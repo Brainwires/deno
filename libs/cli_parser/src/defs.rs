@@ -2757,7 +2757,23 @@ pub static SYNC_TYPES_SUBCOMMAND: CommandDef = CommandDef {
   name: "sync-types",
   about: "Generate a tsconfig.json and type mappings so stock TypeScript tooling can type-check the project",
   aliases: &[],
-  args: &[],
+  args: &[
+    ArgDef::new("allow-import")
+      .short('I')
+      .long("allow-import")
+      .action(ArgAction::Append)
+      .num_args(NumArgs::ZeroOrMore)
+      .require_equals()
+      .value_delimiter(',')
+.help("Allow importing from remote hosts. Optionally specify allowed IP addresses and host names, with ports as necessary. Default value: deno.land:443,jsr.io:443,esm.sh:443,raw.esm.sh:443,cdn.jsdelivr.net:443,raw.githubusercontent.com:443,gist.githubusercontent.com:443"),
+    ArgDef::new("deny-import")
+      .long("deny-import")
+      .action(ArgAction::Append)
+      .num_args(NumArgs::ZeroOrMore)
+      .require_equals()
+      .value_delimiter(',')
+.help("Deny importing from remote hosts. Optionally specify denied IP addresses and host names, with ports as necessary."),
+  ],
   arg_groups: &[UNSTABLE_DEPRECATED_ARG, UNSTABLE_FEATURE_ARGS],
   subcommands: &[],
   default_subcommand: None,
