@@ -210,6 +210,7 @@ pub fn convert(result: ParseResult) -> Result<Flags, CliError> {
     }
     Some("types") => types_parse(&mut flags),
     Some("lsp") => lsp_parse(&mut flags),
+    Some("sync-types") => sync_types_parse(&mut flags),
     Some("vendor") => vendor_parse(&mut flags),
     Some("deploy") => deploy_parse(&mut flags, false),
     Some("sandbox") => deploy_parse(&mut flags, true),
@@ -318,6 +319,7 @@ fn default_parse(
       "approve-scripts",
       "types",
       "lsp",
+      "sync-types",
       "vendor",
       "deploy",
       "sandbox",
@@ -2947,6 +2949,10 @@ fn types_parse(flags: &mut Flags) {
 
 fn lsp_parse(flags: &mut Flags) {
   flags.subcommand = DenoSubcommand::Lsp;
+}
+
+fn sync_types_parse(flags: &mut Flags) {
+  flags.subcommand = DenoSubcommand::SyncTypes;
 }
 
 fn vendor_parse(flags: &mut Flags) {

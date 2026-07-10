@@ -820,6 +820,7 @@ pub enum DenoSubcommand {
   Link(LinkFlags),
   Unlink(UnlinkFlags),
   Lsp,
+  SyncTypes,
   Lint(LintFlags),
   Repl(ReplFlags),
   Run(RunFlags),

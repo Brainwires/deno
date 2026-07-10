@@ -2757,6 +2757,19 @@ pub static LSP_SUBCOMMAND: CommandDef = CommandDef {
   keep_double_dash: false,
 };
 
+pub static SYNC_TYPES_SUBCOMMAND: CommandDef = CommandDef {
+  name: "sync-types",
+  about: "Generate a tsconfig.json and type mappings so stock TypeScript tooling can type-check the project",
+  aliases: &[],
+  args: &[],
+  arg_groups: &[UNSTABLE_DEPRECATED_ARG, UNSTABLE_FEATURE_ARGS],
+  subcommands: &[],
+  default_subcommand: None,
+  trailing_var_arg: false,
+  passthrough: false,
+  keep_double_dash: false,
+};
+
 pub static VENDOR_SUBCOMMAND: CommandDef = CommandDef {
   name: "vendor",
   about: "`deno vendor` was removed in Deno 2.\n\nSee the Deno 1.x to 2.x Migration Guide for migration instructions: https://docs.deno.com/runtime/manual/advanced/migrate_deprecations",
@@ -3488,6 +3501,7 @@ pub static DENO_ROOT: CommandDef = CommandDef {
     UNLINK_SUBCOMMAND,
     APPROVE_SCRIPTS_SUBCOMMAND,
     LSP_SUBCOMMAND,
+    SYNC_TYPES_SUBCOMMAND,
     VENDOR_SUBCOMMAND,
     BUNDLE_SUBCOMMAND,
     AUDIT_SUBCOMMAND,
