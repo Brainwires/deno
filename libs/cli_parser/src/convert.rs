@@ -2949,7 +2949,12 @@ fn lsp_parse(flags: &mut Flags) {
 
 fn sync_types_parse(result: &ParseResult, flags: &mut Flags) {
   allow_and_deny_import_parse(result, flags);
-  flags.subcommand = DenoSubcommand::SyncTypes;
+  flags.subcommand = DenoSubcommand::SyncTypes(SyncTypesFlags {
+    roots: result
+      .get_many("roots")
+      .map(|v| v.iter().map(|s| s.to_string()).collect())
+      .unwrap_or_default(),
+  });
 }
 
 fn vendor_parse(flags: &mut Flags) {

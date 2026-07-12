@@ -185,6 +185,14 @@ impl std::str::FromStr for JavaScriptEngine {
   }
 }
 
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct SyncTypesFlags {
+  /// Files, directories, or remote modules to use as module graph roots.
+  /// These scope dependency discovery, not the generated TypeScript project.
+  /// An empty list discovers dependencies from the entire project.
+  pub roots: Vec<String>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CompileFlags {
   pub source_file: String,
@@ -820,7 +828,7 @@ pub enum DenoSubcommand {
   Link(LinkFlags),
   Unlink(UnlinkFlags),
   Lsp,
-  SyncTypes,
+  SyncTypes(SyncTypesFlags),
   Lint(LintFlags),
   Repl(ReplFlags),
   Run(RunFlags),

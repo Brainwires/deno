@@ -2758,6 +2758,11 @@ pub static SYNC_TYPES_SUBCOMMAND: CommandDef = CommandDef {
   about: "Generate a tsconfig.json and type mappings so stock TypeScript tooling can type-check the project",
   aliases: &[],
   args: &[
+    ArgDef::new("roots")
+      .positional()
+      .action(ArgAction::Append)
+      .num_args(NumArgs::ZeroOrMore)
+.help("Module graph roots to use for dependency discovery"),
     ArgDef::new("allow-import")
       .short('I')
       .long("allow-import")
