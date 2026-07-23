@@ -6064,6 +6064,34 @@ where the changes are discussed.
      `test_cli_records_the_glibc_ceiling` and
      `test_a_malformed_glibc_ceiling_is_refused`.
 
+<!-- Items 152-162 are on the other denext3 branches; renumber at integration. -->
+
+163. **`fix(resolver)`: sloppy-import hints only for prepared modules
+     (denoland/deno#36221)** (`fix/audit-lows-denext3`, CLI only;
+     `cli/graph_util.rs`, `cli/module_loader.rs`, `cli/graph_container.rs`,
+     `cli/tools/check.rs`, `cli/tools/pm/cache_deps.rs`,
+     `libs/resolver/graph.rs`, and the callers that pass the new option). The
+     fork production audit's U6, carried from upstream `b23cb76e6d` (on denoland/deno
+     `main` since 2026-07-22; no v2.9.x release has it). A module that
+     failed to load got a "maybe add `.ts` / use `--sloppy-imports`" hint from a
+     file-system lookup of its neighbours, and a runtime-computed
+     `import(specifier)` did that lookup for a path the static graph never
+     prepared, without a read permission check: the error told a program with
+     no `--allow-read` whether `<path>.ts`, `<path>.js` or `<path>/index.ts`
+     exists. The lookup now runs only for graph roots and the dependencies and
+     literal dynamic imports the graph prepared; a computed dynamic-import or
+     worker root that no module references gets the plain "Module not found".
+     Conflicts: the fork's `prepare_load` keeps its Vitest-adjusted
+     `is_dynamic_import` (item 23: the Vitest runner's own imports load as
+     static ones), and
+     `cli/tools/check.rs` keeps the fork's imports beside
+     `GraphRootsValidOptions`. Tests: upstream's
+     `run/sloppy_import_hints_runtime` spec (six cases; `computed_no_read` is the
+     no-permission case); before this change `computed_no_read` and
+     `computed_requested_read` fail on this branch's base with `Unexpected
+     sloppy import suggestion`, and `run/sloppy_imports`, `compile`, `bundle`,
+     `check`, `lint`, `publish` and `npm` sloppy-import specs still pass.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150) are what the prebuilt
