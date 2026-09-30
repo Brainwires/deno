@@ -10,10 +10,12 @@
 //! The user's code uses `Deno.serve()` or `export default { fetch }`
 //! to serve an HTTP app. The desktop runtime starts it on an in-process
 //! memory channel and navigates the webview to the app's stable origin
-//! (`desktop.app.origin` in deno.json, `app://localhost` by default), whose
+//! (`desktop.app.origin` in deno.json or an embedded `.deno-desktop/app.json`,
+//! `app://localhost` by default — see [`app_origin`]), whose
 //! requests are bridged into that channel by [`scheme_bridge`] — there is no
 //! TCP loopback for HTTP.
 
+mod app_origin;
 mod scheme_bridge;
 
 use std::borrow::Cow;
@@ -1356,22 +1358,29 @@ laufey::main!(|| {
     }
   }
 
-  // The page origin the webview runs the app at: `desktop.app.origin` from
-  // deno.json, validated and normalized at compile time and baked into the
-  // metadata; `app://localhost` when unset. A value that fails to parse here
-  // means the metadata was not produced by this CLI, so bail rather than
-  // start the app at an origin the developer did not configure.
-  let app_origin = match data.metadata.app_origin.as_deref() {
-    Some(origin) => match AppOrigin::parse(origin) {
-      Ok(origin) => origin,
-      Err(e) => {
-        log::error!(
-          "[desktop] invalid app origin {origin:?} in binary metadata: {e}"
-        );
-        return;
-      }
+  // The page origin the webview runs the app at: `desktop.app.origin` baked
+  // into the metadata, else an embedded `.deno-desktop/app.json`, else
+  // `app://localhost` (see `app_origin`). An invalid configured value stops
+  // the app rather than starting it at an origin the developer did not
+  // configure.
+  let app_origin = match app_origin::resolve_app_origin(
+    data.metadata.app_origin.as_deref(),
+    &data.root_path,
+    &data.metadata.entrypoint_key,
+    |path| {
+      let file = data.vfs.file_entry(path).ok()?;
+      data.vfs.read_file_all(file).ok().map(|b| b.into_owned())
     },
-    None => AppOrigin::default_origin(),
+  ) {
+    Ok((origin, source)) => {
+      log::debug!("[desktop] app origin {origin} (from {source:?})");
+      origin
+    }
+    Err(e) => {
+      log::error!("[desktop] {e}");
+      eprintln!("error: desktop app origin: {e}");
+      return;
+    }
   };
 
   // Serve over an in-process memory channel — there is no TCP loopback for

@@ -95,6 +95,40 @@ pub enum AppOriginError {
   TooLong,
 }
 
+/// Path, relative to a directory of the app, of the file a desktop runtime
+/// also reads the app origin from: `{ "origin": "<scheme>://<host>" }`.
+///
+/// This is how a `deno desktop` CLI that predates `desktop.app.origin` (and
+/// therefore rejects that key in `deno.json`) can still configure the origin:
+/// the file is embedded like any other asset — `"compile": { "include":
+/// [".deno-desktop/app.json"] }` in `deno.json`, or `--include` — and the
+/// runtime finds it in the embedded file system next to the entrypoint or in
+/// any directory above it, up to the embedded root. A value baked into the
+/// binary metadata (from `desktop.app.origin`) takes precedence.
+pub const APP_CONFIG_FILE: &str = ".deno-desktop/app.json";
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SerializedAppConfigFile {
+  origin: Option<String>,
+}
+
+/// Parse the contents of an [`APP_CONFIG_FILE`]. `Ok(None)` when the file
+/// does not set `origin`; an error for malformed JSON, unknown keys (a typo
+/// must not silently fall back to the default origin) or an invalid origin.
+pub fn parse_app_config_file(
+  bytes: &[u8],
+) -> Result<Option<AppOrigin>, String> {
+  let config: SerializedAppConfigFile =
+    serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
+  match config.origin {
+    None => Ok(None),
+    Some(origin) => AppOrigin::parse(&origin)
+      .map(Some)
+      .map_err(|e| format!("invalid origin {origin:?}: {e}")),
+  }
+}
+
 /// Upper bound on the serialized origin. Generous for anything a person would
 /// type, small enough that it cannot be used to stuff the metadata or a header.
 pub const MAX_LEN: usize = 255;
@@ -408,6 +442,28 @@ mod tests {
   fn rejects_overlong_values() {
     let long = format!("t3code://{}", "a".repeat(MAX_LEN));
     assert_eq!(AppOrigin::parse(&long), Err(AppOriginError::TooLong));
+  }
+
+  #[test]
+  fn app_config_file() {
+    assert_eq!(
+      parse_app_config_file(br#"{ "origin": "T3Code://App/" }"#).unwrap(),
+      Some(AppOrigin::parse("t3code://app").unwrap())
+    );
+    assert_eq!(parse_app_config_file(b"{}").unwrap(), None);
+    assert!(
+      parse_app_config_file(br#"{ "origin": "https://app" }"#)
+        .unwrap_err()
+        .contains("reserved")
+    );
+    // A typo is an error, not a silent fallback to the default origin.
+    assert!(
+      parse_app_config_file(br#"{ "orgin": "t3code://app" }"#)
+        .unwrap_err()
+        .contains("orgin")
+    );
+    assert!(parse_app_config_file(b"not json").is_err());
+    assert!(parse_app_config_file(br#"{ "origin": 1 }"#).is_err());
   }
 
   #[test]
