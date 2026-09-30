@@ -367,6 +367,15 @@ async fn run_ws_loopback_proxy(listener: TcpListener, origin: AppOrigin) {
 /// WebSocket handshakes are small; 8 KiB is plenty for a real browser upgrade.
 const MAX_HEAD_LEN: usize = 8 * 1024;
 
+/// How long the relay waits for a client's complete request head. A browser
+/// sends its WebSocket handshake at once, but Chromium also opens idle
+/// "preconnect" sockets to origins it has learned and may never write to
+/// them; without a deadline each such socket would hold a relay task (and a
+/// file descriptor) for the life of the app. The deadline covers the whole
+/// head, so a client trickling bytes cannot extend it either.
+const HEAD_READ_TIMEOUT: std::time::Duration =
+  std::time::Duration::from_secs(10);
+
 /// What the relay does with a connection, decided from its request head.
 #[derive(Debug, PartialEq, Eq)]
 enum RelayDecision {
@@ -406,24 +415,10 @@ async fn proxy_ws_connection(
   mut tcp: TcpStream,
   origin: &AppOrigin,
 ) -> std::io::Result<()> {
-  // Peek the client's request head. Cheaper than fully parsing HTTP, and all
-  // we need is the request line and a few headers.
-  let mut head = Vec::with_capacity(2048);
-  let mut buf = [0u8; 2048];
-  let end_of_head = loop {
-    let n = tcp.read(&mut buf).await?;
-    if n == 0 {
-      return Ok(());
-    }
-    head.extend_from_slice(&buf[..n]);
-    if let Some(idx) = find_end_of_head(&head) {
-      break idx;
-    }
-    if head.len() >= MAX_HEAD_LEN {
-      // Request head too large — bail without sending an HTTP response so we
-      // don't leak that Deno.serve is behind us on plain-HTTP scans.
-      return Ok(());
-    }
+  let Some((head, end_of_head)) =
+    read_request_head(&mut tcp, HEAD_READ_TIMEOUT).await?
+  else {
+    return Ok(());
   };
 
   match classify_upgrade(&head[..end_of_head], origin) {
@@ -459,6 +454,46 @@ async fn proxy_ws_connection(
 
   let _ = tokio::io::copy_bidirectional(&mut tcp, &mut mem).await;
   Ok(())
+}
+
+/// Read the client's request head: the bytes read so far and the offset one
+/// past its blank line. Cheaper than fully parsing HTTP, and all the relay
+/// needs is the request line and a few headers. `None` when the client closes
+/// first, sends a head larger than [`MAX_HEAD_LEN`], or does not finish it
+/// within `timeout`; the relay then drops the connection without sending an
+/// HTTP response, so a plain-HTTP scan does not learn that `Deno.serve` is
+/// behind it.
+async fn read_request_head(
+  tcp: &mut TcpStream,
+  timeout: std::time::Duration,
+) -> std::io::Result<Option<(Vec<u8>, usize)>> {
+  let read = async {
+    let mut head = Vec::with_capacity(2048);
+    let mut buf = [0u8; 2048];
+    loop {
+      let n = tcp.read(&mut buf).await?;
+      if n == 0 {
+        return Ok(None);
+      }
+      head.extend_from_slice(&buf[..n]);
+      if let Some(idx) = find_end_of_head(&head) {
+        return Ok(Some((head, idx)));
+      }
+      if head.len() >= MAX_HEAD_LEN {
+        return Ok(None);
+      }
+    }
+  };
+  match tokio::time::timeout(timeout, read).await {
+    Ok(result) => result,
+    Err(_elapsed) => {
+      log::debug!(
+        "[desktop] ws relay: no complete request head within {timeout:?}; \
+         closing the connection"
+      );
+      Ok(None)
+    }
+  }
 }
 
 const RELAY_400_RESPONSE: &[u8] = b"HTTP/1.1 400 Bad Request\r\n\
@@ -539,11 +574,82 @@ mod tests {
   use std::sync::Arc;
   use std::sync::atomic::AtomicUsize;
   use std::sync::atomic::Ordering;
+  use std::time::Duration;
 
   use super::*;
 
   fn origin() -> AppOrigin {
     AppOrigin::parse("t3code://app").unwrap()
+  }
+
+  /// A connected (client, relay-side) TCP pair on loopback.
+  async fn tcp_pair() -> (TcpStream, TcpStream) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (client, accepted) =
+      tokio::join!(TcpStream::connect(addr), listener.accept());
+    (client.unwrap(), accepted.unwrap().0)
+  }
+
+  #[tokio::test]
+  async fn head_read_times_out_on_an_idle_socket() {
+    // A preconnect-style socket that never writes: the read gives up at the
+    // deadline instead of holding the task forever.
+    let (_client, mut server) = tcp_pair().await;
+    let start = std::time::Instant::now();
+    let head = read_request_head(&mut server, Duration::from_millis(200))
+      .await
+      .unwrap();
+    assert!(head.is_none());
+    let elapsed = start.elapsed();
+    assert!(elapsed >= Duration::from_millis(200), "{elapsed:?}");
+    assert!(elapsed < Duration::from_secs(5), "{elapsed:?}");
+  }
+
+  #[tokio::test]
+  async fn head_read_deadline_covers_a_trickling_client() {
+    // Bytes that never complete a head do not extend the deadline.
+    let (mut client, mut server) = tcp_pair().await;
+    let writer = tokio::spawn(async move {
+      for _ in 0..50 {
+        if client.write_all(b"G").await.is_err() {
+          break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+      }
+      client
+    });
+    let start = std::time::Instant::now();
+    let head = read_request_head(&mut server, Duration::from_millis(200))
+      .await
+      .unwrap();
+    assert!(head.is_none());
+    assert!(start.elapsed() < Duration::from_millis(900));
+    drop(writer.await);
+  }
+
+  #[tokio::test]
+  async fn head_read_returns_a_complete_head() {
+    let (mut client, mut server) = tcp_pair().await;
+    client
+      .write_all(b"GET / HTTP/1.1\r\nHost: x\r\n\r\nextra")
+      .await
+      .unwrap();
+    let (head, end) = read_request_head(&mut server, Duration::from_secs(5))
+      .await
+      .unwrap()
+      .expect("a complete head");
+    assert_eq!(&head[..end], b"GET / HTTP/1.1\r\nHost: x\r\n\r\n");
+    // A client that closes before finishing its head yields nothing.
+    let (client, mut server) = tcp_pair().await;
+    drop(client);
+    assert!(
+      read_request_head(&mut server, Duration::from_secs(5))
+        .await
+        .unwrap()
+        .is_none()
+    );
+    assert_eq!(HEAD_READ_TIMEOUT, Duration::from_secs(10));
   }
 
   #[test]
