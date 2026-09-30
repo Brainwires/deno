@@ -124,10 +124,21 @@ pub struct Metadata {
   /// The desktop app's reverse-DNS identifier from deno.json
   /// `desktop.app.identifier`, validated by
   /// [`super::app_id::validate_app_identifier`] at compile time. The runtime
-  /// hands it to the webview backend as `LAUFEY_APP_ID` when the launcher did
-  /// not, so web storage lives in a per-app directory. Desktop builds only.
+  /// checks a configured origin against it; the webview backend learns the
+  /// same id from its launch configuration (`LAUFEY_APP_ID` or
+  /// `laufey-launch.json`, both written by `deno desktop`). Desktop builds
+  /// only.
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub app_identifier: Option<String>,
+  /// The custom URL schemes the desktop app registers as deep links, from
+  /// deno.json `desktop.app.deepLinks`, normalized by
+  /// [`super::launch_args::normalize_deep_link_schemes`]. The runtime treats
+  /// a launch argument with one of these schemes as a deep link. `Some` (even
+  /// when empty) in every desktop build of a CLI that writes it, so the
+  /// runtime only falls back to an embedded `.deno-desktop/app.json` for a
+  /// binary from a CLI that predates the field. Desktop builds only.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub app_deep_links: Option<Vec<String>>,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]

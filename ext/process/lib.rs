@@ -1454,7 +1454,10 @@ fn compute_run_env(
       .map(|(k, v)| (EnvVarKey::from_str(k), OsString::from(v)))
       .collect()
   } else {
-    let mut envs = std::env::vars_os()
+    // The inherited environment, including variables the embedder provides
+    // without `setenv` (`deno_os::set_env_overlay_var`).
+    let mut envs = deno_os::env_vars_os_with_overlay()
+      .into_iter()
       .map(|(k, v)| (EnvVarKey::new(k), v))
       .collect::<HashMap<_, _>>();
     for (key, value) in arg_envs {

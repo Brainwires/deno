@@ -397,6 +397,28 @@ pub fn resolve_desktop_app_identifier(
   Ok(Some(identifier.to_string()))
 }
 
+/// Resolve the desktop app's deep-link schemes from `desktop.app.deepLinks`,
+/// normalized (trimmed, lower-cased, deduplicated) and validated the same way
+/// `deno desktop` registers them with the OS. Empty when unset.
+pub fn resolve_desktop_deep_links(
+  cli_options: &CliOptions,
+) -> Result<Vec<String>, AnyError> {
+  let desktop_config = cli_options.start_dir.to_desktop_config()?;
+  let Some(schemes) = desktop_config
+    .app
+    .as_ref()
+    .and_then(|app| app.deep_links.as_deref())
+  else {
+    return Ok(Vec::new());
+  };
+  deno_lib::standalone::launch_args::normalize_deep_link_schemes(schemes)
+    .map_err(|e| {
+      deno_core::anyhow::anyhow!(
+        "Invalid desktop.app.deepLinks in deno.json: {e}"
+      )
+    })
+}
+
 /// The desktop app's configured origin and identifier, resolved together
 /// because a configured origin requires an identifier (see
 /// [`check_desktop_app_identity`]).
@@ -1221,6 +1243,13 @@ impl<'a> DenoCompileBinaryWriter<'a> {
     } else {
       None
     };
+    // The deep-link schemes let the runtime tell a link in its launch
+    // arguments from any other argument. Desktop-only, like the origin.
+    let desktop_deep_links = if self.is_desktop {
+      Some(resolve_desktop_deep_links(self.cli_options)?)
+    } else {
+      None
+    };
     let metadata = Metadata {
       argv: compile_flags.args.clone(),
       seed: self.cli_options.seed(),
@@ -1347,6 +1376,7 @@ impl<'a> DenoCompileBinaryWriter<'a> {
       app_identifier: desktop_app_identity
         .as_mut()
         .and_then(|identity| identity.identifier.take()),
+      app_deep_links: desktop_deep_links,
     };
 
     let (data_section_bytes, section_sizes) = serialize_binary_data_section(

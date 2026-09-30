@@ -923,4 +923,123 @@ declare namespace Deno {
       options?: boolean | EventListenerOptions,
     ): void;
   }
+
+  /** App-level events of a `deno desktop` app: deep links and files the
+   * OS hands the app, and launches forwarded by a second instance.
+   *
+   * A deep link is a URL with one of the schemes the app registers
+   * (`desktop.app.deepLinks` in `deno.json`, e.g. `["acme"]` for
+   * `acme://…`). How one reaches the app depends on the OS:
+   *
+   * - macOS routes links (and files opened with the app) to the running app:
+   *   `"openurl"` / `"openfile"`, including the link that launched it.
+   * - Windows and Linux start a new process with the link or file in its
+   *   arguments. At a cold start it is in {@linkcode Deno.desktop.launchUrls}
+   *   / {@linkcode Deno.desktop.launchFiles}. While the app runs, with
+   *   `desktop.app.singleInstance` on, the new process forwards its
+   *   arguments to the running one (`"secondinstance"`) and exits; without
+   *   it a second instance starts.
+   *
+   * Events that arrive before the app listens are held until the first
+   * listener for that type is added (or its `on…` handler set), then
+   * delivered to it. So add listeners at startup, and read `launchUrls`
+   * there too:
+   *
+   * ```ts
+   * for (const url of Deno.desktop.launchUrls) route(url);
+   * Deno.desktop.addEventListener("openurl", (e) => route(e.detail.url));
+   * Deno.desktop.addEventListener("secondinstance", (e) => {
+   *   for (const url of e.detail.urls) route(url);
+   * });
+   * ```
+   *
+   * **Everything delivered here is untrusted input.** Any program running as
+   * the same user can start the app with arbitrary arguments, open any URL
+   * with it, or forward a launch to it. Check the URL's scheme and validate
+   * the rest before acting on it, and don't treat a path as one the user
+   * chose.
+   *
+   * @category Desktop
+   */
+  export namespace desktop {
+    /** Detail of an `"openurl"` event. */
+    export interface OpenUrlDetail {
+      /** The URL as the OS delivered it (not validated). */
+      url: string;
+    }
+
+    /** Detail of an `"openfile"` event. */
+    export interface OpenFileDetail {
+      /** Absolute filesystem path of the opened file. */
+      path: string;
+    }
+
+    /** Detail of a `"secondinstance"` event. */
+    export interface SecondInstanceDetail {
+      /** The second launch's arguments, after the executable name. */
+      args: string[];
+      /** The second launch's working directory. */
+      cwd: string;
+      /** The deep links in `args`: absolute URLs with a registered scheme. */
+      urls: string[];
+      /** The existing paths in `args` (relative ones resolved against
+       * `cwd`, and `file:` URLs), as absolute paths. */
+      files: string[];
+    }
+
+    export interface DesktopEventMap {
+      /** A URL routed to the running app (macOS). */
+      openurl: CustomEvent<OpenUrlDetail>;
+      /** A file opened with the running app (macOS). */
+      openfile: CustomEvent<OpenFileDetail>;
+      /** The app was launched again while running, with
+       * `desktop.app.singleInstance` on. */
+      secondinstance: CustomEvent<SecondInstanceDetail>;
+    }
+
+    /** The deep links the app was launched with: the arguments of this
+     * process that are absolute URLs with a registered scheme, plus (macOS)
+     * the links delivered before the first `"openurl"` listener was added.
+     * Taken on first read; a link delivered after that is an `"openurl"`
+     * event instead, so each link is seen once. */
+    export const launchUrls: readonly string[];
+
+    /** The files the app was launched with: the arguments of this process
+     * that name an existing path (or are `file:` URLs), as absolute paths,
+     * plus (macOS) the files delivered before the first `"openfile"`
+     * listener was added. Taken on first read, like `launchUrls`. */
+    export const launchFiles: readonly string[];
+
+    export let onopenurl:
+      | ((ev: CustomEvent<OpenUrlDetail>) => any)
+      | null;
+    export let onopenfile:
+      | ((ev: CustomEvent<OpenFileDetail>) => any)
+      | null;
+    export let onsecondinstance:
+      | ((ev: CustomEvent<SecondInstanceDetail>) => any)
+      | null;
+
+    export function addEventListener<K extends keyof DesktopEventMap>(
+      type: K,
+      listener: (ev: DesktopEventMap[K]) => any,
+      options?: boolean | AddEventListenerOptions,
+    ): void;
+    export function addEventListener(
+      type: string,
+      listener: EventListenerOrEventListenerObject,
+      options?: boolean | AddEventListenerOptions,
+    ): void;
+    export function removeEventListener<K extends keyof DesktopEventMap>(
+      type: K,
+      listener: (ev: DesktopEventMap[K]) => any,
+      options?: boolean | EventListenerOptions,
+    ): void;
+    export function removeEventListener(
+      type: string,
+      listener: EventListenerOrEventListenerObject,
+      options?: boolean | EventListenerOptions,
+    ): void;
+    export function dispatchEvent(event: Event): boolean;
+  }
 }

@@ -406,10 +406,30 @@ pub enum DesktopEvent {
   DockMenuClick { id: String },
   #[serde(rename_all = "camelCase")]
   DockReopen { has_visible_windows: bool },
-  /// A deep link (`<scheme>://...`) was opened and routed to this app, either
-  /// at launch (cold start) or while already running. Carries the full URL.
+  /// A URL the OS routed to the running app (macOS: a deep link with a scheme
+  /// the bundle declares, through the `openURLs` Apple Event), passed through
+  /// as delivered. Emitted through [`DesktopLaunchInbox`], so a URL that
+  /// arrives before the app listens (a launch link) is held until it does.
   #[serde(rename_all = "camelCase")]
   OpenUrl { url: String },
+  /// A file opened with the running app (macOS: Finder "Open With", a double
+  /// click on a claimed file type, a drop on the Dock icon; AppKit delivers
+  /// it as a `file://` URL, decoded here to a path). Emitted through
+  /// [`DesktopLaunchInbox`].
+  #[serde(rename_all = "camelCase")]
+  OpenFile { path: String },
+  /// The app was launched again while running, with laufey's
+  /// single-instance lock on: the second process forwarded its arguments
+  /// (after the executable name) and working directory, and exited. `urls`
+  /// and `files` are the deep links and existing paths found in `args`.
+  /// Emitted through [`DesktopLaunchInbox`].
+  #[serde(rename_all = "camelCase")]
+  SecondInstance {
+    args: Vec<String>,
+    cwd: String,
+    urls: Vec<String>,
+    files: Vec<String>,
+  },
   #[serde(rename_all = "camelCase")]
   TrayClick { tray_id: u32 },
   #[serde(rename_all = "camelCase")]
@@ -463,6 +483,217 @@ pub fn create_desktop_event_channel()
     DesktopEventSender(tx),
     DesktopEventReceiver(Arc::new(tokio::sync::Mutex::new(rx))),
   )
+}
+
+/// Most launch events (URLs, files, second-instance launches) of one kind
+/// held while nothing listens for them. Beyond this the oldest are dropped:
+/// the newest is the one the user is waiting on.
+const MAX_PENDING_LAUNCH_EVENTS: usize = 64;
+
+/// The kinds of launch event JS subscribes to, by their DOM event type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LaunchEventKind {
+  OpenUrl,
+  OpenFile,
+  SecondInstance,
+}
+
+impl LaunchEventKind {
+  fn from_event_type(event_type: &str) -> Option<Self> {
+    match event_type {
+      "openurl" => Some(Self::OpenUrl),
+      "openfile" => Some(Self::OpenFile),
+      "secondinstance" => Some(Self::SecondInstance),
+      _ => None,
+    }
+  }
+}
+
+#[derive(Default)]
+struct LaunchInboxState {
+  tx: Option<DesktopEventTx>,
+  /// Deep links and files from the process's own arguments.
+  launch_urls: Vec<String>,
+  launch_files: Vec<String>,
+  /// Whether JS took the launch snapshot (`Deno.desktop.launchUrls`).
+  launch_taken: bool,
+  pending_urls: std::collections::VecDeque<String>,
+  pending_files: std::collections::VecDeque<String>,
+  pending_second_instances: std::collections::VecDeque<DesktopEvent>,
+  subscribed_urls: bool,
+  subscribed_files: bool,
+  subscribed_second_instances: bool,
+}
+
+/// Deep links, opened files and second-instance launches on their way to
+/// `Deno.desktop`.
+///
+/// The backend delivers them from the moment the runtime registers its
+/// handlers, which is before the app's main module has run, let alone added
+/// a listener. So they are buffered here, per kind, until JS subscribes to
+/// that kind (the first `openurl` / `openfile` / `secondinstance` listener or
+/// `on…` handler on `Deno.desktop`), which drains the buffer into events.
+/// After that each one is sent straight into the desktop event channel.
+///
+/// Launch arguments and the URLs and files that arrived before the app read
+/// `Deno.desktop.launchUrls` / `launchFiles` form the launch snapshot
+/// instead: reading it takes the buffered URLs and files, so each delivery
+/// reaches the app exactly once, as part of the snapshot or as an event.
+#[derive(Clone)]
+pub struct DesktopLaunchInbox(Arc<std::sync::Mutex<LaunchInboxState>>);
+
+/// The launch snapshot handed to JS once, for `Deno.desktop.launchUrls` and
+/// `Deno.desktop.launchFiles`.
+#[derive(Debug, Default, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LaunchTargetsSnapshot {
+  pub urls: Vec<String>,
+  pub files: Vec<String>,
+}
+
+impl DesktopLaunchInbox {
+  /// `launch_urls` / `launch_files` are the deep links and files in the
+  /// process's own arguments (a cold start).
+  pub fn new(
+    tx: DesktopEventTx,
+    launch_urls: Vec<String>,
+    launch_files: Vec<String>,
+  ) -> Self {
+    Self(Arc::new(std::sync::Mutex::new(LaunchInboxState {
+      tx: Some(tx),
+      launch_urls,
+      launch_files,
+      ..Default::default()
+    })))
+  }
+
+  fn lock(&self) -> std::sync::MutexGuard<'_, LaunchInboxState> {
+    self
+      .0
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+  }
+
+  /// A non-file URL routed to the running app.
+  pub fn open_url(&self, url: String) {
+    let mut state = self.lock();
+    if state.subscribed_urls {
+      send_launch_event(&state, DesktopEvent::OpenUrl { url });
+    } else {
+      push_bounded(&mut state.pending_urls, url, "openurl");
+    }
+  }
+
+  /// A file opened with the running app.
+  pub fn open_file(&self, path: String) {
+    let mut state = self.lock();
+    if state.subscribed_files {
+      send_launch_event(&state, DesktopEvent::OpenFile { path });
+    } else {
+      push_bounded(&mut state.pending_files, path, "openfile");
+    }
+  }
+
+  /// A launch forwarded by a second instance.
+  pub fn second_instance(
+    &self,
+    args: Vec<String>,
+    cwd: String,
+    urls: Vec<String>,
+    files: Vec<String>,
+  ) {
+    let event = DesktopEvent::SecondInstance {
+      args,
+      cwd,
+      urls,
+      files,
+    };
+    let mut state = self.lock();
+    if state.subscribed_second_instances {
+      send_launch_event(&state, event);
+    } else {
+      push_bounded(
+        &mut state.pending_second_instances,
+        event,
+        "secondinstance",
+      );
+    }
+  }
+
+  /// The launch snapshot: the process's own deep links and files, plus the
+  /// URLs and files delivered so far that no listener has taken. Empty after
+  /// the first call.
+  pub fn take_launch_targets(&self) -> LaunchTargetsSnapshot {
+    let mut state = self.lock();
+    if state.launch_taken {
+      return LaunchTargetsSnapshot::default();
+    }
+    state.launch_taken = true;
+    let mut urls = std::mem::take(&mut state.launch_urls);
+    urls.extend(state.pending_urls.drain(..));
+    let mut files = std::mem::take(&mut state.launch_files);
+    files.extend(state.pending_files.drain(..));
+    LaunchTargetsSnapshot { urls, files }
+  }
+
+  /// Subscribe JS to one kind of launch event (by DOM event type), returning
+  /// what was buffered for it, oldest first. Later deliveries of that kind go
+  /// through the event channel. Unknown types and repeated subscriptions
+  /// return nothing.
+  pub fn subscribe(&self, event_type: &str) -> Vec<DesktopEvent> {
+    let Some(kind) = LaunchEventKind::from_event_type(event_type) else {
+      return Vec::new();
+    };
+    let mut state = self.lock();
+    match kind {
+      LaunchEventKind::OpenUrl => {
+        state.subscribed_urls = true;
+        state
+          .pending_urls
+          .drain(..)
+          .map(|url| DesktopEvent::OpenUrl { url })
+          .collect()
+      }
+      LaunchEventKind::OpenFile => {
+        state.subscribed_files = true;
+        state
+          .pending_files
+          .drain(..)
+          .map(|path| DesktopEvent::OpenFile { path })
+          .collect()
+      }
+      LaunchEventKind::SecondInstance => {
+        state.subscribed_second_instances = true;
+        state.pending_second_instances.drain(..).collect()
+      }
+    }
+  }
+}
+
+fn push_bounded<T>(
+  queue: &mut std::collections::VecDeque<T>,
+  item: T,
+  event_type: &str,
+) {
+  if queue.len() >= MAX_PENDING_LAUNCH_EVENTS {
+    queue.pop_front();
+    log::warn!(
+      "desktop: more than {MAX_PENDING_LAUNCH_EVENTS} \"{event_type}\" events \
+       arrived before the app listened for them; dropping the oldest"
+    );
+  }
+  queue.push_back(item);
+}
+
+fn send_launch_event(state: &LaunchInboxState, event: DesktopEvent) {
+  let Some(tx) = &state.tx else {
+    return;
+  };
+  // Called on the backend's UI thread, which must not block. These events are
+  // rare; the channel is only full when the runtime has stopped draining it.
+  if let Err(e) = tx.try_send(event) {
+    log::warn!("desktop: dropping a launch event: {e}");
+  }
 }
 
 /// A pending call from the webview to a bound Deno function.
@@ -1352,6 +1583,34 @@ fn op_desktop_reject_bind_call(
   }
 }
 
+/// The launch snapshot behind `Deno.desktop.launchUrls` / `launchFiles`.
+/// JS calls it once and caches the result; empty outside a desktop app.
+#[op2]
+#[serde]
+fn op_desktop_take_launch_targets(
+  state: &mut OpState,
+) -> LaunchTargetsSnapshot {
+  state
+    .try_borrow::<DesktopLaunchInbox>()
+    .map(|inbox| inbox.take_launch_targets())
+    .unwrap_or_default()
+}
+
+/// Subscribe to one kind of launch event (`"openurl"`, `"openfile"`,
+/// `"secondinstance"`), returning the events buffered for it; see
+/// [`DesktopLaunchInbox`].
+#[op2]
+#[serde]
+fn op_desktop_subscribe_launch_events(
+  state: &mut OpState,
+  #[string] event_type: &str,
+) -> Vec<DesktopEvent> {
+  state
+    .try_borrow::<DesktopLaunchInbox>()
+    .map(|inbox| inbox.subscribe(event_type))
+    .unwrap_or_default()
+}
+
 #[op2(fast)]
 pub fn op_desktop_init(
   state: &mut OpState,
@@ -2192,6 +2451,8 @@ deno_core::extension!(
     op_desktop_confirm_update,
     op_desktop_init,
     op_desktop_recv_event,
+    op_desktop_take_launch_targets,
+    op_desktop_subscribe_launch_events,
     op_desktop_resolve_bind_call,
     op_desktop_reject_bind_call,
     op_desktop_alert,
@@ -2630,6 +2891,156 @@ mod tests {
     assert_eq!(
       kind_of(DesktopEvent::NotificationError { notification_id: 0 }),
       "notificationError"
+    );
+    assert_eq!(kind_of(DesktopEvent::OpenUrl { url: "".into() }), "openUrl");
+    assert_eq!(
+      kind_of(DesktopEvent::OpenFile { path: "".into() }),
+      "openFile"
+    );
+    assert_eq!(
+      kind_of(DesktopEvent::SecondInstance {
+        args: vec![],
+        cwd: "".into(),
+        urls: vec![],
+        files: vec![],
+      }),
+      "secondInstance"
+    );
+  }
+
+  #[test]
+  fn launch_event_payloads() {
+    let v = serde_json::to_value(DesktopEvent::SecondInstance {
+      args: vec!["acme://x".into(), "--flag".into()],
+      cwd: "/home/me".into(),
+      urls: vec!["acme://x".into()],
+      files: vec![],
+    })
+    .unwrap();
+    assert_eq!(
+      v,
+      json!({
+        "kind": "secondInstance",
+        "args": ["acme://x", "--flag"],
+        "cwd": "/home/me",
+        "urls": ["acme://x"],
+        "files": [],
+      })
+    );
+    let v = serde_json::to_value(DesktopEvent::OpenFile {
+      path: "/a b".into(),
+    })
+    .unwrap();
+    assert_eq!(v, json!({ "kind": "openFile", "path": "/a b" }));
+  }
+
+  fn inbox_with_channel(
+    launch_urls: Vec<String>,
+    launch_files: Vec<String>,
+  ) -> (
+    super::DesktopLaunchInbox,
+    tokio::sync::mpsc::Receiver<DesktopEvent>,
+  ) {
+    let (tx, rx) = tokio::sync::mpsc::channel(16);
+    (
+      super::DesktopLaunchInbox::new(tx, launch_urls, launch_files),
+      rx,
+    )
+  }
+
+  fn drain(rx: &mut tokio::sync::mpsc::Receiver<DesktopEvent>) -> Vec<String> {
+    let mut out = Vec::new();
+    while let Ok(ev) = rx.try_recv() {
+      out.push(serde_json::to_value(ev).unwrap().to_string());
+    }
+    out
+  }
+
+  #[test]
+  fn launch_inbox_buffers_until_subscribed() {
+    let (inbox, mut rx) = inbox_with_channel(vec![], vec![]);
+    // Nothing listens yet: held, not sent.
+    inbox.open_url("acme://cold".into());
+    inbox.open_file("/tmp/a.txt".into());
+    inbox.second_instance(
+      vec!["acme://2".into()],
+      "/".into(),
+      vec!["acme://2".into()],
+      vec![],
+    );
+    assert!(drain(&mut rx).is_empty());
+
+    // Subscribing to one kind drains only that kind, oldest first.
+    inbox.open_url("acme://cold2".into());
+    let pending = inbox.subscribe("openurl");
+    assert_eq!(
+      pending
+        .into_iter()
+        .map(|e| serde_json::to_value(e).unwrap()["url"].clone())
+        .collect::<Vec<_>>(),
+      vec![json!("acme://cold"), json!("acme://cold2")]
+    );
+    // A second subscription gets nothing again.
+    assert!(inbox.subscribe("openurl").is_empty());
+    // Later URLs go straight into the channel; files still wait.
+    inbox.open_url("acme://warm".into());
+    inbox.open_file("/tmp/b.txt".into());
+    let sent = drain(&mut rx);
+    assert_eq!(sent.len(), 1);
+    assert!(sent[0].contains("acme://warm"), "{sent:?}");
+
+    let files = inbox.subscribe("openfile");
+    assert_eq!(files.len(), 2);
+    let second = inbox.subscribe("secondinstance");
+    assert_eq!(second.len(), 1);
+    inbox.second_instance(vec![], "/".into(), vec![], vec![]);
+    assert_eq!(drain(&mut rx).len(), 1);
+    // Unknown types subscribe to nothing.
+    assert!(inbox.subscribe("click").is_empty());
+  }
+
+  #[test]
+  fn launch_snapshot_takes_argv_and_unclaimed_deliveries_once() {
+    let (inbox, mut rx) =
+      inbox_with_channel(vec!["acme://argv".into()], vec!["/argv/file".into()]);
+    inbox.open_url("acme://early".into());
+    inbox.open_file("/early/file".into());
+    let snapshot = inbox.take_launch_targets();
+    assert_eq!(
+      snapshot,
+      super::LaunchTargetsSnapshot {
+        urls: vec!["acme://argv".into(), "acme://early".into()],
+        files: vec!["/argv/file".into(), "/early/file".into()],
+      }
+    );
+    // Taken once: the snapshot never repeats, and what it took is not
+    // delivered again as an event.
+    assert_eq!(
+      inbox.take_launch_targets(),
+      super::LaunchTargetsSnapshot::default()
+    );
+    assert!(inbox.subscribe("openurl").is_empty());
+    assert!(inbox.subscribe("openfile").is_empty());
+    // A URL after the snapshot and before any listener is an event.
+    let (inbox, _rx2) = inbox_with_channel(vec![], vec![]);
+    let _ = inbox.take_launch_targets();
+    inbox.open_url("acme://late".into());
+    assert_eq!(inbox.subscribe("openurl").len(), 1);
+    assert!(drain(&mut rx).is_empty());
+  }
+
+  #[test]
+  fn launch_inbox_is_bounded() {
+    let (inbox, _rx) = inbox_with_channel(vec![], vec![]);
+    for i in 0..(super::MAX_PENDING_LAUNCH_EVENTS + 3) {
+      inbox.open_url(format!("acme://{i}"));
+    }
+    let pending = inbox.subscribe("openurl");
+    assert_eq!(pending.len(), super::MAX_PENDING_LAUNCH_EVENTS);
+    // The oldest were dropped.
+    assert_eq!(
+      serde_json::to_value(&pending[0]).unwrap()["url"],
+      "acme://3"
     );
   }
 

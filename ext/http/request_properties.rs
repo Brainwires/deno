@@ -311,6 +311,29 @@ fn req_host_from_addr(
   }
 }
 
+/// Whether a request's absolute-form target scheme (`POST http+memory://x/ …`
+/// in HTTP/1.1, or HTTP/2's `:scheme`) claims the in-process memory transport
+/// on a connection that is not that transport.
+///
+/// `request.url` takes its scheme from an absolute-form target, so without
+/// this check any TCP client could present `http+memory://…`, the scheme only
+/// the memory transport otherwise produces, and pass a handler that trusts
+/// the URL to mean "in-process". No real client sends that scheme over a
+/// network connection, so such a request is rejected with `400 Bad Request`
+/// rather than rewritten: it never reaches the handler. (Schemes compare
+/// case-insensitively, as `new URL()` lower-cases them.)
+pub(crate) fn claims_foreign_memory_scheme(
+  target_scheme: &str,
+  stream_type: NetworkStreamType,
+) -> bool {
+  stream_type != NetworkStreamType::Memory
+    && target_scheme.eq_ignore_ascii_case(MEMORY_SCHEME)
+}
+
+/// The scheme of `request.url` for a request that arrived over the memory
+/// transport (without the `://`).
+const MEMORY_SCHEME: &str = "http+memory";
+
 fn req_scheme_from_stream_type(stream_type: NetworkStreamType) -> &'static str {
   match stream_type {
     NetworkStreamType::Tcp => "http://",
@@ -387,4 +410,29 @@ fn req_host<'a>(
   }
 
   None
+}
+
+#[cfg(test)]
+mod tests {
+  use deno_net::raw::NetworkStreamType;
+
+  use super::claims_foreign_memory_scheme;
+
+  #[test]
+  fn memory_scheme_only_on_the_memory_transport() {
+    for scheme in ["http+memory", "HTTP+MEMORY", "Http+Memory"] {
+      assert!(claims_foreign_memory_scheme(scheme, NetworkStreamType::Tcp));
+      assert!(claims_foreign_memory_scheme(scheme, NetworkStreamType::Tls));
+      assert!(!claims_foreign_memory_scheme(
+        scheme,
+        NetworkStreamType::Memory
+      ));
+    }
+    for scheme in ["http", "https", "http+memoryx", "memory", "http+unix"] {
+      assert!(
+        !claims_foreign_memory_scheme(scheme, NetworkStreamType::Tcp),
+        "{scheme}"
+      );
+    }
+  }
 }

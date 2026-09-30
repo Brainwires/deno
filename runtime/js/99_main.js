@@ -723,6 +723,8 @@ const NOT_IMPORTED_OPS = [
   "op_desktop_verify_ed25519",
   "op_desktop_init",
   "op_desktop_recv_event",
+  "op_desktop_take_launch_targets",
+  "op_desktop_subscribe_launch_events",
   "op_desktop_resolve_bind_call",
   "op_desktop_reject_bind_call",
   "op_desktop_alert",
@@ -749,9 +751,14 @@ const NOT_IMPORTED_OPS = [
 // a plain `new Worker(...)` the ability to read whatever the user last copied
 // with no matching API and no way to ask for it. The other desktop ops are
 // dialogs, notifications and update plumbing: either user-visible or inert.
+// The launch ops hand out (and consume) the app's deep links, opened files
+// and second-instance launches, which belong to `Deno.desktop` in the main
+// scope: a worker taking them would silently steal them from the app.
 const WORKER_EXCLUDED_OPS = [
   "op_desktop_read_clipboard_text",
   "op_desktop_write_clipboard_text",
+  "op_desktop_take_launch_targets",
+  "op_desktop_subscribe_launch_events",
 ];
 
 function removeImportedOps(isWorker = false) {

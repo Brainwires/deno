@@ -2716,6 +2716,7 @@ fn desktop_parse(
     all_targets: result.get_bool("all-targets"),
     identifier: None,
     deep_links: Vec::new(),
+    single_instance: false,
     codesign_identity: None,
     inspect_renderer,
     compress,

@@ -20,6 +20,13 @@
 //! the metadata's `app_identifier`, else the same [`APP_CONFIG_FILE`]'s
 //! `identifier`, else nowhere.
 //!
+//! The deep-link schemes (`desktop.app.deepLinks`, which tell a link in the
+//! launch arguments from any other argument) come from the metadata's
+//! `app_deep_links`, which every desktop build of a CLI that knows the field
+//! writes, else the file's `deepLinks`, else none. `singleInstance` is only
+//! in the file (the runtime cannot act on it; see [`APP_CONFIG_FILE`]); it
+//! is validated and logged.
+//!
 //! A configured value that does not validate is an error: starting the app at
 //! an origin the developer did not configure would silently move its
 //! origin-keyed storage and break any server allow-list. So is a configured
@@ -36,6 +43,7 @@ use deno_lib::standalone::app_origin::AppConfigFile;
 use deno_lib::standalone::app_origin::AppOrigin;
 use deno_lib::standalone::app_origin::DEFAULT_APP_ORIGIN;
 use deno_lib::standalone::app_origin::parse_app_config_file;
+use deno_lib::standalone::launch_args::normalize_deep_link_schemes;
 
 /// Where a resolved origin came from, for logs.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -52,6 +60,10 @@ pub struct ResolvedAppConfig {
   pub origin_source: AppOriginSource,
   /// The validated reverse-DNS app identifier, if one is configured.
   pub identifier: Option<String>,
+  /// The normalized deep-link schemes the app registers.
+  pub deep_links: Vec<String>,
+  /// `singleInstance` from the config file, if the file was read and set it.
+  pub single_instance: Option<bool>,
 }
 
 /// Resolve the app origin and identifier. `read_file` reads a file from the
@@ -61,6 +73,7 @@ pub struct ResolvedAppConfig {
 pub fn resolve_app_config(
   metadata_origin: Option<&str>,
   metadata_identifier: Option<&str>,
+  metadata_deep_links: Option<&[String]>,
   root: &Path,
   entrypoint_key: &str,
   read_file: impl Fn(&Path) -> Option<Vec<u8>>,
@@ -76,8 +89,17 @@ pub fn resolve_app_config(
       format!("invalid app identifier {identifier:?} in metadata: {e}")
     })?;
   }
+  let metadata_deep_links = metadata_deep_links
+    .map(|schemes| {
+      normalize_deep_link_schemes(schemes)
+        .map_err(|e| format!("invalid deep links in metadata: {e}"))
+    })
+    .transpose()?;
   // The file is only consulted for what the metadata leaves unset.
-  let file = if metadata_origin.is_none() || metadata_identifier.is_none() {
+  let file = if metadata_origin.is_none()
+    || metadata_identifier.is_none()
+    || metadata_deep_links.is_none()
+  {
     find_app_config_file(root, entrypoint_key, read_file)?
   } else {
     None
@@ -94,9 +116,29 @@ pub fn resolve_app_config(
       (AppOrigin::default_origin(), AppOriginSource::Default)
     }
   };
+  let single_instance =
+    file.as_ref().and_then(|(_, config)| config.single_instance);
+  let deep_links = match metadata_deep_links {
+    Some(schemes) => schemes,
+    None => file
+      .as_ref()
+      .and_then(|(_, config)| config.deep_links.clone())
+      .unwrap_or_default(),
+  };
+  let file_path = file.as_ref().map(|(path, _)| path.clone());
   let identifier = metadata_identifier
     .map(|id| id.to_string())
     .or_else(|| file.and_then(|(_, config)| config.identifier));
+  if single_instance == Some(true) && identifier.is_none() {
+    let from = file_path
+      .map(|path| path.display().to_string())
+      .unwrap_or_else(|| APP_CONFIG_FILE.to_string());
+    return Err(format!(
+      "singleInstance (from {from}) requires an app identifier: the \
+       single-instance lock is keyed on it; set desktop.app.identifier in \
+       deno.json, or \"identifier\" in {APP_CONFIG_FILE}"
+    ));
+  }
   if origin_source != AppOriginSource::Default && identifier.is_none() {
     let from = match &origin_source {
       AppOriginSource::ConfigFile(path) => path.display().to_string(),
@@ -113,6 +155,8 @@ pub fn resolve_app_config(
     origin,
     origin_source,
     identifier,
+    deep_links,
+    single_instance,
   })
 }
 
@@ -209,13 +253,86 @@ mod tests {
     entrypoint_key: &str,
     read: impl Fn(&Path) -> Option<Vec<u8>>,
   ) -> Result<ResolvedAppConfig, String> {
+    // A CLI that writes the deep-link field always writes it for a desktop
+    // build; model that here so these tests exercise origin/identifier alone.
     resolve_app_config(
       metadata_origin,
       metadata_identifier,
+      Some(&[]),
       Path::new("/vfs"),
       entrypoint_key,
       read,
     )
+  }
+
+  #[test]
+  fn deep_links_from_metadata_or_the_file() {
+    let read = reader(&[(
+      ".deno-desktop/app.json",
+      r#"{"identifier":"com.a.b","deepLinks":["Acme"],"singleInstance":true}"#,
+    )]);
+    // A stock CLI writes no deep-link field: the file's list applies.
+    let config =
+      resolve_app_config(None, None, None, Path::new("/vfs"), "main.ts", &read)
+        .unwrap();
+    assert_eq!(config.deep_links, vec!["acme".to_string()]);
+    assert_eq!(config.single_instance, Some(true));
+    // The metadata's list wins, even when empty.
+    let schemes = vec!["T3Code".to_string()];
+    let config = resolve_app_config(
+      None,
+      None,
+      Some(&schemes),
+      Path::new("/vfs"),
+      "main.ts",
+      &read,
+    )
+    .unwrap();
+    assert_eq!(config.deep_links, vec!["t3code".to_string()]);
+    // Everything in the metadata: the file is not read.
+    let config = resolve_app_config(
+      Some("a://a"),
+      Some("com.a.a"),
+      Some(&[]),
+      Path::new("/vfs"),
+      "main.ts",
+      reader(&[(".deno-desktop/app.json", "not json")]),
+    )
+    .unwrap();
+    assert!(config.deep_links.is_empty());
+    assert_eq!(config.single_instance, None);
+    // Invalid metadata schemes are an error.
+    let bad = vec!["http".to_string()];
+    let err = resolve_app_config(
+      None,
+      None,
+      Some(&bad),
+      Path::new("/vfs"),
+      "main.ts",
+      |_| None,
+    )
+    .unwrap_err();
+    assert!(err.contains("deep links"), "{err}");
+    // No file and no metadata field: no schemes.
+    let config =
+      resolve_app_config(None, None, None, Path::new("/vfs"), "m.ts", |_| None)
+        .unwrap();
+    assert!(config.deep_links.is_empty());
+  }
+
+  #[test]
+  fn single_instance_requires_an_identifier() {
+    let read =
+      reader(&[(".deno-desktop/app.json", r#"{"singleInstance":true}"#)]);
+    let err = resolve(None, None, "main.ts", &read).unwrap_err();
+    assert!(err.contains("singleInstance"), "{err}");
+    assert!(err.contains("identifier"), "{err}");
+    // The metadata's identifier satisfies it; `false` needs nothing.
+    let config = resolve(None, Some("com.a.b"), "main.ts", &read).unwrap();
+    assert_eq!(config.single_instance, Some(true));
+    let read =
+      reader(&[(".deno-desktop/app.json", r#"{"singleInstance":false}"#)]);
+    resolve(None, None, "main.ts", read).unwrap();
   }
 
   #[test]

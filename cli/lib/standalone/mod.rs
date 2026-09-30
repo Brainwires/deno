@@ -3,4 +3,5 @@
 pub mod app_id;
 pub mod app_origin;
 pub mod binary;
+pub mod launch_args;
 pub mod virtual_fs;
