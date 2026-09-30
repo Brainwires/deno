@@ -20,14 +20,18 @@ macho_files() {
 }
 
 check_macos() {
-  local want
+  local want alias
+  alias="$(mktemp -d)/macho"
   case "$target" in
     x86_64-*) want=x86_64 ;;
     aarch64-*) want=arm64 ;;
   esac
   while IFS= read -r f; do
     rel=${f#"$root"/}
-    archs=$(lipo -archs "$f")
+    # otool reads "name(member)" as an archive member, and CEF helper names
+    # contain parentheses ("laufey Helper (GPU)"): inspect through a symlink.
+    ln -sf "$f" "$alias"
+    archs=$(lipo -archs "$alias")
     echo "== $rel"
     echo "   file: $(file -b "$f")"
     echo "   lipo: $archs"
@@ -35,12 +39,12 @@ check_macos() {
       echo "   ERROR: expected $want" >&2
       fail=1
     fi
-    rpaths=$(otool -l "$f" | awk '/cmd LC_RPATH/{getline; getline; print $2}')
+    rpaths=$(otool -l "$alias" | awk '/cmd LC_RPATH/{getline; getline; print $2}')
     dir=$(dirname "$f")
-    own_id=$(otool -D "$f" | tail -n +2 | head -1)
+    own_id=$(otool -D "$alias" | tail -n +2 | head -1)
     [ -n "$own_id" ] && echo "   id: $own_id"
     # Skip the first line (the file name) and, for a dylib, its own id.
-    otool -L "$f" | tail -n +2 | awk '{print $1}' | while read -r dep; do
+    otool -L "$alias" | tail -n +2 | awk '{print $1}' | while read -r dep; do
       [ -n "$own_id" ] && [ "$dep" = "$own_id" ] && continue
       resolved=""
       case "$dep" in
