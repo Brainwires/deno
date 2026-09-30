@@ -1,0 +1,5 @@
+{
+  "compile": {
+    "include": [".deno-desktop/app.json"]
+  }
+}

@@ -1,0 +1,578 @@
+# Builds denext's patched Deno Desktop runtime (libdenort from this branch +
+# laufey's webview and CEF backend hosts) for five targets, smoke-tests each
+# archive with the STOCK `deno desktop` CLI, attests it, and on a
+# `denext-runtime-v*` tag publishes a GitHub Release with SHA256SUMS and a
+# manifest.json. See DENEXT.md.
+name: denext runtime
+
+on:
+  workflow_dispatch:
+    inputs:
+      targets:
+        description: "Comma-separated targets to build, or 'all' (aarch64-apple-darwin, x86_64-apple-darwin, x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu, x86_64-pc-windows-msvc)"
+        type: string
+        default: all
+      laufey_ref:
+        description: "Brainwires/laufey commit to build the backend hosts from (empty = the pinned LAUFEY_SHA)"
+        type: string
+        default: ""
+      reuse_denort_run_id:
+        description: "Skip the libdenort build and take its artifacts from this earlier run id"
+        type: string
+        default: ""
+      reuse_laufey_run_id:
+        description: "Skip the laufey build and take its artifacts from this earlier run id"
+        type: string
+        default: ""
+  push:
+    tags:
+      - "denext-runtime-v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: denext-runtime-${{ github.ref }}-${{ inputs.targets }}-${{ inputs.reuse_denort_run_id }}-${{ inputs.reuse_laufey_run_id }}
+  cancel-in-progress: ${{ github.event_name == 'workflow_dispatch' }}
+
+env:
+  # laufey `denext/integration` as of the first runtime release.
+  LAUFEY_SHA: a667fff57c02129c5a90b5607e124da6dcac32af
+  LAUFEY_REPOSITORY: Brainwires/laufey
+  # The stock CLI the archives are smoke-tested with (and that denext runs).
+  STOCK_DENO_VERSION: 2.9.7
+
+jobs:
+  setup:
+    name: setup
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      version: ${{ steps.plan.outputs.version }}
+      deno_version: ${{ steps.plan.outputs.deno_version }}
+      laufey_sha: ${{ steps.plan.outputs.laufey_sha }}
+      cef_version: ${{ steps.plan.outputs.cef_version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          sparse-checkout: cli/Cargo.toml
+          sparse-checkout-cone-mode: false
+      - id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGETS: ${{ inputs.targets || 'all' }}
+          LAUFEY_REF: ${{ inputs.laufey_ref }}
+          EVENT: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          RUN_NUMBER: ${{ github.run_number }}
+        run: |
+          set -euo pipefail
+          deno_version=$(sed -n 's/^version = "\(.*\)"$/\1/p' cli/Cargo.toml | head -1)
+          test -n "$deno_version"
+
+          ref=${LAUFEY_REF:-$LAUFEY_SHA}
+          laufey_sha=$(gh api "repos/$LAUFEY_REPOSITORY/commits/$ref" --jq .sha)
+          cef_version=$(gh api "repos/$LAUFEY_REPOSITORY/contents/Makefile?ref=$laufey_sha" --jq .content |
+            base64 -d | sed -n 's/^CEF_FULL_VERSION := //p')
+          test -n "$cef_version"
+
+          if [ "$EVENT" = push ]; then
+            version=${REF_NAME#denext-runtime-v}
+            case "$version" in
+              "$deno_version"-denext.*) ;;
+              *) echo "::error::tag $REF_NAME does not match deno $deno_version (want denext-runtime-v$deno_version-denext.N)"; exit 1 ;;
+            esac
+            TARGETS=all
+          else
+            version="$deno_version-denext.0-ci.$RUN_NUMBER"
+          fi
+
+          matrix=$(TARGETS="$TARGETS" python3 - <<'PY'
+          import json, os
+          all_targets = [
+              {"target": "aarch64-apple-darwin", "os": "macos-14"},
+              {"target": "x86_64-apple-darwin", "os": "macos-15-intel"},
+              {"target": "x86_64-unknown-linux-gnu", "os": "ubuntu-22.04"},
+              {"target": "aarch64-unknown-linux-gnu", "os": "ubuntu-22.04-arm"},
+              {"target": "x86_64-pc-windows-msvc", "os": "windows-latest"},
+          ]
+          want = [t.strip() for t in os.environ["TARGETS"].split(",") if t.strip()]
+          if want != ["all"]:
+              known = {t["target"] for t in all_targets}
+              unknown = [t for t in want if t not in known]
+              if unknown:
+                  raise SystemExit(f"unknown targets: {unknown}")
+              all_targets = [t for t in all_targets if t["target"] in want]
+          print(json.dumps(all_targets))
+          PY
+          )
+          {
+            echo "matrix=$matrix"
+            echo "version=$version"
+            echo "deno_version=$deno_version"
+            echo "laufey_sha=$laufey_sha"
+            echo "cef_version=$cef_version"
+          } >>"$GITHUB_OUTPUT"
+          echo "version=$version deno=$deno_version laufey=$laufey_sha cef=$cef_version"
+          echo "matrix=$matrix"
+
+  # laufey's webview + CEF backend hosts, built the way laufey's own CI does.
+  laufey:
+    name: laufey / ${{ matrix.target }}
+    needs: setup
+    if: ${{ !inputs.reuse_laufey_run_id }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          repository: ${{ env.LAUFEY_REPOSITORY }}
+          ref: ${{ needs.setup.outputs.laufey_sha }}
+          path: laufey
+
+      - name: Install dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build pkg-config \
+            libwebkit2gtk-4.1-dev libgtk-3-dev \
+            libx11-dev libxi-dev libglib2.0-dev libnss3-dev libnspr4-dev \
+            libatk1.0-dev libatk-bridge2.0-dev libcups2-dev libdrm-dev \
+            libgbm-dev libasound2-dev libpango1.0-dev \
+            libcairo2-dev libxcomposite-dev libxdamage-dev libxrandr-dev \
+            libxkbcommon-dev libdbus-1-dev libxext-dev libxfixes-dev
+
+      - name: Install dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: brew install llvm ninja
+
+      - name: Install dependencies (Windows)
+        if: runner.os == 'Windows'
+        working-directory: laufey
+        run: |
+          choco install make ninja -y
+          nuget install Microsoft.Web.WebView2 -OutputDirectory packages
+
+      - name: Cache CEF
+        uses: actions/cache@v6
+        with:
+          path: laufey/vendor/cef
+          key: cef-${{ matrix.os }}-${{ runner.arch }}-${{ hashFiles('laufey/Makefile') }}
+
+      - uses: ilammy/msvc-dev-cmd@v1
+        if: runner.os == 'Windows'
+        with:
+          arch: x64
+
+      - name: Build webview host
+        working-directory: laufey
+        env:
+          # Keep in sync with LSMinimumSystemVersion in webview/macos/Info.plist.in.
+          MACOSX_DEPLOYMENT_TARGET: "10.15"
+        run: |
+          if [ "${{ runner.os }}" = Windows ]; then
+            WEBVIEW2_ROOT="$(pwd)/$(ls -d packages/Microsoft.Web.WebView2.* | head -1)" make webview
+          else
+            make webview
+          fi
+
+      - name: Build CEF host
+        if: runner.os != 'Windows'
+        working-directory: laufey
+        run: make cef
+
+      # As in laufey's build-cef: make runs from pwsh on Windows, where the
+      # Windows tar extracts the CEF dist (Git bash's GNU tar reads "D:/..." as
+      # a remote host).
+      - name: Build CEF host (Windows)
+        if: runner.os == 'Windows'
+        working-directory: laufey
+        shell: pwsh
+        run: make cef
+
+      # Only the backends' runtime files: `deno desktop` copies the whole
+      # directory holding a Linux/Windows backend binary into the app.
+      - name: Stage
+        run: |
+          set -euo pipefail
+          tmp=$RUNNER_TEMP
+          if command -v cygpath >/dev/null; then tmp=$(cygpath -u "$tmp"); fi
+          st="$tmp/laufey-stage"
+          rm -rf "$st"
+          mkdir -p "$st/webview/build" "$st/cef/build" "$st/licenses"
+          case "${{ runner.os }}" in
+            macOS)
+              ditto laufey/webview/build/laufey_webview.app "$st/webview/build/laufey_webview.app"
+              mkdir -p "$st/cef/build/Release"
+              ditto laufey/cef/build/Release/laufey.app "$st/cef/build/Release/laufey.app"
+              ;;
+            Linux)
+              cp laufey/webview/build/laufey_webview "$st/webview/build/"
+              cp -a laufey/cef/build/Release "$st/cef/build/Release"
+              strip --strip-unneeded "$st/cef/build/Release/libcef.so"
+              ;;
+            Windows)
+              cp laufey/webview/build/laufey_webview.exe "$st/webview/build/"
+              cp -r laufey/cef/build/Release "$st/cef/build/Release"
+              find "$st/cef/build/Release" -maxdepth 1 -type f \
+                \( -iname '*.pdb' -o -iname '*.lib' -o -iname '*.exp' -o -iname '*.ilk' \) -print -delete
+              ;;
+          esac
+          cp laufey/LICENSE laufey/LICENSE.cef "$st/licenses/"
+          echo "${{ needs.setup.outputs.laufey_sha }}" >"$st/licenses/LAUFEY_SHA"
+          find "$st" -maxdepth 4 | sort
+          du -sh "$st"/webview "$st"/cef
+          mkdir -p out
+          tar -cf "out/laufey-${{ matrix.target }}.tar" -C "$st" .
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: laufey-${{ matrix.target }}
+          path: out/laufey-${{ matrix.target }}.tar
+          retention-days: 14
+
+  # libdenort (the `denort_desktop` cdylib) from this branch, release profile
+  # (fat LTO, codegen-units=1, opt-level=z), as deno's own release builds it.
+  denort:
+    name: denort / ${{ matrix.target }}
+    needs: setup
+    if: ${{ !inputs.reuse_denort_run_id }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 355
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: "0"
+      DENO_SNAPSHOT_MINIFY_SOURCES: "1"
+    steps:
+      - name: Configure git
+        run: |
+          git config --global core.symlinks true
+          git config --global core.longpaths true
+
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+          submodules: false
+
+      - name: Free disk space (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup \
+            /opt/hostedtoolcache/CodeQL /usr/local/share/boost /usr/share/swift \
+            /usr/local/share/powershell /usr/local/share/chromium /opt/microsoft || true
+          sudo docker image prune --all --force >/dev/null 2>&1 || true
+          df -h /
+
+      - name: Install dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libclang-dev cmake
+
+      - name: libclang (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          set -euo pipefail
+          vs=$("/c/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe" -latest -property installationPath)
+          for d in "$(cygpath -u "$vs")/VC/Tools/Llvm/x64/bin" "/c/Program Files/LLVM/bin"; do
+            if [ -f "$d/libclang.dll" ]; then
+              echo "LIBCLANG_PATH=$(cygpath -w "$d")" >>"$GITHUB_ENV"
+              echo "LIBCLANG_PATH=$(cygpath -w "$d")"
+              exit 0
+            fi
+          done
+          echo "::error::libclang.dll not found"; exit 1
+
+      # ld64.lld: the aarch64-apple-darwin rustflags in .cargo/config.toml link
+      # with -fuse-ld=lld, as deno's release does.
+      - uses: denoland/setup-deno@v2
+        if: matrix.target == 'aarch64-apple-darwin'
+        with:
+          deno-version: v2.x
+      - name: Install ld64.lld (macOS aarch64)
+        if: matrix.target == 'aarch64-apple-darwin'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          ./tools/install_prebuilt.js ld64.lld
+          echo "$GITHUB_WORKSPACE/third_party/prebuilt/mac" >>"$GITHUB_PATH"
+
+      - name: Rust toolchain
+        run: |
+          tc=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)
+          rustup toolchain install "$tc" --profile minimal --no-self-update
+          echo "RUSTUP_TOOLCHAIN=$tc" >>"$GITHUB_ENV"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: denext-denort-v1
+          key: ${{ matrix.target }}-${{ matrix.os }}
+          cache-on-failure: false
+
+      - name: Build libdenort
+        run: |
+          df -h . || true
+          cargo build --release --locked -p denort_desktop
+          df -h . || true
+
+      - name: Collect
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          case "${{ matrix.target }}" in
+            *-apple-darwin)
+              cp target/release/libdenort.dylib out/
+              strip -x -S out/libdenort.dylib
+              # Stripping invalidates the linker's ad-hoc signature, and arm64
+              # macOS refuses to map unsigned code; re-sign ad hoc. Apps are
+              # signed with the author's identity at package time.
+              codesign --force --sign - out/libdenort.dylib
+              file out/libdenort.dylib
+              lipo -info out/libdenort.dylib
+              otool -L out/libdenort.dylib
+              ;;
+            *-linux-gnu)
+              cp target/release/libdenort.so out/
+              strip --strip-debug out/libdenort.so
+              file out/libdenort.so
+              ldd out/libdenort.so || true
+              objdump -T out/libdenort.so | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -3
+              ;;
+            *-windows-msvc)
+              cp target/release/denort.dll out/
+              ;;
+          esac
+          ls -la out
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: denort-${{ matrix.target }}
+          path: out/
+          retention-days: 14
+
+  # Assemble the archives, check them, package the smoke app with the stock
+  # CLI, try to launch it, attest.
+  package:
+    name: package / ${{ matrix.target }}
+    needs: [setup, laufey, denort]
+    if: ${{ always() && needs.setup.result == 'success' && needs.laufey.result != 'cancelled' && needs.denort.result != 'cancelled' }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+      attestations: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      TARGET: ${{ matrix.target }}
+      VERSION: ${{ needs.setup.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          sparse-checkout: |
+            .github/denext-runtime
+            LICENSE.md
+          sparse-checkout-cone-mode: false
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: denort-${{ matrix.target }}
+          path: dl/denort
+          run-id: ${{ inputs.reuse_denort_run_id || github.run_id }}
+          github-token: ${{ github.token }}
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: laufey-${{ matrix.target }}
+          path: dl/laufey
+          run-id: ${{ inputs.reuse_laufey_run_id || github.run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Install runtime dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends xvfb xauth dbus dbus-x11 \
+            libwebkit2gtk-4.1-0 libgtk-3-0 libnss3 libnspr4 libatk1.0-0 \
+            libatk-bridge2.0-0 libcups2 libdrm2 libgbm1 libasound2 libpango-1.0-0 \
+            libcairo2 libxcomposite1 libxdamage1 libxrandr2 libxkbcommon0 libxi6 \
+            libxext6 libxfixes3 libdbus-1-3 file
+
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: ${{ env.STOCK_DENO_VERSION }}
+
+      - name: Assemble
+        env:
+          DENORT_DIR: dl/denort
+          LAUFEY_TAR: dl/laufey/laufey-${{ matrix.target }}.tar
+          OUT_DIR: dist
+          DENO_VERSION: ${{ needs.setup.outputs.deno_version }}
+          DENO_SHA: ${{ github.sha }}
+          LAUFEY_SHA: ${{ needs.setup.outputs.laufey_sha }}
+          CEF_VERSION: ${{ needs.setup.outputs.cef_version }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: bash .github/denext-runtime/assemble.sh
+
+      - name: Verify binaries
+        run: |
+          set -euo pipefail
+          . .github/denext-runtime/lib.sh
+          ext=$(archive_ext "$TARGET")
+          for backend in webview cef; do
+            d="$(unix_path "$RUNNER_TEMP")/verify-$backend"
+            rm -rf "$d"
+            unpack_archive "dist/deno-desktop-runtime-$VERSION-$TARGET-$backend.$ext" "$d"
+            echo "::group::verify $backend"
+            bash .github/denext-runtime/verify.sh "$TARGET" "$d"
+            echo "::endgroup::"
+          done
+
+      - name: Smoke (package, webview)
+        env:
+          ARCHIVE: dist/deno-desktop-runtime-${{ needs.setup.outputs.version }}-${{ matrix.target }}-webview.${{ runner.os == 'Windows' && 'zip' || 'tar.gz' }}
+          BACKEND: webview
+          WORK_DIR: ${{ runner.temp }}/smoke-webview
+        run: bash .github/denext-runtime/smoke.sh
+
+      - name: Smoke (package, cef)
+        env:
+          ARCHIVE: dist/deno-desktop-runtime-${{ needs.setup.outputs.version }}-${{ matrix.target }}-cef.${{ runner.os == 'Windows' && 'zip' || 'tar.gz' }}
+          BACKEND: cef
+          WORK_DIR: ${{ runner.temp }}/smoke-cef
+        run: bash .github/denext-runtime/smoke.sh
+
+      # Launching is best effort: hosted runners may have no usable display
+      # (Linux runs under Xvfb). The outcome is reported in the job summary.
+      - name: Smoke (launch, webview)
+        id: launch_webview
+        continue-on-error: true
+        env:
+          BACKEND: webview
+          WORK_DIR: ${{ runner.temp }}/smoke-webview
+        run: bash .github/denext-runtime/launch.sh
+
+      - name: Smoke (launch, cef)
+        id: launch_cef
+        continue-on-error: true
+        env:
+          BACKEND: cef
+          WORK_DIR: ${{ runner.temp }}/smoke-cef
+        run: bash .github/denext-runtime/launch.sh
+
+      - name: Summary
+        run: |
+          {
+            echo "### $TARGET"
+            echo "- package webview: ok, package cef: ok"
+            echo "- launch webview: ${{ steps.launch_webview.outcome }}"
+            echo "- launch cef: ${{ steps.launch_cef.outcome }}"
+            echo '```'
+            cat dist/*.sha256
+            echo '```'
+          } >>"$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: |
+            dist/*.tar.gz
+            dist/*.zip
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: runtime-${{ matrix.target }}
+          path: dist/
+          retention-days: 30
+
+  publish:
+    name: publish
+    needs: [setup, package]
+    if: ${{ always() && needs.package.result == 'success' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          sparse-checkout: .github/denext-runtime
+          sparse-checkout-cone-mode: false
+
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: runtime-*
+          path: dist
+          merge-multiple: true
+
+      - name: SHA256SUMS + manifest.json
+        env:
+          VERSION: ${{ needs.setup.outputs.version }}
+          TAG: ${{ startsWith(github.ref, 'refs/tags/denext-runtime-v') && github.ref_name || '' }}
+          REPOSITORY: ${{ github.repository }}
+          DENO_VERSION: ${{ needs.setup.outputs.deno_version }}
+          DENO_SHA: ${{ github.sha }}
+          LAUFEY_SHA: ${{ needs.setup.outputs.laufey_sha }}
+          CEF_VERSION: ${{ needs.setup.outputs.cef_version }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          rm -f dist/*.sha256
+          python3 .github/denext-runtime/manifest.py dist
+          cat dist/SHA256SUMS
+          (cd dist && sha256sum -c SHA256SUMS)
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: manifest
+          path: |
+            dist/SHA256SUMS
+            dist/manifest.json
+
+      - name: Check every target is present (tag)
+        if: startsWith(github.ref, 'refs/tags/denext-runtime-v')
+        run: |
+          n=$(python3 -c 'import json;m=json.load(open("dist/manifest.json"));print(sum(len([k for k in v if k!="runtimeLib"]) for v in m["targets"].values()))')
+          echo "archives: $n"
+          test "$n" = 10
+
+      - name: GitHub Release
+        if: startsWith(github.ref, 'refs/tags/denext-runtime-v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          cat >notes.md <<EOF
+          denext's patched Deno Desktop runtime, deno ${{ needs.setup.outputs.deno_version }} + denext patches ([DENEXT.md](https://github.com/${{ github.repository }}/blob/${{ github.sha }}/DENEXT.md)).
+
+          - deno: \`${{ github.sha }}\`
+          - laufey: [\`${{ needs.setup.outputs.laufey_sha }}\`](https://github.com/Brainwires/laufey/commit/${{ needs.setup.outputs.laufey_sha }})
+          - CEF: ${{ needs.setup.outputs.cef_version }}
+
+          Use with the stock \`deno desktop\` ${{ env.STOCK_DENO_VERSION }}: unpack an archive, then set
+          \`DENORT_DESKTOP_BIN=<dir>/<runtime lib>\` and \`LAUFEY_DEV_DIR=<dir>/laufey\`.
+          \`manifest.json\` lists every archive with its URL, SHA-256 and size; each archive has a
+          build provenance attestation (\`gh attestation verify <file> -R ${{ github.repository }}\`).
+          EOF
+          gh release create "$TAG" --repo "${{ github.repository }}" --title "$TAG" \
+            --notes-file notes.md --target "${{ github.sha }}" \
+            dist/*.tar.gz dist/*.zip dist/SHA256SUMS dist/manifest.json

@@ -1,0 +1,144 @@
+# Brainwires/deno: denext's Deno Desktop runtime fork
+
+This is a fork of [denoland/deno](https://github.com/denoland/deno) that
+exists for one reason: to ship a patched **Deno Desktop runtime** (the
+`libdenort` library `deno desktop` embeds an app into, plus
+[laufey](https://github.com/littledivy/laufey)'s backend hosts) for
+[denext](https://github.com/Brainwires/denext) 3.1 without waiting for the
+patches to land upstream.
+
+It is not a general-purpose Deno distribution. The `deno` CLI is **not**
+rebuilt: denext runs the stock `deno desktop` CLI (2.9.7) and points it at
+the prebuilt runtime from this fork's releases:
+
+```sh
+DENORT_DESKTOP_BIN=<unpacked archive>/libdenort.dylib   # .so on Linux, denort.dll on Windows
+LAUFEY_DEV_DIR=<unpacked archive>/laufey
+deno desktop --backend webview|cef ...
+```
+
+## Exit criterion
+
+This fork goes away when **stock Deno ships these features**: once a Deno
+release carries the in-process memory transport, the configured app origin,
+and the per-app identifier handed to every laufey backend (and laufey
+releases the matching backend changes), denext uses the stock runtime and
+this fork is archived.
+
+## Branches and tags
+
+| Ref | What it is |
+| --- | --- |
+| `denext/v<deno version>` (e.g. `denext/v2.9.7`) | The branch the runtime is built from: upstream tag `v<deno version>` + the feature commits + this file and the release workflow. The default branch of this fork. |
+| `feat/desktop-app-origin`, `feat/desktop-app-id` | The feature branches the `denext/*` branch is built from (`feat/desktop-app-id` contains `feat/desktop-app-origin`). Kept for review and for rebasing onto a newer Deno. |
+| `denext-runtime-v<deno version>-denext.<n>` (e.g. `denext-runtime-v2.9.7-denext.1`) | A published runtime. Pushing such a tag on the `denext/*` branch runs the workflow and creates the GitHub Release. `<n>` counts runtime releases on one Deno version. |
+
+`main` and the other upstream branches are untouched mirrors from the fork
+point. Nothing here is proposed back from this fork; the upstream PRs below
+are where the changes are discussed.
+
+## What is patched (on top of `v2.9.7`)
+
+1. **`feat(net,http)`: in-process memory transport for `Deno.serve`** —
+   `DENO_SERVE_ADDRESS=memory:<name>`. Ported from
+   [denoland/deno#35675](https://github.com/denoland/deno/pull/35675).
+2. **`feat(desktop)`: serve the app at a stable, configured origin** —
+   `desktop.app.origin` (`<scheme>://<host>`), a custom-scheme handler that
+   bridges webview requests into `Deno.serve` over the memory transport, a
+   WebSocket relay that checks the `Origin` header.
+3. **`feat(desktop)`: read the app origin from an embedded
+   `.deno-desktop/app.json`** — so a stock CLI that rejects
+   `desktop.app.origin` in `deno.json` can still configure it:
+   `{ "origin": "<scheme>://<host>", "identifier": "<reverse-DNS id>" }`,
+   embedded with `"compile": { "include": [".deno-desktop/app.json"] }`.
+4. **`fix(desktop)`: set the Linux app_id so Wayland shows the configured
+   icon** — a port of [denoland/deno#35662](https://github.com/denoland/deno/pull/35662)
+   by Leo Kettmeir ([@crowlKats](https://github.com/crowlKats)), authored by
+   him; squashed and re-applied onto `v2.9.7`.
+5. **`feat(desktop)`: hand every laufey backend the app identifier** —
+   `LAUFEY_APP_ID`, so each app's web storage (localStorage, IndexedDB,
+   cookies) lives in its own directory and persists across launches.
+
+The runtime-side parts (1-3, 5) are what the prebuilt `libdenort` carries.
+The CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` /
+`LAUFEY_APP_ID` into a packaged app's launchers) are in the branch too, but a
+stock CLI does not run them; denext's own launcher provides that environment.
+
+The laufey backend hosts are built from
+[Brainwires/laufey](https://github.com/Brainwires/laufey) branch
+`denext/integration` (registered schemes, app data dir, WebKitGTK scheme
+request bodies, launch config, Windows bindgen fix), at the commit pinned by
+`LAUFEY_SHA` in the workflow.
+
+## Release archives
+
+One archive per target and backend:
+`deno-desktop-runtime-<deno version>-denext.<n>-<target>-<backend>.tar.gz`
+(`.zip` on Windows). Targets: `aarch64-apple-darwin`, `x86_64-apple-darwin`,
+`x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`,
+`x86_64-pc-windows-msvc`. Backends: `webview`, `cef`.
+
+```text
+libdenort.dylib | libdenort.so | denort.dll    -> DENORT_DESKTOP_BIN
+laufey/                                         -> LAUFEY_DEV_DIR
+  webview/build/laufey_webview.app              (macOS, webview)
+  webview/build/laufey_webview[.exe]            (Linux / Windows, webview)
+  cef/build/Release/laufey.app                  (macOS, cef)
+  cef/build/Release/laufey[.exe], libcef.*, ... (Linux / Windows, cef)
+BUILD_INFO.json                                 deno + laufey SHAs, CEF version, run URL
+licenses/                                       deno, laufey (and CEF) licenses
+```
+
+The `laufey/` paths are the build-tree paths the stock CLI searches under
+`LAUFEY_DEV_DIR` (`cli/tools/desktop.rs`, `locate_dev_backend_binary` /
+`locate_dev_app_bundle`). On Linux and Windows the CLI copies the whole
+directory holding the backend binary into the packaged app, so those
+directories hold only the backend's runtime files.
+
+Each release also has `SHA256SUMS` and `manifest.json`
+(target -> backend -> url, sha256, size; plus the deno SHA, laufey SHA and
+CEF version). Every archive has a build provenance attestation:
+
+```sh
+gh attestation verify deno-desktop-runtime-<...>.tar.gz -R Brainwires/deno
+```
+
+Binaries are not code-signed or notarized: an app is signed with its
+author's identity when it is packaged. The macOS `libdenort.dylib` is
+ad-hoc signed after stripping, because arm64 macOS will not load unsigned
+code.
+
+## Reproducing a build
+
+The workflow is `.github/workflows/denext_runtime.yml` (helpers in
+`.github/denext-runtime/`). Run it from the Actions tab (`workflow_dispatch`,
+optional `targets` filter, `laufey_ref` override, and `reuse_*_run_id` to
+reuse a previous run's libdenort or laufey build), or push a
+`denext-runtime-v*` tag to publish. Per target it:
+
+1. builds `libdenort` with `cargo build --release --locked -p denort_desktop`
+   (the release profile: fat LTO, `codegen-units = 1`), on the runner of that
+   target (Intel macOS on `macos-15-intel`, Linux on `ubuntu-22.04` /
+   `ubuntu-22.04-arm` so the glibc baseline matches laufey's WebKitGTK 4.1
+   requirement of Ubuntu 22.04+);
+2. builds laufey's webview and CEF hosts with laufey's `make webview` /
+   `make cef` (the CEF minimal distribution is downloaded by the Makefile);
+3. assembles the archives, checks architectures and dynamic dependencies
+   (`file` / `lipo` / `otool -L` / `ldd`), packages a small `Deno.serve` app
+   with the stock `deno desktop` 2.9.7 for both backends, and tries to launch
+   it (Linux under Xvfb) so the page POSTs back to the server;
+4. attests the archives and, on a tag, publishes the release.
+
+Locally, the equivalent is:
+
+```sh
+cargo build --release -p denort_desktop                   # this branch
+git clone https://github.com/Brainwires/laufey && cd laufey
+git checkout <LAUFEY_SHA> && make webview && make cef
+DENORT_DESKTOP_BIN=$PWD/../deno/target/release/libdenort.dylib \
+LAUFEY_DEV_DIR=$PWD deno desktop --backend webview main.ts
+```
+
+Upstream Deno's own workflows are removed on the `denext/*` branch and
+disabled in this fork's Actions settings, so pushes and tags here only run
+the denext runtime workflow.
