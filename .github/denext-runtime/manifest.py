@@ -80,6 +80,7 @@ manifest = {
     "laufey": {
         "repository": "https://github.com/Brainwires/laufey",
         "sha": env["LAUFEY_SHA"],
+        "apiVersion": int(env["LAUFEY_API_VERSION"]) if env.get("LAUFEY_API_VERSION") else None,
     },
     "cef": {"version": env["CEF_VERSION"]},
     "layout": {

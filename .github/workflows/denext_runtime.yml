@@ -52,6 +52,7 @@ jobs:
       deno_version: ${{ steps.plan.outputs.deno_version }}
       laufey_sha: ${{ steps.plan.outputs.laufey_sha }}
       cef_version: ${{ steps.plan.outputs.cef_version }}
+      laufey_api: ${{ steps.plan.outputs.laufey_api }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -75,6 +76,9 @@ jobs:
           cef_version=$(gh api "repos/$LAUFEY_REPOSITORY/contents/Makefile?ref=$laufey_sha" --jq .content |
             base64 -d | sed -n 's/^CEF_FULL_VERSION := //p')
           test -n "$cef_version"
+          laufey_api=$(gh api "repos/$LAUFEY_REPOSITORY/contents/capi/include/laufey.h?ref=$laufey_sha" --jq .content |
+            base64 -d | sed -n 's/^#define LAUFEY_API_VERSION \([0-9]*\).*/\1/p')
+          test -n "$laufey_api"
 
           if [ "$EVENT" = push ]; then
             version=${REF_NAME#denext-runtime-v}
@@ -112,6 +116,7 @@ jobs:
             echo "deno_version=$deno_version"
             echo "laufey_sha=$laufey_sha"
             echo "cef_version=$cef_version"
+            echo "laufey_api=$laufey_api"
           } >>"$GITHUB_OUTPUT"
           echo "version=$version deno=$deno_version laufey=$laufey_sha cef=$cef_version"
           echo "matrix=$matrix"
@@ -227,6 +232,11 @@ jobs:
           esac
           cp laufey/LICENSE laufey/LICENSE.cef "$st/licenses/"
           echo "${{ needs.setup.outputs.laufey_sha }}" >"$st/licenses/LAUFEY_SHA"
+          # The C ABI version the hosts were built with (checked against the
+          # one libdenort was compiled with in the package job).
+          sed -n 's/^#define LAUFEY_API_VERSION \([0-9]*\).*/\1/p' laufey/capi/include/laufey.h >"$st/LAUFEY_API_VERSION"
+          test -s "$st/LAUFEY_API_VERSION"
+          echo "laufey API $(cat "$st/LAUFEY_API_VERSION")"
           find "$st" -maxdepth 4 | sort
           du -sh "$st"/webview "$st"/cef
           mkdir -p out
@@ -256,7 +266,6 @@ jobs:
     env:
       CARGO_TERM_COLOR: always
       CARGO_INCREMENTAL: "0"
-      DENO_SNAPSHOT_MINIFY_SOURCES: "1"
     steps:
       - name: Configure git
         run: |
@@ -309,6 +318,8 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
+          # tools/util.js imports the std submodule.
+          git submodule update --init --depth=1 -- ./tests/util/std
           ./tools/install_prebuilt.js ld64.lld
           echo "$GITHUB_WORKSPACE/third_party/prebuilt/mac" >>"$GITHUB_PATH"
 
@@ -324,11 +335,58 @@ jobs:
           key: ${{ matrix.target }}-${{ matrix.os }}
           cache-on-failure: false
 
+      # The laufey crate libdenort links and the backend hosts must come from
+      # the SAME laufey revision: laufey's init_api rejects any C ABI version
+      # mismatch. Build against the host's laufey source by patching whatever
+      # source Cargo.lock names for `laufey` (crates.io today, a git rev of
+      # Brainwires/laufey later) with a path to that checkout.
+      # Outside the deno checkout: a path dependency under the workspace root
+      # would become a deno workspace member.
+      - name: Fetch laufey source
+        run: |
+          set -euo pipefail
+          dir="$RUNNER_TEMP/laufey-src"
+          if command -v cygpath >/dev/null; then dir="$(cygpath -u "$RUNNER_TEMP")/laufey-src"; fi
+          rm -rf "$dir"
+          git init -q "$dir"
+          git -C "$dir" fetch -q --depth=1 "https://github.com/$LAUFEY_REPOSITORY" "${{ needs.setup.outputs.laufey_sha }}"
+          git -C "$dir" checkout -q FETCH_HEAD
+          echo "LAUFEY_SRC=$dir" >>"$GITHUB_ENV"
+
       - name: Build libdenort
         run: |
+          set -euo pipefail
+          src=$(awk '/^name = "laufey"$/{f=1} f&&/^source = /{print; exit}' Cargo.lock | sed 's/^source = "\(.*\)"$/\1/')
+          echo "Cargo.lock laufey source: $src"
+          case "$src" in
+            registry+https://github.com/rust-lang/crates.io-index) key=crates-io ;;
+            git+*) url=${src#git+}; url=${url%%\#*}; url=${url%%\?*}; key="\"$url\"" ;;
+            *) echo "::error::unexpected laufey source '$src'"; exit 1 ;;
+          esac
+          capi="$LAUFEY_SRC/capi"
+          if command -v cygpath >/dev/null; then capi=$(cygpath -m "$capi"); fi
+          patch="patch.$key.laufey.path=\"$capi\""
+          echo "cargo --config '$patch'"
           df -h . || true
-          cargo build --release --locked -p denort_desktop
+          # Not --locked: the patch rewrites the laufey entry of Cargo.lock.
+          cargo build --release --config "$patch" -p denort_desktop
           df -h . || true
+          # Nothing but laufey may have moved in the lockfile.
+          git diff --stat -- Cargo.lock
+          if git diff -U0 -- Cargo.lock | grep '^[-+]name = ' | grep -v '"laufey"'; then
+            echo "::error::Cargo.lock changed beyond laufey"; exit 1
+          fi
+          # Record what libdenort was compiled against.
+          manifest=$(cargo metadata --format-version 1 --config "$patch" |
+            python3 -c 'import json,sys; print([p for p in json.load(sys.stdin)["packages"] if p["name"]=="laufey"][0]["manifest_path"])')
+          echo "laufey crate compiled from: $manifest"
+          if command -v cygpath >/dev/null; then manifest=$(cygpath -u "$manifest"); fi
+          api=$(sed -n 's/^pub const LAUFEY_API_VERSION: u32 = \([0-9]*\);/\1/p' "$(dirname "$manifest")/src/lib.rs")
+          test -n "$api"
+          mkdir -p out
+          echo "$api" >out/LAUFEY_API_VERSION
+          git -C "$LAUFEY_SRC" rev-parse HEAD >out/LAUFEY_SHA
+          echo "laufey API $api at $(cat out/LAUFEY_SHA)"
 
       - name: Collect
         run: |
@@ -423,6 +481,25 @@ jobs:
       - uses: denoland/setup-deno@v2
         with:
           deno-version: ${{ env.STOCK_DENO_VERSION }}
+
+      # laufey's init_api rejects any C ABI mismatch between the runtime and
+      # the host; fail here instead of at an app's first launch.
+      - name: Check laufey ABI (libdenort vs hosts)
+        run: |
+          set -euo pipefail
+          host_api=$(tar -xOf "dl/laufey/laufey-$TARGET.tar" ./LAUFEY_API_VERSION)
+          host_sha=$(tar -xOf "dl/laufey/laufey-$TARGET.tar" ./licenses/LAUFEY_SHA)
+          rt_api=$(cat dl/denort/LAUFEY_API_VERSION)
+          rt_sha=$(cat dl/denort/LAUFEY_SHA)
+          echo "libdenort: laufey API $rt_api from $rt_sha"
+          echo "hosts:     laufey API $host_api from $host_sha"
+          if [ "$rt_api" != "$host_api" ]; then
+            echo "::error::laufey API mismatch: libdenort $rt_api, hosts $host_api"; exit 1
+          fi
+          if [ "$rt_sha" != "$host_sha" ]; then
+            echo "::error::laufey revision mismatch: libdenort $rt_sha, hosts $host_sha"; exit 1
+          fi
+          echo "LAUFEY_API_VERSION=$host_api" >>"$GITHUB_ENV"
 
       - name: Assemble
         env:
@@ -534,6 +611,7 @@ jobs:
           DENO_SHA: ${{ github.sha }}
           LAUFEY_SHA: ${{ needs.setup.outputs.laufey_sha }}
           CEF_VERSION: ${{ needs.setup.outputs.cef_version }}
+          LAUFEY_API_VERSION: ${{ needs.setup.outputs.laufey_api }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           rm -f dist/*.sha256

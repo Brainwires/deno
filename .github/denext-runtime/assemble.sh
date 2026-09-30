@@ -74,7 +74,7 @@ for backend in webview cef; do
   "target": "$TARGET",
   "backend": "$backend",
   "deno": { "version": "$DENO_VERSION", "repository": "https://github.com/${GITHUB_REPOSITORY:-Brainwires/deno}", "sha": "$DENO_SHA" },
-  "laufey": { "repository": "https://github.com/Brainwires/laufey", "sha": "$LAUFEY_SHA" },
+  "laufey": { "repository": "https://github.com/Brainwires/laufey", "sha": "$LAUFEY_SHA", "apiVersion": ${LAUFEY_API_VERSION:-null} },
   "cef": { "version": "$CEF_VERSION" },
   "env": { "DENORT_DESKTOP_BIN": "$lib", "LAUFEY_DEV_DIR": "laufey" },
   "build": { "run": "${RUN_URL:-}" }

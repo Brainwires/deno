@@ -68,7 +68,15 @@ The laufey backend hosts are built from
 [Brainwires/laufey](https://github.com/Brainwires/laufey) branch
 `denext/integration` (registered schemes, app data dir, WebKitGTK scheme
 request bodies, launch config, Windows bindgen fix), at the commit pinned by
-`LAUFEY_SHA` in the workflow.
+`LAUFEY_SHA` in the workflow (or the `laufey_ref` input).
+
+laufey's `init_api` rejects any C ABI version mismatch between the runtime
+and the host, so the `laufey` crate libdenort links and the hosts are built
+from the **same** laufey revision: the workflow patches whatever source
+`Cargo.lock` names for `laufey` (crates.io, or a git rev of
+Brainwires/laufey) with a path to that revision's `capi/`, records the
+`LAUFEY_API_VERSION` it compiled, and the package job fails if it differs
+from the hosts' `capi/include/laufey.h`.
 
 ## Release archives
 
