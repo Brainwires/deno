@@ -1186,6 +1186,22 @@ createUrlTest(
   400,
 );
 
+// `http+memory:` is the scheme of the in-process memory transport's requests.
+// An absolute-form target over TCP must not be able to claim it: the request
+// is rejected instead of reaching the handler with a forged `request.url`.
+createUrlTest(
+  "WithForgedMemoryScheme",
+  "POST http+memory://app/x",
+  null,
+  400,
+);
+createUrlTest(
+  "WithForgedMemorySchemeUppercase",
+  "GET HTTP+MEMORY://app/x",
+  "app",
+  400,
+);
+
 // Regression test for https://github.com/denoland/deno/issues/29872: an empty
 // `Host:` header must fall back to the listener's authority instead of
 // producing `request.url = "http:///path"` (which parses as hostname "path").

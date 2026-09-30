@@ -4567,6 +4567,21 @@ async fn serve_http11_raw(
       return Ok(());
     };
 
+    // An absolute-form target may not claim the memory transport's scheme on
+    // another transport (see `claims_foreign_memory_scheme`). The target is
+    // only kept when the handler takes the request, which is also the only
+    // case in which `request.url` exists.
+    if !matches!(parsed.path.as_bytes().first(), Some(b'/' | b'*'))
+      && let Some((scheme, _, _)) = split_absolute_form_target(&parsed.path)
+      && crate::request_properties::claims_foreign_memory_scheme(
+        scheme,
+        request_info.stream_type,
+      )
+    {
+      write_h1_bad_request(&mut conn, &mut scratch).await?;
+      return Ok(());
+    }
+
     let keep_alive = parsed.keep_alive;
     let expect_continue = parsed.expect_continue;
     let has_body = parsed.has_body;

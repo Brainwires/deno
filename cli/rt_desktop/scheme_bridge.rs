@@ -46,11 +46,17 @@
 //! # What the `Deno.serve` handler sees
 //!
 //! Requests that arrived through the in-process transport — from the scheme
-//! handler or the WebSocket relay — have a `request.url` whose scheme is
-//! `http+memory:` (`new URL(request.url).protocol === "http+memory:"`), and
-//! `info.remoteAddr` is `{ transport: "memory", name: "deno-desktop" }`. That
-//! is the check a framework should gate privileged, desktop-only endpoints
-//! on: nothing that came over real TCP can carry it. Within that class:
+//! handler or the WebSocket relay — have `info.remoteAddr` equal to
+//! `{ transport: "memory", name: "deno-desktop" }`, and a `request.url` whose
+//! scheme is `http+memory:` (`new URL(request.url).protocol ===
+//! "http+memory:"`). Gate privileged, desktop-only endpoints on the
+//! transport (`info.remoteAddr.transport === "memory"`), and treat the URL
+//! as a second check, not the proof: `request.url` takes its scheme from an
+//! absolute-form request target (`POST http+memory://app/x HTTP/1.1`), which
+//! any client can send. `Deno.serve` rejects such a target with 400 on every
+//! listener that is not the memory transport (and HTTP/2's `:scheme` the
+//! same way), so over TCP the URL cannot carry the scheme either, but only
+//! the transport is established by the connection itself. Within that class:
 //!
 //! * a page request from the scheme handler has `Host: <origin host>` (so
 //!   `request.url` is `http+memory://<host>/path`) and, for same-origin
