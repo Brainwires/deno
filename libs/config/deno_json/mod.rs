@@ -923,6 +923,15 @@ struct SerializedDesktopAppConfig {
   /// `HKCU\Software\Classes\<scheme>` protocol handler (Windows).
   #[serde(rename = "deepLinks")]
   pub deep_links: Option<Vec<String>>,
+  /// The stable origin the app's renderer runs at, as `<scheme>://<host>`
+  /// (e.g. `"acme://app"`). The desktop runtime registers `<scheme>` as a
+  /// custom URL scheme with the webview and bridges its requests into the
+  /// app's in-process `Deno.serve`, so the page origin never changes between
+  /// launches (no random loopback port) and can be allow-listed by servers
+  /// that validate the browser `Origin` header. The scheme must not be a web
+  /// or browser-reserved scheme, and the host carries no port, path, query,
+  /// fragment or userinfo. Defaults to `app://localhost`.
+  pub origin: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
@@ -976,6 +985,7 @@ impl SerializedDesktopConfig {
         name: a.name,
         identifier: a.identifier,
         deep_links: a.deep_links,
+        origin: a.origin,
         icons: a.icons.map(|i| {
           fn resolve_icon_value(
             v: SerializedDesktopIconValue,
@@ -1050,6 +1060,9 @@ pub struct DesktopAppConfig {
   pub identifier: Option<String>,
   pub icons: Option<DesktopIconsConfig>,
   pub deep_links: Option<Vec<String>>,
+  /// `desktop.app.origin` as written; validated by the CLI (`deno_lib`'s
+  /// `AppOrigin`), not here.
+  pub origin: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -3122,6 +3135,53 @@ mod tests {
     let config_text = r#"//{"foo":"bar"}"#;
     let config_specifier = Url::parse("file:///deno/tsconfig.json").unwrap();
     ConfigFile::new(config_text, config_specifier).unwrap(); // no panic
+  }
+
+  #[test]
+  fn test_parse_desktop_app_config() {
+    let config_text = r#"{
+      "desktop": {
+        "app": {
+          "name": "Acme",
+          "identifier": "com.acme.app",
+          "deepLinks": ["acme"],
+          "origin": "acme://app"
+        }
+      }
+    }"#;
+    let config_specifier = Url::parse("file:///deno/deno.json").unwrap();
+    let config_file = ConfigFile::new(config_text, config_specifier).unwrap();
+    let desktop = unpack_object(config_file.to_desktop_config(), "desktop");
+    let app = desktop.app.expect("desktop.app must be parsed");
+    assert_eq!(app.name.as_deref(), Some("Acme"));
+    assert_eq!(app.identifier.as_deref(), Some("com.acme.app"));
+    assert_eq!(app.deep_links, Some(vec!["acme".to_string()]));
+    // The origin is carried through as written; the CLI validates it.
+    assert_eq!(app.origin.as_deref(), Some("acme://app"));
+  }
+
+  #[test]
+  fn test_parse_desktop_app_config_origin_defaults_to_none() {
+    let config_text = r#"{ "desktop": { "app": { "name": "Acme" } } }"#;
+    let config_specifier = Url::parse("file:///deno/deno.json").unwrap();
+    let config_file = ConfigFile::new(config_text, config_specifier).unwrap();
+    let desktop = unpack_object(config_file.to_desktop_config(), "desktop");
+    assert_eq!(desktop.app.unwrap().origin, None);
+  }
+
+  #[test]
+  fn test_parse_desktop_app_config_rejects_unknown_fields() {
+    // `deny_unknown_fields` on `desktop.app`: a typo such as `origins` must
+    // surface as a config error, not silently fall back to the default.
+    let config_text =
+      r#"{ "desktop": { "app": { "origins": "acme://app" } } }"#;
+    let config_specifier = Url::parse("file:///deno/deno.json").unwrap();
+    let config_file = ConfigFile::new(config_text, config_specifier).unwrap();
+    let err = config_file.to_desktop_config().unwrap_err();
+    assert_contains!(err.to_string(), "Failed to parse \"desktop\"");
+    let source = std::error::Error::source(&err)
+      .expect("the serde error is retained as the source");
+    assert_contains!(source.to_string(), "origins");
   }
 
   #[test]

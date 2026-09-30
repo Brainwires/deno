@@ -29,6 +29,7 @@ v8.workspace = true
 deno_core.workspace = true
 deno_error.workspace = true
 deno_lib.workspace = true
+deno_net.workspace = true
 deno_runtime.workspace = true
 deno_snapshots.workspace = true
 deno_terminal.workspace = true
@@ -36,6 +37,10 @@ denort = { path = "../rt", default-features = false }
 laufey = "0.7.0"
 libsui.workspace = true
 
+bytes.workspace = true
+http-body-util.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
 log = { workspace = true, features = ["serde"] }
 raw-window-handle.workspace = true
 rustls.workspace = true

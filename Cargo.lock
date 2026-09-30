@@ -3789,14 +3789,19 @@ dependencies = [
 name = "denort_desktop"
 version = "2.7.4"
 dependencies = [
+ "bytes",
  "deno_core",
  "deno_error",
  "deno_lib",
+ "deno_net",
  "deno_runtime",
  "deno_snapshots",
  "deno_terminal",
  "deno_v8",
  "denort",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
  "laufey",
  "libc",
  "libsui",

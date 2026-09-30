@@ -55,6 +55,14 @@ pub async fn desktop(
   let factory = CliFactory::from_flags(Arc::new(config_flags));
   let cli_options = factory.cli_options()?;
   let desktop_config = cli_options.start_dir.to_desktop_config()?.clone();
+  // Fail fast on a malformed `desktop.app.origin` — the same check runs when
+  // the binary metadata is written, but that is after the whole graph has
+  // been built and bundled.
+  if let Some(origin) =
+    crate::standalone::binary::resolve_desktop_app_origin(cli_options)?
+  {
+    log::info!("{} {origin}", colors::green("App origin"));
+  }
   let laufey_resolver = Arc::new(LaufeyBackendResolver::new(&factory)?);
   let deno_dir_root = factory.deno_dir()?.root.clone();
 
@@ -548,11 +556,16 @@ async fn compile_desktop(
 
   if desktop_flags.hmr || inspector_requested {
     let backend = desktop_flags.backend.as_deref().unwrap_or("webview");
+    let cef_scheme = cef_custom_scheme(
+      crate::standalone::binary::resolve_desktop_app_origin(cli_options)?
+        .as_deref(),
+    );
     run_desktop_hmr(
       &output_path,
       &detection_cwd,
       detected_framework.as_ref(),
       backend,
+      cef_scheme.as_deref(),
       laufey_resolver,
       &flags,
       &desktop_flags,
@@ -1251,11 +1264,13 @@ async fn spawn_framework_dev_server(
 /// `child_process.fork()` works because forked workers use
 /// `override_main_module` to run the target script instead of the
 /// embedded entrypoint.
+#[allow(clippy::too_many_arguments, reason = "launch configuration")]
 async fn run_desktop_hmr(
   dylib_path: &Path,
   source_dir: &Path,
   framework: Option<&super::framework::FrameworkDetection>,
   backend: &str,
+  cef_scheme: Option<&str>,
   laufey_resolver: &LaufeyBackendResolver,
   flags: &Flags,
   desktop_flags: &DesktopFlags,
@@ -1335,6 +1350,16 @@ async fn run_desktop_hmr(
   }
   if let Some(name) = app_name.as_ref() {
     cmd.env("LAUFEY_APP_NAME", name);
+  }
+  // Chromium learns custom URL schemes at process start, before the runtime
+  // (which registers the handler) is loaded, so the CEF host must be told
+  // the app origin's scheme up front or the page would run at an opaque,
+  // insecure origin. The WebView backends read the registration at window
+  // creation and need nothing here.
+  if backend == "cef"
+    && let Some(scheme) = cef_scheme
+  {
+    cmd.env(LAUFEY_CUSTOM_SCHEMES_ENV, scheme);
   }
   // Only enable the file watcher + setScriptSource pipeline when the user
   // actually asked for HMR. `deno desktop --inspect` alone used to spin up
@@ -3283,13 +3308,29 @@ async fn package_macos_app_bundle(
     "the bundle will carry CFBundleShortVersionString 1.0 / CFBundleVersion \
      1.0.0 (both accept only period-separated integers)",
   );
-  let info_plist = render_macos_info_plist(
+  let mut info_plist = render_macos_info_plist(
     &app_name,
     &bundle_id,
     &laufey_executable_name,
     desktop_flags.icon.is_some(),
     config_package_version(cli_options).as_deref(),
   );
+  // The CEF host needs the app origin's custom scheme declared at process
+  // start (see `run_desktop_hmr`). A bundle launched by LaunchServices
+  // (Finder, Dock, `open`) gets `LSEnvironment` in its environment, and the
+  // CEF helper processes inherit it from the browser process.
+  if backend == "cef"
+    && let Some(scheme) = cef_custom_scheme(
+      crate::standalone::binary::resolve_desktop_app_origin(cli_options)?
+        .as_deref(),
+    )
+  {
+    info_plist = macos_plist_with_launch_env(
+      &info_plist,
+      LAUFEY_CUSTOM_SCHEMES_ENV,
+      &scheme,
+    );
+  }
   std::fs::write(contents_dir.join("Info.plist"), info_plist)?;
 
   // Rewrite each CEF helper's CFBundleIdentifier to be a strict suffix
@@ -3371,6 +3412,39 @@ async fn package_macos_app_bundle(
   let _ = std::fs::remove_file(dylib_path);
 
   Ok(app_bundle)
+}
+
+/// Environment variable through which laufey's CEF host learns, at process
+/// start, the custom URL schemes to register as standard, secure,
+/// fetch/CORS-enabled schemes (laufey `cef/src/custom_schemes.h`). Laufey's
+/// built-in `app` scheme is always declared.
+const LAUFEY_CUSTOM_SCHEMES_ENV: &str = "LAUFEY_CUSTOM_SCHEMES";
+
+/// The scheme a CEF host must be told about at launch for the app to run at
+/// `app_origin` (a normalized `desktop.app.origin`), or `None` when the origin
+/// uses laufey's built-in `app` scheme — which is also the default origin's
+/// scheme, so an app without `desktop.app.origin` needs no launch setup.
+fn cef_custom_scheme(app_origin: Option<&str>) -> Option<String> {
+  let origin =
+    deno_lib::standalone::app_origin::AppOrigin::parse(app_origin?).ok()?;
+  (origin.scheme() != "app").then(|| origin.scheme().to_string())
+}
+
+/// Add `key=value` to a rendered Info.plist's `LSEnvironment` (the
+/// environment LaunchServices gives the bundle's executable). `key` and
+/// `value` must be XML-safe; callers pass a fixed name and a validated URL
+/// scheme.
+fn macos_plist_with_launch_env(plist: &str, key: &str, value: &str) -> String {
+  const TAIL: &str = "</dict>\n</plist>\n";
+  debug_assert!(
+    !key.contains(['<', '>', '&']) && !value.contains(['<', '>', '&'])
+  );
+  let Some(body) = plist.strip_suffix(TAIL) else {
+    return plist.to_string();
+  };
+  format!(
+    "{body}  <key>LSEnvironment</key>\n  <dict>\n    <key>{key}</key>\n    <string>{value}</string>\n  </dict>\n{TAIL}"
+  )
 }
 
 // Keep the generated bundle metadata aligned with laufey's macOS app plist,
@@ -7622,6 +7696,49 @@ def456  other.zip
       "<key>CFBundleVersion</key>
   <string>1.0.0</string>"
     ));
+  }
+
+  #[test]
+  fn cef_custom_scheme_only_for_non_builtin_schemes() {
+    // No origin configured: the default `app://localhost` rides laufey's
+    // always-declared `app` scheme.
+    assert_eq!(cef_custom_scheme(None), None);
+    assert_eq!(cef_custom_scheme(Some("app://localhost")), None);
+    assert_eq!(cef_custom_scheme(Some("app://other")), None);
+    assert_eq!(
+      cef_custom_scheme(Some("t3code://app")).as_deref(),
+      Some("t3code")
+    );
+    // Values are normalized before they get here, but an unparsable one
+    // must not turn into a launch flag.
+    assert_eq!(cef_custom_scheme(Some("https://app")), None);
+  }
+
+  #[test]
+  fn macos_plist_launch_env_is_a_valid_ls_environment() {
+    let plist = render_macos_info_plist("A", "com.a", "laufey", false, None);
+    let plist =
+      macos_plist_with_launch_env(&plist, LAUFEY_CUSTOM_SCHEMES_ENV, "t3code");
+    let value = plist::Value::from_reader_xml(plist.as_bytes()).unwrap();
+    let env = value
+      .as_dictionary()
+      .and_then(|d| d.get("LSEnvironment"))
+      .and_then(|v| v.as_dictionary())
+      .expect("LSEnvironment dict");
+    assert_eq!(
+      env
+        .get(LAUFEY_CUSTOM_SCHEMES_ENV)
+        .and_then(|v| v.as_string()),
+      Some("t3code")
+    );
+    // The rest of the plist is untouched.
+    assert_eq!(
+      value
+        .as_dictionary()
+        .and_then(|d| d.get("CFBundleExecutable"))
+        .and_then(|v| v.as_string()),
+      Some("laufey")
+    );
   }
 
   #[test]

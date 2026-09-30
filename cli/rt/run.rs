@@ -1678,9 +1678,10 @@ pub async fn run_with_options(
   };
 
   // Desktop runtimes always need a baseline set of permissions to function:
-  // the renderer is served over loopback HTTP, so net access to 127.0.0.1
-  // is mandatory; the desktop init JS reads `DENO_DESKTOP_*` env vars to
-  // discover the inspector mux, HMR watch dir, etc. Without these, the
+  // the app's own code reaches its WebSocket relay and the DevTools mux over
+  // loopback, so net access to 127.0.0.1 is mandatory; the desktop init JS
+  // and the app read `DENO_DESKTOP_*` env vars to discover the inspector
+  // mux, HMR watch dir, page origin, etc. Without these, the
   // very first `Deno.serve(...)` or `Deno.env.get(...)` throws NotCapable
   // and aborts script execution before the event-loop IIFE registers —
   // which manifests as a blank window where nothing works (no input,
@@ -2113,20 +2114,26 @@ pub(crate) fn grant_vfs_read_access(
 }
 
 /// Loopback hosts a desktop runtime must be able to reach. The compiled
-/// app's renderer talks to its `Deno.serve()` over loopback HTTP, so
-/// net access here is structural, not optional.
+/// app's page reaches `Deno.serve()` over the in-process memory transport,
+/// but its WebSocket relay (`DENO_DESKTOP_WS_ORIGIN`) and the DevTools mux
+/// are loopback TCP, so net access here is structural, not optional.
 const DESKTOP_LOOPBACK_HOSTS: &[&str] = &["127.0.0.1", "localhost", "[::1]"];
 
-/// Env vars the DESKTOP_JS init script reads. Granting only these
-/// (instead of blanket `allow-env`) keeps the user's shell environment
-/// off-limits to arbitrary `Deno.env.get` calls in their app code while
-/// still letting the framework boot.
+/// Env vars the DESKTOP_JS init script reads, plus the two the desktop
+/// runtime publishes FOR the app: its page origin (`DENO_DESKTOP_APP_ORIGIN`,
+/// `<scheme>://<host>`) and the WebSocket relay it must dial to reach its own
+/// `Deno.serve` over `ws://` (`DENO_DESKTOP_WS_ORIGIN`, `ws://127.0.0.1:PORT`).
+/// Granting only these (instead of blanket `allow-env`) keeps the user's shell
+/// environment off-limits to arbitrary `Deno.env.get` calls in their app code
+/// while still letting the framework boot.
 const DESKTOP_ENV_KEYS: &[&str] = &[
   "DENO_DESKTOP_MUX_WS",
   "DENO_DESKTOP_HMR",
   "DENO_DESKTOP_INSPECT_INTERNAL_PORT",
   "DENO_DESKTOP_INSPECT_BRK",
   "DENO_DESKTOP_INSPECT_WAIT",
+  "DENO_DESKTOP_APP_ORIGIN",
+  "DENO_DESKTOP_WS_ORIGIN",
   "LAUFEY_RUNTIME_PATH",
   "LAUFEY_REMOTE_DEBUGGING_PORT",
 ];

@@ -114,6 +114,13 @@ pub struct Metadata {
   /// Auto-update release base URL from deno.json `desktop.release.baseUrl`.
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub release_base_url: Option<String>,
+  /// The desktop app's stable page origin (`<scheme>://<host>`) from
+  /// deno.json `desktop.app.origin`, validated and normalized by
+  /// [`super::app_origin::AppOrigin`] at compile time. `None` means the
+  /// runtime uses [`super::app_origin::DEFAULT_APP_ORIGIN`]. Desktop builds
+  /// only.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub app_origin: Option<String>,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]

@@ -189,6 +189,11 @@
               "items": {
                 "type": "string"
               }
+            },
+            "origin": {
+              "type": "string",
+              "description": "The stable origin the app's renderer runs at, as \"<scheme>://<host>\" (e.g. \"acme://app\"). The runtime registers <scheme> as a custom URL scheme with the webview and bridges its requests into the app's in-process Deno.serve, so the page origin never changes between launches and can be allow-listed by servers that validate the browser Origin header. The scheme must not be a web or browser-reserved scheme (http, https, ws, wss, file, ftp, blob, data, javascript, about, ...) and the host carries no port, path, query, fragment or userinfo. Defaults to \"app://localhost\". Exposed to the app's Deno code as DENO_DESKTOP_APP_ORIGIN; the WebSocket relay's address is DENO_DESKTOP_WS_ORIGIN.",
+              "pattern": "^[A-Za-z][A-Za-z0-9+.-]*://[A-Za-z0-9-]+(\\.[A-Za-z0-9-]+)*/?$"
             }
           }
         },

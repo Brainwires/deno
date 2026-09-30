@@ -354,6 +354,28 @@ fn resolve_app_name(
   Ok(app_name)
 }
 
+/// Resolve the desktop app's page origin from `desktop.app.origin`, validated
+/// and normalized so the runtime can register the scheme and compare `Origin`
+/// headers against it byte-for-byte. `None` when unset (the runtime then uses
+/// [`deno_lib::standalone::app_origin::DEFAULT_APP_ORIGIN`]).
+pub fn resolve_desktop_app_origin(
+  cli_options: &CliOptions,
+) -> Result<Option<String>, AnyError> {
+  let desktop_config = cli_options.start_dir.to_desktop_config()?;
+  let Some(origin) = desktop_config
+    .app
+    .as_ref()
+    .and_then(|app| app.origin.as_deref())
+  else {
+    return Ok(None);
+  };
+  let parsed = deno_lib::standalone::app_origin::AppOrigin::parse(origin)
+    .with_context(|| {
+      format!("Invalid desktop.app.origin {origin:?} in deno.json")
+    })?;
+  Ok(Some(parsed.as_origin_string()))
+}
+
 pub struct WriteBinOptions<'a> {
   pub writer: File,
   pub display_output_filename: &'a str,
@@ -1238,6 +1260,15 @@ impl<'a> DenoCompileBinaryWriter<'a> {
         .to_desktop_config()
         .ok()
         .and_then(|c| c.release.as_ref()?.base_url.clone()),
+      // The page origin is a desktop-only concern: `deno compile` binaries
+      // have no webview. Unlike the two URLs above, a malformed value is an
+      // error rather than a silent fallback — the app would otherwise start
+      // at an origin the developer did not configure.
+      app_origin: if self.is_desktop {
+        resolve_desktop_app_origin(self.cli_options)?
+      } else {
+        None
+      },
     };
 
     let (data_section_bytes, section_sizes) = serialize_binary_data_section(
