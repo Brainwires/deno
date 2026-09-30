@@ -934,6 +934,13 @@ struct SerializedDesktopAppConfig {
   /// or browser-reserved scheme, and the host carries no port, path, query,
   /// fragment or userinfo. Defaults to `app://localhost`.
   pub origin: Option<String>,
+  /// Run at most one instance of the app per user. A second launch hands its
+  /// arguments (a deep link or a file on Windows and Linux) and working
+  /// directory to the running instance, which receives them as a
+  /// `secondinstance` event, and exits. The lock is keyed on the app
+  /// identifier. Defaults to `false`.
+  #[serde(rename = "singleInstance")]
+  pub single_instance: Option<bool>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
@@ -988,6 +995,7 @@ impl SerializedDesktopConfig {
         identifier: a.identifier,
         deep_links: a.deep_links,
         origin: a.origin,
+        single_instance: a.single_instance,
         icons: a.icons.map(|i| {
           fn resolve_icon_value(
             v: SerializedDesktopIconValue,
@@ -1065,6 +1073,8 @@ pub struct DesktopAppConfig {
   /// `desktop.app.origin` as written; validated by the CLI (`deno_lib`'s
   /// `AppOrigin`), not here.
   pub origin: Option<String>,
+  /// `desktop.app.singleInstance`.
+  pub single_instance: Option<bool>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -3147,7 +3157,8 @@ mod tests {
           "name": "Acme",
           "identifier": "com.acme.app",
           "deepLinks": ["acme"],
-          "origin": "acme://app"
+          "origin": "acme://app",
+          "singleInstance": true
         }
       }
     }"#;
@@ -3160,6 +3171,7 @@ mod tests {
     assert_eq!(app.deep_links, Some(vec!["acme".to_string()]));
     // The origin is carried through as written; the CLI validates it.
     assert_eq!(app.origin.as_deref(), Some("acme://app"));
+    assert_eq!(app.single_instance, Some(true));
   }
 
   #[test]

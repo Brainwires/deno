@@ -254,6 +254,10 @@ pub struct DesktopFlags {
   /// for `acme://...` links. Sourced from `desktop.app.deepLinks` in
   /// `deno.json`. Each entry is a bare scheme with no `://`.
   pub deep_links: Vec<String>,
+  /// Run at most one instance of the app per user (laufey's single-instance
+  /// lock). Sourced from `desktop.app.singleInstance` in `deno.json`; the
+  /// packaged app's launch configuration carries it to the backend.
+  pub single_instance: bool,
   /// macOS codesigning identity (e.g. `Developer ID Application: Acme,
   /// Inc. (TEAMID)`, or `-` for ad-hoc). When unset the bundle is left
   /// unsigned; the system will quarantine it on download.

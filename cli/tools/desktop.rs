@@ -9,6 +9,7 @@ use deno_config::deno_json::DesktopConfig;
 use deno_core::anyhow::Context;
 use deno_core::anyhow::bail;
 use deno_core::error::AnyError;
+use deno_core::serde_json;
 use deno_core::url::Url;
 use deno_terminal::colors;
 use sha2::Digest;
@@ -165,6 +166,10 @@ fn apply_desktop_config_to_flags(
       && desktop_flags.deep_links.is_empty()
     {
       desktop_flags.deep_links = deep_links;
+    }
+
+    if let Some(single_instance) = app_config.single_instance {
+      desktop_flags.single_instance = single_instance;
     }
   }
 
@@ -605,6 +610,8 @@ async fn compile_desktop(
         &appimage_abs,
         desktop_flags.target.as_deref(),
         desktop_id.as_deref(),
+        &normalized_deep_links(&desktop_flags)?,
+        desktop_flags.single_instance,
       )?;
       appimage_abs
     } else if let Some(deb) = deb_output.as_deref() {
@@ -690,15 +697,15 @@ fn make_self_extracting(
   };
   match target_os {
     "macos" => make_self_extracting_macos(bundle_path, format, desktop_flags),
-    // Windows has no synthesized runtime app id (the packaged `<app>.exe` is
-    // launched directly, and only a configured identifier reaches it, through
-    // the runtime), so the launcher passes the configured one, which the CEF
-    // backend needs at process start.
+    // The launcher passes the configured identifier, which the CEF backend
+    // needs at process start; the extracted `<app>.exe` also finds the app id
+    // (configured or derived) in the `laufey-launch.json` next to it.
     "windows" => make_self_extracting_dir(
       bundle_path,
       format,
       true,
       desktop_flags.identifier.as_deref(),
+      desktop_flags.single_instance,
     ),
     _ => {
       // Export the same reverse-DNS app id the packaged formats use so a launch
@@ -712,6 +719,7 @@ fn make_self_extracting(
         format,
         false,
         desktop_id.as_deref(),
+        desktop_flags.single_instance,
       )
     }
   }
@@ -721,31 +729,16 @@ fn make_self_extracting(
 /// `ALPHA *( ALPHA / DIGIT / "+" / "-" / "." )`. We additionally reject the
 /// common reserved schemes (`http`, `https`, `file`, `ftp`, `ws`, `wss`) since
 /// registering those as app handlers is almost never intended and would hijack
-/// normal browsing.
+/// normal browsing. The rules live in `deno_lib` (`launch_args`) so the
+/// runtime recognizes the same schemes in its launch arguments.
 fn validate_url_scheme(scheme: &str) -> Result<(), AnyError> {
-  let reserved = ["http", "https", "file", "ftp", "ws", "wss"];
-  let bail = |reason: &str| {
-    Err(deno_core::anyhow::anyhow!(
-      "Invalid deep-link scheme {scheme:?}: {reason}."
-    ))
-  };
-  match scheme.chars().next() {
-    None => return bail("scheme is empty"),
-    Some(c) if !c.is_ascii_alphabetic() => {
-      return bail("scheme must start with an ASCII letter");
-    }
-    _ => {}
-  }
-  if !scheme
-    .chars()
-    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
-  {
-    return bail("scheme may only contain letters, digits, '+', '-', and '.'");
-  }
-  if reserved.contains(&scheme) {
-    return bail("scheme is reserved and cannot be used as a deep link");
-  }
-  Ok(())
+  deno_lib::standalone::launch_args::validate_deep_link_scheme(scheme).map_err(
+    |reason| {
+      deno_core::anyhow::anyhow!(
+        "Invalid deep-link scheme {scheme:?}: {reason}."
+      )
+    },
+  )
 }
 
 /// Register the configured deep-link URL schemes with the OS-specific app
@@ -1102,6 +1095,7 @@ fn make_self_extracting_dir(
   format: &str,
   windows: bool,
   desktop_id: Option<&str>,
+  single_instance: bool,
 ) -> Result<(), AnyError> {
   let app_name = bundle_path
     .file_name()
@@ -1128,10 +1122,14 @@ fn make_self_extracting_dir(
     // `set` inside `setlocal` scopes the variable to this launcher and the
     // app it starts. The id is `[A-Za-z0-9.-]` (validated), so it needs no
     // escaping for cmd.
-    let app_id_set = match desktop_id {
+    let mut app_id_set = match desktop_id {
       Some(id) => format!("set \"LAUFEY_APP_ID={id}\"\r\n"),
       None => String::new(),
     };
+    if single_instance {
+      app_id_set
+        .push_str(&format!("set \"{LAUFEY_SINGLE_INSTANCE_ENV}=1\"\r\n"));
+    }
     let launcher = format!(
       "@echo off\r\n\
        setlocal\r\n\
@@ -1149,7 +1147,7 @@ fn make_self_extracting_dir(
     // Export the reverse-DNS window app_id (safe unquoted: `[A-Za-z0-9.-]`) so
     // the extracted app presents the intended app_id, not the binary name.
     let app_id_export = match desktop_id {
-      Some(id) => format!("export LAUFEY_APP_ID={id}\n"),
+      Some(id) => format!("export {}\n", linux_launch_env(id, single_instance)),
       None => String::new(),
     };
     let launcher = format!(
@@ -1435,6 +1433,12 @@ async fn run_desktop_hmr(
     && let Some(scheme) = cef_scheme
   {
     cmd.env(LAUFEY_CUSTOM_SCHEMES_ENV, scheme);
+  }
+  // The single-instance lock is decided in the host's `main()`, so it is set
+  // here like the app id (it is keyed on that id). A second dev launch then
+  // forwards its arguments to this run and exits, as the packaged app would.
+  if desktop_flags.single_instance {
+    cmd.env(LAUFEY_SINGLE_INSTANCE_ENV, "1");
   }
   // Only enable the file watcher + setScriptSource pipeline when the user
   // actually asked for HMR. `deno desktop --inspect` alone used to spin up
@@ -1821,6 +1825,21 @@ async fn package_windows_app_dir(
     }
   }
 
+  // `<app>.exe` has no launcher to set the backend's launch environment, so
+  // the app id (per-app web storage, the single-instance lock's key), the CEF
+  // custom scheme and the single-instance setting ship in the launch file
+  // next to it.
+  write_laufey_launch_config(
+    &app_dir,
+    windows_app_id(desktop_flags.identifier.as_deref(), &app_name).as_deref(),
+    cef_custom_scheme(
+      crate::standalone::binary::resolve_desktop_app_origin(cli_options)?
+        .as_deref(),
+    )
+    .as_deref(),
+    desktop_flags.single_instance,
+  )?;
+
   // Drop the deep-link registration script next to the launcher.
   register_deep_links(&app_dir, desktop_flags)?;
 
@@ -1984,7 +2003,11 @@ async fn package_linux_app_dir(
   if let Some(desktop_id) = desktop_id.as_deref() {
     std::fs::write(
       app_dir.join(format!("{desktop_id}.desktop")),
-      app_dir_desktop_entry(&app_name, desktop_id),
+      app_dir_desktop_entry(
+        &app_name,
+        desktop_id,
+        desktop_flags.single_instance,
+      ),
     )?;
   } else {
     // No usable id (an invalid explicit `--identifier`, already warned about by
@@ -1996,6 +2019,22 @@ async fn package_linux_app_dir(
       "skipping the app's .desktop file: no usable app id for {app_name:?}"
     );
   }
+
+  // The launch file next to `<app>` carries the same settings for a launch
+  // that bypasses the `.desktop` entry (running `<app>` from a shell or a file
+  // manager, or the `/usr/bin/<pkg>` symlink, which laufey resolves to this
+  // directory). It is part of the app dir, so the AppImage, `.deb`, `.rpm`
+  // and self-extract payloads carry it too.
+  write_laufey_launch_config(
+    &app_dir,
+    desktop_id.as_deref(),
+    cef_custom_scheme(
+      crate::standalone::binary::resolve_desktop_app_origin(cli_options)?
+        .as_deref(),
+    )
+    .as_deref(),
+    desktop_flags.single_instance,
+  )?;
 
   // Merge any deep-link schemes into the `.desktop` entry written above.
   register_deep_links(&app_dir, desktop_flags)?;
@@ -2711,12 +2750,17 @@ fn bundle_linux_app_id(
 /// macOS bundles have them); an unquoted `My Cool App` would exec `My` with
 /// args `Cool App`. The name charset is `[A-Za-z0-9 ._-]`, so there's nothing to
 /// escape inside the quotes.
-fn app_dir_desktop_entry(app_name: &str, desktop_id: &str) -> String {
+fn app_dir_desktop_entry(
+  app_name: &str,
+  desktop_id: &str,
+  single_instance: bool,
+) -> String {
+  let env = linux_launch_env(desktop_id, single_instance);
   format!(
     "[Desktop Entry]\n\
      Type=Application\n\
      Name={app_name}\n\
-     Exec=env LAUFEY_APP_ID={desktop_id} \"{app_name}\"\n\
+     Exec=env {env} \"{app_name}\"\n\
      Icon=AppIcon\n\
      StartupWMClass={desktop_id}\n\
      Categories=Utility;\n",
@@ -3544,12 +3588,30 @@ async fn package_macos_app_bundle(
   } else {
     None
   };
+  // - LAUFEY_SINGLE_INSTANCE, when desktop.app.singleInstance is set.
   let mut launch_env = vec![(LAUFEY_APP_ID_ENV, bundle_id.as_str())];
   if let Some(scheme) = cef_scheme.as_deref() {
     launch_env.push((LAUFEY_CUSTOM_SCHEMES_ENV, scheme));
   }
+  if desktop_flags.single_instance {
+    launch_env.push((LAUFEY_SINGLE_INSTANCE_ENV, "1"));
+  }
   info_plist = macos_plist_with_launch_env(&info_plist, &launch_env);
   std::fs::write(contents_dir.join("Info.plist"), info_plist)?;
+  // The same settings as a launch file, for a launch that bypasses
+  // LaunchServices (the binary executed directly gets no LSEnvironment) and
+  // for CEF's helper apps, which read the main app's file. Written before
+  // codesigning, which seals `Contents/Resources`.
+  write_laufey_launch_config(
+    &resources_dir,
+    Some(&bundle_id),
+    cef_custom_scheme(
+      crate::standalone::binary::resolve_desktop_app_origin(cli_options)?
+        .as_deref(),
+    )
+    .as_deref(),
+    desktop_flags.single_instance,
+  )?;
 
   // Rewrite each CEF helper's CFBundleIdentifier to be a strict suffix
   // of the main bundle id. CEF's process model requires this — the
@@ -3639,10 +3701,130 @@ async fn package_macos_app_bundle(
 const LAUFEY_CUSTOM_SCHEMES_ENV: &str = "LAUFEY_CUSTOM_SCHEMES";
 
 /// Environment variable through which a laufey backend learns the app id that
-/// names its per-app web data directory (and, on Linux, the window app_id).
-/// CEF reads it at process start, so every launcher sets it; the runtime sets
-/// it for the WebView backends when a launcher did not.
+/// names its per-app web data directory (and, on Linux, the window app_id, and
+/// everywhere the single-instance lock's key). CEF reads it at process start,
+/// so every launcher sets it; a launch without one (a directly executed
+/// binary, a Windows `<app>.exe`) gets the same id as `"appId"` from
+/// [`LAUFEY_LAUNCH_CONFIG_FILE`]. The runtime does not set it: it would have
+/// to `setenv` while the host's threads run.
 const LAUFEY_APP_ID_ENV: &str = deno_lib::standalone::app_id::LAUFEY_APP_ID_ENV;
+
+/// Environment variable that turns laufey's single-instance lock on (`1`) or
+/// off (`0`) for the backend process, deciding it in the host's `main()`
+/// before any web engine or the runtime starts. Needs an app id. Mirrors
+/// `"singleInstance"` in [`LAUFEY_LAUNCH_CONFIG_FILE`].
+const LAUFEY_SINGLE_INSTANCE_ENV: &str = "LAUFEY_SINGLE_INSTANCE";
+
+/// laufey's launch configuration file, read by the host at process start
+/// before the runtime is loaded: next to the executable on Windows and Linux,
+/// in `Contents/Resources` of a macOS bundle. It stands in for the
+/// `LAUFEY_*` launch environment when nothing sets it, which is how a
+/// directly launched Windows `.exe` (no launcher), a Linux binary run without
+/// its `.desktop` entry, and every CEF helper process learn the app id, the
+/// CEF custom schemes and the single-instance setting. An environment
+/// variable set to a non-empty value still wins over the file, key by key.
+const LAUFEY_LAUNCH_CONFIG_FILE: &str = "laufey-launch.json";
+
+/// The contents of [`LAUFEY_LAUNCH_CONFIG_FILE`] for a packaged app. Every
+/// value is validated by the caller: `app_id` against laufey's rule
+/// ([`ensure_laufey_app_id`]), `custom_schemes` as an app origin scheme.
+/// `singleInstance` is always written, so the file records the packaged
+/// setting even when it is off.
+fn laufey_launch_config_json(
+  app_id: Option<&str>,
+  custom_schemes: &[&str],
+  single_instance: bool,
+) -> String {
+  let mut config = serde_json::Map::new();
+  if let Some(id) = app_id {
+    config.insert("appId".to_string(), serde_json::Value::from(id));
+  }
+  if !custom_schemes.is_empty() {
+    config.insert(
+      "customSchemes".to_string(),
+      serde_json::Value::from(custom_schemes.to_vec()),
+    );
+  }
+  config.insert(
+    "singleInstance".to_string(),
+    serde_json::Value::Bool(single_instance),
+  );
+  let mut json =
+    serde_json::to_string_pretty(&serde_json::Value::Object(config))
+      .expect("a JSON object of strings and a bool serializes");
+  json.push('\n');
+  json
+}
+
+/// Write [`LAUFEY_LAUNCH_CONFIG_FILE`] into `dir` (the executable's directory,
+/// or a macOS bundle's `Contents/Resources`). The custom scheme is the app
+/// origin's, for CEF (see [`cef_custom_scheme`]); the WebView backends ignore
+/// it, so it is written regardless of the backend.
+fn write_laufey_launch_config(
+  dir: &Path,
+  app_id: Option<&str>,
+  cef_scheme: Option<&str>,
+  single_instance: bool,
+) -> Result<(), AnyError> {
+  if let Some(id) = app_id {
+    ensure_laufey_app_id(id)?;
+  }
+  if single_instance && app_id.is_none() {
+    log::warn!(
+      "desktop.app.singleInstance is set but the app has no usable app id; \
+       the single-instance lock needs one, so the app will run unlocked (set \
+       desktop.app.identifier in deno.json)"
+    );
+  }
+  let schemes: Vec<&str> = cef_scheme.into_iter().collect();
+  std::fs::write(
+    dir.join(LAUFEY_LAUNCH_CONFIG_FILE),
+    laufey_launch_config_json(app_id, &schemes, single_instance),
+  )
+  .with_context(|| {
+    format!(
+      "failed to write {}",
+      dir.join(LAUFEY_LAUNCH_CONFIG_FILE).display()
+    )
+  })?;
+  Ok(())
+}
+
+/// The shell `NAME=value` assignments a Linux launcher (a `.desktop` `Exec`
+/// line through `env`, or an `export`) sets for the backend: the app id and,
+/// when enabled, the single-instance lock. Both values are shell- and
+/// desktop-entry-safe (`[A-Za-z0-9.-]` and `1`).
+fn linux_launch_env(desktop_id: &str, single_instance: bool) -> String {
+  if single_instance {
+    format!("{LAUFEY_APP_ID_ENV}={desktop_id} {LAUFEY_SINGLE_INSTANCE_ENV}=1")
+  } else {
+    format!("{LAUFEY_APP_ID_ENV}={desktop_id}")
+  }
+}
+
+/// The `MimeType=` value that registers `schemes` (normalized deep-link
+/// schemes) as URL handlers in a `.desktop` entry, or `None` when there are
+/// none. The `Exec` line must then take the URL with `%u`.
+fn linux_deep_link_mime_types(schemes: &[String]) -> Option<String> {
+  (!schemes.is_empty()).then(|| {
+    schemes
+      .iter()
+      .map(|s| format!("x-scheme-handler/{s};"))
+      .collect()
+  })
+}
+
+/// The app id a packaged Windows app hands the backend through
+/// [`LAUFEY_LAUNCH_CONFIG_FILE`]: the configured identifier, else the same
+/// id a dev run on Windows uses (see [`hmr_app_id`]), so web storage is per
+/// app and the single-instance lock has an id to key on.
+fn windows_app_id(identifier: Option<&str>, app_name: &str) -> Option<String> {
+  let id = match identifier {
+    Some(id) => id.to_string(),
+    None => derived_desktop_id(app_name)?,
+  };
+  deno_lib::standalone::app_id::is_laufey_app_id(&id).then_some(id)
+}
 
 /// The scheme a CEF host must be told about at launch for the app to run at
 /// `app_origin` (a normalized `desktop.app.origin`), or `None` when the origin
@@ -3949,9 +4131,13 @@ fn push_dir_contents_to_squashfs(
 /// it to the `<app>` binary name), letting an integrated AppImage resolve the
 /// configured icon on Wayland (issue #35500). The id is `[A-Za-z0-9.-]`
 /// (`validate_bundle_identifier` / `derived_desktop_id`), so it's safe unquoted.
-fn appimage_apprun(app_name: &str, desktop_id: Option<&str>) -> String {
+fn appimage_apprun(
+  app_name: &str,
+  desktop_id: Option<&str>,
+  single_instance: bool,
+) -> String {
   let export = match desktop_id {
-    Some(id) => format!("export LAUFEY_APP_ID={id}\n"),
+    Some(id) => format!("export {}\n", linux_launch_env(id, single_instance)),
     None => String::new(),
   };
   format!(
@@ -3966,16 +4152,29 @@ fn appimage_apprun(app_name: &str, desktop_id: Option<&str>) -> String {
 /// (set via `LAUFEY_APP_ID` in [`appimage_apprun`]) so an integrated AppImage's
 /// icon resolves; without an id we fall back to the `<app>` binary name laufey
 /// uses by default.
-fn appimage_desktop_entry(app_name: &str, desktop_id: Option<&str>) -> String {
+///
+/// With deep links configured, `MimeType` claims each `x-scheme-handler/…`
+/// and `Exec` takes the URL with `%u`, so an integrated AppImage receives the
+/// links it registers.
+fn appimage_desktop_entry(
+  app_name: &str,
+  desktop_id: Option<&str>,
+  deep_links: &[String],
+) -> String {
   let startup_wm_class = desktop_id.unwrap_or(app_name);
+  let (exec_arg, mime) = match linux_deep_link_mime_types(deep_links) {
+    Some(mime) => (" %u", format!("MimeType={mime}\n")),
+    None => ("", String::new()),
+  };
   format!(
     "[Desktop Entry]\n\
      Type=Application\n\
      Name={app_name}\n\
-     Exec={app_name}\n\
+     Exec={app_name}{exec_arg}\n\
      Icon={app_name}\n\
      StartupWMClass={startup_wm_class}\n\
-     Categories=Utility;\n",
+     Categories=Utility;\n\
+     {mime}",
   )
 }
 
@@ -3990,6 +4189,8 @@ fn create_linux_appimage(
   appimage_path: &Path,
   target: Option<&str>,
   desktop_id: Option<&str>,
+  deep_links: &[String],
+  single_instance: bool,
 ) -> Result<(), AnyError> {
   use std::io::Cursor;
   use std::io::Write as _;
@@ -4015,7 +4216,7 @@ fn create_linux_appimage(
   // AppRun is what the AppImage invokes on launch. Thin shell shim that
   // delegates to the existing launcher (which already sets $DIR and execs
   // the backend with the right args) after exporting the window app_id.
-  let apprun = appimage_apprun(&app_name, desktop_id);
+  let apprun = appimage_apprun(&app_name, desktop_id, single_instance);
   writer.push_file(
     Cursor::new(apprun.into_bytes()),
     "/AppRun",
@@ -4023,7 +4224,7 @@ fn create_linux_appimage(
   )?;
 
   // .desktop entry at the AppDir root.
-  let desktop_entry = appimage_desktop_entry(&app_name, desktop_id);
+  let desktop_entry = appimage_desktop_entry(&app_name, desktop_id, deep_links);
   writer.push_file(
     Cursor::new(desktop_entry.into_bytes()),
     format!("/{app_name}.desktop"),
@@ -4128,6 +4329,10 @@ struct LinuxPackageMeta {
   summary: String,
   /// Reverse-DNS identifier for the `.desktop` `StartupWMClass`.
   identifier: String,
+  /// Normalized deep-link schemes the installed `.desktop` entry claims.
+  deep_links: Vec<String>,
+  /// Whether the installed `.desktop` entry turns the single-instance lock on.
+  single_instance: bool,
 }
 
 /// Sanitize an app name into a Debian-style package name: lowercase, only
@@ -4202,6 +4407,8 @@ fn linux_package_meta(
     package,
     app_name,
     identifier,
+    deep_links: normalized_deep_links(desktop_flags)?,
+    single_instance: desktop_flags.single_instance,
   })
 }
 
@@ -4285,19 +4492,41 @@ fn rpm_arch_for_target(target: Option<&str>) -> Result<&'static str, AnyError> {
 /// the window app_id to the binary name (reached through the `/usr/bin/<pkg>`
 /// symlink), which wouldn't match and the Wayland icon would fall back to a
 /// generic placeholder (issue #35500).
+///
+/// With deep links configured, `MimeType` claims each `x-scheme-handler/…`
+/// and `Exec` takes the URL with `%u` (the installed entry is the one the
+/// desktop's URL handler database sees; the app-dir copy under `/usr/lib`
+/// is not).
 fn system_desktop_entry(meta: &LinuxPackageMeta) -> String {
+  let (exec_arg, mime) = match linux_deep_link_mime_types(&meta.deep_links) {
+    Some(mime) => (" %u", format!("MimeType={mime}\n")),
+    None => ("", String::new()),
+  };
   format!(
     "[Desktop Entry]\n\
      Type=Application\n\
      Name={app_name}\n\
-     Exec=env LAUFEY_APP_ID={identifier} {package}\n\
+     Exec=env {env} {package}{exec_arg}\n\
      Icon={package}\n\
      StartupWMClass={identifier}\n\
-     Categories=Utility;\n",
+     Categories=Utility;\n\
+     {mime}",
     app_name = meta.app_name,
     package = meta.package,
     identifier = meta.identifier,
+    env = linux_launch_env(&meta.identifier, meta.single_instance),
   )
+}
+
+/// `desktop.app.deepLinks`, normalized as the runtime and the app-dir
+/// `.desktop` entry see them.
+fn normalized_deep_links(
+  desktop_flags: &DesktopFlags,
+) -> Result<Vec<String>, AnyError> {
+  deno_lib::standalone::launch_args::normalize_deep_link_schemes(
+    &desktop_flags.deep_links,
+  )
+  .map_err(|e| deno_core::anyhow::anyhow!("{e}"))
 }
 
 /// Wrap a Linux app directory in a Debian `.deb` package.
@@ -6523,25 +6752,52 @@ def456  other.zip
   fn appimage_apprun_exports_app_id() {
     // With an id, AppRun exports it before exec so the window app_id matches
     // StartupWMClass; without one it falls back to the default (no export).
-    let with = appimage_apprun("MyApp", Some("com.deno.desktop.myapp"));
+    let with = appimage_apprun("MyApp", Some("com.deno.desktop.myapp"), false);
     assert!(
       with.contains("export LAUFEY_APP_ID=com.deno.desktop.myapp\n"),
       "AppRun should export the app id:\n{with}"
     );
     assert!(with.contains("exec \"$DIR/MyApp\" \"$@\"\n"));
-    let without = appimage_apprun("MyApp", None);
+    let without = appimage_apprun("MyApp", None, false);
     assert!(!without.contains("LAUFEY_APP_ID"));
     assert!(without.contains("exec \"$DIR/MyApp\" \"$@\"\n"));
+    // Single instance rides along with the app id it is keyed on.
+    let locked = appimage_apprun("MyApp", Some("com.deno.desktop.myapp"), true);
+    assert!(
+      locked.contains(
+        "export LAUFEY_APP_ID=com.deno.desktop.myapp LAUFEY_SINGLE_INSTANCE=1\n"
+      ),
+      "{locked}"
+    );
+    assert!(!with.contains("LAUFEY_SINGLE_INSTANCE"));
   }
 
   #[test]
   fn appimage_desktop_entry_sets_startup_wm_class() {
     // StartupWMClass mirrors the exported app id so an integrated AppImage's
     // icon resolves; without an id it falls back to the binary name.
-    let with = appimage_desktop_entry("MyApp", Some("com.deno.desktop.myapp"));
+    let with =
+      appimage_desktop_entry("MyApp", Some("com.deno.desktop.myapp"), &[]);
     assert!(with.contains("StartupWMClass=com.deno.desktop.myapp\n"));
-    let without = appimage_desktop_entry("MyApp", None);
+    assert!(with.contains("Exec=MyApp\n"), "{with}");
+    assert!(!with.contains("MimeType"), "{with}");
+    let without = appimage_desktop_entry("MyApp", None, &[]);
     assert!(without.contains("StartupWMClass=MyApp\n"));
+  }
+
+  #[test]
+  fn appimage_desktop_entry_registers_deep_links() {
+    let entry = appimage_desktop_entry(
+      "MyApp",
+      Some("com.deno.desktop.myapp"),
+      &["acme".to_string(), "t3code".to_string()],
+    );
+    assert!(entry.contains("Exec=MyApp %u\n"), "{entry}");
+    assert!(
+      entry
+        .contains("MimeType=x-scheme-handler/acme;x-scheme-handler/t3code;\n"),
+      "{entry}"
+    );
   }
 
   #[test]
@@ -6553,6 +6809,7 @@ def456  other.zip
       "zstd",
       false,
       Some("com.deno.desktop.myapp"),
+      false,
     )
     .unwrap();
     // The generated launcher is the `<app>` script in the bundle dir.
@@ -6576,6 +6833,8 @@ def456  other.zip
       maintainer: "MyApp <noreply@deno.com>".to_string(),
       summary: "MyApp desktop application".to_string(),
       identifier: "com.deno.desktop.myapp".to_string(),
+      deep_links: vec![],
+      single_instance: false,
     };
     let entry = system_desktop_entry(&meta);
     // Exec launches through `env` so the backend's app_id matches
@@ -6585,11 +6844,32 @@ def456  other.zip
       "unexpected Exec line:\n{entry}"
     );
     assert!(entry.contains("StartupWMClass=com.deno.desktop.myapp\n"));
+    assert!(!entry.contains("MimeType"), "{entry}");
+
+    // Deep links: the installed entry claims the schemes and takes the URL;
+    // single instance rides on the same `env`.
+    let meta = LinuxPackageMeta {
+      deep_links: vec!["acme".to_string()],
+      single_instance: true,
+      ..meta
+    };
+    let entry = system_desktop_entry(&meta);
+    assert!(
+      entry.contains(
+        "Exec=env LAUFEY_APP_ID=com.deno.desktop.myapp \
+         LAUFEY_SINGLE_INSTANCE=1 myapp %u\n"
+      ),
+      "unexpected Exec line:\n{entry}"
+    );
+    assert!(
+      entry.contains("MimeType=x-scheme-handler/acme;\n"),
+      "{entry}"
+    );
   }
 
   #[test]
   fn app_dir_desktop_entry_sets_app_id_via_exec() {
-    let entry = app_dir_desktop_entry("MyApp", "com.deno.desktop.myapp");
+    let entry = app_dir_desktop_entry("MyApp", "com.deno.desktop.myapp", false);
     // Exec launches through `env` so the window's app_id matches
     // StartupWMClass (the reverse-DNS id), letting the compositor resolve
     // the configured icon.
@@ -6599,6 +6879,14 @@ def456  other.zip
       "unexpected Exec line:\n{entry}"
     );
     assert!(entry.contains("StartupWMClass=com.deno.desktop.myapp\n"));
+    let entry = app_dir_desktop_entry("MyApp", "com.deno.desktop.myapp", true);
+    assert!(
+      entry.contains(
+        "Exec=env LAUFEY_APP_ID=com.deno.desktop.myapp \
+         LAUFEY_SINGLE_INSTANCE=1 \"MyApp\"\n"
+      ),
+      "unexpected Exec line:\n{entry}"
+    );
   }
 
   #[test]
@@ -6606,8 +6894,11 @@ def456  other.zip
     // `validate_launcher_name` permits spaces (macOS bundles have them), so
     // the binary name must be quoted or `env` would exec `My` with args
     // `Cool App` instead of the `My Cool App` launcher.
-    let entry =
-      app_dir_desktop_entry("My Cool App", "com.deno.desktop.my-cool-app");
+    let entry = app_dir_desktop_entry(
+      "My Cool App",
+      "com.deno.desktop.my-cool-app",
+      false,
+    );
     assert!(
       entry.contains(
         "Exec=env LAUFEY_APP_ID=com.deno.desktop.my-cool-app \"My Cool App\"\n"
@@ -7918,6 +8209,7 @@ def456  other.zip
       all_targets: false,
       identifier: None,
       deep_links: Vec::new(),
+      single_instance: false,
       codesign_identity: None,
       inspect_renderer: None,
       compress: None,
@@ -7939,7 +8231,8 @@ def456  other.zip
     let app_dir = fake_linux_app_dir(tmp.path(), "MyApp");
     let appimage_path = tmp.path().join("MyApp.AppImage");
     let target = Some("x86_64-unknown-linux-gnu");
-    create_linux_appimage(&app_dir, &appimage_path, target, None).unwrap();
+    create_linux_appimage(&app_dir, &appimage_path, target, None, &[], false)
+      .unwrap();
 
     let runtime_offset =
       appimage_runtime_for_target(target).unwrap().len() as u64;
@@ -8235,13 +8528,119 @@ def456  other.zip
   }
 
   #[test]
+  fn laufey_launch_config_content() {
+    // Every key, in laufey's `laufey-launch.json` schema.
+    let json =
+      laufey_launch_config_json(Some("com.acme.notes"), &["acme"], true);
+    assert!(json.ends_with('\n'));
+    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(
+      value,
+      serde_json::json!({
+        "appId": "com.acme.notes",
+        "customSchemes": ["acme"],
+        "singleInstance": true,
+      })
+    );
+    // Absent values are omitted; singleInstance is always recorded.
+    let value: serde_json::Value =
+      serde_json::from_str(&laufey_launch_config_json(None, &[], false))
+        .unwrap();
+    assert_eq!(value, serde_json::json!({ "singleInstance": false }));
+
+    let tmp = tempfile::tempdir().unwrap();
+    write_laufey_launch_config(
+      tmp.path(),
+      Some("com.acme.notes"),
+      Some("acme"),
+      true,
+    )
+    .unwrap();
+    let written: serde_json::Value = serde_json::from_str(
+      &std::fs::read_to_string(tmp.path().join(LAUFEY_LAUNCH_CONFIG_FILE))
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(written["appId"], "com.acme.notes");
+    assert_eq!(written["customSchemes"], serde_json::json!(["acme"]));
+    assert_eq!(written["singleInstance"], true);
+    // An id laufey would ignore fails packaging instead.
+    assert!(
+      write_laufey_launch_config(tmp.path(), Some("a/b"), None, false).is_err()
+    );
+    // Single instance without an id still writes the file (laufey warns and
+    // runs unlocked).
+    write_laufey_launch_config(tmp.path(), None, None, true).unwrap();
+  }
+
+  #[test]
+  fn windows_app_id_is_configured_or_derived() {
+    assert_eq!(
+      windows_app_id(Some("com.acme.notes"), "Notes").as_deref(),
+      Some("com.acme.notes")
+    );
+    assert_eq!(windows_app_id(None, "My App"), derived_desktop_id("My App"));
+    assert_eq!(windows_app_id(None, "___"), None);
+  }
+
+  #[test]
+  fn linux_launch_env_adds_single_instance() {
+    assert_eq!(linux_launch_env("com.a.b", false), "LAUFEY_APP_ID=com.a.b");
+    assert_eq!(
+      linux_launch_env("com.a.b", true),
+      "LAUFEY_APP_ID=com.a.b LAUFEY_SINGLE_INSTANCE=1"
+    );
+    assert_eq!(linux_deep_link_mime_types(&[]), None);
+  }
+
+  #[test]
+  fn self_extract_launchers_turn_single_instance_on() {
+    let tmp = tempfile::tempdir().unwrap();
+    let bundle = fake_linux_app_dir(tmp.path(), "MyApp");
+    make_self_extracting_dir(
+      &bundle,
+      "zstd",
+      false,
+      Some("com.deno.desktop.myapp"),
+      true,
+    )
+    .unwrap();
+    let script = std::fs::read_to_string(bundle.join("MyApp")).unwrap();
+    assert!(
+      script.contains(
+        "export LAUFEY_APP_ID=com.deno.desktop.myapp LAUFEY_SINGLE_INSTANCE=1\n"
+      ),
+      "{script}"
+    );
+
+    let bundle = tmp.path().join("WinApp");
+    std::fs::create_dir_all(&bundle).unwrap();
+    std::fs::write(bundle.join("WinApp.exe"), b"exe").unwrap();
+    make_self_extracting_dir(&bundle, "zstd", true, Some("com.acme.w"), true)
+      .unwrap();
+    let script = std::fs::read_to_string(bundle.join("WinApp.bat")).unwrap();
+    assert!(
+      script.contains(
+        "set \"LAUFEY_APP_ID=com.acme.w\"\r\nset \"LAUFEY_SINGLE_INSTANCE=1\"\r\n"
+      ),
+      "{script}"
+    );
+  }
+
+  #[test]
   fn windows_self_extract_launcher_sets_app_id() {
     let tmp = tempfile::tempdir().unwrap();
     let bundle = tmp.path().join("MyApp");
     std::fs::create_dir_all(&bundle).unwrap();
     std::fs::write(bundle.join("MyApp.exe"), b"exe").unwrap();
-    make_self_extracting_dir(&bundle, "zstd", true, Some("com.acme.myapp"))
-      .unwrap();
+    make_self_extracting_dir(
+      &bundle,
+      "zstd",
+      true,
+      Some("com.acme.myapp"),
+      false,
+    )
+    .unwrap();
     let script = std::fs::read_to_string(bundle.join("MyApp.bat")).unwrap();
     assert!(
       script.contains("setlocal\r\nset \"LAUFEY_APP_ID=com.acme.myapp\"\r\n"),
@@ -8255,7 +8654,7 @@ def456  other.zip
     let bundle = tmp.path().join("Other");
     std::fs::create_dir_all(&bundle).unwrap();
     std::fs::write(bundle.join("Other.exe"), b"exe").unwrap();
-    make_self_extracting_dir(&bundle, "zstd", true, None).unwrap();
+    make_self_extracting_dir(&bundle, "zstd", true, None, false).unwrap();
     let script = std::fs::read_to_string(bundle.join("Other.bat")).unwrap();
     assert!(!script.contains("LAUFEY_APP_ID"), "{script}");
   }
