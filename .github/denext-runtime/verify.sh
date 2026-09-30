@@ -44,14 +44,14 @@ check_macos() {
     own_id=$(otool -D "$alias" | tail -n +2 | head -1)
     [ -n "$own_id" ] && echo "   id: $own_id"
     # Skip the first line (the file name) and, for a dylib, its own id.
-    otool -L "$alias" | tail -n +2 | awk '{print $1}' | while read -r dep; do
+    otool -L "$alias" | tail -n +2 | sed -E 's/^[[:space:]]+//; s/ \(compatibility version.*$//' | while IFS= read -r dep; do
       [ -n "$own_id" ] && [ "$dep" = "$own_id" ] && continue
       resolved=""
       case "$dep" in
         /System/* | /usr/lib/*) resolved=system ;;
         @loader_path/* | @executable_path/*)
-          # The executable of a bundle lives next to its dylibs' loader here;
-          # resolve both relative to the file's own directory.
+          # Every Mach-O here is either the executable itself or loaded
+          # next to it; resolve both relative to the file's own directory.
           p="$dir/${dep#*/}"
           [ -e "$p" ] && resolved="$p"
           ;;

@@ -549,11 +549,11 @@ jobs:
           WORK_DIR: ${{ runner.temp }}/smoke-cef
         run: bash .github/denext-runtime/smoke.sh
 
-      # Launching is best effort: hosted runners may have no usable display
-      # (Linux runs under Xvfb). The outcome is reported in the job summary.
+      # Launch = the real load check: the host loads libdenort (laufey's
+      # init_api rejects an ABI mismatch), the page loads from the app origin
+      # and a POST reaches Deno.serve. Linux runs under Xvfb.
       - name: Smoke (launch, webview)
         id: launch_webview
-        continue-on-error: true
         env:
           BACKEND: webview
           WORK_DIR: ${{ runner.temp }}/smoke-webview
@@ -561,7 +561,6 @@ jobs:
 
       - name: Smoke (launch, cef)
         id: launch_cef
-        continue-on-error: true
         env:
           BACKEND: cef
           WORK_DIR: ${{ runner.temp }}/smoke-cef

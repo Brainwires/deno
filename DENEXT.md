@@ -133,8 +133,9 @@ reuse a previous run's libdenort or laufey build), or push a
    `make cef` (the CEF minimal distribution is downloaded by the Makefile);
 3. assembles the archives, checks architectures and dynamic dependencies
    (`file` / `lipo` / `otool -L` / `ldd`), packages a small `Deno.serve` app
-   with the stock `deno desktop` 2.9.7 for both backends, and tries to launch
-   it (Linux under Xvfb) so the page POSTs back to the server;
+   with the stock `deno desktop` 2.9.7 for both backends, and launches it
+   (Linux under Xvfb): the page, served from `t3code://app`, POSTs back to
+   `Deno.serve` and the app exits. A launch failure fails the job;
 4. attests the archives and, on a tag, publishes the release.
 
 Locally, the equivalent is:
