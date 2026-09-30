@@ -1010,6 +1010,121 @@ declare namespace Deno {
      * listener was added. Taken on first read, like `launchUrls`. */
     export const launchFiles: readonly string[];
 
+    /** Who handles a deep-link scheme, from this app's point of view:
+     *
+     * - `"self"`: this app (this executable or bundle).
+     * - `"other"`: another app. A link with the scheme, including an OAuth
+     *   callback, goes to that app, not this one.
+     * - `"none"`: no app; opening a link with the scheme fails.
+     */
+    export type SchemeOwner = "self" | "other" | "none";
+
+    /** The result of {@linkcode Deno.desktop.getSchemeOwner}. */
+    export interface SchemeOwnerInfo {
+      owner: SchemeOwner;
+      /** What identifies the current handler, for display only: an
+       * executable path (Windows), a bundle id (macOS) or a `.desktop` file
+       * id (Linux). It comes from the OS's handler database, which any
+       * program of the same user can write: don't act on it. */
+      handler?: string;
+    }
+
+    /** The result of {@linkcode Deno.desktop.registerScheme}. */
+    export interface RegisterSchemeResult {
+      /** Whether this app handles the scheme after the call. */
+      registered: boolean;
+      /** The handler after the call. */
+      owner: SchemeOwner;
+      /** As in {@linkcode SchemeOwnerInfo.handler}. */
+      handler?: string;
+      /** Why the app does not handle the scheme, when it doesn't (another
+       * app handles it, a Windows "UserChoice" overrides the registration,
+       * `xdg-mime` is not installed, the app is not running from a bundle,
+       * …). */
+      reason?: string;
+    }
+
+    /** Options of {@linkcode Deno.desktop.registerScheme}. */
+    export interface RegisterSchemeOptions {
+      /** Take the scheme over from another app. Only `true` forces.
+       *
+       * **Only on an explicit user action** (e.g. "Make this app the handler
+       * for `acme:` links" in the app's settings): the other app loses the
+       * scheme. On macOS this changes the system's default handler for the
+       * scheme, which the OS may confirm with the user. A Windows
+       * "UserChoice" (the user picked a handler in Settings) cannot be
+       * overridden by any app; the result then reports `registered: false`.
+       */
+      force?: boolean;
+    }
+
+    /** Who handles one of the app's deep-link schemes (declared in
+     * `desktop.app.deepLinks`), so the app can tell whether a link with the
+     * scheme will reach it. Rejects with a `TypeError` for any other scheme.
+     *
+     * Check it before starting a sign-in whose callback uses the scheme: if
+     * another app handles it (`"other"`), the OS would hand that app the
+     * callback (RFC 8252 §8.6), so use a loopback redirect instead, or ask
+     * the user whether to make this app the handler
+     * ({@linkcode Deno.desktop.registerScheme} with `force`).
+     *
+     * The answer is a snapshot. Any program running as the same user can
+     * register itself for the scheme at any time and the OS offers no
+     * protection against that, so `"self"` is not proof that a callback
+     * reaches this app: keep PKCE (and `state`) on every flow.
+     *
+     * - Windows: the `UserChoice` for the scheme if the user made one, else
+     *   `HKCU\Software\Classes\<scheme>`, else
+     *   `HKLM\Software\Classes\<scheme>`; this app's is the one whose
+     *   command runs this executable.
+     * - macOS: the LaunchServices default handler, by bundle id.
+     * - Linux: the `x-scheme-handler/<scheme>` default of the freedesktop
+     *   `mimeapps.list` files, then `mimeinfo.cache`; this app's is its own
+     *   `<app id>.desktop` entry, or one that runs this executable.
+     */
+    export function getSchemeOwner(scheme: string): Promise<SchemeOwnerInfo>;
+
+    /** Register this app as the handler of one of its deep-link schemes
+     * (declared in `desktop.app.deepLinks`); rejects with a `TypeError` for
+     * any other scheme.
+     *
+     * The runtime already does this at startup, in the background, for every
+     * declared scheme that no app handles, and refreshes this app's own
+     * registration when it is out of date (e.g. the app moved). It never
+     * takes a scheme another app handles. Call this to retry, or, with
+     * `force`, to take the scheme over from another app on an explicit user
+     * action.
+     *
+     * Without `force` the app is registered only when no app handles the
+     * scheme or this app already does; otherwise the result is
+     * `registered: false` with the other app as the owner. The result always
+     * reports the handler the OS sees after the call.
+     *
+     * - Windows: writes `HKCU\Software\Classes\<scheme>` (`URL Protocol`,
+     *   `DefaultIcon`, `shell\open\command` = `"<this exe>" "%1"`). A
+     *   per-user registration shadows a machine-wide one.
+     * - macOS: registers the app bundle with LaunchServices; with `force`,
+     *   also makes it the scheme's default handler. Requires running from
+     *   the app bundle.
+     * - Linux: installs `~/.local/share/applications/<app id>.desktop`
+     *   (hidden from menus) and runs `xdg-mime default` for the scheme;
+     *   `registered` is `false` with a `reason` when `xdg-mime` is missing.
+     *   Needs the app id (`desktop.app.identifier`, or the one the packager
+     *   derived into the launch configuration), which names the entry.
+     *
+     * Not available in a development run (`deno desktop --hmr`, a dev
+     * server): the result is `registered: false`. The executable path
+     * registered is always the running app's own, never from input.
+     *
+     * Registering needs no privileges beyond the user's own: every write is
+     * per-user (Windows `HKCU`, the user's LaunchServices database, the
+     * user's XDG directories).
+     */
+    export function registerScheme(
+      scheme: string,
+      options?: RegisterSchemeOptions,
+    ): Promise<RegisterSchemeResult>;
+
     export let onopenurl:
       | ((ev: CustomEvent<OpenUrlDetail>) => any)
       | null;

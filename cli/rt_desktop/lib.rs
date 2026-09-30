@@ -17,6 +17,7 @@
 
 mod app_origin;
 mod scheme_bridge;
+mod scheme_registration;
 
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -1499,6 +1500,7 @@ laufey::main!(|| {
         ws_relay_listener,
         LaunchConfig {
           deep_links,
+          identifier: app_config.identifier,
           targets: launch_targets,
         },
         data,
@@ -1572,6 +1574,8 @@ fn path_exists(path: &std::path::Path) -> bool {
 struct LaunchConfig {
   /// The app's normalized deep-link schemes.
   deep_links: Vec<String>,
+  /// `desktop.app.identifier`, validated.
+  identifier: Option<String>,
   /// The deep links and files in this process's own arguments.
   targets: deno_lib::standalone::launch_args::LaunchTargets,
 }
@@ -2065,6 +2069,16 @@ async fn run_desktop(
   // upgrade `Origin` headers against the same origin from the navigate task.
   let app_origin_for_register = app_origin.clone();
   let app_origin_for_relay = app_origin.clone();
+  // The OS registration of the deep-link schemes (Deno.desktop
+  // getSchemeOwner / registerScheme, and the startup pass below). A dev run
+  // executes a development host, not the packaged app, so it writes nothing.
+  let scheme_registrar = Arc::new(scheme_registration::SchemeRegistrar::new(
+    launch.deep_links.clone(),
+    launch.identifier.clone(),
+    app_name.clone(),
+    env::var_os("DENO_DESKTOP_HMR").is_some()
+      || env::var_os("DENO_DESKTOP_DEV_URL").is_some(),
+  ));
   let launch_deep_links = Arc::new(launch.deep_links);
   let launch_urls = launch.targets.urls;
   let launch_files: Vec<String> = launch
@@ -2123,6 +2137,14 @@ async fn run_desktop(
       );
       register_launch_handlers(&launch_inbox, launch_deep_links);
       state.put(launch_inbox);
+
+      // Register the declared schemes nobody handles (and refresh this
+      // app's own stale registrations) on a background thread; app start
+      // doesn't wait for it, and another app's scheme is never touched.
+      scheme_registrar.clone().register_declared_in_background();
+      state.put::<Arc<dyn deno_runtime::ops::desktop::DesktopSchemeHandlers>>(
+        scheme_registrar.clone(),
+      );
 
       // Create the initial window (hidden) and wire up event handlers. It is
       // revealed from its `on_page_load` handler once content has painted, so
