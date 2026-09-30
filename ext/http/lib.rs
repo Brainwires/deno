@@ -1907,6 +1907,15 @@ fn parse_serve_address(input: &str) -> (u8, String, u32, bool) {
       }
     }
     Some(("tunnel", _)) => (4, String::new(), 0, duplicate),
+    Some(("memory", name)) => {
+      // In-process byte channel. `name` identifies the listener; the peer
+      // (e.g. the desktop runtime) connects to it by the same name.
+      if name.is_empty() {
+        log::error!("DENO_SERVE_ADDRESS: empty memory name");
+        return (0, String::new(), 0, duplicate);
+      }
+      (5, name.to_string(), 0, duplicate)
+    }
     Some((_, _)) | None => {
       log::error!("DENO_SERVE_ADDRESS: invalid address format: {}", input);
       (0, String::new(), 0, false)
@@ -2006,9 +2015,20 @@ mod tests {
       (3, "-1".to_string(), 5678, true)
     );
 
+    // In-process memory channel (the desktop runtime's transport).
+    assert_eq!(
+      parse_serve_address("memory:deno-desktop"),
+      (5, "deno-desktop".to_string(), 0, false)
+    );
+    assert_eq!(
+      parse_serve_address("duplicate,memory:deno-desktop"),
+      (5, "deno-desktop".to_string(), 0, true)
+    );
+
     assert_eq!(parse_serve_address("tcp:"), (0, String::new(), 0, false));
     assert_eq!(parse_serve_address("unix:"), (0, String::new(), 0, false));
     assert_eq!(parse_serve_address("vsock:"), (0, String::new(), 0, false));
+    assert_eq!(parse_serve_address("memory:"), (0, String::new(), 0, false));
     assert_eq!(parse_serve_address("foo:"), (0, String::new(), 0, false));
     assert_eq!(parse_serve_address("bar"), (0, String::new(), 0, false));
   }
