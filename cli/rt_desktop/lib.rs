@@ -52,7 +52,7 @@ use denort::run::RunOptions;
 /// makes the failure mode obvious instead of "the desktop app silently won't
 /// launch".
 const _: () = assert!(
-  laufey::LAUFEY_API_VERSION == 34,
+  laufey::LAUFEY_API_VERSION == 36,
   "LAUFEY_API_VERSION mismatch: update this assert and the prebuilt backend release pin in cli/tools/desktop.rs when laufey bumps its API version",
 );
 
@@ -1264,6 +1264,22 @@ laufey::main!(|| {
     return;
   }
 
+  // The deep links and files the app was launched with are in this process's
+  // own arguments (the backend's argv: laufey does not interpret them), and a
+  // relative path in them is relative to the directory the process started
+  // in, captured here before the self-extract `chdir` below moves it. They
+  // are classified once the app's deep-link schemes are known.
+  let launch_argv: Vec<String> = args
+    .iter()
+    .skip(1)
+    .filter_map(|arg| arg.to_str().map(str::to_string))
+    .collect();
+  #[allow(
+    clippy::disallowed_methods,
+    reason = "the launch directory, before the runtime (and its sys) exists"
+  )]
+  let launch_cwd = env::current_dir().ok();
+
   // Set up panic hook for desktop error reporting.  The error reporting
   // URL is only known after binary metadata is parsed (in run_desktop),
   // so the hook reads from a global that gets set later.
@@ -1368,6 +1384,7 @@ laufey::main!(|| {
   let app_config = match app_origin::resolve_app_config(
     data.metadata.app_origin.as_deref(),
     data.metadata.app_identifier.as_deref(),
+    data.metadata.app_deep_links.as_deref(),
     &data.root_path,
     &data.metadata.entrypoint_key,
     |path| {
@@ -1377,10 +1394,13 @@ laufey::main!(|| {
   ) {
     Ok(config) => {
       log::debug!(
-        "[desktop] app origin {} (from {:?}), identifier {:?}",
+        "[desktop] app origin {} (from {:?}), identifier {:?}, deep links \
+         {:?}, singleInstance {:?}",
         config.origin,
         config.origin_source,
-        config.identifier
+        config.identifier,
+        config.deep_links,
+        config.single_instance,
       );
       config
     }
@@ -1391,33 +1411,38 @@ laufey::main!(|| {
     }
   };
   let app_origin = app_config.origin;
-  // The app identifier the webview backend keys its per-app web data
-  // directory on (`LAUFEY_APP_ID`). A launcher normally sets it: the macOS
-  // bundle's LSEnvironment, the Linux `.desktop` Exec line / AppRun /
-  // self-extract script, `deno desktop --hmr`. It is set here when none did —
-  // a binary executed directly, or a Windows `<app>.exe`, which has no
-  // launcher — so a binary built by a CLI that never sets it (or that only
-  // embeds `.deno-desktop/app.json`) still gets per-app storage. The WebView
-  // backends (WKWebView, WebView2, WebKitGTK) resolve the directory when the
-  // first window is created, which is after this. CEF resolves it at process
-  // start, before this library is loaded, so for CEF this is too late: it
-  // keeps a throwaway profile unless a launcher set the variable.
-  let set_laufey_app_id = match (
-    &app_config.identifier,
-    std::env::var_os(LAUFEY_APP_ID_ENV).filter(|v| !v.is_empty()),
-  ) {
-    (Some(id), None) => Some(id.clone()),
-    (Some(id), Some(launch_id)) => {
-      if launch_id != id.as_str() {
-        log::debug!(
-          "[desktop] {LAUFEY_APP_ID_ENV} {launch_id:?} from the launcher \
-           differs from the app identifier {id:?}; keeping the launcher's"
-        );
-      }
-      None
-    }
-    (None, _) => None,
-  };
+  let deep_links = app_config.deep_links;
+  // `LAUFEY_APP_ID` (the per-app web data directory, and the key of the
+  // single-instance lock) is the backend's launch configuration: the host
+  // reads it, or "appId" from `laufey-launch.json` next to the executable,
+  // in `main()` and when the first window is created. Whatever packages the
+  // app sets it (the macOS bundle's LSEnvironment, the Linux launchers, `deno
+  // desktop --hmr`, and the launch file every package carries). The runtime
+  // no longer sets it itself: see the environment note below.
+  if app_config.identifier.is_some()
+    && std::env::var_os(LAUFEY_APP_ID_ENV).is_none_or(|v| v.is_empty())
+  {
+    log::debug!(
+      "[desktop] {LAUFEY_APP_ID_ENV} is not set in the environment; the \
+       backend takes the app id from laufey-launch.json if the package \
+       carries one"
+    );
+  }
+
+  // Deep links and files in the launch arguments: a URL with one of the
+  // app's registered schemes, or an existing path. Anything else (flags,
+  // the host's own `--runtime <path>`) is ignored.
+  let launch_targets = deno_lib::standalone::launch_args::parse_launch_args(
+    &launch_argv,
+    launch_cwd.as_deref(),
+    &deep_links,
+    path_exists,
+  );
+  log::debug!(
+    "[desktop] launch urls {:?}, files {:?}",
+    launch_targets.urls,
+    launch_targets.files
+  );
 
   // Serve over an in-process memory channel — there is no TCP loopback for
   // plain HTTP at all. No port allocation, no localhost exposure, no kernel
@@ -1427,19 +1452,22 @@ laufey::main!(|| {
   //
   // The one exception is WebSocket: webviews route `ws://` through their own
   // network stack, never through a scheme handler, so a narrow WebSocket-only
-  // TCP loopback relay is bound here (see `scheme_bridge`). It is bound NOW —
-  // as a blocking std listener, converted to tokio inside the runtime — so its
+  // TCP loopback relay is bound here (see `scheme_bridge`). It is bound NOW,
+  // as a blocking std listener converted to tokio inside the runtime, so its
   // address can be published to user code via DENO_DESKTOP_WS_ORIGIN before
-  // any thread exists.
+  // the app's code runs.
   //
-  // Publish DENO_SERVE_ADDRESS, DENO_DESKTOP_APP_ORIGIN and
-  // DENO_DESKTOP_WS_ORIGIN (and LAUFEY_APP_ID, see above) BEFORE the tokio
-  // runtime is built. Once the runtime spins up its mio IO thread (and,
-  // optionally, the inspector server thread), `setenv` is no longer
-  // thread-safe on glibc — Rust 1.81+ marks it unsafe for that reason. We're still single-threaded up to here: the
-  // worker-fork path has already returned, and the init calls above
-  // (init_logging, mark_standalone, rustls install_default, set_js_namespace,
-  // the standalone-section read and the VFS extraction) don't spawn threads.
+  // DENO_SERVE_ADDRESS, DENO_DESKTOP_APP_ORIGIN and DENO_DESKTOP_WS_ORIGIN
+  // reach the app through the runtime's environment overlay
+  // (`deno_os::set_env_overlay_var`), NOT `setenv`. This code runs on the
+  // laufey host's runtime thread: by now the host's UI thread is running its
+  // event loop (AppKit on macOS, GTK on Linux, a Win32 message loop on
+  // Windows; `RuntimeLoader::Start` starts this thread and returns to it),
+  // with the web engine's and GLib's worker threads, and the single-instance
+  // listener thread when the lock is on. Any of them may call `getenv`, and
+  // `setenv` racing `getenv` is undefined behavior on glibc (and not
+  // documented to be safe on macOS). The overlay is what `Deno.env`,
+  // `process.env`, `Deno.serve`'s address override and child processes see.
   let ws_relay_listener = match scheme_bridge::bind_ws_loopback_listener() {
     Ok(l) => Some(l),
     Err(e) => {
@@ -1450,40 +1478,32 @@ laufey::main!(|| {
       None
     }
   };
-  // SAFETY: see the block comment above — single-threaded at this point.
-  unsafe {
-    std::env::set_var(
-      "DENO_SERVE_ADDRESS",
-      format!("memory:{}", scheme_bridge::DESKTOP_SERVE_NAME),
-    );
-    std::env::set_var(
-      scheme_bridge::APP_ORIGIN_ENV,
-      app_origin.as_origin_string(),
-    );
-    if let Some(l) = &ws_relay_listener
-      && let Ok(addr) = l.local_addr()
-    {
-      std::env::set_var(
-        scheme_bridge::WS_ORIGIN_ENV,
-        scheme_bridge::ws_relay_origin(addr),
-      );
-    }
-    if let Some(id) = &set_laufey_app_id {
-      std::env::set_var(LAUFEY_APP_ID_ENV, id);
-    }
+  for (key, value) in desktop_env_overlay(
+    &app_origin,
+    ws_relay_listener.as_ref().and_then(|l| l.local_addr().ok()),
+  ) {
+    deno_runtime::deno_os::set_env_overlay_var(key, value);
   }
 
-  // Everything above must stay on this (still effectively single-threaded)
-  // loader thread — see the setenv comment. The runtime itself moves to a
-  // dedicated thread with a real stack; the loader thread just parks in
-  // `join` (inside `run_on_runtime_thread`) until the app exits.
+  // The runtime itself moves to a dedicated thread with a real stack; the
+  // loader thread just parks in `join` (inside `run_on_runtime_thread`) until
+  // the app exits.
   run_on_runtime_thread(move || {
     let rt = deno_runtime::tokio_util::create_basic_runtime();
 
     rt.block_on(async {
       log::debug!("[desktop] run_desktop starting");
-      match run_desktop(update_rolled_back, app_origin, ws_relay_listener, data)
-        .await
+      match run_desktop(
+        update_rolled_back,
+        app_origin,
+        ws_relay_listener,
+        LaunchConfig {
+          deep_links,
+          targets: launch_targets,
+        },
+        data,
+      )
+      .await
       {
         Ok(()) => log::debug!("[desktop] run_desktop completed OK"),
         Err(error) => {
@@ -1515,6 +1535,94 @@ laufey::main!(|| {
     });
   });
 });
+
+/// The variables the desktop runtime publishes to the app (through the
+/// environment overlay, see `laufey::main!`): the in-process serve address,
+/// the page origin and, when bound, the WebSocket relay's origin.
+fn desktop_env_overlay(
+  app_origin: &AppOrigin,
+  ws_relay_addr: Option<std::net::SocketAddr>,
+) -> Vec<(&'static str, String)> {
+  let mut vars = vec![
+    (
+      "DENO_SERVE_ADDRESS",
+      format!("memory:{}", scheme_bridge::DESKTOP_SERVE_NAME),
+    ),
+    (scheme_bridge::APP_ORIGIN_ENV, app_origin.as_origin_string()),
+  ];
+  if let Some(addr) = ws_relay_addr {
+    vars.push((
+      scheme_bridge::WS_ORIGIN_ENV,
+      scheme_bridge::ws_relay_origin(addr),
+    ));
+  }
+  vars
+}
+
+#[allow(
+  clippy::disallowed_methods,
+  reason = "classifying launch arguments happens outside any runtime sys"
+)]
+fn path_exists(path: &std::path::Path) -> bool {
+  path.exists()
+}
+
+/// What the runtime needs to deliver deep links, opened files and
+/// second-instance launches to `Deno.desktop`.
+struct LaunchConfig {
+  /// The app's normalized deep-link schemes.
+  deep_links: Vec<String>,
+  /// The deep links and files in this process's own arguments.
+  targets: deno_lib::standalone::launch_args::LaunchTargets,
+}
+
+/// Register the backend's open-URL and second-instance handlers, feeding
+/// `inbox`. Registered at runtime start: the backend buffers deliveries made
+/// before that (a launch link, a launch forwarded early) and flushes them into
+/// these handlers synchronously here, and `inbox` holds them until the app
+/// listens.
+fn register_launch_handlers(
+  inbox: &denort::desktop::DesktopLaunchInbox,
+  deep_links: Arc<Vec<String>>,
+) {
+  use deno_lib::standalone::launch_args::OpenedItem;
+
+  // macOS only (a no-op on backends without it): links, and files as
+  // `file://` URLs, routed to the running app.
+  let open_inbox = inbox.clone();
+  laufey::on_open_url(move |url| {
+    match deno_lib::standalone::launch_args::classify_open_url(url) {
+      OpenedItem::Url(url) => open_inbox.open_url(url),
+      OpenedItem::File(path) => {
+        open_inbox.open_file(path.to_string_lossy().into_owned())
+      }
+    }
+  });
+
+  // A later launch of the app, forwarded by laufey's single-instance lock
+  // (a no-op unless the lock is on). Classified with the same rules as this
+  // process's own arguments, relative paths against the forwarded directory.
+  let second_inbox = inbox.clone();
+  laufey::on_second_instance(move |args, cwd| {
+    let cwd_path = (!cwd.is_empty()).then(|| std::path::Path::new(cwd));
+    let targets = deno_lib::standalone::launch_args::parse_launch_args(
+      args,
+      cwd_path,
+      &deep_links,
+      path_exists,
+    );
+    second_inbox.second_instance(
+      args.to_vec(),
+      cwd.to_string(),
+      targets.urls,
+      targets
+        .files
+        .iter()
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect(),
+    );
+  });
+}
 
 /// Decide whether the desktop shell should pop a native error dialog for a
 /// failure that propagated out of the runtime.
@@ -1797,6 +1905,7 @@ async fn run_desktop(
   update_rolled_back: bool,
   app_origin: AppOrigin,
   ws_relay_listener: Option<std::net::TcpListener>,
+  launch: LaunchConfig,
   data: denort::binary::StandaloneData,
 ) -> Result<(), AnyError> {
   // Make the error reporting URL available to the panic hook.
@@ -1956,6 +2065,14 @@ async fn run_desktop(
   // upgrade `Origin` headers against the same origin from the navigate task.
   let app_origin_for_register = app_origin.clone();
   let app_origin_for_relay = app_origin.clone();
+  let launch_deep_links = Arc::new(launch.deep_links);
+  let launch_urls = launch.targets.urls;
+  let launch_files: Vec<String> = launch
+    .targets
+    .files
+    .iter()
+    .map(|p| p.to_string_lossy().into_owned())
+    .collect();
 
   let run_opts = RunOptions {
     auto_serve: true,
@@ -1996,6 +2113,16 @@ async fn run_desktop(
           );
         });
       }
+
+      // Deep links, opened files and second-instance launches, held until
+      // the app listens for them (see `DesktopLaunchInbox`).
+      let launch_inbox = denort::desktop::DesktopLaunchInbox::new(
+        event_tx.0.clone(),
+        launch_urls,
+        launch_files,
+      );
+      register_launch_handlers(&launch_inbox, launch_deep_links);
+      state.put(launch_inbox);
 
       // Create the initial window (hidden) and wire up event handlers. It is
       // revealed from its `on_page_load` handler once content has painted, so
@@ -2169,6 +2296,30 @@ mod tests {
   use super::laufey_value_to_desktop_value;
   use super::map_permission_status;
   use super::should_show_native_error_dialog;
+
+  #[test]
+  fn desktop_env_overlay_publishes_the_serve_address_and_origins() {
+    let origin =
+      deno_lib::standalone::app_origin::AppOrigin::parse("t3code://app")
+        .unwrap();
+    let vars = super::desktop_env_overlay(
+      &origin,
+      Some("127.0.0.1:4321".parse().unwrap()),
+    );
+    assert_eq!(
+      vars,
+      vec![
+        (
+          "DENO_SERVE_ADDRESS",
+          format!("memory:{}", super::scheme_bridge::DESKTOP_SERVE_NAME)
+        ),
+        ("DENO_DESKTOP_APP_ORIGIN", "t3code://app".to_string()),
+        ("DENO_DESKTOP_WS_ORIGIN", "ws://127.0.0.1:4321".to_string()),
+      ]
+    );
+    // No relay bound: no relay origin.
+    assert_eq!(super::desktop_env_overlay(&origin, None).len(), 2);
+  }
 
   // --- should_show_native_error_dialog ---
   //

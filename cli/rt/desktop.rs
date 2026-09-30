@@ -25,6 +25,8 @@ pub const DESKTOP_JS: &str = r#"
     Notification: NotificationNative,
     op_desktop_init,
     op_desktop_recv_event,
+    op_desktop_take_launch_targets,
+    op_desktop_subscribe_launch_events,
     op_desktop_resolve_bind_call,
     op_desktop_reject_bind_call,
     op_desktop_alert,
@@ -330,6 +332,93 @@ pub const DESKTOP_JS: &str = r#"
 
   const dock = new OrigDock();
   Object.defineProperty(Deno, "dock", internals.core.propReadOnly(dock));
+
+  // Deno.desktop: app-level launch events. Deep links and files the OS hands
+  // the running app ("openurl", "openfile"), launches forwarded by a second
+  // instance ("secondinstance"), and the links and files the app was
+  // launched with (launchUrls / launchFiles). The runtime buffers each kind
+  // until the first listener for it is added (see DesktopLaunchInbox), so a
+  // link that arrives while the app is still starting is not lost.
+  const desktop = new EventTarget();
+  const LAUNCH_EVENT_TYPES = ["openurl", "openfile", "secondinstance"];
+  const subscribedLaunchEvents = new Set();
+  function dispatchLaunchEvent(ev) {
+    switch (ev.kind) {
+      case "openUrl":
+        desktop.dispatchEvent(new CustomEvent("openurl", {
+          detail: { url: ev.url },
+        }));
+        break;
+      case "openFile":
+        desktop.dispatchEvent(new CustomEvent("openfile", {
+          detail: { path: ev.path },
+        }));
+        break;
+      case "secondInstance":
+        desktop.dispatchEvent(new CustomEvent("secondinstance", {
+          detail: {
+            args: ev.args,
+            cwd: ev.cwd,
+            urls: ev.urls,
+            files: ev.files,
+          },
+        }));
+        break;
+    }
+  }
+  function subscribeLaunchEvents(type) {
+    if (
+      !LAUNCH_EVENT_TYPES.includes(type) || subscribedLaunchEvents.has(type)
+    ) {
+      return;
+    }
+    subscribedLaunchEvents.add(type);
+    const pending = op_desktop_subscribe_launch_events(type);
+    if (pending.length > 0) {
+      // After the current task, so every listener added alongside this one
+      // (and an `on…` handler set next to it) sees the buffered events.
+      queueMicrotask(() => {
+        for (const ev of pending) dispatchLaunchEvent(ev);
+      });
+    }
+  }
+  const eventTargetAddEventListener = EventTarget.prototype.addEventListener;
+  Object.defineProperty(desktop, "addEventListener", {
+    value: function addEventListener(type, listener, options) {
+      eventTargetAddEventListener.call(this, type, listener, options);
+      if (listener != null) subscribeLaunchEvents(String(type));
+    },
+    writable: true,
+    configurable: true,
+    enumerable: false,
+  });
+  for (const type of LAUNCH_EVENT_TYPES) {
+    internals.defineEventHandler(desktop, type);
+  }
+  let launchTargets = null;
+  function getLaunchTargets() {
+    if (launchTargets === null) {
+      const { urls, files } = op_desktop_take_launch_targets();
+      launchTargets = {
+        urls: Object.freeze(urls),
+        files: Object.freeze(files),
+      };
+    }
+    return launchTargets;
+  }
+  Object.defineProperties(desktop, {
+    launchUrls: {
+      get() { return getLaunchTargets().urls; },
+      configurable: true,
+      enumerable: true,
+    },
+    launchFiles: {
+      get() { return getLaunchTargets().files; },
+      configurable: true,
+      enumerable: true,
+    },
+  });
+  Object.defineProperty(Deno, "desktop", internals.core.propReadOnly(desktop));
 
   const TrayPrototype = Tray.prototype;
   Object.setPrototypeOf(TrayPrototype, EventTarget.prototype);
@@ -962,6 +1051,12 @@ pub const DESKTOP_JS: &str = r#"
             }
             break;
           }
+          case "openUrl":
+          case "openFile":
+          case "secondInstance": {
+            dispatchLaunchEvent(ev);
+            break;
+          }
           case "trayClick": {
             const target = trays.get(ev.trayId);
             if (!target) break;
@@ -1315,6 +1410,7 @@ pub use deno_runtime::ops::desktop::DesktopEvent;
 pub use deno_runtime::ops::desktop::DesktopEventReceiver;
 pub use deno_runtime::ops::desktop::DesktopEventSender;
 pub use deno_runtime::ops::desktop::DesktopEventTx;
+pub use deno_runtime::ops::desktop::DesktopLaunchInbox;
 pub use deno_runtime::ops::desktop::InitialWindowId;
 pub use deno_runtime::ops::desktop::PendingBindCall;
 pub use deno_runtime::ops::desktop::PendingBindResponses;
@@ -1397,6 +1493,37 @@ mod tests {
     assert!(DESKTOP_JS.contains("Notification"));
     assert!(DESKTOP_JS.contains("permission"));
     assert!(DESKTOP_JS.contains("requestPermission"));
+  }
+
+  #[test]
+  fn desktop_js_installs_launch_events() {
+    // `Deno.desktop` is the app-level EventTarget for deep links, opened
+    // files and second-instance launches.
+    assert!(
+      DESKTOP_JS.contains(
+        "Object.defineProperty(Deno, \"desktop\", internals.core.propReadOnly(desktop))"
+      )
+    );
+    for (kind, ty) in [
+      ("openUrl", "openurl"),
+      ("openFile", "openfile"),
+      ("secondInstance", "secondinstance"),
+    ] {
+      // The event loop routes the wire kind, and the dispatcher turns it into
+      // the DOM event type the d.ts documents.
+      assert!(DESKTOP_JS.contains(&format!("case \"{kind}\":")), "{kind}");
+      assert!(
+        DESKTOP_JS.contains(&format!("new CustomEvent(\"{ty}\"")),
+        "{ty}"
+      );
+    }
+    // Adding a listener is what drains the runtime's buffer.
+    assert!(DESKTOP_JS.contains("op_desktop_subscribe_launch_events(type)"));
+    assert!(DESKTOP_JS.contains("internals.defineEventHandler(desktop, type)"));
+    // The launch snapshot is taken once, lazily.
+    assert!(DESKTOP_JS.contains("op_desktop_take_launch_targets()"));
+    assert!(DESKTOP_JS.contains("launchUrls:"));
+    assert!(DESKTOP_JS.contains("launchFiles:"));
   }
 
   #[test]

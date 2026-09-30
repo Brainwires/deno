@@ -108,16 +108,32 @@ pub enum AppOriginError {
 /// binary metadata (from `desktop.app.origin`) takes precedence.
 ///
 /// `identifier` is the app's reverse-DNS id (`desktop.app.identifier`, see
-/// [`super::app_id`]); the runtime hands it to the webview backend so web
-/// storage lives in a per-app directory. A value baked into the binary
-/// metadata takes precedence here too.
+/// [`super::app_id`]). The runtime requires it next to a configured origin;
+/// the webview backend itself learns it from its launch configuration
+/// (`LAUFEY_APP_ID` or `laufey-launch.json`, written by whatever packages the
+/// app), which keeps web storage in a per-app directory. A value baked into
+/// the binary metadata takes precedence here too.
+///
+/// `deepLinks` lists the custom URL schemes the app registers
+/// (`desktop.app.deepLinks`); the runtime recognizes launch arguments with
+/// those schemes as deep links (see [`super::launch_args`]). The metadata's
+/// list, written by a CLI that knows the key, takes precedence.
+///
+/// `singleInstance` mirrors `desktop.app.singleInstance`. The runtime cannot
+/// turn the single-instance lock on itself: laufey decides it in the host's
+/// `main()`, before the runtime is loaded, from `laufey-launch.json` next to
+/// the executable (or `LAUFEY_SINGLE_INSTANCE`). Whatever packages the app
+/// writes that file; the key here only records the intent (and, like the
+/// lock itself, requires an `identifier`).
 pub const APP_CONFIG_FILE: &str = ".deno-desktop/app.json";
 
 #[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct SerializedAppConfigFile {
   origin: Option<String>,
   identifier: Option<String>,
+  deep_links: Option<Vec<String>>,
+  single_instance: Option<bool>,
 }
 
 /// The validated contents of an [`APP_CONFIG_FILE`].
@@ -125,15 +141,26 @@ struct SerializedAppConfigFile {
 pub struct AppConfigFile {
   pub origin: Option<AppOrigin>,
   pub identifier: Option<String>,
+  /// Normalized with [`super::launch_args::normalize_deep_link_schemes`].
+  pub deep_links: Option<Vec<String>>,
+  pub single_instance: Option<bool>,
 }
 
-/// Parse the contents of an [`APP_CONFIG_FILE`]. Both keys are optional; an
+/// Parse the contents of an [`APP_CONFIG_FILE`]. Every key is optional; an
 /// error for malformed JSON, unknown keys (a typo must not silently fall back
-/// to the default origin or to shared storage), an invalid origin or an
-/// invalid identifier.
+/// to the default origin or to shared storage), an invalid origin, an
+/// invalid identifier, an invalid deep-link scheme or a non-boolean
+/// `singleInstance`.
 pub fn parse_app_config_file(bytes: &[u8]) -> Result<AppConfigFile, String> {
   let config: SerializedAppConfigFile =
     serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
+  let deep_links = config
+    .deep_links
+    .map(|schemes| {
+      super::launch_args::normalize_deep_link_schemes(&schemes)
+        .map_err(|e| format!("invalid deepLinks: {e}"))
+    })
+    .transpose()?;
   let origin = match config.origin {
     None => None,
     Some(origin) => Some(
@@ -148,6 +175,8 @@ pub fn parse_app_config_file(bytes: &[u8]) -> Result<AppConfigFile, String> {
   Ok(AppConfigFile {
     origin,
     identifier: config.identifier,
+    deep_links,
+    single_instance: config.single_instance,
   })
 }
 
@@ -503,6 +532,7 @@ mod tests {
       AppConfigFile {
         origin: Some(AppOrigin::parse("t3code://app").unwrap()),
         identifier: Some("com.t3.code".to_string()),
+        ..Default::default()
       }
     );
     // Either key may appear alone; the runtime decides whether the
@@ -529,6 +559,46 @@ mod tests {
         .unwrap_err()
         .contains("identifer")
     );
+  }
+
+  #[test]
+  fn app_config_file_deep_links_and_single_instance() {
+    let config = parse_app_config_file(
+      br#"{ "identifier": "com.t3.code", "deepLinks": [" T3Code ", "acme", "acme"], "singleInstance": true }"#,
+    )
+    .unwrap();
+    assert_eq!(
+      config.deep_links,
+      Some(vec!["t3code".to_string(), "acme".to_string()])
+    );
+    assert_eq!(config.single_instance, Some(true));
+    let config =
+      parse_app_config_file(br#"{ "singleInstance": false }"#).unwrap();
+    assert_eq!(config.single_instance, Some(false));
+    assert_eq!(config.deep_links, None);
+    assert_eq!(
+      parse_app_config_file(br#"{ "deepLinks": [] }"#)
+        .unwrap()
+        .deep_links,
+      Some(vec![])
+    );
+    // Strict, like the other keys.
+    for bad in [
+      r#"{ "singleInstance": "yes" }"#,
+      r#"{ "singleInstance": 1 }"#,
+      r#"{ "deepLinks": "acme" }"#,
+      r#"{ "deepLinks": ["http"] }"#,
+      r#"{ "deepLinks": ["1acme"] }"#,
+      r#"{ "deepLinks": [1] }"#,
+      r#"{ "single_instance": true }"#,
+      r#"{ "deeplinks": ["acme"] }"#,
+    ] {
+      assert!(parse_app_config_file(bad.as_bytes()).is_err(), "{bad}");
+    }
+    let err =
+      parse_app_config_file(br#"{ "deepLinks": ["https"] }"#).unwrap_err();
+    assert!(err.contains("deepLinks"), "{err}");
+    assert!(err.contains("reserved"), "{err}");
   }
 
   #[test]
