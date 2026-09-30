@@ -400,6 +400,8 @@ jobs:
             *-apple-darwin)
               cp target/release/libdenort.dylib out/
               strip -x -S out/libdenort.dylib
+              # Don't ship the build machine's target/ path as the install name.
+              install_name_tool -id @rpath/libdenort.dylib out/libdenort.dylib
               # Stripping invalidates the linker's ad-hoc signature, and arm64
               # macOS refuses to map unsigned code; re-sign ad hoc. Apps are
               # signed with the author's identity at package time.

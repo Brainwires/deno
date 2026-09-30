@@ -37,8 +37,11 @@ check_macos() {
     fi
     rpaths=$(otool -l "$f" | awk '/cmd LC_RPATH/{getline; getline; print $2}')
     dir=$(dirname "$f")
+    own_id=$(otool -D "$f" | tail -n +2 | head -1)
+    [ -n "$own_id" ] && echo "   id: $own_id"
     # Skip the first line (the file name) and, for a dylib, its own id.
     otool -L "$f" | tail -n +2 | awk '{print $1}' | while read -r dep; do
+      [ -n "$own_id" ] && [ "$dep" = "$own_id" ] && continue
       resolved=""
       case "$dep" in
         /System/* | /usr/lib/*) resolved=system ;;
