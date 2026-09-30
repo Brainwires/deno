@@ -58,8 +58,17 @@ are where the changes are discussed.
 5. **`feat(desktop)`: hand every laufey backend the app identifier** —
    `LAUFEY_APP_ID`, so each app's web storage (localStorage, IndexedDB,
    cookies) lives in its own directory and persists across launches.
+6. **`feat(desktop)`: deep links, opened files and second instances in
+   `Deno.desktop`** — `openurl` / `openfile` / `secondinstance` events plus
+   `Deno.desktop.launchUrls` / `launchFiles`, `desktop.app.singleInstance`, and
+   a `laufey-launch.json` in every package. Built on laufey's `on_open_url`
+   ([littledivy/laufey#77](https://github.com/littledivy/laufey/pull/77) by
+   [@diegoholiveira](https://github.com/diegoholiveira)) and `on_second_instance`.
+7. **`fix(http)`: an absolute-form request target can't claim `http+memory:`
+   over TCP** (400), and **`feat(os)`: an env overlay** so the runtime never
+   calls `setenv` while the host's UI thread runs.
 
-The runtime-side parts (1-3, 5) are what the prebuilt `libdenort` carries.
+The runtime-side parts (1-3, 5-7) are what the prebuilt `libdenort` carries.
 The CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` /
 `LAUFEY_APP_ID` into a packaged app's launchers) are in the branch too, but a
 stock CLI does not run them; denext's own launcher provides that environment.
@@ -67,7 +76,8 @@ stock CLI does not run them; denext's own launcher provides that environment.
 The laufey backend hosts are built from
 [Brainwires/laufey](https://github.com/Brainwires/laufey) branch
 `denext/integration` (registered schemes, app data dir, WebKitGTK scheme
-request bodies, launch config, Windows bindgen fix), at the commit pinned by
+request bodies, launch config, open-url / single instance, Windows bindgen
+fix), at the commit pinned by
 `LAUFEY_SHA` in the workflow (or the `laufey_ref` input).
 
 laufey's `init_api` rejects any C ABI version mismatch between the runtime
