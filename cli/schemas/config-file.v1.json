@@ -162,7 +162,7 @@
             },
             "identifier": {
               "type": "string",
-              "description": "Reverse-DNS application identifier (e.g. com.example.myapp)."
+              "description": "Reverse-DNS application identifier (e.g. com.example.myapp). Names the macOS bundle, the Linux .desktop file and the directory the app's web storage (localStorage, IndexedDB, cookies) is kept in, so it persists across launches and is never shared with another app. Required when \"origin\" is set. When omitted, a com.deno.desktop.<app name> identifier is synthesized for the bundle."
             },
             "icons": {
               "type": "object",

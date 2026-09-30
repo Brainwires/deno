@@ -376,6 +376,74 @@ pub fn resolve_desktop_app_origin(
   Ok(Some(parsed.as_origin_string()))
 }
 
+/// Resolve the desktop app's identifier from `desktop.app.identifier`,
+/// validated as a reverse-DNS id (it names the macOS bundle, the Linux
+/// `.desktop` file and the per-app web data directory). `None` when unset.
+pub fn resolve_desktop_app_identifier(
+  cli_options: &CliOptions,
+) -> Result<Option<String>, AnyError> {
+  let desktop_config = cli_options.start_dir.to_desktop_config()?;
+  let Some(identifier) = desktop_config
+    .app
+    .as_ref()
+    .and_then(|app| app.identifier.as_deref())
+  else {
+    return Ok(None);
+  };
+  deno_lib::standalone::app_id::validate_app_identifier(identifier)
+    .with_context(|| {
+      format!("Invalid desktop.app.identifier {identifier:?} in deno.json")
+    })?;
+  Ok(Some(identifier.to_string()))
+}
+
+/// The desktop app's configured origin and identifier, resolved together
+/// because a configured origin requires an identifier (see
+/// [`check_desktop_app_identity`]).
+pub struct DesktopAppIdentity {
+  /// Normalized `desktop.app.origin`, see [`resolve_desktop_app_origin`].
+  pub origin: Option<String>,
+  /// Validated `desktop.app.identifier`, see
+  /// [`resolve_desktop_app_identifier`].
+  pub identifier: Option<String>,
+}
+
+/// Resolve `desktop.app.origin` and `desktop.app.identifier`, failing when
+/// either is invalid or an origin is configured without an identifier.
+pub fn resolve_desktop_app_identity(
+  cli_options: &CliOptions,
+) -> Result<DesktopAppIdentity, AnyError> {
+  let origin = resolve_desktop_app_origin(cli_options)?;
+  let identifier = resolve_desktop_app_identifier(cli_options)?;
+  check_desktop_app_identity(origin.as_deref(), identifier.as_deref())?;
+  Ok(DesktopAppIdentity { origin, identifier })
+}
+
+/// A configured `desktop.app.origin` requires `desktop.app.identifier`.
+///
+/// Web storage (`localStorage`, IndexedDB, cookies) is keyed by origin inside
+/// the webview's profile, and the profile is per app only when the backend is
+/// told the app's identifier. Without one, two apps configured with the same
+/// origin would read each other's data (the webview's shared default store),
+/// so this is a build error rather than a warning.
+fn check_desktop_app_identity(
+  origin: Option<&str>,
+  identifier: Option<&str>,
+) -> Result<(), AnyError> {
+  if let Some(origin) = origin
+    && identifier.is_none()
+  {
+    bail!(
+      "desktop.app.origin {origin:?} requires desktop.app.identifier in \
+       deno.json. Web storage is keyed by origin, so without a per-app \
+       identifier two apps with the same origin could share it. Set a \
+       reverse-DNS identifier, e.g. \"desktop\": {{ \"app\": {{ \"identifier\": \
+       \"com.example.myapp\" }} }}."
+    );
+  }
+  Ok(())
+}
+
 pub struct WriteBinOptions<'a> {
   pub writer: File,
   pub display_output_filename: &'a str,
@@ -1143,6 +1211,16 @@ impl<'a> DenoCompileBinaryWriter<'a> {
       .map(|s| root_dir_url.specifier_key(&s).into_owned())
       .collect::<Vec<_>>();
 
+    // The page origin and identifier are desktop-only concerns: `deno
+    // compile` binaries have no webview. Unlike the release URLs below, a
+    // malformed value is an error rather than a silent fallback — the app
+    // would otherwise start at an origin, or keep its web storage in a place,
+    // the developer did not configure.
+    let mut desktop_app_identity = if self.is_desktop {
+      Some(resolve_desktop_app_identity(self.cli_options)?)
+    } else {
+      None
+    };
     let metadata = Metadata {
       argv: compile_flags.args.clone(),
       seed: self.cli_options.seed(),
@@ -1260,15 +1338,15 @@ impl<'a> DenoCompileBinaryWriter<'a> {
         .to_desktop_config()
         .ok()
         .and_then(|c| c.release.as_ref()?.base_url.clone()),
-      // The page origin is a desktop-only concern: `deno compile` binaries
-      // have no webview. Unlike the two URLs above, a malformed value is an
-      // error rather than a silent fallback — the app would otherwise start
-      // at an origin the developer did not configure.
-      app_origin: if self.is_desktop {
-        resolve_desktop_app_origin(self.cli_options)?
-      } else {
-        None
-      },
+      app_origin: desktop_app_identity
+        .as_mut()
+        .and_then(|identity| identity.origin.take()),
+      // The identifier reaches the runtime so it can hand it to the webview
+      // backend itself when the launcher did not (a directly executed
+      // binary, or a Windows `<app>.exe`, which has no launcher).
+      app_identifier: desktop_app_identity
+        .as_mut()
+        .and_then(|identity| identity.identifier.take()),
     };
 
     let (data_section_bytes, section_sizes) = serialize_binary_data_section(
@@ -1932,9 +2010,30 @@ fn set_windows_binary_to_gui(bin: &mut [u8]) -> Result<(), AnyError> {
 
 #[cfg(test)]
 mod tests {
+  use super::check_desktop_app_identity;
   use super::default_app_name;
   use super::runtime_archive_name;
   use crate::args::JavaScriptEngine;
+
+  #[test]
+  fn desktop_app_origin_requires_an_identifier() {
+    // No origin: the identifier stays optional (the CLI synthesizes one).
+    check_desktop_app_identity(None, None).unwrap();
+    check_desktop_app_identity(None, Some("com.acme.app")).unwrap();
+    check_desktop_app_identity(Some("acme://app"), Some("com.acme.app"))
+      .unwrap();
+    // A configured origin without an identifier is a build error that names
+    // both keys and how to fix it.
+    let err = check_desktop_app_identity(Some("acme://app"), None)
+      .unwrap_err()
+      .to_string();
+    assert!(err.contains("desktop.app.origin \"acme://app\""), "{err}");
+    assert!(err.contains("requires desktop.app.identifier"), "{err}");
+    assert!(
+      err.contains("\"identifier\": \"com.example.myapp\""),
+      "{err}"
+    );
+  }
 
   #[test]
   fn runtime_archive_names_include_engine_suffix() {

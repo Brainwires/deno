@@ -121,6 +121,13 @@ pub struct Metadata {
   /// only.
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub app_origin: Option<String>,
+  /// The desktop app's reverse-DNS identifier from deno.json
+  /// `desktop.app.identifier`, validated by
+  /// [`super::app_id::validate_app_identifier`] at compile time. The runtime
+  /// hands it to the webview backend as `LAUFEY_APP_ID` when the launcher did
+  /// not, so web storage lives in a per-app directory. Desktop builds only.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub app_identifier: Option<String>,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]

@@ -913,8 +913,10 @@ struct SerializedDesktopAppConfig {
   /// Bundle/application identifier in reverse-DNS form (e.g.
   /// `com.acme.foo`). Used as the macOS `CFBundleIdentifier`, the Linux
   /// `.desktop` file identifier, and (eventually) the Windows
-  /// AppUserModelID. Optional; when omitted a synthetic
-  /// `com.deno.desktop.<slug>` is generated from the app name.
+  /// AppUserModelID. It also names the per-app directory the webview keeps
+  /// the app's web storage in. Optional; when omitted a synthetic
+  /// `com.deno.desktop.<slug>` is generated from the app name. Required when
+  /// `origin` is set (checked by the CLI).
   pub identifier: Option<String>,
   /// Custom URL schemes (deep links) the app registers with the OS, e.g.
   /// `["acme"]` to handle `acme://...` links. Each entry is a bare scheme

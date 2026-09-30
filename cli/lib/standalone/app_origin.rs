@@ -96,7 +96,8 @@ pub enum AppOriginError {
 }
 
 /// Path, relative to a directory of the app, of the file a desktop runtime
-/// also reads the app origin from: `{ "origin": "<scheme>://<host>" }`.
+/// also reads the app origin and identifier from:
+/// `{ "origin": "<scheme>://<host>", "identifier": "<reverse-DNS id>" }`.
 ///
 /// This is how a `deno desktop` CLI that predates `desktop.app.origin` (and
 /// therefore rejects that key in `deno.json`) can still configure the origin:
@@ -105,28 +106,49 @@ pub enum AppOriginError {
 /// runtime finds it in the embedded file system next to the entrypoint or in
 /// any directory above it, up to the embedded root. A value baked into the
 /// binary metadata (from `desktop.app.origin`) takes precedence.
+///
+/// `identifier` is the app's reverse-DNS id (`desktop.app.identifier`, see
+/// [`super::app_id`]); the runtime hands it to the webview backend so web
+/// storage lives in a per-app directory. A value baked into the binary
+/// metadata takes precedence here too.
 pub const APP_CONFIG_FILE: &str = ".deno-desktop/app.json";
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SerializedAppConfigFile {
   origin: Option<String>,
+  identifier: Option<String>,
 }
 
-/// Parse the contents of an [`APP_CONFIG_FILE`]. `Ok(None)` when the file
-/// does not set `origin`; an error for malformed JSON, unknown keys (a typo
-/// must not silently fall back to the default origin) or an invalid origin.
-pub fn parse_app_config_file(
-  bytes: &[u8],
-) -> Result<Option<AppOrigin>, String> {
+/// The validated contents of an [`APP_CONFIG_FILE`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AppConfigFile {
+  pub origin: Option<AppOrigin>,
+  pub identifier: Option<String>,
+}
+
+/// Parse the contents of an [`APP_CONFIG_FILE`]. Both keys are optional; an
+/// error for malformed JSON, unknown keys (a typo must not silently fall back
+/// to the default origin or to shared storage), an invalid origin or an
+/// invalid identifier.
+pub fn parse_app_config_file(bytes: &[u8]) -> Result<AppConfigFile, String> {
   let config: SerializedAppConfigFile =
     serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
-  match config.origin {
-    None => Ok(None),
-    Some(origin) => AppOrigin::parse(&origin)
-      .map(Some)
-      .map_err(|e| format!("invalid origin {origin:?}: {e}")),
+  let origin = match config.origin {
+    None => None,
+    Some(origin) => Some(
+      AppOrigin::parse(&origin)
+        .map_err(|e| format!("invalid origin {origin:?}: {e}"))?,
+    ),
+  };
+  if let Some(identifier) = &config.identifier {
+    super::app_id::validate_app_identifier(identifier)
+      .map_err(|e| format!("invalid identifier: {e}"))?;
   }
+  Ok(AppConfigFile {
+    origin,
+    identifier: config.identifier,
+  })
 }
 
 /// Upper bound on the serialized origin. Generous for anything a person would
@@ -447,10 +469,15 @@ mod tests {
   #[test]
   fn app_config_file() {
     assert_eq!(
-      parse_app_config_file(br#"{ "origin": "T3Code://App/" }"#).unwrap(),
+      parse_app_config_file(br#"{ "origin": "T3Code://App/" }"#)
+        .unwrap()
+        .origin,
       Some(AppOrigin::parse("t3code://app").unwrap())
     );
-    assert_eq!(parse_app_config_file(b"{}").unwrap(), None);
+    assert_eq!(
+      parse_app_config_file(b"{}").unwrap(),
+      AppConfigFile::default()
+    );
     assert!(
       parse_app_config_file(br#"{ "origin": "https://app" }"#)
         .unwrap_err()
@@ -464,6 +491,44 @@ mod tests {
     );
     assert!(parse_app_config_file(b"not json").is_err());
     assert!(parse_app_config_file(br#"{ "origin": 1 }"#).is_err());
+  }
+
+  #[test]
+  fn app_config_file_identifier() {
+    assert_eq!(
+      parse_app_config_file(
+        br#"{ "origin": "t3code://app", "identifier": "com.t3.code" }"#
+      )
+      .unwrap(),
+      AppConfigFile {
+        origin: Some(AppOrigin::parse("t3code://app").unwrap()),
+        identifier: Some("com.t3.code".to_string()),
+      }
+    );
+    // Either key may appear alone; the runtime decides whether the
+    // combination is acceptable.
+    assert_eq!(
+      parse_app_config_file(br#"{ "identifier": "com.t3.code" }"#)
+        .unwrap()
+        .identifier
+        .as_deref(),
+      Some("com.t3.code")
+    );
+    // Strictly validated: the id becomes a directory name.
+    for bad in [
+      r#"{ "identifier": "" }"#,
+      r#"{ "identifier": "notes" }"#,
+      r#"{ "identifier": "com.acme/../evil" }"#,
+      r#"{ "identifier": "com.acme app" }"#,
+      r#"{ "identifier": 1 }"#,
+    ] {
+      assert!(parse_app_config_file(bad.as_bytes()).is_err(), "{bad}");
+    }
+    assert!(
+      parse_app_config_file(br#"{ "identifer": "com.t3.code" }"#)
+        .unwrap_err()
+        .contains("identifer")
+    );
   }
 
   #[test]

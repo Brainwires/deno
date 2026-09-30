@@ -55,12 +55,13 @@ pub async fn desktop(
   let factory = CliFactory::from_flags(Arc::new(config_flags));
   let cli_options = factory.cli_options()?;
   let desktop_config = cli_options.start_dir.to_desktop_config()?.clone();
-  // Fail fast on a malformed `desktop.app.origin` — the same check runs when
+  // Fail fast on a malformed `desktop.app.origin` / `desktop.app.identifier`,
+  // or an origin configured without an identifier — the same check runs when
   // the binary metadata is written, but that is after the whole graph has
   // been built and bundled.
-  if let Some(origin) =
-    crate::standalone::binary::resolve_desktop_app_origin(cli_options)?
-  {
+  let app_identity =
+    crate::standalone::binary::resolve_desktop_app_identity(cli_options)?;
+  if let Some(origin) = &app_identity.origin {
     log::info!("{} {origin}", colors::green("App origin"));
   }
   let laufey_resolver = Arc::new(LaufeyBackendResolver::new(&factory)?);
@@ -689,7 +690,16 @@ fn make_self_extracting(
   };
   match target_os {
     "macos" => make_self_extracting_macos(bundle_path, format, desktop_flags),
-    "windows" => make_self_extracting_dir(bundle_path, format, true, None),
+    // Windows has no synthesized runtime app id (the packaged `<app>.exe` is
+    // launched directly, and only a configured identifier reaches it, through
+    // the runtime), so the launcher passes the configured one, which the CEF
+    // backend needs at process start.
+    "windows" => make_self_extracting_dir(
+      bundle_path,
+      format,
+      true,
+      desktop_flags.identifier.as_deref(),
+    ),
     _ => {
       // Export the same reverse-DNS app id the packaged formats use so a launch
       // through the self-extract script gets the intended window app_id rather
@@ -1115,9 +1125,17 @@ fn make_self_extracting_dir(
   let hash = payload_hash(&payload)?;
 
   if windows {
+    // `set` inside `setlocal` scopes the variable to this launcher and the
+    // app it starts. The id is `[A-Za-z0-9.-]` (validated), so it needs no
+    // escaping for cmd.
+    let app_id_set = match desktop_id {
+      Some(id) => format!("set \"LAUFEY_APP_ID={id}\"\r\n"),
+      None => String::new(),
+    };
     let launcher = format!(
       "@echo off\r\n\
        setlocal\r\n\
+       {app_id_set}\
        set \"DIR=%~dp0\"\r\n\
        set \"DEST=%LOCALAPPDATA%\\{id}\\{hash}\"\r\n\
        if not exist \"%DEST%\\{app_name}\\{app_name}.exe\" (\r\n\
@@ -1384,25 +1402,29 @@ async fn run_desktop_hmr(
   if let Some(name) = app_name.as_ref() {
     cmd.env("LAUFEY_APP_NAME", name);
   }
-  // App id for the window manager's icon/taskbar attribution (see the
-  // `LAUFEY_APP_ID` handling in the packaged `.desktop` `Exec` line). Best-effort
-  // match to the packaged build's id so a dev run lines up with an installed
-  // `.desktop` file when one exists — we strip a leading `lib` as the packaged
-  // path does (its id derives from the `lib<app>.so` dylib). It can still differ
-  // when the packaged name comes from a source URL and no `--output` is given.
-  // On X11 the icon shows from `LAUFEY_APP_ICON` regardless; on Wayland the
-  // compositor still needs an installed desktop file to resolve the icon.
-  // `app_id` is a Wayland/X11 concept, so this is Linux-only — there's nothing
-  // to attribute on macOS or Windows.
-  #[cfg(target_os = "linux")]
-  if let Some(id) = resolve_linux_app_id(
+  // The app id names the per-app web data directory on every backend (so
+  // `localStorage`, IndexedDB and cookies persist across dev runs and are not
+  // shared with other apps, or with every other dev run of the prebuilt
+  // laufey bundle), and on Linux it is also the window app_id for the window
+  // manager's icon/taskbar attribution (see the `LAUFEY_APP_ID` handling in
+  // the packaged `.desktop` `Exec` line). Best-effort match to the packaged
+  // build's id (see `hmr_app_id`); it can still differ when the packaged name
+  // comes from a source URL and no `--output` is given. On X11 the icon shows
+  // from `LAUFEY_APP_ICON` regardless; on Wayland the compositor still needs
+  // an installed desktop file to resolve the icon. CEF reads it at process
+  // start, so it has to be set here rather than by the runtime.
+  match hmr_app_id(
     desktop_flags.identifier.as_deref(),
-    app_name
-      .as_deref()
-      .map(|n| n.strip_prefix("lib").unwrap_or(n))
-      .unwrap_or(""),
+    app_name.as_deref().unwrap_or(""),
   ) {
-    cmd.env("LAUFEY_APP_ID", &id);
+    Some(id) => {
+      cmd.env(LAUFEY_APP_ID_ENV, &id);
+    }
+    None => log::warn!(
+      "no usable app id for {:?}; web storage will not persist per app in \
+       this run (set desktop.app.identifier in deno.json)",
+      app_name.as_deref().unwrap_or("")
+    ),
   }
   // Chromium learns custom URL schemes at process start, before the runtime
   // (which registers the handler) is loaded, so the CEF host must be told
@@ -2543,32 +2565,55 @@ fn read_plist_string(path: &Path, key: &str) -> Option<String> {
 /// use digits) but we do reject empty segments and obvious shell
 /// metacharacters — the identifier ends up as a `codesign` argument and
 /// a path component of the helper bundles.
+///
+/// The rules live in `deno_lib` (`app_id::validate_app_identifier`) so the
+/// desktop runtime applies the same ones to an identifier it reads from an
+/// embedded `.deno-desktop/app.json`.
 fn validate_bundle_identifier(id: &str) -> Result<(), AnyError> {
-  if id.is_empty() {
-    bail!("bundle identifier is empty");
-  }
-  if id.len() > 155 {
-    // Apple's documented limit for CFBundleIdentifier on receipts is
-    // 155 chars; bigger values quietly truncate elsewhere in the
-    // toolchain.
-    bail!("bundle identifier {id:?} is longer than 155 characters");
-  }
-  if !id.contains('.') {
+  deno_lib::standalone::app_id::validate_app_identifier(id)?;
+  Ok(())
+}
+
+/// The synthetic macOS bundle identifier used when `desktop.app.identifier` is
+/// not configured: `com.deno.desktop.<slug>` from the app name.
+fn macos_default_bundle_id(app_name: &str) -> String {
+  let slug = app_name.to_lowercase().replace(' ', "-");
+  format!("com.deno.desktop.{slug}")
+}
+
+/// Fail unless `id` is an app id a laufey backend accepts as `LAUFEY_APP_ID`
+/// (see `deno_lib::standalone::app_id::is_laufey_app_id`). The backend would
+/// otherwise ignore it with a warning on stderr and fall back to storage that
+/// does not persist per app, which nobody would notice until data went
+/// missing.
+fn ensure_laufey_app_id(id: &str) -> Result<(), AnyError> {
+  if !deno_lib::standalone::app_id::is_laufey_app_id(id) {
     bail!(
-      "bundle identifier {id:?} must be in reverse-DNS form (e.g. com.acme.foo)"
+      "app identifier {id:?} cannot name the app's web data directory \
+       (allowed: A-Z a-z 0-9 . _ -, not \".\" or \"..\"); set a reverse-DNS \
+       desktop.app.identifier in deno.json"
     );
   }
-  for c in id.chars() {
-    if !(c.is_ascii_alphanumeric() || c == '.' || c == '-') {
-      bail!(
-        "bundle identifier {id:?} must match [A-Za-z0-9.-]+, but contains {c:?}",
-      );
-    }
-  }
-  if id.split('.').any(|seg| seg.is_empty()) {
-    bail!("bundle identifier {id:?} has an empty segment");
-  }
   Ok(())
+}
+
+/// The app id a dev/HMR run hands the backend as `LAUFEY_APP_ID`: the
+/// configured identifier, otherwise the id this host's packaged build would
+/// synthesize from the app name, so a dev run and the packaged app share one
+/// web data directory. `None` when no usable id can be derived.
+fn hmr_app_id(identifier: Option<&str>, app_name: &str) -> Option<String> {
+  let id = match identifier {
+    Some(id) => id.to_string(),
+    None if cfg!(target_os = "macos") => macos_default_bundle_id(app_name),
+    // Linux derives it the way the packaged `.desktop` file does, and has the
+    // `lib` prefix of the `lib<app>.so` dylib stripped. Windows has no
+    // synthesized runtime id; the same sanitized form keeps a dev run out of
+    // the shared `<laufey exe>.WebView2` folder.
+    None => {
+      derived_desktop_id(app_name.strip_prefix("lib").unwrap_or(app_name))?
+    }
+  };
+  deno_lib::standalone::app_id::is_laufey_app_id(&id).then_some(id)
 }
 
 /// Derive a reverse-DNS `com.deno.desktop.<label>` id from an app name, for use
@@ -3456,11 +3501,11 @@ async fn package_macos_app_bundle(
       validate_bundle_identifier(id)?;
       id.to_string()
     }
-    None => {
-      let slug = app_name.to_lowercase().replace(' ', "-");
-      format!("com.deno.desktop.{slug}")
-    }
+    None => macos_default_bundle_id(&app_name),
   };
+  // The bundle id doubles as the app id naming the web data directory, which
+  // laufey accepts only as a single safe path component.
+  ensure_laufey_app_id(&bundle_id)?;
 
   // Generate Info.plist. The backend binary is the CFBundleExecutable so
   // there is no shell-script `exec` between LaunchServices and the GUI
@@ -3482,22 +3527,28 @@ async fn package_macos_app_bundle(
     desktop_flags.icon.is_some(),
     config_package_version(cli_options).as_deref(),
   );
-  // The CEF host needs the app origin's custom scheme declared at process
-  // start (see `run_desktop_hmr`). A bundle launched by LaunchServices
-  // (Finder, Dock, `open`) gets `LSEnvironment` in its environment, and the
-  // CEF helper processes inherit it from the browser process.
-  if backend == "cef"
-    && let Some(scheme) = cef_custom_scheme(
+  // The backend reads its launch configuration from the environment at
+  // process start (see `run_desktop_hmr`). A bundle launched by
+  // LaunchServices (Finder, Dock, `open`) gets `LSEnvironment` in its
+  // environment, and the CEF helper processes inherit it from the browser
+  // process.
+  // - LAUFEY_APP_ID, on both backends: the per-app web data directory. CEF
+  //   needs it to keep a persistent profile at all; WKWebView uses a per-app
+  //   data store instead of the bundle's default one.
+  // - LAUFEY_CUSTOM_SCHEMES, on CEF: the app origin's custom scheme.
+  let cef_scheme = if backend == "cef" {
+    cef_custom_scheme(
       crate::standalone::binary::resolve_desktop_app_origin(cli_options)?
         .as_deref(),
     )
-  {
-    info_plist = macos_plist_with_launch_env(
-      &info_plist,
-      LAUFEY_CUSTOM_SCHEMES_ENV,
-      &scheme,
-    );
+  } else {
+    None
+  };
+  let mut launch_env = vec![(LAUFEY_APP_ID_ENV, bundle_id.as_str())];
+  if let Some(scheme) = cef_scheme.as_deref() {
+    launch_env.push((LAUFEY_CUSTOM_SCHEMES_ENV, scheme));
   }
+  info_plist = macos_plist_with_launch_env(&info_plist, &launch_env);
   std::fs::write(contents_dir.join("Info.plist"), info_plist)?;
 
   // Rewrite each CEF helper's CFBundleIdentifier to be a strict suffix
@@ -3587,6 +3638,12 @@ async fn package_macos_app_bundle(
 /// built-in `app` scheme is always declared.
 const LAUFEY_CUSTOM_SCHEMES_ENV: &str = "LAUFEY_CUSTOM_SCHEMES";
 
+/// Environment variable through which a laufey backend learns the app id that
+/// names its per-app web data directory (and, on Linux, the window app_id).
+/// CEF reads it at process start, so every launcher sets it; the runtime sets
+/// it for the WebView backends when a launcher did not.
+const LAUFEY_APP_ID_ENV: &str = deno_lib::standalone::app_id::LAUFEY_APP_ID_ENV;
+
 /// The scheme a CEF host must be told about at launch for the app to run at
 /// `app_origin` (a normalized `desktop.app.origin`), or `None` when the origin
 /// uses laufey's built-in `app` scheme — which is also the default origin's
@@ -3597,20 +3654,29 @@ fn cef_custom_scheme(app_origin: Option<&str>) -> Option<String> {
   (origin.scheme() != "app").then(|| origin.scheme().to_string())
 }
 
-/// Add `key=value` to a rendered Info.plist's `LSEnvironment` (the
-/// environment LaunchServices gives the bundle's executable). `key` and
-/// `value` must be XML-safe; callers pass a fixed name and a validated URL
-/// scheme.
-fn macos_plist_with_launch_env(plist: &str, key: &str, value: &str) -> String {
+/// Add the `(key, value)` pairs as a rendered Info.plist's `LSEnvironment`
+/// (the environment LaunchServices gives the bundle's executable). Keys and
+/// values must be XML-safe; callers pass fixed names, a validated app id and
+/// a validated URL scheme.
+fn macos_plist_with_launch_env(plist: &str, env: &[(&str, &str)]) -> String {
   const TAIL: &str = "</dict>\n</plist>\n";
-  debug_assert!(
-    !key.contains(['<', '>', '&']) && !value.contains(['<', '>', '&'])
-  );
+  if env.is_empty() {
+    return plist.to_string();
+  }
   let Some(body) = plist.strip_suffix(TAIL) else {
     return plist.to_string();
   };
+  let mut entries = String::new();
+  for (key, value) in env {
+    debug_assert!(
+      !key.contains(['<', '>', '&']) && !value.contains(['<', '>', '&'])
+    );
+    entries.push_str(&format!(
+      "    <key>{key}</key>\n    <string>{value}</string>\n"
+    ));
+  }
   format!(
-    "{body}  <key>LSEnvironment</key>\n  <dict>\n    <key>{key}</key>\n    <string>{value}</string>\n  </dict>\n{TAIL}"
+    "{body}  <key>LSEnvironment</key>\n  <dict>\n{entries}  </dict>\n{TAIL}"
   )
 }
 
@@ -6446,7 +6512,9 @@ def456  other.zip
     // A valid explicit identifier is still honored verbatim.
     flags.identifier = Some("com.acme.tool".to_string());
     assert_eq!(
-      linux_package_meta(&app_dir, &flags, None).unwrap().identifier,
+      linux_package_meta(&app_dir, &flags, None)
+        .unwrap()
+        .identifier,
       "com.acme.tool"
     );
   }
@@ -8103,16 +8171,121 @@ def456  other.zip
   }
 
   #[test]
+  fn app_id_must_be_accepted_by_laufey() {
+    // Every id that validates as a bundle identifier is a valid laufey app
+    // id, and so is the synthetic macOS default for an app name.
+    ensure_laufey_app_id("com.acme.notes").unwrap();
+    ensure_laufey_app_id(&macos_default_bundle_id("My App")).unwrap();
+    ensure_laufey_app_id(&macos_default_bundle_id("my_app.v2")).unwrap();
+    assert_eq!(macos_default_bundle_id("My App"), "com.deno.desktop.my-app");
+    // Anything laufey would ignore (and silently not persist) is an error
+    // that says why.
+    for id in [
+      "",
+      ".",
+      "..",
+      "com.acme/app",
+      "com.acme app",
+      "com.acme:app",
+    ] {
+      let err = ensure_laufey_app_id(id).unwrap_err().to_string();
+      assert!(err.contains("web data directory"), "{id:?}: {err}");
+      assert!(err.contains("desktop.app.identifier"), "{id:?}: {err}");
+    }
+    // Bundle-identifier validation is shared with the runtime (deno_lib) and
+    // keeps its messages.
+    let err = validate_bundle_identifier("notes").unwrap_err().to_string();
+    assert!(err.contains("reverse-DNS"), "{err}");
+    let err = validate_bundle_identifier("com.a b")
+      .unwrap_err()
+      .to_string();
+    assert!(err.contains("[A-Za-z0-9.-]+"), "{err}");
+  }
+
+  #[test]
+  fn hmr_app_id_matches_the_packaged_id() {
+    // A configured identifier is used as is (validated up front by
+    // `resolve_desktop_app_identity`).
+    assert_eq!(
+      hmr_app_id(Some("com.acme.notes"), "whatever").as_deref(),
+      Some("com.acme.notes")
+    );
+    // Otherwise the host's packaged default for the same app name.
+    let expected = if cfg!(target_os = "macos") {
+      macos_default_bundle_id("My App")
+    } else {
+      derived_desktop_id("My App").unwrap()
+    };
+    assert_eq!(hmr_app_id(None, "My App"), Some(expected));
+    if !cfg!(target_os = "macos") {
+      // Linux strips the `lib` prefix of the `lib<app>.so` dylib.
+      assert_eq!(
+        hmr_app_id(None, "libmyapp").as_deref(),
+        Some("com.deno.desktop.myapp")
+      );
+      // Nothing usable derives from the name: no id rather than a bad one.
+      assert_eq!(hmr_app_id(None, "___"), None);
+    }
+    // Whatever comes out is something laufey accepts.
+    for name in ["x", "My App", "my_app", "a.b.c", "libfoo"] {
+      if let Some(id) = hmr_app_id(None, name) {
+        assert!(deno_lib::standalone::app_id::is_laufey_app_id(&id), "{id}");
+      }
+    }
+  }
+
+  #[test]
+  fn windows_self_extract_launcher_sets_app_id() {
+    let tmp = tempfile::tempdir().unwrap();
+    let bundle = tmp.path().join("MyApp");
+    std::fs::create_dir_all(&bundle).unwrap();
+    std::fs::write(bundle.join("MyApp.exe"), b"exe").unwrap();
+    make_self_extracting_dir(&bundle, "zstd", true, Some("com.acme.myapp"))
+      .unwrap();
+    let script = std::fs::read_to_string(bundle.join("MyApp.bat")).unwrap();
+    assert!(
+      script.contains("setlocal\r\nset \"LAUFEY_APP_ID=com.acme.myapp\"\r\n"),
+      "launcher should set the app id inside setlocal:\n{script}"
+    );
+    let set_at = script.find("LAUFEY_APP_ID").unwrap();
+    let run_at = script.find("\"%DEST%\\MyApp\\MyApp.exe\" %*").unwrap();
+    assert!(set_at < run_at, "set must precede the launch:\n{script}");
+
+    // Without a configured identifier the launcher sets nothing.
+    let bundle = tmp.path().join("Other");
+    std::fs::create_dir_all(&bundle).unwrap();
+    std::fs::write(bundle.join("Other.exe"), b"exe").unwrap();
+    make_self_extracting_dir(&bundle, "zstd", true, None).unwrap();
+    let script = std::fs::read_to_string(bundle.join("Other.bat")).unwrap();
+    assert!(!script.contains("LAUFEY_APP_ID"), "{script}");
+  }
+
+  #[test]
   fn macos_plist_launch_env_is_a_valid_ls_environment() {
     let plist = render_macos_info_plist("A", "com.a", "laufey", false, None);
-    let plist =
-      macos_plist_with_launch_env(&plist, LAUFEY_CUSTOM_SCHEMES_ENV, "t3code");
+    // Nothing to add leaves the plist as rendered (no empty LSEnvironment).
+    assert_eq!(macos_plist_with_launch_env(&plist, &[]), plist);
+    // Both keys land in ONE LSEnvironment dict (a second `LSEnvironment` key
+    // would be a duplicate key in the top-level dict).
+    let plist = macos_plist_with_launch_env(
+      &plist,
+      &[
+        (LAUFEY_APP_ID_ENV, "com.a"),
+        (LAUFEY_CUSTOM_SCHEMES_ENV, "t3code"),
+      ],
+    );
+    assert_eq!(plist.matches("<key>LSEnvironment</key>").count(), 1);
     let value = plist::Value::from_reader_xml(plist.as_bytes()).unwrap();
     let env = value
       .as_dictionary()
       .and_then(|d| d.get("LSEnvironment"))
       .and_then(|v| v.as_dictionary())
       .expect("LSEnvironment dict");
+    assert_eq!(env.len(), 2);
+    assert_eq!(
+      env.get(LAUFEY_APP_ID_ENV).and_then(|v| v.as_string()),
+      Some("com.a")
+    );
     assert_eq!(
       env
         .get(LAUFEY_CUSTOM_SCHEMES_ENV)

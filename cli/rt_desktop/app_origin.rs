@@ -1,8 +1,8 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 
-//! Where the desktop runtime gets the app's page origin from.
+//! Where the desktop runtime gets the app's page origin and identifier from.
 //!
-//! In order of precedence:
+//! The origin, in order of precedence:
 //!
 //! 1. The binary metadata's `app_origin` — `desktop.app.origin` from
 //!    `deno.json`, validated and normalized by the `deno desktop` that
@@ -15,14 +15,24 @@
 //!    embedded (`"compile": { "include": [".deno-desktop/app.json"] }`).
 //! 3. [`DEFAULT_APP_ORIGIN`].
 //!
+//! The identifier (the reverse-DNS `desktop.app.identifier` that names the
+//! app's web data directory, see `deno_lib::standalone::app_id`) comes from
+//! the metadata's `app_identifier`, else the same [`APP_CONFIG_FILE`]'s
+//! `identifier`, else nowhere.
+//!
 //! A configured value that does not validate is an error: starting the app at
 //! an origin the developer did not configure would silently move its
-//! origin-keyed storage and break any server allow-list.
+//! origin-keyed storage and break any server allow-list. So is a configured
+//! origin without an identifier: two apps configured with the same origin
+//! would otherwise share web storage. (`deno desktop` refuses to build that;
+//! this catches a file embedded by a CLI that predates the check.)
 
 use std::path::Path;
 use std::path::PathBuf;
 
+use deno_lib::standalone::app_id::validate_app_identifier;
 use deno_lib::standalone::app_origin::APP_CONFIG_FILE;
+use deno_lib::standalone::app_origin::AppConfigFile;
 use deno_lib::standalone::app_origin::AppOrigin;
 use deno_lib::standalone::app_origin::DEFAULT_APP_ORIGIN;
 use deno_lib::standalone::app_origin::parse_app_config_file;
@@ -35,34 +45,94 @@ pub enum AppOriginSource {
   Default,
 }
 
-/// Resolve the app origin. `read_file` reads a file from the embedded file
-/// system (`None` when absent); `root` is that file system's root and
-/// `entrypoint_key` the entrypoint's `/`-separated path relative to it.
-pub fn resolve_app_origin(
+/// The resolved page origin and identifier of the app.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedAppConfig {
+  pub origin: AppOrigin,
+  pub origin_source: AppOriginSource,
+  /// The validated reverse-DNS app identifier, if one is configured.
+  pub identifier: Option<String>,
+}
+
+/// Resolve the app origin and identifier. `read_file` reads a file from the
+/// embedded file system (`None` when absent); `root` is that file system's
+/// root and `entrypoint_key` the entrypoint's `/`-separated path relative to
+/// it.
+pub fn resolve_app_config(
   metadata_origin: Option<&str>,
+  metadata_identifier: Option<&str>,
   root: &Path,
   entrypoint_key: &str,
   read_file: impl Fn(&Path) -> Option<Vec<u8>>,
-) -> Result<(AppOrigin, AppOriginSource), String> {
-  if let Some(origin) = metadata_origin {
-    return AppOrigin::parse(origin)
-      .map(|o| (o, AppOriginSource::Metadata))
-      .map_err(|e| format!("invalid app origin {origin:?} in metadata: {e}"));
+) -> Result<ResolvedAppConfig, String> {
+  let metadata_origin = metadata_origin
+    .map(|origin| {
+      AppOrigin::parse(origin)
+        .map_err(|e| format!("invalid app origin {origin:?} in metadata: {e}"))
+    })
+    .transpose()?;
+  if let Some(identifier) = metadata_identifier {
+    validate_app_identifier(identifier).map_err(|e| {
+      format!("invalid app identifier {identifier:?} in metadata: {e}")
+    })?;
   }
+  // The file is only consulted for what the metadata leaves unset.
+  let file = if metadata_origin.is_none() || metadata_identifier.is_none() {
+    find_app_config_file(root, entrypoint_key, read_file)?
+  } else {
+    None
+  };
+  let file_origin = file
+    .as_ref()
+    .and_then(|(path, config)| Some((config.origin.clone()?, path.clone())));
+  let (origin, origin_source) = match (metadata_origin, file_origin) {
+    (Some(origin), _) => (origin, AppOriginSource::Metadata),
+    (None, Some((origin, path))) => (origin, AppOriginSource::ConfigFile(path)),
+    // The nearest file decides, even when it leaves `origin` unset.
+    (None, None) => {
+      debug_assert!(AppOrigin::parse(DEFAULT_APP_ORIGIN).is_ok());
+      (AppOrigin::default_origin(), AppOriginSource::Default)
+    }
+  };
+  let identifier = metadata_identifier
+    .map(|id| id.to_string())
+    .or_else(|| file.and_then(|(_, config)| config.identifier));
+  if origin_source != AppOriginSource::Default && identifier.is_none() {
+    let from = match &origin_source {
+      AppOriginSource::ConfigFile(path) => path.display().to_string(),
+      _ => "the binary metadata".to_string(),
+    };
+    return Err(format!(
+      "app origin {origin} (from {from}) requires an app identifier: set \
+       desktop.app.identifier in deno.json, or \"identifier\" in {APP_CONFIG_FILE} \
+       (e.g. \"com.example.myapp\"), so that apps sharing an origin do not \
+       share web storage"
+    ));
+  }
+  Ok(ResolvedAppConfig {
+    origin,
+    origin_source,
+    identifier,
+  })
+}
+
+/// The nearest [`APP_CONFIG_FILE`] and its parsed contents, if any.
+fn find_app_config_file(
+  root: &Path,
+  entrypoint_key: &str,
+  read_file: impl Fn(&Path) -> Option<Vec<u8>>,
+) -> Result<Option<(PathBuf, AppConfigFile)>, String> {
   for dir in config_file_dirs(root, entrypoint_key) {
     let path = join_key(&dir, APP_CONFIG_FILE);
     let Some(bytes) = read_file(&path) else {
       continue;
     };
     return match parse_app_config_file(&bytes) {
-      Ok(Some(origin)) => Ok((origin, AppOriginSource::ConfigFile(path))),
-      // The nearest file decides, even when it leaves `origin` unset.
-      Ok(None) => Ok((AppOrigin::default_origin(), AppOriginSource::Default)),
+      Ok(config) => Ok(Some((path, config))),
       Err(e) => Err(format!("{}: {e}", path.display())),
     };
   }
-  debug_assert!(AppOrigin::parse(DEFAULT_APP_ORIGIN).is_ok());
-  Ok((AppOrigin::default_origin(), AppOriginSource::Default))
+  Ok(None)
 }
 
 /// The directories searched for [`APP_CONFIG_FILE`], nearest first: the
@@ -132,63 +202,132 @@ mod tests {
     assert_eq!(config_file_dirs(root, "../outside/main.ts"), vec![vfs("")]);
   }
 
+  /// `resolve_app_config` rooted at `/vfs`, for brevity.
+  fn resolve(
+    metadata_origin: Option<&str>,
+    metadata_identifier: Option<&str>,
+    entrypoint_key: &str,
+    read: impl Fn(&Path) -> Option<Vec<u8>>,
+  ) -> Result<ResolvedAppConfig, String> {
+    resolve_app_config(
+      metadata_origin,
+      metadata_identifier,
+      Path::new("/vfs"),
+      entrypoint_key,
+      read,
+    )
+  }
+
   #[test]
   fn metadata_wins_over_the_config_file() {
-    let read = reader(&[(".deno-desktop/app.json", r#"{"origin":"b://b"}"#)]);
-    let (origin, source) =
-      resolve_app_origin(Some("a://a"), Path::new("/vfs"), "main.ts", read)
-        .unwrap();
-    assert_eq!(origin.as_origin_string(), "a://a");
-    assert_eq!(source, AppOriginSource::Metadata);
+    let read = reader(&[(
+      ".deno-desktop/app.json",
+      r#"{"origin":"b://b","identifier":"com.b.b"}"#,
+    )]);
+    let config =
+      resolve(Some("a://a"), Some("com.a.a"), "main.ts", &read).unwrap();
+    assert_eq!(config.origin.as_origin_string(), "a://a");
+    assert_eq!(config.origin_source, AppOriginSource::Metadata);
+    assert_eq!(config.identifier.as_deref(), Some("com.a.a"));
+    // Each key falls back to the file on its own.
+    let config = resolve(Some("a://a"), None, "main.ts", &read).unwrap();
+    assert_eq!(config.origin.as_origin_string(), "a://a");
+    assert_eq!(config.identifier.as_deref(), Some("com.b.b"));
+    let config = resolve(None, Some("com.a.a"), "main.ts", &read).unwrap();
+    assert_eq!(config.origin.as_origin_string(), "b://b");
+    assert_eq!(config.identifier.as_deref(), Some("com.a.a"));
+  }
+
+  #[test]
+  fn metadata_alone_does_not_read_the_file() {
+    // Both keys in the metadata: a broken file is never parsed.
+    let read = reader(&[(".deno-desktop/app.json", "not json")]);
+    let config =
+      resolve(Some("a://a"), Some("com.a.a"), "main.ts", read).unwrap();
+    assert_eq!(config.identifier.as_deref(), Some("com.a.a"));
   }
 
   #[test]
   fn reads_the_nearest_config_file() {
     let read = reader(&[
-      (".deno-desktop/app.json", r#"{"origin":"root://app"}"#),
-      ("src/.deno-desktop/app.json", r#"{"origin":"T3Code://App"}"#),
+      (
+        ".deno-desktop/app.json",
+        r#"{"origin":"root://app","identifier":"com.root.app"}"#,
+      ),
+      (
+        "src/.deno-desktop/app.json",
+        r#"{"origin":"T3Code://App","identifier":"com.t3.code"}"#,
+      ),
     ]);
-    let (origin, source) =
-      resolve_app_origin(None, Path::new("/vfs"), "src/main.ts", &read)
-        .unwrap();
-    assert_eq!(origin.as_origin_string(), "t3code://app");
+    let config = resolve(None, None, "src/main.ts", &read).unwrap();
+    assert_eq!(config.origin.as_origin_string(), "t3code://app");
     assert_eq!(
-      source,
+      config.origin_source,
       AppOriginSource::ConfigFile(vfs("src/.deno-desktop/app.json"))
     );
-    let (origin, _) =
-      resolve_app_origin(None, Path::new("/vfs"), "lib/main.ts", &read)
-        .unwrap();
-    assert_eq!(origin.as_origin_string(), "root://app");
+    assert_eq!(config.identifier.as_deref(), Some("com.t3.code"));
+    let config = resolve(None, None, "lib/main.ts", &read).unwrap();
+    assert_eq!(config.origin.as_origin_string(), "root://app");
+    assert_eq!(config.identifier.as_deref(), Some("com.root.app"));
   }
 
   #[test]
   fn defaults_when_nothing_is_configured() {
-    let (origin, source) =
-      resolve_app_origin(None, Path::new("/vfs"), "main.ts", reader(&[]))
-        .unwrap();
-    assert_eq!(origin.as_origin_string(), DEFAULT_APP_ORIGIN);
-    assert_eq!(source, AppOriginSource::Default);
+    let config = resolve(None, None, "main.ts", reader(&[])).unwrap();
+    assert_eq!(config.origin.as_origin_string(), DEFAULT_APP_ORIGIN);
+    assert_eq!(config.origin_source, AppOriginSource::Default);
+    assert_eq!(config.identifier, None);
     let read = reader(&[(".deno-desktop/app.json", "{}")]);
-    let (origin, _) =
-      resolve_app_origin(None, Path::new("/vfs"), "main.ts", read).unwrap();
-    assert_eq!(origin.as_origin_string(), DEFAULT_APP_ORIGIN);
+    let config = resolve(None, None, "main.ts", read).unwrap();
+    assert_eq!(config.origin.as_origin_string(), DEFAULT_APP_ORIGIN);
+    assert_eq!(config.identifier, None);
+    // An identifier alone keeps the default origin.
+    let read =
+      reader(&[(".deno-desktop/app.json", r#"{"identifier":"com.a.b"}"#)]);
+    let config = resolve(None, None, "main.ts", read).unwrap();
+    assert_eq!(config.origin_source, AppOriginSource::Default);
+    assert_eq!(config.identifier.as_deref(), Some("com.a.b"));
+  }
+
+  #[test]
+  fn a_configured_origin_requires_an_identifier() {
+    let read =
+      reader(&[(".deno-desktop/app.json", r#"{"origin":"t3code://app"}"#)]);
+    let err = resolve(None, None, "main.ts", &read).unwrap_err();
+    assert!(err.contains("requires an app identifier"), "{err}");
+    assert!(err.contains("app.json"), "{err}");
+    assert!(err.contains("desktop.app.identifier"), "{err}");
+    // The metadata's identifier satisfies it.
+    resolve(None, Some("com.t3.code"), "main.ts", &read).unwrap();
+    // So does one in the file (the other tests).
+    let err = resolve(Some("a://a"), None, "main.ts", reader(&[])).unwrap_err();
+    assert!(err.contains("the binary metadata"), "{err}");
   }
 
   #[test]
   fn invalid_configuration_is_an_error() {
     assert!(
-      resolve_app_origin(Some("http://app"), Path::new("/vfs"), "m.ts", |_| {
-        None
-      })
-      .unwrap_err()
-      .contains("metadata")
+      resolve(Some("http://app"), Some("com.a.b"), "m.ts", |_| None)
+        .unwrap_err()
+        .contains("metadata")
     );
-    let read =
-      reader(&[(".deno-desktop/app.json", r#"{"origin":"t3code://app:1"}"#)]);
     let err =
-      resolve_app_origin(None, Path::new("/vfs"), "main.ts", read).unwrap_err();
+      resolve(Some("a://a"), Some("notes"), "m.ts", |_| None).unwrap_err();
+    assert!(err.contains("identifier"), "{err}");
+    assert!(err.contains("reverse-DNS"), "{err}");
+    let read = reader(&[(
+      ".deno-desktop/app.json",
+      r#"{"origin":"t3code://app:1","identifier":"com.t3.code"}"#,
+    )]);
+    let err = resolve(None, None, "main.ts", read).unwrap_err();
     assert!(err.contains("app.json"), "{err}");
     assert!(err.contains("port"), "{err}");
+    let read = reader(&[(
+      ".deno-desktop/app.json",
+      r#"{"origin":"t3code://app","identifier":"../evil"}"#,
+    )]);
+    let err = resolve(None, None, "main.ts", read).unwrap_err();
+    assert!(err.contains("app.json"), "{err}");
+    assert!(err.contains("identifier"), "{err}");
   }
 }

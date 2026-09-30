@@ -36,6 +36,7 @@ use deno_core::anyhow::Context;
 use deno_core::anyhow::bail;
 use deno_core::error::AnyError;
 use deno_core::v8;
+use deno_lib::standalone::app_id::LAUFEY_APP_ID_ENV;
 use deno_lib::standalone::app_origin::AppOrigin;
 use deno_lib::util::result::js_error_downcast_ref;
 use deno_lib::version::otel_runtime_config;
@@ -1360,11 +1361,13 @@ laufey::main!(|| {
 
   // The page origin the webview runs the app at: `desktop.app.origin` baked
   // into the metadata, else an embedded `.deno-desktop/app.json`, else
-  // `app://localhost` (see `app_origin`). An invalid configured value stops
-  // the app rather than starting it at an origin the developer did not
-  // configure.
-  let app_origin = match app_origin::resolve_app_origin(
+  // `app://localhost` (see `app_origin`); and the app identifier, from the
+  // same two places. An invalid configured value, or a configured origin
+  // without an identifier, stops the app rather than starting it at an origin
+  // or with web storage the developer did not configure.
+  let app_config = match app_origin::resolve_app_config(
     data.metadata.app_origin.as_deref(),
+    data.metadata.app_identifier.as_deref(),
     &data.root_path,
     &data.metadata.entrypoint_key,
     |path| {
@@ -1372,15 +1375,48 @@ laufey::main!(|| {
       data.vfs.read_file_all(file).ok().map(|b| b.into_owned())
     },
   ) {
-    Ok((origin, source)) => {
-      log::debug!("[desktop] app origin {origin} (from {source:?})");
-      origin
+    Ok(config) => {
+      log::debug!(
+        "[desktop] app origin {} (from {:?}), identifier {:?}",
+        config.origin,
+        config.origin_source,
+        config.identifier
+      );
+      config
     }
     Err(e) => {
       log::error!("[desktop] {e}");
       eprintln!("error: desktop app origin: {e}");
       return;
     }
+  };
+  let app_origin = app_config.origin;
+  // The app identifier the webview backend keys its per-app web data
+  // directory on (`LAUFEY_APP_ID`). A launcher normally sets it: the macOS
+  // bundle's LSEnvironment, the Linux `.desktop` Exec line / AppRun /
+  // self-extract script, `deno desktop --hmr`. It is set here when none did —
+  // a binary executed directly, or a Windows `<app>.exe`, which has no
+  // launcher — so a binary built by a CLI that never sets it (or that only
+  // embeds `.deno-desktop/app.json`) still gets per-app storage. The WebView
+  // backends (WKWebView, WebView2, WebKitGTK) resolve the directory when the
+  // first window is created, which is after this. CEF resolves it at process
+  // start, before this library is loaded, so for CEF this is too late: it
+  // keeps a throwaway profile unless a launcher set the variable.
+  let set_laufey_app_id = match (
+    &app_config.identifier,
+    std::env::var_os(LAUFEY_APP_ID_ENV).filter(|v| !v.is_empty()),
+  ) {
+    (Some(id), None) => Some(id.clone()),
+    (Some(id), Some(launch_id)) => {
+      if launch_id != id.as_str() {
+        log::debug!(
+          "[desktop] {LAUFEY_APP_ID_ENV} {launch_id:?} from the launcher \
+           differs from the app identifier {id:?}; keeping the launcher's"
+        );
+      }
+      None
+    }
+    (None, _) => None,
   };
 
   // Serve over an in-process memory channel — there is no TCP loopback for
@@ -1397,10 +1433,10 @@ laufey::main!(|| {
   // any thread exists.
   //
   // Publish DENO_SERVE_ADDRESS, DENO_DESKTOP_APP_ORIGIN and
-  // DENO_DESKTOP_WS_ORIGIN BEFORE the tokio runtime is built. Once the
-  // runtime spins up its mio IO thread (and, optionally, the inspector server
-  // thread), `setenv` is no longer thread-safe on glibc — Rust 1.81+ marks it
-  // unsafe for that reason. We're still single-threaded up to here: the
+  // DENO_DESKTOP_WS_ORIGIN (and LAUFEY_APP_ID, see above) BEFORE the tokio
+  // runtime is built. Once the runtime spins up its mio IO thread (and,
+  // optionally, the inspector server thread), `setenv` is no longer
+  // thread-safe on glibc — Rust 1.81+ marks it unsafe for that reason. We're still single-threaded up to here: the
   // worker-fork path has already returned, and the init calls above
   // (init_logging, mark_standalone, rustls install_default, set_js_namespace,
   // the standalone-section read and the VFS extraction) don't spawn threads.
@@ -1431,6 +1467,9 @@ laufey::main!(|| {
         scheme_bridge::WS_ORIGIN_ENV,
         scheme_bridge::ws_relay_origin(addr),
       );
+    }
+    if let Some(id) = &set_laufey_app_id {
+      std::env::set_var(LAUFEY_APP_ID_ENV, id);
     }
   }
 
