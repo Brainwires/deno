@@ -32,8 +32,9 @@ export COPYFILE_DISABLE=1 # no AppleDouble ._ files in macOS tarballs
 repo_root=$(cd "$here/../.." && pwd)
 lib=$(runtime_lib_name "$TARGET")
 ext=$(archive_ext "$TARGET")
-denort_dir=$(unix_path "$DENORT_DIR")
+denort_dir=$(cd "$(unix_path "$DENORT_DIR")" && pwd)
 laufey_tar=$(unix_path "$LAUFEY_TAR")
+laufey_tar="$(cd "$(dirname "$laufey_tar")" && pwd)/$(basename "$laufey_tar")"
 out_dir=$(unix_path "$OUT_DIR")
 mkdir -p "$out_dir"
 out_dir=$(cd "$out_dir" && pwd)
