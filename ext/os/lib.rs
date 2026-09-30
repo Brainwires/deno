@@ -165,6 +165,78 @@ fn op_exec_path() -> Result<String, OsError> {
 
 static PROCESS_ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(Mutex::default);
 
+/// Environment variables an embedder provides to the runtime without
+/// writing them into the process environment. See [`set_env_overlay_var`].
+static ENV_OVERLAY: LazyLock<Mutex<Vec<(OsString, OsString)>>> =
+  LazyLock::new(Mutex::default);
+
+fn env_overlay() -> MutexGuard<'static, Vec<(OsString, OsString)>> {
+  ENV_OVERLAY
+    .lock()
+    .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Environment variable names compare case-insensitively on Windows.
+fn env_key_eq(a: &std::ffi::OsStr, b: &std::ffi::OsStr) -> bool {
+  #[cfg(windows)]
+  {
+    a.to_string_lossy()
+      .eq_ignore_ascii_case(b.to_string_lossy().as_ref())
+  }
+  #[cfg(not(windows))]
+  {
+    a == b
+  }
+}
+
+fn env_overlay_get(key: &std::ffi::OsStr) -> Option<OsString> {
+  env_overlay()
+    .iter()
+    .find(|(k, _)| env_key_eq(k, key))
+    .map(|(_, v)| v.clone())
+}
+
+fn env_overlay_remove(key: &std::ffi::OsStr) {
+  env_overlay().retain(|(k, _)| !env_key_eq(k, key));
+}
+
+/// Provide `key=value` to the runtime's view of the environment without
+/// calling `setenv`.
+///
+/// `setenv` is not thread-safe against a concurrent `getenv` on glibc (and is
+/// not documented to be on other libcs), and an embedder that loads the
+/// runtime into a process whose other threads already run (a GUI host's UI
+/// thread, a web engine's threads) cannot guarantee nothing reads the
+/// environment at that moment. A variable set here is seen by everything that
+/// reads the environment through [`ProcessEnvGuard`] (`Deno.env`, `node:process`
+/// `process.env`, the `Deno.serve` address override) and by child processes
+/// that inherit the environment, and it takes precedence over the process
+/// environment. `Deno.env.set` / `Deno.env.delete` of the same key drop it
+/// from the overlay and then write the process environment as usual. Native
+/// code reading the environment directly (`getenv`) does not see it.
+pub fn set_env_overlay_var(
+  key: impl Into<OsString>,
+  value: impl Into<OsString>,
+) {
+  let key = key.into();
+  let value = value.into();
+  let mut overlay = env_overlay();
+  overlay.retain(|(k, _)| !env_key_eq(k, &key));
+  overlay.push((key, value));
+}
+
+/// The process environment with the overlay applied (see
+/// [`set_env_overlay_var`]): what a child process that inherits the
+/// environment should receive.
+pub fn env_vars_os_with_overlay() -> Vec<(OsString, OsString)> {
+  let overlay = env_overlay().clone();
+  let mut vars: Vec<(OsString, OsString)> = env::vars_os()
+    .filter(|(k, _)| !overlay.iter().any(|(ok, _)| env_key_eq(ok, k)))
+    .collect();
+  vars.extend(overlay);
+  vars
+}
+
 /// A guard for coordinated runtime access to the process environment.
 ///
 /// Runtime environment ops, Node dotenv loading, and watched dotenv reloads
@@ -184,15 +256,18 @@ impl ProcessEnvGuard {
   }
 
   pub fn var(&self, key: &str) -> Result<String, env::VarError> {
-    env::var(key)
+    match env_overlay_get(key.as_ref()) {
+      Some(value) => value.into_string().map_err(env::VarError::NotUnicode),
+      None => env::var(key),
+    }
   }
 
   pub fn var_os(&self, key: impl AsRef<std::ffi::OsStr>) -> Option<OsString> {
-    env::var_os(key)
+    env_overlay_get(key.as_ref()).or_else(|| env::var_os(key))
   }
 
   pub fn vars_os(&self) -> Vec<(OsString, OsString)> {
-    env::vars_os().collect()
+    env_vars_os_with_overlay()
   }
 
   pub fn set_var(
@@ -201,6 +276,7 @@ impl ProcessEnvGuard {
     value: impl AsRef<std::ffi::OsStr>,
   ) {
     let key = key.as_ref();
+    env_overlay_remove(key);
     // SAFETY: Deno exposes process environment mutation for compatibility.
     // This guard coordinates the runtime mutation paths with the native
     // timezone refresh below, but cannot coordinate arbitrary native readers.
@@ -227,6 +303,7 @@ impl ProcessEnvGuard {
 
   pub fn remove_var(&self, key: impl AsRef<std::ffi::OsStr>) {
     let key = key.as_ref();
+    env_overlay_remove(key);
     // SAFETY: Deno exposes process environment mutation for compatibility.
     // This guard coordinates the runtime mutation paths with the native
     // timezone refresh below, but cannot coordinate arbitrary native readers.
@@ -487,6 +564,39 @@ mod tests {
 
   use super::PROCESS_ENV_LOCK;
   use super::ProcessEnvGuard;
+
+  #[test]
+  fn env_overlay_is_seen_without_setenv() {
+    let key = "DENO_OS_TEST_ENV_OVERLAY_KEY";
+    super::set_env_overlay_var(key, "from-overlay");
+    // Not written to the process environment.
+    assert!(std::env::var_os(key).is_none());
+    let env = ProcessEnvGuard::lock();
+    assert_eq!(env.var(key).unwrap(), "from-overlay");
+    assert_eq!(env.var_os(key).unwrap(), "from-overlay");
+    let matching = env
+      .vars_os()
+      .into_iter()
+      .filter(|(k, _)| k == key)
+      .collect::<Vec<_>>();
+    assert_eq!(matching, vec![(key.into(), "from-overlay".into())]);
+    assert!(
+      super::env_vars_os_with_overlay()
+        .iter()
+        .any(|(k, v)| k == key && v == "from-overlay")
+    );
+    // `Deno.env.set` replaces it for real.
+    env.set_var(key, "set");
+    assert_eq!(env.var(key).unwrap(), "set");
+    assert_eq!(std::env::var(key).unwrap(), "set");
+    // The overlay wins over the process environment...
+    super::set_env_overlay_var(key, "again");
+    assert_eq!(env.var(key).unwrap(), "again");
+    // ...and `Deno.env.delete` removes both.
+    env.remove_var(key);
+    assert!(env.var_os(key).is_none());
+    assert!(std::env::var_os(key).is_none());
+  }
 
   #[test]
   fn process_env_lock_is_held_through_timezone_notification() {

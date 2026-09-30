@@ -1830,7 +1830,9 @@ fn extract_network_stream<U: CanDowncastUpgrade>(
 
 #[op2]
 pub fn op_http_serve_address_override() -> (u8, String, u32, bool) {
-  if let Ok(val) = std::env::var("DENO_SERVE_ADDRESS") {
+  // Through the runtime's environment view, which includes variables an
+  // embedder provides without `setenv` (`deno_os::set_env_overlay_var`).
+  if let Ok(val) = deno_os::ProcessEnvGuard::lock().var("DENO_SERVE_ADDRESS") {
     return parse_serve_address(&val);
   };
 

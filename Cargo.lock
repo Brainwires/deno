@@ -2585,6 +2585,7 @@ dependencies = [
  "deno_error",
  "deno_http_h1",
  "deno_net",
+ "deno_os",
  "deno_telemetry",
  "deno_websocket",
  "flate2",
