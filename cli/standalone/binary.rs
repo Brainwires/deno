@@ -28,6 +28,7 @@ use deno_lib::args::CaData;
 use deno_lib::args::UnstableConfig;
 use deno_lib::shared::ReleaseChannel;
 use deno_lib::standalone::binary::CjsExportAnalysisEntry;
+use deno_lib::standalone::binary::InitialWindowConfig;
 use deno_lib::standalone::binary::MAGIC_BYTES;
 use deno_lib::standalone::binary::Metadata;
 use deno_lib::standalone::binary::NodeModules;
@@ -1377,6 +1378,22 @@ impl<'a> DenoCompileBinaryWriter<'a> {
         .as_mut()
         .and_then(|identity| identity.identifier.take()),
       app_deep_links: desktop_deep_links,
+      initial_window: self
+        .cli_options
+        .start_dir
+        .to_desktop_config()
+        .ok()
+        .and_then(|c| c.initial_window.as_ref())
+        .map(|w| InitialWindowConfig {
+          width: w.width,
+          height: w.height,
+          frameless: w.frameless,
+          no_activate: w.no_activate,
+          transparent_titlebar: w.transparent_titlebar,
+          transparent: w.transparent,
+          show_on_first_load: w.show_on_first_load,
+        })
+        .unwrap_or_default(),
     };
 
     let (data_section_bytes, section_sizes) = serialize_binary_data_section(

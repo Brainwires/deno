@@ -278,19 +278,22 @@ impl WefDesktopApi {
   /// verbatim. Deferring the reveal to load-finished means the window's first
   /// visible frame already has content. See
   /// https://github.com/denoland/deno/issues/35530.
-  fn create_initial_window(&self, width: i32, height: i32) -> u32 {
+  fn create_initial_window(
+    &self,
+    options: deno_lib::standalone::binary::InitialWindowConfig,
+  ) -> u32 {
     let window = laufey::Window::new_with_options(
-      width,
-      height,
+      i32::from(options.width),
+      i32::from(options.height),
       laufey::WindowOptions {
-        frameless: false,
-        no_activate: false,
-        transparent_titlebar: false,
+        frameless: options.frameless,
+        no_activate: options.no_activate,
+        transparent_titlebar: options.transparent_titlebar,
         hidden: true,
-        transparent: false,
+        transparent: options.transparent,
       },
     );
-    let window = self.setup_window_events(window, true);
+    let window = self.setup_window_events(window, options.show_on_first_load);
     let id = window.id();
 
     self.open_windows.lock().unwrap().insert(id);
@@ -2106,6 +2109,7 @@ async fn run_desktop(
   // App name (deno.json `desktop.app.name`, baked in at compile time) used as
   // the default window title. Moved into the op_state_init closure below.
   let app_name = data.metadata.app_name.clone();
+  let initial_window = data.metadata.initial_window;
   // The page origin's scheme handler is registered from the op_state_init
   // closure (it must precede the first webview); the WebSocket relay compares
   // upgrade `Origin` headers against the same origin from the navigate task.
@@ -2201,7 +2205,7 @@ async fn run_desktop(
       // configuration at creation, so a handler added later is never used
       // and the initial navigation to the app origin goes nowhere.
       scheme_bridge::register(app_origin_for_register);
-      let window_id = api.create_initial_window(800, 600);
+      let window_id = api.create_initial_window(initial_window);
       initial_window_id.store(window_id, Ordering::Release);
 
       // Title the initial window with the app name up front, so an app that
