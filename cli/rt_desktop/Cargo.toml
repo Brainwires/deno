@@ -56,8 +56,9 @@ v8.workspace = true
 libc.workspace = true
 
 [target.'cfg(windows)'.dependencies]
-# The URL protocol keys of the app's deep-link schemes (HKCU\Software\Classes).
-windows-sys.workspace = true
+# The URL protocol keys of the app's deep-link schemes (HKCU\Software\Classes),
+# and the Node-API exports added to the host executable (napi_host_exports.rs).
+windows-sys = { workspace = true, features = ["Win32_System_Diagnostics_Debug", "Win32_System_LibraryLoader", "Win32_System_Memory"] }
 
 [dev-dependencies]
 tempfile.workspace = true

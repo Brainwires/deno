@@ -7,8 +7,29 @@
 // request in $SMOKE_RESULT_FILE and exits the process, so a launch succeeds
 // only when the whole path works: the runtime starts, the webview loads the
 // page from the app origin, and a request with a body reaches Deno.serve.
+//
+// When smoke.sh built the Node-API probe addon (napi-probe/) into the app, the
+// app also loads it through `require` and records what its functions return:
+// the runtime library's Node-API symbols must resolve from inside the host
+// executable, both linked and looked up at run time.
+
+import { createRequire } from "node:module";
 
 const resultFile = Deno.env.get("SMOKE_RESULT_FILE");
+
+function loadNapiProbe(): Record<string, unknown> | null {
+  if (Deno.env.get("SMOKE_NAPI") !== "1") return null;
+  try {
+    const require = createRequire(import.meta.url);
+    const probe = require("./probe.node");
+    return { add: probe.add(2, 40), lookup: probe.lookup() };
+  } catch (e) {
+    return { error: String((e as Error)?.stack ?? e) };
+  }
+}
+
+const napi = loadNapiProbe();
+console.log("[smoke] napi", JSON.stringify(napi));
 
 const page = `<!doctype html>
 <html>
@@ -41,6 +62,7 @@ Deno.serve(async (req) => {
       requestUrl: req.url,
       originHeader: req.headers.get("origin"),
       appOrigin: Deno.env.get("DENO_DESKTOP_APP_ORIGIN") ?? null,
+      napi,
     };
     console.log("[smoke] result", JSON.stringify(record));
     if (resultFile) {

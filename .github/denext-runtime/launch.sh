@@ -10,6 +10,9 @@
 # packaged app. A direct exec also bypasses LaunchServices, so a macOS
 # bundle's LSEnvironment would not apply anyway.
 #
+# When smoke.sh embedded the Node-API probe addon, the app loads it and the
+# result must show both of its functions working.
+#
 # Env: TARGET BACKEND WORK_DIR
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
@@ -40,6 +43,11 @@ rm -f "$result"
 export SMOKE_RESULT_FILE
 SMOKE_RESULT_FILE=$(native_path "$result")
 export LAUFEY_APP_ID=dev.denext.smoke
+napi=0
+if [ -f "$work/app/probe.node" ]; then
+  napi=1
+fi
+export SMOKE_NAPI=$napi
 if [ "$BACKEND" = cef ]; then
   export LAUFEY_CUSTOM_SCHEMES=t3code
 fi
@@ -68,4 +76,11 @@ if [ -f "$result" ]; then
   echo
 fi
 [ "$status" = 0 ] && [ -f "$result" ] || { echo "launch smoke FAILED" >&2; exit 1; }
+if [ "$napi" = 1 ]; then
+  # {"add": 42, "lookup": "napi <n>"}: linked and run-time-resolved Node-API
+  # calls both reached the runtime library.
+  grep -Eq '"add": 42' "$result" && grep -Eq '"lookup": "napi [0-9]+"' "$result" ||
+    { echo "Node-API probe FAILED" >&2; exit 1; }
+  echo "Node-API probe passed"
+fi
 echo "launch smoke passed"
