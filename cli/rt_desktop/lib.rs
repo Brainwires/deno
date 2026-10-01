@@ -100,15 +100,89 @@ struct WefDesktopApi {
   /// Singleton for the unified-mux DevTools window. Without this, every
   /// `openDevtools()` call would spawn another DevTools window.
   devtools_window: Mutex<Option<u32>>,
+  /// Close requests waiting for the app's `close` listeners (cancelable
+  /// close; see `deno_runtime::ops::desktop::PendingCloses`).
+  pending_closes: Arc<deno_runtime::ops::desktop::PendingCloses>,
+  /// Whether the runtime may still reveal the hidden bootstrap window.
+  initial_reveal: Arc<InitialReveal>,
+}
+
+/// The bootstrap window's reveal state: it is created hidden and shown by the
+/// runtime on its first load (or by the 10 s fallback) unless the app opted
+/// out (`initialWindow.showOnFirstLoad: false`) or took over its visibility
+/// first (see `should_reveal_initial_window`).
+struct InitialReveal {
+  window_id: std::sync::atomic::AtomicU32,
+  show_on_first_load: bool,
+  app_controlled: std::sync::atomic::AtomicBool,
+  revealed: std::sync::atomic::AtomicBool,
+}
+
+impl InitialReveal {
+  fn new(show_on_first_load: bool) -> Self {
+    Self {
+      window_id: std::sync::atomic::AtomicU32::new(0),
+      show_on_first_load,
+      app_controlled: std::sync::atomic::AtomicBool::new(false),
+      revealed: std::sync::atomic::AtomicBool::new(false),
+    }
+  }
+
+  fn is_initial(&self, window_id: u32) -> bool {
+    window_id != 0 && self.window_id.load(Ordering::Acquire) == window_id
+  }
+
+  /// App code showed, hid or closed the window itself.
+  fn note_app_control(&self, window_id: u32) {
+    if self.is_initial(window_id) {
+      self.app_controlled.store(true, Ordering::Release);
+    }
+  }
+
+  /// Claims the one reveal if it is allowed now.
+  fn try_reveal(
+    &self,
+    trigger: deno_runtime::ops::desktop::RevealTrigger,
+  ) -> bool {
+    deno_runtime::ops::desktop::should_reveal_initial_window(
+      trigger,
+      self.show_on_first_load,
+      self.app_controlled.load(Ordering::Acquire),
+      self.revealed.load(Ordering::Acquire),
+    ) && !self.revealed.swap(true, Ordering::AcqRel)
+  }
+}
+
+/// Bookkeeping + the native close, shared by every path that really closes
+/// a window (an answered or timed-out close request, `close()`).
+#[derive(Clone)]
+struct CloseBook {
+  closed_windows: Arc<Mutex<HashSet<u32>>>,
+  open_windows: Arc<Mutex<HashSet<u32>>>,
+}
+
+impl CloseBook {
+  fn close(&self, window_id: u32) {
+    self.closed_windows.lock().unwrap().insert(window_id);
+    self.open_windows.lock().unwrap().remove(&window_id);
+    laufey::Window::from_id(window_id).close();
+  }
 }
 
 impl WefDesktopApi {
   /// Set up all event handlers on a newly created window, wiring events
   /// into the shared event channel.
+  fn close_book(&self) -> CloseBook {
+    CloseBook {
+      closed_windows: self.closed_windows.clone(),
+      open_windows: self.open_windows.clone(),
+    }
+  }
+
   fn setup_window_events(
     &self,
     window: laufey::Window,
-    show_on_first_load: bool,
+    reveal: Option<Arc<InitialReveal>>,
   ) -> laufey::Window {
     let kb_tx = self.event_tx.clone();
     let mouse_click_tx = self.event_tx.clone();
@@ -120,9 +194,9 @@ impl WefDesktopApi {
     let move_tx = self.event_tx.clone();
     let page_load_tx = self.event_tx.clone();
     let close_tx = self.event_tx.clone();
-    let closed_windows = self.closed_windows.clone();
-    let open_windows_on_close = self.open_windows.clone();
-    let shown = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let state_tx = self.event_tx.clone();
+    let close_book = self.close_book();
+    let pending_closes = self.pending_closes.clone();
 
     window
       .on_keyboard_event(move |ev| {
@@ -241,8 +315,27 @@ impl WefDesktopApi {
           },
         );
       })
+      .on_state_change(move |ev| {
+        let info = |s: laufey::WindowState| {
+          deno_runtime::ops::desktop::WindowStateInfo {
+            maximized: s.maximized,
+            minimized: s.minimized,
+            fullscreen: s.fullscreen,
+          }
+        };
+        let _ = state_tx.try_send(
+          deno_runtime::ops::desktop::DesktopEvent::WindowState {
+            window_id: ev.window_id,
+            state: info(ev.state),
+            previous: info(ev.previous),
+          },
+        );
+      })
       .on_page_load(move |ev| {
-        if show_on_first_load && !shown.swap(true, Ordering::AcqRel) {
+        if let Some(reveal) = &reveal
+          && reveal
+            .try_reveal(deno_runtime::ops::desktop::RevealTrigger::FirstLoad)
+        {
           laufey::Window::from_id(ev.window_id).show();
         }
         let _ = page_load_tx.try_send(
@@ -252,18 +345,44 @@ impl WefDesktopApi {
         );
       })
       .on_close_requested(move |ev| {
-        closed_windows.lock().unwrap().insert(ev.window_id);
-        open_windows_on_close.lock().unwrap().remove(&ev.window_id);
-        let _ = close_tx.try_send(
-          deno_runtime::ops::desktop::DesktopEvent::CloseRequested {
-            window_id: ev.window_id,
-          },
-        );
-        // Since laufey 0.7.0 a registered close-requested handler *defers*
-        // the close: the window stays open until `Window::close()` is called.
-        // The JS "close" event is a plain notification (not cancelable), so
-        // complete the close here to keep the native close button working.
-        laufey::Window::from_id(ev.window_id).close();
+        // A registered close-requested handler *defers* the close (laufey
+        // API 31): the window stays open until `Window::close()`. The JS
+        // "close" event is cancelable: DESKTOP_JS dispatches it and answers
+        // through `op_desktop_close_reply`, and `close_reply` below closes
+        // the window unless a listener called `preventDefault()`. A runtime
+        // that never answers (blocked or gone) must not leave a window the
+        // user cannot close: after CLOSE_REPLY_TIMEOUT it closes anyway.
+        let window_id = ev.window_id;
+        let token = pending_closes.begin(window_id);
+        let sent = close_tx
+          .try_send(deno_runtime::ops::desktop::DesktopEvent::CloseRequested {
+            window_id,
+          })
+          .is_ok();
+        if !sent {
+          if pending_closes.reply(window_id, false)
+            == deno_runtime::ops::desktop::CloseDecision::Close
+          {
+            close_book.close(window_id);
+          }
+          return;
+        }
+        let pending_closes = pending_closes.clone();
+        let close_book = close_book.clone();
+        // This runs on the backend UI thread, which has no tokio reactor.
+        std::thread::spawn(move || {
+          std::thread::sleep(deno_runtime::ops::desktop::CLOSE_REPLY_TIMEOUT);
+          if pending_closes.expire(window_id, token)
+            == deno_runtime::ops::desktop::CloseDecision::Close
+          {
+            log::warn!(
+              "[desktop] window {window_id}: no answer to the close request \
+               within {:?}; closing it",
+              deno_runtime::ops::desktop::CLOSE_REPLY_TIMEOUT
+            );
+            close_book.close(window_id);
+          }
+        });
       })
   }
 
@@ -293,8 +412,10 @@ impl WefDesktopApi {
         transparent: options.transparent,
       },
     );
-    let window = self.setup_window_events(window, options.show_on_first_load);
+    let window =
+      self.setup_window_events(window, Some(self.initial_reveal.clone()));
     let id = window.id();
+    self.initial_reveal.window_id.store(id, Ordering::Release);
 
     self.open_windows.lock().unwrap().insert(id);
     id
@@ -322,16 +443,18 @@ impl denort::desktop::DesktopApi for WefDesktopApi {
         transparent,
       },
     );
-    let window = self.setup_window_events(window, false);
+    let window = self.setup_window_events(window, None);
     let id = window.id();
     self.open_windows.lock().unwrap().insert(id);
     id
   }
 
   fn close_window(&self, window_id: u32) {
-    self.closed_windows.lock().unwrap().insert(window_id);
-    self.open_windows.lock().unwrap().remove(&window_id);
-    laufey::Window::from_id(window_id).close();
+    // A close for real: no `close` event, and a pending request (one the
+    // app canceled, or still deciding) is settled by it.
+    self.pending_closes.forget(window_id);
+    self.initial_reveal.note_app_control(window_id);
+    self.close_book().close(window_id);
   }
 
   fn is_closed(&self, window_id: u32) -> bool {
@@ -399,10 +522,12 @@ impl denort::desktop::DesktopApi for WefDesktopApi {
   }
 
   fn show(&self, window_id: u32) {
+    self.initial_reveal.note_app_control(window_id);
     laufey::Window::from_id(window_id).show();
   }
 
   fn hide(&self, window_id: u32) {
+    self.initial_reveal.note_app_control(window_id);
     laufey::Window::from_id(window_id).hide();
   }
 
@@ -434,7 +559,7 @@ impl denort::desktop::DesktopApi for WefDesktopApi {
       let window = laufey::Window::new(1200, 800);
       window.set_title("Deno Desktop DevTools");
       window.navigate(&url);
-      let window = self.setup_window_events(window, false);
+      let window = self.setup_window_events(window, None);
       let id = window.id();
       // Track for HMR reload + the singleton check above.
       self.open_windows.lock().unwrap().insert(id);
@@ -560,6 +685,124 @@ impl denort::desktop::DesktopApi for WefDesktopApi {
 
   fn quit(&self) {
     laufey::quit();
+  }
+
+  fn window_capabilities(
+    &self,
+  ) -> deno_runtime::ops::desktop::WindowCapabilitiesInfo {
+    let c = laufey::window_capabilities();
+    deno_runtime::ops::desktop::WindowCapabilitiesInfo {
+      state: c.state(),
+      state_events: c.state_events(),
+      size_constraints: c.size_constraints(),
+      screens: c.screens(),
+      display_events: c.display_events(),
+      title_bar_hidden: c.titlebar_hidden(),
+      title_bar_hidden_inset: c.titlebar_hidden_inset(),
+      window_button_position: c.traffic_light_position(),
+      mica: c.mica(),
+      acrylic: c.acrylic(),
+      tabbed: c.mica_alt(),
+      vibrancy: c.vibrancy(),
+      normal_bounds: c.normal_bounds(),
+      keep_alive: c.keep_alive(),
+      set_position: c.set_position(),
+    }
+  }
+
+  fn set_window_state(
+    &self,
+    window_id: u32,
+    action: deno_runtime::ops::desktop::WindowAction,
+  ) {
+    use deno_runtime::ops::desktop::WindowAction;
+    let w = laufey::Window::from_id(window_id);
+    match action {
+      WindowAction::Maximize => w.maximize(),
+      WindowAction::Unmaximize => w.unmaximize(),
+      WindowAction::Minimize => w.minimize(),
+      WindowAction::Restore => w.restore(),
+      WindowAction::EnterFullscreen => w.set_fullscreen(true),
+      WindowAction::LeaveFullscreen => w.set_fullscreen(false),
+    }
+  }
+
+  fn get_window_state(
+    &self,
+    window_id: u32,
+  ) -> deno_runtime::ops::desktop::WindowStateInfo {
+    let s = laufey::Window::from_id(window_id).get_state();
+    deno_runtime::ops::desktop::WindowStateInfo {
+      maximized: s.maximized,
+      minimized: s.minimized,
+      fullscreen: s.fullscreen,
+    }
+  }
+
+  fn set_size_constraints(&self, window_id: u32, c: [i32; 4]) {
+    laufey::Window::from_id(window_id).set_size_constraints(
+      laufey::SizeConstraints {
+        min_width: c[0],
+        min_height: c[1],
+        max_width: c[2],
+        max_height: c[3],
+      },
+    );
+  }
+
+  fn get_size_constraints(&self, window_id: u32) -> [i32; 4] {
+    let c = laufey::Window::from_id(window_id).get_size_constraints();
+    [c.min_width, c.min_height, c.max_width, c.max_height]
+  }
+
+  fn screens(&self) -> Vec<deno_runtime::ops::desktop::ScreenInfo> {
+    laufey::screens().iter().map(screen_info).collect()
+  }
+
+  fn window_screen_id(&self, window_id: u32) -> Option<i64> {
+    laufey::Window::from_id(window_id).get_screen_id()
+  }
+
+  fn set_titlebar_style(&self, window_id: u32, style: i32) -> bool {
+    let style = match style {
+      0 => laufey::TitlebarStyle::Default,
+      1 => laufey::TitlebarStyle::Hidden,
+      2 => laufey::TitlebarStyle::HiddenInset,
+      _ => return false,
+    };
+    laufey::Window::from_id(window_id).set_titlebar_style(style)
+  }
+
+  fn set_traffic_light_position(
+    &self,
+    window_id: u32,
+    position: Option<(i32, i32)>,
+  ) -> bool {
+    laufey::Window::from_id(window_id).set_traffic_light_position(position)
+  }
+
+  fn set_backdrop(&self, window_id: u32, backdrop: i32, material: i32) -> bool {
+    let Some(backdrop) = laufey_backdrop(backdrop, material) else {
+      return false;
+    };
+    laufey::Window::from_id(window_id).set_backdrop(backdrop)
+  }
+
+  fn get_normal_bounds(&self, window_id: u32) -> Option<(i32, i32, i32, i32)> {
+    let r = laufey::Window::from_id(window_id).get_normal_bounds()?;
+    Some((r.x, r.y, r.width, r.height))
+  }
+
+  fn set_quit_on_last_window_closed(&self, quit: bool) {
+    laufey::set_quit_on_last_window_closed(quit);
+  }
+
+  fn close_reply(&self, window_id: u32, prevented: bool) {
+    if self.pending_closes.reply(window_id, prevented)
+      == deno_runtime::ops::desktop::CloseDecision::Close
+    {
+      self.close_book().close(window_id);
+    }
   }
 
   fn set_application_menu(
@@ -933,6 +1176,52 @@ impl denort::desktop::DesktopApi for WefDesktopApi {
       move |status| cb(map_permission_status(status)),
     );
   }
+}
+
+fn screen_info(s: &laufey::Screen) -> deno_runtime::ops::desktop::ScreenInfo {
+  let rect = |r: laufey::Rect| deno_runtime::ops::desktop::DesktopRect {
+    x: r.x,
+    y: r.y,
+    width: r.width,
+    height: r.height,
+  };
+  deno_runtime::ops::desktop::ScreenInfo {
+    id: s.id,
+    bounds: rect(s.bounds),
+    work_area: rect(s.work_area),
+    scale_factor: s.scale_factor,
+    is_primary: s.is_primary,
+  }
+}
+
+/// laufey's `LAUFEY_BACKDROP_*` / `LAUFEY_VIBRANCY_*` numbers (what
+/// DESKTOP_JS passes) to its `Backdrop`.
+fn laufey_backdrop(backdrop: i32, material: i32) -> Option<laufey::Backdrop> {
+  use laufey::VibrancyMaterial as M;
+  Some(match backdrop {
+    0 => laufey::Backdrop::None,
+    1 => laufey::Backdrop::Mica,
+    2 => laufey::Backdrop::Acrylic,
+    3 => laufey::Backdrop::MicaAlt,
+    4 => laufey::Backdrop::Vibrancy(match material {
+      3 => M::Titlebar,
+      4 => M::Selection,
+      5 => M::Menu,
+      6 => M::Popover,
+      7 => M::Sidebar,
+      10 => M::HeaderView,
+      11 => M::Sheet,
+      12 => M::WindowBackground,
+      13 => M::Hud,
+      15 => M::FullscreenUi,
+      17 => M::Tooltip,
+      18 => M::ContentBackground,
+      21 => M::UnderWindowBackground,
+      22 => M::UnderPageBackground,
+      _ => return None,
+    }),
+    _ => return None,
+  })
 }
 
 fn map_permission_status(
@@ -1431,6 +1720,7 @@ laufey::main!(|| {
     data.metadata.app_origin.as_deref(),
     data.metadata.app_identifier.as_deref(),
     data.metadata.app_deep_links.as_deref(),
+    data.metadata.initial_window,
     &data.root_path,
     &data.metadata.entrypoint_key,
     |path| {
@@ -1547,6 +1837,7 @@ laufey::main!(|| {
           deep_links,
           identifier: app_config.identifier,
           targets: launch_targets,
+          initial_window: app_config.initial_window,
         },
         data,
       )
@@ -1623,6 +1914,8 @@ struct LaunchConfig {
   identifier: Option<String>,
   /// The deep links and files in this process's own arguments.
   targets: deno_lib::standalone::launch_args::LaunchTargets,
+  /// `desktop.initialWindow` (metadata, else the embedded app.json).
+  initial_window: deno_lib::standalone::binary::InitialWindowConfig,
 }
 
 /// Register the backend's open-URL and second-instance handlers, feeding
@@ -1720,7 +2013,6 @@ fn run_headless_worker() {
   denort::init_logging(None, None);
   deno_runtime::deno_permissions::mark_standalone();
   rustls::crypto::aws_lc_rs::default_provider()
-    data.metadata.initial_window,
     .install_default()
     .unwrap();
 
@@ -1837,7 +2129,6 @@ fn extract_fork_script_path(
     // This is the script path
     let path = PathBuf::from(arg);
     let path = if path.is_absolute() {
-          initial_window: app_config.initial_window,
       path
     } else {
       #[allow(
@@ -1914,8 +2205,6 @@ fn nested_depth(depth: usize) -> Result<usize, String> {
 }
 
 /// Convert a DesktopValue back to a laufey::Value for delivery to the
-  /// `desktop.initialWindow` (metadata, else the embedded app.json).
-  initial_window: deno_lib::standalone::binary::InitialWindowConfig,
 /// renderer. The inverse of `laufey_value_to_desktop_value`; `Binary` maps to
 /// `laufey::Value::Binary` so binding results carrying byte data arrive in
 /// the webview as a `Uint8Array` (denoland/deno#36498).
@@ -2115,6 +2404,11 @@ async fn run_desktop(
   let app_name = data.metadata.app_name.clone();
   // `desktop.initialWindow` from the metadata, else the embedded app.json.
   let initial_window = launch.initial_window;
+  // Shared by the bootstrap window's first-load reveal and the 10 s
+  // fallback below, so both honor the same opt-out / app control.
+  let initial_reveal =
+    Arc::new(InitialReveal::new(initial_window.show_on_first_load));
+  let initial_reveal_for_fallback = initial_reveal.clone();
   // The page origin's scheme handler is registered from the op_state_init
   // closure (it must precede the first webview); the WebSocket relay compares
   // upgrade `Origin` headers against the same origin from the navigate task.
@@ -2163,7 +2457,20 @@ async fn run_desktop(
         trays: Arc::new(Mutex::new(HashMap::new())),
         notifications: Arc::new(Mutex::new(HashMap::new())),
         devtools_window: Mutex::new(None),
+        pending_closes: Arc::new(
+          deno_runtime::ops::desktop::PendingCloses::default(),
+        ),
+        initial_reveal: initial_reveal.clone(),
       };
+
+      // `Deno.desktop` "displaychanged".
+      {
+        let display_tx = event_tx.0.clone();
+        laufey::on_display_changed(move || {
+          let _ = display_tx
+            .try_send(deno_runtime::ops::desktop::DesktopEvent::DisplayChanged);
+        });
+      }
 
       // Forward macOS dock-reopen callbacks (clicking the dock icon while
       // no windows are visible) into the shared event channel so JS can
@@ -2331,7 +2638,14 @@ async fn run_desktop(
     // anyway so the user isn't left with no window at all. `show()` is
     // idempotent, so racing the on_page_load reveal is harmless.
     tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-    laufey::Window::from_id(id).show();
+    // Not when the app opted out (a tray-only app) or already showed, hid
+    // or closed the window itself: today's unconditional show() revealed a
+    // tray app's hidden window 10 s after launch.
+    if initial_reveal_for_fallback
+      .try_reveal(deno_runtime::ops::desktop::RevealTrigger::Fallback)
+    {
+      laufey::Window::from_id(id).show();
+    }
   };
 
   // Hold the JoinHandle so we can abort it when the runtime / Laufey

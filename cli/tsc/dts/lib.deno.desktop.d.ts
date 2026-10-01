@@ -430,7 +430,85 @@ declare namespace Deno {
      *
      * @default {false} */
     transparent?: boolean;
+    /** Minimum size, applied with {@linkcode BrowserWindow.setMinimumSize}.
+     * `0` (the default) is no limit. */
+    minWidth?: number;
+    minHeight?: number;
+    /** Maximum size, applied with {@linkcode BrowserWindow.setMaximumSize}.
+     * `0` (the default) is no limit. */
+    maxWidth?: number;
+    maxHeight?: number;
+    /** Open in fullscreen ({@linkcode BrowserWindow.setFullScreen}).
+     *
+     * @default {false} */
+    fullscreen?: boolean;
+    /** See {@linkcode BrowserWindow.setTitleBarStyle}. */
+    titleBarStyle?: TitleBarStyle;
+    /** See {@linkcode BrowserWindow.setWindowButtonPosition}. */
+    trafficLightPosition?: WindowButtonPosition;
+    /** See {@linkcode BrowserWindow.setVibrancy}. */
+    vibrancy?: VibrancyMaterial;
+    /** See {@linkcode BrowserWindow.setBackgroundMaterial}. */
+    backgroundMaterial?: BackgroundMaterial;
   }
+
+  /** A rectangle in screen space: the {@linkcode BrowserWindow.getPosition}
+   * coordinates of this backend (points / DIP on macOS, Linux and CEF;
+   * physical pixels with the Windows WebView2 backend). */
+  export interface Rectangle {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  }
+
+  /** A display, from {@linkcode Deno.desktop.screens}. */
+  export interface Screen {
+    /** Identifies the display while it stays connected (not across a
+     * reconnect or a restart). */
+    id: number;
+    /** The whole display. */
+    bounds: Rectangle;
+    /** The display minus the menu bar, Dock, taskbar and panels. */
+    workArea: Rectangle;
+    /** Physical pixels per CSS pixel on this display (what
+     * {@linkcode BrowserWindow.devicePixelRatio} reports for a window on it). */
+    scaleFactor: number;
+    /** The primary display (macOS: the one with the menu bar). */
+    isPrimary: boolean;
+  }
+
+  /** `"hidden"`: a transparent title bar, the page drawn under it, the
+   * system buttons on top. `"hiddenInset"`: the same with the macOS traffic
+   * lights inset. */
+  export type TitleBarStyle = "default" | "hidden" | "hiddenInset";
+
+  /** Where the macOS traffic lights go: the close button's top-left corner,
+   * in points from the window's top-left. */
+  export interface WindowButtonPosition {
+    x: number;
+    y: number;
+  }
+
+  /** Windows 11 backdrops: `"mica"`, `"acrylic"`, `"tabbed"` (Mica Alt). */
+  export type BackgroundMaterial = "none" | "mica" | "acrylic" | "tabbed";
+
+  /** macOS vibrancy materials (NSVisualEffectMaterial). */
+  export type VibrancyMaterial =
+    | "titlebar"
+    | "selection"
+    | "menu"
+    | "popover"
+    | "sidebar"
+    | "header"
+    | "sheet"
+    | "window"
+    | "hud"
+    | "fullscreen-ui"
+    | "tooltip"
+    | "content"
+    | "under-window"
+    | "under-page";
 
   interface BrowserWindowObject {
     [key: string]: BrowserWindowValue;
@@ -587,7 +665,22 @@ declare namespace Deno {
     move: CustomEvent<BrowserWindowMoveDetail>;
     /** Fires after a navigation finishes loading. */
     load: Event;
+    /** The user asked to close the window (its close button, Alt+F4, the
+     * window manager) or {@linkcode Deno.desktop.quit} is closing it.
+     * Cancelable: `preventDefault()` keeps the window open; close it later
+     * with {@linkcode BrowserWindow.close}, which closes it without another
+     * `close` event. Answer synchronously: if the runtime does not get an
+     * answer within 5 seconds (its event loop is blocked or gone), the window
+     * closes anyway. Not fired by {@linkcode BrowserWindow.close}. */
     close: Event;
+    /** The window was maximized (zoomed on macOS). */
+    maximize: Event;
+    unmaximize: Event;
+    minimize: Event;
+    /** The window came back from minimized. */
+    restore: Event;
+    enterfullscreen: Event;
+    leavefullscreen: Event;
     menuclick: CustomEvent<MenuClickDetail>;
     contextmenuclick: CustomEvent<MenuClickDetail>;
   }
@@ -701,7 +794,75 @@ declare namespace Deno {
     setOpacity(opacity: number): void;
 
     isClosed(): boolean;
+    /** Close the window, without a `close` event (the way to finish a close
+     * that a `close` listener canceled). */
     close(): void;
+
+    /** Maximize the window (zoom on macOS). Like the other state methods it
+     * may complete asynchronously while the OS animates the change; the
+     * `maximize` event fires once it took effect. No-op where
+     * `Deno.desktop.windowCapabilities().state` is false. */
+    maximize(): void;
+    unmaximize(): void;
+    isMaximized(): boolean;
+    minimize(): void;
+    /** Un-minimize: back to the state the window had before it was
+     * minimized. */
+    restore(): void;
+    isMinimized(): boolean;
+    setFullScreen(flag: boolean): void;
+    isFullScreen(): boolean;
+
+    /** Limit how small the window can get, in {@linkcode setSize} units
+     * (`0` = no limit on that axis). The OS enforces it while the user
+     * resizes, {@linkcode setSize} clamps to it, and a smaller window grows
+     * to it. */
+    setMinimumSize(width: number, height: number): void;
+    getMinimumSize(): [number, number];
+    /** Limit how large the window can get (`0` = no limit). */
+    setMaximumSize(width: number, height: number): void;
+    getMaximumSize(): [number, number];
+
+    /** The outer frame: {@linkcode getPosition} and
+     * {@linkcode outerWidth} / {@linkcode outerHeight}. */
+    getBounds(): Rectangle;
+    /** Move and / or resize the outer frame; missing fields keep their
+     * value. A rectangle that would leave the window unreachable (on a
+     * display that is gone, or less than a 64x32 corner on any work area)
+     * is moved to the primary display, shrunk to fit and centered. The same
+     * rule applies to {@linkcode setPosition} and the constructor's `x` /
+     * `y`.
+     *
+     * To reopen a window where the user left it, save
+     * {@linkcode getNormalBounds} (and {@linkcode isMaximized} /
+     * {@linkcode isFullScreen}) when it closes, then on the next launch call
+     * `setBounds(saved)` and `maximize()` / `setFullScreen(true)` as needed. */
+    setBounds(bounds: Partial<Rectangle>): void;
+    /** The page area: {@linkcode getInnerPosition} and {@linkcode getSize}. */
+    getContentBounds(): Rectangle;
+    /** Like {@linkcode getBounds}, for the bounds the window returns to when
+     * it leaves the maximized, minimized or fullscreen state (the current
+     * bounds for a normal window). This is what to persist. */
+    getNormalBounds(): Rectangle;
+    /** The display the window is on (the one it overlaps most), or `null`. */
+    getScreen(): Screen | null;
+
+    /** Change the title bar style. Returns `false` (and changes nothing)
+     * where the backend can't: only macOS has title bar styles. */
+    setTitleBarStyle(style: TitleBarStyle): boolean;
+    /** Move the macOS traffic lights (Electron's `setWindowButtonPosition` /
+     * `trafficLightPosition`); `null` puts them back. Kept across resizes
+     * and fullscreen. Returns `false` where unsupported. */
+    setWindowButtonPosition(position: WindowButtonPosition | null): boolean;
+    /** Put a Windows 11 backdrop (Mica, Acrylic, tabbed Mica) behind the
+     * page; it shows where the page's background is transparent. Returns
+     * `false` (and changes nothing) where unsupported: other OSes, Windows
+     * before 11 (Acrylic and tabbed need 22H2), and the CEF backend. */
+    setBackgroundMaterial(material: BackgroundMaterial): boolean;
+    /** Put macOS vibrancy (an NSVisualEffectView) behind the page; it shows
+     * where the page's background is transparent. `null` removes it. Returns
+     * `false` where unsupported: other OSes and the CEF backend. */
+    setVibrancy(material: VibrancyMaterial | null): boolean;
 
     isVisible(): boolean;
     show(): void;
@@ -1045,7 +1206,42 @@ declare namespace Deno {
       files: string[];
     }
 
+    /** What this backend can do on this OS
+     * ({@linkcode Deno.desktop.windowCapabilities}). A method for a feature
+     * reported `false` changes nothing (and returns `false` where it returns
+     * a boolean): Linux has no title bar styles or backdrops, CEF no
+     * backdrops, Wayland can't place windows. */
+    export interface WindowCapabilities {
+      /** maximize / minimize / fullscreen. */
+      state: boolean;
+      /** The `maximize` … `leavefullscreen` events. */
+      stateEvents: boolean;
+      /** setMinimumSize / setMaximumSize. */
+      sizeConstraints: boolean;
+      screens: boolean;
+      /** The `"displaychanged"` event. */
+      displayEvents: boolean;
+      titleBarHidden: boolean;
+      titleBarHiddenInset: boolean;
+      windowButtonPosition: boolean;
+      mica: boolean;
+      acrylic: boolean;
+      tabbed: boolean;
+      vibrancy: boolean;
+      /** getNormalBounds tracks the bounds to return to. */
+      normalBounds: boolean;
+      /** {@linkcode quitOnLastWindowClosed} works. */
+      keepAlive: boolean;
+      /** setPosition / setBounds can move the window (not on Wayland). */
+      setPosition: boolean;
+    }
+
     export interface DesktopEventMap {
+      /** Displays were added, removed, rearranged or rescaled, or a work
+       * area changed; read {@linkcode screens} again. */
+      displaychanged: Event;
+      /** Cancelable: {@linkcode quit} was called. */
+      beforequit: Event;
       /** A URL routed to the running app (macOS). */
       openurl: CustomEvent<OpenUrlDetail>;
       /** A file opened with the running app (macOS). */
@@ -1260,6 +1456,38 @@ declare namespace Deno {
       ): Promise<string>;
     };
 
+    /** The connected displays, primary first. */
+    export function screens(): Screen[];
+    /** The primary display, or `null` when the backend can't list them. */
+    export function getPrimaryScreen(): Screen | null;
+    /** What window features this backend supports on this OS. */
+    export function windowCapabilities(): WindowCapabilities;
+
+    /** Quit the app, like Electron's `app.quit()`: fires a cancelable
+     * `"beforequit"` here, then a cancelable `close` on every open window;
+     * if any listener calls `preventDefault()`, nothing happens and this
+     * returns `false`. Otherwise the app shuts down as when its last window
+     * closes (the remaining windows close without another event) and this
+     * returns `true`.
+     *
+     * Quitting from the macOS app menu's Quit item (Cmd+Q, the `quit` role)
+     * does not go through this and can't be canceled. */
+    export function quit(): boolean;
+
+    /** Whether the app quits when its last window closes (default `true`).
+     * Creating a {@linkcode Deno.Tray} sets it to `false` unless the app set
+     * it itself, so a tray / menu-bar app keeps running with no window;
+     * destroying the tray does not quit the app (call {@linkcode quit}).
+     * On macOS an app hidden from the Dock (`Deno.dock.setVisible(false)`)
+     * also keeps running. A tray-only app that should never show its first
+     * window sets `desktop.initialWindow.showOnFirstLoad: false` in
+     * deno.json (or `"initialWindow"` in `.deno-desktop/app.json`); the
+     * window is also left alone once the app calls `show()`, `hide()` or
+     * `close()` on it before it first loads. */
+    export let quitOnLastWindowClosed: boolean;
+
+    export let ondisplaychanged: ((ev: Event) => any) | null;
+    export let onbeforequit: ((ev: Event) => any) | null;
     export let onopenurl:
       | ((ev: CustomEvent<OpenUrlDetail>) => any)
       | null;

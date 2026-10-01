@@ -739,6 +739,11 @@ const NOT_IMPORTED_OPS = [
   "op_desktop_send_error_report",
   "op_desktop_request_notification_permission",
   "op_desktop_query_notification_permission",
+  "op_desktop_screens",
+  "op_desktop_window_capabilities",
+  "op_desktop_quit",
+  "op_desktop_set_quit_on_last_window_closed",
+  "op_desktop_close_reply",
 
   // deno deploy subcommand
   "op_deploy_token_get",
@@ -761,7 +766,10 @@ const NOT_IMPORTED_OPS = [
 // The scheme ops (owner query, OS handler registration) belong to the same
 // main-scope `Deno.desktop` API, as do the passkey ops: a ceremony is
 // anchored to a window and yields a credential, which only the app's own
-// main-scope code may ask for.
+// main-scope code may ask for. Quitting the app, the keep-alive switch and
+// the answer to a window's close request are the app's own lifecycle: a
+// worker must not end the app or close (or keep open) a window behind its
+// back.
 const WORKER_EXCLUDED_OPS = [
   "op_desktop_read_clipboard_text",
   "op_desktop_write_clipboard_text",
@@ -771,6 +779,9 @@ const WORKER_EXCLUDED_OPS = [
   "op_desktop_register_scheme",
   "op_desktop_passkey_capabilities",
   "op_desktop_passkey_request",
+  "op_desktop_quit",
+  "op_desktop_set_quit_on_last_window_closed",
+  "op_desktop_close_reply",
 ];
 
 function removeImportedOps(isWorker = false) {

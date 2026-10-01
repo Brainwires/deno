@@ -397,6 +397,19 @@ pub enum DesktopEvent {
   PageLoad { window_id: u32 },
   #[serde(rename_all = "camelCase")]
   CloseRequested { window_id: u32 },
+  /// The window's maximized / minimized / fullscreen state changed (after
+  /// the OS applied it). DESKTOP_JS derives `maximize`, `unmaximize`,
+  /// `minimize`, `restore`, `enterfullscreen` and `leavefullscreen` from the
+  /// difference.
+  #[serde(rename_all = "camelCase")]
+  WindowState {
+    window_id: u32,
+    state: WindowStateInfo,
+    previous: WindowStateInfo,
+  },
+  /// Displays were added, removed, rearranged or rescaled, or a work area
+  /// changed (`Deno.desktop` "displaychanged").
+  DisplayChanged,
   #[serde(rename_all = "camelCase")]
   RuntimeError {
     message: String,
@@ -829,6 +842,208 @@ pub fn register_bind_call(
 /// runtime (denort_desktop) to bridge to the laufey backend.
 ///
 /// All per-window methods take a `window_id` identifying the target window.
+/// A window's state (`BrowserWindow.isMaximized()` etc.).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WindowStateInfo {
+  pub maximized: bool,
+  pub minimized: bool,
+  pub fullscreen: bool,
+}
+
+/// What `BrowserWindow` state methods ask the backend to do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowAction {
+  Maximize,
+  Unmaximize,
+  Minimize,
+  Restore,
+  EnterFullscreen,
+  LeaveFullscreen,
+}
+
+/// A rectangle in the backend's screen space (the `getPosition` space).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopRect {
+  pub x: i32,
+  pub y: i32,
+  pub width: i32,
+  pub height: i32,
+}
+
+/// One display (`Deno.desktop.screens()`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScreenInfo {
+  pub id: i64,
+  pub bounds: DesktopRect,
+  pub work_area: DesktopRect,
+  pub scale_factor: f64,
+  pub is_primary: bool,
+}
+
+/// `Deno.desktop.windowCapabilities()`: what this backend can do on this OS.
+/// A setter for something reported `false` changes nothing (and returns
+/// `false` where it returns a boolean).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WindowCapabilitiesInfo {
+  pub state: bool,
+  pub state_events: bool,
+  pub size_constraints: bool,
+  pub screens: bool,
+  pub display_events: bool,
+  pub title_bar_hidden: bool,
+  pub title_bar_hidden_inset: bool,
+  pub window_button_position: bool,
+  pub mica: bool,
+  pub acrylic: bool,
+  pub tabbed: bool,
+  pub vibrancy: bool,
+  pub normal_bounds: bool,
+  pub keep_alive: bool,
+  pub set_position: bool,
+}
+
+/// The smallest part of a window (or all of it, when smaller) that must
+/// overlap a screen's work area for [`ensure_on_screen`] to leave it where it
+/// is: enough of the title bar to grab it.
+pub const ON_SCREEN_MIN_WIDTH: i32 = 64;
+pub const ON_SCREEN_MIN_HEIGHT: i32 = 32;
+
+/// Keep a restored window reachable. Returns `rect` unchanged when at least
+/// a 64x32 part of it (all of it, if smaller) overlaps the work area of some
+/// screen; otherwise (a monitor that is gone, a resolution that shrank) the
+/// window moves to the primary screen's work area (the first screen when
+/// none is marked primary), shrunk to fit and centered. No screens (a
+/// backend that can't list them) leaves `rect` alone.
+pub fn ensure_on_screen(
+  rect: DesktopRect,
+  screens: &[ScreenInfo],
+) -> DesktopRect {
+  if screens.is_empty() {
+    return rect;
+  }
+  let need_w = ON_SCREEN_MIN_WIDTH.min(rect.width.max(1));
+  let need_h = ON_SCREEN_MIN_HEIGHT.min(rect.height.max(1));
+  let visible = screens.iter().any(|s| {
+    let wa = s.work_area;
+    let left = rect.x.max(wa.x) as i64;
+    let top = rect.y.max(wa.y) as i64;
+    let right =
+      (rect.x as i64 + rect.width as i64).min(wa.x as i64 + wa.width as i64);
+    let bottom =
+      (rect.y as i64 + rect.height as i64).min(wa.y as i64 + wa.height as i64);
+    right - left >= need_w as i64 && bottom - top >= need_h as i64
+  });
+  if visible {
+    return rect;
+  }
+  let target = screens
+    .iter()
+    .find(|s| s.is_primary)
+    .unwrap_or(&screens[0])
+    .work_area;
+  let width = rect.width.min(target.width).max(1);
+  let height = rect.height.min(target.height).max(1);
+  DesktopRect {
+    x: target.x + (target.width - width) / 2,
+    y: target.y + (target.height - height) / 2,
+    width,
+    height,
+  }
+}
+
+/// How long a close the user asked for waits for the app's `close` listeners
+/// to answer before it happens anyway (a blocked or crashed runtime must not
+/// leave a window that cannot be closed).
+pub const CLOSE_REPLY_TIMEOUT: std::time::Duration =
+  std::time::Duration::from_secs(5);
+
+/// What to do with a window after a close-request event was answered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CloseDecision {
+  /// Close the window now.
+  Close,
+  /// A listener called `preventDefault()`: keep it open.
+  Keep,
+  /// No close is pending for that window (already answered, timed out or
+  /// closed): do nothing.
+  Ignore,
+}
+
+/// The close requests waiting for the app's answer, keyed by window, each
+/// with a generation so a timer started for an earlier request can't close a
+/// window whose later request is still pending.
+#[derive(Default)]
+pub struct PendingCloses {
+  inner: std::sync::Mutex<(u64, HashMap<u32, u64>)>,
+}
+
+impl PendingCloses {
+  /// Record a close request; returns the token its timeout must present.
+  pub fn begin(&self, window_id: u32) -> u64 {
+    let mut guard = self.inner.lock().unwrap();
+    guard.0 += 1;
+    let token = guard.0;
+    guard.1.insert(window_id, token);
+    token
+  }
+
+  /// The app answered (`prevented` = a listener called `preventDefault()`).
+  pub fn reply(&self, window_id: u32, prevented: bool) -> CloseDecision {
+    if self.inner.lock().unwrap().1.remove(&window_id).is_none() {
+      return CloseDecision::Ignore;
+    }
+    if prevented {
+      CloseDecision::Keep
+    } else {
+      CloseDecision::Close
+    }
+  }
+
+  /// The timeout for request `token` fired: close only if that very request
+  /// is still unanswered.
+  pub fn expire(&self, window_id: u32, token: u64) -> CloseDecision {
+    let mut guard = self.inner.lock().unwrap();
+    if guard.1.get(&window_id) == Some(&token) {
+      guard.1.remove(&window_id);
+      CloseDecision::Close
+    } else {
+      CloseDecision::Ignore
+    }
+  }
+
+  /// The window closed some other way (`close()`, quit): forget it.
+  pub fn forget(&self, window_id: u32) {
+    self.inner.lock().unwrap().1.remove(&window_id);
+  }
+}
+
+/// What can reveal the hidden bootstrap window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RevealTrigger {
+  /// Its first navigation finished loading.
+  FirstLoad,
+  /// The safety net that shows it when the load never finishes.
+  Fallback,
+}
+
+/// Whether the runtime may reveal the bootstrap window on its own.
+///
+/// Never when `desktop.initialWindow.showOnFirstLoad` is false (a tray-only
+/// app), never once app code has called `show()`, `hide()` or `close()` on it
+/// (the app owns its visibility from then on), and only once.
+pub fn should_reveal_initial_window(
+  _trigger: RevealTrigger,
+  show_on_first_load: bool,
+  app_controlled: bool,
+  already_revealed: bool,
+) -> bool {
+  show_on_first_load && !app_controlled && !already_revealed
+}
+
 pub trait DesktopApi: Send + Sync + 'static {
   /// Create a new window with the given dimensions and return its ID.
   ///
@@ -890,7 +1105,58 @@ pub trait DesktopApi: Send + Sync + 'static {
   fn unbind(&self, window_id: u32, name: &str);
 
   fn navigate(&self, window_id: u32, url: &str);
+  /// End the app the way closing the last window does (laufey `quit`):
+  /// remaining windows close without a `close` event.
   fn quit(&self);
+
+  // --- Window state, constraints, screens and chrome (laufey API 38). The
+  // defaults are a backend that can do none of it.
+
+  fn window_capabilities(&self) -> WindowCapabilitiesInfo {
+    WindowCapabilitiesInfo::default()
+  }
+  fn set_window_state(&self, _window_id: u32, _action: WindowAction) {}
+  fn get_window_state(&self, _window_id: u32) -> WindowStateInfo {
+    WindowStateInfo::default()
+  }
+  /// `[min_width, min_height, max_width, max_height]`, 0 = no limit.
+  fn set_size_constraints(&self, _window_id: u32, _constraints: [i32; 4]) {}
+  fn get_size_constraints(&self, _window_id: u32) -> [i32; 4] {
+    [0; 4]
+  }
+  fn screens(&self) -> Vec<ScreenInfo> {
+    Vec::new()
+  }
+  fn window_screen_id(&self, _window_id: u32) -> Option<i64> {
+    None
+  }
+  /// 0 default, 1 hidden, 2 hidden inset.
+  fn set_titlebar_style(&self, _window_id: u32, _style: i32) -> bool {
+    false
+  }
+  fn set_traffic_light_position(
+    &self,
+    _window_id: u32,
+    _position: Option<(i32, i32)>,
+  ) -> bool {
+    false
+  }
+  /// laufey `LAUFEY_BACKDROP_*` and, for vibrancy, `LAUFEY_VIBRANCY_*`.
+  fn set_backdrop(
+    &self,
+    _window_id: u32,
+    _backdrop: i32,
+    _material: i32,
+  ) -> bool {
+    false
+  }
+  /// Normal bounds as (x, y, content width, content height).
+  fn get_normal_bounds(&self, _window_id: u32) -> Option<(i32, i32, i32, i32)> {
+    None
+  }
+  fn set_quit_on_last_window_closed(&self, _quit: bool) {}
+  /// The app answered a close request (see [`PendingCloses`]).
+  fn close_reply(&self, _window_id: u32, _prevented: bool) {}
   fn set_application_menu(&self, window_id: u32, menu: Vec<MenuItem>);
   fn show_context_menu(
     &self,
@@ -1140,7 +1406,18 @@ impl BrowserWindow {
         options.height.unwrap_or(600),
       );
       if let (Some(x), Some(y)) = (options.x, options.y) {
-        api.set_window_position(window_id, x, y);
+        // A position saved on a monitor that is gone lands on-screen.
+        let (width, height) = api.get_window_outer_size(window_id);
+        let rect = place_on_screen(
+          api.as_ref(),
+          DesktopRect {
+            x,
+            y,
+            width,
+            height,
+          },
+        );
+        api.set_window_position(window_id, rect.x, rect.y);
       }
       if let Some(resizable) = options.resizable {
         api.set_resizable(window_id, resizable);
@@ -1271,7 +1548,202 @@ impl BrowserWindow {
 
   #[fast]
   fn set_position(&self, #[smi] x: i32, #[smi] y: i32) {
-    self.api.set_window_position(self.window_id, x, y);
+    let (width, height) = self.api.get_window_outer_size(self.window_id);
+    let rect = place_on_screen(
+      self.api.as_ref(),
+      DesktopRect {
+        x,
+        y,
+        width,
+        height,
+      },
+    );
+    self.api.set_window_position(self.window_id, rect.x, rect.y);
+  }
+
+  // --- State (laufey API 38) ---
+
+  #[fast]
+  fn maximize(&self) {
+    self
+      .api
+      .set_window_state(self.window_id, WindowAction::Maximize);
+  }
+
+  #[fast]
+  fn unmaximize(&self) {
+    self
+      .api
+      .set_window_state(self.window_id, WindowAction::Unmaximize);
+  }
+
+  #[fast]
+  fn minimize(&self) {
+    self
+      .api
+      .set_window_state(self.window_id, WindowAction::Minimize);
+  }
+
+  #[fast]
+  fn restore(&self) {
+    self
+      .api
+      .set_window_state(self.window_id, WindowAction::Restore);
+  }
+
+  #[fast]
+  fn set_full_screen(&self, flag: bool) {
+    self.api.set_window_state(
+      self.window_id,
+      if flag {
+        WindowAction::EnterFullscreen
+      } else {
+        WindowAction::LeaveFullscreen
+      },
+    );
+  }
+
+  #[fast]
+  fn is_maximized(&self) -> bool {
+    self.api.get_window_state(self.window_id).maximized
+  }
+
+  #[fast]
+  fn is_minimized(&self) -> bool {
+    self.api.get_window_state(self.window_id).minimized
+  }
+
+  #[fast]
+  fn is_full_screen(&self) -> bool {
+    self.api.get_window_state(self.window_id).fullscreen
+  }
+
+  // --- Size constraints ---
+
+  #[fast]
+  fn set_minimum_size(&self, #[smi] width: i32, #[smi] height: i32) {
+    let mut c = self.api.get_size_constraints(self.window_id);
+    c[0] = width.max(0);
+    c[1] = height.max(0);
+    self.api.set_size_constraints(self.window_id, c);
+  }
+
+  fn get_minimum_size(&self) -> (i32, i32) {
+    let c = self.api.get_size_constraints(self.window_id);
+    (c[0], c[1])
+  }
+
+  #[fast]
+  fn set_maximum_size(&self, #[smi] width: i32, #[smi] height: i32) {
+    let mut c = self.api.get_size_constraints(self.window_id);
+    c[2] = width.max(0);
+    c[3] = height.max(0);
+    self.api.set_size_constraints(self.window_id, c);
+  }
+
+  fn get_maximum_size(&self) -> (i32, i32) {
+    let c = self.api.get_size_constraints(self.window_id);
+    (c[2], c[3])
+  }
+
+  // --- Bounds ---
+
+  /// The outer frame: `getPosition()` + `outerWidth` / `outerHeight`.
+  #[serde]
+  fn get_bounds(&self) -> DesktopRect {
+    outer_bounds(self.api.as_ref(), self.window_id)
+  }
+
+  /// The page area: `getInnerPosition()` + `getSize()`.
+  #[serde]
+  fn get_content_bounds(&self) -> DesktopRect {
+    let (x, y) = self.api.get_window_inner_position(self.window_id);
+    let (width, height) = self.api.get_window_size(self.window_id);
+    DesktopRect {
+      x,
+      y,
+      width,
+      height,
+    }
+  }
+
+  /// Like `getBounds()`, for the bounds the window returns to when it
+  /// leaves the maximized / minimized / fullscreen state.
+  #[serde]
+  fn get_normal_bounds(&self) -> DesktopRect {
+    let (outer_w, outer_h) = self.api.get_window_outer_size(self.window_id);
+    let (inner_w, inner_h) = self.api.get_window_size(self.window_id);
+    match self.api.get_normal_bounds(self.window_id) {
+      Some((x, y, w, h)) => DesktopRect {
+        x,
+        y,
+        width: w + (outer_w - inner_w).max(0),
+        height: h + (outer_h - inner_h).max(0),
+      },
+      None => outer_bounds(self.api.as_ref(), self.window_id),
+    }
+  }
+
+  /// Set the outer frame (missing fields keep their value). The result is
+  /// kept on-screen (see `ensure_on_screen`).
+  fn set_bounds(&self, #[scoped] bounds: BoundsOptions) {
+    let current = outer_bounds(self.api.as_ref(), self.window_id);
+    let (inner_w, inner_h) = self.api.get_window_size(self.window_id);
+    let chrome_w = (current.width - inner_w).max(0);
+    let chrome_h = (current.height - inner_h).max(0);
+    let target = DesktopRect {
+      x: bounds.x.unwrap_or(current.x),
+      y: bounds.y.unwrap_or(current.y),
+      width: bounds.width.unwrap_or(current.width),
+      height: bounds.height.unwrap_or(current.height),
+    };
+    let rect = place_on_screen(self.api.as_ref(), target);
+    if rect.width != current.width || rect.height != current.height {
+      self.api.set_window_size(
+        self.window_id,
+        (rect.width - chrome_w).max(1),
+        (rect.height - chrome_h).max(1),
+      );
+    }
+    if rect.x != current.x || rect.y != current.y {
+      self.api.set_window_position(self.window_id, rect.x, rect.y);
+    }
+  }
+
+  /// The id of the display the window is on (`Deno.desktop.screens()`), or
+  /// 0 when unknown (display ids are never 0).
+  #[fast]
+  #[symbol("Deno_privateDesktopScreenId")]
+  fn screen_id(&self) -> f64 {
+    self.api.window_screen_id(self.window_id).unwrap_or(0) as f64
+  }
+
+  // --- Chrome (string mapping in DESKTOP_JS) ---
+
+  #[fast]
+  #[symbol("Deno_privateDesktopTitleBarStyle")]
+  fn title_bar_style(&self, #[smi] style: i32) -> bool {
+    self.api.set_titlebar_style(self.window_id, style)
+  }
+
+  #[fast]
+  #[symbol("Deno_privateDesktopWindowButtonPosition")]
+  fn window_button_position(
+    &self,
+    reset: bool,
+    #[smi] x: i32,
+    #[smi] y: i32,
+  ) -> bool {
+    self.api.set_traffic_light_position(
+      self.window_id,
+      if reset { None } else { Some((x, y)) },
+    )
+  }
+
+  #[fast]
+  #[symbol("Deno_privateDesktopBackdrop")]
+  fn backdrop(&self, #[smi] backdrop: i32, #[smi] material: i32) -> bool {
+    self.api.set_backdrop(self.window_id, backdrop, material)
   }
 
   #[fast]
@@ -1460,6 +1932,35 @@ impl BrowserWindow {
     self.surface_taken.set(true);
     Ok(result)
   }
+}
+
+#[derive(FromV8)]
+struct BoundsOptions {
+  x: Option<i32>,
+  y: Option<i32>,
+  width: Option<i32>,
+  height: Option<i32>,
+}
+
+/// The outer frame of a window: position + chrome-inclusive size.
+fn outer_bounds(api: &dyn DesktopApi, window_id: u32) -> DesktopRect {
+  let (x, y) = api.get_window_position(window_id);
+  let (width, height) = api.get_window_outer_size(window_id);
+  DesktopRect {
+    x,
+    y,
+    width,
+    height,
+  }
+}
+
+/// [`ensure_on_screen`] against the backend's screens, when it can place
+/// windows at all (it can't on Wayland).
+fn place_on_screen(api: &dyn DesktopApi, rect: DesktopRect) -> DesktopRect {
+  if !api.window_capabilities().set_position {
+    return rect;
+  }
+  ensure_on_screen(rect, &api.screens())
 }
 
 #[derive(FromV8)]
@@ -1869,6 +2370,57 @@ async fn op_desktop_passkey_request(
   match desktop_passkeys(&state) {
     Some(passkeys) => passkeys.request(create, window_id, options_json).await,
     None => PASSKEY_NOT_SUPPORTED_ENVELOPE.to_string(),
+  }
+}
+
+/// `Deno.desktop.screens()`.
+#[op2]
+#[serde]
+fn op_desktop_screens(state: &mut OpState) -> Vec<ScreenInfo> {
+  state
+    .try_borrow::<Arc<dyn DesktopApi>>()
+    .map(|api| api.screens())
+    .unwrap_or_default()
+}
+
+/// `Deno.desktop.windowCapabilities()`.
+#[op2]
+#[serde]
+fn op_desktop_window_capabilities(
+  state: &mut OpState,
+) -> WindowCapabilitiesInfo {
+  state
+    .try_borrow::<Arc<dyn DesktopApi>>()
+    .map(|api| api.window_capabilities())
+    .unwrap_or_default()
+}
+
+/// `Deno.desktop.quit()`, once no listener canceled it.
+#[op2(fast)]
+fn op_desktop_quit(state: &mut OpState) {
+  if let Some(api) = state.try_borrow::<Arc<dyn DesktopApi>>() {
+    api.quit();
+  }
+}
+
+/// `Deno.desktop.quitOnLastWindowClosed = …`.
+#[op2(fast)]
+fn op_desktop_set_quit_on_last_window_closed(state: &mut OpState, quit: bool) {
+  if let Some(api) = state.try_borrow::<Arc<dyn DesktopApi>>() {
+    api.set_quit_on_last_window_closed(quit);
+  }
+}
+
+/// DESKTOP_JS's answer to a `closeRequested` event: whether a `close`
+/// listener called `preventDefault()`.
+#[op2(fast)]
+fn op_desktop_close_reply(
+  state: &mut OpState,
+  #[smi] window_id: u32,
+  prevented: bool,
+) {
+  if let Some(api) = state.try_borrow::<Arc<dyn DesktopApi>>() {
+    api.close_reply(window_id, prevented);
   }
 }
 
@@ -2729,6 +3281,11 @@ deno_core::extension!(
     op_desktop_send_error_report,
     op_desktop_request_notification_permission,
     op_desktop_query_notification_permission,
+    op_desktop_screens,
+    op_desktop_window_capabilities,
+    op_desktop_quit,
+    op_desktop_set_quit_on_last_window_closed,
+    op_desktop_close_reply,
   ],
   objects = [BrowserWindow, Dock, Tray, Notification],
 );
@@ -2922,6 +3479,220 @@ mod tests {
         "height": 600,
       })
     );
+  }
+
+  #[test]
+  fn window_state_and_display_wire_shapes() {
+    let v = serde_json::to_value(DesktopEvent::WindowState {
+      window_id: 3,
+      state: super::WindowStateInfo {
+        maximized: true,
+        minimized: false,
+        fullscreen: false,
+      },
+      previous: super::WindowStateInfo::default(),
+    })
+    .unwrap();
+    assert_eq!(
+      v,
+      json!({
+        "kind": "windowState",
+        "windowId": 3,
+        "state": { "maximized": true, "minimized": false, "fullscreen": false },
+        "previous": { "maximized": false, "minimized": false, "fullscreen": false },
+      })
+    );
+    assert_eq!(
+      serde_json::to_value(DesktopEvent::DisplayChanged).unwrap(),
+      json!({ "kind": "displayChanged" })
+    );
+  }
+
+  #[test]
+  fn screen_and_capabilities_wire_shapes() {
+    let screen = super::ScreenInfo {
+      id: 69734272,
+      bounds: super::DesktopRect {
+        x: 0,
+        y: 0,
+        width: 1440,
+        height: 900,
+      },
+      work_area: super::DesktopRect {
+        x: 0,
+        y: 25,
+        width: 1440,
+        height: 875,
+      },
+      scale_factor: 2.0,
+      is_primary: true,
+    };
+    assert_eq!(
+      serde_json::to_value(screen).unwrap(),
+      json!({
+        "id": 69734272,
+        "bounds": { "x": 0, "y": 0, "width": 1440, "height": 900 },
+        "workArea": { "x": 0, "y": 25, "width": 1440, "height": 875 },
+        "scaleFactor": 2.0,
+        "isPrimary": true,
+      })
+    );
+    let caps = serde_json::to_value(super::WindowCapabilitiesInfo {
+      state: true,
+      tabbed: true,
+      window_button_position: true,
+      ..Default::default()
+    })
+    .unwrap();
+    let keys: Vec<&str> = caps
+      .as_object()
+      .unwrap()
+      .keys()
+      .map(|k| k.as_str())
+      .collect();
+    for key in [
+      "state",
+      "stateEvents",
+      "sizeConstraints",
+      "screens",
+      "displayEvents",
+      "titleBarHidden",
+      "titleBarHiddenInset",
+      "windowButtonPosition",
+      "mica",
+      "acrylic",
+      "tabbed",
+      "vibrancy",
+      "normalBounds",
+      "keepAlive",
+      "setPosition",
+    ] {
+      assert!(keys.contains(&key), "missing {key}");
+    }
+    assert_eq!(caps["tabbed"], json!(true));
+    assert_eq!(caps["mica"], json!(false));
+  }
+
+  fn rect(x: i32, y: i32, width: i32, height: i32) -> super::DesktopRect {
+    super::DesktopRect {
+      x,
+      y,
+      width,
+      height,
+    }
+  }
+
+  fn screen(
+    id: i64,
+    work: super::DesktopRect,
+    primary: bool,
+  ) -> super::ScreenInfo {
+    super::ScreenInfo {
+      id,
+      bounds: work,
+      work_area: work,
+      scale_factor: 1.0,
+      is_primary: primary,
+    }
+  }
+
+  #[test]
+  fn ensure_on_screen_keeps_reachable_windows() {
+    use super::ensure_on_screen;
+    let screens = [
+      screen(1, rect(0, 25, 1440, 875), true),
+      screen(2, rect(1440, 0, 1920, 1080), false),
+    ];
+    // Fully on a screen, on the secondary, straddling both.
+    for r in [
+      rect(100, 100, 800, 600),
+      rect(2000, 100, 800, 600),
+      rect(1200, 100, 800, 600),
+    ] {
+      assert_eq!(ensure_on_screen(r, &screens), r);
+    }
+    // Mostly off-screen but a 64x32 corner is still inside: left alone.
+    let r = rect(-736, 25 + 875 - 32, 800, 600);
+    assert_eq!(ensure_on_screen(r, &screens), r);
+    // No screens known: nothing to check against.
+    let r = rect(-5000, -5000, 10, 10);
+    assert_eq!(ensure_on_screen(r, &[]), r);
+  }
+
+  #[test]
+  fn ensure_on_screen_moves_windows_from_a_missing_monitor() {
+    use super::ensure_on_screen;
+    // The saved bounds were on a monitor to the right that is gone.
+    let screens = [screen(1, rect(0, 25, 1440, 875), true)];
+    let moved = ensure_on_screen(rect(2000, 100, 800, 600), &screens);
+    assert_eq!(moved, rect(320, 162, 800, 600));
+    // Only a sliver (less than 64x32) shows: moved too.
+    let moved = ensure_on_screen(rect(1400, 100, 800, 600), &screens);
+    assert_eq!(moved, rect(320, 162, 800, 600));
+    // Bigger than the work area: shrunk to fit.
+    let moved = ensure_on_screen(rect(-4000, 0, 3000, 2000), &screens);
+    assert_eq!(moved, rect(0, 25, 1440, 875));
+    // The primary screen is the target even when it is not first.
+    let screens = [
+      screen(2, rect(-1920, 0, 1920, 1080), false),
+      screen(1, rect(0, 0, 1000, 1000), true),
+    ];
+    let moved = ensure_on_screen(rect(5000, 5000, 200, 100), &screens);
+    assert_eq!(moved, rect(400, 450, 200, 100));
+  }
+
+  #[test]
+  fn pending_closes_answer_once() {
+    use super::CloseDecision;
+    use super::PendingCloses;
+    let p = PendingCloses::default();
+    // Not canceled: close.
+    p.begin(1);
+    assert_eq!(p.reply(1, false), CloseDecision::Close);
+    // Answered already: the timeout does nothing.
+    assert_eq!(p.reply(1, false), CloseDecision::Ignore);
+    // Canceled: keep, and the timeout must not close it later.
+    let token = p.begin(2);
+    assert_eq!(p.reply(2, true), CloseDecision::Keep);
+    assert_eq!(p.expire(2, token), CloseDecision::Ignore);
+    // Never answered: the timeout closes it.
+    let token = p.begin(3);
+    assert_eq!(p.expire(3, token), CloseDecision::Close);
+    assert_eq!(p.reply(3, false), CloseDecision::Ignore);
+    // A stale timer from an earlier request leaves a newer one pending.
+    let old = p.begin(4);
+    assert_eq!(p.reply(4, true), CloseDecision::Keep);
+    let new = p.begin(4);
+    assert_eq!(p.expire(4, old), CloseDecision::Ignore);
+    assert_eq!(p.expire(4, new), CloseDecision::Close);
+    // close() settles a pending request.
+    let token = p.begin(5);
+    p.forget(5);
+    assert_eq!(p.expire(5, token), CloseDecision::Ignore);
+    assert_eq!(p.reply(5, false), CloseDecision::Ignore);
+    assert_eq!(
+      super::CLOSE_REPLY_TIMEOUT,
+      std::time::Duration::from_secs(5)
+    );
+  }
+
+  #[test]
+  fn initial_window_reveal_rules() {
+    use super::RevealTrigger::*;
+    use super::should_reveal_initial_window as reveal;
+    // The default: revealed once, by whichever comes first.
+    assert!(reveal(FirstLoad, true, false, false));
+    assert!(reveal(Fallback, true, false, false));
+    assert!(!reveal(Fallback, true, false, true));
+    assert!(!reveal(FirstLoad, true, false, true));
+    // A tray-only app (showOnFirstLoad: false): never, not even by the
+    // 10 s fallback.
+    assert!(!reveal(FirstLoad, false, false, false));
+    assert!(!reveal(Fallback, false, false, false));
+    // The app hid / showed / closed it before the first load: it owns its
+    // visibility.
+    assert!(!reveal(FirstLoad, true, true, false));
+    assert!(!reveal(Fallback, true, true, false));
   }
 
   #[test]

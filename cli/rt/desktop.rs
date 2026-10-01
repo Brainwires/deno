@@ -40,6 +40,11 @@ pub const DESKTOP_JS: &str = r#"
     op_desktop_write_clipboard_text,
     op_desktop_request_notification_permission,
     op_desktop_query_notification_permission,
+    op_desktop_screens,
+    op_desktop_window_capabilities,
+    op_desktop_quit,
+    op_desktop_set_quit_on_last_window_closed,
+    op_desktop_close_reply,
   } = internals.core.ops;
   const BrowserWindowPrototype = BrowserWindow.prototype;
   Object.setPrototypeOf(BrowserWindowPrototype, EventTarget.prototype);
@@ -612,8 +617,32 @@ pub const DESKTOP_JS: &str = r#"
     const instance = new nativeConstructor(...args);
     const windowId = instance.windowId;
     windows.set(windowId, instance);
+    applyWindowOptions(instance, args[0]);
     return instance;
   };
+  // Options the native constructor doesn't apply (size limits, fullscreen,
+  // chrome), applied right after the window exists.
+  function applyWindowOptions(win, options) {
+    if (options == null || typeof options !== "object") return;
+    const { minWidth, minHeight, maxWidth, maxHeight } = options;
+    if (minWidth != null || minHeight != null) {
+      win.setMinimumSize(minWidth ?? 0, minHeight ?? 0);
+    }
+    if (maxWidth != null || maxHeight != null) {
+      win.setMaximumSize(maxWidth ?? 0, maxHeight ?? 0);
+    }
+    if (options.titleBarStyle != null) {
+      win.setTitleBarStyle(options.titleBarStyle);
+    }
+    if (options.trafficLightPosition != null) {
+      win.setWindowButtonPosition(options.trafficLightPosition);
+    }
+    if (options.vibrancy != null) win.setVibrancy(options.vibrancy);
+    if (options.backgroundMaterial != null) {
+      win.setBackgroundMaterial(options.backgroundMaterial);
+    }
+    if (options.fullscreen) win.setFullScreen(true);
+  }
   Object.setPrototypeOf(OrigBW, nativeConstructor);
   Object.setPrototypeOf(OrigBW.prototype, nativeConstructor.prototype);
   Deno.BrowserWindow = OrigBW;
@@ -636,6 +665,87 @@ pub const DESKTOP_JS: &str = r#"
   internals.defineEventHandler(BrowserWindowPrototype, "close");
   internals.defineEventHandler(BrowserWindowPrototype, "menuclick");
   internals.defineEventHandler(BrowserWindowPrototype, "contextmenuclick");
+  internals.defineEventHandler(BrowserWindowPrototype, "maximize");
+  internals.defineEventHandler(BrowserWindowPrototype, "unmaximize");
+  internals.defineEventHandler(BrowserWindowPrototype, "minimize");
+  internals.defineEventHandler(BrowserWindowPrototype, "restore");
+  internals.defineEventHandler(BrowserWindowPrototype, "enterfullscreen");
+  internals.defineEventHandler(BrowserWindowPrototype, "leavefullscreen");
+
+  // Window chrome (laufey API 38). Each returns whether this backend / OS
+  // applied it (see Deno.desktop.windowCapabilities()).
+  const privateTitleBarStyle = Symbol.for("Deno_privateDesktopTitleBarStyle");
+  const privateWindowButtonPosition = Symbol.for(
+    "Deno_privateDesktopWindowButtonPosition",
+  );
+  const privateBackdrop = Symbol.for("Deno_privateDesktopBackdrop");
+  const privateScreenId = Symbol.for("Deno_privateDesktopScreenId");
+  const TITLE_BAR_STYLES = { default: 0, hidden: 1, hiddenInset: 2 };
+  const BACKGROUND_MATERIALS = { none: 0, mica: 1, acrylic: 2, tabbed: 3 };
+  // Electron's vibrancy names -> NSVisualEffectMaterial.
+  const VIBRANCY_MATERIALS = {
+    "titlebar": 3,
+    "selection": 4,
+    "menu": 5,
+    "popover": 6,
+    "sidebar": 7,
+    "header": 10,
+    "sheet": 11,
+    "window": 12,
+    "hud": 13,
+    "fullscreen-ui": 15,
+    "tooltip": 17,
+    "content": 18,
+    "under-window": 21,
+    "under-page": 22,
+  };
+  const BACKDROP_VIBRANCY = 4;
+  BrowserWindowPrototype.setTitleBarStyle = function(style) {
+    const raw = TITLE_BAR_STYLES[String(style)];
+    if (raw === undefined) {
+      throw new TypeError(`Unknown title bar style: ${style}`);
+    }
+    return this[privateTitleBarStyle](raw);
+  };
+  BrowserWindowPrototype.setWindowButtonPosition = function(position) {
+    if (position == null) return this[privateWindowButtonPosition](true, 0, 0);
+    const x = Math.trunc(Number(position.x));
+    const y = Math.trunc(Number(position.y));
+    if (!Number.isFinite(x) || !Number.isFinite(y) || x < 0 || y < 0) {
+      throw new TypeError("position must be { x, y } with x, y >= 0, or null");
+    }
+    return this[privateWindowButtonPosition](false, x, y);
+  };
+  BrowserWindowPrototype.setBackgroundMaterial = function(material) {
+    const raw = BACKGROUND_MATERIALS[String(material)];
+    if (raw === undefined) {
+      throw new TypeError(`Unknown background material: ${material}`);
+    }
+    return this[privateBackdrop](raw, 0);
+  };
+  BrowserWindowPrototype.setVibrancy = function(material) {
+    if (material == null) return this[privateBackdrop](0, 0);
+    const raw = VIBRANCY_MATERIALS[String(material)];
+    if (raw === undefined) {
+      throw new TypeError(`Unknown vibrancy material: ${material}`);
+    }
+    return this[privateBackdrop](BACKDROP_VIBRANCY, raw);
+  };
+  BrowserWindowPrototype.getScreen = function() {
+    const id = this[privateScreenId]();
+    if (!id) return null;
+    return op_desktop_screens().find((s) => s.id === id) ?? null;
+  };
+  // A state change from the backend -> the Electron-style events.
+  function dispatchWindowStateEvents(target, state, previous) {
+    const fire = (type) => target.dispatchEvent(new Event(type));
+    if (!previous.minimized && state.minimized) fire("minimize");
+    if (previous.minimized && !state.minimized) fire("restore");
+    if (!previous.maximized && state.maximized) fire("maximize");
+    if (previous.maximized && !state.maximized) fire("unmaximize");
+    if (!previous.fullscreen && state.fullscreen) fire("enterfullscreen");
+    if (previous.fullscreen && !state.fullscreen) fire("leavefullscreen");
+  }
 
   BrowserWindowPrototype.matchMedia = function(query) {
     return new MediaQueryList(this, query);
@@ -967,6 +1077,73 @@ pub const DESKTOP_JS: &str = r#"
     configurable: true,
     enumerable: true,
   });
+  // Screens, capabilities and the app's lifetime (laufey API 38).
+  internals.defineEventHandler(desktop, "displaychanged");
+  internals.defineEventHandler(desktop, "beforequit");
+  let quitOnLastWindowClosed = true;
+  let quitOnLastWindowClosedSet = false;
+  function setQuitOnLastWindowClosed(value) {
+    quitOnLastWindowClosed = !!value;
+    op_desktop_set_quit_on_last_window_closed(quitOnLastWindowClosed);
+  }
+  Object.defineProperties(desktop, {
+    screens: {
+      value: function screens() {
+        return op_desktop_screens();
+      },
+      writable: true,
+      configurable: true,
+      enumerable: true,
+    },
+    getPrimaryScreen: {
+      value: function getPrimaryScreen() {
+        const all = op_desktop_screens();
+        return all.find((s) => s.isPrimary) ?? all[0] ?? null;
+      },
+      writable: true,
+      configurable: true,
+      enumerable: true,
+    },
+    windowCapabilities: {
+      value: function windowCapabilities() {
+        return op_desktop_window_capabilities();
+      },
+      writable: true,
+      configurable: true,
+      enumerable: true,
+    },
+    quitOnLastWindowClosed: {
+      get() { return quitOnLastWindowClosed; },
+      set(value) {
+        quitOnLastWindowClosedSet = true;
+        setQuitOnLastWindowClosed(value);
+      },
+      configurable: true,
+      enumerable: true,
+    },
+    // Electron's app.quit(): a cancelable "beforequit" on Deno.desktop, then
+    // a cancelable "close" on every open window; any preventDefault() aborts
+    // (returns false). Otherwise the app shuts down as when its last window
+    // closes, and the remaining windows close without another event.
+    quit: {
+      value: function quit() {
+        const beforeQuit = new Event("beforequit", { cancelable: true });
+        desktop.dispatchEvent(beforeQuit);
+        if (beforeQuit.defaultPrevented) return false;
+        for (const win of windows.values()) {
+          if (win.isClosed()) continue;
+          const closeEvent = new Event("close", { cancelable: true });
+          win.dispatchEvent(closeEvent);
+          if (closeEvent.defaultPrevented) return false;
+        }
+        op_desktop_quit();
+        return true;
+      },
+      writable: true,
+      configurable: true,
+      enumerable: true,
+    },
+  });
   Object.defineProperty(Deno, "desktop", internals.core.propReadOnly(desktop));
 
   const TrayPrototype = Tray.prototype;
@@ -980,6 +1157,11 @@ pub const DESKTOP_JS: &str = r#"
   const OrigTray = function(...args) {
     const instance = new nativeTrayConstructor(...args);
     trays.set(instance.trayId, instance);
+    // A tray app keeps running with no window, unless it decided otherwise
+    // (Deno.desktop.quitOnLastWindowClosed set explicitly).
+    if (!quitOnLastWindowClosedSet && quitOnLastWindowClosed) {
+      setQuitOnLastWindowClosed(false);
+    }
     return instance;
   };
   Object.setPrototypeOf(OrigTray, nativeTrayConstructor);
@@ -1568,9 +1750,30 @@ pub const DESKTOP_JS: &str = r#"
             break;
           }
           case "closeRequested": {
+            // Cancelable: preventDefault() keeps the window open (the app
+            // later calls close(), which closes without another event). The
+            // runtime closes it if this answer never comes (5 s).
+            const target = windows.get(ev.windowId);
+            let prevented = false;
+            try {
+              if (target) {
+                const closeEvent = new Event("close", { cancelable: true });
+                target.dispatchEvent(closeEvent);
+                prevented = closeEvent.defaultPrevented;
+              }
+            } finally {
+              op_desktop_close_reply(ev.windowId, prevented);
+            }
+            break;
+          }
+          case "windowState": {
             const target = windows.get(ev.windowId);
             if (!target) break;
-            target.dispatchEvent(new Event("close"));
+            dispatchWindowStateEvents(target, ev.state, ev.previous);
+            break;
+          }
+          case "displayChanged": {
+            desktop.dispatchEvent(new Event("displaychanged"));
             break;
           }
           case "runtimeError": {
@@ -1991,6 +2194,65 @@ mod tests {
   // cheaply exec it in a v8 isolate from here, but the asserts below
   // pin the regressions that motivated this whole fix: the "Deno.env
   // throws NotCapable and aborts the IIFE" bug from May 2026.
+
+  #[test]
+  fn desktop_js_window_api_is_wired() {
+    // The close event is cancelable and always answered, even when a
+    // listener throws (`finally`), so the runtime never waits out the 5 s
+    // timeout for a responsive app.
+    assert!(DESKTOP_JS.contains(r#"new Event("close", { cancelable: true })"#));
+    assert!(DESKTOP_JS.contains(
+      "} finally {\n              op_desktop_close_reply(ev.windowId, prevented);"
+    ));
+    // State changes become the Electron-style events.
+    for ev in [
+      "\"minimize\"",
+      "\"restore\"",
+      "\"maximize\"",
+      "\"unmaximize\"",
+      "\"enterfullscreen\"",
+      "\"leavefullscreen\"",
+    ] {
+      assert!(
+        DESKTOP_JS.contains(&format!(
+          "defineEventHandler(BrowserWindowPrototype, {ev})"
+        )),
+        "{ev}"
+      );
+    }
+    assert!(DESKTOP_JS.contains("case \"windowState\":"));
+    assert!(DESKTOP_JS.contains("case \"displayChanged\":"));
+    assert!(DESKTOP_JS.contains("new Event(\"displaychanged\")"));
+    // quit(): beforequit, then every window's close, any cancel aborts.
+    assert!(
+      DESKTOP_JS.contains(r#"new Event("beforequit", { cancelable: true })"#)
+    );
+    assert!(
+      DESKTOP_JS.contains("if (closeEvent.defaultPrevented) return false;")
+    );
+    assert!(DESKTOP_JS.contains("op_desktop_quit();"));
+    // The tray-only rule: a Tray keeps the app alive unless the app chose.
+    assert!(
+      DESKTOP_JS.contains(
+        "if (!quitOnLastWindowClosedSet && quitOnLastWindowClosed) {"
+      )
+    );
+    for api in [
+      "screens:",
+      "getPrimaryScreen:",
+      "windowCapabilities:",
+      "quitOnLastWindowClosed:",
+      "quit:",
+      "BrowserWindowPrototype.setTitleBarStyle",
+      "BrowserWindowPrototype.setWindowButtonPosition",
+      "BrowserWindowPrototype.setBackgroundMaterial",
+      "BrowserWindowPrototype.setVibrancy",
+      "BrowserWindowPrototype.getScreen",
+      "applyWindowOptions(instance, args[0]);",
+    ] {
+      assert!(DESKTOP_JS.contains(api), "{api}");
+    }
+  }
 
   #[test]
   fn desktop_js_wraps_binding_trace_env_read_in_try_catch() {
