@@ -490,6 +490,12 @@ jobs:
         with:
           deno-version: ${{ env.STOCK_DENO_VERSION }}
 
+      # cl/lib for the Node-API probe addon smoke.sh builds into the app.
+      - uses: ilammy/msvc-dev-cmd@v1
+        if: runner.os == 'Windows'
+        with:
+          arch: x64
+
       # laufey's init_api rejects any C ABI mismatch between the runtime and
       # the host; fail here instead of at an app's first launch.
       - name: Check laufey ABI (libdenort vs hosts)
@@ -551,7 +557,9 @@ jobs:
 
       # Launch = the real load check: the host loads libdenort (laufey's
       # init_api rejects an ABI mismatch), the page loads from the app origin
-      # and a POST reaches Deno.serve. Linux runs under Xvfb.
+      # and a POST reaches Deno.serve. The app also loads the Node-API probe
+      # addon (.github/denext-runtime/napi-probe), linked and looked up at run
+      # time, from inside the host. Linux runs under Xvfb.
       - name: Smoke (launch, webview)
         id: launch_webview
         env:

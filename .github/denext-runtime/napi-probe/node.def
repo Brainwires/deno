@@ -1,0 +1,9 @@
+; The Node-API functions probe.c links against, for the import library the
+; Windows build generates (node-gyp links the one Node ships, node.lib).
+LIBRARY node.exe
+EXPORTS
+  napi_create_function
+  napi_set_named_property
+  napi_get_cb_info
+  napi_get_value_int32
+  napi_create_int32

@@ -92,8 +92,18 @@ are where the changes are discussed.
     [@sasivarnan](https://github.com/sasivarnan)), cherry-picked with their
     authorship; `initialWindow` is also read from the embedded
     `.deno-desktop/app.json`.
+11. **`fix(desktop)`: Node-API addons load on Windows** — addons look the
+    Node-API functions up in the host executable (node-gyp's delay-load hook,
+    napi-rs / neon `GetProcAddress(GetModuleHandle(NULL))`), which in a
+    desktop app is laufey's host and exports nothing, so the first Node-API
+    call killed the process (`0xC06D007F`). The runtime now gives the
+    executable an in-memory export table whose Node-API entries jump to the
+    DLL's functions (`cli/rt_desktop/napi_host_exports.rs`). macOS and Linux
+    already resolved them (the dylib's exports promoted to `RTLD_GLOBAL`,
+    with denoland/deno#36718's Linux flag fix). The runtime smoke test loads
+    a probe addon (`.github/denext-runtime/napi-probe`) on every target.
 
-11. **`feat(desktop)`: drag and drop, native file dialogs and the rich
+12. **`feat(desktop)`: drag and drop, native file dialogs and the rich
     clipboard** — `BrowserWindow` `dragenter` / `dragover` / `dragleave` /
     `drop` with native paths and `startDrag({ files, icon })`;
     `Deno.desktop.dialog.showOpenDialog` / `showSaveDialog` (the OS's own
@@ -101,7 +111,7 @@ are where the changes are discussed.
     `Deno.desktop.clipboard` (text, HTML, PNG images, `availableFormats()`,
     a `"change"` event); new `windowCapabilities()` keys (laufey API 39).
 
-The runtime-side parts (1-3, 5-11) are what the prebuilt `libdenort` carries.
+The runtime-side parts (1-3, 5-12) are what the prebuilt `libdenort` carries.
 The CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` /
 `LAUFEY_APP_ID` into a packaged app's launchers) are in the branch too, but a
 stock CLI does not run them; denext's own launcher provides that environment.

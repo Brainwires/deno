@@ -16,6 +16,7 @@
 //! TCP loopback for HTTP.
 
 mod app_origin;
+mod napi_host_exports;
 mod scheme_bridge;
 mod scheme_registration;
 
@@ -1557,6 +1558,19 @@ fn promote_dylib_symbols_to_global() {
   }
 }
 
+/// See `napi_host_exports`: Node-API addons on Windows resolve the Node-API
+/// functions through the host executable, which here is laufey's host.
+#[cfg(windows)]
+#[allow(clippy::print_stderr, reason = "runs before logging is initialized")]
+fn export_napi_symbols_from_executable() {
+  if let Err(err) = napi_host_exports::install() {
+    eprintln!(
+      "[desktop] could not export Node-API symbols from the executable; \
+       native Node-API addons will fail to load: {err}"
+    );
+  }
+}
+
 /// Get the filesystem path of this dylib using `dladdr`.
 #[cfg(unix)]
 fn get_dylib_path() -> Option<PathBuf> {
@@ -1695,6 +1709,10 @@ laufey::main!(|| {
   // Make NAPI symbols visible to native addons (e.g. next-swc).
   #[cfg(unix)]
   promote_dylib_symbols_to_global();
+  // On Windows addons look them up in the host executable (node-gyp's
+  // delay-load hook, libloading's `Library::this()`); make it export them.
+  #[cfg(windows)]
+  export_napi_symbols_from_executable();
 
   // Guard against re-entry: when a framework dev server (e.g. Next.js)
   // forks child/worker processes, they re-execute this dylib. Detect

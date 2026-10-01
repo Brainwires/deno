@@ -5,7 +5,11 @@
 #   DENORT_DESKTOP_BIN=<unpacked>/<runtime lib>
 #   LAUFEY_DEV_DIR=<unpacked>/laufey
 #
-# Env: TARGET ARCHIVE BACKEND WORK_DIR
+# The Node-API probe addon (napi-probe/) is built with the platform C compiler
+# (MSVC on PATH on Windows) and embedded in the app; launch.sh checks that it
+# loads. SMOKE_NAPI=0 skips it.
+#
+# Env: TARGET ARCHIVE BACKEND WORK_DIR [SMOKE_NAPI]
 # Leaves the packaged app under $WORK_DIR/app/out.
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
@@ -32,9 +36,15 @@ LAUFEY_DEV_DIR=$(native_path "$work/runtime/laufey")
 echo "DENORT_DESKTOP_BIN=$DENORT_DESKTOP_BIN"
 echo "LAUFEY_DEV_DIR=$LAUFEY_DEV_DIR"
 
+include=()
+if [ "${SMOKE_NAPI:-1}" != 0 ]; then
+  bash "$here/napi-probe/build.sh" "$work/app/probe.node"
+  include=(--include probe.node)
+fi
+
 cd "$work/app"
 deno --version
-deno desktop -A --backend "$BACKEND" --output out/smoke main.ts
+deno desktop -A --backend "$BACKEND" "${include[@]}" --output out/smoke main.ts
 
 echo "--- packaged output"
 find out -maxdepth 4 | sort | head -200
