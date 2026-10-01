@@ -467,14 +467,17 @@ pub fn rollback_with(
     let _ = write_state(layout, state);
     return err(Code::Io, format!("the rollback failed: {e}"));
   }
-  remove_path(&failed);
-  remove_path(&layout.staging_dir());
+  // On Windows the helper runs from the failed install's own executable, which
+  // cannot be deleted while it runs: leave `cleanup` set and the next start's
+  // watchdog finishes it.
+  let failed_gone = remove_path(&failed);
+  let staging_gone = remove_path(&layout.staging_dir());
   state.phase = Phase::Idle;
   state.launches = 0;
   state.helper_attempts = 0;
   state.entry = None;
   state.install_id = None;
-  state.cleanup = false;
+  state.cleanup = !(failed_gone && staging_gone);
   state.last_error = None;
   write_state(layout, state)?;
   Ok(if reject { to } else { None })
@@ -1045,6 +1048,40 @@ mod tests {
       assert_eq!(installed(l), "1.0.0", "{failing}");
       assert!(!l.failed_path().exists());
     }
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn undeletable_failed_install_is_cleaned_at_next_start() {
+    use std::os::unix::fs::PermissionsExt;
+    // SAFETY: getuid has no preconditions.
+    if unsafe { libc::getuid() } == 0 {
+      return; // root ignores the mode bits this relies on
+    }
+    let f = fixture(Some("2.0.0"));
+    let l = &f.layout;
+    let mut s = read_state(l).unwrap();
+    apply_swap(l, &mut s).unwrap();
+    // The new install holds a read-only directory with a file: removing the
+    // failed install fails (as a running exe does on Windows).
+    let locked = l.install.join("locked");
+    std::fs::create_dir(&locked).unwrap();
+    std::fs::write(locked.join("f"), b"x").unwrap();
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555))
+      .unwrap();
+    let mut s = read_state(l).unwrap();
+    assert_eq!(rollback(l, &mut s).unwrap().as_deref(), Some("2.0.0"));
+    assert_eq!(installed(l), "1.0.0");
+    assert!(l.failed_path().exists());
+    assert!(read_state(l).unwrap().cleanup);
+    std::fs::set_permissions(
+      l.failed_path().join("locked"),
+      std::fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    assert_eq!(startup_action(l), StartupAction::Continue { trial: false });
+    assert!(!l.failed_path().exists());
+    assert!(!read_state(l).unwrap().cleanup);
   }
 
   #[test]
