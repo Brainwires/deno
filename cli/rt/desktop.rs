@@ -29,6 +29,8 @@ pub const DESKTOP_JS: &str = r#"
     op_desktop_subscribe_launch_events,
     op_desktop_get_scheme_owner,
     op_desktop_register_scheme,
+    op_desktop_passkey_capabilities,
+    op_desktop_passkey_request,
     op_desktop_resolve_bind_call,
     op_desktop_reject_bind_call,
     op_desktop_alert,
@@ -442,6 +444,53 @@ pub const DESKTOP_JS: &str = r#"
       configurable: true,
       enumerable: false,
     },
+  });
+  // Native passkeys (WebAuthn through the OS platform authenticator), in the
+  // @clerk/electron-passkeys wire format: JSON options in, a JSON envelope
+  // out. A thin pass-through, so a preload can expose it unchanged as
+  // window.__clerk_internal_electron_passkeys.
+  function passkeyWindowId(options) {
+    const target = options == null ? undefined : options.window;
+    if (target === undefined || target === null) return 0; // focused window
+    if (typeof target === "number") {
+      if (!Number.isInteger(target) || target < 0 || target > 0x7fffffff) {
+        throw new TypeError(
+          "options.window must be a window id (an integer, 0 to 2^31 - 1)",
+        );
+      }
+      return target;
+    }
+    if (Object.prototype.isPrototypeOf.call(BrowserWindowPrototype, target)) {
+      return target.windowId;
+    }
+    throw new TypeError("options.window must be a BrowserWindow or a window id");
+  }
+  async function passkeyRequest(create, optionsJson, options) {
+    if (typeof optionsJson !== "string") {
+      throw new TypeError("optionsJson must be a string (JSON)");
+    }
+    return await op_desktop_passkey_request(
+      create,
+      passkeyWindowId(options),
+      optionsJson,
+    );
+  }
+  const passkeys = Object.freeze({
+    capabilities: function capabilities() {
+      return op_desktop_passkey_capabilities();
+    },
+    create: function create(optionsJson, options = undefined) {
+      return passkeyRequest(true, optionsJson, options);
+    },
+    get: function get(optionsJson, options = undefined) {
+      return passkeyRequest(false, optionsJson, options);
+    },
+  });
+  Object.defineProperty(desktop, "passkeys", {
+    value: passkeys,
+    writable: false,
+    configurable: true,
+    enumerable: true,
   });
   Object.defineProperty(Deno, "desktop", internals.core.propReadOnly(desktop));
 
@@ -1549,6 +1598,22 @@ mod tests {
     assert!(DESKTOP_JS.contains("op_desktop_take_launch_targets()"));
     assert!(DESKTOP_JS.contains("launchUrls:"));
     assert!(DESKTOP_JS.contains("launchFiles:"));
+  }
+
+  #[test]
+  fn desktop_js_installs_passkeys() {
+    assert!(
+      DESKTOP_JS.contains(r#"Object.defineProperty(desktop, "passkeys""#)
+    );
+    assert!(DESKTOP_JS.contains("op_desktop_passkey_capabilities()"));
+    // Strings in, the envelope out: the JSON is passed through untouched.
+    assert!(DESKTOP_JS.contains("typeof optionsJson !== \"string\""));
+    assert!(DESKTOP_JS.contains(
+      "op_desktop_passkey_request(\n      create,\n      passkeyWindowId(options),\n      optionsJson,"
+    ));
+    // The window defaults to 0 (focused); a BrowserWindow gives its id.
+    assert!(DESKTOP_JS.contains("return 0; // focused window"));
+    assert!(DESKTOP_JS.contains("return target.windowId;"));
   }
 
   #[test]

@@ -1125,6 +1125,83 @@ declare namespace Deno {
       options?: RegisterSchemeOptions,
     ): Promise<RegisterSchemeResult>;
 
+    /** What {@linkcode Deno.desktop.passkeys.capabilities} reports. */
+    export interface PasskeyCapabilities {
+      /** Touch ID / iCloud Keychain (macOS), Windows Hello (Windows). */
+      platformAuthenticator: boolean;
+      /** Roaming security keys (USB / NFC / BLE). */
+      securityKeys: boolean;
+    }
+
+    /** Options of {@linkcode Deno.desktop.passkeys.create} / `get`. */
+    export interface PasskeyRequestOptions {
+      /** The window the OS sheet / dialog is anchored to. Defaults to the
+       * focused window (on macOS the key, main or first visible window; on
+       * Windows the foreground window when it is the app's, else its first
+       * visible window). With no visible window (e.g. before the initial
+       * window has loaded) the request resolves with `unknown`, "no window to
+       * anchor the passkey request to". */
+      // deno-lint-ignore no-explicit-any
+      window?: BrowserWindow<any> | number;
+    }
+
+    /**
+     * Native passkeys: WebAuthn ceremonies through the OS platform
+     * authenticator, for an app whose page origin (a custom scheme, a
+     * loopback address) can't satisfy the RP ID the browser engine checks.
+     *
+     * Strings in, strings out, in the wire format of
+     * `@clerk/electron-passkeys`, so a preload can expose this unchanged to
+     * `@clerk/electron/passkeys`: `optionsJson` is
+     * `PublicKeyCredentialCreationOptions` / `RequestOptions` as JSON with
+     * unpadded base64url binary members, and every request resolves with a
+     * JSON envelope, `{"ok":true,"credential":{...}}` or
+     * `{"ok":false,"error":{"code","message"}}`, `code` one of `cancelled`,
+     * `invalid_rp`, `not_supported`, `timeout`, `unknown`. It rejects only
+     * on a wrong argument type.
+     *
+     * **Security.** Treat `optionsJson` as untrusted input and the result as
+     * a credential for the RP: call this only from the app's own trusted
+     * code, never on behalf of arbitrary web content. This path skips the
+     * browser's origin check; on Windows nothing ties the RP ID to the app,
+     * so check it against the RP IDs the app expects.
+     *
+     * One ceremony runs at a time; a request made meanwhile resolves with
+     * `unknown` ("a passkey request is already in progress").
+     *
+     * **Per OS.**
+     * - macOS 12+: the app's code signature must carry
+     *   `com.apple.developer.associated-domains` = `webcredentials:<rp-id>`
+     *   (with a provisioning profile), and
+     *   `https://<rp-id>/.well-known/apple-app-site-association` must list
+     *   `<TeamID>.<bundle-id>`; otherwise every request is `invalid_rp`.
+     *   The OS builds clientDataJSON (origin `https://<rp-id>`).
+     * - Windows 10 1903+: `webauthn.dll`; any RP ID; clientDataJSON is built
+     *   with origin `https://<rp-id>`. A request without `timeout` ends
+     *   after 60 s.
+     * - Linux: not supported (`capabilities()` reports none and requests
+     *   resolve with `not_supported`).
+     *
+     * Not available in workers.
+     *
+     * @category Desktop
+     * @experimental
+     */
+    export const passkeys: {
+      /** What a request can use right now. */
+      capabilities(): Promise<PasskeyCapabilities>;
+      /** A registration ceremony (`navigator.credentials.create`). */
+      create(
+        optionsJson: string,
+        options?: PasskeyRequestOptions,
+      ): Promise<string>;
+      /** An authentication ceremony (`navigator.credentials.get`). */
+      get(
+        optionsJson: string,
+        options?: PasskeyRequestOptions,
+      ): Promise<string>;
+    };
+
     export let onopenurl:
       | ((ev: CustomEvent<OpenUrlDetail>) => any)
       | null;
