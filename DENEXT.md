@@ -93,7 +93,15 @@ are where the changes are discussed.
     authorship; `initialWindow` is also read from the embedded
     `.deno-desktop/app.json`.
 
-The runtime-side parts (1-3, 5-10) are what the prebuilt `libdenort` carries.
+11. **`feat(desktop)`: drag and drop, native file dialogs and the rich
+    clipboard** — `BrowserWindow` `dragenter` / `dragover` / `dragleave` /
+    `drop` with native paths and `startDrag({ files, icon })`;
+    `Deno.desktop.dialog.showOpenDialog` / `showSaveDialog` (the OS's own
+    dialogs, AbortSignal-cancellable, never blocking the runtime);
+    `Deno.desktop.clipboard` (text, HTML, PNG images, `availableFormats()`,
+    a `"change"` event); new `windowCapabilities()` keys (laufey API 39).
+
+The runtime-side parts (1-3, 5-11) are what the prebuilt `libdenort` carries.
 The CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` /
 `LAUFEY_APP_ID` into a packaged app's launchers) are in the branch too, but a
 stock CLI does not run them; denext's own launcher provides that environment.
@@ -102,7 +110,8 @@ The laufey backend hosts are built from
 [Brainwires/laufey](https://github.com/Brainwires/laufey) branch
 `denext/integration` (registered schemes, app data dir, WebKitGTK scheme
 request bodies, launch config, open-url / single instance, passkeys, the
-window API with littledivy/laufey#80 and #81, Windows bindgen fix), at the commit pinned by
+window API with littledivy/laufey#80 and #81, drag and drop / file dialogs /
+rich clipboard, Windows bindgen fix), at the commit pinned by
 `LAUFEY_SHA` in the workflow (or the `laufey_ref` input).
 
 laufey's `init_api` rejects any C ABI version mismatch between the runtime
