@@ -27,6 +27,8 @@ pub const DESKTOP_JS: &str = r#"
     op_desktop_recv_event,
     op_desktop_take_launch_targets,
     op_desktop_subscribe_launch_events,
+    op_desktop_get_scheme_owner,
+    op_desktop_register_scheme,
     op_desktop_resolve_bind_call,
     op_desktop_reject_bind_call,
     op_desktop_alert,
@@ -416,6 +418,29 @@ pub const DESKTOP_JS: &str = r#"
       get() { return getLaunchTargets().files; },
       configurable: true,
       enumerable: true,
+    },
+  });
+  // Who handles the app's deep-link schemes, and registering the app as
+  // their handler (the runtime also registers unowned ones at startup).
+  // Only schemes declared in desktop.app.deepLinks are accepted.
+  Object.defineProperties(desktop, {
+    getSchemeOwner: {
+      value: function getSchemeOwner(scheme) {
+        return op_desktop_get_scheme_owner(String(scheme));
+      },
+      writable: true,
+      configurable: true,
+      enumerable: false,
+    },
+    registerScheme: {
+      value: function registerScheme(scheme, options = undefined) {
+        // Only a literal `true` takes a scheme over from another app.
+        const force = options != null && options.force === true;
+        return op_desktop_register_scheme(String(scheme), force);
+      },
+      writable: true,
+      configurable: true,
+      enumerable: false,
     },
   });
   Object.defineProperty(Deno, "desktop", internals.core.propReadOnly(desktop));
@@ -1524,6 +1549,19 @@ mod tests {
     assert!(DESKTOP_JS.contains("op_desktop_take_launch_targets()"));
     assert!(DESKTOP_JS.contains("launchUrls:"));
     assert!(DESKTOP_JS.contains("launchFiles:"));
+  }
+
+  #[test]
+  fn desktop_js_installs_scheme_registration() {
+    assert!(DESKTOP_JS.contains("getSchemeOwner: {"));
+    assert!(DESKTOP_JS.contains("registerScheme: {"));
+    assert!(DESKTOP_JS.contains("op_desktop_get_scheme_owner(String(scheme))"));
+    // `force` must be exactly `true`: a truthy non-boolean doesn't take a
+    // scheme over.
+    assert!(DESKTOP_JS.contains("options.force === true"));
+    assert!(
+      DESKTOP_JS.contains("op_desktop_register_scheme(String(scheme), force)")
+    );
   }
 
   #[test]

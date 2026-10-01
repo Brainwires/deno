@@ -744,11 +744,13 @@ fn validate_url_scheme(scheme: &str) -> Result<(), AnyError> {
 /// Register the configured deep-link URL schemes with the OS-specific app
 /// metadata so the system routes `<scheme>://...` links to this app.
 ///
-/// First pass: this writes the declarative registration into the bundle
-/// (macOS `CFBundleURLTypes`, Linux `.desktop` `MimeType` + `Exec %u`,
-/// Windows `.reg`/`.bat` helper). Delivering the opened URL into the running
-/// app (single-instance forwarding, the macOS `openURLs` Apple Event, and the
-/// `open-url` JS event) is tracked separately in the issue.
+/// This writes the declarative registration into the bundle (macOS
+/// `CFBundleURLTypes`, Linux `.desktop` `MimeType` + `Exec %u`). Windows has
+/// no in-bundle registration: the `.msi` writes the URL protocol keys at
+/// install time (`msi_scheme_rows`), and the runtime registers the schemes
+/// on startup when nothing handles them. Delivering the opened URL into the
+/// running app (single-instance forwarding, the macOS `openURLs` Apple Event,
+/// and the `open-url` JS event) is tracked separately in the issue.
 fn register_deep_links(
   bundle_path: &Path,
   desktop_flags: &DesktopFlags,
@@ -782,7 +784,8 @@ fn register_deep_links(
   };
   match target_os {
     "macos" => register_deep_links_macos(bundle_path, &schemes)?,
-    "windows" => register_deep_links_windows(bundle_path, &schemes)?,
+    // Registered by the installer and the runtime (see above).
+    "windows" => {}
     _ => register_deep_links_linux(bundle_path, &schemes)?,
   }
 
@@ -893,36 +896,6 @@ fn register_deep_links_linux(
   }
 
   std::fs::write(&desktop_file, out)?;
-  Ok(())
-}
-
-/// Windows: there is no in-bundle declarative registration for protocol
-/// handlers, so drop a `register-deep-links.bat` next to the launcher that
-/// writes the `HKCU\Software\Classes\<scheme>` keys. An installer (or the
-/// user) runs it once after install; the keys point back at the launcher in
-/// its install location (`%~dp0`).
-fn register_deep_links_windows(
-  bundle_path: &Path,
-  schemes: &[String],
-) -> Result<(), AnyError> {
-  // The launcher written by the Windows packaging step is `<app>.exe` (the
-  // backend binary renamed to the bundle/app name).
-  let launcher = bundle_path
-    .file_name()
-    .map(|n| format!("{}.exe", n.to_string_lossy()))
-    .unwrap_or_else(|| "launcher.exe".to_string());
-
-  let mut script = String::from("@echo off\r\nsetlocal\r\n");
-  for scheme in schemes {
-    script.push_str(&format!(
-      "reg add \"HKCU\\Software\\Classes\\{scheme}\" /ve /d \"URL:{scheme}\" /f\r\n\
-       reg add \"HKCU\\Software\\Classes\\{scheme}\" /v \"URL Protocol\" /d \"\" /f\r\n\
-       reg add \"HKCU\\Software\\Classes\\{scheme}\\shell\\open\\command\" /ve /d \"\\\"%~dp0{launcher}\\\" \\\"%%1\\\"\" /f\r\n",
-    ));
-  }
-  script.push_str("endlocal\r\n");
-
-  std::fs::write(bundle_path.join("register-deep-links.bat"), script)?;
   Ok(())
 }
 
@@ -1840,7 +1813,8 @@ async fn package_windows_app_dir(
     desktop_flags.single_instance,
   )?;
 
-  // Drop the deep-link registration script next to the launcher.
+  // Validate the deep-link schemes. Windows has nothing to write into the
+  // app dir: the `.msi` and the runtime register them.
   register_deep_links(&app_dir, desktop_flags)?;
 
   // Remove the standalone dylib (it's now inside the app dir).
@@ -5144,6 +5118,169 @@ fn version_core_fields(version: &str) -> Vec<&str> {
   core.split('.').collect()
 }
 
+/// The rows that register an app's deep-link schemes as URL protocols when
+/// its `.msi` installs, so a link opened before the app's first launch
+/// already starts it.
+///
+/// Each scheme gets its own component, so it can be skipped on its own, with
+/// a registry key path. The rows write exactly the key the runtime writes
+/// for itself and recognizes as this app's (`deno_lib`
+/// `standalone::scheme_handler::windows`): the `URL:<scheme>` default value,
+/// `URL Protocol`, the `DenoDesktopAppId` marker when the app has an id,
+/// `DefaultIcon` = `"<exe>",0` and `shell\open\command` = `"<exe>" "%1"`,
+/// where `<exe>` is the installed launcher (`[#key]`). Root `-1` puts the key
+/// in `HKLM\Software\Classes` for a per-machine install (this package's
+/// default, `ALLUSERS=1`) and `HKCU\Software\Classes` for a per-user one,
+/// matching where the files go. A `*` row removes the whole key, subkeys
+/// included, when the component is uninstalled.
+///
+/// Another app's registration is left alone, as the runtime leaves it: the
+/// component's condition installs it only when the key it would write (in
+/// the install's scope) has no `shell\open\command`, or carries this app's
+/// `DenoDesktopAppId` (this app's own earlier registration, or a previous
+/// install). `AppSearch` reads both through `RegLocator` before costing. The
+/// installer can't compare the command against the installed exe path
+/// instead, since that path is only known after `CostFinalize`, which is
+/// where component conditions are evaluated.
+struct MsiSchemeRows {
+  /// Component rows (the Component table's columns).
+  components: Vec<Vec<msi::Value>>,
+  /// Component ids, for FeatureComponents.
+  component_ids: Vec<String>,
+  registry: Vec<Vec<msi::Value>>,
+  reg_locators: Vec<Vec<msi::Value>>,
+  app_search: Vec<Vec<msi::Value>>,
+}
+
+fn msi_scheme_rows(
+  schemes: &[String],
+  identifier: &str,
+  app_id: Option<&str>,
+  launcher_file_key: &str,
+) -> MsiSchemeRows {
+  use deno_lib::standalone::scheme_handler::windows as scheme_reg;
+  use msi::Value;
+
+  // msidbComponentAttributes64bit | msidbComponentAttributesRegistryKeyPath.
+  const COMPONENT_64BIT_REGISTRY_KEYPATH: i32 = 256 | 4;
+  // HKCU for a per-user install, HKLM for a per-machine one.
+  const ROOT_BY_SCOPE: i32 = -1;
+  // RegLocator roots, and msidbLocatorTypeRawValue | msidbLocatorType64bit.
+  const LOCATOR_HKCU: i32 = 1;
+  const LOCATOR_HKLM: i32 = 2;
+  const LOCATOR_RAW_64BIT: i32 = 2 | 16;
+
+  let exe = format!("[#{launcher_file_key}]");
+  let str_or_null =
+    |v: Option<String>| v.map(Value::Str).unwrap_or(Value::Null);
+  let mut rows = MsiSchemeRows {
+    components: Vec::new(),
+    component_ids: Vec::new(),
+    registry: Vec::new(),
+    reg_locators: Vec::new(),
+    app_search: Vec::new(),
+  };
+  for (i, scheme) in schemes.iter().enumerate() {
+    let component = format!("scheme{i}");
+    let key = format!("Software\\Classes\\{scheme}");
+    let mut registry =
+      |id: &str, key: &str, name: Option<&str>, value: Option<String>| {
+        rows.registry.push(vec![
+          Value::Str(format!("{component}_{id}")),
+          Value::Int(ROOT_BY_SCOPE),
+          Value::Str(key.to_string()),
+          str_or_null(name.map(str::to_string)),
+          str_or_null(value),
+          Value::Str(component.clone()),
+        ]);
+      };
+    registry("tree", &key, Some("*"), None);
+    registry(
+      "desc",
+      &key,
+      None,
+      Some(scheme_reg::key_description(scheme)),
+    );
+    // An empty value: Windows Installer writes an empty REG_SZ (MSI has no
+    // empty string distinct from null).
+    registry("proto", &key, Some("URL Protocol"), None);
+    if let Some(id) = app_id {
+      registry(
+        "appid",
+        &key,
+        Some(scheme_reg::APP_ID_VALUE),
+        Some(id.to_string()),
+      );
+    }
+    registry(
+      "icon",
+      &format!("{key}\\DefaultIcon"),
+      None,
+      Some(scheme_reg::default_icon(&exe)),
+    );
+    registry(
+      "cmd",
+      &format!("{key}\\shell\\open\\command"),
+      None,
+      Some(scheme_reg::command_line(&exe)),
+    );
+
+    // What the install's scope already holds for the scheme.
+    let prop = |what: &str| format!("SCHEME{i}_{what}");
+    let mut locate = |what: &str, root: i32, sub: &str, name: Option<&str>| {
+      let property = prop(what);
+      let signature = property.to_ascii_lowercase();
+      rows.reg_locators.push(vec![
+        Value::Str(signature.clone()),
+        Value::Int(root),
+        Value::Str(format!("{key}{sub}")),
+        str_or_null(name.map(str::to_string)),
+        Value::Int(LOCATOR_RAW_64BIT),
+      ]);
+      rows
+        .app_search
+        .push(vec![Value::Str(property), Value::Str(signature)]);
+    };
+    locate("USERCMD", LOCATOR_HKCU, "\\shell\\open\\command", None);
+    locate("MACHINECMD", LOCATOR_HKLM, "\\shell\\open\\command", None);
+    if app_id.is_some() {
+      locate("USERID", LOCATOR_HKCU, "", Some(scheme_reg::APP_ID_VALUE));
+      locate(
+        "MACHINEID",
+        LOCATOR_HKLM,
+        "",
+        Some(scheme_reg::APP_ID_VALUE),
+      );
+    }
+    // `~=` compares case-insensitively, as the runtime compares app ids.
+    // App ids are `[A-Za-z0-9._-]` only (`is_laufey_app_id`), so they need
+    // no quoting inside the condition's string literal.
+    let free_or_ours = |scope: &str| match app_id {
+      Some(id) => format!(
+        "(NOT {cmd} OR {appid} ~= \"{id}\")",
+        cmd = prop(&format!("{scope}CMD")),
+        appid = prop(&format!("{scope}ID")),
+      ),
+      None => format!("NOT {}", prop(&format!("{scope}CMD"))),
+    };
+    let condition = format!(
+      "(ALLUSERS AND {}) OR (NOT ALLUSERS AND {})",
+      free_or_ours("MACHINE"),
+      free_or_ours("USER"),
+    );
+    rows.components.push(vec![
+      Value::Str(component.clone()),
+      Value::Str(msi_derive_guid(identifier, &format!("scheme:{scheme}"))),
+      Value::Str("INSTALLDIR".to_string()),
+      Value::Int(COMPONENT_64BIT_REGISTRY_KEYPATH),
+      Value::Str(condition),
+      Value::Str(format!("{component}_cmd")),
+    ]);
+    rows.component_ids.push(component);
+  }
+  rows
+}
+
 /// Wrap a Windows app directory in a Windows Installer `.msi` package.
 ///
 /// The MSI database is authored entirely in pure Rust via the `msi` crate, with
@@ -5347,10 +5484,31 @@ fn create_windows_msi(
     ]);
   }
 
+  // The deep-link schemes, registered as URL protocols by the install (see
+  // `msi_scheme_rows`). The registration names the launcher, so it needs one.
+  let schemes = normalized_deep_links(desktop_flags)?;
+  let scheme_rows = match &shortcut_target {
+    _ if schemes.is_empty() => None,
+    Some((launcher_key, _)) => Some(msi_scheme_rows(
+      &schemes,
+      &identifier,
+      windows_app_id(desktop_flags.identifier.as_deref(), &app_name).as_deref(),
+      launcher_key,
+    )),
+    None => {
+      log::warn!(
+        "the .msi does not register the deep-link schemes: no {app_name}.exe \
+         launcher in the app directory; the app registers them on its first \
+         launch instead"
+      );
+      None
+    }
+  };
+
   // msidbComponentAttributes64bit (256): mark components 64-bit so they
   // resolve ProgramFiles64Folder and the 64-bit registry view.
   const COMPONENT_64BIT: i32 = 256;
-  let component_rows: Vec<Vec<Value>> = comp_for_dir
+  let mut component_rows: Vec<Vec<Value>> = comp_for_dir
     .iter()
     .map(|(dir, comp)| {
       let dir_id = dir_ids[dir].clone();
@@ -5369,6 +5527,9 @@ fn create_windows_msi(
       ]
     })
     .collect();
+  if let Some(rows) = &scheme_rows {
+    component_rows.extend(rows.components.iter().cloned());
+  }
 
   // --- File table + cabinet payload (shared 1-based sequence). -------------
   // msidbFileAttributesVital (512): a failed file install aborts the
@@ -5552,6 +5713,47 @@ fn create_windows_msi(
       ],
     )?;
   }
+  if scheme_rows.is_some() {
+    package.create_table(
+      "Registry",
+      vec![
+        Column::build("Registry").primary_key().id_string(72),
+        Column::build("Root").int16(),
+        Column::build("Key")
+          .localizable()
+          .category(msi::Category::RegPath)
+          .string(255),
+        Column::build("Name")
+          .nullable()
+          .localizable()
+          .formatted_string(255),
+        Column::build("Value")
+          .nullable()
+          .localizable()
+          .formatted_string(0),
+        Column::build("Component_").id_string(72),
+      ],
+    )?;
+    package.create_table(
+      "RegLocator",
+      vec![
+        Column::build("Signature_").primary_key().id_string(72),
+        Column::build("Root").int16(),
+        Column::build("Key")
+          .category(msi::Category::RegPath)
+          .string(255),
+        Column::build("Name").nullable().formatted_string(255),
+        Column::build("Type").nullable().int16(),
+      ],
+    )?;
+    package.create_table(
+      "AppSearch",
+      vec![
+        Column::build("Property").primary_key().id_string(72),
+        Column::build("Signature_").primary_key().id_string(72),
+      ],
+    )?;
+  }
   for table in ["InstallExecuteSequence", "InstallUISequence"] {
     package.create_table(
       table,
@@ -5583,12 +5785,22 @@ fn create_windows_msi(
     Insert::into("FeatureComponents").rows(
       comp_for_dir
         .values()
+        .chain(scheme_rows.iter().flat_map(|r| r.component_ids.iter()))
         .map(|c| {
           vec![Value::Str("MainFeature".to_string()), Value::Str(c.clone())]
         })
         .collect(),
     ),
   )?;
+  if let Some(rows) = &scheme_rows {
+    package
+      .insert_rows(Insert::into("Registry").rows(rows.registry.clone()))?;
+    package.insert_rows(
+      Insert::into("RegLocator").rows(rows.reg_locators.clone()),
+    )?;
+    package
+      .insert_rows(Insert::into("AppSearch").rows(rows.app_search.clone()))?;
+  }
   package.insert_rows(Insert::into("File").rows(file_rows))?;
   package.insert_rows(Insert::into("Media").row(vec![
     Value::Int(1),
@@ -5674,6 +5886,14 @@ fn create_windows_msi(
     exec_seq.push(("RemoveShortcuts", 3800));
     exec_seq.push(("CreateShortcuts", 4500));
   }
+  if scheme_rows.is_some() {
+    // AppSearch before costing, where the scheme components' conditions are
+    // evaluated; RemoveRegistryValues on uninstall; WriteRegistryValues after
+    // the files land.
+    exec_seq.push(("AppSearch", 50));
+    exec_seq.push(("RemoveRegistryValues", 2600));
+    exec_seq.push(("WriteRegistryValues", 5000));
+  }
   package.insert_rows(
     Insert::into("InstallExecuteSequence").rows(
       exec_seq
@@ -5684,12 +5904,15 @@ fn create_windows_msi(
         .collect(),
     ),
   )?;
-  let ui_seq: &[(&str, i32)] = &[
+  let mut ui_seq: Vec<(&str, i32)> = vec![
     ("CostInitialize", 800),
     ("FileCost", 900),
     ("CostFinalize", 1000),
     ("ExecuteAction", 1300),
   ];
+  if scheme_rows.is_some() {
+    ui_seq.push(("AppSearch", 50));
+  }
   package.insert_rows(
     Insert::into("InstallUISequence").rows(
       ui_seq
@@ -9098,6 +9321,338 @@ def456  other.zip
   // --- deep links ---
 
   #[test]
+  fn msi_registers_deep_link_schemes() {
+    use deno_lib::standalone::scheme_handler::windows as scheme_reg;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let app_dir = fake_windows_app_dir(tmp.path(), "MyApp");
+    let msi_path = tmp.path().join("MyApp.msi");
+    let mut flags = empty_desktop_flags();
+    flags.identifier = Some("com.acme.myapp".to_string());
+    flags.deep_links = vec!["ACME".to_string(), "acme-beta".to_string()];
+    create_windows_msi(
+      &app_dir,
+      &msi_path,
+      &flags,
+      Some("x86_64-pc-windows-msvc"),
+      None,
+    )
+    .unwrap();
+    let mut package = msi::open(&msi_path).unwrap();
+    let opt = |v: &msi::Value| v.as_str().map(str::to_string);
+
+    let launcher_key = package
+      .select_rows(msi::Select::table("File"))
+      .unwrap()
+      .find(|r| r["FileName"].as_str().unwrap().ends_with("|MyApp.exe"))
+      .map(|r| r["File"].as_str().unwrap().to_string())
+      .unwrap();
+    let exe = format!("[#{launcher_key}]");
+
+    // Registry: per scheme, exactly the key the runtime writes for itself,
+    // under the install scope's root (-1), plus the `*` row that removes the
+    // key on uninstall.
+    let mut registry: Vec<(
+      String,
+      i32,
+      String,
+      Option<String>,
+      Option<String>,
+      String,
+    )> = package
+      .select_rows(msi::Select::table("Registry"))
+      .unwrap()
+      .map(|r| {
+        (
+          r["Registry"].as_str().unwrap().to_string(),
+          r["Root"].as_int().unwrap(),
+          r["Key"].as_str().unwrap().to_string(),
+          opt(&r["Name"]),
+          opt(&r["Value"]),
+          r["Component_"].as_str().unwrap().to_string(),
+        )
+      })
+      .collect();
+    registry.sort();
+    let mut expected = Vec::new();
+    for (i, scheme) in ["acme", "acme-beta"].iter().enumerate() {
+      let c = format!("scheme{i}");
+      let key = format!("Software\\Classes\\{scheme}");
+      let row =
+        |id: &str, key: &str, name: Option<&str>, value: Option<&str>| {
+          (
+            format!("{c}_{id}"),
+            -1,
+            key.to_string(),
+            name.map(str::to_string),
+            value.map(str::to_string),
+            c.clone(),
+          )
+        };
+      expected.push(row("tree", &key, Some("*"), None));
+      expected.push(row("desc", &key, None, Some(&format!("URL:{scheme}"))));
+      expected.push(row("proto", &key, Some("URL Protocol"), None));
+      expected.push(row(
+        "appid",
+        &key,
+        Some("DenoDesktopAppId"),
+        Some("com.acme.myapp"),
+      ));
+      expected.push(row(
+        "icon",
+        &format!("{key}\\DefaultIcon"),
+        None,
+        Some(&format!("\"{exe}\",0")),
+      ));
+      expected.push(row(
+        "cmd",
+        &format!("{key}\\shell\\open\\command"),
+        None,
+        Some(&format!("\"{exe}\" \"%1\"")),
+      ));
+    }
+    expected.sort();
+    assert_eq!(registry, expected);
+
+    // The values are the runtime's own, with the installed exe substituted:
+    // a first launch sees a current registration of this app.
+    let me = scheme_reg::ThisApp {
+      exe: exe.clone(),
+      app_id: Some("com.acme.myapp".to_string()),
+      icon: scheme_reg::default_icon(&exe),
+    };
+    let runtime = scheme_reg::expected_key(&me);
+    let value_of = |id: &str| {
+      registry
+        .iter()
+        .find(|r| r.0 == id)
+        .and_then(|r| r.4.clone())
+    };
+    assert_eq!(value_of("scheme0_cmd"), runtime.command);
+    assert_eq!(value_of("scheme0_icon"), runtime.default_icon);
+    assert_eq!(value_of("scheme0_appid"), runtime.app_id);
+    assert_eq!(
+      value_of("scheme0_desc").as_deref(),
+      Some(scheme_reg::key_description("acme").as_str())
+    );
+
+    // What the runtime reads back once `[#key]` resolves to the installed
+    // path: this app's current registration, in either scope, with nothing
+    // to rewrite on the first launch.
+    let installed = "C:\\Program Files\\MyApp\\MyApp.exe";
+    let resolve = |v: Option<String>| v.map(|v| v.replace(&exe, installed));
+    let key = scheme_reg::ClassKey {
+      command: resolve(value_of("scheme0_cmd")),
+      url_protocol: registry.iter().any(|r| r.0 == "scheme0_proto"),
+      default_icon: resolve(value_of("scheme0_icon")),
+      app_id: value_of("scheme0_appid"),
+    };
+    let me = scheme_reg::ThisApp {
+      exe: installed.to_string(),
+      app_id: Some("com.acme.myapp".to_string()),
+      icon: scheme_reg::default_icon(installed),
+    };
+    for state in [
+      scheme_reg::SchemeState {
+        user: Some(key.clone()),
+        ..Default::default()
+      },
+      scheme_reg::SchemeState {
+        machine: Some(key),
+        ..Default::default()
+      },
+    ] {
+      let status = scheme_reg::owner("acme", &state, &me);
+      assert_eq!(
+        status,
+        deno_lib::standalone::scheme_handler::OwnerStatus::this(
+          Some(installed.to_string()),
+          false
+        ),
+        "{state:?}"
+      );
+      assert_eq!(
+        deno_lib::standalone::scheme_handler::plan_registration(
+          &status,
+          deno_lib::standalone::scheme_handler::RegisterMode::Startup
+        ),
+        deno_lib::standalone::scheme_handler::RegisterAction::Keep
+      );
+    }
+
+    // One component per scheme: 64-bit, registry key path (the command),
+    // installed only when the scope's key is free or this app's.
+    let comps: std::collections::HashMap<
+      String,
+      (i32, Option<String>, String),
+    > = package
+      .select_rows(msi::Select::table("Component"))
+      .unwrap()
+      .map(|r| {
+        (
+          r["Component"].as_str().unwrap().to_string(),
+          (
+            r["Attributes"].as_int().unwrap(),
+            opt(&r["Condition"]),
+            r["KeyPath"].as_str().unwrap().to_string(),
+          ),
+        )
+      })
+      .collect();
+    assert_eq!(
+      comps["scheme0"],
+      (
+        260,
+        Some(
+          "(ALLUSERS AND (NOT SCHEME0_MACHINECMD OR SCHEME0_MACHINEID ~= \
+           \"com.acme.myapp\")) OR (NOT ALLUSERS AND (NOT SCHEME0_USERCMD OR \
+           SCHEME0_USERID ~= \"com.acme.myapp\"))"
+            .to_string()
+        ),
+        "scheme0_cmd".to_string(),
+      )
+    );
+    assert_eq!(comps["scheme1"].2, "scheme1_cmd");
+    let feature_comps: Vec<String> = package
+      .select_rows(msi::Select::table("FeatureComponents"))
+      .unwrap()
+      .map(|r| r["Component_"].as_str().unwrap().to_string())
+      .collect();
+    assert!(feature_comps.contains(&"scheme0".to_string()));
+    assert!(feature_comps.contains(&"scheme1".to_string()));
+
+    // AppSearch reads the command and the app id from both scopes.
+    let mut locators: Vec<(String, i32, String, Option<String>, i32)> = package
+      .select_rows(msi::Select::table("RegLocator"))
+      .unwrap()
+      .map(|r| {
+        (
+          r["Signature_"].as_str().unwrap().to_string(),
+          r["Root"].as_int().unwrap(),
+          r["Key"].as_str().unwrap().to_string(),
+          opt(&r["Name"]),
+          r["Type"].as_int().unwrap(),
+        )
+      })
+      .filter(|r| r.0.starts_with("scheme0_"))
+      .collect();
+    locators.sort();
+    let cmd_key = "Software\\Classes\\acme\\shell\\open\\command".to_string();
+    let key = "Software\\Classes\\acme".to_string();
+    let id = Some("DenoDesktopAppId".to_string());
+    assert_eq!(
+      locators,
+      vec![
+        ("scheme0_machinecmd".into(), 2, cmd_key.clone(), None, 18),
+        ("scheme0_machineid".into(), 2, key.clone(), id.clone(), 18),
+        ("scheme0_usercmd".into(), 1, cmd_key, None, 18),
+        ("scheme0_userid".into(), 1, key, id, 18),
+      ]
+    );
+    let searches: Vec<(String, String)> = package
+      .select_rows(msi::Select::table("AppSearch"))
+      .unwrap()
+      .map(|r| {
+        (
+          r["Property"].as_str().unwrap().to_string(),
+          r["Signature_"].as_str().unwrap().to_string(),
+        )
+      })
+      .collect();
+    assert_eq!(searches.len(), 8, "{searches:?}");
+    assert!(
+      searches
+        .iter()
+        .all(|(p, s)| p.to_ascii_lowercase() == *s && p.starts_with("SCHEME"))
+    );
+
+    // The actions that run them.
+    let seq = |package: &mut msi::Package<std::fs::File>, table: &str| {
+      package
+        .select_rows(msi::Select::table(table))
+        .unwrap()
+        .map(|r| {
+          (
+            r["Action"].as_str().unwrap().to_string(),
+            r["Sequence"].as_int().unwrap(),
+          )
+        })
+        .collect::<std::collections::HashMap<_, _>>()
+    };
+    let exec = seq(&mut package, "InstallExecuteSequence");
+    assert_eq!(exec.get("AppSearch"), Some(&50));
+    assert_eq!(exec.get("RemoveRegistryValues"), Some(&2600));
+    assert_eq!(exec.get("WriteRegistryValues"), Some(&5000));
+    assert!(exec["AppSearch"] < exec["CostFinalize"]);
+    assert!(exec["WriteRegistryValues"] > exec["InstallFiles"]);
+    let ui = seq(&mut package, "InstallUISequence");
+    assert_eq!(ui.get("AppSearch"), Some(&50));
+  }
+
+  #[test]
+  fn msi_without_deep_links_has_no_registry() {
+    let tmp = tempfile::tempdir().unwrap();
+    let app_dir = fake_windows_app_dir(tmp.path(), "MyApp");
+    let msi_path = tmp.path().join("MyApp.msi");
+    create_windows_msi(
+      &app_dir,
+      &msi_path,
+      &empty_desktop_flags(),
+      Some("x86_64-pc-windows-msvc"),
+      None,
+    )
+    .unwrap();
+    let package = msi::open(&msi_path).unwrap();
+    for table in ["Registry", "RegLocator", "AppSearch"] {
+      assert!(!package.has_table(table), "{table}");
+    }
+  }
+
+  #[test]
+  fn msi_scheme_rows_without_an_app_id() {
+    // No app id to recognize a registration by: only a free key installs,
+    // and no DenoDesktopAppId value is written or searched for.
+    let rows =
+      msi_scheme_rows(&["acme".to_string()], "com.example", None, "f1");
+    assert_eq!(
+      rows.components[0][4],
+      msi::Value::Str(
+        "(ALLUSERS AND NOT SCHEME0_MACHINECMD) OR (NOT ALLUSERS AND NOT \
+         SCHEME0_USERCMD)"
+          .to_string()
+      )
+    );
+    assert!(
+      rows
+        .registry
+        .iter()
+        .all(|r| r[3] != msi::Value::Str("DenoDesktopAppId".to_string()))
+    );
+    assert_eq!(rows.registry.len(), 5);
+    assert_eq!(rows.reg_locators.len(), 2);
+    assert_eq!(rows.app_search.len(), 2);
+  }
+
+  #[test]
+  fn msi_skips_scheme_registration_without_a_launcher() {
+    let tmp = tempfile::tempdir().unwrap();
+    let app_dir = fake_windows_app_dir(tmp.path(), "MyApp");
+    std::fs::remove_file(app_dir.join("MyApp.exe")).unwrap();
+    let msi_path = tmp.path().join("MyApp.msi");
+    let mut flags = empty_desktop_flags();
+    flags.deep_links = vec!["acme".to_string()];
+    create_windows_msi(
+      &app_dir,
+      &msi_path,
+      &flags,
+      Some("x86_64-pc-windows-msvc"),
+      None,
+    )
+    .unwrap();
+    assert!(!msi::open(&msi_path).unwrap().has_table("Registry"));
+  }
+
+  #[test]
   fn validate_url_scheme_accepts_canonical() {
     for ok in &["acme", "my-app", "x", "com.acme.app", "a1+2.3-4", "App"] {
       assert!(validate_url_scheme(ok).is_ok(), "{ok:?} should be accepted");
@@ -9253,35 +9808,6 @@ def456  other.zip
     assert!(
       out.contains("MimeType=text/html;x-scheme-handler/acme;"),
       "existing MimeType entries should be preserved; got:\n{out}"
-    );
-  }
-
-  #[test]
-  fn deep_links_windows_writes_registry_script() {
-    let tmp = tempfile::tempdir().unwrap();
-    // The launcher is `<bundle-dir-name>.exe`, so the bundle dir must be named
-    // after the app.
-    let bundle = tmp.path().join("MyApp");
-    std::fs::create_dir_all(&bundle).unwrap();
-    register_deep_links_windows(
-      &bundle,
-      &["acme".to_string(), "acme-beta".to_string()],
-    )
-    .unwrap();
-
-    let script =
-      std::fs::read_to_string(bundle.join("register-deep-links.bat")).unwrap();
-    for scheme in &["acme", "acme-beta"] {
-      assert!(
-        script
-          .contains(&format!("reg add \"HKCU\\Software\\Classes\\{scheme}\"")),
-        "script should register {scheme}; got:\n{script}"
-      );
-    }
-    // The protocol handler must point back at the renamed launcher exe.
-    assert!(
-      script.contains("MyApp.exe"),
-      "handler should invoke the launcher; got:\n{script}"
     );
   }
 

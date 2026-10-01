@@ -696,6 +696,57 @@ fn send_launch_event(state: &LaunchInboxState, event: DesktopEvent) {
   }
 }
 
+/// Who handles a deep-link scheme, as `Deno.desktop.getSchemeOwner()`
+/// resolves it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SchemeOwnerInfo {
+  /// `"self"`, `"other"` or `"none"`.
+  pub owner: &'static str,
+  /// What identifies the current handler, for display.
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub handler: Option<String>,
+}
+
+/// The result of `Deno.desktop.registerScheme()`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SchemeRegisterInfo {
+  /// Whether this app handles the scheme afterwards.
+  pub registered: bool,
+  /// The handler afterwards: `"self"`, `"other"` or `"none"`.
+  pub owner: &'static str,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub handler: Option<String>,
+  /// Why the app does not handle the scheme, when it doesn't.
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub reason: Option<String>,
+}
+
+/// The OS registration of the app's deep-link schemes, behind
+/// `Deno.desktop.getSchemeOwner()` / `registerScheme()`. Implemented by the
+/// desktop runtime (denort_desktop), which puts an
+/// `Arc<dyn DesktopSchemeHandlers>` in the op state.
+pub trait DesktopSchemeHandlers: Send + Sync + 'static {
+  /// Normalize `scheme` and check it is one of the app's declared deep-link
+  /// schemes. The error is the message of the `TypeError` the call rejects
+  /// with. Cheap: called on the JS thread.
+  fn check_scheme(&self, scheme: &str) -> Result<String, String>;
+  /// The scheme's current handler. Blocking (registry reads, LaunchServices,
+  /// files): called on the blocking pool.
+  fn scheme_owner(&self, scheme: &str) -> SchemeOwnerInfo;
+  /// Register the app for the scheme: when nobody handles it, to refresh
+  /// the app's own registration, or, with `force`, over another app.
+  /// Blocking: called on the blocking pool.
+  fn register_scheme(&self, scheme: &str, force: bool) -> SchemeRegisterInfo;
+}
+
+/// How long a scheme query or registration may take before the call rejects
+/// (a backend runs at most a couple of short, individually bounded
+/// subprocesses).
+const SCHEME_HANDLER_TIMEOUT: std::time::Duration =
+  std::time::Duration::from_secs(30);
+
 /// A pending call from the webview to a bound Deno function.
 pub struct PendingBindCall {
   pub name: String,
@@ -1611,6 +1662,72 @@ fn op_desktop_subscribe_launch_events(
     .unwrap_or_default()
 }
 
+fn scheme_handlers(
+  state: &std::rc::Rc<std::cell::RefCell<OpState>>,
+  scheme: &str,
+) -> Result<(Arc<dyn DesktopSchemeHandlers>, String), deno_error::JsErrorBox> {
+  let handlers = state
+    .borrow()
+    .try_borrow::<Arc<dyn DesktopSchemeHandlers>>()
+    .cloned()
+    .ok_or_else(|| {
+      deno_error::JsErrorBox::generic(
+        "deep-link scheme registration is not available in this runtime",
+      )
+    })?;
+  let scheme = handlers
+    .check_scheme(scheme)
+    .map_err(deno_error::JsErrorBox::type_error)?;
+  Ok((handlers, scheme))
+}
+
+/// Wait for a blocking scheme-handler call, bounded by
+/// [`SCHEME_HANDLER_TIMEOUT`].
+async fn await_scheme_call<T>(
+  call: deno_core::unsync::JoinHandle<T>,
+) -> Result<T, deno_error::JsErrorBox> {
+  match tokio::time::timeout(SCHEME_HANDLER_TIMEOUT, call).await {
+    Ok(Ok(value)) => Ok(value),
+    Ok(Err(_join)) => Err(deno_error::JsErrorBox::generic(
+      "the deep-link scheme lookup failed",
+    )),
+    Err(_elapsed) => Err(deno_error::JsErrorBox::generic(format!(
+      "the deep-link scheme lookup did not complete within {}s",
+      SCHEME_HANDLER_TIMEOUT.as_secs()
+    ))),
+  }
+}
+
+/// `Deno.desktop.getSchemeOwner(scheme)`: who handles one of the app's
+/// declared deep-link schemes.
+#[op2]
+#[serde]
+async fn op_desktop_get_scheme_owner(
+  state: std::rc::Rc<std::cell::RefCell<OpState>>,
+  #[string] scheme: String,
+) -> Result<SchemeOwnerInfo, deno_error::JsErrorBox> {
+  let (handlers, scheme) = scheme_handlers(&state, &scheme)?;
+  await_scheme_call(deno_core::unsync::spawn_blocking(move || {
+    handlers.scheme_owner(&scheme)
+  }))
+  .await
+}
+
+/// `Deno.desktop.registerScheme(scheme, { force })`.
+#[op2]
+#[serde]
+async fn op_desktop_register_scheme(
+  state: std::rc::Rc<std::cell::RefCell<OpState>>,
+  #[string] scheme: String,
+  force: bool,
+) -> Result<SchemeRegisterInfo, deno_error::JsErrorBox> {
+  let (handlers, scheme) = scheme_handlers(&state, &scheme)?;
+  await_scheme_call(deno_core::unsync::spawn_blocking(move || {
+    handlers.register_scheme(&scheme, force)
+  }))
+  .await
+}
+
 #[op2(fast)]
 pub fn op_desktop_init(
   state: &mut OpState,
@@ -2453,6 +2570,8 @@ deno_core::extension!(
     op_desktop_recv_event,
     op_desktop_take_launch_targets,
     op_desktop_subscribe_launch_events,
+    op_desktop_get_scheme_owner,
+    op_desktop_register_scheme,
     op_desktop_resolve_bind_call,
     op_desktop_reject_bind_call,
     op_desktop_alert,
