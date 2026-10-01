@@ -1927,7 +1927,12 @@ laufey::main!(|| {
     }
     Err(e) => {
       log::error!("[desktop] {e}");
-      eprintln!("error: desktop app origin: {e}");
+      // A packaged app has no log sink a user would see, so say it on stderr
+      // too: the app does not start with a misconfigured origin.
+      #[allow(clippy::print_stderr, reason = "a fatal startup error")]
+      {
+        eprintln!("error: desktop app origin: {e}");
+      }
       return;
     }
   };
