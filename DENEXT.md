@@ -67,8 +67,17 @@ are where the changes are discussed.
 7. **`fix(http)`: an absolute-form request target can't claim `http+memory:`
    over TCP** (400), and **`feat(os)`: an env overlay** so the runtime never
    calls `setenv` while the host's UI thread runs.
+8. **`feat(desktop)`: register deep-link schemes with the OS and report their
+   owner** — `Deno.desktop.getSchemeOwner` / `registerScheme({ force })`, a
+   first-launch registration that never takes a scheme another app owns
+   (Windows HKCU, macOS LaunchServices, Linux XDG), and the Windows `.msi`
+   writing the same keys at install.
+9. **`feat(desktop)`: native passkeys** — `Deno.desktop.passkeys`
+   (`capabilities` / `create` / `get`) on macOS AuthenticationServices and
+   Windows `webauthn.dll`, with the request/response envelope of
+   `@clerk/electron-passkeys`.
 
-The runtime-side parts (1-3, 5-7) are what the prebuilt `libdenort` carries.
+The runtime-side parts (1-3, 5-9) are what the prebuilt `libdenort` carries.
 The CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` /
 `LAUFEY_APP_ID` into a packaged app's launchers) are in the branch too, but a
 stock CLI does not run them; denext's own launcher provides that environment.
@@ -76,8 +85,8 @@ stock CLI does not run them; denext's own launcher provides that environment.
 The laufey backend hosts are built from
 [Brainwires/laufey](https://github.com/Brainwires/laufey) branch
 `denext/integration` (registered schemes, app data dir, WebKitGTK scheme
-request bodies, launch config, open-url / single instance, Windows bindgen
-fix), at the commit pinned by
+request bodies, launch config, open-url / single instance, passkeys, Windows
+bindgen fix), at the commit pinned by
 `LAUFEY_SHA` in the workflow (or the `laufey_ref` input).
 
 laufey's `init_api` rejects any C ABI version mismatch between the runtime
