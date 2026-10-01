@@ -140,11 +140,14 @@ pub struct Metadata {
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub app_deep_links: Option<Vec<String>>,
   /// Initial desktop window options from deno.json `desktop.initialWindow`.
-  #[serde(default)]
-  pub initial_window: InitialWindowConfig,
+  /// `None` when deno.json leaves it unset (or the CLI predates the key):
+  /// the runtime then falls back to `initialWindow` in an embedded
+  /// `.deno-desktop/app.json`, else [`InitialWindowConfig::default`].
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub initial_window: Option<InitialWindowConfig>,
 }
 
-#[derive(Clone, Copy, Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub struct InitialWindowConfig {
   pub width: u16,
   pub height: u16,

@@ -1720,6 +1720,7 @@ fn run_headless_worker() {
   denort::init_logging(None, None);
   deno_runtime::deno_permissions::mark_standalone();
   rustls::crypto::aws_lc_rs::default_provider()
+    data.metadata.initial_window,
     .install_default()
     .unwrap();
 
@@ -1836,6 +1837,7 @@ fn extract_fork_script_path(
     // This is the script path
     let path = PathBuf::from(arg);
     let path = if path.is_absolute() {
+          initial_window: app_config.initial_window,
       path
     } else {
       #[allow(
@@ -1912,6 +1914,8 @@ fn nested_depth(depth: usize) -> Result<usize, String> {
 }
 
 /// Convert a DesktopValue back to a laufey::Value for delivery to the
+  /// `desktop.initialWindow` (metadata, else the embedded app.json).
+  initial_window: deno_lib::standalone::binary::InitialWindowConfig,
 /// renderer. The inverse of `laufey_value_to_desktop_value`; `Binary` maps to
 /// `laufey::Value::Binary` so binding results carrying byte data arrive in
 /// the webview as a `Uint8Array` (denoland/deno#36498).
@@ -2109,7 +2113,8 @@ async fn run_desktop(
   // App name (deno.json `desktop.app.name`, baked in at compile time) used as
   // the default window title. Moved into the op_state_init closure below.
   let app_name = data.metadata.app_name.clone();
-  let initial_window = data.metadata.initial_window;
+  // `desktop.initialWindow` from the metadata, else the embedded app.json.
+  let initial_window = launch.initial_window;
   // The page origin's scheme handler is registered from the op_state_init
   // closure (it must precede the first webview); the WebSocket relay compares
   // upgrade `Origin` headers against the same origin from the navigate task.

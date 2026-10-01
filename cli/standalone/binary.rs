@@ -1392,8 +1392,7 @@ impl<'a> DenoCompileBinaryWriter<'a> {
           transparent_titlebar: w.transparent_titlebar,
           transparent: w.transparent,
           show_on_first_load: w.show_on_first_load,
-        })
-        .unwrap_or_default(),
+        }),
     };
 
     let (data_section_bytes, section_sizes) = serialize_binary_data_section(

@@ -125,6 +125,12 @@ pub enum AppOriginError {
 /// the executable (or `LAUFEY_SINGLE_INSTANCE`). Whatever packages the app
 /// writes that file; the key here only records the intent (and, like the
 /// lock itself, requires an `identifier`).
+///
+/// `initialWindow` mirrors `desktop.initialWindow` (width, height, frameless,
+/// noActivate, transparentTitlebar, transparent, showOnFirstLoad), so a
+/// stock CLI that rejects the key in deno.json can still configure the
+/// bootstrap window (a tray-only app sets `"showOnFirstLoad": false`). The
+/// metadata's value, written by a CLI that knows the key, takes precedence.
 pub const APP_CONFIG_FILE: &str = ".deno-desktop/app.json";
 
 #[derive(serde::Deserialize)]
@@ -134,6 +140,21 @@ struct SerializedAppConfigFile {
   identifier: Option<String>,
   deep_links: Option<Vec<String>>,
   single_instance: Option<bool>,
+  initial_window: Option<SerializedInitialWindow>,
+}
+
+/// `initialWindow` in the file: the shape of deno.json's
+/// `desktop.initialWindow`, every key optional.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct SerializedInitialWindow {
+  width: Option<std::num::NonZeroU16>,
+  height: Option<std::num::NonZeroU16>,
+  frameless: Option<bool>,
+  no_activate: Option<bool>,
+  transparent_titlebar: Option<bool>,
+  transparent: Option<bool>,
+  show_on_first_load: Option<bool>,
 }
 
 /// The validated contents of an [`APP_CONFIG_FILE`].
@@ -144,6 +165,8 @@ pub struct AppConfigFile {
   /// Normalized with [`super::launch_args::normalize_deep_link_schemes`].
   pub deep_links: Option<Vec<String>>,
   pub single_instance: Option<bool>,
+  /// `initialWindow`, with deno.json's defaults filled in.
+  pub initial_window: Option<super::binary::InitialWindowConfig>,
 }
 
 /// Parse the contents of an [`APP_CONFIG_FILE`]. Every key is optional; an
@@ -177,6 +200,22 @@ pub fn parse_app_config_file(bytes: &[u8]) -> Result<AppConfigFile, String> {
     identifier: config.identifier,
     deep_links,
     single_instance: config.single_instance,
+    initial_window: config.initial_window.map(|w| {
+      let defaults = super::binary::InitialWindowConfig::default();
+      super::binary::InitialWindowConfig {
+        width: w.width.map(|v| v.get()).unwrap_or(defaults.width),
+        height: w.height.map(|v| v.get()).unwrap_or(defaults.height),
+        frameless: w.frameless.unwrap_or(defaults.frameless),
+        no_activate: w.no_activate.unwrap_or(defaults.no_activate),
+        transparent_titlebar: w
+          .transparent_titlebar
+          .unwrap_or(defaults.transparent_titlebar),
+        transparent: w.transparent.unwrap_or(defaults.transparent),
+        show_on_first_load: w
+          .show_on_first_load
+          .unwrap_or(defaults.show_on_first_load),
+      }
+    }),
   })
 }
 
@@ -520,6 +559,37 @@ mod tests {
     );
     assert!(parse_app_config_file(b"not json").is_err());
     assert!(parse_app_config_file(br#"{ "origin": 1 }"#).is_err());
+  }
+
+  #[test]
+  fn app_config_file_initial_window() {
+    let config = parse_app_config_file(
+      br#"{ "initialWindow": { "width": 320, "showOnFirstLoad": false } }"#,
+    )
+    .unwrap();
+    assert_eq!(
+      config.initial_window,
+      Some(super::super::binary::InitialWindowConfig {
+        width: 320,
+        show_on_first_load: false,
+        ..Default::default()
+      })
+    );
+    assert_eq!(
+      parse_app_config_file(br#"{ "initialWindow": {} }"#)
+        .unwrap()
+        .initial_window,
+      Some(Default::default())
+    );
+    assert_eq!(parse_app_config_file(b"{}").unwrap().initial_window, None);
+    for bad in [
+      r#"{ "initialWindow": { "width": 0 } }"#,
+      r#"{ "initialWindow": { "showOnFirstLod": false } }"#,
+      r#"{ "initialWindow": { "frameless": "yes" } }"#,
+      r#"{ "initialWindow": true }"#,
+    ] {
+      assert!(parse_app_config_file(bad.as_bytes()).is_err(), "{bad}");
+    }
   }
 
   #[test]

@@ -27,6 +27,9 @@
 //! in the file (the runtime cannot act on it; see [`APP_CONFIG_FILE`]); it
 //! is validated and logged.
 //!
+//! The initial window (`desktop.initialWindow`) comes from the metadata's
+//! `initial_window`, else the file's `initialWindow`, else the defaults.
+//!
 //! A configured value that does not validate is an error: starting the app at
 //! an origin the developer did not configure would silently move its
 //! origin-keyed storage and break any server allow-list. So is a configured
@@ -43,6 +46,7 @@ use deno_lib::standalone::app_origin::AppConfigFile;
 use deno_lib::standalone::app_origin::AppOrigin;
 use deno_lib::standalone::app_origin::DEFAULT_APP_ORIGIN;
 use deno_lib::standalone::app_origin::parse_app_config_file;
+use deno_lib::standalone::binary::InitialWindowConfig;
 use deno_lib::standalone::launch_args::normalize_deep_link_schemes;
 
 /// Where a resolved origin came from, for logs.
@@ -64,6 +68,8 @@ pub struct ResolvedAppConfig {
   pub deep_links: Vec<String>,
   /// `singleInstance` from the config file, if the file was read and set it.
   pub single_instance: Option<bool>,
+  /// The bootstrap window's options.
+  pub initial_window: InitialWindowConfig,
 }
 
 /// Resolve the app origin and identifier. `read_file` reads a file from the
@@ -74,6 +80,7 @@ pub fn resolve_app_config(
   metadata_origin: Option<&str>,
   metadata_identifier: Option<&str>,
   metadata_deep_links: Option<&[String]>,
+  metadata_initial_window: Option<InitialWindowConfig>,
   root: &Path,
   entrypoint_key: &str,
   read_file: impl Fn(&Path) -> Option<Vec<u8>>,
@@ -99,6 +106,7 @@ pub fn resolve_app_config(
   let file = if metadata_origin.is_none()
     || metadata_identifier.is_none()
     || metadata_deep_links.is_none()
+    || metadata_initial_window.is_none()
   {
     find_app_config_file(root, entrypoint_key, read_file)?
   } else {
@@ -125,6 +133,9 @@ pub fn resolve_app_config(
       .and_then(|(_, config)| config.deep_links.clone())
       .unwrap_or_default(),
   };
+  let initial_window = metadata_initial_window
+    .or_else(|| file.as_ref().and_then(|(_, config)| config.initial_window))
+    .unwrap_or_default();
   let file_path = file.as_ref().map(|(path, _)| path.clone());
   let identifier = metadata_identifier
     .map(|id| id.to_string())
@@ -157,6 +168,7 @@ pub fn resolve_app_config(
     identifier,
     deep_links,
     single_instance,
+    initial_window,
   })
 }
 
@@ -259,6 +271,7 @@ mod tests {
       metadata_origin,
       metadata_identifier,
       Some(&[]),
+      Some(InitialWindowConfig::default()),
       Path::new("/vfs"),
       entrypoint_key,
       read,
@@ -272,9 +285,16 @@ mod tests {
       r#"{"identifier":"com.a.b","deepLinks":["Acme"],"singleInstance":true}"#,
     )]);
     // A stock CLI writes no deep-link field: the file's list applies.
-    let config =
-      resolve_app_config(None, None, None, Path::new("/vfs"), "main.ts", &read)
-        .unwrap();
+    let config = resolve_app_config(
+      None,
+      None,
+      None,
+      None,
+      Path::new("/vfs"),
+      "main.ts",
+      &read,
+    )
+    .unwrap();
     assert_eq!(config.deep_links, vec!["acme".to_string()]);
     assert_eq!(config.single_instance, Some(true));
     // The metadata's list wins, even when empty.
@@ -283,6 +303,7 @@ mod tests {
       None,
       None,
       Some(&schemes),
+      None,
       Path::new("/vfs"),
       "main.ts",
       &read,
@@ -294,6 +315,7 @@ mod tests {
       Some("a://a"),
       Some("com.a.a"),
       Some(&[]),
+      Some(InitialWindowConfig::default()),
       Path::new("/vfs"),
       "main.ts",
       reader(&[(".deno-desktop/app.json", "not json")]),
@@ -307,6 +329,7 @@ mod tests {
       None,
       None,
       Some(&bad),
+      None,
       Path::new("/vfs"),
       "main.ts",
       |_| None,
@@ -314,10 +337,63 @@ mod tests {
     .unwrap_err();
     assert!(err.contains("deep links"), "{err}");
     // No file and no metadata field: no schemes.
-    let config =
-      resolve_app_config(None, None, None, Path::new("/vfs"), "m.ts", |_| None)
-        .unwrap();
+    let config = resolve_app_config(
+      None,
+      None,
+      None,
+      None,
+      Path::new("/vfs"),
+      "m.ts",
+      |_| None,
+    )
+    .unwrap();
     assert!(config.deep_links.is_empty());
+  }
+
+  #[test]
+  fn initial_window_from_metadata_or_the_file() {
+    let read = reader(&[(
+      ".deno-desktop/app.json",
+      r#"{"initialWindow":{"showOnFirstLoad":false,"width":300}}"#,
+    )]);
+    // A stock CLI writes no initial_window: the file's applies.
+    let config = resolve_app_config(
+      None,
+      None,
+      Some(&[]),
+      None,
+      Path::new("/vfs"),
+      "main.ts",
+      &read,
+    )
+    .unwrap();
+    assert!(!config.initial_window.show_on_first_load);
+    assert_eq!(config.initial_window.width, 300);
+    assert_eq!(config.initial_window.height, 600);
+    // The metadata's wins.
+    let config = resolve_app_config(
+      None,
+      None,
+      Some(&[]),
+      Some(InitialWindowConfig::default()),
+      Path::new("/vfs"),
+      "main.ts",
+      &read,
+    )
+    .unwrap();
+    assert_eq!(config.initial_window, InitialWindowConfig::default());
+    // Neither: the defaults.
+    let config = resolve_app_config(
+      None,
+      None,
+      Some(&[]),
+      None,
+      Path::new("/vfs"),
+      "main.ts",
+      |_| None,
+    )
+    .unwrap();
+    assert_eq!(config.initial_window, InitialWindowConfig::default());
   }
 
   #[test]
