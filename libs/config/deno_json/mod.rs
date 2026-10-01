@@ -953,6 +953,13 @@ struct SerializedDesktopOutputConfig {
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields, rename_all = "camelCase")]
+struct SerializedDesktopUpdateConfig {
+  /// The full-app update public key (ECDSA P-256, base64 SPKI or PEM).
+  pub public_key: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 struct SerializedDesktopReleaseConfig {
   #[serde(rename = "baseUrl")]
@@ -995,6 +1002,7 @@ struct SerializedDesktopConfig {
   pub backend: Option<String>,
   pub output: Option<SerializedDesktopOutputConfig>,
   pub release: Option<SerializedDesktopReleaseConfig>,
+  pub update: Option<SerializedDesktopUpdateConfig>,
   #[serde(rename = "errorReporting")]
   pub error_reporting: Option<SerializedDesktopErrorReportingConfig>,
   pub macos: Option<SerializedDesktopMacOSConfig>,
@@ -1047,6 +1055,9 @@ impl SerializedDesktopConfig {
       }),
       release: self.release.map(|r| DesktopReleaseConfig {
         base_url: r.base_url,
+      }),
+      update: self.update.map(|u| DesktopUpdateConfig {
+        public_key: u.public_key,
       }),
       error_reporting: self
         .error_reporting
@@ -1113,6 +1124,15 @@ pub struct DesktopReleaseConfig {
   pub base_url: Option<String>,
 }
 
+/// `desktop.update`: full-app self-update (`Deno.desktop.updater`).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct DesktopUpdateConfig {
+  /// The public half of the release signing key (ECDSA P-256, base64 SPKI
+  /// or a PUBLIC KEY PEM), baked into the app: every update manifest must be
+  /// signed by it.
+  pub public_key: Option<String>,
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct DesktopErrorReportingConfig {
   pub url: Option<String>,
@@ -1140,6 +1160,7 @@ pub struct DesktopConfig {
   pub backend: Option<String>,
   pub output: Option<DesktopOutputConfig>,
   pub release: Option<DesktopReleaseConfig>,
+  pub update: Option<DesktopUpdateConfig>,
   pub error_reporting: Option<DesktopErrorReportingConfig>,
   pub macos: Option<DesktopMacOSConfig>,
   pub initial_window: Option<DesktopInitialWindowConfig>,

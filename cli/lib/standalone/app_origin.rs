@@ -131,6 +131,10 @@ pub enum AppOriginError {
 /// stock CLI that rejects the key in deno.json can still configure the
 /// bootstrap window (a tray-only app sets `"showOnFirstLoad": false`). The
 /// metadata's value, written by a CLI that knows the key, takes precedence.
+///
+/// `update.publicKey` mirrors `desktop.update.publicKey`: the public half of
+/// the full-app update signing key (`Deno.desktop.updater`). The metadata's
+/// value, written by a CLI that knows the key, takes precedence.
 pub const APP_CONFIG_FILE: &str = ".deno-desktop/app.json";
 
 #[derive(serde::Deserialize)]
@@ -141,6 +145,14 @@ struct SerializedAppConfigFile {
   deep_links: Option<Vec<String>>,
   single_instance: Option<bool>,
   initial_window: Option<SerializedInitialWindow>,
+  update: Option<SerializedUpdate>,
+}
+
+/// `update` in the file.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct SerializedUpdate {
+  public_key: Option<String>,
 }
 
 /// `initialWindow` in the file: the shape of deno.json's
@@ -167,6 +179,8 @@ pub struct AppConfigFile {
   pub single_instance: Option<bool>,
   /// `initialWindow`, with deno.json's defaults filled in.
   pub initial_window: Option<super::binary::InitialWindowConfig>,
+  /// `update.publicKey` (validated by the runtime where it is used).
+  pub update_public_key: Option<String>,
 }
 
 /// Parse the contents of an [`APP_CONFIG_FILE`]. Every key is optional; an
@@ -195,7 +209,12 @@ pub fn parse_app_config_file(bytes: &[u8]) -> Result<AppConfigFile, String> {
     super::app_id::validate_app_identifier(identifier)
       .map_err(|e| format!("invalid identifier: {e}"))?;
   }
+  let update_public_key = config
+    .update
+    .and_then(|u| u.public_key)
+    .filter(|k| !k.trim().is_empty());
   Ok(AppConfigFile {
+    update_public_key,
     origin,
     identifier: config.identifier,
     deep_links,

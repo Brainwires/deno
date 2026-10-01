@@ -1880,6 +1880,12 @@ pub async fn run_with_options(
       .js_runtime()
       .execute_script("ext:deno_desktop/auto_update", js)?;
 
+    // Deno.desktop.updater: full-app self-update.
+    worker.js_runtime().execute_script(
+      "ext:deno_desktop/app_updater",
+      deno_runtime::ops::desktop_update::APP_UPDATER_JS,
+    )?;
+
     // Make the operator-configured reporting URL available to the native
     // op (and the panic hook) via `ERROR_REPORT_CONFIG`. The op reads the
     // destination from here rather than trusting a JS-supplied URL, so an

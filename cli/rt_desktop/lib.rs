@@ -1541,6 +1541,25 @@ fn apply_pending_update(dylib_path: &Path) -> bool {
 }
 
 laufey::main!(|| {
+  // Full-app self-update helper (`<exe> run denext-update-helper <mode>
+  // <pid>`): swap or roll back the install, relaunch, exit. Before anything
+  // else (and before the forked-worker check, which would take its `run`
+  // argv for a script).
+  {
+    let args: Vec<String> = env::args_os()
+      .filter_map(|a| a.into_string().ok())
+      .collect();
+    if deno_runtime::ops::desktop_update::swap::parse_helper_args(&args)
+      .is_some()
+    {
+      let mut trial = false;
+      let code =
+        deno_runtime::ops::desktop_update::early_startup(&args, &mut trial)
+          .unwrap_or(1);
+      deno_runtime::exit(code);
+    }
+  }
+
   // Apply any pending update before anything else.
   #[cfg(unix)]
   #[allow(clippy::print_stderr, reason = "runs before logging is initialized")]
@@ -1599,6 +1618,23 @@ laufey::main!(|| {
     return;
   }
 
+  // The full-app update watchdog: an update still unconfirmed from an
+  // earlier launch (it crashed or never called confirm()) is rolled back
+  // by the helper, which relaunches the previous version; this process
+  // exits without starting. The first launch of a new version is its trial.
+  let app_update_trial = {
+    let args: Vec<String> = env::args_os()
+      .filter_map(|a| a.into_string().ok())
+      .collect();
+    let mut trial = false;
+    if let Some(code) =
+      deno_runtime::ops::desktop_update::early_startup(&args, &mut trial)
+    {
+      deno_runtime::exit(code);
+    }
+    trial
+  };
+
   // The deep links and files the app was launched with are in this process's
   // own arguments (the backend's argv: laufey does not interpret them), and a
   // relative path in them is relative to the directory the process started
@@ -1609,6 +1645,9 @@ laufey::main!(|| {
     .skip(1)
     .filter_map(|arg| arg.to_str().map(str::to_string))
     .collect();
+  // The updater's relaunch markers are not launch targets.
+  let (launch_argv, app_updated_from, app_rolled_back_from) =
+    deno_runtime::ops::desktop_update::split_launch_markers(&launch_argv);
   #[allow(
     clippy::disallowed_methods,
     reason = "the launch directory, before the runtime (and its sys) exists"
@@ -1746,6 +1785,27 @@ laufey::main!(|| {
       return;
     }
   };
+  // Full-app self-update (Deno.desktop.updater): the public key baked in at
+  // package time (metadata, else the embedded app.json), the identity and
+  // version every manifest is checked against, and this launch's facts.
+  let app_update = deno_runtime::ops::desktop_update::AppUpdateConfig {
+    app_id: app_config.identifier.clone(),
+    version: data.metadata.app_version.clone(),
+    public_key: app_origin::resolve_update_public_key(
+      data.metadata.update_public_key.as_deref(),
+      &data.root_path,
+      &data.metadata.entrypoint_key,
+      |path| {
+        let file = data.vfs.file_entry(path).ok()?;
+        data.vfs.read_file_all(file).ok().map(|b| b.into_owned())
+      },
+    ),
+    current_exe: None,
+    launch_args: launch_argv.clone(),
+    updated_from: app_updated_from,
+    rolled_back_from: app_rolled_back_from,
+    trial: app_update_trial,
+  };
   let app_origin = app_config.origin;
   let deep_links = app_config.deep_links;
   // `LAUFEY_APP_ID` (the per-app web data directory, and the key of the
@@ -1838,6 +1898,7 @@ laufey::main!(|| {
           identifier: app_config.identifier,
           targets: launch_targets,
           initial_window: app_config.initial_window,
+          app_update,
         },
         data,
       )
@@ -1916,6 +1977,8 @@ struct LaunchConfig {
   targets: deno_lib::standalone::launch_args::LaunchTargets,
   /// `desktop.initialWindow` (metadata, else the embedded app.json).
   initial_window: deno_lib::standalone::binary::InitialWindowConfig,
+  /// Full-app self-update configuration (`Deno.desktop.updater`).
+  app_update: deno_runtime::ops::desktop_update::AppUpdateConfig,
 }
 
 /// Register the backend's open-URL and second-instance handlers, feeding
@@ -2425,6 +2488,7 @@ async fn run_desktop(
       || env::var_os("DENO_DESKTOP_DEV_URL").is_some(),
   ));
   let launch_deep_links = Arc::new(launch.deep_links);
+  let app_update = launch.app_update;
   let launch_urls = launch.targets.urls;
   let launch_files: Vec<String> = launch
     .targets
@@ -2534,6 +2598,9 @@ async fn run_desktop(
         Box::new(api),
         auto_update_state,
       );
+      // Deno.desktop.updater (main scope only; the ops are kept out of
+      // workers).
+      state.put(app_update);
       state.put(event_rx);
       state.put(event_tx);
       state.put(pending_responses);

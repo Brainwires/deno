@@ -744,6 +744,16 @@ const NOT_IMPORTED_OPS = [
   "op_desktop_quit",
   "op_desktop_set_quit_on_last_window_closed",
   "op_desktop_close_reply",
+  // Deno.desktop.updater (full-app self-update)
+  "op_desktop_app_update_info",
+  "op_desktop_app_update_check",
+  "op_desktop_app_update_begin",
+  "op_desktop_app_update_write",
+  "op_desktop_app_update_finish",
+  "op_desktop_app_update_abort",
+  "op_desktop_app_update_stage",
+  "op_desktop_app_update_apply",
+  "op_desktop_app_update_confirm",
 
   // deno deploy subcommand
   "op_deploy_token_get",
@@ -769,7 +779,8 @@ const NOT_IMPORTED_OPS = [
 // main-scope code may ask for. Quitting the app, the keep-alive switch and
 // the answer to a window's close request are the app's own lifecycle: a
 // worker must not end the app or close (or keep open) a window behind its
-// back.
+// back. Installing a full-app update replaces (and relaunches) the app, so
+// the Deno.desktop.updater ops are the main scope's alone too.
 const WORKER_EXCLUDED_OPS = [
   "op_desktop_read_clipboard_text",
   "op_desktop_write_clipboard_text",
@@ -782,6 +793,15 @@ const WORKER_EXCLUDED_OPS = [
   "op_desktop_quit",
   "op_desktop_set_quit_on_last_window_closed",
   "op_desktop_close_reply",
+  "op_desktop_app_update_info",
+  "op_desktop_app_update_check",
+  "op_desktop_app_update_begin",
+  "op_desktop_app_update_write",
+  "op_desktop_app_update_finish",
+  "op_desktop_app_update_abort",
+  "op_desktop_app_update_stage",
+  "op_desktop_app_update_apply",
+  "op_desktop_app_update_confirm",
 ];
 
 function removeImportedOps(isWorker = false) {

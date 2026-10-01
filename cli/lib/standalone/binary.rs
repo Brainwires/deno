@@ -114,6 +114,12 @@ pub struct Metadata {
   /// Auto-update release base URL from deno.json `desktop.release.baseUrl`.
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub release_base_url: Option<String>,
+  /// The full-app update public key from deno.json
+  /// `desktop.update.publicKey` (ECDSA P-256, base64 SPKI or PEM), checked
+  /// at compile time. Every `Deno.desktop.updater` manifest must be signed by
+  /// it. Desktop builds only.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub update_public_key: Option<String>,
   /// The desktop app's stable page origin (`<scheme>://<host>`) from
   /// deno.json `desktop.app.origin`, validated and normalized by
   /// [`super::app_origin::AppOrigin`] at compile time. `None` means the

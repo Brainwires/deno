@@ -60,6 +60,7 @@ deno_path_util.workspace = true
 deno_permissions.workspace = true
 deno_process.workspace = true
 deno_resolver = { workspace = true, features = ["sync"] }
+deno_semver.workspace = true
 deno_signals.workspace = true
 deno_telemetry.workspace = true
 deno_terminal.workspace = true
@@ -73,6 +74,7 @@ ed25519-dalek.workspace = true
 encoding_rs.workspace = true
 faster-hex.workspace = true
 fastwebsockets.workspace = true
+flate2 = { workspace = true, features = ["default"] }
 http.workspace = true
 http-body-util.workspace = true
 hyper.workspace = true
@@ -81,6 +83,7 @@ log.workspace = true
 node_resolver = { workspace = true, features = ["sync"] }
 notify.workspace = true
 once_cell.workspace = true
+p256 = { workspace = true, features = ["ecdsa", "pkcs8"] }
 qbsdiff.workspace = true
 raw-window-handle.workspace = true
 regex.workspace = true
@@ -88,24 +91,28 @@ rustyline = { workspace = true, features = ["custom-bindings"] }
 same-file.workspace = true
 serde.workspace = true
 serde_bytes.workspace = true
+serde_json.workspace = true
 sha2.workspace = true
 sys_traits.workspace = true
+tar.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tokio-metrics.workspace = true
 twox-hash.workspace = true
+url.workspace = true
 uuid.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 unicode-normalization.workspace = true
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { workspace = true, features = ["Win32_System_Console", "Win32_System_Diagnostics_ToolHelp", "Win32_UI_Input_KeyboardAndMouse"] }
+windows-sys = { workspace = true, features = ["Win32_System_Console", "Win32_System_Diagnostics_ToolHelp", "Win32_UI_Input_KeyboardAndMouse", "Win32_Security_WinTrust", "Win32_Security_Cryptography", "Win32_Security_Cryptography_Catalog", "Win32_Security_Cryptography_Sip"] }
 
 [target.'cfg(unix)'.dependencies]
 nix.workspace = true
 
 [dev-dependencies]
+tempfile.workspace = true
 # Used in benchmark
 test_util.workspace = true
 

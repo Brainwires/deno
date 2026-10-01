@@ -521,6 +521,29 @@ impl<'a> DenoCompileBinaryWriter<'a> {
     }
   }
 
+  /// deno.json `desktop.update.publicKey` for a desktop build, checked to be
+  /// an ECDSA P-256 public key (a key that does not parse would make every
+  /// update fail at runtime).
+  fn resolve_update_public_key(&self) -> Result<Option<String>, AnyError> {
+    if !self.is_desktop {
+      return Ok(None);
+    }
+    let Some(key) = self
+      .cli_options
+      .start_dir
+      .to_desktop_config()
+      .ok()
+      .and_then(|c| c.update.as_ref()?.public_key.clone())
+    else {
+      return Ok(None);
+    };
+    deno_runtime::ops::desktop_update::manifest::parse_public_key(&key)
+      .map_err(|e| {
+        deno_core::anyhow::anyhow!("invalid desktop.update.publicKey: {e}")
+      })?;
+    Ok(Some(key.trim().to_string()))
+  }
+
   pub async fn write_bin(
     &self,
     options: WriteBinOptions<'_>,
@@ -1368,6 +1391,7 @@ impl<'a> DenoCompileBinaryWriter<'a> {
         .to_desktop_config()
         .ok()
         .and_then(|c| c.release.as_ref()?.base_url.clone()),
+      update_public_key: self.resolve_update_public_key()?,
       app_origin: desktop_app_identity
         .as_mut()
         .and_then(|identity| identity.origin.take()),
