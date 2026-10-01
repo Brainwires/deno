@@ -1318,6 +1318,12 @@ struct BrowserWindow {
   /// case and only hide it; the surface keeps the window alive until JS
   /// releases the BrowserWindow (cppgc) and with it the surface.
   surface_taken: std::cell::Cell<bool>,
+  /// The frame around the page (outer size minus page size) last seen while
+  /// the window was in the normal state. `getNormalBounds` adds it to the
+  /// backend's normal (page) size: measured while maximized or fullscreen
+  /// the frame can be gone (window managers drop the borders of a maximized
+  /// window), which would undersize the restored bounds.
+  normal_chrome: std::cell::Cell<Option<(i32, i32)>>,
 }
 
 // SAFETY: we're sure this can be GCed
@@ -1435,6 +1441,7 @@ impl BrowserWindow {
       window_id,
       surface: SameObject::new(),
       surface_taken: std::cell::Cell::new(false),
+      normal_chrome: std::cell::Cell::new(None),
     };
     let window = deno_core::cppgc::make_cppgc_object(scope, window);
     let event_target_setup = state.borrow::<EventTargetSetup>();
@@ -1565,6 +1572,7 @@ impl BrowserWindow {
 
   #[fast]
   fn maximize(&self) {
+    note_normal_chrome(self.api.as_ref(), self.window_id, &self.normal_chrome);
     self
       .api
       .set_window_state(self.window_id, WindowAction::Maximize);
@@ -1579,6 +1587,7 @@ impl BrowserWindow {
 
   #[fast]
   fn minimize(&self) {
+    note_normal_chrome(self.api.as_ref(), self.window_id, &self.normal_chrome);
     self
       .api
       .set_window_state(self.window_id, WindowAction::Minimize);
@@ -1593,6 +1602,13 @@ impl BrowserWindow {
 
   #[fast]
   fn set_full_screen(&self, flag: bool) {
+    if flag {
+      note_normal_chrome(
+        self.api.as_ref(),
+        self.window_id,
+        &self.normal_chrome,
+      );
+    }
     self.api.set_window_state(
       self.window_id,
       if flag {
@@ -1651,6 +1667,7 @@ impl BrowserWindow {
   /// The outer frame: `getPosition()` + `outerWidth` / `outerHeight`.
   #[serde]
   fn get_bounds(&self) -> DesktopRect {
+    note_normal_chrome(self.api.as_ref(), self.window_id, &self.normal_chrome);
     outer_bounds(self.api.as_ref(), self.window_id)
   }
 
@@ -1671,14 +1688,17 @@ impl BrowserWindow {
   /// leaves the maximized / minimized / fullscreen state.
   #[serde]
   fn get_normal_bounds(&self) -> DesktopRect {
-    let (outer_w, outer_h) = self.api.get_window_outer_size(self.window_id);
-    let (inner_w, inner_h) = self.api.get_window_size(self.window_id);
+    let (chrome_w, chrome_h) = note_normal_chrome(
+      self.api.as_ref(),
+      self.window_id,
+      &self.normal_chrome,
+    );
     match self.api.get_normal_bounds(self.window_id) {
       Some((x, y, w, h)) => DesktopRect {
         x,
         y,
-        width: w + (outer_w - inner_w).max(0),
-        height: h + (outer_h - inner_h).max(0),
+        width: w + chrome_w,
+        height: h + chrome_h,
       },
       None => outer_bounds(self.api.as_ref(), self.window_id),
     }
@@ -1943,6 +1963,37 @@ struct BoundsOptions {
 }
 
 /// The outer frame of a window: position + chrome-inclusive size.
+/// The frame around the page right now, recorded as the normal-state frame
+/// when the window is in the normal state. Returns the frame to use for
+/// normal bounds: the recorded one, else the current one.
+fn note_normal_chrome(
+  api: &dyn DesktopApi,
+  window_id: u32,
+  cache: &std::cell::Cell<Option<(i32, i32)>>,
+) -> (i32, i32) {
+  normal_chrome(
+    api.get_window_outer_size(window_id),
+    api.get_window_size(window_id),
+    &api.get_window_state(window_id),
+    cache,
+  )
+}
+
+/// The decision behind [`note_normal_chrome`], without the backend.
+fn normal_chrome(
+  outer: (i32, i32),
+  inner: (i32, i32),
+  state: &WindowStateInfo,
+  cache: &std::cell::Cell<Option<(i32, i32)>>,
+) -> (i32, i32) {
+  let now = ((outer.0 - inner.0).max(0), (outer.1 - inner.1).max(0));
+  if !state.maximized && !state.minimized && !state.fullscreen {
+    cache.set(Some(now));
+    return now;
+  }
+  cache.get().unwrap_or(now)
+}
+
 fn outer_bounds(api: &dyn DesktopApi, window_id: u32) -> DesktopRect {
   let (x, y) = api.get_window_position(window_id);
   let (width, height) = api.get_window_outer_size(window_id);
@@ -3594,6 +3645,38 @@ mod tests {
       scale_factor: 1.0,
       is_primary: primary,
     }
+  }
+
+  #[test]
+  fn normal_chrome_keeps_the_frame_seen_while_normal() {
+    let cache = std::cell::Cell::new(None);
+    let normal = super::WindowStateInfo::default();
+    let maximized = super::WindowStateInfo {
+      maximized: true,
+      ..Default::default()
+    };
+    // Maximized before anything was seen: the current frame is all there is.
+    assert_eq!(
+      super::normal_chrome((800, 600), (800, 600), &maximized, &cache),
+      (0, 0)
+    );
+    assert_eq!(cache.get(), None);
+    // Normal: the frame is recorded.
+    assert_eq!(
+      super::normal_chrome((650, 454), (640, 426), &normal, &cache),
+      (10, 28)
+    );
+    // Maximized under a window manager that drops the borders: the
+    // recorded frame wins, so the restored bounds aren't undersized.
+    assert_eq!(
+      super::normal_chrome((1280, 1024), (1280, 1024), &maximized, &cache),
+      (10, 28)
+    );
+    // Normal again with another frame: re-recorded.
+    assert_eq!(
+      super::normal_chrome((640, 452), (640, 424), &normal, &cache),
+      (0, 28)
+    );
   }
 
   #[test]
