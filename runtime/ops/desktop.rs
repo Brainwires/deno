@@ -747,6 +747,44 @@ pub trait DesktopSchemeHandlers: Send + Sync + 'static {
 const SCHEME_HANDLER_TIMEOUT: std::time::Duration =
   std::time::Duration::from_secs(30);
 
+/// What `Deno.desktop.passkeys.capabilities()` resolves with — the shape of
+/// `@clerk/electron-passkeys`' `capabilities()`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PasskeyCapabilitiesInfo {
+  pub platform_authenticator: bool,
+  pub security_keys: bool,
+}
+
+/// Native passkeys (WebAuthn through the OS platform authenticator), behind
+/// `Deno.desktop.passkeys`. Implemented by the desktop runtime
+/// (denort_desktop, over laufey), which puts an `Arc<dyn DesktopPasskeys>` in
+/// the op state.
+///
+/// Options and results are JSON strings in the `@clerk/electron-passkeys`
+/// wire format, passed through untouched: laufey's backend parses the options
+/// strictly and resolves every request with one envelope,
+/// `{"ok":true,"credential":{...}}` or
+/// `{"ok":false,"error":{"code","message"}}`.
+pub trait DesktopPasskeys: Send + Sync + 'static {
+  /// May block briefly (Windows asks the WebAuthn service): called on the
+  /// blocking pool.
+  fn capabilities(&self) -> PasskeyCapabilitiesInfo;
+  /// Start a registration (`create`) or authentication ceremony anchored to
+  /// `window_id` (0: the focused window). The request is made when this is
+  /// called; the future resolves with the envelope and never fails.
+  fn request(
+    &self,
+    create: bool,
+    window_id: u32,
+    options_json: String,
+  ) -> std::pin::Pin<Box<dyn std::future::Future<Output = String> + Send>>;
+}
+
+/// The envelope a runtime without native passkeys answers with (the text of
+/// laufey's own not_supported answer).
+pub const PASSKEY_NOT_SUPPORTED_ENVELOPE: &str = r#"{"ok":false,"error":{"code":"not_supported","message":"Native passkeys are not supported on this platform."}}"#;
+
 /// A pending call from the webview to a bound Deno function.
 pub struct PendingBindCall {
   pub name: String,
@@ -1728,6 +1766,47 @@ async fn op_desktop_register_scheme(
   .await
 }
 
+fn desktop_passkeys(
+  state: &std::rc::Rc<std::cell::RefCell<OpState>>,
+) -> Option<Arc<dyn DesktopPasskeys>> {
+  state
+    .borrow()
+    .try_borrow::<Arc<dyn DesktopPasskeys>>()
+    .cloned()
+}
+
+/// `Deno.desktop.passkeys.capabilities()`.
+#[op2]
+#[serde]
+async fn op_desktop_passkey_capabilities(
+  state: std::rc::Rc<std::cell::RefCell<OpState>>,
+) -> Result<PasskeyCapabilitiesInfo, deno_error::JsErrorBox> {
+  let Some(passkeys) = desktop_passkeys(&state) else {
+    return Ok(PasskeyCapabilitiesInfo::default());
+  };
+  deno_core::unsync::spawn_blocking(move || passkeys.capabilities())
+    .await
+    .map_err(|_| {
+      deno_error::JsErrorBox::generic("the passkey capability query failed")
+    })
+}
+
+/// `Deno.desktop.passkeys.create()` / `.get()`: the JSON envelope, never an
+/// exception (the JS side validates the argument types).
+#[op2]
+#[string]
+async fn op_desktop_passkey_request(
+  state: std::rc::Rc<std::cell::RefCell<OpState>>,
+  create: bool,
+  #[smi] window_id: u32,
+  #[string] options_json: String,
+) -> String {
+  match desktop_passkeys(&state) {
+    Some(passkeys) => passkeys.request(create, window_id, options_json).await,
+    None => PASSKEY_NOT_SUPPORTED_ENVELOPE.to_string(),
+  }
+}
+
 #[op2(fast)]
 pub fn op_desktop_init(
   state: &mut OpState,
@@ -2572,6 +2651,8 @@ deno_core::extension!(
     op_desktop_subscribe_launch_events,
     op_desktop_get_scheme_owner,
     op_desktop_register_scheme,
+    op_desktop_passkey_capabilities,
+    op_desktop_passkey_request,
     op_desktop_resolve_bind_call,
     op_desktop_reject_bind_call,
     op_desktop_alert,
@@ -2596,6 +2677,8 @@ mod tests {
   use super::DesktopEvent;
   use super::DesktopValue;
   use super::MenuItem;
+  use super::PASSKEY_NOT_SUPPORTED_ENVELOPE;
+  use super::PasskeyCapabilitiesInfo;
   use super::PendingBindResponses;
   use super::PermissionState;
   use super::Tray;
@@ -3633,5 +3716,30 @@ mod tests {
     // pretty-printed whitespace (or trailing newlines from `\n` literals)
     // still verifies.
     assert!(verify_ed25519_b64(&pk, &sg, message));
+  }
+
+  // The JS bridge hands these to @clerk/electron unchanged: the capability
+  // keys and the not_supported envelope must keep the
+  // @clerk/electron-passkeys shapes.
+  #[test]
+  fn passkey_capabilities_serialize_like_clerk() {
+    let v = serde_json::to_value(PasskeyCapabilitiesInfo {
+      platform_authenticator: true,
+      security_keys: false,
+    })
+    .unwrap();
+    assert_eq!(
+      v,
+      json!({ "platformAuthenticator": true, "securityKeys": false })
+    );
+  }
+
+  #[test]
+  fn passkey_not_supported_envelope_is_clerk_shaped() {
+    let v: serde_json::Value =
+      serde_json::from_str(PASSKEY_NOT_SUPPORTED_ENVELOPE).unwrap();
+    assert_eq!(v["ok"], json!(false));
+    assert_eq!(v["error"]["code"], json!("not_supported"));
+    assert!(v["error"]["message"].is_string());
   }
 }

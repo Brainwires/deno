@@ -53,9 +53,39 @@ use denort::run::RunOptions;
 /// makes the failure mode obvious instead of "the desktop app silently won't
 /// launch".
 const _: () = assert!(
-  laufey::LAUFEY_API_VERSION == 36,
+  laufey::LAUFEY_API_VERSION == 37,
   "LAUFEY_API_VERSION mismatch: update this assert and the prebuilt backend release pin in cli/tools/desktop.rs when laufey bumps its API version",
 );
+
+/// `Deno.desktop.passkeys` over laufey's native passkeys (API 37): the
+/// options and the envelope pass through unchanged (laufey parses the
+/// options strictly; see laufey's docs/passkeys.md).
+struct LaufeyPasskeys;
+
+impl deno_runtime::ops::desktop::DesktopPasskeys for LaufeyPasskeys {
+  fn capabilities(
+    &self,
+  ) -> deno_runtime::ops::desktop::PasskeyCapabilitiesInfo {
+    let caps = laufey::passkey_capabilities();
+    deno_runtime::ops::desktop::PasskeyCapabilitiesInfo {
+      platform_authenticator: caps.platform_authenticator,
+      security_keys: caps.security_keys,
+    }
+  }
+
+  fn request(
+    &self,
+    create: bool,
+    window_id: u32,
+    options_json: String,
+  ) -> std::pin::Pin<Box<dyn std::future::Future<Output = String> + Send>> {
+    if create {
+      Box::pin(laufey::passkey_create(window_id, &options_json))
+    } else {
+      Box::pin(laufey::passkey_get(window_id, &options_json))
+    }
+  }
+}
 
 /// Laufey-backed implementation of [`denort::desktop::DesktopApi`].
 struct WefDesktopApi {
@@ -2144,6 +2174,11 @@ async fn run_desktop(
       scheme_registrar.clone().register_declared_in_background();
       state.put::<Arc<dyn deno_runtime::ops::desktop::DesktopSchemeHandlers>>(
         scheme_registrar.clone(),
+      );
+      // Deno.desktop.passkeys (main scope only; the ops are kept out of
+      // workers).
+      state.put::<Arc<dyn deno_runtime::ops::desktop::DesktopPasskeys>>(
+        Arc::new(LaufeyPasskeys),
       );
 
       // Create the initial window (hidden) and wire up event handlers. It is

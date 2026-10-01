@@ -727,6 +727,8 @@ const NOT_IMPORTED_OPS = [
   "op_desktop_subscribe_launch_events",
   "op_desktop_get_scheme_owner",
   "op_desktop_register_scheme",
+  "op_desktop_passkey_capabilities",
+  "op_desktop_passkey_request",
   "op_desktop_resolve_bind_call",
   "op_desktop_reject_bind_call",
   "op_desktop_alert",
@@ -757,7 +759,9 @@ const NOT_IMPORTED_OPS = [
 // and second-instance launches, which belong to `Deno.desktop` in the main
 // scope: a worker taking them would silently steal them from the app.
 // The scheme ops (owner query, OS handler registration) belong to the same
-// main-scope `Deno.desktop` API.
+// main-scope `Deno.desktop` API, as do the passkey ops: a ceremony is
+// anchored to a window and yields a credential, which only the app's own
+// main-scope code may ask for.
 const WORKER_EXCLUDED_OPS = [
   "op_desktop_read_clipboard_text",
   "op_desktop_write_clipboard_text",
@@ -765,6 +769,8 @@ const WORKER_EXCLUDED_OPS = [
   "op_desktop_subscribe_launch_events",
   "op_desktop_get_scheme_owner",
   "op_desktop_register_scheme",
+  "op_desktop_passkey_capabilities",
+  "op_desktop_passkey_request",
 ];
 
 function removeImportedOps(isWorker = false) {
