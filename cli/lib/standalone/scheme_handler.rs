@@ -318,6 +318,16 @@ pub mod windows {
     format!("\"{exe}\" \"%1\"")
   }
 
+  /// The default value of a URL protocol key: `URL:<scheme>`.
+  pub fn key_description(scheme: &str) -> String {
+    format!("URL:{scheme}")
+  }
+
+  /// The `DefaultIcon` for `exe`: its first icon, `"<exe>",0`.
+  pub fn default_icon(exe: &str) -> String {
+    format!("\"{exe}\",0")
+  }
+
   /// The key this app writes for itself.
   pub fn expected_key(me: &ThisApp) -> ClassKey {
     ClassKey {

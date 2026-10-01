@@ -430,7 +430,7 @@ mod os {
   ) -> Result<(), String> {
     let expected = logic::expected_key(me);
     let key = Key::create(HKEY_CURRENT_USER, &format!("{CLASSES}\\{scheme}"))?;
-    key.set_string(None, &format!("URL:{scheme}"))?;
+    key.set_string(None, &logic::key_description(scheme))?;
     key.set_string(Some("URL Protocol"), "")?;
     match &expected.app_id {
       Some(id) => key.set_string(Some(logic::APP_ID_VALUE), id)?,
@@ -502,7 +502,7 @@ mod os {
       .strip_prefix("\\\\?\\")
       .map(str::to_string)
       .unwrap_or(exe);
-    let icon = format!("\"{exe}\",0");
+    let icon = logic::default_icon(&exe);
     Some(logic::ThisApp { exe, app_id, icon })
   }
 
