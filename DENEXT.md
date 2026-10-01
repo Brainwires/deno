@@ -76,8 +76,24 @@ are where the changes are discussed.
    (`capabilities` / `create` / `get`) on macOS AuthenticationServices and
    Windows `webauthn.dll`, with the request/response envelope of
    `@clerk/electron-passkeys`.
+10. **`feat(desktop)`: window state, size limits, screens, chrome, cancelable
+    close and quit** — `BrowserWindow` maximize / minimize / fullscreen with
+    events, min / max size, `getBounds` / `setBounds` / `getNormalBounds`,
+    title bar styles, traffic-light position, Mica / Acrylic and vibrancy;
+    `Deno.desktop.screens()`, `"displaychanged"`, `windowCapabilities()`,
+    `quit()` (cancelable, Electron's `app.quit()`) and
+    `quitOnLastWindowClosed`; a cancelable `close` event (5 s answer
+    timeout); the tray-only and off-screen placement fixes. On top of
+    [denoland/deno#36761](https://github.com/denoland/deno/pull/36761)
+    (`devicePixelRatio`, inner / outer size, `screenX` / `screenY`, by Kenta
+    Moriuchi, [@petamoriken](https://github.com/petamoriken)) and
+    [denoland/deno#36789](https://github.com/denoland/deno/pull/36789)
+    (`desktop.initialWindow`, by Sasivarnan R,
+    [@sasivarnan](https://github.com/sasivarnan)), cherry-picked with their
+    authorship; `initialWindow` is also read from the embedded
+    `.deno-desktop/app.json`.
 
-The runtime-side parts (1-3, 5-9) are what the prebuilt `libdenort` carries.
+The runtime-side parts (1-3, 5-10) are what the prebuilt `libdenort` carries.
 The CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` /
 `LAUFEY_APP_ID` into a packaged app's launchers) are in the branch too, but a
 stock CLI does not run them; denext's own launcher provides that environment.
@@ -85,8 +101,8 @@ stock CLI does not run them; denext's own launcher provides that environment.
 The laufey backend hosts are built from
 [Brainwires/laufey](https://github.com/Brainwires/laufey) branch
 `denext/integration` (registered schemes, app data dir, WebKitGTK scheme
-request bodies, launch config, open-url / single instance, passkeys, Windows
-bindgen fix), at the commit pinned by
+request bodies, launch config, open-url / single instance, passkeys, the
+window API with littledivy/laufey#80 and #81, Windows bindgen fix), at the commit pinned by
 `LAUFEY_SHA` in the workflow (or the `laufey_ref` input).
 
 laufey's `init_api` rejects any C ABI version mismatch between the runtime
