@@ -736,6 +736,17 @@ const NOT_IMPORTED_OPS = [
   "op_desktop_prompt",
   "op_desktop_read_clipboard_text",
   "op_desktop_write_clipboard_text",
+  "op_desktop_clipboard_capabilities",
+  "op_desktop_read_clipboard_html",
+  "op_desktop_write_clipboard_html",
+  "op_desktop_read_clipboard_image",
+  "op_desktop_write_clipboard_image",
+  "op_desktop_read_clipboard_formats",
+  "op_desktop_clipboard_watch",
+  "op_desktop_start_drag",
+  "op_desktop_file_dialog_open",
+  "op_desktop_file_dialog_wait",
+  "op_desktop_file_dialog_cancel",
   "op_desktop_send_error_report",
   "op_desktop_request_notification_permission",
   "op_desktop_query_notification_permission",
@@ -769,7 +780,9 @@ const NOT_IMPORTED_OPS = [
 // main-scope code may ask for. Quitting the app, the keep-alive switch and
 // the answer to a window's close request are the app's own lifecycle: a
 // worker must not end the app or close (or keep open) a window behind its
-// back.
+// back. The rich clipboard (HTML, images, formats, change events) follows the
+// text clipboard; the file dialogs and the drag out hand over (or offer) the
+// user's files, which is the app's own main-scope `Deno.desktop` business.
 const WORKER_EXCLUDED_OPS = [
   "op_desktop_read_clipboard_text",
   "op_desktop_write_clipboard_text",
@@ -782,6 +795,17 @@ const WORKER_EXCLUDED_OPS = [
   "op_desktop_quit",
   "op_desktop_set_quit_on_last_window_closed",
   "op_desktop_close_reply",
+  "op_desktop_clipboard_capabilities",
+  "op_desktop_read_clipboard_html",
+  "op_desktop_write_clipboard_html",
+  "op_desktop_read_clipboard_image",
+  "op_desktop_write_clipboard_image",
+  "op_desktop_read_clipboard_formats",
+  "op_desktop_clipboard_watch",
+  "op_desktop_start_drag",
+  "op_desktop_file_dialog_open",
+  "op_desktop_file_dialog_wait",
+  "op_desktop_file_dialog_cancel",
 ];
 
 function removeImportedOps(isWorker = false) {

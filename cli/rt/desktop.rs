@@ -38,6 +38,17 @@ pub const DESKTOP_JS: &str = r#"
     op_desktop_prompt,
     op_desktop_read_clipboard_text,
     op_desktop_write_clipboard_text,
+    op_desktop_clipboard_capabilities,
+    op_desktop_read_clipboard_html,
+    op_desktop_write_clipboard_html,
+    op_desktop_read_clipboard_image,
+    op_desktop_write_clipboard_image,
+    op_desktop_read_clipboard_formats,
+    op_desktop_clipboard_watch,
+    op_desktop_start_drag,
+    op_desktop_file_dialog_open,
+    op_desktop_file_dialog_wait,
+    op_desktop_file_dialog_cancel,
     op_desktop_request_notification_permission,
     op_desktop_query_notification_permission,
     op_desktop_screens,
@@ -671,6 +682,11 @@ pub const DESKTOP_JS: &str = r#"
   internals.defineEventHandler(BrowserWindowPrototype, "restore");
   internals.defineEventHandler(BrowserWindowPrototype, "enterfullscreen");
   internals.defineEventHandler(BrowserWindowPrototype, "leavefullscreen");
+  // Files dragged over / dropped on the window (laufey API 39).
+  internals.defineEventHandler(BrowserWindowPrototype, "dragenter");
+  internals.defineEventHandler(BrowserWindowPrototype, "dragover");
+  internals.defineEventHandler(BrowserWindowPrototype, "dragleave");
+  internals.defineEventHandler(BrowserWindowPrototype, "drop");
 
   // Window chrome (laufey API 38). Each returns whether this backend / OS
   // applied it (see Deno.desktop.windowCapabilities()).
@@ -730,6 +746,36 @@ pub const DESKTOP_JS: &str = r#"
       throw new TypeError(`Unknown vibrancy material: ${material}`);
     }
     return this[privateBackdrop](BACKDROP_VIBRANCY, raw);
+  };
+  // Drag files out of the window to another app or the desktop (laufey API
+  // 39), as a copy. Call it while the left mouse button is held (from the
+  // page's dragstart, after preventDefault()). Resolves "dropped",
+  // "cancelled" or "failed"; rejects only on a wrong argument.
+  const MAX_DRAG_FILES = 4096;
+  BrowserWindowPrototype.startDrag = async function startDrag(item) {
+    if (item == null || typeof item !== "object") {
+      throw new TypeError("startDrag takes { files: string[], icon? }");
+    }
+    let files = item.files;
+    if (files === undefined && typeof item.file === "string") {
+      files = [item.file];
+    }
+    if (
+      !Array.isArray(files) || files.length === 0 ||
+      files.length > MAX_DRAG_FILES ||
+      !files.every((f) => typeof f === "string" && f.length > 0)
+    ) {
+      throw new TypeError(
+        `item.files must be 1 to ${MAX_DRAG_FILES} absolute paths`,
+      );
+    }
+    let icon = item.icon;
+    if (icon === undefined || icon === null) {
+      icon = new Uint8Array(0);
+    } else if (!(icon instanceof Uint8Array)) {
+      throw new TypeError("item.icon must be PNG bytes (a Uint8Array)");
+    }
+    return await op_desktop_start_drag(this.windowId, [...files], icon);
   };
   BrowserWindowPrototype.getScreen = function() {
     const id = this[privateScreenId]();
@@ -1073,6 +1119,310 @@ pub const DESKTOP_JS: &str = r#"
   });
   Object.defineProperty(desktop, "passkeys", {
     value: passkeys,
+    writable: false,
+    configurable: true,
+    enumerable: true,
+  });
+
+  // Native file dialogs (laufey API 39): the OS's own open / save / folder
+  // dialogs, shown on the UI thread without blocking the runtime. Electron's
+  // option names; absolute paths out, null when the user cancels; an
+  // AbortSignal closes the dialog.
+  function dialogArgs(windowOrOptions, maybeOptions) {
+    let target = undefined;
+    let options = windowOrOptions;
+    if (
+      windowOrOptions != null &&
+      Object.prototype.isPrototypeOf.call(BrowserWindowPrototype, windowOrOptions)
+    ) {
+      target = windowOrOptions;
+      options = maybeOptions;
+    }
+    if (options === undefined || options === null) options = {};
+    if (typeof options !== "object") {
+      throw new TypeError("dialog options must be an object");
+    }
+    let windowId = 0; // an app-level dialog
+    const w = target !== undefined ? target : options.window;
+    if (w !== undefined && w !== null) {
+      if (typeof w === "number") {
+        if (!Number.isInteger(w) || w < 0 || w > 0x7fffffff) {
+          throw new TypeError(
+            "options.window must be a window id (an integer, 0 to 2^31 - 1)",
+          );
+        }
+        windowId = w;
+      } else if (Object.prototype.isPrototypeOf.call(BrowserWindowPrototype, w)) {
+        windowId = w.windowId;
+      } else {
+        throw new TypeError(
+          "options.window must be a BrowserWindow or a window id",
+        );
+      }
+    }
+    const str = (key) => {
+      const v = options[key];
+      if (v === undefined || v === null) return null;
+      if (typeof v !== "string") {
+        throw new TypeError(`options.${key} must be a string`);
+      }
+      return v;
+    };
+    let filters = [];
+    if (options.filters !== undefined && options.filters !== null) {
+      if (!Array.isArray(options.filters)) {
+        throw new TypeError(
+          "options.filters must be an array of { name, extensions }",
+        );
+      }
+      filters = options.filters.map((f, i) => {
+        if (
+          f == null || typeof f.name !== "string" ||
+          !Array.isArray(f.extensions) ||
+          !f.extensions.every((e) => typeof e === "string")
+        ) {
+          throw new TypeError(
+            `options.filters[${i}] must be { name: string, extensions: string[] }`,
+          );
+        }
+        return { name: f.name, extensions: [...f.extensions] };
+      });
+    }
+    const signal = options.signal;
+    if (signal !== undefined && signal !== null && !(signal instanceof AbortSignal)) {
+      throw new TypeError("options.signal must be an AbortSignal");
+    }
+    return {
+      windowId,
+      title: str("title"),
+      defaultPath: str("defaultPath"),
+      buttonLabel: str("buttonLabel"),
+      filters,
+      properties: options.properties,
+      signal: signal ?? null,
+    };
+  }
+  function dialogProperties(properties, allowed) {
+    if (properties === undefined || properties === null) return new Set();
+    if (!Array.isArray(properties)) {
+      throw new TypeError("options.properties must be an array");
+    }
+    for (const p of properties) {
+      if (!allowed.includes(p)) {
+        throw new TypeError(`Unknown dialog property: ${p}`);
+      }
+    }
+    return new Set(properties);
+  }
+  async function runFileDialog(request, signal) {
+    if (signal) signal.throwIfAborted();
+    const rid = op_desktop_file_dialog_open(request);
+    const onAbort = () => op_desktop_file_dialog_cancel(rid);
+    if (signal) signal.addEventListener("abort", onAbort, { once: true });
+    try {
+      const result = await op_desktop_file_dialog_wait(rid);
+      if (signal && signal.aborted) throw signal.reason;
+      switch (result.status) {
+        case "accepted": return result.paths;
+        case "cancelled": return null;
+        case "busy":
+          throw new Deno.errors.Busy("Another file dialog is open");
+        default:
+          throw new Error("The file dialog could not be shown");
+      }
+    } finally {
+      if (signal) signal.removeEventListener("abort", onAbort);
+    }
+  }
+  const OPEN_DIALOG_PROPERTIES = [
+    "openFile",
+    "openDirectory",
+    "multiSelections",
+    "showHiddenFiles",
+  ];
+  const SAVE_DIALOG_PROPERTIES = ["showHiddenFiles"];
+  const dialog = Object.freeze({
+    showOpenDialog: async function showOpenDialog(
+      windowOrOptions = undefined,
+      maybeOptions = undefined,
+    ) {
+      const a = dialogArgs(windowOrOptions, maybeOptions);
+      const props = dialogProperties(a.properties, OPEN_DIALOG_PROPERTIES);
+      return await runFileDialog({
+        save: false,
+        windowId: a.windowId,
+        title: a.title,
+        defaultPath: a.defaultPath,
+        buttonLabel: a.buttonLabel,
+        filters: a.filters,
+        files: props.has("openFile"),
+        directories: props.has("openDirectory"),
+        multiple: props.has("multiSelections"),
+        showHidden: props.has("showHiddenFiles"),
+      }, a.signal);
+    },
+    showSaveDialog: async function showSaveDialog(
+      windowOrOptions = undefined,
+      maybeOptions = undefined,
+    ) {
+      const a = dialogArgs(windowOrOptions, maybeOptions);
+      const props = dialogProperties(a.properties, SAVE_DIALOG_PROPERTIES);
+      const paths = await runFileDialog({
+        save: true,
+        windowId: a.windowId,
+        title: a.title,
+        defaultPath: a.defaultPath,
+        buttonLabel: a.buttonLabel,
+        filters: a.filters,
+        files: false,
+        directories: false,
+        multiple: false,
+        showHidden: props.has("showHiddenFiles"),
+      }, a.signal);
+      return paths === null ? null : paths[0];
+    },
+  });
+  Object.defineProperty(desktop, "dialog", {
+    value: dialog,
+    writable: false,
+    configurable: true,
+    enumerable: true,
+  });
+
+  // The native clipboard (laufey API 39): text, HTML, PNG images, the
+  // formats present, and a "change" event. The OS watcher (on macOS a
+  // twice-a-second change-count poll) runs only while a "change" listener
+  // (or onchange) is set.
+  const clipboardKey = Symbol("DesktopClipboard");
+  const privateClipboardChanged = Symbol("Deno_privateClipboardChanged");
+  class DesktopClipboard extends EventTarget {
+    #listeners = []; // { listener, capture, once }
+    #watching = false;
+    #onchange = null;
+    #onchangeWrapper = null;
+
+    constructor(key) {
+      if (key !== clipboardKey) throw new TypeError("Illegal constructor");
+      super();
+    }
+
+    #sync() {
+      const on = this.#listeners.length > 0;
+      if (on === this.#watching) return;
+      this.#watching = on;
+      op_desktop_clipboard_watch(on);
+    }
+
+    #forget(listener, capture) {
+      this.#listeners = this.#listeners.filter((l) =>
+        !(l.listener === listener && l.capture === capture)
+      );
+    }
+
+    addEventListener(type, listener, options = undefined) {
+      super.addEventListener(type, listener, options);
+      if (type !== "change" || listener == null) return;
+      const capture = typeof options === "boolean"
+        ? options
+        : !!(options && options.capture);
+      const once = typeof options === "object" && options !== null &&
+        !!options.once;
+      const signal = typeof options === "object" && options !== null
+        ? options.signal
+        : undefined;
+      if (signal && signal.aborted) return;
+      if (
+        this.#listeners.some((l) =>
+          l.listener === listener && l.capture === capture
+        )
+      ) return;
+      this.#listeners.push({ listener, capture, once });
+      if (signal) {
+        signal.addEventListener("abort", () => {
+          this.#forget(listener, capture);
+          this.#sync();
+        }, { once: true });
+      }
+      this.#sync();
+    }
+
+    removeEventListener(type, listener, options = undefined) {
+      super.removeEventListener(type, listener, options);
+      if (type !== "change") return;
+      const capture = typeof options === "boolean"
+        ? options
+        : !!(options && options.capture);
+      this.#forget(listener, capture);
+      this.#sync();
+    }
+
+    get onchange() {
+      return this.#onchange;
+    }
+
+    set onchange(fn) {
+      if (this.#onchangeWrapper) {
+        this.removeEventListener("change", this.#onchangeWrapper);
+        this.#onchangeWrapper = null;
+      }
+      this.#onchange = typeof fn === "function" ? fn : null;
+      if (this.#onchange) {
+        const handler = this.#onchange;
+        this.#onchangeWrapper = (ev) => handler.call(this, ev);
+        this.addEventListener("change", this.#onchangeWrapper);
+      }
+    }
+
+    [privateClipboardChanged]() {
+      this.dispatchEvent(new Event("change"));
+      // `once` listeners are gone now.
+      if (this.#listeners.some((l) => l.once)) {
+        this.#listeners = this.#listeners.filter((l) => !l.once);
+        this.#sync();
+      }
+    }
+
+    capabilities() {
+      return op_desktop_clipboard_capabilities();
+    }
+
+    async readText() {
+      return (await op_desktop_read_clipboard_text()) ?? "";
+    }
+
+    async writeText(text) {
+      await op_desktop_write_clipboard_text(String(text));
+    }
+
+    async readHTML() {
+      return (await op_desktop_read_clipboard_html()) ?? "";
+    }
+
+    async writeHTML(html, text = undefined) {
+      await op_desktop_write_clipboard_html(
+        String(html),
+        text === undefined || text === null ? null : String(text),
+      );
+    }
+
+    async readImage() {
+      return (await op_desktop_read_clipboard_image()) ?? null;
+    }
+
+    async writeImage(png) {
+      if (!(png instanceof Uint8Array)) {
+        throw new TypeError("writeImage takes PNG bytes (a Uint8Array)");
+      }
+      await op_desktop_write_clipboard_image(png);
+    }
+
+    async availableFormats() {
+      return await op_desktop_read_clipboard_formats();
+    }
+  }
+  const desktopClipboard = new DesktopClipboard(clipboardKey);
+  Object.defineProperty(desktop, "clipboard", {
+    value: desktopClipboard,
     writable: false,
     configurable: true,
     enumerable: true,
@@ -1592,6 +1942,14 @@ pub const DESKTOP_JS: &str = r#"
   // tick used by HMR, or module evaluation with top-level await).
   const { unrefOpPromise } = internals.core;
 
+  const FILE_DROP_EVENTS = {
+    __proto__: null,
+    enter: "dragenter",
+    over: "dragover",
+    leave: "dragleave",
+    drop: "drop",
+  };
+
   // Single polling loop for all native desktop events.
   (async () => {
     while (true) {
@@ -1774,6 +2132,25 @@ pub const DESKTOP_JS: &str = r#"
           }
           case "displayChanged": {
             desktop.dispatchEvent(new Event("displaychanged"));
+            break;
+          }
+          case "fileDrop": {
+            const target = windows.get(ev.windowId);
+            if (!target) break;
+            const type = FILE_DROP_EVENTS[ev.phase];
+            if (!type) break;
+            target.dispatchEvent(new CustomEvent(type, {
+              detail: Object.freeze({
+                paths: ev.paths == null ? null : Object.freeze([...ev.paths]),
+                count: ev.count,
+                x: ev.x,
+                y: ev.y,
+              }),
+            }));
+            break;
+          }
+          case "clipboardChange": {
+            desktopClipboard[privateClipboardChanged]();
             break;
           }
           case "runtimeError": {
@@ -2331,6 +2708,76 @@ mod tests {
     assert!(DESKTOP_JS.contains("op_desktop_take_launch_targets()"));
     assert!(DESKTOP_JS.contains("launchUrls:"));
     assert!(DESKTOP_JS.contains("launchFiles:"));
+  }
+
+  #[test]
+  fn desktop_js_installs_dialogs() {
+    assert!(DESKTOP_JS.contains(r#"Object.defineProperty(desktop, "dialog""#));
+    assert!(
+      DESKTOP_JS.contains("showOpenDialog: async function showOpenDialog(")
+    );
+    assert!(
+      DESKTOP_JS.contains("showSaveDialog: async function showSaveDialog(")
+    );
+    // Open, wait and cancel go through the id the open op hands out, and an
+    // AbortSignal cancels.
+    assert!(
+      DESKTOP_JS.contains("const rid = op_desktop_file_dialog_open(request);")
+    );
+    assert!(DESKTOP_JS.contains("await op_desktop_file_dialog_wait(rid)"));
+    assert!(DESKTOP_JS.contains("op_desktop_file_dialog_cancel(rid)"));
+    assert!(DESKTOP_JS.contains("signal.addEventListener(\"abort\", onAbort"));
+    // Cancelled resolves null; busy is Deno.errors.Busy.
+    assert!(DESKTOP_JS.contains("case \"cancelled\": return null;"));
+    assert!(DESKTOP_JS.contains("new Deno.errors.Busy("));
+    // A save dialog resolves one path.
+    assert!(DESKTOP_JS.contains("return paths === null ? null : paths[0];"));
+    // Electron's properties, nothing else.
+    assert!(DESKTOP_JS.contains("Unknown dialog property"));
+  }
+
+  #[test]
+  fn desktop_js_installs_rich_clipboard() {
+    assert!(
+      DESKTOP_JS.contains(r#"Object.defineProperty(desktop, "clipboard""#)
+    );
+    assert!(DESKTOP_JS.contains("class DesktopClipboard extends EventTarget"));
+    for op in [
+      "op_desktop_read_clipboard_html()",
+      "op_desktop_write_clipboard_html(",
+      "op_desktop_read_clipboard_image()",
+      "op_desktop_write_clipboard_image(png)",
+      "op_desktop_read_clipboard_formats()",
+      "op_desktop_clipboard_capabilities()",
+    ] {
+      assert!(DESKTOP_JS.contains(op), "{op}");
+    }
+    // The OS watcher follows the listeners (macOS polls only while on).
+    assert!(DESKTOP_JS.contains("op_desktop_clipboard_watch(on);"));
+    assert!(DESKTOP_JS.contains("case \"clipboardChange\":"));
+    assert!(
+      DESKTOP_JS.contains("desktopClipboard[privateClipboardChanged]();")
+    );
+  }
+
+  #[test]
+  fn desktop_js_installs_file_drag_and_drop() {
+    for ev in ["dragenter", "dragover", "dragleave", "drop"] {
+      assert!(
+        DESKTOP_JS.contains(&format!(
+          "internals.defineEventHandler(BrowserWindowPrototype, \"{ev}\")"
+        )),
+        "{ev}"
+      );
+    }
+    assert!(DESKTOP_JS.contains("case \"fileDrop\":"));
+    assert!(DESKTOP_JS.contains("const type = FILE_DROP_EVENTS[ev.phase];"));
+    assert!(DESKTOP_JS.contains(
+      "BrowserWindowPrototype.startDrag = async function startDrag(item)"
+    ));
+    assert!(DESKTOP_JS.contains(
+      "return await op_desktop_start_drag(this.windowId, [...files], icon);"
+    ));
   }
 
   #[test]

@@ -410,6 +410,22 @@ pub enum DesktopEvent {
   /// Displays were added, removed, rearranged or rescaled, or a work area
   /// changed (`Deno.desktop` "displaychanged").
   DisplayChanged,
+  /// Files dragged over / dropped on a window (laufey API 39). `phase` is
+  /// `"enter"`, `"over"`, `"leave"` or `"drop"`; `paths` is `None` for
+  /// `"leave"` and, on backends that reveal the paths only on the drop, for
+  /// `"enter"` / `"over"`; `count` is the number of files.
+  #[serde(rename_all = "camelCase")]
+  FileDrop {
+    window_id: u32,
+    phase: String,
+    x: f64,
+    y: f64,
+    paths: Option<Vec<String>>,
+    count: usize,
+  },
+  /// The system clipboard changed (`Deno.desktop.clipboard` "change"); only
+  /// while the app listens.
+  ClipboardChange,
   #[serde(rename_all = "camelCase")]
   RuntimeError {
     message: String,
@@ -904,7 +920,182 @@ pub struct WindowCapabilitiesInfo {
   pub normal_bounds: bool,
   pub keep_alive: bool,
   pub set_position: bool,
+  /// The `dragenter` / `dragover` / `dragleave` / `drop` window events fire
+  /// (laufey API 39).
+  pub file_drop: bool,
+  /// `dragenter` / `dragover` already carry the paths (WebView2 reveals them
+  /// only on the drop).
+  pub file_drop_enter_paths: bool,
+  /// `BrowserWindow.startDrag` works.
+  pub file_drag_out: bool,
+  /// `Deno.desktop.dialog` works.
+  pub file_dialogs: bool,
+  /// One open dialog can pick files and directories (macOS).
+  pub file_dialog_files_and_directories: bool,
+  /// A dialog given a window is modal to it.
+  pub file_dialog_modal: bool,
 }
+
+/// `Deno.desktop.clipboard.capabilities()`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClipboardCapabilitiesInfo {
+  pub text: bool,
+  pub html: bool,
+  pub image: bool,
+  pub formats: bool,
+  /// The clipboard's `"change"` event fires.
+  pub change_events: bool,
+}
+
+/// A boxed future the desktop runtime resolves later (a drag out, a dialog).
+pub type DesktopFuture<T> =
+  std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send>>;
+
+/// How `BrowserWindow.startDrag` ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DragOutcome {
+  /// A target took the files.
+  Dropped,
+  /// The user cancelled, or dropped where nothing took them.
+  Cancelled,
+  /// The drag never started.
+  Failed,
+}
+
+impl DragOutcome {
+  pub fn as_str(self) -> &'static str {
+    match self {
+      DragOutcome::Dropped => "dropped",
+      DragOutcome::Cancelled => "cancelled",
+      DragOutcome::Failed => "failed",
+    }
+  }
+}
+
+/// One filter of a file dialog.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileFilterInfo {
+  pub name: String,
+  pub extensions: Vec<String>,
+}
+
+/// A file dialog request from `Deno.desktop.dialog` (validated by the JS
+/// side; the backend checks it again).
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct FileDialogRequest {
+  /// A save dialog (otherwise open).
+  pub save: bool,
+  /// The window the dialog is modal to; 0 for an app-level dialog.
+  pub window_id: u32,
+  pub title: Option<String>,
+  pub default_path: Option<String>,
+  pub button_label: Option<String>,
+  pub filters: Vec<FileFilterInfo>,
+  /// Open: pick files.
+  pub files: bool,
+  /// Open: pick directories.
+  pub directories: bool,
+  /// Open: allow several.
+  pub multiple: bool,
+  pub show_hidden: bool,
+}
+
+/// How a file dialog ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FileDialogOutcome {
+  Accepted(Vec<String>),
+  Cancelled,
+  /// Another file dialog was open.
+  Busy,
+  Failed,
+}
+
+/// What `op_desktop_file_dialog_wait` resolves with.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct FileDialogResultInfo {
+  /// `"accepted"`, `"cancelled"`, `"busy"` or `"failed"`.
+  pub status: &'static str,
+  pub paths: Vec<String>,
+}
+
+impl From<FileDialogOutcome> for FileDialogResultInfo {
+  fn from(o: FileDialogOutcome) -> Self {
+    match o {
+      FileDialogOutcome::Accepted(paths) => FileDialogResultInfo {
+        status: if paths.is_empty() {
+          "cancelled"
+        } else {
+          "accepted"
+        },
+        paths,
+      },
+      FileDialogOutcome::Cancelled => FileDialogResultInfo {
+        status: "cancelled",
+        paths: Vec::new(),
+      },
+      FileDialogOutcome::Busy => FileDialogResultInfo {
+        status: "busy",
+        paths: Vec::new(),
+      },
+      FileDialogOutcome::Failed => FileDialogResultInfo {
+        status: "failed",
+        paths: Vec::new(),
+      },
+    }
+  }
+}
+
+/// The open file dialogs of this runtime, by the id the JS side holds: the
+/// backend's dialog id (for cancel) and the outcome, until awaited.
+#[derive(Default)]
+pub struct FileDialogTable {
+  next: u32,
+  entries: HashMap<u32, (u32, Option<DesktopFuture<FileDialogOutcome>>)>,
+}
+
+impl FileDialogTable {
+  pub fn insert(
+    &mut self,
+    dialog_id: u32,
+    outcome: DesktopFuture<FileDialogOutcome>,
+  ) -> u32 {
+    self.next = self.next.wrapping_add(1).max(1);
+    while self.entries.contains_key(&self.next) {
+      self.next = self.next.wrapping_add(1).max(1);
+    }
+    self.entries.insert(self.next, (dialog_id, Some(outcome)));
+    self.next
+  }
+
+  fn take_outcome(
+    &mut self,
+    rid: u32,
+  ) -> Option<DesktopFuture<FileDialogOutcome>> {
+    self.entries.get_mut(&rid).and_then(|e| e.1.take())
+  }
+
+  fn dialog_id(&self, rid: u32) -> Option<u32> {
+    self.entries.get(&rid).map(|e| e.0)
+  }
+
+  fn remove(&mut self, rid: u32) {
+    self.entries.remove(&rid);
+  }
+
+  pub fn len(&self) -> usize {
+    self.entries.len()
+  }
+
+  pub fn is_empty(&self) -> bool {
+    self.entries.is_empty()
+  }
+}
+
+/// Most paths one `startDrag` takes (laufey's LAUFEY_MAX_DROP_PATHS).
+pub const MAX_DRAG_PATHS: usize = 4096;
 
 /// The smallest part of a window (or all of it, when smaller) that must
 /// overlap a screen's work area for [`ensure_on_screen`] to leave it where it
@@ -1157,6 +1348,62 @@ pub trait DesktopApi: Send + Sync + 'static {
   fn set_quit_on_last_window_closed(&self, _quit: bool) {}
   /// The app answered a close request (see [`PendingCloses`]).
   fn close_reply(&self, _window_id: u32, _prevented: bool) {}
+
+  // --- Drag and drop, file dialogs, rich clipboard (laufey API 39) ---
+  //
+  // The defaults are a runtime without any of it: drags and dialogs fail,
+  // and the clipboard is text only.
+
+  /// Drag `paths` out of the window (laufey `start_file_drag`). The drag is
+  /// requested when this is called; the future resolves when it ends.
+  fn start_file_drag(
+    &self,
+    _window_id: u32,
+    _paths: Vec<String>,
+    _icon_png: Option<Vec<u8>>,
+  ) -> DesktopFuture<DragOutcome> {
+    Box::pin(async { DragOutcome::Failed })
+  }
+  /// Show a file dialog. Returns the backend's dialog id (0 when the request
+  /// was answered at once) and its outcome; the dialog is requested when this
+  /// is called, and the runtime thread never blocks on it.
+  fn show_file_dialog(
+    &self,
+    _request: FileDialogRequest,
+  ) -> (u32, DesktopFuture<FileDialogOutcome>) {
+    (0, Box::pin(async { FileDialogOutcome::Failed }))
+  }
+  /// Close an open dialog as cancelled. False when it isn't open.
+  fn cancel_file_dialog(&self, _dialog_id: u32) -> bool {
+    false
+  }
+  fn clipboard_capabilities(&self) -> ClipboardCapabilitiesInfo {
+    ClipboardCapabilitiesInfo {
+      text: true,
+      ..Default::default()
+    }
+  }
+  /// Blocking (runs on the blocking pool), like `read_clipboard_text`.
+  fn read_clipboard_html(&self) -> Option<String> {
+    None
+  }
+  fn write_clipboard_html(&self, _html: &str, _text: Option<&str>) -> bool {
+    false
+  }
+  /// PNG bytes.
+  fn read_clipboard_image(&self) -> Option<Vec<u8>> {
+    None
+  }
+  fn write_clipboard_image(&self, _png: &[u8]) -> bool {
+    false
+  }
+  /// MIME types; `None` when the backend can't tell.
+  fn read_clipboard_formats(&self) -> Option<Vec<String>> {
+    None
+  }
+  /// Start / stop delivering [`DesktopEvent::ClipboardChange`] (macOS polls
+  /// the pasteboard only while on).
+  fn set_clipboard_watch(&self, _on: bool) {}
   fn set_application_menu(&self, window_id: u32, menu: Vec<MenuItem>);
   fn show_context_menu(
     &self,
@@ -2892,6 +3139,243 @@ async fn op_desktop_write_clipboard_text(
   }
 }
 
+fn desktop_api(
+  state: &std::rc::Rc<std::cell::RefCell<OpState>>,
+) -> Option<Arc<dyn DesktopApi>> {
+  state.borrow().try_borrow::<Arc<dyn DesktopApi>>().cloned()
+}
+
+/// Runs a blocking clipboard call on the blocking pool with the clipboard
+/// timeout, for the same reasons as `op_desktop_read_clipboard_text`.
+async fn clipboard_blocking<T: Send + 'static>(
+  op: &'static str,
+  f: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, deno_error::JsErrorBox> {
+  let task = deno_core::unsync::spawn_blocking(f);
+  match tokio::time::timeout(CLIPBOARD_TIMEOUT, task).await {
+    Ok(Ok(v)) => Ok(v),
+    Ok(Err(_join)) => Err(clipboard_failed(op)),
+    Err(_elapsed) => Err(clipboard_unavailable(op)),
+  }
+}
+
+fn clipboard_not_supported(what: &str) -> deno_error::JsErrorBox {
+  deno_error::JsErrorBox::new(
+    "NotSupported",
+    format!("the clipboard does not support {what} on this platform"),
+  )
+}
+
+/// `Deno.desktop.clipboard.capabilities()`.
+#[op2]
+#[serde]
+fn op_desktop_clipboard_capabilities(
+  state: &mut OpState,
+) -> ClipboardCapabilitiesInfo {
+  state
+    .try_borrow::<Arc<dyn DesktopApi>>()
+    .map(|api| api.clipboard_capabilities())
+    .unwrap_or_default()
+}
+
+/// `Deno.desktop.clipboard.readHTML()`: `None` when the clipboard holds no
+/// HTML.
+#[op2]
+#[string]
+async fn op_desktop_read_clipboard_html(
+  state: std::rc::Rc<std::cell::RefCell<OpState>>,
+) -> Result<Option<String>, deno_error::JsErrorBox> {
+  let Some(api) = desktop_api(&state) else {
+    return Ok(None);
+  };
+  clipboard_blocking("read", move || api.read_clipboard_html()).await
+}
+
+/// `Deno.desktop.clipboard.writeHTML()`.
+#[op2]
+async fn op_desktop_write_clipboard_html(
+  state: std::rc::Rc<std::cell::RefCell<OpState>>,
+  #[string] html: String,
+  #[string] text: Option<String>,
+) -> Result<(), deno_error::JsErrorBox> {
+  let Some(api) = desktop_api(&state) else {
+    return Err(clipboard_not_supported("HTML"));
+  };
+  if !api.clipboard_capabilities().html {
+    return Err(clipboard_not_supported("HTML"));
+  }
+  let ok = clipboard_blocking("write", move || {
+    api.write_clipboard_html(&html, text.as_deref())
+  })
+  .await?;
+  if ok {
+    Ok(())
+  } else {
+    Err(clipboard_failed("write"))
+  }
+}
+
+/// `Deno.desktop.clipboard.readImage()`: PNG bytes, or `None` when the
+/// clipboard holds no image.
+#[op2]
+#[serde]
+async fn op_desktop_read_clipboard_image(
+  state: std::rc::Rc<std::cell::RefCell<OpState>>,
+) -> Result<Option<deno_core::ToJsBuffer>, deno_error::JsErrorBox> {
+  let Some(api) = desktop_api(&state) else {
+    return Ok(None);
+  };
+  let png =
+    clipboard_blocking("read", move || api.read_clipboard_image()).await?;
+  Ok(png.map(deno_core::ToJsBuffer::from))
+}
+
+/// True when `bytes` starts with the PNG signature.
+pub fn looks_like_png(bytes: &[u8]) -> bool {
+  bytes.len() > 8
+    && bytes[..8] == [0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1A, b'\n']
+}
+
+/// `Deno.desktop.clipboard.writeImage(png)`.
+#[op2]
+async fn op_desktop_write_clipboard_image(
+  state: std::rc::Rc<std::cell::RefCell<OpState>>,
+  #[buffer(copy)] png: Vec<u8>,
+) -> Result<(), deno_error::JsErrorBox> {
+  if !looks_like_png(&png) {
+    return Err(deno_error::JsErrorBox::type_error(
+      "writeImage takes PNG bytes",
+    ));
+  }
+  let Some(api) = desktop_api(&state) else {
+    return Err(clipboard_not_supported("images"));
+  };
+  if !api.clipboard_capabilities().image {
+    return Err(clipboard_not_supported("images"));
+  }
+  let ok = clipboard_blocking("write", move || api.write_clipboard_image(&png))
+    .await?;
+  if ok {
+    Ok(())
+  } else {
+    Err(deno_error::JsErrorBox::generic(
+      "clipboard write failed (not a decodable PNG, or the clipboard refused it)",
+    ))
+  }
+}
+
+/// `Deno.desktop.clipboard.availableFormats()`.
+#[op2]
+#[serde]
+async fn op_desktop_read_clipboard_formats(
+  state: std::rc::Rc<std::cell::RefCell<OpState>>,
+) -> Result<Vec<String>, deno_error::JsErrorBox> {
+  let Some(api) = desktop_api(&state) else {
+    return Ok(Vec::new());
+  };
+  let formats =
+    clipboard_blocking("read", move || api.read_clipboard_formats()).await?;
+  Ok(formats.unwrap_or_default())
+}
+
+/// Starts / stops the clipboard "change" events (the JS side turns them on
+/// with the first listener and off with the last).
+#[op2(fast)]
+fn op_desktop_clipboard_watch(state: &mut OpState, on: bool) {
+  if let Some(api) = state.try_borrow::<Arc<dyn DesktopApi>>() {
+    api.set_clipboard_watch(on);
+  }
+}
+
+/// `BrowserWindow.prototype.startDrag()`: `"dropped"`, `"cancelled"` or
+/// `"failed"`.
+#[op2]
+#[string]
+async fn op_desktop_start_drag(
+  state: std::rc::Rc<std::cell::RefCell<OpState>>,
+  #[smi] window_id: u32,
+  #[serde] paths: Vec<String>,
+  #[buffer(copy)] icon: Vec<u8>,
+) -> String {
+  let Some(api) = desktop_api(&state) else {
+    return DragOutcome::Failed.as_str().to_string();
+  };
+  if paths.is_empty() || paths.len() > MAX_DRAG_PATHS {
+    return DragOutcome::Failed.as_str().to_string();
+  }
+  let icon = if icon.is_empty() { None } else { Some(icon) };
+  api
+    .start_file_drag(window_id, paths, icon)
+    .await
+    .as_str()
+    .to_string()
+}
+
+/// `Deno.desktop.dialog.*`: shows the dialog and returns the id the JS side
+/// waits on (`op_desktop_file_dialog_wait`) and cancels with
+/// (`op_desktop_file_dialog_cancel`). Never blocks.
+#[op2]
+#[smi]
+fn op_desktop_file_dialog_open(
+  state: &mut OpState,
+  #[serde] request: FileDialogRequest,
+) -> u32 {
+  let (dialog_id, outcome) = match state.try_borrow::<Arc<dyn DesktopApi>>() {
+    Some(api) => api.show_file_dialog(request),
+    None => (
+      0,
+      Box::pin(async { FileDialogOutcome::Failed })
+        as DesktopFuture<FileDialogOutcome>,
+    ),
+  };
+  if !state.has::<FileDialogTable>() {
+    state.put(FileDialogTable::default());
+  }
+  state
+    .borrow_mut::<FileDialogTable>()
+    .insert(dialog_id, outcome)
+}
+
+/// The outcome of a dialog `op_desktop_file_dialog_open` showed.
+#[op2]
+#[serde]
+async fn op_desktop_file_dialog_wait(
+  state: std::rc::Rc<std::cell::RefCell<OpState>>,
+  #[smi] rid: u32,
+) -> FileDialogResultInfo {
+  let outcome = state
+    .borrow_mut()
+    .try_borrow_mut::<FileDialogTable>()
+    .and_then(|t| t.take_outcome(rid));
+  let result = match outcome {
+    Some(f) => f.await,
+    None => FileDialogOutcome::Failed,
+  };
+  if let Some(t) = state.borrow_mut().try_borrow_mut::<FileDialogTable>() {
+    t.remove(rid);
+  }
+  result.into()
+}
+
+/// Close a dialog `op_desktop_file_dialog_open` showed, as cancelled (an
+/// AbortSignal). False when it is no longer open.
+#[op2(fast)]
+fn op_desktop_file_dialog_cancel(state: &mut OpState, #[smi] rid: u32) -> bool {
+  let Some(dialog_id) = state
+    .try_borrow::<FileDialogTable>()
+    .and_then(|t| t.dialog_id(rid))
+  else {
+    return false;
+  };
+  if dialog_id == 0 {
+    return false;
+  }
+  state
+    .try_borrow::<Arc<dyn DesktopApi>>()
+    .map(|api| api.cancel_file_dialog(dialog_id))
+    .unwrap_or(false)
+}
+
 fn permission_state_to_web_string(state: PermissionState) -> &'static str {
   // Web Permissions API state values; `Notification.requestPermission`
   // additionally maps `Prompt` → `"default"` per the Notifications spec.
@@ -3329,6 +3813,17 @@ deno_core::extension!(
     op_desktop_prompt,
     op_desktop_read_clipboard_text,
     op_desktop_write_clipboard_text,
+    op_desktop_clipboard_capabilities,
+    op_desktop_read_clipboard_html,
+    op_desktop_write_clipboard_html,
+    op_desktop_read_clipboard_image,
+    op_desktop_write_clipboard_image,
+    op_desktop_read_clipboard_formats,
+    op_desktop_clipboard_watch,
+    op_desktop_start_drag,
+    op_desktop_file_dialog_open,
+    op_desktop_file_dialog_wait,
+    op_desktop_file_dialog_cancel,
     op_desktop_send_error_report,
     op_desktop_request_notification_permission,
     op_desktop_query_notification_permission,
@@ -4660,5 +5155,157 @@ mod tests {
     assert_eq!(v["ok"], json!(false));
     assert_eq!(v["error"]["code"], json!("not_supported"));
     assert!(v["error"]["message"].is_string());
+  }
+
+  // --- Drag and drop, file dialogs, rich clipboard (laufey API 39) ---
+  //
+  // DESKTOP_JS consumes these shapes: the event fields, the capability keys
+  // and the dialog request / result.
+
+  #[test]
+  fn file_drop_event_wire_format() {
+    let v = serde_json::to_value(DesktopEvent::FileDrop {
+      window_id: 3,
+      phase: "drop".into(),
+      x: 12.5,
+      y: 40.0,
+      paths: Some(vec!["/a b.txt".into()]),
+      count: 1,
+    })
+    .unwrap();
+    assert_eq!(
+      v,
+      json!({
+        "kind": "fileDrop",
+        "windowId": 3,
+        "phase": "drop",
+        "x": 12.5,
+        "y": 40.0,
+        "paths": ["/a b.txt"],
+        "count": 1,
+      })
+    );
+    let leave = serde_json::to_value(DesktopEvent::FileDrop {
+      window_id: 3,
+      phase: "leave".into(),
+      x: 0.0,
+      y: 0.0,
+      paths: None,
+      count: 0,
+    })
+    .unwrap();
+    assert_eq!(leave["paths"], json!(null));
+    assert_eq!(
+      serde_json::to_value(DesktopEvent::ClipboardChange).unwrap(),
+      json!({ "kind": "clipboardChange" })
+    );
+  }
+
+  #[test]
+  fn io_capabilities_wire_format() {
+    let caps = serde_json::to_value(super::WindowCapabilitiesInfo {
+      file_drop: true,
+      file_dialog_files_and_directories: true,
+      ..Default::default()
+    })
+    .unwrap();
+    assert_eq!(caps["fileDrop"], json!(true));
+    assert_eq!(caps["fileDropEnterPaths"], json!(false));
+    assert_eq!(caps["fileDragOut"], json!(false));
+    assert_eq!(caps["fileDialogs"], json!(false));
+    assert_eq!(caps["fileDialogFilesAndDirectories"], json!(true));
+    assert_eq!(caps["fileDialogModal"], json!(false));
+    let clip = serde_json::to_value(super::ClipboardCapabilitiesInfo {
+      text: true,
+      change_events: true,
+      ..Default::default()
+    })
+    .unwrap();
+    assert_eq!(
+      clip,
+      json!({
+        "text": true,
+        "html": false,
+        "image": false,
+        "formats": false,
+        "changeEvents": true,
+      })
+    );
+  }
+
+  #[test]
+  fn file_dialog_request_from_js() {
+    let r: super::FileDialogRequest = serde_json::from_value(json!({
+      "save": false,
+      "windowId": 2,
+      "title": "Import",
+      "defaultPath": null,
+      "buttonLabel": null,
+      "filters": [{ "name": "Images", "extensions": ["png", "jpg"] }],
+      "files": true,
+      "directories": false,
+      "multiple": true,
+      "showHidden": false,
+    }))
+    .unwrap();
+    assert_eq!(r.window_id, 2);
+    assert_eq!(r.title.as_deref(), Some("Import"));
+    assert_eq!(r.default_path, None);
+    assert!(r.files && r.multiple && !r.directories && !r.save);
+    assert_eq!(r.filters[0].extensions, vec!["png", "jpg"]);
+    // Missing members default.
+    let d: super::FileDialogRequest =
+      serde_json::from_value(json!({ "save": true })).unwrap();
+    assert!(d.save && d.filters.is_empty() && d.window_id == 0);
+  }
+
+  #[test]
+  fn file_dialog_results() {
+    use super::FileDialogOutcome;
+    use super::FileDialogResultInfo;
+    let accepted: FileDialogResultInfo =
+      FileDialogOutcome::Accepted(vec!["/x".into()]).into();
+    assert_eq!(
+      serde_json::to_value(&accepted).unwrap(),
+      json!({ "status": "accepted", "paths": ["/x"] })
+    );
+    // Accepted with nothing selected reads as cancelled.
+    let empty: FileDialogResultInfo =
+      FileDialogOutcome::Accepted(vec![]).into();
+    assert_eq!(empty.status, "cancelled");
+    let busy: FileDialogResultInfo = FileDialogOutcome::Busy.into();
+    assert_eq!(busy.status, "busy");
+    let failed: FileDialogResultInfo = FileDialogOutcome::Failed.into();
+    assert_eq!((failed.status, failed.paths.len()), ("failed", 0));
+    assert_eq!(super::DragOutcome::Dropped.as_str(), "dropped");
+    assert_eq!(super::DragOutcome::Cancelled.as_str(), "cancelled");
+    assert_eq!(super::DragOutcome::Failed.as_str(), "failed");
+  }
+
+  #[test]
+  fn file_dialog_table_hands_out_each_outcome_once() {
+    use super::FileDialogOutcome;
+    let mut t = super::FileDialogTable::default();
+    let a = t.insert(7, Box::pin(async { FileDialogOutcome::Cancelled }));
+    let b = t.insert(0, Box::pin(async { FileDialogOutcome::Busy }));
+    assert_ne!(a, b);
+    assert_ne!(a, 0);
+    assert_eq!(t.dialog_id(a), Some(7));
+    assert_eq!(t.dialog_id(b), Some(0));
+    assert!(t.take_outcome(a).is_some());
+    assert!(t.take_outcome(a).is_none());
+    // Still known (for cancel) until removed.
+    assert_eq!(t.dialog_id(a), Some(7));
+    t.remove(a);
+    assert_eq!(t.dialog_id(a), None);
+    assert_eq!(t.len(), 1);
+  }
+
+  #[test]
+  fn png_signature() {
+    let png = [0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1A, b'\n', 0];
+    assert!(super::looks_like_png(&png));
+    assert!(!super::looks_like_png(&png[..8]));
+    assert!(!super::looks_like_png(b"GIF89a-not-a-png"));
   }
 }
