@@ -646,6 +646,38 @@ declare namespace Deno {
     id: string;
   }
 
+  /** Detail of a {@linkcode BrowserWindow} `dragenter`, `dragover`,
+   * `dragleave` or `drop` event: files dragged over, or dropped on, the
+   * window.
+   *
+   * @category Desktop
+   * @experimental */
+  export interface BrowserWindowFileDropDetail {
+    /** The files' absolute native paths. Always set for `drop`; `null` for
+     * `dragleave`, and for `dragenter` / `dragover` where the engine reveals
+     * the paths only on the drop (WebView2 on Windows; see
+     * `Deno.desktop.windowCapabilities().fileDropEnterPaths`). */
+    readonly paths: readonly string[] | null;
+    /** How many files are dragged (0 for `dragleave`). */
+    readonly count: number;
+    /** The pointer in the window's content area, in CSS pixels (the
+     * `clientX` / `clientY` space of the page). The Winit backend has no drag
+     * position: there it is the last pointer position seen in the window. */
+    readonly x: number;
+    readonly y: number;
+  }
+
+  /** What {@linkcode BrowserWindow.startDrag} drags.
+   *
+   * @category Desktop
+   * @experimental */
+  export interface BrowserWindowDragItem {
+    /** Absolute paths of existing files or directories (1 to 4096). */
+    files: string[];
+    /** PNG bytes shown under the pointer; by default the OS's file icon. */
+    icon?: Uint8Array;
+  }
+
   interface BrowserWindowEventMap {
     keydown: KeyboardEvent;
     keyup: KeyboardEvent;
@@ -681,6 +713,21 @@ declare namespace Deno {
     restore: Event;
     enterfullscreen: Event;
     leavefullscreen: Event;
+    /** Files are dragged into the window. The page keeps getting its own
+     * DOM `dragenter` (with `File` objects, never paths); this event is
+     * where the native paths are. */
+    dragenter: CustomEvent<BrowserWindowFileDropDetail>;
+    /** The files moved over the window (Winit: never fired). */
+    dragover: CustomEvent<BrowserWindowFileDropDetail>;
+    /** The drag left the window or was cancelled. */
+    dragleave: CustomEvent<BrowserWindowFileDropDetail>;
+    /** Files were dropped on the window: `detail.paths` are their absolute
+     * native paths. The window accepts every file drag (the cursor shows a
+     * copy) so the drop reaches the app even where the page doesn't handle
+     * it; what the page does with its own DOM `drop` is unchanged. On Linux
+     * (WebKitGTK) a page that refuses file drops (`dropEffect = "none"`)
+     * also hides them from this event. */
+    drop: CustomEvent<BrowserWindowFileDropDetail>;
     menuclick: CustomEvent<MenuClickDetail>;
     contextmenuclick: CustomEvent<MenuClickDetail>;
   }
@@ -846,6 +893,30 @@ declare namespace Deno {
     getNormalBounds(): Rectangle;
     /** The display the window is on (the one it overlaps most), or `null`. */
     getScreen(): Screen | null;
+
+    /** Drag files out of the window to another app or the desktop, as a
+     * copy (Electron's `webContents.startDrag`). The OS runs the drag from
+     * the pointer, so call it while the left mouse button is held: from the
+     * page's `dragstart` (call `preventDefault()` there and ask the app to
+     * start this one) or from a `mousedown` followed by a move.
+     *
+     * Resolves `"dropped"` when a target took the files, `"cancelled"` when
+     * the user pressed Escape or dropped where nothing took them, and
+     * `"failed"` when the drag never started: no left button held, another
+     * drag running, a path that is not an existing absolute path, or no
+     * drag-out on this backend
+     * (`Deno.desktop.windowCapabilities().fileDragOut`: none on Winit, and
+     * CEF on Linux needs an X11 display). Rejects with a `TypeError` for a
+     * wrong argument.
+     *
+     * - macOS: `beginDraggingSessionWithItems` (an `NSURL` per file).
+     * - Windows: `DoDragDrop` with a `CF_HDROP` data object.
+     * - Linux: a GTK drag source offering `text/uri-list`.
+     *
+     * @experimental */
+    startDrag(
+      item: BrowserWindowDragItem,
+    ): Promise<"dropped" | "cancelled" | "failed">;
 
     /** Change the title bar style. Returns `false` (and changes nothing)
      * where the backend can't: only macOS has title bar styles. */
@@ -1234,7 +1305,190 @@ declare namespace Deno {
       keepAlive: boolean;
       /** setPosition / setBounds can move the window (not on Wayland). */
       setPosition: boolean;
+      /** The `dragenter` / `dragover` / `dragleave` / `drop` window events
+       * fire. */
+      fileDrop: boolean;
+      /** `dragenter` / `dragover` already carry the paths (not on WebView2,
+       * which reveals them only on the drop). */
+      fileDropEnterPaths: boolean;
+      /** {@linkcode BrowserWindow.startDrag} works. */
+      fileDragOut: boolean;
+      /** {@linkcode Deno.desktop.dialog} works. */
+      fileDialogs: boolean;
+      /** One open dialog can pick files and directories (macOS). */
+      fileDialogFilesAndDirectories: boolean;
+      /** A dialog given a window is modal to it (a sheet on macOS); not on
+       * CEF for Linux. */
+      fileDialogModal: boolean;
     }
+
+    /** A file-type filter of a file dialog: a label and extensions without
+     * the dot (`"*"` matches any file). */
+    export interface FileFilter {
+      name: string;
+      extensions: string[];
+    }
+
+    /** Options shared by {@linkcode Deno.desktop.dialog} functions. */
+    export interface FileDialogOptions {
+      /** The window the dialog is modal to (a sheet on macOS). Default: an
+       * app-level dialog. */
+      // deno-lint-ignore no-explicit-any
+      window?: BrowserWindow<any> | number;
+      /** The dialog's title (on macOS shown as the panel's message line). */
+      title?: string;
+      /** A directory to start in, or a file path: an open dialog starts in
+       * its directory, a save dialog also proposes its name. */
+      defaultPath?: string;
+      /** The accept button's label ("Import"). */
+      buttonLabel?: string;
+      /** File-type filters. Windows and Linux show them as a type menu;
+       * macOS allows the union of every filter's extensions. */
+      filters?: FileFilter[];
+      /** Closes the dialog (the promise rejects with the signal's reason). */
+      signal?: AbortSignal;
+    }
+
+    /** Options of {@linkcode Deno.desktop.dialog.showOpenDialog}. */
+    export interface OpenDialogOptions extends FileDialogOptions {
+      /** `openFile` (the default), `openDirectory` (the folder dialog; with
+       * `openFile` too, either, on macOS only), `multiSelections`,
+       * `showHiddenFiles`. */
+      properties?: Array<
+        "openFile" | "openDirectory" | "multiSelections" | "showHiddenFiles"
+      >;
+    }
+
+    /** Options of {@linkcode Deno.desktop.dialog.showSaveDialog}. */
+    export interface SaveDialogOptions extends FileDialogOptions {
+      properties?: Array<"showHiddenFiles">;
+    }
+
+    /**
+     * The OS's own file dialogs: `NSOpenPanel` / `NSSavePanel` on macOS,
+     * `IFileOpenDialog` / `IFileSaveDialog` on Windows,
+     * `GtkFileChooserNative` on Linux (through the xdg-desktop-portal when
+     * GTK uses it: inside Flatpak / Snap, or with `GTK_USE_PORTAL=1`). The
+     * same dialog on every backend of an OS, CEF included. The dialog runs
+     * on the UI thread; the runtime never blocks on it.
+     *
+     * Both take an optional window first, as Electron's `dialog` does:
+     * `showOpenDialog(win, options)` is `showOpenDialog({ ...options,
+     * window: win })`. One file dialog is open at a time: another call
+     * meanwhile rejects with `Deno.errors.Busy`. They reject with a
+     * `TypeError` for wrong options and with an `Error` when the OS can't
+     * show the dialog (or the backend has none: Winit;
+     * {@linkcode windowCapabilities}`().fileDialogs`).
+     *
+     * Not available in workers.
+     *
+     * @category Desktop
+     * @experimental
+     */
+    export const dialog: {
+      /** Absolute paths of the chosen files / directories, or `null` when
+       * the user cancelled. */
+      showOpenDialog(options?: OpenDialogOptions): Promise<string[] | null>;
+      showOpenDialog(
+        // deno-lint-ignore no-explicit-any
+        window: BrowserWindow<any>,
+        options?: OpenDialogOptions,
+      ): Promise<string[] | null>;
+      /** The absolute path to save to, or `null` when the user cancelled.
+       * The OS asks before replacing an existing file. */
+      showSaveDialog(options?: SaveDialogOptions): Promise<string | null>;
+      showSaveDialog(
+        // deno-lint-ignore no-explicit-any
+        window: BrowserWindow<any>,
+        options?: SaveDialogOptions,
+      ): Promise<string | null>;
+    };
+
+    /** What {@linkcode Deno.desktop.clipboard} supports on this backend /
+     * OS. */
+    export interface ClipboardCapabilities {
+      text: boolean;
+      html: boolean;
+      image: boolean;
+      formats: boolean;
+      /** The `"change"` event fires. */
+      changeEvents: boolean;
+    }
+
+    /** The system clipboard: text, HTML and PNG images. See
+     * {@linkcode Deno.desktop.clipboard}. */
+    export interface DesktopClipboard extends EventTarget {
+      capabilities(): ClipboardCapabilities;
+      /** The clipboard's text, or `""` when it holds none. */
+      readText(): Promise<string>;
+      /** Replace the clipboard with `text` (`""` clears it). */
+      writeText(text: string): Promise<void>;
+      /** The clipboard's HTML (a fragment or a document, as the source app
+       * wrote it), or `""` when it holds none. */
+      readHTML(): Promise<string>;
+      /** Replace the clipboard with `html`, plus `text` as the plain-text
+       * alternative other apps paste. Rejects with `Deno.errors.NotSupported`
+       * where the clipboard has no HTML. */
+      writeHTML(html: string, text?: string): Promise<void>;
+      /** The clipboard's image as PNG bytes (converted from TIFF, a DIB or
+       * any other image format the clipboard holds), or `null`. */
+      readImage(): Promise<Uint8Array | null>;
+      /** Replace the clipboard with a PNG image (also offered as TIFF on
+       * macOS, `CF_DIBV5` on Windows, every gdk-pixbuf format on Linux).
+       * Rejects with a `TypeError` for bytes that aren't a PNG. */
+      writeImage(png: Uint8Array): Promise<void>;
+      /** The kinds of content on the clipboard as MIME types:
+       * `"text/plain"`, `"text/html"`, `"image/png"` (any image),
+       * `"text/uri-list"` (files), `"text/rtf"`. Empty for an empty
+       * clipboard. */
+      availableFormats(): Promise<string[]>;
+      /** Fired when the clipboard changes, this app's own writes included.
+       * The OS watcher runs only while a listener is set: macOS has no
+       * notification, so the pasteboard's change count is polled twice a
+       * second; Windows uses `AddClipboardFormatListener`; Linux GTK's
+       * `owner-change` (X11 needs the XFixes extension; on Wayland GTK only
+       * hears of changes while one of the app's windows has focus). */
+      onchange: ((this: DesktopClipboard, ev: Event) => any) | null;
+      addEventListener(
+        type: "change",
+        listener: (this: DesktopClipboard, ev: Event) => any,
+        options?: boolean | AddEventListenerOptions,
+      ): void;
+      addEventListener(
+        type: string,
+        listener: EventListenerOrEventListenerObject,
+        options?: boolean | AddEventListenerOptions,
+      ): void;
+      removeEventListener(
+        type: "change",
+        listener: (this: DesktopClipboard, ev: Event) => any,
+        options?: boolean | EventListenerOptions,
+      ): void;
+      removeEventListener(
+        type: string,
+        listener: EventListenerOrEventListenerObject,
+        options?: boolean | EventListenerOptions,
+      ): void;
+    }
+
+    /**
+     * The system clipboard with rich formats (`navigator.clipboard` stays the
+     * web's text-only API).
+     *
+     * Every read is capped at 64 MiB (a bigger content reads as absent) and
+     * rejects if the app owning the clipboard doesn't answer within a few
+     * seconds. Formats per OS: macOS `NSPasteboard` (string, HTML, PNG and
+     * TIFF), Windows `CF_UNICODETEXT`, `HTML Format` (the `CF_HTML` header is
+     * stripped on read), the registered `PNG` format and `CF_DIBV5`, Linux
+     * the GTK `CLIPBOARD` selection (`text/html`, `image/png` and every
+     * gdk-pixbuf format). On the Winit backend only text is available.
+     *
+     * Not available in workers.
+     *
+     * @category Desktop
+     * @experimental
+     */
+    export const clipboard: DesktopClipboard;
 
     export interface DesktopEventMap {
       /** Displays were added, removed, rearranged or rescaled, or a work

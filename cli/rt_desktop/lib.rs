@@ -707,6 +707,134 @@ impl denort::desktop::DesktopApi for WefDesktopApi {
       normal_bounds: c.normal_bounds(),
       keep_alive: c.keep_alive(),
       set_position: c.set_position(),
+      file_drop: c.file_drop(),
+      file_drop_enter_paths: c.file_drop_enter_paths(),
+      file_drag_out: c.file_drag_out(),
+      file_dialogs: c.file_dialogs(),
+      file_dialog_files_and_directories: c.file_dialog_files_and_directories(),
+      file_dialog_modal: c.file_dialog_modal(),
+    }
+  }
+
+  // --- Drag and drop, file dialogs, rich clipboard (laufey API 39) ---
+
+  fn start_file_drag(
+    &self,
+    window_id: u32,
+    paths: Vec<String>,
+    icon_png: Option<Vec<u8>>,
+  ) -> deno_runtime::ops::desktop::DesktopFuture<
+    deno_runtime::ops::desktop::DragOutcome,
+  > {
+    use deno_runtime::ops::desktop::DragOutcome;
+    let refs: Vec<&str> = paths.iter().map(String::as_str).collect();
+    // The drag is requested here, synchronously; the future only waits.
+    let drag = laufey::start_file_drag(window_id, &refs, icon_png.as_deref());
+    Box::pin(async move {
+      match drag.await {
+        laufey::DragResult::Dropped => DragOutcome::Dropped,
+        laufey::DragResult::Cancelled => DragOutcome::Cancelled,
+        laufey::DragResult::Failed => DragOutcome::Failed,
+      }
+    })
+  }
+
+  fn show_file_dialog(
+    &self,
+    request: deno_runtime::ops::desktop::FileDialogRequest,
+  ) -> (
+    u32,
+    deno_runtime::ops::desktop::DesktopFuture<
+      deno_runtime::ops::desktop::FileDialogOutcome,
+    >,
+  ) {
+    use deno_runtime::ops::desktop::FileDialogOutcome;
+    let options = laufey::FileDialogOptions {
+      kind: if request.save {
+        laufey::FileDialogKind::Save
+      } else {
+        laufey::FileDialogKind::Open
+      },
+      files: request.files,
+      directories: request.directories,
+      multiple: request.multiple,
+      show_hidden: request.show_hidden,
+      no_overwrite_confirm: false,
+      title: request.title,
+      default_path: request.default_path,
+      button_label: request.button_label,
+      filters: request
+        .filters
+        .into_iter()
+        .map(|f| laufey::FileFilter {
+          name: f.name,
+          extensions: f.extensions,
+        })
+        .collect(),
+    };
+    let dialog = laufey::show_file_dialog(request.window_id, &options);
+    let outcome = dialog.outcome;
+    (
+      dialog.id,
+      Box::pin(async move {
+        match outcome.await {
+          laufey::FileDialogOutcome::Accepted(paths) => {
+            FileDialogOutcome::Accepted(paths)
+          }
+          laufey::FileDialogOutcome::Cancelled => FileDialogOutcome::Cancelled,
+          laufey::FileDialogOutcome::Busy => FileDialogOutcome::Busy,
+          laufey::FileDialogOutcome::Failed => FileDialogOutcome::Failed,
+        }
+      }),
+    )
+  }
+
+  fn cancel_file_dialog(&self, dialog_id: u32) -> bool {
+    laufey::cancel_file_dialog(dialog_id)
+  }
+
+  fn clipboard_capabilities(
+    &self,
+  ) -> deno_runtime::ops::desktop::ClipboardCapabilitiesInfo {
+    let c = laufey::clipboard_capabilities();
+    deno_runtime::ops::desktop::ClipboardCapabilitiesInfo {
+      text: c.text,
+      html: c.html,
+      image: c.image,
+      formats: c.formats,
+      change_events: c.change_events,
+    }
+  }
+
+  fn read_clipboard_html(&self) -> Option<String> {
+    laufey::read_clipboard_html()
+  }
+
+  fn write_clipboard_html(&self, html: &str, text: Option<&str>) -> bool {
+    laufey::write_clipboard_html(html, text)
+  }
+
+  fn read_clipboard_image(&self) -> Option<Vec<u8>> {
+    laufey::read_clipboard_image()
+  }
+
+  fn write_clipboard_image(&self, png: &[u8]) -> bool {
+    laufey::write_clipboard_image(png)
+  }
+
+  fn read_clipboard_formats(&self) -> Option<Vec<String>> {
+    laufey::read_clipboard_formats()
+  }
+
+  fn set_clipboard_watch(&self, on: bool) {
+    if on {
+      let tx = self.event_tx.clone();
+      laufey::on_clipboard_change(move || {
+        let _ = tx
+          .try_send(deno_runtime::ops::desktop::DesktopEvent::ClipboardChange);
+      });
+    } else {
+      laufey::clear_clipboard_change_handler();
     }
   }
 
@@ -2469,6 +2597,30 @@ async fn run_desktop(
         laufey::on_display_changed(move || {
           let _ = display_tx
             .try_send(deno_runtime::ops::desktop::DesktopEvent::DisplayChanged);
+        });
+      }
+
+      // Files dragged over / dropped on a window: BrowserWindow
+      // "dragenter" / "dragover" / "dragleave" / "drop".
+      {
+        let drop_tx = event_tx.0.clone();
+        laufey::on_file_drop(move |e| {
+          let phase = match e.phase {
+            laufey::FileDragPhase::Enter => "enter",
+            laufey::FileDragPhase::Over => "over",
+            laufey::FileDragPhase::Leave => "leave",
+            laufey::FileDragPhase::Drop => "drop",
+          };
+          let _ = drop_tx.try_send(
+            deno_runtime::ops::desktop::DesktopEvent::FileDrop {
+              window_id: e.window_id,
+              phase: phase.to_string(),
+              x: e.x,
+              y: e.y,
+              paths: e.paths,
+              count: e.count,
+            },
+          );
         });
       }
 
