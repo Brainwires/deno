@@ -111,7 +111,21 @@ are where the changes are discussed.
     `Deno.desktop.clipboard` (text, HTML, PNG images, `availableFormats()`,
     a `"change"` event); new `windowCapabilities()` keys (laufey API 39).
 
-The runtime-side parts (1-3, 5-12) are what the prebuilt `libdenort` carries.
+13. **`feat(desktop)`: global shortcuts, launch at login and DevTools
+    control** — `Deno.desktop.shortcuts` (`register(accelerator,
+    callback?)` resolving with the canonical accelerator, `unregister`,
+    `unregisterAll`, `isRegistered`, `list`, `canonicalize`, a `"shortcut"`
+    event; errors carry a `code`: `invalid`, `conflict`,
+    `already_registered`, `not_supported`, `denied`);
+    `Deno.desktop.launchAtLogin` (`get()` / `set(enabled)`:
+    `enabled` / `disabled` / `requires-approval` / `not-supported`);
+    `Deno.desktop.devtools` (`enabled`, `open` / `close` / `toggle` /
+    `isOpen`) and `BrowserWindow.closeDevtools()` / `toggleDevtools()` /
+    `isDevtoolsOpen()` / `isDevtoolsEnabled()`; `openDevtools()` does
+    nothing when the app launched with DevTools off (`LAUFEY_INSPECTABLE=0`
+    / `"inspectable": false`), in dev mode too (laufey API 40).
+
+The runtime-side parts (1-3, 5-13) are what the prebuilt `libdenort` carries.
 The CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` /
 `LAUFEY_APP_ID` into a packaged app's launchers) are in the branch too, but a
 stock CLI does not run them; denext's own launcher provides that environment.
@@ -121,7 +135,8 @@ The laufey backend hosts are built from
 `denext/integration` (registered schemes, app data dir, WebKitGTK scheme
 request bodies, launch config, open-url / single instance, passkeys, the
 window API with littledivy/laufey#80 and #81, drag and drop / file dialogs /
-rich clipboard, Windows bindgen fix), at the commit pinned by
+rich clipboard, global shortcuts / launch at login / DevTools control, Windows
+bindgen fix), at the commit pinned by
 `LAUFEY_SHA` in the workflow (or the `laufey_ref` input).
 
 laufey's `init_api` rejects any C ABI version mismatch between the runtime
