@@ -49,6 +49,15 @@ pub const DESKTOP_JS: &str = r#"
     op_desktop_file_dialog_open,
     op_desktop_file_dialog_wait,
     op_desktop_file_dialog_cancel,
+    op_desktop_system_capabilities,
+    op_desktop_register_shortcut,
+    op_desktop_unregister_shortcut,
+    op_desktop_unregister_all_shortcuts,
+    op_desktop_list_shortcuts,
+    op_desktop_canonical_accelerator,
+    op_desktop_get_launch_at_login,
+    op_desktop_set_launch_at_login,
+    op_desktop_devtools_enabled,
     op_desktop_request_notification_permission,
     op_desktop_query_notification_permission,
     op_desktop_screens,
@@ -1427,6 +1436,191 @@ pub const DESKTOP_JS: &str = r#"
     configurable: true,
     enumerable: true,
   });
+  // Global shortcuts (laufey API 40): system-wide shortcuts that reach the
+  // app whichever app has the focus. register() resolves with the canonical
+  // accelerator ("Ctrl+Shift+K") once the OS bound it (on Wayland, once the
+  // user approved it in the desktop's dialog); each press calls the
+  // registration's callback with it and fires a "shortcut" event (detail
+  // { accelerator }).
+  const shortcutsKey = Symbol("DesktopShortcuts");
+  const privateShortcutPressed = Symbol("Deno_privateShortcutPressed");
+  function shortcutError(status, accelerator) {
+    let err;
+    switch (status) {
+      case "invalid":
+        err = new TypeError(`Invalid accelerator: ${accelerator}`);
+        break;
+      case "conflict":
+        err = new Deno.errors.AlreadyExists(
+          `${accelerator} is already taken by another application`,
+        );
+        break;
+      case "already_registered":
+        err = new Deno.errors.AlreadyExists(
+          `${accelerator} is already registered`,
+        );
+        break;
+      case "not_supported":
+        err = new Deno.errors.NotSupported(
+          "Global shortcuts are not supported here",
+        );
+        break;
+      case "denied":
+        err = new Deno.errors.PermissionDenied(
+          `The user declined ${accelerator}`,
+        );
+        break;
+      default:
+        err = new Error(`${accelerator} could not be registered`);
+    }
+    err.code = status;
+    return err;
+  }
+  class DesktopShortcuts extends EventTarget {
+    #callbacks = new Map(); // canonical accelerator -> callback | null
+
+    constructor(key) {
+      if (key !== shortcutsKey) throw new TypeError("Illegal constructor");
+      super();
+    }
+
+    capabilities() {
+      const caps = op_desktop_system_capabilities();
+      return {
+        globalShortcuts: caps.globalShortcuts,
+        userBinds: caps.shortcutsUserBinds,
+      };
+    }
+
+    canonicalize(accelerator) {
+      return op_desktop_canonical_accelerator(String(accelerator)) ?? null;
+    }
+
+    async register(accelerator, callback = undefined) {
+      accelerator = String(accelerator);
+      if (
+        callback !== undefined && callback !== null &&
+        typeof callback !== "function"
+      ) {
+        throw new TypeError("callback must be a function");
+      }
+      const result = await op_desktop_register_shortcut(accelerator);
+      if (result.status !== "ok") {
+        throw shortcutError(result.status, accelerator);
+      }
+      this.#callbacks.set(result.accelerator, callback ?? null);
+      return result.accelerator;
+    }
+
+    unregister(accelerator) {
+      accelerator = String(accelerator);
+      const canonical = this.canonicalize(accelerator);
+      const removed = op_desktop_unregister_shortcut(accelerator);
+      if (canonical !== null) this.#callbacks.delete(canonical);
+      return removed;
+    }
+
+    unregisterAll() {
+      op_desktop_unregister_all_shortcuts();
+      this.#callbacks.clear();
+    }
+
+    isRegistered(accelerator) {
+      const canonical = this.canonicalize(accelerator);
+      return canonical !== null &&
+        op_desktop_list_shortcuts().includes(canonical);
+    }
+
+    list() {
+      return op_desktop_list_shortcuts();
+    }
+
+    [privateShortcutPressed](accelerator) {
+      const callback = this.#callbacks.get(accelerator);
+      if (callback) {
+        try {
+          callback(accelerator);
+        } catch (err) {
+          reportError(err);
+        }
+      }
+      this.dispatchEvent(new CustomEvent("shortcut", {
+        detail: { accelerator },
+      }));
+    }
+  }
+  const desktopShortcuts = new DesktopShortcuts(shortcutsKey);
+  internals.defineEventHandler(desktopShortcuts, "shortcut");
+
+  // Launch at login (laufey API 40): "enabled", "disabled",
+  // "requires-approval" (registered, but the user has to allow it in the
+  // system settings) or "not-supported".
+  const launchAtLogin = Object.freeze({
+    get: async function get() {
+      return await op_desktop_get_launch_at_login();
+    },
+    set: async function set(enabled) {
+      if (typeof enabled !== "boolean") {
+        throw new TypeError("launchAtLogin.set takes a boolean");
+      }
+      return await op_desktop_set_launch_at_login(enabled);
+    },
+  });
+
+  // DevTools (laufey API 40). `enabled` is false when the app was launched
+  // with DevTools turned off (LAUFEY_INSPECTABLE=0 / "inspectable": false in
+  // laufey-launch.json); then nothing opens them.
+  BrowserWindowPrototype.toggleDevtools = function(options = undefined) {
+    if (this.isDevtoolsOpen()) {
+      this.closeDevtools();
+    } else {
+      this.openDevtools(options);
+    }
+  };
+  function devtoolsTarget(win) {
+    if (!(win instanceof BrowserWindow)) {
+      throw new TypeError("Expected a BrowserWindow");
+    }
+    return win;
+  }
+  const devtools = Object.freeze({
+    get enabled() {
+      return op_desktop_devtools_enabled(0);
+    },
+    open(win, options = undefined) {
+      devtoolsTarget(win).openDevtools(options);
+    },
+    close(win) {
+      devtoolsTarget(win).closeDevtools();
+    },
+    toggle(win, options = undefined) {
+      devtoolsTarget(win).toggleDevtools(options);
+    },
+    isOpen(win) {
+      return devtoolsTarget(win).isDevtoolsOpen();
+    },
+  });
+  Object.defineProperties(desktop, {
+    shortcuts: {
+      value: desktopShortcuts,
+      writable: false,
+      configurable: true,
+      enumerable: true,
+    },
+    launchAtLogin: {
+      value: launchAtLogin,
+      writable: false,
+      configurable: true,
+      enumerable: true,
+    },
+    devtools: {
+      value: devtools,
+      writable: false,
+      configurable: true,
+      enumerable: true,
+    },
+  });
+
   // Screens, capabilities and the app's lifetime (laufey API 38).
   internals.defineEventHandler(desktop, "displaychanged");
   internals.defineEventHandler(desktop, "beforequit");
@@ -2153,6 +2347,10 @@ pub const DESKTOP_JS: &str = r#"
             desktopClipboard[privateClipboardChanged]();
             break;
           }
+          case "shortcut": {
+            desktopShortcuts[privateShortcutPressed](ev.accelerator);
+            break;
+          }
           case "runtimeError": {
             dispatchEvent(new ErrorEvent("error", {
               message: ev.message,
@@ -2734,6 +2932,50 @@ mod tests {
     assert!(DESKTOP_JS.contains("return paths === null ? null : paths[0];"));
     // Electron's properties, nothing else.
     assert!(DESKTOP_JS.contains("Unknown dialog property"));
+  }
+
+  #[test]
+  fn desktop_js_installs_shortcuts_login_devtools() {
+    // laufey API 40: Deno.desktop.shortcuts / launchAtLogin / devtools and
+    // the BrowserWindow DevTools toggle.
+    for needle in [
+      "const result = await op_desktop_register_shortcut(accelerator);",
+      "throw shortcutError(result.status, accelerator);",
+      "op_desktop_unregister_shortcut(accelerator)",
+      "op_desktop_unregister_all_shortcuts();",
+      "op_desktop_list_shortcuts()",
+      "op_desktop_canonical_accelerator(String(accelerator))",
+      "op_desktop_system_capabilities()",
+      "internals.defineEventHandler(desktopShortcuts, \"shortcut\");",
+      "await op_desktop_get_launch_at_login()",
+      "await op_desktop_set_launch_at_login(enabled)",
+      "op_desktop_devtools_enabled(0)",
+      "BrowserWindowPrototype.toggleDevtools = function(options = undefined)",
+      "shortcuts: {",
+      "launchAtLogin: {",
+      "devtools: {",
+    ] {
+      assert!(DESKTOP_JS.contains(needle), "missing: {needle}");
+    }
+    // Presses reach the shortcuts object through the event loop.
+    assert!(DESKTOP_JS.contains("case \"shortcut\":"));
+    assert!(
+      DESKTOP_JS
+        .contains("desktopShortcuts[privateShortcutPressed](ev.accelerator);")
+    );
+    // Every status the runtime reports has an error with that code.
+    for status in [
+      "\"invalid\"",
+      "\"conflict\"",
+      "\"already_registered\"",
+      "\"not_supported\"",
+      "\"denied\"",
+    ] {
+      assert!(
+        DESKTOP_JS.contains(&format!("case {status}:")),
+        "no error for {status}"
+      );
+    }
   }
 
   #[test]

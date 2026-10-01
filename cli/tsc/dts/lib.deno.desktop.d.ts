@@ -946,6 +946,21 @@ declare namespace Deno {
      * select which targets to inspect. At least one must be `true`.
      */
     openDevtools(options?: OpenDevtoolsOptions): void;
+    /** Close this window's DevTools (opened with {@linkcode openDevtools} or
+     * by the user). */
+    closeDevtools(): void;
+    /** Open this window's DevTools if they are closed, else close them. */
+    toggleDevtools(options?: OpenDevtoolsOptions): void;
+    /** Whether this window's DevTools are open.
+     *
+     * On Windows (WebView2), DevTools the user opened with F12 or the
+     * context menu count only while the app has a single window; with
+     * several, only those opened through {@linkcode openDevtools}. */
+    isDevtoolsOpen(): boolean;
+    /** Whether this window's engine lets DevTools open, read back from the
+     * engine: false when the app launched with DevTools turned off (see
+     * {@linkcode Deno.desktop.devtools}). */
+    isDevtoolsEnabled(): boolean;
     reload(): void;
 
     setApplicationMenu(menu: MenuItem[]): void;
@@ -1489,6 +1504,173 @@ declare namespace Deno {
      * @experimental
      */
     export const clipboard: DesktopClipboard;
+
+    /** What {@linkcode Deno.desktop.shortcuts} can do here. */
+    export interface ShortcutCapabilities {
+      /** Registering can bind system-wide shortcuts in this session. */
+      globalShortcuts: boolean;
+      /** The user approves each shortcut and may pick another trigger
+       * (the XDG GlobalShortcuts portal on Wayland). */
+      userBinds: boolean;
+    }
+
+    /** The detail of a `"shortcut"` event: the canonical accelerator the
+     * registration resolved with. */
+    export interface ShortcutEventDetail {
+      accelerator: string;
+    }
+
+    /** System-wide keyboard shortcuts. See
+     * {@linkcode Deno.desktop.shortcuts}. */
+    export interface DesktopShortcuts extends EventTarget {
+      capabilities(): ShortcutCapabilities;
+      /** Bind `accelerator` system-wide. Resolves with its canonical form
+       * (`"CommandOrControl+Shift+K"` → `"Ctrl+Shift+K"`, or
+       * `"Shift+Super+K"` on macOS), which `callback` and the `"shortcut"`
+       * event receive on each press.
+       *
+       * Rejects (the error's `code` names the case) with a `TypeError` for an
+       * accelerator that doesn't parse or a printable key without a modifier
+       * other than Shift (`"invalid"`), `Deno.errors.AlreadyExists` when
+       * another application holds the combination (`"conflict"`) or this app
+       * registered it already (`"already_registered"`),
+       * `Deno.errors.NotSupported` where there are no global shortcuts
+       * (`"not_supported"`), `Deno.errors.PermissionDenied` when the user
+       * declined it (`"denied"`, the Wayland portal), or an `Error`
+       * (`"failed"`). */
+      register(
+        accelerator: string,
+        callback?: (accelerator: string) => void,
+      ): Promise<string>;
+      /** Release a shortcut this app registered (any spelling). False if it
+       * wasn't registered. */
+      unregister(accelerator: string): boolean;
+      /** Release every shortcut this app registered. */
+      unregisterAll(): void;
+      /** Whether this app holds `accelerator` (any spelling). */
+      isRegistered(accelerator: string): boolean;
+      /** The canonical accelerators this app holds, in registration
+       * order. */
+      list(): string[];
+      /** The canonical form of an accelerator, or `null` when it doesn't
+       * parse. */
+      canonicalize(accelerator: string): string | null;
+      /** A registered shortcut was pressed. */
+      onshortcut:
+        | ((
+          this: DesktopShortcuts,
+          ev: CustomEvent<ShortcutEventDetail>,
+        ) => any)
+        | null;
+      addEventListener(
+        type: "shortcut",
+        listener: (
+          this: DesktopShortcuts,
+          ev: CustomEvent<ShortcutEventDetail>,
+        ) => any,
+        options?: boolean | AddEventListenerOptions,
+      ): void;
+      addEventListener(
+        type: string,
+        listener: EventListenerOrEventListenerObject,
+        options?: boolean | AddEventListenerOptions,
+      ): void;
+      removeEventListener(
+        type: "shortcut",
+        listener: (
+          this: DesktopShortcuts,
+          ev: CustomEvent<ShortcutEventDetail>,
+        ) => any,
+        options?: boolean | EventListenerOptions,
+      ): void;
+      removeEventListener(
+        type: string,
+        listener: EventListenerOrEventListenerObject,
+        options?: boolean | EventListenerOptions,
+      ): void;
+    }
+
+    /**
+     * Global shortcuts: key combinations that reach the app whichever app
+     * has the keyboard focus.
+     *
+     * ```ts
+     * await Deno.desktop.shortcuts.register("CommandOrControl+Shift+Space",
+     *   () => win.show());
+     * ```
+     *
+     * Accelerators use the menu syntax: modifiers (`CommandOrControl`,
+     * `Control`, `Alt`/`Option`, `Shift`, `Super`/`Meta`, and `Command` on
+     * macOS) then one key (`A`-`Z`, `0`-`9`, punctuation, `F1`-`F24`,
+     * `Space`, `Enter`, `Escape`, arrows, `PageUp`, `Num0`-`Num9`, media
+     * keys, ...). Per OS: macOS Carbon hot keys (no Accessibility
+     * permission needed), Windows `RegisterHotKey`, X11 key grabs, and on
+     * Wayland the XDG GlobalShortcuts portal, where the desktop asks the
+     * user to approve each shortcut; without that portal (or on the Winit
+     * backend) registration rejects with `Deno.errors.NotSupported`.
+     * Shortcuts are released when the app exits.
+     *
+     * Not available in workers.
+     *
+     * @category Desktop
+     * @experimental
+     */
+    export const shortcuts: DesktopShortcuts;
+
+    /** Whether the app starts at login: `"requires-approval"` means it is
+     * registered but the user has to allow it in the system settings
+     * (macOS Login Items, or a Windows startup entry the user turned
+     * off). */
+    export type LaunchAtLoginState =
+      | "enabled"
+      | "disabled"
+      | "requires-approval"
+      | "not-supported";
+
+    /**
+     * Start the app when the user logs in: macOS 13+ `SMAppService` (the app
+     * bundle becomes a login item), Windows an `HKCU\...\Run` value, Linux
+     * an XDG autostart entry (`~/.config/autostart/<app id>.desktop`). The
+     * entry is named after the app's identifier. `set` resolves with the
+     * state afterwards and rejects with the OS's message when it failed.
+     *
+     * Not available in workers.
+     *
+     * @category Desktop
+     * @experimental
+     */
+    export const launchAtLogin: {
+      get(): Promise<LaunchAtLoginState>;
+      set(enabled: boolean): Promise<LaunchAtLoginState>;
+    };
+
+    /**
+     * DevTools control. `enabled` is false when the app was launched with
+     * DevTools turned off (`LAUFEY_INSPECTABLE=0`, or `"inspectable": false`
+     * in the packaged app's `laufey-launch.json`): then neither these calls
+     * nor the user (F12, the context menu, Safari's Develop menu, remote
+     * debugging) can open them. The per-window functions are the
+     * `BrowserWindow` methods.
+     *
+     * Not available in workers.
+     *
+     * @category Desktop
+     * @experimental
+     */
+    export const devtools: {
+      readonly enabled: boolean;
+      // deno-lint-ignore no-explicit-any
+      open(window: BrowserWindow<any>, options?: OpenDevtoolsOptions): void;
+      // deno-lint-ignore no-explicit-any
+      close(window: BrowserWindow<any>): void;
+      toggle(
+        // deno-lint-ignore no-explicit-any
+        window: BrowserWindow<any>,
+        options?: OpenDevtoolsOptions,
+      ): void;
+      // deno-lint-ignore no-explicit-any
+      isOpen(window: BrowserWindow<any>): boolean;
+    };
 
     export interface DesktopEventMap {
       /** Displays were added, removed, rearranged or rescaled, or a work

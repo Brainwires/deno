@@ -747,6 +747,15 @@ const NOT_IMPORTED_OPS = [
   "op_desktop_file_dialog_open",
   "op_desktop_file_dialog_wait",
   "op_desktop_file_dialog_cancel",
+  "op_desktop_system_capabilities",
+  "op_desktop_register_shortcut",
+  "op_desktop_unregister_shortcut",
+  "op_desktop_unregister_all_shortcuts",
+  "op_desktop_list_shortcuts",
+  "op_desktop_canonical_accelerator",
+  "op_desktop_get_launch_at_login",
+  "op_desktop_set_launch_at_login",
+  "op_desktop_devtools_enabled",
   "op_desktop_send_error_report",
   "op_desktop_request_notification_permission",
   "op_desktop_query_notification_permission",
@@ -794,7 +803,10 @@ const NOT_IMPORTED_OPS = [
 // text clipboard; the file dialogs and the drag out hand over (or offer) the
 // user's files, which is the app's own main-scope `Deno.desktop` business.
 // Installing a full-app update replaces (and relaunches) the app, so
-// the Deno.desktop.updater ops are the main scope's alone too.
+// the Deno.desktop.updater ops are the main scope's alone too. Global
+// shortcuts, launch at login and DevTools control act on the whole app and
+// the user's session (a shortcut also sees keys typed into other apps), so
+// they stay main-scope as well.
 const WORKER_EXCLUDED_OPS = [
   "op_desktop_read_clipboard_text",
   "op_desktop_write_clipboard_text",
@@ -827,6 +839,15 @@ const WORKER_EXCLUDED_OPS = [
   "op_desktop_app_update_stage",
   "op_desktop_app_update_apply",
   "op_desktop_app_update_confirm",
+  "op_desktop_system_capabilities",
+  "op_desktop_register_shortcut",
+  "op_desktop_unregister_shortcut",
+  "op_desktop_unregister_all_shortcuts",
+  "op_desktop_list_shortcuts",
+  "op_desktop_canonical_accelerator",
+  "op_desktop_get_launch_at_login",
+  "op_desktop_set_launch_at_login",
+  "op_desktop_devtools_enabled",
 ];
 
 function removeImportedOps(isWorker = false) {

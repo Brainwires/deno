@@ -426,6 +426,11 @@ pub enum DesktopEvent {
   /// The system clipboard changed (`Deno.desktop.clipboard` "change"); only
   /// while the app listens.
   ClipboardChange,
+  /// A registered global shortcut was pressed (laufey API 40;
+  /// `Deno.desktop.shortcuts` "shortcut"). `accelerator` is the canonical
+  /// form the registration resolved with.
+  #[serde(rename_all = "camelCase")]
+  Shortcut { accelerator: String },
   #[serde(rename_all = "camelCase")]
   RuntimeError {
     message: String,
@@ -948,6 +953,50 @@ pub struct ClipboardCapabilitiesInfo {
   pub change_events: bool,
 }
 
+/// `Deno.desktop.shortcuts.capabilities()` and friends (laufey API 40).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SystemCapabilitiesInfo {
+  /// `Deno.desktop.shortcuts.register` can bind system-wide shortcuts.
+  pub global_shortcuts: bool,
+  /// The user approves each shortcut and may pick another trigger (the XDG
+  /// GlobalShortcuts portal on Wayland).
+  pub shortcuts_user_binds: bool,
+  /// `Deno.desktop.launchAtLogin` works.
+  pub launch_at_login: bool,
+  /// The DevTools controls work (a web engine is present).
+  pub devtools: bool,
+}
+
+/// What `op_desktop_register_shortcut` resolves with: `status` is `"ok"`,
+/// `"invalid"`, `"conflict"`, `"already_registered"`, `"not_supported"`,
+/// `"denied"` or `"failed"`; `accelerator` is the canonical form for `"ok"`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ShortcutRegisterInfo {
+  pub status: &'static str,
+  pub accelerator: Option<String>,
+}
+
+impl ShortcutRegisterInfo {
+  pub fn ok(accelerator: String) -> Self {
+    Self {
+      status: "ok",
+      accelerator: Some(accelerator),
+    }
+  }
+  pub fn err(status: &'static str) -> Self {
+    Self {
+      status,
+      accelerator: None,
+    }
+  }
+}
+
+/// Launch-at-login states (`Deno.desktop.launchAtLogin.get()`):
+/// `"enabled"`, `"disabled"`, `"requires-approval"`, `"not-supported"`.
+pub const LOGIN_ITEM_STATES: [&str; 4] =
+  ["enabled", "disabled", "requires-approval", "not-supported"];
+
 /// A boxed future the desktop runtime resolves later (a drag out, a dialog).
 pub type DesktopFuture<T> =
   std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send>>;
@@ -1404,6 +1453,56 @@ pub trait DesktopApi: Send + Sync + 'static {
   /// Start / stop delivering [`DesktopEvent::ClipboardChange`] (macOS polls
   /// the pasteboard only while on).
   fn set_clipboard_watch(&self, _on: bool) {}
+
+  // --- Global shortcuts, launch at login, DevTools (laufey API 40) ---
+  //
+  // The defaults are a runtime without any of it.
+
+  fn system_capabilities(&self) -> SystemCapabilitiesInfo {
+    SystemCapabilitiesInfo::default()
+  }
+  /// Bind a system-wide shortcut. Presses arrive as
+  /// [`DesktopEvent::Shortcut`]. The request is made when this is called.
+  fn register_shortcut(
+    &self,
+    _accelerator: &str,
+  ) -> DesktopFuture<ShortcutRegisterInfo> {
+    Box::pin(async { ShortcutRegisterInfo::err("not_supported") })
+  }
+  /// Release a shortcut (any spelling). False if it wasn't registered.
+  fn unregister_shortcut(&self, _accelerator: &str) -> bool {
+    false
+  }
+  fn unregister_all_shortcuts(&self) {}
+  /// The canonical accelerators registered, in registration order.
+  fn list_shortcuts(&self) -> Vec<String> {
+    Vec::new()
+  }
+  /// The canonical form of an accelerator, or `None` if it doesn't parse.
+  fn canonical_accelerator(&self, _accelerator: &str) -> Option<String> {
+    None
+  }
+  /// One of [`LOGIN_ITEM_STATES`]. Blocking (runs on the blocking pool).
+  fn launch_at_login(&self) -> &'static str {
+    "not-supported"
+  }
+  /// Turn launch at login on or off: the state afterwards, or the OS's
+  /// error message. Blocking (runs on the blocking pool).
+  fn set_launch_at_login(
+    &self,
+    _enabled: bool,
+  ) -> Result<&'static str, String> {
+    Ok("not-supported")
+  }
+  fn close_devtools(&self, _window_id: u32) {}
+  fn is_devtools_open(&self, _window_id: u32) -> bool {
+    false
+  }
+  /// Whether DevTools can open: for a window, its engine's setting read
+  /// back; for 0, the launch setting (`LAUFEY_INSPECTABLE`).
+  fn devtools_enabled(&self, _window_id: u32) -> bool {
+    false
+  }
   fn set_application_menu(&self, window_id: u32, menu: Vec<MenuItem>);
   fn show_context_menu(
     &self,
@@ -2103,6 +2202,24 @@ impl BrowserWindow {
     }
     self.api.open_devtools(self.window_id, renderer, deno);
     Ok(())
+  }
+
+  /// Close this window's DevTools (laufey API 40).
+  #[fast]
+  fn close_devtools(&self) {
+    self.api.close_devtools(self.window_id);
+  }
+
+  /// Whether this window's DevTools are open (laufey API 40).
+  #[fast]
+  fn is_devtools_open(&self) -> bool {
+    self.api.is_devtools_open(self.window_id)
+  }
+
+  /// Whether this window's engine lets DevTools open (laufey API 40).
+  #[fast]
+  fn is_devtools_enabled(&self) -> bool {
+    self.api.devtools_enabled(self.window_id)
   }
 
   #[fast]
@@ -3375,6 +3492,139 @@ async fn op_desktop_file_dialog_wait(
   result.into()
 }
 
+/// `Deno.desktop.shortcuts.capabilities()` and the launch-at-login /
+/// DevTools availability (laufey API 40).
+#[op2]
+#[serde]
+fn op_desktop_system_capabilities(
+  state: &mut OpState,
+) -> SystemCapabilitiesInfo {
+  state
+    .try_borrow::<Arc<dyn DesktopApi>>()
+    .map(|api| api.system_capabilities())
+    .unwrap_or_default()
+}
+
+/// Longest accelerator string accepted (laufey's parser takes 128 bytes).
+const MAX_ACCELERATOR_LEN: usize = 128;
+
+/// `Deno.desktop.shortcuts.register()`. Never blocks: on Wayland the answer
+/// waits for the user to approve the shortcut in the desktop's dialog.
+#[op2]
+#[serde]
+async fn op_desktop_register_shortcut(
+  state: std::rc::Rc<std::cell::RefCell<OpState>>,
+  #[string] accelerator: String,
+) -> ShortcutRegisterInfo {
+  if accelerator.is_empty() || accelerator.len() > MAX_ACCELERATOR_LEN {
+    return ShortcutRegisterInfo::err("invalid");
+  }
+  match desktop_api(&state) {
+    Some(api) => api.register_shortcut(&accelerator).await,
+    None => ShortcutRegisterInfo::err("not_supported"),
+  }
+}
+
+/// `Deno.desktop.shortcuts.unregister()`.
+#[op2(fast)]
+fn op_desktop_unregister_shortcut(
+  state: &mut OpState,
+  #[string] accelerator: &str,
+) -> bool {
+  state
+    .try_borrow::<Arc<dyn DesktopApi>>()
+    .map(|api| api.unregister_shortcut(accelerator))
+    .unwrap_or(false)
+}
+
+/// `Deno.desktop.shortcuts.unregisterAll()`.
+#[op2(fast)]
+fn op_desktop_unregister_all_shortcuts(state: &mut OpState) {
+  if let Some(api) = state.try_borrow::<Arc<dyn DesktopApi>>() {
+    api.unregister_all_shortcuts();
+  }
+}
+
+/// `Deno.desktop.shortcuts.list()`.
+#[op2]
+#[serde]
+fn op_desktop_list_shortcuts(state: &mut OpState) -> Vec<String> {
+  state
+    .try_borrow::<Arc<dyn DesktopApi>>()
+    .map(|api| api.list_shortcuts())
+    .unwrap_or_default()
+}
+
+/// `Deno.desktop.shortcuts.canonicalize()`: `null` when it doesn't parse.
+#[op2]
+#[string]
+fn op_desktop_canonical_accelerator(
+  state: &mut OpState,
+  #[string] accelerator: &str,
+) -> Option<String> {
+  if accelerator.len() > MAX_ACCELERATOR_LEN {
+    return None;
+  }
+  state
+    .try_borrow::<Arc<dyn DesktopApi>>()
+    .and_then(|api| api.canonical_accelerator(accelerator))
+}
+
+/// `Deno.desktop.launchAtLogin.get()`.
+#[op2]
+#[string]
+async fn op_desktop_get_launch_at_login(
+  state: std::rc::Rc<std::cell::RefCell<OpState>>,
+) -> Result<String, deno_error::JsErrorBox> {
+  let Some(api) = desktop_api(&state) else {
+    return Ok("not-supported".to_string());
+  };
+  // SMAppService and the registry are quick, but they are system calls the
+  // event loop shouldn't wait on.
+  deno_core::unsync::spawn_blocking(move || api.launch_at_login())
+    .await
+    .map(|s| s.to_string())
+    .map_err(|_| {
+      deno_error::JsErrorBox::generic("reading launch at login failed")
+    })
+}
+
+/// `Deno.desktop.launchAtLogin.set()`: the state afterwards.
+#[op2]
+#[string]
+async fn op_desktop_set_launch_at_login(
+  state: std::rc::Rc<std::cell::RefCell<OpState>>,
+  enabled: bool,
+) -> Result<String, deno_error::JsErrorBox> {
+  let Some(api) = desktop_api(&state) else {
+    return Ok("not-supported".to_string());
+  };
+  match deno_core::unsync::spawn_blocking(move || {
+    api.set_launch_at_login(enabled)
+  })
+  .await
+  {
+    Ok(Ok(state)) => Ok(state.to_string()),
+    Ok(Err(message)) => Err(deno_error::JsErrorBox::generic(message)),
+    Err(_) => Err(deno_error::JsErrorBox::generic(
+      "changing launch at login failed",
+    )),
+  }
+}
+
+/// `Deno.desktop.devtools.enabled` (window 0: the launch setting) and
+/// `BrowserWindow.isDevtoolsEnabled()`.
+#[op2(fast)]
+fn op_desktop_devtools_enabled(
+  state: &mut OpState,
+  #[smi] window_id: u32,
+) -> bool {
+  state
+    .try_borrow::<Arc<dyn DesktopApi>>()
+    .map(|api| api.devtools_enabled(window_id))
+    .unwrap_or(false)
+}
+
 /// Close a dialog `op_desktop_file_dialog_open` showed, as cancelled (an
 /// AbortSignal). False when it is no longer open.
 #[op2(fast)]
@@ -3842,6 +4092,15 @@ deno_core::extension!(
     op_desktop_file_dialog_open,
     op_desktop_file_dialog_wait,
     op_desktop_file_dialog_cancel,
+    op_desktop_system_capabilities,
+    op_desktop_register_shortcut,
+    op_desktop_unregister_shortcut,
+    op_desktop_unregister_all_shortcuts,
+    op_desktop_list_shortcuts,
+    op_desktop_canonical_accelerator,
+    op_desktop_get_launch_at_login,
+    op_desktop_set_launch_at_login,
+    op_desktop_devtools_enabled,
     op_desktop_send_error_report,
     op_desktop_request_notification_permission,
     op_desktop_query_notification_permission,
@@ -5216,6 +5475,47 @@ mod tests {
     assert_eq!(
       serde_json::to_value(DesktopEvent::ClipboardChange).unwrap(),
       json!({ "kind": "clipboardChange" })
+    );
+  }
+
+  #[test]
+  fn system_wire_format() {
+    assert_eq!(
+      serde_json::to_value(DesktopEvent::Shortcut {
+        accelerator: "Ctrl+Shift+K".into(),
+      })
+      .unwrap(),
+      json!({ "kind": "shortcut", "accelerator": "Ctrl+Shift+K" })
+    );
+    let caps = serde_json::to_value(super::SystemCapabilitiesInfo {
+      global_shortcuts: true,
+      devtools: true,
+      ..Default::default()
+    })
+    .unwrap();
+    assert_eq!(
+      caps,
+      json!({
+        "globalShortcuts": true,
+        "shortcutsUserBinds": false,
+        "launchAtLogin": false,
+        "devtools": true,
+      })
+    );
+    assert_eq!(
+      serde_json::to_value(super::ShortcutRegisterInfo::ok("Alt+F4".into()))
+        .unwrap(),
+      json!({ "status": "ok", "accelerator": "Alt+F4" })
+    );
+    assert_eq!(
+      serde_json::to_value(super::ShortcutRegisterInfo::err("conflict"))
+        .unwrap(),
+      json!({ "status": "conflict", "accelerator": null })
+    );
+    // The launch-at-login states the JS side and the d.ts know.
+    assert_eq!(
+      super::LOGIN_ITEM_STATES,
+      ["enabled", "disabled", "requires-approval", "not-supported"]
     );
   }
 

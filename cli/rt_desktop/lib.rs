@@ -88,6 +88,17 @@ impl deno_runtime::ops::desktop::DesktopPasskeys for LaufeyPasskeys {
   }
 }
 
+/// `Deno.desktop.launchAtLogin` state names (see
+/// `deno_runtime::ops::desktop::LOGIN_ITEM_STATES`).
+fn login_item_state_str(state: laufey::LoginItemState) -> &'static str {
+  match state {
+    laufey::LoginItemState::Enabled => "enabled",
+    laufey::LoginItemState::Disabled => "disabled",
+    laufey::LoginItemState::RequiresApproval => "requires-approval",
+    laufey::LoginItemState::NotSupported => "not-supported",
+  }
+}
+
 /// Laufey-backed implementation of [`denort::desktop::DesktopApi`].
 struct WefDesktopApi {
   event_tx: deno_runtime::ops::desktop::DesktopEventTx,
@@ -106,6 +117,9 @@ struct WefDesktopApi {
   pending_closes: Arc<deno_runtime::ops::desktop::PendingCloses>,
   /// Whether the runtime may still reveal the hidden bootstrap window.
   initial_reveal: Arc<InitialReveal>,
+  /// laufey's (process-wide) global-shortcut handler, installed on the
+  /// first registration.
+  shortcut_handler: std::sync::Once,
 }
 
 /// The bootstrap window's reveal state: it is created hidden and shown by the
@@ -537,6 +551,12 @@ impl denort::desktop::DesktopApi for WefDesktopApi {
   }
 
   fn open_devtools(&self, window_id: u32, renderer: bool, deno: bool) {
+    // DevTools are off for the app (LAUFEY_INSPECTABLE=0 / "inspectable":
+    // false in laufey-launch.json): neither the engine's nor the unified
+    // dev-mode window opens.
+    if !laufey::devtools_enabled() {
+      return;
+    }
     if let Ok(mux) = env::var("DENO_DESKTOP_MUX_WS") {
       // Reuse an existing DevTools window when one is already open, so
       // repeated `openDevtools()` calls don't pile up windows.
@@ -825,6 +845,99 @@ impl denort::desktop::DesktopApi for WefDesktopApi {
 
   fn read_clipboard_formats(&self) -> Option<Vec<String>> {
     laufey::read_clipboard_formats()
+  }
+
+  // --- Global shortcuts, launch at login, DevTools (laufey API 40) ---
+
+  fn system_capabilities(
+    &self,
+  ) -> deno_runtime::ops::desktop::SystemCapabilitiesInfo {
+    let c = laufey::system_capabilities();
+    deno_runtime::ops::desktop::SystemCapabilitiesInfo {
+      global_shortcuts: c.global_shortcuts(),
+      shortcuts_user_binds: c.shortcuts_user_binds(),
+      launch_at_login: c.launch_at_login(),
+      devtools: c.devtools(),
+    }
+  }
+
+  fn register_shortcut(
+    &self,
+    accelerator: &str,
+  ) -> deno_runtime::ops::desktop::DesktopFuture<
+    deno_runtime::ops::desktop::ShortcutRegisterInfo,
+  > {
+    use deno_runtime::ops::desktop::ShortcutRegisterInfo;
+    self.shortcut_handler.call_once(|| {
+      let tx = self.event_tx.clone();
+      laufey::on_shortcut(move |accelerator| {
+        let _ =
+          tx.try_send(deno_runtime::ops::desktop::DesktopEvent::Shortcut {
+            accelerator: accelerator.to_string(),
+          });
+      });
+    });
+    let result = laufey::register_shortcut(accelerator);
+    Box::pin(async move {
+      match result.await {
+        Ok(canonical) => ShortcutRegisterInfo::ok(canonical),
+        Err(e) => ShortcutRegisterInfo::err(e.code()),
+      }
+    })
+  }
+
+  fn unregister_shortcut(&self, accelerator: &str) -> bool {
+    laufey::unregister_shortcut(accelerator)
+  }
+
+  fn unregister_all_shortcuts(&self) {
+    laufey::unregister_all_shortcuts();
+  }
+
+  fn list_shortcuts(&self) -> Vec<String> {
+    laufey::shortcuts()
+  }
+
+  fn canonical_accelerator(&self, accelerator: &str) -> Option<String> {
+    laufey::canonical_accelerator(accelerator)
+  }
+
+  fn launch_at_login(&self) -> &'static str {
+    login_item_state_str(laufey::launch_at_login())
+  }
+
+  fn set_launch_at_login(&self, enabled: bool) -> Result<&'static str, String> {
+    laufey::set_launch_at_login(enabled).map(login_item_state_str)
+  }
+
+  fn close_devtools(&self, window_id: u32) {
+    if env::var("DENO_DESKTOP_MUX_WS").is_ok() {
+      // `openDevtools()` opened the unified DevTools window (dev mode).
+      if let Some(id) = self.devtools_window.lock().unwrap().take()
+        && !self.closed_windows.lock().unwrap().contains(&id)
+      {
+        laufey::Window::from_id(id).close();
+      }
+      return;
+    }
+    laufey::Window::from_id(window_id).close_devtools();
+  }
+
+  fn is_devtools_open(&self, window_id: u32) -> bool {
+    if env::var("DENO_DESKTOP_MUX_WS").is_ok() {
+      return matches!(
+        *self.devtools_window.lock().unwrap(),
+        Some(id) if !self.closed_windows.lock().unwrap().contains(&id)
+      );
+    }
+    laufey::Window::from_id(window_id).is_devtools_open()
+  }
+
+  fn devtools_enabled(&self, window_id: u32) -> bool {
+    if window_id == 0 || env::var("DENO_DESKTOP_MUX_WS").is_ok() {
+      return laufey::devtools_enabled();
+    }
+    laufey::Window::from_id(window_id).is_devtools_enabled()
   }
 
   fn set_clipboard_watch(&self, on: bool) {
@@ -2676,6 +2789,7 @@ async fn run_desktop(
           deno_runtime::ops::desktop::PendingCloses::default(),
         ),
         initial_reveal: initial_reveal.clone(),
+        shortcut_handler: std::sync::Once::new(),
       };
 
       // `Deno.desktop` "displaychanged".
@@ -2928,6 +3042,7 @@ mod tests {
   use super::desktop_value_to_laufey_value;
   use super::extract_fork_script_path;
   use super::laufey_value_to_desktop_value;
+  use super::login_item_state_str;
   use super::map_permission_status;
   use super::should_show_native_error_dialog;
 
@@ -3438,5 +3553,17 @@ mod tests {
       },
       _ => panic!("nested must convert to Dict"),
     }
+  }
+
+  #[test]
+  fn login_item_states_match_the_runtime_names() {
+    let names = [
+      laufey::LoginItemState::Enabled,
+      laufey::LoginItemState::Disabled,
+      laufey::LoginItemState::RequiresApproval,
+      laufey::LoginItemState::NotSupported,
+    ]
+    .map(login_item_state_str);
+    assert_eq!(names, deno_runtime::ops::desktop::LOGIN_ITEM_STATES);
   }
 }
