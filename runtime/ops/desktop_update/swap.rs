@@ -766,8 +766,26 @@ pub fn spawn_helper(
   layout: &InstallLayout,
   mode: HelperMode,
 ) -> std::io::Result<()> {
+  let exe = layout.exe();
+  // The laufey macOS hosts' headless (`run <arg>`) path finds the runtime
+  // only through LAUFEY_RUNTIME_PATH or a co-located `<exe>.dylib`, while a
+  // bundle ships `libruntime.dylib` (which only their windowed path
+  // searches): point the helper at it. Windows and Linux hosts find their
+  // co-located `<App>.dll` / `<App>.so` themselves.
+  let runtime = if layout.kind == InstallKind::MacBundle
+    && std::env::var_os("LAUFEY_RUNTIME_PATH").is_none()
+  {
+    bundle_runtime_path(&exe)
+  } else {
+    None
+  };
+  let runtime = runtime.as_ref().map(|p| p.to_string_lossy().into_owned());
+  let mut env = vec![("LAUFEY_SINGLE_INSTANCE", Some("0"))];
+  if let Some(path) = runtime.as_deref() {
+    env.push(("LAUFEY_RUNTIME_PATH", Some(path)));
+  }
   spawn_detached(
-    &layout.exe(),
+    &exe,
     &[
       "run".into(),
       HELPER_ARG.into(),
@@ -775,8 +793,20 @@ pub fn spawn_helper(
       std::process::id().to_string(),
     ],
     &layout.parent,
-    &[("LAUFEY_SINGLE_INSTANCE", Some("0"))],
+    &env,
   )
+}
+
+/// The runtime library a macOS bundle's host loads, in the host's own search
+/// order: `Contents/Frameworks/libruntime.dylib`, then
+/// `Contents/MacOS/libruntime.dylib` (`exe` is `Contents/MacOS/<exe>`).
+pub fn bundle_runtime_path(exe: &Path) -> Option<PathBuf> {
+  let macos = exe.parent()?;
+  let candidates = [
+    macos.parent()?.join("Frameworks").join("libruntime.dylib"),
+    macos.join("libruntime.dylib"),
+  ];
+  candidates.into_iter().find(|p| p.is_file())
 }
 
 /// Relaunch the installed app with the recorded arguments plus `marker`.
@@ -1139,6 +1169,24 @@ mod tests {
     assert_eq!(startup_action(l), StartupAction::Continue { trial: false });
     assert!(!l.old_path().exists());
     assert!(!read_state(l).unwrap().cleanup);
+  }
+
+  #[test]
+  fn bundle_runtime_follows_the_host_search_order() {
+    let t = tempfile::tempdir().unwrap();
+    let macos = t.path().join("A.app/Contents/MacOS");
+    let frameworks = t.path().join("A.app/Contents/Frameworks");
+    std::fs::create_dir_all(&macos).unwrap();
+    std::fs::create_dir_all(&frameworks).unwrap();
+    let exe = macos.join("host");
+    assert_eq!(bundle_runtime_path(&exe), None);
+    std::fs::write(macos.join("libruntime.dylib"), b"").unwrap();
+    assert_eq!(bundle_runtime_path(&exe), Some(macos.join("libruntime.dylib")));
+    std::fs::write(frameworks.join("libruntime.dylib"), b"").unwrap();
+    assert_eq!(
+      bundle_runtime_path(&exe),
+      Some(frameworks.join("libruntime.dylib"))
+    );
   }
 
   #[test]
