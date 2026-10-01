@@ -2352,6 +2352,24 @@ pub fn op_desktop_apply_patch(
     })?;
   let dylib_path = &update_state.dylib_path;
 
+  // Patching a file inside a macOS `.app` breaks the bundle's code signature
+  // (and its notarization): the next launch fails Gatekeeper, or the patched
+  // code runs under a broken seal. Full-app updates (`Deno.desktop.updater`)
+  // replace the whole signed bundle instead, so the in-place patch is refused
+  // there. Elsewhere (no OS code signature on Linux; Windows checks a
+  // signature only at install time) the legacy patch path is kept.
+  if cfg!(target_os = "macos")
+    && dylib_path
+      .ancestors()
+      .any(|p| p.extension().is_some_and(|e| e == "app"))
+  {
+    return Err(deno_error::JsErrorBox::generic(
+      "Deno.autoUpdate cannot patch the runtime inside a macOS .app bundle: \
+       it would break the bundle's code signature. Use Deno.desktop.updater \
+       (full signed-bundle updates) instead",
+    ));
+  }
+
   // Verify the patch bytes against the SHA-256 declared in the manifest before
   // we trust them with `bspatch`. Without this, anyone who can MITM the patch
   // download (or compromise the release host) could deliver arbitrary native

@@ -755,6 +755,16 @@ const NOT_IMPORTED_OPS = [
   "op_desktop_quit",
   "op_desktop_set_quit_on_last_window_closed",
   "op_desktop_close_reply",
+  // Deno.desktop.updater (full-app self-update)
+  "op_desktop_app_update_info",
+  "op_desktop_app_update_check",
+  "op_desktop_app_update_begin",
+  "op_desktop_app_update_write",
+  "op_desktop_app_update_finish",
+  "op_desktop_app_update_abort",
+  "op_desktop_app_update_stage",
+  "op_desktop_app_update_apply",
+  "op_desktop_app_update_confirm",
 
   // deno deploy subcommand
   "op_deploy_token_get",
@@ -783,6 +793,8 @@ const NOT_IMPORTED_OPS = [
 // back. The rich clipboard (HTML, images, formats, change events) follows the
 // text clipboard; the file dialogs and the drag out hand over (or offer) the
 // user's files, which is the app's own main-scope `Deno.desktop` business.
+// Installing a full-app update replaces (and relaunches) the app, so
+// the Deno.desktop.updater ops are the main scope's alone too.
 const WORKER_EXCLUDED_OPS = [
   "op_desktop_read_clipboard_text",
   "op_desktop_write_clipboard_text",
@@ -806,6 +818,15 @@ const WORKER_EXCLUDED_OPS = [
   "op_desktop_file_dialog_open",
   "op_desktop_file_dialog_wait",
   "op_desktop_file_dialog_cancel",
+  "op_desktop_app_update_info",
+  "op_desktop_app_update_check",
+  "op_desktop_app_update_begin",
+  "op_desktop_app_update_write",
+  "op_desktop_app_update_finish",
+  "op_desktop_app_update_abort",
+  "op_desktop_app_update_stage",
+  "op_desktop_app_update_apply",
+  "op_desktop_app_update_confirm",
 ];
 
 function removeImportedOps(isWorker = false) {

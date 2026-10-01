@@ -2,6 +2,7 @@
 
 pub mod bootstrap;
 pub mod desktop;
+pub mod desktop_update;
 pub mod fs_events;
 pub mod http;
 pub mod permissions;

@@ -2574,6 +2574,7 @@ impl WorkspaceDirectory {
       backend: member_config.backend.or(root_config.backend),
       output: member_config.output.or(root_config.output),
       release: member_config.release.or(root_config.release),
+      update: member_config.update.or(root_config.update),
       error_reporting: member_config
         .error_reporting
         .or(root_config.error_reporting),

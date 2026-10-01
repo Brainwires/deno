@@ -236,6 +236,17 @@
               "description": "Base URL for auto-update release artifacts."
             }
           }
+        },
+        "update": {
+          "type": "object",
+          "description": "Full-app self-update (Deno.desktop.updater). Every update manifest must be signed by this key.",
+          "additionalProperties": false,
+          "properties": {
+            "publicKey": {
+              "type": "string",
+              "description": "The public half of the release signing key: an ECDSA P-256 key as base64 SPKI or a PUBLIC KEY PEM (the format `denext ota keygen` writes)."
+            }
+          }
         }
       }
     },

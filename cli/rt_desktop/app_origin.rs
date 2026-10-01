@@ -172,6 +172,26 @@ pub fn resolve_app_config(
   })
 }
 
+/// The full-app update public key: the metadata's (deno.json
+/// `desktop.update.publicKey`, checked by the CLI), else the nearest
+/// [`APP_CONFIG_FILE`]'s `update.publicKey` (what a stock CLI can embed),
+/// else none. An app.json that does not parse was already refused by
+/// [`resolve_app_config`].
+pub fn resolve_update_public_key(
+  metadata_key: Option<&str>,
+  root: &Path,
+  entrypoint_key: &str,
+  read_file: impl Fn(&Path) -> Option<Vec<u8>>,
+) -> Option<String> {
+  if let Some(key) = metadata_key.filter(|k| !k.trim().is_empty()) {
+    return Some(key.to_string());
+  }
+  find_app_config_file(root, entrypoint_key, read_file)
+    .ok()
+    .flatten()
+    .and_then(|(_, config)| config.update_public_key)
+}
+
 /// The nearest [`APP_CONFIG_FILE`] and its parsed contents, if any.
 fn find_app_config_file(
   root: &Path,
@@ -241,6 +261,34 @@ mod tests {
       .map(|(p, c)| (vfs(p), c.as_bytes().to_vec()))
       .collect();
     move |p: &Path| map.get(p).cloned()
+  }
+
+  #[test]
+  fn update_public_key_from_metadata_else_app_json() {
+    let read = reader(&[(
+      ".deno-desktop/app.json",
+      r#"{ "identifier": "com.a.b", "update": { "publicKey": "FILEKEY" } }"#,
+    )]);
+    let root = Path::new("/vfs");
+    assert_eq!(
+      resolve_update_public_key(Some("META"), root, "main.ts", &read)
+        .as_deref(),
+      Some("META")
+    );
+    assert_eq!(
+      resolve_update_public_key(None, root, "main.ts", &read).as_deref(),
+      Some("FILEKEY")
+    );
+    assert_eq!(
+      resolve_update_public_key(None, root, "main.ts", reader(&[])),
+      None
+    );
+    // An unknown key inside `update` is a parse error (no silent fallback).
+    let bad = reader(&[(
+      ".deno-desktop/app.json",
+      r#"{ "update": { "publickey": "x" } }"#,
+    )]);
+    assert_eq!(resolve_update_public_key(None, root, "main.ts", bad), None);
   }
 
   #[test]

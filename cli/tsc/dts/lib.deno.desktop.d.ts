@@ -1710,6 +1710,143 @@ declare namespace Deno {
       ): Promise<string>;
     };
 
+    /** Why a {@linkcode Deno.desktop.updater} step refused. */
+    export type AppUpdateErrorCode =
+      | "not_configured"
+      | "invalid_manifest"
+      | "signature"
+      | "wrong_app"
+      | "downgrade"
+      | "rejected"
+      | "no_platform"
+      | "insecure_url"
+      | "size_exceeded"
+      | "integrity"
+      | "unsafe_archive"
+      | "bundle_mismatch"
+      | "os_signature"
+      | "install_not_writable"
+      | "unsupported_layout"
+      | "not_staged"
+      | "busy"
+      | "io";
+
+    /** Options for fetching the manifest or the archive. */
+    export interface AppUpdateFetchOptions {
+      /** Extra trusted CA certificates (PEM), e.g. a test server's. */
+      caCerts?: string[];
+      /** DEV ONLY: accept `http://` to a loopback host. */
+      allowInsecureLoopback?: boolean;
+      /** Manifest request timeout (`check()` only). Default 30 000 ms. */
+      timeoutMs?: number;
+    }
+
+    /** What {@linkcode Deno.desktop.updater.check} found. */
+    export interface AppUpdateCheck {
+      /** A newer, verified version for this platform. */
+      available: boolean;
+      /** The manifest's version. */
+      version: string;
+      /** The running version. */
+      currentVersion: string;
+      /** The running version is below the manifest's `minVersion`. */
+      required: boolean;
+      releaseNotes: string | null;
+      publishedAt: string | null;
+      /** The archive size in bytes. */
+      size: number | null;
+      /** This build's platform key, `<target>-<backend>`. */
+      platform: string | null;
+    }
+
+    /** {@linkcode Deno.desktop.updater.status}. */
+    export interface AppUpdateStatus {
+      /** Whether updates can run (a key, identifier and version are baked in
+       * and the install is replaceable); `reason` says why not. */
+      configured: boolean;
+      reason: string | null;
+      version: string | null;
+      appId: string | null;
+      platform: string | null;
+      install: string | null;
+      kind: "macBundle" | "appDir" | "appImage" | null;
+      phase: "idle" | "staged" | "swapping" | "swapped" | "rollingBack" | null;
+      /** A swapped-in version awaiting {@linkcode Deno.desktop.updater.confirm}. */
+      pendingVersion: string | null;
+      stagedVersion: string | null;
+      /** The last version rolled back after failing to start. */
+      rejected: string | null;
+      lastError: string | null;
+      /** Launched by the updater after an update from this version. */
+      updatedFrom: string | null;
+      /** Launched after this version was rolled back. */
+      rolledBackFrom: string | null;
+      /** This is the first, unconfirmed launch of a new version. */
+      trial: boolean;
+    }
+
+    /**
+     * Full-app self-update: replaces the whole signed app (bundle, app
+     * directory or AppImage), never patching it in place.
+     *
+     * Every manifest must be signed (ECDSA P-256) by the key baked into the
+     * app at package time (deno.json `desktop.update.publicKey`); there is no
+     * unsigned path. A manifest for another app, a version that is not newer
+     * than the running one, an http URL, a download that is larger than
+     * declared or hashes differently, an archive with unsafe entries, or a
+     * staged app the OS signature check refuses (macOS: same Team ID +
+     * Gatekeeper; Windows: same Authenticode signer) is refused with an
+     * error whose `code` is an {@linkcode AppUpdateErrorCode}.
+     *
+     * ```ts
+     * const u = Deno.desktop.updater;
+     * if (u.status().trial) u.confirm(); // after the app proved healthy
+     * const found = await u.check("https://updates.example.com/app.json");
+     * if (found.available) {
+     *   await u.download({ onProgress: (p) => console.log(p) });
+     *   await u.stage();
+     *   u.applyAndRelaunch();
+     * }
+     * ```
+     *
+     * An update not confirmed by its next launch is rolled back, and that
+     * version is not offered again. Fires `"progress"` events (`detail:
+     * { transferred, total }`) while downloading.
+     *
+     * @category Desktop
+     * @experimental
+     */
+    export const updater: EventTarget & {
+      /** Fetch and verify the signed manifest. */
+      check(
+        manifestUrl: string | URL,
+        options?: AppUpdateFetchOptions,
+      ): Promise<AppUpdateCheck>;
+      /** Stream the verified archive next to the install (size-capped,
+       * SHA-256 checked). */
+      download(
+        options?: AppUpdateFetchOptions & {
+          onProgress?: (p: { transferred: number; total: number }) => void;
+          signal?: AbortSignal;
+        },
+      ): Promise<{ version: string; size: number }>;
+      /** Extract safely and check the staged app's OS code signature.
+       * `allowUnsignedDev` (DEV ONLY) accepts an unsigned / ad-hoc running
+       * app; it never weakens a signed one. */
+      stage(options?: { allowUnsignedDev?: boolean }): Promise<{
+        version: string;
+        signature: { mode: string; identity: string | null };
+      }>;
+      /** Start the swap helper and quit (it relaunches the new version).
+       * `quitting: false` when a `beforequit` / `close` listener refused;
+       * `force: true` exits anyway. */
+      applyAndRelaunch(options?: { force?: boolean }): { quitting: boolean };
+      /** Confirm the running version after an update (deletes the previous
+       * app). `false` when nothing was pending. */
+      confirm(): boolean;
+      status(): AppUpdateStatus;
+    };
+
     /** The connected displays, primary first. */
     export function screens(): Screen[];
     /** The primary display, or `null` when the backend can't list them. */
