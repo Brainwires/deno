@@ -735,8 +735,16 @@ pub fn rollback_with(
   // On Windows the helper runs from the failed install's own executable, which
   // cannot be deleted while it runs: leave `cleanup` set and the next start's
   // watchdog finishes it.
+  log_line(layout, "rollback: the previous app is back in place");
   let failed_gone = remove_install_copy(layout, &failed);
   let staging_gone = remove_path(&layout.staging_dir());
+  log_line(
+    layout,
+    &format!(
+      "rollback: failed install removed: {failed_gone}, staging removed: \
+       {staging_gone}"
+    ),
+  );
   state.phase = Phase::Idle;
   state.launches = 0;
   state.helper_attempts = 0;
