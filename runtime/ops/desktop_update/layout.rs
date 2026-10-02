@@ -87,7 +87,9 @@ impl InstallLayout {
 
   /// The state file.
   pub fn state_path(&self) -> PathBuf {
-    self.parent.join(format!(".{}.denext-update.json", self.name))
+    self
+      .parent
+      .join(format!(".{}.denext-update.json", self.name))
   }
 
   /// The executable inside `root` (an install-shaped path).
@@ -278,9 +280,11 @@ pub fn platform_key(backend: &str) -> Option<String> {
 /// `/Applications`, an MSI in Program Files, a `.deb`) must be updated by
 /// its installer.
 pub fn check_writable(layout: &InstallLayout) -> Result<(), UpdateError> {
-  let probe = layout
-    .parent
-    .join(format!(".{}.denext-probe-{}", layout.name, std::process::id()));
+  let probe = layout.parent.join(format!(
+    ".{}.denext-probe-{}",
+    layout.name,
+    std::process::id()
+  ));
   let parent_ok = std::fs::OpenOptions::new()
     .write(true)
     .create_new(true)
@@ -325,8 +329,7 @@ fn dir_writable(dir: &Path) -> bool {
 
 #[cfg(not(unix))]
 fn dir_writable(dir: &Path) -> bool {
-  let probe =
-    dir.join(format!(".denext-probe-{}", std::process::id()));
+  let probe = dir.join(format!(".denext-probe-{}", std::process::id()));
   std::fs::OpenOptions::new()
     .write(true)
     .create_new(true)
@@ -430,7 +433,10 @@ mod tests {
     let other = t.path().join("other/app");
     std::fs::create_dir_all(other.parent().unwrap()).unwrap();
     std::fs::write(&other, b"").unwrap();
-    assert_eq!(detect_install(&other, &env).unwrap().kind, InstallKind::AppDir);
+    assert_eq!(
+      detect_install(&other, &env).unwrap().kind,
+      InstallKind::AppDir
+    );
   }
 
   #[cfg(unix)]
@@ -461,7 +467,10 @@ mod tests {
       .unwrap();
     std::fs::set_permissions(&install, std::fs::Permissions::from_mode(0o555))
       .unwrap();
-    assert_eq!(check_writable(&l).unwrap_err().code, Code::InstallNotWritable);
+    assert_eq!(
+      check_writable(&l).unwrap_err().code,
+      Code::InstallNotWritable
+    );
     std::fs::set_permissions(&install, std::fs::Permissions::from_mode(0o755))
       .unwrap();
     assert!(check_writable(&l).is_ok());

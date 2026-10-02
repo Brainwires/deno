@@ -155,7 +155,10 @@ pub fn safe_entry_path(raw: &[u8]) -> Result<Vec<String>, UpdateError> {
     return err(Code::UnsafeArchive, "entry name is not UTF-8");
   };
   if raw.contains('\0') {
-    return err(Code::UnsafeArchive, format!("entry name contains NUL: {raw:?}"));
+    return err(
+      Code::UnsafeArchive,
+      format!("entry name contains NUL: {raw:?}"),
+    );
   }
   if raw.contains('\\') {
     return err(
@@ -199,8 +202,10 @@ fn symlink_stays_inside(link: &[String], target: &str) -> bool {
   {
     return false;
   }
-  let mut stack: Vec<&str> =
-    link[..link.len().saturating_sub(1)].iter().map(|s| s.as_str()).collect();
+  let mut stack: Vec<&str> = link[..link.len().saturating_sub(1)]
+    .iter()
+    .map(|s| s.as_str())
+    .collect();
   for seg in target.split('/') {
     match seg {
       "" | "." => {}
@@ -224,7 +229,10 @@ fn join(root: &Path, parts: &[String]) -> PathBuf {
 }
 
 /// Refuse if any ancestor of `parts` under `root` is not a real directory.
-fn ensure_real_parents(root: &Path, parts: &[String]) -> Result<(), UpdateError> {
+fn ensure_real_parents(
+  root: &Path,
+  parts: &[String],
+) -> Result<(), UpdateError> {
   let mut p = root.to_path_buf();
   for s in &parts[..parts.len().saturating_sub(1)] {
     p.push(s);
@@ -387,10 +395,7 @@ pub fn extract_tar_gz(
         if cfg!(windows) {
           return err(
             Code::UnsafeArchive,
-            format!(
-              "symlink {} in a Windows update archive",
-              parts.join("/")
-            ),
+            format!("symlink {} in a Windows update archive", parts.join("/")),
           );
         }
         let Some(target) = entry.link_name_bytes() else {
@@ -539,7 +544,9 @@ mod tests {
     path
   }
 
-  fn extract(entries: &[(&str, u8, &[u8], &str)]) -> Result<Extracted, UpdateError> {
+  fn extract(
+    entries: &[(&str, u8, &[u8], &str)],
+  ) -> Result<Extracted, UpdateError> {
     let t = tmp();
     let a = tgz(t.path(), entries);
     extract_tar_gz(&a, &t.path().join("out"), 1 << 30)
@@ -568,8 +575,7 @@ mod tests {
 
   #[test]
   fn refuses_tar_slip() {
-    for name in ["../evil", "App/../../evil", "/etc/evil", "C:/evil", "a\\b"]
-    {
+    for name in ["../evil", "App/../../evil", "/etc/evil", "C:/evil", "a\\b"] {
       let r = extract(&[(name, b'0', b"x", "")]);
       assert_eq!(r.unwrap_err().code, Code::UnsafeArchive, "{name}");
     }
@@ -587,10 +593,8 @@ mod tests {
   #[test]
   fn refuses_escaping_symlinks() {
     for target in ["../../outside", "/etc/passwd", "../.."] {
-      let r = extract(&[
-        ("App/", b'5', b"", ""),
-        ("App/link", b'2', b"", target),
-      ]);
+      let r =
+        extract(&[("App/", b'5', b"", ""), ("App/link", b'2', b"", target)]);
       assert_eq!(r.unwrap_err().code, Code::UnsafeArchive, "{target}");
     }
   }
@@ -643,7 +647,10 @@ mod tests {
     let out = t.path().join("out");
     extract_tar_gz(&a, &out, 1 << 30).unwrap();
     use std::os::unix::fs::PermissionsExt;
-    let mode = std::fs::metadata(out.join("App/bin")).unwrap().permissions().mode();
+    let mode = std::fs::metadata(out.join("App/bin"))
+      .unwrap()
+      .permissions()
+      .mode();
     assert_eq!(mode & 0o7777, 0o755);
     assert!(
       std::fs::symlink_metadata(out.join("App/Current"))

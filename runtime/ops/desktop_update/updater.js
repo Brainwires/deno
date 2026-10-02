@@ -1,5 +1,12 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 
+// This is not a bootstrap module: cli/rt/run.rs evaluates it with
+// `execute_script` after bootstrap (like the rest of the `Deno.desktop` JS in
+// cli/rt), when `__bootstrap.primordials` is no longer reachable, and before
+// the app's main module runs. The console call reports an exception thrown by
+// the app's own onProgress callback.
+// deno-lint-ignore-file deno-internal/prefer-primordials no-console
+
 // Deno.desktop.updater: full-app self-update (see desktop_update/mod.rs).
 // Every trust decision is made in Rust; this file only moves bytes: it
 // fetches the manifest and the archive (https only, every redirect hop

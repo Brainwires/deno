@@ -76,6 +76,44 @@ if [ -f "$result" ]; then
   echo
 fi
 [ "$status" = 0 ] && [ -f "$result" ] || { echo "launch smoke FAILED" >&2; exit 1; }
+
+# What the page and the server saw must be the configured app origin: the
+# page is served from it, is a secure context, its POST reached Deno.serve
+# over the in-process memory transport, and the runtime exported the origin.
+# The Origin header: Chromium (CEF, and WebView2 for the webview backend on
+# Windows) sends it on the same-origin POST and it must be the app origin;
+# WebKit (the webview backend on macOS and Linux) sends none on a
+# custom-scheme request, so there it must be absent or the app origin, never
+# anything else.
+case "$BACKEND:$TARGET" in
+  cef:* | webview:*-windows-msvc) origin_header=required ;;
+  *) origin_header=optional ;;
+esac
+SMOKE_RESULT_PATH=$(native_path "$result") \
+  SMOKE_APP_JSON=$(native_path "$work/app/.deno-desktop/app.json") \
+  SMOKE_ORIGIN_HEADER=$origin_header \
+  deno eval --quiet '
+const result = JSON.parse(Deno.readTextFileSync(Deno.env.get("SMOKE_RESULT_PATH")));
+const expected = JSON.parse(Deno.readTextFileSync(Deno.env.get("SMOKE_APP_JSON"))).origin;
+const failures = [];
+const check = (what, actual, ok) => {
+  console.log(`${ok ? "ok  " : "FAIL"} ${what}: ${JSON.stringify(actual)}`);
+  if (!ok) failures.push(what);
+};
+check("page.origin", result.page?.origin, result.page?.origin === expected);
+check("page.href", result.page?.href, result.page?.href === `${expected}/`);
+check("isSecureContext", result.page?.secureContext, result.page?.secureContext === true);
+check("appOrigin", result.appOrigin, result.appOrigin === expected);
+check("requestUrl", result.requestUrl,
+  typeof result.requestUrl === "string" && result.requestUrl.startsWith("http+memory://"));
+const header = result.originHeader;
+check(`Origin header (${Deno.env.get("SMOKE_ORIGIN_HEADER")})`, header,
+  header === expected || (Deno.env.get("SMOKE_ORIGIN_HEADER") === "optional" && header === null));
+if (failures.length) {
+  console.error(`expected app origin ${expected}; failed: ${failures.join(", ")}`);
+  Deno.exit(1);
+}
+' || { echo "launch smoke FAILED: origin checks" >&2; exit 1; }
 if [ "$napi" = 1 ]; then
   # {"add": 42, "lookup": "napi <n>"}: linked and run-time-resolved Node-API
   # calls both reached the runtime library.

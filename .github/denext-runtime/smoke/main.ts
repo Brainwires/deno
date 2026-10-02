@@ -1,4 +1,5 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
+// deno-lint-ignore-file no-console
 // denext runtime smoke app. Packaged by .github/denext-runtime/smoke.sh with
 // the stock `deno desktop` CLI against a prebuilt runtime archive, and (where
 // the runner can show a window) launched by launch.sh.
