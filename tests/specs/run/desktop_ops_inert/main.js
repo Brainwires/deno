@@ -98,6 +98,8 @@ const cases = {
   op_desktop_resolve_bind_call: () => ops.op_desktop_resolve_bind_call(1, null),
   op_desktop_reject_bind_call: () => ops.op_desktop_reject_bind_call(1, "x"),
   op_desktop_alert: () => ops.op_desktop_alert("title", "message"),
+  op_desktop_alert_async: () =>
+    ops.op_desktop_alert_async("Application Error", "message"),
   op_desktop_confirm: () => ops.op_desktop_confirm("message"),
   op_desktop_prompt: () => ops.op_desktop_prompt("message", "default"),
   op_desktop_read_clipboard_text: () => ops.op_desktop_read_clipboard_text(),

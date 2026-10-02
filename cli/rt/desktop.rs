@@ -3734,6 +3734,47 @@ mod tests {
   }
 
   #[test]
+  fn every_op_the_desktop_scripts_call_survives_bootstrap() {
+    // The desktop scripts reach their ops through
+    // `Deno[Deno.internal].core.ops`, and bootstrap (`removeImportedOps` in
+    // runtime/js/99_main.js) deletes every op that is not listed in
+    // NOT_IMPORTED_OPS. An op missing from that list is `undefined` by the
+    // time the script runs: `op_desktop_alert_async` was, so the
+    // uncaught-error handler threw inside itself and the error dialog never
+    // showed.
+    const MAIN_JS: &str = include_str!("../../runtime/js/99_main.js");
+    let start = MAIN_JS
+      .find("const NOT_IMPORTED_OPS = [")
+      .expect("NOT_IMPORTED_OPS in 99_main.js");
+    let end = start + MAIN_JS[start..].find("];").expect("end of the list");
+    let preserved = &MAIN_JS[start..end];
+    let scripts = [
+      DESKTOP_JS.to_string(),
+      desktop_error_reporting_js(Some("https://err.example/r"), Some("1.0.0")),
+      desktop_auto_update_js(Some("1.0.0"), false, Some("https://up.example/")),
+    ];
+    let mut checked = 0;
+    for script in &scripts {
+      let mut rest = script.as_str();
+      while let Some(i) = rest.find("op_desktop_") {
+        let tail = &rest[i..];
+        let len = tail
+          .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+          .unwrap_or(tail.len());
+        let op = &tail[..len];
+        assert!(
+          preserved.contains(&format!("\"{op}\"")),
+          "{op} is called by a desktop script but removed at bootstrap: \
+           add it to NOT_IMPORTED_OPS in runtime/js/99_main.js"
+        );
+        checked += 1;
+        rest = &tail[len..];
+      }
+    }
+    assert!(checked > 10, "found only {checked} op references");
+  }
+
+  #[test]
   fn error_reporting_js_listens_for_unhandledrejection() {
     // Both `error` and `unhandledrejection` events must be hooked
     // — missing either would let half of all user-code failures fall

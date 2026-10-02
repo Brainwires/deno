@@ -71,7 +71,13 @@ check_macos() {
           echo 1 >"$root/.verify-failed"
           ;;
       esac
-      echo "   dep: $dep -> ${resolved:-UNRESOLVED (loaded at runtime or via framework search)}"
+      echo "   dep: $dep -> ${resolved:-UNRESOLVED}"
+      # A dependency dyld would not find fails the launch: never only
+      # print it. (System libraries live in the shared cache, not on disk.)
+      if [ -z "$resolved" ]; then
+        echo "   ERROR: $dep resolves nowhere" >&2
+        echo 1 >"$root/.verify-failed"
+      fi
     done
   done < <(macho_files)
   # The CEF framework binary is not executable-bit-marked everywhere; show it.
@@ -111,10 +117,21 @@ check_linux() {
 }
 
 check_windows() {
+  local machine py
+  case "$target" in
+    x86_64-*) machine=x64 ;;
+    aarch64-*) machine=arm64 ;;
+  esac
+  py=$(command -v python3 || command -v python)
   find "$root" -type f \( -iname '*.exe' -o -iname '*.dll' \) -print0 |
     while IFS= read -r -d '' f; do
       rel=${f#"$root"/}
       echo "== $rel: $(file -b "$f" 2>/dev/null || echo '?')"
+      # The machine type, and every imported DLL resolving next to the file
+      # or to the system (pe_deps.py).
+      if ! "$py" "$here/pe_deps.py" "$machine" "$(native_path "$f")"; then
+        echo 1 >"$root/.verify-failed"
+      fi
     done
 }
 

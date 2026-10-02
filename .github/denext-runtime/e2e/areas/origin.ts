@@ -1,6 +1,6 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
-// The app origin + memory transport: one launch; the app makes every check
-// (see apps/origin/main.ts).
+// The app origin + memory transport: a Deno.serve app and a node:http app;
+// each makes its own checks (see apps/origin/main.ts, apps/originnode/main.ts).
 
 import {
   type AreaReport,
@@ -25,4 +25,18 @@ export async function run(env: Env, rep: AreaReport) {
   await clearResults("origin");
   await writeParams("origin", { origin });
   await launchAndCollect(env, rep, "launch", p);
+
+  // The same transport with a node:http server as the app's server.
+  const nodeScheme = `dnxoriginnode${env.nonce}`;
+  const nodeOrigin = `${nodeScheme}://app`;
+  const nodeId = `dev.denext.e2e${env.nonce}.originnode`;
+  const pn = await packageApp(env, {
+    app: "originnode",
+    name: "E2EOriginNode",
+    identifier: nodeId,
+    appJson: { origin: nodeOrigin },
+    launch: { appId: nodeId, customSchemes: [nodeScheme] },
+  });
+  await writeParams("origin", { origin: nodeOrigin });
+  await launchAndCollect(env, rep, "node:http", pn);
 }

@@ -736,6 +736,7 @@ const NOT_IMPORTED_OPS = [
   "op_desktop_resolve_bind_call",
   "op_desktop_reject_bind_call",
   "op_desktop_alert",
+  "op_desktop_alert_async",
   "op_desktop_confirm",
   "op_desktop_prompt",
   "op_desktop_read_clipboard_text",
@@ -819,7 +820,14 @@ const NOT_IMPORTED_OPS = [
 // the user's session (a shortcut also sees keys typed into other apps), so
 // they stay main-scope as well, as do scheduled notifications (they outlive
 // the worker and their clicks reach the main scope's Deno.desktop).
+// The native classes (windows, the dock, trays, notifications) need the
+// desktop backend, which only the main scope has: constructing one in a
+// worker would only throw.
 const WORKER_EXCLUDED_OPS = [
+  "BrowserWindow",
+  "Dock",
+  "Tray",
+  "Notification",
   "op_desktop_read_clipboard_text",
   "op_desktop_write_clipboard_text",
   "op_desktop_take_launch_targets",

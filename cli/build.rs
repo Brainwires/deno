@@ -299,11 +299,17 @@ fn emit_laufey_version() {
 }
 
 /// Parse the pinned `laufey` crate version out of a Cargo.lock file. Returns
-/// `None` when the file is missing or has no `laufey` package entry.
+/// `None` when the file is missing, has no `laufey` package entry, or pins
+/// `laufey` from git rather than a crates.io release: then the crate version
+/// names no laufey release, so the release `cli/laufey_sums.lock` pins (and
+/// `deno desktop` would download) is that file's own `# version:`. (The denext
+/// fork links a Brainwires/laufey revision whose crate version is ahead of
+/// every release.)
 fn laufey_version_from_lock(lock_path: &Path) -> Option<String> {
   let lock = std::fs::read_to_string(lock_path).ok()?;
 
   let mut in_laufey = false;
+  let mut version = None;
   for line in lock.lines() {
     if line == "name = \"laufey\"" {
       in_laufey = true;
@@ -311,16 +317,20 @@ fn laufey_version_from_lock(lock_path: &Path) -> Option<String> {
     }
     if in_laufey {
       if let Some(rest) = line.strip_prefix("version = \"")
-        && let Some(version) = rest.strip_suffix('"')
+        && let Some(v) = rest.strip_suffix('"')
       {
-        return Some(version.to_string());
+        version = Some(v.to_string());
       }
-      if line.starts_with("[[package]]") {
+      if line.starts_with("source = \"git+") {
         return None;
+      }
+      if line.starts_with("dependencies = [") || line.starts_with("[[package]]")
+      {
+        return version;
       }
     }
   }
-  None
+  version
 }
 
 /// Read the `# version: vX.Y.Z` directive from `cli/laufey_sums.lock`. This file

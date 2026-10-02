@@ -16,6 +16,7 @@ op_desktop_run_on_main_thread throws NotCapable: Requires ffi access, run again 
 op_desktop_resolve_bind_call -> null
 op_desktop_reject_bind_call -> null
 op_desktop_alert -> null
+op_desktop_alert_async -> null
 op_desktop_confirm -> false
 op_desktop_prompt -> null
 op_desktop_read_clipboard_text -> null
@@ -62,8 +63,8 @@ op_desktop_app_update_abort -> null
 op_desktop_app_update_stage throws Error: not_configured: full-app updates are only available in a packaged desktop app
 op_desktop_app_update_apply throws Error: not_configured: full-app updates are only available in a packaged desktop app
 op_desktop_app_update_confirm -> false
-BrowserWindow throws NotSupported: BrowserWindow is only available in a desktop app (deno desktop)
-Dock throws NotSupported: Dock is only available in a desktop app (deno desktop)
-Tray throws NotSupported: Tray is only available in a desktop app (deno desktop)
-Notification throws NotSupported: Notification is only available in a desktop app (deno desktop)
-68 exposed, 0 uncovered
+BrowserWindow throws NotSupported: BrowserWindow is only available in the main scope of a desktop app
+Dock throws NotSupported: Dock is only available in the main scope of a desktop app
+Tray throws NotSupported: Tray is only available in the main scope of a desktop app
+Notification throws NotSupported: Notification is only available in the main scope of a desktop app
+69 exposed, 0 uncovered

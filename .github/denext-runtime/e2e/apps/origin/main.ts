@@ -8,7 +8,14 @@
 
 // deno-lint-ignore-file no-explicit-any
 
-import { describeError, html, page, Report, sleep } from "../_shared/e2e.ts";
+import {
+  describeError,
+  html,
+  page,
+  Report,
+  sleep,
+  waitFor,
+} from "../_shared/e2e.ts";
 
 const r = new Report("origin");
 const ORIGIN = r.params.origin ?? "denexte2e://app";
@@ -41,6 +48,17 @@ try {
   out.stream = { status: res.status, at };
 } catch (e) { out.stream = { error: String(e) }; }
 step("stream");
+// A response the page gives up on (one chunk, then nothing): the app's stream
+// must be cancelled, not left open for good.
+try {
+  const ac = new AbortController();
+  const res = await fetch("/hang", { cache: "no-store", signal: ac.signal });
+  const reader = res.body.getReader();
+  await reader.read();
+  ac.abort();
+  out.hang = { status: res.status };
+} catch (e) { out.hang = { error: String(e) }; }
+step("hang");
 // A WebSocket through the relay.
 out.ws = await new Promise((resolve) => {
   const res = { url: info.wsOrigin + "/ws", messages: [] };
@@ -63,6 +81,7 @@ await post("/result", out);
 `;
 
 let pageResult: any = null;
+const hang = { started: false, cancelled: false };
 let pageRequest: Record<string, unknown> | null = null;
 const wsUpgrades: Record<string, unknown>[] = [];
 
@@ -78,6 +97,21 @@ Deno.serve((req, info) => {
         reqUrl: req.url,
         remoteAddr: info.remoteAddr,
       });
+    case "/hang": {
+      const enc = new TextEncoder();
+      hang.started = true;
+      return new Response(
+        new ReadableStream<Uint8Array>({
+          start(c) {
+            c.enqueue(enc.encode(`first ${"x".repeat(8192)}\n`));
+          },
+          cancel() {
+            hang.cancelled = true;
+          },
+        }),
+        { headers: { "cache-control": "no-store" } },
+      );
+    }
     case "/stream": {
       const enc = new TextEncoder();
       return new Response(
@@ -262,6 +296,13 @@ async function afterPage() {
     s,
   );
 
+  // --- a request the page cancels reaches the app ---
+  r.check(
+    "a response the page aborts is cancelled in the app (laufey on_cancel)",
+    hang.started && await waitFor(() => hang.cancelled, 10000),
+    { page: p.hang, hang },
+  );
+
   // --- Origin header on a cross-origin request ---
   r.check(
     "a cross-origin fetch succeeds and carries Origin: <app origin>",
@@ -363,13 +404,20 @@ async function afterPage() {
       ? new Deno.Command("cmd", { args: ["/c", "set"], stdout: "piped" })
       : new Deno.Command("/usr/bin/env", { stdout: "piped" });
     const env = new TextDecoder().decode((await cmd.output()).stdout);
-    const line = env.split(/\r?\n/).find((l) =>
-      l.toUpperCase().startsWith("DENO_SERVE_ADDRESS=")
-    );
+    const lines = env.split(/\r?\n/);
+    const line = (name: string) =>
+      lines.find((l) => l.toUpperCase().startsWith(`${name}=`));
     r.check(
-      "a child process inherits DENO_SERVE_ADDRESS (the env overlay)",
-      line === `DENO_SERVE_ADDRESS=${serveAddressEnv}`,
-      line ?? "(absent)",
+      "a child process inherits DENO_DESKTOP_APP_ORIGIN (the env overlay)",
+      line("DENO_DESKTOP_APP_ORIGIN") === `DENO_DESKTOP_APP_ORIGIN=${ORIGIN}`,
+      line("DENO_DESKTOP_APP_ORIGIN") ?? "(absent)",
+    );
+    // The memory serve address names a listener in this process: a child
+    // Deno that inherited it would serve on a channel nobody can reach.
+    r.check(
+      "a child process does not inherit DENO_SERVE_ADDRESS=memory:",
+      line("DENO_SERVE_ADDRESS") === undefined,
+      line("DENO_SERVE_ADDRESS") ?? "(absent)",
     );
   } catch (e) {
     r.fail("child process env", describeError(e));

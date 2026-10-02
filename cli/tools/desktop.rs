@@ -2054,6 +2054,9 @@ impl LaufeyBackendResolver {
     backend: &str,
     target: &str,
   ) -> Result<PathBuf, AnyError> {
+    if RELEASED_LAUFEY_INCOMPATIBLE {
+      return Err(released_laufey_refusal(backend, target));
+    }
     let dir = self.backend_cache_dir(backend, target);
     let marker = dir.join(".downloaded");
     if marker.exists() {
@@ -2280,6 +2283,26 @@ impl LaufeyBackendResolver {
     })?;
     Ok(parent.to_path_buf())
   }
+}
+
+/// This build's desktop runtime is the Brainwires fork's: it speaks a newer
+/// laufey C ABI than the laufey `v{LAUFEY_VERSION}` release hosts, and
+/// laufey's `init_api` refuses any version mismatch, so an app packaged with
+/// the downloaded hosts only failed at launch. The fork's hosts ship in its
+/// runtime archives (the `laufey/` directory), which `LAUFEY_DEV_DIR` points
+/// at; without it the CLI refuses up front instead of downloading.
+const RELEASED_LAUFEY_INCOMPATIBLE: bool = true;
+
+fn released_laufey_refusal(backend: &str, target: &str) -> AnyError {
+  deno_core::anyhow::anyhow!(
+    "this Deno build's desktop runtime needs the laufey hosts built with it, \
+     not the laufey v{LAUFEY_VERSION} release (its C ABI is older, and the \
+     app would fail at launch). Set {LAUFEY_DEV_DIR_ENV} to the `laufey` \
+     directory of the matching denext desktop runtime archive \
+     (https://github.com/Brainwires/deno/releases) or of a Brainwires/laufey \
+     `denext/integration` build to package the '{backend}' backend for \
+     '{target}'"
+  )
 }
 
 fn laufey_archive_name(backend: &str, target: &str) -> String {
@@ -6802,6 +6825,17 @@ mod tests {
       laufey_archive_name("raw", "x86_64-unknown-linux-gnu"),
       "laufey-winit-x86_64-unknown-linux-gnu.tar.gz"
     );
+  }
+
+  #[test]
+  fn released_laufey_hosts_are_refused_with_the_way_out() {
+    // The fork's runtime can't run on the laufey release hosts: the refusal
+    // names the way out.
+    let msg =
+      released_laufey_refusal("cef", "x86_64-pc-windows-msvc").to_string();
+    assert!(msg.contains(LAUFEY_DEV_DIR_ENV), "{msg}");
+    assert!(msg.contains("Brainwires/deno/releases"), "{msg}");
+    assert!(msg.contains("'cef'") && msg.contains("x86_64-pc-windows-msvc"));
   }
 
   #[test]

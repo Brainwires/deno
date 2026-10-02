@@ -225,7 +225,11 @@
         transferred = call(op_desktop_app_update_write, value);
         emitProgress(transferred, begin.size, options.onProgress);
       }
-      call(op_desktop_app_update_finish);
+      try {
+        await op_desktop_app_update_finish();
+      } catch (e) {
+        rethrow(e);
+      }
       return { version: begin.version, size: begin.size };
     } catch (e) {
       try {

@@ -4034,6 +4034,75 @@ mod tests {
   }
 
   #[test]
+  fn the_config_schema_describes_every_desktop_key() {
+    // Every key `desktop` accepts, in one config. The schema's desktop
+    // object is `additionalProperties: false`, so a key it leaves out is
+    // flagged by every editor that validates deno.json (initialWindow,
+    // errorReporting and macos were).
+    const FULL: &str = r#"{
+      "desktop": {
+        "app": {
+          "name": "Acme",
+          "identifier": "com.acme.app",
+          "icons": {
+            "macos": "icon.icns",
+            "windows": [{ "path": "16.png", "size": 16 }],
+            "linux": "icon.png"
+          },
+          "deepLinks": ["acme"],
+          "origin": "acme://app",
+          "singleInstance": true
+        },
+        "backend": "webview",
+        "output": { "macos": "Acme.app", "windows": "Acme.msi", "linux": "Acme.AppImage" },
+        "release": { "baseUrl": "https://example.com/releases" },
+        "update": { "publicKey": "key" },
+        "errorReporting": { "url": "https://example.com/errors" },
+        "macos": { "codesignIdentity": "-" },
+        "initialWindow": {
+          "width": 320,
+          "height": 220,
+          "frameless": true,
+          "noActivate": true,
+          "transparentTitlebar": true,
+          "transparent": true,
+          "showOnFirstLoad": false
+        }
+      }
+    }"#;
+    let config =
+      ConfigFile::new(FULL, root_url().join("deno.json").unwrap()).unwrap();
+    config.to_desktop_config().unwrap();
+
+    let schema: serde_json::Value = serde_json::from_str(include_str!(
+      "../../../cli/schemas/config-file.v1.json"
+    ))
+    .unwrap();
+    fn check(value: &serde_json::Value, schema: &serde_json::Value, at: &str) {
+      let Some(object) = value.as_object() else {
+        return;
+      };
+      let properties = schema["properties"]
+        .as_object()
+        .unwrap_or_else(|| panic!("{at}: no properties in the schema"));
+      for (key, value) in object {
+        let sub = properties
+          .get(key)
+          .unwrap_or_else(|| panic!("{at}.{key} is missing from the schema"));
+        if sub.get("properties").is_some() {
+          check(value, sub, &format!("{at}.{key}"));
+        }
+      }
+    }
+    let full: serde_json::Value = serde_json::from_str(FULL).unwrap();
+    check(
+      &full["desktop"],
+      &schema["properties"]["desktop"],
+      "desktop",
+    );
+  }
+
+  #[test]
   fn desktop_initial_window_rejects_zero_dimensions() {
     let config = ConfigFile::new(
       r#"{ "desktop": { "initialWindow": { "width": 0 } } }"#,

@@ -739,7 +739,24 @@ declare namespace Deno {
      * with {@linkcode BrowserWindow.close}, which closes it without another
      * `close` event. Answer synchronously: if the runtime does not get an
      * answer within 5 seconds (its event loop is blocked or gone), the window
-     * closes anyway. Not fired by {@linkcode BrowserWindow.close}. */
+     * closes anyway. Time spent in a synchronous `confirm()` / `alert()` /
+     * `prompt()` does not count, so the usual pattern works however long the
+     * user takes:
+     *
+     * ```ts
+     * win.addEventListener("close", (e) => {
+     *   if (unsaved && !confirm("Discard your changes?")) e.preventDefault();
+     * });
+     * ```
+     *
+     * To ask asynchronously (a dialog of your own), `preventDefault()` first
+     * and call {@linkcode BrowserWindow.close} once the answer is yes.
+     *
+     * A window with a WebGPU surface ({@linkcode BrowserWindow.getNativeWindow})
+     * is hidden instead of destroyed, however it is closed: the surface holds
+     * its native handles. It counts as closed (and the app quits when it was
+     * the last window and {@linkcode Deno.desktop.quitOnLastWindowClosed} is
+     * on). Not fired by {@linkcode BrowserWindow.close}. */
     close: Event;
     /** The window was maximized (zoomed on macOS). */
     maximize: Event;
@@ -784,6 +801,18 @@ declare namespace Deno {
   export class BrowserWindow<
     T extends ValidBindings<T> = WindowBindings,
   > extends EventTarget {
+    /** The first `new BrowserWindow()` takes over the window the app started
+     * with (the one `desktop.initialWindow` configures and the runtime loads
+     * the app into) when the creation-time options it asks for
+     * (`frameless`, `noActivate`, `transparent`, `transparentTitlebar`)
+     * agree with that window's; options left unset keep the
+     * `initialWindow` values, and only the `width` / `height` given resize
+     * it. Any other window, a tray panel created first included, is a new
+     * window with the option defaults (800x600, framed). Only in the main
+     * scope of a desktop app: a worker has no `BrowserWindow` (constructing
+     * one throws `NotSupported`). Strings passed to a window (title, URL,
+     * script, binding names, menus) must not contain a NUL character
+     * (`TypeError`). */
     constructor(options?: BrowserWindowOptions);
 
     readonly windowId: number;
@@ -1326,6 +1355,39 @@ declare namespace Deno {
    * @category Desktop
    */
   export namespace desktop {
+    /** The `remoteAddr` of a request that reached the app's server through
+     * the desktop runtime: the page's requests (bridged from the app origin's
+     * custom scheme) and the page's WebSockets (through the relay at
+     * `DENO_DESKTOP_WS_ORIGIN`). There is no peer address, only the in-process
+     * listener's name. `Deno.serve` reports it as `info.remoteAddr`; a
+     * `node:http` server sees `req.socket.remoteAddress === "memory:<name>"`.
+     * Gate desktop-only endpoints on the transport:
+     *
+     * ```ts
+     * Deno.serve((req, info) => {
+     *   const addr = info.remoteAddr as Deno.Addr | Deno.desktop.MemoryAddr;
+     *   if (addr.transport !== "memory") return new Response(null, { status: 403 });
+     *   // ...
+     * });
+     * ```
+     *
+     * Such a request's `request.url` is `http+memory://<origin host>/...`.
+     * A `Location`, `Content-Location` or `Refresh` response header with an
+     * absolute `http+memory://` URL (a redirect built from `request.url`) is
+     * rewritten onto the app origin (`DENO_DESKTOP_APP_ORIGIN`) before the
+     * page sees it; other headers and bodies are not, so build URLs for the
+     * page from `DENO_DESKTOP_APP_ORIGIN`. The serve address
+     * (`DENO_SERVE_ADDRESS=memory:<name>`) is not inherited by child
+     * processes.
+     *
+     * @category Desktop
+     */
+    export interface MemoryAddr {
+      transport: "memory";
+      /** The in-process listener the request arrived on. */
+      name: string;
+    }
+
     /** Detail of an `"openurl"` event. */
     export interface OpenUrlDetail {
       /** The URL as the OS delivered it (not validated). */
@@ -2242,6 +2304,18 @@ declare namespace Deno {
       | "busy"
       | "io";
 
+    /** What every {@linkcode Deno.desktop.updater} step throws (or rejects
+     * with) when it refuses: `code` says why. The constructor is
+     * `Deno.desktop.updater.AppUpdateError`, for `instanceof` checks.
+     *
+     * @category Desktop
+     * @experimental
+     */
+    export interface AppUpdateError extends Error {
+      readonly name: "AppUpdateError";
+      readonly code: AppUpdateErrorCode;
+    }
+
     /** Options for fetching the manifest or the archive. */
     export interface AppUpdateFetchOptions {
       /** Extra trusted CA certificates (PEM), e.g. a test server's. */
@@ -2322,7 +2396,40 @@ declare namespace Deno {
      *
      * An update not confirmed by its next launch is rolled back, and that
      * version is not offered again. Fires `"progress"` events (`detail:
-     * { transferred, total }`) while downloading.
+     * { transferred, total }`) while downloading. A `check()` while a
+     * download runs does not change what that download (and its `stage()`)
+     * installs.
+     *
+     * **The manifest** the update host serves is a JSON envelope
+     * `{ "signed": "<payload as a JSON string>", "signature": "<base64>" }`:
+     * an ECDSA P-256 / SHA-256 signature (IEEE P1363 `r || s`, what WebCrypto
+     * `sign` returns) over the bytes `"denext-app-update-v1\n" + signed`. The
+     * payload: `{ "schema": 1, "app": "<desktop.app.identifier>", "version",
+     * "minVersion"?, "platforms": { "<target>-<backend>": { "url", "sha256",
+     * "size", "kind": "bundle" } }, "releaseNotes"?, "publishedAt" }`
+     * (unknown keys are refused). The platform key is
+     * {@linkcode AppUpdateStatus.platform}, e.g.
+     * `"aarch64-apple-darwin-webview"`.
+     *
+     * **The archive** is a `.tar.gz` holding exactly one top-level entry,
+     * shaped like the install: the `<App>.app/` bundle on macOS, the app
+     * directory on Windows and Linux, or the single `.AppImage` file.
+     * Executables keep their mode bits (an executable packed without its
+     * execute bit is refused as `bundle_mismatch`); hard links, devices,
+     * absolute or `..` paths and symlinks leaving the archive are refused,
+     * and symlinks are refused on Windows.
+     *
+     * **Signing.** On macOS a running app signed with a Developer ID only
+     * takes a staged bundle with the same Team ID and signing identifier
+     * that passes `codesign --verify --deep --strict` and Gatekeeper
+     * (`spctl --assess`): sign it with the same identity and notarize
+     * (and staple) it before publishing. On Windows a running executable
+     * with a trusted Authenticode signature only takes a staged executable
+     * and runtime DLL signed by a certificate with the same subject. Linux
+     * has no OS signature: the manifest signature and the SHA-256 are the
+     * check. An unsigned or ad-hoc running app refuses every update unless
+     * `stage({ allowUnsignedDev: true })` (dev only; it never weakens a
+     * signed app).
      *
      * @category Desktop
      * @experimental
@@ -2353,9 +2460,14 @@ declare namespace Deno {
        * `force: true` exits anyway. */
       applyAndRelaunch(options?: { force?: boolean }): { quitting: boolean };
       /** Confirm the running version after an update (deletes the previous
-       * app). `false` when nothing was pending. */
+       * app, in the background). `false` when nothing was pending. */
       confirm(): boolean;
       status(): AppUpdateStatus;
+      /** The class of the errors the steps throw. */
+      readonly AppUpdateError: {
+        new (code: AppUpdateErrorCode, message: string): AppUpdateError;
+        readonly prototype: AppUpdateError;
+      };
     };
 
     /** The connected displays, primary first. */

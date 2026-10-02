@@ -167,10 +167,19 @@ static PROCESS_ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(Mutex::default);
 
 /// Environment variables an embedder provides to the runtime without
 /// writing them into the process environment. See [`set_env_overlay_var`].
-static ENV_OVERLAY: LazyLock<Mutex<Vec<(OsString, OsString)>>> =
+static ENV_OVERLAY: LazyLock<Mutex<Vec<OverlayVar>>> =
   LazyLock::new(Mutex::default);
 
-fn env_overlay() -> MutexGuard<'static, Vec<(OsString, OsString)>> {
+#[derive(Clone)]
+struct OverlayVar {
+  key: OsString,
+  value: OsString,
+  /// Whether child processes inherit it (see
+  /// [`set_env_overlay_var_not_inherited`]).
+  inherited: bool,
+}
+
+fn env_overlay() -> MutexGuard<'static, Vec<OverlayVar>> {
   ENV_OVERLAY
     .lock()
     .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -192,12 +201,22 @@ fn env_key_eq(a: &std::ffi::OsStr, b: &std::ffi::OsStr) -> bool {
 fn env_overlay_get(key: &std::ffi::OsStr) -> Option<OsString> {
   env_overlay()
     .iter()
-    .find(|(k, _)| env_key_eq(k, key))
-    .map(|(_, v)| v.clone())
+    .find(|v| env_key_eq(&v.key, key))
+    .map(|v| v.value.clone())
 }
 
 fn env_overlay_remove(key: &std::ffi::OsStr) {
-  env_overlay().retain(|(k, _)| !env_key_eq(k, key));
+  env_overlay().retain(|v| !env_key_eq(&v.key, key));
+}
+
+fn env_overlay_insert(key: OsString, value: OsString, inherited: bool) {
+  let mut overlay = env_overlay();
+  overlay.retain(|v| !env_key_eq(&v.key, &key));
+  overlay.push(OverlayVar {
+    key,
+    value,
+    inherited,
+  });
 }
 
 /// Provide `key=value` to the runtime's view of the environment without
@@ -218,22 +237,48 @@ pub fn set_env_overlay_var(
   key: impl Into<OsString>,
   value: impl Into<OsString>,
 ) {
-  let key = key.into();
-  let value = value.into();
-  let mut overlay = env_overlay();
-  overlay.retain(|(k, _)| !env_key_eq(k, &key));
-  overlay.push((key, value));
+  env_overlay_insert(key.into(), value.into(), true);
+}
+
+/// Like [`set_env_overlay_var`], but child processes do not inherit the
+/// variable (nor a process-environment variable of the same name it hides).
+/// For values that only mean something inside this process: the desktop
+/// runtime's `DENO_SERVE_ADDRESS=memory:<name>` names an in-process listener,
+/// and a child Deno that inherited it served its own `Deno.serve` on a memory
+/// channel in its own process, which nothing can connect to. A child the app
+/// spawns with the variable in its explicit `env` still gets it.
+pub fn set_env_overlay_var_not_inherited(
+  key: impl Into<OsString>,
+  value: impl Into<OsString>,
+) {
+  env_overlay_insert(key.into(), value.into(), false);
 }
 
 /// The process environment with the overlay applied (see
-/// [`set_env_overlay_var`]): what a child process that inherits the
-/// environment should receive.
+/// [`set_env_overlay_var`]): the runtime's own view of the environment
+/// (`Deno.env.toObject()`).
 pub fn env_vars_os_with_overlay() -> Vec<(OsString, OsString)> {
+  overlaid_env_vars(false)
+}
+
+/// What a child process that inherits the environment receives: the process
+/// environment with the overlay applied, minus the overlay variables set with
+/// [`set_env_overlay_var_not_inherited`].
+pub fn env_vars_os_for_child_process() -> Vec<(OsString, OsString)> {
+  overlaid_env_vars(true)
+}
+
+fn overlaid_env_vars(for_child: bool) -> Vec<(OsString, OsString)> {
   let overlay = env_overlay().clone();
   let mut vars: Vec<(OsString, OsString)> = env::vars_os()
-    .filter(|(k, _)| !overlay.iter().any(|(ok, _)| env_key_eq(ok, k)))
+    .filter(|(k, _)| !overlay.iter().any(|v| env_key_eq(&v.key, k)))
     .collect();
-  vars.extend(overlay);
+  vars.extend(
+    overlay
+      .into_iter()
+      .filter(|v| !for_child || v.inherited)
+      .map(|v| (v.key, v.value)),
+  );
   vars
 }
 
@@ -596,6 +641,37 @@ mod tests {
     env.remove_var(key);
     assert!(env.var_os(key).is_none());
     assert!(std::env::var_os(key).is_none());
+  }
+
+  #[test]
+  fn env_overlay_var_not_inherited_stays_in_the_process() {
+    let key = "DENO_OS_TEST_ENV_OVERLAY_LOCAL_KEY";
+    super::set_env_overlay_var_not_inherited(key, "memory:x");
+    let env = ProcessEnvGuard::lock();
+    // The runtime sees it...
+    assert_eq!(env.var(key).unwrap(), "memory:x");
+    assert!(
+      env
+        .vars_os()
+        .iter()
+        .any(|(k, v)| k == key && v == "memory:x")
+    );
+    // ...a child process does not.
+    assert!(
+      !super::env_vars_os_for_child_process()
+        .iter()
+        .any(|(k, _)| k == key)
+    );
+    // An inherited overlay variable does reach the child.
+    let inherited = "DENO_OS_TEST_ENV_OVERLAY_INHERITED_KEY";
+    super::set_env_overlay_var(inherited, "y");
+    assert!(
+      super::env_vars_os_for_child_process()
+        .iter()
+        .any(|(k, v)| k == inherited && v == "y")
+    );
+    env.remove_var(key);
+    env.remove_var(inherited);
   }
 
   #[test]

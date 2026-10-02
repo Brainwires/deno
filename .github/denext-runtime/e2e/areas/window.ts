@@ -18,6 +18,7 @@ export async function run(env: Env, rep: AreaReport) {
     name: "E2EWindow",
     identifier: `dev.denext.e2e${env.nonce}.window`,
     appJson: { initialWindow },
+    include: ["worker.ts"],
   });
   await clearResults("window");
   await writeParams("window", { initialWindow });

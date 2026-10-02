@@ -45,7 +45,7 @@ denort = { path = "../rt", default-features = false }
 # / deep-link switch filter / pinned launch keys), pinned to
 # a commit of the Brainwires/laufey fork. The host built from the same commit
 # must be used with it (the API version check is exact).
-laufey = { git = "https://github.com/Brainwires/laufey", rev = "1634d1fa4af35ec51a842c6a229d43920fed1332" }
+laufey = { git = "https://github.com/Brainwires/laufey", rev = "b99306854af148d37e1d784f24564ac99a870840" }
 libsui.workspace = true
 
 bytes.workspace = true

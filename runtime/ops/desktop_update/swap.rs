@@ -102,8 +102,15 @@ pub enum Phase {
 }
 
 /// The state file.
+///
+/// Read by more than one version of the app: the version that staged an
+/// update, the new version on trial and, after a rollback, the old one
+/// again. A field one of them doesn't know is ignored and one it lacks takes
+/// its default, so a version that added a field never makes the state
+/// unreadable to another (which lost the rollback's `rejected` version and
+/// re-offered the update that had just failed).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase", default)]
 pub struct UpdateState {
   pub schema: u32,
   pub phase: Phase,
@@ -123,6 +130,10 @@ pub struct UpdateState {
   /// The trial launch's process: while it runs, another launch (a second
   /// instance) is not a sign that the trial failed.
   pub trial_pid: Option<u32>,
+  /// When that process started (an OS-specific token, see
+  /// [`process_start_token`]), so a later process that reuses the trial's
+  /// PID is not taken for the trial still running.
+  pub trial_started: Option<u64>,
   /// Recovery helpers the watchdog started for the current phase.
   pub helper_attempts: u32,
   /// The last version rolled back after failing to start.
@@ -423,6 +434,82 @@ pub fn remove_path(path: &Path) -> bool {
   false
 }
 
+static TRASH_SEQ: std::sync::atomic::AtomicU32 =
+  std::sync::atomic::AtomicU32::new(0);
+
+/// The prefix of the names [`discard_path`] gives what it is deleting.
+fn trash_prefix(layout: &InstallLayout) -> String {
+  format!(".{}.denext-trash-", layout.name)
+}
+
+/// Remove `path` (staging, the previous app) without making the caller wait
+/// for a large tree: it is renamed out of the way at once, so its name is
+/// free for the next step right away, and deleted on a background thread.
+/// These used to be deleted on the JavaScript thread, freezing the app for
+/// as long as deleting a whole previous app takes. Falls back to deleting in
+/// place when it cannot be renamed. What a process that exited mid-delete
+/// leaves behind is removed by [`sweep_trash`].
+pub fn discard_path(layout: &InstallLayout, path: &Path) -> bool {
+  if !exists(path) {
+    return true;
+  }
+  move_to_trash(layout, path) || remove_path(path)
+}
+
+/// [`remove_install_copy`] without the wait of [`discard_path`]: a provable
+/// copy of this app's install (the previous app, a failed install) is renamed
+/// away whole, so it stays provably ours, and deleted in the background.
+/// Anything else at that name is left in place (`false`), as
+/// [`remove_install_copy`] does; when the rename fails it removes in place,
+/// marker last.
+pub fn discard_install_copy(layout: &InstallLayout, path: &Path) -> bool {
+  if !exists(path) || !is_install_copy(layout.kind, path) {
+    // Nothing there, or not this app's: remove_install_copy answers (and
+    // logs what it leaves in place).
+    return remove_install_copy(layout, path);
+  }
+  move_to_trash(layout, path) || remove_install_copy(layout, path)
+}
+
+/// Rename `path` to a fresh trash name next to the install and delete it on
+/// a background thread; `false` when it can't be renamed.
+fn move_to_trash(layout: &InstallLayout, path: &Path) -> bool {
+  let trash = layout.parent.join(format!(
+    "{}{}-{}",
+    trash_prefix(layout),
+    std::process::id(),
+    TRASH_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+  ));
+  if std::fs::rename(path, &trash).is_err() {
+    return false;
+  }
+  std::thread::spawn(move || {
+    remove_path(&trash);
+  });
+  true
+}
+
+/// Delete (in the background) whatever an earlier [`discard_path`] did not
+/// get to.
+pub fn sweep_trash(layout: &InstallLayout) {
+  let prefix = trash_prefix(layout);
+  let Ok(entries) = std::fs::read_dir(&layout.parent) else {
+    return;
+  };
+  let found: Vec<PathBuf> = entries
+    .filter_map(|e| e.ok())
+    .filter(|e| e.file_name().to_string_lossy().starts_with(&prefix))
+    .map(|e| e.path())
+    .collect();
+  if !found.is_empty() {
+    std::thread::spawn(move || {
+      for p in found {
+        remove_path(&p);
+      }
+    });
+  }
+}
+
 /// A seam for fault injection in tests: called before each rename step with
 /// its name; an `Err` aborts the step as if the rename had failed.
 pub type FaultHook<'a> = &'a dyn Fn(&str) -> std::io::Result<()>;
@@ -685,9 +772,9 @@ pub fn confirm(layout: &InstallLayout) -> Result<bool, UpdateError> {
 
 /// Delete `.old`, a failed install and staging; clear `cleanup` when done.
 pub fn cleanup(layout: &InstallLayout, state: &mut UpdateState) {
-  let done = remove_install_copy(layout, &layout.old_path())
-    & remove_install_copy(layout, &layout.failed_path())
-    & remove_path(&layout.staging_dir());
+  let done = discard_install_copy(layout, &layout.old_path())
+    & discard_install_copy(layout, &layout.failed_path())
+    & discard_path(layout, &layout.staging_dir());
   if done && state.cleanup {
     state.cleanup = false;
     let _ = write_state(layout, state);
@@ -714,12 +801,14 @@ pub fn startup_action(layout: &InstallLayout) -> StartupAction {
       if state.cleanup {
         cleanup(layout, &mut state);
       }
+      sweep_trash(layout);
       StartupAction::Continue { trial: false }
     }
     Phase::Staged => StartupAction::Continue { trial: false },
     Phase::Swapped if state.launches == 0 => {
       state.launches = 1;
       state.trial_pid = Some(std::process::id());
+      state.trial_started = process_start_token(std::process::id());
       // If this cannot be recorded a crash goes undetected, but the launch
       // still starts (the update stays unconfirmed until confirm()).
       let _ = write_state(layout, &state);
@@ -728,7 +817,7 @@ pub fn startup_action(layout: &InstallLayout) -> StartupAction {
     Phase::Swapped
       if state
         .trial_pid
-        .is_some_and(|pid| !wait_for_exit(pid, Duration::ZERO)) =>
+        .is_some_and(|pid| trial_running(pid, state.trial_started)) =>
     {
       // The trial launch is still running: this is a second instance.
       StartupAction::Continue { trial: false }
@@ -944,6 +1033,88 @@ pub fn run_helper(layout: &InstallLayout, mode: HelperMode, pid: u32) -> i32 {
         1
       }
     },
+  }
+}
+
+/// Whether the trial launch (process `pid`, started at `started`) is still
+/// running. A bare PID check took any later process that reused the PID for
+/// the trial, so a crashed trial was never rolled back while that process
+/// lived.
+fn trial_running(pid: u32, started: Option<u64>) -> bool {
+  if wait_for_exit(pid, Duration::ZERO) {
+    return false;
+  }
+  match (started, process_start_token(pid)) {
+    (Some(recorded), Some(now)) => recorded == now,
+    // The start time is unknown (an older state file, or the OS wouldn't
+    // say): the PID alone decides, as before.
+    _ => true,
+  }
+}
+
+/// When process `pid` started, as an opaque token that differs between two
+/// processes that held the same PID (`None`: unknown).
+pub fn process_start_token(pid: u32) -> Option<u64> {
+  #[cfg(target_os = "linux")]
+  {
+    // Field 22 of /proc/<pid>/stat: start time in clock ticks since boot.
+    // The command name (field 2) may hold spaces and parentheses, so count
+    // from the last ')'.
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let rest = &stat[stat.rfind(')')? + 1..];
+    rest.split_whitespace().nth(19)?.parse().ok()
+  }
+  #[cfg(target_os = "macos")]
+  {
+    // SAFETY: proc_bsdinfo is plain old data; all-zero is a valid value.
+    let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+    let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+    // SAFETY: `info` is a properly sized, writable proc_bsdinfo.
+    let n = unsafe {
+      libc::proc_pidinfo(
+        pid as libc::c_int,
+        libc::PROC_PIDTBSDINFO,
+        0,
+        &mut info as *mut _ as *mut libc::c_void,
+        size,
+      )
+    };
+    (n == size)
+      .then(|| info.pbi_start_tvsec * 1_000_000 + info.pbi_start_tvusec)
+  }
+  #[cfg(windows)]
+  {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::Foundation::FILETIME;
+    use windows_sys::Win32::System::Threading::GetProcessTimes;
+    use windows_sys::Win32::System::Threading::OpenProcess;
+    use windows_sys::Win32::System::Threading::PROCESS_QUERY_LIMITED_INFORMATION;
+    // SAFETY: plain Win32 calls on out-parameters we own; the handle is
+    // closed.
+    unsafe {
+      let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+      if h.is_null() {
+        return None;
+      }
+      let zero = FILETIME {
+        dwLowDateTime: 0,
+        dwHighDateTime: 0,
+      };
+      let (mut created, mut exited, mut kernel, mut user) =
+        (zero, zero, zero, zero);
+      let ok =
+        GetProcessTimes(h, &mut created, &mut exited, &mut kernel, &mut user);
+      CloseHandle(h);
+      (ok != 0).then(|| {
+        (u64::from(created.dwHighDateTime) << 32)
+          | u64::from(created.dwLowDateTime)
+      })
+    }
+  }
+  #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+  {
+    let _ = pid;
+    None
   }
 }
 
@@ -1379,6 +1550,55 @@ mod tests {
 
   fn installed(l: &InstallLayout) -> String {
     std::fs::read_to_string(l.install.join("version")).unwrap()
+  }
+
+  #[test]
+  fn the_state_file_reads_across_versions() {
+    let f = fixture(Some("2.0.0"));
+    let l = &f.layout;
+    let path = l.state_path();
+    let mut json: serde_json::Value =
+      serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    // A field a newer version added, and one an older version didn't write:
+    // the state still reads (it used to be dropped as unreadable).
+    json["someFutureField"] = serde_json::json!({ "x": 1 });
+    json.as_object_mut().unwrap().remove("trialStarted");
+    json.as_object_mut().unwrap().remove("lastError");
+    json["rejected"] = serde_json::json!("3.0.0");
+    std::fs::write(&path, serde_json::to_vec(&json).unwrap()).unwrap();
+    let s = read_state(l).expect("readable");
+    assert_eq!(s.rejected.as_deref(), Some("3.0.0"));
+    assert_eq!(s.trial_started, None);
+  }
+
+  #[test]
+  fn a_reused_trial_pid_is_not_the_trial() {
+    let me = std::process::id();
+    let token = process_start_token(me);
+    if cfg!(any(target_os = "linux", target_os = "macos", windows)) {
+      assert!(token.is_some(), "this OS reports process start times");
+    }
+    // This very process, recorded with its own start time: running.
+    assert!(trial_running(me, token));
+    // An older state file without a start time: the PID decides.
+    assert!(trial_running(me, None));
+    if let Some(t) = token {
+      // The same PID with another start time is another process: the
+      // trial is gone (it used to count as still running).
+      assert!(!trial_running(me, Some(t.wrapping_add(1))));
+    }
+    // An exited process is not running.
+    let mut child = if cfg!(windows) {
+      std::process::Command::new("cmd")
+        .args(["/C", "exit 0"])
+        .spawn()
+    } else {
+      std::process::Command::new("true").spawn()
+    }
+    .unwrap();
+    let pid = child.id();
+    child.wait().unwrap();
+    assert!(!trial_running(pid, None));
   }
 
   #[test]

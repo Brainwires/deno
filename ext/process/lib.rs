@@ -1455,8 +1455,9 @@ fn compute_run_env(
       .collect()
   } else {
     // The inherited environment, including variables the embedder provides
-    // without `setenv` (`deno_os::set_env_overlay_var`).
-    let mut envs = deno_os::env_vars_os_with_overlay()
+    // without `setenv` (`deno_os::set_env_overlay_var`), but not the ones it
+    // keeps to this process (`set_env_overlay_var_not_inherited`).
+    let mut envs = deno_os::env_vars_os_for_child_process()
       .into_iter()
       .map(|(k, v)| (EnvVarKey::new(k), v))
       .collect::<HashMap<_, _>>();

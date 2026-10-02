@@ -31,6 +31,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU32;
 use std::sync::atomic::Ordering;
 
@@ -200,6 +201,10 @@ struct WefDesktopApi {
   /// laufey's (process-wide) global-shortcut handler, installed on the
   /// first registration.
   shortcut_handler: std::sync::Once,
+  /// Windows a WebGPU surface holds (see `CloseBook`).
+  surface_windows: Arc<Mutex<HashSet<u32>>>,
+  /// `Deno.desktop.quitOnLastWindowClosed` (see `CloseBook`).
+  quit_on_last_window_closed: Arc<AtomicBool>,
 }
 
 /// The bootstrap window's reveal state: it is created hidden and shown by the
@@ -249,18 +254,47 @@ impl InitialReveal {
 }
 
 /// Bookkeeping + the native close, shared by every path that really closes
-/// a window (an answered or timed-out close request, `close()`).
+/// a window (an answered or timed-out close request, `close()`, DevTools).
 #[derive(Clone)]
 struct CloseBook {
   closed_windows: Arc<Mutex<HashSet<u32>>>,
   open_windows: Arc<Mutex<HashSet<u32>>>,
+  /// Windows a WebGPU surface holds the native handles of: never destroyed
+  /// (see `deno_runtime::ops::desktop::NativeClose`).
+  surface_windows: Arc<Mutex<HashSet<u32>>>,
+  /// `Deno.desktop.quitOnLastWindowClosed`, mirrored for the windows kept
+  /// hidden instead of destroyed (laufey still counts those as open).
+  quit_on_last_window_closed: Arc<AtomicBool>,
 }
 
 impl CloseBook {
   fn close(&self, window_id: u32) {
+    use deno_runtime::ops::desktop::NativeClose;
     self.closed_windows.lock().unwrap().insert(window_id);
-    self.open_windows.lock().unwrap().remove(&window_id);
-    laufey::Window::from_id(window_id).close();
+    let others_open = {
+      let mut open = self.open_windows.lock().unwrap();
+      open.remove(&window_id);
+      !open.is_empty()
+    };
+    let surface_attached =
+      self.surface_windows.lock().unwrap().contains(&window_id);
+    match deno_runtime::ops::desktop::native_close_action(
+      surface_attached,
+      self.quit_on_last_window_closed.load(Ordering::Acquire),
+      others_open,
+    ) {
+      NativeClose::Destroy => laufey::Window::from_id(window_id).close(),
+      NativeClose::HideAndKeep { quit } => {
+        log::warn!(
+          "[desktop] window {window_id}: a WebGPU surface is attached; \
+           hiding the window instead of destroying it"
+        );
+        laufey::Window::from_id(window_id).hide();
+        if quit {
+          laufey::quit();
+        }
+      }
+    }
   }
 }
 
@@ -280,6 +314,8 @@ impl WefDesktopApi {
     CloseBook {
       closed_windows: self.closed_windows.clone(),
       open_windows: self.open_windows.clone(),
+      surface_windows: self.surface_windows.clone(),
+      quit_on_last_window_closed: self.quit_on_last_window_closed.clone(),
     }
   }
 
@@ -474,17 +510,26 @@ impl WefDesktopApi {
         let pending_closes = pending_closes.clone();
         let close_book = close_book.clone();
         // This runs on the backend UI thread, which has no tokio reactor.
+        // The timer re-arms while the JS thread sits in a synchronous dialog
+        // (a listener's `confirm()`), whose time does not count.
         std::thread::spawn(move || {
-          std::thread::sleep(deno_runtime::ops::desktop::CLOSE_REPLY_TIMEOUT);
-          if pending_closes.expire(window_id, token)
-            == deno_runtime::ops::desktop::CloseDecision::Close
-          {
-            log::warn!(
-              "[desktop] window {window_id}: no answer to the close request \
-               within {:?}; closing it",
-              deno_runtime::ops::desktop::CLOSE_REPLY_TIMEOUT
-            );
-            close_book.close(window_id);
+          use deno_runtime::ops::desktop::CloseTimeout;
+          let mut wait = deno_runtime::ops::desktop::CLOSE_REPLY_TIMEOUT;
+          loop {
+            std::thread::sleep(wait);
+            match pending_closes.check_timeout(window_id, token) {
+              CloseTimeout::Wait(more) => wait = more,
+              CloseTimeout::Ignore => break,
+              CloseTimeout::Close => {
+                log::warn!(
+                  "[desktop] window {window_id}: no answer to the close \
+                   request within {:?}; closing it",
+                  deno_runtime::ops::desktop::CLOSE_REPLY_TIMEOUT
+                );
+                close_book.close(window_id);
+                break;
+              }
+            }
           }
         });
       })
@@ -710,16 +755,25 @@ impl denort::desktop::DesktopApi for WefDesktopApi {
   }
 
   fn bind(&self, window_id: u32, name: &str) {
-    let tx = self.event_tx.clone();
+    // laufey keeps a binding's handler for the window's lifetime (and past
+    // `unbind`), so the handler holds the event queue weakly: it must not
+    // keep the queue (and every event in it) alive once the runtime is gone.
+    let tx = self.event_tx.downgrade();
     let responses = self.pending_responses.clone();
     let name_owned = name.to_string();
     laufey::Window::from_id(window_id).add_binding_async(
       name,
       move |mut js_call| {
-        let tx = tx.clone();
+        let tx = tx.upgrade();
         let responses = responses.clone();
         let name = name_owned.clone();
         async move {
+          let Some(tx) = tx else {
+            js_call.reject(laufey::Value::String(
+              "event channel closed".to_string(),
+            ));
+            return;
+          };
           // `mem::take` rather than `.iter().cloned()`: `js_call.resolve`
           // below consumes `js_call`, so the args can't simply be moved out
           // of the field, and cloning would deep-copy every argument —
@@ -763,6 +817,8 @@ impl denort::desktop::DesktopApi for WefDesktopApi {
                 "event channel closed".to_string()
               }
             };
+            // Nobody will answer this call: don't keep its slot.
+            responses.0.lock().unwrap().remove(&call_id);
             js_call.reject(laufey::Value::String(msg));
             return;
           }
@@ -1008,7 +1064,7 @@ impl denort::desktop::DesktopApi for WefDesktopApi {
       if let Some(id) = id
         && !self.is_closed(id)
       {
-        laufey::Window::from_id(id).close();
+        self.close_book().close(id);
       }
       return;
     }
@@ -1125,7 +1181,14 @@ impl denort::desktop::DesktopApi for WefDesktopApi {
   }
 
   fn set_quit_on_last_window_closed(&self, quit: bool) {
+    self
+      .quit_on_last_window_closed
+      .store(quit, Ordering::Release);
     laufey::set_quit_on_last_window_closed(quit);
+  }
+
+  fn note_surface_attached(&self, window_id: u32) {
+    self.surface_windows.lock().unwrap().insert(window_id);
   }
 
   fn close_reply(&self, window_id: u32, prevented: bool) {
@@ -1257,6 +1320,14 @@ impl denort::desktop::DesktopApi for WefDesktopApi {
         "unknown Laufey window handle type: {other}",
       ))),
     }
+  }
+
+  fn sync_dialog_began(&self) {
+    self.pending_closes.dialog_began();
+  }
+
+  fn sync_dialog_ended(&self) {
+    self.pending_closes.dialog_ended();
   }
 
   fn alert(&self, title: &str, message: &str) {
@@ -2010,8 +2081,9 @@ laufey::main!(|| {
   #[allow(clippy::print_stderr, reason = "runs before logging is initialized")]
   let update_rolled_back = {
     match std::panic::catch_unwind(|| {
+      // (No print of the path here: this runs on every launch, and stderr
+      // is the app's own.)
       if let Some(ref dylib_path) = get_dylib_path() {
-        eprintln!("[desktop] dylib path: {:?}", dylib_path);
         apply_pending_update(dylib_path)
       } else {
         eprintln!("[desktop] could not determine dylib path");
@@ -2328,11 +2400,15 @@ laufey::main!(|| {
       None
     }
   };
-  for (key, value) in desktop_env_overlay(
+  for (key, value, inherited) in desktop_env_overlay(
     &app_origin,
     ws_relay_listener.as_ref().and_then(|l| l.local_addr().ok()),
   ) {
-    deno_runtime::deno_os::set_env_overlay_var(key, value);
+    if inherited {
+      deno_runtime::deno_os::set_env_overlay_var(key, value);
+    } else {
+      deno_runtime::deno_os::set_env_overlay_var_not_inherited(key, value);
+    }
   }
 
   // The runtime itself moves to a dedicated thread with a real stack; the
@@ -2391,22 +2467,32 @@ laufey::main!(|| {
 
 /// The variables the desktop runtime publishes to the app (through the
 /// environment overlay, see `laufey::main!`): the in-process serve address,
-/// the page origin and, when bound, the WebSocket relay's origin.
+/// the page origin and, when bound, the WebSocket relay's origin. The third
+/// field says whether child processes inherit it: the serve address names a
+/// listener in THIS process, so a child (a `deno` the app runs) that inherited
+/// it would serve its own `Deno.serve` / `node:http` on an unreachable memory
+/// channel instead of the address it asked for.
 fn desktop_env_overlay(
   app_origin: &AppOrigin,
   ws_relay_addr: Option<std::net::SocketAddr>,
-) -> Vec<(&'static str, String)> {
+) -> Vec<(&'static str, String, bool)> {
   let mut vars = vec![
     (
       "DENO_SERVE_ADDRESS",
       format!("memory:{}", scheme_bridge::DESKTOP_SERVE_NAME),
+      false,
     ),
-    (scheme_bridge::APP_ORIGIN_ENV, app_origin.as_origin_string()),
+    (
+      scheme_bridge::APP_ORIGIN_ENV,
+      app_origin.as_origin_string(),
+      true,
+    ),
   ];
   if let Some(addr) = ws_relay_addr {
     vars.push((
       scheme_bridge::WS_ORIGIN_ENV,
       scheme_bridge::ws_relay_origin(addr),
+      true,
     ));
   }
   vars
@@ -2993,6 +3079,8 @@ async fn run_desktop(
         ),
         initial_reveal: initial_reveal.clone(),
         shortcut_handler: std::sync::Once::new(),
+        surface_windows: Arc::new(Mutex::new(HashSet::new())),
+        quit_on_last_window_closed: Arc::new(AtomicBool::new(true)),
       };
 
       // `Deno.desktop` "displaychanged".
@@ -3104,9 +3192,15 @@ async fn run_desktop(
       state.put(event_rx);
       state.put(event_tx);
       state.put(pending_responses);
-      state.put(denort::desktop::InitialWindowId(std::sync::Mutex::new(
-        Some(window_id),
-      )));
+      state.put(denort::desktop::InitialWindowId(
+        std::sync::Mutex::new(Some(window_id)),
+        deno_runtime::ops::desktop::InitialWindowAttributes {
+          frameless: initial_window.frameless,
+          no_activate: initial_window.no_activate,
+          transparent_titlebar: initial_window.transparent_titlebar,
+          transparent: initial_window.transparent,
+        },
+      ));
       if let Some(name) = app_name.filter(|n| !n.is_empty()) {
         state.put(deno_runtime::ops::desktop::DesktopAppName(name));
       }
@@ -3280,10 +3374,16 @@ mod tests {
       vec![
         (
           "DENO_SERVE_ADDRESS",
-          format!("memory:{}", super::scheme_bridge::DESKTOP_SERVE_NAME)
+          format!("memory:{}", super::scheme_bridge::DESKTOP_SERVE_NAME),
+          // In-process only: a child process must not inherit it.
+          false,
         ),
-        ("DENO_DESKTOP_APP_ORIGIN", "t3code://app".to_string()),
-        ("DENO_DESKTOP_WS_ORIGIN", "ws://127.0.0.1:4321".to_string()),
+        ("DENO_DESKTOP_APP_ORIGIN", "t3code://app".to_string(), true),
+        (
+          "DENO_DESKTOP_WS_ORIGIN",
+          "ws://127.0.0.1:4321".to_string(),
+          true
+        ),
       ]
     );
     // No relay bound: no relay origin.
