@@ -162,6 +162,9 @@ await r.step("window API", async () => {
     if (caps.stateEvents) {
       r.check("an unmaximize event fires", unmaxEv !== null);
     }
+    // Let unmaximize's animation finish: AppKit drops a miniaturize asked
+    // for during a zoom animation (as it does a fullscreen toggle).
+    await sleep(1000);
     win.minimize();
     const minEv = await once(win, "minimize", 8000);
     const minimized = await waitFor(() => win.isMinimized(), 5000);

@@ -627,6 +627,14 @@ export async function run(env: Env, rep: AreaReport) {
     );
   } finally {
     await server.shutdown();
+    // The helper's log and the update state, for the uploaded results.
+    for (
+      const f of [`.${top}.denext-update.log`, `.${top}.denext-update.json`]
+    ) {
+      await Deno.copyFile(path(installParent, f), path(RES, f.slice(1))).catch(
+        () => {},
+      );
+    }
     await rm(work);
   }
 }
