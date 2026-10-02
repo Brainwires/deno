@@ -87,7 +87,13 @@ pub struct AppUpdateConfig {
 /// One update at a time, per process.
 #[derive(Default)]
 struct Session {
+  /// What the last `check()` offered: what the next `download()` fetches.
   verified: Option<VerifiedUpdate>,
+  /// The update `download()` began with, which the download and the stage
+  /// stay bound to. A `check()` while they run (a periodic check, another
+  /// window) replaces `verified`, and used to make the stage label the
+  /// archive downloaded for one version with another version.
+  in_flight: Option<VerifiedUpdate>,
   sink: Option<DownloadSink>,
   archive: Option<PathBuf>,
   staged: Option<String>,
@@ -373,7 +379,7 @@ fn update_begin(state: &mut OpState) -> Result<BeginOut, JsErrorBox> {
     Phase::Idle => {}
   }
   let staging = layout.staging_dir();
-  if !swap::remove_path(&staging) {
+  if !swap::discard_path(layout, &staging) {
     return Err(js(UpdateError::io(staging.display(), "cannot clear")));
   }
   std::fs::create_dir(&staging).map_err(|e| {
@@ -389,6 +395,7 @@ fn update_begin(state: &mut OpState) -> Result<BeginOut, JsErrorBox> {
   )
   .map_err(js)?;
   session.sink = Some(sink);
+  session.in_flight = Some(update.clone());
   session.archive = None;
   session.staged = None;
   Ok(BeginOut {
@@ -402,12 +409,13 @@ fn abort_download(state: &mut OpState) {
   let gated = gate(state);
   let mut session = session(state).0.borrow_mut();
   session.sink = None;
+  session.in_flight = None;
   session.archive = None;
   session.staged = None;
   // Only a configured app has a staging directory of its own: never delete
   // anything next to a plain `deno` executable.
   if let Ok((_, ready)) = gated {
-    swap::remove_path(&ready.layout.staging_dir());
+    swap::discard_path(&ready.layout, &ready.layout.staging_dir());
   }
 }
 
@@ -432,25 +440,31 @@ pub fn op_desktop_app_update_write(
   })
 }
 
-/// Close the download and match size + SHA-256.
-#[op2(fast)]
-pub fn op_desktop_app_update_finish(
-  state: &mut OpState,
+/// Close the download and match size + SHA-256. The file is synced to disk
+/// and hashed on the blocking pool, not the JavaScript thread.
+#[op2]
+pub async fn op_desktop_app_update_finish(
+  state: Rc<RefCell<OpState>>,
 ) -> Result<(), JsErrorBox> {
-  let sink = session(state).0.borrow_mut().sink.take();
+  let sink = session(&mut state.borrow_mut()).0.borrow_mut().sink.take();
   let Some(sink) = sink else {
     return Err(js(UpdateError::new(
       Code::NotStaged,
       "no download in progress",
     )));
   };
-  match sink.finish() {
+  let finished = deno_core::unsync::spawn_blocking(move || sink.finish())
+    .await
+    .map_err(|e| UpdateError::io("finish", e))
+    .and_then(|r| r);
+  let mut s = state.borrow_mut();
+  match finished {
     Ok(path) => {
-      session(state).0.borrow_mut().archive = Some(path);
+      session(&mut s).0.borrow_mut().archive = Some(path);
       Ok(())
     }
     Err(e) => {
-      abort_download(state);
+      abort_download(&mut s);
       Err(js(e))
     }
   }
@@ -486,7 +500,7 @@ pub async fn op_desktop_app_update_stage(
       return Err(js(UpdateError::new(Code::Busy, "already staging")));
     }
     let (Some(update), Some(archive)) =
-      (session.verified.clone(), session.archive.clone())
+      (session.in_flight.clone(), session.archive.clone())
     else {
       return Err(js(UpdateError::new(
         Code::NotStaged,
@@ -522,7 +536,7 @@ pub async fn op_desktop_app_update_stage(
     Err(e) => {
       session.staged = None;
       drop(session);
-      swap::remove_path(&ready.layout.staging_dir());
+      swap::discard_path(&ready.layout, &ready.layout.staging_dir());
       Err(js(e))
     }
   }
@@ -571,6 +585,17 @@ fn stage_blocking(
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o755))
       .map_err(|e| UpdateError::io(staged.display(), e))?;
+  } else if !is_executable(&exe) {
+    // The archive's modes are kept as packed. An executable packed without
+    // its execute bit would be swapped in and then fail to start at all, so
+    // not even the trial's rollback could run: refuse it here.
+    return error::err(
+      Code::BundleMismatch,
+      format!(
+        "{} in the archive is not executable (packed without its mode bits?)",
+        layout.exe_rel.display()
+      ),
+    );
   }
   let signature = verify_os_signature(layout, &staged, allow_unsigned_dev)?;
   let _ = std::fs::remove_file(archive);
@@ -583,6 +608,15 @@ fn stage_blocking(
   st.rejected = previous.and_then(|p| p.rejected);
   swap::write_state(layout, &st)?;
   Ok(signature)
+}
+
+/// Whether the owner may execute `path` (Unix).
+#[cfg(unix)]
+fn is_executable(path: &std::path::Path) -> bool {
+  use std::os::unix::fs::PermissionsExt;
+  std::fs::metadata(path)
+    .map(|m| m.is_file() && m.permissions().mode() & 0o100 != 0)
+    .unwrap_or(false)
 }
 
 fn verify_os_signature(
@@ -823,6 +857,54 @@ mod tests {
     (exe, layout)
   }
 
+  #[cfg(unix)]
+  #[test]
+  fn stage_refuses_an_executable_without_its_mode_bits() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (_exe, layout) = fake_app(&tmp);
+    let top = layout.install.file_name().unwrap().to_owned();
+    let pack = |mode: u32| {
+      let archive = tmp.path().join(format!("app-{mode:o}.tar.gz"));
+      let gz = flate2::write::GzEncoder::new(
+        std::fs::File::create(&archive).unwrap(),
+        flate2::Compression::fast(),
+      );
+      let mut tar = tar::Builder::new(gz);
+      let mut dirs = PathBuf::new();
+      let exe_rel = std::path::Path::new(&top).join(&layout.exe_rel);
+      for c in exe_rel.parent().unwrap().components() {
+        dirs.push(c);
+        let mut h = tar::Header::new_gnu();
+        h.set_entry_type(tar::EntryType::Directory);
+        h.set_mode(0o755);
+        h.set_size(0);
+        h.set_cksum();
+        tar.append_data(&mut h, &dirs, std::io::empty()).unwrap();
+      }
+      let mut h = tar::Header::new_gnu();
+      h.set_mode(mode);
+      h.set_size(4);
+      h.set_cksum();
+      tar.append_data(&mut h, &exe_rel, &b"#!/x"[..]).unwrap();
+      tar.into_inner().unwrap().finish().unwrap();
+      let size = std::fs::metadata(&archive).unwrap().len();
+      (archive, size)
+    };
+    let (archive, size) = pack(0o644);
+    let e = stage_blocking(&layout, &archive, size, "1.0.0", "2.0.0", true)
+      .unwrap_err();
+    assert_eq!(e.code, Code::BundleMismatch, "{}", e.message);
+    assert!(e.message.contains("not executable"), "{}", e.message);
+    // The same app with its execute bit passes that check (whatever the
+    // OS signature check then says about a fake app).
+    let (archive, size) = pack(0o755);
+    if let Err(e) =
+      stage_blocking(&layout, &archive, size, "1.0.0", "2.0.0", true)
+    {
+      assert!(!e.message.contains("not executable"), "{}", e.message);
+    }
+  }
+
   fn host_config(exe: PathBuf, public_key: Option<&str>) -> AppUpdateConfig {
     AppUpdateConfig {
       app_id: Some("com.example.fake".into()),
@@ -923,6 +1005,39 @@ mod tests {
     state.put(host_config(exe, None));
     assert!(update_confirm(&mut state).unwrap());
     assert_eq!(swap::read_state(&layout).unwrap().phase, Phase::Idle);
+  }
+
+  // A check() while a download runs offers another version; the download
+  // (and its stage) stay bound to the version they began with.
+  #[test]
+  fn a_check_during_a_download_does_not_relabel_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (exe, _layout) = fake_app(&tmp);
+    let mut state = OpState::new(None);
+    state.put(host_config(exe, Some("key")));
+    let update = |version: &str| VerifiedUpdate {
+      version: version.into(),
+      min_version: None,
+      required: false,
+      platform: "x".into(),
+      url: format!("https://u.example/{version}.tar.gz"),
+      sha256: "0".repeat(64),
+      size: 10,
+      release_notes: None,
+      published_at: "2026-01-01T00:00:00Z".into(),
+    };
+    session(&mut state).0.borrow_mut().verified = Some(update("2.0.0"));
+    let begun = update_begin(&mut state).unwrap();
+    assert_eq!(begun.version, "2.0.0");
+    // A periodic check() finds 3.0.0 meanwhile.
+    session(&mut state).0.borrow_mut().verified = Some(update("3.0.0"));
+    let cell = session(&mut state);
+    let s = cell.0.borrow();
+    assert_eq!(s.in_flight.as_ref().unwrap().version, "2.0.0");
+    drop(s);
+    // Dropping the download unbinds it.
+    abort_download(&mut state);
+    assert!(session(&mut state).0.borrow().in_flight.is_none());
   }
 
   // A configured app sees its own install and owns its staging directory.
