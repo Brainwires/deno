@@ -27,11 +27,12 @@ archived.
 
 ## Branches and tags
 
-| Ref                                                                                 | What it is                                                                                                                                                               |
-| ----------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `denext/v<deno version>` (e.g. `denext/v2.9.7`)                                     | The branch the runtime is built from: upstream tag `v<deno version>` + the feature commits + this file and the release workflow. The default branch of this fork.        |
-| `feat/desktop-app-origin`, `feat/desktop-app-id`                                    | The feature branches the `denext/*` branch is built from (`feat/desktop-app-id` contains `feat/desktop-app-origin`). Kept for review and for rebasing onto a newer Deno. |
-| `denext-runtime-v<deno version>-denext.<n>` (e.g. `denext-runtime-v2.9.7-denext.1`) | A published runtime. Pushing such a tag on the `denext/*` branch runs the workflow and creates the GitHub Release. `<n>` counts runtime releases on one Deno version.    |
+| Ref                                                                                 | What it is                                                                                                                                                                                               |
+| ----------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `rel/denext<n>` (e.g. `rel/denext7`)                                                | The release line runtime `denext.<n>` is built from: the previous line + the feature and fix branches merged for it (`--no-ff`). Releases since `denext.6` are cut here.                                 |
+| `denext/v<deno version>` (e.g. `denext/v2.9.7`)                                     | The original line: upstream tag `v<deno version>` + the first feature commits + this file and the release workflow. The default branch of this fork.                                                     |
+| `feat/desktop-*`, `fix/*`, `ci/*`, `test/*`                                         | The feature and fix branches the release lines are built from. Kept for review and for rebasing onto a newer Deno.                                                                                       |
+| `denext-runtime-v<deno version>-denext.<n>` (e.g. `denext-runtime-v2.9.7-denext.1`) | A published runtime. PUSHING such a tag runs the workflow and creates the GitHub Release (a manual dispatch on a tag ref builds but never publishes). `<n>` counts runtime releases on one Deno version. |
 
 `main` and the other upstream branches are untouched mirrors from the fork
 point. Nothing here is proposed back from this fork; the upstream PRs below are
@@ -165,8 +166,65 @@ where the changes are discussed.
     Windows** — a CEF subprocess outliving its browser process kept the install
     directory from being renamed, failing the rollback of an unconfirmed trial
     (found by the e2e suite).
+18. **`feat(desktop)`: full-app self-update (`Deno.desktop.updater`)**
+    (`1511cdaa20`) — a signed manifest (ECDSA P-256 over
+    `"denext-app-update-v1\n" + signed`), a size-capped and SHA-256-checked
+    download, a safe extractor, the OS code-signature check against the running
+    app (same Developer ID Team ID + Gatekeeper on macOS, same Authenticode
+    signer on Windows), an atomic swap by a helper process, and a rollback of a
+    version not confirmed by its next launch. With its fixes: a rolled-back
+    install is finished deleting at the next start (`5e009fb794`), the macOS
+    helper finds the bundle's runtime (`3c6217526f`), and the ops act only
+    inside a packaged app (`5132a43948`).
+19. **`fix(desktop)`: the JIT entitlement for webview bundles** (`346cb47225`)
+    and **`Dock.setBadge(null)` clears the badge** (`16f8a904a4`, it showed
+    "null").
+20. **`fix(desktop)`: the 3.1.0 fork-code audit** (`fix/fork-audit`):
+    - `node:http` / `node:https` / `node:http2` serve under the memory transport
+      (they failed with "unknown override kind: 5", so a framework on
+      `node:http` never served); the socket's `remoteAddress` is
+      `memory:<name>`;
+    - a string with an embedded NUL is a `TypeError` at every op that hands it
+      to laufey (the laufey crate panicked, and a panic exits the app);
+    - `op_desktop_alert_async` survives bootstrap, so the uncaught-error dialog
+      shows again;
+    - the close request's 5 s answer timeout does not count time the JavaScript
+      thread spends in a synchronous `alert` / `confirm` / `prompt` (a close
+      listener's `confirm()` no longer closes the window under the user);
+    - a window with a WebGPU surface is hidden, never destroyed, on every close
+      path (the user's, a timed-out request, DevTools), not only `close()`;
+    - the first `BrowserWindow` adopts the bootstrap window only when its
+      creation-time options (`frameless`, `noActivate`, `transparent`,
+      `transparentTitlebar`) agree; a tray panel is a real panel again;
+    - the event queue coalesces pointer motion, wheel, resize and move, drops
+      only motion and wheel when full, and never loses a discrete event (a lost
+      `contextMenuClose` used to wedge `showContextMenu()`); a binding's handler
+      no longer keeps the queue alive;
+    - `BrowserWindow` / `Dock` / `Tray` / `Notification` throw `NotSupported` in
+      workers (they panicked) and are kept out of worker scope;
+    - `DENO_SERVE_ADDRESS=memory:` is not inherited by child processes (env
+      overlay variables can be process-local:
+      `deno_os::set_env_overlay_var_not_inherited`);
+    - an HTTPS error report gives up after 5 s instead of hanging the exit;
+    - the scheme bridge honours short writes (it dropped the rest of the chunk)
+      and waits instead of buffering a slow reader's stream, drops a forwarded
+      `content-length` / `expect`, keeps non-ASCII header values, and rewrites
+      `http+memory://` URLs in `Location` / `Content-Location` / `Refresh` onto
+      the app origin;
+    - the updater: a `check()` during a download no longer relabels it, the
+      state file reads across versions (no `deny_unknown_fields`), a reused
+      trial PID is not taken for the trial (process start time), an executable
+      without its execute bit is refused at `stage()`, and large deletions and
+      the download's fsync run off the JavaScript thread;
+    - the config schema describes `desktop.initialWindow`, `errorReporting`,
+      `macos` and icon sets;
+    - the fork's `deno desktop` refuses to download the laufey release hosts (an
+      older C ABI the runtime can't load) and says to set `LAUFEY_DEV_DIR`;
+    - CI: only a tag push publishes, the lockfile check compares every package
+      but laufey and the build is `--locked`, and the archive check fails on an
+      unresolved macOS dependency and checks Windows imports (`pe_deps.py`).
 
-The runtime-side parts (1-3, 5-17) are what the prebuilt `libdenort` carries.
+The runtime-side parts (1-3, 5-20) are what the prebuilt `libdenort` carries.
 The CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` /
 `LAUFEY_APP_ID` into a packaged app's launchers) are in the branch too, but a
 stock CLI does not run them; denext's own launcher provides that environment.
@@ -236,18 +294,22 @@ a previous run's libdenort or laufey build), or push a `denext-runtime-v*` tag
 to publish. Per target it:
 
 1. builds `libdenort` with `cargo build --release --locked -p denort_desktop`
-   (the release profile: fat LTO, `codegen-units = 1`), on the runner of that
-   target (Intel macOS on `macos-15-intel`, Linux on `ubuntu-22.04` /
-   `ubuntu-22.04-arm` so the glibc baseline matches laufey's WebKitGTK 4.1
-   requirement of Ubuntu 22.04+);
+   after patching `laufey` (`cargo metadata` rewrites laufey's lockfile entry;
+   `lock_drift.py` then fails the job if any other package's name, version,
+   source, checksum or dependencies moved), with the release profile (fat LTO,
+   `codegen-units = 1`), on the runner of that target (Intel macOS on
+   `macos-15-intel`, Linux on `ubuntu-22.04` / `ubuntu-22.04-arm` so the glibc
+   baseline matches laufey's WebKitGTK 4.1 requirement of Ubuntu 22.04+);
 2. builds laufey's webview and CEF hosts with laufey's `make webview` /
    `make cef` (the CEF minimal distribution is downloaded by the Makefile);
 3. assembles the archives, checks architectures and dynamic dependencies (`file`
-   / `lipo` / `otool -L` / `ldd`), packages a small `Deno.serve` app with the
-   stock `deno desktop` 2.9.7 for both backends, and launches it (Linux under
-   Xvfb): the page, served from `t3code://app`, POSTs back to `Deno.serve` and
-   the app exits. A launch failure fails the job;
-4. attests the archives and, on a tag, publishes the release.
+   / `lipo` / `otool -L` / `ldd`, and the import table of every Windows `.exe` /
+   `.dll` with `pe_deps.py`; any dependency that resolves nowhere fails it),
+   packages a small `Deno.serve` app with the stock `deno desktop` 2.9.7 for
+   both backends, and launches it (Linux under Xvfb): the page, served from
+   `t3code://app`, POSTs back to `Deno.serve` and the app exits. A launch
+   failure fails the job;
+4. attests the archives and, on a pushed tag, publishes the release.
 
 Locally, the equivalent is:
 
@@ -259,9 +321,21 @@ DENORT_DESKTOP_BIN=$PWD/../deno/target/release/libdenort.dylib \
 LAUFEY_DEV_DIR=$PWD deno desktop --backend webview main.ts
 ```
 
-Upstream Deno's own workflows are removed on the `denext/*` branch and disabled
-in this fork's Actions settings, so pushes and tags here only run the denext
-runtime workflow.
+Upstream Deno's own workflows are removed on the `denext/*` and `rel/*` branches
+and disabled in this fork's Actions settings. Two workflows run instead:
+
+- `denext_runtime.yml` (above): the release build, the launch smoke and the e2e
+  suite (see Test coverage). Manual dispatch, or a pushed `denext-runtime-v*`
+  tag.
+- `denext_tests.yml` (with the per-OS `denext_tests_os.yml`): upstream Deno's
+  own test bar over the fork, the way `v2.9.7`'s `ci.generated.yml` ran it, on
+  macOS, Windows and Linux: `tools/lint.js` (workspace clippy with upstream's
+  deny flags, dlint, copyright and hygiene checks; the fork's copy knows about
+  this file and the removed generated workflows), `tools/format.js --check`,
+  `jsdoc_checker.js`, `cargo fmt --check`, `cargo test --locked --lib` over
+  upstream's crate list plus the fork's crates, a debug build, and the unit and
+  (sharded) spec suites against it. It runs on pushes to `denext/**`, `ci/**`
+  and `rel/**`, on pull requests to `denext/**`, and by manual dispatch.
 
 ## Test coverage
 
@@ -290,7 +364,10 @@ in the job summary, never skipped silently. Areas:
   the page's WebSocket through the relay; the relay refusing foreign / missing /
   duplicate / upper-cased origins (403) and plain HTTP (400) and admitting the
   exact origin (101); a TCP `Deno.serve` refusing `http+memory:` request targets
-  (400); the env overlay reaching a child process.
+  (400); the env overlay reaching a child process, without the in-process
+  `DENO_SERVE_ADDRESS`; and a second app whose server is `node:http`
+  (`originnode`): the page, a POST round trip and the memory socket's
+  `remoteAddress`.
 - **appid** — localStorage and IndexedDB persisting across launches of one
   identifier and not visible to another identifier at the same origin.
 - **deeplink** — cold argv links and files, second-instance forwarding (no
@@ -302,7 +379,10 @@ in the job summary, never skipped silently. Areas:
   cold and warm, then uninstalled.
 - **window** — the window API, state events, limits, placement, chrome vs
   `windowCapabilities()`, a user close canceled and a close the runtime never
-  answers, `quit()`, the tray rule, `initialWindow` from `app.json`.
+  answers, `quit()`, the tray rule, `initialWindow` from `app.json`; a frameless
+  panel created first is a new window and the next plain one adopts the initial
+  window; a string with a NUL is a `TypeError` (`setTitle`, `navigate`,
+  `clipboard.writeText`); workers have no native classes.
 - **dnd** — the clipboard in every format and its change event, file dialogs
   opened and aborted (open / save, modal / app-level), busy and argument
   refusals, `startDrag` refusals.
