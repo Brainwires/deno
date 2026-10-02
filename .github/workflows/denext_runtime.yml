@@ -376,14 +376,17 @@ jobs:
           patch="patch.$key.laufey.path=\"$capi\""
           echo "cargo --config '$patch'"
           df -h . || true
-          # Not --locked: the patch rewrites the laufey entry of Cargo.lock.
-          cargo build --release --config "$patch" -p denort_desktop
-          df -h . || true
-          # Nothing but laufey may have moved in the lockfile.
+          # The patch rewrites the laufey entry of Cargo.lock: let cargo do
+          # that first, check nothing but laufey moved (every other package's
+          # name, version, source, checksum and dependencies), then build
+          # --locked against exactly that lockfile.
+          mkdir -p target
+          cp Cargo.lock target/Cargo.lock.orig
+          cargo metadata --format-version 1 --config "$patch" >/dev/null
           git diff --stat -- Cargo.lock
-          if git diff -U0 -- Cargo.lock | grep '^[-+]name = ' | grep -v '"laufey"'; then
-            echo "::error::Cargo.lock changed beyond laufey"; exit 1
-          fi
+          python3 .github/denext-runtime/lock_drift.py target/Cargo.lock.orig Cargo.lock
+          cargo build --release --locked --config "$patch" -p denort_desktop
+          df -h . || true
           # Record what libdenort was compiled against.
           manifest=$(cargo metadata --format-version 1 --config "$patch" |
             python3 -c 'import json,sys; print([p for p in json.load(sys.stdin)["packages"] if p["name"]=="laufey"][0]["manifest_path"])')
@@ -668,7 +671,7 @@ jobs:
       - name: SHA256SUMS + manifest.json
         env:
           VERSION: ${{ needs.setup.outputs.version }}
-          TAG: ${{ startsWith(github.ref, 'refs/tags/denext-runtime-v') && github.ref_name || '' }}
+          TAG: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/denext-runtime-v') && github.ref_name || '' }}
           REPOSITORY: ${{ github.repository }}
           DENO_VERSION: ${{ needs.setup.outputs.deno_version }}
           DENO_SHA: ${{ github.sha }}
@@ -689,15 +692,17 @@ jobs:
             dist/SHA256SUMS
             dist/manifest.json
 
+      # Only a tag PUSH publishes: a manual dispatch run on a tag ref (with a
+      # `targets` filter or reused artifacts) must never become a release.
       - name: Check every target is present (tag)
-        if: startsWith(github.ref, 'refs/tags/denext-runtime-v')
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/denext-runtime-v')
         run: |
           n=$(python3 -c 'import json;m=json.load(open("dist/manifest.json"));print(sum(len([k for k in v if k!="runtimeLib"]) for v in m["targets"].values()))')
           echo "archives: $n"
           test "$n" = 10
 
       - name: GitHub Release
-        if: startsWith(github.ref, 'refs/tags/denext-runtime-v')
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/denext-runtime-v')
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
