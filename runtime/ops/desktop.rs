@@ -317,6 +317,10 @@ pub enum DesktopEvent {
   AppMenuClick { window_id: u32, id: String },
   #[serde(rename_all = "camelCase")]
   ContextMenuClick { window_id: u32, id: String },
+  /// The context menu `showContextMenu` opened closed, after its click if
+  /// one was chosen (laufey API 41).
+  #[serde(rename_all = "camelCase")]
+  ContextMenuClose { window_id: u32 },
   #[serde(rename_all = "camelCase")]
   KeyboardEvent {
     window_id: u32,
@@ -472,8 +476,28 @@ pub enum DesktopEvent {
   TrayMenuClick { tray_id: u32, id: String },
   #[serde(rename_all = "camelCase")]
   NotificationShow { notification_id: u32 },
+  /// The body of a live notification was clicked. An action button is
+  /// [`DesktopEvent::NotificationAction`] (laufey API 41; before, actions
+  /// were folded into this event).
   #[serde(rename_all = "camelCase")]
   NotificationClick { notification_id: u32 },
+  /// An action button of a live notification was clicked (laufey API 41).
+  #[serde(rename_all = "camelCase")]
+  NotificationAction {
+    notification_id: u32,
+    action: String,
+  },
+  /// A click on a notification that no live `Notification` object owns:
+  /// one an earlier run posted, a scheduled one, or the click that launched
+  /// the app (`launch`; laufey API 41). `data` is the notification's data
+  /// as JSON text. Emitted through [`DesktopLaunchInbox`].
+  #[serde(rename_all = "camelCase")]
+  NotificationResponse {
+    tag: String,
+    action: Option<String>,
+    data: Option<String>,
+    launch: bool,
+  },
   #[serde(rename_all = "camelCase")]
   NotificationClose { notification_id: u32 },
   #[serde(rename_all = "camelCase")]
@@ -530,6 +554,7 @@ enum LaunchEventKind {
   OpenUrl,
   OpenFile,
   SecondInstance,
+  NotificationResponse,
 }
 
 impl LaunchEventKind {
@@ -538,6 +563,7 @@ impl LaunchEventKind {
       "openurl" => Some(Self::OpenUrl),
       "openfile" => Some(Self::OpenFile),
       "secondinstance" => Some(Self::SecondInstance),
+      "notificationresponse" => Some(Self::NotificationResponse),
       _ => None,
     }
   }
@@ -554,9 +580,11 @@ struct LaunchInboxState {
   pending_urls: std::collections::VecDeque<String>,
   pending_files: std::collections::VecDeque<String>,
   pending_second_instances: std::collections::VecDeque<DesktopEvent>,
+  pending_notification_responses: std::collections::VecDeque<DesktopEvent>,
   subscribed_urls: bool,
   subscribed_files: bool,
   subscribed_second_instances: bool,
+  subscribed_notification_responses: bool,
 }
 
 /// Deep links, opened files and second-instance launches on their way to
@@ -583,6 +611,19 @@ pub struct DesktopLaunchInbox(Arc<std::sync::Mutex<LaunchInboxState>>);
 pub struct LaunchTargetsSnapshot {
   pub urls: Vec<String>,
   pub files: Vec<String>,
+  /// Notification responses that arrived before the app listened: the
+  /// click that launched it.
+  pub notifications: Vec<NotificationResponseInfo>,
+}
+
+/// A [`DesktopEvent::NotificationResponse`] in the launch snapshot.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NotificationResponseInfo {
+  pub tag: String,
+  pub action: Option<String>,
+  pub data: Option<String>,
+  pub launch: bool,
 }
 
 impl DesktopLaunchInbox {
@@ -654,9 +695,36 @@ impl DesktopLaunchInbox {
     }
   }
 
+  /// A click on a notification no live `Notification` owns (laufey API
+  /// 41); see [`DesktopEvent::NotificationResponse`].
+  pub fn notification_response(
+    &self,
+    tag: String,
+    action: Option<String>,
+    data: Option<String>,
+    launch: bool,
+  ) {
+    let event = DesktopEvent::NotificationResponse {
+      tag,
+      action,
+      data,
+      launch,
+    };
+    let mut state = self.lock();
+    if state.subscribed_notification_responses {
+      send_launch_event(&state, event);
+    } else {
+      push_bounded(
+        &mut state.pending_notification_responses,
+        event,
+        "notificationresponse",
+      );
+    }
+  }
+
   /// The launch snapshot: the process's own deep links and files, plus the
-  /// URLs and files delivered so far that no listener has taken. Empty after
-  /// the first call.
+  /// URLs, files and notification responses delivered so far that no
+  /// listener has taken. Empty after the first call.
   pub fn take_launch_targets(&self) -> LaunchTargetsSnapshot {
     let mut state = self.lock();
     if state.launch_taken {
@@ -667,7 +735,29 @@ impl DesktopLaunchInbox {
     urls.extend(state.pending_urls.drain(..));
     let mut files = std::mem::take(&mut state.launch_files);
     files.extend(state.pending_files.drain(..));
-    LaunchTargetsSnapshot { urls, files }
+    let notifications = state
+      .pending_notification_responses
+      .drain(..)
+      .filter_map(|event| match event {
+        DesktopEvent::NotificationResponse {
+          tag,
+          action,
+          data,
+          launch,
+        } => Some(NotificationResponseInfo {
+          tag,
+          action,
+          data,
+          launch,
+        }),
+        _ => None,
+      })
+      .collect();
+    LaunchTargetsSnapshot {
+      urls,
+      files,
+      notifications,
+    }
   }
 
   /// Subscribe JS to one kind of launch event (by DOM event type), returning
@@ -699,6 +789,10 @@ impl DesktopLaunchInbox {
       LaunchEventKind::SecondInstance => {
         state.subscribed_second_instances = true;
         state.pending_second_instances.drain(..).collect()
+      }
+      LaunchEventKind::NotificationResponse => {
+        state.subscribed_notification_responses = true;
+        state.pending_notification_responses.drain(..).collect()
       }
     }
   }
@@ -996,6 +1090,94 @@ impl ShortcutRegisterInfo {
 /// `"enabled"`, `"disabled"`, `"requires-approval"`, `"not-supported"`.
 pub const LOGIN_ITEM_STATES: [&str; 4] =
   ["enabled", "disabled", "requires-approval", "not-supported"];
+
+/// `Deno.desktop.menuCapabilities()` (laufey API 41).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MenuCapabilitiesInfo {
+  /// `setApplicationMenu` shows a menu (bar).
+  pub app_menu: bool,
+  /// App-menu items' accelerators fire them from the keyboard.
+  pub accelerators: bool,
+  pub context_menu: bool,
+  /// `showContextMenu` resolves (and "contextmenuclose" fires) when the
+  /// menu closes.
+  pub context_closed: bool,
+  pub icons: bool,
+  pub tooltips: bool,
+}
+
+/// `Deno.desktop.notifications.capabilities()` (laufey API 41).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NotificationCapabilitiesInfo {
+  pub show: bool,
+  /// `schedule()` delivers at the time, at least while the app runs.
+  pub schedule: bool,
+  /// The OS delivers a scheduled notification while the app isn't running.
+  pub schedule_persists: bool,
+  pub actions: bool,
+  pub clicks: bool,
+  /// A click while the app isn't running launches it and is delivered.
+  pub cold_start: bool,
+}
+
+/// An action button (`{ action, title }`, the Web Notifications shape).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct NotificationActionInfo {
+  pub action: String,
+  pub title: String,
+}
+
+/// What a notification shows (`new Notification()` and
+/// `Deno.desktop.notifications.schedule()`).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct NotificationRequest {
+  pub title: String,
+  pub body: Option<String>,
+  pub icon: Option<Vec<u8>>,
+  pub tag: Option<String>,
+  pub silent: Option<bool>,
+  pub require_interaction: Option<bool>,
+  pub actions: Vec<NotificationActionInfo>,
+  /// The notification's `data` as JSON text, handed back with clicks.
+  pub data: Option<String>,
+  /// Unix time in milliseconds to deliver at (scheduled).
+  pub schedule_at_ms: Option<i64>,
+}
+
+/// `Deno.desktop.notifications.schedule(options)` as JS sends it.
+#[derive(Debug, Clone, Default, PartialEq, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NotificationScheduleOptions {
+  pub title: String,
+  pub body: Option<String>,
+  pub tag: String,
+  pub at: f64,
+  #[serde(default)]
+  pub actions: Vec<NotificationActionInfo>,
+  pub data: Option<String>,
+  pub silent: Option<bool>,
+  pub require_interaction: Option<bool>,
+}
+
+/// A pending scheduled notification
+/// (`Deno.desktop.notifications.getScheduled()`).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScheduledNotificationInfo {
+  pub tag: String,
+  pub title: String,
+  pub body: String,
+  /// Unix time in milliseconds.
+  pub at: i64,
+  pub data: Option<String>,
+  pub actions: Vec<NotificationActionInfo>,
+}
+
+/// Longest tag / data laufey accepts (`LAUFEY_NOTIFICATION_MAX_*`).
+pub const MAX_NOTIFICATION_TAG_BYTES: usize = 256;
+pub const MAX_NOTIFICATION_DATA_BYTES: usize = 4096;
 
 /// A boxed future the desktop runtime resolves later (a drag out, a dialog).
 pub type DesktopFuture<T> =
@@ -1595,17 +1777,39 @@ pub trait DesktopApi: Send + Sync + 'static {
 
   /// Show an OS notification. Returns the notification id (`0` if the
   /// backend doesn't support system notifications). Events for this
-  /// notification (`Show`, `Click`, `Close`, `Error`) are delivered via
-  /// the desktop event channel keyed by the returned id.
-  fn show_notification(
+  /// notification (`Show`, `Click`, `Action`, `Close`, `Error`) are
+  /// delivered via the desktop event channel keyed by the returned id.
+  fn show_notification(&self, request: &NotificationRequest) -> u32;
+  /// Schedule a notification for `request.schedule_at_ms` (laufey API 41).
+  /// Its clicks arrive as [`DesktopEvent::NotificationResponse`]. False when
+  /// the backend refused it.
+  fn schedule_notification(&self, _request: &NotificationRequest) -> bool {
+    false
+  }
+  /// The pending scheduled notifications, soonest first (laufey API 41).
+  fn list_scheduled_notifications(
     &self,
-    title: &str,
-    body: Option<&str>,
-    icon: Option<&[u8]>,
-    tag: Option<&str>,
-    silent: Option<bool>,
-    require_interaction: Option<bool>,
-  ) -> u32;
+  ) -> DesktopFuture<Vec<ScheduledNotificationInfo>> {
+    Box::pin(async { Vec::new() })
+  }
+  /// Cancel the scheduled notification `tag` and remove delivered ones with
+  /// that tag (laufey API 41).
+  fn cancel_notification(&self, _tag: &str) {}
+  fn notification_capabilities(&self) -> NotificationCapabilitiesInfo {
+    NotificationCapabilitiesInfo::default()
+  }
+  fn menu_capabilities(&self) -> MenuCapabilitiesInfo {
+    MenuCapabilitiesInfo::default()
+  }
+  /// Ask for quiet ("provisional") notification authorization, which macOS
+  /// grants without a prompt (laufey API 41); elsewhere the same as
+  /// [`DesktopApi::request_notification_permission`].
+  fn request_provisional_notification_permission(
+    &self,
+    cb: Box<dyn FnOnce(PermissionState) + Send + 'static>,
+  ) {
+    self.request_notification_permission(cb);
+  }
   /// Dismiss a notification previously shown via `show_notification`.
   /// No-op if the id is unknown or already dismissed.
   fn close_notification(&self, notification_id: u32);
@@ -1782,12 +1986,18 @@ impl BrowserWindow {
       }
     }
 
+    // The frame a normal window adds around its content, noted now while
+    // the new window is normal, so getNormalBounds() of a window the user
+    // put into fullscreen (or maximized) before the app asked anything still
+    // adds the title bar back.
+    let normal_chrome = std::cell::Cell::new(None);
+    note_normal_chrome(api.as_ref(), window_id, &normal_chrome);
     let window = BrowserWindow {
       api,
       window_id,
       surface: SameObject::new(),
       surface_taken: std::cell::Cell::new(false),
-      normal_chrome: std::cell::Cell::new(None),
+      normal_chrome,
     };
     let window = deno_core::cppgc::make_cppgc_object(scope, window);
     let event_target_setup = state.borrow::<EventTargetSetup>();
@@ -3659,6 +3869,7 @@ fn permission_state_to_web_string(state: PermissionState) -> &'static str {
 #[string]
 async fn op_desktop_request_notification_permission(
   state: std::rc::Rc<std::cell::RefCell<OpState>>,
+  provisional: bool,
 ) -> String {
   let api = {
     let s = state.borrow();
@@ -3669,9 +3880,14 @@ async fn op_desktop_request_notification_permission(
     return "unsupported".to_string();
   };
   let (tx, rx) = tokio::sync::oneshot::channel::<PermissionState>();
-  api.request_notification_permission(Box::new(move |state| {
+  let cb: Box<dyn FnOnce(PermissionState) + Send> = Box::new(move |state| {
     let _ = tx.send(state);
-  }));
+  });
+  if provisional {
+    api.request_provisional_notification_permission(cb);
+  } else {
+    api.request_notification_permission(cb);
+  }
   // If the backend forgets to invoke the callback (programmer error in a
   // hypothetical custom backend), the channel drops and `recv` returns
   // `Err` — surface that as "unsupported" so JS gets a stable result.
@@ -3701,6 +3917,107 @@ async fn op_desktop_query_notification_permission(
     rx.await.unwrap_or(PermissionState::Unsupported),
   )
   .to_string()
+}
+
+/// `Deno.desktop.menuCapabilities()` (laufey API 41).
+#[op2]
+#[serde]
+fn op_desktop_menu_capabilities(state: &mut OpState) -> MenuCapabilitiesInfo {
+  state
+    .try_borrow::<Arc<dyn DesktopApi>>()
+    .map(|api| api.menu_capabilities())
+    .unwrap_or_default()
+}
+
+/// `Deno.desktop.notifications.capabilities()` (laufey API 41).
+#[op2]
+#[serde]
+fn op_desktop_notification_capabilities(
+  state: &mut OpState,
+) -> NotificationCapabilitiesInfo {
+  state
+    .try_borrow::<Arc<dyn DesktopApi>>()
+    .map(|api| api.notification_capabilities())
+    .unwrap_or_default()
+}
+
+/// Checks a tag and data against laufey's limits.
+fn check_notification_ids(
+  tag: Option<&str>,
+  data: Option<&str>,
+) -> Result<(), deno_error::JsErrorBox> {
+  if tag.is_some_and(|t| t.is_empty() || t.len() > MAX_NOTIFICATION_TAG_BYTES) {
+    return Err(deno_error::JsErrorBox::type_error(format!(
+      "a notification tag must be 1 to {MAX_NOTIFICATION_TAG_BYTES} bytes"
+    )));
+  }
+  if data.is_some_and(|d| d.len() > MAX_NOTIFICATION_DATA_BYTES) {
+    return Err(deno_error::JsErrorBox::type_error(format!(
+      "notification data must serialize to at most \
+       {MAX_NOTIFICATION_DATA_BYTES} bytes of JSON"
+    )));
+  }
+  Ok(())
+}
+
+/// `Deno.desktop.notifications.schedule(options)` (laufey API 41): true
+/// when the backend took it.
+#[op2]
+fn op_desktop_schedule_notification(
+  state: &mut OpState,
+  #[serde] options: NotificationScheduleOptions,
+  #[buffer] icon: Option<&[u8]>,
+) -> Result<bool, deno_error::JsErrorBox> {
+  check_notification_ids(Some(&options.tag), options.data.as_deref())?;
+  if options.title.is_empty() {
+    return Err(deno_error::JsErrorBox::type_error(
+      "a notification needs a title",
+    ));
+  }
+  if !options.at.is_finite() || options.at < 0.0 || options.at > 8.64e15 {
+    return Err(deno_error::JsErrorBox::type_error(
+      "the notification time is not a valid date",
+    ));
+  }
+  let Some(api) = state.try_borrow::<Arc<dyn DesktopApi>>() else {
+    return Ok(false);
+  };
+  let request = NotificationRequest {
+    title: options.title,
+    body: options.body,
+    icon: icon.map(|i| i.to_vec()),
+    tag: Some(options.tag),
+    silent: options.silent,
+    require_interaction: options.require_interaction,
+    actions: options.actions,
+    data: options.data,
+    // A time in the past shows it now.
+    schedule_at_ms: Some((options.at as i64).max(1)),
+  };
+  Ok(api.schedule_notification(&request))
+}
+
+/// `Deno.desktop.notifications.getScheduled()` (laufey API 41).
+#[op2]
+#[serde]
+async fn op_desktop_list_scheduled_notifications(
+  state: std::rc::Rc<std::cell::RefCell<OpState>>,
+) -> Vec<ScheduledNotificationInfo> {
+  match desktop_api(&state) {
+    Some(api) => api.list_scheduled_notifications().await,
+    None => Vec::new(),
+  }
+}
+
+/// `Deno.desktop.notifications.cancel(tag)` (laufey API 41).
+#[op2(fast)]
+fn op_desktop_cancel_notification(state: &mut OpState, #[string] tag: &str) {
+  if tag.is_empty() || tag.len() > MAX_NOTIFICATION_TAG_BYTES {
+    return;
+  }
+  if let Some(api) = state.try_borrow::<Arc<dyn DesktopApi>>() {
+    api.cancel_notification(tag);
+  }
 }
 
 struct Dock {
@@ -3900,6 +4217,15 @@ impl deno_core::Resource for Notification {
   }
 }
 
+/// The options `new Notification()` normalizes in JS (laufey API 41): the
+/// action buttons, and `data` as JSON text for the OS to hand back.
+#[derive(Debug, Default, serde::Deserialize)]
+struct NotificationExtra {
+  #[serde(default)]
+  actions: Vec<NotificationActionInfo>,
+  data: Option<String>,
+}
+
 #[derive(FromV8)]
 struct NotificationConstructorOptions {
   body: Option<String>,
@@ -3922,6 +4248,7 @@ impl Notification {
     #[string] title: String,
     #[scoped] options: Option<NotificationConstructorOptions>,
     #[buffer] icon_bytes: Option<&[u8]>,
+    #[serde] extra: Option<NotificationExtra>,
   ) -> v8::Global<v8::Value> {
     let api = state
       .try_borrow::<Arc<dyn DesktopApi>>()
@@ -3940,14 +4267,29 @@ impl Notification {
       data: None,
     });
 
-    let notification_id = api.show_notification(
-      &title,
-      options.body.as_deref(),
-      icon_bytes,
-      options.tag.as_deref(),
-      options.silent,
-      options.require_interaction,
-    );
+    let extra = extra.unwrap_or_default();
+    // Out-of-range tags / data show nothing (an "error" event, as for any
+    // notification the backend refuses).
+    let notification_id = if check_notification_ids(
+      options.tag.as_deref().filter(|t| !t.is_empty()),
+      extra.data.as_deref(),
+    )
+    .is_err()
+    {
+      0
+    } else {
+      api.show_notification(&NotificationRequest {
+        title: title.clone(),
+        body: options.body.clone(),
+        icon: icon_bytes.map(|b| b.to_vec()),
+        tag: options.tag.clone().filter(|t| !t.is_empty()),
+        silent: options.silent,
+        require_interaction: options.require_interaction,
+        actions: extra.actions,
+        data: extra.data,
+        schedule_at_ms: None,
+      })
+    };
 
     let data = options.data.unwrap_or_else(|| {
       let null: v8::Local<v8::Value> = v8::null(scope).into();
@@ -4101,6 +4443,11 @@ deno_core::extension!(
     op_desktop_get_launch_at_login,
     op_desktop_set_launch_at_login,
     op_desktop_devtools_enabled,
+    op_desktop_menu_capabilities,
+    op_desktop_notification_capabilities,
+    op_desktop_schedule_notification,
+    op_desktop_list_scheduled_notifications,
+    op_desktop_cancel_notification,
     op_desktop_send_error_report,
     op_desktop_request_notification_permission,
     op_desktop_query_notification_permission,
@@ -4904,6 +5251,7 @@ mod tests {
       super::LaunchTargetsSnapshot {
         urls: vec!["acme://argv".into(), "acme://early".into()],
         files: vec!["/argv/file".into(), "/early/file".into()],
+        notifications: vec![],
       }
     );
     // Taken once: the snapshot never repeats, and what it took is not
@@ -4920,6 +5268,157 @@ mod tests {
     inbox.open_url("acme://late".into());
     assert_eq!(inbox.subscribe("openurl").len(), 1);
     assert!(drain(&mut rx).is_empty());
+  }
+
+  #[test]
+  fn notification_responses_go_through_the_launch_inbox() {
+    // The click that launched the app: held, then in the snapshot.
+    let (inbox, mut rx) = inbox_with_channel(vec![], vec![]);
+    inbox.notification_response(
+      "launch-tag".into(),
+      Some("open".into()),
+      Some("{\"n\":1}".into()),
+      true,
+    );
+    assert!(drain(&mut rx).is_empty());
+    let snapshot = inbox.take_launch_targets();
+    assert_eq!(
+      snapshot.notifications,
+      vec![super::NotificationResponseInfo {
+        tag: "launch-tag".into(),
+        action: Some("open".into()),
+        data: Some("{\"n\":1}".into()),
+        launch: true,
+      }]
+    );
+    // Not before a listener: held, then handed to the first one.
+    inbox.notification_response("later".into(), None, None, false);
+    assert!(drain(&mut rx).is_empty());
+    let pending = inbox.subscribe("notificationresponse");
+    assert_eq!(pending.len(), 1);
+    assert_eq!(
+      serde_json::to_value(&pending[0]).unwrap(),
+      json!({
+        "kind": "notificationResponse",
+        "tag": "later",
+        "action": null,
+        "data": null,
+        "launch": false,
+      })
+    );
+    // Once JS listens, straight into the channel.
+    inbox.notification_response("warm".into(), None, None, false);
+    let sent = drain(&mut rx);
+    assert_eq!(sent.len(), 1);
+    assert!(sent[0].contains("warm"), "{sent:?}");
+    // A response that arrives before the snapshot, with a listener absent,
+    // is part of the snapshot, not an event.
+    let (inbox, mut rx) = inbox_with_channel(vec![], vec![]);
+    inbox.notification_response("early".into(), None, None, true);
+    assert_eq!(inbox.take_launch_targets().notifications.len(), 1);
+    assert!(inbox.subscribe("notificationresponse").is_empty());
+    assert!(drain(&mut rx).is_empty());
+  }
+
+  #[test]
+  fn menu_notification_wire_format() {
+    assert_eq!(
+      serde_json::to_value(DesktopEvent::ContextMenuClose { window_id: 3 })
+        .unwrap(),
+      json!({ "kind": "contextMenuClose", "windowId": 3 })
+    );
+    assert_eq!(
+      serde_json::to_value(DesktopEvent::NotificationAction {
+        notification_id: 7,
+        action: "reply".into(),
+      })
+      .unwrap(),
+      json!({ "kind": "notificationAction", "notificationId": 7, "action": "reply" })
+    );
+    assert_eq!(
+      serde_json::to_value(super::MenuCapabilitiesInfo {
+        accelerators: true,
+        context_closed: true,
+        ..Default::default()
+      })
+      .unwrap(),
+      json!({
+        "appMenu": false,
+        "accelerators": true,
+        "contextMenu": false,
+        "contextClosed": true,
+        "icons": false,
+        "tooltips": false,
+      })
+    );
+    assert_eq!(
+      serde_json::to_value(super::NotificationCapabilitiesInfo {
+        schedule: true,
+        cold_start: true,
+        ..Default::default()
+      })
+      .unwrap(),
+      json!({
+        "show": false,
+        "schedule": true,
+        "schedulePersists": false,
+        "actions": false,
+        "clicks": false,
+        "coldStart": true,
+      })
+    );
+    assert_eq!(
+      serde_json::to_value(super::ScheduledNotificationInfo {
+        tag: "t".into(),
+        title: "T".into(),
+        body: "".into(),
+        at: 1700000000123,
+        data: None,
+        actions: vec![super::NotificationActionInfo {
+          action: "a".into(),
+          title: "A".into(),
+        }],
+      })
+      .unwrap(),
+      json!({
+        "tag": "t",
+        "title": "T",
+        "body": "",
+        "at": 1700000000123i64,
+        "data": null,
+        "actions": [{ "action": "a", "title": "A" }],
+      })
+    );
+    let opts: super::NotificationScheduleOptions =
+      serde_json::from_value(json!({
+        "title": "T",
+        "tag": "x",
+        "at": 1700000000123.0,
+        "actions": [{ "action": "a", "title": "A" }],
+        "data": "{}",
+        "requireInteraction": true,
+      }))
+      .unwrap();
+    assert_eq!(opts.tag, "x");
+    assert_eq!(opts.at, 1700000000123.0);
+    assert_eq!(opts.actions.len(), 1);
+    assert_eq!(opts.require_interaction, Some(true));
+    assert!(super::check_notification_ids(Some("ok"), Some("{}")).is_ok());
+    assert!(super::check_notification_ids(Some(""), None).is_err());
+    assert!(
+      super::check_notification_ids(
+        None,
+        Some(&"x".repeat(super::MAX_NOTIFICATION_DATA_BYTES + 1))
+      )
+      .is_err()
+    );
+    assert!(
+      super::check_notification_ids(
+        Some(&"t".repeat(super::MAX_NOTIFICATION_TAG_BYTES + 1)),
+        None
+      )
+      .is_err()
+    );
   }
 
   #[test]

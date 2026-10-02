@@ -756,6 +756,11 @@ const NOT_IMPORTED_OPS = [
   "op_desktop_get_launch_at_login",
   "op_desktop_set_launch_at_login",
   "op_desktop_devtools_enabled",
+  "op_desktop_menu_capabilities",
+  "op_desktop_notification_capabilities",
+  "op_desktop_schedule_notification",
+  "op_desktop_list_scheduled_notifications",
+  "op_desktop_cancel_notification",
   "op_desktop_send_error_report",
   "op_desktop_request_notification_permission",
   "op_desktop_query_notification_permission",
@@ -806,7 +811,8 @@ const NOT_IMPORTED_OPS = [
 // the Deno.desktop.updater ops are the main scope's alone too. Global
 // shortcuts, launch at login and DevTools control act on the whole app and
 // the user's session (a shortcut also sees keys typed into other apps), so
-// they stay main-scope as well.
+// they stay main-scope as well, as do scheduled notifications (they outlive
+// the worker and their clicks reach the main scope's Deno.desktop).
 const WORKER_EXCLUDED_OPS = [
   "op_desktop_read_clipboard_text",
   "op_desktop_write_clipboard_text",
@@ -848,6 +854,11 @@ const WORKER_EXCLUDED_OPS = [
   "op_desktop_get_launch_at_login",
   "op_desktop_set_launch_at_login",
   "op_desktop_devtools_enabled",
+  "op_desktop_menu_capabilities",
+  "op_desktop_notification_capabilities",
+  "op_desktop_schedule_notification",
+  "op_desktop_list_scheduled_notifications",
+  "op_desktop_cancel_notification",
 ];
 
 function removeImportedOps(isWorker = false) {

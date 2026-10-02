@@ -101,9 +101,26 @@ declare class WheelEvent extends MouseEvent {
 declare type NotificationPermission = "default" | "denied" | "granted";
 declare type NotificationDirection = "auto" | "ltr" | "rtl";
 
+/** An action button on a notification (the Web Notifications shape). */
+declare interface NotificationAction {
+  /** Identifies the button: the `action` of the `"action"` event. */
+  action: string;
+  /** The button's label. */
+  title: string;
+}
+
 declare interface NotificationOptions {
   body?: string;
+  /** Kept on the object; also stored with the OS notification as JSON (at
+   * most 4 KiB), so a click after a restart
+   * ({@linkcode Deno.desktop.NotificationResponseDetail}) gets it back. A
+   * value JSON can't represent stays on the object only. */
   data?: any;
+  /** Action buttons. A click on one fires the notification's `"action"`
+   * event (not `"click"`). Shown on macOS, Windows (up to five) and Linux
+   * servers that support actions; see
+   * {@linkcode Deno.desktop.NotificationCapabilities.actions}. */
+  actions?: NotificationAction[];
   dir?: NotificationDirection;
   icon?: string;
   lang?: string;
@@ -117,8 +134,17 @@ declare interface NotificationPermissionCallback {
   (permission: NotificationPermission): void;
 }
 
+/** The event a click on a notification's action button fires. */
+declare interface NotificationActionEvent extends Event {
+  /** The `action` of the clicked {@linkcode NotificationAction}. */
+  readonly action: string;
+}
+
 declare interface NotificationEventMap {
+  /** The body was clicked. */
   click: Event;
+  /** An action button was clicked. */
+  action: NotificationActionEvent;
   close: Event;
   error: Event;
   show: Event;
@@ -137,6 +163,7 @@ declare interface Notification extends EventTarget {
   readonly requireInteraction: boolean;
 
   onclick: ((this: Notification, ev: Event) => any) | null;
+  onaction: ((this: Notification, ev: NotificationActionEvent) => any) | null;
   onclose: ((this: Notification, ev: Event) => any) | null;
   onerror: ((this: Notification, ev: Event) => any) | null;
   onshow: ((this: Notification, ev: Event) => any) | null;
@@ -186,6 +213,7 @@ declare var Notification: {
   prototype: Notification;
   new (title: string, options?: NotificationOptions): Notification;
   readonly permission: NotificationPermission;
+  /** 5 where action buttons are shown, else 0. */
   readonly maxActions: number;
   requestPermission(
     deprecatedCallback?: NotificationPermissionCallback,
@@ -604,18 +632,26 @@ declare namespace Deno {
       item: {
         label: string;
         id?: string;
+        /** A keyboard shortcut in the {@linkcode Deno.desktop.shortcuts}
+         * syntax (`"CommandOrControl+Shift+K"`). In the application menu it
+         * fires the item while the window has the focus, on every OS; in a
+         * context menu it is only shown. One that doesn't parse is ignored.
+         */
         accelerator?: string;
         enabled: boolean;
         /** Show a checkmark next to the item. Supported on all
          * platforms. Defaults to `false`. */
         checked?: boolean;
         /** PNG-encoded image bytes shown next to the label, like
-         * {@linkcode Tray.setIcon}. Supported on macOS and Windows;
-         * ignored on Linux. On macOS a monochrome black+alpha PNG is
-         * rendered as a template image, tinting to white when the item
-         * is highlighted. */
+         * {@linkcode Tray.setIcon}. Shown on macOS, Windows and Linux
+         * (WebKitGTK); not in the CEF backend's application menu on Windows
+         * and Linux, nor its Linux context menus (see
+         * {@linkcode Deno.desktop.menuCapabilities}). On macOS a monochrome
+         * black+alpha PNG is rendered as a template image, tinting to white
+         * when the item is highlighted. */
         icon?: Uint8Array;
-        /** Tooltip shown when hovering over the item. macOS only. */
+        /** Tooltip shown when hovering over the item: macOS and Linux
+         * (WebKitGTK). */
         tooltip?: string;
       };
     }
@@ -730,6 +766,10 @@ declare namespace Deno {
     drop: CustomEvent<BrowserWindowFileDropDetail>;
     menuclick: CustomEvent<MenuClickDetail>;
     contextmenuclick: CustomEvent<MenuClickDetail>;
+    /** The context menu {@linkcode BrowserWindow.showContextMenu} opened
+     * closed: `detail.id` is the chosen item's id, or `null` when it was
+     * dismissed. Fires after its `"contextmenuclick"`. */
+    contextmenuclose: CustomEvent<{ id: string | null }>;
   }
 
   type BrowserWindowEventHandlers = {
@@ -978,8 +1018,26 @@ declare namespace Deno {
      *
      * The platform may shift the menu to keep it on screen when it does not
      * fit below or to the right of that point.
+     *
+     * Resolves once the menu closed, with the chosen item's id, or `null`
+     * when it was dismissed (Escape, a click outside); a
+     * `"contextmenuclose"` event fires then too. It never blocks the app.
+     * Where the backend can't report the close
+     * ({@linkcode Deno.desktop.MenuCapabilities.contextClosed} false) it
+     * resolves with `null` at once.
+     *
+     * Items' `accelerator`s are shown but not bound in a context menu. In
+     * the application menu ({@linkcode BrowserWindow.setApplicationMenu})
+     * they fire their items from the keyboard while the window has the focus,
+     * on every OS: the syntax of {@linkcode Deno.desktop.shortcuts}
+     * (`"CommandOrControl+Shift+K"`), an accelerator that doesn't parse is
+     * ignored.
      */
-    showContextMenu(x: number, y: number, menu: MenuItem[]): void;
+    showContextMenu(
+      x: number,
+      y: number,
+      menu: MenuItem[],
+    ): Promise<string | null>;
 
     getNativeWindow(): Deno.UnsafeWindowSurface;
 
@@ -1685,6 +1743,9 @@ declare namespace Deno {
       /** The app was launched again while running, with
        * `desktop.app.singleInstance` on. */
       secondinstance: CustomEvent<SecondInstanceDetail>;
+      /** A click on one of the app's notifications that no live
+       * `Notification` owns (see {@linkcode NotificationResponseDetail}). */
+      notificationresponse: CustomEvent<NotificationResponseDetail>;
     }
 
     /** The deep links the app was launched with: the arguments of this
@@ -1699,6 +1760,124 @@ declare namespace Deno {
      * plus (macOS) the files delivered before the first `"openfile"`
      * listener was added. Taken on first read, like `launchUrls`. */
     export const launchFiles: readonly string[];
+
+    /** Clicks on the app's notifications that arrived before the first
+     * `"notificationresponse"` listener was added: on macOS and Windows the
+     * click that launched the app (`launch: true`). Taken on first read, like
+     * `launchUrls`. */
+    export const launchNotificationResponses:
+      readonly NotificationResponseDetail[];
+
+    /** A click on one of the app's notifications that no live
+     * `Notification` object owns: one an earlier run of the app posted, a
+     * {@linkcode Deno.desktop.notifications.schedule}d one, or the click that
+     * launched the app. Delivered as `Deno.desktop`'s
+     * `"notificationresponse"` event, or in
+     * {@linkcode Deno.desktop.launchNotificationResponses}. */
+    export interface NotificationResponseDetail {
+      /** The notification's tag. */
+      tag: string;
+      /** The clicked action button's `action`, or `null` for the body. */
+      action: string | null;
+      /** The notification's `data` (parsed back from JSON), if it had any. */
+      data: unknown;
+      /** It arrived before the app listened: the click that launched it (or
+       * one made while it was starting). */
+      launch: boolean;
+    }
+
+    /** What notifications can do here (`Deno.desktop.notifications`). */
+    export interface NotificationCapabilities {
+      show: boolean;
+      /** `schedule()` delivers at its time, at least while the app runs. */
+      schedule: boolean;
+      /** The OS delivers a scheduled notification while the app isn't
+       * running (macOS, Windows). On Linux the runtime's own timer delivers
+       * it while the app runs; the schedule is kept with the app's data and
+       * re-armed at the next launch, which delivers one whose time passed
+       * meanwhile at once. */
+      schedulePersists: boolean;
+      /** Action buttons are shown. */
+      actions: boolean;
+      clicks: boolean;
+      /** A click while the app isn't running launches it and arrives in
+       * `launchNotificationResponses` (macOS, Windows; not Linux, whose
+       * notification servers send clicks to the process that posted). */
+      coldStart: boolean;
+    }
+
+    /** Options of {@linkcode Deno.desktop.notifications.schedule}. */
+    export interface ScheduledNotificationOptions {
+      title: string;
+      body?: string;
+      /** When to deliver it; a time in the past shows it now. */
+      at: Date | number;
+      /** Identifies it to `cancel()` and in responses; a random UUID when
+       * omitted. A later notification with the same tag replaces it. */
+      tag?: string;
+      actions?: NotificationAction[];
+      /** Stored with the notification as JSON (at most 4 KiB). */
+      data?: unknown;
+      /** A `data:` URL (PNG). */
+      icon?: string;
+      silent?: boolean;
+      requireInteraction?: boolean;
+    }
+
+    /** A scheduled notification not delivered yet. */
+    export interface ScheduledNotification {
+      tag: string;
+      title: string;
+      body: string;
+      at: Date;
+      data: unknown;
+      actions: NotificationAction[];
+    }
+
+    /** Scheduled notifications and notification capabilities.
+     *
+     * Mechanisms: macOS `UNUserNotificationCenter` (a calendar or
+     * time-interval trigger), Windows toasts (`ScheduledToastNotification`;
+     * the app registers its AppUserModelID and a COM activator per user, under
+     * `HKCU\Software\Classes`, the first time it posts), Linux
+     * `org.freedesktop.Notifications` with the runtime's own timer. */
+    export const notifications: {
+      capabilities(): NotificationCapabilities;
+      /** Schedule a notification; resolves with its tag. Rejects with
+       * `Deno.errors.NotSupported` where it can't be scheduled. Its clicks
+       * arrive as `"notificationresponse"` events. */
+      schedule(options: ScheduledNotificationOptions): Promise<string>;
+      /** The pending scheduled notifications, soonest first. */
+      getScheduled(): Promise<ScheduledNotification[]>;
+      /** Cancel the scheduled notification `tag`, and remove a delivered one
+       * with that tag from the notification center. */
+      cancel(tag: string): void;
+      /** `Notification.requestPermission()`, plus `{ provisional: true }`:
+       * quiet authorization, which macOS grants without a prompt (the
+       * notifications go to the Notification Center without a banner until
+       * the user keeps them). Windows and Linux have no prompt: their status
+       * is the user's setting / whether a notification server runs. */
+      requestPermission(
+        options?: { provisional?: boolean },
+      ): Promise<"granted" | "denied" | "prompt" | "unsupported">;
+    };
+
+    /** What menus can do here. */
+    export interface MenuCapabilities {
+      appMenu: boolean;
+      /** Application-menu accelerators fire their items from the keyboard. */
+      accelerators: boolean;
+      contextMenu: boolean;
+      /** `showContextMenu()` resolves when the menu closes. */
+      contextClosed: boolean;
+      /** Item icons are drawn. */
+      icons: boolean;
+      /** Item tooltips are shown. */
+      tooltips: boolean;
+    }
+
+    /** The menu capabilities of this backend and OS. */
+    export function menuCapabilities(): MenuCapabilities;
 
     /** Who handles a deep-link scheme, from this app's point of view:
      *
@@ -2069,6 +2248,9 @@ declare namespace Deno {
       | null;
     export let onsecondinstance:
       | ((ev: CustomEvent<SecondInstanceDetail>) => any)
+      | null;
+    export let onnotificationresponse:
+      | ((ev: CustomEvent<NotificationResponseDetail>) => any)
       | null;
 
     export function addEventListener<K extends keyof DesktopEventMap>(

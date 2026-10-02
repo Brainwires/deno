@@ -58,6 +58,11 @@ pub const DESKTOP_JS: &str = r#"
     op_desktop_get_launch_at_login,
     op_desktop_set_launch_at_login,
     op_desktop_devtools_enabled,
+    op_desktop_menu_capabilities,
+    op_desktop_notification_capabilities,
+    op_desktop_schedule_notification,
+    op_desktop_list_scheduled_notifications,
+    op_desktop_cancel_notification,
     op_desktop_request_notification_permission,
     op_desktop_query_notification_permission,
     op_desktop_screens,
@@ -685,6 +690,7 @@ pub const DESKTOP_JS: &str = r#"
   internals.defineEventHandler(BrowserWindowPrototype, "close");
   internals.defineEventHandler(BrowserWindowPrototype, "menuclick");
   internals.defineEventHandler(BrowserWindowPrototype, "contextmenuclick");
+  internals.defineEventHandler(BrowserWindowPrototype, "contextmenuclose");
   internals.defineEventHandler(BrowserWindowPrototype, "maximize");
   internals.defineEventHandler(BrowserWindowPrototype, "unmaximize");
   internals.defineEventHandler(BrowserWindowPrototype, "minimize");
@@ -786,6 +792,41 @@ pub const DESKTOP_JS: &str = r#"
     }
     return await op_desktop_start_drag(this.windowId, [...files], icon);
   };
+  // showContextMenu (laufey API 41): resolves once the menu closed, with the
+  // chosen item's id (null when it was dismissed); a "contextmenuclose"
+  // event (detail { id }) fires then too. One context menu is open at a
+  // time, so the window's close events resolve its calls in order.
+  const nativeShowContextMenu = BrowserWindowPrototype.showContextMenu;
+  const contextMenuWaiters = new WeakMap(); // window -> [{ resolve }]
+  const contextMenuChoice = new WeakMap(); // window -> id of the last click
+  BrowserWindowPrototype.showContextMenu = function showContextMenu(
+    x,
+    y,
+    items,
+  ) {
+    nativeShowContextMenu.call(this, x, y, items);
+    if (!op_desktop_menu_capabilities().contextClosed) {
+      return Promise.resolve(null);
+    }
+    return new Promise((resolve) => {
+      let list = contextMenuWaiters.get(this);
+      if (!list) {
+        list = [];
+        contextMenuWaiters.set(this, list);
+      }
+      list.push(resolve);
+    });
+  };
+  function contextMenuClosed(target) {
+    const id = contextMenuChoice.get(target) ?? null;
+    contextMenuChoice.delete(target);
+    target.dispatchEvent(new CustomEvent("contextmenuclose", {
+      detail: { id },
+    }));
+    const resolve = contextMenuWaiters.get(target)?.shift();
+    if (resolve) resolve(id);
+  }
+
   BrowserWindowPrototype.getScreen = function() {
     const id = this[privateScreenId]();
     if (!id) return null;
@@ -984,7 +1025,30 @@ pub const DESKTOP_JS: &str = r#"
   // until the first listener for it is added (see DesktopLaunchInbox), so a
   // link that arrives while the app is still starting is not lost.
   const desktop = new EventTarget();
-  const LAUNCH_EVENT_TYPES = ["openurl", "openfile", "secondinstance"];
+  const LAUNCH_EVENT_TYPES = [
+    "openurl",
+    "openfile",
+    "secondinstance",
+    "notificationresponse",
+  ];
+  // A notification response's data: the JSON text new Notification() /
+  // schedule() stored, parsed back (undefined if there was none).
+  function notificationResponseDetail(ev) {
+    let data;
+    if (typeof ev.data === "string") {
+      try {
+        data = JSON.parse(ev.data);
+      } catch {
+        data = ev.data;
+      }
+    }
+    return {
+      tag: ev.tag,
+      action: ev.action ?? null,
+      data,
+      launch: ev.launch,
+    };
+  }
   const subscribedLaunchEvents = new Set();
   function dispatchLaunchEvent(ev) {
     switch (ev.kind) {
@@ -996,6 +1060,11 @@ pub const DESKTOP_JS: &str = r#"
       case "openFile":
         desktop.dispatchEvent(new CustomEvent("openfile", {
           detail: { path: ev.path },
+        }));
+        break;
+      case "notificationResponse":
+        desktop.dispatchEvent(new CustomEvent("notificationresponse", {
+          detail: notificationResponseDetail(ev),
         }));
         break;
       case "secondInstance":
@@ -1042,10 +1111,15 @@ pub const DESKTOP_JS: &str = r#"
   let launchTargets = null;
   function getLaunchTargets() {
     if (launchTargets === null) {
-      const { urls, files } = op_desktop_take_launch_targets();
+      const { urls, files, notifications } = op_desktop_take_launch_targets();
       launchTargets = {
         urls: Object.freeze(urls),
         files: Object.freeze(files),
+        notifications: Object.freeze(
+          notifications.map((ev) =>
+            Object.freeze(notificationResponseDetail(ev))
+          ),
+        ),
       };
     }
     return launchTargets;
@@ -1058,6 +1132,13 @@ pub const DESKTOP_JS: &str = r#"
     },
     launchFiles: {
       get() { return getLaunchTargets().files; },
+      configurable: true,
+      enumerable: true,
+    },
+    // Clicks on the app's notifications that arrived before it listened for
+    // "notificationresponse": the click that launched it (laufey API 41).
+    launchNotificationResponses: {
+      get() { return getLaunchTargets().notifications; },
       configurable: true,
       enumerable: true,
     },
@@ -1855,6 +1936,46 @@ pub const DESKTOP_JS: &str = r#"
   Object.setPrototypeOf(NotificationPrototype, EventTarget.prototype);
 
   const notifications = new Map();
+  // An action button was clicked (laufey API 41): `action` is the button's
+  // `action` (the Web Notifications NotificationEvent.action).
+  class NotificationActionEvent extends Event {
+    #action = "";
+    get action() { return this.#action; }
+    constructor(type, init = {}) {
+      super(type, init);
+      this.#action = String(init.action ?? "");
+    }
+  }
+  // The most action buttons a notification shows (Windows' limit; laufey
+  // passes more on macOS and Linux).
+  const MAX_NOTIFICATION_ACTIONS = 5;
+  function normalizeNotificationActions(actions) {
+    if (actions == null) return [];
+    const out = [];
+    for (const a of actions) {
+      if (a == null) continue;
+      const action = String(a.action ?? "");
+      const title = String(a.title ?? "");
+      if (action === "" || title === "") {
+        throw new TypeError(
+          "a notification action needs an `action` and a `title`",
+        );
+      }
+      out.push({ action, title });
+    }
+    return out;
+  }
+  // `data` travels to the OS as JSON text; one that can't be serialized
+  // stays on the object only.
+  function notificationDataText(data) {
+    if (data === undefined || data === null) return undefined;
+    try {
+      const text = JSON.stringify(data);
+      return typeof text === "string" ? text : undefined;
+    } catch {
+      return undefined;
+    }
+  }
   // The Web Notifications API constructor is `new Notification(title, options?)`
   // and shows the notification immediately. The native constructor takes
   // a third arg for pre-decoded icon bytes so the icon URL → bytes step
@@ -1868,7 +1989,16 @@ pub const DESKTOP_JS: &str = r#"
     const t = String(title);
     const opts = options ?? {};
     const iconBytes = decodeDataUrlSync(opts.icon);
-    const instance = new NotificationNative(t, opts, iconBytes ?? undefined);
+    const extra = {
+      actions: normalizeNotificationActions(opts.actions),
+      data: notificationDataText(opts.data),
+    };
+    const instance = new NotificationNative(
+      t,
+      opts,
+      iconBytes ?? undefined,
+      extra,
+    );
     if (instance.notificationId !== 0) {
       notifications.set(instance.notificationId, instance);
     } else {
@@ -1924,7 +2054,15 @@ pub const DESKTOP_JS: &str = r#"
         enumerable: true,
         configurable: true,
       },
-      maxActions: internals.core.propReadOnly(0),
+      maxActions: {
+        get() {
+          return op_desktop_notification_capabilities().actions
+            ? MAX_NOTIFICATION_ACTIONS
+            : 0;
+        },
+        enumerable: true,
+        configurable: true,
+      },
       requestPermission: internals.core.propWritable(function requestPermission(
         cb,
       ) {
@@ -1933,7 +2071,7 @@ pub const DESKTOP_JS: &str = r#"
         // renderer activations cleanly (the OS-level UN dialog lives
         // outside Chromium's activation tracking), so we don't enforce.
         const promise = (async () => {
-          const s = await op_desktop_request_notification_permission();
+          const s = await op_desktop_request_notification_permission(false);
           if (s === "unsupported") {
             // Honest signaling: this OS / backend has no notification
             // permission model. Throw rather than silently returning a
@@ -1963,6 +2101,7 @@ pub const DESKTOP_JS: &str = r#"
 
   internals.defineEventHandler(NotificationPrototype, "show");
   internals.defineEventHandler(NotificationPrototype, "click");
+  internals.defineEventHandler(NotificationPrototype, "action");
   internals.defineEventHandler(NotificationPrototype, "close");
   internals.defineEventHandler(NotificationPrototype, "error");
 
@@ -1971,6 +2110,94 @@ pub const DESKTOP_JS: &str = r#"
     writable: true,
     enumerable: false,
     configurable: true,
+  });
+
+  // Deno.desktop.notifications (laufey API 41): scheduled notifications, the
+  // pending list, cancel, capabilities and quiet authorization. A scheduled
+  // notification is identified by its tag; its clicks (and any click on a
+  // notification no live Notification object owns) arrive as Deno.desktop's
+  // "notificationresponse" event, or in launchNotificationResponses for the
+  // click that launched the app.
+  const notificationsApi = {
+    capabilities() {
+      return op_desktop_notification_capabilities();
+    },
+    async schedule(options) {
+      if (options == null || typeof options !== "object") {
+        throw new TypeError("schedule() needs an options object");
+      }
+      const at = options.at instanceof Date ? options.at.getTime()
+        : Number(options.at);
+      if (!Number.isFinite(at)) {
+        throw new TypeError("schedule(): `at` must be a Date or a time in ms");
+      }
+      const tag = options.tag != null ? String(options.tag)
+        : crypto.randomUUID();
+      const iconBytes = decodeDataUrlSync(options.icon);
+      const accepted = op_desktop_schedule_notification({
+        title: String(options.title ?? ""),
+        body: options.body != null ? String(options.body) : undefined,
+        tag,
+        at,
+        actions: normalizeNotificationActions(options.actions),
+        data: notificationDataText(options.data),
+        silent: options.silent != null ? Boolean(options.silent) : undefined,
+        requireInteraction: options.requireInteraction != null
+          ? Boolean(options.requireInteraction)
+          : undefined,
+      }, iconBytes ?? undefined);
+      if (!accepted) {
+        throw new Deno.errors.NotSupported(
+          "Scheduled notifications are not available here",
+        );
+      }
+      return tag;
+    },
+    async getScheduled() {
+      const list = await op_desktop_list_scheduled_notifications();
+      return list.map((n) => {
+        let data;
+        if (typeof n.data === "string") {
+          try {
+            data = JSON.parse(n.data);
+          } catch {
+            data = n.data;
+          }
+        }
+        return {
+          tag: n.tag,
+          title: n.title,
+          body: n.body,
+          at: new Date(n.at),
+          data,
+          actions: n.actions,
+        };
+      });
+    },
+    cancel(tag) {
+      op_desktop_cancel_notification(String(tag));
+    },
+    async requestPermission(options = undefined) {
+      const s = await op_desktop_request_notification_permission(
+        Boolean(options?.provisional),
+      );
+      if (s === "granted") cachedNotificationPermission = "granted";
+      else if (s === "denied") cachedNotificationPermission = "denied";
+      return s;
+    },
+  };
+  Object.defineProperty(desktop, "notifications", {
+    value: Object.freeze(notificationsApi),
+    configurable: true,
+    enumerable: true,
+  });
+  Object.defineProperty(desktop, "menuCapabilities", {
+    value: function menuCapabilities() {
+      return op_desktop_menu_capabilities();
+    },
+    writable: true,
+    configurable: true,
+    enumerable: false,
   });
 
   // --- navigator.permissions.query (minimal) ---
@@ -2162,7 +2389,14 @@ pub const DESKTOP_JS: &str = r#"
           case "contextMenuClick": {
             const target = windows.get(ev.windowId);
             if (!target) break;
+            contextMenuChoice.set(target, ev.id);
             target.dispatchEvent(new CustomEvent("contextmenuclick", { detail: { id: ev.id } }));
+            break;
+          }
+          case "contextMenuClose": {
+            const target = windows.get(ev.windowId);
+            if (!target) break;
+            contextMenuClosed(target);
             break;
           }
           case "keyboardEvent": {
@@ -2376,7 +2610,8 @@ pub const DESKTOP_JS: &str = r#"
           }
           case "openUrl":
           case "openFile":
-          case "secondInstance": {
+          case "secondInstance":
+          case "notificationResponse": {
             dispatchLaunchEvent(ev);
             break;
           }
@@ -2410,6 +2645,14 @@ pub const DESKTOP_JS: &str = r#"
             const target = notifications.get(ev.notificationId);
             if (!target) break;
             target.dispatchEvent(new Event("click"));
+            break;
+          }
+          case "notificationAction": {
+            const target = notifications.get(ev.notificationId);
+            if (!target) break;
+            target.dispatchEvent(new NotificationActionEvent("action", {
+              action: ev.action,
+            }));
             break;
           }
           case "notificationClose": {
@@ -2875,6 +3118,64 @@ mod tests {
     assert!(DESKTOP_JS.contains("Notification"));
     assert!(DESKTOP_JS.contains("permission"));
     assert!(DESKTOP_JS.contains("requestPermission"));
+  }
+
+  #[test]
+  fn desktop_js_parses() {
+    // Compiles the whole script without running it (its body needs the
+    // runtime's internals): a syntax error anywhere would otherwise only
+    // show at app start.
+    // V8 posts delayed tasks; JsRuntime needs a tokio runtime for them.
+    let tokio = tokio::runtime::Builder::new_current_thread()
+      .enable_all()
+      .build()
+      .unwrap();
+    let _guard = tokio.enter();
+    let mut runtime = deno_core::JsRuntime::new(Default::default());
+    let source = format!(
+      "new Function({});",
+      serde_json::to_string(DESKTOP_JS).unwrap()
+    );
+    runtime
+      .execute_script("desktop_js_parses", source)
+      .expect("DESKTOP_JS has a syntax error");
+  }
+
+  #[test]
+  fn desktop_js_menus_and_notifications_are_wired() {
+    // showContextMenu resolves on the close event with the chosen id.
+    assert!(DESKTOP_JS.contains("case \"contextMenuClose\":"));
+    assert!(DESKTOP_JS.contains("contextMenuChoice.set(target, ev.id);"));
+    assert!(DESKTOP_JS.contains("new CustomEvent(\"contextmenuclose\", {"));
+    assert!(DESKTOP_JS.contains(
+      "defineEventHandler(BrowserWindowPrototype, \"contextmenuclose\")"
+    ));
+    // Actions are their own event, not folded into click.
+    assert!(DESKTOP_JS.contains("case \"notificationAction\":"));
+    assert!(DESKTOP_JS.contains("new NotificationActionEvent(\"action\", {"));
+    assert!(
+      DESKTOP_JS
+        .contains("defineEventHandler(NotificationPrototype, \"action\")")
+    );
+    // Responses ride the launch inbox and the launch snapshot.
+    assert!(DESKTOP_JS.contains("\"notificationresponse\","));
+    assert!(DESKTOP_JS.contains("case \"notificationResponse\":"));
+    // ... both when buffered and from the event loop.
+    assert_eq!(
+      DESKTOP_JS.matches("case \"notificationResponse\":").count(),
+      2
+    );
+    assert!(DESKTOP_JS.contains("launchNotificationResponses:"));
+    for api in [
+      "async schedule(options)",
+      "async getScheduled()",
+      "cancel(tag)",
+      "async requestPermission(options = undefined)",
+      "Object.defineProperty(desktop, \"notifications\"",
+      "Object.defineProperty(desktop, \"menuCapabilities\"",
+    ] {
+      assert!(DESKTOP_JS.contains(api), "{api}");
+    }
   }
 
   #[test]

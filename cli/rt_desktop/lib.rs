@@ -1078,7 +1078,10 @@ impl denort::desktop::DesktopApi for WefDesktopApi {
       .map(desktop_menu_item_to_laufey_menu_item)
       .collect::<Vec<_>>();
     let tx = self.event_tx.clone();
-    laufey::Window::from_id(window_id).show_context_menu(
+    let close_tx = self.event_tx.clone();
+    // laufey API 41: the close callback fires once, after the click (if
+    // any), so JS can resolve showContextMenu() with the chosen id.
+    laufey::Window::from_id(window_id).show_context_menu_with_close(
       x,
       y,
       &menu,
@@ -1087,6 +1090,13 @@ impl denort::desktop::DesktopApi for WefDesktopApi {
           deno_runtime::ops::desktop::DesktopEvent::ContextMenuClick {
             window_id,
             id: id.to_string(),
+          },
+        );
+      },
+      move || {
+        let _ = close_tx.try_send(
+          deno_runtime::ops::desktop::DesktopEvent::ContextMenuClose {
+            window_id,
           },
         );
       },
@@ -1301,75 +1311,40 @@ impl denort::desktop::DesktopApi for WefDesktopApi {
 
   fn show_notification(
     &self,
-    title: &str,
-    body: Option<&str>,
-    icon: Option<&[u8]>,
-    tag: Option<&str>,
-    silent: Option<bool>,
-    require_interaction: Option<bool>,
+    request: &deno_runtime::ops::desktop::NotificationRequest,
   ) -> u32 {
-    let mut builder = laufey::Notification::new(title);
-    if let Some(body) = body {
-      builder = builder.body(body);
-    }
-    if let Some(icon) = icon {
-      builder = builder.icon(icon.to_vec());
-    }
-    if let Some(tag) = tag {
-      builder = builder.tag(tag);
-    }
-    if let Some(silent) = silent {
-      builder = builder.silent(silent);
-    }
-    if let Some(require) = require_interaction {
-      builder = builder.require_interaction(require);
-    }
-
-    // The laufey handler closure receives only the event; it needs the
-    // notification id to route the event through the desktop channel.
-    // We can't know the id until `on_event` returns, so we capture it
-    // through a shared slot populated immediately after.
-    let id_slot: Arc<std::sync::OnceLock<u32>> =
-      Arc::new(std::sync::OnceLock::new());
-    let id_for_handler = id_slot.clone();
     let tx = self.event_tx.clone();
     let notifications = self.notifications.clone();
 
-    let handle = builder.on_event(move |event| {
-      let Some(&nid) = id_for_handler.get() else {
-        return;
-      };
-      use laufey::NotificationEvent;
-      let desktop_event = match event {
-        NotificationEvent::Shown => {
-          deno_runtime::ops::desktop::DesktopEvent::NotificationShow {
+    // The id comes with each event (laufey API 41), so an event that
+    // arrives before on_event_with_id returned is still routed.
+    let handle =
+      notification_builder(request).on_event_with_id(move |nid, event| {
+        use deno_runtime::ops::desktop::DesktopEvent;
+        use laufey::NotificationEvent;
+        let is_terminal = matches!(event, NotificationEvent::Closed);
+        let desktop_event = match event {
+          NotificationEvent::Shown => DesktopEvent::NotificationShow {
             notification_id: nid,
-          }
-        }
-        NotificationEvent::Clicked => {
-          deno_runtime::ops::desktop::DesktopEvent::NotificationClick {
+          },
+          NotificationEvent::Clicked => DesktopEvent::NotificationClick {
             notification_id: nid,
-          }
-        }
-        NotificationEvent::Closed => {
-          deno_runtime::ops::desktop::DesktopEvent::NotificationClose {
+          },
+          NotificationEvent::Closed => DesktopEvent::NotificationClose {
             notification_id: nid,
+          },
+          NotificationEvent::Action(action) => {
+            DesktopEvent::NotificationAction {
+              notification_id: nid,
+              action,
+            }
           }
+        };
+        let _ = tx.try_send(desktop_event);
+        if is_terminal {
+          notifications.lock().unwrap().remove(&nid);
         }
-        // The Web Notification API has no "action" event in window context;
-        // surface action button clicks as a click event for compatibility.
-        NotificationEvent::Action(_) => {
-          deno_runtime::ops::desktop::DesktopEvent::NotificationClick {
-            notification_id: nid,
-          }
-        }
-      };
-      let is_terminal = matches!(event, laufey::NotificationEvent::Closed);
-      let _ = tx.try_send(desktop_event);
-      if is_terminal {
-        notifications.lock().unwrap().remove(&nid);
-      }
-    });
+      });
 
     let id = handle.id();
     if id == 0 {
@@ -1382,9 +1357,93 @@ impl denort::desktop::DesktopApi for WefDesktopApi {
       );
       return 0;
     }
-    let _ = id_slot.set(id);
     self.notifications.lock().unwrap().insert(id, handle);
     id
+  }
+
+  fn schedule_notification(
+    &self,
+    request: &deno_runtime::ops::desktop::NotificationRequest,
+  ) -> bool {
+    // No live callback: its clicks reach the response handler (registered
+    // at startup), whichever run of the app they happen in.
+    notification_builder(request).show().id() != 0
+  }
+
+  fn list_scheduled_notifications(
+    &self,
+  ) -> deno_runtime::ops::desktop::DesktopFuture<
+    Vec<deno_runtime::ops::desktop::ScheduledNotificationInfo>,
+  > {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    laufey::list_scheduled_notifications(move |list| {
+      let _ = tx.send(list);
+    });
+    Box::pin(async move {
+      rx.await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|n| deno_runtime::ops::desktop::ScheduledNotificationInfo {
+          tag: n.tag,
+          title: n.title,
+          body: n.body,
+          at: n.at_ms,
+          data: n.data,
+          actions: n
+            .actions
+            .into_iter()
+            .map(|a| deno_runtime::ops::desktop::NotificationActionInfo {
+              action: a.id,
+              title: a.title,
+            })
+            .collect(),
+        })
+        .collect()
+    })
+  }
+
+  fn cancel_notification(&self, tag: &str) {
+    laufey::cancel_notification(tag);
+  }
+
+  fn notification_capabilities(
+    &self,
+  ) -> deno_runtime::ops::desktop::NotificationCapabilitiesInfo {
+    let c = laufey::notification_capabilities();
+    deno_runtime::ops::desktop::NotificationCapabilitiesInfo {
+      show: c.show(),
+      schedule: c.schedule(),
+      schedule_persists: c.schedule_persists(),
+      actions: c.actions(),
+      clicks: c.clicks(),
+      cold_start: c.cold_start(),
+    }
+  }
+
+  fn menu_capabilities(
+    &self,
+  ) -> deno_runtime::ops::desktop::MenuCapabilitiesInfo {
+    let c = laufey::menu_capabilities();
+    deno_runtime::ops::desktop::MenuCapabilitiesInfo {
+      app_menu: c.app_menu(),
+      accelerators: c.accelerators(),
+      context_menu: c.context_menu(),
+      context_closed: c.context_closed(),
+      icons: c.icons(),
+      tooltips: c.tooltips(),
+    }
+  }
+
+  fn request_provisional_notification_permission(
+    &self,
+    cb: Box<
+      dyn FnOnce(deno_runtime::ops::desktop::PermissionState) + Send + 'static,
+    >,
+  ) {
+    laufey::request_permission(
+      laufey::PermissionKind::NotificationsProvisional,
+      move |status| cb(map_permission_status(status)),
+    );
   }
 
   fn close_notification(&self, notification_id: u32) {
@@ -1464,6 +1523,38 @@ fn laufey_backdrop(backdrop: i32, material: i32) -> Option<laufey::Backdrop> {
     }),
     _ => return None,
   })
+}
+
+/// The laufey notification a request describes.
+fn notification_builder(
+  request: &deno_runtime::ops::desktop::NotificationRequest,
+) -> laufey::Notification {
+  let mut builder = laufey::Notification::new(request.title.clone());
+  if let Some(body) = &request.body {
+    builder = builder.body(body.clone());
+  }
+  if let Some(icon) = &request.icon {
+    builder = builder.icon(icon.clone());
+  }
+  if let Some(tag) = &request.tag {
+    builder = builder.tag(tag.clone());
+  }
+  if let Some(silent) = request.silent {
+    builder = builder.silent(silent);
+  }
+  if let Some(require) = request.require_interaction {
+    builder = builder.require_interaction(require);
+  }
+  for action in &request.actions {
+    builder = builder.action(action.action.clone(), action.title.clone());
+  }
+  if let Some(data) = &request.data {
+    builder = builder.data(data.clone());
+  }
+  if let Some(at) = request.schedule_at_ms {
+    builder = builder.schedule_at_ms(at);
+  }
+  builder
 }
 
 fn map_permission_status(
@@ -2266,6 +2357,19 @@ fn register_launch_handlers(
         open_inbox.open_file(path.to_string_lossy().into_owned())
       }
     }
+  });
+
+  // A click on a notification no live `Notification` owns (laufey API 41):
+  // one an earlier run posted, a scheduled one, or the click that launched
+  // the app, which laufey held until this registration.
+  let response_inbox = inbox.clone();
+  laufey::set_notification_response_handler(move |response| {
+    response_inbox.notification_response(
+      response.tag,
+      response.action,
+      response.data,
+      response.launch,
+    );
   });
 
   // A later launch of the app, forwarded by laufey's single-instance lock
