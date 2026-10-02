@@ -154,7 +154,15 @@ where the changes are discussed.
     are main-scope only (laufey API 42, which also stops WebKitGTK's
     custom-scheme writes from blocking the event loop).
 
-The runtime-side parts (1-3, 5-15) are what the prebuilt `libdenort` carries.
+16. **`fix(desktop)`: `Notification.close()` no longer deadlocks** — it
+    held the runtime's notification map lock while the backend waited for
+    the thread whose close event takes that lock (found by the e2e suite).
+17. **`fix(desktop)`: the update helper waits for the install's processes
+    on Windows** — a CEF subprocess outliving its browser process kept the
+    install directory from being renamed, failing the rollback of an
+    unconfirmed trial (found by the e2e suite).
+
+The runtime-side parts (1-3, 5-17) are what the prebuilt `libdenort` carries.
 The CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` /
 `LAUFEY_APP_ID` into a packaged app's launchers) are in the branch too, but a
 stock CLI does not run them; denext's own launcher provides that environment.
@@ -324,3 +332,14 @@ What a hosted runner cannot do, reported `n/a` with the reason:
 | Key presses on macOS without an Accessibility grant | macOS refuses synthesized events (checked with `AXIsProcessTrusted`) |
 | `.msi` on macOS / Linux | the stock CLI builds `.msi` only for Windows |
 | An unwritable install on Windows | the runner is an administrator |
+
+Open findings the suite reports as failures (laufey's hosts, not this
+fork's runtime; the root cause is in each case shown by the suite):
+
+| Failing check | Where | Cause |
+| --- | --- | --- |
+| origin: the page's WebSocket through the relay, a cross-origin fetch to loopback | CEF, every OS | Chromium 149's Local Network Access checks: a custom-scheme page is a "public" origin, so its requests to `127.0.0.1` wait for a permission CEF never grants. The same app launched with `--disable-features=LocalNetworkAccessChecks,LocalNetworkAccessChecksWebSockets` passes (the suite records that run as a note). Fix in laufey's CEF hosts: grant the permission to the app origin, or that switch. |
+| menus: the app hangs once a context menu is open | CEF, Windows | the runtime's event loop stops (not even a timer fires) from the moment `showContextMenu()` returns while `TrackPopupMenu`'s modal loop runs on CEF's UI thread; likely a synchronous call into that UI thread, whose CEF tasks don't run inside the nested loop. WebView2 is fine. |
+| menus: choosing a context-menu item from the keyboard | WebView2, Windows | `win32_menu::ShowContextMenu` doesn't make the owner window foreground before `TrackPopupMenu` (KB135788), so the menu may not get keyboard input. |
+| dnd: a file dialog closes on abort | Windows | in some runs `IFileDialog::Close` requested on laufey's I/O thread doesn't end the dialog (its window exists 0.2-0.4 s after it opens, the abort comes at 2 s, it is still open 15 s later), so the promise never settles. |
+
