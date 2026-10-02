@@ -161,11 +161,33 @@ fn js(e: UpdateError) -> JsErrorBox {
   JsErrorBox::generic(e.to_string())
 }
 
-fn config(state: &OpState) -> AppUpdateConfig {
+/// The update configuration of the packaged desktop app this runtime runs.
+///
+/// Only the desktop runtime (`cli/rt_desktop`) puts an [`AppUpdateConfig`]
+/// into the `OpState`. Everywhere else (a plain `deno run`, `deno serve`, a
+/// worker) the `Deno.desktop.updater` ops are still reachable through
+/// `Deno[Deno.internal].core.ops`, so they must not touch the running
+/// executable's install (its path, its update state file, its staging
+/// directory) there: that would read and delete files with no permission.
+fn host(state: &OpState) -> Result<AppUpdateConfig, UpdateError> {
   state
     .try_borrow::<AppUpdateConfig>()
     .cloned()
-    .unwrap_or_default()
+    .ok_or_else(|| {
+      UpdateError::new(
+        Code::NotConfigured,
+        "full-app updates are only available in a packaged desktop app",
+      )
+    })
+}
+
+/// [`host`] plus everything an update step needs ([`ready`]): an identifier,
+/// a version and a baked update public key. Every step that reads or writes
+/// the install goes through this gate.
+fn gate(state: &OpState) -> Result<(AppUpdateConfig, Ready), UpdateError> {
+  let config = host(state)?;
+  let ready = ready(&config)?;
+  Ok((config, ready))
 }
 
 fn session(state: &mut OpState) -> &SessionCell {
@@ -198,13 +220,18 @@ pub struct InfoOut {
 #[op2]
 #[serde]
 pub fn op_desktop_app_update_info(state: &mut OpState) -> InfoOut {
-  let config = config(state);
+  update_info(state)
+}
+
+fn update_info(state: &mut OpState) -> InfoOut {
+  let config = host(state).unwrap_or_default();
   let staged_version = session(state).0.borrow().staged.clone();
-  let ready = ready(&config);
-  let layout = match &ready {
-    Ok(r) => Some(r.layout.clone()),
-    Err(_) => layout_of(&config).ok(),
-  };
+  let ready = gate(state).map(|(_, ready)| ready);
+  // The install (its path, kind and update state) is reported only to an
+  // app the updater can act for: outside a packaged, configured app this
+  // would hand out the running executable's location and read files next to
+  // it without a read permission.
+  let layout = ready.as_ref().ok().map(|r| r.layout.clone());
   let st = layout.as_ref().and_then(swap::read_state);
   InfoOut {
     configured: ready.is_ok(),
@@ -248,7 +275,15 @@ pub fn op_desktop_app_update_check(
   #[buffer] manifest_bytes: &[u8],
   allow_insecure_loopback: bool,
 ) -> Result<CheckOut, JsErrorBox> {
-  let ready = ready(&config(state)).map_err(js)?;
+  update_check(state, manifest_bytes, allow_insecure_loopback)
+}
+
+fn update_check(
+  state: &mut OpState,
+  manifest_bytes: &[u8],
+  allow_insecure_loopback: bool,
+) -> Result<CheckOut, JsErrorBox> {
+  let (_, ready) = gate(state).map_err(js)?;
   let rejected = swap::read_state(&ready.layout).and_then(|s| s.rejected);
   let verdict = manifest::verify_manifest(
     manifest_bytes,
@@ -300,7 +335,11 @@ pub struct BeginOut {
 pub fn op_desktop_app_update_begin(
   state: &mut OpState,
 ) -> Result<BeginOut, JsErrorBox> {
-  let config = config(state);
+  update_begin(state)
+}
+
+fn update_begin(state: &mut OpState) -> Result<BeginOut, JsErrorBox> {
+  let (_, ready) = gate(state).map_err(js)?;
   let mut session = session(state).0.borrow_mut();
   if session.sink.is_some() || session.staging {
     return Err(js(UpdateError::new(
@@ -314,7 +353,6 @@ pub fn op_desktop_app_update_begin(
       "no verified update: call check() first",
     )));
   };
-  let ready = ready(&config).map_err(js)?;
   let layout = &ready.layout;
   layout::check_writable(layout).map_err(js)?;
   let mut st =
@@ -361,13 +399,15 @@ pub fn op_desktop_app_update_begin(
 }
 
 fn abort_download(state: &mut OpState) {
-  let config = config(state);
+  let gated = gate(state);
   let mut session = session(state).0.borrow_mut();
   session.sink = None;
   session.archive = None;
   session.staged = None;
-  if let Ok(layout) = layout_of(&config) {
-    swap::remove_path(&layout.staging_dir());
+  // Only a configured app has a staging directory of its own: never delete
+  // anything next to a plain `deno` executable.
+  if let Ok((_, ready)) = gated {
+    swap::remove_path(&ready.layout.staging_dir());
   }
 }
 
@@ -439,7 +479,7 @@ pub async fn op_desktop_app_update_stage(
 ) -> Result<StageOut, JsErrorBox> {
   let (ready, update, archive) = {
     let mut s = state.borrow_mut();
-    let config = config(&s);
+    let (_, ready) = gate(&s).map_err(js)?;
     let cell = session(&mut s);
     let mut session = cell.0.borrow_mut();
     if session.staging {
@@ -453,7 +493,6 @@ pub async fn op_desktop_app_update_stage(
         "nothing downloaded: call check() and download() first",
       )));
     };
-    let ready = ready(&config).map_err(js)?;
     session.staging = true;
     (ready, update, archive)
   };
@@ -586,7 +625,11 @@ fn verify_os_signature(
 pub fn op_desktop_app_update_apply(
   state: &mut OpState,
 ) -> Result<(), JsErrorBox> {
-  let config = config(state);
+  update_apply(state)
+}
+
+fn update_apply(state: &mut OpState) -> Result<(), JsErrorBox> {
+  let (config, ready) = gate(state).map_err(js)?;
   let staged = session(state).0.borrow().staged.clone();
   let Some(version) = staged else {
     return Err(js(UpdateError::new(
@@ -594,7 +637,7 @@ pub fn op_desktop_app_update_apply(
       "nothing staged in this run: call check(), download() and stage()",
     )));
   };
-  let layout = layout_of(&config).map_err(js)?;
+  let layout = ready.layout;
   let Some(mut st) = swap::read_state(&layout)
     .filter(|s| s.phase == Phase::Staged && s.to.as_deref() == Some(&version))
   else {
@@ -621,7 +664,21 @@ pub fn op_desktop_app_update_apply(
 pub fn op_desktop_app_update_confirm(
   state: &mut OpState,
 ) -> Result<bool, JsErrorBox> {
-  let config = config(state);
+  update_confirm(state)
+}
+
+fn update_confirm(state: &mut OpState) -> Result<bool, JsErrorBox> {
+  // Confirming needs the app (its identity), not the update key: an updated
+  // version that no longer bakes a key must still be able to confirm itself,
+  // or the next launch would roll it back. Outside a packaged app, nothing
+  // was ever swapped by this runtime and nothing next to the executable is
+  // touched.
+  let Ok(config) = host(state) else {
+    return Ok(false);
+  };
+  if config.app_id.is_none() {
+    return Ok(false);
+  }
   let layout = match layout_of(&config) {
     Ok(l) => l,
     // Not a replaceable install: nothing was ever swapped here.
@@ -747,5 +804,144 @@ mod tests {
     ] {
       assert_eq!(ready(&broken).err().unwrap().code, Code::NotConfigured);
     }
+  }
+
+  /// A fake packaged app under a temp dir: the executable's path, and the
+  /// install layout `detect_install` derives from it.
+  fn fake_app(tmp: &tempfile::TempDir) -> (PathBuf, InstallLayout) {
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    let exe = if cfg!(target_os = "macos") {
+      root.join("Fake.app/Contents/MacOS/fake")
+    } else {
+      root
+        .join("Fake")
+        .join(if cfg!(windows) { "fake.exe" } else { "fake" })
+    };
+    std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+    std::fs::write(&exe, b"").unwrap();
+    let layout = layout::detect_install(&exe, &AppImageEnv::default()).unwrap();
+    (exe, layout)
+  }
+
+  fn host_config(exe: PathBuf, public_key: Option<&str>) -> AppUpdateConfig {
+    AppUpdateConfig {
+      app_id: Some("com.example.fake".into()),
+      version: Some("1.0.0".into()),
+      public_key: public_key.map(str::to_string),
+      current_exe: Some(exe),
+      ..Default::default()
+    }
+  }
+
+  fn code_of(e: JsErrorBox) -> String {
+    e.to_string()
+  }
+
+  // Outside a packaged desktop app (a plain `deno run`, where the ops are
+  // still reachable through `Deno[Deno.internal].core.ops`) every step
+  // refuses before it looks at the running executable's install.
+  #[test]
+  fn ops_refuse_without_a_desktop_host() {
+    let mut state = OpState::new(None);
+    let info = update_info(&mut state);
+    assert!(!info.configured);
+    assert!(
+      info
+        .reason
+        .as_deref()
+        .unwrap()
+        .contains("packaged desktop app")
+    );
+    assert_eq!(info.install, None);
+    assert_eq!(info.kind, None);
+    assert_eq!(info.phase, None);
+    assert_eq!(info.app_id, None);
+
+    let refused = |r: Result<(), JsErrorBox>| {
+      let msg = code_of(r.unwrap_err());
+      assert!(msg.contains("not_configured"), "{msg}");
+    };
+    refused(update_check(&mut state, b"{}", false).map(|_| ()));
+    refused(update_begin(&mut state).map(|_| ()));
+    refused(update_apply(&mut state));
+    assert!(!update_confirm(&mut state).unwrap());
+    abort_download(&mut state);
+  }
+
+  // A packaged app without an update key: the updater is off, and neither
+  // the install's path nor its update state is reported or touched.
+  #[test]
+  fn unconfigured_app_keeps_its_install_private() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (exe, layout) = fake_app(&tmp);
+    let staging = layout.staging_dir();
+    std::fs::create_dir_all(&staging).unwrap();
+    let mut st = UpdateState::new(&layout);
+    st.phase = Phase::Swapped;
+    st.to = Some("2.0.0".into());
+    swap::write_state(&layout, &st).unwrap();
+
+    let mut state = OpState::new(None);
+    state.put(host_config(exe, None));
+    let info = update_info(&mut state);
+    assert!(!info.configured);
+    assert!(info.reason.as_deref().unwrap().contains("public key"));
+    assert_eq!(info.app_id.as_deref(), Some("com.example.fake"));
+    assert_eq!(info.install, None);
+    assert_eq!(info.phase, None);
+    assert_eq!(info.pending_version, None);
+
+    abort_download(&mut state);
+    assert!(
+      staging.exists(),
+      "abort deleted an unconfigured app's files"
+    );
+    let msg = code_of(update_begin(&mut state).err().unwrap());
+    assert!(msg.contains("not_configured"), "{msg}");
+  }
+
+  // Confirming needs only the app's identity: an updated version that no
+  // longer bakes a key still confirms itself instead of rolling back.
+  #[test]
+  fn confirm_needs_the_app_not_the_key() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (exe, layout) = fake_app(&tmp);
+    let mut st = UpdateState::new(&layout);
+    st.phase = Phase::Swapped;
+    st.to = Some("2.0.0".into());
+    swap::write_state(&layout, &st).unwrap();
+
+    let mut state = OpState::new(None);
+    state.put(AppUpdateConfig {
+      app_id: None,
+      ..host_config(exe.clone(), None)
+    });
+    assert!(!update_confirm(&mut state).unwrap());
+    assert_eq!(swap::read_state(&layout).unwrap().phase, Phase::Swapped);
+
+    let mut state = OpState::new(None);
+    state.put(host_config(exe, None));
+    assert!(update_confirm(&mut state).unwrap());
+    assert_eq!(swap::read_state(&layout).unwrap().phase, Phase::Idle);
+  }
+
+  // A configured app sees its own install and owns its staging directory.
+  #[test]
+  fn configured_app_reports_its_install_and_clears_staging() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (exe, layout) = fake_app(&tmp);
+    let staging = layout.staging_dir();
+    std::fs::create_dir_all(&staging).unwrap();
+
+    let mut state = OpState::new(None);
+    state.put(host_config(exe, Some("key")));
+    let info = update_info(&mut state);
+    assert!(info.configured, "{:?}", info.reason);
+    assert_eq!(
+      info.install.as_deref(),
+      Some(layout.install.to_string_lossy().as_ref())
+    );
+    abort_download(&mut state);
+    assert!(!staging.exists());
   }
 }

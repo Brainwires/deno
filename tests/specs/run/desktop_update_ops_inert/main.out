@@ -1,0 +1,8 @@
+info: false null null null null
+check: not_configured
+begin: not_configured
+apply: not_configured
+stage: not_configured
+confirm: false
+write: not_staged
+finish: not_staged
