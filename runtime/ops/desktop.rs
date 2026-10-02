@@ -7492,8 +7492,8 @@ mod tests {
       drop(conn);
     });
     // As the runtime binaries do at startup (cli/rt/lib.rs).
-    let _ = deno_tls::rustls::crypto::aws_lc_rs::default_provider()
-      .install_default();
+    let _ =
+      deno_tls::rustls::crypto::aws_lc_rs::default_provider().install_default();
     let client = deno_fetch::create_http_client(
       "deno-test",
       deno_fetch::CreateHttpClientOptions::default(),
