@@ -13,20 +13,20 @@ on:
         type: string
         default: all
       laufey_ref:
-        description: "Brainwires/laufey commit to build the backend hosts from (empty = the pinned LAUFEY_SHA)"
+        description: 'Brainwires/laufey commit to build the backend hosts from (empty = the pinned LAUFEY_SHA)'
         type: string
-        default: ""
+        default: ''
       reuse_denort_run_id:
-        description: "Skip the libdenort build and take its artifacts from this earlier run id"
+        description: 'Skip the libdenort build and take its artifacts from this earlier run id'
         type: string
-        default: ""
+        default: ''
       reuse_laufey_run_id:
-        description: "Skip the laufey build and take its artifacts from this earlier run id"
+        description: 'Skip the laufey build and take its artifacts from this earlier run id'
         type: string
-        default: ""
+        default: ''
   push:
     tags:
-      - "denext-runtime-v*"
+      - 'denext-runtime-v*'
 
 permissions:
   contents: read
@@ -182,7 +182,7 @@ jobs:
         working-directory: laufey
         env:
           # Keep in sync with LSMinimumSystemVersion in webview/macos/Info.plist.in.
-          MACOSX_DEPLOYMENT_TARGET: "10.15"
+          MACOSX_DEPLOYMENT_TARGET: '10.15'
         run: |
           if [ "${{ runner.os }}" = Windows ]; then
             WEBVIEW2_ROOT="$(pwd)/$(ls -d packages/Microsoft.Web.WebView2.* | head -1)" make webview
@@ -267,7 +267,7 @@ jobs:
         shell: bash
     env:
       CARGO_TERM_COLOR: always
-      CARGO_INCREMENTAL: "0"
+      CARGO_INCREMENTAL: '0'
     steps:
       - name: Configure git
         run: |

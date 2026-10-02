@@ -1,17 +1,17 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 
-// denext fork (Brainwires/deno): 45 more than upstream's 44, the
+// denext fork (Brainwires/deno): 48 more than upstream's 44, the
 // `Deno.desktop` ops the fork adds to NOT_IMPORTED_OPS in 99_main.js (launch
 // targets and events, scheme registration, passkeys, the rich clipboard, drag
 // out, file dialogs, shortcuts, launch at login, DevTools, menus, scheduled
-// notifications, screens, window capabilities, quit / close, and
-// Deno.desktop.updater). The desktop JS that cli/rt evaluates after bootstrap
+// notifications, screens, window capabilities, quit / close, auth sessions,
+// runOnMainThread, and Deno.desktop.updater). The desktop JS that cli/rt evaluates after bootstrap
 // reaches them through `core.ops`, so they survive removeImportedOps() like
 // upstream's own desktop ops.
-const EXPECTED_OP_COUNT = 89;
+const EXPECTED_OP_COUNT = 92;
 // The main scope minus WORKER_EXCLUDED_OPS in 99_main.js: upstream strips the
 // two text-clipboard ops from workers, and the fork strips every new
-// main-scope-only desktop op (43), leaving 2 more than upstream's 20
+// main-scope-only desktop op (46), leaving 2 more than upstream's 20
 // (op_desktop_screens and op_desktop_window_capabilities, both read-only).
 const EXPECTED_WORKER_OP_COUNT = 22;
 

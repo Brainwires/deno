@@ -154,8 +154,7 @@ impl deno_runtime::ops::desktop::DesktopMainThread for LaufeyMainThread {
       // vouches for the signature (see DesktopMainThread::call).
       let f: unsafe extern "C" fn(
         *mut std::ffi::c_void,
-      ) -> *mut std::ffi::c_void =
-        unsafe { std::mem::transmute(function) };
+      ) -> *mut std::ffi::c_void = unsafe { std::mem::transmute(function) };
       // SAFETY: as above; this runs on the UI thread, where the caller asked
       // for it to run.
       unsafe { f(context as *mut std::ffi::c_void) as usize }

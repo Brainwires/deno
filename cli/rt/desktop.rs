@@ -3453,19 +3453,22 @@ mod tests {
     assert!(DESKTOP_JS.contains("op_desktop_auth_session_capabilities()"));
     // Exactly one callback; an error outcome becomes an AuthSessionError
     // with its code; the window option is shared with passkeys.
-    assert!(DESKTOP_JS.contains(
-      "(scheme === undefined) === (callbackUrl === undefined)"
-    ));
+    assert!(
+      DESKTOP_JS
+        .contains("(scheme === undefined) === (callbackUrl === undefined)")
+    );
     assert!(DESKTOP_JS.contains("error.name = \"AuthSessionError\";"));
     assert!(
-      DESKTOP_JS.contains("throw authSessionError(outcome.code, outcome.message);")
+      DESKTOP_JS
+        .contains("throw authSessionError(outcome.code, outcome.message);")
     );
     assert!(DESKTOP_JS.contains(
       "op_desktop_auth_session_start(\n        passkeyWindowId(options),"
     ));
     // runOnMainThread takes FFI pointers, resolves with a bigint.
     assert!(
-      DESKTOP_JS.contains(r#"Object.defineProperty(desktop, "runOnMainThread""#)
+      DESKTOP_JS
+        .contains(r#"Object.defineProperty(desktop, "runOnMainThread""#)
     );
     assert!(DESKTOP_JS.contains("fn instanceof Deno.UnsafeFnPointer"));
     assert!(DESKTOP_JS.contains(

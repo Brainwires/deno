@@ -3161,8 +3161,7 @@ fn op_desktop_run_on_main_thread(
   function: *mut std::ffi::c_void,
   context: *mut std::ffi::c_void,
 ) -> Result<
-  impl std::future::Future<Output = Result<String, deno_error::JsErrorBox>>
-  + use<>,
+  impl std::future::Future<Output = Result<String, deno_error::JsErrorBox>> + use<>,
   deno_error::JsErrorBox,
 > {
   let main_thread = {
@@ -4652,13 +4651,13 @@ mod tests {
   use deno_core::serde_json;
   use deno_core::serde_json::json;
 
+  use super::AUTH_SESSION_NOT_SUPPORTED_MESSAGE;
+  use super::AuthSessionCapabilitiesInfo;
+  use super::AuthSessionOutcome;
   use super::BrowserWindow;
   use super::DesktopEvent;
   use super::DesktopValue;
   use super::MenuItem;
-  use super::AUTH_SESSION_NOT_SUPPORTED_MESSAGE;
-  use super::AuthSessionCapabilitiesInfo;
-  use super::AuthSessionOutcome;
   use super::PASSKEY_NOT_SUPPORTED_ENVELOPE;
   use super::PasskeyCapabilitiesInfo;
   use super::PendingBindResponses;
