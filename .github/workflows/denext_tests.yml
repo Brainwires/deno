@@ -18,7 +18,10 @@
 #            the `#[ignore]`d LaunchServices scheme-registration test on the
 #            throwaway macOS runner.
 #   - unit / specs: `cargo test -p unit_tests --test unit` and
-#            `cargo test -p specs_tests --test specs` (2 shards) against them.
+#            `cargo test -p specs_tests --test specs` (2 shards) against them;
+#            on Linux also `integration` (2 shards) and `unit_node`.
+# - macOS x64 (macos-15-intel) and Linux arm64 (ubuntu-22.04-arm), the other
+#   two release architectures: build + libs only.
 #
 # The test harness asks Deno's "hashy" service whether a test input hash
 # already passed and PUTs one when it did (tests/util/lib/hash.rs). That is
@@ -32,9 +35,12 @@ on:
       - 'denext/**'
       - 'ci/**'
       - 'rel/**'
+      - 'feat/**'
+      - 'fix/**'
   pull_request:
     branches:
       - 'denext/**'
+      - 'rel/**'
   workflow_dispatch:
 
 permissions:
@@ -110,3 +116,19 @@ jobs:
     uses: ./.github/workflows/denext_tests_os.yml
     with:
       os: ubuntu-22.04
+
+  # The other two release architectures: the debug build and the lib tests
+  # (the desktop, updater and config crates included).
+  macos-x64:
+    name: macos-15-intel
+    uses: ./.github/workflows/denext_tests_os.yml
+    with:
+      os: macos-15-intel
+      libs_only: true
+
+  linux-arm64:
+    name: ubuntu-22.04-arm
+    uses: ./.github/workflows/denext_tests_os.yml
+    with:
+      os: ubuntu-22.04-arm
+      libs_only: true

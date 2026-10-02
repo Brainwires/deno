@@ -528,20 +528,9 @@ impl<'a> DenoCompileBinaryWriter<'a> {
     if !self.is_desktop {
       return Ok(None);
     }
-    let Some(key) = self
-      .cli_options
-      .start_dir
-      .to_desktop_config()
-      .ok()
-      .and_then(|c| c.update.as_ref()?.public_key.clone())
-    else {
-      return Ok(None);
-    };
-    deno_runtime::ops::desktop_update::manifest::parse_public_key(&key)
-      .map_err(|e| {
-        deno_core::anyhow::anyhow!("invalid desktop.update.publicKey: {e}")
-      })?;
-    Ok(Some(key.trim().to_string()))
+    update_public_key_from_config(
+      self.cli_options.start_dir.to_desktop_config(),
+    )
   }
 
   pub async fn write_bin(
@@ -2078,11 +2067,34 @@ fn set_windows_binary_to_gui(bin: &mut [u8]) -> Result<(), AnyError> {
   Ok(())
 }
 
+/// The update public key a desktop build bakes in: `desktop.update.publicKey`
+/// trimmed, after checking that it parses. A desktop config that does not
+/// parse is an error, never "no key": dropping the key silently would ship an
+/// app whose updater is quietly off.
+fn update_public_key_from_config<E: std::fmt::Display>(
+  config: Result<&deno_config::deno_json::DesktopConfig, E>,
+) -> Result<Option<String>, AnyError> {
+  let config = config.map_err(|e| {
+    deno_core::anyhow::anyhow!(
+      "invalid desktop config, so desktop.update.publicKey can't be read: {e}"
+    )
+  })?;
+  let Some(key) = config.update.as_ref().and_then(|u| u.public_key.clone())
+  else {
+    return Ok(None);
+  };
+  deno_runtime::ops::desktop_update::manifest::parse_public_key(&key).map_err(
+    |e| deno_core::anyhow::anyhow!("invalid desktop.update.publicKey: {e}"),
+  )?;
+  Ok(Some(key.trim().to_string()))
+}
+
 #[cfg(test)]
 mod tests {
   use super::check_desktop_app_identity;
   use super::default_app_name;
   use super::runtime_archive_name;
+  use super::update_public_key_from_config;
   use crate::args::JavaScriptEngine;
 
   #[test]
@@ -2131,5 +2143,66 @@ mod tests {
     assert_eq!(default_app_name("speedgraph.dylib", true), "speedgraph");
     assert_eq!(default_app_name("speedgraph.so", true), "speedgraph");
     assert_eq!(default_app_name("speed.graph.so", true), "speed.graph");
+  }
+
+  #[test]
+  fn update_public_key_comes_from_a_valid_config_only() {
+    use deno_config::deno_json::DesktopConfig;
+    use deno_config::deno_json::DesktopUpdateConfig;
+    const KEY: &str = "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEu5luQoCWV/y9l8enmIN8mS+FDQRqxgQXJMYMm63fzCJeBOEIXLPtHA10rb+x74DWIOlqf1C4ao4xBJb+vnyQsw==";
+    let with_key = |key: &str| DesktopConfig {
+      update: Some(DesktopUpdateConfig {
+        public_key: Some(key.to_string()),
+      }),
+      ..Default::default()
+    };
+    // No update section, or no key: no key, not an error.
+    assert_eq!(
+      update_public_key_from_config::<String>(Ok(&DesktopConfig::default()))
+        .unwrap(),
+      None
+    );
+    assert_eq!(
+      update_public_key_from_config::<String>(Ok(&DesktopConfig {
+        update: Some(DesktopUpdateConfig { public_key: None }),
+        ..Default::default()
+      }))
+      .unwrap(),
+      None
+    );
+    // A valid key is trimmed; a PEM is accepted as written.
+    assert_eq!(
+      update_public_key_from_config::<String>(Ok(&with_key(&format!(
+        "  {KEY}\n"
+      ))))
+      .unwrap()
+      .as_deref(),
+      Some(KEY)
+    );
+    let pem = format!(
+      "-----BEGIN PUBLIC KEY-----\n{}\n{}\n-----END PUBLIC KEY-----",
+      &KEY[..64],
+      &KEY[64..]
+    );
+    assert_eq!(
+      update_public_key_from_config::<String>(Ok(&with_key(&pem)))
+        .unwrap()
+        .as_deref(),
+      Some(pem.as_str())
+    );
+    // A key that does not parse fails the build.
+    let err = update_public_key_from_config::<String>(Ok(&with_key("nope")))
+      .unwrap_err()
+      .to_string();
+    assert!(err.contains("invalid desktop.update.publicKey"), "{err}");
+    // A desktop config that does not parse fails the build too: the key is
+    // never dropped silently (an app whose updater is quietly off).
+    let err = update_public_key_from_config::<String>(Err(
+      "desktop.update: invalid type".to_string(),
+    ))
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("invalid desktop config"), "{err}");
+    assert!(err.contains("desktop.update: invalid type"), "{err}");
   }
 }

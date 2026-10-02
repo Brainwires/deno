@@ -1,8 +1,10 @@
 # Builds denext's patched Deno Desktop runtime (libdenort from this branch +
 # laufey's webview and CEF backend hosts) for five targets, smoke-tests each
-# archive with the STOCK `deno desktop` CLI, attests it, and on a
-# `denext-runtime-v*` tag publishes a GitHub Release with SHA256SUMS and a
-# manifest.json. See DENEXT.md.
+# archive with the STOCK `deno desktop` CLI, runs the e2e suite, attests it,
+# and on a `denext-runtime-v*` tag publishes a GitHub Release with SHA256SUMS
+# and a manifest.json. It runs on every push to a release branch (rel/**),
+# nightly on the default branch, by hand, and on a tag, which publishes only
+# when `denext tests` passed on the tagged commit. See DENEXT.md.
 name: denext runtime
 
 on:
@@ -29,15 +31,24 @@ on:
         type: string
         default: ''
   push:
+    branches:
+      - 'rel/**'
     tags:
       - 'denext-runtime-v*'
+  schedule:
+    # Nightly, on the default branch (the released line).
+    - cron: '17 6 * * *'
 
 permissions:
   contents: read
+  # setup reads the `denext tests` runs of a tagged commit.
+  actions: read
 
 concurrency:
   group: denext-runtime-${{ github.ref }}-${{ inputs.targets }}-${{ inputs.reuse_denort_run_id }}-${{ inputs.reuse_laufey_run_id }}
-  cancel-in-progress: ${{ github.event_name == 'workflow_dispatch' }}
+  # A newer push to the same branch (or a new dispatch) supersedes a run; a
+  # tag's run and the nightly are never cancelled.
+  cancel-in-progress: ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref_type == 'branch') }}
 
 env:
   # laufey `denext/integration` as of the first runtime release.
@@ -67,8 +78,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TARGETS: ${{ inputs.targets || 'all' }}
           LAUFEY_REF: ${{ inputs.laufey_ref }}
-          EVENT: ${{ github.event_name }}
+          REF_TYPE: ${{ github.ref_type }}
           REF_NAME: ${{ github.ref_name }}
+          SHA: ${{ github.sha }}
+          REPO: ${{ github.repository }}
           RUN_NUMBER: ${{ github.run_number }}
         run: |
           set -euo pipefail
@@ -84,12 +97,21 @@ jobs:
             base64 -d | sed -n 's/^#define LAUFEY_API_VERSION \([0-9]*\).*/\1/p')
           test -n "$laufey_api"
 
-          if [ "$EVENT" = push ]; then
+          if [ "$REF_TYPE" = tag ]; then
             version=${REF_NAME#denext-runtime-v}
             case "$version" in
               "$deno_version"-denext.*) ;;
               *) echo "::error::tag $REF_NAME does not match deno $deno_version (want denext-runtime-v$deno_version-denext.N)"; exit 1 ;;
             esac
+            # A release needs a green `denext tests` run (lint, libs, unit,
+            # specs on 3 OSes) of exactly the tagged commit, from its branch
+            # push or a dispatch.
+            passed=$(gh api "repos/$REPO/actions/workflows/denext_tests.yml/runs?head_sha=$SHA&status=success&per_page=1" --jq .total_count)
+            if [ "${passed:-0}" -lt 1 ]; then
+              echo "::error::no successful 'denext tests' run for $SHA: push the commit to a rel/** or denext/** branch (or dispatch denext_tests.yml on it) and wait for it to pass before tagging"
+              exit 1
+            fi
+            echo "denext tests passed for $SHA"
             TARGETS=all
           else
             version="$deno_version-denext.0-ci.$RUN_NUMBER"

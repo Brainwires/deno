@@ -1,0 +1,17 @@
+{
+  "tests": {
+    // The fork's Deno.desktop APIs type-check as documented with --desktop.
+    "valid": {
+      "args": "check --desktop valid.ts",
+      "output": "Check [WILDCARD]valid.ts\n",
+      "exitCode": 0
+    },
+    // ... and misuses are type errors (a wrong option, a wrong return use,
+    // a removed member).
+    "invalid": {
+      "args": "check --desktop invalid.ts",
+      "output": "invalid.out",
+      "exitCode": 1
+    }
+  }
+}

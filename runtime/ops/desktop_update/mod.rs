@@ -421,6 +421,10 @@ pub fn op_desktop_app_update_write(
   state: &mut OpState,
   #[buffer] chunk: &[u8],
 ) -> Result<f64, JsErrorBox> {
+  update_write(state, chunk)
+}
+
+fn update_write(state: &mut OpState, chunk: &[u8]) -> Result<f64, JsErrorBox> {
   let result = {
     let mut session = session(state).0.borrow_mut();
     match session.sink.as_mut() {
@@ -481,25 +485,8 @@ pub async fn op_desktop_app_update_stage(
   state: Rc<RefCell<OpState>>,
   allow_unsigned_dev: bool,
 ) -> Result<StageOut, JsErrorBox> {
-  let (ready, update, archive) = {
-    let mut s = state.borrow_mut();
-    let (_, ready) = gate(&s).map_err(js)?;
-    let cell = session(&mut s);
-    let mut session = cell.0.borrow_mut();
-    if session.staging {
-      return Err(js(UpdateError::new(Code::Busy, "already staging")));
-    }
-    let (Some(update), Some(archive)) =
-      (session.verified.clone(), session.archive.clone())
-    else {
-      return Err(js(UpdateError::new(
-        Code::NotStaged,
-        "nothing downloaded: call check() and download() first",
-      )));
-    };
-    session.staging = true;
-    (ready, update, archive)
-  };
+  let (ready, update, archive) =
+    stage_start(&mut state.borrow_mut()).map_err(js)?;
   let layout = ready.layout.clone();
   let from = ready.version.clone();
   let to = update.version.clone();
@@ -530,6 +517,30 @@ pub async fn op_desktop_app_update_stage(
       Err(js(e))
     }
   }
+}
+
+/// The synchronous half of [`op_desktop_app_update_stage`]: one stage at a
+/// time, only of a verified and fully downloaded update; marks the session
+/// as staging.
+fn stage_start(
+  s: &mut OpState,
+) -> Result<(Ready, VerifiedUpdate, PathBuf), UpdateError> {
+  let (_, ready) = gate(s)?;
+  let cell = session(s);
+  let mut session = cell.0.borrow_mut();
+  if session.staging {
+    return Err(UpdateError::new(Code::Busy, "already staging"));
+  }
+  let (Some(update), Some(archive)) =
+    (session.verified.clone(), session.archive.clone())
+  else {
+    return Err(UpdateError::new(
+      Code::NotStaged,
+      "nothing downloaded: call check() and download() first",
+    ));
+  };
+  session.staging = true;
+  Ok((ready, update, archive))
 }
 
 fn stage_blocking(
@@ -1000,6 +1011,153 @@ mod tests {
     state.put(host_config(exe, None));
     assert!(update_confirm(&mut state).unwrap());
     assert_eq!(swap::read_state(&layout).unwrap().phase, Phase::Idle);
+  }
+
+  fn verified(size: u64) -> VerifiedUpdate {
+    VerifiedUpdate {
+      version: "2.0.0".into(),
+      min_version: None,
+      required: false,
+      platform: "test".into(),
+      url: "https://example.com/app.tar.gz".into(),
+      sha256: "00".repeat(32),
+      size,
+      release_notes: None,
+      published_at: "2026-10-02T00:00:00Z".into(),
+    }
+  }
+
+  fn configured(tmp: &tempfile::TempDir) -> (OpState, InstallLayout) {
+    let (exe, layout) = fake_app(tmp);
+    let mut state = OpState::new(None);
+    state.put(host_config(exe, Some("key")));
+    (state, layout)
+  }
+
+  fn expect_code<T>(r: Result<T, JsErrorBox>, code: &str) {
+    let msg = match r {
+      Ok(_) => panic!("expected {code}, got Ok"),
+      Err(e) => code_of(e),
+    };
+    assert!(msg.contains(code), "expected {code}: {msg}");
+  }
+
+  // begin(): only a verified update; one download or stage at a time; never
+  // while an installed update awaits confirmation.
+  #[test]
+  fn begin_needs_a_verified_update_and_an_idle_session() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut state, layout) = configured(&tmp);
+    expect_code(update_begin(&mut state), "not_staged");
+
+    session(&mut state).0.borrow_mut().verified = Some(verified(4));
+    let out = update_begin(&mut state).unwrap();
+    assert_eq!(out.version, "2.0.0");
+    assert!(layout.staging_dir().join("download.part").exists());
+    // A second begin() while that download is open is busy, and leaves it.
+    expect_code(update_begin(&mut state), "busy");
+    assert!(session(&mut state).0.borrow().sink.is_some());
+
+    // So is begin() while a stage runs.
+    abort_download(&mut state);
+    session(&mut state).0.borrow_mut().staging = true;
+    expect_code(update_begin(&mut state), "busy");
+    session(&mut state).0.borrow_mut().staging = false;
+
+    for phase in [Phase::Swapped, Phase::Swapping, Phase::RollingBack] {
+      let mut st = UpdateState::new(&layout);
+      st.phase = phase;
+      st.to = Some("2.0.0".into());
+      swap::write_state(&layout, &st).unwrap();
+      expect_code(update_begin(&mut state), "busy");
+      // The awaiting install is left as it was.
+      assert_eq!(swap::read_state(&layout).unwrap().phase, phase);
+    }
+  }
+
+  // A stage left by an earlier run is never applied blind: begin() starts
+  // over from Idle.
+  #[test]
+  fn begin_resets_an_earlier_runs_stage() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut state, layout) = configured(&tmp);
+    let mut st = UpdateState::new(&layout);
+    st.phase = Phase::Staged;
+    st.to = Some("1.5.0".into());
+    st.entry = Some("old-entry".into());
+    swap::write_state(&layout, &st).unwrap();
+
+    session(&mut state).0.borrow_mut().verified = Some(verified(4));
+    update_begin(&mut state).unwrap();
+    let st = swap::read_state(&layout).unwrap();
+    assert_eq!(st.phase, Phase::Idle);
+    assert_eq!(st.entry, None);
+    let session = session(&mut state).0.borrow();
+    assert!(session.sink.is_some());
+    assert_eq!(session.archive, None);
+    assert_eq!(session.staged, None);
+  }
+
+  // write() / finish() without a download: not_staged, and the session is
+  // left alone; a write past the declared size aborts the download.
+  #[test]
+  fn write_and_finish_need_a_download() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut state, layout) = configured(&tmp);
+    let write = update_write;
+    expect_code(write(&mut state, b"x"), "not_staged");
+    session(&mut state).0.borrow_mut().verified = Some(verified(4));
+    update_begin(&mut state).unwrap();
+    assert_eq!(write(&mut state, b"ab").unwrap(), 2.0);
+    // Past the declared size: refused, and the download is dropped.
+    assert!(write(&mut state, b"cdefg").is_err());
+    assert!(session(&mut state).0.borrow().sink.is_none());
+    assert!(!layout.staging_dir().exists());
+    expect_code(write(&mut state, b"x"), "not_staged");
+  }
+
+  // stage(): one at a time, only of a downloaded update.
+  #[test]
+  fn stage_needs_a_download_and_no_other_stage() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut state, _layout) = configured(&tmp);
+    let code = |r: Result<_, UpdateError>| r.err().unwrap().code;
+    assert_eq!(code(stage_start(&mut state)), Code::NotStaged);
+    session(&mut state).0.borrow_mut().verified = Some(verified(4));
+    assert_eq!(code(stage_start(&mut state)), Code::NotStaged);
+    session(&mut state).0.borrow_mut().archive =
+      Some(tmp.path().join("download.part"));
+    let (_, update, _) = stage_start(&mut state).unwrap();
+    assert_eq!(update.version, "2.0.0");
+    assert!(session(&mut state).0.borrow().staging);
+    // A second stage while the first runs is busy.
+    assert_eq!(code(stage_start(&mut state)), Code::Busy);
+  }
+
+  // apply(): only what this run staged, and only while the install still
+  // records that stage.
+  #[test]
+  fn apply_needs_this_runs_stage() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut state, layout) = configured(&tmp);
+    expect_code(update_apply(&mut state), "not_staged");
+
+    session(&mut state).0.borrow_mut().staged = Some("2.0.0".into());
+    // Nothing recorded on disk: the stage is gone.
+    expect_code(update_apply(&mut state), "not_staged");
+    // A stage of another version, or a phase other than Staged, is not it.
+    for (phase, to) in [
+      (Phase::Staged, "3.0.0"),
+      (Phase::Idle, "2.0.0"),
+      (Phase::Swapped, "2.0.0"),
+    ] {
+      let mut st = UpdateState::new(&layout);
+      st.phase = phase;
+      st.to = Some(to.into());
+      swap::write_state(&layout, &st).unwrap();
+      expect_code(update_apply(&mut state), "not_staged");
+      assert_eq!(swap::read_state(&layout).unwrap().phase, phase);
+    }
   }
 
   // A configured app sees its own install and owns its staging directory.

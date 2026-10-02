@@ -1,0 +1,28 @@
+{
+  "tests": {
+    // DENO_SERVE_ADDRESS=memory:<name> (what the desktop runtime sets) puts
+    // Deno.serve on the in-process memory transport in any `deno run`: a
+    // listener only this process's own Rust side can connect to, so it needs
+    // no net permission and opens no socket.
+    "listens_in_process": {
+      "args": "run listen.ts",
+      "envs": { "DENO_SERVE_ADDRESS": "memory:spec-mem" },
+      "output": "listen.out",
+      "exitCode": 0
+    },
+    "default_log": {
+      "args": "run default_log.ts",
+      "envs": { "DENO_SERVE_ADDRESS": "memory:spec-log" },
+      "output": "default_log.out",
+      "exitCode": 0
+    },
+    // A TCP server never takes a request that claims the memory transport
+    // (`http+memory://` in the absolute-form target): only a real memory
+    // connection produces that scheme, and a handler may trust it.
+    "tcp_refuses_forged_memory_target": {
+      "args": "run --allow-net=127.0.0.1 forged.ts",
+      "output": "forged.out",
+      "exitCode": 0
+    }
+  }
+}

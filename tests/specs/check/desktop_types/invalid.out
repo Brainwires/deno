@@ -1,0 +1,19 @@
+Check [WILDCARD]invalid.ts
+TS2339 [ERROR]: Property 'then' does not exist on type 'boolean'.
+d.authSession.cancel().then(() => {});
+                       ~~~~
+    at [WILDCARD]invalid.ts:3:24
+
+TS2322 [ERROR]: Type 'number' is not assignable to type 'boolean | undefined'.
+d.authSession.start({ url: "https://x", callbackScheme: "x", ephemeral: 1 });
+                                                             ~~~~~~~~~
+    at [WILDCARD]invalid.ts:5:62
+
+TS2322 [ERROR]: Type '"nope"' is not assignable to type 'AppUpdateErrorCode'.
+const code: Deno.desktop.AppUpdateErrorCode = "nope";
+      ~~~~
+    at [WILDCARD]invalid.ts:7:7
+
+Found 3 errors.
+
+error: Type checking failed.

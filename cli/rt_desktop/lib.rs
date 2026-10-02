@@ -265,6 +265,15 @@ impl CloseBook {
 }
 
 impl WefDesktopApi {
+  /// The unified dev-mode DevTools window while it is open. Each lock is
+  /// taken and released in turn (never nested, never held across a native
+  /// call).
+  fn open_devtools_window(&self) -> Option<u32> {
+    let id = (*self.devtools_window.lock().unwrap())?;
+    let closed = self.closed_windows.lock().unwrap().contains(&id);
+    (!closed).then_some(id)
+  }
+
   /// Set up all event handlers on a newly created window, wiring events
   /// into the shared event channel.
   fn close_book(&self) -> CloseBook {
@@ -639,10 +648,9 @@ impl denort::desktop::DesktopApi for WefDesktopApi {
     }
     if let Ok(mux) = env::var("DENO_DESKTOP_MUX_WS") {
       // Reuse an existing DevTools window when one is already open, so
-      // repeated `openDevtools()` calls don't pile up windows.
-      if let Some(id) = *self.devtools_window.lock().unwrap()
-        && !self.closed_windows.lock().unwrap().contains(&id)
-      {
+      // repeated `openDevtools()` calls don't pile up windows. The id is
+      // copied out first: no lock is held across the native call.
+      if let Some(id) = self.open_devtools_window() {
         laufey::Window::from_id(id).focus();
         return;
       }
@@ -993,8 +1001,12 @@ impl denort::desktop::DesktopApi for WefDesktopApi {
   fn close_devtools(&self, window_id: u32) {
     if env::var("DENO_DESKTOP_MUX_WS").is_ok() {
       // `openDevtools()` opened the unified DevTools window (dev mode).
-      if let Some(id) = self.devtools_window.lock().unwrap().take()
-        && !self.closed_windows.lock().unwrap().contains(&id)
+      // Take the id and release both locks BEFORE closing: the native close
+      // runs the window's close handlers, which take `closed_windows` (the
+      // Notification.close() deadlock had the same shape).
+      let id = self.devtools_window.lock().unwrap().take();
+      if let Some(id) = id
+        && !self.is_closed(id)
       {
         laufey::Window::from_id(id).close();
       }
@@ -1005,10 +1017,7 @@ impl denort::desktop::DesktopApi for WefDesktopApi {
 
   fn is_devtools_open(&self, window_id: u32) -> bool {
     if env::var("DENO_DESKTOP_MUX_WS").is_ok() {
-      return matches!(
-        *self.devtools_window.lock().unwrap(),
-        Some(id) if !self.closed_windows.lock().unwrap().contains(&id)
-      );
+      return self.open_devtools_window().is_some();
     }
     laufey::Window::from_id(window_id).is_devtools_open()
   }
