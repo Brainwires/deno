@@ -1,10 +1,11 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 // e2e: Deno.desktop.runOnMainThread and Deno.desktop.authSession (laufey API
-// 42). runOnMainThread is proven to run on the UI thread (and not the
+// 42, cancel() 43). runOnMainThread is proven to run on the UI thread (and not the
 // JavaScript thread) with each OS's own thread id; authSession runs a real
 // ASWebAuthenticationSession on macOS against a loopback identity provider
 // (an ephemeral session, so no prompt), then busy and the anchor window
-// closing (cancelled); Windows and Linux have no OS auth session and must
+// closing (cancelled), then the app cancelling (cancel(), after which the
+// next session completes); Windows and Linux have no OS auth session and must
 // say so (not_supported).
 
 // deno-lint-ignore-file no-explicit-any
@@ -214,9 +215,16 @@ await r.step("runOnMainThread", async () => {
 await r.step("authSession", async () => {
   const a = desktop.authSession;
   r.check(
-    "Deno.desktop.authSession is frozen with capabilities / start",
+    "Deno.desktop.authSession is frozen with capabilities / start / cancel",
     typeof a === "object" && Object.isFrozen(a) &&
-      JSON.stringify(Object.keys(a).sort()) === '["capabilities","start"]',
+      JSON.stringify(Object.keys(a).sort()) ===
+        '["cancel","capabilities","start"]',
+  );
+  // laufey API 43: cancel() with nothing running is a no-op answering false
+  // (always so where no session can run).
+  r.check(
+    "cancel() with no session running answers false",
+    a.cancel() === false,
   );
   const caps = a.capabilities();
   r.set("capabilities", caps);
@@ -347,6 +355,44 @@ await r.step("authSession", async () => {
       ? closed.value
       : "still pending 20 s after the window closed",
   );
+  // The app gives up (laufey API 43): cancel() closes the sheet, the session
+  // ends cancelled exactly once, a second cancel() finds nothing, and the
+  // next session is not busy: it completes a real round trip.
+  await sleep(1000);
+  const running = rejects(() =>
+    a.start({ url: `${idp}/wait`, callbackScheme: "dnxasmt", ephemeral: true })
+  );
+  await sleep(1500);
+  const cancelled = a.cancel();
+  const again = a.cancel();
+  const ended = await within(running, 20000);
+  r.check(
+    "cancel() ends the running session as AuthSessionError(cancelled), once",
+    cancelled === true && again === false && "value" in ended &&
+      String(ended.value).startsWith("AuthSessionError(cancelled)"),
+    {
+      cancelled,
+      again,
+      ended: "value" in ended
+        ? ended.value
+        : "still pending 20 s after cancel()",
+    },
+  );
+  const next = await within(
+    a.start({
+      url: `${idp}/redirect?state=s2`,
+      callbackScheme: "dnxasmt",
+      ephemeral: true,
+    }).catch((e: Error) => describeError(e)),
+    60000,
+  );
+  r.check(
+    "the session after a cancel() completes (not busy)",
+    "value" in next &&
+      (next.value as any)?.url === "dnxasmt://cb?code=probe-code&state=s2",
+    "value" in next ? next.value : "no answer in 60 s",
+  );
+  r.check("cancel() after it completed answers false", a.cancel() === false);
 });
 
 await r.step("workers and permissions", async () => {
@@ -363,8 +409,9 @@ await r.step("workers and permissions", async () => {
   });
   w.terminate();
   r.check(
-    "workers have neither authSession nor runOnMainThread",
-    got?.authSession === "undefined" && got?.runOnMainThread === "undefined",
+    "workers have neither authSession nor runOnMainThread (nor the cancel op)",
+    got?.authSession === "undefined" && got?.runOnMainThread === "undefined" &&
+      got?.cancelOp === "undefined",
     got,
   );
   const nat = nativeSymbols();

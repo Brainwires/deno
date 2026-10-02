@@ -2138,7 +2138,8 @@ declare namespace Deno {
      *
      * - **macOS** (10.15+): `ASWebAuthenticationSession`, a sheet on the
      *   app's window backed by Safari (or the default browser when it
-     *   supports it). Closing the sheet rejects with `cancelled`.
+     *   supports it). Closing the sheet, or `cancel()`, rejects with
+     *   `cancelled`.
      * - **Windows, Linux**: the OS has no equivalent; `capabilities()`
      *   reports none and `start()` rejects with `not_supported`. RFC 8252
      *   says to open the system browser and receive the redirect through a
@@ -2173,6 +2174,13 @@ declare namespace Deno {
       /** Run a sign-in; resolves with the callback URL, rejects with an
        * {@linkcode AuthSessionError}. */
       start(options: AuthSessionStartOptions): Promise<{ url: string }>;
+      /** End the running session because the app gave up on it (the page
+       * cancelled, a timeout): its sheet closes and its `start()` rejects
+       * with an {@linkcode AuthSessionError} of code `cancelled`, exactly
+       * once; the next session can start. Returns `false`, and does
+       * nothing, when no session is running, which is always the case on
+       * Windows and Linux. */
+      cancel(): boolean;
     };
 
     /**

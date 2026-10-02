@@ -153,6 +153,10 @@ where the changes are discussed.
     `--allow-ffi` and rejects instead of hanging once the app is quitting. Both
     are main-scope only (laufey API 42, which also stops WebKitGTK's
     custom-scheme writes from blocking the event loop).
+    `Deno.desktop.authSession.cancel()` (laufey API 43) ends the running session
+    when the app gives up on it: the sheet closes and `start()` rejects with
+    `cancelled`, exactly once; it returns `false` when no session is running
+    (always on Windows and Linux).
 
 16. **`fix(desktop)`: `Notification.close()` no longer deadlocks** — it held the
     runtime's notification map lock while the backend waited for the thread
@@ -174,7 +178,9 @@ bodies, launch config, open-url / single instance, passkeys, the window API with
 littledivy/laufey#80 and #81, drag and drop / file dialogs / rich clipboard,
 global shortcuts / launch at login / DevTools control, menu accelerators /
 notifications, UI-thread tasks / auth sessions / non-blocking WebKitGTK scheme
-bodies, Windows bindgen fix), at the commit pinned by `LAUFEY_SHA` in the
+bodies, Windows bindgen fix, and API 43: auth session cancel, Local Network
+Access for the registered custom-scheme origins on CEF, Windows menu and
+file-dialog fixes, CEF file drops), at the commit pinned by `LAUFEY_SHA` in the
 workflow (or the `laufey_ref` input).
 
 laufey's `init_api` rejects any C ABI version mismatch between the runtime and
@@ -317,7 +323,9 @@ in the job summary, never skipped silently. Areas:
   argument refusals, `--allow-ffi`; `authSession`: argument refusals, on macOS a
   real ephemeral `ASWebAuthenticationSession` against a loopback identity
   provider ending at the callback, `busy`, and the anchor window closing
-  (`cancelled`); `not_supported` on Windows and Linux; neither in workers.
+  (`cancelled`), the app's `cancel()` (`cancelled` once, then `false`, and the
+  next session completes); `cancel()` with nothing running is `false` on every
+  OS; `not_supported` on Windows and Linux; neither in workers.
 - **update** — full-app self-update with throwaway keys and a throwaway TLS CA:
   hostile manifests and archives refused with their codes and the install
   untouched, an unwritable install, 1.0.0 -> 2.0.0 relaunch and confirm, a 3.0.0
@@ -339,12 +347,18 @@ What a hosted runner cannot do, reported `n/a` with the reason:
 | `.msi` on macOS / Linux                             | the stock CLI builds `.msi` only for Windows                                                                           |
 | An unwritable install on Windows                    | the runner is an administrator                                                                                         |
 
-Open findings the suite reports as failures (laufey's hosts, not this fork's
-runtime; the root cause is in each case shown by the suite):
+The suite's first full run found four failures in laufey's hosts (not in this
+fork's runtime), all fixed in laufey `denext/integration` at API 43 and now
+checked on every leg:
 
-| Failing check                                                                    | Where             | Cause                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
-| -------------------------------------------------------------------------------- | ----------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| origin: the page's WebSocket through the relay, a cross-origin fetch to loopback | CEF, every OS     | Chromium 149's Local Network Access checks: a custom-scheme page is a "public" origin, so its requests to `127.0.0.1` wait for a permission CEF never grants. The same app launched with `--disable-features=LocalNetworkAccessChecks,LocalNetworkAccessChecksWebSockets` passes (the suite records that run as a note). Fix (decided): laufey's CEF hosts grant local-network access to the app's own registered custom-scheme origin only; Local Network Access stays on for everything else. |
-| menus: the app hangs once a context menu is open                                 | CEF, Windows      | the runtime's event loop stops (not even a timer fires) from the moment `showContextMenu()` returns while `TrackPopupMenu`'s modal loop runs on CEF's UI thread; likely a synchronous call into that UI thread, whose CEF tasks don't run inside the nested loop. WebView2 is fine.                                                                                                                                                                                                             |
-| menus: choosing a context-menu item from the keyboard                            | WebView2, Windows | `win32_menu::ShowContextMenu` doesn't make the owner window foreground before `TrackPopupMenu` (KB135788), so the menu may not get keyboard input.                                                                                                                                                                                                                                                                                                                                              |
-| dnd: a file dialog closes on abort                                               | Windows           | in some runs `IFileDialog::Close` requested on laufey's I/O thread doesn't end the dialog (its window exists 0.2-0.4 s after it opens, the abort comes at 2 s, it is still open 15 s later), so the promise never settles.                                                                                                                                                                                                                                                                      |
+- origin, CEF on every OS: the page's WebSocket through the relay and a
+  cross-origin fetch to loopback were held by Chromium's Local Network Access
+  checks (a custom-scheme page is a "public" origin). The CEF hosts grant
+  local-network access to the app's own registered custom-scheme origins only;
+  the checks stay on for everything else.
+- menus, CEF on Windows: the runtime's event loop stopped while
+  `TrackPopupMenu`'s modal loop ran on CEF's UI thread (task starvation).
+- menus, WebView2: keyboard selection in a context menu (the owner window is
+  made foreground first, KB135788).
+- dnd, Windows: an aborted file dialog did not always close, so its promise
+  never settled.

@@ -1,5 +1,6 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
-// Auth sessions and native code on the UI thread (laufey API 42): one
+// Auth sessions and native code on the UI thread (laufey API 42; the
+// app's cancel() 43): one
 // launch; the app makes the checks (apps/asmt/main.ts).
 
 import {

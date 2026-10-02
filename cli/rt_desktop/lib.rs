@@ -54,7 +54,7 @@ use denort::run::RunOptions;
 /// makes the failure mode obvious instead of "the desktop app silently won't
 /// launch".
 const _: () = assert!(
-  laufey::LAUFEY_API_VERSION == 42,
+  laufey::LAUFEY_API_VERSION == 43,
   "LAUFEY_API_VERSION mismatch: update this assert and the prebuilt backend release pin in cli/tools/desktop.rs when laufey bumps its API version",
 );
 
@@ -133,6 +133,11 @@ impl deno_runtime::ops::desktop::DesktopAuthSession for LaufeyAuthSession {
         Err(e) => AuthSessionOutcome::error(e.kind.code(), e.message),
       }
     })
+  }
+
+  fn cancel(&self) -> bool {
+    // API 43: the session's start() future resolves Cancelled, once.
+    laufey::auth_session_cancel()
   }
 }
 

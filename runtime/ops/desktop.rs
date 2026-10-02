@@ -981,6 +981,11 @@ pub trait DesktopAuthSession: Send + Sync + 'static {
   ) -> std::pin::Pin<
     Box<dyn std::future::Future<Output = AuthSessionOutcome> + Send>,
   >;
+  /// End the running session as `cancelled` (the app gave up on it): its
+  /// sheet closes and its `start` future resolves with the `cancelled`
+  /// outcome, exactly once. Returns false, and does nothing, when no session
+  /// is running (always so where sessions are not supported).
+  fn cancel(&self) -> bool;
 }
 
 /// Running native code on the app's UI thread, behind
@@ -3150,6 +3155,22 @@ async fn op_desktop_auth_session_start(
   }
 }
 
+/// `Deno.desktop.authSession.cancel()`: true when a running session was
+/// ended (its `start()` rejects with code `cancelled`), false when none was
+/// running or the runtime has no OS auth sessions.
+#[op2(fast)]
+fn op_desktop_auth_session_cancel(
+  state: std::rc::Rc<std::cell::RefCell<OpState>>,
+) -> bool {
+  auth_session_cancel(&state)
+}
+
+fn auth_session_cancel(
+  state: &std::rc::Rc<std::cell::RefCell<OpState>>,
+) -> bool {
+  desktop_auth_session(state).is_some_and(|a| a.cancel())
+}
+
 /// `Deno.desktop.runOnMainThread(fn, context)`: calls the native function on
 /// the UI thread and resolves with its return value (a decimal string the JS
 /// side turns into a bigint). Full trust: it needs `--allow-ffi`, like
@@ -4600,6 +4621,7 @@ deno_core::extension!(
     op_desktop_passkey_request,
     op_desktop_auth_session_capabilities,
     op_desktop_auth_session_start,
+    op_desktop_auth_session_cancel,
     op_desktop_run_on_main_thread,
     op_desktop_resolve_bind_call,
     op_desktop_reject_bind_call,
@@ -6347,6 +6369,97 @@ mod tests {
     );
     // The fallback answer points at the system browser, as laufey's does.
     assert!(AUTH_SESSION_NOT_SUPPORTED_MESSAGE.contains("RFC 8252"));
+  }
+
+  /// A stand-in for laufey's one-slot auth session: `cancel()` resolves the
+  /// running session's future with `cancelled` and frees the slot.
+  #[derive(Default)]
+  struct OneSlotAuthSession {
+    running: std::sync::Mutex<
+      Option<tokio::sync::oneshot::Sender<AuthSessionOutcome>>,
+    >,
+  }
+
+  impl super::DesktopAuthSession for OneSlotAuthSession {
+    fn capabilities(&self) -> AuthSessionCapabilitiesInfo {
+      AuthSessionCapabilitiesInfo::default()
+    }
+
+    fn start(
+      &self,
+      _window_id: u32,
+      _url: String,
+      _callback: String,
+      _ephemeral: bool,
+    ) -> std::pin::Pin<
+      Box<dyn std::future::Future<Output = AuthSessionOutcome> + Send>,
+    > {
+      let (tx, rx) = tokio::sync::oneshot::channel();
+      let mut slot = self.running.lock().unwrap();
+      if slot.is_some() {
+        return Box::pin(async { AuthSessionOutcome::error("busy", "busy") });
+      }
+      *slot = Some(tx);
+      Box::pin(async move {
+        rx.await
+          .unwrap_or_else(|_| AuthSessionOutcome::error("failed", "x"))
+      })
+    }
+
+    fn cancel(&self) -> bool {
+      match self.running.lock().unwrap().take() {
+        Some(tx) => {
+          let _ = tx.send(AuthSessionOutcome::error("cancelled", "cancelled"));
+          true
+        }
+        None => false,
+      }
+    }
+  }
+
+  #[tokio::test]
+  async fn auth_session_cancel_ends_the_running_session_once() {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    use std::sync::Arc;
+
+    use deno_core::OpState;
+
+    // No auth session in the runtime (not a desktop app): nothing to cancel.
+    let state = Rc::new(RefCell::new(OpState::new(None)));
+    assert!(!super::auth_session_cancel(&state));
+
+    let auth = Arc::new(OneSlotAuthSession::default());
+    state
+      .borrow_mut()
+      .put::<Arc<dyn super::DesktopAuthSession>>(auth.clone());
+    // Nothing running: false, a no-op.
+    assert!(!super::auth_session_cancel(&state));
+
+    let pending = super::DesktopAuthSession::start(
+      auth.as_ref(),
+      0,
+      "https://idp.example/authorize".into(),
+      "myapp".into(),
+      true,
+    );
+    assert!(super::auth_session_cancel(&state));
+    // Exactly once: the slot is free again.
+    assert!(!super::auth_session_cancel(&state));
+    assert_eq!(
+      pending.await,
+      AuthSessionOutcome::error("cancelled", "cancelled")
+    );
+    // The next session is not busy, and can be cancelled in its turn.
+    let next = super::DesktopAuthSession::start(
+      auth.as_ref(),
+      0,
+      "https://idp.example/authorize".into(),
+      "myapp".into(),
+      true,
+    );
+    assert!(super::auth_session_cancel(&state));
+    assert_eq!(next.await.code.as_deref(), Some("cancelled"));
   }
 
   #[test]

@@ -33,6 +33,7 @@ pub const DESKTOP_JS: &str = r#"
     op_desktop_passkey_request,
     op_desktop_auth_session_capabilities,
     op_desktop_auth_session_start,
+    op_desktop_auth_session_cancel,
     op_desktop_run_on_main_thread,
     op_desktop_resolve_bind_call,
     op_desktop_reject_bind_call,
@@ -1279,6 +1280,12 @@ pub const DESKTOP_JS: &str = r#"
       );
       if (outcome.ok) return { url: outcome.url };
       throw authSessionError(outcome.code, outcome.message);
+    },
+    // The app gives up on the running session (the page cancelled, a
+    // timeout): its sheet closes and its start() rejects with code
+    // "cancelled", once. False when no session is running.
+    cancel: function cancel() {
+      return op_desktop_auth_session_cancel();
     },
   });
   Object.defineProperty(desktop, "authSession", {
@@ -3465,6 +3472,8 @@ mod tests {
     assert!(DESKTOP_JS.contains(
       "op_desktop_auth_session_start(\n        passkeyWindowId(options),"
     ));
+    // cancel() ends the running session (laufey API 43), false when none.
+    assert!(DESKTOP_JS.contains("return op_desktop_auth_session_cancel();"));
     // runOnMainThread takes FFI pointers, resolves with a bigint.
     assert!(
       DESKTOP_JS
