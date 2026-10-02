@@ -97,10 +97,15 @@ await r.step("window API", async () => {
 
   r.check(
     "a frameless panel is a new window; the next plain one adopts the initial window",
+    // WebKitGTK can report the initial page's innerWidth / innerHeight as
+    // 0 (it loaded before the window was mapped): its outer size counts
+    // then, as for the initialWindow check above.
     panelInfo.panel !== panelInfo.adopted &&
       Math.abs(panelInfo.panelSize[0] - 240) <= 2 &&
-      Math.abs(panelInfo.adoptedSize[0] - initial.innerWidth) <= 2 &&
-      Math.abs(panelInfo.adoptedSize[1] - initial.innerHeight) <= 40,
+      (Math.abs(panelInfo.adoptedSize[0] - initial.innerWidth) <= 2 ||
+        Math.abs(panelInfo.adoptedSize[0] - initial.outerWidth) <= 2) &&
+      (Math.abs(panelInfo.adoptedSize[1] - initial.innerHeight) <= 40 ||
+        Math.abs(panelInfo.adoptedSize[1] - initial.outerHeight) <= 40),
     { panelInfo, initial },
   );
 

@@ -80,6 +80,11 @@ pub const MAX_HELPER_ATTEMPTS: u32 = 3;
 /// leave the install.
 #[cfg(windows)]
 pub const HELPER_WAIT_INSTALL_PROCESSES: Duration = Duration::from_secs(60);
+
+/// How long a startup cleanup waits for processes still running from the
+/// failed install (the rollback helper that relaunched the app, exiting).
+#[cfg(windows)]
+const HELPER_EXIT_GRACE: Duration = Duration::from_secs(5);
 const STATE_SCHEMA: u32 = 1;
 
 /// Where an update is.
@@ -361,6 +366,22 @@ pub fn tree_digest(root: &Path) -> std::io::Result<String> {
 /// [`is_install_copy`]); `true` when nothing is left there. Anything else at
 /// that name is left in place (`false`).
 pub fn remove_install_copy(layout: &InstallLayout, path: &Path) -> bool {
+  remove_install_copy_by(layout, path, remove_path)
+}
+
+/// [`remove_install_copy`] with one attempt per entry and no waiting: for
+/// cleanup that must not stall (after a rollback, at startup). A file still
+/// in use (the helper's own executable on Windows, a subprocess's open file)
+/// is left, and with it the marker, so the next cleanup finishes the tree.
+pub fn remove_install_copy_now(layout: &InstallLayout, path: &Path) -> bool {
+  remove_install_copy_by(layout, path, remove_path_once)
+}
+
+fn remove_install_copy_by(
+  layout: &InstallLayout,
+  path: &Path,
+  remove: fn(&Path) -> bool,
+) -> bool {
   if !exists(path) {
     return true;
   }
@@ -378,21 +399,25 @@ pub fn remove_install_copy(layout: &InstallLayout, path: &Path) -> bool {
   // Windows) leaves a tree that is still provably this app's, so the next
   // cleanup can finish it.
   match layout.kind {
-    InstallKind::AppImage => remove_path(path),
-    kind => remove_marker_last(path, super::layout::marker_path(kind)),
+    InstallKind::AppImage => remove(path),
+    kind => remove_marker_last(path, super::layout::marker_path(kind), remove),
   }
 }
 
 /// Remove the directory `dir` with the entry `keep` (a relative path, one
 /// name per element) removed after everything else in each directory on its
 /// way. `true` when `dir` is gone.
-fn remove_marker_last(dir: &Path, keep: &[&str]) -> bool {
+fn remove_marker_last(
+  dir: &Path,
+  keep: &[&str],
+  remove: fn(&Path) -> bool,
+) -> bool {
   let Some((first, rest)) = keep.split_first() else {
-    return remove_path(dir);
+    return remove(dir);
   };
   // A symlink (or a file) is removed itself, never followed.
   if !std::fs::symlink_metadata(dir).is_ok_and(|m| m.file_type().is_dir()) {
-    return remove_path(dir);
+    return remove(dir);
   }
   let Ok(entries) = std::fs::read_dir(dir) else {
     return !exists(dir);
@@ -400,7 +425,7 @@ fn remove_marker_last(dir: &Path, keep: &[&str]) -> bool {
   let mut ok = true;
   for entry in entries.flatten() {
     if entry.file_name() != std::ffi::OsStr::new(first) {
-      ok &= remove_path(&entry.path());
+      ok &= remove(&entry.path());
     }
   }
   if !ok {
@@ -408,11 +433,24 @@ fn remove_marker_last(dir: &Path, keep: &[&str]) -> bool {
   }
   let kept = dir.join(first);
   let kept_gone = if rest.is_empty() {
-    remove_path(&kept)
+    remove(&kept)
   } else {
-    remove_marker_last(&kept, rest)
+    remove_marker_last(&kept, rest, remove)
   };
   kept_gone && (std::fs::remove_dir(dir).is_ok() || !exists(dir))
+}
+
+/// [`remove_path`] with a single attempt (no retries, no sleeping).
+pub fn remove_path_once(path: &Path) -> bool {
+  let Ok(m) = std::fs::symlink_metadata(path) else {
+    return true;
+  };
+  let r = if m.file_type().is_dir() {
+    std::fs::remove_dir_all(path)
+  } else {
+    std::fs::remove_file(path)
+  };
+  r.is_ok() || !exists(path)
 }
 
 /// Remove a file or directory tree; `true` when nothing is left.
@@ -468,7 +506,7 @@ pub fn discard_install_copy(layout: &InstallLayout, path: &Path) -> bool {
     // logs what it leaves in place).
     return remove_install_copy(layout, path);
   }
-  move_to_trash(layout, path) || remove_install_copy(layout, path)
+  move_to_trash(layout, path) || remove_install_copy_now(layout, path)
 }
 
 /// Rename `path` to a fresh trash name next to the install and delete it on
@@ -732,28 +770,54 @@ pub fn rollback_with(
     let _ = write_state(layout, state);
     return err(Code::Io, format!("the rollback failed: {e}"));
   }
-  // On Windows the helper runs from the failed install's own executable, which
-  // cannot be deleted while it runs: leave `cleanup` set and the next start's
-  // watchdog finishes it.
-  log_line(layout, "rollback: the previous app is back in place");
-  let failed_gone = remove_install_copy(layout, &failed);
-  let staging_gone = remove_path(&layout.staging_dir());
-  log_line(
-    layout,
-    &format!(
-      "rollback: failed install removed: {failed_gone}, staging removed: \
-       {staging_gone}"
-    ),
-  );
+  // The previous app is back: record that before anything else. Deleting the
+  // failed install and staging comes after the relaunch
+  // ([`remove_rollback_leftovers`]); until then `cleanup` stays set, so the
+  // next start finishes it whatever happens to this process.
   state.phase = Phase::Idle;
   state.launches = 0;
   state.helper_attempts = 0;
   state.entry = None;
   state.install_id = None;
-  state.cleanup = !(failed_gone && staging_gone);
+  state.cleanup = true;
   state.last_error = None;
   write_state(layout, state)?;
   Ok(if reject { to } else { None })
+}
+
+/// Roll back and delete what is left ([`rollback_with`], then
+/// [`remove_rollback_leftovers`]).
+pub fn rollback_and_clean(
+  layout: &InstallLayout,
+  state: &mut UpdateState,
+) -> Result<Option<String>, UpdateError> {
+  let rolled_back = rollback(layout, state)?;
+  remove_rollback_leftovers(layout, state);
+  Ok(rolled_back)
+}
+
+/// After a rollback: the failed install and staging, best effort and bounded
+/// (one attempt per entry, never waiting on a file in use; the marker goes
+/// last). What can't go stays, with `cleanup` set, for the next start.
+/// `true` when both are gone.
+pub fn remove_rollback_leftovers(
+  layout: &InstallLayout,
+  state: &mut UpdateState,
+) -> bool {
+  let failed_gone = remove_install_copy_now(layout, &layout.failed_path());
+  let staging_gone = remove_path_once(&layout.staging_dir());
+  log_line(
+    layout,
+    &format!(
+      "rollback cleanup: failed install removed: {failed_gone}, staging \
+       removed: {staging_gone}"
+    ),
+  );
+  if failed_gone && staging_gone && state.cleanup {
+    state.cleanup = false;
+    let _ = write_state(layout, state);
+  }
+  failed_gone && staging_gone
 }
 
 /// Confirm the running (swapped-in) version: the state goes `idle` first,
@@ -780,6 +844,12 @@ pub fn confirm(layout: &InstallLayout) -> Result<bool, UpdateError> {
 
 /// Delete `.old`, a failed install and staging; clear `cleanup` when done.
 pub fn cleanup(layout: &InstallLayout, state: &mut UpdateState) {
+  // Right after a rollback the helper that relaunched this app may still be
+  // exiting from the failed install's executable: give it a moment, bounded.
+  #[cfg(windows)]
+  if exists(&layout.failed_path()) {
+    let _ = wait_for_processes_in(&layout.failed_path(), HELPER_EXIT_GRACE);
+  }
   let done = discard_install_copy(layout, &layout.old_path())
     & discard_install_copy(layout, &layout.failed_path())
     & discard_path(layout, &layout.staging_dir());
@@ -1027,20 +1097,44 @@ pub fn run_helper(layout: &InstallLayout, mode: HelperMode, pid: u32) -> i32 {
         1
       }
     },
-    HelperMode::Rollback => match rollback(layout, &mut state) {
-      Ok(rolled_back) => {
-        log_line(layout, &format!("rolled back {rolled_back:?}"));
-        relaunch(
+    HelperMode::Rollback => {
+      helper_rollback(layout, &mut state, &mut |state, marker| {
+        relaunch(layout, state, marker)
+      })
+    }
+  }
+}
+
+/// The helper's rollback: restore and record it, log, relaunch the previous
+/// app, and only then delete the failed install (best effort, bounded), so a
+/// file that can't be deleted never holds up the relaunch. On Windows this
+/// helper runs from the failed install's own executable, which can't be
+/// deleted while it runs: the relaunched app's startup cleanup removes it.
+fn helper_rollback(
+  layout: &InstallLayout,
+  state: &mut UpdateState,
+  relaunch: &mut dyn FnMut(&UpdateState, Option<String>) -> i32,
+) -> i32 {
+  match rollback(layout, state) {
+    Ok(rolled_back) => {
+      log_line(layout, &format!("rolled back {rolled_back:?}"));
+      let code =
+        relaunch(state, rolled_back.map(|v| format!("{ROLLED_BACK_ARG}{v}")));
+      if cfg!(windows) {
+        log_line(
           layout,
-          &state,
-          rolled_back.map(|v| format!("{ROLLED_BACK_ARG}{v}")),
-        )
+          "rollback cleanup: left to the relaunched app (this helper runs \
+           from the failed install)",
+        );
+      } else {
+        remove_rollback_leftovers(layout, state);
       }
-      Err(e) => {
-        log_line(layout, &format!("rollback failed: {e}"));
-        1
-      }
-    },
+      code
+    }
+    Err(e) => {
+      log_line(layout, &format!("rollback failed: {e}"));
+      1
+    }
   }
 }
 
@@ -1812,7 +1906,10 @@ mod tests {
     mark_trial_exited(l);
     assert_eq!(startup_action(l), StartupAction::RollBack);
     let mut s = read_state(l).unwrap();
-    assert_eq!(rollback(l, &mut s).unwrap().as_deref(), Some("2.0.0"));
+    assert_eq!(
+      rollback_and_clean(l, &mut s).unwrap().as_deref(),
+      Some("2.0.0")
+    );
     assert_eq!(installed(l), "1.0.0");
     assert!(!l.old_path().exists());
     assert!(!l.failed_path().exists());
@@ -1870,7 +1967,7 @@ mod tests {
     std::fs::rename(&l.install, l.old_path()).unwrap();
     assert_eq!(startup_action(l), StartupAction::RollBack);
     let mut s = read_state(l).unwrap();
-    assert_eq!(rollback(l, &mut s).unwrap(), None);
+    assert_eq!(rollback_and_clean(l, &mut s).unwrap(), None);
     assert_eq!(installed(l), "1.0.0");
     let s = read_state(l).unwrap();
     assert_eq!(s.phase, Phase::Idle);
@@ -1896,7 +1993,7 @@ mod tests {
     // Killed before `staged -> .old`: the new app is installed, the old one
     // sits in staging.
     let mut s = read_state(l).unwrap();
-    assert_eq!(rollback(l, &mut s).unwrap(), None);
+    assert_eq!(rollback_and_clean(l, &mut s).unwrap(), None);
     assert_eq!(installed(l), "1.0.0");
     assert_eq!(read_state(l).unwrap().phase, Phase::Idle);
   }
@@ -1910,7 +2007,7 @@ mod tests {
     s.install_id = file_id(&l.install);
     write_state(l, &s).unwrap();
     let mut s = read_state(l).unwrap();
-    assert_eq!(rollback(l, &mut s).unwrap(), None);
+    assert_eq!(rollback_and_clean(l, &mut s).unwrap(), None);
     assert_eq!(installed(l), "1.0.0");
     assert_eq!(read_state(l).unwrap().phase, Phase::Staged);
   }
@@ -1935,7 +2032,10 @@ mod tests {
       // A rerun (the next helper) completes it.
       let mut s = read_state(l).unwrap();
       assert_eq!(s.phase, Phase::RollingBack, "{failing}");
-      assert_eq!(rollback(l, &mut s).unwrap().as_deref(), Some("2.0.0"));
+      assert_eq!(
+        rollback_and_clean(l, &mut s).unwrap().as_deref(),
+        Some("2.0.0")
+      );
       assert_eq!(installed(l), "1.0.0", "{failing}");
       assert!(!l.failed_path().exists());
     }
@@ -1961,10 +2061,88 @@ mod tests {
     std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555))
       .unwrap();
     let mut s = read_state(l).unwrap();
-    assert_eq!(rollback(l, &mut s).unwrap().as_deref(), Some("2.0.0"));
+    assert_eq!(
+      rollback_and_clean(l, &mut s).unwrap().as_deref(),
+      Some("2.0.0")
+    );
     assert_eq!(installed(l), "1.0.0");
     assert!(l.failed_path().exists());
     assert!(read_state(l).unwrap().cleanup);
+    std::fs::set_permissions(
+      l.failed_path().join("locked"),
+      std::fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    assert_eq!(startup_action(l), StartupAction::Continue { trial: false });
+    assert!(!l.failed_path().exists());
+    assert!(!read_state(l).unwrap().cleanup);
+  }
+
+  /// The helper's rollback relaunches the previous app before it deletes
+  /// anything, and a failed install that refuses deletion (a file in use, as
+  /// the helper's own executable is on Windows) neither delays nor blocks the
+  /// relaunch: one attempt per entry, the marker kept, `cleanup` left set.
+  #[cfg(unix)]
+  #[test]
+  fn helper_rollback_relaunches_before_a_stuck_cleanup() {
+    use std::os::unix::fs::PermissionsExt;
+    // SAFETY: getuid has no preconditions.
+    if unsafe { libc::getuid() } == 0 {
+      return; // root ignores the mode bits this relies on
+    }
+    let f = fixture(Some("2.0.0"));
+    let l = &f.layout;
+    let mut s = read_state(l).unwrap();
+    apply_swap(l, &mut s).unwrap();
+    // Every deletion attempt inside the (soon failed) install is refused.
+    let locked = l.install.join("locked");
+    std::fs::create_dir(&locked).unwrap();
+    std::fs::write(locked.join("f"), b"x").unwrap();
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555))
+      .unwrap();
+    let log = || {
+      std::fs::read_to_string(
+        l.parent.join(format!(".{}.denext-update.log", l.name)),
+      )
+      .unwrap_or_default()
+    };
+    let mut relaunches = Vec::new();
+    let mut s = read_state(l).unwrap();
+    let started = Instant::now();
+    let code = helper_rollback(l, &mut s, &mut |state, marker| {
+      // At the relaunch the rollback is recorded and logged, and nothing
+      // has been deleted yet.
+      assert_eq!(state.phase, Phase::Idle);
+      relaunches.push((
+        read_state(l).map(|s| (s.phase, s.cleanup)),
+        marker,
+        log().contains("rolled back Some(\"2.0.0\")"),
+        l.failed_path().join("locked").exists(),
+      ));
+      0
+    });
+    assert_eq!(code, 0);
+    assert!(
+      started.elapsed() < Duration::from_secs(5),
+      "{:?}",
+      started.elapsed()
+    );
+    assert_eq!(
+      relaunches,
+      vec![(
+        Some((Phase::Idle, true)),
+        Some(format!("{ROLLED_BACK_ARG}2.0.0")),
+        true,
+        true,
+      )]
+    );
+    assert_eq!(installed(l), "1.0.0");
+    // The undeletable part stays, still provably this app's (marker kept),
+    // for the next start.
+    assert!(l.failed_path().join("locked").exists());
+    assert!(is_install_copy(l.kind, &l.failed_path()));
+    assert!(read_state(l).unwrap().cleanup);
+    assert!(log().contains("rollback cleanup: failed install removed: false"));
     std::fs::set_permissions(
       l.failed_path().join("locked"),
       std::fs::Permissions::from_mode(0o755),
