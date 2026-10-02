@@ -125,7 +125,21 @@ are where the changes are discussed.
     nothing when the app launched with DevTools off (`LAUFEY_INSPECTABLE=0`
     / `"inspectable": false`), in dev mode too (laufey API 40).
 
-The runtime-side parts (1-3, 5-13) are what the prebuilt `libdenort` carries.
+14. **`feat(desktop)`: menu accelerators and close events, scheduled and
+    actionable notifications** — menu `accelerator`s work on every backend
+    (`Deno.desktop.menuCapabilities()` says what each supports);
+    `showContextMenu` returns a promise of the chosen id (`null` when
+    dismissed) and fires `contextmenuclose`. `Notification` takes
+    `actions` and `data`, fires a separate `action` event (actions are no
+    longer folded into `click`) and reports `Notification.maxActions`;
+    `Deno.desktop.notifications` adds `schedule({ at, ... })`,
+    `getScheduled()`, `cancel(tag)`, `capabilities()` and
+    `requestPermission({ provisional })`. A click on a notification of an
+    earlier run, or the one that launched the app, is a
+    `notificationresponse` event, and `Deno.desktop.launchNotificationResponses`
+    holds the ones that arrived before the app listened (laufey API 41).
+
+The runtime-side parts (1-3, 5-14) are what the prebuilt `libdenort` carries.
 The CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` /
 `LAUFEY_APP_ID` into a packaged app's launchers) are in the branch too, but a
 stock CLI does not run them; denext's own launcher provides that environment.
@@ -135,8 +149,8 @@ The laufey backend hosts are built from
 `denext/integration` (registered schemes, app data dir, WebKitGTK scheme
 request bodies, launch config, open-url / single instance, passkeys, the
 window API with littledivy/laufey#80 and #81, drag and drop / file dialogs /
-rich clipboard, global shortcuts / launch at login / DevTools control, Windows
-bindgen fix), at the commit pinned by
+rich clipboard, global shortcuts / launch at login / DevTools control, menu
+accelerators / notifications, Windows bindgen fix), at the commit pinned by
 `LAUFEY_SHA` in the workflow (or the `laufey_ref` input).
 
 laufey's `init_api` rejects any C ABI version mismatch between the runtime

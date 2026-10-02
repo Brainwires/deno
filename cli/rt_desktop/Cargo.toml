@@ -34,12 +34,14 @@ deno_runtime.workspace = true
 deno_snapshots.workspace = true
 deno_terminal.workspace = true
 denort = { path = "../rt", default-features = false }
-# laufey's `denext/integration` branch (API 40: open-url / file delivery,
+# laufey's `denext/integration` branch (API 41: open-url / file delivery,
 # single-instance forwarding, the `laufey-launch.json` launch file, native
 # passkeys, the window API, drag and drop / file dialogs / rich clipboard,
-# global shortcuts / launch at login / DevTools control), pinned to a commit of the Brainwires/laufey fork. The host built from the same commit
+# global shortcuts / launch at login / DevTools control, menu accelerators
+# and context-menu close, scheduled and actionable notifications), pinned to
+# a commit of the Brainwires/laufey fork. The host built from the same commit
 # must be used with it (the API version check is exact).
-laufey = { git = "https://github.com/Brainwires/laufey", rev = "0c518b5348a1cd136053c183d9be0e39c8de1edc" }
+laufey = { git = "https://github.com/Brainwires/laufey", rev = "200b94c508c30f99bbc2d4568d98eabaa21c30a5" }
 libsui.workspace = true
 
 bytes.workspace = true
