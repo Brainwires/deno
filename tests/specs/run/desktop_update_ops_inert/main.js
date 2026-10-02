@@ -29,7 +29,8 @@ console.log(
   code(() => ops.op_desktop_app_update_check(new Uint8Array(2), false)),
 );
 console.log("begin:", code(() => ops.op_desktop_app_update_begin()));
-console.log("apply:", code(() => ops.op_desktop_app_update_apply()));
+console.log("apply:", code(() => ops.op_desktop_app_update_apply(false)));
+console.log("withdraw:", code(() => ops.op_desktop_app_update_apply(true)));
 try {
   await ops.op_desktop_app_update_stage(false);
   console.log("stage: did not throw");
