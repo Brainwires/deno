@@ -54,7 +54,7 @@ use denort::run::RunOptions;
 /// makes the failure mode obvious instead of "the desktop app silently won't
 /// launch".
 const _: () = assert!(
-  laufey::LAUFEY_API_VERSION == 41,
+  laufey::LAUFEY_API_VERSION == 42,
   "LAUFEY_API_VERSION mismatch: update this assert and the prebuilt backend release pin in cli/tools/desktop.rs when laufey bumps its API version",
 );
 
@@ -85,6 +85,82 @@ impl deno_runtime::ops::desktop::DesktopPasskeys for LaufeyPasskeys {
     } else {
       Box::pin(laufey::passkey_get(window_id, &options_json))
     }
+  }
+}
+
+/// The badge laufey sets for `Dock.setBadge`'s text: "" (from `null`,
+/// `undefined` or "") clears it (laufey passes NULL to the backend).
+fn laufey_dock_badge(text: &str) -> Option<&str> {
+  if text.is_empty() { None } else { Some(text) }
+}
+
+/// `Deno.desktop.authSession` over laufey's auth sessions (API 42):
+/// `ASWebAuthenticationSession` on macOS, not_supported elsewhere (RFC 8252:
+/// the system browser). See laufey's docs/auth-session.md.
+struct LaufeyAuthSession;
+
+impl deno_runtime::ops::desktop::DesktopAuthSession for LaufeyAuthSession {
+  fn capabilities(
+    &self,
+  ) -> deno_runtime::ops::desktop::AuthSessionCapabilitiesInfo {
+    let caps = laufey::auth_session_capabilities();
+    deno_runtime::ops::desktop::AuthSessionCapabilitiesInfo {
+      supported: caps.supported,
+      ephemeral: caps.ephemeral,
+      https_callback: caps.https_callback,
+    }
+  }
+
+  fn start(
+    &self,
+    window_id: u32,
+    url: String,
+    callback: String,
+    ephemeral: bool,
+  ) -> std::pin::Pin<
+    Box<
+      dyn std::future::Future<
+          Output = deno_runtime::ops::desktop::AuthSessionOutcome,
+        > + Send,
+    >,
+  > {
+    use deno_runtime::ops::desktop::AuthSessionOutcome;
+    let pending =
+      laufey::auth_session_start(window_id, &url, &callback, ephemeral);
+    Box::pin(async move {
+      match pending.await {
+        Ok(url) => AuthSessionOutcome::success(url),
+        Err(e) => AuthSessionOutcome::error(e.kind.code(), e.message),
+      }
+    })
+  }
+}
+
+/// `Deno.desktop.runOnMainThread` over laufey's `dispatch_ui_task` (API 42):
+/// the function runs on the UI thread, or the call rejects once the event
+/// loop has ended (never hangs).
+struct LaufeyMainThread;
+
+impl deno_runtime::ops::desktop::DesktopMainThread for LaufeyMainThread {
+  unsafe fn call(
+    &self,
+    function: usize,
+    context: usize,
+  ) -> std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<usize, String>> + Send>,
+  > {
+    let pending = laufey::spawn_on_ui_thread(move || {
+      // SAFETY: the op checked --allow-ffi and a non-null pointer; the caller
+      // vouches for the signature (see DesktopMainThread::call).
+      let f: unsafe extern "C" fn(
+        *mut std::ffi::c_void,
+      ) -> *mut std::ffi::c_void =
+        unsafe { std::mem::transmute(function) };
+      // SAFETY: as above; this runs on the UI thread, where the caller asked
+      // for it to run.
+      unsafe { f(context as *mut std::ffi::c_void) as usize }
+    });
+    Box::pin(async move { pending.await.map_err(|e| e.to_string()) })
   }
 }
 
@@ -1196,7 +1272,7 @@ impl denort::desktop::DesktopApi for WefDesktopApi {
   }
 
   fn set_dock_badge(&self, text: &str) {
-    laufey::set_dock_badge(if text.is_empty() { None } else { Some(text) });
+    laufey::set_dock_badge(laufey_dock_badge(text));
   }
 
   fn bounce_dock(&self, critical: bool) {
@@ -2965,6 +3041,14 @@ async fn run_desktop(
       state.put::<Arc<dyn deno_runtime::ops::desktop::DesktopPasskeys>>(
         Arc::new(LaufeyPasskeys),
       );
+      // Deno.desktop.authSession and Deno.desktop.runOnMainThread (main
+      // scope only, like the passkey ops).
+      state.put::<Arc<dyn deno_runtime::ops::desktop::DesktopAuthSession>>(
+        Arc::new(LaufeyAuthSession),
+      );
+      state.put::<Arc<dyn deno_runtime::ops::desktop::DesktopMainThread>>(
+        Arc::new(LaufeyMainThread),
+      );
 
       // Create the initial window (hidden) and wire up event handlers. It is
       // revealed from its `on_page_load` handler once content has painted, so
@@ -3145,10 +3229,19 @@ mod tests {
   use super::desktop_menu_item_to_laufey_menu_item;
   use super::desktop_value_to_laufey_value;
   use super::extract_fork_script_path;
+  use super::laufey_dock_badge;
   use super::laufey_value_to_desktop_value;
   use super::login_item_state_str;
   use super::map_permission_status;
   use super::should_show_native_error_dialog;
+
+  #[test]
+  fn an_empty_dock_badge_clears_it() {
+    // Dock.setBadge(null) arrives as "" and must clear (NULL to laufey),
+    // not show a badge.
+    assert_eq!(laufey_dock_badge(""), None);
+    assert_eq!(laufey_dock_badge("7"), Some("7"));
+  }
 
   #[test]
   fn desktop_env_overlay_publishes_the_serve_address_and_origins() {
