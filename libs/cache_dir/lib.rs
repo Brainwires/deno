@@ -3,6 +3,7 @@
 #![deny(clippy::disallowed_methods)]
 
 mod cache;
+pub mod cache_lock;
 mod common;
 mod deno_dir;
 #[cfg(feature = "file_fetcher")]
