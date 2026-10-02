@@ -154,7 +154,10 @@ pub fn verify_macos(
         Code::OsSignature,
         format!(
           "the staged app is signed by Team ID {}, the running app by {team}",
-          staged_info.team_id.as_deref().unwrap_or("(none: ad-hoc/unsigned)")
+          staged_info
+            .team_id
+            .as_deref()
+            .unwrap_or("(none: ad-hoc/unsigned)")
         ),
       );
     }
@@ -260,10 +263,7 @@ pub fn verify_windows(
       None => {
         return err(
           Code::OsSignature,
-          format!(
-            "{} has no trusted Authenticode signature",
-            file.display()
-          ),
+          format!("{} has no trusted Authenticode signature", file.display()),
         );
       }
     }
@@ -296,8 +296,11 @@ pub fn authenticode_signer(path: &Path) -> Option<Signer> {
   use windows_sys::Win32::Security::WinTrust::WTHelperProvDataFromStateData;
   use windows_sys::Win32::Security::WinTrust::WinVerifyTrust;
 
-  let wide: Vec<u16> =
-    path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+  let wide: Vec<u16> = path
+    .as_os_str()
+    .encode_wide()
+    .chain(std::iter::once(0))
+    .collect();
   // SAFETY: zeroed POD structs, then the documented fields set; the path
   // buffer outlives both WinVerifyTrust calls; the state is closed below.
   unsafe {
@@ -338,9 +341,8 @@ pub fn authenticode_signer(path: &Path) -> Option<Signer> {
               buf.as_mut_ptr(),
               buf.len() as u32,
             );
-            let name = String::from_utf16_lossy(
-              &buf[..(n as usize).saturating_sub(1)],
-            );
+            let name =
+              String::from_utf16_lossy(&buf[..(n as usize).saturating_sub(1)]);
             result = Some((subject, name));
           }
         }
@@ -400,11 +402,7 @@ mod tests {
         "display".to_string()
       };
       self.calls.borrow_mut().push(format!("{verb} {last}"));
-      self
-        .answers
-        .get(&(verb, last))
-        .cloned()
-        .unwrap_or_default()
+      self.answers.get(&(verb, last)).cloned().unwrap_or_default()
     }
   }
 
@@ -520,7 +518,9 @@ mod tests {
   fn windows_signer_subject_must_match() {
     let lookup = |p: &Path| -> Option<(Vec<u8>, String)> {
       match p.to_str().unwrap() {
-        "run.exe" | "new.exe" | "new.dll" => Some((b"CN=A".to_vec(), "A".into())),
+        "run.exe" | "new.exe" | "new.dll" => {
+          Some((b"CN=A".to_vec(), "A".into()))
+        }
         "evil.exe" => Some((b"CN=E".to_vec(), "E".into())),
         _ => None,
       }
@@ -538,24 +538,16 @@ mod tests {
     assert_eq!(ok.mode, "authenticode");
     for bad in [["evil.exe"], ["unsigned.exe"]] {
       for opt_out in [false, true] {
-        let e = verify_windows(
-          &lookup,
-          "run.exe".as_ref(),
-          &files(&bad),
-          opt_out,
-        )
-        .unwrap_err();
+        let e =
+          verify_windows(&lookup, "run.exe".as_ref(), &files(&bad), opt_out)
+            .unwrap_err();
         assert_eq!(e.code, Code::OsSignature);
       }
     }
     // An unsigned running app: refused without the opt-out.
-    let e = verify_windows(
-      &lookup,
-      "dev.exe".as_ref(),
-      &files(&["new.exe"]),
-      false,
-    )
-    .unwrap_err();
+    let e =
+      verify_windows(&lookup, "dev.exe".as_ref(), &files(&["new.exe"]), false)
+        .unwrap_err();
     assert_eq!(e.code, Code::OsSignature);
     let r = verify_windows(
       &lookup,

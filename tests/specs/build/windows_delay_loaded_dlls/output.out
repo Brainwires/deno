@@ -19,4 +19,5 @@ shell32.dll: eager
 user32.dll: eager
 userenv.dll: eager
 winmm.dll: delay
+wintrust.dll: delay
 ws2_32.dll: eager

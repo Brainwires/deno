@@ -69,7 +69,9 @@ pub const MAX_HELPER_ATTEMPTS: u32 = 3;
 const STATE_SCHEMA: u32 = 1;
 
 /// Where an update is.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(
+  Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default,
+)]
 #[serde(rename_all = "camelCase")]
 pub enum Phase {
   /// Nothing pending.
@@ -204,7 +206,8 @@ pub fn exchange(a: &Path, b: &Path) -> std::io::Result<bool> {
     let cb = std::ffi::CString::new(b.as_os_str().as_bytes())?;
     #[cfg(target_os = "macos")]
     // SAFETY: valid NUL-terminated paths.
-    let rc = unsafe { libc::renamex_np(ca.as_ptr(), cb.as_ptr(), libc::RENAME_SWAP) };
+    let rc =
+      unsafe { libc::renamex_np(ca.as_ptr(), cb.as_ptr(), libc::RENAME_SWAP) };
     #[cfg(target_os = "linux")]
     // SAFETY: valid NUL-terminated paths; renameat2's documented signature.
     let rc = unsafe {
@@ -331,8 +334,11 @@ pub fn apply_swap_with(
   write_state(layout, state)?;
 
   let result = (|| -> std::io::Result<()> {
-    let exchanged =
-      if hook("exchange").is_ok() { exchange(&staged, &layout.install)? } else { false };
+    let exchanged = if hook("exchange").is_ok() {
+      exchange(&staged, &layout.install)?
+    } else {
+      false
+    };
     if exchanged {
       // The install is the new app; `staged` holds the previous one.
       if let Err(e) = step(hook, "old", || rename_retry(&staged, &old)) {
@@ -343,9 +349,9 @@ pub fn apply_swap_with(
       return Ok(());
     }
     step(hook, "install->old", || rename_retry(&layout.install, &old))?;
-    if let Err(e) =
-      step(hook, "staged->install", || rename_retry(&staged, &layout.install))
-    {
+    if let Err(e) = step(hook, "staged->install", || {
+      rename_retry(&staged, &layout.install)
+    }) {
       // Undo: the previous app back at the install path.
       let _ = rename_retry(&old, &layout.install);
       return Err(e);
@@ -413,7 +419,8 @@ pub fn rollback_with(
         // Never happened: the previous app is in place, the staged app is
         // intact. Back to `staged` (it may be applied again).
         state.phase = Phase::Staged;
-        state.last_error = Some("the swap was interrupted before it ran".into());
+        state.last_error =
+          Some("the swap was interrupted before it ran".into());
         write_state(layout, state)?;
         return Ok(None);
       }
@@ -630,7 +637,10 @@ pub fn log_line(layout: &InstallLayout, line: &str) {
 
 /// Run the helper. Returns the process exit code.
 pub fn run_helper(layout: &InstallLayout, mode: HelperMode, pid: u32) -> i32 {
-  log_line(layout, &format!("helper {} waiting for pid {pid}", mode.as_str()));
+  log_line(
+    layout,
+    &format!("helper {} waiting for pid {pid}", mode.as_str()),
+  );
   if !wait_for_exit(pid, HELPER_WAIT) {
     log_line(layout, "the app did not exit in time; nothing changed");
     return 1;
@@ -903,7 +913,9 @@ mod tests {
   /// Point the recorded trial at a process that has exited.
   fn mark_trial_exited(l: &InstallLayout) {
     let mut child = if cfg!(windows) {
-      std::process::Command::new("cmd").args(["/C", "exit 0"]).spawn()
+      std::process::Command::new("cmd")
+        .args(["/C", "exit 0"])
+        .spawn()
     } else {
       std::process::Command::new("true").spawn()
     }
@@ -1016,7 +1028,10 @@ mod tests {
     assert_eq!(installed(l), "1.0.0");
     let s = read_state(l).unwrap();
     assert_eq!(s.phase, Phase::Idle);
-    assert_eq!(s.rejected, None, "an interrupted swap is not the version's fault");
+    assert_eq!(
+      s.rejected, None,
+      "an interrupted swap is not the version's fault"
+    );
   }
 
   #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -1181,7 +1196,10 @@ mod tests {
     let exe = macos.join("host");
     assert_eq!(bundle_runtime_path(&exe), None);
     std::fs::write(macos.join("libruntime.dylib"), b"").unwrap();
-    assert_eq!(bundle_runtime_path(&exe), Some(macos.join("libruntime.dylib")));
+    assert_eq!(
+      bundle_runtime_path(&exe),
+      Some(macos.join("libruntime.dylib"))
+    );
     std::fs::write(frameworks.join("libruntime.dylib"), b"").unwrap();
     assert_eq!(
       bundle_runtime_path(&exe),
@@ -1200,7 +1218,10 @@ mod tests {
       parse_helper_args(&a(&["x", "run", HELPER_ARG, "rollback", "7"])),
       Some((HelperMode::Rollback, 7))
     );
-    assert_eq!(parse_helper_args(&a(&["x", "run", HELPER_ARG, "rm", "7"])), None);
+    assert_eq!(
+      parse_helper_args(&a(&["x", "run", HELPER_ARG, "rm", "7"])),
+      None
+    );
     assert_eq!(parse_helper_args(&a(&["x", "run", "main.ts"])), None);
     assert_eq!(
       parse_helper_args(&a(&["x", "run", HELPER_ARG, "apply", "-1"])),
@@ -1211,7 +1232,9 @@ mod tests {
   #[test]
   fn waits_for_an_exited_process() {
     let mut child = if cfg!(windows) {
-      std::process::Command::new("cmd").args(["/C", "exit 0"]).spawn()
+      std::process::Command::new("cmd")
+        .args(["/C", "exit 0"])
+        .spawn()
     } else {
       std::process::Command::new("true").spawn()
     }
@@ -1221,7 +1244,10 @@ mod tests {
     assert!(wait_for_exit(pid, Duration::from_secs(5)));
     // Our own pid never exits within the timeout.
     let start = Instant::now();
-    assert!(!wait_for_exit(std::process::id(), Duration::from_millis(300)));
+    assert!(!wait_for_exit(
+      std::process::id(),
+      Duration::from_millis(300)
+    ));
     assert!(start.elapsed() >= Duration::from_millis(250));
   }
 }

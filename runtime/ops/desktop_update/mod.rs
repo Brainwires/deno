@@ -317,7 +317,8 @@ pub fn op_desktop_app_update_begin(
   let ready = ready(&config).map_err(js)?;
   let layout = &ready.layout;
   layout::check_writable(layout).map_err(js)?;
-  let mut st = swap::read_state(layout).unwrap_or_else(|| UpdateState::new(layout));
+  let mut st =
+    swap::read_state(layout).unwrap_or_else(|| UpdateState::new(layout));
   match st.phase {
     Phase::Swapped | Phase::Swapping | Phase::RollingBack => {
       return Err(js(UpdateError::new(
@@ -645,15 +646,17 @@ pub fn early_startup(args: &[String], trial: &mut bool) -> Option<i32> {
   }
   // Not an installed app (a dev run, a translocated copy, ...): nothing to
   // watch.
-  let layout =
-    layout::detect_install(&exe, &AppImageEnv::from_env()).ok()?;
+  let layout = layout::detect_install(&exe, &AppImageEnv::from_env()).ok()?;
   match swap::startup_action(&layout) {
     swap::StartupAction::Continue { trial: t } => {
       *trial = t;
       None
     }
     swap::StartupAction::RollBack => {
-      swap::log_line(&layout, "unconfirmed or interrupted update: rolling back");
+      swap::log_line(
+        &layout,
+        "unconfirmed or interrupted update: rolling back",
+      );
       match swap::spawn_helper(&layout, swap::HelperMode::Rollback) {
         Ok(()) => Some(0),
         Err(e) => {

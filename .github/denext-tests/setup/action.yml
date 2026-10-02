@@ -1,0 +1,89 @@
+# Shared setup for .github/workflows/denext_tests.yml: the toolchains and
+# system pieces upstream's ci.generated.yml installs, plus a Rust cache.
+name: denext tests setup
+description: Toolchains, system deps and the Rust cache for the denext test jobs.
+inputs:
+  cache-key:
+    description: Rust cache key for this job kind (lint, libs, build, test-*)
+    required: true
+runs:
+  using: composite
+  steps:
+    # tests/util/lib/hash.rs asks Deno's hashy service whether a test input
+    # hash already passed (and PUTs one when it does). Keep the fork off
+    # Deno's infrastructure: with the host unreachable the harness runs
+    # every test and reports nothing.
+    - name: Keep the test harness off Deno's hashy service
+      shell: bash
+      run: |
+        set -euo pipefail
+        case "$RUNNER_OS" in
+          Windows) hosts=/c/Windows/System32/drivers/etc/hosts; echo "127.0.0.1 hashy.deno.deno.net" >>"$hosts" ;;
+          *) echo "127.0.0.1 hashy.deno.deno.net" | sudo tee -a /etc/hosts >/dev/null ;;
+        esac
+        if curl -sf --max-time 5 https://hashy.deno.deno.net/ >/dev/null 2>&1; then
+          echo "::error::hashy.deno.deno.net is still reachable"; exit 1
+        fi
+
+    - name: Free disk space (Linux)
+      if: runner.os == 'Linux'
+      shell: bash
+      run: |
+        df -h /
+        sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup \
+          /opt/hostedtoolcache/CodeQL /usr/local/share/boost /usr/share/swift \
+          /usr/local/share/powershell /usr/local/share/chromium /opt/microsoft || true
+        sudo docker image prune --all --force >/dev/null 2>&1 || true
+        df -h /
+
+    - name: Install dependencies (Linux)
+      if: runner.os == 'Linux'
+      shell: bash
+      run: |
+        # man-db triggers can take minutes on hosted runners.
+        sudo apt-get -qq remove --purge -y man-db >/dev/null 2>&1 || true
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends libclang-dev cmake protobuf-compiler
+
+    - name: libclang (Windows)
+      if: runner.os == 'Windows'
+      shell: bash
+      run: |
+        set -euo pipefail
+        vs=$("/c/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe" -latest -property installationPath)
+        for d in "$(cygpath -u "$vs")/VC/Tools/Llvm/x64/bin" "/c/Program Files/LLVM/bin"; do
+          if [ -f "$d/libclang.dll" ]; then
+            echo "LIBCLANG_PATH=$(cygpath -w "$d")" >>"$GITHUB_ENV"
+            exit 0
+          fi
+        done
+        echo "::error::libclang.dll not found"; exit 1
+
+    - name: Rust toolchain
+      shell: bash
+      run: |
+        set -euo pipefail
+        tc=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)
+        rustup toolchain install "$tc" --profile minimal --component rustfmt,clippy --no-self-update
+        echo "RUSTUP_TOOLCHAIN=$tc" >>"$GITHUB_ENV"
+
+    - uses: denoland/setup-deno@v2
+      with:
+        deno-version: ${{ env.TOOLS_DENO_VERSION }}
+
+    # The aarch64-apple-darwin rustflags in .cargo/config.toml link with
+    # -fuse-ld=lld, as upstream's CI does.
+    - name: Install macOS aarch64 lld
+      if: runner.os == 'macOS' && runner.arch == 'ARM64'
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ github.token }}
+      run: |
+        ./tools/install_prebuilt.js ld64.lld
+        echo "$GITHUB_WORKSPACE/third_party/prebuilt/mac" >>"$GITHUB_PATH"
+
+    - uses: Swatinem/rust-cache@v2
+      with:
+        prefix-key: denext-tests-v1
+        key: ${{ inputs.cache-key }}
+        cache-on-failure: true

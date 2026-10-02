@@ -536,6 +536,16 @@ async function ensureWorkflowYmlsUpToDate() {
   ];
 
   for (const gen of generators) {
+    // denext fork (Brainwires/deno): the fork deletes upstream's generated
+    // workflows and runs its own (.github/workflows/denext_*.yml), so a
+    // generator whose .generated.yml is absent has nothing to compare against.
+    // See DENEXT.md.
+    try {
+      await Deno.stat(join(ROOT_PATH, gen.replace(".ts", ".generated.yml")));
+    } catch (e) {
+      if (e instanceof Deno.errors.NotFound) continue;
+      throw e;
+    }
     const cmd = new Deno.Command("deno", {
       cwd: ROOT_PATH,
       args: ["run", "--allow-read=.", "--allow-net=jsr.io", gen, "--lint"],
@@ -844,6 +854,8 @@ async function ensureNoNewTopLevelEntries() {
     "rust-toolchain.toml",
     "flake.nix",
     "flake.lock",
+    // denext fork (Brainwires/deno): what the fork patches and why.
+    "DENEXT.md",
   ]);
 
   const newEntries = currentEntries.filter((e) => !allowed.has(e));

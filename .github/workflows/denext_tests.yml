@@ -1,0 +1,111 @@
+# Upstream Deno's own test bar, on every OS, for denext's fork.
+#
+# The fork deletes upstream's generated workflows (ci.generated.yml and
+# friends), so without this nothing ran the Rust tests, clippy, the format
+# check, the unit tests or the spec tests over the denext patches. This runs
+# them the way v2.9.7's ci.generated.yml does (the same commands, flags and
+# CARGO_PROFILE_DEV_DEBUG=0 debug builds), on macOS arm64, Windows x64 and
+# Linux x64:
+#
+# - lint:  tools/lint.js (clippy over the whole workspace with upstream's deny
+#          flags, dlint, the copyright and repo-hygiene checks), plus
+#          tools/format.js --check, tools/jsdoc_checker.js and cargo fmt.
+# - per OS (denext_tests_os.yml), each OS on its own so one slow OS does not
+#   hold up the others' tests:
+#   - build: target/debug/{deno,denort,test_server}, as upstream's build job.
+#   - libs:  `cargo test --locked --lib` over upstream's crate list (every
+#            crate the fork touches is in it) against that test_server, plus
+#            the `#[ignore]`d LaunchServices scheme-registration test on the
+#            throwaway macOS runner.
+#   - unit / specs: `cargo test -p unit_tests --test unit` and
+#            `cargo test -p specs_tests --test specs` (2 shards) against them.
+#
+# The test harness asks Deno's "hashy" service whether a test input hash
+# already passed and PUTs one when it did (tests/util/lib/hash.rs). That is
+# Deno's infrastructure, not ours: every job resolves its host to 127.0.0.1,
+# so the harness always runs the tests and never reports back.
+name: denext tests
+
+on:
+  push:
+    branches:
+      - 'denext/**'
+      - 'ci/**'
+  pull_request:
+    branches:
+      - 'denext/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: denext-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: '0'
+  CARGO_PROFILE_DEV_DEBUG: '0'
+  RUST_BACKTRACE: full
+  RUST_LIB_BACKTRACE: '0'
+  # The Deno that runs the repo's tooling scripts (format.js, lint.js, ...).
+  TOOLS_DENO_VERSION: 2.9.7
+
+jobs:
+  lint:
+    name: lint / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, windows-2022, ubuntu-22.04]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Configure git
+        run: |
+          git config --global core.symlinks true
+          git config --global core.longpaths true
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 5
+          submodules: false
+      - name: Clone submodule ./tests/util/std
+        run: git submodule update --init --recursive --depth=1 -- ./tests/util/std
+      - uses: ./.github/denext-tests/setup
+        with:
+          cache-key: lint
+      - name: format.js --check
+        if: runner.os == 'Linux'
+        run: deno run --allow-write --allow-read --allow-run --allow-net ./tools/format.js --check
+      - name: cargo fmt --check
+        if: runner.os == 'Linux'
+        run: cargo fmt --all --check
+      - name: jsdoc_checker.js
+        if: runner.os == 'Linux'
+        run: deno run --allow-read --allow-env --allow-sys ./tools/jsdoc_checker.js
+      - name: lint.js
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: deno run --allow-write --allow-read --allow-run --allow-net --allow-env ./tools/lint.js
+
+  macos:
+    name: macos-14
+    uses: ./.github/workflows/denext_tests_os.yml
+    with:
+      os: macos-14
+
+  windows:
+    name: windows-2022
+    uses: ./.github/workflows/denext_tests_os.yml
+    with:
+      os: windows-2022
+
+  linux:
+    name: ubuntu-22.04
+    uses: ./.github/workflows/denext_tests_os.yml
+    with:
+      os: ubuntu-22.04
