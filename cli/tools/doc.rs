@@ -548,6 +548,12 @@ fn generate_docs_directory(
   main_entrypoint: Option<ModuleSpecifier>,
 ) -> Result<(), AnyError> {
   let output_dir_resolved = cwd.join(&html_options.output);
+  // one `deno doc --html` writes the directory at a time
+  let _output_lock = crate::cache::lock::lock_artifact(
+    cwd,
+    &output_dir_resolved,
+    "output directory",
+  );
 
   let category_docs =
     if let Some(category_docs_path) = &html_options.category_docs_path {

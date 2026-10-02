@@ -57,10 +57,19 @@ pub async fn clean(
 
     // On a dry run, tally up what would be removed without deleting anything;
     // the reported output is otherwise identical to a real clean.
-    if clean_flags.dry_run {
-      cleaner.tally(&deno_dir.root)?;
-    } else {
-      cleaner.rm_rf(&deno_dir.root)?;
+    // Everything except the lock files: other processes may be waiting on
+    // them, and a deleted lock file would let a new process lock a fresh file
+    // at the same path while they still hold the old one.
+    for entry in std::fs::read_dir(&deno_dir.root)? {
+      let entry = entry?;
+      if entry.file_name() == deno_cache_dir::cache_lock::LOCKS_DIR_NAME {
+        continue;
+      }
+      if clean_flags.dry_run {
+        cleaner.tally(&entry.path())?;
+      } else {
+        cleaner.rm_rf(&entry.path())?;
+      }
     }
 
     // Drop the guard so that progress bar disappears.
@@ -300,6 +309,14 @@ async fn clean_except(
   if deno_dir_root_canonical != deno_dir.root {
     keep_paths_trie
       .add_rewrite(deno_dir.root.clone(), deno_dir_root_canonical.clone());
+  }
+  // Keep the lock files (see `clean` above). The walk below only matches
+  // kept paths exactly, so insert every entry rather than the directory.
+  let locks_dir = deno_dir
+    .root
+    .join(deno_cache_dir::cache_lock::LOCKS_DIR_NAME);
+  for entry in WalkDir::new(locks_dir).into_iter().flatten() {
+    keep_paths_trie.insert(entry.into_path());
   }
   for (_, entry) in graph.walk(
     roots.iter(),

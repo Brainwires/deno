@@ -6,6 +6,7 @@ mod check;
 mod code_cache;
 mod fast_check;
 mod incremental;
+pub mod lock;
 mod module_info;
 mod node;
 
