@@ -217,14 +217,20 @@ await r.step("menus", async () => {
     return;
   }
   const choose = async (keys: Key[][], label: string) => {
+    r.mark(`${label}: focus`);
     win.focus();
+    r.mark(`${label}: activate`);
     await activate(TITLE);
+    r.mark(`${label}: showContextMenu`);
     const p = win.showContextMenu(40, 40, menu);
+    r.mark(`${label}: shown`);
     await sleep(1200);
     for (const k of keys) {
+      r.mark(`${label}: press ${k.join("+")}`);
       await pressKeys(k);
       await sleep(250);
     }
+    r.mark(`${label}: waiting`);
     return await Promise.race([
       p,
       sleep(8000).then(() => `(${label}: still open after 8 s)`),
@@ -344,6 +350,8 @@ await r.step("notifications", async () => {
     });
     const clicked: string[] = [];
     a.addEventListener("click", () => clicked.push("click"));
+    let aClosedAt = 0;
+    a.addEventListener("close", () => (aClosedAt ||= Date.now()));
     const actionP = once(a, "action", 15000);
     const shown = await once(a, "show", 10000);
     r.check("a live notification fires show", shown !== null);
@@ -352,15 +360,39 @@ await r.step("notifications", async () => {
       JSON.stringify(a.data) === '{"n":1}',
       a.data,
     );
+    const clickAt = Date.now();
     const why = await osClick("e2e-action", "E2E action", "yes", '{"n":1}');
     if (why) {
       r.na("a click on an action button fires action (not click)", why);
+    } else if (aClosedAt && aClosedAt < clickAt) {
+      // The shell retired the toast before the click (Windows moves a toast
+      // it hides or times out to the notification center and reports it
+      // closed): the click is a response, as for any notification no live
+      // object owns.
+      r.set("actionToastClosedBeforeClickMs", clickAt - aClosedAt);
+      r.check(
+        "a click on a toast the shell already retired is a notificationresponse with its action and data",
+        await waitFor(
+          () => responses.some((x) => x.tag === "e2e-action"),
+          10000,
+        ) &&
+          JSON.stringify(responses.find((x) => x.tag === "e2e-action")) ===
+            JSON.stringify({
+              tag: "e2e-action",
+              action: "yes",
+              data: { n: 1 },
+              launch: false,
+            }),
+        responses,
+      );
     } else {
       const ev: any = await actionP;
       r.check(
         "a click on an action button fires action with its id, not click",
         ev?.action === "yes" && clicked.length === 0,
-        ev ? { action: ev.action, clicked } : "no action event",
+        ev
+          ? { action: ev.action, clicked, closedAt: aClosedAt, clickAt }
+          : { event: "none", closedAt: aClosedAt, clickAt, responses },
       );
     }
     // The body.
@@ -369,10 +401,28 @@ await r.step("notifications", async () => {
       tag: "e2e-click",
     });
     const clickP = once(b, "click", 15000);
+    let bClosedAt = 0;
+    b.addEventListener("close", () => (bClosedAt ||= Date.now()));
     await once(b, "show", 10000);
+    const bClickAt = Date.now();
     const whyB = await osClick("e2e-click", "E2E click", null);
     if (whyB) r.na("a click on the body fires click", whyB);
-    else r.check("a click on the body fires click", (await clickP) !== null);
+    else if (bClosedAt && bClosedAt < bClickAt) {
+      r.check(
+        "a body click on a toast the shell already retired is a notificationresponse",
+        await waitFor(
+          () => responses.some((x) => x.tag === "e2e-click"),
+          10000,
+        ),
+        responses,
+      );
+    } else {
+      r.check("a click on the body fires click", (await clickP) !== null, {
+        closedAt: bClosedAt,
+        clickAt: bClickAt,
+        responses,
+      });
+    }
     // Dismissed.
     if (OS === "linux") {
       const c = new N("E2E dismiss", {

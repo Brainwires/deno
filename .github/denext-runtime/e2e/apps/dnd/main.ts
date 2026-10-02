@@ -13,6 +13,7 @@ import {
   desktop,
   errorOf,
   html,
+  OS,
   page,
   PNG,
   Report,
@@ -21,6 +22,7 @@ import {
   titledWindow,
   within,
 } from "../_shared/e2e.ts";
+import { topLevelExists } from "../_shared/input.ts";
 
 const r = new Report("dnd");
 const isA = (e: unknown, name: string) =>
@@ -166,19 +168,34 @@ await r.step("dialogs", async () => {
   }
   const ac = new AbortController();
   const t0 = Date.now();
-  const p = desktop.dialog.showOpenDialog(win, {
+  const p = errorOf(desktop.dialog.showOpenDialog(win, {
     title: "e2e",
     properties: ["openFile", "multiSelections"],
     filters: [{ name: "Text", extensions: ["txt"] }],
     signal: ac.signal,
-  });
+  }));
+  // Windows: when the dialog's own window appears (a hosted runner's shell
+  // can take a while to build the first one), for the record.
+  if (OS === "windows") {
+    (async () => {
+      for (let i = 0; i < 200; i++) {
+        if (topLevelExists("e2e")) {
+          r.set("dialogWindowAfterMs", Date.now() - t0);
+          return;
+        }
+        await sleep(200);
+      }
+      r.set("dialogWindowAfterMs", "never (40 s)");
+    })();
+  }
   await sleep(2000);
   r.check(
     "a second dialog while one is open is Deno.errors.Busy",
     isA(await errorOf(desktop.dialog.showSaveDialog({})), "Busy"),
   );
+  r.set("abortAfterMs", Date.now() - t0);
   ac.abort(new Error("e2e abort"));
-  const got1 = await within(errorOf(p), 15000);
+  const got1 = await within(p, 15000);
   const e = "value" in got1 ? got1.value : null;
   r.check(
     "aborting closes the dialog and rejects with the signal's reason",
@@ -192,22 +209,28 @@ await r.step("dialogs", async () => {
   );
   // Every kind of dialog closes on abort and frees the slot: open / save,
   // modal to a window / app-level.
+  if (!("value" in got1)) {
+    r.fail("the first dialog never closed: the abort matrix can't run");
+    return;
+  }
   for (const kind of ["save", "open"] as const) {
     for (const modal of [false, true]) {
       const label = `${kind} dialog${modal ? " (modal)" : " (app-level)"}`;
       r.mark(label);
       const ac2 = new AbortController();
       const opts = { defaultPath: "e2e.txt", signal: ac2.signal };
-      const p2 = kind === "save"
-        ? (modal
-          ? desktop.dialog.showSaveDialog(win, opts)
-          : desktop.dialog.showSaveDialog(opts))
-        : (modal
-          ? desktop.dialog.showOpenDialog(win, opts)
-          : desktop.dialog.showOpenDialog(opts));
+      const p2 = errorOf(
+        kind === "save"
+          ? (modal
+            ? desktop.dialog.showSaveDialog(win, opts)
+            : desktop.dialog.showSaveDialog(opts))
+          : (modal
+            ? desktop.dialog.showOpenDialog(win, opts)
+            : desktop.dialog.showOpenDialog(opts)),
+      );
       await sleep(1500);
       ac2.abort();
-      const got = await within(errorOf(p2), 15000);
+      const got = await within(p2, 15000);
       r.check(
         `a ${label} opens and closes on abort (AbortError)`,
         "value" in got && isA(got.value, "AbortError"),

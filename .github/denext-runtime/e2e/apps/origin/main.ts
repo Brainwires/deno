@@ -41,12 +41,6 @@ try {
   out.stream = { status: res.status, at };
 } catch (e) { out.stream = { error: String(e) }; }
 step("stream");
-// A cross-origin fetch carries the app origin.
-try {
-  const res = await fetch("http://127.0.0.1:" + info.tcpPort + "/cors", { cache: "no-store" });
-  out.crossOrigin = { status: res.status, body: await res.text() };
-} catch (e) { out.crossOrigin = { error: String(e) }; }
-step("cross-origin");
 // A WebSocket through the relay.
 out.ws = await new Promise((resolve) => {
   const res = { url: info.wsOrigin + "/ws", messages: [] };
@@ -59,6 +53,12 @@ out.ws = await new Promise((resolve) => {
   ws.onclose = (ev) => { res.close = ev.code; if (res.messages.length < 2) { clearTimeout(timer); resolve(res); } };
 });
 step("websocket");
+// A cross-origin fetch carries the app origin.
+try {
+  const res = await fetch("http://127.0.0.1:" + info.tcpPort + "/cors", { cache: "no-store", signal: AbortSignal.timeout(10000) });
+  out.crossOrigin = { status: res.status, body: await res.text() };
+} catch (e) { out.crossOrigin = { error: String(e) }; }
+step("cross-origin");
 await post("/result", out);
 `;
 
@@ -84,7 +84,8 @@ Deno.serve((req, info) => {
         new ReadableStream<Uint8Array>({
           async start(c) {
             for (let i = 0; i < 5; i++) {
-              c.enqueue(enc.encode(`chunk ${i}\n`));
+              // 8 KiB each: an engine may hold back a tiny chunk.
+              c.enqueue(enc.encode(`chunk ${i} ${"x".repeat(8192)}\n`));
               await sleep(300);
             }
             c.close();

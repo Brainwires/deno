@@ -18,7 +18,7 @@ import {
   titledWindow,
   waitFor,
 } from "../_shared/e2e.ts";
-import { userClose } from "../_shared/input.ts";
+import { macWindowState, userClose } from "../_shared/input.ts";
 
 const r = new Report("window");
 
@@ -164,9 +164,11 @@ await r.step("window API", async () => {
     }
     win.minimize();
     const minEv = await once(win, "minimize", 8000);
+    const minimized = await waitFor(() => win.isMinimized(), 5000);
     r.check(
       "minimize() minimizes",
-      await waitFor(() => win.isMinimized(), 5000),
+      minimized,
+      minimized ? undefined : macWindowState(TITLE_A),
     );
     if (caps.stateEvents) r.check("a minimize event fires", minEv !== null);
     win.restore();

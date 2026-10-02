@@ -314,48 +314,56 @@ export async function run(env: Env, rep: AreaReport) {
     await stopAll();
 
     // 6. Another app declaring the scheme leaves it alone, until forced.
-    const snapshot = await registrationSnapshot(scheme, appEnv);
-    await params("b");
-    const { res: rb } = await start(b, [], "B");
-    rep.merge("B", rb);
-    const ob = rb?.data.owner;
-    rep.check(
-      "B: the scheme is owned by another app",
-      ob?.later?.owner === "other",
-      ob,
-    );
-    rep.check(
-      "B: registerScheme() without force does not take it",
-      ob?.explicit?.registered === false && ob?.explicit?.owner === "other",
-      ob?.explicit,
-    );
-    rep.check(
-      "B: the OS registration is untouched",
-      (await registrationSnapshot(scheme, appEnv)) === snapshot,
-      {
-        before: snapshot,
-        after: await registrationSnapshot(scheme, appEnv),
-      },
-    );
-    await stopAll();
-    await params("b", { force: true });
-    const { res: rbf } = await start(b, [], "B forced");
-    const obf = rbf?.data.owner;
-    rep.check(
-      "B: registerScheme({ force: true }) takes the scheme over",
-      obf?.forced?.registered === true && obf?.forced?.owner === "self" &&
-        obf?.afterForce?.owner === "self",
-      obf,
-    );
-    await stopAll();
-    await params("a");
-    const { res: ra2 } = await start(a, [], "A after B forced");
-    rep.check(
-      "A: now sees the scheme owned by another app",
-      ra2?.data.owner?.later?.owner === "other",
-      ra2?.data.owner,
-    );
-    await stopAll();
+    // On macOS that other app is a stub bundle made the scheme's default
+    // handler explicitly: LaunchServices itself may hand a scheme to any
+    // newly launched app that declares it (a second runtime app included),
+    // so only an explicit default is a stable "another app owns it".
+    if (OS === "darwin") {
+      await macForeignOwner();
+    } else {
+      const snapshot = await registrationSnapshot(scheme, appEnv);
+      await params("b");
+      const { res: rb } = await start(b, [], "B");
+      rep.merge("B", rb);
+      const ob = rb?.data.owner;
+      rep.check(
+        "B: the scheme is owned by another app",
+        ob?.later?.owner === "other",
+        ob,
+      );
+      rep.check(
+        "B: registerScheme() without force does not take it",
+        ob?.explicit?.registered === false && ob?.explicit?.owner === "other",
+        ob?.explicit,
+      );
+      rep.check(
+        "B: the OS registration is untouched",
+        (await registrationSnapshot(scheme, appEnv)) === snapshot,
+        {
+          before: snapshot,
+          after: await registrationSnapshot(scheme, appEnv),
+        },
+      );
+      await stopAll();
+      await params("b", { force: true });
+      const { res: rbf } = await start(b, [], "B forced");
+      const obf = rbf?.data.owner;
+      rep.check(
+        "B: registerScheme({ force: true }) takes the scheme over",
+        obf?.forced?.registered === true && obf?.forced?.owner === "self" &&
+          obf?.afterForce?.owner === "self",
+        obf,
+      );
+      await stopAll();
+      await params("a");
+      const { res: ra2 } = await start(a, [], "A after B forced");
+      rep.check(
+        "A: now sees the scheme owned by another app",
+        ra2?.data.owner?.later?.owner === "other",
+        ra2?.data.owner,
+      );
+      await stopAll();
+    }
 
     // 7. Windows: the app installed from the stock CLI's .msi.
     if (OS === "windows") await msi(env, rep, scheme, ids.a, winKey);
@@ -387,6 +395,74 @@ export async function run(env: Env, rep: AreaReport) {
       await sleep(250);
     }
     return { ok: false, events: ev };
+  }
+
+  async function macForeignOwner() {
+    const foreignId = `dev.denext.e2e${env.nonce}.foreign`;
+    const stub = path(scratch, "Foreign.app");
+    await Deno.mkdir(path(stub, "Contents", "MacOS"), { recursive: true });
+    await Deno.writeTextFile(
+      path(stub, "Contents", "Info.plist"),
+      `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleIdentifier</key><string>${foreignId}</string>
+<key>CFBundleName</key><string>Foreign</string>
+<key>CFBundleExecutable</key><string>Foreign</string>
+<key>CFBundlePackageType</key><string>APPL</string>
+<key>CFBundleURLTypes</key><array><dict>
+<key>CFBundleURLName</key><string>${foreignId}</string>
+<key>CFBundleURLSchemes</key><array><string>${scheme}</string></array>
+</dict></array></dict></plist>`,
+    );
+    const stubExe = path(stub, "Contents", "MacOS", "Foreign");
+    await Deno.writeTextFile(stubExe, "#!/bin/sh\nexit 0\n");
+    await Deno.chmod(stubExe, 0o755);
+    await sh(LSREGISTER, ["-f", stub]);
+    const set = await sh("osascript", [
+      "-l",
+      "JavaScript",
+      "-e",
+      `ObjC.import("CoreServices"); $.LSSetDefaultHandlerForURLScheme($("${scheme}"), $("${foreignId}"))`,
+    ]);
+    rep.check(
+      "foreign stub: made the default handler (LSSetDefaultHandlerForURLScheme)",
+      set.code === 0 && set.out.trim() === "0",
+      set.out,
+    );
+    try {
+      await params("a");
+      const { res } = await start(a, [], "A with a foreign default");
+      const o = res?.data.owner;
+      rep.check(
+        "A: a scheme another app is the default for is owned by another app",
+        o?.atStart?.owner === "other" && o?.later?.owner === "other" &&
+          o?.later?.handler === foreignId,
+        o,
+      );
+      rep.check(
+        "A: registerScheme() without force does not take it",
+        o?.explicit?.registered === false && o?.explicit?.owner === "other",
+        o?.explicit,
+      );
+      await stopAll();
+      await params("a", { force: true });
+      const { res: rf } = await start(
+        a,
+        [],
+        "A forced over the foreign default",
+      );
+      const of = rf?.data.owner;
+      rep.check(
+        "A: registerScheme({ force: true }) takes the scheme over",
+        of?.forced?.registered === true && of?.forced?.owner === "self" &&
+          of?.afterForce?.owner === "self",
+        of,
+      );
+      await stopAll();
+    } finally {
+      await sh(LSREGISTER, ["-u", stub]);
+    }
   }
 
   async function msi(

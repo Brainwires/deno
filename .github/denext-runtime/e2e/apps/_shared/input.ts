@@ -84,6 +84,11 @@ function macLibs() {
         parameters: ["pointer", "pointer"],
         result: "usize",
       },
+      msgU8: {
+        name: "objc_msgSend",
+        parameters: ["pointer", "pointer"],
+        result: "u8",
+      },
       msgPerformOnMain: {
         name: "objc_msgSend",
         parameters: ["pointer", "pointer", "pointer", "pointer", "bool"],
@@ -273,6 +278,31 @@ export async function activate(title: string): Promise<void> {
       w.keybd_event(0x12, 0, 2, 0n);
     }
   }
+}
+
+/** macOS: the NSWindow titled `title`'s style mask and state, for a
+ * failure report (null elsewhere, or when there is no such window). */
+export function macWindowState(title: string): Record<string, unknown> | null {
+  if (OS !== "darwin") return null;
+  const s = macLibs().objc.symbols;
+  const w = macWindow(title);
+  if (!w) return null;
+  const sel = (n: string) => s.sel_registerName(cstr(n));
+  const mask = Number(s.msgCount(w, sel("styleMask")));
+  return {
+    styleMask: mask,
+    miniaturizable: (mask & 4) !== 0,
+    isMiniaturized: s.msgU8(w, sel("isMiniaturized")) !== 0,
+    isVisible: s.msgU8(w, sel("isVisible")) !== 0,
+    isKeyWindow: s.msgU8(w, sel("isKeyWindow")) !== 0,
+  };
+}
+
+/** Windows: whether a top-level window titled `title` exists (null
+ * elsewhere). */
+export function topLevelExists(title: string): boolean | null {
+  if (OS !== "windows") return null;
+  return winLibs().symbols.FindWindowW(null, wide(title)) !== null;
 }
 
 /** Ask to close the window titled `title` the way its close button does.
