@@ -225,9 +225,10 @@ async fn bridge(
     if is_hop_by_hop_header(name.as_str()) {
       continue;
     }
-    if let Ok(v) = value.to_str() {
-      resp_headers.push((name.as_str().to_string(), v.to_string()));
-    }
+    resp_headers.push((
+      name.as_str().to_string(),
+      response_header_value(name.as_str(), value.as_bytes(), origin),
+    ));
   }
   exchange.begin(status, &resp_headers);
   *began = true;
@@ -236,14 +237,123 @@ async fn bridge(
   while let Some(frame) = body.frame().await {
     let frame = frame?;
     if let Some(chunk) = frame.data_ref() {
-      // Negative return means the webview cancelled / went away.
-      if exchange.write(chunk.as_ref()) < 0 {
+      // The next frame is only pulled once the webview took this one, so a
+      // slow reader holds the server back instead of the backend buffering
+      // an endless stream (server-sent events, a large download).
+      if !write_all(exchange, chunk.as_ref()).await {
+        // The webview cancelled / went away.
         break;
       }
     }
   }
 
   Ok(())
+}
+
+/// Where a response body chunk goes (the webview's exchange; a fake in
+/// tests).
+trait ResponseSink {
+  /// Bytes accepted (possibly fewer than offered, possibly 0 while the
+  /// consumer is full), or negative once the consumer has gone away.
+  fn write(&self, buf: &[u8]) -> isize;
+}
+
+impl ResponseSink for laufey::SchemeExchange {
+  fn write(&self, buf: &[u8]) -> isize {
+    laufey::SchemeExchange::write(self, buf)
+  }
+}
+
+/// Hand all of `chunk` to `sink`, waiting (with a growing pause, at most
+/// [`WRITE_RETRY_MAX`]) while it accepts nothing. A short write used to drop
+/// the rest of the chunk. False once the consumer has gone away.
+async fn write_all(sink: &impl ResponseSink, mut chunk: &[u8]) -> bool {
+  let mut pause = WRITE_RETRY_MIN;
+  while !chunk.is_empty() {
+    let n = sink.write(chunk);
+    if n < 0 {
+      return false;
+    }
+    let n = (n as usize).min(chunk.len());
+    if n == 0 {
+      tokio::time::sleep(pause).await;
+      pause = (pause * 2).min(WRITE_RETRY_MAX);
+      continue;
+    }
+    chunk = &chunk[n..];
+    pause = WRITE_RETRY_MIN;
+  }
+  true
+}
+
+const WRITE_RETRY_MIN: std::time::Duration =
+  std::time::Duration::from_millis(1);
+const WRITE_RETRY_MAX: std::time::Duration =
+  std::time::Duration::from_millis(50);
+
+/// A response header's value as the webview gets it.
+///
+/// Header values are bytes; a non-ASCII one (a UTF-8 `filename` in
+/// `content-disposition`, a localized `x-*` header) used to be dropped
+/// because `HeaderValue::to_str` only takes visible ASCII. It is decoded as
+/// UTF-8 when it is, else as Latin-1 (what browsers do with raw header
+/// bytes).
+///
+/// The app's `request.url` is `http+memory://<host>/…`, so an absolute URL
+/// the app builds from it (`Response.redirect(new URL("/login", req.url))`)
+/// points at a scheme the webview cannot load. In `location`,
+/// `content-location` and `refresh` such a URL is rewritten onto the app
+/// origin's scheme.
+fn response_header_value(
+  name: &str,
+  value: &[u8],
+  origin: &AppOrigin,
+) -> String {
+  let text = match std::str::from_utf8(value) {
+    Ok(text) => text.to_string(),
+    Err(_) => value.iter().map(|&b| b as char).collect(),
+  };
+  if name.eq_ignore_ascii_case("location")
+    || name.eq_ignore_ascii_case("content-location")
+  {
+    return rewrite_memory_url(&text, origin).unwrap_or(text);
+  }
+  if name.eq_ignore_ascii_case("refresh") {
+    // `<seconds>; url=<url>` (the `url=` part may be quoted or absent).
+    let lower = text.to_ascii_lowercase();
+    if let Some(i) = lower.find("url=") {
+      let start = i + "url=".len();
+      let (quote, start) = match text[start..].chars().next() {
+        Some(q @ ('\'' | '"')) => (Some(q), start + 1),
+        _ => (None, start),
+      };
+      let end = quote
+        .and_then(|q| text[start..].find(q).map(|j| start + j))
+        .unwrap_or(text.len());
+      if let Some(url) = rewrite_memory_url(&text[start..end], origin) {
+        return format!("{}{url}{}", &text[..start], &text[end..]);
+      }
+    }
+  }
+  text
+}
+
+/// `http+memory://<authority>/rest` -> `<app scheme>://<authority>/rest`;
+/// `None` for any other URL.
+fn rewrite_memory_url(url: &str, origin: &AppOrigin) -> Option<String> {
+  const PREFIX: &str = "http+memory://";
+  let trimmed = url.trim_start();
+  if trimmed.len() >= PREFIX.len()
+    && trimmed[..PREFIX.len()].eq_ignore_ascii_case(PREFIX)
+  {
+    Some(format!(
+      "{}://{}",
+      origin.scheme(),
+      &trimmed[PREFIX.len()..]
+    ))
+  } else {
+    None
+  }
 }
 
 /// Split `scheme://authority[/path][?query][#fragment]` into
@@ -293,7 +403,15 @@ fn path_and_query(url: &str) -> String {
 }
 
 fn should_skip_request_header(name: &str) -> bool {
-  name.eq_ignore_ascii_case(HOST.as_str()) || is_hop_by_hop_header(name)
+  name.eq_ignore_ascii_case(HOST.as_str())
+    || is_hop_by_hop_header(name)
+    // The body is forwarded fully buffered (`Full`), and hyper sets the
+    // length of what is actually sent. Forwarding the webview's own
+    // `content-length` could contradict it (a body the backend read short,
+    // or one it was never given), and `expect: 100-continue` would make the
+    // server wait for a continuation that is never asked for.
+    || name.eq_ignore_ascii_case("content-length")
+    || name.eq_ignore_ascii_case("expect")
 }
 
 fn is_hop_by_hop_header(name: &str) -> bool {
@@ -595,6 +713,94 @@ mod tests {
     let (client, accepted) =
       tokio::join!(TcpStream::connect(addr), listener.accept());
     (client.unwrap(), accepted.unwrap().0)
+  }
+
+  #[test]
+  fn request_headers_the_bridge_recomputes_are_not_forwarded() {
+    for name in ["Content-Length", "expect", "host", "Connection"] {
+      assert!(should_skip_request_header(name), "{name}");
+    }
+    for name in ["content-type", "cookie", "origin", "accept"] {
+      assert!(!should_skip_request_header(name), "{name}");
+    }
+  }
+
+  #[test]
+  fn response_headers_keep_non_ascii_and_point_at_the_app_origin() {
+    let o = origin();
+    // UTF-8 kept (it used to be dropped), Latin-1 decoded.
+    assert_eq!(
+      response_header_value(
+        "content-disposition",
+        "attachment; filename=\"résumé.pdf\"".as_bytes(),
+        &o
+      ),
+      "attachment; filename=\"résumé.pdf\""
+    );
+    assert_eq!(response_header_value("x-name", b"caf\xe9", &o), "café");
+    // A redirect built from request.url lands on the app origin.
+    assert_eq!(
+      response_header_value("Location", b"http+memory://app/login?x=1", &o),
+      "t3code://app/login?x=1"
+    );
+    assert_eq!(
+      response_header_value("content-location", b"HTTP+MEMORY://app/a", &o),
+      "t3code://app/a"
+    );
+    assert_eq!(
+      response_header_value("refresh", b"5; url=http+memory://app/next", &o),
+      "5; url=t3code://app/next"
+    );
+    assert_eq!(
+      response_header_value("refresh", b"0;URL='http+memory://app/q'", &o),
+      "0;URL='t3code://app/q'"
+    );
+    // Anything else is left alone.
+    for (name, value) in [
+      ("location", "/relative"),
+      ("location", "https://idp.example/authorize"),
+      ("refresh", "5"),
+      ("link", "<http+memory://app/x>; rel=preload"),
+    ] {
+      assert_eq!(response_header_value(name, value.as_bytes(), &o), value);
+    }
+  }
+
+  struct FakeSink {
+    accepted: std::cell::RefCell<Vec<u8>>,
+    /// What each write accepts at most, in turn (then everything).
+    script: std::cell::RefCell<std::collections::VecDeque<isize>>,
+  }
+
+  impl ResponseSink for FakeSink {
+    fn write(&self, buf: &[u8]) -> isize {
+      let cap = self.script.borrow_mut().pop_front().unwrap_or(isize::MAX);
+      if cap < 0 {
+        return cap;
+      }
+      let n = buf.len().min(cap as usize);
+      self.accepted.borrow_mut().extend_from_slice(&buf[..n]);
+      n as isize
+    }
+  }
+
+  #[tokio::test]
+  async fn short_and_full_writes_deliver_the_whole_chunk() {
+    // The consumer takes 3 bytes, is full twice, then takes the rest: every
+    // byte arrives (a short write used to lose the remainder).
+    let sink = FakeSink {
+      accepted: Default::default(),
+      script: std::cell::RefCell::new([3, 0, 0, 2].into()),
+    };
+    assert!(write_all(&sink, b"hello world").await);
+    assert_eq!(&*sink.accepted.borrow(), b"hello world");
+    // A consumer that went away stops the copy.
+    let gone = FakeSink {
+      accepted: Default::default(),
+      script: std::cell::RefCell::new([4, -1].into()),
+    };
+    assert!(!write_all(&gone, b"hello world").await);
+    assert_eq!(&*gone.accepted.borrow(), b"hell");
   }
 
   #[tokio::test]
