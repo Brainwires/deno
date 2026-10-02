@@ -251,11 +251,14 @@ async function afterPage() {
     pageRequest?.url,
   );
   const s = p.stream ?? {};
-  const gaps = (s.at ?? []).slice(1).map((t: number, i: number) => t - s.at[i]);
+  // The server sends a chunk every 300 ms for 1.2 s: reads must come in at
+  // least three separate bursts (an engine may coalesce two chunks or split
+  // one), the first well before the last.
+  const at: number[] = s.at ?? [];
+  const bursts = at.filter((t, i) => i === 0 || t - at[i - 1] >= 100).length;
   r.check(
     "a streamed response arrives incrementally",
-    s.status === 200 && s.at?.length >= 5 &&
-      gaps.filter((g: number) => g >= 150).length >= 3,
+    s.status === 200 && bursts >= 3 && at[at.length - 1] - at[0] >= 600,
     s,
   );
 

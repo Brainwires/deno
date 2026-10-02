@@ -248,3 +248,79 @@ LAUFEY_DEV_DIR=$PWD deno desktop --backend webview main.ts
 Upstream Deno's own workflows are removed on the `denext/*` branch and disabled
 in this fork's Actions settings, so pushes and tags here only run the denext
 runtime workflow.
+
+## Test coverage
+
+Upstream Deno has no end-to-end harness for `deno desktop` apps (its own
+tests stop at unit tests and `tests/specs` of the CLI), so this fork carries
+its own, the equivalent of laufey's `native_e2e`:
+`.github/denext-runtime/e2e/`. The runtime workflow runs it after the launch
+smoke on all five targets with both backends (Linux under Xvfb with the
+xfwm4 window manager, a private D-Bus session and a stand-in notification
+server, `linux/`).
+
+Layout:
+
+| Path | What |
+| --- | --- |
+| `e2e.sh` | Unpacks the archive under test, sets up the Linux session, runs `run.ts` with the stock `deno` (2.9.7). |
+| `run.ts` | Runs every area (`E2E_AREAS` / the workflow's `e2e_areas` input narrows it), writes `e2e-<target>-<backend>.json` and the step summary, exits 1 on any failure. |
+| `lib/runner.ts` | Packages an app with the stock `deno desktop` against `DENORT_DESKTOP_BIN` / `LAUFEY_DEV_DIR`, writes `.deno-desktop/app.json` and `laufey-launch.json` as denext's packager does, launches, collects, kills. |
+| `apps/<area>/main.ts` | One small app per area; `apps/_shared` has the reporting (`e2e.ts`) and real input (`input.ts`: XTEST / `keybd_event` / CoreGraphics key presses, the window manager's close). |
+| `areas/<area>.ts` | The runner side of each area: launches the OS would make, and checks only the outside can make (state across launches, the registry / XDG / LaunchServices, processes that must not start). |
+
+Each check is `pass`, `fail` or `n/a`; an `n/a` carries the reason and is
+listed in the job summary, never skipped silently. Areas:
+
+- **origin** — page origin and secure context, `request.url` /
+  `remoteAddr` of the memory transport, incremental streaming, `Origin` on a
+  cross-origin fetch, the page's WebSocket through the relay; the relay
+  refusing foreign / missing / duplicate / upper-cased origins (403) and
+  plain HTTP (400) and admitting the exact origin (101); a TCP `Deno.serve`
+  refusing `http+memory:` request targets (400); the env overlay reaching a
+  child process.
+- **appid** — localStorage and IndexedDB persisting across launches of one
+  identifier and not visible to another identifier at the same origin.
+- **deeplink** — cold argv links and files, second-instance forwarding
+  (no second runtime), startup registration (HKCU, XDG in a throwaway
+  `XDG_DATA_HOME`/`XDG_CONFIG_HOME`, LaunchServices), OS-routed links cold and
+  warm (`Start-Process`, `xdg-open`, `open`), `open -a <app> <file>` on macOS,
+  another owner left alone until `force`; on Windows the stock CLI's `.msi`
+  installed with `msiexec`, registering from Program Files and receiving
+  links cold and warm, then uninstalled.
+- **window** — the window API, state events, limits, placement, chrome vs
+  `windowCapabilities()`, a user close canceled and a close the runtime
+  never answers, `quit()`, the tray rule, `initialWindow` from `app.json`.
+- **dnd** — the clipboard in every format and its change event, file
+  dialogs opened and aborted (open / save, modal / app-level), busy and
+  argument refusals, `startDrag` refusals.
+- **passkeys** — argument refusals, every refusal envelope, one ceremony at
+  a time, the slot freed after an OS refusal, no passkeys in workers.
+- **sld** — global shortcuts with a real key press, launch at login against
+  the OS's record (autostart entry, `HKCU\...\Run`), DevTools on (env
+  override) and off (`"inspectable": false`).
+- **menus** — application-menu accelerators from the keyboard, context
+  menus dismissed and chosen from the keyboard; notifications shown,
+  clicked, acted on and dismissed (Linux: the stand-in server; Windows: the
+  app's toast activator, `windows/toast-click.ps1`), scheduled / listed /
+  cancelled, a scheduled one's click as `notificationresponse`, and on
+  Windows the cold-start click (COM starts the app).
+- **update** — full-app self-update with throwaway keys and a throwaway
+  TLS CA: hostile manifests and archives refused with their codes and the
+  install untouched, an unwritable install, 1.0.0 -> 2.0.0 relaunch and
+  confirm, a 3.0.0 trial that never confirms rolled back and refused.
+- **Node-API** stays in `launch.sh`.
+
+What a hosted runner cannot do, reported `n/a` with the reason:
+
+| Check | Why |
+| --- | --- |
+| A real file drop / completed drag-out | needs an OS drag session driven by a pointer |
+| A completed passkey ceremony | needs a person (Touch ID / Windows Hello) and, on macOS, an associated-domains entitlement in a Developer ID signature |
+| A staged update accepted by signer match | needs a real Developer ID / Authenticode identity |
+| Notification clicks and dismissals on macOS | only a person clicking a banner produces one for an unsigned app |
+| A notification click on Linux after the app exited | freedesktop servers send the click to the posting process only (`coldStart: false`) |
+| A dismissed toast on Windows, a live toast's click | the hosted session retires toasts within ~2 s; the click is then checked as a `notificationresponse` |
+| Key presses on macOS without an Accessibility grant | macOS refuses synthesized events (checked with `AXIsProcessTrusted`) |
+| `.msi` on macOS / Linux | the stock CLI builds `.msi` only for Windows |
+| An unwritable install on Windows | the runner is an administrator |
