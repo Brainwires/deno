@@ -1014,12 +1014,16 @@ mod tests {
       .stdout(std::process::Stdio::null())
       .spawn()
       .unwrap();
-    // A key in the `\\?\` form names the same directory.
-    let verbatim = PathBuf::from(format!("\\\\?\\{}", dir.display()));
-    assert!(!wait_for_processes_in(
-      &verbatim,
-      Duration::from_millis(300)
-    ));
+    // canonicalize gives the `\\?\` form (as an install path is); the plain
+    // form names the same directory.
+    let plain = PathBuf::from(
+      dir
+        .to_string_lossy()
+        .trim_start_matches("\\\\?\\")
+        .to_string(),
+    );
+    assert!(!wait_for_processes_in(&dir, Duration::from_millis(300)));
+    assert!(!wait_for_processes_in(&plain, Duration::from_millis(300)));
     assert!(wait_for_processes_in(&dir, Duration::from_secs(30)));
     child.wait().unwrap();
     assert_eq!(

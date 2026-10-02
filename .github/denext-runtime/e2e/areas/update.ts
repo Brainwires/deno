@@ -36,6 +36,7 @@ import {
   kill,
   launch,
   type Launched,
+  log,
   must,
   OS,
   packageApp,
@@ -265,7 +266,7 @@ export async function run(env: Env, rep: AreaReport) {
         path(d, "app-update.json"),
         await sign(payloads[v], key),
       );
-      console.log(`  published ${v}: ${size} bytes in ${Date.now() - t0} ms`);
+      log(`  published ${v}: ${size} bytes in ${Date.now() - t0} ms`);
     }
     for (const b of builds.slice(1)) await rm(b);
 

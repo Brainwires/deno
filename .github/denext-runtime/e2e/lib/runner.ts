@@ -489,6 +489,7 @@ export function short(v: unknown, n = 600): string {
 }
 
 export function log(s: string) {
+  // deno-lint-ignore no-console
   console.log(s);
 }
 
