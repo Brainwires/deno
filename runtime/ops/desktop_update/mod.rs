@@ -92,6 +92,8 @@ struct Session {
   archive: Option<PathBuf>,
   staged: Option<String>,
   staging: bool,
+  /// An apply helper was started for this process and not withdrawn.
+  applying: bool,
 }
 
 #[derive(Default)]
@@ -368,6 +370,8 @@ fn update_begin(state: &mut OpState) -> Result<BeginOut, JsErrorBox> {
       // A stage from an earlier run is never applied blind: start over.
       st.phase = Phase::Idle;
       st.entry = None;
+      st.staged_digest = None;
+      st.apply_pid = None;
       swap::write_state(layout, &st).map_err(js)?;
     }
     Phase::Idle => {}
@@ -547,9 +551,16 @@ fn stage_blocking(
   let exe = layout.exe_in(&staged);
   let shape_ok = match layout.kind {
     InstallKind::MacBundle => {
-      x.top_is_dir && x.top.ends_with(".app") && exe.is_file()
+      x.top_is_dir
+        && x.top.ends_with(".app")
+        && exe.is_file()
+        && layout::is_install_copy(InstallKind::MacBundle, &staged)
     }
-    InstallKind::AppDir => x.top_is_dir && exe.is_file(),
+    InstallKind::AppDir => {
+      x.top_is_dir
+        && exe.is_file()
+        && layout::is_install_copy(InstallKind::AppDir, &staged)
+    }
     InstallKind::AppImage => !x.top_is_dir,
   };
   if !shape_ok {
@@ -558,8 +569,12 @@ fn stage_blocking(
       format!(
         "the archive does not hold this app (expected {} with {})",
         match layout.kind {
-          InstallKind::MacBundle => "a .app bundle",
-          InstallKind::AppDir => "an app directory",
+          InstallKind::MacBundle =>
+            "a packaged .app bundle (with \
+                                     Contents/Resources/.deno-desktop-app)",
+          InstallKind::AppDir =>
+            "a packaged app directory (with \
+                                  .deno-desktop-app)",
           InstallKind::AppImage => "a single AppImage file",
         },
         layout.exe_rel.display()
@@ -573,6 +588,9 @@ fn stage_blocking(
       .map_err(|e| UpdateError::io(staged.display(), e))?;
   }
   let signature = verify_os_signature(layout, &staged, allow_unsigned_dev)?;
+  // What the helper re-checks before it swaps (the tree verified above).
+  let staged_digest = swap::tree_digest(&staged)
+    .map_err(|e| UpdateError::io(staged.display(), e))?;
   let _ = std::fs::remove_file(archive);
   let previous = swap::read_state(layout);
   let mut st = UpdateState::new(layout);
@@ -580,6 +598,7 @@ fn stage_blocking(
   st.from = Some(from.to_string());
   st.to = Some(to.to_string());
   st.entry = Some(x.top);
+  st.staged_digest = Some(staged_digest);
   st.rejected = previous.and_then(|p| p.rejected);
   swap::write_state(layout, &st)?;
   Ok(signature)
@@ -620,16 +639,40 @@ fn verify_os_signature(
 }
 
 /// Record the relaunch arguments and start the helper; the caller then
-/// quits the app (the helper waits for it to exit).
+/// quits the app (the helper waits for it to exit). With `withdraw` (the
+/// quit was refused), withdraw this process's request instead: the waiting
+/// helper stands down rather than swap whenever the app exits later.
 #[op2(fast)]
 pub fn op_desktop_app_update_apply(
   state: &mut OpState,
+  withdraw: bool,
 ) -> Result<(), JsErrorBox> {
+  if withdraw {
+    return update_withdraw(state);
+  }
   update_apply(state)
+}
+
+fn update_withdraw(state: &mut OpState) -> Result<(), JsErrorBox> {
+  let (_, ready) = gate(state).map_err(js)?;
+  session(state).0.borrow_mut().applying = false;
+  if let Some(mut st) = swap::read_state(&ready.layout)
+    && st.apply_pid == Some(std::process::id())
+  {
+    st.apply_pid = None;
+    swap::write_state(&ready.layout, &st).map_err(js)?;
+  }
+  Ok(())
 }
 
 fn update_apply(state: &mut OpState) -> Result<(), JsErrorBox> {
   let (config, ready) = gate(state).map_err(js)?;
+  if session(state).0.borrow().applying {
+    return Err(js(UpdateError::new(
+      Code::Busy,
+      "the update is already being applied: the app is quitting",
+    )));
+  }
   let staged = session(state).0.borrow().staged.clone();
   let Some(version) = staged else {
     return Err(js(UpdateError::new(
@@ -653,9 +696,11 @@ fn update_apply(state: &mut OpState) -> Result<(), JsErrorBox> {
     .cloned()
     .collect();
   st.last_error = None;
+  st.apply_pid = Some(std::process::id());
   swap::write_state(&layout, &st).map_err(js)?;
   swap::spawn_helper(&layout, swap::HelperMode::Apply)
     .map_err(|e| js(UpdateError::io("starting the update helper", e)))?;
+  session(state).0.borrow_mut().applying = true;
   Ok(())
 }
 
@@ -733,8 +778,16 @@ pub fn split_launch_markers(
   let mut out = Vec::new();
   let mut from = None;
   let mut rolled = None;
+  // Only before a `--`: after it every argument is positional (a deep link
+  // delivered as `"<exe>" -- "%1"` can't pose as a marker).
+  let mut options_ended = false;
   for a in args {
-    if let Some(v) = a.strip_prefix(swap::UPDATED_FROM_ARG) {
+    if options_ended {
+      out.push(a.clone());
+    } else if a == "--" {
+      options_ended = true;
+      out.push(a.clone());
+    } else if let Some(v) = a.strip_prefix(swap::UPDATED_FROM_ARG) {
       from = Some(v.to_string());
     } else if let Some(v) = a.strip_prefix(swap::ROLLED_BACK_ARG) {
       rolled = Some(v.to_string());
@@ -781,6 +834,23 @@ mod tests {
   }
 
   #[test]
+  fn markers_after_the_terminator_are_positional() {
+    let a = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    let (args, from, rolled) = split_launch_markers(&a(&[
+      "--denext-updated-from=1.0.0",
+      "--",
+      "myapp://x",
+      "--denext-update-rolled-back=9.9.9",
+    ]));
+    assert_eq!(from.as_deref(), Some("1.0.0"));
+    assert_eq!(rolled, None);
+    assert_eq!(
+      args,
+      a(&["--", "myapp://x", "--denext-update-rolled-back=9.9.9"])
+    );
+  }
+
+  #[test]
   fn not_configured_without_key_id_or_version() {
     let base = AppUpdateConfig {
       app_id: Some("com.example.app".into()),
@@ -819,6 +889,13 @@ mod tests {
     };
     std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
     std::fs::write(&exe, b"").unwrap();
+    if cfg!(target_os = "macos") {
+      let resources = root.join("Fake.app/Contents/Resources");
+      std::fs::create_dir_all(&resources).unwrap();
+      std::fs::write(resources.join(layout::INSTALL_MARKER), b"").unwrap();
+    } else {
+      std::fs::write(exe.with_file_name(layout::INSTALL_MARKER), b"").unwrap();
+    }
     let layout = layout::detect_install(&exe, &AppImageEnv::default()).unwrap();
     (exe, layout)
   }

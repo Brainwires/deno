@@ -40,6 +40,16 @@
 //! ```
 //!
 //! Unknown keys are refused (a typo must not silently drop a constraint).
+//!
+//! **Replay and freeze.** A manifest carries no expiry or sequence number. A
+//! replayed OLDER manifest can never install anything older than what runs
+//! (the downgrade guard, and `rejected` versions are never offered again);
+//! what it can do is hide a newer release from a client whose update host
+//! is controlled by an attacker (a freeze). Bounding that needs an expiry the
+//! publisher refreshes (TUF's timestamp role), which is a schema change:
+//! because unknown keys are refused, an `expiresAt` added now would make
+//! every earlier runtime reject the manifest, so it belongs with a `schema:
+//! 2` and a publisher that re-signs on a schedule, not in this patch.
 
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
