@@ -890,6 +890,8 @@ mod tests {
       let size = std::fs::metadata(&archive).unwrap().len();
       (archive, size)
     };
+    // download() made the staging directory the extraction goes into.
+    std::fs::create_dir_all(layout.staging_dir()).unwrap();
     let (archive, size) = pack(0o644);
     let e = stage_blocking(&layout, &archive, size, "1.0.0", "2.0.0", true)
       .unwrap_err();

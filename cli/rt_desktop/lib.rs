@@ -2072,8 +2072,9 @@ laufey::main!(|| {
   #[allow(clippy::print_stderr, reason = "runs before logging is initialized")]
   let update_rolled_back = {
     match std::panic::catch_unwind(|| {
+      // (No print of the path here: this runs on every launch, and stderr
+      // is the app's own.)
       if let Some(ref dylib_path) = get_dylib_path() {
-        eprintln!("[desktop] dylib path: {:?}", dylib_path);
         apply_pending_update(dylib_path)
       } else {
         eprintln!("[desktop] could not determine dylib path");
