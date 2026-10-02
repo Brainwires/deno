@@ -217,7 +217,17 @@ async fn bridge(
   builder = builder.header(HOST, origin.host());
   let request = builder.body(Full::new(bytes::Bytes::from(body)))?;
 
-  let response = sender.send_request(request).await?;
+  // The webview may cancel the request (navigation away, an aborted fetch,
+  // the window closing) while the app is still working on it: drop the
+  // request then, which closes the memory connection, so the app's
+  // `request.signal` aborts instead of the app computing a response nobody
+  // reads (a long poll, a slow render). `write()` failing only told the
+  // bridge once a body chunk arrived.
+  let response =
+    match until_cancelled(exchange, sender.send_request(request)).await {
+      Some(response) => response?,
+      None => return Ok(()),
+    };
 
   let status = response.status().as_u16() as i32;
   let mut resp_headers = Vec::with_capacity(response.headers().len());
@@ -234,7 +244,10 @@ async fn bridge(
   *began = true;
 
   let mut body = response.into_body();
-  while let Some(frame) = body.frame().await {
+  while let Some(frame) = until_cancelled(exchange, body.frame()).await {
+    let Some(frame) = frame else {
+      break;
+    };
     let frame = frame?;
     if let Some(chunk) = frame.data_ref() {
       // The next frame is only pulled once the webview took this one, so a
@@ -248,6 +261,43 @@ async fn bridge(
   }
 
   Ok(())
+}
+
+/// How often a bridged request checks whether the webview cancelled it.
+const CANCEL_POLL: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// `future`'s output, or `None` once the webview cancelled the exchange
+/// (laufey's `on_cancel`; see [`CancelSource`]). Backends that can't report
+/// a cancel in some state never do, and a failed `write` remains the signal
+/// there.
+async fn until_cancelled<T>(
+  exchange: &impl CancelSource,
+  future: impl std::future::Future<Output = T>,
+) -> Option<T> {
+  let mut future = std::pin::pin!(future);
+  let mut poll = tokio::time::interval(CANCEL_POLL);
+  poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+  loop {
+    tokio::select! {
+      out = &mut future => return Some(out),
+      _ = poll.tick() => {
+        if exchange.is_cancelled() {
+          return None;
+        }
+      }
+    }
+  }
+}
+
+/// Whether the webview cancelled the request (a fake in tests).
+trait CancelSource {
+  fn is_cancelled(&self) -> bool;
+}
+
+impl CancelSource for laufey::SchemeExchange {
+  fn is_cancelled(&self) -> bool {
+    laufey::SchemeExchange::is_cancelled(self)
+  }
 }
 
 /// Where a response body chunk goes (the webview's exchange; a fake in
@@ -782,6 +832,34 @@ mod tests {
       self.accepted.borrow_mut().extend_from_slice(&buf[..n]);
       n as isize
     }
+  }
+
+  struct FakeCancel(std::sync::atomic::AtomicBool);
+
+  impl CancelSource for FakeCancel {
+    fn is_cancelled(&self) -> bool {
+      self.0.load(std::sync::atomic::Ordering::SeqCst)
+    }
+  }
+
+  #[tokio::test]
+  async fn a_cancelled_request_stops_waiting_for_the_app() {
+    // An app that never answers (a long poll): the bridge used to wait for
+    // it forever after the webview gave up.
+    let cancel = Arc::new(FakeCancel(false.into()));
+    let flag = cancel.clone();
+    tokio::spawn(async move {
+      tokio::time::sleep(Duration::from_millis(150)).await;
+      flag.0.store(true, Ordering::SeqCst);
+    });
+    let started = std::time::Instant::now();
+    let out =
+      until_cancelled(cancel.as_ref(), std::future::pending::<()>()).await;
+    assert!(out.is_none());
+    assert!(started.elapsed() < Duration::from_secs(5));
+    // Not cancelled: the future's output.
+    let live = FakeCancel(false.into());
+    assert_eq!(until_cancelled(&live, async { 7 }).await, Some(7));
   }
 
   #[tokio::test]

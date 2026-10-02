@@ -206,11 +206,13 @@ where the changes are discussed.
       overlay variables can be process-local:
       `deno_os::set_env_overlay_var_not_inherited`);
     - an HTTPS error report gives up after 5 s instead of hanging the exit;
-    - the scheme bridge honours short writes (it dropped the rest of the chunk)
-      and waits instead of buffering a slow reader's stream, drops a forwarded
-      `content-length` / `expect`, keeps non-ASCII header values, and rewrites
-      `http+memory://` URLs in `Location` / `Content-Location` / `Refresh` onto
-      the app origin;
+    - the scheme bridge drops a request the webview cancelled (laufey's
+      `on_cancel`, `SchemeExchange::is_cancelled`), so the app's
+      `request.signal` aborts and a long poll or an endless stream ends; it
+      honours short writes (it dropped the rest of the chunk) and waits instead
+      of buffering a slow reader's stream, drops a forwarded `content-length` /
+      `expect`, keeps non-ASCII header values, and rewrites `http+memory://`
+      URLs in `Location` / `Content-Location` / `Refresh` onto the app origin;
     - the updater: a `check()` during a download no longer relabels it, the
       state file reads across versions (no `deny_unknown_fields`), a reused
       trial PID is not taken for the trial (process start time), an executable
@@ -238,8 +240,12 @@ global shortcuts / launch at login / DevTools control, menu accelerators /
 notifications, UI-thread tasks / auth sessions / non-blocking WebKitGTK scheme
 bodies, Windows bindgen fix, and API 43: auth session cancel, Local Network
 Access for the registered custom-scheme origins on CEF, Windows menu and
-file-dialog fixes, CEF file drops), at the commit pinned by `LAUFEY_SHA` in the
-workflow (or the `laufey_ref` input).
+file-dialog fixes, CEF file drops; then the 3.1.0 audits: scheme request
+cancellation (`on_cancel` on every backend), no aborts on a NUL in a string, the
+Linux window-destroy use-after-free, sync UI hops that can't hang exit), at the
+commit pinned by `LAUFEY_SHA` in the workflow (or the `laufey_ref` input). The
+same commit is the `laufey` git dependency of `cli/rt_desktop/Cargo.toml` (crate
+0.8.0, API 43).
 
 laufey's `init_api` rejects any C ABI version mismatch between the runtime and
 the host, so the `laufey` crate libdenort links and the hosts are built from the
@@ -361,13 +367,13 @@ in the job summary, never skipped silently. Areas:
 
 - **origin** — page origin and secure context, `request.url` / `remoteAddr` of
   the memory transport, incremental streaming, `Origin` on a cross-origin fetch,
-  the page's WebSocket through the relay; the relay refusing foreign / missing /
-  duplicate / upper-cased origins (403) and plain HTTP (400) and admitting the
-  exact origin (101); a TCP `Deno.serve` refusing `http+memory:` request targets
-  (400); the env overlay reaching a child process, without the in-process
-  `DENO_SERVE_ADDRESS`; and a second app whose server is `node:http`
-  (`originnode`): the page, a POST round trip and the memory socket's
-  `remoteAddress`.
+  the page's WebSocket through the relay, a response the page aborts cancelled
+  in the app; the relay refusing foreign / missing / duplicate / upper-cased
+  origins (403) and plain HTTP (400) and admitting the exact origin (101); a TCP
+  `Deno.serve` refusing `http+memory:` request targets (400); the env overlay
+  reaching a child process, without the in-process `DENO_SERVE_ADDRESS`; and a
+  second app whose server is `node:http` (`originnode`): the page, a POST round
+  trip and the memory socket's `remoteAddress`.
 - **appid** — localStorage and IndexedDB persisting across launches of one
   identifier and not visible to another identifier at the same origin.
 - **deeplink** — cold argv links and files, second-instance forwarding (no
