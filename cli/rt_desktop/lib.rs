@@ -88,6 +88,12 @@ impl deno_runtime::ops::desktop::DesktopPasskeys for LaufeyPasskeys {
   }
 }
 
+/// The badge laufey sets for `Dock.setBadge`'s text: "" (from `null`,
+/// `undefined` or "") clears it (laufey passes NULL to the backend).
+fn laufey_dock_badge(text: &str) -> Option<&str> {
+  if text.is_empty() { None } else { Some(text) }
+}
+
 /// `Deno.desktop.authSession` over laufey's auth sessions (API 42):
 /// `ASWebAuthenticationSession` on macOS, not_supported elsewhere (RFC 8252:
 /// the system browser). See laufey's docs/auth-session.md.
@@ -1266,7 +1272,7 @@ impl denort::desktop::DesktopApi for WefDesktopApi {
   }
 
   fn set_dock_badge(&self, text: &str) {
-    laufey::set_dock_badge(if text.is_empty() { None } else { Some(text) });
+    laufey::set_dock_badge(laufey_dock_badge(text));
   }
 
   fn bounce_dock(&self, critical: bool) {
@@ -3223,10 +3229,19 @@ mod tests {
   use super::desktop_menu_item_to_laufey_menu_item;
   use super::desktop_value_to_laufey_value;
   use super::extract_fork_script_path;
+  use super::laufey_dock_badge;
   use super::laufey_value_to_desktop_value;
   use super::login_item_state_str;
   use super::map_permission_status;
   use super::should_show_native_error_dialog;
+
+  #[test]
+  fn an_empty_dock_badge_clears_it() {
+    // Dock.setBadge(null) arrives as "" and must clear (NULL to laufey),
+    // not show a badge.
+    assert_eq!(laufey_dock_badge(""), None);
+    assert_eq!(laufey_dock_badge("7"), Some("7"));
+  }
 
   #[test]
   fn desktop_env_overlay_publishes_the_serve_address_and_origins() {

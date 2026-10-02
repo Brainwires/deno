@@ -4243,9 +4243,10 @@ impl Dock {
     v8::Global::new(scope, dock)
   }
 
-  #[fast]
-  fn set_badge(&self, #[string] text: &str) {
-    self.api.set_dock_badge(text);
+  // `null` / `undefined` clear the badge, as the d.ts says (a required
+  // string turned `null` into the text "null").
+  fn set_badge(&self, #[string] text: Option<String>) {
+    self.api.set_dock_badge(dock_badge_text(text.as_deref()));
   }
 
   #[fast]
@@ -4261,6 +4262,12 @@ impl Dock {
   fn set_visible(&self, visible: bool) {
     self.api.set_dock_visible(visible);
   }
+}
+
+/// What `Dock.setBadge(text)` hands `DesktopApi::set_dock_badge`: the text,
+/// or "" (which clears) for `null` / `undefined`.
+fn dock_badge_text(text: Option<&str>) -> &str {
+  text.unwrap_or("")
 }
 
 struct Tray {
@@ -4657,6 +4664,7 @@ mod tests {
   use super::PendingBindResponses;
   use super::PermissionState;
   use super::Tray;
+  use super::dock_badge_text;
   use super::dylib_magic_ok;
   use super::permission_state_to_web_string;
   use super::register_bind_call;
@@ -6340,5 +6348,22 @@ mod tests {
     );
     // The fallback answer points at the system browser, as laufey's does.
     assert!(AUTH_SESSION_NOT_SUPPORTED_MESSAGE.contains("RFC 8252"));
+  }
+
+  #[test]
+  fn dock_badge_null_clears() {
+    // Dock.setBadge(null) / setBadge() clear the badge ("" is the clear
+    // value of DesktopApi::set_dock_badge), never show "null".
+    assert_eq!(dock_badge_text(None), "");
+    assert_eq!(dock_badge_text(Some("")), "");
+    assert_eq!(dock_badge_text(Some("3")), "3");
+    // The JS method is not a fast call: those can't take an optional
+    // string, so null would be coerced to "null".
+    let method = super::Dock::DECL
+      .methods
+      .iter()
+      .find(|m| m.name == "setBadge" || m.name == "set_badge")
+      .expect("Dock.setBadge");
+    assert!(std::panic::catch_unwind(|| method.fast_fn()).is_err());
   }
 }
