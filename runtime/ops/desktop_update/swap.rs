@@ -66,6 +66,11 @@ pub const ROLLED_BACK_ARG: &str = "--denext-update-rolled-back=";
 pub const HELPER_WAIT: Duration = Duration::from_secs(300);
 /// The watchdog stops spawning recovery helpers after this many attempts.
 pub const MAX_HELPER_ATTEMPTS: u32 = 3;
+/// Windows: how long the helper then waits for the app's other processes
+/// (a CEF subprocess outliving its browser process, an earlier launch) to
+/// leave the install.
+#[cfg(windows)]
+pub const HELPER_WAIT_INSTALL_PROCESSES: Duration = Duration::from_secs(60);
 const STATE_SCHEMA: u32 = 1;
 
 /// Where an update is.
@@ -645,6 +650,20 @@ pub fn run_helper(layout: &InstallLayout, mode: HelperMode, pid: u32) -> i32 {
     log_line(layout, "the app did not exit in time; nothing changed");
     return 1;
   }
+  // Windows refuses to rename a directory while a process holds one of its
+  // files open without delete sharing: the app's CEF subprocesses (which
+  // open the .pak / ICU data that way) can outlive the process that was
+  // waited for by seconds, and a crashed trial's by longer. Wait for every
+  // process running from the install to leave, so the renames below don't
+  // run out of retries. (This helper runs from the install too; it is not
+  // waited for.)
+  #[cfg(windows)]
+  if !wait_for_processes_in(&layout.install, HELPER_WAIT_INSTALL_PROCESSES) {
+    log_line(
+      layout,
+      "processes still run from the install; trying the swap anyway",
+    );
+  }
   let Some(mut state) = read_state(layout) else {
     log_line(layout, "no update state for this install");
     return 1;
@@ -719,6 +738,117 @@ pub fn wait_for_exit(pid: u32, timeout: Duration) -> bool {
       r == WAIT_OBJECT_0
     }
   }
+}
+
+/// Windows: wait up to `timeout` until no process other than this one runs
+/// an executable from inside `dir`. `true` when none is left.
+#[cfg(windows)]
+pub fn wait_for_processes_in(dir: &Path, timeout: Duration) -> bool {
+  let deadline = Instant::now() + timeout;
+  let prefix = windows_path_key(dir, true);
+  loop {
+    let running = processes_in(&prefix);
+    if running.is_empty() {
+      return true;
+    }
+    let now = Instant::now();
+    let done = now >= deadline;
+    // Wait on one of them (at most a second, then look again: others may
+    // have started or ended meanwhile).
+    let wait = if done {
+      0
+    } else {
+      (deadline - now).as_millis().min(1000) as u32
+    };
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::WaitForSingleObject;
+    // SAFETY: handles opened by processes_in, each closed once.
+    unsafe {
+      WaitForSingleObject(running[0], wait);
+      for h in running {
+        CloseHandle(h);
+      }
+    }
+    if done {
+      return false;
+    }
+  }
+}
+
+/// A path as a case-insensitive comparison key: `\\?\` stripped, `/` as
+/// `\`, lower-cased, and (`dir`) ending in `\`.
+#[cfg(windows)]
+fn windows_path_key(path: &Path, dir: bool) -> String {
+  let mut s = path.to_string_lossy().replace('/', "\\");
+  if let Some(rest) = s.strip_prefix("\\\\?\\UNC\\") {
+    s = format!("\\\\{rest}");
+  } else if let Some(rest) = s.strip_prefix("\\\\?\\") {
+    s = rest.to_string();
+  }
+  let mut s = s.to_lowercase();
+  if dir && !s.ends_with('\\') {
+    s.push('\\');
+  }
+  s
+}
+
+/// Handles (SYNCHRONIZE) of the processes other than this one whose
+/// executable is under `prefix` (a [`windows_path_key`] of a directory).
+#[cfg(windows)]
+fn processes_in(prefix: &str) -> Vec<windows_sys::Win32::Foundation::HANDLE> {
+  use windows_sys::Win32::Foundation::CloseHandle;
+  use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+  use windows_sys::Win32::System::Diagnostics::ToolHelp::CreateToolhelp32Snapshot;
+  use windows_sys::Win32::System::Diagnostics::ToolHelp::PROCESSENTRY32W;
+  use windows_sys::Win32::System::Diagnostics::ToolHelp::Process32FirstW;
+  use windows_sys::Win32::System::Diagnostics::ToolHelp::Process32NextW;
+  use windows_sys::Win32::System::Diagnostics::ToolHelp::TH32CS_SNAPPROCESS;
+  use windows_sys::Win32::System::Threading::OpenProcess;
+  use windows_sys::Win32::System::Threading::PROCESS_QUERY_LIMITED_INFORMATION;
+  use windows_sys::Win32::System::Threading::PROCESS_SYNCHRONIZE;
+  use windows_sys::Win32::System::Threading::QueryFullProcessImageNameW;
+  let me = std::process::id();
+  let mut out = Vec::new();
+  // SAFETY: a process snapshot walked with a correctly sized entry; every
+  // handle is closed or returned.
+  unsafe {
+    let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if snap == INVALID_HANDLE_VALUE {
+      return out;
+    }
+    let mut entry: PROCESSENTRY32W = std::mem::zeroed();
+    entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+    let mut more = Process32FirstW(snap, &mut entry) != 0;
+    while more {
+      let pid = entry.th32ProcessID;
+      if pid != 0 && pid != me {
+        let h = OpenProcess(
+          PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
+          0,
+          pid,
+        );
+        if !h.is_null() {
+          let mut buf = vec![0u16; 32768];
+          let mut len = buf.len() as u32;
+          let inside =
+            QueryFullProcessImageNameW(h, 0, buf.as_mut_ptr(), &mut len) != 0
+              && windows_path_key(
+                Path::new(&String::from_utf16_lossy(&buf[..len as usize])),
+                false,
+              )
+              .starts_with(prefix);
+          if inside {
+            out.push(h);
+          } else {
+            CloseHandle(h);
+          }
+        }
+      }
+      more = Process32NextW(snap, &mut entry) != 0;
+    }
+    CloseHandle(snap);
+  }
+  out
 }
 
 /// Start `program` detached from this process (its own process group /
@@ -865,6 +995,42 @@ pub fn is_update_marker(arg: &str) -> bool {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  /// The helper's wait for processes running from the install: a process
+  /// started from a copy of a system executable in a scratch directory keeps
+  /// the wait from finishing until it exits; one elsewhere does not count.
+  #[cfg(windows)]
+  #[test]
+  fn waits_for_processes_running_from_the_install() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = std::fs::canonicalize(tmp.path()).unwrap();
+    let system = std::env::var("SystemRoot").unwrap_or("C:\\Windows".into());
+    let ping = dir.join("ping.exe");
+    std::fs::copy(Path::new(&system).join("System32").join("ping.exe"), &ping)
+      .unwrap();
+    assert!(wait_for_processes_in(&dir, Duration::ZERO));
+    let mut child = std::process::Command::new(&ping)
+      .args(["-n", "4", "127.0.0.1"])
+      .stdout(std::process::Stdio::null())
+      .spawn()
+      .unwrap();
+    // canonicalize gives the `\\?\` form (as an install path is); the plain
+    // form names the same directory.
+    let plain = PathBuf::from(
+      dir
+        .to_string_lossy()
+        .trim_start_matches("\\\\?\\")
+        .to_string(),
+    );
+    assert!(!wait_for_processes_in(&dir, Duration::from_millis(300)));
+    assert!(!wait_for_processes_in(&plain, Duration::from_millis(300)));
+    assert!(wait_for_processes_in(&dir, Duration::from_secs(30)));
+    child.wait().unwrap();
+    assert_eq!(
+      windows_path_key(Path::new("\\\\?\\C:\\A/b"), true),
+      "c:\\a\\b\\"
+    );
+  }
 
   fn exchange_supported(dir: &Path) -> bool {
     let a = dir.join(".xa");
