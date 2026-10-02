@@ -486,7 +486,14 @@ await r.step("notifications", async () => {
       auto,
     );
     r.mark("getScheduled");
-    const list = await desktop.notifications.getScheduled();
+    // macOS adds a request to UNUserNotificationCenter asynchronously:
+    // the pending list catches up within moments.
+    let list: any[] = [];
+    await waitFor(async () => {
+      list = await desktop.notifications.getScheduled();
+      return list.some((n: any) => n.tag === "e2e-later") &&
+        list.some((n: any) => n.tag === auto);
+    }, 5000);
     const mine = list.find((n: any) => n.tag === "e2e-later");
     r.set("scheduled", list);
     r.check(
