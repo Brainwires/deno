@@ -1211,6 +1211,21 @@ mod tests {
     // Idempotent: nothing to write the second time.
     let out = register_scheme(&reg, &scheme, RegisterMode::Startup);
     assert!(out.registered && !out.wrote);
+    // The registered command ends the options before the link.
+    let command = os::read_state(&scheme).user.unwrap().command.unwrap();
+    assert!(command.ends_with(" -- \"%1\""), "{command}");
+
+    // A registration in the earlier form (no `--`) is rewritten at startup.
+    os::Key::create(
+      windows_sys::Win32::System::Registry::HKEY_CURRENT_USER,
+      &format!("Software\\Classes\\{scheme}\\shell\\open\\command"),
+    )
+    .unwrap()
+    .set_string(None, &format!("\"{}\" \"%1\"", me.exe))
+    .unwrap();
+    let out = register_scheme(&reg, &scheme, RegisterMode::Startup);
+    assert!(out.registered && out.wrote, "{out:?}");
+    assert_eq!(os::read_state(&scheme).user, Some(logic::expected_key(&me)));
 
     // The app moved: the key names the old path but carries the app id, so
     // it is this app's, stale, and refreshed.
@@ -1228,7 +1243,7 @@ mod tests {
     assert!(out.registered && out.wrote);
     assert_eq!(
       os::read_state(&scheme).user.unwrap().command.as_deref(),
-      Some("\"C:\\Moved\\App.exe\" \"%1\"")
+      Some("\"C:\\Moved\\App.exe\" -- \"%1\"")
     );
 
     // Another app's key (no app id): left alone at startup and without
