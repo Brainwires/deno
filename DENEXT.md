@@ -139,7 +139,20 @@ are where the changes are discussed.
     `notificationresponse` event, and `Deno.desktop.launchNotificationResponses`
     holds the ones that arrived before the app listened (laufey API 41).
 
-The runtime-side parts (1-3, 5-14) are what the prebuilt `libdenort` carries.
+15. **`feat(desktop)`: OS auth sessions and native code on the UI thread** —
+    `Deno.desktop.authSession` (`capabilities()`, `start({ url,
+    callbackScheme | callbackUrl, ephemeral, window })` resolving with the
+    callback URL) runs `ASWebAuthenticationSession` on macOS, with a real
+    `cancelled` when the user closes the sheet; Windows and Linux have no OS
+    equivalent and reject with code `not_supported` (RFC 8252: the system
+    browser). `Deno.desktop.runOnMainThread(fn, context)` calls a native
+    `void* (*)(void*)` (an `UnsafeFnPointer`, `UnsafeCallback` or pointer) on
+    the UI thread and resolves with its return value as a bigint; it needs
+    `--allow-ffi` and rejects instead of hanging once the app is quitting.
+    Both are main-scope only (laufey API 42, which also stops WebKitGTK's
+    custom-scheme writes from blocking the event loop).
+
+The runtime-side parts (1-3, 5-15) are what the prebuilt `libdenort` carries.
 The CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` /
 `LAUFEY_APP_ID` into a packaged app's launchers) are in the branch too, but a
 stock CLI does not run them; denext's own launcher provides that environment.
@@ -150,7 +163,8 @@ The laufey backend hosts are built from
 request bodies, launch config, open-url / single instance, passkeys, the
 window API with littledivy/laufey#80 and #81, drag and drop / file dialogs /
 rich clipboard, global shortcuts / launch at login / DevTools control, menu
-accelerators / notifications, Windows bindgen fix), at the commit pinned by
+accelerators / notifications, UI-thread tasks / auth sessions /
+non-blocking WebKitGTK scheme bodies, Windows bindgen fix), at the commit pinned by
 `LAUFEY_SHA` in the workflow (or the `laufey_ref` input).
 
 laufey's `init_api` rejects any C ABI version mismatch between the runtime
