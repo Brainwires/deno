@@ -11,6 +11,7 @@ const {
 } = core;
 const {
   op_dns_resolve,
+  op_net_accept_memory,
   op_net_accept_tcp,
   op_net_accept_tunnel,
   op_net_accept_unix,
@@ -313,6 +314,9 @@ class Listener {
       case "tunnel":
         promise = op_net_accept_tunnel(this.#rid);
         break;
+      case "memory":
+        promise = op_net_accept_memory(this.#rid);
+        break;
       default:
         throw new Error(`Unsupported transport: ${this.addr.transport}`);
     }
@@ -339,6 +343,13 @@ class Listener {
         );
       case "tunnel":
         return new TunnelConn(rid, remoteAddr, localAddr);
+      case "memory": {
+        // Both ends of a memory connection share one address: the listener
+        // name and the per-listener connection id (there is no peer address).
+        // `localAddr` is the name, `remoteAddr` the id (see the op).
+        const addr = { transport: "memory", name: localAddr, id: remoteAddr };
+        return new Conn(rid, addr, { ...addr });
+      }
       default:
         throw new Error("unreachable");
     }

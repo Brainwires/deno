@@ -144,6 +144,7 @@ deno_core::extension!(deno_net,
     ops::op_net_listen_tunnel,
     ops::op_net_accept_tunnel,
     ops::op_net_listen_memory,
+    ops::op_net_accept_memory,
 
     ops_tls::op_tls_key_null,
     ops_tls::op_tls_key_static,

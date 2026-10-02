@@ -12,7 +12,8 @@
 //
 // TCP overrides are applied by mutating the listen() options so the
 // normal net.Server path handles them. Non-TCP overrides (unix, vsock,
-// tunnel) open a Deno listener directly and feed each accepted
+// tunnel, and the desktop runtime's in-process memory channel) open a Deno
+// listener directly and feed each accepted
 // connection to the server's connection listener via a lightweight
 // Duplex wrapper around the Deno.Conn.
 
@@ -43,7 +44,9 @@ const {
 } = primordials;
 
 const { nextTick } = core.loadExtScript("ext:deno_node/_next_tick.ts");
-const { listen: denoListen } = core.loadExtScript("ext:deno_net/01_net.js");
+const { listen: denoListen, listenMemory } = core.loadExtScript(
+  "ext:deno_net/01_net.js",
+);
 const { ERR_SOCKET_CLOSED } = core.loadExtScript(
   "ext:deno_node/internal/errors.ts",
 );
@@ -57,6 +60,9 @@ const KIND_TCP = 1;
 const KIND_UNIX = 2;
 const KIND_VSOCK = 3;
 const KIND_TUNNEL = 4;
+// The in-process memory channel (`DENO_SERVE_ADDRESS=memory:<name>`), the
+// desktop runtime's transport. `host` is the listener name.
+const KIND_MEMORY = 5;
 
 // Peek at the override without consuming it. Returns null if there is
 // no override or it has already been consumed by an earlier server.
@@ -80,6 +86,13 @@ const SERVER_KIND_NODE_HTTP2 = 3;
 
 function notifyAddressOverrideServing(kind = SERVER_KIND_NODE_HTTP) {
   op_http_notify_serving(kind);
+}
+
+// Open the Deno listener for an override record. The memory transport is
+// not a public `Deno.listen` transport, so it has its own internal entry.
+function listenOnOverride(override) {
+  if (override.kind === KIND_MEMORY) return listenMemory(override.host);
+  return denoListen(overrideToListenArgs(override));
 }
 
 // Translate an override record into the argument for denoListen().
@@ -141,6 +154,10 @@ class OverrideSocket extends Duplex {
     } else if (remote && remote.transport === "vsock") {
       this.remoteAddress = `vsock:${remote.cid}`;
       this.remotePort = remote.port;
+    } else if (remote && remote.transport === "memory") {
+      // No peer address on the in-process channel; name the listener the
+      // request arrived on, like a unix socket's path.
+      this.remoteAddress = `memory:${remote.name}`;
     }
 
     this.#readLoop();
@@ -518,7 +535,7 @@ function startOverrideListener(
 ) {
   let denoListener;
   try {
-    denoListener = denoListen(overrideToListenArgs(override));
+    denoListener = listenOnOverride(override);
   } catch (err) {
     // Don't bring the main listener down just because the override
     // failed to open -- surface it asynchronously.

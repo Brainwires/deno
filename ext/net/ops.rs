@@ -1030,6 +1030,37 @@ pub fn op_net_listen_memory(
   Ok((rid, local_addr.name, local_addr.id))
 }
 
+/// Accepts the next connection on a `memory:` listener (the internal
+/// in-process transport behind `DENO_SERVE_ADDRESS=memory:<name>`). Used by
+/// the `node:http` / `node:https` / `node:http2` address override, which
+/// drives its own HTTP parser over the accepted `Deno.Conn`; `Deno.serve`
+/// accepts memory connections in Rust instead.
+#[op2]
+pub async fn op_net_accept_memory(
+  state: Rc<RefCell<OpState>>,
+  #[smi] rid: ResourceId,
+) -> Result<(ResourceId, String, u32), NetError> {
+  let resource = state
+    .borrow()
+    .resource_table
+    .get::<NetworkListenerResource<crate::memory::MemoryListener>>(rid)
+    .map_err(|_| NetError::ListenerClosed)?;
+  let listener = RcRef::map(&resource, |r| &r.listener)
+    .try_borrow_mut()
+    .ok_or_else(|| NetError::AcceptTaskOngoing)?;
+  let cancel = RcRef::map(resource, |r| &r.cancel);
+  let (stream, addr) = listener
+    .accept()
+    .try_or_cancel(cancel)
+    .await
+    .map_err(accept_err)?;
+  let rid = state
+    .borrow_mut()
+    .resource_table
+    .add(crate::io::MemoryStreamResource::new(stream.into_split()));
+  Ok((rid, addr.name, addr.id))
+}
+
 #[op2]
 pub async fn op_net_accept_tunnel(
   state: Rc<RefCell<OpState>>,
