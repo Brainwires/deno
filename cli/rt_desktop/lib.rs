@@ -2056,6 +2056,28 @@ fn apply_pending_update(dylib_path: &Path) -> bool {
   false
 }
 
+/// Exit from the runtime thread before the app started (the update helper
+/// finished, or the update watchdog handed a rollback to the helper): nothing
+/// has run that needs flushing.
+///
+/// On Windows the backend may still be initializing on the UI thread (CEF
+/// starting its subprocesses), and `exit()`'s CRT teardown and DLL detach can
+/// then wait on it forever: the CEF e2e's rollback launch logged its hand-off
+/// and never exited, so the helper waiting for it never rolled back. End the
+/// process at once instead.
+fn exit_before_start(code: i32) -> ! {
+  #[cfg(windows)]
+  {
+    use windows_sys::Win32::System::Threading::GetCurrentProcess;
+    use windows_sys::Win32::System::Threading::TerminateProcess;
+    // SAFETY: terminating the current process; nothing after this runs.
+    unsafe {
+      TerminateProcess(GetCurrentProcess(), code as u32);
+    }
+  }
+  deno_runtime::exit(code)
+}
+
 laufey::main!(|| {
   // Full-app self-update helper (`<exe> run denext-update-helper <mode>
   // <pid>`): swap or roll back the install, relaunch, exit. Before anything
@@ -2072,7 +2094,9 @@ laufey::main!(|| {
       let code =
         deno_runtime::ops::desktop_update::early_startup(&args, &mut trial)
           .unwrap_or(1);
-      deno_runtime::exit(code);
+      // The helper's work (and its log) is done; the host never started an
+      // app in this process.
+      exit_before_start(code);
     }
   }
 
@@ -2151,7 +2175,7 @@ laufey::main!(|| {
     if let Some(code) =
       deno_runtime::ops::desktop_update::early_startup(&args, &mut trial)
     {
-      deno_runtime::exit(code);
+      exit_before_start(code);
     }
     trial
   };
