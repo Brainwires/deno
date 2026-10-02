@@ -6,6 +6,31 @@
   "type": "object",
   "required": [],
   "$defs": {
+    "desktopIcon": {
+      "oneOf": [{
+        "type": "string",
+        "description": "A single icon file."
+      }, {
+        "type": "array",
+        "description": "PNG files at specific sizes.",
+        "items": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["path", "size"],
+          "properties": {
+            "path": {
+              "type": "string",
+              "description": "The PNG file."
+            },
+            "size": {
+              "type": "integer",
+              "description": "Its width and height in pixels.",
+              "minimum": 1
+            }
+          }
+        }
+      }]
+    },
     "permissionConfigValue": {
       "oneOf": [{
         "type": "boolean",
@@ -170,16 +195,16 @@
               "additionalProperties": false,
               "properties": {
                 "macos": {
-                  "type": "string",
-                  "description": "Icon path for macOS (.icns or .png)."
+                  "$ref": "#/$defs/desktopIcon",
+                  "description": "Icon for macOS (.icns or .png, or PNGs at several sizes)."
                 },
                 "windows": {
-                  "type": "string",
-                  "description": "Icon path for Windows (.ico)."
+                  "$ref": "#/$defs/desktopIcon",
+                  "description": "Icon for Windows (.ico, or PNGs at several sizes)."
                 },
                 "linux": {
-                  "type": "string",
-                  "description": "Icon path for Linux (.png)."
+                  "$ref": "#/$defs/desktopIcon",
+                  "description": "Icon for Linux (.png, or PNGs at several sizes)."
                 }
               }
             },
@@ -245,6 +270,72 @@
             "publicKey": {
               "type": "string",
               "description": "The public half of the release signing key: an ECDSA P-256 key as base64 SPKI or a PUBLIC KEY PEM (the format `denext ota keygen` writes)."
+            }
+          }
+        },
+        "errorReporting": {
+          "type": "object",
+          "description": "Where the app's uncaught errors are reported (besides the error dialog and stderr).",
+          "additionalProperties": false,
+          "properties": {
+            "url": {
+              "type": "string",
+              "description": "An https:// URL each error report is POSTed to as JSON, or a file:// URL of a local file the reports are appended to. Other schemes (plain http) are refused."
+            }
+          }
+        },
+        "macos": {
+          "type": "object",
+          "description": "macOS packaging options.",
+          "additionalProperties": false,
+          "properties": {
+            "codesignIdentity": {
+              "type": "string",
+              "description": "The identity passed to `codesign --sign`: typically \"Developer ID Application: Acme, Inc. (TEAMID)\" for distribution, or \"-\" for an ad-hoc signature (Apple Silicon will not launch unsigned code)."
+            }
+          }
+        },
+        "initialWindow": {
+          "type": "object",
+          "description": "The window the app starts with (the one the first `new BrowserWindow()` adopts when its options agree with these creation-time attributes).",
+          "additionalProperties": false,
+          "properties": {
+            "width": {
+              "type": "integer",
+              "description": "Width in logical pixels. Defaults to 800.",
+              "minimum": 1,
+              "maximum": 65535
+            },
+            "height": {
+              "type": "integer",
+              "description": "Height in logical pixels. Defaults to 600.",
+              "minimum": 1,
+              "maximum": 65535
+            },
+            "frameless": {
+              "type": "boolean",
+              "description": "No title bar or window frame. Defaults to false.",
+              "default": false
+            },
+            "noActivate": {
+              "type": "boolean",
+              "description": "Showing the window does not take focus from the active app (a tray panel). Defaults to false.",
+              "default": false
+            },
+            "transparentTitlebar": {
+              "type": "boolean",
+              "description": "The title bar is transparent and the content extends under it (macOS). Defaults to false.",
+              "default": false
+            },
+            "transparent": {
+              "type": "boolean",
+              "description": "The window background is transparent. Defaults to false.",
+              "default": false
+            },
+            "showOnFirstLoad": {
+              "type": "boolean",
+              "description": "Reveal the window once its first page has loaded. Set to false for an app that shows it itself, or a tray-only app. Defaults to true.",
+              "default": true
             }
           }
         }
