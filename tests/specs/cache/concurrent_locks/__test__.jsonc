@@ -1,0 +1,37 @@
+// Cross-process locks on DENO_DIR's package cache and on build outputs. Each
+// test holds a lock the way another `deno` process would (or starts a second
+// `deno`) and checks that the contending command reports that it is blocking,
+// waits, and then succeeds.
+{
+  "tempDir": true,
+  "envs": {
+    "DENO_DIR": "$PWD/deno_dir"
+  },
+  "timeout": 120,
+  "tests": {
+    "clean_waits_for_readers": {
+      "args": "run -A clean_waits_for_readers.ts",
+      "output": "ok\n"
+    },
+    "readers_wait_for_mutation": {
+      "args": "run -A readers_wait_for_mutation.ts",
+      "output": "ok\n"
+    },
+    "downloads_exclude_downloads": {
+      "args": "run -A downloads_exclude_downloads.ts",
+      "output": "ok\n"
+    },
+    "coverage_dir": {
+      "args": "run -A coverage_dir.ts",
+      "output": "ok\n"
+    },
+    "compile_output": {
+      "args": "run -A compile_output.ts",
+      "output": "ok\n"
+    },
+    "lockfile_merge": {
+      "args": "run -A lockfile_merge.ts",
+      "output": "ok\n"
+    }
+  }
+}

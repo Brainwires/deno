@@ -689,6 +689,14 @@ pub async fn compile_binary(
     is_desktop,
   )
   .await?;
+  // Held until the binary is in place: a concurrent compile to the same
+  // output would otherwise delete this one's temp file (see the stale temp
+  // file cleanup below) or race it to the final rename.
+  let _output_lock = crate::cache::lock::lock_artifact(
+    cli_options.initial_cwd(),
+    &output_path,
+    "output file",
+  );
   let compile_config = cli_options.start_dir.to_compile_config()?;
   if !is_desktop {
     apply_compile_arg_separator(
@@ -961,6 +969,11 @@ async fn compile_eszip(
   )
   .await?;
   output_path.set_extension("eszip");
+  let _output_lock = crate::cache::lock::lock_artifact(
+    cli_options.initial_cwd(),
+    &output_path,
+    "output file",
+  );
 
   let maybe_import_map_specifier =
     cli_options.resolve_specified_import_map_specifier()?;
