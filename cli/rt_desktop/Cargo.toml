@@ -40,10 +40,12 @@ denort = { path = "../rt", default-features = false }
 # global shortcuts / launch at login / DevTools control, menu accelerators
 # and context-menu close, scheduled and actionable notifications, UI-thread
 # tasks, auth sessions and their cancel, non-blocking WebKitGTK scheme
-# bodies, CEF Local Network Access for registered schemes), pinned to
+# bodies, CEF Local Network Access for registered schemes, in-process
+# dialogs, and the security audit's "--" end of options / packaged --runtime
+# / deep-link switch filter / pinned launch keys), pinned to
 # a commit of the Brainwires/laufey fork. The host built from the same commit
 # must be used with it (the API version check is exact).
-laufey = { git = "https://github.com/Brainwires/laufey", rev = "6c56a34e7a914f90753e127087fd41510ac6fca0" }
+laufey = { git = "https://github.com/Brainwires/laufey", rev = "1634d1fa4af35ec51a842c6a229d43920fed1332" }
 libsui.workspace = true
 
 bytes.workspace = true
