@@ -263,9 +263,15 @@ export async function activate(title: string): Promise<void> {
     ])
       .catch(() => {});
   } else if (OS === "windows") {
+    // Windows lets a process take the foreground only right after input; an
+    // Alt press counts (the usual workaround for SetForegroundWindow).
     const w = winLibs().symbols;
     const h = w.FindWindowW(null, wide(title));
-    if (h) w.SetForegroundWindow(h);
+    if (h) {
+      w.keybd_event(0x12, 0, 0, 0n);
+      w.SetForegroundWindow(h);
+      w.keybd_event(0x12, 0, 2, 0n);
+    }
   }
 }
 

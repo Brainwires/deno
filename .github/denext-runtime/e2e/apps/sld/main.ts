@@ -11,14 +11,15 @@
 // deno-lint-ignore-file no-explicit-any
 
 import {
-  BrowserWindow,
   desktop,
   errorOf,
   html,
   OS,
   page,
   Report,
+  shared,
   sleep,
+  titledWindow,
   waitFor,
 } from "../_shared/e2e.ts";
 import { activate, canPressKeys, pressKeys } from "../_shared/input.ts";
@@ -27,9 +28,9 @@ const r = new Report("sld");
 const expectDevtools = r.params.devtools !== false;
 const identifier: string = r.params.identifier;
 
-Deno.serve(() => html(page("e2e sld")));
+Deno.serve((req) => shared(req) ?? html(page("e2e sld")));
 const TITLE = "E2E SLD";
-const win = new BrowserWindow({ title: TITLE, width: 600, height: 400 });
+const win = titledWindow(TITLE);
 await sleep(2500);
 
 await r.step("shortcuts", async () => {
@@ -67,8 +68,14 @@ await r.step("shortcuts", async () => {
     );
     return;
   }
-  const ACCEL = "CommandOrControl+Alt+Shift+F9";
-  const want = OS === "darwin" ? "Alt+Shift+Super+F9" : "Ctrl+Alt+Shift+F9";
+  r.check(
+    "canonicalize: CommandOrControl and function keys",
+    sc.canonicalize("CommandOrControl+Alt+Shift+F9") ===
+      (OS === "darwin" ? "Alt+Shift+Super+F9" : "Ctrl+Alt+Shift+F9"),
+    sc.canonicalize("CommandOrControl+Alt+Shift+F9"),
+  );
+  const ACCEL = "CommandOrControl+Alt+Shift+K";
+  const want = OS === "darwin" ? "Alt+Shift+Super+K" : "Ctrl+Alt+Shift+K";
   const pressed: string[] = [];
   const events: string[] = [];
   sc.addEventListener(
@@ -105,7 +112,7 @@ await r.step("shortcuts", async () => {
     r.na("a real key press reaches the callback and the event", cannot);
   } else {
     await activate(TITLE);
-    await pressKeys(["Primary", "Alt", "Shift", "F9"]);
+    await pressKeys(["Primary", "Alt", "Shift", "K"]);
     r.check(
       "a real key press calls the callback and fires the event, once each",
       await waitFor(() => pressed.length === 1 && events.length === 1, 8000) &&
@@ -116,7 +123,7 @@ await r.step("shortcuts", async () => {
   sc.unregisterAll();
   r.check("unregisterAll empties the list", sc.list().length === 0);
   if (!cannot) {
-    await pressKeys(["Primary", "Alt", "Shift", "F9"]);
+    await pressKeys(["Primary", "Alt", "Shift", "K"]);
     await sleep(1500);
     r.check(
       "after unregisterAll a press does nothing",

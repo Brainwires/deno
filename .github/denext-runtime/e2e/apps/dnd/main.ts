@@ -10,22 +10,24 @@
 // deno-lint-ignore-file no-explicit-any
 
 import {
-  BrowserWindow,
   desktop,
   errorOf,
   html,
   page,
   PNG,
   Report,
+  shared,
   sleep,
+  titledWindow,
+  within,
 } from "../_shared/e2e.ts";
 
 const r = new Report("dnd");
 const isA = (e: unknown, name: string) =>
   e instanceof Error && (e.name === name || e.constructor.name === name);
 
-Deno.serve(() => html(page("e2e dnd")));
-const win = new BrowserWindow({ title: "E2E DnD", width: 600, height: 400 });
+Deno.serve((req) => shared(req) ?? html(page("e2e dnd")));
+const win = titledWindow("E2E DnD");
 await sleep(2500);
 
 await r.step("surface", () => {
@@ -176,7 +178,8 @@ await r.step("dialogs", async () => {
     isA(await errorOf(desktop.dialog.showSaveDialog({})), "Busy"),
   );
   ac.abort(new Error("e2e abort"));
-  const e = await errorOf(p);
+  const got1 = await within(errorOf(p), 15000);
+  const e = "value" in got1 ? got1.value : null;
   r.check(
     "aborting closes the dialog and rejects with the signal's reason",
     e?.message === "e2e abort",
@@ -187,17 +190,32 @@ await r.step("dialogs", async () => {
     Date.now() - t0 < 20000,
     Date.now() - t0,
   );
-  const ac2 = new AbortController();
-  const p2 = desktop.dialog.showSaveDialog({
-    defaultPath: "e2e.txt",
-    signal: ac2.signal,
-  });
-  await sleep(1500);
-  ac2.abort();
-  r.check(
-    "the dialog slot frees: a save dialog opens and aborts",
-    isA(await errorOf(p2), "AbortError"),
-  );
+  // Every kind of dialog closes on abort and frees the slot: open / save,
+  // modal to a window / app-level.
+  for (const kind of ["save", "open"] as const) {
+    for (const modal of [false, true]) {
+      const label = `${kind} dialog${modal ? " (modal)" : " (app-level)"}`;
+      r.mark(label);
+      const ac2 = new AbortController();
+      const opts = { defaultPath: "e2e.txt", signal: ac2.signal };
+      const p2 = kind === "save"
+        ? (modal
+          ? desktop.dialog.showSaveDialog(win, opts)
+          : desktop.dialog.showSaveDialog(opts))
+        : (modal
+          ? desktop.dialog.showOpenDialog(win, opts)
+          : desktop.dialog.showOpenDialog(opts));
+      await sleep(1500);
+      ac2.abort();
+      const got = await within(errorOf(p2), 15000);
+      r.check(
+        `a ${label} opens and closes on abort (AbortError)`,
+        "value" in got && isA(got.value, "AbortError"),
+        "value" in got ? String(got.value) : "still open 15 s after abort()",
+      );
+      if (!("value" in got)) break;
+    }
+  }
 });
 
 await r.step("drag and drop", async () => {

@@ -15,7 +15,6 @@
 // deno-lint-ignore-file no-explicit-any
 
 import {
-  BrowserWindow,
   describeError,
   desktop,
   errorOf,
@@ -24,7 +23,9 @@ import {
   OS,
   page,
   Report,
+  shared,
   sleep,
+  titledWindow,
   waitFor,
 } from "../_shared/e2e.ts";
 import {
@@ -42,15 +43,16 @@ if (r.params.mode === "cold") {
   // COM hands the click over once the app registered its activator, which
   // may be after this code first reads the inbox: then it is an event (still
   // marked as the launch).
-  const got: any[] = [...desktop.launchNotificationResponses];
-  r.set("launchNotificationResponses", [...got]);
+  const inbox = desktop.launchNotificationResponses;
+  const got: any[] = [...inbox];
+  r.set("launchNotificationResponses", [...inbox]);
   desktop.addEventListener(
     "notificationresponse",
     (e: CustomEvent) => got.push(e.detail),
   );
   r.check(
-    "launchNotificationResponses is taken on first read",
-    desktop.launchNotificationResponses.length === 0,
+    "launchNotificationResponses is a snapshot taken on first read (later clicks are events)",
+    desktop.launchNotificationResponses === inbox && Object.isFrozen(inbox),
   );
   await waitFor(() => got.length > 0, 30000);
   await sleep(1000);
@@ -71,9 +73,9 @@ desktop.addEventListener("notificationresponse", (e: CustomEvent) => {
   r.set("responses", responses);
 });
 
-Deno.serve(() => html(page("e2e menus")));
+Deno.serve((req) => shared(req) ?? html(page("e2e menus")));
 const TITLE = "E2E Menus";
-const win = new BrowserWindow({ title: TITLE, width: 600, height: 400 });
+const win = titledWindow(TITLE);
 await sleep(3000);
 const cannotPress = await canPressKeys();
 
@@ -140,6 +142,7 @@ await r.step("menus", async () => {
     "menuclick",
     (e: CustomEvent) => clicks.push(e.detail.id),
   );
+  r.mark("application menu");
   win.setApplicationMenu([
     {
       submenu: {
@@ -172,6 +175,7 @@ await r.step("menus", async () => {
     win.focus();
     await activate(TITLE);
     await sleep(500);
+    r.mark("accelerator press");
     await pressKeys(["Primary", "Shift", "K"]);
     r.check(
       "an application-menu accelerator fires its item (menuclick)",
@@ -226,6 +230,7 @@ await r.step("menus", async () => {
       sleep(8000).then(() => `(${label}: still open after 8 s)`),
     ]);
   };
+  r.mark("context menu: Escape");
   const dismissed = await choose([["Escape"]], "Escape");
   r.check(
     "Escape dismisses the context menu: it resolves null",
@@ -237,6 +242,7 @@ await r.step("menus", async () => {
     await waitFor(() => closes.length === 1 && closes[0] === null, 3000),
     closes,
   );
+  r.mark("context menu: Down+Return");
   const chosen = await choose([["Down"], ["Return"]], "Down+Return");
   r.check("choosing an item resolves with its id", chosen === "ctx-a", chosen);
   r.check(
@@ -329,6 +335,7 @@ await r.step("notifications", async () => {
     );
   } else {
     // A live notification with an action button: the action event.
+    r.mark("live notification");
     const a = new N("E2E action", {
       body: clickBody("yes"),
       tag: "e2e-action",
@@ -385,10 +392,12 @@ await r.step("notifications", async () => {
           : "it needs a person at the machine",
       );
     }
+    r.mark("closing live notifications");
     a.close();
     b.close();
   }
 
+  r.mark("scheduling");
   if (!caps.schedule) {
     const e = await errorOf(
       desktop.notifications.schedule({ title: "x", at: Date.now() + 60000 }),
@@ -418,6 +427,7 @@ await r.step("notifications", async () => {
       /^[0-9a-f-]{36}$/.test(auto),
       auto,
     );
+    r.mark("getScheduled");
     const list = await desktop.notifications.getScheduled();
     const mine = list.find((n: any) => n.tag === "e2e-later");
     r.set("scheduled", list);
@@ -430,6 +440,7 @@ await r.step("notifications", async () => {
         mine.actions?.[0]?.action === "snooze",
       mine,
     );
+    r.mark("cancel");
     desktop.notifications.cancel("e2e-later");
     desktop.notifications.cancel(auto);
     await sleep(500);
@@ -440,6 +451,7 @@ await r.step("notifications", async () => {
       after,
     );
 
+    r.mark("scheduling one due in 3 s");
     // One due in 3 s, delivered by the scheduler, then clicked: no live
     // Notification owns it, so it is a notificationresponse.
     await desktop.notifications.schedule({

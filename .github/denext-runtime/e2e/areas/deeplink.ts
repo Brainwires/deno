@@ -51,7 +51,9 @@ const LSREGISTER =
   "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister";
 
 export async function run(env: Env, rep: AreaReport) {
-  const scheme = `e2elink${env.nonce}`;
+  // Letters only: xdg-utils' generic xdg-open takes a URL whose scheme has a
+  // digit for a file path.
+  const scheme = `dnxlink${env.nonce}`;
   const ids = {
     a: `dev.denext.e2e${env.nonce}.linka`,
     b: `dev.denext.e2e${env.nonce}.linkb`,
@@ -147,7 +149,6 @@ export async function run(env: Env, rep: AreaReport) {
 
   try {
     await clearResults("deeplink");
-    if (OS === "darwin") await sh(LSREGISTER, ["-f", a.artifact]);
 
     // 1. Cold start with a link and a file in argv. On macOS A also forces
     // its registration once the unforced checks ran: LaunchServices picks
@@ -313,7 +314,6 @@ export async function run(env: Env, rep: AreaReport) {
     await stopAll();
 
     // 6. Another app declaring the scheme leaves it alone, until forced.
-    if (OS === "darwin") await sh(LSREGISTER, ["-f", b.artifact]);
     const snapshot = await registrationSnapshot(scheme, appEnv);
     await params("b");
     const { res: rb } = await start(b, [], "B");

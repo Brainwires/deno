@@ -150,17 +150,34 @@ await r.step("passkeys", async () => {
       height: 300,
     });
     await sleep(1500);
-    const first = p.get(getOpts("example.com"), { window: win });
-    await sleep(100);
-    const second = envelope(
-      await p.get(getOpts("example.com"), { window: win }),
-    );
-    r.check(
-      "a request while one runs -> unknown, already in progress",
-      second.ok === false && second.code === "unknown" &&
-        /already in progress/.test(second.message ?? ""),
-      second,
-    );
+    let firstDone = false;
+    const first = p.get(getOpts("example.com"), { window: win }).finally(() => {
+      firstDone = true;
+    });
+    // A second request while the first runs is refused as busy. The first
+    // can end before the second is made (macOS refuses an unsigned app at
+    // once), so keep asking until it is either busy or the first ended.
+    let second: any = null;
+    for (let i = 0; i < 40 && !firstDone; i++) {
+      const e = envelope(await p.get(getOpts("example.com"), { window: win }));
+      if (/already in progress/.test(e.message ?? "")) {
+        second = e;
+        break;
+      }
+      await sleep(25);
+    }
+    if (second) {
+      r.check(
+        "a request while one runs -> unknown, already in progress",
+        second.ok === false && second.code === "unknown",
+        second,
+      );
+    } else {
+      r.na(
+        "a request while one runs -> unknown, already in progress",
+        "the OS ended the first ceremony before a second request could overlap it",
+      );
+    }
     const t0 = Date.now();
     const firstEnv = envelope(
       await Promise.race([
@@ -183,10 +200,19 @@ await r.step("passkeys", async () => {
         firstEnv,
       );
     }
-    // Once it ended, the next request is not busy.
-    const third = envelope(
+    // Once the OS ended it, the next request is not busy (after a timeout
+    // the slot stays taken until the OS reports back: docs/passkeys.md).
+    let third = envelope(
       await p.get(getOpts("example.com"), { window: 999999 }),
     );
+    for (
+      let i = 0;
+      i < 60 && /already in progress/.test(third.message ?? "");
+      i++
+    ) {
+      await sleep(500);
+      third = envelope(await p.get(getOpts("example.com"), { window: 999999 }));
+    }
     r.check(
       "the slot frees once a ceremony ends",
       third.code === "unknown" && /not found/.test(third.message ?? ""),

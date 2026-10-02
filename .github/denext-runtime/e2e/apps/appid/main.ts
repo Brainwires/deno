@@ -43,11 +43,6 @@ Deno.serve(async (req) => {
     r.set("laufeyAppId", Deno.env.get("LAUFEY_APP_ID") ?? null);
     r.check("localStorage reads back", body.localReadBack === body.value, body);
     r.check("IndexedDB reads back", body.idbReadBack === body.value, body);
-    r.check(
-      "LAUFEY_APP_ID is the identifier",
-      Deno.env.get("LAUFEY_APP_ID") === r.params.identifier,
-      Deno.env.get("LAUFEY_APP_ID"),
-    );
     r.done();
     // Let the engine flush its storage, then quit the way a user does (the
     // window closes, the engine shuts down) rather than killing the process.

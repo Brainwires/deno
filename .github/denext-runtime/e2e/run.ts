@@ -12,7 +12,15 @@
 // $E2E_OUT/e2e-<target>-<backend>.json and a table to $GITHUB_STEP_SUMMARY.
 // Exits 1 when any check failed.
 
-import { AreaReport, type Env, log, path, rm, short } from "./lib/runner.ts";
+import {
+  AreaReport,
+  DIR,
+  type Env,
+  log,
+  path,
+  rm,
+  short,
+} from "./lib/runner.ts";
 
 const AREAS: Record<
   string,
@@ -97,6 +105,31 @@ for (const area of areas) {
       count(rep, "n/a")
     } n/a (${Math.round((Date.now() - t0) / 1000)} s)`,
   );
+  // The apps' own result files, for the uploaded logs.
+  const keep = path(env.workDir, "logs", "results", area);
+  await Deno.mkdir(keep, { recursive: true });
+  for (const e of await Array.fromAsync(Deno.readDir(DIR)).catch(() => [])) {
+    if (
+      e.isFile &&
+      (e.name.startsWith(`${area}-`) || e.name.startsWith(`${area}.`))
+    ) {
+      await Deno.copyFile(path(DIR, e.name), path(keep, e.name)).catch(
+        () => {},
+      );
+    }
+  }
+  if (area === "update") {
+    for (
+      const e of await Array.fromAsync(Deno.readDir(path(DIR, "update"))).catch(
+        () => [],
+      )
+    ) {
+      if (e.isFile) {
+        await Deno.copyFile(path(DIR, "update", e.name), path(keep, e.name))
+          .catch(() => {});
+      }
+    }
+  }
   // Keep the disk in check: CEF apps are large.
   await rm(path(env.workDir, "build", area));
   const builds = await Array.fromAsync(Deno.readDir(path(env.workDir, "build")))

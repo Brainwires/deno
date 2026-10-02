@@ -7,14 +7,15 @@
 // deno-lint-ignore-file no-explicit-any
 
 import {
-  BrowserWindow,
   describeError,
   desktop,
   html,
   once,
   page,
   Report,
+  shared,
   sleep,
+  titledWindow,
   waitFor,
 } from "../_shared/e2e.ts";
 import { userClose } from "../_shared/input.ts";
@@ -23,9 +24,12 @@ const r = new Report("window");
 
 let initial: any = null;
 Deno.serve(async (req) => {
+  const s = shared(req);
+  if (s) return s;
   const url = new URL(req.url);
   if (url.pathname === "/initial") {
-    initial = await req.json();
+    const body = await req.json();
+    initial ??= body;
     return new Response("ok");
   }
   return html(page(
@@ -35,9 +39,12 @@ Deno.serve(async (req) => {
   ));
 });
 
+// The initial window (Deno.serve's) reports its size first; window A is
+// created after that, so the report is the initial window's own.
+await waitFor(() => initial !== null, 30000);
 const TITLE_A = "E2E Window A";
 const TITLE_B = "E2E Window B";
-const win = new BrowserWindow({ title: TITLE_A, width: 640, height: 420 });
+const win = titledWindow(TITLE_A, { width: 640, height: 420 });
 const stateEvents: string[] = [];
 for (
   const t of [
@@ -56,7 +63,6 @@ await sleep(2500);
 await r.step("window API", async () => {
   // --- the initial window, sized by app.json's initialWindow ---
   const want = r.params.initialWindow ?? {};
-  await waitFor(() => initial !== null, 15000);
   r.check(
     "the initial window takes its size from app.json initialWindow",
     initial !== null &&
@@ -298,13 +304,7 @@ await r.step("window API", async () => {
   }
 
   // --- a close whose listener never answers closes after the timeout ---
-  const b = new BrowserWindow({
-    title: TITLE_B,
-    width: 300,
-    height: 200,
-    x: 60,
-    y: 80,
-  });
+  const b = titledWindow(TITLE_B, { width: 300, height: 200, x: 60, y: 80 });
   let bEvent = false;
   b.addEventListener("close", (e: Event) => {
     bEvent = true;

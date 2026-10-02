@@ -171,6 +171,13 @@ export class Report {
     }
   }
 
+  /** Where the app is (shown when it times out). */
+  mark(stage: string) {
+    const stages = (this.data.stages ??= []) as string[];
+    stages.push(`${new Date().toISOString()} ${stage}`);
+    this.write();
+  }
+
   set(key: string, value: unknown) {
     this.data[key] = value;
     this.write();
@@ -190,6 +197,49 @@ export class Report {
 }
 
 const startedAt = new Date().toISOString();
+
+/** `p`'s value, or `timeout` after `ms` (a hang becomes a failed check,
+ * not a stuck app). */
+export async function within<T>(
+  p: Promise<T>,
+  ms: number,
+): Promise<{ value: T } | { timeout: true }> {
+  let t: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      p.then((value) => ({ value })),
+      new Promise<{ timeout: true }>((resolve) => {
+        t = setTimeout(() => resolve({ timeout: true }), ms);
+      }),
+    ]);
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+/** A BrowserWindow whose page keeps `title` as its document title, so the
+ * native window title (which engines take from the page) is `title` too:
+ * the input helpers find windows by title. The app's handler must call
+ * {@linkcode shared} first. */
+export function titledWindow(
+  title: string,
+  options: Record<string, unknown> = {},
+): any {
+  const w = new BrowserWindow({ title, width: 600, height: 400, ...options });
+  const origin = Deno.env.get("DENO_DESKTOP_APP_ORIGIN") ?? "app://localhost";
+  w.navigate(`${origin}/__e2e/titled?t=${encodeURIComponent(title)}`);
+  return w;
+}
+
+/** The harness's own routes; null for the app's. */
+export function shared(req: Request): Response | null {
+  const url = new URL(req.url);
+  if (url.pathname === "/__e2e/titled") {
+    const t = url.searchParams.get("t") ?? "";
+    return html(page(t.replace(/[<&]/g, "")));
+  }
+  return null;
+}
 
 export function page(title: string, body = "", script = ""): string {
   return `<!doctype html><html><head><meta charset="utf-8"><title>${title}</title></head>` +

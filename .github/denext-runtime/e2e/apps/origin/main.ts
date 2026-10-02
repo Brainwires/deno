@@ -19,13 +19,17 @@ const serveAddressEnv = Deno.env.get("DENO_SERVE_ADDRESS") ?? null;
 const SCRIPT = `
 const out = {};
 const post = (path, body) => fetch(path, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+const step = (s) => post("/log", { step: s }).catch(() => {});
 addEventListener("error", (e) => post("/log", { error: String(e.message) }));
+addEventListener("unhandledrejection", (e) => post("/log", { error: String(e.reason) }));
+step("loaded");
 out.origin = location.origin;
 out.href = location.href;
 out.isSecureContext = globalThis.isSecureContext;
 out.cryptoSubtle = typeof crypto.subtle;
 out.digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode("x")).then((b) => b.byteLength, (e) => String(e));
 const info = await (await fetch("/info")).json();
+step("info");
 out.info = info;
 // A streamed response arrives chunk by chunk.
 try {
@@ -36,11 +40,13 @@ try {
   for (;;) { const { done } = await reader.read(); if (done) break; at.push(Math.round(performance.now() - t0)); }
   out.stream = { status: res.status, at };
 } catch (e) { out.stream = { error: String(e) }; }
+step("stream");
 // A cross-origin fetch carries the app origin.
 try {
   const res = await fetch("http://127.0.0.1:" + info.tcpPort + "/cors", { cache: "no-store" });
   out.crossOrigin = { status: res.status, body: await res.text() };
 } catch (e) { out.crossOrigin = { error: String(e) }; }
+step("cross-origin");
 // A WebSocket through the relay.
 out.ws = await new Promise((resolve) => {
   const res = { url: info.wsOrigin + "/ws", messages: [] };
@@ -52,6 +58,7 @@ out.ws = await new Promise((resolve) => {
   ws.onerror = () => { res.error = "onerror"; };
   ws.onclose = (ev) => { res.close = ev.code; if (res.messages.length < 2) { clearTimeout(timer); resolve(res); } };
 });
+step("websocket");
 await post("/result", out);
 `;
 
@@ -104,7 +111,7 @@ Deno.serve((req, info) => {
     }
     case "/log":
       return req.text().then((t) => {
-        r.set("pageLog", t);
+        r.mark(`page: ${t}`);
         return new Response("ok");
       });
     case "/result":

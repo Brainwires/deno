@@ -12,7 +12,7 @@ import {
 } from "../lib/runner.ts";
 
 export async function run(env: Env, rep: AreaReport) {
-  const scheme = `e2eorigin${env.nonce}`;
+  const scheme = `dnxorigin${env.nonce}`;
   const origin = `${scheme}://app`;
   const identifier = `dev.denext.e2e${env.nonce}.origin`;
   const p = await packageApp(env, {
