@@ -22,6 +22,18 @@
 //! read-only App Translocation mount), or one of `deno desktop --compress`'s
 //! self-extracting launchers (the running copy is a per-user cache, not the
 //! install).
+//!
+//! An app directory or bundle is only treated as the install when it is
+//! provably a packaged app's: it holds the packager's [`INSTALL_MARKER`]
+//! (`.deno-desktop-app`, which `deno desktop` writes into every app
+//! directory, and into a bundle's `Contents/Resources`), and an app directory
+//! is not a well-known folder an executable may sit
+//! in loose (a drive or filesystem root, the home directory, Downloads,
+//! Desktop, Documents, `/usr/bin`, Program Files, ...; see
+//! [`refused_install_dir`]). Otherwise an executable dropped into, say,
+//! Downloads would make the updater rename and later delete the whole folder.
+//! The same proof ([`is_install_copy`]) is required of anything the updater
+//! deletes as a previous or failed install.
 
 #![allow(
   clippy::disallowed_methods,
@@ -107,6 +119,174 @@ impl InstallLayout {
   }
 }
 
+/// The file that marks a packaged app's install: `deno desktop` writes it into
+/// every app directory it generates (next to the executable) and into a
+/// bundle's `Contents/Resources` (the CLI's `APP_DIR_MARKER`, which it also
+/// uses to recognize its own earlier output).
+pub const INSTALL_MARKER: &str = ".deno-desktop-app";
+
+/// Where [`INSTALL_MARKER`] sits inside an install of `kind`, one path
+/// element per item (empty for an AppImage, a single file).
+pub fn marker_path(kind: InstallKind) -> &'static [&'static str] {
+  match kind {
+    InstallKind::AppDir => &[INSTALL_MARKER],
+    InstallKind::MacBundle => &["Contents", "Resources", INSTALL_MARKER],
+    InstallKind::AppImage => &[],
+  }
+}
+
+/// Whether `path` is a copy of an install of `kind`: a real directory whose
+/// [`marker_path`] leads, through real directories (no symlinks), to the
+/// [`INSTALL_MARKER`] as a regular file (an app directory, a macOS bundle),
+/// or a regular file (an AppImage). Only such a path is ever swapped or
+/// deleted as an install, a previous install (`.old`) or a failed one.
+pub fn is_install_copy(kind: InstallKind, path: &Path) -> bool {
+  let Ok(meta) = std::fs::symlink_metadata(path) else {
+    return false;
+  };
+  let elements = marker_path(kind);
+  let Some((marker, dirs)) = elements.split_last() else {
+    return meta.file_type().is_file();
+  };
+  if !meta.file_type().is_dir() {
+    return false;
+  }
+  let mut at = path.to_path_buf();
+  for dir in dirs {
+    at.push(dir);
+    if !std::fs::symlink_metadata(&at).is_ok_and(|m| m.file_type().is_dir()) {
+      return false;
+    }
+  }
+  std::fs::symlink_metadata(at.join(marker))
+    .is_ok_and(|m| m.file_type().is_file())
+}
+
+/// Why `dir` can never be an app directory install, if it can't: a
+/// filesystem or drive root, a well-known user folder (the home directory
+/// itself, its Desktop, Documents, Downloads, ...), or a system directory
+/// that holds loose executables (`/usr/bin`, `C:\Windows`, Program Files,
+/// ...). `home` is the user's home directory. Compared lexically after
+/// canonicalization by the caller, case-insensitively on Windows and macOS.
+pub fn refused_install_dir(dir: &Path, home: Option<&Path>) -> Option<String> {
+  let norm = |p: &Path| -> String {
+    let mut s = p.to_string_lossy().replace('\\', "/");
+    if let Some(rest) = s.strip_prefix("//?/UNC/") {
+      s = format!("//{rest}");
+    } else if let Some(rest) = s.strip_prefix("//?/") {
+      s = rest.to_string();
+    }
+    while s.len() > 1 && s.ends_with('/') && !s.ends_with(":/") {
+      s.pop();
+    }
+    if cfg!(any(windows, target_os = "macos")) {
+      s.to_lowercase()
+    } else {
+      s
+    }
+  };
+  let d = norm(dir);
+  if dir.parent().is_none() || d == "/" || (d.len() <= 3 && d.contains(':')) {
+    return Some(format!("{} is a filesystem root", dir.display()));
+  }
+  let mut refused: Vec<String> = Vec::new();
+  if let Some(home) = home {
+    let h = norm(home);
+    refused.push(h.clone());
+    for sub in [
+      "Desktop",
+      "Documents",
+      "Downloads",
+      "Music",
+      "Pictures",
+      "Videos",
+      "Movies",
+      "Public",
+      "Templates",
+      "Applications",
+      "bin",
+      ".local",
+      ".local/bin",
+      ".local/share",
+      "AppData",
+      "AppData/Local",
+      "AppData/Roaming",
+      "AppData/Local/Programs",
+      "AppData/Local/Temp",
+      "OneDrive",
+      "OneDrive/Desktop",
+      "OneDrive/Documents",
+    ] {
+      refused.push(norm(&Path::new(&h).join(sub)));
+    }
+  }
+  if cfg!(windows) {
+    for var in [
+      "SystemRoot",
+      "ProgramFiles",
+      "ProgramFiles(x86)",
+      "ProgramW6432",
+      "ProgramData",
+      "PUBLIC",
+      "TEMP",
+      "TMP",
+    ] {
+      if let Some(v) = std::env::var_os(var) {
+        refused.push(norm(Path::new(&v)));
+      }
+    }
+    for fixed in ["c:/windows", "c:/windows/system32", "c:/users"] {
+      refused.push(fixed.to_string());
+    }
+  } else {
+    for fixed in [
+      "/bin",
+      "/sbin",
+      "/usr",
+      "/usr/bin",
+      "/usr/sbin",
+      "/usr/lib",
+      "/usr/lib64",
+      "/usr/libexec",
+      "/usr/local",
+      "/usr/local/bin",
+      "/usr/local/sbin",
+      "/usr/local/lib",
+      "/usr/share",
+      "/opt",
+      "/etc",
+      "/home",
+      "/Users",
+      "/tmp",
+      "/var",
+      "/var/tmp",
+      "/private/tmp",
+      "/Applications",
+      "/System",
+      "/Library",
+    ] {
+      refused.push(norm(Path::new(fixed)));
+    }
+    if let Some(v) = std::env::var_os("TMPDIR") {
+      refused.push(norm(Path::new(&v)));
+    }
+  }
+  refused.contains(&d).then(|| {
+    format!(
+      "{} is a well-known folder, not an app's own directory",
+      dir.display()
+    )
+  })
+}
+
+/// The current user's home directory, for [`refused_install_dir`].
+fn home_dir() -> Option<PathBuf> {
+  let var = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+  let home = std::env::var_os(var).filter(|v| !v.is_empty())?;
+  let home = PathBuf::from(home);
+  Some(std::fs::canonicalize(&home).unwrap_or(home))
+}
+
 /// The AppImage runtime's variables, when set.
 #[derive(Debug, Clone, Default)]
 pub struct AppImageEnv {
@@ -172,6 +352,17 @@ pub fn detect_install(
          --compress); full-app updates need an uncompressed bundle",
       );
     }
+    if !is_install_copy(InstallKind::MacBundle, bundle) {
+      return err(
+        Code::UnsupportedLayout,
+        format!(
+          "{} has no Contents/Resources/{INSTALL_MARKER}, so it is not a \
+           packaged app's bundle: full-app updates only replace a bundle the \
+           packager made",
+          bundle.display()
+        ),
+      );
+    }
     return layout(
       InstallKind::MacBundle,
       bundle,
@@ -200,6 +391,26 @@ pub fn detect_install(
       Code::UnsupportedLayout,
       "the app runs from a self-extracting launcher's cache (deno desktop \
        --compress); full-app updates need an uncompressed app directory",
+    );
+  }
+  if let Some(why) = refused_install_dir(dir, home_dir().as_deref()) {
+    return err(
+      Code::UnsupportedLayout,
+      format!(
+        "{why}: full-app updates replace the executable's whole directory, \
+         so the app must be installed in a directory of its own"
+      ),
+    );
+  }
+  if !is_install_copy(InstallKind::AppDir, dir) {
+    return err(
+      Code::UnsupportedLayout,
+      format!(
+        "{} has no {INSTALL_MARKER}, so it is not a packaged app's \
+         directory: full-app updates only replace a directory the packager \
+         made",
+        dir.display()
+      ),
     );
   }
   layout(InstallKind::AppDir, dir, PathBuf::from(&exe_name))
@@ -381,17 +592,115 @@ mod tests {
 
   #[test]
   fn detects_the_running_test_binary() {
-    // The test binary is not in a .app on macOS; elsewhere its directory is
-    // an app dir.
+    // The test binary is not in a .app on macOS, and elsewhere its directory
+    // (cargo's target dir) has no install marker: never an install.
     let exe = std::env::current_exe().unwrap();
     let r = detect_install(&exe, &AppImageEnv::default());
-    if cfg!(target_os = "macos") {
-      assert_eq!(r.unwrap_err().code, Code::UnsupportedLayout);
-    } else {
-      let l = r.unwrap();
-      assert_eq!(l.kind, InstallKind::AppDir);
-      assert_eq!(l.exe(), std::fs::canonicalize(&exe).unwrap());
+    assert_eq!(r.unwrap_err().code, Code::UnsupportedLayout);
+  }
+
+  #[cfg(not(target_os = "macos"))]
+  #[test]
+  fn an_app_dir_needs_the_marker() {
+    let t = tempfile::tempdir().unwrap();
+    let dir = std::fs::canonicalize(t.path()).unwrap().join("App");
+    std::fs::create_dir_all(&dir).unwrap();
+    let exe = dir.join("app");
+    std::fs::write(&exe, b"").unwrap();
+    // A loose executable in an unmarked directory: refused.
+    let e = detect_install(&exe, &AppImageEnv::default()).unwrap_err();
+    assert_eq!(e.code, Code::UnsupportedLayout);
+    assert!(e.to_string().contains(INSTALL_MARKER), "{e}");
+    // A marker that is a directory, or a symlink, is no marker.
+    std::fs::create_dir(dir.join(INSTALL_MARKER)).unwrap();
+    assert!(detect_install(&exe, &AppImageEnv::default()).is_err());
+    std::fs::remove_dir(dir.join(INSTALL_MARKER)).unwrap();
+    #[cfg(unix)]
+    {
+      let real = t.path().join("elsewhere.json");
+      std::fs::write(&real, "{}").unwrap();
+      std::os::unix::fs::symlink(&real, dir.join(INSTALL_MARKER)).unwrap();
+      assert!(detect_install(&exe, &AppImageEnv::default()).is_err());
+      std::fs::remove_file(dir.join(INSTALL_MARKER)).unwrap();
     }
+    // The packager's launch file: an install.
+    std::fs::write(dir.join(INSTALL_MARKER), "{}").unwrap();
+    let l = detect_install(&exe, &AppImageEnv::default()).unwrap();
+    assert_eq!(l.kind, InstallKind::AppDir);
+    assert_eq!(l.install, dir);
+  }
+
+  #[test]
+  fn well_known_folders_are_never_installs() {
+    let home = if cfg!(windows) {
+      PathBuf::from("C:\\Users\\me")
+    } else {
+      PathBuf::from("/home/me")
+    };
+    let h = |sub: &str| home.join(sub);
+    for dir in [
+      home.clone(),
+      h("Downloads"),
+      h("Desktop"),
+      h("Documents"),
+      h(".local/bin"),
+      h("AppData/Local/Programs"),
+    ] {
+      assert!(refused_install_dir(&dir, Some(&home)).is_some(), "{dir:?}");
+    }
+    // Case and a trailing separator don't get around it where the file
+    // system ignores case.
+    if cfg!(any(windows, target_os = "macos")) {
+      let mut s = h("DOWNLOADS").to_string_lossy().into_owned();
+      s.push(std::path::MAIN_SEPARATOR);
+      assert!(refused_install_dir(Path::new(&s), Some(&home)).is_some());
+    }
+    if cfg!(windows) {
+      for dir in ["C:\\", "D:\\", "C:\\Windows\\System32"] {
+        assert!(refused_install_dir(Path::new(dir), Some(&home)).is_some());
+      }
+      assert!(
+        refused_install_dir(Path::new("\\\\?\\C:\\Users\\me"), Some(&home))
+          .is_some()
+      );
+    } else {
+      for dir in ["/", "/usr/bin", "/usr/local/bin", "/opt", "/tmp"] {
+        assert!(refused_install_dir(Path::new(dir), Some(&home)).is_some());
+      }
+    }
+    // An app's own directory below them is fine.
+    for dir in [h("Apps/My App"), h("AppData/Local/Programs/My App")] {
+      assert!(refused_install_dir(&dir, Some(&home)).is_none(), "{dir:?}");
+    }
+    if !cfg!(windows) {
+      assert!(refused_install_dir(Path::new("/opt/myapp"), None).is_none());
+    }
+  }
+
+  #[test]
+  fn install_copies_are_proven_by_shape() {
+    let t = tempfile::tempdir().unwrap();
+    let dir = t.path().join("App.old");
+    std::fs::create_dir_all(&dir).unwrap();
+    assert!(!is_install_copy(InstallKind::AppDir, &dir));
+    std::fs::write(dir.join(INSTALL_MARKER), "{}").unwrap();
+    assert!(is_install_copy(InstallKind::AppDir, &dir));
+    assert!(!is_install_copy(InstallKind::MacBundle, &dir));
+    let bundle = t.path().join("A.app.old");
+    std::fs::create_dir_all(bundle.join("Contents/Resources")).unwrap();
+    std::fs::write(bundle.join("Contents/Info.plist"), "").unwrap();
+    assert!(!is_install_copy(InstallKind::MacBundle, &bundle));
+    std::fs::write(bundle.join("Contents/Resources").join(INSTALL_MARKER), "")
+      .unwrap();
+    assert!(is_install_copy(InstallKind::MacBundle, &bundle));
+    let image = t.path().join("A.AppImage.old");
+    std::fs::write(&image, "").unwrap();
+    assert!(is_install_copy(InstallKind::AppImage, &image));
+    assert!(!is_install_copy(InstallKind::AppImage, &dir));
+    assert!(!is_install_copy(
+      InstallKind::AppDir,
+      &t.path().join("none")
+    ));
   }
 
   #[cfg(target_os = "macos")]
@@ -401,6 +710,12 @@ mod tests {
     let exe = t.path().join("A.app/Contents/MacOS/a");
     std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
     std::fs::write(&exe, b"").unwrap();
+    // Without the packager's marker: not an install.
+    let e = detect_install(&exe, &AppImageEnv::default()).unwrap_err();
+    assert_eq!(e.code, Code::UnsupportedLayout);
+    let resources = t.path().join("A.app/Contents/Resources");
+    std::fs::create_dir_all(&resources).unwrap();
+    std::fs::write(resources.join(INSTALL_MARKER), b"").unwrap();
     let l = detect_install(&exe, &AppImageEnv::default()).unwrap();
     assert_eq!(l.kind, InstallKind::MacBundle);
     assert_eq!(l.name, "A.app");
@@ -433,6 +748,7 @@ mod tests {
     let other = t.path().join("other/app");
     std::fs::create_dir_all(other.parent().unwrap()).unwrap();
     std::fs::write(&other, b"").unwrap();
+    std::fs::write(other.with_file_name(INSTALL_MARKER), b"").unwrap();
     assert_eq!(
       detect_install(&other, &env).unwrap().kind,
       InstallKind::AppDir

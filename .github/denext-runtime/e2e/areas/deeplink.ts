@@ -540,9 +540,9 @@ export async function run(env: Env, rep: AreaReport) {
       );
       const cmd = await regCommand(key);
       rep.check(
-        "msi: HKCU\\Software\\Classes\\<scheme>\\shell\\open\\command runs the installed exe",
+        "msi: HKCU\\Software\\Classes\\<scheme>\\shell\\open\\command runs the installed exe with -- before the link",
         cmd !== null && cmd.toLowerCase().includes(`"${exe.toLowerCase()}"`) &&
-          cmd.includes("%1"),
+          cmd.includes(' -- "%1"'),
         cmd,
       );
       const proto = await sh("reg", ["query", key, "/v", "URL Protocol"]);
@@ -675,9 +675,9 @@ async function checkRegistration(
   if (OS === "windows") {
     const cmd = await regCommand(`HKCU\\Software\\Classes\\${scheme}`);
     rep.check(
-      `${label}: HKCU\\Software\\Classes\\<scheme>\\shell\\open\\command runs this exe with the link`,
+      `${label}: HKCU\\Software\\Classes\\<scheme>\\shell\\open\\command runs this exe with -- before the link`,
       cmd !== null && cmd.toLowerCase().includes(`"${p.exe.toLowerCase()}"`) &&
-        cmd.includes("%1"),
+        cmd.includes(' -- "%1"'),
       cmd,
     );
   } else if (OS === "linux") {

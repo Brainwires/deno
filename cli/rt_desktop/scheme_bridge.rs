@@ -62,8 +62,33 @@
 //!   `request.url` is `http+memory://<host>/path`) and, for same-origin
 //!   fetches, NO `Origin` header — the browser omits it as it does for any
 //!   same-origin `GET`;
-//! * a relayed WebSocket upgrade has `Host: 127.0.0.1:<relay port>` and an
-//!   `Origin` header equal to the app origin (the relay guarantees it).
+//! * a relayed WebSocket upgrade has `Host: 127.0.0.1:<relay port>`, an
+//!   `Origin` header equal to the app origin (the relay guarantees it), and
+//!   exactly one [`RELAY_MARKER_HEADER`] header, `x-deno-desktop-relay: 1`.
+//!
+//! # Telling relayed connections apart
+//!
+//! The relay is reachable by every local process, and a native one can send
+//! the app origin as `Origin`, so the app must treat a relayed request as
+//! less trusted than a page request: it may only be a WebSocket upgrade.
+//! The contract, on the memory transport (`info.remoteAddr.transport ===
+//! "memory"`):
+//!
+//! * a request carrying [`RELAY_MARKER_HEADER`] came through the loopback
+//!   relay. The relay removes every copy the client sent and adds exactly
+//!   one, `x-deno-desktop-relay: 1`, to every request it forwards;
+//! * a request without it came from the scheme handler (the app's page): the
+//!   bridge removes the header, in any case, from every request the webview
+//!   delivers, and from every response it returns.
+//!
+//! The relay forwards only the client's request head (never bytes pipelined
+//! after it), then reads the server's response head: anything but `101
+//! Switching Protocols` is replaced with the relay's own `502` and the
+//! connection is closed, so a relayed connection never carries a non-101
+//! response from the app nor a second request.
+//!
+//! The scheme handler buffers a request body of at most
+//! [`MAX_BRIDGE_REQUEST_BODY`] bytes (`413` beyond it).
 
 use std::net::SocketAddr;
 
@@ -102,6 +127,16 @@ pub const APP_ORIGIN_ENV: &str = "DENO_DESKTOP_APP_ORIGIN";
 /// `laufey::main!` before the runtime — and therefore before user code —
 /// starts.
 pub const WS_ORIGIN_ENV: &str = "DENO_DESKTOP_WS_ORIGIN";
+
+/// The request header that marks a connection from the WebSocket loopback
+/// relay (see the module docs). Lower-case: header names are compared
+/// case-insensitively.
+pub const RELAY_MARKER_HEADER: &str = "x-deno-desktop-relay";
+
+/// The largest request body the scheme handler forwards to `Deno.serve`; a
+/// larger one is answered with `413 Payload Too Large`. Matches denext's
+/// desktop bridge limit.
+pub const MAX_BRIDGE_REQUEST_BODY: usize = 4 * 1024 * 1024;
 
 /// The `ws://` origin the page dials to reach the relay bound at `addr`.
 pub fn ws_relay_origin(addr: SocketAddr) -> String {
@@ -191,6 +226,21 @@ async fn bridge(
     if n <= 0 {
       break;
     }
+    if body_exceeds_limit(body.len(), n as usize) {
+      exchange.begin(
+        413,
+        &[(
+          "content-type".to_string(),
+          "text/plain; charset=utf-8".to_string(),
+        )],
+      );
+      *began = true;
+      let _ = exchange.write(
+        format!("request body larger than {MAX_BRIDGE_REQUEST_BODY} bytes\n")
+          .as_bytes(),
+      );
+      return Ok(());
+    }
     body.extend_from_slice(&buf[..n as usize]);
   }
 
@@ -222,7 +272,7 @@ async fn bridge(
   let status = response.status().as_u16() as i32;
   let mut resp_headers = Vec::with_capacity(response.headers().len());
   for (name, value) in response.headers() {
-    if is_hop_by_hop_header(name.as_str()) {
+    if is_hop_by_hop_header(name.as_str()) || is_relay_marker(name.as_str()) {
       continue;
     }
     if let Ok(v) = value.to_str() {
@@ -293,7 +343,21 @@ fn path_and_query(url: &str) -> String {
 }
 
 fn should_skip_request_header(name: &str) -> bool {
-  name.eq_ignore_ascii_case(HOST.as_str()) || is_hop_by_hop_header(name)
+  name.eq_ignore_ascii_case(HOST.as_str())
+    || is_hop_by_hop_header(name)
+    || is_relay_marker(name)
+}
+
+/// Whether a header name is [`RELAY_MARKER_HEADER`] (any case, surrounding
+/// whitespace ignored).
+fn is_relay_marker(name: &str) -> bool {
+  name.trim().eq_ignore_ascii_case(RELAY_MARKER_HEADER)
+}
+
+/// Whether a body of `have` bytes plus a chunk of `next` exceeds
+/// [`MAX_BRIDGE_REQUEST_BODY`].
+fn body_exceeds_limit(have: usize, next: usize) -> bool {
+  have.saturating_add(next) > MAX_BRIDGE_REQUEST_BODY
 }
 
 fn is_hop_by_hop_header(name: &str) -> bool {
@@ -382,6 +446,11 @@ const MAX_HEAD_LEN: usize = 8 * 1024;
 const HEAD_READ_TIMEOUT: std::time::Duration =
   std::time::Duration::from_secs(10);
 
+/// How long the relay waits for `Deno.serve`'s answer to a forwarded upgrade
+/// (the app's handler may do async work before it upgrades).
+const UPSTREAM_HEAD_TIMEOUT: std::time::Duration =
+  std::time::Duration::from_secs(30);
+
 /// What the relay does with a connection, decided from its request head.
 #[derive(Debug, PartialEq, Eq)]
 enum RelayDecision {
@@ -447,8 +516,7 @@ async fn proxy_ws_connection(
     }
   }
 
-  // Open the in-process connection to Deno.serve and replay everything we
-  // already read from the client, then plain-shuttle bytes in both directions.
+  // Open the in-process connection to Deno.serve and forward the upgrade.
   let mut mem = match connect_memory(DESKTOP_SERVE_NAME) {
     Ok(s) => s,
     Err(e) => {
@@ -456,10 +524,102 @@ async fn proxy_ws_connection(
       return Ok(());
     }
   };
-  mem.write_all(&head).await?;
+  relay_upgrade(
+    &mut tcp,
+    &mut mem,
+    &head[..end_of_head],
+    UPSTREAM_HEAD_TIMEOUT,
+  )
+  .await
+}
 
-  let _ = tokio::io::copy_bidirectional(&mut tcp, &mut mem).await;
+/// Forward one admitted upgrade: only the request `head` (rewritten by
+/// [`relay_request_head`]; bytes the client pipelined after it are dropped),
+/// then the server's response. Only a `101` is passed on, after which bytes
+/// are shuttled both ways; any other answer (or none within `timeout`) is
+/// replaced with the relay's `502` and both sides are closed, so the client
+/// can neither read the app's non-upgrade response nor send a second request
+/// on the connection.
+async fn relay_upgrade<C, U>(
+  client: &mut C,
+  upstream: &mut U,
+  head: &[u8],
+  timeout: std::time::Duration,
+) -> std::io::Result<()>
+where
+  C: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+  U: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+  upstream.write_all(&relay_request_head(head)).await?;
+  let response = read_response_head(upstream, timeout).await?;
+  match response {
+    Some((buf, end)) if is_switching_protocols(&buf[..end]) => {
+      // The 101 head and any frames the server already sent after it.
+      client.write_all(&buf).await?;
+      let _ = tokio::io::copy_bidirectional(client, upstream).await;
+    }
+    response => {
+      log::debug!(
+        "[desktop] ws relay: the server did not switch protocols ({:?}); \
+         closing the connection",
+        response.map(|(buf, end)| {
+          let line_end =
+            buf[..end].iter().position(|&b| b == b'\r').unwrap_or(end);
+          String::from_utf8_lossy(&buf[..line_end]).into_owned()
+        })
+      );
+      let _ = client.write_all(RELAY_502_RESPONSE).await;
+      let _ = client.shutdown().await;
+      let _ = upstream.shutdown().await;
+    }
+  }
   Ok(())
+}
+
+/// The request head the relay sends upstream: the client's request line and
+/// headers, minus every [`RELAY_MARKER_HEADER`] the client sent and header
+/// lines without a colon, plus exactly one `x-deno-desktop-relay: 1`.
+fn relay_request_head(head: &[u8]) -> Vec<u8> {
+  let mut out = Vec::with_capacity(head.len() + 32);
+  let mut lines = head
+    .split(|&b| b == b'\n')
+    .map(|line| line.strip_suffix(b"\r").unwrap_or(line))
+    .filter(|line| !line.is_empty());
+  if let Some(request_line) = lines.next() {
+    out.extend_from_slice(request_line);
+    out.extend_from_slice(b"\r\n");
+  }
+  for line in lines {
+    let Some(colon) = line.iter().position(|&b| b == b':') else {
+      continue;
+    };
+    if trim_ascii(&line[..colon])
+      .eq_ignore_ascii_case(RELAY_MARKER_HEADER.as_bytes())
+    {
+      continue;
+    }
+    out.extend_from_slice(line);
+    out.extend_from_slice(b"\r\n");
+  }
+  out.extend_from_slice(RELAY_MARKER_HEADER.as_bytes());
+  out.extend_from_slice(b": 1\r\n\r\n");
+  out
+}
+
+/// Whether a response head's status is `101` (`HTTP/1.1 101 …`).
+fn is_switching_protocols(head: &[u8]) -> bool {
+  let Some(rest) = head.strip_prefix(b"HTTP/1.1 101") else {
+    return false;
+  };
+  matches!(rest.first(), Some(b' ' | b'\r'))
+}
+
+/// Read `Deno.serve`'s response head, like [`read_request_head`].
+async fn read_response_head<R: tokio::io::AsyncRead + Unpin>(
+  upstream: &mut R,
+  timeout: std::time::Duration,
+) -> std::io::Result<Option<(Vec<u8>, usize)>> {
+  read_request_head(upstream, timeout).await
 }
 
 /// Read the client's request head: the bytes read so far and the offset one
@@ -469,8 +629,8 @@ async fn proxy_ws_connection(
 /// within `timeout`; the relay then drops the connection without sending an
 /// HTTP response, so a plain-HTTP scan does not learn that `Deno.serve` is
 /// behind it.
-async fn read_request_head(
-  tcp: &mut TcpStream,
+async fn read_request_head<R: tokio::io::AsyncRead + Unpin>(
+  tcp: &mut R,
   timeout: std::time::Duration,
 ) -> std::io::Result<Option<(Vec<u8>, usize)>> {
   let read = async {
@@ -513,6 +673,12 @@ const RELAY_403_RESPONSE: &[u8] = b"HTTP/1.1 403 Forbidden\r\n\
   content-length: 47\r\n\
   connection: close\r\n\r\n\
   desktop ws relay: Origin is not the app origin\n";
+
+const RELAY_502_RESPONSE: &[u8] = b"HTTP/1.1 502 Bad Gateway\r\n\
+  content-type: text/plain; charset=utf-8\r\n\
+  content-length: 50\r\n\
+  connection: close\r\n\r\n\
+  desktop ws relay: the server did not upgrade this\n";
 
 /// Byte offset of the request head/body boundary (`\r\n\r\n`) — the index one
 /// past the final `\n`.
@@ -878,8 +1044,171 @@ mod tests {
   }
 
   #[test]
+  fn relay_marks_every_forwarded_head_exactly_once() {
+    // Client copies of the marker, in any case and with any value, are
+    // dropped; the relay's own is the only one upstream sees.
+    let head = upgrade_head(
+      "Origin: t3code://app\r\nX-Deno-Desktop-Relay: 0\r\n\
+       x-deno-desktop-relay : spoof\r\n",
+    );
+    let out = relay_request_head(&head);
+    let values: Vec<&[u8]> =
+      header_values(&out, RELAY_MARKER_HEADER.as_bytes()).collect();
+    assert_eq!(values, vec![&b"1"[..]]);
+    assert!(out.starts_with(b"GET /ws HTTP/1.1\r\n"));
+    assert!(out.ends_with(b"\r\n\r\n"));
+    assert_eq!(find_end_of_head(&out), Some(out.len()));
+    // Everything else the client sent is kept.
+    assert_eq!(header_values(&out, b"origin").count(), 1);
+    assert_eq!(header_values(&out, b"sec-websocket-key").count(), 1);
+    // And a head without any marker gets one too.
+    let out = relay_request_head(&upgrade_head("Origin: t3code://app\r\n"));
+    assert_eq!(
+      header_values(&out, RELAY_MARKER_HEADER.as_bytes()).count(),
+      1
+    );
+  }
+
+  #[test]
+  fn the_scheme_handler_never_forwards_or_returns_the_marker() {
+    for name in [
+      "x-deno-desktop-relay",
+      "X-Deno-Desktop-Relay",
+      " X-DENO-DESKTOP-RELAY ",
+    ] {
+      assert!(should_skip_request_header(name), "{name:?}");
+      assert!(is_relay_marker(name), "{name:?}");
+    }
+    assert!(!is_relay_marker("x-deno-desktop-relay-x"));
+  }
+
+  #[test]
+  fn bridge_request_bodies_are_capped() {
+    assert_eq!(MAX_BRIDGE_REQUEST_BODY, 4 * 1024 * 1024);
+    assert!(!body_exceeds_limit(0, MAX_BRIDGE_REQUEST_BODY));
+    assert!(body_exceeds_limit(MAX_BRIDGE_REQUEST_BODY, 1));
+    assert!(body_exceeds_limit(usize::MAX, 1));
+  }
+
+  #[test]
+  fn switching_protocols_status_is_exact() {
+    assert!(is_switching_protocols(
+      b"HTTP/1.1 101 Switching Protocols\r\n\r\n"
+    ));
+    assert!(is_switching_protocols(b"HTTP/1.1 101\r\n\r\n"));
+    for other in [
+      &b"HTTP/1.1 200 OK\r\n\r\n"[..],
+      b"HTTP/1.1 1010 x\r\n\r\n",
+      b"HTTP/1.0 101 x\r\n\r\n",
+      b"",
+    ] {
+      assert!(!is_switching_protocols(other));
+    }
+  }
+
+  /// Runs [`relay_upgrade`] between in-memory pipes. `server` answers the
+  /// forwarded head; returns what the client read and what the server read.
+  async fn run_relay(
+    client_sends: &[u8],
+    server_answer: &'static [u8],
+  ) -> (Vec<u8>, Vec<u8>) {
+    let (mut client, mut relay_client_side) = tokio::io::duplex(64 * 1024);
+    let (mut relay_upstream_side, mut server) = tokio::io::duplex(64 * 1024);
+    client.write_all(client_sends).await.unwrap();
+    let end = find_end_of_head(client_sends).unwrap();
+    let head = client_sends[..end].to_vec();
+    let relay = tokio::spawn(async move {
+      relay_upgrade(
+        &mut relay_client_side,
+        &mut relay_upstream_side,
+        &head,
+        Duration::from_secs(5),
+      )
+      .await
+      .unwrap();
+    });
+    let server_task = tokio::spawn(async move {
+      let (got, _) = read_request_head(&mut server, Duration::from_secs(5))
+        .await
+        .unwrap()
+        .expect("the forwarded head");
+      server.write_all(server_answer).await.unwrap();
+      // Collect anything else the relay sends until it closes or idles.
+      let mut rest = got;
+      let mut buf = [0u8; 1024];
+      while let Ok(Ok(n)) =
+        tokio::time::timeout(Duration::from_millis(300), server.read(&mut buf))
+          .await
+      {
+        if n == 0 {
+          break;
+        }
+        rest.extend_from_slice(&buf[..n]);
+      }
+      rest
+    });
+    let mut got = Vec::new();
+    let mut buf = [0u8; 1024];
+    while let Ok(Ok(n)) =
+      tokio::time::timeout(Duration::from_millis(500), client.read(&mut buf))
+        .await
+    {
+      if n == 0 {
+        break;
+      }
+      got.extend_from_slice(&buf[..n]);
+    }
+    drop(client);
+    let upstream = server_task.await.unwrap();
+    relay.abort();
+    (got, upstream)
+  }
+
+  #[tokio::test]
+  async fn relay_never_carries_a_non_101_response() {
+    let mut sends = upgrade_head("Origin: t3code://app\r\n");
+    // A second request pipelined behind the upgrade.
+    sends.extend_from_slice(b"GET /second HTTP/1.1\r\nHost: x\r\n\r\n");
+    let (client_got, upstream_got) = run_relay(
+      &sends,
+      b"HTTP/1.1 200 OK\r\ncontent-length: 6\r\n\r\nsecret",
+    )
+    .await;
+    let text = String::from_utf8_lossy(&client_got);
+    assert!(text.starts_with("HTTP/1.1 502 "), "{text}");
+    assert!(
+      !text.contains("200 OK") && !text.contains("secret"),
+      "{text}"
+    );
+    // Only the (marked) upgrade head went upstream; the pipelined request
+    // never did.
+    assert_eq!(find_end_of_head(&upstream_got), Some(upstream_got.len()));
+    assert_eq!(
+      header_values(&upstream_got, RELAY_MARKER_HEADER.as_bytes()).count(),
+      1
+    );
+    assert!(!String::from_utf8_lossy(&upstream_got).contains("/second"));
+  }
+
+  #[tokio::test]
+  async fn relay_passes_a_101_and_what_follows() {
+    let sends = upgrade_head("Origin: t3code://app\r\n");
+    let (client_got, upstream_got) = run_relay(
+      &sends,
+      b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n\r\n\x81\x02hi",
+    )
+    .await;
+    assert!(client_got.starts_with(b"HTTP/1.1 101 "));
+    assert!(client_got.ends_with(b"\x81\x02hi"));
+    assert_eq!(
+      header_values(&upstream_got, RELAY_MARKER_HEADER.as_bytes()).count(),
+      1
+    );
+  }
+
+  #[test]
   fn canned_responses_have_correct_content_length() {
-    for resp in [RELAY_400_RESPONSE, RELAY_403_RESPONSE] {
+    for resp in [RELAY_400_RESPONSE, RELAY_403_RESPONSE, RELAY_502_RESPONSE] {
       let text = std::str::from_utf8(resp).unwrap();
       let (head, body) = text.split_once("\r\n\r\n").unwrap();
       let declared: usize = head
@@ -925,6 +1254,10 @@ mod tests {
           let mut buf = vec![0u8; 4096];
           let n = stream.read(&mut buf).await.unwrap();
           assert!(find_end_of_head(&buf[..n]).is_some());
+          assert_eq!(
+            header_values(&buf[..n], RELAY_MARKER_HEADER.as_bytes()).count(),
+            1
+          );
           stream
             .write_all(b"HTTP/1.1 101 Switching Protocols\r\n\r\n")
             .await

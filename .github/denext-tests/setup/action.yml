@@ -67,7 +67,7 @@ runs:
         rustup toolchain install "$tc" --profile minimal --component rustfmt,clippy --no-self-update
         echo "RUSTUP_TOOLCHAIN=$tc" >>"$GITHUB_ENV"
 
-    - uses: denoland/setup-deno@v2
+    - uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
       with:
         deno-version: ${{ env.TOOLS_DENO_VERSION }}
 
@@ -82,7 +82,7 @@ runs:
         ./tools/install_prebuilt.js ld64.lld
         echo "$GITHUB_WORKSPACE/third_party/prebuilt/mac" >>"$GITHUB_PATH"
 
-    - uses: Swatinem/rust-cache@v2
+    - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       with:
         prefix-key: denext-tests-v1
         key: ${{ inputs.cache-key }}

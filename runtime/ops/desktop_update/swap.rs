@@ -34,6 +34,14 @@
 //! records the version as `rejected` (it is never offered again), and
 //! relaunches the previous app with `--denext-update-rolled-back=<version>`.
 //! An interrupted swap or rollback is recovered the same way.
+//!
+//! **What is touched.** Only paths proven to be copies of this app's install
+//! ([`super::layout::is_install_copy`]: the packager's marker) are swapped or
+//! deleted as the install, `.old` or a failed install; anything else at those
+//! names is left alone and the step is refused. Before swapping, the helper
+//! re-hashes the staged tree and compares it with the digest recorded when
+//! it was verified and staged ([`tree_digest`]), so a staged app changed
+//! after verification is never swapped in.
 
 #![allow(
   clippy::disallowed_methods,
@@ -55,6 +63,7 @@ use super::error::UpdateErrorCode as Code;
 use super::error::err;
 use super::layout::InstallKind;
 use super::layout::InstallLayout;
+use super::layout::is_install_copy;
 
 /// The helper's argv marker: `<exe> run denext-update-helper <mode> <pid>`.
 pub const HELPER_ARG: &str = "denext-update-helper";
@@ -120,6 +129,13 @@ pub struct UpdateState {
   pub rejected: Option<String>,
   /// The arguments to relaunch the app with.
   pub relaunch_args: Vec<String>,
+  /// [`tree_digest`] of the staged app, recorded when it was verified and
+  /// staged; the helper re-checks it before swapping.
+  pub staged_digest: Option<String>,
+  /// The app process that asked for the swap (`applyAndRelaunch`). The apply
+  /// helper only swaps for this process, and stands down when it is cleared
+  /// (the app's quit was refused, so the request was withdrawn).
+  pub apply_pid: Option<u32>,
   /// `.old` / staging still need deleting.
   pub cleanup: bool,
   /// Why the last step failed, if it did.
@@ -265,6 +281,129 @@ pub fn rename_retry(from: &Path, to: &Path) -> std::io::Result<()> {
   }
 }
 
+/// A digest of the tree at `root` (a directory or a single file): SHA-256
+/// over every entry's relative path, kind, and for a file its size and
+/// SHA-256, for a symlink its target, in a fixed (sorted) order. Two trees
+/// have the same digest only if they have the same entries and contents.
+pub fn tree_digest(root: &Path) -> std::io::Result<String> {
+  use sha2::Digest;
+  fn file_sha(path: &Path) -> std::io::Result<String> {
+    let mut f = std::fs::File::open(path)?;
+    let mut h = sha2::Sha256::new();
+    std::io::copy(&mut f, &mut h)?;
+    Ok(faster_hex::hex_string(&h.finalize()))
+  }
+  fn walk(
+    dir: &Path,
+    rel: &str,
+    out: &mut sha2::Sha256,
+  ) -> std::io::Result<()> {
+    let mut names: Vec<std::ffi::OsString> = std::fs::read_dir(dir)?
+      .map(|e| e.map(|e| e.file_name()))
+      .collect::<std::io::Result<_>>()?;
+    names.sort();
+    for name in names {
+      let path = dir.join(&name);
+      let name = name.to_string_lossy();
+      let rel = if rel.is_empty() {
+        name.into_owned()
+      } else {
+        format!("{rel}/{name}")
+      };
+      entry(&path, &rel, out)?;
+    }
+    Ok(())
+  }
+  fn entry(
+    path: &Path,
+    rel: &str,
+    out: &mut sha2::Sha256,
+  ) -> std::io::Result<()> {
+    let meta = std::fs::symlink_metadata(path)?;
+    let ft = meta.file_type();
+    // Length-prefixed fields: no name can be confused with a separator.
+    let mut field = |tag: &str, value: &str| {
+      out.update(tag.as_bytes());
+      out.update((value.len() as u64).to_le_bytes());
+      out.update(value.as_bytes());
+    };
+    if ft.is_symlink() {
+      let target = std::fs::read_link(path)?;
+      field("l", rel);
+      field("t", &target.to_string_lossy());
+    } else if ft.is_dir() {
+      field("d", rel);
+      walk(path, rel, out)?;
+    } else {
+      field("f", rel);
+      field("s", &meta.len().to_string());
+      field("h", &file_sha(path)?);
+    }
+    Ok(())
+  }
+  let mut out = sha2::Sha256::new();
+  entry(root, "", &mut out)?;
+  Ok(faster_hex::hex_string(&out.finalize()))
+}
+
+/// Remove `path` only if it is a copy of this app's install (see
+/// [`is_install_copy`]); `true` when nothing is left there. Anything else at
+/// that name is left in place (`false`).
+pub fn remove_install_copy(layout: &InstallLayout, path: &Path) -> bool {
+  if !exists(path) {
+    return true;
+  }
+  if !is_install_copy(layout.kind, path) {
+    log_line(
+      layout,
+      &format!(
+        "{} is not a copy of this app's install; left in place",
+        path.display()
+      ),
+    );
+    return false;
+  }
+  // The marker goes last: a removal that fails part-way (a file in use on
+  // Windows) leaves a tree that is still provably this app's, so the next
+  // cleanup can finish it.
+  match layout.kind {
+    InstallKind::AppImage => remove_path(path),
+    kind => remove_marker_last(path, super::layout::marker_path(kind)),
+  }
+}
+
+/// Remove the directory `dir` with the entry `keep` (a relative path, one
+/// name per element) removed after everything else in each directory on its
+/// way. `true` when `dir` is gone.
+fn remove_marker_last(dir: &Path, keep: &[&str]) -> bool {
+  let Some((first, rest)) = keep.split_first() else {
+    return remove_path(dir);
+  };
+  // A symlink (or a file) is removed itself, never followed.
+  if !std::fs::symlink_metadata(dir).is_ok_and(|m| m.file_type().is_dir()) {
+    return remove_path(dir);
+  }
+  let Ok(entries) = std::fs::read_dir(dir) else {
+    return !exists(dir);
+  };
+  let mut ok = true;
+  for entry in entries.flatten() {
+    if entry.file_name() != std::ffi::OsStr::new(first) {
+      ok &= remove_path(&entry.path());
+    }
+  }
+  if !ok {
+    return false;
+  }
+  let kept = dir.join(first);
+  let kept_gone = if rest.is_empty() {
+    remove_path(&kept)
+  } else {
+    remove_marker_last(&kept, rest)
+  };
+  kept_gone && (std::fs::remove_dir(dir).is_ok() || !exists(dir))
+}
+
 /// Remove a file or directory tree; `true` when nothing is left.
 pub fn remove_path(path: &Path) -> bool {
   let Ok(m) = std::fs::symlink_metadata(path) else {
@@ -326,11 +465,36 @@ pub fn apply_swap_with(
   if !exists(&staged) || !exists(&layout.install) {
     return err(Code::NotStaged, "the staged app or the install is missing");
   }
+  if !is_install_copy(layout.kind, &layout.install)
+    || !is_install_copy(layout.kind, &staged)
+  {
+    return err(
+      Code::UnsupportedLayout,
+      "the install or the staged app is not a packaged app (no install \
+       marker); nothing was swapped",
+    );
+  }
+  // The staged tree must still be exactly what was verified and staged.
+  let digest = tree_digest(&staged).ok();
+  if digest.is_none() || digest != state.staged_digest {
+    state.last_error =
+      Some("the staged app changed after it was verified".into());
+    let _ = write_state(layout, state);
+    return err(
+      Code::BundleMismatch,
+      "the staged app no longer matches what was verified and staged; \
+       nothing was swapped",
+    );
+  }
   let old = layout.old_path();
-  if exists(&old) && !remove_path(&old) {
+  if exists(&old) && !remove_install_copy(layout, &old) {
     return err(
       Code::Io,
-      format!("cannot remove a leftover {}", old.display()),
+      format!(
+        "cannot remove a leftover {} (it is not a previous install of this \
+         app, or is in use); move it away to update",
+        old.display()
+      ),
     );
   }
   state.phase = Phase::Swapping;
@@ -370,6 +534,8 @@ pub fn apply_swap_with(
       state.launches = 0;
       state.helper_attempts = 0;
       state.entry = None;
+      state.staged_digest = None;
+      state.apply_pid = None;
       write_state(layout, state)?;
       remove_path(&layout.staging_dir());
       Ok(())
@@ -456,7 +622,7 @@ pub fn rollback_with(
     if exists(&old) {
       if exists(install) {
         if exists(&failed) {
-          remove_path(&failed);
+          remove_install_copy(layout, &failed);
         }
         step(hook, "install->failed", || rename_retry(install, &failed))?;
       }
@@ -482,7 +648,7 @@ pub fn rollback_with(
   // On Windows the helper runs from the failed install's own executable, which
   // cannot be deleted while it runs: leave `cleanup` set and the next start's
   // watchdog finishes it.
-  let failed_gone = remove_path(&failed);
+  let failed_gone = remove_install_copy(layout, &failed);
   let staging_gone = remove_path(&layout.staging_dir());
   state.phase = Phase::Idle;
   state.launches = 0;
@@ -519,8 +685,8 @@ pub fn confirm(layout: &InstallLayout) -> Result<bool, UpdateError> {
 
 /// Delete `.old`, a failed install and staging; clear `cleanup` when done.
 pub fn cleanup(layout: &InstallLayout, state: &mut UpdateState) {
-  let done = remove_path(&layout.old_path())
-    & remove_path(&layout.failed_path())
+  let done = remove_install_copy(layout, &layout.old_path())
+    & remove_install_copy(layout, &layout.failed_path())
     & remove_path(&layout.staging_dir());
   if done && state.cleanup {
     state.cleanup = false;
@@ -640,15 +806,94 @@ pub fn log_line(layout: &InstallLayout, line: &str) {
   }
 }
 
+/// The helper's lock file, next to the install: holds the running helper's
+/// PID, so a second helper (a second `applyAndRelaunch`, a watchdog retry)
+/// never runs a step concurrently with the first.
+pub fn helper_lock_path(layout: &InstallLayout) -> PathBuf {
+  layout
+    .parent
+    .join(format!(".{}.denext-update.lock", layout.name))
+}
+
+/// The held helper lock; removed when dropped.
+pub struct HelperLock(PathBuf);
+
+impl Drop for HelperLock {
+  fn drop(&mut self) {
+    let _ = std::fs::remove_file(&self.0);
+  }
+}
+
+/// Take the helper lock, unless another live helper holds it. A lock left by
+/// a helper that died is taken over.
+pub fn take_helper_lock(layout: &InstallLayout) -> Option<HelperLock> {
+  let path = helper_lock_path(layout);
+  let me = std::process::id();
+  for _ in 0..2 {
+    match std::fs::OpenOptions::new()
+      .write(true)
+      .create_new(true)
+      .open(&path)
+    {
+      Ok(mut f) => {
+        let _ = write!(f, "{me}");
+        return Some(HelperLock(path));
+      }
+      Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+        let holder = std::fs::read_to_string(&path)
+          .ok()
+          .and_then(|s| s.trim().parse::<u32>().ok());
+        match holder {
+          Some(pid) if pid != me && !wait_for_exit(pid, Duration::ZERO) => {
+            return None;
+          }
+          _ => {
+            // Stale (its helper is gone, or unreadable): take it over.
+            let _ = std::fs::remove_file(&path);
+          }
+        }
+      }
+      Err(_) => return None,
+    }
+  }
+  None
+}
+
+/// Whether the apply `pid` asked for is still requested (not withdrawn).
+fn apply_requested(layout: &InstallLayout, pid: u32) -> bool {
+  read_state(layout)
+    .is_some_and(|s| s.phase == Phase::Staged && s.apply_pid == Some(pid))
+}
+
 /// Run the helper. Returns the process exit code.
 pub fn run_helper(layout: &InstallLayout, mode: HelperMode, pid: u32) -> i32 {
+  let Some(_lock) = take_helper_lock(layout) else {
+    log_line(layout, "another update helper is running; nothing to do");
+    return 1;
+  };
   log_line(
     layout,
     &format!("helper {} waiting for pid {pid}", mode.as_str()),
   );
-  if !wait_for_exit(pid, HELPER_WAIT) {
-    log_line(layout, "the app did not exit in time; nothing changed");
-    return 1;
+  // Wait in short steps: an apply the app withdrew (its quit was refused)
+  // ends the wait at once, instead of swapping whenever the app exits later.
+  let deadline = Instant::now() + HELPER_WAIT;
+  loop {
+    if wait_for_exit(pid, Duration::from_secs(1)) {
+      break;
+    }
+    if mode == HelperMode::Apply && !apply_requested(layout, pid) {
+      log_line(layout, "the app withdrew the update; nothing changed");
+      return 0;
+    }
+    if Instant::now() >= deadline {
+      log_line(layout, "the app did not exit in time; nothing changed");
+      return 1;
+    }
+  }
+  if mode == HelperMode::Apply && !apply_requested(layout, pid) {
+    log_line(layout, "the update was withdrawn before the app exited");
+    return 0;
   }
   // Windows refuses to rename a directory while a process holds one of its
   // files open without delete sharing: the app's CEF subprocesses (which
@@ -955,13 +1200,7 @@ fn relaunch(
   state: &UpdateState,
   marker: Option<String>,
 ) -> i32 {
-  let mut args: Vec<String> = state
-    .relaunch_args
-    .iter()
-    .filter(|a| !is_update_marker(a))
-    .cloned()
-    .collect();
-  args.extend(marker);
+  let args = relaunch_argv(&state.relaunch_args, marker);
   let env = [("LAUFEY_SINGLE_INSTANCE", None)];
   let r = if layout.kind == InstallKind::MacBundle {
     // Through LaunchServices, so the bundle's LSEnvironment and activation
@@ -987,6 +1226,27 @@ fn relaunch(
   }
 }
 
+/// The relaunch arguments: the recorded ones without old markers, and
+/// `marker` before a `--` (where `split_launch_markers` reads markers; after
+/// it every argument is positional), else at the end.
+fn relaunch_argv(recorded: &[String], marker: Option<String>) -> Vec<String> {
+  let mut args: Vec<String> = Vec::with_capacity(recorded.len() + 1);
+  let mut options_ended = false;
+  for a in recorded {
+    if !options_ended && a == "--" {
+      options_ended = true;
+    } else if !options_ended && is_update_marker(a) {
+      continue;
+    }
+    args.push(a.clone());
+  }
+  if let Some(marker) = marker {
+    let at = args.iter().position(|a| a == "--").unwrap_or(args.len());
+    args.insert(at, marker);
+  }
+  args
+}
+
 /// Whether `arg` is one of the updater's relaunch markers.
 pub fn is_update_marker(arg: &str) -> bool {
   arg.starts_with(UPDATED_FROM_ARG) || arg.starts_with(ROLLED_BACK_ARG)
@@ -995,6 +1255,25 @@ pub fn is_update_marker(arg: &str) -> bool {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn relaunch_puts_the_marker_before_the_terminator() {
+    let a = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    let marker = || Some(format!("{UPDATED_FROM_ARG}1.0.0"));
+    assert_eq!(
+      relaunch_argv(&a(&["--", "acme://x"]), marker()),
+      a(&["--denext-updated-from=1.0.0", "--", "acme://x"])
+    );
+    assert_eq!(
+      relaunch_argv(&a(&["--denext-update-rolled-back=2", "f.txt"]), marker()),
+      a(&["f.txt", "--denext-updated-from=1.0.0"])
+    );
+    // A positional argument after `--` is kept as it is.
+    assert_eq!(
+      relaunch_argv(&a(&["--", "--denext-updated-from=x"]), None),
+      a(&["--", "--denext-updated-from=x"])
+    );
+  }
 
   /// The helper's wait for processes running from the install: a process
   /// started from a copy of a system executable in a scratch directory keeps
@@ -1055,6 +1334,8 @@ mod tests {
     let install = parent.join("App");
     std::fs::create_dir_all(&install).unwrap();
     std::fs::write(install.join("version"), "1.0.0").unwrap();
+    std::fs::write(install.join(super::super::layout::INSTALL_MARKER), "{}")
+      .unwrap();
     let layout = InstallLayout {
       kind: InstallKind::AppDir,
       install,
@@ -1067,6 +1348,9 @@ mod tests {
       let dir = layout.extract_dir().join("App");
       std::fs::create_dir_all(&dir).unwrap();
       std::fs::write(dir.join("version"), v).unwrap();
+      std::fs::write(dir.join(super::super::layout::INSTALL_MARKER), "{}")
+        .unwrap();
+      state.staged_digest = Some(tree_digest(&dir).unwrap());
       state.phase = Phase::Staged;
       state.from = Some("1.0.0".into());
       state.to = Some(v.into());
@@ -1116,6 +1400,174 @@ mod tests {
     assert!(!s.cleanup);
     assert_eq!(startup_action(l), StartupAction::Continue { trial: false });
     assert!(!confirm(l).unwrap());
+  }
+
+  #[test]
+  fn an_unproven_leftover_old_is_never_deleted() {
+    // Something else sits where `.old` goes (not a copy of the install):
+    // the swap refuses instead of deleting it, and leaves the install alone.
+    let f = fixture(Some("2.0.0"));
+    let l = &f.layout;
+    std::fs::create_dir_all(l.old_path()).unwrap();
+    std::fs::write(l.old_path().join("user-file"), "keep me").unwrap();
+    let mut s = read_state(l).unwrap();
+    let e = apply_swap(l, &mut s).unwrap_err();
+    assert_eq!(e.code, Code::Io);
+    assert_eq!(installed(l), "1.0.0");
+    assert_eq!(
+      std::fs::read_to_string(l.old_path().join("user-file")).unwrap(),
+      "keep me"
+    );
+    // Cleanup leaves it too (and stays pending).
+    let mut s = read_state(l).unwrap();
+    s.cleanup = true;
+    cleanup(l, &mut s);
+    assert!(l.old_path().join("user-file").exists());
+    assert!(!is_install_copy(l.kind, &l.old_path()));
+    // A proven previous install at `.old` is removed, marker last.
+    std::fs::remove_dir_all(l.old_path()).unwrap();
+    std::fs::create_dir_all(l.old_path().join("sub")).unwrap();
+    std::fs::write(l.old_path().join("sub/f"), "x").unwrap();
+    std::fs::write(
+      l.old_path().join(super::super::layout::INSTALL_MARKER),
+      "{}",
+    )
+    .unwrap();
+    assert!(remove_install_copy(l, &l.old_path()));
+    assert!(!l.old_path().exists());
+  }
+
+  #[test]
+  fn an_unmarked_install_or_stage_is_never_swapped() {
+    let f = fixture(Some("2.0.0"));
+    let l = &f.layout;
+    std::fs::remove_file(l.install.join(super::super::layout::INSTALL_MARKER))
+      .unwrap();
+    let mut s = read_state(l).unwrap();
+    let e = apply_swap(l, &mut s).unwrap_err();
+    assert_eq!(e.code, Code::UnsupportedLayout);
+    assert_eq!(installed(l), "1.0.0");
+    assert!(!l.old_path().exists());
+
+    let f = fixture(Some("2.0.0"));
+    let l = &f.layout;
+    let staged = read_state(l).unwrap().staged_path(l).unwrap();
+    std::fs::remove_file(staged.join(super::super::layout::INSTALL_MARKER))
+      .unwrap();
+    let mut s = read_state(l).unwrap();
+    assert_eq!(
+      apply_swap(l, &mut s).unwrap_err().code,
+      Code::UnsupportedLayout
+    );
+    assert_eq!(installed(l), "1.0.0");
+  }
+
+  #[test]
+  fn a_stage_changed_after_verification_is_never_swapped() {
+    for change in ["edit", "add", "missing digest"] {
+      let f = fixture(Some("2.0.0"));
+      let l = &f.layout;
+      let staged = read_state(l).unwrap().staged_path(l).unwrap();
+      match change {
+        "edit" => std::fs::write(staged.join("version"), "6.6.6").unwrap(),
+        "add" => std::fs::write(staged.join("extra"), "x").unwrap(),
+        _ => {
+          let mut s = read_state(l).unwrap();
+          s.staged_digest = None;
+          write_state(l, &s).unwrap();
+        }
+      }
+      let mut s = read_state(l).unwrap();
+      let e = apply_swap(l, &mut s).unwrap_err();
+      assert_eq!(e.code, Code::BundleMismatch, "{change}");
+      assert_eq!(installed(l), "1.0.0", "{change}");
+      assert_eq!(read_state(l).unwrap().phase, Phase::Staged, "{change}");
+    }
+  }
+
+  #[test]
+  fn tree_digest_covers_names_contents_and_shape() {
+    let t = tempfile::tempdir().unwrap();
+    let a = t.path().join("a");
+    std::fs::create_dir_all(a.join("d")).unwrap();
+    std::fs::write(a.join("d/f"), "1").unwrap();
+    let base = tree_digest(&a).unwrap();
+    assert_eq!(base, tree_digest(&a).unwrap());
+    std::fs::write(a.join("d/f"), "2").unwrap();
+    assert_ne!(base, tree_digest(&a).unwrap());
+    std::fs::write(a.join("d/f"), "1").unwrap();
+    assert_eq!(base, tree_digest(&a).unwrap());
+    std::fs::rename(a.join("d/f"), a.join("d/g")).unwrap();
+    assert_ne!(base, tree_digest(&a).unwrap());
+    std::fs::rename(a.join("d/g"), a.join("d/f")).unwrap();
+    std::fs::create_dir(a.join("e")).unwrap();
+    assert_ne!(base, tree_digest(&a).unwrap());
+  }
+
+  /// A process that runs until killed (stands in for the app, or another
+  /// helper).
+  fn long_running() -> std::process::Child {
+    if cfg!(windows) {
+      std::process::Command::new("cmd")
+        .args(["/C", "ping -n 60 127.0.0.1 >NUL"])
+        .spawn()
+    } else {
+      std::process::Command::new("sleep").arg("60").spawn()
+    }
+    .unwrap()
+  }
+
+  #[test]
+  fn one_helper_at_a_time() {
+    let f = fixture(Some("2.0.0"));
+    let l = &f.layout;
+    let mut other = long_running();
+    std::fs::write(helper_lock_path(l), other.id().to_string()).unwrap();
+    // Another live helper holds the lock: refused, and its lock is kept.
+    assert!(take_helper_lock(l).is_none());
+    assert!(helper_lock_path(l).exists());
+    other.kill().unwrap();
+    other.wait().unwrap();
+    // Its helper is gone: the stale lock is taken over, and released.
+    let lock = take_helper_lock(l).expect("a stale lock is taken over");
+    assert_eq!(
+      std::fs::read_to_string(helper_lock_path(l)).unwrap(),
+      std::process::id().to_string()
+    );
+    drop(lock);
+    assert!(!helper_lock_path(l).exists());
+  }
+
+  #[test]
+  fn a_withdrawn_apply_is_never_swapped() {
+    // The app asked for the swap, its quit was refused, and it withdrew the
+    // request: the waiting helper stands down without waiting for the app.
+    let f = fixture(Some("2.0.0"));
+    let l = &f.layout;
+    let mut app = long_running();
+    let mut s = read_state(l).unwrap();
+    s.apply_pid = None;
+    write_state(l, &s).unwrap();
+    let start = Instant::now();
+    assert_eq!(run_helper(l, HelperMode::Apply, app.id()), 0);
+    assert!(start.elapsed() < Duration::from_secs(30));
+    assert_eq!(installed(l), "1.0.0");
+    assert_eq!(read_state(l).unwrap().phase, Phase::Staged);
+    // A request for another process is not this one's either.
+    let mut s = read_state(l).unwrap();
+    s.apply_pid = Some(app.id().wrapping_add(1));
+    write_state(l, &s).unwrap();
+    assert_eq!(run_helper(l, HelperMode::Apply, app.id()), 0);
+    assert_eq!(installed(l), "1.0.0");
+    app.kill().unwrap();
+    app.wait().unwrap();
+    // Requested by the process that exited: swapped.
+    let mut s = read_state(l).unwrap();
+    s.apply_pid = Some(app.id());
+    write_state(l, &s).unwrap();
+    run_helper(l, HelperMode::Apply, app.id());
+    assert_eq!(installed(l), "2.0.0");
+    assert!(!helper_lock_path(l).exists());
   }
 
   #[test]

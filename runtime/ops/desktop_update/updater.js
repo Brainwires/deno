@@ -258,12 +258,17 @@
   // Start the swap helper, then quit. The helper waits for this process to
   // exit, swaps the install, and relaunches the new version.
   function applyAndRelaunch(options = {}) {
-    call(op_desktop_app_update_apply);
+    call(op_desktop_app_update_apply, false);
     const quitting = typeof desktop.quit === "function"
       ? desktop.quit() !== false
       : false;
     if (!quitting && options.force === true) {
       Deno.exit(0);
+    }
+    if (!quitting) {
+      // The quit was refused: withdraw the request, so the waiting helper
+      // stands down instead of swapping whenever the app exits later.
+      call(op_desktop_app_update_apply, true);
     }
     return { quitting };
   }

@@ -92,26 +92,37 @@ pub struct MacSignInfo {
 }
 
 /// Parse `codesign -dv --verbose=2` output (it writes to stderr).
+///
+/// Only whole `Key=value` lines with exactly the keys `Identifier` and
+/// `TeamIdentifier` count. Each must appear at most once: codesign prints
+/// each once, so a second one (with any value) means the output is not what
+/// it seems (e.g. a path with a newline in the `Executable=` line) and the
+/// bundle is treated as unsigned, which every check then refuses.
 pub fn parse_codesign_display(out: &CmdOutput) -> MacSignInfo {
   if !out.success {
     return MacSignInfo::default();
   }
-  let text = format!("{}\n{}", out.stderr, out.stdout);
-  let mut info = MacSignInfo {
-    signed: true,
-    ..Default::default()
-  };
-  for line in text.lines() {
-    if let Some(v) = line.strip_prefix("Identifier=") {
-      info.identifier = Some(v.trim().to_string());
-    } else if let Some(v) = line.strip_prefix("TeamIdentifier=") {
-      let v = v.trim();
-      if !v.is_empty() && v != "not set" {
-        info.team_id = Some(v.to_string());
-      }
+  let mut identifier: Option<String> = None;
+  let mut team: Option<String> = None;
+  for line in out.stderr.lines().chain(out.stdout.lines()) {
+    let Some((key, value)) = line.split_once('=') else {
+      continue;
+    };
+    let slot = match key {
+      "Identifier" => &mut identifier,
+      "TeamIdentifier" => &mut team,
+      _ => continue,
+    };
+    if slot.is_some() {
+      return MacSignInfo::default();
     }
+    *slot = Some(value.trim().to_string());
   }
-  info
+  MacSignInfo {
+    signed: true,
+    identifier: identifier.filter(|v| !v.is_empty()),
+    team_id: team.filter(|v| !v.is_empty() && v != "not set"),
+  }
 }
 
 fn codesign_info(runner: &dyn CommandRunner, path: &Path) -> MacSignInfo {
@@ -274,11 +285,56 @@ pub fn verify_windows(
   })
 }
 
+/// `CRYPT_E_REVOCATION_OFFLINE`: the revocation server could not be reached.
+const CRYPT_E_REVOCATION_OFFLINE: i32 = 0x80092013_u32 as i32;
+/// `CERT_E_REVOCATION_FAILURE`: revocation could not be checked.
+const CERT_E_REVOCATION_FAILURE: i32 = 0x800B010E_u32 as i32;
+
+/// How [`authenticode_signer`] treats a `WinVerifyTrust` status from the
+/// check WITH revocation: `Some(true)` trusted, `Some(false)` refused, `None`
+/// revocation could not be determined (offline) and the offline fallback
+/// decides.
+pub fn revocation_status_verdict(status: i32) -> Option<bool> {
+  match status {
+    0 => Some(true),
+    CRYPT_E_REVOCATION_OFFLINE | CERT_E_REVOCATION_FAILURE => None,
+    // Anything else, CRYPT_E_REVOKED / CERT_E_REVOKED included: refused.
+    _ => Some(false),
+  }
+}
+
 /// The Authenticode signer of `path`: verified with `WinVerifyTrust`
-/// (`WINTRUST_ACTION_GENERIC_VERIFY_V2`, no UI, no online revocation
-/// lookup), then the leaf signer certificate's subject.
+/// (`WINTRUST_ACTION_GENERIC_VERIFY_V2`, no UI), then the leaf signer
+/// certificate's subject.
+///
+/// Revocation is checked online for the whole chain except the root
+/// (`WTD_REVOKE_WHOLECHAIN` + `WTD_REVOCATION_CHECK_CHAIN_EXCLUDE_ROOT`): a
+/// revoked signing certificate is refused. Offline-tolerant fallback: when
+/// the revocation status cannot be determined (no network, the CRL/OCSP
+/// server unreachable: `CRYPT_E_REVOCATION_OFFLINE` /
+/// `CERT_E_REVOCATION_FAILURE`), the signature is verified again without
+/// the revocation lookup and accepted if valid, so an offline machine can
+/// still update; a certificate positively reported revoked never is. The
+/// update manifest is separately signed with the app's own key, so the
+/// fallback only weakens the second, OS-level check while offline.
 #[cfg(windows)]
 pub fn authenticode_signer(path: &Path) -> Option<Signer> {
+  match authenticode_signer_with(path, true) {
+    Ok(signer) => Some(signer),
+    Err(status) => match revocation_status_verdict(status) {
+      None => authenticode_signer_with(path, false).ok(),
+      Some(_) => None,
+    },
+  }
+}
+
+/// One `WinVerifyTrust` pass (`revocation`: online revocation checks), then
+/// the signer; `Err(status)` when the file is not trusted.
+#[cfg(windows)]
+fn authenticode_signer_with(
+  path: &Path,
+  revocation: bool,
+) -> Result<Signer, i32> {
   use std::os::windows::ffi::OsStrExt;
 
   use windows_sys::Win32::Security::Cryptography::CERT_NAME_SIMPLE_DISPLAY_TYPE;
@@ -288,7 +344,9 @@ pub fn authenticode_signer(path: &Path) -> Option<Signer> {
   use windows_sys::Win32::Security::WinTrust::WINTRUST_DATA_0;
   use windows_sys::Win32::Security::WinTrust::WINTRUST_FILE_INFO;
   use windows_sys::Win32::Security::WinTrust::WTD_CHOICE_FILE;
+  use windows_sys::Win32::Security::WinTrust::WTD_REVOCATION_CHECK_CHAIN_EXCLUDE_ROOT;
   use windows_sys::Win32::Security::WinTrust::WTD_REVOKE_NONE;
+  use windows_sys::Win32::Security::WinTrust::WTD_REVOKE_WHOLECHAIN;
   use windows_sys::Win32::Security::WinTrust::WTD_STATEACTION_CLOSE;
   use windows_sys::Win32::Security::WinTrust::WTD_STATEACTION_VERIFY;
   use windows_sys::Win32::Security::WinTrust::WTD_UI_NONE;
@@ -310,7 +368,12 @@ pub fn authenticode_signer(path: &Path) -> Option<Signer> {
     let mut data: WINTRUST_DATA = std::mem::zeroed();
     data.cbStruct = std::mem::size_of::<WINTRUST_DATA>() as u32;
     data.dwUIChoice = WTD_UI_NONE;
-    data.fdwRevocationChecks = WTD_REVOKE_NONE;
+    if revocation {
+      data.fdwRevocationChecks = WTD_REVOKE_WHOLECHAIN;
+      data.dwProvFlags = WTD_REVOCATION_CHECK_CHAIN_EXCLUDE_ROOT;
+    } else {
+      data.fdwRevocationChecks = WTD_REVOKE_NONE;
+    }
     data.dwUnionChoice = WTD_CHOICE_FILE;
     data.Anonymous = WINTRUST_DATA_0 { pFile: &mut file };
     data.dwStateAction = WTD_STATEACTION_VERIFY;
@@ -354,7 +417,7 @@ pub fn authenticode_signer(path: &Path) -> Option<Signer> {
       &mut action,
       &mut data as *mut _ as *mut std::ffi::c_void,
     );
-    result
+    result.ok_or(if status == 0 { -1 } else { status })
   }
 }
 
@@ -427,6 +490,56 @@ mod tests {
       stderr: "code object is not signed at all".into(),
     });
     assert!(!i.signed);
+  }
+
+  #[test]
+  fn codesign_keys_are_exact_and_unique() {
+    let out = |text: &str| CmdOutput {
+      success: true,
+      stdout: String::new(),
+      stderr: text.into(),
+    };
+    // A repeated key (whatever its value) is not trusted: the bundle reads
+    // as unsigned, which every check refuses.
+    for text in [
+      "Identifier=com.a\nTeamIdentifier=EVIL\nTeamIdentifier=TEAM1\n",
+      "Identifier=com.a\nTeamIdentifier=TEAM1\nTeamIdentifier=TEAM1\n",
+      "Identifier=com.a\nIdentifier=com.b\nTeamIdentifier=TEAM1\n",
+    ] {
+      assert_eq!(
+        parse_codesign_display(&out(text)),
+        MacSignInfo::default(),
+        "{text:?}"
+      );
+    }
+    // Only the exact keys count: look-alike keys are ignored.
+    let i = parse_codesign_display(&out(
+      "Identifier=com.a\nTeamIdentifier=TEAM1\nXTeamIdentifier=EVIL\n\
+       TeamIdentifierX=EVIL\n Identifier=evil\n",
+    ));
+    assert_eq!(i.identifier.as_deref(), Some("com.a"));
+    assert_eq!(i.team_id.as_deref(), Some("TEAM1"));
+  }
+
+  #[test]
+  fn authenticode_revocation_verdicts() {
+    assert_eq!(revocation_status_verdict(0), Some(true));
+    // Revoked: refused outright, never retried without revocation.
+    for revoked in [0x80092010_u32 as i32, 0x800B010C_u32 as i32] {
+      assert_eq!(revocation_status_verdict(revoked), Some(false));
+    }
+    // Offline: the fallback (no revocation lookup) decides.
+    assert_eq!(revocation_status_verdict(CRYPT_E_REVOCATION_OFFLINE), None);
+    assert_eq!(revocation_status_verdict(CERT_E_REVOCATION_FAILURE), None);
+    // Not signed / bad signature: refused.
+    assert_eq!(
+      revocation_status_verdict(0x800B0100_u32 as i32),
+      Some(false)
+    );
+    assert_eq!(
+      revocation_status_verdict(0x80096010_u32 as i32),
+      Some(false)
+    );
   }
 
   #[test]

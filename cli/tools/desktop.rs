@@ -5183,7 +5183,8 @@ fn version_core_fields(version: &str) -> Vec<&str> {
 /// for itself and recognizes as this app's (`deno_lib`
 /// `standalone::scheme_handler::windows`): the `URL:<scheme>` default value,
 /// `URL Protocol`, the `DenoDesktopAppId` marker when the app has an id,
-/// `DefaultIcon` = `"<exe>",0` and `shell\open\command` = `"<exe>" "%1"`,
+/// `DefaultIcon` = `"<exe>",0` and `shell\open\command` = `"<exe>" -- "%1"`
+/// (the `--` keeps a link from adding options, see `command_line`),
 /// where `<exe>` is the installed launcher (`[#key]`). Root `-1` puts the key
 /// in `HKLM\Software\Classes` for a per-machine install (this package's
 /// default, `ALLUSERS=1`) and `HKCU\Software\Classes` for a per-user one,
@@ -9491,7 +9492,7 @@ def456  other.zip
         "cmd",
         &format!("{key}\\shell\\open\\command"),
         None,
-        Some(&format!("\"{exe}\" \"%1\"")),
+        Some(&format!("\"{exe}\" -- \"%1\"")),
       ));
     }
     expected.sort();

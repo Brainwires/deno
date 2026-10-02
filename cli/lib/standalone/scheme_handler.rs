@@ -313,9 +313,21 @@ pub mod windows {
     pub icon: String,
   }
 
-  /// The `shell\open\command` for `exe`: `"<exe>" "%1"`.
+  /// The `shell\open\command` for `exe`: `"<exe>" -- "%1"`.
+  ///
+  /// The `--` ends the options: Windows substitutes the link for `%1`
+  /// without escaping it, so a link containing a `"` can close the quotes
+  /// and add arguments of its own. After `--` every argument is a
+  /// positional one for the runtime (`launch_args::parse_launch_args`), the
+  /// host (laufey stops reading its options there) and Chromium (CEF's
+  /// command line parser treats `--` as the switch terminator), never an
+  /// option. The class of bug is Electron's CVE-2018-1000006.
+  ///
+  /// A registration written in the earlier `"<exe>" "%1"` form no longer
+  /// matches [`expected_key`], so the runtime refreshes it on the next
+  /// launch (see [`owner`]).
   pub fn command_line(exe: &str) -> String {
-    format!("\"{exe}\" \"%1\"")
+    format!("\"{exe}\" -- \"%1\"")
   }
 
   /// The default value of a URL protocol key: `URL:<scheme>`.
@@ -420,7 +432,12 @@ pub mod windows {
       let handler = command_exe(command).or_else(|| Some(command.clone()));
       if command_is_this_app(command, me) {
         // A machine-wide registration of this executable (an installer).
-        return OwnerStatus::this(handler, false);
+        // One without the `--` of [`command_line`] (an older installer) is
+        // stale: the per-user key written to refresh it shadows it in the
+        // merged `HKCR` view, so links never reach the unsafe command.
+        let stale =
+          !command.trim().eq_ignore_ascii_case(&command_line(&me.exe));
+        return OwnerStatus::this(handler, stale);
       }
       return OwnerStatus::other(handler)
         .with_reason("registered machine-wide (HKLM) for another app");
@@ -1148,6 +1165,43 @@ mod tests {
       assert_eq!(command_exe("rundll32 url.dll").as_deref(), Some("rundll32"));
       assert_eq!(command_exe("\"unterminated"), None);
       assert_eq!(command_exe(""), None);
+    }
+
+    #[test]
+    fn command_line_ends_the_options_before_the_link() {
+      // The link is substituted for %1 unescaped: everything from it on has
+      // to be a positional argument, so `--` comes first.
+      let cmd = command_line(EXE);
+      assert_eq!(cmd, format!("\"{EXE}\" -- \"%1\""));
+      let terminator = cmd.find(" -- ").expect("no -- in the command");
+      let link = cmd.find("%1").unwrap();
+      assert!(terminator < link, "{cmd}");
+      assert_eq!(command_exe(&cmd).as_deref(), Some(EXE));
+    }
+
+    #[test]
+    fn a_registration_without_the_terminator_is_refreshed() {
+      // The earlier `"<exe>" "%1"` form, per-user: this app's, stale.
+      let mut key = expected_key(&me());
+      key.command = Some(format!("\"{EXE}\" \"%1\""));
+      let s = owner("acme", &state(Some(key), None), &me());
+      assert_eq!(s.owner, SchemeOwner::This);
+      assert!(s.stale);
+      assert_eq!(
+        plan_registration(&s, RegisterMode::Startup),
+        RegisterAction::Write
+      );
+      // The same form machine-wide (an older installer): stale too, so the
+      // per-user key that shadows it gets written.
+      let mut machine = foreign(EXE);
+      machine.command = Some(format!("\"{EXE}\" \"%1\""));
+      let s = owner("acme", &state(None, Some(machine)), &me());
+      assert_eq!(s.owner, SchemeOwner::This);
+      assert!(s.stale);
+      assert_eq!(
+        plan_registration(&s, RegisterMode::Startup),
+        RegisterAction::Write
+      );
     }
 
     #[test]

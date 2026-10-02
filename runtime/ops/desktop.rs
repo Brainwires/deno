@@ -3831,26 +3831,52 @@ fn op_desktop_clipboard_watch(state: &mut OpState, on: bool) {
 
 /// `BrowserWindow.prototype.startDrag()`: `"dropped"`, `"cancelled"` or
 /// `"failed"`.
-#[op2]
+///
+/// Dragging a file out hands it (its contents) to another app, so every
+/// path needs read permission (`--allow-read`), checked before the drag
+/// starts: a missing permission rejects with `NotCapable`, as reading the
+/// file would.
+#[op2(stack_trace)]
 #[string]
 async fn op_desktop_start_drag(
   state: std::rc::Rc<std::cell::RefCell<OpState>>,
   #[smi] window_id: u32,
   #[serde] paths: Vec<String>,
   #[buffer(copy)] icon: Vec<u8>,
-) -> String {
+) -> Result<String, deno_error::JsErrorBox> {
   let Some(api) = desktop_api(&state) else {
-    return DragOutcome::Failed.as_str().to_string();
+    return Ok(DragOutcome::Failed.as_str().to_string());
   };
   if paths.is_empty() || paths.len() > MAX_DRAG_PATHS {
-    return DragOutcome::Failed.as_str().to_string();
+    return Ok(DragOutcome::Failed.as_str().to_string());
   }
+  check_drag_read_permission(&state.borrow(), &paths)?;
   let icon = if icon.is_empty() { None } else { Some(icon) };
-  api
-    .start_file_drag(window_id, paths, icon)
-    .await
-    .as_str()
-    .to_string()
+  Ok(
+    api
+      .start_file_drag(window_id, paths, icon)
+      .await
+      .as_str()
+      .to_string(),
+  )
+}
+
+/// Read permission for each path a drag-out carries.
+fn check_drag_read_permission(
+  state: &OpState,
+  paths: &[String],
+) -> Result<(), deno_error::JsErrorBox> {
+  let permissions = state.borrow::<deno_permissions::PermissionsContainer>();
+  for path in paths {
+    permissions
+      .check_open(
+        Cow::Borrowed(Path::new(path)),
+        deno_permissions::OpenAccessKind::Read,
+        Some("BrowserWindow.startDrag()"),
+      )
+      .map_err(deno_error::JsErrorBox::from_err)?;
+  }
+  Ok(())
 }
 
 /// `Deno.desktop.dialog.*`: shows the dialog and returns the id the JS side
@@ -4697,6 +4723,50 @@ mod tests {
   // fail if you change a field name or remove a `#[serde(rename_all =
   // "camelCase")]` so you find out at test time, not at runtime in the
   // packaged app.
+
+  #[test]
+  #[allow(clippy::disallowed_methods, reason = "test fixtures on disk")]
+  fn drag_out_needs_read_permission_for_every_path() {
+    use std::sync::Arc;
+
+    use deno_permissions::Permissions;
+    use deno_permissions::PermissionsContainer;
+    use deno_permissions::PermissionsOptions;
+    use deno_permissions::RuntimePermissionDescriptorParser;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let allowed = tmp.path().join("allowed");
+    let other = tmp.path().join("other");
+    std::fs::create_dir_all(&allowed).unwrap();
+    std::fs::create_dir_all(&other).unwrap();
+    std::fs::write(allowed.join("a.txt"), "a").unwrap();
+    std::fs::write(other.join("b.txt"), "b").unwrap();
+    let parser =
+      RuntimePermissionDescriptorParser::new(sys_traits::impls::RealSys);
+    let perms = Permissions::from_options(
+      &parser,
+      &PermissionsOptions {
+        allow_read: Some(vec![allowed.to_string_lossy().into_owned()]),
+        ..Default::default()
+      },
+    )
+    .unwrap();
+    let mut state = deno_core::OpState::new(None);
+    state.put(PermissionsContainer::new(Arc::new(parser), perms));
+    let path = |p: std::path::PathBuf| p.to_string_lossy().into_owned();
+    assert!(
+      super::check_drag_read_permission(&state, &[path(allowed.join("a.txt"))])
+        .is_ok()
+    );
+    // One unreadable path refuses the whole drag.
+    assert!(
+      super::check_drag_read_permission(
+        &state,
+        &[path(allowed.join("a.txt")), path(other.join("b.txt"))]
+      )
+      .is_err()
+    );
+  }
 
   #[test]
   fn js_wrapped_desktop_methods_use_private_symbols() {
