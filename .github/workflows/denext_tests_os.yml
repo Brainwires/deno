@@ -6,9 +6,13 @@ on:
   workflow_call:
     inputs:
       os:
-        description: The runner image (macos-14, windows-2022, ubuntu-22.04)
+        description: The runner image (macos-14, macos-15-intel, windows-2022, ubuntu-22.04, ubuntu-22.04-arm)
         type: string
         required: true
+      libs_only:
+        description: Build and run the lib tests only (the extra architecture legs)
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -113,30 +117,19 @@ jobs:
         # in, and the build is reused); the filter selects the one test.
         run: cargo test --locked --lib -p deno -p denort -p node_shim -p bsdiff_helper -p deno_lib -p denort_desktop -p deno_snapshots -p deno_bundle_runtime -p deno_cache -p deno_canvas -p deno_cron -p deno_crypto -p deno_fetch -p deno_ffi -p deno_fs -p deno_http -p deno_image -p deno_io -p deno_kv -p deno_napi -p napi_sym -p deno_net -p deno_node -p deno_node_crypto -p deno_node_sqlite -p denort_helper -p deno_signals -p deno_telemetry -p deno_url -p deno_web -p deno_webgpu -p deno_webidl -p deno_websocket -p deno_webstorage -p deno_cache_dir -p deno_cli_parser -p deno_config -p deno_crypto_provider -p deno_v8 -p deno_dotenv -p eszip -p deno_http_h1 -p deno_inspector_server -p deno_lockfile -p deno_maybe_sync -p napi_sys -p node_resolver -p deno_npm -p deno_npm_cache -p deno_npm_installer -p deno_npmrc -p deno_package_json -p deno_print -p deno_resolver -p deno_typescript_go_client_rust -p deno_runtime -p deno_features -p deno_permissions -p deno_subprocess_windows -p deno_os -p deno_process -- --ignored --exact scheme_registration::tests::macos_register_bundle_with_launch_services
 
+  # unit and specs on every OS; on Linux also upstream's integration and
+  # unit_node suites (the fork changes ext/os, ext/http, ext/net and
+  # ext/process, which they cover).
   test:
     name: test ${{ matrix.suite }}${{ matrix.shard_label }}
     needs: build
+    if: ${{ !inputs.libs_only }}
     runs-on: ${{ inputs.os }}
     timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - suite: unit
-            package: unit_tests
-            shard: ''
-            shard_total: ''
-            shard_label: ''
-          - suite: specs
-            package: specs_tests
-            shard: '0'
-            shard_total: '2'
-            shard_label: ' (1/2)'
-          - suite: specs
-            package: specs_tests
-            shard: '1'
-            shard_total: '2'
-            shard_label: ' (2/2)'
+        include: ${{ fromJSON(inputs.os == 'ubuntu-22.04' && '[{"suite":"unit","package":"unit_tests","shard":"","shard_total":"","shard_label":""},{"suite":"specs","package":"specs_tests","shard":"0","shard_total":"2","shard_label":" (1/2)"},{"suite":"specs","package":"specs_tests","shard":"1","shard_total":"2","shard_label":" (2/2)"},{"suite":"integration","package":"integration_tests","shard":"0","shard_total":"2","shard_label":" (1/2)"},{"suite":"integration","package":"integration_tests","shard":"1","shard_total":"2","shard_label":" (2/2)"},{"suite":"unit_node","package":"unit_node_tests","shard":"","shard_total":"","shard_label":""}]' || '[{"suite":"unit","package":"unit_tests","shard":"","shard_total":"","shard_label":""},{"suite":"specs","package":"specs_tests","shard":"0","shard_total":"2","shard_label":" (1/2)"},{"suite":"specs","package":"specs_tests","shard":"1","shard_total":"2","shard_label":" (2/2)"}]') }}
     defaults:
       run:
         shell: bash
@@ -170,7 +163,7 @@ jobs:
           ls -la target/debug
           target/debug/deno --version
       - name: Build ffi (debug)
-        if: matrix.suite == 'specs'
+        if: matrix.suite == 'specs' || matrix.suite == 'integration'
         run: cargo build -p test_ffi
       # Upstream's `Test (debug)` step.
       - name: Test (debug)

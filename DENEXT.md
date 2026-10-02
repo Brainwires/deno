@@ -233,7 +233,10 @@ The workflow is `.github/workflows/denext_runtime.yml` (helpers in
 `.github/denext-runtime/`). Run it from the Actions tab (`workflow_dispatch`,
 optional `targets` filter, `laufey_ref` override, and `reuse_*_run_id` to reuse
 a previous run's libdenort or laufey build), or push a `denext-runtime-v*` tag
-to publish. Per target it:
+to publish. It also runs on every push to a `rel/**` branch and nightly on the
+default branch. A tag publishes only when `denext tests` (`denext_tests.yml`)
+passed on exactly the tagged commit; the setup job checks and fails otherwise.
+Per target it:
 
 1. builds `libdenort` with `cargo build --release --locked -p denort_desktop`
    (the release profile: fat LTO, `codegen-units = 1`), on the runner of that
@@ -261,9 +264,29 @@ LAUFEY_DEV_DIR=$PWD deno desktop --backend webview main.ts
 
 Upstream Deno's own workflows are removed on the `denext/*` branch and disabled
 in this fork's Actions settings, so pushes and tags here only run the denext
-runtime workflow.
+workflows: `denext_runtime.yml` (above) and `denext_tests.yml`, upstream's own
+test bar (lint, the lib tests, `unit` and `specs` on macOS arm64, Windows x64
+and Linux x64, plus `integration` and `unit_node` on Linux; the build and lib
+tests on macOS x64 and Linux arm64) on pushes to `denext/**`, `rel/**`, `ci/**`,
+`feat/**` and `fix/**` and on pull requests into `denext/**` and `rel/**`.
 
 ## Test coverage
+
+Specs this fork adds for what its runtime exposes outside a desktop app:
+
+- `tests/specs/run/desktop_ops_inert`: every `Deno.desktop` op and native class
+  in `NOT_IMPORTED_OPS` (reachable from any code through
+  `Deno[Deno.internal].core.ops`) called in a plain `deno run` with no
+  permissions: each answers "not supported", an empty value or a refusal, opens
+  nothing, writes nothing, and the classes throw `NotSupported`;
+  `runOnMainThread`'s op needs `--allow-ffi` first. The spec fails on an exposed
+  op it has no case for, and a Rust test fails when `NOT_IMPORTED_OPS` names a
+  desktop op the spec lacks.
+- `tests/specs/serve/memory_address`: `DENO_SERVE_ADDRESS=memory:<name>` serves
+  on the in-process memory transport (no socket, no net permission), and a TCP
+  server refuses a request target that claims `http+memory://` (400).
+- `tests/specs/check/desktop_types`: the fork's `Deno.desktop` types check with
+  `--desktop`, and misuses are type errors.
 
 Upstream Deno has no end-to-end harness for `deno desktop` apps (its own tests
 stop at unit tests and `tests/specs` of the CLI), so this fork carries its own,

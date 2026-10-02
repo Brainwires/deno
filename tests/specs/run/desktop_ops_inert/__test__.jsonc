@@ -1,0 +1,20 @@
+{
+  "tempDir": true,
+  "steps": [{
+    "args": "run main.js",
+    "output": "main.out",
+    "exitCode": 0
+  }, {
+    "args": "run ffi.js",
+    "output": "ffi_denied.out",
+    "exitCode": 0
+  }, {
+    "args": "run --allow-ffi ffi.js",
+    "output": "ffi.out",
+    "exitCode": 0
+  }, {
+    "args": "run --allow-read=. files.js",
+    "output": "ffi.js files.js main.js\n",
+    "exitCode": 0
+  }]
+}

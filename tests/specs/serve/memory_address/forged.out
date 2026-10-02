@@ -1,0 +1,4 @@
+http+memory://app/x -> HTTP/1.1 400 Bad Request
+HTTP+MEMORY://app/x -> HTTP/1.1 400 Bad Request
+http://app/x -> HTTP/1.1 200 OK
+handler saw: ["http://app/x"]

@@ -199,8 +199,14 @@ pub fn lookup<'a>(
 
 /// A 16-byte absolute jump to `target`.
 pub fn stub_bytes(target: u64) -> [u8; STUB_SIZE] {
+  stub_bytes_for(cfg!(target_arch = "aarch64"), target)
+}
+
+/// [`stub_bytes`] for either architecture, so both encodings are tested on
+/// every host.
+fn stub_bytes_for(aarch64: bool, target: u64) -> [u8; STUB_SIZE] {
   let mut stub = [0u8; STUB_SIZE];
-  if cfg!(target_arch = "aarch64") {
+  if aarch64 {
     // ldr x16, #8 ; br x16 ; .quad target
     stub[0..4].copy_from_slice(&0x5800_0050u32.to_le_bytes());
     stub[4..8].copy_from_slice(&0xd61f_0200u32.to_le_bytes());
@@ -638,12 +644,36 @@ mod tests {
 
   #[test]
   fn x86_64_stub_is_an_absolute_indirect_jump() {
-    if cfg!(target_arch = "aarch64") {
-      return;
-    }
-    let stub = stub_bytes(0x1122_3344_5566_7788);
+    let stub = stub_bytes_for(false, 0x1122_3344_5566_7788);
+    // jmp qword ptr [rip+0]: the target is the 8 bytes right after it.
     assert_eq!(&stub[0..6], &[0xff, 0x25, 0, 0, 0, 0]);
     assert_eq!(&stub[6..14], &0x1122_3344_5566_7788u64.to_le_bytes());
+    assert_eq!(&stub[14..16], &[0xcc, 0xcc]);
+  }
+
+  #[test]
+  fn aarch64_stub_loads_the_target_and_branches() {
+    let stub = stub_bytes_for(true, 0x1122_3344_5566_7788);
+    let word =
+      |at: usize| u32::from_le_bytes(stub[at..at + 4].try_into().unwrap());
+    // ldr x16, <literal>: LDR (literal, 64-bit) is 0x58000000 | imm19 << 5
+    // | Rt. The literal is imm19 * 4 bytes after the instruction: 8 here,
+    // where the target is stored.
+    let ldr = word(0);
+    assert_eq!(ldr & 0xff00_0000, 0x5800_0000);
+    assert_eq!((ldr >> 5) & 0x7_ffff, 2);
+    assert_eq!(ldr & 0x1f, 16);
+    // br x16: 0xd61f0000 | Rn << 5.
+    let br = word(4);
+    assert_eq!(br & 0xffff_fc1f, 0xd61f_0000);
+    assert_eq!((br >> 5) & 0x1f, 16);
+    assert_eq!(&stub[8..16], &0x1122_3344_5566_7788u64.to_le_bytes());
+  }
+
+  #[test]
+  fn stub_bytes_is_the_host_encoding() {
+    let host = stub_bytes(0x1234);
+    assert_eq!(host, stub_bytes_for(cfg!(target_arch = "aarch64"), 0x1234));
   }
 
   #[test]

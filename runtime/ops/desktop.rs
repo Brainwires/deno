@@ -21,6 +21,7 @@ use deno_core::ToV8;
 use deno_core::cppgc::SameObject;
 use deno_core::op2;
 use deno_core::v8;
+use deno_error::JsErrorBox;
 
 /// Thread-safe intermediate value type for crossing the WEF ↔ Deno boundary.
 /// Converts directly to V8 values without going through serde.
@@ -1991,7 +1992,58 @@ impl deno_core::Resource for BrowserWindow {
 
 struct EventTargetSetup {
   brand: v8::Global<v8::Value>,
-  set_event_target_data: v8::Global<v8::Value>,
+  set_event_target_data: v8::Global<v8::Function>,
+}
+
+/// The backend, the webidl brand and `setEventTargetData`.
+type ClassPrerequisites = (
+  Arc<dyn DesktopApi>,
+  v8::Global<v8::Value>,
+  v8::Global<v8::Function>,
+);
+
+/// What a native class constructor needs before it creates anything: the
+/// desktop backend and DESKTOP_JS's event-target setup. The classes sit on
+/// `core.ops` and survive `removeImportedOps()` (NOT_IMPORTED_OPS), so a
+/// plain `deno run` can construct them: there they throw `NotSupported`
+/// instead of panicking the process.
+fn class_prerequisites(
+  state: &OpState,
+  class: &str,
+) -> Result<ClassPrerequisites, JsErrorBox> {
+  let not_supported = || {
+    JsErrorBox::new(
+      "NotSupported",
+      format!("{class} is only available in a desktop app (deno desktop)"),
+    )
+  };
+  let api = state
+    .try_borrow::<Arc<dyn DesktopApi>>()
+    .cloned()
+    .ok_or_else(not_supported)?;
+  let setup = state
+    .try_borrow::<EventTargetSetup>()
+    .ok_or_else(not_supported)?;
+  Ok((
+    api,
+    setup.brand.clone(),
+    setup.set_event_target_data.clone(),
+  ))
+}
+
+/// Brands a freshly made native object as an EventTarget, as DESKTOP_JS set
+/// it up in `op_desktop_init`.
+fn init_event_target<'s>(
+  scope: &mut v8::PinScope<'s, '_>,
+  object: v8::Local<'s, v8::Object>,
+  brand: &v8::Global<v8::Value>,
+  set_event_target_data: &v8::Global<v8::Function>,
+) {
+  let brand = v8::Local::new(scope, brand);
+  object.set(scope, brand, brand);
+  let set_event_target_data = v8::Local::new(scope, set_event_target_data);
+  let null = v8::null(scope);
+  set_event_target_data.call(scope, null.into(), &[object.into()]);
 }
 
 #[op2]
@@ -2001,11 +2053,9 @@ impl BrowserWindow {
     state: &OpState,
     scope: &mut v8::PinScope<'_, '_>,
     #[scoped] options: Option<BrowserWindowOptions>,
-  ) -> v8::Global<v8::Value> {
-    let api = state
-      .try_borrow::<Arc<dyn DesktopApi>>()
-      .expect("desktop mode enabled")
-      .clone();
+  ) -> Result<v8::Global<v8::Value>, JsErrorBox> {
+    let (api, brand, set_event_target_data) =
+      class_prerequisites(state, "BrowserWindow")?;
 
     // Use the initial window if this is the first BrowserWindow,
     // otherwise create a new one.
@@ -2098,17 +2148,10 @@ impl BrowserWindow {
       normal_chrome,
     };
     let window = deno_core::cppgc::make_cppgc_object(scope, window);
-    let event_target_setup = state.borrow::<EventTargetSetup>();
-    let webidl_brand = v8::Local::new(scope, event_target_setup.brand.clone());
-    window.set(scope, webidl_brand, webidl_brand);
-    let set_event_target_data =
-      v8::Local::new(scope, event_target_setup.set_event_target_data.clone())
-        .cast::<v8::Function>();
-    let null = v8::null(scope);
-    set_event_target_data.call(scope, null.into(), &[window.into()]);
+    init_event_target(scope, window, &brand, &set_event_target_data);
     let window = window.cast::<v8::Value>();
 
-    v8::Global::new(scope, window)
+    Ok(v8::Global::new(scope, window))
   }
 
   #[getter]
@@ -2921,11 +2964,12 @@ async fn op_desktop_recv_event(
     let s = state.borrow();
     s.try_borrow::<DesktopEventReceiver>().map(|r| r.0.clone())
   };
-  if let Some(rx) = rx {
-    rx.lock().await.recv().await
-  } else {
-    std::future::pending().await
-  }
+  // Outside a desktop app there is no event source: answer null (the end of
+  // the stream, which DESKTOP_JS's loop stops on) instead of a promise that
+  // never settles. The op sits on `core.ops` (NOT_IMPORTED_OPS), and a
+  // pending, ref'd op would keep a plain `deno run` alive forever.
+  let rx = rx?;
+  rx.lock().await.recv().await
 }
 
 #[allow(
@@ -3264,17 +3308,32 @@ fn op_desktop_close_reply(
   }
 }
 
+/// DESKTOP_JS hands over the webidl brand and `setEventTargetData` once, at
+/// startup, before any app code runs. The op sits on `core.ops`
+/// (NOT_IMPORTED_OPS), so later calls are refused: app code can't swap in
+/// its own function for every window, tray and notification made after.
 #[op2(fast)]
 pub fn op_desktop_init(
   state: &mut OpState,
   scope: &mut v8::PinScope<'_, '_>,
   webidl_brand: v8::Local<v8::Value>,
   set_event_target_data: v8::Local<v8::Value>,
-) {
+) -> Result<(), JsErrorBox> {
+  if state.has::<EventTargetSetup>() {
+    return Err(JsErrorBox::generic("the desktop runtime is already set up"));
+  }
+  let Ok(set_event_target_data) =
+    v8::Local::<v8::Function>::try_from(set_event_target_data)
+  else {
+    return Err(JsErrorBox::type_error(
+      "setEventTargetData is not a function",
+    ));
+  };
   state.put(EventTargetSetup {
     brand: v8::Global::new(scope, webidl_brand),
     set_event_target_data: v8::Global::new(scope, set_event_target_data),
   });
+  Ok(())
 }
 
 #[op2(fast)]
@@ -4242,25 +4301,16 @@ impl Dock {
   fn new(
     state: &OpState,
     scope: &mut v8::PinScope<'_, '_>,
-  ) -> v8::Global<v8::Value> {
-    let api = state
-      .try_borrow::<Arc<dyn DesktopApi>>()
-      .expect("desktop mode enabled")
-      .clone();
+  ) -> Result<v8::Global<v8::Value>, JsErrorBox> {
+    let (api, brand, set_event_target_data) =
+      class_prerequisites(state, "Dock")?;
 
     let dock = Dock { api };
     let dock = deno_core::cppgc::make_cppgc_object(scope, dock);
-    let event_target_setup = state.borrow::<EventTargetSetup>();
-    let webidl_brand = v8::Local::new(scope, event_target_setup.brand.clone());
-    dock.set(scope, webidl_brand, webidl_brand);
-    let set_event_target_data =
-      v8::Local::new(scope, event_target_setup.set_event_target_data.clone())
-        .cast::<v8::Function>();
-    let null = v8::null(scope);
-    set_event_target_data.call(scope, null.into(), &[dock.into()]);
+    init_event_target(scope, dock, &brand, &set_event_target_data);
     let dock = dock.cast::<v8::Value>();
 
-    v8::Global::new(scope, dock)
+    Ok(v8::Global::new(scope, dock))
   }
 
   // `null` / `undefined` clear the badge, as the d.ts says (a required
@@ -4316,26 +4366,17 @@ impl Tray {
   fn new(
     state: &OpState,
     scope: &mut v8::PinScope<'_, '_>,
-  ) -> v8::Global<v8::Value> {
-    let api = state
-      .try_borrow::<Arc<dyn DesktopApi>>()
-      .expect("desktop mode enabled")
-      .clone();
+  ) -> Result<v8::Global<v8::Value>, JsErrorBox> {
+    let (api, brand, set_event_target_data) =
+      class_prerequisites(state, "Tray")?;
 
     let tray_id = api.create_tray();
     let tray = Tray { api, tray_id };
     let tray = deno_core::cppgc::make_cppgc_object(scope, tray);
-    let event_target_setup = state.borrow::<EventTargetSetup>();
-    let webidl_brand = v8::Local::new(scope, event_target_setup.brand.clone());
-    tray.set(scope, webidl_brand, webidl_brand);
-    let set_event_target_data =
-      v8::Local::new(scope, event_target_setup.set_event_target_data.clone())
-        .cast::<v8::Function>();
-    let null = v8::null(scope);
-    set_event_target_data.call(scope, null.into(), &[tray.into()]);
+    init_event_target(scope, tray, &brand, &set_event_target_data);
     let tray = tray.cast::<v8::Value>();
 
-    v8::Global::new(scope, tray)
+    Ok(v8::Global::new(scope, tray))
   }
 
   #[getter]
@@ -4453,11 +4494,9 @@ impl Notification {
     #[scoped] options: Option<NotificationConstructorOptions>,
     #[buffer] icon_bytes: Option<&[u8]>,
     #[serde] extra: Option<NotificationExtra>,
-  ) -> v8::Global<v8::Value> {
-    let api = state
-      .try_borrow::<Arc<dyn DesktopApi>>()
-      .expect("desktop mode enabled")
-      .clone();
+  ) -> Result<v8::Global<v8::Value>, JsErrorBox> {
+    let (api, brand, set_event_target_data) =
+      class_prerequisites(state, "Notification")?;
 
     let options = options.unwrap_or(NotificationConstructorOptions {
       body: None,
@@ -4515,17 +4554,10 @@ impl Notification {
       data,
     };
     let notification = deno_core::cppgc::make_cppgc_object(scope, notification);
-    let event_target_setup = state.borrow::<EventTargetSetup>();
-    let webidl_brand = v8::Local::new(scope, event_target_setup.brand.clone());
-    notification.set(scope, webidl_brand, webidl_brand);
-    let set_event_target_data =
-      v8::Local::new(scope, event_target_setup.set_event_target_data.clone())
-        .cast::<v8::Function>();
-    let null = v8::null(scope);
-    set_event_target_data.call(scope, null.into(), &[notification.into()]);
+    init_event_target(scope, notification, &brand, &set_event_target_data);
     let notification = notification.cast::<v8::Value>();
 
-    v8::Global::new(scope, notification)
+    Ok(v8::Global::new(scope, notification))
   }
 
   #[getter]
@@ -6460,6 +6492,37 @@ mod tests {
     );
     assert!(super::auth_session_cancel(&state));
     assert_eq!(next.await.code.as_deref(), Some("cancelled"));
+  }
+
+  /// Every desktop op and class in NOT_IMPORTED_OPS (they survive
+  /// `removeImportedOps()`, so any code reaches them through `core.ops`) has
+  /// a case in tests/specs/run/desktop_ops_inert, which proves it inert in a
+  /// plain `deno run`. A new op must get a case there.
+  #[test]
+  fn desktop_ops_inert_spec_covers_not_imported_ops() {
+    const MAIN_JS: &str = include_str!("../js/99_main.js");
+    const SPEC: &str =
+      include_str!("../../tests/specs/run/desktop_ops_inert/main.js");
+    let start = MAIN_JS.find("const NOT_IMPORTED_OPS = [").unwrap();
+    let end = start + MAIN_JS[start..].find("];").unwrap();
+    let names: Vec<&str> = MAIN_JS[start..end]
+      .split('"')
+      .skip(1)
+      .step_by(2)
+      .filter(|n| {
+        n.starts_with("op_desktop_")
+          || ["BrowserWindow", "Dock", "Tray", "Notification"].contains(n)
+      })
+      .collect();
+    assert!(names.len() > 60, "{names:?}");
+    let missing: Vec<&&str> = names
+      .iter()
+      .filter(|n| !SPEC.contains(&format!("\n  {n}: ")))
+      .collect();
+    assert!(
+      missing.is_empty(),
+      "add a case to tests/specs/run/desktop_ops_inert/main.js for: {missing:?}"
+    );
   }
 
   #[test]
