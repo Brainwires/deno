@@ -24,6 +24,10 @@ on:
         description: 'Skip the laufey build and take its artifacts from this earlier run id'
         type: string
         default: ''
+      e2e_areas:
+        description: 'Comma-separated e2e areas to run (.github/denext-runtime/e2e/run.ts), or empty for all'
+        type: string
+        default: ''
   push:
     tags:
       - 'denext-runtime-v*'
@@ -430,13 +434,14 @@ jobs:
           retention-days: 14
 
   # Assemble the archives, check them, package the smoke app with the stock
-  # CLI, try to launch it, attest.
+  # CLI, try to launch it, run the e2e suite (.github/denext-runtime/e2e)
+  # on both backends, attest.
   package:
     name: package / ${{ matrix.target }}
     needs: [setup, laufey, denort]
     if: ${{ always() && needs.setup.result == 'success' && needs.laufey.result != 'cancelled' && needs.denort.result != 'cancelled' }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
+    timeout-minutes: 180
     permissions:
       contents: read
       actions: read
@@ -484,7 +489,9 @@ jobs:
             libwebkit2gtk-4.1-0 libgtk-3-0 libnss3 libnspr4 libatk1.0-0 \
             libatk-bridge2.0-0 libcups2 libdrm2 libgbm1 libasound2 libpango-1.0-0 \
             libcairo2 libxcomposite1 libxdamage1 libxrandr2 libxkbcommon0 libxi6 \
-            libxext6 libxfixes3 libdbus-1-3 file
+            libxext6 libxfixes3 libdbus-1-3 file \
+            xfwm4 wmctrl xdotool xdg-utils desktop-file-utils \
+            python3-gi gir1.2-glib-2.0 libglib2.0-bin openssl
 
       - uses: denoland/setup-deno@v2
         with:
@@ -574,13 +581,54 @@ jobs:
           WORK_DIR: ${{ runner.temp }}/smoke-cef
         run: bash .github/denext-runtime/launch.sh
 
+      # The e2e suite: one small app per feature area, packaged with the
+      # stock CLI against this archive and driven the way the OS would
+      # (deep links through the registered handler, the .msi on Windows, a
+      # full-app self-update, ...). Every check passes, fails, or is n/a with
+      # the reason. See .github/denext-runtime/e2e/run.ts and DENEXT.md.
+      - name: E2E (webview)
+        id: e2e_webview
+        if: ${{ !cancelled() }}
+        env:
+          ARCHIVE: dist/deno-desktop-runtime-${{ needs.setup.outputs.version }}-${{ matrix.target }}-webview.${{ runner.os == 'Windows' && 'zip' || 'tar.gz' }}
+          BACKEND: webview
+          WORK_DIR: ${{ runner.temp }}/e2e-webview
+          E2E_OUT: ${{ runner.temp }}/e2e-out
+          E2E_AREAS: ${{ inputs.e2e_areas }}
+        run: bash .github/denext-runtime/e2e/e2e.sh
+
+      - name: E2E (cef)
+        id: e2e_cef
+        if: ${{ !cancelled() }}
+        env:
+          ARCHIVE: dist/deno-desktop-runtime-${{ needs.setup.outputs.version }}-${{ matrix.target }}-cef.${{ runner.os == 'Windows' && 'zip' || 'tar.gz' }}
+          BACKEND: cef
+          WORK_DIR: ${{ runner.temp }}/e2e-cef
+          E2E_OUT: ${{ runner.temp }}/e2e-out
+          E2E_AREAS: ${{ inputs.e2e_areas }}
+        run: bash .github/denext-runtime/e2e/e2e.sh
+
+      - uses: actions/upload-artifact@v7
+        if: ${{ !cancelled() }}
+        with:
+          name: e2e-${{ matrix.target }}
+          path: |
+            ${{ runner.temp }}/e2e-out/
+            ${{ runner.temp }}/e2e-webview/w/logs/
+            ${{ runner.temp }}/e2e-cef/w/logs/
+          retention-days: 14
+          if-no-files-found: warn
+
       - name: Summary
+        if: ${{ !cancelled() }}
         run: |
           {
             echo "### $TARGET"
             echo "- package webview: ok, package cef: ok"
             echo "- launch webview: ${{ steps.launch_webview.outcome }}"
             echo "- launch cef: ${{ steps.launch_cef.outcome }}"
+            echo "- e2e webview: ${{ steps.e2e_webview.outcome }}"
+            echo "- e2e cef: ${{ steps.e2e_cef.outcome }}"
             echo '```'
             cat dist/*.sha256
             echo '```'
