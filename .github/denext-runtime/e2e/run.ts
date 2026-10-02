@@ -34,6 +34,7 @@ const AREAS: Record<
   passkeys: () => import("./areas/passkeys.ts"),
   sld: () => import("./areas/sld.ts"),
   menus: () => import("./areas/menus.ts"),
+  asmt: () => import("./areas/asmt.ts"),
   update: () => import("./areas/update.ts"),
 };
 const AREA_TIMEOUT_MS = 20 * 60_000;

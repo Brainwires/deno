@@ -313,6 +313,14 @@ listed in the job summary, never skipped silently. Areas:
   app's toast activator, `windows/toast-click.ps1`), scheduled / listed /
   cancelled, a scheduled one's click as `notificationresponse`, and on
   Windows the cold-start click (COM starts the app).
+- **asmt** — `runOnMainThread` proven on the UI thread (the thread that
+  owns the windows, by the OS's own thread id) and not the JavaScript
+  thread, context / return values, `UnsafeFnPointer` / `UnsafeCallback`, 50
+  calls at once, argument refusals, `--allow-ffi`; `authSession`: argument
+  refusals, on macOS a real ephemeral `ASWebAuthenticationSession` against a
+  loopback identity provider ending at the callback, `busy`, and the anchor
+  window closing (`cancelled`); `not_supported` on Windows and Linux; neither
+  in workers.
 - **update** — full-app self-update with throwaway keys and a throwaway
   TLS CA: hostile manifests and archives refused with their codes and the
   install untouched, an unwritable install, 1.0.0 -> 2.0.0 relaunch and
@@ -330,6 +338,7 @@ What a hosted runner cannot do, reported `n/a` with the reason:
 | A notification click on Linux after the app exited | freedesktop servers send the click to the posting process only (`coldStart: false`) |
 | A dismissed toast on Windows, a live toast's click | the hosted session retires toasts within ~2 s; the click is then checked as a `notificationresponse` |
 | Key presses on macOS without an Accessibility grant | macOS refuses synthesized events (checked with `AXIsProcessTrusted`) |
+| A real OS auth session on Windows / Linux | they have no OS auth session (`not_supported` is checked) |
 | `.msi` on macOS / Linux | the stock CLI builds `.msi` only for Windows |
 | An unwritable install on Windows | the runner is an administrator |
 
@@ -338,7 +347,7 @@ fork's runtime; the root cause is in each case shown by the suite):
 
 | Failing check | Where | Cause |
 | --- | --- | --- |
-| origin: the page's WebSocket through the relay, a cross-origin fetch to loopback | CEF, every OS | Chromium 149's Local Network Access checks: a custom-scheme page is a "public" origin, so its requests to `127.0.0.1` wait for a permission CEF never grants. The same app launched with `--disable-features=LocalNetworkAccessChecks,LocalNetworkAccessChecksWebSockets` passes (the suite records that run as a note). Fix in laufey's CEF hosts: grant the permission to the app origin, or that switch. |
+| origin: the page's WebSocket through the relay, a cross-origin fetch to loopback | CEF, every OS | Chromium 149's Local Network Access checks: a custom-scheme page is a "public" origin, so its requests to `127.0.0.1` wait for a permission CEF never grants. The same app launched with `--disable-features=LocalNetworkAccessChecks,LocalNetworkAccessChecksWebSockets` passes (the suite records that run as a note). Fix (decided): laufey's CEF hosts grant local-network access to the app's own registered custom-scheme origin only; Local Network Access stays on for everything else. |
 | menus: the app hangs once a context menu is open | CEF, Windows | the runtime's event loop stops (not even a timer fires) from the moment `showContextMenu()` returns while `TrackPopupMenu`'s modal loop runs on CEF's UI thread; likely a synchronous call into that UI thread, whose CEF tasks don't run inside the nested loop. WebView2 is fine. |
 | menus: choosing a context-menu item from the keyboard | WebView2, Windows | `win32_menu::ShowContextMenu` doesn't make the owner window foreground before `TrackPopupMenu` (KB135788), so the menu may not get keyboard input. |
 | dnd: a file dialog closes on abort | Windows | in some runs `IFileDialog::Close` requested on laufey's I/O thread doesn't end the dialog (its window exists 0.2-0.4 s after it opens, the abort comes at 2 s, it is still open 15 s later), so the promise never settles. |
