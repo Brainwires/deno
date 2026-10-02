@@ -25,6 +25,8 @@
   },
   "excludes": [
     ".cargo_home",
+    "DENEXT.md",
+    ".github/workflows/denext_runtime.yml",
     ".git",
     "cli/tsc/*typescript.js",
     "cli/tsc/dts/lib.d.ts",

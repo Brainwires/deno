@@ -9439,14 +9439,10 @@ def456  other.zip
     // Registry: per scheme, exactly the key the runtime writes for itself,
     // under the install scope's root (-1), plus the `*` row that removes the
     // key on uninstall.
-    let mut registry: Vec<(
-      String,
-      i32,
-      String,
-      Option<String>,
-      Option<String>,
-      String,
-    )> = package
+    // (Registry, Root, Key, Name, Value, Component_)
+    type RegistryRow =
+      (String, i32, String, Option<String>, Option<String>, String);
+    let mut registry: Vec<RegistryRow> = package
       .select_rows(msi::Select::table("Registry"))
       .unwrap()
       .map(|r| {

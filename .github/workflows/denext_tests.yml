@@ -10,12 +10,15 @@
 # - lint:  tools/lint.js (clippy over the whole workspace with upstream's deny
 #          flags, dlint, the copyright and repo-hygiene checks), plus
 #          tools/format.js --check, tools/jsdoc_checker.js and cargo fmt.
-# - libs:  `cargo test --locked --lib` over upstream's crate list (every crate
-#          the fork touches is in it), plus the `#[ignore]`d LaunchServices
-#          scheme-registration test on the throwaway macOS runner.
-# - build: target/debug/{deno,denort,test_server}, as upstream's build job.
-# - unit / specs: `cargo test -p unit_tests --test unit` and
-#          `cargo test -p specs_tests --test specs` (2 shards) against them.
+# - per OS (denext_tests_os.yml), each OS on its own so one slow OS does not
+#   hold up the others' tests:
+#   - build: target/debug/{deno,denort,test_server}, as upstream's build job.
+#   - libs:  `cargo test --locked --lib` over upstream's crate list (every
+#            crate the fork touches is in it) against that test_server, plus
+#            the `#[ignore]`d LaunchServices scheme-registration test on the
+#            throwaway macOS runner.
+#   - unit / specs: `cargo test -p unit_tests --test unit` and
+#            `cargo test -p specs_tests --test specs` (2 shards) against them.
 #
 # The test harness asks Deno's "hashy" service whether a test input hash
 # already passed and PUTs one when it did (tests/util/lib/hash.rs). That is
@@ -26,11 +29,11 @@ name: denext tests
 on:
   push:
     branches:
-      - "denext/**"
-      - "ci/**"
+      - 'denext/**'
+      - 'ci/**'
   pull_request:
     branches:
-      - "denext/**"
+      - 'denext/**'
   workflow_dispatch:
 
 permissions:
@@ -42,10 +45,10 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  CARGO_INCREMENTAL: "0"
-  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_INCREMENTAL: '0'
+  CARGO_PROFILE_DEV_DEBUG: '0'
   RUST_BACKTRACE: full
-  RUST_LIB_BACKTRACE: "0"
+  RUST_LIB_BACKTRACE: '0'
   # The Deno that runs the repo's tooling scripts (format.js, lint.js, ...).
   TOOLS_DENO_VERSION: 2.9.7
 
@@ -89,166 +92,20 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: deno run --allow-write --allow-read --allow-run --allow-net --allow-env ./tools/lint.js
 
-  libs:
-    name: test libs / ${{ matrix.os }}
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 240
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [macos-14, windows-2022, ubuntu-22.04]
-    defaults:
-      run:
-        shell: bash
-    steps:
-      - name: Configure git
-        run: |
-          git config --global core.symlinks true
-          git config --global core.longpaths true
-      - uses: actions/checkout@v7
-        with:
-          fetch-depth: 1
-          submodules: false
-      - name: Clone submodule ./tests/util/std
-        run: git submodule update --init --recursive --depth=1 -- ./tests/util/std
-      - uses: ./.github/denext-tests/setup
-        with:
-          cache-key: libs
-      # Upstream's `Test libs` step, verbatim (v2.9.7 ci.generated.yml).
-      - name: Test libs
-        run: cargo test --locked --lib -p deno -p denort -p node_shim -p bsdiff_helper -p deno_lib -p denort_desktop -p deno_snapshots -p deno_bundle_runtime -p deno_cache -p deno_canvas -p deno_cron -p deno_crypto -p deno_fetch -p deno_ffi -p deno_fs -p deno_http -p deno_image -p deno_io -p deno_kv -p deno_napi -p napi_sym -p deno_net -p deno_node -p deno_node_crypto -p deno_node_sqlite -p denort_helper -p deno_signals -p deno_telemetry -p deno_url -p deno_web -p deno_webgpu -p deno_webidl -p deno_websocket -p deno_webstorage -p deno_cache_dir -p deno_cli_parser -p deno_config -p deno_crypto_provider -p deno_v8 -p deno_dotenv -p eszip -p deno_http_h1 -p deno_inspector_server -p deno_lockfile -p deno_maybe_sync -p napi_sys -p node_resolver -p deno_npm -p deno_npm_cache -p deno_npm_installer -p deno_npmrc -p deno_package_json -p deno_print -p deno_resolver -p deno_typescript_go_client_rust -p deno_runtime -p deno_features -p deno_permissions -p deno_subprocess_windows
-      # The fork's crates that upstream's list leaves out (ext/os, ext/process).
-      - name: Test libs (fork-touched crates outside upstream's list)
-        run: cargo test --locked --lib -p deno_os -p deno_process
-      # Registers a throwaway bundle with LaunchServices and checks the scheme
-      # resolves to it; `#[ignore]`d because it writes the user's LaunchServices
-      # database, which is exactly what a hosted macOS runner is for.
-      - name: LaunchServices scheme registration (ignored test, macOS)
-        if: runner.os == 'macOS'
-        run: cargo test --locked --lib -p denort_desktop -- --ignored --exact scheme_registration::tests::macos_register_bundle_with_launch_services
+  macos:
+    name: macos-14
+    uses: ./.github/workflows/denext_tests_os.yml
+    with:
+      os: macos-14
 
-  build:
-    name: build debug / ${{ matrix.os }}
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 240
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [macos-14, windows-2022, ubuntu-22.04]
-    defaults:
-      run:
-        shell: bash
-    steps:
-      - name: Configure git
-        run: |
-          git config --global core.symlinks true
-          git config --global core.longpaths true
-      - uses: actions/checkout@v7
-        with:
-          fetch-depth: 1
-          submodules: false
-      - name: Clone submodule ./tests/util/std
-        run: git submodule update --init --recursive --depth=1 -- ./tests/util/std
-      - uses: ./.github/denext-tests/setup
-        with:
-          cache-key: build
-      # Upstream's `Build debug` step, verbatim.
-      - name: Build debug
-        run: cargo build --locked -p deno -p denort -p test_server --bin deno --bin denort --bin test_server --features=deno/panic-trace
-      - name: Pack binaries
-        run: |
-          set -euo pipefail
-          mkdir -p out
-          if [ "${{ runner.os }}" = Windows ]; then ext=.exe; else ext=; fi
-          for b in deno denort test_server; do cp "target/debug/$b$ext" out/; done
-          tar -cf bins.tar -C out .
-          ls -la out
-      - uses: actions/upload-artifact@v7
-        with:
-          name: debug-bins-${{ matrix.os }}
-          path: bins.tar
-          retention-days: 3
+  windows:
+    name: windows-2022
+    uses: ./.github/workflows/denext_tests_os.yml
+    with:
+      os: windows-2022
 
-  test:
-    name: test ${{ matrix.suite }}${{ matrix.shard_label }} / ${{ matrix.os }}
-    needs: build
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 120
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [macos-14, windows-2022, ubuntu-22.04]
-        suite: [unit, specs]
-        shard: ["0", "1"]
-        exclude:
-          - suite: unit
-            shard: "1"
-        include:
-          - suite: unit
-            package: unit_tests
-            shard_total: ""
-            shard_label: ""
-          - suite: specs
-            package: specs_tests
-            shard_total: "2"
-          - suite: specs
-            shard: "0"
-            shard_label: " (1/2)"
-          - suite: specs
-            shard: "1"
-            shard_label: " (2/2)"
-    defaults:
-      run:
-        shell: bash
-    steps:
-      - name: Configure git
-        run: |
-          git config --global core.symlinks true
-          git config --global core.longpaths true
-      - uses: actions/checkout@v7
-        with:
-          fetch-depth: 1
-          submodules: false
-      - name: Clone submodule ./tests/util/std
-        run: git submodule update --init --recursive --depth=1 -- ./tests/util/std
-      - uses: ./.github/denext-tests/setup
-        with:
-          cache-key: test-${{ matrix.suite }}
-      - uses: actions/setup-node@v6
-        with:
-          node-version: 22
-      - uses: actions/download-artifact@v8
-        with:
-          name: debug-bins-${{ matrix.os }}
-      - name: Unpack binaries
-        run: |
-          set -euo pipefail
-          mkdir -p target/debug
-          tar -xf bins.tar -C target/debug
-          rm bins.tar
-          chmod +x target/debug/* || true
-          ls -la target/debug
-          target/debug/deno --version
-      - name: Build ffi (debug)
-        if: matrix.suite == 'specs'
-        run: cargo build -p test_ffi
-      # Upstream's `Test (debug)` step.
-      - name: Test (debug)
-        env:
-          CI_SHARD_INDEX: ${{ matrix.shard_total && matrix.shard || '' }}
-          CI_SHARD_TOTAL: ${{ matrix.shard_total }}
-        run: cargo test -p ${{ matrix.package }} --test ${{ matrix.suite }}
-      - name: Ensure no git changes
-        run: |
-          if [[ -n "$(git status --porcelain)" ]]; then
-            echo "::error::cargo test modified git-tracked files"
-            git status
-            exit 1
-          fi
-      - uses: actions/upload-artifact@v7
-        if: always()
-        with:
-          name: test-results-${{ matrix.os }}-${{ matrix.suite }}${{ matrix.shard_total && format('-shard-{0}', matrix.shard) || '' }}
-          path: target/test_results_${{ matrix.suite }}.json
-          if-no-files-found: ignore
-          retention-days: 7
+  linux:
+    name: ubuntu-22.04
+    uses: ./.github/workflows/denext_tests_os.yml
+    with:
+      os: ubuntu-22.04

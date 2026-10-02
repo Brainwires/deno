@@ -67,6 +67,9 @@ pub fn print_linker_flags(name: &str) {
       // debugging/diagnostics (only needed on panic/crash)
       "dbghelp",
       "psapi",
+      // Authenticode verification (only needed when a desktop app stages a
+      // full-app update; runtime/ops/desktop_update/oscheck.rs)
+      "wintrust",
     ];
     for dll in dlls {
       println!("cargo:rustc-link-arg-bin={name}=/delayload:{dll}.dll");
