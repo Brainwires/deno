@@ -97,18 +97,21 @@ jobs:
           chmod +x target/debug/* || true
           ls -la target/debug
           target/debug/deno --version
-      # Upstream's `Test libs` step, verbatim (v2.9.7 ci.generated.yml).
+      # Upstream's `Test libs` step (v2.9.7 ci.generated.yml), plus the two
+      # crates the fork touches that upstream's list leaves out (deno_os,
+      # deno_process). They are in the same invocation because on their own
+      # Cargo does not unify deno_v8's `v8` feature in, and deno_v8 then
+      # refuses to compile.
       - name: Test libs
-        run: cargo test --locked --lib -p deno -p denort -p node_shim -p bsdiff_helper -p deno_lib -p denort_desktop -p deno_snapshots -p deno_bundle_runtime -p deno_cache -p deno_canvas -p deno_cron -p deno_crypto -p deno_fetch -p deno_ffi -p deno_fs -p deno_http -p deno_image -p deno_io -p deno_kv -p deno_napi -p napi_sym -p deno_net -p deno_node -p deno_node_crypto -p deno_node_sqlite -p denort_helper -p deno_signals -p deno_telemetry -p deno_url -p deno_web -p deno_webgpu -p deno_webidl -p deno_websocket -p deno_webstorage -p deno_cache_dir -p deno_cli_parser -p deno_config -p deno_crypto_provider -p deno_v8 -p deno_dotenv -p eszip -p deno_http_h1 -p deno_inspector_server -p deno_lockfile -p deno_maybe_sync -p napi_sys -p node_resolver -p deno_npm -p deno_npm_cache -p deno_npm_installer -p deno_npmrc -p deno_package_json -p deno_print -p deno_resolver -p deno_typescript_go_client_rust -p deno_runtime -p deno_features -p deno_permissions -p deno_subprocess_windows
-      # The fork's crates that upstream's list leaves out (ext/os, ext/process).
-      - name: Test libs (fork-touched crates outside upstream's list)
-        run: cargo test --locked --lib -p deno_os -p deno_process
+        run: cargo test --locked --lib -p deno -p denort -p node_shim -p bsdiff_helper -p deno_lib -p denort_desktop -p deno_snapshots -p deno_bundle_runtime -p deno_cache -p deno_canvas -p deno_cron -p deno_crypto -p deno_fetch -p deno_ffi -p deno_fs -p deno_http -p deno_image -p deno_io -p deno_kv -p deno_napi -p napi_sym -p deno_net -p deno_node -p deno_node_crypto -p deno_node_sqlite -p denort_helper -p deno_signals -p deno_telemetry -p deno_url -p deno_web -p deno_webgpu -p deno_webidl -p deno_websocket -p deno_webstorage -p deno_cache_dir -p deno_cli_parser -p deno_config -p deno_crypto_provider -p deno_v8 -p deno_dotenv -p eszip -p deno_http_h1 -p deno_inspector_server -p deno_lockfile -p deno_maybe_sync -p napi_sys -p node_resolver -p deno_npm -p deno_npm_cache -p deno_npm_installer -p deno_npmrc -p deno_package_json -p deno_print -p deno_resolver -p deno_typescript_go_client_rust -p deno_runtime -p deno_features -p deno_permissions -p deno_subprocess_windows -p deno_os -p deno_process
       # Registers a throwaway bundle with LaunchServices and checks the scheme
       # resolves to it; `#[ignore]`d because it writes the user's LaunchServices
       # database, which is exactly what a hosted macOS runner is for.
       - name: LaunchServices scheme registration (ignored test, macOS)
         if: runner.os == 'macOS'
-        run: cargo test --locked --lib -p denort_desktop -- --ignored --exact scheme_registration::tests::macos_register_bundle_with_launch_services
+        # The same crate set as above (deno_v8 needs the feature set it brings
+        # in, and the build is reused); the filter selects the one test.
+        run: cargo test --locked --lib -p deno -p denort -p node_shim -p bsdiff_helper -p deno_lib -p denort_desktop -p deno_snapshots -p deno_bundle_runtime -p deno_cache -p deno_canvas -p deno_cron -p deno_crypto -p deno_fetch -p deno_ffi -p deno_fs -p deno_http -p deno_image -p deno_io -p deno_kv -p deno_napi -p napi_sym -p deno_net -p deno_node -p deno_node_crypto -p deno_node_sqlite -p denort_helper -p deno_signals -p deno_telemetry -p deno_url -p deno_web -p deno_webgpu -p deno_webidl -p deno_websocket -p deno_webstorage -p deno_cache_dir -p deno_cli_parser -p deno_config -p deno_crypto_provider -p deno_v8 -p deno_dotenv -p eszip -p deno_http_h1 -p deno_inspector_server -p deno_lockfile -p deno_maybe_sync -p napi_sys -p node_resolver -p deno_npm -p deno_npm_cache -p deno_npm_installer -p deno_npmrc -p deno_package_json -p deno_print -p deno_resolver -p deno_typescript_go_client_rust -p deno_runtime -p deno_features -p deno_permissions -p deno_subprocess_windows -p deno_os -p deno_process -- --ignored --exact scheme_registration::tests::macos_register_bundle_with_launch_services
 
   test:
     name: test ${{ matrix.suite }}${{ matrix.shard_label }}
