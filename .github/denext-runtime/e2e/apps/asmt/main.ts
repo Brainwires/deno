@@ -108,8 +108,16 @@ function startIdp(): string {
     for await (const conn of listener) {
       (async () => {
         const buf = new Uint8Array(8192);
-        const n = await conn.read(buf);
-        const head = new TextDecoder().decode(buf.subarray(0, n ?? 0));
+        // A session the app cancels (cancel()) or whose sheet closes can
+        // drop the connection mid-request: that is not a failure here.
+        const n = await conn.read(buf).catch(() => null);
+        if (n === null) {
+          try {
+            conn.close();
+          } catch { /* closed */ }
+          return;
+        }
+        const head = new TextDecoder().decode(buf.subarray(0, n));
         const path = head.split(" ")[1] ?? "/";
         const state = new URL(path, "http://x").searchParams.get("state");
         const res = path.startsWith("/redirect")

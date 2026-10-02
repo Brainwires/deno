@@ -7,6 +7,7 @@
 // deno-lint-ignore-file no-explicit-any
 
 import {
+  BrowserWindow,
   describeError,
   desktop,
   html,
