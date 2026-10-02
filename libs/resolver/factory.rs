@@ -561,6 +561,10 @@ impl<TSys: WorkspaceFactorySys> WorkspaceFactory<TSys> {
           npm_package_info_provider,
         )
         .await?
+        .map(|lockfile| match self.deno_dir() {
+          Ok(deno_dir) => lockfile.with_write_lock(deno_dir.root.clone()),
+          Err(_) => lockfile,
+        })
         .map(deno_maybe_sync::new_rc);
 
         Ok(maybe_lock_file)
