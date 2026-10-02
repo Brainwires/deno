@@ -42,4 +42,10 @@ console.log(
   "write:",
   code(() => ops.op_desktop_app_update_write(new Uint8Array(1))),
 );
-console.log("finish:", code(() => ops.op_desktop_app_update_finish()));
+// Async: the download's fsync and hash run off the JavaScript thread.
+try {
+  await ops.op_desktop_app_update_finish();
+  console.log("finish: did not throw");
+} catch (e) {
+  console.log("finish:", e.message.split(":")[0]);
+}
