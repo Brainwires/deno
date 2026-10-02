@@ -151,6 +151,9 @@ impl deno_cache_dir::file_fetcher::HttpClient for HttpClientAdapter {
       }
     }
 
+    // Only one process downloads into the package cache at a time. This does
+    // not wait on processes that only read the cache.
+    let _download_lock = crate::cache::lock::lock_download().await;
     let mut maybe_progress_guard = None;
     if let Some(pb) = self.progress_bar.as_ref() {
       maybe_progress_guard = Some(pb.update(url.as_str()));

@@ -28,10 +28,12 @@
       // use a new dir to avoid creating the old one
       "DENO_DIR": "$PWD/other"
     },
+    // everything is removed except the lock files, which other processes
+    // may be waiting on
     "args": [
       "eval",
-      "try { Deno.statSync('./deno_dir') } catch (_) { console.log(true) }"
+      "console.log(Array.from(Deno.readDirSync('./deno_dir'), (e) => e.name).join(','))"
     ],
-    "output": "true\n"
+    "output": "locks\n"
   }]
 }

@@ -131,6 +131,9 @@ impl deno_npm_cache::NpmCacheHttpClient for CliNpmCacheHttpClient {
     maybe_etag: Option<String>,
     maybe_registry_config: Option<&RegistryConfig>,
   ) -> Result<NpmCacheHttpClientResponse, deno_npm_cache::DownloadError> {
+    // Only one process downloads into the package cache at a time. This does
+    // not wait on processes that only read the cache.
+    let _download_lock = crate::cache::lock::lock_download().await;
     let guard = self.progress_bar.update(url.as_str());
     let client = self
       .get_or_create_http_client(maybe_registry_config)

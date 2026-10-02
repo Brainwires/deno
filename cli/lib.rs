@@ -37,6 +37,7 @@ use std::future::Future;
 use std::io::IsTerminal;
 use std::io::Write as _;
 use std::ops::Deref;
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -126,6 +127,8 @@ async fn run_subcommand(
   unconfigured_runtime: Option<UnconfiguredRuntime>,
   roots: LibWorkerFactoryRoots,
 ) -> Result<i32, AnyError> {
+  // held until the subcommand finishes; see `cache::lock`
+  let _package_cache_lock = init_package_cache_lock(&flags);
   let handle = match flags.subcommand.clone() {
     DenoSubcommand::Add(add_flags) => spawn_subcommand(async {
       tools::pm::add(Arc::new(flags), add_flags, tools::pm::AddCommandName::Add)
@@ -199,6 +202,22 @@ async fn run_subcommand(
       Box::pin(tools::desktop::desktop(flags, desktop_flags)).await
     }),
     DenoSubcommand::Coverage(coverage_flags) => spawn_subcommand(async move {
+      // wait for any `deno test --coverage` still writing these directories
+      let cwd =
+        util::env::resolve_cwd_or_fallback(flags.initial_cwd.as_deref());
+      let _coverage_locks = coverage_flags
+        .files
+        .include
+        .iter()
+        .filter(|dir| !is_coverage_dir_inherited(&cwd, dir))
+        .filter_map(|dir| {
+          cache::lock::lock_artifact_shared(
+            &cwd,
+            Path::new(dir),
+            "coverage directory",
+          )
+        })
+        .collect::<Vec<_>>();
       let reporter =
         crate::tools::coverage::reporter::create(coverage_flags.r#type.clone());
       tools::coverage::cover_files(
@@ -455,7 +474,20 @@ async fn run_subcommand(
     }),
     DenoSubcommand::Test(test_flags) => {
       spawn_subcommand(async {
+        // Held for the whole run, so another `deno test --coverage` on the
+        // same directory neither clears it while this one writes to it nor
+        // reports on a half-written one.
+        let mut _coverage_lock = None;
         if let Some(ref coverage_dir) = test_flags.coverage_dir {
+          let cwd =
+            util::env::resolve_cwd_or_fallback(flags.initial_cwd.as_deref());
+          if !is_coverage_dir_inherited(&cwd, coverage_dir) {
+            _coverage_lock = cache::lock::lock_artifact(
+              &cwd,
+              Path::new(coverage_dir),
+              "coverage directory",
+            );
+          }
           if !test_flags.coverage_raw_data_only || test_flags.clean {
             // Keeps coverage_dir contents only when --coverage-raw-data-only is set and --clean is not set
             let _ = std::fs::remove_dir_all(coverage_dir);
@@ -554,6 +586,54 @@ async fn run_subcommand(
   };
 
   handle.await?
+}
+
+/// Whether `coverage_dir` is the one a parent `deno test --coverage` passed
+/// down through `DENO_COVERAGE_DIR`. That parent holds the directory's lock,
+/// so a nested `deno test` taking it too would wait forever.
+fn is_coverage_dir_inherited(cwd: &Path, coverage_dir: &str) -> bool {
+  let Some(inherited) = env::var_os("DENO_COVERAGE_DIR") else {
+    return false;
+  };
+  match (
+    canonicalize_path(Path::new(&inherited)),
+    canonicalize_path(&cwd.join(coverage_dir)),
+  ) {
+    (Ok(inherited), Ok(coverage_dir)) => inherited == coverage_dir,
+    _ => false,
+  }
+}
+
+/// Sets up the package cache locker for the `DENO_DIR` this process uses and
+/// takes the lock the subcommand holds for its whole run, if any.
+fn init_package_cache_lock(
+  flags: &Flags,
+) -> Option<cache::lock::PackageCacheLockGuard> {
+  use sys_traits::FsMetadata;
+
+  let sys = sys::CliSys::default();
+  let deno_dir_root = match deno_cache_dir::resolve_deno_dir(
+    &sys,
+    deno_cache_dir::ResolveDenoDirOptions {
+      maybe_initial_cwd: flags.initial_cwd.as_deref(),
+      maybe_custom_root: flags.internal.cache_path.as_deref(),
+    },
+  ) {
+    Ok(root) => root,
+    Err(err) => {
+      log::debug!("Not locking the package cache: {err:#}");
+      return None;
+    }
+  };
+  cache::lock::init(&deno_dir_root);
+  let mode = cache::lock::subcommand_lock_mode(flags)?;
+  if mode == cache::lock::CacheLockMode::MutateExclusive
+    && !sys.fs_exists_no_err(&deno_dir_root)
+  {
+    // nothing to mutate, and locking would create the directory
+    return None;
+  }
+  cache::lock::lock_for_subcommand(mode)
 }
 
 /// Determines whether a error encountered during `deno run`
