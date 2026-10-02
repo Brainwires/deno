@@ -159,6 +159,8 @@ pub trait LockfileSys:
   deno_path_util::fs::AtomicWriteFileWithRetriesSys
   + sys_traits::FsRead
   + sys_traits::FsCanonicalize
+  + sys_traits::FsOpen
+  + sys_traits::FsCreateDirAll
   + std::fmt::Debug
 {
 }
@@ -215,9 +217,22 @@ pub struct LockfileLock<TSys: LockfileSys> {
   pub filename: PathBuf,
   frozen: bool,
   skip_write: bool,
+  /// The lockfile's text on disk as of the last read or write (`None` when
+  /// there was no file), to tell whether another process wrote it since.
+  disk_text: Mutex<Option<String>>,
+  /// The `DENO_DIR` whose lock files guard writes to the lockfile. See
+  /// `deno_cache_dir::cache_lock`.
+  write_lock_deno_dir: Option<PathBuf>,
 }
 
 impl<TSys: LockfileSys> LockfileLock<TSys> {
+  /// Serializes writes to the lockfile with other processes through a lock
+  /// file in this `DENO_DIR`, and merges in what they wrote in the meantime.
+  pub fn with_write_lock(mut self, deno_dir_root: PathBuf) -> Self {
+    self.write_lock_deno_dir = Some(deno_dir_root);
+    self
+  }
+
   /// Get the inner deno_lockfile::Lockfile.
   pub fn lock(&self) -> Guard<'_, Lockfile> {
     Guard {
@@ -269,9 +284,9 @@ impl<TSys: LockfileSys> LockfileLock<TSys> {
       .error_if_changed()
       .map_err(LockfileWriteError::Changed)?;
     let mut lockfile = self.lockfile.lock();
-    let Some(bytes) = lockfile.resolve_write_bytes() else {
+    if !lockfile.has_content_changed && !lockfile.overwrite {
       return Ok(()); // nothing to do
-    };
+    }
     // If the lockfile path is a symlink, resolve it to its target so the
     // atomic write below replaces the target file rather than clobbering the
     // symlink with a freshly created regular file. This matches how the
@@ -284,13 +299,66 @@ impl<TSys: LockfileSys> LockfileLock<TSys> {
     } else {
       lockfile.filename.clone()
     };
+    // Read, merge and write under an exclusive lock, so that concurrent
+    // processes each add their entries instead of the last writer dropping
+    // the others'.
+    let _write_lock = self
+      .write_lock_deno_dir
+      .as_ref()
+      .map(|deno_dir_root| self.lock_for_write(deno_dir_root, &write_path));
+    let mut disk_text = self.disk_text.lock();
+    if !lockfile.overwrite {
+      match self.sys.fs_read_to_string(&write_path) {
+        Ok(current) => {
+          if disk_text.as_deref() != Some(current.as_ref()) {
+            lockfile.merge_concurrent_write(&current);
+          }
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => {
+          log::debug!(
+            "Failed reading {} before writing it. {:#}",
+            write_path.display(),
+            err
+          );
+        }
+      }
+    }
+    let Some(bytes) = lockfile.resolve_write_bytes() else {
+      return Ok(()); // nothing to do
+    };
     // do an atomic write to reduce the chance of multiple deno
     // processes corrupting the file
     const CACHE_PERM: u32 = 0o644;
     atomic_write_file_with_retries(&self.sys, &write_path, &bytes, CACHE_PERM)
       .map_err(LockfileWriteError::Io)?;
     lockfile.has_content_changed = false;
+    *disk_text = String::from_utf8(bytes).ok();
     Ok(())
+  }
+
+  fn lock_for_write(
+    &self,
+    deno_dir_root: &std::path::Path,
+    write_path: &std::path::Path,
+  ) -> deno_cache_dir::cache_lock::PathLockGuard<TSys::File> {
+    use deno_cache_dir::cache_lock;
+    // `write_path` is absolute, so the cwd is never used
+    let target =
+      cache_lock::normalize_lock_target(&self.sys, write_path, write_path);
+    cache_lock::lock_path(
+      &self.sys,
+      &cache_lock::path_lock_file(deno_dir_root, &target),
+      cache_lock::FileLockKind::Exclusive,
+      &format!("lockfile {}", write_path.display()),
+      &|description| {
+        log::info!(
+          "{} waiting for file lock on {}",
+          deno_terminal::colors::cyan("Blocking"),
+          description
+        );
+      },
+    )
   }
 
   pub async fn discover(
@@ -513,12 +581,14 @@ impl<TSys: LockfileSys> LockfileLock<TSys> {
     opts: LockfileReadFromPathOptions,
     api: &dyn deno_lockfile::NpmPackageInfoProvider,
   ) -> Result<LockfileLock<TSys>, AnyError> {
+    let mut disk_text = None;
     let lockfile = match sys.fs_read_to_string(&opts.file_path) {
       Ok(text) => {
+        let text = disk_text.insert(text.into_owned());
         Lockfile::new(
           deno_lockfile::NewLockfileOptions {
             file_path: opts.file_path,
-            content: &text,
+            content: text.as_str(),
             overwrite: false,
           },
           api,
@@ -551,6 +621,8 @@ impl<TSys: LockfileSys> LockfileLock<TSys> {
       lockfile: Mutex::new(lockfile),
       frozen: opts.frozen,
       skip_write: opts.skip_write,
+      disk_text: Mutex::new(disk_text),
+      write_lock_deno_dir: None,
     })
   }
 

@@ -1070,6 +1070,34 @@ impl Lockfile {
     }
   }
 
+  /// Merges in the entries of `disk_content`, the current text of the
+  /// lockfile on disk, when another process wrote it after this lockfile
+  /// was read. Without this, the last of several concurrent writers would
+  /// drop the entries the others added.
+  ///
+  /// The merge is the same one used for git merge conflicts: the package,
+  /// remote and redirect entries are unioned, a version requirement keeps
+  /// the higher resolved version, and the workspace config of `self` wins.
+  ///
+  /// Only the current format (version 5) is merged, since that is what any
+  /// concurrent Deno writes. Returns `false`, leaving `self` untouched, when
+  /// `disk_content` is not a version 5 lockfile.
+  pub fn merge_concurrent_write(&mut self, disk_content: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(disk_content)
+    else {
+      return false;
+    };
+    if value.get("version").and_then(|v| v.as_str()) != Some("5") {
+      return false;
+    }
+    let Ok(theirs) = LockfileContent::from_json(value) else {
+      return false;
+    };
+    let ours = std::mem::take(&mut self.content);
+    self.content = LockfileContent::merge_conflict_sides(ours, theirs);
+    true
+  }
+
   /// Gets the bytes that should be written to the disk.
   ///
   /// Ideally when the caller should use an "atomic write"
@@ -1490,6 +1518,44 @@ mod tests {
     assert_eq!(npm.len(), 2);
     assert!(npm.contains_key("chalk@5.3.0"));
     assert!(npm.contains_key("picocolors@1.0.0"));
+  }
+
+  #[test]
+  fn merges_concurrent_write() {
+    // what this process read at startup
+    let mut lockfile = new_lockfile(NewLockfileOptions {
+      file_path: PathBuf::from("/foo"),
+      content: r#"{
+  "version": "5",
+  "remote": {
+    "https://deno.land/std@0.71.0/a.ts": "aaa"
+  }
+}"#,
+      overwrite: false,
+    })
+    .unwrap();
+    lockfile.insert_remote(
+      "https://deno.land/std@0.71.0/ours.ts".to_string(),
+      "ours".to_string(),
+    );
+    // another process wrote this in the meantime
+    let disk = r#"{
+  "version": "5",
+  "remote": {
+    "https://deno.land/std@0.71.0/a.ts": "aaa",
+    "https://deno.land/std@0.71.0/theirs.ts": "theirs"
+  }
+}"#;
+    assert!(lockfile.merge_concurrent_write(disk));
+    let remote = lockfile.remote();
+    assert_eq!(remote.len(), 3);
+    assert_eq!(remote["https://deno.land/std@0.71.0/ours.ts"], "ours");
+    assert_eq!(remote["https://deno.land/std@0.71.0/theirs.ts"], "theirs");
+
+    // anything but a v5 lockfile is left alone
+    assert!(!lockfile.merge_concurrent_write("{ not json"));
+    assert!(!lockfile.merge_concurrent_write(r#"{ "version": "4" }"#));
+    assert_eq!(lockfile.remote().len(), 3);
   }
 
   #[test]
