@@ -31,6 +31,9 @@ pub const DESKTOP_JS: &str = r#"
     op_desktop_register_scheme,
     op_desktop_passkey_capabilities,
     op_desktop_passkey_request,
+    op_desktop_auth_session_capabilities,
+    op_desktop_auth_session_start,
+    op_desktop_run_on_main_thread,
     op_desktop_resolve_bind_call,
     op_desktop_reject_bind_call,
     op_desktop_alert,
@@ -1212,6 +1215,109 @@ pub const DESKTOP_JS: &str = r#"
     writable: false,
     configurable: true,
     enumerable: true,
+  });
+
+  // OS auth sessions (laufey API 42): ASWebAuthenticationSession on macOS,
+  // a sign-in that ends at a callback URL with a real "cancelled" when the
+  // user closes the sheet. Windows and Linux have none (RFC 8252: the system
+  // browser), so start() rejects with code "not_supported" there and the
+  // caller falls back. Rejections are AuthSessionErrors with a `code`.
+  function authSessionError(code, message) {
+    const error = new Error(message);
+    error.name = "AuthSessionError";
+    error.code = code;
+    return error;
+  }
+  const authSession = Object.freeze({
+    capabilities: function capabilities() {
+      return op_desktop_auth_session_capabilities();
+    },
+    start: async function start(options) {
+      if (options === null || typeof options !== "object") {
+        throw new TypeError("options must be an object");
+      }
+      if (typeof options.url !== "string") {
+        throw new TypeError("options.url must be a string");
+      }
+      const scheme = options.callbackScheme;
+      const callbackUrl = options.callbackUrl;
+      if ((scheme === undefined) === (callbackUrl === undefined)) {
+        throw new TypeError(
+          "pass exactly one of options.callbackScheme and options.callbackUrl",
+        );
+      }
+      const callback = scheme !== undefined ? scheme : callbackUrl;
+      if (typeof callback !== "string") {
+        throw new TypeError(
+          scheme !== undefined
+            ? "options.callbackScheme must be a string"
+            : "options.callbackUrl must be a string",
+        );
+      }
+      if (
+        callbackUrl !== undefined &&
+        !callbackUrl.toLowerCase().startsWith("https://")
+      ) {
+        throw new TypeError("options.callbackUrl must be an https URL");
+      }
+      if (scheme !== undefined && scheme.includes(":")) {
+        throw new TypeError(
+          "options.callbackScheme is a scheme name (\"myapp\"), not a URL",
+        );
+      }
+      const ephemeral = options.ephemeral === undefined
+        ? false
+        : options.ephemeral;
+      if (typeof ephemeral !== "boolean") {
+        throw new TypeError("options.ephemeral must be a boolean");
+      }
+      const outcome = await op_desktop_auth_session_start(
+        passkeyWindowId(options),
+        options.url,
+        callback,
+        ephemeral,
+      );
+      if (outcome.ok) return { url: outcome.url };
+      throw authSessionError(outcome.code, outcome.message);
+    },
+  });
+  Object.defineProperty(desktop, "authSession", {
+    value: authSession,
+    writable: false,
+    configurable: true,
+    enumerable: true,
+  });
+
+  // Run native code on the app's UI thread (laufey API 42): AppKit, Win32
+  // and GTK objects belong to it. `fn` is a C function `void* (*)(void*)`:
+  // a Deno.UnsafeFnPointer, a Deno.UnsafeCallback or a pointer value.
+  // Full trust, so it needs --allow-ffi. Resolves with the return value as a
+  // bigint; rejects once the app is quitting (the function was not called).
+  function nativeFunctionPointer(fn) {
+    if (
+      fn !== null && typeof fn === "object" &&
+      (fn instanceof Deno.UnsafeFnPointer || fn instanceof Deno.UnsafeCallback)
+    ) {
+      return fn.pointer;
+    }
+    return fn;
+  }
+  Object.defineProperty(desktop, "runOnMainThread", {
+    value: async function runOnMainThread(fn, context = null) {
+      const pointer = nativeFunctionPointer(fn);
+      if (pointer === null || pointer === undefined) {
+        throw new TypeError(
+          "fn must be a Deno.UnsafeFnPointer, a Deno.UnsafeCallback or a non-null pointer",
+        );
+      }
+      if (context !== null && typeof context !== "object") {
+        throw new TypeError("context must be a pointer value or null");
+      }
+      return BigInt(await op_desktop_run_on_main_thread(pointer, context));
+    },
+    writable: true,
+    configurable: true,
+    enumerable: false,
   });
 
   // Native file dialogs (laufey API 39): the OS's own open / save / folder
@@ -3337,6 +3443,34 @@ mod tests {
     // The window defaults to 0 (focused); a BrowserWindow gives its id.
     assert!(DESKTOP_JS.contains("return 0; // focused window"));
     assert!(DESKTOP_JS.contains("return target.windowId;"));
+  }
+
+  #[test]
+  fn desktop_js_installs_auth_session_and_main_thread() {
+    assert!(
+      DESKTOP_JS.contains(r#"Object.defineProperty(desktop, "authSession""#)
+    );
+    assert!(DESKTOP_JS.contains("op_desktop_auth_session_capabilities()"));
+    // Exactly one callback; an error outcome becomes an AuthSessionError
+    // with its code; the window option is shared with passkeys.
+    assert!(DESKTOP_JS.contains(
+      "(scheme === undefined) === (callbackUrl === undefined)"
+    ));
+    assert!(DESKTOP_JS.contains("error.name = \"AuthSessionError\";"));
+    assert!(
+      DESKTOP_JS.contains("throw authSessionError(outcome.code, outcome.message);")
+    );
+    assert!(DESKTOP_JS.contains(
+      "op_desktop_auth_session_start(\n        passkeyWindowId(options),"
+    ));
+    // runOnMainThread takes FFI pointers, resolves with a bigint.
+    assert!(
+      DESKTOP_JS.contains(r#"Object.defineProperty(desktop, "runOnMainThread""#)
+    );
+    assert!(DESKTOP_JS.contains("fn instanceof Deno.UnsafeFnPointer"));
+    assert!(DESKTOP_JS.contains(
+      "return BigInt(await op_desktop_run_on_main_thread(pointer, context));"
+    ));
   }
 
   #[test]

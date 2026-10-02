@@ -88,6 +88,76 @@ impl deno_runtime::ops::desktop::DesktopPasskeys for LaufeyPasskeys {
   }
 }
 
+/// `Deno.desktop.authSession` over laufey's auth sessions (API 42):
+/// `ASWebAuthenticationSession` on macOS, not_supported elsewhere (RFC 8252:
+/// the system browser). See laufey's docs/auth-session.md.
+struct LaufeyAuthSession;
+
+impl deno_runtime::ops::desktop::DesktopAuthSession for LaufeyAuthSession {
+  fn capabilities(
+    &self,
+  ) -> deno_runtime::ops::desktop::AuthSessionCapabilitiesInfo {
+    let caps = laufey::auth_session_capabilities();
+    deno_runtime::ops::desktop::AuthSessionCapabilitiesInfo {
+      supported: caps.supported,
+      ephemeral: caps.ephemeral,
+      https_callback: caps.https_callback,
+    }
+  }
+
+  fn start(
+    &self,
+    window_id: u32,
+    url: String,
+    callback: String,
+    ephemeral: bool,
+  ) -> std::pin::Pin<
+    Box<
+      dyn std::future::Future<
+          Output = deno_runtime::ops::desktop::AuthSessionOutcome,
+        > + Send,
+    >,
+  > {
+    use deno_runtime::ops::desktop::AuthSessionOutcome;
+    let pending =
+      laufey::auth_session_start(window_id, &url, &callback, ephemeral);
+    Box::pin(async move {
+      match pending.await {
+        Ok(url) => AuthSessionOutcome::success(url),
+        Err(e) => AuthSessionOutcome::error(e.kind.code(), e.message),
+      }
+    })
+  }
+}
+
+/// `Deno.desktop.runOnMainThread` over laufey's `dispatch_ui_task` (API 42):
+/// the function runs on the UI thread, or the call rejects once the event
+/// loop has ended (never hangs).
+struct LaufeyMainThread;
+
+impl deno_runtime::ops::desktop::DesktopMainThread for LaufeyMainThread {
+  unsafe fn call(
+    &self,
+    function: usize,
+    context: usize,
+  ) -> std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<usize, String>> + Send>,
+  > {
+    let pending = laufey::spawn_on_ui_thread(move || {
+      // SAFETY: the op checked --allow-ffi and a non-null pointer; the caller
+      // vouches for the signature (see DesktopMainThread::call).
+      let f: unsafe extern "C" fn(
+        *mut std::ffi::c_void,
+      ) -> *mut std::ffi::c_void =
+        unsafe { std::mem::transmute(function) };
+      // SAFETY: as above; this runs on the UI thread, where the caller asked
+      // for it to run.
+      unsafe { f(context as *mut std::ffi::c_void) as usize }
+    });
+    Box::pin(async move { pending.await.map_err(|e| e.to_string()) })
+  }
+}
+
 /// `Deno.desktop.launchAtLogin` state names (see
 /// `deno_runtime::ops::desktop::LOGIN_ITEM_STATES`).
 fn login_item_state_str(state: laufey::LoginItemState) -> &'static str {
@@ -2964,6 +3034,14 @@ async fn run_desktop(
       // workers).
       state.put::<Arc<dyn deno_runtime::ops::desktop::DesktopPasskeys>>(
         Arc::new(LaufeyPasskeys),
+      );
+      // Deno.desktop.authSession and Deno.desktop.runOnMainThread (main
+      // scope only, like the passkey ops).
+      state.put::<Arc<dyn deno_runtime::ops::desktop::DesktopAuthSession>>(
+        Arc::new(LaufeyAuthSession),
+      );
+      state.put::<Arc<dyn deno_runtime::ops::desktop::DesktopMainThread>>(
+        Arc::new(LaufeyMainThread),
       );
 
       // Create the initial window (hidden) and wire up event handlers. It is

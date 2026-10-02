@@ -2071,6 +2071,145 @@ declare namespace Deno {
       ): Promise<string>;
     };
 
+    /** What {@linkcode Deno.desktop.authSession.capabilities} reports. */
+    export interface AuthSessionCapabilities {
+      /** An OS auth session exists: macOS 10.15+ (`ASWebAuthenticationSession`).
+       * `false` on Windows and Linux. */
+      supported: boolean;
+      /** `ephemeral: true` is honored (macOS). */
+      ephemeral: boolean;
+      /** `callbackUrl` (an https callback) works: macOS 14.4+. */
+      httpsCallback: boolean;
+    }
+
+    /** Options of {@linkcode Deno.desktop.authSession.start}. Exactly one of
+     * `callbackScheme` and `callbackUrl`. */
+    export interface AuthSessionStartOptions {
+      /** The sign-in page (http or https; percent-encode anything outside
+       * printable ASCII), e.g. the provider's authorization URL with its
+       * PKCE challenge and `state`. */
+      url: string;
+      /** The custom scheme the sign-in ends at (`"myapp"`, no `:`): the
+       * first navigation to `myapp:…` completes the session. Not `http`,
+       * `https`, `file`, `about`, `data`, `javascript`, `blob`, `ws`, `wss`. */
+      callbackScheme?: string;
+      /** An https callback (`"https://example.com/auth/done"`, no port,
+       * query or fragment): a navigation to that host and path completes the
+       * session. macOS 14.4+, and the app needs the host as an associated
+       * domain. */
+      callbackUrl?: string;
+      /** A private browser session: no cookies shared with the browser, and
+       * no "“App” Wants to Use “example.com” to Sign In" prompt. Default
+       * `false`. */
+      ephemeral?: boolean;
+      /** The window the sheet is anchored to. Defaults to the key window (or
+       * the app's first visible window); with no window the OS shows the
+       * sheet on a window of its own. */
+      // deno-lint-ignore no-explicit-any
+      window?: BrowserWindow<any> | number;
+    }
+
+    /** The `code` of an {@linkcode AuthSessionError}. */
+    export type AuthSessionErrorCode =
+      | "cancelled"
+      | "not_supported"
+      | "invalid"
+      | "busy"
+      | "failed";
+
+    /** How {@linkcode Deno.desktop.authSession.start} rejects. */
+    export interface AuthSessionError extends Error {
+      name: "AuthSessionError";
+      /**
+       * - `cancelled`: the user closed the sheet or declined the prompt, the
+       *   anchor window closed, or the app is quitting.
+       * - `not_supported`: no OS auth session (Windows, Linux), or an https
+       *   callback before macOS 14.4.
+       * - `invalid`: a bad `url`, callback or window.
+       * - `busy`: another session is in progress (one at a time per app).
+       * - `failed`: the OS refused or failed (`message` says why).
+       */
+      code: AuthSessionErrorCode;
+    }
+
+    /**
+     * OS auth sessions: a sign-in in the user's browser that ends at a
+     * callback URL (RFC 8252, "OAuth 2.0 for Native Apps").
+     *
+     * - **macOS** (10.15+): `ASWebAuthenticationSession`, a sheet on the
+     *   app's window backed by Safari (or the default browser when it
+     *   supports it). Closing the sheet rejects with `cancelled`.
+     * - **Windows, Linux**: the OS has no equivalent; `capabilities()`
+     *   reports none and `start()` rejects with `not_supported`. RFC 8252
+     *   says to open the system browser and receive the redirect through a
+     *   loopback listener or a claimed URL scheme (see
+     *   {@linkcode Deno.desktop.registerScheme} and the `openurl` event);
+     *   the browser gives no signal when its tab is closed, so keep a
+     *   timeout and an in-app cancel button there.
+     *
+     * `start()` resolves with the full callback URL. Checking `state` and
+     * redeeming the code with PKCE are the caller's job. Nothing is logged.
+     *
+     * ```ts
+     * const caps = await Deno.desktop.authSession.capabilities();
+     * if (caps.supported) {
+     *   const { url } = await Deno.desktop.authSession.start({
+     *     url: authorizeUrl,
+     *     callbackScheme: "myapp",
+     *     ephemeral: true,
+     *   });
+     *   const code = new URL(url).searchParams.get("code");
+     * }
+     * ```
+     *
+     * Not available in workers.
+     *
+     * @category Desktop
+     * @experimental
+     */
+    export const authSession: {
+      /** What this platform supports. */
+      capabilities(): AuthSessionCapabilities;
+      /** Run a sign-in; resolves with the callback URL, rejects with an
+       * {@linkcode AuthSessionError}. */
+      start(options: AuthSessionStartOptions): Promise<{ url: string }>;
+    };
+
+    /**
+     * Call a native function on the app's UI thread (the thread AppKit,
+     * Win32 windows and GTK objects belong to: the process main thread with
+     * the WebView backends, CEF's UI thread), and resolve with its return
+     * value.
+     *
+     * `fn` is a C function `void* fn(void* context)`: a
+     * `Deno.UnsafeFnPointer`, a `Deno.UnsafeCallback`, or a pointer value
+     * (e.g. from `Deno.dlopen(...).symbols` through
+     * `Deno.UnsafePointer.of`, or an extension's own function). It is called
+     * with `context` (default `null`); its pointer-sized return value is
+     * resolved as an unsigned bigint (meaningless for a `void` function).
+     * The call is queued behind the UI work already posted and never runs
+     * on the calling thread.
+     *
+     * **Full trust**: this is FFI, so it needs `--allow-ffi`, and a wrong
+     * pointer or signature crashes the app. A `Deno.UnsafeCallback` does not
+     * run JavaScript on the UI thread: the UI thread waits while the callback
+     * runs on the JavaScript thread, so it must not wait for the UI thread
+     * itself.
+     *
+     * Rejects without calling `fn` once the app is quitting (the UI thread's
+     * event loop has ended), so a call never hangs.
+     *
+     * Not available in workers.
+     *
+     * @category Desktop
+     * @experimental
+     */
+    export function runOnMainThread(
+      // deno-lint-ignore no-explicit-any
+      fn: UnsafeFnPointer<any> | UnsafeCallback<any> | PointerObject,
+      context?: PointerValue,
+    ): Promise<bigint>;
+
     /** Why a {@linkcode Deno.desktop.updater} step refused. */
     export type AppUpdateErrorCode =
       | "not_configured"

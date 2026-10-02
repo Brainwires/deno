@@ -913,6 +913,99 @@ pub trait DesktopPasskeys: Send + Sync + 'static {
 /// laufey's own not_supported answer).
 pub const PASSKEY_NOT_SUPPORTED_ENVELOPE: &str = r#"{"ok":false,"error":{"code":"not_supported","message":"Native passkeys are not supported on this platform."}}"#;
 
+/// What `Deno.desktop.authSession.capabilities()` resolves with.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AuthSessionCapabilitiesInfo {
+  /// An OS auth session exists (macOS 10.15+).
+  pub supported: bool,
+  /// `ephemeral: true` is honored.
+  pub ephemeral: bool,
+  /// An https callback URL works (macOS 14.4+, with an associated domain).
+  pub https_callback: bool,
+}
+
+/// How a `Deno.desktop.authSession.start()` ended: the callback URL, or an
+/// error `code` (`cancelled`, `not_supported`, `invalid`, `busy`, `failed`)
+/// and `message`, which the JS side turns into a rejection.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AuthSessionOutcome {
+  pub ok: bool,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub url: Option<String>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub code: Option<String>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub message: Option<String>,
+}
+
+impl AuthSessionOutcome {
+  pub fn success(url: String) -> Self {
+    Self {
+      ok: true,
+      url: Some(url),
+      code: None,
+      message: None,
+    }
+  }
+
+  pub fn error(code: &str, message: impl Into<String>) -> Self {
+    Self {
+      ok: false,
+      url: None,
+      code: Some(code.to_string()),
+      message: Some(message.into()),
+    }
+  }
+}
+
+/// The message a runtime without an OS auth session answers with.
+pub const AUTH_SESSION_NOT_SUPPORTED_MESSAGE: &str = "this platform has no OS auth session; open the system browser and receive the redirect through a loopback or custom-scheme listener (RFC 8252)";
+
+/// OS auth sessions (`ASWebAuthenticationSession` on macOS), behind
+/// `Deno.desktop.authSession`. Implemented by the desktop runtime
+/// (denort_desktop, over laufey), which puts an `Arc<dyn DesktopAuthSession>`
+/// in the op state.
+pub trait DesktopAuthSession: Send + Sync + 'static {
+  fn capabilities(&self) -> AuthSessionCapabilitiesInfo;
+  /// Start a session at `url` ending at `callback` (a custom scheme or an
+  /// https URL), anchored to `window_id` (0: the key window). The session
+  /// starts when this is called; the future never fails.
+  fn start(
+    &self,
+    window_id: u32,
+    url: String,
+    callback: String,
+    ephemeral: bool,
+  ) -> std::pin::Pin<
+    Box<dyn std::future::Future<Output = AuthSessionOutcome> + Send>,
+  >;
+}
+
+/// Running native code on the app's UI thread, behind
+/// `Deno.desktop.runOnMainThread`. Implemented by the desktop runtime (over
+/// laufey's `dispatch_ui_task`), which puts an `Arc<dyn DesktopMainThread>`
+/// in the op state.
+pub trait DesktopMainThread: Send + Sync + 'static {
+  /// Call `function(context)`, a C function `void* (*)(void*)`, on the UI
+  /// thread. Resolves with its pointer-sized return value, or with an error
+  /// message when the UI thread is gone (the app is quitting) and the
+  /// function was not called.
+  ///
+  /// # Safety
+  ///
+  /// `function` must be the address of a function with that signature that
+  /// is safe to call on the UI thread with `context`.
+  unsafe fn call(
+    &self,
+    function: usize,
+    context: usize,
+  ) -> std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<usize, String>> + Send>,
+  >;
+}
+
 /// A pending call from the webview to a bound Deno function.
 pub struct PendingBindCall {
   pub name: String,
@@ -3016,6 +3109,90 @@ async fn op_desktop_passkey_request(
   }
 }
 
+fn desktop_auth_session(
+  state: &std::rc::Rc<std::cell::RefCell<OpState>>,
+) -> Option<Arc<dyn DesktopAuthSession>> {
+  state
+    .borrow()
+    .try_borrow::<Arc<dyn DesktopAuthSession>>()
+    .cloned()
+}
+
+/// `Deno.desktop.authSession.capabilities()`.
+#[op2]
+#[serde]
+fn op_desktop_auth_session_capabilities(
+  state: std::rc::Rc<std::cell::RefCell<OpState>>,
+) -> AuthSessionCapabilitiesInfo {
+  desktop_auth_session(&state)
+    .map(|a| a.capabilities())
+    .unwrap_or_default()
+}
+
+/// `Deno.desktop.authSession.start()`: the outcome, never an exception (the
+/// JS side validates the argument types and turns an error outcome into a
+/// rejection).
+#[op2]
+#[serde]
+async fn op_desktop_auth_session_start(
+  state: std::rc::Rc<std::cell::RefCell<OpState>>,
+  #[smi] window_id: u32,
+  #[string] url: String,
+  #[string] callback: String,
+  ephemeral: bool,
+) -> AuthSessionOutcome {
+  match desktop_auth_session(&state) {
+    Some(auth) => auth.start(window_id, url, callback, ephemeral).await,
+    None => AuthSessionOutcome::error(
+      "not_supported",
+      AUTH_SESSION_NOT_SUPPORTED_MESSAGE,
+    ),
+  }
+}
+
+/// `Deno.desktop.runOnMainThread(fn, context)`: calls the native function on
+/// the UI thread and resolves with its return value (a decimal string the JS
+/// side turns into a bigint). Full trust: it needs `--allow-ffi`, like
+/// calling the pointer through `Deno.UnsafeFnPointer`.
+#[op2(stack_trace)]
+#[string]
+fn op_desktop_run_on_main_thread(
+  state: std::rc::Rc<std::cell::RefCell<OpState>>,
+  function: *mut std::ffi::c_void,
+  context: *mut std::ffi::c_void,
+) -> Result<
+  impl std::future::Future<Output = Result<String, deno_error::JsErrorBox>>
+  + use<>,
+  deno_error::JsErrorBox,
+> {
+  let main_thread = {
+    let mut state = state.borrow_mut();
+    state
+      .borrow_mut::<deno_permissions::PermissionsContainer>()
+      .check_ffi_partial_no_path()
+      .map_err(deno_error::JsErrorBox::from_err)?;
+    state.try_borrow::<Arc<dyn DesktopMainThread>>().cloned()
+  };
+  if function.is_null() {
+    return Err(deno_error::JsErrorBox::type_error(
+      "the function pointer is null",
+    ));
+  }
+  let Some(main_thread) = main_thread else {
+    return Err(deno_error::JsErrorBox::not_supported());
+  };
+  // SAFETY: the caller holds --allow-ffi (checked above), which vouches for
+  // the pointer as for Deno.UnsafeFnPointer#call.
+  let pending =
+    unsafe { main_thread.call(function as usize, context as usize) };
+  Ok(async move {
+    pending
+      .await
+      .map(|value| value.to_string())
+      .map_err(deno_error::JsErrorBox::generic)
+  })
+}
+
 /// `Deno.desktop.screens()`.
 #[op2]
 #[serde]
@@ -4415,6 +4592,9 @@ deno_core::extension!(
     op_desktop_register_scheme,
     op_desktop_passkey_capabilities,
     op_desktop_passkey_request,
+    op_desktop_auth_session_capabilities,
+    op_desktop_auth_session_start,
+    op_desktop_run_on_main_thread,
     op_desktop_resolve_bind_call,
     op_desktop_reject_bind_call,
     op_desktop_alert,
@@ -4469,6 +4649,9 @@ mod tests {
   use super::DesktopEvent;
   use super::DesktopValue;
   use super::MenuItem;
+  use super::AUTH_SESSION_NOT_SUPPORTED_MESSAGE;
+  use super::AuthSessionCapabilitiesInfo;
+  use super::AuthSessionOutcome;
   use super::PASSKEY_NOT_SUPPORTED_ENVELOPE;
   use super::PasskeyCapabilitiesInfo;
   use super::PendingBindResponses;
@@ -6124,5 +6307,38 @@ mod tests {
     assert!(super::looks_like_png(&png));
     assert!(!super::looks_like_png(&png[..8]));
     assert!(!super::looks_like_png(b"GIF89a-not-a-png"));
+  }
+
+  #[test]
+  fn auth_session_wire_format() {
+    // DESKTOP_JS reads `ok`, `url`, `code`, `message` and the capability
+    // names; absent members are left out.
+    assert_eq!(
+      serde_json::to_value(AuthSessionOutcome::success(
+        "myapp://cb?code=1".into()
+      ))
+      .unwrap(),
+      json!({ "ok": true, "url": "myapp://cb?code=1" })
+    );
+    assert_eq!(
+      serde_json::to_value(AuthSessionOutcome::error("cancelled", "closed"))
+        .unwrap(),
+      json!({ "ok": false, "code": "cancelled", "message": "closed" })
+    );
+    assert_eq!(
+      serde_json::to_value(AuthSessionCapabilitiesInfo {
+        supported: true,
+        ephemeral: true,
+        https_callback: false,
+      })
+      .unwrap(),
+      json!({ "supported": true, "ephemeral": true, "httpsCallback": false })
+    );
+    assert_eq!(
+      serde_json::to_value(AuthSessionCapabilitiesInfo::default()).unwrap(),
+      json!({ "supported": false, "ephemeral": false, "httpsCallback": false })
+    );
+    // The fallback answer points at the system browser, as laufey's does.
+    assert!(AUTH_SESSION_NOT_SUPPORTED_MESSAGE.contains("RFC 8252"));
   }
 }

@@ -729,6 +729,9 @@ const NOT_IMPORTED_OPS = [
   "op_desktop_register_scheme",
   "op_desktop_passkey_capabilities",
   "op_desktop_passkey_request",
+  "op_desktop_auth_session_capabilities",
+  "op_desktop_auth_session_start",
+  "op_desktop_run_on_main_thread",
   "op_desktop_resolve_bind_call",
   "op_desktop_reject_bind_call",
   "op_desktop_alert",
@@ -801,7 +804,9 @@ const NOT_IMPORTED_OPS = [
 // The scheme ops (owner query, OS handler registration) belong to the same
 // main-scope `Deno.desktop` API, as do the passkey ops: a ceremony is
 // anchored to a window and yields a credential, which only the app's own
-// main-scope code may ask for. Quitting the app, the keep-alive switch and
+// main-scope code may ask for. So do the auth session ops (a sign-in sheet
+// on the app's window, yielding an authorization code) and running native
+// code on the UI thread. Quitting the app, the keep-alive switch and
 // the answer to a window's close request are the app's own lifecycle: a
 // worker must not end the app or close (or keep open) a window behind its
 // back. The rich clipboard (HTML, images, formats, change events) follows the
@@ -822,6 +827,9 @@ const WORKER_EXCLUDED_OPS = [
   "op_desktop_register_scheme",
   "op_desktop_passkey_capabilities",
   "op_desktop_passkey_request",
+  "op_desktop_auth_session_capabilities",
+  "op_desktop_auth_session_start",
+  "op_desktop_run_on_main_thread",
   "op_desktop_quit",
   "op_desktop_set_quit_on_last_window_closed",
   "op_desktop_close_reply",
