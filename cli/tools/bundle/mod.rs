@@ -333,6 +333,26 @@ pub async fn bundle(
     let flags_mut = Arc::make_mut(&mut flags);
     flags_mut.unstable_config.sloppy_imports = true;
   }
+  // one `deno bundle` writes an output at a time (held while watching too)
+  let _output_lock = {
+    let cwd =
+      crate::util::env::resolve_cwd_or_fallback(flags.initial_cwd.as_deref());
+    if let Some(output_dir) = &bundle_flags.output_dir {
+      crate::cache::lock::lock_artifact(
+        &cwd,
+        Path::new(output_dir),
+        "output directory",
+      )
+    } else if let Some(output_path) = &bundle_flags.output_path {
+      crate::cache::lock::lock_artifact(
+        &cwd,
+        Path::new(output_path),
+        "output file",
+      )
+    } else {
+      None
+    }
+  };
   // `--check[=all]` is documented in `bundle --help`; honour it before we
   // hand the graph to esbuild so type errors surface alongside (and not
   // after) the bundle output (denoland/deno#30159).
