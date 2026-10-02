@@ -504,31 +504,242 @@ pub enum DesktopEvent {
   NotificationError { notification_id: u32 },
 }
 
-/// Capacity of the runtime-bound event channel. A misbehaving renderer could
-/// otherwise flood mouse-move / wheel events fast enough to OOM the runtime
-/// (the channel was previously unbounded). When full, low-priority events
-/// (motion / wheel) are dropped via `try_send` and a warning is logged.
+/// How many events may wait in the desktop event queue before the ones that
+/// can be dropped are: pointer motion and wheel events (and bound-function
+/// calls, which are refused with "event channel saturated"). A misbehaving
+/// renderer could otherwise flood motion fast enough to OOM the runtime.
 const DESKTOP_EVENT_CHANNEL_CAPACITY: usize = 1024;
 
-type DesktopEventRx =
-  tokio::sync::Mutex<tokio::sync::mpsc::Receiver<DesktopEvent>>;
-pub type DesktopEventTx = tokio::sync::mpsc::Sender<DesktopEvent>;
+/// The queue between the backend's threads and the runtime's event loop
+/// (`op_desktop_recv_event`).
+///
+/// It used to be one bounded channel every event went through with
+/// `try_send`, so once a burst of motion filled it, *any* event was lost:
+/// a `contextMenuClose` dropped that way left `showContextMenu()` pending
+/// forever and the next menu refused as busy, a lost `closeRequested` or
+/// `pageLoad` desynced the window state the same way. Now:
+/// - consecutive pointer-motion, wheel, resize and move events of one window
+///   are coalesced into the latest (wheel deltas add up), so a flood of them
+///   takes one slot;
+/// - only motion and wheel events are dropped when the queue is full, and
+///   bound-function calls are refused (the page's call rejects);
+/// - every other event is always delivered, in order.
+pub struct DesktopEventQueue {
+  state: std::sync::Mutex<EventQueueState>,
+  notify: tokio::sync::Notify,
+}
 
-pub struct DesktopEventReceiver(pub Arc<DesktopEventRx>);
+#[derive(Default)]
+struct EventQueueState {
+  events: std::collections::VecDeque<DesktopEvent>,
+  /// The receiving runtime is gone.
+  closed: bool,
+}
+
+/// How the queue treats an event when it is full.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EventDelivery {
+  /// Dropped (pointer motion, wheel).
+  Lossy,
+  /// Refused, so the sender can answer (a bound-function call).
+  Refusable,
+  /// Always queued.
+  Always,
+}
+
+impl DesktopEvent {
+  fn delivery(&self) -> EventDelivery {
+    match self {
+      DesktopEvent::MouseMove { .. } | DesktopEvent::Wheel { .. } => {
+        EventDelivery::Lossy
+      }
+      DesktopEvent::BindCall { .. } => EventDelivery::Refusable,
+      _ => EventDelivery::Always,
+    }
+  }
+
+  /// Fold `next` into `self` when it is the same kind of continuous event
+  /// for the same window; gives `next` back otherwise.
+  fn coalesce(&mut self, next: DesktopEvent) -> Option<DesktopEvent> {
+    use DesktopEvent::*;
+    let same = match (&*self, &next) {
+      (MouseMove { window_id: a, .. }, MouseMove { window_id: b, .. })
+      | (
+        WindowResize { window_id: a, .. },
+        WindowResize { window_id: b, .. },
+      )
+      | (WindowMove { window_id: a, .. }, WindowMove { window_id: b, .. }) => {
+        a == b
+      }
+      (
+        Wheel {
+          window_id: a,
+          delta_mode: am,
+          ..
+        },
+        Wheel {
+          window_id: b,
+          delta_mode: bm,
+          ..
+        },
+      ) => a == b && am == bm,
+      _ => false,
+    };
+    if !same {
+      return Some(next);
+    }
+    let merged = match (&*self, next) {
+      (
+        Wheel {
+          delta_x: ax,
+          delta_y: ay,
+          ..
+        },
+        Wheel {
+          window_id,
+          delta_x,
+          delta_y,
+          delta_mode,
+          client_x,
+          client_y,
+          shift,
+          control,
+          alt,
+          meta,
+        },
+      ) => Wheel {
+        window_id,
+        delta_x: ax + delta_x,
+        delta_y: ay + delta_y,
+        delta_mode,
+        client_x,
+        client_y,
+        shift,
+        control,
+        alt,
+        meta,
+      },
+      (_, next) => next,
+    };
+    *self = merged;
+    None
+  }
+}
+
+impl DesktopEventQueue {
+  fn lock(&self) -> std::sync::MutexGuard<'_, EventQueueState> {
+    self
+      .state
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+  }
+
+  fn push(
+    &self,
+    event: DesktopEvent,
+  ) -> Result<(), tokio::sync::mpsc::error::TrySendError<DesktopEvent>> {
+    use tokio::sync::mpsc::error::TrySendError;
+    let mut state = self.lock();
+    if state.closed {
+      return Err(TrySendError::Closed(event));
+    }
+    let event = match state.events.back_mut() {
+      Some(last) => match last.coalesce(event) {
+        None => return Ok(()),
+        Some(event) => event,
+      },
+      None => event,
+    };
+    if state.events.len() >= DESKTOP_EVENT_CHANNEL_CAPACITY
+      && event.delivery() != EventDelivery::Always
+    {
+      return Err(TrySendError::Full(event));
+    }
+    state.events.push_back(event);
+    drop(state);
+    self.notify.notify_one();
+    Ok(())
+  }
+
+  /// The next event, waiting for one; `None` once closed and drained.
+  pub async fn recv(&self) -> Option<DesktopEvent> {
+    loop {
+      let notified = self.notify.notified();
+      {
+        let mut state = self.lock();
+        if let Some(event) = state.events.pop_front() {
+          return Some(event);
+        }
+        if state.closed {
+          return None;
+        }
+      }
+      notified.await;
+    }
+  }
+
+  /// The next event if one is queued.
+  pub fn try_recv(&self) -> Option<DesktopEvent> {
+    self.lock().events.pop_front()
+  }
+
+  fn close(&self) {
+    self.lock().closed = true;
+    self.notify.notify_one();
+  }
+}
+
+/// The sending side of the [`DesktopEventQueue`] (the backend's threads).
+#[derive(Clone)]
+pub struct DesktopEventTx(Arc<DesktopEventQueue>);
+
+impl DesktopEventTx {
+  /// Queue an event without blocking; see [`DesktopEventQueue`] for what is
+  /// coalesced, dropped or refused.
+  pub fn try_send(
+    &self,
+    event: DesktopEvent,
+  ) -> Result<(), tokio::sync::mpsc::error::TrySendError<DesktopEvent>> {
+    self.0.push(event)
+  }
+
+  /// A handle that does not keep the queue alive: for callbacks the backend
+  /// may hold for the rest of the process (a binding's handler).
+  pub fn downgrade(&self) -> WeakDesktopEventTx {
+    WeakDesktopEventTx(Arc::downgrade(&self.0))
+  }
+}
+
+/// See [`DesktopEventTx::downgrade`].
+#[derive(Clone)]
+pub struct WeakDesktopEventTx(std::sync::Weak<DesktopEventQueue>);
+
+impl WeakDesktopEventTx {
+  pub fn upgrade(&self) -> Option<DesktopEventTx> {
+    self.0.upgrade().map(DesktopEventTx)
+  }
+}
+
+/// The receiving side (the runtime). Dropping it closes the queue.
+pub struct DesktopEventReceiver(pub Arc<DesktopEventQueue>);
+
+impl Drop for DesktopEventReceiver {
+  fn drop(&mut self) {
+    self.0.close();
+  }
+}
+
 #[derive(Clone)]
 pub struct DesktopEventSender(pub DesktopEventTx);
 
 impl DesktopEventSender {
-  /// Send an event, dropping it on backpressure rather than blocking or
-  /// allocating. Use this for high-frequency events (mouse move, wheel).
+  /// Send an event without blocking, logging one the queue drops or refuses.
   pub fn try_send(&self, event: DesktopEvent) {
     if let Err(tokio::sync::mpsc::error::TrySendError::Full(_)) =
       self.0.try_send(event)
     {
-      // Log once per overflow burst would be ideal, but a plain warn is fine
-      // here — this only fires on pathological event rates.
       log::warn!(
-        "desktop event channel full; dropping event (renderer producing events faster than runtime can drain)"
+        "desktop event queue full; dropping a pointer event (renderer producing events faster than runtime can drain)"
       );
     }
   }
@@ -536,10 +747,13 @@ impl DesktopEventSender {
 
 pub fn create_desktop_event_channel()
 -> (DesktopEventSender, DesktopEventReceiver) {
-  let (tx, rx) = tokio::sync::mpsc::channel(DESKTOP_EVENT_CHANNEL_CAPACITY);
+  let queue = Arc::new(DesktopEventQueue {
+    state: std::sync::Mutex::new(EventQueueState::default()),
+    notify: tokio::sync::Notify::new(),
+  });
   (
-    DesktopEventSender(tx),
-    DesktopEventReceiver(Arc::new(tokio::sync::Mutex::new(rx))),
+    DesktopEventSender(DesktopEventTx(queue.clone())),
+    DesktopEventReceiver(queue),
   )
 }
 
@@ -1477,7 +1691,10 @@ pub fn ensure_on_screen(
 
 /// How long a close the user asked for waits for the app's `close` listeners
 /// to answer before it happens anyway (a blocked or crashed runtime must not
-/// leave a window that cannot be closed).
+/// leave a window that cannot be closed). Time the JavaScript thread spends
+/// in a synchronous dialog (`alert()` / `confirm()` / `prompt()`) does not
+/// count: a listener that asks the user "Discard changes?" is answering, not
+/// hung, however long the user takes to read it.
 pub const CLOSE_REPLY_TIMEOUT: std::time::Duration =
   std::time::Duration::from_secs(5);
 
@@ -1493,27 +1710,77 @@ pub enum CloseDecision {
   Ignore,
 }
 
+/// What a close request's timer should do when it wakes up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CloseTimeout {
+  /// The request is still unanswered after [`CLOSE_REPLY_TIMEOUT`] of
+  /// counted time: close the window.
+  Close,
+  /// The request was answered or replaced: the timer is done.
+  Ignore,
+  /// Not yet (a synchronous dialog ran or is running): check again after
+  /// this long.
+  Wait(std::time::Duration),
+}
+
 /// The close requests waiting for the app's answer, keyed by window, each
 /// with a generation so a timer started for an earlier request can't close a
-/// window whose later request is still pending.
+/// window whose later request is still pending; and the synchronous dialogs
+/// the JavaScript thread is in, whose time the timeout does not count.
 #[derive(Default)]
 pub struct PendingCloses {
-  inner: std::sync::Mutex<(u64, HashMap<u32, u64>)>,
+  inner: std::sync::Mutex<PendingClosesState>,
+}
+
+#[derive(Default)]
+struct PendingClosesState {
+  next_token: u64,
+  /// Window -> (token, when the request began, dialog time at that moment).
+  pending: HashMap<u32, (u64, std::time::Instant, std::time::Duration)>,
+  /// Synchronous dialogs open on the JavaScript thread (nested ones count).
+  dialogs: u32,
+  /// Total time spent in finished dialogs.
+  dialog_time: std::time::Duration,
+  /// When the outermost open dialog started.
+  dialog_since: Option<std::time::Instant>,
+}
+
+impl PendingClosesState {
+  /// Total dialog time up to `now`, the open dialog's included.
+  fn dialog_time_at(&self, now: std::time::Instant) -> std::time::Duration {
+    self.dialog_time
+      + self
+        .dialog_since
+        .map(|since| now.saturating_duration_since(since))
+        .unwrap_or_default()
+  }
 }
 
 impl PendingCloses {
   /// Record a close request; returns the token its timeout must present.
   pub fn begin(&self, window_id: u32) -> u64 {
+    self.begin_at(window_id, std::time::Instant::now())
+  }
+
+  fn begin_at(&self, window_id: u32, now: std::time::Instant) -> u64 {
     let mut guard = self.inner.lock().unwrap();
-    guard.0 += 1;
-    let token = guard.0;
-    guard.1.insert(window_id, token);
+    guard.next_token += 1;
+    let token = guard.next_token;
+    let dialog_time = guard.dialog_time_at(now);
+    guard.pending.insert(window_id, (token, now, dialog_time));
     token
   }
 
   /// The app answered (`prevented` = a listener called `preventDefault()`).
   pub fn reply(&self, window_id: u32, prevented: bool) -> CloseDecision {
-    if self.inner.lock().unwrap().1.remove(&window_id).is_none() {
+    if self
+      .inner
+      .lock()
+      .unwrap()
+      .pending
+      .remove(&window_id)
+      .is_none()
+    {
       return CloseDecision::Ignore;
     }
     if prevented {
@@ -1523,21 +1790,229 @@ impl PendingCloses {
     }
   }
 
-  /// The timeout for request `token` fired: close only if that very request
-  /// is still unanswered.
-  pub fn expire(&self, window_id: u32, token: u64) -> CloseDecision {
+  /// The timer of request `token` woke up: close only if that very request
+  /// is still unanswered after [`CLOSE_REPLY_TIMEOUT`] of time not spent in
+  /// a synchronous dialog.
+  pub fn check_timeout(&self, window_id: u32, token: u64) -> CloseTimeout {
+    self.check_timeout_at(window_id, token, std::time::Instant::now())
+  }
+
+  fn check_timeout_at(
+    &self,
+    window_id: u32,
+    token: u64,
+    now: std::time::Instant,
+  ) -> CloseTimeout {
     let mut guard = self.inner.lock().unwrap();
-    if guard.1.get(&window_id) == Some(&token) {
-      guard.1.remove(&window_id);
-      CloseDecision::Close
+    let Some(&(pending, began, dialog_at_begin)) =
+      guard.pending.get(&window_id)
+    else {
+      return CloseTimeout::Ignore;
+    };
+    if pending != token {
+      return CloseTimeout::Ignore;
+    }
+    if guard.dialogs > 0 {
+      // Paused: look again once the dialog may be over.
+      return CloseTimeout::Wait(std::time::Duration::from_millis(250));
+    }
+    let paused = guard.dialog_time_at(now).saturating_sub(dialog_at_begin);
+    let counted = now.saturating_duration_since(began).saturating_sub(paused);
+    if counted >= CLOSE_REPLY_TIMEOUT {
+      guard.pending.remove(&window_id);
+      CloseTimeout::Close
     } else {
-      CloseDecision::Ignore
+      CloseTimeout::Wait(CLOSE_REPLY_TIMEOUT - counted)
+    }
+  }
+
+  /// The JavaScript thread entered a synchronous dialog.
+  pub fn dialog_began(&self) {
+    self.dialog_began_at(std::time::Instant::now());
+  }
+
+  fn dialog_began_at(&self, now: std::time::Instant) {
+    let mut guard = self.inner.lock().unwrap();
+    guard.dialogs += 1;
+    if guard.dialogs == 1 {
+      guard.dialog_since = Some(now);
+    }
+  }
+
+  /// The JavaScript thread left a synchronous dialog.
+  pub fn dialog_ended(&self) {
+    self.dialog_ended_at(std::time::Instant::now());
+  }
+
+  fn dialog_ended_at(&self, now: std::time::Instant) {
+    let mut guard = self.inner.lock().unwrap();
+    guard.dialogs = guard.dialogs.saturating_sub(1);
+    if guard.dialogs == 0
+      && let Some(since) = guard.dialog_since.take()
+    {
+      guard.dialog_time += now.saturating_duration_since(since);
     }
   }
 
   /// The window closed some other way (`close()`, quit): forget it.
   pub fn forget(&self, window_id: u32) {
-    self.inner.lock().unwrap().1.remove(&window_id);
+    self.inner.lock().unwrap().pending.remove(&window_id);
+  }
+}
+
+/// laufey's C ABI takes NUL-terminated strings, so a JS string with an
+/// embedded NUL (`"a\0b"`) cannot cross it: the laufey crate panicked on one,
+/// and a panic there exits the whole app. Every op that hands a string to the
+/// backend refuses one first, with a TypeError naming the argument.
+fn reject_nul(what: &str, value: &str) -> Result<(), deno_error::JsErrorBox> {
+  if value.contains('\0') {
+    Err(deno_error::JsErrorBox::type_error(format!(
+      "{what} must not contain a NUL character"
+    )))
+  } else {
+    Ok(())
+  }
+}
+
+fn reject_nul_opt(
+  what: &str,
+  value: Option<&str>,
+) -> Result<(), deno_error::JsErrorBox> {
+  value.map_or(Ok(()), |v| reject_nul(what, v))
+}
+
+/// [`reject_nul`] over a menu: labels, ids, accelerators, tooltips, roles.
+fn reject_nul_in_menu(
+  items: &[MenuItem],
+) -> Result<(), deno_error::JsErrorBox> {
+  for item in items {
+    match item {
+      MenuItem::Item {
+        label,
+        id,
+        accelerator,
+        tooltip,
+        ..
+      } => {
+        reject_nul("a menu item label", label)?;
+        reject_nul_opt("a menu item id", id.as_deref())?;
+        reject_nul_opt("a menu item accelerator", accelerator.as_deref())?;
+        reject_nul_opt("a menu item tooltip", tooltip.as_deref())?;
+      }
+      MenuItem::Submenu { label, items } => {
+        reject_nul("a submenu label", label)?;
+        reject_nul_in_menu(items)?;
+      }
+      MenuItem::Separator => {}
+      MenuItem::Role { role } => reject_nul("a menu role", role)?,
+    }
+  }
+  Ok(())
+}
+
+/// [`reject_nul`] over a value handed back to the page (a bound function's
+/// result): every string and object key.
+fn reject_nul_in_value(
+  value: &DesktopValue,
+) -> Result<(), deno_error::JsErrorBox> {
+  match value {
+    DesktopValue::String(s) => reject_nul("a string in the result", s),
+    DesktopValue::List(items) => items.iter().try_for_each(reject_nul_in_value),
+    DesktopValue::Dict(entries) => entries.iter().try_for_each(|(k, v)| {
+      reject_nul("a key in the result", k)?;
+      reject_nul_in_value(v)
+    }),
+    DesktopValue::Null
+    | DesktopValue::Bool(_)
+    | DesktopValue::Int(_)
+    | DesktopValue::Double(_)
+    | DesktopValue::Binary(_) => Ok(()),
+  }
+}
+
+fn reject_nul_in_notification(
+  request: &NotificationRequest,
+) -> Result<(), deno_error::JsErrorBox> {
+  reject_nul("a notification title", &request.title)?;
+  reject_nul_opt("a notification body", request.body.as_deref())?;
+  reject_nul_opt("a notification tag", request.tag.as_deref())?;
+  reject_nul_opt("notification data", request.data.as_deref())?;
+  for action in &request.actions {
+    reject_nul("a notification action", &action.action)?;
+    reject_nul("a notification action title", &action.title)?;
+  }
+  Ok(())
+}
+
+fn reject_nul_in_file_dialog(
+  request: &FileDialogRequest,
+) -> Result<(), deno_error::JsErrorBox> {
+  reject_nul_opt("the dialog title", request.title.as_deref())?;
+  reject_nul_opt("the dialog defaultPath", request.default_path.as_deref())?;
+  reject_nul_opt("the dialog buttonLabel", request.button_label.as_deref())?;
+  for filter in &request.filters {
+    reject_nul("a filter name", &filter.name)?;
+    for ext in &filter.extensions {
+      reject_nul("a filter extension", ext)?;
+    }
+  }
+  Ok(())
+}
+
+/// For text that must reach the backend whatever it holds (an error
+/// message on its way to a dialog or to the page): NUL becomes U+FFFD.
+fn replace_nul(text: String) -> String {
+  if text.contains('\0') {
+    text.replace('\0', "\u{FFFD}")
+  } else {
+    text
+  }
+}
+
+/// How a window is closed for real (an answered or timed-out close request,
+/// `close()`, DevTools).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeClose {
+  /// Destroy the OS window.
+  Destroy,
+  /// A WebGPU surface holds the window's native handles, and destroying the
+  /// OS window under it would leave the surface pointing at freed memory:
+  /// hide it instead, kept until the process ends, and count it as closed.
+  /// `quit` is set when that was the last open window and the app quits on
+  /// its last window closing (the hidden window would otherwise keep the
+  /// app running).
+  HideAndKeep { quit: bool },
+}
+
+/// See [`NativeClose`]. `others_open`: whether another window is still open
+/// once this one is closed.
+pub fn native_close_action(
+  surface_attached: bool,
+  quit_on_last_window_closed: bool,
+  others_open: bool,
+) -> NativeClose {
+  if !surface_attached {
+    return NativeClose::Destroy;
+  }
+  NativeClose::HideAndKeep {
+    quit: quit_on_last_window_closed && !others_open,
+  }
+}
+
+/// Marks a synchronous dialog on the JavaScript thread for the duration of
+/// the call (see [`CLOSE_REPLY_TIMEOUT`]).
+struct SyncDialog<'a>(&'a dyn DesktopApi);
+
+impl<'a> SyncDialog<'a> {
+  fn begin(api: &'a dyn DesktopApi) -> Self {
+    api.sync_dialog_began();
+    Self(api)
+  }
+}
+
+impl Drop for SyncDialog<'_> {
+  fn drop(&mut self) {
+    self.0.sync_dialog_ended();
   }
 }
 
@@ -1792,6 +2267,10 @@ pub trait DesktopApi: Send + Sync + 'static {
     menu: Vec<MenuItem>,
   );
 
+  /// A WebGPU surface now holds this window's native handles: from here on
+  /// no path may destroy the OS window (see [`native_close_action`]).
+  fn note_surface_attached(&self, _window_id: u32) {}
+
   /// Best-effort fetch of the OS-level window/display handles for the
   /// given window. Returning `Err` instead of panicking matters because
   /// this trait method is reachable from a v8 op handler but its
@@ -1820,6 +2299,11 @@ pub trait DesktopApi: Send + Sync + 'static {
   );
 
   fn alert(&self, title: &str, message: &str);
+  /// The JavaScript thread entered / left a synchronous `alert()` /
+  /// `confirm()` / `prompt()`: a pending close request's
+  /// [`CLOSE_REPLY_TIMEOUT`] does not count that time.
+  fn sync_dialog_began(&self) {}
+  fn sync_dialog_ended(&self) {}
   /// Show a modal confirm dialog. Blocks the calling thread until the
   /// user dismisses it; the platform's modal run loop pumps OS events
   /// while the dialog is up so other windows continue to render and
@@ -1944,10 +2428,65 @@ pub enum PermissionState {
   Unsupported,
 }
 
-/// Stores the window ID of the initial window created during runtime init.
-/// The first `BrowserWindow` constructor takes this ID to wrap the existing
-/// window; subsequent constructors create new windows.
-pub struct InitialWindowId(pub std::sync::Mutex<Option<u32>>);
+/// Stores the window ID of the initial window created during runtime init,
+/// with the creation-time attributes it was created with.
+/// The first `BrowserWindow` constructor whose options agree with those
+/// attributes takes this ID to wrap the existing window (see
+/// [`adopts_initial_window`]); other constructors create new windows.
+pub struct InitialWindowId(
+  pub std::sync::Mutex<Option<u32>>,
+  pub InitialWindowAttributes,
+);
+
+/// The attributes of a window that are fixed when it is created (the backend
+/// cannot change them afterwards): what `desktop.initialWindow` configured
+/// for the bootstrap window.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct InitialWindowAttributes {
+  pub frameless: bool,
+  pub no_activate: bool,
+  pub transparent_titlebar: bool,
+  pub transparent: bool,
+}
+
+/// Whether a `new BrowserWindow(options)` may adopt the bootstrap window
+/// instead of creating one. It may only when every creation-time attribute
+/// the options ask for is what the bootstrap window already has: adopting it
+/// regardless silently dropped `frameless` / `noActivate` / `transparent` /
+/// `transparentTitlebar`, so a tray panel (`attachPanel`) came out as an
+/// ordinary framed, focus-stealing window. An attribute the options leave
+/// unset keeps the configured `initialWindow` value.
+fn adopts_initial_window(
+  initial: &InitialWindowAttributes,
+  options: Option<&BrowserWindowOptions>,
+) -> bool {
+  let Some(o) = options else {
+    return true;
+  };
+  let agrees = |asked: Option<bool>, has: bool| asked.is_none_or(|v| v == has);
+  agrees(o.frameless, initial.frameless)
+    && agrees(o.no_activate, initial.no_activate)
+    && agrees(o.transparent_titlebar, initial.transparent_titlebar)
+    && agrees(o.transparent, initial.transparent)
+}
+
+/// The native API for a `Deno.desktop` constructor. Workers have no desktop
+/// backend (the classes are also kept out of worker scope); constructing one
+/// there threw a Rust panic that took the whole app down.
+fn constructor_api(
+  state: &OpState,
+  class: &str,
+) -> Result<Arc<dyn DesktopApi>, deno_error::JsErrorBox> {
+  state
+    .try_borrow::<Arc<dyn DesktopApi>>()
+    .cloned()
+    .ok_or_else(|| {
+      deno_error::JsErrorBox::new(
+        "NotSupported",
+        format!("{class} is only available in the main scope of a desktop app"),
+      )
+    })
+}
 
 /// The compiled app's name (from deno.json `desktop.app.name`, falling back to
 /// the output file name). Used as the default window title so a window the app
@@ -2001,16 +2540,15 @@ impl BrowserWindow {
     state: &OpState,
     scope: &mut v8::PinScope<'_, '_>,
     #[scoped] options: Option<BrowserWindowOptions>,
-  ) -> v8::Global<v8::Value> {
-    let api = state
-      .try_borrow::<Arc<dyn DesktopApi>>()
-      .expect("desktop mode enabled")
-      .clone();
+  ) -> Result<v8::Global<v8::Value>, deno_error::JsErrorBox> {
+    let api = constructor_api(state, "BrowserWindow")?;
 
-    // Use the initial window if this is the first BrowserWindow,
-    // otherwise create a new one.
+    // Use the initial window if this is the first BrowserWindow whose
+    // creation-time options it satisfies, otherwise create a new one (the
+    // bootstrap window then stays available to a later BrowserWindow).
     let window_id = state
       .try_borrow::<InitialWindowId>()
+      .filter(|iw| adopts_initial_window(&iw.1, options.as_ref()))
       .and_then(|iw| iw.0.lock().unwrap().take())
       .unwrap_or_else(|| {
         let width = options.as_ref().and_then(|o| o.width).unwrap_or(800);
@@ -2054,11 +2592,18 @@ impl BrowserWindow {
       if let Some(title) = &options.title {
         api.set_title(window_id, title);
       }
-      api.set_window_size(
-        window_id,
-        options.width.unwrap_or(800),
-        options.height.unwrap_or(600),
-      );
+      // Only the dimensions the options give: an adopted bootstrap window
+      // keeps its `initialWindow` size for the others (a `{ title }` alone
+      // used to shrink it to 800x600), and a new window was already created
+      // at its size.
+      if options.width.is_some() || options.height.is_some() {
+        let (width, height) = api.get_window_size(window_id);
+        api.set_window_size(
+          window_id,
+          options.width.unwrap_or(width),
+          options.height.unwrap_or(height),
+        );
+      }
       if let (Some(x), Some(y)) = (options.x, options.y) {
         // A position saved on a monitor that is gone lands on-screen.
         let (width, height) = api.get_window_outer_size(window_id);
@@ -2108,7 +2653,7 @@ impl BrowserWindow {
     set_event_target_data.call(scope, null.into(), &[window.into()]);
     let window = window.cast::<v8::Value>();
 
-    v8::Global::new(scope, window)
+    Ok(v8::Global::new(scope, window))
   }
 
   #[getter]
@@ -2121,19 +2666,28 @@ impl BrowserWindow {
   // method without overwriting the wrapper.
   #[fast]
   #[symbol("Deno_privateDesktopBind")]
-  fn bind(&self, #[string] name: &str) {
+  fn bind(&self, #[string] name: &str) -> Result<(), deno_error::JsErrorBox> {
+    reject_nul("the binding name", name)?;
     self.api.bind(self.window_id, name);
+    Ok(())
   }
 
   #[fast]
   #[symbol("Deno_privateDesktopUnbind")]
-  fn unbind(&self, #[string] name: &str) {
+  fn unbind(&self, #[string] name: &str) -> Result<(), deno_error::JsErrorBox> {
+    reject_nul("the binding name", name)?;
     self.api.unbind(self.window_id, name);
+    Ok(())
   }
 
   #[fast]
-  fn set_title(&self, #[string] title: &str) {
+  fn set_title(
+    &self,
+    #[string] title: &str,
+  ) -> Result<(), deno_error::JsErrorBox> {
+    reject_nul("the window title", title)?;
     self.api.set_title(self.window_id, title);
+    Ok(())
   }
 
   fn get_size(&self) -> (i32, i32) {
@@ -2491,8 +3045,13 @@ impl BrowserWindow {
   }
 
   #[fast]
-  fn navigate(&self, #[string] url: &str) {
+  fn navigate(
+    &self,
+    #[string] url: &str,
+  ) -> Result<(), deno_error::JsErrorBox> {
+    reject_nul("the URL", url)?;
     self.api.navigate(self.window_id, url);
+    Ok(())
   }
 
   fn open_devtools(
@@ -2541,6 +3100,7 @@ impl BrowserWindow {
     &self,
     #[string] script: String,
   ) -> Result<ExecuteJsResult, deno_error::JsErrorBox> {
+    reject_nul("the script", &script)?;
     let (tx, rx) = tokio::sync::oneshot::channel();
     self.api.execute_js(
       self.window_id,
@@ -2555,8 +3115,13 @@ impl BrowserWindow {
     Ok(ExecuteJsResult(result))
   }
 
-  fn set_application_menu(&self, #[serde] menu: Vec<MenuItem>) {
+  fn set_application_menu(
+    &self,
+    #[serde] menu: Vec<MenuItem>,
+  ) -> Result<(), deno_error::JsErrorBox> {
+    reject_nul_in_menu(&menu)?;
     self.api.set_application_menu(self.window_id, menu);
+    Ok(())
   }
 
   fn show_context_menu(
@@ -2564,8 +3129,10 @@ impl BrowserWindow {
     #[smi] x: i32,
     #[smi] y: i32,
     #[serde] menu: Vec<MenuItem>,
-  ) {
+  ) -> Result<(), deno_error::JsErrorBox> {
+    reject_nul_in_menu(&menu)?;
     self.api.show_context_menu(self.window_id, x, y, menu);
+    Ok(())
   }
 
   fn get_native_window(
@@ -2622,6 +3189,9 @@ impl BrowserWindow {
     // Only suppress close() once the surface is actually live. If
     // surface creation failed above, the window is still safe to close.
     self.surface_taken.set(true);
+    // And the closes that don't go through `close()`: the user's (an
+    // answered or timed-out close request), DevTools.
+    self.api.note_surface_attached(self.window_id);
     Ok(result)
   }
 }
@@ -2686,7 +3256,7 @@ fn place_on_screen(api: &dyn DesktopApi, rect: DesktopRect) -> DesktopRect {
   ensure_on_screen(rect, &api.screens())
 }
 
-#[derive(FromV8)]
+#[derive(FromV8, Default)]
 struct BrowserWindowOptions {
   title: Option<String>,
   width: Option<i32>,
@@ -2922,7 +3492,7 @@ async fn op_desktop_recv_event(
     s.try_borrow::<DesktopEventReceiver>().map(|r| r.0.clone())
   };
   if let Some(rx) = rx {
-    rx.lock().await.recv().await
+    rx.recv().await
   } else {
     std::future::pending().await
   }
@@ -2958,12 +3528,16 @@ fn op_desktop_resolve_bind_call(
   state: &mut OpState,
   #[smi] call_id: u32,
   #[serde] result: DesktopValue,
-) {
+) -> Result<(), deno_error::JsErrorBox> {
+  // Checked before the call is taken: on a TypeError DESKTOP_JS rejects
+  // the call with it instead.
+  reject_nul_in_value(&result)?;
   if let Some(responses) = state.try_borrow::<PendingBindResponses>()
     && let Some(tx) = responses.0.lock().unwrap().remove(&call_id)
   {
     let _ = tx.send(Ok(result));
   }
+  Ok(())
 }
 
 #[op2(fast)]
@@ -2975,7 +3549,8 @@ fn op_desktop_reject_bind_call(
   if let Some(responses) = state.try_borrow::<PendingBindResponses>()
     && let Some(tx) = responses.0.lock().unwrap().remove(&call_id)
   {
-    let _ = tx.send(Err(error));
+    // The rejection must reach the page whatever the message holds.
+    let _ = tx.send(Err(replace_nul(error)));
   }
 }
 
@@ -3282,10 +3857,14 @@ fn op_desktop_alert(
   state: &mut OpState,
   #[string] title: &str,
   #[string] message: &str,
-) {
+) -> Result<(), deno_error::JsErrorBox> {
+  reject_nul("alert() title", title)?;
+  reject_nul("alert() message", message)?;
   if let Some(api) = state.try_borrow::<Arc<dyn DesktopApi>>() {
+    let _dialog = SyncDialog::begin(api.as_ref());
     api.alert(title, message);
   }
+  Ok(())
 }
 
 /// True while an error dialog is on screen. Single-flight at the native
@@ -3368,6 +3947,8 @@ async fn op_desktop_alert_async(
     // keeps a caller in a loop from parking a thread per call.
     return;
   }
+  // An error message may hold anything; the dialog must still show.
+  let (title, message) = (replace_nul(title), replace_nul(message));
   let dialog = deno_core::unsync::spawn_blocking(move || {
     let _guard = ErrorDialogGuard;
     api.alert(&title, &message);
@@ -3431,16 +4012,34 @@ fn append_to_file(path: &Path, body: &str) {
     .and_then(|mut f| std::io::Write::write_all(&mut f, line.as_bytes()));
 }
 
+/// How long an HTTPS error report may take (connect, TLS, request and
+/// response) before it is given up. The report is posted on its own thread
+/// and joined, so the panic hook's report is out before the process exits;
+/// without a bound, an endpoint that accepts and never answers (or a
+/// black-holed network) hung the exiting app, or the error path, forever.
+const ERROR_REPORT_TIMEOUT: std::time::Duration =
+  std::time::Duration::from_secs(5);
+
 fn post_error_report(client: deno_fetch::Client, url: String, body: String) {
-  let _ = std::thread::spawn(move || {
-    let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
-      .enable_io()
-      .enable_time()
-      .build()
-    else {
-      return;
-    };
-    runtime.block_on(async move {
+  post_error_report_within(client, url, body, ERROR_REPORT_TIMEOUT);
+}
+
+fn post_error_report_within(
+  client: deno_fetch::Client,
+  url: String,
+  body: String,
+  timeout: std::time::Duration,
+) {
+  let _ =
+    std::thread::spawn(move || {
+      let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .enable_time()
+        .build()
+      else {
+        return;
+      };
+      runtime.block_on(async move {
       let Ok(uri) = url.parse::<http::Uri>() else {
         return;
       };
@@ -3451,10 +4050,16 @@ fn post_error_report(client: deno_fetch::Client, url: String, body: String) {
         http::header::CONTENT_TYPE,
         http::HeaderValue::from_static("application/json"),
       );
-      let _ = client.send(req).await;
+      if tokio::time::timeout(timeout, client.send(req)).await.is_err() {
+        log::warn!(
+          "desktop: error report not delivered within {timeout:?}; dropping it"
+        );
+      }
     });
-  })
-  .join();
+      // Don't wait on a resolver thread still stuck in the dropped request.
+      runtime.shutdown_timeout(std::time::Duration::from_millis(100));
+    })
+    .join();
 }
 
 /// Send a JSON error report to the given URL. Best-effort — never panics.
@@ -3530,16 +4135,23 @@ fn op_desktop_send_error_report(state: &mut OpState, #[string] body: &str) {
 }
 
 #[op2(fast)]
-fn op_desktop_confirm(state: &mut OpState, #[string] message: &str) -> bool {
+fn op_desktop_confirm(
+  state: &mut OpState,
+  #[string] message: &str,
+) -> Result<bool, deno_error::JsErrorBox> {
   // Sync op: web `confirm()` returns a boolean, not a Promise. The
   // backend's `confirm` blocks the calling thread inside the platform's
   // modal run loop (NSAlert runModal / MessageBoxW / gtk_dialog_run /
   // rfd) which itself pumps OS events, so other windows stay responsive
   // while the dialog is up.
-  match state.try_borrow::<Arc<dyn DesktopApi>>() {
-    Some(api) => api.confirm("", message),
+  reject_nul("confirm() message", message)?;
+  Ok(match state.try_borrow::<Arc<dyn DesktopApi>>() {
+    Some(api) => {
+      let _dialog = SyncDialog::begin(api.as_ref());
+      api.confirm("", message)
+    }
     None => false,
-  }
+  })
 }
 
 #[op2]
@@ -3548,14 +4160,18 @@ fn op_desktop_prompt(
   state: &mut OpState,
   #[string] message: &str,
   #[string] default_value: Option<String>,
-) -> Option<String> {
+) -> Result<Option<String>, deno_error::JsErrorBox> {
   // See `op_desktop_confirm` for the sync-blocking rationale.
-  match state.try_borrow::<Arc<dyn DesktopApi>>() {
+  reject_nul("prompt() message", message)?;
+  let default_value = default_value.unwrap_or_default();
+  reject_nul("prompt() default value", &default_value)?;
+  Ok(match state.try_borrow::<Arc<dyn DesktopApi>>() {
     Some(api) => {
-      api.prompt("", message, default_value.as_deref().unwrap_or(""))
+      let _dialog = SyncDialog::begin(api.as_ref());
+      api.prompt("", message, &default_value)
     }
     None => None,
-  }
+  })
 }
 
 /// How long to wait on a clipboard call before giving up.
@@ -3661,6 +4277,7 @@ async fn op_desktop_write_clipboard_text(
   state: std::rc::Rc<std::cell::RefCell<OpState>>,
   #[string] text: String,
 ) -> Result<(), deno_error::JsErrorBox> {
+  reject_nul("the clipboard text", &text)?;
   let api = {
     let s = state.borrow();
     s.try_borrow::<Arc<dyn DesktopApi>>().cloned()
@@ -3740,6 +4357,8 @@ async fn op_desktop_write_clipboard_html(
   #[string] html: String,
   #[string] text: Option<String>,
 ) -> Result<(), deno_error::JsErrorBox> {
+  reject_nul("the clipboard HTML", &html)?;
+  reject_nul_opt("the clipboard text", text.as_deref())?;
   let Some(api) = desktop_api(&state) else {
     return Err(clipboard_not_supported("HTML"));
   };
@@ -3842,7 +4461,11 @@ async fn op_desktop_start_drag(
   let Some(api) = desktop_api(&state) else {
     return DragOutcome::Failed.as_str().to_string();
   };
-  if paths.is_empty() || paths.len() > MAX_DRAG_PATHS {
+  // A path with a NUL can't name a file (nor cross laufey's C ABI).
+  if paths.is_empty()
+    || paths.len() > MAX_DRAG_PATHS
+    || paths.iter().any(|p| p.contains('\0'))
+  {
     return DragOutcome::Failed.as_str().to_string();
   }
   let icon = if icon.is_empty() { None } else { Some(icon) };
@@ -3861,7 +4484,8 @@ async fn op_desktop_start_drag(
 fn op_desktop_file_dialog_open(
   state: &mut OpState,
   #[serde] request: FileDialogRequest,
-) -> u32 {
+) -> Result<u32, deno_error::JsErrorBox> {
+  reject_nul_in_file_dialog(&request)?;
   let (dialog_id, outcome) = match state.try_borrow::<Arc<dyn DesktopApi>>() {
     Some(api) => api.show_file_dialog(request),
     None => (
@@ -3873,9 +4497,11 @@ fn op_desktop_file_dialog_open(
   if !state.has::<FileDialogTable>() {
     state.put(FileDialogTable::default());
   }
-  state
-    .borrow_mut::<FileDialogTable>()
-    .insert(dialog_id, outcome)
+  Ok(
+    state
+      .borrow_mut::<FileDialogTable>()
+      .insert(dialog_id, outcome),
+  )
 }
 
 /// The outcome of a dialog `op_desktop_file_dialog_open` showed.
@@ -3923,7 +4549,10 @@ async fn op_desktop_register_shortcut(
   state: std::rc::Rc<std::cell::RefCell<OpState>>,
   #[string] accelerator: String,
 ) -> ShortcutRegisterInfo {
-  if accelerator.is_empty() || accelerator.len() > MAX_ACCELERATOR_LEN {
+  if accelerator.is_empty()
+    || accelerator.len() > MAX_ACCELERATOR_LEN
+    || accelerator.contains('\0')
+  {
     return ShortcutRegisterInfo::err("invalid");
   }
   match desktop_api(&state) {
@@ -3938,6 +4567,9 @@ fn op_desktop_unregister_shortcut(
   state: &mut OpState,
   #[string] accelerator: &str,
 ) -> bool {
+  if accelerator.contains('\0') {
+    return false;
+  }
   state
     .try_borrow::<Arc<dyn DesktopApi>>()
     .map(|api| api.unregister_shortcut(accelerator))
@@ -3969,7 +4601,7 @@ fn op_desktop_canonical_accelerator(
   state: &mut OpState,
   #[string] accelerator: &str,
 ) -> Option<String> {
-  if accelerator.len() > MAX_ACCELERATOR_LEN {
+  if accelerator.len() > MAX_ACCELERATOR_LEN || accelerator.contains('\0') {
     return None;
   }
   state
@@ -4191,6 +4823,7 @@ fn op_desktop_schedule_notification(
     // A time in the past shows it now.
     schedule_at_ms: Some((options.at as i64).max(1)),
   };
+  reject_nul_in_notification(&request)?;
   Ok(api.schedule_notification(&request))
 }
 
@@ -4209,7 +4842,10 @@ async fn op_desktop_list_scheduled_notifications(
 /// `Deno.desktop.notifications.cancel(tag)` (laufey API 41).
 #[op2(fast)]
 fn op_desktop_cancel_notification(state: &mut OpState, #[string] tag: &str) {
-  if tag.is_empty() || tag.len() > MAX_NOTIFICATION_TAG_BYTES {
+  if tag.is_empty()
+    || tag.len() > MAX_NOTIFICATION_TAG_BYTES
+    || tag.contains('\0')
+  {
     return;
   }
   if let Some(api) = state.try_borrow::<Arc<dyn DesktopApi>>() {
@@ -4242,11 +4878,8 @@ impl Dock {
   fn new(
     state: &OpState,
     scope: &mut v8::PinScope<'_, '_>,
-  ) -> v8::Global<v8::Value> {
-    let api = state
-      .try_borrow::<Arc<dyn DesktopApi>>()
-      .expect("desktop mode enabled")
-      .clone();
+  ) -> Result<v8::Global<v8::Value>, deno_error::JsErrorBox> {
+    let api = constructor_api(state, "Dock")?;
 
     let dock = Dock { api };
     let dock = deno_core::cppgc::make_cppgc_object(scope, dock);
@@ -4260,13 +4893,18 @@ impl Dock {
     set_event_target_data.call(scope, null.into(), &[dock.into()]);
     let dock = dock.cast::<v8::Value>();
 
-    v8::Global::new(scope, dock)
+    Ok(v8::Global::new(scope, dock))
   }
 
   // `null` / `undefined` clear the badge, as the d.ts says (a required
   // string turned `null` into the text "null").
-  fn set_badge(&self, #[string] text: Option<String>) {
+  fn set_badge(
+    &self,
+    #[string] text: Option<String>,
+  ) -> Result<(), deno_error::JsErrorBox> {
+    reject_nul_opt("the badge text", text.as_deref())?;
     self.api.set_dock_badge(dock_badge_text(text.as_deref()));
+    Ok(())
   }
 
   #[fast]
@@ -4274,8 +4912,13 @@ impl Dock {
     self.api.bounce_dock(critical);
   }
 
-  fn set_menu(&self, #[serde] menu: Option<Vec<MenuItem>>) {
+  fn set_menu(
+    &self,
+    #[serde] menu: Option<Vec<MenuItem>>,
+  ) -> Result<(), deno_error::JsErrorBox> {
+    reject_nul_in_menu(menu.as_deref().unwrap_or_default())?;
     self.api.set_dock_menu(menu);
+    Ok(())
   }
 
   #[fast]
@@ -4316,11 +4959,8 @@ impl Tray {
   fn new(
     state: &OpState,
     scope: &mut v8::PinScope<'_, '_>,
-  ) -> v8::Global<v8::Value> {
-    let api = state
-      .try_borrow::<Arc<dyn DesktopApi>>()
-      .expect("desktop mode enabled")
-      .clone();
+  ) -> Result<v8::Global<v8::Value>, deno_error::JsErrorBox> {
+    let api = constructor_api(state, "Tray")?;
 
     let tray_id = api.create_tray();
     let tray = Tray { api, tray_id };
@@ -4335,7 +4975,7 @@ impl Tray {
     set_event_target_data.call(scope, null.into(), &[tray.into()]);
     let tray = tray.cast::<v8::Value>();
 
-    v8::Global::new(scope, tray)
+    Ok(v8::Global::new(scope, tray))
   }
 
   #[getter]
@@ -4352,12 +4992,22 @@ impl Tray {
     self.api.set_tray_icon_dark(self.tray_id, png_bytes);
   }
 
-  fn set_tooltip(&self, #[string] text: Option<String>) {
+  fn set_tooltip(
+    &self,
+    #[string] text: Option<String>,
+  ) -> Result<(), deno_error::JsErrorBox> {
+    reject_nul_opt("the tooltip", text.as_deref())?;
     self.api.set_tray_tooltip(self.tray_id, text.as_deref());
+    Ok(())
   }
 
-  fn set_menu(&self, #[serde] menu: Option<Vec<MenuItem>>) {
+  fn set_menu(
+    &self,
+    #[serde] menu: Option<Vec<MenuItem>>,
+  ) -> Result<(), deno_error::JsErrorBox> {
+    reject_nul_in_menu(menu.as_deref().unwrap_or_default())?;
     self.api.set_tray_menu(self.tray_id, menu);
+    Ok(())
   }
 
   #[serde]
@@ -4453,11 +5103,8 @@ impl Notification {
     #[scoped] options: Option<NotificationConstructorOptions>,
     #[buffer] icon_bytes: Option<&[u8]>,
     #[serde] extra: Option<NotificationExtra>,
-  ) -> v8::Global<v8::Value> {
-    let api = state
-      .try_borrow::<Arc<dyn DesktopApi>>()
-      .expect("desktop mode enabled")
-      .clone();
+  ) -> Result<v8::Global<v8::Value>, deno_error::JsErrorBox> {
+    let api = constructor_api(state, "Notification")?;
 
     let options = options.unwrap_or(NotificationConstructorOptions {
       body: None,
@@ -4472,27 +5119,29 @@ impl Notification {
     });
 
     let extra = extra.unwrap_or_default();
+    let request = NotificationRequest {
+      title: title.clone(),
+      body: options.body.clone(),
+      icon: icon_bytes.map(|b| b.to_vec()),
+      tag: options.tag.clone().filter(|t| !t.is_empty()),
+      silent: options.silent,
+      require_interaction: options.require_interaction,
+      actions: extra.actions,
+      data: extra.data,
+      schedule_at_ms: None,
+    };
+    reject_nul_in_notification(&request)?;
     // Out-of-range tags / data show nothing (an "error" event, as for any
     // notification the backend refuses).
     let notification_id = if check_notification_ids(
-      options.tag.as_deref().filter(|t| !t.is_empty()),
-      extra.data.as_deref(),
+      request.tag.as_deref(),
+      request.data.as_deref(),
     )
     .is_err()
     {
       0
     } else {
-      api.show_notification(&NotificationRequest {
-        title: title.clone(),
-        body: options.body.clone(),
-        icon: icon_bytes.map(|b| b.to_vec()),
-        tag: options.tag.clone().filter(|t| !t.is_empty()),
-        silent: options.silent,
-        require_interaction: options.require_interaction,
-        actions: extra.actions,
-        data: extra.data,
-        schedule_at_ms: None,
-      })
+      api.show_notification(&request)
     };
 
     let data = options.data.unwrap_or_else(|| {
@@ -4525,7 +5174,7 @@ impl Notification {
     set_event_target_data.call(scope, null.into(), &[notification.into()]);
     let notification = notification.cast::<v8::Value>();
 
-    v8::Global::new(scope, notification)
+    Ok(v8::Global::new(scope, notification))
   }
 
   #[getter]
@@ -5058,36 +5707,95 @@ mod tests {
   #[test]
   fn pending_closes_answer_once() {
     use super::CloseDecision;
+    use super::CloseTimeout;
     use super::PendingCloses;
+    let t0 = std::time::Instant::now();
+    let after = |secs: u64| t0 + std::time::Duration::from_secs(secs);
     let p = PendingCloses::default();
     // Not canceled: close.
-    p.begin(1);
+    p.begin_at(1, t0);
     assert_eq!(p.reply(1, false), CloseDecision::Close);
     // Answered already: the timeout does nothing.
     assert_eq!(p.reply(1, false), CloseDecision::Ignore);
     // Canceled: keep, and the timeout must not close it later.
-    let token = p.begin(2);
+    let token = p.begin_at(2, t0);
     assert_eq!(p.reply(2, true), CloseDecision::Keep);
-    assert_eq!(p.expire(2, token), CloseDecision::Ignore);
-    // Never answered: the timeout closes it.
-    let token = p.begin(3);
-    assert_eq!(p.expire(3, token), CloseDecision::Close);
+    assert_eq!(p.check_timeout_at(2, token, after(5)), CloseTimeout::Ignore);
+    // Never answered: the timeout closes it, not before.
+    let token = p.begin_at(3, t0);
+    assert_eq!(
+      p.check_timeout_at(3, token, after(2)),
+      CloseTimeout::Wait(std::time::Duration::from_secs(3))
+    );
+    assert_eq!(p.check_timeout_at(3, token, after(5)), CloseTimeout::Close);
     assert_eq!(p.reply(3, false), CloseDecision::Ignore);
     // A stale timer from an earlier request leaves a newer one pending.
-    let old = p.begin(4);
+    let old = p.begin_at(4, t0);
     assert_eq!(p.reply(4, true), CloseDecision::Keep);
-    let new = p.begin(4);
-    assert_eq!(p.expire(4, old), CloseDecision::Ignore);
-    assert_eq!(p.expire(4, new), CloseDecision::Close);
+    let new = p.begin_at(4, t0);
+    assert_eq!(p.check_timeout_at(4, old, after(5)), CloseTimeout::Ignore);
+    assert_eq!(p.check_timeout_at(4, new, after(5)), CloseTimeout::Close);
     // close() settles a pending request.
-    let token = p.begin(5);
+    let token = p.begin_at(5, t0);
     p.forget(5);
-    assert_eq!(p.expire(5, token), CloseDecision::Ignore);
+    assert_eq!(p.check_timeout_at(5, token, after(5)), CloseTimeout::Ignore);
     assert_eq!(p.reply(5, false), CloseDecision::Ignore);
     assert_eq!(
       super::CLOSE_REPLY_TIMEOUT,
       std::time::Duration::from_secs(5)
     );
+  }
+
+  #[test]
+  fn pending_closes_do_not_count_sync_dialog_time() {
+    use super::CloseDecision;
+    use super::CloseTimeout;
+    use super::PendingCloses;
+    let t0 = std::time::Instant::now();
+    let after = |secs: u64| t0 + std::time::Duration::from_secs(secs);
+    let p = PendingCloses::default();
+    // A close listener that asks `confirm("Discard changes?")` 1 s in, and
+    // the user takes 30 s to answer: the window must not close under the
+    // open dialog (it used to close at 5 s).
+    let token = p.begin_at(1, t0);
+    p.dialog_began_at(after(1));
+    assert!(matches!(
+      p.check_timeout_at(1, token, after(5)),
+      CloseTimeout::Wait(_)
+    ));
+    assert!(matches!(
+      p.check_timeout_at(1, token, after(30)),
+      CloseTimeout::Wait(_)
+    ));
+    p.dialog_ended_at(after(31));
+    // 1 s before the dialog counted; 4 s are left after it.
+    assert_eq!(
+      p.check_timeout_at(1, token, after(31)),
+      CloseTimeout::Wait(std::time::Duration::from_secs(4))
+    );
+    // The listener answers right after the dialog: kept.
+    assert_eq!(p.reply(1, true), CloseDecision::Keep);
+    // A listener that never answers still closes, 5 s of counted time after
+    // its request (here: 2 s, a 10 s dialog, 3 s).
+    let token = p.begin_at(2, after(40));
+    p.dialog_began_at(after(42));
+    p.dialog_ended_at(after(52));
+    assert!(matches!(
+      p.check_timeout_at(2, token, after(54)),
+      CloseTimeout::Wait(_)
+    ));
+    assert_eq!(p.check_timeout_at(2, token, after(55)), CloseTimeout::Close);
+    // Nested dialogs pause until the outermost ends.
+    let token = p.begin_at(3, after(60));
+    p.dialog_began_at(after(60));
+    p.dialog_began_at(after(61));
+    p.dialog_ended_at(after(62));
+    assert!(matches!(
+      p.check_timeout_at(3, token, after(70)),
+      CloseTimeout::Wait(_)
+    ));
+    p.dialog_ended_at(after(70));
+    assert_eq!(p.check_timeout_at(3, token, after(75)), CloseTimeout::Close);
   }
 
   #[test]
@@ -5389,20 +6097,17 @@ mod tests {
   fn inbox_with_channel(
     launch_urls: Vec<String>,
     launch_files: Vec<String>,
-  ) -> (
-    super::DesktopLaunchInbox,
-    tokio::sync::mpsc::Receiver<DesktopEvent>,
-  ) {
-    let (tx, rx) = tokio::sync::mpsc::channel(16);
+  ) -> (super::DesktopLaunchInbox, super::DesktopEventReceiver) {
+    let (tx, rx) = super::create_desktop_event_channel();
     (
-      super::DesktopLaunchInbox::new(tx, launch_urls, launch_files),
+      super::DesktopLaunchInbox::new(tx.0, launch_urls, launch_files),
       rx,
     )
   }
 
-  fn drain(rx: &mut tokio::sync::mpsc::Receiver<DesktopEvent>) -> Vec<String> {
+  fn drain(rx: &mut super::DesktopEventReceiver) -> Vec<String> {
     let mut out = Vec::new();
-    while let Ok(ev) = rx.try_recv() {
+    while let Some(ev) = rx.0.try_recv() {
       out.push(serde_json::to_value(ev).unwrap().to_string());
     }
     out
@@ -6477,5 +7182,332 @@ mod tests {
       .find(|m| m.name == "setBadge" || m.name == "set_badge")
       .expect("Dock.setBadge");
     assert!(std::panic::catch_unwind(|| method.fast_fn()).is_err());
+  }
+
+  #[test]
+  fn browser_window_adopts_the_bootstrap_window_only_when_it_fits() {
+    use super::BrowserWindowOptions;
+    use super::InitialWindowAttributes;
+    use super::adopts_initial_window;
+
+    let plain = InitialWindowAttributes::default();
+    // No options, or options without creation-time attributes: adopt.
+    assert!(adopts_initial_window(&plain, None));
+    assert!(adopts_initial_window(
+      &plain,
+      Some(&BrowserWindowOptions {
+        title: Some("x".into()),
+        width: Some(300),
+        ..Default::default()
+      })
+    ));
+    // Asking for what the bootstrap window already has: adopt.
+    assert!(adopts_initial_window(
+      &plain,
+      Some(&BrowserWindowOptions {
+        frameless: Some(false),
+        transparent: Some(false),
+        ..Default::default()
+      })
+    ));
+    // A tray panel (frameless, no activation) can't be the framed
+    // bootstrap window: a new window is created instead.
+    let panel = BrowserWindowOptions {
+      frameless: Some(true),
+      no_activate: Some(true),
+      ..Default::default()
+    };
+    assert!(!adopts_initial_window(&plain, Some(&panel)));
+    for options in [
+      BrowserWindowOptions {
+        transparent: Some(true),
+        ..Default::default()
+      },
+      BrowserWindowOptions {
+        transparent_titlebar: Some(true),
+        ..Default::default()
+      },
+    ] {
+      assert!(!adopts_initial_window(&plain, Some(&options)));
+    }
+    // A frameless `initialWindow` is adopted by a frameless request, and
+    // not by one asking for a frame.
+    let frameless = InitialWindowAttributes {
+      frameless: true,
+      no_activate: true,
+      ..Default::default()
+    };
+    assert!(adopts_initial_window(&frameless, Some(&panel)));
+    assert!(!adopts_initial_window(
+      &frameless,
+      Some(&BrowserWindowOptions {
+        frameless: Some(false),
+        ..Default::default()
+      })
+    ));
+  }
+
+  #[test]
+  fn strings_with_nul_are_refused_before_the_backend() {
+    use deno_error::JsErrorClass;
+
+    use super::DesktopValue;
+    use super::FileDialogRequest;
+    use super::FileFilterInfo;
+    use super::MenuItem;
+    use super::NotificationActionInfo;
+    use super::NotificationRequest;
+    use super::reject_nul;
+    use super::reject_nul_in_file_dialog;
+    use super::reject_nul_in_menu;
+    use super::reject_nul_in_notification;
+    use super::reject_nul_in_value;
+    use super::replace_nul;
+
+    let err = reject_nul("the window title", "a\0b").unwrap_err();
+    assert_eq!(err.get_class(), "TypeError");
+    assert!(err.get_message().contains("the window title"));
+    assert!(reject_nul("the window title", "ab").is_ok());
+
+    let item = |label: &str| MenuItem::Item {
+      label: label.into(),
+      id: Some("id".into()),
+      accelerator: None,
+      enabled: true,
+      checked: false,
+      icon: None,
+      tooltip: None,
+    };
+    assert!(reject_nul_in_menu(&[item("ok"), MenuItem::Separator]).is_ok());
+    // Deep in a submenu too.
+    let nested = MenuItem::Submenu {
+      label: "File".into(),
+      items: vec![item("ok"), item("bad\0")],
+    };
+    assert!(reject_nul_in_menu(&[nested]).is_err());
+    assert!(
+      reject_nul_in_menu(&[MenuItem::Role {
+        role: "quit\0".into()
+      }])
+      .is_err()
+    );
+
+    let ok = DesktopValue::Dict(vec![(
+      "k".into(),
+      DesktopValue::List(vec![DesktopValue::String("v".into())]),
+    )]);
+    assert!(reject_nul_in_value(&ok).is_ok());
+    let bad_value = DesktopValue::List(vec![DesktopValue::String("\0".into())]);
+    assert!(reject_nul_in_value(&bad_value).is_err());
+    let bad_key = DesktopValue::Dict(vec![("k\0".into(), DesktopValue::Null)]);
+    assert!(reject_nul_in_value(&bad_key).is_err());
+    // Binary data may hold any byte.
+    assert!(reject_nul_in_value(&DesktopValue::Binary(vec![0, 0])).is_ok());
+
+    let notification = NotificationRequest {
+      title: "t".into(),
+      actions: vec![NotificationActionInfo {
+        action: "a".into(),
+        title: "A\0".into(),
+      }],
+      ..Default::default()
+    };
+    assert!(reject_nul_in_notification(&notification).is_err());
+
+    let dialog = FileDialogRequest {
+      save: false,
+      window_id: 0,
+      title: None,
+      default_path: None,
+      button_label: None,
+      filters: vec![FileFilterInfo {
+        name: "Images".into(),
+        extensions: vec!["png\0".into()],
+      }],
+      files: true,
+      directories: false,
+      multiple: false,
+      show_hidden: false,
+    };
+    assert!(reject_nul_in_file_dialog(&dialog).is_err());
+
+    assert_eq!(replace_nul("a\0b".into()), "a\u{FFFD}b");
+  }
+
+  #[test]
+  fn a_window_with_a_webgpu_surface_is_never_destroyed() {
+    use super::NativeClose;
+    use super::native_close_action;
+    assert_eq!(
+      native_close_action(false, true, false),
+      NativeClose::Destroy
+    );
+    assert_eq!(
+      native_close_action(false, false, true),
+      NativeClose::Destroy
+    );
+    // A surface window is hidden and kept; the app still quits when it was
+    // the last window and the app quits on the last window closing.
+    assert_eq!(
+      native_close_action(true, true, false),
+      NativeClose::HideAndKeep { quit: true }
+    );
+    assert_eq!(
+      native_close_action(true, true, true),
+      NativeClose::HideAndKeep { quit: false }
+    );
+    assert_eq!(
+      native_close_action(true, false, false),
+      NativeClose::HideAndKeep { quit: false }
+    );
+  }
+
+  #[test]
+  fn desktop_event_queue_never_loses_discrete_events() {
+    use super::DesktopEvent;
+    use super::create_desktop_event_channel;
+    let (tx, rx) = create_desktop_event_channel();
+    let motion = |window_id: u32, x: f64| DesktopEvent::MouseMove {
+      window_id,
+      client_x: x,
+      client_y: 0.0,
+      shift: false,
+      control: false,
+      alt: false,
+      meta: false,
+    };
+    let wheel = |dy: f64| DesktopEvent::Wheel {
+      window_id: 1,
+      delta_x: 0.0,
+      delta_y: dy,
+      delta_mode: 0,
+      client_x: 0.0,
+      client_y: 0.0,
+      shift: false,
+      control: false,
+      alt: false,
+      meta: false,
+    };
+    // A flood of motion for one window takes one slot: the latest.
+    for i in 0..10_000 {
+      tx.0.try_send(motion(1, i as f64)).unwrap();
+    }
+    // Wheel deltas add up.
+    tx.0.try_send(wheel(1.0)).unwrap();
+    tx.0.try_send(wheel(2.5)).unwrap();
+    let mut got = vec![];
+    while let Some(ev) = rx.0.try_recv() {
+      got.push(ev);
+    }
+    assert_eq!(got.len(), 2);
+    assert!(matches!(
+      got[0],
+      DesktopEvent::MouseMove { client_x, .. } if client_x == 9999.0
+    ));
+    assert!(matches!(
+      got[1],
+      DesktopEvent::Wheel { delta_y, .. } if delta_y == 3.5
+    ));
+
+    // Fill the queue with motion that can't coalesce (alternating windows).
+    for i in 0..super::DESKTOP_EVENT_CHANNEL_CAPACITY {
+      tx.0.try_send(motion((i % 2) as u32, 0.0)).unwrap();
+    }
+    // Full: more motion is dropped, a bound-function call refused...
+    assert!(tx.0.try_send(motion(5, 0.0)).is_err());
+    assert!(
+      tx.0
+        .try_send(DesktopEvent::BindCall {
+          window_id: 1,
+          name: "f".into(),
+          args: vec![],
+          call_id: 1,
+        })
+        .is_err()
+    );
+    // ...but a context menu closing, a close request and a page load are
+    // still delivered, after the motion, in order.
+    tx.0
+      .try_send(DesktopEvent::ContextMenuClose { window_id: 1 })
+      .unwrap();
+    tx.0
+      .try_send(DesktopEvent::CloseRequested { window_id: 1 })
+      .unwrap();
+    tx.0
+      .try_send(DesktopEvent::PageLoad { window_id: 1 })
+      .unwrap();
+    let mut tail = vec![];
+    while let Some(ev) = rx.0.try_recv() {
+      tail.push(ev);
+    }
+    assert_eq!(tail.len(), super::DESKTOP_EVENT_CHANNEL_CAPACITY + 3);
+    assert!(matches!(
+      tail[tail.len() - 3..],
+      [
+        DesktopEvent::ContextMenuClose { .. },
+        DesktopEvent::CloseRequested { .. },
+        DesktopEvent::PageLoad { .. }
+      ]
+    ));
+
+    // Once the runtime's receiver is gone, sends fail and a weak sender
+    // (a binding's handler) no longer reaches the queue.
+    let weak = tx.0.downgrade();
+    drop(rx);
+    assert!(
+      tx.0
+        .try_send(DesktopEvent::PageLoad { window_id: 1 })
+        .is_err()
+    );
+    drop(tx);
+    assert!(weak.upgrade().is_none());
+  }
+
+  #[tokio::test]
+  async fn desktop_event_queue_wakes_the_receiver() {
+    use super::DesktopEvent;
+    let (tx, rx) = super::create_desktop_event_channel();
+    let sender = tx.0.clone();
+    let recv = tokio::spawn(async move { rx.0.recv().await });
+    tokio::task::yield_now().await;
+    sender
+      .try_send(DesktopEvent::PageLoad { window_id: 7 })
+      .unwrap();
+    let got = tokio::time::timeout(std::time::Duration::from_secs(5), recv)
+      .await
+      .expect("woken")
+      .unwrap();
+    assert!(matches!(got, Some(DesktopEvent::PageLoad { window_id: 7 })));
+  }
+
+  #[test]
+  fn error_report_post_gives_up_on_a_silent_endpoint() {
+    // An HTTPS endpoint that accepts the connection and never answers (not
+    // even the TLS handshake). The post used to wait on it forever.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let held = std::thread::spawn(move || {
+      let conn = listener.accept();
+      std::thread::sleep(std::time::Duration::from_secs(10));
+      drop(conn);
+    });
+    let client = deno_fetch::create_http_client(
+      "deno-test",
+      deno_fetch::CreateHttpClientOptions::default(),
+    )
+    .unwrap();
+    let started = std::time::Instant::now();
+    super::post_error_report_within(
+      client,
+      format!("https://{addr}/report"),
+      "{}".into(),
+      std::time::Duration::from_millis(500),
+    );
+    assert!(
+      started.elapsed() < std::time::Duration::from_secs(5),
+      "took {:?}",
+      started.elapsed()
+    );
+    drop(held);
   }
 }

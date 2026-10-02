@@ -42,6 +42,27 @@ Deno.serve(async (req) => {
 // The initial window (Deno.serve's) reports its size first; window A is
 // created after that, so the report is the initial window's own.
 await waitFor(() => initial !== null, 30000);
+// A tray-style panel created before any plain window: it can't be the framed
+// bootstrap window, so it is a new frameless window, and the bootstrap
+// window is still there for the next plain BrowserWindow (the first
+// BrowserWindow used to adopt it whatever its options, dropping
+// frameless / noActivate / transparent).
+const panel = new BrowserWindow({
+  frameless: true,
+  noActivate: true,
+  width: 240,
+  height: 160,
+});
+const adopted = new BrowserWindow();
+await sleep(1000);
+const panelInfo = {
+  panel: panel.windowId,
+  adopted: adopted.windowId,
+  panelSize: panel.getSize(),
+  adoptedSize: adopted.getSize(),
+};
+panel.close();
+
 const TITLE_A = "E2E Window A";
 const TITLE_B = "E2E Window B";
 const win = titledWindow(TITLE_A, { width: 640, height: 420 });
@@ -71,6 +92,36 @@ await r.step("window API", async () => {
       (Math.abs(initial.innerHeight - want.height) <= 2 ||
         Math.abs(initial.outerHeight - want.height) <= 40),
     { initial, want },
+  );
+
+  r.check(
+    "a frameless panel is a new window; the next plain one adopts the initial window",
+    panelInfo.panel !== panelInfo.adopted &&
+      Math.abs(panelInfo.panelSize[0] - 240) <= 2 &&
+      Math.abs(panelInfo.adoptedSize[0] - initial.innerWidth) <= 2 &&
+      Math.abs(panelInfo.adoptedSize[1] - initial.innerHeight) <= 40,
+    { panelInfo, initial },
+  );
+
+  // laufey's C ABI can't carry an embedded NUL: refused at the op boundary
+  // (it used to abort the whole app).
+  const nulErrors = [
+    () => win.setTitle("a\0b"),
+    () => win.navigate("app://x\0y"),
+    () => (navigator as any).clipboard.writeText("a\0b"),
+  ].map((f) => {
+    try {
+      const p = f();
+      return p instanceof Promise ? p.then(() => null, (e) => e) : null;
+    } catch (e) {
+      return e;
+    }
+  });
+  const nulResults = await Promise.all(nulErrors);
+  r.check(
+    "a string with a NUL is a TypeError, not a crash",
+    nulResults.every((e) => e instanceof TypeError),
+    nulResults.map((e) => e ? describeError(e) : null),
   );
 
   const caps = desktop.windowCapabilities();
@@ -343,6 +394,27 @@ await r.step("window API", async () => {
     desktop.quit() === false,
   );
   win.removeEventListener("close", cancel);
+
+  // --- workers get no native classes ---
+  const w = new Worker(new URL("./worker.ts", import.meta.url), {
+    type: "module",
+  });
+  const fromWorker: any = await new Promise((resolve) => {
+    w.onmessage = (e) => resolve(e.data);
+    w.onerror = (e) => {
+      e.preventDefault();
+      resolve(`worker error: ${e.message}`);
+    };
+    setTimeout(() => resolve("worker timeout"), 15000);
+  });
+  w.terminate();
+  r.check(
+    "workers have no BrowserWindow / Dock / Tray / Notification",
+    ["BrowserWindow", "Dock", "Tray", "Notification"].every((k) =>
+      fromWorker?.[k] === "undefined"
+    ),
+    fromWorker,
+  );
 
   // --- the tray rule ---
   r.check(

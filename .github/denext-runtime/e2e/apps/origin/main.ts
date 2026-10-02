@@ -363,13 +363,20 @@ async function afterPage() {
       ? new Deno.Command("cmd", { args: ["/c", "set"], stdout: "piped" })
       : new Deno.Command("/usr/bin/env", { stdout: "piped" });
     const env = new TextDecoder().decode((await cmd.output()).stdout);
-    const line = env.split(/\r?\n/).find((l) =>
-      l.toUpperCase().startsWith("DENO_SERVE_ADDRESS=")
-    );
+    const lines = env.split(/\r?\n/);
+    const line = (name: string) =>
+      lines.find((l) => l.toUpperCase().startsWith(`${name}=`));
     r.check(
-      "a child process inherits DENO_SERVE_ADDRESS (the env overlay)",
-      line === `DENO_SERVE_ADDRESS=${serveAddressEnv}`,
-      line ?? "(absent)",
+      "a child process inherits DENO_DESKTOP_APP_ORIGIN (the env overlay)",
+      line("DENO_DESKTOP_APP_ORIGIN") === `DENO_DESKTOP_APP_ORIGIN=${ORIGIN}`,
+      line("DENO_DESKTOP_APP_ORIGIN") ?? "(absent)",
+    );
+    // The memory serve address names a listener in this process: a child
+    // Deno that inherited it would serve on a channel nobody can reach.
+    r.check(
+      "a child process does not inherit DENO_SERVE_ADDRESS=memory:",
+      line("DENO_SERVE_ADDRESS") === undefined,
+      line("DENO_SERVE_ADDRESS") ?? "(absent)",
     );
   } catch (e) {
     r.fail("child process env", describeError(e));
