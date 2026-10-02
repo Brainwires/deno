@@ -132,6 +132,11 @@ pub struct LaunchTargets {
 /// - Everything else is ignored: an argument starting with `-` (a flag, which
 ///   also keeps option values like `--flag=/path` out), the value that
 ///   follows the host's `--runtime` option, and anything else.
+/// - A `--` ends the options: every argument after it is classified as a
+///   positional one by the rules above, even one that starts with `-` or is
+///   `--runtime`. The Windows scheme registration runs `"<exe>" -- "%1"`
+///   (see `scheme_handler::windows::command_line`), so a link that closes
+///   the quotes around `%1` can only add more positional arguments.
 pub fn parse_launch_args(
   args: &[String],
   cwd: Option<&Path>,
@@ -141,12 +146,22 @@ pub fn parse_launch_args(
   let cwd = cwd.filter(|c| c.is_absolute());
   let mut targets = LaunchTargets::default();
   let mut iter = args.iter();
+  let mut options_ended = false;
   while let Some(arg) = iter.next() {
-    if HOST_OPTIONS_WITH_VALUE.contains(&arg.as_str()) {
-      iter.next();
-      continue;
+    if !options_ended {
+      if arg == "--" {
+        options_ended = true;
+        continue;
+      }
+      if HOST_OPTIONS_WITH_VALUE.contains(&arg.as_str()) {
+        iter.next();
+        continue;
+      }
+      if arg.starts_with('-') {
+        continue;
+      }
     }
-    if arg.is_empty() || arg.starts_with('-') {
+    if arg.is_empty() {
       continue;
     }
     if let Ok(url) = Url::parse(arg) {
@@ -247,6 +262,51 @@ mod tests {
       classify_open_url("file:///C:/Users/me/My%20Notes.txt"),
       OpenedItem::File(PathBuf::from("C:\\Users\\me\\My Notes.txt"))
     );
+  }
+
+  #[test]
+  fn arguments_after_the_terminator_are_positional() {
+    let schemes = strings(&["acme"]);
+    let never = |_: &Path| false;
+    // Before `--`, `--runtime` takes the next argument as its value; after
+    // it, `--runtime` and the arguments that follow are positional, so the
+    // link after it is still a link and nothing is consumed as a value.
+    let targets = parse_launch_args(
+      &strings(&["--", "acme://a", "--runtime", "acme://b", "--x=acme://c"]),
+      None,
+      &schemes,
+      never,
+    );
+    assert_eq!(targets.urls, strings(&["acme://a", "acme://b"]));
+    // Without the terminator the same `--runtime` swallows `acme://b`.
+    let targets = parse_launch_args(
+      &strings(&["acme://a", "--runtime", "acme://b"]),
+      None,
+      &schemes,
+      never,
+    );
+    assert_eq!(targets.urls, strings(&["acme://a"]));
+    // A second `--` after the first is an ordinary (ignored) argument.
+    let targets = parse_launch_args(
+      &strings(&["--", "--", "acme://a"]),
+      None,
+      &schemes,
+      never,
+    );
+    assert_eq!(targets.urls, strings(&["acme://a"]));
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn a_dash_file_after_the_terminator_is_a_file() {
+    let exists = |p: &Path| p == Path::new("/home/me/-notes.txt");
+    let cwd = Some(Path::new("/home/me"));
+    let targets =
+      parse_launch_args(&strings(&["--", "-notes.txt"]), cwd, &[], exists);
+    assert_eq!(targets.files, vec![PathBuf::from("/home/me/-notes.txt")]);
+    let targets =
+      parse_launch_args(&strings(&["-notes.txt"]), cwd, &[], exists);
+    assert!(targets.files.is_empty());
   }
 
   #[cfg(unix)]

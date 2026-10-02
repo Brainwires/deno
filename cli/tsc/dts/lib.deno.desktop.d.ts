@@ -947,7 +947,8 @@ declare namespace Deno {
      * drag-out on this backend
      * (`Deno.desktop.windowCapabilities().fileDragOut`: none on Winit, and
      * CEF on Linux needs an X11 display). Rejects with a `TypeError` for a
-     * wrong argument.
+     * wrong argument, and with `Deno.errors.NotCapable` unless every path is
+     * readable (`--allow-read`): the drag hands the files to another app.
      *
      * - macOS: `beginDraggingSessionWithItems` (an `NSURL` per file).
      * - Windows: `DoDragDrop` with a `CF_HDROP` data object.
@@ -1970,8 +1971,10 @@ declare namespace Deno {
      * reports the handler the OS sees after the call.
      *
      * - Windows: writes `HKCU\Software\Classes\<scheme>` (`URL Protocol`,
-     *   `DefaultIcon`, `shell\open\command` = `"<this exe>" "%1"`). A
-     *   per-user registration shadows a machine-wide one.
+     *   `DefaultIcon`, `shell\open\command` = `"<this exe>" -- "%1"`: the
+     *   `--` makes everything after it a positional argument, so a link can
+     *   never add options). A per-user registration shadows a machine-wide
+     *   one; an older registration without the `--` is rewritten.
      * - macOS: registers the app bundle with LaunchServices; with `force`,
      *   also makes it the scheme's default handler. Requires running from
      *   the app bundle.
