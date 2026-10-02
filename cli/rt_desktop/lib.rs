@@ -1522,9 +1522,19 @@ impl denort::desktop::DesktopApi for WefDesktopApi {
   }
 
   fn close_notification(&self, notification_id: u32) {
-    if let Some(handle) =
-      self.notifications.lock().unwrap().get(&notification_id)
-    {
+    // Copy the handle out and drop the lock BEFORE closing: the backend may
+    // wait for the thread that delivers notification events (Linux runs a
+    // close on laufey's own GLib thread, macOS on the main thread), and that
+    // thread's event callback takes this lock to forget a closed
+    // notification. Holding it across close() deadlocked the two as soon as
+    // a close event was in flight.
+    let handle = self
+      .notifications
+      .lock()
+      .unwrap()
+      .get(&notification_id)
+      .copied();
+    if let Some(handle) = handle {
       handle.close();
     }
   }
