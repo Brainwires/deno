@@ -42,10 +42,11 @@ denort = { path = "../rt", default-features = false }
 # tasks, auth sessions and their cancel, non-blocking WebKitGTK scheme
 # bodies, CEF Local Network Access for registered schemes, in-process
 # dialogs, and the security audit's "--" end of options / packaged --runtime
-# / deep-link switch filter / pinned launch keys), pinned to
+# / deep-link switch filter / pinned launch keys, the first window brought
+# to the front at launch on macOS), pinned to
 # a commit of the Brainwires/laufey fork. The host built from the same commit
 # must be used with it (the API version check is exact).
-laufey = { git = "https://github.com/Brainwires/laufey", rev = "b99306854af148d37e1d784f24564ac99a870840" }
+laufey = { git = "https://github.com/Brainwires/laufey", rev = "e1bfe17c9111c3829263418d80d90bade7112f35" }
 libsui.workspace = true
 
 bytes.workspace = true
