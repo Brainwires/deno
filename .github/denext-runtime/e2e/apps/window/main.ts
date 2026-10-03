@@ -12,6 +12,7 @@ import {
   desktop,
   html,
   once,
+  OS,
   page,
   Report,
   shared,
@@ -24,19 +25,38 @@ import { macWindowState, userClose } from "../_shared/input.ts";
 const r = new Report("window");
 
 let initial: any = null;
+let initialAt = 0;
+// The initial window's first animation frame: the page asks for one as it
+// loads, while the window is still hidden; it runs once the window is
+// revealed and on screen (a window opened behind the active app reads as
+// occluded, and the engine runs no frames for it).
+let frame: any = null;
+let frameAt = 0;
 Deno.serve(async (req) => {
   const s = shared(req);
   if (s) return s;
   const url = new URL(req.url);
   if (url.pathname === "/initial") {
     const body = await req.json();
-    initial ??= body;
+    if (initial === null) {
+      initial = body;
+      initialAt = Date.now();
+    }
+    return new Response("ok");
+  }
+  if (url.pathname === "/frame") {
+    const body = await req.json();
+    if (frame === null) {
+      frame = body;
+      frameAt = Date.now();
+    }
     return new Response("ok");
   }
   return html(page(
     "e2e window",
     "",
-    `fetch("/initial", { method: "POST", body: JSON.stringify({ innerWidth, innerHeight, outerWidth, outerHeight }) });`,
+    `fetch("/initial", { method: "POST", body: JSON.stringify({ innerWidth, innerHeight, outerWidth, outerHeight }) });
+requestAnimationFrame(() => fetch("/frame", { method: "POST", body: JSON.stringify({ visibilityState: document.visibilityState, innerWidth, innerHeight, outerWidth, outerHeight }) }));`,
   ));
 });
 
@@ -108,6 +128,30 @@ await r.step("window API", async () => {
         Math.abs(panelInfo.adoptedSize[1] - initial.outerHeight) <= 40),
     { panelInfo, initial },
   );
+
+  await waitFor(() => frame !== null, 10000);
+  r.check(
+    "the initial window draws a frame within 5 s of its page loading",
+    frame !== null && frameAt - initialAt <= 5000,
+    { frame, afterPageLoadMs: frame ? frameAt - initialAt : null },
+  );
+  r.check(
+    "the initial window's page is visible when it draws",
+    frame?.visibilityState === "visible",
+    frame,
+  );
+  if (OS === "darwin") {
+    // WKWebView answered 0 until laufey gave WebKit the window frame.
+    r.check(
+      "the page's outerWidth / outerHeight are the window's, not 0",
+      frame !== null && frame.innerWidth > 0 &&
+        frame.outerWidth >= frame.innerWidth &&
+        frame.outerHeight > frame.innerHeight,
+      frame,
+    );
+  } else {
+    r.set("initialFrameSizes", frame);
+  }
 
   // laufey's C ABI can't carry an embedded NUL: refused at the op boundary
   // (it used to abort the whole app).
