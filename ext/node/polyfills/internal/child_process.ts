@@ -1084,7 +1084,8 @@ function withoutProcessLocalEnv(env) {
     const value = env[key];
     const ownValue = own.get(isWindows ? StringPrototypeToUpperCase(key) : key);
     if (
-      ownValue !== undefined && value !== undefined && String(value) === ownValue
+      ownValue !== undefined && value !== undefined &&
+      String(value) === ownValue
     ) {
       drop.add(key);
     }
