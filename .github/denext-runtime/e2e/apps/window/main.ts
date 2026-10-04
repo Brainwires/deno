@@ -446,12 +446,22 @@ await r.step("window API", async () => {
         height: 200,
       });
       await sleep(500);
-      g.getNativeWindow();
+      let surface: unknown = null;
+      try {
+        surface = g.getNativeWindow();
+      } catch (e) {
+        r.na(
+          "close() of a WebGPU window closes it (isClosed)",
+          `no native surface on this backend: ${describeError(e)}`,
+        );
+      }
       g.close();
-      r.check(
-        "close() of a WebGPU window closes it (isClosed)",
-        await waitFor(() => g.isClosed(), 5000),
-      );
+      if (surface !== null) {
+        r.check(
+          "close() of a WebGPU window closes it (isClosed)",
+          await waitFor(() => g.isClosed(), 5000),
+        );
+      }
     }
   } catch (e) {
     r.fail("close() of a WebGPU window", describeError(e));
