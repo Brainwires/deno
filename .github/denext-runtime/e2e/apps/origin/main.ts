@@ -25,6 +25,8 @@ const r = new Report("origin");
 const ORIGIN = r.params.origin ?? "denexte2e://app";
 const appOriginEnv = Deno.env.get("DENO_DESKTOP_APP_ORIGIN") ?? null;
 const wsOriginEnv = Deno.env.get("DENO_DESKTOP_WS_ORIGIN") ?? null;
+// The relay URL with this launch's token: what the page dials (plus a path).
+const wsUrlEnv = Deno.env.get("DENO_DESKTOP_WS_URL") ?? null;
 const serveAddressEnv = Deno.env.get("DENO_SERVE_ADDRESS") ?? null;
 
 const SCRIPT = `
@@ -65,7 +67,7 @@ try {
 step("hang");
 // A WebSocket through the relay.
 out.ws = await new Promise((resolve) => {
-  const res = { url: info.wsOrigin + "/ws", messages: [] };
+  const res = { url: info.wsUrl + "/ws", messages: [] };
   let ws;
   const timer = setTimeout(() => { res.timeout = true; try { ws.close(); } catch {} resolve(res); }, 8000);
   try { ws = new WebSocket(res.url); } catch (e) { res.error = String(e); clearTimeout(timer); resolve(res); return; }
@@ -75,6 +77,17 @@ out.ws = await new Promise((resolve) => {
   ws.onclose = (ev) => { res.close = ev.code; if (res.messages.length < 2) { clearTimeout(timer); resolve(res); } };
 });
 step("websocket");
+// The page's own POST, and one from a document of another (opaque) origin:
+// the scheme bridge marks only the second (x-deno-desktop-cross-origin).
+try {
+  await fetch("/marker/same", { method: "POST", body: "x" });
+  const frame = document.createElement("iframe");
+  frame.sandbox = "allow-scripts";
+  frame.srcdoc = "<script>fetch(" + JSON.stringify(location.origin + "/marker/cross") +
+    ", { method: 'POST', mode: 'no-cors', body: 'x' }).catch(() => {});</" + "script>";
+  document.body.appendChild(frame);
+} catch (e) { post("/log", { error: "marker: " + String(e) }); }
+step("marker");
 // A cross-origin fetch carries the app origin.
 try {
   const res = await fetch("http://127.0.0.1:" + info.tcpPort + "/cors", { cache: "no-store", signal: AbortSignal.timeout(10000) });
@@ -87,6 +100,11 @@ await post("/result", out);
 let pageResult: any = null;
 const hang = { started: false, cancelled: false };
 let pageRequest: Record<string, unknown> | null = null;
+// What the app saw of /marker/<kind> requests.
+const markerSeen: Record<
+  string,
+  { marker: string | null; origin: string | null; site: string | null }
+> = {};
 const wsUpgrades: Record<string, unknown>[] = [];
 
 Deno.serve((req, info) => {
@@ -98,6 +116,7 @@ Deno.serve((req, info) => {
       return Response.json({
         tcpPort,
         wsOrigin: wsOriginEnv,
+        wsUrl: wsUrlEnv,
         reqUrl: req.url,
         remoteAddr: info.remoteAddr,
       });
@@ -148,6 +167,14 @@ Deno.serve((req, info) => {
       socket.onmessage = (ev) => socket.send(`echo:${ev.data}`);
       return response;
     }
+    case "/marker/same":
+    case "/marker/cross":
+      markerSeen[url.pathname.slice("/marker/".length)] = {
+        marker: req.headers.get("x-deno-desktop-cross-origin"),
+        origin: req.headers.get("origin"),
+        site: req.headers.get("sec-fetch-site"),
+      };
+      return new Response("ok");
     case "/log":
       return req.text().then((t) => {
         r.mark(`page: ${t}`);
@@ -220,9 +247,15 @@ async function rawStatus(port: number, head: string): Promise<string> {
   }
 }
 
-function upgrade(host: string, origins: string[]): string {
+/** A WebSocket handshake to `target` (by default `/ws` through this launch's
+ * relay token). */
+function upgrade(
+  host: string,
+  origins: string[],
+  target = `${new URL(wsUrlEnv ?? "ws://x/").pathname}/ws`,
+): string {
   return [
-    "GET /ws HTTP/1.1",
+    `GET ${target} HTTP/1.1`,
     `Host: ${host}`,
     "Upgrade: websocket",
     "Connection: Upgrade",
@@ -241,6 +274,7 @@ async function afterPage() {
   r.set("env", {
     DENO_DESKTOP_APP_ORIGIN: appOriginEnv,
     DENO_DESKTOP_WS_ORIGIN: wsOriginEnv,
+    DENO_DESKTOP_WS_URL: wsUrlEnv ? "(set)" : null,
     DENO_SERVE_ADDRESS: serveAddressEnv,
   });
 
@@ -314,11 +348,37 @@ async function afterPage() {
     { page: p.crossOrigin, seen: tcpOrigins },
   );
 
+  // --- requests from documents of another origin are marked ---
+  r.check(
+    "the page's own POST is not marked cross-origin",
+    markerSeen.same !== undefined && markerSeen.same.marker === null,
+    markerSeen.same,
+  );
+  if (await waitFor(() => markerSeen.cross !== undefined, 5000)) {
+    r.check(
+      "a POST from an opaque-origin frame is marked x-deno-desktop-cross-origin: 1",
+      markerSeen.cross.marker === "1",
+      markerSeen.cross,
+    );
+  } else {
+    r.na(
+      "a POST from an opaque-origin frame is marked x-deno-desktop-cross-origin: 1",
+      "the engine did not deliver a sandboxed frame's no-cors POST to the app scheme",
+    );
+  }
+
   // --- the page's WebSocket through the relay ---
   r.check(
     "DENO_DESKTOP_WS_ORIGIN is a loopback ws:// address",
     /^ws:\/\/127\.0\.0\.1:\d+$/.test(wsOriginEnv ?? ""),
     wsOriginEnv,
+  );
+  r.check(
+    "DENO_DESKTOP_WS_URL is the relay origin + /.deno-desktop-relay/<token>",
+    wsUrlEnv !== null && wsOriginEnv !== null &&
+      wsUrlEnv.startsWith(`${wsOriginEnv}/.deno-desktop-relay/`) &&
+      /\/\.deno-desktop-relay\/[0-9a-f]{64}$/.test(wsUrlEnv),
+    wsUrlEnv ? "(set)" : null,
   );
   r.check(
     "the page's WebSocket reaches Deno.serve through the relay",
@@ -330,6 +390,12 @@ async function afterPage() {
     wsUpgrades.length >= 1 && wsUpgrades[0].origin === ORIGIN &&
       wsUpgrades[0].transport === "memory",
     wsUpgrades,
+  );
+  r.check(
+    "the relay hands Deno.serve the page's path, without its token",
+    wsUpgrades.length >= 1 &&
+      new URL(String(wsUpgrades[0].url)).pathname === "/ws",
+    wsUpgrades[0]?.url,
   );
 
   // --- the relay refuses what a page elsewhere (or a local process) sends ---
@@ -358,7 +424,16 @@ async function afterPage() {
         `GET / HTTP/1.1\r\nHost: ${host}\r\nOrigin: ${ORIGIN}\r\n\r\n`,
         "400",
       ],
-      ["exact app origin", upgrade(host, [ORIGIN]), "101"],
+      // The app origin is not enough: another app at the same origin (every
+      // app without one runs at app://localhost) or any local process can
+      // send it. Only the page, which got the token from the app, gets in.
+      ["exact app origin, no token", upgrade(host, [ORIGIN], "/ws"), "403"],
+      [
+        "exact app origin, another token",
+        upgrade(host, [ORIGIN], `/.deno-desktop-relay/${"0".repeat(64)}/ws`),
+        "403",
+      ],
+      ["exact app origin + token", upgrade(host, [ORIGIN]), "101"],
     ];
     for (const [name, head, want] of cases) {
       const got = await rawStatus(Number(port), head);
@@ -367,7 +442,7 @@ async function afterPage() {
     // Only the exact-origin upgrade reached Deno.serve.
     await sleep(300);
     r.check(
-      "relay: only the exact-origin upgrade reached Deno.serve",
+      "relay: only the exact-origin upgrade with the token reached Deno.serve",
       wsUpgrades.length === before + 1,
       wsUpgrades.slice(before),
     );
@@ -422,6 +497,12 @@ async function afterPage() {
       "a child process does not inherit DENO_SERVE_ADDRESS=memory:",
       line("DENO_SERVE_ADDRESS") === undefined,
       line("DENO_SERVE_ADDRESS") ?? "(absent)",
+    );
+    // The relay token is the app's secret.
+    r.check(
+      "a child process does not inherit DENO_DESKTOP_WS_URL (the relay token)",
+      line("DENO_DESKTOP_WS_URL") === undefined,
+      line("DENO_DESKTOP_WS_URL") === undefined ? "(absent)" : "(present)",
     );
   } catch (e) {
     r.fail("child process env", describeError(e));

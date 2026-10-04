@@ -29,19 +29,29 @@
 //! WebSocket to its own server, the desktop runtime binds a narrow TCP loopback
 //! that only accepts WebSocket upgrades and proxies them into the in-memory
 //! listener ([`proxy_ws_connection`] below). The relay is reachable by any
-//! local process and by any page in any browser on the machine, so it admits
-//! an upgrade only when its `Origin` header is exactly the app origin — a
-//! browser page elsewhere cannot forge that header, which closes the
-//! cross-site WebSocket hijacking hole a plain loopback listener has. (A local
-//! native process can still set any header; the relay is not a boundary
-//! against other software running as the same user — no loopback listener
-//! is.) Because the page's origin no longer carries the loopback address, the
-//! relay's `ws://127.0.0.1:PORT` address is published to the app's Deno code
-//! through [`WS_ORIGIN_ENV`] (set before user code runs), and the page origin
-//! through [`APP_ORIGIN_ENV`]; the app hands them to the page however it
-//! likes. Plain HTTP against the loopback is rejected with 400 so the proxy is
+//! local process, any other user's included, and by any page in any browser
+//! on the machine, so it admits an upgrade only when
+//!
+//! * its request target starts with `/.deno-desktop-relay/<token>`
+//!   ([`RELAY_PATH_PREFIX`]), where `<token>` is a 256-bit secret drawn once
+//!   per launch ([`relay_token`]). Only the app knows it: it is published to
+//!   the app's Deno code in [`WS_URL_ENV`] (never inherited by child
+//!   processes), and the app hands it to its page. An `Origin` header alone
+//!   was not enough: every app without a configured origin runs at the same
+//!   default `app://localhost`, so one such app's page could open another's
+//!   relay, and any local process (another user's too) can send any header;
+//! * and its `Origin` header is exactly the app origin — a browser page
+//!   elsewhere cannot forge that header, which closes the cross-site
+//!   WebSocket hijacking hole a plain loopback listener has.
+//!
+//! The relay strips the prefix before forwarding, so the app's server sees the
+//! path the page asked for (`ws://127.0.0.1:PORT/.deno-desktop-relay/<token>/ws`
+//! reaches it as `GET /ws`). The relay's origin (`ws://127.0.0.1:PORT`) stays
+//! published in [`WS_ORIGIN_ENV`] and the page origin in [`APP_ORIGIN_ENV`].
+//! Plain HTTP against the loopback is rejected with 400 so the proxy is
 //! WebSocket-only — regular requests still have to come through the scheme
-//! handler.
+//! handler. (The relay is still not a boundary against native code running
+//! as the same user, which can read the app's environment and memory.)
 //!
 //! # What the `Deno.serve` handler sees
 //!
@@ -77,9 +87,27 @@
 //! * a request carrying [`RELAY_MARKER_HEADER`] came through the loopback
 //!   relay. The relay removes every copy the client sent and adds exactly
 //!   one, `x-deno-desktop-relay: 1`, to every request it forwards;
-//! * a request without it came from the scheme handler (the app's page): the
-//!   bridge removes the header, in any case, from every request the webview
-//!   delivers, and from every response it returns.
+//! * a request without it came from the scheme handler: the webview loaded
+//!   it. The bridge removes the header, in any case, from every request the
+//!   webview delivers, and from every response it returns. That is NOT proof
+//!   the app's own page sent it: any document the webview shows can address
+//!   the app origin (a cross-origin iframe, a remote page the main frame
+//!   navigated to, a form another site posts to the app);
+//! * a request the webview loaded for a document of another origin carries
+//!   exactly one [`CROSS_ORIGIN_MARKER_HEADER`],
+//!   `x-deno-desktop-cross-origin: 1`: the bridge adds it when the request's
+//!   `Origin` is present and not exactly the app origin (`null` included), or
+//!   its `Sec-Fetch-Site` is anything but `same-origin` / `none`, after
+//!   removing every copy the client sent. The request is still forwarded (an
+//!   identity provider's `form_post` callback is a legitimate cross-site
+//!   POST), with its own `Origin` / `Sec-Fetch-*` headers;
+//! * so an unmarked request either came from a document at the app origin or
+//!   carried neither header. Engines send `Origin` with every request whose
+//!   method is not `GET` / `HEAD` (and with every CORS request), so an
+//!   unmarked state-changing request did not come from a foreign document;
+//!   an unmarked `GET` / `HEAD` may be a navigation or a no-CORS load
+//!   (`<img>`, `<script>`) by any document, as on the web, and must not change
+//!   state.
 //!
 //! The relay forwards only the client's request head (never bytes pipelined
 //! after it), then reads the server's response head: anything but `101
@@ -128,10 +156,25 @@ pub const APP_ORIGIN_ENV: &str = "DENO_DESKTOP_APP_ORIGIN";
 /// starts.
 pub const WS_ORIGIN_ENV: &str = "DENO_DESKTOP_WS_ORIGIN";
 
+/// Environment variable through which the app's Deno code learns the URL
+/// its page dials for a WebSocket to its own server:
+/// `ws://127.0.0.1:<port>/.deno-desktop-relay/<token>`, to which the page
+/// appends its path (`…/<token>/ws?room=1`). Kept to this process (child
+/// processes don't inherit it): the token is the relay's secret.
+pub const WS_URL_ENV: &str = "DENO_DESKTOP_WS_URL";
+
+/// The request-target prefix the relay requires, followed by
+/// [`relay_token`] (see the module docs).
+pub const RELAY_PATH_PREFIX: &str = "/.deno-desktop-relay/";
+
 /// The request header that marks a connection from the WebSocket loopback
 /// relay (see the module docs). Lower-case: header names are compared
 /// case-insensitively.
 pub const RELAY_MARKER_HEADER: &str = "x-deno-desktop-relay";
+
+/// The request header the scheme bridge adds to a request a document of
+/// another origin made (see the module docs). Lower-case.
+pub const CROSS_ORIGIN_MARKER_HEADER: &str = "x-deno-desktop-cross-origin";
 
 /// The largest request body the scheme handler forwards to `Deno.serve`; a
 /// larger one is answered with `413 Payload Too Large`. Matches denext's
@@ -141,6 +184,33 @@ pub const MAX_BRIDGE_REQUEST_BODY: usize = 4 * 1024 * 1024;
 /// The `ws://` origin the page dials to reach the relay bound at `addr`.
 pub fn ws_relay_origin(addr: SocketAddr) -> String {
   format!("ws://127.0.0.1:{}", addr.port())
+}
+
+/// The URL the page dials (plus its own path) for the relay bound at `addr`:
+/// [`WS_URL_ENV`]. `None` when no relay token could be drawn (the relay then
+/// refuses every upgrade).
+pub fn ws_relay_url(addr: SocketAddr) -> Option<String> {
+  Some(format!(
+    "{}{RELAY_PATH_PREFIX}{}",
+    ws_relay_origin(addr),
+    relay_token()?
+  ))
+}
+
+/// This launch's relay secret: 32 random bytes as 64 lowercase hex digits,
+/// drawn once. `None` if the system RNG failed, in which case the relay
+/// admits nothing (never a guessable token).
+pub fn relay_token() -> Option<&'static str> {
+  static TOKEN: std::sync::OnceLock<Option<String>> =
+    std::sync::OnceLock::new();
+  TOKEN
+    .get_or_init(|| {
+      let mut bytes = [0u8; 32];
+      let provider = rustls::crypto::aws_lc_rs::default_provider();
+      provider.secure_random.fill(&mut bytes).ok()?;
+      Some(bytes.iter().map(|b| format!("{b:02x}")).collect())
+    })
+    .as_deref()
 }
 
 type BridgeError = Box<dyn std::error::Error + Send + Sync>;
@@ -265,6 +335,10 @@ async fn bridge(
   // The authority the page addressed is the origin's host (checked above), so
   // `request.url` on the Deno side reads `http+memory://<host>/...`.
   builder = builder.header(HOST, origin.host());
+  // A document of another origin made it (see the module docs).
+  if is_cross_origin_request(headers, origin) {
+    builder = builder.header(CROSS_ORIGIN_MARKER_HEADER, "1");
+  }
   let request = builder.body(Full::new(bytes::Bytes::from(body)))?;
 
   // The webview may cancel the request (navigation away, an aborted fetch,
@@ -516,6 +590,7 @@ fn should_skip_request_header(name: &str) -> bool {
   name.eq_ignore_ascii_case(HOST.as_str())
     || is_hop_by_hop_header(name)
     || is_relay_marker(name)
+    || name.trim().eq_ignore_ascii_case(CROSS_ORIGIN_MARKER_HEADER)
     // The body is forwarded fully buffered (`Full`), and hyper sets the
     // length of what is actually sent. Forwarding the webview's own
     // `content-length` could contradict it (a body the backend read short,
@@ -523,6 +598,30 @@ fn should_skip_request_header(name: &str) -> bool {
     // server wait for a continuation that is never asked for.
     || name.eq_ignore_ascii_case("content-length")
     || name.eq_ignore_ascii_case("expect")
+}
+
+/// Whether the webview loaded the request for a document of another origin:
+/// an `Origin` that is present and not exactly the app origin (`null`, a
+/// remote page, another host on the app's scheme), or a `Sec-Fetch-Site`
+/// other than `same-origin` / `none` (`none`: the user started it, as by
+/// typing a URL). Engines don't send `Sec-Fetch-*` to every custom scheme,
+/// so `Origin` is the check that always applies to a state-changing request.
+fn is_cross_origin_request(
+  headers: &[(String, String)],
+  origin: &AppOrigin,
+) -> bool {
+  headers.iter().any(|(name, value)| {
+    let name = name.trim();
+    if name.eq_ignore_ascii_case("origin") {
+      return !origin.matches_origin_header(value);
+    }
+    if name.eq_ignore_ascii_case("sec-fetch-site") {
+      let site = value.trim_matches([' ', '\t']);
+      return !site.eq_ignore_ascii_case("same-origin")
+        && !site.eq_ignore_ascii_case("none");
+    }
+    false
+  })
 }
 
 /// Whether a header name is [`RELAY_MARKER_HEADER`] (any case, surrounding
@@ -639,9 +738,14 @@ enum RelayDecision {
   /// origin: a page somewhere else on this machine is trying to reach the
   /// app's server.
   ForbiddenOrigin,
+  /// A WebSocket upgrade whose request target does not carry this launch's
+  /// relay token ([`relay_target`]).
+  ForbiddenToken,
 }
 
-/// Classify a request head (everything up to and including the blank line).
+/// Classify a request head (everything up to and including the blank line),
+/// given this launch's relay token (`None`: none could be drawn, nothing is
+/// admitted).
 ///
 /// The `Origin` header is the browser-controlled part of a WebSocket
 /// handshake: a page cannot set it, and the browser fills it with the page's
@@ -649,9 +753,16 @@ enum RelayDecision {
 /// admits only the app's own page. Exactly one `Origin` header is required —
 /// a duplicated header is how a proxy or a confused client smuggles a second
 /// value past a check that only looks at the first.
-fn classify_upgrade(head: &[u8], origin: &AppOrigin) -> RelayDecision {
+fn classify_upgrade(
+  head: &[u8],
+  origin: &AppOrigin,
+  token: Option<&str>,
+) -> RelayDecision {
   if !is_get_request(head) || !is_websocket_upgrade(head) {
     return RelayDecision::NotWebSocket;
+  }
+  if relay_target(head, token).is_none() {
+    return RelayDecision::ForbiddenToken;
   }
   let mut origins = header_values(head, b"origin");
   let (Some(value), None) = (origins.next(), origins.next()) else {
@@ -661,6 +772,42 @@ fn classify_upgrade(head: &[u8], origin: &AppOrigin) -> RelayDecision {
     Ok(value) if origin.matches_origin_header(value) => RelayDecision::Proxy,
     _ => RelayDecision::ForbiddenOrigin,
   }
+}
+
+/// The request target the app's server gets for a head whose target is
+/// `/.deno-desktop-relay/<token>[rest]`: `rest` (`/` when empty, a `/` put
+/// before a bare query). `None` when the target doesn't carry exactly this
+/// launch's token, or there is no token. The token is compared in constant
+/// time.
+fn relay_target(head: &[u8], token: Option<&str>) -> Option<Vec<u8>> {
+  let token = token?;
+  let line_end = head.iter().position(|&b| b == b'\r' || b == b'\n')?;
+  let mut parts = head[..line_end].split(|&b| b == b' ');
+  let (Some(_method), Some(target), Some(_version), None) =
+    (parts.next(), parts.next(), parts.next(), parts.next())
+  else {
+    return None;
+  };
+  let after_prefix = target.strip_prefix(RELAY_PATH_PREFIX.as_bytes())?;
+  let len = token.len();
+  let candidate = after_prefix.get(..len)?;
+  if !constant_time_eq(candidate, token.as_bytes()) {
+    return None;
+  }
+  let rest = &after_prefix[len..];
+  match rest.first() {
+    None => Some(b"/".to_vec()),
+    Some(b'/') => Some(rest.to_vec()),
+    Some(b'?') => Some([b"/".as_slice(), rest].concat()),
+    // `<token>x…`: not this token.
+    Some(_) => None,
+  }
+}
+
+/// Byte equality whose time does not depend on where the inputs differ.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+  a.len() == b.len()
+    && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
 async fn proxy_ws_connection(
@@ -673,8 +820,20 @@ async fn proxy_ws_connection(
     return Ok(());
   };
 
-  match classify_upgrade(&head[..end_of_head], origin) {
-    RelayDecision::Proxy => {}
+  let token = relay_token();
+  let target = match classify_upgrade(&head[..end_of_head], origin, token) {
+    RelayDecision::Proxy => {
+      // Present: `classify_upgrade` checked it.
+      relay_target(&head[..end_of_head], token).unwrap_or_default()
+    }
+    RelayDecision::ForbiddenToken => {
+      log::debug!(
+        "[desktop] ws relay: refused an upgrade without this launch's token"
+      );
+      let _ = tcp.write_all(RELAY_403_TOKEN_RESPONSE).await;
+      let _ = tcp.shutdown().await;
+      return Ok(());
+    }
     RelayDecision::NotWebSocket => {
       let _ = tcp.write_all(RELAY_400_RESPONSE).await;
       let _ = tcp.shutdown().await;
@@ -691,7 +850,7 @@ async fn proxy_ws_connection(
       let _ = tcp.shutdown().await;
       return Ok(());
     }
-  }
+  };
 
   // Open the in-process connection to Deno.serve and forward the upgrade.
   let mut mem = match connect_memory(DESKTOP_SERVE_NAME) {
@@ -705,6 +864,7 @@ async fn proxy_ws_connection(
     &mut tcp,
     &mut mem,
     &head[..end_of_head],
+    &target,
     UPSTREAM_HEAD_TIMEOUT,
   )
   .await
@@ -721,13 +881,16 @@ async fn relay_upgrade<C, U>(
   client: &mut C,
   upstream: &mut U,
   head: &[u8],
+  target: &[u8],
   timeout: std::time::Duration,
 ) -> std::io::Result<()>
 where
   C: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
   U: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
-  upstream.write_all(&relay_request_head(head)).await?;
+  upstream
+    .write_all(&relay_request_head(head, target))
+    .await?;
   let response = read_response_head(upstream, timeout).await?;
   match response {
     Some((buf, end)) if is_switching_protocols(&buf[..end]) => {
@@ -753,17 +916,27 @@ where
   Ok(())
 }
 
-/// The request head the relay sends upstream: the client's request line and
-/// headers, minus every [`RELAY_MARKER_HEADER`] the client sent and header
-/// lines without a colon, plus exactly one `x-deno-desktop-relay: 1`.
-fn relay_request_head(head: &[u8]) -> Vec<u8> {
+/// The request head the relay sends upstream: the client's request line with
+/// its target replaced by `target` (the path without the relay prefix, see
+/// [`relay_target`]) and headers, minus every [`RELAY_MARKER_HEADER`] the
+/// client sent and header lines without a colon, plus exactly one
+/// `x-deno-desktop-relay: 1`.
+fn relay_request_head(head: &[u8], target: &[u8]) -> Vec<u8> {
   let mut out = Vec::with_capacity(head.len() + 32);
   let mut lines = head
     .split(|&b| b == b'\n')
     .map(|line| line.strip_suffix(b"\r").unwrap_or(line))
     .filter(|line| !line.is_empty());
   if let Some(request_line) = lines.next() {
-    out.extend_from_slice(request_line);
+    let mut parts = request_line.splitn(3, |&b| b == b' ');
+    let method = parts.next().unwrap_or_default();
+    let _client_target = parts.next();
+    let version = parts.next().unwrap_or(b"HTTP/1.1");
+    out.extend_from_slice(method);
+    out.push(b' ');
+    out.extend_from_slice(target);
+    out.push(b' ');
+    out.extend_from_slice(version);
     out.extend_from_slice(b"\r\n");
   }
   for line in lines {
@@ -850,6 +1023,12 @@ const RELAY_403_RESPONSE: &[u8] = b"HTTP/1.1 403 Forbidden\r\n\
   content-length: 47\r\n\
   connection: close\r\n\r\n\
   desktop ws relay: Origin is not the app origin\n";
+
+const RELAY_403_TOKEN_RESPONSE: &[u8] = b"HTTP/1.1 403 Forbidden\r\n\
+  content-type: text/plain; charset=utf-8\r\n\
+  content-length: 47\r\n\
+  connection: close\r\n\r\n\
+  desktop ws relay: missing or wrong relay token\n";
 
 const RELAY_502_RESPONSE: &[u8] = b"HTTP/1.1 502 Bad Gateway\r\n\
   content-type: text/plain; charset=utf-8\r\n\
@@ -1296,9 +1475,19 @@ mod tests {
     assert!(!is_websocket_upgrade(other));
   }
 
+  /// A WebSocket handshake to `/ws` through this launch's relay token.
   fn upgrade_head(extra_headers: &str) -> Vec<u8> {
+    upgrade_head_to(&token_path("/ws"), extra_headers)
+  }
+
+  /// `/.deno-desktop-relay/<this launch's token><rest>`.
+  fn token_path(rest: &str) -> String {
+    format!("{RELAY_PATH_PREFIX}{}{rest}", relay_token().unwrap())
+  }
+
+  fn upgrade_head_to(target: &str, extra_headers: &str) -> Vec<u8> {
     format!(
-      "GET /ws HTTP/1.1\r\n\
+      "GET {target} HTTP/1.1\r\n\
        Host: 127.0.0.1:1234\r\n\
        Upgrade: websocket\r\n\
        Connection: Upgrade\r\n\
@@ -1313,12 +1502,20 @@ mod tests {
   fn relay_admits_only_the_app_origin() {
     let origin = origin();
     assert_eq!(
-      classify_upgrade(&upgrade_head("Origin: t3code://app\r\n"), &origin),
+      classify_upgrade(
+        &upgrade_head("Origin: t3code://app\r\n"),
+        &origin,
+        relay_token()
+      ),
       RelayDecision::Proxy
     );
     // Header name case and surrounding whitespace are not significant …
     assert_eq!(
-      classify_upgrade(&upgrade_head("ORIGIN:   t3code://app \r\n"), &origin),
+      classify_upgrade(
+        &upgrade_head("ORIGIN:   t3code://app \r\n"),
+        &origin,
+        relay_token()
+      ),
       RelayDecision::Proxy
     );
     // … but the value is matched byte-for-byte.
@@ -1335,7 +1532,8 @@ mod tests {
       assert_eq!(
         classify_upgrade(
           &upgrade_head(&format!("Origin: {foreign}\r\n")),
-          &origin
+          &origin,
+          relay_token()
         ),
         RelayDecision::ForbiddenOrigin,
         "Origin {foreign:?} must be refused"
@@ -1349,7 +1547,7 @@ mod tests {
     // A browser always sends Origin on a WebSocket handshake; a raw client
     // that omits it is not the app's page.
     assert_eq!(
-      classify_upgrade(&upgrade_head(""), &origin),
+      classify_upgrade(&upgrade_head(""), &origin, relay_token()),
       RelayDecision::ForbiddenOrigin
     );
     // Two Origin headers: the check must not be satisfiable by smuggling the
@@ -1359,7 +1557,8 @@ mod tests {
         &upgrade_head(
           "Origin: t3code://app\r\nOrigin: https://evil.example\r\n"
         ),
-        &origin
+        &origin,
+        relay_token()
       ),
       RelayDecision::ForbiddenOrigin
     );
@@ -1368,7 +1567,8 @@ mod tests {
         &upgrade_head(
           "Origin: https://evil.example\r\nOrigin: t3code://app\r\n"
         ),
-        &origin
+        &origin,
+        relay_token()
       ),
       RelayDecision::ForbiddenOrigin
     );
@@ -1377,7 +1577,7 @@ mod tests {
     head.truncate(head.len() - 2);
     head.extend_from_slice(b"Origin: t3code://\xff\r\n\r\n");
     assert_eq!(
-      classify_upgrade(&head, &origin),
+      classify_upgrade(&head, &origin, relay_token()),
       RelayDecision::ForbiddenOrigin
     );
   }
@@ -1389,17 +1589,20 @@ mod tests {
     let plain =
       b"GET / HTTP/1.1\r\nHost: 127.0.0.1:1\r\nOrigin: t3code://app\r\n\r\n";
     assert_eq!(
-      classify_upgrade(plain, &origin),
+      classify_upgrade(plain, &origin, relay_token()),
       RelayDecision::NotWebSocket
     );
     // Only GET can open a WebSocket (RFC 6455 §4.1).
     let post = b"POST /ws HTTP/1.1\r\nHost: 127.0.0.1:1\r\n\
       Upgrade: websocket\r\nOrigin: t3code://app\r\n\r\n";
-    assert_eq!(classify_upgrade(post, &origin), RelayDecision::NotWebSocket);
+    assert_eq!(
+      classify_upgrade(post, &origin, relay_token()),
+      RelayDecision::NotWebSocket
+    );
     let other_upgrade = b"GET / HTTP/1.1\r\nUpgrade: h2c\r\n\
       Origin: t3code://app\r\n\r\n";
     assert_eq!(
-      classify_upgrade(other_upgrade, &origin),
+      classify_upgrade(other_upgrade, &origin, relay_token()),
       RelayDecision::NotWebSocket
     );
   }
@@ -1412,10 +1615,11 @@ mod tests {
       "Origin: t3code://app\r\nX-Deno-Desktop-Relay: 0\r\n\
        x-deno-desktop-relay : spoof\r\n",
     );
-    let out = relay_request_head(&head);
+    let out = relay_request_head(&head, b"/ws");
     let values: Vec<&[u8]> =
       header_values(&out, RELAY_MARKER_HEADER.as_bytes()).collect();
     assert_eq!(values, vec![&b"1"[..]]);
+    // The relay's prefix and token never reach the app.
     assert!(out.starts_with(b"GET /ws HTTP/1.1\r\n"));
     assert!(out.ends_with(b"\r\n\r\n"));
     assert_eq!(find_end_of_head(&out), Some(out.len()));
@@ -1423,7 +1627,8 @@ mod tests {
     assert_eq!(header_values(&out, b"origin").count(), 1);
     assert_eq!(header_values(&out, b"sec-websocket-key").count(), 1);
     // And a head without any marker gets one too.
-    let out = relay_request_head(&upgrade_head("Origin: t3code://app\r\n"));
+    let out =
+      relay_request_head(&upgrade_head("Origin: t3code://app\r\n"), b"/ws");
     assert_eq!(
       header_values(&out, RELAY_MARKER_HEADER.as_bytes()).count(),
       1
@@ -1483,6 +1688,7 @@ mod tests {
         &mut relay_client_side,
         &mut relay_upstream_side,
         &head,
+        b"/ws",
         Duration::from_secs(5),
       )
       .await
@@ -1569,7 +1775,12 @@ mod tests {
 
   #[test]
   fn canned_responses_have_correct_content_length() {
-    for resp in [RELAY_400_RESPONSE, RELAY_403_RESPONSE, RELAY_502_RESPONSE] {
+    for resp in [
+      RELAY_400_RESPONSE,
+      RELAY_403_RESPONSE,
+      RELAY_403_TOKEN_RESPONSE,
+      RELAY_502_RESPONSE,
+    ] {
       let text = std::str::from_utf8(resp).unwrap();
       let (head, body) = text.split_once("\r\n\r\n").unwrap();
       let declared: usize = head
@@ -1619,6 +1830,8 @@ mod tests {
             header_values(&buf[..n], RELAY_MARKER_HEADER.as_bytes()).count(),
             1
           );
+          // The relay's prefix and token are gone.
+          assert!(buf[..n].starts_with(b"GET /ws HTTP/1.1\r\n"));
           stream
             .write_all(b"HTTP/1.1 101 Switching Protocols\r\n\r\n")
             .await
@@ -1665,6 +1878,15 @@ mod tests {
       assert!(resp.starts_with("HTTP/1.1 403 "), "{resp}");
       assert_eq!(accepted.load(Ordering::SeqCst), 0);
 
+      // The app origin without this launch's token (another app at the same
+      // origin, any local process): refused, never proxied.
+      let resp =
+        exchange(addr, &upgrade_head_to("/ws", "Origin: t3code://app\r\n"))
+          .await;
+      assert!(resp.starts_with("HTTP/1.1 403 "), "{resp}");
+      assert!(resp.contains("relay token"), "{resp}");
+      assert_eq!(accepted.load(Ordering::SeqCst), 0);
+
       // Plain HTTP: 400, never proxied.
       let resp =
         exchange(addr, b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n").await;
@@ -1677,5 +1899,152 @@ mod tests {
       assert!(resp.starts_with("HTTP/1.1 101 "), "{resp}");
       assert_eq!(accepted.load(Ordering::SeqCst), 1);
     });
+  }
+
+  #[test]
+  fn relay_requires_this_launchs_token_in_the_target() {
+    let origin = origin();
+    let token = relay_token().unwrap();
+    assert_eq!(token.len(), 64);
+    assert!(token.bytes().all(|b| b.is_ascii_hexdigit()));
+    let ok = "Origin: t3code://app\r\n";
+    // The right token, the right Origin: proxied, with the prefix removed.
+    for (target, upstream) in [
+      (token_path("/ws"), "/ws"),
+      (token_path(""), "/"),
+      (token_path("/"), "/"),
+      (token_path("?room=1"), "/?room=1"),
+      (token_path("/a/b?c=d"), "/a/b?c=d"),
+    ] {
+      let head = upgrade_head_to(&target, ok);
+      assert_eq!(
+        classify_upgrade(&head, &origin, Some(token)),
+        RelayDecision::Proxy,
+        "{target}"
+      );
+      assert_eq!(
+        relay_target(&head, Some(token)).as_deref(),
+        Some(upstream.as_bytes()),
+        "{target}"
+      );
+    }
+    // The app origin is not enough without the token: another app at the
+    // same default origin, or any local process.
+    let wrong = format!("{RELAY_PATH_PREFIX}{}/ws", "0".repeat(64));
+    let longer = token_path("0/ws");
+    let upper = format!("{RELAY_PATH_PREFIX}{}/ws", token.to_uppercase());
+    let short = format!("{RELAY_PATH_PREFIX}{}/ws", &token[..63]);
+    let encoded = format!("/.deno-desktop-relay%2F{token}/ws");
+    let absolute = format!("http://127.0.0.1:1{}", token_path("/ws"));
+    for target in [
+      "/ws",
+      "/",
+      RELAY_PATH_PREFIX,
+      &wrong,
+      &longer,
+      &upper,
+      &short,
+      &encoded,
+      &absolute,
+    ] {
+      assert_eq!(
+        classify_upgrade(&upgrade_head_to(target, ok), &origin, Some(token)),
+        RelayDecision::ForbiddenToken,
+        "{target}"
+      );
+    }
+    // No token could be drawn: nothing is admitted.
+    assert_eq!(
+      classify_upgrade(&upgrade_head(ok), &origin, None),
+      RelayDecision::ForbiddenToken
+    );
+    // The token does not excuse a foreign Origin.
+    assert_eq!(
+      classify_upgrade(
+        &upgrade_head("Origin: https://evil.example\r\n"),
+        &origin,
+        Some(token)
+      ),
+      RelayDecision::ForbiddenOrigin
+    );
+    // A request line with extra or missing parts is refused.
+    let mut bad = upgrade_head(ok);
+    bad.splice(3..4, b"  ".iter().copied());
+    assert_eq!(
+      classify_upgrade(&bad, &origin, Some(token)),
+      RelayDecision::ForbiddenToken
+    );
+  }
+
+  #[test]
+  fn constant_time_eq_is_equality() {
+    assert!(constant_time_eq(b"", b""));
+    assert!(constant_time_eq(b"abc", b"abc"));
+    assert!(!constant_time_eq(b"abc", b"abd"));
+    assert!(!constant_time_eq(b"abc", b"ab"));
+  }
+
+  #[test]
+  fn the_relay_url_carries_the_token() {
+    let addr: SocketAddr = "127.0.0.1:4321".parse().unwrap();
+    assert_eq!(
+      ws_relay_url(addr).unwrap(),
+      format!(
+        "ws://127.0.0.1:4321/.deno-desktop-relay/{}",
+        relay_token().unwrap()
+      )
+    );
+    // Drawn once per launch.
+    assert_eq!(relay_token(), relay_token());
+  }
+
+  #[test]
+  fn requests_from_another_origin_are_marked() {
+    let o = origin();
+    let h = |pairs: &[(&str, &str)]| -> Vec<(String, String)> {
+      pairs
+        .iter()
+        .map(|(n, v)| (n.to_string(), v.to_string()))
+        .collect()
+    };
+    for same in [
+      h(&[]),
+      h(&[("Origin", "t3code://app")]),
+      h(&[("origin", " t3code://app ")]),
+      h(&[("Sec-Fetch-Site", "same-origin")]),
+      h(&[("sec-fetch-site", "none")]),
+      h(&[
+        ("Origin", "t3code://app"),
+        ("Sec-Fetch-Site", "SAME-ORIGIN"),
+      ]),
+      h(&[("Accept", "*/*")]),
+    ] {
+      assert!(!is_cross_origin_request(&same, &o), "{same:?}");
+    }
+    for cross in [
+      h(&[("Origin", "https://evil.example")]),
+      h(&[("Origin", "null")]),
+      h(&[("Origin", "t3code://other")]),
+      h(&[("Origin", "T3CODE://APP")]),
+      h(&[("Origin", "")]),
+      h(&[("Sec-Fetch-Site", "cross-site")]),
+      h(&[("Sec-Fetch-Site", "same-site")]),
+      // Either header names another origin.
+      h(&[("Origin", "t3code://app"), ("Sec-Fetch-Site", "cross-site")]),
+      h(&[
+        ("Origin", "t3code://app"),
+        ("Origin", "https://evil.example"),
+      ]),
+    ] {
+      assert!(is_cross_origin_request(&cross, &o), "{cross:?}");
+    }
+    // A client's own copy of the marker is never forwarded.
+    for name in [
+      "x-deno-desktop-cross-origin",
+      "X-Deno-Desktop-Cross-Origin",
+      " x-deno-desktop-cross-origin ",
+    ] {
+      assert!(should_skip_request_header(name), "{name:?}");
+    }
   }
 }

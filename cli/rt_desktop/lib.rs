@@ -2506,7 +2506,8 @@ laufey::main!(|| {
 
 /// The variables the desktop runtime publishes to the app (through the
 /// environment overlay, see `laufey::main!`): the in-process serve address,
-/// the page origin and, when bound, the WebSocket relay's origin. The third
+/// the page origin and, when bound, the WebSocket relay's origin and its URL
+/// with the per-launch token (`DENO_DESKTOP_WS_URL`). The third
 /// field says whether child processes inherit it: the serve address names a
 /// listener in THIS process, so a child (a `deno` the app runs) that inherited
 /// it would serve its own `Deno.serve` / `node:http` on an unreachable memory
@@ -2533,6 +2534,11 @@ fn desktop_env_overlay(
       scheme_bridge::ws_relay_origin(addr),
       true,
     ));
+    // The URL with the relay's per-launch token: a secret, kept to this
+    // process (a child the app runs gets no way into the relay).
+    if let Some(url) = scheme_bridge::ws_relay_url(addr) {
+      vars.push((scheme_bridge::WS_URL_ENV, url, false));
+    }
   }
   vars
 }
@@ -3447,6 +3453,15 @@ mod tests {
           "DENO_DESKTOP_WS_ORIGIN",
           "ws://127.0.0.1:4321".to_string(),
           true
+        ),
+        (
+          "DENO_DESKTOP_WS_URL",
+          format!(
+            "ws://127.0.0.1:4321/.deno-desktop-relay/{}",
+            super::scheme_bridge::relay_token().unwrap()
+          ),
+          // The relay token: not inherited.
+          false
         ),
       ]
     );
