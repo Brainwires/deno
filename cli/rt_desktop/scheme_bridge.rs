@@ -440,17 +440,27 @@ fn response_header_value(
 
 /// `http+memory://<authority>/rest` -> `<app scheme>://<authority>/rest`;
 /// `None` for any other URL.
+///
+/// The prefix is compared as bytes: the value is whatever the app put in a
+/// response header (decoded from UTF-8 or Latin-1), so the byte at the prefix
+/// length may be inside a multi-byte character, and slicing the `&str` there
+/// panicked, which exits the app.
 fn rewrite_memory_url(url: &str, origin: &AppOrigin) -> Option<String> {
-  const PREFIX: &str = "http+memory://";
-  let trimmed = url.trim_start();
-  if trimmed.len() >= PREFIX.len()
-    && trimmed[..PREFIX.len()].eq_ignore_ascii_case(PREFIX)
-  {
-    Some(format!(
-      "{}://{}",
-      origin.scheme(),
-      &trimmed[PREFIX.len()..]
-    ))
+  let rest =
+    strip_prefix_ignore_ascii_case(url.trim_start(), "http+memory://")?;
+  Some(format!("{}://{rest}", origin.scheme()))
+}
+
+/// `text` without `prefix` (ASCII, compared ASCII case-insensitively), or
+/// `None` when `text` does not start with it. `text` is only ever split right
+/// after a matched ASCII prefix, which is always a character boundary.
+fn strip_prefix_ignore_ascii_case<'a>(
+  text: &'a str,
+  prefix: &str,
+) -> Option<&'a str> {
+  let head = text.as_bytes().get(..prefix.len())?;
+  if prefix.is_ascii() && head.eq_ignore_ascii_case(prefix.as_bytes()) {
+    text.get(prefix.len()..)
   } else {
     None
   }
@@ -976,8 +986,76 @@ mod tests {
       ("location", "https://idp.example/authorize"),
       ("refresh", "5"),
       ("link", "<http+memory://app/x>; rel=preload"),
+      // A multi-byte character across the prefix length (14 bytes) used to
+      // panic the runtime thread (`&str` sliced inside a character).
+      ("location", "http+memoré://app/x"),
+      ("location", "ééééééééééééééé"),
+      ("location", "日本語のパス/x"),
+      ("location", "http+memory:/日本"),
+      ("content-location", "/données/é"),
+      ("content-location", "  ééééééé"),
+      ("refresh", "5; url=ééééééééééééééé"),
+      ("refresh", "5; url='日本語のパス'"),
+      ("refresh", "5; URL=\"http+memoré://app/\""),
+      ("refresh", "é; url=/x"),
+      ("refresh", "5; url='ééé"),
     ] {
       assert_eq!(response_header_value(name, value.as_bytes(), &o), value);
+    }
+    // Latin-1 bytes (decoded to two-byte characters) in the same places.
+    assert_eq!(
+      response_header_value(
+        "location",
+        b"\xe9\xe9\xe9\xe9\xe9\xe9\xe9\xe9",
+        &o
+      ),
+      "éééééééé"
+    );
+    assert_eq!(
+      response_header_value("refresh", b"0; url=http+memor\xe9://app/", &o),
+      "0; url=http+memoré://app/"
+    );
+    // Non-ASCII after a real prefix is kept as it is.
+    assert_eq!(
+      response_header_value(
+        "location",
+        "http+memory://app/données?q=日本".as_bytes(),
+        &o
+      ),
+      "t3code://app/données?q=日本"
+    );
+    assert_eq!(
+      response_header_value(
+        "refresh",
+        "1; url=\"http+memory://app/é\"".as_bytes(),
+        &o
+      ),
+      "1; url=\"t3code://app/é\""
+    );
+  }
+
+  #[test]
+  fn strip_prefix_ignore_ascii_case_never_splits_a_character() {
+    assert_eq!(
+      strip_prefix_ignore_ascii_case("HTTP+memory://x", "http+memory://"),
+      Some("x")
+    );
+    assert_eq!(
+      strip_prefix_ignore_ascii_case("http+memory:/", "http+memory://"),
+      None
+    );
+    assert_eq!(strip_prefix_ignore_ascii_case("", "http+memory://"), None);
+    // Every split position of a string of 2-, 3- and 4-byte characters.
+    for text in [
+      "éééééééééé",
+      "日本語日本語日本語",
+      "😀😀😀😀😀",
+      "aé日😀aé日😀",
+    ] {
+      for len in 1..=text.len() {
+        let prefix = "x".repeat(len);
+        assert_eq!(strip_prefix_ignore_ascii_case(text, &prefix), None);
+      }
     }
   }
 
