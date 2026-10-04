@@ -1381,8 +1381,43 @@ fn apply_requested(layout: &InstallLayout, pid: u32) -> bool {
     .is_some_and(|s| s.phase == Phase::Staged && s.apply_pid == Some(pid))
 }
 
+/// What the helper re-checks about the staged app right before it swaps it
+/// in (see [`run_helper`]).
+pub type StagedVerifier<'a> =
+  &'a dyn Fn(&InstallLayout, &UpdateState) -> Result<(), UpdateError>;
+
+/// A verifier that accepts everything (tests of the swap mechanics).
+#[cfg(test)]
+pub fn accept_staged(
+  _: &InstallLayout,
+  _: &UpdateState,
+) -> Result<(), UpdateError> {
+  Ok(())
+}
+
 /// Run the helper. Returns the process exit code.
-pub fn run_helper(layout: &InstallLayout, mode: HelperMode, pid: u32) -> i32 {
+///
+/// The helper is the app's own executable started from argv (`<exe> run
+/// denext-update-helper <mode> <pid>`), so anyone can start it, and its
+/// input is the state file next to the install, which anything running as
+/// the user can write. It takes no paths: the install, `.old`, the staging
+/// directory and the state, log and lock files all derive from its own
+/// location, the staged app is a single plain name inside the staging
+/// directory, and only paths proven to be copies of this app's install are
+/// swapped or deleted. It runs no code but the app's own executable (the
+/// relaunch). What a forged state could still ask for is a swap of some
+/// other app tree placed in the staging directory: so before an apply,
+/// `verify` checks the staged app again as `stage()` did (its OS code
+/// signature against the running app's signer, its own version newer than
+/// the installed one and not rejected), so the helper can't be used to put
+/// an app the updater would refuse in place of a signed one (on macOS the
+/// app may modify its own bundle where another program may not).
+pub fn run_helper(
+  layout: &InstallLayout,
+  mode: HelperMode,
+  pid: u32,
+  verify: StagedVerifier<'_>,
+) -> i32 {
   let Some(_lock) = take_helper_lock(layout) else {
     log_line(layout, "another update helper is running; nothing to do");
     return 1;
@@ -1430,7 +1465,9 @@ pub fn run_helper(layout: &InstallLayout, mode: HelperMode, pid: u32) -> i32 {
     return 1;
   };
   match mode {
-    HelperMode::Apply => match apply_swap(layout, &mut state) {
+    HelperMode::Apply => match verify(layout, &state)
+      .and_then(|()| apply_swap(layout, &mut state))
+    {
       Ok(()) => {
         let from = state.from.clone().unwrap_or_default();
         log_line(layout, &format!("swapped {from} -> {:?}", state.to));
@@ -2391,7 +2428,10 @@ mod tests {
     s.apply_pid = None;
     write_state(l, &s).unwrap();
     let start = Instant::now();
-    assert_eq!(run_helper(l, HelperMode::Apply, app.id()), 0);
+    assert_eq!(
+      run_helper(l, HelperMode::Apply, app.id(), &accept_staged),
+      0
+    );
     assert!(start.elapsed() < Duration::from_secs(30));
     assert_eq!(installed(l), "1.0.0");
     assert_eq!(read_state(l).unwrap().phase, Phase::Staged);
@@ -2399,7 +2439,10 @@ mod tests {
     let mut s = read_state(l).unwrap();
     s.apply_pid = Some(app.id().wrapping_add(1));
     write_state(l, &s).unwrap();
-    assert_eq!(run_helper(l, HelperMode::Apply, app.id()), 0);
+    assert_eq!(
+      run_helper(l, HelperMode::Apply, app.id(), &accept_staged),
+      0
+    );
     assert_eq!(installed(l), "1.0.0");
     app.kill().unwrap();
     app.wait().unwrap();
@@ -2407,7 +2450,7 @@ mod tests {
     let mut s = read_state(l).unwrap();
     s.apply_pid = Some(app.id());
     write_state(l, &s).unwrap();
-    run_helper(l, HelperMode::Apply, app.id());
+    run_helper(l, HelperMode::Apply, app.id(), &accept_staged);
     assert_eq!(installed(l), "2.0.0");
     // The helper released its lock.
     assert!(take_helper_lock(l).is_some());

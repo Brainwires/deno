@@ -543,6 +543,10 @@ async fn compile_desktop(
   let mut temp_flags = flags.clone();
   temp_flags.subcommand = DenoSubcommand::Compile(compile_flags.clone());
   temp_flags.internal.is_desktop = true;
+  // The binary `run_desktop_hmr` launches below is a development build: only
+  // its runtime honours the development switches it is given in the
+  // environment (see `Metadata::desktop_dev`).
+  temp_flags.internal.is_desktop_dev = desktop_flags.hmr || inspector_requested;
 
   let output_path = super::compile::compile_binary(
     Arc::new(temp_flags),

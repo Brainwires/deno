@@ -99,6 +99,34 @@ export async function run(env: Env, rep: AreaReport) {
     await rm(marker);
   }
 
+  // The development switches in a packaged app's environment: ignored.
+  const dsScheme = `dnxdevswitch${env.nonce}`;
+  const dsOrigin = `${dsScheme}://app`;
+  const dsId = `dev.denext.e2e${env.nonce}.devswitch`;
+  const ds = await packageApp(env, {
+    app: "devswitch",
+    name: "E2EDevSwitch",
+    identifier: dsId,
+    appJson: { origin: dsOrigin },
+    launch: { appId: dsId, customSchemes: [dsScheme] },
+  });
+  const watched = path(env.workDir, "devswitch-hmr");
+  await rm(watched);
+  await Deno.mkdir(watched, { recursive: true });
+  const probe = Deno.listen({ hostname: "127.0.0.1", port: 0 });
+  const inspectPort = (probe.addr as Deno.NetAddr).port;
+  probe.close();
+  await writeParams("origin", { origin: dsOrigin });
+  await launchAndCollect(env, rep, "devswitch", ds, {
+    env: {
+      DENO_DESKTOP_HMR: watched,
+      DENO_DESKTOP_DEV_URL: "http://127.0.0.1:9/",
+      DENO_DESKTOP_FRAMEWORK_DEV: "1",
+      DENO_DESKTOP_INSPECT_INTERNAL_PORT: `127.0.0.1:${inspectPort}`,
+    },
+  });
+  await rm(watched);
+
   // The same transport with a node:http server as the app's server.
   const nodeScheme = `dnxoriginnode${env.nonce}`;
   const nodeOrigin = `${nodeScheme}://app`;

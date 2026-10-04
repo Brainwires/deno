@@ -684,6 +684,67 @@ fn stage_blocking(
   Ok(signature)
 }
 
+/// The helper's re-check of a staged app before it swaps it in (see
+/// `swap::run_helper`): the state file is writable by anything running as
+/// the user, so what it names is verified again here, as `stage()` did.
+/// The OS check runs with the unsigned-development opt-out, which only ever
+/// relaxes it for an unsigned running app: a signed app still requires the
+/// same signer (an app with no signature has no identity to protect).
+fn verify_staged_for_helper(
+  layout: &InstallLayout,
+  state: &UpdateState,
+) -> Result<(), UpdateError> {
+  let Some(staged) = state.staged_path(layout) else {
+    return error::err(Code::NotStaged, "the state names no staged app");
+  };
+  let Some(to) = state.to.as_deref() else {
+    return error::err(Code::NotStaged, "the state names no version");
+  };
+  let to_v = manifest::parse_version(to, "version")?;
+  if state.all_rejected().iter().any(|r| {
+    manifest::parse_version(r, "a rejected version")
+      .is_ok_and(|r| manifest::compare_versions(&r, &to_v).is_eq())
+  }) {
+    return error::err(
+      Code::Rejected,
+      format!("{to} was rolled back before; it is not swapped in again"),
+    );
+  }
+  verify_newer_than_installed(layout, &to_v)?;
+  embedded::check_embedded_version(layout, &staged, to)?;
+  verify_os_signature(layout, &staged, true)?;
+  Ok(())
+}
+
+/// `to` must be newer than the version compiled into the installed app.
+fn verify_newer_than_installed(
+  layout: &InstallLayout,
+  to: &deno_semver::Version,
+) -> Result<(), UpdateError> {
+  if layout.kind == InstallKind::AppImage {
+    // Its runtime sits inside a compressed squashfs (see `embedded`).
+    return Ok(());
+  }
+  let installed = embedded::runtime_libraries(layout.kind, &layout.exe())
+    .iter()
+    .find_map(|lib| embedded::read_metadata(lib).ok().flatten())
+    .and_then(|m| m.app_version);
+  let Some(installed) = installed else {
+    return error::err(
+      Code::VersionMismatch,
+      "the installed app's own version can't be read; nothing is swapped",
+    );
+  };
+  let installed = manifest::parse_version(&installed, "the installed version")?;
+  if manifest::compare_versions(to, &installed).is_le() {
+    return error::err(
+      Code::Downgrade,
+      format!("{to} is not newer than the installed {installed}"),
+    );
+  }
+  Ok(())
+}
+
 /// Whether the owner may execute `path` (Unix).
 #[cfg(unix)]
 fn is_executable(path: &std::path::Path) -> bool {
@@ -848,7 +909,9 @@ pub fn early_startup(args: &[String], trial: &mut bool) -> Option<i32> {
   if let Some((mode, pid)) = swap::parse_helper_args(args) {
     return Some(
       match layout::detect_install(&exe, &AppImageEnv::from_env()) {
-        Ok(layout) => swap::run_helper(&layout, mode, pid),
+        Ok(layout) => {
+          swap::run_helper(&layout, mode, pid, &verify_staged_for_helper)
+        }
         Err(_) => 1,
       },
     );
@@ -1475,6 +1538,96 @@ mod tests {
     assert_eq!(
       swap::read_state(&layout).unwrap().manifest_sequence,
       Some(12)
+    );
+  }
+
+  // The helper verifies a staged app again before swapping it in: the state
+  // file naming it is writable by anything running as the user.
+  #[cfg(target_os = "linux")]
+  #[test]
+  fn the_helper_reverifies_what_the_state_names() {
+    use super::embedded::tests::library;
+    use super::embedded::tests::metadata;
+    let tmp = tempfile::tempdir().unwrap();
+    let (exe, layout) = fake_app(&tmp);
+    std::fs::write(
+      exe.with_extension("so"),
+      library(&metadata(Some("1.0.0")), 10),
+    )
+    .unwrap();
+    let entry = layout.install.file_name().unwrap().to_owned();
+    let staged = layout.extract_dir().join(&entry);
+    let staged_exe = layout.exe_in(&staged);
+    std::fs::create_dir_all(staged_exe.parent().unwrap()).unwrap();
+    std::fs::write(&staged_exe, b"").unwrap();
+    let stage_version = |v: &str| {
+      std::fs::write(
+        staged_exe.with_extension("so"),
+        library(&metadata(Some(v)), 10),
+      )
+      .unwrap();
+    };
+    let state = |to: Option<&str>, rejected: &[&str]| {
+      let mut s = UpdateState::new(&layout);
+      s.phase = Phase::Staged;
+      s.entry = Some(entry.to_string_lossy().into_owned());
+      s.to = to.map(String::from);
+      s.rejected_versions = rejected.iter().map(|r| r.to_string()).collect();
+      s
+    };
+    let code = |r: Result<(), UpdateError>| r.unwrap_err().code;
+    stage_version("2.0.0");
+    verify_staged_for_helper(&layout, &state(Some("2.0.0"), &[])).unwrap();
+    // A version the state claims but the staged app doesn't carry.
+    assert_eq!(
+      code(verify_staged_for_helper(
+        &layout,
+        &state(Some("3.0.0"), &[])
+      )),
+      Code::VersionMismatch
+    );
+    // An older (or the same) build than the installed one.
+    stage_version("0.9.0");
+    assert_eq!(
+      code(verify_staged_for_helper(
+        &layout,
+        &state(Some("0.9.0"), &[])
+      )),
+      Code::Downgrade
+    );
+    stage_version("1.0.0");
+    assert_eq!(
+      code(verify_staged_for_helper(
+        &layout,
+        &state(Some("1.0.0"), &[])
+      )),
+      Code::Downgrade
+    );
+    // A version rolled back before.
+    stage_version("2.0.0");
+    assert_eq!(
+      code(verify_staged_for_helper(
+        &layout,
+        &state(Some("2.0.0"), &["2.0.0"])
+      )),
+      Code::Rejected
+    );
+    // No version, no entry, an entry that is a path.
+    assert_eq!(
+      code(verify_staged_for_helper(&layout, &state(None, &[]))),
+      Code::NotStaged
+    );
+    let mut s = state(Some("2.0.0"), &[]);
+    s.entry = Some("../elsewhere".into());
+    assert_eq!(code(verify_staged_for_helper(&layout, &s)), Code::NotStaged);
+    // The installed app's version can't be read.
+    std::fs::write(exe.with_extension("so"), b"not a runtime").unwrap();
+    assert_eq!(
+      code(verify_staged_for_helper(
+        &layout,
+        &state(Some("2.0.0"), &[])
+      )),
+      Code::VersionMismatch
     );
   }
 

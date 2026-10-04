@@ -151,6 +151,17 @@ pub struct Metadata {
   /// `.deno-desktop/app.json`, else [`InitialWindowConfig::default`].
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub initial_window: Option<InitialWindowConfig>,
+  /// A development build: the throwaway binary `deno desktop --hmr` /
+  /// `--inspect*` compiles and launches itself. Only such a binary's runtime
+  /// honours the development switches in its environment
+  /// (`DENO_DESKTOP_HMR`, `DENO_DESKTOP_DEV_URL`,
+  /// `DENO_DESKTOP_FRAMEWORK_DEV`, `DENO_DESKTOP_INSPECT_*`,
+  /// `DENO_DESKTOP_MUX_WS`): in a packaged app they would let anyone who can
+  /// set its environment reload its code from a directory, open an inspector
+  /// on it or point its window at another site. Absent (`false`) in every
+  /// other build, and in a binary from a CLI that predates the field.
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub desktop_dev: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]

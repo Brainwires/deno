@@ -285,12 +285,12 @@ pub fn check_embedded_version(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
   use super::*;
 
   /// A fake runtime library: noise, the bare magic (as the section lookup's
   /// code has it), then the data section.
-  fn library(metadata: &serde_json::Value, noise: usize) -> Vec<u8> {
+  pub(crate) fn library(metadata: &serde_json::Value, noise: usize) -> Vec<u8> {
     let mut out: Vec<u8> = (0..noise).map(|i| (i % 251) as u8).collect();
     out.extend_from_slice(b"find_section(\"d3n0l4nd\")");
     out.extend_from_slice(&[0xff; 37]);
@@ -303,7 +303,7 @@ mod tests {
     out
   }
 
-  fn metadata(version: Option<&str>) -> serde_json::Value {
+  pub(crate) fn metadata(version: Option<&str>) -> serde_json::Value {
     let mut m = serde_json::json!({
       "argv": [],
       "entrypoint_key": "file:///main.ts",
