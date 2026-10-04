@@ -4,10 +4,12 @@
 //
 // 1. package the app at 1.0.0 / 2.0.0 / 3.0.0 and "install" 1.0.0;
 // 2. hostile manifests and archives against the real app: wrong key,
-//    unsigned, wrong app, downgrade, same version, no platform, http, a
-//    tampered / oversized download, tar-slip, a symlink out, the wrong shape,
-//    and staging without the unsigned-dev opt-out on an unsigned app; none
-//    may change the install;
+//    unsigned, wrong app, downgrade, same version, a replayed (lower or
+//    missing) sequence, an expired manifest, no platform, http, a tampered /
+//    oversized download, tar-slip, a symlink out, the wrong shape, another
+//    version's archive under this version's manifest, and staging without
+//    the unsigned-dev opt-out on an unsigned app; none may change the
+//    install;
 // 3. an install the user can't write (POSIX);
 // 4. 1.0.0 -> 2.0.0: download, stage, swap, relaunch, confirm (the old app
 //    removed);
@@ -238,6 +240,9 @@ export async function run(env: Env, rep: AreaReport) {
   base = `https://127.0.0.1:${server.addr.port}`;
   try {
     const payloads: Record<string, Payload> = {};
+    // Every real release is sequenced (2.0.0 -> 1000, 3.0.0 -> 1001) and
+    // expires in a day, as a publisher that re-signs on a schedule writes.
+    const expiresAt = new Date(Date.now() + 86_400_000).toISOString();
     for (const v of ["2.0.0", "3.0.0"]) {
       const d = path(srv, `v${v[0]}`);
       await Deno.mkdir(d, { recursive: true });
@@ -261,6 +266,8 @@ export async function run(env: Env, rep: AreaReport) {
           },
         },
         publishedAt: new Date().toISOString(),
+        expiresAt,
+        sequence: 998 + Number(v[0]),
       };
       await Deno.writeTextFile(
         path(d, "app-update.json"),
@@ -301,7 +308,15 @@ export async function run(env: Env, rep: AreaReport) {
     await addCase("unsigned", JSON.stringify(v2));
     await addCase("wrongapp", await sign({ ...v2, app: `${ID}.other` }, key));
     await addCase("downgrade", await sign({ ...v2, version: "0.9.0" }, key));
+    // Verifies (up to date), and raises the install's sequence mark to 1000.
     await addCase("equal", await sign({ ...v2, version: "1.0.0" }, key));
+    await addCase("replayed", await sign({ ...v2, sequence: 999 }, key));
+    const { sequence: _, ...unsequenced } = v2;
+    await addCase("unsequenced", await sign(unsequenced, key));
+    await addCase(
+      "expired",
+      await sign({ ...v2, expiresAt: "2026-01-01T00:00:00.000Z" }, key),
+    );
     await addCase(
       "noplatform",
       await sign({
@@ -370,6 +385,13 @@ export async function run(env: Env, rep: AreaReport) {
     await addCase("wrongshape", await sign(withEntry(shape), key), {
       download: true,
     });
+    // 3.0.0's genuine archive offered as 2.0.0: the version compiled into
+    // the staged app is not the manifest's.
+    await addCase(
+      "versionMismatch",
+      await sign(withEntry(payloads["3.0.0"].platforms[platform]), key),
+      { download: true },
+    );
     await addCase(
       "noOptOut",
       await Deno.readTextFile(path(srv, "v2", "app-update.json")),
@@ -413,6 +435,9 @@ export async function run(env: Env, rep: AreaReport) {
         wrongapp: "wrong_app",
         downgrade: "downgrade",
         equal: "not available",
+        replayed: "replayed",
+        unsequenced: "replayed",
+        expired: "expired",
         noplatform: "no_platform",
         http: "insecure_url",
         tampered: "integrity",
@@ -420,6 +445,7 @@ export async function run(env: Env, rep: AreaReport) {
         tarslip: "unsafe_archive",
         symlink: "unsafe_archive",
         wrongshape: "bundle_mismatch",
+        versionMismatch: "version_mismatch",
         noOptOut: OS === "linux" ? "staged" : "os_signature",
       };
       for (const [n, code] of Object.entries(want)) {
@@ -437,6 +463,13 @@ export async function run(env: Env, rep: AreaReport) {
       "adversarial: the install is untouched (no .old)",
       !afterAdv.some((n) => n.endsWith(".old")),
       afterAdv,
+    );
+    const statePath = path(installParent, `.${top}.denext-update.json`);
+    const stateAdv = await readJson(statePath).catch(() => null);
+    rep.check(
+      "adversarial: the accepted manifest sequence (1000) is recorded",
+      stateAdv?.manifestSequence === 1000,
+      stateAdv,
     );
 
     // 4. Install not writable (POSIX permissions).
@@ -525,7 +558,6 @@ export async function run(env: Env, rep: AreaReport) {
       !after2.some((n) => n.endsWith(".old")),
       after2,
     );
-    const statePath = path(installParent, `.${top}.denext-update.json`);
     const state2 = await readJson(statePath).catch(() => null);
     rep.check(
       "update state idle after confirm",
@@ -604,8 +636,10 @@ export async function run(env: Env, rep: AreaReport) {
     );
     const state4 = await readJson(statePath).catch(() => null);
     rep.check(
-      "state idle with rejected 3.0.0",
-      state4?.phase === "idle" && state4?.rejected === "3.0.0",
+      "state idle with rejected 3.0.0 (in the rejected set too)",
+      state4?.phase === "idle" && state4?.rejected === "3.0.0" &&
+        state4?.rejectedVersions?.includes("3.0.0") &&
+        state4?.manifestSequence === 1001,
       state4,
     );
     if (OS === "darwin") {

@@ -35,21 +35,36 @@
 //!     }
 //!   },
 //!   "releaseNotes": "...",
-//!   "publishedAt": "2026-10-01T00:00:00Z"
+//!   "publishedAt": "2026-10-01T00:00:00Z",
+//!   "expiresAt": "2026-10-15T00:00:00Z",
+//!   "sequence": 1790812800
 //! }
 //! ```
 //!
 //! Unknown keys are refused (a typo must not silently drop a constraint).
 //!
-//! **Replay and freeze.** A manifest carries no expiry or sequence number. A
-//! replayed OLDER manifest can never install anything older than what runs
-//! (the downgrade guard, and `rejected` versions are never offered again);
-//! what it can do is hide a newer release from a client whose update host
-//! is controlled by an attacker (a freeze). Bounding that needs an expiry the
-//! publisher refreshes (TUF's timestamp role), which is a schema change:
-//! because unknown keys are refused, an `expiresAt` added now would make
-//! every earlier runtime reject the manifest, so it belongs with a `schema:
-//! 2` and a publisher that re-signs on a schedule, not in this patch.
+//! **Replay and freeze.** A replayed OLDER manifest can never install
+//! anything older than what runs (the downgrade guard, and rejected versions
+//! are never offered again); what it can do is hide a newer release from a
+//! client whose update host an attacker controls (a freeze). Two optional,
+//! signed fields bound that:
+//!
+//! - `expiresAt` (an RFC 3339 timestamp, e.g. `Date.prototype.toISOString`
+//!   output): a manifest is refused (`expired`) once the clock passes it, so
+//!   a publisher that re-signs on a schedule (TUF's timestamp role) caps how
+//!   long an old manifest can be served.
+//! - `sequence` (a non-negative integer up to 2^53 - 1 that only grows, e.g.
+//!   the Unix time in seconds at signing): the highest one accepted is kept
+//!   in the install's update state, and a lower one is refused (`replayed`),
+//!   as is a manifest WITHOUT a sequence once a sequenced one was accepted
+//!   (otherwise replaying any pre-sequence manifest would undo it). An equal
+//!   sequence is the same release checked again.
+//!
+//! Both are optional: a manifest without them verifies as before (what
+//! denext's publisher wrote before they existed), unless this install has
+//! already accepted a sequenced one. Runtimes before these fields refuse a
+//! manifest that carries them (unknown keys), so a publisher adds them only
+//! for apps on a runtime that reads them.
 
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
@@ -98,6 +113,12 @@ struct SignedManifest {
   #[serde(default)]
   release_notes: Option<String>,
   published_at: String,
+  /// RFC 3339; the manifest is refused after it.
+  #[serde(default)]
+  expires_at: Option<String>,
+  /// Monotonic release counter (see the module docs).
+  #[serde(default)]
+  sequence: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -120,8 +141,12 @@ pub struct Expectations<'a> {
   pub running_version: &'a str,
   /// This build's platform key, `<target>-<backend>`.
   pub platform: &'a str,
-  /// A version that was installed, failed to start and was rolled back.
-  pub rejected_version: Option<&'a str>,
+  /// Versions that were installed, failed to start and were rolled back.
+  pub rejected_versions: &'a [String],
+  /// The highest manifest `sequence` this install has accepted.
+  pub sequence_floor: Option<u64>,
+  /// The current time, Unix seconds (for `expiresAt`).
+  pub now_unix: i64,
   /// Accept `http://` on a loopback host (dev only).
   pub allow_insecure_loopback: bool,
 }
@@ -141,6 +166,9 @@ pub struct VerifiedUpdate {
   pub size: u64,
   pub release_notes: Option<String>,
   pub published_at: String,
+  /// The manifest's `sequence`, recorded as the install's high-water mark.
+  pub sequence: Option<u64>,
+  pub expires_at: Option<String>,
 }
 
 /// The outcome of checking a manifest that verified.
@@ -149,8 +177,16 @@ pub enum ManifestVerdict {
   /// A newer version for this platform.
   Available(VerifiedUpdate),
   /// The manifest offers the running version: nothing to do.
-  UpToDate { version: String },
+  UpToDate {
+    version: String,
+    /// The manifest's `sequence` (still a high-water mark to record).
+    sequence: Option<u64>,
+  },
 }
+
+/// The largest `sequence` accepted: JavaScript's `Number.MAX_SAFE_INTEGER`,
+/// so a publisher's number and the runtime's agree exactly.
+pub const MAX_SEQUENCE: u64 = (1 << 53) - 1;
 
 /// Parse the baked public key: standard base64 SPKI (what `denext ota
 /// keygen` writes to `<out>.pub`) or a `-----BEGIN PUBLIC KEY-----` PEM of an
@@ -196,8 +232,8 @@ fn decode_b64(text: &str) -> Option<Vec<u8>> {
 /// Verify `envelope` (the raw bytes the update host served) and check it
 /// against `exp`. Every check runs before anything is trusted: size, envelope
 /// shape, the signature over the exact signed bytes, then — parsing only the
-/// verified bytes — schema, app, versions, the rejected version, the
-/// platform entry, its hash, size, kind and URL.
+/// verified bytes — schema, app, `expiresAt` and `sequence`, versions, the
+/// rejected versions, the platform entry, its hash, size, kind and URL.
 pub fn verify_manifest(
   envelope: &[u8],
   exp: &Expectations,
@@ -274,6 +310,7 @@ pub fn verify_manifest(
   {
     return err(Code::InvalidManifest, "releaseNotes is too long");
   }
+  check_freshness(&manifest, exp)?;
 
   let offered = parse_version(&manifest.version, "version")?;
   let running = parse_version(exp.running_version, "the running version")
@@ -306,14 +343,15 @@ pub fn verify_manifest(
     Ordering::Equal => {
       return Ok(ManifestVerdict::UpToDate {
         version: manifest.version,
+        sequence: manifest.sequence,
       });
     }
     Ordering::Greater => {}
   }
-  if let Some(rejected) = exp.rejected_version
-    && let Ok(rejected) = parse_version(rejected, "rejected")
-    && compare_versions(&offered, &rejected) == Ordering::Equal
-  {
+  if exp.rejected_versions.iter().any(|rejected| {
+    parse_version(rejected, "rejected")
+      .is_ok_and(|r| compare_versions(&offered, &r) == Ordering::Equal)
+  }) {
     return err(
       Code::Rejected,
       format!(
@@ -375,7 +413,127 @@ pub fn verify_manifest(
     size: entry.size,
     release_notes: manifest.release_notes,
     published_at: manifest.published_at,
+    sequence: manifest.sequence,
+    expires_at: manifest.expires_at,
   }))
+}
+
+/// `expiresAt` and `sequence` against the clock and the install's
+/// high-water mark (see the module docs).
+fn check_freshness(
+  manifest: &SignedManifest,
+  exp: &Expectations,
+) -> Result<(), UpdateError> {
+  if let Some(expires) = &manifest.expires_at {
+    let Some(at) = parse_rfc3339(expires) else {
+      return err(
+        Code::InvalidManifest,
+        format!("expiresAt {expires:?} is not an RFC 3339 timestamp"),
+      );
+    };
+    if exp.now_unix >= at {
+      return err(
+        Code::Expired,
+        format!(
+          "the manifest expired at {expires}: the update host serves a stale \
+           manifest (or this computer's clock is wrong)"
+        ),
+      );
+    }
+  }
+  match (manifest.sequence, exp.sequence_floor) {
+    (Some(seq), _) if seq > MAX_SEQUENCE => err(
+      Code::InvalidManifest,
+      format!("sequence must be 0..={MAX_SEQUENCE}"),
+    ),
+    (Some(seq), Some(floor)) if seq < floor => err(
+      Code::Replayed,
+      format!(
+        "the manifest's sequence {seq} is lower than {floor}, which this \
+         install already accepted: an older manifest was served again"
+      ),
+    ),
+    (None, Some(floor)) => err(
+      Code::Replayed,
+      format!(
+        "the manifest has no sequence, but this install already accepted \
+         sequence {floor}: an older manifest was served again"
+      ),
+    ),
+    _ => Ok(()),
+  }
+}
+
+/// Parse an RFC 3339 timestamp (`YYYY-MM-DDTHH:MM:SS[.fraction]` then `Z`
+/// or `+HH:MM` / `-HH:MM`) into Unix seconds (the fraction is dropped).
+/// `None` for anything else.
+pub fn parse_rfc3339(text: &str) -> Option<i64> {
+  let b = text.as_bytes();
+  if b.len() < 20 || b.len() > 64 {
+    return None;
+  }
+  let num = |from: usize, to: usize| -> Option<i64> {
+    let digits = b.get(from..to)?;
+    if !digits.iter().all(u8::is_ascii_digit) {
+      return None;
+    }
+    std::str::from_utf8(digits).ok()?.parse().ok()
+  };
+  let at = |i: usize, c: u8| b.get(i) == Some(&c);
+  if !(at(4, b'-')
+    && at(7, b'-')
+    && at(10, b'T')
+    && at(13, b':')
+    && at(16, b':'))
+  {
+    return None;
+  }
+  let (year, month, day) = (num(0, 4)?, num(5, 7)?, num(8, 10)?);
+  let (hour, minute, second) = (num(11, 13)?, num(14, 16)?, num(17, 19)?);
+  let mut i = 19;
+  if at(i, b'.') {
+    i += 1;
+    let start = i;
+    while b.get(i).is_some_and(u8::is_ascii_digit) {
+      i += 1;
+    }
+    if i == start {
+      return None;
+    }
+  }
+  let offset = if at(i, b'Z') && i + 1 == b.len() {
+    0
+  } else if (at(i, b'+') || at(i, b'-')) && i + 6 == b.len() && at(i + 3, b':')
+  {
+    let (oh, om) = (num(i + 1, i + 3)?, num(i + 4, i + 6)?);
+    if oh > 23 || om > 59 {
+      return None;
+    }
+    let sign = if at(i, b'-') { -1 } else { 1 };
+    sign * (oh * 3600 + om * 60)
+  } else {
+    return None;
+  };
+  let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+  let days_in_month = match month {
+    1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+    4 | 6 | 9 | 11 => 30,
+    2 if leap => 29,
+    2 => 28,
+    _ => return None,
+  };
+  if day < 1 || day > days_in_month || hour > 23 || minute > 59 || second > 60 {
+    return None;
+  }
+  // Days since 1970-01-01 (H. Hinnant's days_from_civil).
+  let y = if month <= 2 { year - 1 } else { year };
+  let era = y.div_euclid(400);
+  let yoe = y - era * 400;
+  let mp = (month + 9) % 12;
+  let doy = (153 * mp + 2) / 5 + day - 1;
+  let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+  let days = era * 146_097 + doe - 719_468;
+  Some(days * 86_400 + hour * 3600 + minute * 60 + second - offset)
 }
 
 /// A strict semver: `MAJOR.MINOR.PATCH[-pre][+build]`, ASCII only, no `v`
@@ -517,10 +675,15 @@ mod tests {
       app_id: "com.example.app",
       running_version: "1.0.0",
       platform: PLATFORM,
-      rejected_version: None,
+      rejected_versions: &[],
+      sequence_floor: None,
+      now_unix: NOW,
       allow_insecure_loopback: false,
     }
   }
+
+  /// 2026-10-01T00:00:00Z.
+  const NOW: i64 = 1_790_812_800;
 
   fn check(
     key: &SigningKey,
@@ -622,14 +785,16 @@ mod tests {
     assert_eq!(
       check(&k, payload("1.0.0")).unwrap(),
       ManifestVerdict::UpToDate {
-        version: "1.0.0".into()
+        version: "1.0.0".into(),
+        sequence: None,
       }
     );
     // Build metadata does not make a version newer.
     assert_eq!(
       check(&k, payload("1.0.0+build.7")).unwrap(),
       ManifestVerdict::UpToDate {
-        version: "1.0.0+build.7".into()
+        version: "1.0.0+build.7".into(),
+        sequence: None,
       }
     );
   }
@@ -663,12 +828,131 @@ mod tests {
   fn rejected_version_is_refused() {
     let k = key(1);
     let pk = public_b64(&k);
+    let rejected = ["2.0.0".to_string(), "2.1.0".to_string()];
     let mut e = exp(&pk);
-    e.rejected_version = Some("2.0.0");
-    let r = verify_manifest(&sign(&k, &payload("2.0.0").to_string()), &e);
-    assert_eq!(code(r), Code::Rejected);
+    e.rejected_versions = &rejected;
+    // Every version of the set is refused, not only the last one.
+    for v in ["2.0.0", "2.1.0", "2.1.0+build.2"] {
+      let r = verify_manifest(&sign(&k, &payload(v).to_string()), &e);
+      assert_eq!(code(r), Code::Rejected, "{v}");
+    }
     let r = verify_manifest(&sign(&k, &payload("2.0.1").to_string()), &e);
     assert!(matches!(r, Ok(ManifestVerdict::Available(_))));
+  }
+
+  #[test]
+  fn an_expired_manifest_is_refused() {
+    let k = key(1);
+    let mut p = payload("2.0.0");
+    p["expiresAt"] = "2026-10-01T00:00:01.000Z".into();
+    let ManifestVerdict::Available(u) = check(&k, p.clone()).unwrap() else {
+      panic!("expected an update");
+    };
+    assert_eq!(u.expires_at.as_deref(), Some("2026-10-01T00:00:01.000Z"));
+    // At the expiry instant and after: refused, also when it offers the
+    // running version (a frozen "up to date").
+    p["expiresAt"] = "2026-10-01T00:00:00Z".into();
+    assert_eq!(code(check(&k, p.clone())), Code::Expired);
+    p["version"] = "1.0.0".into();
+    assert_eq!(code(check(&k, p.clone())), Code::Expired);
+    // An offset is honored: 02:00+02:00 is 00:00Z.
+    p["expiresAt"] = "2026-10-01T02:00:00+02:00".into();
+    assert_eq!(code(check(&k, p.clone())), Code::Expired);
+    p["expiresAt"] = "2026-10-01T02:00:01+02:00".into();
+    assert!(check(&k, p.clone()).is_ok());
+    for bad in [
+      "tomorrow",
+      "2026-10-01",
+      "2026-13-01T00:00:00Z",
+      "1790812800",
+    ] {
+      p["expiresAt"] = bad.into();
+      assert_eq!(code(check(&k, p.clone())), Code::InvalidManifest, "{bad}");
+    }
+    p["expiresAt"] = 1_790_812_900.into();
+    assert_eq!(code(check(&k, p)), Code::InvalidManifest);
+  }
+
+  #[test]
+  fn a_replayed_sequence_is_refused() {
+    let k = key(1);
+    let pk = public_b64(&k);
+    let signed = |v: &str, seq: Option<serde_json::Value>| {
+      let mut p = payload(v);
+      if let Some(seq) = seq {
+        p["sequence"] = seq;
+      }
+      sign(&k, &p.to_string())
+    };
+    // No floor yet: sequenced and unsequenced manifests both verify.
+    let ManifestVerdict::Available(u) =
+      verify_manifest(&signed("2.0.0", Some(10.into())), &exp(&pk)).unwrap()
+    else {
+      panic!("expected an update");
+    };
+    assert_eq!(u.sequence, Some(10));
+    assert!(verify_manifest(&signed("2.0.0", None), &exp(&pk)).is_ok());
+    let mut e = exp(&pk);
+    e.sequence_floor = Some(10);
+    // The same release again, and a newer one: accepted.
+    assert!(verify_manifest(&signed("2.0.0", Some(10.into())), &e).is_ok());
+    assert!(verify_manifest(&signed("2.0.0", Some(11.into())), &e).is_ok());
+    // An older one, or one without a sequence: replayed, even when it offers
+    // the running version (the freeze).
+    for (v, seq) in [
+      ("2.0.0", Some(9.into())),
+      ("1.0.0", Some(9.into())),
+      ("2.0.0", None),
+    ] {
+      let r = verify_manifest(&signed(v, seq.clone()), &e);
+      assert_eq!(code(r), Code::Replayed, "{v} {seq:?}");
+    }
+    // An UpToDate verdict carries its sequence (to record it).
+    assert_eq!(
+      verify_manifest(&signed("1.0.0", Some(12.into())), &e).unwrap(),
+      ManifestVerdict::UpToDate {
+        version: "1.0.0".into(),
+        sequence: Some(12),
+      }
+    );
+    // Not a non-negative integer within JavaScript's safe range: malformed.
+    for bad in [
+      serde_json::json!(-1),
+      serde_json::json!(1.5),
+      serde_json::json!("12"),
+      serde_json::json!(MAX_SEQUENCE + 1),
+    ] {
+      let r = verify_manifest(&signed("2.0.0", Some(bad.clone())), &exp(&pk));
+      assert_eq!(code(r), Code::InvalidManifest, "{bad}");
+    }
+    assert!(
+      verify_manifest(&signed("2.0.0", Some(MAX_SEQUENCE.into())), &exp(&pk))
+        .is_ok()
+    );
+  }
+
+  #[test]
+  fn rfc3339_timestamps() {
+    assert_eq!(parse_rfc3339("1970-01-01T00:00:00Z"), Some(0));
+    assert_eq!(parse_rfc3339("2026-10-01T00:00:00Z"), Some(NOW));
+    assert_eq!(parse_rfc3339("2026-10-01T00:00:00.123Z"), Some(NOW));
+    assert_eq!(parse_rfc3339("2000-02-29T12:34:56Z"), Some(951_827_696));
+    assert_eq!(parse_rfc3339("1969-12-31T23:59:59Z"), Some(-1));
+    assert_eq!(parse_rfc3339("2026-10-01T01:30:00+01:30"), Some(NOW));
+    assert_eq!(parse_rfc3339("2026-09-30T22:00:00-02:00"), Some(NOW));
+    for bad in [
+      "",
+      "2026-10-01T00:00:00",
+      "2026-10-01 00:00:00Z",
+      "2026-10-01T00:00:00.Z",
+      "2026-02-29T00:00:00Z",
+      "2026-10-01T24:00:00Z",
+      "2026-10-01T00:00:00+0200",
+      "2026-10-01T00:00:00Zjunk",
+      "+026-10-01T00:00:00Z",
+    ] {
+      assert_eq!(parse_rfc3339(bad), None, "{bad}");
+    }
   }
 
   #[test]
@@ -764,7 +1048,9 @@ mod tests {
         app_id: "com.example.vector",
         running_version: "1.0.0",
         platform: "x86_64-unknown-linux-gnu-webview",
-        rejected_version: None,
+        rejected_versions: &[],
+        sequence_floor: None,
+        now_unix: NOW,
         allow_insecure_loopback: false,
       },
     );

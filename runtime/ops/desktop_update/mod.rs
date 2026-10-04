@@ -10,8 +10,9 @@
 //!    ([`manifest`]): ECDSA P-256 against the public key BAKED INTO THE APP
 //!    at package time (there is no unsigned path), this app's identifier, a
 //!    version strictly newer than the running one (no downgrade, no
-//!    reinstall), not a version that was rolled back, this platform's entry,
-//!    an https URL.
+//!    reinstall), not a version that was rolled back, not expired and not
+//!    older (`sequence`) than a manifest already accepted, this platform's
+//!    entry, an https URL.
 //! 2. `download()` streams the archive into a staging directory next to the
 //!    install, refusing a byte past the manifest's size, then matches size
 //!    and SHA-256 ([`archive::DownloadSink`]).
@@ -167,6 +168,14 @@ fn ready(config: &AppUpdateConfig) -> Result<Ready, UpdateError> {
   })
 }
 
+/// Now, in Unix seconds (a clock before 1970 reads as 0).
+fn unix_now() -> i64 {
+  std::time::SystemTime::now()
+    .duration_since(std::time::UNIX_EPOCH)
+    .map(|d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
+    .unwrap_or(0)
+}
+
 fn js(e: UpdateError) -> JsErrorBox {
   JsErrorBox::generic(e.to_string())
 }
@@ -220,7 +229,12 @@ pub struct InfoOut {
   phase: Option<Phase>,
   pending_version: Option<String>,
   staged_version: Option<String>,
+  /// The last rejected version (what older runtimes reported).
   rejected: Option<String>,
+  /// Every rejected version, oldest first.
+  rejected_versions: Vec<String>,
+  /// The highest manifest `sequence` this install has accepted.
+  manifest_sequence: Option<u64>,
   last_error: Option<String>,
   updated_from: Option<String>,
   rolled_back_from: Option<String>,
@@ -259,7 +273,12 @@ fn update_info(state: &mut OpState) -> InfoOut {
       .filter(|s| s.phase == Phase::Swapped)
       .and_then(|s| s.to.clone()),
     staged_version,
-    rejected: st.as_ref().and_then(|s| s.rejected.clone()),
+    rejected: st.as_ref().and_then(|s| s.all_rejected().last().cloned()),
+    rejected_versions: st
+      .as_ref()
+      .map(|s| s.all_rejected())
+      .unwrap_or_default(),
+    manifest_sequence: st.as_ref().and_then(|s| s.manifest_sequence),
     last_error: st.as_ref().and_then(|s| s.last_error.clone()),
     updated_from: config.updated_from,
     rolled_back_from: config.rolled_back_from,
@@ -294,7 +313,8 @@ fn update_check(
   allow_insecure_loopback: bool,
 ) -> Result<CheckOut, JsErrorBox> {
   let (_, ready) = gate(state).map_err(js)?;
-  let rejected = swap::read_state(&ready.layout).and_then(|s| s.rejected);
+  let st = swap::read_state(&ready.layout);
+  let rejected = st.as_ref().map(|s| s.all_rejected()).unwrap_or_default();
   let verdict = manifest::verify_manifest(
     manifest_bytes,
     &manifest::Expectations {
@@ -302,11 +322,20 @@ fn update_check(
       app_id: &ready.app_id,
       running_version: &ready.version,
       platform: &ready.platform,
-      rejected_version: rejected.as_deref(),
+      rejected_versions: &rejected,
+      sequence_floor: st.as_ref().and_then(|s| s.manifest_sequence),
+      now_unix: unix_now(),
       allow_insecure_loopback,
     },
   )
   .map_err(js)?;
+  // The high-water mark, best effort: an install this user can't write is
+  // refused at download() anyway, and stage() records it again.
+  let sequence = match &verdict {
+    ManifestVerdict::Available(u) => u.sequence,
+    ManifestVerdict::UpToDate { sequence, .. } => *sequence,
+  };
+  let _ = swap::record_manifest_sequence(&ready.layout, sequence);
   let mut session = session(state).0.borrow_mut();
   match verdict {
     ManifestVerdict::Available(update) => {
@@ -318,7 +347,7 @@ fn update_check(
         update: Some(update),
       })
     }
-    ManifestVerdict::UpToDate { version } => {
+    ManifestVerdict::UpToDate { version, .. } => {
       session.verified = None;
       Ok(CheckOut {
         available: false,
@@ -507,8 +536,17 @@ pub async fn op_desktop_app_update_stage(
   let from = ready.version.clone();
   let to = update.version.clone();
   let size = update.size;
+  let sequence = update.sequence;
   let result = deno_core::unsync::spawn_blocking(move || {
-    stage_blocking(&layout, &archive, size, &from, &to, allow_unsigned_dev)
+    stage_blocking(
+      &layout,
+      &archive,
+      size,
+      &from,
+      &to,
+      sequence,
+      allow_unsigned_dev,
+    )
   })
   .await
   .map_err(|e| UpdateError::io("stage", e))
@@ -565,6 +603,7 @@ fn stage_blocking(
   size: u64,
   from: &str,
   to: &str,
+  sequence: Option<u64>,
   allow_unsigned_dev: bool,
 ) -> Result<SignatureReport, UpdateError> {
   let extract = layout.extract_dir();
@@ -634,13 +673,13 @@ fn stage_blocking(
     .map_err(|e| UpdateError::io(staged.display(), e))?;
   let _ = std::fs::remove_file(archive);
   let previous = swap::read_state(layout);
-  let mut st = UpdateState::new(layout);
+  let mut st = UpdateState::carried_from(layout, previous);
   st.phase = Phase::Staged;
   st.from = Some(from.to_string());
   st.to = Some(to.to_string());
   st.entry = Some(x.top);
   st.staged_digest = Some(staged_digest);
-  st.rejected = previous.and_then(|p| p.rejected);
+  st.record_sequence(sequence);
   swap::write_state(layout, &st)?;
   Ok(signature)
 }
@@ -786,7 +825,17 @@ fn update_confirm(state: &mut OpState) -> Result<bool, JsErrorBox> {
     // Not a replaceable install: nothing was ever swapped here.
     Err(_) => return Ok(false),
   };
-  swap::confirm(&layout).map_err(js)
+  // The state is recorded before this returns; deleting the previous app
+  // (and on Windows waiting for its processes) runs on its own thread, not
+  // the JavaScript one. If the app exits first, `cleanup` stays set and the
+  // next start finishes it.
+  match swap::mark_confirmed(&layout).map_err(js)? {
+    Some(mut st) => {
+      std::thread::spawn(move || swap::cleanup(&layout, &mut st));
+      Ok(true)
+    }
+    None => Ok(false),
+  }
 }
 
 /// Run at the very start of a desktop app's process (before the runtime or
@@ -1015,15 +1064,16 @@ mod tests {
     // download() made the staging directory the extraction goes into.
     std::fs::create_dir_all(layout.staging_dir()).unwrap();
     let (archive, size) = pack(0o644);
-    let e = stage_blocking(&layout, &archive, size, "1.0.0", "2.0.0", true)
-      .unwrap_err();
+    let e =
+      stage_blocking(&layout, &archive, size, "1.0.0", "2.0.0", None, true)
+        .unwrap_err();
     assert_eq!(e.code, Code::BundleMismatch, "{}", e.message);
     assert!(e.message.contains("not executable"), "{}", e.message);
     // The same app with its execute bit passes that check (whatever the
     // OS signature check then says about a fake app).
     let (archive, size) = pack(0o755);
     if let Err(e) =
-      stage_blocking(&layout, &archive, size, "1.0.0", "2.0.0", true)
+      stage_blocking(&layout, &archive, size, "1.0.0", "2.0.0", None, true)
     {
       assert!(!e.message.contains("not executable"), "{}", e.message);
     }
@@ -1149,6 +1199,8 @@ mod tests {
       size: 10,
       release_notes: None,
       published_at: "2026-01-01T00:00:00Z".into(),
+      sequence: None,
+      expires_at: None,
     };
     session(&mut state).0.borrow_mut().verified = Some(update("2.0.0"));
     let begun = update_begin(&mut state).unwrap();
@@ -1175,6 +1227,8 @@ mod tests {
       size,
       release_notes: None,
       published_at: "2026-10-02T00:00:00Z".into(),
+      sequence: None,
+      expires_at: None,
     }
   }
 
@@ -1315,6 +1369,101 @@ mod tests {
       expect_code(update_apply(&mut state), "not_staged");
       assert_eq!(swap::read_state(&layout).unwrap().phase, phase);
     }
+  }
+
+  /// A manifest signed with a throwaway key for the fake app, with extra
+  /// payload fields.
+  fn signed_manifest(
+    key: &p256::ecdsa::SigningKey,
+    platform: &str,
+    version: &str,
+    extra: serde_json::Value,
+  ) -> Vec<u8> {
+    use base64::Engine;
+    use p256::ecdsa::signature::Signer;
+    let mut payload = serde_json::json!({
+      "schema": 1,
+      "app": "com.example.fake",
+      "version": version,
+      "platforms": { platform: {
+        "url": "https://u.example/app.tar.gz",
+        "sha256": "0".repeat(64),
+        "size": 10,
+        "kind": "bundle",
+      } },
+      "publishedAt": "2026-10-01T00:00:00Z",
+    });
+    for (k, v) in extra.as_object().unwrap() {
+      payload[k] = v.clone();
+    }
+    let signed = payload.to_string();
+    let mut msg = manifest::SIGNATURE_DOMAIN.to_vec();
+    msg.extend_from_slice(signed.as_bytes());
+    let sig: p256::ecdsa::Signature = key.sign(&msg);
+    serde_json::to_vec(&serde_json::json!({
+      "signed": signed,
+      "signature": base64::engine::general_purpose::STANDARD
+        .encode(sig.to_bytes()),
+    }))
+    .unwrap()
+  }
+
+  // check() records a manifest's sequence next to the install and refuses an
+  // older one (or an expired manifest) afterwards; the status reports it.
+  #[test]
+  fn check_records_the_sequence_and_refuses_a_replay() {
+    use base64::Engine;
+    use p256::pkcs8::EncodePublicKey;
+    let key = p256::ecdsa::SigningKey::from_bytes(&[7u8; 32].into()).unwrap();
+    let public = base64::engine::general_purpose::STANDARD
+      .encode(key.verifying_key().to_public_key_der().unwrap().as_bytes());
+    let tmp = tempfile::tempdir().unwrap();
+    let (exe, layout) = fake_app(&tmp);
+    let config = host_config(exe, Some(&public));
+    let platform = ready(&config).unwrap().platform;
+    let mut state = OpState::new(None);
+    state.put(config);
+    let check = |state: &mut OpState, v: &str, extra: serde_json::Value| {
+      update_check(state, &signed_manifest(&key, &platform, v, extra), false)
+    };
+    // Without a sequence (what publishers wrote before it existed): fine.
+    assert!(
+      check(&mut state, "2.0.0", serde_json::json!({}))
+        .unwrap()
+        .available
+    );
+    assert_eq!(swap::read_state(&layout), None, "nothing to record");
+    let out = check(&mut state, "2.0.0", serde_json::json!({ "sequence": 10 }))
+      .unwrap();
+    assert!(out.available);
+    assert_eq!(
+      swap::read_state(&layout).unwrap().manifest_sequence,
+      Some(10)
+    );
+    // An up-to-date manifest still raises the mark.
+    assert!(
+      !check(&mut state, "1.0.0", serde_json::json!({ "sequence": 12 }))
+        .unwrap()
+        .available
+    );
+    assert_eq!(update_info(&mut state).manifest_sequence, Some(12));
+    for extra in [serde_json::json!({ "sequence": 11 }), serde_json::json!({})]
+    {
+      expect_code(check(&mut state, "2.0.0", extra), "replayed");
+    }
+    expect_code(
+      check(
+        &mut state,
+        "2.0.0",
+        serde_json::json!({ "sequence": 12, "expiresAt": "2001-01-01T00:00:00Z" }),
+      ),
+      "expired",
+    );
+    // A refused manifest records nothing.
+    assert_eq!(
+      swap::read_state(&layout).unwrap().manifest_sequence,
+      Some(12)
+    );
   }
 
   // A configured app sees its own install and owns its staging directory.

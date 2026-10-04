@@ -30,6 +30,13 @@ pub enum UpdateErrorCode {
   Rejected,
   /// The manifest has no entry for this platform.
   NoPlatform,
+  /// The manifest's signed `expiresAt` has passed: an old manifest served
+  /// again to hide newer releases (a freeze) is refused.
+  Expired,
+  /// The manifest's signed `sequence` is lower than the highest this install
+  /// has accepted, or it has none after a sequenced one was accepted: an
+  /// older signed manifest replayed.
+  Replayed,
   /// The archive URL is not https (loopback http needs the dev flag).
   InsecureUrl,
   /// The download grew past the size the manifest declares.
@@ -71,6 +78,8 @@ impl UpdateErrorCode {
       Self::Downgrade => "downgrade",
       Self::Rejected => "rejected",
       Self::NoPlatform => "no_platform",
+      Self::Expired => "expired",
+      Self::Replayed => "replayed",
       Self::InsecureUrl => "insecure_url",
       Self::SizeExceeded => "size_exceeded",
       Self::Integrity => "integrity",
