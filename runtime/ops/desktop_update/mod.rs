@@ -825,13 +825,14 @@ fn update_confirm(state: &mut OpState) -> Result<bool, JsErrorBox> {
     // Not a replaceable install: nothing was ever swapped here.
     Err(_) => return Ok(false),
   };
-  // The state is recorded before this returns; deleting the previous app
-  // (and on Windows waiting for its processes) runs on its own thread, not
-  // the JavaScript one. If the app exits first, `cleanup` stays set and the
-  // next start finishes it.
+  // The state is recorded, and the previous app renamed away, before this
+  // returns; nothing that can block (deleting it, waiting on Windows for
+  // processes of a failed install) runs on the JavaScript thread: the
+  // deletion is a background thread's, and what can't be moved now is the
+  // next start's (`cleanup` stays set).
   match swap::mark_confirmed(&layout).map_err(js)? {
     Some(mut st) => {
-      std::thread::spawn(move || swap::cleanup(&layout, &mut st));
+      swap::cleanup_without_waiting(&layout, &mut st);
       Ok(true)
     }
     None => Ok(false),

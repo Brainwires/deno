@@ -1118,11 +1118,9 @@ pub fn confirm(layout: &InstallLayout) -> Result<bool, UpdateError> {
 }
 
 /// The state half of [`confirm`]: record the running version as good
-/// (`idle`, `cleanup` pending) and return the state for the [`cleanup`],
-/// which the caller may run elsewhere (the `confirm()` op runs it off the
-/// JavaScript thread: deleting the previous app, and on Windows waiting for
-/// its processes, must not freeze the app). `None` when there was nothing
-/// to confirm.
+/// (`idle`, `cleanup` pending) and return the state for a [`cleanup`] or
+/// [`cleanup_without_waiting`] (the `confirm()` op runs on the JavaScript
+/// thread). `None` when there was nothing to confirm.
 pub fn mark_confirmed(
   layout: &InstallLayout,
 ) -> Result<Option<UpdateState>, UpdateError> {
@@ -1155,18 +1153,55 @@ pub fn cleanup(layout: &InstallLayout, state: &mut UpdateState) {
   let done = discard_install_copy(layout, &layout.old_path())
     & discard_install_copy(layout, &layout.failed_path())
     & discard_path(layout, &layout.staging_dir());
-  if done && state.cleanup {
-    state.cleanup = false;
-    // Clear the flag on the state as it is NOW, not on the copy this
-    // cleanup started from: it may run on another thread while the app
-    // records a manifest sequence or stages an update.
-    if let Some(mut current) = read_state(layout)
-      && current.phase == Phase::Idle
-      && current.cleanup
-    {
-      current.cleanup = false;
-      let _ = write_state(layout, &current);
+  if done {
+    cleanup_done(layout, state);
+  }
+}
+
+/// [`cleanup`] for the JavaScript thread (`confirm()`): only renames. The
+/// previous app, a failed install and staging are each moved to a trash
+/// name at once (so `.old` is gone when `confirm()` returns, even if the app
+/// exits right after) and deleted on a background thread. What would block
+/// (waiting on Windows for processes still running from a failed install, a
+/// deletion in place when the rename fails) is never done here: that path
+/// stays, with `cleanup` set, for the next start's [`cleanup`].
+pub fn cleanup_without_waiting(
+  layout: &InstallLayout,
+  state: &mut UpdateState,
+) {
+  let quick = |path: &Path, install_copy: bool| -> bool {
+    if !exists(path) {
+      return true;
     }
+    // Anything at an install name that isn't provably this app's is left in
+    // place (the next `cleanup` logs it).
+    if install_copy && !is_install_copy(layout.kind, path) {
+      return false;
+    }
+    move_to_trash(layout, path)
+  };
+  let done = quick(&layout.old_path(), true)
+    & quick(&layout.failed_path(), true)
+    & quick(&layout.staging_dir(), false);
+  if done {
+    cleanup_done(layout, state);
+  }
+}
+
+/// Clear `cleanup` once everything is gone, on the state as it is NOW (a
+/// re-read), not on the copy the cleanup started from: the app may have
+/// recorded a manifest sequence or staged an update meanwhile.
+fn cleanup_done(layout: &InstallLayout, state: &mut UpdateState) {
+  if !state.cleanup {
+    return;
+  }
+  state.cleanup = false;
+  if let Some(mut current) = read_state(layout)
+    && current.phase == Phase::Idle
+    && current.cleanup
+  {
+    current.cleanup = false;
+    let _ = write_state(layout, &current);
   }
 }
 
@@ -2062,6 +2097,36 @@ mod tests {
     let s = read_state(l).unwrap();
     assert_eq!(s.all_rejected(), vec!["4.0.0"]);
     assert_eq!(s.manifest_sequence, Some(77));
+  }
+
+  /// confirm() on the JavaScript thread: `.old` is renamed away before it
+  /// returns (deleted in the background); what can't be moved now, or isn't
+  /// provably this app's, stays with `cleanup` set for the next start.
+  #[test]
+  fn confirm_without_waiting_moves_the_previous_app_at_once() {
+    let f = fixture(Some("2.0.0"));
+    let l = &f.layout;
+    let mut s = read_state(l).unwrap();
+    apply_swap(l, &mut s).unwrap();
+    assert!(l.old_path().exists());
+    let mut s = mark_confirmed(l).unwrap().expect("a swapped update");
+    cleanup_without_waiting(l, &mut s);
+    assert!(!l.old_path().exists());
+    assert!(!read_state(l).unwrap().cleanup);
+    assert_eq!(installed(l), "2.0.0");
+
+    let f = fixture(Some("2.0.0"));
+    let l = &f.layout;
+    let mut s = read_state(l).unwrap();
+    apply_swap(l, &mut s).unwrap();
+    std::fs::remove_file(
+      l.old_path().join(super::super::layout::INSTALL_MARKER),
+    )
+    .unwrap();
+    let mut s = mark_confirmed(l).unwrap().unwrap();
+    cleanup_without_waiting(l, &mut s);
+    assert!(l.old_path().exists(), "not provably ours: left in place");
+    assert!(read_state(l).unwrap().cleanup);
   }
 
   #[test]
