@@ -488,8 +488,10 @@ impl CancelSource for laufey::SchemeExchange {
 /// Where a response body chunk goes (the webview's exchange; a fake in
 /// tests).
 trait ResponseSink {
-  /// Bytes accepted (possibly fewer than offered, possibly 0 while the
-  /// consumer is full), or negative once the consumer has gone away.
+  /// Bytes accepted, 0 when nothing was (laufey API 44: the backend holds
+  /// its high-water mark of this response unread, so the same bytes are
+  /// offered again later), or negative once the consumer has gone away.
+  /// Older backends could also accept part of a chunk.
   fn write(&self, buf: &[u8]) -> isize;
 }
 
@@ -500,9 +502,17 @@ impl ResponseSink for laufey::SchemeExchange {
 }
 
 /// Hand all of `chunk` to `sink`, waiting (with a growing pause, at most
-/// [`WRITE_RETRY_MAX`]) while it accepts nothing. A short write used to drop
-/// the rest of the chunk. False once the consumer has gone away.
-async fn write_all(sink: &impl ResponseSink, mut chunk: &[u8]) -> bool {
+/// [`WRITE_RETRY_MAX`]) while it accepts nothing: laufey's backpressure
+/// (API 44) answers 0 once the page has the backend's high-water mark
+/// (4 MiB) unread, and the bridge holds the app's stream there instead of
+/// letting the backend buffer without bound. A short write used to drop the rest of the chunk.
+/// False once the consumer has gone away or the webview cancelled the
+/// request while the bridge waited (a page that stopped reading must not
+/// keep the app's stream parked forever).
+async fn write_all(
+  sink: &(impl ResponseSink + CancelSource),
+  mut chunk: &[u8],
+) -> bool {
   let mut pause = WRITE_RETRY_MIN;
   while !chunk.is_empty() {
     let n = sink.write(chunk);
@@ -511,6 +521,9 @@ async fn write_all(sink: &impl ResponseSink, mut chunk: &[u8]) -> bool {
     }
     let n = (n as usize).min(chunk.len());
     if n == 0 {
+      if sink.is_cancelled() {
+        return false;
+      }
       tokio::time::sleep(pause).await;
       pause = (pause * 2).min(WRITE_RETRY_MAX);
       continue;
@@ -524,7 +537,7 @@ async fn write_all(sink: &impl ResponseSink, mut chunk: &[u8]) -> bool {
 const WRITE_RETRY_MIN: std::time::Duration =
   std::time::Duration::from_millis(1);
 const WRITE_RETRY_MAX: std::time::Duration =
-  std::time::Duration::from_millis(50);
+  std::time::Duration::from_millis(20);
 
 /// A response header's value as the webview gets it.
 ///
@@ -1303,6 +1316,25 @@ mod tests {
     accepted: std::cell::RefCell<Vec<u8>>,
     /// What each write accepts at most, in turn (then everything).
     script: std::cell::RefCell<std::collections::VecDeque<isize>>,
+    /// Cancelled once this many writes were refused (0: never).
+    cancel_after_refusals: usize,
+    refusals: std::cell::Cell<usize>,
+  }
+
+  impl CancelSource for FakeSink {
+    fn is_cancelled(&self) -> bool {
+      self.cancel_after_refusals != 0
+        && self.refusals.get() >= self.cancel_after_refusals
+    }
+  }
+
+  fn fake_sink(script: &[isize], cancel_after_refusals: usize) -> FakeSink {
+    FakeSink {
+      accepted: Default::default(),
+      script: std::cell::RefCell::new(script.iter().copied().collect()),
+      cancel_after_refusals,
+      refusals: Default::default(),
+    }
   }
 
   impl ResponseSink for FakeSink {
@@ -1312,6 +1344,9 @@ mod tests {
         return cap;
       }
       let n = buf.len().min(cap as usize);
+      if n == 0 {
+        self.refusals.set(self.refusals.get() + 1);
+      }
       self.accepted.borrow_mut().extend_from_slice(&buf[..n]);
       n as isize
     }
@@ -1404,19 +1439,34 @@ mod tests {
   async fn short_and_full_writes_deliver_the_whole_chunk() {
     // The consumer takes 3 bytes, is full twice, then takes the rest: every
     // byte arrives (a short write used to lose the remainder).
-    let sink = FakeSink {
-      accepted: Default::default(),
-      script: std::cell::RefCell::new([3, 0, 0, 2].into()),
-    };
+    let sink = fake_sink(&[3, 0, 0, 2], 0);
     assert!(write_all(&sink, b"hello world").await);
     assert_eq!(&*sink.accepted.borrow(), b"hello world");
     // A consumer that went away stops the copy.
-    let gone = FakeSink {
-      accepted: Default::default(),
-      script: std::cell::RefCell::new([4, -1].into()),
-    };
+    let gone = fake_sink(&[4, -1], 0);
     assert!(!write_all(&gone, b"hello world").await);
     assert_eq!(&*gone.accepted.borrow(), b"hell");
+  }
+
+  #[tokio::test]
+  async fn backpressure_waits_and_offers_the_same_bytes_again() {
+    // laufey API 44: 0 means nothing was taken (the page has 4 MiB unread);
+    // the bridge waits and offers the whole chunk again, then it goes in at
+    // once.
+    let sink = fake_sink(&[0, 0, 0, 0, 0], 0);
+    let t0 = std::time::Instant::now();
+    assert!(write_all(&sink, b"chunk").await);
+    assert_eq!(&*sink.accepted.borrow(), b"chunk");
+    assert_eq!(sink.refusals.get(), 5);
+    // It waited between the attempts (1 + 2 + 4 + 8 + 16 ms, capped at
+    // 20).
+    assert!(t0.elapsed() >= std::time::Duration::from_millis(25));
+    // A page that stops reading and is cancelled while the bridge waits:
+    // the copy ends instead of waiting forever.
+    let stalled = fake_sink(&[0; 1000], 3);
+    assert!(!write_all(&stalled, b"chunk").await);
+    assert!(stalled.accepted.borrow().is_empty());
+    assert_eq!(stalled.refusals.get(), 3);
   }
 
   #[tokio::test]

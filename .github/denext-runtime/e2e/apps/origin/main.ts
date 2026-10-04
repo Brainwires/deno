@@ -89,6 +89,23 @@ try {
   document.body.appendChild(frame);
 } catch (e) { post("/log", { error: "marker: " + String(e) }); }
 step("marker");
+// A reader that stops: the app's stream must be held back (laufey API 44
+// backpressure), not drained into the backend's memory.
+try {
+  const ac = new AbortController();
+  const res = await fetch("/flood", { cache: "no-store", signal: ac.signal });
+  const reader = res.body.getReader();
+  let read = 0;
+  while (read < 1024 * 1024) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    read += value.byteLength;
+  }
+  await new Promise((r) => setTimeout(r, 3000));
+  await post("/flood-paused", { read });
+  ac.abort();
+} catch (e) { post("/log", { error: "flood: " + String(e) }); }
+step("flood");
 // The app's own document calls a binding: the handler learns its origin.
 try {
   out.whoami = await window.bindings.e2eWhoami();
@@ -106,6 +123,10 @@ await post("/result", out);
 let pageResult: any = null;
 const hang = { started: false, cancelled: false };
 let pageRequest: Record<string, unknown> | null = null;
+// /flood: what the app produced, and what it had produced when the page
+// (having read 1 MiB) reported its pause.
+const flood = { produced: 0, atPause: -1, pageRead: -1 };
+const FLOOD_TOTAL = 256 * 1024 * 1024;
 // What the app saw of /marker/<kind> requests.
 const markerSeen: Record<
   string,
@@ -173,6 +194,25 @@ Deno.serve((req, info) => {
       socket.onmessage = (ev) => socket.send(`echo:${ev.data}`);
       return response;
     }
+    case "/flood": {
+      const chunk = new Uint8Array(1024 * 1024);
+      return new Response(
+        new ReadableStream<Uint8Array>({
+          pull(c) {
+            if (flood.produced >= FLOOD_TOTAL) return c.close();
+            flood.produced += chunk.byteLength;
+            c.enqueue(chunk.slice());
+          },
+        }, { highWaterMark: 1 }),
+        { headers: { "cache-control": "no-store" } },
+      );
+    }
+    case "/flood-paused":
+      return req.json().then((body) => {
+        flood.atPause = flood.produced;
+        flood.pageRead = body.read;
+        return new Response("ok");
+      });
     case "/marker/same":
     case "/marker/cross":
       markerSeen[url.pathname.slice("/marker/".length)] = {
@@ -386,6 +426,14 @@ async function afterPage() {
     "a cross-origin fetch succeeds and carries Origin: <app origin>",
     p.crossOrigin?.status === 200 && tcpOrigins.includes(ORIGIN),
     { page: p.crossOrigin, seen: tcpOrigins },
+  );
+
+  // --- a response the page stops reading is held back ---
+  r.check(
+    "a stream the page stops reading is held back (backpressure), not drained",
+    flood.atPause > 0 && flood.pageRead > 0 &&
+      flood.atPause <= 64 * 1024 * 1024 && flood.atPause < FLOOD_TOTAL,
+    flood,
   );
 
   // --- requests from documents of another origin are marked ---
