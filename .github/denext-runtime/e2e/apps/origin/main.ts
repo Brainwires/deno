@@ -8,6 +8,9 @@
 
 // deno-lint-ignore-file no-explicit-any
 
+import { spawn, spawnSync } from "node:child_process";
+import process from "node:process";
+
 import {
   describeError,
   html,
@@ -423,6 +426,79 @@ async function afterPage() {
     r.fail("child process env", describeError(e));
   }
 
+  await nodeChildProcessChecks();
+
   await tcp.shutdown();
   r.finish();
+}
+
+/** The output of a program that prints its environment, run through
+ * `node:child_process` with `opts`. */
+function envLines(opts: Record<string, unknown> = {}): string[] {
+  const [cmd, args] = Deno.build.os === "windows"
+    ? ["cmd", ["/c", "set"]]
+    : ["/usr/bin/env", []];
+  const out = spawnSync(cmd, args as string[], { encoding: "utf8", ...opts });
+  return String(out.stdout ?? "").split(/\r?\n/);
+}
+
+function envLine(lines: string[], name: string): string | undefined {
+  return lines.find((l) => l.toUpperCase().startsWith(`${name}=`));
+}
+
+async function nodeChildProcessChecks() {
+  // --- node:child_process: the env overlay (DENO_SERVE_ADDRESS stays in this
+  // process even where the app copies process.env into the child's env) ---
+  try {
+    const plain = envLines();
+    r.check(
+      "node:child_process: a child does not inherit DENO_SERVE_ADDRESS=memory:",
+      envLine(plain, "DENO_SERVE_ADDRESS") === undefined,
+      envLine(plain, "DENO_SERVE_ADDRESS") ?? "(absent)",
+    );
+    r.check(
+      "node:child_process: a child inherits DENO_DESKTOP_APP_ORIGIN",
+      envLine(plain, "DENO_DESKTOP_APP_ORIGIN") ===
+        `DENO_DESKTOP_APP_ORIGIN=${ORIGIN}`,
+      envLine(plain, "DENO_DESKTOP_APP_ORIGIN") ?? "(absent)",
+    );
+    const spread = envLines({
+      env: { ...process.env, DENEXT_E2E_EXTRA: "1" },
+    });
+    r.check(
+      "node:child_process: { ...process.env } does not carry DENO_SERVE_ADDRESS",
+      envLine(spread, "DENO_SERVE_ADDRESS") === undefined &&
+        envLine(spread, "DENEXT_E2E_EXTRA") === "DENEXT_E2E_EXTRA=1",
+      {
+        serve: envLine(spread, "DENO_SERVE_ADDRESS") ?? "(absent)",
+        extra: envLine(spread, "DENEXT_E2E_EXTRA") ?? "(absent)",
+      },
+    );
+    const own = envLines({
+      env: { ...process.env, DENO_SERVE_ADDRESS: "127.0.0.1:9" },
+    });
+    r.check(
+      "node:child_process: a DENO_SERVE_ADDRESS the app sets for the child is kept",
+      envLine(own, "DENO_SERVE_ADDRESS") === "DENO_SERVE_ADDRESS=127.0.0.1:9",
+      envLine(own, "DENO_SERVE_ADDRESS") ?? "(absent)",
+    );
+    // The asynchronous spawn path builds the environment the same way.
+    const [cmd, args] = Deno.build.os === "windows"
+      ? ["cmd", ["/c", "set"]]
+      : ["/usr/bin/env", []];
+    const asyncOut = await new Promise<string>((resolve) => {
+      let out = "";
+      const child = spawn(cmd, args as string[]);
+      child.stdout.on("data", (d: Uint8Array) => {
+        out += new TextDecoder().decode(d);
+      });
+      child.on("close", () => resolve(out));
+    });
+    r.check(
+      "node:child_process: an async spawn does not inherit DENO_SERVE_ADDRESS",
+      envLine(asyncOut.split(/\r?\n/), "DENO_SERVE_ADDRESS") === undefined,
+    );
+  } catch (e) {
+    r.fail("node:child_process env", describeError(e));
+  }
 }

@@ -91,6 +91,7 @@ deno_core::extension!(
   deno_os,
   ops = [
     op_env,
+    op_env_process_local_keys,
     op_exec_path,
     op_exit,
     op_delete_env,
@@ -252,6 +253,20 @@ pub fn set_env_overlay_var_not_inherited(
   value: impl Into<OsString>,
 ) {
   env_overlay_insert(key.into(), value.into(), false);
+}
+
+/// The names of the overlay variables this process keeps to itself (set with
+/// [`set_env_overlay_var_not_inherited`]). A child process spawned with an
+/// explicit copy of the environment (`node:child_process` passes
+/// `process.env` as the child's whole environment) would otherwise carry
+/// them along; the caller leaves them out where its copy still holds the
+/// runtime's own value.
+pub fn env_overlay_process_local_keys() -> Vec<OsString> {
+  env_overlay()
+    .iter()
+    .filter(|v| !v.inherited)
+    .map(|v| v.key.clone())
+    .collect()
 }
 
 /// The process environment with the overlay applied (see
@@ -515,6 +530,17 @@ fn get_env_var(key: &str) -> Result<Option<String>, OsError> {
   Ok(r)
 }
 
+/// See [`env_overlay_process_local_keys`]. Only names: a value is read
+/// through the usual (permission-checked) paths.
+#[op2]
+#[serde]
+fn op_env_process_local_keys() -> Vec<String> {
+  env_overlay_process_local_keys()
+    .into_iter()
+    .filter_map(|k| k.into_string().ok())
+    .collect()
+}
+
 #[op2]
 #[string]
 fn op_get_env_no_permission_check(
@@ -665,6 +691,11 @@ mod tests {
     // An inherited overlay variable does reach the child.
     let inherited = "DENO_OS_TEST_ENV_OVERLAY_INHERITED_KEY";
     super::set_env_overlay_var(inherited, "y");
+    // Only the process-local one is named for callers that copy the
+    // environment themselves (`node:child_process`).
+    let local = super::env_overlay_process_local_keys();
+    assert!(local.iter().any(|k| k == key));
+    assert!(!local.iter().any(|k| k == inherited));
     assert!(
       super::env_vars_os_for_child_process()
         .iter()
@@ -672,6 +703,12 @@ mod tests {
     );
     env.remove_var(key);
     env.remove_var(inherited);
+    // Removed with `Deno.env.delete`, it is no longer process-local.
+    assert!(
+      !super::env_overlay_process_local_keys()
+        .iter()
+        .any(|k| k == key)
+    );
   }
 
   #[test]

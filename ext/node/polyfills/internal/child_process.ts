@@ -48,6 +48,8 @@ const {
 } = primordials;
 const { isTypedArray } = core;
 const {
+  op_env_process_local_keys,
+  op_get_env_no_permission_check,
   op_node_in_npm_package,
   op_node_ipc_buffer_constructor,
   op_node_ipc_read_advanced,
@@ -1053,6 +1055,53 @@ function keys(object) {
   return ObjectKeys(object);
 }
 
+/**
+ * `env` without the variables the runtime keeps to its own process (the
+ * desktop runtime's in-process `DENO_SERVE_ADDRESS=memory:<name>`, see
+ * `deno_os::set_env_overlay_var_not_inherited`) wherever `env` still holds the
+ * runtime's own value: `process.env` itself (the default) or a copy of it such
+ * as `{ ...process.env, FOO: "1" }`. A child would otherwise serve its
+ * `Deno.serve` / `node:http` on a memory channel in its own process, which
+ * nothing can reach. A child given a different value keeps it. Outside such a
+ * runtime there are no process-local variables and `env` is returned as is.
+ */
+function withoutProcessLocalEnv(env) {
+  const localKeys = op_env_process_local_keys();
+  if (localKeys.length === 0) {
+    return env;
+  }
+  const own = new SafeMap();
+  for (const key of new SafeArrayIterator(localKeys)) {
+    const value = op_get_env_no_permission_check(key);
+    if (value !== undefined && value !== null) {
+      own.set(isWindows ? StringPrototypeToUpperCase(key) : key, value);
+    }
+  }
+  const drop = new SafeSet();
+  // Prototype values are intentionally included, as in the caller.
+  // deno-lint-ignore guard-for-in
+  for (const key in env) {
+    const value = env[key];
+    const ownValue = own.get(isWindows ? StringPrototypeToUpperCase(key) : key);
+    if (
+      ownValue !== undefined && value !== undefined && String(value) === ownValue
+    ) {
+      drop.add(key);
+    }
+  }
+  if (drop.size === 0) {
+    return env;
+  }
+  const copy = {};
+  // deno-lint-ignore guard-for-in
+  for (const key in env) {
+    if (!drop.has(key)) {
+      copy[key] = env[key];
+    }
+  }
+  return copy;
+}
+
 function copyProcessEnvToEnv(
   env,
   name,
@@ -1380,7 +1429,7 @@ function normalizeSpawnArguments(
     ArrayPrototypeUnshift(args, file);
   }
 
-  const env = options.env || Deno.env.toObject();
+  const env = withoutProcessLocalEnv(options.env || Deno.env.toObject());
   const envPairs = [];
 
   // process.env.NODE_V8_COVERAGE always propagates, making it possible to
