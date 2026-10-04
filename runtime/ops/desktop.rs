@@ -351,6 +351,9 @@ pub enum DesktopEvent {
     name: String,
     args: Vec<DesktopValue>,
     call_id: u32,
+    /// The serialized origin of the document that called (laufey API 44),
+    /// already admitted by [`bind_call_allowed`].
+    origin: String,
   },
   #[serde(rename_all = "camelCase")]
   MouseClick {
@@ -1243,6 +1246,102 @@ pub trait DesktopMainThread: Send + Sync + 'static {
   >;
 }
 
+/// Which documents may call a binding, beyond the app's own (see
+/// [`bind_call_allowed`]): `BrowserWindow.bind(name, fn, { origins })`.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum BindOrigins {
+  /// Only the app's own origins (the default).
+  #[default]
+  App,
+  /// Any document, `null` (opaque) origins included (`origins: "*"`).
+  Any,
+  /// The app's origins and these serialized origins (`origins: [...]`).
+  List(Vec<String>),
+}
+
+/// The most origins one binding may list.
+const MAX_BIND_ORIGINS: usize = 64;
+
+impl BindOrigins {
+  /// `options.origins` as DESKTOP_JS's `bind()` hands it to the (fast)
+  /// native method: `""` (not given), `"*"`, or the listed origins, one per
+  /// line (an origin has no line break).
+  fn from_spec(spec: &str) -> Result<Self, deno_error::JsErrorBox> {
+    match spec {
+      "" => Ok(BindOrigins::App),
+      "*" => Ok(BindOrigins::Any),
+      list => {
+        let list: Vec<&str> = list.split('\n').collect();
+        if list.len() > MAX_BIND_ORIGINS {
+          return Err(deno_error::JsErrorBox::type_error(format!(
+            "a binding lists at most {MAX_BIND_ORIGINS} origins"
+          )));
+        }
+        let mut out = Vec::with_capacity(list.len());
+        for origin in list {
+          out.push(serialize_bind_origin(origin).ok_or_else(|| {
+            deno_error::JsErrorBox::type_error(format!(
+              "not an origin (scheme://host[:port], or \"null\"): {origin:?}"
+            ))
+          })?);
+        }
+        Ok(BindOrigins::List(out))
+      }
+    }
+  }
+}
+
+/// `origin` as browsers serialize it (lowercase scheme and host, the port
+/// only when it isn't the scheme's default): what laufey reports for the
+/// calling document, so the two compare exactly. `"null"` stays `"null"`.
+/// `None` for anything with a path, query, credentials, or not a URL.
+pub fn serialize_bind_origin(origin: &str) -> Option<String> {
+  if origin == "null" {
+    return Some(origin.to_string());
+  }
+  if origin.contains('\0') || origin.ends_with('/') {
+    return None;
+  }
+  let url = deno_core::url::Url::parse(origin).ok()?;
+  if url.path() != "/" && !url.path().is_empty()
+    || url.query().is_some()
+    || url.fragment().is_some()
+    || !url.username().is_empty()
+    || url.password().is_some()
+  {
+    return None;
+  }
+  let host = url.host_str()?;
+  Some(match url.port() {
+    Some(port) => format!("{}://{host}:{port}", url.scheme()),
+    None => format!("{}://{host}", url.scheme()),
+  })
+}
+
+/// Whether a document at `origin` (laufey's serialization of the calling
+/// document's origin) may call a binding: one of the app's own `trusted`
+/// origins (the app origin, and a development run's dev server), or one the
+/// binding opted into. A page the app navigated to elsewhere (a remote site,
+/// an identity provider) kept every binding before. An empty origin (a
+/// backend that reports none) is never trusted.
+pub fn bind_call_allowed(
+  origin: &str,
+  trusted: &[String],
+  extra: &BindOrigins,
+) -> bool {
+  if origin.is_empty() {
+    return matches!(extra, BindOrigins::Any);
+  }
+  if trusted.iter().any(|t| t == origin) {
+    return true;
+  }
+  match extra {
+    BindOrigins::App => false,
+    BindOrigins::Any => true,
+    BindOrigins::List(list) => list.iter().any(|o| o == origin),
+  }
+}
+
 /// A pending call from the webview to a bound Deno function.
 pub struct PendingBindCall {
   pub name: String,
@@ -2114,7 +2213,9 @@ pub trait DesktopApi: Send + Sync + 'static {
   fn hide(&self, window_id: u32);
   fn focus(&self, window_id: u32);
 
-  fn bind(&self, window_id: u32, name: &str);
+  /// Expose binding `name` to the window's page, callable from the documents
+  /// [`bind_call_allowed`] admits for `origins`.
+  fn bind(&self, window_id: u32, name: &str, origins: BindOrigins);
   fn unbind(&self, window_id: u32, name: &str);
 
   fn navigate(&self, window_id: u32, url: &str);
@@ -2728,9 +2829,14 @@ impl BrowserWindow {
   // method without overwriting the wrapper.
   #[fast]
   #[symbol("Deno_privateDesktopBind")]
-  fn bind(&self, #[string] name: &str) -> Result<(), deno_error::JsErrorBox> {
+  fn bind(
+    &self,
+    #[string] name: &str,
+    #[string] origins: &str,
+  ) -> Result<(), deno_error::JsErrorBox> {
     reject_nul("the binding name", name)?;
-    self.api.bind(self.window_id, name);
+    let origins = BindOrigins::from_spec(origins)?;
+    self.api.bind(self.window_id, name, origins);
     Ok(())
   }
 
@@ -6108,6 +6214,7 @@ mod tests {
         name: "".into(),
         args: vec![],
         call_id: 0,
+        origin: String::new(),
       }),
       "bindCall"
     );
@@ -6555,12 +6662,87 @@ mod tests {
         ("n".into(), DesktopValue::Int(42)),
       ])],
       call_id: 7,
+      origin: "myapp://app".into(),
     };
     let v = serde_json::to_value(&ev).unwrap();
     assert_eq!(v["args"][0]["name"], "ada");
     assert_eq!(v["args"][0]["n"], 42);
     assert_eq!(v["callId"], 7);
     assert_eq!(v["windowId"], 1);
+    assert_eq!(v["origin"], "myapp://app");
+  }
+
+  #[test]
+  fn bindings_answer_only_the_documents_they_trust() {
+    use super::BindOrigins;
+    use super::bind_call_allowed;
+    let trusted = vec![
+      "myapp://app".to_string(),
+      "http://localhost:5173".to_string(),
+    ];
+    // The app's own origins.
+    for origin in ["myapp://app", "http://localhost:5173"] {
+      assert!(bind_call_allowed(origin, &trusted, &BindOrigins::App));
+    }
+    // A page the main frame navigated to, an opaque document, another
+    // host on the app's scheme, a different port, no origin at all.
+    for origin in [
+      "https://evil.example",
+      "null",
+      "myapp://other",
+      "http://localhost:5174",
+      "MYAPP://APP",
+      "",
+    ] {
+      assert!(
+        !bind_call_allowed(origin, &trusted, &BindOrigins::App),
+        "{origin:?}"
+      );
+    }
+    // Opted in.
+    let list = BindOrigins::List(vec!["https://idp.example".to_string()]);
+    assert!(bind_call_allowed("https://idp.example", &trusted, &list));
+    assert!(!bind_call_allowed("https://evil.example", &trusted, &list));
+    assert!(!bind_call_allowed("", &trusted, &list));
+    assert!(bind_call_allowed(
+      "https://evil.example",
+      &trusted,
+      &BindOrigins::Any
+    ));
+    assert!(bind_call_allowed("null", &[], &BindOrigins::Any));
+    assert!(bind_call_allowed("", &[], &BindOrigins::Any));
+  }
+
+  #[test]
+  fn bind_origins_are_serialized_like_the_browser() {
+    use super::BindOrigins;
+    use super::serialize_bind_origin;
+    for (input, want) in [
+      ("https://Example.COM", Some("https://example.com")),
+      ("https://example.com:443", Some("https://example.com")),
+      ("http://127.0.0.1:5173", Some("http://127.0.0.1:5173")),
+      ("myapp://app", Some("myapp://app")),
+      ("null", Some("null")),
+      ("https://example.com/", None),
+      ("https://example.com/path", None),
+      ("https://example.com?x", None),
+      ("https://u:p@example.com", None),
+      ("not a url", None),
+      ("", None),
+    ] {
+      assert_eq!(serialize_bind_origin(input).as_deref(), want, "{input:?}");
+    }
+    assert_eq!(BindOrigins::from_spec("").unwrap(), BindOrigins::App);
+    assert_eq!(BindOrigins::from_spec("*").unwrap(), BindOrigins::Any);
+    assert_eq!(
+      BindOrigins::from_spec("HTTPS://IDP.example:443\nnull").unwrap(),
+      BindOrigins::List(vec!["https://idp.example".into(), "null".into()])
+    );
+    for bad in ["x", "https://x/", "https://x\n", "*\nhttps://x"] {
+      assert!(BindOrigins::from_spec(bad).is_err(), "{bad:?}");
+    }
+    let too_many = vec!["https://x"; 65].join("\n");
+    assert!(BindOrigins::from_spec(&too_many).is_err());
   }
 
   #[test]
@@ -7690,6 +7872,7 @@ mod tests {
           name: "f".into(),
           args: vec![],
           call_id: 1,
+          origin: String::new(),
         })
         .is_err()
     );

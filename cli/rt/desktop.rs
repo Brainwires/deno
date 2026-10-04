@@ -919,13 +919,33 @@ pub const DESKTOP_JS: &str = r#"
     // No env access — fine, we just don't trace binding calls.
   }
 
-  BrowserWindowPrototype.bind = function(name, fn) {
+  // `options.origins`: the documents besides the app's own that may call the
+  // binding ("*" for any, or a list of origins); `options.withCaller`: the
+  // handler gets `{ origin, windowId }` of the calling document first.
+  BrowserWindowPrototype.bind = function(name, fn, options = undefined) {
     const windowId = this.windowId;
+    const origins = options?.origins;
+    if (
+      origins !== undefined && origins !== "*" &&
+      !(Array.isArray(origins) && origins.length > 0 &&
+        origins.every((o) => typeof o === "string" && !o.includes("\n")))
+    ) {
+      throw new TypeError('origins must be "*" or an array of origins');
+    }
+    // The native method takes "" (app only), "*" or one origin per line.
+    const originsSpec = origins === undefined
+      ? ""
+      : origins === "*"
+      ? "*"
+      : origins.join("\n");
+    BrowserWindowPrototype[privateDesktopBind].call(this, name, originsSpec);
     if (!windowBindCallbacks.has(windowId)) {
       windowBindCallbacks.set(windowId, new Map());
     }
-    windowBindCallbacks.get(windowId).set(name, fn.bind(this));
-    BrowserWindowPrototype[privateDesktopBind].call(this, name);
+    windowBindCallbacks.get(windowId).set(name, {
+      fn: fn.bind(this),
+      withCaller: options?.withCaller === true,
+    });
 
     // Inject a renderer-side wrapper that emits console.debug around
     // every binding call. The wrapper waits for the native binding to
@@ -2544,7 +2564,8 @@ pub const DESKTOP_JS: &str = r#"
           }
           case "bindCall": {
             const callbacks = windowBindCallbacks.get(ev.windowId);
-            const fn_ = callbacks?.get(ev.name);
+            const binding = callbacks?.get(ev.name);
+            const fn_ = binding?.fn;
             if (!fn_) {
               op_desktop_reject_bind_call(ev.callId, "No callback bound for: " + ev.name);
               break;
@@ -2556,7 +2577,11 @@ pub const DESKTOP_JS: &str = r#"
                 if (bindingTrace) {
                   console.debug("[binding:call]", ev.name, ":" + ev.callId, args);
                 }
-                const result = await fn_(...args);
+                // The runtime already refused documents the binding doesn't
+                // trust; `withCaller` tells the handler which one called.
+                const result = binding.withCaller
+                  ? await fn_({ origin: ev.origin, windowId: ev.windowId }, ...args)
+                  : await fn_(...args);
                 if (bindingTrace) {
                   console.debug("[binding:return]", ev.name, ":" + ev.callId, result);
                 }
@@ -3631,9 +3656,9 @@ mod tests {
 
   #[test]
   fn desktop_js_interposes_on_native_registry_methods() {
-    assert!(
-      DESKTOP_JS.contains("BrowserWindowPrototype.bind = function(name, fn)")
-    );
+    assert!(DESKTOP_JS.contains(
+      "BrowserWindowPrototype.bind = function(name, fn, options = undefined)"
+    ));
     assert!(
       DESKTOP_JS.contains("BrowserWindowPrototype.unbind = function(name)")
     );
@@ -3644,11 +3669,13 @@ mod tests {
     assert!(DESKTOP_JS.contains(
       "const privateDesktopUnbind = Symbol.for(\"Deno_privateDesktopUnbind\")"
     ));
-    assert!(
-      DESKTOP_JS.contains(
-        "BrowserWindowPrototype[privateDesktopBind].call(this, name)"
-      )
-    );
+    assert!(DESKTOP_JS.contains(
+      "BrowserWindowPrototype[privateDesktopBind].call(this, name, originsSpec);"
+    ));
+    // The handler learns the calling document only when it asked to.
+    assert!(DESKTOP_JS.contains(
+      "? await fn_({ origin: ev.origin, windowId: ev.windowId }, ...args)"
+    ));
     assert!(DESKTOP_JS.contains(
       "BrowserWindowPrototype[privateDesktopUnbind].call(this, name)"
     ));

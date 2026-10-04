@@ -409,6 +409,33 @@ declare namespace Deno {
     deno?: boolean;
   }
 
+  /** Options of {@linkcode BrowserWindow.bind}.
+   *
+   * @category Desktop
+   * @experimental
+   */
+  export interface BrowserWindowBindOptions {
+    /** Documents besides the app's own that may call the binding: their
+     * origins (`"https://idp.example"`, `"null"` for an opaque one), or
+     * `"*"` for any document. */
+    origins?: "*" | readonly string[];
+    /** Call the handler with the calling document first
+     * ({@linkcode BrowserWindowBindCaller}), then the page's arguments. */
+    withCaller?: boolean;
+  }
+
+  /** The document that called a binding (`bind(..., { withCaller: true })`).
+   *
+   * @category Desktop
+   * @experimental
+   */
+  export interface BrowserWindowBindCaller {
+    /** Its origin as the browser serializes it (`"myapp://app"`,
+     * `"http://127.0.0.1:5173"`, `"null"`). */
+    origin: string;
+    windowId: number;
+  }
+
   export interface BrowserWindowOptions {
     title?: string;
     /** @default {800} */
@@ -822,10 +849,24 @@ declare namespace Deno {
      * The resolved value must be serializable; see
      * {@linkcode BrowserWindowSerializable}. This is checked even when `T` is
      * left to its default, so returning e.g. a `Date` is a type error rather
-     * than an empty object at runtime. */
+     * than an empty object at runtime.
+     *
+     * Only the app's own documents may call it: a page at the app origin
+     * (`DENO_DESKTOP_APP_ORIGIN`), or a development run's dev server. A call
+     * from any other document the window shows (a remote site the app
+     * navigated to, an identity provider) is rejected before `fn` runs,
+     * unless `options.origins` lists its origin (`"*"`: any document). */
     bind<N extends keyof T, F extends T[N]>(
       name: N,
       fn: F & BrowserWindowSerializableCheck<F>,
+      options?: BrowserWindowBindOptions & { withCaller?: false },
+    ): void;
+    /** With `withCaller: true`, `fn` gets the calling document first. */
+    bind<N extends keyof T>(
+      name: N,
+      // deno-lint-ignore no-explicit-any
+      fn: (caller: BrowserWindowBindCaller, ...args: any[]) => unknown,
+      options: BrowserWindowBindOptions & { withCaller: true },
     ): void;
     unbind<N extends keyof T>(name: N): void;
     /** @throws {BrowserWindowValue} */

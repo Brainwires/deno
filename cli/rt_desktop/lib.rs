@@ -56,7 +56,7 @@ use denort::run::RunOptions;
 /// makes the failure mode obvious instead of "the desktop app silently won't
 /// launch".
 const _: () = assert!(
-  laufey::LAUFEY_API_VERSION == 43,
+  laufey::LAUFEY_API_VERSION == 44,
   "LAUFEY_API_VERSION mismatch: update this assert and the prebuilt backend release pin in cli/tools/desktop.rs when laufey bumps its API version",
 );
 
@@ -211,6 +211,28 @@ struct WefDesktopApi {
   surface_windows: Arc<Mutex<HashSet<u32>>>,
   /// `Deno.desktop.quitOnLastWindowClosed` (see `CloseBook`).
   quit_on_last_window_closed: Arc<AtomicBool>,
+  /// The origins a binding answers without opting in: the app origin, and a
+  /// development run's dev server (see `trusted_bridge_origins`).
+  trusted_bridge_origins: Arc<Vec<String>>,
+}
+
+/// The documents whose calls every binding answers (laufey API 44 reports
+/// the calling document's origin): the app origin and, in a development run
+/// against an external dev server (`DENO_DESKTOP_DEV_URL`), that server's
+/// origin, both serialized as the browser does.
+fn trusted_bridge_origins(
+  app_origin: &AppOrigin,
+  dev_url: Option<&str>,
+) -> Vec<String> {
+  let mut out = vec![app_origin.as_origin_string()];
+  if let Some(origin) = dev_url
+    .and_then(|u| deno_core::url::Url::parse(u).ok())
+    .map(|u| u.origin().ascii_serialization())
+    .filter(|o| o != "null")
+  {
+    out.push(origin);
+  }
+  out
 }
 
 /// The bootstrap window's reveal state: it is created hidden and shown by the
@@ -786,20 +808,48 @@ impl denort::desktop::DesktopApi for WefDesktopApi {
     );
   }
 
-  fn bind(&self, window_id: u32, name: &str) {
+  fn bind(
+    &self,
+    window_id: u32,
+    name: &str,
+    origins: deno_runtime::ops::desktop::BindOrigins,
+  ) {
     // laufey keeps a binding's handler for the window's lifetime (and past
     // `unbind`), so the handler holds the event queue weakly: it must not
     // keep the queue (and every event in it) alive once the runtime is gone.
     let tx = self.event_tx.downgrade();
     let responses = self.pending_responses.clone();
     let name_owned = name.to_string();
+    let trusted = self.trusted_bridge_origins.clone();
+    let origins = Arc::new(origins);
     laufey::Window::from_id(window_id).add_binding_async(
       name,
       move |mut js_call| {
         let tx = tx.upgrade();
         let responses = responses.clone();
         let name = name_owned.clone();
+        let trusted = trusted.clone();
+        let origins = origins.clone();
         async move {
+          // The page the main frame shows may not be the app's (navigated
+          // to a remote site, an identity provider): a binding answers only
+          // the documents it trusts.
+          if !deno_runtime::ops::desktop::bind_call_allowed(
+            &js_call.origin,
+            &trusted,
+            &origins,
+          ) {
+            let message = format!(
+              "this page's origin ({}) may not call the app's binding {name:?}",
+              if js_call.origin.is_empty() {
+                "unknown"
+              } else {
+                js_call.origin.as_str()
+              }
+            );
+            js_call.reject(laufey::Value::String(message));
+            return;
+          }
           let Some(tx) = tx else {
             js_call.reject(laufey::Value::String(
               "event channel closed".to_string(),
@@ -839,6 +889,7 @@ impl denort::desktop::DesktopApi for WefDesktopApi {
             name,
             args,
             call_id,
+            origin: js_call.origin.clone(),
           };
           if let Err(err) = tx.try_send(event) {
             let msg = match err {
@@ -3139,6 +3190,11 @@ async fn run_desktop(
   // upgrade `Origin` headers against the same origin from the navigate task.
   let app_origin_for_register = app_origin.clone();
   let app_origin_for_relay = app_origin.clone();
+  // The documents bindings answer by default (see `bind_call_allowed`).
+  let trusted_bridge_origins = Arc::new(trusted_bridge_origins(
+    &app_origin,
+    external_dev_url.as_deref(),
+  ));
   // The OS registration of the deep-link schemes (Deno.desktop
   // getSchemeOwner / registerScheme, and the startup pass below). A dev run
   // executes a development host, not the packaged app, so it writes nothing.
@@ -3190,6 +3246,7 @@ async fn run_desktop(
         shortcut_handler: std::sync::Once::new(),
         surface_windows: Arc::new(Mutex::new(HashSet::new())),
         quit_on_last_window_closed: Arc::new(AtomicBool::new(true)),
+        trusted_bridge_origins: trusted_bridge_origins.clone(),
       };
 
       // `Deno.desktop` "displaychanged".
@@ -3460,6 +3517,39 @@ mod tests {
   use super::login_item_state_str;
   use super::map_permission_status;
   use super::should_show_native_error_dialog;
+
+  #[test]
+  fn bindings_trust_the_app_origin_and_a_dev_server() {
+    let origin =
+      deno_lib::standalone::app_origin::AppOrigin::parse("t3code://app")
+        .unwrap();
+    assert_eq!(
+      super::trusted_bridge_origins(&origin, None),
+      vec!["t3code://app".to_string()]
+    );
+    // The dev server's origin, serialized as the browser reports it.
+    assert_eq!(
+      super::trusted_bridge_origins(
+        &origin,
+        Some("http://LOCALHOST:5173/some/path?x")
+      ),
+      vec![
+        "t3code://app".to_string(),
+        "http://localhost:5173".to_string()
+      ]
+    );
+    assert_eq!(
+      super::trusted_bridge_origins(&origin, Some("https://dev.example:443/")),
+      vec![
+        "t3code://app".to_string(),
+        "https://dev.example".to_string()
+      ]
+    );
+    // Not a URL, or an opaque one: nothing added.
+    for bad in ["not a url", "data:text/plain,x"] {
+      assert_eq!(super::trusted_bridge_origins(&origin, Some(bad)).len(), 1);
+    }
+  }
 
   #[test]
   fn live_notifications_are_capped_oldest_first() {

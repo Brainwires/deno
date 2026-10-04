@@ -46,7 +46,7 @@ denort = { path = "../rt", default-features = false }
 # to the front at launch on macOS), pinned to
 # a commit of the Brainwires/laufey fork. The host built from the same commit
 # must be used with it (the API version check is exact).
-laufey = { git = "https://github.com/Brainwires/laufey", rev = "e1bfe17c9111c3829263418d80d90bade7112f35" }
+laufey = { git = "https://github.com/Brainwires/laufey", rev = "1b8dbc6186616741ae8edbb5f7f7cee5806e5e5c" }
 libsui.workspace = true
 
 bytes.workspace = true

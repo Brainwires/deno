@@ -13,6 +13,7 @@ import process from "node:process";
 import { fileURLToPath } from "node:url";
 
 import {
+  BrowserWindow,
   describeError,
   html,
   page,
@@ -88,6 +89,11 @@ try {
   document.body.appendChild(frame);
 } catch (e) { post("/log", { error: "marker: " + String(e) }); }
 step("marker");
+// The app's own document calls a binding: the handler learns its origin.
+try {
+  out.whoami = await window.bindings.e2eWhoami();
+} catch (e) { out.whoami = "ERR: " + String(e?.message ?? e); }
+step("bindings");
 // A cross-origin fetch carries the app origin.
 try {
   const res = await fetch("http://127.0.0.1:" + info.tcpPort + "/cors", { cache: "no-store", signal: AbortSignal.timeout(10000) });
@@ -208,9 +214,31 @@ Deno.serve((req, info) => {
 // forgery checks below send it `http+memory:` targets.
 let tcpHandled = 0;
 const tcpOrigins: (string | null)[] = [];
+// What a page at another origin (this TCP server) got from the app's
+// bindings, after the main window navigated there.
+let remoteBridge: Record<string, unknown> | null = null;
+const REMOTE_BRIDGE_PAGE = page(
+  "e2e remote",
+  "",
+  `const out = {};
+const call = (name) => window.bindings[name]().then((v) => ({ value: v }), (e) => ({ error: String(e?.message ?? e) }));
+try {
+  out.whoami = await call("e2eWhoami");
+  out.remoteOk = await call("e2eRemoteOk");
+} catch (e) { out.error = String(e); }
+await fetch("/bridge-result", { method: "POST", body: JSON.stringify(out) });`,
+);
 const tcp = Deno.serve(
   { hostname: "127.0.0.1", port: 0, onListen() {} },
   (req) => {
+    const path = new URL(req.url).pathname;
+    if (path === "/bridge") return html(REMOTE_BRIDGE_PAGE);
+    if (path === "/bridge-result") {
+      return req.json().then((body) => {
+        remoteBridge = body;
+        return new Response("ok");
+      });
+    }
     tcpHandled++;
     tcpOrigins.push(req.headers.get("origin"));
     return new Response("tcp ok", {
@@ -219,6 +247,18 @@ const tcp = Deno.serve(
   },
 );
 const tcpPort = tcp.addr.port;
+const tcpOrigin = `http://127.0.0.1:${tcpPort}`;
+
+// The app's bindings (laufey API 44 reports the calling document's origin):
+// `e2eWhoami` answers only the app's own documents and tells the handler
+// which one called; `e2eRemoteOk` also opts the TCP server's origin in.
+const win = new BrowserWindow();
+win.bind(
+  "e2eWhoami",
+  (caller: { origin: string; windowId: number }) => caller.origin,
+  { withCaller: true },
+);
+win.bind("e2eRemoteOk", () => "ok", { origins: [tcpOrigin] });
 
 /** Send `head` over a raw TCP connection; the response's status code. */
 async function rawStatus(port: number, head: string): Promise<string> {
@@ -509,9 +549,39 @@ async function afterPage() {
   }
 
   await nodeChildProcessChecks();
+  await remoteBridgeChecks(p);
 
   await tcp.shutdown();
   r.finish();
+}
+
+async function remoteBridgeChecks(p: any) {
+  r.check(
+    "a binding answers the app's own page; withCaller passes its origin",
+    p.whoami === ORIGIN,
+    p.whoami,
+  );
+  // The main window navigated to a page at another origin keeps the app's
+  // bindings in its document (the launch file lets every origin reach the
+  // runtime: `bridgeOrigins: ["*"]`), but the runtime refuses its calls
+  // unless the binding opted that origin in.
+  win.navigate(`${tcpOrigin}/bridge`);
+  if (!await waitFor(() => remoteBridge !== null, 20_000)) {
+    r.fail("a page at another origin reported its binding calls", "timed out");
+    return;
+  }
+  const rb = remoteBridge as any;
+  r.check(
+    "a binding refuses a page at another origin",
+    typeof rb.whoami?.error === "string" &&
+      rb.whoami.error.includes("may not call"),
+    rb.whoami,
+  );
+  r.check(
+    "a binding that lists the page's origin answers it",
+    rb.remoteOk?.value === "ok",
+    rb.remoteOk,
+  );
 }
 
 /** The output of a program that prints its environment, run through

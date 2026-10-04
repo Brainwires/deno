@@ -28,7 +28,14 @@ export async function run(env: Env, rep: AreaReport) {
     name: "E2EOrigin",
     identifier,
     appJson: { origin },
-    launch: { appId: identifier, customSchemes: [scheme] },
+    // Every origin may reach the runtime's bindings (the backend's own gate
+    // defaults to the app's scheme): the app checks the runtime's per-binding
+    // gate by navigating to a page at another origin.
+    launch: {
+      appId: identifier,
+      customSchemes: [scheme],
+      bridgeOrigins: ["*"],
+    },
     include: ["fork_child.js"],
   });
   await clearResults("origin");
