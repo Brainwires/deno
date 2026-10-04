@@ -8,8 +8,9 @@
 
 // deno-lint-ignore-file no-explicit-any
 
-import { spawn, spawnSync } from "node:child_process";
+import { fork, spawn, spawnSync } from "node:child_process";
 import process from "node:process";
+import { fileURLToPath } from "node:url";
 
 import {
   describeError,
@@ -446,6 +447,32 @@ function envLine(lines: string[], name: string): string | undefined {
   return lines.find((l) => l.toUpperCase().startsWith(`${name}=`));
 }
 
+type ForkOutcome = { code: number | null; message: any; stderr: string };
+
+function forkAndWait(module: string, ms = 60_000): Promise<ForkOutcome> {
+  return new Promise((resolve) => {
+    let message: any = null;
+    let stderr = "";
+    const child = fork(module, [], {
+      stdio: ["ignore", "ignore", "pipe", "ipc"],
+    });
+    child.stderr?.on("data", (d: Uint8Array) => {
+      stderr += new TextDecoder().decode(d);
+    });
+    child.on("message", (m: unknown) => {
+      message = m;
+    });
+    const t = setTimeout(() => {
+      child.kill("SIGKILL");
+      resolve({ code: null, message, stderr: stderr + " (timed out)" });
+    }, ms);
+    child.on("exit", (code: number | null) => {
+      clearTimeout(t);
+      resolve({ code, message, stderr: stderr.slice(-2000) });
+    });
+  });
+}
+
 async function nodeChildProcessChecks() {
   // --- node:child_process: the env overlay (DENO_SERVE_ADDRESS stays in this
   // process even where the app copies process.env into the child's env) ---
@@ -500,5 +527,39 @@ async function nodeChildProcessChecks() {
     );
   } catch (e) {
     r.fail("node:child_process env", describeError(e));
+  }
+
+  // --- forked workers: the app's own modules run headless, nothing else ---
+  try {
+    const shipped = await forkAndWait(
+      fileURLToPath(new URL("./fork_child.js", import.meta.url)),
+    );
+    r.check(
+      "fork: a module the app ships runs headless and answers over IPC",
+      shipped.code === 0 && shipped.message?.ok === true,
+      shipped,
+    );
+    r.check(
+      "fork: the worker does not inherit DENO_SERVE_ADDRESS=memory:",
+      shipped.message !== null && shipped.message.serveAddress === null,
+      shipped.message,
+    );
+    const dir = await Deno.makeTempDir({ prefix: "denext-e2e-fork-" });
+    const marker = `${dir}/ran`;
+    const outside = `${dir}/outside.js`;
+    await Deno.writeTextFile(
+      outside,
+      `Deno.writeTextFileSync(${JSON.stringify(marker)}, "ran");\n`,
+    );
+    const refused = await forkAndWait(outside);
+    const ran = await Deno.lstat(marker).then(() => true, () => false);
+    r.check(
+      "fork: a script outside the packaged app is refused, not run",
+      refused.code !== 0 && refused.code !== null && !ran,
+      { ...refused, ran },
+    );
+    await Deno.remove(dir, { recursive: true }).catch(() => {});
+  } catch (e) {
+    r.fail("fork", describeError(e));
   }
 }

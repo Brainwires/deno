@@ -19,6 +19,7 @@ mod app_origin;
 mod napi_host_exports;
 mod scheme_bridge;
 mod scheme_registration;
+mod worker_launch;
 
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -2133,35 +2134,49 @@ laufey::main!(|| {
   export_napi_symbols_from_executable();
 
   // Guard against re-entry: when a framework dev server (e.g. Next.js)
-  // forks child/worker processes, they re-execute this dylib. Detect
-  // forked workers and run them headless (no Laufey window).
-  //
-  // A forked worker is recognized by the *combination* of:
-  //   1. argv shaped like `<exe> run [flags…] script.js …` (i.e.
-  //      `extract_fork_script_path` returns `Some`), OR
-  //   2. argv shaped like `<exe> run …` *and* one of the worker env
-  //      vars set by the parent dev server (NODE_CHANNEL_FD,
-  //      NEXT_PRIVATE_WORKER).
-  //
-  // The bare env-var check used to be enough, but a user shell that
-  // already had NODE_CHANNEL_FD set (e.g. running inside another forked
-  // process, Jest, pnpm) would silently take the headless path and
-  // never show a window. Requiring the `run` argv shape rules that out:
-  // the Laufey backend never invokes us with `run` as argv[1].
+  // forks child/worker processes (`child_process.fork()`), they re-execute
+  // this dylib as `<exe> run [flags…] [script.js …]` with a Node IPC
+  // channel. Such a launch runs headless (no Laufey window), but only when
+  // this app's own runtime forked it: the worker token it hands its forks,
+  // naming it as the parent, and a real inherited IPC channel (see
+  // `worker_launch`). argv alone (`<App> run /tmp/x.js` from a shell,
+  // `open --args`, a shortcut) used to run any script with the app's
+  // permissions, signature and privacy grants. Anything else with `run` as
+  // argv[1] is refused: the Laufey backend never invokes us that way, and
+  // starting the app with `run` and a script as its launch arguments would
+  // only open it.
   let args: Vec<_> = env::args_os().collect();
   let argv_run = args
     .get(1)
     .and_then(|a| a.to_str())
     .map(|s| s == "run")
     .unwrap_or(false);
-  let is_worker = extract_fork_script_path(&args).is_some()
-    || (argv_run
-      && (env::var("NODE_CHANNEL_FD").is_ok()
-        || env::var("NEXT_PRIVATE_WORKER").is_ok()));
-  if is_worker {
-    run_on_runtime_thread(run_headless_worker);
-    return;
+  if argv_run {
+    match worker_launch::authorize() {
+      Ok(()) => {
+        run_on_runtime_thread(run_headless_worker);
+        return;
+      }
+      Err(refusal) => {
+        #[allow(
+          clippy::print_stderr,
+          reason = "runs before logging is initialized"
+        )]
+        {
+          eprintln!(
+            "[desktop] refusing to run as a worker process: {refusal} \
+             (only this app's own runtime forks workers)"
+          );
+        }
+        exit_before_start(1);
+      }
+    }
   }
+  // This process's forks of its own executable may run headless.
+  deno_runtime::deno_process::set_self_fork_env_var(
+    worker_launch::WORKER_TOKEN_ENV,
+    worker_launch::issue_token(),
+  );
 
   // The full-app update watchdog: an update still unconfirmed from an
   // earlier launch (it crashed or never called confirm()) is rolled back
@@ -2703,6 +2718,31 @@ fn run_headless_worker() {
     } else {
       denort::file_system::DenoRtSys::new(data.vfs.clone())
     };
+
+    // A packaged app forks only the modules it ships (under the embedded
+    // file system's root), never a file elsewhere on disk or on a share; a
+    // development run forks the dev server's scripts from the source tree.
+    if let Some(module) = &fork_module {
+      let dev = env::var_os("DENO_DESKTOP_HMR").is_some()
+        || env::var_os("DENO_DESKTOP_DEV_URL").is_some()
+        || env::var_os("DENO_DESKTOP_FRAMEWORK_DEV").is_some();
+      if !worker_launch::module_allowed(module, &data.root_path, dev) {
+        log::error!(
+          "{}: refusing to fork {module}: a packaged app forks only its own \
+           modules (under {})",
+          colors::red_bold("error"),
+          data.root_path.display()
+        );
+        deno_runtime::exit(1);
+      }
+    }
+
+    // A worker's own forks (a dev server's workers fork too) get a token
+    // naming it.
+    deno_runtime::deno_process::set_self_fork_env_var(
+      worker_launch::WORKER_TOKEN_ENV,
+      worker_launch::issue_token(),
+    );
 
     let options = denort::run::RunOptions {
       override_main_module: fork_module,

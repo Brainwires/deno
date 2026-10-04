@@ -72,6 +72,63 @@ pub const UNSTABLE_FEATURE_NAME: &str = "process";
 #[cfg(unix)]
 use deno_io::DENO_EXTRA_STDIO_FDS_ENV_VAR;
 
+/// Variables an embedder adds to the environment of every child that runs
+/// this process's own executable with an IPC channel (`child_process.fork()`
+/// and `spawn(process.execPath, …, { stdio: [..., "ipc"] })`), and of no
+/// other child. See [`set_self_fork_env_var`].
+static SELF_FORK_ENV: std::sync::LazyLock<Mutex<Vec<(OsString, OsString)>>> =
+  std::sync::LazyLock::new(Mutex::default);
+
+/// Give `key=value` to the children this process forks of its own executable
+/// (with an IPC channel), on top of the environment they would get anyway,
+/// and to no other child. The desktop runtime passes its per-launch worker
+/// token this way: a desktop app's executable runs a forked script headless
+/// only for its own parent, and the token is not handed to every program
+/// the app starts.
+pub fn set_self_fork_env_var(
+  key: impl Into<OsString>,
+  value: impl Into<OsString>,
+) {
+  let key = key.into();
+  let mut env = SELF_FORK_ENV
+    .lock()
+    .unwrap_or_else(std::sync::PoisonError::into_inner);
+  env.retain(|(k, _)| k != &key);
+  env.push((key, value.into()));
+}
+
+/// The variables of [`set_self_fork_env_var`] for a child running `cmd` with
+/// an IPC channel: none unless `cmd` is this process's own executable.
+fn self_fork_env(cmd: &Path) -> Vec<(OsString, OsString)> {
+  let env = SELF_FORK_ENV
+    .lock()
+    .unwrap_or_else(std::sync::PoisonError::into_inner)
+    .clone();
+  if env.is_empty() || !is_current_exe(cmd) {
+    return Vec::new();
+  }
+  env
+}
+
+/// Whether `cmd` is this process's own executable (the same file, whatever
+/// path names it).
+fn is_current_exe(cmd: &Path) -> bool {
+  #[allow(
+    clippy::disallowed_methods,
+    reason = "compares a resolved command with the running executable on the real fs"
+  )]
+  fn canonical(p: &Path) -> Option<PathBuf> {
+    std::fs::canonicalize(p).ok()
+  }
+  let Ok(exe) = std::env::current_exe() else {
+    return false;
+  };
+  match (canonical(cmd), canonical(&exe)) {
+    (Some(a), Some(b)) => a == b,
+    _ => false,
+  }
+}
+
 #[cfg(unix)]
 fn clear_nonblocking(fd: i32) -> std::io::Result<()> {
   // SAFETY: fcntl is called with a valid file descriptor supplied by the
@@ -724,6 +781,14 @@ fn create_command(
   // inherit this from `execvp`; Rust's `posix_spawn` on Linux does not, so we
   // replicate it. The user args (`args.args`, i.e. argv[1..]) are appended
   // below; `argv0` is intentionally skipped (see below) to match libc.
+  // Computed before `cmd` moves into the command; applied once the IPC
+  // channel is known (only a forked child gets it).
+  let self_fork_env = if wrap_in_shell {
+    Vec::new()
+  } else {
+    self_fork_env(&cmd)
+  };
+
   #[cfg(unix)]
   let mut command = if wrap_in_shell {
     let mut command = Command::new("/bin/sh");
@@ -822,6 +887,10 @@ fn create_command(
     }
     value => value.as_stdio()?,
   });
+  // Only a child with an IPC channel (a fork) gets them.
+  if args.ipc.is_some_and(|fd| fd >= 0) {
+    command.envs(self_fork_env);
+  }
 
   #[cfg(unix)]
   // TODO(bartlomieju):
@@ -2550,5 +2619,35 @@ mod tests {
       ]
     );
     assert_eq!(error.raw_os_error(), Some(libc::ENOENT));
+  }
+}
+
+#[cfg(test)]
+mod self_fork_tests {
+  #[test]
+  fn self_fork_env_goes_only_to_this_executable() {
+    let exe = std::env::current_exe().unwrap();
+    // Nothing registered: nothing added.
+    assert!(super::self_fork_env(&exe).is_empty());
+    super::set_self_fork_env_var("DENO_PROCESS_TEST_SELF_FORK", "a");
+    super::set_self_fork_env_var("DENO_PROCESS_TEST_SELF_FORK", "b");
+    assert_eq!(
+      super::self_fork_env(&exe),
+      vec![("DENO_PROCESS_TEST_SELF_FORK".into(), "b".into())]
+    );
+    // The same file through another path.
+    let dir = exe.parent().unwrap();
+    let via_dot = dir.join(".").join(exe.file_name().unwrap());
+    assert_eq!(super::self_fork_env(&via_dot).len(), 1);
+    // Any other program gets nothing.
+    let other = if cfg!(windows) {
+      std::path::Path::new("C:\\Windows\\System32\\cmd.exe")
+    } else {
+      std::path::Path::new("/bin/sh")
+    };
+    assert!(super::self_fork_env(other).is_empty());
+    assert!(
+      super::self_fork_env(std::path::Path::new("/no/such/program")).is_empty()
+    );
   }
 }

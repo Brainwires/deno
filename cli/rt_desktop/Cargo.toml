@@ -65,8 +65,10 @@ libc.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 # The URL protocol keys of the app's deep-link schemes (HKCU\Software\Classes),
-# and the Node-API exports added to the host executable (napi_host_exports.rs).
-windows-sys = { workspace = true, features = ["Win32_System_Diagnostics_Debug", "Win32_System_LibraryLoader", "Win32_System_Memory", "Win32_System_Threading"] }
+# the Node-API exports added to the host executable (napi_host_exports.rs),
+# and the parent process and IPC handle a forked worker checks
+# (worker_launch.rs).
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_Diagnostics_Debug", "Win32_System_Diagnostics_ToolHelp", "Win32_System_LibraryLoader", "Win32_System_Memory", "Win32_System_Threading"] }
 
 [dev-dependencies]
 tempfile.workspace = true
