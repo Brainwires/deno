@@ -34,7 +34,7 @@ deno_runtime.workspace = true
 deno_snapshots.workspace = true
 deno_terminal.workspace = true
 denort = { path = "../rt", default-features = false }
-# laufey's `denext/integration` branch (API 43: open-url / file delivery,
+# laufey's `denext/integration` branch (API 44: open-url / file delivery,
 # single-instance forwarding, the `laufey-launch.json` launch file, native
 # passkeys, the window API, drag and drop / file dialogs / rich clipboard,
 # global shortcuts / launch at login / DevTools control, menu accelerators
@@ -43,10 +43,12 @@ denort = { path = "../rt", default-features = false }
 # bodies, CEF Local Network Access for registered schemes, in-process
 # dialogs, and the security audit's "--" end of options / packaged --runtime
 # / deep-link switch filter / pinned launch keys, the first window brought
-# to the front at launch on macOS), pinned to
+# to the front at launch on macOS; the 3.1.1 audit: each JS call's document
+# origin, `bridgeOrigins`, scheme write backpressure, packaged-launch
+# pinning), pinned to
 # a commit of the Brainwires/laufey fork. The host built from the same commit
 # must be used with it (the API version check is exact).
-laufey = { git = "https://github.com/Brainwires/laufey", rev = "1b8dbc6186616741ae8edbb5f7f7cee5806e5e5c" }
+laufey = { git = "https://github.com/Brainwires/laufey", rev = "ada1a9584ea2bba5b4e9df686e2632d88e1110fd" }
 libsui.workspace = true
 
 bytes.workspace = true
