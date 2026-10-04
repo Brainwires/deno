@@ -1094,7 +1094,7 @@ function withoutProcessLocalEnv(env) {
     return env;
   }
   const copy = {};
-  // deno-lint-ignore guard-for-in
+  // Prototype values are kept too, flattened into own properties.
   for (const key in env) {
     if (!drop.has(key)) {
       copy[key] = env[key];
