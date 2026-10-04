@@ -226,7 +226,48 @@ where the changes are discussed.
       but laufey and the build is `--locked`, and the archive check fails on an
       unresolved macOS dependency and checks Windows imports (`pe_deps.py`).
 
-The runtime-side parts (1-3, 5-20) are what the prebuilt `libdenort` carries.
+21. **`fix(desktop)`: the 3.1.1 audit** (`fix/audit-3-1-1`, runtime `denext.9`,
+    laufey API 44):
+    - a forked worker runs only for the app's own runtime: both fork shapes
+      (`<App> run x.js`, and a compiled binary's `<App> x.js` with
+      `DENO_INTERNAL_CHILD_ENTRYPOINT`) need a per-launch
+      `DENO_DESKTOP_WORKER_TOKEN` naming the real parent (which runs the same
+      executable) and an inherited IPC channel; a packaged app forks only
+      modules under its embedded file system, and a worker exits when its module
+      is done; any other such launch exits at once;
+    - `node:child_process` no longer copies the process-local
+      `DENO_SERVE_ADDRESS=memory:` into a child's environment;
+    - the scheme bridge: a non-ASCII `Location` no longer panics; a request from
+      a document of another origin (as far as the engine discloses `Origin` /
+      `Sec-Fetch-Site`) carries the `x-deno-desktop-cross-origin` header; a body
+      the backend failed to deliver is a 400; laufey's write backpressure (API
+      44: 0 means retry the same bytes) stops on a cancel;
+    - the WebSocket relay requires a per-launch token in the request target
+      besides the exact `Origin`: `DENO_DESKTOP_WS_URL` is the relay origin plus
+      `/.deno-desktop-relay/<64 hex>`, and child processes don't inherit it;
+    - bindings answer only the app's own documents (the app origin, a
+      development run's dev server) unless `bind(name, fn, { origins })` opts
+      another origin in; `{ withCaller: true }` passes the caller's
+      `{ origin, windowId }`;
+    - the updater: every PE file pinned to the running app's signer (issuer +
+      subject), the staged app's own version checked against the manifest,
+      optional manifest `expiresAt` / `sequence` (a lower sequence than the
+      highest accepted is `replayed`), a set of rejected versions, crash-safe
+      swap and rollback (atomic exchange, a checked undo), an OS file lock for
+      the helper, symlink-safe owned state / log / lock files, extracted modes
+      masked to `0o755` and symlinks kept inside the app;
+    - reading / watching the clipboard, global shortcuts, `launchAtLogin.set`,
+      `registerScheme({ force: true })` and OS notifications need unscoped
+      `--allow-sys`;
+    - launch arguments: after the scheme registration's `--` only one
+      declared-scheme link counts, and a network path is never checked; macOS
+      `openURLs` drops undeclared schemes; `runOnMainThread` refuses a
+      `Deno.UnsafeCallback`; page values become own data properties; `close()`
+      of a WebGPU window closes it; a NUL title is refused before the window
+      exists; the error report leaves the JavaScript thread; a closed window's
+      JavaScript state and old notifications are forgotten.
+
+The runtime-side parts (1-3, 5-21) are what the prebuilt `libdenort` carries.
 The CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` /
 `LAUFEY_APP_ID` into a packaged app's launchers) are in the branch too, but a
 stock CLI does not run them; denext's own launcher provides that environment.
@@ -242,10 +283,13 @@ bodies, Windows bindgen fix, and API 43: auth session cancel, Local Network
 Access for the registered custom-scheme origins on CEF, Windows menu and
 file-dialog fixes, CEF file drops; then the 3.1.0 audits: scheme request
 cancellation (`on_cancel` on every backend), no aborts on a NUL in a string, the
-Linux window-destroy use-after-free, sync UI hops that can't hang exit), at the
-commit pinned by `LAUFEY_SHA` in the workflow (or the `laufey_ref` input). The
-same commit is the `laufey` git dependency of `cli/rt_desktop/Cargo.toml` (crate
-0.8.0, API 43).
+Linux window-destroy use-after-free, sync UI hops that can't hang exit; and API
+44, the 3.1.1 audit: each JS call's document origin, the launch file's
+`bridgeOrigins`, scheme response write backpressure, a packaged app loading only
+its own runtime and pinned launch keys, WebKitGTK sub-frames kept off the
+bridge, a strict bridge JSON parser), at the commit pinned by `LAUFEY_SHA` in
+the workflow (or the `laufey_ref` input). The same commit is the `laufey` git
+dependency of `cli/rt_desktop/Cargo.toml` (crate 0.8.0, API 44).
 
 laufey's `init_api` rejects any C ABI version mismatch between the runtime and
 the host, so the `laufey` crate libdenort links and the hosts are built from the
@@ -367,6 +411,9 @@ Specs this fork adds for what its runtime exposes outside a desktop app:
   server refuses a request target that claims `http+memory://` (400).
 - `tests/specs/check/desktop_types`: the fork's `Deno.desktop` types check with
   `--desktop`, and misuses are type errors.
+- `tests/specs/run/desktop_ops_inert` (`sys.js`): the integrations that need
+  `--allow-sys` refuse without it (and with only some sys names) and are inert
+  with it.
 
 Upstream Deno has no end-to-end harness for `deno desktop` apps (its own tests
 stop at unit tests and `tests/specs` of the CLI), so this fork carries its own,
@@ -391,12 +438,18 @@ in the job summary, never skipped silently. Areas:
 - **origin** — page origin and secure context, `request.url` / `remoteAddr` of
   the memory transport, incremental streaming, `Origin` on a cross-origin fetch,
   the page's WebSocket through the relay, a response the page aborts cancelled
-  in the app; the relay refusing foreign / missing / duplicate / upper-cased
-  origins (403) and plain HTTP (400) and admitting the exact origin (101); a TCP
-  `Deno.serve` refusing `http+memory:` request targets (400); the env overlay
-  reaching a child process, without the in-process `DENO_SERVE_ADDRESS`; and a
-  second app whose server is `node:http` (`originnode`): the page, a POST round
-  trip and the memory socket's `remoteAddress`.
+  in the app, a stream the page stops reading held back; the relay refusing
+  foreign / missing / duplicate / upper-cased origins and a missing or wrong
+  relay token (403) and plain HTTP (400) and admitting the exact origin with the
+  token (101); the cross-origin marker on an opaque frame's POST; bindings
+  refusing a page at another origin unless opted in; a TCP `Deno.serve` refusing
+  `http+memory:` request targets (400); the env overlay reaching a child process
+  (also through `node:child_process`), without the in-process
+  `DENO_SERVE_ADDRESS` or the relay URL; a forked module the app ships answering
+  over IPC, a script outside the app refused, and `<App> run x.js` from outside
+  exiting without running it; and a second app whose server is `node:http`
+  (`originnode`): the page, a POST round trip and the memory socket's
+  `remoteAddress`.
 - **appid** — localStorage and IndexedDB persisting across launches of one
   identifier and not visible to another identifier at the same origin.
 - **deeplink** — cold argv links and files, second-instance forwarding (no
@@ -437,8 +490,11 @@ in the job summary, never skipped silently. Areas:
   OS; `not_supported` on Windows and Linux; neither in workers.
 - **update** — full-app self-update with throwaway keys and a throwaway TLS CA:
   hostile manifests and archives refused with their codes and the install
-  untouched, an unwritable install, 1.0.0 -> 2.0.0 relaunch and confirm, a 3.0.0
-  trial that never confirms rolled back and refused.
+  untouched (including a replayed or missing `sequence`, an expired `expiresAt`,
+  and another version's archive under a manifest's version), the accepted
+  sequence recorded, an unwritable install, 1.0.0 -> 2.0.0 relaunch and confirm,
+  a 3.0.0 trial that never confirms rolled back and refused (and kept in the
+  rejected set).
 - **Node-API** stays in `launch.sh`.
 
 What a hosted runner cannot do, reported `n/a` with the reason:

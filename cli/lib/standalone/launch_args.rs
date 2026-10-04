@@ -92,21 +92,53 @@ pub enum OpenedItem {
 }
 
 /// Classify a URL delivered by the OS to the running app (macOS
-/// `openURLs`): a `file:` URL that maps to a local path is a [`OpenedItem::File`],
-/// anything else (including a `file:` URL with a remote host, which has no
-/// local path) is an [`OpenedItem::Url`] carrying the string unchanged.
+/// `openURLs`): a `file:` URL that maps to a local path is a
+/// [`OpenedItem::File`], a URL whose scheme (case-insensitive) is one of the
+/// app's declared deep-link `schemes` (as normalized by
+/// [`normalize_deep_link_schemes`]) is an [`OpenedItem::Url`] carrying the
+/// string unchanged, and anything else is `None`: dropped.
 ///
-/// The scheme is not checked against the registered deep links: the OS only
-/// routes schemes the bundle declares, and dropping a delivery would lose it.
-/// Consumers still have to validate it.
-pub fn classify_open_url(url: &str) -> OpenedItem {
-  if let Ok(parsed) = Url::parse(url)
-    && parsed.scheme() == "file"
-    && let Ok(path) = deno_path_util::url_to_file_path(&parsed)
-  {
-    return OpenedItem::File(path);
+/// The OS routes the schemes the bundle declares, but a bundle can declare
+/// more than the app's deep links (`CFBundleURLTypes` edited after packaging,
+/// another tool's entry), and `open -a <App> <url>` hands any URL to it, so
+/// the declared list is checked here as on every other OS. A `file:` URL with
+/// a remote host (a network share) has no local path and is dropped too.
+pub fn classify_open_url(url: &str, schemes: &[String]) -> Option<OpenedItem> {
+  let parsed = Url::parse(url).ok()?;
+  if parsed.scheme() == "file" {
+    return deno_path_util::url_to_file_path(&parsed)
+      .ok()
+      .filter(|path| !is_remote_path(path))
+      .map(OpenedItem::File);
   }
-  OpenedItem::Url(url.to_string())
+  schemes
+    .iter()
+    .any(|s| s == parsed.scheme())
+    .then(|| OpenedItem::Url(url.to_string()))
+}
+
+/// Whether `path` names a network location (`\\server\share`, `\\?\UNC\…`)
+/// or a device namespace (`\\.\…`): checking whether it exists would make
+/// Windows connect to that server and offer the user's credentials (NTLM), so
+/// a launch argument naming one is never looked at.
+fn is_remote_path(path: &Path) -> bool {
+  #[cfg(windows)]
+  {
+    use std::path::Component;
+    use std::path::Prefix;
+    if let Some(Component::Prefix(prefix)) = path.components().next() {
+      return !matches!(
+        prefix.kind(),
+        Prefix::Disk(_) | Prefix::VerbatimDisk(_)
+      );
+    }
+    false
+  }
+  #[cfg(not(windows))]
+  {
+    let _ = path;
+    false
+  }
 }
 
 /// Deep links and files found in a process's arguments.
@@ -132,11 +164,15 @@ pub struct LaunchTargets {
 /// - Everything else is ignored: an argument starting with `-` (a flag, which
 ///   also keeps option values like `--flag=/path` out), the value that
 ///   follows the host's `--runtime` option, and anything else.
-/// - A `--` ends the options: every argument after it is classified as a
-///   positional one by the rules above, even one that starts with `-` or is
-///   `--runtime`. The Windows scheme registration runs `"<exe>" -- "%1"`
-///   (see `scheme_handler::windows::command_line`), so a link that closes
-///   the quotes around `%1` can only add more positional arguments.
+/// - A `--` ends the options and marks an OS deep-link launch: the Windows
+///   scheme registration runs `"<exe>" -- "%1"` (see
+///   `scheme_handler::windows::command_line`). After it exactly one argument
+///   is accepted, and only when it is a link with a declared scheme; a link
+///   that closes the quotes around `%1` adds more arguments, and then
+///   nothing after the `--` counts (no file the link named is opened).
+/// - A network path (`\\server\share\x`, also as a `file:` URL with a
+///   host) is never checked for existence or taken as a file: on Windows the
+///   check alone connects to the server with the user's credentials.
 pub fn parse_launch_args(
   args: &[String],
   cwd: Option<&Path>,
@@ -146,22 +182,22 @@ pub fn parse_launch_args(
   let cwd = cwd.filter(|c| c.is_absolute());
   let mut targets = LaunchTargets::default();
   let mut iter = args.iter();
-  let mut options_ended = false;
   while let Some(arg) = iter.next() {
-    if !options_ended {
-      if arg == "--" {
-        options_ended = true;
-        continue;
+    if arg == "--" {
+      // An OS deep-link launch: one declared-scheme link, or nothing.
+      if let [link] = iter.as_slice()
+        && let Ok(url) = Url::parse(link)
+        && schemes.iter().any(|s| s == url.scheme())
+      {
+        targets.urls.push(link.clone());
       }
-      if HOST_OPTIONS_WITH_VALUE.contains(&arg.as_str()) {
-        iter.next();
-        continue;
-      }
-      if arg.starts_with('-') {
-        continue;
-      }
+      break;
     }
-    if arg.is_empty() {
+    if HOST_OPTIONS_WITH_VALUE.contains(&arg.as_str()) {
+      iter.next();
+      continue;
+    }
+    if arg.starts_with('-') || arg.is_empty() {
       continue;
     }
     if let Ok(url) = Url::parse(arg) {
@@ -171,6 +207,7 @@ pub fn parse_launch_args(
       }
       if url.scheme() == "file" {
         if let Ok(path) = deno_path_util::url_to_file_path(&url)
+          && !is_remote_path(&path)
           && exists(&path)
         {
           targets.files.push(normalize(path));
@@ -187,7 +224,7 @@ pub fn parse_launch_args(
       continue;
     };
     let path = normalize(path);
-    if exists(&path) {
+    if !is_remote_path(&path) && exists(&path) {
       targets.files.push(path);
     }
   }
@@ -230,83 +267,123 @@ mod tests {
 
   #[test]
   fn open_urls_split_files_from_links() {
+    let schemes = strings(&["acme"]);
     assert_eq!(
-      classify_open_url("acme://open/doc/42?x=1"),
-      OpenedItem::Url("acme://open/doc/42?x=1".to_string())
+      classify_open_url("acme://open/doc/42?x=1", &schemes),
+      Some(OpenedItem::Url("acme://open/doc/42?x=1".to_string()))
     );
-    // Any other scheme is still a URL: the OS only routes declared schemes.
     assert_eq!(
-      classify_open_url("other:thing"),
-      OpenedItem::Url("other:thing".to_string())
+      classify_open_url("ACME:upper", &schemes),
+      Some(OpenedItem::Url("ACME:upper".to_string()))
     );
-    // Not even a URL: passed through rather than dropped.
-    assert_eq!(
-      classify_open_url("not a url"),
-      OpenedItem::Url("not a url".to_string())
-    );
+    // A scheme the app didn't declare (another entry in the bundle, `open
+    // -a <App> <url>`) is dropped.
+    for other in [
+      "other:thing",
+      "https://example.com/",
+      "javascript:alert(1)",
+      "acmex://y",
+      "not a url",
+      "",
+    ] {
+      assert_eq!(classify_open_url(other, &schemes), None, "{other:?}");
+    }
+    assert_eq!(classify_open_url("acme://x", &[]), None);
     #[cfg(unix)]
     {
       // Percent-encoded, as AppKit delivers it.
       assert_eq!(
-        classify_open_url("file:///Users/me/My%20Notes.txt"),
-        OpenedItem::File(PathBuf::from("/Users/me/My Notes.txt"))
+        classify_open_url("file:///Users/me/My%20Notes.txt", &[]),
+        Some(OpenedItem::File(PathBuf::from("/Users/me/My Notes.txt")))
       );
       // A remote file URL has no local path.
       assert_eq!(
-        classify_open_url("file://server/share/x.txt"),
-        OpenedItem::Url("file://server/share/x.txt".to_string())
+        classify_open_url("file://server/share/x.txt", &schemes),
+        None
       );
     }
     #[cfg(windows)]
-    assert_eq!(
-      classify_open_url("file:///C:/Users/me/My%20Notes.txt"),
-      OpenedItem::File(PathBuf::from("C:\\Users\\me\\My Notes.txt"))
-    );
+    {
+      assert_eq!(
+        classify_open_url("file:///C:/Users/me/My%20Notes.txt", &[]),
+        Some(OpenedItem::File(PathBuf::from(
+          "C:\\Users\\me\\My Notes.txt"
+        )))
+      );
+      // A network share is never an opened file.
+      assert_eq!(classify_open_url("file://server/share/x.txt", &[]), None);
+    }
   }
 
   #[test]
-  fn arguments_after_the_terminator_are_positional() {
+  fn after_the_terminator_only_one_declared_link_counts() {
     let schemes = strings(&["acme"]);
-    let never = |_: &Path| false;
-    // Before `--`, `--runtime` takes the next argument as its value; after
-    // it, `--runtime` and the arguments that follow are positional, so the
-    // link after it is still a link and nothing is consumed as a value.
+    let all = |_: &Path| true;
+    // The OS deep-link launch: `"<exe>" -- "%1"`.
+    let targets =
+      parse_launch_args(&strings(&["--", "acme://a?x=1"]), None, &schemes, all);
+    assert_eq!(targets.urls, strings(&["acme://a?x=1"]));
+    assert!(targets.files.is_empty());
+    // A link that broke out of its quotes added arguments: nothing after
+    // the `--` counts, not even the link, and no path it named is opened.
+    for args in [
+      &["--", "acme://a", "C:\\secret.txt"][..],
+      &["--", "acme://a", "acme://b"],
+      &["--", "acme://a", "--runtime", "acme://b"],
+      &["--", "/etc/passwd"],
+      &["--", "-notes.txt"],
+      &["--", "other://a"],
+      &["--", "--", "acme://a"],
+      &["--"],
+    ] {
+      let targets =
+        parse_launch_args(&strings(args), Some(Path::new("/")), &schemes, all);
+      assert_eq!(targets, LaunchTargets::default(), "{args:?}");
+    }
+    // What came before the `--` (the host's own options) is unaffected.
     let targets = parse_launch_args(
-      &strings(&["--", "acme://a", "--runtime", "acme://b", "--x=acme://c"]),
+      &strings(&["--runtime", "/x/lib.so", "--", "acme://a"]),
       None,
       &schemes,
-      never,
+      all,
     );
-    assert_eq!(targets.urls, strings(&["acme://a", "acme://b"]));
-    // Without the terminator the same `--runtime` swallows `acme://b`.
+    assert_eq!(targets.urls, strings(&["acme://a"]));
+    // Without the terminator `--runtime` swallows the next argument.
     let targets = parse_launch_args(
       &strings(&["acme://a", "--runtime", "acme://b"]),
       None,
       &schemes,
-      never,
-    );
-    assert_eq!(targets.urls, strings(&["acme://a"]));
-    // A second `--` after the first is an ordinary (ignored) argument.
-    let targets = parse_launch_args(
-      &strings(&["--", "--", "acme://a"]),
-      None,
-      &schemes,
-      never,
+      |_| false,
     );
     assert_eq!(targets.urls, strings(&["acme://a"]));
   }
 
-  #[cfg(unix)]
   #[test]
-  fn a_dash_file_after_the_terminator_is_a_file() {
-    let exists = |p: &Path| p == Path::new("/home/me/-notes.txt");
-    let cwd = Some(Path::new("/home/me"));
-    let targets =
-      parse_launch_args(&strings(&["--", "-notes.txt"]), cwd, &[], exists);
-    assert_eq!(targets.files, vec![PathBuf::from("/home/me/-notes.txt")]);
-    let targets =
-      parse_launch_args(&strings(&["-notes.txt"]), cwd, &[], exists);
-    assert!(targets.files.is_empty());
+  fn network_paths_are_never_looked_at() {
+    let looked = std::cell::RefCell::new(Vec::<PathBuf>::new());
+    let exists = |p: &Path| {
+      looked.borrow_mut().push(p.to_path_buf());
+      true
+    };
+    let args = if cfg!(windows) {
+      strings(&[
+        "\\\\server\\share\\x.txt",
+        "//server/share/x.txt",
+        "\\\\?\\UNC\\server\\share\\x.txt",
+        "\\\\.\\pipe\\x",
+        "file://server/share/x.txt",
+      ])
+    } else {
+      strings(&["file://server/share/x.txt"])
+    };
+    let targets = parse_launch_args(
+      &args,
+      Some(Path::new("/")),
+      &strings(&["acme"]),
+      exists,
+    );
+    assert!(targets.files.is_empty(), "{targets:?}");
+    assert!(looked.borrow().is_empty(), "{:?}", looked.borrow());
   }
 
   #[cfg(unix)]

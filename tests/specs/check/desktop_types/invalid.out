@@ -14,6 +14,17 @@ const code: Deno.desktop.AppUpdateErrorCode = "nope";
       ~~~~
     at [WILDCARD]invalid.ts:7:7
 
-Found 3 errors.
+TS2345 [ERROR]: Argument of type 'UnsafeCallback<{ parameters: ["pointer"]; result: "pointer"; }>' is not assignable to parameter of type 'UnsafeFnPointer<any> | PointerObject<unknown>'.
+  Property 'call' is missing in type 'UnsafeCallback<{ parameters: ["pointer"]; result: "pointer"; }>' but required in type 'UnsafeFnPointer<any>'.
+d.runOnMainThread(callback);
+                  ~~~~~~~~
+    at [WILDCARD]invalid.ts:13:19
+
+    'call' is declared here.
+        call: FromForeignFunction<Fn>;
+        ~~~~
+        at asset:///lib.deno.ns.d.ts:[WILDCARD]
+
+Found 4 errors.
 
 error: Type checking failed.

@@ -14,13 +14,18 @@
 //!   letter, backslash, `:`, NUL or `..` segment (tar-slip);
 //! - only regular files, directories and symlinks (pax global headers are
 //!   skipped); a hard link, device, FIFO or anything else is refused;
-//! - a symlink must be relative and resolve INSIDE the destination; symlinks
+//! - a symlink must be relative and resolve INSIDE the app (the archive's
+//!   top-level entry, not merely the extraction directory, which also holds
+//!   the download and is not swapped in with the app); symlinks
 //!   are created LAST, after every file, and never under another symlink, so
 //!   no entry is written through a link; a dangling one is refused; on
 //!   Windows an archive with a symlink is refused;
 //! - a duplicate entry path is refused, and files are created with
 //!   `create_new` (never opened through an existing path);
-//! - file modes keep only the permission bits (no setuid / setgid / sticky);
+//! - file modes are masked to `0o755` (no setuid / setgid / sticky, nothing
+//!   group- or world-writable: another local user must not be able to change
+//!   the installed app) and always readable and writable by the owner;
+//!   directories get the process default (the archive's are ignored);
 //! - the total extracted size and the entry count are capped.
 //!
 //! The archive must hold exactly one top-level entry: the app (`<App>.app/`,
@@ -192,7 +197,10 @@ pub fn safe_entry_path(raw: &[u8]) -> Result<Vec<String>, UpdateError> {
 }
 
 /// Whether a symlink at `link` (normalized segments) pointing at `target`
-/// stays inside the root, resolved lexically from the link's directory.
+/// stays inside the archive's top-level entry (`link[0]`), resolved
+/// lexically from the link's directory. A target that resolves to the
+/// top-level entry itself or outside it (a sibling next to the app in the
+/// extraction directory, the directory itself) is refused.
 fn symlink_stays_inside(link: &[String], target: &str) -> bool {
   if target.is_empty()
     || target.starts_with('/')
@@ -217,7 +225,7 @@ fn symlink_stays_inside(link: &[String], target: &str) -> bool {
       s => stack.push(s),
     }
   }
-  true
+  stack.len() > 1 && link.first().is_some_and(|top| stack[0] == top.as_str())
 }
 
 fn join(root: &Path, parts: &[String]) -> PathBuf {
@@ -379,7 +387,7 @@ pub fn extract_tar_gz(
         #[cfg(unix)]
         {
           use std::os::unix::fs::PermissionsExt;
-          let mode = entry.header().mode().unwrap_or(0o644) & 0o777;
+          let mode = entry.header().mode().unwrap_or(0o644) & 0o755;
           std::fs::set_permissions(
             &path,
             std::fs::Permissions::from_mode(mode | 0o600),
@@ -450,12 +458,15 @@ pub fn extract_tar_gz(
       std::os::unix::fs::symlink(target, &path)
         .map_err(|e| UpdateError::io(path.display(), e))?;
     }
-    let root = std::fs::canonicalize(dest)
-      .map_err(|e| UpdateError::io(dest.display(), e))?;
+    // What each link resolves to must be inside the app (the top-level
+    // entry), not just inside the extraction directory.
     for (parts, _) in &symlinks {
+      let top = dest.join(&parts[0]);
+      let root = std::fs::canonicalize(&top)
+        .map_err(|e| UpdateError::io(top.display(), e))?;
       let path = join(dest, parts);
       match std::fs::canonicalize(&path) {
-        Ok(real) if real.starts_with(&root) => {}
+        Ok(real) if real.starts_with(&root) && real != root => {}
         Ok(_) => {
           return err(
             Code::UnsafeArchive,
@@ -592,7 +603,18 @@ mod tests {
   #[cfg(unix)]
   #[test]
   fn refuses_escaping_symlinks() {
-    for target in ["../../outside", "/etc/passwd", "../.."] {
+    // Out of the extraction directory, and out of the app into the
+    // extraction directory (`../download.part`, a sibling) or onto the app's
+    // own top-level directory.
+    for target in [
+      "../../outside",
+      "/etc/passwd",
+      "../..",
+      "../download.part",
+      "../Other",
+      "..",
+      "../App",
+    ] {
       let r =
         extract(&[("App/", b'5', b"", ""), ("App/link", b'2', b"", target)]);
       assert_eq!(r.unwrap_err().code, Code::UnsafeArchive, "{target}");
@@ -652,6 +674,33 @@ mod tests {
       .permissions()
       .mode();
     assert_eq!(mode & 0o7777, 0o755);
+    // Group- and world-writable bits are dropped; the owner can always read
+    // and write.
+    for (packed, expect) in [(0o777, 0o755), (0o666, 0o644), (0o2775, 0o755)] {
+      let t = tmp();
+      let mut h = header("App/f", b'0', 1, "");
+      h[100..108].copy_from_slice(format!("{packed:07o}\0").as_bytes());
+      h[148..156].copy_from_slice(b"        ");
+      let sum: u32 = h.iter().map(|&b| b as u32).sum();
+      h[148..156].copy_from_slice(format!("{sum:06o}\0 ").as_bytes());
+      let mut raw = h.to_vec();
+      raw.push(b'x');
+      raw.extend(std::iter::repeat_n(0u8, 511 + 1024));
+      let a = t.path().join("m.tar.gz");
+      let mut enc = flate2::write::GzEncoder::new(
+        File::create(&a).unwrap(),
+        flate2::Compression::fast(),
+      );
+      enc.write_all(&raw).unwrap();
+      enc.finish().unwrap();
+      let out = t.path().join("out");
+      extract_tar_gz(&a, &out, 1 << 30).unwrap();
+      let mode = std::fs::metadata(out.join("App/f"))
+        .unwrap()
+        .permissions()
+        .mode();
+      assert_eq!(mode & 0o7777, expect, "{packed:o}");
+    }
     assert!(
       std::fs::symlink_metadata(out.join("App/Current"))
         .unwrap()

@@ -13,8 +13,20 @@
     "output": "ffi.out",
     "exitCode": 0
   }, {
+    "args": "run sys.js",
+    "output": "sys_denied.out",
+    "exitCode": 0
+  }, {
+    "args": "run --allow-sys=hostname sys.js",
+    "output": "sys_denied.out",
+    "exitCode": 0
+  }, {
+    "args": "run --allow-sys sys.js",
+    "output": "sys.out",
+    "exitCode": 0
+  }, {
     "args": "run --allow-read=. files.js",
-    "output": "ffi.js files.js main.js\n",
+    "output": "ffi.js files.js main.js sys.js\n",
     "exitCode": 0
   }]
 }

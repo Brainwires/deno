@@ -19,6 +19,7 @@ mod app_origin;
 mod napi_host_exports;
 mod scheme_bridge;
 mod scheme_registration;
+mod worker_launch;
 
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -55,7 +56,7 @@ use denort::run::RunOptions;
 /// makes the failure mode obvious instead of "the desktop app silently won't
 /// launch".
 const _: () = assert!(
-  laufey::LAUFEY_API_VERSION == 43,
+  laufey::LAUFEY_API_VERSION == 44,
   "LAUFEY_API_VERSION mismatch: update this assert and the prebuilt backend release pin in cli/tools/desktop.rs when laufey bumps its API version",
 );
 
@@ -189,7 +190,12 @@ struct WefDesktopApi {
   /// callback so it can refresh all windows, not just the initial one.
   open_windows: Arc<Mutex<HashSet<u32>>>,
   trays: Arc<Mutex<HashMap<u32, laufey::TrayIcon>>>,
-  notifications: Arc<Mutex<HashMap<u32, laufey::NotificationHandle>>>,
+  /// Live notifications by id, for `close()`. Forgotten on their `Closed`
+  /// event, and capped at [`MAX_LIVE_NOTIFICATIONS`] (oldest out): a
+  /// notification the user leaves in the notification center never sends
+  /// one, so the map used to grow with every notification the app posted.
+  notifications:
+    Arc<Mutex<std::collections::BTreeMap<u32, laufey::NotificationHandle>>>,
   /// Singleton for the unified-mux DevTools window. Without this, every
   /// `openDevtools()` call would spawn another DevTools window.
   devtools_window: Mutex<Option<u32>>,
@@ -205,6 +211,28 @@ struct WefDesktopApi {
   surface_windows: Arc<Mutex<HashSet<u32>>>,
   /// `Deno.desktop.quitOnLastWindowClosed` (see `CloseBook`).
   quit_on_last_window_closed: Arc<AtomicBool>,
+  /// The origins a binding answers without opting in: the app origin, and a
+  /// development run's dev server (see `trusted_bridge_origins`).
+  trusted_bridge_origins: Arc<Vec<String>>,
+}
+
+/// The documents whose calls every binding answers (laufey API 44 reports
+/// the calling document's origin): the app origin and, in a development run
+/// against an external dev server (`DENO_DESKTOP_DEV_URL`), that server's
+/// origin, both serialized as the browser does.
+fn trusted_bridge_origins(
+  app_origin: &AppOrigin,
+  dev_url: Option<&str>,
+) -> Vec<String> {
+  let mut out = vec![app_origin.as_origin_string()];
+  if let Some(origin) = dev_url
+    .and_then(|u| deno_core::url::Url::parse(u).ok())
+    .map(|u| u.origin().ascii_serialization())
+    .filter(|o| o != "null")
+  {
+    out.push(origin);
+  }
+  out
 }
 
 /// The bootstrap window's reveal state: it is created hidden and shown by the
@@ -253,6 +281,24 @@ impl InitialReveal {
   }
 }
 
+/// How many live notifications the runtime remembers for `close()` (see
+/// `WefDesktopApi::notifications`).
+const MAX_LIVE_NOTIFICATIONS: usize = 1024;
+
+/// Remember notification `id` (ids grow, so the smallest is the oldest),
+/// forgetting the oldest beyond [`MAX_LIVE_NOTIFICATIONS`]. A forgotten one
+/// stays on screen; only `close()` from the app no longer reaches it.
+fn remember_notification<T>(
+  live: &mut std::collections::BTreeMap<u32, T>,
+  id: u32,
+  handle: T,
+) {
+  live.insert(id, handle);
+  while live.len() > MAX_LIVE_NOTIFICATIONS {
+    live.pop_first();
+  }
+}
+
 /// Bookkeeping + the native close, shared by every path that really closes
 /// a window (an answered or timed-out close request, `close()`, DevTools).
 #[derive(Clone)]
@@ -265,12 +311,19 @@ struct CloseBook {
   /// `Deno.desktop.quitOnLastWindowClosed`, mirrored for the windows kept
   /// hidden instead of destroyed (laufey still counts those as open).
   quit_on_last_window_closed: Arc<AtomicBool>,
+  /// Tells DESKTOP_JS the window is gone (`WindowClosed`).
+  event_tx: deno_runtime::ops::desktop::DesktopEventTx,
 }
 
 impl CloseBook {
   fn close(&self, window_id: u32) {
     use deno_runtime::ops::desktop::NativeClose;
-    self.closed_windows.lock().unwrap().insert(window_id);
+    let newly_closed = self.closed_windows.lock().unwrap().insert(window_id);
+    if newly_closed {
+      let _ = self.event_tx.try_send(
+        deno_runtime::ops::desktop::DesktopEvent::WindowClosed { window_id },
+      );
+    }
     let others_open = {
       let mut open = self.open_windows.lock().unwrap();
       open.remove(&window_id);
@@ -316,6 +369,7 @@ impl WefDesktopApi {
       open_windows: self.open_windows.clone(),
       surface_windows: self.surface_windows.clone(),
       quit_on_last_window_closed: self.quit_on_last_window_closed.clone(),
+      event_tx: self.event_tx.clone(),
     }
   }
 
@@ -754,20 +808,48 @@ impl denort::desktop::DesktopApi for WefDesktopApi {
     );
   }
 
-  fn bind(&self, window_id: u32, name: &str) {
+  fn bind(
+    &self,
+    window_id: u32,
+    name: &str,
+    origins: deno_runtime::ops::desktop::BindOrigins,
+  ) {
     // laufey keeps a binding's handler for the window's lifetime (and past
     // `unbind`), so the handler holds the event queue weakly: it must not
     // keep the queue (and every event in it) alive once the runtime is gone.
     let tx = self.event_tx.downgrade();
     let responses = self.pending_responses.clone();
     let name_owned = name.to_string();
+    let trusted = self.trusted_bridge_origins.clone();
+    let origins = Arc::new(origins);
     laufey::Window::from_id(window_id).add_binding_async(
       name,
       move |mut js_call| {
         let tx = tx.upgrade();
         let responses = responses.clone();
         let name = name_owned.clone();
+        let trusted = trusted.clone();
+        let origins = origins.clone();
         async move {
+          // The page the main frame shows may not be the app's (navigated
+          // to a remote site, an identity provider): a binding answers only
+          // the documents it trusts.
+          if !deno_runtime::ops::desktop::bind_call_allowed(
+            &js_call.origin,
+            &trusted,
+            &origins,
+          ) {
+            let message = format!(
+              "this page's origin ({}) may not call the app's binding {name:?}",
+              if js_call.origin.is_empty() {
+                "unknown"
+              } else {
+                js_call.origin.as_str()
+              }
+            );
+            js_call.reject(laufey::Value::String(message));
+            return;
+          }
           let Some(tx) = tx else {
             js_call.reject(laufey::Value::String(
               "event channel closed".to_string(),
@@ -807,6 +889,7 @@ impl denort::desktop::DesktopApi for WefDesktopApi {
             name,
             args,
             call_id,
+            origin: js_call.origin.clone(),
           };
           if let Err(err) = tx.try_send(event) {
             let msg = match err {
@@ -1517,7 +1600,7 @@ impl denort::desktop::DesktopApi for WefDesktopApi {
       );
       return 0;
     }
-    self.notifications.lock().unwrap().insert(id, handle);
+    remember_notification(&mut self.notifications.lock().unwrap(), id, handle);
     id
   }
 
@@ -2133,35 +2216,59 @@ laufey::main!(|| {
   export_napi_symbols_from_executable();
 
   // Guard against re-entry: when a framework dev server (e.g. Next.js)
-  // forks child/worker processes, they re-execute this dylib. Detect
-  // forked workers and run them headless (no Laufey window).
+  // forks child/worker processes (`child_process.fork()`), they re-execute
+  // this dylib as `<exe> run [flags…] [script.js …]` with a Node IPC
+  // channel. Such a launch runs headless (no Laufey window), but only when
+  // this app's own runtime forked it: the worker token it hands its forks,
+  // naming it as the parent, and a real inherited IPC channel (see
+  // `worker_launch`). argv alone (`<App> run /tmp/x.js` from a shell,
+  // `open --args`, a shortcut) used to run any script with the app's
+  // permissions, signature and privacy grants. Anything else with `run` as
+  // argv[1] is refused: the Laufey backend never invokes us that way, and
+  // starting the app with `run` and a script as its launch arguments would
+  // only open it.
   //
-  // A forked worker is recognized by the *combination* of:
-  //   1. argv shaped like `<exe> run [flags…] script.js …` (i.e.
-  //      `extract_fork_script_path` returns `Some`), OR
-  //   2. argv shaped like `<exe> run …` *and* one of the worker env
-  //      vars set by the parent dev server (NODE_CHANNEL_FD,
-  //      NEXT_PRIVATE_WORKER).
-  //
-  // The bare env-var check used to be enough, but a user shell that
-  // already had NODE_CHANNEL_FD set (e.g. running inside another forked
-  // process, Jest, pnpm) would silently take the headless path and
-  // never show a window. Requiring the `run` argv shape rules that out:
-  // the Laufey backend never invokes us with `run` as argv[1].
+  // A compiled binary's `fork()` (this runtime is one) uses a second shape:
+  // `<exe> <module> [args…]` with the module in
+  // `DENO_INTERNAL_CHILD_ENTRYPOINT` (see `node:child_process`). That child
+  // used to start the whole desktop app and run the module as its main module
+  // (`denort::run`), from an environment variable and any NODE_CHANNEL_FD, so
+  // it is a worker launch too and goes through the same gate.
   let args: Vec<_> = env::args_os().collect();
   let argv_run = args
     .get(1)
     .and_then(|a| a.to_str())
     .map(|s| s == "run")
     .unwrap_or(false);
-  let is_worker = extract_fork_script_path(&args).is_some()
-    || (argv_run
-      && (env::var("NODE_CHANNEL_FD").is_ok()
-        || env::var("NEXT_PRIVATE_WORKER").is_ok()));
-  if is_worker {
-    run_on_runtime_thread(run_headless_worker);
-    return;
+  let fork_child_env =
+    env::var_os(denort::run::INTERNAL_CHILD_ENTRYPOINT_ENV_VAR)
+      .is_some_and(|v| !v.is_empty());
+  if argv_run || fork_child_env {
+    match worker_launch::authorize() {
+      Ok(()) => {
+        run_on_runtime_thread(run_headless_worker);
+        return;
+      }
+      Err(refusal) => {
+        #[allow(
+          clippy::print_stderr,
+          reason = "runs before logging is initialized"
+        )]
+        {
+          eprintln!(
+            "[desktop] refusing to run as a worker process: {refusal} \
+             (only this app's own runtime forks workers)"
+          );
+        }
+        exit_before_start(1);
+      }
+    }
   }
+  // This process's forks of its own executable may run headless.
+  deno_runtime::deno_process::set_self_fork_env_var(
+    worker_launch::WORKER_TOKEN_ENV,
+    worker_launch::issue_token(),
+  );
 
   // The full-app update watchdog: an update still unconfirmed from an
   // earlier launch (it crashed or never called confirm()) is rolled back
@@ -2491,7 +2598,8 @@ laufey::main!(|| {
 
 /// The variables the desktop runtime publishes to the app (through the
 /// environment overlay, see `laufey::main!`): the in-process serve address,
-/// the page origin and, when bound, the WebSocket relay's origin. The third
+/// the page origin and, when bound, the WebSocket relay's origin and its URL
+/// with the per-launch token (`DENO_DESKTOP_WS_URL`). The third
 /// field says whether child processes inherit it: the serve address names a
 /// listener in THIS process, so a child (a `deno` the app runs) that inherited
 /// it would serve its own `Deno.serve` / `node:http` on an unreachable memory
@@ -2518,6 +2626,11 @@ fn desktop_env_overlay(
       scheme_bridge::ws_relay_origin(addr),
       true,
     ));
+    // The URL with the relay's per-launch token: a secret, kept to this
+    // process (a child the app runs gets no way into the relay).
+    if let Some(url) = scheme_bridge::ws_relay_url(addr) {
+      vars.push((scheme_bridge::WS_URL_ENV, url, false));
+    }
   }
   vars
 }
@@ -2558,13 +2671,21 @@ fn register_launch_handlers(
 
   // macOS only (a no-op on backends without it): links, and files as
   // `file://` URLs, routed to the running app.
+  // A URL with a scheme the app didn't declare is dropped.
   let open_inbox = inbox.clone();
+  let open_schemes = deep_links.clone();
   laufey::on_open_url(move |url| {
-    match deno_lib::standalone::launch_args::classify_open_url(url) {
-      OpenedItem::Url(url) => open_inbox.open_url(url),
-      OpenedItem::File(path) => {
+    match deno_lib::standalone::launch_args::classify_open_url(
+      url,
+      &open_schemes,
+    ) {
+      Some(OpenedItem::Url(url)) => open_inbox.open_url(url),
+      Some(OpenedItem::File(path)) => {
         open_inbox.open_file(path.to_string_lossy().into_owned())
       }
+      None => log::debug!(
+        "[desktop] dropped an opened URL whose scheme the app doesn't declare"
+      ),
     }
   });
 
@@ -2671,8 +2792,14 @@ fn run_headless_worker() {
     // Detect if this is a child_process.fork() invocation.
     // fork() translates args to: ["run", "-A", "--unstable-...", "script.js", ...]
     // Extract the script path so the forked worker runs the correct module
-    // instead of the embedded entrypoint.
+    // instead of the embedded entrypoint. A compiled binary's fork() names
+    // the module in DENO_INTERNAL_CHILD_ENTRYPOINT instead (resolved below,
+    // once the embedded file system is known).
     let fork_module = extract_fork_script_path(&args);
+    let child_entrypoint =
+      env::var(denort::run::INTERNAL_CHILD_ENTRYPOINT_ENV_VAR)
+        .ok()
+        .filter(|m| !m.is_empty());
     log::debug!("[worker] fork_module: {:?}", fork_module);
 
     let data = match denort::binary::extract_standalone_with_finder(
@@ -2682,7 +2809,7 @@ fn run_headless_worker() {
       Ok(data) => data,
       Err(e) => {
         log::error!("Worker failed to load standalone data: {:?}", e);
-        return;
+        deno_runtime::exit(1);
       }
     };
 
@@ -2704,6 +2831,47 @@ fn run_headless_worker() {
       denort::file_system::DenoRtSys::new(data.vfs.clone())
     };
 
+    // The compiled-binary fork shape: the module next to the entrypoint in the
+    // embedded file system, else (as fork() resolves it) relative to the
+    // working directory; checked below like any forked module.
+    let fork_module = fork_module.or_else(|| {
+      let module_path = child_entrypoint.as_deref()?;
+      let root_url =
+        deno_core::url::Url::from_directory_path(&data.root_path).ok()?;
+      let entrypoint = root_url.join(&data.metadata.entrypoint_key).ok()?;
+      Some(denort::run::resolve_child_entrypoint(
+        module_path,
+        &entrypoint,
+        &data.vfs,
+        &sys,
+      ))
+    });
+
+    // A packaged app forks only the modules it ships (under the embedded
+    // file system's root), never a file elsewhere on disk or on a share; a
+    // development run forks the dev server's scripts from the source tree.
+    if let Some(module) = &fork_module {
+      let dev = env::var_os("DENO_DESKTOP_HMR").is_some()
+        || env::var_os("DENO_DESKTOP_DEV_URL").is_some()
+        || env::var_os("DENO_DESKTOP_FRAMEWORK_DEV").is_some();
+      if !worker_launch::module_allowed(module, &data.root_path, dev) {
+        log::error!(
+          "{}: refusing to fork {module}: a packaged app forks only its own \
+           modules (under {})",
+          colors::red_bold("error"),
+          data.root_path.display()
+        );
+        deno_runtime::exit(1);
+      }
+    }
+
+    // A worker's own forks (a dev server's workers fork too) get a token
+    // naming it.
+    deno_runtime::deno_process::set_self_fork_env_var(
+      worker_launch::WORKER_TOKEN_ENV,
+      worker_launch::issue_token(),
+    );
+
     let options = denort::run::RunOptions {
       override_main_module: fork_module,
       ..Default::default()
@@ -2724,6 +2892,10 @@ fn run_headless_worker() {
           "[worker] run_with_options completed with exit code: {}",
           exit_code
         );
+        // The worker is done: end the process (a backend host would
+        // otherwise keep running its UI loop with nothing to show), with the
+        // module's exit code.
+        deno_runtime::exit(exit_code);
       }
       Err(error) => {
         let error_string = match js_error_downcast_ref(&error) {
@@ -2736,11 +2908,10 @@ fn run_headless_worker() {
           colors::red_bold("error"),
           error_string.trim_start_matches("error: ")
         );
+        deno_runtime::exit(1);
       }
     }
-    log::debug!("[worker] block_on finished");
   });
-  log::debug!("[worker] run_headless_worker returning");
 }
 
 /// Extract the script path from fork'd process arguments.
@@ -3054,6 +3225,11 @@ async fn run_desktop(
   // upgrade `Origin` headers against the same origin from the navigate task.
   let app_origin_for_register = app_origin.clone();
   let app_origin_for_relay = app_origin.clone();
+  // The documents bindings answer by default (see `bind_call_allowed`).
+  let trusted_bridge_origins = Arc::new(trusted_bridge_origins(
+    &app_origin,
+    external_dev_url.as_deref(),
+  ));
   // The OS registration of the deep-link schemes (Deno.desktop
   // getSchemeOwner / registerScheme, and the startup pass below). A dev run
   // executes a development host, not the packaged app, so it writes nothing.
@@ -3096,7 +3272,7 @@ async fn run_desktop(
         closed_windows: Arc::new(Mutex::new(HashSet::new())),
         open_windows: open_windows_for_api.clone(),
         trays: Arc::new(Mutex::new(HashMap::new())),
-        notifications: Arc::new(Mutex::new(HashMap::new())),
+        notifications: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
         devtools_window: Mutex::new(None),
         pending_closes: Arc::new(
           deno_runtime::ops::desktop::PendingCloses::default(),
@@ -3105,6 +3281,7 @@ async fn run_desktop(
         shortcut_handler: std::sync::Once::new(),
         surface_windows: Arc::new(Mutex::new(HashSet::new())),
         quit_on_last_window_closed: Arc::new(AtomicBool::new(true)),
+        trusted_bridge_origins: trusted_bridge_origins.clone(),
       };
 
       // `Deno.desktop` "displaychanged".
@@ -3377,6 +3554,51 @@ mod tests {
   use super::should_show_native_error_dialog;
 
   #[test]
+  fn bindings_trust_the_app_origin_and_a_dev_server() {
+    let origin =
+      deno_lib::standalone::app_origin::AppOrigin::parse("t3code://app")
+        .unwrap();
+    assert_eq!(
+      super::trusted_bridge_origins(&origin, None),
+      vec!["t3code://app".to_string()]
+    );
+    // The dev server's origin, serialized as the browser reports it.
+    assert_eq!(
+      super::trusted_bridge_origins(
+        &origin,
+        Some("http://LOCALHOST:5173/some/path?x")
+      ),
+      vec![
+        "t3code://app".to_string(),
+        "http://localhost:5173".to_string()
+      ]
+    );
+    assert_eq!(
+      super::trusted_bridge_origins(&origin, Some("https://dev.example:443/")),
+      vec![
+        "t3code://app".to_string(),
+        "https://dev.example".to_string()
+      ]
+    );
+    // Not a URL, or an opaque one: nothing added.
+    for bad in ["not a url", "data:text/plain,x"] {
+      assert_eq!(super::trusted_bridge_origins(&origin, Some(bad)).len(), 1);
+    }
+  }
+
+  #[test]
+  fn live_notifications_are_capped_oldest_first() {
+    let mut live = std::collections::BTreeMap::new();
+    for id in 1..=(super::MAX_LIVE_NOTIFICATIONS as u32 + 10) {
+      super::remember_notification(&mut live, id, ());
+    }
+    assert_eq!(live.len(), super::MAX_LIVE_NOTIFICATIONS);
+    // The ten oldest went; the newest is kept.
+    assert_eq!(live.keys().next(), Some(&11));
+    assert!(live.contains_key(&(super::MAX_LIVE_NOTIFICATIONS as u32 + 10)));
+  }
+
+  #[test]
   fn an_empty_dock_badge_clears_it() {
     // Dock.setBadge(null) arrives as "" and must clear (NULL to laufey),
     // not show a badge.
@@ -3407,6 +3629,15 @@ mod tests {
           "DENO_DESKTOP_WS_ORIGIN",
           "ws://127.0.0.1:4321".to_string(),
           true
+        ),
+        (
+          "DENO_DESKTOP_WS_URL",
+          format!(
+            "ws://127.0.0.1:4321/.deno-desktop-relay/{}",
+            super::scheme_bridge::relay_token().unwrap()
+          ),
+          // The relay token: not inherited.
+          false
         ),
       ]
     );

@@ -6,7 +6,7 @@ op_desktop_recv_event -> null
 op_desktop_take_launch_targets -> {"urls":[],"files":[],"notifications":[]}
 op_desktop_subscribe_launch_events -> []
 op_desktop_get_scheme_owner throws Error: deep-link scheme registration is not available in this runtime
-op_desktop_register_scheme throws Error: deep-link scheme registration is not available in this runtime
+op_desktop_register_scheme throws NotCapable: Requires sys access, run again with the --allow-sys flag
 op_desktop_passkey_capabilities -> {"platformAuthenticator":false,"securityKeys":false}
 op_desktop_passkey_request -> "{\"ok\":false,\"error\":{\"code\":\"not_supported\",\"message\":\"Native passkeys are not supported on this platform.\"}}"
 op_desktop_auth_session_capabilities -> {"supported":false,"ephemeral":false,"httpsCallback":false}
@@ -19,31 +19,31 @@ op_desktop_alert -> null
 op_desktop_alert_async -> null
 op_desktop_confirm -> false
 op_desktop_prompt -> null
-op_desktop_read_clipboard_text -> null
+op_desktop_read_clipboard_text throws NotCapable: Requires sys access, run again with the --allow-sys flag
 op_desktop_write_clipboard_text -> null
 op_desktop_clipboard_capabilities -> {"text":false,"html":false,"image":false,"formats":false,"changeEvents":false}
-op_desktop_read_clipboard_html -> null
+op_desktop_read_clipboard_html throws NotCapable: Requires sys access, run again with the --allow-sys flag
 op_desktop_write_clipboard_html throws NotSupported: the clipboard does not support HTML on this platform
-op_desktop_read_clipboard_image -> null
+op_desktop_read_clipboard_image throws NotCapable: Requires sys access, run again with the --allow-sys flag
 op_desktop_write_clipboard_image throws NotSupported: the clipboard does not support images on this platform
-op_desktop_read_clipboard_formats -> []
-op_desktop_clipboard_watch -> null
+op_desktop_read_clipboard_formats throws NotCapable: Requires sys access, run again with the --allow-sys flag
+op_desktop_clipboard_watch throws NotCapable: Requires sys access, run again with the --allow-sys flag
 op_desktop_start_drag -> "failed"
 op_desktop_file_dialog_open -> "rid 1, cancel false, wait {\"status\":\"failed\",\"paths\":[]}"
 op_desktop_file_dialog_wait -> {"status":"failed","paths":[]}
 op_desktop_file_dialog_cancel -> false
 op_desktop_system_capabilities -> {"globalShortcuts":false,"shortcutsUserBinds":false,"launchAtLogin":false,"devtools":false}
-op_desktop_register_shortcut -> {"status":"not_supported","accelerator":null}
+op_desktop_register_shortcut throws NotCapable: Requires sys access, run again with the --allow-sys flag
 op_desktop_unregister_shortcut -> false
 op_desktop_unregister_all_shortcuts -> null
 op_desktop_list_shortcuts -> []
 op_desktop_canonical_accelerator -> null
 op_desktop_get_launch_at_login -> "not-supported"
-op_desktop_set_launch_at_login -> "not-supported"
+op_desktop_set_launch_at_login throws NotCapable: Requires sys access, run again with the --allow-sys flag
 op_desktop_devtools_enabled -> false
 op_desktop_menu_capabilities -> {"appMenu":false,"accelerators":false,"contextMenu":false,"contextClosed":false,"icons":false,"tooltips":false}
 op_desktop_notification_capabilities -> {"show":false,"schedule":false,"schedulePersists":false,"actions":false,"clicks":false,"coldStart":false}
-op_desktop_schedule_notification -> false
+op_desktop_schedule_notification throws NotCapable: Requires sys access, run again with the --allow-sys flag
 op_desktop_list_scheduled_notifications -> []
 op_desktop_cancel_notification -> null
 op_desktop_send_error_report -> null

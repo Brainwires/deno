@@ -50,21 +50,32 @@ impl<'a> ToV8<'a> for DesktopValue {
       DesktopValue::Int(i) => v8::Integer::new(scope, i).into(),
       DesktopValue::Double(d) => v8::Number::new(scope, d).into(),
       DesktopValue::String(s) => v8::String::new(scope, &s).unwrap().into(),
+      // Own data properties (`CreateDataProperty`), never `[[Set]]`: the
+      // value comes from the page (binding arguments, `executeJs` results),
+      // and a `__proto__` key assigned with `[[Set]]` replaced the object's
+      // prototype, while a setter the app (or a dependency) put on
+      // `Object.prototype` / `Array.prototype` would have run for every key.
       DesktopValue::List(l) => {
         let arr = v8::Array::new(scope, l.len() as i32);
         for (i, v) in l.into_iter().enumerate() {
           let val = v.to_v8(scope)?;
-          arr.set_index(scope, i as u32, val);
+          let index: v8::Local<v8::Name> =
+            v8::Integer::new_from_unsigned(scope, i as u32)
+              .to_string(scope)
+              .unwrap()
+              .into();
+          arr.create_data_property(scope, index, val);
         }
         arr.into()
       }
       DesktopValue::Dict(d) => {
         let obj = v8::Object::new(scope);
         for (k, v) in d {
-          let key: v8::Local<v8::Value> =
-            v8::String::new(scope, &k).unwrap().into();
+          let Some(key) = v8::String::new(scope, &k) else {
+            continue;
+          };
           let val = v.to_v8(scope)?;
-          obj.set(scope, key, val);
+          obj.create_data_property(scope, key.into(), val);
         }
         obj.into()
       }
@@ -340,6 +351,9 @@ pub enum DesktopEvent {
     name: String,
     args: Vec<DesktopValue>,
     call_id: u32,
+    /// The serialized origin of the document that called (laufey API 44),
+    /// already admitted by [`bind_call_allowed`].
+    origin: String,
   },
   #[serde(rename_all = "camelCase")]
   MouseClick {
@@ -402,6 +416,12 @@ pub enum DesktopEvent {
   PageLoad { window_id: u32 },
   #[serde(rename_all = "camelCase")]
   CloseRequested { window_id: u32 },
+  /// The window is closed for good (destroyed, or hidden and kept for a
+  /// WebGPU surface): DESKTOP_JS forgets its per-window state (the window
+  /// registry, bound functions, pressed buttons), which it kept for the life
+  /// of the process.
+  #[serde(rename_all = "camelCase")]
+  WindowClosed { window_id: u32 },
   /// The window's maximized / minimized / fullscreen state changed (after
   /// the OS applied it). DESKTOP_JS derives `maximize`, `unmaximize`,
   /// `minimize`, `restore`, `enterfullscreen` and `leavefullscreen` from the
@@ -1224,6 +1244,102 @@ pub trait DesktopMainThread: Send + Sync + 'static {
   ) -> std::pin::Pin<
     Box<dyn std::future::Future<Output = Result<usize, String>> + Send>,
   >;
+}
+
+/// Which documents may call a binding, beyond the app's own (see
+/// [`bind_call_allowed`]): `BrowserWindow.bind(name, fn, { origins })`.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum BindOrigins {
+  /// Only the app's own origins (the default).
+  #[default]
+  App,
+  /// Any document, `null` (opaque) origins included (`origins: "*"`).
+  Any,
+  /// The app's origins and these serialized origins (`origins: [...]`).
+  List(Vec<String>),
+}
+
+/// The most origins one binding may list.
+const MAX_BIND_ORIGINS: usize = 64;
+
+impl BindOrigins {
+  /// `options.origins` as DESKTOP_JS's `bind()` hands it to the (fast)
+  /// native method: `""` (not given), `"*"`, or the listed origins, one per
+  /// line (an origin has no line break).
+  fn from_spec(spec: &str) -> Result<Self, deno_error::JsErrorBox> {
+    match spec {
+      "" => Ok(BindOrigins::App),
+      "*" => Ok(BindOrigins::Any),
+      list => {
+        let list: Vec<&str> = list.split('\n').collect();
+        if list.len() > MAX_BIND_ORIGINS {
+          return Err(deno_error::JsErrorBox::type_error(format!(
+            "a binding lists at most {MAX_BIND_ORIGINS} origins"
+          )));
+        }
+        let mut out = Vec::with_capacity(list.len());
+        for origin in list {
+          out.push(serialize_bind_origin(origin).ok_or_else(|| {
+            deno_error::JsErrorBox::type_error(format!(
+              "not an origin (scheme://host[:port], or \"null\"): {origin:?}"
+            ))
+          })?);
+        }
+        Ok(BindOrigins::List(out))
+      }
+    }
+  }
+}
+
+/// `origin` as browsers serialize it (lowercase scheme and host, the port
+/// only when it isn't the scheme's default): what laufey reports for the
+/// calling document, so the two compare exactly. `"null"` stays `"null"`.
+/// `None` for anything with a path, query, credentials, or not a URL.
+pub fn serialize_bind_origin(origin: &str) -> Option<String> {
+  if origin == "null" {
+    return Some(origin.to_string());
+  }
+  if origin.contains('\0') || origin.ends_with('/') {
+    return None;
+  }
+  let url = deno_core::url::Url::parse(origin).ok()?;
+  if url.path() != "/" && !url.path().is_empty()
+    || url.query().is_some()
+    || url.fragment().is_some()
+    || !url.username().is_empty()
+    || url.password().is_some()
+  {
+    return None;
+  }
+  let host = url.host_str()?;
+  Some(match url.port() {
+    Some(port) => format!("{}://{host}:{port}", url.scheme()),
+    None => format!("{}://{host}", url.scheme()),
+  })
+}
+
+/// Whether a document at `origin` (laufey's serialization of the calling
+/// document's origin) may call a binding: one of the app's own `trusted`
+/// origins (the app origin, and a development run's dev server), or one the
+/// binding opted into. A page the app navigated to elsewhere (a remote site,
+/// an identity provider) kept every binding before. An empty origin (a
+/// backend that reports none) is never trusted.
+pub fn bind_call_allowed(
+  origin: &str,
+  trusted: &[String],
+  extra: &BindOrigins,
+) -> bool {
+  if origin.is_empty() {
+    return matches!(extra, BindOrigins::Any);
+  }
+  if trusted.iter().any(|t| t == origin) {
+    return true;
+  }
+  match extra {
+    BindOrigins::App => false,
+    BindOrigins::Any => true,
+    BindOrigins::List(list) => list.iter().any(|o| o == origin),
+  }
 }
 
 /// A pending call from the webview to a bound Deno function.
@@ -2097,7 +2213,9 @@ pub trait DesktopApi: Send + Sync + 'static {
   fn hide(&self, window_id: u32);
   fn focus(&self, window_id: u32);
 
-  fn bind(&self, window_id: u32, name: &str);
+  /// Expose binding `name` to the window's page, callable from the documents
+  /// [`bind_call_allowed`] admits for `origins`.
+  fn bind(&self, window_id: u32, name: &str, origins: BindOrigins);
   fn unbind(&self, window_id: u32, name: &str);
 
   fn navigate(&self, window_id: u32, url: &str);
@@ -2589,6 +2707,11 @@ impl BrowserWindow {
   ) -> Result<v8::Global<v8::Value>, JsErrorBox> {
     let (api, brand, set_event_target_data) =
       class_prerequisites(state, "BrowserWindow")?;
+    // Before anything is created: a title with a NUL used to be refused only
+    // after the window existed (and left it open).
+    if let Some(title) = options.as_ref().and_then(|o| o.title.as_deref()) {
+      reject_nul("the window title", title)?;
+    }
 
     // Use the initial window if this is the first BrowserWindow whose
     // creation-time options it satisfies, otherwise create a new one (the
@@ -2706,9 +2829,14 @@ impl BrowserWindow {
   // method without overwriting the wrapper.
   #[fast]
   #[symbol("Deno_privateDesktopBind")]
-  fn bind(&self, #[string] name: &str) -> Result<(), deno_error::JsErrorBox> {
+  fn bind(
+    &self,
+    #[string] name: &str,
+    #[string] origins: &str,
+  ) -> Result<(), deno_error::JsErrorBox> {
     reject_nul("the binding name", name)?;
-    self.api.bind(self.window_id, name);
+    let origins = BindOrigins::from_spec(origins)?;
+    self.api.bind(self.window_id, name, origins);
     Ok(())
   }
 
@@ -3051,16 +3179,12 @@ impl BrowserWindow {
 
   #[fast]
   fn close(&self) {
-    if self.surface_taken.get() {
-      // A WebGPU surface is referencing this window's native handles.
-      // Destroying the OS window now would dangle those handles. Hide
-      // instead; cleanup happens when the BrowserWindow is GC'd.
-      log::warn!(
-        "BrowserWindow.close(): a WebGPU surface is still attached; hiding window instead of destroying it"
-      );
-      self.api.hide(self.window_id);
-      return;
-    }
+    // Always a real close: the window counts as closed, and the app quits
+    // when it was the last one. A window a WebGPU surface holds is hidden and
+    // kept instead of destroyed by the shared close path
+    // (`note_surface_attached`, `native_close_action`); this used to only
+    // hide it here, so `isClosed()` stayed false and a last window closed
+    // this way never quit the app.
     self.api.close_window(self.window_id);
   }
 
@@ -3199,8 +3323,9 @@ impl BrowserWindow {
 
     let result = self.surface.try_get(scope, move |_| {
       // SAFETY: The raw handles are valid for the lifetime of the OS window.
-      // `BrowserWindow.close()` is suppressed (downgraded to hide) once a
-      // surface has been taken (`surface_taken`), and the OS window outlives
+      // Once a surface has been taken (`note_surface_attached` below) every
+      // close path hides the window instead of destroying it
+      // (`native_close_action`), and the OS window outlives
       // both the cached `SameObject<UnsafeWindowSurface>` and the
       // BrowserWindow itself, so the handles remain valid for the surface's
       // lifetime.
@@ -3682,6 +3807,11 @@ async fn op_desktop_register_scheme(
   #[string] scheme: String,
   force: bool,
 ) -> Result<SchemeRegisterInfo, deno_error::JsErrorBox> {
+  // Taking a scheme from the app that owns it needs `--allow-sys`; claiming
+  // one nobody owns (what the runtime does at startup anyway) does not.
+  if force {
+    check_desktop_integration(&state.borrow())?;
+  }
   let (handlers, scheme) = scheme_handlers(&state, &scheme)?;
   await_scheme_call(deno_core::unsync::spawn_blocking(move || {
     handlers.register_scheme(&scheme, force)
@@ -4164,8 +4294,27 @@ pub fn send_error_report(url: &str, body: &str) {
   }
 }
 
-#[op2(fast)]
-fn op_desktop_send_error_report(state: &mut OpState, #[string] body: &str) {
+/// Sends the report off the JavaScript thread (an HTTPS report may take up
+/// to [`ERROR_REPORT_TIMEOUT`], and the JavaScript thread used to wait for
+/// it, its timers and servers stalled); the error handler awaits the promise
+/// before it exits.
+#[op2]
+async fn op_desktop_send_error_report(
+  state: std::rc::Rc<std::cell::RefCell<OpState>>,
+  #[string] body: String,
+) {
+  let Some(url) = prepare_error_report(&mut state.borrow_mut()) else {
+    return;
+  };
+  let _ = deno_core::unsync::spawn_blocking(move || {
+    send_error_report(url, &body);
+  })
+  .await;
+}
+
+/// The configured report destination, with the report client set up (see
+/// [`op_desktop_send_error_report`]); `None` when nothing is configured.
+fn prepare_error_report(state: &mut OpState) -> Option<&'static str> {
   // The report destination is operator config — it is baked into the app at
   // build time (`error_reporting_url`) and stored in `ERROR_REPORT_CONFIG`.
   // It is deliberately NOT accepted from JS: this op is exposed on
@@ -4177,7 +4326,7 @@ fn op_desktop_send_error_report(state: &mut OpState, #[string] body: &str) {
   let Some((url, _)) = error_report_config() else {
     // No reporting URL configured (e.g. plain `deno run`, or a desktop app
     // that didn't set one) — there is nowhere to send, so do nothing.
-    return;
+    return None;
   };
   // Make sure the panic-hook path has a client too. The OpState client is
   // the one configured with the user's TLS roots/permissions, so we share
@@ -4187,7 +4336,7 @@ fn op_desktop_send_error_report(state: &mut OpState, #[string] body: &str) {
   {
     set_error_report_client(client);
   }
-  send_error_report(url, body);
+  Some(url)
 }
 
 #[op2(fast)]
@@ -4265,6 +4414,7 @@ async fn op_desktop_read_clipboard_text(
 ) -> Result<Option<String>, deno_error::JsErrorBox> {
   let api = {
     let s = state.borrow();
+    check_desktop_integration(&s)?;
     s.try_borrow::<Arc<dyn DesktopApi>>().cloned()
   };
   let Some(api) = api else {
@@ -4360,6 +4510,26 @@ fn desktop_api(
   state.borrow().try_borrow::<Arc<dyn DesktopApi>>().cloned()
 }
 
+/// The permission the desktop integrations that reach past the app's own
+/// windows need: unscoped `--allow-sys` (or `-A`). They are reading the
+/// clipboard (and watching it change), global shortcuts (key combinations
+/// taken from every other app), launch at login, taking over a URL scheme
+/// another app owns (`registerScheme({ force: true })`), and posting OS
+/// notifications. A permission-less dependency of the app reached all of
+/// them. Deno has no permission kind of their own, and the stock `deno
+/// desktop` CLI that packages an app refuses `--allow-sys` names it doesn't
+/// know, so they share the whole `sys` grant; a partial
+/// `--allow-sys=<names>` is not enough. Checked before anything else, so
+/// the refusal (`NotCapable`) is the same in and outside a desktop app.
+fn check_desktop_integration(
+  state: &OpState,
+) -> Result<(), deno_error::JsErrorBox> {
+  state
+    .borrow::<deno_permissions::PermissionsContainer>()
+    .check_sys_all()
+    .map_err(deno_error::JsErrorBox::from_err)
+}
+
 /// Runs a blocking clipboard call on the blocking pool with the clipboard
 /// timeout, for the same reasons as `op_desktop_read_clipboard_text`.
 async fn clipboard_blocking<T: Send + 'static>(
@@ -4400,6 +4570,7 @@ fn op_desktop_clipboard_capabilities(
 async fn op_desktop_read_clipboard_html(
   state: std::rc::Rc<std::cell::RefCell<OpState>>,
 ) -> Result<Option<String>, deno_error::JsErrorBox> {
+  check_desktop_integration(&state.borrow())?;
   let Some(api) = desktop_api(&state) else {
     return Ok(None);
   };
@@ -4439,6 +4610,7 @@ async fn op_desktop_write_clipboard_html(
 async fn op_desktop_read_clipboard_image(
   state: std::rc::Rc<std::cell::RefCell<OpState>>,
 ) -> Result<Option<deno_core::ToJsBuffer>, deno_error::JsErrorBox> {
+  check_desktop_integration(&state.borrow())?;
   let Some(api) = desktop_api(&state) else {
     return Ok(None);
   };
@@ -4487,6 +4659,7 @@ async fn op_desktop_write_clipboard_image(
 async fn op_desktop_read_clipboard_formats(
   state: std::rc::Rc<std::cell::RefCell<OpState>>,
 ) -> Result<Vec<String>, deno_error::JsErrorBox> {
+  check_desktop_integration(&state.borrow())?;
   let Some(api) = desktop_api(&state) else {
     return Ok(Vec::new());
   };
@@ -4496,12 +4669,20 @@ async fn op_desktop_read_clipboard_formats(
 }
 
 /// Starts / stops the clipboard "change" events (the JS side turns them on
-/// with the first listener and off with the last).
+/// with the first listener and off with the last). Turning them on needs
+/// `--allow-sys`, as reading the clipboard does.
 #[op2(fast)]
-fn op_desktop_clipboard_watch(state: &mut OpState, on: bool) {
+fn op_desktop_clipboard_watch(
+  state: &mut OpState,
+  on: bool,
+) -> Result<(), deno_error::JsErrorBox> {
+  if on {
+    check_desktop_integration(state)?;
+  }
   if let Some(api) = state.try_borrow::<Arc<dyn DesktopApi>>() {
     api.set_clipboard_watch(on);
   }
+  Ok(())
 }
 
 /// `BrowserWindow.prototype.startDrag()`: `"dropped"`, `"cancelled"` or
@@ -4630,17 +4811,18 @@ const MAX_ACCELERATOR_LEN: usize = 128;
 async fn op_desktop_register_shortcut(
   state: std::rc::Rc<std::cell::RefCell<OpState>>,
   #[string] accelerator: String,
-) -> ShortcutRegisterInfo {
+) -> Result<ShortcutRegisterInfo, deno_error::JsErrorBox> {
+  check_desktop_integration(&state.borrow())?;
   if accelerator.is_empty()
     || accelerator.len() > MAX_ACCELERATOR_LEN
     || accelerator.contains('\0')
   {
-    return ShortcutRegisterInfo::err("invalid");
+    return Ok(ShortcutRegisterInfo::err("invalid"));
   }
-  match desktop_api(&state) {
+  Ok(match desktop_api(&state) {
     Some(api) => api.register_shortcut(&accelerator).await,
     None => ShortcutRegisterInfo::err("not_supported"),
-  }
+  })
 }
 
 /// `Deno.desktop.shortcuts.unregister()`.
@@ -4717,6 +4899,7 @@ async fn op_desktop_set_launch_at_login(
   state: std::rc::Rc<std::cell::RefCell<OpState>>,
   enabled: bool,
 ) -> Result<String, deno_error::JsErrorBox> {
+  check_desktop_integration(&state.borrow())?;
   let Some(api) = desktop_api(&state) else {
     return Ok("not-supported".to_string());
   };
@@ -4879,6 +5062,7 @@ fn op_desktop_schedule_notification(
   #[serde] options: NotificationScheduleOptions,
   #[buffer] icon: Option<&[u8]>,
 ) -> Result<bool, deno_error::JsErrorBox> {
+  check_desktop_integration(state)?;
   check_notification_ids(Some(&options.tag), options.data.as_deref())?;
   if options.title.is_empty() {
     return Err(deno_error::JsErrorBox::type_error(
@@ -5176,6 +5360,7 @@ impl Notification {
   ) -> Result<v8::Global<v8::Value>, JsErrorBox> {
     let (api, brand, set_event_target_data) =
       class_prerequisites(state, "Notification")?;
+    check_desktop_integration(state)?;
 
     let options = options.unwrap_or(NotificationConstructorOptions {
       body: None,
@@ -6029,6 +6214,7 @@ mod tests {
         name: "".into(),
         args: vec![],
         call_id: 0,
+        origin: String::new(),
       }),
       "bindCall"
     );
@@ -6476,12 +6662,137 @@ mod tests {
         ("n".into(), DesktopValue::Int(42)),
       ])],
       call_id: 7,
+      origin: "myapp://app".into(),
     };
     let v = serde_json::to_value(&ev).unwrap();
     assert_eq!(v["args"][0]["name"], "ada");
     assert_eq!(v["args"][0]["n"], 42);
     assert_eq!(v["callId"], 7);
     assert_eq!(v["windowId"], 1);
+    assert_eq!(v["origin"], "myapp://app");
+  }
+
+  #[test]
+  fn bindings_answer_only_the_documents_they_trust() {
+    use super::BindOrigins;
+    use super::bind_call_allowed;
+    let trusted = vec![
+      "myapp://app".to_string(),
+      "http://localhost:5173".to_string(),
+    ];
+    // The app's own origins.
+    for origin in ["myapp://app", "http://localhost:5173"] {
+      assert!(bind_call_allowed(origin, &trusted, &BindOrigins::App));
+    }
+    // A page the main frame navigated to, an opaque document, another
+    // host on the app's scheme, a different port, no origin at all.
+    for origin in [
+      "https://evil.example",
+      "null",
+      "myapp://other",
+      "http://localhost:5174",
+      "MYAPP://APP",
+      "",
+    ] {
+      assert!(
+        !bind_call_allowed(origin, &trusted, &BindOrigins::App),
+        "{origin:?}"
+      );
+    }
+    // Opted in.
+    let list = BindOrigins::List(vec!["https://idp.example".to_string()]);
+    assert!(bind_call_allowed("https://idp.example", &trusted, &list));
+    assert!(!bind_call_allowed("https://evil.example", &trusted, &list));
+    assert!(!bind_call_allowed("", &trusted, &list));
+    assert!(bind_call_allowed(
+      "https://evil.example",
+      &trusted,
+      &BindOrigins::Any
+    ));
+    assert!(bind_call_allowed("null", &[], &BindOrigins::Any));
+    assert!(bind_call_allowed("", &[], &BindOrigins::Any));
+  }
+
+  #[test]
+  fn bind_origins_are_serialized_like_the_browser() {
+    use super::BindOrigins;
+    use super::serialize_bind_origin;
+    for (input, want) in [
+      ("https://Example.COM", Some("https://example.com")),
+      ("https://example.com:443", Some("https://example.com")),
+      ("http://127.0.0.1:5173", Some("http://127.0.0.1:5173")),
+      ("myapp://app", Some("myapp://app")),
+      ("null", Some("null")),
+      ("https://example.com/", None),
+      ("https://example.com/path", None),
+      ("https://example.com?x", None),
+      ("https://u:p@example.com", None),
+      ("not a url", None),
+      ("", None),
+    ] {
+      assert_eq!(serialize_bind_origin(input).as_deref(), want, "{input:?}");
+    }
+    assert_eq!(BindOrigins::from_spec("").unwrap(), BindOrigins::App);
+    assert_eq!(BindOrigins::from_spec("*").unwrap(), BindOrigins::Any);
+    assert_eq!(
+      BindOrigins::from_spec("HTTPS://IDP.example:443\nnull").unwrap(),
+      BindOrigins::List(vec!["https://idp.example".into(), "null".into()])
+    );
+    for bad in ["x", "https://x/", "https://x\n", "*\nhttps://x"] {
+      assert!(BindOrigins::from_spec(bad).is_err(), "{bad:?}");
+    }
+    let too_many = vec!["https://x"; 65].join("\n");
+    assert!(BindOrigins::from_spec(&too_many).is_err());
+  }
+
+  #[test]
+  fn desktop_values_become_own_data_properties() {
+    use deno_core::ToV8;
+    use deno_core::v8;
+    let mut runtime = deno_core::JsRuntime::new(Default::default());
+    runtime
+      .execute_script(
+        "setup",
+        "globalThis.hits = 0;\n\
+         for (const proto of [Object.prototype, Array.prototype]) {\n\
+           Object.defineProperty(proto, proto === Object.prototype ? 'x' : '0', {\n\
+             set() { globalThis.hits++; }, configurable: true,\n\
+           });\n\
+         }",
+      )
+      .unwrap();
+    let value = DesktopValue::Dict(vec![
+      (
+        "__proto__".into(),
+        DesktopValue::Dict(vec![("polluted".into(), DesktopValue::Bool(true))]),
+      ),
+      ("x".into(), DesktopValue::Int(1)),
+      (
+        "list".into(),
+        DesktopValue::List(vec![DesktopValue::Int(7)]),
+      ),
+    ]);
+    {
+      deno_core::scope!(scope, &mut runtime);
+      let v = value.to_v8(scope).unwrap();
+      let global = scope.get_current_context().global(scope);
+      let key = v8::String::new(scope, "value").unwrap();
+      global.set(scope, key.into(), v);
+    }
+    let out = runtime
+      .execute_script(
+        "check",
+        "JSON.stringify([hits, Object.getPrototypeOf(value) === Object.prototype, \
+         Object.hasOwn(value, '__proto__'), value.__proto__ === Object.prototype, \
+         value.polluted, Object.hasOwn(value, 'x'), value.x, \
+         Object.hasOwn(value.list, '0'), value.list[0], value.list.length])",
+      )
+      .unwrap();
+    deno_core::scope!(scope, &mut runtime);
+    let out = v8::Local::new(scope, out).to_rust_string_lossy(scope);
+    // No setter ran, the prototype is untouched and `__proto__` is an own
+    // data property like any other key.
+    assert_eq!(out, "[0,true,true,false,null,true,1,true,7,1]");
   }
 
   #[test]
@@ -7561,6 +7872,7 @@ mod tests {
           name: "f".into(),
           args: vec![],
           call_id: 1,
+          origin: String::new(),
         })
         .is_err()
     );

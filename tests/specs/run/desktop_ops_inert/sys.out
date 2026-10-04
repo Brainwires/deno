@@ -1,0 +1,12 @@
+sys granted
+op_desktop_read_clipboard_text -> null
+op_desktop_read_clipboard_html -> null
+op_desktop_read_clipboard_image -> null
+op_desktop_read_clipboard_formats -> []
+op_desktop_clipboard_watch -> null
+op_desktop_clipboard_watch(false) -> null
+op_desktop_register_shortcut -> {"status":"not_supported","accelerator":null}
+op_desktop_set_launch_at_login -> "not-supported"
+op_desktop_register_scheme throws Error: deep-link scheme registration is not available in this runtime
+op_desktop_register_scheme(no force) throws Error: deep-link scheme registration is not available in this runtime
+op_desktop_schedule_notification -> false

@@ -181,13 +181,19 @@ await r.step("runOnMainThread", async () => {
     (await desktop.runOnMainThread(fnPtr, Deno.UnsafePointer.create(42n))) ===
       42n,
   );
+  // JavaScript would make the UI thread wait for the JavaScript thread.
   const cb = new Deno.UnsafeCallback(
     { parameters: ["pointer"], result: "pointer" } as const,
     (p) => p,
   );
+  const cbError = await desktop.runOnMainThread(cb, null).then(
+    () => null,
+    (e: Error) => e,
+  );
   r.check(
-    "a Deno.UnsafeCallback is accepted",
-    (await desktop.runOnMainThread(cb, Deno.UnsafePointer.create(7n))) === 7n,
+    "a Deno.UnsafeCallback is refused with a TypeError",
+    cbError instanceof TypeError,
+    String(cbError),
   );
   cb.close();
   const many = await Promise.all(

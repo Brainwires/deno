@@ -431,6 +431,42 @@ await r.step("window API", async () => {
     );
   }
 
+  // --- close() of a window a WebGPU surface holds ---
+  try {
+    const adapter = await (navigator as any).gpu?.requestAdapter();
+    if (!adapter) {
+      r.na(
+        "close() of a WebGPU window closes it (isClosed)",
+        "no WebGPU adapter on this runner",
+      );
+    } else {
+      const g = new BrowserWindow({
+        title: "e2e webgpu",
+        width: 200,
+        height: 200,
+      });
+      await sleep(500);
+      let surface: unknown = null;
+      try {
+        surface = g.getNativeWindow();
+      } catch (e) {
+        r.na(
+          "close() of a WebGPU window closes it (isClosed)",
+          `no native surface on this backend: ${describeError(e)}`,
+        );
+      }
+      g.close();
+      if (surface !== null) {
+        r.check(
+          "close() of a WebGPU window closes it (isClosed)",
+          await waitFor(() => g.isClosed(), 5000),
+        );
+      }
+    }
+  } catch (e) {
+    r.fail("close() of a WebGPU window", describeError(e));
+  }
+
   // --- quit(), canceled ---
   const cancelQuit = (e: Event) => e.preventDefault();
   desktop.addEventListener("beforequit", cancelQuit);

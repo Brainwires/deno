@@ -409,6 +409,33 @@ declare namespace Deno {
     deno?: boolean;
   }
 
+  /** Options of {@linkcode BrowserWindow.bind}.
+   *
+   * @category Desktop
+   * @experimental
+   */
+  export interface BrowserWindowBindOptions {
+    /** Documents besides the app's own that may call the binding: their
+     * origins (`"https://idp.example"`, `"null"` for an opaque one), or
+     * `"*"` for any document. */
+    origins?: "*" | readonly string[];
+    /** Call the handler with the calling document first
+     * ({@linkcode BrowserWindowBindCaller}), then the page's arguments. */
+    withCaller?: boolean;
+  }
+
+  /** The document that called a binding (`bind(..., { withCaller: true })`).
+   *
+   * @category Desktop
+   * @experimental
+   */
+  export interface BrowserWindowBindCaller {
+    /** Its origin as the browser serializes it (`"myapp://app"`,
+     * `"http://127.0.0.1:5173"`, `"null"`). */
+    origin: string;
+    windowId: number;
+  }
+
   export interface BrowserWindowOptions {
     title?: string;
     /** @default {800} */
@@ -822,10 +849,24 @@ declare namespace Deno {
      * The resolved value must be serializable; see
      * {@linkcode BrowserWindowSerializable}. This is checked even when `T` is
      * left to its default, so returning e.g. a `Date` is a type error rather
-     * than an empty object at runtime. */
+     * than an empty object at runtime.
+     *
+     * Only the app's own documents may call it: a page at the app origin
+     * (`DENO_DESKTOP_APP_ORIGIN`), or a development run's dev server. A call
+     * from any other document the window shows (a remote site the app
+     * navigated to, an identity provider) is rejected before `fn` runs,
+     * unless `options.origins` lists its origin (`"*"`: any document). */
     bind<N extends keyof T, F extends T[N]>(
       name: N,
       fn: F & BrowserWindowSerializableCheck<F>,
+      options?: BrowserWindowBindOptions & { withCaller?: false },
+    ): void;
+    /** With `withCaller: true`, `fn` gets the calling document first. */
+    bind<N extends keyof T>(
+      name: N,
+      // deno-lint-ignore no-explicit-any
+      fn: (caller: BrowserWindowBindCaller, ...args: any[]) => unknown,
+      options: BrowserWindowBindOptions & { withCaller: true },
     ): void;
     unbind<N extends keyof T>(name: N): void;
     /** @throws {BrowserWindowValue} */
@@ -1552,7 +1593,12 @@ declare namespace Deno {
     }
 
     /** The system clipboard: text, HTML and PNG images. See
-     * {@linkcode Deno.desktop.clipboard}. */
+     * {@linkcode Deno.desktop.clipboard}.
+     *
+     * Reading it (`readText`, `readHTML`, `readImage`, `availableFormats`)
+     * and listening for `"change"` need `--allow-sys` (unscoped): they throw
+     * / reject with `Deno.errors.NotCapable` without it. Writing needs no
+     * permission. */
     export interface DesktopClipboard extends EventTarget {
       capabilities(): ClipboardCapabilities;
       /** The clipboard's text, or `""` when it holds none. */
@@ -1658,7 +1704,10 @@ declare namespace Deno {
        * `Deno.errors.NotSupported` where there are no global shortcuts
        * (`"not_supported"`), `Deno.errors.PermissionDenied` when the user
        * declined it (`"denied"`, the Wayland portal), or an `Error`
-       * (`"failed"`). */
+       * (`"failed"`).
+       *
+       * Needs `--allow-sys` (unscoped): rejects with
+       * `Deno.errors.NotCapable` without it. */
       register(
         accelerator: string,
         callback?: (accelerator: string) => void,
@@ -1754,6 +1803,9 @@ declare namespace Deno {
      * an XDG autostart entry (`~/.config/autostart/<app id>.desktop`). The
      * entry is named after the app's identifier. `set` resolves with the
      * state afterwards and rejects with the OS's message when it failed.
+     *
+     * `set` needs `--allow-sys` (unscoped): it rejects with
+     * `Deno.errors.NotCapable` without it. `get` needs no permission.
      *
      * Not available in workers.
      *
@@ -1908,7 +1960,9 @@ declare namespace Deno {
       capabilities(): NotificationCapabilities;
       /** Schedule a notification; resolves with its tag. Rejects with
        * `Deno.errors.NotSupported` where it can't be scheduled. Its clicks
-       * arrive as `"notificationresponse"` events. */
+       * arrive as `"notificationresponse"` events. Needs `--allow-sys`
+       * (unscoped), like `new Notification()`: `Deno.errors.NotCapable`
+       * without it. */
       schedule(options: ScheduledNotificationOptions): Promise<string>;
       /** The pending scheduled notifications, soonest first. */
       getScheduled(): Promise<ScheduledNotification[]>;
@@ -1986,6 +2040,9 @@ declare namespace Deno {
        * scheme, which the OS may confirm with the user. A Windows
        * "UserChoice" (the user picked a handler in Settings) cannot be
        * overridden by any app; the result then reports `registered: false`.
+       *
+       * Forcing needs `--allow-sys` (unscoped): the call rejects with
+       * `Deno.errors.NotCapable` without it.
        */
       force?: boolean;
     }
@@ -2255,7 +2312,7 @@ declare namespace Deno {
      * value.
      *
      * `fn` is a C function `void* fn(void* context)`: a
-     * `Deno.UnsafeFnPointer`, a `Deno.UnsafeCallback`, or a pointer value
+     * `Deno.UnsafeFnPointer` or a pointer value
      * (e.g. from `Deno.dlopen(...).symbols` through
      * `Deno.UnsafePointer.of`, or an extension's own function). It is called
      * with `context` (default `null`); its pointer-sized return value is
@@ -2264,10 +2321,12 @@ declare namespace Deno {
      * on the calling thread.
      *
      * **Full trust**: this is FFI, so it needs `--allow-ffi`, and a wrong
-     * pointer or signature crashes the app. A `Deno.UnsafeCallback` does not
-     * run JavaScript on the UI thread: the UI thread waits while the callback
-     * runs on the JavaScript thread, so it must not wait for the UI thread
-     * itself.
+     * pointer or signature crashes the app. A `Deno.UnsafeCallback` is
+     * refused with a `TypeError`: it runs JavaScript, so the UI thread would
+     * wait for the JavaScript thread, and the app deadlocks as soon as the
+     * JavaScript thread waits for the UI thread (most window calls do). The
+     * same holds for the raw pointer of an `UnsafeCallback`, which can't be
+     * told apart: don't pass one.
      *
      * Rejects without calling `fn` once the app is quitting (the UI thread's
      * event loop has ended), so a call never hangs.
@@ -2279,7 +2338,7 @@ declare namespace Deno {
      */
     export function runOnMainThread(
       // deno-lint-ignore no-explicit-any
-      fn: UnsafeFnPointer<any> | UnsafeCallback<any> | PointerObject,
+      fn: UnsafeFnPointer<any> | PointerObject,
       context?: PointerValue,
     ): Promise<bigint>;
 
@@ -2292,11 +2351,14 @@ declare namespace Deno {
       | "downgrade"
       | "rejected"
       | "no_platform"
+      | "expired"
+      | "replayed"
       | "insecure_url"
       | "size_exceeded"
       | "integrity"
       | "unsafe_archive"
       | "bundle_mismatch"
+      | "version_mismatch"
       | "os_signature"
       | "install_not_writable"
       | "unsupported_layout"
@@ -2361,6 +2423,11 @@ declare namespace Deno {
       stagedVersion: string | null;
       /** The last version rolled back after failing to start. */
       rejected: string | null;
+      /** Every version rolled back after failing to start (and newer than
+       * the last confirmed one), oldest first: none is offered again. */
+      rejectedVersions: string[];
+      /** The highest manifest `sequence` this install has accepted. */
+      manifestSequence: number | null;
       lastError: string | null;
       /** Launched by the updater after an update from this version. */
       updatedFrom: string | null;
@@ -2406,8 +2473,12 @@ declare namespace Deno {
      * `sign` returns) over the bytes `"denext-app-update-v1\n" + signed`. The
      * payload: `{ "schema": 1, "app": "<desktop.app.identifier>", "version",
      * "minVersion"?, "platforms": { "<target>-<backend>": { "url", "sha256",
-     * "size", "kind": "bundle" } }, "releaseNotes"?, "publishedAt" }`
-     * (unknown keys are refused). The platform key is
+     * "size", "kind": "bundle" } }, "releaseNotes"?, "publishedAt",
+     * "expiresAt"?, "sequence"? }` (unknown keys are refused). `expiresAt`
+     * (RFC 3339) refuses the manifest once it passes (`expired`); `sequence`
+     * (an integer up to 2^53 - 1 that only grows) is remembered per install,
+     * and a lower one, or none after a sequenced manifest, is refused
+     * (`replayed`): an old manifest served again can't hide newer releases. The platform key is
      * {@linkcode AppUpdateStatus.platform}, e.g.
      * `"aarch64-apple-darwin-webview"`.
      *
@@ -2424,12 +2495,16 @@ declare namespace Deno {
      * that passes `codesign --verify --deep --strict` and Gatekeeper
      * (`spctl --assess`): sign it with the same identity and notarize
      * (and staple) it before publishing. On Windows a running executable
-     * with a trusted Authenticode signature only takes a staged executable
-     * and runtime DLL signed by a certificate with the same subject. Linux
+     * with a trusted Authenticode signature only takes a staged app whose
+     * EVERY PE image (`.exe`, `.dll`, `.node`, ...) is signed by a
+     * certificate with the same issuer and subject: sign them all. Linux
      * has no OS signature: the manifest signature and the SHA-256 are the
      * check. An unsigned or ad-hoc running app refuses every update unless
      * `stage({ allowUnsignedDev: true })` (dev only; it never weakens a
-     * signed app).
+     * signed app). On every platform but AppImage the staged app's own
+     * compiled version (deno.json `version`; on macOS also its
+     * `CFBundleShortVersionString`) must be the manifest's version
+     * (`version_mismatch`).
      *
      * @category Desktop
      * @experimental
