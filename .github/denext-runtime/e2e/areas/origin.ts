@@ -39,7 +39,7 @@ export async function run(env: Env, rep: AreaReport) {
     include: ["fork_child.js"],
   });
   await clearResults("origin");
-  await writeParams("origin", { origin });
+  await writeParams("origin", { origin, backend: env.backend });
   await launchAndCollect(env, rep, "launch", p);
 
   // The app's executable started as a worker from outside (`<App> run
@@ -54,21 +54,32 @@ export async function run(env: Env, rep: AreaReport) {
     script,
     `Deno.writeTextFileSync(${JSON.stringify(marker)}, "ran");\n`,
   );
-  const forged: [string, Record<string, string>][] = [
-    ["argv alone", {}],
-    ["argv + NODE_CHANNEL_FD + NEXT_PRIVATE_WORKER", {
+  const token = `v1.${Deno.pid}.${"0".repeat(32)}`;
+  const forged: [string, string[], Record<string, string>][] = [
+    ["argv alone", ["run", script], {}],
+    ["argv + NODE_CHANNEL_FD + NEXT_PRIVATE_WORKER", ["run", script], {
       NODE_CHANNEL_FD: "0",
       NEXT_PRIVATE_WORKER: "1",
     }],
     // The runner IS the parent here, but runs another executable.
-    ["argv + a token naming the real parent + NODE_CHANNEL_FD", {
-      DENO_DESKTOP_WORKER_TOKEN: `v1.${Deno.pid}.${"0".repeat(32)}`,
+    ["argv + a token naming the real parent + NODE_CHANNEL_FD", [
+      "run",
+      script,
+    ], { DENO_DESKTOP_WORKER_TOKEN: token, NODE_CHANNEL_FD: "0" }],
+    // The shape a compiled binary's fork() uses: the module in an env var.
+    ["DENO_INTERNAL_CHILD_ENTRYPOINT + NODE_CHANNEL_FD", [script], {
+      DENO_INTERNAL_CHILD_ENTRYPOINT: script,
+      NODE_CHANNEL_FD: "0",
+    }],
+    ["DENO_INTERNAL_CHILD_ENTRYPOINT + a token + NODE_CHANNEL_FD", [script], {
+      DENO_INTERNAL_CHILD_ENTRYPOINT: script,
+      DENO_DESKTOP_WORKER_TOKEN: token,
       NODE_CHANNEL_FD: "0",
     }],
   ];
-  for (const [label, envs] of forged) {
+  for (const [label, args, envs] of forged) {
     const before = await seenPids("origin");
-    const l = await launch(env, p.exe, ["run", script], { env: envs });
+    const l = await launch(env, p.exe, args, { env: envs });
     const st = await waitExit(l, 30_000);
     if (!st) await kill(l, p.artifact);
     const ran = await exists(marker);
@@ -76,7 +87,7 @@ export async function run(env: Env, rep: AreaReport) {
       !before.has(pid)
     );
     rep.check(
-      `worker argv (${label}): exits without running the script or the app`,
+      `worker launch (${label}): exits without running the script or the app`,
       st !== null && st.code !== 0 && !ran && !started,
       {
         code: st?.code ?? "(still running)",

@@ -1969,7 +1969,7 @@ pub async fn run_with_options(
 
 // Internal env var carrying the module a fork()ed child of a compiled binary
 // should run. Kept in sync with ext/node/polyfills/child_process.ts.
-const INTERNAL_CHILD_ENTRYPOINT_ENV_VAR: &str =
+pub const INTERNAL_CHILD_ENTRYPOINT_ENV_VAR: &str =
   "DENO_INTERNAL_CHILD_ENTRYPOINT";
 
 /// Resolves the module path passed to `node:child_process.fork()` to the module
@@ -1982,7 +1982,7 @@ const INTERNAL_CHILD_ENTRYPOINT_ENV_VAR: &str =
 /// relative path outside a compiled binary). Absolute paths are used as-is: the
 /// module loader consults the VFS first and falls back to disk. Falls back to
 /// the entrypoint if resolution fails entirely.
-fn resolve_child_entrypoint(
+pub fn resolve_child_entrypoint(
   module_path: &str,
   entrypoint: &Url,
   vfs: &FileBackedVfs,

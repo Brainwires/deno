@@ -2227,13 +2227,23 @@ laufey::main!(|| {
   // argv[1] is refused: the Laufey backend never invokes us that way, and
   // starting the app with `run` and a script as its launch arguments would
   // only open it.
+  //
+  // A compiled binary's `fork()` (this runtime is one) uses a second shape:
+  // `<exe> <module> [args…]` with the module in
+  // `DENO_INTERNAL_CHILD_ENTRYPOINT` (see `node:child_process`). That child
+  // used to start the whole desktop app and run the module as its main module
+  // (`denort::run`), from an environment variable and any NODE_CHANNEL_FD, so
+  // it is a worker launch too and goes through the same gate.
   let args: Vec<_> = env::args_os().collect();
   let argv_run = args
     .get(1)
     .and_then(|a| a.to_str())
     .map(|s| s == "run")
     .unwrap_or(false);
-  if argv_run {
+  let fork_child_env =
+    env::var_os(denort::run::INTERNAL_CHILD_ENTRYPOINT_ENV_VAR)
+      .is_some_and(|v| !v.is_empty());
+  if argv_run || fork_child_env {
     match worker_launch::authorize() {
       Ok(()) => {
         run_on_runtime_thread(run_headless_worker);
@@ -2782,8 +2792,14 @@ fn run_headless_worker() {
     // Detect if this is a child_process.fork() invocation.
     // fork() translates args to: ["run", "-A", "--unstable-...", "script.js", ...]
     // Extract the script path so the forked worker runs the correct module
-    // instead of the embedded entrypoint.
+    // instead of the embedded entrypoint. A compiled binary's fork() names
+    // the module in DENO_INTERNAL_CHILD_ENTRYPOINT instead (resolved below,
+    // once the embedded file system is known).
     let fork_module = extract_fork_script_path(&args);
+    let child_entrypoint =
+      env::var(denort::run::INTERNAL_CHILD_ENTRYPOINT_ENV_VAR)
+        .ok()
+        .filter(|m| !m.is_empty());
     log::debug!("[worker] fork_module: {:?}", fork_module);
 
     let data = match denort::binary::extract_standalone_with_finder(
@@ -2793,7 +2809,7 @@ fn run_headless_worker() {
       Ok(data) => data,
       Err(e) => {
         log::error!("Worker failed to load standalone data: {:?}", e);
-        return;
+        deno_runtime::exit(1);
       }
     };
 
@@ -2814,6 +2830,22 @@ fn run_headless_worker() {
     } else {
       denort::file_system::DenoRtSys::new(data.vfs.clone())
     };
+
+    // The compiled-binary fork shape: the module next to the entrypoint in the
+    // embedded file system, else (as fork() resolves it) relative to the
+    // working directory; checked below like any forked module.
+    let fork_module = fork_module.or_else(|| {
+      let module_path = child_entrypoint.as_deref()?;
+      let root_url =
+        deno_core::url::Url::from_directory_path(&data.root_path).ok()?;
+      let entrypoint = root_url.join(&data.metadata.entrypoint_key).ok()?;
+      Some(denort::run::resolve_child_entrypoint(
+        module_path,
+        &entrypoint,
+        &data.vfs,
+        &sys,
+      ))
+    });
 
     // A packaged app forks only the modules it ships (under the embedded
     // file system's root), never a file elsewhere on disk or on a share; a
@@ -2860,6 +2892,10 @@ fn run_headless_worker() {
           "[worker] run_with_options completed with exit code: {}",
           exit_code
         );
+        // The worker is done: end the process (a backend host would
+        // otherwise keep running its UI loop with nothing to show), with the
+        // module's exit code.
+        deno_runtime::exit(exit_code);
       }
       Err(error) => {
         let error_string = match js_error_downcast_ref(&error) {
@@ -2872,11 +2908,10 @@ fn run_headless_worker() {
           colors::red_bold("error"),
           error_string.trim_start_matches("error: ")
         );
+        deno_runtime::exit(1);
       }
     }
-    log::debug!("[worker] block_on finished");
   });
-  log::debug!("[worker] run_headless_worker returning");
 }
 
 /// Extract the script path from fork'd process arguments.
