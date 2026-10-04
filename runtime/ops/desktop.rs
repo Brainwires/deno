@@ -50,21 +50,32 @@ impl<'a> ToV8<'a> for DesktopValue {
       DesktopValue::Int(i) => v8::Integer::new(scope, i).into(),
       DesktopValue::Double(d) => v8::Number::new(scope, d).into(),
       DesktopValue::String(s) => v8::String::new(scope, &s).unwrap().into(),
+      // Own data properties (`CreateDataProperty`), never `[[Set]]`: the
+      // value comes from the page (binding arguments, `executeJs` results),
+      // and a `__proto__` key assigned with `[[Set]]` replaced the object's
+      // prototype, while a setter the app (or a dependency) put on
+      // `Object.prototype` / `Array.prototype` would have run for every key.
       DesktopValue::List(l) => {
         let arr = v8::Array::new(scope, l.len() as i32);
         for (i, v) in l.into_iter().enumerate() {
           let val = v.to_v8(scope)?;
-          arr.set_index(scope, i as u32, val);
+          let index: v8::Local<v8::Name> =
+            v8::Integer::new_from_unsigned(scope, i as u32)
+              .to_string(scope)
+              .unwrap()
+              .into();
+          arr.create_data_property(scope, index, val);
         }
         arr.into()
       }
       DesktopValue::Dict(d) => {
         let obj = v8::Object::new(scope);
         for (k, v) in d {
-          let key: v8::Local<v8::Value> =
-            v8::String::new(scope, &k).unwrap().into();
+          let Some(key) = v8::String::new(scope, &k) else {
+            continue;
+          };
           let val = v.to_v8(scope)?;
-          obj.set(scope, key, val);
+          obj.create_data_property(scope, key.into(), val);
         }
         obj.into()
       }
@@ -402,6 +413,12 @@ pub enum DesktopEvent {
   PageLoad { window_id: u32 },
   #[serde(rename_all = "camelCase")]
   CloseRequested { window_id: u32 },
+  /// The window is closed for good (destroyed, or hidden and kept for a
+  /// WebGPU surface): DESKTOP_JS forgets its per-window state (the window
+  /// registry, bound functions, pressed buttons), which it kept for the life
+  /// of the process.
+  #[serde(rename_all = "camelCase")]
+  WindowClosed { window_id: u32 },
   /// The window's maximized / minimized / fullscreen state changed (after
   /// the OS applied it). DESKTOP_JS derives `maximize`, `unmaximize`,
   /// `minimize`, `restore`, `enterfullscreen` and `leavefullscreen` from the
@@ -2589,6 +2606,11 @@ impl BrowserWindow {
   ) -> Result<v8::Global<v8::Value>, JsErrorBox> {
     let (api, brand, set_event_target_data) =
       class_prerequisites(state, "BrowserWindow")?;
+    // Before anything is created: a title with a NUL used to be refused only
+    // after the window existed (and left it open).
+    if let Some(title) = options.as_ref().and_then(|o| o.title.as_deref()) {
+      reject_nul("the window title", title)?;
+    }
 
     // Use the initial window if this is the first BrowserWindow whose
     // creation-time options it satisfies, otherwise create a new one (the
@@ -3051,16 +3073,12 @@ impl BrowserWindow {
 
   #[fast]
   fn close(&self) {
-    if self.surface_taken.get() {
-      // A WebGPU surface is referencing this window's native handles.
-      // Destroying the OS window now would dangle those handles. Hide
-      // instead; cleanup happens when the BrowserWindow is GC'd.
-      log::warn!(
-        "BrowserWindow.close(): a WebGPU surface is still attached; hiding window instead of destroying it"
-      );
-      self.api.hide(self.window_id);
-      return;
-    }
+    // Always a real close: the window counts as closed, and the app quits
+    // when it was the last one. A window a WebGPU surface holds is hidden and
+    // kept instead of destroyed by the shared close path
+    // (`note_surface_attached`, `native_close_action`); this used to only
+    // hide it here, so `isClosed()` stayed false and a last window closed
+    // this way never quit the app.
     self.api.close_window(self.window_id);
   }
 
@@ -3199,8 +3217,9 @@ impl BrowserWindow {
 
     let result = self.surface.try_get(scope, move |_| {
       // SAFETY: The raw handles are valid for the lifetime of the OS window.
-      // `BrowserWindow.close()` is suppressed (downgraded to hide) once a
-      // surface has been taken (`surface_taken`), and the OS window outlives
+      // Once a surface has been taken (`note_surface_attached` below) every
+      // close path hides the window instead of destroying it
+      // (`native_close_action`), and the OS window outlives
       // both the cached `SameObject<UnsafeWindowSurface>` and the
       // BrowserWindow itself, so the handles remain valid for the surface's
       // lifetime.
@@ -4169,8 +4188,27 @@ pub fn send_error_report(url: &str, body: &str) {
   }
 }
 
-#[op2(fast)]
-fn op_desktop_send_error_report(state: &mut OpState, #[string] body: &str) {
+/// Sends the report off the JavaScript thread (an HTTPS report may take up
+/// to [`ERROR_REPORT_TIMEOUT`], and the JavaScript thread used to wait for
+/// it, its timers and servers stalled); the error handler awaits the promise
+/// before it exits.
+#[op2]
+async fn op_desktop_send_error_report(
+  state: std::rc::Rc<std::cell::RefCell<OpState>>,
+  #[string] body: String,
+) {
+  let Some(url) = prepare_error_report(&mut state.borrow_mut()) else {
+    return;
+  };
+  let _ = deno_core::unsync::spawn_blocking(move || {
+    send_error_report(url, &body);
+  })
+  .await;
+}
+
+/// The configured report destination, with the report client set up (see
+/// [`op_desktop_send_error_report`]); `None` when nothing is configured.
+fn prepare_error_report(state: &mut OpState) -> Option<&'static str> {
   // The report destination is operator config — it is baked into the app at
   // build time (`error_reporting_url`) and stored in `ERROR_REPORT_CONFIG`.
   // It is deliberately NOT accepted from JS: this op is exposed on
@@ -4182,7 +4220,7 @@ fn op_desktop_send_error_report(state: &mut OpState, #[string] body: &str) {
   let Some((url, _)) = error_report_config() else {
     // No reporting URL configured (e.g. plain `deno run`, or a desktop app
     // that didn't set one) — there is nowhere to send, so do nothing.
-    return;
+    return None;
   };
   // Make sure the panic-hook path has a client too. The OpState client is
   // the one configured with the user's TLS roots/permissions, so we share
@@ -4192,7 +4230,7 @@ fn op_desktop_send_error_report(state: &mut OpState, #[string] body: &str) {
   {
     set_error_report_client(client);
   }
-  send_error_report(url, body);
+  Some(url)
 }
 
 #[op2(fast)]
@@ -6523,6 +6561,56 @@ mod tests {
     assert_eq!(v["args"][0]["n"], 42);
     assert_eq!(v["callId"], 7);
     assert_eq!(v["windowId"], 1);
+  }
+
+  #[test]
+  fn desktop_values_become_own_data_properties() {
+    use deno_core::ToV8;
+    use deno_core::v8;
+    let mut runtime = deno_core::JsRuntime::new(Default::default());
+    runtime
+      .execute_script(
+        "setup",
+        "globalThis.hits = 0;\n\
+         for (const proto of [Object.prototype, Array.prototype]) {\n\
+           Object.defineProperty(proto, proto === Object.prototype ? 'x' : '0', {\n\
+             set() { globalThis.hits++; }, configurable: true,\n\
+           });\n\
+         }",
+      )
+      .unwrap();
+    let value = DesktopValue::Dict(vec![
+      (
+        "__proto__".into(),
+        DesktopValue::Dict(vec![("polluted".into(), DesktopValue::Bool(true))]),
+      ),
+      ("x".into(), DesktopValue::Int(1)),
+      (
+        "list".into(),
+        DesktopValue::List(vec![DesktopValue::Int(7)]),
+      ),
+    ]);
+    {
+      deno_core::scope!(scope, &mut runtime);
+      let v = value.to_v8(scope).unwrap();
+      let global = scope.get_current_context().global(scope);
+      let key = v8::String::new(scope, "value").unwrap();
+      global.set(scope, key.into(), v);
+    }
+    let out = runtime
+      .execute_script(
+        "check",
+        "JSON.stringify([hits, Object.getPrototypeOf(value) === Object.prototype, \
+         Object.hasOwn(value, '__proto__'), value.__proto__ === Object.prototype, \
+         value.polluted, Object.hasOwn(value, 'x'), value.x, \
+         Object.hasOwn(value.list, '0'), value.list[0], value.list.length])",
+      )
+      .unwrap();
+    deno_core::scope!(scope, &mut runtime);
+    let out = v8::Local::new(scope, out).to_rust_string_lossy(scope);
+    // No setter ran, the prototype is untouched and `__proto__` is an own
+    // data property like any other key.
+    assert_eq!(out, "[0,true,true,false,null,true,1,true,7,1]");
   }
 
   #[test]

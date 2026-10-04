@@ -287,16 +287,9 @@ async fn bridge(
     return Ok(());
   }
 
-  // The request body is fully buffered by the backend, so these pulls are
-  // non-blocking copies.
-  let mut body = Vec::new();
-  let mut buf = [0u8; 16 * 1024];
-  loop {
-    let n = exchange.read_body(&mut buf);
-    if n <= 0 {
-      break;
-    }
-    if body_exceeds_limit(body.len(), n as usize) {
+  let body = match read_request_body(exchange, method) {
+    Ok(body) => body,
+    Err(BodyError::TooLarge) => {
       exchange.begin(
         413,
         &[(
@@ -311,8 +304,21 @@ async fn bridge(
       );
       return Ok(());
     }
-    body.extend_from_slice(&buf[..n as usize]);
-  }
+    Err(BodyError::Unreadable) => {
+      // A body the backend failed to deliver is not forwarded as if it
+      // were complete (the app would act on a truncated upload or form).
+      exchange.begin(
+        400,
+        &[(
+          "content-type".to_string(),
+          "text/plain; charset=utf-8".to_string(),
+        )],
+      );
+      *began = true;
+      let _ = exchange.write(b"the request body could not be read\n");
+      return Ok(());
+    }
+  };
 
   // Open a fresh in-process connection to the Deno.serve listener and drive an
   // HTTP/1.1 client over it.
@@ -385,6 +391,61 @@ async fn bridge(
   }
 
   Ok(())
+}
+
+/// Where a request body comes from (the webview's exchange; a fake in tests).
+trait BodySource {
+  /// Bytes read (>0), 0 at the end of the body, negative on an error.
+  fn read_body(&self, buf: &mut [u8]) -> isize;
+}
+
+impl BodySource for laufey::SchemeExchange {
+  fn read_body(&self, buf: &mut [u8]) -> isize {
+    laufey::SchemeExchange::read_body(self, buf)
+  }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum BodyError {
+  /// Larger than [`MAX_BRIDGE_REQUEST_BODY`].
+  TooLarge,
+  /// The backend reported an error part way (or before any byte).
+  Unreadable,
+}
+
+/// The whole request body. The backend buffers it, so the pulls are
+/// non-blocking copies. A read error used to end the loop like the end of
+/// the body, so a body cut short was forwarded as complete. A `GET` /
+/// `HEAD` / `OPTIONS` whose first read fails has no body to lose (a backend
+/// without body support answers every read with an error) and gets an empty
+/// one.
+fn read_request_body(
+  source: &impl BodySource,
+  method: &str,
+) -> Result<Vec<u8>, BodyError> {
+  let mut body = Vec::new();
+  let mut buf = [0u8; 16 * 1024];
+  loop {
+    let n = source.read_body(&mut buf);
+    if n == 0 {
+      return Ok(body);
+    }
+    if n < 0 {
+      let bodiless = ["GET", "HEAD", "OPTIONS"]
+        .iter()
+        .any(|m| m.eq_ignore_ascii_case(method));
+      return if body.is_empty() && bodiless {
+        Ok(body)
+      } else {
+        Err(BodyError::Unreadable)
+      };
+    }
+    let n = (n as usize).min(buf.len());
+    if body_exceeds_limit(body.len(), n) {
+      return Err(BodyError::TooLarge);
+    }
+    body.extend_from_slice(&buf[..n]);
+  }
 }
 
 /// How often a bridged request checks whether the webview cancelled it.
@@ -1254,6 +1315,61 @@ mod tests {
       self.accepted.borrow_mut().extend_from_slice(&buf[..n]);
       n as isize
     }
+  }
+
+  /// Hands out `chunks` in turn: a length to read, or an error code.
+  struct FakeBody(std::cell::RefCell<std::collections::VecDeque<isize>>);
+
+  impl BodySource for FakeBody {
+    fn read_body(&self, buf: &mut [u8]) -> isize {
+      match self.0.borrow_mut().pop_front() {
+        None => 0,
+        Some(n) if n > 0 => {
+          let n = (n as usize).min(buf.len());
+          buf[..n].fill(b'x');
+          n as isize
+        }
+        Some(n) => n,
+      }
+    }
+  }
+
+  fn fake_body(script: &[isize]) -> FakeBody {
+    FakeBody(std::cell::RefCell::new(script.iter().copied().collect()))
+  }
+
+  #[test]
+  fn a_body_read_error_is_never_forwarded_as_complete() {
+    assert_eq!(
+      read_request_body(&fake_body(&[3, 4]), "POST")
+        .unwrap()
+        .len(),
+      7
+    );
+    assert_eq!(read_request_body(&fake_body(&[]), "POST").unwrap().len(), 0);
+    // An error after some bytes, or before any on a method with a body.
+    for script in [&[3, -1][..], &[-1], &[5, 5, -2]] {
+      for method in ["POST", "PUT", "PATCH", "DELETE", "GET"] {
+        if method == "GET" && script == [-1] {
+          continue;
+        }
+        assert_eq!(
+          read_request_body(&fake_body(script), method),
+          Err(BodyError::Unreadable),
+          "{method} {script:?}"
+        );
+      }
+    }
+    // A bodiless request on a backend that can't read bodies.
+    for method in ["GET", "head", "OPTIONS"] {
+      assert_eq!(read_request_body(&fake_body(&[-1]), method), Ok(vec![]));
+    }
+    // The cap.
+    let chunks = vec![16 * 1024; MAX_BRIDGE_REQUEST_BODY / (16 * 1024) + 1];
+    assert_eq!(
+      read_request_body(&fake_body(&chunks), "POST"),
+      Err(BodyError::TooLarge)
+    );
   }
 
   struct FakeCancel(std::sync::atomic::AtomicBool);

@@ -1297,15 +1297,23 @@ pub const DESKTOP_JS: &str = r#"
 
   // Run native code on the app's UI thread (laufey API 42): AppKit, Win32
   // and GTK objects belong to it. `fn` is a C function `void* (*)(void*)`:
-  // a Deno.UnsafeFnPointer, a Deno.UnsafeCallback or a pointer value.
-  // Full trust, so it needs --allow-ffi. Resolves with the return value as a
-  // bigint; rejects once the app is quitting (the function was not called).
+  // a Deno.UnsafeFnPointer or a pointer value. Full trust, so it needs
+  // --allow-ffi. Resolves with the return value as a bigint; rejects once
+  // the app is quitting (the function was not called).
+  //
+  // A Deno.UnsafeCallback is refused: it runs JavaScript, so the UI thread
+  // would block until the JavaScript thread ran it, while anything the
+  // JavaScript thread does that waits for the UI thread (most window calls)
+  // deadlocks the app, and a callback closed before the UI thread got to it
+  // aborts the process.
   function nativeFunctionPointer(fn) {
-    if (
-      fn !== null && typeof fn === "object" &&
-      (fn instanceof Deno.UnsafeFnPointer || fn instanceof Deno.UnsafeCallback)
-    ) {
-      return fn.pointer;
+    if (fn !== null && typeof fn === "object") {
+      if (fn instanceof Deno.UnsafeCallback) {
+        throw new TypeError(
+          "runOnMainThread runs native code: a Deno.UnsafeCallback (JavaScript) would make the UI thread wait for the JavaScript thread",
+        );
+      }
+      if (fn instanceof Deno.UnsafeFnPointer) return fn.pointer;
     }
     return fn;
   }
@@ -1314,7 +1322,7 @@ pub const DESKTOP_JS: &str = r#"
       const pointer = nativeFunctionPointer(fn);
       if (pointer === null || pointer === undefined) {
         throw new TypeError(
-          "fn must be a Deno.UnsafeFnPointer, a Deno.UnsafeCallback or a non-null pointer",
+          "fn must be a Deno.UnsafeFnPointer or a non-null pointer",
         );
       }
       if (context !== null && typeof context !== "object") {
@@ -2051,6 +2059,7 @@ pub const DESKTOP_JS: &str = r#"
   Object.setPrototypeOf(NotificationPrototype, EventTarget.prototype);
 
   const notifications = new Map();
+  const MAX_LIVE_NOTIFICATIONS = 1024;
   // An action button was clicked (laufey API 41): `action` is the button's
   // `action` (the Web Notifications NotificationEvent.action).
   class NotificationActionEvent extends Event {
@@ -2116,6 +2125,11 @@ pub const DESKTOP_JS: &str = r#"
     );
     if (instance.notificationId !== 0) {
       notifications.set(instance.notificationId, instance);
+      // A notification left in the notification center never sends its
+      // close event: keep the newest ones (as the runtime does), not all.
+      while (notifications.size > MAX_LIVE_NOTIFICATIONS) {
+        notifications.delete(notifications.keys().next().value);
+      }
     } else {
       // Backend didn't show it (no support / failure). The native side
       // already emitted a NotificationError event; nothing to track here.
@@ -2770,6 +2784,14 @@ pub const DESKTOP_JS: &str = r#"
             }));
             break;
           }
+          case "windowClosed": {
+            // Gone for good: forget what was kept per window (the
+            // registry held every BrowserWindow ever created).
+            windows.delete(ev.windowId);
+            windowBindCallbacks.delete(ev.windowId);
+            windowButtons.delete(ev.windowId);
+            break;
+          }
           case "notificationClose": {
             const target = notifications.get(ev.notificationId);
             notifications.delete(ev.notificationId);
@@ -3021,6 +3043,9 @@ pub fn desktop_error_reporting_js(
       if (stack) console.error(String(stack));
     }}
 
+    // The report goes out off the JavaScript thread; exiting waits for it
+    // (it is bounded: 5 s for HTTPS).
+    let reported = Promise.resolve();
     if (_errorReportingUrl) {{
       const body = JSON.stringify({{
         version: 1,
@@ -3035,7 +3060,7 @@ pub fn desktop_error_reporting_js(
       // operator-configured `error_reporting_url` from native state so an
       // untrusted caller can't retarget it. `_errorReportingUrl` here only
       // gates whether there's anything to report.
-      op_desktop_send_error_report(body);
+      reported = op_desktop_send_error_report(body).catch(() => {{}});
     }}
 
     // Take over the default handling. Letting this listener return without
@@ -3052,11 +3077,11 @@ pub fn desktop_error_reporting_js(
     try {{
       shown = op_desktop_alert_async("Application Error", String(message));
     }} catch (_) {{
-      Deno.exit(1);
+      reported.then(() => Deno.exit(1));
       return;
     }}
     // Exit on rejection too: a dialog we can't show must not strand the app.
-    shown.then(() => Deno.exit(1), () => Deno.exit(1));
+    Promise.allSettled([shown, reported]).then(() => Deno.exit(1));
   }}
 
   addEventListener("error", (ev) => {{
@@ -3254,6 +3279,26 @@ mod tests {
     runtime
       .execute_script("desktop_js_parses", source)
       .expect("DESKTOP_JS has a syntax error");
+  }
+
+  #[test]
+  fn desktop_js_forgets_closed_windows_and_old_notifications() {
+    let closed = DESKTOP_JS
+      .split("case \"windowClosed\": {")
+      .nth(1)
+      .expect("a windowClosed case");
+    let closed = &closed[..closed.find("break;").unwrap()];
+    for map in ["windows", "windowBindCallbacks", "windowButtons"] {
+      assert!(
+        closed.contains(&format!("{map}.delete(ev.windowId);")),
+        "{map}"
+      );
+    }
+    assert!(DESKTOP_JS.contains("const MAX_LIVE_NOTIFICATIONS = 1024;"));
+    assert!(
+      DESKTOP_JS
+        .contains("while (notifications.size > MAX_LIVE_NOTIFICATIONS)")
+    );
   }
 
   #[test]
@@ -3485,6 +3530,9 @@ mod tests {
     assert!(DESKTOP_JS.contains(
       "return BigInt(await op_desktop_run_on_main_thread(pointer, context));"
     ));
+    // A JavaScript callback would make the UI thread wait for the
+    // JavaScript thread: refused before the op.
+    assert!(DESKTOP_JS.contains("if (fn instanceof Deno.UnsafeCallback) {"));
   }
 
   #[test]

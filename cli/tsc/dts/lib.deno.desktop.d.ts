@@ -2271,7 +2271,7 @@ declare namespace Deno {
      * value.
      *
      * `fn` is a C function `void* fn(void* context)`: a
-     * `Deno.UnsafeFnPointer`, a `Deno.UnsafeCallback`, or a pointer value
+     * `Deno.UnsafeFnPointer` or a pointer value
      * (e.g. from `Deno.dlopen(...).symbols` through
      * `Deno.UnsafePointer.of`, or an extension's own function). It is called
      * with `context` (default `null`); its pointer-sized return value is
@@ -2280,10 +2280,12 @@ declare namespace Deno {
      * on the calling thread.
      *
      * **Full trust**: this is FFI, so it needs `--allow-ffi`, and a wrong
-     * pointer or signature crashes the app. A `Deno.UnsafeCallback` does not
-     * run JavaScript on the UI thread: the UI thread waits while the callback
-     * runs on the JavaScript thread, so it must not wait for the UI thread
-     * itself.
+     * pointer or signature crashes the app. A `Deno.UnsafeCallback` is
+     * refused with a `TypeError`: it runs JavaScript, so the UI thread would
+     * wait for the JavaScript thread, and the app deadlocks as soon as the
+     * JavaScript thread waits for the UI thread (most window calls do). The
+     * same holds for the raw pointer of an `UnsafeCallback`, which can't be
+     * told apart: don't pass one.
      *
      * Rejects without calling `fn` once the app is quitting (the UI thread's
      * event loop has ended), so a call never hangs.
@@ -2295,7 +2297,7 @@ declare namespace Deno {
      */
     export function runOnMainThread(
       // deno-lint-ignore no-explicit-any
-      fn: UnsafeFnPointer<any> | UnsafeCallback<any> | PointerObject,
+      fn: UnsafeFnPointer<any> | PointerObject,
       context?: PointerValue,
     ): Promise<bigint>;
 

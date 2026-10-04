@@ -190,7 +190,12 @@ struct WefDesktopApi {
   /// callback so it can refresh all windows, not just the initial one.
   open_windows: Arc<Mutex<HashSet<u32>>>,
   trays: Arc<Mutex<HashMap<u32, laufey::TrayIcon>>>,
-  notifications: Arc<Mutex<HashMap<u32, laufey::NotificationHandle>>>,
+  /// Live notifications by id, for `close()`. Forgotten on their `Closed`
+  /// event, and capped at [`MAX_LIVE_NOTIFICATIONS`] (oldest out): a
+  /// notification the user leaves in the notification center never sends
+  /// one, so the map used to grow with every notification the app posted.
+  notifications:
+    Arc<Mutex<std::collections::BTreeMap<u32, laufey::NotificationHandle>>>,
   /// Singleton for the unified-mux DevTools window. Without this, every
   /// `openDevtools()` call would spawn another DevTools window.
   devtools_window: Mutex<Option<u32>>,
@@ -254,6 +259,24 @@ impl InitialReveal {
   }
 }
 
+/// How many live notifications the runtime remembers for `close()` (see
+/// `WefDesktopApi::notifications`).
+const MAX_LIVE_NOTIFICATIONS: usize = 1024;
+
+/// Remember notification `id` (ids grow, so the smallest is the oldest),
+/// forgetting the oldest beyond [`MAX_LIVE_NOTIFICATIONS`]. A forgotten one
+/// stays on screen; only `close()` from the app no longer reaches it.
+fn remember_notification<T>(
+  live: &mut std::collections::BTreeMap<u32, T>,
+  id: u32,
+  handle: T,
+) {
+  live.insert(id, handle);
+  while live.len() > MAX_LIVE_NOTIFICATIONS {
+    live.pop_first();
+  }
+}
+
 /// Bookkeeping + the native close, shared by every path that really closes
 /// a window (an answered or timed-out close request, `close()`, DevTools).
 #[derive(Clone)]
@@ -266,12 +289,19 @@ struct CloseBook {
   /// `Deno.desktop.quitOnLastWindowClosed`, mirrored for the windows kept
   /// hidden instead of destroyed (laufey still counts those as open).
   quit_on_last_window_closed: Arc<AtomicBool>,
+  /// Tells DESKTOP_JS the window is gone (`WindowClosed`).
+  event_tx: deno_runtime::ops::desktop::DesktopEventTx,
 }
 
 impl CloseBook {
   fn close(&self, window_id: u32) {
     use deno_runtime::ops::desktop::NativeClose;
-    self.closed_windows.lock().unwrap().insert(window_id);
+    let newly_closed = self.closed_windows.lock().unwrap().insert(window_id);
+    if newly_closed {
+      let _ = self.event_tx.try_send(
+        deno_runtime::ops::desktop::DesktopEvent::WindowClosed { window_id },
+      );
+    }
     let others_open = {
       let mut open = self.open_windows.lock().unwrap();
       open.remove(&window_id);
@@ -317,6 +347,7 @@ impl WefDesktopApi {
       open_windows: self.open_windows.clone(),
       surface_windows: self.surface_windows.clone(),
       quit_on_last_window_closed: self.quit_on_last_window_closed.clone(),
+      event_tx: self.event_tx.clone(),
     }
   }
 
@@ -1518,7 +1549,7 @@ impl denort::desktop::DesktopApi for WefDesktopApi {
       );
       return 0;
     }
-    self.notifications.lock().unwrap().insert(id, handle);
+    remember_notification(&mut self.notifications.lock().unwrap(), id, handle);
     id
   }
 
@@ -2579,13 +2610,21 @@ fn register_launch_handlers(
 
   // macOS only (a no-op on backends without it): links, and files as
   // `file://` URLs, routed to the running app.
+  // A URL with a scheme the app didn't declare is dropped.
   let open_inbox = inbox.clone();
+  let open_schemes = deep_links.clone();
   laufey::on_open_url(move |url| {
-    match deno_lib::standalone::launch_args::classify_open_url(url) {
-      OpenedItem::Url(url) => open_inbox.open_url(url),
-      OpenedItem::File(path) => {
+    match deno_lib::standalone::launch_args::classify_open_url(
+      url,
+      &open_schemes,
+    ) {
+      Some(OpenedItem::Url(url)) => open_inbox.open_url(url),
+      Some(OpenedItem::File(path)) => {
         open_inbox.open_file(path.to_string_lossy().into_owned())
       }
+      None => log::debug!(
+        "[desktop] dropped an opened URL whose scheme the app doesn't declare"
+      ),
     }
   });
 
@@ -3142,7 +3181,7 @@ async fn run_desktop(
         closed_windows: Arc::new(Mutex::new(HashSet::new())),
         open_windows: open_windows_for_api.clone(),
         trays: Arc::new(Mutex::new(HashMap::new())),
-        notifications: Arc::new(Mutex::new(HashMap::new())),
+        notifications: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
         devtools_window: Mutex::new(None),
         pending_closes: Arc::new(
           deno_runtime::ops::desktop::PendingCloses::default(),
@@ -3421,6 +3460,18 @@ mod tests {
   use super::login_item_state_str;
   use super::map_permission_status;
   use super::should_show_native_error_dialog;
+
+  #[test]
+  fn live_notifications_are_capped_oldest_first() {
+    let mut live = std::collections::BTreeMap::new();
+    for id in 1..=(super::MAX_LIVE_NOTIFICATIONS as u32 + 10) {
+      super::remember_notification(&mut live, id, ());
+    }
+    assert_eq!(live.len(), super::MAX_LIVE_NOTIFICATIONS);
+    // The ten oldest went; the newest is kept.
+    assert_eq!(live.keys().next(), Some(&11));
+    assert!(live.contains_key(&(super::MAX_LIVE_NOTIFICATIONS as u32 + 10)));
+  }
 
   #[test]
   fn an_empty_dock_badge_clears_it() {

@@ -6,3 +6,8 @@ d.authSession.start({ url: "https://x", callbackScheme: "x", ephemeral: 1 });
 // Not an updater error code.
 const code: Deno.desktop.AppUpdateErrorCode = "nope";
 console.log(code);
+// runOnMainThread runs native code, never a JavaScript callback.
+declare const callback: Deno.UnsafeCallback<
+  { parameters: ["pointer"]; result: "pointer" }
+>;
+d.runOnMainThread(callback);
