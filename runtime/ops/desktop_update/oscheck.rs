@@ -8,9 +8,13 @@
 //!   Gatekeeper (`spctl --assess --type execute`), and its signing
 //!   identifier must match the running app's (the same app).
 //! - **Windows:** when the running executable has a trusted Authenticode
-//!   signature (`WinVerifyTrust`), the staged executable and its runtime DLL
-//!   must verify too, with a signer certificate whose subject equals the
-//!   running executable's.
+//!   signature (`WinVerifyTrust`), EVERY PE image in the staged app must
+//!   verify too (see [`pe_files`]: any file with a PE header, whatever its
+//!   extension: `.exe`, `.dll`, a native addon's `.node`, ...), each with a
+//!   leaf signer certificate whose issuer AND subject equal the running
+//!   executable's. Checking only the executable and its runtime DLL left
+//!   every other DLL the app loads (CEF's, an addon's) unchecked: a
+//!   same-named DLL is all a DLL-planting attack needs.
 //! - **Linux:** the OS has no code signature; the manifest signature and the
 //!   archive's SHA-256 are the whole check.
 //!
@@ -233,19 +237,80 @@ pub fn verify_macos(
   })
 }
 
-/// An Authenticode signer: the leaf certificate's DER-encoded subject and a
-/// display name.
-pub type Signer = (Vec<u8>, String);
+/// An Authenticode signer: the leaf certificate's DER-encoded subject and
+/// issuer, and a display name.
+///
+/// The pin is issuer + subject, not the leaf certificate's thumbprint: a
+/// code-signing certificate is reissued every one to three years (and EV
+/// certificates more often), and a thumbprint pin would make every app
+/// signed with the old certificate refuse the first update signed with the
+/// renewed one, with no way out but a manual reinstall. The same CA issuing
+/// a certificate with the same subject DN (for an organization: its legal
+/// name, and for EV its registration number) is the identity that renewal
+/// keeps; a certificate for that name from another CA, or from the same CA
+/// for another name, is refused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Signer {
+  pub subject: Vec<u8>,
+  pub issuer: Vec<u8>,
+  pub name: String,
+}
+
+/// Every PE image under `root` (a file or a directory, walked without
+/// following symlinks), sorted: every regular file with the headers the
+/// Windows loader requires, `MZ` at 0 and `PE\0\0` at the offset the DOS
+/// header's `e_lfanew` (0x3C) names. By content rather than by extension, so
+/// a DLL renamed to anything (`.node`, `.pyd`, `.dat`, none) that
+/// `LoadLibrary` would still load is checked too, and a data file that only
+/// happens to start with `MZ` is not (`WinVerifyTrust` would refuse it, and
+/// with it the update).
+pub fn pe_files(root: &Path) -> std::io::Result<Vec<PathBuf>> {
+  fn walk(path: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
+    let meta = std::fs::symlink_metadata(path)?;
+    if meta.is_dir() {
+      for entry in std::fs::read_dir(path)? {
+        walk(&entry?.path(), out)?;
+      }
+    } else if meta.is_file() && is_pe_image(path)? {
+      out.push(path.to_path_buf());
+    }
+    Ok(())
+  }
+  let mut out = Vec::new();
+  walk(root, &mut out)?;
+  out.sort();
+  Ok(out)
+}
+
+/// Whether the file at `path` has a PE image's headers (see [`pe_files`]).
+fn is_pe_image(path: &Path) -> std::io::Result<bool> {
+  use std::io::Read;
+  use std::io::Seek;
+  let mut f = std::fs::File::open(path)?;
+  let mut dos = [0u8; 64];
+  if f.read_exact(&mut dos).is_err() || &dos[..2] != b"MZ" {
+    return Ok(false);
+  }
+  let e_lfanew = u32::from_le_bytes([dos[60], dos[61], dos[62], dos[63]]);
+  let mut sig = [0u8; 4];
+  Ok(
+    f.seek(std::io::SeekFrom::Start(u64::from(e_lfanew)))
+      .is_ok()
+      && f.read_exact(&mut sig).is_ok()
+      && &sig == b"PE\0\0",
+  )
+}
 
 /// The Windows check over a signer lookup (`None`: no trusted signature).
-/// See the module docs.
+/// `staged_files` is every PE image of the staged app ([`pe_files`]). See
+/// the module docs.
 pub fn verify_windows(
   lookup: &dyn Fn(&Path) -> Option<Signer>,
   running_exe: &Path,
   staged_files: &[PathBuf],
   allow_unsigned_dev: bool,
 ) -> Result<SignatureReport, UpdateError> {
-  let Some((subject, name)) = lookup(running_exe) else {
+  let Some(running) = lookup(running_exe) else {
     if !allow_unsigned_dev {
       return err(
         Code::OsSignature,
@@ -259,15 +324,22 @@ pub fn verify_windows(
       identity: None,
     });
   };
+  if staged_files.is_empty() {
+    return err(Code::OsSignature, "the staged app holds no PE image");
+  }
   for file in staged_files {
     match lookup(file) {
-      Some((s, _)) if s == subject => {}
-      Some((_, other)) => {
+      Some(s) if s.subject == running.subject && s.issuer == running.issuer => {
+      }
+      Some(other) => {
         return err(
           Code::OsSignature,
           format!(
-            "{} is signed by {other:?}, the running app by {name:?}",
-            file.display()
+            "{} is signed by {:?}, the running app by {:?} (the signer's \
+             issuer and subject must both match)",
+            file.display(),
+            other.name,
+            running.name
           ),
         );
       }
@@ -281,7 +353,7 @@ pub fn verify_windows(
   }
   Ok(SignatureReport {
     mode: "authenticode",
-    identity: Some(name),
+    identity: Some(running.name),
   })
 }
 
@@ -294,6 +366,22 @@ const CERT_E_REVOCATION_FAILURE: i32 = 0x800B010E_u32 as i32;
 /// check WITH revocation: `Some(true)` trusted, `Some(false)` refused, `None`
 /// revocation could not be determined (offline) and the offline fallback
 /// decides.
+///
+/// The whole table:
+///
+/// | status                                   | verdict                     |
+/// | ---------------------------------------- | --------------------------- |
+/// | `0` (trusted, revocation checked)        | accepted                    |
+/// | `CRYPT_E_REVOCATION_OFFLINE` 0x80092013  | fallback without revocation |
+/// | `CERT_E_REVOCATION_FAILURE` 0x800B010E   | fallback without revocation |
+/// | `CRYPT_E_REVOKED` / `CERT_E_REVOKED`     | refused                     |
+/// | `CRYPT_E_NO_REVOCATION_CHECK` 0x80092012 | refused (the CA publishes no revocation info for a cert that should have it) |
+/// | anything else (unsigned, bad digest, untrusted root, expired without a timestamp, ...) | refused |
+///
+/// The fallback re-verifies the whole chain WITHOUT revocation and accepts
+/// only a trusted result: it is taken when the revocation servers can't be
+/// reached (an offline machine, a captive portal, a CRL/OCSP outage), never
+/// when a certificate is positively known revoked.
 pub fn revocation_status_verdict(status: i32) -> Option<bool> {
   match status {
     0 => Some(true),
@@ -304,8 +392,8 @@ pub fn revocation_status_verdict(status: i32) -> Option<bool> {
 }
 
 /// The Authenticode signer of `path`: verified with `WinVerifyTrust`
-/// (`WINTRUST_ACTION_GENERIC_VERIFY_V2`, no UI), then the leaf signer
-/// certificate's subject.
+/// (`WINTRUST_ACTION_GENERIC_VERIFY_V2`, the whole chain to a trusted root,
+/// no UI), then the leaf signer certificate's subject and issuer.
 ///
 /// Revocation is checked online for the whole chain except the root
 /// (`WTD_REVOKE_WHOLECHAIN` + `WTD_REVOCATION_CHECK_CHAIN_EXCLUDE_ROOT`): a
@@ -391,10 +479,16 @@ fn authenticode_signer_with(
         if !sgnr.is_null() && (*sgnr).csCertChain > 0 {
           let cert = (*(*sgnr).pasCertChain).pCert;
           if !cert.is_null() && !(*cert).pCertInfo.is_null() {
-            let blob = &(*(*cert).pCertInfo).Subject;
-            let subject =
-              std::slice::from_raw_parts(blob.pbData, blob.cbData as usize)
-                .to_vec();
+            let der = |blob: &windows_sys::Win32::Security::Cryptography::CRYPT_INTEGER_BLOB| {
+              if blob.pbData.is_null() {
+                Vec::new()
+              } else {
+                std::slice::from_raw_parts(blob.pbData, blob.cbData as usize)
+                  .to_vec()
+              }
+            };
+            let subject = der(&(*(*cert).pCertInfo).Subject);
+            let issuer = der(&(*(*cert).pCertInfo).Issuer);
             let mut buf = [0u16; 512];
             let n = CertGetNameStringW(
               cert,
@@ -406,7 +500,13 @@ fn authenticode_signer_with(
             );
             let name =
               String::from_utf16_lossy(&buf[..(n as usize).saturating_sub(1)]);
-            result = Some((subject, name));
+            if !subject.is_empty() && !issuer.is_empty() {
+              result = Some(Signer {
+                subject,
+                issuer,
+                name,
+              });
+            }
           }
         }
       }
@@ -531,6 +631,12 @@ mod tests {
     // Offline: the fallback (no revocation lookup) decides.
     assert_eq!(revocation_status_verdict(CRYPT_E_REVOCATION_OFFLINE), None);
     assert_eq!(revocation_status_verdict(CERT_E_REVOCATION_FAILURE), None);
+    // No revocation information at all (CRYPT_E_NO_REVOCATION_CHECK), an
+    // untrusted root (CERT_E_UNTRUSTEDROOT), an expired certificate
+    // (CERT_E_EXPIRED): refused, no fallback.
+    for status in [0x80092012_u32, 0x800B0109, 0x800B0101] {
+      assert_eq!(revocation_status_verdict(status as i32), Some(false));
+    }
     // Not signed / bad signature: refused.
     assert_eq!(
       revocation_status_verdict(0x800B0100_u32 as i32),
@@ -629,12 +735,19 @@ mod tests {
 
   #[test]
   fn windows_signer_subject_must_match() {
-    let lookup = |p: &Path| -> Option<(Vec<u8>, String)> {
+    let signer = |subject: &[u8], issuer: &[u8], name: &str| Signer {
+      subject: subject.to_vec(),
+      issuer: issuer.to_vec(),
+      name: name.into(),
+    };
+    let lookup = |p: &Path| -> Option<Signer> {
       match p.to_str().unwrap() {
-        "run.exe" | "new.exe" | "new.dll" => {
-          Some((b"CN=A".to_vec(), "A".into()))
+        "run.exe" | "new.exe" | "new.dll" | "addon.node" => {
+          Some(signer(b"CN=A", b"CN=CA1", "A"))
         }
-        "evil.exe" => Some((b"CN=E".to_vec(), "E".into())),
+        "evil.exe" => Some(signer(b"CN=E", b"CN=CA1", "E")),
+        // The same subject from another CA: not the same identity.
+        "otherca.dll" => Some(signer(b"CN=A", b"CN=CA2", "A")),
         _ => None,
       }
     };
@@ -644,11 +757,28 @@ mod tests {
     let ok = verify_windows(
       &lookup,
       "run.exe".as_ref(),
-      &files(&["new.exe", "new.dll"]),
+      &files(&["new.exe", "new.dll", "addon.node"]),
       false,
     )
     .unwrap();
     assert_eq!(ok.mode, "authenticode");
+    assert_eq!(ok.identity.as_deref(), Some("A"));
+    // One bad image among good ones is enough to refuse.
+    for bad in [
+      &["new.exe", "evil.exe"][..],
+      &["new.exe", "unsigned.dll"],
+      &["new.exe", "otherca.dll"],
+    ] {
+      let e = verify_windows(&lookup, "run.exe".as_ref(), &files(bad), true)
+        .unwrap_err();
+      assert_eq!(e.code, Code::OsSignature, "{bad:?}");
+    }
+    assert_eq!(
+      verify_windows(&lookup, "run.exe".as_ref(), &[], false)
+        .unwrap_err()
+        .code,
+      Code::OsSignature
+    );
     for bad in [["evil.exe"], ["unsigned.exe"]] {
       for opt_out in [false, true] {
         let e =
@@ -695,10 +825,63 @@ mod tests {
       .next();
     // Embedded signatures are not guaranteed on every image; record what we
     // saw without failing the suite on an image that only catalog-signs.
-    if let Some((subject, name)) = found {
-      assert!(!subject.is_empty());
-      assert!(name.contains("Microsoft"), "{name}");
+    if let Some(s) = found {
+      assert!(!s.subject.is_empty());
+      assert!(!s.issuer.is_empty());
+      assert!(s.name.contains("Microsoft"), "{}", s.name);
     }
+  }
+
+  #[test]
+  fn every_pe_image_is_found_by_content() {
+    // A minimal PE header: `MZ`, e_lfanew = 0x80, `PE\0\0` there.
+    let pe = || {
+      let mut b = vec![0u8; 0x84];
+      b[..2].copy_from_slice(b"MZ");
+      b[60..64].copy_from_slice(&0x80u32.to_le_bytes());
+      b[0x80..].copy_from_slice(b"PE\0\0");
+      b
+    };
+    let mut bad_offset = pe();
+    bad_offset[60..64].copy_from_slice(&0x1000u32.to_le_bytes());
+    let t = tempfile::tempdir().unwrap();
+    let root = t.path().join("App");
+    std::fs::create_dir_all(root.join("sub/deeper")).unwrap();
+    for (name, body) in [
+      ("App.exe", pe()),
+      ("App.dll", pe()),
+      ("sub/addon.node", pe()),
+      ("sub/deeper/renamed.dat", pe()),
+      (
+        "sub/readme.txt",
+        b"MZ is the DOS magic, and this is text".repeat(4),
+      ),
+      ("sub/past-the-end.bin", bad_offset),
+      ("data.pak", b"PAK\0".to_vec()),
+      ("one", b"M".to_vec()),
+      ("empty", Vec::new()),
+    ] {
+      std::fs::write(root.join(name), body).unwrap();
+    }
+    let found: Vec<String> = pe_files(&root)
+      .unwrap()
+      .iter()
+      .map(|p| {
+        p.strip_prefix(&root)
+          .unwrap()
+          .to_string_lossy()
+          .replace('\\', "/")
+      })
+      .collect();
+    assert_eq!(
+      found,
+      [
+        "App.dll",
+        "App.exe",
+        "sub/addon.node",
+        "sub/deeper/renamed.dat",
+      ]
+    );
   }
 
   #[cfg(target_os = "macos")]

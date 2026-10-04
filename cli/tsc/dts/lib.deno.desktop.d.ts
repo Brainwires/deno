@@ -2351,11 +2351,14 @@ declare namespace Deno {
       | "downgrade"
       | "rejected"
       | "no_platform"
+      | "expired"
+      | "replayed"
       | "insecure_url"
       | "size_exceeded"
       | "integrity"
       | "unsafe_archive"
       | "bundle_mismatch"
+      | "version_mismatch"
       | "os_signature"
       | "install_not_writable"
       | "unsupported_layout"
@@ -2420,6 +2423,11 @@ declare namespace Deno {
       stagedVersion: string | null;
       /** The last version rolled back after failing to start. */
       rejected: string | null;
+      /** Every version rolled back after failing to start (and newer than
+       * the last confirmed one), oldest first: none is offered again. */
+      rejectedVersions: string[];
+      /** The highest manifest `sequence` this install has accepted. */
+      manifestSequence: number | null;
       lastError: string | null;
       /** Launched by the updater after an update from this version. */
       updatedFrom: string | null;
@@ -2465,8 +2473,12 @@ declare namespace Deno {
      * `sign` returns) over the bytes `"denext-app-update-v1\n" + signed`. The
      * payload: `{ "schema": 1, "app": "<desktop.app.identifier>", "version",
      * "minVersion"?, "platforms": { "<target>-<backend>": { "url", "sha256",
-     * "size", "kind": "bundle" } }, "releaseNotes"?, "publishedAt" }`
-     * (unknown keys are refused). The platform key is
+     * "size", "kind": "bundle" } }, "releaseNotes"?, "publishedAt",
+     * "expiresAt"?, "sequence"? }` (unknown keys are refused). `expiresAt`
+     * (RFC 3339) refuses the manifest once it passes (`expired`); `sequence`
+     * (an integer up to 2^53 - 1 that only grows) is remembered per install,
+     * and a lower one, or none after a sequenced manifest, is refused
+     * (`replayed`): an old manifest served again can't hide newer releases. The platform key is
      * {@linkcode AppUpdateStatus.platform}, e.g.
      * `"aarch64-apple-darwin-webview"`.
      *
@@ -2483,12 +2495,16 @@ declare namespace Deno {
      * that passes `codesign --verify --deep --strict` and Gatekeeper
      * (`spctl --assess`): sign it with the same identity and notarize
      * (and staple) it before publishing. On Windows a running executable
-     * with a trusted Authenticode signature only takes a staged executable
-     * and runtime DLL signed by a certificate with the same subject. Linux
+     * with a trusted Authenticode signature only takes a staged app whose
+     * EVERY PE image (`.exe`, `.dll`, `.node`, ...) is signed by a
+     * certificate with the same issuer and subject: sign them all. Linux
      * has no OS signature: the manifest signature and the SHA-256 are the
      * check. An unsigned or ad-hoc running app refuses every update unless
      * `stage({ allowUnsignedDev: true })` (dev only; it never weakens a
-     * signed app).
+     * signed app). On every platform but AppImage the staged app's own
+     * compiled version (deno.json `version`; on macOS also its
+     * `CFBundleShortVersionString`) must be the manifest's version
+     * (`version_mismatch`).
      *
      * @category Desktop
      * @experimental

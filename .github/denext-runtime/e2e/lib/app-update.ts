@@ -24,6 +24,10 @@ export interface Payload {
   platforms: Record<string, PlatformEntry>;
   releaseNotes?: string;
   publishedAt: string;
+  /** RFC 3339; the runtime refuses the manifest after it (`expired`). */
+  expiresAt?: string;
+  /** Only grows; a lower one than the install accepted is `replayed`. */
+  sequence?: number;
 }
 
 const enc = new TextEncoder();

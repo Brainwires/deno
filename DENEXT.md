@@ -437,8 +437,11 @@ in the job summary, never skipped silently. Areas:
   OS; `not_supported` on Windows and Linux; neither in workers.
 - **update** — full-app self-update with throwaway keys and a throwaway TLS CA:
   hostile manifests and archives refused with their codes and the install
-  untouched, an unwritable install, 1.0.0 -> 2.0.0 relaunch and confirm, a 3.0.0
-  trial that never confirms rolled back and refused.
+  untouched (including a replayed or missing `sequence`, an expired `expiresAt`,
+  and another version's archive under a manifest's version), the accepted
+  sequence recorded, an unwritable install, 1.0.0 -> 2.0.0 relaunch and confirm,
+  a 3.0.0 trial that never confirms rolled back and refused (and kept in the
+  rejected set).
 - **Node-API** stays in `launch.sh`.
 
 What a hosted runner cannot do, reported `n/a` with the reason:

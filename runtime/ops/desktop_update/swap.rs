@@ -12,18 +12,30 @@
 //!
 //! **The state file** (`.<name>.denext-update.json`, next to the install)
 //! moves through `staged` → `swapping` → `swapped` → `idle` (confirmed), or
-//! → `rollingBack` → `idle` (with `rejected` set). It is written atomically
-//! (a temporary file renamed over it) BEFORE each step, so whatever was
-//! interrupted is visible to the next process.
+//! → `rollingBack` → `idle` (the version added to `rejectedVersions`). It is
+//! written atomically (a temporary file renamed over it) BEFORE each step, so
+//! whatever was interrupted is visible to the next process. It also keeps
+//! what outlives one update: the rejected versions and the highest manifest
+//! `sequence` accepted. The state file, the helper log and the helper lock
+//! are opened without following a symlink and only when this user owns them
+//! ([`open_private`]).
 //!
 //! **The swap.** macOS and Linux exchange the staged directory (or AppImage
 //! file) with the install in ONE atomic rename (`renamex_np(RENAME_SWAP)` /
 //! `renameat2(RENAME_EXCHANGE)`), then move the previous app to `<name>.old`:
 //! there is no moment without an app at the install path. Where the file
-//! system cannot exchange (and on Windows, which has no directory exchange)
-//! it is two renames: install → `.old`, staged → install, undone on failure;
-//! Windows retries a sharing violation (an antivirus scan) for a few seconds.
-//! The helper's working directory is the install's parent, never inside it.
+//! system cannot exchange (`EINVAL` / `ENOTSUP` / `ENOSYS`: FAT, exFAT, some
+//! network file systems) and on Windows, which has no directory exchange, it
+//! is two renames: install → `.old`, staged → install. A failed second rename
+//! is undone (retried, and checked); a swap that cannot be undone in place
+//! is left `swapping` and recovered at once by the helper ([`rollback`]), as
+//! the next launch's watchdog would. The rollback exchanges `.old` back the
+//! same way. What remains is a hard crash (power loss) BETWEEN the two
+//! renames of the fallback: the install path is then empty and `.old` holds
+//! the previous app, with the state `swapping` recording it for the next
+//! helper run. Windows retries a sharing violation (an antivirus scan) for a
+//! few seconds. The helper's working directory is the install's parent,
+//! never inside it.
 //!
 //! **Confirm or roll back.** The new app is relaunched with
 //! `--denext-updated-from=<version>`. Its first launch is its trial
@@ -141,8 +153,18 @@ pub struct UpdateState {
   pub trial_started: Option<u64>,
   /// Recovery helpers the watchdog started for the current phase.
   pub helper_attempts: u32,
-  /// The last version rolled back after failing to start.
+  /// The last version rolled back after failing to start. Kept for the
+  /// runtimes that read only this field (an app rolled back to an older
+  /// version may run one); [`Self::rejected_versions`] is the whole set.
   pub rejected: Option<String>,
+  /// Every version rolled back after failing to start and newer than the
+  /// confirmed version, oldest first, at most [`MAX_REJECTED`]. A single
+  /// `rejected` forgot the earlier failures as soon as a second version
+  /// failed, and re-offered them.
+  pub rejected_versions: Vec<String>,
+  /// The highest manifest `sequence` accepted for this install (see
+  /// `manifest.rs`): a lower one is a replayed manifest.
+  pub manifest_sequence: Option<u64>,
   /// The arguments to relaunch the app with.
   pub relaunch_args: Vec<String>,
   /// [`tree_digest`] of the staged app, recorded when it was verified and
@@ -156,7 +178,14 @@ pub struct UpdateState {
   pub cleanup: bool,
   /// Why the last step failed, if it did.
   pub last_error: Option<String>,
+  /// Fields a newer version wrote that this one does not know: written back
+  /// as they were, so going through an older version does not drop them.
+  #[serde(flatten)]
+  pub other: serde_json::Map<String, serde_json::Value>,
 }
+
+/// The most rejected versions kept (the oldest are dropped first).
+pub const MAX_REJECTED: usize = 32;
 
 impl UpdateState {
   pub fn new(layout: &InstallLayout) -> Self {
@@ -164,6 +193,80 @@ impl UpdateState {
       schema: STATE_SCHEMA,
       install: layout.install.to_string_lossy().into_owned(),
       ..Default::default()
+    }
+  }
+
+  /// A fresh state that keeps what outlives one update from `previous`: the
+  /// rejected versions, the manifest sequence and unknown fields.
+  pub fn carried_from(
+    layout: &InstallLayout,
+    previous: Option<UpdateState>,
+  ) -> Self {
+    let mut state = Self::new(layout);
+    if let Some(p) = previous {
+      state.rejected = p.rejected;
+      state.rejected_versions = p.rejected_versions;
+      state.manifest_sequence = p.manifest_sequence;
+      state.other = p.other;
+    }
+    state
+  }
+
+  /// Every rejected version: [`Self::rejected_versions`] plus a `rejected`
+  /// written by a runtime that knew only that field (the migration).
+  pub fn all_rejected(&self) -> Vec<String> {
+    let mut all = self.rejected_versions.clone();
+    if let Some(r) = &self.rejected
+      && !all.contains(r)
+    {
+      all.push(r.clone());
+    }
+    all
+  }
+
+  /// Add `version` to the rejected set (bounded) and make it `rejected`.
+  pub fn reject(&mut self, version: &str) {
+    let mut all = self.all_rejected();
+    all.retain(|v| v != version);
+    all.push(version.to_string());
+    let excess = all.len().saturating_sub(MAX_REJECTED);
+    all.drain(..excess);
+    self.rejected_versions = all;
+    self.rejected = Some(version.to_string());
+  }
+
+  /// `confirmed` runs and is good: forget the rejected versions it makes
+  /// moot (no newer than it: the downgrade guard refuses them anyway). A
+  /// rejected version NEWER than it stays rejected. Unparseable entries are
+  /// dropped; an unparseable `confirmed` keeps the set as it is.
+  pub fn forget_rejected_up_to(&mut self, confirmed: &str) {
+    use super::manifest::compare_versions;
+    use super::manifest::parse_version;
+    let Ok(confirmed) = parse_version(confirmed, "confirmed") else {
+      return;
+    };
+    let kept: Vec<String> = self
+      .all_rejected()
+      .into_iter()
+      .filter(|v| {
+        parse_version(v, "rejected").is_ok_and(|v| {
+          compare_versions(&v, &confirmed) == std::cmp::Ordering::Greater
+        })
+      })
+      .collect();
+    self.rejected = kept.last().cloned();
+    self.rejected_versions = kept;
+  }
+
+  /// Raise the manifest sequence high-water mark to `sequence`; `true` when
+  /// it changed.
+  pub fn record_sequence(&mut self, sequence: Option<u64>) -> bool {
+    match sequence {
+      Some(s) if self.manifest_sequence.is_none_or(|c| s > c) => {
+        self.manifest_sequence = Some(s);
+        true
+      }
+      _ => false,
     }
   }
 
@@ -185,7 +288,12 @@ impl UpdateState {
 /// Read the state for `layout` (`None`: no state, unreadable, or another
 /// install's).
 pub fn read_state(layout: &InstallLayout) -> Option<UpdateState> {
-  let bytes = std::fs::read(layout.state_path()).ok()?;
+  use std::io::Read;
+  let mut bytes = Vec::new();
+  open_private(&layout.state_path(), std::fs::OpenOptions::new().read(true))
+    .ok()?
+    .read_to_end(&mut bytes)
+    .ok()?;
   let state: UpdateState = serde_json::from_slice(&bytes).ok()?;
   (state.schema == STATE_SCHEMA
     && Path::new(&state.install) == layout.install.as_path())
@@ -202,7 +310,13 @@ pub fn write_state(
   let bytes = serde_json::to_vec_pretty(state)
     .map_err(|e| UpdateError::io("state", e))?;
   let write = || -> std::io::Result<()> {
-    let mut f = std::fs::File::create(&tmp)?;
+    // A temporary file of this name is a leftover of a crashed write by an
+    // earlier process with this PID (or planted): never written through.
+    let _ = std::fs::remove_file(&tmp);
+    let mut f = open_private(
+      &tmp,
+      std::fs::OpenOptions::new().write(true).create_new(true),
+    )?;
     f.write_all(&bytes)?;
     f.sync_all()?;
     drop(f);
@@ -212,6 +326,79 @@ pub fn write_state(
     let _ = std::fs::remove_file(&tmp);
     UpdateError::io(path.display(), e)
   })
+}
+
+/// Persist the manifest `sequence` a verified manifest carried as the
+/// install's high-water mark (a no-op when it is not higher).
+pub fn record_manifest_sequence(
+  layout: &InstallLayout,
+  sequence: Option<u64>,
+) -> Result<(), UpdateError> {
+  if sequence.is_none() {
+    return Ok(());
+  }
+  let mut state =
+    read_state(layout).unwrap_or_else(|| UpdateState::new(layout));
+  if state.record_sequence(sequence) {
+    write_state(layout, &state)?;
+  }
+  Ok(())
+}
+
+/// Open one of the updater's own files next to the install (the state, its
+/// temporary copy, the helper log, the helper lock) without following a
+/// symlink at its name, and only when it is a regular file this user owns.
+/// The install's parent may be writable by others (a shared `/opt`, a
+/// group-writable folder): another user must not be able to point the
+/// updater's writes at a file of their choosing through a symlink, nor feed
+/// it a state file (which names what to swap and roll back) of their own.
+/// Unix: `O_NOFOLLOW` and the owner checked against the effective uid on the
+/// opened file (no race with the check). Windows: the reparse point itself
+/// is opened (`FILE_FLAG_OPEN_REPARSE_POINT`) and refused; ownership is left
+/// to the install directory's ACL.
+pub fn open_private(
+  path: &Path,
+  opts: &mut std::fs::OpenOptions,
+) -> std::io::Result<std::fs::File> {
+  let refuse = |why: &str| {
+    std::io::Error::new(
+      std::io::ErrorKind::PermissionDenied,
+      format!("{}: {why}", path.display()),
+    )
+  };
+  #[cfg(unix)]
+  {
+    use std::os::unix::fs::MetadataExt;
+    use std::os::unix::fs::OpenOptionsExt;
+    let f = opts.custom_flags(libc::O_NOFOLLOW).open(path)?;
+    let meta = f.metadata()?;
+    // SAFETY: geteuid has no preconditions and cannot fail.
+    let me = unsafe { libc::geteuid() };
+    if !meta.is_file() {
+      return Err(refuse("not a regular file"));
+    }
+    if meta.uid() != me {
+      return Err(refuse("owned by another user"));
+    }
+    Ok(f)
+  }
+  #[cfg(windows)]
+  {
+    use std::os::windows::fs::OpenOptionsExt;
+    /// `FILE_FLAG_OPEN_REPARSE_POINT`.
+    const OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    let f = opts.custom_flags(OPEN_REPARSE_POINT).open(path)?;
+    let meta = f.metadata()?;
+    if meta.file_type().is_symlink() || !meta.is_file() {
+      return Err(refuse("not a regular file"));
+    }
+    Ok(f)
+  }
+  #[cfg(not(any(unix, windows)))]
+  {
+    let _ = refuse;
+    opts.open(path)
+  }
 }
 
 fn exists(path: &Path) -> bool {
@@ -565,6 +752,30 @@ fn step(
   f()
 }
 
+/// How often an undo (putting the previous app back) is tried.
+const UNDO_ATTEMPTS: u32 = 5;
+
+/// Undo a rename: `from` back to `to`, tried [`UNDO_ATTEMPTS`] times (each
+/// try is a [`rename_retry`], which on Windows already outlasts a sharing
+/// violation), and checked: a failed undo used to be ignored, which could
+/// leave the install path empty while the state claimed the previous app was
+/// in place.
+fn undo_rename(hook: FaultHook, from: &Path, to: &Path) -> std::io::Result<()> {
+  let mut last = None;
+  for attempt in 0..UNDO_ATTEMPTS {
+    if attempt > 0 {
+      std::thread::sleep(Duration::from_millis(250));
+    }
+    match step(hook, "undo", || rename_retry(from, to)) {
+      Ok(()) => return Ok(()),
+      // Already back (an earlier try that reported an error but moved it).
+      Err(_) if exists(to) && !exists(from) => return Ok(()),
+      Err(e) => last = Some(e),
+    }
+  }
+  Err(last.unwrap_or_else(|| std::io::Error::other("undo failed")))
+}
+
 /// The helper's `apply`: swap the staged app into place. On failure the
 /// install is left as it was (the previous app) and the state goes back to
 /// `staged` with `last_error`. On success the state is `swapped` (trial
@@ -627,9 +838,12 @@ pub fn apply_swap_with(
   state.last_error = None;
   write_state(layout, state)?;
 
-  let result = (|| -> std::io::Result<()> {
+  // `Err((error, undone))`: `undone` when the previous app is at the install
+  // path again (the swap can be retried), else the state stays `swapping`
+  // for a recovery ([`rollback`]).
+  let result = (|| -> Result<(), (std::io::Error, bool)> {
     let exchanged = if hook("exchange").is_ok() {
-      exchange(&staged, &layout.install)?
+      exchange(&staged, &layout.install).map_err(|e| (e, true))?
     } else {
       false
     };
@@ -637,18 +851,25 @@ pub fn apply_swap_with(
       // The install is the new app; `staged` holds the previous one.
       if let Err(e) = step(hook, "old", || rename_retry(&staged, &old)) {
         // Put the previous app back (exchange again) before failing.
-        let _ = exchange(&staged, &layout.install);
-        return Err(e);
+        let undone =
+          step(hook, "undo", || match exchange(&staged, &layout.install) {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(std::io::Error::other("cannot exchange back")),
+            Err(e) => Err(e),
+          })
+          .is_ok();
+        return Err((e, undone));
       }
       return Ok(());
     }
-    step(hook, "install->old", || rename_retry(&layout.install, &old))?;
+    step(hook, "install->old", || rename_retry(&layout.install, &old))
+      .map_err(|e| (e, true))?;
     if let Err(e) = step(hook, "staged->install", || {
       rename_retry(&staged, &layout.install)
     }) {
       // Undo: the previous app back at the install path.
-      let _ = rename_retry(&old, &layout.install);
-      return Err(e);
+      let undone = undo_rename(hook, &old, &layout.install).is_ok();
+      return Err((e, undone));
     }
     Ok(())
   })();
@@ -665,11 +886,21 @@ pub fn apply_swap_with(
       remove_path(&layout.staging_dir());
       Ok(())
     }
-    Err(e) => {
+    Err((e, true)) => {
       state.phase = Phase::Staged;
       state.last_error = Some(format!("swap failed: {e}"));
       let _ = write_state(layout, state);
       err(Code::Io, format!("the swap failed and was undone: {e}"))
+    }
+    Err((e, false)) => {
+      // Still `swapping` (as written before the first rename): what is where
+      // is exactly what [`rollback`] recovers from.
+      state.last_error = Some(format!("swap failed and was not undone: {e}"));
+      let _ = write_state(layout, state);
+      err(
+        Code::Io,
+        format!("the swap failed and could not be undone in place: {e}"),
+      )
     }
   }
 }
@@ -693,11 +924,14 @@ pub fn rollback_with(
   let old = layout.old_path();
   let failed = layout.failed_path();
   let install = &layout.install;
+  let resuming = state.phase == Phase::RollingBack;
   // A version that failed its trial is rejected. The mark is recorded when
   // the rollback starts, so a resumed rollback still knows.
   let reject = match state.phase {
     Phase::Swapped => {
-      state.rejected = state.to.clone();
+      if let Some(to) = state.to.clone() {
+        state.reject(&to);
+      }
       true
     }
     Phase::RollingBack => state.to.is_some() && state.rejected == state.to,
@@ -738,24 +972,51 @@ pub fn rollback_with(
   };
   let to = state.to.clone();
   state.phase = Phase::RollingBack;
-  state.install_id = file_id(install);
+  // What is at the install path as the rollback starts (the failed app):
+  // a resumed rollback compares it with what is there now to tell whether
+  // its exchange already ran. Recorded once, never by the resumed run.
+  if !resuming {
+    state.install_id = file_id(install);
+  }
   write_state(layout, state)?;
 
   // Restore: the failed install aside, `.old` back. Each step is checked so
   // a rerun after an interruption picks up where this one stopped.
   let restore = (|| -> std::io::Result<()> {
+    if exists(install)
+      && exists(&old)
+      && state.install_id.is_some()
+      && file_id(install) != state.install_id
+    {
+      // An earlier run exchanged them and stopped: the previous app is
+      // installed and `.old` holds the failed one.
+      park_failed(layout, hook, &old, &failed);
+      return Ok(());
+    }
     if exists(&old) {
       if exists(install) {
         if exists(&failed) {
           remove_install_copy(layout, &failed);
         }
+        // The previous app back in ONE atomic step where the OS can.
+        let exchanged = if hook("rollback-exchange").is_ok() {
+          exchange(&old, install)?
+        } else {
+          false
+        };
+        if exchanged {
+          park_failed(layout, hook, &old, &failed);
+          return Ok(());
+        }
         step(hook, "install->failed", || rename_retry(install, &failed))?;
       }
       if let Err(e) = step(hook, "old->install", || rename_retry(&old, install))
       {
-        // Never leave the install path empty.
+        // Never leave the install path empty: the failed app back (checked
+        // and retried; if even that fails the state stays `rollingBack`
+        // and the next helper run puts `.old` back).
         if !exists(install) && exists(&failed) {
-          let _ = rename_retry(&failed, install);
+          let _ = undo_rename(hook, &failed, install);
         }
         return Err(e);
       }
@@ -785,6 +1046,27 @@ pub fn rollback_with(
   Ok(if reject { to } else { None })
 }
 
+/// After the rollback's exchange the failed app sits at `.old`: move it to
+/// the failed-install name. The rollback is complete without this (the
+/// previous app is installed), so a failure only leaves it at `.old`, where
+/// the cleanup after the rollback deletes it as well.
+fn park_failed(
+  layout: &InstallLayout,
+  hook: FaultHook,
+  old: &Path,
+  failed: &Path,
+) {
+  if let Err(e) = step(hook, "old->failed", || rename_retry(old, failed)) {
+    log_line(
+      layout,
+      &format!(
+        "the failed install stays at {} for cleanup: {e}",
+        old.display()
+      ),
+    );
+  }
+}
+
 /// Roll back and delete what is left ([`rollback_with`], then
 /// [`remove_rollback_leftovers`]).
 pub fn rollback_and_clean(
@@ -804,7 +1086,10 @@ pub fn remove_rollback_leftovers(
   layout: &InstallLayout,
   state: &mut UpdateState,
 ) -> bool {
-  let failed_gone = remove_install_copy_now(layout, &layout.failed_path());
+  // After a rollback `.old` is never the previous app (that is installed
+  // again): only a failed one an interrupted exchange left there.
+  let failed_gone = remove_install_copy_now(layout, &layout.old_path())
+    & remove_install_copy_now(layout, &layout.failed_path());
   let staging_gone = remove_path_once(&layout.staging_dir());
   log_line(
     layout,
@@ -825,21 +1110,36 @@ pub fn remove_rollback_leftovers(
 /// `cleanup`, finished at the next start). `Ok(false)` when there was
 /// nothing to confirm.
 pub fn confirm(layout: &InstallLayout) -> Result<bool, UpdateError> {
-  let Some(mut state) = read_state(layout) else {
+  let Some(mut state) = mark_confirmed(layout)? else {
     return Ok(false);
   };
+  cleanup(layout, &mut state);
+  Ok(true)
+}
+
+/// The state half of [`confirm`]: record the running version as good
+/// (`idle`, `cleanup` pending) and return the state for a [`cleanup`] or
+/// [`cleanup_without_waiting`] (the `confirm()` op runs on the JavaScript
+/// thread). `None` when there was nothing to confirm.
+pub fn mark_confirmed(
+  layout: &InstallLayout,
+) -> Result<Option<UpdateState>, UpdateError> {
+  let Some(mut state) = read_state(layout) else {
+    return Ok(None);
+  };
   if state.phase != Phase::Swapped {
-    return Ok(false);
+    return Ok(None);
   }
   state.phase = Phase::Idle;
   state.launches = 0;
   state.helper_attempts = 0;
-  state.rejected = None;
+  if let Some(to) = state.to.clone() {
+    state.forget_rejected_up_to(&to);
+  }
   state.cleanup = true;
   state.last_error = None;
   write_state(layout, &state)?;
-  cleanup(layout, &mut state);
-  Ok(true)
+  Ok(Some(state))
 }
 
 /// Delete `.old`, a failed install and staging; clear `cleanup` when done.
@@ -853,9 +1153,55 @@ pub fn cleanup(layout: &InstallLayout, state: &mut UpdateState) {
   let done = discard_install_copy(layout, &layout.old_path())
     & discard_install_copy(layout, &layout.failed_path())
     & discard_path(layout, &layout.staging_dir());
-  if done && state.cleanup {
-    state.cleanup = false;
-    let _ = write_state(layout, state);
+  if done {
+    cleanup_done(layout, state);
+  }
+}
+
+/// [`cleanup`] for the JavaScript thread (`confirm()`): only renames. The
+/// previous app, a failed install and staging are each moved to a trash
+/// name at once (so `.old` is gone when `confirm()` returns, even if the app
+/// exits right after) and deleted on a background thread. What would block
+/// (waiting on Windows for processes still running from a failed install, a
+/// deletion in place when the rename fails) is never done here: that path
+/// stays, with `cleanup` set, for the next start's [`cleanup`].
+pub fn cleanup_without_waiting(
+  layout: &InstallLayout,
+  state: &mut UpdateState,
+) {
+  let quick = |path: &Path, install_copy: bool| -> bool {
+    if !exists(path) {
+      return true;
+    }
+    // Anything at an install name that isn't provably this app's is left in
+    // place (the next `cleanup` logs it).
+    if install_copy && !is_install_copy(layout.kind, path) {
+      return false;
+    }
+    move_to_trash(layout, path)
+  };
+  let done = quick(&layout.old_path(), true)
+    & quick(&layout.failed_path(), true)
+    & quick(&layout.staging_dir(), false);
+  if done {
+    cleanup_done(layout, state);
+  }
+}
+
+/// Clear `cleanup` once everything is gone, on the state as it is NOW (a
+/// re-read), not on the copy the cleanup started from: the app may have
+/// recorded a manifest sequence or staged an update meanwhile.
+fn cleanup_done(layout: &InstallLayout, state: &mut UpdateState) {
+  if !state.cleanup {
+    return;
+  }
+  state.cleanup = false;
+  if let Some(mut current) = read_state(layout)
+    && current.phase == Phase::Idle
+    && current.cleanup
+  {
+    current.cleanup = false;
+    let _ = write_state(layout, &current);
   }
 }
 
@@ -957,13 +1303,11 @@ pub fn log_line(layout: &InstallLayout, line: &str) {
   let path = layout
     .parent
     .join(format!(".{}.denext-update.log", layout.name));
-  if std::fs::metadata(&path).is_ok_and(|m| m.len() > 256 * 1024) {
+  if std::fs::symlink_metadata(&path).is_ok_and(|m| m.len() > 256 * 1024) {
     let _ = std::fs::remove_file(&path);
   }
-  if let Ok(mut f) = std::fs::OpenOptions::new()
-    .create(true)
-    .append(true)
-    .open(&path)
+  if let Ok(mut f) =
+    open_private(&path, std::fs::OpenOptions::new().create(true).append(true))
   {
     let now = std::time::SystemTime::now()
       .duration_since(std::time::UNIX_EPOCH)
@@ -973,57 +1317,62 @@ pub fn log_line(layout: &InstallLayout, line: &str) {
   }
 }
 
-/// The helper's lock file, next to the install: holds the running helper's
-/// PID, so a second helper (a second `applyAndRelaunch`, a watchdog retry)
-/// never runs a step concurrently with the first.
+/// The helper's lock file, next to the install, so a second helper (a
+/// second `applyAndRelaunch`, a watchdog retry) never runs a step
+/// concurrently with the first.
 pub fn helper_lock_path(layout: &InstallLayout) -> PathBuf {
   layout
     .parent
     .join(format!(".{}.denext-update.lock", layout.name))
 }
 
-/// The held helper lock; removed when dropped.
-pub struct HelperLock(PathBuf);
-
-impl Drop for HelperLock {
-  fn drop(&mut self) {
-    let _ = std::fs::remove_file(&self.0);
-  }
+/// The held helper lock: an OS lock on the lock file (`flock` on Unix,
+/// `LockFileEx` on Windows, through [`std::fs::File::try_lock`]), held for
+/// as long as this value lives and released by the OS however the helper
+/// ends, a crash included.
+///
+/// The lock used to be the file's EXISTENCE, holding the helper's PID: a
+/// helper that died left it behind, and the next one judged it stale by
+/// whether that PID was alive, which a reused PID fooled one way and a
+/// racing takeover (two helpers deleting and recreating it) the other. Now
+/// only the OS lock decides, and the file is never deleted: removing a lock
+/// file while another process has it open would let a third lock a new file
+/// of the same name while the first still holds the old one. Its content (the
+/// holder's PID) is for a person reading the directory; it is never trusted,
+/// and a file this runtime can't parse is simply locked over, never deleted.
+pub struct HelperLock {
+  _file: std::fs::File,
 }
 
-/// Take the helper lock, unless another live helper holds it. A lock left by
-/// a helper that died is taken over.
+/// Take the helper lock, unless another helper holds it.
 pub fn take_helper_lock(layout: &InstallLayout) -> Option<HelperLock> {
   let path = helper_lock_path(layout);
-  let me = std::process::id();
-  for _ in 0..2 {
-    match std::fs::OpenOptions::new()
+  let mut file = match open_private(
+    &path,
+    std::fs::OpenOptions::new()
+      .read(true)
       .write(true)
-      .create_new(true)
-      .open(&path)
-    {
-      Ok(mut f) => {
-        let _ = write!(f, "{me}");
-        return Some(HelperLock(path));
-      }
-      Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-        let holder = std::fs::read_to_string(&path)
-          .ok()
-          .and_then(|s| s.trim().parse::<u32>().ok());
-        match holder {
-          Some(pid) if pid != me && !wait_for_exit(pid, Duration::ZERO) => {
-            return None;
-          }
-          _ => {
-            // Stale (its helper is gone, or unreadable): take it over.
-            let _ = std::fs::remove_file(&path);
-          }
-        }
-      }
-      Err(_) => return None,
+      .create(true)
+      .truncate(false),
+  ) {
+    Ok(f) => f,
+    Err(e) => {
+      log_line(layout, &format!("cannot open the helper lock: {e}"));
+      return None;
+    }
+  };
+  match file.try_lock() {
+    Ok(()) => {}
+    Err(std::fs::TryLockError::WouldBlock) => return None,
+    Err(std::fs::TryLockError::Error(e)) => {
+      log_line(layout, &format!("cannot lock the helper lock: {e}"));
+      return None;
     }
   }
-  None
+  if file.set_len(0).is_ok() {
+    let _ = write!(file, "{}", std::process::id());
+  }
+  Some(HelperLock { _file: file })
 }
 
 /// Whether the apply `pid` asked for is still requested (not withdrawn).
@@ -1089,12 +1438,9 @@ pub fn run_helper(layout: &InstallLayout, mode: HelperMode, pid: u32) -> i32 {
       }
       Err(e) => {
         log_line(layout, &format!("apply failed: {e}"));
-        // The previous app is in place (or the state could not be read):
-        // bring it back up only when the state was recorded.
-        if read_state(layout).is_some_and(|s| s.phase == Phase::Staged) {
-          relaunch(layout, &state, None);
-        }
-        1
+        helper_after_failed_apply(layout, &mut |state, marker| {
+          relaunch(layout, state, marker)
+        })
       }
     },
     HelperMode::Rollback => {
@@ -1102,6 +1448,29 @@ pub fn run_helper(layout: &InstallLayout, mode: HelperMode, pid: u32) -> i32 {
         relaunch(layout, state, marker)
       })
     }
+  }
+}
+
+/// After a failed apply: the previous app is in place (`staged`): relaunch
+/// it. A swap that could not be undone in place (`swapping`) is recovered
+/// right here, as the next launch's watchdog would: there may be no app at
+/// the install path to launch. Anything else (the state unreadable): leave
+/// it for the next start.
+fn helper_after_failed_apply(
+  layout: &InstallLayout,
+  relaunch: &mut dyn FnMut(&UpdateState, Option<String>) -> i32,
+) -> i32 {
+  match read_state(layout) {
+    Some(state) if state.phase == Phase::Staged => {
+      relaunch(&state, None);
+      1
+    }
+    Some(mut state) if state.phase == Phase::Swapping => {
+      log_line(layout, "the swap was not undone: recovering now");
+      helper_rollback(layout, &mut state, relaunch);
+      1
+    }
+    _ => 1,
   }
 }
 
@@ -1671,6 +2040,146 @@ mod tests {
     let s = read_state(l).expect("readable");
     assert_eq!(s.rejected.as_deref(), Some("3.0.0"));
     assert_eq!(s.trial_started, None);
+    // The single `rejected` an older runtime wrote is part of the set.
+    assert_eq!(s.all_rejected(), vec!["3.0.0".to_string()]);
+    // A field this version does not know survives its write.
+    write_state(l, &s).unwrap();
+    let json: serde_json::Value =
+      serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(json["someFutureField"], serde_json::json!({ "x": 1 }));
+  }
+
+  #[test]
+  fn rejected_versions_are_a_bounded_set() {
+    let f = fixture(None);
+    let mut s = UpdateState::new(&f.layout);
+    s.rejected = Some("1.5.0".into()); // what an older runtime wrote
+    s.reject("2.0.0");
+    s.reject("3.0.0");
+    s.reject("2.0.0"); // again: moved to the end, not duplicated
+    assert_eq!(s.all_rejected(), vec!["1.5.0", "3.0.0", "2.0.0"]);
+    assert_eq!(s.rejected.as_deref(), Some("2.0.0"));
+    for i in 0..(MAX_REJECTED + 5) {
+      s.reject(&format!("9.0.{i}"));
+    }
+    assert_eq!(s.all_rejected().len(), MAX_REJECTED);
+    assert_eq!(
+      s.all_rejected().first().map(String::as_str),
+      Some("9.0.5"),
+      "the oldest are dropped first"
+    );
+    // Confirming a version forgets the rejected ones it makes moot and keeps
+    // the newer ones.
+    let mut s = UpdateState::new(&f.layout);
+    for v in ["1.5.0", "2.0.0", "3.0.0", "not-a-version"] {
+      s.reject(v);
+    }
+    s.forget_rejected_up_to("2.0.0");
+    assert_eq!(s.all_rejected(), vec!["3.0.0"]);
+    assert_eq!(s.rejected.as_deref(), Some("3.0.0"));
+    s.forget_rejected_up_to("3.0.0");
+    assert!(s.all_rejected().is_empty());
+    assert_eq!(s.rejected, None);
+  }
+
+  #[test]
+  fn confirm_keeps_newer_rejected_versions_and_the_sequence() {
+    let f = fixture(Some("2.0.0"));
+    let l = &f.layout;
+    let mut s = read_state(l).unwrap();
+    s.reject("1.5.0");
+    s.reject("4.0.0");
+    s.manifest_sequence = Some(77);
+    write_state(l, &s).unwrap();
+    let mut s = read_state(l).unwrap();
+    apply_swap(l, &mut s).unwrap();
+    assert!(confirm(l).unwrap());
+    let s = read_state(l).unwrap();
+    assert_eq!(s.all_rejected(), vec!["4.0.0"]);
+    assert_eq!(s.manifest_sequence, Some(77));
+  }
+
+  /// confirm() on the JavaScript thread: `.old` is renamed away before it
+  /// returns (deleted in the background); what can't be moved now, or isn't
+  /// provably this app's, stays with `cleanup` set for the next start.
+  #[test]
+  fn confirm_without_waiting_moves_the_previous_app_at_once() {
+    let f = fixture(Some("2.0.0"));
+    let l = &f.layout;
+    let mut s = read_state(l).unwrap();
+    apply_swap(l, &mut s).unwrap();
+    assert!(l.old_path().exists());
+    let mut s = mark_confirmed(l).unwrap().expect("a swapped update");
+    cleanup_without_waiting(l, &mut s);
+    assert!(!l.old_path().exists());
+    assert!(!read_state(l).unwrap().cleanup);
+    assert_eq!(installed(l), "2.0.0");
+
+    let f = fixture(Some("2.0.0"));
+    let l = &f.layout;
+    let mut s = read_state(l).unwrap();
+    apply_swap(l, &mut s).unwrap();
+    std::fs::remove_file(
+      l.old_path().join(super::super::layout::INSTALL_MARKER),
+    )
+    .unwrap();
+    let mut s = mark_confirmed(l).unwrap().unwrap();
+    cleanup_without_waiting(l, &mut s);
+    assert!(l.old_path().exists(), "not provably ours: left in place");
+    assert!(read_state(l).unwrap().cleanup);
+  }
+
+  #[test]
+  fn the_manifest_sequence_only_grows() {
+    let f = fixture(None);
+    let l = &f.layout;
+    record_manifest_sequence(l, Some(5)).unwrap();
+    assert_eq!(read_state(l).unwrap().manifest_sequence, Some(5));
+    record_manifest_sequence(l, Some(3)).unwrap();
+    record_manifest_sequence(l, None).unwrap();
+    assert_eq!(read_state(l).unwrap().manifest_sequence, Some(5));
+    record_manifest_sequence(l, Some(9)).unwrap();
+    assert_eq!(read_state(l).unwrap().manifest_sequence, Some(9));
+    // A new stage keeps it (and the rejected set).
+    let mut s = read_state(l).unwrap();
+    s.reject("3.0.0");
+    let fresh = UpdateState::carried_from(l, Some(s));
+    assert_eq!(fresh.manifest_sequence, Some(9));
+    assert_eq!(fresh.all_rejected(), vec!["3.0.0"]);
+    assert_eq!(fresh.phase, Phase::Idle);
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn state_and_log_never_follow_a_symlink() {
+    let f = fixture(Some("2.0.0"));
+    let l = &f.layout;
+    let elsewhere = l.parent.join("elsewhere.json");
+    std::fs::rename(l.state_path(), &elsewhere).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, l.state_path()).unwrap();
+    // A state file reached through a symlink is not read...
+    assert!(read_state(l).is_none());
+    // ...and a log planted as a symlink is not written through.
+    let log = l.parent.join(format!(".{}.denext-update.log", l.name));
+    let target = l.parent.join("victim");
+    std::fs::write(&target, b"keep").unwrap();
+    std::os::unix::fs::symlink(&target, &log).unwrap();
+    log_line(l, "hello");
+    assert_eq!(std::fs::read(&target).unwrap(), b"keep");
+    // Writing the state replaces the link itself, never its target.
+    let s = UpdateState::new(l);
+    write_state(l, &s).unwrap();
+    assert!(
+      !std::fs::symlink_metadata(l.state_path())
+        .unwrap()
+        .file_type()
+        .is_symlink()
+    );
+    assert!(
+      std::fs::read_to_string(&elsewhere)
+        .unwrap()
+        .contains("staged")
+    );
   }
 
   #[test]
@@ -1843,21 +2352,32 @@ mod tests {
   fn one_helper_at_a_time() {
     let f = fixture(Some("2.0.0"));
     let l = &f.layout;
-    let mut other = long_running();
-    std::fs::write(helper_lock_path(l), other.id().to_string()).unwrap();
-    // Another live helper holds the lock: refused, and its lock is kept.
+    // The OS lock decides: while one is held (its own open file, as another
+    // helper process's would be), a second take is refused.
+    let lock = take_helper_lock(l).expect("free");
     assert!(take_helper_lock(l).is_none());
+    drop(lock);
+    // Released when dropped (and by the OS when a helper dies); the file
+    // stays, it is never deleted.
     assert!(helper_lock_path(l).exists());
+    let lock = take_helper_lock(l).expect("released");
+    drop(lock);
+    // What the file says is never trusted: a live process's PID, or
+    // garbage, in an unlocked file is no lock, and the file is kept.
+    let other = long_running();
+    for content in [other.id().to_string(), "garbage\u{0}".to_string()] {
+      std::fs::write(helper_lock_path(l), &content).unwrap();
+      let lock = take_helper_lock(l).expect("unlocked is free");
+      #[cfg(not(windows))]
+      assert_eq!(
+        std::fs::read_to_string(helper_lock_path(l)).unwrap(),
+        std::process::id().to_string()
+      );
+      drop(lock);
+    }
+    let mut other = other;
     other.kill().unwrap();
     other.wait().unwrap();
-    // Its helper is gone: the stale lock is taken over, and released.
-    let lock = take_helper_lock(l).expect("a stale lock is taken over");
-    assert_eq!(
-      std::fs::read_to_string(helper_lock_path(l)).unwrap(),
-      std::process::id().to_string()
-    );
-    drop(lock);
-    assert!(!helper_lock_path(l).exists());
   }
 
   #[test]
@@ -1889,7 +2409,8 @@ mod tests {
     write_state(l, &s).unwrap();
     run_helper(l, HelperMode::Apply, app.id());
     assert_eq!(installed(l), "2.0.0");
-    assert!(!helper_lock_path(l).exists());
+    // The helper released its lock.
+    assert!(take_helper_lock(l).is_some());
   }
 
   #[test]
@@ -1916,6 +2437,7 @@ mod tests {
     let s = read_state(l).unwrap();
     assert_eq!(s.phase, Phase::Idle);
     assert_eq!(s.rejected.as_deref(), Some("2.0.0"));
+    assert_eq!(s.all_rejected(), vec!["2.0.0"]);
     assert_eq!(startup_action(l), StartupAction::Continue { trial: false });
   }
 
@@ -1951,6 +2473,107 @@ mod tests {
       );
       assert!(!l.old_path().exists(), "{failing}");
     }
+  }
+
+  /// A swap whose second rename fails AND whose undo fails: never reported
+  /// as undone; the state stays `swapping`, and the recovery the helper then
+  /// runs (the rollback) puts the previous app back, also on the atomic
+  /// exchange path.
+  #[test]
+  fn a_swap_that_cannot_be_undone_is_recovered() {
+    for exchanged in [false, true] {
+      let f = fixture(Some("2.0.0"));
+      let l = &f.layout;
+      if exchanged && !exchange_supported(&l.parent) {
+        continue;
+      }
+      let mut s = read_state(l).unwrap();
+      let hook = |name: &str| -> std::io::Result<()> {
+        let fail = match name {
+          "exchange" => !exchanged,
+          "old" => exchanged,
+          "staged->install" | "undo" => true,
+          _ => false,
+        };
+        if fail {
+          return Err(std::io::Error::other("injected"));
+        }
+        Ok(())
+      };
+      let e = apply_swap_with(l, &mut s, &hook).unwrap_err();
+      assert!(e.message.contains("could not be undone"), "{}", e.message);
+      let s = read_state(l).unwrap();
+      assert_eq!(s.phase, Phase::Swapping, "exchanged={exchanged}");
+      // The helper's recovery, as `run_helper` runs it after the failure.
+      let mut relaunched = Vec::new();
+      helper_after_failed_apply(l, &mut |state, marker| {
+        relaunched.push((state.phase, marker));
+        0
+      });
+      assert_eq!(installed(l), "1.0.0", "exchanged={exchanged}");
+      assert_eq!(relaunched, vec![(Phase::Idle, None)]);
+      let s = read_state(l).unwrap();
+      assert_eq!(s.phase, Phase::Idle);
+      assert!(s.all_rejected().is_empty(), "not the version's fault");
+    }
+  }
+
+  /// The rollback's atomic exchange: the previous app is back in one step;
+  /// if moving the failed app aside then fails, the rollback still
+  /// completes and the failed app is cleaned from `.old`; if the helper is
+  /// killed right after the exchange, the resumed rollback sees that it ran
+  /// (the install changed since it started) and does not swap back.
+  #[cfg(any(target_os = "macos", target_os = "linux"))]
+  #[test]
+  fn rollback_by_exchange_and_its_crash_points() {
+    let f = fixture(Some("2.0.0"));
+    if !exchange_supported(&f.layout.parent) {
+      return;
+    }
+    // The exchange ran, `.old` -> failed did not.
+    let l = &f.layout;
+    let mut s = read_state(l).unwrap();
+    apply_swap(l, &mut s).unwrap();
+    let mut s = read_state(l).unwrap();
+    let hook = |name: &str| -> std::io::Result<()> {
+      if name == "old->failed" {
+        return Err(std::io::Error::other("injected"));
+      }
+      Ok(())
+    };
+    assert_eq!(
+      rollback_with(l, &mut s, &hook).unwrap().as_deref(),
+      Some("2.0.0")
+    );
+    assert_eq!(installed(l), "1.0.0");
+    assert_eq!(
+      std::fs::read_to_string(l.old_path().join("version")).unwrap(),
+      "2.0.0"
+    );
+    assert!(remove_rollback_leftovers(l, &mut s));
+    assert!(!l.old_path().exists());
+    assert_eq!(installed(l), "1.0.0");
+
+    // Killed right after the exchange (the state still `rollingBack`).
+    let f = fixture(Some("2.0.0"));
+    let l = &f.layout;
+    let mut s = read_state(l).unwrap();
+    apply_swap(l, &mut s).unwrap();
+    let mut s = read_state(l).unwrap();
+    s.reject("2.0.0");
+    s.phase = Phase::RollingBack;
+    s.install_id = file_id(&l.install);
+    write_state(l, &s).unwrap();
+    assert!(exchange(&l.old_path(), &l.install).unwrap());
+    assert_eq!(installed(l), "1.0.0");
+    let mut s = read_state(l).unwrap();
+    assert_eq!(
+      rollback_and_clean(l, &mut s).unwrap().as_deref(),
+      Some("2.0.0")
+    );
+    assert_eq!(installed(l), "1.0.0", "the resumed rollback swapped back");
+    assert!(!l.old_path().exists());
+    assert!(!l.failed_path().exists());
   }
 
   #[test]
@@ -2020,8 +2643,9 @@ mod tests {
       let mut s = read_state(l).unwrap();
       apply_swap(l, &mut s).unwrap();
       let mut s = read_state(l).unwrap();
+      // The two-rename restore (no exchange), failing at `failing`.
       let hook = |name: &str| -> std::io::Result<()> {
-        if name == failing {
+        if name == failing || name == "rollback-exchange" {
           return Err(std::io::Error::other("injected"));
         }
         Ok(())
