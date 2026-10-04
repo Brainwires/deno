@@ -4,8 +4,9 @@
 //
 // 1. package the app at 1.0.0 / 2.0.0 / 3.0.0 and "install" 1.0.0;
 // 2. hostile manifests and archives against the real app: wrong key,
-//    unsigned, wrong app, downgrade, same version, a replayed (lower or
-//    missing) sequence, an expired manifest, no platform, http, a tampered /
+//    unsigned, wrong app, downgrade, same version, a replayed sequence, a
+//    manifest without a sequence or an expiry, an expired manifest, no
+//    platform, http, a tampered /
 //    oversized download, tar-slip, a symlink out, the wrong shape, another
 //    version's archive under this version's manifest, and staging without
 //    the unsigned-dev opt-out on an unsigned app; none may change the
@@ -311,8 +312,11 @@ export async function run(env: Env, rep: AreaReport) {
     // Verifies (up to date), and raises the install's sequence mark to 1000.
     await addCase("equal", await sign({ ...v2, version: "1.0.0" }, key));
     await addCase("replayed", await sign({ ...v2, sequence: 999 }, key));
+    // Both fields are required: a manifest without either is malformed.
     const { sequence: _, ...unsequenced } = v2;
     await addCase("unsequenced", await sign(unsequenced, key));
+    const { expiresAt: _e, ...unexpiring } = v2;
+    await addCase("unexpiring", await sign(unexpiring, key));
     await addCase(
       "expired",
       await sign({ ...v2, expiresAt: "2026-01-01T00:00:00.000Z" }, key),
@@ -436,7 +440,8 @@ export async function run(env: Env, rep: AreaReport) {
         downgrade: "downgrade",
         equal: "not available",
         replayed: "replayed",
-        unsequenced: "replayed",
+        unsequenced: "invalid_manifest",
+        unexpiring: "invalid_manifest",
         expired: "expired",
         noplatform: "no_platform",
         http: "insecure_url",

@@ -251,7 +251,7 @@ where the changes are discussed.
       `{ origin, windowId }`;
     - the updater: every PE file pinned to the running app's signer (issuer +
       subject), the staged app's own version checked against the manifest,
-      optional manifest `expiresAt` / `sequence` (a lower sequence than the
+      required manifest `expiresAt` / `sequence` (a lower sequence than the
       highest accepted is `replayed`), a set of rejected versions, crash-safe
       swap and rollback (atomic exchange, a checked undo), an OS file lock for
       the helper, symlink-safe owned state / log / lock files, extracted modes
@@ -490,11 +490,11 @@ in the job summary, never skipped silently. Areas:
   OS; `not_supported` on Windows and Linux; neither in workers.
 - **update** — full-app self-update with throwaway keys and a throwaway TLS CA:
   hostile manifests and archives refused with their codes and the install
-  untouched (including a replayed or missing `sequence`, an expired `expiresAt`,
-  and another version's archive under a manifest's version), the accepted
-  sequence recorded, an unwritable install, 1.0.0 -> 2.0.0 relaunch and confirm,
-  a 3.0.0 trial that never confirms rolled back and refused (and kept in the
-  rejected set).
+  untouched (including a replayed `sequence`, a missing `sequence` or
+  `expiresAt`, an expired `expiresAt`, and another version's archive under a
+  manifest's version), the accepted sequence recorded, an unwritable install,
+  1.0.0 -> 2.0.0 relaunch and confirm, a 3.0.0 trial that never confirms rolled
+  back and refused (and kept in the rejected set).
 - **Node-API** stays in `launch.sh`.
 
 What a hosted runner cannot do, reported `n/a` with the reason:
