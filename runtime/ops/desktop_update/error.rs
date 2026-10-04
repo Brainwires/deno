@@ -40,6 +40,10 @@ pub enum UpdateErrorCode {
   UnsafeArchive,
   /// The staged app is not the same app (another bundle id / executable).
   BundleMismatch,
+  /// The staged app's own embedded version (the version compiled into its
+  /// runtime library; on macOS also its `Info.plist`) is not the version the
+  /// manifest offers.
+  VersionMismatch,
   /// The OS code-signature check of the staged app failed, or the running
   /// app is unsigned and the dev opt-out was not given.
   OsSignature,
@@ -72,6 +76,7 @@ impl UpdateErrorCode {
       Self::Integrity => "integrity",
       Self::UnsafeArchive => "unsafe_archive",
       Self::BundleMismatch => "bundle_mismatch",
+      Self::VersionMismatch => "version_mismatch",
       Self::OsSignature => "os_signature",
       Self::InstallNotWritable => "install_not_writable",
       Self::UnsupportedLayout => "unsupported_layout",

@@ -16,7 +16,8 @@
 //!    install, refusing a byte past the manifest's size, then matches size
 //!    and SHA-256 ([`archive::DownloadSink`]).
 //! 3. `stage()` extracts it with the safe extractor ([`archive`]), checks it
-//!    is the same app shape, and runs the OS code-signature check against the
+//!    is the same app shape and the version the manifest offers
+//!    ([`embedded`]), and runs the OS code-signature check against the
 //!    running app ([`oscheck`]). Only then is the update `staged`.
 //! 4. `applyAndRelaunch()` starts the helper, which waits for the app to
 //!    exit, swaps the install atomically and relaunches ([`swap`]).
@@ -33,6 +34,7 @@
 )]
 
 pub mod archive;
+pub mod embedded;
 pub mod error;
 pub mod layout;
 pub mod manifest;
@@ -623,6 +625,9 @@ fn stage_blocking(
       ),
     );
   }
+  // The app's own version is the one the manifest offers (an older build
+  // signed by the same identity, served as a newer version, is refused).
+  embedded::check_embedded_version(layout, &staged, to)?;
   let signature = verify_os_signature(layout, &staged, allow_unsigned_dev)?;
   // What the helper re-checks before it swaps (the tree verified above).
   let staged_digest = swap::tree_digest(&staged)
@@ -662,12 +667,19 @@ fn verify_os_signature(
       allow_unsigned_dev,
     )
   } else if cfg!(windows) {
+    // Every PE image the app holds, not only the executable and its runtime
+    // DLL: any DLL in the tree is loadable by name.
     let exe = layout.exe_in(staged);
-    let mut files = vec![exe.clone()];
-    // The runtime the executable loads: `<App>.dll` next to `<App>.exe`.
-    let dll = exe.with_extension("dll");
-    if dll.is_file() {
-      files.push(dll);
+    let files = oscheck::pe_files(staged)
+      .map_err(|e| UpdateError::io(staged.display(), e))?;
+    if !files.contains(&exe) {
+      return error::err(
+        Code::BundleMismatch,
+        format!(
+          "{} in the archive is not a PE image",
+          layout.exe_rel.display()
+        ),
+      );
     }
     oscheck::verify_windows(
       &oscheck::authenticode_signer,
