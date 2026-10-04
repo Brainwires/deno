@@ -1512,8 +1512,10 @@ pub const DESKTOP_JS: &str = r#"
     #sync() {
       const on = this.#listeners.length > 0;
       if (on === this.#watching) return;
-      this.#watching = on;
+      // Turning the watcher on needs --allow-sys (it throws NotCapable
+      // without it); only a watcher that started counts as on.
       op_desktop_clipboard_watch(on);
+      this.#watching = on;
     }
 
     #forget(listener, capture) {

@@ -3682,6 +3682,11 @@ async fn op_desktop_register_scheme(
   #[string] scheme: String,
   force: bool,
 ) -> Result<SchemeRegisterInfo, deno_error::JsErrorBox> {
+  // Taking a scheme from the app that owns it needs `--allow-sys`; claiming
+  // one nobody owns (what the runtime does at startup anyway) does not.
+  if force {
+    check_desktop_integration(&state.borrow())?;
+  }
   let (handlers, scheme) = scheme_handlers(&state, &scheme)?;
   await_scheme_call(deno_core::unsync::spawn_blocking(move || {
     handlers.register_scheme(&scheme, force)
@@ -4265,6 +4270,7 @@ async fn op_desktop_read_clipboard_text(
 ) -> Result<Option<String>, deno_error::JsErrorBox> {
   let api = {
     let s = state.borrow();
+    check_desktop_integration(&s)?;
     s.try_borrow::<Arc<dyn DesktopApi>>().cloned()
   };
   let Some(api) = api else {
@@ -4360,6 +4366,26 @@ fn desktop_api(
   state.borrow().try_borrow::<Arc<dyn DesktopApi>>().cloned()
 }
 
+/// The permission the desktop integrations that reach past the app's own
+/// windows need: unscoped `--allow-sys` (or `-A`). They are reading the
+/// clipboard (and watching it change), global shortcuts (key combinations
+/// taken from every other app), launch at login, taking over a URL scheme
+/// another app owns (`registerScheme({ force: true })`), and posting OS
+/// notifications. A permission-less dependency of the app reached all of
+/// them. Deno has no permission kind of their own, and the stock `deno
+/// desktop` CLI that packages an app refuses `--allow-sys` names it doesn't
+/// know, so they share the whole `sys` grant; a partial
+/// `--allow-sys=<names>` is not enough. Checked before anything else, so
+/// the refusal (`NotCapable`) is the same in and outside a desktop app.
+fn check_desktop_integration(
+  state: &OpState,
+) -> Result<(), deno_error::JsErrorBox> {
+  state
+    .borrow::<deno_permissions::PermissionsContainer>()
+    .check_sys_all()
+    .map_err(deno_error::JsErrorBox::from_err)
+}
+
 /// Runs a blocking clipboard call on the blocking pool with the clipboard
 /// timeout, for the same reasons as `op_desktop_read_clipboard_text`.
 async fn clipboard_blocking<T: Send + 'static>(
@@ -4400,6 +4426,7 @@ fn op_desktop_clipboard_capabilities(
 async fn op_desktop_read_clipboard_html(
   state: std::rc::Rc<std::cell::RefCell<OpState>>,
 ) -> Result<Option<String>, deno_error::JsErrorBox> {
+  check_desktop_integration(&state.borrow())?;
   let Some(api) = desktop_api(&state) else {
     return Ok(None);
   };
@@ -4439,6 +4466,7 @@ async fn op_desktop_write_clipboard_html(
 async fn op_desktop_read_clipboard_image(
   state: std::rc::Rc<std::cell::RefCell<OpState>>,
 ) -> Result<Option<deno_core::ToJsBuffer>, deno_error::JsErrorBox> {
+  check_desktop_integration(&state.borrow())?;
   let Some(api) = desktop_api(&state) else {
     return Ok(None);
   };
@@ -4487,6 +4515,7 @@ async fn op_desktop_write_clipboard_image(
 async fn op_desktop_read_clipboard_formats(
   state: std::rc::Rc<std::cell::RefCell<OpState>>,
 ) -> Result<Vec<String>, deno_error::JsErrorBox> {
+  check_desktop_integration(&state.borrow())?;
   let Some(api) = desktop_api(&state) else {
     return Ok(Vec::new());
   };
@@ -4496,12 +4525,20 @@ async fn op_desktop_read_clipboard_formats(
 }
 
 /// Starts / stops the clipboard "change" events (the JS side turns them on
-/// with the first listener and off with the last).
+/// with the first listener and off with the last). Turning them on needs
+/// `--allow-sys`, as reading the clipboard does.
 #[op2(fast)]
-fn op_desktop_clipboard_watch(state: &mut OpState, on: bool) {
+fn op_desktop_clipboard_watch(
+  state: &mut OpState,
+  on: bool,
+) -> Result<(), deno_error::JsErrorBox> {
+  if on {
+    check_desktop_integration(state)?;
+  }
   if let Some(api) = state.try_borrow::<Arc<dyn DesktopApi>>() {
     api.set_clipboard_watch(on);
   }
+  Ok(())
 }
 
 /// `BrowserWindow.prototype.startDrag()`: `"dropped"`, `"cancelled"` or
@@ -4630,17 +4667,18 @@ const MAX_ACCELERATOR_LEN: usize = 128;
 async fn op_desktop_register_shortcut(
   state: std::rc::Rc<std::cell::RefCell<OpState>>,
   #[string] accelerator: String,
-) -> ShortcutRegisterInfo {
+) -> Result<ShortcutRegisterInfo, deno_error::JsErrorBox> {
+  check_desktop_integration(&state.borrow())?;
   if accelerator.is_empty()
     || accelerator.len() > MAX_ACCELERATOR_LEN
     || accelerator.contains('\0')
   {
-    return ShortcutRegisterInfo::err("invalid");
+    return Ok(ShortcutRegisterInfo::err("invalid"));
   }
-  match desktop_api(&state) {
+  Ok(match desktop_api(&state) {
     Some(api) => api.register_shortcut(&accelerator).await,
     None => ShortcutRegisterInfo::err("not_supported"),
-  }
+  })
 }
 
 /// `Deno.desktop.shortcuts.unregister()`.
@@ -4717,6 +4755,7 @@ async fn op_desktop_set_launch_at_login(
   state: std::rc::Rc<std::cell::RefCell<OpState>>,
   enabled: bool,
 ) -> Result<String, deno_error::JsErrorBox> {
+  check_desktop_integration(&state.borrow())?;
   let Some(api) = desktop_api(&state) else {
     return Ok("not-supported".to_string());
   };
@@ -4879,6 +4918,7 @@ fn op_desktop_schedule_notification(
   #[serde] options: NotificationScheduleOptions,
   #[buffer] icon: Option<&[u8]>,
 ) -> Result<bool, deno_error::JsErrorBox> {
+  check_desktop_integration(state)?;
   check_notification_ids(Some(&options.tag), options.data.as_deref())?;
   if options.title.is_empty() {
     return Err(deno_error::JsErrorBox::type_error(
@@ -5176,6 +5216,7 @@ impl Notification {
   ) -> Result<v8::Global<v8::Value>, JsErrorBox> {
     let (api, brand, set_event_target_data) =
       class_prerequisites(state, "Notification")?;
+    check_desktop_integration(state)?;
 
     let options = options.unwrap_or(NotificationConstructorOptions {
       body: None,

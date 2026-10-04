@@ -1552,7 +1552,12 @@ declare namespace Deno {
     }
 
     /** The system clipboard: text, HTML and PNG images. See
-     * {@linkcode Deno.desktop.clipboard}. */
+     * {@linkcode Deno.desktop.clipboard}.
+     *
+     * Reading it (`readText`, `readHTML`, `readImage`, `availableFormats`)
+     * and listening for `"change"` need `--allow-sys` (unscoped): they throw
+     * / reject with `Deno.errors.NotCapable` without it. Writing needs no
+     * permission. */
     export interface DesktopClipboard extends EventTarget {
       capabilities(): ClipboardCapabilities;
       /** The clipboard's text, or `""` when it holds none. */
@@ -1658,7 +1663,10 @@ declare namespace Deno {
        * `Deno.errors.NotSupported` where there are no global shortcuts
        * (`"not_supported"`), `Deno.errors.PermissionDenied` when the user
        * declined it (`"denied"`, the Wayland portal), or an `Error`
-       * (`"failed"`). */
+       * (`"failed"`).
+       *
+       * Needs `--allow-sys` (unscoped): rejects with
+       * `Deno.errors.NotCapable` without it. */
       register(
         accelerator: string,
         callback?: (accelerator: string) => void,
@@ -1754,6 +1762,9 @@ declare namespace Deno {
      * an XDG autostart entry (`~/.config/autostart/<app id>.desktop`). The
      * entry is named after the app's identifier. `set` resolves with the
      * state afterwards and rejects with the OS's message when it failed.
+     *
+     * `set` needs `--allow-sys` (unscoped): it rejects with
+     * `Deno.errors.NotCapable` without it. `get` needs no permission.
      *
      * Not available in workers.
      *
@@ -1908,7 +1919,9 @@ declare namespace Deno {
       capabilities(): NotificationCapabilities;
       /** Schedule a notification; resolves with its tag. Rejects with
        * `Deno.errors.NotSupported` where it can't be scheduled. Its clicks
-       * arrive as `"notificationresponse"` events. */
+       * arrive as `"notificationresponse"` events. Needs `--allow-sys`
+       * (unscoped), like `new Notification()`: `Deno.errors.NotCapable`
+       * without it. */
       schedule(options: ScheduledNotificationOptions): Promise<string>;
       /** The pending scheduled notifications, soonest first. */
       getScheduled(): Promise<ScheduledNotification[]>;
@@ -1986,6 +1999,9 @@ declare namespace Deno {
        * scheme, which the OS may confirm with the user. A Windows
        * "UserChoice" (the user picked a handler in Settings) cannot be
        * overridden by any app; the result then reports `registered: false`.
+       *
+       * Forcing needs `--allow-sys` (unscoped): the call rejects with
+       * `Deno.errors.NotCapable` without it.
        */
       force?: boolean;
     }
