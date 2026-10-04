@@ -633,6 +633,11 @@ impl CliOptions {
     }
   }
 
+  /// See `InternalFlags::is_desktop_dev`.
+  pub fn is_desktop_dev_build(&self) -> bool {
+    self.flags.internal.is_desktop_dev
+  }
+
   pub fn ts_type_lib_window(&self) -> TsTypeLib {
     if self.flags.internal.is_desktop {
       TsTypeLib::DenoDesktop

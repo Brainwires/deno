@@ -916,6 +916,11 @@ pub struct InternalFlags {
   pub lockfile_skip_write: bool,
   /// Set when running the desktop subcommand to use desktop type libs.
   pub is_desktop: bool,
+  /// Set by `deno desktop --hmr` / `--inspect*` for the throwaway binary it
+  /// compiles and launches itself: the binary is marked a development build
+  /// (`Metadata::desktop_dev`), the only kind whose runtime honours the
+  /// development switches in its environment.
+  pub is_desktop_dev: bool,
   /// Set by `deno compile --bundle` when the bundled output contains
   /// references that need to resolve against npm packages at runtime
   /// (CJS dependencies, native addons). When true, the standalone

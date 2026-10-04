@@ -16,6 +16,7 @@
 //! TCP loopback for HTTP.
 
 mod app_origin;
+mod dev_switches;
 mod napi_host_exports;
 mod scheme_bridge;
 mod scheme_registration;
@@ -810,7 +811,7 @@ impl denort::desktop::DesktopApi for WefDesktopApi {
     if !laufey::devtools_enabled() {
       return;
     }
-    if let Ok(mux) = env::var("DENO_DESKTOP_MUX_WS") {
+    if let Some(mux) = dev_switches::get().mux_ws.clone() {
       // Reuse an existing DevTools window when one is already open, so
       // repeated `openDevtools()` calls don't pile up windows. The id is
       // copied out first: no lock is held across the native call.
@@ -1203,7 +1204,7 @@ impl denort::desktop::DesktopApi for WefDesktopApi {
   }
 
   fn close_devtools(&self, window_id: u32) {
-    if env::var("DENO_DESKTOP_MUX_WS").is_ok() {
+    if dev_switches::get().mux_ws.is_some() {
       // `openDevtools()` opened the unified DevTools window (dev mode).
       // Take the id and release both locks BEFORE closing: the native close
       // runs the window's close handlers, which take `closed_windows` (the
@@ -1220,14 +1221,14 @@ impl denort::desktop::DesktopApi for WefDesktopApi {
   }
 
   fn is_devtools_open(&self, window_id: u32) -> bool {
-    if env::var("DENO_DESKTOP_MUX_WS").is_ok() {
+    if dev_switches::get().mux_ws.is_some() {
       return self.open_devtools_window().is_some();
     }
     laufey::Window::from_id(window_id).is_devtools_open()
   }
 
   fn devtools_enabled(&self, window_id: u32) -> bool {
-    if window_id == 0 || env::var("DENO_DESKTOP_MUX_WS").is_ok() {
+    if window_id == 0 || dev_switches::get().mux_ws.is_some() {
       return laufey::devtools_enabled();
     }
     laufey::Window::from_id(window_id).is_devtools_enabled()
@@ -2398,6 +2399,9 @@ laufey::main!(|| {
       return;
     }
   };
+  // The development switches in the environment count only in a
+  // development build (see `dev_switches`).
+  dev_switches::init(data.metadata.desktop_dev);
   if data.metadata.self_extracting.is_some() {
     if let Err(e) =
       denort::binary::extract_vfs_to_disk(&data.vfs, &data.root_path)
@@ -2828,6 +2832,7 @@ fn run_headless_worker() {
         deno_runtime::exit(1);
       }
     };
+    let dev = dev_switches::init(data.metadata.desktop_dev);
 
     denort::load_env_vars(&data.metadata.env_vars_from_env_file);
 
@@ -2837,9 +2842,7 @@ fn run_headless_worker() {
       // in-runtime dev server via DENO_DESKTOP_FRAMEWORK_DEV), keep the
       // source directory as CWD (inherited from parent). In production
       // mode, set CWD to extraction directory.
-      if env::var("DENO_DESKTOP_DEV_URL").is_err()
-        && env::var("DENO_DESKTOP_FRAMEWORK_DEV").is_err()
-      {
+      if !dev.is_framework_dev() {
         let _ = std::env::set_current_dir(&data.root_path);
       }
       denort::file_system::DenoRtSys::new_self_extracting(data.vfs.clone())
@@ -2866,19 +2869,20 @@ fn run_headless_worker() {
     // A packaged app forks only the modules it ships (under the embedded
     // file system's root), never a file elsewhere on disk or on a share; a
     // development run forks the dev server's scripts from the source tree.
-    if let Some(module) = &fork_module {
-      let dev = env::var_os("DENO_DESKTOP_HMR").is_some()
-        || env::var_os("DENO_DESKTOP_DEV_URL").is_some()
-        || env::var_os("DENO_DESKTOP_FRAMEWORK_DEV").is_some();
-      if !worker_launch::module_allowed(module, &data.root_path, dev) {
-        log::error!(
-          "{}: refusing to fork {module}: a packaged app forks only its own \
-           modules (under {})",
-          colors::red_bold("error"),
-          data.root_path.display()
-        );
-        deno_runtime::exit(1);
-      }
+    if let Some(module) = &fork_module
+      && !worker_launch::module_allowed(
+        module,
+        &data.root_path,
+        dev.is_dev_run(),
+      )
+    {
+      log::error!(
+        "{}: refusing to fork {module}: a packaged app forks only its own \
+         modules (under {})",
+        colors::red_bold("error"),
+        data.root_path.display()
+      );
+      deno_runtime::exit(1);
     }
 
     // A worker's own forks (a dev server's workers fork too) get a token
@@ -3113,10 +3117,9 @@ async fn run_desktop(
   // Surface a malformed value loudly: previously a typoed port silently
   // disabled the inspector and the user wondered why DevTools showed
   // nothing. Bail rather than no-op so the failure is visible.
-  let inspect_internal_port = match env::var(
-    "DENO_DESKTOP_INSPECT_INTERNAL_PORT",
-  ) {
-    Ok(s) => match s.parse::<std::net::SocketAddr>() {
+  let dev = dev_switches::get();
+  let inspect_internal_port = match &dev.inspect_port {
+    Some(s) => match s.parse::<std::net::SocketAddr>() {
       Ok(addr) => Some(addr),
       Err(e) => {
         bail!(
@@ -3124,10 +3127,10 @@ async fn run_desktop(
         );
       }
     },
-    Err(_) => None,
+    None => None,
   };
-  let inspect_brk = env::var("DENO_DESKTOP_INSPECT_BRK").is_ok();
-  let inspect_wait = env::var("DENO_DESKTOP_INSPECT_WAIT").is_ok();
+  let inspect_brk = dev.inspect_brk;
+  let inspect_wait = dev.inspect_wait;
   if let Some(addr) = inspect_internal_port {
     deno_runtime::deno_inspector_server::create_inspector_server(
       addr,
@@ -3148,7 +3151,7 @@ async fn run_desktop(
 
   // Enable HMR if DENO_DESKTOP_HMR is set to a directory path
   // (set by `deno compile --desktop --hmr`).
-  let hmr_watch_dir = env::var("DENO_DESKTOP_HMR").ok().map(PathBuf::from);
+  let hmr_watch_dir = dev.hmr_dir.clone();
 
   // Framework dev servers handle their own HMR via websocket.
   // For non-framework apps, V8-level HMR reloads the webview.
@@ -3160,14 +3163,13 @@ async fn run_desktop(
   // - DENO_DESKTOP_FRAMEWORK_DEV: the embedded entrypoint boots the dev
   //   server inside this runtime on the desktop serve port (so server code
   //   keeps `Deno.desktop`, #35899); use the regular serve-port poll.
-  let external_dev_url = env::var("DENO_DESKTOP_DEV_URL").ok();
-  let is_framework_dev = external_dev_url.is_some()
-    || env::var("DENO_DESKTOP_FRAMEWORK_DEV").is_ok();
+  let external_dev_url = dev.dev_url.clone();
+  let is_framework_dev = dev.is_framework_dev();
 
   // In dev mode, restore CWD to the source directory so the framework
   // dev server watches the original source files, not the extracted VFS.
-  if is_framework_dev && let Ok(source_dir) = env::var("DENO_DESKTOP_HMR") {
-    std::env::set_current_dir(&source_dir)?;
+  if is_framework_dev && let Some(source_dir) = &dev.hmr_dir {
+    std::env::set_current_dir(source_dir)?;
   }
 
   // Shared initial window ID for navigate_fut and HMR reload.
@@ -3253,8 +3255,7 @@ async fn run_desktop(
     launch.deep_links.clone(),
     launch.identifier.clone(),
     app_name.clone(),
-    env::var_os("DENO_DESKTOP_HMR").is_some()
-      || env::var_os("DENO_DESKTOP_DEV_URL").is_some(),
+    dev.hmr_dir.is_some() || dev.dev_url.is_some(),
   ));
   let launch_deep_links = Arc::new(launch.deep_links);
   let app_update = launch.app_update;
@@ -3446,7 +3447,7 @@ async fn run_desktop(
   // Do a full HTTP request instead of just a TCP connect — frameworks
   // like Vite accept connections before they're ready to serve.
   let wait_for_debugger = inspect_brk || inspect_wait;
-  let mux_addr = env::var("DENO_DESKTOP_MUX_WS").ok();
+  let mux_addr = dev.mux_ws.clone();
   let navigate_fut = async move {
     use tokio::io::AsyncReadExt;
     use tokio::io::AsyncWriteExt;
