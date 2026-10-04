@@ -46,7 +46,7 @@
 //! **Replay and freeze.** A replayed OLDER manifest can never install
 //! anything older than what runs (the downgrade guard, and rejected versions
 //! are never offered again); what it can do is hide a newer release from a
-//! client whose update host an attacker controls (a freeze). Two optional,
+//! client whose update host an attacker controls (a freeze). Two required,
 //! signed fields bound that:
 //!
 //! - `expiresAt` (an RFC 3339 timestamp, e.g. `Date.prototype.toISOString`
@@ -60,11 +60,12 @@
 //!   (otherwise replaying any pre-sequence manifest would undo it). An equal
 //!   sequence is the same release checked again.
 //!
-//! Both are optional: a manifest without them verifies as before (what
-//! denext's publisher wrote before they existed), unless this install has
-//! already accepted a sequenced one. Runtimes before these fields refuse a
-//! manifest that carries them (unknown keys), so a publisher adds them only
-//! for apps on a runtime that reads them.
+//! Both are required: a manifest without either is malformed
+//! (`invalid_manifest`), so no unsequenced or never-expiring manifest (what
+//! publishers wrote before these fields) is accepted, and replaying one can't
+//! undo the high-water mark. Runtimes before these fields refuse a manifest
+//! that carries them (unknown keys): a publisher writes them for apps on
+//! this runtime or later.
 
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
@@ -113,10 +114,11 @@ struct SignedManifest {
   #[serde(default)]
   release_notes: Option<String>,
   published_at: String,
-  /// RFC 3339; the manifest is refused after it.
+  /// RFC 3339; the manifest is refused after it. Required (checked in
+  /// `check_freshness`, which names the missing field).
   #[serde(default)]
   expires_at: Option<String>,
-  /// Monotonic release counter (see the module docs).
+  /// Monotonic release counter (see the module docs). Required, likewise.
   #[serde(default)]
   sequence: Option<u64>,
 }
@@ -424,7 +426,14 @@ fn check_freshness(
   manifest: &SignedManifest,
   exp: &Expectations,
 ) -> Result<(), UpdateError> {
-  if let Some(expires) = &manifest.expires_at {
+  let Some(expires) = &manifest.expires_at else {
+    return err(
+      Code::InvalidManifest,
+      "the manifest has no expiresAt (an RFC 3339 time after which it is \
+       refused)",
+    );
+  };
+  {
     let Some(at) = parse_rfc3339(expires) else {
       return err(
         Code::InvalidManifest,
@@ -453,12 +462,9 @@ fn check_freshness(
          install already accepted: an older manifest was served again"
       ),
     ),
-    (None, Some(floor)) => err(
-      Code::Replayed,
-      format!(
-        "the manifest has no sequence, but this install already accepted \
-         sequence {floor}: an older manifest was served again"
-      ),
+    (None, _) => err(
+      Code::InvalidManifest,
+      "the manifest has no sequence (a release counter that only grows)",
     ),
     _ => Ok(()),
   }
@@ -666,6 +672,8 @@ mod tests {
         }
       },
       "publishedAt": "2026-10-01T00:00:00Z",
+      "expiresAt": "2026-10-02T00:00:00Z",
+      "sequence": 1,
     })
   }
 
@@ -786,7 +794,7 @@ mod tests {
       check(&k, payload("1.0.0")).unwrap(),
       ManifestVerdict::UpToDate {
         version: "1.0.0".into(),
-        sequence: None,
+        sequence: Some(1),
       }
     );
     // Build metadata does not make a version newer.
@@ -794,7 +802,7 @@ mod tests {
       check(&k, payload("1.0.0+build.7")).unwrap(),
       ManifestVerdict::UpToDate {
         version: "1.0.0+build.7".into(),
-        sequence: None,
+        sequence: Some(1),
       }
     );
   }
@@ -841,6 +849,16 @@ mod tests {
   }
 
   #[test]
+  fn a_manifest_without_an_expiry_is_malformed() {
+    let k = key(1);
+    let mut p = payload("2.0.0");
+    p.as_object_mut().unwrap().remove("expiresAt");
+    assert_eq!(code(check(&k, p.clone())), Code::InvalidManifest);
+    p["version"] = "1.0.0".into();
+    assert_eq!(code(check(&k, p)), Code::InvalidManifest);
+  }
+
+  #[test]
   fn an_expired_manifest_is_refused() {
     let k = key(1);
     let mut p = payload("2.0.0");
@@ -879,34 +897,40 @@ mod tests {
     let pk = public_b64(&k);
     let signed = |v: &str, seq: Option<serde_json::Value>| {
       let mut p = payload(v);
-      if let Some(seq) = seq {
-        p["sequence"] = seq;
+      match seq {
+        Some(seq) => p["sequence"] = seq,
+        None => {
+          p.as_object_mut().unwrap().remove("sequence");
+        }
       }
       sign(&k, &p.to_string())
     };
-    // No floor yet: sequenced and unsequenced manifests both verify.
     let ManifestVerdict::Available(u) =
       verify_manifest(&signed("2.0.0", Some(10.into())), &exp(&pk)).unwrap()
     else {
       panic!("expected an update");
     };
     assert_eq!(u.sequence, Some(10));
-    assert!(verify_manifest(&signed("2.0.0", None), &exp(&pk)).is_ok());
+    // A manifest without a sequence is malformed, with or without a mark.
+    assert_eq!(
+      code(verify_manifest(&signed("2.0.0", None), &exp(&pk))),
+      Code::InvalidManifest
+    );
     let mut e = exp(&pk);
     e.sequence_floor = Some(10);
     // The same release again, and a newer one: accepted.
     assert!(verify_manifest(&signed("2.0.0", Some(10.into())), &e).is_ok());
     assert!(verify_manifest(&signed("2.0.0", Some(11.into())), &e).is_ok());
-    // An older one, or one without a sequence: replayed, even when it offers
-    // the running version (the freeze).
-    for (v, seq) in [
-      ("2.0.0", Some(9.into())),
-      ("1.0.0", Some(9.into())),
-      ("2.0.0", None),
-    ] {
+    // An older one: replayed, even when it offers the running version (the
+    // freeze). One without a sequence: malformed.
+    for (v, seq) in [("2.0.0", Some(9.into())), ("1.0.0", Some(9.into()))] {
       let r = verify_manifest(&signed(v, seq.clone()), &e);
       assert_eq!(code(r), Code::Replayed, "{v} {seq:?}");
     }
+    assert_eq!(
+      code(verify_manifest(&signed("2.0.0", None), &e)),
+      Code::InvalidManifest
+    );
     // An UpToDate verdict carries its sequence (to record it).
     assert_eq!(
       verify_manifest(&signed("1.0.0", Some(12.into())), &e).unwrap(),
@@ -1037,8 +1061,9 @@ mod tests {
   /// A manifest signed by denext's WebCrypto signer (`denext desktop
   /// publish-update`, ECDSA P-256 via `crypto.subtle.sign`) verifies here:
   /// the two sides agree on the key format, the signature encoding and the
-  /// signed bytes. Regenerate with `tests/desktop-app-update-vector.ts` in
-  /// denext.
+  /// signed bytes. The vector carries `expiresAt` and `sequence`; it was
+  /// regenerated with WebCrypto (`crypto.subtle.sign`, ECDSA P-256 /
+  /// SHA-256) when they became required.
   #[test]
   fn verifies_a_webcrypto_signed_vector() {
     let r = verify_manifest(
@@ -1059,6 +1084,7 @@ mod tests {
     };
     assert_eq!(u.version, "1.2.3");
     assert_eq!(u.size, 4242);
+    assert_eq!(u.sequence, Some(1_790_812_800));
   }
 
   // Generated by denext (WebCrypto ECDSA P-256), see the test above.

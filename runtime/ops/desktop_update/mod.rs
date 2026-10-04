@@ -1393,9 +1393,16 @@ mod tests {
         "kind": "bundle",
       } },
       "publishedAt": "2026-10-01T00:00:00Z",
+      "expiresAt": "2999-01-01T00:00:00Z",
+      "sequence": 1,
     });
+    // A null in `extra` removes the key.
     for (k, v) in extra.as_object().unwrap() {
-      payload[k] = v.clone();
+      if v.is_null() {
+        payload.as_object_mut().unwrap().remove(k);
+      } else {
+        payload[k] = v.clone();
+      }
     }
     let signed = payload.to_string();
     let mut msg = manifest::SIGNATURE_DOMAIN.to_vec();
@@ -1427,12 +1434,14 @@ mod tests {
     let check = |state: &mut OpState, v: &str, extra: serde_json::Value| {
       update_check(state, &signed_manifest(&key, &platform, v, extra), false)
     };
-    // Without a sequence (what publishers wrote before it existed): fine.
-    assert!(
-      check(&mut state, "2.0.0", serde_json::json!({}))
-        .unwrap()
-        .available
-    );
+    // Without a sequence or an expiry (what publishers wrote before them):
+    // malformed, and nothing is recorded.
+    for missing in [
+      serde_json::json!({ "sequence": null }),
+      serde_json::json!({ "expiresAt": null }),
+    ] {
+      expect_code(check(&mut state, "2.0.0", missing), "invalid_manifest");
+    }
     assert_eq!(swap::read_state(&layout), None, "nothing to record");
     let out = check(&mut state, "2.0.0", serde_json::json!({ "sequence": 10 }))
       .unwrap();
@@ -1448,8 +1457,10 @@ mod tests {
         .available
     );
     assert_eq!(update_info(&mut state).manifest_sequence, Some(12));
-    for extra in [serde_json::json!({ "sequence": 11 }), serde_json::json!({})]
-    {
+    for extra in [
+      serde_json::json!({ "sequence": 11 }),
+      serde_json::json!({ "sequence": 1 }),
+    ] {
       expect_code(check(&mut state, "2.0.0", extra), "replayed");
     }
     expect_code(

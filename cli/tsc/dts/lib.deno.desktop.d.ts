@@ -2474,11 +2474,12 @@ declare namespace Deno {
      * payload: `{ "schema": 1, "app": "<desktop.app.identifier>", "version",
      * "minVersion"?, "platforms": { "<target>-<backend>": { "url", "sha256",
      * "size", "kind": "bundle" } }, "releaseNotes"?, "publishedAt",
-     * "expiresAt"?, "sequence"? }` (unknown keys are refused). `expiresAt`
-     * (RFC 3339) refuses the manifest once it passes (`expired`); `sequence`
-     * (an integer up to 2^53 - 1 that only grows) is remembered per install,
-     * and a lower one, or none after a sequenced manifest, is refused
-     * (`replayed`): an old manifest served again can't hide newer releases. The platform key is
+     * "expiresAt", "sequence" }` (unknown keys are refused; a missing
+     * `expiresAt` or `sequence` is `invalid_manifest`). `expiresAt` (RFC
+     * 3339) refuses the manifest once it passes (`expired`); `sequence` (an
+     * integer up to 2^53 - 1 that only grows) is remembered per install, and
+     * a lower one is refused (`replayed`): an old manifest served again can't
+     * hide newer releases. The platform key is
      * {@linkcode AppUpdateStatus.platform}, e.g.
      * `"aarch64-apple-darwin-webview"`.
      *
