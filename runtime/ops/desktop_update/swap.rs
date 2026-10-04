@@ -1824,8 +1824,11 @@ pub fn spawn_detached(
 
 /// Start the helper (`<exe> run denext-update-helper <mode> <our pid>`): the
 /// installed executable (an AppImage's file, not its mount), working
-/// directory the install's parent, single-instance forwarding off (it must
-/// not be handed to the running app as a second instance).
+/// directory the install's parent. It must not be handed to the running app
+/// as a second instance: every laufey host runs a `run <script>` launch
+/// headless before its single-instance check (a launch file that pins the
+/// app id makes laufey ignore LAUFEY_SINGLE_INSTANCE, which is set here only
+/// for an app without one).
 pub fn spawn_helper(
   layout: &InstallLayout,
   mode: HelperMode,

@@ -125,6 +125,20 @@ async function main() {
     setTimeout(() => Deno.exit(0), 3000);
     return;
   }
+  if (probe.mode === "hold") {
+    // Stay up (holding the single-instance lock) until the runner releases
+    // this launch, at most two minutes.
+    log(`holding-${v}`, { pid: Deno.pid });
+    const until = Date.now() + 120_000;
+    while (Date.now() < until) {
+      try {
+        Deno.statSync(`${dir}/release-hold`);
+        break;
+      } catch { /* not yet */ }
+      await new Promise((r) => setTimeout(r, 200));
+    }
+    Deno.exit(0);
+  }
   if (probe.mode === "status") {
     log(`only-status-${v}`, status);
   }
