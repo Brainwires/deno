@@ -281,6 +281,71 @@ impl InitialReveal {
   }
 }
 
+/// The `raw-window-handle` pair for a laufey window (`BrowserWindow`'s
+/// WebGPU surface), from laufey's handle type and pointers. A null pointer
+/// is an error, never a handle: wgpu panics on an X11 handle without a
+/// `Display` ("Display pointer is not set", CEF on X11 reports none), and a
+/// panic exits the app.
+fn raw_window_handles(
+  handle_type: i32,
+  raw_win: *mut std::ffi::c_void,
+  raw_display: *mut std::ffi::c_void,
+) -> Result<
+  (
+    raw_window_handle::RawWindowHandle,
+    raw_window_handle::RawDisplayHandle,
+  ),
+  deno_error::JsErrorBox,
+> {
+  use raw_window_handle::*;
+  let null_window =
+    || deno_error::JsErrorBox::generic("Laufey returned a null window handle");
+  let null_display =
+    || deno_error::JsErrorBox::generic("Laufey returned a null display handle");
+  match handle_type {
+    laufey::LAUFEY_WINDOW_HANDLE_APPKIT => {
+      let win = RawWindowHandle::AppKit(AppKitWindowHandle::new(
+        std::ptr::NonNull::new(raw_win).ok_or_else(null_window)?,
+      ));
+      Ok((win, RawDisplayHandle::AppKit(AppKitDisplayHandle::new())))
+    }
+    laufey::LAUFEY_WINDOW_HANDLE_WIN32 => {
+      let mut handle = Win32WindowHandle::new(
+        std::num::NonZeroIsize::new(raw_win as isize)
+          .ok_or_else(null_window)?,
+      );
+      handle.hinstance = std::num::NonZeroIsize::new(raw_display as isize);
+      Ok((
+        RawWindowHandle::Win32(handle),
+        RawDisplayHandle::Windows(WindowsDisplayHandle::new()),
+      ))
+    }
+    laufey::LAUFEY_WINDOW_HANDLE_X11 => {
+      if raw_win.is_null() {
+        return Err(null_window());
+      }
+      let display =
+        std::ptr::NonNull::new(raw_display).ok_or_else(null_display)?;
+      Ok((
+        RawWindowHandle::Xlib(XlibWindowHandle::new(raw_win as _)),
+        RawDisplayHandle::Xlib(XlibDisplayHandle::new(Some(display), 0)),
+      ))
+    }
+    laufey::LAUFEY_WINDOW_HANDLE_WAYLAND => {
+      let win = RawWindowHandle::Wayland(WaylandWindowHandle::new(
+        std::ptr::NonNull::new(raw_win).ok_or_else(null_window)?,
+      ));
+      let display = RawDisplayHandle::Wayland(WaylandDisplayHandle::new(
+        std::ptr::NonNull::new(raw_display).ok_or_else(null_display)?,
+      ));
+      Ok((win, display))
+    }
+    other => Err(deno_error::JsErrorBox::generic(format!(
+      "unknown Laufey window handle type: {other}",
+    ))),
+  }
+}
+
 /// How many live notifications the runtime remembers for `close()` (see
 /// `WefDesktopApi::notifications`).
 const MAX_LIVE_NOTIFICATIONS: usize = 1024;
@@ -1349,60 +1414,11 @@ impl denort::desktop::DesktopApi for WefDesktopApi {
     deno_error::JsErrorBox,
   > {
     let window = laufey::Window::from_id(window_id);
-    let handle_type = window.get_window_handle_type();
-    let raw_win = window.get_window_handle();
-    let raw_display = window.get_display_handle();
-
-    let null_window = || {
-      deno_error::JsErrorBox::generic("Laufey returned a null window handle")
-    };
-    let null_display = || {
-      deno_error::JsErrorBox::generic("Laufey returned a null display handle")
-    };
-
-    match handle_type {
-      laufey::LAUFEY_WINDOW_HANDLE_APPKIT => {
-        use raw_window_handle::*;
-        let win = RawWindowHandle::AppKit(AppKitWindowHandle::new(
-          std::ptr::NonNull::new(raw_win).ok_or_else(null_window)?,
-        ));
-        let display = RawDisplayHandle::AppKit(AppKitDisplayHandle::new());
-        Ok((win, display))
-      }
-      laufey::LAUFEY_WINDOW_HANDLE_WIN32 => {
-        use raw_window_handle::*;
-        let mut handle = Win32WindowHandle::new(
-          std::num::NonZeroIsize::new(raw_win as isize)
-            .ok_or_else(null_window)?,
-        );
-        handle.hinstance = std::num::NonZeroIsize::new(raw_display as isize);
-        let win = RawWindowHandle::Win32(handle);
-        let display = RawDisplayHandle::Windows(WindowsDisplayHandle::new());
-        Ok((win, display))
-      }
-      laufey::LAUFEY_WINDOW_HANDLE_X11 => {
-        use raw_window_handle::*;
-        let win = RawWindowHandle::Xlib(XlibWindowHandle::new(raw_win as _));
-        let display = RawDisplayHandle::Xlib(XlibDisplayHandle::new(
-          std::ptr::NonNull::new(raw_display),
-          0,
-        ));
-        Ok((win, display))
-      }
-      laufey::LAUFEY_WINDOW_HANDLE_WAYLAND => {
-        use raw_window_handle::*;
-        let win = RawWindowHandle::Wayland(WaylandWindowHandle::new(
-          std::ptr::NonNull::new(raw_win).ok_or_else(null_window)?,
-        ));
-        let display = RawDisplayHandle::Wayland(WaylandDisplayHandle::new(
-          std::ptr::NonNull::new(raw_display).ok_or_else(null_display)?,
-        ));
-        Ok((win, display))
-      }
-      other => Err(deno_error::JsErrorBox::generic(format!(
-        "unknown Laufey window handle type: {other}",
-      ))),
-    }
+    raw_window_handles(
+      window.get_window_handle_type(),
+      window.get_window_handle(),
+      window.get_display_handle(),
+    )
   }
 
   fn sync_dialog_began(&self) {
@@ -3584,6 +3600,50 @@ mod tests {
     for bad in ["not a url", "data:text/plain,x"] {
       assert_eq!(super::trusted_bridge_origins(&origin, Some(bad)).len(), 1);
     }
+  }
+
+  #[test]
+  fn window_handles_are_never_built_from_null_pointers() {
+    let p = |v: usize| v as *mut std::ffi::c_void;
+    let null = std::ptr::null_mut();
+    // X11 without a Display: wgpu panicked on it (CEF on X11).
+    let e =
+      super::raw_window_handles(laufey::LAUFEY_WINDOW_HANDLE_X11, p(7), null)
+        .unwrap_err();
+    assert!(e.to_string().contains("null display"), "{e}");
+    assert!(
+      super::raw_window_handles(laufey::LAUFEY_WINDOW_HANDLE_X11, null, p(8))
+        .is_err()
+    );
+    assert!(matches!(
+      super::raw_window_handles(laufey::LAUFEY_WINDOW_HANDLE_X11, p(7), p(8)),
+      Ok((
+        raw_window_handle::RawWindowHandle::Xlib(_),
+        raw_window_handle::RawDisplayHandle::Xlib(_)
+      ))
+    ));
+    for t in [
+      laufey::LAUFEY_WINDOW_HANDLE_APPKIT,
+      laufey::LAUFEY_WINDOW_HANDLE_WIN32,
+      laufey::LAUFEY_WINDOW_HANDLE_WAYLAND,
+    ] {
+      assert!(super::raw_window_handles(t, null, p(8)).is_err(), "{t}");
+    }
+    assert!(
+      super::raw_window_handles(
+        laufey::LAUFEY_WINDOW_HANDLE_WAYLAND,
+        p(7),
+        null
+      )
+      .is_err()
+    );
+    let e = super::raw_window_handles(
+      laufey::LAUFEY_WINDOW_HANDLE_UNKNOWN,
+      p(7),
+      p(8),
+    )
+    .unwrap_err();
+    assert!(e.to_string().contains("unknown Laufey window handle type"));
   }
 
   #[test]
