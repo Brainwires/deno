@@ -192,6 +192,8 @@
       publishedAt: out.update?.publishedAt ?? null,
       size: out.update?.size ?? null,
       platform: out.update?.platform ?? null,
+      sequence: out.update?.sequence ?? null,
+      expiresAt: out.update?.expiresAt ?? null,
     };
   }
 

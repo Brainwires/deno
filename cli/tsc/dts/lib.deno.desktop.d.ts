@@ -2404,6 +2404,11 @@ declare namespace Deno {
       size: number | null;
       /** This build's platform key, `<target>-<backend>`. */
       platform: string | null;
+      /** The manifest's `sequence` (`null` when no update is available). */
+      sequence: number | null;
+      /** The manifest's `expiresAt`, RFC 3339 (`null` when no update is
+       * available). */
+      expiresAt: string | null;
     }
 
     /** {@linkcode Deno.desktop.updater.status}. */

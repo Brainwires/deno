@@ -394,6 +394,35 @@ and disabled in this fork's Actions settings. Two workflows run instead:
   and `fix/**`, on pull requests to `denext/**` and `rel/**`, and by manual
   dispatch.
 
+## The update helper
+
+The full-app updater's helper is the app's own executable started from argv
+(`<exe> run denext-update-helper <mode> <pid>`), so anyone can start it, with a
+state file next to the install that anything running as the user can write. It
+is safe to start because it takes no paths and runs no code but the app's own:
+the install, `.old`, the staging directory and the state, log and lock files all
+derive from the executable's own location; the staged app is a single plain name
+inside the staging directory; only paths proven to be copies of this app's
+install (the packager's marker) are swapped or deleted; the relaunch starts the
+install's executable. What a forged state could still ask for, a swap of some
+other app tree placed in the staging directory, is checked again right before
+the swap as `stage()` checked it: the OS code signature against the running
+app's signer, the staged app's own version equal to the state's and newer than
+the installed one, and not a rejected version. So it can't be used to put an app
+the updater would refuse in place of a signed one.
+
+## Development switches
+
+`deno desktop --hmr` / `--inspect*` launch a throwaway build with
+`DENO_DESKTOP_HMR`, `DENO_DESKTOP_DEV_URL`, `DENO_DESKTOP_FRAMEWORK_DEV`,
+`DENO_DESKTOP_INSPECT_INTERNAL_PORT` / `_BRK` / `_WAIT` and
+`DENO_DESKTOP_MUX_WS` in its environment. The runtime honours them only in a
+binary whose compiled metadata says it is a development build
+(`desktop_dev: true`, written only by this fork's CLI on that path); any other
+binary, a packaged app included, ignores them with a note on stderr. A stock CLI
+never writes the mark, so its own `--hmr` run against this runtime runs without
+hot reload.
+
 ## Test coverage
 
 Specs this fork adds for what its runtime exposes outside a desktop app:
