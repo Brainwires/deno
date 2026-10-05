@@ -535,15 +535,6 @@ export async function run(env: Env, rep: AreaReport) {
       const helperLog = path(installParent, `.${top}.denext-update.log`);
       const before = await Deno.readTextFile(helperLog).catch(() => "");
       const helperEnv: Record<string, string> = { LAUFEY_SINGLE_INSTANCE: "0" };
-      if (OS === "darwin") {
-        for (const d of ["Frameworks", "MacOS"]) {
-          const rt = path(install, "Contents", d, "libruntime.dylib");
-          if (await exists(rt)) {
-            helperEnv.LAUFEY_RUNTIME_PATH = rt;
-            break;
-          }
-        }
-      }
       const h = await launch(
         env,
         exe,

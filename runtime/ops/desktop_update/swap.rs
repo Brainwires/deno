@@ -1834,23 +1834,11 @@ pub fn spawn_helper(
   mode: HelperMode,
 ) -> std::io::Result<()> {
   let exe = layout.exe();
-  // The laufey macOS hosts' headless (`run <arg>`) path finds the runtime
-  // only through LAUFEY_RUNTIME_PATH or a co-located `<exe>.dylib`, while a
-  // bundle ships `libruntime.dylib` (which only their windowed path
-  // searches): point the helper at it. Windows and Linux hosts find their
-  // co-located `<App>.dll` / `<App>.so` themselves.
-  let runtime = if layout.kind == InstallKind::MacBundle
-    && std::env::var_os("LAUFEY_RUNTIME_PATH").is_none()
-  {
-    bundle_runtime_path(&exe)
-  } else {
-    None
-  };
-  let runtime = runtime.as_ref().map(|p| p.to_string_lossy().into_owned());
-  let mut env = vec![("LAUFEY_SINGLE_INSTANCE", Some("0"))];
-  if let Some(path) = runtime.as_deref() {
-    env.push(("LAUFEY_RUNTIME_PATH", Some(path)));
-  }
+  // Every host finds the runtime the installed app ships (a macOS bundle's
+  // `libruntime.dylib`, the `<App>.dll` / `<App>.so` next to the executable)
+  // for a headless launch too, and a packaged host ignores
+  // LAUFEY_RUNTIME_PATH, so the helper needs no pointer to it.
+  let env = [("LAUFEY_SINGLE_INSTANCE", Some("0"))];
   spawn_detached(
     &exe,
     &[
