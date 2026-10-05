@@ -68,14 +68,27 @@ out.digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode("x")
 const info = await (await fetch("/info")).json();
 step("info");
 out.info = info;
-// A streamed response arrives chunk by chunk.
+// A streamed response arrives chunk by chunk. The app sends the next chunk
+// only once the page acknowledges the previous one, so each read can hold at
+// most one new line: a body delivered whole (buffered until it ends) never
+// gets its acknowledgements in time, however slow or fast the machine.
 try {
   const t0 = performance.now();
   const res = await fetch("/stream", { cache: "no-store" });
   const reader = res.body.getReader();
-  const at = [];
-  for (;;) { const { done } = await reader.read(); if (done) break; at.push(Math.round(performance.now() - t0)); }
-  out.stream = { status: res.status, at };
+  const dec = new TextDecoder();
+  const at = [], lines = [];
+  let text = "", acked = 0;
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    at.push(Math.round(performance.now() - t0));
+    text += dec.decode(value, { stream: true });
+    const n = text.split("\\n").length - 1;
+    lines.push(n);
+    for (; acked < n; acked++) await post("/stream-ack", { i: acked });
+  }
+  out.stream = { status: res.status, at, lines };
 } catch (e) { out.stream = { error: String(e) }; }
 step("stream");
 // A response the page gives up on (one chunk, then nothing): the app's stream
@@ -149,6 +162,11 @@ let pageRequest: Record<string, unknown> | null = null;
 // /flood: what the app produced, and what it had produced when the page
 // (having read 1 MiB) reported its pause.
 const flood = { produced: 0, atPause: -1, pageRead: -1 };
+// /stream: the highest chunk the page acknowledged having read, and the
+// chunks the app sent without that acknowledgement (after STREAM_ACK_MS).
+const STREAM_CHUNKS = 5;
+const STREAM_ACK_MS = 10_000;
+const stream = { acked: -1, unacked: [] as number[] };
 const FLOOD_TOTAL = 256 * 1024 * 1024;
 // What the app saw of /marker/<kind> requests.
 const markerSeen: Record<
@@ -190,10 +208,15 @@ Deno.serve((req, info) => {
       return new Response(
         new ReadableStream<Uint8Array>({
           async start(c) {
-            for (let i = 0; i < 5; i++) {
+            for (let i = 0; i < STREAM_CHUNKS; i++) {
               // 8 KiB each: an engine may hold back a tiny chunk.
               c.enqueue(enc.encode(`chunk ${i} ${"x".repeat(8192)}\n`));
-              await sleep(300);
+              // Paced by the page: chunk i+1 waits until the page has read
+              // chunk i (a stuck delivery still ends the body, unacknowledged).
+              if (
+                i < STREAM_CHUNKS - 1 &&
+                !await waitFor(() => stream.acked >= i, STREAM_ACK_MS)
+              ) stream.unacked.push(i);
             }
             c.close();
           },
@@ -230,6 +253,11 @@ Deno.serve((req, info) => {
         { headers: { "cache-control": "no-store" } },
       );
     }
+    case "/stream-ack":
+      return req.json().then((body) => {
+        stream.acked = Math.max(stream.acked, Number(body.i));
+        return new Response("ok");
+      });
     case "/flood-paused":
       return req.json().then((body) => {
         flood.atPause = flood.produced;
@@ -426,15 +454,19 @@ async function afterPage() {
     pageRequest?.url,
   );
   const s = p.stream ?? {};
-  // The server sends a chunk every 300 ms for 1.2 s: reads must come in at
-  // least three separate bursts (an engine may coalesce two chunks or split
-  // one), the first well before the last.
-  const at: number[] = s.at ?? [];
-  const bursts = at.filter((t, i) => i === 0 || t - at[i - 1] >= 100).length;
+  // The app sends chunk i+1 only after the page acknowledged reading chunk i:
+  // every chunk but the last must have been read (and acknowledged) while the
+  // rest of the body was still unsent, and the page must have seen each line
+  // count 1..N in turn (no read held two chunks). No wall-clock bounds: a
+  // loaded machine only slows the exchange down.
+  const lines: number[] = s.lines ?? [];
+  const seenEach = Array.from({ length: STREAM_CHUNKS }, (_, i) => i + 1)
+    .every((n) => lines.includes(n));
   r.check(
     "a streamed response arrives incrementally",
-    s.status === 200 && bursts >= 3 && at[at.length - 1] - at[0] >= 600,
-    s,
+    s.status === 200 && stream.unacked.length === 0 &&
+      stream.acked === STREAM_CHUNKS - 1 && seenEach,
+    { page: s, app: stream },
   );
 
   // --- a request the page cancels reaches the app ---
