@@ -2233,34 +2233,25 @@ laufey::main!(|| {
   export_napi_symbols_from_executable();
 
   // Guard against re-entry: when a framework dev server (e.g. Next.js)
-  // forks child/worker processes (`child_process.fork()`), they re-execute
-  // this dylib as `<exe> run [flags…] [script.js …]` with a Node IPC
-  // channel. Such a launch runs headless (no Laufey window), but only when
-  // this app's own runtime forked it: the worker token it hands its forks,
-  // naming it as the parent, and a real inherited IPC channel (see
-  // `worker_launch`). argv alone (`<App> run /tmp/x.js` from a shell,
-  // `open --args`, a shortcut) used to run any script with the app's
-  // permissions, signature and privacy grants. Anything else with `run` as
-  // argv[1] is refused: the Laufey backend never invokes us that way, and
-  // starting the app with `run` and a script as its launch arguments would
-  // only open it.
-  //
-  // A compiled binary's `fork()` (this runtime is one) uses a second shape:
-  // `<exe> <module> [args…]` with the module in
-  // `DENO_INTERNAL_CHILD_ENTRYPOINT` (see `node:child_process`). That child
-  // used to start the whole desktop app and run the module as its main module
-  // (`denort::run`), from an environment variable and any NODE_CHANNEL_FD, so
-  // it is a worker launch too and goes through the same gate.
+  // forks child/worker processes, they re-execute this dylib with a Node IPC
+  // channel: `<exe> run [flags…] <script> …` (the `run` command),
+  // `<exe> <module> …` with the module in `DENO_INTERNAL_CHILD_ENTRYPOINT`
+  // (a compiled binary's `fork()`, see `node:child_process`), or
+  // `<exe> <script> …` with only `NODE_CHANNEL_FD` (`spawn(process.execPath,
+  // …, { stdio: [..., "ipc"] })`). The laufey host runs those headless (no
+  // web engine, no window, no single-instance check), and so must we:
+  // `worker_launch::is_worker_launch` mirrors the host's classifier. Such a
+  // launch runs headless only when this app's own runtime started it: the
+  // worker token it hands its forks, naming it as the parent, and a real
+  // inherited IPC channel (see `worker_launch`). Anything else shaped like
+  // one (`<App> run /tmp/x.js` from a shell, `open --args`, a shortcut, a
+  // forged environment) is refused: it used to run any script with the app's
+  // permissions, signature and privacy grants, or to start the app with no
+  // backend.
   let args: Vec<_> = env::args_os().collect();
-  let argv_run = args
-    .get(1)
-    .and_then(|a| a.to_str())
-    .map(|s| s == "run")
-    .unwrap_or(false);
-  let fork_child_env =
-    env::var_os(denort::run::INTERNAL_CHILD_ENTRYPOINT_ENV_VAR)
-      .is_some_and(|v| !v.is_empty());
-  if argv_run || fork_child_env {
+  if worker_launch::is_worker_launch(args.get(1..).unwrap_or_default(), |n| {
+    env::var_os(n)
+  }) {
     match worker_launch::authorize() {
       Ok(()) => {
         run_on_runtime_thread(run_headless_worker);

@@ -48,7 +48,7 @@ denort = { path = "../rt", default-features = false }
 # pinning), pinned to
 # a commit of the Brainwires/laufey fork. The host built from the same commit
 # must be used with it (the API version check is exact).
-laufey = { git = "https://github.com/Brainwires/laufey", rev = "ada1a9584ea2bba5b4e9df686e2632d88e1110fd" }
+laufey = { git = "https://github.com/Brainwires/laufey", rev = "1d1ae22f4282a203e4c1bd8ec7454100a283b4f0" }
 libsui.workspace = true
 
 bytes.workspace = true

@@ -31,6 +31,16 @@ case "$TARGET" in
     export E2E_LOG_DIR="$work/w/logs"
     # No desktop environment: xdg-utils' generic mode, as on a bare session.
     unset XDG_CURRENT_DESKTOP DESKTOP_SESSION
+    # No secret service in the session, as on the GitHub runner. A host's
+    # gnome-keyring holds every request CEF sends with cookies (navigations,
+    # WebSocket handshakes): the cookie store waits for the OSCrypt key, the
+    # locked login keyring asks for its password through gcr-prompter, and a
+    # headless session has no one to answer.
+    mkdir -p "$work/xdg/dbus-1/services"
+    for svc in org.freedesktop.secrets org.freedesktop.impl.portal.Secret org.gnome.keyring; do
+      printf '[D-BUS Service]\nName=%s\nExec=/bin/false\n' "$svc" >"$work/xdg/dbus-1/services/$svc.service"
+    done
+    export XDG_DATA_DIRS="$work/xdg:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
     xvfb-run --auto-servernum --server-args="-screen 0 1600x1000x24" \
       dbus-run-session -- bash "$here/linux/session.sh" "${run[@]}"
     ;;

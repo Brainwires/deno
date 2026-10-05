@@ -12,6 +12,8 @@
 //    the unsigned-dev opt-out on an unsigned app; none may change the
 //    install;
 // 3. an install the user can't write (POSIX);
+//    then the update helper, started as the updater starts it, while the app
+//    holds its single-instance lock: it runs (it is not forwarded);
 // 4. 1.0.0 -> 2.0.0: download, stage, swap, relaunch, confirm (the old app
 //    removed);
 // 5. 2.0.0 -> 3.0.0 whose trial exits before confirming: the next launch
@@ -181,8 +183,11 @@ export async function run(env: Env, rep: AreaReport) {
       name: NAME,
       identifier: ID,
       version: v,
-      appJson: { update: { publicKey } },
-      launch: { appId: ID },
+      // Single instance on, as real apps ship it: the updater's helper and
+      // trial launches must not be forwarded to the running app as second
+      // instances (laufey takes the lock before the runtime loads).
+      appJson: { update: { publicKey }, singleInstance: true },
+      launch: { appId: ID, singleInstance: true },
     });
     artifacts[v] = p.artifact;
     builds.push(p.buildDir);
@@ -508,6 +513,58 @@ export async function run(env: Env, rep: AreaReport) {
         "the runner is an administrator, which Windows ACLs on a scratch directory don't stop",
       );
     }
+
+    // 4b. The helper runs while the app still holds the single-instance
+    // lock: started exactly as spawn_helper starts it, `<exe> run
+    // denext-update-helper ...` must run headless, not be forwarded to the
+    // running app as a second instance (which exits 0 and never runs it).
+    // pid 1 is not the app's: the helper finds no requested apply and
+    // changes nothing, but logs that it ran.
+    await writeProbe({ mode: "hold" });
+    l = await start("hold");
+    const holding = await waitFor(
+      async () => !!(await resultFile("holding-1.0.0")),
+      120,
+    );
+    rep.check(
+      "1.0.0 is running (holding the single-instance lock)",
+      holding,
+      holding ? undefined : await tail(l.logFile),
+    );
+    if (holding) {
+      const helperLog = path(installParent, `.${top}.denext-update.log`);
+      const before = await Deno.readTextFile(helperLog).catch(() => "");
+      const helperEnv: Record<string, string> = { LAUFEY_SINGLE_INSTANCE: "0" };
+      const h = await launch(
+        env,
+        exe,
+        ["run", "denext-update-helper", "apply", "1"],
+        { cwd: installParent, env: helperEnv },
+      );
+      const exited = (await waitExit(h, 60_000)) !== null;
+      if (!exited) await kill(h);
+      const ran = await waitFor(
+        async () =>
+          (await Deno.readTextFile(helperLog).catch(() => "")).slice(
+            before.length,
+          ).includes("helper apply waiting for pid 1"),
+        15,
+      );
+      rep.check(
+        "the update helper runs while the app holds the single-instance lock",
+        exited && ran,
+        exited && ran ? undefined : {
+          exited,
+          helperLog: (await Deno.readTextFile(helperLog).catch(() => ""))
+            .slice(before.length) || "(nothing logged)",
+          launch: await tail(h.logFile),
+        },
+      );
+    }
+    await Deno.writeTextFile(path(RES, "release-hold"), "");
+    await waitExit(l, 30_000).catch(() => {});
+    await rm(path(RES, "release-hold"));
+    for (const x of running.splice(0)) await kill(x);
 
     // 5. 1.0.0 -> 2.0.0, relaunch, confirm.
     await writeProbe({
