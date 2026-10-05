@@ -4586,6 +4586,30 @@ fn normalized_deep_links(
   .map_err(|e| deno_core::anyhow::anyhow!("{e}"))
 }
 
+/// Chromium's setuid sandbox helper, which the CEF backend ships next to its
+/// executable. A `.deb` / `.rpm` installs it owned by root with mode 4755 so
+/// web content runs sandboxed even where unprivileged user namespaces are
+/// restricted (Ubuntu 23.10+ AppArmor); Chromium uses it only when it can't
+/// create user namespaces. Nowhere else can a package arrange that: an
+/// AppImage mounts `nosuid` and a tarball is unpacked by the user, so laufey
+/// probes at launch and turns the sandbox off, with a warning, when neither
+/// layer is available (docs/backends.md in laufey, "The Chromium sandbox").
+const CEF_SANDBOX_HELPER: &str = "chrome-sandbox";
+
+/// The permission bits a system package installs `rel` (a path inside the
+/// staged app dir) with: the setuid sandbox helper at the app dir's root gets
+/// 4755; everything else keeps `mode` without group / other write and without
+/// setuid, setgid or sticky bits, whatever the staging umask or a stray bit
+/// left (a package's files are root-owned, so any of those would let another
+/// user change, or run as root, what the app loads).
+fn linux_package_permissions(rel: &Path, mode: u32) -> u32 {
+  if rel == Path::new(CEF_SANDBOX_HELPER) {
+    0o4755
+  } else {
+    mode & 0o755
+  }
+}
+
 /// Wrap a Linux app directory in a Debian `.deb` package.
 ///
 /// A `.deb` is an `ar` archive of three members: `debian-binary` (`2.0\n`),
@@ -4599,27 +4623,6 @@ fn normalized_deep_links(
 /// /usr/share/applications/<pkg>.desktop
 /// /usr/share/icons/hicolor/512x512/apps/<pkg>.png
 /// ```
-/// Chromium's setuid sandbox helper, which the CEF backend ships next to its
-/// executable. A `.deb` / `.rpm` installs it owned by root with mode 4755 so
-/// web content runs sandboxed even where unprivileged user namespaces are
-/// restricted (Ubuntu 23.10+ AppArmor); Chromium uses it only when it can't
-/// create user namespaces. Nowhere else can a package arrange that: an
-/// AppImage mounts `nosuid` and a tarball is unpacked by the user, so laufey
-/// probes at launch and turns the sandbox off, with a warning, when neither
-/// layer is available (docs/backends.md in laufey, "The Chromium sandbox").
-const CEF_SANDBOX_HELPER: &str = "chrome-sandbox";
-
-/// The permission bits a system package installs `rel` (a path inside the
-/// staged app dir) with: the setuid sandbox helper at the app dir's root gets
-/// 4755, everything else keeps `mode`.
-fn linux_package_permissions(rel: &Path, mode: u32) -> u32 {
-  if rel == Path::new(CEF_SANDBOX_HELPER) {
-    0o4755
-  } else {
-    mode
-  }
-}
-
 fn create_linux_deb(
   app_dir: &Path,
   deb_path: &Path,
@@ -4784,7 +4787,10 @@ fn build_deb_data_tar(
       h.set_mtime(0);
       if meta_fs.is_dir() {
         h.set_entry_type(tar::EntryType::Directory);
-        h.set_mode(if mode == 0 { 0o755 } else { mode });
+        h.set_mode(linux_package_permissions(
+          rel,
+          if mode == 0 { 0o755 } else { mode },
+        ));
         h.set_size(0);
         h.set_cksum();
         builder.append_data(
@@ -4914,6 +4920,67 @@ fn build_deb_control_tar(control: &str) -> Result<Vec<u8>, AnyError> {
   Ok(gz)
 }
 
+/// Add the staged app dir to an `.rpm` at `prefix`, every directory, file and
+/// symlink with the modes [`linux_package_permissions`] gives it (root-owned,
+/// the rpm builder's default owner).
+fn add_rpm_app_dir(
+  builder: &mut rpm::PackageBuilder,
+  app_dir: &Path,
+  prefix: &str,
+) -> Result<(), AnyError> {
+  let mut stack = vec![app_dir.to_path_buf()];
+  while let Some(dir) = stack.pop() {
+    let rel = dir.strip_prefix(app_dir)?;
+    let dest = if rel.as_os_str().is_empty() {
+      prefix.to_string()
+    } else {
+      format!("{prefix}/{}", rel.to_string_lossy().replace('\\', "/"))
+    };
+    let mode = unix_mode_of(&std::fs::symlink_metadata(&dir)?) as u32;
+    builder
+      .with_dir_entry(rpm::FileOptions::dir(&dest).permissions(
+        linux_package_permissions(rel, if mode == 0 { 0o755 } else { mode })
+          as u16,
+      ))
+      .with_context(|| format!("failed to add {dest} to rpm"))?;
+    let mut entries: Vec<_> =
+      std::fs::read_dir(&dir)?.collect::<Result<_, _>>()?;
+    entries.sort_by_key(|e| e.file_name());
+    for entry in entries {
+      let path = entry.path();
+      let rel = path.strip_prefix(app_dir)?;
+      let dest =
+        format!("{prefix}/{}", rel.to_string_lossy().replace('\\', "/"));
+      let meta = std::fs::symlink_metadata(&path)?;
+      if meta.is_dir() {
+        stack.push(path);
+      } else if meta.file_type().is_symlink() {
+        let target = std::fs::read_link(&path)?;
+        builder
+          .with_symlink(rpm::FileOptions::symlink(
+            &dest,
+            target.to_string_lossy(),
+          ))
+          .with_context(|| format!("failed to add {dest} to rpm"))?;
+      } else {
+        let mode = unix_mode_of(&meta) as u32;
+        builder
+          .with_file(
+            &path,
+            rpm::FileOptions::new(&dest).permissions(
+              linux_package_permissions(
+                rel,
+                if mode == 0 { 0o644 } else { mode },
+              ) as u16,
+            ),
+          )
+          .with_context(|| format!("failed to add {dest} to rpm"))?;
+      }
+    }
+  }
+  Ok(())
+}
+
 /// Wrap a Linux app directory in an RPM `.rpm` package via the pure-Rust `rpm`
 /// crate (no `rpmbuild`, so it cross-compiles). Same install layout as the
 /// `.deb`. `Requires` is expressed as CEF shared-library sonames, which resolve
@@ -4951,31 +5018,15 @@ fn create_linux_rpm(
   builder.description(&meta.summary);
   builder.vendor(&meta.maintainer);
 
-  // The setuid sandbox helper, root-owned 4755 (see CEF_SANDBOX_HELPER). Added
-  // ahead of the directory, which then skips the path.
-  let sandbox_helper = app_dir.join(CEF_SANDBOX_HELPER);
-  if sandbox_helper.is_file() {
-    builder
-      .with_file(
-        &sandbox_helper,
-        rpm::FileOptions::new(format!(
-          "/usr/lib/{}/{CEF_SANDBOX_HELPER}",
-          meta.package
-        ))
-        .permissions(linux_package_permissions(
-          Path::new(CEF_SANDBOX_HELPER),
-          0o755,
-        ) as u16),
-      )
-      .context("failed to add the sandbox helper to rpm")?;
-  }
-
-  // Own /usr/lib/<pkg>/** (the staged app dir). Standard dirs (/usr, /usr/bin,
-  // /usr/share, …) are deliberately not owned — they belong to the filesystem
-  // package.
-  builder
-    .with_dir(app_dir, format!("/usr/lib/{}", meta.package), |o| o)
-    .context("failed to add app directory to rpm")?;
+  // Own /usr/lib/<pkg>/** (the staged app dir), each entry with
+  // linux_package_permissions (the setuid sandbox helper root-owned 4755, see
+  // CEF_SANDBOX_HELPER). Standard dirs (/usr, /usr/bin, /usr/share, …) are
+  // deliberately not owned — they belong to the filesystem package.
+  add_rpm_app_dir(
+    &mut builder,
+    app_dir,
+    &format!("/usr/lib/{}", meta.package),
+  )?;
 
   // /usr/bin/<pkg> → ../lib/<pkg>/<launcher>
   builder
@@ -4998,7 +5049,8 @@ fn create_linux_rpm(
       rpm::FileOptions::new(format!(
         "/usr/share/applications/{}.desktop",
         meta.package
-      )),
+      ))
+      .permissions(0o644),
     )
     .context("failed to add .desktop file to rpm")?;
 
@@ -5011,7 +5063,8 @@ fn create_linux_rpm(
         rpm::FileOptions::new(format!(
           "/usr/share/icons/hicolor/512x512/apps/{}.png",
           meta.package
-        )),
+        ))
+        .permissions(0o644),
       )
       .context("failed to add icon to rpm")?;
   }
@@ -8794,12 +8847,19 @@ def456  other.zip
     let app_dir = fake_linux_app_dir(tmp.path(), "MyApp");
     std::fs::write(app_dir.join(CEF_SANDBOX_HELPER), b"\x7fELFsandbox")
       .unwrap();
+    // A file staged world-writable and setgid: shipped 0755.
+    std::fs::write(app_dir.join("loose.bin"), b"loose").unwrap();
     #[cfg(unix)]
     {
       use std::os::unix::fs::PermissionsExt;
       std::fs::set_permissions(
         app_dir.join(CEF_SANDBOX_HELPER),
         std::fs::Permissions::from_mode(0o755),
+      )
+      .unwrap();
+      std::fs::set_permissions(
+        app_dir.join("loose.bin"),
+        std::fs::Permissions::from_mode(0o2777),
       )
       .unwrap();
     }
@@ -8831,6 +8891,14 @@ def456  other.zip
         assert_eq!(h.gid().unwrap(), 0);
       } else {
         assert_eq!(h.mode().unwrap() & 0o7000, 0, "{p} must not be setuid");
+        // A symlink's own mode (0777) means nothing.
+        if h.entry_type() != tar::EntryType::Symlink {
+          assert_eq!(h.mode().unwrap() & 0o022, 0, "{p} must not be writable");
+        }
+      }
+      #[cfg(unix)]
+      if p == "usr/lib/myapp/loose.bin" {
+        assert_eq!(h.mode().unwrap(), 0o755);
       }
     }
     assert_eq!(helper_mode, Some(0o4755));
@@ -8863,6 +8931,18 @@ def456  other.zip
           "{} must not be setuid",
           e.path().display()
         );
+        if e.linkto().is_none_or(str::is_empty) {
+          assert_eq!(
+            e.permissions() & 0o022,
+            0,
+            "{} must not be writable",
+            e.path().display()
+          );
+        }
+      }
+      #[cfg(unix)]
+      if e.path() == Path::new("/usr/lib/myapp/loose.bin") {
+        assert_eq!(e.permissions(), 0o755);
       }
     }
   }
