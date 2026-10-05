@@ -266,8 +266,19 @@ where the changes are discussed.
       of a WebGPU window closes it; a NUL title is refused before the window
       exists; the error report leaves the JavaScript thread; a closed window's
       JavaScript state and old notifications are forgotten.
+22. **`feat(desktop)`: Linux platform features** (`feat/linux-l0`, laufey API
+    45): `Deno.desktop.platformFeatures()` reports what the session provides,
+    probed by laufey instead of guessed from the desktop's name (the tray host,
+    the Secret Service's state, the session type, the xdg-desktop-portal
+    versions, the cookie store). On Linux, `new Deno.Tray()` throws
+    `NotSupported` with the reason when no icon can be shown (no
+    StatusNotifierWatcher and no XEmbed tray, as on stock GNOME, or no
+    appindicator library) instead of returning a dead tray; CEF starts with
+    `--password-store=basic` when the Secret Service could only answer through
+    a prompt no one can answer (it used to hold every request that carries
+    cookies forever), and reports `cookieEncryption: "basic"`.
 
-The runtime-side parts (1-3, 5-21) are what the prebuilt `libdenort` carries.
+The runtime-side parts (1-3, 5-22) are what the prebuilt `libdenort` carries.
 The CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` /
 `LAUFEY_APP_ID` into a packaged app's launchers) are in the branch too, but a
 stock CLI does not run them; denext's own launcher provides that environment.

@@ -1142,6 +1142,10 @@ impl denort::desktop::DesktopApi for WefDesktopApi {
 
   // --- Global shortcuts, launch at login, DevTools (laufey API 40) ---
 
+  fn platform_features(&self) -> Option<String> {
+    laufey::platform_features()
+  }
+
   fn system_capabilities(
     &self,
   ) -> deno_runtime::ops::desktop::SystemCapabilitiesInfo {

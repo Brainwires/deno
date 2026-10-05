@@ -132,6 +132,7 @@ const cases = {
   op_desktop_file_dialog_wait: () => ops.op_desktop_file_dialog_wait(999),
   op_desktop_file_dialog_cancel: () => ops.op_desktop_file_dialog_cancel(999),
   op_desktop_system_capabilities: () => ops.op_desktop_system_capabilities(),
+  op_desktop_platform_features: () => ops.op_desktop_platform_features(),
   op_desktop_register_shortcut: () =>
     ops.op_desktop_register_shortcut("CmdOrCtrl+Shift+K"),
   op_desktop_unregister_shortcut: () =>

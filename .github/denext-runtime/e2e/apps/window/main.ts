@@ -507,11 +507,34 @@ await r.step("window API", async () => {
     "quitOnLastWindowClosed defaults to true",
     desktop.quitOnLastWindowClosed === true,
   );
+  // Linux (laufey API 45): with no tray host (this Xvfb session has no
+  // StatusNotifierWatcher and no XEmbed tray) the constructor refuses with
+  // the probe's reason instead of returning a tray no one can see.
+  const features = desktop.platformFeatures();
+  r.check(
+    "platformFeatures() answers for this OS",
+    features?.os === (OS === "darwin" ? "macos" : OS),
+    features,
+  );
   let tray: any = null;
   try {
     tray = new (Deno as any).Tray();
   } catch (e) {
-    r.fail("new Deno.Tray()", describeError(e));
+    if (features?.trayHost === false) {
+      r.check(
+        "no tray host: new Deno.Tray() throws NotSupported with the reason",
+        e instanceof Deno.errors.NotSupported &&
+          typeof features.trayReason === "string" &&
+          String((e as Error).message).includes(features.trayReason),
+        describeError(e),
+      );
+      r.na("the tray rule", "no tray host in this session");
+    } else {
+      r.fail("new Deno.Tray()", describeError(e));
+    }
+  }
+  if (!tray && features?.trayHost) {
+    r.fail("new Deno.Tray() with a tray host", "no tray");
   }
   if (tray) {
     r.check(

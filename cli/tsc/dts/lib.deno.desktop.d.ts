@@ -1283,6 +1283,15 @@ declare namespace Deno {
    * called. Multiple trays may be created.
    */
   export class Tray extends EventTarget implements Disposable {
+    /** Creates the icon.
+     *
+     * @throws {Deno.errors.NotSupported} when no icon can be shown here,
+     * with the reason in the message: on Linux, a session with no tray host
+     * (no StatusNotifierWatcher and no XEmbed tray, as on stock GNOME
+     * without the AppIndicator extension) or no appindicator library.
+     * {@linkcode Deno.desktop.platformFeatures} reports the same
+     * (`trayHost`, `trayReason`), so an app can check first and show a
+     * window instead. */
     constructor();
 
     readonly trayId: number;
@@ -1452,6 +1461,55 @@ declare namespace Deno {
       /** The existing paths in `args` (relative ones resolved against
        * `cwd`, and `file:` URLs), as absolute paths. */
       files: string[];
+    }
+
+    /** What this session provides
+     * ({@linkcode Deno.desktop.platformFeatures}), probed from the session
+     * itself, never guessed from the desktop's name. A feature the session
+     * lacks is reported, with a reason. */
+    export interface PlatformFeatures {
+      os: "linux" | "macos" | "windows";
+      /** Linux: from `XDG_SESSION_TYPE`, else the display variables
+       * (`"tty"` is an ssh or console session). `null` elsewhere. */
+      sessionType: "wayland" | "x11" | "tty" | "unknown" | null;
+      /** `XDG_CURRENT_DESKTOP` as set: a hint for wording only. */
+      desktopHint: string | null;
+      /** Linux: a D-Bus session bus answered. */
+      sessionBus: boolean;
+      /** A tray icon can be seen: on Linux, a StatusNotifierWatcher runs
+       * (or an XEmbed tray on X11) and the appindicator library loads.
+       * Followed live: a host that starts later counts at once. */
+      trayHost: boolean;
+      /** Why not, when `trayHost` is false. */
+      trayReason: string | null;
+      /** The tray icon reports clicks (`false` on Linux). */
+      trayClicks: boolean;
+      /** The tray tooltip shows (on Linux as the indicator's title). */
+      trayTooltip: boolean;
+      /** Linux: the Secret Service's state, read without starting it or
+       * asking it to unlock. `"locked"` also covers a missing default
+       * keyring; `"activatable"` is installed but not running. `"os"` on
+       * macOS and Windows (Keychain, DPAPI). */
+      secretService:
+        | "available"
+        | "locked"
+        | "activatable"
+        | "absent"
+        | "no-session-bus"
+        | "os";
+      /** Someone could answer an unlock prompt here (a graphical session
+       * and, for gnome-keyring, its prompter). */
+      secretServicePrompt: boolean;
+      /** Linux: the xdg-desktop-portal interfaces the session offers, by
+       * version (`Notification`, `FileChooser`, `GlobalShortcuts`,
+       * `Settings`). An interface the portal lacks is absent. */
+      portalVersions: Record<string, number>;
+      /** CEF: `"os"` (cookies are encrypted with a key the OS keystore
+       * keeps) or `"basic"` (Linux, when the Secret Service could not hand
+       * that key out without a prompt no one could answer: Chromium was
+       * started with `--password-store=basic` instead of waiting for it).
+       * `null` on the WebView backends. */
+      cookieEncryption: "os" | "basic" | null;
     }
 
     /** What this backend can do on this OS
@@ -2557,6 +2615,11 @@ declare namespace Deno {
     export function getPrimaryScreen(): Screen | null;
     /** What window features this backend supports on this OS. */
     export function windowCapabilities(): WindowCapabilities;
+    /** What this session provides: the tray host, the Secret Service, the
+     * session type, the xdg-desktop-portal versions and the cookie store.
+     * `null` outside a desktop app. On Linux the first call may wait a few
+     * seconds for xdg-desktop-portal to start. */
+    export function platformFeatures(): PlatformFeatures | null;
 
     /** Quit the app, like Electron's `app.quit()`: fires a cancelable
      * `"beforequit"` here, then a cancelable `close` on every open window;

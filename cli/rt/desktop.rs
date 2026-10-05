@@ -54,6 +54,7 @@ pub const DESKTOP_JS: &str = r#"
     op_desktop_file_dialog_wait,
     op_desktop_file_dialog_cancel,
     op_desktop_system_capabilities,
+    op_desktop_platform_features,
     op_desktop_register_shortcut,
     op_desktop_unregister_shortcut,
     op_desktop_unregister_all_shortcuts,
@@ -1872,6 +1873,17 @@ pub const DESKTOP_JS: &str = r#"
       configurable: true,
       enumerable: true,
     },
+    // What this session provides (laufey API 45): probed, never guessed
+    // from the desktop's name. A fresh object per call; null outside a
+    // desktop app.
+    platformFeatures: {
+      value: function platformFeatures() {
+        return op_desktop_platform_features();
+      },
+      writable: true,
+      configurable: true,
+      enumerable: true,
+    },
     windowCapabilities: {
       value: function windowCapabilities() {
         return op_desktop_window_capabilities();
@@ -3418,6 +3430,18 @@ mod tests {
     assert!(DESKTOP_JS.contains("return paths === null ? null : paths[0];"));
     // Electron's properties, nothing else.
     assert!(DESKTOP_JS.contains("Unknown dialog property"));
+  }
+
+  #[test]
+  fn desktop_js_installs_platform_features() {
+    // laufey API 45: Deno.desktop.platformFeatures().
+    for needle in [
+      "platformFeatures: {",
+      "value: function platformFeatures() {",
+      "return op_desktop_platform_features();",
+    ] {
+      assert!(DESKTOP_JS.contains(needle), "missing: {needle}");
+    }
   }
 
   #[test]

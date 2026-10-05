@@ -5,6 +5,7 @@
 # window manager and a stand-in notification server (linux/session.sh).
 #
 # Env: TARGET ARCHIVE BACKEND WORK_DIR [E2E_OUT] [E2E_AREAS=a,b,...]
+#      [E2E_SECRET_SERVICE=masked|locked] (Linux; masked by default)
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 . "$here/../lib.sh"
@@ -31,16 +32,37 @@ case "$TARGET" in
     export E2E_LOG_DIR="$work/w/logs"
     # No desktop environment: xdg-utils' generic mode, as on a bare session.
     unset XDG_CURRENT_DESKTOP DESKTOP_SESSION
-    # No secret service in the session, as on the GitHub runner. A host's
-    # gnome-keyring holds every request CEF sends with cookies (navigations,
-    # WebSocket handshakes): the cookie store waits for the OSCrypt key, the
-    # locked login keyring asks for its password through gcr-prompter, and a
-    # headless session has no one to answer.
-    mkdir -p "$work/xdg/dbus-1/services"
-    for svc in org.freedesktop.secrets org.freedesktop.impl.portal.Secret org.gnome.keyring; do
-      printf '[D-BUS Service]\nName=%s\nExec=/bin/false\n' "$svc" >"$work/xdg/dbus-1/services/$svc.service"
-    done
-    export XDG_DATA_DIRS="$work/xdg:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
+    # The secret service. Masked (the default): none in the session, as on
+    # the GitHub runner, so a host's gnome-keyring can't hold the run up
+    # (gcr-prompter would also grab the pointer and keyboard from the input
+    # checks). Locked (E2E_SECRET_SERVICE=locked): a real gnome-keyring on
+    # the session bus whose login keyring is locked, with gcr-prompter
+    # installed and no one to answer it, the case that used to hold every
+    # request CEF sends with cookies (navigations, WebSocket handshakes):
+    # the runtime must fall back to --password-store=basic (laufey API 45),
+    # and the keyring area checks that nothing stalls (linux/session.sh
+    # starts the keyring).
+    export E2E_SECRET_SERVICE="${E2E_SECRET_SERVICE:-masked}"
+    case "$E2E_SECRET_SERVICE" in
+      masked)
+        mkdir -p "$work/xdg/dbus-1/services"
+        for svc in org.freedesktop.secrets org.freedesktop.impl.portal.Secret org.gnome.keyring; do
+          printf '[D-BUS Service]\nName=%s\nExec=/bin/false\n' "$svc" >"$work/xdg/dbus-1/services/$svc.service"
+        done
+        export XDG_DATA_DIRS="$work/xdg:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
+        ;;
+      locked)
+        command -v gnome-keyring-daemon >/dev/null || {
+          echo "E2E_SECRET_SERVICE=locked needs gnome-keyring-daemon" >&2
+          exit 1
+        }
+        export E2E_KEYRING_DIR="$work/keyring"
+        ;;
+      *)
+        echo "E2E_SECRET_SERVICE: masked or locked, not $E2E_SECRET_SERVICE" >&2
+        exit 1
+        ;;
+    esac
     xvfb-run --auto-servernum --server-args="-screen 0 1600x1000x24" \
       dbus-run-session -- bash "$here/linux/session.sh" "${run[@]}"
     ;;

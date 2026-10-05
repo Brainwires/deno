@@ -2335,6 +2335,15 @@ pub trait DesktopApi: Send + Sync + 'static {
   fn system_capabilities(&self) -> SystemCapabilitiesInfo {
     SystemCapabilitiesInfo::default()
   }
+
+  // --- Platform features (laufey API 45) ---
+
+  /// What this session provides (the backend's `platform_features` JSON
+  /// object: the tray host, the Secret Service, the session type, the
+  /// portal versions, the cookie store). `None` when the backend can't say.
+  fn platform_features(&self) -> Option<String> {
+    None
+  }
   /// Bind a system-wide shortcut. Presses arrive as
   /// [`DesktopEvent::Shortcut`]. The request is made when this is called.
   fn register_shortcut(
@@ -4801,6 +4810,36 @@ fn op_desktop_system_capabilities(
     .unwrap_or_default()
 }
 
+/// `Deno.desktop.platformFeatures()` (laufey API 45): the backend's probe of
+/// this session, or `null` outside a desktop app (or from a backend that
+/// can't say).
+#[op2]
+#[serde]
+fn op_desktop_platform_features(
+  state: &mut OpState,
+) -> Option<serde_json::Value> {
+  let json = state
+    .try_borrow::<Arc<dyn DesktopApi>>()
+    .and_then(|api| api.platform_features())?;
+  serde_json::from_str(&json).ok()
+}
+
+/// Why `new Deno.Tray()` got no icon, from the platform features' reason
+/// (Linux: no tray host, or no appindicator library) when there is one.
+fn tray_unavailable_message(features: Option<&str>) -> String {
+  let reason = features
+    .and_then(|f| serde_json::from_str::<serde_json::Value>(f).ok())
+    .and_then(|v| {
+      v.get("trayReason")
+        .and_then(|r| r.as_str())
+        .map(str::to_owned)
+    });
+  match reason {
+    Some(reason) => format!("Tray icons are not available here: {reason}"),
+    None => "Tray icons are not available here".to_string(),
+  }
+}
+
 /// Longest accelerator string accepted (laufey's parser takes 128 bytes).
 const MAX_ACCELERATOR_LEN: usize = 128;
 
@@ -5224,6 +5263,14 @@ impl Tray {
       class_prerequisites(state, "Tray")?;
 
     let tray_id = api.create_tray();
+    if tray_id == 0 {
+      // No icon could be shown (Linux with no tray host, as on stock GNOME,
+      // or no appindicator library): refuse instead of a dead Tray.
+      return Err(JsErrorBox::new(
+        "NotSupported",
+        tray_unavailable_message(api.platform_features().as_deref()),
+      ));
+    }
     let tray = Tray { api, tray_id };
     let tray = deno_core::cppgc::make_cppgc_object(scope, tray);
     init_event_target(scope, tray, &brand, &set_event_target_data);
@@ -5541,6 +5588,7 @@ deno_core::extension!(
     op_desktop_file_dialog_wait,
     op_desktop_file_dialog_cancel,
     op_desktop_system_capabilities,
+    op_desktop_platform_features,
     op_desktop_register_shortcut,
     op_desktop_unregister_shortcut,
     op_desktop_unregister_all_shortcuts,
@@ -5570,6 +5618,31 @@ deno_core::extension!(
 mod tests {
   use deno_core::serde_json;
   use deno_core::serde_json::json;
+
+  #[test]
+  fn tray_unavailable_message_carries_the_reason() {
+    use super::tray_unavailable_message;
+    // Linux with no tray host: the probe's reason is the error's.
+    let features = r#"{"os":"linux","trayHost":false,"trayReason":"no tray host: nothing owns org.kde.StatusNotifierWatcher on the session bus"}"#;
+    assert_eq!(
+      tray_unavailable_message(Some(features)),
+      "Tray icons are not available here: no tray host: nothing owns \
+       org.kde.StatusNotifierWatcher on the session bus"
+    );
+    // No reason (or no probe): still a clear refusal.
+    assert_eq!(
+      tray_unavailable_message(Some(r#"{"trayHost":true,"trayReason":null}"#)),
+      "Tray icons are not available here"
+    );
+    assert_eq!(
+      tray_unavailable_message(None),
+      "Tray icons are not available here"
+    );
+    assert_eq!(
+      tray_unavailable_message(Some("not json")),
+      "Tray icons are not available here"
+    );
+  }
 
   use super::AUTH_SESSION_NOT_SUPPORTED_MESSAGE;
   use super::AuthSessionCapabilitiesInfo;
