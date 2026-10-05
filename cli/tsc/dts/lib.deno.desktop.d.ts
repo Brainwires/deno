@@ -1479,8 +1479,8 @@ declare namespace Deno {
        * `null` elsewhere. */
       sessionType: "wayland" | "x11" | "tty" | "unknown" | null;
       /** `XDG_CURRENT_DESKTOP` as set: a hint for wording only. `null`
-       * without env access to it (`--allow-env`); the reasons then don't
-       * quote it either. */
+       * without env access to it (`--allow-env`); the reasons then name no
+       * desktop either (neutral wording). */
       desktopHint: string | null;
       /** Linux: a D-Bus session bus answered. */
       sessionBus: boolean;

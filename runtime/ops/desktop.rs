@@ -4899,15 +4899,16 @@ fn desktop_hint_allowed(state: &OpState) -> bool {
     })
 }
 
-/// A reason without the `(XDG_CURRENT_DESKTOP=…)` laufey words it with.
+/// A reason without the desktop's name: laufey names it only in a
+/// ` (XDG_CURRENT_DESKTOP=…)` part that is always the reason's last (with
+/// any wording that names the desktop inside it), so the reason is cut
+/// there. Never by matching the closing parenthesis: the desktop's name can
+/// contain one.
 fn strip_desktop_hint(reason: &str) -> String {
   const MARK: &str = " (XDG_CURRENT_DESKTOP=";
-  let Some(start) = reason.find(MARK) else {
-    return reason.to_string();
-  };
-  match reason[start..].find(')') {
-    Some(end) => format!("{}{}", &reason[..start], &reason[start + end + 1..]),
-    None => reason[..start].to_string(),
+  match reason.find(MARK) {
+    Some(start) => reason[..start].to_string(),
+    None => reason.to_string(),
   }
 }
 
@@ -5737,20 +5738,23 @@ mod tests {
   fn tray_unavailable_message_carries_the_reason() {
     use super::tray_unavailable_message;
     // Linux with no tray host: the backend's tray reason is the error's.
-    let reason = "no tray host: nothing owns org.kde.StatusNotifierWatcher \
-                  on the session bus (XDG_CURRENT_DESKTOP=GNOME); GNOME shows \
-                  tray icons only with the AppIndicator extension enabled";
+    let reason = "no tray host (StatusNotifierWatcher) on this session; some \
+                  desktops need an extension (XDG_CURRENT_DESKTOP=GNOME; \
+                  GNOME shows tray icons only with the AppIndicator \
+                  extension enabled)";
     assert_eq!(
       tray_unavailable_message(Some(reason), true),
       format!("Tray icons are not available here: {reason}")
     );
-    // Without env access the desktop's name is not quoted.
+    // Without env access no desktop is named: neutral wording.
+    let message = tray_unavailable_message(Some(reason), false);
     assert_eq!(
-      tray_unavailable_message(Some(reason), false),
-      "Tray icons are not available here: no tray host: nothing owns \
-       org.kde.StatusNotifierWatcher on the session bus; GNOME shows tray \
-       icons only with the AppIndicator extension enabled"
+      message,
+      "Tray icons are not available here: no tray host \
+       (StatusNotifierWatcher) on this session; some desktops need an \
+       extension"
     );
+    assert!(!message.contains("GNOME"));
     // No reason (an older backend): still a clear refusal.
     assert_eq!(
       tray_unavailable_message(None, true),
@@ -5774,9 +5778,21 @@ mod tests {
     assert_eq!(features["desktopHint"], serde_json::Value::Null);
     assert_eq!(features["trayReason"], serde_json::Value::Null);
     assert!(!features.to_string().contains("sway"));
-    assert_eq!(strip_desktop_hint("a (XDG_CURRENT_DESKTOP=KDE); b"), "a; b");
+    assert_eq!(strip_desktop_hint("a (XDG_CURRENT_DESKTOP=KDE)"), "a");
     assert_eq!(strip_desktop_hint("no hint"), "no hint");
     assert_eq!(strip_desktop_hint("cut (XDG_CURRENT_DESKTOP=x"), "cut");
+    // A `)` inside the desktop's name hides nothing after it.
+    assert_eq!(
+      strip_desktop_hint("a (XDG_CURRENT_DESKTOP=K)leak:GNOME; GNOME advice)"),
+      "a"
+    );
+    let mut features = json!({
+      "desktopHint": "x)y",
+      "trayReason": "no tray host (StatusNotifierWatcher) on this session; \
+        some desktops need an extension (XDG_CURRENT_DESKTOP=x)y)",
+    });
+    redact_desktop_hint(&mut features);
+    assert!(!features.to_string().contains("y)"));
   }
 
   #[test]
