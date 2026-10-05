@@ -4599,6 +4599,27 @@ fn normalized_deep_links(
 /// /usr/share/applications/<pkg>.desktop
 /// /usr/share/icons/hicolor/512x512/apps/<pkg>.png
 /// ```
+/// Chromium's setuid sandbox helper, which the CEF backend ships next to its
+/// executable. A `.deb` / `.rpm` installs it owned by root with mode 4755 so
+/// web content runs sandboxed even where unprivileged user namespaces are
+/// restricted (Ubuntu 23.10+ AppArmor); Chromium uses it only when it can't
+/// create user namespaces. Nowhere else can a package arrange that: an
+/// AppImage mounts `nosuid` and a tarball is unpacked by the user, so laufey
+/// probes at launch and turns the sandbox off, with a warning, when neither
+/// layer is available (docs/backends.md in laufey, "The Chromium sandbox").
+const CEF_SANDBOX_HELPER: &str = "chrome-sandbox";
+
+/// The permission bits a system package installs `rel` (a path inside the
+/// staged app dir) with: the setuid sandbox helper at the app dir's root gets
+/// 4755, everything else keeps `mode`.
+fn linux_package_permissions(rel: &Path, mode: u32) -> u32 {
+  if rel == Path::new(CEF_SANDBOX_HELPER) {
+    0o4755
+  } else {
+    mode
+  }
+}
+
 fn create_linux_deb(
   app_dir: &Path,
   deb_path: &Path,
@@ -4783,7 +4804,10 @@ fn build_deb_data_tar(
         let data = std::fs::read(&path)?;
         installed_size += data.len() as u64;
         h.set_entry_type(tar::EntryType::Regular);
-        h.set_mode(if mode == 0 { 0o644 } else { mode });
+        h.set_mode(linux_package_permissions(
+          rel,
+          if mode == 0 { 0o644 } else { mode },
+        ));
         h.set_size(data.len() as u64);
         h.set_cksum();
         builder.append_data(&mut h, &arc_path, &data[..])?;
@@ -4926,6 +4950,25 @@ fn create_linux_rpm(
   builder.using_config(config);
   builder.description(&meta.summary);
   builder.vendor(&meta.maintainer);
+
+  // The setuid sandbox helper, root-owned 4755 (see CEF_SANDBOX_HELPER). Added
+  // ahead of the directory, which then skips the path.
+  let sandbox_helper = app_dir.join(CEF_SANDBOX_HELPER);
+  if sandbox_helper.is_file() {
+    builder
+      .with_file(
+        &sandbox_helper,
+        rpm::FileOptions::new(format!(
+          "/usr/lib/{}/{CEF_SANDBOX_HELPER}",
+          meta.package
+        ))
+        .permissions(linux_package_permissions(
+          Path::new(CEF_SANDBOX_HELPER),
+          0o755,
+        ) as u16),
+      )
+      .context("failed to add the sandbox helper to rpm")?;
+  }
 
   // Own /usr/lib/<pkg>/** (the staged app dir). Standard dirs (/usr, /usr/bin,
   // /usr/share, …) are deliberately not owned — they belong to the filesystem
@@ -8741,6 +8784,87 @@ def456  other.zip
         .iter()
         .any(|f| f == "/usr/share/applications/myapp.desktop")
     );
+  }
+
+  #[test]
+  fn system_packages_install_the_sandbox_helper_setuid_root() {
+    // The CEF backend's chrome-sandbox: 4755, root-owned in the .deb and the
+    // .rpm, whatever its mode in the staged app dir; nothing else is setuid.
+    let tmp = tempfile::tempdir().unwrap();
+    let app_dir = fake_linux_app_dir(tmp.path(), "MyApp");
+    std::fs::write(app_dir.join(CEF_SANDBOX_HELPER), b"\x7fELFsandbox")
+      .unwrap();
+    #[cfg(unix)]
+    {
+      use std::os::unix::fs::PermissionsExt;
+      std::fs::set_permissions(
+        app_dir.join(CEF_SANDBOX_HELPER),
+        std::fs::Permissions::from_mode(0o755),
+      )
+      .unwrap();
+    }
+    let flags = empty_desktop_flags();
+
+    let deb = tmp.path().join("MyApp.deb");
+    create_linux_deb(
+      &app_dir,
+      &deb,
+      &flags,
+      Some("x86_64-unknown-linux-gnu"),
+      None,
+    )
+    .unwrap();
+    let bytes = std::fs::read(&deb).unwrap();
+    // The data member is the last one; find its gzip stream.
+    let data_at = bytes.windows(11).position(|w| w == b"data.tar.gz").unwrap();
+    let data = &bytes[data_at + 60..];
+    let data_tar = gunzip(data);
+    let mut archive = tar::Archive::new(&data_tar[..]);
+    let mut helper_mode = None;
+    for entry in archive.entries().unwrap() {
+      let entry = entry.unwrap();
+      let p = entry.path().unwrap().to_string_lossy().into_owned();
+      let h = entry.header();
+      if p == "usr/lib/myapp/chrome-sandbox" {
+        helper_mode = Some(h.mode().unwrap());
+        assert_eq!(h.uid().unwrap(), 0);
+        assert_eq!(h.gid().unwrap(), 0);
+      } else {
+        assert_eq!(h.mode().unwrap() & 0o7000, 0, "{p} must not be setuid");
+      }
+    }
+    assert_eq!(helper_mode, Some(0o4755));
+
+    let rpm_path = tmp.path().join("MyApp.rpm");
+    create_linux_rpm(
+      &app_dir,
+      &rpm_path,
+      &flags,
+      Some("x86_64-unknown-linux-gnu"),
+      None,
+      None,
+    )
+    .unwrap();
+    let bytes = std::fs::read(&rpm_path).unwrap();
+    let pkg = rpm::Package::parse(&mut &bytes[..]).unwrap();
+    let entries = pkg.metadata.get_file_entries().unwrap();
+    let helper_path = Path::new("/usr/lib/myapp/chrome-sandbox");
+    let helper: Vec<_> =
+      entries.iter().filter(|e| e.path() == helper_path).collect();
+    assert_eq!(helper.len(), 1, "the helper is packaged once");
+    assert_eq!(helper[0].permissions(), 0o4755);
+    assert_eq!(helper[0].user(), "root");
+    assert_eq!(helper[0].group(), "root");
+    for e in &entries {
+      if e.path() != helper_path {
+        assert_eq!(
+          e.permissions() & 0o7000,
+          0,
+          "{} must not be setuid",
+          e.path().display()
+        );
+      }
+    }
   }
 
   #[test]
