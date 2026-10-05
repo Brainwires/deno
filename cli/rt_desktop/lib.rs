@@ -57,7 +57,7 @@ use denort::run::RunOptions;
 /// makes the failure mode obvious instead of "the desktop app silently won't
 /// launch".
 const _: () = assert!(
-  laufey::LAUFEY_API_VERSION == 44,
+  laufey::LAUFEY_API_VERSION == 45,
   "LAUFEY_API_VERSION mismatch: update this assert and the prebuilt backend release pin in cli/tools/desktop.rs when laufey bumps its API version",
 );
 
@@ -1142,6 +1142,14 @@ impl denort::desktop::DesktopApi for WefDesktopApi {
 
   // --- Global shortcuts, launch at login, DevTools (laufey API 40) ---
 
+  fn platform_features(&self) -> Option<String> {
+    laufey::platform_features()
+  }
+
+  fn tray_unavailable_reason(&self) -> Option<String> {
+    laufey::tray_unavailable_reason()
+  }
+
   fn system_capabilities(
     &self,
   ) -> deno_runtime::ops::desktop::SystemCapabilitiesInfo {
@@ -1430,12 +1438,23 @@ impl denort::desktop::DesktopApi for WefDesktopApi {
     self.pending_closes.dialog_ended();
   }
 
-  fn alert(&self, title: &str, message: &str) {
-    laufey::alert(title, message);
+  // laufey API 45: try_* tell "nothing could be shown" from a cancel.
+  fn alert(
+    &self,
+    title: &str,
+    message: &str,
+  ) -> Result<(), deno_runtime::ops::desktop::DialogUnsupported> {
+    laufey::try_alert(title, message)
+      .map_err(|_| deno_runtime::ops::desktop::DialogUnsupported)
   }
 
-  fn confirm(&self, title: &str, message: &str) -> bool {
-    laufey::confirm(title, message)
+  fn confirm(
+    &self,
+    title: &str,
+    message: &str,
+  ) -> Result<bool, deno_runtime::ops::desktop::DialogUnsupported> {
+    laufey::try_confirm(title, message)
+      .map_err(|_| deno_runtime::ops::desktop::DialogUnsupported)
   }
 
   fn prompt(
@@ -1443,8 +1462,9 @@ impl denort::desktop::DesktopApi for WefDesktopApi {
     title: &str,
     message: &str,
     default_value: &str,
-  ) -> Option<String> {
-    laufey::prompt(title, message, default_value)
+  ) -> Result<Option<String>, deno_runtime::ops::desktop::DialogUnsupported> {
+    laufey::try_prompt(title, message, default_value)
+      .map_err(|_| deno_runtime::ops::desktop::DialogUnsupported)
   }
 
   fn read_clipboard_text(&self) -> Option<String> {
@@ -3291,6 +3311,17 @@ async fn run_desktop(
         quit_on_last_window_closed: Arc::new(AtomicBool::new(true)),
         trusted_bridge_origins: trusted_bridge_origins.clone(),
       };
+
+      // `Deno.desktop` "platformfeatureschanged" (laufey API 45: a tray
+      // host appeared or went away).
+      {
+        let features_tx = event_tx.0.clone();
+        laufey::on_platform_features_changed(move || {
+          let _ = features_tx.try_send(
+            deno_runtime::ops::desktop::DesktopEvent::PlatformFeaturesChanged,
+          );
+        });
+      }
 
       // `Deno.desktop` "displaychanged".
       {

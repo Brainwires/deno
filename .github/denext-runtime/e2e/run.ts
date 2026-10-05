@@ -36,6 +36,7 @@ const AREAS: Record<
   menus: () => import("./areas/menus.ts"),
   asmt: () => import("./areas/asmt.ts"),
   update: () => import("./areas/update.ts"),
+  keyring: () => import("./areas/keyring.ts"),
 };
 const AREA_TIMEOUT_MS = 20 * 60_000;
 

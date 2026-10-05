@@ -435,6 +435,10 @@ pub enum DesktopEvent {
   /// Displays were added, removed, rearranged or rescaled, or a work area
   /// changed (`Deno.desktop` "displaychanged").
   DisplayChanged,
+  /// What `Deno.desktop.platformFeatures()` reports may have changed
+  /// (laufey API 45: on Linux a tray host appeared or went away):
+  /// `Deno.desktop` "platformfeatureschanged".
+  PlatformFeaturesChanged,
   /// Files dragged over / dropped on a window (laufey API 39). `phase` is
   /// `"enter"`, `"over"`, `"leave"` or `"drop"`; `paths` is `None` for
   /// `"leave"` and, on backends that reveal the paths only on the drop, for
@@ -2156,6 +2160,24 @@ pub fn should_reveal_initial_window(
   show_on_first_load && !app_controlled && !already_revealed
 }
 
+/// A dialog the backend has no way to show here (laufey API 45): nothing
+/// was shown, which is not the user cancelling. `alert()` / `confirm()` /
+/// `prompt()` throw `Deno.errors.NotSupported` for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DialogUnsupported;
+
+/// The `NotSupported` error a page's `alert()` / `confirm()` / `prompt()`
+/// gets when no dialog can be shown here.
+fn dialog_unsupported_error(what: &str) -> JsErrorBox {
+  JsErrorBox::new(
+    "NotSupported",
+    format!(
+      "{what} can't be shown here: the backend has no way to show a dialog \
+       (on Linux: no kdialog, zenity or GTK display)"
+    ),
+  )
+}
+
 pub trait DesktopApi: Send + Sync + 'static {
   /// Create a new window with the given dimensions and return its ID.
   ///
@@ -2335,6 +2357,25 @@ pub trait DesktopApi: Send + Sync + 'static {
   fn system_capabilities(&self) -> SystemCapabilitiesInfo {
     SystemCapabilitiesInfo::default()
   }
+
+  // --- Platform features (laufey API 45) ---
+
+  /// What this session provides (the backend's `platform_features` JSON
+  /// object: the tray host, the Secret Service, the notification server,
+  /// the session type, the portal versions, the cookie store). `None` when
+  /// the backend can't say. Blocking: the first call on Linux may wait a
+  /// few seconds for xdg-desktop-portal to start, so ops call it off the
+  /// JavaScript thread.
+  fn platform_features(&self) -> Option<String> {
+    None
+  }
+
+  /// Why a tray icon can't be shown here (the tray part of the probe only;
+  /// never waits for the portal), `None` when one can or the backend can't
+  /// say.
+  fn tray_unavailable_reason(&self) -> Option<String> {
+    None
+  }
   /// Bind a system-wide shortcut. Presses arrive as
   /// [`DesktopEvent::Shortcut`]. The request is made when this is called.
   fn register_shortcut(
@@ -2417,7 +2458,10 @@ pub trait DesktopApi: Send + Sync + 'static {
     >,
   );
 
-  fn alert(&self, title: &str, message: &str);
+  /// Show a modal alert. `Err(DialogUnsupported)` when the backend has no
+  /// way to show it here (laufey API 45: Winit on Linux without kdialog,
+  /// zenity or a GTK display): nothing was shown.
+  fn alert(&self, title: &str, message: &str) -> Result<(), DialogUnsupported>;
   /// The JavaScript thread entered / left a synchronous `alert()` /
   /// `confirm()` / `prompt()`: a pending close request's
   /// [`CLOSE_REPLY_TIMEOUT`] does not count that time.
@@ -2427,15 +2471,21 @@ pub trait DesktopApi: Send + Sync + 'static {
   /// user dismisses it; the platform's modal run loop pumps OS events
   /// while the dialog is up so other windows continue to render and
   /// respond.
-  fn confirm(&self, title: &str, message: &str) -> bool;
+  /// `Err(DialogUnsupported)` as for `alert`; `Ok(false)` is a cancel.
+  fn confirm(
+    &self,
+    title: &str,
+    message: &str,
+  ) -> Result<bool, DialogUnsupported>;
   /// Show a modal prompt dialog. Returns the entered text on confirm,
-  /// `None` on cancel. Blocking semantics as `confirm`.
+  /// `Ok(None)` on cancel, `Err(DialogUnsupported)` as for `alert`.
+  /// Blocking semantics as `confirm`.
   fn prompt(
     &self,
     title: &str,
     message: &str,
     default_value: &str,
-  ) -> Option<String>;
+  ) -> Result<Option<String>, DialogUnsupported>;
 
   /// Read the system clipboard's plain-text content. Returns `None` if the
   /// clipboard is empty, holds no text, or the backend has no clipboard
@@ -4048,7 +4098,9 @@ fn op_desktop_alert(
   reject_nul("alert() message", message)?;
   if let Some(api) = state.try_borrow::<Arc<dyn DesktopApi>>() {
     let _dialog = SyncDialog::begin(api.as_ref());
-    api.alert(title, message);
+    api
+      .alert(title, message)
+      .map_err(|_| dialog_unsupported_error("alert()"))?;
   }
   Ok(())
 }
@@ -4137,7 +4189,8 @@ async fn op_desktop_alert_async(
   let (title, message) = (replace_nul(title), replace_nul(message));
   let dialog = deno_core::unsync::spawn_blocking(move || {
     let _guard = ErrorDialogGuard;
-    api.alert(&title, &message);
+    // Nothing shown (no dialog provider): the message is on stderr already.
+    let _ = api.alert(&title, &message);
   });
   // Three ways out, all of which must let the caller exit: dismissed, the
   // backend panicked (join error), or nobody could click it.
@@ -4353,7 +4406,9 @@ fn op_desktop_confirm(
   Ok(match state.try_borrow::<Arc<dyn DesktopApi>>() {
     Some(api) => {
       let _dialog = SyncDialog::begin(api.as_ref());
-      api.confirm("", message)
+      api
+        .confirm("", message)
+        .map_err(|_| dialog_unsupported_error("confirm()"))?
     }
     None => false,
   })
@@ -4373,7 +4428,10 @@ fn op_desktop_prompt(
   Ok(match state.try_borrow::<Arc<dyn DesktopApi>>() {
     Some(api) => {
       let _dialog = SyncDialog::begin(api.as_ref());
-      api.prompt("", message, &default_value)
+      // A cancel is null; nothing shown at all is NotSupported.
+      api
+        .prompt("", message, &default_value)
+        .map_err(|_| dialog_unsupported_error("prompt()"))?
     }
     None => None,
   })
@@ -4801,6 +4859,89 @@ fn op_desktop_system_capabilities(
     .unwrap_or_default()
 }
 
+/// `Deno.desktop.platformFeatures()` (laufey API 45): the backend's probe of
+/// this session, or `null` outside a desktop app (or from a backend that
+/// can't say). Async: the probe runs on a blocking-pool thread, never on the
+/// JavaScript thread (its first call on Linux may wait seconds for
+/// xdg-desktop-portal to start). `desktopHint` (XDG_CURRENT_DESKTOP) is
+/// reported only with env access to it (`--allow-env`); without, it is null
+/// and the reasons don't quote it.
+#[op2]
+#[serde]
+async fn op_desktop_platform_features(
+  state: std::rc::Rc<std::cell::RefCell<OpState>>,
+) -> Option<serde_json::Value> {
+  let (api, env_allowed) = {
+    let state = state.borrow();
+    (
+      state.try_borrow::<Arc<dyn DesktopApi>>().cloned(),
+      desktop_hint_allowed(&state),
+    )
+  };
+  let api = api?;
+  let json = deno_core::unsync::spawn_blocking(move || api.platform_features())
+    .await
+    .ok()??;
+  let mut features: serde_json::Value = serde_json::from_str(&json).ok()?;
+  if !env_allowed {
+    redact_desktop_hint(&mut features);
+  }
+  Some(features)
+}
+
+/// Whether the page may see XDG_CURRENT_DESKTOP (env access to it).
+fn desktop_hint_allowed(state: &OpState) -> bool {
+  state
+    .try_borrow::<deno_permissions::PermissionsContainer>()
+    .is_some_and(|p| {
+      p.query_env(Some("XDG_CURRENT_DESKTOP"))
+        == deno_permissions::PermissionState::Granted
+    })
+}
+
+/// A reason without the desktop's name: laufey names it only in a
+/// ` (XDG_CURRENT_DESKTOP=…)` part that is always the reason's last (with
+/// any wording that names the desktop inside it), so the reason is cut
+/// there. Never by matching the closing parenthesis: the desktop's name can
+/// contain one.
+fn strip_desktop_hint(reason: &str) -> String {
+  const MARK: &str = " (XDG_CURRENT_DESKTOP=";
+  match reason.find(MARK) {
+    Some(start) => reason[..start].to_string(),
+    None => reason.to_string(),
+  }
+}
+
+/// `desktopHint` null, and no reason quoting it.
+fn redact_desktop_hint(features: &mut serde_json::Value) {
+  let Some(obj) = features.as_object_mut() else {
+    return;
+  };
+  if obj.contains_key("desktopHint") {
+    obj.insert("desktopHint".into(), serde_json::Value::Null);
+  }
+  for key in ["trayReason", "notificationReason"] {
+    if let Some(serde_json::Value::String(reason)) = obj.get_mut(key) {
+      *reason = strip_desktop_hint(reason);
+    }
+  }
+}
+
+/// Why `new Deno.Tray()` got no icon, from the backend's tray reason
+/// (Linux: no tray host, or no appindicator library) when there is one.
+fn tray_unavailable_message(reason: Option<&str>, env_allowed: bool) -> String {
+  match reason {
+    Some(reason) if env_allowed => {
+      format!("Tray icons are not available here: {reason}")
+    }
+    Some(reason) => format!(
+      "Tray icons are not available here: {}",
+      strip_desktop_hint(reason)
+    ),
+    None => "Tray icons are not available here".to_string(),
+  }
+}
+
 /// Longest accelerator string accepted (laufey's parser takes 128 bytes).
 const MAX_ACCELERATOR_LEN: usize = 128;
 
@@ -4977,11 +5118,17 @@ async fn op_desktop_request_notification_permission(
   let cb: Box<dyn FnOnce(PermissionState) + Send> = Box::new(move |state| {
     let _ = tx.send(state);
   });
-  if provisional {
-    api.request_provisional_notification_permission(cb);
-  } else {
-    api.request_notification_permission(cb);
-  }
+  // On a blocking-pool thread, never the JavaScript thread (the answer
+  // comes through `cb`; the task's handle is dropped): a backend may answer
+  // inline after starting a notification server over D-Bus (Winit on
+  // Linux), which can take seconds.
+  drop(deno_core::unsync::spawn_blocking(move || {
+    if provisional {
+      api.request_provisional_notification_permission(cb);
+    } else {
+      api.request_notification_permission(cb);
+    }
+  }));
   // If the backend forgets to invoke the callback (programmer error in a
   // hypothetical custom backend), the channel drops and `recv` returns
   // `Err` — surface that as "unsupported" so JS gets a stable result.
@@ -5004,8 +5151,11 @@ async fn op_desktop_query_notification_permission(
     return "unsupported".to_string();
   };
   let (tx, rx) = tokio::sync::oneshot::channel::<PermissionState>();
-  api.query_notification_permission(Box::new(move |state| {
-    let _ = tx.send(state);
+  // Off the JavaScript thread, as for the request above.
+  drop(deno_core::unsync::spawn_blocking(move || {
+    api.query_notification_permission(Box::new(move |state| {
+      let _ = tx.send(state);
+    }));
   }));
   permission_state_to_web_string(
     rx.await.unwrap_or(PermissionState::Unsupported),
@@ -5224,6 +5374,19 @@ impl Tray {
       class_prerequisites(state, "Tray")?;
 
     let tray_id = api.create_tray();
+    if tray_id == 0 {
+      // No icon could be shown (Linux with no tray host, as on stock GNOME,
+      // or no appindicator library): refuse instead of a dead Tray.
+      // The tray part of the probe only: never the portal, which can take
+      // seconds on this (the JavaScript) thread.
+      return Err(JsErrorBox::new(
+        "NotSupported",
+        tray_unavailable_message(
+          api.tray_unavailable_reason().as_deref(),
+          desktop_hint_allowed(state),
+        ),
+      ));
+    }
     let tray = Tray { api, tray_id };
     let tray = deno_core::cppgc::make_cppgc_object(scope, tray);
     init_event_target(scope, tray, &brand, &set_event_target_data);
@@ -5541,6 +5704,7 @@ deno_core::extension!(
     op_desktop_file_dialog_wait,
     op_desktop_file_dialog_cancel,
     op_desktop_system_capabilities,
+    op_desktop_platform_features,
     op_desktop_register_shortcut,
     op_desktop_unregister_shortcut,
     op_desktop_unregister_all_shortcuts,
@@ -5570,6 +5734,75 @@ deno_core::extension!(
 mod tests {
   use deno_core::serde_json;
   use deno_core::serde_json::json;
+
+  #[test]
+  fn tray_unavailable_message_carries_the_reason() {
+    use super::tray_unavailable_message;
+    // Linux with no tray host: the backend's tray reason is the error's.
+    let reason = "no tray host (StatusNotifierWatcher) on this session; some \
+                  desktops need an extension (XDG_CURRENT_DESKTOP=GNOME; \
+                  GNOME shows tray icons only with the AppIndicator \
+                  extension enabled)";
+    assert_eq!(
+      tray_unavailable_message(Some(reason), true),
+      format!("Tray icons are not available here: {reason}")
+    );
+    // Without env access no desktop is named: neutral wording.
+    let message = tray_unavailable_message(Some(reason), false);
+    assert_eq!(
+      message,
+      "Tray icons are not available here: no tray host \
+       (StatusNotifierWatcher) on this session; some desktops need an \
+       extension"
+    );
+    assert!(!message.contains("GNOME"));
+    // No reason (an older backend): still a clear refusal.
+    assert_eq!(
+      tray_unavailable_message(None, true),
+      "Tray icons are not available here"
+    );
+  }
+
+  #[test]
+  fn desktop_hint_is_redacted_without_env_access() {
+    use super::redact_desktop_hint;
+    use super::strip_desktop_hint;
+    let mut features = json!({
+      "os": "linux",
+      "desktopHint": "sway",
+      "trayReason": null,
+      "notificationReason": "no notification server: nothing owns \
+        org.freedesktop.Notifications on the session bus \
+        (XDG_CURRENT_DESKTOP=sway)",
+    });
+    redact_desktop_hint(&mut features);
+    assert_eq!(features["desktopHint"], serde_json::Value::Null);
+    assert_eq!(features["trayReason"], serde_json::Value::Null);
+    assert!(!features.to_string().contains("sway"));
+    assert_eq!(strip_desktop_hint("a (XDG_CURRENT_DESKTOP=KDE)"), "a");
+    assert_eq!(strip_desktop_hint("no hint"), "no hint");
+    assert_eq!(strip_desktop_hint("cut (XDG_CURRENT_DESKTOP=x"), "cut");
+    // A `)` inside the desktop's name hides nothing after it.
+    assert_eq!(
+      strip_desktop_hint("a (XDG_CURRENT_DESKTOP=K)leak:GNOME; GNOME advice)"),
+      "a"
+    );
+    let mut features = json!({
+      "desktopHint": "x)y",
+      "trayReason": "no tray host (StatusNotifierWatcher) on this session; \
+        some desktops need an extension (XDG_CURRENT_DESKTOP=x)y)",
+    });
+    redact_desktop_hint(&mut features);
+    assert!(!features.to_string().contains("y)"));
+  }
+
+  #[test]
+  fn an_unshown_dialog_is_not_supported() {
+    use deno_error::JsErrorClass;
+    let err = super::dialog_unsupported_error("prompt()");
+    assert_eq!(err.get_class(), "NotSupported");
+    assert!(err.get_message().contains("prompt() can't be shown here"));
+  }
 
   use super::AUTH_SESSION_NOT_SUPPORTED_MESSAGE;
   use super::AuthSessionCapabilitiesInfo;
@@ -5829,6 +6062,10 @@ mod tests {
     assert_eq!(
       serde_json::to_value(DesktopEvent::DisplayChanged).unwrap(),
       json!({ "kind": "displayChanged" })
+    );
+    assert_eq!(
+      serde_json::to_value(DesktopEvent::PlatformFeaturesChanged).unwrap(),
+      json!({ "kind": "platformFeaturesChanged" })
     );
   }
 
