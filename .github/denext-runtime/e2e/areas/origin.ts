@@ -28,8 +28,9 @@ export async function run(env: Env, rep: AreaReport) {
     name: "E2EOrigin",
     identifier,
     // Single instance on, with the launch file pinning the app id: the
-    // app's forked workers (both fork shapes) start while it holds the lock
-    // and must run, not be forwarded to it as a second instance.
+    // app's workers (both fork() shapes and spawn(process.execPath, [script],
+    // ipc)) start while it holds the lock and must run headless, not be
+    // forwarded to it as a second instance.
     appJson: { origin, singleInstance: true },
     // Every origin may reach the runtime's bindings (the backend's own gate
     // defaults to the app's scheme): the app checks the runtime's per-binding
@@ -80,6 +81,14 @@ export async function run(env: Env, rep: AreaReport) {
       DENO_DESKTOP_WORKER_TOKEN: token,
       NODE_CHANNEL_FD: "0",
     }],
+    // The shape spawn(process.execPath, [script], ipc) uses: no `run`, no
+    // module variable, only the IPC channel. The host runs it headless.
+    ["NODE_CHANNEL_FD alone", [script], { NODE_CHANNEL_FD: "0" }],
+    ["NODE_CHANNEL_FD + a token naming the real parent", [script], {
+      DENO_DESKTOP_WORKER_TOKEN: token,
+      NODE_CHANNEL_FD: "0",
+    }],
+    ["NEXT_PRIVATE_WORKER alone", [script], { NEXT_PRIVATE_WORKER: "1" }],
   ];
   for (const [label, args, envs] of forged) {
     const before = await seenPids("origin");

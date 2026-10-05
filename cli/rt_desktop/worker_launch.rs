@@ -11,10 +11,18 @@
 //! The worker then ran the script with the app's permissions, its code
 //! signature, and on macOS its privacy (TCC) grants.
 //!
-//! So a worker launch is admitted only when ALL of these hold
-//! ([`authorize`]):
+//! Which launches are worker launches ([`is_worker_launch`]) is the laufey
+//! host's own decision, mirrored: the host runs a launch it classifies as a
+//! headless worker with no web engine, no window and no single-instance
+//! check, so the runtime must take its worker path for every such launch
+//! (and never start the app with no backend). That covers the `run <script>`
+//! command, a compiled binary's `fork()` (`<exe> <module>` with the module in
+//! `DENO_INTERNAL_CHILD_ENTRYPOINT`), and
+//! `spawn(process.execPath, [script], { stdio: [..., "ipc"] })` (`<exe>
+//! <script>` with `NODE_CHANNEL_FD` and nothing else to tell it apart).
 //!
-//! * `argv[1]` is `run`;
+//! A worker launch is admitted only when ALL of these hold ([`authorize`]):
+//!
 //! * [`WORKER_TOKEN_ENV`] holds a token naming the parent process
 //!   (`v1.<parent pid>.<128 random bits>`): the runtime issues it once per
 //!   launch ([`issue_token`]) and hands it only to children it forks of its
@@ -26,8 +34,8 @@
 //!   on macOS / Linux, a pipe handle on Windows), which only a parent that
 //!   set up a fork passes.
 //!
-//! Anything else shaped like a worker launch (`argv[1] == "run"`) is refused
-//! and the process exits without starting the app.
+//! Anything else shaped like a worker launch is refused and the process
+//! exits without starting the app.
 //!
 //! And in a packaged app, a forked script must be one the app ships: a path
 //! inside the embedded file system's root ([`module_allowed`]), not an
@@ -42,6 +50,8 @@
 //! code can only fork scripts the packaged app itself contains, which is what
 //! starting the app normally lets it run anyway.
 
+use std::ffi::OsStr;
+use std::ffi::OsString;
 use std::path::Path;
 
 use deno_core::url::Url;
@@ -49,6 +59,43 @@ use deno_core::url::Url;
 /// The environment variable carrying the worker token from a desktop
 /// runtime to the workers it forks.
 pub const WORKER_TOKEN_ENV: &str = "DENO_DESKTOP_WORKER_TOKEN";
+
+/// Whether a launch is a worker launch: `args` is argv without the program,
+/// `env` reads this process's environment.
+///
+/// It mirrors laufey's `laufey_common::IsHeadlessWorkerLaunch`
+/// (backend-common/src/launch_args.cc), which every host checks before it
+/// loads a web engine or takes the single-instance lock: `IsCliWorkerCommand`
+/// (`args[0]` is `run` and a non-flag argument follows) or
+/// `IsForkedWorkerEnvironment` (`NODE_CHANNEL_FD` or `NEXT_PRIVATE_WORKER` is
+/// set; the Windows hosts skip an empty one, this counts it, which only
+/// widens the worker path). A launch the host runs headless therefore never
+/// reaches the app's startup here with no backend: it is admitted or refused
+/// by [`authorize`]. Keep the two in step.
+///
+/// Two runtime-only shapes are worker launches too, though the host gives
+/// them a backend; they are refused unless [`authorize`] admits them, never
+/// started as the app: `run` with no script, and
+/// `DENO_INTERNAL_CHILD_ENTRYPOINT` (a compiled binary's `fork()` names its
+/// module there; the app started with it set would run that module as its
+/// main module).
+pub fn is_worker_launch(
+  args: &[OsString],
+  env: impl Fn(&str) -> Option<OsString>,
+) -> bool {
+  let run = args.first().is_some_and(|a| a == OsStr::new("run"));
+  let host_cli_worker = run
+    && args[1..]
+      .iter()
+      .any(|a| !a.as_encoded_bytes().starts_with(b"-"));
+  let host_forked_worker = env("NODE_CHANNEL_FD").is_some()
+    || env("NEXT_PRIVATE_WORKER").is_some();
+  let fork_child_entrypoint = env(
+    denort::run::INTERNAL_CHILD_ENTRYPOINT_ENV_VAR,
+  )
+  .is_some_and(|v| !v.is_empty());
+  host_cli_worker || host_forked_worker || run || fork_child_entrypoint
+}
 
 /// Why a worker launch was refused.
 #[derive(Debug, PartialEq, Eq)]
@@ -547,6 +594,130 @@ mod tests {
       authorize_with(Some(&t), Some("3"), Some(10), ok, ok_fd),
       Ok(())
     );
+  }
+
+  /// How a launch with `argv` (without the program) and `env` starts, for a
+  /// process whose parent is `PARENT` running this executable, and whose
+  /// `NODE_CHANNEL_FD` (if any) is an inherited IPC channel: the decision
+  /// the runtime makes at startup, with the OS queries answered.
+  fn launch(argv: &[&str], env: &[(&str, &str)]) -> Result<bool, Refusal> {
+    const PARENT: u32 = 10;
+    let args: Vec<OsString> = argv.iter().map(OsString::from).collect();
+    let var = |name: &str| {
+      env
+        .iter()
+        .find(|(k, _)| *k == name)
+        .map(|(_, v)| OsString::from(v))
+    };
+    if !is_worker_launch(&args, var) {
+      return Ok(false);
+    }
+    let get = |name: &str| env.iter().find(|(k, _)| *k == name).map(|(_, v)| *v);
+    authorize_with(
+      get(WORKER_TOKEN_ENV),
+      get("NODE_CHANNEL_FD"),
+      Some(PARENT),
+      |pid| pid == PARENT,
+      |_| true,
+    )
+    .map(|()| true)
+  }
+
+  #[test]
+  fn every_launch_the_host_runs_headless_is_a_worker_launch() {
+    let token = format!("v1.10.{NONCE}");
+    let token = token.as_str();
+    let entry = denort::run::INTERNAL_CHILD_ENTRYPOINT_ENV_VAR;
+    // The app itself: no worker path at all.
+    assert_eq!(launch(&[], &[]), Ok(false));
+    assert_eq!(launch(&["--", "acme://open?x=1"], &[]), Ok(false));
+    assert_eq!(launch(&["acme://run"], &[]), Ok(false));
+    assert_eq!(launch(&["serve", "x.js"], &[]), Ok(false));
+    // A worker token alone (inherited by a program the app started, which
+    // started the app) does not make a launch a worker launch.
+    assert_eq!(launch(&[], &[(WORKER_TOKEN_ENV, token)]), Ok(false));
+
+    // `<exe> run <script>`: the update helper, `fork()` from `deno desktop`.
+    let ipc = [(WORKER_TOKEN_ENV, token), ("NODE_CHANNEL_FD", "3")];
+    assert_eq!(launch(&["run", "-A", "worker.js"], &ipc), Ok(true));
+    assert_eq!(
+      launch(&["run", "denext-update-helper", "apply", "42"], &[]),
+      Err(Refusal::NoToken)
+    );
+    // A compiled binary's `fork()`.
+    assert_eq!(
+      launch(
+        &["/app/fork_child.js"],
+        &[
+          (entry, "/app/fork_child.js"),
+          (WORKER_TOKEN_ENV, token),
+          ("NODE_CHANNEL_FD", "3")
+        ]
+      ),
+      Ok(true)
+    );
+    // `spawn(process.execPath, [script], { stdio: [..., "ipc"] })`: argv is
+    // `<exe> <script>`, only the IPC channel (and the token this runtime
+    // gave the child) mark it. The host runs it headless.
+    assert_eq!(launch(&["child.js"], &ipc), Ok(true));
+    assert_eq!(launch(&[], &ipc), Ok(true));
+    // The same without a token: not this app's runtime's child.
+    assert_eq!(
+      launch(&["child.js"], &[("NODE_CHANNEL_FD", "3")]),
+      Err(Refusal::NoToken)
+    );
+    // An empty NODE_CHANNEL_FD still sends the host down its headless path.
+    assert_eq!(
+      launch(&["child.js"], &[("NODE_CHANNEL_FD", "")]),
+      Err(Refusal::NoToken)
+    );
+    // A forged NEXT_PRIVATE_WORKER, with or without a stolen token.
+    assert_eq!(
+      launch(&[], &[("NEXT_PRIVATE_WORKER", "1")]),
+      Err(Refusal::NoToken)
+    );
+    assert_eq!(
+      launch(&["x.js"], &[("NEXT_PRIVATE_WORKER", "1"), (WORKER_TOKEN_ENV, token)]),
+      Err(Refusal::NoIpcChannel)
+    );
+    // The runtime-only shapes, which the host starts as the app: refused,
+    // never run as the app.
+    assert_eq!(launch(&["run"], &[]), Err(Refusal::NoToken));
+    assert_eq!(launch(&["run", "--quiet"], &[]), Err(Refusal::NoToken));
+    assert_eq!(launch(&["x.js"], &[(entry, "x.js")]), Err(Refusal::NoToken));
+    assert_eq!(launch(&[], &[(entry, "")]), Ok(false));
+  }
+
+  #[test]
+  fn worker_launches_mirror_the_host_classifier() {
+    // laufey's own cases (backend-common/tests/launch_args_test.cc,
+    // TestHeadlessWorkerLaunch): the host's headless launches are worker
+    // launches here.
+    let no_env = |_: &str| None;
+    let args = |a: &[&str]| a.iter().map(OsString::from).collect::<Vec<_>>();
+    for headless in [
+      &["run", "denext-update-helper", "apply", "42"][..],
+      &["run", "-A", "--quiet", "worker.ts"],
+      &["run", ""],
+    ] {
+      assert!(is_worker_launch(&args(headless), no_env), "{headless:?}");
+    }
+    for name in ["NODE_CHANNEL_FD", "NEXT_PRIVATE_WORKER"] {
+      let env = |n: &str| (n == name).then(|| OsString::from("1"));
+      assert!(is_worker_launch(&args(&["x.js"]), env), "{name}");
+    }
+    for app in [
+      &[][..],
+      &["serve", "worker.ts"],
+      &["--", "acme://run"],
+      &["--runtime", "/rt.so", "run", "x"],
+    ] {
+      assert!(!is_worker_launch(&args(app), no_env), "{app:?}");
+    }
+    let single = |n: &str| {
+      (n == "LAUFEY_SINGLE_INSTANCE").then(|| OsString::from("0"))
+    };
+    assert!(!is_worker_launch(&args(&[]), single));
   }
 
   #[test]

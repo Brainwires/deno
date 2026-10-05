@@ -15,6 +15,7 @@ import { fileURLToPath } from "node:url";
 import {
   BrowserWindow,
   describeError,
+  desktop,
   html,
   page,
   Report,
@@ -22,7 +23,29 @@ import {
   waitFor,
 } from "../_shared/e2e.ts";
 
+// This app started by itself as `spawn(process.execPath, [SPAWN_CHILD], {
+// stdio: [..., "ipc"] })` (see nodeChildProcessChecks): a compiled binary
+// runs its own entrypoint with the arguments, here headless. Answer over IPC
+// and exit, before anything of the app starts.
+const SPAWN_CHILD = "e2e-spawn-ipc-child";
+if (Deno.args.includes(SPAWN_CHILD) && process.send) {
+  await new Promise<void>((resolve) =>
+    process.send!(
+      { ok: true, pid: process.pid, args: Deno.args },
+      () => resolve(),
+    )
+  );
+  process.disconnect();
+  Deno.exit(0);
+}
+
 const r = new Report("origin");
+// Launches forwarded to this instance (it holds the single-instance lock):
+// a worker launch must never be one.
+const secondInstances: unknown[] = [];
+desktop.addEventListener("secondinstance", (e: CustomEvent) => {
+  secondInstances.push(e.detail);
+});
 const ORIGIN = r.params.origin ?? "denexte2e://app";
 const appOriginEnv = Deno.env.get("DENO_DESKTOP_APP_ORIGIN") ?? null;
 const wsOriginEnv = Deno.env.get("DENO_DESKTOP_WS_ORIGIN") ?? null;
@@ -671,12 +694,16 @@ function envLine(lines: string[], name: string): string | undefined {
 type ForkOutcome = { code: number | null; message: any; stderr: string };
 
 function forkAndWait(module: string, ms = 60_000): Promise<ForkOutcome> {
+  return childOutcome(
+    fork(module, [], { stdio: ["ignore", "ignore", "pipe", "ipc"] }),
+    ms,
+  );
+}
+
+function childOutcome(child: any, ms: number): Promise<ForkOutcome> {
   return new Promise((resolve) => {
     let message: any = null;
     let stderr = "";
-    const child = fork(module, [], {
-      stdio: ["ignore", "ignore", "pipe", "ipc"],
-    });
     child.stderr?.on("data", (d: Uint8Array) => {
       stderr += new TextDecoder().decode(d);
     });
@@ -782,5 +809,34 @@ async function nodeChildProcessChecks() {
     await Deno.remove(dir, { recursive: true }).catch(() => {});
   } catch (e) {
     r.fail("fork", describeError(e));
+  }
+
+  // --- spawn(process.execPath, [script], ipc): a worker launched the env way
+  // (argv `<exe> <script>`, only NODE_CHANNEL_FD and the worker token mark
+  // it). The host runs it headless before its single-instance check, so the
+  // runtime must too: it runs, answers, and is not forwarded here ---
+  try {
+    const forwardedBefore = secondInstances.length;
+    const spawned = await childOutcome(
+      spawn(process.execPath, [SPAWN_CHILD], {
+        stdio: ["ignore", "ignore", "pipe", "ipc"],
+      }),
+      60_000,
+    );
+    r.check(
+      "spawn(execPath, [script], ipc): runs headless and answers over IPC",
+      spawned.code === 0 && spawned.message?.ok === true &&
+        spawned.message.pid !== Deno.pid,
+      spawned,
+    );
+    // A forwarded launch would reach this instance shortly after it exits.
+    await sleep(2000);
+    r.check(
+      "spawn(execPath, [script], ipc): not forwarded as a second instance",
+      secondInstances.length === forwardedBefore,
+      secondInstances.slice(forwardedBefore),
+    );
+  } catch (e) {
+    r.fail("spawn(execPath, [script], ipc)", describeError(e));
   }
 }
