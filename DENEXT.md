@@ -281,8 +281,10 @@ where the changes are discussed.
     `NotSupported` when the backend has no way to show a dialog, instead of
     reading as a cancel. CEF starts with `--password-store=basic` when the
     Secret Service could only answer through a prompt no one can answer (it used
-    to hold every request that carries cookies forever), keeps that choice per
-    profile, and reports `cookieEncryption: "basic"`.
+    to hold every request that carries cookies forever) and reports
+    `cookieEncryption: "basic"`. A profile that once had the OS key keeps it; a
+    launch that can't reach the key falls back to basic for that launch only,
+    with a warning that its OS-key cookies are unavailable this run.
 
 The runtime-side parts (1-3, 5-22) are what the prebuilt `libdenort` carries.
 The CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` /

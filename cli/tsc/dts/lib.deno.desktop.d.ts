@@ -1528,8 +1528,11 @@ declare namespace Deno {
        * could answer its unlock prompt, so Chromium was started with
        * `--password-store=basic` instead of waiting for the key) or `"os"`
        * (left to Chromium: the OS keystore, or its own fallback when there
-       * is none). The choice is kept per profile, so later launches keep
-       * it. `null` on the WebView backends. */
+       * is none). A profile that once had the OS key keeps asking for it;
+       * a launch that can't reach it (a locked keyring, no one to unlock
+       * it) is `"basic"` for that launch only, and its OS-key cookies are
+       * unavailable until the key is reachable again. `null` on the
+       * WebView backends. */
       cookieEncryption: "os" | "basic" | null;
     }
 
