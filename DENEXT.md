@@ -267,16 +267,22 @@ where the changes are discussed.
       exists; the error report leaves the JavaScript thread; a closed window's
       JavaScript state and old notifications are forgotten.
 22. **`feat(desktop)`: Linux platform features** (`feat/linux-l0`, laufey API
-    45): `Deno.desktop.platformFeatures()` reports what the session provides,
-    probed by laufey instead of guessed from the desktop's name (the tray host,
-    the Secret Service's state, the session type, the xdg-desktop-portal
-    versions, the cookie store). On Linux, `new Deno.Tray()` throws
-    `NotSupported` with the reason when no icon can be shown (no
-    StatusNotifierWatcher and no XEmbed tray, as on stock GNOME, or no
-    appindicator library) instead of returning a dead tray; CEF starts with
-    `--password-store=basic` when the Secret Service could only answer through a
-    prompt no one can answer (it used to hold every request that carries cookies
-    forever), and reports `cookieEncryption: "basic"`.
+    45): `Deno.desktop.platformFeatures()` (a promise: the probe runs off the
+    JavaScript thread) reports what the session provides, probed by laufey
+    instead of guessed from the desktop's name (the tray host, the Secret
+    Service's state, the notification server, the session type, the
+    xdg-desktop-portal versions, the cookie store); `desktopHint`
+    (XDG_CURRENT_DESKTOP) only with env access. `Deno.desktop` fires
+    `"platformfeatureschanged"` when a tray host appears or goes away. On Linux,
+    `new Deno.Tray()` throws `NotSupported` with the reason (the tray part of
+    the probe only) when no icon can be shown (no StatusNotifierWatcher and no
+    XEmbed tray, as on stock GNOME, or no appindicator library) instead of
+    returning a dead tray; `alert()` / `confirm()` / `prompt()` throw
+    `NotSupported` when the backend has no way to show a dialog, instead of
+    reading as a cancel. CEF starts with `--password-store=basic` when the
+    Secret Service could only answer through a prompt no one can answer (it used
+    to hold every request that carries cookies forever), keeps that choice per
+    profile, and reports `cookieEncryption: "basic"`.
 
 The runtime-side parts (1-3, 5-22) are what the prebuilt `libdenort` carries.
 The CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` /

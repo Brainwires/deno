@@ -1848,6 +1848,7 @@ pub const DESKTOP_JS: &str = r#"
 
   // Screens, capabilities and the app's lifetime (laufey API 38).
   internals.defineEventHandler(desktop, "displaychanged");
+  internals.defineEventHandler(desktop, "platformfeatureschanged");
   internals.defineEventHandler(desktop, "beforequit");
   let quitOnLastWindowClosed = true;
   let quitOnLastWindowClosedSet = false;
@@ -1874,8 +1875,8 @@ pub const DESKTOP_JS: &str = r#"
       enumerable: true,
     },
     // What this session provides (laufey API 45): probed, never guessed
-    // from the desktop's name. A fresh object per call; null outside a
-    // desktop app.
+    // from the desktop's name, off the JavaScript thread. A promise of a
+    // fresh object per call; null outside a desktop app.
     platformFeatures: {
       value: function platformFeatures() {
         return op_desktop_platform_features();
@@ -2728,6 +2729,13 @@ pub const DESKTOP_JS: &str = r#"
             desktop.dispatchEvent(new Event("displaychanged"));
             break;
           }
+          case "platformFeaturesChanged": {
+            // laufey API 45: a tray host appeared or went away; read
+            // platformFeatures() again (and create the tray once trayHost
+            // is true).
+            desktop.dispatchEvent(new Event("platformfeatureschanged"));
+            break;
+          }
           case "fileDrop": {
             const target = windows.get(ev.windowId);
             if (!target) break;
@@ -3218,6 +3226,11 @@ mod tests {
     assert!(DESKTOP_JS.contains("case \"windowState\":"));
     assert!(DESKTOP_JS.contains("case \"displayChanged\":"));
     assert!(DESKTOP_JS.contains("new Event(\"displaychanged\")"));
+    assert!(DESKTOP_JS.contains("case \"platformFeaturesChanged\":"));
+    assert!(DESKTOP_JS.contains("new Event(\"platformfeatureschanged\")"));
+    assert!(DESKTOP_JS.contains(
+      "internals.defineEventHandler(desktop, \"platformfeatureschanged\")"
+    ));
     // quit(): beforequit, then every window's close, any cancel aborts.
     assert!(
       DESKTOP_JS.contains(r#"new Event("beforequit", { cancelable: true })"#)

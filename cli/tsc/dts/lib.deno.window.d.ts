@@ -399,6 +399,11 @@ declare var navigator: Navigator;
  *
  * If the stdin is not interactive, it does nothing.
  *
+ * In a desktop app (`deno desktop`) it shows a native dialog instead.
+ * @throws {Deno.errors.NotSupported} in a desktop app whose backend has no
+ * way to show a dialog here (Linux without kdialog, zenity or a GTK display):
+ * nothing was shown, which is told apart from the user dismissing it.
+ *
  * @example
  * ```ts
  * // Displays the message "Acknowledge me! [Enter]" and waits for the enter key to be pressed before continuing.
@@ -417,6 +422,11 @@ declare function alert(message?: string): void;
  * Only `y` and `Y` are considered as true.
  *
  * If the stdin is not interactive, it returns false.
+ *
+ * In a desktop app (`deno desktop`) it shows a native dialog instead.
+ * @throws {Deno.errors.NotSupported} in a desktop app whose backend has no
+ * way to show a dialog here (Linux without kdialog, zenity or a GTK display):
+ * nothing was shown, which is told apart from a cancel (`false`).
  *
  * @example
  * ```ts
@@ -443,6 +453,11 @@ declare function confirm(message?: string): boolean;
  * string.
  *
  * If the stdin is not interactive, it returns null.
+ *
+ * In a desktop app (`deno desktop`) it shows a native dialog instead.
+ * @throws {Deno.errors.NotSupported} in a desktop app whose backend has no
+ * way to show a dialog here (Linux without kdialog, zenity or a GTK display):
+ * nothing was shown, which is told apart from a cancel (`null`).
  *
  * @example
  * ```ts

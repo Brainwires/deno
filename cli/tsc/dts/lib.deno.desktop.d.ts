@@ -1291,7 +1291,11 @@ declare namespace Deno {
      * without the AppIndicator extension) or no appindicator library.
      * {@linkcode Deno.desktop.platformFeatures} reports the same
      * (`trayHost`, `trayReason`), so an app can check first and show a
-     * window instead. */
+     * window instead. When a tray host appears later (an extension
+     * enabled, the shell restarted), `Deno.desktop` fires
+     * `"platformfeatureschanged"`: create the tray again once `trayHost` is
+     * true. The reason quotes `XDG_CURRENT_DESKTOP` only with env access to
+     * it (`--allow-env`). */
     constructor();
 
     readonly trayId: number;
@@ -1468,11 +1472,15 @@ declare namespace Deno {
      * itself, never guessed from the desktop's name. A feature the session
      * lacks is reported, with a reason. */
     export interface PlatformFeatures {
-      os: "linux" | "macos" | "windows";
-      /** Linux: from `XDG_SESSION_TYPE`, else the display variables
-       * (`"tty"` is an ssh or console session). `null` elsewhere. */
+      /** `"unknown"` on an OS laufey has no probe for. */
+      os: "linux" | "macos" | "windows" | "unknown";
+      /** Linux: `XDG_SESSION_TYPE` as set (`"tty"` is an ssh or console
+       * session), `"unknown"` when unset; never guessed from `$DISPLAY`.
+       * `null` elsewhere. */
       sessionType: "wayland" | "x11" | "tty" | "unknown" | null;
-      /** `XDG_CURRENT_DESKTOP` as set: a hint for wording only. */
+      /** `XDG_CURRENT_DESKTOP` as set: a hint for wording only. `null`
+       * without env access to it (`--allow-env`); the reasons then don't
+       * quote it either. */
       desktopHint: string | null;
       /** Linux: a D-Bus session bus answered. */
       sessionBus: boolean;
@@ -1497,18 +1505,31 @@ declare namespace Deno {
         | "absent"
         | "no-session-bus"
         | "os";
-      /** Someone could answer an unlock prompt here (a graphical session
-       * and, for gnome-keyring, its prompter). */
+      /** Someone could answer an unlock prompt here: `sessionType` x11 or
+       * wayland with a display and, where logind can say, an active x11 /
+       * wayland logind session (a display alone, as under Xvfb, never
+       * counts); for gnome-keyring, its prompter too. */
       secretServicePrompt: boolean;
+      /** Linux: the server that owns `org.freedesktop.Notifications` now
+       * (its name; `"unknown"` when it doesn't say), or `null` when nothing
+       * does. The Notification portal's version is no proof notifications
+       * show: Sway with no daemon offers it. `null` elsewhere. */
+      notificationServer: string | null;
+      /** Why notifications may not show when `notificationServer` is null on
+       * Linux (no server; one D-Bus can start, tried when notifications are
+       * first used: the notification permission is then `"unsupported"` if
+       * it fails to start). `null` otherwise. */
+      notificationReason: string | null;
       /** Linux: the xdg-desktop-portal interfaces the session offers, by
        * version (`Notification`, `FileChooser`, `GlobalShortcuts`,
        * `Settings`). An interface the portal lacks is absent. */
       portalVersions: Record<string, number>;
-      /** CEF: `"os"` (cookies are encrypted with a key the OS keystore
-       * keeps) or `"basic"` (Linux, when the Secret Service could not hand
-       * that key out without a prompt no one could answer: Chromium was
-       * started with `--password-store=basic` instead of waiting for it).
-       * `null` on the WebView backends. */
+      /** CEF: `"basic"` (Linux: the Secret Service is locked and no one
+       * could answer its unlock prompt, so Chromium was started with
+       * `--password-store=basic` instead of waiting for the key) or `"os"`
+       * (left to Chromium: the OS keystore, or its own fallback when there
+       * is none). The choice is kept per profile, so later launches keep
+       * it. `null` on the WebView backends. */
       cookieEncryption: "os" | "basic" | null;
     }
 
@@ -1907,6 +1928,10 @@ declare namespace Deno {
       /** Displays were added, removed, rearranged or rescaled, or a work
        * area changed; read {@linkcode screens} again. */
       displaychanged: Event;
+      /** What {@linkcode platformFeatures} reports may have changed: on
+       * Linux a tray host appeared or went away. Read it again; create a
+       * refused tray again once `trayHost` is true. */
+      platformfeatureschanged: Event;
       /** Cancelable: {@linkcode quit} was called. */
       beforequit: Event;
       /** A URL routed to the running app (macOS). */
@@ -2616,10 +2641,12 @@ declare namespace Deno {
     /** What window features this backend supports on this OS. */
     export function windowCapabilities(): WindowCapabilities;
     /** What this session provides: the tray host, the Secret Service, the
-     * session type, the xdg-desktop-portal versions and the cookie store.
-     * `null` outside a desktop app. On Linux the first call may wait a few
-     * seconds for xdg-desktop-portal to start. */
-    export function platformFeatures(): PlatformFeatures | null;
+     * notification server, the session type, the xdg-desktop-portal
+     * versions and the cookie store. Resolves to `null` outside a desktop
+     * app. Probed off the JavaScript thread: on Linux the first call may
+     * take a few seconds (xdg-desktop-portal starting). Read it again on
+     * `"platformfeatureschanged"`. */
+    export function platformFeatures(): Promise<PlatformFeatures | null>;
 
     /** Quit the app, like Electron's `app.quit()`: fires a cancelable
      * `"beforequit"` here, then a cancelable `close` on every open window;
@@ -2645,6 +2672,7 @@ declare namespace Deno {
     export let quitOnLastWindowClosed: boolean;
 
     export let ondisplaychanged: ((ev: Event) => any) | null;
+    export let onplatformfeatureschanged: ((ev: Event) => any) | null;
     export let onbeforequit: ((ev: Event) => any) | null;
     export let onopenurl:
       | ((ev: CustomEvent<OpenUrlDetail>) => any)
