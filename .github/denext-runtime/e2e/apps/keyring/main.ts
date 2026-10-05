@@ -25,18 +25,35 @@ import {
 const r = new Report("keyring");
 const want = r.params as {
   secretService?: string;
+  secretServicePrompt?: boolean;
+  sessionType?: string;
   cookieEncryption?: string | null;
 };
 
 // Optional: a runtime older than laufey API 45 has none (the cookie checks
-// still run, so the stall it had shows).
-const features = desktop.platformFeatures?.() ?? null;
+// still run, so the stall it had shows). A promise since it left the
+// JavaScript thread (an earlier API 45 build answered synchronously).
+const features = (await desktop.platformFeatures?.()) ?? null;
 r.set("platformFeatures", features);
 if (want.secretService !== undefined) {
   r.check(
     `secretService is ${want.secretService}`,
     features?.secretService === want.secretService,
     features?.secretService,
+  );
+}
+if (want.secretServicePrompt !== undefined) {
+  r.check(
+    `secretServicePrompt is ${want.secretServicePrompt} (a display alone is not a person)`,
+    features?.secretServicePrompt === want.secretServicePrompt,
+    features?.secretServicePrompt,
+  );
+}
+if (want.sessionType !== undefined) {
+  r.check(
+    `sessionType is ${want.sessionType}`,
+    features?.sessionType === want.sessionType,
+    features?.sessionType,
   );
 }
 if (want.cookieEncryption !== undefined) {

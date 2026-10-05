@@ -510,11 +510,26 @@ await r.step("window API", async () => {
   // Linux (laufey API 45): with no tray host (this Xvfb session has no
   // StatusNotifierWatcher and no XEmbed tray) the constructor refuses with
   // the probe's reason instead of returning a tray no one can see.
-  const features = desktop.platformFeatures();
+  const pending = desktop.platformFeatures();
+  r.check(
+    "platformFeatures() answers off the JavaScript thread (a promise)",
+    pending instanceof Promise,
+  );
+  const features = await pending;
   r.check(
     "platformFeatures() answers for this OS",
     features?.os === (OS === "darwin" ? "macos" : OS),
     features,
+  );
+  r.check(
+    "platformFeatures() reports the notification server",
+    features != null && "notificationServer" in features &&
+      "notificationReason" in features,
+    features,
+  );
+  r.check(
+    "Deno.desktop has the platformfeatureschanged event handler",
+    "onplatformfeatureschanged" in desktop,
   );
   let tray: any = null;
   try {

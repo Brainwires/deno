@@ -6,6 +6,8 @@
 #
 # Env: TARGET ARCHIVE BACKEND WORK_DIR [E2E_OUT] [E2E_AREAS=a,b,...]
 #      [E2E_SECRET_SERVICE=masked|locked] (Linux; masked by default)
+#      [E2E_SESSION_TYPE=unset|<value>] (Linux; XDG_SESSION_TYPE for the run,
+#      unset by default)
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 . "$here/../lib.sh"
@@ -32,6 +34,19 @@ case "$TARGET" in
     export E2E_LOG_DIR="$work/w/logs"
     # No desktop environment: xdg-utils' generic mode, as on a bare session.
     unset XDG_CURRENT_DESKTOP DESKTOP_SESSION
+    # The session type. Unset by default, as under cron or a systemd service
+    # running xvfb-run: Xvfb's $DISPLAY must not make the session count as
+    # graphical (laufey API 45: no one could answer a keyring prompt here).
+    # E2E_SESSION_TYPE=x11 (say) exports one: laufey then asks logind,
+    # which knows this process's session (an ssh one: tty) is not an active
+    # graphical one. Where logind has no session for the run (a CI runner's
+    # service), x11 would be taken at its word, so CI keeps the default.
+    export E2E_SESSION_TYPE="${E2E_SESSION_TYPE:-unset}"
+    if [ "$E2E_SESSION_TYPE" = unset ]; then
+      unset XDG_SESSION_TYPE
+    else
+      export XDG_SESSION_TYPE="$E2E_SESSION_TYPE"
+    fi
     # The secret service. Masked (the default): none in the session, as on
     # the GitHub runner, so a host's gnome-keyring can't hold the run up
     # (gcr-prompter would also grab the pointer and keyboard from the input
