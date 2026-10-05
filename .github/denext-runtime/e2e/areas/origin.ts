@@ -27,7 +27,10 @@ export async function run(env: Env, rep: AreaReport) {
     app: "origin",
     name: "E2EOrigin",
     identifier,
-    appJson: { origin },
+    // Single instance on, with the launch file pinning the app id: the
+    // app's forked workers (both fork shapes) start while it holds the lock
+    // and must run, not be forwarded to it as a second instance.
+    appJson: { origin, singleInstance: true },
     // Every origin may reach the runtime's bindings (the backend's own gate
     // defaults to the app's scheme): the app checks the runtime's per-binding
     // gate by navigating to a page at another origin.
@@ -35,6 +38,7 @@ export async function run(env: Env, rep: AreaReport) {
       appId: identifier,
       customSchemes: [scheme],
       bridgeOrigins: ["*"],
+      singleInstance: true,
     },
     include: ["fork_child.js"],
   });

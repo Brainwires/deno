@@ -287,8 +287,10 @@ Linux window-destroy use-after-free, sync UI hops that can't hang exit; and API
 44, the 3.1.1 audit: each JS call's document origin, the launch file's
 `bridgeOrigins`, scheme response write backpressure, a packaged app loading only
 its own runtime and pinned launch keys, WebKitGTK sub-frames kept off the
-bridge, a strict bridge JSON parser), at the commit pinned by `LAUFEY_SHA` in
-the workflow (or the `laufey_ref` input). The same commit is the `laufey` git
+bridge, a strict bridge JSON parser; and every host runs the runtime's own
+helper and worker launches (`run …`, `NODE_CHANNEL_FD`, `NEXT_PRIVATE_WORKER`)
+headless before its single-instance check), at the commit pinned by `LAUFEY_SHA`
+in the workflow (or the `laufey_ref` input). The same commit is the `laufey` git
 dependency of `cli/rt_desktop/Cargo.toml` (crate 0.8.0, API 44).
 
 laufey's `init_api` rejects any C ABI version mismatch between the runtime and
