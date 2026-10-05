@@ -7,12 +7,20 @@
 // session: e2e.sh E2E_SECRET_SERVICE=locked), it used to wait for that key
 // forever, and every navigation, fetch and WebSocket handshake that carries
 // a cookie waited with it. The page here sets a cookie, navigates (the
-// navigation carries it), fetches with it, and opens a WebSocket through the
-// runtime's relay (the handshake goes through the same cookie store); the
+// navigation carries it), fetches with it and opens a WebSocket with it, on
+// a loopback http origin (the app's custom scheme keeps no cookies); the
 // app reports what each request carried. A stall leaves no result, which
 // the runner reports as a timeout.
 
-import { desktop, html, page, Report, sleep } from "../_shared/e2e.ts";
+import {
+  BrowserWindow,
+  desktop,
+  html,
+  page,
+  Report,
+  sleep,
+  waitFor,
+} from "../_shared/e2e.ts";
 
 const r = new Report("keyring");
 const want = r.params as {
@@ -37,9 +45,6 @@ if (want.cookieEncryption !== undefined) {
   );
 }
 
-// The relay URL with this launch's token (what a page's WebSocket dials).
-const wsUrl = Deno.env.get("DENO_DESKTOP_WS_URL") ?? null;
-
 const SECOND = `
 const out = { cookie: document.cookie };
 const t0 = performance.now();
@@ -47,9 +52,7 @@ const res = await fetch("/echo", { credentials: "same-origin" });
 out.fetchCookie = await res.text();
 out.socket = await new Promise((resolve) => {
   const timer = setTimeout(() => resolve("timeout"), 30000);
-  let ws;
-  try { ws = new WebSocket(${JSON.stringify(wsUrl)} + "/ws"); }
-  catch (e) { clearTimeout(timer); resolve(String(e)); return; }
+  const ws = new WebSocket(location.origin.replace(/^http/, "ws") + "/ws");
   ws.onmessage = (e) => { clearTimeout(timer); resolve(String(e.data)); ws.close(); };
   ws.onerror = () => { clearTimeout(timer); resolve("error"); };
 });
@@ -57,12 +60,24 @@ out.ms = performance.now() - t0;
 await fetch("/result", { method: "POST", body: JSON.stringify(out) });
 `;
 
-Deno.serve(async (req) => {
+// The app's own page (its custom-scheme origin keeps no cookies). It says
+// when it loaded: navigating the window before that would be overtaken by it.
+let appPageLoaded = false;
+Deno.serve((req) => {
+  if (new URL(req.url).pathname === "/loaded") {
+    appPageLoaded = true;
+    return new Response("ok");
+  }
+  return html(page("e2e keyring", "", `fetch("/loaded");`));
+});
+
+// A loopback http origin, which does: the second window's page.
+const server = Deno.serve({ hostname: "127.0.0.1", port: 0 }, async (req) => {
   const url = new URL(req.url);
   const cookie = req.headers.get("cookie") ?? "";
-  if (url.pathname.endsWith("/ws")) {
+  if (url.pathname === "/ws") {
     const { socket, response } = Deno.upgradeWebSocket(req);
-    socket.onopen = () => socket.send("open");
+    socket.onopen = () => socket.send(cookie);
     return response;
   }
   if (url.pathname === "/echo") return new Response(cookie);
@@ -83,15 +98,11 @@ Deno.serve(async (req) => {
       String(body.fetchCookie).includes("e2e=1"),
       body,
     );
-    if (wsUrl) {
-      r.check(
-        "a WebSocket handshake through the relay completes",
-        body.socket === "open",
-        body,
-      );
-    } else {
-      r.na("a WebSocket through the relay", "no DENO_DESKTOP_WS_URL");
-    }
+    r.check(
+      "a WebSocket handshake carrying a cookie completes",
+      String(body.socket).includes("e2e=1"),
+      body,
+    );
     r.done();
     setTimeout(async () => {
       await sleep(500);
@@ -102,9 +113,12 @@ Deno.serve(async (req) => {
     return new Response("ok");
   }
   // The first page sets the cookie, then navigates.
-  const res = html(
-    page("e2e keyring", "", `location.href = "/second";`),
-  );
+  const res = html(page("e2e keyring", "", `location.href = "/second";`));
   res.headers.set("set-cookie", "e2e=1; Path=/; SameSite=Lax");
   return res;
 });
+
+// The main window (adopted), once the app's page is in it.
+const win = new BrowserWindow();
+r.set("appPageLoaded", await waitFor(() => appPageLoaded, 60_000));
+win.navigate(`http://127.0.0.1:${server.addr.port}/`);
