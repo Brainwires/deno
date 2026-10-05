@@ -34,6 +34,11 @@ export async function run(env: Env, rep: AreaReport) {
     params.secretServicePrompt = false;
     const sessionType = Deno.env.get("E2E_SESSION_TYPE") ?? "unset";
     params.sessionType = sessionType === "unset" ? "unknown" : sessionType;
+    // No KDE desktop here (none, or GNOME with kwalletd installed): not
+    // Chromium's store, so no KWallet state.
+    params.kwallet = null;
+    // A fresh profile holds no OS-key cookies: never waits for the key.
+    if (env.backend === "cef") params.cookieEncryptionWait = null;
   }
   const p = await packageApp(env, {
     app: "keyring",
