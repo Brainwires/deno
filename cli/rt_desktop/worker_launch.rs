@@ -88,12 +88,11 @@ pub fn is_worker_launch(
     && args[1..]
       .iter()
       .any(|a| !a.as_encoded_bytes().starts_with(b"-"));
-  let host_forked_worker = env("NODE_CHANNEL_FD").is_some()
-    || env("NEXT_PRIVATE_WORKER").is_some();
-  let fork_child_entrypoint = env(
-    denort::run::INTERNAL_CHILD_ENTRYPOINT_ENV_VAR,
-  )
-  .is_some_and(|v| !v.is_empty());
+  let host_forked_worker =
+    env("NODE_CHANNEL_FD").is_some() || env("NEXT_PRIVATE_WORKER").is_some();
+  let fork_child_entrypoint =
+    env(denort::run::INTERNAL_CHILD_ENTRYPOINT_ENV_VAR)
+      .is_some_and(|v| !v.is_empty());
   host_cli_worker || host_forked_worker || run || fork_child_entrypoint
 }
 
@@ -612,7 +611,8 @@ mod tests {
     if !is_worker_launch(&args, var) {
       return Ok(false);
     }
-    let get = |name: &str| env.iter().find(|(k, _)| *k == name).map(|(_, v)| *v);
+    let get =
+      |name: &str| env.iter().find(|(k, _)| *k == name).map(|(_, v)| *v);
     authorize_with(
       get(WORKER_TOKEN_ENV),
       get("NODE_CHANNEL_FD"),
@@ -677,7 +677,10 @@ mod tests {
       Err(Refusal::NoToken)
     );
     assert_eq!(
-      launch(&["x.js"], &[("NEXT_PRIVATE_WORKER", "1"), (WORKER_TOKEN_ENV, token)]),
+      launch(
+        &["x.js"],
+        &[("NEXT_PRIVATE_WORKER", "1"), (WORKER_TOKEN_ENV, token)]
+      ),
       Err(Refusal::NoIpcChannel)
     );
     // The runtime-only shapes, which the host starts as the app: refused,
@@ -714,9 +717,8 @@ mod tests {
     ] {
       assert!(!is_worker_launch(&args(app), no_env), "{app:?}");
     }
-    let single = |n: &str| {
-      (n == "LAUFEY_SINGLE_INSTANCE").then(|| OsString::from("0"))
-    };
+    let single =
+      |n: &str| (n == "LAUFEY_SINGLE_INSTANCE").then(|| OsString::from("0"));
     assert!(!is_worker_launch(&args(&[]), single));
   }
 
