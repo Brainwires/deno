@@ -626,6 +626,7 @@ async fn compile_desktop(
         &desktop_flags,
         desktop_flags.target.as_deref(),
         config_package_version(cli_options).as_deref(),
+        linux_runs_secret_tool(flags.permissions.allow_run.as_deref()),
       )?;
       deb_abs
     } else if let Some(rpm) = rpm_output.as_deref() {
@@ -637,6 +638,7 @@ async fn compile_desktop(
         desktop_flags.target.as_deref(),
         config_package_version(cli_options).as_deref(),
         config_package_license(cli_options).as_deref(),
+        linux_runs_secret_tool(flags.permissions.allow_run.as_deref()),
       )?;
       rpm_abs
     } else if let Some(msi) = msi_output.as_deref() {
@@ -4208,7 +4210,8 @@ fn appimage_apprun(
 /// AppImage root `.desktop` entry. `StartupWMClass` must equal the window app_id
 /// (set via `LAUFEY_APP_ID` in [`appimage_apprun`]) so an integrated AppImage's
 /// icon resolves; without an id we fall back to the `<app>` binary name laufey
-/// uses by default.
+/// uses by default. `Icon` names the same id, the basename of the AppDir's root
+/// icon (as in the `.deb` / `.rpm`, where the icon is installed under it).
 ///
 /// With deep links configured, `MimeType` claims each `x-scheme-handler/…`
 /// and `Exec` takes the URL with `%u`, so an integrated AppImage receives the
@@ -4228,7 +4231,7 @@ fn appimage_desktop_entry(
      Type=Application\n\
      Name={app_name}\n\
      Exec={app_name}{exec_arg}\n\
-     Icon={app_name}\n\
+     Icon={startup_wm_class}\n\
      StartupWMClass={startup_wm_class}\n\
      Categories=Utility;\n\
      {mime}",
@@ -4288,8 +4291,11 @@ fn create_linux_appimage(
     node_header(0o644),
   )?;
 
-  // Icon at AppDir root named after the app. package_linux_app_dir writes the
-  // user icon as AppIcon.png; if absent, fall back to a 1×1 transparent PNG.
+  // Icon at AppDir root named after the entry's `Icon` (the app id, else the
+  // app name), plus the `.DirIcon` AppImage tools show. package_linux_app_dir
+  // writes the user icon as AppIcon.png; if absent, fall back to a 1×1
+  // transparent PNG. An AppIcon.svg goes beside it.
+  let icon_name = desktop_id.unwrap_or(&app_name);
   let icon_src = app_dir.join("AppIcon.png");
   let icon_bytes = if icon_src.exists() {
     std::fs::read(&icon_src)?
@@ -4297,10 +4303,19 @@ fn create_linux_appimage(
     STUB_ICON_PNG.to_vec()
   };
   writer.push_file(
-    Cursor::new(icon_bytes),
-    format!("/{app_name}.png"),
+    Cursor::new(icon_bytes.clone()),
+    format!("/{icon_name}.png"),
     node_header(0o644),
   )?;
+  writer.push_file(Cursor::new(icon_bytes), "/.DirIcon", node_header(0o644))?;
+  let svg_src = app_dir.join("AppIcon.svg");
+  if svg_src.exists() {
+    writer.push_file(
+      Cursor::new(std::fs::read(&svg_src)?),
+      format!("/{icon_name}.svg"),
+      node_header(0o644),
+    )?;
+  }
 
   // Serialize the SquashFS to memory.
   let mut squashfs = Cursor::new(Vec::<u8>::new());
@@ -4368,6 +4383,109 @@ const CEF_RUNTIME_DEPS: &[(&str, &str)] = &[
 /// Default package version when no version is configured. Matches the macOS
 /// bundle's hard-coded `CFBundleVersion`.
 const LINUX_PACKAGE_VERSION: &str = "1.0.0";
+
+/// The Debian package that ships `secret-tool` (libsecret's CLI; a stock
+/// Ubuntu desktop has libsecret without it).
+const SECRET_TOOL_DEB: &str = "libsecret-tools";
+/// The RPM package that ships `secret-tool` (Fedora, RHEL).
+const SECRET_TOOL_RPM: &str = "libsecret";
+
+/// Whether the compiled app may run `secret-tool` (its `--allow-run` list
+/// names it, by name or path): an app that keeps secrets in the Secret Service
+/// through it (denext's `secureStore` bakes exactly this), so its `.deb` /
+/// `.rpm` depend on the package that ships it. An unscoped `--allow-run` (or
+/// `-A`) says nothing about it and adds nothing.
+fn linux_runs_secret_tool(allow_run: Option<&[String]>) -> bool {
+  allow_run.is_some_and(|list| {
+    list
+      .iter()
+      .any(|p| p == "secret-tool" || p.ends_with("/secret-tool"))
+  })
+}
+
+/// The sizes the hicolor icon theme lists (`index.theme`); an icon in a
+/// directory of any other size is never looked up.
+const HICOLOR_SIZES: &[u32] = &[16, 22, 24, 32, 48, 64, 96, 128, 256, 512];
+
+/// Width and height of a PNG (its `IHDR`), or `None` for anything else.
+fn png_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
+  if bytes.len() < 24 || !bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+    return None;
+  }
+  let w = u32::from_be_bytes(bytes[16..20].try_into().ok()?);
+  let h = u32::from_be_bytes(bytes[20..24].try_into().ok()?);
+  Some((w, h))
+}
+
+/// The hicolor directory size for a square icon of `size` pixels: its own size
+/// when the theme lists it, else the largest listed size below it (launchers
+/// scale the larger image down); `None` below 16 px (the 1×1 stub).
+fn hicolor_size(size: u32) -> Option<u32> {
+  HICOLOR_SIZES.iter().rev().copied().find(|s| *s <= size)
+}
+
+/// The icon files a `.deb` / `.rpm` installs for the app dir's icon, as
+/// (absolute install path, contents), named `icon_name` (the app id the
+/// `.desktop` entry's `Icon` names): `AppIcon.png` as
+/// `/usr/share/pixmaps/<id>.png` and, when square, in the hicolor theme at the
+/// size [`hicolor_size`] picks; an `AppIcon.svg` as
+/// `/usr/share/icons/hicolor/scalable/apps/<id>.svg`. Empty without an icon.
+fn linux_package_icons(
+  app_dir: &Path,
+  icon_name: &str,
+) -> Result<Vec<(String, Vec<u8>)>, AnyError> {
+  let mut icons = Vec::new();
+  let png_src = app_dir.join("AppIcon.png");
+  if png_src.exists() {
+    let png = std::fs::read(&png_src)?;
+    if let Some((w, h)) = png_dimensions(&png) {
+      if w == h
+        && let Some(size) = hicolor_size(w)
+      {
+        icons.push((
+          format!(
+            "/usr/share/icons/hicolor/{size}x{size}/apps/{icon_name}.png"
+          ),
+          png.clone(),
+        ));
+      }
+      icons.push((format!("/usr/share/pixmaps/{icon_name}.png"), png));
+    }
+  }
+  let svg_src = app_dir.join("AppIcon.svg");
+  if svg_src.exists() {
+    icons.push((
+      format!("/usr/share/icons/hicolor/scalable/apps/{icon_name}.svg"),
+      std::fs::read(&svg_src)?,
+    ));
+  }
+  Ok(icons)
+}
+
+/// Shell lines the `.deb` maintainer scripts and the `.rpm` scriptlets run to
+/// refresh the desktop-entry database (the `x-scheme-handler` claims) and the
+/// hicolor icon cache, where those tools exist. `|| :` keeps a missing tool or
+/// a failed refresh from failing the install.
+const LINUX_REFRESH_SCRIPT: &str = "command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database -q /usr/share/applications || :\n\
+command -v gtk-update-icon-cache >/dev/null 2>&1 && gtk-update-icon-cache -q -t -f /usr/share/icons/hicolor || :\n";
+
+/// The `.deb` maintainer script `name` (`postinst` after a configure, `postrm`
+/// after a remove or purge): [`LINUX_REFRESH_SCRIPT`]. dpkg's file triggers do
+/// the same on Debian / Ubuntu; this covers a system without them.
+fn deb_maintainer_script(name: &str) -> String {
+  let when = if name == "postinst" {
+    "configure"
+  } else {
+    "remove|purge"
+  };
+  let body: String = LINUX_REFRESH_SCRIPT
+    .lines()
+    .map(|l| format!("    {l}\n"))
+    .collect();
+  format!(
+    "#!/bin/sh\nset -e\ncase \"$1\" in\n  {when})\n{body}    ;;\nesac\nexit 0\n"
+  )
+}
 
 /// Metadata shared by the `.deb` and `.rpm` builders, derived from the staged
 /// app dir name and the desktop flags. Avoids new config fields — the package
@@ -4542,7 +4660,9 @@ fn rpm_arch_for_target(target: Option<&str>) -> Result<&'static str, AnyError> {
 ///
 /// Unlike the in-app-dir `.desktop` (whose `Exec`/`Icon` are relative), this
 /// one points `Exec` at the package name (resolved via PATH from the
-/// `/usr/bin/<pkg>` symlink) and `Icon` at the installed hicolor icon name.
+/// `/usr/bin/<pkg>` symlink) and `Icon` at the installed icon's name, the
+/// identifier ([`linux_package_icons`]); with no icon installed (`icon`
+/// false) it names none.
 ///
 /// `Exec` launches through `env` so the backend gets `LAUFEY_APP_ID` set to the
 /// same reverse-DNS `identifier` as `StartupWMClass`; without it laufey defaults
@@ -4554,17 +4674,22 @@ fn rpm_arch_for_target(target: Option<&str>) -> Result<&'static str, AnyError> {
 /// and `Exec` takes the URL with `%u` (the installed entry is the one the
 /// desktop's URL handler database sees; the app-dir copy under `/usr/lib`
 /// is not).
-fn system_desktop_entry(meta: &LinuxPackageMeta) -> String {
+fn system_desktop_entry(meta: &LinuxPackageMeta, icon: bool) -> String {
   let (exec_arg, mime) = match linux_deep_link_mime_types(&meta.deep_links) {
     Some(mime) => (" %u", format!("MimeType={mime}\n")),
     None => ("", String::new()),
+  };
+  let icon = if icon {
+    format!("Icon={}\n", meta.identifier)
+  } else {
+    String::new()
   };
   format!(
     "[Desktop Entry]\n\
      Type=Application\n\
      Name={app_name}\n\
      Exec=env {env} {package}{exec_arg}\n\
-     Icon={package}\n\
+     {icon}\
      StartupWMClass={identifier}\n\
      Categories=Utility;\n\
      {mime}",
@@ -4597,14 +4722,20 @@ fn normalized_deep_links(
 /// /usr/lib/<pkg>/            ← staged app dir contents
 /// /usr/bin/<pkg>             ← symlink → ../lib/<pkg>/<launcher>
 /// /usr/share/applications/<pkg>.desktop
-/// /usr/share/icons/hicolor/512x512/apps/<pkg>.png
+/// /usr/share/icons/hicolor/<n>x<n>/apps/<id>.png   (see linux_package_icons)
+/// /usr/share/pixmaps/<id>.png
 /// ```
+///
+/// `postinst` / `postrm` refresh the desktop and icon databases
+/// ([`deb_maintainer_script`]); `secret_tool` adds the package that ships
+/// `secret-tool` to `Depends` ([`linux_runs_secret_tool`]).
 fn create_linux_deb(
   app_dir: &Path,
   deb_path: &Path,
   desktop_flags: &DesktopFlags,
   target: Option<&str>,
   config_version: Option<&str>,
+  secret_tool: bool,
 ) -> Result<(), AnyError> {
   let meta = linux_package_meta(app_dir, desktop_flags, config_version)?;
   let arch = debian_arch_for_target(target)?;
@@ -4615,6 +4746,7 @@ fn create_linux_deb(
   let depends = CEF_RUNTIME_DEPS
     .iter()
     .map(|(_, pkg)| *pkg)
+    .chain(secret_tool.then_some(SECRET_TOOL_DEB))
     .collect::<Vec<_>>()
     .join(", ");
   let control = format!(
@@ -4633,7 +4765,9 @@ fn create_linux_deb(
     size = installed_size_kib,
     summary = meta.summary,
   );
-  let control_tar_gz = build_deb_control_tar(&control)?;
+  let scripts =
+    ["postinst", "postrm"].map(|name| (name, deb_maintainer_script(name)));
+  let control_tar_gz = build_deb_control_tar(&control, &scripts)?;
 
   // Assemble the ar archive: global header then the three members in the
   // order dpkg expects (debian-binary, control, data).
@@ -4697,6 +4831,7 @@ fn build_deb_data_tar(
   use flate2::Compression;
   use flate2::write::GzEncoder;
 
+  let icons = linux_package_icons(app_dir, &meta.identifier)?;
   let mut tar_buf: Vec<u8> = Vec::new();
   let mut installed_size: u64 = 0;
   {
@@ -4721,18 +4856,28 @@ fn build_deb_data_tar(
     // conventional for `data.tar`; the `tar` crate strips it (it skips
     // `CurDir` components), leaving root-relative `usr/...` entries, which dpkg
     // installs to `/usr/...` identically.
-    for dir in [
+    let mut dirs: Vec<String> = [
       "./usr/",
       "./usr/bin/",
       "./usr/lib/",
       &format!("./usr/lib/{}/", meta.package),
       "./usr/share/",
       "./usr/share/applications/",
-      "./usr/share/icons/",
-      "./usr/share/icons/hicolor/",
-      "./usr/share/icons/hicolor/512x512/",
-      "./usr/share/icons/hicolor/512x512/apps/",
-    ] {
+    ]
+    .map(String::from)
+    .to_vec();
+    // Every directory above an installed icon, parents first.
+    for (path, _) in &icons {
+      let mut at = 0;
+      while let Some(i) = path[at + 1..].find('/') {
+        at += i + 1;
+        let dir = format!(".{}/", &path[..at]);
+        if !dirs.contains(&dir) {
+          dirs.push(dir);
+        }
+      }
+    }
+    for dir in &dirs {
       push_dir(&mut builder, dir)?;
     }
 
@@ -4810,7 +4955,7 @@ fn build_deb_data_tar(
 
     // /usr/share/applications/<pkg>.desktop
     {
-      let desktop = system_desktop_entry(meta).into_bytes();
+      let desktop = system_desktop_entry(meta, !icons.is_empty()).into_bytes();
       installed_size += desktop.len() as u64;
       let mut h = tar::Header::new_gnu();
       h.set_entry_type(tar::EntryType::Regular);
@@ -4827,10 +4972,8 @@ fn build_deb_data_tar(
       )?;
     }
 
-    // /usr/share/icons/.../<pkg>.png (if the app dir carries an icon)
-    let icon_src = app_dir.join("AppIcon.png");
-    if icon_src.exists() {
-      let data = std::fs::read(&icon_src)?;
+    // The icon in the hicolor theme and pixmaps (if the app dir carries one).
+    for (path, data) in &icons {
       installed_size += data.len() as u64;
       let mut h = tar::Header::new_gnu();
       h.set_entry_type(tar::EntryType::Regular);
@@ -4840,14 +4983,7 @@ fn build_deb_data_tar(
       h.set_mtime(0);
       h.set_size(data.len() as u64);
       h.set_cksum();
-      builder.append_data(
-        &mut h,
-        format!(
-          "./usr/share/icons/hicolor/512x512/apps/{}.png",
-          meta.package
-        ),
-        &data[..],
-      )?;
+      builder.append_data(&mut h, format!(".{path}"), &data[..])?;
     }
 
     builder.finish()?;
@@ -4863,24 +4999,35 @@ fn build_deb_data_tar(
   })
 }
 
-/// Build the `control.tar.gz` carrying the single `./control` file.
-fn build_deb_control_tar(control: &str) -> Result<Vec<u8>, AnyError> {
+/// Build the `control.tar.gz`: the `./control` file and the maintainer
+/// `scripts` (`(name, body)`, executable).
+fn build_deb_control_tar(
+  control: &str,
+  scripts: &[(&str, String)],
+) -> Result<Vec<u8>, AnyError> {
   use flate2::Compression;
   use flate2::write::GzEncoder;
 
   let mut tar_buf: Vec<u8> = Vec::new();
   {
     let mut builder = tar::Builder::new(&mut tar_buf);
-    let body = control.as_bytes();
-    let mut h = tar::Header::new_gnu();
-    h.set_entry_type(tar::EntryType::Regular);
-    h.set_mode(0o644);
-    h.set_uid(0);
-    h.set_gid(0);
-    h.set_mtime(0);
-    h.set_size(body.len() as u64);
-    h.set_cksum();
-    builder.append_data(&mut h, "./control", body)?;
+    let members = std::iter::once(("control", control, 0o644)).chain(
+      scripts
+        .iter()
+        .map(|(name, body)| (*name, body.as_str(), 0o755)),
+    );
+    for (name, body, mode) in members {
+      let body = body.as_bytes();
+      let mut h = tar::Header::new_gnu();
+      h.set_entry_type(tar::EntryType::Regular);
+      h.set_mode(mode);
+      h.set_uid(0);
+      h.set_gid(0);
+      h.set_mtime(0);
+      h.set_size(body.len() as u64);
+      h.set_cksum();
+      builder.append_data(&mut h, format!("./{name}"), body)?;
+    }
     builder.finish()?;
   }
   let mut gz = Vec::new();
@@ -4893,7 +5040,9 @@ fn build_deb_control_tar(control: &str) -> Result<Vec<u8>, AnyError> {
 /// Wrap a Linux app directory in an RPM `.rpm` package via the pure-Rust `rpm`
 /// crate (no `rpmbuild`, so it cross-compiles). Same install layout as the
 /// `.deb`. `Requires` is expressed as CEF shared-library sonames, which resolve
-/// across RPM distros without hard-coding each one's package names.
+/// across RPM distros without hard-coding each one's package names, plus
+/// `libsecret` (its `secret-tool`) with `secret_tool`. `%post` / `%postun`
+/// refresh the desktop and icon databases ([`LINUX_REFRESH_SCRIPT`]).
 fn create_linux_rpm(
   app_dir: &Path,
   rpm_path: &Path,
@@ -4901,6 +5050,7 @@ fn create_linux_rpm(
   target: Option<&str>,
   config_version: Option<&str>,
   config_license: Option<&str>,
+  secret_tool: bool,
 ) -> Result<(), AnyError> {
   let meta = linux_package_meta(app_dir, desktop_flags, config_version)?;
   let arch = rpm_arch_for_target(target)?;
@@ -4947,8 +5097,12 @@ fn create_linux_rpm(
   let staging = tempfile::Builder::new()
     .prefix(".deno-desktop-rpm-")
     .tempdir()?;
+  let icons = linux_package_icons(app_dir, &meta.identifier)?;
   let desktop_path = staging.path().join("app.desktop");
-  std::fs::write(&desktop_path, system_desktop_entry(&meta))?;
+  std::fs::write(
+    &desktop_path,
+    system_desktop_entry(&meta, !icons.is_empty()),
+  )?;
   builder
     .with_file(
       &desktop_path,
@@ -4959,18 +5113,19 @@ fn create_linux_rpm(
     )
     .context("failed to add .desktop file to rpm")?;
 
-  // /usr/share/icons/.../<pkg>.png (if present)
-  let icon_src = app_dir.join("AppIcon.png");
-  if icon_src.exists() {
+  // The icon in the hicolor theme and pixmaps (if present), staged like the
+  // `.desktop` entry.
+  for (i, (path, data)) in icons.iter().enumerate() {
+    let staged = staging.path().join(format!("icon-{i}"));
+    std::fs::write(&staged, data)?;
     builder
-      .with_file(
-        &icon_src,
-        rpm::FileOptions::new(format!(
-          "/usr/share/icons/hicolor/512x512/apps/{}.png",
-          meta.package
-        )),
-      )
+      .with_file(&staged, rpm::FileOptions::new(path.as_str()))
       .context("failed to add icon to rpm")?;
+  }
+  builder.post_install_script(LINUX_REFRESH_SCRIPT);
+  builder.post_uninstall_script(LINUX_REFRESH_SCRIPT);
+  if secret_tool {
+    builder.requires(rpm::Dependency::any(SECRET_TOOL_RPM));
   }
 
   // RPM auto-`Provides` 64-bit ELF sonames with an `()(64bit)` class suffix
@@ -7076,7 +7231,7 @@ def456  other.zip
     flags.identifier = Some("com.example my app".to_string());
     let meta = linux_package_meta(&app_dir, &flags, None).unwrap();
     assert_eq!(meta.identifier, "com.deno.desktop.myapp");
-    let entry = system_desktop_entry(&meta);
+    let entry = system_desktop_entry(&meta, true);
     assert!(
       entry.contains("Exec=env LAUFEY_APP_ID=com.deno.desktop.myapp myapp\n"),
       "unsafe identifier leaked into Exec:\n{entry}"
@@ -7185,7 +7340,7 @@ def456  other.zip
       deep_links: vec![],
       single_instance: false,
     };
-    let entry = system_desktop_entry(&meta);
+    let entry = system_desktop_entry(&meta, true);
     // Exec launches through `env` so the backend's app_id matches
     // StartupWMClass (both the reverse-DNS identifier).
     assert!(
@@ -7202,7 +7357,7 @@ def456  other.zip
       single_instance: true,
       ..meta
     };
-    let entry = system_desktop_entry(&meta);
+    let entry = system_desktop_entry(&meta, true);
     assert!(
       entry.contains(
         "Exec=env LAUFEY_APP_ID=com.deno.desktop.myapp \
@@ -8603,6 +8758,8 @@ def456  other.zip
     let tmp = tempfile::tempdir().unwrap();
     let app_dir = fake_linux_app_dir(tmp.path(), "MyApp");
     let deb = tmp.path().join("MyApp.deb");
+    // A 256×256 icon: the hicolor theme's 256x256 size.
+    std::fs::write(app_dir.join("AppIcon.png"), png_of_size(256, 256)).unwrap();
     let flags = empty_desktop_flags();
     create_linux_deb(
       &app_dir,
@@ -8610,6 +8767,7 @@ def456  other.zip
       &flags,
       Some("x86_64-unknown-linux-gnu"),
       None,
+      false,
     )
     .unwrap();
 
@@ -8681,10 +8839,20 @@ def456  other.zip
         .iter()
         .any(|p| p == "usr/share/applications/myapp.desktop")
     );
+    // The icon is installed under the app id, which `Icon=` names.
+    assert!(paths.iter().any(|p| {
+      p == "usr/share/icons/hicolor/256x256/apps/com.deno.desktop.myapp.png"
+    }));
     assert!(
       paths
         .iter()
-        .any(|p| p == "usr/share/icons/hicolor/512x512/apps/myapp.png")
+        .any(|p| p == "usr/share/pixmaps/com.deno.desktop.myapp.png")
+    );
+    assert!(
+      paths
+        .iter()
+        .any(|p| p == "usr/share/icons/hicolor/256x256/apps/"),
+      "the icon's directories are in the archive: {paths:?}"
     );
     assert_eq!(
       bin_link_target.as_deref(),
@@ -8706,6 +8874,7 @@ def456  other.zip
       Some("aarch64-unknown-linux-gnu"),
       None,
       None,
+      false,
     )
     .unwrap();
 
@@ -8743,6 +8912,297 @@ def456  other.zip
     );
   }
 
+  /// The 1×1 stub PNG with its `IHDR` saying `w`×`h` (the packagers read the
+  /// size only, never the pixels).
+  fn png_of_size(w: u32, h: u32) -> Vec<u8> {
+    let mut png = STUB_ICON_PNG.to_vec();
+    png[16..20].copy_from_slice(&w.to_be_bytes());
+    png[20..24].copy_from_slice(&h.to_be_bytes());
+    png
+  }
+
+  /// The `.deb`'s `control.tar.gz` entries, as (path, mode, contents).
+  fn deb_control_entries(deb: &Path) -> Vec<(String, u32, String)> {
+    let bytes = std::fs::read(deb).unwrap();
+    let mut pos = 8;
+    while pos + 60 <= bytes.len() {
+      let header = &bytes[pos..pos + 60];
+      let name = String::from_utf8_lossy(&header[..16]).trim().to_string();
+      let size: usize = String::from_utf8_lossy(&header[48..58])
+        .trim()
+        .parse()
+        .unwrap();
+      if name == "control.tar.gz" {
+        let tar = gunzip(&bytes[pos + 60..pos + 60 + size]);
+        let mut archive = tar::Archive::new(&tar[..]);
+        return archive
+          .entries()
+          .unwrap()
+          .map(|e| {
+            let mut e = e.unwrap();
+            let path = e.path().unwrap().to_string_lossy().into_owned();
+            let mode = e.header().mode().unwrap();
+            let mut body = String::new();
+            e.read_to_string(&mut body).unwrap();
+            (path, mode, body)
+          })
+          .collect();
+      }
+      pos += 60 + size + (size % 2);
+    }
+    panic!("no control.tar.gz in {}", deb.display());
+  }
+
+  #[test]
+  fn linux_icons_follow_the_hicolor_sizes() {
+    assert_eq!(png_dimensions(&png_of_size(48, 32)), Some((48, 32)));
+    assert_eq!(png_dimensions(b"GIF89a not a png at all.."), None);
+    assert_eq!(hicolor_size(512), Some(512));
+    assert_eq!(hicolor_size(1024), Some(512));
+    assert_eq!(hicolor_size(300), Some(256));
+    assert_eq!(hicolor_size(1), None);
+
+    let tmp = tempfile::tempdir().unwrap();
+    let app_dir = fake_linux_app_dir(tmp.path(), "MyApp");
+    // An off-size square icon goes to the theme size below it, plus pixmaps.
+    std::fs::write(app_dir.join("AppIcon.png"), png_of_size(1000, 1000))
+      .unwrap();
+    let paths = |icons: Vec<(String, Vec<u8>)>| {
+      icons.into_iter().map(|(p, _)| p).collect::<Vec<_>>()
+    };
+    assert_eq!(
+      paths(linux_package_icons(&app_dir, "com.acme.app").unwrap()),
+      [
+        "/usr/share/icons/hicolor/512x512/apps/com.acme.app.png",
+        "/usr/share/pixmaps/com.acme.app.png",
+      ]
+    );
+    // A non-square PNG is pixmaps only; an SVG is the scalable icon.
+    std::fs::write(app_dir.join("AppIcon.png"), png_of_size(64, 32)).unwrap();
+    std::fs::write(app_dir.join("AppIcon.svg"), "<svg/>").unwrap();
+    let icons = linux_package_icons(&app_dir, "com.acme.app").unwrap();
+    assert_eq!(
+      paths(icons.clone()),
+      [
+        "/usr/share/pixmaps/com.acme.app.png",
+        "/usr/share/icons/hicolor/scalable/apps/com.acme.app.svg",
+      ]
+    );
+    assert_eq!(icons[1].1, b"<svg/>");
+    // No icon: nothing installed, and the entry names none.
+    std::fs::remove_file(app_dir.join("AppIcon.png")).unwrap();
+    std::fs::remove_file(app_dir.join("AppIcon.svg")).unwrap();
+    assert!(
+      linux_package_icons(&app_dir, "com.acme.app")
+        .unwrap()
+        .is_empty()
+    );
+    let meta =
+      linux_package_meta(&app_dir, &empty_desktop_flags(), None).unwrap();
+    assert!(!system_desktop_entry(&meta, false).contains("Icon="));
+    assert!(
+      system_desktop_entry(&meta, true)
+        .contains("Icon=com.deno.desktop.myapp\n")
+    );
+  }
+
+  #[test]
+  fn deb_maintainer_scripts_refresh_the_desktop_databases() {
+    let tmp = tempfile::tempdir().unwrap();
+    let app_dir = fake_linux_app_dir(tmp.path(), "MyApp");
+    let deb = tmp.path().join("MyApp.deb");
+    create_linux_deb(
+      &app_dir,
+      &deb,
+      &empty_desktop_flags(),
+      Some("x86_64-unknown-linux-gnu"),
+      None,
+      false,
+    )
+    .unwrap();
+    let entries = deb_control_entries(&deb);
+    let names: Vec<&str> = entries.iter().map(|(p, _, _)| p.as_str()).collect();
+    assert_eq!(names, ["control", "postinst", "postrm"]);
+    for (name, mode, body) in &entries[1..] {
+      assert_eq!(*mode, 0o755, "{name} must be executable");
+      assert!(body.starts_with("#!/bin/sh\nset -e\n"), "{name}:\n{body}");
+      assert!(
+        body.contains(
+          "update-desktop-database -q /usr/share/applications || :\n"
+        ),
+        "{name}:\n{body}"
+      );
+      assert!(
+        body.contains(
+          "gtk-update-icon-cache -q -t -f /usr/share/icons/hicolor || :\n"
+        ),
+        "{name}:\n{body}"
+      );
+      assert!(body.ends_with("esac\nexit 0\n"), "{name}:\n{body}");
+    }
+    assert!(entries[1].2.contains("  configure)\n"));
+    assert!(entries[2].2.contains("  remove|purge)\n"));
+    // No secret-tool unless the app may run it.
+    assert!(!entries[0].2.contains("libsecret"), "{}", entries[0].2);
+  }
+
+  #[test]
+  fn linux_packages_depend_on_secret_tool_when_the_app_runs_it() {
+    let list = |l: &[&str]| l.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    assert!(linux_runs_secret_tool(Some(&list(&["secret-tool"]))));
+    assert!(linux_runs_secret_tool(Some(&list(&[
+      "open",
+      "/usr/bin/secret-tool"
+    ]))));
+    assert!(!linux_runs_secret_tool(Some(&list(&["xdg-open"]))));
+    // An unscoped --allow-run (or none) says nothing about it.
+    assert!(!linux_runs_secret_tool(Some(&[])));
+    assert!(!linux_runs_secret_tool(None));
+
+    let tmp = tempfile::tempdir().unwrap();
+    let app_dir = fake_linux_app_dir(tmp.path(), "MyApp");
+    let deb = tmp.path().join("MyApp.deb");
+    create_linux_deb(
+      &app_dir,
+      &deb,
+      &empty_desktop_flags(),
+      Some("x86_64-unknown-linux-gnu"),
+      None,
+      true,
+    )
+    .unwrap();
+    let control = &deb_control_entries(&deb)[0].2;
+    assert!(
+      control.contains(", libdrm2, libsecret-tools\n"),
+      "Depends must end with the secret-tool package:\n{control}"
+    );
+
+    let rpm_path = tmp.path().join("MyApp.rpm");
+    create_linux_rpm(
+      &app_dir,
+      &rpm_path,
+      &empty_desktop_flags(),
+      Some("x86_64-unknown-linux-gnu"),
+      None,
+      None,
+      true,
+    )
+    .unwrap();
+    let bytes = std::fs::read(&rpm_path).unwrap();
+    let pkg = rpm::Package::parse(&mut &bytes[..]).unwrap();
+    let requires: Vec<String> = pkg
+      .metadata
+      .get_requires()
+      .unwrap()
+      .into_iter()
+      .map(|d| d.name)
+      .collect();
+    assert!(requires.iter().any(|r| r == "libsecret"), "{requires:?}");
+  }
+
+  #[test]
+  fn rpm_installs_the_icon_and_refreshes_the_desktop_databases() {
+    let tmp = tempfile::tempdir().unwrap();
+    let app_dir = fake_linux_app_dir(tmp.path(), "MyApp");
+    std::fs::write(app_dir.join("AppIcon.png"), png_of_size(128, 128)).unwrap();
+    let rpm_path = tmp.path().join("MyApp.rpm");
+    let mut flags = empty_desktop_flags();
+    flags.identifier = Some("com.acme.tool".to_string());
+    create_linux_rpm(
+      &app_dir,
+      &rpm_path,
+      &flags,
+      Some("aarch64-unknown-linux-gnu"),
+      None,
+      None,
+      false,
+    )
+    .unwrap();
+    let bytes = std::fs::read(&rpm_path).unwrap();
+    let pkg = rpm::Package::parse(&mut &bytes[..]).unwrap();
+    let files: Vec<String> = pkg
+      .metadata
+      .get_file_paths()
+      .unwrap()
+      .into_iter()
+      .map(|p| p.to_string_lossy().into_owned())
+      .collect();
+    assert!(
+      files.iter().any(|f| {
+        f == "/usr/share/icons/hicolor/128x128/apps/com.acme.tool.png"
+      }),
+      "{files:?}"
+    );
+    assert!(
+      files
+        .iter()
+        .any(|f| f == "/usr/share/pixmaps/com.acme.tool.png")
+    );
+    let requires: Vec<String> = pkg
+      .metadata
+      .get_requires()
+      .unwrap()
+      .into_iter()
+      .map(|d| d.name)
+      .collect();
+    assert!(!requires.iter().any(|r| r == "libsecret"), "{requires:?}");
+    for script in [
+      pkg.metadata.get_post_install_script().unwrap(),
+      pkg.metadata.get_post_uninstall_script().unwrap(),
+    ] {
+      assert_eq!(script.script, LINUX_REFRESH_SCRIPT);
+      assert!(
+        script
+          .script
+          .contains("update-desktop-database -q /usr/share/applications || :")
+      );
+    }
+    // The installed entry names the icon by the same id.
+    let entry = system_desktop_entry(
+      &linux_package_meta(&app_dir, &flags, None).unwrap(),
+      true,
+    );
+    assert!(entry.contains("Icon=com.acme.tool\n"), "{entry}");
+  }
+
+  #[test]
+  fn appimage_root_icon_is_named_by_the_entry() {
+    let tmp = tempfile::tempdir().unwrap();
+    let app_dir = fake_linux_app_dir(tmp.path(), "MyApp");
+    let appimage_path = tmp.path().join("MyApp.AppImage");
+    let target = Some("x86_64-unknown-linux-gnu");
+    create_linux_appimage(
+      &app_dir,
+      &appimage_path,
+      target,
+      Some("com.acme.tool"),
+      &[],
+      false,
+    )
+    .unwrap();
+    let runtime_offset =
+      appimage_runtime_for_target(target).unwrap().len() as u64;
+    let appimage =
+      std::io::BufReader::new(std::fs::File::open(&appimage_path).unwrap());
+    let filesystem = backhand::FilesystemReader::from_reader_with_offset(
+      appimage,
+      runtime_offset,
+    )
+    .unwrap();
+    let names: Vec<String> = filesystem
+      .files()
+      .map(|n| n.fullpath.to_string_lossy().into_owned())
+      .collect();
+    assert!(names.iter().any(|n| n == "/com.acme.tool.png"), "{names:?}");
+    assert!(names.iter().any(|n| n == "/.DirIcon"), "{names:?}");
+    assert!(!names.iter().any(|n| n == "/MyApp.png"), "{names:?}");
+    let entry = appimage_desktop_entry("MyApp", Some("com.acme.tool"), &[]);
+    assert!(entry.contains("Icon=com.acme.tool\n"), "{entry}");
+    // Without an id, the icon (and StartupWMClass) is the app name.
+    let entry = appimage_desktop_entry("MyApp", None, &[]);
+    assert!(entry.contains("Icon=MyApp\n"), "{entry}");
+  }
+
   #[test]
   fn packaging_honors_config_version_and_license() {
     // deno.json `version`/`license` must reach the installers instead of the
@@ -8758,6 +9218,7 @@ def456  other.zip
       Some("aarch64-unknown-linux-gnu"),
       Some("2.3.4-beta.1"),
       Some("Apache-2.0"),
+      false,
     )
     .unwrap();
     let bytes = std::fs::read(&rpm_path).unwrap();
