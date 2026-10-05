@@ -14,7 +14,8 @@
 //!   into the app (deno.json `version`, the `app_version` of the standalone
 //!   metadata; the same value the running app reports as its version). It
 //!   lives in the app's runtime library (`<App>.dll` next to `<App>.exe`,
-//!   `<App>.so` next to the Linux executable, `libruntime.dylib` or
+//!   `<App>.runtime.dll` with the `cef` backend, where `<App>.dll` is the
+//!   CEF host behind CEF's bootstrap; `<App>.so` next to the Linux executable, `libruntime.dylib` or
 //!   `<exe>.dylib` in a bundle), in the data section that starts with the
 //!   magic `d3n0l4nd` and a little-endian `u64` length, followed by the
 //!   metadata JSON. It must equal the manifest's version (semver precedence:
@@ -24,10 +25,10 @@
 //!   `MAJOR.MINOR.PATCH` there (a prerelease can't be expressed), so that is
 //!   what is compared. A binary plist is not read (the CLI writes XML); the
 //!   embedded version still applies.
-//! - **Windows:** the stock CLI writes no `VERSIONINFO` resource into the
-//!   app's executable (it ships laufey's launcher renamed, without rcedit),
-//!   so there is no PE version to read; the embedded version above is the
-//!   check.
+//! - **Windows:** the app's executable may carry no `VERSIONINFO` resource
+//!   (the stock CLI ships laufey's launcher renamed, without one), and one it
+//!   carries holds only numeric fields, so it is not read; the embedded
+//!   version above is the check.
 //! - **AppImage:** the runtime library is inside the image's compressed
 //!   squashfs, which this runtime does not unpack; an AppImage update relies
 //!   on the manifest signature and the archive's SHA-256 alone (as it does
@@ -76,9 +77,15 @@ pub fn runtime_libraries(kind: InstallKind, exe: &Path) -> Vec<PathBuf> {
       libs.extend(super::swap::bundle_runtime_path(exe));
       libs
     }
-    // `<App>.exe` loads `<App>.dll`; a Linux `<App>` loads `<App>.so` (the
-    // launcher strips the last extension, as `with_extension` does).
-    InstallKind::AppDir if cfg!(windows) => vec![exe.with_extension("dll")],
+    // A Linux `<App>` loads `<App>.so` (the launcher strips the last
+    // extension, as `with_extension` does). The Windows `cef` backend's
+    // `<App>.exe` is CEF's bootstrap, which loads the host as `<App>.dll`,
+    // and the host loads `<App>.runtime.dll`; the `webview` host is
+    // `<App>.exe` itself and loads `<App>.dll`. A library without the
+    // metadata (the CEF host) is passed over by every reader.
+    InstallKind::AppDir if cfg!(windows) => {
+      vec![exe.with_extension("runtime.dll"), exe.with_extension("dll")]
+    }
     InstallKind::AppDir => vec![exe.with_extension("so")],
     InstallKind::AppImage => Vec::new(),
   }
@@ -439,6 +446,25 @@ pub(crate) mod tests {
     let e = check_embedded_version(&layout, &staged, "2.0.0").unwrap_err();
     assert_eq!(e.code, Code::VersionMismatch);
     assert!(e.message.contains("CFBundleShortVersionString"));
+  }
+
+  /// The Windows `cef` layout: `<App>.dll` is the CEF host (no metadata)
+  /// and the runtime is `<App>.runtime.dll`.
+  #[cfg(windows)]
+  #[test]
+  fn the_cef_runtime_is_found_beside_its_host() {
+    let t = tempfile::tempdir().unwrap();
+    let (layout, staged) =
+      staged_app(&t, InstallKind::AppDir, Some("2.0.0"), "2.0.0");
+    let exe = layout.exe_in(&staged);
+    let host = exe.with_extension("dll");
+    let runtime = exe.with_extension("runtime.dll");
+    std::fs::rename(&host, &runtime).unwrap();
+    std::fs::write(&host, b"MZ the laufey CEF host").unwrap();
+    assert_eq!(runtime_libraries(InstallKind::AppDir, &exe)[0], runtime);
+    check_embedded_version(&layout, &staged, "2.0.0").unwrap();
+    let e = check_embedded_version(&layout, &staged, "3.0.0").unwrap_err();
+    assert_eq!(e.code, Code::VersionMismatch);
   }
 
   #[test]

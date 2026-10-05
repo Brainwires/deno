@@ -2277,6 +2277,9 @@ laufey::main!(|| {
     worker_launch::WORKER_TOKEN_ENV,
     worker_launch::issue_token(),
   );
+  // ... in the working directory they were forked with (see
+  // worker_launch::CWD_ENV).
+  deno_runtime::deno_process::set_self_fork_cwd_env_var(worker_launch::CWD_ENV);
 
   // The full-app update watchdog: an update still unconfirmed from an
   // earlier launch (it crashed or never called confirm()) is rolled back
@@ -2877,10 +2880,13 @@ fn run_headless_worker() {
     }
 
     // A worker's own forks (a dev server's workers fork too) get a token
-    // naming it.
+    // naming it, and their working directory.
     deno_runtime::deno_process::set_self_fork_env_var(
       worker_launch::WORKER_TOKEN_ENV,
       worker_launch::issue_token(),
+    );
+    deno_runtime::deno_process::set_self_fork_cwd_env_var(
+      worker_launch::CWD_ENV,
     );
 
     let options = denort::run::RunOptions {

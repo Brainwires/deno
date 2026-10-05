@@ -1805,6 +1805,11 @@ pub fn spawn_detached(
   #[cfg(windows)]
   {
     use std::os::windows::process::CommandExt;
+    // The `cef` backend's executable is CEF's bootstrap, which moves the
+    // process to the executable's directory: inside the install, which the
+    // helper then can't rename. laufey's host changes back to the directory
+    // this names (and removes the variable).
+    cmd.env("LAUFEY_CWD", cwd);
     const DETACHED_PROCESS: u32 = 0x0000_0008;
     const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
     const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
@@ -1835,7 +1840,8 @@ pub fn spawn_helper(
 ) -> std::io::Result<()> {
   let exe = layout.exe();
   // Every host finds the runtime the installed app ships (a macOS bundle's
-  // `libruntime.dylib`, the `<App>.dll` / `<App>.so` next to the executable)
+  // `libruntime.dylib`, the `<App>.dll` (`<App>.runtime.dll` behind CEF's
+  // bootstrap) / `<App>.so` next to the executable)
   // for a headless launch too, and a packaged host ignores
   // LAUFEY_RUNTIME_PATH, so the helper needs no pointer to it.
   let env = [("LAUFEY_SINGLE_INSTANCE", Some("0"))];
