@@ -5118,16 +5118,17 @@ async fn op_desktop_request_notification_permission(
   let cb: Box<dyn FnOnce(PermissionState) + Send> = Box::new(move |state| {
     let _ = tx.send(state);
   });
-  // On a blocking-pool thread, never the JavaScript thread: a backend may
-  // answer inline after starting a notification server over D-Bus (Winit
-  // on Linux), which can take seconds.
-  let _ = deno_core::unsync::spawn_blocking(move || {
+  // On a blocking-pool thread, never the JavaScript thread (the answer
+  // comes through `cb`; the task's handle is dropped): a backend may answer
+  // inline after starting a notification server over D-Bus (Winit on
+  // Linux), which can take seconds.
+  drop(deno_core::unsync::spawn_blocking(move || {
     if provisional {
       api.request_provisional_notification_permission(cb);
     } else {
       api.request_notification_permission(cb);
     }
-  });
+  }));
   // If the backend forgets to invoke the callback (programmer error in a
   // hypothetical custom backend), the channel drops and `recv` returns
   // `Err` — surface that as "unsupported" so JS gets a stable result.
@@ -5151,11 +5152,11 @@ async fn op_desktop_query_notification_permission(
   };
   let (tx, rx) = tokio::sync::oneshot::channel::<PermissionState>();
   // Off the JavaScript thread, as for the request above.
-  let _ = deno_core::unsync::spawn_blocking(move || {
+  drop(deno_core::unsync::spawn_blocking(move || {
     api.query_notification_permission(Box::new(move |state| {
       let _ = tx.send(state);
     }));
-  });
+  }));
   permission_state_to_web_string(
     rx.await.unwrap_or(PermissionState::Unsupported),
   )
