@@ -8,6 +8,7 @@
 #      [E2E_SECRET_SERVICE=masked|locked] (Linux; masked by default)
 #      [E2E_SESSION_TYPE=unset|<value>] (Linux; XDG_SESSION_TYPE for the run,
 #      unset by default)
+#      [E2E_KWALLET=none|activatable] (Linux; none by default)
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 . "$here/../lib.sh"
@@ -75,6 +76,27 @@ case "$TARGET" in
         ;;
       *)
         echo "E2E_SECRET_SERVICE: masked or locked, not $E2E_SECRET_SERVICE" >&2
+        exit 1
+        ;;
+    esac
+    # KWallet. Activatable (E2E_KWALLET=activatable): kwalletd5 / kwalletd6
+    # installed but not running, on a GNOME session (KDE apps on GNOME).
+    # Chromium uses libsecret there, not KWallet, so it must not count: with
+    # a locked keyring no one can unlock, CEF still picks basic (laufey API
+    # 45). The services never start (/bin/false).
+    export E2E_KWALLET="${E2E_KWALLET:-none}"
+    case "$E2E_KWALLET" in
+      none) ;;
+      activatable)
+        mkdir -p "$work/kwallet/dbus-1/services"
+        for svc in org.kde.kwalletd5 org.kde.kwalletd6; do
+          printf '[D-BUS Service]\nName=%s\nExec=/bin/false\n' "$svc" >"$work/kwallet/dbus-1/services/$svc.service"
+        done
+        export XDG_DATA_DIRS="$work/kwallet:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
+        export XDG_CURRENT_DESKTOP=GNOME
+        ;;
+      *)
+        echo "E2E_KWALLET: none or activatable, not $E2E_KWALLET" >&2
         exit 1
         ;;
     esac

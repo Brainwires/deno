@@ -665,6 +665,23 @@ jobs:
           E2E_SESSION_TYPE: unset
         run: bash .github/denext-runtime/e2e/e2e.sh
 
+      # The same locked keyring on a GNOME session where KDE's wallet is
+      # installed (kwalletd5 / 6 activatable, not running): Chromium uses
+      # libsecret there, so KWallet must not count and CEF still picks basic.
+      - name: E2E (cef, keyring locked, KWallet activatable on GNOME)
+        id: e2e_keyring_kwallet
+        if: ${{ !cancelled() && runner.os == 'Linux' }}
+        env:
+          ARCHIVE: dist/deno-desktop-runtime-${{ needs.setup.outputs.version }}-${{ matrix.target }}-cef.tar.gz
+          BACKEND: cef
+          WORK_DIR: ${{ runner.temp }}/e2e-keyring-kwallet
+          E2E_OUT: ${{ runner.temp }}/e2e-out-keyring-kwallet
+          E2E_AREAS: keyring
+          E2E_SECRET_SERVICE: locked
+          E2E_SESSION_TYPE: unset
+          E2E_KWALLET: activatable
+        run: bash .github/denext-runtime/e2e/e2e.sh
+
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: ${{ !cancelled() }}
         with:
@@ -675,6 +692,8 @@ jobs:
             ${{ runner.temp }}/e2e-cef/w/logs/
             ${{ runner.temp }}/e2e-out-keyring/
             ${{ runner.temp }}/e2e-keyring/w/logs/
+            ${{ runner.temp }}/e2e-out-keyring-kwallet/
+            ${{ runner.temp }}/e2e-keyring-kwallet/w/logs/
           retention-days: 14
           if-no-files-found: warn
 

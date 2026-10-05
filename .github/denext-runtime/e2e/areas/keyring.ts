@@ -7,7 +7,9 @@
 // not wait for the cookie key and uses --password-store=basic. Xvfb's
 // $DISPLAY never makes the session graphical: with XDG_SESSION_TYPE unset
 // (e2e.sh's default) or set but not confirmed by logind (E2E_SESSION_TYPE),
-// no one can answer the prompt.
+// no one can answer the prompt. With E2E_KWALLET=activatable the session is
+// GNOME with kwalletd installed but not running: not Chromium's store there,
+// so still basic.
 
 import {
   type AreaReport,
