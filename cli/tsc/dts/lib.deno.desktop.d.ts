@@ -1510,6 +1510,12 @@ declare namespace Deno {
        * wayland logind session (a display alone, as under Xvfb, never
        * counts); for gnome-keyring, its prompter too. */
       secretServicePrompt: boolean;
+      /** Linux, where CEF's cookie store would use KWallet (a KDE desktop by
+       * Chromium's own rule): `"open"` (kwalletd runs and its local wallet
+       * is open: the only state that hands out the key), `"closed"`,
+       * `"disabled"` or `"not-running"`, read without starting kwalletd.
+       * `null` elsewhere. */
+      kwallet: "open" | "closed" | "disabled" | "not-running" | null;
       /** Linux: the server that owns `org.freedesktop.Notifications` now
        * (its name; `"unknown"` when it doesn't say), or `null` when nothing
        * does. The Notification portal's version is no proof notifications
@@ -1524,16 +1530,22 @@ declare namespace Deno {
        * version (`Notification`, `FileChooser`, `GlobalShortcuts`,
        * `Settings`). An interface the portal lacks is absent. */
       portalVersions: Record<string, number>;
-      /** CEF: `"basic"` (Linux: the Secret Service is locked and no one
-       * could answer its unlock prompt, so Chromium was started with
-       * `--password-store=basic` instead of waiting for the key) or `"os"`
-       * (left to Chromium: the OS keystore, or its own fallback when there
-       * is none). A profile that once had the OS key keeps asking for it;
-       * a launch that can't reach it (a locked keyring, no one to unlock
-       * it) is `"basic"` for that launch only, and its OS-key cookies are
-       * unavailable until the key is reachable again. `null` on the
-       * WebView backends. */
+      /** CEF: `"basic"` (Linux: no one could hand out the OS key, a locked
+       * Secret Service with no one to answer its unlock prompt or a KWallet
+       * that isn't open, and the profile holds no cookies encrypted with the
+       * OS key, so Chromium was started with `--password-store=basic`
+       * instead of waiting for the key) or `"os"` (the OS keystore, or
+       * Chromium's own fallback when there is none). A profile that holds
+       * cookies encrypted with the OS key is never switched to basic, which
+       * would make Chromium delete them: it stays `"os"` and waits for the
+       * key (`cookieEncryptionWait`). `null` on the WebView backends. */
       cookieEncryption: "os" | "basic" | null;
+      /** CEF on Linux: why this launch keeps the OS key although no one may
+       * be able to unlock it (the profile holds cookies encrypted with the
+       * OS key, which basic would delete). Requests that carry cookies wait
+       * until the keyring is unlocked or the wallet opened. `null`
+       * otherwise. */
+      cookieEncryptionWait: string | null;
     }
 
     /** What this backend can do on this OS
