@@ -28,7 +28,9 @@ const want = r.params as {
   cookieEncryption?: string | null;
 };
 
-const features = desktop.platformFeatures();
+// Optional: a runtime older than laufey API 45 has none (the cookie checks
+// still run, so the stall it had shows).
+const features = desktop.platformFeatures?.() ?? null;
 r.set("platformFeatures", features);
 if (want.secretService !== undefined) {
   r.check(
@@ -106,6 +108,10 @@ const server = Deno.serve({ hostname: "127.0.0.1", port: 0 }, async (req) => {
     r.done();
     setTimeout(async () => {
       await sleep(500);
+      // Close the loopback window and its server first: the app then ends
+      // the way a user's quit does.
+      win.close();
+      await server.shutdown();
       desktop.quit();
       await sleep(10000);
       Deno.exit(0);

@@ -274,9 +274,9 @@ where the changes are discussed.
     `NotSupported` with the reason when no icon can be shown (no
     StatusNotifierWatcher and no XEmbed tray, as on stock GNOME, or no
     appindicator library) instead of returning a dead tray; CEF starts with
-    `--password-store=basic` when the Secret Service could only answer through
-    a prompt no one can answer (it used to hold every request that carries
-    cookies forever), and reports `cookieEncryption: "basic"`.
+    `--password-store=basic` when the Secret Service could only answer through a
+    prompt no one can answer (it used to hold every request that carries cookies
+    forever), and reports `cookieEncryption: "basic"`.
 
 The runtime-side parts (1-3, 5-22) are what the prebuilt `libdenort` carries.
 The CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` /
