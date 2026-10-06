@@ -7,13 +7,19 @@
 // inherits no environment from the runner, so nothing is passed through the
 // environment) and writes `<dir>/<area>-<pid>.json` as it goes: a list of
 // checks, each `pass`, `fail` or `n/a` (with the reason), plus free-form
-// data. `<dir>` is `$DENEXT_E2E_DIR`, else `~/.denext-e2e`, the same for the
-// runner and the app.
+// data. `<dir>` is `$DENEXT_E2E_DIR`, else the directory of the run that
+// packaged the app (e2e_run.ts, written by the runner), else
+// `~/.denext-e2e`: the same for the runner and the app, and never shared by
+// two runs on one machine. A launch the runner starts itself also carries
+// `$DENEXT_E2E_LAUNCH`, which the result records, so the runner tells that
+// launch's result from any other app's.
 //
 // The desktop APIs under test are not in the stock CLI's type declarations
 // (apps are packaged with --no-check), so they are reached through `any`.
 
 // deno-lint-ignore-file no-explicit-any
+
+import { RUN_DIR } from "./e2e_run.ts";
 
 export const desktop: any = (Deno as any).desktop;
 export const BrowserWindow: any = (Deno as any).BrowserWindow;
@@ -23,6 +29,7 @@ export const OS = Deno.build.os;
 export function e2eDir(): string {
   const explicit = Deno.env.get("DENEXT_E2E_DIR");
   if (explicit) return explicit;
+  if (RUN_DIR) return RUN_DIR;
   // A launch the OS starts on Windows (a registered scheme) has USERPROFILE
   // but not necessarily HOME; prefer it there so every launch agrees.
   const home =
@@ -125,6 +132,7 @@ export class Report {
       os: OS,
       arch: Deno.build.arch,
       startedAt: startedAt,
+      launch,
       params: this.params,
       checks: this.checks,
       data: this.data,
@@ -197,6 +205,8 @@ export class Report {
 }
 
 const startedAt = new Date().toISOString();
+/** The runner's token for this launch (none when the OS started it). */
+const launch = Deno.env.get("DENEXT_E2E_LAUNCH") ?? null;
 
 /** `p`'s value, or `timeout` after `ms` (a hang becomes a failed check,
  * not a stuck app). */

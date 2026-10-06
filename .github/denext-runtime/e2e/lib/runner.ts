@@ -200,6 +200,12 @@ export async function packageApp(env: Env, spec: AppSpec): Promise<Packaged> {
   await rm(buildDir);
   const src = path(buildDir, "src");
   await copyTree(appsPath("_shared"), path(src, "_shared"));
+  // The app writes its results where this run reads them, however it is
+  // launched (the OS starts some launches, with none of our environment).
+  await Deno.writeTextFile(
+    path(src, "_shared", "e2e_run.ts"),
+    `export const RUN_DIR: string | null = ${JSON.stringify(DIR)};\n`,
+  );
   const appDir = path(src, spec.app);
   await copyTree(appsPath(spec.app), appDir);
   const denoJson: Record<string, unknown> = {
@@ -366,6 +372,9 @@ export interface AppResult {
   area: string;
   pid: number;
   startedAt: string;
+  /** The launch token (`DENEXT_E2E_LAUNCH`) of the launch that wrote it;
+   * null for an app the OS started. */
+  launch?: string | null;
   params: Record<string, unknown>;
   checks: Check[];
   data: Record<string, any>;
@@ -373,7 +382,15 @@ export interface AppResult {
   file: string;
 }
 
-export const DIR = e2eDir();
+/** Where the apps of this run write their results: `$DENEXT_E2E_DIR`, else
+ * a directory of this run's own under WORK_DIR, baked into every app it
+ * packages (packageApp). A directory shared by every run on the machine (the
+ * old `~/.denext-e2e`) let one run collect another's result, and read its
+ * params: e.g. a node:http app's result under the devswitch launch's label. */
+export const DIR = Deno.env.get("DENEXT_E2E_DIR") ??
+  (Deno.env.get("WORK_DIR")
+    ? path(Deno.env.get("WORK_DIR")!, "e2e-results")
+    : e2eDir());
 
 export async function clearResults(area: string) {
   await Deno.mkdir(DIR, { recursive: true });
@@ -415,6 +432,8 @@ export async function waitResult(
     pid?: number;
     until?: (r: AppResult) => boolean;
     ms?: number;
+    /** Only a result of this launch (see {@linkcode ofLaunch}). */
+    launch?: string;
   } = {},
 ): Promise<AppResult | null> {
   const until = opts.until ?? ((r) => r.done);
@@ -424,12 +443,21 @@ export async function waitResult(
     for (const r of await results(area)) {
       if (opts.seen?.has(r.pid)) continue;
       if (opts.pid !== undefined && r.pid !== opts.pid) continue;
+      if (opts.launch !== undefined && !ofLaunch(r, opts.launch)) continue;
       last = r;
       if (until(r)) return r;
     }
     await sleep(250);
   }
   return opts.until ? null : last && last.done ? last : null;
+}
+
+/** Whether `r` may be launch `token`'s result: it carries that token, or
+ * none (an app the OS started, which inherits nothing from the runner).
+ * Another launch's result, which a new pid alone would not tell apart, never
+ * is. */
+export function ofLaunch(r: AppResult, token: string): boolean {
+  return !r.launch || r.launch === token;
 }
 
 export async function seenPids(area: string): Promise<Set<number>> {
@@ -493,8 +521,12 @@ export function log(s: string) {
   console.log(s);
 }
 
+let collectSeq = 0;
+
 /** Run one launch: start, wait for a done result (or the timeout), wait for
- * the exit, kill whatever is left, and merge the app's checks. */
+ * the exit, kill whatever is left, and merge the app's checks. The result is
+ * the one this launch wrote (its `DENEXT_E2E_LAUNCH` token), never another
+ * app's that appeared meanwhile. */
 export async function launchAndCollect(
   env: Env,
   rep: AreaReport,
@@ -509,14 +541,19 @@ export async function launchAndCollect(
   } = {},
 ): Promise<AppResult | null> {
   const seen = await seenPids(rep.area);
+  const token = `${env.nonce}-${++collectSeq}`;
   const l = await launch(env, p.exe, opts.args, {
     cwd: opts.cwd,
-    env: opts.env,
+    env: { ...opts.env, DENEXT_E2E_LAUNCH: token },
   });
-  const r = await waitResult(rep.area, { seen, ms: opts.ms ?? 90_000 });
+  const r = await waitResult(rep.area, {
+    seen,
+    launch: token,
+    ms: opts.ms ?? 90_000,
+  });
   if (!r) {
     const partial = (await results(rep.area)).filter((x) =>
-      !seen.has(x.pid)
+      !seen.has(x.pid) && ofLaunch(x, token)
     ).pop() ?? null;
     rep.merge(label, partial, l.logFile);
     rep.check(
@@ -530,7 +567,9 @@ export async function launchAndCollect(
   if (opts.expectExit !== false) {
     const st = await waitExit(l, 30_000);
     // The app may add checks between `done` and its exit (quit() itself).
-    const final = (await results(rep.area)).find((x) => x.pid === r.pid) ?? r;
+    const final = (await results(rep.area)).find((x) =>
+      x.pid === r.pid && ofLaunch(x, token)
+    ) ?? r;
     rep.merge(label, final, l.logFile);
     rep.check(
       `${label}: the app exited`,

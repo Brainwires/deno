@@ -4092,8 +4092,19 @@ const APPIMAGE_RUNTIME_AARCH64: &[u8] = include_bytes!(concat!(
   "/appimage_runtime/runtime-aarch64.zstd"
 ));
 
-/// 1×1 transparent PNG, used when the caller didn't supply an icon.
-/// appimagetool-built AppImages expect a top-level `<Name>.png` to exist.
+/// The generic 256×256 app icon an AppImage carries when the app has none:
+/// the AppDir must have the icon its `.desktop` entry's `Icon` names at its
+/// root, and `.DirIcon` is the 256 px PNG file managers and AppImage tools
+/// show.
+///
+/// Provenance: drawn procedurally (a blue rounded square with a white window
+/// glyph) by a short Python script using only `zlib`/`struct`, written by an
+/// AI coding agent (Claude) for this change; no third-party artwork, font or
+/// icon set is involved. It is licensed under this repository's MIT license.
+const DEFAULT_APP_ICON_PNG: &[u8] = include_bytes!("desktop_default_icon.png");
+
+/// 1×1 transparent PNG (the tests' stand-in icon).
+#[cfg(test)]
 const STUB_ICON_PNG: &[u8] = &[
   0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49,
   0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06,
@@ -4293,14 +4304,14 @@ fn create_linux_appimage(
 
   // Icon at AppDir root named after the entry's `Icon` (the app id, else the
   // app name), plus the `.DirIcon` AppImage tools show. package_linux_app_dir
-  // writes the user icon as AppIcon.png; if absent, fall back to a 1×1
-  // transparent PNG. An AppIcon.svg goes beside it.
+  // writes the user icon as AppIcon.png; if absent, fall back to the generic
+  // app icon. An AppIcon.svg goes beside it.
   let icon_name = desktop_id.unwrap_or(&app_name);
   let icon_src = app_dir.join("AppIcon.png");
   let icon_bytes = if icon_src.exists() {
     std::fs::read(&icon_src)?
   } else {
-    STUB_ICON_PNG.to_vec()
+    DEFAULT_APP_ICON_PNG.to_vec()
   };
   writer.push_file(
     Cursor::new(icon_bytes.clone()),
@@ -4358,7 +4369,8 @@ fn create_linux_appimage(
 /// Fedora, openSUSE, etc. without hard-coding each distro's divergent package
 /// names. Too loose a list crashes the app on launch with a missing `.so`; too
 /// strict blocks install on otherwise-fine systems — this is the curated middle
-/// covering CEF's GTK/X11/NSS/audio needs.
+/// covering CEF's GTK/X11/NSS/audio needs. See [`linux_runtime_deps`] for the
+/// other backends.
 const CEF_RUNTIME_DEPS: &[(&str, &str)] = &[
   ("libgtk-3.so.0", "libgtk-3-0"),
   ("libnss3.so", "libnss3"),
@@ -4379,6 +4391,49 @@ const CEF_RUNTIME_DEPS: &[(&str, &str)] = &[
   ("libxcb.so.1", "libxcb1"),
   ("libdrm.so.2", "libdrm2"),
 ];
+
+/// The WebKitGTK (`webview`) backend's runtime dependencies, in the same
+/// `(soname, debian package)` form as [`CEF_RUNTIME_DEPS`]: the libraries
+/// `laufey_webview` links directly (its `DT_NEEDED`, less glibc and what GTK
+/// itself pulls in). GTK's "Print to File" printer, which `print_to_pdf`
+/// prints through, is GTK's file print backend: part of the GTK package. The
+/// tray's appindicator library is loaded at run time and optional (the tray
+/// is refused, with a reason, without it), so it is no dependency.
+const WEBVIEW_RUNTIME_DEPS: &[(&str, &str)] = &[
+  ("libwebkit2gtk-4.1.so.0", "libwebkit2gtk-4.1-0"),
+  (
+    "libjavascriptcoregtk-4.1.so.0",
+    "libjavascriptcoregtk-4.1-0",
+  ),
+  ("libsoup-3.0.so.0", "libsoup-3.0-0"),
+  ("libgtk-3.so.0", "libgtk-3-0"),
+  ("libxcb.so.1", "libxcb1"),
+  ("libwayland-client.so.0", "libwayland-client0"),
+  ("libstdc++.so.6", "libstdc++6"),
+];
+
+/// The winit (`raw`) backend's runtime dependencies, in the same form:
+/// `laufey_winit` links GTK (its tray and dialogs) and libxdo (muda), and
+/// winit loads libxkbcommon-x11 for the keyboard on X11.
+const WINIT_RUNTIME_DEPS: &[(&str, &str)] = &[
+  ("libgtk-3.so.0", "libgtk-3-0"),
+  ("libxdo.so.3", "libxdo3"),
+  ("libxkbcommon-x11.so.0", "libxkbcommon-x11-0"),
+];
+
+/// The runtime dependencies of the backend the app was built with (the
+/// `--backend` flag or `desktop.backend`, `webview` when neither is set):
+/// a `.deb` / `.rpm` declares those of the engine it ships, never CEF's for
+/// a WebKitGTK app.
+fn linux_runtime_deps(
+  desktop_flags: &DesktopFlags,
+) -> &'static [(&'static str, &'static str)] {
+  match desktop_flags.backend.as_deref().unwrap_or("webview") {
+    "cef" => CEF_RUNTIME_DEPS,
+    "raw" => WINIT_RUNTIME_DEPS,
+    _ => WEBVIEW_RUNTIME_DEPS,
+  }
+}
 
 /// Default package version when no version is configured. Matches the macOS
 /// bundle's hard-coded `CFBundleVersion`.
@@ -4419,7 +4474,7 @@ fn png_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
 
 /// The hicolor directory size for a square icon of `size` pixels: its own size
 /// when the theme lists it, else the largest listed size below it (launchers
-/// scale the larger image down); `None` below 16 px (the 1×1 stub).
+/// scale the larger image down); `None` below 16 px (e.g. a 1×1 PNG).
 fn hicolor_size(size: u32) -> Option<u32> {
   HICOLOR_SIZES.iter().rev().copied().find(|s| *s <= size)
 }
@@ -4767,7 +4822,7 @@ fn create_linux_deb(
   let data_tar_gz = build_deb_data_tar(app_dir, &meta)?;
   let installed_size_kib = data_tar_gz.installed_size_kib;
 
-  let depends = CEF_RUNTIME_DEPS
+  let depends = linux_runtime_deps(desktop_flags)
     .iter()
     .map(|(_, pkg)| *pkg)
     .chain(secret_tool.then_some(SECRET_TOOL_DEB))
@@ -5230,7 +5285,7 @@ fn create_linux_rpm(
   // (e.g. `libgtk-3.so.0()(64bit)`), so a bare-soname `Requires` would not
   // match. Both supported arches (x86_64, aarch64) are 64-bit ELF, so always
   // append the suffix.
-  for (soname, _) in CEF_RUNTIME_DEPS {
+  for (soname, _) in linux_runtime_deps(desktop_flags) {
     builder.requires(rpm::Dependency::any(format!("{soname}()(64bit)")));
   }
 
@@ -8909,7 +8964,11 @@ def456  other.zip
     assert!(control.contains("Package: myapp\n"), "control:\n{control}");
     assert!(control.contains("Architecture: amd64\n"));
     assert!(control.contains("Version: 1.0.0\n"));
-    assert!(control.contains("Depends: libgtk-3-0,"));
+    // The default (webview) backend's own libraries, not CEF's.
+    assert!(
+      control.contains("Depends: libwebkit2gtk-4.1-0,"),
+      "{control}"
+    );
     assert!(control.contains("Installed-Size: "));
 
     // data.tar.gz install layout. The `tar` crate strips the conventional
@@ -8990,8 +9049,10 @@ def456  other.zip
       .map(|d| d.name)
       .collect();
     assert!(
-      requires.iter().any(|r| r == "libgtk-3.so.0()(64bit)"),
-      "rpm Requires must carry CEF sonames with the 64-bit ELF class suffix, got: {requires:?}"
+      requires
+        .iter()
+        .any(|r| r == "libwebkit2gtk-4.1.so.0()(64bit)"),
+      "rpm Requires must carry the backend's sonames with the 64-bit ELF class suffix, got: {requires:?}"
     );
 
     let files: Vec<String> = pkg
@@ -9171,7 +9232,7 @@ def456  other.zip
     .unwrap();
     let control = &deb_control_entries(&deb)[0].2;
     assert!(
-      control.contains(", libdrm2, libsecret-tools\n"),
+      control.contains(", libstdc++6, libsecret-tools\n"),
       "Depends must end with the secret-tool package:\n{control}"
     );
 
@@ -9196,6 +9257,87 @@ def456  other.zip
       .map(|d| d.name)
       .collect();
     assert!(requires.iter().any(|r| r == "libsecret"), "{requires:?}");
+  }
+
+  #[test]
+  fn linux_packages_declare_their_backends_runtime_deps() {
+    let tmp = tempfile::tempdir().unwrap();
+    let app_dir = fake_linux_app_dir(tmp.path(), "MyApp");
+    // (backend, a Debian package it needs, a soname its .rpm requires, a
+    // package it must not name; None: CEF, which must not name WebKitGTK)
+    let cases: [(Option<&str>, &str, &str, Option<&str>); 4] = [
+      (
+        None,
+        "libwebkit2gtk-4.1-0",
+        "libwebkit2gtk-4.1.so.0",
+        Some("libnss3"),
+      ),
+      (
+        Some("webview"),
+        "libsoup-3.0-0",
+        "libjavascriptcoregtk-4.1.so.0",
+        Some("libnss3"),
+      ),
+      (Some("cef"), "libnss3", "libnss3.so", None),
+      (Some("raw"), "libxdo3", "libxdo.so.3", Some("libnss3")),
+    ];
+    for (backend, deb_pkg, soname, absent) in cases {
+      let mut flags = empty_desktop_flags();
+      flags.backend = backend.map(str::to_string);
+      let deb = tmp.path().join("MyApp.deb");
+      create_linux_deb(
+        &app_dir,
+        &deb,
+        &flags,
+        Some("x86_64-unknown-linux-gnu"),
+        None,
+        false,
+      )
+      .unwrap();
+      let control = &deb_control_entries(&deb)[0].2;
+      let depends = control
+        .lines()
+        .find_map(|l| l.strip_prefix("Depends: "))
+        .unwrap()
+        .split(", ")
+        .collect::<Vec<_>>();
+      assert!(depends.contains(&deb_pkg), "{backend:?}: {depends:?}");
+      if let Some(absent) = absent {
+        assert!(!depends.contains(&absent), "{backend:?}: {depends:?}");
+      } else {
+        assert!(
+          !depends.contains(&"libwebkit2gtk-4.1-0"),
+          "{backend:?}: {depends:?}"
+        );
+      }
+
+      let rpm_path = tmp.path().join("MyApp.rpm");
+      create_linux_rpm(
+        &app_dir,
+        &rpm_path,
+        &flags,
+        Some("x86_64-unknown-linux-gnu"),
+        None,
+        None,
+        false,
+      )
+      .unwrap();
+      let bytes = std::fs::read(&rpm_path).unwrap();
+      let pkg = rpm::Package::parse(&mut &bytes[..]).unwrap();
+      let requires: Vec<String> = pkg
+        .metadata
+        .get_requires()
+        .unwrap()
+        .into_iter()
+        .map(|d| d.name)
+        .collect();
+      assert!(
+        requires.contains(&format!("{soname}()(64bit)")),
+        "{backend:?}: {requires:?}"
+      );
+      let cef_only = requires.iter().any(|r| r == "libnss3.so()(64bit)");
+      assert_eq!(cef_only, backend == Some("cef"), "{requires:?}");
+    }
   }
 
   #[test]
@@ -9299,6 +9441,51 @@ def456  other.zip
     // Without an id, the icon (and StartupWMClass) is the app name.
     let entry = appimage_desktop_entry("MyApp", None, &[]);
     assert!(entry.contains("Icon=MyApp\n"), "{entry}");
+  }
+
+  #[test]
+  fn appimage_without_an_icon_carries_the_generic_app_icon() {
+    let tmp = tempfile::tempdir().unwrap();
+    let app_dir = fake_linux_app_dir(tmp.path(), "MyApp");
+    std::fs::remove_file(app_dir.join("AppIcon.png")).unwrap();
+    let appimage_path = tmp.path().join("MyApp.AppImage");
+    let target = Some("x86_64-unknown-linux-gnu");
+    create_linux_appimage(
+      &app_dir,
+      &appimage_path,
+      target,
+      Some("com.acme.tool"),
+      &[],
+      false,
+    )
+    .unwrap();
+    let runtime_offset =
+      appimage_runtime_for_target(target).unwrap().len() as u64;
+    let appimage =
+      std::io::BufReader::new(std::fs::File::open(&appimage_path).unwrap());
+    let filesystem = backhand::FilesystemReader::from_reader_with_offset(
+      appimage,
+      runtime_offset,
+    )
+    .unwrap();
+    for name in ["/com.acme.tool.png", "/.DirIcon"] {
+      let node = filesystem
+        .files()
+        .find(|n| n.fullpath.to_string_lossy() == name)
+        .unwrap_or_else(|| panic!("{name} missing"));
+      let backhand::InnerNode::File(file) = &node.inner else {
+        panic!("{name} is not a file");
+      };
+      let mut bytes = Vec::new();
+      filesystem
+        .file(file)
+        .reader()
+        .read_to_end(&mut bytes)
+        .unwrap();
+      assert_eq!(bytes, DEFAULT_APP_ICON_PNG, "{name}");
+    }
+    // A real 256×256 icon (the hicolor and .DirIcon size), not a 1×1 stub.
+    assert_eq!(png_dimensions(DEFAULT_APP_ICON_PNG), Some((256, 256)));
   }
 
   #[test]
