@@ -898,6 +898,11 @@ mod os {
   pub(super) struct XdgRegistry {
     pub(super) dirs: Option<logic::XdgDirs>,
     pub(super) me: logic::ThisApp,
+    /// The `.deb` / `.rpm` entry installed under the app's own desktop id
+    /// that runs this executable ([`logic::package_entry`]): the schemes it
+    /// claims are made default without an entry of the app's own, which
+    /// would shadow it.
+    pub(super) package_entry: Option<PathBuf>,
     pub(super) app_id: Option<String>,
     pub(super) name: String,
     pub(super) declared: Vec<String>,
@@ -949,26 +954,35 @@ mod os {
             .to_string(),
         );
       };
-      let exe = self
-        .me
-        .exe
-        .to_str()
-        .ok_or("the executable path is not UTF-8")?;
-      let entry = logic::render_entry(
-        &self.name,
-        app_id,
-        exe,
-        &self.entry_schemes(scheme),
-      )?;
-      if read(own_entry).as_deref() != Some(entry.as_str()) {
-        write_file(own_entry, &entry)?;
-      }
-      if let Some(tool) = (self.find_tool)("update-desktop-database") {
-        // Only refreshes mimeinfo.cache; the default is set below.
-        if let Err(e) =
-          run_tool(&tool, &[dirs.user_applications_dir().as_os_str()])
-        {
-          log::debug!("[desktop] {e}");
+      // The package's own entry claims the scheme: it only needs to be the
+      // default (an entry of the app's own would shadow it).
+      let package_claims = self
+        .package_entry
+        .as_deref()
+        .and_then(read)
+        .is_some_and(|e| logic::entry_schemes(&e).iter().any(|s| s == scheme));
+      if !package_claims {
+        let exe = self
+          .me
+          .exe
+          .to_str()
+          .ok_or("the executable path is not UTF-8")?;
+        let entry = logic::render_entry(
+          &self.name,
+          app_id,
+          exe,
+          &self.entry_schemes(scheme),
+        )?;
+        if read(own_entry).as_deref() != Some(entry.as_str()) {
+          write_file(own_entry, &entry)?;
+        }
+        if let Some(tool) = (self.find_tool)("update-desktop-database") {
+          // Only refreshes mimeinfo.cache; the default is set below.
+          if let Err(e) =
+            run_tool(&tool, &[dirs.user_applications_dir().as_os_str()])
+          {
+            log::debug!("[desktop] {e}");
+          }
         }
       }
       let Some(xdg_mime) = (self.find_tool)("xdg-mime") else {
@@ -1026,18 +1040,66 @@ mod os {
       .filter(|n| !n.is_empty())
       .or_else(|| app_id.clone())
       .unwrap_or_else(|| "App".to_string());
-    Box::new(XdgRegistry {
+    Box::new(XdgRegistry::new(
       dirs,
-      me: logic::ThisApp {
+      logic::ThisApp {
         desktop_id,
         exe,
         own_entry,
       },
       app_id,
       name,
-      declared: declared.to_vec(),
+      declared.to_vec(),
       find_tool,
-    })
+    ))
+  }
+
+  impl XdgRegistry {
+    /// The registry for `me`. With a package entry under the app's desktop
+    /// id ([`logic::package_entry`]), an entry the runtime generated under
+    /// that id in the user's data home (an earlier run of the app as a
+    /// tarball or AppImage) is removed: it would hide the package's entry
+    /// from the menus and from the shell's notification lookup.
+    pub(super) fn new(
+      dirs: Option<logic::XdgDirs>,
+      me: logic::ThisApp,
+      app_id: Option<String>,
+      name: String,
+      declared: Vec<String>,
+      find_tool: fn(&str) -> Option<PathBuf>,
+    ) -> Self {
+      let package_entry = match (&dirs, &me.desktop_id) {
+        (Some(dirs), Some(id)) => {
+          logic::package_entry(id, dirs, &me.exe, &read, &resolve_program)
+        }
+        _ => None,
+      };
+      if package_entry.is_some()
+        && let Some(own) = &me.own_entry
+        && read(own).is_some_and(|e| logic::is_generated_entry(&e))
+      {
+        remove_file(own);
+      }
+      Self {
+        dirs,
+        me,
+        package_entry,
+        app_id,
+        name,
+        declared,
+        find_tool,
+      }
+    }
+  }
+
+  #[allow(
+    clippy::disallowed_methods,
+    reason = "the OS handler database, outside any runtime sys"
+  )]
+  fn remove_file(path: &Path) {
+    if let Err(e) = std::fs::remove_file(path) {
+      log::debug!("[desktop] could not remove {}: {e}", path.display());
+    }
   }
 }
 
@@ -1399,17 +1461,19 @@ mod tests {
     std::fs::write(&exe, "").unwrap();
     let exe = std::fs::canonicalize(&exe).unwrap();
     let own = dirs.user_applications_dir().join("com.acme.app.desktop");
-    let mk = |exe: std::path::PathBuf| os::XdgRegistry {
-      dirs: Some(dirs.clone()),
-      me: logic::ThisApp {
-        desktop_id: Some("com.acme.app.desktop".into()),
-        exe,
-        own_entry: Some(own.clone()),
-      },
-      app_id: Some("com.acme.app".into()),
-      name: "Acme".into(),
-      declared: vec!["acme".into(), "acme2".into()],
-      find_tool: |_| None,
+    let mk = |exe: std::path::PathBuf| {
+      os::XdgRegistry::new(
+        Some(dirs.clone()),
+        logic::ThisApp {
+          desktop_id: Some("com.acme.app.desktop".into()),
+          exe,
+          own_entry: Some(own.clone()),
+        },
+        Some("com.acme.app".into()),
+        "Acme".into(),
+        vec!["acme".into(), "acme2".into()],
+        |_| None,
+      )
     };
     let reg = mk(exe.clone());
     assert_eq!(reg.owner("acme").owner, SchemeOwner::Unowned);
@@ -1475,5 +1539,35 @@ mod tests {
       logic::entry_schemes(&std::fs::read_to_string(&own).unwrap()),
       vec!["acme"]
     );
+
+    // A .deb / .rpm installs the app's entry under the same id: the entry
+    // this run generated would hide it, so it goes, and the package's entry
+    // is the one made default (nothing written for the app itself).
+    let package = root.join("sys/applications/com.acme.app.desktop");
+    std::fs::write(
+      &package,
+      format!(
+        "[Desktop Entry]\nName=Acme\nExec=env LAUFEY_APP_ID=com.acme.app {} \
+         %u\nMimeType=x-scheme-handler/acme;\n",
+        moved_exe.display()
+      ),
+    )
+    .unwrap();
+    let packaged = mk(moved_exe.clone());
+    assert!(!own.exists(), "the generated entry must be removed");
+    assert_eq!(
+      packaged.owner("acme"),
+      OwnerStatus::this(Some("com.acme.app.desktop".into()), false)
+    );
+    // The default already names the id: registered, nothing written for
+    // the app itself.
+    let out = register_scheme(&packaged, "acme", RegisterMode::Force);
+    assert!(out.registered, "{out:?}");
+    assert!(!own.exists());
+    // An entry the user wrote under that id is theirs: left alone.
+    std::fs::write(&own, "[Desktop Entry]\nName=Mine\nExec=/bin/true\n")
+      .unwrap();
+    let _ = mk(moved_exe.clone());
+    assert!(own.exists());
   }
 }

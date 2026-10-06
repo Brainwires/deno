@@ -821,6 +821,44 @@ pub mod linux {
     Some(program.replace("%%", "%"))
   }
 
+  /// Whether `entry` is one the runtime wrote for this app
+  /// ([`GENERATED_KEY`]).
+  pub fn is_generated_entry(entry: &str) -> bool {
+    ini_value(entry, "Desktop Entry", GENERATED_KEY).as_deref() == Some("true")
+  }
+
+  /// The entry a system package installed for this app under its own
+  /// desktop id (a `.deb` / `.rpm` names it `<app id>.desktop`, for D-Bus
+  /// activation and the notification portal): the first `desktop_id` in the
+  /// system data directories (`data_dirs`, not the user's data home) whose
+  /// `Exec` runs `exe` (`resolve` canonicalizes the program, as [`owner`]
+  /// does). The app's own handler entry ([`render_entry`]) takes the same id
+  /// in the user's data home, where it would shadow the package's entry and,
+  /// being `NoDisplay`, hide the app from the menus: with a package entry
+  /// the runtime writes none and removes a leftover one it generated.
+  pub fn package_entry(
+    desktop_id: &str,
+    dirs: &XdgDirs,
+    exe: &Path,
+    read: &dyn Fn(&Path) -> Option<String>,
+    resolve: &dyn Fn(&str) -> Option<PathBuf>,
+  ) -> Option<PathBuf> {
+    if desktop_id.contains('/') {
+      return None;
+    }
+    dirs
+      .data_dirs
+      .iter()
+      .map(|dir| dir.join("applications").join(desktop_id))
+      .find(|path| {
+        read(path)
+          .as_deref()
+          .and_then(exec_program)
+          .and_then(|program| resolve(&program))
+          .is_some_and(|program| program == exe)
+      })
+  }
+
   /// The schemes a `.desktop` entry's `MimeType` claims.
   pub fn entry_schemes(entry: &str) -> Vec<String> {
     ini_list(entry, "Desktop Entry", "MimeType")
@@ -1622,6 +1660,50 @@ mod tests {
       assert!(entry.contains("NoDisplay=true\n"));
       assert!(entry.contains(&format!("{GENERATED_KEY}=true\n")));
       assert!(render_entry("A", "a.b", "/x\n/y", &[]).is_err());
+      assert!(is_generated_entry(&entry));
+      assert!(!is_generated_entry("[Desktop Entry]\nExec=/opt/a\n"));
+    }
+
+    // A .deb / .rpm entry under the app id that runs this executable is the
+    // package's: found in the system data directories only.
+    #[test]
+    fn package_entry_is_the_system_entry_running_this_exe() {
+      let pkg = "/usr/share/applications/com.acme.app.desktop";
+      let exe = Path::new("/opt/Acme/Acme");
+      let files = Files::new(&[
+        (
+          pkg,
+          "[Desktop Entry]\nExec=env LAUFEY_APP_ID=com.acme.app acme %u\n",
+        ),
+        (OURS, &our_entry("/opt/Acme/Acme")),
+      ]);
+      let read = |p: &Path| files.read(p);
+      assert_eq!(
+        package_entry("com.acme.app.desktop", &dirs(), exe, &read, &resolve),
+        Some(PathBuf::from(pkg))
+      );
+      // Another executable's entry under that id is not this app's package.
+      assert_eq!(
+        package_entry(
+          "com.acme.app.desktop",
+          &dirs(),
+          Path::new("/home/me/Acme/Acme"),
+          &read,
+          &resolve
+        ),
+        None
+      );
+      // The user's own entry never counts.
+      let only_ours = Files::new(&[(OURS, &our_entry("/opt/Acme/Acme"))]);
+      let read = |p: &Path| only_ours.read(p);
+      assert_eq!(
+        package_entry("com.acme.app.desktop", &dirs(), exe, &read, &resolve),
+        None
+      );
+      assert_eq!(
+        package_entry("../x.desktop", &dirs(), exe, &read, &resolve),
+        None
+      );
     }
   }
 }

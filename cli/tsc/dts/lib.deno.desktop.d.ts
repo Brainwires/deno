@@ -1161,8 +1161,11 @@ declare namespace Deno {
     constructor();
 
     /** Set a short text badge on the app's dock icon (macOS) or taskbar
-     * icon (Windows), or prefix the focused window's title on Linux.
-     * Pass `null` or an empty string to clear the badge. */
+     * icon (Windows). On Linux a badge of digits is the count on the app's
+     * launcher where a dock reads `com.canonical.Unity.LauncherEntry`
+     * (Ubuntu's dock, Dash to Dock, Plasma's task manager), else a `"(N) "`
+     * prefix on the window titles (`Deno.desktop.platformFeatures().badge`
+     * says which). Pass `null` or an empty string to clear the badge. */
     setBadge(text: string | null): void;
 
     /** Bounce the dock icon (macOS), flash the focused window's taskbar
@@ -1549,6 +1552,40 @@ declare namespace Deno {
        * keyring can't hand out the key in this session". `null`
        * otherwise. */
       cookieEncryptionWait: string | null;
+      /** Linux: how notifications are sent: `"portal"` (xdg-desktop-portal's
+       * Notification interface, with the app's id registered and its
+       * `<app id>.desktop` installed, as a `.deb` or `.rpm` does) or
+       * `"freedesktop"` (`org.freedesktop.Notifications` itself). `null`
+       * with no notification server, and elsewhere. */
+      notificationTransport: "portal" | "freedesktop" | null;
+      /** Linux: a click on a notification starts the app when it isn't
+       * running (the portal transport and the app's D-Bus service file, which
+       * a `.deb` or `.rpm` installs). `null` elsewhere: macOS and Windows
+       * always can. */
+      notificationColdStart: boolean | null;
+      /** Why not, when `notificationColdStart` is false. */
+      notificationColdStartReason: string | null;
+      /** Linux: a scheduled notification is posted while the app is closed
+       * (a systemd user manager runs: each one gets a transient user timer).
+       * Without one it is posted while the app runs, or at its next launch.
+       * `null` elsewhere: macOS and Windows always post it. */
+      notificationScheduleWhileClosed: boolean | null;
+      /** Why not, when `notificationScheduleWhileClosed` is false. */
+      notificationScheduleReason: string | null;
+      /** Linux: the running notification server's capabilities
+       * (`GetCapabilities`: `"actions"`, `"body-markup"`, `"persistence"`,
+       * …). Without `"actions"` no action button or click is offered. `null`
+       * with no server running, and elsewhere. */
+      notificationServerCapabilities: string[] | null;
+      /** How {@linkcode Deno.Dock.setBadge}'s badge shows: `"dock"`
+       * (macOS), `"launcher-entry"` (Linux: a count on the app's launcher,
+       * where a dock reads `com.canonical.Unity.LauncherEntry`: Ubuntu's
+       * dock, Dash to Dock, Plasma's task manager) or `"title"` (a `"(N) "`
+       * prefix on the window titles: Windows, Linux otherwise, and a badge
+       * that isn't a number). `null` where the backend can't say. */
+      badge: "dock" | "launcher-entry" | "title" | null;
+      /** Linux, when `badge` is `"title"`: why no launcher shows it. */
+      badgeReason: string | null;
     }
 
     /** What this backend can do on this OS
