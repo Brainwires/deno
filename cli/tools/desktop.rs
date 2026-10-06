@@ -4096,6 +4096,11 @@ const APPIMAGE_RUNTIME_AARCH64: &[u8] = include_bytes!(concat!(
 /// the AppDir must have the icon its `.desktop` entry's `Icon` names at its
 /// root, and `.DirIcon` is the 256 px PNG file managers and AppImage tools
 /// show.
+///
+/// Provenance: drawn procedurally (a blue rounded square with a white window
+/// glyph) by a short Python script using only `zlib`/`struct`, written by an
+/// AI coding agent (Claude) for this change; no third-party artwork, font or
+/// icon set is involved. It is licensed under this repository's MIT license.
 const DEFAULT_APP_ICON_PNG: &[u8] = include_bytes!("desktop_default_icon.png");
 
 /// 1×1 transparent PNG (the tests' stand-in icon).
