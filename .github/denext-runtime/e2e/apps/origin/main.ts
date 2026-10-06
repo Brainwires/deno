@@ -102,14 +102,21 @@ try {
   out.hang = { status: res.status };
 } catch (e) { out.hang = { error: String(e) }; }
 step("hang");
-// A WebSocket through the relay.
+// A WebSocket through the relay. It is the page's first request that goes
+// through Chromium's proxy resolution (everything before it is the app's
+// scheme), and Chromium holds every such request, loopback ones included,
+// until the system proxy configuration is initialized: on Windows, auto-detect
+// (WPAD over DHCP, then DNS) is on by default, and on a CI runner its answer
+// has taken more than 8 s. So the deadline leaves room for that, and out.ws.ms
+// records how long the socket took.
 out.ws = await new Promise((resolve) => {
   const res = { url: info.wsUrl + "/ws", messages: [] };
+  const t0 = performance.now();
   let ws;
-  const timer = setTimeout(() => { res.timeout = true; try { ws.close(); } catch {} resolve(res); }, 8000);
+  const timer = setTimeout(() => { res.timeout = true; res.ms = Math.round(performance.now() - t0); try { ws.close(); } catch {} resolve(res); }, 45000);
   try { ws = new WebSocket(res.url); } catch (e) { res.error = String(e); clearTimeout(timer); resolve(res); return; }
   ws.onopen = () => ws.send("ping");
-  ws.onmessage = (ev) => { res.messages.push(String(ev.data)); if (res.messages.length >= 2) { clearTimeout(timer); ws.close(); resolve(res); } };
+  ws.onmessage = (ev) => { res.messages.push(String(ev.data)); if (res.messages.length >= 2) { res.ms = Math.round(performance.now() - t0); clearTimeout(timer); ws.close(); resolve(res); } };
   ws.onerror = () => { res.error = "onerror"; };
   ws.onclose = (ev) => { res.close = ev.code; if (res.messages.length < 2) { clearTimeout(timer); resolve(res); } };
 });
