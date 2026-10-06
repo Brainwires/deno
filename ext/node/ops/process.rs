@@ -79,10 +79,22 @@ fn overwrite_argv_buffer(title: &str) {
   }
 }
 
-/// Compute the contiguous argv buffer bounds from argv[0]..argv[argc-1].
+/// Compute the contiguous argv buffer bounds from argv[0] to the last
+/// argument before the first NULL entry.
+///
+/// A host may take arguments it handled out of argv in place, moving the rest
+/// up and leaving NULL entries at the end (GLib, Qt, and laufey's hosts with
+/// `--laufey-dbus-activated`). It can't update the argc the C runtime passes
+/// to `.init_array` functions, so argc may count those NULL entries: stop at
+/// the first one, as Rust's `std::env::args` does.
+///
+/// The bounds are empty (the title is then left alone) unless the entries
+/// lie one after another from argv[0]: the last one must end after argv[0]
+/// starts, and the span must hold every argument.
 ///
 /// # Safety
-/// `argv` must be a valid pointer to `argc` C string pointers.
+/// `argv` must be a valid pointer to `argc` C string pointers, each either
+/// NULL or a valid C string.
 #[cfg(unix)]
 unsafe fn compute_argv_info(
   argc: usize,
@@ -90,11 +102,36 @@ unsafe fn compute_argv_info(
 ) -> ArgvInfo {
   // SAFETY: argv is valid and has argc entries (guaranteed by caller).
   unsafe {
-    let start = *argv as *mut _;
-    let last_arg = *argv.add(argc - 1);
+    let mut count = 0;
+    while count < argc && !(*argv.add(count)).is_null() {
+      count += 1;
+    }
+    let empty = ArgvInfo {
+      buf_ptr: std::ptr::null_mut(),
+      buf_size: 0,
+    };
+    if count == 0 {
+      return empty;
+    }
+    let start = *argv as *mut u8;
+    let last_arg = *argv.add(count - 1);
     let last_arg_len = libc::strlen(last_arg);
-    let end = last_arg.add(last_arg_len + 1) as *const u8;
-    let buf_size = end.offset_from(start) as usize;
+    let end = last_arg.add(last_arg_len + 1) as *mut u8;
+    // The span is only the argv buffer when the arguments are laid out one
+    // after another from argv[0] (as the kernel lays them out). Something
+    // else may have pointed entries elsewhere: then leave the title alone.
+    if (end as usize) <= (start as usize) {
+      return empty;
+    }
+    let buf_size = end as usize - start as usize;
+    let mut args_size = 0usize;
+    for i in 0..count {
+      args_size =
+        args_size.saturating_add(libc::strlen(*argv.add(i)).saturating_add(1));
+    }
+    if args_size > buf_size {
+      return empty;
+    }
     ArgvInfo {
       buf_ptr: start,
       buf_size,
@@ -581,6 +618,73 @@ fn get_resource_usage() -> [f64; 16] {
 #[cfg(not(any(unix, windows)))]
 fn get_resource_usage() -> [f64; 16] {
   [0.0; 16]
+}
+
+#[cfg(all(test, unix))]
+mod argv_tests {
+  use super::compute_argv_info;
+
+  #[test]
+  fn argv_info_spans_every_argument() {
+    let mut buf = b"prog\0--flag\0".to_vec();
+    let base = buf.as_mut_ptr() as *mut libc::c_char;
+    // SAFETY: both pointers point into `buf`, at NUL-terminated strings.
+    let mut argv = unsafe { [base, base.add(5), std::ptr::null_mut()] };
+    // SAFETY: argv has 2 valid entries.
+    let info = unsafe { compute_argv_info(2, argv.as_mut_ptr()) };
+    assert_eq!(info.buf_ptr as *const u8, buf.as_ptr());
+    assert_eq!(info.buf_size, buf.len());
+  }
+
+  #[test]
+  fn argv_info_stops_at_an_argument_a_host_took_out() {
+    // A host took argv[1] out after the C runtime counted it: argc is still
+    // 2, argv[1] is NULL.
+    let mut buf = b"prog\0--laufey-dbus-activated\0".to_vec();
+    let base = buf.as_mut_ptr() as *mut libc::c_char;
+    let mut argv = [base, std::ptr::null_mut(), std::ptr::null_mut()];
+    // SAFETY: argv has 2 entries, each NULL or a valid C string.
+    let info = unsafe { compute_argv_info(2, argv.as_mut_ptr()) };
+    assert_eq!(info.buf_ptr as *const u8, buf.as_ptr());
+    assert_eq!(info.buf_size, "prog\0".len());
+  }
+
+  #[test]
+  fn argv_info_is_empty_when_the_last_argument_is_before_argv0() {
+    // A host pointed argv[1] at storage before argv[0]: the span would be
+    // negative.
+    let mut buf = b"--flag\0prog\0".to_vec();
+    let base = buf.as_mut_ptr() as *mut libc::c_char;
+    // SAFETY: both pointers point into `buf`, at NUL-terminated strings.
+    let mut argv = unsafe { [base.add(7), base, std::ptr::null_mut()] };
+    // SAFETY: argv has 2 valid entries.
+    let info = unsafe { compute_argv_info(2, argv.as_mut_ptr()) };
+    assert!(info.buf_ptr.is_null());
+    assert_eq!(info.buf_size, 0);
+  }
+
+  #[test]
+  fn argv_info_is_empty_when_the_arguments_do_not_fit_the_span() {
+    // Every entry points at the same string: the arguments' total size is
+    // larger than the span, so it isn't one argv buffer.
+    let mut buf = b"prog\0".to_vec();
+    let base = buf.as_mut_ptr() as *mut libc::c_char;
+    let mut argv = [base, base, std::ptr::null_mut()];
+    // SAFETY: argv has 2 valid entries.
+    let info = unsafe { compute_argv_info(2, argv.as_mut_ptr()) };
+    assert!(info.buf_ptr.is_null());
+    assert_eq!(info.buf_size, 0);
+  }
+
+  #[test]
+  fn argv_info_is_empty_without_arguments() {
+    let mut argv: [*mut libc::c_char; 2] =
+      [std::ptr::null_mut(), std::ptr::null_mut()];
+    // SAFETY: argv has 1 entry, NULL.
+    let info = unsafe { compute_argv_info(1, argv.as_mut_ptr()) };
+    assert!(info.buf_ptr.is_null());
+    assert_eq!(info.buf_size, 0);
+  }
 }
 
 #[cfg(all(test, unix, target_vendor = "apple"))]
