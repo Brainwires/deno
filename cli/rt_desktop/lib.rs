@@ -2278,8 +2278,8 @@ laufey::main!(|| {
     worker_launch::issue_token(),
   );
   // ... in the working directory they were forked with (see
-  // worker_launch::CWD_ENV).
-  deno_runtime::deno_process::set_self_fork_cwd_env_var(worker_launch::CWD_ENV);
+  // worker_launch::CWD_ENV; Windows CEF apps only).
+  worker_launch::pass_cwd_to_forks();
 
   // The full-app update watchdog: an update still unconfirmed from an
   // earlier launch (it crashed or never called confirm()) is rolled back
@@ -2885,9 +2885,7 @@ fn run_headless_worker() {
       worker_launch::WORKER_TOKEN_ENV,
       worker_launch::issue_token(),
     );
-    deno_runtime::deno_process::set_self_fork_cwd_env_var(
-      worker_launch::CWD_ENV,
-    );
+    worker_launch::pass_cwd_to_forks();
 
     let options = denort::run::RunOptions {
       override_main_module: fork_module,

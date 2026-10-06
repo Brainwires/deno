@@ -1369,10 +1369,13 @@ async fn run_desktop_hmr(
     .arg("--runtime")
     .arg(&dylib_abs)
     .env("LAUFEY_RUNTIME_PATH", &dylib_abs)
-    // The Windows CEF executable is CEF's bootstrap, which moves the process
-    // to its own directory; the host changes back to this one.
-    .env("LAUFEY_CWD", &source_abs)
     .current_dir(&source_abs);
+  // The Windows CEF executable is CEF's bootstrap, which moves the process
+  // to its own directory; the host changes back to this one. No other
+  // backend or OS needs it.
+  if cfg!(windows) && backend == "cef" {
+    cmd.env("LAUFEY_CWD", &source_abs);
+  }
   #[cfg(any(target_os = "macos", target_os = "linux"))]
   if let Some(icon_path) = laufey_app_icon.as_ref() {
     cmd.env("LAUFEY_APP_ICON", icon_path);
@@ -1755,7 +1758,6 @@ async fn package_windows_app_dir(
   // real `.exe` extension and lands on `<app>.dll` (`<app>.runtime.dll`) for
   // any app name, dotted or not. Linux launchers have no extension for the
   // chop to consume, which is why only that side has to pre-truncate.
-  let _ = &parts.file_name;
   let AppDirTargets {
     dest_dylib,
     launcher_path,
@@ -3380,7 +3382,6 @@ fn validate_launcher_name(name: &str, kind: &str) -> Result<(), AnyError> {
 /// `--output /` or `--output .`.
 struct DylibParts<'a> {
   parent: &'a Path,
-  file_name: &'a std::ffi::OsStr,
   app_name: String,
 }
 
@@ -3391,7 +3392,7 @@ fn dylib_parts(dylib_path: &Path) -> Result<DylibParts<'_>, AnyError> {
       dylib_path.display()
     )
   })?;
-  let file_name = dylib_path.file_name().ok_or_else(|| {
+  dylib_path.file_name().ok_or_else(|| {
     deno_core::anyhow::anyhow!(
       "invalid --output: dylib path has no file name: {}",
       dylib_path.display()
@@ -3407,11 +3408,7 @@ fn dylib_parts(dylib_path: &Path) -> Result<DylibParts<'_>, AnyError> {
     })?
     .to_string_lossy()
     .into_owned();
-  Ok(DylibParts {
-    parent,
-    file_name,
-    app_name,
-  })
+  Ok(DylibParts { parent, app_name })
 }
 
 /// The runtime library filename the Linux launcher resolves for an app named
@@ -3571,7 +3568,8 @@ fn windows_version_words(config_version: Option<&str>) -> [u16; 4] {
 /// resource names the app (`ProductName`, `FileDescription`, which Task
 /// Manager shows, `InternalName`, `OriginalFilename`) and carries its
 /// version (deno.json `version`). Any signature the executable had no longer
-/// matches it, so the signing step comes after this one.
+/// matches it, so it is removed ([`strip_pe_certificate`]) and the signing
+/// step comes after this one.
 fn stamp_windows_exe_resources(
   exe: &Path,
   app_name: &str,
@@ -3589,7 +3587,8 @@ fn stamp_windows_exe_resources(
   use editpe::types::VersionU32;
 
   let context = || format!("failed to set the resources of {}", exe.display());
-  let bytes = std::fs::read(exe).with_context(context)?;
+  let mut bytes = std::fs::read(exe).with_context(context)?;
+  strip_pe_certificate(&mut bytes).with_context(context)?;
   let mut image = Image::parse(bytes.as_slice())
     .map_err(|e| deno_core::anyhow::anyhow!("{e}"))
     .with_context(context)?;
@@ -3672,6 +3671,63 @@ fn stamp_windows_exe_resources(
   let out = image.data().to_vec();
   drop(image);
   std::fs::write(exe, out).with_context(context)?;
+  Ok(())
+}
+
+/// Remove a PE image's Authenticode signature, as denext's packager does
+/// (`writePeResources` in its `src/build/pe-resources.ts`): the certificate
+/// table (data directory 4, which holds a file offset, not an RVA) is cut off
+/// the end of the file and its directory entry cleared. Editing the image's
+/// resources breaks the signature anyway, and editpe would carry the table
+/// along as trailing data while the directory entry kept naming its old
+/// offset: a signature that no longer matches, at the wrong place. An image
+/// whose certificate table isn't its last bytes is refused.
+fn strip_pe_certificate(bytes: &mut Vec<u8>) -> Result<(), AnyError> {
+  /// The security (certificate table) data directory's index.
+  const DIR_SECURITY: usize = 4;
+  fn u16_at(b: &[u8], at: usize) -> Option<u16> {
+    Some(u16::from_le_bytes(
+      b.get(at..at.checked_add(2)?)?.try_into().ok()?,
+    ))
+  }
+  fn u32_at(b: &[u8], at: usize) -> Option<u32> {
+    Some(u32::from_le_bytes(
+      b.get(at..at.checked_add(4)?)?.try_into().ok()?,
+    ))
+  }
+  // Anything that isn't a PE image is left for editpe to report.
+  if !bytes.starts_with(b"MZ") {
+    return Ok(());
+  }
+  let Some(pe) = u32_at(bytes, 0x3c).map(|v| v as usize) else {
+    return Ok(());
+  };
+  if bytes.get(pe..pe.saturating_add(4)) != Some(&b"PE\0\0"[..]) {
+    return Ok(());
+  }
+  let opt = pe + 24;
+  let (count_at, dirs) = match u16_at(bytes, opt) {
+    Some(0x20b) => (opt + 108, opt + 112),
+    Some(0x10b) => (opt + 92, opt + 96),
+    _ => return Ok(()),
+  };
+  match u32_at(bytes, count_at) {
+    Some(count) if count as usize > DIR_SECURITY => {}
+    _ => return Ok(()),
+  }
+  let entry = dirs + DIR_SECURITY * 8;
+  let (Some(at), Some(size)) = (u32_at(bytes, entry), u32_at(bytes, entry + 4))
+  else {
+    return Ok(());
+  };
+  if size == 0 {
+    return Ok(());
+  }
+  if at as u64 + size as u64 != bytes.len() as u64 {
+    bail!("its signature (certificate table) is not at the end of the file");
+  }
+  bytes.truncate(at as usize);
+  bytes[entry..entry + 8].fill(0);
   Ok(())
 }
 
@@ -7632,7 +7688,6 @@ def456  other.zip
     let p = std::path::PathBuf::from("/tmp/app/myapp.dylib");
     let parts = dylib_parts(&p).expect("parts");
     assert_eq!(parts.parent, std::path::Path::new("/tmp/app"));
-    assert_eq!(parts.file_name, "myapp.dylib");
     assert_eq!(parts.app_name, "myapp");
   }
 
@@ -7645,7 +7700,6 @@ def456  other.zip
     let parts = dylib_parts(&p).expect("parts");
     // dylib_parts itself doesn't strip; that's downstream. But the
     // pieces should at least round-trip cleanly.
-    assert_eq!(parts.file_name, "libdenort.so");
     assert_eq!(parts.app_name, "libdenort");
   }
 
@@ -7888,6 +7942,65 @@ def456  other.zip
     let err = stamp_windows_exe_resources(&exe, "MyApp", Some(b"nope"), None)
       .unwrap_err();
     assert!(format!("{err:#}").contains("MyApp.exe"), "{err:#}");
+  }
+
+  /// `pe` with a fake Authenticode certificate table appended (8-byte
+  /// aligned, as signtool writes it) and named by data directory 4.
+  fn with_fake_signature(mut pe: Vec<u8>) -> Vec<u8> {
+    while !pe.len().is_multiple_of(8) {
+      pe.push(0);
+    }
+    let at = pe.len() as u32;
+    // WIN_CERTIFICATE: dwLength, wRevision 0x0200, WIN_CERT_TYPE_PKCS_SIGNED_DATA.
+    let mut cert = Vec::new();
+    cert.extend_from_slice(&24u32.to_le_bytes());
+    cert.extend_from_slice(&0x0200u16.to_le_bytes());
+    cert.extend_from_slice(&2u16.to_le_bytes());
+    cert.extend_from_slice(b"FAKE-PKCS7-SIG!!");
+    pe.extend_from_slice(&cert);
+    let entry = 0x44 + 20 + 112 + 4 * 8;
+    pe[entry..entry + 4].copy_from_slice(&at.to_le_bytes());
+    pe[entry + 4..entry + 8]
+      .copy_from_slice(&(cert.len() as u32).to_le_bytes());
+    pe
+  }
+
+  #[test]
+  fn stamp_windows_exe_resources_drops_the_signature() {
+    let tmp = tempfile::tempdir().unwrap();
+    let exe = tmp.path().join("MyApp.exe");
+    let signed = with_fake_signature(bootstrap_like_pe());
+    let entry = 0x44 + 20 + 112 + 4 * 8;
+    assert_ne!(&signed[entry..entry + 8], &[0u8; 8]);
+    std::fs::write(&exe, &signed).unwrap();
+    stamp_windows_exe_resources(&exe, "MyApp", None, Some("1.2.3")).unwrap();
+
+    let bytes = std::fs::read(&exe).unwrap();
+    // The certificate table's directory entry is cleared and its bytes gone.
+    assert_eq!(&bytes[entry..entry + 8], &[0u8; 8]);
+    assert!(
+      !bytes.windows(16).any(|w| w == b"FAKE-PKCS7-SIG!!"),
+      "the old signature is not carried along"
+    );
+    // The image still parses and carries the new version resource.
+    let image = editpe::Image::parse(bytes.as_slice()).unwrap();
+    let info = image
+      .resource_directory()
+      .unwrap()
+      .get_version_info()
+      .unwrap()
+      .unwrap();
+    assert_eq!(info.strings[0].strings["FileVersion"], "1.2.3.0");
+
+    // A certificate table that isn't the file's last bytes is refused, and
+    // the file is left as it was.
+    let mut odd = with_fake_signature(bootstrap_like_pe());
+    odd.extend_from_slice(b"TRAILER!");
+    std::fs::write(&exe, &odd).unwrap();
+    let err =
+      stamp_windows_exe_resources(&exe, "MyApp", None, None).unwrap_err();
+    assert!(format!("{err:#}").contains("signature"), "{err:#}");
+    assert_eq!(std::fs::read(&exe).unwrap(), odd);
   }
 
   // --- linux_colocated_runtime_name ---

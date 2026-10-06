@@ -1775,6 +1775,21 @@ fn processes_in(prefix: &str) -> Vec<windows_sys::Win32::Foundation::HANDLE> {
   out
 }
 
+/// Whether `exe` is the executable of a Windows app on laufey's `cef`
+/// backend: CEF's bootstrap, with CEF's support files (`libcef.dll`) next to
+/// it. The bootstrap moves a browser-type process (the app, a headless
+/// worker) to the executable's directory, so whoever starts one passes the
+/// working directory it should have in `LAUFEY_CWD`, which laufey's host
+/// changes back to. Every other executable (the webview backend, macOS,
+/// Linux) keeps the working directory it is started in and gets no
+/// `LAUFEY_CWD`.
+pub fn is_windows_cef_executable(exe: &Path) -> bool {
+  cfg!(windows)
+    && exe
+      .parent()
+      .is_some_and(|dir| dir.join("libcef.dll").is_file())
+}
+
 /// Start `program` detached from this process (its own process group /
 /// no console, outliving us), with the working directory `cwd`.
 pub fn spawn_detached(
@@ -1809,7 +1824,9 @@ pub fn spawn_detached(
     // process to the executable's directory: inside the install, which the
     // helper then can't rename. laufey's host changes back to the directory
     // this names (and removes the variable).
-    cmd.env("LAUFEY_CWD", cwd);
+    if is_windows_cef_executable(program) {
+      cmd.env("LAUFEY_CWD", cwd);
+    }
     const DETACHED_PROCESS: u32 = 0x0000_0008;
     const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
     const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
@@ -1931,6 +1948,18 @@ pub fn is_update_marker(arg: &str) -> bool {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  /// Only a Windows executable with CEF's files next to it (CEF's bootstrap)
+  /// is handed `LAUFEY_CWD`.
+  #[test]
+  fn only_a_windows_cef_executable_needs_laufey_cwd() {
+    let tmp = tempfile::tempdir().unwrap();
+    let exe = tmp.path().join("App.exe");
+    std::fs::write(&exe, b"").unwrap();
+    assert!(!is_windows_cef_executable(&exe));
+    std::fs::write(tmp.path().join("libcef.dll"), b"").unwrap();
+    assert_eq!(is_windows_cef_executable(&exe), cfg!(windows));
+  }
 
   #[test]
   fn relaunch_puts_the_marker_before_the_terminator() {
