@@ -52,7 +52,7 @@ concurrency:
 
 env:
   # laufey `denext/integration` as of the first runtime release.
-  LAUFEY_SHA: afbda4c2b6d1cf4809010a8ce9e299af59611cbf
+  LAUFEY_SHA: 4204496afc5785938821c695f322b61bd42504aa
   LAUFEY_REPOSITORY: Brainwires/laufey
   # The stock CLI the archives are smoke-tested with (and that denext runs).
   STOCK_DENO_VERSION: 2.9.7
