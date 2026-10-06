@@ -4864,8 +4864,9 @@ fn op_desktop_system_capabilities(
 /// can't say). Async: the probe runs on a blocking-pool thread, never on the
 /// JavaScript thread (its first call on Linux may wait seconds for
 /// xdg-desktop-portal to start). `desktopHint` (XDG_CURRENT_DESKTOP) is
-/// reported only with env access to it (`--allow-env`); without, it is null
-/// and the reasons don't quote it.
+/// reported only with env access to it (`--allow-env`); without, it is null,
+/// the reasons don't quote it, and nothing KWallet-specific is reported
+/// ([`redact_desktop_hint`]).
 #[op2]
 #[serde]
 async fn op_desktop_platform_features(
@@ -4912,16 +4913,35 @@ fn strip_desktop_hint(reason: &str) -> String {
   }
 }
 
-/// `desktopHint` null, and no reason quoting it.
+/// `cookieEncryptionWait` without a desktop-specific cause: what a KWallet
+/// reason becomes when the page may not see the desktop.
+const NEUTRAL_COOKIE_ENCRYPTION_WAIT: &str =
+  "the system keyring can't hand out the key in this session";
+
+/// `desktopHint` null, and no reason quoting it. `kwallet` is null too and a
+/// KWallet `cookieEncryptionWait` reason is neutral: KWallet is reported only
+/// where Chromium's own rule calls the desktop KDE, so either would name it.
 fn redact_desktop_hint(features: &mut serde_json::Value) {
   let Some(obj) = features.as_object_mut() else {
     return;
   };
-  if obj.contains_key("desktopHint") {
-    obj.insert("desktopHint".into(), serde_json::Value::Null);
+  for key in ["desktopHint", "kwallet"] {
+    if obj.contains_key(key) {
+      obj.insert(key.into(), serde_json::Value::Null);
+    }
   }
   for key in ["trayReason", "notificationReason"] {
     if let Some(serde_json::Value::String(reason)) = obj.get_mut(key) {
+      *reason = strip_desktop_hint(reason);
+    }
+  }
+  if let Some(serde_json::Value::String(reason)) =
+    obj.get_mut("cookieEncryptionWait")
+  {
+    let lower = reason.to_ascii_lowercase();
+    if lower.contains("kwallet") {
+      *reason = NEUTRAL_COOKIE_ENCRYPTION_WAIT.to_string();
+    } else {
       *reason = strip_desktop_hint(reason);
     }
   }
@@ -5794,6 +5814,56 @@ mod tests {
     });
     redact_desktop_hint(&mut features);
     assert!(!features.to_string().contains("y)"));
+  }
+
+  #[test]
+  fn kwallet_is_redacted_without_env_access() {
+    use super::NEUTRAL_COOKIE_ENCRYPTION_WAIT;
+    use super::redact_desktop_hint;
+    let mut features = json!({
+      "desktopHint": "KDE",
+      "kwallet": "closed",
+      "cookieEncryption": "os",
+      "cookieEncryptionWait": "the cookie store uses KWallet here, and its \
+        wallet is closed: a request for its key is never answered",
+    });
+    redact_desktop_hint(&mut features);
+    assert_eq!(features["kwallet"], serde_json::Value::Null);
+    assert_eq!(
+      features["cookieEncryptionWait"],
+      NEUTRAL_COOKIE_ENCRYPTION_WAIT
+    );
+    assert_eq!(features["cookieEncryption"], "os");
+    // No value names KWallet or KDE (the `kwallet` key itself stays).
+    for value in features.as_object().unwrap().values() {
+      let text = value.to_string().to_ascii_lowercase();
+      assert!(!text.contains("kwallet") && !text.contains("kde"), "{text}");
+    }
+    // kwalletd's own wording is neutral too.
+    let mut features = json!({
+      "kwallet": "not-running",
+      "cookieEncryptionWait": "the cookie store uses KWallet here, and \
+        kwalletd is not running: a request for its key may never be answered",
+    });
+    redact_desktop_hint(&mut features);
+    assert_eq!(
+      features["cookieEncryptionWait"],
+      NEUTRAL_COOKIE_ENCRYPTION_WAIT
+    );
+    // A Secret Service reason names no desktop: kept; no wait stays null.
+    let secret = "the Secret Service's default keyring is locked and no one \
+      can answer its unlock prompt in this unknown session";
+    let mut features = json!({
+      "kwallet": null,
+      "cookieEncryptionWait": secret,
+    });
+    redact_desktop_hint(&mut features);
+    assert_eq!(features["kwallet"], serde_json::Value::Null);
+    assert_eq!(features["cookieEncryptionWait"], secret);
+    let mut features = json!({ "cookieEncryptionWait": null });
+    redact_desktop_hint(&mut features);
+    assert_eq!(features["cookieEncryptionWait"], serde_json::Value::Null);
+    assert!(features.get("kwallet").is_none());
   }
 
   #[test]

@@ -279,12 +279,16 @@ where the changes are discussed.
     XEmbed tray, as on stock GNOME, or no appindicator library) instead of
     returning a dead tray; `alert()` / `confirm()` / `prompt()` throw
     `NotSupported` when the backend has no way to show a dialog, instead of
-    reading as a cancel. CEF starts with `--password-store=basic` when the
-    Secret Service could only answer through a prompt no one can answer (it used
-    to hold every request that carries cookies forever) and reports
-    `cookieEncryption: "basic"`. A profile that once had the OS key keeps it; a
-    launch that can't reach the key falls back to basic for that launch only,
-    with a warning that its OS-key cookies are unavailable this run.
+    reading as a cancel. When no one can hand out the cookie key (a Secret
+    Service that could only answer through a prompt no one can answer, or, on
+    KDE, a KWallet that isn't open), CEF starts with `--password-store=basic`
+    (it used to hold every request that carries cookies forever) and reports
+    `cookieEncryption: "basic"`, unless the profile's cookie database holds
+    cookies encrypted with the OS key (`v11` rows, or a database it can't read):
+    Chromium deletes cookies it can't decrypt, so such a profile keeps the OS
+    key and waits for it, with a stderr warning and the reason in
+    `cookieEncryptionWait`. An explicit `--password-store=basic` on such a
+    profile is honoured with a warning that those cookies will be deleted.
 
 The runtime-side parts (1-3, 5-22) are what the prebuilt `libdenort` carries.
 The CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` /

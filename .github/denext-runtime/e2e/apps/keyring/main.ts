@@ -28,6 +28,8 @@ const want = r.params as {
   secretServicePrompt?: boolean;
   sessionType?: string;
   cookieEncryption?: string | null;
+  cookieEncryptionWait?: string | null;
+  kwallet?: string | null;
 };
 
 // Optional: a runtime older than laufey API 45 has none (the cookie checks
@@ -61,6 +63,21 @@ if (want.cookieEncryption !== undefined) {
     `cookieEncryption is ${want.cookieEncryption}`,
     features?.cookieEncryption === want.cookieEncryption,
     features?.cookieEncryption,
+  );
+}
+
+if (want.cookieEncryptionWait !== undefined) {
+  r.check(
+    `cookieEncryptionWait is ${want.cookieEncryptionWait}`,
+    features?.cookieEncryptionWait === want.cookieEncryptionWait,
+    features?.cookieEncryptionWait,
+  );
+}
+if (want.kwallet !== undefined) {
+  r.check(
+    `kwallet is ${want.kwallet}`,
+    features?.kwallet === want.kwallet,
+    features?.kwallet,
   );
 }
 

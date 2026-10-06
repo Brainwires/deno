@@ -57,7 +57,9 @@ case "$TARGET" in
     # request CEF sends with cookies (navigations, WebSocket handshakes):
     # the runtime must fall back to --password-store=basic (laufey API 45),
     # and the keyring area checks that nothing stalls (linux/session.sh
-    # starts the keyring).
+    # starts the keyring). The keyringpersist area restarts that keyring
+    # locked and unlocked between launches of one profile: cookies stored
+    # with the OS key must survive a launch that can't reach it.
     export E2E_SECRET_SERVICE="${E2E_SECRET_SERVICE:-masked}"
     case "$E2E_SECRET_SERVICE" in
       masked)
