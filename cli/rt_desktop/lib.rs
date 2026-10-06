@@ -2176,6 +2176,38 @@ fn apply_pending_update(dylib_path: &Path) -> bool {
   false
 }
 
+/// The argument a laufey Linux host's D-Bus activation launch carries (the
+/// Exec line of the app's `<app id>.service`, for a notification click while
+/// the app isn't running). Only the host reads it.
+const LAUFEY_DBUS_ACTIVATION_ARG: &str = "--laufey-dbus-activated";
+
+/// This process's arguments without the one only the laufey host reads: on
+/// Linux, the first `--laufey-dbus-activated` before any `--` (the host's
+/// rule, `laufey::args_os`). The host never changes the process's argv (the C
+/// runtime passes it to this library's `.init_array` functions as it loads),
+/// so every reader of the app's arguments here uses this, never
+/// `env::args_os` itself: the app's `Deno.args` don't carry the argument.
+fn process_args_os() -> Vec<std::ffi::OsString> {
+  without_host_args(env::args_os())
+}
+
+fn without_host_args(
+  args: impl IntoIterator<Item = std::ffi::OsString>,
+) -> Vec<std::ffi::OsString> {
+  let mut args: Vec<_> = args.into_iter().collect();
+  if cfg!(target_os = "linux") {
+    let at = args
+      .iter()
+      .skip(1)
+      .take_while(|a| *a != "--")
+      .position(|a| a == LAUFEY_DBUS_ACTIVATION_ARG);
+    if let Some(i) = at {
+      args.remove(i + 1);
+    }
+  }
+  args
+}
+
 /// Exit from the runtime thread before the app started (the update helper
 /// finished, or the update watchdog handed a rollback to the helper): nothing
 /// has run that needs flushing.
@@ -2204,7 +2236,8 @@ laufey::main!(|| {
   // else (and before the forked-worker check, which would take its `run`
   // argv for a script).
   {
-    let args: Vec<String> = env::args_os()
+    let args: Vec<String> = process_args_os()
+      .into_iter()
       .filter_map(|a| a.into_string().ok())
       .collect();
     if deno_runtime::ops::desktop_update::swap::parse_helper_args(&args)
@@ -2268,7 +2301,7 @@ laufey::main!(|| {
   // forged environment) is refused: it used to run any script with the app's
   // permissions, signature and privacy grants, or to start the app with no
   // backend.
-  let args: Vec<_> = env::args_os().collect();
+  let args: Vec<_> = process_args_os();
   if worker_launch::is_worker_launch(args.get(1..).unwrap_or_default(), |n| {
     env::var_os(n)
   }) {
@@ -2306,7 +2339,8 @@ laufey::main!(|| {
   // by the helper, which relaunches the previous version; this process
   // exits without starting. The first launch of a new version is its trial.
   let app_update_trial = {
-    let args: Vec<String> = env::args_os()
+    let args: Vec<String> = process_args_os()
+      .into_iter()
       .filter_map(|a| a.into_string().ok())
       .collect();
     let mut trial = false;
@@ -2402,7 +2436,7 @@ laufey::main!(|| {
   // chdir is process-wide; doing it after the runtime build (and any
   // worker / async tasks it spawns) would race with code that resolves
   // relative paths.
-  let args: Vec<_> = env::args_os().collect();
+  let args: Vec<_> = process_args_os();
   let data = match denort::binary::extract_standalone_with_finder(
     Cow::Owned(args),
     find_section_in_dylib,
@@ -2814,7 +2848,7 @@ fn run_headless_worker() {
   let rt = deno_runtime::tokio_util::create_basic_runtime();
 
   rt.block_on(async {
-    let args: Vec<_> = env::args_os().collect();
+    let args: Vec<_> = process_args_os();
     log::debug!("[worker] args: {:?}", args);
     #[allow(
       clippy::disallowed_methods,
@@ -3595,6 +3629,39 @@ mod tests {
   use super::login_item_state_str;
   use super::map_permission_status;
   use super::should_show_native_error_dialog;
+  use super::without_host_args;
+
+  #[test]
+  fn the_app_args_leave_out_dbus_activation() {
+    let os =
+      |v: &[&str]| -> Vec<OsString> { v.iter().map(OsString::from).collect() };
+    let linux = cfg!(target_os = "linux");
+    let args = os(&["app", "--x", "--laufey-dbus-activated", "--", "acme://y"]);
+    let want = if linux {
+      os(&["app", "--x", "--", "acme://y"])
+    } else {
+      args.clone()
+    };
+    assert_eq!(without_host_args(args), want);
+    // Only the first; after "--" or as the program it is the app's, and a
+    // scheduled-notification launch never reaches the runtime.
+    let args =
+      os(&["app", "--laufey-dbus-activated", "--laufey-dbus-activated"]);
+    let want = if linux {
+      os(&["app", "--laufey-dbus-activated"])
+    } else {
+      args.clone()
+    };
+    assert_eq!(without_host_args(args), want);
+    for kept in [
+      &["app", "--", "--laufey-dbus-activated"][..],
+      &["--laufey-dbus-activated"],
+      &["app", "--laufey-notify", "0123456789abcdef"],
+      &[],
+    ] {
+      assert_eq!(without_host_args(os(kept)), os(kept));
+    }
+  }
 
   #[test]
   fn bindings_trust_the_app_origin_and_a_dev_server() {
