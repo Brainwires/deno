@@ -18,6 +18,7 @@ cranelift.workspace = true
 cranelift-native.workspace = true
 deno_core.workspace = true
 deno_error.workspace = true
+deno_path_util.workspace = true
 deno_permissions.workspace = true
 denort_helper.workspace = true
 dlopen2.workspace = true

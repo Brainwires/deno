@@ -1,0 +1,19 @@
+{
+  "tempDir": true,
+  "steps": [{
+    "args": "run -A setup.ts",
+    "output": "[WILDCARD]"
+  }, {
+    // Unscoped --allow-ffi: a relative path that names a file resolves
+    // against the current directory, a bare name keeps the OS search. The
+    // permission audit records the path that is opened.
+    "args": "run --allow-ffi --allow-read main.ts",
+    "envs": {
+      "DENO_AUDIT_PERMISSIONS": "$PWD/audit.jsonl"
+    },
+    "output": "main.out"
+  }, {
+    "args": "run --allow-read check_audit.ts",
+    "output": "check_audit.out"
+  }]
+}
