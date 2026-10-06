@@ -1,0 +1,2 @@
+audit records the opened path of ./lib/<lib>: true
+audit records no relative path: true

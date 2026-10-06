@@ -149,17 +149,19 @@ pub fn op_ffi_load<'scope>(
   #[string] path: &str,
   #[serde] symbols: HashMap<String, ForeignSymbol>,
 ) -> Result<v8::Local<'scope, v8::Value>, DlfcnError> {
+  // Resolved before the permission check, so the check (and, under
+  // unscoped `--allow-ffi`, its audit record) sees the path that is opened.
+  let path =
+    resolve_library_path(Cow::Borrowed(Path::new(path)), absolute_library_path);
   let (path, denort_helper) = {
     let mut state = state.borrow_mut();
     let permissions = state.borrow_mut::<PermissionsContainer>();
     (
-      permissions
-        .check_ffi_partial_with_path(Cow::Borrowed(Path::new(path)))?,
+      permissions.check_ffi_partial_with_path(path)?,
       state.try_borrow::<DenoRtNativeAddonLoaderRc>().cloned(),
     )
   };
 
-  let path = resolve_library_path(path, std::env::current_dir);
   let real_path = match denort_helper {
     Some(loader) => loader.load_and_resolve_path(&path)?,
     None => Cow::Borrowed(path.as_ref()),
@@ -341,17 +343,19 @@ fn sync_fn_impl<'s>(
 /// Makes a relative library path that names a file absolute, the way a scoped
 /// `--allow-ffi=<path>` check already resolves it.
 ///
-/// A path names a file when it contains a path separator or starts with `.`
-/// (`./lib.so`, `../lib/x.dll`, `sub/x.dylib`). Such a path is joined to the
-/// process's current directory and normalized, so the loader opens exactly
-/// that file: on Windows `LoadLibrary` otherwise searches the DLL search path
-/// for a relative path, and a host that calls `SetDllDirectoryW(L"")` takes
-/// the current directory out of it. A bare name (`kernel32.dll`, `libc.so.6`)
-/// is returned unchanged so the OS library search still finds system
-/// libraries. If the current directory can't be read the path is left as is.
+/// A path names a file when it contains a path separator, starts with `.`
+/// (`./lib.so`, `../lib/x.dll`, `sub/x.dylib`), or (Windows) starts with a
+/// drive but no root (`C:x.dll`, relative to that drive's current
+/// directory). Such a path is made absolute with `absolutize` and
+/// normalized, so the loader opens exactly that file: on Windows
+/// `LoadLibrary` otherwise searches the DLL search path for a relative path,
+/// and a host that calls `SetDllDirectoryW(L"")` takes the current directory
+/// out of it. A bare name (`kernel32.dll`, `libc.so.6`) is returned
+/// unchanged so the OS library search still finds system libraries. If the
+/// path can't be made absolute (no current directory) it is left as is.
 fn resolve_library_path<'a>(
   path: Cow<'a, Path>,
-  current_dir: impl FnOnce() -> std::io::Result<PathBuf>,
+  absolutize: impl FnOnce(&Path) -> std::io::Result<PathBuf>,
 ) -> Cow<'a, Path> {
   if path.is_absolute() {
     return path;
@@ -360,13 +364,33 @@ fn resolve_library_path<'a>(
   let names_a_file = bytes.first() == Some(&b'.')
     || bytes
       .iter()
-      .any(|b| *b == b'/' || (cfg!(windows) && *b == b'\\'));
+      .any(|b| *b == b'/' || (cfg!(windows) && *b == b'\\'))
+    // A prefix (only Windows has them) without a root: `C:x.dll`.
+    || matches!(
+      path.components().next(),
+      Some(std::path::Component::Prefix(_))
+    );
   if !names_a_file {
     return path;
   }
-  match current_dir() {
-    Ok(cwd) => deno_path_util::normalize_path(Cow::Owned(cwd.join(path))),
+  match absolutize(&path) {
+    Ok(absolute) => deno_path_util::normalize_path(Cow::Owned(absolute)),
     Err(_) => path,
+  }
+}
+
+/// `path` made absolute against the process's current directory. On Windows
+/// that is `std::path::absolute` (`GetFullPathNameW`), which takes a
+/// drive-relative path (`D:x.dll`) against that drive's own current
+/// directory, as `LoadLibrary` would, not the process's.
+fn absolute_library_path(path: &Path) -> std::io::Result<PathBuf> {
+  #[cfg(windows)]
+  {
+    std::path::absolute(path)
+  }
+  #[cfg(not(windows))]
+  {
+    Ok(std::env::current_dir()?.join(path))
   }
 }
 
@@ -559,7 +583,7 @@ mod tests {
   fn resolve(path: &str, cwd: &str) -> std::path::PathBuf {
     super::resolve_library_path(
       std::borrow::Cow::Borrowed(std::path::Path::new(path)),
-      || Ok(std::path::PathBuf::from(cwd)),
+      |p| Ok(std::path::PathBuf::from(cwd).join(p)),
     )
     .into_owned()
   }
@@ -586,7 +610,7 @@ mod tests {
     assert_eq!(
       super::resolve_library_path(
         std::borrow::Cow::Borrowed(std::path::Path::new("/usr/lib/x.so")),
-        || panic!("absolute path read the current directory"),
+        |_| panic!("absolute path read the current directory"),
       ),
       std::path::Path::new("/usr/lib/x.so"),
     );
@@ -594,7 +618,7 @@ mod tests {
     assert_eq!(
       super::resolve_library_path(
         std::borrow::Cow::Borrowed(std::path::Path::new("libm.so")),
-        || panic!("bare name read the current directory"),
+        |_| panic!("bare name read the current directory"),
       ),
       std::path::Path::new("libm.so"),
     );
@@ -602,7 +626,7 @@ mod tests {
     assert_eq!(
       super::resolve_library_path(
         std::borrow::Cow::Borrowed(std::path::Path::new("./x.so")),
-        || Err(std::io::Error::other("gone")),
+        |_| Err(std::io::Error::other("gone")),
       ),
       std::path::Path::new("./x.so"),
     );
@@ -644,6 +668,48 @@ mod tests {
       resolve(r"C:\lib\x.dll", r"D:\app"),
       PathBuf::from(r"C:\lib\x.dll")
     );
+  }
+
+  #[cfg(windows)]
+  #[test]
+  fn test_resolve_library_path_drive_relative() {
+    use std::borrow::Cow;
+    use std::path::Component;
+    use std::path::Path;
+
+    // `C:x.dll` names a file relative to drive C's current directory: it is
+    // handed to the resolver, never to the DLL search as a bare name.
+    let mut seen = None;
+    let out =
+      super::resolve_library_path(Cow::Borrowed(Path::new("C:x.dll")), |p| {
+        seen = Some(p.to_path_buf());
+        Ok(std::path::PathBuf::from(r"C:\on-c\x.dll"))
+      });
+    assert_eq!(seen.as_deref(), Some(Path::new("C:x.dll")));
+    assert_eq!(out, Path::new(r"C:\on-c\x.dll"));
+
+    // With the real resolver, a path on the current directory's drive
+    // resolves against the current directory (that drive's current
+    // directory is the process's).
+    let cwd = std::env::current_dir().unwrap();
+    let Some(Component::Prefix(prefix)) = cwd.components().next() else {
+      return; // a cwd without a drive (UNC) has no drive-relative form
+    };
+    let drive = prefix.as_os_str().to_string_lossy().into_owned();
+    if !drive.ends_with(':') || drive.len() != 2 {
+      return;
+    }
+    let out = super::resolve_library_path(
+      Cow::Owned(std::path::PathBuf::from(format!("{drive}x.dll"))),
+      super::absolute_library_path,
+    );
+    assert_eq!(out, cwd.join("x.dll"));
+    // And `..` in it is normalized.
+    let out = super::resolve_library_path(
+      Cow::Owned(std::path::PathBuf::from(format!("{drive}sub\\..\\x.dll"))),
+      super::absolute_library_path,
+    );
+    assert_eq!(out, cwd.join("x.dll"));
   }
 
   #[cfg(target_os = "windows")]
