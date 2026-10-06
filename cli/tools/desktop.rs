@@ -5620,9 +5620,11 @@ fn add_rpm_app_dir(
 
 /// Wrap a Linux app directory in an RPM `.rpm` package via the pure-Rust `rpm`
 /// crate (no `rpmbuild`, so it cross-compiles). Same install layout as the
-/// `.deb`. `Requires` is expressed as CEF shared-library sonames, which resolve
-/// across RPM distros without hard-coding each one's package names, plus
-/// `libsecret` (its `secret-tool`) with `secret_tool`. `%post` / `%postun`
+/// `.deb`. `Requires` is expressed as the shared-library sonames of the
+/// backend the app was built with ([`linux_runtime_deps`]: CEF's, WebKitGTK's
+/// or winit's), which resolve across RPM distros without hard-coding each
+/// one's package names, plus `libsecret` (its `secret-tool`) with
+/// `secret_tool`. `%post` / `%postun`
 /// refresh the desktop and icon databases ([`LINUX_REFRESH_SCRIPT`]), and an
 /// erase's `%postun` stops the app's scheduled-notification timers
 /// ([`rpm_postun_script`]). The D-Bus service file is
