@@ -5,6 +5,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::path::Path;
+use std::path::PathBuf;
 use std::rc::Rc;
 
 use deno_core::GarbageCollected;
@@ -158,6 +159,7 @@ pub fn op_ffi_load<'scope>(
     )
   };
 
+  let path = resolve_library_path(path, std::env::current_dir);
   let real_path = match denort_helper {
     Some(loader) => loader.load_and_resolve_path(&path)?,
     None => Cow::Borrowed(path.as_ref()),
@@ -334,6 +336,38 @@ fn sync_fn_impl<'s>(
     }
     Err(err) => deno_core::error::throw_js_error_class(scope, &err),
   };
+}
+
+/// Makes a relative library path that names a file absolute, the way a scoped
+/// `--allow-ffi=<path>` check already resolves it.
+///
+/// A path names a file when it contains a path separator or starts with `.`
+/// (`./lib.so`, `../lib/x.dll`, `sub/x.dylib`). Such a path is joined to the
+/// process's current directory and normalized, so the loader opens exactly
+/// that file: on Windows `LoadLibrary` otherwise searches the DLL search path
+/// for a relative path, and a host that calls `SetDllDirectoryW(L"")` takes
+/// the current directory out of it. A bare name (`kernel32.dll`, `libc.so.6`)
+/// is returned unchanged so the OS library search still finds system
+/// libraries. If the current directory can't be read the path is left as is.
+fn resolve_library_path<'a>(
+  path: Cow<'a, Path>,
+  current_dir: impl FnOnce() -> std::io::Result<PathBuf>,
+) -> Cow<'a, Path> {
+  if path.is_absolute() {
+    return path;
+  }
+  let bytes = path.as_os_str().as_encoded_bytes();
+  let names_a_file = bytes.first() == Some(&b'.')
+    || bytes
+      .iter()
+      .any(|b| *b == b'/' || (cfg!(windows) && *b == b'\\'));
+  if !names_a_file {
+    return path;
+  }
+  match current_dir() {
+    Ok(cwd) => deno_path_util::normalize_path(Cow::Owned(cwd.join(path))),
+    Err(_) => path,
+  }
 }
 
 // `path` is only used on Windows.
@@ -520,6 +554,96 @@ mod tests {
       .unwrap();
 
     assert_eq!(MAKE_RECT_CALL_COUNT.load(Ordering::Relaxed), 1);
+  }
+
+  fn resolve(path: &str, cwd: &str) -> std::path::PathBuf {
+    super::resolve_library_path(
+      std::borrow::Cow::Borrowed(std::path::Path::new(path)),
+      || Ok(std::path::PathBuf::from(cwd)),
+    )
+    .into_owned()
+  }
+
+  #[cfg(not(windows))]
+  #[test]
+  fn test_resolve_library_path() {
+    use std::path::PathBuf;
+
+    // Paths that name a file resolve against the current directory.
+    assert_eq!(resolve("./x.so", "/app"), PathBuf::from("/app/x.so"));
+    assert_eq!(resolve("lib/x.so", "/app"), PathBuf::from("/app/lib/x.so"));
+    assert_eq!(
+      resolve("../lib/x.so", "/app/bin"),
+      PathBuf::from("/app/lib/x.so")
+    );
+    assert_eq!(
+      resolve(".hidden.so", "/app"),
+      PathBuf::from("/app/.hidden.so")
+    );
+    // Bare names keep the OS library search.
+    assert_eq!(resolve("libc.so.6", "/app"), PathBuf::from("libc.so.6"));
+    // Absolute paths are untouched and never read the current directory.
+    assert_eq!(
+      super::resolve_library_path(
+        std::borrow::Cow::Borrowed(std::path::Path::new("/usr/lib/x.so")),
+        || panic!("absolute path read the current directory"),
+      ),
+      std::path::Path::new("/usr/lib/x.so"),
+    );
+    // A bare name never reads it either.
+    assert_eq!(
+      super::resolve_library_path(
+        std::borrow::Cow::Borrowed(std::path::Path::new("libm.so")),
+        || panic!("bare name read the current directory"),
+      ),
+      std::path::Path::new("libm.so"),
+    );
+    // An unreadable current directory leaves the path for the OS.
+    assert_eq!(
+      super::resolve_library_path(
+        std::borrow::Cow::Borrowed(std::path::Path::new("./x.so")),
+        || Err(std::io::Error::other("gone")),
+      ),
+      std::path::Path::new("./x.so"),
+    );
+  }
+
+  #[cfg(windows)]
+  #[test]
+  fn test_resolve_library_path() {
+    use std::path::PathBuf;
+
+    assert_eq!(
+      resolve(r".\x.dll", r"C:\app"),
+      PathBuf::from(r"C:\app\x.dll")
+    );
+    assert_eq!(
+      resolve("./x.dll", r"C:\app"),
+      PathBuf::from(r"C:\app\x.dll")
+    );
+    assert_eq!(
+      resolve(r"lib\x.dll", r"C:\app"),
+      PathBuf::from(r"C:\app\lib\x.dll")
+    );
+    assert_eq!(
+      resolve(r"..\lib\x.dll", r"C:\app\bin"),
+      PathBuf::from(r"C:\app\lib\x.dll")
+    );
+    // A root-relative path takes the current directory's drive.
+    assert_eq!(
+      resolve(r"\lib\x.dll", r"D:\app"),
+      PathBuf::from(r"D:\lib\x.dll")
+    );
+    // Bare names keep the DLL search order (system libraries).
+    assert_eq!(
+      resolve("kernel32.dll", r"C:\app"),
+      PathBuf::from("kernel32.dll")
+    );
+    // Absolute paths are untouched.
+    assert_eq!(
+      resolve(r"C:\lib\x.dll", r"D:\app"),
+      PathBuf::from(r"C:\lib\x.dll")
+    );
   }
 
   #[cfg(target_os = "windows")]

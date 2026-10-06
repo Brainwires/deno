@@ -2496,6 +2496,7 @@ dependencies = [
  "cranelift-native",
  "deno_core",
  "deno_error",
+ "deno_path_util",
  "deno_permissions",
  "denort_helper",
  "dlopen2",

@@ -1,0 +1,12 @@
+{
+  "tempDir": true,
+  "steps": [{
+    "args": "run -A setup.ts",
+    "output": "[WILDCARD]"
+  }, {
+    // Unscoped --allow-ffi: a relative path that names a file resolves
+    // against the current directory, a bare name keeps the OS search.
+    "args": "run --allow-ffi --allow-read main.ts",
+    "output": "main.out"
+  }]
+}
