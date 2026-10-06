@@ -4469,17 +4469,72 @@ fn linux_package_icons(
 const LINUX_REFRESH_SCRIPT: &str = "command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database -q /usr/share/applications || :\n\
 command -v gtk-update-icon-cache >/dev/null 2>&1 && gtk-update-icon-cache -q -t -f /usr/share/icons/hicolor || :\n";
 
+/// The 16 lowercase hex digits of the FNV-1a 64 hash of `text` (laufey's
+/// `NotificationTagId`).
+fn laufey_fnv1a64_hex(text: &str) -> String {
+  let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+  for b in text.bytes() {
+    h ^= u64::from(b);
+    h = h.wrapping_mul(0x0000_0100_0000_01b3);
+  }
+  format!("{h:016x}")
+}
+
+/// The longest app id part laufey's timer unit names keep
+/// (`kTimerUnitAppIdMax`).
+const LAUFEY_TIMER_APP_ID_MAX: usize = 200;
+
+/// The app id as laufey's notification timer unit names carry it
+/// (`NotificationTimerAppPart`): a byte a unit name can't hold becomes `_`,
+/// and an id longer than 200 bytes keeps its first 191 plus `_` and the first
+/// 8 hex digits of its own FNV-1a 64 hash.
+fn laufey_timer_app_part(app_id: &str) -> String {
+  let mut out: String = app_id
+    .bytes()
+    .map(|b| {
+      if b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'-' | b':') {
+        b as char
+      } else {
+        '_'
+      }
+    })
+    .collect();
+  if out.len() > LAUFEY_TIMER_APP_ID_MAX {
+    out.truncate(LAUFEY_TIMER_APP_ID_MAX - 9);
+    out.push('_');
+    out.push_str(&laufey_fnv1a64_hex(app_id)[..8]);
+  }
+  out
+}
+
+/// The systemd glob for every one of `app_id`'s scheduled-notification
+/// timers and no other app's (laufey's `NotificationTimerGlob`):
+/// `laufey-<app part>-` then exactly 16 `[0-9a-f]` and `.timer`, so an app
+/// whose id extends this one's (`<id>-extra`) keeps its timers.
+fn laufey_timer_glob(app_id: &str) -> String {
+  format!(
+    "laufey-{}-{}.timer",
+    laufey_timer_app_part(app_id),
+    "[0-9a-f]".repeat(16)
+  )
+}
+
 /// Shell lines a package's removal runs to stop the scheduled-notification
 /// timers laufey made for `app_id` in each user's systemd manager
 /// (`laufey-<app id>-<tag id>.timer`, transient; each one would otherwise run
-/// the removed executable at its time). Every user logind knows (logged in
-/// or lingering); `|| :` keeps a user without a running manager, or a system
-/// without systemd, from failing the removal.
+/// the removed executable at its time), matched by [`laufey_timer_glob`].
+/// Every user logind knows (logged in or lingering). `--no-block` and, where
+/// it exists, `timeout 10` keep a manager that doesn't answer from stalling
+/// the package manager; `|| :` keeps a user without a running manager, or a
+/// system without systemd, from failing the removal.
 fn linux_timer_cleanup_script(app_id: &str) -> String {
+  let glob = laufey_timer_glob(app_id);
   format!(
     "if command -v loginctl >/dev/null 2>&1 && command -v systemctl >/dev/null 2>&1; then\n\
+     \x20 laufey_timeout=\n\
+     \x20 if command -v timeout >/dev/null 2>&1; then laufey_timeout=\"timeout 10\"; fi\n\
      \x20 for user in $(loginctl list-users --no-legend 2>/dev/null | awk '{{print $2}}'); do\n\
-     \x20   systemctl --user --machine=\"$user@\" stop 'laufey-{app_id}-*.timer' >/dev/null 2>&1 || :\n\
+     \x20   $laufey_timeout systemctl --user --machine=\"$user\"@ --no-block stop '{glob}' >/dev/null 2>&1 || :\n\
      \x20 done\n\
      fi\n"
   )
@@ -9285,10 +9340,23 @@ def456  other.zip
 
   #[test]
   fn removal_stops_the_apps_notification_timers() {
+    let glob = laufey_timer_glob("com.acme.tool");
+    assert_eq!(
+      glob,
+      format!("laufey-com.acme.tool-{}.timer", "[0-9a-f]".repeat(16))
+    );
     let cleanup = linux_timer_cleanup_script("com.acme.tool");
     assert!(
+      cleanup.contains(&format!(
+        "    $laufey_timeout systemctl --user --machine=\"$user\"@ \
+         --no-block stop '{glob}' >/dev/null 2>&1 || :\n"
+      )),
+      "{cleanup}"
+    );
+    assert!(
       cleanup.contains(
-        "systemctl --user --machine=\"$user@\" stop 'laufey-com.acme.tool-*.timer'"
+        "  if command -v timeout >/dev/null 2>&1; then \
+         laufey_timeout=\"timeout 10\"; fi\n"
       ),
       "{cleanup}"
     );
@@ -9296,13 +9364,51 @@ def456  other.zip
       cleanup.contains("loginctl list-users --no-legend"),
       "{cleanup}"
     );
+    // The glob: this app's timers (laufey's unit names, a tag id of 16 hex
+    // digits), never those of an app whose id extends this one's.
+    let pattern = glob::Pattern::new(&glob).unwrap();
+    let unit = |id: &str, tag: &str| {
+      format!(
+        "laufey-{}-{}.timer",
+        laufey_timer_app_part(id),
+        laufey_fnv1a64_hex(tag)
+      )
+    };
+    assert!(pattern.matches(&unit("com.acme.tool", "daily")));
+    assert!(!pattern.matches(&unit("com.acme.tool-extra", "daily")));
+    assert!(!pattern.matches(&unit("com.acme.tool.extra", "daily")));
+    assert!(!pattern.matches(&unit("com.acme.tool-0123456789abcdef", "daily")));
+    assert!(!pattern.matches("laufey-com.acme.tool-0123456789ABCDEF.timer"));
+    assert!(
+      !pattern
+        .matches(&unit("com.acme.tool", "daily").replace(".timer", ".service"))
+    );
+    // laufey's tag ids (NotificationTagId) and its cut of a long app id.
+    assert_eq!(laufey_fnv1a64_hex(""), "cbf29ce484222325");
+    assert_eq!(laufey_fnv1a64_hex("a"), "af63dc4c8601ec8c");
+    let long_id = format!("dev.{}", "x".repeat(240));
+    let part = laufey_timer_app_part(&long_id);
+    assert_eq!(part.len(), LAUFEY_TIMER_APP_ID_MAX);
+    // 7154d850: FNV-1a 64 of the id (denext's installer test pins the same).
+    assert_eq!(part, format!("dev.{}_7154d850", "x".repeat(187)));
+    assert_eq!(
+      part,
+      format!(
+        "dev.{}_{}",
+        "x".repeat(187),
+        &laufey_fnv1a64_hex(&long_id)[..8]
+      )
+    );
+    assert!(
+      linux_timer_cleanup_script(&long_id)
+        .contains(&format!("'laufey-{part}-[0-9a-f]"))
+    );
+    let short = format!("dev.{}", "x".repeat(196));
+    assert_eq!(laufey_timer_app_part(&short), short);
     // .deb: the postrm only (remove / purge), not the postinst.
     let postrm = deb_maintainer_script("postrm", Some("com.acme.tool"));
     assert!(postrm.contains("remove|purge)"), "{postrm}");
-    assert!(
-      postrm.contains("'laufey-com.acme.tool-*.timer'"),
-      "{postrm}"
-    );
+    assert!(postrm.contains(&format!("'{glob}'")), "{postrm}");
     assert!(
       !deb_maintainer_script("postinst", Some("com.acme.tool"))
         .contains("laufey-com.acme.tool")
