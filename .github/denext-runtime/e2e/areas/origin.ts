@@ -10,7 +10,10 @@ import {
   kill,
   launch,
   launchAndCollect,
+  log,
+  OS,
   packageApp,
+  type Packaged,
   path,
   rm,
   seenPids,
@@ -46,6 +49,9 @@ export async function run(env: Env, rep: AreaReport) {
   await clearResults("origin");
   await writeParams("origin", { origin, backend: env.backend });
   await launchAndCollect(env, rep, "launch", p);
+  if (OS === "windows" && env.backend === "cef" && Deno.env.get("CI")) {
+    await slowProxyConfig(env, rep, p, origin);
+  }
 
   // The app's executable started as a worker from outside (`<App> run
   // x.js`): it must exit without running the script and without starting
@@ -153,4 +159,68 @@ export async function run(env: Env, rep: AreaReport) {
   });
   await writeParams("origin", { origin: nodeOrigin });
   await launchAndCollect(env, rep, "node:http", pn);
+}
+
+/** Windows CEF on CI: the page's WebSocket still reaches the relay when the
+ * system's proxy auto-configuration answers slowly. Chromium holds a request,
+ * loopback ones included, until the proxy configuration is initialized, and
+ * auto-detect (WPAD) is on by default on Windows; a slow answer once timed
+ * this area's WebSocket out (denext runtime run 37422240286). Simulated with a
+ * per-user PAC URL (AutoConfigURL) that answers DIRECT after 12 s, then
+ * restored. CI only: it changes the user's proxy settings while it runs. */
+async function slowProxyConfig(
+  env: Env,
+  rep: AreaReport,
+  p: Packaged,
+  origin: string,
+) {
+  const ac = new AbortController();
+  const server = Deno.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    signal: ac.signal,
+    onListen: () => {},
+  }, async () => {
+    await new Promise((r) => setTimeout(r, 12_000));
+    return new Response(
+      "function FindProxyForURL(url, host) { return 'DIRECT'; }",
+      { headers: { "content-type": "application/x-ns-proxy-autoconfig" } },
+    );
+  });
+  const key =
+    "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings";
+  const reg = (args: string[]) =>
+    new Deno.Command("reg", { args, stdout: "null", stderr: "null" }).output();
+  const had = (await reg(["query", key, "/v", "AutoConfigURL"])).success;
+  if (had) {
+    rep.na(
+      "slow proxy configuration: the page's WebSocket still reaches the relay",
+      "the user already has a PAC URL (AutoConfigURL)",
+    );
+    ac.abort();
+    await server.finished;
+    return;
+  }
+  const pac = `http://127.0.0.1:${server.addr.port}/proxy.pac`;
+  await reg([
+    "add",
+    key,
+    "/v",
+    "AutoConfigURL",
+    "/t",
+    "REG_SZ",
+    "/d",
+    pac,
+    "/f",
+  ]);
+  try {
+    await clearResults("origin");
+    await writeParams("origin", { origin, backend: env.backend });
+    await launchAndCollect(env, rep, "slow proxy configuration", p);
+  } finally {
+    await reg(["delete", key, "/v", "AutoConfigURL", "/f"]);
+    ac.abort();
+    await server.finished;
+    log("  slow proxy configuration: the PAC URL is removed");
+  }
 }
