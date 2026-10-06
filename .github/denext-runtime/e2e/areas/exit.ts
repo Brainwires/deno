@@ -2,10 +2,11 @@
 // How an app ends: Deno.exit(code), process.exit(code) and desktop.quit()
 // each end the process (no hang) with that exit code, `unload` runs before
 // Deno.exit(), and what the page stored just before the end (localStorage,
-// IndexedDB) survives into the next launch. On Windows CEF an exit from the
-// runtime's thread used to end the process under a running engine (the
-// profile unwritten) and could hang in DLL detach code; it now goes through
-// laufey's exit_app (rt_desktop `desktop_exit`).
+// IndexedDB) survives into the next launch. An exit from the runtime's thread
+// used to end the process under a running engine on every OS (the profile
+// unwritten; on Windows it could also hang in DLL detach code); it now goes
+// through laufey's exit_app (rt_desktop `desktop_exit`) on Windows, macOS and
+// Linux, with both backends.
 
 import {
   type AreaReport,
