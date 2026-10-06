@@ -366,8 +366,14 @@ export async function run(env: Env, rep: AreaReport) {
     }
 
     // 7. Windows: the app installed from the stock CLI's .msi.
-    if (OS === "windows") await msi(env, rep, scheme, ids.a, winKey);
-    else {
+    if (OS === "windows" && env.backend === "cef") {
+      rep.na(
+        "install from the .msi",
+        "the stock CLI's .msi packs laufey's CEF executable as the app and the runtime as <App>.dll, which a CEF host behind CEF's bootstrap can't start (see windowsCefLayout); denext builds its .msi from the finished app directory",
+      );
+    } else if (OS === "windows") {
+      await msi(env, rep, scheme, ids.a, winKey);
+    } else {
       rep.na(
         "install from the .msi",
         "the stock CLI builds .msi installers only for Windows targets",

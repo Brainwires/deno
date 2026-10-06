@@ -97,15 +97,41 @@ pub fn set_self_fork_env_var(
   env.push((key, value.into()));
 }
 
-/// The variables of [`set_self_fork_env_var`] for a child running `cmd` with
-/// an IPC channel: none unless `cmd` is this process's own executable.
-fn self_fork_env(cmd: &Path) -> Vec<(OsString, OsString)> {
-  let env = SELF_FORK_ENV
+/// The variable an embedder names to hand each child it forks of its own
+/// executable that child's working directory. See
+/// [`set_self_fork_cwd_env_var`].
+static SELF_FORK_CWD_ENV: std::sync::LazyLock<Mutex<Option<OsString>>> =
+  std::sync::LazyLock::new(Mutex::default);
+
+/// Also give every child this process forks of its own executable (see
+/// [`set_self_fork_env_var`]) `key=<the child's working directory>`. The
+/// Windows desktop runtime's executable can be CEF's bootstrap, which moves a
+/// process to the executable's directory before the app's code runs; the
+/// host puts a fork back in the directory this variable names.
+pub fn set_self_fork_cwd_env_var(key: impl Into<OsString>) {
+  *SELF_FORK_CWD_ENV
+    .lock()
+    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(key.into());
+}
+
+/// The variables of [`set_self_fork_env_var`] (and
+/// [`set_self_fork_cwd_env_var`], naming `cwd`) for a child running `cmd`
+/// with an IPC channel: none unless `cmd` is this process's own executable.
+fn self_fork_env(cmd: &Path, cwd: &Path) -> Vec<(OsString, OsString)> {
+  let mut env = SELF_FORK_ENV
     .lock()
     .unwrap_or_else(std::sync::PoisonError::into_inner)
     .clone();
-  if env.is_empty() || !is_current_exe(cmd) {
+  let cwd_key = SELF_FORK_CWD_ENV
+    .lock()
+    .unwrap_or_else(std::sync::PoisonError::into_inner)
+    .clone();
+  if (env.is_empty() && cwd_key.is_none()) || !is_current_exe(cmd) {
     return Vec::new();
+  }
+  if let Some(key) = cwd_key {
+    env.retain(|(k, _)| k != &key);
+    env.push((key, cwd.as_os_str().to_owned()));
   }
   env
 }
@@ -786,7 +812,7 @@ fn create_command(
   let self_fork_env = if wrap_in_shell {
     Vec::new()
   } else {
-    self_fork_env(&cmd)
+    self_fork_env(&cmd, &run_env.cwd)
   };
 
   #[cfg(unix)]
@@ -2627,27 +2653,39 @@ mod self_fork_tests {
   #[test]
   fn self_fork_env_goes_only_to_this_executable() {
     let exe = std::env::current_exe().unwrap();
+    let cwd = std::path::Path::new("/some/dir");
     // Nothing registered: nothing added.
-    assert!(super::self_fork_env(&exe).is_empty());
+    assert!(super::self_fork_env(&exe, cwd).is_empty());
     super::set_self_fork_env_var("DENO_PROCESS_TEST_SELF_FORK", "a");
     super::set_self_fork_env_var("DENO_PROCESS_TEST_SELF_FORK", "b");
     assert_eq!(
-      super::self_fork_env(&exe),
+      super::self_fork_env(&exe, cwd),
       vec![("DENO_PROCESS_TEST_SELF_FORK".into(), "b".into())]
     );
     // The same file through another path.
     let dir = exe.parent().unwrap();
     let via_dot = dir.join(".").join(exe.file_name().unwrap());
-    assert_eq!(super::self_fork_env(&via_dot).len(), 1);
+    assert_eq!(super::self_fork_env(&via_dot, cwd).len(), 1);
     // Any other program gets nothing.
     let other = if cfg!(windows) {
       std::path::Path::new("C:\\Windows\\System32\\cmd.exe")
     } else {
       std::path::Path::new("/bin/sh")
     };
-    assert!(super::self_fork_env(other).is_empty());
+    assert!(super::self_fork_env(other, cwd).is_empty());
     assert!(
-      super::self_fork_env(std::path::Path::new("/no/such/program")).is_empty()
+      super::self_fork_env(std::path::Path::new("/no/such/program"), cwd)
+        .is_empty()
     );
+    // The child's working directory, once a variable is named for it.
+    super::set_self_fork_cwd_env_var("DENO_PROCESS_TEST_SELF_FORK_CWD");
+    assert_eq!(
+      super::self_fork_env(&exe, cwd),
+      vec![
+        ("DENO_PROCESS_TEST_SELF_FORK".into(), "b".into()),
+        ("DENO_PROCESS_TEST_SELF_FORK_CWD".into(), "/some/dir".into()),
+      ]
+    );
+    assert!(super::self_fork_env(other, cwd).is_empty());
   }
 }

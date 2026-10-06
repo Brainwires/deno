@@ -185,6 +185,25 @@ export async function findArtifact(
   return { artifact, exe };
 }
 
+/**
+ * The Windows CEF layout. The stock CLI ships laufey's CEF executable as
+ * `<App>.exe` and the runtime as `<App>.dll`; laufey's CEF executable is now
+ * CEF's bootstrap.exe (Chromium's sandbox), which loads its host library
+ * `laufey.dll` under the name `<App>.dll`, and the host loads the runtime as
+ * `<App>.runtime.dll`. denext's packager moves the two files the same way.
+ * No-op elsewhere, or for a laufey without the host library.
+ */
+export async function windowsCefLayout(artifact: string, exe: string) {
+  const host = path(artifact, "laufey.dll");
+  if (OS !== "windows" || !await exists(host)) return;
+  const stem = exe.replace(/\.exe$/i, "");
+  if (stem.toLowerCase() === path(artifact, "laufey").toLowerCase()) {
+    throw new Error(`an app named laufey can't take the CEF layout: ${exe}`);
+  }
+  await Deno.rename(`${stem}.dll`, `${stem}.runtime.dll`);
+  await Deno.rename(host, `${stem}.dll`);
+}
+
 /** Ad-hoc sign a macOS bundle after the harness changed it. */
 export async function adhocSign(artifact: string) {
   if (OS !== "darwin") return;
@@ -256,6 +275,7 @@ export async function packageApp(env: Env, spec: AppSpec): Promise<Packaged> {
     return { spec, artifact: path(appDir, spec.output), exe: "", buildDir };
   }
   const { artifact, exe } = await findArtifact(path(appDir, "out"), spec.name);
+  await windowsCefLayout(artifact, exe);
   if (spec.launch) {
     await Deno.writeTextFile(
       laufeyLaunchPath(artifact),
@@ -297,10 +317,17 @@ export async function launch(
     truncate: true,
   });
   await f.write(new TextEncoder().encode(`$ ${exe} ${args.join(" ")}\n`));
+  // CEF's bootstrap starts a Windows CEF app in its executable's directory;
+  // a launcher that gives it another one names it in LAUFEY_CWD, which the
+  // host changes back to (laufey docs/backends.md). A launch from a shell or
+  // shortcut has no such launcher and starts in the executable's directory.
+  const cwdEnv = OS === "windows" && env.backend === "cef" && opts.cwd
+    ? { LAUFEY_CWD: opts.cwd }
+    : {};
   const child = new Deno.Command(exe, {
     args,
     cwd: opts.cwd,
-    env: opts.env,
+    env: { ...cwdEnv, ...opts.env },
     stdin: "null",
     stdout: "piped",
     stderr: "piped",

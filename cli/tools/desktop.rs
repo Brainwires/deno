@@ -1372,6 +1372,12 @@ async fn run_desktop_hmr(
     .arg(&dylib_abs)
     .env("LAUFEY_RUNTIME_PATH", &dylib_abs)
     .current_dir(&source_abs);
+  // The Windows CEF executable is CEF's bootstrap, which moves the process
+  // to its own directory; the host changes back to this one. No other
+  // backend or OS needs it.
+  if cfg!(windows) && backend == "cef" {
+    cmd.env("LAUFEY_CWD", &source_abs);
+  }
   #[cfg(any(target_os = "macos", target_os = "linux"))]
   if let Some(icon_path) = laufey_app_icon.as_ref() {
     cmd.env("LAUFEY_APP_ICON", icon_path);
@@ -1693,14 +1699,20 @@ async fn package_desktop_app(
 /// Directory structure:
 /// ```text
 /// AppName/
-///   AppName.exe         (LAUFEY backend binary, renamed to the app name)
+///   AppName.exe         (LAUFEY backend binary, renamed to the app name;
+///                        with `cef`, CEF's bootstrap.exe)
+///   AppName.dll         (webview: compiled Deno runtime + user code;
+///                        cef: the laufey host the bootstrap loads)
+///   AppName.runtime.dll (cef: compiled Deno runtime + user code)
 ///   libcef.dll, ...     (CEF support files, if any)
-///   AppName.dll         (compiled Deno runtime + user code)
 ///   AppIcon.ico         (optional)
 /// ```
 ///
 /// The backend binary is renamed to `AppName.exe` so it auto-loads the
-/// co-located `AppName.dll` runtime — no `.bat` launcher is needed.
+/// co-located runtime — no `.bat` launcher is needed. See
+/// [`windows_runtime_name`] for why the two backends name it differently.
+/// With `cef`, `AppName.exe` carries the app's icon and version resources
+/// instead of the bootstrap's ([`stamp_windows_exe_resources`]).
 async fn package_windows_app_dir(
   dylib_path: &Path,
   desktop_flags: &DesktopFlags,
@@ -1745,9 +1757,9 @@ async fn package_windows_app_dir(
   //
   // No `linux_colocated_runtime_name` equivalent is needed here: the Windows
   // launcher is `<app>.exe`, so the same chop-at-the-last-dot lookup removes a
-  // real `.exe` extension and lands on `<app>.dll` for any app name, dotted or
-  // not. Linux launchers have no extension for the chop to consume, which is
-  // why only that side has to pre-truncate.
+  // real `.exe` extension and lands on `<app>.dll` (`<app>.runtime.dll`) for
+  // any app name, dotted or not. Linux launchers have no extension for the
+  // chop to consume, which is why only that side has to pre-truncate.
   let AppDirTargets {
     dest_dylib,
     launcher_path,
@@ -1755,11 +1767,27 @@ async fn package_windows_app_dir(
   } = resolve_app_dir_targets(
     &app_dir,
     &app_name,
-    &parts.file_name.to_string_lossy(),
+    &windows_runtime_name(&app_name, backend),
     &format!("{}.exe", app_name),
     &laufey_binary_name,
   )?;
+  // CEF's host library, behind its bootstrap executable: `<app>.dll`.
+  let cef_host =
+    windows_cef_host_targets(&app_dir, &app_name, &laufey_exe_stem, backend)?;
+  if let Some((_, dest_host)) = &cef_host
+    && *dest_host == dest_dylib
+  {
+    bail!(
+      "app name {app_name:?} resolves its runtime library onto the CEF host \
+       library. Choose a different --output name."
+    );
+  }
   std::fs::copy(dylib_path, &dest_dylib)?;
+  if let Some((staged_host, dest_host)) = &cef_host
+    && staged_host != dest_host
+  {
+    std::fs::rename(staged_host, dest_host)?;
+  }
 
   // Rename the LAUFEY backend binary to the app name (`<app>.exe`) so it sits
   // next to `<app>.dll` and auto-loads it: laufey's LaufeyFindColocatedRuntime
@@ -1775,8 +1803,8 @@ async fn package_windows_app_dir(
     std::fs::rename(&staged_backend, &launcher_path)?;
   }
 
-  // Handle icon — drop an .ico next to the launcher. Embedding the icon
-  // into the .exe itself requires rcedit or equivalent and is out of scope.
+  // Handle icon — drop an .ico next to the launcher; it is also embedded in
+  // the launcher below.
   if let Some(ref icon) = desktop_flags.icon {
     let dest = app_dir.join("AppIcon.ico");
     match icon {
@@ -1802,6 +1830,26 @@ async fn package_windows_app_dir(
         convert_icon_set_to_ico(cli_options.initial_cwd(), entries, &dest)?;
       }
     }
+  }
+
+  // With `cef` the launcher is CEF's bootstrap.exe, which carries CEF's own
+  // icon and version resources ("CEF bootstrap" in Task Manager): it shows
+  // as the app instead, with the app's icon in Explorer, the taskbar and the
+  // Start menu, and its name and version in Task Manager and the file's
+  // properties. The webview launcher ships as laufey builds it.
+  if backend == "cef" {
+    let icon_path = app_dir.join("AppIcon.ico");
+    let icon_bytes = if icon_path.is_file() {
+      Some(std::fs::read(&icon_path)?)
+    } else {
+      None
+    };
+    stamp_windows_exe_resources(
+      &launcher_path,
+      &app_name,
+      icon_bytes.as_deref(),
+      config_package_version(cli_options).as_deref(),
+    )?;
   }
 
   // `<app>.exe` has no launcher to set the backend's launch environment, so
@@ -3336,7 +3384,6 @@ fn validate_launcher_name(name: &str, kind: &str) -> Result<(), AnyError> {
 /// `--output /` or `--output .`.
 struct DylibParts<'a> {
   parent: &'a Path,
-  file_name: &'a std::ffi::OsStr,
   app_name: String,
 }
 
@@ -3347,7 +3394,7 @@ fn dylib_parts(dylib_path: &Path) -> Result<DylibParts<'_>, AnyError> {
       dylib_path.display()
     )
   })?;
-  let file_name = dylib_path.file_name().ok_or_else(|| {
+  dylib_path.file_name().ok_or_else(|| {
     deno_core::anyhow::anyhow!(
       "invalid --output: dylib path has no file name: {}",
       dylib_path.display()
@@ -3363,11 +3410,7 @@ fn dylib_parts(dylib_path: &Path) -> Result<DylibParts<'_>, AnyError> {
     })?
     .to_string_lossy()
     .into_owned();
-  Ok(DylibParts {
-    parent,
-    file_name,
-    app_name,
-  })
+  Ok(DylibParts { parent, app_name })
 }
 
 /// The runtime library filename the Linux launcher resolves for an app named
@@ -3458,6 +3501,236 @@ fn resolve_app_dir_targets(
     launcher_path,
     staged_backend,
   })
+}
+
+/// The runtime library's file name in a Windows app directory.
+///
+/// The webview host is the app's executable and loads the runtime named
+/// after it, `<app>.dll`. The CEF backend's executable is CEF's
+/// `bootstrap.exe`: Chromium's Windows sandbox is linked into it, and it
+/// loads its client library, laufey's CEF host, as `<app>.dll`
+/// ([`windows_cef_host_targets`]). So with `cef` the runtime moves to
+/// `<app>.runtime.dll`, the name laufey's CEF `LaufeyFindColocatedRuntime`
+/// looks for on Windows.
+fn windows_runtime_name(app_name: &str, backend: &str) -> String {
+  if backend == "cef" {
+    format!("{app_name}.runtime.dll")
+  } else {
+    format!("{app_name}.dll")
+  }
+}
+
+/// Where the CEF host library sits in the staged app directory
+/// (`<backend-executable>.dll`, next to the bootstrap executable the backend
+/// ships as `<backend-executable>.exe`) and where it goes (`<app>.dll`, the
+/// client library the bootstrap loads once it is `<app>.exe`). `None` for any
+/// other backend, or a CEF backend built without the sandbox (a single
+/// executable with no host library).
+fn windows_cef_host_targets(
+  app_dir: &Path,
+  app_name: &str,
+  laufey_exe_stem: &str,
+  backend: &str,
+) -> Result<Option<(PathBuf, PathBuf)>, AnyError> {
+  if backend != "cef" {
+    return Ok(None);
+  }
+  let staged = app_dir.join(format!("{laufey_exe_stem}.dll"));
+  if !staged.is_file() {
+    return Ok(None);
+  }
+  let dest = app_dir.join(format!("{app_name}.dll"));
+  if dest != staged {
+    reject_backend_file_collision(&dest, app_name, "CEF host library")?;
+  }
+  Ok(Some((staged, dest)))
+}
+
+/// The `VS_FIXEDFILEINFO` version words for a configured version: the
+/// leading numeric fields (see [`numeric_version_fields`]) padded to four,
+/// `1.0.0.0` when none is configured or it isn't numeric. A field above
+/// 65535, which the format can't hold, is clamped.
+fn windows_version_words(config_version: Option<&str>) -> [u16; 4] {
+  let fields = config_version
+    .and_then(numeric_version_fields)
+    .unwrap_or_else(|| vec![1, 0, 0]);
+  let mut words = [0u16; 4];
+  for (word, field) in words.iter_mut().zip(fields) {
+    *word = field.min(u16::MAX as u64) as u16;
+  }
+  words
+}
+
+/// Replace the icon and version resources of the app's executable, `exe`,
+/// in place, keeping every other resource (the manifest, string tables).
+///
+/// The icon (an `.ico` file's bytes) replaces the executable's first icon
+/// group under the same resource name, so whatever loads it by name (the
+/// shell's `"<exe>",0`, a window class) gets the app's icon. The version
+/// resource names the app (`ProductName`, `FileDescription`, which Task
+/// Manager shows, `InternalName`, `OriginalFilename`) and carries its
+/// version (deno.json `version`). Any signature the executable had no longer
+/// matches it, so it is removed ([`strip_pe_certificate`]) and the signing
+/// step comes after this one.
+fn stamp_windows_exe_resources(
+  exe: &Path,
+  app_name: &str,
+  icon_ico: Option<&[u8]>,
+  config_version: Option<&str>,
+) -> Result<(), AnyError> {
+  use editpe::Image;
+  use editpe::ResourceDirectory;
+  use editpe::ResourceEntry;
+  use editpe::ResourceEntryName;
+  use editpe::VersionInfo;
+  use editpe::VersionStringTable;
+  use editpe::constants::RT_GROUP_ICON;
+  use editpe::types::VersionU16;
+  use editpe::types::VersionU32;
+
+  let context = || format!("failed to set the resources of {}", exe.display());
+  let mut bytes = std::fs::read(exe).with_context(context)?;
+  strip_pe_certificate(&mut bytes).with_context(context)?;
+  let mut image = Image::parse(bytes.as_slice())
+    .map_err(|e| deno_core::anyhow::anyhow!("{e}"))
+    .with_context(context)?;
+  let mut resources: ResourceDirectory =
+    image.resource_directory().cloned().unwrap_or_default();
+
+  if let Some(ico) = icon_ico {
+    // The name of the group the executable already shows (the first one).
+    let group_name = resources
+      .root()
+      .get(ResourceEntryName::ID(RT_GROUP_ICON as u32))
+      .and_then(ResourceEntry::as_table)
+      .and_then(|groups| groups.entries().into_iter().next().cloned());
+    let edit = (|| {
+      resources.remove_main_icon()?;
+      resources.set_main_icon(ico)
+    })();
+    edit
+      .map_err(|e| deno_core::anyhow::anyhow!("invalid icon: {e}"))
+      .with_context(context)?;
+    // set_main_icon adds the group as `MAINICON`; give it the old group's
+    // name instead.
+    if let Some(name) = group_name
+      && name != ResourceEntryName::from_string("MAINICON")
+      && let Some(groups) = resources
+        .root_mut()
+        .get_mut(ResourceEntryName::ID(RT_GROUP_ICON as u32))
+        .and_then(ResourceEntry::as_table_mut)
+      && let Some(group) =
+        groups.remove(ResourceEntryName::from_string("MAINICON"))
+    {
+      groups.insert_at(name, group, 0);
+    }
+  }
+
+  let [a, b, c, d] = windows_version_words(config_version);
+  let numeric = format!("{a}.{b}.{c}.{d}");
+  let product_version = config_version
+    .map(str::to_string)
+    .unwrap_or_else(|| numeric.clone());
+  let mut info = VersionInfo::default();
+  let words = VersionU32 {
+    major: ((a as u32) << 16) | b as u32,
+    minor: ((c as u32) << 16) | d as u32,
+  };
+  info.info.file_version = words;
+  info.info.product_version = words;
+  // U.S. English, Unicode (the code page the strings are encoded in).
+  let mut table = VersionStringTable {
+    key: "040904B0".to_string(),
+    strings: Default::default(),
+  };
+  for (key, value) in [
+    ("FileDescription", app_name.to_string()),
+    ("FileVersion", numeric.clone()),
+    ("InternalName", app_name.to_string()),
+    ("OriginalFilename", format!("{app_name}.exe")),
+    ("ProductName", app_name.to_string()),
+    ("ProductVersion", product_version),
+  ] {
+    table.strings.insert(key.to_string(), value);
+  }
+  info.strings.push(table);
+  info.vars.push(VersionU16 {
+    major: 0x0409,
+    minor: 0x04B0,
+  });
+  let edit = (|| {
+    resources.remove_version_info()?;
+    resources.set_version_info(&info)
+  })();
+  edit
+    .map_err(|e| deno_core::anyhow::anyhow!("{e}"))
+    .with_context(context)?;
+
+  image
+    .set_resource_directory(resources)
+    .map_err(|e| deno_core::anyhow::anyhow!("{e}"))
+    .with_context(context)?;
+  let out = image.data().to_vec();
+  drop(image);
+  std::fs::write(exe, out).with_context(context)?;
+  Ok(())
+}
+
+/// Remove a PE image's Authenticode signature, as denext's packager does
+/// (`writePeResources` in its `src/build/pe-resources.ts`): the certificate
+/// table (data directory 4, which holds a file offset, not an RVA) is cut off
+/// the end of the file and its directory entry cleared. Editing the image's
+/// resources breaks the signature anyway, and editpe would carry the table
+/// along as trailing data while the directory entry kept naming its old
+/// offset: a signature that no longer matches, at the wrong place. An image
+/// whose certificate table isn't its last bytes is refused.
+fn strip_pe_certificate(bytes: &mut Vec<u8>) -> Result<(), AnyError> {
+  /// The security (certificate table) data directory's index.
+  const DIR_SECURITY: usize = 4;
+  fn u16_at(b: &[u8], at: usize) -> Option<u16> {
+    Some(u16::from_le_bytes(
+      b.get(at..at.checked_add(2)?)?.try_into().ok()?,
+    ))
+  }
+  fn u32_at(b: &[u8], at: usize) -> Option<u32> {
+    Some(u32::from_le_bytes(
+      b.get(at..at.checked_add(4)?)?.try_into().ok()?,
+    ))
+  }
+  // Anything that isn't a PE image is left for editpe to report.
+  if !bytes.starts_with(b"MZ") {
+    return Ok(());
+  }
+  let Some(pe) = u32_at(bytes, 0x3c).map(|v| v as usize) else {
+    return Ok(());
+  };
+  if bytes.get(pe..pe.saturating_add(4)) != Some(&b"PE\0\0"[..]) {
+    return Ok(());
+  }
+  let opt = pe + 24;
+  let (count_at, dirs) = match u16_at(bytes, opt) {
+    Some(0x20b) => (opt + 108, opt + 112),
+    Some(0x10b) => (opt + 92, opt + 96),
+    _ => return Ok(()),
+  };
+  match u32_at(bytes, count_at) {
+    Some(count) if count as usize > DIR_SECURITY => {}
+    _ => return Ok(()),
+  }
+  let entry = dirs + DIR_SECURITY * 8;
+  let (Some(at), Some(size)) = (u32_at(bytes, entry), u32_at(bytes, entry + 4))
+  else {
+    return Ok(());
+  };
+  if size == 0 {
+    return Ok(());
+  }
+  if at as u64 + size as u64 != bytes.len() as u64 {
+    bail!("its signature (certificate table) is not at the end of the file");
+  }
+  bytes.truncate(at as usize);
+  bytes[entry..entry + 8].fill(0);
+  Ok(())
 }
 
 /// Refuse an app-derived file name that lands on a file the backend shipped.
@@ -7810,7 +8083,6 @@ def456  other.zip
     let p = std::path::PathBuf::from("/tmp/app/myapp.dylib");
     let parts = dylib_parts(&p).expect("parts");
     assert_eq!(parts.parent, std::path::Path::new("/tmp/app"));
-    assert_eq!(parts.file_name, "myapp.dylib");
     assert_eq!(parts.app_name, "myapp");
   }
 
@@ -7823,7 +8095,6 @@ def456  other.zip
     let parts = dylib_parts(&p).expect("parts");
     // dylib_parts itself doesn't strip; that's downstream. But the
     // pieces should at least round-trip cleanly.
-    assert_eq!(parts.file_name, "libdenort.so");
     assert_eq!(parts.app_name, "libdenort");
   }
 
@@ -7838,6 +8109,293 @@ def456  other.zip
     // a degenerate case that previously panicked.
     let empty = std::path::Path::new("");
     let _ = dylib_parts(empty); // not panicking is the regression test
+  }
+
+  // --- the Windows app directory: runtime / CEF host names, resources ---
+
+  #[test]
+  fn windows_runtime_name_moves_aside_for_the_cef_host() {
+    assert_eq!(windows_runtime_name("MyApp", "webview"), "MyApp.dll");
+    assert_eq!(windows_runtime_name("MyApp", "cef"), "MyApp.runtime.dll");
+    // laufey chops the executable's name at its last dot, the `.exe`.
+    assert_eq!(windows_runtime_name("my.app", "cef"), "my.app.runtime.dll");
+  }
+
+  #[test]
+  fn windows_cef_host_moves_to_the_name_the_bootstrap_loads() {
+    let tmp = tempfile::tempdir().unwrap();
+    let app_dir = fake_backend_app_dir(
+      tmp.path(),
+      &["libcef.dll", "laufey.exe", "laufey.dll"],
+    );
+    assert_eq!(
+      windows_cef_host_targets(&app_dir, "MyApp", "laufey", "cef").unwrap(),
+      Some((app_dir.join("laufey.dll"), app_dir.join("MyApp.dll")))
+    );
+    // The webview backend has no host library; a CEF backend built without
+    // the sandbox (a single executable) neither.
+    assert_eq!(
+      windows_cef_host_targets(&app_dir, "MyApp", "laufey", "webview").unwrap(),
+      None
+    );
+    let single = fake_backend_app_dir(
+      &tmp.path().join("single"),
+      &["libcef.dll", "laufey.exe"],
+    );
+    assert_eq!(
+      windows_cef_host_targets(&single, "MyApp", "laufey", "cef").unwrap(),
+      None
+    );
+    // An app named after the backend keeps the host where it is.
+    assert_eq!(
+      windows_cef_host_targets(&app_dir, "laufey", "laufey", "cef").unwrap(),
+      Some((app_dir.join("laufey.dll"), app_dir.join("laufey.dll")))
+    );
+    // An app name that lands the host on a file the backend shipped.
+    let err = windows_cef_host_targets(&app_dir, "libcef", "laufey", "cef")
+      .unwrap_err()
+      .to_string();
+    assert!(err.contains("CEF host library"), "got: {err}");
+    assert!(err.contains("libcef.dll"), "got: {err}");
+  }
+
+  #[test]
+  fn windows_version_words_pad_and_clamp() {
+    assert_eq!(windows_version_words(None), [1, 0, 0, 0]);
+    assert_eq!(windows_version_words(Some("2.5.1")), [2, 5, 1, 0]);
+    assert_eq!(windows_version_words(Some("3.1.0-rc.2+b7")), [3, 1, 0, 0]);
+    assert_eq!(
+      windows_version_words(Some("2026.70000.1")),
+      [2026, 65535, 1, 0]
+    );
+    assert_eq!(windows_version_words(Some("weird")), [1, 0, 0, 0]);
+  }
+
+  /// A minimal PE32+ image: headers and one `.text` section, no resources.
+  fn minimal_pe() -> Vec<u8> {
+    let mut b = vec![0u8; 0x400];
+    let put16 = |b: &mut Vec<u8>, at: usize, v: u16| {
+      b[at..at + 2].copy_from_slice(&v.to_le_bytes())
+    };
+    let put32 = |b: &mut Vec<u8>, at: usize, v: u32| {
+      b[at..at + 4].copy_from_slice(&v.to_le_bytes())
+    };
+    b[0..2].copy_from_slice(b"MZ");
+    put32(&mut b, 0x3c, 0x40);
+    b[0x40..0x44].copy_from_slice(b"PE\0\0");
+    // COFF header.
+    let coff = 0x44;
+    put16(&mut b, coff, 0x8664);
+    put16(&mut b, coff + 2, 1);
+    put16(&mut b, coff + 16, 240);
+    put16(&mut b, coff + 18, 0x0022);
+    // PE32+ optional header.
+    let opt = coff + 20;
+    put16(&mut b, opt, 0x20b);
+    put32(&mut b, opt + 4, 0x200); // SizeOfCode
+    put32(&mut b, opt + 16, 0x1000); // AddressOfEntryPoint
+    put32(&mut b, opt + 20, 0x1000); // BaseOfCode
+    b[opt + 24..opt + 32].copy_from_slice(&0x1_4000_0000u64.to_le_bytes());
+    put32(&mut b, opt + 32, 0x1000); // SectionAlignment
+    put32(&mut b, opt + 36, 0x200); // FileAlignment
+    put16(&mut b, opt + 40, 6); // MajorOperatingSystemVersion
+    put16(&mut b, opt + 48, 6); // MajorSubsystemVersion
+    put32(&mut b, opt + 56, 0x2000); // SizeOfImage
+    put32(&mut b, opt + 60, 0x200); // SizeOfHeaders
+    put16(&mut b, opt + 68, 2); // Subsystem: Windows GUI
+    put16(&mut b, opt + 70, 0x8160); // DllCharacteristics
+    for (i, v) in [0x100000u64, 0x1000, 0x100000, 0x1000].iter().enumerate() {
+      b[opt + 72 + i * 8..opt + 80 + i * 8].copy_from_slice(&v.to_le_bytes());
+    }
+    put32(&mut b, opt + 108, 16); // NumberOfRvaAndSizes
+    // The `.text` section header.
+    let sec = opt + 240;
+    b[sec..sec + 5].copy_from_slice(b".text");
+    put32(&mut b, sec + 8, 0x200); // VirtualSize
+    put32(&mut b, sec + 12, 0x1000); // VirtualAddress
+    put32(&mut b, sec + 16, 0x200); // SizeOfRawData
+    put32(&mut b, sec + 20, 0x200); // PointerToRawData
+    put32(&mut b, sec + 36, 0x6000_0020);
+    b[0x200] = 0xc3; // ret
+    b
+  }
+
+  /// An `.ico` file with one fake image of `payload` bytes.
+  fn fake_ico(payload: &[u8]) -> Vec<u8> {
+    let mut ico = vec![0, 0, 1, 0, 1, 0];
+    ico.extend_from_slice(&[32, 32, 0, 0, 1, 0, 32, 0]);
+    ico.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+    ico.extend_from_slice(&22u32.to_le_bytes());
+    ico.extend_from_slice(payload);
+    ico
+  }
+
+  const BOOTSTRAP_MANIFEST: &str = "<assembly manifestVersion=\"1.0\"/>";
+
+  /// A stand-in for CEF's bootstrap.exe: a manifest, an icon group named
+  /// 32512 and a version resource of its own.
+  fn bootstrap_like_pe() -> Vec<u8> {
+    use editpe::ResourceEntry;
+    use editpe::ResourceEntryName;
+    use editpe::constants::RT_GROUP_ICON;
+    let base = minimal_pe();
+    let mut image = editpe::Image::parse(base.as_slice()).unwrap();
+    let mut rd = editpe::ResourceDirectory::default();
+    rd.set_manifest(BOOTSTRAP_MANIFEST).unwrap();
+    rd.set_main_icon(fake_ico(b"CEF ICON").as_slice()).unwrap();
+    let groups = rd
+      .root_mut()
+      .get_mut(ResourceEntryName::ID(RT_GROUP_ICON as u32))
+      .and_then(ResourceEntry::as_table_mut)
+      .unwrap();
+    let group = groups
+      .remove(ResourceEntryName::from_string("MAINICON"))
+      .unwrap();
+    groups.insert(ResourceEntryName::ID(32512), group);
+    let mut info = editpe::VersionInfo::default();
+    let mut table = editpe::VersionStringTable {
+      key: "040904B0".to_string(),
+      strings: Default::default(),
+    };
+    table
+      .strings
+      .insert("FileDescription".to_string(), "CEF bootstrap".to_string());
+    info.strings.push(table);
+    rd.set_version_info(&info).unwrap();
+    image.set_resource_directory(rd).unwrap();
+    image.data().to_vec()
+  }
+
+  #[test]
+  fn stamp_windows_exe_resources_names_the_app() {
+    use editpe::ResourceEntry;
+    use editpe::ResourceEntryName;
+    use editpe::constants::RT_GROUP_ICON;
+    let tmp = tempfile::tempdir().unwrap();
+    let exe = tmp.path().join("MyApp.exe");
+    std::fs::write(&exe, bootstrap_like_pe()).unwrap();
+    let ico = fake_ico(b"THE APP'S ICON");
+    stamp_windows_exe_resources(&exe, "MyApp", Some(&ico), Some("2.5.1-rc.1"))
+      .unwrap();
+
+    let bytes = std::fs::read(&exe).unwrap();
+    let image = editpe::Image::parse(bytes.as_slice()).unwrap();
+    let rd = image.resource_directory().unwrap();
+    // The other resources stay.
+    assert_eq!(
+      rd.get_manifest().unwrap().as_deref(),
+      Some(BOOTSTRAP_MANIFEST)
+    );
+    // The app's icon, under the name the executable's icon had.
+    let groups = rd
+      .root()
+      .get(ResourceEntryName::ID(RT_GROUP_ICON as u32))
+      .and_then(ResourceEntry::as_table)
+      .unwrap();
+    assert_eq!(
+      groups.entries(),
+      vec![&ResourceEntryName::ID(32512)],
+      "one icon group, under its old name"
+    );
+    let icon = rd.get_main_icon().unwrap().unwrap();
+    assert!(icon.ends_with(b"THE APP'S ICON"));
+    // The version resource names the app.
+    let info = rd.get_version_info().unwrap().unwrap();
+    let strings = &info.strings[0].strings;
+    assert_eq!(strings["FileDescription"], "MyApp");
+    assert_eq!(strings["ProductName"], "MyApp");
+    assert_eq!(strings["OriginalFilename"], "MyApp.exe");
+    assert_eq!(strings["FileVersion"], "2.5.1.0");
+    assert_eq!(strings["ProductVersion"], "2.5.1-rc.1");
+    let file_version = info.info.file_version;
+    assert_eq!(file_version.major, (2 << 16) | 5);
+    assert_eq!(file_version.minor, 1 << 16);
+  }
+
+  #[test]
+  fn stamp_windows_exe_resources_without_an_icon_keeps_the_old_one() {
+    let tmp = tempfile::tempdir().unwrap();
+    let exe = tmp.path().join("MyApp.exe");
+    std::fs::write(&exe, bootstrap_like_pe()).unwrap();
+    stamp_windows_exe_resources(&exe, "MyApp", None, None).unwrap();
+    let bytes = std::fs::read(&exe).unwrap();
+    let image = editpe::Image::parse(bytes.as_slice()).unwrap();
+    let rd = image.resource_directory().unwrap();
+    assert!(rd.get_main_icon().unwrap().unwrap().ends_with(b"CEF ICON"));
+    let info = rd.get_version_info().unwrap().unwrap();
+    assert_eq!(info.strings[0].strings["FileVersion"], "1.0.0.0");
+    // A laufey host without resources at all gets them too.
+    std::fs::write(&exe, minimal_pe()).unwrap();
+    let ico = fake_ico(b"ICON");
+    stamp_windows_exe_resources(&exe, "MyApp", Some(&ico), None).unwrap();
+    let bytes = std::fs::read(&exe).unwrap();
+    let image = editpe::Image::parse(bytes.as_slice()).unwrap();
+    let rd = image.resource_directory().unwrap();
+    assert!(rd.get_main_icon().unwrap().unwrap().ends_with(b"ICON"));
+    assert!(rd.get_version_info().unwrap().is_some());
+    // Not an icon: refused, naming the file.
+    let err = stamp_windows_exe_resources(&exe, "MyApp", Some(b"nope"), None)
+      .unwrap_err();
+    assert!(format!("{err:#}").contains("MyApp.exe"), "{err:#}");
+  }
+
+  /// `pe` with a fake Authenticode certificate table appended (8-byte
+  /// aligned, as signtool writes it) and named by data directory 4.
+  fn with_fake_signature(mut pe: Vec<u8>) -> Vec<u8> {
+    while !pe.len().is_multiple_of(8) {
+      pe.push(0);
+    }
+    let at = pe.len() as u32;
+    // WIN_CERTIFICATE: dwLength, wRevision 0x0200, WIN_CERT_TYPE_PKCS_SIGNED_DATA.
+    let mut cert = Vec::new();
+    cert.extend_from_slice(&24u32.to_le_bytes());
+    cert.extend_from_slice(&0x0200u16.to_le_bytes());
+    cert.extend_from_slice(&2u16.to_le_bytes());
+    cert.extend_from_slice(b"FAKE-PKCS7-SIG!!");
+    pe.extend_from_slice(&cert);
+    let entry = 0x44 + 20 + 112 + 4 * 8;
+    pe[entry..entry + 4].copy_from_slice(&at.to_le_bytes());
+    pe[entry + 4..entry + 8]
+      .copy_from_slice(&(cert.len() as u32).to_le_bytes());
+    pe
+  }
+
+  #[test]
+  fn stamp_windows_exe_resources_drops_the_signature() {
+    let tmp = tempfile::tempdir().unwrap();
+    let exe = tmp.path().join("MyApp.exe");
+    let signed = with_fake_signature(bootstrap_like_pe());
+    let entry = 0x44 + 20 + 112 + 4 * 8;
+    assert_ne!(&signed[entry..entry + 8], &[0u8; 8]);
+    std::fs::write(&exe, &signed).unwrap();
+    stamp_windows_exe_resources(&exe, "MyApp", None, Some("1.2.3")).unwrap();
+
+    let bytes = std::fs::read(&exe).unwrap();
+    // The certificate table's directory entry is cleared and its bytes gone.
+    assert_eq!(&bytes[entry..entry + 8], &[0u8; 8]);
+    assert!(
+      !bytes.windows(16).any(|w| w == b"FAKE-PKCS7-SIG!!"),
+      "the old signature is not carried along"
+    );
+    // The image still parses and carries the new version resource.
+    let image = editpe::Image::parse(bytes.as_slice()).unwrap();
+    let info = image
+      .resource_directory()
+      .unwrap()
+      .get_version_info()
+      .unwrap()
+      .unwrap();
+    assert_eq!(info.strings[0].strings["FileVersion"], "1.2.3.0");
+
+    // A certificate table that isn't the file's last bytes is refused, and
+    // the file is left as it was.
+    let mut odd = with_fake_signature(bootstrap_like_pe());
+    odd.extend_from_slice(b"TRAILER!");
+    std::fs::write(&exe, &odd).unwrap();
+    let err =
+      stamp_windows_exe_resources(&exe, "MyApp", None, None).unwrap_err();
+    assert!(format!("{err:#}").contains("signature"), "{err:#}");
+    assert_eq!(std::fs::read(&exe).unwrap(), odd);
   }
 
   // --- linux_colocated_runtime_name ---

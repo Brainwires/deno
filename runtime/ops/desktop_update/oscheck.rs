@@ -850,6 +850,8 @@ mod tests {
     for (name, body) in [
       ("App.exe", pe()),
       ("App.dll", pe()),
+      // The `cef` layout's runtime, beside the CEF host (`App.dll`).
+      ("App.runtime.dll", pe()),
       ("sub/addon.node", pe()),
       ("sub/deeper/renamed.dat", pe()),
       (
@@ -878,6 +880,7 @@ mod tests {
       [
         "App.dll",
         "App.exe",
+        "App.runtime.dll",
         "sub/addon.node",
         "sub/deeper/renamed.dat",
       ]

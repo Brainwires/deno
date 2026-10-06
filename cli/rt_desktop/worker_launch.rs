@@ -56,6 +56,29 @@ use std::path::Path;
 
 use deno_core::url::Url;
 
+/// The environment variable carrying a forked worker's working directory.
+///
+/// On Windows the executable of an app on the `cef` backend is CEF's
+/// bootstrap.exe, which moves every browser-type process (a headless worker
+/// is one) to the executable's directory before laufey's host runs
+/// (`SetCwdForBrowserProcess`, CEF `libcef_dll/bootstrap/bootstrap_win.cc`):
+/// a dev server's worker would lose the project directory it was forked in.
+/// laufey's Windows CEF host changes back to the directory this names and
+/// removes the variable, so nothing the app starts inherits it.
+pub const CWD_ENV: &str = "LAUFEY_CWD";
+
+/// Hand this process's forks of its own executable their working directory
+/// in [`CWD_ENV`], when the executable is a Windows CEF app's (CEF's
+/// bootstrap, which would move them); no other app's forks get the variable.
+pub fn pass_cwd_to_forks() {
+  let needed = std::env::current_exe().is_ok_and(|exe| {
+    deno_runtime::ops::desktop_update::swap::is_windows_cef_executable(&exe)
+  });
+  if needed {
+    deno_runtime::deno_process::set_self_fork_cwd_env_var(CWD_ENV);
+  }
+}
+
 /// The environment variable carrying the worker token from a desktop
 /// runtime to the workers it forks.
 pub const WORKER_TOKEN_ENV: &str = "DENO_DESKTOP_WORKER_TOKEN";
