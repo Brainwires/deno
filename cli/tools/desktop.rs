@@ -4469,22 +4469,98 @@ fn linux_package_icons(
 const LINUX_REFRESH_SCRIPT: &str = "command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database -q /usr/share/applications || :\n\
 command -v gtk-update-icon-cache >/dev/null 2>&1 && gtk-update-icon-cache -q -t -f /usr/share/icons/hicolor || :\n";
 
+/// Shell lines a package's removal runs to stop the scheduled-notification
+/// timers laufey made for `app_id` in each user's systemd manager
+/// (`laufey-<app id>-<tag id>.timer`, transient; each one would otherwise run
+/// the removed executable at its time). Every user logind knows (logged in
+/// or lingering); `|| :` keeps a user without a running manager, or a system
+/// without systemd, from failing the removal.
+fn linux_timer_cleanup_script(app_id: &str) -> String {
+  format!(
+    "if command -v loginctl >/dev/null 2>&1 && command -v systemctl >/dev/null 2>&1; then\n\
+     \x20 for user in $(loginctl list-users --no-legend 2>/dev/null | awk '{{print $2}}'); do\n\
+     \x20   systemctl --user --machine=\"$user@\" stop 'laufey-{app_id}-*.timer' >/dev/null 2>&1 || :\n\
+     \x20 done\n\
+     fi\n"
+  )
+}
+
 /// The `.deb` maintainer script `name` (`postinst` after a configure, `postrm`
 /// after a remove or purge): [`LINUX_REFRESH_SCRIPT`]. dpkg's file triggers do
-/// the same on Debian / Ubuntu; this covers a system without them.
-fn deb_maintainer_script(name: &str) -> String {
+/// the same on Debian / Ubuntu; this covers a system without them. `postrm`
+/// also stops the app's scheduled-notification timers
+/// ([`linux_timer_cleanup_script`]) when the package has a D-Bus app id.
+fn deb_maintainer_script(name: &str, app_id: Option<&str>) -> String {
   let when = if name == "postinst" {
     "configure"
   } else {
     "remove|purge"
   };
-  let body: String = LINUX_REFRESH_SCRIPT
-    .lines()
-    .map(|l| format!("    {l}\n"))
-    .collect();
+  let mut script = LINUX_REFRESH_SCRIPT.to_string();
+  if name == "postrm"
+    && let Some(app_id) = app_id
+  {
+    script.push_str(&linux_timer_cleanup_script(app_id));
+  }
+  let body: String = script.lines().map(|l| format!("    {l}\n")).collect();
   format!(
     "#!/bin/sh\nset -e\ncase \"$1\" in\n  {when})\n{body}    ;;\nesac\nexit 0\n"
   )
+}
+
+/// The `.rpm` `%postun` scriptlet: [`LINUX_REFRESH_SCRIPT`], and on an erase
+/// (`$1` is 0; an upgrade's `%postun` runs with 1) the timer cleanup
+/// ([`linux_timer_cleanup_script`]) when the package has a D-Bus app id.
+fn rpm_postun_script(app_id: Option<&str>) -> String {
+  let mut script = LINUX_REFRESH_SCRIPT.to_string();
+  if let Some(app_id) = app_id {
+    script.push_str("if [ \"$1\" = 0 ]; then\n");
+    for line in linux_timer_cleanup_script(app_id).lines() {
+      script.push_str(&format!("  {line}\n"));
+    }
+    script.push_str("fi\n");
+  }
+  script
+}
+
+/// Whether `id` can be a D-Bus well-known name and GApplication id (what
+/// laufey requires to own it and to post through the notification portal):
+/// at most 255 bytes, two or more `.`-separated elements of
+/// `[A-Za-z0-9_-]`, none empty or starting with a digit. A derived
+/// `com.deno.desktop.<label>` whose label starts with a digit is not one.
+fn is_dbus_app_id(id: &str) -> bool {
+  let elements: Vec<&str> = id.split('.').collect();
+  id.len() <= 255
+    && elements.len() >= 2
+    && elements.iter().all(|e| {
+      !e.is_empty()
+        && !e.starts_with(|c: char| c.is_ascii_digit())
+        && e
+          .chars()
+          .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    })
+}
+
+/// The D-Bus service file a `.deb` / `.rpm` installs as
+/// `/usr/share/dbus-1/services/<app id>.service`: it lets D-Bus start the app
+/// for a click on one of its notifications while it isn't running (laufey
+/// posts them through the xdg-desktop-portal and owns the app id's name while
+/// it runs; docs/notifications.md in laufey). `Exec` runs the launcher with
+/// the same environment the `.desktop` `Exec` line sets, plus laufey's
+/// `--laufey-dbus-activated` (the click that follows is the launch). `None`
+/// when the identifier can't be a D-Bus name ([`is_dbus_app_id`]).
+fn dbus_service_file(meta: &LinuxPackageMeta) -> Option<String> {
+  if !is_dbus_app_id(&meta.identifier) {
+    return None;
+  }
+  Some(format!(
+    "[D-BUS Service]\n\
+     Name={identifier}\n\
+     Exec=/usr/bin/env {env} /usr/bin/{package} --laufey-dbus-activated\n",
+    identifier = meta.identifier,
+    env = linux_launch_env(&meta.identifier, meta.single_instance),
+    package = meta.package,
+  ))
 }
 
 /// Metadata shared by the `.deb` and `.rpm` builders, derived from the staged
@@ -4656,7 +4732,11 @@ fn rpm_arch_for_target(target: Option<&str>) -> Result<&'static str, AnyError> {
   }
 }
 
-/// `.desktop` entry installed at `/usr/share/applications/<pkg>.desktop`.
+/// `.desktop` entry installed at `/usr/share/applications/<id>.desktop`,
+/// named by the reverse-DNS identifier: the desktop file id the window's app
+/// id, the notification portal, D-Bus activation and the launcher badge
+/// (`application://<id>.desktop`) all name the app by. `Name=` is the app's
+/// display name.
 ///
 /// Unlike the in-app-dir `.desktop` (whose `Exec`/`Icon` are relative), this
 /// one points `Exec` at the package name (resolved via PATH from the
@@ -4745,13 +4825,14 @@ fn linux_package_permissions(rel: &Path, mode: u32) -> u32 {
 /// ```text
 /// /usr/lib/<pkg>/            ← staged app dir contents
 /// /usr/bin/<pkg>             ← symlink → ../lib/<pkg>/<launcher>
-/// /usr/share/applications/<pkg>.desktop
+/// /usr/share/applications/<id>.desktop
+/// /usr/share/dbus-1/services/<id>.service          (see dbus_service_file)
 /// /usr/share/icons/hicolor/<n>x<n>/apps/<id>.png   (see linux_package_icons)
 /// /usr/share/pixmaps/<id>.png
 /// ```
 ///
-/// `postinst` / `postrm` refresh the desktop and icon databases
-/// ([`deb_maintainer_script`]); `secret_tool` adds the package that ships
+/// `postinst` / `postrm` refresh the desktop and icon databases, and `postrm`
+/// stops the app's scheduled-notification timers ([`deb_maintainer_script`]); `secret_tool` adds the package that ships
 /// `secret-tool` to `Depends` ([`linux_runs_secret_tool`]).
 fn create_linux_deb(
   app_dir: &Path,
@@ -4789,8 +4870,10 @@ fn create_linux_deb(
     size = installed_size_kib,
     summary = meta.summary,
   );
-  let scripts =
-    ["postinst", "postrm"].map(|name| (name, deb_maintainer_script(name)));
+  let app_id =
+    is_dbus_app_id(&meta.identifier).then_some(meta.identifier.as_str());
+  let scripts = ["postinst", "postrm"]
+    .map(|name| (name, deb_maintainer_script(name, app_id)));
   let control_tar_gz = build_deb_control_tar(&control, &scripts)?;
 
   // Assemble the ar archive: global header then the three members in the
@@ -4890,6 +4973,11 @@ fn build_deb_data_tar(
     ]
     .map(String::from)
     .to_vec();
+    let service = dbus_service_file(meta);
+    if service.is_some() {
+      dirs.push("./usr/share/dbus-1/".to_string());
+      dirs.push("./usr/share/dbus-1/services/".to_string());
+    }
     // Every directory above an installed icon, parents first.
     for (path, _) in &icons {
       let mut at = 0;
@@ -4983,7 +5071,7 @@ fn build_deb_data_tar(
       )?;
     }
 
-    // /usr/share/applications/<pkg>.desktop
+    // /usr/share/applications/<id>.desktop
     {
       let desktop = system_desktop_entry(meta, !icons.is_empty()).into_bytes();
       installed_size += desktop.len() as u64;
@@ -4997,8 +5085,27 @@ fn build_deb_data_tar(
       h.set_cksum();
       builder.append_data(
         &mut h,
-        format!("./usr/share/applications/{}.desktop", meta.package),
+        format!("./usr/share/applications/{}.desktop", meta.identifier),
         &desktop[..],
+      )?;
+    }
+
+    // /usr/share/dbus-1/services/<id>.service
+    if let Some(service) = &service {
+      let service = service.as_bytes();
+      installed_size += service.len() as u64;
+      let mut h = tar::Header::new_gnu();
+      h.set_entry_type(tar::EntryType::Regular);
+      h.set_mode(0o644);
+      h.set_uid(0);
+      h.set_gid(0);
+      h.set_mtime(0);
+      h.set_size(service.len() as u64);
+      h.set_cksum();
+      builder.append_data(
+        &mut h,
+        format!("./usr/share/dbus-1/services/{}.service", meta.identifier),
+        service,
       )?;
     }
 
@@ -5133,7 +5240,10 @@ fn add_rpm_app_dir(
 /// `.deb`. `Requires` is expressed as CEF shared-library sonames, which resolve
 /// across RPM distros without hard-coding each one's package names, plus
 /// `libsecret` (its `secret-tool`) with `secret_tool`. `%post` / `%postun`
-/// refresh the desktop and icon databases ([`LINUX_REFRESH_SCRIPT`]).
+/// refresh the desktop and icon databases ([`LINUX_REFRESH_SCRIPT`]), and an
+/// erase's `%postun` stops the app's scheduled-notification timers
+/// ([`rpm_postun_script`]). The D-Bus service file is
+/// [`dbus_service_file`].
 fn create_linux_rpm(
   app_dir: &Path,
   rpm_path: &Path,
@@ -5186,7 +5296,7 @@ fn create_linux_rpm(
     ))
     .context("failed to add launcher symlink to rpm")?;
 
-  // /usr/share/applications/<pkg>.desktop — staged to a temp file because the
+  // /usr/share/applications/<id>.desktop — staged to a temp file because the
   // rpm builder reads file content from disk.
   let staging = tempfile::Builder::new()
     .prefix(".deno-desktop-rpm-")
@@ -5202,11 +5312,27 @@ fn create_linux_rpm(
       &desktop_path,
       rpm::FileOptions::new(format!(
         "/usr/share/applications/{}.desktop",
-        meta.package
+        meta.identifier
       ))
       .permissions(0o644),
     )
     .context("failed to add .desktop file to rpm")?;
+
+  // /usr/share/dbus-1/services/<id>.service, staged the same way.
+  if let Some(service) = dbus_service_file(&meta) {
+    let service_path = staging.path().join("app.service");
+    std::fs::write(&service_path, service)?;
+    builder
+      .with_file(
+        &service_path,
+        rpm::FileOptions::new(format!(
+          "/usr/share/dbus-1/services/{}.service",
+          meta.identifier
+        ))
+        .permissions(0o644),
+      )
+      .context("failed to add the D-Bus service file to rpm")?;
+  }
 
   // The icon in the hicolor theme and pixmaps (if present), staged like the
   // `.desktop` entry.
@@ -5221,7 +5347,9 @@ fn create_linux_rpm(
       .context("failed to add icon to rpm")?;
   }
   builder.post_install_script(LINUX_REFRESH_SCRIPT);
-  builder.post_uninstall_script(LINUX_REFRESH_SCRIPT);
+  builder.post_uninstall_script(rpm_postun_script(
+    is_dbus_app_id(&meta.identifier).then_some(meta.identifier.as_str()),
+  ));
   if secret_tool {
     builder.requires(rpm::Dependency::any(SECRET_TOOL_RPM));
   }
@@ -8932,8 +9060,21 @@ def456  other.zip
     }
     assert!(paths.iter().any(|p| p == "usr/lib/myapp/MyApp"));
     assert!(paths.iter().any(|p| p == "usr/lib/myapp/MyApp.so"));
+    // The entry and the D-Bus service file are named by the app id.
     assert!(
       paths
+        .iter()
+        .any(|p| p == "usr/share/applications/com.deno.desktop.myapp.desktop"),
+      "{paths:?}"
+    );
+    assert!(
+      paths.iter().any(|p| {
+        p == "usr/share/dbus-1/services/com.deno.desktop.myapp.service"
+      }),
+      "{paths:?}"
+    );
+    assert!(
+      !paths
         .iter()
         .any(|p| p == "usr/share/applications/myapp.desktop")
     );
@@ -9003,11 +9144,12 @@ def456  other.zip
       .collect();
     assert!(files.iter().any(|f| f == "/usr/lib/myapp/MyApp"));
     assert!(files.iter().any(|f| f == "/usr/bin/myapp"));
-    assert!(
-      files
-        .iter()
-        .any(|f| f == "/usr/share/applications/myapp.desktop")
-    );
+    assert!(files.iter().any(|f| {
+      f == "/usr/share/applications/com.deno.desktop.myapp.desktop"
+    }));
+    assert!(files.iter().any(|f| {
+      f == "/usr/share/dbus-1/services/com.deno.desktop.myapp.service"
+    }));
   }
 
   /// The 1×1 stub PNG with its `IHDR` saying `w`×`h` (the packagers read the
@@ -9102,6 +9244,90 @@ def456  other.zip
       system_desktop_entry(&meta, true)
         .contains("Icon=com.deno.desktop.myapp\n")
     );
+  }
+
+  #[test]
+  fn dbus_service_file_starts_the_app_for_a_notification_click() {
+    let mut meta = LinuxPackageMeta {
+      package: "myapp".to_string(),
+      app_name: "MyApp".to_string(),
+      version: "1.0.0".to_string(),
+      maintainer: "MyApp <noreply@deno.com>".to_string(),
+      summary: "MyApp desktop application".to_string(),
+      identifier: "com.deno.desktop.my-app".to_string(),
+      deep_links: vec![],
+      single_instance: false,
+    };
+    assert_eq!(
+      dbus_service_file(&meta).unwrap(),
+      "[D-BUS Service]\n\
+       Name=com.deno.desktop.my-app\n\
+       Exec=/usr/bin/env LAUFEY_APP_ID=com.deno.desktop.my-app /usr/bin/myapp \
+       --laufey-dbus-activated\n"
+    );
+    meta.single_instance = true;
+    assert!(
+      dbus_service_file(&meta)
+        .unwrap()
+        .contains("LAUFEY_SINGLE_INSTANCE=1 /usr/bin/myapp")
+    );
+    // An id D-Bus can't take as a name gets no service file.
+    meta.identifier = "com.deno.desktop.3d-viewer".to_string();
+    assert!(dbus_service_file(&meta).is_none());
+    assert!(is_dbus_app_id("dev.denext.kitchen-sink"));
+    assert!(is_dbus_app_id("org.example.App_2"));
+    assert!(!is_dbus_app_id("app"));
+    assert!(!is_dbus_app_id("dev..app"));
+    assert!(!is_dbus_app_id("dev.app."));
+    assert!(!is_dbus_app_id("dev.2app"));
+    assert!(!is_dbus_app_id("dev.a b"));
+  }
+
+  #[test]
+  fn removal_stops_the_apps_notification_timers() {
+    let cleanup = linux_timer_cleanup_script("com.acme.tool");
+    assert!(
+      cleanup.contains(
+        "systemctl --user --machine=\"$user@\" stop 'laufey-com.acme.tool-*.timer'"
+      ),
+      "{cleanup}"
+    );
+    assert!(
+      cleanup.contains("loginctl list-users --no-legend"),
+      "{cleanup}"
+    );
+    // .deb: the postrm only (remove / purge), not the postinst.
+    let postrm = deb_maintainer_script("postrm", Some("com.acme.tool"));
+    assert!(postrm.contains("remove|purge)"), "{postrm}");
+    assert!(
+      postrm.contains("'laufey-com.acme.tool-*.timer'"),
+      "{postrm}"
+    );
+    assert!(
+      !deb_maintainer_script("postinst", Some("com.acme.tool"))
+        .contains("laufey-com.acme.tool")
+    );
+    assert!(!deb_maintainer_script("postrm", None).contains("systemctl"));
+    // .rpm: an erase ($1 = 0) only, not an upgrade's %postun.
+    let postun = rpm_postun_script(Some("com.acme.tool"));
+    assert!(postun.starts_with(LINUX_REFRESH_SCRIPT), "{postun}");
+    assert!(postun.contains("if [ \"$1\" = 0 ]; then\n"), "{postun}");
+    assert!(postun.ends_with("fi\n"), "{postun}");
+    assert_eq!(rpm_postun_script(None), LINUX_REFRESH_SCRIPT);
+    // Both parse as shell.
+    let sh = Path::new("/bin/sh");
+    if sh.exists() {
+      for script in [postrm, format!("#!/bin/sh\n{postun}")] {
+        let ok = std::process::Command::new(sh)
+          .arg("-n")
+          .arg("-c")
+          .arg(&script)
+          .status()
+          .unwrap()
+          .success();
+        assert!(ok, "not valid shell:\n{script}");
+      }
+    }
   }
 
   #[test]
@@ -9244,14 +9470,13 @@ def456  other.zip
       .map(|d| d.name)
       .collect();
     assert!(!requires.iter().any(|r| r == "libsecret"), "{requires:?}");
-    for script in [
-      pkg.metadata.get_post_install_script().unwrap(),
-      pkg.metadata.get_post_uninstall_script().unwrap(),
-    ] {
-      assert_eq!(script.script, LINUX_REFRESH_SCRIPT);
+    let post = pkg.metadata.get_post_install_script().unwrap();
+    assert_eq!(post.script, LINUX_REFRESH_SCRIPT);
+    let postun = pkg.metadata.get_post_uninstall_script().unwrap();
+    assert_eq!(postun.script, rpm_postun_script(Some("com.acme.tool")));
+    for script in [post.script, postun.script] {
       assert!(
         script
-          .script
           .contains("update-desktop-database -q /usr/share/applications || :")
       );
     }

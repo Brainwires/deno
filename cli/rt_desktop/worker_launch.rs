@@ -714,6 +714,12 @@ mod tests {
       &["serve", "worker.ts"],
       &["--", "acme://run"],
       &["--runtime", "/rt.so", "run", "x"],
+      // laufey's own launches: a scheduled notification's systemd timer
+      // (the host posts it and exits before the runtime loads, so it never
+      // reaches authorize()) and D-Bus activation for a notification click
+      // (the app itself).
+      &["--laufey-notify", "0123456789abcdef"],
+      &["--laufey-dbus-activated"],
     ] {
       assert!(!is_worker_launch(&args(app), no_env), "{app:?}");
     }
