@@ -88,6 +88,10 @@ fn overwrite_argv_buffer(title: &str) {
 /// to `.init_array` functions, so argc may count those NULL entries: stop at
 /// the first one, as Rust's `std::env::args` does.
 ///
+/// The bounds are empty (the title is then left alone) unless the entries
+/// lie one after another from argv[0]: the last one must end after argv[0]
+/// starts, and the span must hold every argument.
+///
 /// # Safety
 /// `argv` must be a valid pointer to `argc` C string pointers, each either
 /// NULL or a valid C string.
@@ -102,17 +106,32 @@ unsafe fn compute_argv_info(
     while count < argc && !(*argv.add(count)).is_null() {
       count += 1;
     }
+    let empty = ArgvInfo {
+      buf_ptr: std::ptr::null_mut(),
+      buf_size: 0,
+    };
     if count == 0 {
-      return ArgvInfo {
-        buf_ptr: std::ptr::null_mut(),
-        buf_size: 0,
-      };
+      return empty;
     }
-    let start = *argv as *mut _;
+    let start = *argv as *mut u8;
     let last_arg = *argv.add(count - 1);
     let last_arg_len = libc::strlen(last_arg);
-    let end = last_arg.add(last_arg_len + 1) as *const u8;
-    let buf_size = end.offset_from(start) as usize;
+    let end = last_arg.add(last_arg_len + 1) as *mut u8;
+    // The span is only the argv buffer when the arguments are laid out one
+    // after another from argv[0] (as the kernel lays them out). Something
+    // else may have pointed entries elsewhere: then leave the title alone.
+    if (end as usize) <= (start as usize) {
+      return empty;
+    }
+    let buf_size = end as usize - start as usize;
+    let mut args_size = 0usize;
+    for i in 0..count {
+      args_size =
+        args_size.saturating_add(libc::strlen(*argv.add(i)).saturating_add(1));
+    }
+    if args_size > buf_size {
+      return empty;
+    }
     ArgvInfo {
       buf_ptr: start,
       buf_size,
@@ -628,6 +647,33 @@ mod argv_tests {
     let info = unsafe { compute_argv_info(2, argv.as_mut_ptr()) };
     assert_eq!(info.buf_ptr as *const u8, buf.as_ptr());
     assert_eq!(info.buf_size, "prog\0".len());
+  }
+
+  #[test]
+  fn argv_info_is_empty_when_the_last_argument_is_before_argv0() {
+    // A host pointed argv[1] at storage before argv[0]: the span would be
+    // negative.
+    let mut buf = b"--flag\0prog\0".to_vec();
+    let base = buf.as_mut_ptr() as *mut libc::c_char;
+    // SAFETY: both pointers point into `buf`, at NUL-terminated strings.
+    let mut argv = unsafe { [base.add(7), base, std::ptr::null_mut()] };
+    // SAFETY: argv has 2 valid entries.
+    let info = unsafe { compute_argv_info(2, argv.as_mut_ptr()) };
+    assert!(info.buf_ptr.is_null());
+    assert_eq!(info.buf_size, 0);
+  }
+
+  #[test]
+  fn argv_info_is_empty_when_the_arguments_do_not_fit_the_span() {
+    // Every entry points at the same string: the arguments' total size is
+    // larger than the span, so it isn't one argv buffer.
+    let mut buf = b"prog\0".to_vec();
+    let base = buf.as_mut_ptr() as *mut libc::c_char;
+    let mut argv = [base, base, std::ptr::null_mut()];
+    // SAFETY: argv has 2 valid entries.
+    let info = unsafe { compute_argv_info(2, argv.as_mut_ptr()) };
+    assert!(info.buf_ptr.is_null());
+    assert_eq!(info.buf_size, 0);
   }
 
   #[test]
