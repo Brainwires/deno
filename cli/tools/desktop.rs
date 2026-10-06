@@ -4092,8 +4092,14 @@ const APPIMAGE_RUNTIME_AARCH64: &[u8] = include_bytes!(concat!(
   "/appimage_runtime/runtime-aarch64.zstd"
 ));
 
-/// 1×1 transparent PNG, used when the caller didn't supply an icon.
-/// appimagetool-built AppImages expect a top-level `<Name>.png` to exist.
+/// The generic 256×256 app icon an AppImage carries when the app has none:
+/// the AppDir must have the icon its `.desktop` entry's `Icon` names at its
+/// root, and `.DirIcon` is the 256 px PNG file managers and AppImage tools
+/// show.
+const DEFAULT_APP_ICON_PNG: &[u8] = include_bytes!("desktop_default_icon.png");
+
+/// 1×1 transparent PNG (the tests' stand-in icon).
+#[cfg(test)]
 const STUB_ICON_PNG: &[u8] = &[
   0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49,
   0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06,
@@ -4293,14 +4299,14 @@ fn create_linux_appimage(
 
   // Icon at AppDir root named after the entry's `Icon` (the app id, else the
   // app name), plus the `.DirIcon` AppImage tools show. package_linux_app_dir
-  // writes the user icon as AppIcon.png; if absent, fall back to a 1×1
-  // transparent PNG. An AppIcon.svg goes beside it.
+  // writes the user icon as AppIcon.png; if absent, fall back to the generic
+  // app icon. An AppIcon.svg goes beside it.
   let icon_name = desktop_id.unwrap_or(&app_name);
   let icon_src = app_dir.join("AppIcon.png");
   let icon_bytes = if icon_src.exists() {
     std::fs::read(&icon_src)?
   } else {
-    STUB_ICON_PNG.to_vec()
+    DEFAULT_APP_ICON_PNG.to_vec()
   };
   writer.push_file(
     Cursor::new(icon_bytes.clone()),
@@ -4463,7 +4469,7 @@ fn png_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
 
 /// The hicolor directory size for a square icon of `size` pixels: its own size
 /// when the theme lists it, else the largest listed size below it (launchers
-/// scale the larger image down); `None` below 16 px (the 1×1 stub).
+/// scale the larger image down); `None` below 16 px (e.g. a 1×1 PNG).
 fn hicolor_size(size: u32) -> Option<u32> {
   HICOLOR_SIZES.iter().rev().copied().find(|s| *s <= size)
 }
@@ -9430,6 +9436,51 @@ def456  other.zip
     // Without an id, the icon (and StartupWMClass) is the app name.
     let entry = appimage_desktop_entry("MyApp", None, &[]);
     assert!(entry.contains("Icon=MyApp\n"), "{entry}");
+  }
+
+  #[test]
+  fn appimage_without_an_icon_carries_the_generic_app_icon() {
+    let tmp = tempfile::tempdir().unwrap();
+    let app_dir = fake_linux_app_dir(tmp.path(), "MyApp");
+    std::fs::remove_file(app_dir.join("AppIcon.png")).unwrap();
+    let appimage_path = tmp.path().join("MyApp.AppImage");
+    let target = Some("x86_64-unknown-linux-gnu");
+    create_linux_appimage(
+      &app_dir,
+      &appimage_path,
+      target,
+      Some("com.acme.tool"),
+      &[],
+      false,
+    )
+    .unwrap();
+    let runtime_offset =
+      appimage_runtime_for_target(target).unwrap().len() as u64;
+    let appimage =
+      std::io::BufReader::new(std::fs::File::open(&appimage_path).unwrap());
+    let filesystem = backhand::FilesystemReader::from_reader_with_offset(
+      appimage,
+      runtime_offset,
+    )
+    .unwrap();
+    for name in ["/com.acme.tool.png", "/.DirIcon"] {
+      let node = filesystem
+        .files()
+        .find(|n| n.fullpath.to_string_lossy() == name)
+        .unwrap_or_else(|| panic!("{name} missing"));
+      let backhand::InnerNode::File(file) = &node.inner else {
+        panic!("{name} is not a file");
+      };
+      let mut bytes = Vec::new();
+      filesystem
+        .file(file)
+        .reader()
+        .read_to_end(&mut bytes)
+        .unwrap();
+      assert_eq!(bytes, DEFAULT_APP_ICON_PNG, "{name}");
+    }
+    // A real 256×256 icon (the hicolor and .DirIcon size), not a 1×1 stub.
+    assert_eq!(png_dimensions(DEFAULT_APP_ICON_PNG), Some((256, 256)));
   }
 
   #[test]
