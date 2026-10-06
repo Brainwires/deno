@@ -1514,7 +1514,8 @@ declare namespace Deno {
        * Chromium's own rule): `"open"` (kwalletd runs and its local wallet
        * is open: the only state that hands out the key), `"closed"`,
        * `"disabled"` or `"not-running"`, read without starting kwalletd.
-       * `null` elsewhere. */
+       * `null` elsewhere, and without env access to `XDG_CURRENT_DESKTOP`
+       * (`--allow-env`), as it would name the desktop. */
       kwallet: "open" | "closed" | "disabled" | "not-running" | null;
       /** Linux: the server that owns `org.freedesktop.Notifications` now
        * (its name; `"unknown"` when it doesn't say), or `null` when nothing
@@ -1543,7 +1544,9 @@ declare namespace Deno {
       /** CEF on Linux: why this launch keeps the OS key although no one may
        * be able to unlock it (the profile holds cookies encrypted with the
        * OS key, which basic would delete). Requests that carry cookies wait
-       * until the keyring is unlocked or the wallet opened. `null`
+       * until the keyring is unlocked or the wallet opened. Without env
+       * access to `XDG_CURRENT_DESKTOP` a KWallet reason reads "the system
+       * keyring can't hand out the key in this session". `null`
        * otherwise. */
       cookieEncryptionWait: string | null;
     }
