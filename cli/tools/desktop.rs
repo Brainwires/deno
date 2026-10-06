@@ -4358,7 +4358,8 @@ fn create_linux_appimage(
 /// Fedora, openSUSE, etc. without hard-coding each distro's divergent package
 /// names. Too loose a list crashes the app on launch with a missing `.so`; too
 /// strict blocks install on otherwise-fine systems — this is the curated middle
-/// covering CEF's GTK/X11/NSS/audio needs.
+/// covering CEF's GTK/X11/NSS/audio needs. See [`linux_runtime_deps`] for the
+/// other backends.
 const CEF_RUNTIME_DEPS: &[(&str, &str)] = &[
   ("libgtk-3.so.0", "libgtk-3-0"),
   ("libnss3.so", "libnss3"),
@@ -4379,6 +4380,49 @@ const CEF_RUNTIME_DEPS: &[(&str, &str)] = &[
   ("libxcb.so.1", "libxcb1"),
   ("libdrm.so.2", "libdrm2"),
 ];
+
+/// The WebKitGTK (`webview`) backend's runtime dependencies, in the same
+/// `(soname, debian package)` form as [`CEF_RUNTIME_DEPS`]: the libraries
+/// `laufey_webview` links directly (its `DT_NEEDED`, less glibc and what GTK
+/// itself pulls in). GTK's "Print to File" printer, which `print_to_pdf`
+/// prints through, is GTK's file print backend: part of the GTK package. The
+/// tray's appindicator library is loaded at run time and optional (the tray
+/// is refused, with a reason, without it), so it is no dependency.
+const WEBVIEW_RUNTIME_DEPS: &[(&str, &str)] = &[
+  ("libwebkit2gtk-4.1.so.0", "libwebkit2gtk-4.1-0"),
+  (
+    "libjavascriptcoregtk-4.1.so.0",
+    "libjavascriptcoregtk-4.1-0",
+  ),
+  ("libsoup-3.0.so.0", "libsoup-3.0-0"),
+  ("libgtk-3.so.0", "libgtk-3-0"),
+  ("libxcb.so.1", "libxcb1"),
+  ("libwayland-client.so.0", "libwayland-client0"),
+  ("libstdc++.so.6", "libstdc++6"),
+];
+
+/// The winit (`raw`) backend's runtime dependencies, in the same form:
+/// `laufey_winit` links GTK (its tray and dialogs) and libxdo (muda), and
+/// winit loads libxkbcommon-x11 for the keyboard on X11.
+const WINIT_RUNTIME_DEPS: &[(&str, &str)] = &[
+  ("libgtk-3.so.0", "libgtk-3-0"),
+  ("libxdo.so.3", "libxdo3"),
+  ("libxkbcommon-x11.so.0", "libxkbcommon-x11-0"),
+];
+
+/// The runtime dependencies of the backend the app was built with (the
+/// `--backend` flag or `desktop.backend`, `webview` when neither is set):
+/// a `.deb` / `.rpm` declares those of the engine it ships, never CEF's for
+/// a WebKitGTK app.
+fn linux_runtime_deps(
+  desktop_flags: &DesktopFlags,
+) -> &'static [(&'static str, &'static str)] {
+  match desktop_flags.backend.as_deref().unwrap_or("webview") {
+    "cef" => CEF_RUNTIME_DEPS,
+    "raw" => WINIT_RUNTIME_DEPS,
+    _ => WEBVIEW_RUNTIME_DEPS,
+  }
+}
 
 /// Default package version when no version is configured. Matches the macOS
 /// bundle's hard-coded `CFBundleVersion`.
@@ -4767,7 +4811,7 @@ fn create_linux_deb(
   let data_tar_gz = build_deb_data_tar(app_dir, &meta)?;
   let installed_size_kib = data_tar_gz.installed_size_kib;
 
-  let depends = CEF_RUNTIME_DEPS
+  let depends = linux_runtime_deps(desktop_flags)
     .iter()
     .map(|(_, pkg)| *pkg)
     .chain(secret_tool.then_some(SECRET_TOOL_DEB))
@@ -5230,7 +5274,7 @@ fn create_linux_rpm(
   // (e.g. `libgtk-3.so.0()(64bit)`), so a bare-soname `Requires` would not
   // match. Both supported arches (x86_64, aarch64) are 64-bit ELF, so always
   // append the suffix.
-  for (soname, _) in CEF_RUNTIME_DEPS {
+  for (soname, _) in linux_runtime_deps(desktop_flags) {
     builder.requires(rpm::Dependency::any(format!("{soname}()(64bit)")));
   }
 
@@ -8909,7 +8953,11 @@ def456  other.zip
     assert!(control.contains("Package: myapp\n"), "control:\n{control}");
     assert!(control.contains("Architecture: amd64\n"));
     assert!(control.contains("Version: 1.0.0\n"));
-    assert!(control.contains("Depends: libgtk-3-0,"));
+    // The default (webview) backend's own libraries, not CEF's.
+    assert!(
+      control.contains("Depends: libwebkit2gtk-4.1-0,"),
+      "{control}"
+    );
     assert!(control.contains("Installed-Size: "));
 
     // data.tar.gz install layout. The `tar` crate strips the conventional
@@ -8990,8 +9038,10 @@ def456  other.zip
       .map(|d| d.name)
       .collect();
     assert!(
-      requires.iter().any(|r| r == "libgtk-3.so.0()(64bit)"),
-      "rpm Requires must carry CEF sonames with the 64-bit ELF class suffix, got: {requires:?}"
+      requires
+        .iter()
+        .any(|r| r == "libwebkit2gtk-4.1.so.0()(64bit)"),
+      "rpm Requires must carry the backend's sonames with the 64-bit ELF class suffix, got: {requires:?}"
     );
 
     let files: Vec<String> = pkg
@@ -9171,7 +9221,7 @@ def456  other.zip
     .unwrap();
     let control = &deb_control_entries(&deb)[0].2;
     assert!(
-      control.contains(", libdrm2, libsecret-tools\n"),
+      control.contains(", libstdc++6, libsecret-tools\n"),
       "Depends must end with the secret-tool package:\n{control}"
     );
 
@@ -9196,6 +9246,87 @@ def456  other.zip
       .map(|d| d.name)
       .collect();
     assert!(requires.iter().any(|r| r == "libsecret"), "{requires:?}");
+  }
+
+  #[test]
+  fn linux_packages_declare_their_backends_runtime_deps() {
+    let tmp = tempfile::tempdir().unwrap();
+    let app_dir = fake_linux_app_dir(tmp.path(), "MyApp");
+    // (backend, a Debian package it needs, a soname its .rpm requires, a
+    // package it must not name; None: CEF, which must not name WebKitGTK)
+    let cases: [(Option<&str>, &str, &str, Option<&str>); 4] = [
+      (
+        None,
+        "libwebkit2gtk-4.1-0",
+        "libwebkit2gtk-4.1.so.0",
+        Some("libnss3"),
+      ),
+      (
+        Some("webview"),
+        "libsoup-3.0-0",
+        "libjavascriptcoregtk-4.1.so.0",
+        Some("libnss3"),
+      ),
+      (Some("cef"), "libnss3", "libnss3.so", None),
+      (Some("raw"), "libxdo3", "libxdo.so.3", Some("libnss3")),
+    ];
+    for (backend, deb_pkg, soname, absent) in cases {
+      let mut flags = empty_desktop_flags();
+      flags.backend = backend.map(str::to_string);
+      let deb = tmp.path().join("MyApp.deb");
+      create_linux_deb(
+        &app_dir,
+        &deb,
+        &flags,
+        Some("x86_64-unknown-linux-gnu"),
+        None,
+        false,
+      )
+      .unwrap();
+      let control = &deb_control_entries(&deb)[0].2;
+      let depends = control
+        .lines()
+        .find_map(|l| l.strip_prefix("Depends: "))
+        .unwrap()
+        .split(", ")
+        .collect::<Vec<_>>();
+      assert!(depends.contains(&deb_pkg), "{backend:?}: {depends:?}");
+      if let Some(absent) = absent {
+        assert!(!depends.contains(&absent), "{backend:?}: {depends:?}");
+      } else {
+        assert!(
+          !depends.contains(&"libwebkit2gtk-4.1-0"),
+          "{backend:?}: {depends:?}"
+        );
+      }
+
+      let rpm_path = tmp.path().join("MyApp.rpm");
+      create_linux_rpm(
+        &app_dir,
+        &rpm_path,
+        &flags,
+        Some("x86_64-unknown-linux-gnu"),
+        None,
+        None,
+        false,
+      )
+      .unwrap();
+      let bytes = std::fs::read(&rpm_path).unwrap();
+      let pkg = rpm::Package::parse(&mut &bytes[..]).unwrap();
+      let requires: Vec<String> = pkg
+        .metadata
+        .get_requires()
+        .unwrap()
+        .into_iter()
+        .map(|d| d.name)
+        .collect();
+      assert!(
+        requires.contains(&format!("{soname}()(64bit)")),
+        "{backend:?}: {requires:?}"
+      );
+      let cef_only = requires.iter().any(|r| r == "libnss3.so()(64bit)");
+      assert_eq!(cef_only, backend == Some("cef"), "{requires:?}");
+    }
   }
 
   #[test]
