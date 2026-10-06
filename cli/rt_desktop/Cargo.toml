@@ -45,10 +45,10 @@ denort = { path = "../rt", default-features = false }
 # / deep-link switch filter / pinned launch keys, the first window brought
 # to the front at launch on macOS; the 3.1.1 audit: each JS call's document
 # origin, `bridgeOrigins`, scheme write backpressure, packaged-launch
-# pinning), pinned to
+# pinning; API 46: exit_app, which Deno.exit() uses on Windows), pinned to
 # a commit of the Brainwires/laufey fork. The host built from the same commit
 # must be used with it (the API version check is exact).
-laufey = { git = "https://github.com/Brainwires/laufey", rev = "00f2128bea1df25225e0985bfb731e43dadfa897" }
+laufey = { git = "https://github.com/Brainwires/laufey", rev = "050c625c021e76bbc16a933be5a0232e392d15c0" }
 libsui.workspace = true
 
 bytes.workspace = true

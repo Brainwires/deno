@@ -2219,15 +2219,60 @@ fn without_host_args(
 /// process at once instead.
 fn exit_before_start(code: i32) -> ! {
   #[cfg(windows)]
-  {
-    use windows_sys::Win32::System::Threading::GetCurrentProcess;
-    use windows_sys::Win32::System::Threading::TerminateProcess;
-    // SAFETY: terminating the current process; nothing after this runs.
-    unsafe {
-      TerminateProcess(GetCurrentProcess(), code as u32);
-    }
-  }
+  terminate_now(code);
   deno_runtime::exit(code)
+}
+
+/// Ends the process at once with TerminateProcess: no DLL detach code,
+/// static destructor or atexit callback runs (see `desktop_exit`).
+#[cfg(windows)]
+fn terminate_now(code: i32) {
+  use windows_sys::Win32::System::Threading::GetCurrentProcess;
+  use windows_sys::Win32::System::Threading::TerminateProcess;
+  // SAFETY: terminating the current process; nothing after this runs.
+  unsafe {
+    TerminateProcess(GetCurrentProcess(), code as u32);
+  }
+}
+
+/// How long `desktop_exit` waits for the backend to end the process before
+/// it ends it itself.
+#[cfg(windows)]
+const DESKTOP_EXIT_BACKSTOP: std::time::Duration =
+  std::time::Duration::from_secs(30);
+
+/// `deno_runtime::exit`'s hook in a windowed app on Windows (Deno.exit(),
+/// process.exit(), and the runtime's own exits once the app runs), after the
+/// `unload` event and the before-exit callbacks: the backend ends the process
+/// with `code` (laufey's exit_app). Exiting from this thread instead, as the
+/// CLI does, ended the process under a running web engine: CEF never shut
+/// down, so cookies and web storage written just before could be lost, and
+/// ExitProcess then ran every DLL's detach code with CEF's threads gone, where
+/// one could wait for good (a COM call from Windows.Media.dll's exit-time
+/// cleanup into an apartment whose thread was gone): the process never ended
+/// and kept its profile locked. The backend closes the windows, shuts the
+/// engine down and ends the process with TerminateProcess; this thread waits
+/// for it, as exit() never returns. On the backend's UI thread (a panic in a
+/// callback) the loop could not end while it waits, so the process ends here.
+#[cfg(windows)]
+fn desktop_exit(code: i32) {
+  use std::io::Write;
+  if laufey::is_ui_thread() {
+    let _ = std::io::stdout().flush();
+    let _ = std::io::stderr().flush();
+    terminate_now(code);
+  }
+  if !laufey::exit(code) {
+    // A backend without exit_app: exit() ends the process itself.
+    return;
+  }
+  std::thread::sleep(DESKTOP_EXIT_BACKSTOP);
+  log::error!(
+    "[desktop] the backend didn't end the app within {}s of exit({code}); \
+     ending it",
+    DESKTOP_EXIT_BACKSTOP.as_secs()
+  );
+  terminate_now(code);
 }
 
 laufey::main!(|| {
@@ -2351,6 +2396,11 @@ laufey::main!(|| {
     }
     trial
   };
+
+  // From here on the app runs in its window: exits go through the backend,
+  // which shuts the web engine down first (see `desktop_exit`).
+  #[cfg(windows)]
+  deno_runtime::deno_os::set_exit_hook(desktop_exit);
 
   // The deep links and files the app was launched with are in this process's
   // own arguments (the backend's argv: laufey does not interpret them), and a
