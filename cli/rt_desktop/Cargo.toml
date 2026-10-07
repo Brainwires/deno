@@ -46,10 +46,12 @@ denort = { path = "../rt", default-features = false }
 # to the front at launch on macOS; the 3.1.1 audit: each JS call's document
 # origin, `bridgeOrigins`, scheme write backpressure, packaged-launch
 # pinning; API 46: exit_app, which Deno.exit() ends the app with, and the
-# WebKit backends flushing localStorage before the app ends), pinned to
+# WebKit backends flushing localStorage before the app ends; API 47: title
+# bar preferences, the Linux secure store and portal file chooser, and the
+# denext.12 security fixes), pinned to
 # a commit of the Brainwires/laufey fork. The host built from the same commit
 # must be used with it (the API version check is exact).
-laufey = { git = "https://github.com/Brainwires/laufey", rev = "de9e8d31ecda996a0e75f7dddfe5998bdfc76ab8" }
+laufey = { git = "https://github.com/Brainwires/laufey", rev = "491c0ccfd79ae20f8f47673bcb91d17d41221414" }
 libsui.workspace = true
 
 bytes.workspace = true
