@@ -55,6 +55,9 @@ pub const DESKTOP_JS: &str = r#"
     op_desktop_file_dialog_cancel,
     op_desktop_system_capabilities,
     op_desktop_platform_features,
+    op_desktop_title_bar_preferences,
+    op_desktop_secret_supported,
+    op_desktop_secret_request,
     op_desktop_register_shortcut,
     op_desktop_unregister_shortcut,
     op_desktop_unregister_all_shortcuts,
@@ -1825,7 +1828,87 @@ pub const DESKTOP_JS: &str = r#"
       return devtoolsTarget(win).isDevtoolsOpen();
     },
   });
+  // The OS's secret store (laufey API 47: the Secret Service on Linux). A
+  // store that can't answer (no provider, a locked keyring no one unlocked)
+  // rejects with a "SecureStoreUnavailable" error carrying the reason;
+  // never a plaintext fallback, and a locked item is never `null`.
+  function secretString(value, name) {
+    if (typeof value !== "string" || value === "") {
+      throw new TypeError(`${name} must be a non-empty string`);
+    }
+    return value;
+  }
+  function secretTimeout(options) {
+    const t = options?.timeout;
+    if (t === undefined) return undefined;
+    if (typeof t !== "number" || !(t >= 0) || t > 0xffffffff) {
+      throw new TypeError("timeout must be a number of milliseconds");
+    }
+    return Math.floor(t);
+  }
+  async function secretCall(request) {
+    const r = await op_desktop_secret_request(request);
+    switch (r.status) {
+      case "ok":
+        return r.value;
+      case "unavailable": {
+        const err = new Error(r.reason ?? "the secure store is unavailable");
+        err.name = "SecureStoreUnavailable";
+        throw err;
+      }
+      case "invalid":
+        throw new TypeError(r.reason ?? "invalid secure-store arguments");
+      default:
+        throw new Deno.errors.NotSupported(
+          "This runtime has no secure store here (Linux CEF / WebView)",
+        );
+    }
+  }
+  const secureStore = Object.freeze({
+    get supported() {
+      return op_desktop_secret_supported();
+    },
+    async get(service, account, options = undefined) {
+      return await secretCall({
+        op: "get",
+        service: secretString(service, "service"),
+        account: secretString(account, "account"),
+        timeoutMs: secretTimeout(options),
+      }) ?? null;
+    },
+    async set(service, account, value, options = undefined) {
+      if (typeof value !== "string") {
+        throw new TypeError("value must be a string");
+      }
+      const label = options?.label;
+      if (label !== undefined && typeof label !== "string") {
+        throw new TypeError("label must be a string");
+      }
+      await secretCall({
+        op: "set",
+        service: secretString(service, "service"),
+        account: secretString(account, "account"),
+        value,
+        label,
+        timeoutMs: secretTimeout(options),
+      });
+    },
+    async delete(service, account, options = undefined) {
+      await secretCall({
+        op: "delete",
+        service: secretString(service, "service"),
+        account: secretString(account, "account"),
+        timeoutMs: secretTimeout(options),
+      });
+    },
+  });
   Object.defineProperties(desktop, {
+    secureStore: {
+      value: secureStore,
+      writable: false,
+      configurable: true,
+      enumerable: true,
+    },
     shortcuts: {
       value: desktopShortcuts,
       writable: false,
@@ -1849,6 +1932,7 @@ pub const DESKTOP_JS: &str = r#"
   // Screens, capabilities and the app's lifetime (laufey API 38).
   internals.defineEventHandler(desktop, "displaychanged");
   internals.defineEventHandler(desktop, "platformfeatureschanged");
+  internals.defineEventHandler(desktop, "titlebarpreferenceschanged");
   internals.defineEventHandler(desktop, "beforequit");
   let quitOnLastWindowClosed = true;
   let quitOnLastWindowClosedSet = false;
@@ -1880,6 +1964,18 @@ pub const DESKTOP_JS: &str = r#"
     platformFeatures: {
       value: function platformFeatures() {
         return op_desktop_platform_features();
+      },
+      writable: true,
+      configurable: true,
+      enumerable: true,
+    },
+    // How the user set up title bars (laufey API 47), for an app that draws
+    // its own: the buttons on each side, the double-click action, the
+    // colour scheme. A promise of a fresh object per call; null outside a
+    // desktop app.
+    titleBarPreferences: {
+      value: function titleBarPreferences() {
+        return op_desktop_title_bar_preferences();
       },
       writable: true,
       configurable: true,
@@ -2729,6 +2825,11 @@ pub const DESKTOP_JS: &str = r#"
             desktop.dispatchEvent(new Event("displaychanged"));
             break;
           }
+          case "titleBarPreferencesChanged": {
+            // laufey API 47: read titleBarPreferences() again.
+            desktop.dispatchEvent(new Event("titlebarpreferenceschanged"));
+            break;
+          }
           case "platformFeaturesChanged": {
             // laufey API 45: a tray host appeared or went away; read
             // platformFeatures() again (and create the tray once trayHost
@@ -3228,6 +3329,8 @@ mod tests {
     assert!(DESKTOP_JS.contains("new Event(\"displaychanged\")"));
     assert!(DESKTOP_JS.contains("case \"platformFeaturesChanged\":"));
     assert!(DESKTOP_JS.contains("new Event(\"platformfeatureschanged\")"));
+    assert!(DESKTOP_JS.contains("case \"titleBarPreferencesChanged\":"));
+    assert!(DESKTOP_JS.contains("new Event(\"titlebarpreferenceschanged\")"));
     assert!(DESKTOP_JS.contains(
       "internals.defineEventHandler(desktop, \"platformfeatureschanged\")"
     ));
@@ -3452,6 +3555,35 @@ mod tests {
       "platformFeatures: {",
       "value: function platformFeatures() {",
       "return op_desktop_platform_features();",
+    ] {
+      assert!(DESKTOP_JS.contains(needle), "missing: {needle}");
+    }
+  }
+
+  #[test]
+  fn desktop_js_installs_title_bar_preferences() {
+    // laufey API 47: Deno.desktop.titleBarPreferences() and its event.
+    for needle in [
+      "titleBarPreferences: {",
+      "value: function titleBarPreferences() {",
+      "return op_desktop_title_bar_preferences();",
+      "internals.defineEventHandler(desktop, \"titlebarpreferenceschanged\");",
+    ] {
+      assert!(DESKTOP_JS.contains(needle), "missing: {needle}");
+    }
+  }
+
+  #[test]
+  fn desktop_js_installs_the_secure_store() {
+    // laufey API 47: Deno.desktop.secureStore.
+    for needle in [
+      "secureStore: {",
+      "return op_desktop_secret_supported();",
+      "const r = await op_desktop_secret_request(request);",
+      "err.name = \"SecureStoreUnavailable\";",
+      "op: \"get\",",
+      "op: \"set\",",
+      "op: \"delete\",",
     ] {
       assert!(DESKTOP_JS.contains(needle), "missing: {needle}");
     }

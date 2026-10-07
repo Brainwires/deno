@@ -49,7 +49,7 @@ denort = { path = "../rt", default-features = false }
 # WebKit backends flushing localStorage before the app ends), pinned to
 # a commit of the Brainwires/laufey fork. The host built from the same commit
 # must be used with it (the API version check is exact).
-laufey = { git = "https://github.com/Brainwires/laufey", rev = "1d494196b2ee0a76f68083636ee3e36ddda8819e" }
+laufey = { git = "https://github.com/Brainwires/laufey", rev = "de9e8d31ecda996a0e75f7dddfe5998bdfc76ab8" }
 libsui.workspace = true
 
 bytes.workspace = true

@@ -1470,6 +1470,56 @@ declare namespace Deno {
       files: string[];
     }
 
+    /** How the user set up title bars
+     * ({@linkcode Deno.desktop.titleBarPreferences}), for an app that hides
+     * its title bar and draws its own: put the window buttons where the
+     * user's other windows have them, and make a double click on the drag
+     * region do what a double click on a title bar does. Windows with a frame
+     * already follow these settings. */
+    export interface TitleBarPreferences {
+      /** The buttons on each side of the title, in order: `"close"`,
+       * `"minimize"`, `"maximize"`, and the app's own menu or icon
+       * (`"appmenu"`, `"menu"`, `"icon"`). */
+      buttons: {
+        left: TitleBarButton[];
+        right: TitleBarButton[];
+      };
+      /** Where the close button is (with none, the side with the other
+       * buttons). macOS: always `"left"`; Windows: always `"right"`. */
+      side: "left" | "right";
+      /** What a double click on a title bar does. macOS: System Settings'
+       * "Double-click a window's title bar to" (Zoom / Fill read
+       * `"maximize"`); Windows: `"maximize"`; Linux: GNOME's
+       * `action-double-click-titlebar` as the desktop's portal reports it
+       * (Plasma's portal reports KWin's). `"shade"` rolls the window up. */
+      doubleClick:
+        | "maximize"
+        | "minimize"
+        | "shade"
+        | "lower"
+        | "menu"
+        | "none";
+      /** The colour scheme the user picked. */
+      colorScheme: "light" | "dark" | "no-preference";
+      /** The accent colour as `"#rrggbb"`, or `null` when there is none. */
+      accentColor: string | null;
+      /** The title bar font (Linux, e.g. `"Cantarell Bold 11"`), or `null`. */
+      font: string | null;
+      /** Where the button layout came from: Linux reads xdg-desktop-portal's
+       * Settings first (`"portal"`), then GSettings (`"gsettings"`), else
+       * GTK's defaults (`"default"`); `"os"` on macOS and Windows. */
+      source: "portal" | "gsettings" | "default" | "os";
+    }
+
+    /** A title bar button. */
+    export type TitleBarButton =
+      | "close"
+      | "minimize"
+      | "maximize"
+      | "appmenu"
+      | "menu"
+      | "icon";
+
     /** What this session provides
      * ({@linkcode Deno.desktop.platformFeatures}), probed from the session
      * itself, never guessed from the desktop's name. A feature the session
@@ -1952,6 +2002,55 @@ declare namespace Deno {
     };
 
     /**
+     * The OS's secret store, for a small secret per (service, account): on
+     * Linux the Secret Service (gnome-keyring, KWallet's Secret Service,
+     * KeePassXC) through libsecret, with the CEF and WebView backends.
+     * `supported` is false elsewhere (macOS, Windows, Winit), where every
+     * call rejects with `Deno.errors.NotSupported`.
+     *
+     * Items carry the attributes `service` and `account` (as
+     * `secret-tool store … service S account A` writes them); `set` replaces
+     * what is there. A store that can't answer rejects with an `Error` named
+     * `"SecureStoreUnavailable"` whose message says why and what to do: no
+     * session bus, no provider ("install gnome-keyring", "enable KWallet's
+     * Secret Service"), or a locked keyring whose unlock prompt no one here
+     * can answer (refused at once) or no one answered within `timeout` (20 s
+     * by default). There is never a plaintext fallback, and a locked item is
+     * never `null`.
+     *
+     * Needs `--allow-sys` (unscoped): the store is shared by every app of the
+     * user. Each call runs off the JavaScript thread.
+     *
+     * Not available in workers.
+     *
+     * @category Desktop
+     * @experimental
+     */
+    export const secureStore: {
+      readonly supported: boolean;
+      /** The secret, or `null` when there is none. */
+      get(
+        service: string,
+        account: string,
+        options?: { timeout?: number },
+      ): Promise<string | null>;
+      /** Store `value` (text), replacing what is there. `label` is what a
+       * keyring manager shows (the service by default). */
+      set(
+        service: string,
+        account: string,
+        value: string,
+        options?: { label?: string; timeout?: number },
+      ): Promise<void>;
+      /** Delete it; deleting nothing resolves too. */
+      delete(
+        service: string,
+        account: string,
+        options?: { timeout?: number },
+      ): Promise<void>;
+    };
+
+    /**
      * DevTools control. `enabled` is false when the app was launched with
      * DevTools turned off (`LAUFEY_INSPECTABLE=0`, or `"inspectable": false`
      * in the packaged app's `laufey-launch.json`): then neither these calls
@@ -1987,6 +2086,10 @@ declare namespace Deno {
        * Linux a tray host appeared or went away. Read it again; create a
        * refused tray again once `trayHost` is true. */
       platformfeatureschanged: Event;
+      /** What {@linkcode titleBarPreferences} reports changed: the user
+       * moved the window buttons, or changed the double-click action, the
+       * colour scheme or the accent colour. Read it again. */
+      titlebarpreferenceschanged: Event;
       /** Cancelable: {@linkcode quit} was called. */
       beforequit: Event;
       /** A URL routed to the running app (macOS). */
@@ -2702,6 +2805,16 @@ declare namespace Deno {
      * take a few seconds (xdg-desktop-portal starting). Read it again on
      * `"platformfeatureschanged"`. */
     export function platformFeatures(): Promise<PlatformFeatures | null>;
+    /** How the user set up title bars (the buttons on each side, the
+     * double-click action, the colour scheme, the accent colour), for an app
+     * that draws its own title bar. Resolves to `null` outside a desktop app
+     * and on a backend that can't say (the Winit backend on macOS and
+     * Windows). Read off the JavaScript thread: on Linux the first call may
+     * wait for xdg-desktop-portal to start. Read it again on
+     * `"titlebarpreferenceschanged"`. */
+    export function titleBarPreferences(): Promise<
+      TitleBarPreferences | null
+    >;
 
     /** Quit the app, like Electron's `app.quit()`: fires a cancelable
      * `"beforequit"` here, then a cancelable `close` on every open window;

@@ -30,6 +30,8 @@ const want = r.params as {
   cookieEncryption?: string | null;
   cookieEncryptionWait?: string | null;
   kwallet?: string | null;
+  secureStoreReason?: string;
+  secureStoreGetMayBeNull?: boolean;
 };
 
 // Optional: a runtime older than laufey API 45 has none (the cookie checks
@@ -79,6 +81,62 @@ if (want.kwallet !== undefined) {
     features?.kwallet === want.kwallet,
     features?.kwallet,
   );
+}
+
+// The secure store (laufey API 47): under this Secret Service no write can
+// succeed, and no call may wait for an unlock no one can give: each answers
+// at once, a refusal with the reason (never a plaintext fallback). Off Linux (and on a runtime
+// without it) the store is the OS's own, which these checks don't touch.
+const store = (desktop as unknown as {
+  secureStore?: {
+    supported: boolean;
+    get(s: string, a: string, o?: { timeout?: number }): Promise<unknown>;
+    set(
+      s: string,
+      a: string,
+      v: string,
+      o?: { timeout?: number },
+    ): Promise<unknown>;
+  };
+}).secureStore;
+if (want.secureStoreReason !== undefined) {
+  r.check("secureStore is supported (Linux)", store?.supported === true);
+  if (!store) throw new Error("no Deno.desktop.secureStore");
+  const t0 = performance.now();
+  const outcome = async (p: Promise<unknown>) => {
+    try {
+      return { value: await p };
+    } catch (e) {
+      return { name: (e as Error).name, message: (e as Error).message };
+    }
+  };
+  const got = await outcome(
+    store.get("dev.denext.e2e", "keyring", { timeout: 20000 }),
+  );
+  const set = await outcome(
+    store.set("dev.denext.e2e", "keyring", "v", { timeout: 20000 }),
+  );
+  const ms = Math.round(performance.now() - t0);
+  r.set("secureStore", { got, set, ms });
+  // A locked keyring still answers a search: a key that was never stored is
+  // simply not there (null). Anything else is refused with the reason.
+  r.check(
+    `secureStore.get of a key never stored: ${
+      want.secureStoreGetMayBeNull ? "null or " : ""
+    }SecureStoreUnavailable`,
+    (want.secureStoreGetMayBeNull === true && "value" in got &&
+      got.value === null) ||
+      (got.name === "SecureStoreUnavailable" &&
+        String(got.message).includes(want.secureStoreReason)),
+    got,
+  );
+  r.check(
+    `secureStore.set is refused (${want.secureStoreReason}; never a plaintext fallback)`,
+    set.name === "SecureStoreUnavailable" &&
+      String(set.message).includes(want.secureStoreReason),
+    set,
+  );
+  r.check("both answer at once (no unlock to wait for)", ms < 10000, ms);
 }
 
 const SECOND = `

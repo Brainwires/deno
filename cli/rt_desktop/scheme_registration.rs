@@ -14,7 +14,9 @@
 //!   `LSRegisterURL`, and `LSSetDefaultHandlerForURLScheme` only when forced).
 //! - Linux: the freedesktop MIME defaults (read directly), an own
 //!   `.desktop` entry in `$XDG_DATA_HOME/applications`, `xdg-mime default`
-//!   and `update-desktop-database` (absolute paths, no shell, bounded time).
+//!   and `update-desktop-database`, then KDE's `kbuildsycoca6` / `5` where
+//!   installed, so the first link on Plasma routes without a re-login
+//!   (absolute paths, no shell, bounded time).
 //!
 //! The executable registered is always the running process's own.
 
@@ -1000,8 +1002,29 @@ mod os {
           OsStr::new(desktop_id),
           OsStr::new(&mime),
         ],
-      )
+      )?;
+      refresh_kde_service_cache(self.find_tool);
+      Ok(())
     }
+  }
+
+  /// KDE's service cache (ksycoca), which KIO consults to open a link, is
+  /// rebuilt from the new entry and default right away where KDE's
+  /// `kbuildsycoca6` / `kbuildsycoca5` is installed, so the first link on
+  /// Plasma reaches the app without a re-login. Elsewhere there is nothing
+  /// to do. Failures are logged only: the default is already set.
+  pub(super) fn refresh_kde_service_cache(
+    find_tool: fn(&str) -> Option<PathBuf>,
+  ) -> Option<&'static str> {
+    for name in ["kbuildsycoca6", "kbuildsycoca5"] {
+      if let Some(tool) = find_tool(name) {
+        if let Err(e) = run_tool(&tool, &[]) {
+          log::debug!("[desktop] {e}");
+        }
+        return Some(name);
+      }
+    }
+    None
   }
 
   /// The program a link must start: the AppImage file when running from a
@@ -1436,6 +1459,104 @@ mod tests {
     // Idempotent.
     let out = register_scheme(&reg, &unique, RegisterMode::Startup);
     assert!(out.registered && !out.wrote);
+  }
+
+  /// After the scheme's default is set, KDE's service cache is rebuilt
+  /// (kbuildsycoca6, else kbuildsycoca5) so the first link on Plasma
+  /// routes; not when setting the default failed, and nothing without KDE.
+  #[cfg(all(unix, not(target_os = "macos")))]
+  #[test]
+  fn xdg_registry_refreshes_kde_service_cache() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::Mutex;
+
+    use deno_lib::standalone::scheme_handler::RegisterMode;
+    use deno_lib::standalone::scheme_handler::linux as logic;
+    use deno_lib::standalone::scheme_handler::register_scheme;
+
+    // The tools the fake lookup finds (a fn pointer can't capture).
+    static TOOLS: Mutex<Option<std::path::PathBuf>> = Mutex::new(None);
+    fn find(name: &str) -> Option<std::path::PathBuf> {
+      let dir = TOOLS.lock().unwrap().clone()?;
+      let p = dir.join(name);
+      p.is_file().then_some(p)
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().to_path_buf();
+    let tools = root.join("tools");
+    std::fs::create_dir_all(&tools).unwrap();
+    let log = root.join("ran.log");
+    let tool = |name: &str, status: i32| {
+      let path = tools.join(name);
+      std::fs::write(
+        &path,
+        format!(
+          "#!/bin/sh\necho \"{name} $*\" >> '{}'\nexit {status}\n",
+          log.display()
+        ),
+      )
+      .unwrap();
+      std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+        .unwrap();
+    };
+    let ran = || std::fs::read_to_string(&log).unwrap_or_default();
+    *TOOLS.lock().unwrap() = Some(tools.clone());
+
+    // Without KDE: nothing to refresh.
+    assert_eq!(os::refresh_kde_service_cache(find), None);
+    // Plasma 5 only.
+    tool("kbuildsycoca5", 0);
+    assert_eq!(os::refresh_kde_service_cache(find), Some("kbuildsycoca5"));
+    assert_eq!(ran(), "kbuildsycoca5 \n");
+    // Plasma 6 first.
+    tool("kbuildsycoca6", 0);
+    std::fs::remove_file(&log).unwrap();
+    assert_eq!(os::refresh_kde_service_cache(find), Some("kbuildsycoca6"));
+    assert_eq!(ran(), "kbuildsycoca6 \n");
+
+    // Registering: xdg-mime sets the default, then the cache is rebuilt.
+    let dirs = logic::XdgDirs {
+      config_home: root.join("config"),
+      config_dirs: vec![],
+      data_home: root.join("data"),
+      data_dirs: vec![root.join("sys")],
+      current_desktops: vec![],
+    };
+    let exe = root.join("App/app");
+    std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+    std::fs::write(&exe, "").unwrap();
+    let exe = std::fs::canonicalize(&exe).unwrap();
+    let own = dirs.user_applications_dir().join("com.acme.app.desktop");
+    let reg = os::XdgRegistry::new(
+      Some(dirs.clone()),
+      logic::ThisApp {
+        desktop_id: Some("com.acme.app.desktop".into()),
+        exe,
+        own_entry: Some(own),
+      },
+      Some("com.acme.app".into()),
+      "Acme".into(),
+      vec!["acme".into()],
+      find,
+    );
+    tool("xdg-mime", 0);
+    std::fs::remove_file(&log).unwrap();
+    let _ = register_scheme(&reg, "acme", RegisterMode::Startup);
+    assert_eq!(
+      ran(),
+      "xdg-mime default com.acme.app.desktop x-scheme-handler/acme\n\
+       kbuildsycoca6 \n"
+    );
+    // A default that couldn't be set: no rebuild.
+    tool("xdg-mime", 1);
+    std::fs::remove_file(&log).unwrap();
+    let out = register_scheme(&reg, "acme", RegisterMode::Startup);
+    assert!(!out.registered);
+    assert_eq!(
+      ran(),
+      "xdg-mime default com.acme.app.desktop x-scheme-handler/acme\n"
+    );
+    *TOOLS.lock().unwrap() = None;
   }
 
   /// The freedesktop backend against throwaway XDG directories, without

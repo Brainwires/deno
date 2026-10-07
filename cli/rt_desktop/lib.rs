@@ -57,7 +57,7 @@ use denort::run::RunOptions;
 /// makes the failure mode obvious instead of "the desktop app silently won't
 /// launch".
 const _: () = assert!(
-  laufey::LAUFEY_API_VERSION == 46,
+  laufey::LAUFEY_API_VERSION == 47,
   "LAUFEY_API_VERSION mismatch: update this assert and the prebuilt backend release pin in cli/tools/desktop.rs when laufey bumps its API version",
 );
 
@@ -1148,6 +1148,51 @@ impl denort::desktop::DesktopApi for WefDesktopApi {
 
   fn tray_unavailable_reason(&self) -> Option<String> {
     laufey::tray_unavailable_reason()
+  }
+
+  fn title_bar_preferences(&self) -> Option<String> {
+    laufey::title_bar_preferences()
+  }
+
+  fn secret_store_supported(&self) -> bool {
+    laufey::secret_store_supported()
+  }
+
+  fn secret_request(
+    &self,
+    request: &deno_runtime::ops::desktop::SecretRequest,
+  ) -> deno_runtime::ops::desktop::SecretOutcome {
+    use deno_runtime::ops::desktop::SecretOutcome;
+    // 0 asks the backend for its default (20 s).
+    let timeout = std::time::Duration::from_millis(u64::from(
+      request.timeout_ms.unwrap_or(0),
+    ));
+    let result = match request.op.as_str() {
+      "get" => {
+        laufey::secret_lookup(&request.service, &request.account, timeout)
+      }
+      "set" => laufey::secret_store(
+        &request.service,
+        &request.account,
+        request.label.as_deref().unwrap_or(""),
+        request.value.as_deref().unwrap_or(""),
+        timeout,
+      )
+      .map(|_| None),
+      "delete" => {
+        laufey::secret_delete(&request.service, &request.account, timeout)
+          .map(|_| None)
+      }
+      other => {
+        return SecretOutcome::Invalid(format!("unknown op {other}"));
+      }
+    };
+    match result {
+      Ok(v) => SecretOutcome::Ok(v),
+      Err(laufey::SecretError::NotSupported) => SecretOutcome::Unsupported,
+      Err(laufey::SecretError::Unavailable(r)) => SecretOutcome::Unavailable(r),
+      Err(laufey::SecretError::Failed(r)) => SecretOutcome::Invalid(r),
+    }
   }
 
   fn system_capabilities(
@@ -3427,6 +3472,17 @@ async fn run_desktop(
         laufey::on_platform_features_changed(move || {
           let _ = features_tx.try_send(
             deno_runtime::ops::desktop::DesktopEvent::PlatformFeaturesChanged,
+          );
+        });
+      }
+
+      // `Deno.desktop` "titlebarpreferenceschanged" (laufey API 47: the
+      // user's title bar settings changed).
+      {
+        let title_bar_tx = event_tx.0.clone();
+        laufey::on_title_bar_preferences_changed(move || {
+          let _ = title_bar_tx.try_send(
+            deno_runtime::ops::desktop::DesktopEvent::TitleBarPreferencesChanged,
           );
         });
       }

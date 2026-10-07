@@ -133,6 +133,16 @@ const cases = {
   op_desktop_file_dialog_cancel: () => ops.op_desktop_file_dialog_cancel(999),
   op_desktop_system_capabilities: () => ops.op_desktop_system_capabilities(),
   op_desktop_platform_features: () => ops.op_desktop_platform_features(),
+  op_desktop_title_bar_preferences: () =>
+    ops.op_desktop_title_bar_preferences(),
+  op_desktop_secret_supported: () => ops.op_desktop_secret_supported(),
+  op_desktop_secret_request: () =>
+    ops.op_desktop_secret_request({
+      op: "set",
+      service: "dev.deno.inert",
+      account: "a",
+      value: "v",
+    }),
   op_desktop_register_shortcut: () =>
     ops.op_desktop_register_shortcut("CmdOrCtrl+Shift+K"),
   op_desktop_unregister_shortcut: () =>

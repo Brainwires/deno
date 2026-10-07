@@ -37,6 +37,13 @@ export async function run(env: Env, rep: AreaReport) {
     // No KDE desktop here (none, or GNOME with kwalletd installed): not
     // Chromium's store, so no KWallet state.
     params.kwallet = null;
+    // The secure store (laufey API 47) refuses at once: the keyring is
+    // locked with no one to unlock it, or the masked service can't start.
+    params.secureStoreReason = params.secretService === "locked"
+      ? "no one here can answer its unlock prompt"
+      : "did not answer";
+    // A locked gnome-keyring still searches: a key never stored is null.
+    params.secureStoreGetMayBeNull = params.secretService === "locked";
     // A fresh profile holds no OS-key cookies: never waits for the key.
     if (env.backend === "cef") params.cookieEncryptionWait = null;
   }
