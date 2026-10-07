@@ -42,6 +42,8 @@ export async function run(env: Env, rep: AreaReport) {
     params.secureStoreReason = params.secretService === "locked"
       ? "no one here can answer its unlock prompt"
       : "did not answer";
+    // A locked gnome-keyring still searches: a key never stored is null.
+    params.secureStoreGetMayBeNull = params.secretService === "locked";
     // A fresh profile holds no OS-key cookies: never waits for the key.
     if (env.backend === "cef") params.cookieEncryptionWait = null;
   }

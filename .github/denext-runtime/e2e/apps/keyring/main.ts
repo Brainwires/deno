@@ -31,6 +31,7 @@ const want = r.params as {
   cookieEncryptionWait?: string | null;
   kwallet?: string | null;
   secureStoreReason?: string;
+  secureStoreGetMayBeNull?: boolean;
 };
 
 // Optional: a runtime older than laufey API 45 has none (the cookie checks
@@ -82,10 +83,9 @@ if (want.kwallet !== undefined) {
   );
 }
 
-// The secure store (laufey API 47): under this Secret Service no call can
-// succeed, and none may wait for an unlock no one can give: every one
-// rejects at once with a reason, never null (a locked item is not "not
-// found") and never a plaintext fallback. Off Linux (and on a runtime
+// The secure store (laufey API 47): under this Secret Service no write can
+// succeed, and no call may wait for an unlock no one can give: each answers
+// at once, a refusal with the reason (never a plaintext fallback). Off Linux (and on a runtime
 // without it) the store is the OS's own, which these checks don't touch.
 const store = (desktop as unknown as {
   secureStore?: {
@@ -118,15 +118,22 @@ if (want.secureStoreReason !== undefined) {
   );
   const ms = Math.round(performance.now() - t0);
   r.set("secureStore", { got, set, ms });
+  // A locked keyring still answers a search: a key that was never stored is
+  // simply not there (null). Anything else is refused with the reason.
   r.check(
-    `secureStore.get rejects SecureStoreUnavailable (${want.secureStoreReason})`,
-    got.name === "SecureStoreUnavailable" &&
-      String(got.message).includes(want.secureStoreReason),
+    `secureStore.get of a key never stored: ${
+      want.secureStoreGetMayBeNull ? "null or " : ""
+    }SecureStoreUnavailable`,
+    (want.secureStoreGetMayBeNull === true && "value" in got &&
+      got.value === null) ||
+      (got.name === "SecureStoreUnavailable" &&
+        String(got.message).includes(want.secureStoreReason)),
     got,
   );
   r.check(
-    "secureStore.set is refused too (never a plaintext fallback)",
-    set.name === "SecureStoreUnavailable",
+    `secureStore.set is refused (${want.secureStoreReason}; never a plaintext fallback)`,
+    set.name === "SecureStoreUnavailable" &&
+      String(set.message).includes(want.secureStoreReason),
     set,
   );
   r.check("both answer at once (no unlock to wait for)", ms < 10000, ms);
