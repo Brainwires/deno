@@ -47,6 +47,7 @@ import {
   packageApp,
   path,
   rm,
+  sh,
   sleep,
   tail,
   waitExit,
@@ -422,6 +423,28 @@ export async function run(env: Env, rep: AreaReport) {
     const listParent = async () =>
       (await Array.fromAsync(Deno.readDir(installParent))).map((e) => e.name)
         .sort();
+    // Whether a process still runs from the install (the app, its helper,
+    // its engine's children). The update helper relaunches the app itself,
+    // so `running` doesn't hold those instances.
+    const appRunning = async () => {
+      if (OS === "windows") {
+        const ps =
+          `@(Get-Process | Where-Object { $_.Path -and $_.Path.StartsWith('${
+            installParent.replace(/'/g, "''")
+          }', 'OrdinalIgnoreCase') }).Count`;
+        const r = await sh("powershell", ["-NoProfile", "-Command", ps]);
+        return r.out.trim() !== "0";
+      }
+      return (await sh("pgrep", ["-f", installParent])).code === 0;
+    };
+    // A launch made while the previous instance is still ending is forwarded
+    // to it by the single-instance lock, and lost when it ends. An app that
+    // ends through Deno.exit() shuts its web engine down first, which takes a
+    // moment, so each step's first launch waits for the last one to be gone.
+    const previousEnded = async (label: string) => {
+      const ended = await waitFor(async () => !(await appRunning()), 60);
+      rep.check(`${label}: the previous instance ended`, ended);
+    };
 
     // 3. Adversarial.
     await writeProbe({ mode: "adversarial", cases });
@@ -573,6 +596,7 @@ export async function run(env: Env, rep: AreaReport) {
       manifest: `${base}/v2/app-update.json`,
       crashTrialVersion: "3.0.0",
     });
+    await previousEnded("1.0.0 -> 2.0.0");
     l = await start("update-1");
     const confirmed2 = await waitFor(
       async () => !!(await resultFile("confirmed-2.0.0")),
@@ -648,6 +672,7 @@ export async function run(env: Env, rep: AreaReport) {
       manifest: `${base}/v3/app-update.json`,
       crashTrialVersion: "3.0.0",
     });
+    await previousEnded("2.0.0 -> 3.0.0");
     l = await start("update-2");
     const crashed = await waitFor(
       async () =>
@@ -664,6 +689,7 @@ export async function run(env: Env, rep: AreaReport) {
       state3,
     );
     await rm(path(RES, "check-2.0.0.json"));
+    await previousEnded("after the crashed trial");
     l = await start("after-crash");
     const rolled = await waitFor(async () => {
       for await (const e of Deno.readDir(RES)) {

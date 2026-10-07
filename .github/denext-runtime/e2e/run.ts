@@ -38,6 +38,7 @@ const AREAS: Record<
   update: () => import("./areas/update.ts"),
   keyring: () => import("./areas/keyring.ts"),
   keyringpersist: () => import("./areas/keyringpersist.ts"),
+  exit: () => import("./areas/exit.ts"),
 };
 const AREA_TIMEOUT_MS = 20 * 60_000;
 

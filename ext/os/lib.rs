@@ -9,6 +9,7 @@ use std::sync::Arc;
 use std::sync::LazyLock;
 use std::sync::Mutex;
 use std::sync::MutexGuard;
+use std::sync::OnceLock;
 use std::sync::atomic::AtomicI32;
 use std::sync::atomic::Ordering;
 
@@ -44,8 +45,23 @@ impl ExitCode {
   }
 }
 
+static EXIT_HOOK: OnceLock<fn(i32)> = OnceLock::new();
+
+/// Installs the function [`exit`] hands the process's end to, once the
+/// before-exit callbacks have run, for an embedder that has to end the
+/// process its own way: the desktop runtime asks its web engine to shut down
+/// first, so what the app's pages stored is on disk. The hook is meant not to
+/// return (the process ends in it); if it does, `exit` ends the process as
+/// usual. Only the first call installs one; returns whether this one did.
+pub fn set_exit_hook(hook: fn(i32)) -> bool {
+  EXIT_HOOK.set(hook).is_ok()
+}
+
 pub fn exit(code: i32) -> ! {
   deno_signals::run_exit();
+  if let Some(hook) = EXIT_HOOK.get() {
+    hook(code);
+  }
   #[allow(
     clippy::disallowed_methods,
     reason = "exit is the intended behavior"
