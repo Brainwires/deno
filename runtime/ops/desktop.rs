@@ -940,7 +940,11 @@ impl DesktopLaunchInbox {
   }
 
   /// A click on a notification no live `Notification` owns (laufey API
-  /// 41); see [`DesktopEvent::NotificationResponse`].
+  /// 41); see [`DesktopEvent::NotificationResponse`]. One with a field over
+  /// the limits a notification is posted with (tag 256 bytes, data 4 KiB;
+  /// action id 1 KiB, laufey's cap) is dropped: laufey already drops clicks
+  /// it never posted (its arguments carry a per-install MAC), so this is a
+  /// second line, and the data stays untrusted input either way.
   pub fn notification_response(
     &self,
     tag: String,
@@ -948,6 +952,19 @@ impl DesktopLaunchInbox {
     data: Option<String>,
     launch: bool,
   ) {
+    if tag.len() > MAX_NOTIFICATION_TAG_BYTES
+      || data
+        .as_ref()
+        .is_some_and(|d| d.len() > MAX_NOTIFICATION_DATA_BYTES)
+      || action
+        .as_ref()
+        .is_some_and(|a| a.len() > MAX_NOTIFICATION_ACTION_BYTES)
+    {
+      log::debug!(
+        "desktop: dropped a notification response over the size limits"
+      );
+      return;
+    }
     let event = DesktopEvent::NotificationResponse {
       tag,
       action,
@@ -1041,6 +1058,11 @@ impl DesktopLaunchInbox {
     }
   }
 }
+
+/// The longest action id a notification response may carry (laufey's cap on
+/// a click's action id); the tag and data limits are
+/// MAX_NOTIFICATION_TAG_BYTES / MAX_NOTIFICATION_DATA_BYTES.
+const MAX_NOTIFICATION_ACTION_BYTES: usize = 1024;
 
 fn push_bounded<T>(
   queue: &mut std::collections::VecDeque<T>,
@@ -7013,6 +7035,34 @@ mod tests {
     assert_eq!(inbox.take_launch_targets().notifications.len(), 1);
     assert!(inbox.subscribe("notificationresponse").is_empty());
     assert!(drain(&mut rx).is_empty());
+  }
+
+  #[test]
+  fn oversized_notification_responses_are_dropped() {
+    let (inbox, mut rx) = inbox_with_channel(vec![], vec![]);
+    let _ = inbox.subscribe("notificationresponse");
+    inbox.notification_response("t".repeat(257), None, None, false);
+    inbox.notification_response(
+      "t".into(),
+      None,
+      Some("d".repeat(4097)),
+      false,
+    );
+    inbox.notification_response(
+      "t".into(),
+      Some("a".repeat(1025)),
+      None,
+      false,
+    );
+    assert!(drain(&mut rx).is_empty());
+    // At the limits: delivered.
+    inbox.notification_response(
+      "t".repeat(256),
+      Some("a".repeat(1024)),
+      Some("d".repeat(4096)),
+      false,
+    );
+    assert_eq!(drain(&mut rx).len(), 1);
   }
 
   #[test]

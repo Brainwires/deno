@@ -2129,7 +2129,17 @@ declare namespace Deno {
      * {@linkcode Deno.desktop.notifications.schedule}d one, or the click that
      * launched the app. Delivered as `Deno.desktop`'s
      * `"notificationresponse"` event, or in
-     * {@linkcode Deno.desktop.launchNotificationResponses}. */
+     * {@linkcode Deno.desktop.launchNotificationResponses}.
+     *
+     * The runtime drops a click it didn't post: where the OS delivers clicks
+     * through a call any local process can make (Windows' toast activator,
+     * Linux's `ActivateAction` on the session bus), each notification's
+     * arguments carry a MAC under a key of this install's own, and a click
+     * whose MAC doesn't verify, or that is over the size limits, never
+     * arrives. That proves only that the notification came from this install
+     * of the app: treat `tag`, `action` and especially `data` as untrusted
+     * input (the data is whatever the app stored, often from a page or a
+     * server), validate it before acting on it. */
     export interface NotificationResponseDetail {
       /** The notification's tag. */
       tag: string;
