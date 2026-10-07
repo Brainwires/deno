@@ -2026,13 +2026,13 @@ declare namespace Deno {
     };
 
     /**
-     * The OS's secret store, for a small secret per (service, account): on
-     * Linux the Secret Service (gnome-keyring, KWallet's Secret Service,
-     * KeePassXC) through libsecret, with the CEF and WebView backends.
-     * `supported` is false elsewhere (macOS, Windows, Winit), where every
-     * call rejects with `Deno.errors.NotSupported`.
+     * The OS's secret store, for a small secret per (service, account), with
+     * the CEF and WebView backends: on Linux the Secret Service
+     * (gnome-keyring, KWallet's Secret Service, KeePassXC) through libsecret;
+     * on macOS the Keychain. `supported` is false elsewhere (Windows, Winit),
+     * where every call rejects with `Deno.errors.NotSupported`.
      *
-     * Items carry the attributes `service` and `account` (as
+     * Linux: items carry the attributes `service` and `account` (as
      * `secret-tool store … service S account A` writes them); `set` replaces
      * what is there. A store that can't answer rejects with an `Error` named
      * `"SecureStoreUnavailable"` whose message says why and what to do: no
@@ -2041,6 +2041,17 @@ declare namespace Deno {
      * can answer (refused at once) or no one answered within `timeout` (20 s
      * by default). There is never a plaintext fallback, and a locked item is
      * never `null`.
+     *
+     * macOS: a generic password (`service` / `account`) that only this app
+     * may read: in the data-protection keychain when the app is signed with
+     * a keychain access group (a provisioning profile), else in the login
+     * keychain with an access list naming only this app, so another program
+     * gets macOS's prompt, never the secret. An item another program wrote
+     * for the same service and account (`security add-generic-password`) is
+     * never read (`null`) and makes `set` reject `"SecureStoreUnavailable"`
+     * until it is deleted with the tool that wrote it. `set` and `delete`
+     * never prompt (a locked keychain rejects); `get` may (a locked
+     * keychain, a rebuilt unsigned app) and rejects after `timeout`.
      *
      * Needs `--allow-sys` (unscoped): the store is shared by every app of the
      * user. Each call runs off the JavaScript thread.

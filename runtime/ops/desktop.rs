@@ -2398,7 +2398,7 @@ pub trait DesktopApi: Send + Sync + 'static {
   }
 
   /// Whether the backend has a secure store (laufey API 47: the Secret
-  /// Service on Linux, CEF and WebView).
+  /// Service on Linux, the Keychain on macOS; CEF and WebView).
   fn secret_store_supported(&self) -> bool {
     false
   }
@@ -4966,7 +4966,8 @@ pub enum SecretOutcome {
   /// get: the value, or `None` (not found); set / delete: `None`.
   Ok(Option<String>),
   /// The store can't answer (no provider, a locked keyring no one unlocked,
-  /// no session bus): why, and what to do.
+  /// no session bus; on macOS a locked keychain, access refused, another
+  /// program's item in the way): why, and what to do.
   Unavailable(String),
   /// Bad arguments.
   Invalid(String),

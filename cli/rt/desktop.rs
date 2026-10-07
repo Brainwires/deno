@@ -1828,7 +1828,8 @@ pub const DESKTOP_JS: &str = r#"
       return devtoolsTarget(win).isDevtoolsOpen();
     },
   });
-  // The OS's secret store (laufey API 47: the Secret Service on Linux). A
+  // The OS's secret store (laufey API 47: the Secret Service on Linux, the
+  // Keychain on macOS). A
   // store that can't answer (no provider, a locked keyring no one unlocked)
   // rejects with a "SecureStoreUnavailable" error carrying the reason;
   // never a plaintext fallback, and a locked item is never `null`.
