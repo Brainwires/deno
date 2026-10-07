@@ -2375,6 +2375,19 @@ pub trait DesktopApi: Send + Sync + 'static {
     None
   }
 
+  /// Whether the backend has a secure store (laufey API 47: the Secret
+  /// Service on Linux, CEF and WebView).
+  fn secret_store_supported(&self) -> bool {
+    false
+  }
+
+  /// A secure-store call (laufey API 47). Blocking (for at most about
+  /// `timeout_ms`, which the backend bounds an unlock prompt with): ops call
+  /// it on the blocking pool.
+  fn secret_request(&self, _request: &SecretRequest) -> SecretOutcome {
+    SecretOutcome::Unsupported
+  }
+
   /// How the user set up title bars (the backend's `title_bar_preferences`
   /// JSON object, laufey API 47): the buttons on each side, the double-click
   /// action, the colour scheme, the accent colour, the title bar font.
@@ -4905,6 +4918,108 @@ async fn op_desktop_platform_features(
   Some(features)
 }
 
+/// A `Deno.desktop.secureStore` call (laufey API 47).
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SecretRequest {
+  /// "get", "set" or "delete".
+  pub op: String,
+  pub service: String,
+  pub account: String,
+  /// "set": the secret (text).
+  #[serde(default)]
+  pub value: Option<String>,
+  /// "set": what a keyring manager shows (the service when absent).
+  #[serde(default)]
+  pub label: Option<String>,
+  /// The bound on an unlock prompt nobody answers (the backend's default,
+  /// 20 s, when absent).
+  #[serde(default)]
+  pub timeout_ms: Option<u32>,
+}
+
+/// What a secure-store call came to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SecretOutcome {
+  /// get: the value, or `None` (not found); set / delete: `None`.
+  Ok(Option<String>),
+  /// The store can't answer (no provider, a locked keyring no one unlocked,
+  /// no session bus): why, and what to do.
+  Unavailable(String),
+  /// Bad arguments.
+  Invalid(String),
+  /// No secure store in this backend.
+  Unsupported,
+}
+
+/// The wire shape of a [`SecretOutcome`].
+#[derive(Debug, serde::Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SecretResultInfo {
+  /// "ok", "unavailable", "invalid" or "unsupported".
+  pub status: &'static str,
+  pub value: Option<String>,
+  pub reason: Option<String>,
+}
+
+impl From<SecretOutcome> for SecretResultInfo {
+  fn from(o: SecretOutcome) -> Self {
+    let (status, value, reason) = match o {
+      SecretOutcome::Ok(v) => ("ok", v, None),
+      SecretOutcome::Unavailable(r) => ("unavailable", None, Some(r)),
+      SecretOutcome::Invalid(r) => ("invalid", None, Some(r)),
+      SecretOutcome::Unsupported => ("unsupported", None, None),
+    };
+    SecretResultInfo {
+      status,
+      value,
+      reason,
+    }
+  }
+}
+
+/// `Deno.desktop.secureStore.supported` (laufey API 47).
+#[op2(fast)]
+fn op_desktop_secret_supported(state: &OpState) -> bool {
+  state
+    .try_borrow::<Arc<dyn DesktopApi>>()
+    .is_some_and(|api| api.secret_store_supported())
+}
+
+/// `Deno.desktop.secureStore.get / set / delete` (laufey API 47): the OS's
+/// secret store, which every app of the user shares, so it needs unscoped
+/// `--allow-sys` like the other integrations that reach past the app's own
+/// windows ([`check_desktop_integration`]). The call blocks for as long as
+/// an unlock prompt may stay up (bounded by `timeoutMs`), so it runs on the
+/// blocking pool.
+#[op2]
+#[serde]
+async fn op_desktop_secret_request(
+  state: std::rc::Rc<std::cell::RefCell<OpState>>,
+  #[serde] request: SecretRequest,
+) -> Result<SecretResultInfo, deno_error::JsErrorBox> {
+  let api = {
+    let s = state.borrow();
+    check_desktop_integration(&s)?;
+    s.try_borrow::<Arc<dyn DesktopApi>>().cloned()
+  };
+  if !matches!(request.op.as_str(), "get" | "set" | "delete") {
+    return Ok(
+      SecretOutcome::Invalid(format!("unknown op {}", request.op)).into(),
+    );
+  }
+  let Some(api) = api else {
+    return Ok(SecretOutcome::Unsupported.into());
+  };
+  let outcome =
+    deno_core::unsync::spawn_blocking(move || api.secret_request(&request))
+      .await
+      .unwrap_or_else(|_| {
+        SecretOutcome::Unavailable("the secure store failed".to_string())
+      });
+  Ok(outcome.into())
+}
+
 /// `Deno.desktop.titleBarPreferences()` (laufey API 47): how the user set
 /// up title bars, for an app that draws its own; `null` outside a desktop app
 /// (or from a backend that can't say). Async: on Linux the first call may
@@ -5762,6 +5877,8 @@ deno_core::extension!(
     op_desktop_system_capabilities,
     op_desktop_platform_features,
     op_desktop_title_bar_preferences,
+    op_desktop_secret_supported,
+    op_desktop_secret_request,
     op_desktop_register_shortcut,
     op_desktop_unregister_shortcut,
     op_desktop_unregister_all_shortcuts,
@@ -6177,6 +6294,25 @@ mod tests {
     assert_eq!(
       serde_json::to_value(DesktopEvent::TitleBarPreferencesChanged).unwrap(),
       json!({ "kind": "titleBarPreferencesChanged" })
+    );
+    // laufey API 47: the secure store's answers.
+    let wire =
+      |o| serde_json::to_value(super::SecretResultInfo::from(o)).unwrap();
+    assert_eq!(
+      wire(super::SecretOutcome::Ok(Some("s".into()))),
+      json!({ "status": "ok", "value": "s", "reason": null })
+    );
+    assert_eq!(
+      wire(super::SecretOutcome::Ok(None)),
+      json!({ "status": "ok", "value": null, "reason": null })
+    );
+    assert_eq!(
+      wire(super::SecretOutcome::Unavailable("locked".into())),
+      json!({ "status": "unavailable", "value": null, "reason": "locked" })
+    );
+    assert_eq!(
+      wire(super::SecretOutcome::Unsupported),
+      json!({ "status": "unsupported", "value": null, "reason": null })
     );
   }
 

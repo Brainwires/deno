@@ -30,6 +30,7 @@ const want = r.params as {
   cookieEncryption?: string | null;
   cookieEncryptionWait?: string | null;
   kwallet?: string | null;
+  secureStoreReason?: string;
 };
 
 // Optional: a runtime older than laufey API 45 has none (the cookie checks
@@ -79,6 +80,56 @@ if (want.kwallet !== undefined) {
     features?.kwallet === want.kwallet,
     features?.kwallet,
   );
+}
+
+// The secure store (laufey API 47): under this Secret Service no call can
+// succeed, and none may wait for an unlock no one can give: every one
+// rejects at once with a reason, never null (a locked item is not "not
+// found") and never a plaintext fallback. Off Linux (and on a runtime
+// without it) the store is the OS's own, which these checks don't touch.
+const store = (desktop as unknown as {
+  secureStore?: {
+    supported: boolean;
+    get(s: string, a: string, o?: { timeout?: number }): Promise<unknown>;
+    set(
+      s: string,
+      a: string,
+      v: string,
+      o?: { timeout?: number },
+    ): Promise<unknown>;
+  };
+}).secureStore;
+if (want.secureStoreReason !== undefined) {
+  r.check("secureStore is supported (Linux)", store?.supported === true);
+  if (!store) throw new Error("no Deno.desktop.secureStore");
+  const t0 = performance.now();
+  const outcome = async (p: Promise<unknown>) => {
+    try {
+      return { value: await p };
+    } catch (e) {
+      return { name: (e as Error).name, message: (e as Error).message };
+    }
+  };
+  const got = await outcome(
+    store.get("dev.denext.e2e", "keyring", { timeout: 20000 }),
+  );
+  const set = await outcome(
+    store.set("dev.denext.e2e", "keyring", "v", { timeout: 20000 }),
+  );
+  const ms = Math.round(performance.now() - t0);
+  r.set("secureStore", { got, set, ms });
+  r.check(
+    `secureStore.get rejects SecureStoreUnavailable (${want.secureStoreReason})`,
+    got.name === "SecureStoreUnavailable" &&
+      String(got.message).includes(want.secureStoreReason),
+    got,
+  );
+  r.check(
+    "secureStore.set is refused too (never a plaintext fallback)",
+    set.name === "SecureStoreUnavailable",
+    set,
+  );
+  r.check("both answer at once (no unlock to wait for)", ms < 10000, ms);
 }
 
 const SECOND = `

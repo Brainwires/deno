@@ -35,6 +35,8 @@ op_desktop_file_dialog_cancel -> false
 op_desktop_system_capabilities -> {"globalShortcuts":false,"shortcutsUserBinds":false,"launchAtLogin":false,"devtools":false}
 op_desktop_platform_features -> null
 op_desktop_title_bar_preferences -> null
+op_desktop_secret_supported -> false
+op_desktop_secret_request throws NotCapable: Requires sys access, run again with the --allow-sys flag
 op_desktop_register_shortcut throws NotCapable: Requires sys access, run again with the --allow-sys flag
 op_desktop_unregister_shortcut -> false
 op_desktop_unregister_all_shortcuts -> null
@@ -69,4 +71,4 @@ BrowserWindow throws NotSupported: BrowserWindow is only available in the main s
 Dock throws NotSupported: Dock is only available in the main scope of a desktop app
 Tray throws NotSupported: Tray is only available in the main scope of a desktop app
 Notification throws NotSupported: Notification is only available in the main scope of a desktop app
-71 exposed, 0 uncovered
+73 exposed, 0 uncovered

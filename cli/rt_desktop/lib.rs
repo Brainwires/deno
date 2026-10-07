@@ -1154,6 +1154,47 @@ impl denort::desktop::DesktopApi for WefDesktopApi {
     laufey::title_bar_preferences()
   }
 
+  fn secret_store_supported(&self) -> bool {
+    laufey::secret_store_supported()
+  }
+
+  fn secret_request(
+    &self,
+    request: &deno_runtime::ops::desktop::SecretRequest,
+  ) -> deno_runtime::ops::desktop::SecretOutcome {
+    use deno_runtime::ops::desktop::SecretOutcome;
+    // 0 asks the backend for its default (20 s).
+    let timeout = std::time::Duration::from_millis(u64::from(
+      request.timeout_ms.unwrap_or(0),
+    ));
+    let result = match request.op.as_str() {
+      "get" => {
+        laufey::secret_lookup(&request.service, &request.account, timeout)
+      }
+      "set" => laufey::secret_store(
+        &request.service,
+        &request.account,
+        request.label.as_deref().unwrap_or(""),
+        request.value.as_deref().unwrap_or(""),
+        timeout,
+      )
+      .map(|_| None),
+      "delete" => {
+        laufey::secret_delete(&request.service, &request.account, timeout)
+          .map(|_| None)
+      }
+      other => {
+        return SecretOutcome::Invalid(format!("unknown op {other}"));
+      }
+    };
+    match result {
+      Ok(v) => SecretOutcome::Ok(v),
+      Err(laufey::SecretError::NotSupported) => SecretOutcome::Unsupported,
+      Err(laufey::SecretError::Unavailable(r)) => SecretOutcome::Unavailable(r),
+      Err(laufey::SecretError::Failed(r)) => SecretOutcome::Invalid(r),
+    }
+  }
+
   fn system_capabilities(
     &self,
   ) -> deno_runtime::ops::desktop::SystemCapabilitiesInfo {

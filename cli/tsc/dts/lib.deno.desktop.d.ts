@@ -2002,6 +2002,55 @@ declare namespace Deno {
     };
 
     /**
+     * The OS's secret store, for a small secret per (service, account): on
+     * Linux the Secret Service (gnome-keyring, KWallet's Secret Service,
+     * KeePassXC) through libsecret, with the CEF and WebView backends.
+     * `supported` is false elsewhere (macOS, Windows, Winit), where every
+     * call rejects with `Deno.errors.NotSupported`.
+     *
+     * Items carry the attributes `service` and `account` (as
+     * `secret-tool store … service S account A` writes them); `set` replaces
+     * what is there. A store that can't answer rejects with an `Error` named
+     * `"SecureStoreUnavailable"` whose message says why and what to do: no
+     * session bus, no provider ("install gnome-keyring", "enable KWallet's
+     * Secret Service"), or a locked keyring whose unlock prompt no one here
+     * can answer (refused at once) or no one answered within `timeout` (20 s
+     * by default). There is never a plaintext fallback, and a locked item is
+     * never `null`.
+     *
+     * Needs `--allow-sys` (unscoped): the store is shared by every app of the
+     * user. Each call runs off the JavaScript thread.
+     *
+     * Not available in workers.
+     *
+     * @category Desktop
+     * @experimental
+     */
+    export const secureStore: {
+      readonly supported: boolean;
+      /** The secret, or `null` when there is none. */
+      get(
+        service: string,
+        account: string,
+        options?: { timeout?: number },
+      ): Promise<string | null>;
+      /** Store `value` (text), replacing what is there. `label` is what a
+       * keyring manager shows (the service by default). */
+      set(
+        service: string,
+        account: string,
+        value: string,
+        options?: { label?: string; timeout?: number },
+      ): Promise<void>;
+      /** Delete it; deleting nothing resolves too. */
+      delete(
+        service: string,
+        account: string,
+        options?: { timeout?: number },
+      ): Promise<void>;
+    };
+
+    /**
      * DevTools control. `enabled` is false when the app was launched with
      * DevTools turned off (`LAUFEY_INSPECTABLE=0`, or `"inspectable": false`
      * in the packaged app's `laufey-launch.json`): then neither these calls
