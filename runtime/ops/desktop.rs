@@ -439,6 +439,11 @@ pub enum DesktopEvent {
   /// (laufey API 45: on Linux a tray host appeared or went away):
   /// `Deno.desktop` "platformfeatureschanged".
   PlatformFeaturesChanged,
+  /// What `Deno.desktop.titleBarPreferences()` reports changed (laufey API
+  /// 47: the user moved the window buttons, or changed the double-click
+  /// action, colour scheme or accent colour): `Deno.desktop`
+  /// "titlebarpreferenceschanged".
+  TitleBarPreferencesChanged,
   /// Files dragged over / dropped on a window (laufey API 39). `phase` is
   /// `"enter"`, `"over"`, `"leave"` or `"drop"`; `paths` is `None` for
   /// `"leave"` and, on backends that reveal the paths only on the drop, for
@@ -2367,6 +2372,16 @@ pub trait DesktopApi: Send + Sync + 'static {
   /// few seconds for xdg-desktop-portal to start, so ops call it off the
   /// JavaScript thread.
   fn platform_features(&self) -> Option<String> {
+    None
+  }
+
+  /// How the user set up title bars (the backend's `title_bar_preferences`
+  /// JSON object, laufey API 47): the buttons on each side, the double-click
+  /// action, the colour scheme, the accent colour, the title bar font.
+  /// `None` when the backend can't say. Blocking: on Linux the first call
+  /// may wait for xdg-desktop-portal to start, so ops call it off the
+  /// JavaScript thread.
+  fn title_bar_preferences(&self) -> Option<String> {
     None
   }
 
@@ -4890,6 +4905,27 @@ async fn op_desktop_platform_features(
   Some(features)
 }
 
+/// `Deno.desktop.titleBarPreferences()` (laufey API 47): how the user set
+/// up title bars, for an app that draws its own; `null` outside a desktop app
+/// (or from a backend that can't say). Async: on Linux the first call may
+/// wait for xdg-desktop-portal to start, so it runs on a blocking-pool
+/// thread.
+#[op2]
+#[serde]
+async fn op_desktop_title_bar_preferences(
+  state: std::rc::Rc<std::cell::RefCell<OpState>>,
+) -> Option<serde_json::Value> {
+  let api = state
+    .borrow()
+    .try_borrow::<Arc<dyn DesktopApi>>()
+    .cloned()?;
+  let json =
+    deno_core::unsync::spawn_blocking(move || api.title_bar_preferences())
+      .await
+      .ok()??;
+  serde_json::from_str(&json).ok()
+}
+
 /// Whether the page may see XDG_CURRENT_DESKTOP (env access to it).
 fn desktop_hint_allowed(state: &OpState) -> bool {
   state
@@ -5725,6 +5761,7 @@ deno_core::extension!(
     op_desktop_file_dialog_cancel,
     op_desktop_system_capabilities,
     op_desktop_platform_features,
+    op_desktop_title_bar_preferences,
     op_desktop_register_shortcut,
     op_desktop_unregister_shortcut,
     op_desktop_unregister_all_shortcuts,
@@ -6136,6 +6173,10 @@ mod tests {
     assert_eq!(
       serde_json::to_value(DesktopEvent::PlatformFeaturesChanged).unwrap(),
       json!({ "kind": "platformFeaturesChanged" })
+    );
+    assert_eq!(
+      serde_json::to_value(DesktopEvent::TitleBarPreferencesChanged).unwrap(),
+      json!({ "kind": "titleBarPreferencesChanged" })
     );
   }
 

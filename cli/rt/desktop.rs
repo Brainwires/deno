@@ -55,6 +55,7 @@ pub const DESKTOP_JS: &str = r#"
     op_desktop_file_dialog_cancel,
     op_desktop_system_capabilities,
     op_desktop_platform_features,
+    op_desktop_title_bar_preferences,
     op_desktop_register_shortcut,
     op_desktop_unregister_shortcut,
     op_desktop_unregister_all_shortcuts,
@@ -1849,6 +1850,7 @@ pub const DESKTOP_JS: &str = r#"
   // Screens, capabilities and the app's lifetime (laufey API 38).
   internals.defineEventHandler(desktop, "displaychanged");
   internals.defineEventHandler(desktop, "platformfeatureschanged");
+  internals.defineEventHandler(desktop, "titlebarpreferenceschanged");
   internals.defineEventHandler(desktop, "beforequit");
   let quitOnLastWindowClosed = true;
   let quitOnLastWindowClosedSet = false;
@@ -1880,6 +1882,18 @@ pub const DESKTOP_JS: &str = r#"
     platformFeatures: {
       value: function platformFeatures() {
         return op_desktop_platform_features();
+      },
+      writable: true,
+      configurable: true,
+      enumerable: true,
+    },
+    // How the user set up title bars (laufey API 47), for an app that draws
+    // its own: the buttons on each side, the double-click action, the
+    // colour scheme. A promise of a fresh object per call; null outside a
+    // desktop app.
+    titleBarPreferences: {
+      value: function titleBarPreferences() {
+        return op_desktop_title_bar_preferences();
       },
       writable: true,
       configurable: true,
@@ -2729,6 +2743,11 @@ pub const DESKTOP_JS: &str = r#"
             desktop.dispatchEvent(new Event("displaychanged"));
             break;
           }
+          case "titleBarPreferencesChanged": {
+            // laufey API 47: read titleBarPreferences() again.
+            desktop.dispatchEvent(new Event("titlebarpreferenceschanged"));
+            break;
+          }
           case "platformFeaturesChanged": {
             // laufey API 45: a tray host appeared or went away; read
             // platformFeatures() again (and create the tray once trayHost
@@ -3228,6 +3247,8 @@ mod tests {
     assert!(DESKTOP_JS.contains("new Event(\"displaychanged\")"));
     assert!(DESKTOP_JS.contains("case \"platformFeaturesChanged\":"));
     assert!(DESKTOP_JS.contains("new Event(\"platformfeatureschanged\")"));
+    assert!(DESKTOP_JS.contains("case \"titleBarPreferencesChanged\":"));
+    assert!(DESKTOP_JS.contains("new Event(\"titlebarpreferenceschanged\")"));
     assert!(DESKTOP_JS.contains(
       "internals.defineEventHandler(desktop, \"platformfeatureschanged\")"
     ));
@@ -3452,6 +3473,19 @@ mod tests {
       "platformFeatures: {",
       "value: function platformFeatures() {",
       "return op_desktop_platform_features();",
+    ] {
+      assert!(DESKTOP_JS.contains(needle), "missing: {needle}");
+    }
+  }
+
+  #[test]
+  fn desktop_js_installs_title_bar_preferences() {
+    // laufey API 47: Deno.desktop.titleBarPreferences() and its event.
+    for needle in [
+      "titleBarPreferences: {",
+      "value: function titleBarPreferences() {",
+      "return op_desktop_title_bar_preferences();",
+      "internals.defineEventHandler(desktop, \"titlebarpreferenceschanged\");",
     ] {
       assert!(DESKTOP_JS.contains(needle), "missing: {needle}");
     }

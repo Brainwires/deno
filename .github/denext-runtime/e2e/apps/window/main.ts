@@ -531,6 +531,32 @@ await r.step("window API", async () => {
     "Deno.desktop has the platformfeatureschanged event handler",
     "onplatformfeatureschanged" in desktop,
   );
+  // laufey API 47: how the user set up title bars, for app-drawn ones.
+  const titleBar = await desktop.titleBarPreferences();
+  r.check(
+    "titleBarPreferences() answers the buttons on each side, the side, the " +
+      "double-click action and the colour scheme",
+    titleBar != null && Array.isArray(titleBar.buttons?.left) &&
+      Array.isArray(titleBar.buttons?.right) &&
+      ["left", "right"].includes(titleBar.side) &&
+      typeof titleBar.doubleClick === "string" &&
+      ["light", "dark", "no-preference"].includes(titleBar.colorScheme),
+    titleBar,
+  );
+  r.check(
+    "titleBarPreferences(): the OS's button side (macOS left, Windows " +
+      "right; Linux from the portal, GSettings or GTK's defaults)",
+    OS === "darwin"
+      ? titleBar?.side === "left" && titleBar?.source === "os"
+      : OS === "windows"
+      ? titleBar?.side === "right" && titleBar?.source === "os"
+      : ["portal", "gsettings", "default"].includes(titleBar?.source),
+    titleBar,
+  );
+  r.check(
+    "Deno.desktop has the titlebarpreferenceschanged event handler",
+    "ontitlebarpreferenceschanged" in desktop,
+  );
   let tray: any = null;
   try {
     tray = new (Deno as any).Tray();

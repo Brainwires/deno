@@ -1150,6 +1150,10 @@ impl denort::desktop::DesktopApi for WefDesktopApi {
     laufey::tray_unavailable_reason()
   }
 
+  fn title_bar_preferences(&self) -> Option<String> {
+    laufey::title_bar_preferences()
+  }
+
   fn system_capabilities(
     &self,
   ) -> deno_runtime::ops::desktop::SystemCapabilitiesInfo {
@@ -3357,6 +3361,17 @@ async fn run_desktop(
         laufey::on_platform_features_changed(move || {
           let _ = features_tx.try_send(
             deno_runtime::ops::desktop::DesktopEvent::PlatformFeaturesChanged,
+          );
+        });
+      }
+
+      // `Deno.desktop` "titlebarpreferenceschanged" (laufey API 47: the
+      // user's title bar settings changed).
+      {
+        let title_bar_tx = event_tx.0.clone();
+        laufey::on_title_bar_preferences_changed(move || {
+          let _ = title_bar_tx.try_send(
+            deno_runtime::ops::desktop::DesktopEvent::TitleBarPreferencesChanged,
           );
         });
       }
