@@ -70,4 +70,15 @@ async function system() {
   console.log(owner);
 }
 
-export { authSession, runOnMainThread, system, updater };
+async function platformFeatures() {
+  const f = await d.platformFeatures();
+  if (!f) return;
+  const mode: "namespace" | "setuid" | "chromium" | "off" | null = f.sandbox;
+  const sandboxReason: string | null = f.sandboxReason;
+  const fileChooser: "portal" | "gtk" | null = f.fileChooser;
+  const fileChooserReason: string | null = f.fileChooserReason;
+  const cookies: "os" | "basic" | null = f.cookieEncryption;
+  console.log(mode, sandboxReason, fileChooser, fileChooserReason, cookies);
+}
+
+export { authSession, platformFeatures, runOnMainThread, system, updater };
