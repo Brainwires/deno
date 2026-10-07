@@ -87,10 +87,10 @@ pub const ROLLED_BACK_ARG: &str = "--denext-update-rolled-back=";
 pub const HELPER_WAIT: Duration = Duration::from_secs(300);
 /// The watchdog stops spawning recovery helpers after this many attempts.
 pub const MAX_HELPER_ATTEMPTS: u32 = 3;
-/// Windows: how long the helper then waits for the app's other processes
-/// (a CEF subprocess outliving its browser process, an earlier launch) to
-/// leave the install.
-#[cfg(windows)]
+/// Windows and Linux: how long the helper then waits for the app's other
+/// processes (a CEF subprocess outliving its browser process, an earlier
+/// launch) to leave the install.
+#[cfg(any(windows, target_os = "linux"))]
 pub const HELPER_WAIT_INSTALL_PROCESSES: Duration = Duration::from_secs(60);
 
 /// How long a startup cleanup waits for processes still running from the
@@ -1446,14 +1446,17 @@ pub fn run_helper(
     log_line(layout, "the update was withdrawn before the app exited");
     return 0;
   }
-  // Windows refuses to rename a directory while a process holds one of its
-  // files open without delete sharing: the app's CEF subprocesses (which
-  // open the .pak / ICU data that way) can outlive the process that was
-  // waited for by seconds, and a crashed trial's by longer. Wait for every
-  // process running from the install to leave, so the renames below don't
-  // run out of retries. (This helper runs from the install too; it is not
-  // waited for.)
-  #[cfg(windows)]
+  // The app's CEF subprocesses (the zygotes, the GPU process) can outlive
+  // the process that was waited for by seconds, and a crashed trial's by
+  // longer. Wait for every process running from the install to leave before
+  // swapping. Windows refuses to rename a directory while a process holds
+  // one of its files open without delete sharing (CEF opens the .pak / ICU
+  // data that way), so the renames below would run out of retries. Linux
+  // renames it anyway, and a process still running from the old app then
+  // opens the new one's files by path (a zygote forking a GPU process that
+  // loads its libraries and data). (This helper runs from the install too;
+  // it is not waited for.)
+  #[cfg(any(windows, target_os = "linux"))]
   if !wait_for_processes_in(&layout.install, HELPER_WAIT_INSTALL_PROCESSES) {
     log_line(
       layout,
@@ -1697,6 +1700,85 @@ pub fn wait_for_processes_in(dir: &Path, timeout: Duration) -> bool {
       return false;
     }
   }
+}
+
+/// Linux: wait up to `timeout` until no process other than this one runs an
+/// executable from inside `dir` (an install directory, or an AppImage file:
+/// its own runtime process). `true` when none is left.
+#[cfg(target_os = "linux")]
+pub fn wait_for_processes_in(dir: &Path, timeout: Duration) -> bool {
+  let deadline = Instant::now() + timeout;
+  // /proc/<pid>/exe names the executable with every symlink resolved.
+  let dir = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+  loop {
+    if linux_processes_in(&dir).is_empty() {
+      return true;
+    }
+    if Instant::now() >= deadline {
+      return false;
+    }
+    std::thread::sleep(Duration::from_millis(100));
+  }
+}
+
+/// Linux: the PIDs of the processes other than this one whose executable is
+/// `dir` or inside it. The executable is `/proc/<pid>/exe`; where that can't
+/// be read (a process that is not dumpable, as Chromium's sandboxed ones
+/// are) and the process is this user's, the first argument of its command
+/// line when that is an absolute path. Kernel threads and zombies have
+/// neither.
+#[cfg(target_os = "linux")]
+fn linux_processes_in(dir: &Path) -> Vec<u32> {
+  use std::os::unix::ffi::OsStrExt;
+  use std::os::unix::fs::MetadataExt;
+  let me = std::process::id();
+  // SAFETY: geteuid has no preconditions.
+  let uid = unsafe { libc::geteuid() };
+  let Ok(entries) = std::fs::read_dir("/proc") else {
+    return Vec::new();
+  };
+  let mut out = Vec::new();
+  for entry in entries.flatten() {
+    let Some(pid) = entry
+      .file_name()
+      .to_str()
+      .and_then(|name| name.parse::<u32>().ok())
+    else {
+      continue;
+    };
+    if pid == me {
+      continue;
+    }
+    let proc_dir = entry.path();
+    let exe = match std::fs::read_link(proc_dir.join("exe")) {
+      // A replaced or deleted executable reads "<path> (deleted)".
+      Ok(exe) => {
+        let bytes = exe.as_os_str().as_bytes();
+        PathBuf::from(std::ffi::OsStr::from_bytes(
+          bytes.strip_suffix(b" (deleted)").unwrap_or(bytes),
+        ))
+      }
+      Err(_) => {
+        let ours = std::fs::metadata(&proc_dir).is_ok_and(|m| m.uid() == uid);
+        let argv0 = ours
+          .then(|| std::fs::read(proc_dir.join("cmdline")).ok())
+          .flatten()
+          .and_then(|cmdline| {
+            let first = cmdline.split(|b| *b == 0).next()?.to_vec();
+            (first.first() == Some(&b'/'))
+              .then(|| PathBuf::from(std::ffi::OsStr::from_bytes(&first)))
+          });
+        match argv0 {
+          Some(argv0) => argv0,
+          None => continue,
+        }
+      }
+    };
+    if exe.starts_with(dir) {
+      out.push(pid);
+    }
+  }
+  out
 }
 
 /// A path as a case-insensitive comparison key: `\\?\` stripped, `/` as
@@ -2014,6 +2096,59 @@ mod tests {
       windows_path_key(Path::new("\\\\?\\C:\\A/b"), true),
       "c:\\a\\b\\"
     );
+  }
+
+  /// The Linux helper's wait for processes running from the install: a
+  /// process started from a copy of a system executable in a scratch
+  /// directory keeps the wait from finishing until it exits (also when the
+  /// directory is named through a symlink); one elsewhere does not count,
+  /// and neither does this process.
+  #[cfg(target_os = "linux")]
+  #[test]
+  fn waits_for_processes_running_from_the_install_linux() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("App");
+    std::fs::create_dir(&dir).unwrap();
+    let link = tmp.path().join("AppLink");
+    std::os::unix::fs::symlink(&dir, &link).unwrap();
+    let sleep = dir.join("sleep");
+    std::fs::copy(which_sleep(), &sleep).unwrap();
+    assert!(wait_for_processes_in(&dir, Duration::ZERO));
+    // A process elsewhere (the system's own sleep) does not count.
+    let mut elsewhere = std::process::Command::new(which_sleep())
+      .arg("30")
+      .spawn()
+      .unwrap();
+    assert!(wait_for_processes_in(&dir, Duration::from_millis(300)));
+    elsewhere.kill().unwrap();
+    elsewhere.wait().unwrap();
+    let mut child =
+      std::process::Command::new(&sleep).arg("2").spawn().unwrap();
+    assert!(!wait_for_processes_in(&dir, Duration::from_millis(300)));
+    assert!(!wait_for_processes_in(&link, Duration::from_millis(300)));
+    let started = Instant::now();
+    assert!(wait_for_processes_in(&dir, Duration::from_secs(30)));
+    // It waited for the process to end, not for the timeout.
+    assert!(started.elapsed() < Duration::from_secs(20));
+    child.wait().unwrap();
+    // A process whose executable was deleted ("<path> (deleted)") still
+    // counts.
+    let mut child =
+      std::process::Command::new(&sleep).arg("2").spawn().unwrap();
+    std::thread::sleep(Duration::from_millis(100));
+    std::fs::remove_file(&sleep).unwrap();
+    assert!(!wait_for_processes_in(&dir, Duration::from_millis(300)));
+    assert!(wait_for_processes_in(&dir, Duration::from_secs(30)));
+    child.wait().unwrap();
+  }
+
+  #[cfg(target_os = "linux")]
+  fn which_sleep() -> PathBuf {
+    ["/usr/bin/sleep", "/bin/sleep"]
+      .iter()
+      .map(PathBuf::from)
+      .find(|p| p.is_file())
+      .expect("sleep(1)")
   }
 
   fn exchange_supported(dir: &Path) -> bool {
