@@ -1704,14 +1704,27 @@ pub fn wait_for_processes_in(dir: &Path, timeout: Duration) -> bool {
 
 /// Linux: wait up to `timeout` until no process other than this one runs an
 /// executable from inside `dir` (an install directory, or an AppImage file:
-/// its own runtime process). `true` when none is left.
+/// the FUSE process serving a mount of it). `true` when none is left.
+///
+/// An AppImage helper is itself started through the image (`spawn_helper`),
+/// so the AppImage runtime mounted the image again for it: that mount's FUSE
+/// server runs the image file too, and lives as long as this process. It is
+/// not this process's child (the runtime forks it, and libfuse's
+/// `fuse_daemonize` forks again and leaves it orphaned, in a session of its
+/// own), so it is told apart by the mount it serves, its last argument: the
+/// one this process runs from. Another launch's mount still counts.
 #[cfg(target_os = "linux")]
 pub fn wait_for_processes_in(dir: &Path, timeout: Duration) -> bool {
   let deadline = Instant::now() + timeout;
   // /proc/<pid>/exe names the executable with every symlink resolved.
   let dir = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+  let own_mount = std::env::current_exe()
+    .map(|exe| {
+      own_appimage_mount(&super::layout::AppImageEnv::from_env(), &exe)
+    })
+    .unwrap_or_default();
   loop {
-    if linux_processes_in(&dir).is_empty() {
+    if linux_processes_in(&dir, &own_mount).is_empty() {
       return true;
     }
     if Instant::now() >= deadline {
@@ -1725,10 +1738,13 @@ pub fn wait_for_processes_in(dir: &Path, timeout: Duration) -> bool {
 /// `dir` or inside it. The executable is `/proc/<pid>/exe`; where that can't
 /// be read (a process that is not dumpable, as Chromium's sandboxed ones
 /// are) and the process is this user's, the first argument of its command
-/// line when that is an absolute path. Kernel threads and zombies have
-/// neither.
+/// line when that is an absolute path (with its symlinks resolved). Kernel
+/// threads and zombies have neither. A process running `dir` itself (an
+/// AppImage file) whose last argument is one of `own_mount` (the FUSE server
+/// of the mount this process runs from, see [`own_appimage_mount`]) is left
+/// out.
 #[cfg(target_os = "linux")]
-fn linux_processes_in(dir: &Path) -> Vec<u32> {
+fn linux_processes_in(dir: &Path, own_mount: &[PathBuf]) -> Vec<u32> {
   use std::os::unix::ffi::OsStrExt;
   use std::os::unix::fs::MetadataExt;
   let me = std::process::id();
@@ -1769,14 +1785,56 @@ fn linux_processes_in(dir: &Path) -> Vec<u32> {
               .then(|| PathBuf::from(std::ffi::OsStr::from_bytes(&first)))
           });
         match argv0 {
-          Some(argv0) => argv0,
+          Some(argv0) => std::fs::canonicalize(&argv0).unwrap_or(argv0),
           None => continue,
         }
       }
     };
-    if exe.starts_with(dir) {
-      out.push(pid);
+    if !exe.starts_with(dir) {
+      continue;
     }
+    if exe == dir
+      && !own_mount.is_empty()
+      && std::fs::read(proc_dir.join("cmdline")).is_ok_and(|cmdline| {
+        let last = cmdline
+          .strip_suffix(b"\0")
+          .unwrap_or(&cmdline)
+          .rsplit(|b| *b == 0)
+          .next()
+          .unwrap_or_default();
+        own_mount.iter().any(|m| m.as_os_str().as_bytes() == last)
+      })
+    {
+      continue;
+    }
+    out.push(pid);
+  }
+  out
+}
+
+/// Linux: the mount of an AppImage this process runs from, as the AppImage
+/// runtime named it to its FUSE server (`$APPDIR`) and resolved: empty
+/// unless `current_exe` is inside it (`$APPDIR` alone is inherited by
+/// anything an AppImage app starts).
+#[cfg(target_os = "linux")]
+fn own_appimage_mount(
+  env: &super::layout::AppImageEnv,
+  current_exe: &Path,
+) -> Vec<PathBuf> {
+  let Some(appdir) = env.appdir.as_ref().filter(|d| d.is_absolute()) else {
+    return Vec::new();
+  };
+  let Ok(resolved) = std::fs::canonicalize(appdir) else {
+    return Vec::new();
+  };
+  let exe = std::fs::canonicalize(current_exe)
+    .unwrap_or_else(|_| current_exe.to_path_buf());
+  if !exe.starts_with(&resolved) {
+    return Vec::new();
+  }
+  let mut out = vec![appdir.clone()];
+  if resolved != *appdir {
+    out.push(resolved);
   }
   out
 }
@@ -1897,6 +1955,21 @@ pub fn spawn_detached(
   {
     use std::os::unix::process::CommandExt;
     cmd.process_group(0);
+    // Linux: the process gets no descriptor of this one beyond stdio. An
+    // AppImage app holds its mount's keepalive pipe (the AppImage runtime
+    // doesn't make it close-on-exec): handed down, it would keep that
+    // mount's FUSE server, which runs the image file, alive for as long as
+    // the helper or the relaunched app runs, so the helper's wait for the
+    // install's processes would wait for itself.
+    #[cfg(target_os = "linux")]
+    // SAFETY: the closure only makes async-signal-safe calls
+    // (`mark_descriptors_close_on_exec`).
+    unsafe {
+      cmd.pre_exec(|| {
+        mark_descriptors_close_on_exec();
+        Ok(())
+      });
+    }
     cmd.spawn().map(|_| ())
   }
   #[cfg(windows)]
@@ -1921,6 +1994,48 @@ pub fn spawn_detached(
       Err(_) => {
         cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
         cmd.spawn().map(|_| ())
+      }
+    }
+  }
+}
+
+/// Linux, in a forked child before exec: every descriptor above stderr
+/// close-on-exec. `close_range(CLOSE_RANGE_CLOEXEC)` (Linux 5.11), else
+/// `fcntl` on each one below the descriptor limit. Only async-signal-safe
+/// calls; std's own exec-error pipe is close-on-exec already.
+#[cfg(target_os = "linux")]
+fn mark_descriptors_close_on_exec() {
+  const CLOSE_RANGE_CLOEXEC: libc::c_uint = 1 << 2;
+  // SAFETY: close_range with CLOSE_RANGE_CLOEXEC closes nothing; it only
+  // sets a flag.
+  let r = unsafe {
+    libc::syscall(
+      libc::SYS_close_range,
+      3 as libc::c_uint,
+      libc::c_uint::MAX,
+      CLOSE_RANGE_CLOEXEC,
+    )
+  };
+  if r == 0 {
+    return;
+  }
+  let mut limit = libc::rlimit {
+    rlim_cur: 0,
+    rlim_max: 0,
+  };
+  // SAFETY: getrlimit writes the struct it is given.
+  let max = if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) } == 0
+  {
+    limit.rlim_cur.min(1 << 16) as libc::c_int
+  } else {
+    1024
+  };
+  for fd in 3..max {
+    // SAFETY: fcntl on a descriptor that may not be open fails with EBADF.
+    unsafe {
+      let flags = libc::fcntl(fd, libc::F_GETFD);
+      if flags >= 0 && flags & libc::FD_CLOEXEC == 0 {
+        libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC);
       }
     }
   }
@@ -2140,6 +2255,136 @@ mod tests {
     assert!(!wait_for_processes_in(&dir, Duration::from_millis(300)));
     assert!(wait_for_processes_in(&dir, Duration::from_secs(30)));
     child.wait().unwrap();
+  }
+
+  /// An AppImage helper is started through the image file, so the type-2
+  /// runtime mounts the image again for it: the FUSE process serving that
+  /// mount runs the image file itself (`<image> -o ro,offset=N <image>
+  /// <mount>`), daemonized (not this process's child) and alive as long as
+  /// this process is. It must not hold the wait; the server of another mount
+  /// of the same image (a launch still running) does. The stand-in here is a
+  /// shell copied to the image's path whose last argument is the mount.
+  #[cfg(target_os = "linux")]
+  #[test]
+  fn the_helpers_own_appimage_mount_does_not_hold_the_wait_linux() {
+    let tmp = tempfile::tempdir().unwrap();
+    let tmp_path = std::fs::canonicalize(tmp.path()).unwrap();
+    let image = tmp_path.join("App.AppImage");
+    std::fs::copy(which_sh(), &image).unwrap();
+    let mount = tmp_path.join(".mount_own");
+    let other = tmp_path.join(".mount_old");
+    std::fs::create_dir(&mount).unwrap();
+    std::fs::create_dir(&other).unwrap();
+    let mut server = std::process::Command::new(&image)
+      .args(["-c", "sleep 30; :", "sh"])
+      .arg(&mount)
+      .spawn()
+      .unwrap();
+    // Until it has exec'd, /proc/<pid>/exe is this test binary.
+    let started = Instant::now();
+    while linux_processes_in(&image, &[]).is_empty() {
+      assert!(started.elapsed() < Duration::from_secs(10), "never ran");
+      std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(linux_processes_in(&image, &[]), vec![server.id()]);
+    assert_eq!(
+      linux_processes_in(&image, std::slice::from_ref(&other)),
+      vec![server.id()],
+      "another mount's server still counts"
+    );
+    assert!(
+      linux_processes_in(&image, std::slice::from_ref(&mount)).is_empty(),
+      "the server of the mount this process runs from does not count"
+    );
+    assert!(linux_processes_in(&image, &[mount.join("x")]).len() == 1);
+    server.kill().unwrap();
+    server.wait().unwrap();
+  }
+
+  /// The mount this process runs from: `$APPDIR` (as given and resolved),
+  /// only when this process's executable is inside it.
+  #[cfg(target_os = "linux")]
+  #[test]
+  fn own_appimage_mount_is_the_appdir_this_process_runs_from_linux() {
+    use super::super::layout::AppImageEnv;
+    let tmp = tempfile::tempdir().unwrap();
+    let real = std::fs::canonicalize(tmp.path()).unwrap();
+    let mount = real.join(".mount_a");
+    std::fs::create_dir_all(mount.join("App")).unwrap();
+    let exe = mount.join("App").join("app");
+    std::fs::write(&exe, b"").unwrap();
+    let link = real.join("tmplink");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let env = |appdir: Option<PathBuf>| AppImageEnv {
+      appimage: Some(real.join("App.AppImage")),
+      appdir,
+    };
+    assert_eq!(
+      own_appimage_mount(&env(Some(mount.clone())), &exe),
+      vec![mount.clone()]
+    );
+    // A $TMPDIR behind a symlink: both spellings.
+    let via_link = link.join(".mount_a");
+    assert_eq!(
+      own_appimage_mount(&env(Some(via_link.clone())), &exe),
+      vec![via_link, mount.clone()]
+    );
+    // $APPDIR inherited from an AppImage app that started this one.
+    let elsewhere = real.join("elsewhere");
+    std::fs::write(&elsewhere, b"").unwrap();
+    assert!(
+      own_appimage_mount(&env(Some(mount.clone())), &elsewhere).is_empty()
+    );
+    assert!(own_appimage_mount(&env(None), &exe).is_empty());
+  }
+
+  /// A process started detached (the helper, the relaunch) inherits none of
+  /// this process's descriptors beyond stdio: an AppImage app's is the
+  /// keepalive pipe of the FUSE server of its mount, which would then stay
+  /// mounted (its server running the image, holding the helper's wait) for
+  /// as long as the helper and the relaunched app run.
+  #[cfg(target_os = "linux")]
+  #[test]
+  fn spawn_detached_hands_down_no_descriptors_linux() {
+    use std::os::fd::AsRawFd;
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("fds");
+    let null = std::fs::File::open("/dev/null").unwrap();
+    // SAFETY: F_DUPFD duplicates an open descriptor; the copy is not
+    // close-on-exec.
+    let fd = unsafe { libc::fcntl(null.as_raw_fd(), libc::F_DUPFD, 900) };
+    assert!(fd >= 900);
+    spawn_detached(
+      &which_sh(),
+      &[
+        "-c".into(),
+        "ls /proc/self/fd > \"$0.tmp\" && mv \"$0.tmp\" \"$0\"".into(),
+        out.to_string_lossy().into_owned(),
+      ],
+      tmp.path(),
+      &[],
+    )
+    .unwrap();
+    let started = Instant::now();
+    while !out.exists() {
+      assert!(started.elapsed() < Duration::from_secs(10), "never ran");
+      std::thread::sleep(Duration::from_millis(20));
+    }
+    // SAFETY: `fd` is the descriptor F_DUPFD returned above.
+    unsafe { libc::close(fd) };
+    let listing = std::fs::read_to_string(&out).unwrap();
+    let fds: Vec<&str> = listing.split_whitespace().collect();
+    assert!(fds.contains(&"1"), "{fds:?}");
+    assert!(!fds.contains(&fd.to_string().as_str()), "{fds:?}");
+  }
+
+  #[cfg(target_os = "linux")]
+  fn which_sh() -> PathBuf {
+    ["/usr/bin/sh", "/bin/sh"]
+      .iter()
+      .map(PathBuf::from)
+      .find(|p| p.is_file())
+      .expect("sh(1)")
   }
 
   #[cfg(target_os = "linux")]
