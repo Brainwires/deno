@@ -51,7 +51,7 @@ denort = { path = "../rt", default-features = false }
 # denext.12 security fixes), pinned to
 # a commit of the Brainwires/laufey fork. The host built from the same commit
 # must be used with it (the API version check is exact).
-laufey = { git = "https://github.com/Brainwires/laufey", rev = "b1b73d85aad9a234f4c1c97415915a8923d921c5" }
+laufey = { git = "https://github.com/Brainwires/laufey", rev = "4f6f00f280f9766f0618e959131e5013e871b9d0" }
 libsui.workspace = true
 
 bytes.workspace = true
