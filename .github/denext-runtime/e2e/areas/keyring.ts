@@ -23,9 +23,13 @@ import {
 export async function run(env: Env, rep: AreaReport) {
   const linux = env.target.endsWith("-linux-gnu");
   const params: Record<string, unknown> = {
-    // CEF keeps the cookie key with the OS (Keychain, DPAPI, the Secret
-    // Service) unless no one could unlock it; WebKit reports none.
-    cookieEncryption: env.backend === "cef" ? (linux ? "basic" : "os") : null,
+    // CEF keeps the cookie key with the OS (DPAPI, the Secret Service)
+    // unless no one could unlock it; on macOS CEF runs with Chromium's mock
+    // keychain (a constant key), which laufey reports as "basic". WebKit
+    // reports none.
+    cookieEncryption: env.backend === "cef"
+      ? (linux || env.target.endsWith("-apple-darwin") ? "basic" : "os")
+      : null,
   };
   if (linux) {
     params.secretService = Deno.env.get("E2E_SECRET_SERVICE") === "locked"
