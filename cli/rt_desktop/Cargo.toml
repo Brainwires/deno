@@ -48,10 +48,11 @@ denort = { path = "../rt", default-features = false }
 # pinning; API 46: exit_app, which Deno.exit() ends the app with, and the
 # WebKit backends flushing localStorage before the app ends; API 47: title
 # bar preferences, the Linux secure store and portal file chooser, and the
-# denext.12 security fixes), pinned to
+# denext.12 security fixes; denext.13: the macOS secure store and
+# maintenance fixes), pinned to
 # a commit of the Brainwires/laufey fork. The host built from the same commit
 # must be used with it (the API version check is exact).
-laufey = { git = "https://github.com/Brainwires/laufey", rev = "4f6f00f280f9766f0618e959131e5013e871b9d0" }
+laufey = { git = "https://github.com/Brainwires/laufey", rev = "6974b617070229278cfa572582a95022e29c138f" }
 libsui.workspace = true
 
 bytes.workspace = true
