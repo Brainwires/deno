@@ -2264,14 +2264,25 @@ mod tests {
     let tmp_path = std::fs::canonicalize(tmp.path()).unwrap();
     let image = tmp_path.join("App.AppImage");
     std::fs::copy(which_sh(), &image).unwrap();
+    // Each holds no descriptor of this process's beyond stdio (as the helper
+    // and its server hold none of the app's: spawn_detached), not a pipe the
+    // test harness left open (cargo's jobserver), which both would share.
     let spawn = |stdin: Stdio| {
-      std::process::Command::new(&image)
+      use std::os::unix::process::CommandExt;
+      let mut cmd = std::process::Command::new(&image);
+      cmd
         .args(["-c", "sleep 30; :"])
         .stdin(stdin)
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap()
+        .stderr(Stdio::null());
+      // SAFETY: only async-signal-safe calls.
+      unsafe {
+        cmd.pre_exec(|| {
+          mark_descriptors_close_on_exec();
+          Ok(())
+        });
+      }
+      cmd.spawn().unwrap()
     };
     let mut own = spawn(Stdio::piped());
     let mut other = spawn(Stdio::null());
