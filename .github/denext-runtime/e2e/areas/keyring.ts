@@ -9,7 +9,9 @@
 // (e2e.sh's default) or set but not confirmed by logind (E2E_SESSION_TYPE),
 // no one can answer the prompt. With E2E_KWALLET=activatable the session is
 // GNOME with kwalletd installed but not running: not Chromium's store there,
-// so still basic.
+// so still basic. On macOS the secure store (laufey API 47) is the
+// Keychain: a round trip, and an item only the app may read
+// (secureStoreMac).
 
 import {
   type AreaReport,
@@ -50,6 +52,12 @@ export async function run(env: Env, rep: AreaReport) {
     params.secureStoreGetMayBeNull = params.secretService === "locked";
     // A fresh profile holds no OS-key cookies: never waits for the key.
     if (env.backend === "cef") params.cookieEncryptionWait = null;
+  }
+  if (env.target.endsWith("-apple-darwin")) {
+    // The Keychain: the round trip, an item the `security` CLI wrote is not
+    // the app's, and `security find-generic-password -w` (another program)
+    // doesn't get the app's secret.
+    params.secureStoreMac = true;
   }
   const p = await packageApp(env, {
     app: "keyring",

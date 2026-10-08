@@ -32,6 +32,7 @@ const want = r.params as {
   kwallet?: string | null;
   secureStoreReason?: string;
   secureStoreGetMayBeNull?: boolean;
+  secureStoreMac?: boolean;
 };
 
 // Optional: a runtime older than laufey API 45 has none (the cookie checks
@@ -137,6 +138,118 @@ if (want.secureStoreReason !== undefined) {
     set,
   );
   r.check("both answer at once (no unlock to wait for)", ms < 10000, ms);
+}
+
+// macOS (laufey API 47): the Keychain, as an item only this app may read.
+if (want.secureStoreMac) {
+  r.check("secureStore is supported (macOS)", store?.supported === true);
+  if (!store) throw new Error("no Deno.desktop.secureStore");
+  const full = store as typeof store & {
+    delete(s: string, a: string, o?: { timeout?: number }): Promise<unknown>;
+  };
+  const service = `dev.denext.e2e.keyring.${Deno.pid}`;
+  const o = { timeout: 20000 };
+  const outcome = async (p: Promise<unknown>) => {
+    try {
+      return { value: await p };
+    } catch (e) {
+      return { name: (e as Error).name, message: (e as Error).message };
+    }
+  };
+  // Another program of the user: `security`, killed if it waits on
+  // macOS's prompt (what it must do, or be denied, for the app's item).
+  const security = async (args: string[], ms = 8000) => {
+    const child = new Deno.Command("/usr/bin/security", {
+      args,
+      stdin: "null",
+      stdout: "piped",
+      stderr: "piped",
+    }).spawn();
+    const timer = setTimeout(() => {
+      try {
+        child.kill("SIGKILL");
+      } catch { /* gone */ }
+    }, ms);
+    const out = await child.output();
+    clearTimeout(timer);
+    return {
+      code: out.code,
+      signal: out.signal,
+      stdout: new TextDecoder().decode(out.stdout),
+    };
+  };
+  const secret = 'e2e \u2713 "q"\nline 2';
+  const set1 = await outcome(full.set(service, "a", "one", o));
+  const set2 = await outcome(full.set(service, "a", secret, o));
+  const got = await outcome(full.get(service, "a", o));
+  r.set("secureStoreMac", { set1, set2, got });
+  r.check(
+    "secureStore set / replace / get round trip (Keychain)",
+    !("name" in set1) && !("name" in set2) && "value" in got &&
+      got.value === secret,
+    { set1, set2, got },
+  );
+  const cli = await security([
+    "find-generic-password",
+    "-s",
+    service,
+    "-a",
+    "a",
+    "-w",
+  ]);
+  r.set("securityCliRead", cli);
+  r.check(
+    "`security find-generic-password -w` (another program) doesn't get the secret",
+    !cli.stdout.includes("line 2") && (cli.code !== 0 || cli.signal !== null),
+    cli,
+  );
+  // An item the `security` CLI wrote (the old way: /usr/bin/security is its
+  // trusted app, so any program reads it through `security`) is not the
+  // app's: never read here, and in the way of a set.
+  await security([
+    "add-generic-password",
+    "-s",
+    service,
+    "-a",
+    "legacy",
+    "-w",
+    "old",
+  ]);
+  const legacyCli = await security([
+    "find-generic-password",
+    "-s",
+    service,
+    "-a",
+    "legacy",
+    "-w",
+  ]);
+  const legacyGet = await outcome(full.get(service, "legacy", o));
+  const legacySet = await outcome(full.set(service, "legacy", "new", o));
+  await security(["delete-generic-password", "-s", service, "-a", "legacy"]);
+  r.set("secureStoreLegacy", { legacyCli, legacyGet, legacySet });
+  r.check(
+    "fail first: the old way's item is read back by `security -w`",
+    legacyCli.code === 0 && legacyCli.stdout === "old\n",
+    legacyCli,
+  );
+  r.check(
+    "an item another program wrote is not read (null)",
+    "value" in legacyGet && legacyGet.value === null,
+    legacyGet,
+  );
+  r.check(
+    "and is in the way of a set (SecureStoreUnavailable)",
+    legacySet.name === "SecureStoreUnavailable" &&
+      String(legacySet.message).includes("in the way"),
+    legacySet,
+  );
+  const deleted = await outcome(full.delete(service, "a", o));
+  const after = await outcome(full.get(service, "a", o));
+  r.check(
+    "delete, then get is null",
+    !("name" in deleted) && "value" in after && after.value === null,
+    { deleted, after },
+  );
 }
 
 const SECOND = `
