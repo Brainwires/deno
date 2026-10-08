@@ -87,10 +87,10 @@ pub const ROLLED_BACK_ARG: &str = "--denext-update-rolled-back=";
 pub const HELPER_WAIT: Duration = Duration::from_secs(300);
 /// The watchdog stops spawning recovery helpers after this many attempts.
 pub const MAX_HELPER_ATTEMPTS: u32 = 3;
-/// Windows: how long the helper then waits for the app's other processes
-/// (a CEF subprocess outliving its browser process, an earlier launch) to
-/// leave the install.
-#[cfg(windows)]
+/// Windows and Linux: how long the helper then waits for the app's other
+/// processes (a CEF subprocess outliving its browser process, an earlier
+/// launch) to leave the install.
+#[cfg(any(windows, target_os = "linux"))]
 pub const HELPER_WAIT_INSTALL_PROCESSES: Duration = Duration::from_secs(60);
 
 /// How long a startup cleanup waits for processes still running from the
@@ -1446,14 +1446,17 @@ pub fn run_helper(
     log_line(layout, "the update was withdrawn before the app exited");
     return 0;
   }
-  // Windows refuses to rename a directory while a process holds one of its
-  // files open without delete sharing: the app's CEF subprocesses (which
-  // open the .pak / ICU data that way) can outlive the process that was
-  // waited for by seconds, and a crashed trial's by longer. Wait for every
-  // process running from the install to leave, so the renames below don't
-  // run out of retries. (This helper runs from the install too; it is not
-  // waited for.)
-  #[cfg(windows)]
+  // The app's CEF subprocesses (the zygotes, the GPU process) can outlive
+  // the process that was waited for by seconds, and a crashed trial's by
+  // longer. Wait for every process running from the install to leave before
+  // swapping. Windows refuses to rename a directory while a process holds
+  // one of its files open without delete sharing (CEF opens the .pak / ICU
+  // data that way), so the renames below would run out of retries. Linux
+  // renames it anyway, and a process still running from the old app then
+  // opens the new one's files by path (a zygote forking a GPU process that
+  // loads its libraries and data). (This helper runs from the install too;
+  // it is not waited for.)
+  #[cfg(any(windows, target_os = "linux"))]
   if !wait_for_processes_in(&layout.install, HELPER_WAIT_INSTALL_PROCESSES) {
     log_line(
       layout,
@@ -1699,6 +1702,135 @@ pub fn wait_for_processes_in(dir: &Path, timeout: Duration) -> bool {
   }
 }
 
+/// Linux: wait up to `timeout` until no process other than this one runs an
+/// executable from inside `dir` (an install directory, or an AppImage file:
+/// the FUSE process serving a mount of it). `true` when none is left.
+///
+/// An AppImage helper is itself started through the image (`spawn_helper`),
+/// so the type-2 AppImage runtime mounted the image again for it: that
+/// mount's FUSE server runs the image file too, and lives as long as this
+/// process. It is no relation of this process's by ppid (the runtime forks
+/// it, libfuse's fuse_daemonize forks again and calls setsid, and the
+/// runtime reaps the middle one before it execs AppRun), and it serves from
+/// that fork without exec, so its command line is the runtime's own. What
+/// ties it to this process is the runtime's keepalive pipe: the server holds
+/// the write end, and this process (the runtime exec'd into AppRun and the
+/// app) the read end. A process running `dir` itself that holds a pipe this
+/// process holds is that server, and is left out. Another launch's mount
+/// still counts.
+#[cfg(target_os = "linux")]
+pub fn wait_for_processes_in(dir: &Path, timeout: Duration) -> bool {
+  let deadline = Instant::now() + timeout;
+  // /proc/<pid>/exe names the executable with every symlink resolved.
+  let dir = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+  let own_pipes = linux_pipes_of("/proc/self");
+  loop {
+    if linux_processes_in(&dir, &own_pipes).is_empty() {
+      return true;
+    }
+    if Instant::now() >= deadline {
+      return false;
+    }
+    std::thread::sleep(Duration::from_millis(100));
+  }
+}
+
+/// Linux: the pipes (their inode numbers) a process (`/proc/<pid>` or
+/// `/proc/self`) has open; empty where its descriptors can't be read.
+#[cfg(target_os = "linux")]
+fn linux_pipes_of(
+  proc_dir: impl AsRef<Path>,
+) -> std::collections::HashSet<u64> {
+  let Ok(fds) = std::fs::read_dir(proc_dir.as_ref().join("fd")) else {
+    return Default::default();
+  };
+  fds
+    .flatten()
+    .filter_map(|fd| std::fs::read_link(fd.path()).ok())
+    .filter_map(|target| {
+      target
+        .to_str()?
+        .strip_prefix("pipe:[")?
+        .strip_suffix(']')?
+        .parse()
+        .ok()
+    })
+    .collect()
+}
+
+/// Linux: the PIDs of the processes other than this one whose executable is
+/// `dir` or inside it. The executable is `/proc/<pid>/exe`; where that can't
+/// be read (a process that is not dumpable, as Chromium's sandboxed ones
+/// are) and the process is this user's, the first argument of its command
+/// line when that is an absolute path (with its symlinks resolved). Kernel
+/// threads and zombies have neither. A process running `dir` itself (an
+/// AppImage file) that holds one of `own_pipes` (the FUSE server of the
+/// mount this process runs from, see [`wait_for_processes_in`]) is left
+/// out.
+#[cfg(target_os = "linux")]
+fn linux_processes_in(
+  dir: &Path,
+  own_pipes: &std::collections::HashSet<u64>,
+) -> Vec<u32> {
+  use std::os::unix::ffi::OsStrExt;
+  use std::os::unix::fs::MetadataExt;
+  let me = std::process::id();
+  // SAFETY: geteuid has no preconditions.
+  let uid = unsafe { libc::geteuid() };
+  let Ok(entries) = std::fs::read_dir("/proc") else {
+    return Vec::new();
+  };
+  let mut out = Vec::new();
+  for entry in entries.flatten() {
+    let Some(pid) = entry
+      .file_name()
+      .to_str()
+      .and_then(|name| name.parse::<u32>().ok())
+    else {
+      continue;
+    };
+    if pid == me {
+      continue;
+    }
+    let proc_dir = entry.path();
+    let exe = match std::fs::read_link(proc_dir.join("exe")) {
+      // A replaced or deleted executable reads "<path> (deleted)".
+      Ok(exe) => {
+        let bytes = exe.as_os_str().as_bytes();
+        PathBuf::from(std::ffi::OsStr::from_bytes(
+          bytes.strip_suffix(b" (deleted)").unwrap_or(bytes),
+        ))
+      }
+      Err(_) => {
+        let ours = std::fs::metadata(&proc_dir).is_ok_and(|m| m.uid() == uid);
+        let argv0 = ours
+          .then(|| std::fs::read(proc_dir.join("cmdline")).ok())
+          .flatten()
+          .and_then(|cmdline| {
+            let first = cmdline.split(|b| *b == 0).next()?.to_vec();
+            (first.first() == Some(&b'/'))
+              .then(|| PathBuf::from(std::ffi::OsStr::from_bytes(&first)))
+          });
+        match argv0 {
+          Some(argv0) => std::fs::canonicalize(&argv0).unwrap_or(argv0),
+          None => continue,
+        }
+      }
+    };
+    if !exe.starts_with(dir) {
+      continue;
+    }
+    if exe == dir
+      && !own_pipes.is_empty()
+      && !linux_pipes_of(&proc_dir).is_disjoint(own_pipes)
+    {
+      continue;
+    }
+    out.push(pid);
+  }
+  out
+}
+
 /// A path as a case-insensitive comparison key: `\\?\` stripped, `/` as
 /// `\`, lower-cased, and (`dir`) ending in `\`.
 #[cfg(windows)]
@@ -1815,6 +1947,21 @@ pub fn spawn_detached(
   {
     use std::os::unix::process::CommandExt;
     cmd.process_group(0);
+    // Linux: the process gets no descriptor of this one beyond stdio. An
+    // AppImage app holds its mount's keepalive pipe (the AppImage runtime
+    // doesn't make it close-on-exec): handed down, it would keep that
+    // mount's FUSE server, which runs the image file, alive for as long as
+    // the helper or the relaunched app runs, so the helper's wait for the
+    // install's processes would wait for itself.
+    #[cfg(target_os = "linux")]
+    // SAFETY: the closure only makes async-signal-safe calls
+    // (`mark_descriptors_close_on_exec`).
+    unsafe {
+      cmd.pre_exec(|| {
+        mark_descriptors_close_on_exec();
+        Ok(())
+      });
+    }
     cmd.spawn().map(|_| ())
   }
   #[cfg(windows)]
@@ -1839,6 +1986,48 @@ pub fn spawn_detached(
       Err(_) => {
         cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
         cmd.spawn().map(|_| ())
+      }
+    }
+  }
+}
+
+/// Linux, in a forked child before exec: every descriptor above stderr
+/// close-on-exec. `close_range(CLOSE_RANGE_CLOEXEC)` (Linux 5.11), else
+/// `fcntl` on each one below the descriptor limit. Only async-signal-safe
+/// calls; std's own exec-error pipe is close-on-exec already.
+#[cfg(target_os = "linux")]
+fn mark_descriptors_close_on_exec() {
+  const CLOSE_RANGE_CLOEXEC: libc::c_uint = 1 << 2;
+  // SAFETY: close_range with CLOSE_RANGE_CLOEXEC closes nothing; it only
+  // sets a flag.
+  let r = unsafe {
+    libc::syscall(
+      libc::SYS_close_range,
+      3 as libc::c_uint,
+      libc::c_uint::MAX,
+      CLOSE_RANGE_CLOEXEC,
+    )
+  };
+  if r == 0 {
+    return;
+  }
+  let mut limit = libc::rlimit {
+    rlim_cur: 0,
+    rlim_max: 0,
+  };
+  // SAFETY: getrlimit writes the struct it is given.
+  let max = if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) } == 0
+  {
+    limit.rlim_cur.min(1 << 16) as libc::c_int
+  } else {
+    1024
+  };
+  for fd in 3..max {
+    // SAFETY: fcntl on a descriptor that may not be open fails with EBADF.
+    unsafe {
+      let flags = libc::fcntl(fd, libc::F_GETFD);
+      if flags >= 0 && flags & libc::FD_CLOEXEC == 0 {
+        libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC);
       }
     }
   }
@@ -2014,6 +2203,168 @@ mod tests {
       windows_path_key(Path::new("\\\\?\\C:\\A/b"), true),
       "c:\\a\\b\\"
     );
+  }
+
+  /// The Linux helper's wait for processes running from the install: a
+  /// process started from a copy of a system executable in a scratch
+  /// directory keeps the wait from finishing until it exits (also when the
+  /// directory is named through a symlink); one elsewhere does not count,
+  /// and neither does this process.
+  #[cfg(target_os = "linux")]
+  #[test]
+  fn waits_for_processes_running_from_the_install_linux() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("App");
+    std::fs::create_dir(&dir).unwrap();
+    let link = tmp.path().join("AppLink");
+    std::os::unix::fs::symlink(&dir, &link).unwrap();
+    let sleep = dir.join("sleep");
+    std::fs::copy(which_sleep(), &sleep).unwrap();
+    assert!(wait_for_processes_in(&dir, Duration::ZERO));
+    // A process elsewhere (the system's own sleep) does not count.
+    let mut elsewhere = std::process::Command::new(which_sleep())
+      .arg("30")
+      .spawn()
+      .unwrap();
+    assert!(wait_for_processes_in(&dir, Duration::from_millis(300)));
+    elsewhere.kill().unwrap();
+    elsewhere.wait().unwrap();
+    let mut child =
+      std::process::Command::new(&sleep).arg("2").spawn().unwrap();
+    assert!(!wait_for_processes_in(&dir, Duration::from_millis(300)));
+    assert!(!wait_for_processes_in(&link, Duration::from_millis(300)));
+    let started = Instant::now();
+    assert!(wait_for_processes_in(&dir, Duration::from_secs(30)));
+    // It waited for the process to end, not for the timeout.
+    assert!(started.elapsed() < Duration::from_secs(20));
+    child.wait().unwrap();
+    // A process whose executable was deleted ("<path> (deleted)") still
+    // counts.
+    let mut child =
+      std::process::Command::new(&sleep).arg("2").spawn().unwrap();
+    std::thread::sleep(Duration::from_millis(100));
+    std::fs::remove_file(&sleep).unwrap();
+    assert!(!wait_for_processes_in(&dir, Duration::from_millis(300)));
+    assert!(wait_for_processes_in(&dir, Duration::from_secs(30)));
+    child.wait().unwrap();
+  }
+
+  /// The helper's own AppImage mount, as the type-2 runtime leaves it: a
+  /// FUSE server that runs the image file, orphaned (no ppid link to the
+  /// helper), with the runtime's own argv (it serves from a fork, without
+  /// exec) and the keepalive pipe the helper holds the other end of. It must
+  /// not hold the wait; another launch's server (no pipe shared) does. The
+  /// stand-ins: a shell copied to the image's path, its stdin a pipe from
+  /// this process, and one with nothing shared.
+  #[cfg(target_os = "linux")]
+  #[test]
+  fn the_helpers_own_fuse_server_does_not_hold_the_wait_linux() {
+    use std::process::Stdio;
+    let tmp = tempfile::tempdir().unwrap();
+    let tmp_path = std::fs::canonicalize(tmp.path()).unwrap();
+    let image = tmp_path.join("App.AppImage");
+    std::fs::copy(which_sh(), &image).unwrap();
+    // Each holds no descriptor of this process's beyond stdio (as the helper
+    // and its server hold none of the app's: spawn_detached), not a pipe the
+    // test harness left open (cargo's jobserver), which both would share.
+    let spawn = |stdin: Stdio| {
+      use std::os::unix::process::CommandExt;
+      let mut cmd = std::process::Command::new(&image);
+      cmd
+        .args(["-c", "sleep 30; :"])
+        .stdin(stdin)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+      // SAFETY: only async-signal-safe calls.
+      unsafe {
+        cmd.pre_exec(|| {
+          mark_descriptors_close_on_exec();
+          Ok(())
+        });
+      }
+      cmd.spawn().unwrap()
+    };
+    let mut own = spawn(Stdio::piped());
+    let mut other = spawn(Stdio::null());
+    // Until they have exec'd, /proc/<pid>/exe is this test binary.
+    let started = Instant::now();
+    for pid in [own.id(), other.id()] {
+      while std::fs::read_link(format!("/proc/{pid}/exe"))
+        .ok()
+        .as_deref()
+        != Some(image.as_path())
+      {
+        assert!(started.elapsed() < Duration::from_secs(10), "never ran");
+        std::thread::sleep(Duration::from_millis(20));
+      }
+    }
+    // Another launch's server holds the wait.
+    assert!(!wait_for_processes_in(&image, Duration::from_millis(300)));
+    other.kill().unwrap();
+    other.wait().unwrap();
+    // The helper's own does not.
+    assert!(wait_for_processes_in(&image, Duration::from_secs(3)));
+    assert!(own.try_wait().unwrap().is_none(), "the server is still up");
+    own.kill().unwrap();
+    own.wait().unwrap();
+  }
+
+  /// A process started detached (the helper, the relaunch) inherits none of
+  /// this process's descriptors beyond stdio: an AppImage app's is the
+  /// keepalive pipe of the FUSE server of its mount, which would then stay
+  /// mounted (its server running the image, holding the helper's wait) for
+  /// as long as the helper and the relaunched app run.
+  #[cfg(target_os = "linux")]
+  #[test]
+  fn spawn_detached_hands_down_no_descriptors_linux() {
+    use std::os::fd::AsRawFd;
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("fds");
+    let null = std::fs::File::open("/dev/null").unwrap();
+    // SAFETY: F_DUPFD duplicates an open descriptor; the copy is not
+    // close-on-exec.
+    let fd = unsafe { libc::fcntl(null.as_raw_fd(), libc::F_DUPFD, 900) };
+    assert!(fd >= 900);
+    spawn_detached(
+      &which_sh(),
+      &[
+        "-c".into(),
+        "ls /proc/self/fd > \"$0.tmp\" && mv \"$0.tmp\" \"$0\"".into(),
+        out.to_string_lossy().into_owned(),
+      ],
+      tmp.path(),
+      &[],
+    )
+    .unwrap();
+    let started = Instant::now();
+    while !out.exists() {
+      assert!(started.elapsed() < Duration::from_secs(10), "never ran");
+      std::thread::sleep(Duration::from_millis(20));
+    }
+    // SAFETY: `fd` is the descriptor F_DUPFD returned above.
+    unsafe { libc::close(fd) };
+    let listing = std::fs::read_to_string(&out).unwrap();
+    let fds: Vec<&str> = listing.split_whitespace().collect();
+    assert!(fds.contains(&"1"), "{fds:?}");
+    assert!(!fds.contains(&fd.to_string().as_str()), "{fds:?}");
+  }
+
+  #[cfg(target_os = "linux")]
+  fn which_sh() -> PathBuf {
+    ["/usr/bin/sh", "/bin/sh"]
+      .iter()
+      .map(PathBuf::from)
+      .find(|p| p.is_file())
+      .expect("sh(1)")
+  }
+
+  #[cfg(target_os = "linux")]
+  fn which_sleep() -> PathBuf {
+    ["/usr/bin/sleep", "/bin/sleep"]
+      .iter()
+      .map(PathBuf::from)
+      .find(|p| p.is_file())
+      .expect("sleep(1)")
   }
 
   fn exchange_supported(dir: &Path) -> bool {

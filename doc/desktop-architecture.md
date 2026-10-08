@@ -30,8 +30,8 @@ The closure body is the runtime entrypoint the backend calls after `init`.
 
 Version safety is two-layered:
 
-- **Compile time** (`lib.rs:47`):
-  `const _: () = assert!(laufey::LAUFEY_API_VERSION == 26, …)`. If the linked
+- **Compile time** (`lib.rs:59`):
+  `const _: () = assert!(laufey::LAUFEY_API_VERSION == 47, …)`. If the linked
   `laufey` crate's ABI version drifts from what the shipped backend speaks,
   `cargo build` fails loudly instead of producing a dylib that silently won't
   launch.

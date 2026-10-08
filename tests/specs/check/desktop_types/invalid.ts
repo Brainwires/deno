@@ -11,3 +11,7 @@ declare const callback: Deno.UnsafeCallback<
   { parameters: ["pointer"]; result: "pointer" }
 >;
 d.runOnMainThread(callback);
+// Not a sandbox mode or a file chooser.
+const sandbox: Deno.desktop.PlatformFeatures["sandbox"] = "seccomp";
+const chooser: Deno.desktop.PlatformFeatures["fileChooser"] = "zenity";
+console.log(sandbox, chooser);

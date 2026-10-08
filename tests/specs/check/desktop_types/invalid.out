@@ -25,6 +25,16 @@ d.runOnMainThread(callback);
         ~~~~
         at asset:///lib.deno.ns.d.ts:[WILDCARD]
 
-Found 4 errors.
+TS2322 [ERROR]: Type '"seccomp"' is not assignable to type '"namespace" | "setuid" | "chromium" | "off" | null'.
+const sandbox: Deno.desktop.PlatformFeatures["sandbox"] = "seccomp";
+      ~~~~~~~
+    at [WILDCARD]invalid.ts:15:7
+
+TS2322 [ERROR]: Type '"zenity"' is not assignable to type '"portal" | "gtk" | null'.
+const chooser: Deno.desktop.PlatformFeatures["fileChooser"] = "zenity";
+      ~~~~~~~
+    at [WILDCARD]invalid.ts:16:7
+
+Found 6 errors.
 
 error: Type checking failed.

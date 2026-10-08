@@ -1528,8 +1528,11 @@ declare namespace Deno {
       /** `"unknown"` on an OS laufey has no probe for. */
       os: "linux" | "macos" | "windows" | "unknown";
       /** Linux: `XDG_SESSION_TYPE` as set (`"tty"` is an ssh or console
-       * session), `"unknown"` when unset; never guessed from `$DISPLAY`.
-       * `null` elsewhere. */
+       * session), `"unknown"` when unset. A graphical one names the display
+       * that is there: `"x11"` when `XDG_SESSION_TYPE` is `wayland` but only
+       * `$DISPLAY` is set (as after GDM's autologin into an Xorg session),
+       * and the other way round. Never made graphical by `$DISPLAY` or
+       * `$WAYLAND_DISPLAY` alone. `null` elsewhere. */
       sessionType: "wayland" | "x11" | "tty" | "unknown" | null;
       /** `XDG_CURRENT_DESKTOP` as set: a hint for wording only. `null`
        * without env access to it (`--allow-env`); the reasons then name no
@@ -1584,15 +1587,19 @@ declare namespace Deno {
        * version (`Notification`, `FileChooser`, `GlobalShortcuts`,
        * `Settings`). An interface the portal lacks is absent. */
       portalVersions: Record<string, number>;
-      /** CEF: `"basic"` (Linux: no one could hand out the OS key, a locked
-       * Secret Service with no one to answer its unlock prompt or a KWallet
-       * that isn't open, and the profile holds no cookies encrypted with the
-       * OS key, so Chromium was started with `--password-store=basic`
-       * instead of waiting for the key) or `"os"` (the OS keystore, or
-       * Chromium's own fallback when there is none). A profile that holds
-       * cookies encrypted with the OS key is never switched to basic, which
-       * would make Chromium delete them: it stays `"os"` and waits for the
-       * key (`cookieEncryptionWait`). `null` on the WebView backends. */
+      /** CEF: `"basic"` when the key that encrypts cookies on disk is fixed
+       * (cookies are obfuscated, not protected by the OS): always on macOS,
+       * where CEF runs with Chromium's mock keychain, and on Linux when no
+       * one could hand out the OS key (a locked Secret Service with no one
+       * to answer its unlock prompt, or a KWallet that isn't open) and the
+       * profile holds no cookies encrypted with the OS key, so Chromium was
+       * started with `--password-store=basic` instead of waiting for the
+       * key. Otherwise `"os"` (Windows' DPAPI; on Linux the OS keystore, or
+       * Chromium's own fallback when there is none). A Linux profile that
+       * holds cookies encrypted with the OS key is never switched to basic,
+       * which would make Chromium delete them: it stays `"os"` and waits
+       * for the key (`cookieEncryptionWait`). `null` on the WebView
+       * backends. */
       cookieEncryption: "os" | "basic" | null;
       /** CEF on Linux: why this launch keeps the OS key although no one may
        * be able to unlock it (the profile holds cookies encrypted with the
@@ -1602,6 +1609,16 @@ declare namespace Deno {
        * keyring can't hand out the key in this session". `null`
        * otherwise. */
       cookieEncryptionWait: string | null;
+      /** CEF on Linux: the Chromium sandbox web content runs in:
+       * `"namespace"` (unprivileged user namespaces), `"setuid"` (the
+       * `chrome-sandbox` helper), `"chromium"` (on; the probe could not run,
+       * so Chromium picked the layer) or `"off"` (neither is available: a
+       * tarball or AppImage on Ubuntu 23.10 and later, or root). `null` on
+       * other platforms and backends. */
+      sandbox: "namespace" | "setuid" | "chromium" | "off" | null;
+      /** CEF on Linux: why the host chose that sandbox mode (what it found:
+       * user namespaces, the helper, root). `null` otherwise. */
+      sandboxReason: string | null;
       /** Linux: how notifications are sent: `"portal"` (xdg-desktop-portal's
        * Notification interface, with the app's id registered and its
        * `<app id>.desktop` installed, as a `.deb` or `.rpm` does) or
@@ -1636,6 +1653,13 @@ declare namespace Deno {
       badge: "dock" | "launcher-entry" | "title" | null;
       /** Linux, when `badge` is `"title"`: why no launcher shows it. */
       badgeReason: string | null;
+      /** Linux: the chooser a file dialog uses: `"portal"`
+       * (xdg-desktop-portal's FileChooser, the desktop's own dialog) or
+       * `"gtk"` (GTK's chooser: the portal has no FileChooser, or
+       * `LAUFEY_FILE_CHOOSER=gtk`). `null` elsewhere. */
+      fileChooser: "portal" | "gtk" | null;
+      /** Why GTK's, when `fileChooser` is `"gtk"`; otherwise `null`. */
+      fileChooserReason: string | null;
     }
 
     /** What this backend can do on this OS
