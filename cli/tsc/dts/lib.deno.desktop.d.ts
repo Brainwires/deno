@@ -2043,15 +2043,24 @@ declare namespace Deno {
      * never `null`.
      *
      * macOS: a generic password (`service` / `account`) that only this app
-     * may read: in the data-protection keychain when the app is signed with
-     * a keychain access group (a provisioning profile), else in the login
-     * keychain with an access list naming only this app, so another program
-     * gets macOS's prompt, never the secret. An item another program wrote
-     * for the same service and account (`security add-generic-password`) is
-     * never read (`null`) and makes `set` reject `"SecureStoreUnavailable"`
-     * until it is deleted with the tool that wrote it. `set` and `delete`
-     * never prompt (a locked keychain rejects); `get` may (a locked
-     * keychain, a rebuilt unsigned app) and rejects after `timeout`.
+     * reads without a prompt (code injected into its process aside): in the
+     * data-protection keychain when the app is signed with a keychain access
+     * group (a provisioning profile), else in the login keychain with an
+     * access list naming only the app's host executable, so another program
+     * gets macOS's prompt, never the secret. That executable is named by its
+     * designated requirement when signed and by its code hash when unsigned
+     * or ad-hoc signed, so such builds with byte-identical hosts read each
+     * other's items. Another program of the user can write a login-keychain
+     * item without a prompt (replace its value, or plant one this app would
+     * read): a Developer ID (or otherwise team-) signed app reads such an
+     * item as `null` and `set` rejects `"SecureStoreUnavailable"`; an
+     * ad-hoc signed build gets macOS's prompt for it, and an unsigned one
+     * reads it. An item another tool wrote for the same service and account
+     * (`security add-generic-password`) is never read (`null`) and makes
+     * `set` reject `"SecureStoreUnavailable"` until it is deleted with the
+     * tool that wrote it. `set` and `delete` never prompt (a locked keychain
+     * rejects); `get` may (a locked keychain to unlock, an ad-hoc build
+     * rebuilt since it stored the item) and rejects after `timeout`.
      *
      * Needs `--allow-sys` (unscoped): the store is shared by every app of the
      * user. Each call runs off the JavaScript thread.
