@@ -13,7 +13,7 @@ import {
   launchAndCollect,
   OS,
   packageApp,
-  seenPids,
+  seenResults,
   sh,
   waitResult,
   writeParams,
@@ -45,7 +45,7 @@ export async function run(env: Env, rep: AreaReport) {
     return;
   }
   await writeParams("menus", { identifier, toastClick, mode: "cold" });
-  const seen = await seenPids("menus");
+  const seen = await seenResults("menus");
   const c = await sh("powershell", [
     "-NoProfile",
     "-ExecutionPolicy",

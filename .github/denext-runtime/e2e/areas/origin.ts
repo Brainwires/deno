@@ -15,8 +15,10 @@ import {
   packageApp,
   type Packaged,
   path,
+  resultKey,
+  results,
   rm,
-  seenPids,
+  seenResults,
   tail,
   waitExit,
   writeParams,
@@ -97,13 +99,13 @@ export async function run(env: Env, rep: AreaReport) {
     ["NEXT_PRIVATE_WORKER alone", [script], { NEXT_PRIVATE_WORKER: "1" }],
   ];
   for (const [label, args, envs] of forged) {
-    const before = await seenPids("origin");
+    const before = await seenResults("origin");
     const l = await launch(env, p.exe, args, { env: envs });
     const st = await waitExit(l, 30_000);
     if (!st) await kill(l, p.artifact);
     const ran = await exists(marker);
-    const started = [...await seenPids("origin")].some((pid) =>
-      !before.has(pid)
+    const started = (await results("origin")).some((r) =>
+      !before.has(resultKey(r))
     );
     rep.check(
       `worker launch (${label}): exits without running the script or the app`,

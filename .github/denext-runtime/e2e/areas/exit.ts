@@ -16,7 +16,7 @@ import {
   launch,
   packageApp,
   results,
-  seenPids,
+  seenResults,
   tail,
   waitExit,
   waitResult,
@@ -49,7 +49,7 @@ export async function run(env: Env, rep: AreaReport) {
   for (const step of STEPS) {
     const label = `#${++n} ${step.how}(${step.code})`;
     await writeParams("exit", step);
-    const seen = await seenPids("exit");
+    const seen = await seenResults("exit");
     const token = `${env.nonce}-exit-${n}`;
     const l = await launch(env, app.exe, [], {
       env: { DENEXT_E2E_LAUNCH: token },
