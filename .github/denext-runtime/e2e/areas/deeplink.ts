@@ -35,9 +35,10 @@ import {
   packageApp,
   type Packaged,
   path,
+  resultKey,
   results,
   rm,
-  seenPids,
+  seenResults,
   sh,
   short,
   sleep,
@@ -96,7 +97,7 @@ export async function run(env: Env, rep: AreaReport) {
   const params = (which: "a" | "b", extra: Record<string, unknown> = {}) =>
     writeParams("deeplink", { scheme, identifier: ids[which], ...extra });
   const start = async (p: Packaged, args: string[], label: string) => {
-    const seen = await seenPids("deeplink");
+    const seen = await seenResults("deeplink");
     const l = await launch(env, p.exe, args, { cwd: scratch, env: appEnv });
     running.push(l);
     const res = await waitResult("deeplink", { seen, ms: 90_000 });
@@ -194,7 +195,7 @@ export async function run(env: Env, rep: AreaReport) {
     await checkRegistration(rep, env, scheme, a, ids.a, appEnv, "A");
 
     // 2. A second launch while A runs forwards its argv and exits.
-    const before = await seenPids("deeplink");
+    const before = await seenResults("deeplink");
     const t0 = Date.now();
     const second = await launch(env, a.exe, [
       `${scheme}://second/2`,
@@ -213,7 +214,9 @@ export async function run(env: Env, rep: AreaReport) {
         ms: Date.now() - t0,
       });}
     await sleep(2000);
-    const fresh = (await results("deeplink")).filter((x) => !before.has(x.pid));
+    const fresh = (await results("deeplink")).filter((x) =>
+      !before.has(resultKey(x))
+    );
     rep.check(
       "second instance: never started a runtime of its own",
       fresh.length === 0,
@@ -260,7 +263,8 @@ export async function run(env: Env, rep: AreaReport) {
     );
     rep.check(
       "OS-routed warm link: no new instance",
-      (await results("deeplink")).filter((x) => !before.has(x.pid)).length ===
+      (await results("deeplink")).filter((x) => !before.has(resultKey(x)))
+        .length ===
         0,
     );
 
@@ -292,7 +296,7 @@ export async function run(env: Env, rep: AreaReport) {
 
     // 5. A cold link routed by the OS: the handler starts with it.
     const coldOsUrl = `${scheme}://cold/5`;
-    const seen5 = await seenPids("deeplink");
+    const seen5 = await seenResults("deeplink");
     const oc = await osOpen(coldOsUrl, { cold: true });
     rep.check(
       "OS-routed cold link: the opener succeeded",
@@ -556,7 +560,7 @@ export async function run(env: Env, rep: AreaReport) {
       await stopAll();
       await killByPath(installDir);
       const coldUrl = `${scheme}://msi/cold`;
-      const seen = await seenPids("deeplink");
+      const seen = await seenResults("deeplink");
       const oc = await sh("powershell", [
         "-NoProfile",
         "-Command",
@@ -576,7 +580,7 @@ export async function run(env: Env, rep: AreaReport) {
         rc?.data.launch ?? "no launch",
       );
       const warmUrl = `${scheme}://msi/warm`;
-      const before = await seenPids("deeplink");
+      const before = await seenResults("deeplink");
       await sh("powershell", [
         "-NoProfile",
         "-Command",
@@ -597,7 +601,8 @@ export async function run(env: Env, rep: AreaReport) {
       );
       rep.check(
         "msi: no second instance started",
-        (await results("deeplink")).filter((x) => !before.has(x.pid)).length ===
+        (await results("deeplink")).filter((x) => !before.has(resultKey(x)))
+          .length ===
           0,
       );
     } finally {
