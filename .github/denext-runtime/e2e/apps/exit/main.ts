@@ -15,16 +15,27 @@ const how: string = r.params.how ?? "deno-exit";
 const code: number = r.params.code ?? 0;
 
 // Deno.exit() dispatches `unload` before the process ends.
+const t0 = performance.now();
+const trace: string[] = [];
+const note = (s: string) => {
+  trace.push(`${Math.round(performance.now() - t0)} ${s}`);
+  r.set("trace", trace);
+  r.write();
+};
+note("runtime up");
 globalThis.addEventListener("unload", () => {
   r.set("unloadRan", true);
 });
 
 const SCRIPT = `
+const beacon = (s) => fetch("/trace?s=" + encodeURIComponent(s)).catch(() => {});
+beacon("module start");
 const value = "launch-" + Date.now() + "-" + Math.random().toString(36).slice(2);
 const out = { value, origin: location.origin };
 out.localPrevious = localStorage.getItem("e2e-exit");
 localStorage.setItem("e2e-exit", value);
 out.localReadBack = localStorage.getItem("e2e-exit");
+beacon("localStorage done");
 const idb = (mode, f) => new Promise((resolve, reject) => {
   const open = indexedDB.open("e2e-exit", 1);
   open.onupgradeneeded = () => open.result.createObjectStore("kv");
@@ -38,14 +49,18 @@ const idb = (mode, f) => new Promise((resolve, reject) => {
 });
 try {
   out.idbPrevious = await idb("readonly", (s) => s.get("e2e"));
+  beacon("idb read");
   await idb("readwrite", (s) => s.put(value, "e2e"));
   out.idbReadBack = await idb("readonly", (s) => s.get("e2e"));
+  beacon("idb done");
 } catch (e) { out.idbError = String(e); }
 await fetch("/result", { method: "POST", body: JSON.stringify(out) });
 `;
 
 Deno.serve(async (req) => {
   const url = new URL(req.url);
+  note(`${req.method} ${url.pathname}${url.search}`);
+  if (url.pathname === "/trace") return new Response("ok");
   if (url.pathname === "/result") {
     const body = JSON.parse(await req.text());
     r.set("page", body);

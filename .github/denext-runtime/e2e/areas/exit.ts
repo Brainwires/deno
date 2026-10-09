@@ -15,8 +15,10 @@ import {
   kill,
   launch,
   packageApp,
+  resultKey,
   results,
   seenResults,
+  sh,
   tail,
   waitExit,
   waitResult,
@@ -24,13 +26,26 @@ import {
 } from "../lib/runner.ts";
 
 // Each launch ends one way; the next one reads what it stored.
-const STEPS = [
+const BASE = [
   { how: "deno-exit", code: 3 },
   { how: "process-exit", code: 4 },
   { how: "quit", code: 0 },
   { how: "deno-exit", code: 0 },
   { how: "deno-exit", code: 5 },
 ];
+// ci-exp: many rounds, to catch the rare launch whose page never reports.
+const STEPS = Array.from({ length: 12 }, () => BASE).flat();
+
+async function webview2Procs(identifier: string): Promise<string> {
+  if (Deno.build.os !== "windows") return "";
+  const ps =
+    "Get-CimInstance Win32_Process -Filter \"Name='msedgewebview2.exe'\" | " +
+    "Where-Object { $_.CommandLine -like '*" + identifier + "*' } | " +
+    'ForEach-Object { "$($_.ProcessId) parent=$($_.ParentProcessId) $($_.CreationDate) " + ' +
+    "($_.CommandLine -replace '^.*--type=([a-z-]+).*$', '$1') }";
+  const r = await sh("powershell", ["-NoProfile", "-Command", ps]);
+  return r.out.trim();
+}
 
 export async function run(env: Env, rep: AreaReport) {
   const scheme = `dnxexit${env.nonce}`;
@@ -50,12 +65,33 @@ export async function run(env: Env, rep: AreaReport) {
     const label = `#${++n} ${step.how}(${step.code})`;
     await writeParams("exit", step);
     const seen = await seenResults("exit");
+    const before = await webview2Procs(identifier);
+    if (before) {
+      console.log(`${label}: WebView2 processes alive at launch:\n${before}`);
+    }
     const token = `${env.nonce}-exit-${n}`;
     const l = await launch(env, app.exe, [], {
       env: { DENEXT_E2E_LAUNCH: token },
     });
     const r = await waitResult("exit", { seen, launch: token, ms: 90_000 });
     if (!r) {
+      const partial = (await results("exit")).filter((x) =>
+        !seen.has(resultKey(x))
+      );
+      console.log(
+        `${label}: no result; partial: ${
+          JSON.stringify(
+            partial.map((x) => ({
+              pid: x.pid,
+              launch: x.launch,
+              trace: x.data.trace,
+            })),
+          )
+        }`,
+      );
+      console.log(
+        `${label}: WebView2 processes now:\n${await webview2Procs(identifier)}`,
+      );
       rep.check(
         `${label}: the app wrote a result`,
         false,
