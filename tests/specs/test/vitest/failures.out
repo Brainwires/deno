@@ -1,0 +1,63 @@
+running 6 tests from ./failures_test.ts
+failures > equality diff ... FAILED ([WILDCARD])
+failures > soft assertions ... FAILED ([WILDCARD])
+failures > assertion count ... FAILED ([WILDCARD])
+failures > timeout ... FAILED ([WILDCARD])
+failures > fails() that passes ... ok ([WILDCARD])
+failures > marked fails ... FAILED ([WILDCARD])
+
+ ERRORS 
+
+failures > equality diff => ./failures_test.ts:4:3
+error: AssertionError: expected { name: 'deno', tags: [ 'a', 'b' ] } to deeply equal { name: 'deno', tags: [ 'a', 'c' ] }
+
+- Expected
++ Received
+
+  {
+    "name": "deno",
+    "tags": [
+      "a",
+-     "c",
++     "b",
+    ],
+  }
+    expect({ name: "deno", tags: ["a", "b"] }).toEqual({
+                                               ^
+    at [WILDCARD]failures_test.ts:5:48
+
+failures > soft assertions => ./failures_test.ts:11:3
+error: AssertionError: expected 1 to be 2 // Object.is equality
+
+- Expected
++ Received
+
+- 2
++ 1
+
+expected 'a' to be 'b' // Object.is equality
+
+Expected: "b"
+Received: "a"
+
+failures > assertion count => ./failures_test.ts:16:3
+error: Error: expected number of assertions to be 2, but got 1
+
+failures > timeout => ./failures_test.ts:21:3
+error: Error: Test timed out in 50ms.
+If this is a long-running test, pass a timeout value as the last argument or configure it globally with "testTimeout".
+
+failures > marked fails => ./failures_test.ts:28:6
+error: Error: Expect test to fail
+
+ FAILURES 
+
+failures > equality diff => ./failures_test.ts:4:3
+failures > soft assertions => ./failures_test.ts:11:3
+failures > assertion count => ./failures_test.ts:16:3
+failures > timeout => ./failures_test.ts:21:3
+failures > marked fails => ./failures_test.ts:28:6
+
+FAILED | 1 passed | 5 failed ([WILDCARD])
+
+error: Test failed

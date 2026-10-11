@@ -1,0 +1,8 @@
+Warning the Vitest config has 2 projects; each test file runs once, in the first project that includes it. Select projects with --vitest-project.
+running 1 test from ./a/a.test.ts
+alpha inherits the root config ... ok ([WILDCARD])
+running 1 test from ./b/b.test.ts
+beta uses its own config ... ok ([WILDCARD])
+
+ok | 2 passed | 0 failed ([WILDCARD])
+

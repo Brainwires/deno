@@ -1,0 +1,14 @@
+running 10 tests from ./vi_test.ts
+vi.fn > records calls and results ... ok ([WILDCARD])
+vi.fn > mockResolvedValue and implementation ... ok ([WILDCARD])
+vi.fn > spyOn and restore ... ok ([WILDCARD])
+fake timers > advances timers ... ok ([WILDCARD])
+fake timers > runs all timers async and mocks the date ... ok ([WILDCARD])
+stubs > stubs globals and env ... ok ([WILDCARD])
+stubs > restored them ... ok ([WILDCARD])
+waiting > waitFor and waitUntil ... ok ([WILDCARD])
+waiting > hoisted and mocked ... ok ([WILDCARD])
+import.meta.env defaults ... ok ([WILDCARD])
+
+ok | 10 passed | 0 failed ([WILDCARD])
+

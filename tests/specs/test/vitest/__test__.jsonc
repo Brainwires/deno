@@ -1,0 +1,85 @@
+{
+  // The Vitest compatibility layer: Vitest suites run unchanged under
+  // `deno test` (see cli/tools/test/vitest).
+  "tests": {
+    "api": {
+      "args": "test -A --no-check api_test.ts",
+      "output": "api.out",
+      "exitCode": 0
+    },
+    "expect": {
+      "args": "test -A --no-check expect_test.ts",
+      "output": "expect.out",
+      "exitCode": 0
+    },
+    "vi": {
+      "args": "test -A --no-check vi_test.ts",
+      "output": "vi.out",
+      "exitCode": 0
+    },
+    "failures": {
+      "args": "test -A --no-check failures_test.ts",
+      "output": "failures.out",
+      "exitCode": 1
+    },
+    "hook_error": {
+      "args": "test -A --no-check hook_error_test.ts",
+      "output": "hook_error.out",
+      "exitCode": 1
+    },
+    "vi_mock_not_supported_yet": {
+      "args": "test -A --no-check vi_mock_test.ts",
+      "output": "vi_mock.out",
+      "exitCode": 1
+    },
+    "jest_globals": {
+      "args": "test -A --no-check jest_globals_test.ts",
+      "output": "jest_globals.out",
+      "exitCode": 0
+    },
+    "npm_specifier": {
+      "args": "test -A --no-check npm_specifier_test.ts",
+      "output": "npm_specifier.out",
+      "exitCode": 0
+    },
+    "plain_deno_test_untouched": {
+      "args": "test -A --no-check plain_deno_test.ts",
+      "output": "plain_deno.out",
+      "exitCode": 0
+    },
+    "filter": {
+      "args": "test -A --no-check --filter=square api_test.ts",
+      "output": "filter.out",
+      "exitCode": 0
+    },
+    "no_vitest_compat": {
+      "args": "test -A --no-check --no-vitest-compat api_test.ts",
+      "output": "no_compat.out",
+      "exitCode": 1
+    },
+    "config": {
+      "cwd": "config_project",
+      "args": "test -A --no-check",
+      "output": "config.out",
+      "exitCode": 1
+    },
+    "projects": {
+      "cwd": "projects",
+      "args": "test -A --no-check",
+      "output": "projects.out",
+      "exitCode": 0
+    },
+    "projects_selected": {
+      "cwd": "projects",
+      "args": "test -A --no-check --vitest-project=beta",
+      "output": "projects_beta.out",
+      "exitCode": 0
+    },
+    "projects_unknown": {
+      "cwd": "projects",
+      "args": "test -A --no-check --vitest-project=nope",
+      "output": "projects_nope.out",
+      "exitCode": 1
+    }
+  }
+}

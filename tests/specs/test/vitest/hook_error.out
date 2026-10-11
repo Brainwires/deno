@@ -1,0 +1,28 @@
+running 4 tests from ./hook_error_test.ts
+broken setup > a ... FAILED ([WILDCARD])
+broken setup > b ... ignored ([WILDCARD])
+broken teardown > c ... FAILED ([WILDCARD])
+after ... ok ([WILDCARD])
+
+ ERRORS 
+
+broken setup > a => ./hook_error_test.ts:7:3
+error: Error: Error in hook or setup of broken setup: setup exploded
+    throw new Error("setup exploded");
+          ^
+    at [WILDCARD]hook_error_test.ts:5:11
+
+broken teardown > c => ./hook_error_test.ts:15:3
+error: Error: Error in hook or setup of broken teardown: teardown exploded
+    throw new Error("teardown exploded");
+          ^
+    at [WILDCARD]hook_error_test.ts:13:11
+
+ FAILURES 
+
+broken setup > a => ./hook_error_test.ts:7:3
+broken teardown > c => ./hook_error_test.ts:15:3
+
+FAILED | 1 passed | 2 failed | 1 ignored ([WILDCARD])
+
+error: Test failed

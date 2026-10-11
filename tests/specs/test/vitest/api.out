@@ -1,0 +1,45 @@
+running 20 tests from ./api_test.ts
+outer > first ... ok ([WILDCARD])
+outer > inner > second ... ok ([WILDCARD])
+outer > skipped ... ignored ([WILDCARD])
+outer > todo ... ignored ([WILDCARD])
+outer > skipIf true ... ignored ([WILDCARD])
+outer > runIf true ... ok ([WILDCARD])
+outer > fails as expected ... ok ([WILDCARD])
+add(1, 2) > sums ... ok ([WILDCARD])
+add(2, 3) > sums ... ok ([WILDCARD])
+square 1 = 1 ... ok ([WILDCARD])
+square 2 = 4 ... ok ([WILDCARD])
+square 3 = 9 ... ok ([WILDCARD])
+upper a ... ok ([WILDCARD])
+upper b ... ok ([WILDCARD])
+template 1 + 1 ... ok ([WILDCARD])
+template 2 + 3 ... ok ([WILDCARD])
+concurrent > one ... ok ([WILDCARD])
+concurrent > two ... ok ([WILDCARD])
+retries ... ok ([WILDCARD])
+context skip ...
+------- output -------
+beforeAll
+beforeEach first
+afterEach first
+beforeEach cleanup first
+onTestFinished first
+inner beforeAll
+beforeEach second
+second body
+afterEach second
+beforeEach cleanup second
+inner afterAll
+beforeEach runIf true
+afterEach runIf true
+beforeEach cleanup runIf true
+beforeEach fails as expected
+afterEach fails as expected
+beforeEach cleanup fails as expected
+afterAll
+----- output end -----
+context skip ... ignored ([WILDCARD])
+
+ok | 16 passed | 0 failed | 4 ignored ([WILDCARD])
+
