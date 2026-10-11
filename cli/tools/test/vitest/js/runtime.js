@@ -509,7 +509,7 @@ function evalDefine(value) {
   }
 }
 
-function applyEnvAndDefines(config, environmentName) {
+function applyEnvAndDefines(config, environmentName, workerState) {
   setEnv("VITEST", "true");
   setEnv("TEST", "true");
   setEnv("VITEST_MODE", "RUN");
@@ -521,6 +521,8 @@ function applyEnvAndDefines(config, environmentName) {
     // ignore
   }
   const metaEnv = createImportMetaEnv();
+  // `vi.stubEnv()` stubs through the worker state's `metaEnv`.
+  workerState.metaEnv = metaEnv;
   metaEnv.BASE_URL = config.base ?? "/";
   metaEnv.MODE = config.mode ?? "test";
   metaEnv.DEV = true;
@@ -675,7 +677,7 @@ export async function startFile(specifier, config = {}) {
 
   setSafeTimers();
   installModuleMockingStubs();
-  applyEnvAndDefines(config, environmentName);
+  applyEnvAndDefines(config, environmentName, workerState);
   globalExpect.setState({ environment: environmentName });
 
   const environment = environments[environmentName];
