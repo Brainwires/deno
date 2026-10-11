@@ -221,19 +221,24 @@ class DenoBridge {
 }
 
 class DenoTestRunner extends TestRunner {
-  constructor(config, bridge, onCollected) {
+  #environmentReady;
+
+  constructor(config, bridge, setupEnvironment, onCollected) {
     super(config);
     this.bridge = bridge;
+    this.denoSetupEnvironment = setupEnvironment;
     this.denoOnCollected = onCollected;
     this.moduleRunner = { import: (path) => import(toImportSpecifier(path)) };
   }
 
   trace = (_name, attributes, cb) => (cb ?? attributes)();
 
-  importFile(filepath, source) {
+  async importFile(filepath, source) {
+    this.#environmentReady ??= this.denoSetupEnvironment();
+    await this.#environmentReady;
     const promise = import(toImportSpecifier(filepath));
-    if (source !== "collect") return promise;
-    return promise.catch((error) => {
+    if (source !== "collect") return await promise;
+    return await promise.catch((error) => {
       this.moduleEvaluationFailed = true;
       throw error;
     });
@@ -683,17 +688,31 @@ export async function startFile(specifier, config = {}) {
   applyEnvAndDefines(config, environmentName, workerState);
   globalExpect.setState({ environment: environmentName });
 
-  const environment = environments[environmentName];
-  if (environment === undefined) {
-    throw new Error(
-      `Unknown Vitest environment "${environmentName}" (supported: node, jsdom, happy-dom).`,
-    );
-  }
-  const environmentOptions = config.environmentOptions ?? {};
-  const environmentTeardown = await environment.setup(
-    globalThis,
-    environmentOptions,
-  );
+  // The environment is set up when Vitest's runner imports the first setup
+  // file (or the test module), so a failure is reported as the file's
+  // collection error, once.
+  let environmentTeardown;
+  const setupEnvironment = async () => {
+    const environment = environments[environmentName];
+    if (environment === undefined) {
+      throw new Error(
+        `Unknown Vitest environment "${environmentName}" (supported: node, jsdom, happy-dom).`,
+      );
+    }
+    try {
+      environmentTeardown = await environment.setup(
+        globalThis,
+        config.environmentOptions ?? {},
+      );
+    } catch (error) {
+      throw new Error(
+        `Failed to set up the "${environmentName}" test environment: ${
+          error?.message ?? error
+        }`,
+        { cause: error },
+      );
+    }
+  };
 
   if (config.globals) {
     for (const api of globalApis) {
@@ -703,7 +722,9 @@ export async function startFile(specifier, config = {}) {
 
   const bridge = new DenoBridge();
   const collected = createDeferred();
-  const runner = new DenoTestRunner(runnerConfig, bridge, (files) => {
+  const runner = new DenoTestRunner(runnerConfig, bridge, setupEnvironment, (
+    files,
+  ) => {
     for (const file of files) {
       if (file.result?.state === "fail" && file.result.errors?.length) {
         // A failed import surfaces again when Deno evaluates the module;

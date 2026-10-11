@@ -1,0 +1,9 @@
+{
+  "name": "vitest-config-project",
+  "private": true,
+  "type": "module",
+  "devDependencies": {
+    "jsdom": "*",
+    "vitest": "*"
+  }
+}
