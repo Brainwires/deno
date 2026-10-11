@@ -409,8 +409,11 @@ impl VitestOverrides {
             .unwrap_or_else(|| file.to_string());
           query.append_pair("url", &served);
         }
-        // a package's stylesheet: the content is never needed
-        None if is_css => {}
+        // a package's stylesheet or worker: the content is never needed
+        None if matches!(kind, "css" | "css-module" | "worker") => {}
+        None if kind == "url" => {
+          query.append_pair("url", &format!("/node_modules/{path}"));
+        }
         None => return None,
       }
     }
@@ -1001,6 +1004,14 @@ mod tests {
     assert_eq!(kind("./module.ts"), None);
     assert_eq!(kind("./data.json"), None);
     assert_eq!(kind("pkg/image.png"), None);
+    assert_eq!(
+      kind("pkg/worker.js?worker"),
+      Some("kind=worker".to_string())
+    );
+    assert_eq!(
+      kind("pkg/font.woff2?url"),
+      Some("kind=url&url=/node_modules/pkg/font.woff2".to_string())
+    );
     let in_node_modules =
       Url::parse("file:///project/node_modules/pkg/index.js").unwrap();
     assert_eq!(
