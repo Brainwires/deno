@@ -4,7 +4,7 @@ running 0 tests from ./vi_mock_test.ts
  ERRORS 
 
 ./vi_mock_test.ts (uncaught error)
-error: VitestCompatError: vi.mock("./some_module.ts") is not supported yet by `deno test`'s Vitest compatibility: module mocking is not implemented (called at [WILDCARD]vi_mock_test.ts:3:4).
+error: (in promise) VitestCompatError: vi.mock("./some_module.ts") is not supported yet by `deno test`'s Vitest compatibility: module mocking is not implemented (called at [WILDCARD]vi_mock_test.ts:3:4).
     at [WILDCARD]vi_mock_test.ts:3:4
 This error was not caught from a test and caused the test runner to fail on the referenced module.
 It most likely originated from a dangling promise, event/timeout handler or top-level code.

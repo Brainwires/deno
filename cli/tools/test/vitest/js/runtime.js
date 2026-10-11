@@ -48,6 +48,8 @@ function moduleMockingUnsupported(api) {
         }.`,
     );
     error.name = "VitestCompatError";
+    // Start the stack at the caller, so the error points at the user's code.
+    Error.captureStackTrace(error, unsupported);
     throw error;
   };
 }
