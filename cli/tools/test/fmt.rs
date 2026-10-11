@@ -55,15 +55,27 @@ fn abbreviate_test_error(js_error: &JsError) -> JsError {
     });
     // An error raised by Vitest itself (a timeout, `.fails`) has no user
     // frames; the test's location is reported instead.
-    frames = match last_user_frame {
-      Some(last) => frames
-        .into_iter()
-        .enumerate()
-        .filter(|(i, f)| *i <= last && !is_vitest_frame(f))
-        .map(|(_, f)| f)
-        .collect(),
-      None => Vec::new(),
-    };
+    let kept = frames
+      .iter()
+      .enumerate()
+      .filter(|(i, f)| {
+        last_user_frame.is_some_and(|last| *i <= last) && !is_vitest_frame(f)
+      })
+      .map(|(i, _)| i)
+      .collect::<Vec<_>>();
+    // Keep the source line pointing at the same (kept) frame.
+    js_error.source_line_frame_index = js_error
+      .source_line_frame_index
+      .and_then(|index| kept.iter().position(|i| *i == index));
+    if js_error.source_line_frame_index.is_none() {
+      js_error.source_line = None;
+    }
+    frames = frames
+      .into_iter()
+      .enumerate()
+      .filter(|(i, _)| kept.contains(i))
+      .map(|(_, f)| f)
+      .collect();
   }
 
   // check if there are any stack frames coming from user code
