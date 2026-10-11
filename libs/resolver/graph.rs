@@ -46,6 +46,8 @@ use crate::workspace::sloppy_imports_resolve;
 pub enum SpecifierOverride {
   /// Resolve the specifier to this URL.
   Url(Url),
+  /// Resolve the specifier as usual, and to this URL only if that fails.
+  Fallback(Url),
   /// Resolve `specifier` instead, from `referrer` when set (otherwise from
   /// the original referrer). Overrides are not consulted again for it.
   Rewrite {
@@ -337,6 +339,15 @@ impl<
   ) -> Result<Url, ResolveWithGraphError> {
     match self.specifier_override(raw_specifier, referrer, options.kind) {
       Some(SpecifierOverride::Url(url)) => Ok(url),
+      Some(SpecifierOverride::Fallback(url)) => self
+        .resolve_with_graph_no_override(
+          graph,
+          raw_specifier,
+          referrer,
+          referrer_range_start,
+          options,
+        )
+        .or(Ok(url)),
       Some(SpecifierOverride::Rewrite {
         specifier,
         referrer: new_referrer,
@@ -541,6 +552,15 @@ impl<
   ) -> Result<Url, DenoResolveError> {
     match self.specifier_override(raw_specifier, referrer, resolution_kind) {
       Some(SpecifierOverride::Url(url)) => Ok(url),
+      Some(SpecifierOverride::Fallback(url)) => self
+        .resolve_no_override(
+          raw_specifier,
+          referrer,
+          referrer_range_start,
+          resolution_mode,
+          resolution_kind,
+        )
+        .or(Ok(url)),
       Some(SpecifierOverride::Rewrite {
         specifier,
         referrer: new_referrer,

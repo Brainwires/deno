@@ -30,6 +30,7 @@ import { DenoSnapshotEnvironment } from "./snapshot_environment.js";
 const ORIGINAL_ERROR = Symbol.for("deno.vitest.originalError");
 const TEST_SKIP = Symbol.for("Deno.test.skip");
 const TEST_LOCATION = Symbol.for("Deno.test.location");
+const COLLECTION_FAILED = Symbol.for("deno.vitest.collectionFailed");
 
 const { fileURLToPath, pathToFileURL } = await import("node:url");
 
@@ -855,11 +856,11 @@ export async function startFile(specifier, config = {}) {
   const files = await collected.promise;
   for (const file of files) {
     if (!file.denoCollectionError) continue;
-    // Reported now (or by Deno), not again at teardown.
+    // Reported here, once: `deno test` does not evaluate the test module
+    // again after a failed collection (see `COLLECTION_FAILED`).
     file.denoReported = true;
-    // A failed import of the test module is reported by Deno when it
-    // evaluates the module itself; other collection errors are reported here.
-    if (!runner.moduleEvaluationFailed) throw file.denoCollectionError;
+    globalThis[COLLECTION_FAILED] = true;
+    throw file.denoCollectionError;
   }
 }
 

@@ -868,6 +868,12 @@ async fn configure_main_worker(
     worker.cancel_terminate_execution();
     return Ok((coverage_collector, worker.into_main_worker()));
   }
+  if vitest::collection_failed(&mut worker) {
+    // The Vitest preload imported the test module itself and reported why
+    // collecting it failed; evaluating it again would only repeat that (or,
+    // with a module graph left half-evaluated, wait forever).
+    return Ok((coverage_collector, worker.into_main_worker()));
+  }
   check_res(worker.execute_side_module().await)?;
   if op_state.borrow().has::<ops::testing::IsolateExitInfo>() {
     worker.cancel_terminate_execution();
@@ -2379,6 +2385,7 @@ pub async fn run_tests(
     Some(
       vitest::VitestCompat::setup(
         factory.resolver().await?,
+        &factory.deno_dir()?.root.join("vitest_compat"),
         &worker_factory,
         factory.root_permissions_container()?.clone(),
         cli_options.initial_cwd(),
@@ -2616,6 +2623,7 @@ pub async fn run_tests_with_watch(
           Some(
             vitest::VitestCompat::setup(
               factory.resolver().await?,
+              &factory.deno_dir()?.root.join("vitest_compat"),
               &worker_factory,
               factory.root_permissions_container()?.clone(),
               cli_options.initial_cwd(),

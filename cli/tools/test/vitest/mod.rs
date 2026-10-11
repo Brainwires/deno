@@ -96,8 +96,23 @@ static SOURCES: &[(&str, &str)] = sources!(
 
 const RESOLVED_CONFIG_PATH: &str = "resolved_config.json";
 
+/// Bumped when `types/` changes, so stale written copies are not reused.
+const TYPES_VERSION: &str = "v1";
+
 /// The resolved config served as `deno-vitest:///resolved_config.json`.
 static RESOLVED_CONFIG: RwLock<Option<Arc<str>>> = RwLock::new(None);
+
+/// Whether the Vitest preload of this worker failed to collect the test
+/// module (it then reported the error itself).
+pub fn collection_failed(worker: &mut crate::worker::CliMainWorker) -> bool {
+  // The script throws when the flag is set (no scope is needed to read it).
+  worker
+    .execute_script_static(
+      deno_core::located_script_name!(),
+      "if (globalThis[Symbol.for('deno.vitest.collectionFailed')] === true) { throw 0; }",
+    )
+    .is_err()
+}
 
 /// The URL of a built-in module.
 pub fn module_url(path: &str) -> Url {
@@ -319,15 +334,43 @@ pub struct VitestOverrides {
   /// The Vite root, with a Vitest config: CSS, asset and `?raw` / `?url`
   /// imports then resolve like Vite resolves them.
   vite_root: RwLock<Option<PathBuf>>,
+  /// Where the fallback type declarations are written (see `types/`).
+  types_dir: Option<PathBuf>,
 }
 
+/// Type declarations for the built-in modules, used when the real package's
+/// types are not installed.
+static TYPES: &[(&str, &str)] = &[
+  ("vitest.js", include_str!("types/vitest.d.ts")),
+  ("config.js", include_str!("types/config.d.ts")),
+  ("jest_globals.js", include_str!("types/jest_globals.d.ts")),
+];
+
 impl VitestOverrides {
-  fn new(root: &Path) -> Result<Self, AnyError> {
+  fn new(root: &Path, types_dir: Option<PathBuf>) -> Result<Self, AnyError> {
     Ok(Self {
       root_referrer: RwLock::new(root_referrer(root)?),
       aliases: Default::default(),
       vite_root: Default::default(),
+      types_dir,
     })
+  }
+
+  /// The fallback type declarations of a built-in module.
+  fn types_url(&self, module: &str) -> Option<Url> {
+    let (_, source) = TYPES.iter().find(|(m, _)| *m == module)?;
+    let path = self
+      .types_dir
+      .as_ref()?
+      .join(module.replace(".js", ".d.ts"));
+    if !path.is_file() {
+      std::fs::create_dir_all(path.parent()?).ok()?;
+      // write via a temp file so concurrent runs never see a partial file
+      let temp = path.with_extension(format!("tmp{}", std::process::id()));
+      std::fs::write(&temp, source).ok()?;
+      std::fs::rename(&temp, &path).ok()?;
+    }
+    Url::from_file_path(path).ok()
   }
 
   /// The virtual module Vite would provide for a CSS file, a static asset or
@@ -676,11 +719,17 @@ impl SpecifierOverrides for VitestOverrides {
         referrer: Some(self.root_referrer.read().unwrap().clone()),
       });
     }
-    // Type checking keeps resolving to the real package's types.
-    if resolution_kind == NodeResolutionKind::Types {
-      return None;
-    }
     if let Some(module) = builtin_module(raw_specifier, referrer) {
+      if resolution_kind == NodeResolutionKind::Types {
+        // The real package's types when installed (an `npm:` specifier is
+        // never installed just for its types), else the fallback ones.
+        let types = self.types_url(module)?;
+        return Some(if raw_specifier.starts_with("npm:") {
+          SpecifierOverride::Url(types)
+        } else {
+          SpecifierOverride::Fallback(types)
+        });
+      }
       return Some(SpecifierOverride::Url(module_url(module)));
     }
     let aliases = self.aliases.read().unwrap();
@@ -779,8 +828,10 @@ pub struct VitestCompat {
 
 impl VitestCompat {
   /// Installs the built-in modules and loads the Vitest config, if any.
+  #[allow(clippy::too_many_arguments, reason = "setup")]
   pub async fn setup(
     resolver: &crate::resolver::CliResolver,
+    types_dir: &Path,
     worker_factory: &CliMainWorkerFactory,
     permissions: PermissionsContainer,
     initial_cwd: &Path,
@@ -790,7 +841,10 @@ impl VitestCompat {
     let config_path =
       config::find_config(initial_cwd, test_flags.vitest.config.as_deref())?;
     // Installed first: the config itself imports `vitest/config`.
-    let overrides = Arc::new(VitestOverrides::new(initial_cwd)?);
+    let overrides = Arc::new(VitestOverrides::new(
+      initial_cwd,
+      Some(types_dir.join(TYPES_VERSION)),
+    )?);
     resolver.set_specifier_overrides(overrides.clone());
     let mut compat = Self::default();
     let mut aliases = Vec::new();
@@ -1060,6 +1114,7 @@ mod tests {
       ),
       aliases: Default::default(),
       vite_root: Default::default(),
+      types_dir: None,
     };
     let builtin = module_url("vitest.js");
     assert_eq!(
@@ -1081,6 +1136,7 @@ mod tests {
       overrides.resolve("node:fs", &builtin, NodeResolutionKind::Execution),
       None
     );
+    // without a types dir there are no fallback types
     assert_eq!(
       overrides.resolve("vitest", &referrer(), NodeResolutionKind::Types),
       None
@@ -1089,7 +1145,7 @@ mod tests {
 
   #[test]
   fn vite_asset_modules() {
-    let overrides = VitestOverrides::new(Path::new("/project")).unwrap();
+    let overrides = VitestOverrides::new(Path::new("/project"), None).unwrap();
     let referrer = Url::parse("file:///project/src/a.test.ts").unwrap();
     // only with a Vitest config
     assert_eq!(overrides.vite_asset_module("./a.css", &referrer), None);
