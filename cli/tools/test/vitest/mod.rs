@@ -97,7 +97,7 @@ static SOURCES: &[(&str, &str)] = sources!(
 const RESOLVED_CONFIG_PATH: &str = "resolved_config.json";
 
 /// Bumped when `types/` changes, so stale written copies are not reused.
-const TYPES_VERSION: &str = "v2";
+const TYPES_VERSION: &str = "v3";
 
 /// The resolved config served as `deno-vitest:///resolved_config.json`.
 static RESOLVED_CONFIG: RwLock<Option<Arc<str>>> = RwLock::new(None);

@@ -9,13 +9,12 @@
 // Callbacks get `any` parameters from these shapes, rather than implicit
 // `any`s that a strict type check rejects.
 type Callback = (...args: any[]) => any;
-type Each<R> = (cases: any, ...values: any[]) => (
-  name: any,
-  optionsOrFn?: any,
-  fn?: Callback | number,
-) => R;
-interface TestAPI {
-  (name: any, optionsOrFn?: any, fn?: Callback | number): void;
+interface Register<R> {
+  (name: any, fn?: Callback, timeout?: number): R;
+  (name: any, options: any, fn?: Callback): R;
+}
+type Each<R> = (cases: any, ...values: any[]) => Register<R>;
+interface TestAPI extends Register<void> {
   each: Each<void>;
   for: Each<void>;
   skip: TestAPI;
@@ -29,8 +28,7 @@ interface TestAPI {
   extend(fixtures: any): TestAPI;
   scoped(fixtures: any): void;
 }
-interface SuiteAPI {
-  (name: any, optionsOrFn?: any, fn?: Callback | number): void;
+interface SuiteAPI extends Register<void> {
   each: Each<void>;
   for: Each<void>;
   skip: SuiteAPI;
