@@ -136,6 +136,30 @@ fn self_fork_env(cmd: &Path, cwd: &Path) -> Vec<(OsString, OsString)> {
   env
 }
 
+/// Whether spawning `cmd` with an IPC channel (`ipc`) is a fork of this
+/// process's own executable that an embedder authorizes itself (the children
+/// [`self_fork_env`] gives its variables to): the run permission isn't
+/// checked for it. A packaged desktop app forks its own executable for its
+/// workers, wherever it is installed, and that path is unknown when the app's
+/// permissions are baked; the runtime authorizes such a launch with the
+/// per-launch token it hands only its own forks. Without an IPC channel, or
+/// with no embedder variable registered (the CLI), spawning the executable
+/// needs the permission as any program does.
+fn is_authorized_self_fork(cmd: &Path, ipc: bool) -> bool {
+  if !ipc {
+    return false;
+  }
+  let registered = !SELF_FORK_ENV
+    .lock()
+    .unwrap_or_else(std::sync::PoisonError::into_inner)
+    .is_empty()
+    || SELF_FORK_CWD_ENV
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .is_some();
+  registered && is_current_exe(cmd)
+}
+
 /// Whether `cmd` is this process's own executable (the same file, whatever
 /// path names it).
 fn is_current_exe(cmd: &Path) -> bool {
@@ -789,6 +813,8 @@ fn create_command(
     None
   };
 
+  // A child with an IPC channel (`fork()`, or `stdio: [..., "ipc"]`).
+  let ipc = args.ipc.is_some_and(|fd| fd >= 0) || args.stdio.stdin.is_ipc();
   let (cmd, run_env) = compute_run_cmd_and_check_permissions(
     &args.cmd,
     args.cwd.as_deref(),
@@ -797,6 +823,7 @@ fn create_command(
     state,
     api_name,
     allow_cwd_inherit,
+    ipc,
   )?;
 
   // On Unix, optionally run the command through `/bin/sh` so that files which
@@ -1406,6 +1433,10 @@ fn spawn_child_node(
   })
 }
 
+#[allow(
+  clippy::too_many_arguments,
+  reason = "the spawn inputs the permission check reads"
+)]
 fn compute_run_cmd_and_check_permissions(
   arg_cmd: &str,
   arg_cwd: Option<&str>,
@@ -1414,6 +1445,7 @@ fn compute_run_cmd_and_check_permissions(
   state: &mut OpState,
   api_name: &str,
   allow_cwd_inherit: bool,
+  ipc: bool,
 ) -> Result<(PathBuf, RunEnv), ProcessError> {
   let run_env =
     compute_run_env(arg_cwd, arg_envs, arg_clear_env, allow_cwd_inherit)
@@ -1434,6 +1466,7 @@ fn compute_run_cmd_and_check_permissions(
     ),
     &run_env,
     api_name,
+    is_authorized_self_fork(&cmd, ipc),
   )?;
   Ok((cmd, run_env))
 }
@@ -1625,6 +1658,9 @@ fn check_run_permission(
   cmd: &RunQueryDescriptor,
   run_env: &RunEnv,
   api_name: &str,
+  // An embedder-authorized fork of this executable (is_authorized_self_fork):
+  // only the LD_* / DYLD_* check below applies to it.
+  self_fork: bool,
 ) -> Result<(), CheckRunPermissionError> {
   let permissions = state.borrow_mut::<PermissionsContainer>();
   if !permissions.query_run_all(api_name) {
@@ -1647,7 +1683,9 @@ fn check_run_permission(
         ),
       )));
     }
-    permissions.check_run(cmd, api_name)?;
+    if !self_fork {
+      permissions.check_run(cmd, api_name)?;
+    }
   }
   Ok(())
 }
@@ -2211,6 +2249,7 @@ mod deprecated {
       state,
       "Deno.run()",
       /* allow_cwd_inherit */ false,
+      /* ipc */ false,
     )?;
 
     #[cfg(windows)]
@@ -2650,12 +2689,52 @@ mod tests {
 
 #[cfg(test)]
 mod self_fork_tests {
+  use std::sync::Arc;
+
+  use deno_core::OpState;
+  use deno_permissions::Permissions;
+  use deno_permissions::PermissionsContainer;
+  use deno_permissions::RuntimePermissionDescriptorParser;
+
+  /// Whether a process with no permissions may spawn `cmd` (with `env`, and
+  /// an IPC channel when `ipc`).
+  fn may_spawn(cmd: &std::path::Path, ipc: bool, env: &[(&str, &str)]) -> bool {
+    let mut state = OpState::new(None);
+    let parser =
+      RuntimePermissionDescriptorParser::new(sys_traits::impls::RealSys);
+    state.put(PermissionsContainer::new(
+      Arc::new(parser),
+      Permissions::none_without_prompt(),
+    ));
+    let env: Vec<(String, String)> = env
+      .iter()
+      .map(|(k, v)| (k.to_string(), v.to_string()))
+      .collect();
+    super::compute_run_cmd_and_check_permissions(
+      cmd.to_str().unwrap(),
+      None,
+      &env,
+      // Only `env`: `cargo test` runs this with LD_LIBRARY_PATH set, which
+      // alone needs --allow-run.
+      true,
+      &mut state,
+      "Deno.Command().spawn()",
+      true,
+      ipc,
+    )
+    .is_ok()
+  }
+
+  // One test: the registrations are process-wide, and the checks before
+  // them must see none.
   #[test]
   fn self_fork_env_goes_only_to_this_executable() {
     let exe = std::env::current_exe().unwrap();
     let cwd = std::path::Path::new("/some/dir");
     // Nothing registered: nothing added.
     assert!(super::self_fork_env(&exe, cwd).is_empty());
+    // ... and forking this executable needs the run permission (the CLI).
+    assert!(!may_spawn(&exe, true, &[]));
     super::set_self_fork_env_var("DENO_PROCESS_TEST_SELF_FORK", "a");
     super::set_self_fork_env_var("DENO_PROCESS_TEST_SELF_FORK", "b");
     assert_eq!(
@@ -2687,5 +2766,22 @@ mod self_fork_tests {
       ]
     );
     assert!(super::self_fork_env(other, cwd).is_empty());
+
+    // With the embedder's variables registered, a fork of this executable
+    // with an IPC channel needs no run permission, by any path to it ...
+    assert!(may_spawn(&exe, true, &[]));
+    assert!(may_spawn(&via_dot, true, &[]));
+    // ... but spawning it without an IPC channel still does,
+    assert!(!may_spawn(&exe, false, &[]));
+    // as does any other program, with one or not,
+    assert!(!may_spawn(other, true, &[]));
+    assert!(!may_spawn(other, false, &[]));
+    // and a fork with an LD_* / DYLD_* variable (code injection).
+    assert!(!may_spawn(&exe, true, &[("LD_PRELOAD", "/tmp/x.so")]));
+    assert!(!may_spawn(
+      &exe,
+      true,
+      &[("DYLD_INSERT_LIBRARIES", "/tmp/x")]
+    ));
   }
 }
