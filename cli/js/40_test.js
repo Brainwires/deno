@@ -16,6 +16,7 @@ const {
   op_test_event_step_wait,
   op_test_get_origin,
   op_test_isolate_exit,
+  op_test_set_import_meta_proto,
 } = core.ops;
 const {
   ArrayIsArray,
@@ -897,3 +898,6 @@ function wrapTest(desc) {
 globalThis.Deno.test = test;
 globalThis.Deno[globalThis.Deno.internal].installTestIsolateExitHandler =
   installTestIsolateExitHandler;
+// Used by the Vitest compatibility layer to provide `import.meta.env`.
+globalThis.Deno[globalThis.Deno.internal].testSetImportMetaProto =
+  op_test_set_import_meta_proto;

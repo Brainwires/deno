@@ -489,8 +489,8 @@ function createImportMetaEnv() {
 }
 
 function installImportMetaEnv(env) {
-  const setProto = globalThis.Deno?.[globalThis.Deno?.internal]?.core?.ops
-    ?.op_test_set_import_meta_proto;
+  const setProto = globalThis.Deno?.[globalThis.Deno?.internal]
+    ?.testSetImportMetaProto;
   if (typeof setProto === "function") {
     setProto({ env });
   }
