@@ -363,6 +363,8 @@ impl TestRun {
             vec![],
             // Executing tests in the LSP currently doesn't support require option
             vec![],
+            // nor the Vitest compatibility layer
+            None,
             worker_sender,
             fail_fast_tracker,
             test::TestSpecifierOptions {

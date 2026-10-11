@@ -981,6 +981,16 @@ impl LibMainWorker {
     Ok(())
   }
 
+  /// Loads and evaluates `specifier` as a side module, without then running
+  /// the event loop to completion (unlike a preload module).
+  pub async fn execute_side_module_url(
+    &mut self,
+    specifier: &Url,
+  ) -> Result<(), CoreError> {
+    let id = self.worker.preload_side_module(specifier).await?;
+    self.worker.evaluate_module(id).await
+  }
+
   pub async fn execute_preload_modules(&mut self) -> Result<(), CoreError> {
     for preload_module_url in self.preload_modules.iter() {
       let id = self.worker.preload_side_module(preload_module_url).await?;

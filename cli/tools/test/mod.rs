@@ -762,6 +762,7 @@ async fn configure_main_worker(
   specifier: &Url,
   preload_modules: Vec<Url>,
   require_modules: Vec<Url>,
+  vitest_preload: Option<&Url>,
   permissions_container: PermissionsContainer,
   worker_sender: TestEventWorkerSender,
   options: &TestSpecifierOptions,
@@ -868,7 +869,16 @@ async fn configure_main_worker(
     worker.cancel_terminate_execution();
     return Ok((coverage_collector, worker.into_main_worker()));
   }
-  log::debug!("configure_main_worker: preload done");
+  if let Some(vitest_preload) = vitest_preload {
+    // Unlike a preload module, the Vitest preload must not run the event
+    // loop to completion: Vitest's runner keeps working (waiting for Deno to
+    // invoke each test) and the test module may keep a port or timer alive.
+    check_res(worker.execute_side_module_url(vitest_preload).await)?;
+    if op_state.borrow().has::<ops::testing::IsolateExitInfo>() {
+      worker.cancel_terminate_execution();
+      return Ok((coverage_collector, worker.into_main_worker()));
+    }
+  }
   if vitest::module_imported(&mut worker) {
     // Vitest's runner (run by the preload) imported the test module itself
     // and reported any failure; evaluating it again as the side module would
@@ -894,6 +904,7 @@ pub async fn test_specifier(
   specifier: ModuleSpecifier,
   preload_modules: Vec<ModuleSpecifier>,
   require_modules: Vec<ModuleSpecifier>,
+  vitest_preload: Option<ModuleSpecifier>,
   worker_sender: TestEventWorkerSender,
   fail_fast_tracker: FailFastTracker,
   options: TestSpecifierOptions,
@@ -907,6 +918,7 @@ pub async fn test_specifier(
     &specifier,
     preload_modules,
     require_modules,
+    vitest_preload.as_ref(),
     permissions_container,
     worker_sender,
     &options,
@@ -989,14 +1001,11 @@ async fn test_specifier_inner(
   options: TestSpecifierOptions,
 ) -> Result<(), TestSpecifierError> {
   // Ensure that there are no pending exceptions before we start running tests
-  log::debug!("test_specifier_inner: run_up_to_duration");
   worker.run_up_to_duration(Duration::from_millis(0)).await?;
 
-  log::debug!("test_specifier_inner: dispatch_load_event");
   worker
     .dispatch_load_event()
     .map_err(|e| CoreErrorKind::Js(e).into_box())?;
-  log::debug!("test_specifier_inner: run_tests_for_worker");
 
   run_tests_for_worker(
     worker,
@@ -1769,14 +1778,11 @@ async fn test_specifiers(
   let join_handles = specifiers.into_iter().map(move |specifier| {
     let worker_factory = worker_factory.clone();
     let specifier_dir = cli_options.workspace().resolve_member_dir(&specifier);
-    let mut preload_modules = preload_modules.clone();
+    let preload_modules = preload_modules.clone();
     // A Vitest test file is collected and run by Vitest's runner, which the
     // file's preload sets up.
-    if let Some(preload) =
-      vitest.as_ref().and_then(|v| v.preload_for(&specifier))
-    {
-      preload_modules.push(preload);
-    }
+    let vitest_preload =
+      vitest.as_ref().and_then(|v| v.preload_for(&specifier));
     let require_modules = require_modules.clone();
     let worker_sender = test_event_sender_factory.worker();
     let fail_fast_tracker = fail_fast_tracker.clone();
@@ -1802,6 +1808,7 @@ async fn test_specifiers(
         specifier,
         preload_modules,
         require_modules,
+        vitest_preload,
         worker_sender,
         fail_fast_tracker,
         specifier_options,
