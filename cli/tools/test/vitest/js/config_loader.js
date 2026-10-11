@@ -8,6 +8,7 @@
 // stored as JSON under `globalThis[Symbol.for("deno.vitest.loadedConfig")]`.
 
 import { dirname, isAbsolute, resolve } from "node:path";
+import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { loadEnv, mergeConfig } from "./config.js";
 import { b as defaultInclude, d as defaultExclude } from "./vendor/defaults.js";
@@ -50,6 +51,95 @@ function normalizeAliases(alias) {
       : String(find),
     replacement: String(replacement),
   }));
+}
+
+// tsconfig.json is JSONC: drop comments and trailing commas.
+function parseJsonc(text) {
+  let out = "";
+  let inString = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (inString) {
+      out += c;
+      if (c === "\\") out += text[++i] ?? "";
+      else if (c === '"') inString = false;
+    } else if (c === '"') {
+      inString = true;
+      out += c;
+    } else if (c === "/" && text[i + 1] === "/") {
+      while (i < text.length && text[i] !== "\n") i++;
+      out += "\n";
+    } else if (c === "/" && text[i + 1] === "*") {
+      i += 2;
+      while (i < text.length && !(text[i] === "*" && text[i + 1] === "/")) i++;
+      i++;
+    } else {
+      out += c;
+    }
+  }
+  return JSON.parse(out.replace(/,(\s*[}\]])/g, "$1"));
+}
+
+/** `compilerOptions.paths` of a tsconfig, following `extends`. */
+function readTsconfigPaths(path, seen = new Set()) {
+  if (seen.has(path) || !existsSync(path)) return undefined;
+  seen.add(path);
+  const tsconfig = parseJsonc(readFileSync(path, "utf8"));
+  const options = tsconfig.compilerOptions ?? {};
+  if (options.paths) {
+    const base = resolve(dirname(path), options.baseUrl ?? ".");
+    return { paths: options.paths, base };
+  }
+  for (const parent of toArray(tsconfig.extends)) {
+    if (typeof parent !== "string" || !parent.startsWith(".")) continue;
+    let parentPath = resolve(dirname(path), parent);
+    if (!parentPath.endsWith(".json")) parentPath += ".json";
+    const found = readTsconfigPaths(parentPath, seen);
+    if (found) return found;
+  }
+  return undefined;
+}
+
+function escapeRegExp(text) {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * Vite's `resolve.tsconfigPaths` (and the vite-tsconfig-paths plugin):
+ * tsconfig `paths` become aliases.
+ */
+function tsconfigPathAliases(config, root) {
+  const plugins = (config.plugins ?? []).flat(Infinity);
+  const enabled = config.resolve?.tsconfigPaths === true ||
+    plugins.some((p) =>
+      p && typeof p === "object" &&
+      /tsconfig-paths/.test(String(p.name ?? ""))
+    );
+  if (!enabled) return [];
+  const found = readTsconfigPaths(resolve(root, "tsconfig.json"));
+  if (!found) return [];
+  const aliases = [];
+  for (const [pattern, targets] of Object.entries(found.paths)) {
+    const target = toArray(targets)[0];
+    if (typeof target !== "string") continue;
+    const star = pattern.indexOf("*");
+    if (star === -1) {
+      aliases.push({
+        find: { regex: `^${escapeRegExp(pattern)}$`, flags: "" },
+        replacement: resolve(found.base, target),
+      });
+    } else {
+      const prefix = escapeRegExp(pattern.slice(0, star));
+      const suffix = escapeRegExp(pattern.slice(star + 1));
+      const [before, after = ""] = target.split("*");
+      aliases.push({
+        find: { regex: `^${prefix}(.*)${suffix}$`, flags: "" },
+        replacement: resolve(found.base, before) + (before.endsWith("/") ? "/" : "") +
+          "$1" + after,
+      });
+    }
+  }
+  return aliases;
 }
 
 function toArray(value) {
@@ -142,6 +232,7 @@ function resolveProject(config, configDir, fallbackName) {
     alias: [
       ...normalizeAliases(test.alias),
       ...normalizeAliases(config.resolve?.alias),
+      ...tsconfigPathAliases(config, root),
     ],
     config: {
       root: projectRoot,

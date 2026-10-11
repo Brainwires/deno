@@ -257,13 +257,47 @@ impl Alias {
         if !regex.is_match(specifier) {
           return None;
         }
-        // JS replacement patterns use `$1`; so does the regex crate (`$1`,
-        // `${1}`), but `$&` has no equivalent.
-        let replacement = self.replacement.replace("$&", "${0}");
-        Some(regex.replace(specifier, replacement.as_str()).into_owned())
+        Some(
+          regex
+            .replace(specifier, js_replacement_to_rust(&self.replacement))
+            .into_owned(),
+        )
       }
     }
   }
+}
+
+/// Converts a JS `String.prototype.replace` pattern (`$1`, `$&`) to the
+/// regex crate's syntax (`${1}`, `${0}`), where `$1a` would name a group.
+fn js_replacement_to_rust(replacement: &str) -> String {
+  let mut out = String::with_capacity(replacement.len());
+  let mut chars = replacement.chars().peekable();
+  while let Some(c) = chars.next() {
+    if c != '$' {
+      out.push(c);
+      continue;
+    }
+    match chars.peek() {
+      Some('&') => {
+        chars.next();
+        out.push_str("${0}");
+      }
+      Some('$') => {
+        chars.next();
+        out.push_str("$$");
+      }
+      Some(d) if d.is_ascii_digit() => {
+        let mut digits = String::new();
+        while let Some(d) = chars.peek().filter(|d| d.is_ascii_digit()) {
+          digits.push(*d);
+          chars.next();
+        }
+        out.push_str(&format!("${{{digits}}}"));
+      }
+      _ => out.push_str("$$"),
+    }
+  }
+  out
 }
 
 /// Resolves the built-in Vitest modules and applies config aliases.
@@ -725,6 +759,11 @@ mod tests {
       replacement: "/src/$1".to_string(),
     };
     assert_eq!(groups.apply("~/a/b"), Some("/src/a/b".to_string()));
+    let suffix = Alias {
+      find: AliasFind::Regex(Regex::new("^@x/(.*)$").unwrap()),
+      replacement: "/lib/$1abc/$&".to_string(),
+    };
+    assert_eq!(suffix.apply("@x/y"), Some("/lib/yabc/@x/y".to_string()));
   }
 
   #[test]
