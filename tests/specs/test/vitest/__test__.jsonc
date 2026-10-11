@@ -57,6 +57,11 @@
       "output": "no_compat.out",
       "exitCode": 1
     },
+    "type_check_with_fallback_types": {
+      "args": "test -A typed_test.ts",
+      "output": "typed.out",
+      "exitCode": 0
+    },
     "config": {
       "cwd": "config_project",
       "args": "test -A --no-check",

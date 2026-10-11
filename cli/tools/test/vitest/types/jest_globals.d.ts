@@ -5,13 +5,15 @@
 
 // deno-lint-ignore-file no-explicit-any
 
-export declare const describe: any;
-export declare const it: any;
-export declare const test: any;
-export declare const beforeAll: any;
-export declare const afterAll: any;
-export declare const beforeEach: any;
-export declare const afterEach: any;
+export {
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  it,
+  test,
+} from "./vitest.d.ts";
 export declare const expect: any;
 export declare const jest: any;
 declare const globals: any;

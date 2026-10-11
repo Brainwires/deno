@@ -97,7 +97,7 @@ static SOURCES: &[(&str, &str)] = sources!(
 const RESOLVED_CONFIG_PATH: &str = "resolved_config.json";
 
 /// Bumped when `types/` changes, so stale written copies are not reused.
-const TYPES_VERSION: &str = "v1";
+const TYPES_VERSION: &str = "v2";
 
 /// The resolved config served as `deno-vitest:///resolved_config.json`.
 static RESOLVED_CONFIG: RwLock<Option<Arc<str>>> = RwLock::new(None);
@@ -356,21 +356,23 @@ impl VitestOverrides {
     })
   }
 
-  /// The fallback type declarations of a built-in module.
+  /// The fallback type declarations of a built-in module (all of them are
+  /// written together: they import each other).
   fn types_url(&self, module: &str) -> Option<Url> {
-    let (_, source) = TYPES.iter().find(|(m, _)| *m == module)?;
-    let path = self
-      .types_dir
-      .as_ref()?
-      .join(module.replace(".js", ".d.ts"));
-    if !path.is_file() {
-      std::fs::create_dir_all(path.parent()?).ok()?;
-      // write via a temp file so concurrent runs never see a partial file
-      let temp = path.with_extension(format!("tmp{}", std::process::id()));
-      std::fs::write(&temp, source).ok()?;
-      std::fs::rename(&temp, &path).ok()?;
+    TYPES.iter().find(|(m, _)| *m == module)?;
+    let dir = self.types_dir.as_ref()?;
+    let path_of = |m: &str| dir.join(m.replace(".js", ".d.ts"));
+    if !path_of(module).is_file() {
+      std::fs::create_dir_all(dir).ok()?;
+      for (m, source) in TYPES {
+        // via a temp file, so a concurrent run never reads a partial file
+        let path = path_of(m);
+        let temp = path.with_extension(format!("tmp{}", std::process::id()));
+        std::fs::write(&temp, source).ok()?;
+        std::fs::rename(&temp, &path).ok()?;
+      }
     }
-    Url::from_file_path(path).ok()
+    Url::from_file_path(path_of(module)).ok()
   }
 
   /// The virtual module Vite would provide for a CSS file, a static asset or
@@ -1189,7 +1191,10 @@ mod tests {
     );
     assert_eq!(kind("./module.ts"), None);
     assert_eq!(kind("./data.json"), None);
-    assert_eq!(kind("pkg/image.png"), None);
+    assert_eq!(
+      kind("pkg/image.png"),
+      Some("kind=url&url=/node_modules/pkg/image.png".to_string())
+    );
     assert_eq!(
       kind("pkg/worker.js?worker"),
       Some("kind=worker".to_string())
