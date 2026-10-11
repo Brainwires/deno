@@ -868,10 +868,10 @@ async fn configure_main_worker(
     worker.cancel_terminate_execution();
     return Ok((coverage_collector, worker.into_main_worker()));
   }
-  if vitest::collection_failed(&mut worker) {
-    // The Vitest preload imported the test module itself and reported why
-    // collecting it failed; evaluating it again would only repeat that (or,
-    // with a module graph left half-evaluated, wait forever).
+  if vitest::module_imported(&mut worker) {
+    // Vitest's runner (run by the preload) imported the test module itself
+    // and reported any failure; evaluating it again as the side module would
+    // repeat an error, or wait forever on a graph with top-level await.
     return Ok((coverage_collector, worker.into_main_worker()));
   }
   check_res(worker.execute_side_module().await)?;

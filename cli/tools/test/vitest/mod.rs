@@ -102,14 +102,14 @@ const TYPES_VERSION: &str = "v1";
 /// The resolved config served as `deno-vitest:///resolved_config.json`.
 static RESOLVED_CONFIG: RwLock<Option<Arc<str>>> = RwLock::new(None);
 
-/// Whether the Vitest preload of this worker failed to collect the test
-/// module (it then reported the error itself).
-pub fn collection_failed(worker: &mut crate::worker::CliMainWorker) -> bool {
+/// Whether the Vitest preload of this worker already imported (collected)
+/// the test module, so it must not be evaluated again as the side module.
+pub fn module_imported(worker: &mut crate::worker::CliMainWorker) -> bool {
   // The script throws when the flag is set (no scope is needed to read it).
   worker
     .execute_script_static(
       deno_core::located_script_name!(),
-      "if (globalThis[Symbol.for('deno.vitest.collectionFailed')] === true) { throw 0; }",
+      "if (globalThis[Symbol.for('deno.vitest.moduleImported')] === true) { throw 0; }",
     )
     .is_err()
 }

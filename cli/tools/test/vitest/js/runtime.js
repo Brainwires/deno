@@ -30,7 +30,7 @@ import { DenoSnapshotEnvironment } from "./snapshot_environment.js";
 const ORIGINAL_ERROR = Symbol.for("deno.vitest.originalError");
 const TEST_SKIP = Symbol.for("Deno.test.skip");
 const TEST_LOCATION = Symbol.for("Deno.test.location");
-const COLLECTION_FAILED = Symbol.for("deno.vitest.collectionFailed");
+const MODULE_IMPORTED = Symbol.for("deno.vitest.moduleImported");
 
 const { fileURLToPath, pathToFileURL } = await import("node:url");
 
@@ -854,12 +854,14 @@ export async function startFile(specifier, config = {}) {
   );
 
   const files = await collected.promise;
+  // Vitest's runner imported the test module; `deno test` must not evaluate
+  // it again as its side module (a module graph with top-level await would
+  // wait for an evaluation that already happened).
+  globalThis[MODULE_IMPORTED] = true;
   for (const file of files) {
     if (!file.denoCollectionError) continue;
-    // Reported here, once: `deno test` does not evaluate the test module
-    // again after a failed collection (see `COLLECTION_FAILED`).
+    // Reported here, once.
     file.denoReported = true;
-    globalThis[COLLECTION_FAILED] = true;
     throw file.denoCollectionError;
   }
 }
