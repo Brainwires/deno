@@ -707,6 +707,7 @@ const NOT_IMPORTED_OPS = [
   "op_test_snapshot_read",
   "op_test_snapshot_write",
   "op_test_event_snapshot_summary",
+  "op_test_set_import_meta_proto",
 
   // TODO(bartlomieju): used in various integration tests - figure out a way
   // to not depend on them.
