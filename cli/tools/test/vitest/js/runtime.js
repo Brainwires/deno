@@ -707,7 +707,13 @@ function createWorkerState(runnerConfig, filepath, environmentName) {
  */
 function hideNonNodeGlobals() {
   for (
-    const name of ["localStorage", "sessionStorage", "alert", "confirm", "prompt"]
+    const name of [
+      "localStorage",
+      "sessionStorage",
+      "alert",
+      "confirm",
+      "prompt",
+    ]
   ) {
     try {
       Object.defineProperty(globalThis, name, {
