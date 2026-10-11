@@ -421,6 +421,59 @@ impl VitestOverrides {
   }
 }
 
+/// Vite resolves a deep import into a package without `exports` by trying
+/// extensions (`lucide-react/dynamic` -> `dynamic.mjs`), which Node's (and
+/// Deno's) resolution does not.
+fn resolve_package_subpath_with_extensions(
+  specifier: &str,
+  referrer: &Url,
+) -> Option<Url> {
+  if specifier.starts_with('.')
+    || specifier.starts_with('/')
+    || specifier.contains(':')
+  {
+    return None;
+  }
+  let (name, sub_path) = split_package_specifier(specifier)?;
+  let sub_path = sub_path.strip_prefix('/')?;
+  if sub_path.is_empty() {
+    return None;
+  }
+  let referrer_path = deno_path_util::url_to_file_path(referrer).ok()?;
+  for dir in referrer_path.parent()?.ancestors() {
+    let package_dir = dir.join("node_modules").join(name);
+    let Ok(package_json) =
+      std::fs::read_to_string(package_dir.join("package.json"))
+    else {
+      continue;
+    };
+    let json: deno_core::serde_json::Value =
+      deno_core::serde_json::from_str(&package_json).ok()?;
+    if json.get("exports").is_some() || package_dir.join(sub_path).is_file() {
+      return None;
+    }
+    const EXTENSIONS: [&str; 7] =
+      [".mjs", ".js", ".mts", ".ts", ".jsx", ".tsx", ".json"];
+    let base = package_dir.join(sub_path);
+    for candidate in EXTENSIONS
+      .iter()
+      .map(|ext| PathBuf::from(format!("{}{ext}", base.display())))
+      .chain(
+        EXTENSIONS
+          .iter()
+          .map(|ext| base.join(format!("index{ext}"))),
+      )
+    {
+      if candidate.is_file() {
+        let path = std::fs::canonicalize(&candidate).unwrap_or(candidate);
+        return Url::from_file_path(path).ok();
+      }
+    }
+    return None;
+  }
+  None
+}
+
 /// Vite's CSS languages.
 const CSS_LANGS: &[&str] = &[
   "css", "less", "sass", "scss", "styl", "stylus", "pcss", "postcss", "sss",
@@ -581,6 +634,14 @@ impl SpecifierOverrides for VitestOverrides {
       .vite_asset_module(aliased.as_deref().unwrap_or(raw_specifier), referrer)
     {
       return Some(SpecifierOverride::Url(module));
+    }
+    if self.vite_root.read().unwrap().is_some()
+      && let Some(url) = resolve_package_subpath_with_extensions(
+        aliased.as_deref().unwrap_or(raw_specifier),
+        referrer,
+      )
+    {
+      return Some(SpecifierOverride::Url(url));
     }
     let specifier = aliased?;
     let specifier = if specifier.starts_with('/') {
