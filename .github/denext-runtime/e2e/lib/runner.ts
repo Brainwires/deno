@@ -455,7 +455,8 @@ export async function results(area: string): Promise<AppResult[]> {
 export async function waitResult(
   area: string,
   opts: {
-    seen?: Set<number>;
+    /** Results to skip ({@linkcode seenResults}). */
+    seen?: Set<string>;
     pid?: number;
     until?: (r: AppResult) => boolean;
     ms?: number;
@@ -468,7 +469,7 @@ export async function waitResult(
   let last: AppResult | null = null;
   while (Date.now() < end) {
     for (const r of await results(area)) {
-      if (opts.seen?.has(r.pid)) continue;
+      if (opts.seen?.has(resultKey(r))) continue;
       if (opts.pid !== undefined && r.pid !== opts.pid) continue;
       if (opts.launch !== undefined && !ofLaunch(r, opts.launch)) continue;
       last = r;
@@ -487,8 +488,21 @@ export function ofLaunch(r: AppResult, token: string): boolean {
   return !r.launch || r.launch === token;
 }
 
-export async function seenPids(area: string): Promise<Set<number>> {
-  return new Set((await results(area)).map((r) => r.pid));
+/** One app run's result: its pid and when it started. A pid alone doesn't
+ * tell runs apart: Windows hands a pid to a new process seconds after the
+ * last one with it ended, and the new run's result then replaces the old
+ * one's file (`<area>-<pid>.json`). Keyed by pid, a launch's result looked
+ * like one written before it and was skipped until the wait ran out (the
+ * exit area on Windows, Brainwires/deno run 37720814135: launch #5 got #2's
+ * pid). */
+export function resultKey(r: Pick<AppResult, "pid" | "startedAt">): string {
+  return `${r.pid}@${r.startedAt}`;
+}
+
+/** The results of `area` written so far ({@linkcode resultKey}s): what a
+ * launch about to start must not take for its own. */
+export async function seenResults(area: string): Promise<Set<string>> {
+  return new Set((await results(area)).map(resultKey));
 }
 
 // ---------------------------------------------------------------------------
@@ -567,7 +581,7 @@ export async function launchAndCollect(
     expectExit?: boolean;
   } = {},
 ): Promise<AppResult | null> {
-  const seen = await seenPids(rep.area);
+  const seen = await seenResults(rep.area);
   const token = `${env.nonce}-${++collectSeq}`;
   const l = await launch(env, p.exe, opts.args, {
     cwd: opts.cwd,
@@ -580,7 +594,7 @@ export async function launchAndCollect(
   });
   if (!r) {
     const partial = (await results(rep.area)).filter((x) =>
-      !seen.has(x.pid) && ofLaunch(x, token)
+      !seen.has(resultKey(x)) && ofLaunch(x, token)
     ).pop() ?? null;
     rep.merge(label, partial, l.logFile);
     rep.check(

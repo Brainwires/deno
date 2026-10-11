@@ -147,6 +147,21 @@ jobs:
           echo "version=$version deno=$deno_version laufey=$laufey_sha cef=$cef_version"
           echo "matrix=$matrix"
 
+  # The e2e runner's own logic (.github/denext-runtime/e2e/lib), which needs
+  # no runtime, display or build: which result belongs to which launch.
+  e2e-harness:
+    name: e2e harness
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          sparse-checkout: .github/denext-runtime
+          sparse-checkout-cone-mode: false
+      - uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
+        with:
+          deno-version: ${{ env.STOCK_DENO_VERSION }}
+      - run: deno test -A --no-check --no-config --no-lock .github/denext-runtime/e2e/lib/
+
   # laufey's webview + CEF backend hosts, built the way laufey's own CI does.
   laufey:
     name: laufey / ${{ matrix.target }}
