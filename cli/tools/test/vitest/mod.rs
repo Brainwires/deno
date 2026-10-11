@@ -462,9 +462,13 @@ impl VitestCompat {
           compat.projects.len()
         );
       }
-      set_resolved_config(&compat.projects, update_snapshots);
+      set_resolved_config(
+        &compat.projects,
+        update_snapshots,
+        test_flags.filter.as_deref(),
+      );
     } else {
-      set_resolved_config(&[], update_snapshots);
+      set_resolved_config(&[], update_snapshots, test_flags.filter.as_deref());
     }
     if let Some(project) = compat.projects.first() {
       *overrides.root_referrer.write().unwrap() =
@@ -573,13 +577,19 @@ impl VitestCompat {
   }
 }
 
-fn set_resolved_config(projects: &[Project], update_snapshots: bool) {
+fn set_resolved_config(
+  projects: &[Project],
+  update_snapshots: bool,
+  filter: Option<&str>,
+) {
   let ci = std::env::var("CI")
     .map(|v| !v.is_empty() && v != "false")
     .unwrap_or(false);
   let json = deno_core::serde_json::json!({
     "update": update_snapshots,
     "ci": ci,
+    // `--filter`, so Vitest skips the hooks of suites with no selected test.
+    "filter": filter,
     "projects": projects
       .iter()
       .map(|p| {

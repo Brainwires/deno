@@ -15,7 +15,12 @@ const projectName = params.get("project");
 const project = resolvedConfig.projects?.find((p) =>
   projectName === null ? true : p.name === projectName
 ) ?? {};
-const config = { ...project, update: resolvedConfig.update, ci: resolvedConfig.ci };
+const config = {
+  ...project,
+  update: resolvedConfig.update,
+  ci: resolvedConfig.ci,
+  filter: resolvedConfig.filter ?? undefined,
+};
 const environment = params.get("environment");
 if (environment) config.environment = environment;
 

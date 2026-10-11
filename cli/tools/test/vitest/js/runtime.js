@@ -372,6 +372,47 @@ function failedAncestor(test) {
   return undefined;
 }
 
+/** Mirrors `deno test --filter`: a substring, or a `/regex/`. */
+function createNameFilter(filter) {
+  if (!filter) return undefined;
+  if (filter.length > 1 && filter.startsWith("/") && filter.endsWith("/")) {
+    try {
+      const regex = new RegExp(filter.slice(1, -1));
+      return (name) => regex.test(name);
+    } catch {
+      // Deno falls back to a substring match
+    }
+  }
+  return (name) => name.includes(filter);
+}
+
+/**
+ * Skips the tests `--filter` leaves out before Vitest runs the file, so it
+ * also skips the hooks of suites without a selected test (Deno only knows
+ * which tests it runs).
+ */
+function applyNameFilter(tasks, matches) {
+  let anyRuns = false;
+  for (const task of tasks) {
+    if (task.type === "suite") {
+      if (applyNameFilter(task.tasks, matches)) {
+        anyRuns = true;
+      } else if (task.mode === "run" || task.mode === "queued") {
+        task.mode = "skip";
+      }
+    } else if (task.type === "test") {
+      if (task.mode !== "run" && task.mode !== "queued") continue;
+      if (matches(testFullName(task))) {
+        anyRuns = true;
+      } else {
+        // still registered with Deno, which reports it as filtered out
+        task.denoFilteredOut = true;
+      }
+    }
+  }
+  return anyRuns;
+}
+
 function registerDenoTests(files, bridge) {
   for (const file of files) {
     registerTasks(file.tasks, bridge);
@@ -391,7 +432,8 @@ function registerTasks(tasks, bridge) {
 
 function registerTest(test, bridge) {
   const name = testFullName(test);
-  const runnable = test.mode === "run" || test.mode === "queued";
+  const runnable = test.mode === "run" || test.mode === "queued" ||
+    test.denoFilteredOut === true;
   const entry = runnable ? bridge.track(test) : undefined;
   const fn = async () => {
     bridge.release(entry);
@@ -733,6 +775,10 @@ export async function startFile(specifier, config = {}) {
       }
     }
     registerDenoTests(files, bridge);
+    const matches = createNameFilter(config.filter);
+    if (matches) {
+      for (const file of files) applyNameFilter(file.tasks, matches);
+    }
     collected.resolve(files);
   });
 
