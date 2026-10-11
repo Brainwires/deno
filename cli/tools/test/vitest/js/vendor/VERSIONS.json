@@ -1,0 +1,7 @@
+{
+  "vitest": "5.0.3",
+  "chai": "6.2.2",
+  "magic-string": "1.4.3",
+  "@jridgewell/sourcemap-codec": "1.6.0",
+  "expect-type": "1.4.0"
+}

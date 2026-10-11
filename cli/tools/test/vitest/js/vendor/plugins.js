@@ -1,0 +1,40 @@
+// Vendored from vitest@5.0.3 (dist/chunks/plugins.D2ut1V9b.js) by tools/vendor_vitest.ts. Do not edit.
+// Copyright (c) 2021-Present VoidZero Inc. and Vitest contributors. MIT License, see LICENSE-vitest.md (which also lists bundled code).
+
+import { p as plugins } from './pretty_format.js';
+
+const serialize = (val, config, indentation, depth, refs, printer) => {
+	// Serialize a non-default name, even if config.printFunctionName is false.
+	const name = val.getMockName();
+	const nameString = name === "vi.fn()" ? "" : ` ${name}`;
+	let callsString = "";
+	if (val.mock.calls.length !== 0) {
+		const indentationNext = indentation + config.indent;
+		callsString = ` {${config.spacingOuter}${indentationNext}"calls": ${printer(val.mock.calls, config, indentationNext, depth, refs)}${config.min ? ", " : ","}${config.spacingOuter}${indentationNext}"results": ${printer(val.mock.results, config, indentationNext, depth, refs)}${config.min ? "" : ","}${config.spacingOuter}${indentation}}`;
+	}
+	return `[MockFunction${nameString}]${callsString}`;
+};
+const test = (val) => val && !!val._isMockFunction;
+const plugin = {
+	serialize,
+	test
+};
+
+const { DOMCollection, DOMElement, Immutable, ReactElement, ReactTestComponent, AsymmetricMatcher } = plugins;
+let PLUGINS = [
+	ReactTestComponent,
+	ReactElement,
+	DOMElement,
+	DOMCollection,
+	Immutable,
+	AsymmetricMatcher,
+	plugin
+];
+function addSerializer(plugin) {
+	PLUGINS = [plugin].concat(PLUGINS);
+}
+function getSerializers() {
+	return PLUGINS;
+}
+
+export { addSerializer as a, getSerializers as g };
