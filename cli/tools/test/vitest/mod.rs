@@ -474,6 +474,64 @@ fn resolve_package_subpath_with_extensions(
   None
 }
 
+/// Vite's resolution of local imports that Deno does not resolve on its own:
+/// extensionless paths (`./util`), directories (`.`, `./dir`) and `.js`
+/// specifiers of TypeScript files.
+fn resolve_local_like_vite(specifier: &str, referrer: &Url) -> Option<Url> {
+  let is_relative = specifier == "."
+    || specifier == ".."
+    || specifier.starts_with("./")
+    || specifier.starts_with("../");
+  if !is_relative && !specifier.starts_with("file:") {
+    return None;
+  }
+  if specifier.contains('?') || specifier.contains('#') {
+    return None;
+  }
+  let url = if specifier == "." || specifier == ".." {
+    referrer.join(&format!("{specifier}/")).ok()?
+  } else {
+    referrer.join(specifier).ok()?
+  };
+  let path = deno_path_util::url_to_file_path(&url).ok()?;
+  if path.is_file() {
+    return None;
+  }
+  const EXTENSIONS: [&str; 7] =
+    [".mjs", ".js", ".mts", ".ts", ".jsx", ".tsx", ".json"];
+  let display = path.display().to_string();
+  let display = display.trim_end_matches('/');
+  let mut candidates = Vec::new();
+  if let Some((stem, ext)) = display.rsplit_once('.') {
+    let replacements: &[&str] = match ext {
+      "js" => &["ts", "tsx"],
+      "mjs" => &["mts"],
+      "cjs" => &["cts"],
+      "jsx" => &["tsx"],
+      _ => &[],
+    };
+    candidates.extend(
+      replacements
+        .iter()
+        .map(|ext| PathBuf::from(format!("{stem}.{ext}"))),
+    );
+  }
+  if !path.is_dir() {
+    candidates.extend(
+      EXTENSIONS
+        .iter()
+        .map(|ext| PathBuf::from(format!("{display}{ext}"))),
+    );
+  }
+  candidates.extend(
+    EXTENSIONS
+      .iter()
+      .map(|ext| Path::new(display).join(format!("index{ext}"))),
+  );
+  let found = candidates.into_iter().find(|c| c.is_file())?;
+  Url::from_file_path(found).ok()
+}
+
 /// Vite's CSS languages.
 const CSS_LANGS: &[&str] = &[
   "css", "less", "sass", "scss", "styl", "stylus", "pcss", "postcss", "sss",
@@ -635,13 +693,24 @@ impl SpecifierOverrides for VitestOverrides {
     {
       return Some(SpecifierOverride::Url(module));
     }
-    if self.vite_root.read().unwrap().is_some()
-      && let Some(url) = resolve_package_subpath_with_extensions(
-        aliased.as_deref().unwrap_or(raw_specifier),
-        referrer,
-      )
-    {
-      return Some(SpecifierOverride::Url(url));
+    if self.vite_root.read().unwrap().is_some() {
+      let specifier = aliased.as_deref().unwrap_or(raw_specifier);
+      let file_specifier;
+      let specifier = if specifier.starts_with('/') {
+        file_specifier = Url::from_file_path(specifier)
+          .map(|u| u.to_string())
+          .unwrap_or_default();
+        file_specifier.as_str()
+      } else {
+        specifier
+      };
+      if let Some(url) =
+        resolve_local_like_vite(specifier, referrer).or_else(|| {
+          resolve_package_subpath_with_extensions(specifier, referrer)
+        })
+      {
+        return Some(SpecifierOverride::Url(url));
+      }
     }
     let specifier = aliased?;
     let specifier = if specifier.starts_with('/') {
@@ -1079,6 +1148,40 @@ mod tests {
       overrides.vite_asset_module("./a.css", &in_node_modules),
       None
     );
+  }
+
+  #[test]
+  fn local_resolution_like_vite() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::create_dir_all(root.join("lib/dir")).unwrap();
+    std::fs::write(root.join("lib/util.ts"), "").unwrap();
+    std::fs::write(root.join("lib/dir/index.tsx"), "").unwrap();
+    std::fs::write(root.join("lib/index.ts"), "").unwrap();
+    std::fs::write(root.join("lib/real.js"), "").unwrap();
+    let referrer = Url::from_file_path(root.join("lib/a.test.ts")).unwrap();
+    let url = |p: &str| Url::from_file_path(root.join(p)).unwrap();
+    assert_eq!(
+      resolve_local_like_vite("./util", &referrer),
+      Some(url("lib/util.ts"))
+    );
+    assert_eq!(
+      resolve_local_like_vite("./util.js", &referrer),
+      Some(url("lib/util.ts"))
+    );
+    assert_eq!(
+      resolve_local_like_vite("./dir", &referrer),
+      Some(url("lib/dir/index.tsx"))
+    );
+    assert_eq!(
+      resolve_local_like_vite(".", &referrer),
+      Some(url("lib/index.ts"))
+    );
+    // existing files and bare specifiers are left to Deno
+    assert_eq!(resolve_local_like_vite("./real.js", &referrer), None);
+    assert_eq!(resolve_local_like_vite("./util.ts", &referrer), None);
+    assert_eq!(resolve_local_like_vite("pkg", &referrer), None);
+    assert_eq!(resolve_local_like_vite("./missing", &referrer), None);
   }
 
   #[test]
