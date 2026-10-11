@@ -289,6 +289,25 @@ where the changes are discussed.
     key and waits for it, with a stderr warning and the reason in
     `cookieEncryptionWait`. An explicit `--password-store=basic` on such a
     profile is honoured with a warning that those cookies will be deleted.
+23. **`feat(test)`: Vitest compatibility for `deno test`**
+    (`feat/vitest-compat`, CLI only): Vitest suites run unchanged. `vitest`,
+    `vitest/config`, `vite-plus/test`, `@jest/globals` (bare or `npm:`) resolve
+    to built-in `deno-vitest:` modules — Vitest's own runtime (runner, `expect`,
+    `vi`, snapshots, test environments, chai), vendored by
+    `tools/vendor_vitest.ts` — through a new `SpecifierOverrides` hook in
+    `deno_resolver`. Each Vitest file runs under Vitest's runner from a per-file
+    preload, and every test is registered with `Deno.test()` so Deno's
+    reporters, `--filter` and summaries see one test per Vitest test. A
+    `vitest.config.*` (or a `vite.config.*` of a project that depends on Vitest)
+    is evaluated once: `include`/`exclude`, `projects` (`--vitest-project`),
+    `setupFiles`, `globals`, `environment` (the project's own jsdom / happy-dom,
+    also per file via `@vitest-environment`), aliases and tsconfig paths,
+    `define`/`.env` into `import.meta.env` (a `deno_core` prototype for user
+    modules' `import.meta`), mock reset flags and timeouts; Vite's
+    CSS/asset/`?raw`/`?url` imports and its extension and directory resolution
+    apply in such projects. `--no-vitest-compat` / `test.vitestCompat: false`
+    turn it off; `--vitest-config` picks a config. Module mocking (`vi.mock` &
+    co.) is not implemented yet and throws.
 
 The runtime-side parts (1-3, 5-22) are what the prebuilt `libdenort` carries.
 The CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` /
