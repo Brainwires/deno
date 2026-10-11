@@ -24,6 +24,7 @@ pub use jsrealm::CONTEXT_STATE_SLOT_INDEX;
 pub use jsrealm::ContextState;
 pub(crate) use jsrealm::JsRealm;
 pub use jsrealm::MODULE_MAP_SLOT_INDEX;
+pub use jsrealm::set_user_import_meta_proto;
 pub(crate) use jsrealm::OpDriverImpl;
 pub(crate) use jsrealm::UnrefedOps;
 pub use jsruntime::CompiledWasmModuleStore;

@@ -47,6 +47,7 @@ deno_core::extension!(deno_test,
     op_test_snapshot_read,
     op_test_snapshot_write,
     op_test_event_snapshot_summary,
+    op_test_set_import_meta_proto,
   ],
   options = {
     sender: TestEventSender,
@@ -498,4 +499,15 @@ fn op_test_isolate_exit(state: &mut OpState, #[smi] exit_code: i32) {
   // boundary throws an uncatchable termination exception that propagates
   // up through user code into the Rust test runner.
   isolate_handle.terminate_execution();
+}
+
+/// Gives the `import.meta` of user modules initialized from now on the
+/// prototype `proto`. The Vitest compatibility layer uses it to provide
+/// `import.meta.env` (see cli/tools/test/vitest).
+#[op2(fast)]
+fn op_test_set_import_meta_proto(
+  scope: &mut v8::PinScope,
+  proto: v8::Local<v8::Object>,
+) {
+  deno_core::set_user_import_meta_proto(scope, proto);
 }

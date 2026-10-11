@@ -16,6 +16,9 @@ use deno_graph::SpecifierError;
 use deno_graph::source::ResolveError;
 use deno_media_type::MediaType;
 use deno_semver::npm::NpmPackageReqReference;
+use deno_maybe_sync::MaybeOnceLock;
+use deno_maybe_sync::MaybeSend;
+use deno_maybe_sync::MaybeSync;
 use deno_semver::package::PackageReq;
 use deno_unsync::sync::AtomicFlag;
 use import_map::ImportMapErrorKind;
@@ -37,6 +40,35 @@ use crate::npm;
 use crate::npm::managed::ManagedResolvePkgFolderFromDenoReqError;
 use crate::workspace::MappedResolutionDiagnostic;
 use crate::workspace::sloppy_imports_resolve;
+
+/// The result of consulting [`SpecifierOverrides`] for a specifier.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SpecifierOverride {
+  /// Resolve the specifier to this URL.
+  Url(Url),
+  /// Resolve `specifier` instead, from `referrer` when set (otherwise from
+  /// the original referrer). Overrides are not consulted again for it.
+  Rewrite {
+    specifier: String,
+    referrer: Option<Url>,
+  },
+}
+
+/// A hook that takes precedence over regular resolution for some
+/// specifiers. `deno test` uses it to provide built-in modules (such as
+/// `vitest`) and to apply a Vitest config's aliases.
+pub trait SpecifierOverrides: std::fmt::Debug + MaybeSend + MaybeSync {
+  fn resolve(
+    &self,
+    raw_specifier: &str,
+    referrer: &Url,
+    resolution_kind: node_resolver::NodeResolutionKind,
+  ) -> Option<SpecifierOverride>;
+}
+
+#[allow(clippy::disallowed_types, reason = "definition")]
+pub type SpecifierOverridesRc =
+  deno_maybe_sync::MaybeArc<dyn SpecifierOverrides>;
 
 #[allow(clippy::disallowed_types, reason = "definition")]
 pub type FoundPackageJsonDepFlagRc =
@@ -219,6 +251,7 @@ pub struct DenoResolver<
   found_package_json_dep_flag: FoundPackageJsonDepFlagRc,
   warned_pkgs: deno_maybe_sync::MaybeDashSet<PackageReq>,
   on_warning: Option<OnMappedResolutionDiagnosticFn>,
+  specifier_overrides: MaybeOnceLock<SpecifierOverridesRc>,
 }
 
 impl<
@@ -269,10 +302,62 @@ impl<
       found_package_json_dep_flag,
       warned_pkgs: Default::default(),
       on_warning,
+      specifier_overrides: Default::default(),
     }
   }
 
+  /// Installs a hook that is consulted before regular resolution. Can be set
+  /// once; returns `false` if overrides were already set.
+  pub fn set_specifier_overrides(
+    &self,
+    overrides: SpecifierOverridesRc,
+  ) -> bool {
+    self.specifier_overrides.set(overrides).is_ok()
+  }
+
+  fn specifier_override(
+    &self,
+    raw_specifier: &str,
+    referrer: &Url,
+    resolution_kind: node_resolver::NodeResolutionKind,
+  ) -> Option<SpecifierOverride> {
+    self
+      .specifier_overrides
+      .get()
+      .and_then(|o| o.resolve(raw_specifier, referrer, resolution_kind))
+  }
+
   pub fn resolve_with_graph(
+    &self,
+    graph: &deno_graph::ModuleGraph,
+    raw_specifier: &str,
+    referrer: &Url,
+    referrer_range_start: deno_graph::Position,
+    options: ResolveWithGraphOptions,
+  ) -> Result<Url, ResolveWithGraphError> {
+    match self.specifier_override(raw_specifier, referrer, options.kind) {
+      Some(SpecifierOverride::Url(url)) => Ok(url),
+      Some(SpecifierOverride::Rewrite {
+        specifier,
+        referrer: new_referrer,
+      }) => self.resolve_with_graph_no_override(
+        graph,
+        &specifier,
+        new_referrer.as_ref().unwrap_or(referrer),
+        referrer_range_start,
+        options,
+      ),
+      None => self.resolve_with_graph_no_override(
+        graph,
+        raw_specifier,
+        referrer,
+        referrer_range_start,
+        options,
+      ),
+    }
+  }
+
+  fn resolve_with_graph_no_override(
     &self,
     graph: &deno_graph::ModuleGraph,
     raw_specifier: &str,
@@ -296,7 +381,7 @@ impl<
           ResolveWithGraphErrorKind::Resolution((**err).clone()).into(),
         );
       }
-      Resolution::None => Cow::Owned(self.resolve(
+      Resolution::None => Cow::Owned(self.resolve_no_override(
         raw_specifier,
         referrer,
         referrer_range_start,
@@ -447,6 +532,36 @@ impl<
   }
 
   pub fn resolve(
+    &self,
+    raw_specifier: &str,
+    referrer: &Url,
+    referrer_range_start: deno_graph::Position,
+    resolution_mode: node_resolver::ResolutionMode,
+    resolution_kind: node_resolver::NodeResolutionKind,
+  ) -> Result<Url, DenoResolveError> {
+    match self.specifier_override(raw_specifier, referrer, resolution_kind) {
+      Some(SpecifierOverride::Url(url)) => Ok(url),
+      Some(SpecifierOverride::Rewrite {
+        specifier,
+        referrer: new_referrer,
+      }) => self.resolve_no_override(
+        &specifier,
+        new_referrer.as_ref().unwrap_or(referrer),
+        referrer_range_start,
+        resolution_mode,
+        resolution_kind,
+      ),
+      None => self.resolve_no_override(
+        raw_specifier,
+        referrer,
+        referrer_range_start,
+        resolution_mode,
+        resolution_kind,
+      ),
+    }
+  }
+
+  fn resolve_no_override(
     &self,
     raw_specifier: &str,
     referrer: &Url,

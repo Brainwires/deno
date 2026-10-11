@@ -117,6 +117,14 @@ const testStates = new Map();
 const TEST_LOCATION_SYMBOL = SymbolFor("Deno.test.location");
 
 /**
+ * A test function that throws a value carrying this symbol (set to `true`)
+ * is reported as ignored instead of failed. This lets test-helper libraries
+ * skip a test after it started, e.g. Vitest's `ctx.skip()` under the Vitest
+ * compatibility layer of `deno test`.
+ */
+const TEST_SKIP_SYMBOL = SymbolFor("Deno.test.skip");
+
+/**
  * Parse a location string of the form `"fileName:lineNumber:columnNumber"`.
  * Parsing is done from the right so that file names that contain `:` (such as
  * `file://` or `https://` URLs) are handled correctly.
@@ -242,6 +250,13 @@ function wrapOuter(fn, desc) {
       }
       return result;
     } catch (error) {
+      if (
+        error !== null && typeof error === "object" &&
+        error[TEST_SKIP_SYMBOL] === true
+      ) {
+        snapshotRunState.sawIgnored = true;
+        return "ignored";
+      }
       snapshotRunState.sawFailure = true;
       return { failed: { jsError: core.destructureError(error) } };
     } finally {

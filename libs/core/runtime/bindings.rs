@@ -1502,9 +1502,12 @@ pub extern "C" fn host_initialize_import_meta_object_callback(
 
   maybe_add_import_meta_filename_dirname(scope, meta, &name);
 
-  if name.starts_with("ext:")
-    && let Some(proto) = state.ext_import_meta_proto.borrow().clone()
-  {
+  if name.starts_with("ext:") {
+    if let Some(proto) = state.ext_import_meta_proto.borrow().clone() {
+      let prototype = v8::Local::new(scope, proto);
+      meta.set_prototype(scope, prototype.into());
+    }
+  } else if let Some(proto) = state.user_import_meta_proto.borrow().clone() {
     let prototype = v8::Local::new(scope, proto);
     meta.set_prototype(scope, prototype.into());
   }
