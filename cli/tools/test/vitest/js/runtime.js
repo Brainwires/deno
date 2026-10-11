@@ -696,6 +696,55 @@ function createWorkerState(runnerConfig, filepath, environmentName) {
   };
 }
 
+function captureEventTarget() {
+  return {
+    add: globalThis.addEventListener,
+    remove: globalThis.removeEventListener,
+    dispatch: globalThis.dispatchEvent,
+    Event: globalThis.Event,
+  };
+}
+
+/**
+ * A DOM environment (jsdom, happy-dom) puts its window's EventTarget methods
+ * on the global, but Deno dispatches its own events there too (`load`,
+ * `unhandledrejection`, `error`, ...), which a DOM implementation rejects as
+ * foreign. Route each event to the implementation that created it, and add
+ * listeners to both.
+ */
+function installHybridEventTarget(deno) {
+  const dom = captureEventTarget();
+  if (dom.dispatch === deno.dispatch) return;
+  const define = (name, value) =>
+    Object.defineProperty(globalThis, name, {
+      value,
+      configurable: true,
+      writable: true,
+      enumerable: true,
+    });
+  define("addEventListener", function addEventListener(type, ...args) {
+    dom.add.call(this ?? globalThis, type, ...args);
+    try {
+      deno.add.call(globalThis, type, ...args);
+    } catch {
+      // a listener or option only the DOM implementation accepts
+    }
+  });
+  define("removeEventListener", function removeEventListener(type, ...args) {
+    dom.remove.call(this ?? globalThis, type, ...args);
+    try {
+      deno.remove.call(globalThis, type, ...args);
+    } catch {
+      // see addEventListener
+    }
+  });
+  define("dispatchEvent", function dispatchEvent(event) {
+    return event instanceof deno.Event && !(event instanceof dom.Event)
+      ? deno.dispatch.call(globalThis, event)
+      : dom.dispatch.call(this ?? globalThis, event);
+  });
+}
+
 let started = false;
 
 /**
@@ -741,11 +790,13 @@ export async function startFile(specifier, config = {}) {
         `Unknown Vitest environment "${environmentName}" (supported: node, jsdom, happy-dom).`,
       );
     }
+    const denoEventTarget = captureEventTarget();
     try {
       environmentTeardown = await environment.setup(
         globalThis,
         config.environmentOptions ?? {},
       );
+      installHybridEventTarget(denoEventTarget);
     } catch (error) {
       throw new Error(
         `Failed to set up the "${environmentName}" test environment: ${
