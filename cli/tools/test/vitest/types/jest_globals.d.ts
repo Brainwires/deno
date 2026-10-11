@@ -16,5 +16,10 @@ export {
 } from "./vitest.d.ts";
 export declare const expect: any;
 export declare const jest: any;
+export declare const fdescribe: any;
+export declare const fit: any;
+export declare const xdescribe: any;
+export declare const xit: any;
+export declare const xtest: any;
 declare const globals: any;
 export default globals;

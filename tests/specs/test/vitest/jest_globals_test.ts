@@ -13,7 +13,12 @@ describe("@jest/globals", () => {
     jest.useRealTimers();
   });
 
-  it("has no synchronous jest.requireMock", () => {
-    expect(() => jest.requireMock("./x")).toThrow(/vi\.importMock/);
+  it("jest.requireMock automocks a module synchronously", () => {
+    const math = jest.requireMock<typeof import("./mocking/math.ts")>(
+      "./mocking/math.ts",
+    );
+    expect(jest.isMockFunction(math.add)).toBe(true);
+    expect(math.add(1, 2)).toBeUndefined();
+    expect(math.PI).toBe(3.14);
   });
 });

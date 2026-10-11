@@ -47,11 +47,11 @@ function getFullName(task, separator = " > ") {
 	return (/* @__PURE__ */ getNames(task)).join(separator);
 }
 /* @__NO_SIDE_EFFECTS__ */
-function getTestName(task, separator = " > ") {
+function getTestName(task, separator = globalThis[Symbol.for("deno.vitest.testNameSeparator")] ?? " > ") {
 	return (/* @__PURE__ */ getNames(task)).slice(1).join(separator);
 }
 /* @__NO_SIDE_EFFECTS__ */
-function createTaskName(names, separator = " > ") {
+function createTaskName(names, separator = globalThis[Symbol.for("deno.vitest.testNameSeparator")] ?? " > ") {
 	return names.filter((name) => name !== void 0).join(separator);
 }
 /* @__NO_SIDE_EFFECTS__ */

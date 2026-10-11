@@ -742,6 +742,16 @@ function installHybridEventTarget(deno) {
   });
 }
 
+/** A Jest environment name (`jest-environment-jsdom`, ...) as Vitest's. */
+function normalizeEnvironment(name) {
+  if (name === undefined || name === null) return "node";
+  if (name in environments) return name;
+  if (/happy-?dom/i.test(name)) return "happy-dom";
+  if (/jsdom/i.test(name)) return "jsdom";
+  if (/(^|[-/])node$/.test(name)) return "node";
+  return name;
+}
+
 let started = false;
 
 /**
@@ -757,7 +767,10 @@ export async function startFile(specifier, config = {}) {
   started = true;
   const filepath = toFilePath(specifier);
   config = { root: Deno.cwd(), ...config };
-  const environmentName = config.environment ?? "node";
+  const environmentName = normalizeEnvironment(config.environment);
+  const jestProject = config.flavor === "jest"
+    ? await import("./jest.js")
+    : undefined;
   const runnerConfig = buildRunnerConfig(config);
   const workerState = createWorkerState(
     runnerConfig,
@@ -772,7 +785,15 @@ export async function startFile(specifier, config = {}) {
   });
 
   setSafeTimers();
-  installModuleMocker(vi, config.root);
+  if (config.packageBases) {
+    globalThis[Symbol.for("deno.vitest.packageBases")] = config.packageBases;
+  }
+  installModuleMocker(
+    vi,
+    config.root,
+    config.mockRoots,
+    config.flavor === "jest",
+  );
   applyEnvAndDefines(config, environmentName, workerState);
   globalExpect.setState({ environment: environmentName });
 
@@ -795,6 +816,7 @@ export async function startFile(specifier, config = {}) {
       );
       installHybridEventTarget(denoEventTarget);
       if (environmentName === "node") hideNonNodeGlobals();
+      await jestProject?.setupJestEnvironment(config, environmentName);
     } catch (error) {
       throw new Error(
         `Failed to set up the "${environmentName}" test environment: ${
@@ -805,7 +827,10 @@ export async function startFile(specifier, config = {}) {
     }
   };
 
-  if (config.globals) {
+  if (jestProject) {
+    jestProject.installJestProject(config);
+    await jestProject.registerRootMocks(config.mockRoots);
+  } else if (config.globals) {
     for (const api of globalApis) {
       globalThis[api] = vitestIndex[api];
     }

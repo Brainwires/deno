@@ -15,6 +15,16 @@
 //!   replaces the export for every importer (Vitest allows that because its
 //!   module runner keeps exports on a plain object). Exported `const`
 //!   declarations become `let` for that.
+//! - **Type export stubs**: a TypeScript module's type-only exports (type
+//!   aliases, interfaces, `export type { .. }`), which the TypeScript
+//!   transform erases, become `undefined` value exports. Code that
+//!   re-exports a type without `type` (`export { T } from "./types"`, valid
+//!   without `isolatedModules`) then links, as it does under Vitest's module
+//!   runner and Jest's CommonJS modules.
+//!
+//! It also sets the JSX runtime of a Jest project's user modules to the one
+//! its Jest transform uses (see [`JsxRuntime`]), and gives its modules that
+//! use `require` (CommonJS in Jest) Jest's `require()` (see js/jest.js).
 
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -36,11 +46,13 @@ use deno_ast::swc::ecma_visit::VisitWith;
 use deno_ast::swc::transforms::resolver;
 use deno_core::url::Url;
 use deno_error::JsErrorBox;
+use deno_resolver::deno_json::TranspileAndEmitOptions;
+use deno_resolver::deno_json::TranspileAndEmitOptionsRc;
 use deno_resolver::emit::EmitProgramTransform;
 
 /// Bumped whenever the output of the transforms changes (part of the emit
 /// cache key).
-const TRANSFORM_VERSION: u64 = 1;
+const TRANSFORM_VERSION: u64 = 3;
 
 /// The specifier a module imports itself with to register its exports (the
 /// module loader resolves it to the importing module).
@@ -60,6 +72,19 @@ const HOISTED_METHOD: &str = "hoisted";
 #[derive(Debug, Default)]
 pub struct VitestTransform {
   enabled: AtomicBool,
+  /// The JSX runtime for user modules, when the test config decides it.
+  jsx: std::sync::RwLock<Option<JsxRuntime>>,
+  /// A Jest project: modules using `require` get Jest's.
+  jest: AtomicBool,
+}
+
+/// The automatic JSX runtime a Jest project's transform (babel-jest,
+/// `@swc/jest`, ts-jest) compiles JSX with, which user modules then get
+/// instead of Deno's default classic runtime (`React.createElement`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JsxRuntime {
+  pub import_source: String,
+  pub development: bool,
 }
 
 impl VitestTransform {
@@ -67,6 +92,16 @@ impl VitestTransform {
   /// known; it only applies once a Vitest file is part of the run).
   pub fn enable(&self) {
     self.enabled.store(true, Ordering::Relaxed);
+  }
+
+  /// Sets the JSX runtime of user modules.
+  pub fn set_jsx(&self, jsx: Option<JsxRuntime>) {
+    *self.jsx.write().unwrap() = jsx;
+  }
+
+  /// Marks the run as a Jest project's.
+  pub fn set_jest(&self, jest: bool) {
+    self.jest.store(jest, Ordering::Relaxed);
   }
 }
 
@@ -87,19 +122,259 @@ impl EmitProgramTransform for VitestTransform {
       | MediaType::Mjs
       | MediaType::TypeScript
       | MediaType::Mts
-      | MediaType::Tsx => Some(TRANSFORM_VERSION),
+      | MediaType::Tsx => {
+        Some(TRANSFORM_VERSION * 2 + self.jest.load(Ordering::Relaxed) as u64)
+      }
       _ => None,
     }
+  }
+
+  fn transpile_options(
+    &self,
+    specifier: &Url,
+    options: &TranspileAndEmitOptionsRc,
+  ) -> Option<TranspileAndEmitOptionsRc> {
+    if !is_user_module(specifier) {
+      return None;
+    }
+    let jsx = self.jsx.read().unwrap().clone()?;
+    // only replaces the classic runtime (Deno's default)
+    if !matches!(
+      options.transpile.jsx,
+      Some(deno_ast::JsxRuntime::Classic(_))
+    ) {
+      return None;
+    }
+    let mut transpile = options.transpile.clone();
+    transpile.jsx = Some(deno_ast::JsxRuntime::Automatic(
+      deno_ast::JsxAutomaticOptions {
+        development: jsx.development,
+        import_source: Some(jsx.import_source.clone()),
+      },
+    ));
+    let pre_computed_hash = {
+      use std::hash::Hash;
+      use std::hash::Hasher;
+      let mut hasher = twox_hash::XxHash64::default();
+      transpile.hash(&mut hasher);
+      options.emit.hash(&mut hasher);
+      hasher.finish()
+    };
+    Some(std::sync::Arc::new(TranspileAndEmitOptions {
+      no_transpile: options.no_transpile,
+      transpile,
+      emit: options.emit.clone(),
+      pre_computed_hash,
+    }))
   }
 
   fn transform(
     &self,
     specifier: &Url,
+    original: &deno_ast::ParsedSource,
     module: &mut Module,
   ) -> Result<(), JsErrorBox> {
+    let type_exports = match original.program_ref() {
+      deno_ast::ProgramRef::Module(original) => type_only_exports(original),
+      deno_ast::ProgramRef::Script(_) => Vec::new(),
+    };
     hoist_mocks(specifier, module)?;
     mutable_exports(module);
+    stub_type_exports(module, type_exports);
+    if self.jest.load(Ordering::Relaxed) {
+      provide_jest_require(module);
+    }
     Ok(())
+  }
+}
+
+/// Gives a module that refers to `require` without declaring it at the top
+/// level (a Jest test file written for CommonJS) Jest's `require()`. (A
+/// nested declaration still shadows it.)
+fn provide_jest_require(module: &mut Module) {
+  struct UsesRequire(bool);
+  impl Visit for UsesRequire {
+    fn visit_ident(&mut self, ident: &Ident) {
+      if ident.sym == "require" {
+        self.0 = true;
+      }
+    }
+  }
+  let mut finder = UsesRequire(false);
+  module.visit_with(&mut finder);
+  if !finder.0 || declares_top_level(module, "require") {
+    return;
+  }
+  let mut items = parse_snippet(format!(
+    "import {{ jestRequire as __vi_jest_require__ }} from {};\nconst require = __vi_jest_require__(import.meta.url);\n",
+    js_string(JEST_MODULE_SPECIFIER)
+  ));
+  items.append(&mut module.body);
+  module.body = items;
+}
+
+/// Whether the module declares `name` at its top level.
+fn declares_top_level(module: &Module, name: &str) -> bool {
+  let declares = |decl: &Decl| match decl {
+    Decl::Fn(f) => f.ident.sym == name,
+    Decl::Class(c) => c.ident.sym == name,
+    Decl::Var(var) => var.decls.iter().any(|d| {
+      let mut idents = Vec::new();
+      collect_pat_idents(&d.name, &mut idents);
+      idents.iter().any(|i| i.sym == name)
+    }),
+    _ => false,
+  };
+  module.body.iter().any(|item| match item {
+    ModuleItem::Stmt(Stmt::Decl(decl)) => declares(decl),
+    ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(export)) => {
+      declares(&export.decl)
+    }
+    ModuleItem::ModuleDecl(ModuleDecl::Import(import)) => {
+      import.specifiers.iter().any(|spec| match spec {
+        ImportSpecifier::Named(s) => s.local.sym == name,
+        ImportSpecifier::Default(s) => s.local.sym == name,
+        ImportSpecifier::Namespace(s) => s.local.sym == name,
+      })
+    }
+    _ => false,
+  })
+}
+
+/// The built-in module with Jest's `require()`.
+const JEST_MODULE_SPECIFIER: &str = "deno-vitest:///jest.js";
+
+/// The names a TypeScript module exports only as types: exported type
+/// aliases and interfaces, `export type { .. }` (with or without a source),
+/// and `export { T }` of a local type.
+fn type_only_exports(original: &Module) -> Vec<String> {
+  let mut local_types = HashSet::new();
+  for item in &original.body {
+    if let ModuleItem::Stmt(Stmt::Decl(decl)) = item {
+      match decl {
+        Decl::TsTypeAlias(alias) => {
+          local_types.insert(alias.id.sym.clone());
+        }
+        Decl::TsInterface(interface) => {
+          local_types.insert(interface.id.sym.clone());
+        }
+        _ => {}
+      }
+    }
+  }
+  let mut names = Vec::new();
+  for item in &original.body {
+    let ModuleItem::ModuleDecl(decl) = item else {
+      continue;
+    };
+    match decl {
+      ModuleDecl::ExportDecl(export) => match &export.decl {
+        Decl::TsTypeAlias(alias) => names.push(alias.id.sym.to_string()),
+        Decl::TsInterface(interface) => {
+          names.push(interface.id.sym.to_string())
+        }
+        _ => {}
+      },
+      ModuleDecl::ExportNamed(named) => {
+        for spec in &named.specifiers {
+          let ExportSpecifier::Named(spec) = spec else {
+            continue;
+          };
+          let name = export_name(spec.exported.as_ref().unwrap_or(&spec.orig));
+          let local_type = named.src.is_none()
+            && matches!(&spec.orig, ModuleExportName::Ident(orig) if local_types.contains(&orig.sym));
+          if named.type_only || spec.is_type_only || local_type {
+            names.push(name);
+          }
+        }
+      }
+      _ => {}
+    }
+  }
+  names
+}
+
+/// The names the (transpiled) module exports, `export *` aside.
+fn exported_names(module: &Module) -> HashSet<String> {
+  let mut names = HashSet::new();
+  for item in &module.body {
+    let ModuleItem::ModuleDecl(decl) = item else {
+      continue;
+    };
+    match decl {
+      ModuleDecl::ExportDecl(export) => match &export.decl {
+        Decl::Fn(f) => {
+          names.insert(f.ident.sym.to_string());
+        }
+        Decl::Class(c) => {
+          names.insert(c.ident.sym.to_string());
+        }
+        Decl::Var(var) => {
+          let mut idents = Vec::new();
+          for declarator in &var.decls {
+            collect_pat_idents(&declarator.name, &mut idents);
+          }
+          names.extend(idents.into_iter().map(|i| i.sym.to_string()));
+        }
+        Decl::TsEnum(e) => {
+          names.insert(e.id.sym.to_string());
+        }
+        Decl::TsModule(_)
+        | Decl::TsInterface(_)
+        | Decl::TsTypeAlias(_)
+        | Decl::Using(_) => {}
+      },
+      ModuleDecl::ExportNamed(named) => {
+        for spec in &named.specifiers {
+          match spec {
+            ExportSpecifier::Named(spec) => {
+              names.insert(export_name(
+                spec.exported.as_ref().unwrap_or(&spec.orig),
+              ));
+            }
+            ExportSpecifier::Namespace(spec) => {
+              names.insert(export_name(&spec.name));
+            }
+            ExportSpecifier::Default(spec) => {
+              names.insert(spec.exported.sym.to_string());
+            }
+          }
+        }
+      }
+      ModuleDecl::ExportDefaultDecl(_) | ModuleDecl::ExportDefaultExpr(_) => {
+        names.insert("default".to_string());
+      }
+      _ => {}
+    }
+  }
+  names
+}
+
+/// Exports `undefined` under each type-only export name the module does not
+/// also export as a value (see the module docs).
+fn stub_type_exports(module: &mut Module, type_exports: Vec<String>) {
+  if type_exports.is_empty() {
+    return;
+  }
+  let exported = exported_names(module);
+  let mut seen = HashSet::new();
+  let mut code = String::new();
+  for name in type_exports {
+    if exported.contains(&name) || !seen.insert(name.clone()) {
+      continue;
+    }
+    let local = format!("__vi_type_export_{}__", seen.len() - 1);
+    let exported_as = if is_identifier_name(&name) {
+      name
+    } else {
+      js_string(&name)
+    };
+    code.push_str(&format!(
+      "let {local};\nexport {{ {local} as {exported_as} }};\n"
+    ));
+  }
+  if !code.is_empty() {
+    module.body.extend(parse_snippet(code));
   }
 }
 
@@ -970,6 +1245,13 @@ mod tests {
 
   /// Transpiles `source` like the emitter does with the transform installed.
   fn transform(source: &str) -> Result<String, String> {
+    transform_with(&VitestTransform::default(), source)
+  }
+
+  fn transform_with(
+    transform: &VitestTransform,
+    source: &str,
+  ) -> Result<String, String> {
     let specifier = Url::parse("file:///project/a.test.ts").unwrap();
     let parsed = deno_ast::parse_module(ParseParams {
       specifier: specifier.clone(),
@@ -1005,7 +1287,7 @@ mod tests {
     };
     parsed
       .globals()
-      .with(|_| VitestTransform::default().transform(&specifier, &mut module))
+      .with(|_| transform.transform(&specifier, &parsed, &mut module))
       .map_err(|e| e.to_string())?;
     let emitted = deno_ast::emit(
       (&Program::Module(module)).into(),
@@ -1018,6 +1300,56 @@ mod tests {
     )
     .unwrap();
     Ok(emitted.text)
+  }
+
+  #[test]
+  fn provides_jest_require() {
+    let jest = |source: &str| {
+      let transform = VitestTransform::default();
+      transform.set_jest(true);
+      transform_with(&transform, source).unwrap()
+    };
+    let out = jest("const x = require(\"./a\");\n");
+    assert!(
+      out.starts_with(
+        "import { jestRequire as __vi_jest_require__ } from \"deno-vitest:///jest.js\";\nconst require = __vi_jest_require__(import.meta.url);\n"
+      ),
+      "{out}"
+    );
+    // a declared `require` is left alone
+    let out = jest(
+      "import { createRequire } from \"node:module\";\nconst require = createRequire(import.meta.url);\nrequire(\"./a\");\n",
+    );
+    assert!(!out.contains("__vi_jest_require__"), "{out}");
+    // only in a Jest project
+    let out = transform("const x = require(\"./a\");\n").unwrap();
+    assert!(!out.contains("__vi_jest_require__"), "{out}");
+  }
+
+  #[test]
+  fn stubs_type_only_exports() {
+    let out = transform(
+      r#"export type A = string;
+export interface B { x: number }
+type C = number;
+interface D {}
+export { C, D as E };
+export type { F } from "./f.ts";
+export { type G, h } from "./g.ts";
+export type V = 1;
+export const V = 1;
+"#,
+    )
+    .unwrap();
+    for name in ["A", "B", "C", "E", "F", "G"] {
+      assert!(out.contains(&format!(" as {name} }}")), "{name}: {out}");
+    }
+    // a name also exported as a value is left alone
+    assert!(!out.contains(" as V }"), "{out}");
+    assert!(out.contains("export { h } from \"./g.ts\""), "{out}");
+    // a plain JavaScript module has nothing to stub
+    let out = transform("export const a = 1;\n").unwrap();
+    assert!(!out.contains("__vi_type_export_"), "{out}");
   }
 
   #[test]

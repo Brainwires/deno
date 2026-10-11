@@ -35,6 +35,7 @@ use crate::tools::test::vitest::mocks::op_vitest_mocks_enable;
 use crate::tools::test::vitest::mocks::op_vitest_mocks_poll;
 use crate::tools::test::vitest::mocks::op_vitest_mocks_respond;
 use crate::tools::test::vitest::mocks::op_vitest_mocks_set_generation;
+use crate::tools::test::vitest::mocks::op_vitest_resolve_import;
 
 deno_core::extension!(deno_test,
   ops = [
@@ -62,6 +63,7 @@ deno_core::extension!(deno_test,
     op_vitest_mocks_set_generation,
     op_vitest_mocks_poll,
     op_vitest_mocks_respond,
+    op_vitest_resolve_import,
   ],
   options = {
     sender: TestEventSender,

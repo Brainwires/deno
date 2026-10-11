@@ -1,6 +1,7 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 
-// Evaluates a vitest.config.* / vite.config.* file and reduces it to what
+// Evaluates a vitest.config.* / vite.config.* file (or, with `flavor=jest`, a
+// Jest config, see jest_config.js) and reduces it to what
 // `deno test` needs: one entry per test project with its file globs, aliases
 // and the runtime options the per-file preload hands to Vitest's runner.
 //
@@ -12,10 +13,13 @@ import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { loadEnv, mergeConfig } from "./config.js";
 import { b as defaultInclude, d as defaultExclude } from "./vendor/defaults.js";
+import { loadJestProjects, parseJsonc } from "./jest_config.js";
 
 const RESULT = Symbol.for("deno.vitest.loadedConfig");
 
-const configUrl = new URL(import.meta.url).searchParams.get("config");
+const params = new URL(import.meta.url).searchParams;
+const configUrl = params.get("config");
+const flavor = params.get("flavor") ?? "vitest";
 const configPath = fileURLToPath(configUrl);
 
 /** Mirrors Vite's `ConfigEnv` for `vitest run`. */
@@ -51,33 +55,6 @@ function normalizeAliases(alias) {
       : String(find),
     replacement: String(replacement),
   }));
-}
-
-// tsconfig.json is JSONC: drop comments and trailing commas.
-function parseJsonc(text) {
-  let out = "";
-  let inString = false;
-  for (let i = 0; i < text.length; i++) {
-    const c = text[i];
-    if (inString) {
-      out += c;
-      if (c === "\\") out += text[++i] ?? "";
-      else if (c === '"') inString = false;
-    } else if (c === '"') {
-      inString = true;
-      out += c;
-    } else if (c === "/" && text[i + 1] === "/") {
-      while (i < text.length && text[i] !== "\n") i++;
-      out += "\n";
-    } else if (c === "/" && text[i + 1] === "*") {
-      i += 2;
-      while (i < text.length && !(text[i] === "*" && text[i + 1] === "/")) i++;
-      i++;
-    } else {
-      out += c;
-    }
-  }
-  return JSON.parse(out.replace(/,(\s*[}\]])/g, "$1"));
 }
 
 /** `compilerOptions.paths` of a tsconfig, following `extends`. */
@@ -285,6 +262,11 @@ async function expandProjects(rootConfig, configDir) {
   return projects;
 }
 
-const rootConfig = await evaluateConfigFile(configPath);
-const projects = await expandProjects(rootConfig, dirname(configPath));
+let projects;
+if (flavor === "jest") {
+  projects = await loadJestProjects(configPath);
+} else {
+  const rootConfig = await evaluateConfigFile(configPath);
+  projects = await expandProjects(rootConfig, dirname(configPath));
+}
 globalThis[RESULT] = JSON.stringify({ configPath, projects });

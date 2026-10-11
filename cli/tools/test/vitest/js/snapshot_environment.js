@@ -18,7 +18,9 @@ export class DenoSnapshotEnvironment {
   }
 
   getHeader() {
-    return `// Vitest Snapshot v${this.getVersion()}, https://vitest.dev/guide/snapshot.html`;
+    // a Jest project keeps Jest's header (see jest.js)
+    return globalThis[Symbol.for("deno.vitest.snapshotHeader")] ??
+      `// Vitest Snapshot v${this.getVersion()}, https://vitest.dev/guide/snapshot.html`;
   }
 
   resolveRawPath(testPath, rawPath) {
@@ -41,6 +43,18 @@ export class DenoSnapshotEnvironment {
 
   async saveSnapshotFile(filepath, snapshot) {
     await fs.mkdir(dirname(filepath), { recursive: true });
+    // A Jest project keeps the header of an existing snapshot file (Jest 29
+    // and 30 write different ones).
+    if (
+      globalThis[Symbol.for("deno.vitest.snapshotHeader")] !== undefined &&
+      existsSync(filepath)
+    ) {
+      const existing = (await fs.readFile(filepath, "utf-8")).split("\n", 1)[0];
+      const header = /^\/\/ Jest Snapshot v\d/;
+      if (header.test(existing) && header.test(snapshot)) {
+        snapshot = existing + snapshot.slice(snapshot.indexOf("\n"));
+      }
+    }
     await fs.writeFile(filepath, snapshot, "utf-8");
   }
 

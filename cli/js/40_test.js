@@ -1,6 +1,7 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 
 import { core, primordials } from "ext:core/mod.js";
+import { op_import_sync } from "ext:core/ops";
 import { escapeName, withPermissions } from "ext:cli/40_test_common.js";
 import { assertSnapshot, snapshotRunState } from "ext:cli/40_test_snapshot.js";
 
@@ -24,6 +25,7 @@ const {
   op_vitest_mocks_poll,
   op_vitest_mocks_respond,
   op_vitest_mocks_set_generation,
+  op_vitest_resolve_import,
 } = core.ops;
 const {
   ArrayIsArray,
@@ -917,6 +919,10 @@ globalThis.Deno[globalThis.Deno.internal].vitestMocks = {
   keys: op_vitest_mock_keys,
   setGeneration: op_vitest_mocks_set_generation,
   respond: op_vitest_mocks_respond,
+  /** Resolves like an import (mocks and module generation applied). */
+  resolveImport: op_vitest_resolve_import,
+  /** Synchronously imports (loads and evaluates) an ES module. */
+  importSync: (specifier) => op_import_sync(specifier),
   /** The next requested mock module; does not keep the event loop alive. */
   poll() {
     const promise = op_vitest_mocks_poll();

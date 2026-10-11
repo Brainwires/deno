@@ -98,6 +98,56 @@ const PATCHES: Patch[] = [
     replace: "const _require = createRequire(denoVitestRootRequireBase());",
   },
   {
+    file: "task_utils.js",
+    why: "Jest projects name tests (expect's currentTestName) " +
+      '"describe test", not "describe > test" (see jest.js)',
+    find: `function getTestName(task, separator = " > ") {`,
+    replace:
+      `function getTestName(task, separator = globalThis[Symbol.for("deno.vitest.testNameSeparator")] ?? " > ") {`,
+  },
+  {
+    file: "task_utils.js",
+    why: "Jest projects name tests (a task's fullTestName) " +
+      '"describe test", not "describe > test" (see jest.js)',
+    find: `function createTaskName(names, separator = " > ") {`,
+    replace:
+      `function createTaskName(names, separator = globalThis[Symbol.for("deno.vitest.testNameSeparator")] ?? " > ") {`,
+  },
+  {
+    file: "vitest_core.js",
+    why: 'Jest projects key snapshots by "describe test 1" (see jest.js)',
+    find: `		name: getNames(test).slice(1).join(" > "),`,
+    replace:
+      `		name: getNames(test).slice(1).join(globalThis[Symbol.for("deno.vitest.testNameSeparator")] ?? " > "),`,
+  },
+  {
+    file: "vitest_core.js",
+    why: "Jest does not fail a test whose .resolves / .rejects assertion " +
+      "is not awaited (the assertion still settles before the test ends)",
+    find: `		test.onFinished.push(() => {
+			if (!resolved) {`,
+    replace: `		test.onFinished.push(() => {
+			if (!resolved && !globalThis[Symbol.for("deno.vitest.jestAsyncExpect")]) {`,
+  },
+  {
+    file: "vitest_core.js",
+    why: "Jest's non-strict equality (toEqual, toHaveBeenCalledWith) " +
+      "ignores undefined array items, so [1, undefined] equals [1]",
+    find:
+      `	if (className === "[object Array]" && a.length !== b.length) return false;`,
+    replace:
+      `	if (className === "[object Array]" && a.length !== b.length && (hasKey !== hasDefinedKey || !globalThis[Symbol.for("deno.vitest.jestEquality")])) return false;`,
+  },
+  {
+    file: "runner.js",
+    why: "Jest projects format test.each titles like jest-each (%p, " +
+      "$variable, no truncation; see jest.js)",
+    find: `function formatTitle(template, items, idx) {`,
+    replace: `function formatTitle(template, items, idx) {
+	const denoFormatTitle = globalThis[Symbol.for("deno.vitest.formatTitle")];
+	if (denoFormatTitle) return denoFormatTitle(template, items, idx);`,
+  },
+  {
     file: "environments.js",
     why: "surface uncaught window errors through Deno's error reporting",
     find: `process.emit("uncaughtException", e.error);`,

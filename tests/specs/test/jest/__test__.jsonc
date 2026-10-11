@@ -1,0 +1,32 @@
+{
+  // Jest projects under `deno test`: a Jest config is mapped onto the
+  // Vitest compatibility layer (see cli/tools/test/vitest/js/jest_config.js
+  // and js/jest.js).
+  "tests": {
+    "config_mapping": {
+      "cwd": "project",
+      "envs": { "CI": "true" },
+      "args": "test -A --no-check",
+      "output": "project.out",
+      "exitCode": 0
+    },
+    "package_json": {
+      "cwd": "package_json",
+      "args": "test -A --no-check",
+      "output": "package_json.out",
+      "exitCode": 0
+    },
+    "projects": {
+      "cwd": "projects",
+      "args": "test -A --no-check",
+      "output": "projects.out",
+      "exitCode": 0
+    },
+    "projects_selected": {
+      "cwd": "projects",
+      "args": "test -A --no-check --vitest-project=alpha",
+      "output": "projects_alpha.out",
+      "exitCode": 0
+    }
+  }
+}

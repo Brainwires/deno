@@ -2986,6 +2986,8 @@ function formatName(name) {
 	return typeof name === "string" ? name : typeof name === "function" ? name.name || "<anonymous>" : String(name);
 }
 function formatTitle(template, items, idx) {
+	const denoFormatTitle = globalThis[Symbol.for("deno.vitest.formatTitle")];
+	if (denoFormatTitle) return denoFormatTitle(template, items, idx);
 	if (template.includes("%#") || template.includes("%$"))
  // '%#' match index of the test case
 	template = template.replace(/%%/g, "__vitest_escaped_%__").replace(/%#/g, `${idx}`).replace(/%\$/g, `${idx + 1}`).replace(/__vitest_escaped_%__/g, "%%");

@@ -98,6 +98,32 @@ function mockObject(object, mockExports = {}, type = "automock") {
   );
 }
 
+/**
+ * The ES module view of a Jest mock factory's result, as Babel's (and
+ * ts-jest's / swc's) CommonJS interop gives it to `import`s: an object
+ * marked `__esModule` is a namespace; anything else (a function, a plain
+ * object) is `module.exports`, so it is the default export too.
+ */
+function cjsInteropNamespace(value) {
+  if (value !== null && typeof value === "object" && value.__esModule) {
+    return value;
+  }
+  const namespace = {};
+  if (
+    value !== null && (typeof value === "object" || typeof value === "function")
+  ) {
+    for (const key of Object.keys(value)) {
+      if (key !== "default") namespace[key] = value[key];
+    }
+  }
+  namespace.default = value;
+  return namespace;
+}
+
+function requireFile(importer, file) {
+  return nodeModule.createRequire(toFileUrl(importer))(file);
+}
+
 function isBareSpecifier(path) {
   return !path.startsWith(".") && !path.startsWith("/") &&
     !/^[a-z][a-z0-9+.-]*:/i.test(path);
@@ -137,7 +163,8 @@ function namespaceProxy(namespace, setter) {
 
 class ModuleMocker {
   #ops;
-  #root;
+  /** Where `__mocks__` folders of packages are looked up (Jest's roots). */
+  #roots;
   #nextId = 1;
   /** id -> mock */
   #mocks = new Map();
@@ -148,9 +175,13 @@ class ModuleMocker {
   #errors = new Map();
   #generation = 0;
 
-  constructor(ops, root) {
+  /** Whether factory results get Jest's CommonJS interop. */
+  #cjsInterop;
+
+  constructor(ops, roots, cjsInterop) {
     this.#ops = ops;
-    this.#root = root;
+    this.#roots = roots;
+    this.#cjsInterop = cjsInterop;
     ops.enable();
     this.#poll();
   }
@@ -187,24 +218,35 @@ class ModuleMocker {
     return { url, fsPath: fsPath ?? path, external };
   }
 
-  queueMock(path, importer, factoryOrOptions) {
+  #findRedirect(resolved) {
+    for (const root of this.#roots) {
+      const redirect = findMockRedirect(
+        root,
+        resolved.fsPath,
+        resolved.external,
+      );
+      if (redirect !== null) return redirect;
+    }
+    return null;
+  }
+
+  queueMock(path, importer, factoryOrOptions, redirectPath = null) {
     const resolved = this.#resolve(path, importer);
     // A module that does not resolve cannot be imported either.
     if (resolved === null) return;
     let type;
     let redirect = null;
     let factory;
-    if (typeof factoryOrOptions === "function") {
+    if (redirectPath !== null) {
+      type = "redirect";
+      redirect = redirectPath;
+    } else if (typeof factoryOrOptions === "function") {
       type = "manual";
       factory = factoryOrOptions;
     } else if (factoryOrOptions?.spy) {
       type = "autospy";
     } else {
-      redirect = findMockRedirect(
-        this.#root,
-        resolved.fsPath,
-        resolved.external,
-      );
+      redirect = this.#findRedirect(resolved);
       type = redirect === null ? "automock" : "redirect";
     }
     const id = this.#nextId++;
@@ -223,6 +265,106 @@ class ModuleMocker {
     });
     this.#byUrl.set(resolved.url, id);
     this.#ops.set(resolved.url, id);
+  }
+
+  /** Mocks `path` with the module at `redirectPath` (a `__mocks__` file). */
+  queueRedirect(path, importer, redirectPath) {
+    this.queueMock(path, importer, undefined, redirectPath);
+  }
+
+  /**
+   * Jest's synchronous `jest.requireMock()`: the mock's exports when they
+   * are known or can be computed synchronously (a synchronous factory, a
+   * `__mocks__` file or an automock of a module `require()` can load),
+   * else `undefined`.
+   */
+  requireMock(path, importer, requireActual) {
+    const resolved = this.#resolve(path, importer);
+    if (resolved === null) return undefined;
+    const id = this.#byUrl.get(resolved.url);
+    const mock = id === undefined ? undefined : this.#mocks.get(id);
+    if (mock === undefined) {
+      const redirect = this.#findRedirect(resolved);
+      if (redirect !== null) return requireFile(importer, redirect);
+      return mockObject(requireActual(path));
+    }
+    return this.#computeSync(mock, () => requireActual(path));
+  }
+
+  /** Like `requireMock()`, for mock `id` (Jest's `require()` of a mock). */
+  requireMockById(id) {
+    const mock = this.#mocks.get(id);
+    if (mock === undefined) return undefined;
+    return this.#computeSync(mock, () => this.#actualSync(mock));
+  }
+
+  /**
+   * Computes the exports of the mocks nothing imported yet where that can
+   * be done synchronously, before a synchronous `require()` of a module
+   * graph that may import them (its loading cannot wait for JavaScript).
+   */
+  prepareSync() {
+    for (const mock of this.#mocks.values()) {
+      if (
+        mock.exports !== undefined || mock.running ||
+        this.#byUrl.get(mock.url) !== mock.id
+      ) {
+        continue;
+      }
+      try {
+        this.#computeSync(mock, () => this.#actualSync(mock));
+      } catch {
+        // computed (and its error reported) when imported
+      }
+    }
+  }
+
+  /** The original module of a mock, loaded synchronously. */
+  #actualSync(mock) {
+    const url = mock.url;
+    if (
+      url.startsWith("file:") && !url.includes("/node_modules/") &&
+      !url.endsWith(".json")
+    ) {
+      return this.#ops.importSync(url);
+    }
+    return requireFile(
+      mock.importer,
+      url.startsWith("file:") ? fileURLToPath(url) : mock.path,
+    );
+  }
+
+  /**
+   * The exports of `mock` for a synchronous `require()`: its CommonJS view
+   * when a Jest factory returned one. Computes them when that can be done
+   * synchronously; else `undefined`.
+   */
+  #computeSync(mock, requireActual) {
+    if (mock.exports !== undefined) return mock.cjsExports ?? mock.exports;
+    if (mock.running) return undefined;
+    let exports;
+    switch (mock.type) {
+      case "manual":
+        if (
+          mock.factory.constructor?.name === "AsyncFunction" ||
+          (!this.#cjsInterop && mock.factory.length > 0)
+        ) {
+          return undefined;
+        }
+        exports = mock.factory(requireActual);
+        if (exports !== null && typeof exports?.then === "function") {
+          exports.catch(() => {});
+          return undefined;
+        }
+        break;
+      case "redirect":
+        exports = requireFile(mock.importer, mock.redirect);
+        break;
+      default:
+        exports = mockObject(requireActual(), {}, mock.type);
+    }
+    mock.promise = Promise.resolve(this.#finish(mock, exports));
+    return mock.cjsExports ?? mock.exports;
   }
 
   queueUnmock(path, importer) {
@@ -245,11 +387,7 @@ class ModuleMocker {
     }
     const id = this.#byUrl.get(resolved.url);
     if (id !== undefined) return await this.moduleFor(id);
-    const redirect = findMockRedirect(
-      this.#root,
-      resolved.fsPath,
-      resolved.external,
-    );
+    const redirect = this.#findRedirect(resolved);
     if (redirect !== null) return await import(pathToFileURL(redirect).href);
     const actual = await import(
       ACTUAL_PREFIX + encodeURIComponent(resolved.url)
@@ -327,8 +465,8 @@ class ModuleMocker {
             throw error;
           }
           if (
-            exports === null ||
-            (typeof exports !== "object" && typeof exports !== "function")
+            !this.#cjsInterop && (exports === null ||
+              (typeof exports !== "object" && typeof exports !== "function"))
           ) {
             throw new TypeError(
               `[vitest] vi.mock("${mock.path}", factory?) is not returning an object. Did you mean to return an object with a "default" key?`,
@@ -346,30 +484,40 @@ class ModuleMocker {
             mock.type,
           );
       }
-      // A promise the factory exports (say, a rejected `startup`) is
-      // awaited by its importers only once their modules are loaded, which
-      // takes another turn of the event loop than under Vitest: do not
-      // report its rejection as unhandled meanwhile.
-      if (exports !== null && typeof exports === "object") {
-        for (const key of Object.keys(exports)) {
-          const value = exports[key];
-          if (value instanceof Promise) value.catch(() => {});
-        }
-      }
-      if (mock.type === "manual") this.#makeLive(mock, exports);
-      mock.exports = exports;
-      // the loader generates this mock's modules itself from now on
-      if (exports !== null && typeof exports === "object") {
-        this.#ops.keys(mock.id, Object.keys(exports));
-      }
-      // modules generated while the factory ran get the values now
-      for (const setter of this.#instances.get(mock.id) ?? []) {
-        for (const key of Object.keys(exports)) setter(key, exports[key]);
-      }
-      return exports;
+      return this.#finish(mock, exports);
     } finally {
       mock.running = false;
     }
+  }
+
+  /** Records the exports of mock `mock` once known. */
+  #finish(mock, factoryExports) {
+    let exports = factoryExports;
+    if (mock.type === "manual" && this.#cjsInterop) {
+      mock.cjsExports = factoryExports;
+      exports = cjsInteropNamespace(factoryExports);
+    }
+    // A promise the factory exports (say, a rejected `startup`) is
+    // awaited by its importers only once their modules are loaded, which
+    // takes another turn of the event loop than under Vitest: do not
+    // report its rejection as unhandled meanwhile.
+    if (exports !== null && typeof exports === "object") {
+      for (const key of Object.keys(exports)) {
+        const value = exports[key];
+        if (value instanceof Promise) value.catch(() => {});
+      }
+    }
+    if (mock.type === "manual") this.#makeLive(mock, exports);
+    mock.exports = exports;
+    // the loader generates this mock's modules itself from now on
+    if (exports !== null && typeof exports === "object") {
+      this.#ops.keys(mock.id, Object.keys(exports));
+    }
+    // modules generated while the factory ran get the values now
+    for (const setter of this.#instances.get(mock.id) ?? []) {
+      for (const key of Object.keys(exports)) setter(key, exports[key]);
+    }
+    return exports;
   }
 
   /**
@@ -537,9 +685,13 @@ function moduleSource(id, keys) {
  * Installs module mocking for the test file's worker: `vi.mock()` & co.,
  * and `vi.spyOn()` on module namespaces.
  */
-export function installModuleMocker(vi, root) {
+export function installModuleMocker(vi, root, mockRoots, cjsInterop = false) {
   const ops = globalThis.Deno[globalThis.Deno.internal].vitestMocks;
-  const mocker = new ModuleMocker(ops, root);
+  const mocker = new ModuleMocker(
+    ops,
+    mockRoots?.length ? mockRoots : [root],
+    cjsInterop,
+  );
   globalThis[MOCKER] = mocker;
   Object.defineProperty(globalThis, "__vitest_mocker__", {
     value: mocker,

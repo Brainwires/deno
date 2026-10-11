@@ -475,6 +475,29 @@ pub fn op_vitest_mock_resolve(
   )
 }
 
+/// Resolves `specifier` from `importer` exactly like an import does: to a
+/// mock module when it is mocked, to a fresh instance after
+/// `vi.resetModules()` (for Jest's `require()`, see js/jest.js). Returns
+/// `null` when it does not resolve.
+#[op2]
+#[string]
+pub fn op_vitest_resolve_import(
+  state: &mut OpState,
+  #[string] specifier: &str,
+  #[string] importer: &str,
+) -> Result<Option<String>, JsErrorBox> {
+  let mocks = mocks(state)?;
+  let Some(resolve) = mocks.resolve.borrow().clone() else {
+    return Ok(None);
+  };
+  Ok(
+    mocks
+      .resolve(specifier, importer, |s, r| resolve(s, r))
+      .ok()
+      .map(|url| url.to_string()),
+  )
+}
+
 /// Registers mock `id` for the module `url` (`id` 0 removes the mock).
 #[op2(fast)]
 pub fn op_vitest_mock_set(

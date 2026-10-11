@@ -715,6 +715,7 @@ const NOT_IMPORTED_OPS = [
   "op_vitest_mocks_set_generation",
   "op_vitest_mocks_poll",
   "op_vitest_mocks_respond",
+  "op_vitest_resolve_import",
 
   // TODO(bartlomieju): used in various integration tests - figure out a way
   // to not depend on them.

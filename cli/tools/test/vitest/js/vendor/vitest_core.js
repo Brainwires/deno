@@ -1306,7 +1306,7 @@ function eq(a, b, aStack, bStack, customTesters, hasKey) {
 	bStack.push(b);
 	// Recursively compare objects and arrays.
 	// Compare array lengths to determine if a deep comparison is necessary.
-	if (className === "[object Array]" && a.length !== b.length) return false;
+	if (className === "[object Array]" && a.length !== b.length && (hasKey !== hasDefinedKey || !globalThis[Symbol.for("deno.vitest.jestEquality")])) return false;
 	if (isError(a) && isError(b)) try {
 		return isErrorEqual(a, b, aStack, bStack, customTesters, hasKey);
 	} finally {
@@ -1905,7 +1905,7 @@ function recordAsyncExpect(_test, promise, assertion, error, isSoft) {
 		let resolved = false;
 		test.onFinished ??= [];
 		test.onFinished.push(() => {
-			if (!resolved) {
+			if (!resolved && !globalThis[Symbol.for("deno.vitest.jestAsyncExpect")]) {
 				const awaitError = /* @__PURE__ */ new Error(`Promise returned by \`${assertion}\` was not awaited. This assertion is asynchronous and must be awaited; otherwise, it is not guaranteed to complete before the test finishes:\n\nawait ${assertion}\n`);
 				if (error.stack) awaitError.stack = error.stack.replace(error.message, awaitError.message);
 				throw awaitError;
@@ -7713,7 +7713,7 @@ function getError(expected, promise) {
 function getTestNames(test) {
 	return {
 		filepath: test.file.filepath,
-		name: getNames(test).slice(1).join(" > "),
+		name: getNames(test).slice(1).join(globalThis[Symbol.for("deno.vitest.testNameSeparator")] ?? " > "),
 		testId: test.id
 	};
 }
