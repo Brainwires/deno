@@ -29,14 +29,44 @@ pub fn to_relative_path_or_remote_url(cwd: &Url, path_or_url: &str) -> String {
   path_or_url.to_string()
 }
 
+/// Frames of Deno's own code, or of the built-in Vitest modules, which are
+/// noise in a test failure.
+fn is_internal_frame_file(file_name: &str) -> bool {
+  file_name.starts_with("[ext:")
+    || file_name.starts_with("ext:")
+    || file_name.starts_with("deno-vitest:")
+}
+
 fn abbreviate_test_error(js_error: &JsError) -> JsError {
   let mut js_error = js_error.clone();
-  let frames = std::mem::take(&mut js_error.frames);
+  let mut frames = std::mem::take(&mut js_error.frames);
+
+  // A Vitest test runs inside Vitest's runner: keep only the user's frames.
+  let is_vitest_frame = |f: &deno_core::error::JsStackFrame| {
+    f.file_name
+      .as_deref()
+      .is_some_and(|f| f.starts_with("deno-vitest:"))
+  };
+  if frames.iter().any(is_vitest_frame) {
+    let last_user_frame = frames.iter().rposition(|f| {
+      f.file_name
+        .as_deref()
+        .is_some_and(|f| !is_internal_frame_file(f))
+    });
+    if let Some(last_user_frame) = last_user_frame {
+      frames = frames
+        .into_iter()
+        .enumerate()
+        .filter(|(i, f)| *i <= last_user_frame && !is_vitest_frame(f))
+        .map(|(_, f)| f)
+        .collect();
+    }
+  }
 
   // check if there are any stack frames coming from user code
   let should_filter = frames.iter().any(|f| {
     if let Some(file_name) = &f.file_name {
-      !(file_name.starts_with("[ext:") || file_name.starts_with("ext:"))
+      !is_internal_frame_file(file_name)
     } else {
       true
     }
@@ -48,7 +78,7 @@ fn abbreviate_test_error(js_error: &JsError) -> JsError {
       .rev()
       .skip_while(|f| {
         if let Some(file_name) = &f.file_name {
-          file_name.starts_with("[ext:") || file_name.starts_with("ext:")
+          is_internal_frame_file(file_name)
         } else {
           false
         }

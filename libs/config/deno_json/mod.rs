@@ -652,6 +652,8 @@ struct SerializedTestConfig {
   pub sanitize_ops: Option<bool>,
   #[serde(rename = "sanitizeResources")]
   pub sanitize_resources: Option<bool>,
+  #[serde(rename = "vitestCompat")]
+  pub vitest_compat: Option<bool>,
 }
 
 impl SerializedTestConfig {
@@ -683,6 +685,7 @@ impl SerializedTestConfig {
       },
       sanitize_ops: self.sanitize_ops,
       sanitize_resources: self.sanitize_resources,
+      vitest_compat: self.vitest_compat,
     })
   }
 }
@@ -693,6 +696,8 @@ pub struct TestConfig {
   pub permissions: Option<Box<PermissionsObjectWithBase>>,
   pub sanitize_ops: Option<bool>,
   pub sanitize_resources: Option<bool>,
+  /// `test.vitestCompat`: `false` disables the Vitest compatibility layer.
+  pub vitest_compat: Option<bool>,
 }
 
 impl TestConfig {
@@ -702,6 +707,7 @@ impl TestConfig {
       permissions: None,
       sanitize_ops: None,
       sanitize_resources: None,
+      vitest_compat: None,
     }
   }
 }
@@ -2469,6 +2475,7 @@ impl ConfigFile {
         permissions: None,
         sanitize_ops: None,
         sanitize_resources: None,
+        vitest_compat: None,
       }),
     }
   }

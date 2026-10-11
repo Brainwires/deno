@@ -1407,6 +1407,12 @@ impl<TGraphContainer: ModuleGraphContainer> ModuleLoader
       return eszip_loader.load(specifier);
     }
 
+    if specifier.scheme() == crate::tools::test::vitest::SCHEME {
+      return deno_core::ModuleLoadResponse::Sync(
+        crate::tools::test::vitest::load_module(specifier),
+      );
+    }
+
     self.0.loaded_files.borrow_mut().insert(specifier.clone());
 
     let specifier = specifier.clone();
@@ -1630,6 +1636,12 @@ impl<TGraphContainer: ModuleGraphContainer> ModuleLoader
     }
 
     if self.0.shared.in_npm_pkg_checker.in_npm_package(specifier) {
+      self.0.shared.has_js_execution_started_flag.raise();
+      return Box::pin(deno_core::futures::future::ready(Ok(())));
+    }
+
+    // `deno test`'s built-in Vitest modules are not part of the graph.
+    if specifier.scheme() == crate::tools::test::vitest::SCHEME {
       self.0.shared.has_js_execution_started_flag.raise();
       return Box::pin(deno_core::futures::future::ready(Ok(())));
     }

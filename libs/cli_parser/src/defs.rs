@@ -1195,6 +1195,23 @@ pub static TEST_SUBCOMMAND: CommandDef = CommandDef {
       .long("update-snapshots")
       .set_true()
 .help("Update snapshots created with `t.assertSnapshot()` instead of failing when they do not match"),
+    ArgDef::new("no-vitest-compat")
+      .long("no-vitest-compat")
+      .set_true()
+.help("Disable the Vitest compatibility layer (the built-in `vitest` module and reading vitest.config.* / vite.config.*)"),
+    ArgDef::new("vitest-config")
+      .long("vitest-config")
+      .action(ArgAction::Set)
+      .num_args(NumArgs::Exact(1))
+      .conflicts_with(&["no-vitest-compat"])
+.help("Use this Vitest config file instead of discovering vitest.config.* / vite.config.*"),
+    ArgDef::new("vitest-project")
+      .long("vitest-project")
+      .action(ArgAction::Append)
+      .num_args(NumArgs::Exact(1))
+      .require_equals()
+      .conflicts_with(&["no-vitest-compat"])
+.help("Run only the named project(s) of the Vitest config (like `vitest --project`)"),
     ArgDef::new("trace-leaks")
       .long("trace-leaks")
       .set_true()

@@ -219,6 +219,9 @@ pub struct WorkspaceTestOptions {
   pub junit_path: Option<String>,
   pub hide_stacktraces: bool,
   pub update_snapshots: bool,
+  /// Whether the Vitest compatibility layer is on (`--no-vitest-compat` and
+  /// `test.vitestCompat: false` turn it off).
+  pub vitest_compat: bool,
 }
 
 impl WorkspaceTestOptions {
@@ -261,6 +264,8 @@ impl WorkspaceTestOptions {
       junit_path: test_flags.junit_path.clone(),
       hide_stacktraces: test_flags.hide_stacktraces,
       update_snapshots: test_flags.update_snapshots,
+      vitest_compat: !test_flags.vitest.disabled
+        && test_config.and_then(|c| c.vitest_compat) != Some(false),
     }
   }
 }

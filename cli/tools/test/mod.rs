@@ -94,6 +94,7 @@ mod channel;
 pub mod fmt;
 pub mod reporters;
 mod sanitizers;
+pub mod vitest;
 
 pub use channel::TestEventReceiver;
 pub use channel::TestEventSender;
@@ -658,6 +659,8 @@ struct TestSpecifiersOptions {
   /// `(index, count)` with a 1-based index, from `--shard`. Selects a subset
   /// of test files so a run can be split across machines.
   shard: Option<(usize, usize)>,
+  /// The Vitest compatibility layer, unless disabled.
+  vitest: Option<Arc<vitest::VitestCompat>>,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -1751,10 +1754,18 @@ async fn test_specifiers(
   let reporter = get_test_reporter(&options);
   let fail_fast_tracker = FailFastTracker::new(options.fail_fast);
 
+  let vitest = options.vitest.clone();
   let join_handles = specifiers.into_iter().map(move |specifier| {
     let worker_factory = worker_factory.clone();
     let specifier_dir = cli_options.workspace().resolve_member_dir(&specifier);
-    let preload_modules = preload_modules.clone();
+    let mut preload_modules = preload_modules.clone();
+    // A Vitest test file is collected and run by Vitest's runner, which the
+    // file's preload sets up.
+    if let Some(preload) =
+      vitest.as_ref().and_then(|v| v.preload_for(&specifier))
+    {
+      preload_modules.push(preload);
+    }
     let require_modules = require_modules.clone();
     let worker_sender = test_event_sender_factory.worker();
     let fail_fast_tracker = fail_fast_tracker.clone();
@@ -2361,15 +2372,48 @@ pub async fn run_tests(
   let file_fetcher = factory.file_fetcher()?;
   let log_level = cli_options.log_level();
 
+  let worker_factory =
+    Arc::new(factory.create_cli_main_worker_factory().await?);
+  let mut vitest = if workspace_test_options.vitest_compat {
+    Some(
+      vitest::VitestCompat::setup(
+        factory.resolver().await?,
+        &worker_factory,
+        factory.root_permissions_container()?.clone(),
+        cli_options.initial_cwd(),
+        &test_flags,
+        workspace_test_options.update_snapshots,
+      )
+      .await?,
+    )
+  } else {
+    None
+  };
+
   let members_with_test_options =
     cli_options.resolve_test_options_for_members(&test_flags)?;
-  let specifiers_with_mode = fetch_specifiers_with_test_mode(
-    cli_options,
-    file_fetcher,
-    members_with_test_options.into_iter().map(|(_, v)| v.files),
-    &workspace_test_options.doc,
-  )
-  .await?;
+  // With a Vitest config and no files on the command line, the config's
+  // `include` / `exclude` pick the test files, like `vitest run` does.
+  let specifiers_with_mode = match &vitest {
+    Some(vitest)
+      if vitest.has_config() && test_flags.files.include.is_empty() =>
+    {
+      vitest
+        .discover_specifiers()?
+        .into_iter()
+        .map(|specifier| (specifier, TestMode::Executable))
+        .collect()
+    }
+    _ => {
+      fetch_specifiers_with_test_mode(
+        cli_options,
+        file_fetcher,
+        members_with_test_options.into_iter().map(|(_, v)| v.files),
+        &workspace_test_options.doc,
+      )
+      .await?
+    }
+  };
 
   let is_changed_filter =
     test_flags.changed.is_some() || !test_flags.related.is_empty();
@@ -2428,8 +2472,13 @@ pub async fn run_tests(
     return Ok(());
   }
 
-  let worker_factory =
-    Arc::new(factory.create_cli_main_worker_factory().await?);
+  if let Some(vitest) = &mut vitest {
+    vitest.detect_vitest_files(
+      &main_graph_container.graph(),
+      &specifiers_for_typecheck_and_test,
+    );
+  }
+
   let preload_modules = cli_options.preload_modules()?;
   let require_modules = cli_options.require_modules()?;
 
@@ -2458,6 +2507,7 @@ pub async fn run_tests(
       junit_path: workspace_test_options.junit_path,
       hide_stacktraces: workspace_test_options.hide_stacktraces,
       shard: workspace_test_options.shard,
+      vitest: vitest.map(Arc::new),
       specifier: TestSpecifierOptions {
         filter: TestFilter::from_flag(&workspace_test_options.filter),
         shuffle: workspace_test_options.shuffle,
@@ -2558,6 +2608,24 @@ pub async fn run_tests_with_watch(
         let graph_kind = graph_kind(cli_options.type_check_mode());
         let log_level = cli_options.log_level();
         let cli_options = cli_options.clone();
+        // The Vitest layer must hook resolution before any graph is built.
+        let worker_factory =
+          Arc::new(factory.create_cli_main_worker_factory().await?);
+        let vitest = if workspace_test_options.vitest_compat {
+          Some(
+            vitest::VitestCompat::setup(
+              factory.resolver().await?,
+              &worker_factory,
+              factory.root_permissions_container()?.clone(),
+              cli_options.initial_cwd(),
+              &test_flags,
+              workspace_test_options.update_snapshots,
+            )
+            .await?,
+          )
+        } else {
+          None
+        };
         let module_graph_creator = factory.module_graph_creator().await?;
         let file_fetcher = factory.file_fetcher()?;
         let members_with_test_options =
@@ -2691,8 +2759,13 @@ pub async fn run_tests_with_watch(
           return Ok(());
         }
 
-        let worker_factory =
-          Arc::new(factory.create_cli_main_worker_factory().await?);
+        let vitest = vitest.map(|mut vitest| {
+          vitest.detect_vitest_files(
+            &main_graph_container.graph(),
+            &specifiers_for_typecheck_and_test,
+          );
+          Arc::new(vitest)
+        });
         let preload_modules = cli_options.preload_modules()?;
         let require_modules = cli_options.require_modules()?;
 
@@ -2720,6 +2793,7 @@ pub async fn run_tests_with_watch(
             junit_path: workspace_test_options.junit_path,
             hide_stacktraces: workspace_test_options.hide_stacktraces,
             shard: workspace_test_options.shard,
+            vitest,
             specifier: TestSpecifierOptions {
               filter: TestFilter::from_flag(&workspace_test_options.filter),
               shuffle: workspace_test_options.shuffle,

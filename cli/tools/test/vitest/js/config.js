@@ -10,7 +10,55 @@ export {
   d as defaultExclude,
 } from "./vendor/defaults.js";
 
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+
 export const defaultBrowserPort = 63315;
+
+export function normalizePath(id) {
+  return id.replace(/\\/g, "/");
+}
+
+// Vite's loadEnv(): .env files of the mode, filtered by the env prefixes.
+function parseDotenv(text) {
+  const result = {};
+  for (const line of text.split(/\r?\n/)) {
+    const match = /^\s*(?:export\s+)?([\w.-]+)\s*=\s*(.*)?\s*$/.exec(line);
+    if (!match) continue;
+    let value = (match[2] ?? "").trim();
+    const quote = value[0];
+    if ((quote === '"' || quote === "'" || quote === "`") &&
+      value.endsWith(quote)) {
+      value = value.slice(1, -1);
+      if (quote === '"') value = value.replace(/\\n/g, "\n");
+    } else {
+      value = value.replace(/\s+#.*$/, "");
+    }
+    result[match[1]] = value;
+  }
+  return result;
+}
+
+export function loadEnv(mode, envDir, prefixes = "VITE_") {
+  prefixes = Array.isArray(prefixes) ? prefixes : [prefixes];
+  const env = {};
+  for (
+    const file of [".env", ".env.local", `.env.${mode}`, `.env.${mode}.local`]
+  ) {
+    const path = join(envDir, file);
+    if (!existsSync(path)) continue;
+    Object.assign(env, parseDotenv(readFileSync(path, "utf8")));
+  }
+  const result = {};
+  for (const [key, value] of Object.entries(env)) {
+    if (prefixes.some((p) => key.startsWith(p))) result[key] = value;
+  }
+  for (const key in process.env) {
+    if (prefixes.some((p) => key.startsWith(p))) result[key] = process.env[key];
+  }
+  return result;
+}
+
 
 export function defineConfig(config) {
   return config;
