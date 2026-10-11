@@ -697,6 +697,30 @@ function createWorkerState(runnerConfig, filepath, environmentName) {
   };
 }
 
+/**
+ * Vitest's `node` environment has Node's globals. Deno also has a few
+ * browser globals Node lacks, which code under test feature-detects
+ * (`typeof localStorage`), and Deno's `localStorage` would even persist
+ * between runs: hide them.
+ */
+function hideNonNodeGlobals() {
+  for (
+    const name of ["localStorage", "sessionStorage", "alert", "confirm", "prompt"]
+  ) {
+    try {
+      Object.defineProperty(globalThis, name, {
+        value: undefined,
+        configurable: true,
+        writable: true,
+        enumerable: false,
+      });
+      delete globalThis[name];
+    } catch {
+      // not configurable: leave it
+    }
+  }
+}
+
 function captureEventTarget() {
   return {
     add: globalThis.addEventListener,
@@ -798,6 +822,7 @@ export async function startFile(specifier, config = {}) {
         config.environmentOptions ?? {},
       );
       installHybridEventTarget(denoEventTarget);
+      if (environmentName === "node") hideNonNodeGlobals();
     } catch (error) {
       throw new Error(
         `Failed to set up the "${environmentName}" test environment: ${
