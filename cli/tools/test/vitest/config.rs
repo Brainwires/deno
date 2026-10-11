@@ -61,7 +61,9 @@ fn depends_on_vitest(dir: &Path) -> bool {
     let Ok(text) = std::fs::read_to_string(&path) else {
       continue;
     };
-    let Ok(json) = deno_core::serde_json::from_str::<deno_core::serde_json::Value>(&text) else {
+    let Ok(json) =
+      deno_core::serde_json::from_str::<deno_core::serde_json::Value>(&text)
+    else {
       return false;
     };
     return [

@@ -271,8 +271,26 @@ impl Alias {
 pub struct VitestOverrides {
   /// Bare specifiers imported by the built-in modules (jsdom, happy-dom)
   /// resolve as if imported from here.
-  root_referrer: Url,
-  aliases: Vec<Alias>,
+  root_referrer: RwLock<Url>,
+  /// The config's aliases (set once the config is loaded).
+  aliases: RwLock<Vec<Alias>>,
+}
+
+impl VitestOverrides {
+  fn new(root: &Path) -> Result<Self, AnyError> {
+    Ok(Self {
+      root_referrer: RwLock::new(root_referrer(root)?),
+      aliases: Default::default(),
+    })
+  }
+}
+
+fn root_referrer(root: &Path) -> Result<Url, AnyError> {
+  Ok(
+    Url::from_directory_path(root)
+      .map_err(|_| anyhow!("Invalid Vitest root {}", root.display()))?
+      .join("__deno_vitest_root__.js")?,
+  )
 }
 
 impl SpecifierOverrides for VitestOverrides {
@@ -297,7 +315,7 @@ impl SpecifierOverrides for VitestOverrides {
       }
       return Some(SpecifierOverride::Rewrite {
         specifier: raw_specifier.to_string(),
-        referrer: Some(self.root_referrer.clone()),
+        referrer: Some(self.root_referrer.read().unwrap().clone()),
       });
     }
     // Type checking keeps resolving to the real package's types.
@@ -307,10 +325,11 @@ impl SpecifierOverrides for VitestOverrides {
     if let Some(module) = builtin_module(raw_specifier, referrer) {
       return Some(SpecifierOverride::Url(module_url(module)));
     }
-    if self.aliases.is_empty() || referrer.path().contains("/node_modules/") {
+    let aliases = self.aliases.read().unwrap();
+    if aliases.is_empty() || referrer.path().contains("/node_modules/") {
       return None;
     }
-    for alias in &self.aliases {
+    for alias in aliases.iter() {
       if let Some(specifier) = alias.apply(raw_specifier) {
         let specifier = if specifier.starts_with('/') {
           Url::from_file_path(&specifier)
@@ -391,6 +410,9 @@ impl VitestCompat {
   ) -> Result<Self, AnyError> {
     let config_path =
       config::find_config(initial_cwd, test_flags.vitest.config.as_deref())?;
+    // Installed first: the config itself imports `vitest/config`.
+    let overrides = Arc::new(VitestOverrides::new(initial_cwd)?);
+    resolver.set_specifier_overrides(overrides.clone());
     let mut compat = Self::default();
     let mut aliases = Vec::new();
     if let Some(config_path) = config_path {
@@ -444,18 +466,11 @@ impl VitestCompat {
     } else {
       set_resolved_config(&[], update_snapshots);
     }
-    let root = compat
-      .projects
-      .first()
-      .map(|p| PathBuf::from(&p.loaded.root))
-      .unwrap_or_else(|| initial_cwd.to_path_buf());
-    let root_referrer = Url::from_directory_path(&root)
-      .map_err(|_| anyhow!("Invalid Vitest root {}", root.display()))?
-      .join("__deno_vitest_root__.js")?;
-    resolver.set_specifier_overrides(Arc::new(VitestOverrides {
-      root_referrer,
-      aliases,
-    }));
+    if let Some(project) = compat.projects.first() {
+      *overrides.root_referrer.write().unwrap() =
+        root_referrer(Path::new(&project.loaded.root))?;
+    }
+    *overrides.aliases.write().unwrap() = aliases;
     Ok(compat)
   }
 
@@ -649,9 +664,10 @@ mod tests {
   #[test]
   fn overrides_from_builtin_modules() {
     let overrides = VitestOverrides {
-      root_referrer: Url::parse("file:///project/__deno_vitest_root__.js")
-        .unwrap(),
-      aliases: vec![],
+      root_referrer: RwLock::new(
+        Url::parse("file:///project/__deno_vitest_root__.js").unwrap(),
+      ),
+      aliases: Default::default(),
     };
     let builtin = module_url("vitest.js");
     assert_eq!(
@@ -666,7 +682,7 @@ mod tests {
       overrides.resolve("jsdom", &builtin, NodeResolutionKind::Execution),
       Some(SpecifierOverride::Rewrite {
         specifier: "jsdom".to_string(),
-        referrer: Some(overrides.root_referrer.clone()),
+        referrer: Some(overrides.root_referrer.read().unwrap().clone()),
       })
     );
     assert_eq!(
