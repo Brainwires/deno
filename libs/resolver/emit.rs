@@ -50,6 +50,31 @@ pub type EmitterRc<TInNpmPackageChecker, TSys> =
 #[sys_traits::auto_impl]
 pub trait EmitterSys: EmitCacheSys {}
 
+/// A transform of some ES modules' programs, applied after the TypeScript and
+/// JSX transforms and before the code is emitted. `deno test` uses it for its
+/// Vitest compatibility (module mocking, see `cli/tools/test/vitest`).
+pub trait EmitProgramTransform:
+  std::fmt::Debug + MaybeSend + MaybeSync
+{
+  /// A key identifying the transform of the ES module `specifier` (it is part
+  /// of the emit cache key), or `None` when the module is emitted as usual.
+  /// JavaScript modules are emitted too when a transform applies to them.
+  fn cache_key(&self, specifier: &Url, media_type: MediaType) -> Option<u64>;
+
+  /// Transforms the module, which is already JavaScript (its identifiers'
+  /// syntax contexts are no longer meaningful). Runs with the program's swc
+  /// globals set.
+  fn transform(
+    &self,
+    specifier: &Url,
+    module: &mut deno_ast::swc::ast::Module,
+  ) -> Result<(), JsErrorBox>;
+}
+
+#[allow(clippy::disallowed_types, reason = "definition")]
+pub type EmitProgramTransformRc =
+  deno_maybe_sync::MaybeArc<dyn EmitProgramTransform>;
+
 #[derive(Debug)]
 pub struct Emitter<TInNpmPackageChecker: InNpmPackageChecker, TSys: EmitterSys>
 {
@@ -57,6 +82,7 @@ pub struct Emitter<TInNpmPackageChecker: InNpmPackageChecker, TSys: EmitterSys>
   emit_cache: EmitCacheRc<TSys>,
   parsed_source_cache: ParsedSourceCacheRc,
   compiler_options_resolver: CompilerOptionsResolverRc,
+  program_transform: deno_maybe_sync::MaybeOnceLock<EmitProgramTransformRc>,
 }
 
 impl<TInNpmPackageChecker: InNpmPackageChecker, TSys: EmitterSys>
@@ -73,7 +99,45 @@ impl<TInNpmPackageChecker: InNpmPackageChecker, TSys: EmitterSys>
       emit_cache,
       parsed_source_cache,
       compiler_options_resolver,
+      program_transform: Default::default(),
     }
+  }
+
+  /// Installs a transform applied to some ES modules before they are
+  /// emitted. Can be set once; returns `false` if one was already set.
+  pub fn set_program_transform(
+    &self,
+    transform: EmitProgramTransformRc,
+  ) -> bool {
+    self.program_transform.set(transform).is_ok()
+  }
+
+  /// The installed program transform and its cache key, when it applies to
+  /// the module.
+  fn program_transform_for(
+    &self,
+    specifier: &Url,
+    media_type: MediaType,
+    module_kind: ModuleKind,
+  ) -> Option<(EmitProgramTransformRc, u64)> {
+    if module_kind != ModuleKind::Esm {
+      return None;
+    }
+    let transform = self.program_transform.get()?;
+    let key = transform.cache_key(specifier, media_type)?;
+    Some((transform.clone(), key))
+  }
+
+  /// Whether a JavaScript module must be emitted (instead of being served
+  /// as is) because a program transform applies to it.
+  pub fn transforms_javascript(
+    &self,
+    specifier: &Url,
+    media_type: MediaType,
+  ) -> bool {
+    self
+      .program_transform_for(specifier, media_type, ModuleKind::Esm)
+      .is_some()
   }
 
   pub async fn cache_module_emits(
@@ -124,8 +188,16 @@ impl<TInNpmPackageChecker: InNpmPackageChecker, TSys: EmitterSys>
       .compiler_options_resolver
       .for_specifier(specifier)
       .transpile_options()?;
-    let source_hash =
-      self.get_source_hash(module_kind, transpile_and_emit_options, source);
+    let media_type = MediaType::from_specifier(specifier);
+    let transform_key = self
+      .program_transform_for(specifier, media_type, module_kind)
+      .map(|(_, key)| key);
+    let source_hash = self.get_source_hash(
+      module_kind,
+      transpile_and_emit_options,
+      source,
+      transform_key,
+    );
     Ok(self.emit_cache.get_emit_code(specifier, source_hash))
   }
 
@@ -168,7 +240,12 @@ impl<TInNpmPackageChecker: InNpmPackageChecker, TSys: EmitterSys>
     module_kind: ModuleKind,
   ) -> Result<ArcStr, EmitParsedSourceHelperError> {
     // Note: keep this in sync with the sync version below
-    if !provider.media_type().is_emittable() {
+    let program_transform = self.program_transform_for(
+      provider.specifier(),
+      provider.media_type(),
+      module_kind,
+    );
+    if !provider.media_type().is_emittable() && program_transform.is_none() {
       return Ok(provider.into_source());
     }
     let transpile_and_emit_options = self
@@ -191,6 +268,7 @@ impl<TInNpmPackageChecker: InNpmPackageChecker, TSys: EmitterSys>
       module_kind,
       transpile_and_emit_options,
       provider.source(),
+      program_transform.as_ref().map(|(_, key)| *key),
     ) {
       PreEmitResult::Cached(emitted_text) => Ok(emitted_text.into()),
       PreEmitResult::NotCached { source_hash } => {
@@ -199,12 +277,20 @@ impl<TInNpmPackageChecker: InNpmPackageChecker, TSys: EmitterSys>
           let transpile_and_emit_options = transpile_and_emit_options.clone();
           move || {
             let parsed_source = provider.parsed_source()?;
-            transpile(
-              parsed_source,
-              module_kind,
-              &transpile_and_emit_options.transpile,
-              &transpile_and_emit_options.emit,
-            )
+            match program_transform {
+              Some((transform, _)) => transpile_with_program_transform(
+                parsed_source,
+                &transpile_and_emit_options.transpile,
+                &transpile_and_emit_options.emit,
+                transform.as_ref(),
+              ),
+              None => transpile(
+                parsed_source,
+                module_kind,
+                &transpile_and_emit_options.transpile,
+                &transpile_and_emit_options.emit,
+              ),
+            }
             .map(|r| r.text)
           }
         };
@@ -235,7 +321,9 @@ impl<TInNpmPackageChecker: InNpmPackageChecker, TSys: EmitterSys>
     source: &ArcStr,
   ) -> Result<ArcStr, EmitParsedSourceHelperError> {
     // Note: keep this in sync with the async version above
-    if !media_type.is_emittable() {
+    let program_transform =
+      self.program_transform_for(specifier, media_type, module_kind);
+    if !media_type.is_emittable() && program_transform.is_none() {
       return Ok(source.clone());
     }
     let transpile_and_emit_options = self
@@ -256,6 +344,7 @@ impl<TInNpmPackageChecker: InNpmPackageChecker, TSys: EmitterSys>
       module_kind,
       transpile_and_emit_options,
       source,
+      program_transform.as_ref().map(|(_, key)| *key),
     ) {
       PreEmitResult::Cached(emitted_text) => Ok(emitted_text.into()),
       PreEmitResult::NotCached { source_hash } => {
@@ -264,12 +353,20 @@ impl<TInNpmPackageChecker: InNpmPackageChecker, TSys: EmitterSys>
           media_type,
           source.clone(),
         )?;
-        let transpiled_source = transpile(
-          parsed_source,
-          module_kind,
-          &transpile_and_emit_options.transpile,
-          &transpile_and_emit_options.emit,
-        )?
+        let transpiled_source = match program_transform {
+          Some((transform, _)) => transpile_with_program_transform(
+            parsed_source,
+            &transpile_and_emit_options.transpile,
+            &transpile_and_emit_options.emit,
+            transform.as_ref(),
+          )?,
+          None => transpile(
+            parsed_source,
+            module_kind,
+            &transpile_and_emit_options.transpile,
+            &transpile_and_emit_options.emit,
+          )?,
+        }
         .text;
         helper.post_emit_parsed_source(
           specifier,
@@ -392,11 +489,15 @@ impl<TInNpmPackageChecker: InNpmPackageChecker, TSys: EmitterSys>
     module_kind: ModuleKind,
     transpile_and_emit: &TranspileAndEmitOptions,
     source_text: &str,
+    program_transform_key: Option<u64>,
   ) -> u64 {
     let mut hasher = twox_hash::XxHash64::default();
     source_text.hash(&mut hasher);
     transpile_and_emit.pre_computed_hash.hash(&mut hasher);
     module_kind.hash(&mut hasher);
+    if let Some(key) = program_transform_key {
+      key.hash(&mut hasher);
+    }
     hasher.finish()
   }
 }
@@ -498,11 +599,14 @@ impl<TInNpmPackageChecker: InNpmPackageChecker, TSys: EmitterSys>
     module_kind: deno_ast::ModuleKind,
     transpile_and_emit_options: &TranspileAndEmitOptions,
     source: &ArcStr,
+    program_transform_key: Option<u64>,
   ) -> PreEmitResult {
-    let source_hash =
-      self
-        .0
-        .get_source_hash(module_kind, transpile_and_emit_options, source);
+    let source_hash = self.0.get_source_hash(
+      module_kind,
+      transpile_and_emit_options,
+      source,
+      program_transform_key,
+    );
 
     if let Some(emit_code) =
       self.0.emit_cache.get_emit_code(specifier, source_hash)
@@ -579,6 +683,93 @@ fn transpile(
   };
   patch_public_decorator_access_has(&mut transpiled_source.text);
   Ok(transpiled_source)
+}
+
+/// Like [`transpile`] for an ES module, with `transform` applied to the
+/// program after the TypeScript and JSX transforms.
+#[allow(
+  clippy::result_large_err,
+  reason = "EmitParsedSourceHelperError is intentionally large"
+)]
+fn transpile_with_program_transform(
+  parsed_source: ParsedSource,
+  transpile_options: &deno_ast::TranspileOptions,
+  emit_options: &deno_ast::EmitOptions,
+  transform: &dyn EmitProgramTransform,
+) -> Result<EmittedSourceText, EmitParsedSourceHelperError> {
+  use deno_ast::swc::ast::Program;
+
+  ensure_no_import_assertion(&parsed_source)?;
+  if let Some(diagnostics) = invalid_syntax_parse_diagnostics(&parsed_source) {
+    return Err(deno_ast::TranspileError::ParseErrors(diagnostics).into());
+  }
+  let media_type = parsed_source.media_type();
+  let mut transpile_options = transpile_options.clone();
+  if transpile_options.jsx.is_some()
+    && !matches!(media_type, MediaType::Jsx | MediaType::Tsx)
+  {
+    transpile_options.jsx = None;
+  }
+  if !matches!(
+    transpile_options.decorators,
+    deno_ast::DecoratorsTranspileOption::None
+  ) && !program_has_decorators(parsed_source.program_ref())
+  {
+    transpile_options.decorators = deno_ast::DecoratorsTranspileOption::None;
+  }
+  let specifier = parsed_source.specifier().clone();
+  let program = match (*parsed_source.program()).clone() {
+    Program::Module(module) => module,
+    // force transpiling as a module, like `transpile` does for ES modules
+    Program::Script(script) => deno_ast::swc::ast::Module {
+      span: script.span,
+      body: script
+        .body
+        .into_iter()
+        .map(deno_ast::swc::ast::ModuleItem::Stmt)
+        .collect(),
+      shebang: script.shebang,
+    },
+  };
+  let comments = parsed_source.comments().as_single_threaded();
+  let source_map = deno_ast::SourceMap::single(
+    specifier.clone(),
+    parsed_source.text().to_string(),
+  );
+  let diagnostics = parsed_source
+    .diagnostics()
+    .iter()
+    .chain(parsed_source.script_module_diagnostics().iter());
+  let program = parsed_source.globals().with(|marks| {
+    deno_ast::fold_program(
+      Program::Module(program),
+      &transpile_options,
+      &source_map,
+      &comments,
+      marks,
+      Box::new(diagnostics),
+    )
+  });
+  let program = program
+    .map_err(deno_ast::TranspileError::FoldProgram)
+    .map_err(dedupe_transpile_error)?;
+  let mut module = match program {
+    Program::Module(module) => module,
+    Program::Script(_) => unreachable!("transpiled as a module"),
+  };
+  // in the program's swc globals, so the transform can create marks
+  parsed_source
+    .globals()
+    .with(|_| transform.transform(&specifier, &mut module))?;
+  let mut emitted = deno_ast::emit(
+    (&Program::Module(module)).into(),
+    &comments,
+    &source_map,
+    emit_options,
+  )
+  .map_err(deno_ast::TranspileError::Emit)?;
+  patch_public_decorator_access_has(&mut emitted.text);
+  Ok(emitted)
 }
 
 pub fn patch_public_decorator_access_has(source: &mut String) {

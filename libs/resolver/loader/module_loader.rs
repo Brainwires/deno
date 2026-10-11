@@ -591,6 +591,15 @@ impl<TSys: ModuleLoaderSys> PreparedModuleLoader<TSys> {
             }));
           }
           let code = match media_type {
+            MediaType::JavaScript | MediaType::Mjs
+              if self.emitter.transforms_javascript(specifier, *media_type) =>
+            {
+              return Ok(Some(CodeOrDeferredEmit::DeferredEmit {
+                specifier,
+                media_type: *media_type,
+                source: &source.text,
+              }));
+            }
             MediaType::JavaScript
             | MediaType::Unknown
             | MediaType::Mjs
