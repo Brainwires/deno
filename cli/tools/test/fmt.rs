@@ -53,13 +53,17 @@ fn abbreviate_test_error(js_error: &JsError) -> JsError {
         .as_deref()
         .is_some_and(|f| !is_internal_frame_file(f))
     });
-    let last = last_user_frame.unwrap_or(usize::MAX);
-    frames = frames
-      .into_iter()
-      .enumerate()
-      .filter(|(i, f)| *i <= last && !is_vitest_frame(f))
-      .map(|(_, f)| f)
-      .collect();
+    // An error raised by Vitest itself (a timeout, `.fails`) has no user
+    // frames; the test's location is reported instead.
+    frames = match last_user_frame {
+      Some(last) => frames
+        .into_iter()
+        .enumerate()
+        .filter(|(i, f)| *i <= last && !is_vitest_frame(f))
+        .map(|(_, f)| f)
+        .collect(),
+      None => Vec::new(),
+    };
   }
 
   // check if there are any stack frames coming from user code
