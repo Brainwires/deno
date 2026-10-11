@@ -17,6 +17,13 @@ const {
   op_test_get_origin,
   op_test_isolate_exit,
   op_test_set_import_meta_proto,
+  op_vitest_mock_keys,
+  op_vitest_mock_resolve,
+  op_vitest_mock_set,
+  op_vitest_mocks_enable,
+  op_vitest_mocks_poll,
+  op_vitest_mocks_respond,
+  op_vitest_mocks_set_generation,
 } = core.ops;
 const {
   ArrayIsArray,
@@ -901,3 +908,19 @@ globalThis.Deno[globalThis.Deno.internal].installTestIsolateExitHandler =
 // Used by the Vitest compatibility layer to provide `import.meta.env`.
 globalThis.Deno[globalThis.Deno.internal].testSetImportMetaProto =
   op_test_set_import_meta_proto;
+// Used by the Vitest compatibility layer's module mocking (see
+// cli/tools/test/vitest/mocks.rs).
+globalThis.Deno[globalThis.Deno.internal].vitestMocks = {
+  enable: op_vitest_mocks_enable,
+  resolve: op_vitest_mock_resolve,
+  set: op_vitest_mock_set,
+  keys: op_vitest_mock_keys,
+  setGeneration: op_vitest_mocks_set_generation,
+  respond: op_vitest_mocks_respond,
+  /** The next requested mock module; does not keep the event loop alive. */
+  poll() {
+    const promise = op_vitest_mocks_poll();
+    core.unrefOpPromise(promise);
+    return promise;
+  },
+};

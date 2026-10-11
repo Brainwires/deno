@@ -2396,6 +2396,7 @@ pub async fn run_tests(
     Some(
       vitest::VitestCompat::setup(
         factory.resolver().await?,
+        factory.emitter()?,
         &factory.deno_dir()?.root.join("vitest_compat"),
         &worker_factory,
         factory.root_permissions_container()?.clone(),
@@ -2634,6 +2635,7 @@ pub async fn run_tests_with_watch(
           Some(
             vitest::VitestCompat::setup(
               factory.resolver().await?,
+              factory.emitter()?,
               &factory.deno_dir()?.root.join("vitest_compat"),
               &worker_factory,
               factory.root_permissions_container()?.clone(),

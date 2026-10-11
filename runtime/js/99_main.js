@@ -708,6 +708,13 @@ const NOT_IMPORTED_OPS = [
   "op_test_snapshot_write",
   "op_test_event_snapshot_summary",
   "op_test_set_import_meta_proto",
+  "op_vitest_mocks_enable",
+  "op_vitest_mock_resolve",
+  "op_vitest_mock_set",
+  "op_vitest_mock_keys",
+  "op_vitest_mocks_set_generation",
+  "op_vitest_mocks_poll",
+  "op_vitest_mocks_respond",
 
   // TODO(bartlomieju): used in various integration tests - figure out a way
   // to not depend on them.

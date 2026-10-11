@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+const hoistedValue = vi.hoisted(() => 7);
+
 afterEach(() => {
   vi.useRealTimers();
   vi.unstubAllGlobals();
@@ -100,8 +102,7 @@ describe("waiting", () => {
   });
 
   it("hoisted and mocked", () => {
-    const value = vi.hoisted(() => 7);
-    expect(value).toBe(7);
+    expect(hoistedValue).toBe(7);
     const fn = vi.fn();
     expect(vi.mocked(fn)).toBe(fn);
   });

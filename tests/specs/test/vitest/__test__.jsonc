@@ -27,10 +27,61 @@
       "output": "hook_error.out",
       "exitCode": 1
     },
-    "vi_mock_not_supported_yet": {
-      "args": "test -A --no-check vi_mock_test.ts",
-      "output": "vi_mock.out",
+    "mock_factory": {
+      "args": "test -A --no-check mocking/vi_mock_test.ts",
+      "output": "mocking/vi_mock.out",
+      "exitCode": 0
+    },
+    "mock_partial": {
+      "args": "test -A --no-check mocking/partial_test.ts",
+      "output": "mocking/partial.out",
+      "exitCode": 0
+    },
+    "mock_automock": {
+      "args": "test -A --no-check mocking/automock_test.ts",
+      "output": "mocking/automock.out",
+      "exitCode": 0
+    },
+    "mock_dynamic": {
+      "args": "test -A --no-check mocking/dynamic_test.ts",
+      "output": "mocking/dynamic.out",
+      "exitCode": 0
+    },
+    "mock_spy_namespace": {
+      "args": "test -A --no-check mocking/spy_namespace_test.ts",
+      "output": "mocking/spy_namespace.out",
+      "exitCode": 0
+    },
+    "mock_spy_mocked": {
+      "args": "test -A --no-check mocking/spy_mocked_test.ts",
+      "output": "mocking/spy_mocked.out",
+      "exitCode": 0
+    },
+    "mock_jest": {
+      "args": "test -A --no-check mocking/jest_mock_test.ts",
+      "output": "mocking/jest_mock.out",
+      "exitCode": 0
+    },
+    "mock_isolated_per_file": {
+      "args": "test -A --no-check mocking/isolation_a_test.ts mocking/isolation_b_test.ts",
+      "output": "mocking/isolation.out",
+      "exitCode": 0
+    },
+    "mock_nested_error": {
+      "args": "test -A --no-check mocking/nested_error_test.ts",
+      "output": "mocking/nested_error.out",
       "exitCode": 1
+    },
+    "mock_factory_error": {
+      "args": "test -A --no-check mocking/factory_error_test.ts",
+      "output": "mocking/factory_error.out",
+      "exitCode": 1
+    },
+    "mock_config_project": {
+      "cwd": "mocking_project",
+      "args": "test -A --no-check",
+      "output": "mocking_project.out",
+      "exitCode": 0
     },
     "jest_globals": {
       "args": "test -A --no-check jest_globals_test.ts",

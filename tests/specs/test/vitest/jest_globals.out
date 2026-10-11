@@ -1,6 +1,6 @@
 running 2 tests from ./jest_globals_test.ts
 @jest/globals > maps jest onto vi ... ok ([WILDCARD])
-@jest/globals > does not mock modules yet ... ok ([WILDCARD])
+@jest/globals > has no synchronous jest.requireMock ... ok ([WILDCARD])
 
 ok | 2 passed | 0 failed ([WILDCARD])
 

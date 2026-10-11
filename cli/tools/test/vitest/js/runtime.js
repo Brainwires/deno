@@ -13,7 +13,7 @@
 // has finished with it (and has run the hooks between it and the next test).
 
 // Vitest's chunks export their bindings under minified names.
-import { s as startTests } from "./vendor/runner.js";
+import { i as getFn, s as startTests } from "./vendor/runner.js";
 import {
   c as createExpect,
   g as globalExpect,
@@ -26,71 +26,15 @@ import { s as setSafeTimers } from "./vendor/source_map.js";
 import { g as globalApis } from "./vendor/constants.js";
 import { environments } from "./vendor/environments.js";
 import { DenoSnapshotEnvironment } from "./snapshot_environment.js";
+import { installModuleMocker } from "./mocker.js";
 
 const ORIGINAL_ERROR = Symbol.for("deno.vitest.originalError");
 const TEST_SKIP = Symbol.for("Deno.test.skip");
 const TEST_LOCATION = Symbol.for("Deno.test.location");
 const MODULE_IMPORTED = Symbol.for("deno.vitest.moduleImported");
+const MOCKER = Symbol.for("deno.vitest.mocker");
 
 const { fileURLToPath, pathToFileURL } = await import("node:url");
-
-/** Phase 2 work: module mocking needs loader support in the CLI. */
-function moduleMockingUnsupported(api) {
-  return function unsupported(path) {
-    const site = callSite(unsupported);
-    const what = path === undefined
-      ? `vi.${api}()`
-      : `vi.${api}(${JSON.stringify(String(path))})`;
-    const error = new Error(
-      `${what} is not supported yet by \`deno test\`'s Vitest compatibility: ` +
-        `module mocking is not implemented${
-          site ? ` (called at ${site})` : ""
-        }.`,
-    );
-    error.name = "VitestCompatError";
-    // Start the stack at the caller, so the error points at the user's code.
-    Error.captureStackTrace(error, unsupported);
-    throw error;
-  };
-}
-
-function callSite(fn) {
-  const holder = {};
-  Error.captureStackTrace(holder, fn);
-  for (const line of String(holder.stack).split("\n").slice(1)) {
-    const match = /\(?((?:file|https?|npm|jsr):[^\s()]+:\d+:\d+)\)?\s*$/
-      .exec(line);
-    if (match) return match[1];
-  }
-  return undefined;
-}
-
-function installModuleMockingStubs() {
-  for (const api of ["mock", "doMock", "unmock", "doUnmock", "importMock"]) {
-    vi[api] = moduleMockingUnsupported(api);
-  }
-  vi.resetModules = moduleMockingUnsupported("resetModules");
-  vi.importActual = async function importActual(path) {
-    const site = callSite(importActual);
-    const base = site ? site.replace(/:\d+:\d+$/, "") : undefined;
-    const specifier = path.startsWith(".") || path.startsWith("/")
-      ? new URL(path, base ?? pathToFileURL(Deno.cwd() + "/")).href
-      : path;
-    return await import(specifier);
-  };
-  vi.dynamicImportSettled = async function dynamicImportSettled() {
-    for (let i = 0; i < 3; i++) {
-      await new Promise((resolve) => setTimeout(resolve, 0));
-    }
-  };
-  // `vi.hoisted()` only hoists the factory above imports; without module
-  // mocks nothing depends on that ordering.
-  globalThis.__vitest_mocker__ = new Proxy({}, {
-    get(_target, name) {
-      return moduleMockingUnsupported(String(name));
-    },
-  });
-}
 
 function createDeferred() {
   let resolve;
@@ -251,6 +195,21 @@ class DenoTestRunner extends TestRunner {
 
   async onCollected(files) {
     await this.denoOnCollected(files);
+  }
+
+  /** Runs a test's function (after its `beforeEach` hooks). */
+  async runTask(test) {
+    // A mock factory's getters (`get value() { return state.value }`) are
+    // read again, for the values the hooks set up.
+    globalThis[MOCKER]?.syncGetters();
+    globalThis[MOCKER]?.prewarm();
+    const fn = getFn(test);
+    if (!fn) {
+      throw new Error(
+        "Test function is not found. Did you add it using `setFn`?",
+      );
+    }
+    await fn();
   }
 
   async onBeforeRunTask(test) {
@@ -713,6 +672,11 @@ function hideNonNodeGlobals() {
       "alert",
       "confirm",
       "prompt",
+      // canvas/image APIs code detects to decide whether it can draw
+      "createImageBitmap",
+      "ImageBitmap",
+      "ImageData",
+      "OffscreenCanvas",
     ]
   ) {
     try {
@@ -808,7 +772,7 @@ export async function startFile(specifier, config = {}) {
   });
 
   setSafeTimers();
-  installModuleMockingStubs();
+  installModuleMocker(vi, config.root);
   applyEnvAndDefines(config, environmentName, workerState);
   globalExpect.setState({ environment: environmentName });
 

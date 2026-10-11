@@ -28,6 +28,13 @@ use crate::tools::test::TestLocation;
 use crate::tools::test::TestSnapshotSummary;
 use crate::tools::test::TestStepDescription;
 use crate::tools::test::TestStepResult;
+use crate::tools::test::vitest::mocks::op_vitest_mock_keys;
+use crate::tools::test::vitest::mocks::op_vitest_mock_resolve;
+use crate::tools::test::vitest::mocks::op_vitest_mock_set;
+use crate::tools::test::vitest::mocks::op_vitest_mocks_enable;
+use crate::tools::test::vitest::mocks::op_vitest_mocks_poll;
+use crate::tools::test::vitest::mocks::op_vitest_mocks_respond;
+use crate::tools::test::vitest::mocks::op_vitest_mocks_set_generation;
 
 deno_core::extension!(deno_test,
   ops = [
@@ -48,6 +55,13 @@ deno_core::extension!(deno_test,
     op_test_snapshot_write,
     op_test_event_snapshot_summary,
     op_test_set_import_meta_proto,
+    op_vitest_mocks_enable,
+    op_vitest_mock_resolve,
+    op_vitest_mock_set,
+    op_vitest_mock_keys,
+    op_vitest_mocks_set_generation,
+    op_vitest_mocks_poll,
+    op_vitest_mocks_respond,
   ],
   options = {
     sender: TestEventSender,

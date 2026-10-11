@@ -13,7 +13,7 @@ describe("@jest/globals", () => {
     jest.useRealTimers();
   });
 
-  it("does not mock modules yet", () => {
-    expect(() => jest.mock("./x")).toThrow(/not supported yet/);
+  it("has no synchronous jest.requireMock", () => {
+    expect(() => jest.requireMock("./x")).toThrow(/vi\.importMock/);
   });
 });

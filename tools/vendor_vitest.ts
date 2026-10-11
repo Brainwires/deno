@@ -19,6 +19,7 @@ const ROOT_PATH = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
 const join = (...parts: string[]) => parts.join("/");
 
 const VITEST = "5.0.3";
+const VITEST_MOCKER = "5.0.3";
 const CHAI = "6.2.2";
 const MAGIC_STRING = "1.4.3";
 const SOURCEMAP_CODEC = "1.6.0";
@@ -192,6 +193,7 @@ async function main() {
   const tmp = await Deno.makeTempDir({ prefix: "vendor_vitest_" });
   try {
     const vitest = await fetchPackage("vitest", VITEST, tmp);
+    const mocker = await fetchPackage("@vitest/mocker", VITEST_MOCKER, tmp);
     const chai = await fetchPackage("chai", CHAI, tmp);
     const magic = await fetchPackage("magic-string", MAGIC_STRING, tmp);
     const codec = await fetchPackage(
@@ -237,6 +239,25 @@ async function main() {
           `import { Console } from "node:console";\n` +
           `import { denoVitestReportUnhandledError, denoVitestRootRequireBase } from "../shims/environment_support.js";\n\n` +
           body + "\n\nexport { environments, populateGlobal };\n",
+      );
+    }
+
+    // `mockObject()` (automocking) from @vitest/mocker, without its module
+    // registry (module mocking is implemented by `deno test` itself).
+    {
+      const code = await Deno.readTextFile(join(mocker, "dist/index.js"));
+      const body = slice(
+        code,
+        "function mockObject(",
+        "\nexport { mockObject };",
+        "@vitest/mocker",
+      ).replace(/\nexport \{ mockObject \};$/, "");
+      await write(
+        "mocker.js",
+        header(
+          `@vitest/mocker@${VITEST_MOCKER} (dist/index.js, mockObject)`,
+          VITEST_LICENSE,
+        ) + body + "\n\nexport { mockObject };\n",
       );
     }
 
@@ -305,6 +326,7 @@ async function main() {
       JSON.stringify(
         {
           "vitest": VITEST,
+          "@vitest/mocker": VITEST_MOCKER,
           "chai": CHAI,
           "magic-string": MAGIC_STRING,
           "@jridgewell/sourcemap-codec": SOURCEMAP_CODEC,

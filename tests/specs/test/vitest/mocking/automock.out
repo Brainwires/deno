@@ -1,0 +1,7 @@
+running 3 tests from ./mocking/automock_test.ts
+automocks a module without a factory ... ok ([WILDCARD])
+uses the __mocks__ file next to the module ... ok ([WILDCARD])
+spies on the module with { spy: true } ... ok ([WILDCARD])
+
+ok | 3 passed | 0 failed ([WILDCARD])
+

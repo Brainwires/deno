@@ -1,0 +1,16 @@
+Uncaught error from ./mocking/nested_error_test.ts FAILED
+running 0 tests from ./mocking/nested_error_test.ts
+
+ ERRORS 
+
+./mocking/nested_error_test.ts (uncaught error)
+error: (in promise) [WILDCARD]1 call in "nested_error_test.ts" was defined outside of the module's top level scope:
+
+- vi.mock("./db.ts")
+
+Although it appears nested, it will be hoisted and executed before anything in this file. Move it to the top level to reflect its actual execution order.
+See: https://vitest.dev/guide/mocking/modules#how-it-works
+[WILDCARD]
+FAILED | 0 passed | 1 failed ([WILDCARD])
+
+error: Test failed

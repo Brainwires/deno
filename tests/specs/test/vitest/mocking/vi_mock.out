@@ -1,0 +1,7 @@
+running 3 tests from ./mocking/vi_mock_test.ts
+vi.mock with a factory > replaces the module for the test file ... ok ([WILDCARD])
+vi.mock with a factory > replaces the module for every importer ... ok ([WILDCARD])
+vi.mock with a factory > vi.importActual returns the real module ... ok ([WILDCARD])
+
+ok | 3 passed | 0 failed ([WILDCARD])
+

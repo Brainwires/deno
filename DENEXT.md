@@ -306,8 +306,56 @@ where the changes are discussed.
     modules' `import.meta`), mock reset flags and timeouts; Vite's
     CSS/asset/`?raw`/`?url` imports and its extension and directory resolution
     apply in such projects. `--no-vitest-compat` / `test.vitestCompat: false`
-    turn it off; `--vitest-config` picks a config. Module mocking (`vi.mock` &
-    co.) is not implemented yet and throws.
+    turn it off; `--vitest-config` picks a config.
+
+    **Module mocking** (`vi.mock` / `vi.unmock` / `vi.doMock` / `vi.doUnmock` /
+    `vi.hoisted` / `vi.importActual` / `vi.importMock` / `vi.resetModules`,
+    `vi.spyOn(namespace, "export")`, and `jest.mock` & co. from `@jest/globals`)
+    works the way Vitest's does, in three parts:
+
+    - _Transform_ (`cli/tools/test/vitest/transform.rs`): `deno_resolver`'s
+      `Emitter` gained an `EmitProgramTransform` hook, run on the swc program
+      after the TypeScript/JSX passes and before emitting (its key is part of
+      the emit cache hash; JavaScript user modules are emitted too when it
+      applies). In a Vitest run it applies to user modules (`file:` outside
+      `node_modules`). A module calling the mocking API gets Vitest's
+      `hoistMocks`: `vi.mock` / `vi.unmock` / `vi.hoisted` move above the
+      imports, every import except the `vitest` one becomes
+      `const __vi_import_N__ = await import(...)` after them, and references to
+      imported bindings (matched by syntax context, so shadowing is respected)
+      become `__vi_import_N__.name`, so a factory using an import hits the TDZ
+      like in Vitest; nested or exported mocking calls are Vitest's errors.
+      Every user module also gets _mutable exports_: its exported `const`s
+      become `let`, and it registers a setter for its exports (re-exports
+      forward to their source) keyed by its own namespace, which it imports
+      through `deno-vitest:///self` (the loader resolves that to the importing
+      module).
+    - _Registry_ (`cli/tools/test/vitest/mocks.rs`): every worker's
+      `CliModuleLoader` owns a `VitestMocks`, also put into the worker's
+      `OpState` (through a new `CreateModuleLoaderResult::op_state_init`). A
+      mock is registered by the URL its path resolves to from the caller, so
+      `./db`, `@/db` and `../db.ts` are one mock. Once mocking is enabled, the
+      loader resolves an import of a mocked URL from user code (never from
+      `node_modules`, which Vitest leaves external) to
+      `deno-vitest:///mock?id=<n>&name=<imported names>`; the names come from
+      parsing the importer's original source, so an importer can import names
+      the factory does not return (they are `undefined`, Vitest throws on
+      access). Loading that module asks the worker's JavaScript (an unref'd
+      polling op, like the `registerHooks` load bridge) for its source, and the
+      event loop runs during module loads meanwhile.
+      `deno-vitest:///actual?url=` imports the real module. `vi.resetModules()`
+      bumps a generation: user modules resolved afterwards get a
+      `__vitest_gen=<n>` query and are served from the module without it, so
+      they are fresh instances (mocks are kept). Each test file runs in its own
+      worker, hence its own registry.
+    - _Runtime_ (`js/mocker.js`): `vi.mock()` & co. register mocks through the
+      ops; the source of a mock module exports each key of the factory's result
+      (run once, lazily, with `importOriginal`), of the automocked module
+      (`mockObject` from `@vitest/mocker`, vendored), or of the `__mocks__` file
+      (Vitest's `findMockRedirect`), as `let` bindings with a setter.
+      `vi.spyOn()` on a module namespace spies on a proxy whose property
+      definitions go through the module's setter, so the spy (and its restore)
+      reaches every importer.
 
 The runtime-side parts (1-3, 5-22) are what the prebuilt `libdenort` carries.
 The CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` /
