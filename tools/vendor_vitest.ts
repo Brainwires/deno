@@ -71,12 +71,14 @@ const PATCHES: Patch[] = [
     why:
       "keep the original error next to its serialized copy so the Deno test " +
       "reporter can show the real stack trace",
-    find: `		result.errors ??= [];
-		result.errors.push(...errors);`,
-    replace:
-      `		if (errors.length === 1 && e && typeof e === "object") Object.defineProperty(errors[0], Symbol.for("deno.vitest.originalError"), { value: e });
-		result.errors ??= [];
-		result.errors.push(...errors);`,
+    find: `	try {
+		return serializeValue(err);
+	} catch (e) {`,
+    replace: `	try {
+		const serialized = serializeValue(err);
+		if (serialized && typeof serialized === "object") Object.defineProperty(serialized, Symbol.for("deno.vitest.originalError"), { value: err });
+		return serialized;
+	} catch (e) {`,
   },
   {
     file: "runner.js",

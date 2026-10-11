@@ -1293,7 +1293,9 @@ function processError(_err, diffOptions, seen = /* @__PURE__ */ new WeakSet()) {
 		}
 	} catch {}
 	try {
-		return serializeValue(err);
+		const serialized = serializeValue(err);
+		if (serialized && typeof serialized === "object") Object.defineProperty(serialized, Symbol.for("deno.vitest.originalError"), { value: err });
+		return serialized;
 	} catch (e) {
 		return serializeValue(/* @__PURE__ */ new Error(`Failed to fully serialize error: ${e?.message}\nInner error message: ${err?.message}`));
 	}
@@ -3988,7 +3990,6 @@ function failTask(result, err, diffOptions) {
 	const errors = Array.isArray(err) ? err : [err];
 	for (const e of errors) {
 		const errors = e instanceof AggregateError ? e.errors.map((e) => processError(e, diffOptions)) : [processError(e, diffOptions)];
-		if (errors.length === 1 && e && typeof e === "object") Object.defineProperty(errors[0], Symbol.for("deno.vitest.originalError"), { value: e });
 		result.errors ??= [];
 		result.errors.push(...errors);
 	}
