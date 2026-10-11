@@ -53,14 +53,13 @@ fn abbreviate_test_error(js_error: &JsError) -> JsError {
         .as_deref()
         .is_some_and(|f| !is_internal_frame_file(f))
     });
-    if let Some(last_user_frame) = last_user_frame {
-      frames = frames
-        .into_iter()
-        .enumerate()
-        .filter(|(i, f)| *i <= last_user_frame && !is_vitest_frame(f))
-        .map(|(_, f)| f)
-        .collect();
-    }
+    let last = last_user_frame.unwrap_or(usize::MAX);
+    frames = frames
+      .into_iter()
+      .enumerate()
+      .filter(|(i, f)| *i <= last && !is_vitest_frame(f))
+      .map(|(_, f)| f)
+      .collect();
   }
 
   // check if there are any stack frames coming from user code

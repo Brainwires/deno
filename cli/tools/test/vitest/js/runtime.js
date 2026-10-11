@@ -30,7 +30,6 @@ import { DenoSnapshotEnvironment } from "./snapshot_environment.js";
 const ORIGINAL_ERROR = Symbol.for("deno.vitest.originalError");
 const TEST_SKIP = Symbol.for("Deno.test.skip");
 const TEST_LOCATION = Symbol.for("Deno.test.location");
-const MODULE_EVALUATION_ERROR = Symbol("deno.vitest.moduleEvaluationError");
 
 const { fileURLToPath, pathToFileURL } = await import("node:url");
 
@@ -235,13 +234,7 @@ class DenoTestRunner extends TestRunner {
     const promise = import(toImportSpecifier(filepath));
     if (source !== "collect") return promise;
     return promise.catch((error) => {
-      if (error !== null && typeof error === "object") {
-        try {
-          error[MODULE_EVALUATION_ERROR] = true;
-        } catch {
-          // ignore
-        }
-      }
+      this.moduleEvaluationFailed = true;
       throw error;
     });
   }
@@ -284,37 +277,47 @@ function toFilePath(specifier) {
   return specifier.startsWith("file:") ? fileURLToPath(specifier) : specifier;
 }
 
-/** Turns Vitest's recorded errors for a task into one throwable error. */
-function toThrowable(errors, prefix) {
-  const errs = errors.map((processed) => {
-    let error = processed[ORIGINAL_ERROR];
-    if (!(error instanceof Error)) {
-      error = new Error(processed.message ?? String(processed));
-      if (processed.name) error.name = processed.name;
-      if (processed.stack) error.stack = processed.stack;
-    }
-    if (processed.diff && !String(error.message).includes(processed.diff)) {
-      try {
-        error.message = `${error.message}\n\n${processed.diff}`;
-      } catch {
-        // frozen or exotic error; keep the original message
-      }
-    }
-    return error;
-  });
-  let error = errs[0];
-  if (errs.length > 1) {
-    error = new AggregateError(
-      errs,
-      errs.map((e) => String(e?.message ?? e)).join("\n\n"),
-    );
-  }
-  if (prefix) {
+/** Whether the first frame of `stack` is outside the built-in modules. */
+function startsInUserCode(stack) {
+  const frame = String(stack ?? "").split("\n").find((line) =>
+    /^\s+at /.test(line)
+  );
+  return frame !== undefined && !frame.includes(`deno-vitest:`) &&
+    /(file|https?|npm|jsr):/.test(frame);
+}
+
+function messageOf(processed) {
+  const message = String(processed.message ?? processed);
+  return processed.diff && !message.includes(processed.diff)
+    ? `${message}\n\n${processed.diff}`
+    : message;
+}
+
+/**
+ * Turns Vitest's recorded errors for a task into one throwable error. The
+ * original error is thrown when it was raised in user code, so Deno shows
+ * its source location; errors raised by Vitest itself (timeouts, `.fails`,
+ * assertion counts) are rethrown with just their message.
+ */
+function toThrowable(errors, prefix = "") {
+  const first = errors[0];
+  const message = prefix + errors.map(messageOf).join("\n\n");
+  const original = first[ORIGINAL_ERROR];
+  if (original instanceof Error && startsInUserCode(original.stack)) {
     try {
-      error.message = `${prefix}${error.message}`;
+      original.message = message;
+      return original;
     } catch {
-      // ignore
+      // frozen or exotic error: fall through
     }
+  }
+  const error = new Error(message);
+  if (first.name && first.name !== "Error") {
+    Object.defineProperty(error, "name", {
+      value: first.name,
+      configurable: true,
+      writable: true,
+    });
   }
   return error;
 }
@@ -733,12 +736,12 @@ export async function startFile(specifier, config = {}) {
 
   const files = await collected.promise;
   for (const file of files) {
-    const original = file.result?.errors?.[0]?.[ORIGINAL_ERROR];
+    if (!file.denoCollectionError) continue;
+    // Reported now (or by Deno), not again at teardown.
+    file.denoReported = true;
     // A failed import of the test module is reported by Deno when it
     // evaluates the module itself; other collection errors are reported here.
-    if (file.denoCollectionError && !original?.[MODULE_EVALUATION_ERROR]) {
-      throw file.denoCollectionError;
-    }
+    if (!runner.moduleEvaluationFailed) throw file.denoCollectionError;
   }
 }
 
