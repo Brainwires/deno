@@ -107,6 +107,14 @@ pub fn module_url(path: &str) -> Url {
 /// Loads a `deno-vitest:` module.
 pub fn load_module(specifier: &Url) -> Result<ModuleSource, JsErrorBox> {
   let path = specifier.path().trim_start_matches('/');
+  if path == "virtual/asset.js" {
+    return Ok(ModuleSource::new(
+      ModuleType::JavaScript,
+      ModuleSourceCode::String(asset_module_code(specifier)?.into()),
+      specifier,
+      None,
+    ));
+  }
   if path == RESOLVED_CONFIG_PATH {
     let json = RESOLVED_CONFIG
       .read()
@@ -308,6 +316,9 @@ pub struct VitestOverrides {
   root_referrer: RwLock<Url>,
   /// The config's aliases (set once the config is loaded).
   aliases: RwLock<Vec<Alias>>,
+  /// The Vite root, with a Vitest config: CSS, asset and `?raw` / `?url`
+  /// imports then resolve like Vite resolves them.
+  vite_root: RwLock<Option<PathBuf>>,
 }
 
 impl VitestOverrides {
@@ -315,8 +326,207 @@ impl VitestOverrides {
     Ok(Self {
       root_referrer: RwLock::new(root_referrer(root)?),
       aliases: Default::default(),
+      vite_root: Default::default(),
     })
   }
+
+  /// The virtual module Vite would provide for a CSS file, a static asset or
+  /// a `?raw` / `?url` / `?inline` import.
+  fn vite_asset_module(&self, specifier: &str, referrer: &Url) -> Option<Url> {
+    let root = self.vite_root.read().unwrap().clone()?;
+    if referrer.scheme() != "file" || referrer.path().contains("/node_modules/")
+    {
+      return None;
+    }
+    let (path, query) = match specifier.split_once('?') {
+      Some((path, query)) => (path, Some(query)),
+      None => (specifier, None),
+    };
+    let flags = query
+      .map(|q| q.split('&').map(|p| p.split('=').next().unwrap_or(p)))
+      .into_iter()
+      .flatten()
+      .collect::<Vec<_>>();
+    let ext = path
+      .rsplit('/')
+      .next()
+      .and_then(|name| name.rsplit_once('.'))
+      .map(|(_, ext)| ext.to_ascii_lowercase());
+    let is_css = ext.as_deref().is_some_and(|e| CSS_LANGS.contains(&e));
+    let kind = if flags.contains(&"raw") {
+      "raw"
+    } else if flags.contains(&"url") {
+      "url"
+    } else if flags.contains(&"inline") {
+      "inline"
+    } else if flags.contains(&"worker") || flags.contains(&"sharedworker") {
+      "worker"
+    } else if is_css {
+      if path.contains(".module.") {
+        "css-module"
+      } else {
+        "css"
+      }
+    } else if ext
+      .as_deref()
+      .is_some_and(|e| ASSET_EXTENSIONS.contains(&e))
+    {
+      "url"
+    } else {
+      return None;
+    };
+    let file = if path.starts_with("./") || path.starts_with("../") {
+      referrer.join(path).ok()
+    } else if path.starts_with("file:") {
+      Url::parse(path).ok()
+    } else if path.starts_with('/') {
+      // a filesystem path (from an alias), or a path from the Vite root
+      let absolute = Path::new(path);
+      let file = if absolute.exists() {
+        absolute.to_path_buf()
+      } else {
+        root.join(path.trim_start_matches('/'))
+      };
+      Url::from_file_path(file).ok()
+    } else {
+      None
+    };
+    let mut url = module_url("virtual/asset.js");
+    {
+      let mut query = url.query_pairs_mut();
+      query.append_pair("kind", kind);
+      match &file {
+        Some(file) => {
+          query.append_pair("file", file.as_str());
+          let served = deno_path_util::url_to_file_path(file)
+            .ok()
+            .map(|p| match p.strip_prefix(&root) {
+              Ok(relative) => {
+                format!("/{}", relative.to_string_lossy().replace('\\', "/"))
+              }
+              Err(_) => format!("/@fs{}", p.to_string_lossy()),
+            })
+            .unwrap_or_else(|| file.to_string());
+          query.append_pair("url", &served);
+        }
+        // a package's stylesheet: the content is never needed
+        None if is_css => {}
+        None => return None,
+      }
+    }
+    Some(url)
+  }
+}
+
+/// Vite's CSS languages.
+const CSS_LANGS: &[&str] = &[
+  "css", "less", "sass", "scss", "styl", "stylus", "pcss", "postcss", "sss",
+];
+
+/// Vite's known asset types (`KNOWN_ASSET_TYPES`).
+const ASSET_EXTENSIONS: &[&str] = &[
+  "apng",
+  "bmp",
+  "png",
+  "jpg",
+  "jpeg",
+  "jfif",
+  "pjpeg",
+  "pjp",
+  "gif",
+  "svg",
+  "ico",
+  "webp",
+  "avif",
+  "cur",
+  "jxl",
+  "mp4",
+  "webm",
+  "ogg",
+  "mp3",
+  "wav",
+  "flac",
+  "aac",
+  "opus",
+  "mov",
+  "m4a",
+  "vtt",
+  "woff",
+  "woff2",
+  "eot",
+  "ttf",
+  "otf",
+  "webmanifest",
+  "pdf",
+  "txt",
+  "glb",
+  "gltf",
+  "wasm",
+];
+
+/// The code of a `deno-vitest:///virtual/asset.js?...` module.
+fn asset_module_code(specifier: &Url) -> Result<String, JsErrorBox> {
+  let params = specifier.query_pairs().collect::<HashMap<_, _>>();
+  let kind = params.get("kind").map(|k| k.as_ref()).unwrap_or("css");
+  let file = params.get("file").and_then(|f| Url::parse(f).ok());
+  let read = || -> Result<Vec<u8>, JsErrorBox> {
+    let path = file
+      .as_ref()
+      .and_then(|f| deno_path_util::url_to_file_path(f).ok())
+      .ok_or_else(|| JsErrorBox::generic("Missing asset path"))?;
+    std::fs::read(&path).map_err(|err| {
+      JsErrorBox::generic(format!(
+        "Failed to read \"{}\": {err}",
+        path.display()
+      ))
+    })
+  };
+  let json = |value: &str| deno_core::serde_json::to_string(value).unwrap();
+  Ok(match kind {
+    "css" => "export default \"\";\n".to_string(),
+    // Vitest leaves CSS unprocessed by default; a CSS module maps each
+    // class name to itself.
+    "css-module" => "export default new Proxy({}, { get: (_, key) => typeof key === \"string\" ? key : undefined });\n".to_string(),
+    "url" => format!(
+      "export default {};\n",
+      json(params.get("url").map(|u| u.as_ref()).unwrap_or(""))
+    ),
+    "raw" => format!(
+      "export default {};\n",
+      json(&String::from_utf8_lossy(&read()?))
+    ),
+    "inline" => {
+      let bytes = read()?;
+      let path = file.as_ref().map(|f| f.path().to_string()).unwrap_or_default();
+      let mime = match path.rsplit_once('.').map(|(_, e)| e) {
+        Some("svg") => "image/svg+xml",
+        Some("png") => "image/png",
+        Some("jpg" | "jpeg") => "image/jpeg",
+        Some("gif") => "image/gif",
+        Some("webp") => "image/webp",
+        Some("woff2") => "font/woff2",
+        Some("woff") => "font/woff",
+        Some("mp3") => "audio/mpeg",
+        _ => "application/octet-stream",
+      };
+      format!(
+        "export default {};\n",
+        json(&format!(
+          "data:{mime};base64,{}",
+          base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            bytes
+          )
+        ))
+      )
+    }
+    "worker" => "export default class { constructor() { throw new Error(\"Vite worker imports (?worker) are not supported by deno test\"); } }\n".to_string(),
+    _ => {
+      return Err(JsErrorBox::generic(format!(
+        "Unknown Vite asset kind \"{kind}\""
+      )));
+    }
+  })
 }
 
 fn root_referrer(root: &Path) -> Result<Url, AnyError> {
@@ -360,25 +570,27 @@ impl SpecifierOverrides for VitestOverrides {
       return Some(SpecifierOverride::Url(module_url(module)));
     }
     let aliases = self.aliases.read().unwrap();
-    if aliases.is_empty() || referrer.path().contains("/node_modules/") {
+    if referrer.path().contains("/node_modules/") {
       return None;
     }
-    for alias in aliases.iter() {
-      if let Some(specifier) = alias.apply(raw_specifier) {
-        let specifier = if specifier.starts_with('/') {
-          Url::from_file_path(&specifier)
-            .map(|u| u.to_string())
-            .unwrap_or(specifier)
-        } else {
-          specifier
-        };
-        return Some(SpecifierOverride::Rewrite {
-          specifier,
-          referrer: None,
-        });
-      }
+    let aliased = aliases.iter().find_map(|alias| alias.apply(raw_specifier));
+    if let Some(module) = self
+      .vite_asset_module(aliased.as_deref().unwrap_or(raw_specifier), referrer)
+    {
+      return Some(SpecifierOverride::Url(module));
     }
-    None
+    let specifier = aliased?;
+    let specifier = if specifier.starts_with('/') {
+      Url::from_file_path(&specifier)
+        .map(|u| u.to_string())
+        .unwrap_or(specifier)
+    } else {
+      specifier
+    };
+    Some(SpecifierOverride::Rewrite {
+      specifier,
+      referrer: None,
+    })
   }
 }
 
@@ -507,6 +719,8 @@ impl VitestCompat {
     if let Some(project) = compat.projects.first() {
       *overrides.root_referrer.write().unwrap() =
         root_referrer(Path::new(&project.loaded.root))?;
+      *overrides.vite_root.write().unwrap() =
+        Some(PathBuf::from(&project.loaded.root));
     }
     *overrides.aliases.write().unwrap() = aliases;
     Ok(compat)
@@ -712,6 +926,7 @@ mod tests {
         Url::parse("file:///project/__deno_vitest_root__.js").unwrap(),
       ),
       aliases: Default::default(),
+      vite_root: Default::default(),
     };
     let builtin = module_url("vitest.js");
     assert_eq!(
@@ -735,6 +950,61 @@ mod tests {
     );
     assert_eq!(
       overrides.resolve("vitest", &referrer(), NodeResolutionKind::Types),
+      None
+    );
+  }
+
+  #[test]
+  fn vite_asset_modules() {
+    let overrides = VitestOverrides::new(Path::new("/project")).unwrap();
+    let referrer = Url::parse("file:///project/src/a.test.ts").unwrap();
+    // only with a Vitest config
+    assert_eq!(overrides.vite_asset_module("./a.css", &referrer), None);
+    *overrides.vite_root.write().unwrap() = Some(PathBuf::from("/project"));
+    let kind = |specifier: &str| {
+      overrides
+        .vite_asset_module(specifier, &referrer)
+        .map(|url| {
+          url
+            .query_pairs()
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect::<Vec<_>>()
+            .join("&")
+        })
+    };
+    assert_eq!(
+      kind("./a.css"),
+      Some(
+        "kind=css&file=file:///project/src/a.css&url=/src/a.css".to_string()
+      )
+    );
+    assert_eq!(
+      kind("./a.module.scss").map(|k| k.starts_with("kind=css-module")),
+      Some(true)
+    );
+    assert_eq!(kind("pkg/style.css"), Some("kind=css".to_string()));
+    assert_eq!(
+      kind("../assets/x.mp3"),
+      Some(
+        "kind=url&file=file:///project/assets/x.mp3&url=/assets/x.mp3"
+          .to_string()
+      )
+    );
+    assert_eq!(
+      kind("./x.svg?raw").map(|k| k.starts_with("kind=raw")),
+      Some(true)
+    );
+    assert_eq!(
+      kind("./data.json?url").map(|k| k.starts_with("kind=url")),
+      Some(true)
+    );
+    assert_eq!(kind("./module.ts"), None);
+    assert_eq!(kind("./data.json"), None);
+    assert_eq!(kind("pkg/image.png"), None);
+    let in_node_modules =
+      Url::parse("file:///project/node_modules/pkg/index.js").unwrap();
+    assert_eq!(
+      overrides.vite_asset_module("./a.css", &in_node_modules),
       None
     );
   }
