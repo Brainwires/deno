@@ -510,7 +510,8 @@ fn resolve_package_subpath_with_extensions(
       )
     {
       if candidate.is_file() {
-        let path = std::fs::canonicalize(&candidate).unwrap_or(candidate);
+        let path =
+          crate::util::fs::canonicalize_path(&candidate).unwrap_or(candidate);
         return Url::from_file_path(path).ok();
       }
     }
