@@ -357,6 +357,51 @@ where the changes are discussed.
       definitions go through the module's setter, so the spy (and its restore)
       reaches every importer.
 
+    **Jest projects** run on the same layer. Without a Vitest config, a
+    `jest.config.{ts,mts,cts,js,mjs,cjs,json}`, a package.json `"jest"` key or a
+    package.json depending on Jest (Jest's defaults) is the test config
+    (`--vitest-config` takes a `jest*` file or a package.json too).
+    `js/jest_config.js` evaluates it in the config worker (`preset`s merged,
+    `projects` as objects or directories, `displayName` naming them for
+    `--vitest-project`) and maps it onto the Vitest projects: `roots`,
+    `testMatch` (micromatch's bare `(a|b)` groups included, matched against
+    absolute paths) or `testRegex`, `testPathIgnorePatterns` and
+    `moduleFileExtensions` select the files (`Project::matches_jest`);
+    `moduleNameMapper` entries become aliases that map the whole specifier
+    (`<rootDir>`, `$1`); `moduleDirectories` / `modulePaths` resolve bare
+    specifiers that name no installed package; `setupFiles` then
+    `setupFilesAfterEnv` (paths or packages) are setup files; `testEnvironment`
+    maps by name onto node / jsdom / happy-dom (with `testEnvironmentOptions`;
+    jsdom and happy-dom resolve through the Jest environment package under a
+    strict pnpm layout); `testTimeout`, `clearMocks` / `resetMocks` /
+    `restoreMocks`, `injectGlobals`, `globals`, `snapshotSerializers`,
+    `snapshotFormat` and `fakeTimers` (`timers`) configure the runtime. A
+    `transform` other than babel-jest / ts-jest / `@swc/jest` / esbuild & co.
+    (whose work Deno does) is a warning; the JSX runtime those transformers use
+    (`.swcrc`, the ts-jest tsconfig, the Babel config's text) becomes the user
+    modules' through a new `EmitProgramTransform::transpile_options` override.
+    `js/jest.js` provides the `jest` object on top of `vi` (fake timers with
+    Jest's options, `replaceProperty`, `retryTimes`, `requireActual` /
+    `requireMock` synchronously, `unstable_mockModule`, `setMock`,
+    `isolateModules(Async)`, ...) and Jest's semantics: globals by default
+    (`fit`, `xit`, `xdescribe`, `test.failing` too), a declared parameter of a
+    test or hook is `done`, a hook's return value is not a teardown, jest-each
+    titles (`%p`, `$variable`, `$#`), snapshot keys and `currentTestName` joined
+    with spaces, the Jest snapshot header kept, non-strict equality ignoring
+    `undefined` array items, unawaited `.resolves` not failing a test, a mock
+    factory's result treated as `module.exports` (CommonJS interop), root
+    `__mocks__` files mocking packages without `jest.mock()`, no `setImmediate`
+    and no `Deno` on `window` in DOM environments. In a Jest project a user
+    module that uses `require` gets Jest's `require()` (served by the
+    transform): it resolves like an import (aliases, mocks, fresh modules after
+    `jest.resetModules()`, through `op_vitest_resolve_import`) and loads ES
+    modules synchronously (`op_import_sync`). For every Vitest or Jest run the
+    transform also turns a TypeScript module's type-only exports into
+    `undefined` value exports, so `export { SomeType } from "./types"` (valid
+    without `isolatedModules`) links. The vendored runtime has four more marked
+    patches for these (test name separator, `formatTitle` hook, unawaited async
+    assertions, array equality).
+
 The runtime-side parts (1-3, 5-22) are what the prebuilt `libdenort` carries.
 The CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` /
 `LAUFEY_APP_ID` into a packaged app's launchers) are in the branch too, but a
