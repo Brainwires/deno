@@ -75,6 +75,7 @@ use crate::display;
 use crate::factory::CliFactory;
 use crate::file_fetcher::CliFileFetcher;
 use crate::graph_container::CheckSpecifiersOptions;
+use crate::graph_container::ModuleGraphContainer;
 use crate::graph_util::has_graph_root_local_dependent_changed;
 use crate::ops;
 use crate::sys::CliSys;

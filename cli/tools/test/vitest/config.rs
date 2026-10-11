@@ -61,7 +61,7 @@ fn depends_on_vitest(dir: &Path) -> bool {
     let Ok(text) = std::fs::read_to_string(&path) else {
       continue;
     };
-    let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) else {
+    let Ok(json) = deno_core::serde_json::from_str::<deno_core::serde_json::Value>(&text) else {
       return false;
     };
     return [
@@ -96,7 +96,7 @@ pub struct LoadedProject {
   #[serde(default)]
   pub alias: Vec<LoadedAlias>,
   /// The runtime options handed to the per-file preload.
-  pub config: serde_json::Value,
+  pub config: deno_core::serde_json::Value,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -155,7 +155,7 @@ pub async fn load_config(
     }
     value.to_rust_string_lossy(scope)
   };
-  Ok(serde_json::from_str(&json)?)
+  Ok(deno_core::serde_json::from_str(&json)?)
 }
 
 #[cfg(test)]

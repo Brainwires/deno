@@ -562,7 +562,7 @@ fn set_resolved_config(projects: &[Project], update_snapshots: bool) {
   let ci = std::env::var("CI")
     .map(|v| !v.is_empty() && v != "false")
     .unwrap_or(false);
-  let json = serde_json::json!({
+  let json = deno_core::serde_json::json!({
     "update": update_snapshots,
     "ci": ci,
     "projects": projects
