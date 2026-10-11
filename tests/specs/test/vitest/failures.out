@@ -39,6 +39,9 @@ expected 'a' to be 'b' // Object.is equality
 
 Expected: "b"
 Received: "a"
+    expect.soft(1).toBe(2);
+                   ^
+    at [WILDCARD]failures_test.ts:12:20
 
 failures > assertion count => ./failures_test.ts:16:3
 error: Error: expected number of assertions to be 2, but got 1
