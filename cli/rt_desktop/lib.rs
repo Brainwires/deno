@@ -2221,6 +2221,20 @@ fn apply_pending_update(dylib_path: &Path) -> bool {
   false
 }
 
+/// [`apply_pending_update`] on the app's own launch only. A worker launch (a
+/// headless fork or child of the running app, see `worker_launch`) leaves a
+/// staged update, a backup and its sentinel alone: it used to apply a staged
+/// update under the running app, or roll back an update whose first launch
+/// had not yet written its sentinel, whenever the app forked a worker. The
+/// app's next launch applies it.
+#[cfg(unix)]
+fn apply_pending_update_on_launch(dylib_path: &Path, is_worker: bool) -> bool {
+  if is_worker {
+    return false;
+  }
+  apply_pending_update(dylib_path)
+}
+
 /// The argument a laufey Linux host's D-Bus activation launch carries (the
 /// Exec line of the app's `<app id>.service`, for a notification click while
 /// the app isn't running). Only the host reads it.
@@ -2364,6 +2378,14 @@ laufey::main!(|| {
     }
   }
 
+  // Whether this launch is a fork of the app (see below): classified first,
+  // since only the app's own launch may apply a pending update.
+  let args: Vec<_> = process_args_os();
+  let is_worker =
+    worker_launch::is_worker_launch(args.get(1..).unwrap_or_default(), |n| {
+      env::var_os(n)
+    });
+
   // Apply any pending update before anything else.
   #[cfg(unix)]
   #[allow(clippy::print_stderr, reason = "runs before logging is initialized")]
@@ -2372,7 +2394,7 @@ laufey::main!(|| {
       // (No print of the path here: this runs on every launch, and stderr
       // is the app's own.)
       if let Some(ref dylib_path) = get_dylib_path() {
-        apply_pending_update(dylib_path)
+        apply_pending_update_on_launch(dylib_path, is_worker)
       } else {
         eprintln!("[desktop] could not determine dylib path");
         false
@@ -2412,10 +2434,7 @@ laufey::main!(|| {
   // forged environment) is refused: it used to run any script with the app's
   // permissions, signature and privacy grants, or to start the app with no
   // backend.
-  let args: Vec<_> = process_args_os();
-  if worker_launch::is_worker_launch(args.get(1..).unwrap_or_default(), |n| {
-    env::var_os(n)
-  }) {
+  if is_worker {
     match worker_launch::authorize() {
       Ok(()) => {
         run_on_runtime_thread(run_headless_worker);
@@ -4355,6 +4374,46 @@ mod tests {
         "successful-boot path must delete sentinel"
       );
       assert_eq!(read(&dylib), "new", "dylib untouched on cleanup path");
+    }
+
+    // A headless worker the running app forks (`<exe> run <script>` with its
+    // IPC channel) must not apply the update staged for the app's next
+    // launch, nor roll back the update the app is trying out.
+    #[test]
+    fn worker_launch_leaves_a_staged_update_alone() {
+      use std::ffi::OsString;
+
+      use super::super::apply_pending_update_on_launch;
+      use super::super::worker_launch::is_worker_launch;
+
+      let tmp = tempfile::tempdir().unwrap();
+      let (dylib, update, backup, sentinel) = paths(tmp.path());
+      touch(&dylib, "old");
+      touch(&update, "new");
+      let args: Vec<OsString> = vec!["run".into(), "worker.js".into()];
+      let ipc = |n: &str| (n == "NODE_CHANNEL_FD").then(|| OsString::from("3"));
+      let is_worker = is_worker_launch(&args, ipc);
+      assert!(is_worker, "a forked `run` with an IPC channel is a worker");
+      assert!(!apply_pending_update_on_launch(&dylib, is_worker));
+      assert_eq!(read(&dylib), "old", "the running app's dylib is untouched");
+      assert_eq!(read(&update), "new", "the staged update waits");
+      assert!(!backup.exists());
+
+      // ... nor roll back an update on trial (no sentinel yet).
+      std::fs::remove_file(&update).unwrap();
+      touch(&backup, "previous");
+      assert!(!apply_pending_update_on_launch(&dylib, true));
+      assert_eq!(read(&dylib), "old");
+      assert!(backup.exists() && !sentinel.exists());
+
+      // The app's own launch (no worker argv or env) applies it.
+      std::fs::remove_file(&backup).unwrap();
+      touch(&update, "new");
+      let is_worker = is_worker_launch(&[], |_| None);
+      assert!(!is_worker);
+      assert!(!apply_pending_update_on_launch(&dylib, is_worker));
+      assert_eq!(read(&dylib), "new");
+      assert_eq!(read(&backup), "old");
     }
 
     #[test]
