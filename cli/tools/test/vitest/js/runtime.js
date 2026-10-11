@@ -38,12 +38,14 @@ const { fileURLToPath, pathToFileURL } = await import("node:url");
 function moduleMockingUnsupported(api) {
   return function unsupported(path) {
     const site = callSite(unsupported);
-    const what = path === undefined ? `vi.${api}()` : `vi.${api}(${
-      JSON.stringify(String(path))
-    })`;
+    const what = path === undefined
+      ? `vi.${api}()`
+      : `vi.${api}(${JSON.stringify(String(path))})`;
     const error = new Error(
       `${what} is not supported yet by \`deno test\`'s Vitest compatibility: ` +
-        `module mocking is not implemented${site ? ` (called at ${site})` : ""}.`,
+        `module mocking is not implemented${
+          site ? ` (called at ${site})` : ""
+        }.`,
     );
     error.name = "VitestCompatError";
     throw error;
@@ -459,9 +461,9 @@ function registerTest(test, bridge) {
     if (suiteError) throw suiteError;
   };
   if (test.location) {
-    fn[TEST_LOCATION] = `${pathToFileURL(test.file.filepath).href}:${
-      test.location.line
-    }:${test.location.column}`;
+    fn[TEST_LOCATION] = `${
+      pathToFileURL(test.file.filepath).href
+    }:${test.location.line}:${test.location.column}`;
   }
   Deno.test({
     name,
@@ -595,9 +597,7 @@ function applyEnvAndDefines(config, environmentName, workerState) {
 }
 
 function buildRunnerConfig(config) {
-  const updateSnapshot = config.update
-    ? "all"
-    : (config.ci ? "none" : "new");
+  const updateSnapshot = config.update ? "all" : (config.ci ? "none" : "new");
   return {
     root: config.root,
     name: config.name ?? "",

@@ -27,8 +27,10 @@ function parseDotenv(text) {
     if (!match) continue;
     let value = (match[2] ?? "").trim();
     const quote = value[0];
-    if ((quote === '"' || quote === "'" || quote === "`") &&
-      value.endsWith(quote)) {
+    if (
+      (quote === '"' || quote === "'" || quote === "`") &&
+      value.endsWith(quote)
+    ) {
       value = value.slice(1, -1);
       if (quote === '"') value = value.replace(/\\n/g, "\n");
     } else {
@@ -58,7 +60,6 @@ export function loadEnv(mode, envDir, prefixes = "VITE_") {
   }
   return result;
 }
-
 
 export function defineConfig(config) {
   return config;
@@ -100,7 +101,7 @@ function mergeAlias(a, b) {
 
 function mergeConfigRecursively(defaults, overrides, rootPath) {
   const merged = { ...defaults };
-  for (const key in overrides) {
+  for (const key of Object.keys(overrides)) {
     const value = overrides[key];
     if (value == null) continue;
     const existing = merged[key];

@@ -134,7 +134,8 @@ function tsconfigPathAliases(config, root) {
       const [before, after = ""] = target.split("*");
       aliases.push({
         find: { regex: `^${prefix}(.*)${suffix}$`, flags: "" },
-        replacement: resolve(found.base, before) + (before.endsWith("/") ? "/" : "") +
+        replacement: resolve(found.base, before) +
+          (before.endsWith("/") ? "/" : "") +
           "$1" + after,
       });
     }

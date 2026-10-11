@@ -6,13 +6,7 @@
 // VoidZero Inc. and Vitest contributors).
 
 import { existsSync, promises as fs } from "node:fs";
-import {
-  basename,
-  dirname,
-  isAbsolute,
-  join,
-  resolve,
-} from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 
 export class DenoSnapshotEnvironment {
   constructor(options = {}) {

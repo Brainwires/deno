@@ -39,7 +39,9 @@ export const jest = {
   advanceTimersByTimeAsync: async (ms) => (
     await vi.advanceTimersByTimeAsync(ms), jest
   ),
-  advanceTimersToNextTimer: (steps) => (vi.advanceTimersToNextTimer(steps), jest),
+  advanceTimersToNextTimer: (
+    steps,
+  ) => (vi.advanceTimersToNextTimer(steps), jest),
   runAllTimers: () => (vi.runAllTimers(), jest),
   runAllTimersAsync: async () => (await vi.runAllTimersAsync(), jest),
   runOnlyPendingTimers: () => (vi.runOnlyPendingTimers(), jest),

@@ -12,9 +12,10 @@ import resolvedConfig from "./resolved_config.json" with { type: "json" };
 const params = new URL(import.meta.url).searchParams;
 const file = params.get("file");
 const projectName = params.get("project");
-const project = resolvedConfig.projects?.find((p) =>
-  projectName === null ? true : p.name === projectName
-) ?? {};
+const project =
+  resolvedConfig.projects?.find((p) =>
+    projectName === null ? true : p.name === projectName
+  ) ?? {};
 const config = {
   ...project,
   update: resolvedConfig.update,

@@ -73,14 +73,14 @@ const PATCHES: Patch[] = [
       "reporter can show the real stack trace",
     find: `		result.errors ??= [];
 		result.errors.push(...errors);`,
-    replace: `		if (errors.length === 1 && e && typeof e === "object") Object.defineProperty(errors[0], Symbol.for("deno.vitest.originalError"), { value: e });
+    replace:
+      `		if (errors.length === 1 && e && typeof e === "object") Object.defineProperty(errors[0], Symbol.for("deno.vitest.originalError"), { value: e });
 		result.errors ??= [];
 		result.errors.push(...errors);`,
   },
   {
     file: "runner.js",
-    why:
-      "tell the Deno bridge synchronously when a task settles (the runner " +
+    why: "tell the Deno bridge synchronously when a task settles (the runner " +
       "only reports task updates through a throttled RPC otherwise)",
     find: `function updateTask(event, task, runner) {
 	eventsPacks.push([`,
@@ -123,8 +123,7 @@ function header(source: string, license: string) {
     `// ${license}\n\n`;
 }
 
-const IMPORT_RE =
-  /(\bfrom\s*|\bimport\s*\(\s*|\bimport\s+)(['"])([^'"]+)\2/g;
+const IMPORT_RE = /(\bfrom\s*|\bimport\s*\(\s*|\bimport\s+)(['"])([^'"]+)\2/g;
 
 /** Resolves a relative `spec` against the dist-relative `importer` path. */
 function resolveDistPath(importer: string, spec: string) {
@@ -222,12 +221,15 @@ async function main() {
       const body = slice(
         code,
         "const LIVING_KEYS = [",
-        "\t\"edge-runtime\": edge\n};",
+        '\t"edge-runtime": edge\n};',
         chunk,
       );
       await write(
         "environments.js",
-        header(`vitest@${VITEST} (dist/${chunk}, environments)`, VITEST_LICENSE) +
+        header(
+          `vitest@${VITEST} (dist/${chunk}, environments)`,
+          VITEST_LICENSE,
+        ) +
           `import { createRequire } from "node:module";\n` +
           `import { URL as URL$1 } from "node:url";\n` +
           `import { Console } from "node:console";\n` +
@@ -238,12 +240,18 @@ async function main() {
 
     await write(
       "chai.js",
-      header(`chai@${CHAI} (index.js)`, "Copyright (c) 2017 Chai.js Assertion Library. MIT License, see LICENSE-chai.") +
+      header(
+        `chai@${CHAI} (index.js)`,
+        "Copyright (c) 2017 Chai.js Assertion Library. MIT License, see LICENSE-chai.",
+      ) +
         await Deno.readTextFile(join(chai, "index.js")),
     );
     await write(
       "magic_string.js",
-      header(`magic-string@${MAGIC_STRING} (dist/index.mjs)`, "Copyright 2018 Rich Harris. MIT License, see LICENSE-magic-string.") +
+      header(
+        `magic-string@${MAGIC_STRING} (dist/index.mjs)`,
+        "Copyright 2018 Rich Harris. MIT License, see LICENSE-magic-string.",
+      ) +
         rewriteImports(
           "magic_string.js",
           await Deno.readTextFile(join(magic, "dist/index.mjs")),
@@ -265,7 +273,10 @@ async function main() {
         .replaceAll("exports.expectTypeOf", "expectTypeOf");
       await write(
         "expect_type.js",
-        header(`expect-type@${EXPECT_TYPE} (dist/index.js, runtime only)`, "Copyright 2024 Misha Kaletsky. Apache-2.0 License, see LICENSE-expect-type.") +
+        header(
+          `expect-type@${EXPECT_TYPE} (dist/index.js, runtime only)`,
+          "Copyright 2024 Misha Kaletsky. Apache-2.0 License, see LICENSE-expect-type.",
+        ) +
           body + "\n\nexport { expectTypeOf };\n",
       );
     }
