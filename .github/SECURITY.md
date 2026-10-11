@@ -1,24 +1,32 @@
 # Security Policy
 
-Thank you for taking the time to investigate the security of Deno. The security
-of Deno is our topmost priority. We appreciate investigative work into system
-security by well-intentioned, ethical security researchers. If you discover a
-vulnerability, however small, we would like to know about it to address it with
-appropriate measures as quickly as possible. This document outlines the method
-we use to work with the security research community to address runtime security.
+This repository is Brainwires' fork of the Deno runtime, maintained for the
+[denext](https://github.com/Brainwires/denext) runtime line (the
+`2.9.7-denext.N` releases: the Deno CLI fork, `denort`, and the Deno Desktop
+runtime built with [Brainwires/laufey](https://github.com/Brainwires/laufey)).
+It is not affiliated with Deno Land Inc. or Cloudflare. Deno is a trademark of
+its respective owner.
 
 ## Reporting a vulnerability
 
-Please open a new
-[Security advisory](https://github.com/denoland/deno/security/advisories/new)
-with your findings. We strive to resolve all problems as quickly as possible,
-and are more than happy to play an active role in publication of writeups after
-the problem is resolved.
+Please report vulnerabilities **privately** through GitHub's private
+vulnerability reporting:
+[open a security advisory](https://github.com/Brainwires/deno/security/advisories/new).
 
-Try to include as much information as possible in the initial report, so we can
-quickly address the issue.
+**Please do not open security issues in the public issue tracker, and do not
+open public pull requests that disclose an unfixed vulnerability.**
 
-**Please do not open security issues in the public issue tracker.**
+Include as much as you can: the affected release (for example
+`2.9.7-denext.13`), the target (OS and architecture), steps to reproduce, and
+the impact you observed. We will acknowledge a report within 3 business days and
+keep you informed while we work on a fix. We are happy to credit you in the
+advisory once the issue is resolved.
+
+If the issue also affects upstream Deno (it reproduces on a stock Deno release
+without this fork's patches), please report it to the Deno team as well, through
+the
+[Deno security advisory form](https://github.com/denoland/deno/security/advisories/new).
+We will coordinate disclosure with them where possible.
 
 ### Please do the following
 
@@ -26,9 +34,7 @@ quickly address the issue.
 - Do not publish or reveal the problem until it has been resolved.
 - Do not use attacks on physical security or applications of third parties.
 - Do provide sufficient information to reproduce the problem, so we will be able
-  to resolve it as quickly as possible. Usually, a list of steps to follow, and
-  the vulnerable Deno version is enough. More complex vulnerabilities may
-  require further explanation.
+  to resolve it as quickly as possible.
 
 ### Our commitment to you
 
@@ -36,6 +42,30 @@ quickly address the issue.
   against you in regard to your report.
 - We will handle your report with strict confidentiality, and not pass on your
   personal details to third parties without your permission.
+
+## Supported versions
+
+Only the current denext runtime line receives security fixes. Fixes ship as a
+new `denext-runtime-v<deno>-denext.<N>` release on this repository, and denext
+pins the new release.
+
+| Version                                        | Supported            |
+| ---------------------------------------------- | -------------------- |
+| Latest `2.9.7-denext.N` release                | Yes                  |
+| Earlier `2.9.7-denext.N` releases              | No                   |
+| Stock Deno releases (not built from this fork) | No (report upstream) |
+
+## How we track upstream
+
+- We follow upstream Deno security releases and advisories and merge the fixes
+  into this fork's runtime line, then cut a new `denext.N` release.
+- A scheduled `cargo audit` workflow (`.github/workflows/cargo_audit.yml`)
+  checks `Cargo.lock` against the RustSec advisory database every week.
+- V8 comes from the published `rusty_v8` crates; Chromium/V8 security releases
+  are tracked through them. Prebuilt V8 libraries are mirrored on this
+  repository's `rusty_v8-mirror` releases.
+- The Desktop runtime's CEF backend follows CEF / Chromium security releases
+  through [Brainwires/laufey](https://github.com/Brainwires/laufey).
 
 ## Security Model
 
