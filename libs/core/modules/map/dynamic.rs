@@ -232,6 +232,13 @@ impl ModuleMap {
     // https://v8.dev/features/top-level-await#module-execution-order
     v8::tc_scope!(let tc_scope, scope);
 
+    // The module's top-level code runs in the async context of the code that
+    // called `import()` (as in Node): install the importer's continuation
+    // data for the evaluation, then put back what was active before. Without
+    // the restore, the importer's context stays the isolate's ambient one
+    // after this event-loop turn, and the next task the runtime starts on its
+    // own (a `Deno.serve` handler, the test runner's next test) inherits it.
+    let prev_cped = tc_scope.get_continuation_preserved_embedder_data();
     let cped = v8::Local::new(tc_scope, state.cped);
     tc_scope.set_continuation_preserved_embedder_data(cped);
 
@@ -247,6 +254,7 @@ impl ModuleMap {
     self.evaluating_top_level.set(true);
     let maybe_value = module.evaluate(tc_scope);
     self.evaluating_top_level.set(false);
+    tc_scope.set_continuation_preserved_embedder_data(prev_cped);
 
     // Update status after evaluating.
     let status = module.get_status();
@@ -594,6 +602,11 @@ impl ModuleMap {
 
               v8::tc_scope!(let tc_scope, scope);
 
+              // Evaluate the async dependencies in the importer's context,
+              // then restore the previous one (see
+              // `dynamic_import_module_evaluate`).
+              let prev_cped =
+                tc_scope.get_continuation_preserved_embedder_data();
               let cped = v8::Local::new(tc_scope, state.cped.clone());
               tc_scope.set_continuation_preserved_embedder_data(cped);
 
@@ -602,6 +615,7 @@ impl ModuleMap {
               // Gather async transitive dependencies. Returns a promise
               // that resolves when all async deps are ready.
               let maybe_promise = module.evaluate_for_import_defer(tc_scope);
+              tc_scope.set_continuation_preserved_embedder_data(prev_cped);
 
               let Some(promise_val) = maybe_promise else {
                 let exception = tc_scope.exception().unwrap();

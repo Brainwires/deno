@@ -1,0 +1,12 @@
+{
+  "tests": {
+    "serve_next_request": {
+      "args": "run --allow-net serve.mjs",
+      "output": "serve.out"
+    },
+    "test_runner_next_test": {
+      "args": "test --allow-read test.mjs",
+      "output": "test.out"
+    }
+  }
+}

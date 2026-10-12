@@ -1,0 +1,9 @@
+running 6 tests from ./test.mjs
+plain module ... ok [WILDCARD]
+after plain module ... ok [WILDCARD]
+top-level await module ... ok [WILDCARD]
+after top-level await module ... ok [WILDCARD]
+json module ... ok [WILDCARD]
+after json module ... ok [WILDCARD]
+
+ok | 6 passed | 0 failed [WILDCARD]

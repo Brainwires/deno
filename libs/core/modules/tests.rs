@@ -1605,6 +1605,79 @@ async fn dyn_import_ok() {
   .await;
 }
 
+// A first-time `import()` evaluates the new module in the importer's async
+// context, but must not leave that context installed as the isolate's
+// ambient one once the event loop turn ends: work the runtime starts on its
+// own afterwards (an incoming request's handler, the next test) would
+// inherit it.
+#[tokio::test]
+async fn dyn_import_restores_async_context() {
+  let loader = Rc::new(StaticModuleLoader::new([
+    (
+      Url::parse("file:///plain.js").unwrap(),
+      ascii_str!("globalThis.plainCtx = Deno.core.getAsyncContext();"),
+    ),
+    (
+      Url::parse("file:///tla.js").unwrap(),
+      ascii_str!(
+        "globalThis.tlaCtx = Deno.core.getAsyncContext();
+        await null;
+        globalThis.tlaAfterAwaitCtx = Deno.core.getAsyncContext();"
+      ),
+    ),
+  ]));
+  let mut runtime = JsRuntime::new(RuntimeOptions {
+    module_loader: Some(loader),
+    ..Default::default()
+  });
+  for specifier in ["./plain.js", "./tla.js"] {
+    runtime
+      .execute_script(
+        "file:///importer.js",
+        format!(
+          r#"
+          {{
+            const prev = Deno.core.getAsyncContext();
+            Deno.core.setAsyncContext("REQ");
+            import("{specifier}");
+            Deno.core.setAsyncContext(prev);
+          }}
+          "#
+        ),
+      )
+      .unwrap();
+    runtime.run_event_loop(Default::default()).await.unwrap();
+    runtime
+      .execute_script(
+        "file:///check.js",
+        r#"
+        {
+          const ambient = Deno.core.getAsyncContext();
+          if (ambient !== undefined) {
+            throw new Error("leaked async context: " + ambient);
+          }
+        }
+        "#,
+      )
+      .unwrap();
+  }
+  runtime
+    .execute_script(
+      "file:///check_module.js",
+      r#"
+      if (globalThis.plainCtx !== "REQ") {
+        throw new Error("plain.js top level saw " + globalThis.plainCtx);
+      }
+      if (globalThis.tlaCtx !== "REQ" || globalThis.tlaAfterAwaitCtx !== "REQ") {
+        throw new Error(
+          "tla.js saw " + globalThis.tlaCtx + " / " + globalThis.tlaAfterAwaitCtx,
+        );
+      }
+      "#,
+    )
+    .unwrap();
+}
+
 #[tokio::test]
 async fn dyn_import_borrow_mut_error() {
   // https://github.com/denoland/deno/issues/6054
