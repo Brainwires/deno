@@ -22,6 +22,7 @@ deno_core::extension!(
     pg::op_sql_pg_connect,
     pg::op_sql_pg_query,
     pg::op_sql_pg_simple,
+    pg::op_sql_pg_finish,
     pg::op_sql_pg_is_closed,
     pg::op_sql_pg_next_event,
     pg::op_sql_pg_cancel,

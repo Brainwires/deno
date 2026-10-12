@@ -7,14 +7,18 @@
 //! and TLS is negotiated here with the runtime's rustls configuration.
 
 use std::borrow::Cow;
+use std::cell::Cell;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::collections::VecDeque;
+use std::future::Future;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::task::Poll;
 use std::time::Duration;
 
 use deno_core::AsyncRefCell;
@@ -26,6 +30,7 @@ use deno_core::Resource;
 use deno_core::ResourceId;
 use deno_core::ToV8;
 use deno_core::futures::TryStreamExt;
+use deno_core::futures::future::Either;
 use deno_core::op2;
 use deno_core::v8;
 use deno_net::DefaultTlsOptions;
@@ -67,6 +72,8 @@ use crate::params::SqlParams;
 use crate::pg_decode;
 use crate::pg_decode::DecodeOptions;
 use crate::rows::FLAG_BIGINT;
+use crate::rows::FLAG_GUARDED;
+use crate::rows::FLAG_ORDERED;
 use crate::rows::FLAG_RAW;
 use crate::rows::FLAG_UNNAMED;
 use crate::rows::RowShape;
@@ -248,6 +255,17 @@ pub struct PgConnection {
   tls: Option<(Arc<ClientConfig>, String)>,
   in_flight: RefCell<InFlight>,
   in_flight_changed: Notify,
+  /// Held by a request from its op's first poll until its messages are
+  /// queued, so requests go on the wire in the order they were made even
+  /// when one has to prepare its statement first ([`FLAG_ORDERED`]: a
+  /// transaction's pipelined statements rely on it). FIFO, and taken on
+  /// the first poll, which happens when JavaScript calls the op. Simple
+  /// queries and transaction ends take it too; unordered queries (the
+  /// pool's, on connections no ordered request uses) don't.
+  order: tokio::sync::Mutex<()>,
+  /// A [`FLAG_GUARDED`] statement failed before it went on the wire; the
+  /// next `op_sql_pg_finish` rolls back instead.
+  guarded_failed: Cell<bool>,
 }
 
 impl Resource for PgConnection {
@@ -718,6 +736,8 @@ pub async fn op_sql_pg_connect(
     tls,
     in_flight: RefCell::new(InFlight::default()),
     in_flight_changed: Notify::new(),
+    order: tokio::sync::Mutex::new(()),
+    guarded_failed: Cell::new(false),
   });
   Ok(PgConnectInfo {
     rid,
@@ -941,6 +961,12 @@ fn closed() -> SqlError {
   SqlError::postgres_client(codes::CONNECTION_CLOSED, "Connection closed")
 }
 
+/// Polls `fut` once: `tokio-postgres` queues a request's messages on the
+/// first poll of its future (and fails it there if it can't encode them).
+async fn poll_once<F: Future>(mut fut: Pin<&mut F>) -> Poll<F::Output> {
+  std::future::poll_fn(|cx| Poll::Ready(fut.as_mut().poll(cx))).await
+}
+
 #[op2]
 pub async fn op_sql_pg_query(
   state: Rc<RefCell<OpState>>,
@@ -952,42 +978,75 @@ pub async fn op_sql_pg_query(
 ) -> Result<PgRows, SqlError> {
   let conn = state.borrow().resource_table.get::<PgConnection>(rid)?;
   let _live = conn.live(query_id);
-  if let Some(index) = params.0.iter().position(contains_nul) {
-    return Err(SqlError::postgres_client(
-      codes::INVALID_PARAMETER,
-      format!(
-        "Parameter ${} contains a NUL (\\0) character, which Postgres text can't hold",
-        index + 1
-      ),
-    ));
-  }
   let cancel = conn.cancel.clone();
+  let guarded = flags & FLAG_GUARDED != 0;
+  let unnamed = conn.cache_size == 0 || flags & FLAG_UNNAMED != 0;
+  let ordered = flags & FLAG_ORDERED != 0;
   let run = async {
-    let mut _ticket = None;
-    let (stream, statement) =
-      if conn.cache_size == 0 || flags & FLAG_UNNAMED != 0 {
-        let unspecified = unspecified_type();
-        let typed = params.0.iter().map(|p| (p, unspecified.clone()));
-        _ticket = Some(conn.enter(query_id));
-        (conn.client.query_typed_raw(&sql, typed).await?, None)
-      } else {
-        let stmt = conn.statement(&sql).await?;
-        if stmt.params().len() != params.0.len() {
-          return Err(SqlError::postgres_client(
-            codes::INVALID_PARAMETER,
-            format!(
-              "The query expects {} parameter(s) but {} were given",
-              stmt.params().len(),
-              params.0.len()
-            ),
-          ));
+    let order = if ordered {
+      Some(conn.order.lock().await)
+    } else {
+      None
+    };
+    let prepared = async {
+      if let Some(index) = params.0.iter().position(contains_nul) {
+        return Err(SqlError::postgres_client(
+          codes::INVALID_PARAMETER,
+          format!(
+            "Parameter ${} contains a NUL (\\0) character, which Postgres text can't hold",
+            index + 1
+          ),
+        ));
+      }
+      if unnamed {
+        return Ok(None);
+      }
+      let stmt = conn.statement(&sql).await?;
+      if stmt.params().len() != params.0.len() {
+        return Err(SqlError::postgres_client(
+          codes::INVALID_PARAMETER,
+          format!(
+            "The query expects {} parameter(s) but {} were given",
+            stmt.params().len(),
+            params.0.len()
+          ),
+        ));
+      }
+      Ok(Some(stmt))
+    }
+    .await;
+    let statement = match prepared {
+      Ok(statement) => statement,
+      Err(err) => {
+        // A statement that fails to prepare on the server aborts the
+        // transaction itself; only client-side failures need the flag, but
+        // setting it for both is harmless (the transaction ends in a
+        // rollback either way).
+        if guarded {
+          conn.guarded_failed.set(true);
         }
-        _ticket = Some(conn.enter(query_id));
-        (
-          conn.client.query_raw(&stmt, params.0.iter()).await?,
-          Some(stmt),
-        )
-      };
+        return Err(err);
+      }
+    };
+    let _ticket = conn.enter(query_id);
+    let fut = match &statement {
+      None => {
+        let unspecified = unspecified_type();
+        let typed = params.0.iter().map(move |p| (p, unspecified.clone()));
+        Either::Left(conn.client.query_typed_raw(&sql, typed))
+      }
+      Some(stmt) => Either::Right(conn.client.query_raw(stmt, params.0.iter())),
+    };
+    let mut fut = std::pin::pin!(fut);
+    let first = poll_once(fut.as_mut()).await;
+    if guarded && matches!(first, Poll::Ready(Err(_))) {
+      conn.guarded_failed.set(true);
+    }
+    drop(order);
+    let stream = match first {
+      Poll::Ready(result) => result?,
+      Poll::Pending => fut.await?,
+    };
     let mut stream = std::pin::pin!(stream);
     let mut rows = Vec::new();
     while let Some(row) = stream.try_next().await? {
@@ -1090,8 +1149,18 @@ pub async fn op_sql_pg_simple(
   let _live = conn.live(query_id);
   let cancel = conn.cancel.clone();
   let run = async {
+    let order = conn.order.lock().await;
     let _ticket = conn.enter(query_id);
-    let messages = conn.client.simple_query(&sql).await?;
+    let mut fut = std::pin::pin!(conn.client.simple_query(&sql));
+    let first = poll_once(fut.as_mut()).await;
+    if flags & FLAG_GUARDED != 0 && matches!(first, Poll::Ready(Err(_))) {
+      conn.guarded_failed.set(true);
+    }
+    drop(order);
+    let messages = match first {
+      Poll::Ready(result) => result?,
+      Poll::Pending => fut.await?,
+    };
     let mut results = Vec::new();
     let mut columns: Vec<String> = Vec::new();
     let mut rows: Vec<Vec<Option<String>>> = Vec::new();
@@ -1118,6 +1187,45 @@ pub async fn op_sql_pg_simple(
       }
     }
     Ok(PgSimpleResults { results, flags })
+  };
+  match run.or_cancel(cancel).await {
+    Ok(result) => result,
+    Err(_) => Err(closed()),
+  }
+}
+
+/// Ends a pipelined transaction or savepoint right behind the statements
+/// sent before it: `ok` (`COMMIT`, `RELEASE SAVEPOINT ...`), or `fail`
+/// (`ROLLBACK`, `ROLLBACK TO SAVEPOINT ...`; nothing when empty) when a
+/// [`FLAG_GUARDED`] statement failed before it went on the wire, which the
+/// server can't know about (one it ran and failed has aborted the
+/// transaction already, so `COMMIT` rolls back). Returns whether it sent
+/// `ok`.
+#[op2]
+pub async fn op_sql_pg_finish(
+  state: Rc<RefCell<OpState>>,
+  #[smi] rid: ResourceId,
+  #[string] ok: String,
+  #[string] fail: String,
+) -> Result<bool, SqlError> {
+  let conn = state.borrow().resource_table.get::<PgConnection>(rid)?;
+  let cancel = conn.cancel.clone();
+  let run = async {
+    let order = conn.order.lock().await;
+    let failed = conn.guarded_failed.replace(false);
+    let text = if failed { &fail } else { &ok };
+    if text.is_empty() {
+      return Ok(false);
+    }
+    let _ticket = conn.enter(0);
+    let mut fut = std::pin::pin!(conn.client.simple_query(text));
+    let first = poll_once(fut.as_mut()).await;
+    drop(order);
+    match first {
+      Poll::Ready(result) => result?,
+      Poll::Pending => fut.await?,
+    };
+    Ok(!failed)
   };
   match run.or_cancel(cancel).await {
     Ok(result) => result,

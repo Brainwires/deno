@@ -10,6 +10,7 @@ const { core, primordials } = __bootstrap;
 const {
   op_sql_pg_cancel,
   op_sql_pg_connect,
+  op_sql_pg_finish,
   op_sql_pg_is_closed,
   op_sql_pg_next_event,
   op_sql_pg_query,
@@ -103,6 +104,8 @@ const FLAG_VALUES = 1;
 const FLAG_RAW = 2;
 const FLAG_BIGINT = 4;
 const FLAG_UNNAMED = 8;
+const FLAG_GUARDED = 16;
+const FLAG_ORDERED = 32;
 
 // Must match `pg.rs`.
 const EVENTS_NOTICES = 1;
@@ -224,6 +227,8 @@ const postgres = {
   async control(rid, text) {
     await op_sql_pg_simple(rid, text, 0, 0);
   },
+  // Ends a pipelined transaction / savepoint (see `op_sql_pg_finish`).
+  finish: (rid, ok, fail) => op_sql_pg_finish(rid, ok, fail),
   isClosed: (rid) => op_sql_pg_is_closed(rid),
   nextEvent: (rid) => op_sql_pg_next_event(rid),
   cancel: (rid, id) => op_sql_pg_cancel(rid, id),
@@ -1072,27 +1077,38 @@ function queryFlags(state, query) {
   return flags;
 }
 
-async function execute(state, conn, query) {
+/** Runs `query` on `conn`. `ordered`: on the wire after every request made
+ * before it on `conn` (a transaction's or a reserved connection's
+ * statements), not just sent as soon as it can be (the pool's). */
+async function execute(state, conn, query, ordered = false) {
   const adapter = state.adapter;
-  const b = buildQuery(query, adapter);
-  const flags = queryFlags(state, query);
+  let flags = queryFlags(state, query);
+  if (ordered) flags |= FLAG_ORDERED;
   const id = nextQueryId();
+  let b;
+  let sent = false;
   query[kRunning] = { conn, id };
   try {
+    b = buildQuery(query, adapter);
     if (query[kCancelled]) throw cancelledError();
     if (query[kSimple]) {
       if (b.params.length) {
         throw new SQLError("simple() queries cannot have parameters");
       }
+      sent = true;
       const results = await adapter.simple(conn.rid, b.text, flags, id);
       if (results.length === 1) return finishResult(results[0], b.text);
       return ArrayPrototypeMap(results, (r) => finishResult(r, ""));
     }
+    sent = true;
     return finishResult(
       await adapter.query(conn.rid, b.text, b.params, flags, id),
       b.text,
     );
   } catch (error) {
+    // Reached synchronously when it fails before the op is called, so a
+    // pipelined end sent right after sees it.
+    if (!sent && flags & FLAG_GUARDED) conn.guardedFailed = true;
     throw queryError(conn, query, error);
   } finally {
     query[kRunning] = undefined;
@@ -1203,10 +1219,14 @@ async function* cursorBatches(query, size, rowByRow = false) {
           : "The reserved connection has been released",
       );
     }
+    // A cursor reacts to "not in a transaction" itself, so it waits for a
+    // pipelined BEGIN / SAVEPOINT to succeed first.
+    const gateError = await gateOutcome(ctx.gate);
+    if (gateError !== undefined) throw gateError;
     conn = ctx.conn;
   }
   const b = buildQuery(query, adapter);
-  const flags = queryFlags(state, query) | FLAG_UNNAMED;
+  const flags = queryFlags(state, query) | FLAG_UNNAMED | FLAG_ORDERED;
   const name = "deno_sql_cursor_" + (++lastCursorId);
   const declare = "declare " + name + " no scroll cursor for " + b.text;
   const fetch = "fetch forward " + size + " from " + name;
@@ -1218,14 +1238,26 @@ async function* cursorBatches(query, size, rowByRow = false) {
       began = true;
     }
     try {
-      await adapter.query(conn.rid, declare, b.params, FLAG_UNNAMED, 0);
+      await adapter.query(
+        conn.rid,
+        declare,
+        b.params,
+        FLAG_UNNAMED | FLAG_ORDERED,
+        0,
+      );
     } catch (error) {
       // A reserved connection outside a transaction: open one for the
       // cursor's lifetime.
       if (owned || error?.code !== "25P01") throw error;
       await adapter.control(conn.rid, "BEGIN");
       began = true;
-      await adapter.query(conn.rid, declare, b.params, FLAG_UNNAMED, 0);
+      await adapter.query(
+        conn.rid,
+        declare,
+        b.params,
+        FLAG_UNNAMED | FLAG_ORDERED,
+        0,
+      );
     }
     while (true) {
       const id = nextQueryId();
@@ -1446,6 +1478,9 @@ function connectionContext(state, kind, conn) {
     conn,
     done: false,
     savepoints: 0,
+    // The pipelined BEGIN / SAVEPOINT the statements after it depend on
+    // (`openGate`), or undefined.
+    gate: undefined,
     run(query) {
       if (ctx.done) {
         return PromiseReject(
@@ -1456,7 +1491,19 @@ function connectionContext(state, kind, conn) {
           ),
         );
       }
-      return execute(state, conn, query);
+      const gate = ctx.gate;
+      if (gate === undefined || (gate.settled && !gate.failed)) {
+        return execute(state, conn, query, true);
+      }
+      if (gate.failed) {
+        if (query[kFlags] & FLAG_GUARDED) conn.guardedFailed = true;
+        return PromiseReject(gate.error);
+      }
+      // Sent now, right behind the gate; its outcome is only reported once
+      // the gate's is known, and the gate's error wins.
+      const result = execute(state, conn, query, true);
+      PromisePrototypeCatch(result, noop);
+      return PromisePrototypeThen(gate.promise, () => result);
     },
   };
   return ctx;
@@ -1712,35 +1759,257 @@ async function settle(result) {
   return ArrayIsArray(result) ? await SafePromiseAll(result) : result;
 }
 
+const noop = () => {};
+
+/** A pipelined BEGIN / SAVEPOINT: statements sent after it go out at once,
+ * and report their results once its own is known (its error, if any). */
+function openGate(promise) {
+  const gate = { promise, settled: false, failed: false, error: undefined };
+  PromisePrototypeThen(promise, () => {
+    gate.settled = true;
+  }, (error) => {
+    gate.settled = true;
+    gate.failed = true;
+    gate.error = error;
+  });
+  return gate;
+}
+
+/** The gate's error once it has settled, or undefined. */
+async function gateOutcome(gate) {
+  if (gate === undefined) return undefined;
+  if (!gate.settled) {
+    try {
+      await gate.promise;
+    } catch {
+      // Recorded by openGate's handler, which ran first.
+    }
+  }
+  return gate.failed ? gate.error : undefined;
+}
+
+// `BEGIN` options a pipelined BEGIN takes: the transaction modes, and
+// nothing else, so BEGIN can't fail on its syntax (the statements sent
+// behind it would then run outside any transaction). Postgres separates
+// tokens by ASCII whitespace only.
+const WS = "[ \\t\\n\\r\\f]";
+const TRANSACTION_MODE = "(?:isolation" + WS + "+level" + WS +
+  "+(?:serializable|repeatable" + WS + "+read|read" + WS + "+committed|read" +
+  WS + "+uncommitted)|read" + WS + "+(?:write|only)|(?:not" + WS +
+  "+)?deferrable)";
+const TRANSACTION_MODES = new SafeRegExp(
+  "^" + WS + "*" + TRANSACTION_MODE + "(?:(?:" + WS + "*," + WS + "*|" + WS +
+    "+)" + TRANSACTION_MODE + ")*" + WS + "*$",
+  "i",
+);
+
+/** Whether BEGIN with these options can go on the wire ahead of the
+ * transaction's first statements without waiting for its answer. */
+function canPipelineBegin(adapter, options) {
+  return adapter.finish !== undefined &&
+    (options === "" ||
+      RegExpPrototypeExec(TRANSACTION_MODES, options) !== null);
+}
+
+/** The queries to start when a callback's result allows a pipelined end
+ * (COMMIT / RELEASE right behind its last statement): a query of this
+ * transaction or an array of them (and plain values), none started yet;
+ * an empty array when there is nothing to start; undefined when the result
+ * has to be awaited first (a promise, an async callback, a query of another
+ * client, a `sql.file()` query still to be read...). */
+function pipelinedEnd(ctx, result) {
+  if (ctx.state.adapter.finish === undefined) return undefined;
+  const items = ArrayIsArray(result) ? result : [result];
+  const queries = [];
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i];
+    if (isQuery(item)) {
+      if (
+        item[kCtx] !== ctx || item[kPromise] !== undefined ||
+        item[kCancelled] ||
+        (item[kFile] !== undefined && item[kUnsafe] === undefined)
+      ) {
+        return undefined;
+      }
+      ArrayPrototypePush(queries, item);
+    } else if (
+      item !== null && (typeof item === "object" || typeof item === "function")
+    ) {
+      // A thenable (or anything that might be one) is awaited first.
+      if (typeof item.then === "function") return undefined;
+    }
+  }
+  return queries;
+}
+
+/** Starts `queries` (guarded: one that fails before it is sent makes the end
+ * roll back), then sends the end (`ok`, or `fail` when one of them already
+ * failed). Returns the end's promise, already handled. */
+function startWithEnd(conn, adapter, queries, ok, fail) {
+  for (let i = 0; i < queries.length; i++) {
+    queries[i][kFlags] |= FLAG_GUARDED;
+    queries[i].execute();
+  }
+  const failed = conn.guardedFailed;
+  conn.guardedFailed = false;
+  const end = adapter.finish(conn.rid, failed ? fail : ok, fail);
+  PromisePrototypeCatch(end, noop);
+  return end;
+}
+
+function callTransactionFn(fn, tx) {
+  try {
+    return fn(tx);
+  } catch (error) {
+    return PromiseReject(error);
+  }
+}
+
+async function rollback(adapter, conn) {
+  try {
+    await adapter.control(conn.rid, "ROLLBACK");
+  } catch {
+    conn.broken = true;
+  }
+}
+
+/** BEGIN, `fn(tx)`, COMMIT; ROLLBACK when it throws. On Postgres BEGIN is
+ * pipelined with the first statements (their results wait for its answer),
+ * and when `fn` returns its queries without awaiting them COMMIT goes right
+ * behind them, so `begin(tx => [tx`...`, tx`...`])` is one round trip. */
 async function runTransaction(state, conn, options, fn) {
   const adapter = state.adapter;
-  await adapter.control(conn.rid, options ? "BEGIN " + options : "BEGIN");
+  const begin = options ? "BEGIN " + options : "BEGIN";
   const ctx = connectionContext(state, "transaction", conn);
   const tx = makeSql(state, ctx);
-  let result;
+  if (canPipelineBegin(adapter, options)) {
+    conn.guardedFailed = false;
+    ctx.gate = openGate(adapter.control(conn.rid, begin));
+  } else {
+    await adapter.control(conn.rid, begin);
+  }
+  const result = callTransactionFn(fn, tx);
+
+  const queries = pipelinedEnd(ctx, result);
+  if (queries !== undefined) {
+    const end = startWithEnd(conn, adapter, queries, "COMMIT", "ROLLBACK");
+    ctx.done = true;
+    let value;
+    try {
+      value = await settle(result);
+    } catch (error) {
+      // A statement failed: the server has aborted the transaction (its
+      // COMMIT rolls back), or it never went out (`end` was a ROLLBACK).
+      try {
+        await end;
+      } catch {
+        conn.broken = true;
+      }
+      throw (await gateOutcome(ctx.gate)) ?? error;
+    }
+    const gateError = await gateOutcome(ctx.gate);
+    let committed;
+    try {
+      committed = await end;
+    } catch (error) {
+      if (gateError !== undefined) throw gateError;
+      await rollback(adapter, conn);
+      throw error;
+    }
+    if (gateError !== undefined) throw gateError;
+    if (!committed) throw new SQLError("The transaction was rolled back");
+    return value;
+  }
+
+  let value;
   try {
-    result = await settle(fn(tx));
+    value = await settle(result);
   } catch (error) {
     ctx.done = true;
-    try {
-      await adapter.control(conn.rid, "ROLLBACK");
-    } catch {
-      conn.broken = true;
-    }
+    const gateError = await gateOutcome(ctx.gate);
+    if (gateError !== undefined) throw gateError;
+    await rollback(adapter, conn);
     throw error;
   }
   ctx.done = true;
+  const gateError = await gateOutcome(ctx.gate);
+  if (gateError !== undefined) throw gateError;
   try {
     await adapter.control(conn.rid, "COMMIT");
   } catch (error) {
-    try {
-      await adapter.control(conn.rid, "ROLLBACK");
-    } catch {
-      conn.broken = true;
-    }
+    await rollback(adapter, conn);
     throw error;
   }
-  return result;
+  return value;
+}
+
+/** SAVEPOINT, `fn(tx)`, RELEASE; ROLLBACK TO when it throws. Pipelined as
+ * `runTransaction` is (a SAVEPOINT can only fail in an aborted transaction,
+ * where the statements behind it fail too). */
+async function runSavepoint(state, ctx, tx, id, fn) {
+  const adapter = state.adapter;
+  const conn = ctx.conn;
+  const outer = ctx.gate;
+  const pipelined = adapter.finish !== undefined;
+  const release = "RELEASE SAVEPOINT " + id;
+  const rollbackTo = "ROLLBACK TO SAVEPOINT " + id;
+  if (pipelined) {
+    ctx.gate = openGate(adapter.control(conn.rid, "SAVEPOINT " + id));
+  } else {
+    await adapter.control(conn.rid, "SAVEPOINT " + id);
+  }
+  const gate = ctx.gate;
+  try {
+    const result = callTransactionFn(fn, tx);
+    const queries = pipelined ? pipelinedEnd(ctx, result) : undefined;
+    if (queries !== undefined) {
+      const end = startWithEnd(conn, adapter, queries, release, rollbackTo);
+      let value;
+      try {
+        value = await settle(result);
+      } catch (error) {
+        // RELEASE failed in the aborted transaction (or never went out:
+        // `end` was the ROLLBACK TO already).
+        let released;
+        try {
+          released = await end;
+        } catch {
+          released = undefined;
+        }
+        const gateError = await gateOutcome(gate);
+        if (gateError !== undefined) throw gateError;
+        if (released !== false) {
+          await adapter.control(conn.rid, rollbackTo);
+        }
+        throw error;
+      }
+      const gateError = await gateOutcome(gate);
+      if (gateError !== undefined) {
+        await PromisePrototypeCatch(end, noop);
+        throw gateError;
+      }
+      if (!(await end)) {
+        throw new SQLError("The savepoint was rolled back");
+      }
+      return value;
+    }
+
+    let value;
+    try {
+      value = await settle(result);
+    } catch (error) {
+      const gateError = await gateOutcome(gate);
+      if (gateError !== undefined) throw gateError;
+      await adapter.control(conn.rid, rollbackTo);
+      throw error;
+    }
+    const gateError = await gateOutcome(gate);
+    if (gateError !== undefined) throw gateError;
+    await adapter.control(conn.rid, release);
+    return value;
+  } finally {
+    if (ctx.gate === gate) ctx.gate = outer;
+  }
 }
 
 function readEnv(name) {
@@ -2284,20 +2553,10 @@ class SQL {
     if (ctx.kind !== "transaction" || ctx.done) {
       throw new SQLError("savepoint() is only available inside a transaction");
     }
-    const adapter = this[kState].adapter;
     const id = escapeIdentifier(
       name !== undefined ? String(name) : "s" + (++ctx.savepoints),
     );
-    await adapter.control(ctx.conn.rid, "SAVEPOINT " + id);
-    let result;
-    try {
-      result = await settle(fn(this));
-    } catch (error) {
-      await adapter.control(ctx.conn.rid, "ROLLBACK TO SAVEPOINT " + id);
-      throw error;
-    }
-    await adapter.control(ctx.conn.rid, "RELEASE SAVEPOINT " + id);
-    return result;
+    return await runSavepoint(this[kState], ctx, this, id, fn);
   }
 
   /** A connection of the pool for this caller alone, until `release()`. */

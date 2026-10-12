@@ -342,6 +342,35 @@ where the changes are discussed.
       release, against `npm:postgres` 3.4.7 on the same build): 100 concurrent
       `select 1` went from 3.2-4.8 ms to 1.4-1.7 ms (npm:postgres 1.6-1.9 ms);
       the sequential cases did not move (select 1 ~0.09-0.10 ms either way).
+    - Transactions pipeline their control statements: `begin()` sends BEGIN
+      without waiting for it, so it goes out with the callback's first
+      statements, whose results are held until BEGIN's answer (its error wins,
+      and `begin()` rejects with it even if the callback swallowed it); and when
+      the callback returns its queries without awaiting them (a query or an
+      array of them) COMMIT is sent right behind them. A returned statement the
+      server fails aborts the transaction, so that COMMIT rolls back; one that
+      fails before it is sent (a NUL, a parameter count, the builder) is flagged
+      (`FLAG_GUARDED`) and `op_sql_pg_finish` sends ROLLBACK instead. BEGIN is
+      pipelined only when the options are transaction modes
+      (`isolation level ...`, `read only` / `read write`, `[not] deferrable`),
+      since a BEGIN that failed on its syntax would leave the statements behind
+      it in autocommit; other options keep the awaited BEGIN. `savepoint()` does
+      the same with SAVEPOINT / RELEASE (ROLLBACK TO on failure). The statements
+      of a transaction or a reserved connection (and cursors, simple queries and
+      transaction ends) now go on the wire in call order even when one has to
+      prepare its statement first (`FLAG_ORDERED`: a per-connection FIFO lock
+      held from the op's first poll until its messages are queued; before, a
+      cached statement could overtake one being prepared, which in a transaction
+      could run a query ahead of its `set_config` setup). The pool's independent
+      queries don't take it, so one being prepared doesn't hold back the ones
+      pipelined behind it. Round trips
+      (`tests/specs/sql/pg_round_trips.ts --timing`, a 10 ms each-way delay
+      proxy, `delay_proxy.ts`), before → after: bare query 1 → 1; begin with 1
+      returned query 3 → 1, with 1 awaited query 3 → 2; 2 returned queries 3 →
+      1; 2 pipelined queries in an async callback (denext's RLS shape) 3 → 2; 2
+      sequential awaited queries 4 → 3; a failing returned statement 3 → 1, a
+      failing awaited one 3 → 2; a savepoint with a returned query inside an
+      async transaction 5 → 2.
     - `sql.listen(channel, fn, onlisten?)` / `sql.notify(channel, payload)`:
       every channel of a client on one dedicated connection (outside `max`),
       `LISTEN "<channel>"` with the name exact; on connection loss it reconnects

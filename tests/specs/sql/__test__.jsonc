@@ -92,6 +92,16 @@
       "args": "run --allow-env=DENO_SQL_TEST_POSTGRES_URL --allow-net=127.0.0.1,localhost pg_cancel.ts",
       "output": "pg_cancel.out"
     },
+    "pg_pipelined_begin": {
+      "if": "postgres",
+      "args": "run --allow-env=DENO_SQL_TEST_POSTGRES_URL --allow-net=127.0.0.1,localhost pg_pipelined_begin.ts",
+      "output": "pg_pipelined_begin.out"
+    },
+    "pg_round_trips": {
+      "if": "postgres",
+      "args": "run --allow-env=DENO_SQL_TEST_POSTGRES_URL --allow-net=127.0.0.1,localhost pg_round_trips.ts",
+      "output": "pg_round_trips.out"
+    },
     "pg_pipeline": {
       "if": "postgres",
       "args": "run --allow-env=DENO_SQL_TEST_POSTGRES_URL --allow-net=127.0.0.1,localhost pg_pipeline.ts",

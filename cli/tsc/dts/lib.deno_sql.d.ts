@@ -331,9 +331,17 @@ declare namespace Deno {
      * sent in commits. */
     notify(channel: string, payload?: string): SQLQuery;
     /** Runs `fn` in a transaction: COMMIT when it settles, ROLLBACK (and
-     * rethrow) when it throws. */
+     * rethrow) when it throws.
+     *
+     * On Postgres, BEGIN goes out with the transaction's first statements
+     * (their results wait for BEGIN's answer), and when `fn` returns its
+     * queries without awaiting them (`tx => [tx\`...\`, tx\`...\`]`)
+     * COMMIT goes right behind them: one round trip for the whole
+     * transaction. */
     begin<T>(fn: (sql: SQL) => T | Promise<T>): Promise<Awaited<T>>;
-    /** Runs `fn` in a transaction, with `options` appended to `BEGIN`. */
+    /** Runs `fn` in a transaction, with `options` appended to `BEGIN`
+     * (`"isolation level serializable, read only"`; BEGIN is pipelined
+     * only when `options` are transaction modes). */
     begin<T>(
       options: string,
       fn: (sql: SQL) => T | Promise<T>,

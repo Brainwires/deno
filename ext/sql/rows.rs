@@ -17,6 +17,16 @@ pub const FLAG_BIGINT: u32 = 4;
 /// Postgres: run as an unnamed statement even when statements are cached
 /// (cursor commands, whose text differs per cursor).
 pub const FLAG_UNNAMED: u32 = 8;
+/// Postgres: a statement a pipelined transaction end is sent right behind
+/// (`op_sql_pg_finish`). If it fails before going on the wire, the end that
+/// follows it rolls back instead of committing.
+pub const FLAG_GUARDED: u32 = 16;
+/// Postgres: goes on the wire after every request made before it on its
+/// connection, even when it has to prepare its statement first (statements
+/// of a transaction or a reserved connection). Without it a cached
+/// statement may overtake one being prepared, which only independent
+/// queries (the pool's) can afford.
+pub const FLAG_ORDERED: u32 = 32;
 
 pub struct RowShape<'a> {
   arrays: bool,
