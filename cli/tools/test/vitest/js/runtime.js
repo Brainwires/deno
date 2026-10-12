@@ -64,6 +64,9 @@ class DenoBridge {
   #idleWaiters = [];
   /** Suite-level errors (hooks, collection) not yet surfaced. */
   pendingErrors = [];
+  /** Why Vitest's runner stopped after collecting the tests, if it threw. */
+  runError = undefined;
+  runErrorReported = false;
 
   track(test) {
     const entry = {
@@ -416,6 +419,15 @@ function registerTest(test, bridge, prefix) {
     const suiteError = takePendingSuiteError(bridge);
     if (result?.state === "fail" && result.errors?.length) {
       throw toThrowable(result.errors);
+    }
+    // The runner stopped before running the test (or recording why it
+    // failed): never report it as passed.
+    if (bridge.runError !== undefined && (!result || result.state === "run")) {
+      bridge.runErrorReported = true;
+      throw bridge.runError;
+    }
+    if (result?.state === "fail") {
+      throw new Error("The test failed without an error");
     }
     if (result?.state === "skip" || test.mode === "skip") {
       const failed = failedAncestor(test);
@@ -874,12 +886,19 @@ export async function startFile(specifier, config = {}) {
     await environmentTeardown?.teardown?.(globalThis);
     const error = takePendingSuiteError(bridge);
     if (error) throw error;
+    // e.g. saving the snapshot file after the last test
+    if (bridge.runError !== undefined && !bridge.runErrorReported) {
+      bridge.runErrorReported = true;
+      throw bridge.runError;
+    }
   };
   Deno.test.afterAll(teardown);
 
   const run = startTests([filepath], runner).then(
     () => bridge.done(),
     (error) => {
+      // after collection, the tests that did not run fail with it
+      bridge.runError = error;
       bridge.done();
       collected.reject(error);
     },

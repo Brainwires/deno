@@ -544,7 +544,7 @@ var hasRequiredReactIs_development$1;
 function requireReactIs_development$1 () {
 	if (hasRequiredReactIs_development$1) return reactIs_development$1;
 	hasRequiredReactIs_development$1 = 1;
-	"production" !== process.env.NODE_ENV &&
+	"production" !== globalThis.Deno[globalThis.Deno.internal].vitestEnv().NODE_ENV &&
 	  (function () {
 	    function typeOf(object) {
 	      if ("object" === typeof object && null !== object) {
@@ -674,7 +674,7 @@ function requireReactIs$1 () {
 	if (hasRequiredReactIs$1) return reactIs$1.exports;
 	hasRequiredReactIs$1 = 1;
 
-	if (process.env.NODE_ENV === 'production') {
+	if (globalThis.Deno[globalThis.Deno.internal].vitestEnv().NODE_ENV === 'production') {
 	  reactIs$1.exports = requireReactIs_production();
 	} else {
 	  reactIs$1.exports = requireReactIs_development$1();
@@ -735,7 +735,7 @@ function requireReactIs_development () {
 	if (hasRequiredReactIs_development) return reactIs_development;
 	hasRequiredReactIs_development = 1;
 
-	if (process.env.NODE_ENV !== "production") {
+	if (globalThis.Deno[globalThis.Deno.internal].vitestEnv().NODE_ENV !== "production") {
 	  (function() {
 
 	// ATTENTION
@@ -952,7 +952,7 @@ function requireReactIs () {
 	if (hasRequiredReactIs) return reactIs.exports;
 	hasRequiredReactIs = 1;
 
-	if (process.env.NODE_ENV === 'production') {
+	if (globalThis.Deno[globalThis.Deno.internal].vitestEnv().NODE_ENV === 'production') {
 	  reactIs.exports = requireReactIs_production_min();
 	} else {
 	  reactIs.exports = requireReactIs_development();

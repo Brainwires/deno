@@ -101,6 +101,20 @@
         }
       ]
     },
+    "no_permissions": {
+      // Vitest's own runtime needs no permission (its environment reads
+      // included); the test's own reads stay checked
+      "args": "test --no-check no_permissions/no_permissions_test.ts",
+      "output": "no_permissions/no_permissions.out",
+      "exitCode": 0
+    },
+    "no_permissions_file_snapshot": {
+      // an unreadable snapshot file fails the run, rather than passing
+      // against no snapshot
+      "args": "test --no-check no_permissions/file_snapshot_test.ts",
+      "output": "no_permissions/file_snapshot.out",
+      "exitCode": 1
+    },
     "jest_globals": {
       "args": "test -A --no-check jest_globals_test.ts",
       "output": "jest_globals.out",

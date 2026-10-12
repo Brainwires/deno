@@ -60,7 +60,7 @@ function p() {
   return e;
 }
 function B() {
-  let e = typeof process != "undefined" ? process : void 0, r = (e == null ? void 0 : e.env) || {}, a = r.FORCE_TTY !== "false", l = (e == null ? void 0 : e.argv) || [];
+  let e = typeof process != "undefined" ? process : void 0, r = globalThis.Deno[globalThis.Deno.internal].vitestEnv(), a = r.FORCE_TTY !== "false", l = (e == null ? void 0 : e.argv) || [];
   return !("NO_COLOR" in r || l.includes("--no-color")) && ("FORCE_COLOR" in r || l.includes("--color") || (e == null ? void 0 : e.platform) === "win32" || a && r.TERM !== "dumb" || "CI" in r) || typeof window != "undefined" && !!window.chrome;
 }
 function C({ force: e } = {}) {

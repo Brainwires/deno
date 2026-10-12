@@ -55,8 +55,15 @@ export function loadEnv(mode, envDir, prefixes = "VITE_") {
   for (const [key, value] of Object.entries(env)) {
     if (prefixes.some((p) => key.startsWith(p))) result[key] = value;
   }
-  for (const key in process.env) {
-    if (prefixes.some((p) => key.startsWith(p))) result[key] = process.env[key];
+  let processEnv;
+  try {
+    processEnv = { ...process.env };
+  } catch {
+    // no --allow-env: only the .env files
+    processEnv = {};
+  }
+  for (const key in processEnv) {
+    if (prefixes.some((p) => key.startsWith(p))) result[key] = processEnv[key];
   }
   return result;
 }

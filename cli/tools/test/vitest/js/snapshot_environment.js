@@ -8,7 +8,20 @@
 import { existsSync, promises as fs } from "node:fs";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 
+function isNotCapable(error) {
+  const NotCapable = globalThis.Deno?.errors?.NotCapable;
+  return NotCapable !== undefined && error instanceof NotCapable;
+}
+
 export class DenoSnapshotEnvironment {
+  /**
+   * The snapshot files the test may not read (no --allow-read), with the
+   * error: read as missing, so that a test using no file snapshot needs no
+   * permission, while saving one throws that error (its snapshots were not
+   * compared with the file's).
+   */
+  #unreadable = new Map();
+
   constructor(options = {}) {
     this.options = options;
   }
@@ -42,6 +55,8 @@ export class DenoSnapshotEnvironment {
   }
 
   async saveSnapshotFile(filepath, snapshot) {
+    const unreadable = this.#unreadable.get(filepath);
+    if (unreadable !== undefined) throw unreadable;
     await fs.mkdir(dirname(filepath), { recursive: true });
     // A Jest project keeps the header of an existing snapshot file (Jest 29
     // and 30 write different ones).
@@ -59,8 +74,14 @@ export class DenoSnapshotEnvironment {
   }
 
   async readSnapshotFile(filepath) {
-    if (!existsSync(filepath)) return null;
-    return await fs.readFile(filepath, "utf-8");
+    try {
+      if (!existsSync(filepath)) return null;
+      return await fs.readFile(filepath, "utf-8");
+    } catch (error) {
+      if (!isNotCapable(error)) throw error;
+      this.#unreadable.set(filepath, error);
+      return null;
+    }
   }
 
   async removeSnapshotFile(filepath) {

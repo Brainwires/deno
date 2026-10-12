@@ -2,12 +2,11 @@
 
 // The two `std-env` flags Vitest's config defaults read.
 
+// Read without an --allow-env check (see `vitestEnv` in cli/js/40_test.js).
+const internalEnv = globalThis.Deno[globalThis.Deno.internal].vitestEnv();
+
 function env(name) {
-  try {
-    return Deno.env.get(name);
-  } catch {
-    return undefined;
-  }
+  return internalEnv[name];
 }
 
 export const isCI = !!(env("CI") && env("CI") !== "false") ||
