@@ -299,14 +299,25 @@ where the changes are discussed.
     preload, and every test is registered with `Deno.test()` so Deno's
     reporters, `--filter` and summaries see one test per Vitest test. A
     `vitest.config.*` (or a `vite.config.*` of a project that depends on Vitest)
-    is evaluated once: `include`/`exclude`, `projects` (`--vitest-project`),
-    `setupFiles`, `globals`, `environment` (the project's own jsdom / happy-dom,
-    also per file via `@vitest-environment`), aliases and tsconfig paths,
-    `define`/`.env` into `import.meta.env` (a `deno_core` prototype for user
-    modules' `import.meta`), mock reset flags and timeouts; Vite's
+    is evaluated once: `include`/`exclude`, `projects` (`--vitest-project`; a
+    file several projects include runs once in each, as with Vitest and Jest,
+    its tests named `|project| ...` when several projects run), `setupFiles`,
+    `globals`, `environment` (the project's own jsdom / happy-dom, also per file
+    via `@vitest-environment`), aliases and tsconfig paths (in the dependencies
+    `server.deps.inline` selects too, which Vitest inlines), `define`/`.env`
+    into `import.meta.env` (a `deno_core` prototype for user modules'
+    `import.meta`), mock reset flags and timeouts; Vite's
     CSS/asset/`?raw`/`?url` imports and its extension and directory resolution
-    apply in such projects. `--no-vitest-compat` / `test.vitestCompat: false`
-    turn it off; `--vitest-config` picks a config.
+    apply in such projects, and `esbuild.loader: "jsx"` (or `oxc.lang`) with its
+    `include` makes `.js` files JSX: `deno_resolver`'s file fetcher gained a
+    `LocalContentTypeOverride` hook, through which such user modules get the JSX
+    content type (hence media type). In a Vitest or Jest project the user
+    modules do not see the `Deno` global, as under Node.js: one that refers to
+    `Deno` without declaring it gets a top-level `var Deno;` from the transform
+    (`typeof Deno` is `"undefined"`). The global itself stays, as Deno's Node.js
+    APIs and the test runtime need it; `globalThis.Deno` (and dependencies)
+    still reach it. `--no-vitest-compat` / `test.vitestCompat: false` turn it
+    off; `--vitest-config` picks a config.
 
     **Module mocking** (`vi.mock` / `vi.unmock` / `vi.doMock` / `vi.doUnmock` /
     `vi.hoisted` / `vi.importActual` / `vi.importMock` / `vi.resetModules`,
@@ -368,20 +379,30 @@ where the changes are discussed.
     absolute paths) or `testRegex`, `testPathIgnorePatterns` and
     `moduleFileExtensions` select the files (`Project::matches_jest`);
     `moduleNameMapper` entries become aliases that map the whole specifier
-    (`<rootDir>`, `$1`); `moduleDirectories` / `modulePaths` resolve bare
-    specifiers that name no installed package; `setupFiles` then
-    `setupFilesAfterEnv` (paths or packages) are setup files; `testEnvironment`
-    maps by name onto node / jsdom / happy-dom (with `testEnvironmentOptions`;
-    jsdom and happy-dom resolve through the Jest environment package under a
-    strict pnpm layout); `testTimeout`, `clearMocks` / `resetMocks` /
-    `restoreMocks`, `injectGlobals`, `globals`, `snapshotSerializers`,
-    `snapshotFormat` and `fakeTimers` (`timers`) configure the runtime. A
-    `transform` other than babel-jest / ts-jest / `@swc/jest` / esbuild & co.
-    (whose work Deno does) is a warning; the JSX runtime those transformers use
-    (`.swcrc`, the ts-jest tsconfig, the Babel config's text) becomes the user
-    modules' through a new `EmitProgramTransform::transpile_options` override.
-    `js/jest.js` provides the `jest` object on top of `vi` (fake timers with
-    Jest's options, `replaceProperty`, `retryTimes`, `requireActual` /
+    (`<rootDir>`, `$1`), applied to every module like Jest does: the imports of
+    dependencies too (a project module they map to is added to the module graph
+    when loaded) and, once the environment is set up, the `require()` calls of
+    CommonJS dependencies (`Module._resolveFilename`); `moduleDirectories` /
+    `modulePaths` resolve bare specifiers that name no installed package;
+    `setupFiles` then `setupFilesAfterEnv` (paths or packages) are setup files;
+    `testEnvironment` maps by name onto node / jsdom / happy-dom (with
+    `testEnvironmentOptions`; jsdom and happy-dom resolve through the Jest
+    environment package under a strict pnpm layout); `testTimeout`, `clearMocks`
+    / `resetMocks` / `restoreMocks`, `injectGlobals`, `globals`,
+    `snapshotSerializers`, `snapshotFormat` and `fakeTimers` (`timers`)
+    configure the runtime. A `transform` other than babel-jest / ts-jest /
+    `@swc/jest` / esbuild & co. (whose work Deno does) is a warning; `.js` files
+    are parsed as JSX when the transform for them is babel-jest (Jest's default)
+    or another JSX-capable one, else only when they do not parse as plain
+    JavaScript; the JSX runtime those transformers use (`.swcrc`, the ts-jest
+    tsconfig, the Babel config's text) becomes the user modules' through a new
+    `EmitProgramTransform::transpile_options` override. `js/jest.js` provides
+    the `jest` object on top of `vi` (fake timers with Jest's options and
+    defaults: modern timers fake everything `@sinonjs/fake-timers` can on
+    Node.js, `process.nextTick` and `queueMicrotask` included, which Vitest
+    leaves alone, minus `doNotFake`, with the project's `fakeTimers` as the
+    defaults of every `useFakeTimers()`; legacy timers fake the timer functions
+    and `nextTick`; `replaceProperty`, `retryTimes`, `requireActual` /
     `requireMock` synchronously, `unstable_mockModule`, `setMock`,
     `isolateModules(Async)`, ...) and Jest's semantics: globals by default
     (`fit`, `xit`, `xdescribe`, `test.failing` too), a declared parameter of a
