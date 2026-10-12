@@ -601,6 +601,7 @@ impl WebWorker {
       deno_process::deno_process::init(services.npm_process_state_provider),
       deno_node_crypto::deno_node_crypto::init(),
       deno_node_sqlite::deno_node_sqlite::init(),
+      deno_sql::deno_sql::init(),
       deno_node::deno_node::init::<
         TInNpmPackageChecker,
         TNpmPackageFolderResolver,

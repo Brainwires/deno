@@ -1,0 +1,10 @@
+true function true
+{
+  hostname: "db.example",
+  port: 6543,
+  username: "alice",
+  database: "app",
+  sslMode: "require",
+  max: 10
+}
+password hidden: true

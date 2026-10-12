@@ -69,6 +69,7 @@ pub fn get_types_declaration_file_text() -> String {
     "deno.crypto",
     "deno.broadcast_channel",
     "deno.net",
+    "deno.sql",
     "deno.shared_globals",
     "deno.cache",
     "esnext.temporal",
@@ -209,6 +210,7 @@ pub static LAZILY_LOADED_STATIC_ASSETS: Lazy<
       "lib.deno_broadcast_channel.d.ts"
     ),
     maybe_compressed_lib!("lib.deno.net.d.ts", "lib.deno_net.d.ts"),
+    maybe_compressed_lib!("lib.deno.sql.d.ts", "lib.deno_sql.d.ts"),
     maybe_compressed_lib!("lib.deno.cache.d.ts", "lib.deno_cache.d.ts"),
     maybe_compressed_lib!("lib.deno.webgpu.d.ts", "lib.deno_webgpu.d.ts"),
     maybe_compressed_lib!("lib.deno.window.d.ts"),

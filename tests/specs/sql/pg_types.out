@@ -1,0 +1,84 @@
+{
+  i2: 1,
+  i4: 2,
+  i8: "9007199254740993",
+  f4: 1.5,
+  f8: 0.1,
+  finf: Infinity,
+  num: "12345.678900",
+  small: "-0.000123",
+  nan: "NaN",
+  t: true,
+  f: false,
+  n: null,
+  txt: "héllo ✓ 𝒳",
+  vc: "x",
+  ch: "ab  ",
+  nm: "nm",
+  js: { a: [ 1, 2, { b: null } ], s: 'q"uote' },
+  jsb: { k: "v", n: 1.5 },
+  by: Uint8Array(4) [ 222, 173, 190, 239 ],
+  empty_by: Uint8Array(0) [],
+  tstz: 2024-02-29T12:34:56.789Z,
+  ts: 2024-02-29T12:34:56.789Z,
+  d: 1969-07-20T00:00:00.000Z,
+  inf: "infinity",
+  ninf: "-infinity",
+  tm: "12:34:56.5",
+  tmtz: "12:34:56+05:30",
+  iv: "1 year 2 mons 3 days 04:05:06.5",
+  iv2: "-1 days +02:00:00",
+  id: "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11",
+  ip: "10.0.0.1/24",
+  ip6: "::1",
+  net: "10.0.0.0/8",
+  mac: "08:00:2b:01:02:03",
+  bits: "10101",
+  money: "1.50",
+  lsn: "0/16B3748",
+  pt: { x: 1.5, y: -2 },
+  mood: "happy",
+  dom: 5,
+  pair: { a: 1, b: "x" },
+  arr: [ 1, null, 3 ],
+  arr2: [ [ "a", "b" ], [ "c", null ] ],
+  empty_arr: [],
+  darr: [ 2024-01-01T00:00:00.000Z ],
+  jarr: [ { x: 1 } ],
+  moods: [ "happy", "sad" ],
+  rng: Uint8Array(17) [
+    2, 0,  0, 0, 4, 0, 0,
+    0, 1,  0, 0, 0, 4, 0,
+    0, 0, 10
+  ]
+}
+[ { i8: 9007199254740993n, a: [ 1n, 2n ], i4: 2 } ]
+i ok
+b ok
+n ok
+f ok
+bo ok
+t ok
+j ok
+js ok
+by ok
+ts ok
+d ok
+u ok
+ia ok
+ta ok
+ja ok
+m ok
+iv ok
+[ { i: null, t: null, j: null } ]
+[ [ 1, "x" ] ]
+[ [ Uint8Array(4) [ 0, 0, 0, 1 ], Uint8Array(1) [ 120 ], null ] ]
+[ { x: 2 } ]
+[ [ 1, 2 ] ]
+INSERT 3 3
+UPDATE 2 0
+SELECT true
+DELETE 0
+[ { sum: 3, by: Uint8Array(1) [ 7 ], j: { a: 1 }, a: [ 1, 2 ] } ]
+[ [ { a: "1" } ], [ { b: "two", c: null } ] ]
+[ { s: "a'b" } ]

@@ -67,6 +67,10 @@ let _surface;
 const lazySurface = () =>
   _surface ??
     (_surface = core.loadExtScript("ext:deno_canvas/02_surface.js"));
+// `Deno.SQL` / `Deno.sql` (ext/sql): loaded on first access.
+let _sql;
+const lazySql = () =>
+  _sql ?? (_sql = core.loadExtScript("ext:deno_sql/01_sql.js"));
 let _telemetry;
 const lazyTelemetry = () =>
   _telemetry ??
@@ -271,6 +275,12 @@ const denoNs = {
   createHttpClient: httpClient.createHttpClient,
   get telemetry() {
     return lazyTelemetry().telemetry;
+  },
+  get SQL() {
+    return lazySql().SQL;
+  },
+  get sql() {
+    return lazySql().getDefaultSql();
   },
 };
 

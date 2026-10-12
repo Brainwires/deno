@@ -1,0 +1,27 @@
+insert: 1 INSERT 1
+[ { id: 1, name: "Ada", age: 36 }, { id: 3, name: "Eve", age: null } ]
+roundtrip: true
+roundtrip: true
+roundtrip: true
+roundtrip: true
+roundtrip: true
+roundtrip: true
+users: 9
+[ [ "Ada", 37, '{"tags":["x"]}' ] ]
+Uint8Array(3) [ 0, 1, 255 ]
+{ n: 9007199254740993n, age: 40n }
+{ n: "9007199254740993" }
+rolled back: boom
+users after rollback: 9
+savepoint rolled back: inner
+committed [ [ "Tx" ] ]
+after commit: The transaction has already finished
+true true SQLiteError SQLITE_CONSTRAINT_UNIQUE 2067
+SQLITE_ERROR
+[ { s: 3 } ]
+[ { a: 2 } ]
+[ [ 1 ], [ 2 ] ]
+[]
+cancelled: ERR_SQL_QUERY_CANCELLED
+closed: ERR_SQLITE_CLOSED
+[ { sum: 3, t: "text", n: null, b: 1 } ]

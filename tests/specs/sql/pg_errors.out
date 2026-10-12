@@ -1,0 +1,24 @@
+unique: true PostgresError duplicate key value violates unique constraint "denosql_errors_pkey" {
+  code: "23505",
+  errno: "23505",
+  severity: "ERROR",
+  constraint: "denosql_errors_pkey",
+  table: "denosql_errors",
+  detail: "Key (id)=(1) already exists."
+}
+not null: true PostgresError null value in column "v" of relation "denosql_errors" violates not-null constraint {
+  code: "23502",
+  errno: "23502",
+  severity: "ERROR",
+  table: "denosql_errors",
+  column: "v",
+  detail: "Failing row contains (2, null)."
+}
+syntax: true PostgresError syntax error at or near "selec" { code: "42601", errno: "42601", severity: "ERROR", position: 1 }
+undefined table: true PostgresError relation "denosql_nope" does not exist { code: "42P01", errno: "42P01", severity: "ERROR", position: 15 }
+division: true PostgresError division by zero { code: "22012", errno: "22012", severity: "ERROR" }
+bad input: true PostgresError invalid input syntax for type integer: "abc" { code: "22P02", errno: "22P02", severity: "ERROR" }
+param count: true PostgresError The query expects 2 parameter(s) but 1 were given { code: "ERR_POSTGRES_INVALID_PARAMETER" }
+nul byte: true PostgresError Parameter $1 contains a NUL (\0) character, which Postgres text can't hold { code: "ERR_POSTGRES_INVALID_PARAMETER" }
+[ { n: 1 } ]
+auth: true PostgresError password authentication failed for user "postgres" { code: "28P01", errno: "28P01", severity: "FATAL" }
