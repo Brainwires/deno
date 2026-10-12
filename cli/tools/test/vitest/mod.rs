@@ -29,6 +29,7 @@
 
 mod config;
 mod glob;
+mod jsx_in_js;
 pub mod mocks;
 mod transform;
 
@@ -245,6 +246,68 @@ pub struct Alias {
   replacement: String,
   /// Maps the whole specifier (Jest's `moduleNameMapper`).
   whole: bool,
+  /// The dependencies whose imports it applies to.
+  deps: AliasDeps,
+}
+
+/// Which modules in `node_modules` an alias applies to (see
+/// [`config::LoadedAliasDeps`]).
+#[derive(Debug, Clone)]
+enum AliasDeps {
+  All,
+  Some {
+    packages: Vec<String>,
+    regexes: Vec<Regex>,
+  },
+}
+
+impl AliasDeps {
+  fn new(loaded: &config::LoadedAliasDeps) -> Result<Self, AnyError> {
+    Ok(match loaded {
+      config::LoadedAliasDeps::All(true) => Self::All,
+      config::LoadedAliasDeps::None | config::LoadedAliasDeps::All(false) => {
+        Self::Some {
+          packages: Vec::new(),
+          regexes: Vec::new(),
+        }
+      }
+      config::LoadedAliasDeps::Some(entries) => {
+        let mut packages = Vec::new();
+        let mut regexes = Vec::new();
+        for entry in entries {
+          match entry {
+            config::LoadedAliasFind::String(name) => {
+              packages.push(name.clone())
+            }
+            config::LoadedAliasFind::Regex { regex, flags } => {
+              regexes.push(js_regex_with_flags(regex, flags)?)
+            }
+          }
+        }
+        Self::Some { packages, regexes }
+      }
+    })
+  }
+
+  fn is_none(&self) -> bool {
+    matches!(self, Self::Some { packages, regexes } if packages.is_empty() && regexes.is_empty())
+  }
+
+  /// Whether the dependency module `referrer` is one of them.
+  fn includes(&self, referrer: &Url) -> bool {
+    match self {
+      Self::All => true,
+      Self::Some { packages, regexes } => {
+        let path = deno_path_util::url_to_file_path(referrer)
+          .map(|p| p.to_string_lossy().replace('\\', "/"))
+          .unwrap_or_default();
+        packages
+          .iter()
+          .any(|name| path.contains(&format!("/node_modules/{name}/")))
+          || regexes.iter().any(|re| re.is_match(&path))
+      }
+    }
+  }
 }
 
 #[derive(Debug, Clone)]
@@ -258,25 +321,14 @@ impl Alias {
     let find = match &alias.find {
       config::LoadedAliasFind::String(s) => AliasFind::Exact(s.clone()),
       config::LoadedAliasFind::Regex { regex, flags } => {
-        let mut prefix = String::new();
-        if flags.contains('i') {
-          prefix.push_str("(?i)");
-        }
-        if flags.contains('m') {
-          prefix.push_str("(?m)");
-        }
-        if flags.contains('s') {
-          prefix.push_str("(?s)");
-        }
-        AliasFind::Regex(Regex::new(&format!("{prefix}{regex}")).map_err(
-          |err| anyhow!("Unsupported alias regex /{regex}/{flags}: {err}"),
-        )?)
+        AliasFind::Regex(js_regex_with_flags(regex, flags)?)
       }
     };
     Ok(Self {
       find,
       replacement: alias.replacement.clone(),
       whole: alias.whole,
+      deps: AliasDeps::new(&alias.deps)?,
     })
   }
 
@@ -313,6 +365,23 @@ impl Alias {
       }
     }
   }
+}
+
+/// Compiles a JavaScript regex (source and flags) for the regex crate.
+fn js_regex_with_flags(regex: &str, flags: &str) -> Result<Regex, AnyError> {
+  let mut prefix = String::new();
+  if flags.contains('i') {
+    prefix.push_str("(?i)");
+  }
+  if flags.contains('m') {
+    prefix.push_str("(?m)");
+  }
+  if flags.contains('s') {
+    prefix.push_str("(?s)");
+  }
+  Regex::new(&format!("{prefix}{regex}")).map_err(|err| {
+    anyhow!("Unsupported regular expression /{regex}/{flags}: {err}")
+  })
 }
 
 /// Converts a JS `String.prototype.replace` pattern (`$1`, `$&`) to the
@@ -837,7 +906,16 @@ impl SpecifierOverrides for VitestOverrides {
     }
     let aliases = self.aliases.read().unwrap();
     if referrer.path().contains("/node_modules/") {
-      return None;
+      // a dependency: only the aliases that apply to it, and none of Vite's
+      // resolution (Vitest leaves dependencies external)
+      let specifier = aliases
+        .iter()
+        .filter(|alias| alias.deps.includes(referrer))
+        .find_map(|alias| alias.apply(raw_specifier))?;
+      return Some(SpecifierOverride::Rewrite {
+        specifier: absolute_path_to_url(specifier),
+        referrer: None,
+      });
     }
     let aliased = aliases.iter().find_map(|alias| alias.apply(raw_specifier));
     if let Some(module) = self
@@ -871,18 +949,21 @@ impl SpecifierOverrides for VitestOverrides {
         return Some(SpecifierOverride::Url(url));
       }
     }
-    let specifier = aliased?;
-    let specifier = if specifier.starts_with('/') {
-      Url::from_file_path(&specifier)
-        .map(|u| u.to_string())
-        .unwrap_or(specifier)
-    } else {
-      specifier
-    };
     Some(SpecifierOverride::Rewrite {
-      specifier,
+      specifier: absolute_path_to_url(aliased?),
       referrer: None,
     })
+  }
+}
+
+/// An alias replacement that is an absolute path, as a file URL.
+fn absolute_path_to_url(specifier: String) -> String {
+  if specifier.starts_with('/') {
+    Url::from_file_path(&specifier)
+      .map(|u| u.to_string())
+      .unwrap_or(specifier)
+  } else {
+    specifier
   }
 }
 
@@ -1001,6 +1082,16 @@ impl Project {
   }
 }
 
+/// Whether an alias of the run applies to dependencies (Jest's
+/// `moduleNameMapper`, a Vite alias with inlined dependencies): their imports
+/// may then resolve to project modules outside the module graph.
+static DEPENDENCY_ALIASES: std::sync::atomic::AtomicBool =
+  std::sync::atomic::AtomicBool::new(false);
+
+pub fn dependency_aliases_active() -> bool {
+  DEPENDENCY_ALIASES.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// The state of the Vitest compatibility layer for one `deno test` run.
 #[derive(Debug, Default)]
 pub struct VitestCompat {
@@ -1042,12 +1133,14 @@ impl VitestCompat {
     let mut module_directories = Vec::new();
     let mut package_referrers = HashMap::new();
     let mut jsx = None;
+    let mut jsx_in_js = jsx_in_js::JsxInJs::default();
     if let Some(found) = found {
       let config_path = &found.path;
       let label = found.flavor.label();
       compat
         .transform
         .set_jest(found.flavor == config::ConfigFlavor::Jest);
+      compat.transform.set_hide_deno(true);
       let loaded = config::load_config(worker_factory, permissions, &found)
         .await
         .map_err(|err| {
@@ -1097,6 +1190,11 @@ impl VitestCompat {
             development: loaded.development,
           });
         }
+        if let Some(loaded) = &project.jsx_in_js
+          && let Err(err) = jsx_in_js.add(loaded)
+        {
+          log::warn!("{} {err:#}", deno_runtime::colors::yellow("Warning"));
+        }
         for (name, path) in &project.package_bases {
           if let Ok(url) = Url::from_file_path(path) {
             package_referrers.entry(name.clone()).or_insert(url);
@@ -1108,13 +1206,6 @@ impl VitestCompat {
         compat.projects.push(Project::new(project)?);
       }
       compat.has_config = true;
-      if compat.projects.len() > 1 && selected.is_empty() {
-        log::warn!(
-          "{} the {label} config has {} projects; each test file runs once, in the first project that includes it. Select projects with --vitest-project.",
-          deno_runtime::colors::yellow("Warning"),
-          compat.projects.len()
-        );
-      }
       set_resolved_config(
         &compat.projects,
         update_snapshots,
@@ -1129,10 +1220,20 @@ impl VitestCompat {
       *overrides.vite_root.write().unwrap() =
         Some(PathBuf::from(&project.loaded.root));
     }
+    DEPENDENCY_ALIASES.store(
+      aliases.iter().any(|alias| !alias.deps.is_none()),
+      std::sync::atomic::Ordering::Relaxed,
+    );
     *overrides.aliases.write().unwrap() = aliases;
     *overrides.module_directories.write().unwrap() = module_directories;
     *overrides.package_referrers.write().unwrap() = package_referrers;
     compat.transform.set_jsx(jsx);
+    deno_resolver::file_fetcher::set_local_content_type_override(
+      (!jsx_in_js.is_empty()).then(|| {
+        Arc::new(jsx_in_js)
+          as Arc<dyn deno_resolver::file_fetcher::LocalContentTypeOverride>
+      }),
+    );
     Ok(compat)
   }
 
@@ -1217,28 +1318,42 @@ impl VitestCompat {
     }
   }
 
-  /// The preload module that runs `specifier` with Vitest's runner, or
-  /// `None` when it is not a Vitest test file.
-  pub fn preload_for(&self, specifier: &Url) -> Option<Url> {
+  /// The preload modules that run `specifier` with Vitest's runner, one per
+  /// project that includes it (Vitest and Jest run such a file once in each
+  /// project), or none when it is not a Vitest test file.
+  pub fn preloads_for(&self, specifier: &Url) -> Vec<Url> {
     if !self.has_config && !self.vitest_files.contains(specifier) {
-      return None;
+      return Vec::new();
     }
-    let project = deno_path_util::url_to_file_path(specifier)
-      .ok()
-      .and_then(|path| self.projects.iter().find(|p| p.matches(&path)))
-      .or_else(|| self.projects.first());
-    let mut url = module_url("preload.js");
-    {
-      let mut query = url.query_pairs_mut();
-      query.append_pair("file", specifier.as_str());
-      if let Some(project) = project {
-        query.append_pair("project", &project.loaded.name);
-      }
-      if let Some(environment) = file_environment(specifier) {
-        query.append_pair("environment", &environment);
-      }
+    let path = deno_path_util::url_to_file_path(specifier).ok();
+    let mut projects = self
+      .projects
+      .iter()
+      .filter(|p| path.as_ref().is_some_and(|path| p.matches(path)))
+      .map(Some)
+      .collect::<Vec<_>>();
+    if projects.is_empty() {
+      // a file named on the command line that no project includes
+      projects.push(self.projects.first());
     }
-    Some(url)
+    let environment = file_environment(specifier);
+    projects
+      .into_iter()
+      .map(|project| {
+        let mut url = module_url("preload.js");
+        {
+          let mut query = url.query_pairs_mut();
+          query.append_pair("file", specifier.as_str());
+          if let Some(project) = project {
+            query.append_pair("project", &project.loaded.name);
+          }
+          if let Some(environment) = &environment {
+            query.append_pair("environment", environment);
+          }
+        }
+        url
+      })
+      .collect()
   }
 }
 
@@ -1482,6 +1597,7 @@ mod tests {
       find: AliasFind::Exact("@".to_string()),
       replacement: "/project/src".to_string(),
       whole: false,
+      deps: AliasDeps::All,
     };
     assert_eq!(exact.apply("@/a"), Some("/project/src/a".to_string()));
     assert_eq!(exact.apply("@"), Some("/project/src".to_string()));
@@ -1490,6 +1606,7 @@ mod tests {
       find: AliasFind::Regex(Regex::new("^react$").unwrap()),
       replacement: "preact/compat".to_string(),
       whole: false,
+      deps: AliasDeps::All,
     };
     assert_eq!(regex.apply("react"), Some("preact/compat".to_string()));
     assert_eq!(regex.apply("react-dom"), None);
@@ -1497,12 +1614,14 @@ mod tests {
       find: AliasFind::Regex(Regex::new("^~/(.*)$").unwrap()),
       replacement: "/src/$1".to_string(),
       whole: false,
+      deps: AliasDeps::All,
     };
     assert_eq!(groups.apply("~/a/b"), Some("/src/a/b".to_string()));
     let suffix = Alias {
       find: AliasFind::Regex(Regex::new("^@x/(.*)$").unwrap()),
       replacement: "/lib/$1abc/$&".to_string(),
       whole: false,
+      deps: AliasDeps::All,
     };
     assert_eq!(suffix.apply("@x/y"), Some("/lib/yabc/@x/y".to_string()));
     // Jest's moduleNameMapper maps the whole specifier
@@ -1510,6 +1629,7 @@ mod tests {
       find: AliasFind::Regex(Regex::new("\\.(css|less)$").unwrap()),
       replacement: "identity-obj-proxy".to_string(),
       whole: true,
+      deps: AliasDeps::All,
     };
     assert_eq!(
       css.apply("./a/b.module.css"),
@@ -1520,8 +1640,32 @@ mod tests {
       find: AliasFind::Regex(Regex::new("^@app/(.*)$").unwrap()),
       replacement: "/root/src/$1".to_string(),
       whole: true,
+      deps: AliasDeps::All,
     };
     assert_eq!(groups.apply("@app/x/y"), Some("/root/src/x/y".to_string()));
+  }
+
+  #[test]
+  fn aliases_in_dependencies() {
+    let dep = |path: &str| Url::parse(&format!("file://{path}")).unwrap();
+    let all = AliasDeps::new(&config::LoadedAliasDeps::All(true)).unwrap();
+    assert!(all.includes(&dep("/p/node_modules/a/index.js")));
+    let none = AliasDeps::new(&config::LoadedAliasDeps::None).unwrap();
+    assert!(!none.includes(&dep("/p/node_modules/a/index.js")));
+    let some = AliasDeps::new(&config::LoadedAliasDeps::Some(vec![
+      config::LoadedAliasFind::String("@scope/a".to_string()),
+      config::LoadedAliasFind::Regex {
+        regex: "/b-[a-z]+/".to_string(),
+        flags: String::new(),
+      },
+    ]))
+    .unwrap();
+    assert!(some.includes(&dep("/p/node_modules/@scope/a/x.js")));
+    assert!(
+      some.includes(&dep("/p/node_modules/.pnpm/b-x@1/node_modules/b-x/i.js"))
+    );
+    assert!(!some.includes(&dep("/p/node_modules/@scope/ab/x.js")));
+    assert!(!some.includes(&dep("/p/node_modules/c/x.js")));
   }
 
   fn jest_project(
@@ -1542,6 +1686,7 @@ mod tests {
       warnings: vec![],
       package_bases: Default::default(),
       jsx: None,
+      jsx_in_js: None,
     })
     .unwrap()
   }

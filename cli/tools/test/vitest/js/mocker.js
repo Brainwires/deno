@@ -351,7 +351,14 @@ class ModuleMocker {
         ) {
           return undefined;
         }
-        exports = mock.factory(requireActual);
+        // running: a `requireActual()` in the factory loads a module graph,
+        // which prepares the other mocks, not this one again
+        mock.running = true;
+        try {
+          exports = mock.factory(requireActual);
+        } finally {
+          mock.running = false;
+        }
         if (exports !== null && typeof exports?.then === "function") {
           exports.catch(() => {});
           return undefined;

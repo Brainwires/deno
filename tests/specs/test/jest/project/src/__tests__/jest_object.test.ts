@@ -9,6 +9,12 @@ jest.mock("../dep.ts", () => ({
   value: jest.fn(() => "mocked dep"),
 }));
 
+// A second factory loading its original synchronously, which imports the
+// first mock: each factory runs once.
+jest.mock("../uses_dep.ts", () => ({
+  ...jest.requireActual<typeof import("../uses_dep.ts")>("../uses_dep.ts"),
+}));
+
 // A factory's result is `module.exports` (Jest's CommonJS interop): here a
 // function, which is the default export.
 jest.mock("../greet.ts", () => () => "hi");
@@ -45,10 +51,40 @@ describe("jest object", () => {
     jest.clearAllTimers();
     expect(Date.now()).toBeGreaterThan(1000);
     jest.useRealTimers();
-    jest.useFakeTimers("legacy" as never);
+    jest.useFakeTimers();
     jest.setSystemTime(new Date(2020, 0, 1));
     expect(new Date().getFullYear()).toBe(2020);
     expect(jest.getRealSystemTime()).toBeGreaterThan(1600000000000);
+    jest.useRealTimers();
+  });
+
+  it("fakes process.nextTick and queueMicrotask like Jest", async () => {
+    const { setImmediate: macrotask } = await import("node:timers");
+    const real = {
+      nextTick: process.nextTick,
+      queueMicrotask: globalThis.queueMicrotask,
+      Date: globalThis.Date,
+    };
+    jest.useFakeTimers();
+    const calls: string[] = [];
+    process.nextTick(() => calls.push("tick"));
+    queueMicrotask(() => calls.push("microtask"));
+    await new Promise((resolve) => macrotask(resolve));
+    expect(calls).toEqual([]);
+    jest.runAllTicks();
+    expect(calls).toEqual(["tick", "microtask"]);
+    jest.useRealTimers();
+    expect(process.nextTick).toBe(real.nextTick);
+    // doNotFake keeps them
+    jest.useFakeTimers({ doNotFake: ["nextTick", "queueMicrotask"] });
+    expect(process.nextTick).toBe(real.nextTick);
+    expect(globalThis.queueMicrotask).toBe(real.queueMicrotask);
+    jest.useRealTimers();
+    // legacy timers fake the timer functions and nextTick only
+    jest.useFakeTimers({ legacyFakeTimers: true });
+    expect(process.nextTick).not.toBe(real.nextTick);
+    expect(globalThis.queueMicrotask).toBe(real.queueMicrotask);
+    expect(globalThis.Date).toBe(real.Date);
     jest.useRealTimers();
   });
 

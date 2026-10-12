@@ -7,6 +7,7 @@ export default {
   moduleNameMapper: {
     "^@lib/(.*)$": "<rootDir>/lib/$1",
     "\\.css$": "<rootDir>/style_mock.js",
+    "^mapped-target$": "<rootDir>/lib/mapped_target.cjs",
   },
   moduleDirectories: ["node_modules", "shared"],
   setupFiles: ["<rootDir>/setup.ts"],

@@ -5,6 +5,8 @@
   "devDependencies": {
     "fake-pkg": "*",
     "jest": "*",
-    "jsdom": "*"
+    "jsdom": "*",
+    "mapped-cjs": "*",
+    "mapped-esm": "*"
   }
 }

@@ -186,6 +186,50 @@ function runtimeOptions(test, root) {
   return pick;
 }
 
+/**
+ * Vite's JSX-in-`.js` setup: `esbuild: { loader: "jsx", include }` (or
+ * `oxc: { lang: "jsx", include }`) makes the transform parse the included
+ * files as JSX. `include` / `exclude` are Vite filters (regexes, or globs
+ * resolved against the root); the default include has no `.js`.
+ */
+function viteJsxInJs(config, root) {
+  const options = config.esbuild?.loader === "jsx"
+    ? config.esbuild
+    : config.oxc?.lang === "jsx"
+    ? config.oxc
+    : undefined;
+  if (!options || typeof options !== "object") return undefined;
+  const filters = (value) =>
+    toArray(value).map((f) =>
+      f instanceof RegExp
+        ? { regex: f.source, flags: f.flags }
+        : String(f).startsWith("**") || isAbsolute(String(f))
+        ? String(f)
+        : resolve(root, String(f))
+    );
+  return {
+    root,
+    mode: "always",
+    include: filters(options.include ?? /\.(m?ts|[jt]sx)$/),
+    exclude: filters(options.exclude),
+  };
+}
+
+/**
+ * The dependencies Vitest inlines (`server.deps.inline`, formerly
+ * `deps.inline`): Vite's aliases apply to their imports too.
+ */
+function inlinedDeps(test) {
+  const inline = test.server?.deps?.inline ?? test.deps?.inline;
+  if (inline === true) return true;
+  if (!Array.isArray(inline)) return undefined;
+  return inline.map((entry) =>
+    entry instanceof RegExp
+      ? { regex: entry.source, flags: entry.flags }
+      : String(entry)
+  );
+}
+
 function resolveProject(config, configDir, fallbackName) {
   const root = resolve(configDir, config.root ?? ".");
   const test = config.test ?? {};
@@ -207,12 +251,15 @@ function resolveProject(config, configDir, fallbackName) {
     dir,
     include: toArray(test.include ?? defaultInclude),
     exclude: toArray(test.exclude ?? defaultExclude),
+    jsxInJs: viteJsxInJs(config, root),
     alias: [
       ...normalizeAliases(test.alias),
       ...normalizeAliases(config.resolve?.alias),
       ...tsconfigPathAliases(config, root),
-    ],
+    ].map((alias) => ({ ...alias, deps: inlinedDeps(test) })),
     config: {
+      // a named project's tests show its name when several projects run
+      label: test.name?.label ?? test.name ?? undefined,
       root: projectRoot,
       mode,
       base: config.base ?? "/",

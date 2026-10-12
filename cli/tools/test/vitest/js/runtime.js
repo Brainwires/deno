@@ -377,25 +377,25 @@ function applyNameFilter(tasks, matches) {
   return anyRuns;
 }
 
-function registerDenoTests(files, bridge) {
+function registerDenoTests(files, bridge, prefix = "") {
   for (const file of files) {
-    registerTasks(file.tasks, bridge);
+    registerTasks(file.tasks, bridge, prefix);
   }
 }
 
-function registerTasks(tasks, bridge) {
+function registerTasks(tasks, bridge, prefix) {
   for (const task of tasks) {
     if (task.type === "suite") {
-      registerTasks(task.tasks, bridge);
+      registerTasks(task.tasks, bridge, prefix);
       continue;
     }
     if (task.type !== "test") continue;
-    registerTest(task, bridge);
+    registerTest(task, bridge, prefix);
   }
 }
 
-function registerTest(test, bridge) {
-  const name = testFullName(test);
+function registerTest(test, bridge, prefix) {
+  const name = prefix + testFullName(test);
   const runnable = test.mode === "run" || test.mode === "queued" ||
     test.denoFilteredOut === true;
   const entry = runnable ? bridge.track(test) : undefined;
@@ -848,7 +848,7 @@ export async function startFile(specifier, config = {}) {
         file.denoCollectionError = toThrowable(file.result.errors);
       }
     }
-    registerDenoTests(files, bridge);
+    registerDenoTests(files, bridge, config.testNamePrefix);
     const matches = createNameFilter(config.filter);
     if (matches) {
       for (const file of files) applyNameFilter(file.tasks, matches);

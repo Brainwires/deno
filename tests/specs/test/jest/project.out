@@ -9,9 +9,11 @@ jest api > formats each titles like jest-each ... ok ([WILDCARD])
 jest api > xit skips ... ignored ([WILDCARD])
 jest api > test.failing passes when the test fails ... ok ([WILDCARD])
 retryTimes > retries a failing test ... ok ([WILDCARD])
-running 10 tests from ./src/__tests__/config.test.ts
+running 12 tests from ./src/__tests__/config.test.ts
 config > runs setupFiles, then setupFilesAfterEnv ... ok ([WILDCARD])
 config > maps modules (moduleNameMapper, moduleDirectories) ... ok ([WILDCARD])
+config > maps the modules of dependencies too (moduleNameMapper) ... ok ([WILDCARD])
+config > has no Deno global, as under Node.js ... ok ([WILDCARD])
 config > links re-exported types ... ok ([WILDCARD])
 config > compares like Jest's equality ... ok ([WILDCARD])
 config > does not fail a test on an unawaited .resolves ... ok ([WILDCARD])
@@ -22,15 +24,16 @@ config > restoreMocks > spies (2) ... ok ([WILDCARD])
 config > names snapshots like Jest ... ok ([WILDCARD])
 running 1 test from ./src/__tests__/dom.test.ts
 uses the docblock's test environment ... ok ([WILDCARD])
-running 8 tests from ./src/__tests__/jest_object.test.ts
+running 9 tests from ./src/__tests__/jest_object.test.ts
 jest object > gives factory results CommonJS interop ... ok ([WILDCARD])
 jest object > hoists jest.mock above the imports ... ok ([WILDCARD])
 jest object > requireMock returns the registered mock ... ok ([WILDCARD])
 jest object > uses a root __mocks__ file for a package without jest.mock ... ok ([WILDCARD])
 jest object > maps the fake timers API ... ok ([WILDCARD])
+jest object > fakes process.nextTick and queueMicrotask like Jest ... ok ([WILDCARD])
 jest object > replaceProperty restores with restoreAllMocks ... ok ([WILDCARD])
 jest object > require() is Jest's: mocks, aliases, fresh modules ... ok ([WILDCARD])
 jest object > mocked and fn ... ok ([WILDCARD])
 
-ok | 27 passed | 0 failed | 1 ignored ([WILDCARD])
+ok | 30 passed | 0 failed | 1 ignored ([WILDCARD])
 

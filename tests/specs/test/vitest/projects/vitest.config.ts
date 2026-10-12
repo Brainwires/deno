@@ -6,9 +6,18 @@ export default defineConfig({
     projects: [
       defineProject({
         extends: true,
-        test: { name: "alpha", include: ["a/**/*.test.ts"] },
+        test: {
+          name: "alpha",
+          include: ["a/**/*.test.ts", "shared/**/*.test.ts"],
+        },
       }),
-      { test: { name: "beta", include: ["b/**/*.test.ts"], globals: true } },
+      {
+        test: {
+          name: "beta",
+          include: ["b/**/*.test.ts", "shared/**/*.test.ts"],
+          globals: true,
+        },
+      },
     ],
   },
 });

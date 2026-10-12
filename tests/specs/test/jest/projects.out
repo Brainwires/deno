@@ -1,9 +1,14 @@
 Warning Jest test environment "jest-environment-unknown" is not supported by deno test; using "node".
-Warning the Jest config has 2 projects; each test file runs once, in the first project that includes it. Select projects with --vitest-project.
+running 1 test from ./a/jsx.test.js
+|alpha| parses JSX in .js files ... ok ([WILDCARD])
 running 1 test from ./a/one.test.js
-alpha runs ... ok ([WILDCARD])
+|alpha| alpha runs ... ok ([WILDCARD])
 running 1 test from ./b/two.test.js
-beta runs ... ok ([WILDCARD])
+|beta| beta runs ... ok ([WILDCARD])
+running 1 test from ./shared/both.test.js
+|alpha| runs in each project ... ok ([WILDCARD])
+running 1 test from ./shared/both.test.js
+|beta| runs in each project ... ok ([WILDCARD])
 
-ok | 2 passed | 0 failed ([WILDCARD])
+ok | 5 passed | 0 failed ([WILDCARD])
 

@@ -3,11 +3,11 @@ module.exports = {
   projects: [
     {
       displayName: { name: "alpha", color: "blue" },
-      testMatch: ["<rootDir>/a/**/*.test.js"],
+      testMatch: ["<rootDir>/a/**/*.test.js", "<rootDir>/shared/**/*.test.js"],
     },
     {
       displayName: "beta",
-      testMatch: ["<rootDir>/b/**/*.test.js"],
+      testMatch: ["<rootDir>/b/**/*.test.js", "<rootDir>/shared/**/*.test.js"],
       testEnvironment: "jest-environment-unknown",
     },
   ],

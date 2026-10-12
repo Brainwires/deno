@@ -1,7 +1,10 @@
-running 6 tests from ./src/globals.test.ts
+running 9 tests from ./src/globals.test.ts
 config > ran the setup file ... ok ([WILDCARD])
 config > applies define and env ... ok ([WILDCARD])
 config > resolves aliases ... ok ([WILDCARD])
+config > applies aliases in inlined dependencies ... ok ([WILDCARD])
+config > parses JSX in .js files with esbuild.loader jsx ... ok ([WILDCARD])
+config > has no Deno global, as under Node.js ... ok ([WILDCARD])
 config > restoreMocks: spies are restored before each test (1) ... ok ([WILDCARD])
 config > restoreMocks: spies are restored before each test (2) ... ok ([WILDCARD])
 config > uses the config's testTimeout ... FAILED ([WILDCARD])
@@ -10,14 +13,14 @@ jsdom environment > installs the window ... ok ([WILDCARD])
 
  ERRORS 
 
-config > uses the config's testTimeout => ./src/globals.test.ts:32:3
+config > uses the config's testTimeout => ./src/globals.test.ts:50:3
 error: Error: Test timed out in 1000ms.
 If this is a long-running test, pass a timeout value as the last argument or configure it globally with "testTimeout".
 
  FAILURES 
 
-config > uses the config's testTimeout => ./src/globals.test.ts:32:3
+config > uses the config's testTimeout => ./src/globals.test.ts:50:3
 
-FAILED | 6 passed | 1 failed ([WILDCARD])
+FAILED | 9 passed | 1 failed ([WILDCARD])
 
 error: Test failed

@@ -1640,6 +1640,19 @@ impl<TGraphContainer: ModuleGraphContainer> ModuleLoader
           inner
             .prepare_hooked_specifier(&specifier, options.is_dynamic_import)
             .await;
+        } else if crate::tools::test::vitest::dependency_aliases_active()
+          && maybe_referrer.as_ref().is_some_and(|r| {
+            inner.shared.in_npm_pkg_checker.in_npm_package(&r.specifier)
+          })
+          && !inner.shared.in_npm_pkg_checker.in_npm_package(&specifier)
+          && inner.graph_container.graph().get(&specifier).is_none()
+        {
+          // A Jest `moduleNameMapper` entry (or a Vite alias of an inlined
+          // dependency) mapped a dependency's import to a module of the
+          // project, which the graph has not seen.
+          inner
+            .prepare_hooked_specifier(&specifier, options.is_dynamic_import)
+            .await;
         }
         inner
           .load_inner(

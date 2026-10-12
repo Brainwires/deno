@@ -10,7 +10,9 @@ export default defineConfig({
       "@lib": new URL("./lib", import.meta.url).pathname,
     },
   },
+  esbuild: { loader: "jsx", include: /src\/.*\.jsx?$/, exclude: [] },
   test: {
+    server: { deps: { inline: ["inlined-dep"] } },
     include: ["src/**/*.test.ts"],
     exclude: ["src/sub/excluded.test.ts"],
     globals: true,

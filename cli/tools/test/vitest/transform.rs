@@ -52,7 +52,7 @@ use deno_resolver::emit::EmitProgramTransform;
 
 /// Bumped whenever the output of the transforms changes (part of the emit
 /// cache key).
-const TRANSFORM_VERSION: u64 = 3;
+const TRANSFORM_VERSION: u64 = 4;
 
 /// The specifier a module imports itself with to register its exports (the
 /// module loader resolves it to the importing module).
@@ -76,6 +76,9 @@ pub struct VitestTransform {
   jsx: std::sync::RwLock<Option<JsxRuntime>>,
   /// A Jest project: modules using `require` get Jest's.
   jest: AtomicBool,
+  /// A Vitest / Jest project (a config was found): user modules do not see
+  /// the `Deno` global, as under Node.js.
+  hide_deno: AtomicBool,
 }
 
 /// The automatic JSX runtime a Jest project's transform (babel-jest,
@@ -103,6 +106,11 @@ impl VitestTransform {
   pub fn set_jest(&self, jest: bool) {
     self.jest.store(jest, Ordering::Relaxed);
   }
+
+  /// Hides the `Deno` global from user modules.
+  pub fn set_hide_deno(&self, hide: bool) {
+    self.hide_deno.store(hide, Ordering::Relaxed);
+  }
 }
 
 /// Whether `specifier` is a user module (Vitest transforms user source, but
@@ -122,9 +130,11 @@ impl EmitProgramTransform for VitestTransform {
       | MediaType::Mjs
       | MediaType::TypeScript
       | MediaType::Mts
-      | MediaType::Tsx => {
-        Some(TRANSFORM_VERSION * 2 + self.jest.load(Ordering::Relaxed) as u64)
-      }
+      | MediaType::Tsx => Some(
+        TRANSFORM_VERSION * 4
+          + self.jest.load(Ordering::Relaxed) as u64
+          + 2 * self.hide_deno.load(Ordering::Relaxed) as u64,
+      ),
       _ => None,
     }
   }
@@ -184,8 +194,36 @@ impl EmitProgramTransform for VitestTransform {
     if self.jest.load(Ordering::Relaxed) {
       provide_jest_require(module);
     }
+    if self.hide_deno.load(Ordering::Relaxed) {
+      shadow_deno_global(module);
+    }
     Ok(())
   }
+}
+
+/// Gives a module that refers to `Deno` without declaring it a top-level
+/// `var Deno;`, so `typeof Deno` is `"undefined"` and `Deno.*` throws in a
+/// test project's user code, as under Node.js (Vitest, Jest). The global
+/// itself stays: Deno's Node.js APIs and the test runtime use it; only
+/// `globalThis.Deno` still reaches it. (`var`, unlike `const`, has no TDZ for
+/// a function of the module called during an import cycle.)
+fn shadow_deno_global(module: &mut Module) {
+  struct UsesDeno(bool);
+  impl Visit for UsesDeno {
+    fn visit_ident(&mut self, ident: &Ident) {
+      if ident.sym == "Deno" {
+        self.0 = true;
+      }
+    }
+  }
+  let mut finder = UsesDeno(false);
+  module.visit_with(&mut finder);
+  if !finder.0 || declares_top_level(module, "Deno") {
+    return;
+  }
+  let mut items = parse_snippet("var Deno;\n".to_string());
+  items.append(&mut module.body);
+  module.body = items;
 }
 
 /// Gives a module that refers to `require` without declaring it at the top
@@ -1324,6 +1362,26 @@ mod tests {
     // only in a Jest project
     let out = transform("const x = require(\"./a\");\n").unwrap();
     assert!(!out.contains("__vi_jest_require__"), "{out}");
+  }
+
+  #[test]
+  fn shadows_the_deno_global() {
+    let hiding = |source: &str| {
+      let transform = VitestTransform::default();
+      transform.set_hide_deno(true);
+      transform_with(&transform, source).unwrap()
+    };
+    let out = hiding("export const isDeno = typeof Deno !== \"undefined\";\n");
+    assert!(out.starts_with("var Deno;\n"), "{out}");
+    // a module declaring its own `Deno`, or not using it, is left alone
+    let out = hiding("const Deno = { x: 1 };\nexport const x = Deno.x;\n");
+    assert!(!out.contains("var Deno"), "{out}");
+    let out =
+      hiding("export const o = { Deno: 1 };\nexport const p = o.Deno;\n");
+    assert!(!out.contains("var Deno"), "{out}");
+    // only in a Vitest / Jest project
+    let out = transform("export const d = Deno.env;\n").unwrap();
+    assert!(!out.contains("var Deno"), "{out}");
   }
 
   #[test]

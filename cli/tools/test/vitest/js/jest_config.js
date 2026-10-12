@@ -321,6 +321,8 @@ function mapModuleNameMapper(rootDir, mapper) {
       find: { regex: String(regex), flags: "" },
       replacement: String(replacement),
       whole: true,
+      // Jest maps every module's imports, node_modules' included
+      deps: true,
     });
   }
   return aliases;
@@ -425,6 +427,37 @@ function babelJsx(rootDir) {
   return undefined;
 }
 
+/** Transformers that compile JSX in the `.js` files they are given. */
+const JSX_IN_JS_TRANSFORMERS =
+  /^(babel-jest|@swc\/jest|esbuild-jest|jest-esbuild|@sucrase\/jest|sucrase-jest)$/;
+
+/**
+ * How the project's `.js` files get JSX: babel-jest (Jest's default
+ * transform) and the other JSX-capable transforms parse it there ("always");
+ * otherwise only a file that fails to parse as plain JavaScript is parsed as
+ * JSX ("fallback").
+ */
+function jestJsxInJs(rootDir, transform) {
+  const entries = Object.entries(transform ?? {});
+  if (entries.length === 0) return { root: rootDir, mode: "always" };
+  for (const [pattern, value] of entries) {
+    let regex;
+    try {
+      regex = new RegExp(pattern);
+    } catch {
+      continue;
+    }
+    // Jest uses the first transform whose pattern matches the file
+    if (!regex.test("/project/file.js")) continue;
+    const name = Array.isArray(value) ? value[0] : value;
+    return {
+      root: rootDir,
+      mode: JSX_IN_JS_TRANSFORMERS.test(String(name)) ? "always" : "fallback",
+    };
+  }
+  return { root: rootDir, mode: "fallback" };
+}
+
 /**
  * The automatic JSX runtime the project's Jest transform compiles `.tsx` /
  * `.jsx` files with (babel-jest, `@swc/jest`, ts-jest), if it uses one: Deno
@@ -500,6 +533,14 @@ function fakeTimersOption(options) {
   return undefined;
 }
 
+/** The `fakeTimers` options every `jest.useFakeTimers()` call starts from. */
+function fakeTimersDefaults(options) {
+  if (options.fakeTimers && typeof options.fakeTimers === "object") {
+    return options.fakeTimers;
+  }
+  return options.timers === "legacy" ? { legacyFakeTimers: true } : {};
+}
+
 const UNSUPPORTED_OPTIONS = {
   automock: (v) => v === true,
   resetModules: (v) => v === true,
@@ -553,7 +594,13 @@ export async function resolveJestProject(rawOptions, configDir, fallbackName) {
     ...toArray(options.setupFiles),
     ...toArray(options.setupFilesAfterEnv),
   ].map((f) => resolveModulePath(rootDir, f));
+  const moduleNameMapper = mapModuleNameMapper(
+    rootDir,
+    options.moduleNameMapper,
+  );
   const config = {
+    // a project's displayName shows with its tests when several projects run
+    label: typeof displayName === "string" ? displayName : displayName?.name,
     root: rootDir,
     mode: "test",
     base: "/",
@@ -578,7 +625,10 @@ export async function resolveJestProject(rawOptions, configDir, fallbackName) {
       resolveModulePath(rootDir, s)
     ),
     mockRoots: roots,
+    // for the `require()` calls of CommonJS dependencies (see jest.js)
+    moduleNameMapper,
     jestFakeTimers: fakeTimersOption(options),
+    jestFakeTimersConfig: fakeTimersDefaults(options),
     packageBases,
     snapshotHeader: snapshotHeader(rootDir),
   };
@@ -595,10 +645,11 @@ export async function resolveJestProject(rawOptions, configDir, fallbackName) {
       .map((p) => normalizeTestMatch(rootDir, p))
       .filter((p) => p !== undefined),
     exclude: testMatchExclusions(rootDir, testMatch),
-    alias: mapModuleNameMapper(rootDir, options.moduleNameMapper),
+    alias: moduleNameMapper,
     moduleDirectories,
     packageBases,
     jsx: transformJsx(rootDir, options.transform),
+    jsxInJs: jestJsxInJs(rootDir, options.transform),
     jest: {
       roots,
       testRegex: testRegex.map((r) => replaceRootDirInPattern(rootDir, r)),

@@ -1774,47 +1774,65 @@ async fn test_specifiers(
   let reporter = get_test_reporter(&options);
   let fail_fast_tracker = FailFastTracker::new(options.fail_fast);
 
-  let vitest = options.vitest.clone();
-  let join_handles = specifiers.into_iter().map(move |specifier| {
-    let worker_factory = worker_factory.clone();
-    let specifier_dir = cli_options.workspace().resolve_member_dir(&specifier);
-    let preload_modules = preload_modules.clone();
-    // A Vitest test file is collected and run by Vitest's runner, which the
-    // file's preload sets up.
-    let vitest_preload =
-      vitest.as_ref().and_then(|v| v.preload_for(&specifier));
-    let require_modules = require_modules.clone();
-    let worker_sender = test_event_sender_factory.worker();
-    let fail_fast_tracker = fail_fast_tracker.clone();
-    let specifier_options = options.specifier.clone();
-    let cli_options = cli_options.clone();
-    let permission_desc_parser = permission_desc_parser.clone();
-    spawn_blocking(move || {
-      // Various test files should not share the same permissions in terms of
-      // `PermissionsContainer` - otherwise granting/revoking permissions in one
-      // file would have impact on other files, which is undesirable.
-      let permissions =
-        cli_options.permissions_options_for_dir(&specifier_dir)?;
-      let permissions_container = PermissionsContainer::new(
-        permission_desc_parser.clone(),
-        Permissions::from_options(
-          permission_desc_parser.as_ref(),
-          &permissions,
-        )?,
-      );
-      create_and_run_current_thread(test_specifier(
-        worker_factory,
-        permissions_container,
-        specifier,
-        preload_modules,
-        require_modules,
-        vitest_preload,
-        worker_sender,
-        fail_fast_tracker,
-        specifier_options,
-      ))
+  // A Vitest test file is collected and run by Vitest's runner, which the
+  // file's preload sets up; a file several projects include runs once per
+  // project.
+  let runs = specifiers
+    .into_iter()
+    .flat_map(|specifier| {
+      let preloads = options
+        .vitest
+        .as_ref()
+        .map(|v| v.preloads_for(&specifier))
+        .unwrap_or_default();
+      if preloads.is_empty() {
+        vec![(specifier, None)]
+      } else {
+        preloads
+          .into_iter()
+          .map(|preload| (specifier.clone(), Some(preload)))
+          .collect()
+      }
     })
-  });
+    .collect::<Vec<_>>();
+  let join_handles =
+    runs.into_iter().map(move |(specifier, vitest_preload)| {
+      let worker_factory = worker_factory.clone();
+      let specifier_dir =
+        cli_options.workspace().resolve_member_dir(&specifier);
+      let preload_modules = preload_modules.clone();
+      let require_modules = require_modules.clone();
+      let worker_sender = test_event_sender_factory.worker();
+      let fail_fast_tracker = fail_fast_tracker.clone();
+      let specifier_options = options.specifier.clone();
+      let cli_options = cli_options.clone();
+      let permission_desc_parser = permission_desc_parser.clone();
+      spawn_blocking(move || {
+        // Various test files should not share the same permissions in terms of
+        // `PermissionsContainer` - otherwise granting/revoking permissions in one
+        // file would have impact on other files, which is undesirable.
+        let permissions =
+          cli_options.permissions_options_for_dir(&specifier_dir)?;
+        let permissions_container = PermissionsContainer::new(
+          permission_desc_parser.clone(),
+          Permissions::from_options(
+            permission_desc_parser.as_ref(),
+            &permissions,
+          )?,
+        );
+        create_and_run_current_thread(test_specifier(
+          worker_factory,
+          permissions_container,
+          specifier,
+          preload_modules,
+          require_modules,
+          vitest_preload,
+          worker_sender,
+          fail_fast_tracker,
+          specifier_options,
+        ))
+      })
+    });
 
   let join_stream = stream::iter(join_handles)
     .buffer_unordered(concurrent_jobs.get())

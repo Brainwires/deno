@@ -3,6 +3,8 @@ import { square } from "@lib/math";
 import styles from "../button.css";
 import { log } from "log";
 import { reexported } from "../reexports.ts";
+import { viaEsm } from "mapped-esm";
+import { viaCjs } from "mapped-cjs";
 
 declare const __APP__: { name: string };
 // deno-lint-ignore no-explicit-any
@@ -19,6 +21,17 @@ describe("config", () => {
     expect(square(3)).toBe(9);
     expect(styles.root).toBe("root-class");
     expect(log()).toBe("logged");
+  });
+
+  it("maps the modules of dependencies too (moduleNameMapper)", () => {
+    expect(viaEsm).toBe("mapped");
+    expect(viaCjs).toBe("mapped");
+  });
+
+  it("has no Deno global, as under Node.js", () => {
+    expect(typeof Deno).toBe("undefined");
+    // the runtime's own global stays
+    expect(typeof g.Deno).toBe("object");
   });
 
   it("links re-exported types", () => {

@@ -180,6 +180,24 @@ pub struct LoadedProject {
   /// The automatic JSX runtime of a Jest project's transform.
   #[serde(default)]
   pub jsx: Option<LoadedJsx>,
+  /// Which `.js` user modules are parsed as JSX.
+  #[serde(default)]
+  pub jsx_in_js: Option<LoadedJsxInJs>,
+}
+
+/// Which `.js` user modules under `root` a project parses as JSX: all of
+/// them (`mode: "always"`, babel-jest & co., or Vite's `esbuild.loader:
+/// "jsx"`) or those that fail to parse as plain JavaScript (`"fallback"`),
+/// in both cases only those `include` (when not empty) and `exclude` select.
+#[derive(Debug, Clone, Deserialize)]
+pub struct LoadedJsxInJs {
+  pub root: String,
+  pub mode: String,
+  /// Vite filters: regexes, or globs against absolute paths.
+  #[serde(default)]
+  pub include: Vec<LoadedAliasFind>,
+  #[serde(default)]
+  pub exclude: Vec<LoadedAliasFind>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -216,6 +234,24 @@ pub struct LoadedAlias {
   /// replaces the matched part.
   #[serde(default)]
   pub whole: bool,
+  /// The dependencies (modules in `node_modules`) whose imports the alias
+  /// applies to: Jest's `moduleNameMapper` applies to every module, a Vite
+  /// alias only to the dependencies Vitest inlines (`server.deps.inline`).
+  #[serde(default)]
+  pub deps: LoadedAliasDeps,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(untagged)]
+pub enum LoadedAliasDeps {
+  /// None of them.
+  #[default]
+  None,
+  /// `true`: all of them.
+  All(bool),
+  /// Those a pattern selects: a package name (a module under
+  /// `node_modules/<name>/`) or a regex tested against the module's path.
+  Some(Vec<LoadedAliasFind>),
 }
 
 #[derive(Debug, Clone, Deserialize)]

@@ -22,6 +22,11 @@ const config = {
   ci: resolvedConfig.ci,
   filter: resolvedConfig.filter ?? undefined,
 };
+// Like Vitest's and Jest's reporters, a named project's tests carry its
+// name when several projects run (a file can run in each that includes it).
+if ((resolvedConfig.projects?.length ?? 0) > 1 && project.label) {
+  config.testNamePrefix = `|${project.label}| `;
+}
 const environment = params.get("environment");
 if (environment) config.environment = environment;
 

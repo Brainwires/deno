@@ -85,20 +85,65 @@ export function jestRequire(importer) {
   return require;
 }
 
-/** Jest's fake timer config, as Vitest's. */
+/**
+ * What Jest's fake timers fake: modern timers (`@jest/fake-timers`) fake every
+ * API `@sinonjs/fake-timers` can fake on Node's global, `process.nextTick`
+ * and `queueMicrotask` included (Vitest leaves those two alone), except the
+ * `doNotFake` ones; Node has no `Temporal`. Legacy timers fake the timer
+ * functions and `process.nextTick` only.
+ */
+const JEST_FAKEABLE = [
+  "Date",
+  "hrtime",
+  "nextTick",
+  "performance",
+  "queueMicrotask",
+  "requestAnimationFrame",
+  "cancelAnimationFrame",
+  "requestIdleCallback",
+  "cancelIdleCallback",
+  "setImmediate",
+  "clearImmediate",
+  "setInterval",
+  "clearInterval",
+  "setTimeout",
+  "clearTimeout",
+  "Intl",
+];
+const JEST_LEGACY_FAKED = [
+  "nextTick",
+  "setImmediate",
+  "clearImmediate",
+  "setInterval",
+  "clearInterval",
+  "setTimeout",
+  "clearTimeout",
+];
+
+/** The project's `fakeTimers` config, the defaults of `useFakeTimers()`. */
+let projectFakeTimers = {};
+
+/** Jest's fake timer config (merged over the project's), as Vitest's. */
 export function toVitestTimerConfig(config) {
-  if (config === null || typeof config !== "object") return undefined;
-  const out = {};
+  if (config === "legacy") config = { legacyFakeTimers: true };
+  config = {
+    ...projectFakeTimers,
+    ...(config !== null && typeof config === "object" ? config : {}),
+  };
+  const doNotFake = Array.isArray(config.doNotFake) ? config.doNotFake : [];
+  const out = {
+    loopLimit: config.timerLimit || 100_000,
+    shouldClearNativeTimers: true,
+    toFake:
+      (config.legacyFakeTimers === true ? JEST_LEGACY_FAKED : JEST_FAKEABLE)
+        .filter((name) => !doNotFake.includes(name)),
+  };
   if (config.now !== undefined) out.now = config.now;
-  if (config.timerLimit !== undefined) out.loopLimit = config.timerLimit;
   if (config.advanceTimers === true) {
     out.shouldAdvanceTime = true;
   } else if (typeof config.advanceTimers === "number") {
     out.shouldAdvanceTime = true;
     out.advanceTimeDelta = config.advanceTimers;
-  }
-  if (Array.isArray(config.doNotFake) && config.doNotFake.length) {
-    out.toNotFake = config.doNotFake;
   }
   return out;
 }
@@ -584,6 +629,43 @@ function windowWithoutDeno() {
   });
 }
 
+/**
+ * Jest applies `moduleNameMapper` to every module of a test, so to the
+ * `require()` calls of CommonJS dependencies too (their imports are mapped
+ * by the CLI's resolver, a user module's `require` is Jest's). Installed
+ * once the test environment is set up: Jest loads the environment outside
+ * the test's modules.
+ */
+async function mapDependencyRequires(mappers) {
+  const compiled = (mappers ?? [])
+    .filter((m) => typeof m.find === "object")
+    .map((m) => ({
+      regex: new RegExp(m.find.regex, m.find.flags),
+      replacement: m.replacement,
+    }));
+  if (compiled.length === 0) return;
+  const { default: Module } = await import("node:module");
+  const resolveFilename = Module._resolveFilename;
+  Module._resolveFilename = function (request, parent, ...rest) {
+    const from = parent?.filename ?? "";
+    if (
+      typeof request === "string" &&
+      (from.includes("/node_modules/") || from.includes("\\node_modules\\"))
+    ) {
+      for (const { regex, replacement } of compiled) {
+        const matches = request.match(regex);
+        if (matches === null) continue;
+        request = replacement.replace(
+          /\$([0-9]+)/g,
+          (_, index) => matches[parseInt(index, 10)],
+        );
+        break;
+      }
+    }
+    return resolveFilename.call(this, request, parent, ...rest);
+  };
+}
+
 export async function setupJestEnvironment(config, environmentName) {
   if (environmentName === "jsdom" || environmentName === "happy-dom") {
     // Jest's DOM environments have no setImmediate (React's scheduler then
@@ -598,6 +680,8 @@ export async function setupJestEnvironment(config, environmentName) {
     const mod = await import(pathToFileURL(path).href);
     expect.addSnapshotSerializer(mod.default ?? mod);
   }
+  await mapDependencyRequires(config.moduleNameMapper);
+  projectFakeTimers = config.jestFakeTimersConfig ?? {};
   if (config.jestFakeTimers) {
     vi.useFakeTimers(toVitestTimerConfig(config.jestFakeTimers));
   }

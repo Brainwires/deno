@@ -1,5 +1,9 @@
+running 1 test from ./a/jsx.test.js
+parses JSX in .js files ... ok ([WILDCARD])
 running 1 test from ./a/one.test.js
 alpha runs ... ok ([WILDCARD])
+running 1 test from ./shared/both.test.js
+runs in each project ... ok ([WILDCARD])
 
-ok | 1 passed | 0 failed ([WILDCARD])
+ok | 3 passed | 0 failed ([WILDCARD])
 
