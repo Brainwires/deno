@@ -8,6 +8,12 @@ declare namespace Deno {
   /** A value that can be bound as a query parameter. Objects are sent as JSON
    * and arrays as Postgres arrays (or JSON for a `json` / `jsonb` parameter).
    *
+   * A `Date` is sent as local time with its UTC offset
+   * (`2024-01-15T12:00:00.000-06:00`): a `timestamptz` gets that instant, a
+   * `timestamp` the local wall-clock time, a `date` the instant's UTC date.
+   * An uncast parameter takes the type the server infers from the query, so
+   * `select ${42}` returns the text `"42"` (cast it: `${42}::int`).
+   *
    * @category SQL */
   export type SQLValue =
     | null
@@ -453,8 +459,12 @@ declare namespace Deno {
    * Postgres values arrive as: `int2` / `int4` / `oid` / floats as numbers;
    * `int8` and `numeric` as strings (`bigint: true` makes `int8` a
    * `bigint`); `bool`; text types and enums as strings; `json` / `jsonb`
-   * parsed; `bytea` as `Uint8Array`; `timestamp(tz)` / `date` as `Date`
-   * (`"infinity"` / `"-infinity"` as strings); `time`, `timetz`,
+   * parsed; `bytea` as `Uint8Array`; `timestamptz` as `Date`, `timestamp`
+   * (without time zone) as a `Date` at that local wall-clock time (as Bun,
+   * postgres.js and node-postgres do; a skipped local time is read as
+   * `new Date(y, m, d, h, ...)` reads it, a repeated one as its earlier
+   * instant) and `date` as a `Date` at UTC midnight (`"infinity"` /
+   * `"-infinity"` as strings); `time`, `timetz`,
    * `interval`, `uuid`, `inet`, `cidr`, `macaddr`, `bit`, `money` and
    * `tsvector` as the server's text; arrays as (nested) arrays; composites
    * as objects; ranges as `{ lower, upper, lowerInclusive, upperInclusive,

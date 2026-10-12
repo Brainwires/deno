@@ -27,8 +27,10 @@ pub enum SqlParam {
   Bytes(Vec<u8>),
   /// A plain object, already `JSON.stringify`-ed.
   Json(String),
-  /// A `Date`, as milliseconds since the epoch.
-  Date(f64),
+  /// A `Date`: milliseconds since the epoch, and the local time zone's
+  /// offset from UTC at that instant in seconds (east positive), as the
+  /// runtime's `Date` sees it.
+  Date(f64, i32),
   Array(Vec<SqlParam>),
 }
 
@@ -37,6 +39,19 @@ pub enum SqlParam {
 pub struct SqlParams(pub Vec<SqlParam>);
 
 const MAX_ARRAY_DEPTH: u32 = 32;
+
+/// `date.getTimezoneOffset()`: minutes local time is behind UTC at the
+/// date's instant, from the runtime's own time-zone data (so `TZ` applies the
+/// same way it does to JavaScript).
+pub fn tz_offset_minutes<'a>(
+  scope: &mut v8::PinScope<'a, '_>,
+  date: v8::Local<'a, v8::Date>,
+) -> Option<f64> {
+  let key = v8::String::new(scope, "getTimezoneOffset")?;
+  let method = date.get(scope, key.into())?;
+  let method = v8::Local::<v8::Function>::try_from(method).ok()?;
+  method.call(scope, date.into(), &[])?.number_value(scope)
+}
 
 fn from_v8_value<'a>(
   scope: &mut v8::PinScope<'a, '_>,
@@ -80,7 +95,13 @@ fn from_v8_value<'a>(
     return Ok(SqlParam::Bytes(bytes));
   }
   if let Ok(date) = v8::Local::<v8::Date>::try_from(value) {
-    return Ok(SqlParam::Date(date.value_of()));
+    let offset = tz_offset_minutes(scope, date).unwrap_or(0.0);
+    let offset = if offset.is_finite() {
+      -(offset * 60.0).round() as i32
+    } else {
+      0
+    };
+    return Ok(SqlParam::Date(date.value_of(), offset));
   }
   if let Ok(array) = v8::Local::<v8::Array>::try_from(value) {
     if depth >= MAX_ARRAY_DEPTH {
@@ -211,9 +232,36 @@ fn date_text(ms: f64) -> Result<String, SqlError> {
   date_to_iso(ms).ok_or_else(|| SqlError::type_error("Invalid Date parameter"))
 }
 
+/// A `Date` as local time with its UTC offset
+/// (`2024-01-15T12:00:00.000-06:00`): a `timestamptz` reads the same instant,
+/// a `timestamp` (without time zone) the local wall-clock time, as Bun,
+/// postgres.js and node-postgres send it.
+pub fn local_date_text(ms: f64, offset_s: i32) -> Result<String, SqlError> {
+  let wall = date_text(ms + offset_s as f64 * 1000.0)?;
+  let mut out = wall.trim_end_matches('Z').to_string();
+  let abs = offset_s.unsigned_abs();
+  out.push(if offset_s < 0 { '-' } else { '+' });
+  out.push_str(&format!("{:02}:{:02}", abs / 3600, (abs / 60) % 60));
+  if !abs.is_multiple_of(60) {
+    out.push_str(&format!(":{:02}", abs % 60));
+  }
+  Ok(out)
+}
+
+/// How a `Date` is written for a Postgres parameter.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum DateStyle {
+  /// Local time with its offset (timestamps, and parameters whose type the
+  /// server picks).
+  Local,
+  /// The UTC instant (`date`, which `Date`s are read back from as UTC
+  /// midnight; JSON).
+  Utc,
+}
+
 /// A scalar parameter in the text format (arrays use [`array_literal`] or
 /// [`json_text`]).
-fn scalar_text(p: &SqlParam) -> Result<String, SqlError> {
+fn scalar_text(p: &SqlParam, dates: DateStyle) -> Result<String, SqlError> {
   Ok(match p {
     SqlParam::Null => String::new(),
     // `true` / `false`: what `bool::text` gives, and the bool input reads.
@@ -221,7 +269,10 @@ fn scalar_text(p: &SqlParam) -> Result<String, SqlError> {
     SqlParam::Number(n) => number_to_text(*n),
     SqlParam::BigInt(s) | SqlParam::Text(s) | SqlParam::Json(s) => s.clone(),
     SqlParam::Bytes(b) => hex_bytea(b),
-    SqlParam::Date(ms) => date_text(*ms)?,
+    SqlParam::Date(ms, offset) => match dates {
+      DateStyle::Local => local_date_text(*ms, *offset)?,
+      DateStyle::Utc => date_text(*ms)?,
+    },
     SqlParam::Array(_) => json_text(p)?,
   })
 }
@@ -229,7 +280,10 @@ fn scalar_text(p: &SqlParam) -> Result<String, SqlError> {
 /// A Postgres array literal: `{1,"a b",NULL,{2,3}}`. Every non-null element is
 /// double-quoted with `\` and `"` escaped, which the array input function
 /// accepts for any element type.
-pub fn array_literal(items: &[SqlParam]) -> Result<String, SqlError> {
+pub fn array_literal(
+  items: &[SqlParam],
+  dates: DateStyle,
+) -> Result<String, SqlError> {
   let mut out = String::from("{");
   for (i, item) in items.iter().enumerate() {
     if i > 0 {
@@ -237,10 +291,10 @@ pub fn array_literal(items: &[SqlParam]) -> Result<String, SqlError> {
     }
     match item {
       SqlParam::Null => out.push_str("NULL"),
-      SqlParam::Array(inner) => out.push_str(&array_literal(inner)?),
+      SqlParam::Array(inner) => out.push_str(&array_literal(inner, dates)?),
       other => {
         out.push('"');
-        for c in scalar_text(other)?.chars() {
+        for c in scalar_text(other, dates)?.chars() {
           if c == '"' || c == '\\' {
             out.push('\\');
           }
@@ -286,7 +340,7 @@ fn write_json(out: &mut String, p: &SqlParam) -> Result<(), SqlError> {
     SqlParam::BigInt(s) | SqlParam::Json(s) => out.push_str(s),
     SqlParam::Text(s) => push_json_string(out, s),
     SqlParam::Bytes(b) => push_json_string(out, &hex_bytea(b)),
-    SqlParam::Date(ms) => push_json_string(out, &date_text(*ms)?),
+    SqlParam::Date(ms, _) => push_json_string(out, &date_text(*ms)?),
     SqlParam::Array(items) => {
       out.push('[');
       for (i, item) in items.iter().enumerate() {
@@ -329,6 +383,14 @@ fn is_numeric(ty: &Type) -> bool {
   .contains(ty)
 }
 
+fn date_style(ty: &Type) -> DateStyle {
+  if *ty == Type::DATE || *ty == Type::DATE_ARRAY {
+    DateStyle::Utc
+  } else {
+    DateStyle::Local
+  }
+}
+
 /// The text a parameter is sent as for a parameter of type `ty`.
 pub fn pg_text(p: &SqlParam, ty: &Type) -> Result<String, SqlError> {
   if let (SqlParam::Bool(b), true) = (p, is_numeric(ty)) {
@@ -345,13 +407,13 @@ pub fn pg_text(p: &SqlParam, ty: &Type) -> Result<String, SqlError> {
   match p {
     SqlParam::Array(items) => {
       if is_array(ty) || ty.oid() == 0 || *ty == Type::UNKNOWN {
-        array_literal(items)
+        array_literal(items, date_style(ty))
       } else {
         // An array bound to a scalar (text, ...) parameter: its JSON.
         json_text(p)
       }
     }
-    other => scalar_text(other),
+    other => scalar_text(other, date_style(ty)),
   }
 }
 
@@ -423,19 +485,59 @@ mod tests {
 
   #[test]
   fn array_literals_escape() {
-    let lit = array_literal(&[
-      SqlParam::Number(1.0),
-      SqlParam::Text("a \"b\" \\c".into()),
-      SqlParam::Null,
-      SqlParam::Text("NULL".into()),
-      SqlParam::Array(vec![SqlParam::Bool(true)]),
-    ])
+    let lit = array_literal(
+      &[
+        SqlParam::Number(1.0),
+        SqlParam::Text("a \"b\" \\c".into()),
+        SqlParam::Null,
+        SqlParam::Text("NULL".into()),
+        SqlParam::Array(vec![SqlParam::Bool(true)]),
+      ],
+      DateStyle::Local,
+    )
     .unwrap();
     assert_eq!(lit, r#"{"1","a \"b\" \\c",NULL,"NULL",{"true"}}"#);
-    assert_eq!(array_literal(&[]).unwrap(), "{}");
+    assert_eq!(array_literal(&[], DateStyle::Local).unwrap(), "{}");
     assert_eq!(
-      array_literal(&[SqlParam::Bytes(vec![0xde, 0xad])]).unwrap(),
+      array_literal(&[SqlParam::Bytes(vec![0xde, 0xad])], DateStyle::Local)
+        .unwrap(),
       r#"{"\\xdead"}"#
+    );
+  }
+
+  #[test]
+  fn local_dates() {
+    // 2024-01-15T18:00:00Z in UTC-6.
+    let ms = 1_705_341_600_000.0;
+    assert_eq!(
+      local_date_text(ms, -6 * 3600).unwrap(),
+      "2024-01-15T12:00:00.000-06:00"
+    );
+    assert_eq!(
+      local_date_text(ms, 5 * 3600 + 1800).unwrap(),
+      "2024-01-15T23:30:00.000+05:30"
+    );
+    // A historic offset with seconds (LMT).
+    assert_eq!(
+      local_date_text(ms, -(5 * 3600 + 50 * 60 + 36)).unwrap(),
+      "2024-01-15T12:09:24.000-05:50:36"
+    );
+    let d = SqlParam::Date(ms, -6 * 3600);
+    assert_eq!(
+      pg_text(&d, &Type::TIMESTAMP).unwrap(),
+      "2024-01-15T12:00:00.000-06:00"
+    );
+    assert_eq!(
+      pg_text(&d, &Type::DATE).unwrap(),
+      "2024-01-15T18:00:00.000Z"
+    );
+    assert_eq!(
+      pg_text(&SqlParam::Array(vec![d.clone()]), &Type::DATE_ARRAY).unwrap(),
+      r#"{"2024-01-15T18:00:00.000Z"}"#
+    );
+    assert_eq!(
+      pg_text(&SqlParam::Array(vec![d.clone()]), &Type::JSONB).unwrap(),
+      r#"["2024-01-15T18:00:00.000Z"]"#
     );
   }
 

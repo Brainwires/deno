@@ -18,10 +18,10 @@ users:
   ```
 
 - **Features of the `deno` CLI and runtime itself**, such as Vitest / Jest
-  compatibility for `deno test` and the built-in SQL client (`Deno.SQL` /
-  `Deno.sql`). These need this fork's own `deno` binary, built from a release
-  line (see [Reproducing a build](#reproducing-a-build)); the stock CLI does not
-  have them.
+  compatibility for `deno test` (item 23) and the built-in SQL client
+  (`Deno.SQL` / `Deno.sql`, item 24). These need this fork's own `deno` binary,
+  built from a release line (see [Reproducing a build](#reproducing-a-build));
+  the stock CLI does not have them.
 
 ## Upstream
 
@@ -409,16 +409,23 @@ where the changes are discussed.
       text and `.raw()` cells its binary form (Bun parses simple results and
       gives text-format raw cells); `cancel()` before a query starts rejects it
       (Bun's never settles); a refused connection is
-      `ERR_POSTGRES_CONNECTION_FAILED` (Bun: `_CONNECTION_CLOSED`); `timestamp`
-      without a time zone is read as UTC (Bun, postgres.js and node-postgres
-      read it as local time). Aligned: booleans bound where the server expects a
-      number (`${true}::int`) are sent as `1` / `0`, and as `true` / `false`
-      where it expects text; `onconnect` / `onclose` take the error (or `null`)
-      first.
+      `ERR_POSTGRES_CONNECTION_FAILED` (Bun: `_CONNECTION_CLOSED`); an uncast
+      parameter takes the type the server infers (`select ${42}` is `"42"`),
+      which is more forgiving than Bun's client-side typing (`text_col = ${42}`
+      works). Aligned: booleans bound where the server expects a number
+      (`${true}::int`) are sent as `1` / `0`, and as `true` / `false` where it
+      expects text; `onconnect` / `onclose` take the error (or `null`) first;
+      `timestamp` without a time zone is local wall-clock time both ways, as in
+      Bun, postgres.js and node-postgres: read as `new Date(y, m, d, h, ...)`
+      would (a time the clock skipped uses the offset from before the change,
+      one it passed twice the earlier instant), and a `Date` is sent as local
+      time with its UTC offset (`2024-01-15T12:00:00.000-06:00`, which a
+      `timestamptz` reads as the same instant); `date` stays UTC midnight both
+      ways. The offsets come from the runtime's own `Date` (so `TZ` applies).
     - Not yet: MySQL, the `"bun"` module, `tsquery` decoding.
 
-The runtime-side parts (1-3, 5-23) are what the prebuilt `libdenort` carries.
-The CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` /
+The runtime-side parts (1-3, 5-22, 24) are what the prebuilt `libdenort`
+carries. The CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` /
 `LAUFEY_APP_ID` into a packaged app's launchers) are in the branch too, but a
 stock CLI does not run them; denext's own launcher provides that environment.
 

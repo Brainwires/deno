@@ -52,6 +52,7 @@
     },
     "pg_types": {
       "if": "postgres",
+      "envs": { "TZ": "UTC" },
       "args": "run --allow-env=DENO_SQL_TEST_POSTGRES_URL --allow-net=127.0.0.1,localhost pg_types.ts",
       "output": "pg_types.out"
     },
@@ -69,6 +70,12 @@
       "if": "postgres",
       "args": "run --allow-env=DENO_SQL_TEST_POSTGRES_URL --allow-net=127.0.0.1,localhost pg_pool.ts",
       "output": "pg_pool.out"
+    },
+    "pg_timestamp": {
+      "if": "postgres",
+      "envs": { "TZ": "America/Chicago" },
+      "args": "run --allow-env=DENO_SQL_TEST_POSTGRES_URL --allow-net=127.0.0.1,localhost pg_timestamp.ts",
+      "output": "pg_timestamp.out"
     },
     "pg_listen": {
       "if": "postgres",

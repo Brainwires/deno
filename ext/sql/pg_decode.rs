@@ -463,6 +463,55 @@ fn v8_date<'a>(
     .ok_or_else(|| "could not create Date".to_string())
 }
 
+/// `getTimezoneOffset()` at instant `ms`, in milliseconds.
+fn tz_offset_ms(
+  scope: &mut v8::PinScope<'_, '_>,
+  ms: f64,
+) -> DecodeResult<f64> {
+  let date = v8::Date::new(scope, ms)
+    .ok_or_else(|| "could not create Date".to_string())?;
+  let minutes = crate::params::tz_offset_minutes(scope, date)
+    .ok_or_else(|| "could not read the time zone offset".to_string())?;
+  Ok(if minutes.is_finite() {
+    minutes * 60_000.0
+  } else {
+    0.0
+  })
+}
+
+const DAY_MS: f64 = 86_400_000.0;
+
+/// The instant of local wall-clock time `wall` (milliseconds as if it were
+/// UTC), resolved as `new Date(y, m, d, h, ...)` does: a time that occurs
+/// twice (the clock went back) is the earlier one, a time that never occurs
+/// (the clock went forward) is read with the offset from before the change.
+pub fn local_to_utc(
+  scope: &mut v8::PinScope<'_, '_>,
+  wall: f64,
+) -> DecodeResult<f64> {
+  if !wall.is_finite() || wall.abs() > 8.64e15 {
+    return Ok(f64::NAN);
+  }
+  // The offsets in effect a day either side cover a change near `wall`.
+  let before = tz_offset_ms(scope, wall - DAY_MS)?;
+  let after = tz_offset_ms(scope, wall + DAY_MS)?;
+  let mut best: Option<f64> = None;
+  for offset in [before, after] {
+    let instant = wall + offset;
+    if tz_offset_ms(scope, instant)? == offset {
+      best = Some(best.map_or(instant, |b: f64| b.min(instant)));
+    }
+    if before == after {
+      break;
+    }
+  }
+  match best {
+    Some(instant) => Ok(instant),
+    // In a gap: the offset from before the change.
+    None => Ok(wall + before),
+  }
+}
+
 fn v8_i64<'a>(
   scope: &mut v8::PinScope<'a, '_>,
   v: i64,
@@ -731,8 +780,18 @@ fn decode_nested<'a>(
       match us {
         i64::MAX => v8_str(scope, b"infinity")?,
         i64::MIN => v8_str(scope, b"-infinity")?,
-        // A Date holds whole milliseconds: floor the microseconds.
-        _ => v8_date(scope, (us.div_euclid(1000) + PG_EPOCH_MS) as f64)?,
+        _ => {
+          // A Date holds whole milliseconds: floor the microseconds.
+          let ms = (us.div_euclid(1000) + PG_EPOCH_MS) as f64;
+          if ty.oid() == oid::TIMESTAMP {
+            // No time zone: a local wall-clock time, as Bun, postgres.js
+            // and node-postgres read it.
+            let utc = local_to_utc(scope, ms)?;
+            v8_date(scope, utc)?
+          } else {
+            v8_date(scope, ms)?
+          }
+        }
       }
     }
     oid::DATE => {

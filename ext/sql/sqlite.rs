@@ -173,7 +173,7 @@ impl rusqlite::ToSql for Bind<'_> {
         ToSqlOutput::Borrowed(ValueRef::Text(s.as_bytes()))
       }
       SqlParam::Bytes(b) => ToSqlOutput::Borrowed(ValueRef::Blob(b)),
-      SqlParam::Date(ms) => ToSqlOutput::Owned(Value::Text(
+      SqlParam::Date(ms, _) => ToSqlOutput::Owned(Value::Text(
         date_to_iso(*ms).ok_or_else(|| conversion("Invalid Date".into()))?,
       )),
       SqlParam::Array(_) => ToSqlOutput::Owned(Value::Text(
