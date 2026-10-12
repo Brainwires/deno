@@ -49,10 +49,11 @@ denort = { path = "../rt", default-features = false }
 # WebKit backends flushing localStorage before the app ends; API 47: title
 # bar preferences, the Linux secure store and portal file chooser, and the
 # denext.12 security fixes; denext.13: the macOS secure store and
-# maintenance fixes; denext.14: the launch messages on stderr), pinned to
-# a commit of the Brainwires/laufey fork. The host built from the same commit
-# must be used with it (the API version check is exact).
-laufey = { git = "https://github.com/Brainwires/laufey", rev = "066f609fab0589c033b2a815e358479b6a85bf9d" }
+# maintenance fixes; denext.14: the launch messages on stderr and the
+# Windows passkey cancel), pinned to a commit of the Brainwires/laufey fork.
+# The host built from the same commit must be used with it (the API version
+# check is exact).
+laufey = { git = "https://github.com/Brainwires/laufey", rev = "09ad1b6278ac8f13bcebeeffc3f0b290290a9094" }
 libsui.workspace = true
 
 bytes.workspace = true
