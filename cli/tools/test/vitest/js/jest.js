@@ -20,6 +20,7 @@ const SNAPSHOT_HEADER = Symbol.for("deno.vitest.snapshotHeader");
 
 const { createRequire } = await import("node:module");
 const { fileURLToPath, pathToFileURL } = await import("node:url");
+const { isAbsolute } = await import("node:path");
 const { format: utilFormat } = await import("node:util");
 
 function mocker() {
@@ -666,7 +667,15 @@ async function mapDependencyRequires(mappers) {
   };
 }
 
-export async function setupJestEnvironment(config, environmentName) {
+/**
+ * `runnerFs` is the runner's own reads (see preload.js), or undefined: the
+ * fixed paths `moduleNameMapper` maps to are then loaded like the test's.
+ */
+export async function setupJestEnvironment(
+  config,
+  environmentName,
+  runnerFs,
+) {
   if (environmentName === "jsdom" || environmentName === "happy-dom") {
     // Jest's DOM environments have no setImmediate (React's scheduler then
     // uses a MessageChannel, which changes when effects run).
@@ -680,6 +689,15 @@ export async function setupJestEnvironment(config, environmentName) {
     const mod = await import(pathToFileURL(path).href);
     expect.addSnapshotSerializer(mod.default ?? mod);
   }
+  // a fixed path the config maps a module to is the runner's own import
+  for (const { replacement } of config.moduleNameMapper ?? []) {
+    if (
+      typeof replacement === "string" && !replacement.includes("$") &&
+      isAbsolute(replacement)
+    ) {
+      runnerFs?.allowImport(pathToFileURL(replacement).href);
+    }
+  }
   await mapDependencyRequires(config.moduleNameMapper);
   projectFakeTimers = config.jestFakeTimersConfig ?? {};
   if (config.jestFakeTimers) {
@@ -692,8 +710,8 @@ export async function setupJestEnvironment(config, environmentName) {
  * they name: Jest uses them without a `jest.mock()` call (Node's built-in
  * modules excepted).
  */
-export async function registerRootMocks(roots) {
-  const fs = await import("node:fs");
+export async function registerRootMocks(roots, runnerFs) {
+  const fs = runnerFs ?? await import("node:fs");
   const path = await import("node:path");
   const { isBuiltin } = await import("node:module");
   for (const root of roots ?? []) {

@@ -9,13 +9,22 @@
 // stored as JSON under `globalThis[Symbol.for("deno.vitest.loadedConfig")]`.
 
 import { dirname, isAbsolute, resolve } from "node:path";
-import { existsSync, readFileSync } from "node:fs";
+import * as nodeFs from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { loadEnv, mergeConfig } from "./config.js";
 import { b as defaultInclude, d as defaultExclude } from "./vendor/defaults.js";
 import { loadJestProjects, parseJsonc } from "./jest_config.js";
 
 const RESULT = Symbol.for("deno.vitest.loadedConfig");
+
+// The runner's own reads (see cli/tools/test/vitest/runner_reads.rs): the
+// config files it imports and the files it reduces to options (tsconfig,
+// `.env`, Jest presets and Babel configs) need no read permission within
+// the run's root. Taken before the config's code runs, and only handed to
+// the functions doing those reads: what the config's code itself does at
+// runtime stays checked. `node:fs` when not available.
+const fs = globalThis.Deno[globalThis.Deno.internal].takeVitestRunnerFs?.() ??
+  nodeFs;
 
 const params = new URL(import.meta.url).searchParams;
 const configUrl = params.get("config");
@@ -31,7 +40,9 @@ const configEnv = {
 };
 
 async function evaluateConfigFile(path) {
-  const mod = await import(pathToFileURL(path).href);
+  const url = pathToFileURL(path).href;
+  fs.allowImport?.(url);
+  const mod = await import(url);
   let config = mod.default ?? mod;
   if (typeof config === "function") config = config(configEnv);
   config = await config;
@@ -59,9 +70,9 @@ function normalizeAliases(alias) {
 
 /** `compilerOptions.paths` of a tsconfig, following `extends`. */
 function readTsconfigPaths(path, seen = new Set()) {
-  if (seen.has(path) || !existsSync(path)) return undefined;
+  if (seen.has(path) || !fs.existsSync(path)) return undefined;
   seen.add(path);
-  const tsconfig = parseJsonc(readFileSync(path, "utf8"));
+  const tsconfig = parseJsonc(fs.readFileSync(path, "utf8"));
   const options = tsconfig.compilerOptions ?? {};
   if (options.paths) {
     const base = resolve(dirname(path), options.baseUrl ?? ".");
@@ -238,7 +249,7 @@ function resolveProject(config, configDir, fallbackName) {
   const mode = config.mode ?? "test";
   const envDir = config.envDir ? resolve(root, config.envDir) : root;
   const env = {
-    ...loadEnv(mode, envDir, config.envPrefix ?? "VITE_"),
+    ...loadEnv(mode, envDir, config.envPrefix ?? "VITE_", fs),
     ...(test.env ?? {}),
   };
   const define = {};
@@ -311,7 +322,7 @@ async function expandProjects(rootConfig, configDir) {
 
 let projects;
 if (flavor === "jest") {
-  projects = await loadJestProjects(configPath);
+  projects = await loadJestProjects(configPath, fs);
 } else {
   const rootConfig = await evaluateConfigFile(configPath);
   projects = await expandProjects(rootConfig, dirname(configPath));

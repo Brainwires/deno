@@ -26,11 +26,15 @@
 //!   [`Project`]; `moduleNameMapper` becomes aliases, `moduleDirectories`
 //!   extra lookup directories) and `js/jest.js` provides the `jest` object
 //!   and Jest's semantics (globals, `done` callbacks, snapshot names).
+//! - The runner's own reads (the config, `__mocks__` lookups, the modules it
+//!   imports itself) need no `--allow-read` within the run's root, through a
+//!   privileged path the test code cannot use (see [`runner_reads`]).
 
 mod config;
 mod glob;
 mod jsx_in_js;
 pub mod mocks;
+pub mod runner_reads;
 mod transform;
 
 use std::collections::HashMap;
@@ -1128,6 +1132,11 @@ impl VitestCompat {
   ) -> Result<Self, AnyError> {
     let found =
       config::find_config(initial_cwd, test_flags.vitest.config.as_deref())?;
+    // The runner reads within the working directory and the config's.
+    runner_reads::set_scope(
+      std::iter::once(initial_cwd)
+        .chain(found.as_ref().and_then(|found| found.path.parent())),
+    );
     // Installed first: the config itself imports `vitest/config`.
     let overrides = Arc::new(VitestOverrides::new(
       initial_cwd,

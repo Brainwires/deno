@@ -24,6 +24,7 @@ use std::cell::Cell;
 use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -80,6 +81,11 @@ pub struct VitestMocks {
   senders: RefCell<HashMap<u32, oneshot::Sender<Result<String, String>>>>,
   /// The export names of the mocks whose exports are known.
   keys: RefCell<HashMap<u32, Rc<Vec<String>>>>,
+  /// Modules the Vitest runner itself imports (a config file, a setup file,
+  /// a `__mocks__` file, an automocked module), within the runner's read
+  /// scope: loaded like a static import, without a read permission check
+  /// (see [`super::runner_reads`]).
+  runner_imports: RefCell<HashSet<Url>>,
 }
 
 impl std::fmt::Debug for VitestMocks {
@@ -97,6 +103,23 @@ impl VitestMocks {
   pub fn set_loader(&self, resolve: ResolveFn, source: SourceFn) {
     *self.resolve.borrow_mut() = Some(resolve);
     *self.source.borrow_mut() = Some(source);
+  }
+
+  /// Lets the runner import `url` like a static import (see
+  /// `runner_imports`).
+  pub fn allow_runner_import(&self, url: Url) {
+    self
+      .runner_imports
+      .borrow_mut()
+      .insert(strip_generation(&url));
+  }
+
+  /// Whether a dynamic import of `url` is the runner's own (see
+  /// `runner_imports`).
+  pub fn is_runner_import(&self, url: &Url) -> bool {
+    let runner_imports = self.runner_imports.borrow();
+    !runner_imports.is_empty()
+      && runner_imports.contains(&strip_generation(url))
   }
 
   /// Whether module loads may wait for the worker's JavaScript (so the
@@ -441,7 +464,7 @@ fn parse_imported_names(
   result
 }
 
-fn mocks(state: &OpState) -> Result<Rc<VitestMocks>, JsErrorBox> {
+pub(super) fn mocks(state: &OpState) -> Result<Rc<VitestMocks>, JsErrorBox> {
   state
     .try_borrow::<Rc<VitestMocks>>()
     .cloned()

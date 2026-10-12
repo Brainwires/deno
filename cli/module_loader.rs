@@ -571,6 +571,7 @@ impl CliModuleLoaderFactory {
         .shared
         .npm_registry_permission_checker
         .clone(),
+      vitest_mocks: vitest_mocks.clone(),
     });
     CreateModuleLoaderResult {
       module_loader,
@@ -752,6 +753,10 @@ impl<TGraphContainer: ModuleGraphContainer>
     specifier: &ModuleSpecifier,
     is_dynamic_import: bool,
   ) {
+    // a module `deno test`'s Vitest runner loads itself (such as the target
+    // of a Jest `moduleNameMapper` entry) loads like a static import
+    let is_dynamic_import =
+      is_dynamic_import && !self.vitest_mocks.is_runner_import(specifier);
     let permissions = if is_dynamic_import {
       &self.permissions
     } else {
@@ -1767,17 +1772,22 @@ impl<TGraphContainer: ModuleGraphContainer> ModuleLoader
         .unwrap_or_else(|| specifier.clone());
     let inner = self.0.clone();
     let is_synchronous = options.is_synchronous;
+    // A module `deno test`'s Vitest runner imports itself (its config, a
+    // setup file, a `__mocks__` file) loads like a static import: no read
+    // permission check (see cli/tools/test/vitest/runner_reads.rs).
+    let is_dynamic_import = options.is_dynamic_import
+      && !inner.vitest_mocks.is_runner_import(&specifier);
 
     let future = async move {
       let graph_container = &inner.graph_container;
       let module_load_preparer = &inner.shared.module_load_preparer;
-      let permissions = if options.is_dynamic_import {
+      let permissions = if is_dynamic_import {
         &inner.permissions
       } else {
         &inner.parent_permissions
       };
 
-      if options.is_dynamic_import {
+      if is_dynamic_import {
         // This doesn't acquire a graph update permit because that will
         // clone the graph which is a bit slow.
         let mut graph = graph_container.graph();
@@ -1807,7 +1817,7 @@ impl<TGraphContainer: ModuleGraphContainer> ModuleLoader
         }
       }
 
-      let is_dynamic = options.is_dynamic_import || inner.is_worker; // consider workers as dynamic for permissions
+      let is_dynamic = is_dynamic_import || inner.is_worker; // consider workers as dynamic for permissions
       let lib = inner.lib;
       let mut update_permit = graph_container.acquire_update_permit().await;
       // For a blob/object-URL worker root, inject the captured blob's content
@@ -2184,6 +2194,7 @@ struct CliNodeRequireLoader<TGraphContainer: ModuleGraphContainer> {
   in_npm_pkg_checker: DenoInNpmPackageChecker,
   npm_registry_permission_checker:
     Arc<NpmRegistryReadPermissionChecker<CliSys>>,
+  vitest_mocks: Rc<crate::tools::test::vitest::mocks::VitestMocks>,
 }
 
 impl<TGraphContainer: ModuleGraphContainer> NodeRequireLoader
@@ -2195,8 +2206,11 @@ impl<TGraphContainer: ModuleGraphContainer> NodeRequireLoader
     path: Cow<'a, Path>,
   ) -> Result<Cow<'a, Path>, JsErrorBox> {
     if let Ok(url) = deno_path_util::url_from_file_path(&path) {
-      // allow reading if it's in the module graph
-      if self.graph_container.graph().get(&url).is_some() {
+      // allow reading if it's in the module graph, or a module `deno test`'s
+      // Vitest runner loads itself (cli/tools/test/vitest/runner_reads.rs)
+      if self.graph_container.graph().get(&url).is_some()
+        || self.vitest_mocks.is_runner_import(&url)
+      {
         return Ok(path);
       }
     }

@@ -22,6 +22,21 @@
       "output": "projects.out",
       "exitCode": 0
     },
+    // The runner's own reads need no --allow-read within the project (see
+    // cli/tools/test/vitest/runner_reads.rs): a CommonJS config with
+    // projects, the package.json "jest" key.
+    "projects_no_permissions": {
+      "cwd": "projects",
+      "args": "test --no-check",
+      "output": "projects.out",
+      "exitCode": 0
+    },
+    "package_json_no_permissions": {
+      "cwd": "package_json",
+      "args": "test --no-check",
+      "output": "package_json.out",
+      "exitCode": 0
+    },
     "projects_selected": {
       "cwd": "projects",
       "args": "test -A --no-check --vitest-project=alpha",

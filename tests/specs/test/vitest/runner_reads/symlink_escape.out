@@ -1,0 +1,5 @@
+running 1 test from ./src/symlink_escape.spec.ts
+does not follow a symlink out of the project ... ok ([WILDCARD])
+
+ok | 1 passed | 0 failed ([WILDCARD])
+

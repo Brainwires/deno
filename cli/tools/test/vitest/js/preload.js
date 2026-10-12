@@ -9,6 +9,14 @@
 import { startFile } from "./runtime.js";
 import resolvedConfig from "./resolved_config.json" with { type: "json" };
 
+// The runner's own reads (see cli/tools/test/vitest/runner_reads.rs): its
+// `__mocks__` lookups and the modules it imports itself (setup files,
+// `__mocks__` files, automocked modules) need no read permission within the
+// run's root. Taken before the test module runs, and only handed to the
+// runner: the test's own reads and imports stay checked.
+const runnerFs = globalThis.Deno[globalThis.Deno.internal]
+  .takeVitestRunnerFs?.();
+
 const params = new URL(import.meta.url).searchParams;
 const file = params.get("file");
 const projectName = params.get("project");
@@ -30,4 +38,4 @@ if ((resolvedConfig.projects?.length ?? 0) > 1 && project.label) {
 const environment = params.get("environment");
 if (environment) config.environment = environment;
 
-await startFile(file, config);
+await startFile(file, config, runnerFs);

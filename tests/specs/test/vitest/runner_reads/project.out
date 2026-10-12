@@ -1,0 +1,17 @@
+running 4 tests from ./src/config.test.ts
+applies the config's aliases ... ok ([WILDCARD])
+runs the setup files ... ok ([WILDCARD])
+loads the .env files ... ok ([WILDCARD])
+checks the config's own reads ... ok ([WILDCARD])
+running 4 tests from ./src/denied.test.ts
+denies the test's own reads ... ok ([WILDCARD])
+denies the test's own dynamic imports ... ok ([WILDCARD])
+does not hand the runner's reads to the test ... ok ([WILDCARD])
+does not let the runner read outside the project ... ok ([WILDCARD])
+running 3 tests from ./src/mocks.test.ts
+uses the __mocks__ file next to the module ... ok ([WILDCARD])
+automocks a module ... ok ([WILDCARD])
+automocks with vi.importMock ... ok ([WILDCARD])
+
+ok | 11 passed | 0 failed ([WILDCARD])
+
