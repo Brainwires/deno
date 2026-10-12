@@ -609,21 +609,25 @@ where the changes are discussed.
 26. **`ci(release)`: this fork's own `deno` CLI is a release asset** (from
     `denext.15`; `.github/workflows/denext_runtime.yml` job `cli`,
     `.github/denext-runtime/assemble_cli.sh` / `cli_smoke.sh`,
-    `cli/args/flags.rs`). Every runtime release also carries
-    `deno-cli-<version>-<target>` for the same five targets, built with
-    `cargo build --release --locked --bin deno`, so denext can download the CLI
-    features (items 23, 24, and the CLI-side parts of the rest) pinned by
-    version and SHA-256 like the runtime, with nothing else to install. The
-    binary is still `deno`. A release build bakes `DENEXT_VERSION` (the release
-    version, e.g. `2.9.7-denext.15`) in at compile time: `deno --version` and
-    `deno -V` print it (`deno 2.9.7-denext.15 (stable, release, <target>)`),
-    while `Deno.version.deno`, the user agent and every version check keep the
-    plain Deno version (`2.9.7`); a value that does not extend the binary's own
-    version with `-` or `+` is ignored, and without it the output is upstream's.
-    Each archive is smoke-tested on its own runner (the version lines, plain
-    `Deno.version.deno`, `typeof Deno.SQL === "function"`, a Vitest suite
-    passing under `deno test`) and attested. Test: `denext_display_version` in
-    `cli/args/flags.rs`.
+    `cli/lib/version.rs`, `cli/standalone/binary.rs`). Every runtime release
+    also carries `deno-cli-<version>-<target>.zip` for the same five targets,
+    built with `cargo build --release --locked --bin deno`, so denext can
+    download the CLI features (items 23, 24, and the CLI-side parts of the rest)
+    pinned by version and SHA-256 like the runtime, with nothing else to
+    install. The binary is still `deno`. A release build bakes `DENEXT_VERSION`
+    (the release version, e.g. `2.9.7-denext.15`) in at compile time: it becomes
+    `Deno.version.deno`, `deno --version` / `deno -V`
+    (`deno 2.9.7-denext.15 (stable, release, <target>)`) and the user agent
+    (`Deno/2.9.7-denext.15`), still a semver on the stable channel, so a program
+    (denext) can tell this CLI from a stock one. The `denort` / `libdenort`
+    downloads of `deno compile` / `deno desktop` and `deno upgrade` keep the
+    plain Deno version (`DENO_VERSION`, `2.9.7`). A value that does not extend
+    the build's own Deno version with `-` or `+` is ignored; without it every
+    version is upstream's (the `libdenort` build sets none). Each archive is
+    smoke-tested on its own runner (the version lines and `Deno.version.deno`,
+    `typeof Deno.SQL === "function"`, a Vitest suite passing under `deno test`)
+    and attested. Test: `denext_version_extends_the_deno_version` in
+    `cli/lib/version.rs`.
 
 The runtime-side parts (1-3, 5-22, 24, 25) are what the prebuilt `libdenort`
 carries. The CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` /
@@ -684,11 +688,11 @@ directory holding the backend binary into the packaged app, so those directories
 hold only the backend's runtime files.
 
 Since `denext.15` each release also has this fork's `deno` CLI (item 26), one
-archive per target: `deno-cli-<deno version>-denext.<n>-<target>.tar.gz` (`.zip`
-on Windows), no wrapping directory:
+zip per target (every OS): `deno-cli-<deno version>-denext.<n>-<target>.zip`, no
+wrapping directory:
 
 ```text
-deno | deno.exe     the CLI; `deno --version` prints `deno <deno version>-denext.<n> (...)`
+deno | deno.exe     the CLI; `Deno.version.deno` is `<deno version>-denext.<n>`
 BUILD_INFO.json     deno version + SHA, run URL
 licenses/           the deno license
 ```
@@ -700,7 +704,7 @@ SHA and CEF version). Every archive has a build provenance attestation:
 
 ```sh
 gh attestation verify deno-desktop-runtime-<...>.tar.gz -R Brainwires/deno
-gh attestation verify deno-cli-<...>.tar.gz -R Brainwires/deno
+gh attestation verify deno-cli-<...>.zip -R Brainwires/deno
 ```
 
 Binaries are not code-signed or notarized: an app is signed with its author's

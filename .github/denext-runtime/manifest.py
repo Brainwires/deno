@@ -111,8 +111,8 @@ manifest = {
         t: {"runtimeLib": lib_for(t), **backends}
         for t, backends in sorted(targets.items())
     },
-    # This fork's own `deno` CLI: `deno --version` prints `deno <version>`,
-    # Deno.version.deno is deno.version.
+    # This fork's own `deno` CLI, a zip per target with the binary at the
+    # top: `deno --version` and Deno.version.deno are `version`.
     "cli": {
         "version": version,
         "targets": dict(sorted(cli_targets.items())),

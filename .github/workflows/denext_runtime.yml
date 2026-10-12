@@ -586,8 +586,9 @@ jobs:
 
       - name: Build deno
         env:
-          # Shown by `deno --version` / `deno -V` (cli/args/flags.rs,
-          # display_version); Deno.version.deno stays the plain version.
+          # Deno.version.deno, `deno --version` and the user agent
+          # (cli/lib/version.rs, denext_version); denort / libdenort
+          # downloads keep the plain Deno version.
           DENEXT_VERSION: ${{ needs.setup.outputs.version }}
         run: |
           set -euo pipefail
@@ -630,12 +631,12 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: bash .github/denext-runtime/assemble_cli.sh
 
-      # `deno --version` names the build, Deno.version.deno stays plain,
+      # `deno --version` and Deno.version.deno name the build,
       # `typeof Deno.SQL` is "function" and a Vitest suite passes under
       # `deno test`, all from the unpacked archive.
       - name: Smoke
         env:
-          ARCHIVE: dist/deno-cli-${{ needs.setup.outputs.version }}-${{ matrix.target }}.${{ runner.os == 'Windows' && 'zip' || 'tar.gz' }}
+          ARCHIVE: dist/deno-cli-${{ needs.setup.outputs.version }}-${{ matrix.target }}.zip
           WORK_DIR: ${{ runner.temp }}/cli-smoke
         run: bash .github/denext-runtime/cli_smoke.sh
 
@@ -1023,7 +1024,7 @@ jobs:
 
           \`deno-cli-*\` is this fork's own \`deno\` CLI (Vitest compatibility in \`deno test\`,
           \`Deno.SQL\`, ...): unpack it and run \`deno\` (\`deno.exe\` on Windows). Its
-          \`deno --version\` names this release; \`Deno.version.deno\` is ${DENO_VERSION}.
+          \`deno --version\` and \`Deno.version.deno\` name this release (\`${TAG#denext-runtime-v}\`).
           They are listed under \`cli\` in \`manifest.json\`.
           EOF
           gh release create "$TAG" --repo "$REPO" --title "$TAG" \

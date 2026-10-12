@@ -757,12 +757,11 @@ pub fn flags_from_vec_with_initial_cwd(
 /// Both forms are prefixed with the binary name and terminated by a newline,
 /// matching what clap's `render_long_version` / `render_version` used to emit.
 pub fn render_version(long: bool) -> String {
-  let version = display_version(option_env!("DENEXT_VERSION"));
   if long {
     debug_assert_eq!(DENO_VERSION_INFO.typescript, deno_snapshots::TS_VERSION);
     format!(
       "deno {} ({}, {}, {})\nv8 {}\ntypescript {}\n",
-      version,
+      DENO_VERSION_INFO.deno,
       DENO_VERSION_INFO.release_channel.name(),
       env!("PROFILE"),
       env!("TARGET"),
@@ -770,26 +769,7 @@ pub fn render_version(long: bool) -> String {
       DENO_VERSION_INFO.typescript,
     )
   } else {
-    format!("deno {}\n", version)
-  }
-}
-
-/// The version `deno --version` / `deno -V` print. A denext release build sets
-/// `DENEXT_VERSION` at compile time (e.g. `2.9.7-denext.15`, see DENEXT.md
-/// "Release archives") so the binary says which build it is; it is shown only
-/// when it extends this binary's own Deno version. `Deno.version.deno`, the
-/// user agent and every version check keep the plain Deno version.
-fn display_version(denext_version: Option<&'static str>) -> &'static str {
-  let deno = DENO_VERSION_INFO.deno;
-  match denext_version {
-    Some(v)
-      if v
-        .strip_prefix(deno)
-        .is_some_and(|rest| rest.starts_with(['-', '+'])) =>
-    {
-      v
-    }
-    _ => deno,
+    format!("deno {}\n", DENO_VERSION_INFO.deno)
   }
 }
 
@@ -922,25 +902,6 @@ mod tests {
 
   fn flags_from_vec(args: Vec<OsString>) -> Result<Flags, CliError> {
     flags_from_vec_with_initial_cwd(args, None)
-  }
-
-  #[test]
-  fn denext_display_version() {
-    let deno = DENO_VERSION_INFO.deno;
-    assert_eq!(display_version(None), deno);
-    let denext: &'static str =
-      Box::leak(format!("{deno}-denext.15").into_boxed_str());
-    assert_eq!(display_version(Some(denext)), denext);
-    let build: &'static str =
-      Box::leak(format!("{deno}+denext.15").into_boxed_str());
-    assert_eq!(display_version(Some(build)), build);
-    // Only a suffix on this binary's own version is shown.
-    assert_eq!(display_version(Some("")), deno);
-    assert_eq!(display_version(Some(deno)), deno);
-    assert_eq!(display_version(Some("1.0.0-denext.1")), deno);
-    let joined: &'static str = Box::leak(format!("{deno}1").into_boxed_str());
-    assert_eq!(display_version(Some(joined)), deno);
-    assert!(render_version(false).starts_with("deno "));
   }
 
   /// The bare-run fast path in `flags_from_vec_with_initial_cwd` bypasses the

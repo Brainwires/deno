@@ -61,9 +61,14 @@ pub static DENO_VERSION_INFO: std::sync::LazyLock<DenoVersionInfo> =
       release_channel_from_version_string(DENO_VERSION)
     };
 
+    let denext = denext_version(option_env!("DENEXT_VERSION"), DENO_VERSION)
+      .filter(|_| release_channel != ReleaseChannel::Canary);
+
     DenoVersionInfo {
       deno: if release_channel == ReleaseChannel::Canary {
         concat!(env!("DENO_VERSION"), "+", env!("GIT_COMMIT_HASH_SHORT"))
+      } else if let Some(denext) = denext {
+        denext
       } else {
         env!("DENO_VERSION")
       },
@@ -80,6 +85,8 @@ pub static DENO_VERSION_INFO: std::sync::LazyLock<DenoVersionInfo> =
           "+",
           env!("GIT_COMMIT_HASH_SHORT")
         )
+      } else if let Some(denext) = denext {
+        Box::leak(format!("Deno/{denext}").into_boxed_str())
       } else {
         concat!("Deno/", env!("DENO_VERSION"))
       },
@@ -118,6 +125,22 @@ impl DenoVersionInfo {
   }
 }
 
+/// A denext release build's version: `DENEXT_VERSION` at compile time (the
+/// release, e.g. `2.9.7-denext.15`; see DENEXT.md "Release archives"), used
+/// only when it extends this build's Deno version with `-` or `+`. It becomes
+/// `Deno.version.deno`, `deno --version` and the user agent, so the binary
+/// says which build it is; downloads of `denort` / `libdenort` and
+/// `deno upgrade` keep using the plain Deno version (`DENO_VERSION`).
+fn denext_version(
+  denext: Option<&'static str>,
+  deno: &str,
+) -> Option<&'static str> {
+  denext.filter(|v| {
+    v.strip_prefix(deno)
+      .is_some_and(|rest| rest.len() > 1 && rest.starts_with(['-', '+']))
+  })
+}
+
 fn release_channel_from_version_string(version: &str) -> ReleaseChannel {
   let v = deno_semver::Version::parse_standard(version).ok();
   match v.and_then(|v| v.pre.first().map(|s| s.as_str().to_string())) {
@@ -125,5 +148,35 @@ fn release_channel_from_version_string(version: &str) -> ReleaseChannel {
     Some(ref s) if s == "beta" => ReleaseChannel::Beta,
     Some(ref s) if s == "rc" => ReleaseChannel::Rc,
     _ => ReleaseChannel::Stable,
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn denext_version_extends_the_deno_version() {
+    assert_eq!(denext_version(None, "2.9.7"), None);
+    assert_eq!(
+      denext_version(Some("2.9.7-denext.15"), "2.9.7"),
+      Some("2.9.7-denext.15")
+    );
+    assert_eq!(
+      denext_version(Some("2.9.7+denext.15"), "2.9.7"),
+      Some("2.9.7+denext.15")
+    );
+    // only a suffix on this build's own version
+    assert_eq!(denext_version(Some(""), "2.9.7"), None);
+    assert_eq!(denext_version(Some("2.9.7"), "2.9.7"), None);
+    assert_eq!(denext_version(Some("2.9.7-"), "2.9.7"), None);
+    assert_eq!(denext_version(Some("2.9.71"), "2.9.7"), None);
+    assert_eq!(denext_version(Some("1.0.0-denext.1"), "2.9.7"), None);
+    // a denext version is still semver, on the stable channel
+    assert_eq!(
+      release_channel_from_version_string("2.9.7-denext.15"),
+      ReleaseChannel::Stable
+    );
+    assert!(deno_semver::Version::parse_standard("2.9.7-denext.15").is_ok());
   }
 }

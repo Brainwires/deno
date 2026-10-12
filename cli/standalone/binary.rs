@@ -49,6 +49,7 @@ use deno_lib::standalone::virtual_fs::WindowsSystemRootablePath;
 use deno_lib::util::hash::FastInsecureHasher;
 use deno_lib::util::text_encoding::is_valid_utf8;
 use deno_lib::util::v8::construct_v8_flags;
+use deno_lib::version::DENO_VERSION;
 use deno_lib::version::DENO_VERSION_INFO;
 use deno_npm::NpmSystemInfo;
 use deno_npm::resolution::SerializedNpmResolutionSnapshot;
@@ -608,8 +609,9 @@ impl<'a> DenoCompileBinaryWriter<'a> {
       ReleaseChannel::Canary => {
         format!("canary/{}/{}", DENO_VERSION_INFO.git_hash, binary_name)
       }
+      // the plain Deno version, also in a denext build (DENEXT_VERSION)
       _ => {
-        format!("release/v{}/{}", DENO_VERSION_INFO.deno, binary_name)
+        format!("release/v{}/{}", DENO_VERSION, binary_name)
       }
     };
 
@@ -683,8 +685,9 @@ impl<'a> DenoCompileBinaryWriter<'a> {
       ReleaseChannel::Canary => {
         format!("canary/{}/{}", DENO_VERSION_INFO.git_hash, binary_name)
       }
+      // the plain Deno version, also in a denext build (DENEXT_VERSION)
       _ => {
-        format!("release/v{}/{}", DENO_VERSION_INFO.deno, binary_name)
+        format!("release/v{}/{}", DENO_VERSION, binary_name)
       }
     };
 

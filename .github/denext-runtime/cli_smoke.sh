@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Smoke-test a `deno` CLI archive from assemble_cli.sh: unpack it and check
-# that the binary names its denext build, keeps a plain `Deno.version.deno`,
-# has `Deno.SQL`, and runs a Vitest suite under `deno test`
+# that the binary names its denext build (`deno --version`, `deno -V` and
+# `Deno.version.deno`), has `Deno.SQL`, and runs a Vitest suite under `deno test`
 # (smoke/cli/vitest_test.ts).
 #
 # Env: TARGET VERSION ARCHIVE WORK_DIR (a directory that does not exist yet)
@@ -14,7 +14,12 @@ here=$(cd "$(dirname "$0")" && pwd)
 work=$(unix_path "$WORK_DIR")
 test ! -e "$work" || { echo "$work already exists" >&2; exit 1; }
 mkdir -p "$work/cli" "$work/app" "$work/deno-dir"
-unpack_archive "$(unix_path "$ARCHIVE")" "$work/cli"
+archive=$(unix_path "$ARCHIVE")
+if command -v unzip >/dev/null 2>&1; then
+  unzip -q "$archive" -d "$work/cli"
+else
+  unpack_archive "$archive" "$work/cli"
+fi
 bin=$(cli_bin_name "$TARGET")
 deno="$work/cli/$bin"
 test -f "$deno" || { echo "::error::no $bin in $ARCHIVE" >&2; exit 1; }
@@ -32,11 +37,19 @@ esac
 short=$("$deno" -V | tr -d '\r')
 test "$short" = "deno $VERSION" || { echo "::error::deno -V says '$short', want 'deno $VERSION'" >&2; exit 1; }
 
-# Deno.version.deno stays the plain, semver-parseable Deno version.
+# Deno.version.deno is the denext version too (denext tells its own CLI by
+# the `-denext.` in it), and still semver.
 deno_version=$("$deno" eval 'console.log(Deno.version.deno)' | tr -d '\r')
-case "$VERSION" in
-  "$deno_version"-*) echo "Deno.version.deno: $deno_version" ;;
-  *) echo "::error::Deno.version.deno is '$deno_version', not the base of $VERSION" >&2; exit 1 ;;
+test "$deno_version" = "$VERSION" || { echo "::error::Deno.version.deno is '$deno_version', want '$VERSION'" >&2; exit 1; }
+echo "Deno.version.deno: $deno_version"
+case "$deno_version" in
+  *-denext.*) ;;
+  *) echo "::error::Deno.version.deno '$deno_version' has no -denext. suffix" >&2; exit 1 ;;
+esac
+# On a Unix target the archive must keep the executable bit.
+case "$TARGET" in
+  *-windows-msvc) ;;
+  *) test -x "$deno" || { echo "::error::$bin is not executable after unzip" >&2; exit 1; } ;;
 esac
 
 sql=$("$deno" eval 'console.log(typeof Deno.SQL)' | tr -d '\r')
