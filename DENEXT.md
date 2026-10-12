@@ -8,8 +8,8 @@ users:
 
 - **The Deno Desktop runtime**: the `libdenort` library `deno desktop` embeds an
   app into, plus [laufey](https://github.com/littledivy/laufey)'s backend hosts
-  (items 1-22 below). It is published as prebuilt archives that also work with
-  the stock `deno desktop` CLI (2.9.7):
+  (items 1-22 below, plus the `deno_core` fix in item 25). It is published as
+  prebuilt archives that also work with the stock `deno desktop` CLI (2.9.7):
 
   ```sh
   DENORT_DESKTOP_BIN=<unpacked archive>/libdenort.dylib   # .so on Linux, denort.dll on Windows
@@ -427,7 +427,7 @@ where the changes are discussed.
     patches for these (test name separator, `formatTitle` hook, unawaited async
     assertions, array equality).
 
-23. **`feat(sql)`: `Deno.SQL` / `Deno.sql`, a built-in SQL client** (`feat/sql`,
+24. **`feat(sql)`: `Deno.SQL` / `Deno.sql`, a built-in SQL client** (`feat/sql`,
     `ext/sql`): Bun's `Bun.sql` surface over Postgres and SQLite, with no npm.
     `new Deno.SQL(url | options)` returns a tagged-template function; every
     interpolated value is sent as a parameter (`$1`... / `?1`...), never spliced
@@ -586,7 +586,25 @@ where the changes are discussed.
       ways. The offsets come from the runtime's own `Date` (so `TZ` applies).
     - Not yet: MySQL, the `"bun"` module, `tsquery` decoding.
 
-The runtime-side parts (1-3, 5-22, 24) are what the prebuilt `libdenort`
+25. **`fix(core)`: a first-time `import()` no longer leaks the importer's async
+    context** (`fix/als-dynamic-import`, `libs/core/modules/map/dynamic.rs`).
+    `ModuleMap::dynamic_import_module_evaluate` (and the `import.defer` path)
+    installed the importer's continuation-preserved embedder data
+    (AsyncLocalStorage / AsyncContext) to evaluate a newly loaded module and
+    never put the previous value back. The importer's context stayed the
+    isolate's ambient one, so the next task the runtime started on its own
+    inherited it: the next `Deno.serve` handler saw the previous request's
+    `als.getStore()`, the test runner's next test saw the last test's store.
+    Only a module not loaded before took that path (plain, top-level await,
+    JSON, Wasm); cached imports resolve without it. The module's top-level code
+    still runs in the importer's context, as in Node (checked against Node
+    24.18: top level, after a top-level `await` and its timers see the store;
+    the next `http` request does not). Tests:
+    `dyn_import_restores_async_context` in `libs/core/modules/tests.rs` and
+    `tests/specs/node/async_local_storage_dynamic_import` (the next `Deno.serve`
+    request and the next `deno test` test).
+
+The runtime-side parts (1-3, 5-22, 24, 25) are what the prebuilt `libdenort`
 carries. The CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` /
 `LAUFEY_APP_ID` into a packaged app's launchers) are in the branch too, but a
 stock CLI does not run them; denext's own launcher provides that environment.
