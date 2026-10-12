@@ -232,6 +232,19 @@ impl<TInNpmPackageChecker: InNpmPackageChecker, TSys: EmitterSys>
     Ok(self.emit_cache.get_emit_code(specifier, source_hash))
   }
 
+  /// The cached emit of `specifier`, whatever source, options and program
+  /// transform it was emitted with: the caller checks it is the current
+  /// source's (see
+  /// [`crate::cache::EmitCache::get_emit_code_any_source_hash`]). `deno
+  /// coverage` uses it for modules a program transform changed, whose
+  /// transform it does not know.
+  pub fn maybe_cached_emit_any_source_hash(
+    &self,
+    specifier: &Url,
+  ) -> Option<String> {
+    self.emit_cache.get_emit_code_any_source_hash(specifier)
+  }
+
   pub async fn maybe_emit_source(
     &self,
     specifier: &Url,
