@@ -26,6 +26,11 @@ const {
   op_vitest_mocks_respond,
   op_vitest_mocks_set_generation,
   op_vitest_resolve_import,
+  op_vitest_runner_allow_import,
+  op_vitest_runner_read_dir,
+  op_vitest_runner_read_text,
+  op_vitest_runner_stat,
+  op_vitest_runner_take,
 } = core.ops;
 const {
   ArrayIsArray,
@@ -41,6 +46,7 @@ const {
   NumberIsFinite,
   NumberIsInteger,
   NumberIsNaN,
+  ObjectFreeze,
   MapPrototypeGet,
   MapPrototypeSet,
   SafeArrayIterator,
@@ -937,6 +943,37 @@ globalThis.Deno[globalThis.Deno.internal].vitestEnv = () => {
     if (value != null) env[name] = value;
   }
   return env;
+};
+// The Vitest runner's own reads (its config, `__mocks__` lookups, the modules
+// it imports itself), made without a read permission within the run's root
+// (see cli/tools/test/vitest/runner_reads.rs). Only the runner's entry module
+// (`deno-vitest:///preload.js` or `config_loader.js`) gets them, once per
+// worker; anyone else gets `undefined`. Shaped like the `node:fs` functions
+// the runner used.
+globalThis.Deno[globalThis.Deno.internal].takeVitestRunnerFs = () => {
+  const token = op_vitest_runner_take?.();
+  if (token == null) return undefined;
+  const stat = (path) => op_vitest_runner_stat(token, String(path));
+  const notFound = (path) =>
+    new DenoNs.errors.NotFound(
+      `No such file or directory (os error 2): stat '${path}'`,
+    );
+  return ObjectFreeze({
+    existsSync: (path) => stat(path) !== 0,
+    statSync(path) {
+      const kind = stat(path);
+      if (kind === 0) throw notFound(path);
+      return ObjectFreeze({
+        isFile: () => kind === 1,
+        isDirectory: () => kind === 2,
+      });
+    },
+    readdirSync: (path, options) =>
+      op_vitest_runner_read_dir(token, String(path), !!options?.recursive),
+    readFileSync: (path) => op_vitest_runner_read_text(token, String(path)),
+    /** Lets the runner import the module at `url` like a static import. */
+    allowImport: (url) => op_vitest_runner_allow_import(token, String(url)),
+  });
 };
 // Used by the Vitest compatibility layer's module mocking (see
 // cli/tools/test/vitest/mocks.rs).

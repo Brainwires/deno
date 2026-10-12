@@ -16,6 +16,8 @@
 //   runtime (see js/jest.js);
 // - a `transform` deno test cannot honour (anything but the usual
 //   TypeScript/JavaScript transformers, which Deno replaces) is a warning.
+//
+// `fs` is the runner's own (see config_loader.js), or `node:fs`.
 
 import {
   basename,
@@ -25,7 +27,7 @@ import {
   join,
   resolve,
 } from "node:path";
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import * as nodeFs from "node:fs";
 import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
 
@@ -127,14 +129,16 @@ function replaceRootDirInPattern(rootDir, pattern) {
   );
 }
 
-async function requireOrImport(path) {
+async function requireOrImport(path, fs) {
   const ext = extname(path);
-  if (ext === ".json") return JSON.parse(readFileSync(path, "utf8"));
+  if (ext === ".json") return JSON.parse(fs.readFileSync(path, "utf8"));
+  const url = pathToFileURL(path).href;
+  fs.allowImport?.(url);
   if (ext === ".cjs" || ext === ".cts") {
     return createRequire(path)(path);
   }
   try {
-    const mod = await import(pathToFileURL(path).href);
+    const mod = await import(url);
     return mod.default ?? mod;
   } catch (error) {
     // a CommonJS file deno did not detect as such
@@ -147,12 +151,12 @@ async function requireOrImport(path) {
 }
 
 /** Reads a Jest config file (or the `jest` key of a package.json). */
-export async function readJestConfig(path) {
+export async function readJestConfig(path, fs = nodeFs) {
   let config;
   if (basename(path) === "package.json") {
-    config = JSON.parse(readFileSync(path, "utf8")).jest ?? {};
+    config = JSON.parse(fs.readFileSync(path, "utf8")).jest ?? {};
   } else {
-    config = await requireOrImport(path);
+    config = await requireOrImport(path, fs);
     if (config?.__esModule && "default" in config) config = config.default;
   }
   if (typeof config === "function") config = await config();
@@ -164,7 +168,7 @@ export async function readJestConfig(path) {
 }
 
 /** Jest's `setupFromPreset`. */
-async function applyPreset(options, rootDir, warnings) {
+async function applyPreset(options, rootDir, warnings, fs) {
   const name = options.preset;
   if (typeof name !== "string") return options;
   const { preset: _, ...rest } = options;
@@ -183,13 +187,13 @@ async function applyPreset(options, rootDir, warnings) {
     let path;
     if (base.startsWith(".") || isAbsolute(base)) {
       const file = resolve(rootDir, base);
-      path = existsSync(file) && statSync(file).isFile()
+      path = fs.existsSync(file) && fs.statSync(file).isFile()
         ? file
         : require.resolve(join(file, "jest-preset"));
     } else {
       path = require.resolve(`${base}/jest-preset`);
     }
-    preset = await requireOrImport(path);
+    preset = await requireOrImport(path, fs);
   } catch (error) {
     warnings.push(
       `Jest preset "${name}" could not be loaded (${
@@ -312,14 +316,14 @@ function environmentPackageBases(rootDir, testEnvironment) {
   return bases;
 }
 
-function mapModuleNameMapper(rootDir, mapper) {
+function mapModuleNameMapper(rootDir, mapper, fs) {
   const aliases = [];
   for (const [regex, mapped] of Object.entries(mapper ?? {})) {
     const candidates = toArray(mapped).map((m) => replaceRootDir(rootDir, m));
     // Jest tries each mapped path in turn; take the first that exists when
     // it is a fixed path.
     const replacement = candidates.find((c) =>
-      !isAbsolute(c) || c.includes("$") || existsSync(c)
+      !isAbsolute(c) || c.includes("$") || fs.existsSync(c)
     ) ?? candidates[0];
     if (replacement === undefined) {
       continue;
@@ -350,9 +354,9 @@ function transformWarnings(transform) {
   ];
 }
 
-function readJsonc(path) {
+function readJsonc(path, fs) {
   try {
-    return parseJsonc(readFileSync(path, "utf8"));
+    return parseJsonc(fs.readFileSync(path, "utf8"));
   } catch {
     return undefined;
   }
@@ -372,10 +376,10 @@ function swcJsx(options) {
 }
 
 /** The JSX runtime a tsconfig asks for (following relative `extends`). */
-function tsconfigJsx(path, seen = new Set()) {
+function tsconfigJsx(path, fs, seen = new Set()) {
   if (seen.has(path)) return undefined;
   seen.add(path);
-  const tsconfig = readJsonc(path);
+  const tsconfig = readJsonc(path, fs);
   if (!tsconfig) return undefined;
   const options = tsconfig.compilerOptions ?? {};
   if (options.jsx) {
@@ -387,7 +391,7 @@ function tsconfigJsx(path, seen = new Set()) {
     if (typeof parent !== "string" || !parent.startsWith(".")) continue;
     let parentPath = resolve(dirname(path), parent);
     if (!parentPath.endsWith(".json")) parentPath += ".json";
-    const found = tsconfigJsx(parentPath, seen);
+    const found = tsconfigJsx(parentPath, fs, seen);
     if (found !== undefined) return found;
   }
   return undefined;
@@ -412,13 +416,13 @@ const BABEL_CONFIGS = [
  * presets are not evaluated): `runtime: "automatic"` (preset-react) or a
  * preset that defaults to it (next/babel, babel-preset-expo).
  */
-function babelJsx(rootDir) {
+function babelJsx(rootDir, fs) {
   const texts = [];
   for (const name of BABEL_CONFIGS) {
     const path = join(rootDir, name);
-    if (existsSync(path)) texts.push(readFileSync(path, "utf8"));
+    if (fs.existsSync(path)) texts.push(fs.readFileSync(path, "utf8"));
   }
-  const packageJson = readJsonc(join(rootDir, "package.json"));
+  const packageJson = readJsonc(join(rootDir, "package.json"), fs);
   if (packageJson?.babel) texts.push(JSON.stringify(packageJson.babel));
   for (const text of texts) {
     if (
@@ -470,9 +474,9 @@ function jestJsxInJs(rootDir, transform) {
  * `.jsx` files with (babel-jest, `@swc/jest`, ts-jest), if it uses one: Deno
  * then compiles JSX the same way instead of with its classic default.
  */
-function transformJsx(rootDir, transform) {
+function transformJsx(rootDir, transform, fs) {
   const entries = Object.entries(transform ?? {});
-  if (entries.length === 0) return babelJsx(rootDir) ?? undefined;
+  if (entries.length === 0) return babelJsx(rootDir, fs) ?? undefined;
   for (const [pattern, value] of entries) {
     let regex;
     try {
@@ -486,7 +490,8 @@ function transformJsx(rootDir, transform) {
     const [name, options] = Array.isArray(value) ? value : [value, undefined];
     let found;
     if (/^@swc\/jest$/.test(name)) {
-      found = swcJsx(options) ?? swcJsx(readJsonc(join(rootDir, ".swcrc")));
+      found = swcJsx(options) ??
+        swcJsx(readJsonc(join(rootDir, ".swcrc"), fs));
     } else if (/^ts-jest(\/|$)/.test(name)) {
       const tsconfig = options?.tsconfig;
       if (tsconfig && typeof tsconfig === "object") {
@@ -501,10 +506,11 @@ function transformJsx(rootDir, transform) {
           typeof tsconfig === "string"
             ? resolve(rootDir, replaceRootDir(rootDir, tsconfig))
             : join(rootDir, "tsconfig.json"),
+          fs,
         );
       }
     } else if (/^babel-jest$/.test(name)) {
-      found = babelJsx(rootDir);
+      found = babelJsx(rootDir, fs);
     }
     if (found !== undefined) return found ?? undefined;
   }
@@ -559,10 +565,15 @@ const UNSUPPORTED_OPTIONS = {
 };
 
 /** Normalizes one Jest project config into the shape config_loader.js uses. */
-export async function resolveJestProject(rawOptions, configDir, fallbackName) {
+export async function resolveJestProject(
+  rawOptions,
+  configDir,
+  fallbackName,
+  fs = nodeFs,
+) {
   const warnings = [];
   const rootDir = resolve(configDir, rawOptions.rootDir ?? ".");
-  const options = await applyPreset(rawOptions, rootDir, warnings);
+  const options = await applyPreset(rawOptions, rootDir, warnings, fs);
   for (const [key, unsupported] of Object.entries(UNSUPPORTED_OPTIONS)) {
     if (unsupported(options[key])) {
       warnings.push(
@@ -604,6 +615,7 @@ export async function resolveJestProject(rawOptions, configDir, fallbackName) {
   const moduleNameMapper = mapModuleNameMapper(
     rootDir,
     options.moduleNameMapper,
+    fs,
   );
   const config = {
     // a project's displayName shows with its tests when several projects run
@@ -655,7 +667,7 @@ export async function resolveJestProject(rawOptions, configDir, fallbackName) {
     alias: moduleNameMapper,
     moduleDirectories,
     packageBases,
-    jsx: transformJsx(rootDir, options.transform),
+    jsx: transformJsx(rootDir, options.transform, fs),
     jsxInJs: jestJsxInJs(rootDir, options.transform),
     jest: {
       roots,
@@ -673,17 +685,17 @@ export async function resolveJestProject(rawOptions, configDir, fallbackName) {
 }
 
 /** The Jest config in a directory named by a `projects` entry. */
-function findConfigIn(dir) {
+function findConfigIn(dir, fs) {
   for (const ext of CONFIG_EXTENSIONS) {
     const path = join(dir, `jest.config${ext}`);
-    if (existsSync(path)) return path;
+    if (fs.existsSync(path)) return path;
   }
   const packageJson = join(dir, "package.json");
-  return existsSync(packageJson) ? packageJson : undefined;
+  return fs.existsSync(packageJson) ? packageJson : undefined;
 }
 
 /** Expands a `projects` path entry (`<rootDir>/packages/*`). */
-function expandProjectPath(rootDir, entry) {
+function expandProjectPath(rootDir, entry, fs) {
   const path = resolve(rootDir, replaceRootDir(rootDir, entry));
   if (!path.includes("*")) return [path];
   const star = path.indexOf("*");
@@ -693,33 +705,33 @@ function expandProjectPath(rootDir, entry) {
       .replace(/[.+?^${}()|[\]\\]/g, "\\$&").replaceAll("*", ".*") +
       "$",
   );
-  if (!existsSync(parent)) return [];
-  return readdirSync(parent)
+  if (!fs.existsSync(parent)) return [];
+  return fs.readdirSync(parent)
     .filter((name) => pattern.test(name))
     .map((name) => join(parent, name))
-    .filter((p) => statSync(p).isDirectory())
+    .filter((p) => fs.statSync(p).isDirectory())
     .sort();
 }
 
 /** Every project of a Jest config. */
-export async function loadJestProjects(configPath) {
-  const config = await readJestConfig(configPath);
+export async function loadJestProjects(configPath, fs = nodeFs) {
+  const config = await readJestConfig(configPath, fs);
   const configDir = dirname(configPath);
   const rootDir = resolve(configDir, config.rootDir ?? ".");
   const entries = toArray(config.projects);
   if (entries.length === 0) {
-    return [await resolveJestProject(config, configDir, "")];
+    return [await resolveJestProject(config, configDir, "", fs)];
   }
   const projects = [];
   for (const entry of entries) {
     if (typeof entry === "string") {
-      for (const path of expandProjectPath(rootDir, entry)) {
-        const isFile = existsSync(path) && statSync(path).isFile();
-        const file = isFile ? path : findConfigIn(path);
-        const projectConfig = file ? await readJestConfig(file) : {};
+      for (const path of expandProjectPath(rootDir, entry, fs)) {
+        const isFile = fs.existsSync(path) && fs.statSync(path).isFile();
+        const file = isFile ? path : findConfigIn(path, fs);
+        const projectConfig = file ? await readJestConfig(file, fs) : {};
         const dir = isFile ? dirname(path) : path;
         projects.push(
-          await resolveJestProject(projectConfig, dir, basename(dir)),
+          await resolveJestProject(projectConfig, dir, basename(dir), fs),
         );
       }
       continue;
@@ -734,6 +746,7 @@ export async function loadJestProjects(configPath) {
         { ...entry, rootDir: projectRootDir },
         configDir,
         String(projects.length),
+        fs,
       ),
     );
   }

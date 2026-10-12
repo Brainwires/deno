@@ -10,7 +10,7 @@ export {
   d as defaultExclude,
 } from "./vendor/defaults.js";
 
-import { existsSync, readFileSync } from "node:fs";
+import * as nodeFs from "node:fs";
 import { join } from "node:path";
 
 export const defaultBrowserPort = 63315;
@@ -41,15 +41,17 @@ function parseDotenv(text) {
   return result;
 }
 
-export function loadEnv(mode, envDir, prefixes = "VITE_") {
+// `fs` is the runner's own (see config_loader.js) when the runner loads the
+// env of a project; a config calling `loadEnv()` reads with its permissions.
+export function loadEnv(mode, envDir, prefixes = "VITE_", fs = nodeFs) {
   prefixes = Array.isArray(prefixes) ? prefixes : [prefixes];
   const env = {};
   for (
     const file of [".env", ".env.local", `.env.${mode}`, `.env.${mode}.local`]
   ) {
     const path = join(envDir, file);
-    if (!existsSync(path)) continue;
-    Object.assign(env, parseDotenv(readFileSync(path, "utf8")));
+    if (!fs.existsSync(path)) continue;
+    Object.assign(env, parseDotenv(fs.readFileSync(path, "utf8")));
   }
   const result = {};
   for (const [key, value] of Object.entries(env)) {

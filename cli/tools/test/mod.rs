@@ -775,7 +775,7 @@ async fn configure_main_worker(
       preload_modules,
       require_modules,
       permissions_container,
-      vec![
+      [
         ops::testing::deno_test::init(worker_sender.sender),
         ops::lint::deno_lint_ext_for_test::init(),
         ops::jupyter::deno_jupyter_for_test::init(
@@ -785,7 +785,15 @@ async fn configure_main_worker(
           // dropped so any `op_jupyter_input` call will resolve to `None`.
           tokio::sync::mpsc::unbounded_channel().0,
         ),
-      ],
+      ]
+      .into_iter()
+      // the runner's own reads, for a Vitest test file
+      .chain(vitest_preload.map(|_| {
+        vitest::runner_reads::deno_vitest_runner::init(
+          vitest::runner_reads::RunnerWorker::Test,
+        )
+      }))
+      .collect(),
       Stdio {
         stdin: StdioPipe::inherit(),
         stdout: StdioPipe::file(worker_sender.stdout),

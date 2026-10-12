@@ -157,6 +157,51 @@
       "output": "projects.out",
       "exitCode": 0
     },
+    // The runner's own reads need no --allow-read within the project (see
+    // cli/tools/test/vitest/runner_reads.rs): the config, its imports, its
+    // tsconfig and .env files, setup files, `__mocks__` lookups and
+    // automocks. The test's (and the config's) own reads stay checked.
+    "runner_reads": {
+      "cwd": "runner_reads/project",
+      "args": "test --no-check",
+      "output": "runner_reads/project.out",
+      "exitCode": 0
+    },
+    "runner_reads_symlink_escape": {
+      // a symlink out of the project is not followed
+      "if": "unix",
+      "tempDir": true,
+      "steps": [
+        {
+          "args": "run -A runner_reads/make_link.ts",
+          "output": ""
+        },
+        {
+          "cwd": "runner_reads/project",
+          "args": "test --no-check src/symlink_escape.spec.ts",
+          "output": "runner_reads/symlink_escape.out",
+          "exitCode": 0
+        }
+      ]
+    },
+    "runner_reads_config_project": {
+      "cwd": "config_project",
+      "args": "test --no-check",
+      "output": "config.out",
+      "exitCode": 1
+    },
+    "runner_reads_mocking_project": {
+      "cwd": "mocking_project",
+      "args": "test --no-check",
+      "output": "mocking_project.out",
+      "exitCode": 0
+    },
+    "runner_reads_projects": {
+      "cwd": "projects",
+      "args": "test --no-check",
+      "output": "projects.out",
+      "exitCode": 0
+    },
     "projects_selected": {
       "cwd": "projects",
       "args": "test -A --no-check --vitest-project=beta",

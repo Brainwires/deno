@@ -285,7 +285,9 @@ pub async fn load_config(
       vec![],
       vec![],
       permissions,
-      vec![],
+      vec![super::runner_reads::deno_vitest_runner::init(
+        super::runner_reads::RunnerWorker::Config,
+      )],
       Default::default(),
       None,
     )

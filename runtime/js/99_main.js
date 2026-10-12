@@ -716,6 +716,13 @@ const NOT_IMPORTED_OPS = [
   "op_vitest_mocks_poll",
   "op_vitest_mocks_respond",
   "op_vitest_resolve_import",
+  // privileged only with the token `op_vitest_runner_take` hands the
+  // runner's entry module (cli/tools/test/vitest/runner_reads.rs)
+  "op_vitest_runner_take",
+  "op_vitest_runner_stat",
+  "op_vitest_runner_read_dir",
+  "op_vitest_runner_read_text",
+  "op_vitest_runner_allow_import",
 
   // TODO(bartlomieju): used in various integration tests - figure out a way
   // to not depend on them.

@@ -783,10 +783,22 @@ let started = false;
  *
  * @param {string} specifier the test module's URL
  * @param {object} config the resolved Vitest config for the file
+ * @param {object} [runnerFs] the runner's own reads (see preload.js); without
+ *   them, its reads and imports are checked like the test's
  */
-export async function startFile(specifier, config = {}) {
+export async function startFile(specifier, config = {}, runnerFs) {
   if (started) return;
   started = true;
+  // the setup files (and a Jest project's snapshot serializers) are the
+  // runner's own imports
+  for (
+    const path of [
+      ...(config.setupFiles ?? []),
+      ...(config.snapshotSerializers ?? []),
+    ]
+  ) {
+    runnerFs?.allowImport(toImportSpecifier(path));
+  }
   const filepath = toFilePath(specifier);
   config = { root: slash(Deno.cwd()), ...config };
   const environmentName = normalizeEnvironment(config.environment);
@@ -815,6 +827,7 @@ export async function startFile(specifier, config = {}) {
     config.root,
     config.mockRoots,
     config.flavor === "jest",
+    runnerFs,
   );
   applyEnvAndDefines(config, environmentName, workerState);
   globalExpect.setState({ environment: environmentName });
@@ -838,7 +851,11 @@ export async function startFile(specifier, config = {}) {
       );
       installHybridEventTarget(denoEventTarget);
       if (environmentName === "node") hideNonNodeGlobals();
-      await jestProject?.setupJestEnvironment(config, environmentName);
+      await jestProject?.setupJestEnvironment(
+        config,
+        environmentName,
+        runnerFs,
+      );
     } catch (error) {
       throw new Error(
         `Failed to set up the "${environmentName}" test environment: ${
@@ -851,7 +868,7 @@ export async function startFile(specifier, config = {}) {
 
   if (jestProject) {
     jestProject.installJestProject(config);
-    await jestProject.registerRootMocks(config.mockRoots);
+    await jestProject.registerRootMocks(config.mockRoots, runnerFs);
   } else if (config.globals) {
     for (const api of globalApis) {
       globalThis[api] = vitestIndex[api];

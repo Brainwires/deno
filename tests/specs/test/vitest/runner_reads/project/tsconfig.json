@@ -1,0 +1,6 @@
+{
+  // JSONC, like a real tsconfig
+  "compilerOptions": {
+    "paths": { "~lib/*": ["./lib/*"] }
+  }
+}

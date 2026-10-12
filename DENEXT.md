@@ -335,9 +335,35 @@ where the changes are discussed.
     missing, and saving it then fails with the read error; `loadEnv` takes only
     the `.env` files without `--allow-env`. An error of Vitest's runner after
     collection (such as a snapshot save) fails the tests that did not run, or
-    the file, instead of being dropped. Loading a `vitest.config.*` / Jest
-    config, automocking and `__mocks__` lookups still read files, so need
-    `--allow-read`.
+    the file, instead of being dropped.
+
+    **The runner's own reads** need no `--allow-read` either, the way Deno reads
+    `deno.json`, the module graph and `node_modules` without it: the config it
+    found (`vitest.config.*` / `vite.config.*` / `jest.config.*`, the
+    package.json `jest` key) and the project configs and Jest presets it names,
+    the files it reduces to options (tsconfig `paths` / `jsx`, `.env` files,
+    Babel and swc configs), `__mocks__` lookups (Jest's root `__mocks__`
+    included), and the modules it imports itself: the config, setup files and
+    Jest snapshot serializers, `__mocks__` files, automocked modules, and the
+    fixed paths a Jest `moduleNameMapper` maps to. Such a module loads like a
+    static import (its static imports are part of the module graph); what its
+    code then does (a read, a dynamic import, a CommonJS `require()` of another
+    file) is checked as usual, so a config's own reads stay checked. These reads
+    are confined to the run's root (the working directory and the config's
+    directory): a path is privileged only when, canonicalized, it lies inside
+    it, so a symlink out of it or a `..` is not, and goes through the
+    permissions like the test's reads. It is a privileged path, not a permission
+    (`cli/tools/test/vitest/runner_reads.rs`): the config worker and a Vitest
+    file's worker get the `deno_vitest_runner` ops, which read with privilege
+    only with the worker's token, handed once by
+    `Deno[Deno.internal].takeVitestRunnerFs()` to the runner's entry module
+    (`config_loader.js`, `preload.js`) before user code runs, and only the
+    config worker reads file contents. A module the runner imports is recorded
+    with the worker's module loader, whose `prepare_load` (and
+    `ensure_read_permission` for `require()`) then treats it as a static import.
+    The test's own reads, dynamic imports and `vi.importActual()` of a module
+    outside the graph stay checked; snapshot files still need `--allow-read`,
+    like `assertSnapshot`.
 
     **Module mocking** (`vi.mock` / `vi.unmock` / `vi.doMock` / `vi.doUnmock` /
     `vi.hoisted` / `vi.importActual` / `vi.importMock` / `vi.resetModules`,

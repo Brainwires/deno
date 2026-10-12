@@ -19,7 +19,7 @@ const MOCKER = Symbol.for("deno.vitest.mocker");
 const EXPORT_SETTERS = Symbol.for("deno.vitest.exports");
 const ACTUAL_PREFIX = "deno-vitest:///actual?url=";
 
-const fs = await import("node:fs");
+const nodeFs = await import("node:fs");
 const nodePath = await import("node:path");
 const nodeModule = await import("node:module");
 const { fileURLToPath, pathToFileURL } = await import("node:url");
@@ -58,8 +58,11 @@ function toFileUrl(importer) {
   return pathToFileURL(importer).href;
 }
 
-/** Vitest's `findMockRedirect`: the `__mocks__` file for a module. */
-function findMockRedirect(root, mockPath, external) {
+/**
+ * Vitest's `findMockRedirect`: the `__mocks__` file for a module. `fs` is the
+ * runner's own reads (see preload.js), or `node:fs`.
+ */
+function findMockRedirect(root, mockPath, external, fs) {
   const path = external || mockPath;
   if (
     external || nodeModule.isBuiltin(mockPath) || !fs.existsSync(mockPath)
@@ -177,11 +180,14 @@ class ModuleMocker {
 
   /** Whether factory results get Jest's CommonJS interop. */
   #cjsInterop;
+  /** The runner's own reads (see preload.js), or `node:fs`. */
+  #fs;
 
-  constructor(ops, roots, cjsInterop) {
+  constructor(ops, roots, cjsInterop, runnerFs) {
     this.#ops = ops;
     this.#roots = roots;
     this.#cjsInterop = cjsInterop;
+    this.#fs = runnerFs ?? nodeFs;
     ops.enable();
     this.#poll();
   }
@@ -224,6 +230,7 @@ class ModuleMocker {
         root,
         resolved.fsPath,
         resolved.external,
+        this.#fs,
       );
       if (redirect !== null) return redirect;
     }
@@ -285,7 +292,7 @@ class ModuleMocker {
     const mock = id === undefined ? undefined : this.#mocks.get(id);
     if (mock === undefined) {
       const redirect = this.#findRedirect(resolved);
-      if (redirect !== null) return requireFile(importer, redirect);
+      if (redirect !== null) return this.#requireRedirect(importer, redirect);
       return mockObject(requireActual(path));
     }
     return this.#computeSync(mock, () => requireActual(path));
@@ -365,7 +372,7 @@ class ModuleMocker {
         }
         break;
       case "redirect":
-        exports = requireFile(mock.importer, mock.redirect);
+        exports = this.#requireRedirect(mock.importer, mock.redirect);
         break;
       default:
         exports = mockObject(requireActual(), {}, mock.type);
@@ -395,11 +402,27 @@ class ModuleMocker {
     const id = this.#byUrl.get(resolved.url);
     if (id !== undefined) return await this.moduleFor(id);
     const redirect = this.#findRedirect(resolved);
-    if (redirect !== null) return await import(pathToFileURL(redirect).href);
-    const actual = await import(
-      ACTUAL_PREFIX + encodeURIComponent(resolved.url)
-    );
-    return mockObject(actual);
+    if (redirect !== null) return await this.#importRedirect(redirect);
+    return mockObject(await this.#importToMock(resolved.url));
+  }
+
+  /** Requires a `__mocks__` file (the runner's own import). */
+  #requireRedirect(importer, path) {
+    this.#fs.allowImport?.(pathToFileURL(path).href);
+    return requireFile(importer, path);
+  }
+
+  /** Imports a `__mocks__` file (the runner's own import). */
+  #importRedirect(path) {
+    const url = pathToFileURL(path).href;
+    this.#fs.allowImport?.(url);
+    return import(url);
+  }
+
+  /** Imports the module at `url` to mock it (the runner's own import). */
+  #importToMock(url) {
+    this.#fs.allowImport?.(url);
+    return import(ACTUAL_PREFIX + encodeURIComponent(url));
   }
 
   mockObject(object, mockExports, type) {
@@ -482,11 +505,11 @@ class ModuleMocker {
           break;
         }
         case "redirect":
-          exports = await import(pathToFileURL(mock.redirect).href);
+          exports = await this.#importRedirect(mock.redirect);
           break;
         default:
           exports = mockObject(
-            await import(ACTUAL_PREFIX + encodeURIComponent(mock.url)),
+            await this.#importToMock(mock.url),
             {},
             mock.type,
           );
@@ -692,12 +715,19 @@ function moduleSource(id, keys) {
  * Installs module mocking for the test file's worker: `vi.mock()` & co.,
  * and `vi.spyOn()` on module namespaces.
  */
-export function installModuleMocker(vi, root, mockRoots, cjsInterop = false) {
+export function installModuleMocker(
+  vi,
+  root,
+  mockRoots,
+  cjsInterop = false,
+  runnerFs = undefined,
+) {
   const ops = globalThis.Deno[globalThis.Deno.internal].vitestMocks;
   const mocker = new ModuleMocker(
     ops,
     mockRoots?.length ? mockRoots : [root],
     cjsInterop,
+    runnerFs,
   );
   globalThis[MOCKER] = mocker;
   Object.defineProperty(globalThis, "__vitest_mocker__", {
