@@ -1,0 +1,11 @@
+running 1 test from ./a/a.test.ts
+|alpha| alpha inherits the root config ... ok ([WILDCARD])
+running 1 test from ./b/b.test.ts
+|beta| beta uses its own config ... ok ([WILDCARD])
+running 1 test from ./shared/both.test.ts
+|alpha| runs in each project ... ok ([WILDCARD])
+running 1 test from ./shared/both.test.ts
+|beta| runs in each project ... ok ([WILDCARD])
+
+ok | 4 passed | 0 failed ([WILDCARD])
+

@@ -1,0 +1,1 @@
+error: No Vitest project named "nope" in [WILDCARD]vitest.config.ts (projects: "alpha", "beta")

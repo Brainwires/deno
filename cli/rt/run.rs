@@ -1211,6 +1211,7 @@ impl StandaloneModuleLoaderFactory {
       module_loader: loader.clone(),
       node_require_loader: loader,
       hook_registry: Some(hook_registry),
+      op_state_init: None,
     }
   }
 }

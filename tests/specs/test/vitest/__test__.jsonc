@@ -1,0 +1,141 @@
+{
+  // The Vitest compatibility layer: Vitest suites run unchanged under
+  // `deno test` (see cli/tools/test/vitest).
+  "tests": {
+    "api": {
+      "args": "test -A --no-check api_test.ts",
+      "output": "api.out",
+      "exitCode": 0
+    },
+    "expect": {
+      "args": "test -A --no-check expect_test.ts",
+      "output": "expect.out",
+      "exitCode": 0
+    },
+    "vi": {
+      "args": "test -A --no-check vi_test.ts",
+      "output": "vi.out",
+      "exitCode": 0
+    },
+    "failures": {
+      "args": "test -A --no-check failures_test.ts",
+      "output": "failures.out",
+      "exitCode": 1
+    },
+    "hook_error": {
+      "args": "test -A --no-check hook_error_test.ts",
+      "output": "hook_error.out",
+      "exitCode": 1
+    },
+    "mock_factory": {
+      "args": "test -A --no-check mocking/vi_mock_test.ts",
+      "output": "mocking/vi_mock.out",
+      "exitCode": 0
+    },
+    "mock_partial": {
+      "args": "test -A --no-check mocking/partial_test.ts",
+      "output": "mocking/partial.out",
+      "exitCode": 0
+    },
+    "mock_automock": {
+      "args": "test -A --no-check mocking/automock_test.ts",
+      "output": "mocking/automock.out",
+      "exitCode": 0
+    },
+    "mock_dynamic": {
+      "args": "test -A --no-check mocking/dynamic_test.ts",
+      "output": "mocking/dynamic.out",
+      "exitCode": 0
+    },
+    "mock_spy_namespace": {
+      "args": "test -A --no-check mocking/spy_namespace_test.ts",
+      "output": "mocking/spy_namespace.out",
+      "exitCode": 0
+    },
+    "mock_spy_mocked": {
+      "args": "test -A --no-check mocking/spy_mocked_test.ts",
+      "output": "mocking/spy_mocked.out",
+      "exitCode": 0
+    },
+    "mock_jest": {
+      "args": "test -A --no-check mocking/jest_mock_test.ts",
+      "output": "mocking/jest_mock.out",
+      "exitCode": 0
+    },
+    "mock_isolated_per_file": {
+      "args": "test -A --no-check mocking/isolation_a_test.ts mocking/isolation_b_test.ts",
+      "output": "mocking/isolation.out",
+      "exitCode": 0
+    },
+    "mock_nested_error": {
+      "args": "test -A --no-check mocking/nested_error_test.ts",
+      "output": "mocking/nested_error.out",
+      "exitCode": 1
+    },
+    "mock_factory_error": {
+      "args": "test -A --no-check mocking/factory_error_test.ts",
+      "output": "mocking/factory_error.out",
+      "exitCode": 1
+    },
+    "mock_config_project": {
+      "cwd": "mocking_project",
+      "args": "test -A --no-check",
+      "output": "mocking_project.out",
+      "exitCode": 0
+    },
+    "jest_globals": {
+      "args": "test -A --no-check jest_globals_test.ts",
+      "output": "jest_globals.out",
+      "exitCode": 0
+    },
+    "npm_specifier": {
+      "args": "test -A --no-check npm_specifier_test.ts",
+      "output": "npm_specifier.out",
+      "exitCode": 0
+    },
+    "plain_deno_test_untouched": {
+      "args": "test -A --no-check plain_deno_test.ts",
+      "output": "plain_deno.out",
+      "exitCode": 0
+    },
+    "filter": {
+      "args": "test -A --no-check --filter=square api_test.ts",
+      "output": "filter.out",
+      "exitCode": 0
+    },
+    "no_vitest_compat": {
+      "args": "test -A --no-check --no-vitest-compat api_test.ts",
+      "output": "no_compat.out",
+      "exitCode": 1
+    },
+    "type_check_with_fallback_types": {
+      "args": "test -A typed_test.ts",
+      "output": "typed.out",
+      "exitCode": 0
+    },
+    "config": {
+      "cwd": "config_project",
+      "args": "test -A --no-check",
+      "output": "config.out",
+      "exitCode": 1
+    },
+    "projects": {
+      "cwd": "projects",
+      "args": "test -A --no-check",
+      "output": "projects.out",
+      "exitCode": 0
+    },
+    "projects_selected": {
+      "cwd": "projects",
+      "args": "test -A --no-check --vitest-project=beta",
+      "output": "projects_beta.out",
+      "exitCode": 0
+    },
+    "projects_unknown": {
+      "cwd": "projects",
+      "args": "test -A --no-check --vitest-project=nope",
+      "output": "projects_nope.out",
+      "exitCode": 1
+    }
+  }
+}

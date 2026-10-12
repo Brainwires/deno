@@ -381,6 +381,15 @@ impl CliMainWorker {
     self.worker.execute_side_module().await
   }
 
+  /// See [`LibMainWorker::execute_side_module_url`].
+  #[inline]
+  pub async fn execute_side_module_url(
+    &mut self,
+    specifier: &ModuleSpecifier,
+  ) -> Result<(), CoreError> {
+    self.worker.execute_side_module_url(specifier).await
+  }
+
   #[inline]
   pub async fn execute_preload_modules(&mut self) -> Result<(), CoreError> {
     self.worker.execute_preload_modules().await

@@ -1,0 +1,7 @@
+running 1 test from ./mocking/isolation_a_test.ts
+mocked in this file ... ok ([WILDCARD])
+running 1 test from ./mocking/isolation_b_test.ts
+not mocked in another file ... ok ([WILDCARD])
+
+ok | 2 passed | 0 failed ([WILDCARD])
+

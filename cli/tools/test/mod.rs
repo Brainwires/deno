@@ -75,6 +75,7 @@ use crate::display;
 use crate::factory::CliFactory;
 use crate::file_fetcher::CliFileFetcher;
 use crate::graph_container::CheckSpecifiersOptions;
+use crate::graph_container::ModuleGraphContainer;
 use crate::graph_util::has_graph_root_local_dependent_changed;
 use crate::ops;
 use crate::sys::CliSys;
@@ -94,6 +95,7 @@ mod channel;
 pub mod fmt;
 pub mod reporters;
 mod sanitizers;
+pub mod vitest;
 
 pub use channel::TestEventReceiver;
 pub use channel::TestEventSender;
@@ -658,6 +660,8 @@ struct TestSpecifiersOptions {
   /// `(index, count)` with a 1-based index, from `--shard`. Selects a subset
   /// of test files so a run can be split across machines.
   shard: Option<(usize, usize)>,
+  /// The Vitest compatibility layer, unless disabled.
+  vitest: Option<Arc<vitest::VitestCompat>>,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -758,6 +762,7 @@ async fn configure_main_worker(
   specifier: &Url,
   preload_modules: Vec<Url>,
   require_modules: Vec<Url>,
+  vitest_preload: Option<&Url>,
   permissions_container: PermissionsContainer,
   worker_sender: TestEventWorkerSender,
   options: &TestSpecifierOptions,
@@ -864,6 +869,22 @@ async fn configure_main_worker(
     worker.cancel_terminate_execution();
     return Ok((coverage_collector, worker.into_main_worker()));
   }
+  if let Some(vitest_preload) = vitest_preload {
+    // Unlike a preload module, the Vitest preload must not run the event
+    // loop to completion: Vitest's runner keeps working (waiting for Deno to
+    // invoke each test) and the test module may keep a port or timer alive.
+    check_res(worker.execute_side_module_url(vitest_preload).await)?;
+    if op_state.borrow().has::<ops::testing::IsolateExitInfo>() {
+      worker.cancel_terminate_execution();
+      return Ok((coverage_collector, worker.into_main_worker()));
+    }
+  }
+  if vitest::module_imported(&mut worker) {
+    // Vitest's runner (run by the preload) imported the test module itself
+    // and reported any failure; evaluating it again as the side module would
+    // repeat an error, or wait forever on a graph with top-level await.
+    return Ok((coverage_collector, worker.into_main_worker()));
+  }
   check_res(worker.execute_side_module().await)?;
   if op_state.borrow().has::<ops::testing::IsolateExitInfo>() {
     worker.cancel_terminate_execution();
@@ -883,6 +904,7 @@ pub async fn test_specifier(
   specifier: ModuleSpecifier,
   preload_modules: Vec<ModuleSpecifier>,
   require_modules: Vec<ModuleSpecifier>,
+  vitest_preload: Option<ModuleSpecifier>,
   worker_sender: TestEventWorkerSender,
   fail_fast_tracker: FailFastTracker,
   options: TestSpecifierOptions,
@@ -896,6 +918,7 @@ pub async fn test_specifier(
     &specifier,
     preload_modules,
     require_modules,
+    vitest_preload.as_ref(),
     permissions_container,
     worker_sender,
     &options,
@@ -1751,41 +1774,65 @@ async fn test_specifiers(
   let reporter = get_test_reporter(&options);
   let fail_fast_tracker = FailFastTracker::new(options.fail_fast);
 
-  let join_handles = specifiers.into_iter().map(move |specifier| {
-    let worker_factory = worker_factory.clone();
-    let specifier_dir = cli_options.workspace().resolve_member_dir(&specifier);
-    let preload_modules = preload_modules.clone();
-    let require_modules = require_modules.clone();
-    let worker_sender = test_event_sender_factory.worker();
-    let fail_fast_tracker = fail_fast_tracker.clone();
-    let specifier_options = options.specifier.clone();
-    let cli_options = cli_options.clone();
-    let permission_desc_parser = permission_desc_parser.clone();
-    spawn_blocking(move || {
-      // Various test files should not share the same permissions in terms of
-      // `PermissionsContainer` - otherwise granting/revoking permissions in one
-      // file would have impact on other files, which is undesirable.
-      let permissions =
-        cli_options.permissions_options_for_dir(&specifier_dir)?;
-      let permissions_container = PermissionsContainer::new(
-        permission_desc_parser.clone(),
-        Permissions::from_options(
-          permission_desc_parser.as_ref(),
-          &permissions,
-        )?,
-      );
-      create_and_run_current_thread(test_specifier(
-        worker_factory,
-        permissions_container,
-        specifier,
-        preload_modules,
-        require_modules,
-        worker_sender,
-        fail_fast_tracker,
-        specifier_options,
-      ))
+  // A Vitest test file is collected and run by Vitest's runner, which the
+  // file's preload sets up; a file several projects include runs once per
+  // project.
+  let runs = specifiers
+    .into_iter()
+    .flat_map(|specifier| {
+      let preloads = options
+        .vitest
+        .as_ref()
+        .map(|v| v.preloads_for(&specifier))
+        .unwrap_or_default();
+      if preloads.is_empty() {
+        vec![(specifier, None)]
+      } else {
+        preloads
+          .into_iter()
+          .map(|preload| (specifier.clone(), Some(preload)))
+          .collect()
+      }
     })
-  });
+    .collect::<Vec<_>>();
+  let join_handles =
+    runs.into_iter().map(move |(specifier, vitest_preload)| {
+      let worker_factory = worker_factory.clone();
+      let specifier_dir =
+        cli_options.workspace().resolve_member_dir(&specifier);
+      let preload_modules = preload_modules.clone();
+      let require_modules = require_modules.clone();
+      let worker_sender = test_event_sender_factory.worker();
+      let fail_fast_tracker = fail_fast_tracker.clone();
+      let specifier_options = options.specifier.clone();
+      let cli_options = cli_options.clone();
+      let permission_desc_parser = permission_desc_parser.clone();
+      spawn_blocking(move || {
+        // Various test files should not share the same permissions in terms of
+        // `PermissionsContainer` - otherwise granting/revoking permissions in one
+        // file would have impact on other files, which is undesirable.
+        let permissions =
+          cli_options.permissions_options_for_dir(&specifier_dir)?;
+        let permissions_container = PermissionsContainer::new(
+          permission_desc_parser.clone(),
+          Permissions::from_options(
+            permission_desc_parser.as_ref(),
+            &permissions,
+          )?,
+        );
+        create_and_run_current_thread(test_specifier(
+          worker_factory,
+          permissions_container,
+          specifier,
+          preload_modules,
+          require_modules,
+          vitest_preload,
+          worker_sender,
+          fail_fast_tracker,
+          specifier_options,
+        ))
+      })
+    });
 
   let join_stream = stream::iter(join_handles)
     .buffer_unordered(concurrent_jobs.get())
@@ -2361,15 +2408,50 @@ pub async fn run_tests(
   let file_fetcher = factory.file_fetcher()?;
   let log_level = cli_options.log_level();
 
+  let worker_factory =
+    Arc::new(factory.create_cli_main_worker_factory().await?);
+  let mut vitest = if workspace_test_options.vitest_compat {
+    Some(
+      vitest::VitestCompat::setup(
+        factory.resolver().await?,
+        factory.emitter()?,
+        &factory.deno_dir()?.root.join("vitest_compat"),
+        &worker_factory,
+        factory.root_permissions_container()?.clone(),
+        cli_options.initial_cwd(),
+        &test_flags,
+        workspace_test_options.update_snapshots,
+      )
+      .await?,
+    )
+  } else {
+    None
+  };
+
   let members_with_test_options =
     cli_options.resolve_test_options_for_members(&test_flags)?;
-  let specifiers_with_mode = fetch_specifiers_with_test_mode(
-    cli_options,
-    file_fetcher,
-    members_with_test_options.into_iter().map(|(_, v)| v.files),
-    &workspace_test_options.doc,
-  )
-  .await?;
+  // With a Vitest config and no files on the command line, the config's
+  // `include` / `exclude` pick the test files, like `vitest run` does.
+  let specifiers_with_mode = match &vitest {
+    Some(vitest)
+      if vitest.has_config() && test_flags.files.include.is_empty() =>
+    {
+      vitest
+        .discover_specifiers()?
+        .into_iter()
+        .map(|specifier| (specifier, TestMode::Executable))
+        .collect()
+    }
+    _ => {
+      fetch_specifiers_with_test_mode(
+        cli_options,
+        file_fetcher,
+        members_with_test_options.into_iter().map(|(_, v)| v.files),
+        &workspace_test_options.doc,
+      )
+      .await?
+    }
+  };
 
   let is_changed_filter =
     test_flags.changed.is_some() || !test_flags.related.is_empty();
@@ -2428,8 +2510,13 @@ pub async fn run_tests(
     return Ok(());
   }
 
-  let worker_factory =
-    Arc::new(factory.create_cli_main_worker_factory().await?);
+  if let Some(vitest) = &mut vitest {
+    vitest.detect_vitest_files(
+      &main_graph_container.graph(),
+      &specifiers_for_typecheck_and_test,
+    );
+  }
+
   let preload_modules = cli_options.preload_modules()?;
   let require_modules = cli_options.require_modules()?;
 
@@ -2458,6 +2545,7 @@ pub async fn run_tests(
       junit_path: workspace_test_options.junit_path,
       hide_stacktraces: workspace_test_options.hide_stacktraces,
       shard: workspace_test_options.shard,
+      vitest: vitest.map(Arc::new),
       specifier: TestSpecifierOptions {
         filter: TestFilter::from_flag(&workspace_test_options.filter),
         shuffle: workspace_test_options.shuffle,
@@ -2558,6 +2646,26 @@ pub async fn run_tests_with_watch(
         let graph_kind = graph_kind(cli_options.type_check_mode());
         let log_level = cli_options.log_level();
         let cli_options = cli_options.clone();
+        // The Vitest layer must hook resolution before any graph is built.
+        let worker_factory =
+          Arc::new(factory.create_cli_main_worker_factory().await?);
+        let vitest = if workspace_test_options.vitest_compat {
+          Some(
+            vitest::VitestCompat::setup(
+              factory.resolver().await?,
+              factory.emitter()?,
+              &factory.deno_dir()?.root.join("vitest_compat"),
+              &worker_factory,
+              factory.root_permissions_container()?.clone(),
+              cli_options.initial_cwd(),
+              &test_flags,
+              workspace_test_options.update_snapshots,
+            )
+            .await?,
+          )
+        } else {
+          None
+        };
         let module_graph_creator = factory.module_graph_creator().await?;
         let file_fetcher = factory.file_fetcher()?;
         let members_with_test_options =
@@ -2691,8 +2799,13 @@ pub async fn run_tests_with_watch(
           return Ok(());
         }
 
-        let worker_factory =
-          Arc::new(factory.create_cli_main_worker_factory().await?);
+        let vitest = vitest.map(|mut vitest| {
+          vitest.detect_vitest_files(
+            &main_graph_container.graph(),
+            &specifiers_for_typecheck_and_test,
+          );
+          Arc::new(vitest)
+        });
         let preload_modules = cli_options.preload_modules()?;
         let require_modules = cli_options.require_modules()?;
 
@@ -2720,6 +2833,7 @@ pub async fn run_tests_with_watch(
             junit_path: workspace_test_options.junit_path,
             hide_stacktraces: workspace_test_options.hide_stacktraces,
             shard: workspace_test_options.shard,
+            vitest,
             specifier: TestSpecifierOptions {
               filter: TestFilter::from_flag(&workspace_test_options.filter),
               shuffle: workspace_test_options.shuffle,

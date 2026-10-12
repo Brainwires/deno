@@ -1763,6 +1763,14 @@ fn test_parse(result: &ParseResult, flags: &mut Flags) -> Result<(), CliError> {
       None => vec![],
     },
     update_snapshots: result.get_bool("update-snapshots"),
+    vitest: VitestFlags {
+      disabled: result.get_bool("no-vitest-compat"),
+      config: result.get_one("vitest-config").map(|s| s.to_string()),
+      projects: result
+        .get_many("vitest-project")
+        .map(|v| v.iter().map(|s| s.to_string()).collect())
+        .unwrap_or_default(),
+    },
   });
   Ok(())
 }

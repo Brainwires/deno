@@ -289,6 +289,139 @@ where the changes are discussed.
     key and waits for it, with a stderr warning and the reason in
     `cookieEncryptionWait`. An explicit `--password-store=basic` on such a
     profile is honoured with a warning that those cookies will be deleted.
+23. **`feat(test)`: Vitest compatibility for `deno test`**
+    (`feat/vitest-compat`, CLI only): Vitest suites run unchanged. `vitest`,
+    `vitest/config`, `vite-plus/test`, `@jest/globals` (bare or `npm:`) resolve
+    to built-in `deno-vitest:` modules — Vitest's own runtime (runner, `expect`,
+    `vi`, snapshots, test environments, chai), vendored by
+    `tools/vendor_vitest.ts` — through a new `SpecifierOverrides` hook in
+    `deno_resolver`. Each Vitest file runs under Vitest's runner from a per-file
+    preload, and every test is registered with `Deno.test()` so Deno's
+    reporters, `--filter` and summaries see one test per Vitest test. A
+    `vitest.config.*` (or a `vite.config.*` of a project that depends on Vitest)
+    is evaluated once: `include`/`exclude`, `projects` (`--vitest-project`; a
+    file several projects include runs once in each, as with Vitest and Jest,
+    its tests named `|project| ...` when several projects run), `setupFiles`,
+    `globals`, `environment` (the project's own jsdom / happy-dom, also per file
+    via `@vitest-environment`), aliases and tsconfig paths (in the dependencies
+    `server.deps.inline` selects too, which Vitest inlines), `define`/`.env`
+    into `import.meta.env` (a `deno_core` prototype for user modules'
+    `import.meta`), mock reset flags and timeouts; Vite's
+    CSS/asset/`?raw`/`?url` imports and its extension and directory resolution
+    apply in such projects, and `esbuild.loader: "jsx"` (or `oxc.lang`) with its
+    `include` makes `.js` files JSX: `deno_resolver`'s file fetcher gained a
+    `LocalContentTypeOverride` hook, through which such user modules get the JSX
+    content type (hence media type). In a Vitest or Jest project the user
+    modules do not see the `Deno` global, as under Node.js: one that refers to
+    `Deno` without declaring it gets a top-level `var Deno;` from the transform
+    (`typeof Deno` is `"undefined"`). The global itself stays, as Deno's Node.js
+    APIs and the test runtime need it; `globalThis.Deno` (and dependencies)
+    still reach it. `--no-vitest-compat` / `test.vitestCompat: false` turn it
+    off; `--vitest-config` picks a config.
+
+    **Module mocking** (`vi.mock` / `vi.unmock` / `vi.doMock` / `vi.doUnmock` /
+    `vi.hoisted` / `vi.importActual` / `vi.importMock` / `vi.resetModules`,
+    `vi.spyOn(namespace, "export")`, and `jest.mock` & co. from `@jest/globals`)
+    works the way Vitest's does, in three parts:
+
+    - _Transform_ (`cli/tools/test/vitest/transform.rs`): `deno_resolver`'s
+      `Emitter` gained an `EmitProgramTransform` hook, run on the swc program
+      after the TypeScript/JSX passes and before emitting (its key is part of
+      the emit cache hash; JavaScript user modules are emitted too when it
+      applies). In a Vitest run it applies to user modules (`file:` outside
+      `node_modules`). A module calling the mocking API gets Vitest's
+      `hoistMocks`: `vi.mock` / `vi.unmock` / `vi.hoisted` move above the
+      imports, every import except the `vitest` one becomes
+      `const __vi_import_N__ = await import(...)` after them, and references to
+      imported bindings (matched by syntax context, so shadowing is respected)
+      become `__vi_import_N__.name`, so a factory using an import hits the TDZ
+      like in Vitest; nested or exported mocking calls are Vitest's errors.
+      Every user module also gets _mutable exports_: its exported `const`s
+      become `let`, and it registers a setter for its exports (re-exports
+      forward to their source) keyed by its own namespace, which it imports
+      through `deno-vitest:///self` (the loader resolves that to the importing
+      module).
+    - _Registry_ (`cli/tools/test/vitest/mocks.rs`): every worker's
+      `CliModuleLoader` owns a `VitestMocks`, also put into the worker's
+      `OpState` (through a new `CreateModuleLoaderResult::op_state_init`). A
+      mock is registered by the URL its path resolves to from the caller, so
+      `./db`, `@/db` and `../db.ts` are one mock. Once mocking is enabled, the
+      loader resolves an import of a mocked URL from user code (never from
+      `node_modules`, which Vitest leaves external) to
+      `deno-vitest:///mock?id=<n>&name=<imported names>`; the names come from
+      parsing the importer's original source, so an importer can import names
+      the factory does not return (they are `undefined`, Vitest throws on
+      access). Loading that module asks the worker's JavaScript (an unref'd
+      polling op, like the `registerHooks` load bridge) for its source, and the
+      event loop runs during module loads meanwhile.
+      `deno-vitest:///actual?url=` imports the real module. `vi.resetModules()`
+      bumps a generation: user modules resolved afterwards get a
+      `__vitest_gen=<n>` query and are served from the module without it, so
+      they are fresh instances (mocks are kept). Each test file runs in its own
+      worker, hence its own registry.
+    - _Runtime_ (`js/mocker.js`): `vi.mock()` & co. register mocks through the
+      ops; the source of a mock module exports each key of the factory's result
+      (run once, lazily, with `importOriginal`), of the automocked module
+      (`mockObject` from `@vitest/mocker`, vendored), or of the `__mocks__` file
+      (Vitest's `findMockRedirect`), as `let` bindings with a setter.
+      `vi.spyOn()` on a module namespace spies on a proxy whose property
+      definitions go through the module's setter, so the spy (and its restore)
+      reaches every importer.
+
+    **Jest projects** run on the same layer. Without a Vitest config, a
+    `jest.config.{ts,mts,cts,js,mjs,cjs,json}`, a package.json `"jest"` key or a
+    package.json depending on Jest (Jest's defaults) is the test config
+    (`--vitest-config` takes a `jest*` file or a package.json too).
+    `js/jest_config.js` evaluates it in the config worker (`preset`s merged,
+    `projects` as objects or directories, `displayName` naming them for
+    `--vitest-project`) and maps it onto the Vitest projects: `roots`,
+    `testMatch` (micromatch's bare `(a|b)` groups included, matched against
+    absolute paths) or `testRegex`, `testPathIgnorePatterns` and
+    `moduleFileExtensions` select the files (`Project::matches_jest`);
+    `moduleNameMapper` entries become aliases that map the whole specifier
+    (`<rootDir>`, `$1`), applied to every module like Jest does: the imports of
+    dependencies too (a project module they map to is added to the module graph
+    when loaded) and, once the environment is set up, the `require()` calls of
+    CommonJS dependencies (`Module._resolveFilename`); `moduleDirectories` /
+    `modulePaths` resolve bare specifiers that name no installed package;
+    `setupFiles` then `setupFilesAfterEnv` (paths or packages) are setup files;
+    `testEnvironment` maps by name onto node / jsdom / happy-dom (with
+    `testEnvironmentOptions`; jsdom and happy-dom resolve through the Jest
+    environment package under a strict pnpm layout); `testTimeout`, `clearMocks`
+    / `resetMocks` / `restoreMocks`, `injectGlobals`, `globals`,
+    `snapshotSerializers`, `snapshotFormat` and `fakeTimers` (`timers`)
+    configure the runtime. A `transform` other than babel-jest / ts-jest /
+    `@swc/jest` / esbuild & co. (whose work Deno does) is a warning; `.js` files
+    are parsed as JSX when the transform for them is babel-jest (Jest's default)
+    or another JSX-capable one, else only when they do not parse as plain
+    JavaScript; the JSX runtime those transformers use (`.swcrc`, the ts-jest
+    tsconfig, the Babel config's text) becomes the user modules' through a new
+    `EmitProgramTransform::transpile_options` override. `js/jest.js` provides
+    the `jest` object on top of `vi` (fake timers with Jest's options and
+    defaults: modern timers fake everything `@sinonjs/fake-timers` can on
+    Node.js, `process.nextTick` and `queueMicrotask` included, which Vitest
+    leaves alone, minus `doNotFake`, with the project's `fakeTimers` as the
+    defaults of every `useFakeTimers()`; legacy timers fake the timer functions
+    and `nextTick`; `replaceProperty`, `retryTimes`, `requireActual` /
+    `requireMock` synchronously, `unstable_mockModule`, `setMock`,
+    `isolateModules(Async)`, ...) and Jest's semantics: globals by default
+    (`fit`, `xit`, `xdescribe`, `test.failing` too), a declared parameter of a
+    test or hook is `done`, a hook's return value is not a teardown, jest-each
+    titles (`%p`, `$variable`, `$#`), snapshot keys and `currentTestName` joined
+    with spaces, the Jest snapshot header kept, non-strict equality ignoring
+    `undefined` array items, unawaited `.resolves` not failing a test, a mock
+    factory's result treated as `module.exports` (CommonJS interop), root
+    `__mocks__` files mocking packages without `jest.mock()`, no `setImmediate`
+    and no `Deno` on `window` in DOM environments. In a Jest project a user
+    module that uses `require` gets Jest's `require()` (served by the
+    transform): it resolves like an import (aliases, mocks, fresh modules after
+    `jest.resetModules()`, through `op_vitest_resolve_import`) and loads ES
+    modules synchronously (`op_import_sync`). For every Vitest or Jest run the
+    transform also turns a TypeScript module's type-only exports into
+    `undefined` value exports, so `export { SomeType } from "./types"` (valid
+    without `isolatedModules`) links. The vendored runtime has four more marked
+    patches for these (test name separator, `formatTitle` hook, unawaited async
+    assertions, array equality).
 
 The runtime-side parts (1-3, 5-22) are what the prebuilt `libdenort` carries.
 The CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` /

@@ -3776,6 +3776,7 @@ fn test_with_flags() {
         changed: None,
         related: vec![],
         update_snapshots: false,
+        vitest: Default::default(),
       }),
       no_npm: true,
       no_remote: true,
@@ -3886,6 +3887,7 @@ fn test_with_fail_fast() {
         changed: None,
         related: vec![],
         update_snapshots: false,
+        vitest: Default::default(),
       }),
       type_check_mode: TypeCheckMode::Local,
       permissions: PermissionFlags {
@@ -3938,6 +3940,7 @@ fn test_with_enable_testing_features() {
         changed: None,
         related: vec![],
         update_snapshots: false,
+        vitest: Default::default(),
       }),
       permissions: PermissionFlags {
         no_prompt: true,
@@ -4139,6 +4142,7 @@ fn test_shuffle() {
         changed: None,
         related: vec![],
         update_snapshots: false,
+        vitest: Default::default(),
       }),
       permissions: PermissionFlags {
         no_prompt: true,
@@ -4184,6 +4188,7 @@ fn test_retry_and_repeats() {
         changed: None,
         related: vec![],
         update_snapshots: false,
+        vitest: Default::default(),
       }),
       permissions: PermissionFlags {
         no_prompt: true,
@@ -4248,6 +4253,7 @@ fn test_watch() {
         changed: None,
         related: vec![],
         update_snapshots: false,
+        vitest: Default::default(),
       }),
       permissions: PermissionFlags {
         no_prompt: true,
@@ -4293,6 +4299,7 @@ fn test_watch_explicit_cwd() {
         changed: None,
         related: vec![],
         update_snapshots: false,
+        vitest: Default::default(),
       }),
       permissions: PermissionFlags {
         no_prompt: true,
@@ -4339,6 +4346,7 @@ fn test_watch_with_no_clear_screen() {
         changed: None,
         related: vec![],
         update_snapshots: false,
+        vitest: Default::default(),
       }),
       type_check_mode: TypeCheckMode::Local,
       permissions: PermissionFlags {
@@ -4546,6 +4554,7 @@ fn test_hide_stacktraces() {
       subcommand: DenoSubcommand::Test(TestFlags {
         hide_stacktraces: true,
         update_snapshots: false,
+        vitest: Default::default(),
         ..TestFlags::default()
       }),
       type_check_mode: TypeCheckMode::Local,

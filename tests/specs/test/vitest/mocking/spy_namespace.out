@@ -1,0 +1,7 @@
+running 3 tests from ./mocking/spy_namespace_test.ts
+spies on an export of a module namespace ... ok ([WILDCARD])
+restores the export ... ok ([WILDCARD])
+spies through re-exports ... ok ([WILDCARD])
+
+ok | 3 passed | 0 failed ([WILDCARD])
+

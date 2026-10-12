@@ -1,0 +1,5 @@
+running 1 test from ./mocking/spy_mocked_test.ts
+spies on an export of a mocked module ... ok ([WILDCARD])
+
+ok | 1 passed | 0 failed ([WILDCARD])
+
