@@ -30,7 +30,7 @@ import {
   type Packaged,
   path,
   rm,
-  seenPids,
+  seenResults,
   sh,
   short,
   tail,
@@ -279,7 +279,7 @@ async function step(
 ): Promise<string | null> {
   await clearResults(AREA);
   await writeParams(AREA, params);
-  const seen = await seenPids(AREA);
+  const seen = await seenResults(AREA);
   const l = await launch(env, p.exe);
   const r = await waitResult(AREA, { seen, ms: 120_000 });
   rep.merge(label, r, l.logFile);
