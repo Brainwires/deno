@@ -1,0 +1,14 @@
+Warning Jest test environment "jest-environment-unknown" is not supported by deno test; using "node".
+running 1 test from ./a/jsx.test.js
+|alpha| parses JSX in .js files ... ok ([WILDCARD])
+running 1 test from ./a/one.test.js
+|alpha| alpha runs ... ok ([WILDCARD])
+running 1 test from ./b/two.test.js
+|beta| beta runs ... ok ([WILDCARD])
+running 1 test from ./shared/both.test.js
+|alpha| runs in each project ... ok ([WILDCARD])
+running 1 test from ./shared/both.test.js
+|beta| runs in each project ... ok ([WILDCARD])
+
+ok | 5 passed | 0 failed ([WILDCARD])
+

@@ -1,0 +1,11 @@
+running 7 tests from ./expect_test.ts
+matchers > equality and truthiness ... ok ([WILDCARD])
+matchers > asymmetric matchers ... ok ([WILDCARD])
+matchers > errors and promises ... ok ([WILDCARD])
+matchers > extend ... ok ([WILDCARD])
+matchers > assertion counting ... ok ([WILDCARD])
+matchers > poll ... ok ([WILDCARD])
+matchers > chai style and assert ... ok ([WILDCARD])
+
+ok | 7 passed | 0 failed ([WILDCARD])
+

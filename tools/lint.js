@@ -85,6 +85,7 @@ async function lintJS() {
       ":!:cli/bench/testdata/react-dom.js",
       ":!:cli/compilers/wasm_wrap.js",
       ":!:cli/tools/coverage/script.js",
+      ":!:cli/tools/test/vitest/js/vendor/**",
       ":!:cli/tools/doc/prism.css",
       ":!:cli/tools/doc/prism.js",
       ":!:cli/tsc/dts/**",

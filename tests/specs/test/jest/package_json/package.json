@@ -1,0 +1,9 @@
+{
+  "name": "jest-package-json",
+  "private": true,
+  "type": "module",
+  "jest": {
+    "testEnvironment": "node",
+    "clearMocks": true
+  }
+}

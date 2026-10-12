@@ -1,0 +1,8 @@
+running 4 tests from ./mocking/dynamic_test.ts
+vi.doMock applies to later imports ... ok ([WILDCARD])
+vi.resetModules gives fresh module instances ... ok ([WILDCARD])
+vi.doUnmock restores the real module ... ok ([WILDCARD])
+vi.importMock automocks a module ... ok ([WILDCARD])
+
+ok | 4 passed | 0 failed ([WILDCARD])
+

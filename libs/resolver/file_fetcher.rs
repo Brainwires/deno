@@ -345,6 +345,9 @@ impl<
       // aliases do not become graph redirects to paths outside the allowlist.
       file.url = specifier.clone();
     }
+    if let FileOrRedirect::File(file) = &mut result {
+      apply_local_content_type_override(file);
+    }
     Ok(result)
   }
 
@@ -442,6 +445,42 @@ pub trait GraphLoaderReporter: Send + Sync {
 #[allow(clippy::disallowed_types, reason = "definition")]
 pub type GraphLoaderReporterRc =
   deno_maybe_sync::MaybeArc<dyn GraphLoaderReporter>;
+
+/// Decides the content type (hence the media type) of some local files
+/// before their extension does. `deno test`'s Vitest compatibility layer
+/// uses it to parse the `.js` user modules of a Jest project as JSX, like
+/// babel-jest does.
+pub trait LocalContentTypeOverride: std::fmt::Debug + Send + Sync {
+  /// The content type of the local file `specifier` with `source`, or
+  /// `None` to keep the one its extension gives.
+  fn content_type(&self, specifier: &Url, source: &[u8]) -> Option<String>;
+}
+
+#[allow(clippy::disallowed_types, reason = "process-wide hook")]
+static LOCAL_CONTENT_TYPE_OVERRIDE: std::sync::RwLock<
+  Option<std::sync::Arc<dyn LocalContentTypeOverride>>,
+> = std::sync::RwLock::new(None);
+
+/// Installs (or, with `None`, removes) the [`LocalContentTypeOverride`].
+#[allow(clippy::disallowed_types, reason = "process-wide hook")]
+pub fn set_local_content_type_override(
+  hook: Option<std::sync::Arc<dyn LocalContentTypeOverride>>,
+) {
+  *LOCAL_CONTENT_TYPE_OVERRIDE.write().unwrap() = hook;
+}
+
+fn apply_local_content_type_override(file: &mut File) {
+  if file.url.scheme() != "file" || file.maybe_headers.is_some() {
+    return;
+  }
+  let hook = LOCAL_CONTENT_TYPE_OVERRIDE.read().unwrap().clone();
+  if let Some(content_type) =
+    hook.and_then(|hook| hook.content_type(&file.url, &file.source))
+  {
+    file.maybe_headers =
+      Some(HashMap::from([("content-type".to_string(), content_type)]));
+  }
+}
 
 pub struct DenoGraphLoaderOptions {
   pub file_header_overrides: HashMap<Url, HashMap<String, String>>,

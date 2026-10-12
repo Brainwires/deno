@@ -1196,6 +1196,11 @@
         "sanitizeResources": {
           "type": "boolean",
           "description": "Enable the resources sanitizer for all tests. Ensures that all resources opened in a test are closed before the test ends. Can be overridden per-test or per-module."
+        },
+        "vitestCompat": {
+          "type": "boolean",
+          "default": true,
+          "description": "Run Vitest suites unchanged: provide the built-in `vitest` module and read vitest.config.* / vite.config.*. Set to `false` to disable (same as `--no-vitest-compat`)."
         }
       }
     },

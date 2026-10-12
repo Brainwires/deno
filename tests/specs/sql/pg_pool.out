@@ -1,0 +1,11 @@
+two waves: true connections: 2
+pool exhausted: ERR_POSTGRES_CONNECTION_TIMEOUT true
+after release: [ { ok: 1 } ]
+open: 2
+after idle timeout: 0
+lifetime: true true
+close waited: 1
+close while connecting: 1
+closed now: ERR_POSTGRES_CONNECTION_CLOSED true
+after close: ERR_POSTGRES_CONNECTION_CLOSED
+reconnected: true

@@ -2735,6 +2735,7 @@ impl WorkspaceDirectory {
         permissions: None,
         sanitize_ops: None,
         sanitize_resources: None,
+        vitest_compat: None,
       },
     };
     let root_config = match &self.deno_json.root {
@@ -2753,6 +2754,7 @@ impl WorkspaceDirectory {
       sanitize_resources: member_config
         .sanitize_resources
         .or(root_config.sanitize_resources),
+      vitest_compat: member_config.vitest_compat.or(root_config.vitest_compat),
     })
   }
 
@@ -4440,6 +4442,7 @@ pub mod test {
         permissions: None,
         sanitize_ops: None,
         sanitize_resources: None,
+        vitest_compat: None,
       }
     );
 
@@ -4465,6 +4468,7 @@ pub mod test {
         permissions: None,
         sanitize_ops: None,
         sanitize_resources: None,
+        vitest_compat: None,
       }
     );
   }
@@ -4589,6 +4593,7 @@ pub mod test {
           permissions: None,
           sanitize_ops: None,
           sanitize_resources: None,
+          vitest_compat: None,
         }
       );
       assert_eq!(

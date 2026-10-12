@@ -1,6 +1,7 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 
 import { core, primordials } from "ext:core/mod.js";
+import { op_import_sync } from "ext:core/ops";
 import { escapeName, withPermissions } from "ext:cli/40_test_common.js";
 import { assertSnapshot, snapshotRunState } from "ext:cli/40_test_snapshot.js";
 
@@ -16,6 +17,15 @@ const {
   op_test_event_step_wait,
   op_test_get_origin,
   op_test_isolate_exit,
+  op_test_set_import_meta_proto,
+  op_vitest_mock_keys,
+  op_vitest_mock_resolve,
+  op_vitest_mock_set,
+  op_vitest_mocks_enable,
+  op_vitest_mocks_poll,
+  op_vitest_mocks_respond,
+  op_vitest_mocks_set_generation,
+  op_vitest_resolve_import,
 } = core.ops;
 const {
   ArrayIsArray,
@@ -115,6 +125,14 @@ const testStates = new Map();
  * location inside the library itself.
  */
 const TEST_LOCATION_SYMBOL = SymbolFor("Deno.test.location");
+
+/**
+ * A test function that throws a value carrying this symbol (set to `true`)
+ * is reported as ignored instead of failed. This lets test-helper libraries
+ * skip a test after it started, e.g. Vitest's `ctx.skip()` under the Vitest
+ * compatibility layer of `deno test`.
+ */
+const TEST_SKIP_SYMBOL = SymbolFor("Deno.test.skip");
 
 /**
  * Parse a location string of the form `"fileName:lineNumber:columnNumber"`.
@@ -242,6 +260,13 @@ function wrapOuter(fn, desc) {
       }
       return result;
     } catch (error) {
+      if (
+        error !== null && typeof error === "object" &&
+        error[TEST_SKIP_SYMBOL] === true
+      ) {
+        snapshotRunState.sawIgnored = true;
+        return "ignored";
+      }
       snapshotRunState.sawFailure = true;
       return { failed: { jsError: core.destructureError(error) } };
     } finally {
@@ -882,3 +907,26 @@ function wrapTest(desc) {
 globalThis.Deno.test = test;
 globalThis.Deno[globalThis.Deno.internal].installTestIsolateExitHandler =
   installTestIsolateExitHandler;
+// Used by the Vitest compatibility layer to provide `import.meta.env`.
+globalThis.Deno[globalThis.Deno.internal].testSetImportMetaProto =
+  op_test_set_import_meta_proto;
+// Used by the Vitest compatibility layer's module mocking (see
+// cli/tools/test/vitest/mocks.rs).
+globalThis.Deno[globalThis.Deno.internal].vitestMocks = {
+  enable: op_vitest_mocks_enable,
+  resolve: op_vitest_mock_resolve,
+  set: op_vitest_mock_set,
+  keys: op_vitest_mock_keys,
+  setGeneration: op_vitest_mocks_set_generation,
+  respond: op_vitest_mocks_respond,
+  /** Resolves like an import (mocks and module generation applied). */
+  resolveImport: op_vitest_resolve_import,
+  /** Synchronously imports (loads and evaluates) an ES module. */
+  importSync: (specifier) => op_import_sync(specifier),
+  /** The next requested mock module; does not keep the event loop alive. */
+  poll() {
+    const promise = op_vitest_mocks_poll();
+    core.unrefOpPromise(promise);
+    return promise;
+  },
+};

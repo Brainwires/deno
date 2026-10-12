@@ -32,6 +32,7 @@ export async function checkCopyright() {
     ":!:cli/tools/bench/mitata.rs",
     ":!:cli/tools/doc/prism.css",
     ":!:cli/tools/doc/prism.js",
+    ":!:cli/tools/test/vitest/js/vendor/**",
     ":!:cli/tools/init/templates/**",
     ":!:cli/tsc/*typescript.js",
     ":!:cli/tsc/compiler.d.ts",

@@ -1,0 +1,10 @@
+{
+  "name": "vitest-config-project",
+  "private": true,
+  "type": "module",
+  "devDependencies": {
+    "inlined-dep": "*",
+    "jsdom": "*",
+    "vitest": "*"
+  }
+}

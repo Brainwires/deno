@@ -1,0 +1,11 @@
+// Jest Snapshot v1, https://goo.gl/fbAQLP
+
+exports[`config names snapshots like Jest 1`] = `Money<5>`;
+
+exports[`config names snapshots like Jest 2`] = `
+{
+  "b": [
+    1,
+  ],
+}
+`;

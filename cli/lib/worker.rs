@@ -60,11 +60,17 @@ use crate::args::has_trace_permissions_enabled;
 use crate::sys::DenoLibSys;
 use crate::util::checksum;
 
+/// Puts state into a new worker's `OpState`.
+pub type OpStateInitFn = Box<dyn FnOnce(&mut deno_core::OpState)>;
+
 pub struct CreateModuleLoaderResult {
   pub module_loader: Rc<dyn ModuleLoader>,
   pub node_require_loader: Rc<dyn NodeRequireLoader>,
   pub hook_registry:
     Option<deno_runtime::deno_node::ops::module_hooks::LoaderHookRegistry>,
+  /// Puts state the module loader shares with the worker's ops into the
+  /// worker's `OpState`.
+  pub op_state_init: Option<OpStateInitFn>,
 }
 
 pub trait ModuleLoaderFactory: Send + Sync {
@@ -368,6 +374,7 @@ impl<TSys: DenoLibSys> LibWorkerFactorySharedState<TSys> {
         module_loader,
         node_require_loader,
         hook_registry,
+        op_state_init,
       } = shared.module_loader_factory.create_for_worker(
         args.parent_permissions.clone(),
         args.permissions.clone(),
@@ -556,6 +563,9 @@ impl<TSys: DenoLibSys> LibWorkerFactorySharedState<TSys> {
       if let Some(registry) = hook_registry {
         worker.js_runtime.op_state().borrow_mut().put(registry);
       }
+      if let Some(init) = op_state_init {
+        init(&mut worker.js_runtime.op_state().borrow_mut());
+      }
 
       // When resource limits are set, install a near-heap-limit callback
       // that terminates the worker's isolate gracefully instead of
@@ -667,6 +677,7 @@ impl<TSys: DenoLibSys> LibMainWorkerFactory<TSys> {
       module_loader,
       node_require_loader,
       hook_registry,
+      op_state_init,
     } = shared
       .module_loader_factory
       .create_for_main(permissions.clone());
@@ -789,6 +800,9 @@ impl<TSys: DenoLibSys> LibMainWorkerFactory<TSys> {
     // Wire module hook registry into OpState so JS ops share it with the loader
     if let Some(registry) = hook_registry {
       worker.js_runtime.op_state().borrow_mut().put(registry);
+    }
+    if let Some(init) = op_state_init {
+      init(&mut worker.js_runtime.op_state().borrow_mut());
     }
 
     // Store the main inspector session sender for worker debugging
@@ -979,6 +993,16 @@ impl LibMainWorker {
     }
 
     Ok(())
+  }
+
+  /// Loads and evaluates `specifier` as a side module, without then running
+  /// the event loop to completion (unlike a preload module).
+  pub async fn execute_side_module_url(
+    &mut self,
+    specifier: &Url,
+  ) -> Result<(), CoreError> {
+    let id = self.worker.preload_side_module(specifier).await?;
+    self.worker.evaluate_module(id).await
   }
 
   pub async fn execute_preload_modules(&mut self) -> Result<(), CoreError> {

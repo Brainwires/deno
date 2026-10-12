@@ -137,6 +137,9 @@ pub struct ContextState {
     RefCell<std::collections::HashMap<usize, (bool, bool)>>,
   pub(crate) external_ops_tracker: ExternalOpsTracker,
   pub(crate) ext_import_meta_proto: RefCell<Option<v8::Global<v8::Object>>>,
+  /// Prototype given to the `import.meta` object of every module that is not
+  /// an `ext:` module, when set (see [`set_user_import_meta_proto`]).
+  pub(crate) user_import_meta_proto: RefCell<Option<v8::Global<v8::Object>>>,
   /// Lazily-cached "next"/"done"/"value" iterator keys used by the WebIDL
   /// sequence converter. Cached per-context (not in a `thread_local`) because
   /// `v8::String` handles are isolate-bound. See
@@ -227,6 +230,7 @@ impl ContextState {
       unrefed_ops,
       external_ops_tracker,
       ext_import_meta_proto: Default::default(),
+      user_import_meta_proto: Default::default(),
       webidl_sequence_keys: Default::default(),
       event_loop_phases: Default::default(),
       uv_loop_inner: Cell::new(None),
@@ -697,4 +701,19 @@ impl JsRealm {
       None,
     )
   }
+}
+
+/// Sets the prototype of the `import.meta` object of every module that is
+/// initialized from now on in the current context, except `ext:` modules
+/// (which have their own prototype). Properties on `proto` then read as
+/// `import.meta.<name>` in user code unless the module defines its own.
+///
+/// `deno test` uses this to provide Vite's `import.meta.env` to Vitest suites.
+pub fn set_user_import_meta_proto(
+  scope: &mut v8::PinScope,
+  proto: v8::Local<v8::Object>,
+) {
+  let state = JsRealm::state_from_scope(scope);
+  *state.user_import_meta_proto.borrow_mut() =
+    Some(v8::Global::new(scope, proto));
 }

@@ -486,6 +486,8 @@ impl CliModuleLoaderFactory {
   ) -> CreateModuleLoaderResult {
     let hook_registry =
       deno_runtime::deno_node::ops::module_hooks::LoaderHookRegistry::default();
+    let vitest_mocks =
+      Rc::new(crate::tools::test::vitest::mocks::VitestMocks::default());
     let module_loader =
       Rc::new(CliModuleLoader(Rc::new(CliModuleLoaderInner {
         lib,
@@ -497,7 +499,36 @@ impl CliModuleLoaderFactory {
         loaded_files: Default::default(),
         hook_registry: hook_registry.clone(),
         maybe_main_module_blob,
+        vitest_mocks: vitest_mocks.clone(),
       })));
+    {
+      // weak references, like the resolve hook's below
+      let resolve_inner = Rc::downgrade(&module_loader.0);
+      let source_inner = Rc::downgrade(&module_loader.0);
+      vitest_mocks.set_loader(
+        Rc::new(move |specifier: &str, referrer: &str| {
+          let Some(inner) = resolve_inner.upgrade() else {
+            return Err(JsErrorBox::generic("module loader was dropped"));
+          };
+          inner.inner_resolve(
+            specifier,
+            referrer,
+            deno_core::ResolutionKind::Import,
+            false,
+          )
+        }),
+        Rc::new(move |specifier: &ModuleSpecifier| {
+          let inner = source_inner.upgrade()?;
+          let graph = inner.graph_container.graph();
+          let module = inner
+            .shared
+            .module_loader
+            .load_prepared_module_for_source_map_sync(&graph, specifier)
+            .ok()??;
+          Some(String::from_utf8_lossy(module.source.as_bytes()).into())
+        }),
+      );
+    }
     {
       // Capture a weak reference: the module loader stores `hook_registry`,
       // and the registry stores this `default_resolve` callback, so capturing
@@ -545,6 +576,7 @@ impl CliModuleLoaderFactory {
       module_loader,
       node_require_loader,
       hook_registry: Some(hook_registry),
+      op_state_init: Some(Box::new(move |state| state.put(vitest_mocks))),
     }
   }
 }
@@ -608,6 +640,8 @@ struct CliModuleLoaderInner<TGraphContainer: ModuleGraphContainer> {
   /// Its content and media type are injected into the graph during
   /// `prepare_load`.
   maybe_main_module_blob: Option<(ModuleSpecifier, Arc<Blob>)>,
+  /// `deno test`'s Vitest module mocks for this worker.
+  vitest_mocks: Rc<crate::tools::test::vitest::mocks::VitestMocks>,
 }
 
 // Recursive CJS analysis must not prompt for or acquire new read access. This
@@ -1302,7 +1336,12 @@ impl<TGraphContainer: ModuleGraphContainer> ModuleLoader
     referrer: &str,
     kind: deno_core::ResolutionKind,
   ) -> deno_core::ModuleResolveResponse {
-    self.0.inner_resolve(specifier, referrer, kind, false)
+    self
+      .0
+      .vitest_mocks
+      .resolve(specifier, referrer, |specifier, referrer| {
+        self.0.inner_resolve(specifier, referrer, kind, false)
+      })
   }
 
   fn resolve_with_scope(
@@ -1350,7 +1389,12 @@ impl<TGraphContainer: ModuleGraphContainer> ModuleLoader
     )? {
       ModuleSpecifier::parse(&url).map_err(JsErrorBox::from_err)
     } else {
-      self.0.inner_resolve(specifier, referrer, kind, false)
+      self
+        .0
+        .vitest_mocks
+        .resolve(specifier, referrer, |specifier, referrer| {
+          self.0.inner_resolve(specifier, referrer, kind, false)
+        })
     };
     // Stash the full import attributes against the resolved URL so the load
     // hook (which V8 only hands the `type` attribute) can recover them.
@@ -1365,8 +1409,9 @@ impl<TGraphContainer: ModuleGraphContainer> ModuleLoader
 
   fn pump_event_loop_during_load(&self) -> bool {
     // Load hooks respond through the async bridge, so the event loop must be
-    // pumped during the recursive load or the load deadlocks.
-    self.0.hook_registry.load_active.get()
+    // pumped during the recursive load or the load deadlocks. The same goes
+    // for Vitest mock modules, whose source the test's JavaScript provides.
+    self.0.hook_registry.load_active.get() || self.0.vitest_mocks.is_enabled()
   }
 
   fn import_meta_resolve(
@@ -1405,6 +1450,63 @@ impl<TGraphContainer: ModuleGraphContainer> ModuleLoader
 
     if let Some(eszip_loader) = &inner.shared.maybe_eszip_loader {
       return eszip_loader.load(specifier);
+    }
+
+    if specifier.scheme() == crate::tools::test::vitest::SCHEME {
+      use crate::tools::test::vitest::mocks::MockSource;
+      let module_source = |source: String, specifier: &ModuleSpecifier| {
+        deno_core::ModuleSource::new(
+          deno_core::ModuleType::JavaScript,
+          deno_core::ModuleSourceCode::String(source.into()),
+          specifier,
+          None,
+        )
+      };
+      match inner.vitest_mocks.load_mock(specifier) {
+        Some(MockSource::Ready(source)) => {
+          return deno_core::ModuleLoadResponse::Sync(Ok(module_source(
+            source, specifier,
+          )));
+        }
+        Some(MockSource::Pending(source)) => {
+          let specifier = specifier.clone();
+          return deno_core::ModuleLoadResponse::Async(
+            async move { Ok(module_source(source.await?, &specifier)) }
+              .boxed_local(),
+          );
+        }
+        None => {}
+      }
+      return deno_core::ModuleLoadResponse::Sync(
+        crate::tools::test::vitest::load_module(specifier),
+      );
+    }
+
+    // A fresh instance of a module (after Vitest's `vi.resetModules()`) has
+    // the code of the module without the generation query.
+    if let Some(base) =
+      crate::tools::test::vitest::mocks::generation_base(specifier)
+    {
+      let specifier = specifier.clone();
+      let maybe_referrer = maybe_referrer.map(|r| r.specifier.clone());
+      return deno_core::ModuleLoadResponse::Async(
+        async move {
+          let source = inner
+            .load_inner(
+              &base,
+              maybe_referrer.as_ref(),
+              &options.requested_module_type,
+            )
+            .await?;
+          Ok(deno_core::ModuleSource::new(
+            source.module_type,
+            source.code,
+            &specifier,
+            None,
+          ))
+        }
+        .boxed_local(),
+      );
     }
 
     self.0.loaded_files.borrow_mut().insert(specifier.clone());
@@ -1538,6 +1640,19 @@ impl<TGraphContainer: ModuleGraphContainer> ModuleLoader
           inner
             .prepare_hooked_specifier(&specifier, options.is_dynamic_import)
             .await;
+        } else if crate::tools::test::vitest::dependency_aliases_active()
+          && maybe_referrer.as_ref().is_some_and(|r| {
+            inner.shared.in_npm_pkg_checker.in_npm_package(&r.specifier)
+          })
+          && !inner.shared.in_npm_pkg_checker.in_npm_package(&specifier)
+          && inner.graph_container.graph().get(&specifier).is_none()
+        {
+          // A Jest `moduleNameMapper` entry (or a Vite alias of an inlined
+          // dependency) mapped a dependency's import to a module of the
+          // project, which the graph has not seen.
+          inner
+            .prepare_hooked_specifier(&specifier, options.is_dynamic_import)
+            .await;
         }
         inner
           .load_inner(
@@ -1634,12 +1749,22 @@ impl<TGraphContainer: ModuleGraphContainer> ModuleLoader
       return Box::pin(deno_core::futures::future::ready(Ok(())));
     }
 
+    // `deno test`'s built-in Vitest modules are not part of the graph.
+    if specifier.scheme() == crate::tools::test::vitest::SCHEME {
+      self.0.shared.has_js_execution_started_flag.raise();
+      return Box::pin(deno_core::futures::future::ready(Ok(())));
+    }
+
     if self.0.shared.maybe_eszip_loader.is_some() {
       self.0.shared.has_js_execution_started_flag.raise();
       return Box::pin(deno_core::futures::future::ready(Ok(())));
     }
 
-    let specifier = specifier.clone();
+    // A fresh module instance after Vitest's `vi.resetModules()` is loaded
+    // from the module without the generation query.
+    let specifier =
+      crate::tools::test::vitest::mocks::generation_base(specifier)
+        .unwrap_or_else(|| specifier.clone());
     let inner = self.0.clone();
     let is_synchronous = options.is_synchronous;
 
@@ -1837,6 +1962,9 @@ impl<TGraphContainer: ModuleGraphContainer> ModuleLoader
 
   fn get_source_map(&self, file_name: &str) -> Option<Cow<'_, [u8]>> {
     let specifier = resolve_url(file_name).ok()?;
+    let specifier =
+      crate::tools::test::vitest::mocks::generation_base(&specifier)
+        .unwrap_or(specifier);
     match specifier.scheme() {
       // we should only be looking for emits for schemes that denote external
       // modules, which the disk_cache supports
@@ -1898,6 +2026,9 @@ impl<TGraphContainer: ModuleGraphContainer> ModuleLoader
     line_number: usize,
   ) -> Option<String> {
     let specifier = resolve_url(file_name).ok()?;
+    let specifier =
+      crate::tools::test::vitest::mocks::generation_base(&specifier)
+        .unwrap_or(specifier);
     let graph = self.0.graph_container.graph();
 
     let code = match graph.get(&specifier) {

@@ -1,0 +1,9 @@
+before start: ERR_SQL_QUERY_CANCELLED true
+running: ERR_SQL_QUERY_CANCELLED 57014 true true
+connection still usable: 1
+waiting: ERR_SQL_QUERY_CANCELLED true
+pool after: 2
+pipelined: [ "ahead", "ERR_SQL_QUERY_CANCELLED", "behind" ]
+transaction: ERR_SQL_QUERY_CANCELLED
+finished: 3 3
+statement_timeout: 57014

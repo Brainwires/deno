@@ -28,6 +28,14 @@ use crate::tools::test::TestLocation;
 use crate::tools::test::TestSnapshotSummary;
 use crate::tools::test::TestStepDescription;
 use crate::tools::test::TestStepResult;
+use crate::tools::test::vitest::mocks::op_vitest_mock_keys;
+use crate::tools::test::vitest::mocks::op_vitest_mock_resolve;
+use crate::tools::test::vitest::mocks::op_vitest_mock_set;
+use crate::tools::test::vitest::mocks::op_vitest_mocks_enable;
+use crate::tools::test::vitest::mocks::op_vitest_mocks_poll;
+use crate::tools::test::vitest::mocks::op_vitest_mocks_respond;
+use crate::tools::test::vitest::mocks::op_vitest_mocks_set_generation;
+use crate::tools::test::vitest::mocks::op_vitest_resolve_import;
 
 deno_core::extension!(deno_test,
   ops = [
@@ -47,6 +55,15 @@ deno_core::extension!(deno_test,
     op_test_snapshot_read,
     op_test_snapshot_write,
     op_test_event_snapshot_summary,
+    op_test_set_import_meta_proto,
+    op_vitest_mocks_enable,
+    op_vitest_mock_resolve,
+    op_vitest_mock_set,
+    op_vitest_mock_keys,
+    op_vitest_mocks_set_generation,
+    op_vitest_mocks_poll,
+    op_vitest_mocks_respond,
+    op_vitest_resolve_import,
   ],
   options = {
     sender: TestEventSender,
@@ -498,4 +515,15 @@ fn op_test_isolate_exit(state: &mut OpState, #[smi] exit_code: i32) {
   // boundary throws an uncatchable termination exception that propagates
   // up through user code into the Rust test runner.
   isolate_handle.terminate_execution();
+}
+
+/// Gives the `import.meta` of user modules initialized from now on the
+/// prototype `proto`. The Vitest compatibility layer uses it to provide
+/// `import.meta.env` (see cli/tools/test/vitest).
+#[op2(fast)]
+fn op_test_set_import_meta_proto(
+  scope: &mut v8::PinScope,
+  proto: v8::Local<v8::Object>,
+) {
+  deno_core::set_user_import_meta_proto(scope, proto);
 }

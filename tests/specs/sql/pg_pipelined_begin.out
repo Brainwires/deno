@@ -1,0 +1,16 @@
+array: [ 1, 1, 1 ] 2
+server failure: 22012 [ "a", "b" ]
+client failure (NUL): ERR_POSTGRES_INVALID_PARAMETER [ "a", "b" ]
+client failure (parameters): ERR_POSTGRES_INVALID_PARAMETER [ "a", "b" ]
+client failure (builder): sql.unsafe() with parameters cannot be used inside another query [ "a", "b" ]
+order: first
+rls: anon
+modes: [ { i: "repeatable read", r: "on" } ] [ { i: "serializable", r: "off", d: "off" } ]
+read only: 25006 [ "a", "b" ]
+bad options: 42601 callback called: false
+begin failure: 25P02 statement saw: 25P02
+begin failure (returned): 25P02
+reserved after: 1
+savepoints: [ 2, [ "22012", "ERR_POSTGRES_INVALID_PARAMETER", "22012" ] ] [ "a", "b", "outer", "inner kept", "again kept" ]
+sync throw: sync throw [ "a", "b", "outer", "inner kept", "again kept" ]
+after: no warnings

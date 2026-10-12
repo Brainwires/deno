@@ -83,6 +83,7 @@ pub fn create_runtime_snapshot(
     deno_process::deno_process::lazy_init(),
     deno_node_crypto::deno_node_crypto::lazy_init(),
     deno_node_sqlite::deno_node_sqlite::lazy_init(),
+    deno_sql::deno_sql::lazy_init(),
     deno_node::deno_node::lazy_init::<
       DenoInNpmPackageChecker,
       NpmResolver<sys_traits::impls::RealSys>,

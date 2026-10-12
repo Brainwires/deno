@@ -673,6 +673,18 @@ pub struct TestFlags {
   /// Run only test modules that depend on the given source files (`--related`).
   pub related: Vec<String>,
   pub update_snapshots: bool,
+  pub vitest: VitestFlags,
+}
+
+/// Flags of the Vitest compatibility layer of `deno test`.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct VitestFlags {
+  /// `--no-vitest-compat`: don't provide `vitest` or read Vitest configs.
+  pub disabled: bool,
+  /// `--vitest-config <path>`: the Vitest config to use.
+  pub config: Option<String>,
+  /// `--vitest-project=<name>` (repeatable): the projects to run.
+  pub projects: Vec<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Default)]

@@ -1,29 +1,33 @@
-# Brainwires/deno: denext's Deno Desktop runtime fork
+# Brainwires/deno: denext's Deno
 
-This is a fork of [denoland/deno](https://github.com/denoland/deno) that exists
-for one reason: to ship a patched **Deno Desktop runtime** (the `libdenort`
-library `deno desktop` embeds an app into, plus
-[laufey](https://github.com/littledivy/laufey)'s backend hosts) for
-[denext](https://github.com/Brainwires/denext) 3.1 without waiting for the
-patches to land upstream.
+This is a fork of [denoland/deno](https://github.com/denoland/deno) that we
+maintain as our own Deno (decided 2026-10-11): it follows Deno releases on our
+own schedule and is not waiting to be retired in favor of stock Deno. It carries
+two kinds of changes, for [denext](https://github.com/Brainwires/denext) and its
+users:
 
-It is not a general-purpose Deno distribution. The `deno` CLI is **not**
-rebuilt: denext runs the stock `deno desktop` CLI (2.9.7) and points it at the
-prebuilt runtime from this fork's releases:
+- **The Deno Desktop runtime**: the `libdenort` library `deno desktop` embeds an
+  app into, plus [laufey](https://github.com/littledivy/laufey)'s backend hosts
+  (items 1-22 below, plus the `deno_core` fix in item 25). It is published as
+  prebuilt archives that also work with the stock `deno desktop` CLI (2.9.7):
 
-```sh
-DENORT_DESKTOP_BIN=<unpacked archive>/libdenort.dylib   # .so on Linux, denort.dll on Windows
-LAUFEY_DEV_DIR=<unpacked archive>/laufey
-deno desktop --backend webview|cef ...
-```
+  ```sh
+  DENORT_DESKTOP_BIN=<unpacked archive>/libdenort.dylib   # .so on Linux, denort.dll on Windows
+  LAUFEY_DEV_DIR=<unpacked archive>/laufey
+  deno desktop --backend webview|cef ...
+  ```
 
-## Exit criterion
+- **Features of the `deno` CLI and runtime itself**, such as Vitest / Jest
+  compatibility for `deno test` (item 23) and the built-in SQL client
+  (`Deno.SQL` / `Deno.sql`, item 24). These need this fork's own `deno` binary,
+  built from a release line (see [Reproducing a build](#reproducing-a-build));
+  the stock CLI does not have them.
 
-This fork goes away when **stock Deno ships these features**: once a Deno
-release carries the in-process memory transport, the configured app origin, and
-the per-app identifier handed to every laufey backend (and laufey releases the
-matching backend changes), denext uses the stock runtime and this fork is
-archived.
+## Upstream
+
+Changes that would help everyone can still be offered to denoland/deno, but
+nothing here depends on that: the fork keeps every change whether or not
+upstream takes it, and is rebased onto a newer Deno when we choose to move.
 
 ## Branches and tags
 
@@ -289,8 +293,298 @@ where the changes are discussed.
     key and waits for it, with a stderr warning and the reason in
     `cookieEncryptionWait`. An explicit `--password-store=basic` on such a
     profile is honoured with a warning that those cookies will be deleted.
+23. **`feat(test)`: Vitest compatibility for `deno test`**
+    (`feat/vitest-compat`, CLI only): Vitest suites run unchanged. `vitest`,
+    `vitest/config`, `vite-plus/test`, `@jest/globals` (bare or `npm:`) resolve
+    to built-in `deno-vitest:` modules — Vitest's own runtime (runner, `expect`,
+    `vi`, snapshots, test environments, chai), vendored by
+    `tools/vendor_vitest.ts` — through a new `SpecifierOverrides` hook in
+    `deno_resolver`. Each Vitest file runs under Vitest's runner from a per-file
+    preload, and every test is registered with `Deno.test()` so Deno's
+    reporters, `--filter` and summaries see one test per Vitest test. A
+    `vitest.config.*` (or a `vite.config.*` of a project that depends on Vitest)
+    is evaluated once: `include`/`exclude`, `projects` (`--vitest-project`; a
+    file several projects include runs once in each, as with Vitest and Jest,
+    its tests named `|project| ...` when several projects run), `setupFiles`,
+    `globals`, `environment` (the project's own jsdom / happy-dom, also per file
+    via `@vitest-environment`), aliases and tsconfig paths (in the dependencies
+    `server.deps.inline` selects too, which Vitest inlines), `define`/`.env`
+    into `import.meta.env` (a `deno_core` prototype for user modules'
+    `import.meta`), mock reset flags and timeouts; Vite's
+    CSS/asset/`?raw`/`?url` imports and its extension and directory resolution
+    apply in such projects, and `esbuild.loader: "jsx"` (or `oxc.lang`) with its
+    `include` makes `.js` files JSX: `deno_resolver`'s file fetcher gained a
+    `LocalContentTypeOverride` hook, through which such user modules get the JSX
+    content type (hence media type). In a Vitest or Jest project the user
+    modules do not see the `Deno` global, as under Node.js: one that refers to
+    `Deno` without declaring it gets a top-level `var Deno;` from the transform
+    (`typeof Deno` is `"undefined"`). The global itself stays, as Deno's Node.js
+    APIs and the test runtime need it; `globalThis.Deno` (and dependencies)
+    still reach it. `--no-vitest-compat` / `test.vitestCompat: false` turn it
+    off; `--vitest-config` picks a config.
 
-<!-- 23 and 24 are on feat/vitest-compat and feat/sql. -->
+    **Module mocking** (`vi.mock` / `vi.unmock` / `vi.doMock` / `vi.doUnmock` /
+    `vi.hoisted` / `vi.importActual` / `vi.importMock` / `vi.resetModules`,
+    `vi.spyOn(namespace, "export")`, and `jest.mock` & co. from `@jest/globals`)
+    works the way Vitest's does, in three parts:
+
+    - _Transform_ (`cli/tools/test/vitest/transform.rs`): `deno_resolver`'s
+      `Emitter` gained an `EmitProgramTransform` hook, run on the swc program
+      after the TypeScript/JSX passes and before emitting (its key is part of
+      the emit cache hash; JavaScript user modules are emitted too when it
+      applies). In a Vitest run it applies to user modules (`file:` outside
+      `node_modules`). A module calling the mocking API gets Vitest's
+      `hoistMocks`: `vi.mock` / `vi.unmock` / `vi.hoisted` move above the
+      imports, every import except the `vitest` one becomes
+      `const __vi_import_N__ = await import(...)` after them, and references to
+      imported bindings (matched by syntax context, so shadowing is respected)
+      become `__vi_import_N__.name`, so a factory using an import hits the TDZ
+      like in Vitest; nested or exported mocking calls are Vitest's errors.
+      Every user module also gets _mutable exports_: its exported `const`s
+      become `let`, and it registers a setter for its exports (re-exports
+      forward to their source) keyed by its own namespace, which it imports
+      through `deno-vitest:///self` (the loader resolves that to the importing
+      module).
+    - _Registry_ (`cli/tools/test/vitest/mocks.rs`): every worker's
+      `CliModuleLoader` owns a `VitestMocks`, also put into the worker's
+      `OpState` (through a new `CreateModuleLoaderResult::op_state_init`). A
+      mock is registered by the URL its path resolves to from the caller, so
+      `./db`, `@/db` and `../db.ts` are one mock. Once mocking is enabled, the
+      loader resolves an import of a mocked URL from user code (never from
+      `node_modules`, which Vitest leaves external) to
+      `deno-vitest:///mock?id=<n>&name=<imported names>`; the names come from
+      parsing the importer's original source, so an importer can import names
+      the factory does not return (they are `undefined`, Vitest throws on
+      access). Loading that module asks the worker's JavaScript (an unref'd
+      polling op, like the `registerHooks` load bridge) for its source, and the
+      event loop runs during module loads meanwhile.
+      `deno-vitest:///actual?url=` imports the real module. `vi.resetModules()`
+      bumps a generation: user modules resolved afterwards get a
+      `__vitest_gen=<n>` query and are served from the module without it, so
+      they are fresh instances (mocks are kept). Each test file runs in its own
+      worker, hence its own registry.
+    - _Runtime_ (`js/mocker.js`): `vi.mock()` & co. register mocks through the
+      ops; the source of a mock module exports each key of the factory's result
+      (run once, lazily, with `importOriginal`), of the automocked module
+      (`mockObject` from `@vitest/mocker`, vendored), or of the `__mocks__` file
+      (Vitest's `findMockRedirect`), as `let` bindings with a setter.
+      `vi.spyOn()` on a module namespace spies on a proxy whose property
+      definitions go through the module's setter, so the spy (and its restore)
+      reaches every importer.
+
+    **Jest projects** run on the same layer. Without a Vitest config, a
+    `jest.config.{ts,mts,cts,js,mjs,cjs,json}`, a package.json `"jest"` key or a
+    package.json depending on Jest (Jest's defaults) is the test config
+    (`--vitest-config` takes a `jest*` file or a package.json too).
+    `js/jest_config.js` evaluates it in the config worker (`preset`s merged,
+    `projects` as objects or directories, `displayName` naming them for
+    `--vitest-project`) and maps it onto the Vitest projects: `roots`,
+    `testMatch` (micromatch's bare `(a|b)` groups included, matched against
+    absolute paths) or `testRegex`, `testPathIgnorePatterns` and
+    `moduleFileExtensions` select the files (`Project::matches_jest`);
+    `moduleNameMapper` entries become aliases that map the whole specifier
+    (`<rootDir>`, `$1`), applied to every module like Jest does: the imports of
+    dependencies too (a project module they map to is added to the module graph
+    when loaded) and, once the environment is set up, the `require()` calls of
+    CommonJS dependencies (`Module._resolveFilename`); `moduleDirectories` /
+    `modulePaths` resolve bare specifiers that name no installed package;
+    `setupFiles` then `setupFilesAfterEnv` (paths or packages) are setup files;
+    `testEnvironment` maps by name onto node / jsdom / happy-dom (with
+    `testEnvironmentOptions`; jsdom and happy-dom resolve through the Jest
+    environment package under a strict pnpm layout); `testTimeout`, `clearMocks`
+    / `resetMocks` / `restoreMocks`, `injectGlobals`, `globals`,
+    `snapshotSerializers`, `snapshotFormat` and `fakeTimers` (`timers`)
+    configure the runtime. A `transform` other than babel-jest / ts-jest /
+    `@swc/jest` / esbuild & co. (whose work Deno does) is a warning; `.js` files
+    are parsed as JSX when the transform for them is babel-jest (Jest's default)
+    or another JSX-capable one, else only when they do not parse as plain
+    JavaScript; the JSX runtime those transformers use (`.swcrc`, the ts-jest
+    tsconfig, the Babel config's text) becomes the user modules' through a new
+    `EmitProgramTransform::transpile_options` override. `js/jest.js` provides
+    the `jest` object on top of `vi` (fake timers with Jest's options and
+    defaults: modern timers fake everything `@sinonjs/fake-timers` can on
+    Node.js, `process.nextTick` and `queueMicrotask` included, which Vitest
+    leaves alone, minus `doNotFake`, with the project's `fakeTimers` as the
+    defaults of every `useFakeTimers()`; legacy timers fake the timer functions
+    and `nextTick`; `replaceProperty`, `retryTimes`, `requireActual` /
+    `requireMock` synchronously, `unstable_mockModule`, `setMock`,
+    `isolateModules(Async)`, ...) and Jest's semantics: globals by default
+    (`fit`, `xit`, `xdescribe`, `test.failing` too), a declared parameter of a
+    test or hook is `done`, a hook's return value is not a teardown, jest-each
+    titles (`%p`, `$variable`, `$#`), snapshot keys and `currentTestName` joined
+    with spaces, the Jest snapshot header kept, non-strict equality ignoring
+    `undefined` array items, unawaited `.resolves` not failing a test, a mock
+    factory's result treated as `module.exports` (CommonJS interop), root
+    `__mocks__` files mocking packages without `jest.mock()`, no `setImmediate`
+    and no `Deno` on `window` in DOM environments. In a Jest project a user
+    module that uses `require` gets Jest's `require()` (served by the
+    transform): it resolves like an import (aliases, mocks, fresh modules after
+    `jest.resetModules()`, through `op_vitest_resolve_import`) and loads ES
+    modules synchronously (`op_import_sync`). For every Vitest or Jest run the
+    transform also turns a TypeScript module's type-only exports into
+    `undefined` value exports, so `export { SomeType } from "./types"` (valid
+    without `isolatedModules`) links. The vendored runtime has four more marked
+    patches for these (test name separator, `formatTitle` hook, unawaited async
+    assertions, array equality).
+
+24. **`feat(sql)`: `Deno.SQL` / `Deno.sql`, a built-in SQL client** (`feat/sql`,
+    `ext/sql`): Bun's `Bun.sql` surface over Postgres and SQLite, with no npm.
+    `new Deno.SQL(url | options)` returns a tagged-template function; every
+    interpolated value is sent as a parameter (`$1`... / `?1`...), never spliced
+    into the text. Helpers `sql(object | objects,
+    ...columns)` (by the
+    keyword before them: INSERT, UPDATE ... SET, VALUES, IN, SELECT),
+    `sql(array)`, `sql("identifier")`, query fragments,
+    `sql.unsafe(text, params)`, `.values()`, `.raw()`, `.simple()`,
+    `sql.begin([options,] fn)` (ROLLBACK on throw) with `savepoint()`,
+    `sql.reserve()`, `sql.close({ timeout })` / `end()`. The pool (`max`,
+    `idleTimeout`, `maxLifetime`, `connectionTimeout`, a wait queue bounded by
+    the same timeout) and the builder are JavaScript (`01_sql.js`); the engines
+    are Rust:
+    - Postgres on `tokio-postgres` 0.7.15 (exact pins, MIT / Apache-2.0) over a
+      socket the extension opens: `--allow-net` is checked for the host as named
+      and for each address it resolves to; the `SSLRequest` and the rustls
+      handshake are done here with the runtime's root store and
+      `--unsafely-ignore-certificate-errors` (`sslmode` disable / prefer /
+      require / verify-ca / verify-full,
+      `tls: { ca, servername,
+      rejectUnauthorized }`). One op per query
+      returns every row, built directly in V8 from the binary format:
+      int2/int4/float as numbers, int8/numeric as strings (`bigint: true`:
+      `bigint`), json/jsonb parsed, bytea as `Uint8Array`, timestamp(tz)/date as
+      `Date`, arrays, enums, domains and composites; interval / time / uuid /
+      inet as the server's text. Prepared statements are cached per connection
+      (`prepare: false` sends unnamed ones). Server errors are
+      `SQL.PostgresError` with the SQLSTATE in `code` (and `errno`) plus
+      `detail`, `hint`, `position`, `constraint`, ...; client failures carry
+      `ERR_POSTGRES_*` codes.
+    - SQLite (`sqlite://`, `file:`, `:memory:`, `{ adapter: "sqlite" }`) on the
+      bundled rusqlite, one connection per client: read (and, unless read-only,
+      write) permission for the file, `ATTACH` (and so `VACUUM
+      INTO`) held
+      off without full permissions as `node:sqlite` does.
+    - `Deno.sql` is created on first access from `POSTGRES_URL` / `DATABASE_URL`
+      / `PGURL` / `PG_URL` (env permission); `PG*` variables fill fields a
+      client left out only when env access to them is already granted (no
+      prompt). Typings: `cli/tsc/dts/lib.deno_sql.d.ts`.
+    - Pipelining: single queries share pooled Postgres connections (up to 64 in
+      flight on one, sent back to back and answered in order; tokio-postgres
+      matches the responses), so a burst of queries is not bounded by `max`
+      round trips at a time. Transactions, `reserve()` and cursors get a
+      connection of their own. The S1 bench (`max: 4`, loopback, non-LTO
+      release, against `npm:postgres` 3.4.7 on the same build): 100 concurrent
+      `select 1` went from 3.2-4.8 ms to 1.4-1.7 ms (npm:postgres 1.6-1.9 ms);
+      the sequential cases did not move (select 1 ~0.09-0.10 ms either way).
+    - Transactions pipeline their control statements: `begin()` sends BEGIN
+      without waiting for it, so it goes out with the callback's first
+      statements, whose results are held until BEGIN's answer (its error wins,
+      and `begin()` rejects with it even if the callback swallowed it); and when
+      the callback returns its queries without awaiting them (a query or an
+      array of them) COMMIT is sent right behind them. A returned statement the
+      server fails aborts the transaction, so that COMMIT rolls back; one that
+      fails before it is sent (a NUL, a parameter count, the builder) is flagged
+      (`FLAG_GUARDED`) and `op_sql_pg_finish` sends ROLLBACK instead. BEGIN is
+      pipelined only when the options are transaction modes
+      (`isolation level ...`, `read only` / `read write`, `[not] deferrable`),
+      since a BEGIN that failed on its syntax would leave the statements behind
+      it in autocommit; other options keep the awaited BEGIN. `savepoint()` does
+      the same with SAVEPOINT / RELEASE (ROLLBACK TO on failure). The statements
+      of a transaction or a reserved connection (and cursors, simple queries and
+      transaction ends) now go on the wire in call order even when one has to
+      prepare its statement first (`FLAG_ORDERED`: a per-connection FIFO lock
+      held from the op's first poll until its messages are queued; before, a
+      cached statement could overtake one being prepared, which in a transaction
+      could run a query ahead of its `set_config` setup). The pool's independent
+      queries don't take it, so one being prepared doesn't hold back the ones
+      pipelined behind it. Round trips
+      (`tests/specs/sql/pg_round_trips.ts --timing`, a 10 ms each-way delay
+      proxy, `delay_proxy.ts`), before → after: bare query 1 → 1; begin with 1
+      returned query 3 → 1, with 1 awaited query 3 → 2; 2 returned queries 3 →
+      1; 2 pipelined queries in an async callback (denext's RLS shape) 3 → 2; 2
+      sequential awaited queries 4 → 3; a failing returned statement 3 → 1, a
+      failing awaited one 3 → 2; a savepoint with a returned query inside an
+      async transaction 5 → 2.
+    - `sql.listen(channel, fn, onlisten?)` / `sql.notify(channel, payload)`:
+      every channel of a client on one dedicated connection (outside `max`),
+      `LISTEN "<channel>"` with the name exact; on connection loss it reconnects
+      with backoff (immediately, then 100 ms doubling to 5 s), LISTENs again and
+      calls `onlisten` again (notifications sent while it was down are lost).
+      `unlisten()` UNLISTENs a channel with no callbacks left and closes the
+      connection once nothing listens. `onnotice(notice)` receives the server's
+      notices from every connection (dropped without it). The connection task
+      forwards notifications and notices through a channel to
+      `op_sql_pg_next_event` only when asked for.
+    - Cursors: `for await (const rows of sql\`...\`.cursor(n))`and`for await
+      (const row of
+      sql\`...\`)`(batches of 100) read a
+      server-side cursor (`DECLARE ...
+      NO SCROLL CURSOR`+`FETCH FORWARD
+      n`,
+      unnamed statements so cursor names don't fill the statement cache) one
+      batch per step of the loop, so backpressure is the loop itself; leaving
+      early closes the cursor. On the pool a cursor holds a connection in a
+      transaction of its own; on a reserved connection it opens one only if it
+      is not in a transaction already (`25P01`from`DECLARE`).
+      SQLite reads the rows first and hands them out in batches.
+    - `query.cancel()` of a running Postgres query: a CancelRequest over a new
+      connection to the same endpoint (same permission checks, TLS when the
+      connection uses TLS), rejecting with `ERR_SQL_QUERY_CANCELLED` (the
+      server's `57014` as `cause`). Each connection keeps its in-flight requests
+      in wire order, and a cancel waits until its query is the one the server is
+      running, so a pipelined query ahead of it is not cancelled. A query still
+      waiting for a pooled connection rejects at once.
+    - `sql.file(path, params)` (read permission, read when it runs),
+      `sql.array(values, type)` (`$n::type[]`), Unix-socket hosts (`host=/dir`,
+      `?host=/dir`, `path`; read and write permission for the socket plus
+      `--allow-net` for it, as `Deno.connect` for a Unix socket; no TLS), client
+      certificates (`sslcert` / `sslkey` / `sslrootcert` files or
+      `tls: { cert, key }`), ranges and multiranges as
+      `{ lower, upper, lowerInclusive, upperInclusive, empty }`, geometry
+      (`point` `{ x, y }`, `line`, `lseg`, `box`, `path`, `polygon`, `circle`),
+      `tsvector` as the server's text, and Bun's hook arguments:
+      `onconnect(error | null, connection)` /
+      `onclose(error | null,
+      connection)` with the connection's id and
+      server parameters.
+    - Checked against Bun 1.3.6's `Bun.sql` on the same server (one script,
+      every builtin type, parameters, result metadata, helpers via
+      `current_query()`, errors). The same: row objects, `int8` / `numeric` as
+      strings (`bigint: true` → `bigint`), json, arrays, enums, dates and
+      `timestamptz`, uuid / inet / interval / time text, `count` / `command`,
+      the INSERT / UPDATE / IN / identifier helpers (whitespace aside),
+      transactions and savepoints, `reserve()`,
+      `ERR_POSTGRES_CONNECTION_CLOSED`. Kept different on purpose: `code` is the
+      SQLSTATE (as in postgres.js; Bun puts `ERR_POSTGRES_SERVER_ERROR` /
+      `_SYNTAX_ERROR` there and the SQLSTATE in `errno`, which we also set),
+      `position` is a number; `count` / `command` are non-enumerable (Bun's
+      print with the rows) and there is no `affectedRows`; `bytea` is a
+      `Uint8Array` (Bun: `Buffer`); ranges, geometry and anonymous records are
+      objects / arrays (Bun: the server's text) and `money` has no currency
+      sign; `±infinity` timestamps are strings (Bun: an Invalid Date); `void` is
+      `null`; parameters are typed by the server (unspecified OIDs), so an
+      uncast `${42}` in a select list comes back as the text `"42"` (Bun types
+      numbers and booleans itself), while `${[1, 2]}::int4[]`, objects (JSON,
+      Bun sends `[object Object]`), `Date`s (ISO, Bun sends `Date.toString()`)
+      and arrays bound to text work; `sql([])` after IN is `(null)` (Bun: a
+      syntax error); `sql(names)` after SELECT and `VALUES` rows, arrays of
+      fragments work (Bun rejects them); `.simple()` values are the server's
+      text and `.raw()` cells its binary form (Bun parses simple results and
+      gives text-format raw cells); `cancel()` before a query starts rejects it
+      (Bun's never settles); a refused connection is
+      `ERR_POSTGRES_CONNECTION_FAILED` (Bun: `_CONNECTION_CLOSED`); an uncast
+      parameter takes the type the server infers (`select ${42}` is `"42"`),
+      which is more forgiving than Bun's client-side typing (`text_col = ${42}`
+      works). Aligned: booleans bound where the server expects a number
+      (`${true}::int`) are sent as `1` / `0`, and as `true` / `false` where it
+      expects text; `onconnect` / `onclose` take the error (or `null`) first;
+      `timestamp` without a time zone is local wall-clock time both ways, as in
+      Bun, postgres.js and node-postgres: read as `new Date(y, m, d, h, ...)`
+      would (a time the clock skipped uses the offset from before the change,
+      one it passed twice the earlier instant), and a `Date` is sent as local
+      time with its UTC offset (`2024-01-15T12:00:00.000-06:00`, which a
+      `timestamptz` reads as the same instant); `date` stays UTC midnight both
+      ways. The offsets come from the runtime's own `Date` (so `TZ` applies).
+    - Not yet: MySQL, the `"bun"` module, `tsquery` decoding.
 
 25. **`fix(core)`: a first-time `import()` no longer leaks the importer's async
     context** (`fix/als-dynamic-import`, `libs/core/modules/map/dynamic.rs`).
@@ -310,7 +604,7 @@ where the changes are discussed.
     `tests/specs/node/async_local_storage_dynamic_import` (the next `Deno.serve`
     request and the next `deno test` test).
 
-The runtime-side parts (1-3, 5-22, 25) are what the prebuilt `libdenort`
+The runtime-side parts (1-3, 5-22, 24, 25) are what the prebuilt `libdenort`
 carries. The CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` /
 `LAUFEY_APP_ID` into a packaged app's launchers) are in the branch too, but a
 stock CLI does not run them; denext's own launcher provides that environment.
@@ -485,6 +779,14 @@ Specs this fork adds for what its runtime exposes outside a desktop app:
   server refuses a request target that claims `http+memory://` (400).
 - `tests/specs/check/desktop_types`: the fork's `Deno.desktop` types check with
   `--desktop`, and misuses are type errors.
+- `tests/specs/sql`: `Deno.SQL` over SQLite (helpers, parameters that would
+  break interpolation, transactions and savepoints, errors, permissions,
+  read-only files) and Postgres client failures against stand-in servers
+  (`sslmode=require` refused by a server without TLS, connect timeout, refused
+  port, net and env permissions). The `pg_*` tests that need a real server
+  (types both ways, SQLSTATE errors, transactions, the pool's limits and
+  timeouts, TLS modes) run when `DENO_SQL_TEST_POSTGRES_URL` (and, for TLS,
+  `DENO_SQL_TEST_POSTGRES_CA`) is set, and are skipped otherwise.
 - `tests/specs/run/desktop_ops_inert` (`sys.js`): the integrations that need
   `--allow-sys` refuse without it (and with only some sys names) and are inert
   with it.

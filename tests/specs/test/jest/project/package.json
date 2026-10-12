@@ -1,0 +1,12 @@
+{
+  "name": "jest-spec-project",
+  "private": true,
+  "type": "module",
+  "devDependencies": {
+    "fake-pkg": "*",
+    "jest": "*",
+    "jsdom": "*",
+    "mapped-cjs": "*",
+    "mapped-esm": "*"
+  }
+}

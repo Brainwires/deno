@@ -1,0 +1,3 @@
+[ { n: 1 } ]
+SQLITE_READONLY
+read-write: true

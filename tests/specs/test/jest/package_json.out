@@ -1,0 +1,8 @@
+running 1 test from ./__tests__/helpers.ts
+and every file under __tests__ ... ok ([WILDCARD])
+running 2 tests from ./math.spec.ts
+Jest's default testMatch picks *.spec.ts ... ok ([WILDCARD])
+clearMocks clears calls before each test ... ok ([WILDCARD])
+
+ok | 3 passed | 0 failed ([WILDCARD])
+
