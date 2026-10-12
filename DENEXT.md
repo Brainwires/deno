@@ -290,7 +290,50 @@ where the changes are discussed.
     `cookieEncryptionWait`. An explicit `--password-store=basic` on such a
     profile is honoured with a warning that those cookies will be deleted.
 
-The runtime-side parts (1-3, 5-22) are what the prebuilt `libdenort` carries.
+23. **`feat(sql)`: `Deno.SQL` / `Deno.sql`, a built-in SQL client** (`feat/sql`,
+    `ext/sql`): Bun's `Bun.sql` surface over Postgres and SQLite, with no npm.
+    `new Deno.SQL(url | options)` returns a tagged-template function; every
+    interpolated value is sent as a parameter (`$1`... / `?1`...), never spliced
+    into the text. Helpers `sql(object | objects,
+    ...columns)` (by the
+    keyword before them: INSERT, UPDATE ... SET, VALUES, IN, SELECT),
+    `sql(array)`, `sql("identifier")`, query fragments,
+    `sql.unsafe(text, params)`, `.values()`, `.raw()`, `.simple()`,
+    `sql.begin([options,] fn)` (ROLLBACK on throw) with `savepoint()`,
+    `sql.reserve()`, `sql.close({ timeout })` / `end()`. The pool (`max`,
+    `idleTimeout`, `maxLifetime`, `connectionTimeout`, a wait queue bounded by
+    the same timeout) and the builder are JavaScript (`01_sql.js`); the engines
+    are Rust:
+    - Postgres on `tokio-postgres` 0.7.15 (exact pins, MIT / Apache-2.0) over a
+      socket the extension opens: `--allow-net` is checked for the host as named
+      and for each address it resolves to; the `SSLRequest` and the rustls
+      handshake are done here with the runtime's root store and
+      `--unsafely-ignore-certificate-errors` (`sslmode` disable / prefer /
+      require / verify-ca / verify-full,
+      `tls: { ca, servername,
+      rejectUnauthorized }`). One op per query
+      returns every row, built directly in V8 from the binary format:
+      int2/int4/float as numbers, int8/numeric as strings (`bigint: true`:
+      `bigint`), json/jsonb parsed, bytea as `Uint8Array`, timestamp(tz)/date as
+      `Date`, arrays, enums, domains and composites; interval / time / uuid /
+      inet as the server's text. Prepared statements are cached per connection
+      (`prepare: false` sends unnamed ones). Server errors are
+      `SQL.PostgresError` with the SQLSTATE in `code` (and `errno`) plus
+      `detail`, `hint`, `position`, `constraint`, ...; client failures carry
+      `ERR_POSTGRES_*` codes.
+    - SQLite (`sqlite://`, `file:`, `:memory:`, `{ adapter: "sqlite" }`) on the
+      bundled rusqlite, one connection per client: read (and, unless read-only,
+      write) permission for the file, `ATTACH` (and so `VACUUM
+      INTO`) held
+      off without full permissions as `node:sqlite` does.
+    - `Deno.sql` is created on first access from `POSTGRES_URL` / `DATABASE_URL`
+      / `PGURL` / `PG_URL` (env permission); `PG*` variables fill fields a
+      client left out only when env access to them is already granted (no
+      prompt). Typings: `cli/tsc/dts/lib.deno_sql.d.ts`. Not yet: cursors /
+      async iteration, `cancel()` of a running query, `sql.file` / `sql.array`,
+      LISTEN / NOTIFY and notices, unix-socket hosts, MySQL, the `"bun"` module.
+
+The runtime-side parts (1-3, 5-23) are what the prebuilt `libdenort` carries.
 The CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` /
 `LAUFEY_APP_ID` into a packaged app's launchers) are in the branch too, but a
 stock CLI does not run them; denext's own launcher provides that environment.
@@ -465,6 +508,14 @@ Specs this fork adds for what its runtime exposes outside a desktop app:
   server refuses a request target that claims `http+memory://` (400).
 - `tests/specs/check/desktop_types`: the fork's `Deno.desktop` types check with
   `--desktop`, and misuses are type errors.
+- `tests/specs/sql`: `Deno.SQL` over SQLite (helpers, parameters that would
+  break interpolation, transactions and savepoints, errors, permissions,
+  read-only files) and Postgres client failures against stand-in servers
+  (`sslmode=require` refused by a server without TLS, connect timeout, refused
+  port, net and env permissions). The `pg_*` tests that need a real server
+  (types both ways, SQLSTATE errors, transactions, the pool's limits and
+  timeouts, TLS modes) run when `DENO_SQL_TEST_POSTGRES_URL` (and, for TLS,
+  `DENO_SQL_TEST_POSTGRES_CA`) is set, and are skipped otherwise.
 - `tests/specs/run/desktop_ops_inert` (`sys.js`): the integrations that need
   `--allow-sys` refuse without it (and with only some sys names) and are inert
   with it.

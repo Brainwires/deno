@@ -489,6 +489,13 @@ const BUILDERS = ArrayPrototypeMap([
 ]);
 
 function renderHelper(helper, before, b) {
+  // `sql("name")` / `sql("a", "b")` is always an identifier list, whatever
+  // keyword precedes it (`insert into ${sql("t")} ${sql(rows)}`).
+  if (typeof helper.first === "string") {
+    return escapeIdentifiers(
+      ArrayPrototypeConcat([helper.first], flatColumns(helper.rest)),
+    );
+  }
   let best = -1;
   let builder;
   for (let i = 0; i < BUILDERS.length; i++) {
@@ -499,12 +506,7 @@ function renderHelper(helper, before, b) {
     }
   }
   if (builder) return builder(helper.first, helper.rest, b);
-  // No keyword: identifiers (`sql("table")`, `sql(["a", "b"])`).
-  if (typeof helper.first === "string") {
-    return escapeIdentifiers(
-      ArrayPrototypeConcat([helper.first], flatColumns(helper.rest)),
-    );
-  }
+  // No keyword: identifiers (`sql(["a", "b"])`).
   if (ArrayIsArray(helper.first)) return escapeIdentifiers(helper.first);
   throw new SQLError(
     "sql(object) must follow INSERT, UPDATE ... SET, VALUES, IN or SELECT",
@@ -595,9 +597,6 @@ function buildIn(first, rest, b) {
 }
 
 function buildSelect(first, rest, b) {
-  if (typeof first === "string") {
-    return escapeIdentifiers(ArrayPrototypeConcat([first], flatColumns(rest)));
-  }
   if (ArrayIsArray(first)) return escapeIdentifiers(first);
   if (!isPlainObject(first)) {
     throw new SQLError("sql() after SELECT needs column names or an object");

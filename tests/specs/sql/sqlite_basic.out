@@ -21,6 +21,7 @@ SQLITE_ERROR
 [ { s: 3 } ]
 [ { a: 2 } ]
 [ [ 1 ], [ 2 ] ]
+[ [ 1 ], [ 2 ] ] [ { n: 3 } ]
 []
 cancelled: ERR_SQL_QUERY_CANCELLED
 closed: ERR_SQLITE_CLOSED

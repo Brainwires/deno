@@ -132,6 +132,17 @@ console.log(await sql`select a from t2 ${filter}`);
 console.log(
   await sql`select ${sql("a")} from ${sql("t2")} order by a`.values(),
 );
+// A string is an identifier wherever it appears, even right after INSERT;
+// dots separate schema and table.
+await sql`insert into ${sql("main.t2")} ${sql({ a: 3 })}`;
+await sql`create table ${sql('we"ird name')} (${sql("a b")})`;
+await sql`insert into ${sql('we"ird name')} ${
+  sql([{ "a b": 1 }, { "a b": 2 }])
+}`;
+console.log(
+  await sql`select ${sql("a b")} from ${sql('we"ird name')}`.values(),
+  await sql`select count(*) as n from t2`,
+);
 console.log(await sql`select * from t2 where a in ${sql([])}`);
 
 const pending = sql`select 1 as one`;

@@ -21,4 +21,6 @@ bad input: true PostgresError invalid input syntax for type integer: "abc" { cod
 param count: true PostgresError The query expects 2 parameter(s) but 1 were given { code: "ERR_POSTGRES_INVALID_PARAMETER" }
 nul byte: true PostgresError Parameter $1 contains a NUL (\0) character, which Postgres text can't hold { code: "ERR_POSTGRES_INVALID_PARAMETER" }
 [ { n: 1 } ]
+stale plan: true PostgresError cached plan must not change result type { code: "0A000", errno: "0A000", severity: "ERROR" }
+re-prepared: [ { a: 1, b: null } ]
 auth: true PostgresError password authentication failed for user "postgres" { code: "28P01", errno: "28P01", severity: "FATAL" }

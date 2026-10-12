@@ -232,3 +232,33 @@ pub fn sqlite_code_name(extended: std::ffi::c_int) -> &'static str {
     },
   }
 }
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn sqlite_code_names() {
+    assert_eq!(sqlite_code_name(2067), "SQLITE_CONSTRAINT_UNIQUE");
+    assert_eq!(sqlite_code_name(19), "SQLITE_CONSTRAINT");
+    // SQLITE_BUSY_RECOVERY falls back to its primary code.
+    assert_eq!(sqlite_code_name(261), "SQLITE_BUSY");
+    assert_eq!(sqlite_code_name(256), codes::SQLITE);
+  }
+
+  #[test]
+  fn client_errors_carry_codes() {
+    let err = SqlError::postgres_client(codes::CONNECTION_TIMEOUT, "late");
+    assert_eq!(err.get_class(), POSTGRES_ERROR_CLASS);
+    assert_eq!(err.get_message(), "late");
+    let props: Vec<_> = err.get_additional_properties().collect();
+    assert_eq!(
+      props,
+      vec![(
+        Cow::Borrowed("code"),
+        PropertyValue::String(Cow::Borrowed(codes::CONNECTION_TIMEOUT))
+      )]
+    );
+    assert_eq!(SqlError::type_error("x").get_class(), "TypeError");
+  }
+}

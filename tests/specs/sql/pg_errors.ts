@@ -48,6 +48,18 @@ await show("nul byte:", sql`select ${"a\u0000b"}::text`);
 // The connection is still usable after errors.
 console.log(await sql`select count(*)::int as n from denosql_errors`);
 
+// A cached statement whose result type changed fails once, then is
+// prepared again.
+await sql`drop table if exists denosql_stale`;
+await sql`create table denosql_stale (a int)`;
+await sql`insert into denosql_stale values (1)`;
+const stale = () => sql`select * from denosql_stale`;
+await stale();
+await sql`alter table denosql_stale add column b int`;
+await show("stale plan:", stale());
+console.log("re-prepared:", await stale());
+await sql`drop table denosql_stale`;
+
 // Authentication failure.
 const bad = new URL(url);
 bad.password = "wrong-password";

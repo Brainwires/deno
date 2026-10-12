@@ -120,6 +120,13 @@ impl Resource for PgConnection {
 }
 
 impl PgConnection {
+  fn evict(&self, sql: &str) {
+    let mut cache = self.statements.borrow_mut();
+    if cache.map.remove(sql).is_some() {
+      cache.order.retain(|s| s != sql);
+    }
+  }
+
   async fn statement(&self, sql: &str) -> Result<Statement, SqlError> {
     if let Some(stmt) = self.statements.borrow().map.get(sql) {
       return Ok(stmt.clone());
@@ -299,12 +306,9 @@ where
     // Terminate) or the socket fails, which the client sees as
     // `is_closed()`. Notices and notifications are dropped here rather than
     // logged.
-    loop {
-      match std::future::poll_fn(|cx| connection.poll_message(cx)).await {
-        Some(Ok(_)) => {}
-        Some(Err(_)) | None => break,
-      }
-    }
+    while let Some(Ok(_)) =
+      std::future::poll_fn(|cx| connection.poll_message(cx)).await
+    {}
   });
   Ok(client)
 }
@@ -554,9 +558,30 @@ pub async fn op_sql_pg_query(
     })
   };
   match run.or_cancel(cancel).await {
+    Ok(Err(err)) => {
+      if is_stale_statement(&err) {
+        // The next call prepares the statement afresh (after ALTER TABLE,
+        // DISCARD ALL, ...).
+        conn.evict(&sql);
+      }
+      Err(err)
+    }
     Ok(result) => result,
     Err(_) => Err(closed()),
   }
+}
+
+/// A cached prepared statement the server can no longer run as prepared:
+/// "cached plan must not change result type" (0A000) or a statement that no
+/// longer exists (26000).
+fn is_stale_statement(err: &SqlError) -> bool {
+  let SqlError::Postgres { props, .. } = err else {
+    return false;
+  };
+  props.iter().any(|(k, v)| {
+    *k == "code"
+      && matches!(v, deno_error::PropertyValue::String(c) if c == "0A000" || c == "26000")
+  })
 }
 
 /// One statement's result over the simple protocol: column names, rows of
@@ -642,5 +667,45 @@ pub async fn op_sql_pg_simple(
   match run.or_cancel(cancel).await {
     Ok(result) => result,
     Err(_) => Err(closed()),
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn ssl_request_is_length_8_code_80877103() {
+    assert_eq!(i32::from_be_bytes(SSL_REQUEST[0..4].try_into().unwrap()), 8);
+    assert_eq!(
+      i32::from_be_bytes(SSL_REQUEST[4..8].try_into().unwrap()),
+      80_877_103
+    );
+  }
+
+  #[test]
+  fn stale_statements() {
+    let stale = SqlError::Postgres {
+      message: "cached plan must not change result type".into(),
+      props: vec![(
+        "code",
+        deno_error::PropertyValue::String(Cow::Borrowed("0A000")),
+      )],
+    };
+    assert!(is_stale_statement(&stale));
+    assert!(!is_stale_statement(&SqlError::postgres_client(
+      codes::CONNECTION_CLOSED,
+      "closed"
+    )));
+  }
+
+  #[test]
+  fn nul_detection() {
+    use crate::params::SqlParam;
+    assert!(contains_nul(&SqlParam::Text("a\0".into())));
+    assert!(contains_nul(&SqlParam::Array(vec![SqlParam::Json(
+      "\"\0\"".into()
+    )])));
+    assert!(!contains_nul(&SqlParam::Bytes(vec![0])));
   }
 }
