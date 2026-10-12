@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Write SHA256SUMS and manifest.json for a directory of runtime archives.
+"""Write SHA256SUMS and manifest.json for a directory of runtime archives
+(and the `deno-cli-*` CLI archives, listed under "cli").
 
 Usage: manifest.py <dist dir>
 Env:   VERSION TAG REPOSITORY DENO_VERSION DENO_SHA LAUFEY_SHA CEF_VERSION RUN_URL
@@ -23,12 +24,14 @@ pattern = re.compile(
     + r"-(?P<target>[a-z0-9_]+-[a-z0-9_]+-[a-z0-9_]+(?:-[a-z0-9_]+)?)-(?P<backend>webview|cef)\.(?P<ext>tar\.gz|zip)$"
 )
 
-targets = {}
-sums = []
-for name in sorted(os.listdir(dist)):
-    m = pattern.match(name)
-    if not m:
-        continue
+cli_pattern = re.compile(
+    r"^deno-cli-"
+    + re.escape(version)
+    + r"-(?P<target>[a-z0-9_]+-[a-z0-9_]+-[a-z0-9_]+(?:-[a-z0-9_]+)?)\.(?P<ext>tar\.gz|zip)$"
+)
+
+
+def describe(name, ext):
     path = os.path.join(dist, name)
     h = hashlib.sha256()
     with open(path, "rb") as f:
@@ -41,13 +44,29 @@ for name in sorted(os.listdir(dist)):
         if tag
         else None
     )
-    targets.setdefault(m["target"], {})[m["backend"]] = {
+    return {
         "file": name,
         "url": url,
         "sha256": digest,
         "size": os.path.getsize(path),
-        "format": m["ext"],
+        "format": ext,
     }
+
+
+targets = {}
+cli_targets = {}
+sums = []
+for name in sorted(os.listdir(dist)):
+    m = pattern.match(name)
+    if m:
+        targets.setdefault(m["target"], {})[m["backend"]] = describe(name, m["ext"])
+        continue
+    m = cli_pattern.match(name)
+    if m:
+        cli_targets[m["target"]] = {
+            "binary": "deno.exe" if m["target"].endswith("windows-msvc") else "deno",
+            **describe(name, m["ext"]),
+        }
 
 if not targets:
     sys.exit(f"no runtime archives for version {version} in {dist}")
@@ -91,6 +110,12 @@ manifest = {
     "targets": {
         t: {"runtimeLib": lib_for(t), **backends}
         for t, backends in sorted(targets.items())
+    },
+    # This fork's own `deno` CLI: `deno --version` prints `deno <version>`,
+    # Deno.version.deno is deno.version.
+    "cli": {
+        "version": version,
+        "targets": dict(sorted(cli_targets.items())),
     },
 }
 

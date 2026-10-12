@@ -1,6 +1,7 @@
 # Builds denext's patched Deno Desktop runtime (libdenort from this branch +
 # laufey's webview and CEF backend hosts) for five targets, smoke-tests each
 # archive with the STOCK `deno desktop` CLI, runs the e2e suite, attests it,
+# builds and smoke-tests this fork's own `deno` CLI for the same targets,
 # and on a `denext-runtime-v*` tag publishes a GitHub Release with SHA256SUMS
 # and a manifest.json. It runs on every push to a release branch (rel/**),
 # nightly on the default branch, by hand, and on a tag, which publishes only
@@ -486,6 +487,181 @@ jobs:
           path: out/
           retention-days: 14
 
+  # This fork's own `deno` CLI (the CLI-side features: Vitest compatibility in
+  # `deno test`, `Deno.SQL`, ...), release profile, with DENEXT_VERSION baked
+  # in so `deno --version` names the build. It needs no laufey patch: the CLI
+  # does not link the laufey crate. Smoke-tested from its archive on the
+  # target's own runner, then attested.
+  cli:
+    name: cli / ${{ matrix.target }}
+    needs: setup
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 355
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: '0'
+      TARGET: ${{ matrix.target }}
+      VERSION: ${{ needs.setup.outputs.version }}
+    steps:
+      - name: Configure git
+        run: |
+          git config --global core.symlinks true
+          git config --global core.longpaths true
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          submodules: false
+
+      - name: Free disk space (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup \
+            /opt/hostedtoolcache/CodeQL /usr/local/share/boost /usr/share/swift \
+            /usr/local/share/powershell /usr/local/share/chromium /opt/microsoft || true
+          sudo docker image prune --all --force >/dev/null 2>&1 || true
+          df -h /
+
+      - name: Install dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          # man-db triggers can take minutes on hosted runners.
+          sudo apt-get -qq remove --purge -y man-db >/dev/null 2>&1 || true
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libclang-dev cmake
+
+      - name: libclang (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          set -euo pipefail
+          vs=$("/c/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe" -latest -property installationPath)
+          for d in "$(cygpath -u "$vs")/VC/Tools/Llvm/x64/bin" "/c/Program Files/LLVM/bin"; do
+            if [ -f "$d/libclang.dll" ]; then
+              echo "LIBCLANG_PATH=$(cygpath -w "$d")" >>"$GITHUB_ENV"
+              echo "LIBCLANG_PATH=$(cygpath -w "$d")"
+              exit 0
+            fi
+          done
+          echo "::error::libclang.dll not found"; exit 1
+
+      # ld64.lld: the aarch64-apple-darwin rustflags in .cargo/config.toml link
+      # with -fuse-ld=lld, as deno's release does.
+      - uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
+        if: matrix.target == 'aarch64-apple-darwin'
+        with:
+          deno-version: v2.x
+      - name: Install ld64.lld (macOS aarch64)
+        if: matrix.target == 'aarch64-apple-darwin'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          # tools/util.js imports the std submodule.
+          git submodule update --init --depth=1 -- ./tests/util/std
+          ./tools/install_prebuilt.js ld64.lld
+          echo "$GITHUB_WORKSPACE/third_party/prebuilt/mac" >>"$GITHUB_PATH"
+
+      - name: Rust toolchain
+        run: |
+          tc=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)
+          rustup toolchain install "$tc" --profile minimal --no-self-update
+          echo "RUSTUP_TOOLCHAIN=$tc" >>"$GITHUB_ENV"
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          prefix-key: denext-cli-v1
+          key: ${{ matrix.target }}-${{ matrix.os }}
+          cache-on-failure: false
+
+      - name: Build deno
+        env:
+          # Shown by `deno --version` / `deno -V` (cli/args/flags.rs,
+          # display_version); Deno.version.deno stays the plain version.
+          DENEXT_VERSION: ${{ needs.setup.outputs.version }}
+        run: |
+          set -euo pipefail
+          df -h . || true
+          cargo build --release --locked --bin deno
+          df -h . || true
+          git diff --exit-code -- Cargo.lock
+
+      - name: Check binary
+        run: |
+          set -euo pipefail
+          case "$TARGET" in
+            *-apple-darwin)
+              file target/release/deno
+              lipo -info target/release/deno
+              otool -L target/release/deno
+              # arm64 macOS refuses to run unsigned code. The arm64 linker
+              # signs ad hoc; sign the x86_64 binary the same way.
+              if ! codesign --verify target/release/deno 2>/dev/null; then
+                codesign --force --sign - target/release/deno
+              fi
+              codesign --verify --verbose target/release/deno
+              ;;
+            *-linux-gnu)
+              file target/release/deno
+              ldd target/release/deno || true
+              objdump -T target/release/deno | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -3
+              ;;
+            *-windows-msvc)
+              ls -la target/release/deno.exe
+              ;;
+          esac
+
+      - name: Assemble
+        env:
+          DENO_BIN: target/release/${{ runner.os == 'Windows' && 'deno.exe' || 'deno' }}
+          OUT_DIR: dist
+          DENO_VERSION: ${{ needs.setup.outputs.deno_version }}
+          DENO_SHA: ${{ github.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: bash .github/denext-runtime/assemble_cli.sh
+
+      # `deno --version` names the build, Deno.version.deno stays plain,
+      # `typeof Deno.SQL` is "function" and a Vitest suite passes under
+      # `deno test`, all from the unpacked archive.
+      - name: Smoke
+        env:
+          ARCHIVE: dist/deno-cli-${{ needs.setup.outputs.version }}-${{ matrix.target }}.${{ runner.os == 'Windows' && 'zip' || 'tar.gz' }}
+          WORK_DIR: ${{ runner.temp }}/cli-smoke
+        run: bash .github/denext-runtime/cli_smoke.sh
+
+      - name: Summary
+        if: ${{ !cancelled() }}
+        run: |
+          {
+            echo "### cli / $TARGET"
+            echo '```'
+            cat dist/*.sha256 2>/dev/null || true
+            head -1 "$RUNNER_TEMP/cli-smoke/version.txt" 2>/dev/null || true
+            echo '```'
+          } >>"$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            dist/*.tar.gz
+            dist/*.zip
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: cli-${{ matrix.target }}
+          path: dist/
+          retention-days: 30
+
   # Assemble the archives, check them, package the smoke app with the stock
   # CLI, try to launch it, run the e2e suite (.github/denext-runtime/e2e)
   # on both backends, attest.
@@ -761,8 +937,8 @@ jobs:
 
   publish:
     name: publish
-    needs: [setup, package]
-    if: ${{ always() && needs.package.result == 'success' }}
+    needs: [setup, package, cli]
+    if: ${{ always() && needs.package.result == 'success' && needs.cli.result == 'success' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -775,6 +951,12 @@ jobs:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           pattern: runtime-*
+          path: dist
+          merge-multiple: true
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: cli-*
           path: dist
           merge-multiple: true
 
@@ -810,6 +992,9 @@ jobs:
           n=$(python3 -c 'import json;m=json.load(open("dist/manifest.json"));print(sum(len([k for k in v if k!="runtimeLib"]) for v in m["targets"].values()))')
           echo "archives: $n"
           test "$n" = 10
+          c=$(python3 -c 'import json;m=json.load(open("dist/manifest.json"));print(len(m["cli"]["targets"]))')
+          echo "cli archives: $c"
+          test "$c" = 5
 
       - name: GitHub Release
         if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/denext-runtime-v')
@@ -835,6 +1020,11 @@ jobs:
           \`DENORT_DESKTOP_BIN=<dir>/<runtime lib>\` and \`LAUFEY_DEV_DIR=<dir>/laufey\`.
           \`manifest.json\` lists every archive with its URL, SHA-256 and size; each archive has a
           build provenance attestation (\`gh attestation verify <file> -R ${REPO}\`).
+
+          \`deno-cli-*\` is this fork's own \`deno\` CLI (Vitest compatibility in \`deno test\`,
+          \`Deno.SQL\`, ...): unpack it and run \`deno\` (\`deno.exe\` on Windows). Its
+          \`deno --version\` names this release; \`Deno.version.deno\` is ${DENO_VERSION}.
+          They are listed under \`cli\` in \`manifest.json\`.
           EOF
           gh release create "$TAG" --repo "$REPO" --title "$TAG" \
             --notes-file notes.md --target "$SHA" \

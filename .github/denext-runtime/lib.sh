@@ -10,6 +10,14 @@ runtime_lib_name() {
   esac
 }
 
+# The binary in a `deno-cli-*` archive (assemble_cli.sh).
+cli_bin_name() {
+  case "$1" in
+    *-windows-msvc) echo deno.exe ;;
+    *) echo deno ;;
+  esac
+}
+
 archive_ext() {
   case "$1" in
     *-windows-msvc) echo zip ;;
