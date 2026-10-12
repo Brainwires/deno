@@ -67,7 +67,7 @@ const configDefaults = Object.freeze({
 	teardownTimeout: 1e4,
 	forceRerunTriggers: ["**/package.json", "**/{vitest,vite}.config.*"],
 	update: false,
-	reporters: [isAgent ? "minimal" : "default", ...process.env.GITHUB_ACTIONS === "true" ? ["github-actions"] : []],
+	reporters: [isAgent ? "minimal" : "default", ...globalThis.Deno[globalThis.Deno.internal].vitestEnv().GITHUB_ACTIONS === "true" ? ["github-actions"] : []],
 	silent: false,
 	hideSkippedTests: false,
 	api: false,

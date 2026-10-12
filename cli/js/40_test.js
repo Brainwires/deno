@@ -1,7 +1,7 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 
 import { core, primordials } from "ext:core/mod.js";
-import { op_import_sync } from "ext:core/ops";
+import { op_get_env_no_permission_check, op_import_sync } from "ext:core/ops";
 import { escapeName, withPermissions } from "ext:cli/40_test_common.js";
 import { assertSnapshot, snapshotRunState } from "ext:cli/40_test_snapshot.js";
 
@@ -910,6 +910,34 @@ globalThis.Deno[globalThis.Deno.internal].installTestIsolateExitHandler =
 // Used by the Vitest compatibility layer to provide `import.meta.env`.
 globalThis.Deno[globalThis.Deno.internal].testSetImportMetaProto =
   op_test_set_import_meta_proto;
+// The environment variables Vitest's own runtime reads to choose its output
+// (colors, CI, agent and production modes). It reads them without an
+// --allow-env check, as Deno's own internal reads do; the test's own reads of
+// these and of every other variable stay checked.
+const VITEST_INTERNAL_ENV = [
+  "AI_AGENT",
+  "BUILDKITE",
+  "CI",
+  "CLAUDECODE",
+  "CODEX_SANDBOX",
+  "FORCE_COLOR",
+  "FORCE_TTY",
+  "GITHUB_ACTIONS",
+  "GITLAB_CI",
+  "NODE_ENV",
+  "NO_COLOR",
+  "TERM",
+];
+/** The set variables of `VITEST_INTERNAL_ENV`, as an object. */
+globalThis.Deno[globalThis.Deno.internal].vitestEnv = () => {
+  const env = { __proto__: null };
+  for (let i = 0; i < VITEST_INTERNAL_ENV.length; i++) {
+    const name = VITEST_INTERNAL_ENV[i];
+    const value = op_get_env_no_permission_check(name);
+    if (value != null) env[name] = value;
+  }
+  return env;
+};
 // Used by the Vitest compatibility layer's module mocking (see
 // cli/tools/test/vitest/mocks.rs).
 globalThis.Deno[globalThis.Deno.internal].vitestMocks = {

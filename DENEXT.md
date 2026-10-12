@@ -325,6 +325,20 @@ where the changes are discussed.
     still reach it. `--no-vitest-compat` / `test.vitestCompat: false` turn it
     off; `--vitest-config` picks a config.
 
+    **Permissions**: a Vitest file needs only the permissions its own code does.
+    The environment variables Vitest's runtime reads to choose its output
+    (`FORCE_TTY`, `TERM`, `CI`, `NODE_ENV`, `GITHUB_ACTIONS`, ...; a fixed list)
+    come from `Deno[Deno.internal].vitestEnv()` (in `cli/js/40_test.js`, through
+    `op_get_env_no_permission_check`, like Deno's own internal reads; the
+    vendored reads are patched by `tools/vendor_vitest.ts`), while the test's
+    own reads stay checked. A snapshot file the test may not read counts as
+    missing, and saving it then fails with the read error; `loadEnv` takes only
+    the `.env` files without `--allow-env`. An error of Vitest's runner after
+    collection (such as a snapshot save) fails the tests that did not run, or
+    the file, instead of being dropped. Loading a `vitest.config.*` / Jest
+    config, automocking and `__mocks__` lookups still read files, so need
+    `--allow-read`.
+
     **Module mocking** (`vi.mock` / `vi.unmock` / `vi.doMock` / `vi.doUnmock` /
     `vi.hoisted` / `vi.importActual` / `vi.importMock` / `vi.resetModules`,
     `vi.spyOn(namespace, "export")`, and `jest.mock` & co. from `@jest/globals`)

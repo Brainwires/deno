@@ -66,7 +66,56 @@ interface Patch {
   why: string;
 }
 
+/** Vitest's own environment reads, which need no --allow-env. */
+const INTERNAL_ENV = "globalThis.Deno[globalThis.Deno.internal].vitestEnv()";
+
 const PATCHES: Patch[] = [
+  {
+    file: "tinyrainbow.js",
+    why:
+      "read the color environment variables without an --allow-env check (Deno.internal.vitestEnv, see cli/js/40_test.js)",
+    find: `r = (e == null ? void 0 : e.env) || {}`,
+    replace: `r = ${INTERNAL_ENV}`,
+  },
+  {
+    file: "pretty_format.js",
+    why:
+      "read NODE_ENV without an --allow-env check (Deno.internal.vitestEnv, see cli/js/40_test.js)",
+    find: `"production" !== process.env.NODE_ENV &&`,
+    replace: `"production" !== ${INTERNAL_ENV}.NODE_ENV &&`,
+  },
+  {
+    file: "pretty_format.js",
+    why:
+      "read NODE_ENV without an --allow-env check (Deno.internal.vitestEnv, see cli/js/40_test.js)",
+    find:
+      `if (process.env.NODE_ENV === 'production') {\n\t  reactIs$1.exports = requireReactIs_production();`,
+    replace:
+      `if (${INTERNAL_ENV}.NODE_ENV === 'production') {\n\t  reactIs$1.exports = requireReactIs_production();`,
+  },
+  {
+    file: "pretty_format.js",
+    why:
+      "read NODE_ENV without an --allow-env check (Deno.internal.vitestEnv, see cli/js/40_test.js)",
+    find: `if (process.env.NODE_ENV !== "production") {`,
+    replace: `if (${INTERNAL_ENV}.NODE_ENV !== "production") {`,
+  },
+  {
+    file: "pretty_format.js",
+    why:
+      "read NODE_ENV without an --allow-env check (Deno.internal.vitestEnv, see cli/js/40_test.js)",
+    find:
+      `if (process.env.NODE_ENV === 'production') {\n\t  reactIs.exports = requireReactIs_production_min();`,
+    replace:
+      `if (${INTERNAL_ENV}.NODE_ENV === 'production') {\n\t  reactIs.exports = requireReactIs_production_min();`,
+  },
+  {
+    file: "defaults.js",
+    why:
+      "read GITHUB_ACTIONS without an --allow-env check (Deno.internal.vitestEnv, see cli/js/40_test.js)",
+    find: `...process.env.GITHUB_ACTIONS === "true"`,
+    replace: `...${INTERNAL_ENV}.GITHUB_ACTIONS === "true"`,
+  },
   {
     file: "runner.js",
     why:

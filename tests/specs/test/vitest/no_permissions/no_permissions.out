@@ -1,0 +1,7 @@
+running 3 tests from ./no_permissions/no_permissions_test.ts
+without permissions > mocks, matchers and inline snapshots ... ok ([WILDCARD])
+without permissions > a failed assertion is formatted ... ok ([WILDCARD])
+without permissions > the test's own environment reads stay checked ... ok ([WILDCARD])
+
+ok | 3 passed | 0 failed ([WILDCARD])
+
