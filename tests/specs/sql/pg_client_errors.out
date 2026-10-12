@@ -1,0 +1,10 @@
+ssl request: true
+require true ERR_POSTGRES_TLS_NOT_AVAILABLE
+ssl request: true
+verify-full true ERR_POSTGRES_TLS_NOT_AVAILABLE
+timeout: ERR_POSTGRES_CONNECTION_TIMEOUT true
+refused: ERR_POSTGRES_CONNECTION_FAILED
+true MySQL is not supported by Deno.SQL yet
+true Unsupported connection string: expected postgres://, sqlite://, file: or :memory:
+true Unsupported sslmode "bogus"
+true "max" must be a positive integer

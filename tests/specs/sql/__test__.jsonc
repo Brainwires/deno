@@ -1,0 +1,131 @@
+// Deno.SQL / Deno.sql. The `pg_*` tests marked `"if": "postgres"` need a
+// Postgres server: set DENO_SQL_TEST_POSTGRES_URL (for example
+// postgres://postgres:pw@127.0.0.1:5432/postgres; the server must be on
+// loopback) and, for `pg_tls`, DENO_SQL_TEST_POSTGRES_CA to the PEM of the
+// CA that signed the server's certificate (issued for localhost and
+// 127.0.0.1). `pg_socket` needs DENO_SQL_TEST_POSTGRES_SOCKET, the directory
+// of the server's Unix-domain socket (DENO_SQL_TEST_POSTGRES_SOCKET_PORT if
+// its port is not 5432); `pg_client_cert` needs
+// DENO_SQL_TEST_POSTGRES_CLIENT_CERT / _CLIENT_KEY, a certificate (and key)
+// signed by that CA for a role `certuser` the server authenticates by
+// certificate (`hostssl all certuser all cert`). Without them those tests
+// are skipped.
+{
+  "tempDir": true,
+  "tests": {
+    "sqlite_basic": {
+      "args": "run --allow-read=. --allow-write=. sqlite_basic.ts",
+      "output": "sqlite_basic.out"
+    },
+    "sqlite_permissions": {
+      "args": "run sqlite_permissions.ts",
+      "output": "sqlite_permissions.out"
+    },
+    "sqlite_readonly": {
+      "steps": [{
+        "args": "run --allow-read=. --allow-write=. sqlite_readonly_setup.ts",
+        "output": ""
+      }, {
+        "args": "run --allow-read=. sqlite_readonly.ts",
+        "output": "sqlite_readonly.out"
+      }]
+    },
+    "pg_client_errors": {
+      "args": "run --allow-net=127.0.0.1 pg_client_errors.ts",
+      "output": "pg_client_errors.out"
+    },
+    "pg_permissions": {
+      "args": "run --allow-net=127.0.0.1:2 pg_permissions.ts",
+      "output": "pg_permissions.out"
+    },
+    "pg_default_env": {
+      "args": "run --allow-env pg_default_env.ts",
+      "envs": {
+        "POSTGRES_URL": "",
+        "DATABASE_URL": "postgres://alice:secret@db.example:6543/app?sslmode=require"
+      },
+      "output": "pg_default_env.out"
+    },
+    "check_types": {
+      "args": "check types.ts",
+      "output": "types.out"
+    },
+    "pg_types": {
+      "if": "postgres",
+      "envs": { "TZ": "UTC" },
+      "args": "run --allow-env=DENO_SQL_TEST_POSTGRES_URL --allow-net=127.0.0.1,localhost pg_types.ts",
+      "output": "pg_types.out"
+    },
+    "pg_errors": {
+      "if": "postgres",
+      "args": "run --allow-env=DENO_SQL_TEST_POSTGRES_URL --allow-net=127.0.0.1,localhost pg_errors.ts",
+      "output": "pg_errors.out"
+    },
+    "pg_transactions": {
+      "if": "postgres",
+      "args": "run --allow-env=DENO_SQL_TEST_POSTGRES_URL --allow-net=127.0.0.1,localhost pg_transactions.ts",
+      "output": "pg_transactions.out"
+    },
+    "pg_pool": {
+      "if": "postgres",
+      "args": "run --allow-env=DENO_SQL_TEST_POSTGRES_URL --allow-net=127.0.0.1,localhost pg_pool.ts",
+      "output": "pg_pool.out"
+    },
+    "pg_timestamp": {
+      "if": "postgres",
+      "envs": { "TZ": "America/Chicago" },
+      "args": "run --allow-env=DENO_SQL_TEST_POSTGRES_URL --allow-net=127.0.0.1,localhost pg_timestamp.ts",
+      "output": "pg_timestamp.out"
+    },
+    "pg_listen": {
+      "if": "postgres",
+      "args": "run --allow-env=DENO_SQL_TEST_POSTGRES_URL --allow-net=127.0.0.1,localhost pg_listen.ts",
+      "output": "pg_listen.out"
+    },
+    "pg_cursor": {
+      "if": "postgres",
+      "args": "run --allow-env=DENO_SQL_TEST_POSTGRES_URL --allow-net=127.0.0.1,localhost pg_cursor.ts",
+      "output": "pg_cursor.out"
+    },
+    "pg_cancel": {
+      "if": "postgres",
+      "args": "run --allow-env=DENO_SQL_TEST_POSTGRES_URL --allow-net=127.0.0.1,localhost pg_cancel.ts",
+      "output": "pg_cancel.out"
+    },
+    "pg_pipelined_begin": {
+      "if": "postgres",
+      "args": "run --allow-env=DENO_SQL_TEST_POSTGRES_URL --allow-net=127.0.0.1,localhost pg_pipelined_begin.ts",
+      "output": "pg_pipelined_begin.out"
+    },
+    "pg_round_trips": {
+      "if": "postgres",
+      "args": "run --allow-env=DENO_SQL_TEST_POSTGRES_URL --allow-net=127.0.0.1,localhost pg_round_trips.ts",
+      "output": "pg_round_trips.out"
+    },
+    "pg_pipeline": {
+      "if": "postgres",
+      "args": "run --allow-env=DENO_SQL_TEST_POSTGRES_URL --allow-net=127.0.0.1,localhost pg_pipeline.ts",
+      "output": "pg_pipeline.out"
+    },
+    "pg_file": {
+      "if": "postgres",
+      "args": "run --allow-env=DENO_SQL_TEST_POSTGRES_URL --allow-net=127.0.0.1,localhost --allow-read=. --allow-write=. pg_file.ts",
+      "output": "pg_file.out"
+    },
+    "pg_socket": {
+      "if": "postgresSocket",
+      "args": "run --allow-env --allow-read --allow-write --allow-net pg_socket.ts",
+      "output": "pg_socket.out"
+    },
+    "pg_client_cert": {
+      "if": "postgresClientCert",
+      "args": "run --allow-env --allow-read --allow-net=127.0.0.1,localhost pg_client_cert.ts",
+      "output": "pg_client_cert.out"
+    },
+    "pg_tls": {
+      "if": "postgresTls",
+      "args": "run --allow-env=DENO_SQL_TEST_POSTGRES_URL,DENO_SQL_TEST_POSTGRES_CA --allow-read --allow-net=127.0.0.1,localhost pg_tls.ts",
+      "output": "pg_tls.out"
+    }
+  }
+}

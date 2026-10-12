@@ -49,6 +49,7 @@ pub fn get_extensions_in_snapshot() -> Vec<Extension> {
     deno_process::deno_process::init(Default::default()),
     deno_node_crypto::deno_node_crypto::init(),
     deno_node_sqlite::deno_node_sqlite::init(),
+    deno_sql::deno_sql::init(),
     deno_node::deno_node::init::<
       DenoInNpmPackageChecker,
       NpmResolver<sys_traits::impls::RealSys>,

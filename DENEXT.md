@@ -1,29 +1,33 @@
-# Brainwires/deno: denext's Deno Desktop runtime fork
+# Brainwires/deno: denext's Deno
 
-This is a fork of [denoland/deno](https://github.com/denoland/deno) that exists
-for one reason: to ship a patched **Deno Desktop runtime** (the `libdenort`
-library `deno desktop` embeds an app into, plus
-[laufey](https://github.com/littledivy/laufey)'s backend hosts) for
-[denext](https://github.com/Brainwires/denext) 3.1 without waiting for the
-patches to land upstream.
+This is a fork of [denoland/deno](https://github.com/denoland/deno) that we
+maintain as our own Deno (decided 2026-10-11): it follows Deno releases on our
+own schedule and is not waiting to be retired in favor of stock Deno. It carries
+two kinds of changes, for [denext](https://github.com/Brainwires/denext) and its
+users:
 
-It is not a general-purpose Deno distribution. The `deno` CLI is **not**
-rebuilt: denext runs the stock `deno desktop` CLI (2.9.7) and points it at the
-prebuilt runtime from this fork's releases:
+- **The Deno Desktop runtime**: the `libdenort` library `deno desktop` embeds an
+  app into, plus [laufey](https://github.com/littledivy/laufey)'s backend hosts
+  (items 1-22 below). It is published as prebuilt archives that also work with
+  the stock `deno desktop` CLI (2.9.7):
 
-```sh
-DENORT_DESKTOP_BIN=<unpacked archive>/libdenort.dylib   # .so on Linux, denort.dll on Windows
-LAUFEY_DEV_DIR=<unpacked archive>/laufey
-deno desktop --backend webview|cef ...
-```
+  ```sh
+  DENORT_DESKTOP_BIN=<unpacked archive>/libdenort.dylib   # .so on Linux, denort.dll on Windows
+  LAUFEY_DEV_DIR=<unpacked archive>/laufey
+  deno desktop --backend webview|cef ...
+  ```
 
-## Exit criterion
+- **Features of the `deno` CLI and runtime itself**, such as Vitest / Jest
+  compatibility for `deno test` (item 23) and the built-in SQL client
+  (`Deno.SQL` / `Deno.sql`, item 24). These need this fork's own `deno` binary,
+  built from a release line (see [Reproducing a build](#reproducing-a-build));
+  the stock CLI does not have them.
 
-This fork goes away when **stock Deno ships these features**: once a Deno
-release carries the in-process memory transport, the configured app origin, and
-the per-app identifier handed to every laufey backend (and laufey releases the
-matching backend changes), denext uses the stock runtime and this fork is
-archived.
+## Upstream
+
+Changes that would help everyone can still be offered to denoland/deno, but
+nothing here depends on that: the fork keeps every change whether or not
+upstream takes it, and is rebased onto a newer Deno when we choose to move.
 
 ## Branches and tags
 
@@ -423,8 +427,167 @@ where the changes are discussed.
     patches for these (test name separator, `formatTitle` hook, unawaited async
     assertions, array equality).
 
-The runtime-side parts (1-3, 5-22) are what the prebuilt `libdenort` carries.
-The CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` /
+23. **`feat(sql)`: `Deno.SQL` / `Deno.sql`, a built-in SQL client** (`feat/sql`,
+    `ext/sql`): Bun's `Bun.sql` surface over Postgres and SQLite, with no npm.
+    `new Deno.SQL(url | options)` returns a tagged-template function; every
+    interpolated value is sent as a parameter (`$1`... / `?1`...), never spliced
+    into the text. Helpers `sql(object | objects,
+    ...columns)` (by the
+    keyword before them: INSERT, UPDATE ... SET, VALUES, IN, SELECT),
+    `sql(array)`, `sql("identifier")`, query fragments,
+    `sql.unsafe(text, params)`, `.values()`, `.raw()`, `.simple()`,
+    `sql.begin([options,] fn)` (ROLLBACK on throw) with `savepoint()`,
+    `sql.reserve()`, `sql.close({ timeout })` / `end()`. The pool (`max`,
+    `idleTimeout`, `maxLifetime`, `connectionTimeout`, a wait queue bounded by
+    the same timeout) and the builder are JavaScript (`01_sql.js`); the engines
+    are Rust:
+    - Postgres on `tokio-postgres` 0.7.15 (exact pins, MIT / Apache-2.0) over a
+      socket the extension opens: `--allow-net` is checked for the host as named
+      and for each address it resolves to; the `SSLRequest` and the rustls
+      handshake are done here with the runtime's root store and
+      `--unsafely-ignore-certificate-errors` (`sslmode` disable / prefer /
+      require / verify-ca / verify-full,
+      `tls: { ca, servername,
+      rejectUnauthorized }`). One op per query
+      returns every row, built directly in V8 from the binary format:
+      int2/int4/float as numbers, int8/numeric as strings (`bigint: true`:
+      `bigint`), json/jsonb parsed, bytea as `Uint8Array`, timestamp(tz)/date as
+      `Date`, arrays, enums, domains and composites; interval / time / uuid /
+      inet as the server's text. Prepared statements are cached per connection
+      (`prepare: false` sends unnamed ones). Server errors are
+      `SQL.PostgresError` with the SQLSTATE in `code` (and `errno`) plus
+      `detail`, `hint`, `position`, `constraint`, ...; client failures carry
+      `ERR_POSTGRES_*` codes.
+    - SQLite (`sqlite://`, `file:`, `:memory:`, `{ adapter: "sqlite" }`) on the
+      bundled rusqlite, one connection per client: read (and, unless read-only,
+      write) permission for the file, `ATTACH` (and so `VACUUM
+      INTO`) held
+      off without full permissions as `node:sqlite` does.
+    - `Deno.sql` is created on first access from `POSTGRES_URL` / `DATABASE_URL`
+      / `PGURL` / `PG_URL` (env permission); `PG*` variables fill fields a
+      client left out only when env access to them is already granted (no
+      prompt). Typings: `cli/tsc/dts/lib.deno_sql.d.ts`.
+    - Pipelining: single queries share pooled Postgres connections (up to 64 in
+      flight on one, sent back to back and answered in order; tokio-postgres
+      matches the responses), so a burst of queries is not bounded by `max`
+      round trips at a time. Transactions, `reserve()` and cursors get a
+      connection of their own. The S1 bench (`max: 4`, loopback, non-LTO
+      release, against `npm:postgres` 3.4.7 on the same build): 100 concurrent
+      `select 1` went from 3.2-4.8 ms to 1.4-1.7 ms (npm:postgres 1.6-1.9 ms);
+      the sequential cases did not move (select 1 ~0.09-0.10 ms either way).
+    - Transactions pipeline their control statements: `begin()` sends BEGIN
+      without waiting for it, so it goes out with the callback's first
+      statements, whose results are held until BEGIN's answer (its error wins,
+      and `begin()` rejects with it even if the callback swallowed it); and when
+      the callback returns its queries without awaiting them (a query or an
+      array of them) COMMIT is sent right behind them. A returned statement the
+      server fails aborts the transaction, so that COMMIT rolls back; one that
+      fails before it is sent (a NUL, a parameter count, the builder) is flagged
+      (`FLAG_GUARDED`) and `op_sql_pg_finish` sends ROLLBACK instead. BEGIN is
+      pipelined only when the options are transaction modes
+      (`isolation level ...`, `read only` / `read write`, `[not] deferrable`),
+      since a BEGIN that failed on its syntax would leave the statements behind
+      it in autocommit; other options keep the awaited BEGIN. `savepoint()` does
+      the same with SAVEPOINT / RELEASE (ROLLBACK TO on failure). The statements
+      of a transaction or a reserved connection (and cursors, simple queries and
+      transaction ends) now go on the wire in call order even when one has to
+      prepare its statement first (`FLAG_ORDERED`: a per-connection FIFO lock
+      held from the op's first poll until its messages are queued; before, a
+      cached statement could overtake one being prepared, which in a transaction
+      could run a query ahead of its `set_config` setup). The pool's independent
+      queries don't take it, so one being prepared doesn't hold back the ones
+      pipelined behind it. Round trips
+      (`tests/specs/sql/pg_round_trips.ts --timing`, a 10 ms each-way delay
+      proxy, `delay_proxy.ts`), before → after: bare query 1 → 1; begin with 1
+      returned query 3 → 1, with 1 awaited query 3 → 2; 2 returned queries 3 →
+      1; 2 pipelined queries in an async callback (denext's RLS shape) 3 → 2; 2
+      sequential awaited queries 4 → 3; a failing returned statement 3 → 1, a
+      failing awaited one 3 → 2; a savepoint with a returned query inside an
+      async transaction 5 → 2.
+    - `sql.listen(channel, fn, onlisten?)` / `sql.notify(channel, payload)`:
+      every channel of a client on one dedicated connection (outside `max`),
+      `LISTEN "<channel>"` with the name exact; on connection loss it reconnects
+      with backoff (immediately, then 100 ms doubling to 5 s), LISTENs again and
+      calls `onlisten` again (notifications sent while it was down are lost).
+      `unlisten()` UNLISTENs a channel with no callbacks left and closes the
+      connection once nothing listens. `onnotice(notice)` receives the server's
+      notices from every connection (dropped without it). The connection task
+      forwards notifications and notices through a channel to
+      `op_sql_pg_next_event` only when asked for.
+    - Cursors: `for await (const rows of sql\`...\`.cursor(n))`and`for await
+      (const row of
+      sql\`...\`)`(batches of 100) read a
+      server-side cursor (`DECLARE ...
+      NO SCROLL CURSOR`+`FETCH FORWARD
+      n`,
+      unnamed statements so cursor names don't fill the statement cache) one
+      batch per step of the loop, so backpressure is the loop itself; leaving
+      early closes the cursor. On the pool a cursor holds a connection in a
+      transaction of its own; on a reserved connection it opens one only if it
+      is not in a transaction already (`25P01`from`DECLARE`).
+      SQLite reads the rows first and hands them out in batches.
+    - `query.cancel()` of a running Postgres query: a CancelRequest over a new
+      connection to the same endpoint (same permission checks, TLS when the
+      connection uses TLS), rejecting with `ERR_SQL_QUERY_CANCELLED` (the
+      server's `57014` as `cause`). Each connection keeps its in-flight requests
+      in wire order, and a cancel waits until its query is the one the server is
+      running, so a pipelined query ahead of it is not cancelled. A query still
+      waiting for a pooled connection rejects at once.
+    - `sql.file(path, params)` (read permission, read when it runs),
+      `sql.array(values, type)` (`$n::type[]`), Unix-socket hosts (`host=/dir`,
+      `?host=/dir`, `path`; read and write permission for the socket plus
+      `--allow-net` for it, as `Deno.connect` for a Unix socket; no TLS), client
+      certificates (`sslcert` / `sslkey` / `sslrootcert` files or
+      `tls: { cert, key }`), ranges and multiranges as
+      `{ lower, upper, lowerInclusive, upperInclusive, empty }`, geometry
+      (`point` `{ x, y }`, `line`, `lseg`, `box`, `path`, `polygon`, `circle`),
+      `tsvector` as the server's text, and Bun's hook arguments:
+      `onconnect(error | null, connection)` /
+      `onclose(error | null,
+      connection)` with the connection's id and
+      server parameters.
+    - Checked against Bun 1.3.6's `Bun.sql` on the same server (one script,
+      every builtin type, parameters, result metadata, helpers via
+      `current_query()`, errors). The same: row objects, `int8` / `numeric` as
+      strings (`bigint: true` → `bigint`), json, arrays, enums, dates and
+      `timestamptz`, uuid / inet / interval / time text, `count` / `command`,
+      the INSERT / UPDATE / IN / identifier helpers (whitespace aside),
+      transactions and savepoints, `reserve()`,
+      `ERR_POSTGRES_CONNECTION_CLOSED`. Kept different on purpose: `code` is the
+      SQLSTATE (as in postgres.js; Bun puts `ERR_POSTGRES_SERVER_ERROR` /
+      `_SYNTAX_ERROR` there and the SQLSTATE in `errno`, which we also set),
+      `position` is a number; `count` / `command` are non-enumerable (Bun's
+      print with the rows) and there is no `affectedRows`; `bytea` is a
+      `Uint8Array` (Bun: `Buffer`); ranges, geometry and anonymous records are
+      objects / arrays (Bun: the server's text) and `money` has no currency
+      sign; `±infinity` timestamps are strings (Bun: an Invalid Date); `void` is
+      `null`; parameters are typed by the server (unspecified OIDs), so an
+      uncast `${42}` in a select list comes back as the text `"42"` (Bun types
+      numbers and booleans itself), while `${[1, 2]}::int4[]`, objects (JSON,
+      Bun sends `[object Object]`), `Date`s (ISO, Bun sends `Date.toString()`)
+      and arrays bound to text work; `sql([])` after IN is `(null)` (Bun: a
+      syntax error); `sql(names)` after SELECT and `VALUES` rows, arrays of
+      fragments work (Bun rejects them); `.simple()` values are the server's
+      text and `.raw()` cells its binary form (Bun parses simple results and
+      gives text-format raw cells); `cancel()` before a query starts rejects it
+      (Bun's never settles); a refused connection is
+      `ERR_POSTGRES_CONNECTION_FAILED` (Bun: `_CONNECTION_CLOSED`); an uncast
+      parameter takes the type the server infers (`select ${42}` is `"42"`),
+      which is more forgiving than Bun's client-side typing (`text_col = ${42}`
+      works). Aligned: booleans bound where the server expects a number
+      (`${true}::int`) are sent as `1` / `0`, and as `true` / `false` where it
+      expects text; `onconnect` / `onclose` take the error (or `null`) first;
+      `timestamp` without a time zone is local wall-clock time both ways, as in
+      Bun, postgres.js and node-postgres: read as `new Date(y, m, d, h, ...)`
+      would (a time the clock skipped uses the offset from before the change,
+      one it passed twice the earlier instant), and a `Date` is sent as local
+      time with its UTC offset (`2024-01-15T12:00:00.000-06:00`, which a
+      `timestamptz` reads as the same instant); `date` stays UTC midnight both
+      ways. The offsets come from the runtime's own `Date` (so `TZ` applies).
+    - Not yet: MySQL, the `"bun"` module, `tsquery` decoding.
+
+The runtime-side parts (1-3, 5-22, 24) are what the prebuilt `libdenort`
+carries. The CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` /
 `LAUFEY_APP_ID` into a packaged app's launchers) are in the branch too, but a
 stock CLI does not run them; denext's own launcher provides that environment.
 
@@ -598,6 +761,14 @@ Specs this fork adds for what its runtime exposes outside a desktop app:
   server refuses a request target that claims `http+memory://` (400).
 - `tests/specs/check/desktop_types`: the fork's `Deno.desktop` types check with
   `--desktop`, and misuses are type errors.
+- `tests/specs/sql`: `Deno.SQL` over SQLite (helpers, parameters that would
+  break interpolation, transactions and savepoints, errors, permissions,
+  read-only files) and Postgres client failures against stand-in servers
+  (`sslmode=require` refused by a server without TLS, connect timeout, refused
+  port, net and env permissions). The `pg_*` tests that need a real server
+  (types both ways, SQLSTATE errors, transactions, the pool's limits and
+  timeouts, TLS modes) run when `DENO_SQL_TEST_POSTGRES_URL` (and, for TLS,
+  `DENO_SQL_TEST_POSTGRES_CA`) is set, and are skipped otherwise.
 - `tests/specs/run/desktop_ops_inert` (`sys.js`): the integrations that need
   `--allow-sys` refuse without it (and with only some sys names) and are inert
   with it.

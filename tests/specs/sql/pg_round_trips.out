@@ -1,0 +1,10 @@
+bare query: 1 turn(s) -> 1
+begin, 1 query returned: 1 turn(s) -> 1
+begin, 1 query awaited: 2 turn(s) -> 1
+begin, 2 queries returned (array): 1 turn(s) -> [1,"one"]
+begin, 2 pipelined queries (RLS shape): 2 turn(s) -> "rls"
+begin, 2 sequential awaited queries: 3 turn(s) -> "seq"
+failing statement, returned (rollback): 1 turn(s) -> "22012"
+failing statement, awaited (rollback): 2 turn(s) -> "22012"
+savepoint, 1 query returned: 2 turn(s) -> 2
+after: ""

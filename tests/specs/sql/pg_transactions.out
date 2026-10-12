@@ -1,0 +1,12 @@
+inside: 1
+rolled back: boom 0
+statement error: 22P02 0
+savepoint: inner
+committed: [ [ { a: 1 } ], [ { b: 2 } ] ] [ [ "kept" ], [ "nested ok" ] ]
+read only: 25006
+[ { transaction_isolation: "serializable" } ]
+one connection: true
+Already in a transaction: use savepoint() to nest one
+savepoint() is only available inside a transaction
+reserved same connection: true
+The reserved connection has been released

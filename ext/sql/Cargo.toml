@@ -1,0 +1,29 @@
+# Copyright 2018-2026 the Deno authors. MIT license.
+
+[package]
+name = "deno_sql"
+version = "0.1.0"
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Built-in SQL client (Deno.SQL / Deno.sql) for Postgres and SQLite"
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+bytes.workspace = true
+deno_core.workspace = true
+deno_error.workspace = true
+deno_net.workspace = true
+deno_permissions.workspace = true
+deno_tls.workspace = true
+postgres-protocol.workspace = true
+postgres-types.workspace = true
+rusqlite.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-postgres.workspace = true
+tokio-rustls.workspace = true

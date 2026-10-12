@@ -1,0 +1,3 @@
+host: { local: true, ssl: false }
+?host=: { local: true, ssl: false }
+path: { local: true, ssl: false }

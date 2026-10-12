@@ -1,0 +1,10 @@
+disable ssl: false
+prefer ssl: true
+require ssl: true
+verify-full (untrusted) error: ERR_POSTGRES_TLS_UPGRADE_FAILED
+tls: true (untrusted) error: ERR_POSTGRES_TLS_UPGRADE_FAILED
+verify-full + ca ssl: true
+verify-full + ca, wrong name error: ERR_POSTGRES_TLS_UPGRADE_FAILED
+verify-ca + ca, wrong name ssl: true
+verify-ca (untrusted) error: ERR_POSTGRES_TLS_UPGRADE_FAILED
+rejectUnauthorized: false ssl: true
