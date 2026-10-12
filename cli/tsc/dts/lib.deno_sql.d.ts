@@ -51,12 +51,35 @@ declare namespace Deno {
     simple(): SQLQuery<T>;
     /** Starts the query now. */
     execute(): this;
-    /** Cancels the query if it has not started. */
+    /** Cancels the query. One that has not started never runs; one waiting
+     * for a pooled connection rejects at once; one the server is running
+     * (Postgres) gets a cancel request and rejects with
+     * `ERR_SQL_QUERY_CANCELLED` (the server's `57014` error in `cause`)
+     * unless it finished first. Queries pipelined on the same connection
+     * ahead of it are not affected: the request waits for its turn. */
     cancel(): this;
     /** Whether the query has started. */
     readonly active: boolean;
-    /** Whether `cancel()` was called before the query started. */
+    /** Whether `cancel()` was called. */
     readonly cancelled: boolean;
+    /** The rows in batches of at most `size` (default 1), read from a
+     * server-side cursor (`DECLARE` / `FETCH`) one batch at a time as the
+     * loop asks for them. On the pool the cursor holds a connection, in a
+     * transaction of its own, until the loop ends; on a reserved connection
+     * or in a transaction it uses that one. Leaving the loop early closes
+     * the cursor. SQLite reads the rows first and hands them out in
+     * batches.
+     *
+     * ```ts
+     * for await (const rows of sql`select * from events`.cursor(100)) {
+     *   await process(rows);
+     * }
+     * ```
+     */
+    cursor(size?: number): AsyncIterable<SQLResult<T>>;
+    /** The rows one at a time, from a server-side cursor read 100 rows per
+     * round trip (see `cursor()`). */
+    [Symbol.asyncIterator](): AsyncIterator<T>;
     /** Attaches a rejection handler. */
     catch<R = never>(
       onrejected?: ((reason: unknown) => R | PromiseLike<R>) | null,
@@ -77,6 +100,68 @@ declare namespace Deno {
     readonly rest: unknown[];
   }
 
+  /** An array parameter with an explicit type, from `sql.array()`.
+   *
+   * @category SQL */
+  export interface SQLArrayValue {
+    /** The elements. */
+    readonly values: readonly unknown[];
+    /** The type cast to (`"int4[]"`), if any. */
+    readonly cast?: string;
+  }
+
+  /** A pooled connection, as `onconnect` / `onclose` see it.
+   *
+   * @category SQL */
+  export interface SQLConnectionInfo {
+    /** A number for the connection, unique within its client. */
+    id: number;
+    /** Parameters the server reported at startup (`server_version`,
+     * `TimeZone`, `application_name`, ...). */
+    parameters: Record<string, string>;
+  }
+
+  /** A notice from the server (`RAISE NOTICE`, warnings), for `onnotice`.
+   *
+   * @category SQL */
+  export interface SQLNotice {
+    /** The notice's text. */
+    message: string;
+    /** `NOTICE`, `WARNING`, `INFO`, `LOG` or `DEBUG`. */
+    severity: string;
+    /** Its SQLSTATE (`00000` for a plain notice). */
+    code: string;
+    /** The server's detail message. */
+    detail?: string;
+    /** The server's hint. */
+    hint?: string;
+    /** Context. */
+    where?: string;
+    /** Schema of the object involved. */
+    schema?: string;
+    /** Table involved. */
+    table?: string;
+    /** Column involved. */
+    column?: string;
+    /** Data type involved. */
+    dataType?: string;
+    /** Constraint involved. */
+    constraint?: string;
+    /** Server source routine. */
+    routine?: string;
+  }
+
+  /** A subscription made with `sql.listen()`.
+   *
+   * @category SQL */
+  export interface SQLListener {
+    /** The channel. */
+    readonly channel: string;
+    /** Stops delivering to this callback (UNLISTEN once a channel has no
+     * callbacks left; the listening connection closes once none has). */
+    unlisten(): Promise<void>;
+  }
+
   /** TLS options for a Postgres connection.
    *
    * @category SQL */
@@ -88,6 +173,12 @@ declare namespace Deno {
     ca?: string | string[];
     /** The name to verify the certificate against (default: the host). */
     servername?: string;
+    /** A client certificate chain (PEM), for servers that ask for one
+     * (`sslcert` in a connection string names a file instead). */
+    cert?: string;
+    /** The client certificate's private key (PEM; `sslkey` in a connection
+     * string names a file instead). */
+    key?: string;
   }
 
   /** Options of {@linkcode Deno.SQL}. Times are in seconds.
@@ -99,12 +190,20 @@ declare namespace Deno {
     url?: string | URL;
     /** `"postgres"` (default) or `"sqlite"`. */
     adapter?: "postgres" | "postgresql" | "sqlite";
-    /** Postgres host (default `PGHOST`, else `localhost`). */
+    /** Postgres host (default `PGHOST`, else `localhost`). A path (starting
+     * with `/`) is the directory of the server's Unix-domain socket
+     * (`<host>/.s.PGSQL.<port>`), as in libpq; `?host=/path` in a
+     * connection string works the same. A socket needs read and write
+     * permission for its path and net permission for it, as
+     * `Deno.connect({ transport: "unix" })` does, and never uses TLS. */
     hostname?: string;
     /** Alias of `hostname`. */
     host?: string;
     /** Postgres port (default `PGPORT`, else 5432). */
     port?: number;
+    /** The Postgres server's Unix-domain socket itself
+     * (`/var/run/postgresql/.s.PGSQL.5432`), instead of a host. */
+    path?: string;
     /** Postgres user (default `PGUSER`, then `USER`, else `postgres`). */
     username?: string;
     /** Alias of `username`. */
@@ -150,10 +249,16 @@ declare namespace Deno {
     readonly?: boolean;
     /** SQLite: create the file if missing (default `true`). */
     create?: boolean;
-    /** Called after each new connection. */
-    onconnect?: () => void;
-    /** Called when a pooled connection closes. */
-    onclose?: (error?: unknown) => void;
+    /** Called after each new pooled connection is open (`error` is
+     * `null`), or failed to open (`error` set, no connection). */
+    onconnect?: (error: unknown, connection?: SQLConnectionInfo) => void;
+    /** Called when a pooled connection closes: `error` is what broke it, or
+     * `null` when it was closed on purpose (idle timeout, `close()`). */
+    onclose?: (error: unknown, connection: SQLConnectionInfo) => void;
+    /** Called with each notice the server sends (`RAISE NOTICE`,
+     * warnings) on any connection of the client. Without it notices are
+     * dropped. */
+    onnotice?: (notice: SQLNotice) => void;
   }
 
   /** A SQL client: a tagged-template function that builds parameterized
@@ -186,6 +291,39 @@ declare namespace Deno {
       text: string,
       params?: unknown[],
     ): SQLQuery<T>;
+    /** A query from the text of a file, read when the query runs (read
+     * permission), with optional parameters (`$1`... / `?1`...). It can't
+     * be used as a fragment of another query. */
+    file<T = Record<string, unknown>>(
+      path: string | URL,
+      params?: unknown[],
+    ): SQLQuery<T>;
+    /** An array parameter sent as `type[]` (`sql.array(ids, "int8")` is
+     * `$1::int8[]`); without a type the server infers it. */
+    array(values: readonly unknown[], type?: string): SQLArrayValue;
+    /** Postgres: subscribes `fn` to `channel` (`LISTEN`, the name taken
+     * exactly as given) on a connection of its own, shared by every channel
+     * of the client and outside the pool's `max`. `fn` gets each
+     * notification's payload, in the order the server sent them;
+     * `onlisten` runs once subscribed, and again whenever the connection
+     * was lost and is back (it reconnects with backoff and LISTENs again;
+     * notifications sent while it was down are lost). While something
+     * listens, the connection keeps the process alive.
+     *
+     * ```ts
+     * const { unlisten } = await sql.listen("jobs", (id) => run(id));
+     * await sql.notify("jobs", "42");
+     * ```
+     */
+    listen(
+      channel: string,
+      fn: (payload: string, info: { channel: string; pid: number }) => void,
+      onlisten?: () => void,
+    ): Promise<SQLListener>;
+    /** Postgres: sends `payload` (under 8000 bytes) to the listeners of
+     * `channel` (`pg_notify`); it is delivered when the transaction it is
+     * sent in commits. */
+    notify(channel: string, payload?: string): SQLQuery;
     /** Runs `fn` in a transaction: COMMIT when it settles, ROLLBACK (and
      * rethrow) when it throws. */
     begin<T>(fn: (sql: SQL) => T | Promise<T>): Promise<Awaited<T>>;
@@ -311,6 +449,20 @@ declare namespace Deno {
    * Requires `--allow-net` for the Postgres host, `--allow-read` and
    * `--allow-write` for a SQLite file, and `--allow-env` to read a default
    * connection string.
+   *
+   * Postgres values arrive as: `int2` / `int4` / `oid` / floats as numbers;
+   * `int8` and `numeric` as strings (`bigint: true` makes `int8` a
+   * `bigint`); `bool`; text types and enums as strings; `json` / `jsonb`
+   * parsed; `bytea` as `Uint8Array`; `timestamp(tz)` / `date` as `Date`
+   * (`"infinity"` / `"-infinity"` as strings); `time`, `timetz`,
+   * `interval`, `uuid`, `inet`, `cidr`, `macaddr`, `bit`, `money` and
+   * `tsvector` as the server's text; arrays as (nested) arrays; composites
+   * as objects; ranges as `{ lower, upper, lowerInclusive, upperInclusive,
+   * empty }` (an unbounded side is `null`) and multiranges as arrays of
+   * them; `point` as `{ x, y }`, `line` as `{ a, b, c }`, `lseg` and `box`
+   * as two points, `path` as `{ closed, points }`, `polygon` as an array of
+   * points, `circle` as `{ x, y, radius }`. Other types (`tsquery`, ...)
+   * arrive as their raw bytes; cast them to `text` to read them.
    *
    * @category SQL */
   export const SQL: SQLConstructor;

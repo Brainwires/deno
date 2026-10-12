@@ -1,2 +1,5 @@
 net: true
 env: true
+file: true
+unix socket: true
+sslcert: true

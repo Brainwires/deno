@@ -22,7 +22,34 @@ export async function valid() {
   const code: string | undefined = err.code;
   const isSql: boolean = err instanceof Deno.SQL.SQLError;
   const def: Deno.SQL = Deno.sql;
-  return [first, count, command, values, n, lite, code, isSql, def];
+  for await (const batch of sql<{ id: number }>`select id from t`.cursor(10)) {
+    const id: number | undefined = batch[0]?.id;
+    const batchCount: number = batch.count;
+    console.log(id, batchCount);
+  }
+  for await (const row of sql<{ id: number }>`select id from t`) {
+    const id: number = row.id;
+    console.log(id);
+  }
+  const running = sql`select pg_sleep(1)`.execute();
+  running.cancel();
+  const sub: Deno.SQLListener = await sql.listen(
+    "chan",
+    (payload: string, info) => console.log(payload, info.pid),
+    () => {},
+  );
+  await sub.unlisten();
+  await sql.notify("chan", "hi");
+  await sql.file("q.sql", [1]);
+  await sql`select ${sql.array([1, 2], "int4")}`;
+  const hooked = new Deno.SQL({
+    host: "/var/run/postgresql",
+    tls: { cert: "pem", key: "pem" },
+    onconnect: (error, conn) => console.log(error, conn?.parameters),
+    onclose: (error, conn) => console.log(error, conn.id),
+    onnotice: (notice: Deno.SQLNotice) => console.log(notice.severity),
+  });
+  return [first, count, command, values, n, lite, code, isSql, def, hooked];
 }
 
 export async function invalid(sql: Deno.SQL) {
@@ -34,6 +61,12 @@ export async function invalid(sql: Deno.SQL) {
   await sql.begin();
   // @ts-expect-error: unsafe takes text
   sql.unsafe(1);
+  // @ts-expect-error: listen needs a callback
+  await sql.listen("chan");
+  // @ts-expect-error: payloads are strings
+  sql.listen("chan", (payload: number) => payload);
+  // @ts-expect-error: array() takes an array
+  sql.array(1);
   // @ts-expect-error: count is a number
   const s: string = (await sql`select 1`).count;
   return s;

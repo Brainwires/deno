@@ -147,5 +147,44 @@ console.log(await sql`select 1 as a; select 'two' as b, null as c`.simple());
 // unsafe()
 console.log(await sql.unsafe("select $1::text || $2::text as s", ["a'", "b"]));
 
+// Ranges and multiranges as { lower, upper, lowerInclusive, upperInclusive,
+// empty } (null for an unbounded side).
+console.log(
+  await sql`select int4range(1, 10) as r, '(,2020-01-02]'::daterange as d,
+    'empty'::numrange as e, '{[1,3), [5,6)}'::int4multirange as m`,
+);
+// Geometry as points ({ x, y }) and shapes made of them; tsvector as the
+// server's text.
+console.log(
+  await sql`select point(1, 2) as p, line(point(0, 0), point(1, 1)) as l,
+    lseg(point(0, 0), point(1, 1)) as s, box(point(0, 0), point(2, 2)) as b,
+    path(polygon '((0,0),(1,0),(1,1))') as pa, '[(0,0),(1,1)]'::path as op,
+    polygon '((0,0),(1,0),(1,1))' as pg, circle(point(0, 0), 3) as c`,
+);
+const [tsv] = await sql`select $$'a''b':1A,2 c$$::tsvector as t,
+  to_tsvector('english', 'The quick brown foxes') as en`;
+console.log(tsv);
+const [{ same }] =
+  await sql`select ${tsv.t}::tsvector::text = ${tsv.t} as same`;
+console.log("tsvector round trip:", same);
+
+// sql.array(values, type): an array parameter cast to type[].
+console.log(
+  await sql`select ${sql.array([1, 2, 3], "int4")} as i,
+    ${sql.array(["a", "b c"], "text")} as t, ${sql.array([], "int8")} as e,
+    pg_typeof(${sql.array([1.5], "double precision")})::text as dp,
+    ${sql.array([[1, 2], [3, 4]], "int4[]")} as nested`,
+);
+await sql`create table denosql_types.arr (tags text[])`;
+await sql`insert into denosql_types.arr ${
+  sql({ tags: sql.array(["x", "y"], "text") })
+}`;
+console.log(await sql`select tags from denosql_types.arr`);
+try {
+  sql.array([1], "int; drop table x");
+} catch (e) {
+  console.log("bad type:", (e as Error).name);
+}
+
 await sql`drop schema denosql_types cascade`;
 await sql.close();

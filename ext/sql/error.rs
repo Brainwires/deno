@@ -31,6 +31,9 @@ pub enum SqlError {
   Permission(#[from] deno_permissions::PermissionCheckError),
   #[error(transparent)]
   Resource(#[from] deno_core::error::ResourceError),
+  /// Reading a file (`sql.file`, `sslcert`, ...) failed.
+  #[error(transparent)]
+  Io(std::io::Error),
   /// A `SQL.PostgresError`: a server error (SQLSTATE in `code`) or a
   /// client-side failure (an `ERR_POSTGRES_*` code).
   #[error("{message}")]
@@ -158,6 +161,7 @@ impl JsErrorClass for SqlError {
     match self {
       SqlError::Permission(e) => e.get_class(),
       SqlError::Resource(e) => e.get_class(),
+      SqlError::Io(e) => e.get_class(),
       SqlError::Postgres { .. } => Cow::Borrowed(POSTGRES_ERROR_CLASS),
       SqlError::Sqlite { .. } => Cow::Borrowed(SQLITE_ERROR_CLASS),
       SqlError::Type(_) => Cow::Borrowed("TypeError"),
@@ -168,6 +172,7 @@ impl JsErrorClass for SqlError {
     match self {
       SqlError::Permission(e) => e.get_message(),
       SqlError::Resource(e) => e.get_message(),
+      SqlError::Io(e) => e.get_message(),
       SqlError::Postgres { message, .. } | SqlError::Sqlite { message, .. } => {
         Cow::Owned(message.clone())
       }
@@ -179,6 +184,7 @@ impl JsErrorClass for SqlError {
     match self {
       SqlError::Permission(e) => e.get_additional_properties(),
       SqlError::Resource(e) => e.get_additional_properties(),
+      SqlError::Io(e) => e.get_additional_properties(),
       SqlError::Postgres { props, .. } | SqlError::Sqlite { props, .. } => {
         Box::new(
           props

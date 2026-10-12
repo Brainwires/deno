@@ -1,0 +1,13 @@
+batches: [ [ 1, 2, 3 ], [ 4, 5, 6 ], [ 7 ] ]
+default size 1: [ "1:a", "1:b" ]
+values: [[[1,2],[2,4]],[[3,6]]]
+rows: 1000 500500
+early exit: 30 250 true
+pool after: [ 1, 2, 3 ]
+error: 22012
+after error: 1
+in transaction: [ 1, 2, 3, 4 ] open cursors: 0
+reserved: [ 3, 1 ] open cursors: 0 no transaction
+started: The query has already started
+consumed: The query was consumed by a cursor
+size 0: TypeError

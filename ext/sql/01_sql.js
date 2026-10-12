@@ -8,10 +8,13 @@
 (function () {
 const { core, primordials } = __bootstrap;
 const {
+  op_sql_pg_cancel,
   op_sql_pg_connect,
   op_sql_pg_is_closed,
+  op_sql_pg_next_event,
   op_sql_pg_query,
   op_sql_pg_simple,
+  op_sql_read_text_file,
   op_sql_sqlite_exec,
   op_sql_sqlite_open,
   op_sql_sqlite_query,
@@ -25,10 +28,19 @@ const {
   ArrayPrototypePop,
   ArrayPrototypePush,
   ArrayPrototypeShift,
+  ArrayPrototypeSlice,
   ArrayPrototypeSplice,
   DateNow,
   Error,
   FunctionPrototype,
+  MapPrototypeClear,
+  MapPrototypeDelete,
+  MapPrototypeGet,
+  MapPrototypeGetSize,
+  MapPrototypeKeys,
+  MapPrototypeSet,
+  MapPrototypeValues,
+  MathMin,
   NumberIsFinite,
   NumberIsInteger,
   NumberParseInt,
@@ -45,15 +57,18 @@ const {
   RegExpPrototypeExec,
   SafePromiseAll,
   SafePromisePrototypeFinally,
+  SafeMap,
   SafeRegExp,
   SafeSet,
   SetPrototypeAdd,
   SetPrototypeDelete,
   SetPrototypeGetSize,
+  SetPrototypeHas,
   SetPrototypeValues,
   ArrayFrom,
   String,
   StringPrototypeCharCodeAt,
+  StringPrototypeEndsWith,
   StringPrototypeIndexOf,
   StringPrototypeReplace,
   StringPrototypeSearch,
@@ -64,6 +79,7 @@ const {
   StringPrototypeToUpperCase,
   Symbol,
   SymbolAsyncDispose,
+  SymbolAsyncIterator,
   SymbolDispose,
   TypeError,
   decodeURIComponent,
@@ -78,11 +94,19 @@ let _permissions;
 const lazyPermissions = () =>
   _permissions ??
     (_permissions = core.loadExtScript("ext:runtime/10_permissions.js"));
+let _event;
+const lazyEvent = () =>
+  _event ?? (_event = core.loadExtScript("ext:deno_web/02_event.js"));
 
 // Must match `rows.rs`.
 const FLAG_VALUES = 1;
 const FLAG_RAW = 2;
 const FLAG_BIGINT = 4;
+const FLAG_UNNAMED = 8;
+
+// Must match `pg.rs`.
+const EVENTS_NOTICES = 1;
+const EVENTS_NOTIFICATIONS = 2;
 
 const STATEMENT_CACHE_SIZE = 100;
 
@@ -153,21 +177,32 @@ function connectionError(adapter, message, code) {
   });
 }
 
+async function readPem(path) {
+  return path === undefined ? undefined : await op_sql_read_text_file(path);
+}
+
 const postgres = {
   name: "postgres",
   Error: PostgresError,
   closedCode: "ERR_POSTGRES_CONNECTION_CLOSED",
   timeoutCode: "ERR_POSTGRES_CONNECTION_TIMEOUT",
+  pipeline: true,
   placeholder: (n) => "$" + n,
-  async connect(options) {
+  async connect(options, events) {
     let password = options.password;
     if (typeof password === "function") password = await password();
     if (password !== undefined && password !== null) {
       password = String(password);
     }
+    // `sslcert` / `sslkey` / `sslrootcert` files are read per connection
+    // (read permission for each).
+    const ca = options.caFile !== undefined
+      ? ArrayPrototypeConcat(options.ca, [await readPem(options.caFile)])
+      : options.ca;
     return await op_sql_pg_connect({
       hostname: options.hostname,
       port: options.port,
+      socketPath: options.socketPath ?? null,
       username: options.username,
       password: password ?? null,
       database: options.database ?? null,
@@ -175,18 +210,23 @@ const postgres = {
       applicationName: options.applicationName ?? null,
       options: options.startupOptions ?? null,
       connectTimeoutMs: options.connectionTimeout * 1000,
-      ca: options.ca,
+      ca,
       serverName: options.serverName ?? null,
+      cert: options.cert ?? (await readPem(options.certFile)) ?? null,
+      key: options.key ?? (await readPem(options.keyFile)) ?? null,
       statementCacheSize: options.prepare ? STATEMENT_CACHE_SIZE : 0,
+      events,
     });
   },
-  query: (rid, text, params, flags) =>
-    op_sql_pg_query(rid, text, params, flags),
-  simple: (rid, text, flags) => op_sql_pg_simple(rid, text, flags),
+  query: (rid, text, params, flags, id) =>
+    op_sql_pg_query(rid, text, params, flags, id),
+  simple: (rid, text, flags, id) => op_sql_pg_simple(rid, text, flags, id),
   async control(rid, text) {
-    await op_sql_pg_simple(rid, text, 0);
+    await op_sql_pg_simple(rid, text, 0, 0);
   },
   isClosed: (rid) => op_sql_pg_is_closed(rid),
+  nextEvent: (rid) => op_sql_pg_next_event(rid),
+  cancel: (rid, id) => op_sql_pg_cancel(rid, id),
 };
 
 const sqlite = {
@@ -194,14 +234,18 @@ const sqlite = {
   Error: SQLiteError,
   closedCode: "ERR_SQLITE_CLOSED",
   timeoutCode: "ERR_SQLITE_CONNECTION_TIMEOUT",
+  pipeline: false,
   placeholder: (n) => "?" + n,
   // deno-lint-ignore require-await
   async connect(options) {
-    return op_sql_sqlite_open(
-      options.filename,
-      options.readonly,
-      options.create,
-    );
+    return {
+      rid: op_sql_sqlite_open(
+        options.filename,
+        options.readonly,
+        options.create,
+      ),
+      parameters: {},
+    };
   },
   // deno-lint-ignore require-await
   async query(rid, text, params, flags) {
@@ -217,19 +261,40 @@ const sqlite = {
     op_sql_sqlite_exec(rid, text);
   },
   isClosed: () => false,
+  nextEvent: undefined,
+  cancel: undefined,
 };
 
 // ---------------------------------------------------------------------------
 // Pool
 
+// Queries one pooled Postgres connection may have in flight at once (sent
+// back to back without waiting for the previous result: the server runs them
+// in order). Transactions and reserved connections are never shared.
+const PIPELINE_DEPTH = 64;
+
+/** What `onconnect` / `onclose` receive about a pooled connection (after
+ * the error, or `null`, which comes first as in Bun). */
+function connectionInfo(conn) {
+  return {
+    id: conn.id,
+    parameters: conn.parameters ?? {},
+  };
+}
+
 class Pool {
   #adapter;
   #options;
+  /** Open connections nobody uses. */
   #idle = [];
+  /** Connections in use or being opened (`conn.ready` until open). */
   #busy = new SafeSet();
-  #pending = 0;
+  /** The busy connections whose queries may be pipelined. */
+  #shared = [];
   #waiters = [];
+  #exclusiveWaiters = 0;
   #drained = [];
+  #nextId = 0;
   closed = false;
 
   constructor(adapter, options) {
@@ -238,33 +303,46 @@ class Pool {
   }
 
   get #size() {
-    return this.#idle.length + SetPrototypeGetSize(this.#busy) +
-      this.#pending;
+    return this.#idle.length + SetPrototypeGetSize(this.#busy);
   }
 
-  acquire() {
+  /** A connection for one query (`exclusive` false: possibly shared with
+   * other single queries) or for a transaction / reservation. */
+  acquire(exclusive) {
     if (this.closed) {
       return PromiseReject(
         connectionError(this.#adapter, "Connection pool is closed"),
       );
     }
+    const shared = !exclusive && this.#adapter.pipeline;
     while (this.#idle.length > 0) {
       const conn = ArrayPrototypePop(this.#idle);
       this.#clearIdle(conn);
       if (this.#usable(conn)) {
-        SetPrototypeAdd(this.#busy, conn);
+        this.#take(conn, shared);
         return PromiseResolve(conn);
       }
       this.#destroy(conn);
     }
-    if (this.#size < this.#options.max) return this.#open();
+    if (this.#size < this.#options.max) return this.#open(shared);
+    if (shared && this.#exclusiveWaiters === 0) {
+      const conn = this.#leastLoaded();
+      if (conn !== undefined) {
+        conn.users++;
+        return conn.ready ?? PromiseResolve(conn);
+      }
+    }
     return new Promise((resolve, reject) => {
-      const waiter = { resolve, reject, timer: undefined };
+      const waiter = { resolve, reject, timer: undefined, shared };
+      if (!shared) this.#exclusiveWaiters++;
       const seconds = this.#options.connectionTimeout;
       if (seconds > 0) {
         waiter.timer = setTimeout(() => {
           const i = ArrayPrototypeIndexOf(this.#waiters, waiter);
-          if (i !== -1) ArrayPrototypeSplice(this.#waiters, i, 1);
+          if (i !== -1) {
+            ArrayPrototypeSplice(this.#waiters, i, 1);
+            if (!shared) this.#exclusiveWaiters--;
+          }
           reject(connectionError(
             this.#adapter,
             `Timed out after ${seconds}s waiting for a connection from the pool (max: ${this.#options.max})`,
@@ -276,44 +354,111 @@ class Pool {
     });
   }
 
-  async #open() {
-    this.#pending++;
-    let rid;
-    try {
-      rid = await this.#adapter.connect(this.#options);
-    } catch (error) {
-      this.#pending--;
-      this.#dispatch();
-      this.#checkDrained();
-      throw error;
-    }
-    this.#pending--;
-    const conn = { rid, createdAt: DateNow(), idleTimer: undefined };
-    if (this.closed) {
-      this.#destroy(conn);
-      this.#checkDrained();
-      throw connectionError(this.#adapter, "Connection pool is closed");
-    }
+  #take(conn, shared) {
     SetPrototypeAdd(this.#busy, conn);
-    if (typeof this.#options.onconnect === "function") {
-      this.#options.onconnect();
-    }
-    return conn;
+    conn.users = 1;
+    conn.shared = shared;
+    if (shared) ArrayPrototypePush(this.#shared, conn);
   }
 
-  release(conn, broken = false) {
-    if (!SetPrototypeDelete(this.#busy, conn)) return;
-    if (broken || this.closed || !this.#usable(conn)) {
-      this.#destroy(conn, broken);
+  #unshare(conn) {
+    const i = ArrayPrototypeIndexOf(this.#shared, conn);
+    if (i !== -1) ArrayPrototypeSplice(this.#shared, i, 1);
+  }
+
+  #leastLoaded() {
+    let best;
+    for (let i = 0; i < this.#shared.length; i++) {
+      const conn = this.#shared[i];
+      if (
+        conn.broken || conn.cancelling > 0 || conn.users >= PIPELINE_DEPTH
+      ) {
+        continue;
+      }
+      if (best === undefined || conn.users < best.users) best = conn;
+    }
+    return best;
+  }
+
+  #open(shared) {
+    const conn = {
+      id: ++this.#nextId,
+      rid: undefined,
+      parameters: undefined,
+      createdAt: 0,
+      idleTimer: undefined,
+      users: 0,
+      shared: false,
+      broken: undefined,
+      cancelling: 0,
+      ready: undefined,
+    };
+    this.#take(conn, shared);
+    conn.ready = (async () => {
+      let info;
+      try {
+        info = await this.#adapter.connect(
+          this.#options,
+          typeof this.#options.onnotice === "function" ? EVENTS_NOTICES : 0,
+        );
+      } catch (error) {
+        conn.ready = undefined;
+        SetPrototypeDelete(this.#busy, conn);
+        this.#unshare(conn);
+        this.#dispatch();
+        this.#checkDrained();
+        callHook(this.#options.onconnect, error, undefined);
+        throw error;
+      }
+      conn.ready = undefined;
+      conn.rid = info.rid;
+      conn.parameters = info.parameters;
+      conn.createdAt = DateNow();
+      if (this.closed) {
+        SetPrototypeDelete(this.#busy, conn);
+        this.#unshare(conn);
+        this.#destroy(conn);
+        this.#checkDrained();
+        throw connectionError(this.#adapter, "Connection pool is closed");
+      }
+      callHook(this.#options.onconnect, null, connectionInfo(conn));
+      if (typeof this.#options.onnotice === "function") {
+        pumpNotices(this.#adapter, this.#options, conn.rid);
+      }
+      return conn;
+    })();
+    return conn.ready;
+  }
+
+  /** One user of `conn` is done with it; `error` (a connection error) marks
+   * it broken. */
+  release(conn, error) {
+    if (!SetPrototypeHas(this.#busy, conn)) return;
+    if (error) conn.broken = error;
+    if (conn.shared) {
+      conn.users--;
+      if (conn.users > 0) {
+        if (!conn.broken) this.#serveSharedWaiters();
+        return;
+      }
+      this.#unshare(conn);
+    }
+    SetPrototypeDelete(this.#busy, conn);
+    this.#recycle(conn);
+  }
+
+  #recycle(conn) {
+    if (conn.broken || this.closed || !this.#usable(conn)) {
+      this.#destroy(conn, conn.broken);
       this.#dispatch();
       this.#checkDrained();
       return;
     }
-    const waiter = ArrayPrototypeShift(this.#waiters);
+    const waiter = this.#nextWaiter();
     if (waiter) {
-      clearTimeout(waiter.timer);
-      SetPrototypeAdd(this.#busy, conn);
+      this.#take(conn, waiter.shared);
       waiter.resolve(conn);
+      if (waiter.shared) this.#serveSharedWaiters();
       return;
     }
     ArrayPrototypePush(this.#idle, conn);
@@ -332,6 +477,31 @@ class Pool {
     }
   }
 
+  #nextWaiter() {
+    const waiter = ArrayPrototypeShift(this.#waiters);
+    if (waiter !== undefined) {
+      clearTimeout(waiter.timer);
+      if (!waiter.shared) this.#exclusiveWaiters--;
+    }
+    return waiter;
+  }
+
+  /** Waiting single queries (up to the first transaction / reservation in
+   * line) join shared connections with room in their pipeline. */
+  #serveSharedWaiters() {
+    while (this.#waiters.length > 0 && this.#waiters[0].shared) {
+      const conn = this.#leastLoaded();
+      if (conn === undefined) return;
+      const waiter = this.#nextWaiter();
+      conn.users++;
+      if (conn.ready) {
+        PromisePrototypeThen(conn.ready, waiter.resolve, waiter.reject);
+      } else {
+        waiter.resolve(conn);
+      }
+    }
+  }
+
   #usable(conn) {
     if (this.#adapter.isClosed(conn.rid)) return false;
     const lifetime = this.#options.maxLifetime;
@@ -347,26 +517,27 @@ class Pool {
 
   #destroy(conn, error) {
     this.#clearIdle(conn);
+    if (conn.closed) return;
+    conn.closed = true;
     core.tryClose(conn.rid);
-    if (typeof this.#options.onclose === "function") {
-      this.#options.onclose(error === true ? undefined : error);
-    }
+    callHook(this.#options.onclose, error ?? null, connectionInfo(conn));
   }
 
   // Waiters get new connections when others close (or fail to open).
   #dispatch() {
     while (this.#waiters.length > 0 && this.#size < this.#options.max) {
-      const waiter = ArrayPrototypeShift(this.#waiters);
-      clearTimeout(waiter.timer);
-      PromisePrototypeThen(this.#open(), waiter.resolve, waiter.reject);
+      const waiter = this.#nextWaiter();
+      PromisePrototypeThen(
+        this.#open(waiter.shared),
+        waiter.resolve,
+        waiter.reject,
+      );
     }
+    this.#serveSharedWaiters();
   }
 
   #checkDrained() {
-    if (
-      this.closed && SetPrototypeGetSize(this.#busy) === 0 &&
-      this.#pending === 0
-    ) {
+    if (this.closed && SetPrototypeGetSize(this.#busy) === 0) {
       const drained = this.#drained;
       this.#drained = [];
       for (let i = 0; i < drained.length; i++) drained[i]();
@@ -377,6 +548,7 @@ class Pool {
     this.closed = true;
     const waiters = this.#waiters;
     this.#waiters = [];
+    this.#exclusiveWaiters = 0;
     for (let i = 0; i < waiters.length; i++) {
       clearTimeout(waiters[i].timer);
       waiters[i].reject(
@@ -384,10 +556,18 @@ class Pool {
       );
     }
     while (this.#idle.length > 0) this.#destroy(ArrayPrototypePop(this.#idle));
-    if (SetPrototypeGetSize(this.#busy) === 0 && this.#pending === 0) return;
+    if (SetPrototypeGetSize(this.#busy) === 0) return;
     const forceClose = () => {
+      // Connections still opening close as soon as they are open.
       const busy = ArrayFrom(SetPrototypeValues(this.#busy));
-      for (let i = 0; i < busy.length; i++) this.release(busy[i], true);
+      for (let i = 0; i < busy.length; i++) {
+        const conn = busy[i];
+        if (conn.rid === undefined) continue;
+        SetPrototypeDelete(this.#busy, conn);
+        this.#unshare(conn);
+        this.#destroy(conn);
+      }
+      this.#checkDrained();
     };
     if (timeout === 0) {
       forceClose();
@@ -404,6 +584,47 @@ class Pool {
       }
     });
   }
+}
+
+/** Calls `onnotice` for each notice a pooled connection receives, until it
+ * closes; never keeps the process alive. */
+async function pumpNotices(adapter, options, rid) {
+  while (true) {
+    let event;
+    try {
+      const promise = adapter.nextEvent(rid);
+      core.unrefOpPromise(promise);
+      event = await promise;
+    } catch {
+      return;
+    }
+    if (event === null) return;
+    if (event.kind === "notice") deliverNotice(options, event);
+  }
+}
+
+function deliverNotice(options, event) {
+  const { kind: _kind, ...notice } = event;
+  try {
+    options.onnotice(notice);
+  } catch (error) {
+    reportCallbackError(error);
+  }
+}
+
+function callHook(fn, error, info) {
+  if (typeof fn !== "function") return;
+  try {
+    fn(error, info);
+  } catch (e) {
+    reportCallbackError(e);
+  }
+}
+
+// An exception thrown by a user callback (onconnect, onclose, onnotice, a
+// listen handler) is reported like an uncaught one.
+function reportCallbackError(error) {
+  lazyEvent().reportException(error);
 }
 
 // ---------------------------------------------------------------------------
@@ -612,9 +833,39 @@ function buildSelect(first, rest, b) {
   return ArrayPrototypeJoin(parts, ",");
 }
 
+/** `sql.array(values, type)`: an array parameter cast to `type[]`. */
+class SQLArray {
+  constructor(values, cast) {
+    this.values = values;
+    this.cast = cast;
+  }
+}
+
+// A type name as it may follow `::` (`int4`, `double precision`,
+// `public.mood`, `varchar(20)`): letters, digits, `_`, spaces, dots and a
+// length in parentheses.
+const TYPE_NAME = new SafeRegExp(
+  "^[A-Za-z_][A-Za-z0-9_ .]*(?:\\(\\d+(?:,\\d+)?\\))?(?:\\[\\])*$",
+);
+
+function arrayCast(type) {
+  if (type === undefined || type === null) return undefined;
+  if (
+    typeof type !== "string" || RegExpPrototypeExec(TYPE_NAME, type) === null
+  ) {
+    throw new TypeError(
+      `sql.array(): invalid type name ${
+        typeof type === "string" ? `"${type}"` : typeof type
+      }`,
+    );
+  }
+  return StringPrototypeEndsWith(type, "[]") ? type : type + "[]";
+}
+
 class Builder {
-  constructor(placeholder) {
-    this.placeholder = placeholder;
+  constructor(adapter) {
+    this.placeholder = adapter.placeholder;
+    this.casts = adapter.name === "postgres";
     this.params = [];
     this.text = "";
   }
@@ -629,12 +880,28 @@ class Builder {
       this.text = saved;
       return out;
     }
+    return this.param(value);
+  }
+
+  param(value) {
     if (value === undefined) value = null;
+    if (ObjectPrototypeIsPrototypeOf(SQLArrayPrototype, value)) {
+      ArrayPrototypePush(this.params, value.values);
+      const placeholder = this.placeholder(this.params.length);
+      return value.cast !== undefined && this.casts
+        ? placeholder + "::" + value.cast
+        : placeholder;
+    }
     ArrayPrototypePush(this.params, value);
     return this.placeholder(this.params.length);
   }
 
   query(q) {
+    if (q[kUnsafe] === undefined && q[kStrings] === undefined) {
+      throw new SQLError(
+        "A sql.file() query cannot be used inside another query",
+      );
+    }
     if (q[kUnsafe] !== undefined) {
       const params = q[kUnsafeParams];
       if (params && params.length) {
@@ -673,15 +940,15 @@ class Builder {
         this.query(value[i]);
       }
     } else {
-      if (value === undefined) value = null;
-      ArrayPrototypePush(this.params, value);
-      this.text += this.placeholder(this.params.length);
+      this.text += this.param(value);
     }
   }
 }
 
+const SQLArrayPrototype = SQLArray.prototype;
+
 function buildQuery(q, adapter) {
-  const b = new Builder(adapter.placeholder);
+  const b = new Builder(adapter);
   b.query(q);
   return b;
 }
@@ -776,27 +1043,221 @@ function isConnectionError(error) {
     : error?.name === "BadResource" || error?.name === "Interrupted";
 }
 
+let lastQueryId = 0;
+/** An id for a query's op, so `cancel()` can name it (a small integer). */
+function nextQueryId() {
+  lastQueryId = lastQueryId >= 0x3fffffff ? 1 : lastQueryId + 1;
+  return lastQueryId;
+}
+
+function cancelledError(cause) {
+  return new SQLError(
+    "Query cancelled",
+    cause === undefined
+      ? { code: "ERR_SQL_QUERY_CANCELLED" }
+      : { code: "ERR_SQL_QUERY_CANCELLED", cause },
+  );
+}
+
+// SQLSTATE query_canceled: what the server answers a cancel request with.
+const QUERY_CANCELED = "57014";
+
+function queryFlags(state, query) {
+  let flags = query[kFlags];
+  if (state.options.bigint) flags |= FLAG_BIGINT;
+  return flags;
+}
+
 async function execute(state, conn, query) {
   const adapter = state.adapter;
   const b = buildQuery(query, adapter);
-  let flags = query[kFlags];
-  if (state.options.bigint) flags |= FLAG_BIGINT;
+  const flags = queryFlags(state, query);
+  const id = nextQueryId();
+  query[kRunning] = { conn, id };
   try {
+    if (query[kCancelled]) throw cancelledError();
     if (query[kSimple]) {
       if (b.params.length) {
         throw new SQLError("simple() queries cannot have parameters");
       }
-      const results = await adapter.simple(conn.rid, b.text, flags);
+      const results = await adapter.simple(conn.rid, b.text, flags, id);
       if (results.length === 1) return finishResult(results[0], b.text);
       return ArrayPrototypeMap(results, (r) => finishResult(r, ""));
     }
     return finishResult(
-      await adapter.query(conn.rid, b.text, b.params, flags),
+      await adapter.query(conn.rid, b.text, b.params, flags, id),
       b.text,
     );
   } catch (error) {
-    if (isConnectionError(error)) conn.broken = true;
+    throw queryError(conn, query, error);
+  } finally {
+    query[kRunning] = undefined;
+  }
+}
+
+function queryError(conn, query, error) {
+  if (isConnectionError(error)) conn.broken = error;
+  if (query[kCancelled] && error?.code === QUERY_CANCELED) {
+    return cancelledError(error);
+  }
+  return error;
+}
+
+/** Waits for a pooled connection; `query.cancel()` meanwhile rejects at
+ * once (the connection, when it comes, goes straight back). */
+function acquireFor(pool, query, exclusive) {
+  return new Promise((resolve, reject) => {
+    let done = false;
+    query[kAbort] = (error) => {
+      if (done) return;
+      done = true;
+      query[kAbort] = undefined;
+      reject(error);
+    };
+    PromisePrototypeThen(pool.acquire(exclusive), (conn) => {
+      if (done) {
+        pool.release(conn);
+        return;
+      }
+      done = true;
+      query[kAbort] = undefined;
+      resolve(conn);
+    }, (error) => {
+      if (done) return;
+      done = true;
+      query[kAbort] = undefined;
+      reject(error);
+    });
+  });
+}
+
+/** Reads a `sql.file()` query's text (once). */
+async function loadFile(query) {
+  if (query[kFile] !== undefined && query[kUnsafe] === undefined) {
+    query[kUnsafe] = await op_sql_read_text_file(query[kFile]);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Cursors
+
+let lastCursorId = 0;
+// Rows fetched per round trip when a query is iterated row by row.
+const ROW_ITERATION_BATCH = 100;
+
+/** The rows of `query` in batches of at most `size`: a server-side cursor
+ * (`DECLARE ... CURSOR` + `FETCH`) inside a transaction, so only one batch
+ * is in memory and the next is fetched when the consumer asks for it. On the
+ * pool it holds a connection for itself, in a transaction of its own; on a
+ * reserved connection or in a transaction it uses that one. Leaving the loop
+ * early closes the cursor. SQLite runs the query and hands out its rows in
+ * batches. */
+async function* cursorBatches(query, size, rowByRow = false) {
+  if (!NumberIsInteger(size) || size < 1) {
+    throw new TypeError("cursor() needs a positive integer batch size");
+  }
+  if (query[kPromise] !== undefined) {
+    throw new SQLError("The query has already started");
+  }
+  query[kPromise] = PromiseReject(
+    new SQLError("The query was consumed by a cursor"),
+  );
+  PromisePrototypeCatch(query[kPromise], () => {});
+  if (query[kCancelled]) throw cancelledError();
+  const ctx = query[kCtx];
+  const state = ctx.state;
+  const adapter = state.adapter;
+  await loadFile(query);
+  if (query[kSimple]) {
+    throw new SQLError("simple() queries cannot use a cursor");
+  }
+
+  if (adapter.name !== "postgres") {
+    query[kPromise] = undefined;
+    const rows = await query;
+    if (rowByRow) {
+      for (let i = 0; i < rows.length; i++) yield rows[i];
+      return;
+    }
+    for (let i = 0; i < rows.length; i += size) {
+      const batch = ArrayPrototypeSlice(rows, i, i + size);
+      yield finishResult([batch, batch.length, undefined], "SELECT");
+    }
+    return;
+  }
+
+  let conn;
+  let owned = false;
+  if (ctx.kind === "pool") {
+    conn = await acquireFor(state.pool, query, true);
+    owned = true;
+  } else {
+    if (ctx.done) {
+      throw new SQLError(
+        ctx.kind === "transaction"
+          ? "The transaction has already finished"
+          : "The reserved connection has been released",
+      );
+    }
+    conn = ctx.conn;
+  }
+  const b = buildQuery(query, adapter);
+  const flags = queryFlags(state, query) | FLAG_UNNAMED;
+  const name = "deno_sql_cursor_" + (++lastCursorId);
+  const declare = "declare " + name + " no scroll cursor for " + b.text;
+  const fetch = "fetch forward " + size + " from " + name;
+  let began = false;
+  let failed = false;
+  try {
+    if (owned) {
+      await adapter.control(conn.rid, "BEGIN");
+      began = true;
+    }
+    try {
+      await adapter.query(conn.rid, declare, b.params, FLAG_UNNAMED, 0);
+    } catch (error) {
+      // A reserved connection outside a transaction: open one for the
+      // cursor's lifetime.
+      if (owned || error?.code !== "25P01") throw error;
+      await adapter.control(conn.rid, "BEGIN");
+      began = true;
+      await adapter.query(conn.rid, declare, b.params, FLAG_UNNAMED, 0);
+    }
+    while (true) {
+      const id = nextQueryId();
+      query[kRunning] = { conn, id };
+      let tuple;
+      try {
+        if (query[kCancelled]) throw cancelledError();
+        tuple = await adapter.query(conn.rid, fetch, [], flags, id);
+      } catch (error) {
+        throw queryError(conn, query, error);
+      } finally {
+        query[kRunning] = undefined;
+      }
+      const rows = finishResult(tuple, b.text);
+      if (rowByRow) {
+        for (let i = 0; i < rows.length; i++) yield rows[i];
+      } else if (rows.length > 0) {
+        yield rows;
+      }
+      if (rows.length < size) break;
+    }
+  } catch (error) {
+    failed = true;
     throw error;
+  } finally {
+    // Also reached when the consumer leaves the loop early.
+    try {
+      if (began) {
+        await adapter.control(conn.rid, failed ? "ROLLBACK" : "COMMIT");
+      } else if (!failed) {
+        await adapter.control(conn.rid, "CLOSE " + name);
+      }
+    } catch (error) {
+      if (isConnectionError(error) || began) conn.broken = error;
+    }
+    if (owned) state.pool.release(conn, conn.broken);
   }
 }
 
@@ -807,27 +1268,36 @@ const kFlags = Symbol("sql.flags");
 const kSimple = Symbol("sql.simple");
 const kPromise = Symbol("sql.promise");
 const kCancelled = Symbol("sql.cancelled");
+const kRunning = Symbol("sql.running");
+const kAbort = Symbol("sql.abort");
+const kFile = Symbol("sql.file");
 
 /** A query: lazy (runs when awaited or `.execute()`d), usable as a fragment
  * inside another query until then. */
 class Query {
-  constructor(ctx, strings, args, unsafe, unsafeParams) {
+  constructor(ctx, strings, args, unsafe, unsafeParams, file) {
     this[kCtx] = ctx;
     this[kStrings] = strings;
     this[kArgs] = args;
     this[kUnsafe] = unsafe;
     this[kUnsafeParams] = unsafeParams;
+    this[kFile] = file;
     this[kFlags] = 0;
     this[kSimple] = false;
     this[kPromise] = undefined;
     this[kCancelled] = false;
+    this[kRunning] = undefined;
+    this[kAbort] = undefined;
   }
 
   #run() {
     if (this[kPromise] === undefined) {
       if (this[kCancelled]) {
-        this[kPromise] = PromiseReject(
-          new SQLError("Query cancelled", { code: "ERR_SQL_QUERY_CANCELLED" }),
+        this[kPromise] = PromiseReject(cancelledError());
+      } else if (this[kFile] !== undefined && this[kUnsafe] === undefined) {
+        this[kPromise] = PromisePrototypeThen(
+          loadFile(this),
+          () => this[kCtx].run(this),
         );
       } else {
         try {
@@ -865,10 +1335,43 @@ class Query {
     return this;
   }
 
-  /** Cancels a query that has not started. */
+  /** Cancels the query: one that has not started never runs, one waiting
+   * for a connection rejects at once, and one the server is running gets a
+   * cancel request (Postgres) and rejects with `ERR_SQL_QUERY_CANCELLED`
+   * unless it finished first. */
   cancel() {
-    if (this[kPromise] === undefined) this[kCancelled] = true;
+    if (this[kCancelled]) return this;
+    this[kCancelled] = true;
+    if (this[kAbort] !== undefined) {
+      this[kAbort](cancelledError());
+      return this;
+    }
+    const running = this[kRunning];
+    const adapter = this[kCtx].state.adapter;
+    if (running !== undefined && adapter.cancel !== undefined) {
+      const conn = running.conn;
+      conn.cancelling++;
+      const done = () => {
+        conn.cancelling--;
+      };
+      PromisePrototypeThen(adapter.cancel(conn.rid, running.id), done, done);
+    }
     return this;
+  }
+
+  /** The rows in batches of at most `size` (default 1), fetched from a
+   * server-side cursor as the loop asks for them. */
+  cursor(size = 1) {
+    return {
+      __proto__: null,
+      [SymbolAsyncIterator]: () => cursorBatches(this, size),
+    };
+  }
+
+  /** The rows one at a time, fetched from a server-side cursor in batches
+   * of 100. */
+  [SymbolAsyncIterator]() {
+    return cursorBatches(this, ROW_ITERATION_BATCH, true);
   }
 
   get active() {
@@ -920,12 +1423,13 @@ function makeSql(state, ctx) {
 function poolContext(state) {
   return {
     kind: "pool",
+    state,
     async run(query) {
-      const conn = await state.pool.acquire();
+      const conn = await acquireFor(state.pool, query, false);
       try {
         return await execute(state, conn, query);
       } finally {
-        state.pool.release(conn, conn.broken === true);
+        state.pool.release(conn, conn.broken);
       }
     },
   };
@@ -934,6 +1438,7 @@ function poolContext(state) {
 function connectionContext(state, kind, conn) {
   const ctx = {
     kind,
+    state,
     conn,
     done: false,
     savepoints: 0,
@@ -951,6 +1456,239 @@ function connectionContext(state, kind, conn) {
     },
   };
   return ctx;
+}
+
+// ---------------------------------------------------------------------------
+// LISTEN / NOTIFY
+
+// Reconnect delays of the listening connection: the first retry is
+// immediate, then they double up to the cap.
+const LISTEN_RETRY_FIRST_MS = 100;
+const LISTEN_RETRY_MAX_MS = 5000;
+
+function quoteChannel(channel) {
+  return '"' +
+    StringPrototypeReplace(channel, new SafeRegExp('"', "g"), '""') + '"';
+}
+
+/** The dedicated connection `sql.listen()` uses: every channel of one
+ * client on it, LISTENed again after a reconnect. Notifications are
+ * delivered in the order the server sent them; one that arrives while the
+ * connection is down is lost (Postgres keeps none for a closed session). */
+class Listener {
+  #state;
+  /** channel name -> Set of `{ fn, onlisten }` */
+  #channels = new SafeMap();
+  #conn = undefined;
+  #connecting = undefined;
+  #reconnecting = false;
+  #closed = false;
+
+  constructor(state) {
+    this.#state = state;
+  }
+
+  async listen(channel, fn, onlisten) {
+    if (this.#closed) {
+      throw connectionError(this.#state.adapter, "Connection pool is closed");
+    }
+    const entry = { fn, onlisten };
+    let handlers = MapPrototypeGet(this.#channels, channel);
+    const first = handlers === undefined;
+    if (first) {
+      handlers = new SafeSet();
+      MapPrototypeSet(this.#channels, channel, handlers);
+    }
+    SetPrototypeAdd(handlers, entry);
+    try {
+      const conn = await this.#ensure();
+      // Also when #ensure() just LISTENed it: LISTEN twice is a no-op.
+      if (first) {
+        await this.#state.adapter.control(
+          conn.rid,
+          "LISTEN " + quoteChannel(channel),
+        );
+      }
+    } catch (error) {
+      this.#remove(channel, entry);
+      throw error;
+    }
+    if (typeof onlisten === "function") onlisten();
+    let listening = true;
+    return {
+      __proto__: null,
+      channel,
+      unlisten: () => {
+        if (!listening) return PromiseResolve();
+        listening = false;
+        return this.#unlisten(channel, entry);
+      },
+    };
+  }
+
+  #remove(channel, entry) {
+    const handlers = MapPrototypeGet(this.#channels, channel);
+    if (handlers === undefined) return false;
+    SetPrototypeDelete(handlers, entry);
+    if (SetPrototypeGetSize(handlers) > 0) return false;
+    MapPrototypeDelete(this.#channels, channel);
+    return true;
+  }
+
+  async #unlisten(channel, entry) {
+    if (!this.#remove(channel, entry)) return;
+    const conn = this.#conn;
+    if (MapPrototypeGetSize(this.#channels) === 0) {
+      // Nothing left to listen to: close the connection (it no longer keeps
+      // the process alive).
+      this.#retire();
+      return;
+    }
+    if (conn !== undefined) {
+      try {
+        await this.#state.adapter.control(
+          conn.rid,
+          "UNLISTEN " + quoteChannel(channel),
+        );
+      } catch {
+        // The connection is gone, and with it the subscription.
+      }
+    }
+  }
+
+  #retire() {
+    const conn = this.#conn;
+    this.#conn = undefined;
+    if (conn !== undefined) {
+      conn.retired = true;
+      core.tryClose(conn.rid);
+    }
+  }
+
+  #ensure() {
+    if (this.#conn !== undefined) return PromiseResolve(this.#conn);
+    if (this.#connecting === undefined) {
+      this.#connecting = SafePromisePrototypeFinally(
+        this.#connect(),
+        () => {
+          this.#connecting = undefined;
+        },
+      );
+    }
+    return this.#connecting;
+  }
+
+  async #connect() {
+    const state = this.#state;
+    const options = state.options;
+    const events = EVENTS_NOTIFICATIONS |
+      (typeof options.onnotice === "function" ? EVENTS_NOTICES : 0);
+    const info = await state.adapter.connect(options, events);
+    const conn = { rid: info.rid, retired: false };
+    try {
+      const channels = ArrayFrom(MapPrototypeKeys(this.#channels));
+      for (let i = 0; i < channels.length; i++) {
+        await state.adapter.control(
+          conn.rid,
+          "LISTEN " + quoteChannel(channels[i]),
+        );
+      }
+    } catch (error) {
+      core.tryClose(conn.rid);
+      throw error;
+    }
+    if (this.#closed || MapPrototypeGetSize(this.#channels) === 0) {
+      core.tryClose(conn.rid);
+      if (this.#closed) {
+        throw connectionError(state.adapter, "Connection pool is closed");
+      }
+      return conn;
+    }
+    this.#conn = conn;
+    this.#pump(conn);
+    return conn;
+  }
+
+  async #pump(conn) {
+    const adapter = this.#state.adapter;
+    while (true) {
+      let event;
+      try {
+        event = await adapter.nextEvent(conn.rid);
+      } catch {
+        event = null;
+      }
+      if (event === null) break;
+      if (event.kind === "notification") {
+        const handlers = MapPrototypeGet(this.#channels, event.channel);
+        if (handlers === undefined) continue;
+        const entries = ArrayFrom(SetPrototypeValues(handlers));
+        for (let i = 0; i < entries.length; i++) {
+          try {
+            entries[i].fn(event.payload, {
+              channel: event.channel,
+              pid: event.pid,
+            });
+          } catch (error) {
+            reportCallbackError(error);
+          }
+        }
+      } else if (event.kind === "notice") {
+        deliverNotice(this.#state.options, event);
+      }
+    }
+    // The connection ended: closed by us, or lost.
+    core.tryClose(conn.rid);
+    if (conn.retired) return;
+    if (this.#conn === conn) this.#conn = undefined;
+    this.#reconnect();
+  }
+
+  async #reconnect() {
+    if (this.#reconnecting) return;
+    this.#reconnecting = true;
+    let delay = 0;
+    try {
+      while (!this.#closed && MapPrototypeGetSize(this.#channels) > 0) {
+        if (delay > 0) {
+          await new Promise((resolve) => setTimeout(resolve, delay));
+          if (this.#closed || MapPrototypeGetSize(this.#channels) === 0) {
+            return;
+          }
+        }
+        try {
+          await this.#ensure();
+        } catch {
+          delay = delay === 0
+            ? LISTEN_RETRY_FIRST_MS
+            : MathMin(delay * 2, LISTEN_RETRY_MAX_MS);
+          continue;
+        }
+        // Subscribed again: tell every listener, as after the first LISTEN.
+        const all = ArrayFrom(MapPrototypeValues(this.#channels));
+        for (let i = 0; i < all.length; i++) {
+          const entries = ArrayFrom(SetPrototypeValues(all[i]));
+          for (let j = 0; j < entries.length; j++) {
+            if (typeof entries[j].onlisten !== "function") continue;
+            try {
+              entries[j].onlisten();
+            } catch (error) {
+              reportCallbackError(error);
+            }
+          }
+        }
+        return;
+      }
+    } finally {
+      this.#reconnecting = false;
+    }
+  }
+
+  close() {
+    this.#closed = true;
+    MapPrototypeClear(this.#channels);
+    this.#retire();
+  }
 }
 
 function splitOptionsAndFn(a, b) {
@@ -1164,6 +1902,8 @@ function resolveSslMode(options, urlParams) {
   let ca = [];
   let serverName;
   let mode;
+  let cert;
+  let key;
   if (tls === true) {
     mode = "verify-full";
   } else if (tls === false) {
@@ -1180,6 +1920,8 @@ function resolveSslMode(options, urlParams) {
         : [String(tls.ca)];
     }
     serverName = tls.servername ?? tls.serverName;
+    if (tls.cert !== undefined) cert = String(tls.cert);
+    if (tls.key !== undefined) key = String(tls.key);
   } else if (typeof tls === "string") {
     mode = tls;
   }
@@ -1193,7 +1935,7 @@ function resolveSslMode(options, urlParams) {
     throw new TypeError(`Unsupported sslmode "${mode}"`);
   }
   if (mode === "allow") mode = "prefer";
-  return { mode, ca, serverName };
+  return { mode, ca, serverName, cert, key };
 }
 
 function parseOptions(a, b) {
@@ -1277,6 +2019,7 @@ function parseOptions(a, b) {
     bigint: options.bigint === true || options.safeIntegers === true,
     onconnect: options.onconnect,
     onclose: options.onclose,
+    onnotice: options.onnotice,
   };
 
   if (adapter === "sqlite") {
@@ -1308,16 +2051,21 @@ function parseOptions(a, b) {
   if (typeof hostname !== "string" || hostname === "") {
     throw new TypeError("Invalid hostname");
   }
-  if (hostname[0] === "/") {
-    throw new TypeError(
-      "Unix-socket Postgres hosts are not supported by Deno.SQL yet",
-    );
-  }
   let port = options.port ?? u.port ?? params.port ?? softEnv("PGPORT") ??
     5432;
   port = typeof port === "string" ? NumberParseInt(port, 10) : port;
   if (!NumberIsInteger(port) || port < 1 || port > 65535) {
     throw new TypeError("Invalid port");
+  }
+  // A host that is a directory is where the server's Unix-domain socket is
+  // (as in libpq: `host=/var/run/postgresql`); `path` names the socket
+  // itself.
+  let socketPath = options.path;
+  if (socketPath === undefined && hostname[0] === "/") {
+    socketPath = hostname + "/.s.PGSQL." + port;
+  }
+  if (socketPath !== undefined && typeof socketPath !== "string") {
+    throw new TypeError("Invalid socket path");
   }
   const username = options.username ?? options.user ?? u.username ??
     params.user ?? softEnv("PGUSER") ?? softEnv("PGUSERNAME") ??
@@ -1342,12 +2090,15 @@ function parseOptions(a, b) {
     "application_name",
     "connect_timeout",
     "options",
+    "sslcert",
+    "sslkey",
+    "sslrootcert",
   ]);
   const urlKeys = ObjectKeys(params);
   for (let i = 0; i < urlKeys.length; i++) {
     if (!urlKnown.has(urlKeys[i])) connection[urlKeys[i]] = params[urlKeys[i]];
   }
-  const { mode, ca, serverName } = resolveSslMode(options, params);
+  const { mode, ca, serverName, cert, key } = resolveSslMode(options, params);
   let startup = startupOptions(connection);
   if (params.options) {
     startup = startup ? params.options + " " + startup : params.options;
@@ -1359,9 +2110,18 @@ function parseOptions(a, b) {
     username: String(username),
     password,
     database: String(database),
+    socketPath,
     sslMode: mode,
     ca,
     serverName,
+    cert,
+    key,
+    certFile: cert === undefined ? params.sslcert : undefined,
+    keyFile: key === undefined ? params.sslkey : undefined,
+    caFile: params.sslrootcert !== undefined &&
+        params.sslrootcert !== "system"
+      ? params.sslrootcert
+      : undefined,
     applicationName: connection.application_name ?? params.application_name,
     startupOptions: startup,
     prepare: options.prepare !== false,
@@ -1410,6 +2170,72 @@ class SQL {
     return new Query(this[kCtx], undefined, undefined, text, params);
   }
 
+  /** A query from the text of the file at `path` (read when it runs; read
+   * permission), with optional parameters (`$1`... / `?1`...). */
+  file(path, params) {
+    if (
+      path !== null && typeof path === "object" &&
+      typeof path.href === "string" && path.protocol === "file:"
+    ) {
+      path = decodeURIComponent(path.pathname);
+    }
+    if (typeof path !== "string") {
+      throw new TypeError("sql.file() expects a path");
+    }
+    if (params !== undefined && !ArrayIsArray(params)) {
+      throw new TypeError("sql.file() parameters must be an array");
+    }
+    return new Query(
+      this[kCtx],
+      undefined,
+      undefined,
+      undefined,
+      params,
+      path,
+    );
+  }
+
+  /** An array parameter sent as `type[]` (`sql.array([1, 2], "int4")`); with
+   * no type the server infers it. */
+  array(values, type) {
+    if (!ArrayIsArray(values)) {
+      throw new TypeError("sql.array() expects an array");
+    }
+    return new SQLArray(values, arrayCast(type));
+  }
+
+  /** Subscribes to `channel` (LISTEN) on a dedicated connection: `fn`
+   * receives each notification's payload, `onlisten` runs once subscribed
+   * (and again after a reconnect). */
+  async listen(channel, fn, onlisten) {
+    if (typeof channel !== "string" || channel === "") {
+      throw new TypeError("sql.listen() expects a channel name");
+    }
+    if (typeof fn !== "function") {
+      throw new TypeError("sql.listen() expects a callback");
+    }
+    const state = this[kState];
+    if (state.adapter.name !== "postgres") {
+      throw new SQLError("LISTEN / NOTIFY needs a Postgres connection");
+    }
+    if (state.pool.closed) {
+      throw connectionError(state.adapter, "Connection pool is closed");
+    }
+    state.listener ??= new Listener(state);
+    return await state.listener.listen(channel, fn, onlisten);
+  }
+
+  /** Sends `payload` to the listeners of `channel` (`pg_notify`). */
+  notify(channel, payload) {
+    if (typeof channel !== "string" || channel === "") {
+      throw new TypeError("sql.notify() expects a channel name");
+    }
+    if (this[kState].adapter.name !== "postgres") {
+      throw new SQLError("LISTEN / NOTIFY needs a Postgres connection");
+    }
+    return this`select pg_notify(${channel}, ${payload ?? ""})`.execute();
+  }
+
   /** Runs `fn` in a transaction: COMMIT when it settles, ROLLBACK (and
    * rethrow) when it throws. `options` is appended to `BEGIN`. */
   begin(a, b) {
@@ -1426,11 +2252,11 @@ class SQL {
         return runTransaction(state, ctx.conn, options, fn);
       }
       return (async () => {
-        const conn = await state.pool.acquire();
+        const conn = await state.pool.acquire(true);
         try {
           return await runTransaction(state, conn, options, fn);
         } finally {
-          state.pool.release(conn, conn.broken === true);
+          state.pool.release(conn, conn.broken);
         }
       })();
     } catch (error) {
@@ -1476,7 +2302,7 @@ class SQL {
     if (this[kCtx].kind !== "pool") {
       throw new SQLError("reserve() is only available on the pool");
     }
-    const conn = await state.pool.acquire();
+    const conn = await state.pool.acquire(true);
     return makeSql(state, connectionContext(state, "reserved", conn));
   }
 
@@ -1486,7 +2312,7 @@ class SQL {
     if (ctx.kind !== "reserved") return;
     if (ctx.done) return;
     ctx.done = true;
-    this[kState].pool.release(ctx.conn, ctx.conn.broken === true);
+    this[kState].pool.release(ctx.conn, ctx.conn.broken);
   }
 
   [SymbolDispose]() {
@@ -1502,7 +2328,9 @@ class SQL {
         new SQLError("close() is only available on the pool"),
       );
     }
-    return this[kState].pool.close(options?.timeout);
+    const state = this[kState];
+    state.listener?.close();
+    return state.pool.close(options?.timeout);
   }
 
   end(options) {
@@ -1514,7 +2342,7 @@ class SQL {
   }
 
   get options() {
-    const { password: _password, ...rest } = this[kState].options;
+    const { password: _password, key: _key, ...rest } = this[kState].options;
     return rest;
   }
 }

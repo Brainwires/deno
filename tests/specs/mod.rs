@@ -538,6 +538,16 @@ fn should_run(if_cond: Option<&str>) -> bool {
         std::env::var_os("DENO_SQL_TEST_POSTGRES_URL").is_some()
           && std::env::var_os("DENO_SQL_TEST_POSTGRES_CA").is_some()
       }
+      "postgresSocket" => {
+        cfg!(unix)
+          && std::env::var_os("DENO_SQL_TEST_POSTGRES_URL").is_some()
+          && std::env::var_os("DENO_SQL_TEST_POSTGRES_SOCKET").is_some()
+      }
+      "postgresClientCert" => {
+        ["URL", "CA", "CLIENT_CERT", "CLIENT_KEY"].iter().all(|v| {
+          std::env::var_os(format!("DENO_SQL_TEST_POSTGRES_{v}")).is_some()
+        })
+      }
       "notMacIntel" => {
         cfg!(unix)
           && !(cfg!(target_os = "macos") && cfg!(target_arch = "x86_64"))

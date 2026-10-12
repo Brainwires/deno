@@ -164,4 +164,30 @@ const memory = new Deno.SQL(":memory:");
 console.log(
   await memory`select ${1} + ${2} as sum, ${"text"} as t, ${null} as n, ${true} as b`,
 );
+// Cursors and iteration: the rows, handed out in batches.
+await memory`create table nums (n integer)`;
+await memory`insert into nums ${memory([1, 2, 3, 4, 5].map((n) => ({ n })))}`;
+const batches = [];
+for await (const rows of memory`select n from nums order by n`.cursor(2)) {
+  batches.push(rows.map((r) => r.n));
+}
+const each = [];
+for await (const row of memory`select n from nums order by n`) {
+  each.push(row.n);
+  if (each.length === 4) break;
+}
+console.log("cursor:", batches, "rows:", each);
+// sql.file and sql.array (an array parameter is JSON in SQLite).
+Deno.writeTextFileSync("q.sql", "select ?1 * 2 as twice");
+console.log(await memory.file("q.sql", [21]));
+console.log(
+  await memory`select json_array_length(${
+    memory.array([1, 2, 3], "int")
+  }) as n`,
+);
+try {
+  await memory.listen("chan", () => {});
+} catch (e) {
+  console.log("listen:", (e as Error).message);
+}
 await memory.close();

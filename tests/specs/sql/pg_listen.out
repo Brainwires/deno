@@ -1,0 +1,15 @@
+onlisten: 1
+handler a: [ "first", "second" ]
+handler b: [ "news:first:number", "news:second:number" ]
+50 channels: 50 listening connections: 1
+odd channel: [ "yes" ]
+payload too long: 22023
+7999 bytes: true in order: true
+transaction: [ "tx0", "tx1", "tx2" ]
+after unlisten: 2 3
+reconnected: 2 [ "after reconnect" ] news:news after reconnect:number
+listening connections after unlisten: 0
+notices: [ "NOTICE 00000 hello 42", "WARNING 01000 careful" ]
+reported: handler failed
+after a throwing handler: [ "still delivered" ]
+after close: ERR_POSTGRES_CONNECTION_CLOSED

@@ -26,3 +26,7 @@ SQLITE_ERROR
 cancelled: ERR_SQL_QUERY_CANCELLED
 closed: ERR_SQLITE_CLOSED
 [ { sum: 3, t: "text", n: null, b: 1 } ]
+cursor: [ [ 1, 2 ], [ 3, 4 ], [ 5 ] ] rows: [ 1, 2, 3, 4 ]
+[ { twice: 42 } ]
+[ { n: 3 } ]
+listen: LISTEN / NOTIFY needs a Postgres connection

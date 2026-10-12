@@ -1,0 +1,7 @@
+[ { sum: 5 } ]
+[ { sum: 2 } ]
+[ [ { a: "1" } ], [ { b: "2" } ] ]
+in a transaction: 9
+missing: true
+as a fragment: A sql.file() query cannot be used inside another query
+read when run

@@ -6,6 +6,7 @@
 //! connection pool are in `01_sql.js`, the engines here.
 
 mod error;
+mod files;
 mod params;
 mod pg;
 mod pg_decode;
@@ -22,6 +23,9 @@ deno_core::extension!(
     pg::op_sql_pg_query,
     pg::op_sql_pg_simple,
     pg::op_sql_pg_is_closed,
+    pg::op_sql_pg_next_event,
+    pg::op_sql_pg_cancel,
+    files::op_sql_read_text_file,
     sqlite::op_sql_sqlite_open,
     sqlite::op_sql_sqlite_query,
     sqlite::op_sql_sqlite_exec,

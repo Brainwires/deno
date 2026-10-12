@@ -9,15 +9,19 @@
 use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
+use deno_core::AsyncRefCell;
 use deno_core::CancelFuture;
 use deno_core::CancelHandle;
 use deno_core::OpState;
+use deno_core::RcRef;
 use deno_core::Resource;
 use deno_core::ResourceId;
 use deno_core::ToV8;
@@ -26,19 +30,28 @@ use deno_core::op2;
 use deno_core::v8;
 use deno_net::DefaultTlsOptions;
 use deno_net::UnsafelyIgnoreCertificateErrors;
+use deno_permissions::OpenAccessKind;
 use deno_permissions::PermissionsContainer;
 use deno_tls::SocketUse;
 use deno_tls::TlsClientConfigOptions;
+use deno_tls::TlsKey;
 use deno_tls::TlsKeys;
 use deno_tls::create_client_config;
+use deno_tls::load_certs;
+use deno_tls::load_private_keys;
 use postgres_types::FromSql;
 use postgres_types::Type;
 use serde::Deserialize;
+use serde::Serialize;
 use tokio::io::AsyncRead;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWrite;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
+use tokio::sync::Notify;
+use tokio::sync::mpsc;
+use tokio_postgres::AsyncMessage;
+use tokio_postgres::CancelToken;
 use tokio_postgres::Client;
 use tokio_postgres::NoTls;
 use tokio_postgres::Row;
@@ -55,12 +68,36 @@ use crate::pg_decode;
 use crate::pg_decode::DecodeOptions;
 use crate::rows::FLAG_BIGINT;
 use crate::rows::FLAG_RAW;
+use crate::rows::FLAG_UNNAMED;
 use crate::rows::RowShape;
 use crate::rows::result_tuple;
 
 const API_NAME: &str = "Deno.SQL";
 /// `SSLRequest`: length 8, code 1234.5679.
 const SSL_REQUEST: [u8; 8] = [0, 0, 0, 8, 0x04, 0xd2, 0x16, 0x2f];
+/// How long opening the side connection for a cancel request may take.
+const CANCEL_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Forward the server's notices to `op_sql_pg_next_event`.
+const EVENTS_NOTICES: u32 = 1;
+/// Forward `LISTEN` notifications to `op_sql_pg_next_event`.
+const EVENTS_NOTIFICATIONS: u32 = 2;
+
+/// Server parameters reported to `onconnect`.
+const REPORTED_PARAMETERS: &[&str] = &[
+  "server_version",
+  "server_encoding",
+  "client_encoding",
+  "application_name",
+  "DateStyle",
+  "IntervalStyle",
+  "TimeZone",
+  "integer_datetimes",
+  "standard_conforming_strings",
+  "is_superuser",
+  "session_authorization",
+  "in_hot_standby",
+];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -77,6 +114,9 @@ pub enum SslMode {
 pub struct PgConnectArgs {
   hostname: String,
   port: u16,
+  /// A Unix-domain socket to connect to instead of `hostname:port`
+  /// (`<directory>/.s.PGSQL.<port>`).
+  socket_path: Option<String>,
   username: String,
   password: Option<String>,
   database: Option<String>,
@@ -89,9 +129,84 @@ pub struct PgConnectArgs {
   #[serde(default)]
   ca: Vec<String>,
   server_name: Option<String>,
+  /// A client certificate chain and its key (PEM), sent when the server
+  /// asks for one.
+  cert: Option<String>,
+  key: Option<String>,
   /// Prepared statements kept per connection; 0 runs every query as an
   /// unnamed statement (`prepare: false`, for transaction-mode poolers).
   statement_cache_size: usize,
+  /// `EVENTS_*` bits: which asynchronous messages to keep for
+  /// `op_sql_pg_next_event` (the rest are dropped).
+  #[serde(default)]
+  events: u32,
+}
+
+/// What `op_sql_pg_connect` returns: the connection, and the server
+/// parameters it reported at startup.
+#[derive(Serialize)]
+pub struct PgConnectInfo {
+  rid: ResourceId,
+  parameters: HashMap<String, String>,
+}
+
+/// An asynchronous message from the server: a `LISTEN` notification or a
+/// notice.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase", tag = "kind")]
+pub enum PgEvent {
+  Notification {
+    channel: String,
+    payload: String,
+    pid: i32,
+  },
+  Notice(Box<PgNotice>),
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PgNotice {
+  message: String,
+  severity: String,
+  code: String,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  detail: Option<String>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  hint: Option<String>,
+  #[serde(rename = "where", skip_serializing_if = "Option::is_none")]
+  where_: Option<String>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  schema: Option<String>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  table: Option<String>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  column: Option<String>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  data_type: Option<String>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  constraint: Option<String>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  routine: Option<String>,
+}
+
+impl From<&tokio_postgres::error::DbError> for PgNotice {
+  fn from(db: &tokio_postgres::error::DbError) -> Self {
+    let own = |v: Option<&str>| v.map(str::to_string);
+    PgNotice {
+      message: db.message().to_string(),
+      severity: db.severity().to_string(),
+      code: db.code().code().to_string(),
+      detail: own(db.detail()),
+      hint: own(db.hint()),
+      where_: own(db.where_()),
+      schema: own(db.schema()),
+      table: own(db.table()),
+      column: own(db.column()),
+      data_type: own(db.datatype()),
+      constraint: own(db.constraint()),
+      routine: own(db.routine()),
+    }
+  }
 }
 
 #[derive(Default)]
@@ -100,11 +215,39 @@ struct StatementCache {
   order: VecDeque<String>,
 }
 
+/// Where a connection (and so its cancel requests) goes.
+#[derive(Clone, Debug)]
+enum Endpoint {
+  Tcp { hostname: String, port: u16 },
+  Unix(PathBuf),
+}
+
+/// The requests sent on a connection whose results have not all arrived,
+/// oldest first: the server answers them in order, so the front one is the
+/// one it is running. Cancel requests target that one only.
+#[derive(Default)]
+struct InFlight {
+  next_seq: u64,
+  /// `(seq, query id)`.
+  queue: VecDeque<(u64, u32)>,
+  /// Query ids whose op is running (cancel requests for any other id are
+  /// no-ops).
+  live: HashSet<u32>,
+}
+
 pub struct PgConnection {
   client: Client,
   statements: RefCell<StatementCache>,
   cache_size: usize,
   cancel: Rc<CancelHandle>,
+  events: Option<AsyncRefCell<mpsc::UnboundedReceiver<PgEvent>>>,
+  cancel_token: CancelToken,
+  endpoint: Endpoint,
+  /// The TLS configuration and server name, when the connection uses TLS
+  /// (a cancel request goes over TLS too).
+  tls: Option<(Arc<ClientConfig>, String)>,
+  in_flight: RefCell<InFlight>,
+  in_flight_changed: Notify,
 }
 
 impl Resource for PgConnection {
@@ -116,6 +259,38 @@ impl Resource for PgConnection {
     // Fails every in-flight query on this connection; the client (and so the
     // socket, after a Terminate) goes away with the last reference.
     self.cancel.cancel();
+  }
+}
+
+/// A request in [`InFlight::queue`], removed when dropped (its results have
+/// arrived, or it failed).
+struct Ticket<'c> {
+  conn: &'c PgConnection,
+  seq: u64,
+}
+
+impl Drop for Ticket<'_> {
+  fn drop(&mut self) {
+    let mut in_flight = self.conn.in_flight.borrow_mut();
+    if let Some(i) = in_flight.queue.iter().position(|(s, _)| *s == self.seq) {
+      in_flight.queue.remove(i);
+    }
+    drop(in_flight);
+    self.conn.in_flight_changed.notify_waiters();
+  }
+}
+
+/// The op of query `id` is running (cancel requests for it are accepted)
+/// until dropped.
+struct LiveOp<'c> {
+  conn: &'c PgConnection,
+  id: u32,
+}
+
+impl Drop for LiveOp<'_> {
+  fn drop(&mut self) {
+    self.conn.in_flight.borrow_mut().live.remove(&self.id);
+    self.conn.in_flight_changed.notify_waiters();
   }
 }
 
@@ -147,6 +322,25 @@ impl PgConnection {
     }
     Ok(stmt)
   }
+
+  fn live(&self, id: u32) -> Option<LiveOp<'_>> {
+    if id == 0 {
+      return None;
+    }
+    self.in_flight.borrow_mut().live.insert(id);
+    Some(LiveOp { conn: self, id })
+  }
+
+  /// Registers a request about to be sent. Call it right before the
+  /// request's future is first polled (which is when `tokio-postgres`
+  /// queues its messages), so the queue order is the order on the wire.
+  fn enter(&self, id: u32) -> Ticket<'_> {
+    let mut in_flight = self.in_flight.borrow_mut();
+    let seq = in_flight.next_seq;
+    in_flight.next_seq += 1;
+    in_flight.queue.push_back((seq, id));
+    Ticket { conn: self, seq }
+  }
 }
 
 fn tls_config(
@@ -158,6 +352,8 @@ fn tls_config(
     SslMode::Prefer | SslMode::Require => false,
     SslMode::VerifyCa | SslMode::VerifyFull => true,
   };
+  let tls_error =
+    |e: String| SqlError::postgres_client(codes::TLS_UPGRADE_FAILED, e);
   // `--unsafely-ignore-certificate-errors` applies here as it does to every
   // other TLS client in the runtime.
   let unsafely_ignore_certificate_errors = if verify {
@@ -171,21 +367,36 @@ fn tls_config(
     .try_borrow::<DefaultTlsOptions>()
     .map(|o| o.root_cert_store())
     .transpose()
-    .map_err(|e| {
-      SqlError::postgres_client(codes::TLS_UPGRADE_FAILED, e.to_string())
-    })?
+    .map_err(|e| tls_error(e.to_string()))?
     .flatten();
+  let cert_chain_and_key = match (&args.cert, &args.key) {
+    (Some(cert), Some(key)) => {
+      let certs = load_certs(&mut cert.as_bytes()).map_err(|e| {
+        tls_error(format!("Invalid client certificate (sslcert): {e}"))
+      })?;
+      let key = load_private_keys(key.as_bytes())
+        .map_err(|e| tls_error(format!("Invalid client key (sslkey): {e}")))?
+        .into_iter()
+        .next()
+        .ok_or_else(|| tls_error("No private key in sslkey".into()))?;
+      TlsKeys::Static(TlsKey(certs, key))
+    }
+    (None, None) => TlsKeys::Null,
+    _ => {
+      return Err(SqlError::type_error(
+        "A client certificate (sslcert) needs its key (sslkey), and the other way around",
+      ));
+    }
+  };
   let config = create_client_config(TlsClientConfigOptions {
     root_cert_store,
     ca_certs: args.ca.iter().map(|c| c.as_bytes().to_vec()).collect(),
     unsafely_ignore_certificate_errors,
     unsafely_disable_hostname_verification: args.ssl_mode == SslMode::VerifyCa,
-    cert_chain_and_key: TlsKeys::Null,
+    cert_chain_and_key,
     socket_use: SocketUse::GeneralSsl,
   })
-  .map_err(|e| {
-    SqlError::postgres_client(codes::TLS_UPGRADE_FAILED, e.to_string())
-  })?;
+  .map_err(|e| tls_error(e.to_string()))?;
   Ok(Some(Arc::new(config)))
 }
 
@@ -196,7 +407,7 @@ fn connect_failed(addr: &str, err: impl std::fmt::Display) -> SqlError {
   )
 }
 
-async fn open_socket(
+async fn open_tcp(
   state: &Rc<RefCell<OpState>>,
   hostname: &str,
   port: u16,
@@ -232,17 +443,54 @@ async fn open_socket(
   ))
 }
 
-enum Negotiated {
-  Plain(TcpStream),
-  Tls(Box<tokio_rustls::client::TlsStream<TcpStream>>),
+#[cfg(unix)]
+async fn open_unix(path: &std::path::Path) -> Result<UnixStream, SqlError> {
+  UnixStream::connect(path)
+    .await
+    .map_err(|e| connect_failed(&path.display().to_string(), e))
 }
 
-async fn negotiate_tls(
-  mut stream: TcpStream,
+#[cfg(unix)]
+use tokio::net::UnixStream;
+
+/// Checks the permissions to reach `endpoint`: `--allow-net` for the host,
+/// or for a Unix socket what `Deno.connect({ transport: "unix" })` checks
+/// (read and write access to the path, and `--allow-net` for it).
+fn check_endpoint(
+  state: &mut OpState,
+  endpoint: &Endpoint,
+) -> Result<(), SqlError> {
+  let permissions = state.borrow_mut::<PermissionsContainer>();
+  match endpoint {
+    Endpoint::Tcp { hostname, port } => {
+      permissions.check_net(&(hostname, Some(*port)), API_NAME)?;
+    }
+    Endpoint::Unix(path) => {
+      deno_net::check_unix_socket_path(
+        permissions,
+        Cow::Borrowed(path.as_path()),
+        OpenAccessKind::ReadWriteNoFollow,
+        Some(API_NAME),
+      )?;
+    }
+  }
+  Ok(())
+}
+
+enum Negotiated<S> {
+  Plain(S),
+  Tls(Box<tokio_rustls::client::TlsStream<S>>),
+}
+
+async fn negotiate_tls<S>(
+  mut stream: S,
   mode: SslMode,
   config: Option<Arc<ClientConfig>>,
   server_name: &str,
-) -> Result<Negotiated, SqlError> {
+) -> Result<Negotiated<S>, SqlError>
+where
+  S: AsyncRead + AsyncWrite + Unpin,
+{
   let Some(config) = config else {
     return Ok(Negotiated::Plain(stream));
   };
@@ -293,41 +541,77 @@ async fn negotiate_tls(
   }
 }
 
+struct Started {
+  client: Client,
+  events: Option<mpsc::UnboundedReceiver<PgEvent>>,
+  parameters: HashMap<String, String>,
+}
+
 async fn startup<S>(
   stream: S,
   config: &tokio_postgres::Config,
-) -> Result<Client, SqlError>
+  events: u32,
+) -> Result<Started, SqlError>
 where
   S: AsyncRead + AsyncWrite + Unpin + 'static,
 {
   let (client, mut connection) = config.connect_raw(stream, NoTls).await?;
+  let parameters = REPORTED_PARAMETERS
+    .iter()
+    .filter_map(|name| {
+      connection
+        .parameter(name)
+        .map(|v| (name.to_string(), v.to_string()))
+    })
+    .collect();
+  let (tx, rx) = if events != 0 {
+    let (tx, rx) = mpsc::unbounded_channel();
+    (Some(tx), Some(rx))
+  } else {
+    (None, None)
+  };
   deno_core::unsync::spawn(async move {
     // Drives the socket until the client is dropped (after sending
     // Terminate) or the socket fails, which the client sees as
-    // `is_closed()`. Notices and notifications are dropped here rather than
-    // logged.
-    while let Some(Ok(_)) =
+    // `is_closed()` and the event receiver as the end of its channel.
+    // Asynchronous messages nobody asked for are dropped here.
+    while let Some(Ok(message)) =
       std::future::poll_fn(|cx| connection.poll_message(cx)).await
-    {}
+    {
+      let Some(tx) = &tx else { continue };
+      let event = match message {
+        AsyncMessage::Notification(n) if events & EVENTS_NOTIFICATIONS != 0 => {
+          PgEvent::Notification {
+            channel: n.channel().to_string(),
+            payload: n.payload().to_string(),
+            pid: n.process_id(),
+          }
+        }
+        AsyncMessage::Notice(notice) if events & EVENTS_NOTICES != 0 => {
+          PgEvent::Notice(Box::new(PgNotice::from(&notice)))
+        }
+        _ => continue,
+      };
+      let _ = tx.send(event);
+    }
   });
-  Ok(client)
+  Ok(Started {
+    client,
+    events: rx,
+    parameters,
+  })
 }
+
+/// The connection, the TLS configuration and server name it ended up using
+/// (if any).
+type Connected = (Started, Option<(Arc<ClientConfig>, String)>);
 
 async fn connect(
   state: Rc<RefCell<OpState>>,
   args: &PgConnectArgs,
+  endpoint: &Endpoint,
   tls: Option<Arc<ClientConfig>>,
-) -> Result<Client, SqlError> {
-  let stream = open_socket(&state, &args.hostname, args.port).await?;
-  let server_name = args
-    .server_name
-    .as_deref()
-    .unwrap_or(&args.hostname)
-    .trim_start_matches('[')
-    .trim_end_matches(']');
-  let negotiated =
-    negotiate_tls(stream, args.ssl_mode, tls, server_name).await?;
-
+) -> Result<Connected, SqlError> {
   let mut config = tokio_postgres::Config::new();
   config.user(&args.username);
   if let Some(password) = &args.password {
@@ -345,47 +629,100 @@ async fn connect(
   // TLS (if any) is already in place underneath.
   config.ssl_mode(tokio_postgres::config::SslMode::Disable);
 
-  match negotiated {
-    Negotiated::Plain(s) => startup(s, &config).await,
-    Negotiated::Tls(s) => startup(*s, &config).await,
+  match endpoint {
+    Endpoint::Tcp { hostname, port } => {
+      let stream = open_tcp(&state, hostname, *port).await?;
+      let server_name = args
+        .server_name
+        .as_deref()
+        .unwrap_or(hostname)
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .to_string();
+      match negotiate_tls(stream, args.ssl_mode, tls.clone(), &server_name)
+        .await?
+      {
+        Negotiated::Plain(s) => {
+          Ok((startup(s, &config, args.events).await?, None))
+        }
+        Negotiated::Tls(s) => Ok((
+          startup(*s, &config, args.events).await?,
+          tls.map(|t| (t, server_name)),
+        )),
+      }
+    }
+    #[cfg(unix)]
+    Endpoint::Unix(path) => {
+      // As libpq: no TLS over a Unix-domain socket, whatever the sslmode.
+      let stream = open_unix(path).await?;
+      Ok((startup(stream, &config, args.events).await?, None))
+    }
+    #[cfg(not(unix))]
+    Endpoint::Unix(_) => Err(SqlError::type_error(
+      "Unix-socket Postgres hosts are not supported on this platform",
+    )),
   }
 }
 
 #[op2]
-#[smi]
+#[serde]
 pub async fn op_sql_pg_connect(
   state: Rc<RefCell<OpState>>,
   #[serde] args: PgConnectArgs,
-) -> Result<ResourceId, SqlError> {
+) -> Result<PgConnectInfo, SqlError> {
+  let endpoint = match &args.socket_path {
+    Some(path) => Endpoint::Unix(PathBuf::from(path)),
+    None => Endpoint::Tcp {
+      hostname: args.hostname.clone(),
+      port: args.port,
+    },
+  };
   let tls = {
     let mut s = state.borrow_mut();
-    s.borrow_mut::<PermissionsContainer>()
-      .check_net(&(&args.hostname, Some(args.port)), API_NAME)?;
-    tls_config(&s, &args)?
+    check_endpoint(&mut s, &endpoint)?;
+    if matches!(endpoint, Endpoint::Unix(_)) {
+      None
+    } else {
+      tls_config(&s, &args)?
+    }
   };
-  let fut = connect(state.clone(), &args, tls);
-  let client = if args.connect_timeout_ms > 0 {
+  let display = match &endpoint {
+    Endpoint::Tcp { hostname, port } => format!("{hostname}:{port}"),
+    Endpoint::Unix(path) => path.display().to_string(),
+  };
+  let fut = connect(state.clone(), &args, &endpoint, tls);
+  let (started, tls) = if args.connect_timeout_ms > 0 {
     tokio::time::timeout(Duration::from_millis(args.connect_timeout_ms), fut)
       .await
       .map_err(|_| {
         SqlError::postgres_client(
           codes::CONNECTION_TIMEOUT,
           format!(
-            "Connection to {}:{} timed out after {}ms",
-            args.hostname, args.port, args.connect_timeout_ms
+            "Connection to {display} timed out after {}ms",
+            args.connect_timeout_ms
           ),
         )
       })??
   } else {
     fut.await?
   };
+  let cancel_token = started.client.cancel_token();
   let rid = state.borrow_mut().resource_table.add(PgConnection {
-    client,
+    client: started.client,
     statements: RefCell::new(StatementCache::default()),
     cache_size: args.statement_cache_size,
     cancel: CancelHandle::new_rc(),
+    events: started.events.map(AsyncRefCell::new),
+    cancel_token,
+    endpoint,
+    tls,
+    in_flight: RefCell::new(InFlight::default()),
+    in_flight_changed: Notify::new(),
   });
-  Ok(rid)
+  Ok(PgConnectInfo {
+    rid,
+    parameters: started.parameters,
+  })
 }
 
 #[op2(fast)]
@@ -395,6 +732,115 @@ pub fn op_sql_pg_is_closed(state: &OpState, #[smi] rid: ResourceId) -> bool {
     .get::<PgConnection>(rid)
     .map(|c| c.client.is_closed())
     .unwrap_or(true)
+}
+
+/// The next notification or notice of a connection opened with `events`;
+/// `null` once the connection has closed.
+#[op2]
+#[serde]
+pub async fn op_sql_pg_next_event(
+  state: Rc<RefCell<OpState>>,
+  #[smi] rid: ResourceId,
+) -> Result<Option<PgEvent>, SqlError> {
+  let conn = state.borrow().resource_table.get::<PgConnection>(rid)?;
+  if conn.events.is_none() {
+    return Ok(None);
+  }
+  let cancel = conn.cancel.clone();
+  let events = RcRef::map(&conn, |c| c.events.as_ref().unwrap());
+  let mut receiver = events.borrow_mut().await;
+  match receiver.recv().or_cancel(cancel).await {
+    Ok(event) => Ok(event),
+    Err(_) => Ok(None),
+  }
+}
+
+/// Sends a CancelRequest for the backend of `conn` over a new connection to
+/// the same server (TLS when the connection uses TLS).
+async fn send_cancel(
+  state: &Rc<RefCell<OpState>>,
+  conn: &PgConnection,
+) -> Result<(), SqlError> {
+  let token = conn.cancel_token.clone();
+  match &conn.endpoint {
+    Endpoint::Tcp { hostname, port } => {
+      let stream = open_tcp(state, hostname, *port).await?;
+      match &conn.tls {
+        Some((config, server_name)) => {
+          match negotiate_tls(
+            stream,
+            SslMode::Require,
+            Some(config.clone()),
+            server_name,
+          )
+          .await?
+          {
+            Negotiated::Tls(s) => token.cancel_query_raw(*s, NoTls).await?,
+            Negotiated::Plain(s) => token.cancel_query_raw(s, NoTls).await?,
+          }
+        }
+        None => token.cancel_query_raw(stream, NoTls).await?,
+      }
+    }
+    #[cfg(unix)]
+    Endpoint::Unix(path) => {
+      token
+        .cancel_query_raw(open_unix(path).await?, NoTls)
+        .await?
+    }
+    #[cfg(not(unix))]
+    Endpoint::Unix(_) => {}
+  }
+  Ok(())
+}
+
+/// Cancels query `id` on connection `rid` once the server is running it:
+/// requests on one connection run in order, so with others ahead of it the
+/// cancel request waits for its turn (a request sent earlier would cancel
+/// another query). Resolves `true` when a cancel request was sent, `false`
+/// when the query was not (or no longer) running.
+#[op2]
+pub async fn op_sql_pg_cancel(
+  state: Rc<RefCell<OpState>>,
+  #[smi] rid: ResourceId,
+  #[smi] id: u32,
+) -> Result<bool, SqlError> {
+  let conn = state.borrow().resource_table.get::<PgConnection>(rid)?;
+  {
+    // The cancel connection needs the same permissions as the connection.
+    let mut s = state.borrow_mut();
+    check_endpoint(&mut s, &conn.endpoint)?;
+  }
+  let cancel = conn.cancel.clone();
+  let wait_turn = async {
+    loop {
+      let changed = conn.in_flight_changed.notified();
+      {
+        let in_flight = conn.in_flight.borrow();
+        if !in_flight.live.contains(&id) {
+          return false;
+        }
+        if matches!(in_flight.queue.front(), Some((_, front)) if *front == id) {
+          return true;
+        }
+      }
+      changed.await;
+    }
+  };
+  match wait_turn.or_cancel(cancel).await {
+    Ok(true) => {}
+    _ => return Ok(false),
+  }
+  let send = send_cancel(&state, &conn);
+  tokio::time::timeout(CANCEL_CONNECT_TIMEOUT, send)
+    .await
+    .map_err(|_| {
+      SqlError::postgres_client(
+        codes::CONNECTION_TIMEOUT,
+        "Timed out sending the cancel request",
+      )
+    })??;
+  Ok(true)
 }
 
 /// A column value exactly as the server sent it (binary format).
@@ -502,8 +948,10 @@ pub async fn op_sql_pg_query(
   #[string] sql: String,
   #[scoped] params: SqlParams,
   #[smi] flags: u32,
+  #[smi] query_id: u32,
 ) -> Result<PgRows, SqlError> {
   let conn = state.borrow().resource_table.get::<PgConnection>(rid)?;
+  let _live = conn.live(query_id);
   if let Some(index) = params.0.iter().position(contains_nul) {
     return Err(SqlError::postgres_client(
       codes::INVALID_PARAMETER,
@@ -515,27 +963,31 @@ pub async fn op_sql_pg_query(
   }
   let cancel = conn.cancel.clone();
   let run = async {
-    let (stream, statement) = if conn.cache_size == 0 {
-      let unspecified = unspecified_type();
-      let typed = params.0.iter().map(|p| (p, unspecified.clone()));
-      (conn.client.query_typed_raw(&sql, typed).await?, None)
-    } else {
-      let stmt = conn.statement(&sql).await?;
-      if stmt.params().len() != params.0.len() {
-        return Err(SqlError::postgres_client(
-          codes::INVALID_PARAMETER,
-          format!(
-            "The query expects {} parameter(s) but {} were given",
-            stmt.params().len(),
-            params.0.len()
-          ),
-        ));
-      }
-      (
-        conn.client.query_raw(&stmt, params.0.iter()).await?,
-        Some(stmt),
-      )
-    };
+    let mut _ticket = None;
+    let (stream, statement) =
+      if conn.cache_size == 0 || flags & FLAG_UNNAMED != 0 {
+        let unspecified = unspecified_type();
+        let typed = params.0.iter().map(|p| (p, unspecified.clone()));
+        _ticket = Some(conn.enter(query_id));
+        (conn.client.query_typed_raw(&sql, typed).await?, None)
+      } else {
+        let stmt = conn.statement(&sql).await?;
+        if stmt.params().len() != params.0.len() {
+          return Err(SqlError::postgres_client(
+            codes::INVALID_PARAMETER,
+            format!(
+              "The query expects {} parameter(s) but {} were given",
+              stmt.params().len(),
+              params.0.len()
+            ),
+          ));
+        }
+        _ticket = Some(conn.enter(query_id));
+        (
+          conn.client.query_raw(&stmt, params.0.iter()).await?,
+          Some(stmt),
+        )
+      };
     let mut stream = std::pin::pin!(stream);
     let mut rows = Vec::new();
     while let Some(row) = stream.try_next().await? {
@@ -632,10 +1084,13 @@ pub async fn op_sql_pg_simple(
   #[smi] rid: ResourceId,
   #[string] sql: String,
   #[smi] flags: u32,
+  #[smi] query_id: u32,
 ) -> Result<PgSimpleResults, SqlError> {
   let conn = state.borrow().resource_table.get::<PgConnection>(rid)?;
+  let _live = conn.live(query_id);
   let cancel = conn.cancel.clone();
   let run = async {
+    let _ticket = conn.enter(query_id);
     let messages = conn.client.simple_query(&sql).await?;
     let mut results = Vec::new();
     let mut columns: Vec<String> = Vec::new();

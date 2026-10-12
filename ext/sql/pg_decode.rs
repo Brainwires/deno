@@ -41,6 +41,12 @@ mod oid {
   pub const JSON: u32 = 114;
   pub const XML: u32 = 142;
   pub const POINT: u32 = 600;
+  pub const LSEG: u32 = 601;
+  pub const PATH: u32 = 602;
+  pub const BOX: u32 = 603;
+  pub const POLYGON: u32 = 604;
+  pub const LINE: u32 = 628;
+  pub const CIRCLE: u32 = 718;
   pub const CIDR: u32 = 650;
   pub const FLOAT4: u32 = 700;
   pub const FLOAT8: u32 = 701;
@@ -69,6 +75,7 @@ mod oid {
   pub const VOID: u32 = 2278;
   pub const UUID: u32 = 2950;
   pub const PG_LSN: u32 = 3220;
+  pub const TSVECTOR: u32 = 3614;
   pub const REGCONFIG: u32 = 3734;
   pub const REGDICTIONARY: u32 = 3769;
   pub const JSONB: u32 = 3802;
@@ -368,6 +375,51 @@ pub fn money_to_string(cents: i64) -> String {
   format!("{sign}{}.{:02}", abs / 100, abs % 100)
 }
 
+/// `tsvector` in the server's text form: `'lexeme':1A,2 'other'`.
+pub fn tsvector_to_string(buf: &[u8]) -> DecodeResult<String> {
+  let mut r = Reader::new(buf);
+  let n = r.i32()?;
+  if n < 0 {
+    return Err("invalid tsvector length".into());
+  }
+  let mut out = String::new();
+  for i in 0..n {
+    let rest = r.rest();
+    let end = rest
+      .iter()
+      .position(|&b| b == 0)
+      .ok_or_else(|| "unterminated tsvector lexeme".to_string())?;
+    let lexeme = std::str::from_utf8(&rest[..end])
+      .map_err(|_| "invalid UTF-8 in tsvector".to_string())?;
+    r = Reader::new(&rest[end + 1..]);
+    if i > 0 {
+      out.push(' ');
+    }
+    out.push('\'');
+    for c in lexeme.chars() {
+      if c == '\'' || c == '\\' {
+        out.push(c);
+      }
+      out.push(c);
+    }
+    out.push('\'');
+    let npos = r.u16()?;
+    for j in 0..npos {
+      let pos = r.u16()?;
+      out.push(if j == 0 { ':' } else { ',' });
+      out.push_str(&(pos & 0x3fff).to_string());
+      match pos >> 14 {
+        3 => out.push('A'),
+        2 => out.push('B'),
+        1 => out.push('C'),
+        _ => {}
+      }
+    }
+  }
+  r.done()?;
+  Ok(out)
+}
+
 // ---------------------------------------------------------------------------
 // V8 construction
 
@@ -435,6 +487,159 @@ fn v8_json<'a>(
 fn looks_like_text(buf: &[u8]) -> bool {
   std::str::from_utf8(buf).is_ok()
     && !buf.iter().any(|&b| b < 0x09 || (0x0e..0x20).contains(&b))
+}
+
+fn v8_object<'a>(
+  scope: &mut v8::PinScope<'a, '_>,
+  keys: &[&str],
+  values: &[v8::Local<'a, v8::Value>],
+) -> DecodeResult<v8::Local<'a, v8::Value>> {
+  let mut names = Vec::with_capacity(keys.len());
+  for key in keys {
+    names.push(
+      v8::String::new(scope, key)
+        .ok_or_else(|| "could not create a key".to_string())?
+        .into(),
+    );
+  }
+  let proto = v8::Object::new(scope)
+    .get_prototype(scope)
+    .ok_or_else(|| "no Object prototype".to_string())?;
+  Ok(
+    v8::Object::with_prototype_and_properties(scope, proto, &names, values)
+      .into(),
+  )
+}
+
+/// A geometric point, `{ x, y }`.
+fn v8_point<'a>(
+  scope: &mut v8::PinScope<'a, '_>,
+  r: &mut Reader<'_>,
+) -> DecodeResult<v8::Local<'a, v8::Value>> {
+  let (x, y) = (r.f64()?, r.f64()?);
+  let values = [
+    v8::Number::new(scope, x).into(),
+    v8::Number::new(scope, y).into(),
+  ];
+  v8_object(scope, &["x", "y"], &values)
+}
+
+/// A point count, then the points (`path`, `polygon`).
+fn v8_points<'a>(
+  scope: &mut v8::PinScope<'a, '_>,
+  r: &mut Reader<'_>,
+) -> DecodeResult<v8::Local<'a, v8::Value>> {
+  let n = r.i32()?;
+  if n < 0 {
+    return Err("invalid point count".into());
+  }
+  let mut points = Vec::with_capacity((n as usize).min(1 << 16));
+  for _ in 0..n {
+    points.push(v8_point(scope, r)?);
+  }
+  Ok(v8::Array::new_with_elements(scope, &points).into())
+}
+
+const RANGE_EMPTY: u8 = 0x01;
+const RANGE_LB_INC: u8 = 0x02;
+const RANGE_UB_INC: u8 = 0x04;
+const RANGE_LB_INF: u8 = 0x08;
+const RANGE_UB_INF: u8 = 0x10;
+
+fn range_bound<'a>(
+  scope: &mut v8::PinScope<'a, '_>,
+  r: &mut Reader<'_>,
+  elem: &Type,
+  present: bool,
+  opts: DecodeOptions,
+  depth: u32,
+) -> DecodeResult<v8::Local<'a, v8::Value>> {
+  if !present {
+    return Ok(v8::null(scope).into());
+  }
+  let len = r.i32()?;
+  if len < 0 {
+    return Ok(v8::null(scope).into());
+  }
+  let bytes = r.take(len as usize)?;
+  decode_nested(scope, elem, bytes, opts, depth + 1)
+}
+
+/// A range as `{ lower, upper, lowerInclusive, upperInclusive, empty }`: an
+/// unbounded side is `null` (and not inclusive); an empty range has both
+/// bounds `null` and `empty: true`.
+fn decode_range<'a>(
+  scope: &mut v8::PinScope<'a, '_>,
+  elem: &Type,
+  buf: &[u8],
+  opts: DecodeOptions,
+  depth: u32,
+) -> DecodeResult<v8::Local<'a, v8::Value>> {
+  let mut r = Reader::new(buf);
+  let flags = r.take(1)?[0];
+  let empty = flags & RANGE_EMPTY != 0;
+  let lower = range_bound(
+    scope,
+    &mut r,
+    elem,
+    !empty && flags & RANGE_LB_INF == 0,
+    opts,
+    depth,
+  )?;
+  let upper = range_bound(
+    scope,
+    &mut r,
+    elem,
+    !empty && flags & RANGE_UB_INF == 0,
+    opts,
+    depth,
+  )?;
+  r.done()?;
+  let values = [
+    lower,
+    upper,
+    v8::Boolean::new(scope, !empty && flags & RANGE_LB_INC != 0).into(),
+    v8::Boolean::new(scope, !empty && flags & RANGE_UB_INC != 0).into(),
+    v8::Boolean::new(scope, empty).into(),
+  ];
+  v8_object(
+    scope,
+    &[
+      "lower",
+      "upper",
+      "lowerInclusive",
+      "upperInclusive",
+      "empty",
+    ],
+    &values,
+  )
+}
+
+/// A multirange (of ranges of `elem`) as an array of ranges (see
+/// [`decode_range`]).
+fn decode_multirange<'a>(
+  scope: &mut v8::PinScope<'a, '_>,
+  elem: &Type,
+  buf: &[u8],
+  opts: DecodeOptions,
+  depth: u32,
+) -> DecodeResult<v8::Local<'a, v8::Value>> {
+  let mut r = Reader::new(buf);
+  let n = r.i32()?;
+  if n < 0 {
+    return Err("invalid multirange length".into());
+  }
+  let mut items = Vec::with_capacity((n as usize).min(1 << 16));
+  for _ in 0..n {
+    let len = r.i32()?;
+    if len < 0 {
+      return Err("invalid range length".into());
+    }
+    let bytes = r.take(len as usize)?;
+    items.push(decode_range(scope, elem, bytes, opts, depth + 1)?);
+  }
+  r.done()?;
+  Ok(v8::Array::new_with_elements(scope, &items).into())
 }
 
 /// Decodes one non-null binary-format value of type `ty`.
@@ -574,25 +779,64 @@ fn decode_nested<'a>(
     }
     oid::POINT => {
       let mut r = Reader::new(buf);
-      let (x, y) = (r.f64()?, r.f64()?);
+      let p = v8_point(scope, &mut r)?;
       r.done()?;
-      let names = [
-        v8::String::new(scope, "x").unwrap().into(),
-        v8::String::new(scope, "y").unwrap().into(),
+      p
+    }
+    oid::LINE => {
+      let mut r = Reader::new(buf);
+      let (a, b, c) = (r.f64()?, r.f64()?, r.f64()?);
+      r.done()?;
+      let values = [
+        v8::Number::new(scope, a).into(),
+        v8::Number::new(scope, b).into(),
+        v8::Number::new(scope, c).into(),
       ];
+      v8_object(scope, &["a", "b", "c"], &values)?
+    }
+    oid::LSEG | oid::BOX => {
+      // lseg: its two end points; box: the upper-right then the lower-left
+      // corner (the order the server stores and prints them in).
+      let mut r = Reader::new(buf);
+      let points = [v8_point(scope, &mut r)?, v8_point(scope, &mut r)?];
+      r.done()?;
+      v8::Array::new_with_elements(scope, &points).into()
+    }
+    oid::PATH => {
+      let mut r = Reader::new(buf);
+      let closed = r.take(1)?[0] != 0;
+      let points = v8_points(scope, &mut r)?;
+      r.done()?;
+      let values = [v8::Boolean::new(scope, closed).into(), points];
+      v8_object(scope, &["closed", "points"], &values)?
+    }
+    oid::POLYGON => {
+      let mut r = Reader::new(buf);
+      let points = v8_points(scope, &mut r)?;
+      r.done()?;
+      points
+    }
+    oid::CIRCLE => {
+      let mut r = Reader::new(buf);
+      let (x, y, radius) = (r.f64()?, r.f64()?, r.f64()?);
+      r.done()?;
       let values = [
         v8::Number::new(scope, x).into(),
         v8::Number::new(scope, y).into(),
+        v8::Number::new(scope, radius).into(),
       ];
-      let proto = v8::Object::new(scope).get_prototype(scope).unwrap();
-      v8::Object::with_prototype_and_properties(scope, proto, &names, &values)
-        .into()
+      v8_object(scope, &["x", "y", "radius"], &values)?
     }
+    oid::TSVECTOR => v8_str(scope, tsvector_to_string(buf)?.as_bytes())?,
     oid::VOID => v8::null(scope).into(),
     oid::INT2VECTOR => decode_array(scope, &Type::INT2, buf, opts, depth)?,
     oid::OIDVECTOR => decode_array(scope, &Type::OID, buf, opts, depth)?,
     _ => match ty.kind() {
       Kind::Array(elem) => decode_array(scope, elem, buf, opts, depth)?,
+      Kind::Range(elem) => decode_range(scope, elem, buf, opts, depth)?,
+      Kind::Multirange(elem) => {
+        decode_multirange(scope, elem, buf, opts, depth)?
+      }
       Kind::Domain(base) => decode_nested(scope, base, buf, opts, depth + 1)?,
       Kind::Enum(_) => v8_str(scope, utf8(buf)?)?,
       Kind::Composite(fields) => {
@@ -602,7 +846,7 @@ fn decode_nested<'a>(
         // An extension type whose binary form is its text (citext, ...).
         v8_str(scope, buf)?
       }
-      // Ranges, geometry other than point, tsvector, ...: the raw bytes.
+      // tsquery and other types without a decoder: the raw bytes.
       _ => v8_bytes(scope, buf),
     },
   };
@@ -799,6 +1043,14 @@ mod tests {
     assert_eq!(money_to_string(-1234), "-12.34");
     assert_eq!(money_to_string(5), "0.05");
     assert!(looks_like_text(b"hello"));
+    // 2 lexemes: "a'b" at 1A,2 and "c" without positions.
+    let mut tsv = vec![0, 0, 0, 2];
+    tsv.extend_from_slice(b"a'b\0");
+    tsv.extend_from_slice(&[0, 2, 0xc0, 1, 0, 2]);
+    tsv.extend_from_slice(b"c\0");
+    tsv.extend_from_slice(&[0, 0]);
+    assert_eq!(tsvector_to_string(&tsv).unwrap(), "'a''b':1A,2 'c'");
+    assert!(tsvector_to_string(&[0, 0, 0, 1, b'x']).is_err());
     assert!(!looks_like_text(&[0, 1, 2]));
   }
 }

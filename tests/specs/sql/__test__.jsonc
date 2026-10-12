@@ -3,7 +3,13 @@
 // postgres://postgres:pw@127.0.0.1:5432/postgres; the server must be on
 // loopback) and, for `pg_tls`, DENO_SQL_TEST_POSTGRES_CA to the PEM of the
 // CA that signed the server's certificate (issued for localhost and
-// 127.0.0.1). Without them those tests are skipped.
+// 127.0.0.1). `pg_socket` needs DENO_SQL_TEST_POSTGRES_SOCKET, the directory
+// of the server's Unix-domain socket (DENO_SQL_TEST_POSTGRES_SOCKET_PORT if
+// its port is not 5432); `pg_client_cert` needs
+// DENO_SQL_TEST_POSTGRES_CLIENT_CERT / _CLIENT_KEY, a certificate (and key)
+// signed by that CA for a role `certuser` the server authenticates by
+// certificate (`hostssl all certuser all cert`). Without them those tests
+// are skipped.
 {
   "tempDir": true,
   "tests": {
@@ -63,6 +69,41 @@
       "if": "postgres",
       "args": "run --allow-env=DENO_SQL_TEST_POSTGRES_URL --allow-net=127.0.0.1,localhost pg_pool.ts",
       "output": "pg_pool.out"
+    },
+    "pg_listen": {
+      "if": "postgres",
+      "args": "run --allow-env=DENO_SQL_TEST_POSTGRES_URL --allow-net=127.0.0.1,localhost pg_listen.ts",
+      "output": "pg_listen.out"
+    },
+    "pg_cursor": {
+      "if": "postgres",
+      "args": "run --allow-env=DENO_SQL_TEST_POSTGRES_URL --allow-net=127.0.0.1,localhost pg_cursor.ts",
+      "output": "pg_cursor.out"
+    },
+    "pg_cancel": {
+      "if": "postgres",
+      "args": "run --allow-env=DENO_SQL_TEST_POSTGRES_URL --allow-net=127.0.0.1,localhost pg_cancel.ts",
+      "output": "pg_cancel.out"
+    },
+    "pg_pipeline": {
+      "if": "postgres",
+      "args": "run --allow-env=DENO_SQL_TEST_POSTGRES_URL --allow-net=127.0.0.1,localhost pg_pipeline.ts",
+      "output": "pg_pipeline.out"
+    },
+    "pg_file": {
+      "if": "postgres",
+      "args": "run --allow-env=DENO_SQL_TEST_POSTGRES_URL --allow-net=127.0.0.1,localhost --allow-read=. --allow-write=. pg_file.ts",
+      "output": "pg_file.out"
+    },
+    "pg_socket": {
+      "if": "postgresSocket",
+      "args": "run --allow-env --allow-read --allow-write --allow-net pg_socket.ts",
+      "output": "pg_socket.out"
+    },
+    "pg_client_cert": {
+      "if": "postgresClientCert",
+      "args": "run --allow-env --allow-read --allow-net=127.0.0.1,localhost pg_client_cert.ts",
+      "output": "pg_client_cert.out"
     },
     "pg_tls": {
       "if": "postgresTls",

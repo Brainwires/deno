@@ -46,11 +46,13 @@
   darr: [ 2024-01-01T00:00:00.000Z ],
   jarr: [ { x: 1 } ],
   moods: [ "happy", "sad" ],
-  rng: Uint8Array(17) [
-    2, 0,  0, 0, 4, 0, 0,
-    0, 1,  0, 0, 0, 4, 0,
-    0, 0, 10
-  ]
+  rng: {
+    lower: 1,
+    upper: 10,
+    lowerInclusive: true,
+    upperInclusive: false,
+    empty: false
+  }
 }
 [ { i8: 9007199254740993n, a: [ 1n, 2n ], i4: 2 } ]
 i ok
@@ -82,3 +84,72 @@ DELETE 0
 [ { sum: 3, by: Uint8Array(1) [ 7 ], j: { a: 1 }, a: [ 1, 2 ] } ]
 [ [ { a: "1" } ], [ { b: "two", c: null } ] ]
 [ { s: "a'b" } ]
+[
+  {
+    r: {
+      lower: 1,
+      upper: 10,
+      lowerInclusive: true,
+      upperInclusive: false,
+      empty: false
+    },
+    d: {
+      lower: null,
+      upper: 2020-01-03T00:00:00.000Z,
+      lowerInclusive: false,
+      upperInclusive: false,
+      empty: false
+    },
+    e: {
+      lower: null,
+      upper: null,
+      lowerInclusive: false,
+      upperInclusive: false,
+      empty: true
+    },
+    m: [
+      {
+        lower: 1,
+        upper: 3,
+        lowerInclusive: true,
+        upperInclusive: false,
+        empty: false
+      },
+      {
+        lower: 5,
+        upper: 6,
+        lowerInclusive: true,
+        upperInclusive: false,
+        empty: false
+      }
+    ]
+  }
+]
+[
+  {
+    p: { x: 1, y: 2 },
+    l: { a: 1, b: -1, c: 0 },
+    s: [ { x: 0, y: 0 }, { x: 1, y: 1 } ],
+    b: [ { x: 2, y: 2 }, { x: 0, y: 0 } ],
+    pa: {
+      closed: true,
+      points: [ { x: 0, y: 0 }, { x: 1, y: 0 }, { x: 1, y: 1 } ]
+    },
+    op: { closed: false, points: [ { x: 0, y: 0 }, { x: 1, y: 1 } ] },
+    pg: [ { x: 0, y: 0 }, { x: 1, y: 0 }, { x: 1, y: 1 } ],
+    c: { x: 0, y: 0, radius: 3 }
+  }
+]
+{ t: "'a''b':1A,2 'c'", en: "'brown':3 'fox':4 'quick':2" }
+tsvector round trip: true
+[
+  {
+    i: [ 1, 2, 3 ],
+    t: [ "a", "b c" ],
+    e: [],
+    dp: "double precision[]",
+    nested: [ [ 1, 2 ], [ 3, 4 ] ]
+  }
+]
+[ { tags: [ "x", "y" ] } ]
+bad type: TypeError

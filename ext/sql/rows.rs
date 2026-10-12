@@ -14,6 +14,9 @@ pub const FLAG_VALUES: u32 = 1;
 pub const FLAG_RAW: u32 = 2;
 /// 64-bit integers as `bigint`.
 pub const FLAG_BIGINT: u32 = 4;
+/// Postgres: run as an unnamed statement even when statements are cached
+/// (cursor commands, whose text differs per cursor).
+pub const FLAG_UNNAMED: u32 = 8;
 
 pub struct RowShape<'a> {
   arrays: bool,

@@ -1,0 +1,4 @@
+url files: { who: "certuser", ssl: true }
+tls options: { who: "certuser", ssl: true }
+no certificate: error: 28000
+cert without key: TypeError
