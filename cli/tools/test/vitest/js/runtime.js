@@ -242,8 +242,18 @@ function toImportSpecifier(path) {
   return pathToFileURL(path).href;
 }
 
+/**
+ * A path as Vitest spells it: forward slashes on Windows too (Vitest compares
+ * a task's file with the stack frames it parses, which it normalizes so).
+ */
+function slash(path) {
+  return Deno.build.os === "windows" ? path.replaceAll("\\", "/") : path;
+}
+
 function toFilePath(specifier) {
-  return specifier.startsWith("file:") ? fileURLToPath(specifier) : specifier;
+  return slash(
+    specifier.startsWith("file:") ? fileURLToPath(specifier) : specifier,
+  );
 }
 
 /** Whether the first frame of `stack` is outside the built-in modules. */
@@ -766,7 +776,7 @@ export async function startFile(specifier, config = {}) {
   if (started) return;
   started = true;
   const filepath = toFilePath(specifier);
-  config = { root: Deno.cwd(), ...config };
+  config = { root: slash(Deno.cwd()), ...config };
   const environmentName = normalizeEnvironment(config.environment);
   const jestProject = config.flavor === "jest"
     ? await import("./jest.js")

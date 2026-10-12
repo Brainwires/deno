@@ -588,7 +588,7 @@ impl VitestOverrides {
       referrer.join(path).ok()
     } else if path.starts_with("file:") {
       Url::parse(path).ok()
-    } else if path.starts_with('/') {
+    } else if is_absolute_path(path) {
       // a filesystem path (from an alias), or a path from the Vite root
       let absolute = Path::new(path);
       let file = if absolute.exists() {
@@ -926,7 +926,7 @@ impl SpecifierOverrides for VitestOverrides {
     if self.vite_root.read().unwrap().is_some() {
       let specifier = aliased.as_deref().unwrap_or(raw_specifier);
       let file_specifier;
-      let specifier = if specifier.starts_with('/') {
+      let specifier = if is_absolute_path(specifier) {
         file_specifier = Url::from_file_path(specifier)
           .map(|u| u.to_string())
           .unwrap_or_default();
@@ -956,9 +956,16 @@ impl SpecifierOverrides for VitestOverrides {
   }
 }
 
+/// Whether an alias replacement is an absolute filesystem path: `/x`, or on
+/// Windows also `C:\x` / `C:/x` (a Jest `<rootDir>` there is a drive path).
+fn is_absolute_path(specifier: &str) -> bool {
+  specifier.starts_with('/')
+    || (cfg!(windows) && Path::new(specifier).is_absolute())
+}
+
 /// An alias replacement that is an absolute path, as a file URL.
 fn absolute_path_to_url(specifier: String) -> String {
-  if specifier.starts_with('/') {
+  if is_absolute_path(&specifier) {
     Url::from_file_path(&specifier)
       .map(|u| u.to_string())
       .unwrap_or(specifier)
@@ -1492,12 +1499,37 @@ mod tests {
   }
 
   #[test]
+  fn absolute_alias_replacements_become_file_urls() {
+    #[cfg(windows)]
+    {
+      assert!(is_absolute_path("d:\\p\\lib\\math"));
+      assert!(is_absolute_path("D:/p/lib/math"));
+      let url = absolute_path_to_url("d:\\p\\lib\\math".to_string());
+      assert!(url.starts_with("file:///"), "{url}");
+      assert!(url.to_ascii_lowercase().ends_with("d:/p/lib/math"), "{url}");
+    }
+    #[cfg(not(windows))]
+    assert_eq!(
+      absolute_path_to_url("/p/lib/math".to_string()),
+      "file:///p/lib/math"
+    );
+    assert!(!is_absolute_path("pkg/x"));
+    assert_eq!(absolute_path_to_url("pkg/x".to_string()), "pkg/x");
+    assert_eq!(absolute_path_to_url("npm:pkg".to_string()), "npm:pkg");
+  }
+
+  #[test]
   fn vite_asset_modules() {
-    let overrides = VitestOverrides::new(Path::new("/project"), None).unwrap();
-    let referrer = Url::parse("file:///project/src/a.test.ts").unwrap();
+    // a root that is absolute on this platform, and its file URL
+    #[cfg(windows)]
+    let (root, root_url) = ("C:\\project", "file:///C:/project");
+    #[cfg(not(windows))]
+    let (root, root_url) = ("/project", "file:///project");
+    let overrides = VitestOverrides::new(Path::new(root), None).unwrap();
+    let referrer = Url::parse(&format!("{root_url}/src/a.test.ts")).unwrap();
     // only with a Vitest config
     assert_eq!(overrides.vite_asset_module("./a.css", &referrer), None);
-    *overrides.vite_root.write().unwrap() = Some(PathBuf::from("/project"));
+    *overrides.vite_root.write().unwrap() = Some(PathBuf::from(root));
     let kind = |specifier: &str| {
       overrides
         .vite_asset_module(specifier, &referrer)
@@ -1511,9 +1543,7 @@ mod tests {
     };
     assert_eq!(
       kind("./a.css"),
-      Some(
-        "kind=css&file=file:///project/src/a.css&url=/src/a.css".to_string()
-      )
+      Some(format!("kind=css&file={root_url}/src/a.css&url=/src/a.css"))
     );
     assert_eq!(
       kind("./a.module.scss").map(|k| k.starts_with("kind=css-module")),
@@ -1522,10 +1552,9 @@ mod tests {
     assert_eq!(kind("pkg/style.css"), Some("kind=css".to_string()));
     assert_eq!(
       kind("../assets/x.mp3"),
-      Some(
-        "kind=url&file=file:///project/assets/x.mp3&url=/assets/x.mp3"
-          .to_string()
-      )
+      Some(format!(
+        "kind=url&file={root_url}/assets/x.mp3&url=/assets/x.mp3"
+      ))
     );
     assert_eq!(
       kind("./x.svg?raw").map(|k| k.starts_with("kind=raw")),
@@ -1550,7 +1579,7 @@ mod tests {
       Some("kind=url&url=/node_modules/pkg/font.woff2".to_string())
     );
     let in_node_modules =
-      Url::parse("file:///project/node_modules/pkg/index.js").unwrap();
+      Url::parse(&format!("{root_url}/node_modules/pkg/index.js")).unwrap();
     assert_eq!(
       overrides.vite_asset_module("./a.css", &in_node_modules),
       None

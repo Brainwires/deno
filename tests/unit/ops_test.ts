@@ -10,7 +10,9 @@
 // op_desktop_alert_async, which the uncaught-error handler needs). The desktop JS that cli/rt evaluates
 // after bootstrap reaches them through `core.ops`, so they survive
 // removeImportedOps() like upstream's own desktop ops.
-const EXPECTED_OP_COUNT = 98;
+// Plus 9 for Vitest compatibility (`deno test`, item 23):
+// op_test_set_import_meta_proto and the eight op_vitest_* ops.
+const EXPECTED_OP_COUNT = 107;
 // The main scope minus WORKER_EXCLUDED_OPS in 99_main.js: upstream strips the
 // two text-clipboard ops from workers, and the fork strips every new
 // main-scope-only desktop op (51) and the native classes that need the
