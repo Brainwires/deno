@@ -110,7 +110,9 @@
     },
     "no_permissions_file_snapshot": {
       // an unreadable snapshot file fails the run, rather than passing
-      // against no snapshot
+      // against no snapshot (outside CI mode, where a missing snapshot is
+      // written rather than a mismatch: CI runners set CI)
+      "envs": { "CI": "false" },
       "args": "test --no-check no_permissions/file_snapshot_test.ts",
       "output": "no_permissions/file_snapshot.out",
       "exitCode": 1
