@@ -83,6 +83,24 @@
       "output": "mocking_project.out",
       "exitCode": 0
     },
+    "coverage": {
+      // deno coverage reports the modules the Vitest transform changed: a
+      // module mocked in some test files and real in others, a JavaScript
+      // one, one that mocks its own import (hoisted), one with only types
+      "tempDir": true,
+      "steps": [
+        {
+          "cwd": "coverage",
+          "args": "test -A --no-check --coverage=cov",
+          "output": "[WILDCARD]ok | 4 passed | 0 failed[WILDCARD]"
+        },
+        {
+          "cwd": "coverage",
+          "args": "coverage cov --lcov",
+          "output": "coverage/expected_lcov.out"
+        }
+      ]
+    },
     "jest_globals": {
       "args": "test -A --no-check jest_globals_test.ts",
       "output": "jest_globals.out",

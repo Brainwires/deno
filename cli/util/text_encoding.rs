@@ -57,6 +57,14 @@ pub fn code_without_source_map(code: ModuleSourceCode) -> ModuleSourceCode {
   }
 }
 
+/// `code` without its inline source map, as the module loader gives it to V8.
+pub fn str_without_source_map(code: &str) -> &str {
+  match find_source_map_range(code.as_bytes()) {
+    Some(range) => &code[..range.start],
+    None => code,
+  }
+}
+
 fn find_source_map_range(code: &[u8]) -> Option<Range<usize>> {
   fn last_non_blank_line_range(code: &[u8]) -> Option<Range<usize>> {
     let mut hit_non_whitespace = false;
@@ -405,6 +413,7 @@ throw new Error(\"Hello world!\");
         let bytes = result.as_bytes();
         assert_eq!(bytes, output.as_bytes());
       }
+      assert_eq!(str_without_source_map(input), output);
     }
   }
 

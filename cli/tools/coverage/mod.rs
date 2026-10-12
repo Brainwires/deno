@@ -38,10 +38,12 @@ use crate::args::Flags;
 use crate::cdp;
 use crate::factory::CliFactory;
 use crate::file_fetcher::TextDecodedFile;
+use crate::module_loader::CliEmitter;
 use crate::sys::CliSys;
 use crate::tools::test::is_supported_test_path;
 use crate::util::text_encoding::Utf16Map;
 use crate::util::text_encoding::source_map_from_code;
+use crate::util::text_encoding::str_without_source_map;
 
 mod ignore_directives;
 mod merge;
@@ -592,7 +594,9 @@ fn generate_coverage_report(
 /// decorator runtime helpers like `applyDecs2203R`) — the bytes exist in
 /// the runtime JS but didn't come from the user's source, so callers
 /// should drop these coverage entries rather than reporting them as if
-/// they were the user's own code.
+/// they were the user's own code. So does code injected after all of the
+/// user's code (e.g. the export setters of `deno test`'s Vitest
+/// compatibility): the closest mapping before it is the user's last one.
 fn range_to_src_line_index(
   range: &cdp::CoverageRange,
   text_lines: &TextLines,
@@ -606,6 +610,14 @@ fn range_to_src_line_index(
     // the distance from the line's start in that unit.
     let column = utf16_offset(utf16_map, range_start_byte_offset)
       - utf16_offset(utf16_map, text_lines.line_start(line_index));
+    let last_mapped_line = source_map
+      .get_token_count()
+      .checked_sub(1)
+      .and_then(|index| source_map.get_token(index as usize))
+      .map(|token| token.get_dst_line() as usize);
+    if last_mapped_line.is_none_or(|last_line| line_index > last_line) {
+      return None;
+    }
     source_map
       .lookup_token(line_index as u32, column as u32)
       .map(|token| token.get_src_line() as usize)
@@ -697,6 +709,9 @@ fn filter_coverages(
       let is_internal = e.url.starts_with("ext:")
         || e.url.starts_with("data:")
         || e.url.starts_with("blob:")
+        // the Vitest compatibility of `deno test`: Vitest's own (vendored)
+        // runtime and the generated mock modules
+        || e.url.starts_with("deno-vitest:")
         || e.url.ends_with("__anonymous__")
         || e.url.ends_with("$deno$test.mjs")
         || e.url.contains("/$deno$stdin.")
@@ -845,21 +860,35 @@ pub fn cover_files(
     };
 
     let original_source = file.source.clone();
-    // Check if file was transpiled
-    let transpiled_code = match file.media_type {
-      MediaType::JavaScript
-      | MediaType::Unknown
+    // The length of the code V8 ran, to tell which candidate it was.
+    let runtime_len = script_runtime_len(&script_coverage);
+    let runtime_code: String = match file.media_type {
+      MediaType::Unknown
       | MediaType::Css
       | MediaType::Html
       | MediaType::Markdown
       | MediaType::Sql
       | MediaType::Wasm
       | MediaType::Cjs
-      | MediaType::Mjs
       | MediaType::Json
       | MediaType::Jsonc
-      | MediaType::Json5 => None,
-      MediaType::Dts | MediaType::Dmts | MediaType::Dcts => Some(String::new()),
+      | MediaType::Json5 => original_source.to_string(),
+      // Served as is, unless a program transform (the Vitest compatibility
+      // of `deno test`) applied to it, which emits it.
+      MediaType::JavaScript | MediaType::Mjs => {
+        if is_runtime_code(&original_source, runtime_len) {
+          original_source.to_string()
+        } else {
+          transformed_emit(
+            emitter.as_ref(),
+            &file.specifier,
+            &original_source,
+            runtime_len,
+          )
+          .unwrap_or_else(|| original_source.to_string())
+        }
+      }
+      MediaType::Dts | MediaType::Dmts | MediaType::Dcts => String::new(),
       MediaType::TypeScript
       | MediaType::Jsx
       | MediaType::Mts
@@ -868,12 +897,23 @@ pub fn cover_files(
         let module_kind = ModuleKind::from_is_cjs(
           cjs_tracker.is_maybe_cjs(&file.specifier, file.media_type)?,
         );
-        Some(
-          match emitter.maybe_cached_emit(
+        let cached_emit = emitter.maybe_cached_emit(
+          &file.specifier,
+          module_kind,
+          &file.source,
+        )?;
+        match cached_emit {
+          Some(code) if is_runtime_code(&code, runtime_len) => code,
+          // Not what ran: emitted with a program transform, whose key is
+          // part of the emit's cache key.
+          cached_emit => match transformed_emit(
+            emitter.as_ref(),
             &file.specifier,
-            module_kind,
-            &file.source,
-          )? {
+            &original_source,
+            runtime_len,
+          )
+          .or(cached_emit)
+          {
             Some(code) => code,
             None => {
               log::warn!(
@@ -883,15 +923,11 @@ pub fn cover_files(
               continue;
             }
           },
-        )
+        }
       }
       MediaType::SourceMap => {
         unreachable!()
       }
-    };
-    let runtime_code: String = match transpiled_code {
-      Some(code) => code,
-      None => original_source.to_string(),
     };
 
     let source_map = source_map_from_code(runtime_code.as_bytes());
@@ -937,6 +973,62 @@ pub fn cover_files(
   check_coverage_thresholds(&file_reports, thresholds)?;
 
   Ok(())
+}
+
+/// The UTF-16 length of the code V8 ran for a script: the end of its
+/// top-level function's range, if the coverage has it.
+fn script_runtime_len(script_coverage: &cdp::ScriptCoverage) -> Option<usize> {
+  script_coverage
+    .functions
+    .iter()
+    .filter(|function| function.function_name.is_empty())
+    .filter_map(|function| function.ranges.first())
+    .filter(|range| range.start_char_offset == 0)
+    .map(|range| range.end_char_offset)
+    .max()
+}
+
+/// Whether `code` (with its inline source map, which the module loader
+/// strips) can be the code V8 ran, which was `runtime_len` long, if known.
+fn is_runtime_code(code: &str, runtime_len: Option<usize>) -> bool {
+  runtime_len.is_none_or(|runtime_len| {
+    str_without_source_map(code).encode_utf16().count() == runtime_len
+  })
+}
+
+/// The cached emit of a module that a program transform changed (`deno
+/// test`'s Vitest compatibility hoists `vi.mock()` calls and makes exports
+/// mutable), which `deno coverage` cannot reproduce and so cannot look up by
+/// its cache key: whatever the cache holds for the module, when its source
+/// map says it was emitted from `original_source` and it is what ran.
+fn transformed_emit(
+  emitter: &CliEmitter,
+  specifier: &ModuleSpecifier,
+  original_source: &str,
+  runtime_len: Option<usize>,
+) -> Option<String> {
+  let code = emitter.maybe_cached_emit_any_source_hash(specifier)?;
+  (is_emit_of(&code, original_source) && is_runtime_code(&code, runtime_len))
+    .then_some(code)
+}
+
+/// Whether the inline source map of the emitted `code` maps it to the single
+/// source `original_source` (when the map has no sources content, only that
+/// it has a single source), or maps none of it (all of it was generated,
+/// like the export stubs of a module with only type exports).
+fn is_emit_of(code: &str, original_source: &str) -> bool {
+  let Some(source_map) = source_map_from_code(code.as_bytes())
+    .and_then(|source_map| SourceMap::from_slice(&source_map).ok())
+  else {
+    return false;
+  };
+  match source_map.get_source_count() {
+    0 => true,
+    1 => source_map
+      .get_source_contents(0)
+      .is_none_or(|contents| contents == original_source),
+    _ => false,
+  }
 }
 
 /// Computes the aggregate line, branch, and function coverage percentages
@@ -1022,6 +1114,96 @@ impl std::error::Error for CoverageThresholdError {}
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  fn coverage_range(start: usize, end: usize) -> cdp::CoverageRange {
+    cdp::CoverageRange {
+      start_char_offset: start,
+      end_char_offset: end,
+      count: 1,
+    }
+  }
+
+  fn function_coverage(
+    name: &str,
+    ranges: Vec<cdp::CoverageRange>,
+  ) -> cdp::FunctionCoverage {
+    cdp::FunctionCoverage {
+      function_name: name.to_string(),
+      ranges,
+      is_block_coverage: true,
+    }
+  }
+
+  fn with_inline_source_map(code: &str, source_map: &str) -> String {
+    use base64::Engine;
+    format!(
+      "{code}//# sourceMappingURL=data:application/json;base64,{}",
+      base64::prelude::BASE64_STANDARD.encode(source_map)
+    )
+  }
+
+  #[test]
+  fn script_runtime_len_is_the_top_level_range_end() {
+    let coverage = cdp::ScriptCoverage {
+      script_id: "1".to_string(),
+      url: "file:///a.ts".to_string(),
+      functions: vec![
+        // an anonymous function at the start of the script
+        function_coverage("", vec![coverage_range(0, 10)]),
+        function_coverage("", vec![coverage_range(0, 42)]),
+        function_coverage("f", vec![coverage_range(0, 50)]),
+        function_coverage("", vec![coverage_range(12, 60)]),
+      ],
+    };
+    assert_eq!(script_runtime_len(&coverage), Some(42));
+    let coverage = cdp::ScriptCoverage {
+      functions: vec![],
+      ..coverage
+    };
+    assert_eq!(script_runtime_len(&coverage), None);
+  }
+
+  #[test]
+  fn runtime_code_is_measured_without_its_source_map_in_utf16() {
+    let code = with_inline_source_map("let a = \"\u{1F600}\";\n", "{}");
+    // the emoji is two UTF-16 code units
+    assert!(is_runtime_code(&code, Some(14)));
+    assert!(!is_runtime_code(&code, Some(13)));
+    assert!(is_runtime_code(&code, None));
+  }
+
+  #[test]
+  fn emit_of_a_source_is_told_by_its_source_map() {
+    let source_map = |contents: &str| {
+      format!(
+        r#"{{"version":3,"sources":["file:///a.ts"],"sourcesContent":[{}],"names":[],"mappings":"AAAA"}}"#,
+        serde_json::to_string(contents).unwrap()
+      )
+    };
+    let code = with_inline_source_map("a();\n", &source_map("a();"));
+    assert!(is_emit_of(&code, "a();"));
+    // an emit of the module's previous source
+    assert!(!is_emit_of(&code, "b();"));
+    // no source map
+    assert!(!is_emit_of("a();\n", "a();"));
+    // no sources content: a single source is all there is to check
+    let code = with_inline_source_map(
+      "a();\n",
+      r#"{"version":3,"sources":["file:///a.ts"],"names":[],"mappings":"AAAA"}"#,
+    );
+    assert!(is_emit_of(&code, "a();"));
+    let code = with_inline_source_map(
+      "a();\n",
+      r#"{"version":3,"sources":["file:///a.ts","file:///b.ts"],"names":[],"mappings":"AAAA"}"#,
+    );
+    assert!(!is_emit_of(&code, "a();"));
+    // all generated (the type export stubs of a module of types)
+    let code = with_inline_source_map(
+      "let __vi_type_export_0__;\n",
+      r#"{"version":3,"sources":[],"names":[],"mappings":""}"#,
+    );
+    assert!(is_emit_of(&code, "export type A = string;\n"));
+  }
 
   /// The source substring credited as code on `line_index`: the line with any
   /// trailing comment and the whitespace before it removed from its end.

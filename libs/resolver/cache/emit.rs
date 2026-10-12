@@ -79,7 +79,26 @@ impl<TSys: EmitCacheSys> EmitCache<TSys> {
     let bytes = self.disk_cache.get(&emit_filename).ok()?;
     self
       .file_serializer
-      .deserialize(bytes, expected_source_hash)
+      .deserialize(bytes, Some(expected_source_hash))
+  }
+
+  /// The emit cached for `specifier`, whatever source and options it was
+  /// emitted from (only checked to be intact and of this CLI version). The
+  /// caller must check that it belongs to the module's current source: `deno
+  /// coverage` does, through its source map, to find the emit of a module
+  /// that a program transform it cannot reproduce changed (the source hash
+  /// covers the transform's key).
+  pub fn get_emit_code_any_source_hash(
+    &self,
+    specifier: &Url,
+  ) -> Option<String> {
+    if matches!(self.mode, Mode::Disable) {
+      return None;
+    }
+
+    let emit_filename = self.get_emit_filename(specifier)?;
+    let bytes = self.disk_cache.get(&emit_filename).ok()?;
+    self.file_serializer.deserialize(bytes, None)
   }
 
   /// Sets the emit code in the cache.
@@ -130,7 +149,7 @@ impl EmitFileSerializer {
   pub fn deserialize(
     &self,
     mut bytes: Vec<u8>,
-    expected_source_hash: u64,
+    expected_source_hash: Option<u64>,
   ) -> Option<String> {
     let last_newline_index = bytes.iter().rposition(|&b| b == b'\n')?;
     let (content, last_line) = bytes.split_at(last_newline_index);
@@ -140,7 +159,7 @@ impl EmitFileSerializer {
 
     // verify the meta data file is for this source and CLI version
     let source_hash = source_hash.parse::<u64>().ok()?;
-    if source_hash != expected_source_hash {
+    if expected_source_hash.is_some_and(|expected| source_hash != expected) {
       return None;
     }
     let emit_hash = emit_hash.parse::<u64>().ok()?;
@@ -253,6 +272,30 @@ mod test {
     let emit_code3 = "asdf".to_string();
     cache.set_emit_code(&specifier1, 20, emit_code3.as_bytes());
     assert_eq!(cache.get_emit_code(&specifier1, 5), None);
-    assert_eq!(cache.get_emit_code(&specifier1, 20), Some(emit_code3));
+    assert_eq!(
+      cache.get_emit_code(&specifier1, 20),
+      Some(emit_code3.clone())
+    );
+
+    // whatever the source hash
+    assert_eq!(
+      cache.get_emit_code_any_source_hash(&specifier1),
+      Some(emit_code3)
+    );
+    let specifier3 = deno_path_util::url_from_file_path(
+      temp_dir.path().join("file3.ts").as_path(),
+    )
+    .unwrap();
+    assert_eq!(cache.get_emit_code_any_source_hash(&specifier3), None);
+    // but still only for this CLI version
+    let cache = EmitCache {
+      disk_cache: cache.disk_cache.clone(),
+      file_serializer: EmitFileSerializer {
+        cache_version: "3.0.0".into(),
+      },
+      emit_failed_flag: Default::default(),
+      mode: Mode::Normal,
+    };
+    assert_eq!(cache.get_emit_code_any_source_hash(&specifier1), None);
   }
 }

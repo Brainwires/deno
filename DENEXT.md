@@ -374,6 +374,23 @@ where the changes are discussed.
       definitions go through the module's setter, so the spy (and its restore)
       reaches every importer.
 
+    **Coverage**: `deno test --coverage` and `deno coverage` report the modules
+    the transform changed (`tests/specs/test/vitest/coverage`). `deno coverage`
+    cannot reproduce the transform, whose key (part of the emit cache key)
+    depends on the run's config, so when the emit cached under the module's own
+    key is missing or is not what ran, it takes the module's cached emit
+    whatever its key (new `Emitter::maybe_cached_emit_any_source_hash` /
+    `EmitCache::get_emit_code_any_source_hash`), accepted only when its inline
+    source map's sources content is the module's current source (or it maps
+    nothing, as for a module of types) and its length without the source map is
+    the length of the script V8 ran (its top-level function's range). A
+    JavaScript user module, which the transform emits too, is matched the same
+    way. Coverage ranges starting after the module's last mapping (the export
+    setters the transform appends) are dropped like transformer helpers,
+    `deno-vitest:` modules (the vendored runtime, the mock modules) are left out
+    of reports, and a mocked module's coverage merges the files where it is
+    real, `importOriginal` / `vi.importActual` included.
+
     **Jest projects** run on the same layer. Without a Vitest config, a
     `jest.config.{ts,mts,cts,js,mjs,cjs,json}`, a package.json `"jest"` key or a
     package.json depending on Jest (Jest's defaults) is the test config
