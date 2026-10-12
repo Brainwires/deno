@@ -79,6 +79,12 @@ const url = Deno.env.get("DENO_SQL_TEST_POSTGRES_URL")!;
   await sql.close();
   console.log("close waited:", (await slow).length);
 
+  // Even when the query's connection is still being opened.
+  const fresh = new Deno.SQL(url, { max: 1 });
+  const early = fresh`select 1 as v`.execute();
+  await fresh.close();
+  console.log("close while connecting:", (await early)[0].v);
+
   const sql2 = new Deno.SQL(url, { max: 2 });
   const killed = sql2`select pg_sleep(5)`.execute();
   await new Promise((r) => setTimeout(r, 100));

@@ -295,6 +295,7 @@ class Pool {
   #exclusiveWaiters = 0;
   #drained = [];
   #nextId = 0;
+  #forced = false;
   closed = false;
 
   constructor(adapter, options) {
@@ -414,7 +415,9 @@ class Pool {
       conn.rid = info.rid;
       conn.parameters = info.parameters;
       conn.createdAt = DateNow();
-      if (this.closed) {
+      // After close(), the query this connection was opened for still runs
+      // (close() waits for it), unless close() stopped waiting.
+      if (this.#forced) {
         SetPrototypeDelete(this.#busy, conn);
         this.#unshare(conn);
         this.#destroy(conn);
@@ -558,6 +561,7 @@ class Pool {
     while (this.#idle.length > 0) this.#destroy(ArrayPrototypePop(this.#idle));
     if (SetPrototypeGetSize(this.#busy) === 0) return;
     const forceClose = () => {
+      this.#forced = true;
       // Connections still opening close as soon as they are open.
       const busy = ArrayFrom(SetPrototypeValues(this.#busy));
       for (let i = 0; i < busy.length; i++) {
