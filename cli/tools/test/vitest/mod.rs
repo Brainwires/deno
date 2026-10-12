@@ -590,7 +590,7 @@ impl VitestOverrides {
       Url::parse(path).ok()
     } else if is_absolute_path(path) {
       // a filesystem path (from an alias), or a path from the Vite root
-      let absolute = Path::new(path);
+      let absolute = Path::new(native_absolute_path(path));
       let file = if absolute.exists() {
         absolute.to_path_buf()
       } else {
@@ -927,7 +927,7 @@ impl SpecifierOverrides for VitestOverrides {
       let specifier = aliased.as_deref().unwrap_or(raw_specifier);
       let file_specifier;
       let specifier = if is_absolute_path(specifier) {
-        file_specifier = Url::from_file_path(specifier)
+        file_specifier = Url::from_file_path(native_absolute_path(specifier))
           .map(|u| u.to_string())
           .unwrap_or_default();
         file_specifier.as_str()
@@ -963,10 +963,28 @@ fn is_absolute_path(specifier: &str) -> bool {
     || (cfg!(windows) && Path::new(specifier).is_absolute())
 }
 
+/// An absolute alias replacement as a path of this platform. On Windows a
+/// URL pathname of a drive path (`/D:/x`, what `new URL(..).pathname` gives
+/// in a Vite config) is the drive path `D:/x`.
+fn native_absolute_path(specifier: &str) -> &str {
+  let bytes = specifier.as_bytes();
+  if cfg!(windows)
+    && bytes.len() >= 3
+    && bytes[0] == b'/'
+    && bytes[1].is_ascii_alphabetic()
+    && bytes[2] == b':'
+    && (bytes.len() == 3 || bytes[3] == b'/' || bytes[3] == b'\\')
+  {
+    &specifier[1..]
+  } else {
+    specifier
+  }
+}
+
 /// An alias replacement that is an absolute path, as a file URL.
 fn absolute_path_to_url(specifier: String) -> String {
   if is_absolute_path(&specifier) {
-    Url::from_file_path(&specifier)
+    Url::from_file_path(native_absolute_path(&specifier))
       .map(|u| u.to_string())
       .unwrap_or(specifier)
   } else {
@@ -1507,7 +1525,16 @@ mod tests {
       let url = absolute_path_to_url("d:\\p\\lib\\math".to_string());
       assert!(url.starts_with("file:///"), "{url}");
       assert!(url.to_ascii_lowercase().ends_with("d:/p/lib/math"), "{url}");
+      // a Vite config's `new URL("./src", import.meta.url).pathname`
+      assert!(is_absolute_path("/D:/p/src"));
+      assert_eq!(
+        absolute_path_to_url("/D:/p/src/feature".to_string()),
+        "file:///D:/p/src/feature"
+      );
+      assert_eq!(native_absolute_path("/D:"), "D:");
     }
+    assert_eq!(native_absolute_path("/src/x"), "/src/x");
+    assert_eq!(native_absolute_path("pkg/x"), "pkg/x");
     #[cfg(not(windows))]
     assert_eq!(
       absolute_path_to_url("/p/lib/math".to_string()),

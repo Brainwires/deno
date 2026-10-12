@@ -115,9 +115,16 @@ function replaceRootDir(rootDir, value) {
   return resolve(rootDir, "./" + value.slice("<rootDir>".length));
 }
 
-/** `<rootDir>` inside a regex or glob pattern. */
+/**
+ * `<rootDir>` inside a regex or glob pattern. The CLI matches patterns against
+ * slash paths, so on Windows the root is spelled with forward slashes (a
+ * backslash would be an escape in either syntax).
+ */
 function replaceRootDirInPattern(rootDir, pattern) {
-  return String(pattern).replaceAll("<rootDir>", rootDir);
+  return String(pattern).replaceAll(
+    "<rootDir>",
+    rootDir.replaceAll("\\", "/"),
+  );
 }
 
 async function requireOrImport(path) {
