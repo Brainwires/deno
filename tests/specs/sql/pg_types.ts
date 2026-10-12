@@ -168,6 +168,13 @@ const [{ same }] =
   await sql`select ${tsv.t}::tsvector::text = ${tsv.t} as same`;
 console.log("tsvector round trip:", same);
 
+// Booleans where the server expects a number or text; anonymous records as
+// arrays of their values.
+console.log(
+  await sql`select ${true}::int as bi, ${false}::text as bt,
+    row(1, 'x', null, '2024-01-02'::date, row(2)) as rec`,
+);
+
 // sql.array(values, type): an array parameter cast to type[].
 console.log(
   await sql`select ${sql.array([1, 2, 3], "int4")} as i,

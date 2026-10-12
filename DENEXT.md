@@ -338,7 +338,10 @@ where the changes are discussed.
       flight on one, sent back to back and answered in order; tokio-postgres
       matches the responses), so a burst of queries is not bounded by `max`
       round trips at a time. Transactions, `reserve()` and cursors get a
-      connection of their own.
+      connection of their own. The S1 bench (`max: 4`, loopback, non-LTO
+      release, against `npm:postgres` 3.4.7 on the same build): 100 concurrent
+      `select 1` went from 3.2-4.8 ms to 1.4-1.7 ms (npm:postgres 1.6-1.9 ms);
+      the sequential cases did not move (select 1 ~0.09-0.10 ms either way).
     - `sql.listen(channel, fn, onlisten?)` / `sql.notify(channel, payload)`:
       every channel of a client on one dedicated connection (outside `max`),
       `LISTEN "<channel>"` with the name exact; on connection loss it reconnects
@@ -381,6 +384,37 @@ where the changes are discussed.
       `onclose(error | null,
       connection)` with the connection's id and
       server parameters.
+    - Checked against Bun 1.3.6's `Bun.sql` on the same server (one script,
+      every builtin type, parameters, result metadata, helpers via
+      `current_query()`, errors). The same: row objects, `int8` / `numeric` as
+      strings (`bigint: true` → `bigint`), json, arrays, enums, dates and
+      `timestamptz`, uuid / inet / interval / time text, `count` / `command`,
+      the INSERT / UPDATE / IN / identifier helpers (whitespace aside),
+      transactions and savepoints, `reserve()`,
+      `ERR_POSTGRES_CONNECTION_CLOSED`. Kept different on purpose: `code` is the
+      SQLSTATE (as in postgres.js; Bun puts `ERR_POSTGRES_SERVER_ERROR` /
+      `_SYNTAX_ERROR` there and the SQLSTATE in `errno`, which we also set),
+      `position` is a number; `count` / `command` are non-enumerable (Bun's
+      print with the rows) and there is no `affectedRows`; `bytea` is a
+      `Uint8Array` (Bun: `Buffer`); ranges, geometry and anonymous records are
+      objects / arrays (Bun: the server's text) and `money` has no currency
+      sign; `±infinity` timestamps are strings (Bun: an Invalid Date); `void` is
+      `null`; parameters are typed by the server (unspecified OIDs), so an
+      uncast `${42}` in a select list comes back as the text `"42"` (Bun types
+      numbers and booleans itself), while `${[1, 2]}::int4[]`, objects (JSON,
+      Bun sends `[object Object]`), `Date`s (ISO, Bun sends `Date.toString()`)
+      and arrays bound to text work; `sql([])` after IN is `(null)` (Bun: a
+      syntax error); `sql(names)` after SELECT and `VALUES` rows, arrays of
+      fragments work (Bun rejects them); `.simple()` values are the server's
+      text and `.raw()` cells its binary form (Bun parses simple results and
+      gives text-format raw cells); `cancel()` before a query starts rejects it
+      (Bun's never settles); a refused connection is
+      `ERR_POSTGRES_CONNECTION_FAILED` (Bun: `_CONNECTION_CLOSED`); `timestamp`
+      without a time zone is read as UTC (Bun, postgres.js and node-postgres
+      read it as local time). Aligned: booleans bound where the server expects a
+      number (`${true}::int`) are sent as `1` / `0`, and as `true` / `false`
+      where it expects text; `onconnect` / `onclose` take the error (or `null`)
+      first.
     - Not yet: MySQL, the `"bun"` module, `tsquery` decoding.
 
 The runtime-side parts (1-3, 5-23) are what the prebuilt `libdenort` carries.

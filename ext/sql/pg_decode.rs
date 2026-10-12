@@ -84,6 +84,7 @@ mod oid {
   pub const REGROLE: u32 = 4096;
   pub const REGCOLLATION: u32 = 4191;
   pub const XID8: u32 = 5069;
+  pub const RECORD: u32 = 2249;
 }
 
 // ---------------------------------------------------------------------------
@@ -829,6 +830,7 @@ fn decode_nested<'a>(
     }
     oid::TSVECTOR => v8_str(scope, tsvector_to_string(buf)?.as_bytes())?,
     oid::VOID => v8::null(scope).into(),
+    oid::RECORD => decode_record(scope, buf, opts, depth)?,
     oid::INT2VECTOR => decode_array(scope, &Type::INT2, buf, opts, depth)?,
     oid::OIDVECTOR => decode_array(scope, &Type::OID, buf, opts, depth)?,
     _ => match ty.kind() {
@@ -904,6 +906,39 @@ fn build_array<'a>(
       }
     }
   }
+  Ok(v8::Array::new_with_elements(scope, &items).into())
+}
+
+/// An anonymous record (`row(1, 'x')`): its field values as an array (the
+/// fields have no names). A field of a type this decoder can't name by its
+/// OID arrives as text when it looks like text, else as bytes.
+fn decode_record<'a>(
+  scope: &mut v8::PinScope<'a, '_>,
+  buf: &[u8],
+  opts: DecodeOptions,
+  depth: u32,
+) -> DecodeResult<v8::Local<'a, v8::Value>> {
+  let mut r = Reader::new(buf);
+  let count = r.i32()?;
+  if count < 0 {
+    return Err("invalid record field count".into());
+  }
+  let mut items = Vec::with_capacity((count as usize).min(1 << 12));
+  for _ in 0..count {
+    let oid = r.u32()?;
+    let len = r.i32()?;
+    if len < 0 {
+      items.push(v8::null(scope).into());
+      continue;
+    }
+    let bytes = r.take(len as usize)?;
+    items.push(match Type::from_oid(oid) {
+      Some(ty) => decode_nested(scope, &ty, bytes, opts, depth + 1)?,
+      None if looks_like_text(bytes) => v8_str(scope, bytes)?,
+      None => v8_bytes(scope, bytes),
+    });
+  }
+  r.done()?;
   Ok(v8::Array::new_with_elements(scope, &items).into())
 }
 

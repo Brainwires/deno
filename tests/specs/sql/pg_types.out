@@ -144,6 +144,13 @@ DELETE 0
 tsvector round trip: true
 [
   {
+    bi: 1,
+    bt: "false",
+    rec: [ 1, "x", null, 2024-01-02T00:00:00.000Z, [ 2 ] ]
+  }
+]
+[
+  {
     i: [ 1, 2, 3 ],
     t: [ "a", "b c" ],
     e: [],

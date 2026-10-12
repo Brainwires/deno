@@ -216,7 +216,8 @@ fn date_text(ms: f64) -> Result<String, SqlError> {
 fn scalar_text(p: &SqlParam) -> Result<String, SqlError> {
   Ok(match p {
     SqlParam::Null => String::new(),
-    SqlParam::Bool(b) => if *b { "t" } else { "f" }.to_string(),
+    // `true` / `false`: what `bool::text` gives, and the bool input reads.
+    SqlParam::Bool(b) => if *b { "true" } else { "false" }.to_string(),
     SqlParam::Number(n) => number_to_text(*n),
     SqlParam::BigInt(s) | SqlParam::Text(s) | SqlParam::Json(s) => s.clone(),
     SqlParam::Bytes(b) => hex_bytea(b),
@@ -315,8 +316,25 @@ fn is_array(ty: &Type) -> bool {
   matches!(ty.kind(), Kind::Array(_))
 }
 
+fn is_numeric(ty: &Type) -> bool {
+  [
+    Type::INT2,
+    Type::INT4,
+    Type::INT8,
+    Type::NUMERIC,
+    Type::FLOAT4,
+    Type::FLOAT8,
+    Type::OID,
+  ]
+  .contains(ty)
+}
+
 /// The text a parameter is sent as for a parameter of type `ty`.
 pub fn pg_text(p: &SqlParam, ty: &Type) -> Result<String, SqlError> {
+  if let (SqlParam::Bool(b), true) = (p, is_numeric(ty)) {
+    // A boolean where the server expects a number (`${true}::int`): 1 / 0.
+    return Ok(if *b { "1" } else { "0" }.to_string());
+  }
   if is_json(ty) {
     return match p {
       // A string bound to a json parameter is the JSON text itself.
@@ -413,7 +431,7 @@ mod tests {
       SqlParam::Array(vec![SqlParam::Bool(true)]),
     ])
     .unwrap();
-    assert_eq!(lit, r#"{"1","a \"b\" \\c",NULL,"NULL",{"t"}}"#);
+    assert_eq!(lit, r#"{"1","a \"b\" \\c",NULL,"NULL",{"true"}}"#);
     assert_eq!(array_literal(&[]).unwrap(), "{}");
     assert_eq!(
       array_literal(&[SqlParam::Bytes(vec![0xde, 0xad])]).unwrap(),
@@ -434,6 +452,11 @@ mod tests {
     assert_eq!(
       pg_text(&SqlParam::Text("{}".into()), &Type::JSONB).unwrap(),
       "{}"
+    );
+    assert_eq!(pg_text(&SqlParam::Bool(true), &Type::INT4).unwrap(), "1");
+    assert_eq!(
+      pg_text(&SqlParam::Bool(false), &Type::TEXT).unwrap(),
+      "false"
     );
     assert_eq!(
       pg_text(&SqlParam::Array(vec![SqlParam::Number(1.0)]), &Type::JSONB)
