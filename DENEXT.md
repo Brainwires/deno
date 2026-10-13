@@ -686,7 +686,22 @@ where the changes are discussed.
     and attested. Test: `denext_version_extends_the_deno_version` in
     `cli/lib/version.rs`.
 
-The runtime-side parts (1-3, 5-22, 24, 25) are what the prebuilt `libdenort`
+27. **Upstream fixes taken ahead of a Deno bump** (from `denext.16`), each
+    cherry-picked from denoland/deno `main` with `-x` (the commit message names
+    the upstream commit):
+    - `fix(compile)`: a compiled program checks the read permission for a local
+      file it imports dynamically (denoland/deno#36925, a security fix).
+    - `fix(ext/napi)`: `napi_create_dataview` checks its bounds for overflow
+      (#36962); a callback's return value is ignored while an exception is
+      pending (#36942).
+    - `fix(coverage)`: the V8 code cache is skipped while collecting coverage,
+      so a module loaded from it is not reported as fully covered (#36901).
+    - `fix(ext/fetch)`: hyper 1.11.1 / hyper-util 0.1.21 cancel the connection
+      pool's idle interval once the pool is empty (#36968).
+    - `fix`: rand 0.9.3 (GHSA-cq8v-f236-94qc), for ext/sql's Postgres client
+      (`postgres-protocol`, `tokio-postgres`) too.
+
+The runtime-side parts (1-3, 5-22, 24, 25, 27) are what the prebuilt `libdenort`
 carries. The CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` /
 `LAUFEY_APP_ID` into a packaged app's launchers) are in the branch too, but a
 stock CLI does not run them; denext's own launcher provides that environment.
