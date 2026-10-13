@@ -117,7 +117,7 @@ static SOURCES: &[(&str, &str)] = sources!(
 const RESOLVED_CONFIG_PATH: &str = "resolved_config.json";
 
 /// Bumped when `types/` changes, so stale written copies are not reused.
-const TYPES_VERSION: &str = "v6";
+const TYPES_VERSION: &str = "v7";
 
 /// The resolved config served as `deno-vitest:///resolved_config.json`.
 static RESOLVED_CONFIG: RwLock<Option<Arc<str>>> = RwLock::new(None);
@@ -514,7 +514,40 @@ static TYPES: &[(&str, &str)] = &[
   ("config.js", include_str!("types/config.d.ts")),
   ("jest_globals.js", include_str!("types/jest_globals.d.ts")),
   ("globals.js", include_str!("types/globals.d.ts")),
+  // Vite's CSS, asset and `?raw` / `?url` / `?inline` / `?worker` imports
+  // (`deno-vitest:///virtual/asset.js`), as Vite's client types declare them
+  (
+    "asset_string.js",
+    "// The default export of a Vite CSS, asset, ?raw, ?url or ?inline import.\n\
+     declare const value: string;\nexport default value;\n",
+  ),
+  (
+    "asset_css_module.js",
+    "// The class names of a Vite CSS module.\n\
+     declare const classes: { readonly [key: string]: string };\n\
+     export default classes;\n",
+  ),
+  (
+    "asset_worker.js",
+    "// A Vite ?worker import.\n\
+     declare const WorkerConstructor: {\n  new (options?: { name?: string }): Worker;\n};\n\
+     export default WorkerConstructor;\n",
+  ),
 ];
+
+/// The types of a Vite asset module (see [`asset_module_code`]).
+fn asset_types_module(module: &Url) -> Option<&'static str> {
+  let kind = module
+    .query_pairs()
+    .find(|(key, _)| key == "kind")
+    .map(|(_, value)| value.into_owned())?;
+  Some(match kind.as_str() {
+    "css" | "url" | "raw" | "inline" => "asset_string.js",
+    "css-module" => "asset_css_module.js",
+    "worker" => "asset_worker.js",
+    _ => return None,
+  })
+}
 
 /// The fallback types of the built-in module `module` that `raw_specifier`
 /// resolved to: `vitest/globals` (an empty module at runtime) declares the
@@ -940,6 +973,13 @@ impl SpecifierOverrides for VitestOverrides {
     if let Some(module) = self
       .vite_asset_module(aliased.as_deref().unwrap_or(raw_specifier), referrer)
     {
+      // a type check sees what Vite's client types declare for it
+      if resolution_kind == NodeResolutionKind::Types
+        && let Some(types) =
+          asset_types_module(&module).and_then(|m| self.types_url(m))
+      {
+        return Some(SpecifierOverride::Url(types));
+      }
       return Some(SpecifierOverride::Url(module));
     }
     if self.vite_root.read().unwrap().is_some() {

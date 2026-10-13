@@ -222,6 +222,20 @@
       "output": "types/augment_error.out",
       "exitCode": 1
     },
+    "types_config_project_type_error": {
+      // with a Vitest config, the test modules are type-checked too ...
+      "cwd": "types/check_project",
+      "args": "test -A",
+      "output": "types/config_project_type_error.out",
+      "exitCode": 1
+    },
+    "types_config_project_no_check": {
+      // ... unless --no-check
+      "cwd": "types/check_project",
+      "args": "test -A --no-check",
+      "output": "types/config_project_no_check.out",
+      "exitCode": 0
+    },
     "types_check_installed_package_wins": {
       "tempDir": true,
       "cwd": "types/installed",

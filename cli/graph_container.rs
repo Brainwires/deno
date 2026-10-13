@@ -52,6 +52,8 @@ pub struct MainModuleGraphContainer {
 pub struct CheckSpecifiersOptions<'a> {
   pub ext_overwrite: Option<&'a String>,
   pub allow_unknown_media_types: bool,
+  /// See `PrepareModuleLoadOptions::force_type_check`.
+  pub force_type_check: bool,
 }
 
 pub struct CollectSpecifiersOptions {
@@ -98,6 +100,7 @@ impl MainModuleGraphContainer {
           skip_graph_roots_validation: false,
           file_content_overrides: Default::default(),
           file_header_overrides: Default::default(),
+          force_type_check: options.force_type_check,
         },
       )
       .await?;
