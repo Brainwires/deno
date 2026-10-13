@@ -192,10 +192,17 @@
       "exitCode": 1
     },
     "types_globals": {
-      // `globals: true` with `vitest/globals` referenced: the globals are typed
+      // `globals: true`: the globals are installed ...
       "cwd": "types/globals_project",
       "args": "test -A",
       "output": "types/globals.out",
+      "exitCode": 0
+    },
+    "types_check_globals": {
+      // ... and typed by `vitest/globals`
+      "cwd": "types/globals_project",
+      "args": "check globals.test.ts",
+      "output": "types/check_globals.out",
       "exitCode": 0
     },
     "types_check_globals_error": {

@@ -14,10 +14,16 @@ declare module "vitest" {
 
 expect.extend({
   toBeFoo(received: unknown) {
-    return { pass: received === "foo", message: () => `${received} is not foo` };
+    return {
+      pass: received === "foo",
+      message: () => `${received} is not foo`,
+    };
   },
   toBeWithin(received: number, min: number, max: number) {
-    return { pass: received >= min && received <= max, message: () => "out of range" };
+    return {
+      pass: received >= min && received <= max,
+      message: () => "out of range",
+    };
   },
 });
 
