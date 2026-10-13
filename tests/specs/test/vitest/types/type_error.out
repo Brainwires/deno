@@ -1,0 +1,26 @@
+Check [WILDCARD]type_error_test.ts
+TS2769 [ERROR]: No overload matches this call.
+[WILDCARD]
+              Type 'number' is not assignable to type 'string'.
+vi.mock(import("./greeting.ts"), () => ({ prefix: 1 }));
+   ~~~~
+    at [WILDCARD]type_error_test.ts:5:4
+
+TS2345 [ERROR]: Argument of type 'string' is not assignable to parameter of type 'number'.
+  add.mockReturnValue("three");
+                      ~~~~~~~
+    at [WILDCARD]type_error_test.ts:9:23
+
+TS2345 [ERROR]: Argument of type '"save"' is not assignable to parameter of type '"load"'.
+  vi.spyOn(store, "save");
+                  ~~~~~~
+    at [WILDCARD]type_error_test.ts:10:19
+
+TS2345 [ERROR]: Argument of type 'string' is not assignable to parameter of type 'number | bigint'.
+  expect(1).toBeGreaterThan("0");
+                            ~~~
+    at [WILDCARD]type_error_test.ts:11:29
+
+Found 4 errors.
+
+error: Type checking failed.

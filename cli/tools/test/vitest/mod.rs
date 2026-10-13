@@ -117,7 +117,7 @@ static SOURCES: &[(&str, &str)] = sources!(
 const RESOLVED_CONFIG_PATH: &str = "resolved_config.json";
 
 /// Bumped when `types/` changes, so stale written copies are not reused.
-const TYPES_VERSION: &str = "v4";
+const TYPES_VERSION: &str = "v5";
 
 /// The resolved config served as `deno-vitest:///resolved_config.json`.
 static RESOLVED_CONFIG: RwLock<Option<Arc<str>>> = RwLock::new(None);
@@ -1133,6 +1133,24 @@ pub struct VitestCompat {
   /// The emitter transform for module mocking, enabled once the run has a
   /// Vitest file.
   transform: Arc<transform::VitestTransform>,
+}
+
+/// Resolves `vitest`, `@jest/globals` & co. to their types for `deno check`,
+/// as `deno test` does when it type-checks a Vitest or Jest file, so both
+/// commands check such a file against the same declarations (an installed
+/// package's own types first). Only the built-in modules' types: the config's
+/// aliases and Vite's resolution stay `deno test`'s.
+pub fn install_type_overrides(
+  resolver: &crate::resolver::CliResolver,
+  types_dir: &Path,
+  initial_cwd: &Path,
+) -> Result<(), AnyError> {
+  let overrides = Arc::new(VitestOverrides::new(
+    initial_cwd,
+    Some(types_dir.join(TYPES_VERSION)),
+  )?);
+  resolver.set_specifier_overrides(overrides);
+  Ok(())
 }
 
 impl VitestCompat {

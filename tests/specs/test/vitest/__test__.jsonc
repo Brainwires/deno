@@ -156,6 +156,48 @@
       "output": "typed.out",
       "exitCode": 0
     },
+    // The built-in types of `vitest` and `@jest/globals` (types/vitest.d.ts,
+    // types/jest_globals.d.ts): mock factories, mocks, spies, fixtures and
+    // matchers are typed, under `deno test` and `deno check` alike, and a
+    // wrongly typed use is a type error. An installed package's own types
+    // take precedence.
+    "types_typed_usage": {
+      "args": "test -A types/typed_usage_test.ts",
+      "output": "types/typed_usage.out",
+      "exitCode": 0
+    },
+    "types_jest_typed": {
+      "args": "test -A types/jest_typed_test.ts",
+      "output": "types/jest_typed.out",
+      "exitCode": 0
+    },
+    "types_type_error": {
+      "args": "test -A types/type_error_test.ts",
+      "output": "types/type_error.out",
+      "exitCode": 1
+    },
+    "types_check_typed_usage": {
+      "args": "check types/typed_usage_test.ts",
+      "output": "types/check_typed_usage.out",
+      "exitCode": 0
+    },
+    "types_check_jest_typed": {
+      "args": "check types/jest_typed_test.ts",
+      "output": "types/check_jest_typed.out",
+      "exitCode": 0
+    },
+    "types_check_type_error": {
+      "args": "check types/type_error_test.ts",
+      "output": "types/type_error.out",
+      "exitCode": 1
+    },
+    "types_check_installed_package_wins": {
+      "tempDir": true,
+      "cwd": "types/installed",
+      "args": "check installed_test.ts",
+      "output": "types/installed.out",
+      "exitCode": 0
+    },
     "config": {
       "cwd": "config_project",
       "args": "test -A --no-check",
