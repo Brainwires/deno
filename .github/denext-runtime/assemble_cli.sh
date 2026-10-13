@@ -5,16 +5,20 @@
 #
 # A zip on every target (what denext downloads), no wrapping directory:
 #
-#   deno | deno.exe      the CLI
-#   BUILD_INFO.json      what was built from where
-#   licenses/            the deno license
+#   deno | deno.exe        the CLI
+#   esbuild | esbuild.exe  the official esbuild binary `deno bundle` uses
+#                          instead of downloading one (fetch_esbuild.py)
+#   esbuild.LICENSE        esbuild's MIT license
+#   BUILD_INFO.json        what was built from where (esbuild's source too)
+#   licenses/              the deno license
 #
-# Env: TARGET VERSION DENO_BIN OUT_DIR DENO_VERSION DENO_SHA RUN_URL
+# Env: TARGET VERSION DENO_BIN ESBUILD_DIR OUT_DIR DENO_VERSION DENO_SHA RUN_URL
+# (ESBUILD_DIR: fetch_esbuild.py's output directory)
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 . "$here/lib.sh"
 
-: "${TARGET:?}" "${VERSION:?}" "${DENO_BIN:?}" "${OUT_DIR:?}"
+: "${TARGET:?}" "${VERSION:?}" "${DENO_BIN:?}" "${ESBUILD_DIR:?}" "${OUT_DIR:?}"
 : "${DENO_VERSION:?}" "${DENO_SHA:?}"
 
 export COPYFILE_DISABLE=1 # no AppleDouble ._ files in macOS tarballs
@@ -23,6 +27,18 @@ repo_root=$(cd "$here/../.." && pwd)
 bin=$(cli_bin_name "$TARGET")
 deno_bin=$(unix_path "$DENO_BIN")
 test -f "$deno_bin" || { echo "missing $deno_bin" >&2; exit 1; }
+esbuild_dir=$(unix_path "$ESBUILD_DIR")
+case "$TARGET" in
+  *-windows-msvc) esbuild_bin=esbuild.exe ;;
+  *) esbuild_bin=esbuild ;;
+esac
+for f in "$esbuild_bin" esbuild.LICENSE esbuild.json; do
+  test -f "$esbuild_dir/$f" || { echo "missing $esbuild_dir/$f (run fetch_esbuild.py)" >&2; exit 1; }
+done
+# The binary must be the one fetch_esbuild.py verified.
+esbuild_sha=$(sha256_of "$esbuild_dir/$esbuild_bin")
+grep -q "\"sha256\": \"$esbuild_sha\"" "$esbuild_dir/esbuild.json" ||
+  { echo "$esbuild_dir/$esbuild_bin does not match esbuild.json" >&2; exit 1; }
 out_dir=$(unix_path "$OUT_DIR")
 mkdir -p "$out_dir"
 out_dir=$(cd "$out_dir" && pwd)
@@ -37,6 +53,9 @@ mkdir -p "$root/licenses"
 cp "$deno_bin" "$root/$bin"
 chmod +x "$root/$bin"
 cp "$repo_root/LICENSE.md" "$root/licenses/deno-LICENSE.md"
+cp "$esbuild_dir/$esbuild_bin" "$root/$esbuild_bin"
+chmod +x "$root/$esbuild_bin"
+cp "$esbuild_dir/esbuild.LICENSE" "$root/esbuild.LICENSE"
 
 cat >"$root/BUILD_INFO.json" <<EOF
 {
@@ -45,6 +64,7 @@ cat >"$root/BUILD_INFO.json" <<EOF
   "target": "$TARGET",
   "binary": "$bin",
   "deno": { "version": "$DENO_VERSION", "repository": "https://github.com/${GITHUB_REPOSITORY:-Brainwires/deno}", "sha": "$DENO_SHA" },
+  "esbuild": $(cat "$esbuild_dir/esbuild.json"),
   "build": { "run": "${RUN_URL:-}" }
 }
 EOF

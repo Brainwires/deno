@@ -2666,6 +2666,11 @@ fn resolve_roots(
 async fn ensure_esbuild_downloaded(
   factory: &CliFactory,
 ) -> Result<PathBuf, AnyError> {
+  // denext: an esbuild shipped next to `deno` (or DENO_ESBUILD_BINARY) needs
+  // no npm registry, cache or download.
+  if let Some(path) = esbuild::find_local_esbuild()? {
+    return Ok(path);
+  }
   let deno_dir = factory.deno_dir()?;
   let sys = factory.sys();
 
