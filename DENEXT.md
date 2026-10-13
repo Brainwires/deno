@@ -701,6 +701,34 @@ where the changes are discussed.
     - `fix`: rand 0.9.3 (GHSA-cq8v-f236-94qc), for ext/sql's Postgres client
       (`postgres-protocol`, `tokio-postgres`) too.
 
+28. **`feat(bundle)`: the CLI archive ships esbuild, and `deno bundle` uses it**
+    (`cli/tools/bundle/esbuild.rs`, `.github/denext-runtime/fetch_esbuild.py`,
+    `assemble_cli.sh`, `cli_smoke.sh`, `manifest.py`; another branch adds two
+    items here too, so this one becomes 30 when that one lands first). Each
+    `deno-cli-*` zip (item 26) carries, beside `deno`, the official esbuild
+    `ESBUILD_VERSION` (0.25.5) binary for its target (`esbuild`, `esbuild.exe`
+    on Windows) and esbuild's MIT license (`esbuild.LICENSE`). The release
+    workflow takes it from the `@esbuild/<platform>` npm tarball (the license
+    from the `esbuild` package of the same version), each pinned in
+    `fetch_esbuild.py` by URL and npm `dist.integrity`: the registry's current
+    packument must still say the same, and the downloaded bytes must hash to it.
+    `BUILD_INFO.json` records the source tarball, integrity and binary SHA-256,
+    and `manifest.json` lists `esbuild: { version, sha256 }` under each CLI
+    target. `deno bundle` then looks for an esbuild before downloading one into
+    `DENO_DIR`: first `DENO_ESBUILD_BINARY` (an explicit path; used even at
+    another version, with a warning; an error if it is not a file), then an
+    `esbuild[.exe]` next to the running `deno` executable, used only when its
+    `--version` is exactly `ESBUILD_VERSION`. A sibling of another version, or
+    none, leaves upstream's download path as it was. So neither `deno bundle`
+    nor denext's build (which uses the same CLI) fetches esbuild from npm.
+    Upstream has no such override. Tests: the `local_esbuild` unit tests in
+    `cli/tools/bundle/esbuild.rs`; `tests/integration/bundle_tests.rs` (a copy
+    of `deno` with the pinned esbuild beside it bundles with an empty `DENO_DIR`
+    and an unreachable npm registry and downloads nothing; a wrong-version
+    sibling is ignored; `DENO_ESBUILD_BINARY` works offline); `cli_smoke.sh`
+    checks `esbuild --version` and an offline `deno bundle` from every unpacked
+    release zip.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27) are what the prebuilt `libdenort`
 carries. The CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` /
 `LAUFEY_APP_ID` into a packaged app's launchers) are in the branch too, but a
@@ -764,15 +792,18 @@ zip per target (every OS): `deno-cli-<deno version>-denext.<n>-<target>.zip`, no
 wrapping directory:
 
 ```text
-deno | deno.exe     the CLI; `Deno.version.deno` is `<deno version>-denext.<n>`
-BUILD_INFO.json     deno version + SHA, run URL
-licenses/           the deno license
+deno | deno.exe        the CLI; `Deno.version.deno` is `<deno version>-denext.<n>`
+esbuild | esbuild.exe  the official esbuild 0.25.5 `deno bundle` uses
+esbuild.LICENSE        esbuild's MIT license
+BUILD_INFO.json        deno version + SHA, run URL, esbuild source + SHA-256
+licenses/              the deno license
 ```
 
 Each release also has `SHA256SUMS` (every runtime and CLI archive) and
 `manifest.json` (target -> backend -> url, sha256, size; the CLI archives under
-`cli.targets` -> target -> binary, url, sha256, size; plus the deno SHA, laufey
-SHA and CEF version). Every archive has a build provenance attestation:
+`cli.targets` -> target -> binary, url, sha256, size and
+`esbuild: { version, sha256 }`; plus the deno SHA, laufey SHA and CEF version).
+Every archive has a build provenance attestation:
 
 ```sh
 gh attestation verify deno-desktop-runtime-<...>.tar.gz -R Brainwires/deno
@@ -813,10 +844,13 @@ Per target it:
 4. attests the archives and, on a pushed tag, publishes the release;
 5. in a parallel `cli` job, builds this fork's `deno` CLI with
    `cargo build --release --locked --bin deno` and `DENEXT_VERSION` set to the
-   release version (`<deno version>-denext.0-ci.<run>` for untagged runs), packs
-   it with `assemble_cli.sh`, smoke-tests the unpacked archive with
-   `cli_smoke.sh` and attests it. The release needs every runtime archive and
-   every CLI archive.
+   release version (`<deno version>-denext.0-ci.<run>` for untagged runs),
+   fetches and verifies esbuild with `fetch_esbuild.py`, packs both with
+   `assemble_cli.sh`, smoke-tests the unpacked archive with `cli_smoke.sh` and
+   attests it. The release needs every runtime archive and every CLI archive. A
+   dispatch with `cli_only: true` runs just this job and the manifest (no
+   laufey, libdenort or package jobs, and never a release): a dry run of the CLI
+   archives' layout.
 
 Locally, the equivalent is:
 

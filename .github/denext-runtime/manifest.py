@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Write SHA256SUMS and manifest.json for a directory of runtime archives
-(and the `deno-cli-*` CLI archives, listed under "cli").
+(and the `deno-cli-*` CLI archives, listed under "cli", each with the
+esbuild it ships: version and the binary's sha256).
 
 Usage: manifest.py <dist dir>
 Env:   VERSION TAG REPOSITORY DENO_VERSION DENO_SHA LAUFEY_SHA CEF_VERSION RUN_URL
+       CLI_ONLY (1: a `cli_only` dry run, which has no runtime archives)
 """
 
 import hashlib
@@ -11,6 +13,7 @@ import json
 import os
 import re
 import sys
+import zipfile
 
 dist = sys.argv[1]
 env = os.environ
@@ -53,6 +56,28 @@ def describe(name, ext):
     }
 
 
+def esbuild_of(name, target):
+    """The esbuild inside a CLI zip (assemble_cli.sh): its version, from
+    BUILD_INFO.json, and the sha256 of the binary itself."""
+    binary = "esbuild.exe" if target.endswith("windows-msvc") else "esbuild"
+    with zipfile.ZipFile(os.path.join(dist, name)) as z:
+        names = set(z.namelist())
+        for want in (binary, "esbuild.LICENSE", "BUILD_INFO.json"):
+            if want not in names:
+                sys.exit(f"{name} has no {want}")
+        info = json.loads(z.read("BUILD_INFO.json")).get("esbuild") or {}
+        h = hashlib.sha256()
+        with z.open(binary) as f:
+            for chunk in iter(lambda: f.read(1 << 20), b""):
+                h.update(chunk)
+    digest = h.hexdigest()
+    if info.get("sha256") != digest:
+        sys.exit(f"{name}: {binary} sha256 {digest} != BUILD_INFO.json {info.get('sha256')}")
+    if not info.get("version"):
+        sys.exit(f"{name}: BUILD_INFO.json names no esbuild version")
+    return {"version": info["version"], "sha256": digest}
+
+
 targets = {}
 cli_targets = {}
 sums = []
@@ -66,9 +91,10 @@ for name in sorted(os.listdir(dist)):
         cli_targets[m["target"]] = {
             "binary": "deno.exe" if m["target"].endswith("windows-msvc") else "deno",
             **describe(name, m["ext"]),
+            "esbuild": esbuild_of(name, m["target"]),
         }
 
-if not targets:
+if not targets and not (env.get("CLI_ONLY") == "1" and cli_targets):
     sys.exit(f"no runtime archives for version {version} in {dist}")
 
 lib_names = {
