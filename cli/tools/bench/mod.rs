@@ -639,6 +639,7 @@ pub async fn run_benchmarks_with_watch(
             CheckSpecifiersOptions {
               ext_overwrite: cli_options.ext_flag().as_ref(),
               allow_unknown_media_types: false,
+              force_type_check: false,
             },
           )
           .await?;
