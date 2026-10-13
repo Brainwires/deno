@@ -420,16 +420,17 @@ where the changes are discussed.
     depends on the run's config, so when the emit cached under the module's own
     key is missing or is not what ran, it takes the module's cached emit
     whatever its key (new `Emitter::maybe_cached_emit_any_source_hash` /
-    `EmitCache::get_emit_code_any_source_hash`), accepted only when its inline
-    source map's sources content is the module's current source (or it maps
-    nothing, as for a module of types) and its length without the source map is
-    the length of the script V8 ran (its top-level function's range). A
-    JavaScript user module, which the transform emits too, is matched the same
-    way. Coverage ranges starting after the module's last mapping (the export
-    setters the transform appends) are dropped like transformer helpers,
-    `deno-vitest:` modules (the vendored runtime, the mock modules) are left out
-    of reports, and a mocked module's coverage merges the files where it is
-    real, `importOriginal` / `vi.importActual` included.
+    `EmitCache::get_emit_code_any_source_hash`; since item 31 the transformed
+    emit, cached apart from the plain one), accepted only when its inline source
+    map's sources content is the module's current source (or it maps nothing, as
+    for a module of types) and its length without the source map is the length
+    of the script V8 ran (its top-level function's range). A JavaScript user
+    module, which the transform emits too, is matched the same way. Coverage
+    ranges starting after the module's last mapping (the export setters the
+    transform appends) are dropped like transformer helpers, `deno-vitest:`
+    modules (the vendored runtime, the mock modules) are left out of reports,
+    and a mocked module's coverage merges the files where it is real,
+    `importOriginal` / `vi.importActual` included.
 
     **Jest projects** run on the same layer. Without a Vitest config, a
     `jest.config.{ts,mts,cts,js,mjs,cjs,json}`, a package.json `"jest"` key or a
@@ -821,6 +822,66 @@ where the changes are discussed.
     sibling is ignored; `DENO_ESBUILD_BINARY` works offline); `cli_smoke.sh`
     checks `esbuild --version` and an offline `deno bundle` from every unpacked
     release zip.
+
+31. **`fix(test)`: coverage of a module run both with and without the Vitest
+    transform** (`fix/vitest-coverage-merge`, CLI only). A module run by a plain `deno test` and by a Vitest one
+    (item 23) runs as two different emits: the transform makes every user
+    module's exports mutable (export setters appended, `const` exports made
+    `let`), stubs type-only exports, hoists `vi.mock()`, and hides `Deno` in a
+    Vitest or Jest project. Their profiles did not merge: the emit cache held
+    one emit per module, so the later run's emit replaced the other's and
+    `deno coverage` reported "Missing transpiled source" for, or misread, the
+    other run's profiles; and `deno coverage` merged the profiles of one URL
+    range by range, offsets into two different scripts, so a module covered
+    91.9% by plain tests and 30.8% by Vitest ones read 38.9%.
+
+    Emitting only the modules that need setters untransformed is not possible:
+    `vi.spyOn(namespace, "export")` reaches any module whose namespace a test
+    obtains (an `import * as`, a dynamic `import()`, `vi.importActual()`, a
+    namespace handed through a helper), which is not known when a module is
+    emitted, so Vitest itself (`vite-node`'s SSR transform) instruments every
+    module; and the `Deno` shadowing and type export stubs change the emit
+    regardless. So:
+
+    - The emit cache keeps a module's transformed emit apart from its plain one
+      (`<file>.transformed.js` beside `<file>.js` in `gen/`): an emit with a
+      program transform key (`EmitProgramTransform::cache_key`) is read and
+      written through `EmitCache::{get,set}_transformed_emit_code`, and
+      `deno
+      coverage` reads it with
+      `Emitter::maybe_cached_transformed_emit_any_source_hash` (which replaces
+      item 23's `maybe_cached_emit_any_source_hash`). A plain run no longer
+      evicts the Vitest run's emit, nor the other way round.
+    - `deno coverage` sorts each module's profiles by the form of its code they
+      were taken of (the plain source or emit, or the transformed emit: the one
+      whose length is that of the script V8 ran, else the plain one, as for a
+      CommonJS module V8 ran wrapped), merges the profiles of one form range by
+      range as before, and makes a report of each form through that form's own
+      source map. The reports of the forms then merge in terms of the original
+      source (`merge_reports` in `cli/tools/coverage/mod.rs`): a line's,
+      function's (by name and line) and branch's counts are summed and anything
+      in only one report is kept, so the merged line coverage is the union of
+      the runs'. Branches are matched by the function they are in (`BlockKey`:
+      the top-level code, or a function's original line, name and rank) and keep
+      the first report's block numbers. A branch one form's report lacks is one
+      whose range V8 left out of that profile, as it does a block that ran as
+      often as the code around it; there its arm counts as often as the first
+      line of code of its range ran in that form
+      (`BranchCoverageItem::content_line_index`), and the implicit complement of
+      a single range never. Merged, a module can list a branch at both the `if`
+      and the code after it where one process running both would list only one
+      of them.
+
+    `deno test --coverage=<dir>` empties `<dir>` first unless
+    `--coverage-raw-data-only` is given (without `--clean`), as upstream; that
+    is unchanged. To combine runs, give each `--coverage-raw-data-only` and
+    report the directory with `deno coverage <dir>` (or several directories with
+    `deno coverage <dir1> <dir2>`). Covered by
+    `tests/specs/test/vitest/coverage_mixed` (a plain test and Vitest tests
+    covering complementary halves of one module, a module mocked in one run and
+    real in another, both run orders with their own emit caches: the merged lcov
+    is the union, line for line) and unit tests in `cli/tools/coverage/mod.rs`
+    and `libs/resolver/cache/emit.rs`.
 
 The runtime-side parts (1-3, 5-22, 24, 25, 27) are what the prebuilt `libdenort`
 carries. The CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` /

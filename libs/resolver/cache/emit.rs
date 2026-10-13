@@ -71,39 +71,86 @@ impl<TSys: EmitCacheSys> EmitCache<TSys> {
     specifier: &Url,
     expected_source_hash: u64,
   ) -> Option<String> {
-    if matches!(self.mode, Mode::Disable) {
-      return None;
-    }
-
-    let emit_filename = self.get_emit_filename(specifier)?;
-    let bytes = self.disk_cache.get(&emit_filename).ok()?;
-    self
-      .file_serializer
-      .deserialize(bytes, Some(expected_source_hash))
+    self.get_emit_code_of(
+      specifier,
+      EmitForm::Plain,
+      Some(expected_source_hash),
+    )
   }
 
-  /// The emit cached for `specifier`, whatever source and options it was
-  /// emitted from (only checked to be intact and of this CLI version). The
-  /// caller must check that it belongs to the module's current source: `deno
-  /// coverage` does, through its source map, to find the emit of a module
-  /// that a program transform it cannot reproduce changed (the source hash
-  /// covers the transform's key).
-  pub fn get_emit_code_any_source_hash(
+  /// Like [`Self::get_emit_code`], for the emit of a module that a program
+  /// transform changed (`deno test`'s Vitest compatibility), which is cached
+  /// apart from the module's plain emit: a run with the transform and one
+  /// without it each keep theirs, so `deno coverage` can read the profiles of
+  /// both.
+  pub fn get_transformed_emit_code(
     &self,
     specifier: &Url,
+    expected_source_hash: u64,
+  ) -> Option<String> {
+    self.get_emit_code_of(
+      specifier,
+      EmitForm::Transformed,
+      Some(expected_source_hash),
+    )
+  }
+
+  /// The emit of `specifier` that a program transform changed, whatever
+  /// source and options it was emitted from (only checked to be intact and of
+  /// this CLI version). The caller must check that it belongs to the module's
+  /// current source: `deno coverage` does, through its source map, to find the
+  /// emit of a module that a program transform it cannot reproduce changed
+  /// (the source hash covers the transform's key).
+  pub fn get_transformed_emit_code_any_source_hash(
+    &self,
+    specifier: &Url,
+  ) -> Option<String> {
+    self.get_emit_code_of(specifier, EmitForm::Transformed, None)
+  }
+
+  fn get_emit_code_of(
+    &self,
+    specifier: &Url,
+    form: EmitForm,
+    expected_source_hash: Option<u64>,
   ) -> Option<String> {
     if matches!(self.mode, Mode::Disable) {
       return None;
     }
 
-    let emit_filename = self.get_emit_filename(specifier)?;
+    let emit_filename = self.get_emit_filename(specifier, form)?;
     let bytes = self.disk_cache.get(&emit_filename).ok()?;
-    self.file_serializer.deserialize(bytes, None)
+    self
+      .file_serializer
+      .deserialize(bytes, expected_source_hash)
   }
 
   /// Sets the emit code in the cache.
   pub fn set_emit_code(&self, specifier: &Url, source_hash: u64, code: &[u8]) {
-    if let Err(err) = self.set_emit_code_result(specifier, source_hash, code) {
+    self.set_emit_code_of(specifier, EmitForm::Plain, source_hash, code)
+  }
+
+  /// Sets the emit code of a module that a program transform changed (see
+  /// [`Self::get_transformed_emit_code`]).
+  pub fn set_transformed_emit_code(
+    &self,
+    specifier: &Url,
+    source_hash: u64,
+    code: &[u8],
+  ) {
+    self.set_emit_code_of(specifier, EmitForm::Transformed, source_hash, code)
+  }
+
+  fn set_emit_code_of(
+    &self,
+    specifier: &Url,
+    form: EmitForm,
+    source_hash: u64,
+    code: &[u8],
+  ) {
+    if let Err(err) =
+      self.set_emit_code_result(specifier, form, source_hash, code)
+    {
       // might error in cases such as a readonly file system
       log::debug!("Error saving emit data ({}): {}", specifier, err);
       // assume the cache can't be written to and disable caching to it
@@ -114,6 +161,7 @@ impl<TSys: EmitCacheSys> EmitCache<TSys> {
   fn set_emit_code_result(
     &self,
     specifier: &Url,
+    form: EmitForm,
     source_hash: u64,
     code: &[u8],
   ) -> Result<(), AnyError> {
@@ -123,7 +171,7 @@ impl<TSys: EmitCacheSys> EmitCache<TSys> {
     }
 
     let emit_filename = self
-      .get_emit_filename(specifier)
+      .get_emit_filename(specifier, form)
       .ok_or_else(|| anyhow!("Could not get emit filename."))?;
     let cache_data = self.file_serializer.serialize(code, source_hash);
     self.disk_cache.set(&emit_filename, &cache_data)?;
@@ -131,11 +179,28 @@ impl<TSys: EmitCacheSys> EmitCache<TSys> {
     Ok(())
   }
 
-  fn get_emit_filename(&self, specifier: &Url) -> Option<PathBuf> {
+  fn get_emit_filename(
+    &self,
+    specifier: &Url,
+    form: EmitForm,
+  ) -> Option<PathBuf> {
+    let extension = match form {
+      EmitForm::Plain => "js",
+      EmitForm::Transformed => "transformed.js",
+    };
     self
       .disk_cache
-      .get_cache_filename_with_extension(specifier, "js")
+      .get_cache_filename_with_extension(specifier, extension)
   }
+}
+
+/// Which emit of a module a cache entry holds: there is one entry for each.
+#[derive(Debug, Clone, Copy)]
+enum EmitForm {
+  /// The module's usual emit.
+  Plain,
+  /// The emit of a module that a program transform changed.
+  Transformed,
 }
 
 const LAST_LINE_PREFIX: &str = "\n// denoCacheMetadata=";
@@ -277,16 +342,43 @@ mod test {
       Some(emit_code3.clone())
     );
 
+    // a transformed emit is kept apart from the plain one
+    assert_eq!(cache.get_transformed_emit_code(&specifier1, 20), None);
+    assert_eq!(
+      cache.get_transformed_emit_code_any_source_hash(&specifier1),
+      None
+    );
+    let transformed_code = "transformed".to_string();
+    cache.set_transformed_emit_code(
+      &specifier1,
+      30,
+      transformed_code.as_bytes(),
+    );
+    assert_eq!(
+      cache.get_emit_code(&specifier1, 20),
+      Some(emit_code3.clone())
+    );
+    assert_eq!(cache.get_emit_code(&specifier1, 30), None);
+    assert_eq!(
+      cache.get_transformed_emit_code(&specifier1, 30),
+      Some(transformed_code.clone())
+    );
+    assert_eq!(cache.get_transformed_emit_code(&specifier1, 20), None);
+    // and a later plain emit leaves it in place
+    cache.set_emit_code(&specifier1, 40, emit_code3.as_bytes());
     // whatever the source hash
     assert_eq!(
-      cache.get_emit_code_any_source_hash(&specifier1),
-      Some(emit_code3)
+      cache.get_transformed_emit_code_any_source_hash(&specifier1),
+      Some(transformed_code)
     );
     let specifier3 = deno_path_util::url_from_file_path(
       temp_dir.path().join("file3.ts").as_path(),
     )
     .unwrap();
-    assert_eq!(cache.get_emit_code_any_source_hash(&specifier3), None);
+    assert_eq!(
+      cache.get_transformed_emit_code_any_source_hash(&specifier3),
+      None
+    );
     // but still only for this CLI version
     let cache = EmitCache {
       disk_cache: cache.disk_cache.clone(),
@@ -296,6 +388,9 @@ mod test {
       emit_failed_flag: Default::default(),
       mode: Mode::Normal,
     };
-    assert_eq!(cache.get_emit_code_any_source_hash(&specifier1), None);
+    assert_eq!(
+      cache.get_transformed_emit_code_any_source_hash(&specifier1),
+      None
+    );
   }
 }

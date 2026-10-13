@@ -101,6 +101,54 @@
         }
       ]
     },
+    "coverage_mixed": {
+      // a module run by a plain Deno test and by Vitest tests: its plain emit
+      // and the one the Vitest transform changed are cached apart, and `deno
+      // coverage` merges their profiles line by line in terms of the original
+      // source, so the merged coverage is the union of the two runs' (a
+      // module mocked in one run and real in the other included). The runs
+      // keep the directory's profiles with `--coverage-raw-data-only`, which
+      // `deno test --coverage` otherwise empties first (as upstream).
+      "tempDir": true,
+      "steps": [
+        {
+          "cwd": "coverage_mixed",
+          "args": "test -A --no-check --coverage=cov --coverage-raw-data-only plain_test.ts",
+          "output": "[WILDCARD]ok | 1 passed | 0 failed[WILDCARD]"
+        },
+        {
+          "cwd": "coverage_mixed",
+          "args": "test -A --no-check --coverage=cov --coverage-raw-data-only vitest_test.ts mock_test.ts",
+          "output": "[WILDCARD]ok | 2 passed | 0 failed[WILDCARD]"
+        },
+        {
+          "cwd": "coverage_mixed",
+          "args": "coverage cov --lcov",
+          "output": "coverage_mixed/expected_lcov.out"
+        },
+        // the other order, with an emit cache of its own: the Vitest run
+        // first, then the plain one, which must not make the Vitest run's
+        // profiles unreadable
+        {
+          "cwd": "coverage_mixed",
+          "envs": { "DENO_DIR": "$PWD/deno_dir2" },
+          "args": "test -A --no-check --coverage=cov2 --coverage-raw-data-only vitest_test.ts mock_test.ts",
+          "output": "[WILDCARD]ok | 2 passed | 0 failed[WILDCARD]"
+        },
+        {
+          "cwd": "coverage_mixed",
+          "envs": { "DENO_DIR": "$PWD/deno_dir2" },
+          "args": "test -A --no-check --coverage=cov2 --coverage-raw-data-only plain_test.ts",
+          "output": "[WILDCARD]ok | 1 passed | 0 failed[WILDCARD]"
+        },
+        {
+          "cwd": "coverage_mixed",
+          "envs": { "DENO_DIR": "$PWD/deno_dir2" },
+          "args": "coverage cov2 --lcov",
+          "output": "coverage_mixed/expected_lcov.out"
+        }
+      ]
+    },
     "path_chars": {
       // mocks under a path Node's pathToFileURL spells otherwise than the
       // module loader (`~`, as in a Windows 8.3 short path), and under one a
