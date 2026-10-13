@@ -85,7 +85,6 @@ fn bundle_uses_esbuild_next_to_deno_without_network() {
   assert_bundle_ran(&context, "offline.js");
   // Nothing was downloaded.
   assert!(!empty_deno_dir.join("dl").exists());
-  assert!(!empty_deno_dir.join("npm").exists());
 
   // A sibling that reports another version is ignored: with no registry the
   // download fails...

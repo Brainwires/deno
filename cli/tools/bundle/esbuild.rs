@@ -125,6 +125,15 @@ fn local_esbuild(
   }
 }
 
+/// The esbuild to use without downloading one, if any: `DENO_ESBUILD_BINARY`,
+/// else a sibling of the running executable at `ESBUILD_VERSION`.
+pub fn find_local_esbuild() -> Result<Option<PathBuf>, AnyError> {
+  local_esbuild(
+    std::env::var_os(DENO_ESBUILD_BINARY_ENV),
+    std::env::current_exe().ok(),
+  )
+}
+
 pub async fn ensure_esbuild(
   deno_dir: &DenoDir,
   npmrc: &ResolvedNpmRc,
@@ -133,13 +142,6 @@ pub async fn ensure_esbuild(
   tarball_cache: &Arc<TarballCache<CliNpmCacheHttpClient, CliSys>>,
   npm_cache: &CliNpmCache,
 ) -> Result<PathBuf, AnyError> {
-  if let Some(path) = local_esbuild(
-    std::env::var_os(DENO_ESBUILD_BINARY_ENV),
-    std::env::current_exe().ok(),
-  )? {
-    return Ok(path);
-  }
-
   let target = esbuild_platform();
   let mut esbuild_path = deno_dir
     .dl_folder_path()
