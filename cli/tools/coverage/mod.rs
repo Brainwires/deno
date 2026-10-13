@@ -39,6 +39,7 @@ use crate::cdp;
 use crate::factory::CliFactory;
 use crate::file_fetcher::TextDecodedFile;
 use crate::module_loader::CliEmitter;
+use crate::resolver::CliCjsTracker;
 use crate::sys::CliSys;
 use crate::tools::test::is_supported_test_path;
 use crate::util::text_encoding::Utf16Map;
@@ -56,9 +57,32 @@ use merge::ProcessCoverage;
 struct BranchCoverageItem {
   line_index: usize,
   block_number: usize,
+  /// The function the block is, to match it in a report of another emitted
+  /// form of the module, where its number can differ.
+  block_key: BlockKey,
+  /// The line of the first code of the arm's range, if it has one (the
+  /// implicit complement of a single range has none), to tell how often it
+  /// ran in a report of another emitted form of the module that lacks it.
+  content_line_index: Option<usize>,
   branch_number: usize,
   taken: Option<i64>,
   is_hit: bool,
+}
+
+/// A function of a module (a block of its branches), told apart in terms of
+/// its original source, so that the reports of different emitted forms of the
+/// module (see `merge_reports`) can be matched function by function.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum BlockKey {
+  /// The module's top-level code.
+  TopLevel,
+  /// A function, by the original line it starts on (if mapped), its name and
+  /// its rank among the functions of that line and name.
+  Function {
+    line_index: Option<usize>,
+    name: String,
+    ordinal: usize,
+  },
 }
 
 #[derive(Debug, Clone)]
@@ -242,10 +266,35 @@ fn generate_coverage_report(
     });
   }
 
+  let mut block_ordinals: std::collections::HashMap<
+    (Option<usize>, &str),
+    usize,
+  > = std::collections::HashMap::new();
   for (block_number, function) in
     options.script_coverage.functions.iter().enumerate()
   {
     let block_hits = function.ranges[0].count;
+    let block_key = if function.function_name.is_empty()
+      && function.ranges[0].start_char_offset == 0
+    {
+      BlockKey::TopLevel
+    } else {
+      let line_index = range_to_src_line_index(
+        &function.ranges[0],
+        &runtime_text_lines,
+        &utf16_map,
+        &maybe_source_map,
+      );
+      let ordinal = block_ordinals
+        .entry((line_index, function.function_name.as_str()))
+        .or_insert(0);
+      *ordinal += 1;
+      BlockKey::Function {
+        line_index,
+        name: function.function_name.clone(),
+        ordinal: *ordinal - 1,
+      }
+    };
 
     // For each sub-range, find the parent count: the count of the smallest
     // enclosing range. V8 ranges are nested (ranges[0] is the function body,
@@ -279,7 +328,7 @@ fn generate_coverage_report(
     // different arms of the same branch (e.g. if/else).
     let mut branches_by_line: std::collections::BTreeMap<
       usize,
-      Vec<(usize, &cdp::CoverageRange)>,
+      Vec<(usize, &cdp::CoverageRange, usize)>,
     > = std::collections::BTreeMap::new();
     for (idx, range) in function.ranges[1..].iter().enumerate() {
       // Skip whitespace-only "gap" ranges V8 emits between blocks (e.g. the
@@ -305,10 +354,23 @@ fn generate_coverage_report(
       ) else {
         continue;
       };
-      branches_by_line
-        .entry(line_index)
-        .or_default()
-        .push((idx, range));
+      // The line of the first code the range covers (a range after a `return`
+      // starts at the end of the line before it).
+      let range_source =
+        &options.script_runtime_source[start_byte_offset..end_byte_offset];
+      let content_line_index = byte_offset_to_src_line_index(
+        start_byte_offset + range_source.len()
+          - range_source.trim_start().len(),
+        &runtime_text_lines,
+        &utf16_map,
+        &maybe_source_map,
+      )
+      .unwrap_or(line_index);
+      branches_by_line.entry(line_index).or_default().push((
+        idx,
+        range,
+        content_line_index,
+      ));
     }
 
     for (line_index, ranges) in &branches_by_line {
@@ -326,7 +388,7 @@ fn generate_coverage_report(
       }
 
       if ranges.len() == 1 {
-        let (idx, range) = &ranges[0];
+        let (idx, range, content_line_index) = &ranges[0];
         let enclosing_count = parent_counts[*idx];
 
         if range.count > enclosing_count {
@@ -335,6 +397,8 @@ fn generate_coverage_report(
           coverage_report.branches.push(BranchCoverageItem {
             line_index: *line_index,
             block_number,
+            block_key: block_key.clone(),
+            content_line_index: Some(*content_line_index),
             branch_number: 0,
             taken: if enclosing_count > 0 {
               Some(range.count)
@@ -362,6 +426,8 @@ fn generate_coverage_report(
           coverage_report.branches.push(BranchCoverageItem {
             line_index: *line_index,
             block_number,
+            block_key: block_key.clone(),
+            content_line_index: Some(*content_line_index),
             branch_number: 0,
             taken,
             is_hit: range.count > 0,
@@ -369,6 +435,8 @@ fn generate_coverage_report(
           coverage_report.branches.push(BranchCoverageItem {
             line_index: *line_index,
             block_number,
+            block_key: block_key.clone(),
+            content_line_index: None,
             branch_number: 1,
             taken: complement_taken,
             is_hit: complement_taken.is_some_and(|c| c > 0),
@@ -377,7 +445,9 @@ fn generate_coverage_report(
       } else {
         // Multiple ranges at the same line: these are explicit branch arms
         // (e.g. both if and else blocks reported by V8).
-        for (branch_number, (_, range)) in ranges.iter().enumerate() {
+        for (branch_number, (_, range, content_line_index)) in
+          ranges.iter().enumerate()
+        {
           let taken = if block_hits > 0 {
             Some(range.count)
           } else {
@@ -386,6 +456,8 @@ fn generate_coverage_report(
           coverage_report.branches.push(BranchCoverageItem {
             line_index: *line_index,
             block_number,
+            block_key: block_key.clone(),
+            content_line_index: Some(*content_line_index),
             branch_number,
             taken,
             is_hit: range.count > 0,
@@ -603,12 +675,26 @@ fn range_to_src_line_index(
   utf16_map: &Utf16Map,
   maybe_source_map: &Option<SourceMap>,
 ) -> Option<usize> {
-  let range_start_byte_offset = byte_offset(utf16_map, range.start_char_offset);
-  let line_index = text_lines.line_index(range_start_byte_offset);
+  byte_offset_to_src_line_index(
+    byte_offset(utf16_map, range.start_char_offset),
+    text_lines,
+    utf16_map,
+    maybe_source_map,
+  )
+}
+
+/// [`range_to_src_line_index`] for a byte offset in the runtime source.
+fn byte_offset_to_src_line_index(
+  runtime_byte_offset: usize,
+  text_lines: &TextLines,
+  utf16_map: &Utf16Map,
+  maybe_source_map: &Option<SourceMap>,
+) -> Option<usize> {
+  let line_index = text_lines.line_index(runtime_byte_offset);
   if let Some(source_map) = maybe_source_map.as_ref() {
     // A source map's columns are UTF-16 code units as well, so the column is
     // the distance from the line's start in that unit.
-    let column = utf16_offset(utf16_map, range_start_byte_offset)
+    let column = utf16_offset(utf16_map, runtime_byte_offset)
       - utf16_offset(utf16_map, text_lines.line_start(line_index));
     let last_mapped_line = source_map
       .get_token_count()
@@ -788,38 +874,37 @@ pub fn cover_files(
     return Err(anyhow!("No covered files included in the report"));
   }
 
-  let proc_coverages: Vec<_> = script_coverages
-    .into_iter()
-    .map(|mut cov| {
-      // Merge the same module loaded under different specifiers. Fragments
-      // never affect the source, so strip them for any file/http(s) URL.
-      // Query strings are only stripped for `file:` (same file on disk);
-      // http(s) servers can return different bytes per query and the cache
-      // keys on the full URL, so keep it there.
-      if let Ok(mut url) = Url::parse(&cov.url) {
-        let strip_fragment = matches!(url.scheme(), "file" | "http" | "https")
-          && url.fragment().is_some();
-        let strip_query = url.scheme() == "file" && url.query().is_some();
-        if strip_fragment {
-          url.set_fragment(None);
-        }
-        if strip_query {
-          url.set_query(None);
-        }
-        if strip_fragment || strip_query {
-          cov.url = url.to_string();
-        }
+  // The profiles of each module, the same module loaded under different
+  // specifiers being one.
+  let mut url_to_coverages: std::collections::BTreeMap<
+    String,
+    Vec<cdp::ScriptCoverage>,
+  > = std::collections::BTreeMap::new();
+  for mut cov in script_coverages {
+    // Merge the same module loaded under different specifiers. Fragments
+    // never affect the source, so strip them for any file/http(s) URL.
+    // Query strings are only stripped for `file:` (same file on disk);
+    // http(s) servers can return different bytes per query and the cache
+    // keys on the full URL, so keep it there.
+    if let Ok(mut url) = Url::parse(&cov.url) {
+      let strip_fragment = matches!(url.scheme(), "file" | "http" | "https")
+        && url.fragment().is_some();
+      let strip_query = url.scheme() == "file" && url.query().is_some();
+      if strip_fragment {
+        url.set_fragment(None);
       }
-      ProcessCoverage { result: vec![cov] }
-    })
-    .collect();
-
-  let script_coverages = if let Some(c) = merge::merge_processes(proc_coverages)
-  {
-    c.result
-  } else {
-    vec![]
-  };
+      if strip_query {
+        url.set_query(None);
+      }
+      if strip_fragment || strip_query {
+        cov.url = url.to_string();
+      }
+    }
+    url_to_coverages
+      .entry(cov.url.clone())
+      .or_default()
+      .push(cov);
+  }
 
   let out_mode = match output {
     Some(ref path) => match File::create(path) {
@@ -837,13 +922,11 @@ pub fn cover_files(
     )
   };
 
-  let mut file_reports = Vec::with_capacity(script_coverages.len());
+  let mut file_reports = Vec::with_capacity(url_to_coverages.len());
 
-  for script_coverage in script_coverages {
-    let module_specifier = deno_path_util::resolve_url_or_path(
-      &script_coverage.url,
-      cli_options.initial_cwd(),
-    )?;
+  for (url, coverages) in url_to_coverages {
+    let module_specifier =
+      deno_path_util::resolve_url_or_path(&url, cli_options.initial_cwd())?;
 
     let maybe_file_result =
       file_fetcher.get_cached_source_or_local(&module_specifier);
@@ -860,92 +943,67 @@ pub fn cover_files(
     };
 
     let original_source = file.source.clone();
-    // The length of the code V8 ran, to tell which candidate it was.
-    let runtime_len = script_runtime_len(&script_coverage);
-    let runtime_code: String = match file.media_type {
-      MediaType::Unknown
-      | MediaType::Css
-      | MediaType::Html
-      | MediaType::Markdown
-      | MediaType::Sql
-      | MediaType::Wasm
-      | MediaType::Cjs
-      | MediaType::Json
-      | MediaType::Jsonc
-      | MediaType::Json5 => original_source.to_string(),
-      // Served as is, unless a program transform (the Vitest compatibility
-      // of `deno test`) applied to it, which emits it.
-      MediaType::JavaScript | MediaType::Mjs => {
-        if is_runtime_code(&original_source, runtime_len) {
-          original_source.to_string()
-        } else {
-          transformed_emit(
-            emitter.as_ref(),
-            &file.specifier,
-            &original_source,
-            runtime_len,
-          )
-          .unwrap_or_else(|| original_source.to_string())
-        }
-      }
-      MediaType::Dts | MediaType::Dmts | MediaType::Dcts => String::new(),
-      MediaType::TypeScript
-      | MediaType::Jsx
-      | MediaType::Mts
-      | MediaType::Cts
-      | MediaType::Tsx => {
-        let module_kind = ModuleKind::from_is_cjs(
-          cjs_tracker.is_maybe_cjs(&file.specifier, file.media_type)?,
-        );
-        let cached_emit = emitter.maybe_cached_emit(
-          &file.specifier,
-          module_kind,
-          &file.source,
-        )?;
-        match cached_emit {
-          Some(code) if is_runtime_code(&code, runtime_len) => code,
-          // Not what ran: emitted with a program transform, whose key is
-          // part of the emit's cache key.
-          cached_emit => match transformed_emit(
-            emitter.as_ref(),
-            &file.specifier,
-            &original_source,
-            runtime_len,
-          )
-          .or(cached_emit)
-          {
-            Some(code) => code,
-            None => {
-              log::warn!(
-                "Missing transpiled source code for: \"{}\" (was it deleted after coverage was collected?). Skipping.",
-                file.specifier,
-              );
-              continue;
-            }
-          },
-        }
-      }
-      MediaType::SourceMap => {
-        unreachable!()
-      }
-    };
+    let candidates =
+      runtime_code_candidates(&file, emitter.as_ref(), cjs_tracker.as_ref())?;
 
-    let source_map = source_map_from_code(runtime_code.as_bytes());
-    let coverage_report =
-      generate_coverage_report(GenerateCoverageReportOptions {
-        script_module_specifier: module_specifier.clone(),
-        script_media_type: file.media_type,
-        script_coverage: &script_coverage,
-        script_original_source: original_source.to_string(),
-        script_runtime_source: runtime_code.as_str().to_owned(),
-        maybe_source_map: &source_map,
-        output: &out_mode,
-      })
-      .with_context(|| {
-        format!(
-          "Failed to generate coverage report for file ({module_specifier})"
-        )
-      })?;
+    // The profiles of one emitted form of the module merge range by range.
+    // A module can have run in more than one form (with and without `deno
+    // test`'s Vitest transform, which changes the emitted code), whose ranges
+    // are offsets into different code: each form gets its own report, through
+    // its own source map, and the reports merge line by line below.
+    let mut forms: Vec<(usize, Vec<ProcessCoverage>)> = Vec::new();
+    let mut missing = false;
+    for coverage in coverages {
+      let Some(index) =
+        runtime_code_index(&candidates, script_runtime_len(&coverage))
+      else {
+        missing = true;
+        continue;
+      };
+      let process = ProcessCoverage {
+        result: vec![coverage],
+      };
+      match forms.iter_mut().find(|(form, _)| *form == index) {
+        Some((_, processes)) => processes.push(process),
+        None => forms.push((index, vec![process])),
+      }
+    }
+    if missing {
+      log::warn!(
+        "Missing transpiled source code for: \"{}\" (was it deleted after coverage was collected?). Skipping.",
+        file.specifier,
+      );
+    }
+
+    let mut form_reports = Vec::with_capacity(forms.len());
+    for (index, processes) in forms {
+      let Some(script_coverage) = merge::merge_processes(processes)
+        .and_then(|process| process.result.into_iter().next())
+      else {
+        continue;
+      };
+      let runtime_code = &candidates[index].code;
+      let source_map = source_map_from_code(runtime_code.as_bytes());
+      let coverage_report =
+        generate_coverage_report(GenerateCoverageReportOptions {
+          script_module_specifier: module_specifier.clone(),
+          script_media_type: file.media_type,
+          script_coverage: &script_coverage,
+          script_original_source: original_source.to_string(),
+          script_runtime_source: runtime_code.clone(),
+          maybe_source_map: &source_map,
+          output: &out_mode,
+        })
+        .with_context(|| {
+          format!(
+            "Failed to generate coverage report for file ({module_specifier})"
+          )
+        })?;
+      form_reports.push(coverage_report);
+    }
+    let Some(coverage_report) = merge_reports(form_reports) else {
+      continue;
+    };
 
     if !coverage_report.found_lines.is_empty() {
       file_reports.push((coverage_report, original_source.to_string()));
@@ -996,20 +1054,231 @@ fn is_runtime_code(code: &str, runtime_len: Option<usize>) -> bool {
   })
 }
 
+/// A form of a module's code that V8 may have run.
+struct RuntimeCode {
+  code: String,
+  /// The module's usual form (not changed by a program transform).
+  plain: bool,
+}
+
+/// The forms of `file`'s code a coverage profile of it can be of: its usual
+/// one (the source itself, or its cached emit) and, when `deno test`'s Vitest
+/// compatibility ran it, the emit its program transform changed. A plain run
+/// and a Vitest run of a module each leave theirs in the emit cache.
+fn runtime_code_candidates(
+  file: &TextDecodedFile,
+  emitter: &CliEmitter,
+  cjs_tracker: &CliCjsTracker,
+) -> Result<Vec<RuntimeCode>, AnyError> {
+  let original_source = &file.source;
+  let plain = |code: String| RuntimeCode { code, plain: true };
+  let mut candidates = match file.media_type {
+    MediaType::Unknown
+    | MediaType::Css
+    | MediaType::Html
+    | MediaType::Markdown
+    | MediaType::Sql
+    | MediaType::Wasm
+    | MediaType::Cjs
+    | MediaType::Json
+    | MediaType::Jsonc
+    | MediaType::Json5 => return Ok(vec![plain(original_source.to_string())]),
+    // Served as is, unless a program transform applied to it, which emits it.
+    MediaType::JavaScript | MediaType::Mjs => {
+      vec![plain(original_source.to_string())]
+    }
+    MediaType::Dts | MediaType::Dmts | MediaType::Dcts => {
+      return Ok(vec![plain(String::new())]);
+    }
+    MediaType::TypeScript
+    | MediaType::Jsx
+    | MediaType::Mts
+    | MediaType::Cts
+    | MediaType::Tsx => {
+      let module_kind = ModuleKind::from_is_cjs(
+        cjs_tracker.is_maybe_cjs(&file.specifier, file.media_type)?,
+      );
+      emitter
+        .maybe_cached_emit(&file.specifier, module_kind, original_source)?
+        .map(plain)
+        .into_iter()
+        .collect()
+    }
+    MediaType::SourceMap => {
+      unreachable!()
+    }
+  };
+  if let Some(code) =
+    transformed_emit(emitter, &file.specifier, original_source)
+    && candidates.iter().all(|candidate| candidate.code != code)
+  {
+    candidates.push(RuntimeCode { code, plain: false });
+  }
+  Ok(candidates)
+}
+
+/// Which of `candidates` a profile whose code was `runtime_len` long is of:
+/// the one of that length, else (a length that tells nothing, as for a
+/// CommonJS module V8 ran wrapped) the module's usual form, if there is one.
+fn runtime_code_index(
+  candidates: &[RuntimeCode],
+  runtime_len: Option<usize>,
+) -> Option<usize> {
+  candidates
+    .iter()
+    .position(|candidate| is_runtime_code(&candidate.code, runtime_len))
+    .or_else(|| candidates.iter().position(|candidate| candidate.plain))
+}
+
 /// The cached emit of a module that a program transform changed (`deno
 /// test`'s Vitest compatibility hoists `vi.mock()` calls and makes exports
 /// mutable), which `deno coverage` cannot reproduce and so cannot look up by
-/// its cache key: whatever the cache holds for the module, when its source
-/// map says it was emitted from `original_source` and it is what ran.
+/// its cache key: whatever the cache holds for the module's transformed
+/// emit, when its source map says it was emitted from `original_source`.
 fn transformed_emit(
   emitter: &CliEmitter,
   specifier: &ModuleSpecifier,
   original_source: &str,
-  runtime_len: Option<usize>,
 ) -> Option<String> {
-  let code = emitter.maybe_cached_emit_any_source_hash(specifier)?;
-  (is_emit_of(&code, original_source) && is_runtime_code(&code, runtime_len))
-    .then_some(code)
+  let code =
+    emitter.maybe_cached_transformed_emit_any_source_hash(specifier)?;
+  is_emit_of(&code, original_source).then_some(code)
+}
+
+/// Merges the reports of one module made from profiles of different emitted
+/// forms of it (see `cover_files`), whose ranges cannot be merged as such, in
+/// terms of its original source: a line's, function's and branch's counts
+/// are the sums of theirs in each report, and a line, function or branch in
+/// only one of them is kept. The blocks of the branches are matched by the
+/// function they are in (see [`BlockKey`]), keeping the first report's block
+/// numbers.
+fn merge_reports(reports: Vec<CoverageReport>) -> Option<CoverageReport> {
+  let mut reports = reports.into_iter();
+  let mut merged = reports.next()?;
+  let mut merged_any = false;
+  for report in reports {
+    merged_any = true;
+    let merged_lines: std::collections::HashMap<usize, i64> =
+      merged.found_lines.iter().copied().collect();
+    let report_lines: std::collections::HashMap<usize, i64> =
+      report.found_lines.iter().copied().collect();
+
+    let mut lines: std::collections::BTreeMap<usize, i64> =
+      merged.found_lines.drain(..).collect();
+    for (line_index, count) in report.found_lines {
+      let merged_count = lines.entry(line_index).or_insert(0);
+      *merged_count = merged_count.saturating_add(count);
+    }
+    merged.found_lines = lines.into_iter().collect();
+
+    for function in report.named_functions {
+      match merged.named_functions.iter_mut().find(|merged_function| {
+        merged_function.name == function.name
+          && merged_function.line_index == function.line_index
+      }) {
+        Some(merged_function) => {
+          merged_function.execution_count = merged_function
+            .execution_count
+            .saturating_add(function.execution_count);
+        }
+        None => merged.named_functions.push(function),
+      }
+    }
+
+    // A branch one report has and the other lacks is one whose range V8 left
+    // out of the other's profile, as it does a block that ran as often as the
+    // code around it (see `elided_branch_taken`).
+    for merged_branch in &mut merged.branches {
+      if !report
+        .branches
+        .iter()
+        .any(|branch| is_same_branch(branch, merged_branch))
+      {
+        add_branch_taken(
+          merged_branch,
+          elided_branch_taken(&report_lines, merged_branch),
+        );
+      }
+    }
+    let mut block_numbers: std::collections::HashMap<BlockKey, usize> = merged
+      .branches
+      .iter()
+      .map(|branch| (branch.block_key.clone(), branch.block_number))
+      .collect();
+    let mut next_block_number = merged
+      .branches
+      .iter()
+      .map(|branch| branch.block_number + 1)
+      .max()
+      .unwrap_or(0);
+    for mut branch in report.branches {
+      match merged
+        .branches
+        .iter_mut()
+        .find(|merged_branch| is_same_branch(merged_branch, &branch))
+      {
+        Some(merged_branch) => add_branch_taken(merged_branch, branch.taken),
+        None => {
+          let taken = elided_branch_taken(&merged_lines, &branch);
+          add_branch_taken(&mut branch, taken);
+          branch.block_number = *block_numbers
+            .entry(branch.block_key.clone())
+            .or_insert_with(|| {
+              next_block_number += 1;
+              next_block_number - 1
+            });
+          merged.branches.push(branch);
+        }
+      }
+    }
+  }
+  if merged_any {
+    merged
+      .named_functions
+      .sort_by_key(|function| function.line_index);
+    merged.branches.sort_by_key(|branch| {
+      (branch.block_number, branch.line_index, branch.branch_number)
+    });
+  }
+  Some(merged)
+}
+
+/// Whether two branches of reports of different emitted forms of a module
+/// are the same arm of the same branch (see `merge_reports`).
+fn is_same_branch(a: &BranchCoverageItem, b: &BranchCoverageItem) -> bool {
+  a.block_key == b.block_key
+    && a.line_index == b.line_index
+    && a.branch_number == b.branch_number
+}
+
+/// How often the arm `branch` was taken in a report that lacks it, whose line
+/// counts are `lines` (see `merge_reports`): V8 left out a range that ran as
+/// often as the code around it, so an arm with a range ran as often as its
+/// first line of code did there, and the implicit complement of such a range
+/// never ran. Nothing is known for code that did not run there.
+fn elided_branch_taken(
+  lines: &std::collections::HashMap<usize, i64>,
+  branch: &BranchCoverageItem,
+) -> Option<i64> {
+  match branch.content_line_index {
+    Some(content_line_index) => lines
+      .get(&content_line_index)
+      .copied()
+      .filter(|count| *count > 0),
+    None => lines
+      .get(&branch.line_index)
+      .is_some_and(|count| *count > 0)
+      .then_some(0),
+  }
+}
+
+/// Adds `taken` to how often `branch` was taken.
+fn add_branch_taken(branch: &mut BranchCoverageItem, taken: Option<i64>) {
+  branch.taken = match (branch.taken, taken) {
+    (Some(a), Some(b)) => Some(a.saturating_add(b)),
+    (a, b) => a.or(b),
+  };
+  branch.is_hit |= branch.taken.is_some_and(|taken| taken > 0);
 }
 
 /// Whether the inline source map of the emitted `code` maps it to the single
@@ -1203,6 +1472,245 @@ mod tests {
       r#"{"version":3,"sources":[],"names":[],"mappings":""}"#,
     );
     assert!(is_emit_of(&code, "export type A = string;\n"));
+  }
+
+  fn report(
+    found_lines: Vec<(usize, i64)>,
+    named_functions: Vec<(&str, usize, i64)>,
+    branches: Vec<(BlockKey, usize, usize, usize, Option<i64>)>,
+  ) -> CoverageReport {
+    CoverageReport {
+      url: Url::parse("file:///a.ts").unwrap(),
+      named_functions: named_functions
+        .into_iter()
+        .map(|(name, line_index, execution_count)| FunctionCoverageItem {
+          name: name.to_string(),
+          line_index,
+          execution_count,
+        })
+        .collect(),
+      branches: branches
+        .into_iter()
+        .map(
+          |(block_key, block_number, line_index, branch_number, taken)| {
+            BranchCoverageItem {
+              line_index,
+              block_number,
+              branch_number,
+              is_hit: taken.is_some_and(|taken| taken > 0),
+              taken,
+              block_key,
+              // a range starting on its line, for the first arm
+              content_line_index: (branch_number == 0).then_some(line_index),
+            }
+          },
+        )
+        .collect(),
+      found_lines,
+      output: None,
+    }
+  }
+
+  fn function_key(line_index: usize, name: &str) -> BlockKey {
+    BlockKey::Function {
+      line_index: Some(line_index),
+      name: name.to_string(),
+      ordinal: 0,
+    }
+  }
+
+  #[test]
+  fn reports_of_different_emits_merge_line_by_line() {
+    // `kind` and `plainOnly` ran in a plain run, `kind` and `vitestOnly` in a
+    // Vitest one, whose emit numbers the functions differently
+    let plain = report(
+      vec![
+        (0, 1),
+        (1, 1),
+        (2, 1),
+        (4, 0),
+        (7, 1),
+        (8, 1),
+        (11, 0),
+        (12, 0),
+      ],
+      vec![("kind", 0, 1), ("plainOnly", 7, 1), ("vitestOnly", 11, 0)],
+      vec![
+        (function_key(0, "kind"), 1, 1, 0, Some(1)),
+        (function_key(0, "kind"), 1, 1, 1, Some(0)),
+      ],
+    );
+    let vitest = report(
+      vec![
+        (0, 1),
+        (1, 1),
+        (2, 0),
+        (4, 1),
+        (7, 0),
+        (8, 0),
+        (11, 1),
+        (12, 1),
+      ],
+      vec![("kind", 0, 1), ("plainOnly", 7, 0), ("vitestOnly", 11, 1)],
+      vec![
+        (BlockKey::TopLevel, 0, 9, 0, Some(1)),
+        (function_key(0, "kind"), 3, 1, 0, Some(0)),
+        (function_key(0, "kind"), 3, 1, 1, Some(1)),
+        (function_key(11, "vitestOnly"), 5, 12, 0, Some(1)),
+      ],
+    );
+    let merged = merge_reports(vec![plain, vitest]).unwrap();
+    assert_eq!(
+      merged.found_lines,
+      vec![
+        (0, 2),
+        (1, 2),
+        (2, 1),
+        (4, 1),
+        (7, 1),
+        (8, 1),
+        (11, 1),
+        (12, 1)
+      ]
+    );
+    let functions = merged
+      .named_functions
+      .iter()
+      .map(|f| (f.name.as_str(), f.line_index, f.execution_count))
+      .collect::<Vec<_>>();
+    assert_eq!(
+      functions,
+      vec![("kind", 0, 2), ("plainOnly", 7, 1), ("vitestOnly", 11, 1)]
+    );
+    let branches = merged
+      .branches
+      .iter()
+      .map(|b| {
+        (
+          b.block_number,
+          b.line_index,
+          b.branch_number,
+          b.taken,
+          b.is_hit,
+        )
+      })
+      .collect::<Vec<_>>();
+    // the plain report's block numbers are kept; blocks only in the Vitest
+    // one get new ones
+    assert_eq!(
+      branches,
+      vec![
+        (1, 1, 0, Some(1), true),
+        (1, 1, 1, Some(1), true),
+        (2, 9, 0, Some(1), true),
+        (3, 12, 0, Some(1), true),
+      ]
+    );
+  }
+
+  #[test]
+  fn branches_v8_left_out_of_one_report_are_inferred() {
+    // `kind(-1)` in one form: the `if` block ran as often as the function, so
+    // V8 reported only the code after it, which starts at the end of the
+    // block's last line (3) and never ran; `kind(1)` in the other: the `if`
+    // block (line 1) never ran, the rest ran as often as the function
+    let mut negative = report(
+      vec![(0, 1), (1, 1), (2, 1), (3, 1), (4, 0), (5, 1)],
+      vec![("kind", 0, 1)],
+      vec![
+        (function_key(0, "kind"), 1, 3, 0, Some(0)),
+        (function_key(0, "kind"), 1, 3, 1, Some(1)),
+      ],
+    );
+    negative.branches[0].content_line_index = Some(4);
+    let positive = report(
+      vec![(0, 1), (1, 1), (2, 0), (3, 0), (4, 1), (5, 1)],
+      vec![("kind", 0, 1)],
+      vec![
+        (function_key(0, "kind"), 2, 1, 0, Some(0)),
+        (function_key(0, "kind"), 2, 1, 1, Some(1)),
+      ],
+    );
+    let merged = merge_reports(vec![negative, positive]).unwrap();
+    let branches = merged
+      .branches
+      .iter()
+      .map(|b| {
+        (
+          b.block_number,
+          b.line_index,
+          b.branch_number,
+          b.taken,
+          b.is_hit,
+        )
+      })
+      .collect::<Vec<_>>();
+    // both arms of both branches were taken once, as in a profile of one
+    // process running both
+    assert_eq!(
+      branches,
+      vec![
+        (1, 1, 0, Some(1), true),
+        (1, 1, 1, Some(1), true),
+        (1, 3, 0, Some(1), true),
+        (1, 3, 1, Some(1), true),
+      ]
+    );
+    assert_eq!(
+      merged.found_lines,
+      vec![(0, 2), (1, 2), (2, 1), (3, 1), (4, 1), (5, 2)]
+    );
+  }
+
+  #[test]
+  fn a_single_report_is_left_as_is() {
+    let single = report(
+      vec![(3, 0), (1, 1)],
+      vec![("b", 3, 0), ("a", 1, 1)],
+      vec![(function_key(3, "b"), 4, 3, 0, None)],
+    );
+    let merged = merge_reports(vec![single]).unwrap();
+    assert_eq!(merged.found_lines, vec![(3, 0), (1, 1)]);
+    assert_eq!(merged.named_functions[0].name, "b");
+    assert_eq!(merged.branches[0].block_number, 4);
+    assert!(merge_reports(vec![]).is_none());
+  }
+
+  #[test]
+  fn branch_counts_of_a_block_that_did_not_run_merge() {
+    let a = report(vec![], vec![], vec![(function_key(0, "f"), 0, 1, 0, None)]);
+    let b = report(
+      vec![],
+      vec![],
+      vec![(function_key(0, "f"), 2, 1, 0, Some(3))],
+    );
+    let merged = merge_reports(vec![a, b]).unwrap();
+    assert_eq!(merged.branches.len(), 1);
+    assert_eq!(merged.branches[0].block_number, 0);
+    assert_eq!(merged.branches[0].taken, Some(3));
+    assert!(merged.branches[0].is_hit);
+  }
+
+  #[test]
+  fn a_profile_is_of_the_form_of_its_length() {
+    let candidates = vec![
+      RuntimeCode {
+        code: "a();\n".to_string(),
+        plain: true,
+      },
+      RuntimeCode {
+        code: "a();\nlet b;\n".to_string(),
+        plain: false,
+      },
+    ];
+    assert_eq!(runtime_code_index(&candidates, Some(5)), Some(0));
+    assert_eq!(runtime_code_index(&candidates, Some(12)), Some(1));
+    // a length that tells nothing: the usual form
+    assert_eq!(runtime_code_index(&candidates, Some(99)), Some(0));
+    assert_eq!(runtime_code_index(&candidates, None), Some(0));
+    // no usual form to fall back on
+    assert_eq!(runtime_code_index(&candidates[1..], Some(5)), None);
+    assert_eq!(runtime_code_index(&candidates[1..], Some(12)), Some(0));
   }
 
   /// The source substring credited as code on `line_index`: the line with any

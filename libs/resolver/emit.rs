@@ -229,20 +229,27 @@ impl<TInNpmPackageChecker: InNpmPackageChecker, TSys: EmitterSys>
       source,
       transform_key,
     );
-    Ok(self.emit_cache.get_emit_code(specifier, source_hash))
+    Ok(match transform_key {
+      Some(_) => self
+        .emit_cache
+        .get_transformed_emit_code(specifier, source_hash),
+      None => self.emit_cache.get_emit_code(specifier, source_hash),
+    })
   }
 
-  /// The cached emit of `specifier`, whatever source, options and program
-  /// transform it was emitted with: the caller checks it is the current
-  /// source's (see
-  /// [`crate::cache::EmitCache::get_emit_code_any_source_hash`]). `deno
-  /// coverage` uses it for modules a program transform changed, whose
+  /// The cached emit of `specifier` that a program transform changed,
+  /// whatever source, options and transform it was emitted with: the caller
+  /// checks it is the current source's (see
+  /// [`crate::cache::EmitCache::get_transformed_emit_code_any_source_hash`]).
+  /// `deno coverage` uses it for modules a program transform changed, whose
   /// transform it does not know.
-  pub fn maybe_cached_emit_any_source_hash(
+  pub fn maybe_cached_transformed_emit_any_source_hash(
     &self,
     specifier: &Url,
   ) -> Option<String> {
-    self.emit_cache.get_emit_code_any_source_hash(specifier)
+    self
+      .emit_cache
+      .get_transformed_emit_code_any_source_hash(specifier)
   }
 
   pub async fn maybe_emit_source(
@@ -313,7 +320,10 @@ impl<TInNpmPackageChecker: InNpmPackageChecker, TSys: EmitterSys>
       program_transform.as_ref().map(|(_, key)| *key),
     ) {
       PreEmitResult::Cached(emitted_text) => Ok(emitted_text.into()),
-      PreEmitResult::NotCached { source_hash } => {
+      PreEmitResult::NotCached {
+        source_hash,
+        transformed,
+      } => {
         let specifier = provider.specifier().clone();
         let emit = {
           let transpile_and_emit_options = transpile_and_emit_options.clone();
@@ -345,6 +355,7 @@ impl<TInNpmPackageChecker: InNpmPackageChecker, TSys: EmitterSys>
           &specifier,
           &transpiled_source,
           source_hash,
+          transformed,
         );
         Ok(transpiled_source.into())
       }
@@ -386,7 +397,10 @@ impl<TInNpmPackageChecker: InNpmPackageChecker, TSys: EmitterSys>
       program_transform.as_ref().map(|(_, key)| *key),
     ) {
       PreEmitResult::Cached(emitted_text) => Ok(emitted_text.into()),
-      PreEmitResult::NotCached { source_hash } => {
+      PreEmitResult::NotCached {
+        source_hash,
+        transformed,
+      } => {
         let parsed_source = self.parsed_source_cache.remove_or_parse_module(
           specifier,
           media_type,
@@ -411,6 +425,7 @@ impl<TInNpmPackageChecker: InNpmPackageChecker, TSys: EmitterSys>
           specifier,
           &transpiled_source,
           source_hash,
+          transformed,
         );
         Ok(transpiled_source.into())
       }
@@ -598,7 +613,12 @@ impl ParsedSourceProvider for ParsedSource {
 
 enum PreEmitResult {
   Cached(String),
-  NotCached { source_hash: u64 },
+  /// `transformed`: a program transform applies, so the emit is cached apart
+  /// from the module's plain emit.
+  NotCached {
+    source_hash: u64,
+    transformed: bool,
+  },
 }
 
 #[derive(Debug, thiserror::Error, deno_error::JsError)]
@@ -642,12 +662,22 @@ impl<TInNpmPackageChecker: InNpmPackageChecker, TSys: EmitterSys>
       program_transform_key,
     );
 
-    if let Some(emit_code) =
+    let transformed = program_transform_key.is_some();
+    let cached = if transformed {
+      self
+        .0
+        .emit_cache
+        .get_transformed_emit_code(specifier, source_hash)
+    } else {
       self.0.emit_cache.get_emit_code(specifier, source_hash)
-    {
+    };
+    if let Some(emit_code) = cached {
       PreEmitResult::Cached(emit_code)
     } else {
-      PreEmitResult::NotCached { source_hash }
+      PreEmitResult::NotCached {
+        source_hash,
+        transformed,
+      }
     }
   }
 
@@ -656,12 +686,21 @@ impl<TInNpmPackageChecker: InNpmPackageChecker, TSys: EmitterSys>
     specifier: &Url,
     transpiled_source: &str,
     source_hash: u64,
+    transformed: bool,
   ) {
-    self.0.emit_cache.set_emit_code(
-      specifier,
-      source_hash,
-      transpiled_source.as_bytes(),
-    );
+    if transformed {
+      self.0.emit_cache.set_transformed_emit_code(
+        specifier,
+        source_hash,
+        transpiled_source.as_bytes(),
+      );
+    } else {
+      self.0.emit_cache.set_emit_code(
+        specifier,
+        source_hash,
+        transpiled_source.as_bytes(),
+      );
+    }
   }
 }
 
