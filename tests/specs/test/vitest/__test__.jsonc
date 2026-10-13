@@ -188,7 +188,7 @@
     },
     "types_check_type_error": {
       "args": "check types/type_error_test.ts",
-      "output": "types/type_error.out",
+      "output": "types/type_error_check.out",
       "exitCode": 1
     },
     "types_check_installed_package_wins": {

@@ -74,7 +74,9 @@ describe("typed", () => {
 });
 
 const withUser = test.extend<{ user: { name: string } }>({
-  user: async (_context, use) => {
+  // Vitest requires a destructuring pattern for a fixture's context
+  // deno-lint-ignore no-empty-pattern
+  user: async ({}, use) => {
     await use({ name: "fixture" });
   },
 });

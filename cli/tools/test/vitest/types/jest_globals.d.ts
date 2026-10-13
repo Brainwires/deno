@@ -6,7 +6,7 @@
 // js/jest.js): Jest's test API (a declared parameter of a test or hook is the
 // `done` callback), `expect` and the `jest` object.
 
-// deno-lint-ignore-file no-explicit-any
+// deno-lint-ignore-file no-explicit-any camelcase
 
 import type {
   Constructable,
