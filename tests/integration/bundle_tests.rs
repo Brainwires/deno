@@ -77,7 +77,7 @@ fn bundle_uses_esbuild_next_to_deno_without_network() {
     .new_command()
     .name(deno.as_path())
     .args("bundle --output=offline.js main.ts")
-    .env("DENO_DIR", empty_deno_dir.to_string_lossy())
+    .env("DENO_DIR", empty_deno_dir.as_path())
     .env("NPM_CONFIG_REGISTRY", UNREACHABLE_REGISTRY)
     .run()
     .skip_output_check()
@@ -99,7 +99,7 @@ fn bundle_uses_esbuild_next_to_deno_without_network() {
       .new_command()
       .name(deno.as_path())
       .args("bundle --output=ignored.js main.ts")
-      .env("DENO_DIR", empty_deno_dir.to_string_lossy())
+      .env("DENO_DIR", empty_deno_dir.as_path())
       .env("NPM_CONFIG_REGISTRY", UNREACHABLE_REGISTRY)
       .run();
     offline.skip_output_check().assert_exit_code(1);
@@ -113,7 +113,7 @@ fn bundle_uses_esbuild_next_to_deno_without_network() {
       .new_command()
       .name(deno.as_path())
       .args("bundle --output=ignored.js main.ts")
-      .env("DENO_DIR", empty_deno_dir.to_string_lossy())
+      .env("DENO_DIR", empty_deno_dir.as_path())
       .run()
       .skip_output_check()
       .assert_exit_code(0);
@@ -129,9 +129,9 @@ fn bundle_uses_deno_esbuild_binary_without_network() {
   context
     .new_command()
     .args("bundle --output=override.js main.ts")
-    .env("DENO_DIR", empty_deno_dir.to_string_lossy())
+    .env("DENO_DIR", empty_deno_dir.as_path())
     .env("NPM_CONFIG_REGISTRY", UNREACHABLE_REGISTRY)
-    .env("DENO_ESBUILD_BINARY", esbuild.to_string_lossy())
+    .env("DENO_ESBUILD_BINARY", esbuild.as_path())
     .run()
     .skip_output_check()
     .assert_exit_code(0);
@@ -142,7 +142,7 @@ fn bundle_uses_deno_esbuild_binary_without_network() {
   context
     .new_command()
     .args("bundle --output=missing.js main.ts")
-    .env("DENO_DIR", empty_deno_dir.to_string_lossy())
+    .env("DENO_DIR", empty_deno_dir.as_path())
     .env("DENO_ESBUILD_BINARY", "./does-not-exist")
     .run()
     .assert_matches_text(
