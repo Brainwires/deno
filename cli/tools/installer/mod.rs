@@ -221,6 +221,7 @@ pub async fn install_from_entrypoints(
       crate::graph_container::CheckSpecifiersOptions {
         ext_overwrite: None,
         allow_unknown_media_types: true,
+        force_type_check: false,
       },
     )
     .await?;

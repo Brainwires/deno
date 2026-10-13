@@ -1,0 +1,7 @@
+Check [WILDCARD]jest_typed_test.ts
+running 2 tests from ./types/jest_typed_test.ts
+jest typed > calls done ... ok ([WILDCARD])
+jest typed > types jest mocks ... ok ([WILDCARD])
+
+ok | 2 passed | 0 failed ([WILDCARD])
+

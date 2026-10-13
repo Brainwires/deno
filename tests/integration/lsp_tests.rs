@@ -13296,6 +13296,70 @@ fn lsp_diagnostics_none_for_resolving_types() {
   client.shutdown();
 }
 
+/// denext: the editor resolves `vitest` to the built-in types `deno test`
+/// checks a Vitest file against, without the package installed.
+#[test(timeout = 300)]
+fn lsp_vitest_builtin_types() {
+  let context = TestContextBuilder::new().use_temp_cwd().build();
+  let temp_dir = context.temp_dir();
+  temp_dir.write("deno.json", "{}");
+  let mut client = context.new_lsp_command().build();
+  client.initialize_default();
+  let diagnostics = client.did_open(json!({
+    "textDocument": {
+      "uri": temp_dir.path().join("sum_test.ts").uri_file(),
+      "languageId": "typescript",
+      "version": 1,
+      "text": concat!(
+        "/// <reference types=\"vitest/globals\" />\n",
+        "import { expect, it, vi } from \"vitest\";\n",
+        "\n",
+        "it(\"sums\", () => {\n",
+        "  const add = vi.fn((a: number, b: number) => a + b);\n",
+        "  add.mockReturnValue(\"three\");\n",
+        "  expect(add(1, 2)).toBe(3);\n",
+        "  beforeEach(() => {});\n",
+        "});\n",
+      ),
+    },
+  }));
+  // only the type error: `vitest` and `vitest/globals` resolve, typed
+  let diagnostics = diagnostics.all();
+  assert_eq!(diagnostics.len(), 1, "{:#?}", diagnostics);
+  assert_eq!(diagnostics[0].source.as_deref(), Some("deno-ts"));
+  assert_eq!(diagnostics[0].code, Some(lsp::NumberOrString::Number(2345)));
+  assert_eq!(diagnostics[0].range.start.line, 5);
+  client.shutdown();
+}
+
+/// denext: `test.vitestCompat: false` turns the built-in types off in the
+/// editor too.
+#[test(timeout = 300)]
+fn lsp_vitest_builtin_types_disabled() {
+  let context = TestContextBuilder::new().use_temp_cwd().build();
+  let temp_dir = context.temp_dir();
+  temp_dir.write("deno.json", r#"{ "test": { "vitestCompat": false } }"#);
+  let mut client = context.new_lsp_command().build();
+  client.initialize_default();
+  let diagnostics = client.did_open(json!({
+    "textDocument": {
+      "uri": temp_dir.path().join("sum_test.ts").uri_file(),
+      "languageId": "typescript",
+      "version": 1,
+      "text": "import { vi } from \"vitest\";\n\nvi.fn();\n",
+    },
+  }));
+  let diagnostics = diagnostics.all();
+  assert!(
+    diagnostics
+      .iter()
+      .any(|d| d.range.start.line == 0 && d.message.contains("vitest")),
+    "{:#?}",
+    diagnostics
+  );
+  client.shutdown();
+}
+
 #[test(timeout = 300)]
 fn lsp_jupyter_import_map_and_diagnostics() {
   let context = TestContextBuilder::new().use_temp_cwd().build();

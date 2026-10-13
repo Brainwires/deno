@@ -150,6 +150,9 @@ pub struct LspScopedResolver {
   dep_info: Arc<Mutex<Arc<ScopeDepInfo>>>,
   configured_dep_resolutions: Arc<ConfiguredDepResolutions>,
   config_data: Option<Arc<ConfigData>>,
+  /// denext: the built-in `vitest` / `@jest/globals` types (see
+  /// `tools::test::vitest::lsp_type_overrides`).
+  specifier_overrides: Option<deno_resolver::graph::SpecifierOverridesRc>,
 }
 
 impl Default for LspScopedResolver {
@@ -172,6 +175,7 @@ impl Default for LspScopedResolver {
       dep_info: Default::default(),
       configured_dep_resolutions: Default::default(),
       config_data: None,
+      specifier_overrides: None,
     }
   }
 }
@@ -193,6 +197,20 @@ impl LspScopedResolver {
     let node_resolver = factory.node_resolver().cloned();
     let npm_pkg_req_resolver = factory.npm_pkg_req_resolver().cloned();
     let cli_resolver = factory.cli_resolver().clone();
+    let specifier_overrides = {
+      // the root only serves the runtime modules, which the LSP never loads
+      let root = config_data
+        .and_then(|d| url_to_file_path(&d.scope).ok())
+        .unwrap_or_else(|| cache.deno_dir().root.clone());
+      crate::tools::test::vitest::lsp_type_overrides(
+        config_data.map(|d| d.test_config.as_ref()),
+        &cache.deno_dir().root,
+        &root,
+      )
+    };
+    if let Some(overrides) = &specifier_overrides {
+      cli_resolver.set_specifier_overrides(overrides.clone());
+    }
     let pkg_json_resolver = factory.pkg_json_resolver().clone();
     let jsr_resolver = Some(Arc::new(JsrCacheResolver::new(
       cache.for_specifier(config_data.map(|d| d.scope.as_ref())),
@@ -230,6 +248,7 @@ impl LspScopedResolver {
       dep_info: Default::default(),
       configured_dep_resolutions,
       config_data: config_data.cloned(),
+      specifier_overrides,
     }
   }
 
@@ -290,8 +309,12 @@ impl LspScopedResolver {
       ));
     }
 
+    let resolver = factory.cli_resolver().clone();
+    if let Some(overrides) = &self.specifier_overrides {
+      resolver.set_specifier_overrides(overrides.clone());
+    }
     Arc::new(Self {
-      resolver: factory.cli_resolver().clone(),
+      resolver,
       workspace_resolver: factory.workspace_resolver().clone(),
       in_npm_pkg_checker: factory.in_npm_pkg_checker().clone(),
       is_cjs_resolver: factory.is_cjs_resolver().clone(),
@@ -307,6 +330,7 @@ impl LspScopedResolver {
       dep_info: self.dep_info.clone(),
       configured_dep_resolutions: self.configured_dep_resolutions.clone(),
       config_data: self.config_data.clone(),
+      specifier_overrides: self.specifier_overrides.clone(),
     })
   }
 

@@ -1,0 +1,5 @@
+[WILDCARD]running 1 test from ./globals.test.ts
+globals > needs no import ... ok ([WILDCARD])
+
+ok | 1 passed | 0 failed ([WILDCARD])
+

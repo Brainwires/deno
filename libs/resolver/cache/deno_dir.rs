@@ -55,6 +55,17 @@ impl<TSys: DenoDirSys> DenoDirProvider<TSys> {
   }
 }
 
+/// denext: the suffix of the DENO_DIR caches this fork keeps apart from stock
+/// Deno's. A stock `deno` and this fork share one DENO_DIR (the download
+/// caches, `remote/`, `npm/`, `registries/` and the emits in `gen/`, are
+/// keyed by content and the `deno_ast` version, so both reuse them), but each
+/// of the SQLite caches below is wiped whenever a different CLI version opens
+/// it (`CacheDBConfiguration::on_version_change`), so alternating the two
+/// binaries threw away each one's type-check, code, fast-check, analysis and
+/// fmt/lint incremental caches on every switch. The fork keeps its own copy
+/// of each instead (see DENEXT.md, "Caches of their own").
+pub const DENEXT_CACHE_SUFFIX: &str = "_denext";
+
 /// `DenoDir` serves as coordinator for multiple `DiskCache`s containing them
 /// in single directory that can be controlled with `$DENO_DIR` env variable.
 #[derive(Debug, Clone)]
@@ -82,46 +93,52 @@ impl<TSys: DiskCacheSys> DenoDir<TSys> {
     self.root.display()
   }
 
+  /// The fork's own copy of the version-keyed cache `name`, see
+  /// [`DENEXT_CACHE_SUFFIX`].
+  fn denext_cache_path(&self, name: &str) -> PathBuf {
+    self.root.join(format!("{name}{DENEXT_CACHE_SUFFIX}"))
+  }
+
   /// Path for the V8 code cache.
   pub fn code_cache_db_file_path(&self) -> PathBuf {
     // bump this version name to invalidate the entire cache
-    self.root.join("v8_code_cache_v2")
+    self.denext_cache_path("v8_code_cache_v2")
   }
 
   /// Path for the incremental cache used for formatting.
   pub fn fmt_incremental_cache_db_file_path(&self) -> PathBuf {
     // bump this version name to invalidate the entire cache
-    self.root.join("fmt_incremental_cache_v2")
+    self.denext_cache_path("fmt_incremental_cache_v2")
   }
 
   /// Path for the incremental cache used for linting.
   pub fn lint_incremental_cache_db_file_path(&self) -> PathBuf {
     // bump this version name to invalidate the entire cache
-    self.root.join("lint_incremental_cache_v2")
+    self.denext_cache_path("lint_incremental_cache_v2")
   }
 
   /// Path for caching swc dependency analysis.
   pub fn dep_analysis_db_file_path(&self) -> PathBuf {
     // bump this version name to invalidate the entire cache
-    self.root.join("dep_analysis_cache_v2")
+    self.denext_cache_path("dep_analysis_cache_v2")
   }
 
   /// Path for the cache used for fast check.
   pub fn fast_check_cache_db_file_path(&self) -> PathBuf {
     // bump this version name to invalidate the entire cache
-    self.root.join("fast_check_cache_v2")
+    self.denext_cache_path("fast_check_cache_v2")
   }
 
   /// Path for caching node analysis.
   pub fn node_analysis_db_file_path(&self) -> PathBuf {
     // bump this version name to invalidate the entire cache
-    self.root.join("node_analysis_cache_v2")
+    self.denext_cache_path("node_analysis_cache_v2")
   }
 
   /// Path for the cache used for type checking.
   pub fn type_checking_cache_db_file_path(&self) -> PathBuf {
     // bump this version name to invalidate the entire cache
-    self.root.join("check_cache_v2")
+    self.denext_cache_path("check_cache_v2")
   }
 
   /// Path to the registries cache, used for the lps.
@@ -171,5 +188,52 @@ impl<TSys: DiskCacheSys> DenoDir<TSys> {
   /// Folder path used for downloading new versions of deno.
   pub fn dl_folder_path(&self) -> PathBuf {
     self.root.join("dl")
+  }
+}
+
+#[cfg(test)]
+mod test {
+  use sys_traits::impls::RealSys;
+
+  use super::*;
+
+  #[test]
+  fn version_keyed_caches_are_the_forks_own() {
+    let root = if cfg!(windows) {
+      PathBuf::from("C:\\deno_dir")
+    } else {
+      PathBuf::from("/deno_dir")
+    };
+    let dir = DenoDir::new(RealSys, root.clone());
+    let name = |path: PathBuf| {
+      assert_eq!(path.parent(), Some(root.as_path()));
+      path.file_name().unwrap().to_string_lossy().into_owned()
+    };
+    // the SQLite caches a different CLI version wipes
+    assert_eq!(
+      [
+        name(dir.code_cache_db_file_path()),
+        name(dir.fmt_incremental_cache_db_file_path()),
+        name(dir.lint_incremental_cache_db_file_path()),
+        name(dir.dep_analysis_db_file_path()),
+        name(dir.fast_check_cache_db_file_path()),
+        name(dir.node_analysis_db_file_path()),
+        name(dir.type_checking_cache_db_file_path()),
+      ],
+      [
+        "v8_code_cache_v2_denext",
+        "fmt_incremental_cache_v2_denext",
+        "lint_incremental_cache_v2_denext",
+        "dep_analysis_cache_v2_denext",
+        "fast_check_cache_v2_denext",
+        "node_analysis_cache_v2_denext",
+        "check_cache_v2_denext",
+      ]
+    );
+    // the caches keyed by content stay shared with stock Deno
+    assert_eq!(dir.gen_cache.location, root.join("gen"));
+    assert_eq!(dir.remote_folder_path(), root.join("remote"));
+    assert_eq!(dir.npm_folder_path(), root.join("npm"));
+    assert_eq!(dir.registries_folder_path(), root.join("registries"));
   }
 }

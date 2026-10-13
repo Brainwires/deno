@@ -2503,12 +2503,14 @@ pub async fn run_tests(
 
   let main_graph_container = factory.main_module_graph_container().await?;
 
-  // Typecheck
+  // Typecheck (with a Vitest or Jest config, loading it added the config to
+  // the graph first, so the test modules are checked explicitly)
   main_graph_container
     .check_specifiers(
       &specifiers_for_typecheck_and_test,
       CheckSpecifiersOptions {
         ext_overwrite: cli_options.ext_flag().as_ref(),
+        force_type_check: vitest.as_ref().is_some_and(|v| v.has_config()),
         ..Default::default()
       },
     )
@@ -2798,6 +2800,7 @@ pub async fn run_tests_with_watch(
             &specifiers_for_typecheck_and_test,
             crate::graph_container::CheckSpecifiersOptions {
               ext_overwrite: cli_options.ext_flag().as_ref(),
+              force_type_check: vitest.as_ref().is_some_and(|v| v.has_config()),
               ..Default::default()
             },
           )

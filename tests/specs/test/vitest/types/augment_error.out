@@ -1,0 +1,14 @@
+Check [WILDCARD]augment_error_test.ts
+TS2345 [ERROR]: Argument of type 'string' is not assignable to parameter of type 'number'.
+  expect(5).toBeWithin("1", 10);
+                       ~~~
+    at [WILDCARD]augment_error_test.ts:9:24
+
+TS2339 [ERROR]: Property 'toBeBar' does not exist on type 'Assertion<number>'.
+  expect(5).toBeBar();
+            ~~~~~~~
+    at [WILDCARD]augment_error_test.ts:10:13
+
+Found 2 errors.
+
+error: Type checking failed.

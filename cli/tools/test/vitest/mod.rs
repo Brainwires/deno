@@ -117,7 +117,7 @@ static SOURCES: &[(&str, &str)] = sources!(
 const RESOLVED_CONFIG_PATH: &str = "resolved_config.json";
 
 /// Bumped when `types/` changes, so stale written copies are not reused.
-const TYPES_VERSION: &str = "v4";
+const TYPES_VERSION: &str = "v7";
 
 /// The resolved config served as `deno-vitest:///resolved_config.json`.
 static RESOLVED_CONFIG: RwLock<Option<Arc<str>>> = RwLock::new(None);
@@ -434,6 +434,9 @@ pub struct VitestOverrides {
   vite_root: RwLock<Option<PathBuf>>,
   /// Where the fallback type declarations are written (see `types/`).
   types_dir: Option<PathBuf>,
+  /// Every resolution of a built-in module goes to its types (the LSP, which
+  /// runs nothing: its code is not loadable outside `deno test`).
+  types_only: bool,
   /// Jest's extra module directories (see [`ModuleDirectory`]).
   module_directories: RwLock<Vec<ModuleDirectory>>,
   /// Packages the built-in modules import that resolve from another
@@ -510,7 +513,51 @@ static TYPES: &[(&str, &str)] = &[
   ("vitest.js", include_str!("types/vitest.d.ts")),
   ("config.js", include_str!("types/config.d.ts")),
   ("jest_globals.js", include_str!("types/jest_globals.d.ts")),
+  ("globals.js", include_str!("types/globals.d.ts")),
+  // Vite's CSS, asset and `?raw` / `?url` / `?inline` / `?worker` imports
+  // (`deno-vitest:///virtual/asset.js`), as Vite's client types declare them
+  (
+    "asset_string.js",
+    "// The default export of a Vite CSS, asset, ?raw, ?url or ?inline import.\n\
+     declare const value: string;\nexport default value;\n",
+  ),
+  (
+    "asset_css_module.js",
+    "// The class names of a Vite CSS module.\n\
+     declare const classes: { readonly [key: string]: string };\n\
+     export default classes;\n",
+  ),
+  (
+    "asset_worker.js",
+    "// A Vite ?worker import.\n\
+     declare const WorkerConstructor: {\n  new (options?: { name?: string }): Worker;\n};\n\
+     export default WorkerConstructor;\n",
+  ),
 ];
+
+/// The types of a Vite asset module (see [`asset_module_code`]).
+fn asset_types_module(module: &Url) -> Option<&'static str> {
+  let kind = module
+    .query_pairs()
+    .find(|(key, _)| key == "kind")
+    .map(|(_, value)| value.into_owned())?;
+  Some(match kind.as_str() {
+    "css" | "url" | "raw" | "inline" => "asset_string.js",
+    "css-module" => "asset_css_module.js",
+    "worker" => "asset_worker.js",
+    _ => return None,
+  })
+}
+
+/// The fallback types of the built-in module `module` that `raw_specifier`
+/// resolved to: `vitest/globals` (an empty module at runtime) declares the
+/// globals a `globals: true` config installs.
+fn types_module(raw_specifier: &str, module: &'static str) -> &'static str {
+  match split_package_specifier(raw_specifier) {
+    Some((_, "/globals" | "/test/globals")) => "globals.js",
+    _ => module,
+  }
+}
 
 impl VitestOverrides {
   fn new(root: &Path, types_dir: Option<PathBuf>) -> Result<Self, AnyError> {
@@ -519,6 +566,7 @@ impl VitestOverrides {
       aliases: Default::default(),
       vite_root: Default::default(),
       types_dir,
+      types_only: false,
       module_directories: Default::default(),
       package_referrers: Default::default(),
     })
@@ -896,10 +944,10 @@ impl SpecifierOverrides for VitestOverrides {
       });
     }
     if let Some(module) = builtin_module(raw_specifier, referrer) {
-      if resolution_kind == NodeResolutionKind::Types {
+      if resolution_kind == NodeResolutionKind::Types || self.types_only {
         // The real package's types when installed (an `npm:` specifier is
         // never installed just for its types), else the fallback ones.
-        let types = self.types_url(module)?;
+        let types = self.types_url(types_module(raw_specifier, module))?;
         return Some(if raw_specifier.starts_with("npm:") {
           SpecifierOverride::Url(types)
         } else {
@@ -925,6 +973,13 @@ impl SpecifierOverrides for VitestOverrides {
     if let Some(module) = self
       .vite_asset_module(aliased.as_deref().unwrap_or(raw_specifier), referrer)
     {
+      // a type check sees what Vite's client types declare for it
+      if resolution_kind == NodeResolutionKind::Types
+        && let Some(types) =
+          asset_types_module(&module).and_then(|m| self.types_url(m))
+      {
+        return Some(SpecifierOverride::Url(types));
+      }
       return Some(SpecifierOverride::Url(module));
     }
     if self.vite_root.read().unwrap().is_some() {
@@ -1133,6 +1188,44 @@ pub struct VitestCompat {
   /// The emitter transform for module mocking, enabled once the run has a
   /// Vitest file.
   transform: Arc<transform::VitestTransform>,
+}
+
+/// Resolves `vitest`, `@jest/globals` & co. to their types for `deno check`,
+/// as `deno test` does when it type-checks a Vitest or Jest file, so both
+/// commands check such a file against the same declarations (an installed
+/// package's own types first). Only the built-in modules' types: the config's
+/// aliases and Vite's resolution stay `deno test`'s.
+pub fn install_type_overrides(
+  resolver: &crate::resolver::CliResolver,
+  types_dir: &Path,
+  initial_cwd: &Path,
+) -> Result<(), AnyError> {
+  let overrides = Arc::new(VitestOverrides::new(
+    initial_cwd,
+    Some(types_dir.join(TYPES_VERSION)),
+  )?);
+  resolver.set_specifier_overrides(overrides);
+  Ok(())
+}
+
+/// The type overrides of [`install_type_overrides`] for the LSP: the built-in
+/// modules resolve to their types for code too, as the editor runs nothing
+/// (unless the workspace sets `test.vitestCompat: false`).
+pub fn lsp_type_overrides(
+  test_config: Option<&deno_config::deno_json::TestConfig>,
+  deno_dir_root: &Path,
+  root: &Path,
+) -> Option<deno_resolver::graph::SpecifierOverridesRc> {
+  if test_config.and_then(|c| c.vitest_compat) == Some(false) {
+    return None;
+  }
+  let mut overrides = VitestOverrides::new(
+    root,
+    Some(deno_dir_root.join("vitest_compat").join(TYPES_VERSION)),
+  )
+  .ok()?;
+  overrides.types_only = true;
+  Some(Arc::new(overrides))
 }
 
 impl VitestCompat {
@@ -1487,6 +1580,22 @@ mod tests {
   }
 
   #[test]
+  fn types_of_builtin_modules() {
+    let r = referrer();
+    let types = |specifier: &str| {
+      types_module(specifier, builtin_module(specifier, &r).unwrap())
+    };
+    assert_eq!(types("vitest"), "vitest.js");
+    assert_eq!(types("vitest/config"), "config.js");
+    assert_eq!(types("@jest/globals"), "jest_globals.js");
+    assert_eq!(types("vitest/globals"), "globals.js");
+    assert_eq!(types("npm:vitest@3/globals"), "globals.js");
+    assert_eq!(types("vite-plus/test/globals"), "globals.js");
+    // no types of its own
+    assert_eq!(types("vitest/jsdom"), "shims/empty.js");
+  }
+
+  #[test]
   fn overrides_from_builtin_modules() {
     let overrides = VitestOverrides {
       root_referrer: RwLock::new(
@@ -1495,6 +1604,7 @@ mod tests {
       aliases: Default::default(),
       vite_root: Default::default(),
       types_dir: None,
+      types_only: false,
       module_directories: Default::default(),
       package_referrers: Default::default(),
     };

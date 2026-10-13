@@ -45,6 +45,20 @@ async fn check_with_factory(
   factory: &CliFactory,
   check_flags: CheckFlags,
 ) -> Result<(), AnyError> {
+  // denext: a Vitest or Jest test file checks against the same types of
+  // `vitest` / `@jest/globals` as under `deno test` (unless the workspace
+  // turns the compatibility layer off with `test.vitestCompat: false`).
+  let cli_options = factory.cli_options()?;
+  if cli_options
+    .resolve_workspace_test_options(&Default::default())
+    .vitest_compat
+  {
+    crate::tools::test::vitest::install_type_overrides(
+      factory.resolver().await?,
+      &factory.deno_dir()?.root.join("vitest_compat"),
+      cli_options.initial_cwd(),
+    )?;
+  }
   let main_graph_container = factory.main_module_graph_container().await?;
 
   let specifiers = main_graph_container.collect_specifiers(

@@ -164,6 +164,11 @@ pub struct PrepareModuleLoadOptions<'a> {
   /// the graph loader. Used to preserve a blob's media type when its content
   /// is supplied out-of-band via `file_content_overrides`.
   pub file_header_overrides: HashMap<ModuleSpecifier, HashMap<String, String>>,
+  /// denext: type-check `roots` even when the graph already has roots (which
+  /// were type-checked when they were added), checking only `roots`. `deno
+  /// test` uses it in a Vitest or Jest config project, whose config was loaded
+  /// (and checked) before the test modules.
+  pub force_type_check: bool,
 }
 
 impl ModuleLoadPreparer {
@@ -205,6 +210,7 @@ impl ModuleLoadPreparer {
       skip_graph_roots_validation,
       file_content_overrides,
       file_header_overrides,
+      force_type_check,
     } = options;
     let _pb_clear_guard = self.progress_bar.deferred_keep_initialize_alive();
 
@@ -263,13 +269,20 @@ impl ModuleLoadPreparer {
     drop(_pb_clear_guard);
 
     // type check if necessary
-    if self.options.type_check_mode().is_true() && !has_type_checked {
+    if self.options.type_check_mode().is_true()
+      && (!has_type_checked || force_type_check)
+    {
+      // todo(perf): since this is only done the first time the graph is
+      // created, we could avoid the clone of the graph here by providing
+      // the actual graph on the first run and then getting the Arc<ModuleGraph>
+      // back from the return value.
+      let mut graph_to_check = graph.clone();
+      if has_type_checked {
+        // only the new roots: the earlier ones were checked already
+        graph_to_check.roots = roots.iter().cloned().collect();
+      }
       self.type_checker.check(
-        // todo(perf): since this is only done the first time the graph is
-        // created, we could avoid the clone of the graph here by providing
-        // the actual graph on the first run and then getting the Arc<ModuleGraph>
-        // back from the return value.
-        graph.clone(),
+        graph_to_check,
         CheckOptions {
           build_fast_check_graph: true,
           lib,
@@ -781,6 +794,7 @@ impl<TGraphContainer: ModuleGraphContainer>
           skip_graph_roots_validation: true,
           file_content_overrides: HashMap::new(),
           file_header_overrides: HashMap::new(),
+          force_type_check: false,
         },
       )
       .await;
@@ -1869,6 +1883,7 @@ impl<TGraphContainer: ModuleGraphContainer> ModuleLoader
               skip_graph_roots_validation: is_dynamic,
               file_content_overrides: file_overrides,
               file_header_overrides: header_overrides,
+              force_type_check: false,
             },
           )
           .await
