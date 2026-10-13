@@ -117,7 +117,7 @@ static SOURCES: &[(&str, &str)] = sources!(
 const RESOLVED_CONFIG_PATH: &str = "resolved_config.json";
 
 /// Bumped when `types/` changes, so stale written copies are not reused.
-const TYPES_VERSION: &str = "v5";
+const TYPES_VERSION: &str = "v6";
 
 /// The resolved config served as `deno-vitest:///resolved_config.json`.
 static RESOLVED_CONFIG: RwLock<Option<Arc<str>>> = RwLock::new(None);
@@ -434,6 +434,9 @@ pub struct VitestOverrides {
   vite_root: RwLock<Option<PathBuf>>,
   /// Where the fallback type declarations are written (see `types/`).
   types_dir: Option<PathBuf>,
+  /// Every resolution of a built-in module goes to its types (the LSP, which
+  /// runs nothing: its code is not loadable outside `deno test`).
+  types_only: bool,
   /// Jest's extra module directories (see [`ModuleDirectory`]).
   module_directories: RwLock<Vec<ModuleDirectory>>,
   /// Packages the built-in modules import that resolve from another
@@ -510,7 +513,18 @@ static TYPES: &[(&str, &str)] = &[
   ("vitest.js", include_str!("types/vitest.d.ts")),
   ("config.js", include_str!("types/config.d.ts")),
   ("jest_globals.js", include_str!("types/jest_globals.d.ts")),
+  ("globals.js", include_str!("types/globals.d.ts")),
 ];
+
+/// The fallback types of the built-in module `module` that `raw_specifier`
+/// resolved to: `vitest/globals` (an empty module at runtime) declares the
+/// globals a `globals: true` config installs.
+fn types_module(raw_specifier: &str, module: &'static str) -> &'static str {
+  match split_package_specifier(raw_specifier) {
+    Some((_, "/globals" | "/test/globals")) => "globals.js",
+    _ => module,
+  }
+}
 
 impl VitestOverrides {
   fn new(root: &Path, types_dir: Option<PathBuf>) -> Result<Self, AnyError> {
@@ -519,6 +533,7 @@ impl VitestOverrides {
       aliases: Default::default(),
       vite_root: Default::default(),
       types_dir,
+      types_only: false,
       module_directories: Default::default(),
       package_referrers: Default::default(),
     })
@@ -896,10 +911,10 @@ impl SpecifierOverrides for VitestOverrides {
       });
     }
     if let Some(module) = builtin_module(raw_specifier, referrer) {
-      if resolution_kind == NodeResolutionKind::Types {
+      if resolution_kind == NodeResolutionKind::Types || self.types_only {
         // The real package's types when installed (an `npm:` specifier is
         // never installed just for its types), else the fallback ones.
-        let types = self.types_url(module)?;
+        let types = self.types_url(types_module(raw_specifier, module))?;
         return Some(if raw_specifier.starts_with("npm:") {
           SpecifierOverride::Url(types)
         } else {
@@ -1151,6 +1166,26 @@ pub fn install_type_overrides(
   )?);
   resolver.set_specifier_overrides(overrides);
   Ok(())
+}
+
+/// The type overrides of [`install_type_overrides`] for the LSP: the built-in
+/// modules resolve to their types for code too, as the editor runs nothing
+/// (unless the workspace sets `test.vitestCompat: false`).
+pub fn lsp_type_overrides(
+  test_config: Option<&deno_config::deno_json::TestConfig>,
+  deno_dir_root: &Path,
+  root: &Path,
+) -> Option<deno_resolver::graph::SpecifierOverridesRc> {
+  if test_config.and_then(|c| c.vitest_compat) == Some(false) {
+    return None;
+  }
+  let mut overrides = VitestOverrides::new(
+    root,
+    Some(deno_dir_root.join("vitest_compat").join(TYPES_VERSION)),
+  )
+  .ok()?;
+  overrides.types_only = true;
+  Some(Arc::new(overrides))
 }
 
 impl VitestCompat {
@@ -1505,6 +1540,22 @@ mod tests {
   }
 
   #[test]
+  fn types_of_builtin_modules() {
+    let r = referrer();
+    let types = |specifier: &str| {
+      types_module(specifier, builtin_module(specifier, &r).unwrap())
+    };
+    assert_eq!(types("vitest"), "vitest.js");
+    assert_eq!(types("vitest/config"), "config.js");
+    assert_eq!(types("@jest/globals"), "jest_globals.js");
+    assert_eq!(types("vitest/globals"), "globals.js");
+    assert_eq!(types("npm:vitest@3/globals"), "globals.js");
+    assert_eq!(types("vite-plus/test/globals"), "globals.js");
+    // no types of its own
+    assert_eq!(types("vitest/jsdom"), "shims/empty.js");
+  }
+
+  #[test]
   fn overrides_from_builtin_modules() {
     let overrides = VitestOverrides {
       root_referrer: RwLock::new(
@@ -1513,6 +1564,7 @@ mod tests {
       aliases: Default::default(),
       vite_root: Default::default(),
       types_dir: None,
+      types_only: false,
       module_directories: Default::default(),
       package_referrers: Default::default(),
     };

@@ -7,7 +7,7 @@
 // type-checks without the package: `vi.mock()` factories, `vi.fn()` mocks,
 // `expect()` matchers, the test API and its modifiers, hooks and fixtures.
 
-// deno-lint-ignore-file no-explicit-any ban-types
+// deno-lint-ignore-file no-explicit-any ban-types no-empty-interface
 
 // --- helpers ----------------------------------------------------------------
 
@@ -621,8 +621,16 @@ export interface ChaiAssertion<T = any> {
   calledAfter(mock: MockInstance<any>): Assertion<T>;
 }
 
+/**
+ * Custom matchers, for a project's `expect.extend()` ones:
+ * `declare module "vitest" { interface Matchers<T = any> { toBeFoo(): void } }`
+ * (or augment `Assertion` / `AsymmetricMatchersContaining` directly).
+ */
+export interface Matchers<T = any> {}
+
 /** What `expect(value)` returns. */
-export interface Assertion<T = any> extends ChaiAssertion<T>, JestAssertion<T> {
+export interface Assertion<T = any>
+  extends ChaiAssertion<T>, JestAssertion<T>, Matchers<T> {
   not: Assertion<T>;
   resolves: Promisify<Assertion<T>>;
   rejects: Promisify<Assertion<T>>;

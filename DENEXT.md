@@ -731,28 +731,37 @@ where the changes are discussed.
 
 29. **`feat(test)`: types for the built-in `vitest` and `@jest/globals`**
     (`feat/toolchain-cache-and-types`, CLI only; `cli/tools/test/vitest/types/`,
-    `cli/tools/check.rs`). The declarations item 23 serves for `vitest` /
-    `vite-plus/test` / `@jest/globals` when the package itself is not installed
-    typed `vi`, `expect` and `jest` as `any`, so `vi.mock()` factory parameters
-    and mocks needed explicit types under a strict check. They now describe the
-    surface the vendored runtime implements: `vi` (`fn`, `spyOn` with its `get`
-    / `set` forms, `mocked`, `mockObject`, `when`, `mock` / `doMock` with a
-    typed `importOriginal`, the `vi.mock(import("./x"), factory)` form typing
-    the factory's result against the module, `hoisted`, `importActual` /
-    `importMock`, `resetModules`, the fake timers, `stubGlobal` / `stubEnv`,
-    `waitFor` / `waitUntil`, `setConfig`), `Mock` / `MockInstance` /
-    `MockContext` / `Mocked*` / `MaybeMocked*`, `expect` (Jest's matchers and
-    Vitest's own, chai's chains and flags, the asymmetric matchers, `resolves` /
-    `rejects`, `soft`, `poll`, `extend`, `assertions`), `describe` / `it` /
-    `test` with `skip`, `only`, `todo`, `concurrent`, `fails`, `shuffle`,
-    `skipIf` / `runIf`, `each` (array rows spread, tuples typed, template
-    tables) and `for`, fixtures (`test.extend` in its object and builder forms,
-    `override`), the hooks and `TestContext`; and for `@jest/globals` Jest's
-    test API (a declared parameter is the `DoneCallback`, `test.failing`, `fit`
-    / `xit` / ...) and the `jest` object, with `jest.Mock` / `jest.Mocked` /
-    `jest.SpiedFunction` & co. as types. Chai's `assert` / `should` and
-    `expectTypeOf` stay `any`. The types are written to
-    `<DENO_DIR>/vitest_compat/v5/` (the version bumped, so older copies are not
+    `cli/tools/check.rs`, `cli/lsp/resolver.rs`). The declarations item 23
+    serves for `vitest` / `vite-plus/test` / `@jest/globals` when the package
+    itself is not installed typed `vi`, `expect` and `jest` as `any`, so
+    `vi.mock()` factory parameters and mocks needed explicit types under a
+    strict check. They now describe the surface the vendored runtime implements:
+    `vi` (`fn`, `spyOn` with its `get` / `set` forms, `mocked`, `mockObject`,
+    `when`, `mock` / `doMock` with a typed `importOriginal`, the
+    `vi.mock(import("./x"), factory)` form typing the factory's result against
+    the module, `hoisted`, `importActual` / `importMock`, `resetModules`, the
+    fake timers, `stubGlobal` / `stubEnv`, `waitFor` / `waitUntil`,
+    `setConfig`), `Mock` / `MockInstance` / `MockContext` / `Mocked*` /
+    `MaybeMocked*`, `expect` (Jest's matchers and Vitest's own, chai's chains
+    and flags, the asymmetric matchers, `resolves` / `rejects`, `soft`, `poll`,
+    `extend`, `assertions`), `describe` / `it` / `test` with `skip`, `only`,
+    `todo`, `concurrent`, `fails`, `shuffle`, `skipIf` / `runIf`, `each` (array
+    rows spread, tuples typed, template tables) and `for`, fixtures
+    (`test.extend` in its object and builder forms, `override`), the hooks and
+    `TestContext`; and for `@jest/globals` Jest's test API (a declared parameter
+    is the `DoneCallback`, `test.failing`, `fit` / `xit` / ...) and the `jest`
+    object, with `jest.Mock` / `jest.Mocked` / `jest.SpiedFunction` & co. as
+    types. Chai's `assert` / `should` and `expectTypeOf` stay `any`. Custom
+    matchers are typed by augmenting the module, as with Vitest:
+    `declare module "vitest" { interface Matchers<T> {
+    toBeFoo(): void } }`
+    (or `interface Assertion<T>`). `vitest/globals` (an empty module at runtime)
+    has its own types: the globals a `globals: true` config installs (Vitest's
+    `globalApis`: `describe`, `it`, `expect`, `vi`, the hooks, ...), for
+    `/// <reference types="vitest/globals" />` or `compilerOptions.types`.
+    `vitest/importMeta` gets none: the runtime does not implement in-source
+    testing (`import.meta.vitest`, `includeSource`). The types are written to
+    `<DENO_DIR>/vitest_compat/v6/` (the version bumped, so older copies are not
     reused). An installed package's own types still take precedence (the
     override is a fallback for a bare specifier; an `npm:` specifier is never
     installed just for its types). `deno check` now installs the same type
@@ -761,11 +770,18 @@ where the changes are discussed.
     same declarations under `deno check` as under `deno test` (before,
     `deno check` reported `Import "vitest" not a dependency`); only the built-in
     modules' types, as the config's aliases and Vite's resolution are
-    `deno test`'s. The LSP does not install them. Tests:
-    `tests/specs/test/vitest` `types_*` (a fully typed suite, with no annotation
-    on any factory, mock or fixture, passing under `deno test` and `deno check`;
-    a Jest one; wrong uses reported as type errors by both; an installed
-    `vitest`'s own types winning).
+    `deno test`'s. The LSP installs them too (`vitest::lsp_type_overrides`, per
+    scope, with the same `test.vitestCompat: false` opt-out), so an editor
+    resolves `vitest` without the package; as it runs nothing, there a built-in
+    module resolves to its types for code as well
+    (`VitestOverrides::types_only`). Tests: `tests/specs/test/vitest` `types_*`
+    (a fully typed suite, with no annotation on any factory, mock or fixture,
+    passing under `deno test` and `deno check`; a Jest one; wrong uses reported
+    as type errors by both; an installed `vitest`'s own types winning; a
+    `globals: true` project typed by `vitest/globals`; custom matchers through
+    module augmentation), `types_of_builtin_modules` in
+    `cli/tools/test/vitest/mod.rs`, and `lsp_vitest_builtin_types` /
+    `lsp_vitest_builtin_types_disabled` in `tests/integration/lsp_tests.rs`.
 
 The runtime-side parts (1-3, 5-22, 24, 25, 27) are what the prebuilt `libdenort`
 carries. The CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` /

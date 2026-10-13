@@ -191,6 +191,30 @@
       "output": "types/type_error_check.out",
       "exitCode": 1
     },
+    "types_globals": {
+      // `globals: true` with `vitest/globals` referenced: the globals are typed
+      "cwd": "types/globals_project",
+      "args": "test -A",
+      "output": "types/globals.out",
+      "exitCode": 0
+    },
+    "types_check_globals_error": {
+      "cwd": "types/globals_project",
+      "args": "check globals_error.ts",
+      "output": "types/globals_error.out",
+      "exitCode": 1
+    },
+    "types_module_augmentation": {
+      // custom matchers declared with `declare module "vitest"`
+      "args": "test -A types/augment_test.ts",
+      "output": "types/augment.out",
+      "exitCode": 0
+    },
+    "types_check_module_augmentation_error": {
+      "args": "check types/augment_error_test.ts",
+      "output": "types/augment_error.out",
+      "exitCode": 1
+    },
     "types_check_installed_package_wins": {
       "tempDir": true,
       "cwd": "types/installed",
