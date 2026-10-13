@@ -165,9 +165,10 @@ pub struct PrepareModuleLoadOptions<'a> {
   /// is supplied out-of-band via `file_content_overrides`.
   pub file_header_overrides: HashMap<ModuleSpecifier, HashMap<String, String>>,
   /// denext: type-check `roots` even when the graph already has roots (which
-  /// were type-checked when they were added), checking only `roots`. `deno
-  /// test` uses it in a Vitest or Jest config project, whose config was loaded
-  /// (and checked) before the test modules.
+  /// were type-checked when they were added), checking only `roots`, in a
+  /// graph of their own (the shared one is code only once a module ran).
+  /// `deno test` uses it in a Vitest or Jest config project, whose config was
+  /// loaded (checked, then run) before the test modules.
   pub force_type_check: bool,
 }
 
@@ -272,15 +273,33 @@ impl ModuleLoadPreparer {
     if self.options.type_check_mode().is_true()
       && (!has_type_checked || force_type_check)
     {
-      // todo(perf): since this is only done the first time the graph is
-      // created, we could avoid the clone of the graph here by providing
-      // the actual graph on the first run and then getting the Arc<ModuleGraph>
-      // back from the return value.
-      let mut graph_to_check = graph.clone();
-      if has_type_checked {
-        // only the new roots: the earlier ones were checked already
-        graph_to_check.roots = roots.iter().cloned().collect();
-      }
+      let graph_to_check = if has_type_checked {
+        // Only the new roots (the earlier ones were checked when they were
+        // added), in a graph of their own: running a module prunes the types
+        // from the shared graph (`ModuleGraph::prune_types`), which leaves it
+        // code only, so a module added to it afterwards keeps none of its
+        // type dependencies (`/// <reference types>`, `@ts-types`, ...).
+        let mut graph_to_check = ModuleGraph::new(self.options.graph_kind());
+        self
+          .module_graph_builder
+          .build_graph_roots_with_npm_resolution(
+            &mut graph_to_check,
+            roots.to_vec(),
+            BuildGraphWithNpmOptions {
+              is_dynamic,
+              loader: Some(&loader),
+              npm_caching: self.options.default_npm_caching_strategy(),
+            },
+          )
+          .await?;
+        graph_to_check
+      } else {
+        // todo(perf): since this is only done the first time the graph is
+        // created, we could avoid the clone of the graph here by providing
+        // the actual graph on the first run and then getting the
+        // Arc<ModuleGraph> back from the return value.
+        graph.clone()
+      };
       self.type_checker.check(
         graph_to_check,
         CheckOptions {

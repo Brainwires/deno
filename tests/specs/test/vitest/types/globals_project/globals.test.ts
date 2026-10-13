@@ -1,8 +1,9 @@
 // `globals: true`: the test API is global, typed by `vitest/globals`.
 /// <reference types="vitest/globals" />
+import type { Calls } from "./calls.ts";
 
 describe("globals", () => {
-  let calls = 0;
+  let calls: Calls = 0;
   beforeEach(() => {
     calls++;
   });
