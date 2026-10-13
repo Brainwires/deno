@@ -702,9 +702,10 @@ where the changes are discussed.
     - `fix`: rand 0.9.3 (GHSA-cq8v-f236-94qc), for ext/sql's Postgres client
       (`postgres-protocol`, `tokio-postgres`) too.
 
-28. **`fix(cache)`: caches of their own** (`feat/toolchain-cache-and-types`, CLI
-    only; `libs/resolver/cache/deno_dir.rs`, `cli/node_compat_shim.rs`). denext
-    runs this CLI as its managed toolchain next to a stock `deno`, both on one
+28. **`fix(cache)`: caches of their own** (from `denext.17`;
+    `feat/toolchain-cache-and-types`, CLI only;
+    `libs/resolver/cache/deno_dir.rs`, `cli/node_compat_shim.rs`). denext runs
+    this CLI as its managed toolchain next to a stock `deno`, both on one
     DENO_DIR, so the downloads are shared. But every SQLite cache in it is wiped
     whenever a CLI of another version opens it
     (`CacheDBConfiguration::on_version_change`, the version being
@@ -730,46 +731,47 @@ where the changes are discussed.
     type-check and code caches (`tests/integration/jsr_tests.rs`,
     `run_tests.rs`) open the new files.
 
-29. **`feat(test)`: types for the built-in `vitest` and `@jest/globals`**
-    (`feat/toolchain-cache-and-types`, CLI only; `cli/tools/test/vitest/types/`,
-    `cli/tools/check.rs`, `cli/lsp/resolver.rs`, `cli/module_loader.rs`,
-    `cli/graph_container.rs`). The declarations item 23 serves for `vitest` /
-    `vite-plus/test` / `@jest/globals` when the package itself is not installed
-    typed `vi`, `expect` and `jest` as `any`, so `vi.mock()` factory parameters
-    and mocks needed explicit types under a strict check. They now describe the
-    surface the vendored runtime implements: `vi` (`fn`, `spyOn` with its `get`
-    / `set` forms, `mocked`, `mockObject`, `when`, `mock` / `doMock` with a
-    typed `importOriginal`, the `vi.mock(import("./x"), factory)` form typing
-    the factory's result against the module, `hoisted`, `importActual` /
-    `importMock`, `resetModules`, the fake timers, `stubGlobal` / `stubEnv`,
-    `waitFor` / `waitUntil`, `setConfig`), `Mock` / `MockInstance` /
-    `MockContext` / `Mocked*` / `MaybeMocked*`, `expect` (Jest's matchers and
-    Vitest's own, chai's chains and flags, the asymmetric matchers, `resolves` /
-    `rejects`, `soft`, `poll`, `extend`, `assertions`), `describe` / `it` /
-    `test` with `skip`, `only`, `todo`, `concurrent`, `fails`, `shuffle`,
-    `skipIf` / `runIf`, `each` (array rows spread, tuples typed, template
-    tables) and `for`, fixtures (`test.extend` in its object and builder forms,
-    `override`), the hooks and `TestContext`; and for `@jest/globals` Jest's
-    test API (a declared parameter is the `DoneCallback`, `test.failing`, `fit`
-    / `xit` / ...) and the `jest` object, with `jest.Mock` / `jest.Mocked` /
-    `jest.SpiedFunction` & co. as types. Chai's `assert` / `should` and
-    `expectTypeOf` stay `any`. Custom matchers are typed by augmenting the
-    module, as with Vitest: a `declare module "vitest"` block adding to
-    `interface Matchers<T>` (or `interface Assertion<T>`). `vitest/globals` (an
-    empty module at runtime) has its own types: the globals a `globals: true`
-    config installs (Vitest's `globalApis`: `describe`, `it`, `expect`, `vi`,
-    the hooks, ...), for `/// <reference types="vitest/globals" />` or
-    `compilerOptions.types`. `vitest/importMeta` gets none: the runtime does not
-    implement in-source testing (`import.meta.vitest`, `includeSource`). The
-    types are written to `<DENO_DIR>/vitest_compat/v7/` (the version bumped, so
-    older copies are not reused). An installed package's own types still take
-    precedence (the override is a fallback for a bare specifier; an `npm:`
-    specifier is never installed just for its types). `deno check` now installs
-    the same type overrides (`vitest::install_type_overrides`, unless the
-    workspace sets `test.vitestCompat: false`), so a Vitest or Jest file checks
-    against the same declarations under `deno check` as under `deno test`
-    (before, `deno check` reported `Import "vitest" not a dependency`); only the
-    built-in modules' types, as the config's aliases and Vite's resolution are
+29. **`feat(test)`: types for the built-in `vitest` and `@jest/globals`** (from
+    `denext.17`; `feat/toolchain-cache-and-types`, CLI only;
+    `cli/tools/test/vitest/types/`, `cli/tools/check.rs`, `cli/lsp/resolver.rs`,
+    `cli/module_loader.rs`, `cli/graph_container.rs`). The declarations item 23
+    serves for `vitest` / `vite-plus/test` / `@jest/globals` when the package
+    itself is not installed typed `vi`, `expect` and `jest` as `any`, so
+    `vi.mock()` factory parameters and mocks needed explicit types under a
+    strict check. They now describe the surface the vendored runtime implements:
+    `vi` (`fn`, `spyOn` with its `get` / `set` forms, `mocked`, `mockObject`,
+    `when`, `mock` / `doMock` with a typed `importOriginal`, the
+    `vi.mock(import("./x"), factory)` form typing the factory's result against
+    the module, `hoisted`, `importActual` / `importMock`, `resetModules`, the
+    fake timers, `stubGlobal` / `stubEnv`, `waitFor` / `waitUntil`,
+    `setConfig`), `Mock` / `MockInstance` / `MockContext` / `Mocked*` /
+    `MaybeMocked*`, `expect` (Jest's matchers and Vitest's own, chai's chains
+    and flags, the asymmetric matchers, `resolves` / `rejects`, `soft`, `poll`,
+    `extend`, `assertions`), `describe` / `it` / `test` with `skip`, `only`,
+    `todo`, `concurrent`, `fails`, `shuffle`, `skipIf` / `runIf`, `each` (array
+    rows spread, tuples typed, template tables) and `for`, fixtures
+    (`test.extend` in its object and builder forms, `override`), the hooks and
+    `TestContext`; and for `@jest/globals` Jest's test API (a declared parameter
+    is the `DoneCallback`, `test.failing`, `fit` / `xit` / ...) and the `jest`
+    object, with `jest.Mock` / `jest.Mocked` / `jest.SpiedFunction` & co. as
+    types. Chai's `assert` / `should` and `expectTypeOf` stay `any`. Custom
+    matchers are typed by augmenting the module, as with Vitest: a
+    `declare module "vitest"` block adding to `interface Matchers<T>` (or
+    `interface Assertion<T>`). `vitest/globals` (an empty module at runtime) has
+    its own types: the globals a `globals: true` config installs (Vitest's
+    `globalApis`: `describe`, `it`, `expect`, `vi`, the hooks, ...), for
+    `/// <reference types="vitest/globals" />` or `compilerOptions.types`.
+    `vitest/importMeta` gets none: the runtime does not implement in-source
+    testing (`import.meta.vitest`, `includeSource`). The types are written to
+    `<DENO_DIR>/vitest_compat/v7/` (the version bumped, so older copies are not
+    reused). An installed package's own types still take precedence (the
+    override is a fallback for a bare specifier; an `npm:` specifier is never
+    installed just for its types). `deno check` now installs the same type
+    overrides (`vitest::install_type_overrides`, unless the workspace sets
+    `test.vitestCompat: false`), so a Vitest or Jest file checks against the
+    same declarations under `deno check` as under `deno test` (before,
+    `deno check` reported `Import "vitest" not a dependency`); only the built-in
+    modules' types, as the config's aliases and Vite's resolution are
     `deno test`'s. The LSP installs them too (`vitest::lsp_type_overrides`, per
     scope, with the same `test.vitestCompat: false` opt-out), so an editor
     resolves `vitest` without the package; as it runs nothing, there a built-in
@@ -797,43 +799,45 @@ where the changes are discussed.
     `tests/integration/lsp_tests.rs`.
 
 30. **`feat(bundle)`: the CLI archive ships esbuild, and `deno bundle` uses it**
-    (`cli/tools/bundle/esbuild.rs`, `.github/denext-runtime/fetch_esbuild.py`,
-    `assemble_cli.sh`, `cli_smoke.sh`, `manifest.py`). Each
-    `deno-cli-*` zip (item 26) carries, beside `deno`, the official esbuild
-    `ESBUILD_VERSION` (0.25.5) binary for its target (`esbuild`, `esbuild.exe`
-    on Windows) and esbuild's MIT license (`esbuild.LICENSE`). The release
-    workflow takes it from the `@esbuild/<platform>` npm tarball (the license
-    from the `esbuild` package of the same version), each pinned in
-    `fetch_esbuild.py` by URL and npm `dist.integrity`: the registry's current
-    packument must still say the same, and the downloaded bytes must hash to it.
-    `BUILD_INFO.json` records the source tarball, integrity and binary SHA-256,
-    and `manifest.json` lists `esbuild: { version, sha256 }` under each CLI
-    target. `deno bundle` then looks for an esbuild before downloading one into
-    `DENO_DIR`: first `DENO_ESBUILD_BINARY` (an explicit path; used even at
-    another version, with a warning; an error if it is not a file), then an
-    `esbuild[.exe]` next to the running `deno` executable, used only when its
-    `--version` is exactly `ESBUILD_VERSION`. A sibling of another version, or
-    none, leaves upstream's download path as it was. So neither `deno bundle`
-    nor denext's build (which uses the same CLI) fetches esbuild from npm.
-    Upstream has no such override. Tests: the `local_esbuild` unit tests in
-    `cli/tools/bundle/esbuild.rs`; `tests/integration/bundle_tests.rs` (a copy
-    of `deno` with the pinned esbuild beside it bundles with an empty `DENO_DIR`
-    and an unreachable npm registry and downloads nothing; a wrong-version
-    sibling is ignored; `DENO_ESBUILD_BINARY` works offline); `cli_smoke.sh`
-    checks `esbuild --version` and an offline `deno bundle` from every unpacked
-    release zip.
+    (from `denext.17`; `feat/bundled-esbuild`; `cli/tools/bundle/esbuild.rs`,
+    `.github/denext-runtime/fetch_esbuild.py`, `assemble_cli.sh`,
+    `cli_smoke.sh`, `manifest.py`). Each `deno-cli-*` zip (item 26) carries,
+    beside `deno`, the official esbuild `ESBUILD_VERSION` (0.25.5) binary for
+    its target (`esbuild`, `esbuild.exe` on Windows) and esbuild's MIT license
+    (`esbuild.LICENSE`). The release workflow takes it from the
+    `@esbuild/<platform>` npm tarball (the license from the `esbuild` package of
+    the same version), each pinned in `fetch_esbuild.py` by URL and npm
+    `dist.integrity`: the registry's current packument must still say the same,
+    and the downloaded bytes must hash to it. `BUILD_INFO.json` records the
+    source tarball, integrity and binary SHA-256, and `manifest.json` lists
+    `esbuild: { version, sha256 }` under each CLI target. `deno bundle` then
+    looks for an esbuild before downloading one into `DENO_DIR`: first
+    `DENO_ESBUILD_BINARY` (an explicit path; used even at another version, with
+    a warning; an error if it is not a file), then an `esbuild[.exe]` next to
+    the running `deno` executable, used only when its `--version` is exactly
+    `ESBUILD_VERSION`. A sibling of another version, or none, leaves upstream's
+    download path as it was. So neither `deno bundle` nor denext's build (which
+    uses the same CLI) fetches esbuild from npm. Upstream has no such override.
+    Tests: the `local_esbuild` unit tests in `cli/tools/bundle/esbuild.rs`;
+    `tests/integration/bundle_tests.rs` (a copy of `deno` with the pinned
+    esbuild beside it bundles with an empty `DENO_DIR` and an unreachable npm
+    registry and downloads nothing; a wrong-version sibling is ignored;
+    `DENO_ESBUILD_BINARY` works offline); `cli_smoke.sh` checks
+    `esbuild --version` and an offline `deno bundle` from every unpacked release
+    zip.
 
 31. **`fix(test)`: coverage of a module run both with and without the Vitest
-    transform** (`fix/vitest-coverage-merge`, CLI only). A module run by a plain `deno test` and by a Vitest one
-    (item 23) runs as two different emits: the transform makes every user
-    module's exports mutable (export setters appended, `const` exports made
-    `let`), stubs type-only exports, hoists `vi.mock()`, and hides `Deno` in a
-    Vitest or Jest project. Their profiles did not merge: the emit cache held
-    one emit per module, so the later run's emit replaced the other's and
-    `deno coverage` reported "Missing transpiled source" for, or misread, the
-    other run's profiles; and `deno coverage` merged the profiles of one URL
-    range by range, offsets into two different scripts, so a module covered
-    91.9% by plain tests and 30.8% by Vitest ones read 38.9%.
+    transform** (from `denext.17`; `fix/vitest-coverage-merge`, CLI only). A
+    module run by a plain `deno test` and by a Vitest one (item 23) runs as two
+    different emits: the transform makes every user module's exports mutable
+    (export setters appended, `const` exports made `let`), stubs type-only
+    exports, hoists `vi.mock()`, and hides `Deno` in a Vitest or Jest project.
+    Their profiles did not merge: the emit cache held one emit per module, so
+    the later run's emit replaced the other's and `deno coverage` reported
+    "Missing transpiled source" for, or misread, the other run's profiles; and
+    `deno coverage` merged the profiles of one URL range by range, offsets into
+    two different scripts, so a module covered 91.9% by plain tests and 30.8% by
+    Vitest ones read 38.9%.
 
     Emitting only the modules that need setters untransformed is not possible:
     `vi.spyOn(namespace, "export")` reaches any module whose namespace a test
