@@ -101,6 +101,15 @@
         }
       ]
     },
+    "path_chars": {
+      // mocks under a path Node's pathToFileURL spells otherwise than the
+      // module loader (`~`, as in a Windows 8.3 short path), and under one a
+      // stack trace spells otherwise than the module's URL (a space)
+      "cwd": "path_chars",
+      "args": "test -A --no-check",
+      "output": "[WILDCARD]ok | 2 passed | 0 failed[WILDCARD]",
+      "exitCode": 0
+    },
     "no_permissions": {
       // Vitest's own runtime needs no permission (its environment reads
       // included); the test's own reads stay checked

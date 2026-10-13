@@ -34,19 +34,55 @@ const liveGetters = new WeakSet();
 const FACTORY_ERROR =
   '[vitest] There was an error when mocking a module. If you are using "vi.mock" factory, make sure there are no top level variables inside, since this call is hoisted to top of the file. Read more: https://vitest.dev/api/vi.html#vi-mock';
 
+/**
+ * The file URL of `path` as Deno's module loader spells it. Node's
+ * `pathToFileURL` also encodes `~`, `^`, `[`, `]` and `|`, which the loader
+ * keeps as they are: a module imported by that URL would be another module
+ * (and another key for a mock) than the one the loader resolves an import to,
+ * e.g. under a Windows 8.3 short path (`C:\Users\RUNNER~1\...`).
+ */
+export function fileUrl(path) {
+  return pathToFileURL(path).href.replace(
+    /%(7E|5E|5B|5D|7C)/gi,
+    (_, hex) => String.fromCharCode(parseInt(hex, 16)),
+  );
+}
+
+const SCHEME_URL = /^(?:file|https?|npm|jsr):/;
+
 /** The file (URL) of the first caller outside the built-in modules. */
 export function callerUrl(fn) {
   const holder = {};
   const limit = Error.stackTraceLimit;
+  const prepare = Error.prepareStackTrace;
+  let callsites;
   Error.stackTraceLimit = 30;
-  Error.captureStackTrace(holder, fn);
-  Error.stackTraceLimit = limit;
-  for (const line of String(holder.stack).split("\n").slice(1)) {
-    const match = /\(?((?:file|https?|npm|jsr):[^\s()]+):\d+:\d+\)?\s*$/
-      .exec(line);
-    if (match) return match[1];
+  // The call sites, not the formatted stack: that one spells a file URL
+  // percent-decoded (`a b`, not `a%20b`), which is not the module's URL.
+  Error.prepareStackTrace = (_, sites) => sites;
+  try {
+    Error.captureStackTrace(holder, fn);
+    callsites = holder.stack;
+  } finally {
+    Error.prepareStackTrace = prepare;
+    Error.stackTraceLimit = limit;
   }
-  return pathToFileURL(Deno.cwd() + "/__deno_vitest_root__.js").href;
+  if (Array.isArray(callsites)) {
+    for (const site of callsites) {
+      // a file URL's call site names its path (deno_core patches it so)
+      const name = site?.getFileName?.();
+      if (typeof name !== "string" || name === "") continue;
+      if (SCHEME_URL.test(name) && !/^[a-z]:[\\/]/i.test(name)) return name;
+      if (nodePath.isAbsolute(name)) return fileUrl(name);
+    }
+  } else {
+    for (const line of String(callsites).split("\n").slice(1)) {
+      const match = /\(?((?:file|https?|npm|jsr):[^\s()]+):\d+:\d+\)?\s*$/
+        .exec(line);
+      if (match) return match[1];
+    }
+  }
+  return fileUrl(Deno.cwd() + "/__deno_vitest_root__.js");
 }
 
 function toFileUrl(importer) {
@@ -55,7 +91,7 @@ function toFileUrl(importer) {
   ) {
     return importer;
   }
-  return pathToFileURL(importer).href;
+  return fileUrl(importer);
 }
 
 /**
@@ -408,13 +444,13 @@ class ModuleMocker {
 
   /** Requires a `__mocks__` file (the runner's own import). */
   #requireRedirect(importer, path) {
-    this.#fs.allowImport?.(pathToFileURL(path).href);
+    this.#fs.allowImport?.(fileUrl(path));
     return requireFile(importer, path);
   }
 
   /** Imports a `__mocks__` file (the runner's own import). */
   #importRedirect(path) {
-    const url = pathToFileURL(path).href;
+    const url = fileUrl(path);
     this.#fs.allowImport?.(url);
     return import(url);
   }

@@ -10,7 +10,7 @@
 
 import { i as index } from "./vendor/vitest_core.js";
 import { f as prettyFormat } from "./vendor/pretty_format.js";
-import { callerUrl } from "./mocker.js";
+import { callerUrl, fileUrl } from "./mocker.js";
 
 const { vi } = index;
 
@@ -19,7 +19,7 @@ const FORMAT_TITLE = Symbol.for("deno.vitest.formatTitle");
 const SNAPSHOT_HEADER = Symbol.for("deno.vitest.snapshotHeader");
 
 const { createRequire } = await import("node:module");
-const { fileURLToPath, pathToFileURL } = await import("node:url");
+const { fileURLToPath } = await import("node:url");
 const { isAbsolute } = await import("node:path");
 const { format: utilFormat } = await import("node:util");
 
@@ -686,7 +686,7 @@ export async function setupJestEnvironment(
     globalThis.self = window;
   }
   for (const path of config.snapshotSerializers ?? []) {
-    const mod = await import(pathToFileURL(path).href);
+    const mod = await import(fileUrl(path));
     expect.addSnapshotSerializer(mod.default ?? mod);
   }
   // a fixed path the config maps a module to is the runner's own import
@@ -695,7 +695,7 @@ export async function setupJestEnvironment(
       typeof replacement === "string" && !replacement.includes("$") &&
       isAbsolute(replacement)
     ) {
-      runnerFs?.allowImport(pathToFileURL(replacement).href);
+      runnerFs?.allowImport(fileUrl(replacement));
     }
   }
   await mapDependencyRequires(config.moduleNameMapper);
@@ -722,8 +722,7 @@ export async function registerRootMocks(roots, runnerFs) {
     } catch {
       continue;
     }
-    const importer = pathToFileURL(path.join(root, "__deno_jest_root__.js"))
-      .href;
+    const importer = fileUrl(path.join(root, "__deno_jest_root__.js"));
     for (const entry of entries) {
       const file = path.join(dir, String(entry));
       if (!fs.statSync(file).isFile()) continue;

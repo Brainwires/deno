@@ -26,7 +26,7 @@ import { s as setSafeTimers } from "./vendor/source_map.js";
 import { g as globalApis } from "./vendor/constants.js";
 import { environments } from "./vendor/environments.js";
 import { DenoSnapshotEnvironment } from "./snapshot_environment.js";
-import { installModuleMocker } from "./mocker.js";
+import { fileUrl, installModuleMocker } from "./mocker.js";
 
 const ORIGINAL_ERROR = Symbol.for("deno.vitest.originalError");
 const TEST_SKIP = Symbol.for("Deno.test.skip");
@@ -34,7 +34,7 @@ const TEST_LOCATION = Symbol.for("Deno.test.location");
 const MODULE_IMPORTED = Symbol.for("deno.vitest.moduleImported");
 const MOCKER = Symbol.for("deno.vitest.mocker");
 
-const { fileURLToPath, pathToFileURL } = await import("node:url");
+const { fileURLToPath } = await import("node:url");
 
 function createDeferred() {
   let resolve;
@@ -242,7 +242,8 @@ function toImportSpecifier(path) {
   if (/^[a-z][a-z0-9+.-]*:/i.test(path) && !/^[a-z]:[\\/]/i.test(path)) {
     return path;
   }
-  return pathToFileURL(path).href;
+  // the URL `deno test` loaded the module by, not another one
+  return fileUrl(path);
 }
 
 /**
@@ -445,7 +446,7 @@ function registerTest(test, bridge, prefix) {
   };
   if (test.location) {
     fn[TEST_LOCATION] = `${
-      pathToFileURL(test.file.filepath).href
+      fileUrl(test.file.filepath)
     }:${test.location.line}:${test.location.column}`;
   }
   Deno.test({
