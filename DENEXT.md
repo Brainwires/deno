@@ -701,6 +701,72 @@ where the changes are discussed.
     - `fix`: rand 0.9.3 (GHSA-cq8v-f236-94qc), for ext/sql's Postgres client
       (`postgres-protocol`, `tokio-postgres`) too.
 
+28. **`fix(cache)`: caches of their own** (`feat/toolchain-cache-and-types`, CLI
+    only; `libs/resolver/cache/deno_dir.rs`, `cli/node_compat_shim.rs`). denext
+    runs this CLI as its managed toolchain next to a stock `deno`, both on one
+    DENO_DIR, so the downloads are shared. But every SQLite cache in it is wiped
+    whenever a CLI of another version opens it
+    (`CacheDBConfiguration::on_version_change`, the version being
+    `2.9.7-denext.N` here and `2.9.7` there), so alternating the two binaries
+    threw both one's type-check results and the rest away on every switch: on
+    denext's own `deno check mod.ts cli.ts src/server/mod.ts` a check warm at
+    4.6 s took 52 s again after each switch. The fork now keeps its own copy of
+    each version-keyed cache, named with a `_denext` suffix
+    (`DENEXT_CACHE_SUFFIX`): `check_cache_v2_denext`, `v8_code_cache_v2_denext`,
+    `fast_check_cache_v2_denext`, `dep_analysis_cache_v2_denext`,
+    `node_analysis_cache_v2_denext`, `fmt_incremental_cache_v2_denext` and
+    `lint_incremental_cache_v2_denext` (plus their `-wal` / `-shm` files). Its
+    `node` shim directory is `node_compat_bin_denext`: each binary points the
+    shim at itself, so a shared one was re-pointed on every switch and a `node`
+    spawned by one could run the other. What stays shared is keyed by content:
+    `remote/`, `npm/`, `registries/`, `dl/`, `location_data/` and the emits in
+    `gen/` (keyed by the source, the transpile options and the `deno_ast`
+    version, which both builds share; a module the Vitest transform changes is
+    emitted under another key, so its emit is the one exception the two builds
+    overwrite). `deno clean` removes both copies. Tests:
+    `version_keyed_caches_are_the_forks_own` in
+    `libs/resolver/cache/deno_dir.rs`; the integration tests that inspect the
+    type-check and code caches (`tests/integration/jsr_tests.rs`,
+    `run_tests.rs`) open the new files.
+
+29. **`feat(test)`: types for the built-in `vitest` and `@jest/globals`**
+    (`feat/toolchain-cache-and-types`, CLI only; `cli/tools/test/vitest/types/`,
+    `cli/tools/check.rs`). The declarations item 23 serves for `vitest` /
+    `vite-plus/test` / `@jest/globals` when the package itself is not installed
+    typed `vi`, `expect` and `jest` as `any`, so `vi.mock()` factory parameters
+    and mocks needed explicit types under a strict check. They now describe the
+    surface the vendored runtime implements: `vi` (`fn`, `spyOn` with its `get`
+    / `set` forms, `mocked`, `mockObject`, `when`, `mock` / `doMock` with a
+    typed `importOriginal`, the `vi.mock(import("./x"), factory)` form typing
+    the factory's result against the module, `hoisted`, `importActual` /
+    `importMock`, `resetModules`, the fake timers, `stubGlobal` / `stubEnv`,
+    `waitFor` / `waitUntil`, `setConfig`), `Mock` / `MockInstance` /
+    `MockContext` / `Mocked*` / `MaybeMocked*`, `expect` (Jest's matchers and
+    Vitest's own, chai's chains and flags, the asymmetric matchers, `resolves` /
+    `rejects`, `soft`, `poll`, `extend`, `assertions`), `describe` / `it` /
+    `test` with `skip`, `only`, `todo`, `concurrent`, `fails`, `shuffle`,
+    `skipIf` / `runIf`, `each` (array rows spread, tuples typed, template
+    tables) and `for`, fixtures (`test.extend` in its object and builder forms,
+    `override`), the hooks and `TestContext`; and for `@jest/globals` Jest's
+    test API (a declared parameter is the `DoneCallback`, `test.failing`, `fit`
+    / `xit` / ...) and the `jest` object, with `jest.Mock` / `jest.Mocked` /
+    `jest.SpiedFunction` & co. as types. Chai's `assert` / `should` and
+    `expectTypeOf` stay `any`. The types are written to
+    `<DENO_DIR>/vitest_compat/v5/` (the version bumped, so older copies are not
+    reused). An installed package's own types still take precedence (the
+    override is a fallback for a bare specifier; an `npm:` specifier is never
+    installed just for its types). `deno check` now installs the same type
+    overrides (`vitest::install_type_overrides`, unless the workspace sets
+    `test.vitestCompat: false`), so a Vitest or Jest file checks against the
+    same declarations under `deno check` as under `deno test` (before,
+    `deno check` reported `Import "vitest" not a dependency`); only the built-in
+    modules' types, as the config's aliases and Vite's resolution are
+    `deno test`'s. The LSP does not install them. Tests:
+    `tests/specs/test/vitest` `types_*` (a fully typed suite, with no annotation
+    on any factory, mock or fixture, passing under `deno test` and `deno check`;
+    a Jest one; wrong uses reported as type errors by both; an installed
+    `vitest`'s own types winning).
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27) are what the prebuilt `libdenort`
 carries. The CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` /
 `LAUFEY_APP_ID` into a packaged app's launchers) are in the branch too, but a
