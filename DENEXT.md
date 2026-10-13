@@ -784,18 +784,22 @@ where the changes are discussed.
     config, once: the check of the test modules is forced
     (`CheckSpecifiersOptions::force_type_check` /
     `PrepareModuleLoadOptions::force_type_check`) and covers only the new roots,
-    as the config was checked when it loaded; `--no-check` and the check
-    settings apply as usual. For that check, Vite's CSS, asset, `?raw`, `?url`,
-    `?inline` and `?worker` imports resolve to types as Vite's client types
-    declare them (a `string`, a CSS module's class map, a worker constructor).
-    Tests: `tests/specs/test/vitest` `types_*` (a fully typed suite, with no
-    annotation on any factory, mock or fixture, passing under `deno test` and
-    `deno check`; a Jest one; wrong uses reported as type errors by both; an
-    installed `vitest`'s own types winning; a `globals: true` project typed by
-    `vitest/globals`; custom matchers through module augmentation; a config
-    project whose test module has a type error failing, and running with
-    `--no-check`), `types_of_builtin_modules` in `cli/tools/test/vitest/mod.rs`,
-    and `lsp_vitest_builtin_types` / `lsp_vitest_builtin_types_disabled` in
+    as the config was checked when it loaded, in a graph of their own: running
+    the config pruned the types from the shared graph, which left it code only,
+    so test modules added to it kept no type dependencies (a `vitest/globals`
+    type reference or an `import type` went unresolved). `--no-check` and the
+    check settings apply as usual. For that check, Vite's CSS, asset, `?raw`,
+    `?url`, `?inline` and `?worker` imports resolve to types as Vite's client
+    types declare them (a `string`, a CSS module's class map, a worker
+    constructor). Tests: `tests/specs/test/vitest` `types_*` (a fully typed
+    suite, with no annotation on any factory, mock or fixture, passing under
+    `deno test` and `deno check`; a Jest one; wrong uses reported as type errors
+    by both; an installed `vitest`'s own types winning; a `globals: true`
+    project typed by `vitest/globals` under `deno test` and `deno check`; custom
+    matchers through module augmentation; a config project whose test module has
+    a type error failing, and running with `--no-check`),
+    `types_of_builtin_modules` in `cli/tools/test/vitest/mod.rs`, and
+    `lsp_vitest_builtin_types` / `lsp_vitest_builtin_types_disabled` in
     `tests/integration/lsp_tests.rs`.
 
 30. **`feat(bundle)`: the CLI archive ships esbuild, and `deno bundle` uses it**
