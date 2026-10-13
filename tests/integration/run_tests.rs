@@ -26,7 +26,7 @@ use util::TestContextBuilder;
 use util::assert_contains;
 use util::assert_not_contains;
 
-const CODE_CACHE_DB_FILE_NAME: &str = "v8_code_cache_v2";
+const CODE_CACHE_DB_FILE_NAME: &str = "v8_code_cache_v2_denext";
 
 // tests to ensure that when `--location` is set, all code shares the same
 // localStorage cache based on the origin of the location URL.
