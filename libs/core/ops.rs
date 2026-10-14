@@ -267,13 +267,29 @@ impl OpCtx {
 /// (static memory or a heap buffer), so moving this struct into the
 /// `ContextState` does not invalidate the pointers.
 pub struct OpCtxs {
+  storage: Rc<OpCtxStorage>,
+  common: Box<OpCommonCtx>,
+}
+
+/// The op contexts and the declarations they point into: what V8 reads
+/// through a fast-call template after the realm is gone.
+///
+/// V8 keeps the raw `CFunction` pointers of every fast-call template (each
+/// `OpCtx::fast_fn_overloads`, and the `CFunctionInfo` its declaration owns)
+/// in `FunctionTemplateInfo`, and a concurrent TurboFan job inlining a
+/// fast-API call (`JSCallReducer::ReduceCallApiFunction`) reads them until
+/// the isolate is disposed, which cancels and joins those jobs. The realm's
+/// `ContextState` is dropped before that, so the runtime takes a reference
+/// to this storage first ([`OpCtxs::keep_alive_until_isolate_disposal`]) and
+/// drops it only after `v8::OwnedIsolate` is disposed. Nothing in it holds a
+/// `v8::Global`.
+pub struct OpCtxStorage {
   ctxs: Box<[OpCtx]>,
   #[allow(
     dead_code,
     reason = "storage for the decls borrowed by `ctxs` (via raw pointer)"
   )]
   decls: Vec<OpDeclStorage>,
-  common: Box<OpCommonCtx>,
 }
 
 /// A contiguous run of op declarations, in op-registration order.
@@ -341,10 +357,18 @@ impl OpCtxs {
       .collect::<Vec<_>>()
       .into_boxed_slice();
     Self {
-      ctxs,
-      decls,
+      storage: Rc::new(OpCtxStorage { ctxs, decls }),
       common,
     }
+  }
+
+  /// A reference that keeps the op contexts and their declarations alive
+  /// after this `OpCtxs` (and its realm) is dropped: the runtime drops it
+  /// only after the isolate is disposed (see [`OpCtxStorage`]). An `OpCtx`
+  /// read through it must not reach its `common` context, which is dropped
+  /// with this `OpCtxs`; V8 only reads the fast-call overloads.
+  pub(crate) fn keep_alive_until_isolate_disposal(&self) -> Rc<OpCtxStorage> {
+    self.storage.clone()
   }
 
   /// Hand the isolate pointer to every op once the isolate exists.
@@ -357,7 +381,7 @@ impl Deref for OpCtxs {
   type Target = [OpCtx];
   #[inline(always)]
   fn deref(&self) -> &[OpCtx] {
-    &self.ctxs
+    &self.storage.ctxs
   }
 }
 

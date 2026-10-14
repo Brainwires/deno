@@ -103,6 +103,26 @@ v8_static_strings! {
 pub struct PluginHostProxy {
   tx: mpsc::Sender<PluginHostRequest>,
   pub(crate) plugin_info: Arc<Mutex<Vec<PluginInfo>>>,
+  /// The plugin host's thread. Joined when the proxy is dropped, so the
+  /// host's runtime (and its V8 isolate) is torn down before the process
+  /// can reach `exit()`; a detached thread let `deno lint` exit while the
+  /// isolate was still being disposed.
+  join_handle: Option<std::thread::JoinHandle<Result<(), AnyError>>>,
+}
+
+impl Drop for PluginHostProxy {
+  fn drop(&mut self) {
+    let Some(join_handle) = self.join_handle.take() else {
+      return;
+    };
+    // Close the request channel: the host's loop ends once it has no
+    // sender, and its thread returns.
+    let (closed, _) = mpsc::channel(1);
+    drop(std::mem::replace(&mut self.tx, closed));
+    if let Err(err) = join_handle.join() {
+      log::debug!("Lint PluginHost thread panicked: {err:?}");
+    }
+  }
 }
 
 impl PluginHostProxy {
@@ -230,7 +250,7 @@ impl PluginHost {
     let (tx_req, rx_req) = mpsc::channel(10);
 
     let logger_ = logger.clone();
-    let _join_handle: std::thread::JoinHandle<Result<(), AnyError>> =
+    let join_handle: std::thread::JoinHandle<Result<(), AnyError>> =
       std::thread::spawn(move || {
         let logger = logger_;
         log::debug!("Lint PluginHost thread spawned");
@@ -253,6 +273,7 @@ impl PluginHost {
     let proxy = PluginHostProxy {
       tx: tx_req,
       plugin_info: Arc::new(Mutex::new(vec![])),
+      join_handle: Some(join_handle),
     };
 
     Ok(proxy)

@@ -317,7 +317,16 @@ impl JsRealmInner {
     self.function_templates.clone()
   }
 
-  pub fn destroy(self) {
+  /// Tears the realm down. Returns the op contexts' storage, which V8 may
+  /// still read through a fast-call template until the isolate is disposed
+  /// (see [`crate::ops::OpCtxStorage`]): the caller drops it only after
+  /// disposing of the isolate.
+  #[must_use = "drop the op contexts only after the isolate is disposed"]
+  pub fn destroy(self) -> Rc<crate::ops::OpCtxStorage> {
+    let op_ctxs = self
+      .context_state
+      .op_ctxs
+      .keep_alive_until_isolate_disposal();
     let state = self.state();
     let raw_ptr = self.state().isolate.unwrap();
     // SAFETY: We know the isolate outlives the realm
@@ -392,6 +401,7 @@ impl JsRealmInner {
     // Expect that this context is dead (we only check this in debug mode)
     // TODO(mmastrac): This check fails for some tests, will need to fix this
     // debug_assert_eq!(Rc::strong_count(&self.context), 1, "Realm was still alive when we wanted to destroy it. Not dropped?");
+    op_ctxs
   }
 }
 

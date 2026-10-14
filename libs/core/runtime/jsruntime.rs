@@ -220,6 +220,11 @@ pub(crate) struct InnerIsolateState {
   main_realm: ManuallyDrop<JsRealm>,
   pub(crate) state: ManuallyDropRc<JsRuntimeState>,
   v8_isolate: ManuallyDrop<v8::OwnedIsolate>,
+  /// The main realm's op contexts, from its `destroy()`: V8 keeps raw
+  /// pointers to their fast-call overloads, which a concurrent optimization
+  /// job may read until the isolate is disposed, so they are dropped only
+  /// after `v8_isolate` (see `crate::ops::OpCtxStorage`).
+  op_ctxs_until_disposal: Option<Rc<crate::ops::OpCtxStorage>>,
 }
 
 impl InnerIsolateState {
@@ -260,9 +265,9 @@ impl InnerIsolateState {
     // release the Global<Context> stored in loop.data. If we clear
     // op_state first, the Box<UvLoop> is freed and destroy() would
     // dereference a dangling pointer (use-after-free).
-    unsafe {
-      ManuallyDrop::take(&mut self.main_realm).0.destroy();
-    }
+    let op_ctxs =
+      unsafe { ManuallyDrop::take(&mut self.main_realm).0.destroy() };
+    self.op_ctxs_until_disposal = Some(op_ctxs);
 
     // Now safe to clear op_state (drops Box<UvLoop> etc.) since
     // destroy() has already released the Global from loop.data.
@@ -286,6 +291,10 @@ impl InnerIsolateState {
       ManuallyDrop::drop(&mut self.state.0);
 
       let isolate = ManuallyDrop::take(&mut self.v8_isolate);
+      // The isolate outlives this state (the caller snapshots and disposes
+      // of it), so its fast-call templates may still point into the op
+      // contexts: leak them rather than free them under it.
+      std::mem::forget(self.op_ctxs_until_disposal.take());
 
       std::mem::forget(self);
 
@@ -310,8 +319,13 @@ impl Drop for InnerIsolateState {
         {
           eprintln!("WARNING: v8::OwnedIsolate for snapshot was leaked");
         }
+        // The leaked isolate keeps pointing into the op contexts.
+        std::mem::forget(self.op_ctxs_until_disposal.take());
       } else {
         ManuallyDrop::drop(&mut self.v8_isolate);
+        // Only now: disposal has cancelled and joined the concurrent
+        // optimization jobs that could read the fast-call overloads.
+        drop(self.op_ctxs_until_disposal.take());
       }
     }
   }
@@ -1239,6 +1253,7 @@ impl JsRuntime {
         main_realm: ManuallyDrop::new(main_realm),
         state: ManuallyDropRc(ManuallyDrop::new(state_rc)),
         v8_isolate: ManuallyDrop::new(isolate),
+        op_ctxs_until_disposal: None,
       },
       allocations: isolate_allocations,
       files_loaded_from_fs_during_snapshot: vec![],

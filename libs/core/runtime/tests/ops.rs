@@ -196,6 +196,46 @@ fn test_op_high_arity() {
   assert_eq!(r.open(scope).integer_value(scope), Some(10));
 }
 
+/// V8 keeps raw pointers to each fast-call template's `CFunction` overloads
+/// (`OpCtx::fast_fn_overloads`) and reads them from concurrent TurboFan jobs
+/// that inline the fast call, until the isolate is disposed. Dropping a
+/// runtime while such a job may still run must not free the op contexts
+/// first: they are now dropped after the isolate (`OpCtxStorage`). Each
+/// iteration makes a fast op hot (so it is queued for concurrent
+/// optimization) and drops the runtime at once. Before the fix this read
+/// freed memory now and then (a SIGSEGV at exit under load).
+#[test]
+fn test_drop_runtime_while_fast_op_is_being_optimized() {
+  #[op2(fast)]
+  fn op_hot_add(x: u32, y: u32) -> u32 {
+    x.wrapping_add(y)
+  }
+
+  deno_core::extension!(hot_ext, ops = [op_hot_add]);
+  for _ in 0..25 {
+    let mut runtime = JsRuntime::new(RuntimeOptions {
+      extensions: vec![hot_ext::init()],
+      ..Default::default()
+    });
+    runtime
+      .execute_script(
+        "hot.js",
+        r#"
+          const { op_hot_add } = Deno.core.ops;
+          function hot(n) {
+            let acc = 0;
+            for (let i = 0; i < n; i++) acc = op_hot_add(acc, i);
+            return acc;
+          }
+          for (let round = 0; round < 40; round++) hot(5000);
+        "#,
+      )
+      .unwrap();
+    // Dropped while TurboFan may still be compiling `hot`.
+    drop(runtime);
+  }
+}
+
 #[test]
 fn test_op_disabled() {
   #[allow(clippy::unnecessary_wraps, reason = "test code")]
