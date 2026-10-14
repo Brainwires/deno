@@ -146,6 +146,7 @@ struct SerializedAppConfigFile {
   single_instance: Option<bool>,
   initial_window: Option<SerializedInitialWindow>,
   update: Option<SerializedUpdate>,
+  allowed_navigation_origins: Option<Vec<String>>,
 }
 
 /// `update` in the file.
@@ -181,6 +182,49 @@ pub struct AppConfigFile {
   pub initial_window: Option<super::binary::InitialWindowConfig>,
   /// `update.publicKey` (validated by the runtime where it is used).
   pub update_public_key: Option<String>,
+  /// `allowedNavigationOrigins`: the origins besides the app's own a
+  /// window's top-level frame may load (the navigation guard), normalized
+  /// with [`normalize_navigation_origin`].
+  pub allowed_navigation_origins: Option<Vec<String>>,
+}
+
+/// Normalize one `allowedNavigationOrigins` entry: an exact origin
+/// (`scheme://host[:port]`, optionally with a trailing `/`), serialized as
+/// a browser does (lowercase scheme and host, no default port). Anything
+/// else (a path, a query, a fragment, credentials, a wildcard, no host) is
+/// an error.
+pub fn normalize_navigation_origin(input: &str) -> Result<String, String> {
+  let trimmed = input.trim();
+  if trimmed.is_empty() || trimmed.len() > 2048 || trimmed.contains('*') {
+    return Err(format!("{input:?} is not an origin"));
+  }
+  if !trimmed.contains("://") {
+    return Err(format!("{input:?} is not an origin (scheme://host[:port])"));
+  }
+  let url = url::Url::parse(trimmed)
+    .map_err(|e| format!("{input:?} is not an origin: {e}"))?;
+  let path_ok = matches!(url.path(), "" | "/");
+  if !url.username().is_empty()
+    || url.password().is_some()
+    || url.query().is_some()
+    || url.fragment().is_some()
+    || !path_ok
+    || trimmed.ends_with('?')
+    || trimmed.ends_with('#')
+  {
+    return Err(format!(
+      "{input:?} is not an origin: only scheme://host[:port] is allowed"
+    ));
+  }
+  let Some(host) = url.host_str().filter(|h| !h.is_empty()) else {
+    return Err(format!("{input:?} is not an origin: it has no host"));
+  };
+  let host = host.to_ascii_lowercase();
+  let mut origin = format!("{}://{host}", url.scheme());
+  if let Some(port) = url.port() {
+    origin.push_str(&format!(":{port}"));
+  }
+  Ok(origin)
 }
 
 /// Parse the contents of an [`APP_CONFIG_FILE`]. Every key is optional; an
@@ -213,8 +257,23 @@ pub fn parse_app_config_file(bytes: &[u8]) -> Result<AppConfigFile, String> {
     .update
     .and_then(|u| u.public_key)
     .filter(|k| !k.trim().is_empty());
+  let allowed_navigation_origins = config
+    .allowed_navigation_origins
+    .map(|origins| {
+      let mut out: Vec<String> = Vec::with_capacity(origins.len());
+      for origin in &origins {
+        let origin = normalize_navigation_origin(origin)
+          .map_err(|e| format!("invalid allowedNavigationOrigins: {e}"))?;
+        if !out.contains(&origin) {
+          out.push(origin);
+        }
+      }
+      Ok::<_, String>(out)
+    })
+    .transpose()?;
   Ok(AppConfigFile {
     update_public_key,
+    allowed_navigation_origins,
     origin,
     identifier: config.identifier,
     deep_links,
@@ -688,6 +747,50 @@ mod tests {
       parse_app_config_file(br#"{ "deepLinks": ["https"] }"#).unwrap_err();
     assert!(err.contains("deepLinks"), "{err}");
     assert!(err.contains("reserved"), "{err}");
+  }
+
+  #[test]
+  fn app_config_file_allowed_navigation_origins() {
+    let config = parse_app_config_file(
+      br#"{ "allowedNavigationOrigins": ["https://Auth.Example.com/", "https://auth.example.com:443", "http://127.0.0.1:9000", "myapp://Other"] }"#,
+    )
+    .unwrap();
+    assert_eq!(
+      config.allowed_navigation_origins,
+      Some(vec![
+        "https://auth.example.com".to_string(),
+        "http://127.0.0.1:9000".to_string(),
+        "myapp://other".to_string(),
+      ])
+    );
+    assert_eq!(
+      parse_app_config_file(b"{}")
+        .unwrap()
+        .allowed_navigation_origins,
+      None
+    );
+    assert_eq!(
+      parse_app_config_file(br#"{ "allowedNavigationOrigins": [] }"#)
+        .unwrap()
+        .allowed_navigation_origins,
+      Some(vec![])
+    );
+    for bad in [
+      r#"{ "allowedNavigationOrigins": "https://a.example" }"#,
+      r#"{ "allowedNavigationOrigins": [1] }"#,
+      r#"{ "allowedNavigationOrigins": ["*"] }"#,
+      r#"{ "allowedNavigationOrigins": ["https://*.example.com"] }"#,
+      r#"{ "allowedNavigationOrigins": ["https://a.example/path"] }"#,
+      r#"{ "allowedNavigationOrigins": ["https://a.example/?q"] }"#,
+      r#"{ "allowedNavigationOrigins": ["https://a.example#x"] }"#,
+      r#"{ "allowedNavigationOrigins": ["https://u:p@a.example"] }"#,
+      r#"{ "allowedNavigationOrigins": ["a.example"] }"#,
+      r#"{ "allowedNavigationOrigins": ["file:///etc"] }"#,
+      r#"{ "allowedNavigationOrigins": [""] }"#,
+      r#"{ "allowednavigationorigins": [] }"#,
+    ] {
+      assert!(parse_app_config_file(bad.as_bytes()).is_err(), "{bad}");
+    }
   }
 
   #[test]

@@ -236,6 +236,19 @@ fn trusted_bridge_origins(
   out
 }
 
+/// The origins every window's top-level frame may load besides the one the
+/// runtime navigated it to: the trusted bridge origins (the app origin, a
+/// dev server's), then the app's `allowedNavigationOrigins`, de-duplicated.
+fn navigation_origins(trusted: &[String], allowed: &[String]) -> Vec<String> {
+  let mut out: Vec<String> = Vec::with_capacity(trusted.len() + allowed.len());
+  for origin in trusted.iter().chain(allowed) {
+    if !out.contains(origin) {
+      out.push(origin.clone());
+    }
+  }
+  out
+}
+
 /// The bootstrap window's reveal state: it is created hidden and shown by the
 /// runtime on its first load (or by the 10 s fallback) unless the app opted
 /// out (`initialWindow.showOnFirstLoad: false`) or took over its visibility
@@ -2665,6 +2678,18 @@ laufey::main!(|| {
     rolled_back_from: app_rolled_back_from,
     trial: app_update_trial,
   };
+  // The navigation guard's extra origins (`allowedNavigationOrigins` in the
+  // embedded app.json): a window's top-level frame loads its own origin and
+  // these, nothing else.
+  let allowed_navigation_origins =
+    app_origin::resolve_allowed_navigation_origins(
+      &data.root_path,
+      &data.metadata.entrypoint_key,
+      |path| {
+        let file = data.vfs.file_entry(path).ok()?;
+        data.vfs.read_file_all(file).ok().map(|b| b.into_owned())
+      },
+    );
   let app_origin = app_config.origin;
   let deep_links = app_config.deep_links;
   // `LAUFEY_APP_ID` (the per-app web data directory, and the key of the
@@ -2762,6 +2787,7 @@ laufey::main!(|| {
           targets: launch_targets,
           initial_window: app_config.initial_window,
           app_update,
+          allowed_navigation_origins,
         },
         data,
       )
@@ -2858,6 +2884,8 @@ struct LaunchConfig {
   initial_window: deno_lib::standalone::binary::InitialWindowConfig,
   /// Full-app self-update configuration (`Deno.desktop.updater`).
   app_update: deno_runtime::ops::desktop_update::AppUpdateConfig,
+  /// `allowedNavigationOrigins` from the embedded app.json (normalized).
+  allowed_navigation_origins: Vec<String>,
 }
 
 /// Register the backend's open-URL and second-instance handlers, feeding
@@ -3431,6 +3459,14 @@ async fn run_desktop(
     &app_origin,
     external_dev_url.as_deref(),
   ));
+  // The navigation guard (laufey API 48): a window's top-level frame loads
+  // the origin the runtime navigated it to, and these: the app origin, a
+  // development run's dev server, and the app's allowedNavigationOrigins.
+  // Set from the op_state_init closure, before the first window.
+  let navigation_origins = navigation_origins(
+    &trusted_bridge_origins,
+    &launch.allowed_navigation_origins,
+  );
   // The OS registration of the deep-link schemes (Deno.desktop
   // getSchemeOwner / registerScheme, and the startup pass below). A dev run
   // executes a development host, not the packaged app, so it writes nothing.
@@ -3592,6 +3628,13 @@ async fn run_desktop(
       // configuration at creation, so a handler added later is never used
       // and the initial navigation to the app origin goes nowhere.
       scheme_bridge::register(app_origin_for_register);
+      if !laufey::set_allowed_navigation_origins(&navigation_origins) {
+        log::debug!("[desktop] the backend has no navigation guard");
+      } else if navigation_origins.len() > 1 {
+        log::debug!(
+          "[desktop] top-level navigations allowed to {navigation_origins:?}"
+        );
+      }
       let window_id = api.create_initial_window(initial_window);
       initial_window_id.store(window_id, Ordering::Release);
 
@@ -3839,6 +3882,27 @@ mod tests {
     for bad in ["not a url", "data:text/plain,x"] {
       assert_eq!(super::trusted_bridge_origins(&origin, Some(bad)).len(), 1);
     }
+  }
+
+  #[test]
+  fn navigation_origins_are_the_trusted_ones_then_the_allowed_ones() {
+    let trusted = vec![
+      "t3code://app".to_string(),
+      "http://localhost:5173".to_string(),
+    ];
+    let allowed = vec![
+      "https://auth.example.com".to_string(),
+      "t3code://app".to_string(),
+    ];
+    assert_eq!(
+      super::navigation_origins(&trusted, &allowed),
+      vec![
+        "t3code://app".to_string(),
+        "http://localhost:5173".to_string(),
+        "https://auth.example.com".to_string(),
+      ]
+    );
+    assert_eq!(super::navigation_origins(&trusted[..1], &[]), trusted[..1]);
   }
 
   #[test]
