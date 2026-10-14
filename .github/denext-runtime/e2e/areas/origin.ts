@@ -36,7 +36,13 @@ export async function run(env: Env, rep: AreaReport) {
     // app's workers (both fork() shapes and spawn(process.execPath, [script],
     // ipc)) start while it holds the lock and must run headless, not be
     // forwarded to it as a second instance.
-    appJson: { origin, singleInstance: true },
+    // allowedNavigationOrigins (the navigation guard's extra origins): the
+    // runtime must accept the key and still start the app.
+    appJson: {
+      origin,
+      singleInstance: true,
+      allowedNavigationOrigins: ["https://idp.example"],
+    },
     // Every origin may reach the runtime's bindings (the backend's own gate
     // defaults to the app's scheme): the app checks the runtime's per-binding
     // gate by navigating to a page at another origin.

@@ -192,6 +192,23 @@ pub fn resolve_update_public_key(
     .and_then(|(_, config)| config.update_public_key)
 }
 
+/// The origins besides the app's own that a window's top-level frame may
+/// load (the navigation guard): the nearest [`APP_CONFIG_FILE`]'s
+/// `allowedNavigationOrigins`, normalized, else none. Only the file carries
+/// them (denext writes it; deno.json has no such key). An app.json that does
+/// not parse was already refused by [`resolve_app_config`].
+pub fn resolve_allowed_navigation_origins(
+  root: &Path,
+  entrypoint_key: &str,
+  read_file: impl Fn(&Path) -> Option<Vec<u8>>,
+) -> Vec<String> {
+  find_app_config_file(root, entrypoint_key, read_file)
+    .ok()
+    .flatten()
+    .and_then(|(_, config)| config.allowed_navigation_origins)
+    .unwrap_or_default()
+}
+
 /// The nearest [`APP_CONFIG_FILE`] and its parsed contents, if any.
 fn find_app_config_file(
   root: &Path,
@@ -289,6 +306,30 @@ mod tests {
       r#"{ "update": { "publickey": "x" } }"#,
     )]);
     assert_eq!(resolve_update_public_key(None, root, "main.ts", bad), None);
+  }
+
+  #[test]
+  fn allowed_navigation_origins_from_app_json() {
+    let root = Path::new("/vfs");
+    let read = reader(&[(
+      ".deno-desktop/app.json",
+      r#"{ "allowedNavigationOrigins": ["https://Auth.Example.com/", "https://auth.example.com"] }"#,
+    )]);
+    assert_eq!(
+      resolve_allowed_navigation_origins(root, "main.ts", &read),
+      vec!["https://auth.example.com".to_string()]
+    );
+    assert!(
+      resolve_allowed_navigation_origins(root, "main.ts", reader(&[]))
+        .is_empty()
+    );
+    let bad = reader(&[(
+      ".deno-desktop/app.json",
+      r#"{ "allowedNavigationOrigins": ["https://*.example.com"] }"#,
+    )]);
+    assert!(
+      resolve_allowed_navigation_origins(root, "main.ts", bad).is_empty()
+    );
   }
 
   #[test]

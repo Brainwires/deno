@@ -891,10 +891,30 @@ where the changes are discussed.
     is the union, line for line) and unit tests in `cli/tools/coverage/mod.rs`
     and `libs/resolver/cache/emit.rs`.
 
-The runtime-side parts (1-3, 5-22, 24, 25, 27) are what the prebuilt `libdenort`
-carries. The CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` /
-`LAUFEY_APP_ID` into a packaged app's launchers) are in the branch too, but a
-stock CLI does not run them; denext's own launcher provides that environment.
+32. **`feat(desktop)`: the navigation guard** (from `denext.18`;
+    `feat/desktop-navigation-guard`, laufey API 48). A top-level navigation in
+    an app window to an origin other than the app's (a link, `location = …`, a
+    form, a server redirect, `window.open()` / `target="_blank"`) never loads in
+    the window: laufey cancels it and opens an `http(s)` destination in the
+    system browser through its checked open-external path, on CEF
+    (`OnBeforeBrowse`), WKWebView (`decidePolicyForNavigationAction`), WebView2
+    (`NavigationStarting`) and WebKitGTK (the main frame's response policy; its
+    navigation policy names no frame, so a refused response is ignored, after
+    its request is sent). Sub-frames stay the page's CSP's. A window may load
+    the origin the runtime navigated it to; at startup the runtime also allows,
+    for every window, the app origin, a development run's dev server and the
+    embedded app.json's new `allowedNavigationOrigins` (exact origins,
+    normalized; `parse_app_config_file` refuses a wildcard, a path, a query or
+    credentials, as it refuses an unknown key). Covered by unit tests in
+    `cli/lib/standalone/app_origin.rs`, `cli/rt_desktop/app_origin.rs` and
+    `cli/rt_desktop/lib.rs`, and by laufey's `navigation_guard_test` and
+    native-e2e `--navigation` on every web-engine backend.
+
+The runtime-side parts (1-3, 5-22, 24, 25, 27, 32) are what the prebuilt
+`libdenort` carries. The CLI-side parts (for example writing
+`LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
+in the branch too, but a stock CLI does not run them; denext's own launcher
+provides that environment.
 
 The laufey backend hosts are built from
 [Brainwires/laufey](https://github.com/Brainwires/laufey) branch
@@ -913,9 +933,10 @@ Linux window-destroy use-after-free, sync UI hops that can't hang exit; and API
 its own runtime and pinned launch keys, WebKitGTK sub-frames kept off the
 bridge, a strict bridge JSON parser; and every host runs the runtime's own
 helper and worker launches (`run …`, `NODE_CHANNEL_FD`, `NEXT_PRIVATE_WORKER`)
-headless before its single-instance check), at the commit pinned by `LAUFEY_SHA`
-in the workflow (or the `laufey_ref` input). The same commit is the `laufey` git
-dependency of `cli/rt_desktop/Cargo.toml` (crate 0.8.0, API 44).
+headless before its single-instance check; and API 48, the navigation guard), at
+the commit pinned by `LAUFEY_SHA` in the workflow (or the `laufey_ref` input).
+The same commit is the `laufey` git dependency of `cli/rt_desktop/Cargo.toml`
+(crate 0.8.0, API 48).
 
 laufey's `init_api` rejects any C ABI version mismatch between the runtime and
 the host, so the `laufey` crate libdenort links and the hosts are built from the
