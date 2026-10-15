@@ -910,7 +910,25 @@ where the changes are discussed.
     `cli/rt_desktop/lib.rs`, and by laufey's `navigation_guard_test` and
     native-e2e `--navigation` on every web-engine backend.
 
-The runtime-side parts (1-3, 5-22, 24, 25, 27, 32) are what the prebuilt
+33. **`fix(core)`: the op contexts outlive the isolate; `deno lint` joins its
+    plugin host** (from `denext.19`; `fix/core-opctx-outlives-isolate`,
+    cherry-picked unchanged from f73f713, offered upstream as
+    [denoland/deno#37026](https://github.com/denoland/deno/pull/37026) for
+    [#37025](https://github.com/denoland/deno/issues/37025); runtime and CLI).
+    V8 150.x keeps the raw `CFunction` pointers of every fast-call template
+    (`OpCtx::fast_fn_overloads`) in `FunctionTemplateInfo`, and a concurrent
+    TurboFan job that inlines a fast-API call reads them until the isolate is
+    disposed. Dropping a runtime freed the realm's op contexts first
+    (`JsRealmInner::destroy()` before `ManuallyDrop::drop(v8_isolate)`), so a
+    job still compiling read freed memory: about 2% of `deno lint` runs with a
+    lint plugin under load ended in a SIGSEGV at exit, in stock 2.9.6 / 2.9.7
+    too. `destroy()` now hands the op contexts back and `InnerIsolateState`
+    drops them after disposing of the isolate; `deno lint` waits (bounded) for
+    its plugin host thread instead of detaching it. Covered by
+    `op_ctxs_outlive_isolate` (`libs/core/runtime/tests/misc.rs`) and the spec
+    `tests/specs/lint/lint_plugin_shutdown`.
+
+The runtime-side parts (1-3, 5-22, 24, 25, 27, 32, 33) are what the prebuilt
 `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
 in the branch too, but a stock CLI does not run them; denext's own launcher
