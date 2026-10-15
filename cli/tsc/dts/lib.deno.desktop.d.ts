@@ -680,6 +680,11 @@ declare namespace Deno {
         /** Tooltip shown when hovering over the item: macOS and Linux
          * (WebKitGTK). */
         tooltip?: string;
+        /** An action that deletes or discards: drawn in red on macOS,
+         * Linux (WebKitGTK) and the CEF backend's Views menus; Windows' Win32
+         * menus draw it as a normal item (see
+         * {@linkcode Deno.desktop.menuCapabilities}). */
+        destructive?: boolean;
       };
     }
     | {
@@ -1028,6 +1033,39 @@ declare namespace Deno {
     startDrag(
       item: BrowserWindowDragItem,
     ): Promise<"dropped" | "cancelled" | "failed">;
+
+    /** Show the OS share sheet over this window for `data` (at least one of
+     * `text`, `url` or `files`), like the Web Share API. Resolves with how it
+     * ended:
+     *
+     * - `"completed"`: a target was chosen (`target`: its name, where the OS
+     *   says);
+     * - `"shown"`: the sheet opened, and this OS reports nothing more;
+     * - `"cancelled"`, `"not_supported"` (Linux has no share sheet),
+     *   `"failed"` (`reason`).
+     *
+     * - macOS: `NSSharingServicePicker`, anchored at `x`/`y` (the window's
+     *   DIPs; by default its middle).
+     * - Windows: `DataTransferManager` for the window; files go as their
+     *   paths in the text.
+     *
+     * Rejects with a `TypeError` for a wrong argument, and with
+     * `Deno.errors.NotCapable` unless every file is readable
+     * (`--allow-read`): sharing hands the files to another app.
+     *
+     * @experimental */
+    share(data: {
+      title?: string;
+      text?: string;
+      url?: string;
+      files?: string[];
+      x?: number;
+      y?: number;
+    }): Promise<{
+      outcome: "completed" | "shown" | "cancelled" | "not_supported" | "failed";
+      target?: string;
+      reason?: string;
+    }>;
 
     /** Change the title bar style. Returns `false` (and changes nothing)
      * where the backend can't: only macOS has title bar styles. */
@@ -2214,6 +2252,10 @@ declare namespace Deno {
        * `launchNotificationResponses` (macOS, Windows; not Linux, whose
        * notification servers send clicks to the process that posted). */
       coldStart: boolean;
+      /** `getDelivered()` / `removeDelivered()` read and clear the OS
+       * notification center's list (macOS, Windows; not Linux, whose
+       * notification servers keep no list for apps). */
+      delivered: boolean;
     }
 
     /** Options of {@linkcode Deno.desktop.notifications.schedule}. */
@@ -2244,6 +2286,48 @@ declare namespace Deno {
       actions: NotificationAction[];
     }
 
+    /** An activity the app is engaged in, for Handoff and Spotlight. */
+    export interface UserActivity {
+      /** Reverse-DNS; listed in the bundle's `NSUserActivityTypes` for
+       * another device (or a Spotlight result) to continue it. */
+      type: string;
+      title?: string;
+      /** An http(s) URL a device without the app opens in a browser. */
+      url?: string;
+      /** String values; all are required to continue the activity. */
+      userInfo?: Record<string, string>;
+      keywords?: string[];
+      /** Offered to the user's other devices (default `true`). */
+      handoff?: boolean;
+      /** Indexed by Spotlight (default `false`). */
+      searchable?: boolean;
+    }
+
+    /** A user activity the user continued. */
+    export interface ContinuedUserActivity {
+      type: string;
+      title: string;
+      url: string | null;
+      userInfo: Record<string, string>;
+    }
+
+    /** Handoff and Spotlight through `NSUserActivity` (macOS). Windows and
+     * Linux have none: `set()` and `clear()` return `false` there.
+     *
+     * @experimental */
+    export const userActivity: {
+      /** Make `activity` the app's current activity. Returns `false` for an
+       * invalid one and where there are none. */
+      set(activity: UserActivity): boolean;
+      /** End the current activity. */
+      clear(): boolean;
+      /** Call `listener` for each activity the user continues (Handoff from
+       * another device, a Spotlight result); one that launched the app
+       * arrives once a listener is added. Returns a function that removes
+       * it. */
+      onContinue(listener: (activity: ContinuedUserActivity) => void): () => void;
+    };
+
     /** Scheduled notifications and notification capabilities.
      *
      * Mechanisms: macOS `UNUserNotificationCenter` (a calendar or
@@ -2261,6 +2345,15 @@ declare namespace Deno {
       schedule(options: ScheduledNotificationOptions): Promise<string>;
       /** The pending scheduled notifications, soonest first. */
       getScheduled(): Promise<ScheduledNotification[]>;
+      /** The app's notifications the notification center still shows
+       * (macOS, Windows), oldest first. `at` is when each was delivered
+       * (macOS), or the epoch where the OS doesn't say (Windows). Empty where
+       * `capabilities().delivered` is false. */
+      getDelivered(): Promise<ScheduledNotification[]>;
+      /** Remove delivered notifications from the notification center: those
+       * with the given tags, or all the app's when called without. Scheduled
+       * ones are left alone (`cancel()` removes both). */
+      removeDelivered(tags?: string | string[]): void;
       /** Cancel the scheduled notification `tag`, and remove a delivered one
        * with that tag from the notification center. */
       cancel(tag: string): void;
@@ -2286,6 +2379,8 @@ declare namespace Deno {
       icons: boolean;
       /** Item tooltips are shown. */
       tooltips: boolean;
+      /** Destructive items are drawn as such (red). */
+      destructive: boolean;
     }
 
     /** The menu capabilities of this backend and OS. */

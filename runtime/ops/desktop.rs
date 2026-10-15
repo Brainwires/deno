@@ -1565,6 +1565,8 @@ pub struct MenuCapabilitiesInfo {
   pub context_closed: bool,
   pub icons: bool,
   pub tooltips: bool,
+  /// Destructive items are drawn as such (laufey API 49).
+  pub destructive: bool,
 }
 
 /// `Deno.desktop.notifications.capabilities()` (laufey API 41).
@@ -1580,6 +1582,9 @@ pub struct NotificationCapabilitiesInfo {
   pub clicks: bool,
   /// A click while the app isn't running launches it and is delivered.
   pub cold_start: bool,
+  /// `getDelivered()` / `removeDelivered()` read and clear the OS
+  /// notification center's list (laufey API 49: macOS, Windows).
+  pub delivered: bool,
 }
 
 /// An action button (`{ action, title }`, the Web Notifications shape).
@@ -1662,6 +1667,28 @@ impl DragOutcome {
       DragOutcome::Failed => "failed",
     }
   }
+}
+
+/// What `BrowserWindow.share()` hands the OS share sheet (laufey API 49).
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ShareRequestInfo {
+  pub title: Option<String>,
+  pub text: Option<String>,
+  pub url: Option<String>,
+  #[serde(default)]
+  pub files: Vec<String>,
+  pub x: Option<i32>,
+  pub y: Option<i32>,
+}
+
+/// How a share ended: `outcome` is "completed", "shown", "cancelled",
+/// "not_supported" or "failed"; `detail` the target (completed) or the
+/// reason.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ShareOutcomeInfo {
+  pub outcome: &'static str,
+  pub detail: Option<String>,
 }
 
 /// One filter of a file dialog.
@@ -2336,6 +2363,31 @@ pub trait DesktopApi: Send + Sync + 'static {
   ) -> DesktopFuture<DragOutcome> {
     Box::pin(async { DragOutcome::Failed })
   }
+  /// Make `activity_json` the app's current user activity (Handoff,
+  /// Spotlight; laufey API 49), or end it with `None`. False where there are
+  /// none (Windows, Linux) or for an invalid activity.
+  fn set_user_activity(&self, _activity_json: Option<&str>) -> bool {
+    false
+  }
+  /// The next activity the user continues (its JSON), or `None` once there
+  /// will be none (laufey API 49).
+  fn next_user_activity(&self) -> DesktopFuture<Option<String>> {
+    Box::pin(async { None })
+  }
+  /// Show the OS share sheet over `window_id` (laufey API 49); the future
+  /// resolves when it ends (or at once for a refusal).
+  fn share(
+    &self,
+    _window_id: u32,
+    _request: ShareRequestInfo,
+  ) -> DesktopFuture<ShareOutcomeInfo> {
+    Box::pin(async {
+      ShareOutcomeInfo {
+        outcome: "not_supported",
+        detail: None,
+      }
+    })
+  }
   /// Show a file dialog. Returns the backend's dialog id (0 when the request
   /// was answered at once) and its outcome; the dialog is requested when this
   /// is called, and the runtime thread never blocks on it.
@@ -2596,6 +2648,16 @@ pub trait DesktopApi: Send + Sync + 'static {
   /// Cancel the scheduled notification `tag` and remove delivered ones with
   /// that tag (laufey API 41).
   fn cancel_notification(&self, _tag: &str) {}
+  /// The app's notifications the OS notification center still shows,
+  /// oldest first; `at` is the delivery time, or 0 (laufey API 49).
+  fn list_delivered_notifications(
+    &self,
+  ) -> DesktopFuture<Vec<ScheduledNotificationInfo>> {
+    Box::pin(async { Vec::new() })
+  }
+  /// Remove delivered notifications with `tags`, or all the app's when
+  /// `tags` is `None` (laufey API 49).
+  fn remove_delivered_notifications(&self, _tags: Option<&[String]>) {}
   fn notification_capabilities(&self) -> NotificationCapabilitiesInfo {
     NotificationCapabilitiesInfo::default()
   }
@@ -3554,6 +3616,10 @@ pub enum MenuItem {
     icon: Option<Vec<u8>>,
     /// Tooltip shown on hover. macOS only.
     tooltip: Option<String>,
+    /// Drawn as a destructive action (red text) where the backend can
+    /// (laufey API 49; see `menuCapabilities().destructive`).
+    #[serde(default)]
+    destructive: bool,
   },
   Submenu {
     label: String,
@@ -4829,6 +4895,83 @@ async fn op_desktop_start_drag(
   )
 }
 
+/// `BrowserWindow.share(data)` (laufey API 49): the files need read
+/// permission (they go to another app).
+#[op2]
+#[serde]
+async fn op_desktop_share(
+  state: std::rc::Rc<std::cell::RefCell<OpState>>,
+  #[smi] window_id: u32,
+  #[serde] request: ShareRequestInfo,
+) -> Result<ShareOutcomeInfo, deno_error::JsErrorBox> {
+  let strings = [&request.title, &request.text, &request.url];
+  if strings
+    .iter()
+    .any(|s| s.as_deref().is_some_and(|s| s.contains('\0')))
+    || request.files.iter().any(|f| f.contains('\0'))
+    || request.files.len() > MAX_DRAG_PATHS
+  {
+    return Err(deno_error::JsErrorBox::type_error(
+      "share(): a string contains a NUL character, or too many files",
+    ));
+  }
+  if request.x.is_some() != request.y.is_some() {
+    return Err(deno_error::JsErrorBox::type_error(
+      "share(): x and y go together",
+    ));
+  }
+  if !request.files.is_empty() {
+    let state = state.borrow();
+    let permissions = state.borrow::<deno_permissions::PermissionsContainer>();
+    for path in &request.files {
+      permissions
+        .check_open(
+          Cow::Borrowed(Path::new(path)),
+          deno_permissions::OpenAccessKind::Read,
+          Some("BrowserWindow.share()"),
+        )
+        .map_err(deno_error::JsErrorBox::from_err)?;
+    }
+  }
+  let Some(api) = desktop_api(&state) else {
+    return Ok(ShareOutcomeInfo {
+      outcome: "not_supported",
+      detail: None,
+    });
+  };
+  Ok(api.share(window_id, request).await)
+}
+
+/// `Deno.desktop.userActivity.set(activity)` / `clear()` (laufey API 49).
+#[op2]
+fn op_desktop_set_user_activity(
+  state: &mut OpState,
+  #[string] activity_json: Option<String>,
+) -> bool {
+  if activity_json
+    .as_deref()
+    .is_some_and(|j| j.contains('\0') || j.len() > 64 * 1024)
+  {
+    return false;
+  }
+  match state.try_borrow::<Arc<dyn DesktopApi>>() {
+    Some(api) => api.set_user_activity(activity_json.as_deref()),
+    None => false,
+  }
+}
+
+/// The next continued user activity's JSON, or null (laufey API 49).
+#[op2]
+#[string]
+async fn op_desktop_next_user_activity(
+  state: std::rc::Rc<std::cell::RefCell<OpState>>,
+) -> Option<String> {
+  match desktop_api(&state) {
+    Some(api) => api.next_user_activity().await,
+    None => None,
+  }
+}
+
 /// Read permission for each path a drag-out carries.
 fn check_drag_read_permission(
   state: &OpState,
@@ -5449,6 +5592,43 @@ async fn op_desktop_list_scheduled_notifications(
   }
 }
 
+/// `Deno.desktop.notifications.getDelivered()` (laufey API 49).
+#[op2]
+#[serde]
+async fn op_desktop_list_delivered_notifications(
+  state: std::rc::Rc<std::cell::RefCell<OpState>>,
+) -> Vec<ScheduledNotificationInfo> {
+  match desktop_api(&state) {
+    Some(api) => api.list_delivered_notifications().await,
+    None => Vec::new(),
+  }
+}
+
+/// `Deno.desktop.notifications.removeDelivered(tags?)` (laufey API 49):
+/// `None` removes all the app's delivered notifications.
+#[op2]
+fn op_desktop_remove_delivered_notifications(
+  state: &mut OpState,
+  #[serde] tags: Option<Vec<String>>,
+) {
+  let tags = tags.map(|tags| {
+    tags
+      .into_iter()
+      .filter(|t| {
+        !t.is_empty()
+          && t.len() <= MAX_NOTIFICATION_TAG_BYTES
+          && !t.contains('\0')
+      })
+      .collect::<Vec<_>>()
+  });
+  if tags.as_ref().is_some_and(|t| t.is_empty()) {
+    return;
+  }
+  if let Some(api) = state.try_borrow::<Arc<dyn DesktopApi>>() {
+    api.remove_delivered_notifications(tags.as_deref());
+  }
+}
+
 /// `Deno.desktop.notifications.cancel(tag)` (laufey API 41).
 #[op2(fast)]
 fn op_desktop_cancel_notification(state: &mut OpState, #[string] tag: &str) {
@@ -5915,6 +6095,11 @@ deno_core::extension!(
     op_desktop_schedule_notification,
     op_desktop_list_scheduled_notifications,
     op_desktop_cancel_notification,
+    op_desktop_list_delivered_notifications,
+    op_desktop_remove_delivered_notifications,
+    op_desktop_share,
+    op_desktop_set_user_activity,
+    op_desktop_next_user_activity,
     op_desktop_send_error_report,
     op_desktop_request_notification_permission,
     op_desktop_query_notification_permission,
@@ -7095,6 +7280,7 @@ mod tests {
         "contextClosed": true,
         "icons": false,
         "tooltips": false,
+        "destructive": false,
       })
     );
     assert_eq!(
@@ -7111,6 +7297,7 @@ mod tests {
         "actions": false,
         "clicks": false,
         "coldStart": true,
+        "delivered": false,
       })
     );
     assert_eq!(
@@ -8262,6 +8449,7 @@ mod tests {
       checked: false,
       icon: None,
       tooltip: None,
+      destructive: false,
     };
     assert!(reject_nul_in_menu(&[item("ok"), MenuItem::Separator]).is_ok());
     // Deep in a submenu too.

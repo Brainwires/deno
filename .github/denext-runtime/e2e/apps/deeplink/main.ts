@@ -75,6 +75,26 @@ if (r.params.force) {
     desktop.registerScheme(scheme, { force: true })
   );
   owner.afterForce = await capture(() => desktop.getSchemeOwner(scheme));
+  // How LaunchServices' answer moves after the forced write (the CI failure
+  // where registerScheme({ force: true }) reported the old handler): sampled
+  // for 8 s, so a late convergence and a write that never lands tell apart.
+  const t0 = Date.now();
+  const timeline: { ms: number; owner: unknown; handler: unknown }[] = [];
+  let last = "";
+  while (Date.now() - t0 < 8000) {
+    const o: any = await capture(() => desktop.getSchemeOwner(scheme));
+    const key = `${o?.owner}|${o?.handler}`;
+    if (key !== last) {
+      timeline.push({
+        ms: Date.now() - t0,
+        owner: o?.owner,
+        handler: o?.handler,
+      });
+      last = key;
+    }
+    await sleep(250);
+  }
+  owner.forceTimeline = timeline;
 }
 r.set("owner", owner);
 r.done();

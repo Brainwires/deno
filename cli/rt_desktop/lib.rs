@@ -57,7 +57,7 @@ use denort::run::RunOptions;
 /// makes the failure mode obvious instead of "the desktop app silently won't
 /// launch".
 const _: () = assert!(
-  laufey::LAUFEY_API_VERSION == 48,
+  laufey::LAUFEY_API_VERSION == 49,
   "LAUFEY_API_VERSION mismatch: update this assert and the prebuilt backend release pin in cli/tools/desktop.rs when laufey bumps its API version",
 );
 
@@ -234,6 +234,96 @@ fn trusted_bridge_origins(
     out.push(origin);
   }
   out
+}
+
+/// Continued user activities (laufey API 49): laufey's handler is registered
+/// the first time the app asks for one (so a launch activity laufey held
+/// arrives then), and feeds a channel the app's loop reads.
+mod user_activity {
+  use std::sync::OnceLock;
+
+  type Receiver = tokio::sync::mpsc::UnboundedReceiver<String>;
+
+  fn receiver() -> &'static tokio::sync::Mutex<Option<Receiver>> {
+    static RX: OnceLock<tokio::sync::Mutex<Option<Receiver>>> = OnceLock::new();
+    RX.get_or_init(|| {
+      let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+      if !laufey::on_user_activity(move |json| {
+        let _ = tx.send(json);
+      }) {
+        return tokio::sync::Mutex::new(None);
+      }
+      tokio::sync::Mutex::new(Some(rx))
+    })
+  }
+
+  pub async fn next() -> Option<String> {
+    let mut guard = receiver().lock().await;
+    guard.as_mut()?.recv().await
+  }
+
+  /// The JS side's activity JSON, re-read into laufey's shape (the backend
+  /// validates it again).
+  pub fn set_from_json(json: &str) -> bool {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(json) else {
+      return false;
+    };
+    let s = |k: &str| v.get(k).and_then(|x| x.as_str()).map(str::to_string);
+    let Some(activity_type) = s("type") else {
+      return false;
+    };
+    let user_info = v
+      .get("userInfo")
+      .and_then(|x| x.as_object())
+      .map(|o| {
+        o.iter()
+          .filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string())))
+          .collect()
+      })
+      .unwrap_or_default();
+    let keywords = v
+      .get("keywords")
+      .and_then(|x| x.as_array())
+      .map(|a| {
+        a.iter()
+          .filter_map(|k| k.as_str().map(str::to_string))
+          .collect()
+      })
+      .unwrap_or_default();
+    laufey::set_user_activity(Some(&laufey::UserActivity {
+      activity_type,
+      title: s("title").unwrap_or_default(),
+      url: s("url"),
+      user_info,
+      keywords,
+      handoff: v.get("handoff").and_then(|x| x.as_bool()).unwrap_or(true),
+      searchable: v
+        .get("searchable")
+        .and_then(|x| x.as_bool())
+        .unwrap_or(false),
+    }))
+  }
+}
+
+/// A laufey notification list entry as the runtime reports it.
+fn scheduled_notification_info(
+  n: laufey::ScheduledNotification,
+) -> deno_runtime::ops::desktop::ScheduledNotificationInfo {
+  deno_runtime::ops::desktop::ScheduledNotificationInfo {
+    tag: n.tag,
+    title: n.title,
+    body: n.body,
+    at: n.at_ms,
+    data: n.data,
+    actions: n
+      .actions
+      .into_iter()
+      .map(|a| deno_runtime::ops::desktop::NotificationActionInfo {
+        action: a.id,
+        title: a.title,
+      })
+      .collect(),
+  }
 }
 
 /// The origins every window's top-level frame may load besides the one the
@@ -1066,6 +1156,54 @@ impl denort::desktop::DesktopApi for WefDesktopApi {
     })
   }
 
+  fn set_user_activity(&self, activity_json: Option<&str>) -> bool {
+    match activity_json {
+      None => laufey::set_user_activity(None),
+      Some(json) => user_activity::set_from_json(json),
+    }
+  }
+
+  fn next_user_activity(
+    &self,
+  ) -> deno_runtime::ops::desktop::DesktopFuture<Option<String>> {
+    Box::pin(user_activity::next())
+  }
+
+  fn share(
+    &self,
+    window_id: u32,
+    request: deno_runtime::ops::desktop::ShareRequestInfo,
+  ) -> deno_runtime::ops::desktop::DesktopFuture<
+    deno_runtime::ops::desktop::ShareOutcomeInfo,
+  > {
+    use deno_runtime::ops::desktop::ShareOutcomeInfo;
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    laufey::share(
+      window_id,
+      &laufey::ShareRequest {
+        title: request.title,
+        text: request.text,
+        url: request.url,
+        files: request.files,
+        point: request.x.zip(request.y),
+      },
+      move |outcome| {
+        let _ = tx.send(outcome);
+      },
+    );
+    Box::pin(async move {
+      let (outcome, detail) = match rx.await {
+        Ok(laufey::ShareOutcome::Completed(d)) => ("completed", d),
+        Ok(laufey::ShareOutcome::Shown) => ("shown", None),
+        Ok(laufey::ShareOutcome::Cancelled) => ("cancelled", None),
+        Ok(laufey::ShareOutcome::NotSupported(d)) => ("not_supported", d),
+        Ok(laufey::ShareOutcome::Failed(d)) => ("failed", d),
+        Err(_) => ("failed", Some("the backend dropped the request".into())),
+      };
+      ShareOutcomeInfo { outcome, detail }
+    })
+  }
+
   fn show_file_dialog(
     &self,
     request: deno_runtime::ops::desktop::FileDialogRequest,
@@ -1721,27 +1859,41 @@ impl denort::desktop::DesktopApi for WefDesktopApi {
       rx.await
         .unwrap_or_default()
         .into_iter()
-        .map(|n| deno_runtime::ops::desktop::ScheduledNotificationInfo {
-          tag: n.tag,
-          title: n.title,
-          body: n.body,
-          at: n.at_ms,
-          data: n.data,
-          actions: n
-            .actions
-            .into_iter()
-            .map(|a| deno_runtime::ops::desktop::NotificationActionInfo {
-              action: a.id,
-              title: a.title,
-            })
-            .collect(),
-        })
+        .map(scheduled_notification_info)
         .collect()
     })
   }
 
   fn cancel_notification(&self, tag: &str) {
     laufey::cancel_notification(tag);
+  }
+
+  fn list_delivered_notifications(
+    &self,
+  ) -> deno_runtime::ops::desktop::DesktopFuture<
+    Vec<deno_runtime::ops::desktop::ScheduledNotificationInfo>,
+  > {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    laufey::list_delivered_notifications(move |list| {
+      let _ = tx.send(list);
+    });
+    Box::pin(async move {
+      rx.await
+        .unwrap_or_default()
+        .into_iter()
+        .map(scheduled_notification_info)
+        .collect()
+    })
+  }
+
+  fn remove_delivered_notifications(&self, tags: Option<&[String]>) {
+    match tags {
+      None => laufey::remove_delivered_notifications(None),
+      Some(tags) => {
+        let refs: Vec<&str> = tags.iter().map(String::as_str).collect();
+        laufey::remove_delivered_notifications(Some(&refs));
+      }
+    }
   }
 
   fn notification_capabilities(
@@ -1755,6 +1907,7 @@ impl denort::desktop::DesktopApi for WefDesktopApi {
       actions: c.actions(),
       clicks: c.clicks(),
       cold_start: c.cold_start(),
+      delivered: c.delivered(),
     }
   }
 
@@ -1769,6 +1922,7 @@ impl denort::desktop::DesktopApi for WefDesktopApi {
       context_closed: c.context_closed(),
       icons: c.icons(),
       tooltips: c.tooltips(),
+      destructive: c.destructive(),
     }
   }
 
@@ -1929,6 +2083,7 @@ fn desktop_menu_item_to_laufey_menu_item(
       checked,
       icon,
       tooltip,
+      destructive,
     } => laufey::MenuItem::Item {
       label,
       id,
@@ -1937,6 +2092,7 @@ fn desktop_menu_item_to_laufey_menu_item(
       checked,
       icon,
       tooltip,
+      destructive,
     },
     denort::desktop::MenuItem::Submenu { label, items } => {
       laufey::MenuItem::Submenu {
@@ -4134,6 +4290,7 @@ mod tests {
       checked: true,
       icon: Some(vec![0x89, b'P', b'N', b'G']),
       tooltip: Some("Save the current file".into()),
+      destructive: true,
     };
     match desktop_menu_item_to_laufey_menu_item(item) {
       laufey::MenuItem::Item {
@@ -4144,7 +4301,9 @@ mod tests {
         checked,
         icon,
         tooltip,
+        destructive,
       } => {
+        assert!(destructive);
         assert_eq!(label, "Save");
         assert_eq!(id.as_deref(), Some("file.save"));
         assert_eq!(accelerator.as_deref(), Some("CmdOrCtrl+S"));
@@ -4170,6 +4329,7 @@ mod tests {
           checked: false,
           icon: None,
           tooltip: None,
+          destructive: false,
         },
         denort::desktop::MenuItem::Separator,
         denort::desktop::MenuItem::Role {

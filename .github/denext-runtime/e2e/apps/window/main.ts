@@ -102,6 +102,59 @@ for (
 }
 
 await sleep(2500);
+await r.step("share sheet", async () => {
+  // The sheet waits for a person, so only what answers without one.
+  const bad = await (win as any).share({ title: "nothing" }).then(
+    () => null,
+    (e: Error) => e,
+  );
+  r.check(
+    "share() with nothing to share is a TypeError",
+    bad instanceof TypeError,
+    bad && describeError(bad),
+  );
+  if (OS === "linux") {
+    const got = await (win as any).share({ text: "hello" });
+    r.check(
+      "share() on Linux: not_supported",
+      got?.outcome === "not_supported",
+      got,
+    );
+  } else {
+    r.na(
+      "share() shows the OS share sheet",
+      "the sheet waits for a person to pick a target",
+    );
+  }
+});
+await r.step("user activity", async () => {
+  const set = (desktop as any).userActivity.set({
+    type: "dev.denext.e2e.view",
+    title: "E2E",
+    url: "https://example.com/e2e",
+    searchable: false,
+  });
+  r.check(
+    "userActivity.set() makes it current on macOS, false elsewhere",
+    set === (OS === "darwin"),
+    set,
+  );
+  r.check(
+    "userActivity.set() refuses a type that isn't reverse-DNS",
+    (desktop as any).userActivity.set({ type: "nodots" }) === false,
+  );
+  r.check(
+    "userActivity.clear() ends it on macOS",
+    (desktop as any).userActivity.clear() === (OS === "darwin"),
+  );
+  const off = (desktop as any).userActivity.onContinue(() => {});
+  r.check(
+    "userActivity.onContinue() returns a remover",
+    typeof off === "function",
+  );
+  off();
+});
+await sleep(2500);
 await r.step("window API", async () => {
   // --- the initial window, sized by app.json's initialWindow ---
   const want = r.params.initialWindow ?? {};

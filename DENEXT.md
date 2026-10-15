@@ -928,7 +928,32 @@ where the changes are discussed.
     `op_ctxs_outlive_isolate` (`libs/core/runtime/tests/misc.rs`) and the spec
     `tests/specs/lint/lint_plugin_shutdown`.
 
-The runtime-side parts (1-3, 5-22, 24, 25, 27, 32, 33) are what the prebuilt
+34. **`feat(desktop)`: delivered notifications, destructive menu items, the
+    share sheet, Handoff and Spotlight** (from `denext.20`, laufey API 49):
+    `Deno.desktop.notifications.getDelivered()` / `removeDelivered(tags?)`
+    (macOS `UNUserNotificationCenter`, Windows' toast history;
+    `capabilities().delivered`); a menu item's `destructive: true` (red on
+    macOS, WebKitGTK and CEF's Views menus; `menuCapabilities().destructive`);
+    `BrowserWindow.share({ title, text, url, files })` (macOS
+    `NSSharingServicePicker`, Windows `DataTransferManager`; files need read
+    permission); `Deno.desktop.userActivity.set()` / `clear()` / `onContinue()`
+    (macOS `NSUserActivity`). Covered by the menus and window e2e areas and
+    laufey's unit tests and native-e2e.
+35. **laufey `integration/denext20` host changes** (from `denext.20`, no runtime
+    API): the navigation guard's per-window budget of browser opens (3 a
+    second); the Windows CEF host's proxy warm-up and `"proxy"` launch setting
+    (`LAUFEY_PROXY`: `system`, `system-resolver`, `direct`); a team-signed macOS
+    CEF app's cookie key in a keychain item of its own
+    (`"<app id> Safe Storage"`, the mock-keychain profile migrated; the
+    `SecItem*` interposers ship as
+    `Contents/MacOS/liblaufey_keychain_interpose.dylib`, which the packaging
+    signs with the other Mach-O files there); the CEF hosts waiting for the
+    profile's LevelDB LOCK files before `CefInitialize` and for their helpers
+    (not Linux's zygotes) after `CefShutdown`. The exit e2e area quits and
+    relaunches at once to check localStorage survives, and the deeplink area
+    logs the scheme owner over time after a forced registration.
+
+The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-35) are what the prebuilt
 `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
 in the branch too, but a stock CLI does not run them; denext's own launcher

@@ -71,6 +71,11 @@ pub const DESKTOP_JS: &str = r#"
     op_desktop_schedule_notification,
     op_desktop_list_scheduled_notifications,
     op_desktop_cancel_notification,
+    op_desktop_list_delivered_notifications,
+    op_desktop_remove_delivered_notifications,
+    op_desktop_share,
+    op_desktop_set_user_activity,
+    op_desktop_next_user_activity,
     op_desktop_request_notification_permission,
     op_desktop_query_notification_permission,
     op_desktop_screens,
@@ -799,6 +804,39 @@ pub const DESKTOP_JS: &str = r#"
       throw new TypeError("item.icon must be PNG bytes (a Uint8Array)");
     }
     return await op_desktop_start_drag(this.windowId, [...files], icon);
+  };
+  // share (laufey API 49): the OS share sheet over this window.
+  BrowserWindowPrototype.share = async function share(data) {
+    if (data == null || typeof data !== "object") {
+      throw new TypeError("share takes { title?, text?, url?, files? }");
+    }
+    const request = {};
+    for (const key of ["title", "text", "url"]) {
+      if (data[key] !== undefined && data[key] !== null) {
+        request[key] = String(data[key]);
+      }
+    }
+    if (data.files !== undefined && data.files !== null) {
+      if (
+        !Array.isArray(data.files) ||
+        !data.files.every((f) => typeof f === "string" && f.length > 0)
+      ) {
+        throw new TypeError("data.files must be absolute paths");
+      }
+      request.files = [...data.files];
+    }
+    if (data.x !== undefined || data.y !== undefined) {
+      request.x = Math.round(Number(data.x));
+      request.y = Math.round(Number(data.y));
+    }
+    if (!request.text && !request.url && !request.files?.length) {
+      throw new TypeError("share needs text, a url or files");
+    }
+    const { outcome, detail } = await op_desktop_share(this.windowId, request);
+    const result = { outcome };
+    if (outcome === "completed" && detail) result.target = detail;
+    else if (detail) result.reason = detail;
+    return result;
   };
   // showContextMenu (laufey API 41): resolves once the menu closed, with the
   // chosen item's id (null when it was dismissed); a "contextmenuclose"
@@ -2413,25 +2451,18 @@ pub const DESKTOP_JS: &str = r#"
       return tag;
     },
     async getScheduled() {
-      const list = await op_desktop_list_scheduled_notifications();
-      return list.map((n) => {
-        let data;
-        if (typeof n.data === "string") {
-          try {
-            data = JSON.parse(n.data);
-          } catch {
-            data = n.data;
-          }
-        }
-        return {
-          tag: n.tag,
-          title: n.title,
-          body: n.body,
-          at: new Date(n.at),
-          data,
-          actions: n.actions,
-        };
-      });
+      return notificationList(await op_desktop_list_scheduled_notifications());
+    },
+    async getDelivered() {
+      return notificationList(await op_desktop_list_delivered_notifications());
+    },
+    removeDelivered(tags = undefined) {
+      if (tags === undefined || tags === null) {
+        op_desktop_remove_delivered_notifications(null);
+        return;
+      }
+      const list = typeof tags === "string" ? [tags] : Array.from(tags, String);
+      if (list.length > 0) op_desktop_remove_delivered_notifications(list);
     },
     cancel(tag) {
       op_desktop_cancel_notification(String(tag));
@@ -2445,6 +2476,100 @@ pub const DESKTOP_JS: &str = r#"
       return s;
     },
   };
+  function notificationList(list) {
+    return list.map((n) => {
+      let data;
+      if (typeof n.data === "string") {
+        try {
+          data = JSON.parse(n.data);
+        } catch {
+          data = n.data;
+        }
+      }
+      return {
+        tag: n.tag,
+        title: n.title,
+        body: n.body,
+        at: new Date(n.at),
+        data,
+        actions: n.actions,
+      };
+    });
+  }
+  // userActivity (laufey API 49): Handoff and Spotlight on macOS.
+  const userActivityListeners = [];
+  let userActivityLoop = false;
+  function startUserActivityLoop() {
+    if (userActivityLoop) return;
+    userActivityLoop = true;
+    (async () => {
+      while (true) {
+        const p = op_desktop_next_user_activity();
+        internals.core.unrefOpPromise(p);
+        const json = await p;
+        if (json == null) return;
+        let activity;
+        try {
+          activity = JSON.parse(json);
+        } catch {
+          continue;
+        }
+        for (const listener of [...userActivityListeners]) {
+          try {
+            listener(activity);
+          } catch (e) {
+            reportError(e);
+          }
+        }
+      }
+    })();
+  }
+  const userActivityApi = {
+    set(activity) {
+      if (activity == null || typeof activity !== "object") {
+        throw new TypeError("set() takes an activity object");
+      }
+      if (typeof activity.type !== "string") {
+        throw new TypeError("activity.type must be a reverse-DNS string");
+      }
+      const body = { type: activity.type };
+      if (activity.title != null) body.title = String(activity.title);
+      if (activity.url != null) body.url = String(activity.url);
+      if (activity.userInfo != null) {
+        body.userInfo = {};
+        for (const [k, v] of Object.entries(activity.userInfo)) {
+          body.userInfo[k] = String(v);
+        }
+      }
+      if (activity.keywords != null) {
+        body.keywords = Array.from(activity.keywords, String);
+      }
+      if (activity.handoff != null) body.handoff = Boolean(activity.handoff);
+      if (activity.searchable != null) {
+        body.searchable = Boolean(activity.searchable);
+      }
+      return op_desktop_set_user_activity(JSON.stringify(body));
+    },
+    clear() {
+      return op_desktop_set_user_activity(null);
+    },
+    onContinue(listener) {
+      if (typeof listener !== "function") {
+        throw new TypeError("onContinue() takes a function");
+      }
+      userActivityListeners.push(listener);
+      startUserActivityLoop();
+      return () => {
+        const i = userActivityListeners.indexOf(listener);
+        if (i >= 0) userActivityListeners.splice(i, 1);
+      };
+    },
+  };
+  Object.defineProperty(desktop, "userActivity", {
+    value: Object.freeze(userActivityApi),
+    configurable: true,
+    enumerable: true,
+  });
   Object.defineProperty(desktop, "notifications", {
     value: Object.freeze(notificationsApi),
     configurable: true,
@@ -3483,6 +3608,8 @@ mod tests {
     for api in [
       "async schedule(options)",
       "async getScheduled()",
+      "async getDelivered()",
+      "removeDelivered(tags = undefined)",
       "cancel(tag)",
       "async requestPermission(options = undefined)",
       "Object.defineProperty(desktop, \"notifications\"",
@@ -3675,6 +3802,9 @@ mod tests {
     ));
     assert!(DESKTOP_JS.contains(
       "return await op_desktop_start_drag(this.windowId, [...files], icon);"
+    ));
+    assert!(DESKTOP_JS.contains(
+      "BrowserWindowPrototype.share = async function share(data)"
     ));
   }
 

@@ -222,9 +222,31 @@ async function slowProxyConfig(
     "/f",
   ]);
   try {
-    await clearResults("origin");
-    await writeParams("origin", { origin, backend: env.backend });
-    await launchAndCollect(env, rep, "slow proxy configuration", p);
+    // Each proxy mode of the CEF host (laufey's "proxy" launch key, set
+    // through LAUFEY_PROXY here): how long the page's first WebSocket to the
+    // loopback relay waits under a PAC file that takes 12 s to arrive.
+    for (const mode of ["system", "system-resolver", "direct"]) {
+      await clearResults("origin");
+      await writeParams("origin", { origin, backend: env.backend });
+      const res = await launchAndCollect(
+        env,
+        rep,
+        `slow proxy configuration (${mode})`,
+        p,
+        { env: { LAUFEY_PROXY: mode } },
+      );
+      const ws = (res?.data as any)?.page?.ws;
+      log(
+        `  slow proxy configuration (${mode}): websocket ${JSON.stringify(ws)}`,
+      );
+      if (mode === "direct") {
+        rep.check(
+          "slow proxy configuration (direct): the relay WebSocket does not wait for the PAC file",
+          typeof ws?.ms === "number" && ws.ms < 8000,
+          ws,
+        );
+      }
+    }
   } finally {
     await reg(["delete", key, "/v", "AutoConfigURL", "/f"]);
     ac.abort();
