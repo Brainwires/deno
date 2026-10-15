@@ -292,6 +292,8 @@ export async function packageApp(env: Env, spec: AppSpec): Promise<Packaged> {
 export interface Launched {
   child: Deno.ChildProcess;
   pid: number;
+  /** Every process this launch started, seen while it ran (kill()). */
+  tree: ProcessTree;
   logFile: string;
   exited: Promise<Deno.CommandStatus>;
   status: Deno.CommandStatus | null;
@@ -339,13 +341,18 @@ export async function launch(
   const pumps = Promise.all([pump(child.stdout), pump(child.stderr)]).finally(
     () => w.close().catch(() => {}),
   );
+  const tree = new ProcessTree(child.pid);
+  await tree.track();
+  tree.poll();
   const l: Launched = {
     child,
     pid: child.pid,
+    tree,
     logFile,
     status: null,
     exited: child.status.then(async (s) => {
       l.status = s;
+      tree.stopPolling();
       await pumps.catch(() => {});
       return s;
     }),
@@ -361,18 +368,220 @@ export async function waitExit(
   return await Promise.race([l.exited, sleep(ms).then(() => null)]);
 }
 
+// ---------------------------------------------------------------------------
+// Killing: by pid and start time, never by command-line pattern. Chromium
+// re-execs its zygote, renderer and GPU helpers through /proc/self/exe, so
+// their command line need not name the artifact; a pattern match (pkill -f)
+// missed them and they leaked into the next launch.
+
+/** A process as the OS lists it: its parent, its start time (a reused pid
+ * has another start time) and its state (`Z`: a zombie, which has already
+ * let go of its files and locks). */
+export interface ProcInfo {
+  ppid: number;
+  start: string;
+  state: string;
+}
+
+/** Every process on the machine (Linux: /proc/<pid>/stat; macOS: ps). */
+export async function processTable(): Promise<Map<number, ProcInfo>> {
+  const t = new Map<number, ProcInfo>();
+  if (OS === "linux") {
+    const reads: Promise<void>[] = [];
+    for await (const e of Deno.readDir("/proc")) {
+      if (!/^\d+$/.test(e.name)) continue;
+      reads.push(
+        Deno.readTextFile(`/proc/${e.name}/stat`).then((stat) => {
+          // `pid (comm) state ppid ...`: comm may hold spaces and parens.
+          const f = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
+          // Fields 4 (ppid) and 22 (starttime, clock ticks since boot).
+          t.set(Number(e.name), {
+            ppid: Number(f[1]),
+            start: f[19],
+            state: f[0],
+          });
+        }, () => {/* exited meanwhile */}),
+      );
+    }
+    await Promise.all(reads);
+  } else {
+    const r = await sh("ps", ["-A", "-o", "pid=,ppid=,stat=,lstart="]);
+    for (const line of r.out.split("\n")) {
+      const f = line.trim().split(/\s+/);
+      if (f.length < 4 || !/^\d+$/.test(f[0])) continue;
+      t.set(Number(f[0]), {
+        ppid: Number(f[1]),
+        start: f.slice(3).join(" "),
+        state: f[2],
+      });
+    }
+  }
+  return t;
+}
+
+/** Wait (up to `ms`) until none of `pids` runs as the process `start` names
+ * (a zombie has ended); the ones still running. A SIGKILLed process can take
+ * a while to end (a write to disk in progress), and until it has ended it
+ * still holds its locks: the next launch's engine would find its profile's
+ * databases locked (Chromium's localStorage then runs in memory only). */
+async function waitGone(
+  pids: Map<number, string>,
+  ms = 10_000,
+): Promise<number[]> {
+  const until = Date.now() + ms;
+  for (;;) {
+    const t = await processTable();
+    const left = [...pids].filter(([pid, start]) => {
+      const p = t.get(pid);
+      return p?.start === start && !p.state.startsWith("Z");
+    }).map(([pid]) => pid);
+    if (!left.length || Date.now() > until) return left;
+    await sleep(50);
+  }
+}
+
+function signal(pid: number, sig: Deno.Signal) {
+  if (pid <= 1 || pid === Deno.pid) return;
+  try {
+    Deno.kill(pid, sig);
+  } catch { /* gone */ }
+}
+
+/** A launched process and every descendant seen while it ran, each with its
+ * start time. A descendant reparented after its parent exited (to init or a
+ * subreaper) is still tracked once it was seen. */
+export class ProcessTree {
+  readonly seen = new Map<number, string>();
+  #timer: ReturnType<typeof setInterval> | undefined;
+  #busy = false;
+
+  constructor(readonly root: number) {}
+
+  /** Take a snapshot and add every live descendant of a tracked process. */
+  async track(): Promise<Map<number, ProcInfo>> {
+    const t = await processTable();
+    this.absorb(t);
+    return t;
+  }
+
+  /** Add the descendants of tracked processes in `t`. */
+  absorb(t: Map<number, ProcInfo>) {
+    const root = t.get(this.root);
+    if (!this.seen.has(this.root) && root) this.seen.set(this.root, root.start);
+    const children = new Map<number, number[]>();
+    for (const [pid, p] of t) {
+      const c = children.get(p.ppid);
+      if (c) c.push(pid);
+      else children.set(p.ppid, [pid]);
+    }
+    // Walk from every tracked process still alive as the one recorded.
+    const queue = [...this.seen].filter(([pid, start]) =>
+      t.get(pid)?.start === start
+    ).map(([pid]) => pid);
+    while (queue.length) {
+      for (const c of children.get(queue.pop()!) ?? []) {
+        if (c === Deno.pid || this.seen.has(c)) continue;
+        this.seen.set(c, t.get(c)!.start);
+        queue.push(c);
+      }
+    }
+  }
+
+  /** The tracked processes alive in `t` (same pid, same start time). */
+  alive(t: Map<number, ProcInfo>): number[] {
+    return [...this.seen].filter(([pid, start]) => t.get(pid)?.start === start)
+      .map(([pid]) => pid);
+  }
+
+  /** Snapshot every `ms` until stopPolling() (or kill). */
+  poll(ms = 250) {
+    if (this.#timer !== undefined) return;
+    const timer = setInterval(() => {
+      if (this.#busy) return;
+      this.#busy = true;
+      this.track().catch(() => {}).finally(() => this.#busy = false);
+    }, ms);
+    Deno.unrefTimer(timer);
+    this.#timer = timer;
+  }
+
+  stopPolling() {
+    clearInterval(this.#timer);
+    this.#timer = undefined;
+  }
+}
+
+/** SIGSTOP every live tracked process (nothing forks or is reparented while
+ * the tree is walked), re-walk until no new descendant appears, then SIGKILL
+ * every tracked process whose start time still matches. */
+async function killTree(tree: ProcessTree) {
+  tree.stopPolling();
+  let t = await tree.track();
+  const stopped = new Set<number>();
+  for (let round = 0; round < 20; round++) {
+    const fresh = tree.alive(t).filter((pid) => !stopped.has(pid));
+    if (!fresh.length) break;
+    for (const pid of fresh) {
+      signal(pid, "SIGSTOP");
+      stopped.add(pid);
+    }
+    t = await tree.track();
+  }
+  const doomed = new Map<number, string>();
+  for (const pid of tree.alive(t)) {
+    signal(pid, "SIGKILL");
+    doomed.set(pid, tree.seen.get(pid)!);
+  }
+  const left = await waitGone(doomed);
+  if (left.length) log(`kill: still running after SIGKILL: ${left.join(" ")}`);
+}
+
 /** Kill `l` and everything it started. */
 export async function kill(l: Launched | number, artifact?: string) {
   const pid = typeof l === "number" ? l : l.pid;
   if (OS === "windows") {
     await sh("taskkill", ["/F", "/T", "/PID", String(pid)]);
   } else {
-    try {
-      Deno.kill(pid, "SIGKILL");
-    } catch { /* gone */ }
+    if (typeof l !== "number" && l.status !== null) {
+      // The app ended by itself: what it started (Chromium's storage service
+      // committing the profile, say) is given a moment to end too, as after a
+      // user's quit, rather than being killed mid-write.
+      l.tree.stopPolling();
+      const t = await l.tree.track();
+      await waitGone(
+        new Map(l.tree.alive(t).map((p) => [p, l.tree.seen.get(p)!])),
+        5_000,
+      );
+    }
+    await killTree(typeof l === "number" ? new ProcessTree(l) : l.tree);
   }
   if (artifact) await killByPath(artifact);
   if (typeof l !== "number") await waitExit(l, 10_000);
+}
+
+/** The pids whose executable lives under `dir` (Linux: the /proc/<pid>/exe
+ * link, which a /proc/self/exe re-exec keeps; macOS: ps's comm, the
+ * executable's path as launched). */
+export async function pidsUnder(dir: string): Promise<number[]> {
+  const roots = new Set([dir.replace(/\/+$/, "")]);
+  roots.add((await Deno.realPath(dir).catch(() => dir)).replace(/\/+$/, ""));
+  const under = (exe: string) =>
+    [...roots].some((d) => exe === d || exe.startsWith(d + "/"));
+  const pids: number[] = [];
+  if (OS === "linux") {
+    for await (const e of Deno.readDir("/proc")) {
+      if (!/^\d+$/.test(e.name)) continue;
+      const exe = await Deno.readLink(`/proc/${e.name}/exe`).catch(() => "");
+      if (exe && under(exe)) pids.push(Number(e.name));
+    }
+  } else {
+    const r = await sh("ps", ["-A", "-o", "pid=,comm="]);
+    for (const line of r.out.split("\n")) {
+      const m = line.match(/^\s*(\d+)\s+(.+?)\s*$/);
+      if (m && under(m[2])) pids.push(Number(m[1]));
+    }
+  }
+  return pids.filter((p) => p !== Deno.pid);
 }
 
 /** Kill every process whose executable lives under `dir`. */
@@ -382,8 +591,26 @@ export async function killByPath(dir: string) {
       dir.replace(/'/g, "''")
     }', 'OrdinalIgnoreCase') } | Stop-Process -Force`;
     await sh("powershell", ["-NoProfile", "-Command", ps]);
-  } else {
-    await sh("pkill", ["-KILL", "-f", dir]);
+    return;
+  }
+  // Stop them first, then kill only what still runs from `dir` with the
+  // start time it had: a pid that exited and was reused in between is let go.
+  const before = await processTable();
+  const pids = await pidsUnder(dir);
+  if (!pids.length) return;
+  for (const pid of pids) signal(pid, "SIGSTOP");
+  const after = await processTable();
+  const still = new Set(await pidsUnder(dir));
+  const doomed = new Map<number, string>();
+  for (const pid of pids) {
+    const start = before.get(pid)?.start;
+    const same = start !== undefined && after.get(pid)?.start === start;
+    signal(pid, same && still.has(pid) ? "SIGKILL" : "SIGCONT");
+    if (same && still.has(pid)) doomed.set(pid, start);
+  }
+  const left = await waitGone(doomed);
+  if (left.length) {
+    log(`killByPath: still running after SIGKILL: ${left.join(" ")}`);
   }
 }
 
