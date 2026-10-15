@@ -32,6 +32,13 @@ const STEPS = [
   { how: "deno-exit", code: 5 },
 ];
 
+// Then quit-and-relaunch at once, without the runner ending what the
+// previous launch started (E2E_EXIT_QUICK_RELAUNCHES, default 6): the
+// previous launch's helpers may still hold the profile's LevelDB LOCK files
+// when the next one starts, which ran its localStorage in memory only and
+// lost what the page stored (laufey now waits for both).
+const QUICK = Number(Deno.env.get("E2E_EXIT_QUICK_RELAUNCHES") ?? 6);
+
 export async function run(env: Env, rep: AreaReport) {
   const scheme = `dnxexit${env.nonce}`;
   const origin = `${scheme}://app`;
@@ -46,9 +53,18 @@ export async function run(env: Env, rep: AreaReport) {
   await clearResults("exit");
   let previous: string | null = null;
   let n = 0;
-  for (const step of STEPS) {
+  const steps = [
+    ...STEPS.map((s) => ({ ...s, quick: false })),
+    ...Array.from({ length: QUICK }, () => ({
+      how: "quit",
+      code: 0,
+      quick: true,
+    })),
+  ];
+  const pending: Awaited<ReturnType<typeof launch>>[] = [];
+  for (const step of steps) {
     const label = `#${++n} ${step.how}(${step.code})`;
-    await writeParams("exit", step);
+    await writeParams("exit", { how: step.how, code: step.code });
     const seen = await seenResults("exit");
     const token = `${env.nonce}-exit-${n}`;
     const l = await launch(env, app.exe, [], {
@@ -99,6 +115,12 @@ export async function run(env: Env, rep: AreaReport) {
       );
     }
     previous = page?.value ?? null;
-    await kill(l, app.artifact);
+    if (step.quick) {
+      // Relaunch at once; what this launch started is ended at the end.
+      pending.push(l);
+    } else {
+      await kill(l, app.artifact);
+    }
   }
+  for (const l of pending) await kill(l, app.artifact);
 }
