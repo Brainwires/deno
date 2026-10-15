@@ -942,16 +942,24 @@ where the changes are discussed.
 35. **laufey `integration/denext20` host changes** (from `denext.20`, no runtime
     API): the navigation guard's per-window budget of browser opens (3 a
     second); the Windows CEF host's proxy warm-up and `"proxy"` launch setting
-    (`LAUFEY_PROXY`: `system`, `system-resolver`, `direct`); a team-signed macOS
-    CEF app's cookie key in a keychain item of its own
+    (`LAUFEY_PROXY`: `system`, `direct`; WinHTTP per-request resolution was
+    dropped: under a 12 s PAC file the relay WebSocket waited 11.7 s with
+    `system`, 14 ms with `direct`, and timed out at 45 s with it); a team-signed
+    macOS CEF app's cookie key in a keychain item of its own
     (`"<app id> Safe Storage"`, the mock-keychain profile migrated; the
     `SecItem*` interposers ship as
     `Contents/MacOS/liblaufey_keychain_interpose.dylib`, which the packaging
     signs with the other Mach-O files there); the CEF hosts waiting for the
     profile's LevelDB LOCK files before `CefInitialize` and for their helpers
-    (not Linux's zygotes) after `CefShutdown`. The exit e2e area quits and
-    relaunches at once to check localStorage survives, and the deeplink area
-    logs the scheme owner over time after a forced registration.
+    after `CefShutdown` (only `--type=` children: not the zygotes, which had
+    added 5 s to every quit on Linux, the crash handler or the app's own
+    processes). On a KDE Plasma 6 box (4 cores, 12 busy loops), 50 `exit` area
+    runs (550 launches, 6 of each 11 a quit-and-relaunch at once) without the
+    LOCK wait and 50 with it all passed, with no LOCK held at a relaunch
+    (`fuser` never triggered) and the same run time (81.5 s and 82.5 s on
+    average): the race the CI runs hit did not reproduce there. The exit e2e
+    area quits and relaunches at once to check localStorage survives, and the
+    deeplink area logs the scheme owner over time after a forced registration.
 
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-35) are what the prebuilt
 `libdenort` carries. The CLI-side parts (for example writing

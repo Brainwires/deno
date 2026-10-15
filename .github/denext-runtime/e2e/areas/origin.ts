@@ -224,8 +224,10 @@ async function slowProxyConfig(
   try {
     // Each proxy mode of the CEF host (laufey's "proxy" launch key, set
     // through LAUFEY_PROXY here): how long the page's first WebSocket to the
-    // loopback relay waits under a PAC file that takes 12 s to arrive.
-    for (const mode of ["system", "system-resolver", "direct"]) {
+    // loopback relay waits under a PAC file that takes 12 s to arrive. (A
+    // third mode, WinHTTP per-request resolution, timed the WebSocket out at
+    // 45 s and was dropped from laufey.)
+    for (const mode of ["system", "direct"]) {
       await clearResults("origin");
       await writeParams("origin", { origin, backend: env.backend });
       const res = await launchAndCollect(
