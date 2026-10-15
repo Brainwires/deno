@@ -469,6 +469,10 @@ export async function run(env: Env, rep: AreaReport) {
           of?.afterForce?.owner === "self",
         of,
       );
+      // The owner over the 8 s after the forced write: settles whether a
+      // failure above is LaunchServices converging late or the write not
+      // landing at all.
+      log(`  A forced: owner timeline ${JSON.stringify(of?.forceTimeline)}`);
       await stopAll();
     } finally {
       await sh(LSREGISTER, ["-u", stub]);
