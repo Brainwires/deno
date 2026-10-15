@@ -960,6 +960,13 @@ where the changes are discussed.
     average): the race the CI runs hit did not reproduce there. The exit e2e
     area quits and relaunches at once to check localStorage survives, and the
     deeplink area logs the scheme owner over time after a forced registration.
+    On Windows, a file dialog's abort that reaches laufey's I/O thread before
+    the COM dialog exists is remembered and settles the dialog cancelled without
+    showing it (it used to be dropped and the dialog stayed open, a likely cause
+    of the dnd area's abort check timing out once on a hosted runner); laufey's
+    CI covers it with `LAUFEY_TEST_WIN_DIALOG_SETUP_PUMP_MS` and
+    `dialog_abort_stress`'s 0 ms abort. The e2e artifact now carries each app's
+    `w/e2e-results` (for example `dialogWindowAfterMs`).
 
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-35) are what the prebuilt
 `libdenort` carries. The CLI-side parts (for example writing

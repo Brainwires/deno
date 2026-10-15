@@ -57,7 +57,7 @@ concurrency:
 
 env:
   # laufey `denext/integration` as of the first runtime release.
-  LAUFEY_SHA: ae841aa0cf218b29de766904937893f86348ec21
+  LAUFEY_SHA: d296cd7f62e6b9b1b886ca17cba5464a80cbae61
   LAUFEY_REPOSITORY: Brainwires/laufey
   # The stock CLI the archives are smoke-tested with (and that denext runs).
   STOCK_DENO_VERSION: 2.9.7
@@ -933,6 +933,9 @@ jobs:
           E2E_SESSION_TYPE: unset
         run: bash .github/denext-runtime/e2e/e2e.sh
 
+      # The reports, the launch logs and each app's own results file
+      # (w/e2e-results: what it recorded with r.set / r.mark, such as the
+      # dnd area's dialogWindowAfterMs), to tell a slow runner from a bug.
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: ${{ !cancelled() }}
         with:
@@ -940,13 +943,18 @@ jobs:
           path: |
             ${{ runner.temp }}/e2e-out/
             ${{ runner.temp }}/e2e-webview/w/logs/
+            ${{ runner.temp }}/e2e-webview/w/e2e-results/
             ${{ runner.temp }}/e2e-cef/w/logs/
+            ${{ runner.temp }}/e2e-cef/w/e2e-results/
             ${{ runner.temp }}/e2e-out-keyring/
             ${{ runner.temp }}/e2e-keyring/w/logs/
+            ${{ runner.temp }}/e2e-keyring/w/e2e-results/
             ${{ runner.temp }}/e2e-out-keyring-kwallet/
             ${{ runner.temp }}/e2e-keyring-kwallet/w/logs/
+            ${{ runner.temp }}/e2e-keyring-kwallet/w/e2e-results/
             ${{ runner.temp }}/e2e-out-keyring-persist/
             ${{ runner.temp }}/e2e-keyring-persist/w/logs/
+            ${{ runner.temp }}/e2e-keyring-persist/w/e2e-results/
           retention-days: 14
           if-no-files-found: warn
 
