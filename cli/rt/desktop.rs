@@ -71,6 +71,8 @@ pub const DESKTOP_JS: &str = r#"
     op_desktop_schedule_notification,
     op_desktop_list_scheduled_notifications,
     op_desktop_cancel_notification,
+    op_desktop_list_delivered_notifications,
+    op_desktop_remove_delivered_notifications,
     op_desktop_request_notification_permission,
     op_desktop_query_notification_permission,
     op_desktop_screens,
@@ -2413,25 +2415,18 @@ pub const DESKTOP_JS: &str = r#"
       return tag;
     },
     async getScheduled() {
-      const list = await op_desktop_list_scheduled_notifications();
-      return list.map((n) => {
-        let data;
-        if (typeof n.data === "string") {
-          try {
-            data = JSON.parse(n.data);
-          } catch {
-            data = n.data;
-          }
-        }
-        return {
-          tag: n.tag,
-          title: n.title,
-          body: n.body,
-          at: new Date(n.at),
-          data,
-          actions: n.actions,
-        };
-      });
+      return notificationList(await op_desktop_list_scheduled_notifications());
+    },
+    async getDelivered() {
+      return notificationList(await op_desktop_list_delivered_notifications());
+    },
+    removeDelivered(tags = undefined) {
+      if (tags === undefined || tags === null) {
+        op_desktop_remove_delivered_notifications(null);
+        return;
+      }
+      const list = typeof tags === "string" ? [tags] : Array.from(tags, String);
+      if (list.length > 0) op_desktop_remove_delivered_notifications(list);
     },
     cancel(tag) {
       op_desktop_cancel_notification(String(tag));
@@ -2445,6 +2440,26 @@ pub const DESKTOP_JS: &str = r#"
       return s;
     },
   };
+  function notificationList(list) {
+    return list.map((n) => {
+      let data;
+      if (typeof n.data === "string") {
+        try {
+          data = JSON.parse(n.data);
+        } catch {
+          data = n.data;
+        }
+      }
+      return {
+        tag: n.tag,
+        title: n.title,
+        body: n.body,
+        at: new Date(n.at),
+        data,
+        actions: n.actions,
+      };
+    });
+  }
   Object.defineProperty(desktop, "notifications", {
     value: Object.freeze(notificationsApi),
     configurable: true,
@@ -3483,6 +3498,8 @@ mod tests {
     for api in [
       "async schedule(options)",
       "async getScheduled()",
+      "async getDelivered()",
+      "removeDelivered(tags = undefined)",
       "cancel(tag)",
       "async requestPermission(options = undefined)",
       "Object.defineProperty(desktop, \"notifications\"",

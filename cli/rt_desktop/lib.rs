@@ -57,7 +57,7 @@ use denort::run::RunOptions;
 /// makes the failure mode obvious instead of "the desktop app silently won't
 /// launch".
 const _: () = assert!(
-  laufey::LAUFEY_API_VERSION == 48,
+  laufey::LAUFEY_API_VERSION == 49,
   "LAUFEY_API_VERSION mismatch: update this assert and the prebuilt backend release pin in cli/tools/desktop.rs when laufey bumps its API version",
 );
 
@@ -234,6 +234,27 @@ fn trusted_bridge_origins(
     out.push(origin);
   }
   out
+}
+
+/// A laufey notification list entry as the runtime reports it.
+fn scheduled_notification_info(
+  n: laufey::ScheduledNotification,
+) -> deno_runtime::ops::desktop::ScheduledNotificationInfo {
+  deno_runtime::ops::desktop::ScheduledNotificationInfo {
+    tag: n.tag,
+    title: n.title,
+    body: n.body,
+    at: n.at_ms,
+    data: n.data,
+    actions: n
+      .actions
+      .into_iter()
+      .map(|a| deno_runtime::ops::desktop::NotificationActionInfo {
+        action: a.id,
+        title: a.title,
+      })
+      .collect(),
+  }
 }
 
 /// The origins every window's top-level frame may load besides the one the
@@ -1721,27 +1742,41 @@ impl denort::desktop::DesktopApi for WefDesktopApi {
       rx.await
         .unwrap_or_default()
         .into_iter()
-        .map(|n| deno_runtime::ops::desktop::ScheduledNotificationInfo {
-          tag: n.tag,
-          title: n.title,
-          body: n.body,
-          at: n.at_ms,
-          data: n.data,
-          actions: n
-            .actions
-            .into_iter()
-            .map(|a| deno_runtime::ops::desktop::NotificationActionInfo {
-              action: a.id,
-              title: a.title,
-            })
-            .collect(),
-        })
+        .map(scheduled_notification_info)
         .collect()
     })
   }
 
   fn cancel_notification(&self, tag: &str) {
     laufey::cancel_notification(tag);
+  }
+
+  fn list_delivered_notifications(
+    &self,
+  ) -> deno_runtime::ops::desktop::DesktopFuture<
+    Vec<deno_runtime::ops::desktop::ScheduledNotificationInfo>,
+  > {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    laufey::list_delivered_notifications(move |list| {
+      let _ = tx.send(list);
+    });
+    Box::pin(async move {
+      rx.await
+        .unwrap_or_default()
+        .into_iter()
+        .map(scheduled_notification_info)
+        .collect()
+    })
+  }
+
+  fn remove_delivered_notifications(&self, tags: Option<&[String]>) {
+    match tags {
+      None => laufey::remove_delivered_notifications(None),
+      Some(tags) => {
+        let refs: Vec<&str> = tags.iter().map(String::as_str).collect();
+        laufey::remove_delivered_notifications(Some(&refs));
+      }
+    }
   }
 
   fn notification_capabilities(
@@ -1755,6 +1790,7 @@ impl denort::desktop::DesktopApi for WefDesktopApi {
       actions: c.actions(),
       clicks: c.clicks(),
       cold_start: c.cold_start(),
+      delivered: c.delivered(),
     }
   }
 

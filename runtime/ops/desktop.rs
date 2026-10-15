@@ -1580,6 +1580,9 @@ pub struct NotificationCapabilitiesInfo {
   pub clicks: bool,
   /// A click while the app isn't running launches it and is delivered.
   pub cold_start: bool,
+  /// `getDelivered()` / `removeDelivered()` read and clear the OS
+  /// notification center's list (laufey API 49: macOS, Windows).
+  pub delivered: bool,
 }
 
 /// An action button (`{ action, title }`, the Web Notifications shape).
@@ -2596,6 +2599,16 @@ pub trait DesktopApi: Send + Sync + 'static {
   /// Cancel the scheduled notification `tag` and remove delivered ones with
   /// that tag (laufey API 41).
   fn cancel_notification(&self, _tag: &str) {}
+  /// The app's notifications the OS notification center still shows,
+  /// oldest first; `at` is the delivery time, or 0 (laufey API 49).
+  fn list_delivered_notifications(
+    &self,
+  ) -> DesktopFuture<Vec<ScheduledNotificationInfo>> {
+    Box::pin(async { Vec::new() })
+  }
+  /// Remove delivered notifications with `tags`, or all the app's when
+  /// `tags` is `None` (laufey API 49).
+  fn remove_delivered_notifications(&self, _tags: Option<&[String]>) {}
   fn notification_capabilities(&self) -> NotificationCapabilitiesInfo {
     NotificationCapabilitiesInfo::default()
   }
@@ -5449,6 +5462,43 @@ async fn op_desktop_list_scheduled_notifications(
   }
 }
 
+/// `Deno.desktop.notifications.getDelivered()` (laufey API 49).
+#[op2]
+#[serde]
+async fn op_desktop_list_delivered_notifications(
+  state: std::rc::Rc<std::cell::RefCell<OpState>>,
+) -> Vec<ScheduledNotificationInfo> {
+  match desktop_api(&state) {
+    Some(api) => api.list_delivered_notifications().await,
+    None => Vec::new(),
+  }
+}
+
+/// `Deno.desktop.notifications.removeDelivered(tags?)` (laufey API 49):
+/// `None` removes all the app's delivered notifications.
+#[op2]
+fn op_desktop_remove_delivered_notifications(
+  state: &mut OpState,
+  #[serde] tags: Option<Vec<String>>,
+) {
+  let tags = tags.map(|tags| {
+    tags
+      .into_iter()
+      .filter(|t| {
+        !t.is_empty()
+          && t.len() <= MAX_NOTIFICATION_TAG_BYTES
+          && !t.contains('\0')
+      })
+      .collect::<Vec<_>>()
+  });
+  if tags.as_ref().is_some_and(|t| t.is_empty()) {
+    return;
+  }
+  if let Some(api) = state.try_borrow::<Arc<dyn DesktopApi>>() {
+    api.remove_delivered_notifications(tags.as_deref());
+  }
+}
+
 /// `Deno.desktop.notifications.cancel(tag)` (laufey API 41).
 #[op2(fast)]
 fn op_desktop_cancel_notification(state: &mut OpState, #[string] tag: &str) {
@@ -5915,6 +5965,8 @@ deno_core::extension!(
     op_desktop_schedule_notification,
     op_desktop_list_scheduled_notifications,
     op_desktop_cancel_notification,
+    op_desktop_list_delivered_notifications,
+    op_desktop_remove_delivered_notifications,
     op_desktop_send_error_report,
     op_desktop_request_notification_permission,
     op_desktop_query_notification_permission,
@@ -7111,6 +7163,7 @@ mod tests {
         "actions": false,
         "clicks": false,
         "coldStart": true,
+        "delivered": false,
       })
     );
     assert_eq!(

@@ -2214,6 +2214,10 @@ declare namespace Deno {
        * `launchNotificationResponses` (macOS, Windows; not Linux, whose
        * notification servers send clicks to the process that posted). */
       coldStart: boolean;
+      /** `getDelivered()` / `removeDelivered()` read and clear the OS
+       * notification center's list (macOS, Windows; not Linux, whose
+       * notification servers keep no list for apps). */
+      delivered: boolean;
     }
 
     /** Options of {@linkcode Deno.desktop.notifications.schedule}. */
@@ -2261,6 +2265,15 @@ declare namespace Deno {
       schedule(options: ScheduledNotificationOptions): Promise<string>;
       /** The pending scheduled notifications, soonest first. */
       getScheduled(): Promise<ScheduledNotification[]>;
+      /** The app's notifications the notification center still shows
+       * (macOS, Windows), oldest first. `at` is when each was delivered
+       * (macOS), or the epoch where the OS doesn't say (Windows). Empty where
+       * `capabilities().delivered` is false. */
+      getDelivered(): Promise<ScheduledNotification[]>;
+      /** Remove delivered notifications from the notification center: those
+       * with the given tags, or all the app's when called without. Scheduled
+       * ones are left alone (`cancel()` removes both). */
+      removeDelivered(tags?: string | string[]): void;
       /** Cancel the scheduled notification `tag`, and remove a delivered one
        * with that tag from the notification center. */
       cancel(tag: string): void;

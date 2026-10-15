@@ -269,9 +269,16 @@ await r.step("notifications", async () => {
   const caps = desktop.notifications.capabilities();
   r.set("notificationCapabilities", caps);
   r.check(
-    "notifications.capabilities() reports six booleans",
-    ["show", "schedule", "schedulePersists", "actions", "clicks", "coldStart"]
-      .every((k) => typeof caps[k] === "boolean"),
+    "notifications.capabilities() reports seven booleans",
+    [
+      "show",
+      "schedule",
+      "schedulePersists",
+      "actions",
+      "clicks",
+      "coldStart",
+      "delivered",
+    ].every((k) => typeof caps[k] === "boolean"),
     caps,
   );
   r.check(
@@ -293,7 +300,8 @@ await r.step("notifications", async () => {
     r.check(
       "Linux with a notification server: granted, show / schedule / actions / clicks on, no cold start",
       perm === "granted" && caps.show && caps.schedule && caps.actions &&
-        caps.clicks && !caps.coldStart && !caps.schedulePersists,
+        caps.clicks && !caps.coldStart && !caps.schedulePersists &&
+        !caps.delivered,
       caps,
     );
   }
@@ -301,7 +309,7 @@ await r.step("notifications", async () => {
     r.check(
       "Windows: show / schedule (persisting) / actions / clicks / cold start",
       caps.show && caps.schedule && caps.schedulePersists && caps.actions &&
-        caps.clicks && caps.coldStart,
+        caps.clicks && caps.coldStart && caps.delivered,
       caps,
     );
   }
@@ -544,6 +552,20 @@ await r.step("notifications", async () => {
       );
     } else if (OS === "windows") {
       await sleep(6000);
+      // The delivered toast is in the Action Center's list until removed.
+      let delivered: any[] = [];
+      await waitFor(async () => {
+        delivered = await desktop.notifications.getDelivered();
+        return delivered.some((n: any) => n.tag === "e2e-due");
+      }, 5000);
+      r.check(
+        "getDelivered() lists a delivered notification with its title and data",
+        delivered.some((n: any) =>
+          n.tag === "e2e-due" && n.title === "E2E due" &&
+          JSON.stringify(n.data) === '{"due":true}'
+        ),
+        delivered,
+      );
       const why = await osClick("e2e-due", "E2E due", null, '{"due":true}');
       if (why) r.fail("toast activation", why);
       else {
@@ -567,6 +589,32 @@ await r.step("notifications", async () => {
       r.na(
         "a scheduled notification's click is a notificationresponse",
         "macOS delivers a click only from a person clicking the banner",
+      );
+    }
+    if (caps.delivered) {
+      desktop.notifications.removeDelivered("e2e-due");
+      r.check(
+        "removeDelivered(tag) removes it from the notification center",
+        await waitFor(
+          async () =>
+            !(await desktop.notifications.getDelivered()).some((n: any) =>
+              n.tag === "e2e-due"
+            ),
+          5000,
+        ),
+      );
+      desktop.notifications.removeDelivered();
+      r.check(
+        "removeDelivered() empties the app's list",
+        await waitFor(
+          async () => (await desktop.notifications.getDelivered()).length === 0,
+          5000,
+        ),
+      );
+    } else {
+      r.check(
+        "getDelivered() is empty where the OS keeps no list",
+        (await desktop.notifications.getDelivered()).length === 0,
       );
     }
     desktop.notifications.cancel("e2e-due");
