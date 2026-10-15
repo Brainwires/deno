@@ -2286,6 +2286,48 @@ declare namespace Deno {
       actions: NotificationAction[];
     }
 
+    /** An activity the app is engaged in, for Handoff and Spotlight. */
+    export interface UserActivity {
+      /** Reverse-DNS; listed in the bundle's `NSUserActivityTypes` for
+       * another device (or a Spotlight result) to continue it. */
+      type: string;
+      title?: string;
+      /** An http(s) URL a device without the app opens in a browser. */
+      url?: string;
+      /** String values; all are required to continue the activity. */
+      userInfo?: Record<string, string>;
+      keywords?: string[];
+      /** Offered to the user's other devices (default `true`). */
+      handoff?: boolean;
+      /** Indexed by Spotlight (default `false`). */
+      searchable?: boolean;
+    }
+
+    /** A user activity the user continued. */
+    export interface ContinuedUserActivity {
+      type: string;
+      title: string;
+      url: string | null;
+      userInfo: Record<string, string>;
+    }
+
+    /** Handoff and Spotlight through `NSUserActivity` (macOS). Windows and
+     * Linux have none: `set()` and `clear()` return `false` there.
+     *
+     * @experimental */
+    export const userActivity: {
+      /** Make `activity` the app's current activity. Returns `false` for an
+       * invalid one and where there are none. */
+      set(activity: UserActivity): boolean;
+      /** End the current activity. */
+      clear(): boolean;
+      /** Call `listener` for each activity the user continues (Handoff from
+       * another device, a Spotlight result); one that launched the app
+       * arrives once a listener is added. Returns a function that removes
+       * it. */
+      onContinue(listener: (activity: ContinuedUserActivity) => void): () => void;
+    };
+
     /** Scheduled notifications and notification capabilities.
      *
      * Mechanisms: macOS `UNUserNotificationCenter` (a calendar or

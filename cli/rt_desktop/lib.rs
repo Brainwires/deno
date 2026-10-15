@@ -236,6 +236,75 @@ fn trusted_bridge_origins(
   out
 }
 
+/// Continued user activities (laufey API 49): laufey's handler is registered
+/// the first time the app asks for one (so a launch activity laufey held
+/// arrives then), and feeds a channel the app's loop reads.
+mod user_activity {
+  use std::sync::OnceLock;
+
+  type Receiver = tokio::sync::mpsc::UnboundedReceiver<String>;
+
+  fn receiver() -> &'static tokio::sync::Mutex<Option<Receiver>> {
+    static RX: OnceLock<tokio::sync::Mutex<Option<Receiver>>> = OnceLock::new();
+    RX.get_or_init(|| {
+      let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+      if !laufey::on_user_activity(move |json| {
+        let _ = tx.send(json);
+      }) {
+        return tokio::sync::Mutex::new(None);
+      }
+      tokio::sync::Mutex::new(Some(rx))
+    })
+  }
+
+  pub async fn next() -> Option<String> {
+    let mut guard = receiver().lock().await;
+    guard.as_mut()?.recv().await
+  }
+
+  /// The JS side's activity JSON, re-read into laufey's shape (the backend
+  /// validates it again).
+  pub fn set_from_json(json: &str) -> bool {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(json) else {
+      return false;
+    };
+    let s = |k: &str| v.get(k).and_then(|x| x.as_str()).map(str::to_string);
+    let Some(activity_type) = s("type") else {
+      return false;
+    };
+    let user_info = v
+      .get("userInfo")
+      .and_then(|x| x.as_object())
+      .map(|o| {
+        o.iter()
+          .filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string())))
+          .collect()
+      })
+      .unwrap_or_default();
+    let keywords = v
+      .get("keywords")
+      .and_then(|x| x.as_array())
+      .map(|a| {
+        a.iter()
+          .filter_map(|k| k.as_str().map(str::to_string))
+          .collect()
+      })
+      .unwrap_or_default();
+    laufey::set_user_activity(Some(&laufey::UserActivity {
+      activity_type,
+      title: s("title").unwrap_or_default(),
+      url: s("url"),
+      user_info,
+      keywords,
+      handoff: v.get("handoff").and_then(|x| x.as_bool()).unwrap_or(true),
+      searchable: v
+        .get("searchable")
+        .and_then(|x| x.as_bool())
+        .unwrap_or(false),
+    }))
+  }
+}
+
 /// A laufey notification list entry as the runtime reports it.
 fn scheduled_notification_info(
   n: laufey::ScheduledNotification,
@@ -1085,6 +1154,19 @@ impl denort::desktop::DesktopApi for WefDesktopApi {
         laufey::DragResult::Failed => DragOutcome::Failed,
       }
     })
+  }
+
+  fn set_user_activity(&self, activity_json: Option<&str>) -> bool {
+    match activity_json {
+      None => laufey::set_user_activity(None),
+      Some(json) => user_activity::set_from_json(json),
+    }
+  }
+
+  fn next_user_activity(
+    &self,
+  ) -> deno_runtime::ops::desktop::DesktopFuture<Option<String>> {
+    Box::pin(user_activity::next())
   }
 
   fn share(

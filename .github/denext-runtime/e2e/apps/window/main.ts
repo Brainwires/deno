@@ -127,6 +127,33 @@ await r.step("share sheet", async () => {
     );
   }
 });
+await r.step("user activity", async () => {
+  const set = (desktop as any).userActivity.set({
+    type: "dev.denext.e2e.view",
+    title: "E2E",
+    url: "https://example.com/e2e",
+    searchable: false,
+  });
+  r.check(
+    "userActivity.set() makes it current on macOS, false elsewhere",
+    set === (OS === "darwin"),
+    set,
+  );
+  r.check(
+    "userActivity.set() refuses a type that isn't reverse-DNS",
+    (desktop as any).userActivity.set({ type: "nodots" }) === false,
+  );
+  r.check(
+    "userActivity.clear() ends it on macOS",
+    (desktop as any).userActivity.clear() === (OS === "darwin"),
+  );
+  const off = (desktop as any).userActivity.onContinue(() => {});
+  r.check(
+    "userActivity.onContinue() returns a remover",
+    typeof off === "function",
+  );
+  off();
+});
 await sleep(2500);
 await r.step("window API", async () => {
   // --- the initial window, sized by app.json's initialWindow ---

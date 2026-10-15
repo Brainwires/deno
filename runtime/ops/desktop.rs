@@ -2363,6 +2363,17 @@ pub trait DesktopApi: Send + Sync + 'static {
   ) -> DesktopFuture<DragOutcome> {
     Box::pin(async { DragOutcome::Failed })
   }
+  /// Make `activity_json` the app's current user activity (Handoff,
+  /// Spotlight; laufey API 49), or end it with `None`. False where there are
+  /// none (Windows, Linux) or for an invalid activity.
+  fn set_user_activity(&self, _activity_json: Option<&str>) -> bool {
+    false
+  }
+  /// The next activity the user continues (its JSON), or `None` once there
+  /// will be none (laufey API 49).
+  fn next_user_activity(&self) -> DesktopFuture<Option<String>> {
+    Box::pin(async { None })
+  }
   /// Show the OS share sheet over `window_id` (laufey API 49); the future
   /// resolves when it ends (or at once for a refusal).
   fn share(
@@ -4931,6 +4942,36 @@ async fn op_desktop_share(
   Ok(api.share(window_id, request).await)
 }
 
+/// `Deno.desktop.userActivity.set(activity)` / `clear()` (laufey API 49).
+#[op2]
+fn op_desktop_set_user_activity(
+  state: &mut OpState,
+  #[string] activity_json: Option<String>,
+) -> bool {
+  if activity_json
+    .as_deref()
+    .is_some_and(|j| j.contains('\0') || j.len() > 64 * 1024)
+  {
+    return false;
+  }
+  match state.try_borrow::<Arc<dyn DesktopApi>>() {
+    Some(api) => api.set_user_activity(activity_json.as_deref()),
+    None => false,
+  }
+}
+
+/// The next continued user activity's JSON, or null (laufey API 49).
+#[op2]
+#[string]
+async fn op_desktop_next_user_activity(
+  state: std::rc::Rc<std::cell::RefCell<OpState>>,
+) -> Option<String> {
+  match desktop_api(&state) {
+    Some(api) => api.next_user_activity().await,
+    None => None,
+  }
+}
+
 /// Read permission for each path a drag-out carries.
 fn check_drag_read_permission(
   state: &OpState,
@@ -6057,6 +6098,8 @@ deno_core::extension!(
     op_desktop_list_delivered_notifications,
     op_desktop_remove_delivered_notifications,
     op_desktop_share,
+    op_desktop_set_user_activity,
+    op_desktop_next_user_activity,
     op_desktop_send_error_report,
     op_desktop_request_notification_permission,
     op_desktop_query_notification_permission,
