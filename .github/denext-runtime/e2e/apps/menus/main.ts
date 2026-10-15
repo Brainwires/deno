@@ -32,6 +32,7 @@ import {
 import {
   activate,
   canPressKeys,
+  isForeground,
   type Key,
   pressKeys,
 } from "../_shared/input.ts";
@@ -180,14 +181,17 @@ await r.step("menus", async () => {
   } else {
     await sleep(800);
     win.focus();
-    await activate(TITLE);
+    const foreground = await activate(TITLE);
     await sleep(500);
-    r.mark("accelerator press");
+    // The keys go to whichever window is in the foreground: record whether
+    // it was this one when they were pressed.
+    const atPress = isForeground(TITLE);
+    r.mark(`accelerator press (foreground: ${foreground}, ${atPress})`);
     await pressKeys(["Primary", "Shift", "K"]);
     r.check(
       "an application-menu accelerator fires its item (menuclick)",
       await waitFor(() => clicks.includes("fire"), 8000),
-      clicks,
+      { clicks, foreground, atPress },
     );
   }
 
