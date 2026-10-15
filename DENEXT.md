@@ -944,9 +944,12 @@ where the changes are discussed.
     second); the Windows CEF host's proxy warm-up and `"proxy"` launch setting
     (`LAUFEY_PROXY`: `system`, `system-resolver`, `direct`); a team-signed macOS
     CEF app's cookie key in a keychain item of its own
-    (`"<app id> Safe Storage"`, the mock-keychain profile migrated); the CEF
-    hosts waiting for the profile's LevelDB LOCK files before `CefInitialize`
-    and for their helpers after `CefShutdown`. The exit e2e area quits and
+    (`"<app id> Safe Storage"`, the mock-keychain profile migrated; the
+    `SecItem*` interposers ship as
+    `Contents/MacOS/liblaufey_keychain_interpose.dylib`, which the packaging
+    signs with the other Mach-O files there); the CEF hosts waiting for the
+    profile's LevelDB LOCK files before `CefInitialize` and for their helpers
+    (not Linux's zygotes) after `CefShutdown`. The exit e2e area quits and
     relaunches at once to check localStorage survives, and the deeplink area
     logs the scheme owner over time after a forced registration.
 
