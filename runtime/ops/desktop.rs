@@ -1669,6 +1669,28 @@ impl DragOutcome {
   }
 }
 
+/// What `BrowserWindow.share()` hands the OS share sheet (laufey API 49).
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ShareRequestInfo {
+  pub title: Option<String>,
+  pub text: Option<String>,
+  pub url: Option<String>,
+  #[serde(default)]
+  pub files: Vec<String>,
+  pub x: Option<i32>,
+  pub y: Option<i32>,
+}
+
+/// How a share ended: `outcome` is "completed", "shown", "cancelled",
+/// "not_supported" or "failed"; `detail` the target (completed) or the
+/// reason.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ShareOutcomeInfo {
+  pub outcome: &'static str,
+  pub detail: Option<String>,
+}
+
 /// One filter of a file dialog.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -2340,6 +2362,20 @@ pub trait DesktopApi: Send + Sync + 'static {
     _icon_png: Option<Vec<u8>>,
   ) -> DesktopFuture<DragOutcome> {
     Box::pin(async { DragOutcome::Failed })
+  }
+  /// Show the OS share sheet over `window_id` (laufey API 49); the future
+  /// resolves when it ends (or at once for a refusal).
+  fn share(
+    &self,
+    _window_id: u32,
+    _request: ShareRequestInfo,
+  ) -> DesktopFuture<ShareOutcomeInfo> {
+    Box::pin(async {
+      ShareOutcomeInfo {
+        outcome: "not_supported",
+        detail: None,
+      }
+    })
   }
   /// Show a file dialog. Returns the backend's dialog id (0 when the request
   /// was answered at once) and its outcome; the dialog is requested when this
@@ -4848,6 +4884,53 @@ async fn op_desktop_start_drag(
   )
 }
 
+/// `BrowserWindow.share(data)` (laufey API 49): the files need read
+/// permission (they go to another app).
+#[op2]
+#[serde]
+async fn op_desktop_share(
+  state: std::rc::Rc<std::cell::RefCell<OpState>>,
+  #[smi] window_id: u32,
+  #[serde] request: ShareRequestInfo,
+) -> Result<ShareOutcomeInfo, deno_error::JsErrorBox> {
+  let strings = [&request.title, &request.text, &request.url];
+  if strings
+    .iter()
+    .any(|s| s.as_deref().is_some_and(|s| s.contains('\0')))
+    || request.files.iter().any(|f| f.contains('\0'))
+    || request.files.len() > MAX_DRAG_PATHS
+  {
+    return Err(deno_error::JsErrorBox::type_error(
+      "share(): a string contains a NUL character, or too many files",
+    ));
+  }
+  if request.x.is_some() != request.y.is_some() {
+    return Err(deno_error::JsErrorBox::type_error(
+      "share(): x and y go together",
+    ));
+  }
+  if !request.files.is_empty() {
+    let state = state.borrow();
+    let permissions = state.borrow::<deno_permissions::PermissionsContainer>();
+    for path in &request.files {
+      permissions
+        .check_open(
+          Cow::Borrowed(Path::new(path)),
+          deno_permissions::OpenAccessKind::Read,
+          Some("BrowserWindow.share()"),
+        )
+        .map_err(deno_error::JsErrorBox::from_err)?;
+    }
+  }
+  let Some(api) = desktop_api(&state) else {
+    return Ok(ShareOutcomeInfo {
+      outcome: "not_supported",
+      detail: None,
+    });
+  };
+  Ok(api.share(window_id, request).await)
+}
+
 /// Read permission for each path a drag-out carries.
 fn check_drag_read_permission(
   state: &OpState,
@@ -5973,6 +6056,7 @@ deno_core::extension!(
     op_desktop_cancel_notification,
     op_desktop_list_delivered_notifications,
     op_desktop_remove_delivered_notifications,
+    op_desktop_share,
     op_desktop_send_error_report,
     op_desktop_request_notification_permission,
     op_desktop_query_notification_permission,

@@ -1034,6 +1034,39 @@ declare namespace Deno {
       item: BrowserWindowDragItem,
     ): Promise<"dropped" | "cancelled" | "failed">;
 
+    /** Show the OS share sheet over this window for `data` (at least one of
+     * `text`, `url` or `files`), like the Web Share API. Resolves with how it
+     * ended:
+     *
+     * - `"completed"`: a target was chosen (`target`: its name, where the OS
+     *   says);
+     * - `"shown"`: the sheet opened, and this OS reports nothing more;
+     * - `"cancelled"`, `"not_supported"` (Linux has no share sheet),
+     *   `"failed"` (`reason`).
+     *
+     * - macOS: `NSSharingServicePicker`, anchored at `x`/`y` (the window's
+     *   DIPs; by default its middle).
+     * - Windows: `DataTransferManager` for the window; files go as their
+     *   paths in the text.
+     *
+     * Rejects with a `TypeError` for a wrong argument, and with
+     * `Deno.errors.NotCapable` unless every file is readable
+     * (`--allow-read`): sharing hands the files to another app.
+     *
+     * @experimental */
+    share(data: {
+      title?: string;
+      text?: string;
+      url?: string;
+      files?: string[];
+      x?: number;
+      y?: number;
+    }): Promise<{
+      outcome: "completed" | "shown" | "cancelled" | "not_supported" | "failed";
+      target?: string;
+      reason?: string;
+    }>;
+
     /** Change the title bar style. Returns `false` (and changes nothing)
      * where the backend can't: only macOS has title bar styles. */
     setTitleBarStyle(style: TitleBarStyle): boolean;

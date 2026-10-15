@@ -1087,6 +1087,41 @@ impl denort::desktop::DesktopApi for WefDesktopApi {
     })
   }
 
+  fn share(
+    &self,
+    window_id: u32,
+    request: deno_runtime::ops::desktop::ShareRequestInfo,
+  ) -> deno_runtime::ops::desktop::DesktopFuture<
+    deno_runtime::ops::desktop::ShareOutcomeInfo,
+  > {
+    use deno_runtime::ops::desktop::ShareOutcomeInfo;
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    laufey::share(
+      window_id,
+      &laufey::ShareRequest {
+        title: request.title,
+        text: request.text,
+        url: request.url,
+        files: request.files,
+        point: request.x.zip(request.y),
+      },
+      move |outcome| {
+        let _ = tx.send(outcome);
+      },
+    );
+    Box::pin(async move {
+      let (outcome, detail) = match rx.await {
+        Ok(laufey::ShareOutcome::Completed(d)) => ("completed", d),
+        Ok(laufey::ShareOutcome::Shown) => ("shown", None),
+        Ok(laufey::ShareOutcome::Cancelled) => ("cancelled", None),
+        Ok(laufey::ShareOutcome::NotSupported(d)) => ("not_supported", d),
+        Ok(laufey::ShareOutcome::Failed(d)) => ("failed", d),
+        Err(_) => ("failed", Some("the backend dropped the request".into())),
+      };
+      ShareOutcomeInfo { outcome, detail }
+    })
+  }
+
   fn show_file_dialog(
     &self,
     request: deno_runtime::ops::desktop::FileDialogRequest,

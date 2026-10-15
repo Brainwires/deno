@@ -102,6 +102,32 @@ for (
 }
 
 await sleep(2500);
+await r.step("share sheet", async () => {
+  // The sheet waits for a person, so only what answers without one.
+  const bad = await (win as any).share({ title: "nothing" }).then(
+    () => null,
+    (e: Error) => e,
+  );
+  r.check(
+    "share() with nothing to share is a TypeError",
+    bad instanceof TypeError,
+    bad && describeError(bad),
+  );
+  if (OS === "linux") {
+    const got = await (win as any).share({ text: "hello" });
+    r.check(
+      "share() on Linux: not_supported",
+      got?.outcome === "not_supported",
+      got,
+    );
+  } else {
+    r.na(
+      "share() shows the OS share sheet",
+      "the sheet waits for a person to pick a target",
+    );
+  }
+});
+await sleep(2500);
 await r.step("window API", async () => {
   // --- the initial window, sized by app.json's initialWindow ---
   const want = r.params.initialWindow ?? {};

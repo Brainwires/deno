@@ -788,6 +788,7 @@ const NOT_IMPORTED_OPS = [
   "op_desktop_cancel_notification",
   "op_desktop_list_delivered_notifications",
   "op_desktop_remove_delivered_notifications",
+  "op_desktop_share",
   "op_desktop_send_error_report",
   "op_desktop_request_notification_permission",
   "op_desktop_query_notification_permission",
@@ -905,6 +906,7 @@ const WORKER_EXCLUDED_OPS = [
   "op_desktop_cancel_notification",
   "op_desktop_list_delivered_notifications",
   "op_desktop_remove_delivered_notifications",
+  "op_desktop_share",
 ];
 
 function removeImportedOps(isWorker = false) {

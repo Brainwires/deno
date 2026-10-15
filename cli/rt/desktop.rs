@@ -73,6 +73,7 @@ pub const DESKTOP_JS: &str = r#"
     op_desktop_cancel_notification,
     op_desktop_list_delivered_notifications,
     op_desktop_remove_delivered_notifications,
+    op_desktop_share,
     op_desktop_request_notification_permission,
     op_desktop_query_notification_permission,
     op_desktop_screens,
@@ -801,6 +802,39 @@ pub const DESKTOP_JS: &str = r#"
       throw new TypeError("item.icon must be PNG bytes (a Uint8Array)");
     }
     return await op_desktop_start_drag(this.windowId, [...files], icon);
+  };
+  // share (laufey API 49): the OS share sheet over this window.
+  BrowserWindowPrototype.share = async function share(data) {
+    if (data == null || typeof data !== "object") {
+      throw new TypeError("share takes { title?, text?, url?, files? }");
+    }
+    const request = {};
+    for (const key of ["title", "text", "url"]) {
+      if (data[key] !== undefined && data[key] !== null) {
+        request[key] = String(data[key]);
+      }
+    }
+    if (data.files !== undefined && data.files !== null) {
+      if (
+        !Array.isArray(data.files) ||
+        !data.files.every((f) => typeof f === "string" && f.length > 0)
+      ) {
+        throw new TypeError("data.files must be absolute paths");
+      }
+      request.files = [...data.files];
+    }
+    if (data.x !== undefined || data.y !== undefined) {
+      request.x = Math.round(Number(data.x));
+      request.y = Math.round(Number(data.y));
+    }
+    if (!request.text && !request.url && !request.files?.length) {
+      throw new TypeError("share needs text, a url or files");
+    }
+    const { outcome, detail } = await op_desktop_share(this.windowId, request);
+    const result = { outcome };
+    if (outcome === "completed" && detail) result.target = detail;
+    else if (detail) result.reason = detail;
+    return result;
   };
   // showContextMenu (laufey API 41): resolves once the menu closed, with the
   // chosen item's id (null when it was dismissed); a "contextmenuclose"
@@ -3692,6 +3726,9 @@ mod tests {
     ));
     assert!(DESKTOP_JS.contains(
       "return await op_desktop_start_drag(this.windowId, [...files], icon);"
+    ));
+    assert!(DESKTOP_JS.contains(
+      "BrowserWindowPrototype.share = async function share(data)"
     ));
   }
 
