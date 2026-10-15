@@ -175,6 +175,7 @@ function winLibs() {
         result: "i32",
       },
       SetForegroundWindow: { parameters: ["pointer"], result: "i32" },
+      GetForegroundWindow: { parameters: [], result: "pointer" },
     } as const,
   );
   return win;
@@ -256,8 +257,11 @@ export async function pressKeys(keys: Key[]): Promise<void> {
   ]);
 }
 
-/** Bring the window titled `title` to the front (best effort). */
-export async function activate(title: string): Promise<void> {
+/** Bring the window titled `title` to the front. Resolves with whether it
+ * is known to be there: on Windows, whether it became the foreground window
+ * (synthesized keys go to the foreground window, so a press made while
+ * another window has it is lost); elsewhere true after the attempt. */
+export async function activate(title: string): Promise<boolean> {
   if (OS === "linux") {
     await run("xdotool", [
       "search",
@@ -269,15 +273,37 @@ export async function activate(title: string): Promise<void> {
       .catch(() => {});
   } else if (OS === "windows") {
     // Windows lets a process take the foreground only right after input; an
-    // Alt press counts (the usual workaround for SetForegroundWindow).
+    // Alt press counts (the usual workaround for SetForegroundWindow). The
+    // shell can still refuse or hand the foreground back a moment later
+    // (a hosted runner's shell is busy right after a launch), so ask until
+    // the window is the foreground one, for up to 5 s.
     const w = winLibs().symbols;
-    const h = w.FindWindowW(null, wide(title));
-    if (h) {
-      w.keybd_event(0x12, 0, 0, 0n);
-      w.SetForegroundWindow(h);
-      w.keybd_event(0x12, 0, 2, 0n);
+    const deadline = Date.now() + 5000;
+    for (;;) {
+      const h = w.FindWindowW(null, wide(title));
+      if (h) {
+        w.keybd_event(0x12, 0, 0, 0n);
+        w.SetForegroundWindow(h);
+        w.keybd_event(0x12, 0, 2, 0n);
+        await new Promise((r) => setTimeout(r, 100));
+        const fg = w.GetForegroundWindow();
+        if (fg && Deno.UnsafePointer.equals(fg, h)) return true;
+      }
+      if (Date.now() >= deadline) return false;
+      await new Promise((r) => setTimeout(r, 150));
     }
   }
+  return true;
+}
+
+/** Windows: whether the window titled `title` is the foreground window
+ * (null elsewhere). */
+export function isForeground(title: string): boolean | null {
+  if (OS !== "windows") return null;
+  const w = winLibs().symbols;
+  const h = w.FindWindowW(null, wide(title));
+  const fg = w.GetForegroundWindow();
+  return !!h && !!fg && Deno.UnsafePointer.equals(fg, h);
 }
 
 /** macOS: the NSWindow titled `title`'s style mask and state, for a
