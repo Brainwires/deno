@@ -45,11 +45,16 @@ op_desktop_canonical_accelerator -> null
 op_desktop_get_launch_at_login -> "not-supported"
 op_desktop_set_launch_at_login throws NotCapable: Requires sys access, run again with the --allow-sys flag
 op_desktop_devtools_enabled -> false
-op_desktop_menu_capabilities -> {"appMenu":false,"accelerators":false,"contextMenu":false,"contextClosed":false,"icons":false,"tooltips":false}
-op_desktop_notification_capabilities -> {"show":false,"schedule":false,"schedulePersists":false,"actions":false,"clicks":false,"coldStart":false}
+op_desktop_menu_capabilities -> {"appMenu":false,"accelerators":false,"contextMenu":false,"contextClosed":false,"icons":false,"tooltips":false,"destructive":false}
+op_desktop_notification_capabilities -> {"show":false,"schedule":false,"schedulePersists":false,"actions":false,"clicks":false,"coldStart":false,"delivered":false}
 op_desktop_schedule_notification throws NotCapable: Requires sys access, run again with the --allow-sys flag
 op_desktop_list_scheduled_notifications -> []
 op_desktop_cancel_notification -> null
+op_desktop_list_delivered_notifications -> []
+op_desktop_remove_delivered_notifications -> null
+op_desktop_share -> {"outcome":"not_supported","detail":null}
+op_desktop_set_user_activity -> false
+op_desktop_next_user_activity -> null
 op_desktop_send_error_report -> null
 op_desktop_request_notification_permission -> "unsupported"
 op_desktop_query_notification_permission -> "unsupported"
@@ -71,4 +76,4 @@ BrowserWindow throws NotSupported: BrowserWindow is only available in the main s
 Dock throws NotSupported: Dock is only available in the main scope of a desktop app
 Tray throws NotSupported: Tray is only available in the main scope of a desktop app
 Notification throws NotSupported: Notification is only available in the main scope of a desktop app
-73 exposed, 0 uncovered
+78 exposed, 0 uncovered

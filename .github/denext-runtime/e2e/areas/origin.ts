@@ -237,7 +237,8 @@ async function slowProxyConfig(
         p,
         { env: { LAUFEY_PROXY: mode } },
       );
-      const ws = (res?.data as any)?.page?.ws;
+      const ws = (res?.data as { page?: { ws?: { ms?: number } } } | undefined)
+        ?.page?.ws;
       log(
         `  slow proxy configuration (${mode}): websocket ${JSON.stringify(ws)}`,
       );

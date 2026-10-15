@@ -127,7 +127,7 @@ await r.step("share sheet", async () => {
     );
   }
 });
-await r.step("user activity", async () => {
+await r.step("user activity", () => {
   const set = (desktop as any).userActivity.set({
     type: "dev.denext.e2e.view",
     title: "E2E",
