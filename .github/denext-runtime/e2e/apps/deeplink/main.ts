@@ -82,7 +82,9 @@ if (r.params.force) {
   const timeline: { ms: number; owner: unknown; handler: unknown }[] = [];
   let last = "";
   while (Date.now() - t0 < 8000) {
-    const o: any = await capture(() => desktop.getSchemeOwner(scheme));
+    const o = await capture(() => desktop.getSchemeOwner(scheme)) as
+      | { owner?: unknown; handler?: unknown }
+      | undefined;
     const key = `${o?.owner}|${o?.handler}`;
     if (key !== last) {
       timeline.push({

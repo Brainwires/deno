@@ -3803,9 +3803,10 @@ mod tests {
     assert!(DESKTOP_JS.contains(
       "return await op_desktop_start_drag(this.windowId, [...files], icon);"
     ));
-    assert!(DESKTOP_JS.contains(
-      "BrowserWindowPrototype.share = async function share(data)"
-    ));
+    assert!(
+      DESKTOP_JS
+        .contains("BrowserWindowPrototype.share = async function share(data)")
+    );
   }
 
   #[test]

@@ -170,6 +170,22 @@ const cases = {
   op_desktop_list_scheduled_notifications: () =>
     ops.op_desktop_list_scheduled_notifications(),
   op_desktop_cancel_notification: () => ops.op_desktop_cancel_notification("t"),
+  op_desktop_list_delivered_notifications: () =>
+    ops.op_desktop_list_delivered_notifications(),
+  op_desktop_remove_delivered_notifications: () =>
+    ops.op_desktop_remove_delivered_notifications(["t"]),
+  op_desktop_share: () =>
+    ops.op_desktop_share(1, {
+      title: "title",
+      text: "text",
+      url: "https://example.com/",
+      files: [],
+    }),
+  op_desktop_set_user_activity: () =>
+    ops.op_desktop_set_user_activity(
+      JSON.stringify({ type: "com.example.view", title: "title" }),
+    ),
+  op_desktop_next_user_activity: () => ops.op_desktop_next_user_activity(),
   // The destination is operator config, never the caller's (see
   // desktop_error_report_no_escape).
   op_desktop_send_error_report: () =>

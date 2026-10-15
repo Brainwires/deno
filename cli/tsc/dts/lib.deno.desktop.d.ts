@@ -2325,7 +2325,9 @@ declare namespace Deno {
        * another device, a Spotlight result); one that launched the app
        * arrives once a listener is added. Returns a function that removes
        * it. */
-      onContinue(listener: (activity: ContinuedUserActivity) => void): () => void;
+      onContinue(
+        listener: (activity: ContinuedUserActivity) => void,
+      ): () => void;
     };
 
     /** Scheduled notifications and notification capabilities.
