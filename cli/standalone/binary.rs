@@ -738,7 +738,7 @@ impl<'a> DenoCompileBinaryWriter<'a> {
   ) -> Result<Vec<u8>, AnyError> {
     let response = {
       let progress_bars = ProgressBar::new(ProgressBarStyle::DownloadBars);
-      let progress = progress_bars.update(&download_url);
+      let progress = progress_bars.update(download_url);
 
       self
         .http_client_provider
