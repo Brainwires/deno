@@ -374,11 +374,13 @@ export async function waitExit(
 // their command line need not name the artifact; a pattern match (pkill -f)
 // missed them and they leaked into the next launch.
 
-/** A process as the OS lists it: its parent and its start time (a reused pid
- * has another start time). */
+/** A process as the OS lists it: its parent, its start time (a reused pid
+ * has another start time) and its state (`Z`: a zombie, which has already
+ * let go of its files and locks). */
 export interface ProcInfo {
   ppid: number;
   start: string;
+  state: string;
 }
 
 /** Every process on the machine (Linux: /proc/<pid>/stat; macOS: ps). */
@@ -393,20 +395,49 @@ export async function processTable(): Promise<Map<number, ProcInfo>> {
           // `pid (comm) state ppid ...`: comm may hold spaces and parens.
           const f = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
           // Fields 4 (ppid) and 22 (starttime, clock ticks since boot).
-          t.set(Number(e.name), { ppid: Number(f[1]), start: f[19] });
+          t.set(Number(e.name), {
+            ppid: Number(f[1]),
+            start: f[19],
+            state: f[0],
+          });
         }, () => {/* exited meanwhile */}),
       );
     }
     await Promise.all(reads);
   } else {
-    const r = await sh("ps", ["-A", "-o", "pid=,ppid=,lstart="]);
+    const r = await sh("ps", ["-A", "-o", "pid=,ppid=,stat=,lstart="]);
     for (const line of r.out.split("\n")) {
       const f = line.trim().split(/\s+/);
-      if (f.length < 3 || !/^\d+$/.test(f[0])) continue;
-      t.set(Number(f[0]), { ppid: Number(f[1]), start: f.slice(2).join(" ") });
+      if (f.length < 4 || !/^\d+$/.test(f[0])) continue;
+      t.set(Number(f[0]), {
+        ppid: Number(f[1]),
+        start: f.slice(3).join(" "),
+        state: f[2],
+      });
     }
   }
   return t;
+}
+
+/** Wait (up to `ms`) until none of `pids` runs as the process `start` names
+ * (a zombie has ended); the ones still running. A SIGKILLed process can take
+ * a while to end (a write to disk in progress), and until it has ended it
+ * still holds its locks: the next launch's engine would find its profile's
+ * databases locked (Chromium's localStorage then runs in memory only). */
+async function waitGone(
+  pids: Map<number, string>,
+  ms = 10_000,
+): Promise<number[]> {
+  const until = Date.now() + ms;
+  for (;;) {
+    const t = await processTable();
+    const left = [...pids].filter(([pid, start]) => {
+      const p = t.get(pid);
+      return p?.start === start && !p.state.startsWith("Z");
+    }).map(([pid]) => pid);
+    if (!left.length || Date.now() > until) return left;
+    await sleep(50);
+  }
 }
 
 function signal(pid: number, sig: Deno.Signal) {
@@ -496,7 +527,13 @@ async function killTree(tree: ProcessTree) {
     }
     t = await tree.track();
   }
-  for (const pid of tree.alive(t)) signal(pid, "SIGKILL");
+  const doomed = new Map<number, string>();
+  for (const pid of tree.alive(t)) {
+    signal(pid, "SIGKILL");
+    doomed.set(pid, tree.seen.get(pid)!);
+  }
+  const left = await waitGone(doomed);
+  if (left.length) log(`kill: still running after SIGKILL: ${left.join(" ")}`);
 }
 
 /** Kill `l` and everything it started. */
@@ -505,6 +542,17 @@ export async function kill(l: Launched | number, artifact?: string) {
   if (OS === "windows") {
     await sh("taskkill", ["/F", "/T", "/PID", String(pid)]);
   } else {
+    if (typeof l !== "number" && l.status !== null) {
+      // The app ended by itself: what it started (Chromium's storage service
+      // committing the profile, say) is given a moment to end too, as after a
+      // user's quit, rather than being killed mid-write.
+      l.tree.stopPolling();
+      const t = await l.tree.track();
+      await waitGone(
+        new Map(l.tree.alive(t).map((p) => [p, l.tree.seen.get(p)!])),
+        5_000,
+      );
+    }
     await killTree(typeof l === "number" ? new ProcessTree(l) : l.tree);
   }
   if (artifact) await killByPath(artifact);
@@ -553,10 +601,16 @@ export async function killByPath(dir: string) {
   for (const pid of pids) signal(pid, "SIGSTOP");
   const after = await processTable();
   const still = new Set(await pidsUnder(dir));
+  const doomed = new Map<number, string>();
   for (const pid of pids) {
     const start = before.get(pid)?.start;
     const same = start !== undefined && after.get(pid)?.start === start;
     signal(pid, same && still.has(pid) ? "SIGKILL" : "SIGCONT");
+    if (same && still.has(pid)) doomed.set(pid, start);
+  }
+  const left = await waitGone(doomed);
+  if (left.length) {
+    log(`killByPath: still running after SIGKILL: ${left.join(" ")}`);
   }
 }
 

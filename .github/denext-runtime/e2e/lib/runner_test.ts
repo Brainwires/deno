@@ -139,6 +139,13 @@ Deno.test({
     assert(l.tree.seen.has(p), `pid ${p} tracked`, [...l.tree.seen]);
   }
   await kill(l);
+  // kill() returns once they have ended, not just been signalled: the next
+  // launch must not find a profile lock still held.
+  const after = await processTable();
+  const running = pids.filter((p) =>
+    after.has(p) && !after.get(p)!.state.startsWith("Z")
+  );
+  assert(running.length === 0, "ended when kill() returns", running);
   await l.exited;
   const left = await survivors([l.pid, ...pids]);
   assert(left.length === 0, "every process is gone", left);
@@ -179,6 +186,12 @@ Deno.test({
   const bystander = new Deno.Command("sleep", { args: ["300"] }).spawn();
   try {
     await killByPath(artifact);
+    const now = await processTable();
+    assert(
+      !now.has(pid) || now.get(pid)!.state.startsWith("Z"),
+      "ended when killByPath() returns",
+      now.get(pid),
+    );
     const left = await survivors([pid]);
     assert(left.length === 0, "the helper is gone", left);
     const t = await processTable();
@@ -193,10 +206,10 @@ Deno.test("a tracked pid reused by another process is not alive", () => {
   const tree = new ProcessTree(100);
   tree.absorb(
     new Map([
-      [100, { ppid: 1, start: "a" }],
-      [101, { ppid: 100, start: "b" }],
-      [102, { ppid: 101, start: "c" }],
-      [200, { ppid: 1, start: "d" }],
+      [100, { ppid: 1, start: "a", state: "S" }],
+      [101, { ppid: 100, start: "b", state: "S" }],
+      [102, { ppid: 101, start: "c", state: "S" }],
+      [200, { ppid: 1, start: "d", state: "S" }],
     ]),
   );
   assert(
@@ -206,10 +219,10 @@ Deno.test("a tracked pid reused by another process is not alive", () => {
   );
   // 101 exited and its pid went to an unrelated process; 102 was reparented.
   const later = new Map([
-    [100, { ppid: 1, start: "a" }],
-    [101, { ppid: 1, start: "z" }],
-    [102, { ppid: 1, start: "c" }],
-    [103, { ppid: 101, start: "y" }],
+    [100, { ppid: 1, start: "a", state: "S" }],
+    [101, { ppid: 1, start: "z", state: "S" }],
+    [102, { ppid: 1, start: "c", state: "S" }],
+    [103, { ppid: 101, start: "y", state: "S" }],
   ]);
   tree.absorb(later);
   const alive = tree.alive(later).sort().join();
