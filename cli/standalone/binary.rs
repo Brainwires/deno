@@ -605,13 +605,23 @@ impl<'a> DenoCompileBinaryWriter<'a> {
     let binary_name =
       runtime_archive_name("denort", &compile_flags.engine, &target);
 
-    let binary_path_suffix = match DENO_VERSION_INFO.release_channel {
-      ReleaseChannel::Canary => {
-        format!("canary/{}/{}", DENO_VERSION_INFO.git_hash, binary_name)
-      }
-      // the plain Deno version, also in a denext build (DENEXT_VERSION)
-      _ => {
-        format!("release/v{}/{}", DENO_VERSION, binary_name)
+    // A denext build compiles onto its own release's denort (the runtime
+    // patches, Deno.SQL, ...), never Deno's stock one of the same version.
+    let denext = (compile_flags.engine == JavaScriptEngine::V8)
+      .then(|| DENO_VERSION_INFO.denext())
+      .flatten()
+      .map(|version| denext_denort(version, &target));
+    let (binary_path_suffix, download_url) = match denext {
+      Some(denext) => denext,
+      None => {
+        let suffix = match DENO_VERSION_INFO.release_channel {
+          ReleaseChannel::Canary => {
+            format!("canary/{}/{}", DENO_VERSION_INFO.git_hash, binary_name)
+          }
+          _ => format!("release/v{}/{}", DENO_VERSION, binary_name),
+        };
+        let url = format!("https://dl.deno.land/{suffix}");
+        (suffix, url)
       }
     };
 
@@ -626,7 +636,7 @@ impl<'a> DenoCompileBinaryWriter<'a> {
       read_file(&binary_path)?
     } else {
       self
-        .download_base_binary(&binary_path, &binary_path_suffix)
+        .download_base_binary(&binary_path, &download_url)
         .await
         .context("Setting up base binary.")?
     };
@@ -702,7 +712,10 @@ impl<'a> DenoCompileBinaryWriter<'a> {
       read_file(&binary_path)?
     } else {
       self
-        .download_base_binary(&binary_path, &binary_path_suffix)
+        .download_base_binary(
+          &binary_path,
+          &format!("https://dl.deno.land/{binary_path_suffix}"),
+        )
         .await
         .context("Setting up desktop base binary.")?
     };
@@ -721,9 +734,8 @@ impl<'a> DenoCompileBinaryWriter<'a> {
   async fn download_base_binary(
     &self,
     output_path: &Path,
-    binary_path_suffix: &str,
+    download_url: &str,
   ) -> Result<Vec<u8>, AnyError> {
-    let download_url = format!("https://dl.deno.land/{binary_path_suffix}");
     let response = {
       let progress_bars = ProgressBar::new(ProgressBarStyle::DownloadBars);
       let progress = progress_bars.update(&download_url);
@@ -1958,6 +1970,33 @@ fn get_denort_path(deno_exe: PathBuf) -> Option<OsString> {
   denort.exists().then(|| denort.into_os_string())
 }
 
+/// Where a denext release keeps its `denort`: the asset
+/// `deno-denort-<version>-<target>.zip` (a zip holding `denort` /
+/// `denort.exe`) of the GitHub release `denext-runtime-v<version>`, under
+/// DENEXT_DENORT_BASE_URL (default: the Brainwires/deno releases). Returns
+/// the cache path suffix under the DENO_DIR `dl` folder and the URL.
+fn denext_denort(version: &str, target: &str) -> (String, String) {
+  let asset = denext_denort_asset_name(version, target);
+  let base = env::var("DENEXT_DENORT_BASE_URL")
+    .ok()
+    .filter(|b| !b.is_empty())
+    .unwrap_or_else(|| DENEXT_DENORT_BASE_URL.to_string());
+  (
+    format!("denext/v{version}/{asset}"),
+    format!(
+      "{}/denext-runtime-v{version}/{asset}",
+      base.trim_end_matches('/')
+    ),
+  )
+}
+
+const DENEXT_DENORT_BASE_URL: &str =
+  "https://github.com/Brainwires/deno/releases/download";
+
+fn denext_denort_asset_name(version: &str, target: &str) -> String {
+  format!("deno-denort-{version}-{target}.zip")
+}
+
 fn runtime_archive_name(
   prefix: &str,
   engine: &JavaScriptEngine,
@@ -2097,9 +2136,30 @@ fn update_public_key_from_config<E: std::fmt::Display>(
 mod tests {
   use super::check_desktop_app_identity;
   use super::default_app_name;
+  use super::denext_denort;
+  use super::denext_denort_asset_name;
   use super::runtime_archive_name;
   use super::update_public_key_from_config;
   use crate::args::JavaScriptEngine;
+
+  #[test]
+  fn denext_denort_is_the_release_asset() {
+    assert_eq!(
+      denext_denort_asset_name("2.9.7-denext.20", "x86_64-pc-windows-msvc"),
+      "deno-denort-2.9.7-denext.20-x86_64-pc-windows-msvc.zip"
+    );
+    if std::env::var_os("DENEXT_DENORT_BASE_URL").is_none() {
+      assert_eq!(
+        denext_denort("2.9.7-denext.20", "aarch64-apple-darwin"),
+        (
+          "denext/v2.9.7-denext.20/deno-denort-2.9.7-denext.20-aarch64-apple-darwin.zip"
+            .to_string(),
+          "https://github.com/Brainwires/deno/releases/download/denext-runtime-v2.9.7-denext.20/deno-denort-2.9.7-denext.20-aarch64-apple-darwin.zip"
+            .to_string()
+        )
+      );
+    }
+  }
 
   #[test]
   fn desktop_app_origin_requires_an_identifier() {

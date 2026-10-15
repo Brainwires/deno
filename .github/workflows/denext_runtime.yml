@@ -593,16 +593,20 @@ jobs:
           key: ${{ matrix.target }}-${{ matrix.os }}
           cache-on-failure: false
 
-      - name: Build deno
+      # And `denort`, the standalone runtime `deno compile` puts under a
+      # compiled app: this CLI downloads the release's own
+      # (deno-denort-<version>-<target>.zip; cli/standalone/binary.rs,
+      # denext_denort), never Deno's stock one.
+      - name: Build deno + denort
         env:
           # Deno.version.deno, `deno --version` and the user agent
-          # (cli/lib/version.rs, denext_version); denort / libdenort
-          # downloads keep the plain Deno version.
+          # (cli/lib/version.rs, denext_version), in a compiled app too;
+          # libdenort downloads keep the plain Deno version.
           DENEXT_VERSION: ${{ needs.setup.outputs.version }}
         run: |
           set -euo pipefail
           df -h . || true
-          cargo build --release --locked --bin deno
+          cargo build --release --locked --bin deno --bin denort
           df -h . || true
           git diff --exit-code -- Cargo.lock
 
@@ -611,23 +615,27 @@ jobs:
           set -euo pipefail
           case "$TARGET" in
             *-apple-darwin)
-              file target/release/deno
-              lipo -info target/release/deno
-              otool -L target/release/deno
-              # arm64 macOS refuses to run unsigned code. The arm64 linker
-              # signs ad hoc; sign the x86_64 binary the same way.
-              if ! codesign --verify target/release/deno 2>/dev/null; then
-                codesign --force --sign - target/release/deno
-              fi
-              codesign --verify --verbose target/release/deno
+              for b in target/release/deno target/release/denort; do
+                file "$b"
+                lipo -info "$b"
+                otool -L "$b"
+                # arm64 macOS refuses to run unsigned code. The arm64 linker
+                # signs ad hoc; sign the x86_64 binaries the same way.
+                if ! codesign --verify "$b" 2>/dev/null; then
+                  codesign --force --sign - "$b"
+                fi
+                codesign --verify --verbose "$b"
+              done
               ;;
             *-linux-gnu)
-              file target/release/deno
-              ldd target/release/deno || true
-              objdump -T target/release/deno | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -3
+              for b in target/release/deno target/release/denort; do
+                file "$b"
+                ldd "$b" || true
+                objdump -T "$b" | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -3
+              done
               ;;
             *-windows-msvc)
-              ls -la target/release/deno.exe
+              ls -la target/release/deno.exe target/release/denort.exe
               ;;
           esac
 
@@ -645,6 +653,7 @@ jobs:
       - name: Assemble
         env:
           DENO_BIN: target/release/${{ runner.os == 'Windows' && 'deno.exe' || 'deno' }}
+          DENORT_BIN: target/release/${{ runner.os == 'Windows' && 'denort.exe' || 'denort' }}
           ESBUILD_DIR: ${{ runner.temp }}/esbuild
           OUT_DIR: dist
           DENO_VERSION: ${{ needs.setup.outputs.deno_version }}
@@ -661,6 +670,16 @@ jobs:
           ARCHIVE: dist/deno-cli-${{ needs.setup.outputs.version }}-${{ matrix.target }}.zip
           WORK_DIR: ${{ runner.temp }}/cli-smoke
         run: bash .github/denext-runtime/cli_smoke.sh
+
+      # `deno compile` from the unpacked CLI onto the unpacked denort archive
+      # (DENORT_BIN: the release URL only exists once it is published): the
+      # compiled app has Deno.SQL and names this release.
+      - name: Smoke (denort)
+        env:
+          ARCHIVE: dist/deno-cli-${{ needs.setup.outputs.version }}-${{ matrix.target }}.zip
+          DENORT_ARCHIVE: dist/deno-denort-${{ needs.setup.outputs.version }}-${{ matrix.target }}.zip
+          WORK_DIR: ${{ runner.temp }}/denort-smoke
+        run: bash .github/denext-runtime/denort_smoke.sh
 
       - name: Summary
         if: ${{ !cancelled() }}
@@ -1022,6 +1041,9 @@ jobs:
           c=$(python3 -c 'import json;m=json.load(open("dist/manifest.json"));print(len(m["cli"]["targets"]))')
           echo "cli archives: $c"
           test "$c" = 5
+          r=$(python3 -c 'import json;m=json.load(open("dist/manifest.json"));print(len(m["denort"]["targets"]))')
+          echo "denort archives: $r"
+          test "$r" = 5
 
       - name: GitHub Release
         if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/denext-runtime-v')
@@ -1054,6 +1076,10 @@ jobs:
           instead of downloading one. The CLI's
           \`deno --version\` and \`Deno.version.deno\` name this release (\`${TAG#denext-runtime-v}\`).
           They are listed under \`cli\` in \`manifest.json\`.
+
+          \`deno-denort-*\` is the standalone runtime that CLI's \`deno compile\` builds onto (a zip
+          holding \`denort\` / \`denort.exe\`), so a compiled app carries the same patches and
+          \`Deno.SQL\`; the CLI downloads it from this release by itself. Listed under \`denort\`.
           EOF
           gh release create "$TAG" --repo "$REPO" --title "$TAG" \
             --notes-file notes.md --target "$SHA" \

@@ -114,6 +114,14 @@ pub struct DenoVersionInfo {
 }
 
 impl DenoVersionInfo {
+  /// A denext release build's version (`DENEXT_VERSION` at compile time,
+  /// e.g. `2.9.7-denext.20`), or `None` for any other build.
+  pub fn denext(&self) -> Option<&'static str> {
+    (self.release_channel != ReleaseChannel::Canary
+      && self.deno != DENO_VERSION)
+      .then_some(self.deno)
+  }
+
   /// For stable release, a semver like, eg. `v1.46.2`.
   /// For canary release a full git hash, eg. `9bdab6fb6b93eb43b1930f40987fa4997287f9c8`.
   pub fn version_or_git_hash(&self) -> &'static str {
@@ -129,8 +137,9 @@ impl DenoVersionInfo {
 /// release, e.g. `2.9.7-denext.15`; see DENEXT.md "Release archives"), used
 /// only when it extends this build's Deno version with `-` or `+`. It becomes
 /// `Deno.version.deno`, `deno --version` and the user agent, so the binary
-/// says which build it is; downloads of `denort` / `libdenort` and
-/// `deno upgrade` keep using the plain Deno version (`DENO_VERSION`).
+/// says which build it is. `deno compile` takes the release's own `denort`
+/// (cli/standalone/binary.rs, `denext_denort`); downloads of `libdenort`
+/// and `deno upgrade` keep using the plain Deno version (`DENO_VERSION`).
 fn denext_version(
   denext: Option<&'static str>,
   deno: &str,

@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Write SHA256SUMS and manifest.json for a directory of runtime archives
 (and the `deno-cli-*` CLI archives, listed under "cli", each with the
-esbuild it ships: version and the binary's sha256).
+esbuild it ships: version and the binary's sha256; and the `deno-denort-*`
+archives `deno compile` builds onto, listed under "denort").
 
 Usage: manifest.py <dist dir>
 Env:   VERSION TAG REPOSITORY DENO_VERSION DENO_SHA LAUFEY_SHA CEF_VERSION RUN_URL
@@ -31,6 +32,12 @@ cli_pattern = re.compile(
     r"^deno-cli-"
     + re.escape(version)
     + r"-(?P<target>[a-z0-9_]+-[a-z0-9_]+-[a-z0-9_]+(?:-[a-z0-9_]+)?)\.(?P<ext>tar\.gz|zip)$"
+)
+
+denort_pattern = re.compile(
+    r"^deno-denort-"
+    + re.escape(version)
+    + r"-(?P<target>[a-z0-9_]+-[a-z0-9_]+-[a-z0-9_]+(?:-[a-z0-9_]+)?)\.zip$"
 )
 
 
@@ -80,11 +87,20 @@ def esbuild_of(name, target):
 
 targets = {}
 cli_targets = {}
+denort_targets = {}
 sums = []
 for name in sorted(os.listdir(dist)):
     m = pattern.match(name)
     if m:
         targets.setdefault(m["target"], {})[m["backend"]] = describe(name, m["ext"])
+        continue
+    m = denort_pattern.match(name)
+    if m:
+        binary = "denort.exe" if m["target"].endswith("windows-msvc") else "denort"
+        with zipfile.ZipFile(os.path.join(dist, name)) as z:
+            if z.namelist() != [binary]:
+                sys.exit(f"{name} must hold just {binary}, not {z.namelist()}")
+        denort_targets[m["target"]] = {"binary": binary, **describe(name, "zip")}
         continue
     m = cli_pattern.match(name)
     if m:
@@ -142,6 +158,13 @@ manifest = {
     "cli": {
         "version": version,
         "targets": dict(sorted(cli_targets.items())),
+    },
+    # The standalone runtime the CLI's `deno compile` downloads from this
+    # release (DENORT_BIN still overrides it): a zip per target holding just
+    # the binary.
+    "denort": {
+        "version": version,
+        "targets": dict(sorted(denort_targets.items())),
     },
 }
 

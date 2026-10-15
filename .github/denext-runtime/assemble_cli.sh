@@ -12,13 +12,18 @@
 #   BUILD_INFO.json        what was built from where (esbuild's source too)
 #   licenses/              the deno license
 #
-# Env: TARGET VERSION DENO_BIN ESBUILD_DIR OUT_DIR DENO_VERSION DENO_SHA RUN_URL
-# (ESBUILD_DIR: fetch_esbuild.py's output directory)
+# And the `denort` archive beside it, deno-denort-<version>-<target>.zip:
+# just `denort` / `denort.exe` at the top, as Deno's own denort zips are, for
+# `deno compile` (this CLI downloads it from the release:
+# cli/standalone/binary.rs, denext_denort).
+#
+# Env: TARGET VERSION DENO_BIN DENORT_BIN ESBUILD_DIR OUT_DIR DENO_VERSION
+# DENO_SHA RUN_URL (ESBUILD_DIR: fetch_esbuild.py's output directory)
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 . "$here/lib.sh"
 
-: "${TARGET:?}" "${VERSION:?}" "${DENO_BIN:?}" "${ESBUILD_DIR:?}" "${OUT_DIR:?}"
+: "${TARGET:?}" "${VERSION:?}" "${DENO_BIN:?}" "${DENORT_BIN:?}" "${ESBUILD_DIR:?}" "${OUT_DIR:?}"
 : "${DENO_VERSION:?}" "${DENO_SHA:?}"
 
 export COPYFILE_DISABLE=1 # no AppleDouble ._ files in macOS tarballs
@@ -27,6 +32,8 @@ repo_root=$(cd "$here/../.." && pwd)
 bin=$(cli_bin_name "$TARGET")
 deno_bin=$(unix_path "$DENO_BIN")
 test -f "$deno_bin" || { echo "missing $deno_bin" >&2; exit 1; }
+denort_bin=$(unix_path "$DENORT_BIN")
+test -f "$denort_bin" || { echo "missing $denort_bin" >&2; exit 1; }
 esbuild_dir=$(unix_path "$ESBUILD_DIR")
 case "$TARGET" in
   *-windows-msvc) esbuild_bin=esbuild.exe ;;
@@ -78,3 +85,24 @@ fi
 echo "$(sha256_of "$archive")  $name.zip" >"$archive.sha256"
 echo "assembled $name.zip ($(size_of "$archive") bytes)"
 cat "$archive.sha256"
+
+# denort: the binary alone.
+rt_name="deno-denort-${VERSION}-${TARGET}"
+rt_archive="$out_dir/$rt_name.zip"
+test ! -e "$rt_archive" || { echo "$rt_archive already exists" >&2; exit 1; }
+case "$TARGET" in
+  *-windows-msvc) rt_bin=denort.exe ;;
+  *) rt_bin=denort ;;
+esac
+rt_root="$work/$rt_name"
+mkdir -p "$rt_root"
+cp "$denort_bin" "$rt_root/$rt_bin"
+chmod +x "$rt_root/$rt_bin"
+if command -v zip >/dev/null 2>&1; then
+  (cd "$rt_root" && zip -q -9 -r "$rt_archive" .)
+else
+  (cd "$rt_root" && 7z a -tzip -bd -mx=9 "$(native_path "$rt_archive")" . >/dev/null)
+fi
+echo "$(sha256_of "$rt_archive")  $rt_name.zip" >"$rt_archive.sha256"
+echo "assembled $rt_name.zip ($(size_of "$rt_archive") bytes)"
+cat "$rt_archive.sha256"
