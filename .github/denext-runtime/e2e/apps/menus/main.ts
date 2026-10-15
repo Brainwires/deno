@@ -121,7 +121,7 @@ await r.step("menus", async () => {
   const caps = desktop.menuCapabilities();
   r.set("menuCapabilities", caps);
   r.check(
-    "menuCapabilities() reports six booleans",
+    "menuCapabilities() reports seven booleans",
     [
       "appMenu",
       "accelerators",
@@ -129,7 +129,13 @@ await r.step("menus", async () => {
       "contextClosed",
       "icons",
       "tooltips",
+      "destructive",
     ].every((k) => typeof caps[k] === "boolean"),
+    caps,
+  );
+  r.check(
+    "destructive items are drawn except in Win32 menus",
+    caps.destructive === (OS !== "windows"),
     caps,
   );
   r.check(
@@ -187,7 +193,7 @@ await r.step("menus", async () => {
 
   const menu = [
     { item: { label: "Alpha", id: "ctx-a", enabled: true } },
-    { item: { label: "Beta", id: "ctx-b", enabled: true } },
+    { item: { label: "Beta", id: "ctx-b", enabled: true, destructive: true } },
   ];
   const closes: (string | null)[] = [];
   const ctxClicks: string[] = [];

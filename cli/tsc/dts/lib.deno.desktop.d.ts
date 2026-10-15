@@ -680,6 +680,11 @@ declare namespace Deno {
         /** Tooltip shown when hovering over the item: macOS and Linux
          * (WebKitGTK). */
         tooltip?: string;
+        /** An action that deletes or discards: drawn in red on macOS,
+         * Linux (WebKitGTK) and the CEF backend's Views menus; Windows' Win32
+         * menus draw it as a normal item (see
+         * {@linkcode Deno.desktop.menuCapabilities}). */
+        destructive?: boolean;
       };
     }
     | {
@@ -2299,6 +2304,8 @@ declare namespace Deno {
       icons: boolean;
       /** Item tooltips are shown. */
       tooltips: boolean;
+      /** Destructive items are drawn as such (red). */
+      destructive: boolean;
     }
 
     /** The menu capabilities of this backend and OS. */

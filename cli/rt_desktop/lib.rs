@@ -1805,6 +1805,7 @@ impl denort::desktop::DesktopApi for WefDesktopApi {
       context_closed: c.context_closed(),
       icons: c.icons(),
       tooltips: c.tooltips(),
+      destructive: c.destructive(),
     }
   }
 
@@ -1965,6 +1966,7 @@ fn desktop_menu_item_to_laufey_menu_item(
       checked,
       icon,
       tooltip,
+      destructive,
     } => laufey::MenuItem::Item {
       label,
       id,
@@ -1973,6 +1975,7 @@ fn desktop_menu_item_to_laufey_menu_item(
       checked,
       icon,
       tooltip,
+      destructive,
     },
     denort::desktop::MenuItem::Submenu { label, items } => {
       laufey::MenuItem::Submenu {
@@ -4170,6 +4173,7 @@ mod tests {
       checked: true,
       icon: Some(vec![0x89, b'P', b'N', b'G']),
       tooltip: Some("Save the current file".into()),
+      destructive: true,
     };
     match desktop_menu_item_to_laufey_menu_item(item) {
       laufey::MenuItem::Item {
@@ -4180,7 +4184,9 @@ mod tests {
         checked,
         icon,
         tooltip,
+        destructive,
       } => {
+        assert!(destructive);
         assert_eq!(label, "Save");
         assert_eq!(id.as_deref(), Some("file.save"));
         assert_eq!(accelerator.as_deref(), Some("CmdOrCtrl+S"));
@@ -4206,6 +4212,7 @@ mod tests {
           checked: false,
           icon: None,
           tooltip: None,
+          destructive: false,
         },
         denort::desktop::MenuItem::Separator,
         denort::desktop::MenuItem::Role {

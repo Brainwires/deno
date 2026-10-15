@@ -1565,6 +1565,8 @@ pub struct MenuCapabilitiesInfo {
   pub context_closed: bool,
   pub icons: bool,
   pub tooltips: bool,
+  /// Destructive items are drawn as such (laufey API 49).
+  pub destructive: bool,
 }
 
 /// `Deno.desktop.notifications.capabilities()` (laufey API 41).
@@ -3567,6 +3569,10 @@ pub enum MenuItem {
     icon: Option<Vec<u8>>,
     /// Tooltip shown on hover. macOS only.
     tooltip: Option<String>,
+    /// Drawn as a destructive action (red text) where the backend can
+    /// (laufey API 49; see `menuCapabilities().destructive`).
+    #[serde(default)]
+    destructive: bool,
   },
   Submenu {
     label: String,
@@ -7147,6 +7153,7 @@ mod tests {
         "contextClosed": true,
         "icons": false,
         "tooltips": false,
+        "destructive": false,
       })
     );
     assert_eq!(
@@ -8315,6 +8322,7 @@ mod tests {
       checked: false,
       icon: None,
       tooltip: None,
+      destructive: false,
     };
     assert!(reject_nul_in_menu(&[item("ok"), MenuItem::Separator]).is_ok());
     // Deep in a submenu too.
