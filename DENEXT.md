@@ -1015,7 +1015,7 @@ where the changes are discussed.
 
 39. **`feat(desktop)`: `--inspect-renderer` on its own (spike)** (from
     `denext.21`; CLI only; `cli/tools/desktop_renderer_inspect.rs`, design note
-    `DENEXT-inspect-renderer.md`). `deno desktop --inspect-renderer[=<addr>]`
+    `doc/denext-inspect-renderer.md`). `deno desktop --inspect-renderer[=<addr>]`
     without `--inspect` runs the app as a development build with its window's
     renderer open to a debugger: CDP on loopback for CEF (the host's
     `LAUFEY_REMOTE_DEBUGGING_PORT`) and WebView2

@@ -6,7 +6,7 @@
 //! so a CDP client (Chrome's `chrome://inspect`, Puppeteer, Playwright's
 //! `connectOverCDP`, an agent) can drive the page directly. With `--inspect`
 //! the renderer port feeds the unified DevTools multiplexer instead
-//! (`desktop_devtools.rs`). Design note: `DENEXT-inspect-renderer.md`.
+//! (`desktop_devtools.rs`). Design note: `doc/denext-inspect-renderer.md`.
 //!
 //! What each backend offers:
 //!
