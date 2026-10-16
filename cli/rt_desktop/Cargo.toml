@@ -53,7 +53,7 @@ denort = { path = "../rt", default-features = false }
 # Windows passkey cancel; API 48: the navigation guard), pinned to a commit of the Brainwires/laufey fork.
 # The host built from the same commit must be used with it (the API version
 # check is exact).
-laufey = { git = "https://github.com/Brainwires/laufey", rev = "d296cd7f62e6b9b1b886ca17cba5464a80cbae61" }
+laufey = { git = "https://github.com/Brainwires/laufey", rev = "df1d8c877d36fd7b79da91df8450377031b7dfe4" }
 libsui.workspace = true
 
 bytes.workspace = true

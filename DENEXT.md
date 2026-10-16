@@ -979,7 +979,29 @@ where the changes are discussed.
     the metadata, so the compiled app behaves as `deno run` with it. Test: the
     `compile::no_legacy_abort` spec (the flag, the config, and without it).
 
-The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-36) are what the prebuilt
+37. **Spellcheck on Linux CEF** (from `denext.21`; laufey
+    `integration/denext21` `df1d8c8`, no runtime API). The Linux CEF host
+    never lets Chromium download a Hunspell dictionary from Google (laufey's
+    network-quiet defaults, since `denext.11`), so a fresh profile had no spellcheck. The Linux
+    CEF archives now ship Chromium's prebuilt dictionaries of the common
+    languages (en-US, en-GB, de-DE, fr-FR, es-ES, pt-BR, it-IT; about 14 MB) in
+    `laufey/cef/build/Release/dictionaries/`, fetched by
+    `.github/denext-runtime/fetch_dictionaries.py` from
+    chromium/deps/hunspell_dictionaries at the commit CEF 149's Chromium pins
+    (so the versioned names are the ones it asks for) and pinned by SHA-256;
+    each dictionary's license is in `licenses/hunspell/`. Before the first
+    browser the host copies the dictionaries of the languages in use (the
+    profile's `spellcheck.dictionaries`, else the UI language) into
+    `<profile>/Dictionaries`, taking them from `LAUFEY_SPELLCHECK_DICTIONARIES`
+    (a folder, for a launcher or a developer) first, then from `dictionaries/`
+    beside the host executable, where an app adds or replaces its own `.bdic`
+    files when it packages; a dictionary the profile already has is never
+    replaced, and the copy goes through a temporary name. Tests: laufey's
+    `cef_network_quiet_test` (`DictionariesToSeed`), `verify.sh` (the archive
+    holds exactly the pinned files) and the Linux CEF launch smoke (the
+    profile has its language's dictionary after the first launch).
+
+The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37) are what the prebuilt
 `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
 in the branch too, but a stock CLI does not run them; denext's own launcher
@@ -1029,6 +1051,7 @@ laufey/                                         -> LAUFEY_DEV_DIR
   webview/build/laufey_webview[.exe]            (Linux / Windows, webview)
   cef/build/Release/laufey.app                  (macOS, cef)
   cef/build/Release/laufey[.exe], libcef.*, ... (Linux / Windows, cef)
+  cef/build/Release/dictionaries/*.bdic         (Linux, cef: spellcheck, item 37)
 BUILD_INFO.json                                 deno + laufey SHAs, CEF version, run URL
 licenses/                                       deno, laufey (and CEF) licenses
 ```

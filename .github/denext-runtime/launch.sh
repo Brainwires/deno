@@ -121,4 +121,18 @@ if [ "$napi" = 1 ]; then
     { echo "Node-API probe FAILED" >&2; exit 1; }
   echo "Node-API probe passed"
 fi
+if [ "$BACKEND" = cef ]; then
+  case "$TARGET" in
+    *-linux-gnu)
+      # The host copied the bundled Hunspell dictionary of the profile's
+      # spellcheck language (the UI language by default) into the profile,
+      # which never downloads one: spellcheck works on a fresh profile.
+      data_home=${XDG_DATA_HOME:-$HOME/.local/share}
+      found=$(find "$data_home" -path "*$LAUFEY_APP_ID*/Dictionaries/*.bdic" 2>/dev/null || true)
+      echo "--- profile dictionaries"
+      echo "${found:-none}"
+      [ -n "$found" ] || { echo "spellcheck dictionaries FAILED: none copied into the profile" >&2; exit 1; }
+      ;;
+  esac
+fi
 echo "launch smoke passed"

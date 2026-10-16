@@ -114,6 +114,14 @@ check_linux() {
         echo 1 >"$root/.verify-failed"
       fi
     done
+  # A CEF archive carries the pinned spellcheck dictionaries beside the host.
+  if [ -d "$root/laufey/cef/build/Release" ]; then
+    echo "== laufey/cef/build/Release/dictionaries"
+    if ! python3 -I "$here/fetch_dictionaries.py" --check "$root/laufey/cef/build/Release/dictionaries" | sed 's/^/   /'; then
+      echo "   ERROR: spellcheck dictionaries" >&2
+      echo 1 >"$root/.verify-failed"
+    fi
+  fi
 }
 
 check_windows() {

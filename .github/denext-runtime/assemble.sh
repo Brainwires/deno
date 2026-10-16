@@ -11,6 +11,8 @@
 #     webview/build/laufey_webview[.exe]        (Linux/Windows, webview)
 #     cef/build/Release/laufey.app              (macOS, cef)
 #     cef/build/Release/laufey[.exe] + libcef.* + resources  (Linux/Windows, cef)
+#     cef/build/Release/dictionaries/*.bdic     (Linux, cef: spellcheck;
+#                                                fetch_dictionaries.py)
 #   BUILD_INFO.json      what was built from where
 #   licenses/            deno, laufey and CEF licenses
 #
@@ -45,6 +47,18 @@ mkdir -p "$work/laufey"
 
 test -f "$denort_dir/$lib" || { echo "missing $denort_dir/$lib" >&2; exit 1; }
 
+# Linux CEF: the Hunspell dictionaries of the common languages, which the host
+# copies into a profile for the languages it checks (Chromium may not
+# download them). macOS and Windows use the OS spellchecker.
+dictionaries=""
+case "$TARGET" in
+  *-linux-gnu)
+    dictionaries="$work/dictionaries"
+    py=$(command -v python3 || command -v python)
+    "$py" -I "$here/fetch_dictionaries.py" "$dictionaries/bdic" "$dictionaries/licenses"
+    ;;
+esac
+
 for backend in webview cef; do
   name="deno-desktop-runtime-${VERSION}-${TARGET}-${backend}"
   root="$work/$name"
@@ -60,6 +74,11 @@ for backend in webview cef; do
       test -d "$work/laufey/cef/build/Release" || { echo "laufey stage has no cef/build/Release" >&2; exit 1; }
       mkdir -p "$root/laufey/cef/build"
       cp -a "$work/laufey/cef/build/Release" "$root/laufey/cef/build/Release"
+      if [ -n "$dictionaries" ]; then
+        cp -a "$dictionaries/bdic" "$root/laufey/cef/build/Release/dictionaries"
+        mkdir -p "$root/licenses/hunspell"
+        cp "$dictionaries/licenses/"* "$root/licenses/hunspell/"
+      fi
       ;;
   esac
   cp "$repo_root/LICENSE.md" "$root/licenses/deno-LICENSE.md"
