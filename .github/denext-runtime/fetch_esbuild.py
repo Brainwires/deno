@@ -50,6 +50,10 @@ PACKAGES = {
         "https://registry.npmjs.org/@esbuild/win32-x64/-/win32-x64-0.25.5.tgz",
         "sha512-TXv6YnJ8ZMVdX+SXWVBo/0p8LTcrUYngpWjvm91TMjjBQii7Oz11Lw5lbDV5Y0TzuhSJHwiH4hEtC1I42mMS0g==",
     ),
+    "@esbuild/win32-arm64": (
+        "https://registry.npmjs.org/@esbuild/win32-arm64/-/win32-arm64-0.25.5.tgz",
+        "sha512-O2S7SNZzdcFG7eFKgvwUEZ2VG9D/sn/eIiz8XRZ1Q/DO5a3s76Xv0mdBzVM5j5R639lXQmPmSo0iRpHqUUrsxw==",
+    ),
     # The main package, for its LICENSE.md (the platform packages carry none).
     "esbuild": (
         "https://registry.npmjs.org/esbuild/-/esbuild-0.25.5.tgz",
@@ -64,6 +68,7 @@ TARGETS = {
     "x86_64-unknown-linux-gnu": ("@esbuild/linux-x64", "package/bin/esbuild"),
     "aarch64-unknown-linux-gnu": ("@esbuild/linux-arm64", "package/bin/esbuild"),
     "x86_64-pc-windows-msvc": ("@esbuild/win32-x64", "package/esbuild.exe"),
+    "aarch64-pc-windows-msvc": ("@esbuild/win32-arm64", "package/esbuild.exe"),
 }
 
 

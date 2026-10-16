@@ -1,5 +1,5 @@
 # Builds denext's patched Deno Desktop runtime (libdenort from this branch +
-# laufey's webview and CEF backend hosts) for five targets, smoke-tests each
+# laufey's webview and CEF backend hosts) for six targets, smoke-tests each
 # archive with the STOCK `deno desktop` CLI, runs the e2e suite, attests it,
 # builds and smoke-tests this fork's own `deno` CLI for the same targets,
 # and on a `denext-runtime-v*` tag publishes a GitHub Release with SHA256SUMS
@@ -12,7 +12,7 @@ on:
   workflow_dispatch:
     inputs:
       targets:
-        description: "Comma-separated targets to build, or 'all' (aarch64-apple-darwin, x86_64-apple-darwin, x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu, x86_64-pc-windows-msvc)"
+        description: "Comma-separated targets to build, or 'all' (aarch64-apple-darwin, x86_64-apple-darwin, x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu, x86_64-pc-windows-msvc, aarch64-pc-windows-msvc)"
         type: string
         default: all
       laufey_ref:
@@ -135,6 +135,7 @@ jobs:
               {"target": "x86_64-unknown-linux-gnu", "os": "ubuntu-22.04"},
               {"target": "aarch64-unknown-linux-gnu", "os": "ubuntu-22.04-arm"},
               {"target": "x86_64-pc-windows-msvc", "os": "windows-latest"},
+              {"target": "aarch64-pc-windows-msvc", "os": "windows-11-arm"},
           ]
           want = [t.strip() for t in os.environ["TARGETS"].split(",") if t.strip()]
           if want != ["all"]:
@@ -233,10 +234,12 @@ jobs:
           path: laufey/vendor/cef
           key: cef-${{ matrix.os }}-${{ runner.arch }}-${{ hashFiles('laufey/Makefile') }}
 
+      # An ARM64 toolchain on windows-11-arm, so cl.exe targets ARM64 and
+      # CMake links the arm64 WebView2 loader.
       - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
         if: runner.os == 'Windows'
         with:
-          arch: x64
+          arch: ${{ runner.arch == 'ARM64' && 'arm64' || 'x64' }}
 
       - name: Build webview host
         working-directory: laufey
@@ -245,7 +248,9 @@ jobs:
           MACOSX_DEPLOYMENT_TARGET: '10.15'
         run: |
           if [ "${{ runner.os }}" = Windows ]; then
-            WEBVIEW2_ROOT="$(pwd)/$(ls -d packages/Microsoft.Web.WebView2.* | head -1)" make webview
+            # laufey's Makefile reads the architecture from `uname -m`, which
+            # an emulated x64 shell reports as x86_64 on Windows on Arm.
+            WEBVIEW2_ROOT="$(pwd)/$(ls -d packages/Microsoft.Web.WebView2.* | head -1)" make webview UNAME_M=${{ runner.arch == 'ARM64' && 'aarch64' || 'x86_64' }}
           else
             make webview
           fi
@@ -262,7 +267,9 @@ jobs:
         if: runner.os == 'Windows'
         working-directory: laufey
         shell: pwsh
-        run: make cef
+        # UNAME_M: the windowsarm64 CEF dist on windows-11-arm (see the
+        # webview step).
+        run: make cef UNAME_M=${{ runner.arch == 'ARM64' && 'aarch64' || 'x86_64' }}
 
       # Only the backends' runtime files: `deno desktop` copies the whole
       # directory holding a Linux/Windows backend binary into the app.
@@ -364,7 +371,8 @@ jobs:
         run: |
           set -euo pipefail
           vs=$("/c/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe" -latest -property installationPath)
-          for d in "$(cygpath -u "$vs")/VC/Tools/Llvm/x64/bin" "/c/Program Files/LLVM/bin"; do
+          # VS's own LLVM (x64, or ARM64 on windows-11-arm), else a system one.
+          for d in "$(cygpath -u "$vs")/VC/Tools/Llvm/${{ runner.arch == 'ARM64' && 'ARM64' || 'x64' }}/bin" "$(cygpath -u "$vs")/VC/Tools/Llvm/x64/bin" "/c/Program Files/LLVM/bin"; do
             if [ -f "$d/libclang.dll" ]; then
               echo "LIBCLANG_PATH=$(cygpath -w "$d")" >>"$GITHUB_ENV"
               echo "LIBCLANG_PATH=$(cygpath -w "$d")"
@@ -392,6 +400,9 @@ jobs:
       - name: Rust toolchain
         run: |
           tc=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)
+          # Name the host on Windows on Arm: an emulated x64 rustup would
+          # otherwise install (and build with) an x86_64 toolchain.
+          if [ "${{ matrix.target }}" = aarch64-pc-windows-msvc ]; then tc="$tc-${{ matrix.target }}"; fi
           rustup toolchain install "$tc" --profile minimal --no-self-update
           echo "RUSTUP_TOOLCHAIN=$tc" >>"$GITHUB_ENV"
 
@@ -486,6 +497,8 @@ jobs:
               ;;
             *-windows-msvc)
               cp target/release/denort.dll out/
+              case "${{ matrix.target }}" in aarch64-*) machine=arm64 ;; *) machine=x64 ;; esac
+              python .github/denext-runtime/pe_deps.py "$machine" out/denort.dll
               ;;
           esac
           ls -la out
@@ -556,7 +569,8 @@ jobs:
         run: |
           set -euo pipefail
           vs=$("/c/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe" -latest -property installationPath)
-          for d in "$(cygpath -u "$vs")/VC/Tools/Llvm/x64/bin" "/c/Program Files/LLVM/bin"; do
+          # VS's own LLVM (x64, or ARM64 on windows-11-arm), else a system one.
+          for d in "$(cygpath -u "$vs")/VC/Tools/Llvm/${{ runner.arch == 'ARM64' && 'ARM64' || 'x64' }}/bin" "$(cygpath -u "$vs")/VC/Tools/Llvm/x64/bin" "/c/Program Files/LLVM/bin"; do
             if [ -f "$d/libclang.dll" ]; then
               echo "LIBCLANG_PATH=$(cygpath -w "$d")" >>"$GITHUB_ENV"
               echo "LIBCLANG_PATH=$(cygpath -w "$d")"
@@ -584,6 +598,9 @@ jobs:
       - name: Rust toolchain
         run: |
           tc=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)
+          # Name the host on Windows on Arm: an emulated x64 rustup would
+          # otherwise install (and build with) an x86_64 toolchain.
+          if [ "${{ matrix.target }}" = aarch64-pc-windows-msvc ]; then tc="$tc-${{ matrix.target }}"; fi
           rustup toolchain install "$tc" --profile minimal --no-self-update
           echo "RUSTUP_TOOLCHAIN=$tc" >>"$GITHUB_ENV"
 
@@ -636,6 +653,10 @@ jobs:
               ;;
             *-windows-msvc)
               ls -la target/release/deno.exe target/release/denort.exe
+              # The machine type is the target's (an x64 toolchain on
+              # windows-11-arm would build x64 binaries).
+              case "$TARGET" in aarch64-*) machine=arm64 ;; *) machine=x64 ;; esac
+              python .github/denext-runtime/pe_deps.py "$machine" target/release/deno.exe target/release/denort.exe
               ;;
           esac
 
@@ -773,7 +794,7 @@ jobs:
       - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
         if: runner.os == 'Windows'
         with:
-          arch: x64
+          arch: ${{ runner.arch == 'ARM64' && 'arm64' || 'x64' }}
 
       # laufey's init_api rejects any C ABI mismatch between the runtime and
       # the host; fail here instead of at an app's first launch.
@@ -1045,13 +1066,13 @@ jobs:
         run: |
           n=$(python3 -c 'import json;m=json.load(open("dist/manifest.json"));print(sum(len([k for k in v if k!="runtimeLib"]) for v in m["targets"].values()))')
           echo "archives: $n"
-          test "$n" = 10
+          test "$n" = 12
           c=$(python3 -c 'import json;m=json.load(open("dist/manifest.json"));print(len(m["cli"]["targets"]))')
           echo "cli archives: $c"
-          test "$c" = 5
+          test "$c" = 6
           r=$(python3 -c 'import json;m=json.load(open("dist/manifest.json"));print(len(m["denort"]["targets"]))')
           echo "denort archives: $r"
-          test "$r" = 5
+          test "$r" = 6
 
       - name: GitHub Release
         if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/denext-runtime-v')

@@ -668,7 +668,7 @@ where the changes are discussed.
     `denext.15`; `.github/workflows/denext_runtime.yml` job `cli`,
     `.github/denext-runtime/assemble_cli.sh` / `cli_smoke.sh`,
     `cli/lib/version.rs`, `cli/standalone/binary.rs`). Every runtime release
-    also carries `deno-cli-<version>-<target>.zip` for the same five targets,
+    also carries `deno-cli-<version>-<target>.zip` for the same targets,
     built with `cargo build --release --locked --bin deno`, so denext can
     download the CLI features (items 23, 24, and the CLI-side parts of the rest)
     pinned by version and SHA-256 like the runtime, with nothing else to
@@ -1001,6 +1001,18 @@ where the changes are discussed.
     holds exactly the pinned files) and the Linux CEF launch smoke (the
     profile has its language's dictionary after the first launch).
 
+38. **A Windows on Arm runtime** (from `denext.21`; the release workflow
+    only). `aarch64-pc-windows-msvc` joins the release matrix on GitHub's
+    `windows-11-arm` runner, for the runtime archives (webview and CEF: CEF's
+    `windowsarm64` distribution, `make ... UNAME_M=aarch64` because an emulated
+    shell reports `x86_64`) and for the CLI and `denort` archives (esbuild's
+    `@esbuild/win32-arm64`, pinned like the others). The MSVC environment, VS's
+    LLVM (`libclang`) and the Rust toolchain are the runner's ARM64 ones (the
+    toolchain named with its host so an emulated `rustup` can't pick x86_64),
+    and every Windows binary's PE machine type is checked against the target
+    when it is built. A release now has 12 runtime, 6 CLI and 6 `denort`
+    archives.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37) are what the prebuilt
 `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
@@ -1042,7 +1054,8 @@ One archive per target and backend:
 `deno-desktop-runtime-<deno version>-denext.<n>-<target>-<backend>.tar.gz`
 (`.zip` on Windows). Targets: `aarch64-apple-darwin`, `x86_64-apple-darwin`,
 `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`,
-`x86_64-pc-windows-msvc`. Backends: `webview`, `cef`.
+`x86_64-pc-windows-msvc`, `aarch64-pc-windows-msvc` (from `denext.21`).
+Backends: `webview`, `cef`.
 
 ```text
 libdenort.dylib | libdenort.so | denort.dll    -> DENORT_DESKTOP_BIN
@@ -1218,7 +1231,7 @@ Specs this fork adds for what its runtime exposes outside a desktop app:
 Upstream Deno has no end-to-end harness for `deno desktop` apps (its own tests
 stop at unit tests and `tests/specs` of the CLI), so this fork carries its own,
 the equivalent of laufey's `native_e2e`: `.github/denext-runtime/e2e/`. The
-runtime workflow runs it after the launch smoke on all five targets with both
+runtime workflow runs it after the launch smoke on every target with both
 backends (Linux under Xvfb with the xfwm4 window manager, a private D-Bus
 session and a stand-in notification server, `linux/`).
 

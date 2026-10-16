@@ -26,7 +26,12 @@ case "$(uname -s)" in
     cp "$here/probe.c" "$here/node.def" "$tmp/"
     (
       cd "$tmp"
-      lib -nologo -def:node.def -name:node.exe -machine:x64 -out:node.lib
+      # The import library for the toolchain's own target (x64 or ARM64).
+      case "${VSCMD_ARG_TGT_ARCH:-x64}" in
+        arm64) machine=arm64 ;;
+        *) machine=x64 ;;
+      esac
+      lib -nologo -def:node.def -name:node.exe -machine:$machine -out:node.lib
       cl -nologo -O2 -W3 -LD probe.c -Fe:probe.node \
         -link node.lib delayimp.lib -DELAYLOAD:node.exe
     )
