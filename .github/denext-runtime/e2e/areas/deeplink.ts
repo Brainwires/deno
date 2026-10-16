@@ -479,6 +479,48 @@ export async function run(env: Env, rep: AreaReport) {
     }
   }
 
+  /** The Template and Page Count of an .msi's summary information, read
+   * through Windows Installer's own COM API. */
+  async function msiSchema(
+    file: string,
+  ): Promise<{ template: string; pageCount: number } | null> {
+    const ps = [
+      // Parameterized COM properties go through InvokeMember.
+      "$i = New-Object -ComObject WindowsInstaller.Installer",
+      `$s = $i.GetType().InvokeMember('SummaryInformation', 'GetProperty', $null, $i, @('${
+        file.replaceAll("'", "''")
+      }', 0))`,
+      "Write-Output $s.GetType().InvokeMember('Property', 'GetProperty', $null, $s, @(7))",
+      "Write-Output $s.GetType().InvokeMember('Property', 'GetProperty', $null, $s, @(14))",
+    ].join("; ");
+    const r = await sh("powershell", ["-NoProfile", "-Command", ps]);
+    const [template, pages] = r.out.trim().split(/\r?\n/);
+    const pageCount = Number(pages);
+    return r.code === 0 && template && Number.isFinite(pageCount)
+      ? { template: template.trim(), pageCount }
+      : null;
+  }
+
+  async function setMsiPageCount(
+    file: string,
+    pageCount: number,
+  ): Promise<{ ok: boolean; out: string }> {
+    const ps = [
+      "$i = New-Object -ComObject WindowsInstaller.Installer",
+      `$s = $i.GetType().InvokeMember('SummaryInformation', 'GetProperty', $null, $i, @('${
+        file.replaceAll("'", "''")
+      }', 1))`,
+      `$s.GetType().InvokeMember('Property', 'SetProperty', $null, $s, @(14, ${pageCount}))`,
+      "$s.GetType().InvokeMember('Persist', 'InvokeMethod', $null, $s, $null)",
+    ].join("; ");
+    const r = await sh("powershell", ["-NoProfile", "-Command", ps]);
+    const after = await msiSchema(file);
+    return {
+      ok: r.code === 0 && after?.pageCount === pageCount,
+      out: JSON.stringify({ code: r.code, out: r.out, after }),
+    };
+  }
+
   async function msi(
     env: Env,
     rep: AreaReport,
@@ -493,12 +535,34 @@ export async function run(env: Env, rep: AreaReport) {
       name,
       output: path("out", `${name}.msi`),
     });
-    const msiFile = m.artifact;
+    let msiFile = m.artifact;
     rep.check(
       "msi: the stock CLI built an .msi",
       await exists(msiFile),
       msiFile,
     );
+    // Windows Installer opens an Arm64 package only at schema 500 (Page
+    // Count; Template "Arm64;..."), and refuses a lower one with 1620. The
+    // stock CLI writes 200 for every arch (this fork's writes 500 for Arm64,
+    // DENEXT.md item 40): say so, and install a copy at 500 to check the rest.
+    const schema = await msiSchema(msiFile);
+    if (schema && /^arm64/i.test(schema.template) && schema.pageCount < 500) {
+      rep.na(
+        "msi: the stock CLI's Arm64 .msi installs as built",
+        `its summary declares Template ${schema.template} with Page Count ${schema.pageCount}; Windows Installer needs 500 for Arm64 and refuses it (1620). This fork's CLI writes 500; the checks below use a copy with Page Count 500`,
+      );
+      const copy = msiFile.replace(/\.msi$/i, "-schema500.msi");
+      await Deno.copyFile(msiFile, copy);
+      const set = await setMsiPageCount(copy, 500);
+      rep.check("msi: a copy at Page Count 500 was written", set.ok, set.out);
+      msiFile = copy;
+    } else {
+      rep.check(
+        "msi: the package's schema suits its platform",
+        schema !== null,
+        schema ?? "could not read the summary information",
+      );
+    }
     const logFile = path(env.workDir, "logs", "msiexec-install.log");
     const inst = await sh("msiexec", [
       "/i",

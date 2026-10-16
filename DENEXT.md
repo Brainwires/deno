@@ -1028,6 +1028,22 @@ where the changes are discussed.
     client's `Runtime.evaluate` in a CEF window on Linux by hand (the note says
     what was and wasn't run).
 
+40. **`fix(desktop)`: an Arm64 `.msi` declares schema 500** (from `denext.21`;
+    CLI only; `cli/tools/desktop.rs`, `msi_schema_for_arch`). `deno desktop`
+    wrote Page Count 200 (Windows Installer 2.0) into every `.msi`, but Windows
+    Installer opens a package whose Template is `Arm64;...` only at schema 500
+    and refuses it with 1620 ("This installation package could not be opened"),
+    so no Windows on Arm `.msi` it built could install. It now writes 500 for
+    Arm64 (200 for x64, as before). Test:
+    `msi_arm64_package_declares_schema_500`. The e2e suite packages with the
+    stock CLI, so on Windows on Arm its deeplink area reports the stock `.msi`
+    as n/a with the summary it read (Template and Page Count, through Windows
+    Installer's COM API) and installs a copy set to 500 for the rest of its
+    checks. The same run's menus area reports its keyboard checks as n/a when
+    Windows refuses the window the foreground for a reason it can name (another
+    process keeps it, none holds it, the session is not the console's or can't
+    open the input desktop), with that evidence in the results file.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37) are what the prebuilt
 `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are

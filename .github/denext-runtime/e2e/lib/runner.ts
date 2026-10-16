@@ -615,8 +615,18 @@ export async function killByPath(dir: string) {
 }
 
 export async function tail(file: string, lines = 40): Promise<string> {
-  const t = await Deno.readTextFile(file).catch(() => "");
-  return t.split(/\r?\n/).slice(-lines).join("\n");
+  const bytes = await Deno.readFile(file).catch(() => new Uint8Array());
+  return decodeLog(bytes).split(/\r?\n/).slice(-lines).join("\n");
+}
+
+/** A log's text: UTF-16LE when it starts with that BOM or looks like it
+ * (msiexec's `/l*v` logs), else UTF-8. */
+export function decodeLog(bytes: Uint8Array): string {
+  const bom = bytes[0] === 0xff && bytes[1] === 0xfe;
+  const wide = bom || (bytes.length >= 4 && bytes[1] === 0 && bytes[3] === 0);
+  return wide
+    ? new TextDecoder("utf-16le").decode(bytes.subarray(bom ? 2 : 0))
+    : new TextDecoder().decode(bytes);
 }
 
 // ---------------------------------------------------------------------------

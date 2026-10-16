@@ -5832,6 +5832,14 @@ fn msi_arch_for_target(target: Option<&str>) -> Result<&'static str, AnyError> {
   }
 }
 
+/// The summary's Page Count: the minimum Windows Installer schema. 2.00 is
+/// enough for x64, but Windows Installer opens an `Arm64` package only at
+/// schema 500 (5.0) and refuses a lower one with 1620, "This installation
+/// package could not be opened" (denext: DENEXT.md item 40).
+fn msi_schema_for_arch(arch: &str) -> i32 {
+  if arch == "Arm64" { 500 } else { 200 }
+}
+
 /// Lowercase base36 encoding of a counter, used to mint unique 8.3 short names.
 fn base36(mut n: u32) -> String {
   if n == 0 {
@@ -6466,8 +6474,7 @@ fn create_windows_msi(
     // Word Count bit 1 (2) = source files are compressed (in cabinets); bit 0
     // clear = long file names allowed.
     summary.set_word_count(2);
-    // Page Count = minimum Windows Installer version (2.00).
-    summary.set_page_count(200);
+    summary.set_page_count(msi_schema_for_arch(arch));
     // Fixed creation time (2020-01-01) for reproducible output.
     summary.set_creation_time(
       std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_577_836_800),
@@ -10959,6 +10966,27 @@ def456  other.zip
   }
 
   #[test]
+  fn msi_arm64_package_declares_schema_500() {
+    // Windows Installer refuses an Arm64 package below schema 500 (1620).
+    assert_eq!(msi_schema_for_arch("Arm64"), 500);
+    assert_eq!(msi_schema_for_arch("x64"), 200);
+    let tmp = tempfile::tempdir().unwrap();
+    let app_dir = fake_windows_app_dir(tmp.path(), "MyApp");
+    let msi_path = tmp.path().join("MyApp.msi");
+    create_windows_msi(
+      &app_dir,
+      &msi_path,
+      &empty_desktop_flags(),
+      Some("aarch64-pc-windows-msvc"),
+      None,
+    )
+    .unwrap();
+    let package = msi::open(&msi_path).unwrap();
+    assert_eq!(package.summary_info().arch(), Some("Arm64"));
+    assert_eq!(package.summary_info().page_count(), Some(500));
+  }
+
+  #[test]
   fn msi_short_names_are_valid_8_3() {
     let d = msi_short_name(1, "Some Long Folder Name", true);
     assert_eq!(d, "D1");
@@ -11004,6 +11032,7 @@ def456  other.zip
 
     let mut package = msi::open(&msi_path).unwrap();
     assert_eq!(package.summary_info().arch(), Some("x64"));
+    assert_eq!(package.summary_info().page_count(), Some(200));
     // Windows Installer rejects a UTF-8 (65001) database codepage with "could
     // not be opened"; both the database and summary-info codepage must be a
     // valid ANSI codepage. We author Windows-1252.
