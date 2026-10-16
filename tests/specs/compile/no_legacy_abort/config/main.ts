@@ -14,7 +14,7 @@ const server = Deno.serve({ port: 0, onListen: () => {} }, (req) => {
 const res = await fetch(`http://127.0.0.1:${server.addr.port}/`);
 const body = await res.text();
 
-let timer: number;
+let timer: ReturnType<typeof setTimeout>;
 const result = await Promise.race([
   aborted.promise.then(() => true),
   new Promise((r) => timer = setTimeout(r, 1000)).then(() => false),
