@@ -1044,7 +1044,27 @@ where the changes are discussed.
     process keeps it, none holds it, the session is not the console's or can't
     open the input desktop), with that evidence in the results file.
 
-The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37) are what the prebuilt
+41. **A macOS CEF quit no longer waits 5 s** (from `denext.21`; laufey
+    `integration/denext21` `165d2c7`, no runtime API). Every quit of a macOS CEF
+    app took over 5 s and logged that a helper was still running 5 s after
+    shutdown: the host waited for Chromium's `--type=code-sign-clone-cleanup`,
+    which the browser process starts during shutdown to delete its code-signing
+    clone of the app bundle and which polls `getppid()` until the browser has
+    exited, so the wait only ever ended at its deadline. The host now leaves it
+    out of the post-shutdown wait, as it does the zygotes and the crash handler;
+    the 5 s bound stays for the other helpers. On an x86_64 Mac the median quit
+    went from 5246 ms to 649 ms. On macOS the profile's LevelDB `LOCK` files are
+    held by the host itself (Chromium sandboxes the storage service and the
+    browser opens its files), so no helper outliving the host can hold them.
+    Tests: laufey's `cef_profile_lock_test`; the e2e exit area checks for every
+    CEF launch that the process is gone within 3 s of the app asking
+    (`E2E_EXIT_QUIT_BUDGET_MS`), that the host logged no helper outliving its
+    shutdown, and on macOS and Linux that nothing the launch started outlives it
+    but those after-the-browser helpers, gone within 3 s; its quick
+    quit-and-relaunch cycles (localStorage and IndexedDB carried over) go from 6
+    to 10.
+
+The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41) are what the prebuilt
 `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
 in the branch too, but a stock CLI does not run them; denext's own launcher
