@@ -55,9 +55,12 @@ const STEPS = [
 const QUICK = Number(Deno.env.get("E2E_EXIT_QUICK_RELAUNCHES") ?? 10);
 
 // From the app asking to end to its process being gone (and its output
-// closed: a helper still holding the host's stdout or stderr counts).
+// closed: a helper still holding the host's stdout or stderr counts). Under
+// the host's 5 s helper wait, so a quit that waits it out still fails, with
+// room for a loaded CI runner (Windows CEF quits in ~0.75 s but measured
+// 3.27 s once).
 const QUIT_BUDGET_MS = Number(
-  Deno.env.get("E2E_EXIT_QUIT_BUDGET_MS") ?? 3_000,
+  Deno.env.get("E2E_EXIT_QUIT_BUDGET_MS") ?? 4_500,
 );
 // The CEF host's line when a helper outlived its post-shutdown wait.
 const HELPER_LEFT = /helper process\(es\) still running/;
