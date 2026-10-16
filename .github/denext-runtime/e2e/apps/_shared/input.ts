@@ -176,9 +176,87 @@ function winLibs() {
       },
       SetForegroundWindow: { parameters: ["pointer"], result: "i32" },
       GetForegroundWindow: { parameters: [], result: "pointer" },
+      GetWindowThreadProcessId: {
+        parameters: ["pointer", "buffer"],
+        result: "u32",
+      },
+      AttachThreadInput: { parameters: ["u32", "u32", "i32"], result: "i32" },
+      BringWindowToTop: { parameters: ["pointer"], result: "i32" },
+      IsWindowVisible: { parameters: ["pointer"], result: "i32" },
+      IsWindowEnabled: { parameters: ["pointer"], result: "i32" },
+      IsIconic: { parameters: ["pointer"], result: "i32" },
+      GetClassNameW: {
+        parameters: ["pointer", "buffer", "i32"],
+        result: "i32",
+      },
+      GetWindowTextW: {
+        parameters: ["pointer", "buffer", "i32"],
+        result: "i32",
+      },
+      OpenInputDesktop: {
+        parameters: ["u32", "i32", "u32"],
+        result: "pointer",
+      },
+      CloseDesktop: { parameters: ["pointer"], result: "i32" },
     } as const,
   );
   return win;
+}
+
+let k32: any;
+function kernel32() {
+  if (k32) return k32;
+  k32 = Deno.dlopen(
+    "kernel32.dll",
+    {
+      GetCurrentThreadId: { parameters: [], result: "u32" },
+      OpenProcess: { parameters: ["u32", "i32", "u32"], result: "pointer" },
+      QueryFullProcessImageNameW: {
+        parameters: ["pointer", "u32", "buffer", "buffer"],
+        result: "i32",
+      },
+      CloseHandle: { parameters: ["pointer"], result: "i32" },
+      ProcessIdToSessionId: { parameters: ["u32", "buffer"], result: "i32" },
+      WTSGetActiveConsoleSessionId: { parameters: [], result: "u32" },
+    } as const,
+  );
+  return k32;
+}
+
+function wideString(buf: Uint8Array, chars: number): string {
+  return String.fromCharCode(
+    ...new Uint16Array(buf.buffer, 0, Math.max(0, chars)),
+  );
+}
+
+/** A window's title, class, owning pid and that process's executable. */
+function describeWindow(h: Deno.PointerValue) {
+  if (!h) return null;
+  const u = winLibs().symbols;
+  const k = kernel32().symbols;
+  const text = new Uint8Array(512);
+  const cls = new Uint8Array(512);
+  const pidBuf = new Uint32Array(1);
+  const tid = u.GetWindowThreadProcessId(h, new Uint8Array(pidBuf.buffer));
+  const pid = pidBuf[0];
+  let exe: string | null = null;
+  // PROCESS_QUERY_LIMITED_INFORMATION
+  const ph = k.OpenProcess(0x1000, 0, pid);
+  if (ph) {
+    const name = new Uint8Array(1024);
+    const len = new Uint32Array([512]);
+    if (k.QueryFullProcessImageNameW(ph, 0, name, new Uint8Array(len.buffer))) {
+      exe = wideString(name, len[0]);
+    }
+    k.CloseHandle(ph);
+  }
+  return {
+    title: wideString(text, u.GetWindowTextW(h, text, 256)),
+    class: wideString(cls, u.GetClassNameW(h, cls, 256)),
+    pid,
+    tid,
+    exe,
+  };
 }
 
 const wide = (s: string) => {
@@ -277,23 +355,106 @@ export async function activate(title: string): Promise<boolean> {
     // shell can still refuse or hand the foreground back a moment later
     // (a hosted runner's shell is busy right after a launch), so ask until
     // the window is the foreground one, for up to 5 s.
+    // Every other attempt also joins the foreground window's input queue
+    // (AttachThreadInput), which the shell honours when the Alt press alone
+    // is not enough.
     const w = winLibs().symbols;
     const deadline = Date.now() + 5000;
-    for (;;) {
+    for (let attempt = 0;; attempt++) {
       const h = w.FindWindowW(null, wide(title));
       if (h) {
+        const fg = w.GetForegroundWindow();
+        const fgTid = fg ? w.GetWindowThreadProcessId(fg, null) : 0;
+        const ownTid = kernel32().symbols.GetCurrentThreadId();
+        const attach = attempt % 2 === 1 && fgTid !== 0 && fgTid !== ownTid;
+        if (attach) w.AttachThreadInput(ownTid, fgTid, 1);
         w.keybd_event(0x12, 0, 0, 0n);
+        w.BringWindowToTop(h);
         w.SetForegroundWindow(h);
         w.keybd_event(0x12, 0, 2, 0n);
+        if (attach) w.AttachThreadInput(ownTid, fgTid, 0);
         await new Promise((r) => setTimeout(r, 100));
-        const fg = w.GetForegroundWindow();
-        if (fg && Deno.UnsafePointer.equals(fg, h)) return true;
+        const now = w.GetForegroundWindow();
+        if (now && Deno.UnsafePointer.equals(now, h)) return true;
       }
       if (Date.now() >= deadline) return false;
       await new Promise((r) => setTimeout(r, 150));
     }
   }
   return true;
+}
+
+/** Windows, after `activate(title)` failed: why this session would not
+ * give the window the foreground, when that is the session's doing and not
+ * the window's. Returns `{ refusal }` (a runner limitation, with what was
+ * detected) or `{ refusal: null }` (the window itself looks wrong: missing,
+ * hidden, disabled or minimized, so the failure is the app's) and the
+ * evidence either way. */
+export function foregroundDiagnosis(title: string): {
+  refusal: string | null;
+  evidence: Record<string, unknown>;
+} {
+  if (OS !== "windows") return { refusal: null, evidence: {} };
+  const u = winLibs().symbols;
+  const k = kernel32().symbols;
+  const h = u.FindWindowW(null, wide(title));
+  const fg = u.GetForegroundWindow();
+  const sid = new Uint32Array(1);
+  const haveSid = k.ProcessIdToSessionId(Deno.pid, new Uint8Array(sid.buffer));
+  const consoleSession = k.WTSGetActiveConsoleSessionId();
+  // DESKTOP_READOBJECTS: can this process open the input desktop at all?
+  const desk = u.OpenInputDesktop(0, 0, 0x0001);
+  if (desk) u.CloseDesktop(desk);
+  const evidence: Record<string, unknown> = {
+    window: h
+      ? {
+        ...describeWindow(h),
+        visible: u.IsWindowVisible(h) !== 0,
+        enabled: u.IsWindowEnabled(h) !== 0,
+        minimized: u.IsIconic(h) !== 0,
+      }
+      : null,
+    foreground: fg ? describeWindow(fg) : null,
+    session: haveSid ? sid[0] : null,
+    consoleSession,
+    inputDesktop: desk !== null,
+  };
+  const win = evidence.window as Record<string, unknown> | null;
+  if (!win || !win.visible || !win.enabled || win.minimized) {
+    return { refusal: null, evidence };
+  }
+  if (!desk) {
+    return {
+      refusal:
+        "this session can't open the input desktop (OpenInputDesktop failed), so no window of it can hold the foreground",
+      evidence,
+    };
+  }
+  if (haveSid && consoleSession !== 0xFFFFFFFF && sid[0] !== consoleSession) {
+    return {
+      refusal: `this process runs in session ${
+        sid[0]
+      }, not the console session ${consoleSession}, so Windows keeps the foreground away from its windows`,
+      evidence,
+    };
+  }
+  if (!fg) {
+    return {
+      refusal:
+        "no window holds the foreground in this session (GetForegroundWindow is NULL), and Windows refused it to the app's visible, enabled window",
+      evidence,
+    };
+  }
+  const f = evidence.foreground as { pid?: number; exe?: string | null };
+  if (f.pid !== undefined && f.pid !== win.pid) {
+    return {
+      refusal: `Windows kept the foreground on another process's window (${
+        f.exe ?? `pid ${f.pid}`
+      }) and refused SetForegroundWindow to the app's visible, enabled window, even with an Alt press and AttachThreadInput`,
+      evidence,
+    };
+  }
+  return { refusal: null, evidence };
 }
 
 /** Windows: whether the window titled `title` is the foreground window

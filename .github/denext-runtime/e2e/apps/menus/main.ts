@@ -32,12 +32,22 @@ import {
 import {
   activate,
   canPressKeys,
+  foregroundDiagnosis,
   isForeground,
   type Key,
   pressKeys,
 } from "../_shared/input.ts";
 
 const r = new Report("menus");
+
+/** After `activate` failed: the runner limitation that explains it (recorded
+ * with its evidence under `foreground:<what>`), or null when the window is
+ * at fault, so the check below runs and fails with its own evidence. */
+function noForeground(what: string): string | null {
+  const { refusal, evidence } = foregroundDiagnosis(TITLE);
+  r.set(`foreground:${what}`, { refusal, ...evidence });
+  return refusal;
+}
 const identifier: string = r.params.identifier;
 const responses: any[] = [];
 
@@ -187,12 +197,20 @@ await r.step("menus", async () => {
     // it was this one when they were pressed.
     const atPress = isForeground(TITLE);
     r.mark(`accelerator press (foreground: ${foreground}, ${atPress})`);
-    await pressKeys(["Primary", "Shift", "K"]);
-    r.check(
-      "an application-menu accelerator fires its item (menuclick)",
-      await waitFor(() => clicks.includes("fire"), 8000),
-      { clicks, foreground, atPress },
-    );
+    const refused = foreground ? null : noForeground("accelerator");
+    if (refused) {
+      r.na(
+        "an application-menu accelerator fires its item",
+        `no foreground on this runner: ${refused}`,
+      );
+    } else {
+      await pressKeys(["Primary", "Shift", "K"]);
+      r.check(
+        "an application-menu accelerator fires its item (menuclick)",
+        await waitFor(() => clicks.includes("fire"), 8000),
+        { clicks, foreground, atPress },
+      );
+    }
   }
 
   const menu = [
@@ -225,6 +243,18 @@ await r.step("menus", async () => {
   }
   if (cannotPress) {
     r.na("a context menu dismissed / chosen from the keyboard", cannotPress);
+    return;
+  }
+  // A menu takes the keyboard only from its window in the foreground.
+  win.focus();
+  const ctxRefused = await activate(TITLE)
+    ? null
+    : noForeground("context menu");
+  if (ctxRefused) {
+    r.na(
+      "a context menu dismissed / chosen from the keyboard",
+      `no foreground on this runner: ${ctxRefused}`,
+    );
     return;
   }
   const choose = async (keys: Key[][], label: string) => {
