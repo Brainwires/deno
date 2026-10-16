@@ -968,7 +968,18 @@ where the changes are discussed.
     `dialog_abort_stress`'s 0 ms abort. The e2e artifact now carries each app's
     `w/e2e-results` (for example `dialogWindowAfterMs`).
 
-The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-35) are what the prebuilt
+36. **`fix(compile)`: a compiled program keeps `--unstable-no-legacy-abort`**
+    (from `denext.21`; `cli/rt/run.rs`). `deno compile` already embedded the
+    unstable features in the binary's metadata, but the standalone runtime
+    started its workers with `no_legacy_abort: false`, so a compiled app (and a
+    `deno desktop` app) aborted `request.signal` after every successful
+    response and printed `Deno.serve`'s legacy-behavior notice on its first
+    request even when it was compiled with the flag or with
+    `"unstable": ["no-legacy-abort"]` in its config. The setting now comes from
+    the metadata, so the compiled app behaves as `deno run` with it. Test: the
+    `compile::no_legacy_abort` spec (the flag, the config, and without it).
+
+The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-36) are what the prebuilt
 `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
 in the branch too, but a stock CLI does not run them; denext's own launcher

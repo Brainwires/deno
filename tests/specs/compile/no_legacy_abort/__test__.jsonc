@@ -1,0 +1,49 @@
+{
+  "tempDir": true,
+  "tests": {
+    // `--unstable-no-legacy-abort` is carried into the binary.
+    "flag": {
+      "steps": [
+        {
+          "args": "compile --unstable-no-legacy-abort -A --output out main.ts",
+          "output": "[WILDCARD]"
+        },
+        {
+          "commandName": "./out",
+          "args": [],
+          "output": "no_legacy.out"
+        }
+      ]
+    },
+    // So is `"unstable": ["no-legacy-abort"]` in the config file.
+    "config": {
+      "steps": [
+        {
+          "cwd": "config",
+          "args": "compile -A --output out main.ts",
+          "output": "[WILDCARD]"
+        },
+        {
+          "cwd": "config",
+          "commandName": "./out",
+          "args": [],
+          "output": "no_legacy.out"
+        }
+      ]
+    },
+    // Without it the compiled app keeps the legacy behavior and its notice.
+    "legacy": {
+      "steps": [
+        {
+          "args": "compile -A --output out main.ts",
+          "output": "[WILDCARD]"
+        },
+        {
+          "commandName": "./out",
+          "args": [],
+          "output": "legacy.out"
+        }
+      ]
+    }
+  }
+}
