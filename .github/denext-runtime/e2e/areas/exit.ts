@@ -7,6 +7,15 @@
 // unwritten; on Windows it could also hang in DLL detach code); it now goes
 // through laufey's exit_app (rt_desktop `desktop_exit`) on Windows, macOS and
 // Linux, with both backends.
+//
+// With CEF the end is also quick and clean: the process is gone within
+// QUIT_BUDGET_MS of the app asking for it (the host waits a bounded 5 s for
+// its helper processes after CefShutdown, and on macOS it used to wait for
+// Chromium's code-sign-clone-cleanup, which itself waits for the browser
+// process to exit, so every end took over 5 s), the host reports no helper
+// outliving its shutdown, and nothing the launch started outlives it but the
+// helpers that end only after the browser process (AFTER_HOST), which are
+// gone within moments of it.
 
 import {
   type AreaReport,
@@ -14,9 +23,15 @@ import {
   type Env,
   kill,
   launch,
+  type Launched,
+  OS,
   packageApp,
+  pidsUnder,
+  processTable,
   results,
   seenResults,
+  sh,
+  sleep,
   tail,
   waitExit,
   waitResult,
@@ -33,11 +48,56 @@ const STEPS = [
 ];
 
 // Then quit-and-relaunch at once, without the runner ending what the
-// previous launch started (E2E_EXIT_QUICK_RELAUNCHES, default 6): the
+// previous launch started (E2E_EXIT_QUICK_RELAUNCHES, default 10): the
 // previous launch's helpers may still hold the profile's LevelDB LOCK files
 // when the next one starts, which ran its localStorage in memory only and
 // lost what the page stored (laufey now waits for both).
-const QUICK = Number(Deno.env.get("E2E_EXIT_QUICK_RELAUNCHES") ?? 6);
+const QUICK = Number(Deno.env.get("E2E_EXIT_QUICK_RELAUNCHES") ?? 10);
+
+// From the app asking to end to its process being gone (and its output
+// closed: a helper still holding the host's stdout or stderr counts).
+const QUIT_BUDGET_MS = Number(
+  Deno.env.get("E2E_EXIT_QUIT_BUDGET_MS") ?? 3_000,
+);
+// The CEF host's line when a helper outlived its post-shutdown wait.
+const HELPER_LEFT = /helper process\(es\) still running/;
+// Chromium's helpers that end only after the browser process, which the host
+// doesn't wait for (laufey's IsCefHelperToWaitFor): the zygotes and the crash
+// handler (Linux), and the code-signing clone's cleanup (macOS), which polls
+// once a second for its parent's exit.
+const AFTER_HOST = /--type=(zygote|crashpad-handler|code-sign-clone-cleanup)\b/;
+
+/** The processes of launch `l` still running once its process has ended:
+ * those it was seen to start, and any running from the app's bundle (one
+ * started too late for the runner's poll), with their command lines. */
+async function survivors(l: Launched, artifact: string) {
+  const t = await l.tree.track();
+  const pids = new Set(l.tree.alive(t).filter((p) => p !== l.pid));
+  for (const p of await pidsUnder(artifact)) pids.add(p);
+  const out: { pid: number; start: string; command: string }[] = [];
+  for (const pid of pids) {
+    const p = t.get(pid);
+    if (!p || p.state.startsWith("Z")) continue;
+    const r = await sh("ps", ["-o", "command=", "-p", String(pid)]);
+    if (r.out.trim()) {
+      out.push({ pid, start: p.start, command: r.out.trim() });
+    }
+  }
+  return out;
+}
+
+/** The processes of `procs` still running after up to `ms`. */
+async function gone(procs: { pid: number; start: string }[], ms: number) {
+  const until = Date.now() + ms;
+  for (;;) {
+    const t = await processTable();
+    const left = procs.filter(({ pid, start }) =>
+      t.get(pid)?.start === start && !t.get(pid)!.state.startsWith("Z")
+    ).map(({ pid }) => pid);
+    if (!left.length || Date.now() > until) return left;
+    await sleep(100);
+  }
+}
 
 export async function run(env: Env, rep: AreaReport) {
   const scheme = `dnxexit${env.nonce}`;
@@ -81,6 +141,7 @@ export async function run(env: Env, rep: AreaReport) {
       return;
     }
     const st = await waitExit(l, 30_000);
+    const exitedAt = Date.now();
     const final = (await results("exit")).find((x) => x.pid === r.pid) ?? r;
     rep.merge(label, final, l.logFile);
     rep.check(
@@ -94,6 +155,40 @@ export async function run(env: Env, rep: AreaReport) {
       return;
     }
     rep.check(`${label}: exit code ${step.code}`, st.code === step.code, st);
+    if (env.backend === "cef") {
+      const ending = Date.parse(final.data.ending ?? "");
+      const quitMs = exitedAt - ending;
+      rep.check(
+        `${label}: the process was gone within ${QUIT_BUDGET_MS} ms`,
+        quitMs <= QUIT_BUDGET_MS,
+        { quitMs, ending: final.data.ending ?? null },
+      );
+      const hostLog = await Deno.readTextFile(l.logFile).catch(() => "");
+      rep.check(
+        `${label}: no helper outlived the shutdown`,
+        !HELPER_LEFT.test(hostLog),
+        hostLog.split("\n").filter((s) => HELPER_LEFT.test(s)),
+      );
+      if (OS === "windows") {
+        rep.na(
+          `${label}: nothing it started outlived it`,
+          "the runner reads the process table with ps (macOS, Linux)",
+        );
+      } else {
+        const left = await survivors(l, app.artifact);
+        rep.check(
+          `${label}: nothing it started outlived it`,
+          left.every((p) => AFTER_HOST.test(p.command)),
+          { left },
+        );
+        const late = await gone(left, 3_000);
+        rep.check(
+          `${label}: what it started ended within 3 s of it`,
+          !late.length,
+          { left, late },
+        );
+      }
+    }
     if (step.how !== "quit") {
       rep.check(
         `${label}: unload ran before the end`,
