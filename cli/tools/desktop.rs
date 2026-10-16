@@ -479,9 +479,12 @@ async fn compile_desktop(
     }
   }
 
+  // `--inspect-renderer` alone (denext) also runs the app as a development
+  // build, with its renderer open to a CDP client (desktop_renderer_inspect).
   let inspector_requested = flags.inspect.is_some()
     || flags.inspect_brk.is_some()
-    || flags.inspect_wait.is_some();
+    || flags.inspect_wait.is_some()
+    || desktop_flags.inspect_renderer.is_some();
 
   // In HMR/inspector mode the compiled dylib is a throwaway dev artifact: we
   // load it directly rather than packaging it into a `.app`. Writing it into
@@ -1479,8 +1482,10 @@ async fn run_desktop_hmr(
     .parse()
     .unwrap();
     let cef_internal: SocketAddr = match desktop_flags.inspect_renderer {
-      Some(addr) => addr,
-      None => format!(
+      // A bare `--inspect-renderer` is 127.0.0.1:0: pick the port here, as
+      // the host ignores a port of 0.
+      Some(addr) if addr.port() != 0 => addr,
+      _ => format!(
         "127.0.0.1:{}",
         crate::tools::desktop_devtools::allocate_random_port()?
       )
@@ -1532,6 +1537,29 @@ async fn run_desktop_hmr(
     }
     Some(handle)
   } else {
+    if let Some(addr) = desktop_flags.inspect_renderer {
+      use crate::tools::desktop_renderer_inspect as renderer;
+      let addr = if addr.port() == 0 {
+        SocketAddr::new(
+          addr.ip(),
+          crate::tools::desktop_devtools::allocate_random_port()?,
+        )
+      } else {
+        addr
+      };
+      let plan = renderer::plan(
+        backend,
+        renderer::HostOs::current(),
+        addr,
+        std::env::var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS")
+          .ok()
+          .as_deref(),
+      );
+      for (key, value) in &plan.env {
+        cmd.env(key, value);
+      }
+      renderer::announce(&plan);
+    }
     None
   };
 

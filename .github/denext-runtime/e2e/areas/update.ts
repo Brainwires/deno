@@ -331,7 +331,14 @@ export async function run(env: Env, rep: AreaReport) {
       "noplatform",
       await sign({
         ...v2,
-        platforms: { "aarch64-pc-windows-msvc-cef": v2entry },
+        // A platform other than this one (Windows on Arm CEF is one now).
+        platforms: {
+          [
+            platform === "aarch64-pc-windows-msvc-cef"
+              ? "x86_64-pc-windows-msvc-cef"
+              : "aarch64-pc-windows-msvc-cef"
+          ]: v2entry,
+        },
       }, key),
     );
     await addCase(

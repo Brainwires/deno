@@ -54,6 +54,8 @@ fi
 
 limit=120
 status=0
+# Files the launch creates are newer than this (the profile's dictionaries).
+touch "$work/launch-start"
 case "$TARGET" in
   *-linux-gnu)
     export WEBKIT_DISABLE_COMPOSITING_MODE=1 LIBGL_ALWAYS_SOFTWARE=1
@@ -128,7 +130,7 @@ if [ "$BACKEND" = cef ]; then
       # spellcheck language (the UI language by default) into the profile,
       # which never downloads one: spellcheck works on a fresh profile.
       data_home=${XDG_DATA_HOME:-$HOME/.local/share}
-      found=$(find "$data_home" -path "*$LAUFEY_APP_ID*/Dictionaries/*.bdic" 2>/dev/null || true)
+      found=$(find "$data_home" -path '*/CEF/Dictionaries/*.bdic' -newer "$work/launch-start" 2>/dev/null || true)
       echo "--- profile dictionaries"
       echo "${found:-none}"
       [ -n "$found" ] || { echo "spellcheck dictionaries FAILED: none copied into the profile" >&2; exit 1; }

@@ -668,12 +668,12 @@ where the changes are discussed.
     `denext.15`; `.github/workflows/denext_runtime.yml` job `cli`,
     `.github/denext-runtime/assemble_cli.sh` / `cli_smoke.sh`,
     `cli/lib/version.rs`, `cli/standalone/binary.rs`). Every runtime release
-    also carries `deno-cli-<version>-<target>.zip` for the same targets,
-    built with `cargo build --release --locked --bin deno`, so denext can
-    download the CLI features (items 23, 24, and the CLI-side parts of the rest)
-    pinned by version and SHA-256 like the runtime, with nothing else to
-    install. The binary is still `deno`. A release build bakes `DENEXT_VERSION`
-    (the release version, e.g. `2.9.7-denext.15`) in at compile time: it becomes
+    also carries `deno-cli-<version>-<target>.zip` for the same targets, built
+    with `cargo build --release --locked --bin deno`, so denext can download the
+    CLI features (items 23, 24, and the CLI-side parts of the rest) pinned by
+    version and SHA-256 like the runtime, with nothing else to install. The
+    binary is still `deno`. A release build bakes `DENEXT_VERSION` (the release
+    version, e.g. `2.9.7-denext.15`) in at compile time: it becomes
     `Deno.version.deno`, `deno --version` / `deno -V`
     (`deno 2.9.7-denext.15 (stable, release, <target>)`) and the user agent
     (`Deno/2.9.7-denext.15`), still a semver on the stable channel, so a program
@@ -972,19 +972,19 @@ where the changes are discussed.
     (from `denext.21`; `cli/rt/run.rs`). `deno compile` already embedded the
     unstable features in the binary's metadata, but the standalone runtime
     started its workers with `no_legacy_abort: false`, so a compiled app (and a
-    `deno desktop` app) aborted `request.signal` after every successful
-    response and printed `Deno.serve`'s legacy-behavior notice on its first
-    request even when it was compiled with the flag or with
-    `"unstable": ["no-legacy-abort"]` in its config. The setting now comes from
-    the metadata, so the compiled app behaves as `deno run` with it. Test: the
-    `compile::no_legacy_abort` spec (the flag, the config, and without it).
+    `deno desktop` app) aborted `request.signal` after every successful response
+    and printed `Deno.serve`'s legacy-behavior notice on its first request even
+    when it was compiled with the flag or with `"unstable": ["no-legacy-abort"]`
+    in its config. The setting now comes from the metadata, so the compiled app
+    behaves as `deno run` with it. Test: the `compile::no_legacy_abort` spec
+    (the flag, the config, and without it).
 
-37. **Spellcheck on Linux CEF** (from `denext.21`; laufey
-    `integration/denext21` `df1d8c8`, no runtime API). The Linux CEF host
-    never lets Chromium download a Hunspell dictionary from Google (laufey's
-    network-quiet defaults, since `denext.11`), so a fresh profile had no spellcheck. The Linux
-    CEF archives now ship Chromium's prebuilt dictionaries of the common
-    languages (en-US, en-GB, de-DE, fr-FR, es-ES, pt-BR, it-IT; about 14 MB) in
+37. **Spellcheck on Linux CEF** (from `denext.21`; laufey `integration/denext21`
+    `df1d8c8`, no runtime API). The Linux CEF host never lets Chromium download
+    a Hunspell dictionary from Google (laufey's network-quiet defaults, since
+    `denext.11`), so a fresh profile had no spellcheck. The Linux CEF archives
+    now ship Chromium's prebuilt dictionaries of the common languages (en-US,
+    en-GB, de-DE, fr-FR, es-ES, pt-BR, it-IT; about 14 MB) in
     `laufey/cef/build/Release/dictionaries/`, fetched by
     `.github/denext-runtime/fetch_dictionaries.py` from
     chromium/deps/hunspell_dictionaries at the commit CEF 149's Chromium pins
@@ -998,11 +998,11 @@ where the changes are discussed.
     files when it packages; a dictionary the profile already has is never
     replaced, and the copy goes through a temporary name. Tests: laufey's
     `cef_network_quiet_test` (`DictionariesToSeed`), `verify.sh` (the archive
-    holds exactly the pinned files) and the Linux CEF launch smoke (the
-    profile has its language's dictionary after the first launch).
+    holds exactly the pinned files) and the Linux CEF launch smoke (the profile
+    has its language's dictionary after the first launch).
 
-38. **A Windows on Arm runtime** (from `denext.21`; the release workflow
-    only). `aarch64-pc-windows-msvc` joins the release matrix on GitHub's
+38. **A Windows on Arm runtime** (from `denext.21`; the release workflow only).
+    `aarch64-pc-windows-msvc` joins the release matrix on GitHub's
     `windows-11-arm` runner, for the runtime archives (webview and CEF: CEF's
     `windowsarm64` distribution, `make ... UNAME_M=aarch64` because an emulated
     shell reports `x86_64`) and for the CLI and `denort` archives (esbuild's
@@ -1012,6 +1012,21 @@ where the changes are discussed.
     and every Windows binary's PE machine type is checked against the target
     when it is built. A release now has 12 runtime, 6 CLI and 6 `denort`
     archives.
+
+39. **`feat(desktop)`: `--inspect-renderer` on its own (spike)** (from
+    `denext.21`; CLI only; `cli/tools/desktop_renderer_inspect.rs`, design note
+    `DENEXT-inspect-renderer.md`). `deno desktop --inspect-renderer[=<addr>]`
+    without `--inspect` runs the app as a development build with its window's
+    renderer open to a debugger: CDP on loopback for CEF (the host's
+    `LAUFEY_REMOTE_DEBUGGING_PORT`) and WebView2
+    (`WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS` `--remote-debugging-port`),
+    WebKit's own HTTP inspector for WebKitGTK (`WEBKIT_INSPECTOR_HTTP_SERVER`),
+    and a pointer to Safari's Develop menu for WKWebView. It prints the page's
+    `webSocketDebuggerUrl` once the window has loaded. A bare
+    `--inspect-renderer` (port 0) now gets a free port, also behind the
+    `--inspect` multiplexer. Tests: `desktop_renderer_inspect::tests`; a CDP
+    client's `Runtime.evaluate` in a CEF window on Linux by hand (the note says
+    what was and wasn't run).
 
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37) are what the prebuilt
 `libdenort` carries. The CLI-side parts (for example writing

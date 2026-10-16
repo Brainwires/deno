@@ -10,6 +10,7 @@ pub mod coverage;
 pub mod deploy;
 pub mod desktop;
 pub mod desktop_devtools;
+pub mod desktop_renderer_inspect;
 pub mod doc;
 pub mod fmt;
 pub mod fmt_editorconfig;
