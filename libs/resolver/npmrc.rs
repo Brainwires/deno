@@ -174,6 +174,7 @@ fn discover_npmrc<TSys: EnvVar + EnvHomeDir + FsRead>(
         }
         excludes
       },
+      node_linker: project_rc.node_linker.or(home_rc.node_linker),
     }
   }
 
@@ -279,6 +280,7 @@ pub fn create_default_npmrc(sys: &impl EnvVar) -> ResolvedNpmRc {
     trust_policy: Default::default(),
     trust_policy_ignore_after_minutes: None,
     trust_policy_exclude: Vec::new(),
+    node_linker: None,
   }
 }
 

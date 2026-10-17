@@ -1,0 +1,7 @@
+{
+  "name": "hoisted-default-app",
+  "version": "1.0.0",
+  "dependencies": {
+    "@denotest/create": "1.0.0"
+  }
+}

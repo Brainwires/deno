@@ -1,0 +1,83 @@
+{
+  // A package.json-only project gets npm's hoisted node_modules by default,
+  // so a package it uses without listing it (here @denotest/add, a
+  // dependency of @denotest/create) resolves. `.npmrc` `node-linker`, the
+  // `--node-modules-linker` flag and a deno.json keep the isolated layout.
+  "tempDir": true,
+  "tests": {
+    "package_json_only_is_hoisted": {
+      "steps": [
+        { "cwd": "pkg_only", "args": "install", "output": "[WILDCARD]" },
+        { "cwd": "pkg_only", "args": "run main.mjs", "output": "3\n" },
+        { "cwd": "pkg_only", "args": "run main.cjs", "output": "3\n" },
+        {
+          "cwd": "pkg_only",
+          "args": "eval console.log(Deno.lstatSync('node_modules/@denotest/add').isDirectory)",
+          "output": "true\n"
+        }
+      ]
+    },
+    "aliased_dependency": {
+      // a dependency's `"x": "npm:y@1"` dependency is at node_modules/x
+      "steps": [
+        { "cwd": "alias", "args": "install", "output": "[WILDCARD]" },
+        { "cwd": "alias", "args": "run main.cjs", "output": "3\n" }
+      ]
+    },
+    "switch_from_isolated": {
+      // a node_modules an earlier install laid out isolated (direct
+      // dependencies linked into .deno) becomes hoisted on the next install
+      "steps": [
+        {
+          "cwd": "switch",
+          "args": "install --node-modules-linker=isolated",
+          "output": "[WILDCARD]"
+        },
+        { "cwd": "switch", "args": "install", "output": "[WILDCARD]" },
+        { "cwd": "switch", "args": "run main.mjs", "output": "3\n" },
+        {
+          "cwd": "switch",
+          "args": "eval console.log(Deno.lstatSync('node_modules/@denotest/create').isSymlink)",
+          "output": "false\n"
+        }
+      ]
+    },
+    "npmrc_node_linker_isolated": {
+      "steps": [
+        { "cwd": "npmrc_isolated", "args": "install", "output": "[WILDCARD]" },
+        {
+          "cwd": "npmrc_isolated",
+          "args": "run main.mjs",
+          "output": "phantom_error.out",
+          "exitCode": 1
+        }
+      ]
+    },
+    "flag_isolated": {
+      "steps": [
+        {
+          "cwd": "flag_isolated",
+          "args": "install --node-modules-linker=isolated",
+          "output": "[WILDCARD]"
+        },
+        {
+          "cwd": "flag_isolated",
+          "args": "run main.mjs",
+          "output": "phantom_error.out",
+          "exitCode": 1
+        }
+      ]
+    },
+    "deno_json_keeps_isolated": {
+      "steps": [
+        { "cwd": "with_deno_json", "args": "install", "output": "[WILDCARD]" },
+        {
+          "cwd": "with_deno_json",
+          "args": "run main.mjs",
+          "output": "phantom_error.out",
+          "exitCode": 1
+        }
+      ]
+    }
+  }
+}

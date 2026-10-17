@@ -420,9 +420,36 @@ impl<TSys: WorkspaceFactorySys> WorkspaceFactory<TSys> {
           flag
         } else {
           let workspace = &self.workspace_directory()?.workspace;
-          workspace
-            .node_modules_linker()?
-            .unwrap_or_default()
+          if let Some(mode) = workspace.node_modules_linker()? {
+            mode
+          } else {
+            // Not chosen by the command line or deno.json: npm's layout for
+            // a project npm would install. A package.json-only project gets
+            // the hoisted node_modules npm writes, so a package it imports
+            // without listing it (a dependency's dependency, an
+            // auto-installed peer) resolves, for Deno and for tools that
+            // walk node_modules themselves. `.npmrc`'s `node-linker` (pnpm)
+            // chooses instead when set. The hoisted layout needs a manual
+            // node_modules dir, so a project whose node_modules Deno manages
+            // stays isolated.
+            let manual = self.raw_node_modules_dir_mode()?
+              == NodeModulesDirMode::Manual;
+            let npmrc_linker = self.npmrc()?.node_linker;
+            match npmrc_linker {
+              Some(deno_npmrc::NpmRcNodeLinker::Hoisted) if manual => {
+                NodeModulesLinkerMode::Hoisted
+              }
+              Some(_) => NodeModulesLinkerMode::Isolated,
+              None
+                if manual
+                  && workspace.deno_jsons().next().is_none()
+                  && workspace.package_jsons().next().is_some() =>
+              {
+                NodeModulesLinkerMode::Hoisted
+              }
+              None => NodeModulesLinkerMode::Isolated,
+            }
+          }
         };
         if mode == NodeModulesLinkerMode::Hoisted {
           let dir_mode = self.raw_node_modules_dir_mode()?;

@@ -1,0 +1,7 @@
+{
+  "name": "hoisted-alias-app",
+  "version": "1.0.0",
+  "dependencies": {
+    "@denotest/alias-dep-user": "1.0.0"
+  }
+}

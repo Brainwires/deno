@@ -42,6 +42,7 @@ use futures::stream::FuturesUnordered;
 use parking_lot::Mutex;
 use sys_traits::FsDirEntry;
 use sys_traits::FsMetadata;
+use sys_traits::FsMetadataValue;
 use sys_traits::PathsInErrorsExt;
 
 use crate::BinEntries;
@@ -74,6 +75,10 @@ use crate::process_state::NpmProcessState;
 struct HoistedLayout<'a> {
   /// Packages that go to `node_modules/<name>/`.
   top_level: HashMap<&'a StackString, &'a NpmResolutionPackage>,
+  /// Aliased dependencies (`"<alias>": "npm:<name>@<version>"`) placed at
+  /// `node_modules/<alias>/`, where a package that depends on them under
+  /// that name finds them.
+  top_level_aliases: HashMap<&'a StackString, &'a NpmResolutionPackage>,
   /// Packages that must be nested: `<parent_path>/node_modules/<dep>/`,
   /// where `parent_path` is relative to the root `node_modules/` dir and
   /// may itself include `.../node_modules/<name>` segments for parents
@@ -86,7 +91,7 @@ struct NestedPackage<'a> {
   /// For a top-level parent this is just `<name>`; for a nested parent
   /// it is `<ancestor>/node_modules/.../node_modules/<name>`.
   parent_path: PathBuf,
-  #[allow(dead_code, reason = "used for future nested package resolution")]
+  /// The folder name: the dependency's name, or its alias.
   dep_name: &'a StackString,
   dep: &'a NpmResolutionPackage,
 }
@@ -195,6 +200,8 @@ fn compute_hoisted_layout<'a>(
   // re-emitting the same edges when multiple paths reach the same
   // (path, package) pair.
   let mut visited: HashSet<(PathBuf, &PackageNv)> = HashSet::new();
+  let mut top_level_aliases: HashMap<&StackString, &NpmResolutionPackage> =
+    HashMap::new();
 
   for (name, package) in &best_version_for_name {
     queue.push_back((PathBuf::from(name.as_str()), package, Vec::new()));
@@ -210,6 +217,39 @@ fn compute_hoisted_layout<'a>(
       if parent.optional_dependencies.contains(dep_name)
         && !dep.system.matches_system(system_info)
       {
+        continue;
+      }
+
+      // An aliased dependency (`"@jest/react-is-18": "npm:react-is@18"`,
+      // pretty-format's) lives in a folder named for the alias, which no
+      // placement by package name provides: at the root when that name is
+      // free, else under the parent. Its own dependencies resolve from
+      // there.
+      if dep_name.as_str() != dep.id.nv.name.as_str() {
+        let at_root = match top_level_aliases.get(dep_name) {
+          Some(placed) => placed.id.nv == dep.id.nv,
+          None if !best_version_for_name.contains_key(dep_name) => {
+            top_level_aliases.insert(dep_name, dep);
+            true
+          }
+          None => false,
+        };
+        if at_root {
+          queue.push_back((PathBuf::from(dep_name.as_str()), dep, Vec::new()));
+        } else {
+          nested.push(NestedPackage {
+            parent_path: parent_path.clone(),
+            dep_name,
+            dep,
+          });
+          let mut dep_ancestors = parent_ancestors.clone();
+          dep_ancestors.push(parent);
+          queue.push_back((
+            parent_path.join("node_modules").join(dep_name.as_str()),
+            dep,
+            dep_ancestors,
+          ));
+        }
         continue;
       }
 
@@ -270,6 +310,7 @@ fn compute_hoisted_layout<'a>(
 
   HoistedLayout {
     top_level: best_version_for_name,
+    top_level_aliases,
     nested,
   }
 }
@@ -441,11 +482,15 @@ impl<
         self.root_node_modules_path.parent(),
       ));
 
-    // Clone top-level (hoisted) packages
-    for package in layout.top_level.values() {
+    // Clone top-level (hoisted) packages, and aliased ones under their alias
+    for (folder_name, package) in layout
+      .top_level
+      .iter()
+      .chain(layout.top_level_aliases.iter())
+    {
       let package_path = join_package_name(
         Cow::Borrowed(&self.root_node_modules_path),
-        &package.id.nv.name,
+        folder_name,
       );
 
       let packages_with_deprecation_warnings =
@@ -485,10 +530,8 @@ impl<
       let parent_path = self.root_node_modules_path.join(&nested.parent_path);
       let nested_node_modules = parent_path.join("node_modules");
       sys.fs_create_dir_all(&nested_node_modules)?;
-      let package_path = join_package_name(
-        Cow::Owned(nested_node_modules),
-        &nested.dep.id.nv.name,
-      );
+      let package_path =
+        join_package_name(Cow::Owned(nested_node_modules), nested.dep_name);
 
       let packages_with_deprecation_warnings =
         packages_with_deprecation_warnings.clone();
@@ -911,6 +954,7 @@ impl<
       let package_path = package_path.clone();
       let sys = self.sys.clone();
       move || {
+        remove_isolated_link(&sys, &package_path);
         clone_dir_recursive(&sys, &cache_folder, &package_path)?;
         Ok::<_, SyncResolutionWithFsError>(())
       }
@@ -1014,9 +1058,19 @@ fn hoisted_package_path(
             .join(&nested.parent_path)
             .join("node_modules"),
         ),
-        &nv.name,
+        nested.dep_name,
       ));
     }
+  }
+  if let Some((alias, _)) = layout
+    .top_level_aliases
+    .iter()
+    .find(|(_, p)| p.id.nv == *nv)
+  {
+    return Some(join_package_name(
+      Cow::Borrowed(root_node_modules_path),
+      alias,
+    ));
   }
   None
 }
@@ -1037,8 +1091,12 @@ fn cleanup_hoisted_packages(
   root_node_modules_path: &Path,
   layout: &HoistedLayout,
 ) {
-  let expected_names: HashSet<&str> =
-    layout.top_level.keys().map(|k| k.as_str()).collect();
+  let expected_names: HashSet<&str> = layout
+    .top_level
+    .keys()
+    .chain(layout.top_level_aliases.keys())
+    .map(|k| k.as_str())
+    .collect();
 
   fn remove_unexpected_package(
     sys: &impl LocalNpmInstallSys,
@@ -1089,6 +1147,22 @@ fn cleanup_hoisted_packages(
       let path = root_node_modules_path.join(&*name_str);
       remove_unexpected_package(sys, &path, &name_str, &expected_names);
     }
+  }
+}
+
+/// A symlink (a junction on Windows) where the hoisted layout puts a package
+/// is the isolated linker's `node_modules/<name>` link into `.deno`, left by
+/// an install before the project switched layouts (the hoisted default for
+/// package.json projects). Remove the link itself, never what it points to,
+/// so the package can be materialized; `clone_dir_recursive` still refuses
+/// any symlink that is there afterwards.
+fn remove_isolated_link(sys: &impl LocalNpmInstallSys, path: &Path) {
+  let is_link = sys
+    .fs_symlink_metadata(path)
+    .is_ok_and(|metadata| metadata.file_type().is_symlink());
+  if is_link && sys.fs_remove_file(path).is_err() {
+    // a directory junction is removed as a directory (without its contents)
+    let _ = sys.fs_remove_dir(path);
   }
 }
 

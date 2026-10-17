@@ -1141,6 +1141,29 @@ where the changes are discussed.
     contributes no names, as in Node. Spec: `npm/cjs_reexport_pkg_imports`
     (Prisma's shape).
 
+47. **`feat(npm)`: npm's hoisted node_modules by default for package.json
+    projects** (behavior change; `node_modules_linker_mode` in
+    `libs/resolver/factory.rs`, `node-linker` in `libs/npmrc`). A project with a
+    package.json and no deno.json now gets the hoisted layout npm writes (every
+    package at `node_modules/<name>` unless versions conflict) instead of the
+    isolated one (`node_modules/.deno/...` with only the direct dependencies
+    linked at the top). Code that imports a package it doesn't list (a
+    dependency's dependency such as `ms` under `debug`, an auto-installed peer
+    such as `react` under `react-dom`) failed with
+    `Import "react" not a dependency` / `Cannot find module 'ms'`; it now
+    resolves, for Deno and for tools that walk node_modules themselves
+    (bundlers, TypeScript, eslint plugins), which a resolver-only fallback would
+    not have covered. Measured on the npm matrix before choosing (both layouts
+    on `denext.21`, see the branch's report). The layout's choice, in order:
+    `--node-modules-linker`, deno.json `"nodeModulesLinker"`, `.npmrc`
+    `node-linker=isolated|hoisted` (pnpm's setting; `pnp` is ignored), then the
+    default (hoisted only for a package.json-only project with a manual
+    node_modules; everything else stays isolated, and `.npmrc` hoisted is
+    ignored where the hoisted linker can't apply). Opt out with
+    `node-linker=isolated` in `.npmrc`, `--node-modules-linker=isolated`, or a
+    deno.json. An existing isolated node_modules is replaced on the next
+    `deno install`. Spec: `npm/hoisted_linker_default`.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41) are what the prebuilt
 `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
