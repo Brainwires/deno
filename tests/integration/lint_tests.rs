@@ -2,6 +2,7 @@
 
 use test_util as util;
 use util::TestContextBuilder;
+use util::test;
 
 #[test]
 fn lint_fix_preserves_permissions() {
@@ -22,6 +23,7 @@ fn lint_fix_preserves_permissions() {
   let output = context.new_command().args("lint --fix a.ts").run();
 
   output.assert_exit_code(0);
+  output.assert_matches_text("Checked 1 file\n");
 
   #[cfg(unix)]
   {
