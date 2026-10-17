@@ -1171,7 +1171,23 @@ where the changes are discussed.
     ignored where the hoisted linker can't apply). Opt out with
     `node-linker=isolated` in `.npmrc`, `--node-modules-linker=isolated`, or a
     deno.json. An existing isolated node_modules is replaced on the next
-    `deno install`. Spec: `npm/hoisted_linker_default`.
+    `deno install` (its top-level links into `.deno` are removed, never what
+    they point to). Making it the default meant fixing what the hoisted
+    installer did not do yet: aliased dependencies (`"x": "npm:y@1"`, a
+    dependency's such as pretty-format's `@jest/react-is-18`, which broke jest,
+    or the root package.json's) are placed under the alias; a version only a
+    workspace member depends on, which lost the top level to another member's,
+    gets its own copy under `node_modules/.deno/.workspace-deps/` for the
+    member's link; a package an earlier install already put in place (same name
+    and version) is left there instead of being copied and reported again on
+    every install, and its lifecycle scripts don't rerun (markers in
+    `node_modules/.deno/.hoisted-scripts-run/`, cleared when a package is copied
+    again); and its deprecation warning matches the isolated layout's. Specs
+    that check the isolated layout's internals (`node_modules/.deno/...` paths,
+    its lazy-caching output, a `--node-modules-dir=auto` run after a manual
+    install) pin it with a `.npmrc`. Spec: `npm/hoisted_linker_default` (the
+    layout, phantom imports from ESM and CommonJS, the opt-outs, an alias,
+    switching from an isolated node_modules).
 
 48. **`feat(npm)`: lifecycle scripts as npm runs them** (behavior change for the
     project's own scripts; `lifecycle_scripts.rs`, `cli/npm.rs`,

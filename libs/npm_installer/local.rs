@@ -1091,29 +1091,8 @@ impl<
       let packages_with_deprecation_warnings =
         packages_with_deprecation_warnings.lock();
       if !packages_with_deprecation_warnings.is_empty() {
-        use std::fmt::Write;
-        let mut output = String::new();
-        let _ = writeln!(
-          &mut output,
-          "{} {}",
-          colors::yellow("╭"),
-          colors::yellow_bold("Warning")
-        );
-        let _ = writeln!(&mut output, "{}", colors::yellow("│"));
-        let _ = writeln!(
-          &mut output,
-          "{}  The following packages are deprecated:",
-          colors::yellow("│"),
-        );
-        for (package_nv, msg) in packages_with_deprecation_warnings.iter() {
-          let _ = writeln!(
-            &mut output,
-            "{}  {}",
-            colors::yellow("│"),
-            colors::gray(format!("npm:{:?} ({})", package_nv, msg))
-          );
-        }
-        let _ = write!(&mut output, "{}", colors::yellow("╰─"));
+        let output =
+          deprecation_warning_message(&packages_with_deprecation_warnings);
         if let Some(install_reporter) = &self.install_reporter {
           install_reporter.deprecated_message(output);
         } else {
@@ -1389,7 +1368,7 @@ fn ensure_jsr_npmrc<TSys: NpmCacheSys>(
 }
 
 /// `node_modules/.deno/<package>/`
-fn local_node_modules_package_folder(
+pub(crate) fn local_node_modules_package_folder(
   local_registry_dir: &Path,
   package: &NpmResolutionPackage,
 ) -> PathBuf {
@@ -2000,7 +1979,9 @@ fn write_initialized_file(
   }
 }
 
-fn create_initialized_file<F: sys_traits::boxed::FsOpenBoxed + ?Sized>(
+pub(crate) fn create_initialized_file<
+  F: sys_traits::boxed::FsOpenBoxed + ?Sized,
+>(
   sys: &F,
   path: &Path,
 ) -> Result<(), std::io::Error> {
@@ -2250,6 +2231,36 @@ pub fn remove_unused_node_modules_symlinks<TSys: LocalNpmInstallSys>(
     }
   }
   Ok(())
+}
+
+/// The "deprecated packages" warning both node_modules layouts print.
+pub(crate) fn deprecation_warning_message(
+  packages: &[(PackageNv, String)],
+) -> String {
+  use std::fmt::Write;
+  let mut output = String::new();
+  let _ = writeln!(
+    &mut output,
+    "{} {}",
+    colors::yellow("╭"),
+    colors::yellow_bold("Warning")
+  );
+  let _ = writeln!(&mut output, "{}", colors::yellow("│"));
+  let _ = writeln!(
+    &mut output,
+    "{}  The following packages are deprecated:",
+    colors::yellow("│"),
+  );
+  for (package_nv, msg) in packages {
+    let _ = writeln!(
+      &mut output,
+      "{}  {}",
+      colors::yellow("│"),
+      colors::gray(format!("npm:{:?} ({})", package_nv, msg))
+    );
+  }
+  let _ = write!(&mut output, "{}", colors::yellow("╰─"));
+  output
 }
 
 #[cfg(test)]
