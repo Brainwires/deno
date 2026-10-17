@@ -444,8 +444,9 @@ impl<
       let Some(alias) = &remote_pkg.alias else {
         continue;
       };
-      if root_dir != Some(remote_pkg.base_dir.as_path())
-        || layout.top_level.contains_key(alias)
+      if !root_dir.is_some_and(|root_dir| {
+        is_same_dir(&self.sys, root_dir, &remote_pkg.base_dir)
+      }) || layout.top_level.contains_key(alias)
       {
         continue;
       }
@@ -1237,6 +1238,21 @@ fn cleanup_hoisted_packages(
       let path = root_node_modules_path.join(&*name_str);
       remove_unexpected_package(sys, &path, &name_str, &expected_names);
     }
+  }
+}
+
+/// Whether two paths name the same directory. `root_node_modules_path` is
+/// canonicalized while a package.json's directory is not, so on Windows the
+/// same directory can be spelled differently (an 8.3 short name such as
+/// `C:\Users\RUNNER~1`, casing, the `\\?\` prefix); compare the canonical
+/// forms when the spellings differ.
+fn is_same_dir(sys: &impl LocalNpmInstallSys, a: &Path, b: &Path) -> bool {
+  if a == b {
+    return true;
+  }
+  match (sys.fs_canonicalize(a), sys.fs_canonicalize(b)) {
+    (Ok(a), Ok(b)) => a == b,
+    _ => false,
   }
 }
 
