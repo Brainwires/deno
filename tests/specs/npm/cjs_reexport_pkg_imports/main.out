@@ -1,0 +1,7 @@
+[UNORDERED_START]
+Download http://localhost:4260/@denotest%2fcjs-reexport-pkg-imports
+Download http://localhost:4260/@denotest/cjs-reexport-pkg-imports/1.0.0.tgz
+[UNORDERED_END]
+hello from PrismaClient
+1.0.0
+Prisma,PrismaClient,default,module.exports

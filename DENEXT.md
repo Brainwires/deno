@@ -1129,6 +1129,18 @@ where the changes are discussed.
     redeclares a CommonJS wrapper name (`const require = ...`). Spec:
     `node/cjs_detect_default`.
 
+46. **`fix`: CommonJS re-export analysis follows package `"imports"`**
+    (`libs/node_resolver/analyze.rs`). `module.exports = { ...require('#x') }`
+    contributed no names, because the analyzer resolved only relative, absolute
+    and bare specifiers, so `import { PrismaClient } from
+    "@prisma/client"`
+    failed ("does not provide an export named"): `@prisma/client` re-exports
+    `.prisma/client/default.js`, which is `{ ...require('#main-entry-point') }`.
+    A `#` specifier now resolves through the referrer's closest package.json
+    `"imports"` (with the require conditions); one that doesn't resolve
+    contributes no names, as in Node. Spec: `npm/cjs_reexport_pkg_imports`
+    (Prisma's shape).
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41) are what the prebuilt
 `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
