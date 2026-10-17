@@ -751,14 +751,13 @@ impl<
     }
 
     for package in &workspace_lifecycle_packages {
-      lifecycle_scripts.borrow_mut().add(
+      lifecycle_scripts.borrow_mut().add_workspace(
         &package.package,
         &NpmPackageExtraInfo {
           scripts: package.scripts.clone(),
           ..Default::default()
         },
         Cow::Borrowed(&package.package_path),
-        Vec::new(),
       );
     }
 

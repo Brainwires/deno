@@ -28,6 +28,10 @@ pub struct PackageWithScript<'a> {
   pub package: &'a NpmResolutionPackage,
   pub scripts: HashMap<SmallStackString, String>,
   pub package_folder: PathBuf,
+  /// The project's own package (the root package.json or a workspace
+  /// member): its scripts run without approval and include npm's
+  /// `preprepare`/`prepare`/`postprepare`.
+  pub is_workspace: bool,
   /// The working directories to expose as `INIT_CWD` when running the scripts.
   ///
   /// These are the directories of the workspace members that depend on the
@@ -175,6 +179,11 @@ pub fn member_dep_init_cwds(
     .collect()
 }
 
+/// The lifecycle scripts npm runs for the project itself (not for its
+/// dependencies) after `postinstall` on `npm install`.
+pub const WORKSPACE_ONLY_SCRIPTS: &[&str] =
+  &["preprepare", "prepare", "postprepare"];
+
 pub fn has_lifecycle_scripts(
   sys: &impl FsMetadata,
   extra: &NpmPackageExtraInfo,
@@ -278,6 +287,7 @@ impl<'a, TSys: FsMetadata> LifecycleScripts<'a, TSys> {
             scripts: extra.scripts.clone(),
             package_folder: package_path.into_owned(),
             init_cwds,
+            is_workspace: false,
           });
         }
       } else if !self.has_run_scripts(package)
@@ -302,6 +312,46 @@ impl<'a, TSys: FsMetadata> LifecycleScripts<'a, TSys> {
           .packages_with_scripts_not_run
           .push((package, package_path.into_owned()));
       }
+    }
+  }
+
+  /// Register a workspace package (the root package.json or a workspace
+  /// member) for its lifecycle scripts. They are the project's own code, so
+  /// as npm does they run without `--allow-scripts`, and on every explicit
+  /// `deno install` (an implicit install, such as `deno run` setting up a
+  /// managed node_modules, runs them once). `--deny-scripts=npm:<name>`
+  /// still turns them off.
+  pub fn add_workspace(
+    &mut self,
+    package: &'a NpmResolutionPackage,
+    extra: &NpmPackageExtraInfo,
+    package_path: Cow<'_, Path>,
+  ) {
+    if !has_lifecycle_scripts(self.sys, extra, &package_path)
+      && !WORKSPACE_ONLY_SCRIPTS
+        .iter()
+        .any(|name| extra.scripts.contains_key(*name))
+    {
+      return;
+    }
+    let nv = &package.id.nv;
+    if !self.strategy.can_run_scripts()
+      || self
+        .config
+        .denied
+        .iter()
+        .any(|d| nv.name == d.name && d.version_req.matches(&nv.version))
+    {
+      return;
+    }
+    if self.config.explicit_install || !self.has_run_scripts(package) {
+      self.packages_with_scripts.push(PackageWithScript {
+        package,
+        scripts: extra.scripts.clone(),
+        package_folder: package_path.into_owned(),
+        init_cwds: Vec::new(),
+        is_workspace: true,
+      });
     }
   }
 
@@ -543,6 +593,7 @@ mod tests {
       scripts: HashMap::from([("install".into(), "node-gyp rebuild".into())]),
       package_folder: PathBuf::from(format!("/tmp/{}", package.id)),
       init_cwds: Vec::new(),
+      is_workspace: false,
     }
   }
 

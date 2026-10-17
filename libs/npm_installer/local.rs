@@ -1077,14 +1077,13 @@ impl<
         &deno_local_registry_dir,
         &package.package,
       ))?;
-      lifecycle_scripts.borrow_mut().add(
+      lifecycle_scripts.borrow_mut().add_workspace(
         &package.package,
         &NpmPackageExtraInfo {
           scripts: package.scripts.clone(),
           ..Default::default()
         },
         Cow::Borrowed(&package.package_path),
-        Vec::new(),
       );
     }
 

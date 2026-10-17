@@ -1164,6 +1164,35 @@ where the changes are discussed.
     deno.json. An existing isolated node_modules is replaced on the next
     `deno install`. Spec: `npm/hoisted_linker_default`.
 
+48. **`feat(npm)`: lifecycle scripts as npm runs them** (behavior change for the
+    project's own scripts; `lifecycle_scripts.rs`, `cli/npm.rs`,
+    `cli/task_runner.rs`).
+    - The project's own scripts (the root package.json and workspace members)
+      run on `deno install` without `--allow-scripts`, as npm runs them (they
+      are the project's code, not a dependency's), on every explicit install,
+      and include npm's `preprepare`/`prepare`/`postprepare` after `postinstall`
+      (husky and similar set themselves up there). Before, the root package was
+      listed under "Ignored build scripts" and needed approval, and `prepare`
+      never ran. Dependencies' scripts still need approval. Opt out per package
+      with deno.json `"allowScripts": { "deny": ["npm:<name>"] }`.
+    - `node <flags>` in a lifecycle script (`node -e "..."`, `node -p`,
+      `node --require x y.js`) runs Deno in Node.js mode through `node_shim`'s
+      translation, as `child_process` does; it needed a real `node` before
+      ("Error launching 'node'"). `deno install`, `add`, `approve-scripts`, `ci`
+      and `x` also put the `node` shim on `PATH` (as `run` and `task` did), so
+      `#!/usr/bin/env node` bins and native tools that start `node` work during
+      an install.
+    - `node-gyp` in a lifecycle script, when the project doesn't provide one,
+      runs `npm:node-gyp@13.1.0` (an exact version, fetched on first use and
+      checked against the registry's sha512 integrity like any package; isolated
+      from the project: global cache, no config). Before it printed a warning
+      and exited 0, so a package without a prebuilt binary (node-pty, an arm64
+      or musl machine) installed without one. On demand rather than bundled:
+      node-gyp is only useful with Python, make and a C++ toolchain, downloads
+      Node.js headers anyway, and would add its dependency tree to every binary.
+      `DENO_NODE_GYP` names another (an `npm:` specifier). Specs:
+      `npm/lifecycle_scripts_root`, `npm/lifecycle_scripts_node_compat`.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41) are what the prebuilt
 `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are

@@ -57,9 +57,23 @@ pub fn subcommand_may_spawn_node(
   subcommand: &crate::args::DenoSubcommand,
 ) -> bool {
   use crate::args::DenoSubcommand::*;
+  // install / add / approve-scripts / ci run lifecycle scripts, and x runs
+  // npm binaries: `#!/usr/bin/env node` bins and the native tools they start
+  // need a `node` too
   matches!(
     subcommand,
-    Run(_) | Task(_) | Test(_) | Bench(_) | Eval(_) | Repl(_) | Serve(_)
+    Run(_)
+      | Task(_)
+      | Test(_)
+      | Bench(_)
+      | Eval(_)
+      | Repl(_)
+      | Serve(_)
+      | Install(_)
+      | Add(_)
+      | ApproveScripts(_)
+      | Ci(_)
+      | X(_)
   )
 }
 

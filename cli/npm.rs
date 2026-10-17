@@ -613,6 +613,7 @@ impl DenoTaskLifeCycleScriptsExecutor {
       scripts,
       package_folder,
       init_cwds,
+      is_workspace,
     } = pkg;
     // Run the scripts once per workspace member that depends on this package,
     // with `INIT_CWD` pointing at that member, so workspace-aware scripts (e.g.
@@ -654,7 +655,15 @@ impl DenoTaskLifeCycleScriptsExecutor {
 
     let mut failed = None;
     'cwds: for init_cwd in init_cwds {
-      for script_name in ["preinstall", "install", "postinstall"] {
+      // npm runs the project's own `prepare` scripts after `postinstall`
+      let script_names =
+        ["preinstall", "install", "postinstall"].into_iter().chain(
+          deno_npm_installer::lifecycle_scripts::WORKSPACE_ONLY_SCRIPTS
+            .iter()
+            .copied()
+            .filter(|_| *is_workspace),
+        );
+      for script_name in script_names {
         if let Some(script) = scripts.get(script_name) {
           if script_name == "install"
             && is_broken_default_install_script(sys, script, package_folder)

@@ -2,6 +2,5 @@
   "category": "native",
   "run": "deno run -A index.mjs",
   "node": "node index.mjs",
-  "expect": "fail",
-  "gap": 5
+  "expect": "pass-with-allow-scripts"
 }
