@@ -1,0 +1,9 @@
+{
+  "name": "npm-matrix-koa",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "koa": "^3",
+    "@koa/router": "^14"
+  }
+}

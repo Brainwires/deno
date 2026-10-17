@@ -1,0 +1,10 @@
+{
+  "name": "npm-matrix-typeorm",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "typeorm": "^0.3",
+    "pg": "^8",
+    "reflect-metadata": "^0.2"
+  }
+}

@@ -1,0 +1,6 @@
+{
+  "category": "test-runner",
+  "run": "{ deno task test; } && echo SMOKE_OK",
+  "node": "{ npm test; } && echo SMOKE_OK",
+  "expect": "pass"
+}

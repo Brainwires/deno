@@ -1,0 +1,12 @@
+{
+  "name": "npm-matrix-eslint",
+  "version": "1.0.0",
+  "private": true,
+  "devDependencies": {
+    "eslint": "^9",
+    "@eslint/js": "^9"
+  },
+  "scripts": {
+    "lint": "eslint bad.js"
+  }
+}

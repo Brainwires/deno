@@ -1,0 +1,6 @@
+{
+  "category": "tooling",
+  "run": "deno task smoke",
+  "node": "npm run smoke",
+  "expect": "pass"
+}

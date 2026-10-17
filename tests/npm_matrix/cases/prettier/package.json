@@ -1,0 +1,11 @@
+{
+  "name": "npm-matrix-prettier",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "prettier": "^3"
+  },
+  "scripts": {
+    "fmt": "prettier --check u.ts"
+  }
+}

@@ -51,6 +51,7 @@
     "tests/node_compat/runner/suite",
     "tests/node_compat/runner/TODO.md",
     "tests/node_compat/test",
+    "tests/npm_matrix/cases",
     "tests/registry/",
     "tests/specs/bench/default_ts",
     "tests/specs/compile/bytes_and_text_imports",

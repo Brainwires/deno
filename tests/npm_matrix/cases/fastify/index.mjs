@@ -1,0 +1,10 @@
+import Fastify from "fastify";
+const f = Fastify();
+f.get("/", async () => ({ hello: "world" }));
+const r = await f.inject({ method: "GET", url: "/" });
+if (r.json().hello !== "world") throw new Error("inject");
+await f.listen({ port: 0, host: "127.0.0.1" });
+const port = f.server.address().port;
+const j = await (await fetch(`http://127.0.0.1:${port}/`)).json();
+if (j.hello !== "world") throw new Error("listen");
+await f.close(); console.log("SMOKE_OK");

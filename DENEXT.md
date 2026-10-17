@@ -1079,6 +1079,18 @@ where the changes are discussed.
     the generated workflows; `denext tests` runs it again on Linux (two shards,
     `denext_tests_os.yml`). Before: 3343 enabled on linux-x86_64; after: 3572.
 
+43. **`ci`: the npm matrix** (`tests/npm_matrix`,
+    `.github/workflows/denext_npm_matrix.yml`). 54 programs over about 68 real
+    npm packages (frameworks, ORMs and database clients, native addons, test
+    runners, build tools, browsers, network clients, logging, cloud SDKs), each
+    in its own package.json project, installed with `deno install` and run with
+    no `node` on `PATH`, against throwaway Postgres 17, Redis 7, MongoDB 7 and
+    MinIO containers (`services.sh`). Direct dependencies are pinned to exact
+    versions; each case's `case.json` carries its command and expected status
+    (`pass`, `pass-with-allow-scripts`, `fail`), and a run fails when a case
+    does worse than expected. Nightly, on dispatch (`only` narrows it) and on a
+    push that changes it. `README.md` there says how to run it locally.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41) are what the prebuilt
 `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are

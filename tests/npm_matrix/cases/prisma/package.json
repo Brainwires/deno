@@ -1,0 +1,11 @@
+{
+  "name": "npm-matrix-prisma",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "@prisma/client": "^6"
+  },
+  "devDependencies": {
+    "prisma": "^6"
+  }
+}

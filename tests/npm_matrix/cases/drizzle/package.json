@@ -1,0 +1,9 @@
+{
+  "name": "npm-matrix-drizzle",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "drizzle-orm": "^0.44",
+    "pg": "^8"
+  }
+}

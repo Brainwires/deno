@@ -1,0 +1,6 @@
+{
+  "category": "tooling",
+  "run": "deno run -A index.mjs && (deno task fmt; test $? -eq 1)",
+  "node": "node index.mjs",
+  "expect": "pass"
+}

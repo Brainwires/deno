@@ -1,0 +1,6 @@
+{
+  "category": "tooling",
+  "run": "deno task build && deno run -A check.mjs",
+  "node": "npm run build && node check.mjs",
+  "expect": "pass"
+}

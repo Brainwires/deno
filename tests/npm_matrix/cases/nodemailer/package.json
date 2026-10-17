@@ -1,0 +1,8 @@
+{
+  "name": "npm-matrix-nodemailer",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "nodemailer": "^7"
+  }
+}

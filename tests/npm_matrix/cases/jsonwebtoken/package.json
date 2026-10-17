@@ -1,0 +1,8 @@
+{
+  "name": "npm-matrix-jsonwebtoken",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "jsonwebtoken": "^9"
+  }
+}

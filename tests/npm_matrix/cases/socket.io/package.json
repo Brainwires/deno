@@ -1,0 +1,9 @@
+{
+  "name": "npm-matrix-socket-io",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "socket.io": "^4",
+    "socket.io-client": "^4"
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "name": "npm-matrix-vitest",
+  "version": "1.0.0",
+  "private": true,
+  "devDependencies": {
+    "vitest": "^3"
+  },
+  "scripts": {
+    "test": "vitest run"
+  }
+}

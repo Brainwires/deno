@@ -1,0 +1,7 @@
+{
+  "category": "native",
+  "run": "deno run -A index.cjs",
+  "node": "node index.cjs",
+  "expect": "pass-with-allow-scripts",
+  "gap": 5
+}
