@@ -523,6 +523,9 @@ TLSSocket.prototype[kReinitializeHandle] = function (handle) {
   if (this._session && this._sessionReused) {
     this._handle.setSessionAllowed(true);
   }
+  if (this._maxSendFragment !== undefined) {
+    this._handle.setMaxSendFragment(this._maxSendFragment);
+  }
 
   this._undestroy();
   this._sockname = undefined;
@@ -948,11 +951,13 @@ TLSSocket.prototype.renegotiate = function (_options, callback) {
 };
 
 TLSSocket.prototype.setMaxSendFragment = function setMaxSendFragment(size) {
-  // Not applicable to rustls
   validateInt32(size, "size");
-  if (size < 512 || size > 16384) return false;
-  this._maxSendFragment = size;
-  return true;
+  // Like Node, the handle answers 1 when the size is in OpenSSL's range
+  // (512..16384) and 0 otherwise. Kept so a re-created handle (Happy
+  // Eyeballs) gets it too.
+  const ok = this._handle.setMaxSendFragment(size) === 1;
+  if (ok) this._maxSendFragment = size;
+  return ok;
 };
 
 TLSSocket.prototype._handleTimeout = function () {
