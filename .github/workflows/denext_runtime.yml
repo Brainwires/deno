@@ -172,7 +172,7 @@ jobs:
         with:
           deno-version: ${{ env.STOCK_DENO_VERSION }}
       # Type-check every e2e module (the runner, the areas and the test apps):
-      # `deno run` and the harness tests above skip type checking, so a type
+      # `deno run` and the harness tests below skip type checking, so a type
       # error would otherwise land unseen.
       - name: Type-check the e2e TypeScript
         run: deno check --no-config --no-lock $(find .github/denext-runtime/e2e -name '*.ts')
