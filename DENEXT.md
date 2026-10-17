@@ -1311,16 +1311,18 @@ where the changes are discussed.
       or `ext::` URL, no revision expression or option as a ref), git gets only
       `https`, `http`, `ssh`, `git` and `file` (`GIT_ALLOW_PROTOCOL`), no
       terminal prompt, no hooks (`git init --template=`), no submodules;
-      fetching happens only on an install (never on `deno run`, whose
-      permissions don't cover it), and `--cached-only` refuses to fetch. Not
-      covered, unlike npm: a git dependency's `prepare` build and npm's packing
-      (`files`) are not run, a fetched package's install scripts are not run (a
-      warning says so), and a git or tarball dependency of one of those is left
-      out (a warning). A `file:` directory dependency's `bin` is now linked into
-      `node_modules/.bin` too (it wasn't). Specs: `npm/remote_deps` (hoisted and
-      isolated layouts, git tag and `semver:`, tarball URL, `file:` bin,
-      lockfile entries, a tarball that doesn't match its integrity), unit tests
-      for the parsing and its refusals; npm matrix: `git-tarball-deps`.
+      fetching happens only in the package manager commands (`install`, `add`,
+      `remove`, `ci`, `cache`, `outdated`, `list`, `approve-scripts`), never on
+      `deno run`, whose permissions don't cover it, and `--cached-only` refuses
+      to fetch. Not covered, unlike npm: a git dependency's `prepare` build and
+      npm's packing (`files`) are not run, a fetched package's install scripts
+      are not run (a warning says so), and a git or tarball dependency of one of
+      those is left out (a warning). A `file:` directory dependency's `bin` is
+      now linked into `node_modules/.bin` too (it wasn't). Specs:
+      `npm/remote_deps` (hoisted and isolated layouts, git tag and `semver:`,
+      tarball URL, `file:` bin, lockfile entries, a tarball that doesn't match
+      its integrity), unit tests for the parsing and its refusals; npm matrix:
+      `git-tarball-deps`.
 
 53. **`feat(npm)`: the project's own lifecycle scripts print their output, and
     `.npmrc` `ignore-scripts`** (behavior change; `cli/npm.rs`,

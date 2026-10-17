@@ -1,6 +1,8 @@
 // Creates a git repository (tags v1.0.0, v1.1.0 and v2.0.0) and the apps'
 // package.json, whose git dependencies need its absolute path.
 const repo = `${Deno.cwd()}/repo`;
+// a file URL on every OS (`file:///C:/...` on Windows)
+const repoUrl = new URL("./repo", import.meta.url).href;
 function git(...args: string[]) {
   const { code, stderr } = new Deno.Command("git", {
     args: [
@@ -40,8 +42,8 @@ const packageJson = JSON.stringify({
   name: "remote-deps-app",
   version: "1.0.0",
   dependencies: {
-    "git-dep": `git+file://${repo}#v1.0.0`,
-    "git-semver": `git+file://${repo}#semver:^1.0.0`,
+    "git-dep": `git+${repoUrl}#v1.0.0`,
+    "git-semver": `git+${repoUrl}#semver:^1.0.0`,
     "local-tool": "file:./local-tool",
     "tarball-dep": "http://localhost:4260/@denotest/tarball-dep/1.0.0.tgz",
   },
