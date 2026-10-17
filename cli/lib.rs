@@ -289,11 +289,9 @@ async fn run_subcommand(
     DenoSubcommand::Repl(repl_flags) => spawn_subcommand(async move {
       tools::repl::run(Arc::new(flags), repl_flags).await
     }),
-    DenoSubcommand::X(x_flags) => {
-      spawn_subcommand(
-        async move { tools::x::run(Arc::new(flags), x_flags).await },
-      )
-    }
+    DenoSubcommand::X(x_flags) => spawn_subcommand(async move {
+      Box::pin(tools::x::run(Arc::new(flags), x_flags)).await
+    }),
     DenoSubcommand::Run(run_flags) => spawn_subcommand(async move {
       if run_flags.print_task_list {
         let task_flags = TaskFlags {
@@ -527,7 +525,7 @@ async fn run_subcommand(
       1,
     ),
     DenoSubcommand::Publish(publish_flags) => spawn_subcommand(async {
-      tools::publish::publish(Arc::new(flags), publish_flags).await
+      Box::pin(tools::publish::publish(Arc::new(flags), publish_flags)).await
     }),
     DenoSubcommand::Pack(pack_flags) => spawn_subcommand(async {
       tools::pack::pack(flags.into(), pack_flags).await

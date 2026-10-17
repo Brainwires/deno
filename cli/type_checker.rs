@@ -301,8 +301,10 @@ impl TypeChecker {
     });
     flags.watch = None;
     let flags = Arc::new(flags);
-    let clean =
-      crate::tools::check::run_native_check(crate::tools::check::NativeCheck {
+    // Boxed: the native check's future is large, and every command that
+    // type-checks awaits this one (clippy::large_futures).
+    let clean = Box::pin(crate::tools::check::run_native_check(
+      crate::tools::check::NativeCheck {
         flags: &flags,
         cli_options: &self.cli_options,
         type_checker: self,
@@ -314,11 +316,12 @@ impl TypeChecker {
         type_check_mode: options.type_check_mode,
         reload: options.reload,
         whole_project_fallback: false,
-      })
-      .await
-      .map_err(|err| {
-        CheckErrorKind::Other(JsErrorBox::generic(format!("{err:#}")))
-      })?;
+      },
+    ))
+    .await
+    .map_err(|err| {
+      CheckErrorKind::Other(JsErrorBox::generic(format!("{err:#}")))
+    })?;
     if clean {
       Ok(Arc::new(graph))
     } else {

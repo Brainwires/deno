@@ -59,7 +59,7 @@ fn resolve_native_tsc(
   }
   let real_exe = current_exe
     .as_deref()
-    .and_then(|exe| exe.canonicalize().ok())
+    .and_then(|exe| crate::util::fs::canonicalize_path(exe).ok())
     .filter(|real| Some(real) != current_exe.as_ref());
   if let Some(found) =
     native_pin::find_local(CHECK_ROLE, DENO_TSGO_BIN_ENV, None, real_exe)?
@@ -455,12 +455,13 @@ fn parse_tsc_pretty_diagnostics(
           .push(related);
       }
       in_chain = false;
-    } else if in_chain && line.starts_with([' ', '\t']) {
-      if let Some(last) = diagnostics.last_mut() {
-        let message = last.message_text.get_or_insert_with(String::new);
-        message.push('\n');
-        message.push_str(line.trim_end());
-      }
+    } else if in_chain
+      && line.starts_with([' ', '\t'])
+      && let Some(last) = diagnostics.last_mut()
+    {
+      let message = last.message_text.get_or_insert_with(String::new);
+      message.push('\n');
+      message.push_str(line.trim_end());
     }
     // Code frames, the "Found N errors" summary and the `--diagnostics`
     // statistics are not diagnostics.
@@ -892,7 +893,10 @@ mod resolve_tests {
     let link = link_dir.path().join("deno");
     std::os::unix::fs::symlink(real.path().join("deno"), &link).unwrap();
     let found = resolve_native_tsc(None, Some(link), None).unwrap();
-    assert_eq!(found.canonicalize().unwrap(), tsc.canonicalize().unwrap());
+    assert_eq!(
+      crate::util::fs::canonicalize_path(&found).unwrap(),
+      crate::util::fs::canonicalize_path(&tsc).unwrap()
+    );
   }
 
   #[test]
