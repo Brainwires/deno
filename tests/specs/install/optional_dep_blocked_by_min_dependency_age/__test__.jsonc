@@ -1,19 +1,17 @@
 {
   "tempDir": true,
-  // Regression test for https://github.com/denoland/deno/issues/36597.
-  // `@denotest/napi-optional-platform` lists two platform prebuilds in its
-  // `optionalDependencies`. The `linux-x64` one is old enough, but the
-  // `android-arm64` one was published after the configured minimum dependency
-  // age. Install must skip the blocked (and foreign-platform) optional dep
-  // instead of aborting the whole install, and must say that it did so.
+  // An optional dependency whose only matching version is newer than the
+  // minimum dependency age still fails the install, as in pnpm
+  // (ERR_PNPM_NO_MATURE_MATCHING_VERSION): resolution runs before os/cpu
+  // filtering, so it can't tell a foreign platform's prebuild from the one
+  // this host needs, and skipping the host's would only move the failure to
+  // runtime. An optional dependency that doesn't exist is skipped (see
+  // optional_dep_missing_version).
   "steps": [
     {
       "args": "install npm:@denotest/napi-optional-platform",
-      "output": "install.out"
-    },
-    {
-      "args": "run --allow-read check_lockfile.js",
-      "output": "check_lockfile.out"
+      "output": "install.out",
+      "exitCode": 1
     }
   ]
 }

@@ -1,0 +1,17 @@
+{
+  "tempDir": true,
+  // https://github.com/denoland/deno/issues/36597, #29307: an optional
+  // dependency that can't be resolved (here a version that was never
+  // published) is skipped with a warning instead of failing the install, as
+  // npm and pnpm do, and is left out of the lockfile.
+  "steps": [
+    {
+      "args": "install npm:@denotest/napi-optional-platform-missing",
+      "output": "install.out"
+    },
+    {
+      "args": "run --allow-read check_lockfile.js",
+      "output": "check_lockfile.out"
+    }
+  ]
+}

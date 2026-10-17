@@ -83,11 +83,15 @@ pub enum NpmResolutionError {
 /// Whether an error resolving an *optional* dependency should be swallowed
 /// (skipping that dependency) rather than aborting the whole install.
 ///
-/// Deterministic resolution failures — the package doesn't exist, no version
-/// satisfies the requirement, or every matching version is blocked by the
-/// minimum dependency age — mirror npm/yarn/pnpm, which never fail an install
-/// over an unmet optional dependency. Transient failures (e.g. a registry
-/// load error) are not swallowed so real problems still surface.
+/// Deterministic resolution failures — the package doesn't exist, or no
+/// version satisfies the requirement — mirror npm/yarn/pnpm, which never fail
+/// an install over an unmet optional dependency. Transient failures (e.g. a
+/// registry load error) are not swallowed so real problems still surface, and
+/// neither are policy failures: a version excluded by the minimum dependency
+/// age stays an error, as in pnpm (ERR_PNPM_NO_MATURE_MATCHING_VERSION). This
+/// runs before os/cpu filtering, so it can't tell a foreign platform's
+/// prebuild from the one the host needs, and skipping the host's would only
+/// move the failure to runtime.
 ///
 /// Invariant: every variant classified as skippable here must be raised
 /// *before* the dependency's node is created in the graph (in practice, by
@@ -108,10 +112,19 @@ fn is_skippable_optional_error(err: &NpmResolutionError) -> bool {
     NpmResolutionError::Resolution(
       NpmPackageVersionResolutionError::DistTagNotFound { .. }
       | NpmPackageVersionResolutionError::DistTagVersionNotFound { .. }
-      | NpmPackageVersionResolutionError::DistTagVersionTooNew { .. }
-      | NpmPackageVersionResolutionError::VersionNotFound(_)
-      | NpmPackageVersionResolutionError::VersionReqNotMatched { .. },
+      | NpmPackageVersionResolutionError::VersionNotFound(_),
     ) => true,
+    // `newest_dependency_date` is set only when a matching version exists
+    // but is newer than the minimum dependency age allows.
+    NpmResolutionError::Resolution(
+      NpmPackageVersionResolutionError::VersionReqNotMatched {
+        newest_dependency_date,
+        ..
+      },
+    ) => newest_dependency_date.is_none(),
+    NpmResolutionError::Resolution(
+      NpmPackageVersionResolutionError::DistTagVersionTooNew { .. },
+    ) => false,
     NpmResolutionError::Resolution(
       NpmPackageVersionResolutionError::TrustPolicyDowngrade { .. },
     ) => false,
@@ -6190,11 +6203,11 @@ mod test {
   }
 
   #[tokio::test]
-  async fn resolve_skips_optional_dep_blocked_by_min_dependency_age() {
-    // https://github.com/denoland/deno/issues/36597: a foreign-platform
-    // optional dep whose only matching version is newer than the minimum
-    // dependency age is skipped instead of failing the install, while a
-    // sibling optional dep that is old enough still installs.
+  async fn resolve_optional_dep_blocked_by_min_dependency_age_still_errors() {
+    // An optional dep whose only matching version is newer than the minimum
+    // dependency age is a policy failure, not a missing package: it still
+    // fails the install (as in pnpm), since resolution can't tell whether the
+    // blocked prebuild is the one this host needs.
     let api = TestNpmRegistryApi::default();
     api.ensure_package_version("package-a", "1.0.0");
     api.ensure_package_version("@scope/linux-x64", "1.0.0");
@@ -6218,7 +6231,7 @@ mod test {
       );
     });
 
-    let snapshot = run_resolver_with_options_and_get_snapshot(
+    let err = run_resolver_with_options_and_get_snapshot(
       &api,
       RunResolverOptions {
         reqs: vec!["package-a@1.0.0"],
@@ -6229,20 +6242,18 @@ mod test {
       },
     )
     .await
-    .unwrap();
-    let packages = package_names_with_info(
-      &snapshot,
-      &NpmSystemInfo {
-        os: "linux".into(),
-        cpu: "x64".into(),
-      },
-    );
-    assert_eq!(
-      packages,
-      vec![
-        "@scope/linux-x64@1.0.0".to_string(),
-        "package-a@1.0.0".to_string(),
-      ]
+    .unwrap_err();
+    assert!(
+      matches!(
+        err,
+        NpmResolutionError::Resolution(
+          NpmPackageVersionResolutionError::VersionReqNotMatched {
+            newest_dependency_date: Some(_),
+            ..
+          }
+        )
+      ),
+      "expected a minimum dependency age error, got {err:?}"
     );
   }
 
@@ -6342,16 +6353,6 @@ mod test {
         version: "1.0.0".to_string(),
       }
       .into(),
-      NpmPackageVersionResolutionError::DistTagVersionTooNew {
-        package_name: "package-a".into(),
-        dist_tag: "latest".to_string(),
-        version: "1.0.0".to_string(),
-        publish_date: "2026-08-15T00:00:00.000Z".parse().unwrap(),
-        newest_dependency_date: NewestDependencyDate(
-          "2026-08-01T00:00:00.000Z".parse().unwrap(),
-        ),
-      }
-      .into(),
       NpmPackageVersionResolutionError::VersionNotFound(
         NpmPackageVersionNotFound(PackageNv {
           name: "package-a".into(),
@@ -6374,6 +6375,25 @@ mod test {
     }
 
     let fatal: Vec<NpmResolutionError> = vec![
+      // the minimum dependency age is a policy, not a missing package
+      NpmPackageVersionResolutionError::DistTagVersionTooNew {
+        package_name: "package-a".into(),
+        dist_tag: "latest".to_string(),
+        version: "1.0.0".to_string(),
+        publish_date: "2026-08-15T00:00:00.000Z".parse().unwrap(),
+        newest_dependency_date: NewestDependencyDate(
+          "2026-08-01T00:00:00.000Z".parse().unwrap(),
+        ),
+      }
+      .into(),
+      NpmPackageVersionResolutionError::VersionReqNotMatched {
+        package_name: "package-a".into(),
+        version_req: VersionReq::parse_from_npm("1").unwrap(),
+        newest_dependency_date: Some(NewestDependencyDate(
+          "2026-08-01T00:00:00.000Z".parse().unwrap(),
+        )),
+      }
+      .into(),
       // transient — a registry hiccup must not silently drop a package
       NpmRegistryPackageInfoLoadError::LoadError(Arc::new(
         deno_error::JsErrorBox::generic("connection reset"),
