@@ -2043,9 +2043,9 @@ function spawnSync(
   // for the child, matching the async spawn path and Node.js. spawnSync has no
   // live stdin writer, so a "piped" stdin with no `input` would leave the child
   // blocked on read; map that case to "null" (empty stdin) to match Node.
-  let stdin_deno = toDenoStdio(stdin_);
-  if (stdin_deno === "piped" && input_ == null) {
-    stdin_deno = "null";
+  let stdinDeno = toDenoStdio(stdin_);
+  if (stdinDeno === "piped" && input_ == null) {
+    stdinDeno = "null";
   }
 
   const result = {};
@@ -2058,7 +2058,7 @@ function spawnSync(
       argv0: argv0 !== command ? argv0 : undefined,
       stdout: toDenoStdio(stdout_),
       stderr: toDenoStdio(stderr_),
-      stdin: stdin_deno,
+      stdin: stdinDeno,
       uid,
       gid,
       clearEnv: true,
