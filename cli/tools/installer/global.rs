@@ -1517,17 +1517,20 @@ mod tests {
     let npm_version_resolver = NpmVersionResolver::default();
     let resolver =
       BinNameResolver::new(&http_client, &registry_api, &npm_version_resolver);
-    let (binary_name_and_url, _extra_entries) = BinaryNameAndUrl::resolve(
-      &resolver,
-      &cwd,
-      &install_flags_global.module_urls[0],
-      &install_flags_global,
-    )
-    .await?;
+    // Boxed: on Windows the two futures make this helper's own future
+    // larger than clippy's `large_futures` limit at every call site.
+    let (binary_name_and_url, _extra_entries) =
+      Box::pin(BinaryNameAndUrl::resolve(
+        &resolver,
+        &cwd,
+        &install_flags_global.module_urls[0],
+        &install_flags_global,
+      ))
+      .await?;
     let installation_dir =
       super::get_installer_bin_dir(&cwd, install_flags_global.root.as_deref())
         .unwrap();
-    super::setup_config_dir(
+    Box::pin(super::setup_config_dir(
       &binary_name_and_url,
       flags,
       &cwd,
@@ -1535,7 +1538,7 @@ mod tests {
       None,
       install_flags_global.force,
       &[],
-    )
+    ))
     .await
     .unwrap();
     super::create_install_shim(
