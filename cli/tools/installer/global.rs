@@ -685,6 +685,7 @@ fn package_json_dep_import_entries(module_url: &Url) -> Vec<(String, String)> {
         }
         Ok(
           PackageJsonDepValue::File(_)
+          | PackageJsonDepValue::Remote(_)
           | PackageJsonDepValue::Workspace { .. }
           | PackageJsonDepValue::Catalog(_),
         )
@@ -2502,6 +2503,8 @@ mod tests {
       trust_policy: Default::default(),
       trust_policy_ignore_after_minutes: None,
       trust_policy_exclude: Vec::new(),
+      node_linker: None,
+      ignore_scripts: false,
     })
   }
 

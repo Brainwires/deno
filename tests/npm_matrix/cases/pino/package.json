@@ -1,0 +1,9 @@
+{
+  "name": "npm-matrix-pino",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "pino": "^9",
+    "pino-pretty": "^13"
+  }
+}

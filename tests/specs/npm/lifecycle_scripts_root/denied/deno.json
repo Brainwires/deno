@@ -1,0 +1,4 @@
+{
+  "nodeModulesDir": "manual",
+  "allowScripts": { "deny": ["npm:root-scripts-app"] }
+}

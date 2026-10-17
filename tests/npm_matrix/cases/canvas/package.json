@@ -1,0 +1,8 @@
+{
+  "name": "npm-matrix-canvas",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "canvas": "^3"
+  }
+}

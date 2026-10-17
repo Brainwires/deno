@@ -1,0 +1,44 @@
+{
+  // A dependency's lifecycle scripts get a `node` and a `node-gyp` with no
+  // Node.js installed: `node -e` runs in Deno's Node.js mode, and node-gyp,
+  // when the project has none, is the pinned one from npm (DENO_NODE_GYP
+  // points it at the test registry's).
+  "tempDir": true,
+  "tests": {
+    "node_e_in_dependency_script": {
+      "if": "unix",
+      "steps": [
+        {
+          "cwd": "node_e",
+          "args": "install --allow-scripts",
+          "envs": { "PATH": "/usr/bin:/bin" },
+          "output": "[WILDCARD]"
+        },
+        {
+          "cwd": "node_e",
+          "args": "eval console.log(Deno.readTextFileSync('node-e.txt'))",
+          "output": "node -e ran\n"
+        }
+      ]
+    },
+    "node_gyp_from_npm": {
+      "if": "unix",
+      "steps": [
+        {
+          "cwd": "node_gyp",
+          "args": "install --allow-scripts",
+          "envs": {
+            "PATH": "/usr/bin:/bin",
+            "DENO_NODE_GYP": "npm:node-gyp@10.1.0"
+          },
+          "output": "[WILDCARD]"
+        },
+        {
+          "cwd": "node_gyp",
+          "args": "eval console.log(Deno.readTextFileSync('node-gyp.txt').trim())",
+          "output": "v10.1.0\n"
+        }
+      ]
+    }
+  }
+}

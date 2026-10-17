@@ -1,0 +1,1 @@
+syntax="proto3"; package h; service G { rpc Hi (Req) returns (Res); } message Req { string n = 1; } message Res { string m = 1; }

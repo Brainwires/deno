@@ -1,0 +1,2 @@
+error: Uncaught (in promise) ReferenceError: require is not defined
+[WILDCARD]

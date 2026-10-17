@@ -1,0 +1,10 @@
+{
+  "name": "root-ignored-app",
+  "version": "1.0.0",
+  "scripts": {
+    "postinstall": "node -e \"require('fs').writeFileSync('post.txt', 'post')\""
+  },
+  "dependencies": {
+    "@denotest/lifecycle-scripts-simple": "1.0.0"
+  }
+}

@@ -42,6 +42,7 @@ use futures::stream::FuturesUnordered;
 use parking_lot::Mutex;
 use sys_traits::FsDirEntry;
 use sys_traits::FsMetadata;
+use sys_traits::FsMetadataValue;
 use sys_traits::PathsInErrorsExt;
 
 use crate::BinEntries;
@@ -74,6 +75,10 @@ use crate::process_state::NpmProcessState;
 struct HoistedLayout<'a> {
   /// Packages that go to `node_modules/<name>/`.
   top_level: HashMap<&'a StackString, &'a NpmResolutionPackage>,
+  /// Aliased dependencies (`"<alias>": "npm:<name>@<version>"`) placed at
+  /// `node_modules/<alias>/`, where a package that depends on them under
+  /// that name finds them.
+  top_level_aliases: HashMap<&'a StackString, &'a NpmResolutionPackage>,
   /// Packages that must be nested: `<parent_path>/node_modules/<dep>/`,
   /// where `parent_path` is relative to the root `node_modules/` dir and
   /// may itself include `.../node_modules/<name>` segments for parents
@@ -86,7 +91,7 @@ struct NestedPackage<'a> {
   /// For a top-level parent this is just `<name>`; for a nested parent
   /// it is `<ancestor>/node_modules/.../node_modules/<name>`.
   parent_path: PathBuf,
-  #[allow(dead_code, reason = "used for future nested package resolution")]
+  /// The folder name: the dependency's name, or its alias.
   dep_name: &'a StackString,
   dep: &'a NpmResolutionPackage,
 }
@@ -195,6 +200,8 @@ fn compute_hoisted_layout<'a>(
   // re-emitting the same edges when multiple paths reach the same
   // (path, package) pair.
   let mut visited: HashSet<(PathBuf, &PackageNv)> = HashSet::new();
+  let mut top_level_aliases: HashMap<&StackString, &NpmResolutionPackage> =
+    HashMap::new();
 
   for (name, package) in &best_version_for_name {
     queue.push_back((PathBuf::from(name.as_str()), package, Vec::new()));
@@ -210,6 +217,39 @@ fn compute_hoisted_layout<'a>(
       if parent.optional_dependencies.contains(dep_name)
         && !dep.system.matches_system(system_info)
       {
+        continue;
+      }
+
+      // An aliased dependency (`"@jest/react-is-18": "npm:react-is@18"`,
+      // pretty-format's) lives in a folder named for the alias, which no
+      // placement by package name provides: at the root when that name is
+      // free, else under the parent. Its own dependencies resolve from
+      // there.
+      if dep_name.as_str() != dep.id.nv.name.as_str() {
+        let at_root = match top_level_aliases.get(dep_name) {
+          Some(placed) => placed.id.nv == dep.id.nv,
+          None if !best_version_for_name.contains_key(dep_name) => {
+            top_level_aliases.insert(dep_name, dep);
+            true
+          }
+          None => false,
+        };
+        if at_root {
+          queue.push_back((PathBuf::from(dep_name.as_str()), dep, Vec::new()));
+        } else {
+          nested.push(NestedPackage {
+            parent_path: parent_path.clone(),
+            dep_name,
+            dep,
+          });
+          let mut dep_ancestors = parent_ancestors.clone();
+          dep_ancestors.push(parent);
+          queue.push_back((
+            parent_path.join("node_modules").join(dep_name.as_str()),
+            dep,
+            dep_ancestors,
+          ));
+        }
         continue;
       }
 
@@ -270,6 +310,7 @@ fn compute_hoisted_layout<'a>(
 
   HoistedLayout {
     top_level: best_version_for_name,
+    top_level_aliases,
     nested,
   }
 }
@@ -391,11 +432,61 @@ impl<
     let pb_clear_guard = self.reporter.clear_guard();
 
     // Compute the hoisted layout
-    let layout = compute_hoisted_layout(
+    let mut layout = compute_hoisted_layout(
       snapshot,
       &package_partitions.packages,
       &self.system_info,
     );
+    // The root package.json's own aliases (`"x": "npm:y@1"`) live at
+    // `node_modules/<alias>` too, as npm installs them.
+    let root_dir = self.root_node_modules_path.parent();
+    for remote_pkg in self.npm_install_deps_provider.remote_pkgs() {
+      let Some(alias) = &remote_pkg.alias else {
+        continue;
+      };
+      if root_dir != Some(remote_pkg.base_dir.as_path())
+        || layout.top_level.contains_key(alias)
+      {
+        continue;
+      }
+      if let Ok(pkg) = snapshot.resolve_pkg_from_pkg_req(&remote_pkg.req)
+        && pkg.id.nv.name != *alias
+      {
+        layout.top_level_aliases.entry(alias).or_insert(pkg);
+      }
+    }
+    // A version a workspace member depends on directly that has no place in
+    // the hoisted tree (it lost the top level to another member's version
+    // and no package depends on it) gets a copy of its own under
+    // `node_modules/.deno/.workspace-deps/`, which the member's
+    // `node_modules/<alias>` links to; its own dependencies resolve upwards
+    // from there through the root node_modules.
+    for workspace_pkg in self.npm_install_deps_provider.workspace_pkgs() {
+      for dep in &workspace_pkg.deps {
+        let InstallWorkspacePkgDep::Remote { req, .. } = dep else {
+          continue;
+        };
+        let Ok(pkg) = snapshot.resolve_pkg_from_pkg_req(req) else {
+          continue;
+        };
+        if hoisted_package_path(
+          &layout,
+          &self.root_node_modules_path,
+          &pkg.id.nv,
+        )
+        .is_none()
+        {
+          layout.nested.push(NestedPackage {
+            parent_path: crate::local::local_node_modules_package_folder(
+              &Path::new(".deno").join(".workspace-deps"),
+              pkg,
+            ),
+            dep_name: &pkg.id.nv.name,
+            dep: pkg,
+          });
+        }
+      }
+    }
 
     // 1. If clean install, remove stale packages
     if self.clean_on_install {
@@ -415,6 +506,8 @@ impl<
       sys.as_ref(),
       &self.lifecycle_scripts_config,
       HoistedLifecycleScripts {
+        sys: self.sys.clone(),
+        ran_dir: hoisted_ran_dir(&self.root_node_modules_path),
         install_reporter: self.install_reporter.clone(),
       },
     )));
@@ -441,11 +534,15 @@ impl<
         self.root_node_modules_path.parent(),
       ));
 
-    // Clone top-level (hoisted) packages
-    for package in layout.top_level.values() {
+    // Clone top-level (hoisted) packages, and aliased ones under their alias
+    for (folder_name, package) in layout
+      .top_level
+      .iter()
+      .chain(layout.top_level_aliases.iter())
+    {
       let package_path = join_package_name(
         Cow::Borrowed(&self.root_node_modules_path),
-        &package.id.nv.name,
+        folder_name,
       );
 
       let packages_with_deprecation_warnings =
@@ -455,6 +552,7 @@ impl<
       let lifecycle_script_init_cwds = lifecycle_script_init_cwds.clone();
       let bin_entries_to_setup = bin_entries.clone();
       let install_reporter = self.install_reporter.clone();
+      let report = !is_alias_copy(&layout, folder_name, package);
 
       if let Some(dist) = &package.dist {
         cache_futures.push(
@@ -463,6 +561,7 @@ impl<
               package,
               dist,
               package_path,
+              report,
               install_reporter,
               extra_info_provider,
               bin_entries_to_setup,
@@ -485,10 +584,8 @@ impl<
       let parent_path = self.root_node_modules_path.join(&nested.parent_path);
       let nested_node_modules = parent_path.join("node_modules");
       sys.fs_create_dir_all(&nested_node_modules)?;
-      let package_path = join_package_name(
-        Cow::Owned(nested_node_modules),
-        &nested.dep.id.nv.name,
-      );
+      let package_path =
+        join_package_name(Cow::Owned(nested_node_modules), nested.dep_name);
 
       let packages_with_deprecation_warnings =
         packages_with_deprecation_warnings.clone();
@@ -497,6 +594,7 @@ impl<
       let lifecycle_script_init_cwds = lifecycle_script_init_cwds.clone();
       let bin_entries_to_setup = bin_entries.clone();
       let install_reporter = self.install_reporter.clone();
+      let report = !is_alias_copy(&layout, nested.dep_name, nested.dep);
 
       if let Some(dist) = &nested.dep.dist {
         cache_futures.push(
@@ -505,6 +603,7 @@ impl<
               nested.dep,
               dist,
               package_path,
+              report,
               install_reporter,
               extra_info_provider,
               bin_entries_to_setup,
@@ -592,6 +691,13 @@ impl<
           &self.root_node_modules_path.join(pkg_alias),
         )?;
       }
+      // and the `bin` of `file:`, git and tarball dependencies
+      crate::bin_entries::set_up_local_package_bin_entries(
+        sys.as_ref(),
+        self.npm_install_deps_provider.local_pkgs(),
+        &self.root_node_modules_path,
+        &self.root_node_modules_path.join(".bin"),
+      )?;
     }
 
     // 7. Create a `node_modules` directory inside each workspace member and
@@ -708,14 +814,13 @@ impl<
     }
 
     for package in &workspace_lifecycle_packages {
-      lifecycle_scripts.borrow_mut().add(
+      lifecycle_scripts.borrow_mut().add_workspace(
         &package.package,
         &NpmPackageExtraInfo {
           scripts: package.scripts.clone(),
           ..Default::default()
         },
         Cow::Borrowed(&package.package_path),
-        Vec::new(),
       );
     }
 
@@ -724,31 +829,10 @@ impl<
       let packages_with_deprecation_warnings =
         packages_with_deprecation_warnings.lock();
       if !packages_with_deprecation_warnings.is_empty() {
-        use std::fmt::Write;
-        let mut output = String::new();
-        let _ = writeln!(
-          &mut output,
-          "{} The following packages are deprecated:",
-          colors::yellow("Warning")
+        // the same warning as the isolated layout's
+        let output = crate::local::deprecation_warning_message(
+          &packages_with_deprecation_warnings,
         );
-        let len = packages_with_deprecation_warnings.len();
-        for (idx, (package_nv, msg)) in
-          packages_with_deprecation_warnings.iter().enumerate()
-        {
-          if idx != len - 1 {
-            let _ = writeln!(
-              &mut output,
-              "┠─ {}",
-              colors::gray(format!("npm:{:?} ({})", package_nv, msg))
-            );
-          } else {
-            let _ = write!(
-              &mut output,
-              "┖─ {}",
-              colors::gray(format!("npm:{:?} ({})", package_nv, msg))
-            );
-          }
-        }
         if let Some(install_reporter) = &self.install_reporter {
           install_reporter.deprecated_message(output);
         } else {
@@ -764,6 +848,8 @@ impl<
         sys.as_ref(),
         &self.lifecycle_scripts_config,
         HoistedLifecycleScripts {
+          sys: self.sys.clone(),
+          ran_dir: hoisted_ran_dir(&self.root_node_modules_path),
           install_reporter: self.install_reporter.clone(),
         },
       ),
@@ -795,7 +881,20 @@ impl<
           process_state: process_state.as_str(),
           root_node_modules_dir_path: &self.root_node_modules_path,
           resolve_pkg_folder: Some(&resolve_pkg_folder),
-          on_ran_pkg_scripts: &|_pkg| Ok(()),
+          on_ran_pkg_scripts: &|pkg| {
+            let ran_dir = hoisted_ran_dir(&self.root_node_modules_path);
+            sys
+              .fs_create_dir_all(&ran_dir)
+              .and_then(|()| {
+                crate::local::create_initialized_file(
+                  sys.as_ref(),
+                  &crate::local::local_node_modules_package_folder(
+                    &ran_dir, pkg,
+                  ),
+                )
+              })
+              .map_err(JsErrorBox::from_err)
+          },
           snapshot,
           system_packages: &package_partitions.packages,
           additional_packages: &additional_packages,
@@ -830,7 +929,8 @@ impl<
       })
       .collect::<HashMap<_, _>>();
     let mut packages = Vec::with_capacity(workspace_pkgs.len());
-    for workspace_pkg in workspace_pkgs {
+    // a git or tarball dependency runs no scripts
+    for workspace_pkg in workspace_pkgs.iter().filter(|pkg| !pkg.fetched) {
       let mut dependencies = HashMap::with_capacity(workspace_pkg.deps.len());
       for dep in &workspace_pkg.deps {
         match dep {
@@ -883,6 +983,7 @@ impl<
     package: &'a NpmResolutionPackage,
     dist: &'a deno_npm::registry::NpmPackageVersionDistInfo,
     package_path: PathBuf,
+    report_initializing: bool,
     install_reporter: Option<Arc<dyn crate::InstallReporter>>,
     extra_info_provider: Arc<CachedNpmPackageExtraInfoProvider>,
     bin_entries_to_setup: Rc<RefCell<BinEntries<'a, impl LocalNpmInstallSys>>>,
@@ -890,31 +991,63 @@ impl<
     lifecycle_script_init_cwds: Rc<HashMap<NpmPackageId, Vec<PathBuf>>>,
     packages_with_deprecation_warnings: Arc<Mutex<Vec<(PackageNv, String)>>>,
   ) -> Result<(), JsErrorBox> {
-    self
-      .tarball_cache
-      .ensure_package(&package.id.nv, dist)
-      .await
-      .map_err(JsErrorBox::from_err)?;
-    let pb_guard = self.reporter.on_initializing(&package.id.nv.to_string());
-    let _initialization_guard =
-      install_reporter.as_ref().map(|install_reporter| {
-        install_reporter.initializing(&package.id.nv);
-        InitializingGuard {
-          nv: package.id.nv.clone(),
-          install_reporter: install_reporter.clone(),
-        }
-      });
-
-    let cache_folder = self.npm_cache.package_folder_for_nv(&package.id.nv);
-
-    let handle = crate::rt::spawn_blocking({
-      let package_path = package_path.clone();
-      let sys = self.sys.clone();
-      move || {
-        clone_dir_recursive(&sys, &cache_folder, &package_path)?;
-        Ok::<_, SyncResolutionWithFsError>(())
+    // A package an earlier install already put here (same name and version)
+    // stays as it is, as npm leaves it: no copy, no "Initialize", and its
+    // lifecycle scripts don't run again (`HoistedLifecycleScripts::has_run`).
+    // (`--reload` copies it again, as the isolated layout does)
+    let installed = self
+      .npm_cache
+      .cache_setting()
+      .should_use_for_npm_package(&package.id.nv.name)
+      && is_installed_at(&self.sys, &package_path, &package.id.nv);
+    let mut pb_guard = None;
+    let mut _initialization_guard = None;
+    let handle = if installed {
+      None
+    } else {
+      self
+        .tarball_cache
+        .ensure_package(&package.id.nv, dist)
+        .await
+        .map_err(JsErrorBox::from_err)?;
+      if report_initializing {
+        pb_guard =
+          Some(self.reporter.on_initializing(&package.id.nv.to_string()));
       }
-    });
+      _initialization_guard = install_reporter
+        .as_ref()
+        .filter(|_| report_initializing)
+        .map(|install_reporter| {
+          install_reporter.initializing(&package.id.nv);
+          InitializingGuard {
+            nv: package.id.nv.clone(),
+            install_reporter: install_reporter.clone(),
+          }
+        });
+
+      let cache_folder = self.npm_cache.package_folder_for_nv(&package.id.nv);
+      let ran_marker = crate::local::local_node_modules_package_folder(
+        &hoisted_ran_dir(&self.root_node_modules_path),
+        package,
+      );
+      Some(crate::rt::spawn_blocking({
+        let package_path = package_path.clone();
+        let sys = self.sys.clone();
+        move || {
+          remove_isolated_link(&sys, &package_path);
+          // a fresh copy has not run its scripts
+          let _ = sys.fs_remove_file(&ran_marker);
+          clone_dir_recursive(&sys, &cache_folder, &package_path)?;
+          Ok::<_, SyncResolutionWithFsError>(())
+        }
+      }))
+    };
+    let handle = async move {
+      match handle {
+        Some(handle) => handle.await,
+        None => Ok(Ok(())),
+      }
+    };
 
     let needs_extra_from_disk = package.extra.is_none()
       || (package.has_scripts
@@ -971,6 +1104,7 @@ impl<
     }
 
     if package.is_deprecated
+      && !installed
       && let Some(deprecated) = &extra.deprecated
     {
       packages_with_deprecation_warnings
@@ -1014,9 +1148,19 @@ fn hoisted_package_path(
             .join(&nested.parent_path)
             .join("node_modules"),
         ),
-        &nv.name,
+        nested.dep_name,
       ));
     }
+  }
+  if let Some((alias, _)) = layout
+    .top_level_aliases
+    .iter()
+    .find(|(_, p)| p.id.nv == *nv)
+  {
+    return Some(join_package_name(
+      Cow::Borrowed(root_node_modules_path),
+      alias,
+    ));
   }
   None
 }
@@ -1037,8 +1181,12 @@ fn cleanup_hoisted_packages(
   root_node_modules_path: &Path,
   layout: &HoistedLayout,
 ) {
-  let expected_names: HashSet<&str> =
-    layout.top_level.keys().map(|k| k.as_str()).collect();
+  let expected_names: HashSet<&str> = layout
+    .top_level
+    .keys()
+    .chain(layout.top_level_aliases.keys())
+    .map(|k| k.as_str())
+    .collect();
 
   fn remove_unexpected_package(
     sys: &impl LocalNpmInstallSys,
@@ -1092,6 +1240,22 @@ fn cleanup_hoisted_packages(
   }
 }
 
+/// A symlink (a junction on Windows) where the hoisted layout puts a package
+/// is the isolated linker's `node_modules/<name>` link into `.deno`, left by
+/// an install before the project switched layouts (the hoisted default for
+/// package.json projects). Remove the link itself, never what it points to,
+/// so the package can be materialized; `clone_dir_recursive` still refuses
+/// any symlink that is there afterwards.
+fn remove_isolated_link(sys: &impl LocalNpmInstallSys, path: &Path) {
+  let is_link = sys
+    .fs_symlink_metadata(path)
+    .is_ok_and(|metadata| metadata.file_type().is_symlink());
+  if is_link && sys.fs_remove_file(path).is_err() {
+    // a directory junction is removed as a directory (without its contents)
+    let _ = sys.fs_remove_dir(path);
+  }
+}
+
 #[async_trait(?Send)]
 impl<
   THttpClient: NpmCacheHttpClient,
@@ -1115,11 +1279,66 @@ impl<
   }
 }
 
-struct HoistedLifecycleScripts {
+/// Whether a placement under `folder_name` is a second copy of a package
+/// that also sits at the top level under its own name: an alias
+/// (`"x": "npm:y@1"`). Its setup is reported once, as for the isolated
+/// layout's alias links.
+fn is_alias_copy(
+  layout: &HoistedLayout,
+  folder_name: &str,
+  package: &NpmResolutionPackage,
+) -> bool {
+  folder_name != package.id.nv.name.as_str()
+    && layout
+      .top_level
+      .get(&package.id.nv.name)
+      .is_some_and(|top| top.id.nv == package.id.nv)
+}
+
+/// `node_modules/.deno/.hoisted-scripts-run`: one marker per package
+/// version whose lifecycle scripts ran (removed when the package is copied
+/// again), so an install doesn't rerun the scripts of packages it left in
+/// place, as npm doesn't.
+fn hoisted_ran_dir(root_node_modules_path: &Path) -> PathBuf {
+  root_node_modules_path
+    .join(".deno")
+    .join(".hoisted-scripts-run")
+}
+
+/// Whether `package_path` already holds this package (its package.json has
+/// the same name and version), as an earlier install left it.
+fn is_installed_at(
+  sys: &impl LocalNpmInstallSys,
+  package_path: &Path,
+  nv: &PackageNv,
+) -> bool {
+  let is_link = sys
+    .fs_symlink_metadata(package_path)
+    .is_ok_and(|metadata| metadata.file_type().is_symlink());
+  if is_link {
+    return false;
+  }
+  let Ok(text) = sys.fs_read_to_string_lossy(package_path.join("package.json"))
+  else {
+    return false;
+  };
+  let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) else {
+    return false;
+  };
+  json.get("name").and_then(|v| v.as_str()) == Some(nv.name.as_str())
+    && json.get("version").and_then(|v| v.as_str())
+      == Some(nv.version.to_string().as_str())
+}
+
+struct HoistedLifecycleScripts<TSys: FsMetadata> {
+  sys: TSys,
+  ran_dir: PathBuf,
   install_reporter: Option<Arc<dyn crate::InstallReporter>>,
 }
 
-impl LifecycleScriptsStrategy for HoistedLifecycleScripts {
+impl<TSys: FsMetadata> LifecycleScriptsStrategy
+  for HoistedLifecycleScripts<TSys>
+{
   fn warn_on_scripts_not_run(
     &self,
     packages: &[(&NpmResolutionPackage, PathBuf)],
@@ -1175,8 +1394,12 @@ impl LifecycleScriptsStrategy for HoistedLifecycleScripts {
     false
   }
 
-  fn has_run(&self, _package: &NpmResolutionPackage) -> bool {
-    // For hoisted mode, we don't persistently track this yet
-    false
+  fn has_run(&self, package: &NpmResolutionPackage) -> bool {
+    self
+      .sys
+      .fs_exists_no_err(crate::local::local_node_modules_package_folder(
+        &self.ran_dir,
+        package,
+      ))
   }
 }

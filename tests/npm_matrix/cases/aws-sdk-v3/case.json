@@ -1,0 +1,9 @@
+{
+  "category": "sdk",
+  "run": "deno run -A index.mjs",
+  "node": "node index.mjs",
+  "expect": "pass",
+  "services": [
+    "minio"
+  ]
+}

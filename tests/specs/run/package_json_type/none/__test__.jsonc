@@ -1,14 +1,24 @@
 {
   "tests": {
     "main_cjs": {
-      "args": "run --allow-read=. main_cjs.js",
+      "args": "run --allow-read=. --no-detect-cjs main_cjs.js",
       "output": "main_cjs.out",
       "exitCode": 1
     },
     "main_esm": {
-      "args": "run --allow-read=. main_esm.js",
+      "args": "run --allow-read=. --no-detect-cjs main_esm.js",
       "output": "main_esm.out",
       "exitCode": 1
+    },
+    // CommonJS detection (the default): an untyped .js file without ES
+    // module syntax is CommonJS, so both work
+    "main_cjs_detected": {
+      "args": "run --allow-read=. main_cjs.js",
+      "output": "3\n"
+    },
+    "main_esm_detected": {
+      "args": "run --allow-read=. main_esm.js",
+      "output": "3\n"
     },
     "sub_folder_cjs": {
       "args": "run --allow-read=. sub_folder_cjs.js",

@@ -1,0 +1,7 @@
+{
+  "name": "@denotest/node-gyp-install",
+  "version": "1.0.0",
+  "scripts": {
+    "install": "node-gyp --version > \"$INIT_CWD/node-gyp.txt\""
+  }
+}

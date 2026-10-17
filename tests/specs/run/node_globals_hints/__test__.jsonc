@@ -1,12 +1,14 @@
 {
+  // A config-less .js file that uses __dirname / __filename is CommonJS by
+  // default (CommonJS detection); the hint is for an ES module.
   "tests": {
     "__dirname": {
-      "args": "run dirname.js",
+      "args": "run --no-detect-cjs dirname.js",
       "output": "dirname.out",
       "exitCode": 1
     },
     "__filename": {
-      "args": "run filename.js",
+      "args": "run --no-detect-cjs filename.js",
       "output": "filename.out",
       "exitCode": 1
     }

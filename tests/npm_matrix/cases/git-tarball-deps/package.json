@@ -1,0 +1,10 @@
+{
+  "name": "npm-matrix-git-tarball-deps",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "is-number": "https://registry.npmjs.org/is-number/-/is-number-7.0.0.tgz",
+    "kind-of": "git+https://github.com/jonschlinkert/kind-of.git#semver:^6.0.0",
+    "left-pad": "github:stevemao/left-pad#v1.3.0"
+  }
+}

@@ -1,0 +1,10 @@
+{
+  // CJS re-export analysis follows package.json "imports" (`#...`), as for
+  // `import { PrismaClient } from "@prisma/client"`.
+  "tests": {
+    "named_exports": {
+      "args": "run main.mjs",
+      "output": "main.out"
+    }
+  }
+}

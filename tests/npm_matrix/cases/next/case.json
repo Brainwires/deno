@@ -1,0 +1,6 @@
+{
+  "category": "framework",
+  "run": "deno task build && { deno task start -p 34101 & SP=$!; deno run -A check.mjs 34101; RC=$?; kill $SP; exit $RC; }",
+  "node": "npm run build && { npm run start -- -p 34102 & SP=$!; node check.mjs 34102; RC=$?; kill $SP; exit $RC; }",
+  "expect": "pass"
+}

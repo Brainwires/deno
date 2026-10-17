@@ -32,6 +32,7 @@ pub mod lifecycle_scripts;
 mod local;
 pub mod package_json;
 pub mod process_state;
+pub mod remote;
 pub mod resolution;
 mod rt;
 
@@ -92,6 +93,10 @@ pub struct LifecycleScriptsConfig {
   pub root_dir: PathBuf,
   /// Part of an explicit `deno install`
   pub explicit_install: bool,
+  /// `.npmrc`'s `ignore-scripts=true`: no lifecycle scripts run, the
+  /// project's own included, and a dependency's aren't reported as not run;
+  /// `--allow-scripts` still runs the dependencies it names.
+  pub ignore_scripts: bool,
 }
 
 pub trait InstallProgressReporter:
@@ -447,7 +452,8 @@ impl<TNpmCacheHttpClient: NpmCacheHttpClient, TSys: NpmInstallerSys>
       match err.source.as_kind() {
         deno_package_json::PackageJsonDepValueParseErrorKind::JsrRequiresScope { .. } |
         deno_package_json::PackageJsonDepValueParseErrorKind::InvalidNpmPackageName { .. } |
-        deno_package_json::PackageJsonDepValueParseErrorKind::VersionReq { .. } => {
+        deno_package_json::PackageJsonDepValueParseErrorKind::VersionReq { .. } |
+        deno_package_json::PackageJsonDepValueParseErrorKind::InvalidRemote { .. } => {
           return Err(Box::new(err.clone()).into());
         }
         deno_package_json::PackageJsonDepValueParseErrorKind::Unsupported {

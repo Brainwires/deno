@@ -1333,6 +1333,7 @@ impl WorkspaceConfigData {
         package_json_dep_resolution: None,
         specified_import_map: None,
         unstable_sloppy_imports: false,
+        compiler_options_paths_for_execution: false,
         require_modules: vec![],
       },
     );
@@ -1357,6 +1358,7 @@ impl WorkspaceConfigData {
         lifecycle_scripts_config: LifecycleScriptsConfig::default(),
         production: false,
         skip_types: false,
+        install_remote_packages: false,
         resolve_npm_resolution_snapshot: Box::new(|| Ok(None)),
       },
     );

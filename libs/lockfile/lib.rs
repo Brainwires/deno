@@ -355,6 +355,10 @@ pub struct LockfileContent {
   pub redirects: BTreeMap<String, String>,
   /// Mapping between URLs and their checksums for "http:" and "https:" deps
   pub(crate) remote: BTreeMap<String, String>,
+  /// package.json dependencies that aren't registry packages, by their
+  /// specifier as written: a tarball URL's sha512 integrity
+  /// (`sha512-<base64>`), a git dependency's resolved commit.
+  pub(crate) npm_remote: BTreeMap<String, String>,
   pub(crate) workspace: WorkspaceConfigContent,
 }
 
@@ -592,6 +596,7 @@ impl LockfileContent {
       },
       redirects: deserialize_section(&mut json, "redirects")?,
       remote: deserialize_section(&mut json, "remote")?,
+      npm_remote: deserialize_section(&mut json, "npmRemote")?,
       workspace: {
         let mut workspace: WorkspaceConfigContent =
           deserialize_section(&mut json, "workspace")?;
@@ -646,6 +651,9 @@ impl LockfileContent {
     for (url, hash) in theirs.remote {
       ours.remote.entry(url).or_insert(hash);
     }
+    for (specifier, value) in theirs.npm_remote {
+      ours.npm_remote.entry(specifier).or_insert(value);
+    }
     ours
   }
 
@@ -653,6 +661,7 @@ impl LockfileContent {
     self.packages.is_empty()
       && self.redirects.is_empty()
       && self.remote.is_empty()
+      && self.npm_remote.is_empty()
       && self.workspace.is_empty()
   }
 }
@@ -1088,6 +1097,42 @@ impl Lockfile {
 
   pub fn remote(&self) -> &BTreeMap<String, String> {
     &self.content.remote
+  }
+
+  /// package.json dependencies that aren't registry packages (a tarball URL,
+  /// a git repository), by their specifier as written: a tarball's sha512
+  /// integrity, a git dependency's resolved commit.
+  pub fn npm_remote(&self) -> &BTreeMap<String, String> {
+    &self.content.npm_remote
+  }
+
+  /// Records what a package.json tarball or git dependency resolved to.
+  pub fn insert_npm_remote(&mut self, specifier: String, value: String) {
+    match self.content.npm_remote.entry(specifier) {
+      BTreeMapEntry::Vacant(entry) => {
+        entry.insert(value);
+        self.has_content_changed = true;
+      }
+      BTreeMapEntry::Occupied(mut entry) => {
+        if entry.get() != &value {
+          entry.insert(value);
+          self.has_content_changed = true;
+        }
+      }
+    }
+  }
+
+  /// Drops the tarball and git entries whose specifier `keep` rejects (no
+  /// package.json depends on them any more).
+  pub fn retain_npm_remote(&mut self, mut keep: impl FnMut(&str) -> bool) {
+    let before = self.content.npm_remote.len();
+    self
+      .content
+      .npm_remote
+      .retain(|specifier, _| keep(specifier));
+    if self.content.npm_remote.len() != before {
+      self.has_content_changed = true;
+    }
   }
 
   /// Inserts a remote specifier into the lockfile replacing the existing package if it exists.

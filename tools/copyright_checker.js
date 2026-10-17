@@ -39,6 +39,7 @@ export async function checkCopyright() {
     ":!:cli/tsc/dts/**",
     ":!:tests/bench/testdata/**",
     ":!:tests/node_compat/test/**",
+    ":!:tests/npm_matrix/cases/**",
     ":!:tests/registry/**",
     ":!:tests/specs/**",
     ":!:tests/testdata/**",

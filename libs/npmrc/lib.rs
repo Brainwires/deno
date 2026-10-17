@@ -65,6 +65,15 @@ impl RegistryConfig {
 /// `trust-policy` value. Controls whether a resolved npm version may have
 /// weaker publishing-trust evidence than an earlier-published version of the
 /// same package. Mirrors pnpm's `trustPolicy`.
+/// pnpm's `node-linker` (`isolated` or `hoisted`; pnpm's `pnp` is not
+/// supported and is ignored): the node_modules layout `deno install` writes
+/// when deno.json and the command line don't choose one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NpmRcNodeLinker {
+  Isolated,
+  Hoisted,
+}
+
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum TrustPolicyConfig {
   /// Trust evidence is ignored during resolution (the default).
@@ -194,6 +203,20 @@ pub struct NpmRc {
   /// `no-downgrade` trust policy. Mirrors pnpm's `trustPolicyExclude`. Set via
   /// repeated `trust-policy-exclude[]=<package>` entries in `.npmrc`.
   pub trust_policy_exclude: Vec<String>,
+  /// `node-linker` value.
+  pub node_linker: Option<NpmRcNodeLinker>,
+  /// `ignore-scripts` value (npm's opt-out from lifecycle scripts).
+  pub ignore_scripts: Option<bool>,
+}
+
+/// npm's boolean config values (`true`/`false`, as text in `.npmrc` or an
+/// `npm_config_*` variable).
+fn parse_npm_bool(value: &str) -> Option<bool> {
+  match value.trim() {
+    "true" => Some(true),
+    "false" | "" => Some(false),
+    _ => None,
+  }
 }
 
 impl NpmRc {
@@ -211,6 +234,12 @@ impl NpmRc {
     let mut trust_policy = TrustPolicyConfig::default();
     let mut trust_policy_ignore_after_minutes: Option<u64> = None;
     let mut trust_policy_exclude: Vec<String> = Vec::new();
+    let mut node_linker = None;
+    // npm reads every setting from `npm_config_<key>` too
+    let mut ignore_scripts = sys
+      .env_var("npm_config_ignore_scripts")
+      .ok()
+      .and_then(|v| parse_npm_bool(&v));
 
     for kv_or_section in kv_or_sections {
       match kv_or_section {
@@ -292,6 +321,25 @@ impl NpmRc {
                 // unknown config values)
                 _ => TrustPolicyConfig::Off,
               };
+            } else if key == "ignore-scripts" {
+              match &kv.value {
+                Value::Boolean(value) => ignore_scripts = Some(*value),
+                Value::String(text) => {
+                  if let Some(value) = parse_npm_bool(&expand_vars(text, sys)) {
+                    ignore_scripts = Some(value);
+                  }
+                }
+                _ => {}
+              }
+            } else if key == "node-linker"
+              && let Value::String(text) = &kv.value
+            {
+              // unknown values (pnpm's `pnp`) are ignored
+              node_linker = match expand_vars(text, sys).trim() {
+                "isolated" => Some(NpmRcNodeLinker::Isolated),
+                "hoisted" => Some(NpmRcNodeLinker::Hoisted),
+                _ => node_linker,
+              };
             } else if key == "trust-policy-ignore-after" {
               // a number of minutes; ignore unparsable values (npm is lenient
               // about unknown/invalid config values)
@@ -340,6 +388,8 @@ impl NpmRc {
       trust_policy,
       trust_policy_ignore_after_minutes,
       trust_policy_exclude,
+      node_linker,
+      ignore_scripts,
     })
   }
 
@@ -383,6 +433,8 @@ impl NpmRc {
       trust_policy: self.trust_policy,
       trust_policy_ignore_after_minutes: self.trust_policy_ignore_after_minutes,
       trust_policy_exclude: self.trust_policy_exclude.clone(),
+      node_linker: self.node_linker,
+      ignore_scripts: self.ignore_scripts.unwrap_or(false),
     })
   }
 
@@ -478,6 +530,11 @@ pub struct ResolvedNpmRc {
   /// `trust-policy-exclude[]` package names exempted from the `no-downgrade`
   /// trust policy.
   pub trust_policy_exclude: Vec<String>,
+  /// `node-linker` value.
+  pub node_linker: Option<NpmRcNodeLinker>,
+  /// `ignore-scripts=true`: `deno install` runs no lifecycle scripts, the
+  /// project's own included, as npm's `ignore-scripts`.
+  pub ignore_scripts: bool,
 }
 
 impl ResolvedNpmRc {
@@ -737,6 +794,45 @@ mod test {
   }
 
   #[test]
+  fn test_parse_node_linker() {
+    let sys = sys_traits::impls::InMemorySys::default();
+    let rc = NpmRc::parse(&sys, "node-linker=isolated").unwrap();
+    assert_eq!(rc.node_linker, Some(NpmRcNodeLinker::Isolated));
+    let rc = NpmRc::parse(&sys, "node-linker = hoisted").unwrap();
+    assert_eq!(rc.node_linker, Some(NpmRcNodeLinker::Hoisted));
+    let resolved = rc
+      .as_resolved(&npm_url("https://registry.npmjs.org/"))
+      .unwrap();
+    assert_eq!(resolved.node_linker, Some(NpmRcNodeLinker::Hoisted));
+    // pnpm's pnp is not a layout Deno writes: ignored
+    let rc = NpmRc::parse(&sys, "node-linker=pnp").unwrap();
+    assert_eq!(rc.node_linker, None);
+  }
+
+  #[test]
+  fn test_parse_ignore_scripts() {
+    let sys = sys_traits::impls::InMemorySys::default();
+    let rc = NpmRc::parse(&sys, "ignore-scripts=true").unwrap();
+    assert_eq!(rc.ignore_scripts, Some(true));
+    let resolved = rc
+      .as_resolved(&npm_url("https://registry.npmjs.org/"))
+      .unwrap();
+    assert!(resolved.ignore_scripts);
+    let rc = NpmRc::parse(&sys, "ignore-scripts=false").unwrap();
+    assert_eq!(rc.ignore_scripts, Some(false));
+    let rc = NpmRc::parse(&sys, "registry=https://example.com/").unwrap();
+    assert_eq!(rc.ignore_scripts, None);
+    let resolved = rc
+      .as_resolved(&npm_url("https://registry.npmjs.org/"))
+      .unwrap();
+    assert!(!resolved.ignore_scripts);
+    // npm's `npm_config_<key>` environment variable
+    sys.env_set_var("npm_config_ignore_scripts", "true");
+    let rc = NpmRc::parse(&sys, "").unwrap();
+    assert_eq!(rc.ignore_scripts, Some(true));
+  }
+
+  #[test]
   fn test_replace_registry_host_default() {
     assert_eq!(
       replace_tarball_url(
@@ -951,6 +1047,8 @@ registry=https://registry.npmjs.org/
         trust_policy: Default::default(),
         trust_policy_ignore_after_minutes: None,
         trust_policy_exclude: Vec::new(),
+        node_linker: None,
+        ignore_scripts: None,
       }
     );
 
@@ -1017,6 +1115,8 @@ registry=https://registry.npmjs.org/
         trust_policy: Default::default(),
         trust_policy_ignore_after_minutes: None,
         trust_policy_exclude: Vec::new(),
+        node_linker: None,
+        ignore_scripts: false,
       }
     );
 
@@ -1259,6 +1359,8 @@ registry=${VAR_FOUND}
         trust_policy: Default::default(),
         trust_policy_ignore_after_minutes: None,
         trust_policy_exclude: Vec::new(),
+        node_linker: None,
+        ignore_scripts: None,
       }
     )
   }
@@ -1379,6 +1481,7 @@ registry=${VAR_FOUND}
     // default is an empty exclude list
     let npm_rc = NpmRc::parse(&sys, "").unwrap();
     assert!(npm_rc.trust_policy_exclude.is_empty());
+    assert_eq!(npm_rc.node_linker, None);
   }
 
   #[test]

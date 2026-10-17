@@ -1,0 +1,19 @@
+{
+  // `deno run .` / `deno run <dir>` runs the directory's entry as `node .`
+  // does: package.json "main" (with extension probing), else index.js.
+  "tests": {
+    "package_json_main": {
+      "cwd": "app",
+      "args": "run .",
+      "output": "main: lib/start.js\n"
+    },
+    "index_js": {
+      "args": "run plain",
+      "output": "plain/index.js\n"
+    },
+    "main_is_a_directory": {
+      "args": "run main_dir",
+      "output": "main_dir/dist/index.js\n"
+    }
+  }
+}

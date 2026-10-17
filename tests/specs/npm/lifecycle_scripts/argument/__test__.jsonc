@@ -28,9 +28,12 @@
           "envs": {
             "PATH": ""
           },
+          // node-gyp in a lifecycle script is the pinned one from npm, which
+          // the test registry doesn't have: the script fails, as npm's would
+          // fail without a working node-gyp (it used to warn and succeed)
           "args": "cache --allow-scripts implicit_node_gyp.js",
           "output": "node_gyp_not_found.out",
-          "exitCode": 0
+          "exitCode": 1
         }
       ]
     },

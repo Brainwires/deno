@@ -1,0 +1,39 @@
+{
+  // The project's own lifecycle scripts print their output on `deno install`
+  // as npm's do, after a `> name@version script` banner (a dependency's stay
+  // quiet unless they fail). `.npmrc`'s `ignore-scripts=true` runs none, the
+  // project's own included, and doesn't report a dependency's as ignored;
+  // an explicit `--allow-scripts` still runs the dependencies it names.
+  "tempDir": true,
+  "tests": {
+    "root_script_output_shown": {
+      "steps": [
+        { "cwd": "app", "args": "install", "output": "install.out" }
+      ]
+    },
+    "npmrc_ignore_scripts": {
+      "steps": [
+        { "cwd": "ignored", "args": "install", "output": "ignored.out" },
+        {
+          "cwd": "ignored",
+          "args": "run -R check.mjs",
+          "output": "root: false dependency: false\n"
+        }
+      ]
+    },
+    "npmrc_ignore_scripts_allow_flag": {
+      "steps": [
+        {
+          "cwd": "ignored",
+          "args": "install --allow-scripts=npm:@denotest/lifecycle-scripts-simple",
+          "output": "[WILDCARD]"
+        },
+        {
+          "cwd": "ignored",
+          "args": "run -R check.mjs",
+          "output": "root: false dependency: true\n"
+        }
+      ]
+    }
+  }
+}

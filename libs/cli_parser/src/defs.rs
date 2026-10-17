@@ -438,6 +438,11 @@ ArgDef::new("unstable-bare-node-builtins")
     .set_true()
     .hidden()
 .help("Enable unstable `Deno.cron` API"),
+  ArgDef::new("no-detect-cjs")
+    .long("no-detect-cjs")
+    .set_true()
+    .hidden()
+.help("Treat ambiguous .js, .jsx, .ts and .tsx files as ES modules: no CommonJS\n  detection for files without an explicit \"type\" in their package.json"),
   ArgDef::new("unstable-detect-cjs")
     .long("unstable-detect-cjs")
     .set_true()
@@ -2992,6 +2997,11 @@ pub static X_SUBCOMMAND: CommandDef = CommandDef {
       .default_value("dx")
       .conflicts_with(&["script_arg"])
 .help("Creates a dx alias so you can run dx <command> instead of deno x <command>"),
+    ArgDef::new("install-node-shims")
+      .long("install-node-shims")
+      .set_true()
+      .conflicts_with(&["script_arg", "install-alias"])
+.help("Creates node and npx next to the deno executable: they run Deno in Node.js mode, so node_modules/.bin scripts, #!/usr/bin/env node shebangs and tools that run node or npx work without Node.js installed"),
     ArgDef::new("check")
       .long("check")
       .action(ArgAction::Set)

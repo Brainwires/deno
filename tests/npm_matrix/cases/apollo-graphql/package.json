@@ -1,0 +1,9 @@
+{
+  "name": "npm-matrix-apollo-graphql",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "@apollo/server": "^5",
+    "graphql": "^16"
+  }
+}

@@ -318,6 +318,10 @@ impl EmbeddedModuleLoader {
         PackageJsonDepValue::File(_) => Err(JsErrorBox::from_err(
           DenoResolveErrorKind::UnsupportedPackageJsonFileSpecifier.into_box(),
         )),
+        PackageJsonDepValue::Remote(_) => Err(JsErrorBox::from_err(
+          DenoResolveErrorKind::UnsupportedPackageJsonRemoteSpecifier
+            .into_box(),
+        )),
         PackageJsonDepValue::Req(req) => Ok(
           self
             .shared
@@ -1494,6 +1498,8 @@ pub async fn run_with_options(
         trust_policy: Default::default(),
         trust_policy_ignore_after_minutes: None,
         trust_policy_exclude: Vec::new(),
+        node_linker: None,
+        ignore_scripts: false,
       });
       let npm_cache_dir = Arc::new(NpmCacheDir::new(
         &sys,
@@ -2137,6 +2143,8 @@ fn create_default_npmrc() -> Arc<ResolvedNpmRc> {
     trust_policy: Default::default(),
     trust_policy_ignore_after_minutes: None,
     trust_policy_exclude: Vec::new(),
+    node_linker: None,
+    ignore_scripts: false,
   })
 }
 

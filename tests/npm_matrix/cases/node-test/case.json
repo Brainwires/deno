@@ -1,0 +1,6 @@
+{
+  "category": "test-runner",
+  "run": "{ deno test -A t.test.mjs && deno run -A t.test.mjs && deno task test; } && echo SMOKE_OK",
+  "node": "{ node --test; } && echo SMOKE_OK",
+  "expect": "pass"
+}

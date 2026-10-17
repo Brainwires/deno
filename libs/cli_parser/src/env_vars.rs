@@ -85,6 +85,16 @@ pub static ENV_VARS: &[EnvVar] = &[
     example: None,
   },
   EnvVar {
+    name: "DENO_NODE_GYP",
+    description: "The node-gyp npm lifecycle scripts run when the project doesn't\nprovide one (default: npm:node-gyp@13.1.0).",
+    example: None,
+  },
+  EnvVar {
+    name: "DENO_NO_DETECT_CJS",
+    description: "Set to 1 to treat ambiguous .js/.ts files as ES modules instead\nof detecting CommonJS (the same as --no-detect-cjs).",
+    example: None,
+  },
+  EnvVar {
     name: "DENO_NO_PACKAGE_JSON",
     description: "Disables auto-resolution of package.json.",
     example: None,

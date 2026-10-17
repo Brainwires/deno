@@ -73,7 +73,8 @@ pub fn categorize_installed_npm_deps(
         continue;
       };
       match s {
-        deno_package_json::PackageJsonDepValue::File(_) => {
+        deno_package_json::PackageJsonDepValue::File(_)
+        | deno_package_json::PackageJsonDepValue::Remote(_) => {
           // TODO(nathanwhit)
           // TODO(bartlomieju)
         }
@@ -99,7 +100,8 @@ pub fn categorize_installed_npm_deps(
         continue;
       };
       match s {
-        deno_package_json::PackageJsonDepValue::File(_) => {
+        deno_package_json::PackageJsonDepValue::File(_)
+        | deno_package_json::PackageJsonDepValue::Remote(_) => {
           // TODO(nathanwhit)
           // TODO(bartlomieju)
         }

@@ -87,6 +87,10 @@ impl<TSys: FsRead + FsMetadata> PackageJsonResolver<TSys> {
     Self { sys, loader_cache }
   }
 
+  pub fn sys(&self) -> &TSys {
+    &self.sys
+  }
+
   pub fn get_closest_package_json(
     &self,
     file_path: &Path,

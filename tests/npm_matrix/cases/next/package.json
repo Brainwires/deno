@@ -1,0 +1,14 @@
+{
+  "name": "npm-matrix-next",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "next": "^15",
+    "react": "^19",
+    "react-dom": "^19"
+  },
+  "scripts": {
+    "build": "next build",
+    "start": "next start"
+  }
+}

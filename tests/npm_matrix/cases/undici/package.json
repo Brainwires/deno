@@ -1,0 +1,8 @@
+{
+  "name": "npm-matrix-undici",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "undici": "^7"
+  }
+}

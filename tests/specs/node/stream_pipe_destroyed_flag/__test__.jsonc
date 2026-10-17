@@ -1,0 +1,12 @@
+{
+  // A Readable that sets `this.destroyed = true` as a flag right before
+  // `push(null)` (old fd-slicer under yauzl / extract-zip) must still drain
+  // through a pipe under backpressure; a stream really destroyed keeps
+  // Node 26's no-op resume()/pause().
+  "tests": {
+    "pipe_backpressure": {
+      "args": "run main.mjs",
+      "output": "main.out"
+    }
+  }
+}

@@ -117,6 +117,7 @@ impl DenoResolveError {
       | DenoResolveErrorKind::ResolvePkgFolderFromDenoReq(_)
       | DenoResolveErrorKind::InvalidVendorFolderImport
       | DenoResolveErrorKind::UnsupportedPackageJsonFileSpecifier
+      | DenoResolveErrorKind::UnsupportedPackageJsonRemoteSpecifier
       | DenoResolveErrorKind::NodeModulesOutOfDate(_)
       | DenoResolveErrorKind::CatalogPackageNotFound(_)
       | DenoResolveErrorKind::PackageJsonDepValueParse(_)
@@ -137,6 +138,11 @@ pub enum DenoResolveErrorKind {
     "Importing npm packages via a file: specifier is only supported with --node-modules-dir=manual"
   )]
   UnsupportedPackageJsonFileSpecifier,
+  #[class(type)]
+  #[error(
+    "Importing a git or tarball dependency from package.json is only supported with --node-modules-dir=manual (run `deno install` to fetch it)"
+  )]
+  UnsupportedPackageJsonRemoteSpecifier,
   #[class(type)]
   #[error("Package '{0}' not found in catalog")]
   CatalogPackageNotFound(String),
@@ -174,6 +180,7 @@ impl DenoResolveErrorKind {
     match self {
       DenoResolveErrorKind::InvalidVendorFolderImport
       | DenoResolveErrorKind::UnsupportedPackageJsonFileSpecifier
+      | DenoResolveErrorKind::UnsupportedPackageJsonRemoteSpecifier
       | DenoResolveErrorKind::CatalogPackageNotFound { .. }
       | DenoResolveErrorKind::MappedResolution { .. }
       | DenoResolveErrorKind::NodeModulesOutOfDate { .. }
@@ -410,6 +417,10 @@ impl<
                 .into_box()
             })
             .and_then(|dep| match dep {
+              PackageJsonDepValue::Remote(_) => Err(
+                DenoResolveErrorKind::UnsupportedPackageJsonRemoteSpecifier
+                  .into_box(),
+              ),
               PackageJsonDepValue::File(_) => {
                 // We don't support --node-modules-dir=auto/none because it's too
                 // much work to get this to work with a lockfile properly and for

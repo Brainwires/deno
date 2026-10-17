@@ -1,0 +1,6 @@
+{
+  "category": "framework",
+  "run": "deno run -A main.ts",
+  "node": "npx --yes tsx main.ts",
+  "expect": "pass"
+}

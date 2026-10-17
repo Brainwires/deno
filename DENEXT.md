@@ -19,12 +19,14 @@ users:
 
 - **Features of the `deno` CLI and runtime itself**, such as Vitest / Jest
   compatibility for `deno test` (item 23), the built-in SQL client (`Deno.SQL` /
-  `Deno.sql`, item 24) and native type checking on TypeScript 7 (item 47). These
-  need this fork's own `deno` binary, published with each runtime release since
-  `denext.15` (`deno-cli-*`, see [Release archives](#release-archives) and
-  item 26) or built from a release line (see
-  [Reproducing a build](#reproducing-a-build)); the stock CLI does not have
-  them.
+  `Deno.sql`, item 24), native type checking on TypeScript 7 (item 47) and
+  Node.js compatibility beyond stock Deno's (items 48-59: CommonJS detection,
+  npm's hoisted node_modules, npm's lifecycle-script behavior, `node` / `npx`
+  shims). These need this fork's own `deno` binary, published with each
+  runtime release since `denext.15` (`deno-cli-*`, see
+  [Release archives](#release-archives) and item 26) or built from a release
+  line (see [Reproducing a build](#reproducing-a-build)); the stock CLI does not
+  have them.
 
 ## Upstream
 
@@ -1389,7 +1391,280 @@ where the changes are discussed.
       `typescript-check/tsc --version` and an offline `deno check` (native and
       `--check-engine=tsc`) from every unpacked release zip.
 
-The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45) are what the
+48. **`test(node_compat)`: 228 more Node.js tests, and the suite in CI**
+    (`feat/node-compat`). Node's own test suite (`tests/node_compat`,
+    `denoland/node_test` at Node v26.5.1) had about 500 tests that passed on
+    `denext.21` but were not in `config.jsonc`, so nothing caught a regression
+    in them. Half of those only passed vacuously: they print
+    `1..0 # Skipped: ...` (`common.skip`, for example "missing FFI" or "no valid
+    readable TTY") and exit 0, so they are left out. Of the rest, the ones that
+    pass under this fork's own runner with a debug build are now enabled (228:
+    191 added, 37 whose `ignore` was stale; network tests, tests marked flaky or
+    timing out, ones too slow for a debug build and one that waits on GC timing
+    are left out). The harness now collects `async-hooks/` (the
+    `node:async_hooks` suite; still only the listed tests run). The fork's CI
+    had dropped upstream's node_compat job with the generated workflows;
+    `denext tests` runs it again on Linux (two shards, `denext_tests_os.yml`).
+    Before: 3343 enabled on linux-x86_64; after: 3571.
+
+49. **`ci`: the npm matrix** (`tests/npm_matrix`,
+    `.github/workflows/denext_npm_matrix.yml`). 54 programs over about 68 real
+    npm packages (frameworks, ORMs and database clients, native addons, test
+    runners, build tools, browsers, network clients, logging, cloud SDKs), each
+    in its own package.json project, installed with `deno install` and run with
+    no `node` on `PATH`, against throwaway Postgres 17, Redis 7, MongoDB 7 and
+    MinIO containers (`services.sh`). Direct dependencies are pinned to exact
+    versions; each case's `case.json` carries its command and expected status
+    (`pass`, `pass-with-allow-scripts`, `fail`), and a run fails when a case
+    does worse than expected. Nightly, on dispatch (`only` narrows it) and on a
+    push that changes it. `README.md` there says how to run it locally.
+
+50. **`fix(ext/node)`: a pipe from a stream flagged destroyed drains**
+    (`ext/node/polyfills/internal/streams/readable.js`). Node 26
+    (nodejs/node#62557) made `Readable.prototype.resume()`/`pause()` no-ops on a
+    destroyed stream. Old code sets `this.destroyed = true` as a flag right
+    before `push(null)` (fd-slicer under yauzl / extract-zip: puppeteer's,
+    electron's and cypress's installers), and a pipe whose destination applied
+    backpressure then never resumed its source: extraction stopped after a few
+    entries and the process idled. Node reverted the change on v24 (24.18.0,
+    nodejs/node#63487) and still hangs on v26; upstream Deno closed its fix
+    (#35403) as "matches Node 26". The fork keeps the no-op only for a stream
+    that is really finished (nothing buffered, no `'end'` still to emit), the
+    narrower guard tested in nodejs/node#63487, so `test-stream-destroy.js`
+    keeps its contract and the pipe drains. Spec:
+    `node/stream_pipe_destroyed_flag` (the pipe, an EOF-only tail, through zlib,
+    and the no-op on a real `destroy()`; it hangs on `denext.21` and on Node
+    26.5.1, passes on Node 24.18).
+
+51. **`feat`: CommonJS detection by default** (behavior change;
+    `IsCjsResolutionMode::for_project` in `libs/resolver/cjs/mod.rs`). An
+    ambiguous JavaScript file (`.js`, `.jsx` with no `"type"` in its
+    package.json, or with no package.json) that uses CommonJS (`require`,
+    `module.exports`, `exports`, `__dirname`, `__filename`) and no ES module
+    syntax (`import`/`export`, `import.meta`, top-level `await`) is now
+    CommonJS, as Node runs it (`--experimental-detect-module`, the default since
+    22.7), in a project with a package.json and when there is no config file at
+    all. Before, such a file was always ESM and `require` threw "require is not
+    defined" unless `--unstable-detect-cjs` was passed. Every other ambiguous
+    file keeps Deno's ESM default: TypeScript (`.ts`, `.tsx`) unless its
+    package.json says `"type": "commonjs"`, and JavaScript that never touches
+    CommonJS, where Node's CommonJS would differ from ESM only in sloppy-mode
+    details (top-level `this`, `var` globals, stack frames). Applying Node's
+    rule to every untyped file changed the behavior of about 40 of the fork's
+    own config-less `run`/`bench`/`test` specs, a measure of how much plain Deno
+    code it would reach. The binding check is a cheap textual scan of a file
+    that parsed with no ES module syntax (as `deno eval`'s), cached per file. A
+    project with only a deno.json keeps ESM for every file, and so does a
+    package.json with `"type": "module"`. Opt out with `--no-detect-cjs` or
+    `DENO_NO_DETECT_CJS=1` (the previous behavior: CommonJS only with
+    `"type": "commonjs"`); `--unstable-detect-cjs` and
+    `"unstable": ["detect-cjs"]` still apply Node's rule to every ambiguous
+    file. The LSP uses the same rule. Not covered: Node's retry as ESM when a
+    file redeclares a CommonJS wrapper name (`const require =
+    ...`). Spec:
+    `node/cjs_detect_default`.
+
+52. **`fix`: CommonJS re-export analysis follows package `"imports"`**
+    (`libs/node_resolver/analyze.rs`). `module.exports = { ...require('#x') }`
+    contributed no names, because the analyzer resolved only relative, absolute
+    and bare specifiers, so `import { PrismaClient } from
+    "@prisma/client"`
+    failed ("does not provide an export named"): `@prisma/client` re-exports
+    `.prisma/client/default.js`, which is `{ ...require('#main-entry-point') }`.
+    A `#` specifier now resolves through the referrer's closest package.json
+    `"imports"` (with the require conditions); one that doesn't resolve
+    contributes no names, as in Node. Spec: `npm/cjs_reexport_pkg_imports`
+    (Prisma's shape).
+
+53. **`feat(npm)`: npm's hoisted node_modules by default for package.json
+    projects** (behavior change; `node_modules_linker_mode` in
+    `libs/resolver/factory.rs`, `node-linker` in `libs/npmrc`). A project with a
+    package.json and no deno.json now gets the hoisted layout npm writes (every
+    package at `node_modules/<name>` unless versions conflict) instead of the
+    isolated one (`node_modules/.deno/...` with only the direct dependencies
+    linked at the top). Code that imports a package it doesn't list (a
+    dependency's dependency such as `ms` under `debug`, an auto-installed peer
+    such as `react` under `react-dom`) failed with
+    `Import "react" not a dependency` / `Cannot find module 'ms'`; it now
+    resolves, for Deno and for tools that walk node_modules themselves
+    (bundlers, TypeScript, eslint plugins), which a resolver-only fallback would
+    not have covered. Measured before choosing: the npm matrix on `denext.21`
+    under both layouts gave the same result for every case but jest, which the
+    hoisted installer broke by not placing aliased dependencies (fixed below).
+    The layout's choice, in order: `--node-modules-linker`, deno.json
+    `"nodeModulesLinker"`, `.npmrc` `node-linker=isolated|hoisted` (pnpm's
+    setting; `pnp` is ignored), then the default (hoisted only for a
+    package.json-only project with a manual node_modules; everything else stays
+    isolated, and `.npmrc` hoisted is ignored where the hoisted linker can't
+    apply). Opt out with `node-linker=isolated` in `.npmrc`,
+    `--node-modules-linker=isolated`, or a deno.json. An existing isolated
+    node_modules is replaced on the next `deno install` (its top-level links
+    into `.deno` are removed, never what they point to). Making it the default
+    meant fixing what the hoisted installer did not do yet: aliased dependencies
+    (`"x": "npm:y@1"`, a dependency's such as pretty-format's
+    `@jest/react-is-18`, which broke jest, or the root package.json's) are
+    placed under the alias; a version only a workspace member depends on, which
+    lost the top level to another member's, gets its own copy under
+    `node_modules/.deno/.workspace-deps/` for the member's link; a package an
+    earlier install already put in place (same name and version) is left there
+    instead of being copied and reported again on every install, and its
+    lifecycle scripts don't rerun (markers in
+    `node_modules/.deno/.hoisted-scripts-run/`, cleared when a package is copied
+    again); and its deprecation warning matches the isolated layout's. Specs
+    that check the isolated layout's internals (`node_modules/.deno/...` paths,
+    its lazy-caching output, a `--node-modules-dir=auto` run after a manual
+    install) pin it with a `.npmrc`. Spec: `npm/hoisted_linker_default` (the
+    layout, phantom imports from ESM and CommonJS, the opt-outs, an alias,
+    switching from an isolated node_modules).
+
+54. **`feat(npm)`: lifecycle scripts as npm runs them** (behavior change for the
+    project's own scripts; `lifecycle_scripts.rs`, `cli/npm.rs`,
+    `cli/task_runner.rs`).
+    - The project's own scripts (the root package.json and workspace members)
+      run on `deno install` without `--allow-scripts`, as npm runs them (they
+      are the project's code, not a dependency's), on every explicit install,
+      and include npm's `preprepare`/`prepare`/`postprepare` after `postinstall`
+      (husky and similar set themselves up there). Before, the root package was
+      listed under "Ignored build scripts" and needed approval, and `prepare`
+      never ran. Dependencies' scripts still need approval. Opt out per package
+      with deno.json `"allowScripts": { "deny": ["npm:<name>"] }`.
+    - `node <flags>` in a lifecycle script (`node -e "..."`, `node -p`,
+      `node --require x y.js`) runs Deno in Node.js mode through `node_shim`'s
+      translation, as `child_process` does; it needed a real `node` before
+      ("Error launching 'node'"). `deno install`, `add`, `approve-scripts`, `ci`
+      and `x` also put the `node` shim on `PATH` (as `run` and `task` did), so
+      `#!/usr/bin/env node` bins and native tools that start `node` work during
+      an install.
+    - `node-gyp` in a lifecycle script, when the project doesn't provide one,
+      runs `npm:node-gyp@13.1.0` (an exact version, fetched on first use and
+      checked against the registry's sha512 integrity like any package; isolated
+      from the project: global cache, no config). Before it printed a warning
+      and exited 0, so a package without a prebuilt binary (node-pty, an arm64
+      or musl machine) installed without one. On demand rather than bundled:
+      node-gyp is only useful with Python, make and a C++ toolchain, downloads
+      Node.js headers anyway, and would add its dependency tree to every binary.
+      `DENO_NODE_GYP` names another (an `npm:` specifier). Specs:
+      `npm/lifecycle_scripts_root`, `npm/lifecycle_scripts_node_compat`.
+
+55. **`feat`: `node` / `npx` executables and `deno run <dir>`** (behavior change
+    for `deno run <dir>`; `cli/tools/x.rs`, `cli/node_compat_shim.rs`,
+    `cli/args/mod.rs`).
+    - `deno x --install-node-shims` writes `node` and `npx` next to the deno
+      executable (as `--install-alias` writes `dx`): symlinks to `deno` on Unix,
+      hardlinks (or copies) on Windows; it refuses to replace a file that isn't
+      one. Invoked as `node`, deno already translated Node's command line and
+      ran in Node.js mode; invoked as `npx` it is now `deno x`. With that
+      directory on `PATH`, `node_modules/.bin/*`, `#!/usr/bin/env node` scripts,
+      git hooks, Makefiles and editors work with no Node.js installed. denext's
+      managed toolchain can run it from `denext toolchain link`.
+    - `deno run .` / `deno run <dir>` runs the directory's entry as `node <dir>`
+      does: package.json `"main"` (as a file, with `.js` or `.json`, or as a
+      directory's index), else `index.js`; before, it failed with
+      ERR_UNSUPPORTED_DIR_IMPORT. Spec: `run/dir_entrypoint`; unit tests for the
+      `npx` dispatch.
+
+56. **`feat`: a package.json project resolves packages without the `deno` export
+    condition** (behavior change; `DenoConditionPolicy` in
+    `libs/node_resolver/resolution.rs`, `CliOptions::deno_condition_policy`).
+    Deno matches a package's `"deno"` `exports`/`imports` condition before
+    `"node"`, which Node.js never does. Packages point it at a build made for
+    Deno-native code that can lack what their Node.js build has. In the npm
+    matrix four packages declare one: stripe's is its worker build (the
+    synchronous `webhooks.constructEvent` throws, so the `stripe` case failed),
+    jose's its browser build (WebCrypto keys only, no `KeyObject`),
+    node-fetch-native's its native-fetch build and react-dom's the same file as
+    its Node.js build. A project with a package.json and no deno.json now
+    resolves with Node.js's conditions; a deno.json project, and a script with
+    no config, keep the `deno` condition. `"denoCondition"` in the root
+    deno.json or package.json chooses: `true` (every package), `false` (none),
+    `{ "exclude": ["stripe"] }` (all but these), `{ "include": ["jose"] }` (only
+    these); `DENO_NO_DENO_CONDITION=1` turns it off everywhere. A package's
+    `require` conditions never had it. Not covered: `deno compile`'s runtime and
+    the LSP resolve with the default conditions, as they already ignored
+    `--conditions`. Spec: `npm/deno_export_condition`; npm matrix: `stripe`
+    passes (`expect` raised).
+
+57. **`feat`: TypeScript resolution as tsx and ts-node resolve it, in a
+    package.json project** (behavior change; `is_node_project` and
+    `CliOptions::node_project_sloppy_imports` /
+    `compiler_options_paths_for_execution` in `cli/args/mod.rs`,
+    `WorkspaceResolver::set_compiler_options_paths_for_execution` in
+    `libs/resolver/workspace.rs`). The rule: a workspace with a package.json and
+    no deno.json anywhere is a Node.js project, and gets
+    - Deno's sloppy imports by default: an extensionless (`./lib/a`), directory
+      (`./dir` to `./dir/index.ts`) or `.js`-for-`.ts` (`./a.js` naming `a.ts`)
+      relative import resolves, as tsx and ts-node (and TypeScript's
+      `moduleResolution: "bundler"`, which already turned them on) resolve it.
+      Opt out with `DENO_NO_SLOPPY_IMPORTS=1`.
+    - tsconfig.json's `compilerOptions.paths` (with `baseUrl`) for the code that
+      runs, not only for type checking: `@/lib/x` resolves through the pattern,
+      its candidates probed for extensions, and a specifier a pattern matches
+      but none of whose candidates exist falls back to the package of that name,
+      as tsconfig-paths does (type checking keeps reporting it). A package's own
+      imports (a referrer under `node_modules`) never go through it. Opt out
+      with `DENO_NO_TSCONFIG_PATHS=1`. A deno.json keeps Deno's strict
+      resolution, and so does a script with no config. Also:
+      `ignoreDeprecations` in compilerOptions reaches the type checker, so a
+      tsconfig.json with `baseUrl`, which TypeScript 6 deprecates, can keep it
+      as TypeScript says (`"ignoreDeprecations": "6.0"`); before, Deno dropped
+      the option and type checking failed. Not covered: `compilerOptions.paths`
+      in a `deno compile` binary's runtime. Spec:
+      `npm/node_project_ts_resolution`; npm matrix: `ts-paths`.
+
+58. **`feat(npm)`: git and tarball dependencies, and `file:` dependencies'
+    bins** (`libs/npm_installer/remote.rs`, `PackageJsonRemoteDep` in
+    `libs/package_json`, the lockfile's `npmRemote`). package.json dependencies
+    npm accepts that aren't registry packages failed with "Not implemented
+    scheme" and were left out:
+    - git: `git+https://`, `git+http://`, `git+ssh://` (scp-like `git@host:path`
+      too), `git+file://`, `git://`, an http(s) URL ending in `.git`, and the
+      `github:`, `gitlab:`, `bitbucket:`, `gist:` shorthands (a bare `user/repo`
+      is GitHub), at `#<branch|tag|commit>` (abbreviated too), `#semver:<range>`
+      (the highest matching tag, `v` optional) or the default branch;
+    - a tarball: any other http(s) URL, or a `file:` path to a `.tgz`.
+      `deno install` (and `add`, `ci`, ... with a manual node_modules) fetches
+      each into `node_modules/.deno/.remote/<alias>@<hash>`, linked at
+      `node_modules/<alias>`; its own registry dependencies install with the
+      rest and are linked into its `node_modules` (both layouts), and its `bin`
+      goes into `node_modules/.bin`. deno.lock records, as package-lock.json
+      does, a tarball's sha512 integrity (a later download that doesn't match is
+      refused) and a git dependency's commit (checked out on later installs
+      instead of resolving the ref again; `--reload` resolves it again), under
+      `npmRemote`; `--frozen` fails when one is missing or changed. A tarball on
+      a `.npmrc` registry gets that registry's credentials. git runs without a
+      shell: package.json's value is checked when it is parsed (no option-like
+      or `ext::` URL, no revision expression or option as a ref), git gets only
+      `https`, `http`, `ssh`, `git` and `file` (`GIT_ALLOW_PROTOCOL`), no
+      terminal prompt, no hooks (`git init --template=`), no submodules;
+      fetching happens only in the package manager commands (`install`, `add`,
+      `remove`, `ci`, `cache`, `outdated`, `list`, `approve-scripts`), never on
+      `deno run`, whose permissions don't cover it, and `--cached-only` refuses
+      to fetch. Not covered, unlike npm: a git dependency's `prepare` build and
+      npm's packing (`files`) are not run, a fetched package's install scripts
+      are not run (a warning says so), and a git or tarball dependency of one of
+      those is left out (a warning). A `file:` directory dependency's `bin` is
+      now linked into `node_modules/.bin` too (it wasn't). Specs:
+      `npm/remote_deps` (hoisted and isolated layouts, git tag and `semver:`,
+      tarball URL, `file:` bin, lockfile entries, a tarball that doesn't match
+      its integrity), unit tests for the parsing and its refusals; npm matrix:
+      `git-tarball-deps`.
+
+59. **`feat(npm)`: the project's own lifecycle scripts print their output, and
+    `.npmrc` `ignore-scripts`** (behavior change; `cli/npm.rs`,
+    `LifecycleScriptsConfig::ignore_scripts`). The root package.json's and
+    workspace members' scripts (item 54) ran with their output captured and
+    shown only on failure; they now run in the foreground as npm runs them: a
+    `> name@version script` banner and `> command` line, then their output as it
+    is written, one package at a time. A dependency's scripts stay quiet unless
+    they fail, as with npm. `ignore-scripts=true` in `.npmrc` (or
+    `npm_config_ignore_scripts=true`) is npm's opt-out: `deno install` runs no
+    lifecycle scripts, the project's own included, and doesn't list a
+    dependency's as ignored; an allow list (`--allow-scripts=npm:<name>`,
+    deno.json `allowScripts`) still runs the dependencies it names. Spec:
+    `npm/lifecycle_scripts_root_output`; `npm/workspace_lifecycle_scripts` now
+    expects the banners.
+
+The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52) are what the
 prebuilt `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
 in the branch too, but a stock CLI does not run them; denext's own launcher

@@ -1,0 +1,10 @@
+import { drizzle } from "drizzle-orm/node-postgres";
+import { pgTable, serial, text } from "drizzle-orm/pg-core";
+import { eq, sql } from "drizzle-orm";
+const db = drizzle("postgres://postgres:pw@127.0.0.1:55432/postgres");
+await db.execute(sql`create table if not exists dz_t (id serial primary key, name text)`);
+const t = pgTable("dz_t", { id: serial("id").primaryKey(), name: text("name") });
+const [row] = await db.insert(t).values({ name: "x" }).returning();
+const got = await db.select().from(t).where(eq(t.id, row.id));
+await db.execute(sql`drop table dz_t`); await db.$client.end();
+if (got[0].name !== "x") throw new Error("drizzle"); console.log("SMOKE_OK");

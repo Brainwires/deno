@@ -1,0 +1,84 @@
+# The npm smoke matrix (tests/npm_matrix): real npm packages, each in its own
+# package.json project with a real node_modules, installed and run by this
+# branch's deno with no `node` on PATH, against throwaway Postgres, Redis,
+# MongoDB and MinIO containers. It fails when a case does worse than the
+# status its case.json expects, so a Node-compatibility regression shows up
+# before a runtime release; a case that does better is listed as improved.
+#
+# Nightly on the default branch, on demand (`only` narrows it to some cases),
+# and on a push that changes the matrix itself.
+name: denext npm matrix
+
+on:
+  schedule:
+    - cron: '43 4 * * *'
+  workflow_dispatch:
+    inputs:
+      only:
+        description: Comma-separated case names (empty = every case)
+        type: string
+        default: ''
+  push:
+    branches:
+      - 'denext/**'
+      - 'rel/**'
+      - 'feat/**'
+      - 'fix/**'
+    paths:
+      - 'tests/npm_matrix/**'
+      - '.github/workflows/denext_npm_matrix.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: denext-npm-matrix-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: '0'
+  CARGO_PROFILE_DEV_DEBUG: '0'
+  RUST_BACKTRACE: full
+  TOOLS_DENO_VERSION: 2.9.7
+
+jobs:
+  matrix:
+    name: npm matrix
+    runs-on: ubuntu-22.04
+    timeout-minutes: 300
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          submodules: false
+      - name: Clone submodule ./tests/util/std
+        run: git submodule update --init --recursive --depth=1 -- ./tests/util/std
+      - uses: ./.github/denext-tests/setup
+        with:
+          cache-key: npm-matrix
+      - name: Build debug
+        run: cargo build --locked --bin deno
+      - name: Start the services
+        run: tests/npm_matrix/services.sh up
+      - name: Run the matrix
+        env:
+          ONLY: ${{ inputs.only }}
+        run: |
+          set -euo pipefail
+          args=(--deno target/debug/deno --jobs 3 --json npm-matrix.jsonl)
+          if [ -n "${ONLY:-}" ]; then args+=(--only "$ONLY"); fi
+          deno run -A --config=tests/config/deno.json tests/npm_matrix/run.ts "${args[@]}"
+      - name: Stop the services
+        if: always()
+        run: tests/npm_matrix/services.sh down
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: npm-matrix-results
+          path: npm-matrix.jsonl
+          if-no-files-found: ignore
+          retention-days: 14

@@ -1,0 +1,6 @@
+{
+  "category": "orm",
+  "run": "deno run -A npm:prisma@6 db push --skip-generate && deno run -A npm:prisma@6 generate && deno run -A index.mjs",
+  "node": "npx prisma db push --skip-generate && npx prisma generate && node index.mjs",
+  "expect": "pass"
+}

@@ -467,6 +467,13 @@ impl WorkspaceMainModuleResolver {
             let cwd_path = deno_path_util::url_to_file_path(cwd)?;
             deno_path_util::resolve_path(file, &cwd_path)?
           }
+          deno_package_json::PackageJsonDepValue::Remote(_) => {
+            return Err(
+              deno_resolver::DenoResolveErrorKind::UnsupportedPackageJsonRemoteSpecifier
+                .into_box()
+                .into(),
+            );
+          }
           deno_package_json::PackageJsonDepValue::Req(package_req) => {
             ModuleSpecifier::parse(&format!(
               "npm:{}{}",
@@ -759,6 +766,32 @@ impl CliOptions {
     self.flags.node_conditions.as_ref()
   }
 
+  /// Which packages the `"deno"` export condition applies to: `"denoCondition"`
+  /// in the root deno.json or package.json, else
+  /// [`default_deno_condition_policy`]. `DENO_NO_DENO_CONDITION=1` turns it off
+  /// for every package.
+  pub fn deno_condition_policy(&self) -> node_resolver::DenoConditionPolicy {
+    let sys = CliSys::default();
+    if has_flag_env_var(&sys, "DENO_NO_DENO_CONDITION") {
+      return node_resolver::DenoConditionPolicy::Disabled;
+    }
+    let workspace = self.workspace();
+    if let Some(value) = workspace.deno_condition_setting() {
+      match parse_deno_condition_setting(value) {
+        Some(policy) => return policy,
+        None => log::warn!(
+          "{} Ignoring invalid \"denoCondition\" setting {}: expected true, false, {{ \"exclude\": [...] }} or {{ \"include\": [...] }}.",
+          colors::yellow("Warning"),
+          value
+        ),
+      }
+    }
+    default_deno_condition_policy(
+      workspace.package_jsons().next().is_some(),
+      workspace.deno_jsons().next().is_some(),
+    )
+  }
+
   pub fn otel_config(&self) -> OtelConfig {
     self.flags.otel_config()
   }
@@ -899,6 +932,15 @@ impl CliOptions {
                   &run_flags.script,
                   self.initial_cwd(),
                 )?;
+                // `deno run .` / `deno run <dir>`: the directory's entry,
+                // as `node <dir>` finds it
+                if url.scheme() == "file"
+                  && let Ok(path) = deno_path_util::url_to_file_path(&url)
+                  && path.is_dir()
+                  && let Some(entry) = resolve_dir_main_entrypoint(&path)
+                {
+                  return Ok(deno_path_util::url_from_file_path(&entry)?);
+                }
                 if self.is_node_main()
                   && url.scheme() == "file"
                   && MediaType::from_specifier(&url) == MediaType::Unknown
@@ -1497,11 +1539,16 @@ impl CliOptions {
       || self.workspace().has_unstable("detect-cjs")
   }
 
-  pub fn detect_cjs(&self) -> bool {
-    // only enabled when there's a package.json in order to not have a
-    // perf penalty for non-npm Deno projects of searching for the closest
-    // package.json beside each module
-    self.workspace().package_jsons().next().is_some() || self.is_node_main()
+  /// How ambiguous files are classified as CommonJS or ESM; see
+  /// `IsCjsResolutionMode::for_project`.
+  pub fn cjs_resolution_mode(&self) -> deno_resolver::cjs::IsCjsResolutionMode {
+    deno_resolver::cjs::IsCjsResolutionMode::for_project(
+      self.workspace().package_jsons().next().is_some(),
+      self.workspace().deno_jsons().next().is_some(),
+      self.flags.no_detect_cjs
+        || has_flag_env_var(&CliSys::default(), "DENO_NO_DETECT_CJS"),
+      self.is_node_main() || self.unstable_detect_cjs(),
+    )
   }
 
   pub fn unstable_raw_imports(&self) -> bool {
@@ -1517,6 +1564,25 @@ impl CliOptions {
   pub fn unstable_sloppy_imports(&self) -> bool {
     self.flags.unstable_config.sloppy_imports
       || self.workspace().has_unstable("sloppy-imports")
+      || self.node_project_sloppy_imports()
+  }
+
+  /// A package.json project (no deno.json) resolves an extensionless or
+  /// directory import, or a `.js` one naming a `.ts` file, the way tsx and
+  /// ts-node do (Deno's sloppy imports), unless `DENO_NO_SLOPPY_IMPORTS=1`.
+  /// See [`is_node_project`].
+  pub fn node_project_sloppy_imports(&self) -> bool {
+    is_node_project(self.workspace())
+      && !has_flag_env_var(&CliSys::default(), "DENO_NO_SLOPPY_IMPORTS")
+  }
+
+  /// A package.json project (no deno.json) honors tsconfig.json's
+  /// `compilerOptions.paths` (and `baseUrl`) for code that runs, as tsx and
+  /// ts-node with tsconfig-paths do, unless `DENO_NO_TSCONFIG_PATHS=1`. Every
+  /// project honors them for type checking.
+  pub fn compiler_options_paths_for_execution(&self) -> bool {
+    is_node_project(self.workspace())
+      && !has_flag_env_var(&CliSys::default(), "DENO_NO_TSCONFIG_PATHS")
   }
 
   pub fn unstable_features(&self) -> Vec<&str> {
@@ -1639,6 +1705,8 @@ impl CliOptions {
           | DenoSubcommand::Cache(_)
           | DenoSubcommand::Add(_)
       ),
+      // from `.npmrc`, read with the rest of the npm config
+      ignore_scripts: false,
     }
   }
 
@@ -1669,6 +1737,50 @@ impl CliOptions {
       NpmCachingStrategy::Eager
     }
   }
+}
+
+/// The file `node <dir>` runs for a directory (Node's `Module._findPath`):
+/// the package.json `"main"` (as a file, with `.js` or `.json`, or as a
+/// directory's `index.js` / `index.json`), else `index.js` / `index.json`.
+/// `"exports"` doesn't apply, as in Node.
+fn resolve_dir_main_entrypoint(dir: &Path) -> Option<PathBuf> {
+  fn try_file(path: &Path) -> Option<PathBuf> {
+    if path.is_file() {
+      return Some(path.to_path_buf());
+    }
+    for ext in ["js", "json"] {
+      let mut with_ext = path.as_os_str().to_owned();
+      with_ext.push(".");
+      with_ext.push(ext);
+      let with_ext = PathBuf::from(with_ext);
+      if with_ext.is_file() {
+        return Some(with_ext);
+      }
+    }
+    None
+  }
+  fn try_index(dir: &Path) -> Option<PathBuf> {
+    ["index.js", "index.json"]
+      .into_iter()
+      .map(|name| dir.join(name))
+      .find(|path| path.is_file())
+  }
+  let main = std::fs::read_to_string(dir.join("package.json"))
+    .ok()
+    .and_then(|text| {
+      deno_core::serde_json::from_str::<deno_core::serde_json::Value>(&text)
+        .ok()
+    })
+    .and_then(|json| json.get("main")?.as_str().map(|s| s.to_string()))
+    .filter(|main| !main.is_empty());
+  if let Some(main) = main {
+    let main_path = deno_path_util::normalize_path(Cow::Owned(dir.join(&main)));
+    if let Some(found) = try_file(&main_path).or_else(|| try_index(&main_path))
+    {
+      return Some(found);
+    }
+  }
+  try_index(dir)
 }
 
 fn try_resolve_node_binary_main_entrypoint(
@@ -2008,6 +2120,15 @@ fn flags_to_permissions_options(
   })
 }
 
+/// A project Node.js tooling would treat as its own: a package.json and no
+/// deno.json anywhere in the workspace. Such a project gets Node.js-style
+/// TypeScript resolution by default (sloppy imports, `compilerOptions.paths`
+/// for code that runs); a deno.json keeps Deno's strict resolution.
+pub fn is_node_project(workspace: &Workspace) -> bool {
+  workspace.package_jsons().next().is_some()
+    && workspace.deno_jsons().next().is_none()
+}
+
 fn augment_permissions_with_serve_flags(
   permissions_options: &mut PermissionsOptions,
   serve_flags: &ServeFlags,
@@ -2028,6 +2149,61 @@ fn augment_permissions_with_serve_flags(
     }
   }
   Ok(())
+}
+
+/// Parses a `"denoCondition"` setting: `true`, `false`,
+/// `{ "exclude": ["name", ...] }` or `{ "include": ["name", ...] }`.
+pub fn parse_deno_condition_setting(
+  value: &deno_core::serde_json::Value,
+) -> Option<node_resolver::DenoConditionPolicy> {
+  use node_resolver::DenoConditionPolicy;
+  fn names(
+    value: &deno_core::serde_json::Value,
+  ) -> Option<std::collections::BTreeSet<String>> {
+    value
+      .as_array()?
+      .iter()
+      .map(|v| v.as_str().map(|s| s.to_string()))
+      .collect()
+  }
+  match value {
+    deno_core::serde_json::Value::Bool(true) => {
+      Some(DenoConditionPolicy::Enabled)
+    }
+    deno_core::serde_json::Value::Bool(false) => {
+      Some(DenoConditionPolicy::Disabled)
+    }
+    deno_core::serde_json::Value::Object(map) if map.len() == 1 => {
+      if let Some(exclude) = map.get("exclude") {
+        Some(DenoConditionPolicy::Except(names(exclude)?))
+      } else if let Some(include) = map.get("include") {
+        Some(DenoConditionPolicy::Only(names(include)?))
+      } else {
+        None
+      }
+    }
+    _ => None,
+  }
+}
+
+/// The `"deno"` export condition's default when the project doesn't choose:
+/// off in a package.json project (no deno.json), which resolves packages
+/// with Node.js's conditions as Node.js would run it, on everywhere else.
+///
+/// A package's `"deno"` build is made for Deno-native code and can lack
+/// what its Node.js build has. In the npm matrix four packages declare one:
+/// stripe's is its worker build (the synchronous webhook API throws), jose's
+/// its browser build (WebCrypto keys only, no `KeyObject`), node-fetch-native's
+/// its native-fetch build and react-dom's its Node.js build.
+pub fn default_deno_condition_policy(
+  has_package_json: bool,
+  has_deno_json: bool,
+) -> node_resolver::DenoConditionPolicy {
+  if has_package_json && !has_deno_json {
+    node_resolver::DenoConditionPolicy::Disabled
+  } else {
+    node_resolver::DenoConditionPolicy::Enabled
+  }
 }
 
 #[cfg(test)]

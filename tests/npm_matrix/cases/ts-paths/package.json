@@ -1,0 +1,13 @@
+{
+  "name": "npm-matrix-ts-paths",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "devDependencies": {
+    "tsx": "4.20.6"
+  },
+  "scripts": {
+    "smoke": "deno run -A src/main.ts",
+    "smoke:node": "tsx src/main.ts"
+  }
+}

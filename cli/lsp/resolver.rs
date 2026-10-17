@@ -1248,9 +1248,14 @@ impl<'a> ResolverFactory<'a> {
       let workspace_resolver = self
         .config_data
         .map(|d| {
+          // the same default as the CLI
+          // (`CliOptions::node_project_sloppy_imports`)
           let unstable_sloppy_imports =
             std::env::var("DENO_UNSTABLE_SLOPPY_IMPORTS").is_ok()
-              || d.unstable.contains("sloppy-imports");
+              || d.unstable.contains("sloppy-imports")
+              || crate::args::is_node_project(&d.member_dir.workspace)
+                && std::env::var_os("DENO_NO_SLOPPY_IMPORTS")
+                  .is_none_or(|v| v != "1");
           let pkg_json_dep_resolution = if d.byonm {
             PackageJsonDepResolution::Disabled
           } else {
@@ -1356,14 +1361,19 @@ impl<'a> ResolverFactory<'a> {
       Arc::new(CliIsCjsResolver::new(
         self.in_npm_pkg_checker().clone(),
         self.pkg_json_resolver().clone(),
-        if self
-          .config_data
-          .is_some_and(|d| d.unstable.contains("detect-cjs"))
-        {
-          IsCjsResolutionMode::ImplicitTypeCommonJs
-        } else {
-          IsCjsResolutionMode::ExplicitTypeCommonJs
-        },
+        // the same default as the CLI (`CliOptions::cjs_resolution_mode`)
+        IsCjsResolutionMode::for_project(
+          self
+            .config_data
+            .is_some_and(|d| d.maybe_pkg_json().is_some()),
+          self
+            .config_data
+            .is_some_and(|d| d.maybe_deno_json().is_some()),
+          std::env::var_os("DENO_NO_DETECT_CJS").is_some_and(|v| v == "1"),
+          self
+            .config_data
+            .is_some_and(|d| d.unstable.contains("detect-cjs")),
+        ),
       ))
     })
   }

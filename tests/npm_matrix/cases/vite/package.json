@@ -1,0 +1,11 @@
+{
+  "name": "npm-matrix-vite",
+  "version": "1.0.0",
+  "private": true,
+  "devDependencies": {
+    "vite": "^7"
+  },
+  "scripts": {
+    "build": "vite build"
+  }
+}

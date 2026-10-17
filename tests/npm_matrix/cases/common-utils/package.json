@@ -1,0 +1,22 @@
+{
+  "name": "npm-matrix-common-utils",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "lodash": "^4",
+    "dotenv": "^17",
+    "commander": "^14",
+    "chalk": "^5",
+    "uuid": "^11",
+    "zod": "^4",
+    "dayjs": "^1",
+    "yargs": "^18",
+    "debug": "^4",
+    "fs-extra": "^11",
+    "glob": "^11",
+    "semver": "^7",
+    "cross-spawn": "^7",
+    "node-fetch": "^3",
+    "ms": "^2"
+  }
+}

@@ -1,0 +1,6 @@
+{
+  "category": "browser",
+  "run": "PLAYWRIGHT_BROWSERS_PATH=$PWD/.browsers deno run -A npm:playwright@1 install chromium-headless-shell >/dev/null && PLAYWRIGHT_BROWSERS_PATH=$PWD/.browsers deno run -A index.mjs",
+  "node": "PLAYWRIGHT_BROWSERS_PATH=$PWD/.browsers node index.mjs",
+  "expect": "pass"
+}

@@ -1,0 +1,9 @@
+{
+  "name": "npm-matrix-hono",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "hono": "^4",
+    "@hono/node-server": "^1"
+  }
+}

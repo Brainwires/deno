@@ -1,0 +1,6 @@
+{
+  "category": "browser",
+  "run": "PUPPETEER_CACHE_DIR=$PWD/.pcache deno run -A index.mjs",
+  "node": "PUPPETEER_CACHE_DIR=$PWD/.pcache node index.mjs",
+  "expect": "pass-with-allow-scripts"
+}

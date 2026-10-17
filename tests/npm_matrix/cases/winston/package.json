@@ -1,0 +1,9 @@
+{
+  "name": "npm-matrix-winston",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "winston": "^3",
+    "winston-daily-rotate-file": "^5"
+  }
+}

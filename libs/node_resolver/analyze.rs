@@ -542,6 +542,33 @@ impl<
       }
     }
 
+    if specifier.starts_with('#') {
+      // A package import, resolved against the referrer's closest
+      // package.json "imports". @prisma/client's generated
+      // `.prisma/client/default.js` is
+      // `module.exports = { ...require('#main-entry-point') }`.
+      // As in Node (cjsPreparseModuleExports), a re-export that does not
+      // resolve contributes no names instead of failing the analysis.
+      let Ok(Some(pkg_json)) = self
+        .pkg_json_resolver
+        .get_closest_package_json(referrer_path)
+      else {
+        return Ok(None);
+      };
+      return Ok(
+        self
+          .node_resolver
+          .resolve_package_import(
+            specifier,
+            Some(&referrer),
+            Some(&*pkg_json),
+            ResolutionMode::Require,
+            resolution_kind,
+          )
+          .ok(),
+      );
+    }
+
     // We've got a bare specifier or maybe bare_specifier/blah.js"
     let (package_specifier, package_subpath, _is_scoped) =
       parse_npm_pkg_name(specifier, &referrer).map_err(JsErrorBox::from_err)?;

@@ -1,0 +1,62 @@
+{
+  // A package.json project (no deno.json) resolves TypeScript the way tsx
+  // and ts-node users expect: extensionless, directory and `.js`-for-`.ts`
+  // relative imports (Deno's sloppy imports), and tsconfig.json's
+  // `compilerOptions.paths` / `baseUrl` for code that runs, falling back to
+  // the package when a pattern's candidates don't exist (as tsconfig-paths
+  // does). A deno.json keeps Deno's strict resolution;
+  // DENO_NO_SLOPPY_IMPORTS=1 and DENO_NO_TSCONFIG_PATHS=1 opt out.
+  "tempDir": true,
+  "tests": {
+    "package_json_project": {
+      "steps": [
+        { "cwd": "app", "args": "install", "output": "[WILDCARD]" },
+        {
+          "cwd": "app",
+          "args": "run main.ts",
+          "output": "a b c d u vendored 3\n"
+        },
+        {
+          "cwd": "app",
+          "args": "check typed.ts",
+          "output": "Check [WILDCARD]typed.ts\n"
+        }
+      ]
+    },
+    "opt_out_sloppy_imports": {
+      "steps": [
+        { "cwd": "app", "args": "install", "output": "[WILDCARD]" },
+        {
+          "cwd": "app",
+          "args": "run typed.ts",
+          "envs": { "DENO_NO_SLOPPY_IMPORTS": "1" },
+          "output": "[WILDCARD]Module not found[WILDCARD]lib/a[WILDCARD]",
+          "exitCode": 1
+        }
+      ]
+    },
+    "opt_out_paths": {
+      "steps": [
+        { "cwd": "app", "args": "install", "output": "[WILDCARD]" },
+        {
+          "cwd": "app",
+          "args": "run typed.ts",
+          "envs": { "DENO_NO_TSCONFIG_PATHS": "1" },
+          "output": "[WILDCARD]not a dependency[WILDCARD]",
+          "exitCode": 1
+        }
+      ]
+    },
+    "deno_json_project_stays_strict": {
+      "steps": [
+        { "cwd": "deno_json_app", "args": "install", "output": "[WILDCARD]" },
+        {
+          "cwd": "deno_json_app",
+          "args": "run strict.ts",
+          "output": "[WILDCARD]Module not found[WILDCARD]lib/a[WILDCARD]",
+          "exitCode": 1
+        }
+      ]
+    }
+  }
+}

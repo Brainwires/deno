@@ -1,0 +1,19 @@
+{
+  "name": "@denotest/cjs-reexport-pkg-imports",
+  "version": "1.0.0",
+  "main": "default.js",
+  "imports": {
+    "#main-entry-point": {
+      "require": {
+        "node": "./index.js",
+        "browser": "./index-browser.js",
+        "default": "./index.js"
+      },
+      "import": {
+        "node": "./index.js",
+        "default": "./index.js"
+      },
+      "default": "./index.js"
+    }
+  }
+}

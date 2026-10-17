@@ -1,0 +1,14 @@
+{
+  "name": "@denotest/deno-export-condition",
+  "version": "1.0.0",
+  "exports": {
+    ".": {
+      "deno": {
+        "import": "./deno.mjs",
+        "require": "./deno.cjs"
+      },
+      "import": "./node.mjs",
+      "require": "./node.cjs"
+    }
+  }
+}

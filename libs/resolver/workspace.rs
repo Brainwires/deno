@@ -428,7 +428,19 @@ impl<TSys: FsMetadata> SloppyImportsResolver<TSys> {
     referrer: &Url,
     resolution_kind: ResolutionKind,
   ) -> Option<(Url, SloppyImportsResolutionReason)> {
-    if !self.enabled_by_options
+    self.resolve_probing(specifier, referrer, resolution_kind, false)
+  }
+
+  /// [`Self::resolve`], probing even when sloppy imports are off if `force`.
+  fn resolve_probing(
+    &self,
+    specifier: &Url,
+    referrer: &Url,
+    resolution_kind: ResolutionKind,
+    force: bool,
+  ) -> Option<(Url, SloppyImportsResolutionReason)> {
+    if !force
+      && !self.enabled_by_options
       && self
         .compiler_options_resolver
         .read()
@@ -726,13 +738,18 @@ impl fmt::Display for CompilerOptionsRootDirsDiagnostic {
   }
 }
 
-fn resolve_types_with_compiler_options_paths(
+fn resolve_with_compiler_options_paths(
   specifier: &str,
   referrer: &Url,
   paths: &CompilerOptionsPaths,
   sloppy_imports_resolver: &SloppyImportsResolver<impl FsMetadata>,
+  resolution_kind: ResolutionKind,
 ) -> Option<Result<(Url, Option<SloppyImportsResolutionReason>), String>> {
   if referrer.scheme() != "file" {
+    return None;
+  }
+  // a package's own imports never go through the project's tsconfig.json
+  if !resolution_kind.is_types() && referrer.path().contains("/node_modules/") {
     return None;
   }
   let (candidates, matched_key) = paths.resolve_candidates(specifier)?;
@@ -743,10 +760,13 @@ fn resolve_types_with_compiler_options_paths(
     if sloppy_imports_resolver.fs.is_file(&candidate_path) {
       return Some(Ok((candidate_specifier, None)));
     } else if let Some((candidate_specifier, sloppy_reason)) =
-      sloppy_imports_resolver.resolve(
+      sloppy_imports_resolver.resolve_probing(
         &candidate_specifier,
         referrer,
-        ResolutionKind::Types,
+        resolution_kind,
+        // `paths` candidates are probed for extensions as TypeScript does,
+        // whether or not sloppy imports are on
+        resolution_kind == ResolutionKind::Execution,
       )
     {
       return Some(Ok((candidate_specifier, Some(sloppy_reason))));
@@ -850,6 +870,10 @@ pub struct WorkspaceResolver<TSys: FsMetadata + FsRead> {
   compiler_options_resolver: CompilerOptionsResolverCellRc,
   sloppy_imports_resolver: SloppyImportsResolverRc<TSys>,
   catalogs: IndexMap<String, IndexMap<String, String>>,
+  /// Whether `compilerOptions.paths` also maps specifiers of code that runs,
+  /// not only of type information (a package.json project's tsconfig.json,
+  /// as tsx and ts-node with tsconfig-paths resolve it).
+  compiler_options_paths_for_execution: std::sync::atomic::AtomicBool,
 }
 
 impl<TSys: FsMetadata + FsRead> WorkspaceResolver<TSys> {
@@ -1155,6 +1179,7 @@ impl<TSys: FsMetadata + FsRead> WorkspaceResolver<TSys> {
       compiler_options_resolver,
       sloppy_imports_resolver,
       catalogs: workspace.catalogs().clone(),
+      compiler_options_paths_for_execution: Default::default(),
     })
   }
 
@@ -1211,6 +1236,7 @@ impl<TSys: FsMetadata + FsRead> WorkspaceResolver<TSys> {
       compiler_options_resolver,
       sloppy_imports_resolver,
       catalogs,
+      compiler_options_paths_for_execution: Default::default(),
     }
   }
 
@@ -1389,38 +1415,40 @@ impl<TSys: FsMetadata + FsRead> WorkspaceResolver<TSys> {
         {
           resolved_specifier = probed_specifier;
           sloppy_reason = Some(probed_sloppy_reason);
-        } else if resolution_kind.is_types() {
-          // 1.1. Try to match the resolved specifier against
-          // `compilerOptions.paths`
-          if let Some(paths_result) = resolve_types_with_compiler_options_paths(
+        } else if let Some(paths_result) = self
+          .resolve_with_compiler_options_paths(
             resolved_specifier.as_str(),
             referrer,
             compiler_options_paths,
-            &self.sloppy_imports_resolver,
-          ) {
-            let (probed_specifier, probed_sloppy_reason) = match paths_result {
-              Ok(r) => r,
-              Err(matched_key) => {
-                return Err(
-                  MappedResolutionError::NotFoundInCompilerOptionsPaths(
-                    Box::new(NotFoundInCompilerOptionsPathsError {
-                      specifier: specifier.to_string(),
-                      referrer: referrer.clone(),
-                      matched_key,
-                      prior_resolution: Some(resolved_specifier),
-                    }),
-                  ),
-                );
-              }
-            };
-            {
+            resolution_kind,
+          )
+        {
+          // 1.1. Try to match the resolved specifier against
+          // `compilerOptions.paths`
+          match paths_result {
+            Ok((probed_specifier, probed_sloppy_reason)) => {
               resolved_specifier = probed_specifier;
               sloppy_reason = probed_sloppy_reason;
             }
-
+            Err(matched_key) if resolution_kind.is_types() => {
+              return Err(
+                MappedResolutionError::NotFoundInCompilerOptionsPaths(
+                  Box::new(NotFoundInCompilerOptionsPathsError {
+                    specifier: specifier.to_string(),
+                    referrer: referrer.clone(),
+                    matched_key,
+                    prior_resolution: Some(resolved_specifier),
+                  }),
+                ),
+              );
+            }
+            // for code that runs, the specifier resolves as it would have
+            Err(_) => {}
+          }
+        } else if resolution_kind.is_types() {
           // 1.2. Try to match the resolved specifier against
           // `compilerOptions.rootDirs`
-          } else if let Some((probed_specifier, probed_sloppy_reason)) =
+          if let Some((probed_specifier, probed_sloppy_reason)) =
             resolve_types_with_compiler_options_root_dirs(
               &resolved_specifier,
               referrer,
@@ -1448,17 +1476,25 @@ impl<TSys: FsMetadata + FsRead> WorkspaceResolver<TSys> {
 
     if resolve_error.is_unmapped_bare_specifier() {
       // 2.0. Try to resolve the bare specifier with `compilerOptions.paths`
-      if resolution_kind.is_types()
-        && let Some(paths_result) = resolve_types_with_compiler_options_paths(
-          specifier,
-          referrer,
-          compiler_options_paths,
-          &self.sloppy_imports_resolver,
-        )
-      {
-        let (probed_specifier, probed_sloppy_reason) = match paths_result {
-          Ok(r) => r,
-          Err(matched_key) => {
+      if let Some(paths_result) = self.resolve_with_compiler_options_paths(
+        specifier,
+        referrer,
+        compiler_options_paths,
+        resolution_kind,
+      ) {
+        match paths_result {
+          Ok((probed_specifier, probed_sloppy_reason)) => {
+            return self.maybe_resolve_specifier_to_workspace_jsr_pkg(
+              MappedResolution::Normal {
+                specifier: probed_specifier,
+                sloppy_reason: probed_sloppy_reason,
+                used_import_map: false,
+                used_compiler_options_root_dirs: false,
+                maybe_diagnostic: None,
+              },
+            );
+          }
+          Err(matched_key) if resolution_kind.is_types() => {
             return Err(MappedResolutionError::NotFoundInCompilerOptionsPaths(
               Box::new(NotFoundInCompilerOptionsPathsError {
                 specifier: specifier.to_string(),
@@ -1468,16 +1504,10 @@ impl<TSys: FsMetadata + FsRead> WorkspaceResolver<TSys> {
               }),
             ));
           }
-        };
-        return self.maybe_resolve_specifier_to_workspace_jsr_pkg(
-          MappedResolution::Normal {
-            specifier: probed_specifier,
-            sloppy_reason: probed_sloppy_reason,
-            used_import_map: false,
-            used_compiler_options_root_dirs: false,
-            maybe_diagnostic: None,
-          },
-        );
+          // for code that runs, a package of that name (or a workspace
+          // member) still resolves, as with tsconfig-paths
+          Err(_) => {}
+        }
       }
 
       // 2.1. Try to resolve the bare specifier to a workspace member or a
@@ -1770,6 +1800,42 @@ impl<TSys: FsMetadata + FsRead> WorkspaceResolver<TSys> {
 
   pub fn pkg_json_dep_resolution(&self) -> PackageJsonDepResolution {
     self.pkg_json_dep_resolution
+  }
+
+  /// Makes `compilerOptions.paths` map the specifiers of code that runs too,
+  /// not only of type information. A specifier that matches a pattern but
+  /// none of whose candidates exist then falls back to the normal resolution,
+  /// as tsconfig-paths does, instead of failing.
+  pub fn set_compiler_options_paths_for_execution(&self, value: bool) {
+    self
+      .compiler_options_paths_for_execution
+      .store(value, std::sync::atomic::Ordering::Relaxed);
+  }
+
+  /// Applies `compilerOptions.paths` for this kind of resolution: `None` when
+  /// the paths don't apply or no pattern matches, `Err(pattern)` when one
+  /// matches but none of its candidates exist.
+  fn resolve_with_compiler_options_paths(
+    &self,
+    specifier: &str,
+    referrer: &Url,
+    paths: &CompilerOptionsPaths,
+    resolution_kind: ResolutionKind,
+  ) -> Option<Result<(Url, Option<SloppyImportsResolutionReason>), String>> {
+    if !resolution_kind.is_types()
+      && !self
+        .compiler_options_paths_for_execution
+        .load(std::sync::atomic::Ordering::Relaxed)
+    {
+      return None;
+    }
+    resolve_with_compiler_options_paths(
+      specifier,
+      referrer,
+      paths,
+      &self.sloppy_imports_resolver,
+      resolution_kind,
+    )
   }
 
   pub fn sloppy_imports_enabled(&self) -> bool {

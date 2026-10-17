@@ -1,0 +1,4 @@
+pipe true
+eof-only true
+inflate true
+destroyed no-op true true

@@ -1,0 +1,9 @@
+{
+  "name": "npm-matrix-grpc-js",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "@grpc/grpc-js": "^1",
+    "@grpc/proto-loader": "^0.8"
+  }
+}

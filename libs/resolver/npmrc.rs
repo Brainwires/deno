@@ -174,6 +174,8 @@ fn discover_npmrc<TSys: EnvVar + EnvHomeDir + FsRead>(
         }
         excludes
       },
+      node_linker: project_rc.node_linker.or(home_rc.node_linker),
+      ignore_scripts: project_rc.ignore_scripts.or(home_rc.ignore_scripts),
     }
   }
 
@@ -279,6 +281,11 @@ pub fn create_default_npmrc(sys: &impl EnvVar) -> ResolvedNpmRc {
     trust_policy: Default::default(),
     trust_policy_ignore_after_minutes: None,
     trust_policy_exclude: Vec::new(),
+    node_linker: None,
+    // npm reads every setting from `npm_config_<key>` too
+    ignore_scripts: sys
+      .env_var("npm_config_ignore_scripts")
+      .is_ok_and(|v| v.trim() == "true"),
   }
 }
 

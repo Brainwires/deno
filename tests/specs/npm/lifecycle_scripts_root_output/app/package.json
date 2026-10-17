@@ -1,0 +1,11 @@
+{
+  "name": "root-output-app",
+  "version": "1.0.0",
+  "scripts": {
+    "postinstall": "node -e \"console.log('postinstall says hi')\"",
+    "prepare": "node -e \"console.log('prepare says hi')\""
+  },
+  "dependencies": {
+    "@denotest/add": "1.0.0"
+  }
+}

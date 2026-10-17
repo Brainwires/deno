@@ -1,0 +1,7 @@
+{
+  "name": "@denotest/alias-dep-user",
+  "version": "1.0.0",
+  "dependencies": {
+    "@denotest/aliased-add": "npm:@denotest/add@1.0.0"
+  }
+}

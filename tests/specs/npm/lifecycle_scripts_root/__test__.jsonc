@@ -1,0 +1,25 @@
+{
+  // The project's own lifecycle scripts run on `deno install` without
+  // --allow-scripts, as npm runs them, including `prepare`; and `node -e`
+  // in a script runs Deno in Node.js mode. deno.json's allowScripts.deny
+  // turns them off.
+  "tempDir": true,
+  "tests": {
+    "root_scripts_run": {
+      "steps": [
+        { "cwd": "app", "args": "install", "output": "[WILDCARD]" },
+        {
+          "cwd": "app",
+          "args": "run -R check.mjs",
+          "output": "pre post=2 prepare\n"
+        }
+      ]
+    },
+    "root_scripts_denied": {
+      "steps": [
+        { "cwd": "denied", "args": "install", "output": "[WILDCARD]" },
+        { "cwd": "denied", "args": "run -R check.mjs", "output": "none\n" }
+      ]
+    }
+  }
+}

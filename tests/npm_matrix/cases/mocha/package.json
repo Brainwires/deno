@@ -1,0 +1,11 @@
+{
+  "name": "npm-matrix-mocha",
+  "version": "1.0.0",
+  "private": true,
+  "devDependencies": {
+    "mocha": "^11"
+  },
+  "scripts": {
+    "test": "mocha"
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "name": "npm-matrix-aws-sdk-v3",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3"
+  }
+}

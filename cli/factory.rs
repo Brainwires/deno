@@ -34,7 +34,6 @@ use deno_npm_installer::lifecycle_scripts::NullLifecycleScriptsExecutor;
 use deno_npm_installer::process_state::NpmProcessStateKind;
 use deno_npmrc::ResolvedNpmRc;
 use deno_resolver::cache::ParsedSourceCache;
-use deno_resolver::cjs::IsCjsResolutionMode;
 use deno_resolver::deno_json::CompilerOptionsOverrides;
 use deno_resolver::deno_json::CompilerOptionsResolver;
 use deno_resolver::factory::ConfigDiscoveryOption;
@@ -790,6 +789,9 @@ impl CliFactory {
             DenoSubcommand::Ci(f) => f.skip_types,
             _ => false,
           },
+          // only a manual node_modules gets them, and only on an install
+          // (`deno run` doesn't install into one)
+          install_remote_packages: true,
           resolve_npm_resolution_snapshot: Box::new(|| {
             deno_lib::args::resolve_npm_resolution_snapshot(&CliSys::default())
           }),
@@ -1455,15 +1457,7 @@ impl CliFactory {
               Ok("1") | Ok("true")
             ),
           },
-          is_cjs_resolution_mode: if options.is_node_main()
-            || options.unstable_detect_cjs()
-          {
-            IsCjsResolutionMode::ImplicitTypeCommonJs
-          } else if options.detect_cjs() {
-            IsCjsResolutionMode::ExplicitTypeCommonJs
-          } else {
-            IsCjsResolutionMode::Disabled
-          },
+          is_cjs_resolution_mode: options.cjs_resolution_mode(),
           newest_dependency_date: self.flags.minimum_dependency_age,
           node_analysis_cache: Some(node_analysis_cache),
           node_resolver_options: NodeResolverOptions {
@@ -1473,6 +1467,7 @@ impl CliFactory {
                 .iter()
                 .map(|c| Cow::Owned(c.clone()))
                 .collect(),
+              deno_condition: options.deno_condition_policy(),
               import_conditions_override: None,
               require_conditions_override: None,
             },
@@ -1519,6 +1514,8 @@ impl CliFactory {
               .clone(),
           })),
           unstable_sloppy_imports: options.unstable_sloppy_imports(),
+          compiler_options_paths_for_execution: options
+            .compiler_options_paths_for_execution(),
           on_mapped_resolution_diagnostic: Some(Arc::new(
             on_resolve_diagnostic,
           )),

@@ -297,6 +297,10 @@ async fn clean_except(
   let mut npm_reqs = Vec::new();
 
   let mut keep_paths_trie = PathTrie::new();
+  // the `node` shim the runtime keeps in DENO_DIR (cli/node_compat_shim.rs)
+  // is the tool's own, not a cached module
+  keep_paths_trie
+    .insert(deno_dir.root.join(crate::node_compat_shim::SHIM_DIR_NAME));
   if deno_dir_root_canonical != deno_dir.root {
     keep_paths_trie
       .add_rewrite(deno_dir.root.clone(), deno_dir_root_canonical.clone());

@@ -293,9 +293,11 @@ fn load_config() -> NodeCompatConfig {
 
 // Directories that don't contain runnable tests
 // from https://github.com/denoland/std/pull/2787#discussion_r1001237016
+//
+// `async-hooks/` is collected: it is the `node:async_hooks` suite, and only the
+// tests listed in config.jsonc run without a filter.
 const IGNORED_TEST_DIRS: &[&str] = &[
   "addons",
-  "async-hooks",
   "benchmark",
   "cctest",
   "common",

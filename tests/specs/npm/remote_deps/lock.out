@@ -1,0 +1,3 @@
+git+file://<repo>#semver:^1.0.0 commit
+git+file://<repo>#v1.0.0 commit
+http://localhost:4260/@denotest/tarball-dep/1.0.0.tgz integrity

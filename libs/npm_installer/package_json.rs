@@ -30,6 +30,9 @@ pub struct InstallNpmRemotePkg {
 pub struct InstallLocalPkg {
   pub alias: Option<StackString>,
   pub target_dir: PathBuf,
+  /// Whether its `bin` goes into the root `node_modules/.bin`, as npm links
+  /// a `file:`, git or tarball dependency's.
+  pub link_bins: bool,
 }
 
 #[derive(Debug)]
@@ -63,6 +66,10 @@ pub struct InstallWorkspacePkg {
   pub is_root: bool,
   pub scripts: std::collections::HashMap<SmallStackString, String>,
   pub deps: Vec<InstallWorkspacePkgDep>,
+  /// A git or tarball dependency fetched into node_modules (see
+  /// `crate::remote`) rather than the project's own package: its
+  /// dependencies are linked the same way, but it runs no scripts.
+  pub fetched: bool,
 }
 
 #[derive(Debug, Error, Clone)]
@@ -162,6 +169,7 @@ impl NpmInstallDepsProvider {
     workspace: &Arc<Workspace>,
     production: bool,
     skip_types: bool,
+    fetched_pkgs: &[crate::remote::FetchedRemotePkg],
   ) -> Self {
     // todo(dsherret): estimate capacity?
     let mut local_pkgs = Vec::new();
@@ -230,6 +238,7 @@ impl NpmInstallDepsProvider {
               local_pkgs.push(InstallLocalPkg {
                 alias: None,
                 target_dir: pkg.pkg_json.dir_path().to_path_buf(),
+                link_bins: false,
               });
             } else {
               pkg_pkgs.push(InstallNpmRemotePkg {
@@ -275,11 +284,17 @@ impl NpmInstallDepsProvider {
           };
           match dep {
             PackageJsonDepValue::File(specifier) => {
-              local_pkgs.push(InstallLocalPkg {
-                alias: Some(alias.clone()),
-                target_dir: pkg_json.dir_path().join(specifier),
-              })
+              // a tarball is extracted with the git and tarball URL ones
+              if !crate::remote::is_tarball_path(specifier) {
+                local_pkgs.push(InstallLocalPkg {
+                  alias: Some(alias.clone()),
+                  target_dir: pkg_json.dir_path().join(specifier),
+                  link_bins: true,
+                })
+              }
             }
+            // fetched before (`fetched_pkgs`)
+            PackageJsonDepValue::Remote(_) => {}
             PackageJsonDepValue::Req(pkg_req) => {
               if skip_types && pkg_req.name.starts_with("@types/") {
                 continue;
@@ -298,6 +313,7 @@ impl NpmInstallDepsProvider {
                 local_pkgs.push(InstallLocalPkg {
                   alias: Some(alias.clone()),
                   target_dir: pkg.pkg_json.dir_path().to_path_buf(),
+                  link_bins: false,
                 });
               } else {
                 workspace_pkg_deps.push(InstallWorkspacePkgDep::Remote {
@@ -347,6 +363,7 @@ impl NpmInstallDepsProvider {
                   local_pkgs.push(InstallLocalPkg {
                     alias: Some(alias.clone()),
                     target_dir: pkg.pkg_json.dir_path().to_path_buf(),
+                    link_bins: false,
                   });
                 } else if let PackageJsonDepWorkspaceReq::VersionReq(
                   version_req,
@@ -388,6 +405,7 @@ impl NpmInstallDepsProvider {
                   local_pkgs.push(InstallLocalPkg {
                     alias: Some(alias.clone()),
                     target_dir: pkg.pkg_json.dir_path().to_path_buf(),
+                    link_bins: false,
                   });
                 } else {
                   workspace_pkg_deps.push(InstallWorkspacePkgDep::Remote {
@@ -425,6 +443,7 @@ impl NpmInstallDepsProvider {
             })
             .unwrap_or_default(),
           deps: workspace_pkg_deps,
+          fetched: false,
         });
 
         // Also symlink each non-root workspace member that is itself an npm
@@ -442,9 +461,41 @@ impl NpmInstallDepsProvider {
           local_pkgs.push(InstallLocalPkg {
             alias: Some(StackString::from_str(name)),
             target_dir: pkg_json.dir_path().to_path_buf(),
+            link_bins: false,
           });
         }
       }
+    }
+
+    // git and tarball dependencies: linked like a `file:` directory, their
+    // registry dependencies installed with the rest and linked into their
+    // own node_modules as a workspace member's are
+    for pkg in fetched_pkgs {
+      local_pkgs.push(InstallLocalPkg {
+        alias: Some(pkg.alias.clone()),
+        target_dir: pkg.dir.clone(),
+        link_bins: true,
+      });
+      remote_pkgs.extend(pkg.deps.iter().map(|(_, req)| InstallNpmRemotePkg {
+        alias: None,
+        base_dir: pkg.dir.clone(),
+        req: req.clone(),
+      }));
+      workspace_pkgs.push(InstallWorkspacePkg {
+        nv: pkg.nv.clone(),
+        target_dir: pkg.dir.clone(),
+        is_root: false,
+        scripts: Default::default(),
+        deps: pkg
+          .deps
+          .iter()
+          .map(|(alias, req)| InstallWorkspacePkgDep::Remote {
+            alias: alias.clone(),
+            req: req.clone(),
+          })
+          .collect(),
+        fetched: true,
+      });
     }
 
     for pkg in workspace.link_pkg_jsons() {

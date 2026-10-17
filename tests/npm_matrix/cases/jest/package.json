@@ -1,0 +1,11 @@
+{
+  "name": "npm-matrix-jest",
+  "version": "1.0.0",
+  "private": true,
+  "devDependencies": {
+    "jest": "^30"
+  },
+  "scripts": {
+    "test": "jest"
+  }
+}

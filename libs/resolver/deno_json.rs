@@ -117,6 +117,9 @@ static ALLOWED_COMPILER_OPTIONS: phf::Set<&'static str> = phf::phf_set! {
   "emitDecoratorMetadata",
   "exactOptionalPropertyTypes",
   "experimentalDecorators",
+  // TypeScript 6 deprecates `baseUrl` and tells a project to set this to
+  // keep it; dropping it made such a tsconfig.json fail type checking
+  "ignoreDeprecations",
   "isolatedDeclarations",
   "jsx",
   "jsxFactory",

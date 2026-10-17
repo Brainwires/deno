@@ -1,0 +1,11 @@
+{
+  "name": "@denotest/tarball-dep",
+  "version": "1.0.0",
+  "main": "index.js",
+  "bin": {
+    "tarball-dep-cli": "./cli.js"
+  },
+  "dependencies": {
+    "@denotest/add": "1.0.0"
+  }
+}

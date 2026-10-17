@@ -1,0 +1,5 @@
+{
+  "name": "node-e-app",
+  "version": "1.0.0",
+  "dependencies": { "@denotest/node-e-postinstall": "1.0.0" }
+}

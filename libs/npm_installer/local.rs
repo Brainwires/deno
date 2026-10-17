@@ -959,6 +959,13 @@ impl<
           &self.root_node_modules_path.join(pkg_alias),
         )?;
       }
+      // and the `bin` of `file:`, git and tarball dependencies
+      crate::bin_entries::set_up_local_package_bin_entries(
+        sys.as_ref(),
+        self.npm_install_deps_provider.local_pkgs(),
+        &self.root_node_modules_path,
+        &self.root_node_modules_path.join(".bin"),
+      )?;
     }
 
     // 11. Create a `node_modules` directory inside each workspace member and
@@ -1077,14 +1084,13 @@ impl<
         &deno_local_registry_dir,
         &package.package,
       ))?;
-      lifecycle_scripts.borrow_mut().add(
+      lifecycle_scripts.borrow_mut().add_workspace(
         &package.package,
         &NpmPackageExtraInfo {
           scripts: package.scripts.clone(),
           ..Default::default()
         },
         Cow::Borrowed(&package.package_path),
-        Vec::new(),
       );
     }
 
@@ -1092,29 +1098,8 @@ impl<
       let packages_with_deprecation_warnings =
         packages_with_deprecation_warnings.lock();
       if !packages_with_deprecation_warnings.is_empty() {
-        use std::fmt::Write;
-        let mut output = String::new();
-        let _ = writeln!(
-          &mut output,
-          "{} {}",
-          colors::yellow("╭"),
-          colors::yellow_bold("Warning")
-        );
-        let _ = writeln!(&mut output, "{}", colors::yellow("│"));
-        let _ = writeln!(
-          &mut output,
-          "{}  The following packages are deprecated:",
-          colors::yellow("│"),
-        );
-        for (package_nv, msg) in packages_with_deprecation_warnings.iter() {
-          let _ = writeln!(
-            &mut output,
-            "{}  {}",
-            colors::yellow("│"),
-            colors::gray(format!("npm:{:?} ({})", package_nv, msg))
-          );
-        }
-        let _ = write!(&mut output, "{}", colors::yellow("╰─"));
+        let output =
+          deprecation_warning_message(&packages_with_deprecation_warnings);
         if let Some(install_reporter) = &self.install_reporter {
           install_reporter.deprecated_message(output);
         } else {
@@ -1201,7 +1186,8 @@ impl<
       })
       .collect::<HashMap<_, _>>();
     let mut packages = Vec::with_capacity(workspace_pkgs.len());
-    for workspace_pkg in workspace_pkgs {
+    // a git or tarball dependency runs no scripts
+    for workspace_pkg in workspace_pkgs.iter().filter(|pkg| !pkg.fetched) {
       let mut dependencies = HashMap::with_capacity(workspace_pkg.deps.len());
       for dep in &workspace_pkg.deps {
         match dep {
@@ -1390,7 +1376,7 @@ fn ensure_jsr_npmrc<TSys: NpmCacheSys>(
 }
 
 /// `node_modules/.deno/<package>/`
-fn local_node_modules_package_folder(
+pub(crate) fn local_node_modules_package_folder(
   local_registry_dir: &Path,
   package: &NpmResolutionPackage,
 ) -> PathBuf {
@@ -2001,7 +1987,9 @@ fn write_initialized_file(
   }
 }
 
-fn create_initialized_file<F: sys_traits::boxed::FsOpenBoxed + ?Sized>(
+pub(crate) fn create_initialized_file<
+  F: sys_traits::boxed::FsOpenBoxed + ?Sized,
+>(
   sys: &F,
   path: &Path,
 ) -> Result<(), std::io::Error> {
@@ -2122,7 +2110,10 @@ fn cleanup_unused_packages<TSys: LocalNpmInstallSys>(
     for entry in entries.flatten() {
       let file_name = entry.file_name();
       if let Some(name_str) = file_name.to_str() {
-        if name_str == "node_modules" || name_str.starts_with(".deno.lock") {
+        if name_str == "node_modules"
+          || name_str.starts_with(".deno.lock")
+          || name_str == crate::remote::REMOTE_PACKAGES_DIR
+        {
           continue;
         }
 
@@ -2251,6 +2242,36 @@ pub fn remove_unused_node_modules_symlinks<TSys: LocalNpmInstallSys>(
     }
   }
   Ok(())
+}
+
+/// The "deprecated packages" warning both node_modules layouts print.
+pub(crate) fn deprecation_warning_message(
+  packages: &[(PackageNv, String)],
+) -> String {
+  use std::fmt::Write;
+  let mut output = String::new();
+  let _ = writeln!(
+    &mut output,
+    "{} {}",
+    colors::yellow("╭"),
+    colors::yellow_bold("Warning")
+  );
+  let _ = writeln!(&mut output, "{}", colors::yellow("│"));
+  let _ = writeln!(
+    &mut output,
+    "{}  The following packages are deprecated:",
+    colors::yellow("│"),
+  );
+  for (package_nv, msg) in packages {
+    let _ = writeln!(
+      &mut output,
+      "{}  {}",
+      colors::yellow("│"),
+      colors::gray(format!("npm:{:?} ({})", package_nv, msg))
+    );
+  }
+  let _ = write!(&mut output, "{}", colors::yellow("╰─"));
+  output
 }
 
 #[cfg(test)]

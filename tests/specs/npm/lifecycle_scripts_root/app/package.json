@@ -1,0 +1,12 @@
+{
+  "name": "root-scripts-app",
+  "version": "1.0.0",
+  "scripts": {
+    "preinstall": "node -e \"require('fs').writeFileSync('pre.txt', 'pre')\"",
+    "postinstall": "node -e \"require('fs').writeFileSync('post.txt', String(1 + 1))\"",
+    "prepare": "node -e \"require('fs').writeFileSync('prepare.txt', 'prepare')\""
+  },
+  "dependencies": {
+    "@denotest/add": "1.0.0"
+  }
+}

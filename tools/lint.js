@@ -99,6 +99,7 @@ async function lintJS() {
       ":!:tests/bench/testdata/express-router.js",
       ":!:tests/bench/testdata/react-dom.js",
       ":!:tests/ffi/testdata/test.js",
+      ":!:tests/npm_matrix/cases/**",
       ":!:tests/registry/**",
       ":!:tests/specs/**",
       ":!:tests/testdata/**",

@@ -382,16 +382,17 @@ impl ShellCommand for NodeCommand {
     &self,
     context: ShellCommandContext,
   ) -> LocalBoxFuture<'static, ExecuteResult> {
-    // continue to use Node if the first argument is a flag
-    // or there are no arguments provided for some reason
-    if context.args.is_empty()
-      || ({
-        let first_arg = context.args[0].to_string_lossy();
-        first_arg.starts_with('-') // has a flag
-      })
-    {
+    if context.args.is_empty() {
+      // `node` alone is the REPL: leave it to a real node
       return ExecutableCommand::new("node".to_string(), PathBuf::from("node"))
         .execute(context);
+    }
+    if context.args[0].to_string_lossy().starts_with('-') {
+      // Node.js flags (`node -e "..."`, `node -p`, `node --version`,
+      // `node --require x y.js`): translate them as the `node` shim and
+      // `child_process` do, so a lifecycle script needs no Node.js install
+      // (npm runs these with its own node).
+      return node_shim_command(context);
     }
 
     let mut args: Vec<OsString> = Vec::with_capacity(7 + context.args.len());
@@ -424,6 +425,67 @@ impl ShellCommand for NodeCommand {
   }
 }
 
+/// Runs `node <node flags> ...` through Deno, translating the flags with
+/// `node_shim` (the `child_process` translation: `-e` code gets `require` and
+/// the builtins). Falls back to a real `node` for flags it can't translate.
+fn node_shim_command(
+  context: ShellCommandContext,
+) -> LocalBoxFuture<'static, ExecuteResult> {
+  let node_args = context
+    .args
+    .iter()
+    .map(|a| a.to_string_lossy().into_owned())
+    .collect::<Vec<_>>();
+  let Ok(parsed) = node_shim::parse_args(node_args) else {
+    return ExecutableCommand::new("node".to_string(), PathBuf::from("node"))
+      .execute(context);
+  };
+  let translated = node_shim::translate_to_deno_args(
+    parsed,
+    &node_shim::TranslateOptions::for_child_process(),
+  );
+  if translated.deno_args.is_empty() {
+    return ExecutableCommand::new("node".to_string(), PathBuf::from("node"))
+      .execute(context);
+  }
+  let mut state = context.state;
+  if !translated.node_options.is_empty() {
+    state.apply_env_var(
+      OsStr::new("NODE_OPTIONS"),
+      OsStr::new(&translated.node_options.join(" ")),
+    );
+  }
+  if translated.use_system_ca {
+    state.apply_env_var(OsStr::new("DENO_TLS_CA_STORE"), OsStr::new("system"));
+  }
+  state.apply_env_var(
+    OsStr::new(USE_PKG_JSON_HIDDEN_ENV_VAR_NAME),
+    OsStr::new("1"),
+  );
+  ExecutableCommand::new(
+    "deno".to_string(),
+    std::env::current_exe()
+      .and_then(|p| canonicalize_path(&p))
+      .unwrap(),
+  )
+  .execute(ShellCommandContext {
+    args: translated
+      .deno_args
+      .into_iter()
+      .map(OsString::from)
+      .collect(),
+    state,
+    ..context
+  })
+}
+
+/// The node-gyp a lifecycle script gets when the project doesn't provide
+/// one (npm ships its own). An exact version, so a node-gyp release can't
+/// change installs; fetched from the npm registry on first use and checked
+/// against the registry's sha512 integrity like any npm package.
+/// `DENO_NODE_GYP` names another one (an `npm:` specifier or a path).
+pub const NODE_GYP_NPM_SPECIFIER: &str = "npm:node-gyp@13.1.0";
+
 pub struct NodeGypCommand;
 
 impl ShellCommand for NodeGypCommand {
@@ -431,25 +493,43 @@ impl ShellCommand for NodeGypCommand {
     &self,
     context: ShellCommandContext,
   ) -> LocalBoxFuture<'static, ExecuteResult> {
-    // at the moment this shell command is just to give a warning if node-gyp is not found
-    // in the future, we could try to run/install node-gyp for the user with deno
-    if context
-      .state
-      .resolve_command_path(OsStr::new("node-gyp"))
-      .is_err()
+    // a node-gyp from the dependencies' bins or on PATH wins
+    if let Ok(path) = context.state.resolve_command_path(OsStr::new("node-gyp"))
     {
-      log::warn!(
-        "{} node-gyp was used in a script, but was not listed as a dependency. Either add it as a dependency or install it globally (e.g. `npm install -g node-gyp`)",
-        crate::colors::yellow("Warning")
-      );
-      Box::pin(std::future::ready(ExecuteResult::from_exit_code(0)))
-    } else {
-      ExecutableCommand::new(
-        "node-gyp".to_string(),
-        "node-gyp".to_string().into(),
-      )
-      .execute(context)
+      return ExecutableCommand::new("node-gyp".to_string(), path)
+        .execute(context);
     }
+    // Otherwise run the pinned node-gyp from npm, outside the project: the
+    // global npm cache, no config, and not the npm state of the install
+    // that is running this script.
+    let mut args: Vec<OsString> = vec![
+      "run".into(),
+      "-A".into(),
+      "--no-config".into(),
+      "--node-modules-dir=none".into(),
+      std::env::var_os("DENO_NODE_GYP")
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| NODE_GYP_NPM_SPECIFIER.into()),
+    ];
+    args.extend(context.args);
+    let mut state = context.state;
+    state.apply_change(&deno_task_shell::EnvChange::UnsetVar(
+      deno_runtime::deno_process::NPM_RESOLUTION_STATE_FD_ENV_VAR_NAME.into(),
+    ));
+    state.apply_change(&deno_task_shell::EnvChange::UnsetVar(
+      USE_PKG_JSON_HIDDEN_ENV_VAR_NAME.into(),
+    ));
+    ExecutableCommand::new(
+      "deno".to_string(),
+      std::env::current_exe()
+        .and_then(|p| canonicalize_path(&p))
+        .unwrap(),
+    )
+    .execute(ShellCommandContext {
+      args,
+      state,
+      ..context
+    })
   }
 }
 

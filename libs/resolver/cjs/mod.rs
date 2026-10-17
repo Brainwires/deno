@@ -120,7 +120,9 @@ impl<TInNpmPackageChecker: InNpmPackageChecker, TSys: FsRead + FsMetadata>
       .get_known_mode_with_is_script(specifier, media_type, is_script)
     {
       Some(kind) => kind,
-      None => self.is_cjs_resolver.check_based_on_pkg_json(specifier)?,
+      None => self
+        .is_cjs_resolver
+        .check_based_on_pkg_json(specifier, media_type)?,
     };
     Ok(kind == ResolutionMode::Require)
   }
@@ -169,9 +171,55 @@ pub enum IsCjsResolutionMode {
   ExplicitTypeCommonJs,
   /// Implicitly uses `"type": "commonjs"` if no `"type"` is specified.
   ImplicitTypeCommonJs,
+  /// `ImplicitTypeCommonJs` for untyped JavaScript (`.js`, `.jsx`) that
+  /// refers to a CommonJS binding (`require`, `module.exports`, `exports`,
+  /// `__dirname`, `__filename`), else `ExplicitTypeCommonJs`.
+  ImplicitTypeCommonJsUntyped,
   /// Does not respect `"type": "commonjs"` and always treats ambiguous files as ESM.
   #[default]
   Disabled,
+}
+
+impl IsCjsResolutionMode {
+  /// The default mode for a project: an ambiguous JavaScript file (`.js`,
+  /// `.jsx` without `"type"` in its package.json, or with no package.json)
+  /// that uses CommonJS (`require`, `module.exports`, `exports`,
+  /// `__dirname`, `__filename`) and no ES module syntax (`import`/`export`,
+  /// `import.meta`, top-level `await`) is CommonJS, as Node's
+  /// `--experimental-detect-module` (on by default since Node 22.7) runs it.
+  /// That is the default for a project with a package.json and for a file
+  /// run with no config file at all. Every other ambiguous file keeps Deno's
+  /// ES module default: TypeScript unless its package.json says
+  /// `"type": "commonjs"`, and JavaScript that never touches CommonJS (where
+  /// Node's CommonJS would differ from ESM only in sloppy-mode details such
+  /// as top-level `this` and `var`), so Deno's config-less scripts and tests
+  /// run as before. A project configured only by a deno.json keeps ESM for
+  /// every file.
+  ///
+  /// `opted_out` (`--no-detect-cjs` / `DENO_NO_DETECT_CJS=1`) restores the
+  /// previous defaults: only `"type": "commonjs"` makes a file CommonJS, and
+  /// only when there is a package.json. `forced` (`--unstable-detect-cjs`,
+  /// `"unstable": ["detect-cjs"]`, a node-shim launch) always detects.
+  pub fn for_project(
+    has_package_json: bool,
+    has_deno_json: bool,
+    opted_out: bool,
+    forced: bool,
+  ) -> Self {
+    if forced {
+      Self::ImplicitTypeCommonJs
+    } else if opted_out {
+      if has_package_json {
+        Self::ExplicitTypeCommonJs
+      } else {
+        Self::Disabled
+      }
+    } else if has_package_json || !has_deno_json {
+      Self::ImplicitTypeCommonJsUntyped
+    } else {
+      Self::Disabled
+    }
+  }
 }
 
 /// Resolves whether a module is CJS or ESM.
@@ -183,6 +231,8 @@ pub struct IsCjsResolver<
   in_npm_pkg_checker: TInNpmPackageChecker,
   pkg_json_resolver: PackageJsonResolverRc<TSys>,
   mode: IsCjsResolutionMode,
+  /// Whether a file refers to a CommonJS binding, per file.
+  uses_commonjs: MaybeDashMap<Url, bool>,
 }
 
 impl<TInNpmPackageChecker: InNpmPackageChecker, TSys: FsRead + FsMetadata>
@@ -197,6 +247,7 @@ impl<TInNpmPackageChecker: InNpmPackageChecker, TSys: FsRead + FsMetadata>
       in_npm_pkg_checker,
       pkg_json_resolver,
       mode,
+      uses_commonjs: Default::default(),
     }
   }
 
@@ -216,7 +267,7 @@ impl<TInNpmPackageChecker: InNpmPackageChecker, TSys: FsRead + FsMetadata>
         // dts files are always determined based on the package.json because
         // they contain imports/exports even when considered CJS
         self
-          .check_based_on_pkg_json(specifier)
+          .check_based_on_pkg_json(specifier, MediaType::Dts)
           .unwrap_or(ResolutionMode::Import)
       }
       MediaType::Wasm |
@@ -235,7 +286,7 @@ impl<TInNpmPackageChecker: InNpmPackageChecker, TSys: FsRead + FsMetadata>
       | MediaType::Sql
       | MediaType::Unknown => {
         match is_script {
-          Some(true) => self.check_based_on_pkg_json(specifier).unwrap_or(ResolutionMode::Import),
+          Some(true) => self.check_based_on_pkg_json(specifier, MediaType::from_specifier(specifier)).unwrap_or(ResolutionMode::Import),
           Some(false) | None => ResolutionMode::Import,
         }
       }
@@ -263,7 +314,8 @@ impl<TInNpmPackageChecker: InNpmPackageChecker, TSys: FsRead + FsMetadata>
         if let Some(value) = known_cache.get(specifier).map(|v| *v) {
           Some(value)
         } else {
-          let value = self.check_based_on_pkg_json(specifier).ok();
+          let value =
+            self.check_based_on_pkg_json(specifier, media_type).ok();
           if let Some(value) = value {
             known_cache.insert(specifier.clone(), value);
           }
@@ -308,9 +360,46 @@ impl<TInNpmPackageChecker: InNpmPackageChecker, TSys: FsRead + FsMetadata>
     }
   }
 
+  /// Whether an ambiguous file of `media_type` (its content's, so
+  /// `--ext=ts` on a `.js` file is TypeScript) with no `"type"` is CommonJS
+  /// (unless it turns out to use ES module syntax).
+  fn is_implicit_for(&self, specifier: &Url, media_type: MediaType) -> bool {
+    match self.mode {
+      IsCjsResolutionMode::ImplicitTypeCommonJs => true,
+      IsCjsResolutionMode::ImplicitTypeCommonJsUntyped => {
+        matches!(media_type, MediaType::JavaScript | MediaType::Jsx)
+          && self.uses_commonjs(specifier)
+      }
+      IsCjsResolutionMode::ExplicitTypeCommonJs
+      | IsCjsResolutionMode::Disabled => false,
+    }
+  }
+
+  /// A cheap textual check (as `deno eval` does) for a CommonJS binding.
+  /// Only consulted for a file that parsed with no ES module syntax, so a
+  /// match in a comment or string at worst runs a script as CommonJS.
+  fn uses_commonjs(&self, specifier: &Url) -> bool {
+    if let Some(value) = self.uses_commonjs.get(specifier).map(|v| *v) {
+      return value;
+    }
+    let value = deno_path_util::url_to_file_path(specifier)
+      .ok()
+      .and_then(|path| {
+        self
+          .pkg_json_resolver
+          .sys()
+          .fs_read_to_string_lossy(&path)
+          .ok()
+      })
+      .is_some_and(|text| text_uses_commonjs(&text));
+    self.uses_commonjs.insert(specifier.clone(), value);
+    value
+  }
+
   fn check_based_on_pkg_json(
     &self,
     specifier: &Url,
+    media_type: MediaType,
   ) -> Result<ResolutionMode, PackageJsonLoadError> {
     if self.in_npm_pkg_checker.in_npm_package(specifier) {
       let Ok(path) = deno_path_util::url_to_file_path(specifier) else {
@@ -336,14 +425,14 @@ impl<TInNpmPackageChecker: InNpmPackageChecker, TSys: FsRead + FsMetadata>
         self.pkg_json_resolver.get_closest_package_json(&path)?
       {
         let is_cjs_type = pkg_json.typ == "commonjs"
-          || self.mode == IsCjsResolutionMode::ImplicitTypeCommonJs
+          || self.is_implicit_for(specifier, media_type)
             && pkg_json.typ == "none";
         Ok(if is_cjs_type {
           ResolutionMode::Require
         } else {
           ResolutionMode::Import
         })
-      } else if self.mode == IsCjsResolutionMode::ImplicitTypeCommonJs {
+      } else if self.is_implicit_for(specifier, media_type) {
         Ok(ResolutionMode::Require)
       } else {
         Ok(ResolutionMode::Import)
@@ -398,5 +487,49 @@ impl<TInNpmPackageChecker: InNpmPackageChecker, TSys: FsRead + FsMetadata>
         })
       }
     }
+  }
+}
+
+/// Whether JavaScript source refers to one of CommonJS's module bindings.
+fn text_uses_commonjs(text: &str) -> bool {
+  const NEEDLES: &[&str] = &[
+    "require(",
+    "require.",
+    "module.exports",
+    "__dirname",
+    "__filename",
+  ];
+  NEEDLES.iter().any(|needle| text.contains(needle))
+    || contains_word(text, "exports")
+}
+
+/// Whether `word` occurs in `text` as a whole identifier (`exports.a`,
+/// `Object.defineProperty(exports, ...)`, but not `reexports`).
+fn contains_word(text: &str, word: &str) -> bool {
+  let is_ident = |c: char| c.is_alphanumeric() || c == '_' || c == '$';
+  text.match_indices(word).any(|(i, _)| {
+    let before = text[..i].chars().next_back();
+    let after = text[i + word.len()..].chars().next();
+    !before.is_some_and(is_ident) && !after.is_some_and(is_ident)
+  })
+}
+
+#[cfg(test)]
+mod uses_commonjs_tests {
+  use super::text_uses_commonjs;
+
+  #[test]
+  fn detects_commonjs_bindings() {
+    assert!(text_uses_commonjs("const fs = require(\"fs\");"));
+    assert!(text_uses_commonjs("module.exports = 1;"));
+    assert!(text_uses_commonjs("exports.a = 1;"));
+    assert!(text_uses_commonjs("console.log(__dirname);"));
+    assert!(text_uses_commonjs("require.resolve(\"x\");"));
+    assert!(text_uses_commonjs(
+      "Object.defineProperty(exports, \"__esModule\", { value: true });"
+    ));
+    assert!(!text_uses_commonjs("const reexports = 1;"));
+    assert!(!text_uses_commonjs("console.log(typeof this);"));
+    assert!(!text_uses_commonjs("Deno.bench(() => {});"));
   }
 }
