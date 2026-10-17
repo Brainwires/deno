@@ -1,14 +1,40 @@
 {
-  "if": "windows",
+  // DENO_INSTALL_ARCH picks the optional dependency for that architecture
+  // under both node_modules layouts (Windows only: the optional packages are
+  // win32 builds).
   "tempDir": true,
-  "steps": [{
-    "args": "install",
-    "envs": {
-      "DENO_INSTALL_ARCH": "aarch64"
+  "tests": {
+    "isolated": {
+      "if": "windows",
+      // `.npmrc` pins the isolated layout this case inspects (a
+      // package.json-only project is hoisted by default)
+      "steps": [{
+        "cwd": "isolated",
+        "args": "install",
+        "envs": {
+          "DENO_INSTALL_ARCH": "aarch64"
+        },
+        "output": "[WILDCARD]"
+      }, {
+        "cwd": "isolated",
+        "args": "run -A verify_output.ts",
+        "output": "FOUND\n"
+      }]
     },
-    "output": "[WILDCARD]"
-  }, {
-    "args": "run -A verify_output.ts",
-    "output": "FOUND\n"
-  }]
+    "hoisted": {
+      "if": "windows",
+      "steps": [{
+        "cwd": "hoisted",
+        "args": "install",
+        "envs": {
+          "DENO_INSTALL_ARCH": "aarch64"
+        },
+        "output": "[WILDCARD]"
+      }, {
+        "cwd": "hoisted",
+        "args": "run -A verify_output.ts",
+        "output": "arm64: true\nx64: false\n"
+      }]
+    }
+  }
 }
