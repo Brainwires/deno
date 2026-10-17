@@ -34,7 +34,7 @@ const ACTIVE_ENV_VAR: &str = "DENO_NODE_SHIM_ACTIVE";
 // denext: the fork's own shim directory. Each binary points the shim at
 // itself, so a stock `deno` and this fork sharing a DENO_DIR would re-point a
 // shared one on every switch, and a `node` spawned by one could run the other.
-const SHIM_DIR_NAME: &str = "node_compat_bin_denext";
+pub const SHIM_DIR_NAME: &str = "node_compat_bin_denext";
 
 fn is_truthy(value: &str) -> bool {
   matches!(
