@@ -1,0 +1,30 @@
+# cargo-audit configuration for denext's Deno fork (read by `cargo audit` from
+# the repository root; CI runs it in .github/workflows/denext_tests.yml).
+#
+# Every ignore below is an advisory with no fixed version we can take, or one
+# whose vulnerable code is not compiled into or reachable from this tree. Each
+# entry says why; DENEXT.md (the cargo audit item) has the same list. Remove an
+# entry as soon as a fix can be taken.
+
+[advisories]
+ignore = [
+  # hickory-proto 0.25.2: NSEC3 closest-encloser proof validation can loop on
+  # cross-zone responses. No fixed version exists, and the code is DNSSEC
+  # validation, which is only compiled with hickory's `dnssec-*` features. The
+  # tree enables only default/std/tokio/serde/text-parsing/futures-io (checked
+  # with `cargo tree -e features -i hickory-proto --target all`).
+  "RUSTSEC-2026-0118",
+  # hickory-proto 0.25.2: O(n^2) name compression while ENCODING a message.
+  # Fixed only in 0.26.1, a semver-breaking release that needs a port of
+  # ext/net/ops.rs, ext/fetch/dns.rs and node's cares_wrap (upstream PR
+  # denoland/deno#36322, still open and conflicting). Deno only encodes the
+  # outgoing query (one question, a name of at most 255 bytes); responses are
+  # decoded, never re-encoded, and hickory-server is a test-only dependency. So
+  # an attacker cannot feed a large name list into the encoder.
+  "RUSTSEC-2026-0119",
+  # rsa 0.9.x: Marvin timing side channel in PKCS#1 v1.5 decryption. No fixed
+  # release exists (upstream Deno carries the same crate). Accepted risk, not
+  # unreachable: WebCrypto RSA-OAEP and node:crypto privateDecrypt use it.
+  # Revisit when rsa 0.10 is released.
+  "RUSTSEC-2023-0071",
+]

@@ -10,6 +10,8 @@
 # - lint:  tools/lint.js (clippy over the whole workspace with upstream's deny
 #          flags, dlint, the copyright and repo-hygiene checks), plus
 #          tools/format.js --check, tools/jsdoc_checker.js and cargo fmt.
+# - cargo-audit: RustSec advisories against Cargo.lock; .cargo/audit.toml
+#          lists the reviewed exceptions.
 # - per OS (denext_tests_os.yml), each OS on its own so one slow OS does not
 #   hold up the others' tests:
 #   - build: target/debug/{deno,denort,test_server}, as upstream's build job.
@@ -98,6 +100,23 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: deno run --allow-write --allow-read --allow-run --allow-net --allow-env ./tools/lint.js
+
+  # RustSec advisories against Cargo.lock. Fails on any vulnerability that is
+  # not listed, with its reasoning, in .cargo/audit.toml (warnings for
+  # unmaintained, unsound or yanked crates are printed but do not fail).
+  cargo-audit:
+    name: cargo audit
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          submodules: false
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked --version 0.22.1
+      - name: cargo audit
+        run: cargo audit --file Cargo.lock
 
   macos:
     name: macos-14

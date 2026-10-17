@@ -194,8 +194,8 @@ async-compression = "0.4"
 async-once-cell = "0.5.4"
 async-stream = "0.3"
 async-trait = "0.1.73"
-aws-lc-rs = { version = "1.16.3" }
-aws-lc-sys = { version = "0.40.0", features = ["prebuilt-nasm"] }
+aws-lc-rs = { version = "1.18.2" }
+aws-lc-sys = { version = "0.46.0", features = ["prebuilt-nasm"] }
 backhand = { version = "0.25.1", default-features = false, features = ["zstd"] }
 base32 = "=0.5.1"
 base64 = "0.22.1"
@@ -281,8 +281,8 @@ percent-encoding = "2.3.0"
 phf = { version = "0.11", features = ["macros"] }
 pin-project = "1.0.11" # don't pin because they yank crates from cargo
 # Deno.SQL (ext/sql): pinned exactly; 0.7.15 / 0.6.10 keep the digest 0.10 / rand 0.9 family already in the tree.
-postgres-protocol = "=0.6.10"
-postgres-types = "=0.2.12"
+postgres-protocol = "=0.6.12"
+postgres-types = "=0.2.14"
 pretty_assertions = "=1.4.1"
 prettyplease = "0.2.31"
 proc-macro2 = "1.0"
@@ -292,7 +292,7 @@ prost-build = "0.14"
 qbsdiff = "1.4"
 quick-junit = "0.3.5"
 quinn = { version = "0.11.8", default-features = false }
-rand = "=0.8.5"
+rand = "=0.8.6"
 rayon = "1.11.0"
 regex = "^1.7.0"
 reqwest = { version = "=0.12.5", default-features = false, features = ["rustls-tls", "stream", "gzip", "brotli", "socks", "json", "http2"] } # pinned because of https://github.com/seanmonstar/reqwest/pull/1955
@@ -302,7 +302,7 @@ reqwest = { version = "=0.12.5", default-features = false, features = ["rustls-t
 rpm = { version = "0.25.1", default-features = false, features = ["payload", "zstd-compression"] }
 rstest = "0"
 rusqlite = { version = "0.40.0", features = ["unlock_notify", "bundled", "session", "modern_sqlite", "limits", "backup", "fallible_uint"] } # "modern_sqlite": need sqlite >= 3.49.0 for some db configs; "fallible_uint": ToSql for u64/usize (needed when crates like deno_cache are published/built standalone, not just feature-unified via denokv_sqlite)
-rustls = { version = "=0.23.40", default-features = false, features = ["logging", "std", "tls12", "aws_lc_rs"] }
+rustls = { version = "0.23.46", default-features = false, features = ["logging", "std", "tls12", "aws_lc_rs"] }
 rustls-pemfile = "2"
 rustls-tokio-stream = "=0.8.0"
 rustls-webpki = "0.103"
@@ -333,7 +333,7 @@ thiserror = "2.0.12"
 tokio = { version = "1.47.1", features = ["full"] }
 tokio-eld = "0.3"
 tokio-metrics = { version = "0.3.0", features = ["rt"] }
-tokio-postgres = { version = "=0.7.15", default-features = false }
+tokio-postgres = { version = "=0.7.18", default-features = false }
 tokio-rustls = { version = "0.26.0", default-features = false, features = ["aws_lc_rs", "tls12"] }
 tokio-socks = "0.5.3"
 tokio-util = "0.7.16"
@@ -355,7 +355,7 @@ webpki-roots = "0.26"
 which = { version = "8.0.0", default-features = false }
 yoke = { version = "0.7.4", features = ["derive"] }
 zeromq = "0.6"
-zip = { version = "2.4.1", default-features = false, features = ["flate2"] }
+zip = { version = "9.0.4", default-features = false, features = ["deflate-flate2"] }
 
 opentelemetry = "0.32.0"
 opentelemetry-http = "0.32.0"

@@ -2495,7 +2495,10 @@ fn extract_laufey_archive(
       // components. Anything that fails this check is a zip-slip attempt
       // (or a legitimately weird archive we don't want to handle).
       let Some(rel_path) = entry.enclosed_name() else {
-        bail!("refusing zip entry with unsafe path: {}", entry.name());
+        bail!(
+          "refusing zip entry with unsafe path: {}",
+          entry.name().unwrap_or_else(|_| "<undecodable name>".into())
+        );
       };
       // Defence in depth — re-check the components ourselves.
       if rel_path.components().any(|c| {
