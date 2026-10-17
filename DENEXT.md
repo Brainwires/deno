@@ -1297,6 +1297,24 @@ where the changes are discussed.
     better-sqlite3. Spec: `node/better_sqlite3_override` (CommonJS, ESM, the
     opt-out).
 
+52. **`fix`: CommonJS detection retries as ES module like Node**
+    (`libs/resolver/cjs/esm_only.rs`, `libs/resolver/cjs/mod.rs`). Node compiles
+    an ambiguous file as CommonJS first and runs it as an ES module when that
+    fails with an error only CommonJS throws: a top-level `let` / `const` /
+    `class` (or `using`) declaring one of the wrapper's parameters
+    (`const require = createRequire(...)`, `let module`), or an `await` outside
+    any function. Item 45's detection missed both: swc parses a file whose
+    `await` sits in a nested top-level block (`if (x) { await y; }`, a loop
+    body) as a script, so such a file that also used a CommonJS binding (by
+    default) or any ambiguous file (with `--unstable-detect-cjs`) ran as
+    CommonJS, failed to compile, and the retry in `Module._compile` then threw
+    "Cannot require() ES Module ... in a cycle" for the main module. The
+    resolver now parses an ambiguous file it would make CommonJS and keeps it
+    ESM when either applies (`var` and `function` may redeclare a parameter and
+    stay CommonJS, as do declarations in nested scopes), cached per file with
+    the textual check, and only when the text contains `await` or a wrapper
+    name. Spec: `node/cjs_detect_esm_retry`; unit tests for the walk.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41, 44, 46, 50, 51) are
 what the prebuilt `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are

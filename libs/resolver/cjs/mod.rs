@@ -12,6 +12,8 @@ use sys_traits::FsRead;
 use url::Url;
 
 pub mod analyzer;
+#[cfg(feature = "deno_ast")]
+mod esm_only;
 
 #[allow(clippy::disallowed_types, reason = "definition")]
 pub type CjsTrackerRc<TInNpmPackageChecker, TSys> =
@@ -231,8 +233,8 @@ pub struct IsCjsResolver<
   in_npm_pkg_checker: TInNpmPackageChecker,
   pkg_json_resolver: PackageJsonResolverRc<TSys>,
   mode: IsCjsResolutionMode,
-  /// Whether a file refers to a CommonJS binding, per file.
-  uses_commonjs: MaybeDashMap<Url, bool>,
+  /// What an ambiguous file's text says about CommonJS, per file.
+  text_hints: MaybeDashMap<Url, TextHints>,
 }
 
 impl<TInNpmPackageChecker: InNpmPackageChecker, TSys: FsRead + FsMetadata>
@@ -247,7 +249,7 @@ impl<TInNpmPackageChecker: InNpmPackageChecker, TSys: FsRead + FsMetadata>
       in_npm_pkg_checker,
       pkg_json_resolver,
       mode,
-      uses_commonjs: Default::default(),
+      text_hints: Default::default(),
     }
   }
 
@@ -363,36 +365,64 @@ impl<TInNpmPackageChecker: InNpmPackageChecker, TSys: FsRead + FsMetadata>
   /// Whether an ambiguous file of `media_type` (its content's, so
   /// `--ext=ts` on a `.js` file is TypeScript) with no `"type"` is CommonJS
   /// (unless it turns out to use ES module syntax).
+  ///
+  /// Either way a file that only an ES module can run (a top-level `const
+  /// require`, an `await` outside functions; see `esm_only`) is ESM, as Node
+  /// retries it as one.
   fn is_implicit_for(&self, specifier: &Url, media_type: MediaType) -> bool {
     match self.mode {
-      IsCjsResolutionMode::ImplicitTypeCommonJs => true,
+      IsCjsResolutionMode::ImplicitTypeCommonJs => {
+        !self.text_hints(specifier, media_type, false).esm_only
+      }
       IsCjsResolutionMode::ImplicitTypeCommonJsUntyped => {
-        matches!(media_type, MediaType::JavaScript | MediaType::Jsx)
-          && self.uses_commonjs(specifier)
+        if !matches!(media_type, MediaType::JavaScript | MediaType::Jsx) {
+          return false;
+        }
+        let hints = self.text_hints(specifier, media_type, true);
+        hints.uses_commonjs && !hints.esm_only
       }
       IsCjsResolutionMode::ExplicitTypeCommonJs
       | IsCjsResolutionMode::Disabled => false,
     }
   }
 
-  /// A cheap textual check (as `deno eval` does) for a CommonJS binding.
-  /// Only consulted for a file that parsed with no ES module syntax, so a
-  /// match in a comment or string at worst runs a script as CommonJS.
-  fn uses_commonjs(&self, specifier: &Url) -> bool {
-    if let Some(value) = self.uses_commonjs.get(specifier).map(|v| *v) {
+  /// A cheap textual check (as `deno eval` does) for a CommonJS binding
+  /// (when `need_commonjs`), then, for a file that may be CommonJS, a parse
+  /// for what makes it ESM-only. Only consulted for a file that parsed with no
+  /// ES module syntax, so a match in a comment or string at worst runs a
+  /// script as CommonJS.
+  fn text_hints(
+    &self,
+    specifier: &Url,
+    media_type: MediaType,
+    need_commonjs: bool,
+  ) -> TextHints {
+    if let Some(value) = self.text_hints.get(specifier).map(|v| *v) {
       return value;
     }
-    let value = deno_path_util::url_to_file_path(specifier)
-      .ok()
-      .and_then(|path| {
-        self
-          .pkg_json_resolver
-          .sys()
-          .fs_read_to_string_lossy(&path)
-          .ok()
-      })
-      .is_some_and(|text| text_uses_commonjs(&text));
-    self.uses_commonjs.insert(specifier.clone(), value);
+    let text =
+      deno_path_util::url_to_file_path(specifier)
+        .ok()
+        .and_then(|path| {
+          self
+            .pkg_json_resolver
+            .sys()
+            .fs_read_to_string_lossy(&path)
+            .ok()
+        });
+    let value = match text {
+      Some(text) => {
+        let uses_commonjs = text_uses_commonjs(&text);
+        let esm_only = (uses_commonjs || !need_commonjs)
+          && text_is_esm_only(specifier, media_type, &text);
+        TextHints {
+          uses_commonjs,
+          esm_only,
+        }
+      }
+      None => TextHints::default(),
+    };
+    self.text_hints.insert(specifier.clone(), value);
     value
   }
 
@@ -488,6 +518,34 @@ impl<TInNpmPackageChecker: InNpmPackageChecker, TSys: FsRead + FsMetadata>
       }
     }
   }
+}
+
+/// What an ambiguous file's text says about CommonJS.
+#[derive(Debug, Default, Clone, Copy)]
+struct TextHints {
+  /// It refers to one of CommonJS's module bindings.
+  uses_commonjs: bool,
+  /// Compiled as CommonJS it would throw an error only CommonJS throws, so
+  /// Node runs it as an ES module.
+  esm_only: bool,
+}
+
+#[cfg(feature = "deno_ast")]
+fn text_is_esm_only(
+  specifier: &Url,
+  media_type: MediaType,
+  text: &str,
+) -> bool {
+  esm_only::is_esm_only(specifier, media_type, text)
+}
+
+#[cfg(not(feature = "deno_ast"))]
+fn text_is_esm_only(
+  _specifier: &Url,
+  _media_type: MediaType,
+  _text: &str,
+) -> bool {
+  false
 }
 
 /// Whether JavaScript source refers to one of CommonJS's module bindings.
