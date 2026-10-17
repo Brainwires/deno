@@ -354,6 +354,33 @@ fn client_capabilities(snapshot: &StateSnapshot) -> Value {
   value
 }
 
+/// A `typescript` / `javascript` settings section as tsgo reads it. Deno
+/// module specifiers carry their extension, so auto-imports and import fixes
+/// must write `./mod.ts`, which tsgo does for `importModuleSpecifierEnding:
+/// "js"` (with `allowImportingTsExtensions`); an explicit user choice other
+/// than `auto` is kept.
+fn language_configuration(settings: Result<Value, serde_json::Error>) -> Value {
+  let mut value = match settings {
+    Ok(Value::Object(map)) => Value::Object(map),
+    _ => json!({}),
+  };
+  let preferences = value
+    .as_object_mut()
+    .unwrap()
+    .entry("preferences")
+    .or_insert_with(|| json!({}));
+  if let Some(preferences) = preferences.as_object_mut() {
+    let ending = preferences
+      .get("importModuleSpecifierEnding")
+      .and_then(|v| v.as_str());
+    if matches!(ending, None | Some("auto")) {
+      preferences
+        .insert("importModuleSpecifierEnding".to_string(), json!("js"));
+    }
+  }
+  value
+}
+
 /// Answer one request tsgo sends its client.
 fn handle_server_request(
   method: &str,
@@ -374,10 +401,10 @@ fn handle_server_request(
           .iter()
           .map(|item| match item.get("section").and_then(|s| s.as_str()) {
             Some("typescript") => {
-              serde_json::to_value(&settings.typescript).unwrap_or_default()
+              language_configuration(serde_json::to_value(&settings.typescript))
             }
             Some("javascript") => {
-              serde_json::to_value(&settings.javascript).unwrap_or_default()
+              language_configuration(serde_json::to_value(&settings.javascript))
             }
             _ => Value::Null,
           })
@@ -1571,6 +1598,27 @@ mod tests {
     };
     normalize_diagnostic(&mut diagnostic);
     assert_eq!(diagnostic.source.as_deref(), Some("deno-ts"));
+  }
+
+  #[test]
+  fn import_specifiers_keep_their_extension() {
+    let value = language_configuration(Ok(json!({ "preferences": {} })));
+    assert_eq!(
+      value["preferences"]["importModuleSpecifierEnding"],
+      json!("js")
+    );
+    let value = language_configuration(Ok(json!({
+      "preferences": { "importModuleSpecifierEnding": "minimal" }
+    })));
+    assert_eq!(
+      value["preferences"]["importModuleSpecifierEnding"],
+      json!("minimal")
+    );
+    let value = language_configuration(Ok(Value::Null));
+    assert_eq!(
+      value["preferences"]["importModuleSpecifierEnding"],
+      json!("js")
+    );
   }
 
   #[test]

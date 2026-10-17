@@ -1086,7 +1086,9 @@ where the changes are discussed.
     (+ resolve), signature help, code actions (+ resolve, organize imports),
     document symbols, highlights, folding and selection ranges, inlay hints,
     call hierarchy and workspace symbols are standard requests whose URIs are
-    mapped back. tsgo has no resolution hooks over LSP, so the backend runs
+    mapped back. tsgo is told `importModuleSpecifierEnding: "js"` unless the
+    user chose otherwise, so auto-imports and import fixes write `./mod.ts` as
+    Deno needs. tsgo has no resolution hooks over LSP, so the backend runs
     `deno sync-types` (the generator the native `deno check` uses) in each
     workspace root before starting tsgo, after `deno.cache` and after a config
     change, then announces the regenerated root `tsconfig.json` and `.deno/`
