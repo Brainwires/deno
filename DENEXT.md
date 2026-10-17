@@ -1351,6 +1351,34 @@ where the changes are discussed.
     `test-esm-default-type.mjs` and `test-esm-type-field-errors.js`, which pass
     now. Spec: `node/package_scope_node_modules`; a unit test for the lookup.
 
+55. **`feat(ext/node)`: `async_hooks` reports promises** (`libs/core`,
+    `ext/node/polyfills/internal/async_hooks.ts`, `async_hooks.ts`). The fork's
+    `async_hooks` emulation never emitted `PROMISE` resources (Node's
+    `updatePromiseHookMode` was a TODO), kept the execution context as a bare
+    stack (`executionAsyncId()` was 0 in the main script, where Node says 1, and
+    `triggerAsyncId()` was always 0), and its `AsyncResource` took no options.
+    Ported from Node's `lib/internal/async_hooks.js`: enabling a hook installs
+    promise hooks (`v8.promiseHooks`) that give each promise an async id and its
+    parent's as trigger, and emit `init` / `before` / `after` /
+    `promiseResolve`; `createHook({ trackPromises })` (Node 24) opts a hook out;
+    the execution and trigger ids live in `async_id_fields` with a stack of
+    saved pairs, so `executionAsyncId()` / `triggerAsyncId()` match Node in
+    promise reactions, timers and `runInAsyncScope`; `AsyncResource` takes
+    `{ triggerAsyncId, requireManualDestroy }` (or a trigger id), validates
+    them, and has `triggerAsyncId()`; hook callbacks are called with the hook as
+    `this`. Promises Deno's runtime makes for itself would be reported too,
+    which Node, whose callback APIs create no promises, never does: an async
+    op's promise and a lazily loaded module's evaluation are created inside a
+    new core scope (`Deno.core.isCreatingInternalPromise()`), and a promise
+    created or settled with no JS on the stack (a module evaluation V8 makes,
+    such as the one Deno runs a CommonJS main through) is left out as well.
+    Enables 21 Node tests (`async-hooks/test-promise*.js`,
+    `test-track-promises-*.js`, `test-embedder.api.async-resource*.js`,
+    `parallel/test-async-hooks-promise*.js`, `-enable-disable-enable.js`,
+    `-async-await.js`, `test-async-wrap-trigger-id.js`, ...). Spec:
+    `node/async_hooks_promise_resources` (the event sequence Node 24 prints for
+    the same program, less Node's own TickObject).
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41, 44, 46, 50, 51) are
 what the prebuilt `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
