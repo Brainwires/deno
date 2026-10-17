@@ -1,0 +1,11 @@
+[WILDCARD]
+> root-output-app@1.0.0 postinstall
+> node -e "console.log('postinstall says hi')"
+
+postinstall says hi
+
+> root-output-app@1.0.0 prepare
+> node -e "console.log('prepare says hi')"
+
+prepare says hi
+[WILDCARD]

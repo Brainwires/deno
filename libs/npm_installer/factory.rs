@@ -341,6 +341,8 @@ impl<
         initial_cwd: args.initial_cwd.clone(),
         root_dir: args.root_dir.clone(),
         explicit_install: args.explicit_install,
+        ignore_scripts: args.ignore_scripts
+          || workspace_factory.npmrc()?.ignore_scripts,
       }))
     })
   }

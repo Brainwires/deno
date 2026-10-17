@@ -93,6 +93,10 @@ pub struct LifecycleScriptsConfig {
   pub root_dir: PathBuf,
   /// Part of an explicit `deno install`
   pub explicit_install: bool,
+  /// `.npmrc`'s `ignore-scripts=true`: no lifecycle scripts run, the
+  /// project's own included, and a dependency's aren't reported as not run;
+  /// `--allow-scripts` still runs the dependencies it names.
+  pub ignore_scripts: bool,
 }
 
 pub trait InstallProgressReporter:

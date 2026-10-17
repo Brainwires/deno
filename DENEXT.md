@@ -1322,6 +1322,21 @@ where the changes are discussed.
       lockfile entries, a tarball that doesn't match its integrity), unit tests
       for the parsing and its refusals; npm matrix: `git-tarball-deps`.
 
+53. **`feat(npm)`: the project's own lifecycle scripts print their output, and
+    `.npmrc` `ignore-scripts`** (behavior change; `cli/npm.rs`,
+    `LifecycleScriptsConfig::ignore_scripts`). The root package.json's and
+    workspace members' scripts (item 48) ran with their output captured and
+    shown only on failure; they now run in the foreground as npm runs them: a
+    `> name@version script` banner and `> command` line, then their output as it
+    is written, one package at a time. A dependency's scripts stay quiet unless
+    they fail, as with npm. `ignore-scripts=true` in `.npmrc` (or
+    `npm_config_ignore_scripts=true`) is npm's opt-out: `deno install` runs no
+    lifecycle scripts, the project's own included, and doesn't list a
+    dependency's as ignored; an allow list (`--allow-scripts=npm:<name>`,
+    deno.json `allowScripts`) still runs the dependencies it names. Spec:
+    `npm/lifecycle_scripts_root_output`; `npm/workspace_lifecycle_scripts` now
+    expects the banners.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41, 44, 46) are what the
 prebuilt `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are

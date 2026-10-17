@@ -1669,6 +1669,8 @@ impl CliOptions {
           | DenoSubcommand::Cache(_)
           | DenoSubcommand::Add(_)
       ),
+      // from `.npmrc`, read with the rest of the npm config
+      ignore_scripts: false,
     }
   }
 

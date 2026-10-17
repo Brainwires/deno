@@ -205,6 +205,18 @@ pub struct NpmRc {
   pub trust_policy_exclude: Vec<String>,
   /// `node-linker` value.
   pub node_linker: Option<NpmRcNodeLinker>,
+  /// `ignore-scripts` value (npm's opt-out from lifecycle scripts).
+  pub ignore_scripts: Option<bool>,
+}
+
+/// npm's boolean config values (`true`/`false`, as text in `.npmrc` or an
+/// `npm_config_*` variable).
+fn parse_npm_bool(value: &str) -> Option<bool> {
+  match value.trim() {
+    "true" => Some(true),
+    "false" | "" => Some(false),
+    _ => None,
+  }
 }
 
 impl NpmRc {
@@ -223,6 +235,11 @@ impl NpmRc {
     let mut trust_policy_ignore_after_minutes: Option<u64> = None;
     let mut trust_policy_exclude: Vec<String> = Vec::new();
     let mut node_linker = None;
+    // npm reads every setting from `npm_config_<key>` too
+    let mut ignore_scripts = sys
+      .env_var("npm_config_ignore_scripts")
+      .ok()
+      .and_then(|v| parse_npm_bool(&v));
 
     for kv_or_section in kv_or_sections {
       match kv_or_section {
@@ -304,6 +321,16 @@ impl NpmRc {
                 // unknown config values)
                 _ => TrustPolicyConfig::Off,
               };
+            } else if key == "ignore-scripts" {
+              match &kv.value {
+                Value::Boolean(value) => ignore_scripts = Some(*value),
+                Value::String(text) => {
+                  if let Some(value) = parse_npm_bool(&expand_vars(text, sys)) {
+                    ignore_scripts = Some(value);
+                  }
+                }
+                _ => {}
+              }
             } else if key == "node-linker"
               && let Value::String(text) = &kv.value
             {
@@ -362,6 +389,7 @@ impl NpmRc {
       trust_policy_ignore_after_minutes,
       trust_policy_exclude,
       node_linker,
+      ignore_scripts,
     })
   }
 
@@ -406,6 +434,7 @@ impl NpmRc {
       trust_policy_ignore_after_minutes: self.trust_policy_ignore_after_minutes,
       trust_policy_exclude: self.trust_policy_exclude.clone(),
       node_linker: self.node_linker,
+      ignore_scripts: self.ignore_scripts.unwrap_or(false),
     })
   }
 
@@ -503,6 +532,9 @@ pub struct ResolvedNpmRc {
   pub trust_policy_exclude: Vec<String>,
   /// `node-linker` value.
   pub node_linker: Option<NpmRcNodeLinker>,
+  /// `ignore-scripts=true`: `deno install` runs no lifecycle scripts, the
+  /// project's own included, as npm's `ignore-scripts`.
+  pub ignore_scripts: bool,
 }
 
 impl ResolvedNpmRc {
@@ -778,6 +810,29 @@ mod test {
   }
 
   #[test]
+  fn test_parse_ignore_scripts() {
+    let sys = sys_traits::impls::InMemorySys::default();
+    let rc = NpmRc::parse(&sys, "ignore-scripts=true").unwrap();
+    assert_eq!(rc.ignore_scripts, Some(true));
+    let resolved = rc
+      .as_resolved(&npm_url("https://registry.npmjs.org/"))
+      .unwrap();
+    assert!(resolved.ignore_scripts);
+    let rc = NpmRc::parse(&sys, "ignore-scripts=false").unwrap();
+    assert_eq!(rc.ignore_scripts, Some(false));
+    let rc = NpmRc::parse(&sys, "registry=https://example.com/").unwrap();
+    assert_eq!(rc.ignore_scripts, None);
+    let resolved = rc
+      .as_resolved(&npm_url("https://registry.npmjs.org/"))
+      .unwrap();
+    assert!(!resolved.ignore_scripts);
+    // npm's `npm_config_<key>` environment variable
+    sys.env_set_var("npm_config_ignore_scripts", "true");
+    let rc = NpmRc::parse(&sys, "").unwrap();
+    assert_eq!(rc.ignore_scripts, Some(true));
+  }
+
+  #[test]
   fn test_replace_registry_host_default() {
     assert_eq!(
       replace_tarball_url(
@@ -993,6 +1048,7 @@ registry=https://registry.npmjs.org/
         trust_policy_ignore_after_minutes: None,
         trust_policy_exclude: Vec::new(),
         node_linker: None,
+        ignore_scripts: None,
       }
     );
 
@@ -1060,6 +1116,7 @@ registry=https://registry.npmjs.org/
         trust_policy_ignore_after_minutes: None,
         trust_policy_exclude: Vec::new(),
         node_linker: None,
+        ignore_scripts: false,
       }
     );
 
@@ -1303,6 +1360,7 @@ registry=${VAR_FOUND}
         trust_policy_ignore_after_minutes: None,
         trust_policy_exclude: Vec::new(),
         node_linker: None,
+        ignore_scripts: None,
       }
     )
   }

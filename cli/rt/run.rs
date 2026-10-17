@@ -1499,6 +1499,7 @@ pub async fn run_with_options(
         trust_policy_ignore_after_minutes: None,
         trust_policy_exclude: Vec::new(),
         node_linker: None,
+        ignore_scripts: false,
       });
       let npm_cache_dir = Arc::new(NpmCacheDir::new(
         &sys,
@@ -2143,6 +2144,7 @@ fn create_default_npmrc() -> Arc<ResolvedNpmRc> {
     trust_policy_ignore_after_minutes: None,
     trust_policy_exclude: Vec::new(),
     node_linker: None,
+    ignore_scripts: false,
   })
 }
 

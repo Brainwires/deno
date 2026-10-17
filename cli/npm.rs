@@ -465,6 +465,22 @@ pub enum DenoTaskLifecycleScriptsError {
   RunScripts(Vec<String>),
 }
 
+/// Hides the progress bars while a script writes to the terminal.
+struct HideDrawThreadGuard;
+
+impl HideDrawThreadGuard {
+  fn new() -> Self {
+    crate::util::draw_thread::DrawThread::hide();
+    Self
+  }
+}
+
+impl Drop for HideDrawThreadGuard {
+  fn drop(&mut self) {
+    crate::util::draw_thread::DrawThread::show();
+  }
+}
+
 pub struct DenoTaskLifeCycleScriptsExecutor {
   progress_bar: ProgressBar,
   npm_resolver: ManagedNpmResolverRc<CliSys>,
@@ -513,6 +529,10 @@ impl LifecycleScriptsExecutor for DenoTaskLifeCycleScriptsExecutor {
       .unwrap_or_else(|| NonZeroUsize::new(2).unwrap())
       .get();
 
+    // the project's own scripts print their output as they run, as npm's
+    // do, one package at a time so it doesn't interleave
+    let foreground_lock = deno_core::futures::lock::Mutex::new(());
+
     let layers = compute_lifecycle_script_layers(
       options.packages_with_scripts,
       options.snapshot,
@@ -538,6 +558,7 @@ impl LifecycleScriptsExecutor for DenoTaskLifeCycleScriptsExecutor {
             &options,
             &kill_signal,
             &sys,
+            &foreground_lock,
           )
         }))
         .buffer_unordered(concurrency);
@@ -599,6 +620,13 @@ impl DenoTaskLifeCycleScriptsExecutor {
   /// Runs lifecycle scripts for a single package (preinstall, install,
   /// postinstall in order). Each package gets its own temp file for
   /// npm process state so concurrent execution is safe.
+  ///
+  /// A dependency's scripts run with their output captured and shown only
+  /// when one fails. The project's own (the root package.json, a workspace
+  /// member) run in the foreground as npm runs them: a `> name@version script`
+  /// banner, then their output as it is written, one package at a time
+  /// (`foreground_lock`).
+  #[allow(clippy::too_many_arguments, reason = "all arguments are needed")]
   async fn run_single_package_scripts<'a>(
     &self,
     pkg: &'a PackageWithScript<'a>,
@@ -607,6 +635,7 @@ impl DenoTaskLifeCycleScriptsExecutor {
     options: &LifecycleScriptsExecutorOptions<'a>,
     kill_signal: &KillSignal,
     sys: &CliSys,
+    foreground_lock: &deno_core::futures::lock::Mutex<()>,
   ) -> Result<PackageScriptResult<'a>, AnyError> {
     let PackageWithScript {
       package,
@@ -653,6 +682,13 @@ impl DenoTaskLifeCycleScriptsExecutor {
       )
       .await;
 
+    let foreground = *is_workspace;
+    let _foreground_guard = if foreground {
+      Some(foreground_lock.lock().await)
+    } else {
+      None
+    };
+
     let mut failed = None;
     'cwds: for init_cwd in init_cwds {
       // npm runs the project's own `prepare` scripts after `postinstall`
@@ -670,10 +706,18 @@ impl DenoTaskLifeCycleScriptsExecutor {
           {
             continue;
           }
-          let _guard = self.progress_bar.update_with_prompt(
-            ProgressMessagePrompt::Initialize,
-            &format!("{}: running '{script_name}' script", package.id.nv),
-          );
+          let _guard = if foreground {
+            None
+          } else {
+            Some(self.progress_bar.update_with_prompt(
+              ProgressMessagePrompt::Initialize,
+              &format!("{}: running '{script_name}' script", package.id.nv),
+            ))
+          };
+          let _hide_guard = foreground.then(|| {
+            log::info!("\n> {} {}\n> {}\n", package.id.nv, script_name, script);
+            HideDrawThreadGuard::new()
+          });
           let crate::task_runner::TaskResult {
             exit_code,
             stderr,
@@ -690,16 +734,21 @@ impl DenoTaskLifeCycleScriptsExecutor {
               node_modules_bin_dirs: &[options
                 .root_node_modules_dir_path
                 .join(".bin")],
-              stdio: Some(crate::task_runner::TaskIo {
-                stderr: TaskStdio::piped(),
-                stdout: TaskStdio::piped(),
-              }),
+              stdio: if foreground {
+                // inherit the terminal's
+                None
+              } else {
+                Some(crate::task_runner::TaskIo {
+                  stderr: TaskStdio::piped(),
+                  stdout: TaskStdio::piped(),
+                })
+              },
               kill_signal: kill_signal.clone(),
             })
             .await
             .map_err(DenoTaskLifecycleScriptsError::Task)?;
-          let stdout = stdout.unwrap();
-          let stderr = stderr.unwrap();
+          let stdout = stdout.unwrap_or_default();
+          let stderr = stderr.unwrap_or_default();
           if exit_code != 0 {
             log::warn!(
               "error: script '{}' in '{}' failed with exit code {}{}{}",

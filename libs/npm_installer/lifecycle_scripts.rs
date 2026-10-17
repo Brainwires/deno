@@ -280,6 +280,12 @@ impl<'a, TSys: FsMetadata> LifecycleScripts<'a, TSys> {
     init_cwds: Vec<PathBuf>,
   ) {
     if has_lifecycle_scripts(self.sys, extra, &package_path) {
+      if self.config.ignore_scripts
+        && matches!(self.config.allowed, PackagesAllowedScripts::None)
+      {
+        // `ignore-scripts`: not run, and not worth a warning
+        return;
+      }
       if self.can_run_scripts(&package.id.nv) {
         if !self.has_run_scripts(package) {
           self.packages_with_scripts.push(PackageWithScript {
@@ -335,7 +341,8 @@ impl<'a, TSys: FsMetadata> LifecycleScripts<'a, TSys> {
       return;
     }
     let nv = &package.id.nv;
-    if !self.strategy.can_run_scripts()
+    if self.config.ignore_scripts
+      || !self.strategy.can_run_scripts()
       || self
         .config
         .denied

@@ -1,2 +1,11 @@
-[WILDCARD]Initialize c@0.0.0: running 'postinstall' script
-[WILDCARD]Initialize a@0.0.0: running 'postinstall' script[WILDCARD]
+[WILDCARD]
+> c@0.0.0 postinstall
+> echo c
+
+c
+[WILDCARD]
+> a@0.0.0 postinstall
+> echo a
+
+a
+[WILDCARD]
