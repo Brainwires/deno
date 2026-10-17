@@ -1372,10 +1372,11 @@ where the changes are discussed.
     new core scope (`Deno.core.isCreatingInternalPromise()`), and a promise
     created or settled with no JS on the stack (a module evaluation V8 makes,
     such as the one Deno runs a CommonJS main through) is left out as well.
-    Enables 21 Node tests (`async-hooks/test-promise*.js`,
+    Enables 23 Node tests (`async-hooks/test-promise*.js`,
     `test-track-promises-*.js`, `test-embedder.api.async-resource*.js`,
     `parallel/test-async-hooks-promise*.js`, `-enable-disable-enable.js`,
-    `-async-await.js`, `test-async-wrap-trigger-id.js`, ...). Spec:
+    `-async-await.js`, `test-async-wrap-trigger-id.js`,
+    `async-hooks/test-crypto-pbkdf2.js` and `-randomBytes.js`, ...). Spec:
     `node/async_hooks_promise_resources` (the event sequence Node 24 prints for
     the same program, less Node's own TickObject).
 

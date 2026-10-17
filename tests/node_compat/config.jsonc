@@ -49,6 +49,8 @@
     "async-hooks/test-emit-before-after.js": {},
     "async-hooks/test-embedder.api.async-resource.runInAsyncScope.js": {},
     "async-hooks/test-async-local-storage-thenable.js": {},
+    "async-hooks/test-crypto-pbkdf2.js": {},
+    "async-hooks/test-crypto-randomBytes.js": {},
     "async-hooks/test-embedder.api.async-resource-no-type.js": {},
     "async-hooks/test-embedder.api.async-resource.js": {},
     "async-hooks/test-async-local-storage-stream-finished.js": {},
