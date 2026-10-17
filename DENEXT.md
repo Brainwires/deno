@@ -1091,6 +1091,23 @@ where the changes are discussed.
     does worse than expected. Nightly, on dispatch (`only` narrows it) and on a
     push that changes it. `README.md` there says how to run it locally.
 
+44. **`fix(ext/node)`: a pipe from a stream flagged destroyed drains**
+    (`ext/node/polyfills/internal/streams/readable.js`). Node 26
+    (nodejs/node#62557) made `Readable.prototype.resume()`/`pause()` no-ops on a
+    destroyed stream. Old code sets `this.destroyed = true` as a flag right
+    before `push(null)` (fd-slicer under yauzl / extract-zip: puppeteer's,
+    electron's and cypress's installers), and a pipe whose destination applied
+    backpressure then never resumed its source: extraction stopped after a few
+    entries and the process idled. Node reverted the change on v24 (24.18.0,
+    nodejs/node#63487) and still hangs on v26; upstream Deno closed its fix
+    (#35403) as "matches Node 26". The fork keeps the no-op only for a stream
+    that is really finished (nothing buffered, no `'end'` still to emit), the
+    narrower guard tested in nodejs/node#63487, so `test-stream-destroy.js`
+    keeps its contract and the pipe drains. Spec:
+    `node/stream_pipe_destroyed_flag` (the pipe, an EOF-only tail, through zlib,
+    and the no-op on a real `destroy()`; it hangs on `denext.21` and on Node
+    26.5.1, passes on Node 24.18).
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41) are what the prebuilt
 `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are

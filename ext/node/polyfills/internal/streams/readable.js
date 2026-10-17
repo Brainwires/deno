@@ -1325,9 +1325,23 @@ function nReadingNextTick(self) {
 
 // pause() and resume() are remnants of the legacy readable stream API
 // If the user uses them, then switch into old mode.
+// resume() and pause() are no-ops on a destroyed stream (Node 26,
+// nodejs/node#62557), but only once nothing is left to deliver: no buffered
+// data and no 'end' still to emit. Older code sets `this.destroyed = true` as a
+// flag right before `push(null)` (fd-slicer under yauzl / extract-zip, so
+// puppeteer, electron and cypress installs). A pipe whose destination applied
+// backpressure at that moment calls `src.resume()` on drain to deliver the
+// rest; a blanket no-op leaves the pipe stalled forever (nodejs/node#63487,
+// which Node reverted on v24 and still hits on v26). This is the narrower guard
+// tested there: test-stream-destroy keeps its no-op contract.
+function isSettledDestroyed(state) {
+  return (state[kState] & kDestroyed) !== 0 && state.length === 0 &&
+    (state[kState] & (kEnded | kEndEmitted)) !== kEnded;
+}
+
 Readable.prototype.resume = function () {
   const state = this._readableState;
-  if ((state[kState] & kDestroyed) !== 0) {
+  if (isSettledDestroyed(state)) {
     return this;
   }
   if ((state[kState] & kFlowing) === 0) {
@@ -1371,7 +1385,7 @@ function resume_(stream, state) {
 
 Readable.prototype.pause = function () {
   const state = this._readableState;
-  if ((state[kState] & kDestroyed) !== 0) {
+  if (isSettledDestroyed(state)) {
     return this;
   }
   debug("call pause");
