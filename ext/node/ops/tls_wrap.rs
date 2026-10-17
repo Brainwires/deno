@@ -1093,6 +1093,11 @@ struct TLSWrapInner {
   // and copy the remaining tail on every chunk (O(n²) for large writes).
   pending_cleartext: Vec<u8>,
   pending_cleartext_offset: usize,
+  // Largest plaintext slice handed to one rustls `write()` call, and so the
+  // largest TLS record: Node's `setMaxSendFragment` (SSL_set_max_send_fragment,
+  // 512..=16384, default 16384). rustls cuts records per `write()` call, never
+  // merging two calls into one record.
+  max_send_fragment: usize,
 
   // Buffered encrypted output that failed to write (e.g. EBADF because the
   // underlying stream wasn't connected yet).  Retried on the next enc_out().
@@ -1268,6 +1273,11 @@ fn rustls_error_to_node_error(
   }
 }
 
+/// OpenSSL's bounds for SSL_set_max_send_fragment; the upper one is also the
+/// TLS maximum record size and the default.
+const MAX_SEND_FRAGMENT_MIN: i32 = 512;
+const MAX_SEND_FRAGMENT_DEFAULT: usize = 16384;
+
 impl TLSWrapInner {
   fn new(kind: Kind, task_spawner: Option<V8TaskSpawner>) -> Self {
     Self {
@@ -1287,6 +1297,7 @@ impl TLSWrapInner {
       enc_writes_in_flight: 0,
       pending_cleartext: Vec::new(),
       pending_cleartext_offset: 0,
+      max_send_fragment: MAX_SEND_FRAGMENT_DEFAULT,
       pending_enc_out: Vec::new(),
       underlying: UnderlyingStream::None,
       js_handle: None,
@@ -1485,10 +1496,15 @@ impl TLSWrapInner {
     // re-allocating the unwritten tail on every chunk.
     const MAX_CLEAR_IN: usize = 48 * 1024;
     let feed_end = data.len().min(MAX_CLEAR_IN);
+    let max_send_fragment = self.max_send_fragment;
     let mut offset = 0;
     let mut write_error = false;
     while offset < feed_end {
-      match conn.writer().write(&data[offset..feed_end]) {
+      // At most one fragment per write() call, so no record carries more
+      // than `max_send_fragment` bytes of plaintext (as OpenSSL splits an
+      // SSL_write under SSL_set_max_send_fragment).
+      let end = feed_end.min(offset + max_send_fragment);
+      match conn.writer().write(&data[offset..end]) {
         Ok(0) => break,
         Ok(n) => offset += n,
         Err(e) => {
@@ -3321,6 +3337,24 @@ impl TLSWrap {
   fn set_session_allowed(&self, allowed: bool) {
     let inner = unsafe { &*self.inner.as_ptr() };
     inner.allow_resumption.store(allowed, Ordering::Relaxed);
+  }
+
+  /// Node's `TLSWrap::SetMaxSendFragment`: cap the plaintext carried by one
+  /// TLS record. Returns 1 when set and 0 when `size` is outside OpenSSL's
+  /// accepted range (512..=16384), like SSL_set_max_send_fragment. Protocols
+  /// that frame data inside TLS rely on it: tedious (mssql) sets it to the TDS
+  /// packet size, and SQL Server drops the connection when a record crosses a
+  /// packet boundary.
+  #[fast]
+  fn set_max_send_fragment(&self, size: i32) -> i32 {
+    if !(MAX_SEND_FRAGMENT_MIN..=MAX_SEND_FRAGMENT_DEFAULT as i32)
+      .contains(&size)
+    {
+      return 0;
+    }
+    let inner = unsafe { &mut *self.inner.as_mut_ptr() };
+    inner.max_send_fragment = size as usize;
+    1
   }
 
   /// Check if the TLS session was resumed (reused from a previous connection).

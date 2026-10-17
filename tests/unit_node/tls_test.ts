@@ -1755,3 +1755,165 @@ Deno.test("tls autoSelectFamily fallback preserves a validated session", async (
     await closeServer(server);
   }
 });
+
+// tedious (npm:mssql, @prisma/adapter-mssql) calls
+// setMaxSendFragment(packetSize) so that each TLS record carries at most one
+// TDS packet: SQL Server drops the connection when a record crosses a packet
+// boundary. Node coalesces a writev batch into one SSL_write (TLSWrap::DoWrite)
+// and OpenSSL cuts it at the max send fragment, so a corked 4096/4096/54
+// batch goes out as one record without the setting and as 4096/4096/54 with
+// it (both checked against Node 24). The test uses tedious's topology, TLS over
+// a back-to-back Duplex pair, and reads the records off the encrypted side.
+for (const version of ["TLSv1.2", "TLSv1.3"] as const) {
+  for (const maxSendFragment of [undefined, 4096]) {
+    Deno.test(
+      `tls setMaxSendFragment(${maxSendFragment}) caps TLS records like Node (${version})`,
+      async () => {
+        const chunkSizes = [4096, 4096, 54];
+        const total = chunkSizes.reduce((a, b) => a + b, 0);
+        const expected = maxSendFragment === undefined
+          ? [total]
+          : [4096, 4096, 54];
+        const { promise, resolve, reject } = Promise.withResolvers<void>();
+
+        const server = tls.createServer({ key, cert }, (sock) => {
+          let received = 0;
+          let acked = false;
+          sock.on("data", (d: Uint8Array) => {
+            if (!acked) {
+              // The first byte marks the end of the handshake; nothing else
+              // is sent until this reply arrives.
+              acked = true;
+              sock.write("k");
+              return;
+            }
+            received += d.length;
+            if (received >= total) sock.write("done");
+          });
+          sock.on("error", () => {});
+        });
+
+        // client -> server records, captured once the handshake is through
+        // (under TLS 1.3 the client's Finished is an application_data record
+        // too).
+        let capture = false;
+        const recordLens: number[] = [];
+        let wire = Buffer.alloc(0);
+        const parseRecords = (chunk: Uint8Array) => {
+          wire = Buffer.concat([wire, chunk]);
+          while (wire.length >= 5) {
+            const len = wire.readUInt16BE(3);
+            if (wire.length < 5 + len) break;
+            if (wire[0] === 23 && capture) recordLens.push(len);
+            wire = wire.subarray(5 + len);
+          }
+        };
+
+        let clientTls: tls.TLSSocket | undefined;
+        let raw: net.Socket | undefined;
+        server.listen(0, () => {
+          const { port } = server.address() as net.AddressInfo;
+          raw = net.connect(port, "localhost", () => {
+            const { socket1, socket2 } = backToBackDuplexPair();
+            raw!.pipe(socket2);
+            socket2.pipe(raw!);
+            socket2.on("data", parseRecords);
+            clientTls = tls.connect({
+              socket: socket1 as net.Socket,
+              servername: "localhost",
+              rejectUnauthorized: false,
+              minVersion: version,
+              maxVersion: version,
+            });
+            clientTls.on("error", reject);
+            clientTls.on("secureConnect", () => {
+              if (maxSendFragment !== undefined) {
+                assertEquals(
+                  clientTls!.setMaxSendFragment(maxSendFragment),
+                  true,
+                );
+              }
+              clientTls!.write("p");
+            });
+            let started = false;
+            clientTls.on("data", () => {
+              if (started) {
+                resolve();
+                return;
+              }
+              started = true;
+              capture = true;
+              clientTls!.cork();
+              for (const size of chunkSizes) {
+                clientTls!.write(Buffer.alloc(size, 0x78));
+              }
+              clientTls!.uncork();
+            });
+          });
+          raw.on("error", reject);
+        });
+
+        try {
+          await deadline(promise, 10_000);
+          // Every record carries the same cipher overhead (explicit nonce and
+          // tag, plus the inner content type under TLS 1.3).
+          const sum = recordLens.reduce((a, b) => a + b, 0);
+          assertEquals(recordLens.length, expected.length, `${recordLens}`);
+          const overhead = (sum - total) / recordLens.length;
+          assert(
+            Number.isInteger(overhead) && overhead >= 0 && overhead <= 64,
+            `records ${recordLens}`,
+          );
+          assertEquals(recordLens.map((l) => l - overhead), expected);
+        } finally {
+          clientTls?.destroy();
+          raw?.destroy();
+          server.close();
+        }
+      },
+    );
+  }
+}
+
+Deno.test("tls setMaxSendFragment validates its argument like Node", async () => {
+  const server = tls.createServer({ key, cert }, (sock) => {
+    sock.on("error", () => {});
+  });
+  const { promise, resolve, reject } = Promise.withResolvers<void>();
+  server.listen(0, () => {
+    const { port } = server.address() as net.AddressInfo;
+    const client = tls.connect({
+      port,
+      host: "localhost",
+      rejectUnauthorized: false,
+    });
+    client.on("error", reject);
+    client.on("secureConnect", () => {
+      try {
+        assertEquals(client.setMaxSendFragment(511), false);
+        assertEquals(client.setMaxSendFragment(16385), false);
+        assertEquals(client.setMaxSendFragment(512), true);
+        assertEquals(client.setMaxSendFragment(16384), true);
+        assertThrows(
+          () => client.setMaxSendFragment(1.5),
+          RangeError,
+        );
+        assertThrows(
+          // deno-lint-ignore no-explicit-any
+          () => client.setMaxSendFragment("4096" as any),
+          TypeError,
+        );
+        resolve();
+      } catch (e) {
+        reject(e);
+      } finally {
+        client.destroy();
+      }
+    });
+  });
+  try {
+    await deadline(promise, 10_000);
+  } finally {
+    server.close();
+  }
+});
