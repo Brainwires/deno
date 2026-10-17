@@ -18,12 +18,13 @@ users:
   ```
 
 - **Features of the `deno` CLI and runtime itself**, such as Vitest / Jest
-  compatibility for `deno test` (item 23) and the built-in SQL client
-  (`Deno.SQL` / `Deno.sql`, item 24). These need this fork's own `deno` binary,
-  published with each runtime release since `denext.15` (`deno-cli-*`, see
-  [Release archives](#release-archives) and item 26) or built from a release
-  line (see [Reproducing a build](#reproducing-a-build)); the stock CLI does not
-  have them.
+  compatibility for `deno test` (item 23), the built-in SQL client (`Deno.SQL` /
+  `Deno.sql`, item 24) and native type checking on TypeScript 7 (item 47). These
+  need this fork's own `deno` binary, published with each runtime release since
+  `denext.15` (`deno-cli-*`, see [Release archives](#release-archives) and
+  item 26) or built from a release line (see
+  [Reproducing a build](#reproducing-a-build)); the stock CLI does not have
+  them.
 
 ## Upstream
 
@@ -1205,6 +1206,189 @@ where the changes are discussed.
     (a torn IndexedDB log is cut and the value written after it read back; the
     quit under load). This fork's e2e is unchanged.
 
+46. **`feat(lsp)`: a TypeScript 7 (tsgo) language service for `deno lsp`,
+    unstable and off by default** (`feat/tsgo-lsp`; `cli/lsp/tsgo.rs`,
+    `cli/lsp/ts_server.rs`, `cli/tsc/native_pin.rs`,
+    `cli/tsc/typescript_pins.json`,
+    `.github/denext-runtime/fetch_typescript.py`,
+    `tools/update_typescript_pin.ts`). `"deno.unstable": ["tsgo-lsp"]` in the
+    editor's initialization settings, or `DENO_UNSTABLE_TSGO_LSP=1` in the
+    environment of `deno lsp` (which wins either way), puts a `TsServer::Go`
+    backend behind `deno lsp` instead of the in-isolate TypeScript 6 service.
+    `deno lsp` stays the editor's only server: Deno's own features (resolution
+    diagnostics, lint, formatting, test code lenses, registry and import-map
+    completions, the `deno/*` requests) are unchanged, and the TypeScript
+    features go to a pinned native `tsc --lsp` child that `deno lsp` is the LSP
+    client of. Open `file:` scripts are mirrored with `didOpen` / `didChange` /
+    `didClose` in the same write as the request that follows (so tsgo answers
+    against the text the positions refer to), the editor's watched-file events
+    are forwarded, diagnostics are pulled (`textDocument/diagnostic`), filtered
+    by the same ignored codes and attributed to `deno-ts`, and hover,
+    definition, type definition, implementation, references, rename, completion
+    (+ resolve), signature help, code actions (+ resolve, organize imports),
+    document symbols, highlights, folding and selection ranges, inlay hints,
+    call hierarchy and workspace symbols are standard requests whose URIs are
+    mapped back. tsgo is told `importModuleSpecifierEnding: "js"` unless the
+    user chose otherwise, so auto-imports and import fixes write `./mod.ts` as
+    Deno needs. tsgo has no resolution hooks over LSP, so the backend runs
+    `deno sync-types` (the generator the native `deno check` uses) in each
+    workspace root before starting tsgo, after `deno.cache` and after a config
+    change, then announces the regenerated root `tsconfig.json` and `.deno/`
+    files; `DENO_TSGO_LSP_SYNC_TYPES=0` leaves them to the user. The compiler is
+    pinned per role in `typescript_pins.json` (role `lsp`: a dated `7.1.0-dev`
+    nightly) by the npm `dist.integrity` of each
+    `@typescript/typescript-<platform>` tarball; it is found as
+    `DENO_TSGO_LSP_BIN`, else `typescript-lsp/tsc[.exe]` next to `deno` at the
+    pinned version (the CLI zip ships it, item 26), else downloaded once into
+    `DENO_DIR/dl/typescript-lsp-<version>/` and verified against the pin.
+    `tools/update_typescript_pin.ts lsp next` is the whole bump; then
+    `cargo test -p integration_tests --test integration --
+    lsp_tsgo`. Not
+    yet with tsgo: semantic tokens, TypeScript code lenses, file-rename import
+    edits, `deno/inferredType`, ambient-module listing, notebooks and remote
+    (`deno:`) documents. Tests: `native_pin` and `tsgo` unit tests;
+    `tests/integration/lsp_tsgo_tests.rs` (each feature, Deno lint and test code
+    lenses alongside, import-map / `jsr:` / `npm:` specifiers, Deno's lib types
+    and `Deno.SQL`), whose harness fetches the pinned build into `target/`;
+    `DENO_TSGO_LSP_PERF=1` adds a timing comparison with the TypeScript 6
+    service; `cli_smoke.sh` checks the shipped `typescript-lsp/tsc --version`.
+
+47. **`feat(check)`: native type checking on TypeScript 7** (from `denext.22` or
+    later; `feat/native-check`, CLI only; `cli/tsc/native.rs`,
+    `cli/tools/check.rs`, `cli/type_checker.rs`, `cli/tsc/tsconfig_gen.rs`,
+    `cli/tools/installer/{local,npm_compat}.rs`,
+    `.github/denext-runtime/fetch_typescript.py`). Every command that
+    type-checks (`deno check`, `run --check`, `test`, `bench`, `bundle --check`,
+    `cache
+    --check`, `publish`, ...) runs the native TypeScript compiler
+    (`typescript@7.0.2`, "tsgo") by default instead of the in-process
+    TypeScript. It is a selective port of upstream's unreleased "Deno 3" series
+    on `main` (each pick `cherry-pick -x` with an `Original-Author:` trailer):
+    #35639 (Deno's libs defer web globals to `lib.dom`), #35641 and #35871 (one
+    `@types/node`), #35642 (the in-process compiler is stock `typescript@6.0.3`,
+    the fork's dual global tables replaced by `.d.ts` markers), #35868
+    (`export =` in an ES module is an error), #35885 / #35888 (tests), #35894 /
+    #35937 / #35966 (`deno sync-types`: a stock `tsconfig.json` in `.deno/`,
+    Deno's types as a private `@types/deno`, the `jsr:` / `http(s):` / `npm:`
+    types mirrored), #35935 (the dead `typescript_go_client` crate,
+    `--unstable-tsgo` / `DENO_UNSTABLE_TSGO` removed), #36102 / #36104 / #35938
+    (run the compiler, map its diagnostics back), #36171, #36177, #36178 (local
+    wasm imports), #36697 and #36883. The clap-era flag hunks are ported to
+    `libs/cli_parser` (`deno sync-types [roots] [--allow-import]`). What the
+    fork does differently from upstream's `main`:
+    - **No download.** Upstream fetched `@typescript/typescript-<platform>` from
+      npm on first use (#36102). The compiler is the `check` role of item 46's
+      `cli/tsc/typescript_pins.json` (7.0.2, per-platform npm `dist.integrity`;
+      bumped only by `tools/update_typescript_pin.ts check
+      <version>`),
+      and each `deno-cli-*` archive ships it in `typescript-check/` beside
+      `deno` (`tsc[.exe]` with the `lib.*.d.ts` files it loads from its own
+      directory, its Apache-2.0 `LICENSE` and `NOTICE.txt`, and
+      `typescript.json`), fetched and verified by `fetch_typescript.py check`.
+      `BUILD_INFO.json` records it as `typescript_check`, and `manifest.json`
+      lists `typescript_check:
+      { version, sha256, tree_sha256 }` per CLI
+      target (the binary's SHA-256 and one over every file of the directory,
+      recomputed from the zip; denext pins both). `deno` looks for it in this
+      order (`native.rs`, on `native_pin::find_local`): `DENO_TSGO_BIN` (used at
+      any version, with a warning; an error if it is not a file), then
+      `typescript-check/tsc` beside the executable (also through a symlink to
+      it) and then denext's toolchain cache
+      (`<DENO_DIR>/denext-deno/<version>/<target>/
+      typescript-check/`,
+      newest first), each used only at the pinned version. Unlike the `lsp`
+      role, `check` never falls back to a download: when none is found the check
+      fails with an error that names `denext toolchain install`, `DENO_TSGO_BIN`
+      and the fallback. `DENO_TSC_BIN` (documented upstream, read by nothing
+      here) and `tools/download_tsc.ts` are gone; the test harness fetches the
+      pinned build into `target/typescript-check-<version>/` once and passes it
+      as `DENO_TSGO_BIN`.
+    - **Every entry point.** Upstream switched only `deno check` (#36086 left
+      the rest on the in-process checker). Here `TypeChecker::check_graph` picks
+      the engine for every graph a command checks, and `deno check` and it share
+      `run_native_check`: Deno's own graph walk and its check cache stay in
+      front of the compiler (an unchanged graph that checked clean skips both
+      the type materialization and the spawn, about 0.04 s), then the config is
+      generated, the compiler runs pinned to the graph's roots (`files` in a
+      per-run tsconfig in the system temp dir) and its diagnostics are mapped
+      back. `run --check` & co. keep their `--no-check` hint. `deno publish`
+      type-checks the package sources natively; the extra check of the in-memory
+      fast-check output (Deno's own generated types, which the compiler cannot
+      read) runs only on the in-process engine. `deno check --watch` re-runs on
+      changes (a watcher-aware factory; upstream ran once, #36089). A graph the
+      generated stock project can't express keeps the in-process checker, for
+      every command including `deno check` (`TypeChecker::native_unsupported`):
+      sloppy imports, `--ext`, `--unstable-detect-cjs`, `test --doc`, a Vitest /
+      Jest config (its aliases), `data:` / `blob:` modules, in-memory code
+      blocks, CommonJS modules, a module without a TypeScript or JavaScript
+      extension, a type redirect (`X-TypeScript-Types`, `@ts-self-types`,
+      `@deno-types`), a `text` / `bytes` import, a
+      `/// <reference lib="deno.*" />` or `/// <reference types="npm:…" />` (any
+      scheme) in the project, a JSX runtime Deno resolves through an import map,
+      a remote or missing module, or a `jsxImportSource` with a scheme
+      (`npm:preact`), workspace `links`, and a `JSR_URL` other than jsr.io (the
+      native path takes `jsr:` types from npm.jsr.io, which mirrors jsr.io
+      only). For `run --check`, `test` & co. a local module the graph could not
+      load does too: Deno reports it with its hints, where the compiler's
+      resolution would even accept `./a.js` for `a.ts` (`deno
+      check`
+      reports it as the compiler does, as upstream).
+    - **The fallback.** `--check-engine=tsc` (a hidden global flag, so no help
+      text changed) or `DENO_CHECK_ENGINE=tsc` type-checks with the in-process
+      TypeScript 6.0.3 as before; `--check-engine=native` wins over the env, and
+      an unknown env value warns and checks natively. `deno check --doc` /
+      `--doc-only` always use the in-process engine (the extracted code blocks
+      exist only in memory). `deno lsp` keeps the in-process language service.
+    - **Our own types on the native path.** The generated `@types/deno` carries
+      `Deno.SQL` / `Deno.sql` (item 24) also for a
+      `"lib":
+      ["deno.ns", "dom"]` project, and Deno's desktop lib
+      (`lib.deno.desktop.d.ts`) for `deno desktop` / `deno check --desktop` (the
+      desktop type lib) or a `"lib": ["deno.desktop"]` config. A `lib` that
+      names `deno.window` (or `deno.worker`) next to `dom` keeps Deno's web
+      libs, which merge into `dom`'s declarations as they do in the in-process
+      checker (upstream emitted only the `Deno` namespace whenever `dom` was
+      listed, which lost e.g. `Transformer.cancel`). The built-in `vitest` /
+      `vite-plus/test` / `@jest/globals` types (items 23 and 29) are written to
+      `.deno/types/deno-vitest/` and mapped through `paths` (their `npm:` forms
+      and subpaths too) for each package that is not installed (an installed
+      package's own types still win); a `globals.d.ts` per not-installed package
+      in the generated `typeRoots` serves
+      `/// <reference types="vitest/globals" />` and `compilerOptions.types`;
+      with a Vitest or Vite config, Vite's asset, CSS module, `?raw` / `?url` /
+      `?inline` / `?worker` imports get ambient declarations.
+      `test.vitestCompat: false` turns all of it off. The check cache is item
+      28's `check_cache_v2_denext`, its hash keyed on the compiler version.
+    - The compiler runs with `--pretty true`: the diagnostics keep their exact
+      spans and their related information ("The expected type comes from ..."),
+      as the in-process checker reports them (a location in the generated config
+      is left out). Several related entries print a blank line apart (they ran
+      together on one line before). The generated `.deno/` files are written
+      atomically, so concurrent checks of one project never read each other's
+      half-written `@types/deno`.
+    - `deno sync-types` skips a `jsr:` import whose package a workspace member
+      provides (the generated `paths` already point at the member, and the
+      published version may not exist yet), and an unresolvable `jsr:` version
+      leaves that package unmapped instead of failing the whole run. Known
+      differences (TypeScript 7 or the stock-project model, not the port):
+      unions print sorted (stable type ordering); related information ("'x' is
+      declared here") is not shown; `export =` in an ES module is TS1203;
+      `.deno/` (gitignored by its own `.gitignore`) is written into the project
+      root; tsgo 7.0.2 rejects a regex character-class range bounded by a
+      literal (unescaped) character above U+07FF (TS1516; escapes work). Tests:
+      `tests/specs/check/check_engine` (native by default, the flag, the env,
+      the flag over the env, unknown values, `test` / `run --check` / `bench`
+      natively and with `tsc`, `--doc-only` on the in-process checker,
+      `DENO_TSGO_BIN` that is not a file), `tests/specs/check/native_sql_types`,
+      `desktop_types` under both engines, upstream's native `check` specs, the
+      `resolve_tests` in `cli/tsc/native.rs` (the sibling, a symlinked
+      executable, the toolchain cache newest first, the override, the
+      missing-compiler error), `check_engine_resolution` in `cli/args/mod.rs`
+      and `check_engine_flag` / `sync_types_subcommand` in `libs/cli_parser`,
+      `pretty_tests` in `cli/tsc/native.rs`. CI: `cli_smoke.sh` checks
+      `typescript-check/tsc --version` and an offline `deno check` (native and
+      `--check-engine=tsc`) from every unpacked release zip.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45) are what the
 prebuilt `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
@@ -1275,15 +1459,18 @@ wrapping directory:
 deno | deno.exe        the CLI; `Deno.version.deno` is `<deno version>-denext.<n>`
 esbuild | esbuild.exe  the official esbuild 0.25.5 `deno bundle` uses
 esbuild.LICENSE        esbuild's MIT license
-BUILD_INFO.json        deno version + SHA, run URL, esbuild source + SHA-256
+typescript-check/      the native TypeScript 7.0.2 type checking runs (item 47;
+                       tsc | tsc.exe, lib.*.d.ts, LICENSE, NOTICE.txt, typescript.json)
+BUILD_INFO.json        deno version + SHA, run URL, esbuild and TypeScript sources + SHA-256
 licenses/              the deno license
 ```
 
 Each release also has `SHA256SUMS` (every runtime and CLI archive) and
 `manifest.json` (target -> backend -> url, sha256, size; the CLI archives under
 `cli.targets` -> target -> binary, url, sha256, size and
-`esbuild: { version, sha256 }`; plus the deno SHA, laufey SHA and CEF version).
-Every archive has a build provenance attestation:
+`esbuild: { version, sha256 }` and
+`typescript_check: { version, sha256, tree_sha256 }`; plus the deno SHA, laufey
+SHA and CEF version). Every archive has a build provenance attestation:
 
 ```sh
 gh attestation verify deno-desktop-runtime-<...>.tar.gz -R Brainwires/deno

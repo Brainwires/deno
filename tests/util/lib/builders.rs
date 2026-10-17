@@ -285,10 +285,26 @@ impl TestContextBuilder {
       None => cwd,
     };
 
+    // denext: point the native type checker at the pinned compiler
+    // (`crate::tsgo_check_bin`, fetched into `target/` once), as denext's CLI
+    // archive ships it beside `deno`. An ambient `DENO_TSGO_BIN` (e.g. a local
+    // `export`) wins, as does a value a test sets itself.
+    let mut envs = self.envs.clone();
+    if !envs.contains_key("DENO_TSGO_BIN") {
+      let tsc_bin = std::env::var_os("DENO_TSGO_BIN")
+        .map(|v| v.to_string_lossy().into_owned())
+        .or_else(|| {
+          crate::tsgo_check_bin().map(|p| p.to_string_lossy().into_owned())
+        });
+      if let Some(tsc_bin) = tsc_bin {
+        envs.insert("DENO_TSGO_BIN".to_string(), tsc_bin);
+      }
+    }
+
     TestContext {
       cwd,
       deno_exe,
-      envs: self.envs.clone(),
+      envs,
       diagnostic_logger: self.diagnostic_logger.clone(),
       _http_server_guard: http_server_guard,
       deno_dir,

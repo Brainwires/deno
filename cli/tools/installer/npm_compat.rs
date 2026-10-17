@@ -2,10 +2,12 @@
 
 //! Post-install setup for stock TypeScript compatibility.
 //!
-//! After `deno install` sets up node_modules/, this module:
-//! 1. Installs jsr: packages to node_modules/@jsr/ via npm.jsr.io
+//! After dependency resolution, this module:
+//! 1. Installs jsr: compatibility packages via npm.jsr.io
 //! 2. Mirrors http(s): modules into .deno/remote/<host><path>/...
 //! 3. Generates .deno/tsconfig.json with paths mappings for npm:/jsr:/https:
+//! 4. In global-cache mode, generates per-package referenced tsconfigs so
+//!    stock TypeScript can preserve Deno's contextual npm resolution.
 //!
 //! This enables stock TypeScript tooling (tsc, tsserver, VS Code) to work
 //! with Deno projects that use jsr:, npm:, and http(s): specifiers.
@@ -21,6 +23,7 @@ use deno_core::serde_json;
 use deno_core::serde_json::Value;
 use deno_core::serde_json::json;
 use deno_core::url::Url;
+use deno_npmrc::ResolvedNpmRc;
 use deno_runtime::deno_permissions::PermissionsContainer;
 use deno_semver::Version;
 use deno_semver::VersionReq;
@@ -28,6 +31,16 @@ use flate2::read::GzDecoder;
 
 use crate::file_fetcher::CliFileFetcher;
 use crate::http_util::HttpClient;
+use crate::npm::CliNpmResolver;
+
+/// The `@types/node` version installed for projects that don't bring their own.
+///
+/// Pinned, and kept equal to the version `cli/tsc/dts/node` is generated from
+/// (`tools/update_types_node.ts` reads this constant), so a project type-checks
+/// the same way whether it uses the downloaded typings or the built-in ones,
+/// and so a `@types/node` release doesn't silently change anyone's diagnostics.
+/// Bump both by running `./tools/update_types_node.ts` after editing this.
+pub const TYPES_NODE_VERSION: &str = "24.2.0";
 
 /// Installed JSR package info for reporting.
 pub struct InstalledJsrPackage {
@@ -37,10 +50,232 @@ pub struct InstalledJsrPackage {
   pub version: String,
 }
 
+#[derive(Default)]
+struct NpmCacheProjects {
+  /// Exact npm: specifier/import-map target to its resolved package folder.
+  package_paths: BTreeMap<String, PathBuf>,
+  /// Paths relative to `.deno/tsconfig.json` for the generated package
+  /// projects.
+  references: Vec<String>,
+}
+
+struct NodeTypesSetup {
+  type_root: Option<String>,
+  undici_types_dir: Option<PathBuf>,
+}
+
+fn path_for_typescript(path: &Path) -> String {
+  path.to_string_lossy().replace('\\', "/")
+}
+
+fn collect_typescript_project_files(package_folder: &Path) -> Vec<String> {
+  fn collect(dir: &Path, files: &mut Vec<String>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+      return;
+    };
+    for entry in entries.flatten() {
+      let path = entry.path();
+      let Ok(file_type) = entry.file_type() else {
+        continue;
+      };
+      if file_type.is_symlink() {
+        continue;
+      }
+      if file_type.is_dir() {
+        collect(&path, files);
+        continue;
+      }
+      let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+      if file_name.ends_with(".d.ts")
+        || file_name.ends_with(".d.mts")
+        || file_name.ends_with(".d.cts")
+      {
+        files.push(path_for_typescript(&path));
+      }
+    }
+  }
+
+  let mut files = Vec::new();
+  collect(package_folder, &mut files);
+  files.sort();
+  files
+}
+
+/// Build the `paths` entries for a package project's edge to one dependency.
+///
+/// The bare `alias -> [folder]` mapping is always correct: stock tsc reads the
+/// folder's own `package.json` (`types` / `exports["."]`) to resolve the root
+/// import, so it is emitted unconditionally.
+///
+/// For subpath imports (`dep/subpath`), a literal `alias/* -> folder/*`
+/// wildcard performs a raw path substitution that ignores the dependency's
+/// `exports` map, so a transitive `import "dep/subpath"` where the dependency
+/// remaps `./subpath` via `exports` mis-resolves to a nonexistent path. When
+/// the dependency declares an `exports` map we instead emit an exact
+/// `alias/<subpath> -> [<resolved declaration>]` entry per export key,
+/// preferring the generated declaration (mirroring how the top-level
+/// `generate_npm_paths` handles subpaths). The `alias/*` wildcard is kept only
+/// as a fallback for packages without an `exports` map.
+fn dependency_project_paths(
+  alias: &str,
+  dependency_folder: &Path,
+) -> serde_json::Map<String, Value> {
+  let mut paths = serde_json::Map::new();
+  let folder = path_for_typescript(dependency_folder);
+  paths.insert(alias.to_string(), json!([folder]));
+
+  let export_keys =
+    crate::tsc::tsconfig_gen::package_export_keys(dependency_folder);
+  if export_keys.is_empty() {
+    // No subpath exports to consult (root-only or no `exports` map): fall back
+    // to a literal subpath wildcard so `dep/subpath` still resolves to
+    // `folder/subpath`.
+    paths.insert(format!("{alias}/*"), json!([format!("{folder}/*")]));
+    return paths;
+  }
+
+  // Emit one exact mapping per declared subpath export. Export keys may
+  // themselves be wildcards (`"./features/*"`); the resolved value keeps the
+  // `*` and the emitted key is a matching wildcard, so those resolve too.
+  for exp_key in export_keys {
+    let sub = exp_key.trim_start_matches("./");
+    let Some(resolved) =
+      crate::tsc::tsconfig_gen::resolve_package_types_entry_path(
+        dependency_folder,
+        &exp_key,
+      )
+      .filter(|p| p.exists())
+      .or_else(|| {
+        crate::tsc::tsconfig_gen::resolve_package_source_entry_path(
+          dependency_folder,
+          &exp_key,
+        )
+      })
+    else {
+      continue;
+    };
+    paths.insert(
+      format!("{alias}/{sub}"),
+      json!([path_for_typescript(&resolved)]),
+    );
+  }
+  paths
+}
+
+/// Generate a referenced TypeScript project for every resolved package copy in
+/// Deno's global npm cache.
+///
+/// A package project owns the cached package's type/source files and maps every
+/// bare dependency name to the exact cache folder selected by the npm snapshot.
+/// TypeScript uses these compiler options as a "project reference redirect"
+/// while resolving imports from the package, which gives stock tsc the same
+/// per-referrer dependency context as Deno's resolver without materializing a
+/// node_modules tree.
+fn generate_npm_cache_projects(
+  project_root: &Path,
+  deno_imports: Option<&Value>,
+  npm_resolver: &CliNpmResolver,
+) -> Result<NpmCacheProjects, AnyError> {
+  let projects_root = project_root.join(".deno/npm");
+  if projects_root.exists() {
+    std::fs::remove_dir_all(&projects_root)?;
+  }
+  let Some(managed) = npm_resolver.as_managed() else {
+    return Ok(Default::default());
+  };
+  if managed.root_node_modules_path().is_some() {
+    return Ok(Default::default());
+  }
+
+  let snapshot = managed.resolution().snapshot();
+  let mut packages = snapshot
+    .all_packages_for_every_system()
+    .filter_map(|package| {
+      let folder = managed.resolve_pkg_folder_from_pkg_id(&package.id).ok()?;
+      folder.exists().then_some((package, folder))
+    })
+    .collect::<Vec<_>>();
+  packages.sort_by_key(|(package, _)| package.id.as_serialized());
+
+  let mut result = NpmCacheProjects::default();
+  for (package, package_folder) in packages {
+    let files = collect_typescript_project_files(&package_folder);
+    if files.is_empty() {
+      continue;
+    }
+    let folder_name = deno_resolver::npm::get_package_folder_id_folder_name(
+      &package.get_package_cache_folder_id(),
+    );
+    let project_dir = projects_root.join(&folder_name);
+    std::fs::create_dir_all(&project_dir)?;
+
+    let mut paths = serde_json::Map::new();
+    let mut dependencies = package.dependencies.iter().collect::<Vec<_>>();
+    dependencies.sort_by_key(|(alias, _)| *alias);
+    for (alias, dependency_id) in dependencies {
+      let Ok(dependency_folder) =
+        managed.resolve_pkg_folder_from_pkg_id(dependency_id)
+      else {
+        continue;
+      };
+      if !dependency_folder.exists() {
+        continue;
+      }
+      for (key, value) in dependency_project_paths(alias, &dependency_folder) {
+        paths.insert(key, value);
+      }
+    }
+
+    let config = json!({
+      "_deno_generated": true,
+      "compilerOptions": {
+        "composite": true,
+        "module": "esnext",
+        "moduleResolution": "bundler",
+        "paths": paths,
+        "skipLibCheck": true,
+        "types": [],
+      },
+      // `files` is intentional rather than an `include` glob. TypeScript only
+      // applies a referenced project's resolver options to cache files it can
+      // identify as explicit project files.
+      "files": files,
+    });
+    std::fs::write(
+      project_dir.join("tsconfig.json"),
+      serde_json::to_string_pretty(&config)?,
+    )?;
+    result
+      .references
+      .push(format!("./npm/{folder_name}/tsconfig.json"));
+  }
+
+  if let Some(imports) = deno_imports.and_then(|v| v.as_object()) {
+    for target in imports.values().filter_map(|v| v.as_str()) {
+      if !target.starts_with("npm:") {
+        continue;
+      }
+      let Ok(req_ref) =
+        deno_semver::npm::NpmPackageReqReference::from_str(target)
+      else {
+        continue;
+      };
+      if let Ok(folder) =
+        managed.resolve_pkg_folder_from_deno_module_req(req_ref.req())
+        && folder.exists()
+      {
+        result.package_paths.insert(target.to_string(), folder);
+      }
+    }
+  }
+
+  Ok(result)
+}
+
 /// Run post-install setup: install jsr packages and generate tsconfig.
 ///
-/// Called after `deno install` completes npm resolution and node_modules setup.
-/// Returns the list of newly installed JSR packages for reporting.
+/// Called after the sync command builds the graph and initializes npm
+/// resolution. Returns the list of newly installed JSR packages for reporting.
 fn is_special_specifier(s: &str) -> bool {
   s.starts_with("jsr:")
     || s.starts_with("npm:")
@@ -48,12 +283,22 @@ fn is_special_specifier(s: &str) -> bool {
     || s.starts_with("https://")
 }
 
+#[allow(
+  clippy::too_many_arguments,
+  reason = "threads the independent inputs needed to set up stock-tsc compat"
+)]
 pub async fn setup_npm_compat(
   project_root: &Path,
   file_fetcher: &CliFileFetcher,
   http_client: &HttpClient,
   permissions: &PermissionsContainer,
   graph_specifiers: &[String],
+  local_wasm_modules: &[(Url, String)],
+  npm_resolver: &CliNpmResolver,
+  npmrc: &ResolvedNpmRc,
+  resolved_compiler_options: Option<&Value>,
+  manage_root_tsconfig: bool,
+  type_check_remote: bool,
 ) -> Result<Vec<InstalledJsrPackage>, AnyError> {
   let deno_json = read_deno_json(project_root)?;
   let deno_compiler_options = deno_json
@@ -127,9 +372,30 @@ pub async fn setup_npm_compat(
   let deno_imports = Some(&combined_imports);
   let deno_compiler_options = deno_compiler_options.as_ref();
 
-  // Install jsr: packages to node_modules/@jsr/
-  let installed =
-    install_jsr_packages(project_root, deno_imports, http_client).await?;
+  // Stock TypeScript has no hook into Deno's contextual global-cache npm
+  // resolver. Model that context with project references: every resolved npm
+  // package copy gets a tiny tsconfig whose `paths` point at the exact package
+  // copies selected for its dependency edges. TypeScript applies the referenced
+  // project's compiler options while resolving imports from files owned by that
+  // project, so duplicate versions and peer-dependency copies remain distinct.
+  let npm_cache_projects =
+    generate_npm_cache_projects(project_root, deno_imports, npm_resolver)?;
+  let use_global_cache_layout = npm_resolver
+    .as_managed()
+    .is_some_and(|managed| managed.root_node_modules_path().is_none());
+
+  let jsr_packages_dir = if use_global_cache_layout {
+    project_root.join(".deno/npm-compat/@jsr")
+  } else {
+    project_root.join("node_modules/@jsr")
+  };
+  let installed = install_jsr_packages(
+    &jsr_packages_dir,
+    deno_imports,
+    &member_paths,
+    http_client,
+  )
+  .await?;
 
   // Mirror http(s): modules (and their transitive remote/relative imports)
   // into .deno/remote/<host><path>/...
@@ -138,6 +404,7 @@ pub async fn setup_npm_compat(
     deno_imports,
     file_fetcher,
     permissions,
+    type_check_remote,
   )
   .await
   {
@@ -148,16 +415,32 @@ pub async fn setup_npm_compat(
     }
   };
 
-  // Warn about npm packages that aren't materialized under `node_modules`. With
-  // Deno's default global-cache mode, `deno install` can resolve npm deps
-  // without a local `node_modules/<pkg>`, so their `paths` are skipped (see
-  // generate_npm_paths) and stock tsc can't resolve them.
+  // Local `.wasm` imports (`import { x } from "./foo.wasm"`) can't be checked as
+  // binaries: stock tsc reports a spurious `TS2307 Cannot find module`. Mirror
+  // each wasm module's generated typed declarations into `.deno/wasm/<rel>`
+  // (renamed to `.d.wasm.ts` so `allowArbitraryExtensions` picks them up) and
+  // add `.deno/wasm` as a `rootDirs` overlay of the project root so tsc resolves
+  // the relative `./foo.wasm` specifier to the mirror. Unlike remote wasm (a
+  // non-relative specifier handled via `paths`), a relative specifier is never
+  // matched by tsconfig `paths`, hence the `rootDirs` overlay.
+  let has_local_wasm =
+    match install_local_wasm_modules(project_root, local_wasm_modules) {
+      Ok(has_wasm) => has_wasm,
+      Err(e) => {
+        log::warn!("Failed to materialize local wasm modules: {e}");
+        false
+      }
+    };
+
+  // Warn about npm packages that could be resolved neither through a local
+  // node_modules directory nor through the generated global-cache projects.
   let mut unmaterialized: Vec<String> = combined_imports
     .as_object()
     .into_iter()
     .flatten()
     .filter_map(|(_k, v)| v.as_str())
     .filter(|s| s.starts_with("npm:"))
+    .filter(|s| !npm_cache_projects.package_paths.contains_key(*s))
     .filter_map(|s| deno_semver::npm::NpmPackageReqReference::from_str(s).ok())
     .map(|r| r.req().name.to_string())
     .filter(|name| !project_root.join(format!("node_modules/{name}")).exists())
@@ -177,12 +460,28 @@ pub async fn setup_npm_compat(
 
   // Ensure @types/node is available so Node globals (timers, node: builtins,
   // Buffer, URLPattern, ...) resolve under stock tooling.
-  let has_node_types = ensure_types_node(project_root, http_client).await;
+  let node_types = ensure_types_node(
+    project_root,
+    http_client,
+    npmrc,
+    use_global_cache_layout,
+  )
+  .await;
+  if let Some(undici_types_dir) = &node_types.undici_types_dir {
+    member_paths.insert(
+      "undici-types".to_string(),
+      json!([path_for_typescript(undici_types_dir)]),
+    );
+    member_paths.insert(
+      "undici-types/*".to_string(),
+      json!([format!("{}/*", path_for_typescript(undici_types_dir))]),
+    );
+  }
 
   // The project's own `exclude` (from deno.json) tells us which paths Deno
   // doesn't check (test fixtures, generated output); mirror it into the tsconfig
   // so we don't surface diagnostics for files Deno itself skips.
-  let excludes: Vec<String> = deno_json
+  let mut excludes: Vec<String> = deno_json
     .as_ref()
     .and_then(|d| d.get("exclude"))
     .and_then(|v| v.as_array())
@@ -194,15 +493,35 @@ pub async fn setup_npm_compat(
     })
     .unwrap_or_default();
 
+  // Exclude Deno's vendor directory. Vendored deps are third-party code Deno
+  // doesn't type-check, and their `jsr:`/`npm:` imports resolve through Deno's
+  // vendor map (not ours), so type-checking them here just surfaces the deps'
+  // own errors. The vendor dir is `vendor/` at the project root when `vendor`
+  // is enabled in deno.json or the directory is present.
+  let vendor_enabled = deno_json
+    .as_ref()
+    .and_then(|d| d.get("vendor"))
+    .and_then(|v| v.as_bool())
+    .unwrap_or(false);
+  if vendor_enabled || project_root.join("vendor").is_dir() {
+    excludes.push("vendor".to_string());
+  }
+
   // Generate .deno/tsconfig.json and ensure root tsconfig.json extends it
   generate_deno_tsconfig(
     project_root,
     deno_compiler_options,
+    resolved_compiler_options,
     deno_imports,
     &http_modules,
     &member_paths,
-    has_node_types,
+    &jsr_packages_dir,
+    &npm_cache_projects.package_paths,
+    &npm_cache_projects.references,
+    node_types.type_root.as_deref(),
     &excludes,
+    has_local_wasm,
+    manage_root_tsconfig,
   )?;
 
   Ok(installed)
@@ -239,35 +558,79 @@ fn resolve_bare_against_import_map(
 }
 
 /// Ensure a stock `@types/node` (and its `undici-types` dependency) is present
-/// in `node_modules/@types` so the generated tsconfig can load Node globals
-/// (timers, `node:` builtins, `Buffer`, `URLPattern`, ...). No-op when the
-/// project already has `@types/node` installed. Returns whether it's available.
+/// so the generated tsconfig can load Node globals (timers, `node:` builtins,
+/// `Buffer`, `URLPattern`, ...).
 ///
-/// This is the interim: once #35889 lands, node types come from the global
-/// cache instead of being materialized per-project here.
+/// If the project already installed `@types/node` under its `node_modules`, we
+/// reuse that in place. Otherwise we materialize a stock copy under
+/// `.deno/npm-compat` (which is gitignored) - never downloading into the
+/// project's real `node_modules`, so `deno check` doesn't mutate the user's tree
+/// (and doesn't dirty the working directory).
 async fn ensure_types_node(
   project_root: &Path,
   http_client: &HttpClient,
-) -> bool {
-  if project_root.join("node_modules/@types/node").exists() {
-    return true;
+  npmrc: &ResolvedNpmRc,
+  use_global_cache_layout: bool,
+) -> NodeTypesSetup {
+  // Reuse an @types/node the project already installed under node_modules.
+  if !use_global_cache_layout {
+    let node_modules = project_root.join("node_modules");
+    // This tree is owned by the project's package manager rather than the
+    // atomic publisher below, so `package.json` is not a valid completion
+    // marker here.
+    if node_modules.join("@types/node").exists() {
+      let undici_types_dir = node_modules.join("undici-types");
+      return NodeTypesSetup {
+        type_root: Some("../node_modules/@types".to_string()),
+        undici_types_dir: undici_types_dir.exists().then_some(undici_types_dir),
+      };
+    }
   }
-  match download_npm_package(project_root, "@types/node", None, http_client)
-    .await
+  // Materialize under `.deno/npm-compat` (gitignored) in every other case.
+  let modules_dir = project_root.join(".deno/npm-compat");
+  let type_root = "./npm-compat/@types".to_string();
+  let node_dir = modules_dir.join("@types/node");
+  let undici_types_dir = modules_dir.join("undici-types");
+  // Only reuse a copy at the pinned version: one left behind by an earlier
+  // Deno (back when this followed the registry's `latest`) would otherwise keep
+  // being type-checked against forever.
+  if is_materialized_package_at_version(&node_dir, TYPES_NODE_VERSION) {
+    return NodeTypesSetup {
+      type_root: Some(type_root),
+      undici_types_dir: is_materialized_package(&undici_types_dir)
+        .then_some(undici_types_dir),
+    };
+  }
+  match download_npm_package(
+    &modules_dir,
+    "@types/node",
+    Some(TYPES_NODE_VERSION),
+    http_client,
+    npmrc,
+  )
+  .await
   {
     Ok(Some((_version, deps))) => {
       if let Some(req) = deps.get("undici-types").and_then(|v| v.as_str()) {
         let _ = download_npm_package(
-          project_root,
+          &modules_dir,
           "undici-types",
           Some(req),
           http_client,
+          npmrc,
         )
         .await;
       }
-      project_root.join("node_modules/@types/node").exists()
+      NodeTypesSetup {
+        type_root: is_materialized_package(&node_dir).then_some(type_root),
+        undici_types_dir: is_materialized_package(&undici_types_dir)
+          .then_some(undici_types_dir),
+      }
     }
-    _ => false,
+    _ => NodeTypesSetup {
+      type_root: None,
+      undici_types_dir: None,
+    },
   }
 }
 
@@ -275,14 +638,17 @@ async fn ensure_types_node(
 /// `node_modules/<pkg>` and return its resolved version + dependency map.
 /// Resolves `req` (a semver range) if given, otherwise the `latest` dist-tag.
 async fn download_npm_package(
-  project_root: &Path,
+  modules_dir: &Path,
   pkg: &str,
   req: Option<&str>,
   http_client: &HttpClient,
+  npmrc: &ResolvedNpmRc,
 ) -> Result<Option<(String, serde_json::Map<String, Value>)>, AnyError> {
-  let meta_url =
-    format!("https://registry.npmjs.org/{}", pkg.replace('/', "%2f"));
-  let bytes = match http_client.download(Url::parse(&meta_url)?).await {
+  // Go through the registry the project configured (`.npmrc`,
+  // `NPM_CONFIG_REGISTRY`) rather than hardcoding npmjs.org, so a private
+  // registry, a mirror or an offline setup is honored here too.
+  let meta_url = deno_npm_cache::get_package_url(npmrc, pkg);
+  let bytes = match http_client.download(meta_url).await {
     Ok(b) => b,
     Err(e) => {
       log::debug!("Failed to fetch metadata for {pkg}: {e}");
@@ -310,10 +676,9 @@ async fn download_npm_package(
     return Ok(None);
   };
   let tb = http_client.download(Url::parse(tarball)?).await?;
-  let dest = project_root.join("node_modules").join(pkg);
-  if let Err(e) = extract_tarball_gz(&tb, &dest) {
+  let dest = modules_dir.join(pkg);
+  if let Err(e) = extract_tarball_gz_atomic(&tb, &dest, Some(&version)) {
     log::debug!("Failed to extract {pkg}: {e}");
-    let _ = std::fs::remove_dir_all(&dest);
     return Ok(None);
   }
   let deps = vinfo
@@ -515,21 +880,36 @@ fn read_deno_json(project_root: &Path) -> Result<Option<Value>, AnyError> {
 fn generate_deno_tsconfig(
   project_root: &Path,
   deno_compiler_options: Option<&Value>,
+  resolved_compiler_options: Option<&Value>,
   deno_imports: Option<&Value>,
   http_modules: &BTreeMap<Url, String>,
   member_paths: &serde_json::Map<String, Value>,
-  has_node_types: bool,
+  jsr_packages_dir: &Path,
+  npm_package_paths: &BTreeMap<String, PathBuf>,
+  npm_project_references: &[String],
+  node_types_root: Option<&str>,
   excludes: &[String],
+  has_local_wasm: bool,
+  manage_root_tsconfig: bool,
 ) -> Result<(), AnyError> {
   let generated = crate::tsc::tsconfig_gen::generate_tsconfig(
     project_root,
     deno_compiler_options,
+    resolved_compiler_options,
     deno_imports,
+    // Command-line roots scope graph/dependency discovery only. Keep the
+    // generated project open so bundlers can consume its resolver mappings for
+    // any entrypoint they are asked to bundle.
     &[],
     http_modules,
     member_paths,
-    has_node_types,
+    jsr_packages_dir,
+    npm_package_paths,
+    npm_project_references,
+    node_types_root,
     excludes,
+    has_local_wasm,
+    manage_root_tsconfig,
   )
   .map_err(|e| anyhow!("Failed to generate tsconfig: {e}"))?;
 
@@ -538,7 +918,7 @@ fn generate_deno_tsconfig(
   Ok(())
 }
 
-/// Install jsr: packages to node_modules/@jsr/ by downloading from npm.jsr.io.
+/// Install jsr: compatibility packages by downloading from npm.jsr.io.
 ///
 /// Uses `HttpClient::download` directly (not `CliFileFetcher`) because we
 /// don't want each registry/tarball URL surfacing as a user-visible
@@ -546,8 +926,9 @@ fn generate_deno_tsconfig(
 /// implementation detail of the stock-tsc compatibility setup. The
 /// fetcher's caching and redirect handling are unnecessary for npm.jsr.io.
 async fn install_jsr_packages(
-  project_root: &Path,
+  jsr_packages_dir: &Path,
   deno_imports: Option<&Value>,
+  member_paths: &serde_json::Map<String, Value>,
   http_client: &HttpClient,
 ) -> Result<Vec<InstalledJsrPackage>, AnyError> {
   let mut installed = Vec::new();
@@ -568,17 +949,28 @@ async fn install_jsr_packages(
       continue;
     };
 
+    // denext: a package a workspace member provides (`"@scope/pkg":
+    // "jsr:@scope/pkg@1.2.3"` with that member at 1.2.3, as Deno resolves it)
+    // maps to the member's sources (`member_paths`), which win in the generated
+    // `paths`; the registry copy is never used, and may not exist yet.
+    let member_name = format!("@{}/{}", scope.trim_start_matches('@'), name);
+    if member_paths.contains_key(&member_name) {
+      continue;
+    }
+
     let npm_name = format!("{}__{}", scope.trim_start_matches('@'), name);
-    let pkg_dir = project_root
-      .join("node_modules")
-      .join("@jsr")
-      .join(&npm_name);
-    if pkg_dir.exists() {
+    let pkg_dir = jsr_packages_dir.join(&npm_name);
+    if is_materialized_package(&pkg_dir) {
       continue;
     }
 
     let registry_name = format!("@jsr/{npm_name}");
-    let npm_jsr_registry = std::env::var("DENO_NPM_JSR_REGISTRY")
+    // Use the same env var as the rest of Deno (`JSR_NPM_URL`, see
+    // libs/npmrc) for the npm-compat jsr registry, so a custom/test registry is
+    // honored. The previous `DENO_NPM_JSR_REGISTRY` was read by nothing else, so
+    // tests (which set `JSR_NPM_URL` to the mock registry) fell through to the
+    // real npm.jsr.io and the fetch failed -> the package was never installed.
+    let npm_jsr_registry = std::env::var("JSR_NPM_URL")
       .unwrap_or_else(|_| "https://npm.jsr.io".to_string());
     let metadata_url = format!(
       "{}/{}",
@@ -608,8 +1000,20 @@ async fn install_jsr_packages(
         anyhow!("Failed to parse metadata for {registry_name}: {e}")
       })?;
 
-    let resolved_version =
-      resolve_jsr_version(&metadata, req_version.as_deref(), &registry_name)?;
+    // An unresolvable version leaves this package unmapped (the compiler then
+    // reports its imports) rather than failing the whole config generation,
+    // like the other per-package failures here.
+    let resolved_version = match resolve_jsr_version(
+      &metadata,
+      req_version.as_deref(),
+      &registry_name,
+    ) {
+      Ok(version) => version,
+      Err(e) => {
+        log::debug!("{e}");
+        continue;
+      }
+    };
 
     let tarball_url = metadata
       .get("versions")
@@ -638,9 +1042,8 @@ async fn install_jsr_packages(
       }
     };
 
-    if let Err(e) = extract_tarball_gz(&tarball_bytes, &pkg_dir) {
+    if let Err(e) = extract_tarball_gz_atomic(&tarball_bytes, &pkg_dir, None) {
       log::debug!("Failed to extract {registry_name}: {e}");
-      let _ = std::fs::remove_dir_all(&pkg_dir);
       continue;
     }
 
@@ -651,6 +1054,159 @@ async fn install_jsr_packages(
   }
 
   Ok(installed)
+}
+
+/// Whether `dir` holds a fully materialized package rather than a directory
+/// that some other process is still extracting into (or left half-extracted
+/// after being killed).
+///
+/// `package.json` is the last thing [`extract_tarball_gz_atomic`] publishes -
+/// it only ever appears via the atomic rename of a complete staging dir - so
+/// its presence is the marker that the tree is usable. A bare `exists()` check
+/// on the destination is not: with several `deno check` processes sharing a
+/// cache, one can observe a directory the other has only started filling in,
+/// skip the download, and then fail type checking with
+/// `TS2688 Cannot find type definition file for 'node'`.
+/// npm and npm.jsr.io package tarballs are required to contain a top-level
+/// `package.json`; this marker relies on that invariant.
+fn is_materialized_package(dir: &Path) -> bool {
+  dir.join("package.json").exists()
+}
+
+/// Whether an existing `dest` tree can stand in for the one being extracted:
+/// complete, and at the version we asked for when we pinned one.
+fn published_copy_is_current(
+  dest: &Path,
+  expected_version: Option<&str>,
+) -> bool {
+  match expected_version {
+    Some(version) => is_materialized_package_at_version(dest, version),
+    None => is_materialized_package(dest),
+  }
+}
+
+fn is_materialized_package_at_version(dir: &Path, version: &str) -> bool {
+  let Ok(contents) = std::fs::read_to_string(dir.join("package.json")) else {
+    return false;
+  };
+  let Ok(manifest) = serde_json::from_str::<Value>(&contents) else {
+    return false;
+  };
+  manifest.get("version").and_then(|v| v.as_str()) == Some(version)
+}
+
+fn cleanup_stale_staging_dirs(
+  parent: &Path,
+  staging_prefix: &str,
+  stale_before: std::time::SystemTime,
+) {
+  let Ok(entries) = std::fs::read_dir(parent) else {
+    return;
+  };
+  for entry in entries.flatten() {
+    let path = entry.path();
+    if !entry
+      .file_name()
+      .to_string_lossy()
+      .starts_with(staging_prefix)
+      || !entry.file_type().is_ok_and(|file_type| file_type.is_dir())
+      || !entry
+        .metadata()
+        .and_then(|metadata| metadata.modified())
+        .is_ok_and(|modified| modified < stale_before)
+    {
+      continue;
+    }
+    let _ = std::fs::remove_dir_all(path);
+  }
+}
+
+/// Extract a gzipped npm-style tarball so that `dest` is never observable in a
+/// half-extracted state: unpack into a sibling staging directory on the same
+/// filesystem, then `rename` it into place.
+///
+/// Concurrent `deno check` invocations sharing a cache race to materialize the
+/// same package. The rename makes each one either publish a complete tree or
+/// lose harmlessly to a winner that already did.
+fn extract_tarball_gz_atomic(
+  gz_bytes: &[u8],
+  dest: &Path,
+  expected_version: Option<&str>,
+) -> Result<(), AnyError> {
+  let parent = dest.parent().ok_or_else(|| {
+    anyhow!("Invalid extract destination: {}", dest.display())
+  })?;
+  std::fs::create_dir_all(parent)?;
+
+  // Stage as a sibling so the rename stays within one filesystem. The pid plus
+  // a process-local counter keeps concurrent extractions - across processes and
+  // within one - from sharing a staging dir.
+  static STAGING_COUNTER: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+  let name = dest.file_name().and_then(|n| n.to_str()).ok_or_else(|| {
+    anyhow!("Invalid extract destination: {}", dest.display())
+  })?;
+  // The leading dot is required because this parent is passed to TypeScript as
+  // a typeRoots directory, and TypeScript ignores dot-prefixed entries when it
+  // enumerates type packages.
+  let staging_prefix = format!(".{name}.tmp-");
+  // Reclaim staging dirs left by killed processes. Keep recent dirs because
+  // they may belong to another extraction currently racing with this one.
+  if let Some(stale_before) = std::time::SystemTime::now()
+    .checked_sub(std::time::Duration::from_secs(24 * 60 * 60))
+  {
+    cleanup_stale_staging_dirs(parent, &staging_prefix, stale_before);
+  }
+  let tmp_dir = parent.join(format!(
+    "{}{}-{}",
+    staging_prefix,
+    std::process::id(),
+    STAGING_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+  ));
+  // A staging dir left over from a previous crashed run would make extraction
+  // append to a foreign tree.
+  let _ = std::fs::remove_dir_all(&tmp_dir);
+
+  if let Err(e) = extract_tarball_gz(gz_bytes, &tmp_dir) {
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    return Err(e);
+  }
+
+  match std::fs::rename(&tmp_dir, dest) {
+    Ok(()) => Ok(()),
+    Err(rename_err) => {
+      // `dest` is in the way. On Windows a rename onto *any* existing directory
+      // fails; on Unix only onto a non-empty one - so this is the normal path
+      // for a lost race, not just an error path.
+      if published_copy_is_current(dest, expected_version) {
+        // Another process published a complete copy first. Its tree is as good
+        // as ours, so keep it and drop the staging dir.
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+        return Ok(());
+      }
+      // `dest` is stale: half-extracted by a killed process, written
+      // non-atomically by an older Deno, or a complete copy of a version we no
+      // longer want (an older pin, or whatever `latest` was when Deno still
+      // followed it). Clearing it is what heals a cache that is already
+      // poisoned - otherwise every later run skips the download and keeps type
+      // checking against the wrong tree.
+      let _ = std::fs::remove_dir_all(dest);
+      match std::fs::rename(&tmp_dir, dest) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+          let _ = std::fs::remove_dir_all(&tmp_dir);
+          // A third process may have published `dest` in between.
+          if published_copy_is_current(dest, expected_version) {
+            return Ok(());
+          }
+          Err(anyhow!(
+            "Failed to move extracted package into {}: {e} (initial: {rename_err})",
+            dest.display()
+          ))
+        }
+      }
+    }
+  }
 }
 
 /// Extract a gzipped npm-style tarball into `dest`, stripping the leading
@@ -706,6 +1262,53 @@ fn extract_tarball_gz(gz_bytes: &[u8], dest: &Path) -> Result<(), AnyError> {
 /// path (relative to `.deno/`) that tsc should resolve it to.
 pub type HttpModulePaths = BTreeMap<Url, String>;
 
+/// Materialize local (`file:`) `.wasm` modules' generated typed declarations
+/// under `.deno/wasm/`, mirroring their path relative to the project root and
+/// renaming `foo.wasm` -> `foo.d.wasm.ts` so stock tsc resolves the relative
+/// `import "./foo.wasm"` via `allowArbitraryExtensions` + a `rootDirs` overlay
+/// (added by `build_tsconfig`). `dts_modules` pairs each wasm's `file:` URL with
+/// its already-generated declaration text (from deno_graph). Returns whether any
+/// wasm module was written (so the caller can enable the tsconfig options only
+/// when needed).
+///
+/// Unlike remote wasm (a non-relative specifier keyed into tsconfig `paths` by
+/// `install_http_modules`), a relative `./foo.wasm` specifier is never matched
+/// by `paths`; the `rootDirs` overlay is what makes tsc find the mirror.
+fn install_local_wasm_modules(
+  project_root: &Path,
+  dts_modules: &[(Url, String)],
+) -> Result<bool, AnyError> {
+  if dts_modules.is_empty() {
+    return Ok(false);
+  }
+  let wasm_root = project_root.join(".deno").join("wasm");
+  let mut wrote_any = false;
+  for (url, dts) in dts_modules {
+    let Ok(path) = url.to_file_path() else {
+      continue;
+    };
+    // Mirror the wasm file's location relative to the project root so the
+    // `rootDirs` overlay resolves it to the same relative specifier the source
+    // used. A wasm module outside the project root has no stable relative
+    // location under `.deno/wasm/`, so skip it (rare; tsc keeps its TS2307).
+    let Ok(rel) = path.strip_prefix(project_root) else {
+      continue;
+    };
+    // `foo.wasm` -> `foo.d.wasm.ts` (the extension `allowArbitraryExtensions`
+    // looks for when resolving `import "./foo.wasm"`).
+    let file_name = rel.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    let stem = file_name.strip_suffix(".wasm").unwrap_or(file_name);
+    let dts_name = format!("{stem}.d.wasm.ts");
+    let dest = wasm_root.join(rel).with_file_name(dts_name);
+    if let Some(parent) = dest.parent() {
+      std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&dest, dts.as_bytes())?;
+    wrote_any = true;
+  }
+  Ok(wrote_any)
+}
+
 /// Materialize http(s): modules referenced from `deno.json` `imports` (and
 /// their transitive remote/relative imports) into `.deno/remote/<host><path>`.
 ///
@@ -725,6 +1328,7 @@ pub async fn install_http_modules(
   deno_imports: Option<&Value>,
   file_fetcher: &CliFileFetcher,
   permissions: &PermissionsContainer,
+  type_check_remote: bool,
 ) -> Result<HttpModulePaths, AnyError> {
   let mut paths: HttpModulePaths = BTreeMap::new();
   let mut queue: VecDeque<Url> = VecDeque::new();
@@ -803,13 +1407,43 @@ pub async fn install_http_modules(
       (final_url.clone(), file.source.clone())
     };
 
+    // wasm modules can't be type-checked as binaries: mirror the generated
+    // TypeScript (typed exports + the wasm's own imports) instead, written as a
+    // checkable `.mts` so tsc surfaces the exports' types to importers and the
+    // wasm's own import errors. Always type-checked (never `@ts-nocheck`).
+    let is_wasm = final_url.path().ends_with(".wasm");
+    let (mirror_url, mirror_bytes): (Url, std::borrow::Cow<[u8]>) = if is_wasm {
+      match deno_graph::source::wasm::wasm_module_to_dts(
+        effective_bytes.as_ref(),
+      ) {
+        Ok(dts) => {
+          let mut u = effective_url.clone();
+          u.set_path(&format!("{}.mts", u.path()));
+          (u, std::borrow::Cow::Owned(dts.into_bytes()))
+        }
+        Err(e) => {
+          log::debug!("wasm dts generation failed for {effective_url}: {e}");
+          (
+            effective_url.clone(),
+            std::borrow::Cow::Borrowed(effective_bytes.as_ref()),
+          )
+        }
+      }
+    } else {
+      (
+        effective_url.clone(),
+        std::borrow::Cow::Borrowed(effective_bytes.as_ref()),
+      )
+    };
+
     // Mirror the chosen content. We deliberately don't mirror both the JS
     // and the .d.ts: their URL paths often collide on disk (e.g.
     // `cowsay@1.6.0` as file vs `cowsay@1.6.0/index.d.ts` under a dir).
     let local = match write_mirror(
       &remote_root,
-      &effective_url,
-      effective_bytes.as_ref(),
+      &mirror_url,
+      &mirror_bytes,
+      type_check_remote || is_wasm,
     ) {
       Ok(p) => p,
       Err(e) => {
@@ -827,10 +1461,13 @@ pub async fn install_http_modules(
       paths.insert(effective_url.clone(), local.clone());
     }
 
-    // Scan the effective (type-bearing) source for transitive imports.
-    let scan_source =
-      String::from_utf8_lossy(effective_bytes.as_ref()).into_owned();
-    for spec in scan_import_specifiers(&effective_url, &scan_source) {
+    // Scan the mirrored (type-bearing) source for transitive imports. For wasm
+    // this is the generated `.mts` (which carries the wasm's imports), not the
+    // binary - so scan with `mirror_url` (`.wasm.mts`), whose media type passes
+    // the analyzer's gate; `effective_url` (`.wasm`) would be rejected as
+    // `MediaType::Wasm` and the imports would never be walked.
+    let scan_source = String::from_utf8_lossy(&mirror_bytes).into_owned();
+    for spec in scan_import_specifiers(&mirror_url, &scan_source) {
       let resolved =
         if spec.starts_with("http://") || spec.starts_with("https://") {
           Url::parse(&spec).ok()
@@ -863,6 +1500,7 @@ fn write_mirror(
   remote_root: &Path,
   url: &Url,
   bytes: &[u8],
+  type_check_remote: bool,
 ) -> Result<String, AnyError> {
   let local_path = url_to_local_path(remote_root, url)
     .ok_or_else(|| anyhow!("URL has no resolvable mirror path: {url}"))?;
@@ -875,12 +1513,13 @@ fn write_mirror(
   // dwarfs the project's own diagnostics). `@ts-nocheck` suppresses errors in
   // the file while keeping its exported and ambient types available to
   // importers, and triple-slash directives (which may follow a leading comment)
-  // still apply.
+  // still apply. Skipped under `deno check --all`, which does type-check remote
+  // modules.
   let is_script = matches!(
     local_path.extension().and_then(|e| e.to_str()),
     Some("ts" | "tsx" | "mts" | "cts" | "js" | "jsx" | "mjs" | "cjs")
   );
-  if is_script {
+  if is_script && !type_check_remote {
     let mut content = Vec::with_capacity(bytes.len() + 16);
     content.extend_from_slice(b"// @ts-nocheck\n");
     content.extend_from_slice(bytes);
@@ -1116,6 +1755,260 @@ mod tests {
     );
     // non-member alias produced no new entry
     assert!(!member_paths.contains_key("chalk"));
+  }
+
+  #[test]
+  fn test_dependency_project_paths_resolves_subpath_exports() {
+    let dir = tempfile::tempdir().unwrap();
+    let pkg_dir = dir.path().join("dep");
+    std::fs::create_dir_all(pkg_dir.join("dist/nested")).unwrap();
+    // The resolved declaration must exist on disk (dependency_project_paths
+    // verifies existence before mapping, falling back to source otherwise).
+    std::fs::write(pkg_dir.join("dist/index.d.ts"), "").unwrap();
+    std::fs::write(pkg_dir.join("dist/nested/subpath.d.ts"), "").unwrap();
+    std::fs::write(
+      pkg_dir.join("package.json"),
+      serde_json::to_string(&json!({
+        "name": "dep",
+        "exports": {
+          ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" },
+          // Remaps `dep/subpath` to a non-literal declaration path: the naive
+          // `dep/* -> folder/*` wildcard would mis-resolve this.
+          "./subpath": {
+            "types": "./dist/nested/subpath.d.ts",
+            "default": "./dist/nested/subpath.js",
+          },
+        }
+      }))
+      .unwrap(),
+    )
+    .unwrap();
+
+    let folder = path_for_typescript(&pkg_dir);
+    let paths = dependency_project_paths("dep", &pkg_dir);
+
+    // Bare alias still maps to the folder (tsc reads its package.json).
+    assert_eq!(paths.get("dep"), Some(&json!([folder])));
+    // The subpath maps to the exact declaration, not `folder/subpath`.
+    assert_eq!(
+      paths.get("dep/subpath"),
+      Some(&json!([format!("{folder}/dist/nested/subpath.d.ts")]))
+    );
+    // A package with an exports map does NOT get the literal wildcard fallback.
+    assert!(!paths.contains_key("dep/*"));
+  }
+
+  #[test]
+  fn test_dependency_project_paths_wildcard_fallback_without_exports() {
+    let dir = tempfile::tempdir().unwrap();
+    let pkg_dir = dir.path().join("dep");
+    std::fs::create_dir_all(&pkg_dir).unwrap();
+    std::fs::write(
+      pkg_dir.join("package.json"),
+      serde_json::to_string(&json!({
+        "name": "dep",
+        "types": "./index.d.ts",
+      }))
+      .unwrap(),
+    )
+    .unwrap();
+
+    let folder = path_for_typescript(&pkg_dir);
+    let paths = dependency_project_paths("dep", &pkg_dir);
+
+    // Without an exports map, keep the literal subpath wildcard fallback.
+    assert_eq!(paths.get("dep"), Some(&json!([folder])));
+    assert_eq!(paths.get("dep/*"), Some(&json!([format!("{folder}/*")])));
+  }
+
+  /// A minimal npm-style `.tgz`: every entry under a leading `package/`.
+  fn make_tarball_gz(files: &[(&str, &str)]) -> Vec<u8> {
+    let mut tar_bytes = Vec::new();
+    {
+      let mut builder = tar::Builder::new(&mut tar_bytes);
+      for (path, contents) in files {
+        let mut header = tar::Header::new_gnu();
+        header.set_size(contents.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        builder
+          .append_data(
+            &mut header,
+            format!("package/{path}"),
+            contents.as_bytes(),
+          )
+          .unwrap();
+      }
+      builder.finish().unwrap();
+    }
+    let mut encoder =
+      flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    std::io::Write::write_all(&mut encoder, &tar_bytes).unwrap();
+    encoder.finish().unwrap()
+  }
+
+  #[test]
+  fn test_cleanup_stale_staging_dirs() {
+    let dir = tempfile::tempdir().unwrap();
+    let staging_dir = dir.path().join(".node.tmp-123-0");
+    let other_dir = dir.path().join(".other.tmp-123-0");
+    let similarly_named_file = dir.path().join(".node.tmp-123-1");
+    std::fs::create_dir(&staging_dir).unwrap();
+    std::fs::create_dir(&other_dir).unwrap();
+    std::fs::write(&similarly_named_file, "keep").unwrap();
+
+    // A cutoff older than every filesystem entry keeps active staging dirs.
+    cleanup_stale_staging_dirs(
+      dir.path(),
+      ".node.tmp-",
+      std::time::SystemTime::UNIX_EPOCH,
+    );
+    assert!(staging_dir.exists());
+
+    // A later cutoff removes only matching directories.
+    cleanup_stale_staging_dirs(
+      dir.path(),
+      ".node.tmp-",
+      std::time::SystemTime::now() + std::time::Duration::from_secs(1),
+    );
+    assert!(!staging_dir.exists());
+    assert!(other_dir.exists());
+    assert!(similarly_named_file.exists());
+  }
+
+  #[test]
+  fn test_extract_tarball_gz_atomic_leaves_no_staging_dir() {
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("@types/node");
+    let gz = make_tarball_gz(&[
+      ("package.json", r#"{"name":"@types/node"}"#),
+      ("index.d.ts", "declare const x: number;"),
+    ]);
+
+    extract_tarball_gz_atomic(&gz, &dest, None).unwrap();
+
+    assert!(is_materialized_package(&dest));
+    assert_eq!(
+      std::fs::read_to_string(dest.join("index.d.ts")).unwrap(),
+      "declare const x: number;"
+    );
+    // The staging sibling must be gone, not left behind next to `dest`.
+    let leftovers = std::fs::read_dir(dest.parent().unwrap())
+      .unwrap()
+      .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+      .filter(|n| n.starts_with('.') && n.contains(".tmp-"))
+      .collect::<Vec<_>>();
+    assert!(leftovers.is_empty(), "leftover staging dirs: {leftovers:?}");
+  }
+
+  #[test]
+  fn test_extract_tarball_gz_atomic_heals_partial_dest() {
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("node");
+    // A tree a killed process left half-extracted: no `package.json`, plus a
+    // stale file that must not survive into the published package.
+    std::fs::create_dir_all(dest.join("ts5.0")).unwrap();
+    std::fs::write(dest.join("ts5.0/stale.d.ts"), "stale").unwrap();
+    assert!(dest.exists());
+    assert!(!is_materialized_package(&dest));
+
+    let gz = make_tarball_gz(&[
+      ("package.json", r#"{"name":"@types/node"}"#),
+      ("index.d.ts", "fresh"),
+    ]);
+    extract_tarball_gz_atomic(&gz, &dest, None).unwrap();
+
+    assert!(is_materialized_package(&dest));
+    assert_eq!(
+      std::fs::read_to_string(dest.join("index.d.ts")).unwrap(),
+      "fresh"
+    );
+    assert!(!dest.join("ts5.0/stale.d.ts").exists());
+  }
+
+  #[test]
+  fn test_extract_tarball_gz_atomic_keeps_winners_package() {
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("node");
+    // Stand in for a concurrent process that published `dest` first.
+    std::fs::create_dir_all(&dest).unwrap();
+    std::fs::write(dest.join("package.json"), r#"{"name":"winner"}"#).unwrap();
+    std::fs::write(dest.join("index.d.ts"), "winner").unwrap();
+
+    let gz = make_tarball_gz(&[
+      ("package.json", r#"{"name":"loser"}"#),
+      ("index.d.ts", "loser"),
+    ]);
+    // Losing the race is not an error, and must not clobber the winner.
+    extract_tarball_gz_atomic(&gz, &dest, None).unwrap();
+
+    assert_eq!(
+      std::fs::read_to_string(dest.join("index.d.ts")).unwrap(),
+      "winner"
+    );
+    let leftovers = std::fs::read_dir(dest.parent().unwrap())
+      .unwrap()
+      .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+      .filter(|n| n.starts_with('.') && n.contains(".tmp-"))
+      .collect::<Vec<_>>();
+    assert!(leftovers.is_empty(), "leftover staging dirs: {leftovers:?}");
+  }
+
+  #[test]
+  fn test_extract_tarball_gz_atomic_replaces_other_version() {
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("node");
+    // A complete copy of a version we no longer want: what an older Deno left
+    // behind when this followed the registry's `latest` instead of a pin.
+    std::fs::create_dir_all(&dest).unwrap();
+    std::fs::write(
+      dest.join("package.json"),
+      r#"{"name":"@types/node","version":"26.6.2"}"#,
+    )
+    .unwrap();
+    std::fs::write(dest.join("index.d.ts"), "stale").unwrap();
+
+    let gz = make_tarball_gz(&[
+      (
+        "package.json",
+        r#"{"name":"@types/node","version":"24.2.0"}"#,
+      ),
+      ("index.d.ts", "pinned"),
+    ]);
+    extract_tarball_gz_atomic(&gz, &dest, Some("24.2.0")).unwrap();
+
+    assert_eq!(
+      std::fs::read_to_string(dest.join("index.d.ts")).unwrap(),
+      "pinned"
+    );
+  }
+
+  #[test]
+  fn test_extract_tarball_gz_atomic_keeps_same_version() {
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("node");
+    // A concurrent process published the version we wanted; keep its tree.
+    std::fs::create_dir_all(&dest).unwrap();
+    std::fs::write(
+      dest.join("package.json"),
+      r#"{"name":"@types/node","version":"24.2.0"}"#,
+    )
+    .unwrap();
+    std::fs::write(dest.join("index.d.ts"), "winner").unwrap();
+
+    let gz = make_tarball_gz(&[
+      (
+        "package.json",
+        r#"{"name":"@types/node","version":"24.2.0"}"#,
+      ),
+      ("index.d.ts", "loser"),
+    ]);
+    extract_tarball_gz_atomic(&gz, &dest, Some("24.2.0")).unwrap();
+
+    assert_eq!(
+      std::fs::read_to_string(dest.join("index.d.ts")).unwrap(),
+      "winner"
+    );
   }
 
   #[test]

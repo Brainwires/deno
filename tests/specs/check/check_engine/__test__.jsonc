@@ -1,0 +1,76 @@
+{
+  "tests": {
+    // denext: native TypeScript 7 by default ...
+    "native": {
+      "args": "check bad.ts",
+      "output": "bad.out",
+      "exitCode": 1
+    },
+    // ... the in-process TypeScript 6.0.3 with --check-engine=tsc ...
+    "flag_tsc": {
+      "args": "check --check-engine=tsc bad.ts",
+      "output": "bad.out",
+      "exitCode": 1
+    },
+    // ... or DENO_CHECK_ENGINE=tsc (the flag wins over it)
+    "env_tsc": {
+      "args": "check bad.ts",
+      "envs": { "DENO_CHECK_ENGINE": "tsc" },
+      "output": "bad.out",
+      "exitCode": 1
+    },
+    "flag_wins_over_env": {
+      "args": "check --check-engine=native -L debug ok.ts",
+      "envs": { "DENO_CHECK_ENGINE": "tsc" },
+      "output": "[WILDCARD]native tsc[WILDCARD]",
+      "exitCode": 0
+    },
+    "env_unknown_value_warns": {
+      "args": "check ok.ts",
+      "envs": { "DENO_CHECK_ENGINE": "tsgo" },
+      "output": "[WILDCARD]DENO_CHECK_ENGINE=tsgo: unsupported type-check engine: tsgo (expected \"native\" or \"tsc\"); type-checking natively\n[WILDCARD]",
+      "exitCode": 0
+    },
+    "flag_unknown_value": {
+      "args": "check --check-engine=tsgo ok.ts",
+      "output": "[WILDCARD]tsgo[WILDCARD]",
+      "exitCode": 1
+    },
+    // every command that type-checks takes the engine
+    "test_native": {
+      "args": "test -L debug bad_test.ts",
+      "output": "[WILDCARD]Type checking (native tsc)[WILDCARD]TS2322 [ERROR][WILDCARD]",
+      "exitCode": 1
+    },
+    "test_tsc": {
+      "args": "test --check-engine=tsc bad_test.ts",
+      "output": "Check [WILDCARD]bad_test.ts\nTS2322 [ERROR][WILDCARD]",
+      "exitCode": 1
+    },
+    "run_native": {
+      "args": "run -L debug --check bad.ts",
+      "output": "[WILDCARD]Type checking (native tsc)[WILDCARD]TS2322 [ERROR][WILDCARD]",
+      "exitCode": 1
+    },
+    "bench_native": {
+      "args": "bench -L debug bad_bench.ts",
+      "output": "[WILDCARD]Type checking (native tsc)[WILDCARD]TS2322 [ERROR][WILDCARD]",
+      "exitCode": 1
+    },
+    // --doc / --doc-only check code blocks held in memory: the in-process
+    // checker runs them
+    "doc_only": {
+      "args": "check --doc-only -L debug doc.ts",
+      "output": "[WILDCARD]--doc/--doc-only: type-checking with the in-process checker[WILDCARD]TS2322 [ERROR][WILDCARD]",
+      "exitCode": 1
+    },
+    // the vendored compiler can be overridden; a path that is not a file is an
+    // error that names the variable
+    "tsgo_bin_not_a_file": {
+      "args": "check ok.ts",
+      "envs": { "DENO_TSGO_BIN": "./no-such-tsc" },
+      "output": "[WILDCARD]DENO_TSGO_BIN is set to ./no-such-tsc, which is not a file\n",
+      "exitCode": 1
+    }
+  }
+}

@@ -475,6 +475,16 @@ impl PublishPreparer {
       // errors like remote modules existing will cause type checking to crash
       if diagnostics_collector.has_error() {
         Ok(Arc::new(graph))
+      } else if self.cli_options.check_engine()
+        == crate::args::CheckEngine::Native
+      {
+        // denext: the fast check modules (the generated public API types) live
+        // in memory only, where the native compiler, which reads files, can't
+        // see them. The package sources were type-checked natively when the
+        // graph was built (`ModuleGraphCreator::create_publish_graph`); this
+        // extra self-check of Deno's own output stays with the in-process
+        // checker (`--check-engine=tsc`).
+        Ok(Arc::new(graph))
       } else {
         // fast check passed, type check the output as a temporary measure
         // until we know that it's reliable and stable

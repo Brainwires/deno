@@ -185,6 +185,14 @@ impl std::str::FromStr for JavaScriptEngine {
   }
 }
 
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct SyncTypesFlags {
+  /// Files, directories, or remote modules to use as module graph roots.
+  /// These scope dependency discovery, not the generated TypeScript project.
+  /// An empty list discovers dependencies from the entire project.
+  pub roots: Vec<String>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CompileFlags {
   pub source_file: String,
@@ -820,6 +828,7 @@ pub enum DenoSubcommand {
   Link(LinkFlags),
   Unlink(UnlinkFlags),
   Lsp,
+  SyncTypes(SyncTypesFlags),
   Lint(LintFlags),
   Repl(ReplFlags),
   Run(RunFlags),
@@ -917,6 +926,31 @@ impl TypeCheckMode {
   }
 }
 
+/// The type checker that `deno check` and every other type-checking command
+/// (`run --check`, `test`, `bench`, `bundle --check`, `publish`) use (denext).
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum CheckEngine {
+  /// The native TypeScript 7 compiler (`tsgo`), vendored next to `deno`.
+  #[default]
+  Native,
+  /// The in-process TypeScript 6.0.3 (`--check-engine=tsc`).
+  Tsc,
+}
+
+impl std::str::FromStr for CheckEngine {
+  type Err = String;
+
+  fn from_str(value: &str) -> Result<Self, Self::Err> {
+    match value {
+      "native" => Ok(Self::Native),
+      "tsc" => Ok(Self::Tsc),
+      _ => Err(format!(
+        "unsupported type-check engine: {value} (expected \"native\" or \"tsc\")"
+      )),
+    }
+  }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Default)]
 pub struct InternalFlags {
   /// Used when the language server is configured with an
@@ -965,6 +999,8 @@ pub struct Flags {
   pub cache_blocklist: Vec<String>,
   pub cached_only: bool,
   pub type_check_mode: TypeCheckMode,
+  /// `--check-engine`: `None` leaves it to `DENO_CHECK_ENGINE`, then native.
+  pub check_engine: Option<CheckEngine>,
   pub config_flag: ConfigFlag,
   pub node_modules_dir: Option<NodeModulesDirMode>,
   pub node_modules_linker: Option<NodeModulesLinkerMode>,

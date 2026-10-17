@@ -1,0 +1,23 @@
+{
+  "tests": {
+    // denext: `Deno.SQL` / `Deno.sql` (DENEXT.md item 24) are in the native
+    // checker's generated @types/deno ...
+    "valid": {
+      "args": "check valid.ts",
+      "output": "Check [WILDCARD]valid.ts\n",
+      "exitCode": 0
+    },
+    "invalid": {
+      "args": "check invalid.ts",
+      "output": "invalid.out",
+      "exitCode": 1
+    },
+    // ... also for a `"lib": ["deno.ns", "dom"]` project, which gets only the
+    // `Deno` namespace from it
+    "valid_ns_dom": {
+      "args": "check --config ns_dom.json valid.ts",
+      "output": "Check [WILDCARD]valid.ts\n",
+      "exitCode": 0
+    }
+  }
+}

@@ -676,11 +676,33 @@ jobs:
           py=python3; command -v python3 >/dev/null 2>&1 || py=python
           "$py" -I .github/denext-runtime/fetch_esbuild.py "$TARGET" "$RUNNER_TEMP/esbuild"
 
+      # The pinned TypeScript 7 nightly that `deno lsp`'s tsgo backend runs
+      # (cli/tsc/typescript_pins.json, role "lsp"; unstable, off by default),
+      # verified against its pinned npm integrity and shipped beside deno as
+      # typescript-lsp/ so the backend never downloads one.
+      - name: Fetch TypeScript (lsp)
+        run: |
+          set -euo pipefail
+          py=python3; command -v python3 >/dev/null 2>&1 || py=python
+          "$py" -I .github/denext-runtime/fetch_typescript.py lsp "$TARGET" "$RUNNER_TEMP/typescript-lsp"
+
+      # The pinned TypeScript 7.0 that `deno check` and every other
+      # type-checking command run by default (role "check"), verified the same
+      # way and shipped beside deno as typescript-check/: type checking never
+      # downloads a compiler.
+      - name: Fetch TypeScript (check)
+        run: |
+          set -euo pipefail
+          py=python3; command -v python3 >/dev/null 2>&1 || py=python
+          "$py" -I .github/denext-runtime/fetch_typescript.py check "$TARGET" "$RUNNER_TEMP/typescript-check"
+
       - name: Assemble
         env:
           DENO_BIN: target/release/${{ runner.os == 'Windows' && 'deno.exe' || 'deno' }}
           DENORT_BIN: target/release/${{ runner.os == 'Windows' && 'denort.exe' || 'denort' }}
           ESBUILD_DIR: ${{ runner.temp }}/esbuild
+          TYPESCRIPT_LSP_DIR: ${{ runner.temp }}/typescript-lsp
+          TYPESCRIPT_CHECK_DIR: ${{ runner.temp }}/typescript-check
           OUT_DIR: dist
           DENO_VERSION: ${{ needs.setup.outputs.deno_version }}
           DENO_SHA: ${{ github.sha }}
@@ -1107,7 +1129,9 @@ jobs:
           \`deno-cli-*\` is this fork's own \`deno\` CLI (Vitest compatibility in \`deno test\`,
           \`Deno.SQL\`, ...): unpack it and run \`deno\` (\`deno.exe\` on Windows). Beside it is
           the official esbuild ${ESBUILD_VERSION} (\`esbuild.LICENSE\`), which \`deno bundle\` uses
-          instead of downloading one. The CLI's
+          instead of downloading one, and in \`typescript-check/\` the official native TypeScript 7.0 compiler
+          (Apache-2.0), which \`deno check\` and the other type-checking commands run
+          (\`--check-engine=tsc\` keeps the in-process TypeScript 6.0.3). The CLI's
           \`deno --version\` and \`Deno.version.deno\` name this release (\`${TAG#denext-runtime-v}\`).
           They are listed under \`cli\` in \`manifest.json\`.
 

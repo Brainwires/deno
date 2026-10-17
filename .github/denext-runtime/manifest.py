@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Write SHA256SUMS and manifest.json for a directory of runtime archives
 (and the `deno-cli-*` CLI archives, listed under "cli", each with the
-esbuild it ships: version and the binary's sha256; and the `deno-denort-*`
+esbuild it ships: version and the binary's sha256, and the native TypeScript
+compiler in its `typescript-check/`: version, the binary's sha256 and a sha256
+over every file of the directory; and the `deno-denort-*`
 archives `deno compile` builds onto, listed under "denort").
 
 Usage: manifest.py <dist dir>
@@ -85,6 +87,34 @@ def esbuild_of(name, target):
     return {"version": info["version"], "sha256": digest}
 
 
+def typescript_check_of(name, target):
+    """The native TypeScript compiler type checking runs, inside a CLI zip
+    (assemble_cli.sh, `typescript-check/`): its version, from BUILD_INFO.json
+    (fetch_typescript.py check), the sha256 of the binary and a tree sha256
+    (`<name>\\0<sha256>\\n` per file but typescript.json, sorted), each
+    recomputed from the zip: denext pins both."""
+    binary = "tsc.exe" if target.endswith("windows-msvc") else "tsc"
+    prefix = "typescript-check/"
+    with zipfile.ZipFile(os.path.join(dist, name)) as z:
+        names = set(z.namelist())
+        for want in (prefix + binary, prefix + "LICENSE", prefix + "typescript.json", "BUILD_INFO.json"):
+            if want not in names:
+                sys.exit(f"{name} has no {want}")
+        info = json.loads(z.read("BUILD_INFO.json")).get("typescript_check") or {}
+        files = {}
+        for n in sorted(names):
+            if n.startswith(prefix) and not n.endswith("/") and n != prefix + "typescript.json":
+                files[n[len(prefix):]] = hashlib.sha256(z.read(n)).hexdigest()
+    tree = hashlib.sha256()
+    for rel in sorted(files):
+        tree.update(f"{rel}\0{files[rel]}\n".encode())
+    if info.get("sha256") != files.get(binary):
+        sys.exit(f"{name}: {prefix}{binary} sha256 {files.get(binary)} != BUILD_INFO.json {info.get('sha256')}")
+    if not info.get("version"):
+        sys.exit(f"{name}: BUILD_INFO.json names no typescript_check version")
+    return {"version": info["version"], "sha256": files[binary], "tree_sha256": tree.hexdigest()}
+
+
 targets = {}
 cli_targets = {}
 denort_targets = {}
@@ -108,6 +138,7 @@ for name in sorted(os.listdir(dist)):
             "binary": "deno.exe" if m["target"].endswith("windows-msvc") else "deno",
             **describe(name, m["ext"]),
             "esbuild": esbuild_of(name, m["target"]),
+            "typescript_check": typescript_check_of(name, m["target"]),
         }
 
 if not targets and not (env.get("CLI_ONLY") == "1" and cli_targets):

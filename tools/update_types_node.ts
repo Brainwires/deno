@@ -19,8 +19,10 @@ import {
   VariableDeclaration,
 } from "jsr:@ts-morph/ts-morph@27.0.2";
 
-const typesNodeVersion = "24.2.0";
 const rootDir = $.path(import.meta.url).parentOrThrow().parentOrThrow();
+// Single source of truth: the same pin `deno check` installs for projects that
+// don't bring their own @types/node.
+const typesNodeVersion = readPinnedTypesNodeVersion();
 const dtsDir = rootDir.join("cli/tsc/dts/");
 const nodeTypesDir = dtsDir.join("node");
 const undiciTypesDir = nodeTypesDir.join("undici");
@@ -350,12 +352,6 @@ function aliasWebStreamGlobals(
 
 function handleInterface(decl: InterfaceDeclaration) {
   switch (decl.getName()) {
-    case "ImportMeta": {
-      // make these align with our ImportMeta, which is optional
-      decl.getPropertyOrThrow("dirname").setHasQuestionToken(true);
-      decl.getPropertyOrThrow("filename").setHasQuestionToken(true);
-      break;
-    }
     case "Blob":
     case "ByteLengthQueuingStrategy":
     case "CompressionStream":
@@ -439,7 +435,12 @@ function handleVarDecl(decl: VariableDeclaration) {
       decl.remove();
       break;
     case "URLPattern":
-      decl.remove();
+      // Unlike its sibling web globals, `@types/node` declares `var URLPattern`
+      // *unconditionally* (no `typeof globalThis extends { onmessage: any; ... }`
+      // guard), so it cannot defer to a Deno declaration. Deno concedes the
+      // `URLPattern` constructor to `@types/node` (keeping only the interface in
+      // its own libs), so keep this declaration - it is the sole provider of the
+      // `URLPattern` value in a single global table.
       break;
     default:
       console.log(decl.getName());
@@ -526,4 +527,15 @@ function isKnownModuleSpecifier(text: string) {
     default:
       return text.startsWith("node:");
   }
+}
+
+function readPinnedTypesNodeVersion(): string {
+  const path = rootDir.join("cli/tools/installer/npm_compat.rs");
+  const match = /TYPES_NODE_VERSION: &str = "([^"]+)"/.exec(
+    path.readTextSync(),
+  );
+  if (match == null) {
+    throw new Error(`Could not find TYPES_NODE_VERSION in ${path}`);
+  }
+  return match[1];
 }

@@ -210,6 +210,7 @@ pub fn convert(result: ParseResult) -> Result<Flags, CliError> {
     }
     Some("types") => types_parse(&mut flags),
     Some("lsp") => lsp_parse(&mut flags),
+    Some("sync-types") => sync_types_parse(&result, &mut flags),
     Some("vendor") => vendor_parse(&mut flags),
     Some("deploy") => deploy_parse(&mut flags, false),
     Some("sandbox") => deploy_parse(&mut flags, true),
@@ -318,6 +319,7 @@ fn default_parse(
       "approve-scripts",
       "types",
       "lsp",
+      "sync-types",
       "vendor",
       "deploy",
       "sandbox",
@@ -460,6 +462,9 @@ fn global_args_parse(result: &ParseResult, flags: &mut Flags) {
   }
   if result.get_bool("quiet") {
     flags.log_level = Some(log::Level::Error);
+  }
+  if let Some(engine) = result.get_one("check-engine") {
+    flags.check_engine = engine.parse().ok();
   }
 }
 
@@ -935,10 +940,6 @@ fn unstable_args_parse(result: &ParseResult, flags: &mut Flags) {
     (
       "unstable-raw-imports",
       Some(|c: &mut UnstableConfig| c.raw_imports = true),
-    ),
-    (
-      "unstable-tsgo",
-      Some(|c: &mut UnstableConfig| c.tsgo = true),
     ),
     ("unstable-ffi", None),
     ("unstable-worker-options", None),
@@ -2947,6 +2948,16 @@ fn types_parse(flags: &mut Flags) {
 
 fn lsp_parse(flags: &mut Flags) {
   flags.subcommand = DenoSubcommand::Lsp;
+}
+
+fn sync_types_parse(result: &ParseResult, flags: &mut Flags) {
+  allow_and_deny_import_parse(result, flags);
+  flags.subcommand = DenoSubcommand::SyncTypes(SyncTypesFlags {
+    roots: result
+      .get_many("roots")
+      .map(|v| v.iter().map(|s| s.to_string()).collect())
+      .unwrap_or_default(),
+  });
 }
 
 fn vendor_parse(flags: &mut Flags) {

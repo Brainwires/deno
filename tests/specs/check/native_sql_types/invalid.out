@@ -1,0 +1,7 @@
+Check [WILDCARD]invalid.ts
+TS2322 [ERROR]: Type 'SQLConstructor' is not assignable to type 'string'.
+const n: string = Deno.SQL;
+      ^
+    at [WILDCARD]invalid.ts:2:7
+
+error: Type checking failed.

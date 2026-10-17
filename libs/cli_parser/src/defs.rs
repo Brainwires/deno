@@ -524,10 +524,6 @@ ArgDef::new("unstable-bare-node-builtins")
     .set_true()
     .hidden()
     .help("Enable unstable Temporal API"),
-  ArgDef::new("unstable-tsgo")
-    .long("unstable-tsgo")
-    .set_true()
-    .hidden(),
   ArgDef::new("unstable-unsafe-proto")
     .long("unstable-unsafe-proto")
     .long_aliases(&["unsafe-proto"])
@@ -2757,6 +2753,40 @@ pub static LSP_SUBCOMMAND: CommandDef = CommandDef {
   keep_double_dash: false,
 };
 
+pub static SYNC_TYPES_SUBCOMMAND: CommandDef = CommandDef {
+  name: "sync-types",
+  about: "Generate a tsconfig.json and type mappings so stock TypeScript tooling can type-check the project",
+  aliases: &[],
+  args: &[
+    ArgDef::new("roots")
+      .positional()
+      .action(ArgAction::Append)
+      .num_args(NumArgs::ZeroOrMore)
+.help("Module graph roots to use for dependency discovery"),
+    ArgDef::new("allow-import")
+      .short('I')
+      .long("allow-import")
+      .action(ArgAction::Append)
+      .num_args(NumArgs::ZeroOrMore)
+      .require_equals()
+      .value_delimiter(',')
+.help("Allow importing from remote hosts. Optionally specify allowed IP addresses and host names, with ports as necessary. Default value: deno.land:443,jsr.io:443,esm.sh:443,raw.esm.sh:443,cdn.jsdelivr.net:443,raw.githubusercontent.com:443,gist.githubusercontent.com:443"),
+    ArgDef::new("deny-import")
+      .long("deny-import")
+      .action(ArgAction::Append)
+      .num_args(NumArgs::ZeroOrMore)
+      .require_equals()
+      .value_delimiter(',')
+.help("Deny importing from remote hosts. Optionally specify denied IP addresses and host names, with ports as necessary."),
+  ],
+  arg_groups: &[UNSTABLE_DEPRECATED_ARG, UNSTABLE_FEATURE_ARGS],
+  subcommands: &[],
+  default_subcommand: None,
+  trailing_var_arg: false,
+  passthrough: false,
+  keep_double_dash: false,
+};
+
 pub static VENDOR_SUBCOMMAND: CommandDef = CommandDef {
   name: "vendor",
   about: "`deno vendor` was removed in Deno 2.\n\nSee the Deno 1.x to 2.x Migration Guide for migration instructions: https://docs.deno.com/runtime/manual/advanced/migrate_deprecations",
@@ -3061,6 +3091,16 @@ pub static GLOBAL_ARGS: &[ArgDef] = &[
     .set_true()
     .global()
 .help("Suppress diagnostic output"),
+  // denext: hidden so every subcommand's help stays as it was; documented
+  // with its env equivalent `DENO_CHECK_ENGINE`.
+  ArgDef::new("check-engine")
+    .long("check-engine")
+    .action(ArgAction::Set)
+    .num_args(NumArgs::Exact(1))
+    .value_parser(ValueParser::Choices(&["native", "tsc"]))
+    .global()
+    .hidden()
+.help("Type-check with the native TypeScript 7 compiler (native, the default) or the in-process TypeScript 6.0.3 (tsc)"),
 ];
 
 pub static DESKTOP_SUBCOMMAND: CommandDef = CommandDef {
@@ -3488,6 +3528,7 @@ pub static DENO_ROOT: CommandDef = CommandDef {
     UNLINK_SUBCOMMAND,
     APPROVE_SCRIPTS_SUBCOMMAND,
     LSP_SUBCOMMAND,
+    SYNC_TYPES_SUBCOMMAND,
     VENDOR_SUBCOMMAND,
     BUNDLE_SUBCOMMAND,
     AUDIT_SUBCOMMAND,

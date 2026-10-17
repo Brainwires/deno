@@ -63,6 +63,7 @@ pub(crate) const IMPORT_COMMIT_CHARS: &[&str] = &["\"", "'"];
 pub enum CompletionItemData {
   Documentation(DocumentationCompletionItemData),
   TsJs(tsc::TsJsCompletionItemData),
+  TsGo(super::tsgo::TsGoCompletionItemData),
 }
 
 /// The set of LSP services used to compute import completions.

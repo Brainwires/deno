@@ -610,9 +610,9 @@ impl ModuleGraphCreator {
             },
           )
           .await?;
-        self.type_check_graph(type_check_graph)?;
+        self.type_check_graph(type_check_graph).await?;
       } else {
-        self.type_check_graph(graph.clone())?;
+        self.type_check_graph(graph.clone()).await?;
       }
     }
 
@@ -692,7 +692,7 @@ impl ModuleGraphCreator {
 
     if self.options.type_check_mode().is_true() {
       // provide the graph to the type checker, then get it back after it's done
-      let graph = self.type_check_graph(graph)?;
+      let graph = self.type_check_graph(graph).await?;
       Ok(graph)
     } else {
       Ok(Arc::new(graph))
@@ -703,19 +703,22 @@ impl ModuleGraphCreator {
     self.module_graph_builder.graph_valid(graph)
   }
 
-  fn type_check_graph(
+  async fn type_check_graph(
     &self,
     graph: ModuleGraph,
   ) -> Result<Arc<ModuleGraph>, CheckError> {
-    self.type_checker.check(
-      graph,
-      CheckOptions {
-        build_fast_check_graph: true,
-        lib: self.options.ts_type_lib_window(),
-        reload: self.options.reload_flag(),
-        type_check_mode: self.options.type_check_mode(),
-      },
-    )
+    self
+      .type_checker
+      .check_graph(
+        graph,
+        CheckOptions {
+          build_fast_check_graph: true,
+          lib: self.options.ts_type_lib_window(),
+          reload: self.options.reload_flag(),
+          type_check_mode: self.options.type_check_mode(),
+        },
+      )
+      .await
   }
 }
 
@@ -1271,7 +1274,7 @@ impl ModuleGraphBuilder {
     }
   }
 
-  fn maybe_resolve_ts_config_imports(
+  pub(crate) fn maybe_resolve_ts_config_imports(
     &self,
     graph_kind: GraphKind,
   ) -> Vec<deno_graph::ReferrerImports> {

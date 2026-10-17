@@ -535,6 +535,13 @@ impl InitializeParamsBuilder {
     self
   }
 
+  /// `deno.unstable` as a list of unstable feature names (e.g. `tsgo-lsp`).
+  pub fn set_unstable_features(&mut self, features: &[&str]) -> &mut Self {
+    let options = self.initialization_options_mut();
+    options.insert("unstable".to_string(), json!(features));
+    self
+  }
+
   pub fn set_force_push_based_diagnostics(&mut self, value: bool) -> &mut Self {
     let options = self.initialization_options_mut();
     options.insert("forcePushBasedDiagnostics".to_string(), value.into());
@@ -659,6 +666,26 @@ impl LspClientBuilder {
     self
       .envs
       .insert(key.as_ref().to_owned(), value.as_ref().to_owned());
+    self
+  }
+
+  /// Run `deno lsp` on the TypeScript 7 (tsgo) language-service backend
+  /// (denext): `DENO_UNSTABLE_TSGO_LSP=1` with the pinned tsgo build from
+  /// [`tsgo_lsp_bin`]. `deno sync-types` is left on unless a test turns it off.
+  pub fn set_use_tsgo(mut self, use_tsgo: bool) -> Self {
+    if use_tsgo {
+      self
+        .envs
+        .insert("DENO_UNSTABLE_TSGO_LSP".into(), "1".into());
+      self.envs.insert(
+        "DENO_TSGO_LSP_BIN".into(),
+        tsgo_lsp_bin().to_string().into(),
+      );
+    } else {
+      self
+        .envs
+        .insert("DENO_UNSTABLE_TSGO_LSP".into(), "0".into());
+    }
     self
   }
 
@@ -1791,4 +1818,54 @@ mod tests {
     let mut reader1 = std::io::Cursor::new(msg1);
     read_message(&mut reader1).unwrap();
   }
+}
+
+/// The pinned TypeScript 7 build the tsgo LSP tests run (denext): the
+/// `DENO_TSGO_LSP_BIN` override, else `target/typescript-lsp-<version>/`,
+/// fetched once with `.github/denext-runtime/fetch_typescript.py` (verified
+/// against `cli/tsc/typescript_pins.json`).
+pub fn tsgo_lsp_bin() -> PathRef {
+  static BIN: std::sync::OnceLock<PathRef> = std::sync::OnceLock::new();
+  BIN
+    .get_or_init(|| {
+      if let Some(path) =
+        std::env::var_os("DENO_TSGO_LSP_BIN").filter(|p| !p.is_empty())
+      {
+        return PathRef::new(std::path::PathBuf::from(path));
+      }
+      let root = crate::root_path();
+      let pins: serde_json::Value = serde_json::from_str(
+        &root.join("cli/tsc/typescript_pins.json").read_to_string(),
+      )
+      .unwrap();
+      let version = pins["lsp"]["version"].as_str().unwrap().to_string();
+      let dir = crate::target_dir().join(format!("typescript-lsp-{version}"));
+      let exe = dir.join(if cfg!(windows) { "tsc.exe" } else { "tsc" });
+      if !exe.exists() {
+        let platform = match (std::env::consts::OS, std::env::consts::ARCH) {
+          ("linux", "x86_64") => "linux-x64",
+          ("linux", "aarch64") => "linux-arm64",
+          ("macos", "x86_64") => "darwin-x64",
+          ("macos", "aarch64") => "darwin-arm64",
+          ("windows", "x86_64") => "win32-x64",
+          ("windows", "aarch64") => "win32-arm64",
+          (os, arch) => panic!("no tsgo build for {os} {arch}"),
+        };
+        let python = if cfg!(windows) { "python" } else { "python3" };
+        let status = std::process::Command::new(python)
+          .arg("-I")
+          .arg(root.join(".github/denext-runtime/fetch_typescript.py"))
+          .arg("--no-registry-check")
+          .arg("lsp")
+          .arg(platform)
+          .arg(dir.as_path())
+          .stdout(std::process::Stdio::null())
+          .status()
+          .expect("run fetch_typescript.py (python3 is required)");
+        assert!(status.success(), "fetch_typescript.py failed");
+      }
+      assert!(exe.exists(), "missing {exe}");
+      exe
+    })
+    .clone()
 }

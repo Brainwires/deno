@@ -1,74 +1,45 @@
 # tsc
 
-This directory contains the typescript compiler and a small compiler host for
-the runtime snapshot.
+Deno type-checks with one of two engines (DENEXT.md item 43):
 
-## How to upgrade TypeScript.
+- **native** (the default): the native TypeScript 7 compiler (`tsgo`), run as a
+  separate process. It is never downloaded: denext's `deno-cli-*` archives ship
+  it in a `typescript-check/` directory next to `deno` (the binary plus the
+  `lib.*.d.ts` files it loads from its own directory), the `check` role of
+  `typescript_pins.json` (see `native_pin.rs`; fetched for the archives by
+  `.github/denext-runtime/fetch_typescript.py`). `native.rs` finds it
+  (`DENO_TSGO_BIN`, then `typescript-check/` beside the executable, then
+  denext's toolchain cache), runs `tsc --pretty true` and maps its diagnostics
+  (with their related information) back onto Deno's specifiers. The compiler
+  sees a stock project: `tsconfig_gen.rs` and
+  `cli/tools/installer/npm_compat.rs` (the `deno sync-types` work) write
+  `.deno/tsconfig.json`, Deno's own types as a private `@types/deno` under
+  `.deno/types/deno/`, and mirrors of the `jsr:` / `http(s):` / `npm:` types the
+  project uses. `cli/tools/check.rs` (`run_native_check`) drives it, behind
+  Deno's check cache, for `deno check` and every command that type-checks
+  through `TypeChecker::check_graph`.
+- **tsc** (`--check-engine=tsc`, `DENO_CHECK_ENGINE=tsc`): the in-process
+  TypeScript 6.0.3 in `00_typescript.js` with the compiler host in
+  `97_ts_host.js`, snapshotted into the CLI (`mod.rs`, `js.rs`).
+  `deno check
+  --doc` / `--doc-only` always use it, and so does `deno lsp`
+  (`98_lsp.js`) unless its unstable tsgo backend is on (DENEXT.md item 42).
 
-The files in this directory are mostly from the TypeScript repository. We
-currently (unfortunately) have a rather manual process for upgrading TypeScript.
-It works like this currently:
+`dts/` holds Deno's own libs (`lib.deno.*.d.ts`) and TypeScript's
+(`lib.es*.d.ts`, `lib.dom*.d.ts`) for the in-process engine; the native engine
+writes Deno's into the generated `@types/deno` and uses the compiler's own
+`lib.es*` / `lib.dom*`.
 
-1. Checkout denoland/TypeScript repo in a separate directory.
-1. Add Microsoft/TypeScript as a remote and fetch its latest tags
-1. Checkout a new branch based on this tag.
-1. Cherry pick the custom commit we made in a previous release to the new one.
-1. This commit has a "deno.ts" file in it. Read the instructions in it.
-1. Copy typescript.js into Deno repo.
-1. Copy d.ts files into dts directory.
-1. Review the copied files, removing and reverting what's necessary
+## Upgrading the native compiler
 
-So that might look something like this:
+1. `tools/update_typescript_pin.ts check <version>` (the only edit: the Rust
+   code, the release archive and the test harness all read the pins file).
+2. Run the `check` spec tests (the harness fetches the newly pinned binary into
+   `target/` on first use).
 
-```
-git clone https://github.com/denoland/TypeScript.git
-cd typescript
-git remote add upstream https://github.com/Microsoft/TypeScript
-git fetch upstream
-git checkout v3.9.7
-git checkout -b branch_v3.9.7
-git cherry pick <previous-release-branch-commit-we-did>
-npm install
-npx hereby
-rsync built/local/typescript.js ~/src/deno/cli/tsc/00_typescript.js
-rsync --exclude=protocol.d.ts --exclude=tsserverlibrary.d.ts --exclude=typescriptServices.d.ts built/local/*.d.ts ~/src/deno/cli/tsc/dts/
-```
+## Upgrading the in-process TypeScript
 
-## Typescript-Go Integration
-
-Currently only integrated with deno check, though in the future it will also be
-integrated with our LSP implementation.
-
-In the CLI, we have a small abstraction over the tsc backend in
-[cli/tsc/mod.rs](./mod.rs). Along with some shared types and functionality, the
-main piece is the `exec` function, which takes a "request" to be served by the
-typescript compiler and returns the result. This now has two different "backend"
-which can serve the request – the current tsc, which runs in an isolate and
-communicates via ops, and typescript-go which runs in a subprocess and uses IPC.
-
-From a high level, the way the tsgo backend works is that we download a
-typescript-go binary from
-[github releases](https://github.com/denoland/typescript-go/releases) into the
-deno cache dir. To actually interface with tsgo, we spawn it in a subprocess and
-write messages over stdin/stdout (similar to the Language Server Protocol). The
-format is a mixture of binary data (for the header and other protocol level
-details) followed by json encoded values for RPC calls. The rust implementation
-of the IPC protocol is in the
-[deno_typescript_go_client_rust crate](../libs/typescript_go_client/src/lib.rs).
-
-We currently maintain a
-[fork of typescript-go](https://github.com/denoland/typescript-go) with the
-following changes:
-
-- Special handling of the global symbol tables to account for the fact that we
-  have two slightly different sets of globals: one for node contexts (in npm
-  packages), and one for deno contexts. At this point, the main difference is
-  the type returned by `setTimeout`. With node globals `setTimeout` returns an
-  object, and with deno globals it returns a number (just like the web
-  standard).
-- Symbol table logic to prevent @types/node from creating type errors by
-  introducing incompatible definitions for globals
-- Additional hooks to allow us to provide our own resolution, determine whether
-  a file is esm/cjs, etc.
-- Additional APIs exposed from the IPC server
-- Support for deno's custom libs (`deno.window`, `deno.worker`, etc)
+`00_typescript.js` is stock `typescript` from npm (no patches since
+denoland/deno#35642): copy the release's `lib/typescript.js` over it and its
+`lib/lib.*.d.ts` into `dts/`, then follow `tools/update_typescript.md` for the
+rest of the checklist.

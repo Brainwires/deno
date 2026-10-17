@@ -12,6 +12,19 @@
       "args": "check --desktop invalid.ts",
       "output": "invalid.out",
       "exitCode": 1
+    },
+    // denext: the native compiler sorts unions (TypeScript 7's stable type
+    // ordering) and reports no related information; the in-process
+    // TypeScript 6.0.3 fallback keeps its own form.
+    "valid_tsc": {
+      "args": "check --check-engine=tsc --desktop valid.ts",
+      "output": "Check [WILDCARD]valid.ts\n",
+      "exitCode": 0
+    },
+    "invalid_tsc": {
+      "args": "check --check-engine=tsc --desktop invalid.ts",
+      "output": "invalid_tsc.out",
+      "exitCode": 1
     }
   }
 }

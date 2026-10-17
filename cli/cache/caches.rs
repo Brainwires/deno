@@ -117,6 +117,16 @@ impl Caches {
     )
   }
 
+  /// `DENO_DIR`, when it can be created (the native type checker looks for
+  /// denext's toolchain cache there).
+  pub fn deno_dir_root(&self) -> Option<PathBuf> {
+    self
+      .dir_provider
+      .get_or_create()
+      .ok()
+      .map(|dir| dir.root.clone())
+  }
+
   pub fn type_checking_cache_db(&self) -> CacheDB {
     Self::make_db(
       &self.type_checking_cache_db,
