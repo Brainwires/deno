@@ -3746,6 +3746,7 @@
     "parallel/test-stream2-readable-wrap-destroy.js": {},
     "parallel/test-stream2-readable-wrap-empty.js": {},
     "parallel/test-stream2-readable-wrap-error.js": {},
+    "parallel/test-stream2-readable-wrap-proxy-methods.js": {},
     "parallel/test-stream2-readable-wrap.js": {},
     "parallel/test-stream2-set-encoding.js": {},
     "parallel/test-stream2-transform.js": {},
