@@ -2426,6 +2426,29 @@ Deno.test(function inspectProxy() {
     `{}`,
   );
 
+  // A revoked proxy is printed as `<Revoked Proxy>`, like Node's inspect,
+  // without touching the proxy (any trap or property access would throw).
+  // https://github.com/denoland/deno/pull/33642
+  {
+    const { proxy, revoke } = Proxy.revocable({ a: 1 }, {});
+    revoke();
+    assertEquals(stripAnsiCode(Deno.inspect(proxy)), "<Revoked Proxy>");
+    assertEquals(
+      stripAnsiCode(Deno.inspect(proxy, { showProxy: true })),
+      "<Revoked Proxy>",
+    );
+    assertEquals(
+      stripAnsiCode(Deno.inspect({ p: proxy })),
+      "{ p: <Revoked Proxy> }",
+    );
+    const { proxy: inner, revoke: revokeInner } = Proxy.revocable({}, {});
+    revokeInner();
+    assertEquals(
+      stripAnsiCode(Deno.inspect(new Proxy(inner, {}))),
+      "<Revoked Proxy>",
+    );
+  }
+
   // Issue: https://github.com/denoland/deno/issues/26355
   // A proxy whose `ownKeys` trap violates the invariant (returns a
   // non-Object) must not throw — Node.js returns the target's inspection.

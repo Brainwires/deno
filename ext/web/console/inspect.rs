@@ -600,13 +600,11 @@ pub fn format_value<'s, 'i>(
     let target = proxy.get_target(scope);
     let handler = proxy.get_handler(scope);
     // A revoked proxy has null target/handler. Proceeding would feed `null`
-    // into `format_raw` (which expects an object) and abort the process; the
-    // old JS threw a catchable TypeError instead.
+    // into `format_raw` (which expects an object) and abort the process.
+    // Node's `inspect` prints `<Revoked Proxy>` without touching the value
+    // (`lib/internal/util/inspect.js`, `formatValue`), and so does this.
     if target.is_null() || handler.is_null() {
-      return Err(type_err(
-        scope,
-        "Cannot inspect a proxy that has been revoked",
-      ));
+      return ctx.stylize(scope, "<Revoked Proxy>", "special");
     }
     if !ctx.show_proxy {
       // Inspect the underlying target directly. Unwrap nested proxies fully so
@@ -617,10 +615,7 @@ pub fn format_value<'s, 'i>(
       while let Ok(inner) = v8::Local::<v8::Proxy>::try_from(value) {
         let inner_target = inner.get_target(scope);
         if inner_target.is_null() || inner.get_handler(scope).is_null() {
-          return Err(type_err(
-            scope,
-            "Cannot inspect a proxy that has been revoked",
-          ));
+          return ctx.stylize(scope, "<Revoked Proxy>", "special");
         }
         value = inner_target;
       }
