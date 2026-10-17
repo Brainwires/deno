@@ -441,6 +441,7 @@ ArgDef::new("unstable-bare-node-builtins")
   ArgDef::new("no-detect-cjs")
     .long("no-detect-cjs")
     .set_true()
+    .hidden()
 .help("Treat ambiguous .js, .jsx, .ts and .tsx files as ES modules: no CommonJS\n  detection for files without an explicit \"type\" in their package.json"),
   ArgDef::new("unstable-detect-cjs")
     .long("unstable-detect-cjs")
