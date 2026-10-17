@@ -384,10 +384,17 @@ export interface ProcInfo {
   state: string;
 }
 
-/** Every process on the machine (Linux: /proc/<pid>/stat; macOS: ps). */
-export async function processTable(): Promise<Map<number, ProcInfo>> {
+/** Every process on the machine (Linux: /proc/<pid>/stat; macOS: ps).
+ * Windows: none. Its launches are ended with `taskkill /T` and killByPath's
+ * PowerShell, and Windows has no `ps`: a plain machine has none at all (the
+ * spawn threw), and the one Git for Windows puts on a runner's PATH takes no
+ * `-A` / `-o`, so the table there was always empty too. */
+export async function processTable(
+  os: typeof Deno.build.os = OS,
+): Promise<Map<number, ProcInfo>> {
   const t = new Map<number, ProcInfo>();
-  if (OS === "linux") {
+  if (os === "windows") return t;
+  if (os === "linux") {
     const reads: Promise<void>[] = [];
     for await (const e of Deno.readDir("/proc")) {
       if (!/^\d+$/.test(e.name)) continue;
@@ -563,13 +570,18 @@ export async function kill(l: Launched | number, artifact?: string) {
 /** The pids whose executable lives under `dir` (Linux: the /proc/<pid>/exe
  * link, which a /proc/self/exe re-exec keeps; macOS: ps's comm, the
  * executable's path as launched). */
-export async function pidsUnder(dir: string): Promise<number[]> {
+export async function pidsUnder(
+  dir: string,
+  os: typeof Deno.build.os = OS,
+): Promise<number[]> {
+  // Windows: none, as processTable (no `ps` there).
+  if (os === "windows") return [];
   const roots = new Set([dir.replace(/\/+$/, "")]);
   roots.add((await Deno.realPath(dir).catch(() => dir)).replace(/\/+$/, ""));
   const under = (exe: string) =>
     [...roots].some((d) => exe === d || exe.startsWith(d + "/"));
   const pids: number[] = [];
-  if (OS === "linux") {
+  if (os === "linux") {
     for await (const e of Deno.readDir("/proc")) {
       if (!/^\d+$/.test(e.name)) continue;
       const exe = await Deno.readLink(`/proc/${e.name}/exe`).catch(() => "");

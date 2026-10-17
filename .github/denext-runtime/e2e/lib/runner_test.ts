@@ -10,6 +10,7 @@ const {
   kill,
   killByPath,
   launch,
+  pidsUnder,
   processTable,
   ProcessTree,
   results,
@@ -234,4 +235,14 @@ addEventListener("unload", () => {
   try {
     Deno.removeSync(dir, { recursive: true });
   } catch { /* gone */ }
+});
+
+Deno.test("Windows lists no processes and spawns no ps", async () => {
+  // A plain Windows machine has no `ps` (the spawn threw NotFound and failed
+  // every area), and Git for Windows' takes no -A / -o: the table is empty
+  // there by design, and launches end through taskkill /T and killByPath.
+  const t = await processTable("windows");
+  assert(t.size === 0, "processTable on Windows", [...t.keys()]);
+  const under = await pidsUnder(Deno.cwd(), "windows");
+  assert(under.length === 0, "pidsUnder on Windows", under);
 });

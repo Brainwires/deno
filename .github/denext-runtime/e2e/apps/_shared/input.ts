@@ -371,6 +371,13 @@ export async function activate(title: string): Promise<boolean> {
         w.keybd_event(0x12, 0, 0, 0n);
         w.BringWindowToTop(h);
         w.SetForegroundWindow(h);
+        // A key between the Alt press and its release, so the release is not
+        // an Alt tap: a tap that reaches the window (now the foreground one)
+        // opens its menu bar's keyboard mode, where the accelerator pressed
+        // next is a menu key and never fires (seen on a Windows on Arm VM's
+        // console session, WebView2). F24 is bound to nothing.
+        w.keybd_event(0x87, 0, 0, 0n);
+        w.keybd_event(0x87, 0, 2, 0n);
         w.keybd_event(0x12, 0, 2, 0n);
         if (attach) w.AttachThreadInput(ownTid, fgTid, 0);
         await new Promise((r) => setTimeout(r, 100));

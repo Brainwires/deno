@@ -40,13 +40,26 @@ import {
 
 const r = new Report("menus");
 
-/** After `activate` failed: the runner limitation that explains it (recorded
- * with its evidence under `foreground:<what>`), or null when the window is
- * at fault, so the check below runs and fails with its own evidence. */
-function noForeground(what: string): string | null {
+/** After `activate`: when it failed, the runner limitation that explains it,
+ * or null when the window is at fault, so the check below runs and fails with
+ * its own evidence; null when it succeeded. On Windows the evidence is
+ * recorded under `foreground:<what>` either way.
+ *
+ * The refusal is a runner's: GitHub's windows-11-arm runner keeps the
+ * foreground on a shell window (WWAHost.exe), so these checks are n/a there,
+ * while the console session of a Windows on Arm VM (QEMU, WARP rendering)
+ * hands it over and they pass on both backends (denext.21, 2026-10-17). A
+ * shell popup left open (a OneDrive prompt, ShellExperienceHost.exe) refuses
+ * it on any machine until it is dismissed. */
+function noForeground(what: string, activated: boolean): string | null {
+  if (activated && OS !== "windows") return null;
   const { refusal, evidence } = foregroundDiagnosis(TITLE);
-  r.set(`foreground:${what}`, { refusal, ...evidence });
-  return refusal;
+  r.set(`foreground:${what}`, {
+    activated,
+    refusal: activated ? null : refusal,
+    ...evidence,
+  });
+  return activated ? null : refusal;
 }
 const identifier: string = r.params.identifier;
 const responses: any[] = [];
@@ -197,7 +210,7 @@ await r.step("menus", async () => {
     // it was this one when they were pressed.
     const atPress = isForeground(TITLE);
     r.mark(`accelerator press (foreground: ${foreground}, ${atPress})`);
-    const refused = foreground ? null : noForeground("accelerator");
+    const refused = noForeground("accelerator", foreground);
     if (refused) {
       r.na(
         "an application-menu accelerator fires its item",
@@ -247,9 +260,7 @@ await r.step("menus", async () => {
   }
   // A menu takes the keyboard only from its window in the foreground.
   win.focus();
-  const ctxRefused = await activate(TITLE)
-    ? null
-    : noForeground("context menu");
+  const ctxRefused = noForeground("context menu", await activate(TITLE));
   if (ctxRefused) {
     r.na(
       "a context menu dismissed / chosen from the keyboard",
