@@ -2061,7 +2061,7 @@ function spawnSync(
       stdin: stdin_deno,
       uid,
       gid,
-      clearEnv: false,
+      clearEnv: true,
       extraStdio: extraStdioNormalized,
       windowsRawArguments: windowsVerbatimArguments,
       windowsHide,
