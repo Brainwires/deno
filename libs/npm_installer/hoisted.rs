@@ -986,7 +986,12 @@ impl<
     // A package an earlier install already put here (same name and version)
     // stays as it is, as npm leaves it: no copy, no "Initialize", and its
     // lifecycle scripts don't run again (`HoistedLifecycleScripts::has_run`).
-    let installed = is_installed_at(&self.sys, &package_path, &package.id.nv);
+    // (`--reload` copies it again, as the isolated layout does)
+    let installed = self
+      .npm_cache
+      .cache_setting()
+      .should_use_for_npm_package(&package.id.nv.name)
+      && is_installed_at(&self.sys, &package_path, &package.id.nv);
     let mut pb_guard = None;
     let mut _initialization_guard = None;
     let handle = if installed {
