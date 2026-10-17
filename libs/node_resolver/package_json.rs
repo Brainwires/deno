@@ -203,12 +203,15 @@ mod tests {
       resolver
         .get_package_scope_config(Path::new(path))
         .unwrap()
-        .map(|pkg_json| pkg_json.path.display().to_string())
+        .map(|pkg_json| pkg_json.path.clone())
     };
-    assert_eq!(scope("/app/main.js").as_deref(), Some("/app/package.json"));
     assert_eq!(
-      scope("/app/node_modules/pkg/lib/a.js").as_deref(),
-      Some("/app/node_modules/pkg/package.json")
+      scope("/app/main.js"),
+      Some(Path::new("/app").join("package.json"))
+    );
+    assert_eq!(
+      scope("/app/node_modules/pkg/lib/a.js"),
+      Some(Path::new("/app/node_modules/pkg").join("package.json"))
     );
     // a folder with no package.json under node_modules is no package's
     assert_eq!(scope("/app/node_modules/loose/dep.js"), None);
