@@ -1108,6 +1108,27 @@ where the changes are discussed.
     and the no-op on a real `destroy()`; it hangs on `denext.21` and on Node
     26.5.1, passes on Node 24.18).
 
+45. **`feat`: CommonJS detection by default** (behavior change;
+    `IsCjsResolutionMode::for_project` in `libs/resolver/cjs/mod.rs`). An
+    ambiguous JavaScript file (`.js`, `.jsx` with no `"type"` in its
+    package.json, or with no package.json) is now CommonJS unless it uses ES
+    module syntax (`import`/`export`, `import.meta`, top-level `await`), as in
+    Node (`--experimental-detect-module`, the default since 22.7), in a project
+    with a package.json and when there is no config file at all. Before, such a
+    file was always ESM and `require` threw "require is not defined" unless
+    `--unstable-detect-cjs` was passed. TypeScript files (`.ts`, `.tsx`) keep
+    Deno's ESM default unless their package.json says `"type": "commonjs"` (Node
+    detects those too, but a config-less `.ts` script or test is Deno's own
+    territory; as CommonJS its stack traces gain `node:module` frames). A
+    project with only a deno.json keeps ESM for every file, and so does a
+    package.json with `"type": "module"`. Opt out with `--no-detect-cjs` or
+    `DENO_NO_DETECT_CJS=1` (the previous behavior: CommonJS only with
+    `"type": "commonjs"`); `--unstable-detect-cjs` and
+    `"unstable": ["detect-cjs"]` still force detection for every ambiguous file.
+    The LSP uses the same rule. Not covered: Node's retry as ESM when a file
+    redeclares a CommonJS wrapper name (`const require = ...`). Spec:
+    `node/cjs_detect_default`.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41) are what the prebuilt
 `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are

@@ -34,7 +34,6 @@ use deno_npm_installer::lifecycle_scripts::NullLifecycleScriptsExecutor;
 use deno_npm_installer::process_state::NpmProcessStateKind;
 use deno_npmrc::ResolvedNpmRc;
 use deno_resolver::cache::ParsedSourceCache;
-use deno_resolver::cjs::IsCjsResolutionMode;
 use deno_resolver::deno_json::CompilerOptionsOverrides;
 use deno_resolver::deno_json::CompilerOptionsResolver;
 use deno_resolver::factory::ConfigDiscoveryOption;
@@ -1473,15 +1472,7 @@ impl CliFactory {
               Ok("1") | Ok("true")
             ),
           },
-          is_cjs_resolution_mode: if options.is_node_main()
-            || options.unstable_detect_cjs()
-          {
-            IsCjsResolutionMode::ImplicitTypeCommonJs
-          } else if options.detect_cjs() {
-            IsCjsResolutionMode::ExplicitTypeCommonJs
-          } else {
-            IsCjsResolutionMode::Disabled
-          },
+          is_cjs_resolution_mode: options.cjs_resolution_mode(),
           newest_dependency_date: self.flags.minimum_dependency_age,
           node_analysis_cache: Some(node_analysis_cache),
           node_resolver_options: NodeResolverOptions {

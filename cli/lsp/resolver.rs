@@ -1357,14 +1357,19 @@ impl<'a> ResolverFactory<'a> {
       Arc::new(CliIsCjsResolver::new(
         self.in_npm_pkg_checker().clone(),
         self.pkg_json_resolver().clone(),
-        if self
-          .config_data
-          .is_some_and(|d| d.unstable.contains("detect-cjs"))
-        {
-          IsCjsResolutionMode::ImplicitTypeCommonJs
-        } else {
-          IsCjsResolutionMode::ExplicitTypeCommonJs
-        },
+        // the same default as the CLI (`CliOptions::cjs_resolution_mode`)
+        IsCjsResolutionMode::for_project(
+          self
+            .config_data
+            .is_some_and(|d| d.maybe_pkg_json().is_some()),
+          self
+            .config_data
+            .is_some_and(|d| d.maybe_deno_json().is_some()),
+          std::env::var_os("DENO_NO_DETECT_CJS").is_some_and(|v| v == "1"),
+          self
+            .config_data
+            .is_some_and(|d| d.unstable.contains("detect-cjs")),
+        ),
       ))
     })
   }

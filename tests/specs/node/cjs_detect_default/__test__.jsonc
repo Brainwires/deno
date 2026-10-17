@@ -1,0 +1,71 @@
+{
+  // An ambiguous .js file is CommonJS unless it uses ES module syntax (Node's
+  // detect-module), in a package.json project and with no config file at all;
+  // .ts files keep ESM.
+  // A deno.json-only project keeps ESM; --no-detect-cjs and
+  // DENO_NO_DETECT_CJS=1 restore the previous defaults.
+  "tempDir": true,
+  "tests": {
+    "no_config_require": {
+      "cwd": "no_config",
+      "args": "run -R main.js",
+      "output": "cjs object\n"
+    },
+    "no_config_tla_is_esm": {
+      "cwd": "no_config",
+      "args": "run tla.js",
+      "output": "esm 42\n"
+    },
+    "no_config_import_meta_is_esm": {
+      "cwd": "no_config",
+      "args": "run meta.js",
+      "output": "esm string\n"
+    },
+    "no_config_ts_stays_esm": {
+      // TypeScript keeps Deno's ES module default
+      "cwd": "no_config",
+      "args": "run script.ts",
+      "output": "undefined\n"
+    },
+    "pkg_require": {
+      "cwd": "pkg",
+      "args": "run -R main.js",
+      "output": "cjs 3\n"
+    },
+    "pkg_esm_syntax_is_esm": {
+      "cwd": "pkg",
+      "args": "run -R esm.js",
+      "output": "esm 3\n"
+    },
+    "pkg_esm_imports_cjs": {
+      "cwd": "pkg",
+      "args": "run -R esm_imports_cjs.mjs",
+      "output": "3\n"
+    },
+    "deno_json_keeps_esm": {
+      "cwd": "deno_json",
+      "args": "run -R main.js",
+      "output": "require_error.out",
+      "exitCode": 1
+    },
+    "type_module_keeps_esm": {
+      "cwd": "type_module",
+      "args": "run -R main.js",
+      "output": "require_error.out",
+      "exitCode": 1
+    },
+    "opt_out_flag": {
+      "cwd": "pkg",
+      "args": "run -R --no-detect-cjs main.js",
+      "output": "require_error.out",
+      "exitCode": 1
+    },
+    "opt_out_env": {
+      "cwd": "no_config",
+      "args": "run -R main.js",
+      "envs": { "DENO_NO_DETECT_CJS": "1" },
+      "output": "require_error.out",
+      "exitCode": 1
+    }
+  }
+}

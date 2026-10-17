@@ -9,17 +9,26 @@
       "output": "main.out"
     },
     "module_error": {
-      "args": "run module_error.js",
+      "args": "run --no-detect-cjs module_error.js",
       "output": "module_error.out",
       "exitCode": 1
     },
     "exports_error": {
-      "args": "run exports_error.js",
+      "args": "run --no-detect-cjs exports_error.js",
       "output": "exports_error.out",
       "exitCode": 1
     },
+    // CommonJS detection (the default): these are CommonJS modules
+    "module_detected": {
+      "args": "run module_error.js",
+      "output": ""
+    },
+    "exports_detected": {
+      "args": "run exports_error.js",
+      "output": ""
+    },
     "require_error": {
-      "args": "run require_error.js",
+      "args": "run --no-detect-cjs require_error.js",
       "output": "require_error.out",
       "exitCode": 1
     }

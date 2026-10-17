@@ -120,7 +120,9 @@ impl<TInNpmPackageChecker: InNpmPackageChecker, TSys: FsRead + FsMetadata>
       .get_known_mode_with_is_script(specifier, media_type, is_script)
     {
       Some(kind) => kind,
-      None => self.is_cjs_resolver.check_based_on_pkg_json(specifier)?,
+      None => self
+        .is_cjs_resolver
+        .check_based_on_pkg_json(specifier, media_type)?,
     };
     Ok(kind == ResolutionMode::Require)
   }
@@ -169,9 +171,51 @@ pub enum IsCjsResolutionMode {
   ExplicitTypeCommonJs,
   /// Implicitly uses `"type": "commonjs"` if no `"type"` is specified.
   ImplicitTypeCommonJs,
+  /// `ImplicitTypeCommonJs` for untyped JavaScript (`.js`, `.jsx`) and
+  /// `ExplicitTypeCommonJs` for TypeScript (`.ts`, `.tsx`).
+  ImplicitTypeCommonJsUntyped,
   /// Does not respect `"type": "commonjs"` and always treats ambiguous files as ESM.
   #[default]
   Disabled,
+}
+
+impl IsCjsResolutionMode {
+  /// The default mode for a project, with Node's semantics where Node's
+  /// rules apply: an ambiguous JavaScript file (`.js`, `.jsx` without
+  /// `"type"` in its package.json, or with no package.json) is CommonJS
+  /// unless it uses ES module syntax (`import`/`export`, `import.meta`,
+  /// top-level `await`), as Node's `--experimental-detect-module` (on by
+  /// default since Node 22.7) does. That is the default for a project with a
+  /// package.json and for a file run with no config file at all. TypeScript
+  /// files keep Deno's ES module default unless their package.json says
+  /// `"type": "commonjs"` (Deno's config-less `.ts` scripts and tests stay
+  /// ES modules), and a project configured only by a deno.json keeps it for
+  /// every file.
+  ///
+  /// `opted_out` (`--no-detect-cjs` / `DENO_NO_DETECT_CJS=1`) restores the
+  /// previous defaults: only `"type": "commonjs"` makes a file CommonJS, and
+  /// only when there is a package.json. `forced` (`--unstable-detect-cjs`,
+  /// `"unstable": ["detect-cjs"]`, a node-shim launch) always detects.
+  pub fn for_project(
+    has_package_json: bool,
+    has_deno_json: bool,
+    opted_out: bool,
+    forced: bool,
+  ) -> Self {
+    if forced {
+      Self::ImplicitTypeCommonJs
+    } else if opted_out {
+      if has_package_json {
+        Self::ExplicitTypeCommonJs
+      } else {
+        Self::Disabled
+      }
+    } else if has_package_json || !has_deno_json {
+      Self::ImplicitTypeCommonJsUntyped
+    } else {
+      Self::Disabled
+    }
+  }
 }
 
 /// Resolves whether a module is CJS or ESM.
@@ -216,7 +260,7 @@ impl<TInNpmPackageChecker: InNpmPackageChecker, TSys: FsRead + FsMetadata>
         // dts files are always determined based on the package.json because
         // they contain imports/exports even when considered CJS
         self
-          .check_based_on_pkg_json(specifier)
+          .check_based_on_pkg_json(specifier, MediaType::Dts)
           .unwrap_or(ResolutionMode::Import)
       }
       MediaType::Wasm |
@@ -235,7 +279,7 @@ impl<TInNpmPackageChecker: InNpmPackageChecker, TSys: FsRead + FsMetadata>
       | MediaType::Sql
       | MediaType::Unknown => {
         match is_script {
-          Some(true) => self.check_based_on_pkg_json(specifier).unwrap_or(ResolutionMode::Import),
+          Some(true) => self.check_based_on_pkg_json(specifier, MediaType::from_specifier(specifier)).unwrap_or(ResolutionMode::Import),
           Some(false) | None => ResolutionMode::Import,
         }
       }
@@ -263,7 +307,8 @@ impl<TInNpmPackageChecker: InNpmPackageChecker, TSys: FsRead + FsMetadata>
         if let Some(value) = known_cache.get(specifier).map(|v| *v) {
           Some(value)
         } else {
-          let value = self.check_based_on_pkg_json(specifier).ok();
+          let value =
+            self.check_based_on_pkg_json(specifier, media_type).ok();
           if let Some(value) = value {
             known_cache.insert(specifier.clone(), value);
           }
@@ -308,9 +353,24 @@ impl<TInNpmPackageChecker: InNpmPackageChecker, TSys: FsRead + FsMetadata>
     }
   }
 
+  /// Whether an ambiguous file of `media_type` (its content's, so
+  /// `--ext=ts` on a `.js` file is TypeScript) with no `"type"` is CommonJS
+  /// (unless it turns out to use ES module syntax).
+  fn is_implicit_for(&self, media_type: MediaType) -> bool {
+    match self.mode {
+      IsCjsResolutionMode::ImplicitTypeCommonJs => true,
+      IsCjsResolutionMode::ImplicitTypeCommonJsUntyped => {
+        matches!(media_type, MediaType::JavaScript | MediaType::Jsx)
+      }
+      IsCjsResolutionMode::ExplicitTypeCommonJs
+      | IsCjsResolutionMode::Disabled => false,
+    }
+  }
+
   fn check_based_on_pkg_json(
     &self,
     specifier: &Url,
+    media_type: MediaType,
   ) -> Result<ResolutionMode, PackageJsonLoadError> {
     if self.in_npm_pkg_checker.in_npm_package(specifier) {
       let Ok(path) = deno_path_util::url_to_file_path(specifier) else {
@@ -336,14 +396,13 @@ impl<TInNpmPackageChecker: InNpmPackageChecker, TSys: FsRead + FsMetadata>
         self.pkg_json_resolver.get_closest_package_json(&path)?
       {
         let is_cjs_type = pkg_json.typ == "commonjs"
-          || self.mode == IsCjsResolutionMode::ImplicitTypeCommonJs
-            && pkg_json.typ == "none";
+          || self.is_implicit_for(media_type) && pkg_json.typ == "none";
         Ok(if is_cjs_type {
           ResolutionMode::Require
         } else {
           ResolutionMode::Import
         })
-      } else if self.mode == IsCjsResolutionMode::ImplicitTypeCommonJs {
+      } else if self.is_implicit_for(media_type) {
         Ok(ResolutionMode::Require)
       } else {
         Ok(ResolutionMode::Import)

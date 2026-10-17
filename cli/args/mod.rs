@@ -1461,11 +1461,16 @@ impl CliOptions {
       || self.workspace().has_unstable("detect-cjs")
   }
 
-  pub fn detect_cjs(&self) -> bool {
-    // only enabled when there's a package.json in order to not have a
-    // perf penalty for non-npm Deno projects of searching for the closest
-    // package.json beside each module
-    self.workspace().package_jsons().next().is_some() || self.is_node_main()
+  /// How ambiguous files are classified as CommonJS or ESM; see
+  /// `IsCjsResolutionMode::for_project`.
+  pub fn cjs_resolution_mode(&self) -> deno_resolver::cjs::IsCjsResolutionMode {
+    deno_resolver::cjs::IsCjsResolutionMode::for_project(
+      self.workspace().package_jsons().next().is_some(),
+      self.workspace().deno_jsons().next().is_some(),
+      self.flags.no_detect_cjs
+        || has_flag_env_var(&CliSys::default(), "DENO_NO_DETECT_CJS"),
+      self.is_node_main() || self.unstable_detect_cjs(),
+    )
   }
 
   pub fn unstable_raw_imports(&self) -> bool {

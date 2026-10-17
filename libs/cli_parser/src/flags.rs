@@ -991,6 +991,9 @@ pub struct Flags {
   pub seed: Option<u64>,
   pub trace_ops: Option<Vec<String>>,
   pub unstable_config: UnstableConfig,
+  /// `--no-detect-cjs`: ambiguous files are ES modules (the pre-denext
+  /// default) instead of Node's CommonJS detection.
+  pub no_detect_cjs: bool,
   pub unsafely_ignore_certificate_errors: Option<Vec<String>>,
   pub v8_flags: Vec<String>,
   pub code_cache_enabled: bool,
