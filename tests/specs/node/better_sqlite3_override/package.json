@@ -1,0 +1,5 @@
+{
+  "name": "better-sqlite3-override",
+  "private": true,
+  "dependencies": { "better-sqlite3": "12.0.0" }
+}

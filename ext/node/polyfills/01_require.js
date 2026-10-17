@@ -2212,7 +2212,39 @@ Module._extensions[".cjs"] = loadCjs;
 Module._extensions[".mjs"] = loadESMFromCJS;
 Module._extensions[".wasm"] = loadESMFromCJS;
 
+// better-sqlite3 is a nan addon (built against Node's V8 C++ ABI), which
+// Deno can't load. The package's entry modules resolve to an implementation
+// of its API over node:sqlite instead (DENEXT.md item 51), unless
+// DENO_NO_BETTER_SQLITE3_COMPAT is set.
+const BETTER_SQLITE3_ENTRY =
+  /^(.*[\\/]better-sqlite3(?:[\\/][^\\/]+)?)[\\/]lib[\\/](index|database|sqlite-error)\.js$/;
+let betterSqlite3OptedOut;
+
+function maybeBetterSqlite3Override(filename) {
+  const match = RegExpPrototypeExec(BETTER_SQLITE3_ENTRY, filename);
+  if (match === null) return undefined;
+  if (betterSqlite3OptedOut === undefined) {
+    const value = op_get_env_no_permission_check(
+      "DENO_NO_BETTER_SQLITE3_COMPAT",
+    );
+    betterSqlite3OptedOut = value != null && value !== "" && value !== "0";
+  }
+  if (betterSqlite3OptedOut) return undefined;
+  const sep = StringPrototypeIncludes(match[1], "/") ? "/" : "\\";
+  const pkg = op_require_read_package_scope(match[1] + sep + "package.json");
+  if (pkg?.name !== "better-sqlite3") return undefined;
+  const { Database, SqliteError } = core.loadExtScript(
+    "ext:deno_node/internal/better_sqlite3.js",
+  );
+  return match[2] === "sqlite-error" ? SqliteError : Database;
+}
+
 function loadMaybeCjs(module, filename) {
+  const override = maybeBetterSqlite3Override(filename);
+  if (override !== undefined) {
+    module.exports = override;
+    return;
+  }
   const content = op_require_read_file(filename);
   const format = op_require_is_maybe_cjs(filename) ? undefined : "module";
   module._compile(content, filename, format);

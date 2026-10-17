@@ -1075,12 +1075,30 @@ impl DatabaseSync {
   ) -> Result<(), SqliteError> {
     let db = self.conn.borrow();
     let db = db.as_ref().ok_or(SqliteError::InUse)?;
+    let sql = CString::new(sql)?;
 
-    if let Err(err) = db.execute_batch(sql) {
+    // sqlite3_exec(), as Node runs it: every statement steps to completion.
+    // rusqlite's execute_batch() steps a statement that returns rows only
+    // once, so `SELECT f(x) FROM t` called a user function for one row.
+    // SAFETY: the handle is open for the duration of the borrow, and `sql`
+    // is NUL-terminated.
+    let r = unsafe {
+      libsqlite3_sys::sqlite3_exec(
+        db.handle(),
+        sql.as_ptr(),
+        None,
+        std::ptr::null_mut(),
+        std::ptr::null_mut(),
+      )
+    };
+    if r != libsqlite3_sys::SQLITE_OK {
       if self.consume_ignore_next_sqlite_error() {
         return Ok(());
       }
-      return Err(err.into());
+      // SAFETY: as above; sqlite3_exec() left its error on the handle.
+      unsafe {
+        crate::statement::check_error_code(r, db.handle())?;
+      }
     }
 
     Ok(())
@@ -2284,6 +2302,10 @@ struct AggregateData {
   value: Option<NonNull<v8::Value>>,
   is_window: bool,
   initialized: bool,
+  /// start() or step() threw: the statement fails with that exception, and
+  /// the xFinal SQLite still calls while resetting it must not run JS (it
+  /// would call start() again, or replace the pending exception).
+  failed: bool,
 }
 
 struct CustomAggregate {
@@ -2320,6 +2342,9 @@ unsafe fn get_aggregate_data(
     }
 
     let agg = &mut *agg_ptr;
+    if agg.failed {
+      return None;
+    }
     if !agg.initialized {
       let start_local: v8::Local<v8::Value> =
         std::mem::transmute(custom_aggregate.start.as_ptr());
@@ -2330,6 +2355,7 @@ unsafe fn get_aggregate_data(
         match start_fn.call(scope, recv, &[]) {
           Some(val) => val,
           None => {
+            agg.failed = true;
             custom_aggregate.ignore_next_sqlite_error.set(true);
             sqlite_result_error(ctx, "");
             return None;
@@ -2444,6 +2470,7 @@ unsafe fn custom_aggregate_step_base(
       .unwrap_or_else(|| v8::undefined(tc_scope).into());
 
     if tc_scope.has_caught() {
+      agg.failed = true;
       data.ignore_next_sqlite_error.set(true);
       sqlite_result_error(ctx, "");
       tc_scope.rethrow();
@@ -3363,4 +3390,18 @@ impl DatabaseSyncLimits {
   ) -> Result<(), SqliteError> {
     self.set_limit_value(scope, Limit::SQLITE_LIMIT_TRIGGER_DEPTH, value)
   }
+}
+
+/// `sqlite3_total_changes64()`: better-sqlite3 reports a statement's
+/// `changes` only when it changed the total, which node:sqlite's `run()`
+/// can't tell (it returns `sqlite3_changes()`, stale after a statement such
+/// as `BEGIN` that changes nothing). For the `better-sqlite3` override.
+#[op2(fast)]
+pub fn op_node_sqlite_total_changes(
+  #[cppgc] db: &DatabaseSync,
+) -> Result<f64, SqliteError> {
+  let conn = db.conn.borrow();
+  let conn = conn.as_ref().ok_or(SqliteError::AlreadyClosed)?;
+  // SAFETY: the connection is open for the duration of the borrow.
+  Ok(unsafe { libsqlite3_sys::sqlite3_total_changes64(conn.handle()) } as f64)
 }

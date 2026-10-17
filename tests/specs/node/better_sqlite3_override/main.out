@@ -1,0 +1,20 @@
+memory true :memory: true
+run { changes: 1, lastInsertRowid: 1 }
+reader false false
+get { id: 1, name: "ada", data: <Buffer 01 02> }
+blob is a Buffer true
+all ada,grace
+pluck 1,2
+raw [1,"ada",{"type":"Buffer","data":[1,2]}]
+expand {"users":{"id":1},"posts":{"id":7},"$":{"two":2}}
+columns id,name,data
+iterate ada,grace
+error true SQLITE_CONSTRAINT_PRIMARYKEY UNIQUE constraint failed: t.a
+rows 3
+inTransaction false
+pragma 0
+function 42 6
+bigint number 1152921504606846976n
+serialize 3
+backup 0 3
+closed false

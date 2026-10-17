@@ -1,0 +1,9 @@
+{
+  "name": "npm-matrix-drizzle-better-sqlite3",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "better-sqlite3": "^12",
+    "drizzle-orm": "^0.44"
+  }
+}

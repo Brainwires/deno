@@ -11,13 +11,19 @@ mod validators;
 pub use backup::op_node_database_backup;
 pub use database::DatabaseSync;
 pub use database::DatabaseSyncLimits;
+pub use database::op_node_sqlite_total_changes;
 pub use session::Session;
 pub use sql_tag_store::SQLTagStore;
 pub use statement::StatementSync;
+pub use statement::op_node_sqlite_statement_info;
 
 deno_core::extension!(
   deno_node_sqlite,
-  ops = [op_node_database_backup,],
+  ops = [
+    op_node_database_backup,
+    op_node_sqlite_statement_info,
+    op_node_sqlite_total_changes,
+  ],
   objects = [
     DatabaseSync,
     DatabaseSyncLimits,
@@ -36,7 +42,7 @@ pub enum SqliteError {
   #[class(generic)]
   #[error(transparent)]
   #[property("code" = self.code())]
-  SqliteError(#[from] rusqlite::Error),
+  SqliteError(rusqlite::Error),
   #[class(generic)]
   #[error("{message}")]
   #[property("code" = self.code())]
@@ -147,6 +153,32 @@ pub enum SqliteError {
   )]
   #[property("code" = self.code())]
   AttachLimitDenied,
+}
+
+/// An error SQLite itself reported carries its extended result code and that
+/// code's description, as Node's `errcode` / `errstr`, whichever API raised
+/// it (`exec()` and `prepare()` go through rusqlite).
+impl From<rusqlite::Error> for SqliteError {
+  fn from(err: rusqlite::Error) -> Self {
+    match err {
+      rusqlite::Error::SqliteFailure(failure, message) => {
+        let errcode = failure.extended_code;
+        // SAFETY: sqlite3_errstr returns a static, NUL-terminated string for
+        // any result code.
+        let errstr = unsafe {
+          std::ffi::CStr::from_ptr(rusqlite::ffi::sqlite3_errstr(errcode))
+        }
+        .to_string_lossy()
+        .into_owned();
+        Self::SqliteSysError {
+          message: message.unwrap_or_else(|| errstr.clone()),
+          errstr,
+          errcode: errcode as f64,
+        }
+      }
+      other => Self::SqliteError(other),
+    }
+  }
 }
 
 #[derive(Debug, PartialEq, Eq)]

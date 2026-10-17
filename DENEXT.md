@@ -1250,8 +1250,55 @@ where the changes are discussed.
     `test-child-process-fork-args.js` (`process.send({ env: process.env })`) is
     enabled. Spec: `node/ipc_send_runs_js` (JSON and advanced serialization).
 
-The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41, 44, 46, 50) are what
-the prebuilt `libdenort` carries. The CLI-side parts (for example writing
+51. **`feat(ext/node)`: `better-sqlite3` over `node:sqlite`** (behavior change
+    for projects that depend on better-sqlite3;
+    `ext/node/polyfills/internal/better_sqlite3.js`, `01_require.js`,
+    `ext/node_sqlite`). better-sqlite3 is a nan addon, built against Node's V8
+    C++ ABI, which Deno can't load, so `require("better-sqlite3")` and
+    `import Database from "better-sqlite3"` failed (no binding, or a prebuilt
+    binary that can't link). The package's entry modules (`lib/index.js`,
+    `lib/database.js`, `lib/sqlite-error.js` of a package whose package.json is
+    named `better-sqlite3`, installed or in the global cache) now resolve to a
+    built-in implementation of its API over the same SQLite engine as
+    `node:sqlite`: statements (`run`/`get`/`all`/`iterate`,
+    `pluck`/`raw`/`expand`, `bind`, `columns`, `reader`/`readonly`), binding
+    with better-sqlite3's rules and errors (arrays spread, one named object,
+    `undefined` as `NULL`, too few/many values are RangeErrors), Buffers for
+    blobs, lossy numbers for integers past 2^53 unless `safeIntegers()` /
+    `defaultSafeIntegers()`, transactions with savepoint nesting and the
+    `deferred`/`immediate`/`exclusive` variants, `pragma`, user functions and
+    aggregates (window functions too), `backup`, `serialize` and a database
+    opened from a buffer, `loadExtension`, `unsafeMode` (defensive mode off),
+    `verbose` (expanded SQL, long values shortened as better-sqlite3's build
+    does), the busy/iterating rules, and `SqliteError` with SQLite's extended
+    result-code names (`SQLITE_CONSTRAINT_PRIMARYKEY`). It opens with
+    better-sqlite3's build defaults (foreign keys on, a 16 MB page cache,
+    defensive mode). The real package's own test suite (v12.11.1, mocha) passes
+    252 of 301; the rest are virtual tables (`db.table()`, not available: 37),
+    the `progress` and abort semantics of `backup()` (7), `LIMIT` on
+    `UPDATE`/`DELETE` (a compile-time option, 2), a compiled test extension and
+    `nativeBinding` (3). Opt out with `DENO_NO_BETTER_SQLITE3_COMPAT=1`, which
+    loads the package's own code. The package's install script is not needed, so
+    it installs without `--allow-scripts`. Two new ops in `ext/node_sqlite`
+    report what better-sqlite3 needs and `node:sqlite` doesn't expose
+    (`sqlite3_stmt_readonly`, parameter names, `sqlite3_total_changes64`).
+    `node:sqlite` fixes found on the way, in Node's direction: an error SQLite
+    raised in `exec()` / `prepare()` / backup carries `errcode` / `errstr` like
+    the others (it came through rusqlite without them); `exec()` runs every
+    statement to completion as `sqlite3_exec()` does (rusqlite's
+    `execute_batch()` stepped a row-returning statement once, so
+    `SELECT f(x) FROM t` called a user function for one row); and a user
+    function or aggregate that throws inside `all()` / `iterate()` no longer
+    hangs (the step error was taken for a row and the statement stepped again,
+    rerunning the callback), nor does an aggregate's `start()` run again, or its
+    result function replace the pending exception, when SQLite finalizes the
+    failed aggregate. The npm matrix's `better-sqlite3` case now passes, and
+    three cases join it (57 programs): Drizzle, Knex and Kysely on
+    better-sqlite3. Spec: `node/better_sqlite3_override` (CommonJS, ESM, the
+    opt-out).
+
+The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41, 44, 46, 50, 51) are
+what the prebuilt `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
 in the branch too, but a stock CLI does not run them; denext's own launcher
 provides that environment.
