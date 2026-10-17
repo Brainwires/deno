@@ -1,0 +1,4 @@
+env from-parent
+getter from-parent-getter
+toJSON from-parent-toJSON
+exit 0

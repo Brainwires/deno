@@ -1238,8 +1238,20 @@ where the changes are discussed.
       ERR_UNSUPPORTED_DIR_IMPORT. Spec: `run/dir_entrypoint`; unit tests for the
       `npx` dispatch.
 
-The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41, 44, 46) are what the
-prebuilt `libdenort` carries. The CLI-side parts (for example writing
+50. **`fix(ext/node)`: `process.send()` may run JS while it serializes**
+    (`ext/node/ops/ipc.rs`). `op_node_ipc_write_json` and
+    `op_node_ipc_write_advanced` serialize the message inside the op, and that
+    runs JS: getters, `toJSON`, and the traps of `process.env`'s proxy, which
+    call `op_get_env`. A debug build panicked on that re-entrant op call ("op
+    op_node_ipc_write_json was not marked as #[op2(reentrant)]"); a release
+    build skips the check. Both ops are now `#[op2(reentrant)]` (neither holds
+    an `OpState` borrow while the message is serialized), and a `toJSON` or
+    getter that throws is an error instead of an `unwrap` panic. Node's
+    `test-child-process-fork-args.js` (`process.send({ env: process.env })`) is
+    enabled. Spec: `node/ipc_send_runs_js` (JSON and advanced serialization).
+
+The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41, 44, 46, 50) are what
+the prebuilt `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
 in the branch too, but a stock CLI does not run them; denext's own launcher
 provides that environment.

@@ -137,7 +137,10 @@ mod impl_ {
       if let Some(to_json) = object.get(scope, to_json_key)
         && let Ok(to_json) = to_json.try_cast::<v8::Function>()
       {
-        let json_value = to_json.call(scope, object.into(), &[]).unwrap();
+        let json_value =
+          to_json.call(scope, object.into(), &[]).ok_or_else(|| {
+            S::Error::custom(JsErrorBox::generic("toJSON threw"))
+          })?;
         return serialize_v8_value(scope, json_value, ser);
       }
 
@@ -154,7 +157,9 @@ mod impl_ {
       for i in 0..num_keys {
         let key = keys.get_index(scope, i).unwrap();
         let key_str = key.to_rust_string_lossy(scope);
-        let value = object.get(scope, key).unwrap();
+        let value = object.get(scope, key).ok_or_else(|| {
+          S::Error::custom(JsErrorBox::generic("reading a property threw"))
+        })?;
         if value.is_undefined() {
           continue;
         }
@@ -258,7 +263,10 @@ mod impl_ {
     }
   }
 
-  #[op2]
+  // Reentrant: serializing the message runs JS (getters, `toJSON`, proxy
+  // traps such as `process.env`'s, which call `op_get_env`). No `OpState`
+  // borrow is held while it runs.
+  #[op2(reentrant)]
   pub fn op_node_ipc_write_json<'a>(
     scope: &mut v8::PinScope<'a, '_>,
     state: Rc<RefCell<OpState>>,
@@ -464,7 +472,9 @@ mod impl_ {
     state.put(constants);
   }
 
-  #[op2]
+  // Reentrant for the same reason as `op_node_ipc_write_json`: V8's value
+  // serializer calls accessors on the message.
+  #[op2(reentrant)]
   pub fn op_node_ipc_write_advanced<'a>(
     scope: &mut v8::PinScope<'a, '_>,
     state: Rc<RefCell<OpState>>,
