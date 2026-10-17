@@ -1066,20 +1066,21 @@ where the changes are discussed.
     quit-and-relaunch cycles (localStorage and IndexedDB carried over) go from 6
     to 10.
 
-42. **`test(node_compat)`: 229 more Node.js tests, and the suite in CI**
+42. **`test(node_compat)`: 228 more Node.js tests, and the suite in CI**
     (`feat/node-compat`). Node's own test suite (`tests/node_compat`,
     `denoland/node_test` at Node v26.5.1) had about 500 tests that passed on
     `denext.21` but were not in `config.jsonc`, so nothing caught a regression
     in them. Half of those only passed vacuously: they print
     `1..0 # Skipped: ...` (`common.skip`, for example "missing FFI" or "no valid
     readable TTY") and exit 0, so they are left out. Of the rest, the ones that
-    pass under this fork's own runner with a debug build are now enabled (229:
-    192 added, 37 whose `ignore` was stale; network tests, tests marked flaky or
-    timing out, and ones too slow for a debug build are left out). The harness
-    now collects `async-hooks/` (the `node:async_hooks` suite; still only the
-    listed tests run). The fork's CI had dropped upstream's node_compat job with
-    the generated workflows; `denext tests` runs it again on Linux (two shards,
-    `denext_tests_os.yml`). Before: 3343 enabled on linux-x86_64; after: 3572.
+    pass under this fork's own runner with a debug build are now enabled (228:
+    191 added, 37 whose `ignore` was stale; network tests, tests marked flaky or
+    timing out, ones too slow for a debug build and one that waits on GC timing
+    are left out). The harness now collects `async-hooks/` (the
+    `node:async_hooks` suite; still only the listed tests run). The fork's CI
+    had dropped upstream's node_compat job with the generated workflows;
+    `denext tests` runs it again on Linux (two shards, `denext_tests_os.yml`).
+    Before: 3343 enabled on linux-x86_64; after: 3571.
 
 43. **`ci`: the npm matrix** (`tests/npm_matrix`,
     `.github/workflows/denext_npm_matrix.yml`). 54 programs over about 68 real
@@ -1124,7 +1125,7 @@ where the changes are discussed.
     package.json says `"type": "commonjs"`, and JavaScript that never touches
     CommonJS, where Node's CommonJS would differ from ESM only in sloppy-mode
     details (top-level `this`, `var` globals, stack frames). Applying Node's
-    rule to every untyped file changed the behavior of about 50 of the fork's
+    rule to every untyped file changed the behavior of about 40 of the fork's
     own config-less `run`/`bench`/`test` specs, a measure of how much plain Deno
     code it would reach. The binding check is a cheap textual scan of a file
     that parsed with no ES module syntax (as `deno eval`'s), cached per file. A
@@ -1162,25 +1163,27 @@ where the changes are discussed.
     `Import "react" not a dependency` / `Cannot find module 'ms'`; it now
     resolves, for Deno and for tools that walk node_modules themselves
     (bundlers, TypeScript, eslint plugins), which a resolver-only fallback would
-    not have covered. Measured on the npm matrix before choosing (both layouts
-    on `denext.21`, see the branch's report). The layout's choice, in order:
-    `--node-modules-linker`, deno.json `"nodeModulesLinker"`, `.npmrc`
-    `node-linker=isolated|hoisted` (pnpm's setting; `pnp` is ignored), then the
-    default (hoisted only for a package.json-only project with a manual
-    node_modules; everything else stays isolated, and `.npmrc` hoisted is
-    ignored where the hoisted linker can't apply). Opt out with
-    `node-linker=isolated` in `.npmrc`, `--node-modules-linker=isolated`, or a
-    deno.json. An existing isolated node_modules is replaced on the next
-    `deno install` (its top-level links into `.deno` are removed, never what
-    they point to). Making it the default meant fixing what the hoisted
-    installer did not do yet: aliased dependencies (`"x": "npm:y@1"`, a
-    dependency's such as pretty-format's `@jest/react-is-18`, which broke jest,
-    or the root package.json's) are placed under the alias; a version only a
-    workspace member depends on, which lost the top level to another member's,
-    gets its own copy under `node_modules/.deno/.workspace-deps/` for the
-    member's link; a package an earlier install already put in place (same name
-    and version) is left there instead of being copied and reported again on
-    every install, and its lifecycle scripts don't rerun (markers in
+    not have covered. Measured before choosing: the npm matrix on `denext.21`
+    under both layouts gave the same result for every case but jest, which the
+    hoisted installer broke by not placing aliased dependencies (fixed below).
+    The layout's choice, in order: `--node-modules-linker`, deno.json
+    `"nodeModulesLinker"`, `.npmrc` `node-linker=isolated|hoisted` (pnpm's
+    setting; `pnp` is ignored), then the default (hoisted only for a
+    package.json-only project with a manual node_modules; everything else stays
+    isolated, and `.npmrc` hoisted is ignored where the hoisted linker can't
+    apply). Opt out with `node-linker=isolated` in `.npmrc`,
+    `--node-modules-linker=isolated`, or a deno.json. An existing isolated
+    node_modules is replaced on the next `deno install` (its top-level links
+    into `.deno` are removed, never what they point to). Making it the default
+    meant fixing what the hoisted installer did not do yet: aliased dependencies
+    (`"x": "npm:y@1"`, a dependency's such as pretty-format's
+    `@jest/react-is-18`, which broke jest, or the root package.json's) are
+    placed under the alias; a version only a workspace member depends on, which
+    lost the top level to another member's, gets its own copy under
+    `node_modules/.deno/.workspace-deps/` for the member's link; a package an
+    earlier install already put in place (same name and version) is left there
+    instead of being copied and reported again on every install, and its
+    lifecycle scripts don't rerun (markers in
     `node_modules/.deno/.hoisted-scripts-run/`, cleared when a package is copied
     again); and its deprecation warning matches the isolated layout's. Specs
     that check the isolated layout's internals (`node_modules/.deno/...` paths,
