@@ -110,6 +110,29 @@ impl<TSys: FsRead + FsMetadata> PackageJsonResolver<TSys> {
     }
   }
 
+  /// The package.json whose `"type"` applies to `file_path`, found as
+  /// Node's `getPackageScopeConfig` finds it: the closest one, but never past
+  /// a `node_modules` directory. A file in a folder under node_modules that
+  /// has no package.json of its own belongs to no package, rather than to the
+  /// project the node_modules folder sits in (which may say
+  /// `"type": "module"`).
+  pub fn get_package_scope_config(
+    &self,
+    file_path: &Path,
+  ) -> Result<Option<PackageJsonRc>, PackageJsonLoadError> {
+    for dir in file_path.ancestors().skip(1) {
+      if dir.file_name().is_some_and(|name| name == "node_modules") {
+        return Ok(None);
+      }
+      if let Some(pkg_json) =
+        self.load_package_json(&dir.join("package.json"))?
+      {
+        return Ok(Some(pkg_json));
+      }
+    }
+    Ok(None)
+  }
+
   pub fn load_package_json(
     &self,
     path: &Path,
@@ -160,6 +183,44 @@ mod tests {
   use sys_traits::impls::InMemorySys;
 
   use super::*;
+
+  #[test]
+  fn package_scope_stops_at_node_modules() {
+    use sys_traits::FsCreateDirAll;
+    use sys_traits::FsWrite;
+    let sys = InMemorySys::default();
+    sys.fs_create_dir_all("/app/node_modules/loose").unwrap();
+    sys.fs_create_dir_all("/app/node_modules/pkg/lib").unwrap();
+    sys
+      .fs_write("/app/package.json", r#"{ "type": "module" }"#)
+      .unwrap();
+    sys
+      .fs_write("/app/node_modules/pkg/package.json", r#"{ "name": "pkg" }"#)
+      .unwrap();
+    let resolver: PackageJsonResolver<InMemorySys> =
+      PackageJsonResolver::new(sys, None);
+    let scope = |path: &str| {
+      resolver
+        .get_package_scope_config(Path::new(path))
+        .unwrap()
+        .map(|pkg_json| pkg_json.path.display().to_string())
+    };
+    assert_eq!(scope("/app/main.js").as_deref(), Some("/app/package.json"));
+    assert_eq!(
+      scope("/app/node_modules/pkg/lib/a.js").as_deref(),
+      Some("/app/node_modules/pkg/package.json")
+    );
+    // a folder with no package.json under node_modules is no package's
+    assert_eq!(scope("/app/node_modules/loose/dep.js"), None);
+    assert_eq!(scope("/app/node_modules/dep.js"), None);
+    // the project's own lookup still finds the project's package.json
+    assert!(
+      resolver
+        .get_closest_package_json(Path::new("/app/node_modules/loose/dep.js"))
+        .unwrap()
+        .is_some()
+    );
+  }
 
   // Regression test for https://github.com/denoland/deno/issues/27433.
   //

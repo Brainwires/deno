@@ -84,6 +84,7 @@
     "es-module/test-esm-cjs-exports.js": {},
     "es-module/test-esm-cjs-main.js": {},
     "es-module/test-esm-cyclic-dynamic-import.mjs": {},
+    "es-module/test-esm-default-type.mjs": {},
     "es-module/test-esm-double-encoding.mjs": {},
     "es-module/test-esm-encoded-path-native.js": {},
     "es-module/test-esm-encoded-path.mjs": {},
@@ -127,6 +128,7 @@
     "es-module/test-esm-shebang.mjs": {},
     "es-module/test-esm-throw-undefined.mjs": {},
     "es-module/test-esm-tla.mjs": {},
+    "es-module/test-esm-type-field-errors.js": {},
     "es-module/test-esm-type-field.mjs": {},
     "es-module/test-esm-type-main.mjs": {},
     "es-module/test-esm-util-types.mjs": {},
@@ -147,24 +149,15 @@
     "es-module/test-require-as-esm-interop.mjs": {},
     "es-module/test-require-module-tla-instantiation-error.js": {},
     "es-module/test-require-module-conditional-exports-module.js": {},
-    "es-module/test-require-module.js": {
-      "ignore": true,
-      "reason": "Test fixtures rely on Node's implicit CommonJS detection for .js files without a package.json; Deno defaults to ESM."
-    },
+    "es-module/test-require-module.js": {},
     "es-module/test-require-module-cached-tla.js": {},
     "es-module/test-require-module-cycle-cjs-esm-esm.js": {},
     "es-module/test-require-module-defined-esmodule.js": {},
     "es-module/test-require-module-detect-entry-point-aou.js": {},
     "es-module/test-require-module-detect-entry-point.js": {},
     "es-module/test-require-module-dont-detect-cjs.js": {},
-    "es-module/test-require-module-dynamic-import-1.js": {
-      "ignore": true,
-      "reason": "Test fixtures rely on Node's implicit CommonJS detection for .js files without a package.json; Deno defaults to ESM."
-    },
-    "es-module/test-require-module-dynamic-import-2.js": {
-      "ignore": true,
-      "reason": "Test fixtures rely on Node's implicit CommonJS detection for .js files without a package.json; Deno defaults to ESM."
-    },
+    "es-module/test-require-module-dynamic-import-1.js": {},
+    "es-module/test-require-module-dynamic-import-2.js": {},
     "es-module/test-require-module-dynamic-import-3.js": {},
     "es-module/test-require-module-retry-import-evaluating.js": {},
     "es-module/test-require-module-dynamic-import-4.js": {},
@@ -194,10 +187,7 @@
     "es-module/test-require-module-tla-retry-require.js": {},
     "es-module/test-require-module-tla-unresolved.js": {},
     "es-module/test-require-module-transpiled.js": {},
-    "es-module/test-require-module-twice.js": {
-      "ignore": true,
-      "reason": "Test fixtures rely on Node's implicit CommonJS detection for .js files without a package.json; Deno defaults to ESM."
-    },
+    "es-module/test-require-module-twice.js": {},
     "es-module/test-require-module-warning.js": {
       "ignore": true,
       "reason": "Tests Node's --trace-require-module / ExperimentalWarning stderr emissions, which Deno does not emit."

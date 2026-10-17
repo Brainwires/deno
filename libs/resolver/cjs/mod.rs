@@ -436,7 +436,7 @@ impl<TInNpmPackageChecker: InNpmPackageChecker, TSys: FsRead + FsMetadata>
         return Ok(ResolutionMode::Require);
       };
       if let Some(pkg_json) =
-        self.pkg_json_resolver.get_closest_package_json(&path)?
+        self.pkg_json_resolver.get_package_scope_config(&path)?
       {
         let is_file_location_cjs = pkg_json.typ != "module";
         Ok(if is_file_location_cjs || path.extension().is_none() {
@@ -452,7 +452,7 @@ impl<TInNpmPackageChecker: InNpmPackageChecker, TSys: FsRead + FsMetadata>
         return Ok(ResolutionMode::Import);
       };
       if let Some(pkg_json) =
-        self.pkg_json_resolver.get_closest_package_json(&path)?
+        self.pkg_json_resolver.get_package_scope_config(&path)?
       {
         let is_cjs_type = pkg_json.typ == "commonjs"
           || self.is_implicit_for(specifier, media_type)
@@ -506,7 +506,7 @@ impl<TInNpmPackageChecker: InNpmPackageChecker, TSys: FsRead + FsMetadata>
           return Ok(ResolutionMode::Import);
         };
         let Some(pkg_json) =
-          self.pkg_json_resolver.get_closest_package_json(&path)?
+          self.pkg_json_resolver.get_package_scope_config(&path)?
         else {
           return Ok(ResolutionMode::Require);
         };

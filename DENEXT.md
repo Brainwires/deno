@@ -1316,10 +1316,9 @@ where the changes are discussed.
     name. Spec: `node/cjs_detect_esm_retry`; unit tests for the walk.
 
 53. **`feat`: an `npm` executable** (`cli/npm_shim.rs`,
-    `cli/node_compat_shim.rs`, `cli/tools/x.rs`).
-    `deno x
-    --install-node-shims` also writes `npm` (beside `node` and
-    `npx`), and deno invoked as `npm` maps npm's common commands onto its own:
+    `cli/node_compat_shim.rs`, `cli/tools/x.rs`). The shims command
+    (`deno x --install-node-shims`) also writes `npm` (beside `node` and `npx`),
+    and deno invoked as `npm` maps npm's common commands onto its own:
     `npm install` / `ci` (`--omit=dev`, `--production`: `--prod`),
     `npm install <pkg>...` (`deno add npm:<pkg>`, with `-D`, `-O`, `-E`,
     `--no-save`), `npm install -g` (`deno install -g -A -f`), `npm uninstall`
@@ -1335,6 +1334,22 @@ where the changes are discussed.
     wouldn't. `DENO_DISABLE_NODE_SHIM=1` turns it off with the others. Spec:
     `npm/npm_shim` (run, test, install from the registry, init, an unsupported
     command); unit tests for the mapping.
+
+54. **`fix`: a package's scope stops at `node_modules`**
+    (`libs/node_resolver/package_json.rs`, `libs/resolver/cjs/mod.rs`). Node
+    looks for the package.json whose `"type"` applies to a file
+    (`getPackageScopeConfig`) only up to the nearest `node_modules` folder: a
+    file in a folder under node_modules with no package.json of its own belongs
+    to no package. Deno kept walking up to the project's package.json, so with
+    `"type": "module"` there such a file (a vendored dependency without a
+    package.json, as in Node's `es-modules/package-type-module` fixture) ran as
+    an ES module and `module.exports` threw "module is not defined". CommonJS
+    detection now uses Node's lookup (`get_package_scope_config`); the
+    closest-package.json walk used elsewhere is unchanged. Enables Node's
+    `test-require-module.js`, `-twice.js`, `-dynamic-import-1.js` and `-2.js`
+    (ignored as "fixtures rely on Node's implicit CommonJS detection"), and
+    `test-esm-default-type.mjs` and `test-esm-type-field-errors.js`, which pass
+    now. Spec: `node/package_scope_node_modules`; a unit test for the lookup.
 
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41, 44, 46, 50, 51) are
 what the prebuilt `libdenort` carries. The CLI-side parts (for example writing
