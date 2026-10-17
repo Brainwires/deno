@@ -1064,8 +1064,74 @@ where the changes are discussed.
     quit-and-relaunch cycles (localStorage and IndexedDB carried over) go from 6
     to 10.
 
-The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41) are what the prebuilt
-`libdenort` carries. The CLI-side parts (for example writing
+42. **A `cargo audit` pass** (from `denext.22`). Every RustSec advisory in
+    `Cargo.lock` that has a fixed release is bumped to it: rustls 0.23.46
+    (RUSTSEC-2026-0285, -0346, -0348, -0349; with aws-lc-rs 1.18.2 and the
+    workspace aws-lc-sys pin 0.46.0, so the tree keeps one aws-lc-sys),
+    tokio-postgres 0.7.18, postgres-protocol 0.6.12 and postgres-types 0.2.14
+    for `Deno.SQL` (RUSTSEC-2026-0178, -0179, -0180), zip 9.0.4
+    (RUSTSEC-2026-0367, -0368, -0369; `deno upgrade` and `deno compile` unpack
+    with `extract()`), quinn-proto 0.11.19 (RUSTSEC-2026-0338 to -0342),
+    quick-xml 0.41.0 through plist 1.10.0 (RUSTSEC-2026-0194, -0195), unicycle
+    0.10.3 (RUSTSEC-2026-0298) and crossbeam-epoch 0.9.21 (RUSTSEC-2026-0204),
+    plus the crates flagged unsound or yanked (anyhow, faster-hex, memmap2, rand
+    0.8.6, scc, chacha20, der, digest, spin). `.cargo/audit.toml` lists the
+    three left, each with its reasoning: hickory-proto RUSTSEC-2026-0118 (DNSSEC
+    validation, not compiled: no `dnssec-*` feature is enabled) and -0119 (fixed
+    only in the semver-breaking 0.26 line, which needs the denoland/deno#36322
+    port; Deno encodes only single-question queries), and rsa RUSTSEC-2023-0071
+    (Marvin; no fixed release exists, an accepted risk for RSA PKCS#1 v1.5
+    decryption in WebCrypto and `node:crypto`). The `denext
+    tests` workflow
+    runs `cargo audit` and fails on any advisory not listed there. laufey
+    `integration/denext22` (`58c0fdb`) does the same for the hosts' `Cargo.lock`
+    (bytes 1.12.1 for RUSTSEC-2026-0007, crossbeam-epoch, quick-xml 0.41.0) with
+    a `cargo audit` job in its CI; this fork pins it (no API change). CEF
+    (149.0.5) has no audit database; it follows Chromium releases through
+    laufey's `CEF_VERSION`.
+
+43. **Upstream batch: `main` picks and open pull requests** (from `denext.22`).
+    Cherry-picked from denoland/deno `main` with `-x`: `AbortSignal.any()`
+    validates its input like Node (#36293), `mock.reset()` restores
+    `mock.method()` implementations (#36886), Node-API finalizers in a
+    `BTreeMap` (#36895), `node:assert` message functions and format arguments
+    (#36944), xxhash-rust 0.8.16 (#36963), zsh completion of `deno run` script
+    paths (#36976), abbreviated packuments under `minimumDependencyAge`
+    (#36907), `SharedArrayBuffer` in the primordials (#36627) and no
+    null-prototype objects for default parameters (#36940), and `errno_location`
+    for Android bionic (#36890). Carried from open upstream pull requests, one
+    commit each with an `Original-Author:` trailer:
+    - memory safety and crashes: a detached `net` onread buffer is kept alive
+      (#37013, a use-after-free), `napi_create_typedarray` checks its length for
+      overflow (#36991), the `getifaddrs` list stays alive through an IPv6
+      interface lookup (#36351, a double free), `serde_v8` returns an error
+      instead of panicking on an unsupported value (#36852), and the callsite
+      cache no longer goes through `Array.prototype` accessors (#36820);
+    - security: CR/LF is refused in a `node:http` proxy request target (#36919),
+      stream event maps are guarded against prototype pollution (#36956),
+      `op_require_try_self` needs `--allow-read` (#35943), `tty.ReadStream` /
+      `WriteStream` check fd permissions (#36220), npm package names used in
+      cache paths are validated (#36469), `startTls`'s internal options are out
+      of reach of user objects (#36249), and EC public keys not on the curve are
+      refused at import (#37032).
+
+    Not carried: #36905 (the `--allow-sys=inspector` check on
+    `process.debugPort` and the inspector's enabled state).
+    `op_inspector_enabled` is also what the inspector Network bridge asks on
+    every `node:http` client request, so with the check any `http.get()` run
+    without `--allow-sys=inspector` throws `NotCapable`. The dependabot hickory
+    0.26.2 bump (#36971) is not carried either: it moves only `hickory-resolver`
+    and leaves `hickory-proto` 0.25.2, the crate the advisories name.
+
+    Tests: each pull request's own (`tests/specs/node`, `tests/specs/run`,
+    `tests/specs/permission`, `tests/specs/npm`, `tests/specs/install`,
+    `tests/unit`, `tests/unit_node`, `tests/napi`, `serde_v8`, and the
+    `node_compat` `test-assert.js` / `test-abortsignal-any.mjs` entries); the
+    #36956 test reads `stream._events` through a cast, since the stream types do
+    not declare it and `unit_node`'s type check refused it.
+
+The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-43) are what the
+prebuilt `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
 in the branch too, but a stock CLI does not run them; denext's own launcher
 provides that environment.
