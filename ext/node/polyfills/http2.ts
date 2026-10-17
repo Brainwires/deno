@@ -525,6 +525,7 @@ const kSentHeaders = Symbol("sent-headers");
 // stream in the same mem_recv batch that created it (e.g. peer flow-control
 // violation), so the user's stream handler still sees a live stream.
 const kStreamEventEmitted = Symbol("kStreamEventEmitted");
+const kResponseEventPending = Symbol("kResponseEventPending");
 const kRawHeaders = Symbol("raw-headers");
 const kSentTrailers = Symbol("sent-trailers");
 const kServer = Symbol("server");
@@ -891,6 +892,18 @@ function onStreamClose(code) {
   const stream = this[kOwner];
   if (!stream || stream.destroyed) {
     return false;
+  }
+
+  // A client stream whose final HEADERS closed it in the same mem_recv batch
+  // ('response' still queued): Node delivers each nghttp2 callback through
+  // MakeCallback, which runs the nextTick queue and the microtasks before the
+  // next callback, so a client that awaits 'response' has attached its
+  // 'data' / 'end' listeners before the stream closes and its readable side
+  // ends. Here both callbacks run before any of that, so wait until the
+  // 'response' handlers and the code awaiting them have run.
+  if (stream[kResponseEventPending]) {
+    setImmediate(onStreamCloseDeferred, stream, code);
+    return true;
   }
 
   // If the 'stream' event for this server stream hasn't been emitted
@@ -1482,6 +1495,13 @@ function emit(self, ...args) {
   ReflectApply(self.emit, self, args);
 }
 
+function emitHeadersEvent(stream, event, obj, flags, headers) {
+  if (event === "response") {
+    stream[kResponseEventPending] = false;
+  }
+  ReflectApply(stream.emit, stream, [event, obj, flags, headers]);
+}
+
 // Mark the stream so onStreamClose stops deferring before user code
 // runs, then emit the 'stream' event on the session.
 function emitStreamNT(session, stream, obj, flags, headers) {
@@ -1669,12 +1689,15 @@ function onSessionHeaders(
       originSet.delete(stream[kOrigin]);
     }
     debugStream(id, type, "emitting stream '%s' event", event);
+    if (event === "response") {
+      stream[kResponseEventPending] = true;
+    }
     const reqAsync = stream[kRequestAsyncResource];
     if (reqAsync) {
       reqAsync.runInAsyncScope(
         process.nextTick,
         null,
-        emit,
+        emitHeadersEvent,
         stream,
         event,
         obj,
@@ -1682,7 +1705,7 @@ function onSessionHeaders(
         headers,
       );
     } else {
-      process.nextTick(emit, stream, event, obj, flags, headers);
+      process.nextTick(emitHeadersEvent, stream, event, obj, flags, headers);
     }
     if (
       (event === "response" ||
