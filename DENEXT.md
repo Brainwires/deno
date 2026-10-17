@@ -36,12 +36,12 @@ upstream takes it, and is rebased onto a newer Deno when we choose to move.
 
 ## Branches and tags
 
-| Ref                                                                                 | What it is                                                                                                                                                                                               |
-| ----------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `rel/denext<n>` (e.g. `rel/denext7`)                                                | The release line runtime `denext.<n>` is built from: the previous line + the feature and fix branches merged for it (`--no-ff`). Releases since `denext.6` are cut here.                                 |
-| `denext/v<deno version>` (e.g. `denext/v2.9.7`)                                     | The original line: upstream tag `v<deno version>` + the first feature commits + this file and the release workflow. The default branch of this fork.                                                     |
-| `feat/desktop-*`, `fix/*`, `ci/*`, `test/*`                                         | The feature and fix branches the release lines are built from. Kept for review and for rebasing onto a newer Deno.                                                                                       |
-| `denext-runtime-v<deno version>-denext.<n>` (e.g. `denext-runtime-v2.9.7-denext.1`) | A published runtime. PUSHING such a tag runs the workflow and creates the GitHub Release (a manual dispatch on a tag ref builds but never publishes). `<n>` counts runtime releases on one Deno version. |
+| Ref                                                                                 | What it is                                                                                                                                                                                                                                                               |
+| ----------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `development-denext`                                                                | The working line: every feature and fix branch is merged here (`--no-ff`), and runtime releases are cut from it as `denext-runtime-v<deno version>-denext.<n>` tags. Replaces the per-release `rel/denext<n>` lines, which stay for history (`denext.6` to `denext.22`). |
+| `denext/v<deno version>` (e.g. `denext/v2.9.7`)                                     | The original line: upstream tag `v<deno version>` + the first feature commits + this file and the release workflow. The default branch of this fork.                                                                                                                     |
+| `feat/desktop-*`, `fix/*`, `ci/*`, `test/*`                                         | The feature and fix branches merged into `development-denext`. Kept for review and for rebasing onto a newer Deno.                                                                                                                                                       |
+| `denext-runtime-v<deno version>-denext.<n>` (e.g. `denext-runtime-v2.9.7-denext.1`) | A published runtime. PUSHING such a tag runs the workflow and creates the GitHub Release (a manual dispatch on a tag ref builds but never publishes). `<n>` counts runtime releases on one Deno version.                                                                 |
 
 `main` and the other upstream branches are untouched mirrors from the fork
 point. Nothing here is proposed back from this fork; the upstream PRs below are
@@ -1944,10 +1944,10 @@ The workflow is `.github/workflows/denext_runtime.yml` (helpers in
 `.github/denext-runtime/`). Run it from the Actions tab (`workflow_dispatch`,
 optional `targets` filter, `laufey_ref` override, and `reuse_*_run_id` to reuse
 a previous run's libdenort or laufey build), or push a `denext-runtime-v*` tag
-to publish. It also runs on every push to a `rel/**` branch and nightly on the
-default branch. A tag publishes only when `denext tests` (`denext_tests.yml`)
-passed on exactly the tagged commit; the setup job checks and fails otherwise.
-Per target it:
+to publish. It also runs on every push to `development-denext` (or a `rel/**`
+branch) and nightly on the default branch. A tag publishes only when
+`denext tests` (`denext_tests.yml`) passed on exactly the tagged commit; the
+setup job checks and fails otherwise. Per target it:
 
 1. builds `libdenort` with `cargo build --release --locked -p denort_desktop`
    after patching `laufey` (`cargo metadata` rewrites laufey's lockfile entry;
@@ -1986,13 +1986,15 @@ DENORT_DESKTOP_BIN=$PWD/../deno/target/release/libdenort.dylib \
 LAUFEY_DEV_DIR=$PWD deno desktop --backend webview main.ts
 ```
 
-Upstream Deno's own workflows are removed on the `denext/*` and `rel/*` branches
-and disabled in this fork's Actions settings. Two workflows run instead:
+Upstream Deno's own workflows are removed on `development-denext` and the
+`denext/*` and `rel/*` branches and disabled in this fork's Actions settings.
+Two workflows run instead:
 
 - `denext_runtime.yml` (above): the release build, the launch smoke and the e2e
-  suite (see Test coverage). Every push to a `rel/**` branch, nightly on the
-  default branch, manual dispatch, or a pushed `denext-runtime-v*` tag (which
-  publishes only when `denext_tests.yml` passed on the tagged commit).
+  suite (see Test coverage). Every push to `development-denext` (or a `rel/**`
+  branch), nightly on the default branch, manual dispatch, or a pushed
+  `denext-runtime-v*` tag (which publishes only when `denext_tests.yml` passed
+  on the tagged commit).
 - `denext_tests.yml` (with the per-OS `denext_tests_os.yml`): upstream Deno's
   own test bar over the fork, the way `v2.9.7`'s `ci.generated.yml` ran it, on
   macOS, Windows and Linux: `tools/lint.js` (workspace clippy with upstream's
@@ -2002,9 +2004,9 @@ and disabled in this fork's Actions settings. Two workflows run instead:
   upstream's crate list plus the fork's crates, a debug build, and the unit and
   (sharded) spec suites against it; on Linux also upstream's `integration`
   (sharded) and `unit_node` suites; and the build and lib tests on macOS x64 and
-  Linux arm64. It runs on pushes to `denext/**`, `rel/**`, `ci/**`, `feat/**`
-  and `fix/**`, on pull requests to `denext/**` and `rel/**`, and by manual
-  dispatch.
+  Linux arm64. It runs on pushes to `development-denext`, `denext/**`, `rel/**`,
+  `ci/**`, `feat/**` and `fix/**`, on pull requests to `development-denext`,
+  `denext/**` and `rel/**`, and by manual dispatch.
 
 ## The update helper
 

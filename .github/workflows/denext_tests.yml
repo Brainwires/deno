@@ -37,12 +37,14 @@ on:
       - 'denext/**'
       - 'ci/**'
       - 'rel/**'
+      - 'development-denext'
       - 'feat/**'
       - 'fix/**'
   pull_request:
     branches:
       - 'denext/**'
       - 'rel/**'
+      - 'development-denext'
   workflow_dispatch:
 
 permissions:
