@@ -1,3 +1,5 @@
 commonjs/index.js commonjs commonjs
+module/index.js module module
+module/node_modules/untyped/index.js undefined undefined
 typeless/cjs.js undefined undefined
 typeless/esm.js undefined undefined

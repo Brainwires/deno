@@ -2329,9 +2329,21 @@ function getLoadHookFormat(filename) {
   return undefined;
 }
 
+// The "type" of the nearest package.json, looked up as Node's
+// TraverseParent (src/node_modules.cc) does: each parent directory of the
+// file up to, but not including, the root, stopping at a node_modules
+// directory.
 function nearestPackageJsonType(filename) {
-  let currentPath = pathDirname(filename);
+  let currentPath = filename;
   while (true) {
+    currentPath = pathDirname(currentPath);
+    if (!hasParentPath(currentPath)) return undefined;
+    if (
+      StringPrototypeEndsWith(currentPath, "/node_modules") ||
+      StringPrototypeEndsWith(currentPath, "\\node_modules")
+    ) {
+      return undefined;
+    }
     let pkg;
     try {
       pkg = op_require_read_package_scope(
@@ -2341,9 +2353,17 @@ function nearestPackageJsonType(filename) {
       // No read permission there: same as no package.json.
     }
     if (pkg) return pkg.type;
-    const parentPath = pathDirname(currentPath);
-    if (parentPath === currentPath) return undefined;
-    currentPath = parentPath;
+  }
+}
+
+function hasParentPath(path) {
+  // Module filenames are absolute; a relative one has nothing to walk.
+  if (path === "" || path === ".") return false;
+  try {
+    return pathDirname(path) !== path;
+  } catch {
+    // The root ("/", "C:\\"): op_require_path_dirname has no parent for it.
+    return false;
   }
 }
 
