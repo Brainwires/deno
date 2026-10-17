@@ -1975,6 +1975,10 @@ Module.prototype.load = function (filename) {
             err.message = this.filename + ": " + err.message;
             throw err;
           }
+        } else if (format === "addon") {
+          // As Node's getExtensionForFormat: an addon is loaded from the
+          // file, whatever source the hooks produced.
+          Module._extensions[".node"](this, this.filename);
         } else {
           // Format unspecified by hooks: honor the file's registered
           // extension handler the way Node.js does, so native addons (.node)
@@ -2260,8 +2264,14 @@ function loadMaybeCjs(module, filename) {
   module._compile(content, filename, format);
 }
 
+// The format Node's CommonJS loader gives a require() load hook
+// (Module._extensions['.js'] / getExtensionForFormat): "json", "addon",
+// "commonjs" / "module" by extension, and for .js the nearest package.json's
+// "type", or undefined when it has none, so the source is then compiled with
+// CommonJS-or-ESM detection as without hooks.
 function getLoadHookFormat(filename) {
   if (StringPrototypeEndsWith(filename, ".json")) return "json";
+  if (StringPrototypeEndsWith(filename, ".node")) return "addon";
   if (
     StringPrototypeEndsWith(filename, ".mjs") ||
     StringPrototypeEndsWith(filename, ".mts")
@@ -2275,7 +2285,29 @@ function getLoadHookFormat(filename) {
     return "commonjs";
   }
   if (StringPrototypeEndsWith(filename, ".wasm")) return "wasm";
-  return op_require_is_maybe_cjs(filename) ? "commonjs" : "module";
+  if (StringPrototypeEndsWith(filename, ".js")) {
+    const type = nearestPackageJsonType(filename);
+    if (type === "module" || type === "commonjs") return type;
+  }
+  return undefined;
+}
+
+function nearestPackageJsonType(filename) {
+  let currentPath = pathDirname(filename);
+  while (true) {
+    let pkg;
+    try {
+      pkg = op_require_read_package_scope(
+        pathResolve(currentPath, "package.json"),
+      );
+    } catch {
+      // No read permission there: same as no package.json.
+    }
+    if (pkg) return pkg.type;
+    const parentPath = pathDirname(currentPath);
+    if (parentPath === currentPath) return undefined;
+    currentPath = parentPath;
+  }
 }
 
 function loadCjs(module, filename) {

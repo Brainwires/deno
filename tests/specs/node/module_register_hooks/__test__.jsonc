@@ -12,6 +12,10 @@
       "args": "run -A format.mjs",
       "output": "format.out"
     },
+    "load_hook_format_js": {
+      "args": "run -A format_js.cjs",
+      "output": "format_js.out"
+    },
     "load_hook_node_addon": {
       "args": "run -A main_load_node_addon.cjs",
       "output": "main_load_node_addon.out"
