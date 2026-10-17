@@ -1846,8 +1846,79 @@ where the changes are discussed.
     an allowed path reads the same file; nothing is recorded when read access is
     fully granted). Spec: `node/cjs_main_symlinked_dir`.
 
+68. **Upstream batch: Node.js-compatibility and npm pull requests** (branch
+    `feat/upstream-prs-node-dd`). Carried from open denoland/deno pull requests,
+    one commit each with an `Original-Author:` trailer and the PR's head SHA;
+    our own changes are separate commits after them.
+    - TLS and HTTP: an empty TLS write completes, so HTTPS keep-alive goes on
+      after `res.end()` (#36986); an unread request body no longer stalls the
+      next keep-alive request (#36828); `server.close()` closes a connection
+      that never sent a request (#36749); an empty-body HTTP/2 response still
+      emits `'end'` (#36864); RST after a complete response is not an
+      `ECONNRESET` (#36424).
+    - Modules: a file in any `node_modules` tree gets Node's package.json
+      CommonJS rules, which fixes `deno x @playwright/mcp` (#36412);
+      `registerHooks` load hooks see `context.format` (#36849), and `.node` /
+      `.json` go through their extension handlers under a load hook (#36243);
+      `require("file://...")` resolves, for Vite configs bundled to ESM (#35482;
+      Node refuses it, so this is a superset).
+    - Processes and fs: `spawnSync()` keeps process stdio fds (#36855), a
+      numeric fd for stdin (#36582) and an explicit `env` without the parent's
+      (#36999); `process.cwd()` follows `Deno.chdir()` through a wrapped
+      `process.chdir` (graceful-fs) (#36328); `process.ref()` /
+      `process.unref()` (#37016); fs write ops return >2 GiB counts as Numbers
+      (#36817); `net.Socket({ fd })` can't adopt signal-hook's self-pipe, a
+      signal-thread panic (#35607); `ipv6Only` on `::` (#36893).
+    - zlib and streams: the `dictionary` option for deflate and raw inflate
+      (#37036); no trailing empty zstd frames (#36689; an end that exactly fills
+      the output buffer gets no empty frame, where Node's would);
+      `Readable.prototype.wrap()` proxies the first method (#36566).
+    - crypto: RSA JWK modulus check (#36156), `raw-private` / `raw-public`
+      KeyObject formats (#36912), X.509 name string types (#36252),
+      `checkHost()` prefers SAN (#36250), X.509 v1 chains verified by signature
+      instead of name matching (#36248); UTF-16LE Buffer writes through V8
+      (#36804).
+    - npm: unchanged `.bin` shims are not rewritten (Windows os error 32,
+      #36447); an optional dependency that doesn't exist is skipped with a
+      warning (#36606); BYONM lookups stay inside the configured root (#36134).
+
+    Our follow-ups: `TLSSocket.setMaxSendFragment()` is implemented (rustls is
+    fed at most that much plaintext per record), which is what npm:tedious /
+    mssql / `@prisma/adapter-mssql` need over TLS; it replaces #36719, whose
+    premise (Node encrypts each `writev` buffer separately) is wrong: Node 24
+    sends a corked 4096/4096/54 batch as one record, and as 4096/4096/54 only
+    under `setMaxSendFragment(4096)`. `registerHooks` formats follow Node's
+    CommonJS loader (#36849 gave every possibly-CommonJS `.js` file "commonjs",
+    which broke `require()` of an ES module in an untyped package under any load
+    hook, and gave `.node` "commonjs", undoing #36243): `.node` is "addon",
+    `.js` takes its package.json `"type"` or stays undefined, and the ES module
+    bridge reports "json" / "wasm" / "commonjs" by media type; a pass-through
+    hook keeps `.wasm` imports working. An optional dependency blocked by
+    `minimumDependencyAge` fails the install again, as the PR's reviewer
+    required and pnpm does (#36606 skipped it, which can drop the host's own
+    prebuild). `test-stream2-readable-wrap-proxy-methods.js` is enabled
+    (#36566's test).
+
+    Not carried: #36719 (replaced, above); #37020
+    (`deno desktop
+    --engine=quickjs` only; a draft); #36201, #35614, #33210,
+    #36442, #36479, #36103 (red upstream CI in their own suites); #36330, #36831
+    (rework the installer's bin linking and lifecycle scripts, which items 53,
+    54 and 58 of the node-compat line also rewrite; port them on top of that);
+    #36349 (raw fd adoption, needs sidecar / `spawnSelf` testing); #36909 (perf,
+    not measured); #36455 (4.3k lines, needs a real `uv_poll` addon).
+
+    Tests: each pull request's own (`tests/unit_node`, `tests/specs`,
+    `tests/napi` where present, Rust unit tests), plus `unit_node/tls_test.ts`'s
+    `setMaxSendFragment` record and argument tests, the `module_register_hooks`
+    `format_js` and `wasm_passthrough` specs, and the
+    `install/optional_dep_missing_version` spec. Node compat tests enabled:
+    `test-http-server-close-idle-connections-pre-request.js` (#36749),
+    `test-process-ref-unref.js` (#37016), `test-crypto-sign-verify.js` (#36912),
+    `test-stream2-readable-wrap-proxy-methods.js`.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
-64-67) are what the prebuilt `libdenort` carries. The CLI-side parts (for
+64-68) are what the prebuilt `libdenort` carries. The CLI-side parts (for
 example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's
 launchers) are in the branch too, but a stock CLI does not run them; denext's
 own launcher provides that environment.
