@@ -46,7 +46,12 @@ Deno.test("stream events ignore inherited properties", () => {
       });
       stream.emit("socket");
       assertEquals(called, true);
-      assertStrictEquals(Object.getPrototypeOf(stream._events), null);
+      assertStrictEquals(
+        Object.getPrototypeOf(
+          (stream as unknown as { _events: object })._events,
+        ),
+        null,
+      );
     }
   } finally {
     if (originalSocket) {
