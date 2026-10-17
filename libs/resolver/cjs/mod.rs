@@ -496,12 +496,22 @@ fn text_uses_commonjs(text: &str) -> bool {
     "require(",
     "require.",
     "module.exports",
-    "exports.",
-    "exports[",
     "__dirname",
     "__filename",
   ];
   NEEDLES.iter().any(|needle| text.contains(needle))
+    || contains_word(text, "exports")
+}
+
+/// Whether `word` occurs in `text` as a whole identifier (`exports.a`,
+/// `Object.defineProperty(exports, ...)`, but not `reexports`).
+fn contains_word(text: &str, word: &str) -> bool {
+  let is_ident = |c: char| c.is_alphanumeric() || c == '_' || c == '$';
+  text.match_indices(word).any(|(i, _)| {
+    let before = text[..i].chars().next_back();
+    let after = text[i + word.len()..].chars().next();
+    !before.is_some_and(is_ident) && !after.is_some_and(is_ident)
+  })
 }
 
 #[cfg(test)]
@@ -515,6 +525,10 @@ mod uses_commonjs_tests {
     assert!(text_uses_commonjs("exports.a = 1;"));
     assert!(text_uses_commonjs("console.log(__dirname);"));
     assert!(text_uses_commonjs("require.resolve(\"x\");"));
+    assert!(text_uses_commonjs(
+      "Object.defineProperty(exports, \"__esModule\", { value: true });"
+    ));
+    assert!(!text_uses_commonjs("const reexports = 1;"));
     assert!(!text_uses_commonjs("console.log(typeof this);"));
     assert!(!text_uses_commonjs("Deno.bench(() => {});"));
   }
