@@ -1,0 +1,71 @@
+{
+  // A package.json project (no deno.json) resolves packages with Node.js's
+  // conditions: a package's "deno" export condition is skipped, as Node.js
+  // skips it. A deno.json project keeps it. "denoCondition" in deno.json or
+  // package.json chooses (true, false, { "exclude": [...] },
+  // { "include": [...] }), and DENO_NO_DENO_CONDITION=1 turns it off.
+  "tempDir": true,
+  "tests": {
+    "package_json_project_skips_it": {
+      "steps": [
+        { "cwd": "pkg_only", "args": "install", "output": "[WILDCARD]" },
+        { "cwd": "pkg_only", "args": "run main.mjs", "output": "node node\n" },
+        { "cwd": "pkg_only", "args": "run main.cjs", "output": "node\n" }
+      ]
+    },
+    "package_json_opt_in": {
+      "steps": [
+        { "cwd": "pkg_only_opt_in", "args": "install", "output": "[WILDCARD]" },
+        {
+          "cwd": "pkg_only_opt_in",
+          "args": "run main.mjs",
+          "output": "deno deno\n"
+        }
+      ]
+    },
+    "deno_json_project_keeps_it": {
+      "steps": [
+        { "cwd": "with_deno_json", "args": "install", "output": "[WILDCARD]" },
+        {
+          "cwd": "with_deno_json",
+          "args": "run main.mjs",
+          "output": "deno deno\n"
+        },
+        {
+          "cwd": "with_deno_json",
+          "args": "run main.mjs",
+          "envs": { "DENO_NO_DENO_CONDITION": "1" },
+          "output": "node node\n"
+        }
+      ]
+    },
+    "exclude_a_package": {
+      "steps": [
+        {
+          "cwd": "deno_json_exclude",
+          "args": "install",
+          "output": "[WILDCARD]"
+        },
+        {
+          "cwd": "deno_json_exclude",
+          "args": "run main.mjs",
+          "output": "node deno\n"
+        }
+      ]
+    },
+    "include_only_a_package": {
+      "steps": [
+        {
+          "cwd": "deno_json_include",
+          "args": "install",
+          "output": "[WILDCARD]"
+        },
+        {
+          "cwd": "deno_json_include",
+          "args": "run main.mjs",
+          "output": "deno node\n"
+        }
+      ]
+    }
+  }
+}

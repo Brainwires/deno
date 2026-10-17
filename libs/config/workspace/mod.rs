@@ -639,6 +639,15 @@ impl Workspace {
     self.root_folder_configs().pkg_json.as_ref()
   }
 
+  /// The project's `"denoCondition"` setting: the root deno.json's, else the
+  /// root package.json's.
+  pub fn deno_condition_setting(&self) -> Option<&serde_json::Value> {
+    self
+      .root_deno_json()
+      .and_then(|c| c.json.deno_condition.as_ref())
+      .or_else(|| self.root_pkg_json()?.deno_condition.as_ref())
+  }
+
   /// Returns the npm overrides from the root package.json, if any.
   pub fn npm_overrides(
     &self,

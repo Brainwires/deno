@@ -1,0 +1,9 @@
+{
+  "name": "deno-condition-app",
+  "version": "1.0.0",
+  "denoCondition": true,
+  "dependencies": {
+    "@denotest/deno-export-condition": "1.0.0",
+    "@denotest/deno-export-condition-other": "1.0.0"
+  }
+}

@@ -87,9 +87,49 @@ pub static REQUIRE_CONDITIONS: &[Cow<'static, str>] = &[
 ];
 static TYPES_ONLY_CONDITIONS: &[Cow<'static, str>] = &[Cow::Borrowed("types")];
 
+/// Which packages the `"deno"` export condition applies to.
+///
+/// Deno resolves a package's `exports`/`imports` with the `"deno"` condition
+/// first, which Node.js does not. Some packages point it at a build made for
+/// Deno-native or worker use that behaves differently from their Node.js build
+/// (stripe's makes its synchronous webhook API throw), so a project can turn it
+/// off for every package or for some.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub enum DenoConditionPolicy {
+  /// The condition applies to every package (Deno's behavior).
+  #[default]
+  Enabled,
+  /// The condition applies to no package (Node.js's conditions).
+  Disabled,
+  /// The condition applies to every package except these (package names).
+  Except(std::collections::BTreeSet<String>),
+  /// The condition applies only to these packages (package names).
+  Only(std::collections::BTreeSet<String>),
+}
+
+impl DenoConditionPolicy {
+  /// Whether the policy may depend on the package being resolved.
+  fn is_per_package(&self) -> bool {
+    matches!(self, Self::Except(_) | Self::Only(_))
+  }
+
+  /// Whether the `"deno"` condition applies to the package named `name`
+  /// (`None` for a package.json without a name).
+  pub fn applies_to(&self, name: Option<&str>) -> bool {
+    match self {
+      Self::Enabled => true,
+      Self::Disabled => false,
+      Self::Except(names) => name.is_none_or(|name| !names.contains(name)),
+      Self::Only(names) => name.is_some_and(|name| names.contains(name)),
+    }
+  }
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct NodeConditionOptions {
   pub conditions: Vec<Cow<'static, str>>,
+  /// Which packages the default `"deno"` condition applies to.
+  pub deno_condition: DenoConditionPolicy,
   /// Provide a value to override the default import conditions.
   ///
   /// Defaults to `["deno", "node", "import", "module-sync"]`
@@ -104,6 +144,7 @@ pub struct NodeConditionOptions {
 struct ConditionResolver {
   import_conditions: Cow<'static, [Cow<'static, str>]>,
   require_conditions: Cow<'static, [Cow<'static, str>]>,
+  deno_condition: DenoConditionPolicy,
 }
 
 impl ConditionResolver {
@@ -143,6 +184,7 @@ impl ConditionResolver {
         options.require_conditions_override,
         REQUIRE_CONDITIONS,
       ),
+      deno_condition: options.deno_condition,
     }
   }
 
@@ -375,6 +417,7 @@ impl<
       sys,
       condition_resolver: ConditionResolver::new(NodeConditionOptions {
         conditions: options.conditions.conditions,
+        deno_condition: options.conditions.deno_condition,
         import_conditions_override: options
           .conditions
           .import_conditions_override
@@ -1717,6 +1760,7 @@ impl<
 
         if key == "default"
           || conditions.contains(&Cow::Borrowed(key))
+            && (key != "deno" || self.deno_condition_applies(package_json_path))
           || resolution_kind.is_types() && self.matches_types_key(key)
         {
           let resolved = self.resolve_package_target(
@@ -1742,6 +1786,21 @@ impl<
     }
 
     Ok(None)
+  }
+
+  /// Whether the `"deno"` export condition applies to the package whose
+  /// package.json is at `package_json_path` (see [`DenoConditionPolicy`]).
+  fn deno_condition_applies(&self, package_json_path: &Path) -> bool {
+    let policy = &self.condition_resolver.deno_condition;
+    if !policy.is_per_package() {
+      return policy.applies_to(None);
+    }
+    let pkg_json = self
+      .pkg_json_resolver
+      .load_package_json(package_json_path)
+      .ok()
+      .flatten();
+    policy.applies_to(pkg_json.as_ref().and_then(|p| p.name.as_deref()))
   }
 
   fn matches_types_key(&self, key: &str) -> bool {
@@ -3174,6 +3233,25 @@ mod tests {
       NodeResolutionSys::new(sys, None),
       NodeResolverOptions::default(),
     )
+  }
+
+  #[test]
+  fn deno_condition_policy_applies_to() {
+    let names = |n: &[&str]| {
+      n.iter()
+        .map(|s| s.to_string())
+        .collect::<std::collections::BTreeSet<_>>()
+    };
+    assert!(DenoConditionPolicy::Enabled.applies_to(Some("stripe")));
+    assert!(!DenoConditionPolicy::Disabled.applies_to(Some("stripe")));
+    let except = DenoConditionPolicy::Except(names(&["stripe"]));
+    assert!(!except.applies_to(Some("stripe")));
+    assert!(except.applies_to(Some("jose")));
+    assert!(except.applies_to(None));
+    let only = DenoConditionPolicy::Only(names(&["jose"]));
+    assert!(only.applies_to(Some("jose")));
+    assert!(!only.applies_to(Some("stripe")));
+    assert!(!only.applies_to(None));
   }
 
   #[test]

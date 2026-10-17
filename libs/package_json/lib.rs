@@ -416,6 +416,11 @@ pub struct PackageJson {
   pub catalogs: Option<IndexMap<String, IndexMap<String, String>>>,
   #[serde(skip_serializing_if = "Option::is_none")]
   pub side_effects: Option<PackageJsonSideEffects>,
+  /// `"denoCondition"`: which packages the `"deno"` export condition applies
+  /// to (`false`, `true`, `{ "exclude": [...] }` or `{ "include": [...] }`).
+  /// Read from the project's own package.json.
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub deno_condition: Option<Value>,
   #[serde(skip_serializing)]
   resolved_deps: PackageJsonDepsRcCell,
 }
@@ -494,6 +499,7 @@ impl PackageJson {
         catalog: None,
         catalogs: None,
         side_effects: None,
+        deno_condition: None,
         resolved_deps: Default::default(),
       });
     }
@@ -701,6 +707,7 @@ impl PackageJson {
         }
         _ => None,
       });
+    let deno_condition = package_json.remove("denoCondition");
     // Top-level catalog/catalogs take precedence; fall back to those
     // extracted from the workspaces object form.
     let catalog = package_json
@@ -755,6 +762,7 @@ impl PackageJson {
       catalog,
       catalogs,
       side_effects,
+      deno_condition,
       resolved_deps: Default::default(),
     })
   }

@@ -1,0 +1,4 @@
+{
+  "nodeModulesDir": "manual",
+  "denoCondition": { "include": ["@denotest/deno-export-condition"] }
+}

@@ -1482,6 +1482,7 @@ impl CliFactory {
                 .iter()
                 .map(|c| Cow::Owned(c.clone()))
                 .collect(),
+              deno_condition: options.deno_condition_policy(),
               import_conditions_override: None,
               require_conditions_override: None,
             },

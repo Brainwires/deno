@@ -1238,6 +1238,27 @@ where the changes are discussed.
       ERR_UNSUPPORTED_DIR_IMPORT. Spec: `run/dir_entrypoint`; unit tests for the
       `npx` dispatch.
 
+50. **`feat`: a package.json project resolves packages without the `deno` export
+    condition** (behavior change; `DenoConditionPolicy` in
+    `libs/node_resolver/resolution.rs`, `CliOptions::deno_condition_policy`).
+    Deno matches a package's `"deno"` `exports`/`imports` condition before
+    `"node"`, which Node.js never does. Packages point it at a build made for
+    Deno-native code that can lack what their Node.js build has. In the npm
+    matrix four packages declare one: stripe's is its worker build (the
+    synchronous `webhooks.constructEvent` throws, so the `stripe` case failed),
+    jose's its browser build (WebCrypto keys only, no `KeyObject`),
+    node-fetch-native's its native-fetch build and react-dom's the same file as
+    its Node.js build. A project with a package.json and no deno.json now
+    resolves with Node.js's conditions; a deno.json project, and a script with
+    no config, keep the `deno` condition. `"denoCondition"` in the root
+    deno.json or package.json chooses: `true` (every package), `false` (none),
+    `{ "exclude": ["stripe"] }` (all but these), `{ "include": ["jose"] }` (only
+    these); `DENO_NO_DENO_CONDITION=1` turns it off everywhere. A package's
+    `require` conditions never had it. Not covered: `deno compile`'s runtime and
+    the LSP resolve with the default conditions, as they already ignored
+    `--conditions`. Spec: `npm/deno_export_condition`; npm matrix: `stripe`
+    passes (`expect` raised).
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41, 44, 46) are what the
 prebuilt `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are

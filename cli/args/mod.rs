@@ -731,6 +731,32 @@ impl CliOptions {
     self.flags.node_conditions.as_ref()
   }
 
+  /// Which packages the `"deno"` export condition applies to: `"denoCondition"`
+  /// in the root deno.json or package.json, else
+  /// [`default_deno_condition_policy`]. `DENO_NO_DENO_CONDITION=1` turns it off
+  /// for every package.
+  pub fn deno_condition_policy(&self) -> node_resolver::DenoConditionPolicy {
+    let sys = CliSys::default();
+    if has_flag_env_var(&sys, "DENO_NO_DENO_CONDITION") {
+      return node_resolver::DenoConditionPolicy::Disabled;
+    }
+    let workspace = self.workspace();
+    if let Some(value) = workspace.deno_condition_setting() {
+      match parse_deno_condition_setting(value) {
+        Some(policy) => return policy,
+        None => log::warn!(
+          "{} Ignoring invalid \"denoCondition\" setting {}: expected true, false, {{ \"exclude\": [...] }} or {{ \"include\": [...] }}.",
+          colors::yellow("Warning"),
+          value
+        ),
+      }
+    }
+    default_deno_condition_policy(
+      workspace.package_jsons().next().is_some(),
+      workspace.deno_jsons().next().is_some(),
+    )
+  }
+
   pub fn otel_config(&self) -> OtelConfig {
     self.flags.otel_config()
   }
@@ -2050,6 +2076,61 @@ fn augment_permissions_with_serve_flags(
     }
   }
   Ok(())
+}
+
+/// Parses a `"denoCondition"` setting: `true`, `false`,
+/// `{ "exclude": ["name", ...] }` or `{ "include": ["name", ...] }`.
+pub fn parse_deno_condition_setting(
+  value: &deno_core::serde_json::Value,
+) -> Option<node_resolver::DenoConditionPolicy> {
+  use node_resolver::DenoConditionPolicy;
+  fn names(
+    value: &deno_core::serde_json::Value,
+  ) -> Option<std::collections::BTreeSet<String>> {
+    value
+      .as_array()?
+      .iter()
+      .map(|v| v.as_str().map(|s| s.to_string()))
+      .collect()
+  }
+  match value {
+    deno_core::serde_json::Value::Bool(true) => {
+      Some(DenoConditionPolicy::Enabled)
+    }
+    deno_core::serde_json::Value::Bool(false) => {
+      Some(DenoConditionPolicy::Disabled)
+    }
+    deno_core::serde_json::Value::Object(map) if map.len() == 1 => {
+      if let Some(exclude) = map.get("exclude") {
+        Some(DenoConditionPolicy::Except(names(exclude)?))
+      } else if let Some(include) = map.get("include") {
+        Some(DenoConditionPolicy::Only(names(include)?))
+      } else {
+        None
+      }
+    }
+    _ => None,
+  }
+}
+
+/// The `"deno"` export condition's default when the project doesn't choose:
+/// off in a package.json project (no deno.json), which resolves packages
+/// with Node.js's conditions as Node.js would run it, on everywhere else.
+///
+/// A package's `"deno"` build is made for Deno-native code and can lack
+/// what its Node.js build has. In the npm matrix four packages declare one:
+/// stripe's is its worker build (the synchronous webhook API throws), jose's
+/// its browser build (WebCrypto keys only, no `KeyObject`), node-fetch-native's
+/// its native-fetch build and react-dom's its Node.js build.
+pub fn default_deno_condition_policy(
+  has_package_json: bool,
+  has_deno_json: bool,
+) -> node_resolver::DenoConditionPolicy {
+  if has_package_json && !has_deno_json {
+    node_resolver::DenoConditionPolicy::Disabled
+  } else {
+    node_resolver::DenoConditionPolicy::Enabled
+  }
 }
 
 #[cfg(test)]
