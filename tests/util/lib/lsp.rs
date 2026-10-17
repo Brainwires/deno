@@ -1796,30 +1796,6 @@ pub fn range_of(text: impl AsRef<str>, src: impl AsRef<str>) -> lsp::Range {
   range_of_nth(0, text, src)
 }
 
-#[cfg(test)]
-mod tests {
-  use super::*;
-
-  #[test]
-  fn test_read_message() {
-    let msg1 = b"content-length: 11\r\n\r\nhello world";
-    let mut reader1 = std::io::Cursor::new(msg1);
-    assert_eq!(read_message(&mut reader1).unwrap().unwrap(), b"hello world");
-
-    let msg2 = b"content-length: 5\r\n\r\nhello world";
-    let mut reader2 = std::io::Cursor::new(msg2);
-    assert_eq!(read_message(&mut reader2).unwrap().unwrap(), b"hello");
-  }
-
-  #[test]
-  #[should_panic(expected = "failed to fill whole buffer")]
-  fn test_invalid_read_message() {
-    let msg1 = b"content-length: 12\r\n\r\nhello world";
-    let mut reader1 = std::io::Cursor::new(msg1);
-    read_message(&mut reader1).unwrap();
-  }
-}
-
 /// The pinned TypeScript 7 build the tsgo LSP tests run (denext): the
 /// `DENO_TSGO_LSP_BIN` override, else `target/typescript-lsp-<version>/`,
 /// fetched once with `.github/denext-runtime/fetch_typescript.py` (verified
@@ -1868,4 +1844,28 @@ pub fn tsgo_lsp_bin() -> PathRef {
       exe
     })
     .clone()
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn test_read_message() {
+    let msg1 = b"content-length: 11\r\n\r\nhello world";
+    let mut reader1 = std::io::Cursor::new(msg1);
+    assert_eq!(read_message(&mut reader1).unwrap().unwrap(), b"hello world");
+
+    let msg2 = b"content-length: 5\r\n\r\nhello world";
+    let mut reader2 = std::io::Cursor::new(msg2);
+    assert_eq!(read_message(&mut reader2).unwrap().unwrap(), b"hello");
+  }
+
+  #[test]
+  #[should_panic(expected = "failed to fill whole buffer")]
+  fn test_invalid_read_message() {
+    let msg1 = b"content-length: 12\r\n\r\nhello world";
+    let mut reader1 = std::io::Cursor::new(msg1);
+    read_message(&mut reader1).unwrap();
+  }
 }
