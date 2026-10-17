@@ -1,6 +1,8 @@
-import _ from "lodash"; import "dotenv/config"; import { Command } from "commander"; import chalk from "chalk"; import { v4, v7 } from "uuid"; import { z } from "zod";
+import _ from "lodash"; import dotenv from "dotenv"; import { Command } from "commander"; import chalk from "chalk"; import { v4, v7 } from "uuid"; import { z } from "zod";
 import dayjs from "dayjs"; import yargs from "yargs"; import { hideBin } from "yargs/helpers"; import debug from "debug"; import fse from "fs-extra"; import { glob } from "glob"; import semver from "semver";
 import spawn from "cross-spawn"; import nf from "node-fetch"; import ms from "ms";
+// smoke.env, not .env: the repository ignores .env files
+dotenv.config({ path: "smoke.env", quiet: true });
 const bad = [];
 if (_.chunk([1,2,3], 2).length !== 2) bad.push("lodash"); if (process.env.FOO !== "bar") bad.push("dotenv");
 const c = new Command().option("-x <n>").parse(["node", "s", "-x", "3"]); if (c.opts().x !== "3") bad.push("commander");
