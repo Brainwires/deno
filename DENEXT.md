@@ -1132,7 +1132,42 @@ where the changes are discussed.
     #36956 test reads `stream._events` through a cast, since the stream types do
     not declare it and `unit_node`'s type check refused it.
 
-The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-43) are what the
+44. **A CEF quit keeps the `localStorage` the page just wrote** (from
+    `denext.22`; laufey `integration/denext22` `b4f35ee`, no runtime API).
+    Chromium's storage service writes `localStorage` to a LevelDB database, and
+    `CefShutdown` kills it without waiting for a write in flight (Chromium waits
+    only for the network service, which keeps cookies). Two consequences, both
+    fixed in the hosts:
+    - a write cut short at the end of the database's log cost every later
+      launch's writes: LevelDB reuses the log and appends after the torn record,
+      then drops everything after it in its 32 KiB block on the next open, so
+      the next launch read the value from before, again and again (laufey CI run
+      39028399584 lost 2 of 3 quick quits that way; reproduced with the LevelDB
+      revision Chromium pins, and on CEF on macOS and Linux by tearing the log's
+      end). Every CEF host now cuts such a torn end before `CefInitialize`, once
+      the database's `LOCK` is free, and says so on stderr;
+    - on macOS the host's loop stops when the last window closes, so the tasks
+      that end that window's renderer (whose end makes the storage service
+      commit the page's writes at once) ran only inside `CefShutdown`, racing
+      the kill: the renderer was still running at `CefShutdown` in 27 of 50
+      traced quits. The host now pumps CEF until those renderers have ended (at
+      most 2 s, logged when one outlives that).
+
+    Not caused by item 41: the storage service is killed inside `CefShutdown`
+    either way and its 5 s wait came after that; on macOS-14 runners 150 quick
+    quit / close / exit cycles lost nothing both before item 41 and with it, so
+    the loss needs a torn write, which is rare, and then lasts. With the fix:
+    150 cycles, 0 lost, and the torn-log check passes (it fails without the
+    repair). Tests: laufey's `cef_profile_lock_test` (the log tail repair
+    against LevelDB-format logs: torn header, torn payload, a fragmented record
+    cut before its end, a write appended after a torn one, damage in the last
+    and in an earlier block; a database whose `LOCK` is held is left alone; the
+    renderer wait) and its exit e2e (a torn log end is cut and the value written
+    after it read back; no renderer outlives the loop); this fork's e2e exit
+    area (quick quit-and-relaunch cycles keep localStorage and IndexedDB) is
+    unchanged.
+
+The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-44) are what the
 prebuilt `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
 in the branch too, but a stock CLI does not run them; denext's own launcher
