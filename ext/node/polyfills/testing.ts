@@ -10,6 +10,7 @@ const {
   ArrayPrototypeIndexOf,
   ArrayPrototypeJoin,
   ArrayPrototypeLastIndexOf,
+  ArrayPrototypePop,
   ArrayPrototypePush,
   ArrayPrototypeSlice,
   ArrayPrototypeSplice,
@@ -1336,6 +1337,8 @@ async function runPossiblyExpectingFailure(fn, nodeTestContext, options) {
   return undefined;
 }
 
+const TIMEOUT_MAX = 2 ** 31 - 1;
+
 class TestPlan {
   #expected;
   #actual = 0;
@@ -1373,6 +1376,7 @@ class NodeTestContext {
   // regardless of how many subtests this context has.
   #beforeHooksRun = false;
   #afterHooksRun = false;
+  #mock;
   // When set via `runOnly(true)`, only direct subtests registered with the
   // `only: true` option are executed; all other subtests are skipped.
   #runOnly = false;
@@ -1438,9 +1442,58 @@ class NodeTestContext {
     return getAssertObject();
   }
 
-  plan(count) {
+  plan(count, options = { __proto__: null }) {
     validateInteger(count, "count", 1);
+    validateObject(options, "options");
+    const { wait = false } = options;
+    if (typeof wait !== "boolean" && typeof wait !== "number") {
+      throw new ERR_INVALID_ARG_TYPE("options.wait", [
+        "boolean",
+        "number",
+      ], wait);
+    }
     this.#plan = new TestPlan(count);
+  }
+
+  // Polls `condition` until it returns or resolves, rejecting with its last
+  // failure as the cause once `timeout` passes (Node's TestContext#waitFor).
+  waitFor(condition, options = { __proto__: null }) {
+    validateFunction(condition, "condition");
+    validateObject(options, "options");
+    const { interval = 50, timeout = 1000 } = options;
+    validateNumber(interval, "options.interval", 0, TIMEOUT_MAX);
+    validateNumber(timeout, "options.timeout", 0, TIMEOUT_MAX);
+    const { promise, resolve, reject } = PromiseWithResolvers();
+    const noError = Symbol("noError");
+    let cause = noError;
+    let pollerId;
+    const done = (err, result) => {
+      clearTimeout(pollerId);
+      clearTimeout(timeoutId);
+      if (err === noError) {
+        resolve(result);
+      } else {
+        reject(err);
+      }
+    };
+    const timeoutId = setTimeout(() => {
+      const err = new Error("waitFor() timed out");
+      if (cause !== noError) {
+        err.cause = cause;
+      }
+      done(err);
+    }, timeout);
+    const poller = async () => {
+      try {
+        const result = await condition();
+        done(noError, result);
+      } catch (err) {
+        cause = err;
+        pollerId = setTimeout(poller, interval);
+      }
+    };
+    poller();
+    return promise;
   }
 
   _checkPlan() {
@@ -1476,8 +1529,11 @@ class NodeTestContext {
     console.log("DIAGNOSTIC:", message);
   }
 
+  // Each test's own tracker (Node's `t.mock`): what it mocks is restored, and
+  // the timers it enabled reset, when the test finishes.
   get mock() {
-    return mock;
+    this.#mock ??= createContextMock();
+    return this.#mock;
   }
 
   runOnly(value) {
@@ -1649,9 +1705,19 @@ class NodeTestContext {
     this.#afterHooksRun = true;
     // deno-lint-ignore no-this-alias
     const ctx = this;
-    for (const hook of new SafeArrayIterator(this.#afterHooks)) {
-      await runInTestContext(ctx, () => hook(ctx));
+    try {
+      for (const hook of new SafeArrayIterator(this.#afterHooks)) {
+        await runInTestContext(ctx, () => hook(ctx));
+      }
+    } finally {
+      this._resetMock();
     }
+  }
+
+  // Restores what this test mocked through `t.mock` (Node resets each test's
+  // MockTracker when the test finishes).
+  _resetMock() {
+    this.#mock?.[kResetContextMock]();
   }
 }
 
@@ -1828,6 +1894,7 @@ class TestSuite {
               );
             } catch { /* ignore */ }
           }
+          newNodeTextContext._resetMock();
         }
       },
       ignore: !!prepared.options.todo || !!prepared.options.skip,
@@ -2661,8 +2728,8 @@ class MockTimers {
     } else if (ObjectPrototypeIsPrototypeOf(originalDatePrototype, now)) {
       now = DatePrototypeGetTime(now);
     }
-    validateNumber(now, "options.now", 0);
-    if (!NumberIsFinite(now) || !NumberIsInteger(now)) {
+    validateNumber(now, "options.now");
+    if (now < 0 || !NumberIsFinite(now) || !NumberIsInteger(now)) {
       throw new ERR_INVALID_ARG_VALUE(
         "options.now",
         now,
@@ -3567,6 +3634,71 @@ const mock = {
     [SymbolDispose]: () => mockTimers.reset(),
   },
 };
+
+const kResetContextMock = Symbol("kResetContextMock");
+
+// A test context's `t.mock`: the shared mock API, keeping the mocks this test
+// created (to restore them) and whether it enabled the mock timers (to reset
+// them) when the test finishes, as Node resets each test's MockTracker.
+function createContextMock() {
+  const own = [];
+  let ownsTimers = false;
+  const tracked = (fn) =>
+    function (...args) {
+      const before = activeMocks.length;
+      const result = ReflectApply(fn, this, args);
+      for (let i = before; i < activeMocks.length; i++) {
+        ArrayPrototypePush(own, activeMocks[i]);
+      }
+      return result;
+    };
+  return {
+    __proto__: null,
+    fn: tracked(mock.fn),
+    getter: tracked(mock.getter),
+    method: tracked(mock.method),
+    module: tracked(mock.module),
+    property: tracked(mock.property),
+    setter: tracked(mock.setter),
+    reset: () => {
+      mock.reset();
+    },
+    restoreAll: () => {
+      mock.restoreAll();
+      own.length = 0;
+    },
+    timers: {
+      __proto__: null,
+      enable: (options) => {
+        mockTimers.enable(options);
+        ownsTimers = true;
+      },
+      reset: () => {
+        mockTimers.reset();
+        ownsTimers = false;
+      },
+      tick: (ms) => mockTimers.tick(ms),
+      runAll: () => mockTimers.runAll(),
+      // `setTime` is MockTimers' own method, not Date.prototype.setTime.
+      // deno-lint-ignore deno-internal/prefer-primordials
+      setTime: (ms) => mockTimers.setTime(ms),
+      [SymbolDispose]: () => {
+        mockTimers.reset();
+        ownsTimers = false;
+      },
+    },
+    [kResetContextMock]() {
+      while (own.length > 0) {
+        const ctx = ArrayPrototypePop(own);
+        if (ArrayPrototypeIncludes(activeMocks, ctx)) ctx.restore?.();
+      }
+      if (ownsTimers) {
+        ownsTimers = false;
+        mockTimers.reset();
+      }
+    },
+  };
+}
 
 test.test = test;
 test.mock = mock;

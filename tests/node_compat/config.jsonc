@@ -3363,6 +3363,7 @@
     "parallel/test-runner-tags-validation.mjs": {},
     "parallel/test-runner-todo-skip-tests.js": {},
     "parallel/test-runner-typechecking.js": {},
+    "parallel/test-runner-wait-for.js": {},
     "parallel/test-runner-xfail.js": {},
     "parallel/test-set-incoming-message-header.js": {},
     "parallel/test-set-process-debug-port.js": {},
@@ -5469,6 +5470,7 @@
       "reason": "running 1 test from ./test/parallel/test-runner-global-setup-watch-mode.mjs"
     },
     "parallel/test-runner-option-validation.js": {},
+    "parallel/test-runner-plan.mjs": {},
     "parallel/test-signal-args.js": {
       "linux": false,
       "darwin": false,

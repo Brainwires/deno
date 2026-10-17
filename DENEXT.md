@@ -1379,6 +1379,21 @@ where the changes are discussed.
     `node/async_hooks_promise_resources` (the event sequence Node 24 prints for
     the same program, less Node's own TickObject).
 
+56. **`fix(ext/node)`: `node:test`'s `t.waitFor()`, `t.plan()` options and
+    per-test mocks** (`ext/node/polyfills/testing.ts`).
+    `t.waitFor(condition,
+    { interval, timeout })` (Node 22.14) was missing;
+    `t.plan(count,
+    options)` ignored and didn't validate `options`; and
+    `t.mock` was the process-wide mock, so a test's mock timers stayed enabled
+    for the next test ("MockTimers is already enabled") and its method mocks
+    stayed in place. Each test context now has its own `t.mock`, which restores
+    what the test mocked and resets the timers it enabled when the test finishes
+    (as Node resets each test's MockTracker), in `it()` inside `describe()` too;
+    and `mock.timers.enable({ now })` reports a negative or non-integer `now` as
+    `ERR_INVALID_ARG_VALUE`. Enables `test-runner-wait-for.js` and
+    `test-runner-plan.mjs`. Spec: `node/node_test_context_wait_for`.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41, 44, 46, 50, 51) are
 what the prebuilt `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
