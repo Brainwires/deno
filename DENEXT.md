@@ -20,7 +20,7 @@ users:
 - **Features of the `deno` CLI and runtime itself**, such as Vitest / Jest
   compatibility for `deno test` (item 23), the built-in SQL client (`Deno.SQL` /
   `Deno.sql`, item 24), native type checking on TypeScript 7 (item 47) and
-  Node.js compatibility beyond stock Deno's (items 48-66: CommonJS detection,
+  Node.js compatibility beyond stock Deno's (items 48-67: CommonJS detection,
   npm's hoisted node_modules, npm's lifecycle-script behavior, `node` / `npx` /
   `npm` executables, `better-sqlite3`). These need this fork's own `deno`
   binary, published with each runtime release since `denext.15` (`deno-cli-*`,
@@ -1084,14 +1084,20 @@ where the changes are discussed.
     only in the semver-breaking 0.26 line, which needs the denoland/deno#36322
     port; Deno encodes only single-question queries), and rsa RUSTSEC-2023-0071
     (Marvin; no fixed release exists, an accepted risk for RSA PKCS#1 v1.5
-    decryption in WebCrypto and `node:crypto`). The `denext
-    tests` workflow
-    runs `cargo audit` and fails on any advisory not listed there. laufey
-    `integration/denext22` (`58c0fdb`) does the same for the hosts' `Cargo.lock`
-    (bytes 1.12.1 for RUSTSEC-2026-0007, crossbeam-epoch, quick-xml 0.41.0) with
-    a `cargo audit` job in its CI; this fork pins it (no API change). CEF
-    (149.0.5) has no audit database; it follows Chromium releases through
-    laufey's `CEF_VERSION`.
+    decryption in WebCrypto and `node:crypto`). Two bumps change an API the tree
+    uses: zip 9's `enclosed_name` drops a leading root or drive prefix instead
+    of refusing the name, so the laufey archive extractor
+    (`cli/tools/desktop.rs`) refuses an absolute entry name itself first
+    (`extract_zip_rejects_absolute_path`); and aws-lc-rs 1.18 stabilized ML-DSA,
+    so `ext/crypto/mldsa.rs` uses `aws_lc_rs::signature::*` and `to_pkcs8v1`
+    (the deprecated `unstable` aliases failed clippy). The `denext
+    tests`
+    workflow runs `cargo audit` and fails on any advisory not listed there.
+    laufey `integration/denext22` (`58c0fdb`) does the same for the hosts'
+    `Cargo.lock` (bytes 1.12.1 for RUSTSEC-2026-0007, crossbeam-epoch, quick-xml
+    0.41.0) with a `cargo audit` job in its CI; this fork pins it (no API
+    change). CEF (149.0.5) has no audit database; it follows Chromium releases
+    through laufey's `CEF_VERSION`.
 
 43. **Upstream batch: `main` picks and open pull requests** (from `denext.22`).
     Cherry-picked from denoland/deno `main` with `-x`: `AbortSignal.any()`
@@ -1513,9 +1519,13 @@ where the changes are discussed.
     again); and its deprecation warning matches the isolated layout's. Specs
     that check the isolated layout's internals (`node_modules/.deno/...` paths,
     its lazy-caching output, a `--node-modules-dir=auto` run after a manual
-    install) pin it with a `.npmrc`. Spec: `npm/hoisted_linker_default` (the
-    layout, phantom imports from ESM and CommonJS, the opt-outs, an alias,
-    switching from an isolated node_modules).
+    install, `install/deno_install_arch`, which also has a hoisted case) pin it
+    with a `.npmrc`. The root package.json's aliases are recognized as the
+    root's by canonical path: the installer's node_modules path is canonical and
+    a package.json's directory is not, which on Windows differ by 8.3 short
+    names, so the aliases were never placed there. Spec:
+    `npm/hoisted_linker_default` (the layout, phantom imports from ESM and
+    CommonJS, the opt-outs, an alias, switching from an isolated node_modules).
 
 54. **`feat(npm)`: lifecycle scripts as npm runs them** (behavior change for the
     project's own scripts; `lifecycle_scripts.rs`, `cli/npm.rs`,
@@ -1821,8 +1831,23 @@ where the changes are discussed.
     `ERR_INVALID_ARG_VALUE`. Enables `test-runner-wait-for.js` and
     `test-runner-plan.mjs`. Spec: `node/node_test_context_wait_for`.
 
+67. **`fix(ext/node)`: a CommonJS main module reached through a symlink or an
+    8.3 short name loads** (`ext/node/ops/require.rs`). The loader resolves a
+    CommonJS module to its real path (`Module._findPath`), then resolves and
+    reads it under that path, checking read access each time. Access was granted
+    for the spelling the module was loaded under (the main module's graph URL),
+    so a main module reached through a symlinked directory, or on Windows from a
+    working directory with an 8.3 short name in it (`C:\Users\RUNNER~1`), was
+    refused with "Requires read access" before it ran; with CommonJS detection
+    on by default (item 51) that includes bundled output and untyped JavaScript.
+    Stock Deno 2.9.6 fails the same way for `deno run /link/main.cjs`.
+    `op_require_real_path` now remembers the real path of each path it was
+    allowed to read, and the require ops accept those (reading the real path of
+    an allowed path reads the same file; nothing is recorded when read access is
+    fully granted). Spec: `node/cjs_main_symlinked_dir`.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
-64-66) are what the prebuilt `libdenort` carries. The CLI-side parts (for
+64-67) are what the prebuilt `libdenort` carries. The CLI-side parts (for
 example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's
 launchers) are in the branch too, but a stock CLI does not run them; denext's
 own launcher provides that environment.
