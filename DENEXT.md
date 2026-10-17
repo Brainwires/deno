@@ -1113,22 +1113,29 @@ where the changes are discussed.
 45. **`feat`: CommonJS detection by default** (behavior change;
     `IsCjsResolutionMode::for_project` in `libs/resolver/cjs/mod.rs`). An
     ambiguous JavaScript file (`.js`, `.jsx` with no `"type"` in its
-    package.json, or with no package.json) is now CommonJS unless it uses ES
-    module syntax (`import`/`export`, `import.meta`, top-level `await`), as in
-    Node (`--experimental-detect-module`, the default since 22.7), in a project
-    with a package.json and when there is no config file at all. Before, such a
-    file was always ESM and `require` threw "require is not defined" unless
-    `--unstable-detect-cjs` was passed. TypeScript files (`.ts`, `.tsx`) keep
-    Deno's ESM default unless their package.json says `"type": "commonjs"` (Node
-    detects those too, but a config-less `.ts` script or test is Deno's own
-    territory; as CommonJS its stack traces gain `node:module` frames). A
+    package.json, or with no package.json) that uses CommonJS (`require`,
+    `module.exports`, `exports`, `__dirname`, `__filename`) and no ES module
+    syntax (`import`/`export`, `import.meta`, top-level `await`) is now
+    CommonJS, as Node runs it (`--experimental-detect-module`, the default since
+    22.7), in a project with a package.json and when there is no config file at
+    all. Before, such a file was always ESM and `require` threw "require is not
+    defined" unless `--unstable-detect-cjs` was passed. Every other ambiguous
+    file keeps Deno's ESM default: TypeScript (`.ts`, `.tsx`) unless its
+    package.json says `"type": "commonjs"`, and JavaScript that never touches
+    CommonJS, where Node's CommonJS would differ from ESM only in sloppy-mode
+    details (top-level `this`, `var` globals, stack frames). Applying Node's
+    rule to every untyped file changed the behavior of about 50 of the fork's
+    own config-less `run`/`bench`/`test` specs, a measure of how much plain Deno
+    code it would reach. The binding check is a cheap textual scan of a file
+    that parsed with no ES module syntax (as `deno eval`'s), cached per file. A
     project with only a deno.json keeps ESM for every file, and so does a
     package.json with `"type": "module"`. Opt out with `--no-detect-cjs` or
     `DENO_NO_DETECT_CJS=1` (the previous behavior: CommonJS only with
     `"type": "commonjs"`); `--unstable-detect-cjs` and
-    `"unstable": ["detect-cjs"]` still force detection for every ambiguous file.
-    The LSP uses the same rule. Not covered: Node's retry as ESM when a file
-    redeclares a CommonJS wrapper name (`const require = ...`). Spec:
+    `"unstable": ["detect-cjs"]` still apply Node's rule to every ambiguous
+    file. The LSP uses the same rule. Not covered: Node's retry as ESM when a
+    file redeclares a CommonJS wrapper name (`const require =
+    ...`). Spec:
     `node/cjs_detect_default`.
 
 46. **`fix`: CommonJS re-export analysis follows package `"imports"`**

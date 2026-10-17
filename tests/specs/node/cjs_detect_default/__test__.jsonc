@@ -1,7 +1,8 @@
 {
-  // An ambiguous .js file is CommonJS unless it uses ES module syntax (Node's
-  // detect-module), in a package.json project and with no config file at all;
-  // .ts files keep ESM.
+  // An ambiguous .js file that uses CommonJS (require, module.exports, ...) is
+  // CommonJS unless it uses ES module syntax (Node's detect-module), in a
+  // package.json project and with no config file at all; .ts files and .js
+  // files that never touch CommonJS keep ESM.
   // A deno.json-only project keeps ESM; --no-detect-cjs and
   // DENO_NO_DETECT_CJS=1 restore the previous defaults.
   "tempDir": true,
@@ -20,6 +21,12 @@
       "cwd": "no_config",
       "args": "run meta.js",
       "output": "esm string\n"
+    },
+    "no_config_js_without_commonjs_stays_esm": {
+      // a script that never touches require/module/exports keeps ESM
+      "cwd": "no_config",
+      "args": "run plain.js",
+      "output": "undefined\n"
     },
     "no_config_ts_stays_esm": {
       // TypeScript keeps Deno's ES module default
