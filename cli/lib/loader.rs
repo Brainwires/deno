@@ -25,15 +25,28 @@ pub fn module_type_from_media_and_requested_type(
   }
 }
 
+/// The `context.format` a `module.registerHooks()` load hook sees for a
+/// module loaded through the ES module loader, as Node's default resolve
+/// reports it: `"json"` / `"wasm"` by type, `"commonjs"` for a CommonJS
+/// module, else `"module"`.
 pub fn module_format_from_requested_type(
   requested_module_type: &RequestedModuleType,
+  media_type: MediaType,
+  is_maybe_cjs: bool,
 ) -> String {
   match requested_module_type {
     RequestedModuleType::Json => "json".to_string(),
     RequestedModuleType::Text => "text".to_string(),
     RequestedModuleType::Bytes => "bytes".to_string(),
     RequestedModuleType::Other(kind) => kind.to_string(),
-    RequestedModuleType::None => "module".to_string(),
+    RequestedModuleType::None => match media_type {
+      MediaType::Json => "json".to_string(),
+      MediaType::Wasm => "wasm".to_string(),
+      MediaType::Cjs | MediaType::Cts => "commonjs".to_string(),
+      MediaType::Mjs | MediaType::Mts => "module".to_string(),
+      _ if is_maybe_cjs => "commonjs".to_string(),
+      _ => "module".to_string(),
+    },
   }
 }
 

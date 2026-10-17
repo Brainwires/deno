@@ -944,9 +944,18 @@ impl ModuleLoader for EmbeddedModuleLoader {
         original_specifier.as_str(),
         &options.requested_module_type,
       );
+      let media_type = MediaType::from_specifier(original_specifier);
       let receiver = self.hook_registry.push_load(
         original_specifier.to_string(),
-        module_format_from_requested_type(&options.requested_module_type),
+        module_format_from_requested_type(
+          &options.requested_module_type,
+          media_type,
+          self
+            .shared
+            .cjs_tracker
+            .is_maybe_cjs(original_specifier, media_type)
+            .unwrap_or(false),
+        ),
         import_attributes,
       );
       let this = self.clone();

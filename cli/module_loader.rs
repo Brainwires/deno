@@ -1580,7 +1580,12 @@ impl<TGraphContainer: ModuleGraphContainer> ModuleLoader
       );
       let receiver = self.0.hook_registry.push_load(
         specifier.to_string(),
-        module_format_from_requested_type(&options.requested_module_type),
+        // maybe-CommonJS modules took the CommonJS path above.
+        module_format_from_requested_type(
+          &options.requested_module_type,
+          deno_media_type::MediaType::from_specifier(&specifier),
+          false,
+        ),
         import_attributes,
       );
       return deno_core::ModuleLoadResponse::Async(
