@@ -16,6 +16,10 @@
       "args": "run -A format_js.cjs",
       "output": "format_js.out"
     },
+    "load_hook_wasm_passthrough": {
+      "args": "run -A wasm_passthrough.mjs",
+      "output": "wasm_passthrough.out"
+    },
     "load_hook_node_addon": {
       "args": "run -A main_load_node_addon.cjs",
       "output": "main_load_node_addon.out"

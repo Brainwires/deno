@@ -818,12 +818,15 @@ function executeEsmLoadHookChain(fileUrl, context) {
         return { source: null, format: "builtin", shortCircuit: true };
       }
       if (StringPrototypeStartsWith(loadUrl, "file://")) {
-        // `type: "bytes"` modules cannot be faithfully represented as a JS
-        // string here; fall through to Rust default loading, which reads the
-        // file as bytes and produces a correctly-typed module. (Reading it as
-        // a string would otherwise trip "Source code for Bytes module must be
-        // provided as bytes".)
-        if (currentContext?.importAttributes?.type === "bytes") {
+        // `type: "bytes"` and WebAssembly modules cannot be faithfully
+        // represented as a JS string here; fall through to Rust default
+        // loading, which reads the file as bytes and produces a
+        // correctly-typed module. (Reading it as a string would otherwise trip
+        // "Source code for Bytes module must be provided as bytes".)
+        if (
+          currentContext?.importAttributes?.type === "bytes" ||
+          currentContext?.format === "wasm"
+        ) {
           return { source: null, shortCircuit: true };
         }
         try {
