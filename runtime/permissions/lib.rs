@@ -4412,9 +4412,53 @@ impl PermissionsContainer {
       // itself a kernel-magic location (e.g. `/proc/self/root/...`).
       SpecialFilePathQueryDescriptor::from_path_query_no_canonicalize(path)
     } else {
-      self.descriptor_parser.parse_special_file_descriptor(path)?
+      let special_path =
+        self.descriptor_parser.parse_special_file_descriptor(path)?;
+      if special_path.canonicalized {
+        self.check_resolved_path_not_denied(
+          &special_path.path,
+          access_kind,
+          api_name,
+        )?;
+      }
+      special_path
     };
     self.check_special_file(special_path, access_kind, api_name)
+  }
+
+  /// Re-checks the deny rules against a symlink-resolved path. The checks in
+  /// `check_open_with_requested` use the path as given, so without this a
+  /// symlink inside an allowed directory that points into a `--deny-read` /
+  /// `--deny-write` scope would reach the denied file. Only a deny that covers
+  /// the resolved path itself refuses the access, matching the partial-deny
+  /// semantics of those checks (a deny scope under a resolved directory does
+  /// not block a non-recursive operation on it).
+  fn check_resolved_path_not_denied(
+    &self,
+    resolved: &Path,
+    access_kind: OpenAccessKind,
+    api_name: Option<&str>,
+  ) -> Result<(), PermissionCheckError> {
+    let resolved = self
+      .descriptor_parser
+      .parse_path_query(Cow::Owned(resolved.to_path_buf()))?;
+    let mut inner = self.inner.lock();
+    if access_kind.is_read() {
+      let desc = resolved.clone().into_read();
+      if inner.read.query(Some(&desc)) == PermissionState::Denied {
+        inner
+          .read
+          .check_partial(&desc, api_name)
+          .map_err(ignored_to_not_found)?;
+      }
+    }
+    if access_kind.is_write() {
+      let desc = resolved.into_write();
+      if inner.write.query(Some(&desc)) == PermissionState::Denied {
+        inner.write.check_partial(&desc, api_name)?;
+      }
+    }
+    Ok(())
   }
 
   #[inline(always)]
