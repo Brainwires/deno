@@ -349,7 +349,14 @@ impl TypeChecker {
     if options.ext_flag().is_some() {
       return Some("--ext");
     }
-    if options.unstable_sloppy_imports() {
+    // A package.json project's tsx-style resolution (extensionless,
+    // directory and `.js`-for-`.ts` imports, on by default since item 57)
+    // is what the generated project's `moduleResolution: "bundler"` does
+    // already. Only Deno's sloppy imports asked for in a deno.json project
+    // or by flag keep the in-process checker.
+    if options.unstable_sloppy_imports()
+      && !options.node_project_sloppy_imports()
+    {
       return Some("sloppy imports");
     }
     if options.unstable_detect_cjs() {
