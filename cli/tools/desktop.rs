@@ -2491,9 +2491,21 @@ fn extract_laufey_archive(
     // beyond the crate's own checks). Treat the archive as untrusted.
     for i in 0..archive.len() {
       let mut entry = archive.by_index(i)?;
-      // `enclosed_name` rejects drive labels, absolute paths and `..`
-      // components. Anything that fails this check is a zip-slip attempt
-      // (or a legitimately weird archive we don't want to handle).
+      // An absolute name (`/x`, `\x`, `C:...`) is refused outright. zip 9
+      // (the cargo audit bump from 2.4) no longer does that in `enclosed_name`:
+      // it drops the root or drive prefix and returns the rest as relative.
+      let raw_name = entry
+        .name()
+        .unwrap_or_else(|_| "<undecodable name>".into())
+        .into_owned();
+      if raw_name.starts_with(['/', '\\'])
+        || raw_name.as_bytes().get(1) == Some(&b':')
+      {
+        bail!("refusing zip entry with unsafe path: {raw_name}");
+      }
+      // `enclosed_name` rejects `..` components that leave the archive root.
+      // Anything that fails this check is a zip-slip attempt (or a
+      // legitimately weird archive we don't want to handle).
       let Some(rel_path) = entry.enclosed_name() else {
         bail!(
           "refusing zip entry with unsafe path: {}",
