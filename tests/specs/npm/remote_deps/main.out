@@ -1,0 +1,5 @@
+5 1.0.0 1.1.0
+own deps: true true
+git-dep-cli true
+local-tool true
+tarball-dep-cli true

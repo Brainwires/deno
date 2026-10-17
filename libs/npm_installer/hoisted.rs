@@ -691,6 +691,13 @@ impl<
           &self.root_node_modules_path.join(pkg_alias),
         )?;
       }
+      // and the `bin` of `file:`, git and tarball dependencies
+      crate::bin_entries::set_up_local_package_bin_entries(
+        sys.as_ref(),
+        self.npm_install_deps_provider.local_pkgs(),
+        &self.root_node_modules_path,
+        &self.root_node_modules_path.join(".bin"),
+      )?;
     }
 
     // 7. Create a `node_modules` directory inside each workspace member and
@@ -922,7 +929,8 @@ impl<
       })
       .collect::<HashMap<_, _>>();
     let mut packages = Vec::with_capacity(workspace_pkgs.len());
-    for workspace_pkg in workspace_pkgs {
+    // a git or tarball dependency runs no scripts
+    for workspace_pkg in workspace_pkgs.iter().filter(|pkg| !pkg.fetched) {
       let mut dependencies = HashMap::with_capacity(workspace_pkg.deps.len());
       for dep in &workspace_pkg.deps {
         match dep {

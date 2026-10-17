@@ -1286,6 +1286,42 @@ where the changes are discussed.
       in a `deno compile` binary's runtime. Spec:
       `npm/node_project_ts_resolution`; npm matrix: `ts-paths`.
 
+52. **`feat(npm)`: git and tarball dependencies, and `file:` dependencies'
+    bins** (`libs/npm_installer/remote.rs`, `PackageJsonRemoteDep` in
+    `libs/package_json`, the lockfile's `npmRemote`). package.json dependencies
+    npm accepts that aren't registry packages failed with "Not implemented
+    scheme" and were left out:
+    - git: `git+https://`, `git+http://`, `git+ssh://` (scp-like `git@host:path`
+      too), `git+file://`, `git://`, an http(s) URL ending in `.git`, and the
+      `github:`, `gitlab:`, `bitbucket:`, `gist:` shorthands (a bare `user/repo`
+      is GitHub), at `#<branch|tag|commit>` (abbreviated too), `#semver:<range>`
+      (the highest matching tag, `v` optional) or the default branch;
+    - a tarball: any other http(s) URL, or a `file:` path to a `.tgz`.
+      `deno install` (and `add`, `ci`, ... with a manual node_modules) fetches
+      each into `node_modules/.deno/.remote/<alias>@<hash>`, linked at
+      `node_modules/<alias>`; its own registry dependencies install with the
+      rest and are linked into its `node_modules` (both layouts), and its `bin`
+      goes into `node_modules/.bin`. deno.lock records, as package-lock.json
+      does, a tarball's sha512 integrity (a later download that doesn't match is
+      refused) and a git dependency's commit (checked out on later installs
+      instead of resolving the ref again; `--reload` resolves it again), under
+      `npmRemote`; `--frozen` fails when one is missing or changed. A tarball on
+      a `.npmrc` registry gets that registry's credentials. git runs without a
+      shell: package.json's value is checked when it is parsed (no option-like
+      or `ext::` URL, no revision expression or option as a ref), git gets only
+      `https`, `http`, `ssh`, `git` and `file` (`GIT_ALLOW_PROTOCOL`), no
+      terminal prompt, no hooks (`git init --template=`), no submodules;
+      fetching happens only on an install (never on `deno run`, whose
+      permissions don't cover it), and `--cached-only` refuses to fetch. Not
+      covered, unlike npm: a git dependency's `prepare` build and npm's packing
+      (`files`) are not run, a fetched package's install scripts are not run (a
+      warning says so), and a git or tarball dependency of one of those is left
+      out (a warning). A `file:` directory dependency's `bin` is now linked into
+      `node_modules/.bin` too (it wasn't). Specs: `npm/remote_deps` (hoisted and
+      isolated layouts, git tag and `semver:`, tarball URL, `file:` bin,
+      lockfile entries, a tarball that doesn't match its integrity), unit tests
+      for the parsing and its refusals; npm matrix: `git-tarball-deps`.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41, 44, 46) are what the
 prebuilt `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are

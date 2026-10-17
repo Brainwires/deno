@@ -509,6 +509,99 @@ impl EntrySetupOutcome<'_> {
   }
 }
 
+/// Links the executables of the project's `file:`, git and tarball
+/// dependencies into `bin_node_modules_dir_path` (the root
+/// `node_modules/.bin`), as npm links them: `<bin> -> ../<alias>/<script>`.
+/// Run after the registry packages' entries, so a direct dependency's bin
+/// takes a name a transitive package's also uses.
+pub fn set_up_local_package_bin_entries(
+  sys: &(impl SetupBinEntrySys + sys_traits::FsRead),
+  local_pkgs: &[crate::package_json::InstallLocalPkg],
+  root_node_modules_path: &Path,
+  bin_node_modules_dir_path: &Path,
+) -> Result<(), std::io::Error> {
+  for pkg in local_pkgs {
+    let (true, Some(alias)) = (pkg.link_bins, &pkg.alias) else {
+      continue;
+    };
+    let Ok(text) =
+      sys.fs_read_to_string_lossy(pkg.target_dir.join("package.json"))
+    else {
+      continue;
+    };
+    let Ok(pkg_json) = serde_json::from_str::<serde_json::Value>(&text) else {
+      continue;
+    };
+    let Some(bin) = pkg_json
+      .get("bin")
+      .and_then(|bin| serde_json::from_value(bin.clone()).ok())
+    else {
+      continue;
+    };
+    let name = pkg_json
+      .get("name")
+      .and_then(|n| n.as_str())
+      .unwrap_or(alias.as_str());
+    let version = pkg_json
+      .get("version")
+      .and_then(|v| v.as_str())
+      .and_then(|v| deno_semver::Version::parse_from_npm(v).ok())
+      .unwrap_or_else(|| {
+        deno_semver::Version::parse_standard("0.0.0").unwrap()
+      });
+    let package = NpmResolutionPackage {
+      id: NpmPackageId {
+        nv: deno_semver::package::PackageNv {
+          name: name.into(),
+          version,
+        },
+        peer_dependencies: Default::default(),
+      },
+      copy_index: 0,
+      system: Default::default(),
+      dist: None,
+      dependencies: Default::default(),
+      optional_dependencies: Default::default(),
+      optional_peer_dependencies: Default::default(),
+      extra: None,
+      is_deprecated: false,
+      has_bin: true,
+      has_scripts: false,
+    };
+    let extra = NpmPackageExtraInfo {
+      bin: Some(bin),
+      ..Default::default()
+    };
+    let link_path = root_node_modules_path.join(alias.as_str());
+    let entries: Vec<(&str, &str)> = match extra.bin.as_ref().unwrap() {
+      deno_npm::registry::NpmPackageVersionBinEntry::String(script) => {
+        vec![(default_bin_name(&package), script.as_str())]
+      }
+      deno_npm::registry::NpmPackageVersionBinEntry::Map(map) => map
+        .iter()
+        .map(|(name, script)| (name.as_str(), script.as_str()))
+        .collect(),
+    };
+    if entries.is_empty() {
+      continue;
+    }
+    sys.fs_create_dir_all(bin_node_modules_dir_path)?;
+    for (bin_name, script) in entries {
+      set_up_bin_entry(
+        sys,
+        &package,
+        &extra,
+        bin_name,
+        script,
+        &link_path,
+        bin_node_modules_dir_path,
+      )?
+      .warn_if_failed();
+    }
+  }
+  Ok(())
+}
+
 fn relative_path(from: &Path, to: &Path) -> Option<PathBuf> {
   pathdiff::diff_paths(to, from)
 }

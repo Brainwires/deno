@@ -44,4 +44,7 @@ A case that fails is retried after `deno install --allow-scripts`. The run exits
 so their `expect` can be raised.
 
 The programs come from the 2026-10-17 Node.js compatibility survey (54 programs,
-about 68 packages); its write-up is denext's `plans/node-compat-gaps.md`.
+about 68 packages); its write-up is denext's `plans/node-compat-gaps.md`. Two
+more cover dependency and TypeScript resolution: `git-tarball-deps` (GitHub,
+git-over-https `semver:` and tarball URL dependencies) and `ts-paths`
+(tsconfig.json `paths` and extensionless imports).

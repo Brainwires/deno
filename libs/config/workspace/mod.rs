@@ -848,6 +848,7 @@ impl Workspace {
                     PackageJsonDepValue::File(path) => {
                       dir_url.join(path).ok().map(Dep::Path)
                     }
+                    PackageJsonDepValue::Remote(_) => None,
                     PackageJsonDepValue::Req(package_req) => {
                       Some(Dep::Req(JsrDepPackageReq {
                         kind: PackageKind::Npm,

@@ -119,6 +119,12 @@ pub enum PackageJsonDepValueParseErrorKind {
   #[class(type)]
   #[error("Package name must not be empty")]
   EmptyName,
+  #[class(type)]
+  #[error("Invalid dependency '{specifier}': {reason}")]
+  InvalidRemote {
+    specifier: String,
+    reason: &'static str,
+  },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -191,9 +197,215 @@ pub fn parse_jsr_dep_value<'a>(
   Ok((npm_name, version_str))
 }
 
+/// What a git dependency checks out (the part after `#`).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum PackageJsonGitCommittish {
+  /// No `#`: the repository's default branch.
+  Head,
+  /// `#<ref>`: a branch, a tag or a commit (full or abbreviated).
+  Ref(String),
+  /// `#semver:<range>`: the highest tag (`v` prefix optional) in the range.
+  Semver(VersionReq),
+}
+
+/// A dependency that isn't a registry package, in a form npm accepts.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum PackageJsonRemoteDepKind {
+  /// `https://host/path/pkg-1.0.0.tgz` (any http(s) URL that isn't a git
+  /// repository): a package tarball.
+  Tarball(Url),
+  /// A git repository: `git+https://`, `git+http://`, `git+ssh://`,
+  /// `git+file://`, `git://`, an http(s) URL ending in `.git`, or the
+  /// `github:`, `gitlab:`, `bitbucket:` and `gist:` shorthands (a bare
+  /// `user/repo` is GitHub).
+  Git {
+    /// The repository as git is given it: a URL, or scp-like
+    /// `user@host:path` for a `git+ssh://` one written that way.
+    url: String,
+    committish: PackageJsonGitCommittish,
+  },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct PackageJsonRemoteDep {
+  /// The dependency's value as written in package.json (what the lockfile
+  /// records it under).
+  pub specifier: String,
+  pub kind: PackageJsonRemoteDepKind,
+}
+
+impl PackageJsonRemoteDep {
+  /// Parses `value` if it is a tarball URL or a git dependency, as npm's
+  /// npm-package-arg classifies them: `None` when it is neither.
+  pub fn parse(
+    value: &str,
+  ) -> Option<Result<Self, PackageJsonDepValueParseError>> {
+    let invalid = |reason: &'static str| {
+      PackageJsonDepValueParseErrorKind::InvalidRemote {
+        specifier: value.to_string(),
+        reason,
+      }
+      .into_box()
+    };
+    let git = |url: String, committish: Option<&str>| {
+      let committish = match committish {
+        None | Some("") => PackageJsonGitCommittish::Head,
+        Some(c) => match c.strip_prefix("semver:") {
+          Some(range) => match VersionReq::parse_from_npm(range) {
+            Ok(req) => PackageJsonGitCommittish::Semver(req),
+            Err(_) => return Err(invalid("invalid semver range")),
+          },
+          None => {
+            if !is_safe_git_ref(c) {
+              return Err(invalid("invalid git ref"));
+            }
+            PackageJsonGitCommittish::Ref(c.to_string())
+          }
+        },
+      };
+      if !is_safe_git_url(&url) {
+        return Err(invalid("invalid git repository URL"));
+      }
+      Ok(Self {
+        specifier: value.to_string(),
+        kind: PackageJsonRemoteDepKind::Git { url, committish },
+      })
+    };
+    let (location, committish) = match value.split_once('#') {
+      Some((location, committish)) => (location, Some(committish)),
+      None => (value, None),
+    };
+
+    for (prefix, host) in [
+      ("github:", "github.com"),
+      ("gitlab:", "gitlab.com"),
+      ("bitbucket:", "bitbucket.org"),
+    ] {
+      if let Some(path) = location.strip_prefix(prefix) {
+        if !is_hosted_repo_path(path) {
+          return Some(Err(invalid("expected <user>/<repo>")));
+        }
+        let path = path.strip_suffix(".git").unwrap_or(path);
+        return Some(git(format!("https://{host}/{path}.git"), committish));
+      }
+    }
+    if let Some(id) = location.strip_prefix("gist:") {
+      let id = id.rsplit('/').next().unwrap_or(id);
+      if id.is_empty() || !id.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return Some(Err(invalid("expected a gist id")));
+      }
+      return Some(git(
+        format!("https://gist.github.com/{id}.git"),
+        committish,
+      ));
+    }
+    if let Some(url) = location.strip_prefix("git+") {
+      let url = match url.strip_prefix("ssh://") {
+        // `git+ssh://git@github.com:user/repo.git`, scp-like: git takes it
+        // without the scheme
+        Some(rest) if is_scp_like(rest) => rest.to_string(),
+        _ => url.to_string(),
+      };
+      let scheme_ok = ["https://", "http://", "ssh://", "file://"]
+        .iter()
+        .any(|scheme| url.starts_with(scheme))
+        || is_scp_like(&url);
+      if !scheme_ok {
+        return Some(Err(invalid("unsupported git protocol")));
+      }
+      return Some(git(url, committish));
+    }
+    if location.starts_with("git://") {
+      return Some(git(location.to_string(), committish));
+    }
+    if location.starts_with("https://") || location.starts_with("http://") {
+      let Ok(url) = Url::parse(location) else {
+        return Some(Err(invalid("invalid URL")));
+      };
+      if url.path().ends_with(".git") {
+        return Some(git(location.to_string(), committish));
+      }
+      // a tarball's URL keeps its fragment
+      let Ok(url) = Url::parse(value) else {
+        return Some(Err(invalid("invalid URL")));
+      };
+      return Some(Ok(Self {
+        specifier: value.to_string(),
+        kind: PackageJsonRemoteDepKind::Tarball(url),
+      }));
+    }
+    // npm's GitHub shorthand: `user/repo`
+    if !location.contains(':') && is_hosted_repo_path(location) {
+      let path = location.strip_suffix(".git").unwrap_or(location);
+      return Some(git(format!("https://github.com/{path}.git"), committish));
+    }
+    None
+  }
+}
+
+/// `<user>/<repo>` as GitHub, GitLab and Bitbucket name repositories.
+fn is_hosted_repo_path(path: &str) -> bool {
+  let Some((user, repo)) = path.split_once('/') else {
+    return false;
+  };
+  let segment_ok = |s: &str| {
+    !s.is_empty()
+      && !s.starts_with('.')
+      && !s.starts_with('-')
+      && s
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+  };
+  segment_ok(user) && segment_ok(repo)
+}
+
+/// scp-like `user@host:path` (git's ssh shorthand), not `host:port/path`.
+fn is_scp_like(value: &str) -> bool {
+  let authority = value.split('/').next().unwrap_or(value);
+  match authority.split_once(':') {
+    Some((host, rest)) => {
+      !host.is_empty()
+        && host.chars().all(|c| {
+          c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '@')
+        })
+        && !rest.is_empty()
+        && !rest.starts_with(|c: char| c.is_ascii_digit() || c == ':')
+    }
+    None => false,
+  }
+}
+
+/// A repository URL git can be given as an argument without it being read
+/// as an option or reaching a transport that runs commands (`ext::`).
+fn is_safe_git_url(url: &str) -> bool {
+  !url.is_empty()
+    && !url.starts_with('-')
+    && !url.contains("::")
+    && !url.chars().any(|c| c.is_whitespace() || c.is_control())
+}
+
+/// A branch, tag or commit name that can't be read as a git option or
+/// revision expression.
+pub fn is_safe_git_ref(name: &str) -> bool {
+  !name.is_empty()
+    && name.len() <= 255
+    && name.starts_with(|c: char| c.is_ascii_alphanumeric())
+    && !name.ends_with('.')
+    && !name.ends_with('/')
+    && !name.ends_with(".lock")
+    && !name.contains("..")
+    && !name.contains("//")
+    && !name.contains("@{")
+    && name.chars().all(|c| {
+      c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/' | '+')
+    })
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum PackageJsonDepValue {
   File(String),
+  /// A tarball URL or a git repository (see [`PackageJsonRemoteDep`]).
+  Remote(PackageJsonRemoteDep),
   Req(PackageReq),
   Workspace {
     /// Target workspace package name for pnpm-style aliased deps
@@ -229,6 +441,10 @@ impl PackageJsonDepValue {
 
     if key.is_empty() {
       return Err(PackageJsonDepValueParseErrorKind::EmptyName.into_box());
+    }
+
+    if let Some(remote) = PackageJsonRemoteDep::parse(value) {
+      return remote.map(Self::Remote);
     }
 
     if let Some((scheme, value)) = value.split_once(':') {
@@ -1333,18 +1549,121 @@ mod test {
         ),
         (
           "http-test".to_string(),
-          Err(PackageJsonDepValueParseErrorKind::Unsupported {
-            scheme: "http".to_string()
-          }),
+          Ok(PackageJsonDepValue::Remote(PackageJsonRemoteDep {
+            specifier: "http://something".to_string(),
+            kind: PackageJsonRemoteDepKind::Tarball(
+              Url::parse("http://something").unwrap()
+            ),
+          })),
         ),
         (
           "https-test".to_string(),
-          Err(PackageJsonDepValueParseErrorKind::Unsupported {
-            scheme: "https".to_string()
-          }),
+          Ok(PackageJsonDepValue::Remote(PackageJsonRemoteDep {
+            specifier: "https://something".to_string(),
+            kind: PackageJsonRemoteDepKind::Tarball(
+              Url::parse("https://something").unwrap()
+            ),
+          })),
         ),
       ])
     );
+  }
+
+  #[test]
+  fn parses_remote_deps() {
+    fn git(
+      url: &str,
+      committish: PackageJsonGitCommittish,
+    ) -> PackageJsonRemoteDepKind {
+      PackageJsonRemoteDepKind::Git {
+        url: url.to_string(),
+        committish,
+      }
+    }
+    fn parse(value: &str) -> Option<PackageJsonRemoteDepKind> {
+      match PackageJsonDepValue::parse("dep", value) {
+        Ok(PackageJsonDepValue::Remote(dep)) => {
+          assert_eq!(dep.specifier, value);
+          Some(dep.kind)
+        }
+        _ => None,
+      }
+    }
+    use PackageJsonGitCommittish::*;
+    assert_eq!(
+      parse("github:user/repo#v1.2.0"),
+      Some(git(
+        "https://github.com/user/repo.git",
+        Ref("v1.2.0".into())
+      ))
+    );
+    assert_eq!(
+      parse("user/repo"),
+      Some(git("https://github.com/user/repo.git", Head))
+    );
+    assert_eq!(
+      parse("gitlab:group/project.git"),
+      Some(git("https://gitlab.com/group/project.git", Head))
+    );
+    assert_eq!(
+      parse("bitbucket:team/repo#main"),
+      Some(git(
+        "https://bitbucket.org/team/repo.git",
+        Ref("main".into())
+      ))
+    );
+    assert_eq!(
+      parse("git+https://example.com/a/b.git#semver:^1.0.0"),
+      Some(git(
+        "https://example.com/a/b.git",
+        Semver(VersionReq::parse_from_npm("^1.0.0").unwrap())
+      ))
+    );
+    assert_eq!(
+      parse("git+ssh://git@github.com:user/repo.git#abc123"),
+      Some(git("git@github.com:user/repo.git", Ref("abc123".into())))
+    );
+    assert_eq!(
+      parse("git+ssh://git@host.example:2222/repo.git"),
+      Some(git("ssh://git@host.example:2222/repo.git", Head))
+    );
+    assert_eq!(
+      parse("git://example.com/repo.git"),
+      Some(git("git://example.com/repo.git", Head))
+    );
+    assert_eq!(
+      parse("https://example.com/repo.git#dev"),
+      Some(git("https://example.com/repo.git", Ref("dev".into())))
+    );
+    assert_eq!(
+      parse("https://example.com/pkg-1.0.0.tgz"),
+      Some(PackageJsonRemoteDepKind::Tarball(
+        Url::parse("https://example.com/pkg-1.0.0.tgz").unwrap()
+      ))
+    );
+    // not remote
+    assert_eq!(parse("^1.0.0"), None);
+    assert_eq!(parse("npm:other@1"), None);
+    // refused: option injection, ext:: transport, revision expressions
+    for value in [
+      "github:user/repo#--upload-pack=touch",
+      "git+https://example.com/r.git#a..b",
+      "git+https://example.com/r.git#HEAD@{1}",
+      "git+ext::sh -c touch% /tmp/pwned",
+      "git+https://example.com/a b.git",
+      "github:-user/repo",
+    ] {
+      assert!(
+        matches!(
+          PackageJsonDepValue::parse("dep", value),
+          Err(err) if matches!(
+            &*err.0,
+            PackageJsonDepValueParseErrorKind::InvalidRemote { .. }
+          )
+        ),
+        "{value}"
+      );
+    }
   }
 
   #[test]

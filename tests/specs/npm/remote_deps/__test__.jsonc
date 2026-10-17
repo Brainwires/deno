@@ -1,0 +1,51 @@
+{
+  // package.json dependencies npm accepts that aren't registry packages: a
+  // git repository (`git+file://` here; `git+https://`, `git+ssh://`,
+  // `github:user/repo` the same way) at a tag or the highest `semver:` tag,
+  // a tarball URL, and a `file:` directory. `deno install` fetches them into
+  // node_modules, installs their own registry dependencies and links their
+  // `bin` into node_modules/.bin; deno.lock records the commit and the
+  // tarball's sha512 integrity under `npmRemote`, and a tarball that doesn't
+  // match it is refused.
+  "tempDir": true,
+  "tests": {
+    "git_tarball_and_file_deps": {
+      "steps": [
+        { "args": "run -A make_repo.ts", "output": "" },
+        { "cwd": "app", "args": "install", "output": "[WILDCARD]" },
+        {
+          "cwd": "app",
+          "args": "run -R main.cjs",
+          "output": "main.out"
+        },
+        {
+          "cwd": "app",
+          "args": "run -R check_lock.mjs",
+          "output": "lock.out"
+        },
+        // a second install reuses what's in place
+        { "cwd": "app", "args": "install", "output": "[WILDCARD]" },
+        { "cwd": "app", "args": "run -R main.cjs", "output": "main.out" },
+        // the lockfile's integrity is checked
+        { "cwd": "app", "args": "run -RW tamper.mjs", "output": "" },
+        {
+          "cwd": "app",
+          "args": "install",
+          "output": "[WILDCARD]Failed fetching 'tarball-dep' (http://localhost:4260/@denotest/tarball-dep/1.0.0.tgz): Tarball checksum did not match[WILDCARD]",
+          "exitCode": 1
+        }
+      ]
+    },
+    "isolated_node_modules": {
+      "steps": [
+        { "args": "run -A make_repo.ts", "output": "" },
+        { "cwd": "app_isolated", "args": "install", "output": "[WILDCARD]" },
+        {
+          "cwd": "app_isolated",
+          "args": "run -R main.cjs",
+          "output": "main.out"
+        }
+      ]
+    }
+  }
+}

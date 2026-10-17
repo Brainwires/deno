@@ -318,6 +318,10 @@ impl EmbeddedModuleLoader {
         PackageJsonDepValue::File(_) => Err(JsErrorBox::from_err(
           DenoResolveErrorKind::UnsupportedPackageJsonFileSpecifier.into_box(),
         )),
+        PackageJsonDepValue::Remote(_) => Err(JsErrorBox::from_err(
+          DenoResolveErrorKind::UnsupportedPackageJsonRemoteSpecifier
+            .into_box(),
+        )),
         PackageJsonDepValue::Req(req) => Ok(
           self
             .shared

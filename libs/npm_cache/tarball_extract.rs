@@ -150,6 +150,52 @@ fn gzip_decompressed_size_hint(data: &[u8]) -> usize {
   }
 }
 
+/// The SRI integrity (`sha512-<base64>`) npm records for a tarball.
+pub fn tarball_integrity(data: &[u8]) -> String {
+  format!("sha512-{}", BASE64_STANDARD.encode(hashing::sha512(data)))
+}
+
+/// Verifies a package tarball that doesn't come from a registry (a tarball
+/// URL dependency) against `integrity` (an SRI string such as
+/// `sha512-<base64>`), then extracts it into `output_folder` through a
+/// sibling temp directory, with the same path checks as a registry package.
+/// `package_nv` only names the package in errors.
+pub fn verify_and_extract_tarball_with_integrity(
+  sys: &(
+     impl FsCanonicalize
+     + FsCreateDirAll
+     + FsMetadata
+     + FsOpen
+     + FsRename
+     + FsRemoveDirAll
+     + FsRemoveFile
+     + SystemRandom
+     + ThreadSleep
+   ),
+  package_nv: &PackageNv,
+  data: &[u8],
+  integrity: &str,
+  output_folder: &Path,
+) -> Result<(), VerifyAndExtractTarballError> {
+  let integrity = match integrity.split_once('-') {
+    Some((algorithm, base64_hash)) => {
+      NpmPackageVersionDistInfoIntegrity::Integrity {
+        algorithm,
+        base64_hash,
+      }
+    }
+    None => NpmPackageVersionDistInfoIntegrity::UnknownIntegrity(integrity),
+  };
+  verify_tarball_integrity(package_nv, data, &integrity)?;
+  let tar_data = decompress_gzip(data)?;
+  write_extracted_tarball(
+    sys,
+    &tar_data,
+    output_folder,
+    TarballExtractionMode::SiblingTempDir,
+  )
+}
+
 /// Writes already-decompressed raw tar bytes to disk.
 /// This is I/O-bound work that benefits from limited concurrency
 /// to avoid filesystem contention.

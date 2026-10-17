@@ -102,6 +102,13 @@ pub async fn info(
                 .into(),
             );
           }
+          deno_package_json::PackageJsonDepValue::Remote(_) => {
+            return Err(
+              DenoResolveErrorKind::UnsupportedPackageJsonRemoteSpecifier
+                .into_box()
+                .into(),
+            );
+          }
           deno_package_json::PackageJsonDepValue::Workspace {
             name,
             version_req,

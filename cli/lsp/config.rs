@@ -1360,6 +1360,7 @@ impl WorkspaceConfigData {
         lifecycle_scripts_config: LifecycleScriptsConfig::default(),
         production: false,
         skip_types: false,
+        install_remote_packages: false,
         resolve_npm_resolution_snapshot: Box::new(|| Ok(None)),
       },
     );

@@ -471,6 +471,21 @@ impl<TSys: SpecifierUnfurlerSys> SpecifierUnfurler<TSys> {
                   },
                 );
               }
+              PackageJsonDepValue::Remote(remote) => {
+                return Err(
+                  UnfurlSpecifierError::UnsupportedPkgJsonSpecifier {
+                    package_name: alias.to_string(),
+                    scheme: match remote.kind {
+                      deno_package_json::PackageJsonRemoteDepKind::Git {
+                        ..
+                      } => "git".to_string(),
+                      deno_package_json::PackageJsonRemoteDepKind::Tarball(
+                        _,
+                      ) => "https".to_string(),
+                    },
+                  },
+                );
+              }
               PackageJsonDepValue::Req(pkg_req) => {
                 // todo(#24612): consider warning or error when this is an npm workspace
                 // member that's also a jsr package?
@@ -588,7 +603,8 @@ impl<TSys: SpecifierUnfurlerSys> SpecifierUnfurler<TSys> {
               | PackageJsonDepValueParseErrorKind::JsrRequiresScope {
                 ..
               }
-              | PackageJsonDepValueParseErrorKind::EmptyName => {
+              | PackageJsonDepValueParseErrorKind::EmptyName
+              | PackageJsonDepValueParseErrorKind::InvalidRemote { .. } => {
                 log::warn!(
                   "Ignoring failed to resolve package.json dependency. {:#}",
                   err

@@ -157,6 +157,8 @@ struct LockfileV5<'a> {
   redirects: &'a BTreeMap<String, String>,
   #[serde(skip_serializing_if = "BTreeMap::is_empty")]
   remote: &'a BTreeMap<String, String>,
+  #[serde(rename = "npmRemote", skip_serializing_if = "BTreeMap::is_empty")]
+  npm_remote: &'a BTreeMap<String, String>,
   #[serde(skip_serializing_if = "SerializedWorkspaceConfigContent::is_empty")]
   workspace: SerializedWorkspaceConfigContent<'a>,
 }
@@ -385,6 +387,7 @@ pub fn print_v5_content(content: &LockfileContent) -> String {
     npm: handle_npm(&content.packages.npm),
     redirects: &content.redirects,
     remote: &content.remote,
+    npm_remote: &content.npm_remote,
     workspace: handle_workspace(&content.workspace),
   };
   let mut writer = Vec::with_capacity(1024);

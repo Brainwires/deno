@@ -319,6 +319,8 @@ impl<TSys: LockfileSys> LockfileLock<TSys> {
             // ignored because this will have its own separate lockfile
             None
           }
+          // recorded in the lockfile's `npmRemote` by the installer
+          PackageJsonDepValue::Remote(_) => None,
           PackageJsonDepValue::Req(req) => {
             Some(JsrDepPackageReq::npm(req.clone()))
           }
@@ -439,6 +441,7 @@ impl<TSys: LockfileSys> LockfileLock<TSys> {
                     }
                     // not supported
                     PackageJsonDepValue::File(_)
+                    | PackageJsonDepValue::Remote(_)
                     | PackageJsonDepValue::Workspace { .. }
                     | PackageJsonDepValue::Catalog(_) => None,
                   })

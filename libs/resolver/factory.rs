@@ -385,6 +385,13 @@ impl<TSys: WorkspaceFactorySys> WorkspaceFactory<TSys> {
     }
   }
 
+  /// Whether the project's node_modules is manual (`deno install` writes it
+  /// and Deno resolves through it), even while a package manager subcommand
+  /// installs into it with the managed resolver.
+  pub fn is_manual_node_modules_dir(&self) -> Result<bool, anyhow::Error> {
+    Ok(self.raw_node_modules_dir_mode()? == NodeModulesDirMode::Manual)
+  }
+
   pub fn node_modules_dir_mode(
     &self,
   ) -> Result<NodeModulesDirMode, anyhow::Error> {

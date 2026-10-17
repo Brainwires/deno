@@ -67,6 +67,9 @@ pub struct NpmInstallerFactoryOptions {
   pub production: bool,
   /// Exclude @types/* packages from installation.
   pub skip_types: bool,
+  /// Fetch package.json's git and tarball dependencies into a manual
+  /// node_modules (see `crate::remote`) when the installer is created.
+  pub install_remote_packages: bool,
   /// Resolves the npm resolution snapshot from the environment.
   pub resolve_npm_resolution_snapshot: ResolveNpmResolutionSnapshotFn,
 }
@@ -484,6 +487,7 @@ impl<
           let registry_info_provider = self.registry_info_provider()?;
           let workspace_npm_link_packages =
             workspace_factory.workspace_npm_link_packages()?;
+          let fetched_pkgs = self.install_remote_packages().await?;
           Ok(Arc::new(NpmInstaller::new(
             self.install_reporter.clone(),
             self.lifecycle_scripts_executor.clone(),
@@ -492,6 +496,7 @@ impl<
               &workspace_factory.workspace_directory()?.workspace,
               self.options.production,
               self.options.skip_types,
+              &fetched_pkgs,
             )),
             registry_info_provider.clone(),
             self.resolver_factory.npm_resolution().clone(),
@@ -566,6 +571,46 @@ impl<
           .map(|r| r.clone() as Arc<dyn deno_npm_cache::TarballCacheReporter>),
       ))
     })
+  }
+
+  /// Fetches package.json's git and tarball dependencies into
+  /// `node_modules/.deno/.remote` (a manual node_modules only; see
+  /// `crate::remote`).
+  async fn install_remote_packages(
+    &self,
+  ) -> Result<Vec<crate::remote::FetchedRemotePkg>, anyhow::Error> {
+    if !self.options.install_remote_packages {
+      return Ok(Vec::new());
+    }
+    let workspace_factory = self.workspace_factory();
+    let workspace = &workspace_factory.workspace_directory()?.workspace;
+    let has_remote_deps =
+      !crate::remote::workspace_remote_deps(workspace, false).is_empty();
+    if !has_remote_deps {
+      return Ok(Vec::new());
+    }
+    let node_modules_path = workspace_factory.node_modules_dir_path()?;
+    let (true, Some(node_modules_path)) = (
+      workspace_factory.is_manual_node_modules_dir()?,
+      node_modules_path,
+    ) else {
+      log::warn!(
+        "{} Not installing package.json's git and tarball dependencies: they need a node_modules directory that `deno install` manages (\"nodeModulesDir\": \"manual\").",
+        deno_terminal::colors::yellow("Warning"),
+      );
+      return Ok(Vec::new());
+    };
+    let lockfile = self.maybe_lockfile().await?;
+    let installer = crate::remote::RemotePackagesInstaller {
+      http_client: &*self.http_client,
+      sys: workspace_factory.sys(),
+      npmrc: workspace_factory.npmrc()?,
+      lockfile: lockfile.map(|l| &**l),
+      node_modules_path,
+      cache_setting: &self.options.cache_setting,
+      production: self.options.production,
+    };
+    Ok(installer.install(workspace).await?)
   }
 
   pub fn resolver_factory(&self) -> &Arc<ResolverFactory<TSys>> {

@@ -959,6 +959,13 @@ impl<
           &self.root_node_modules_path.join(pkg_alias),
         )?;
       }
+      // and the `bin` of `file:`, git and tarball dependencies
+      crate::bin_entries::set_up_local_package_bin_entries(
+        sys.as_ref(),
+        self.npm_install_deps_provider.local_pkgs(),
+        &self.root_node_modules_path,
+        &self.root_node_modules_path.join(".bin"),
+      )?;
     }
 
     // 11. Create a `node_modules` directory inside each workspace member and
@@ -1179,7 +1186,8 @@ impl<
       })
       .collect::<HashMap<_, _>>();
     let mut packages = Vec::with_capacity(workspace_pkgs.len());
-    for workspace_pkg in workspace_pkgs {
+    // a git or tarball dependency runs no scripts
+    for workspace_pkg in workspace_pkgs.iter().filter(|pkg| !pkg.fetched) {
       let mut dependencies = HashMap::with_capacity(workspace_pkg.deps.len());
       for dep in &workspace_pkg.deps {
         match dep {
@@ -2102,7 +2110,10 @@ fn cleanup_unused_packages<TSys: LocalNpmInstallSys>(
     for entry in entries.flatten() {
       let file_name = entry.file_name();
       if let Some(name_str) = file_name.to_str() {
-        if name_str == "node_modules" || name_str.starts_with(".deno.lock") {
+        if name_str == "node_modules"
+          || name_str.starts_with(".deno.lock")
+          || name_str == crate::remote::REMOTE_PACKAGES_DIR
+        {
           continue;
         }
 

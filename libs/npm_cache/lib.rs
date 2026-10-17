@@ -52,6 +52,9 @@ pub use remote::maybe_auth_header_value_for_npm_registry;
 pub use tarball::EnsurePackageError;
 pub use tarball::TarballCache;
 pub use tarball::TarballCacheReporter;
+pub use tarball_extract::VerifyAndExtractTarballError;
+pub use tarball_extract::tarball_integrity;
+pub use tarball_extract::verify_and_extract_tarball_with_integrity;
 
 use self::rt::spawn_blocking;
 
