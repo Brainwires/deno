@@ -31,11 +31,14 @@ use crate::lsp::performance::Performance;
 use crate::lsp::refactor;
 use crate::lsp::tsc::TsJsServer;
 use crate::lsp::tsc::file_text_changes_to_workspace_edit;
+use crate::lsp::tsgo::TsGoServer;
 use crate::lsp::urls::uri_to_url;
 
 #[derive(Debug)]
 pub enum TsServer {
   Js(TsJsServer),
+  /// TypeScript 7 through a pinned `tsc --lsp` (denext, unstable).
+  Go(TsGoServer),
 }
 
 impl TsServer {
@@ -43,9 +46,42 @@ impl TsServer {
     Self::Js(TsJsServer::new(performance))
   }
 
+  pub fn new_go(
+    http_client_provider: Arc<crate::http_util::HttpClientProvider>,
+  ) -> Self {
+    Self::Go(TsGoServer::new(http_client_provider))
+  }
+
   pub fn is_started(&self) -> bool {
     match self {
       Self::Js(ts_server) => ts_server.is_started(),
+      Self::Go(ts_server) => ts_server.is_started(),
+    }
+  }
+
+  /// The editor's watched-file events, for backends that track the disk
+  /// themselves.
+  pub fn did_change_watched_files(&self, changes: &[lsp::FileEvent]) {
+    match self {
+      Self::Js(_) => {}
+      Self::Go(ts_server) => ts_server.did_change_watched_files(changes),
+    }
+  }
+
+  /// Start the backend ahead of the first request where that is costly.
+  pub async fn warm_up(&self, snapshot: Arc<StateSnapshot>) {
+    match self {
+      Self::Js(_) => {}
+      Self::Go(ts_server) => ts_server.warm_up(snapshot).await,
+    }
+  }
+
+  /// Configuration or the dependency cache changed: regenerate what a
+  /// backend derives from them.
+  pub async fn refresh_generated_types(&self, snapshot: Arc<StateSnapshot>) {
+    match self {
+      Self::Js(_) => {}
+      Self::Go(ts_server) => ts_server.refresh_generated_types(snapshot).await,
     }
   }
 
@@ -86,6 +122,10 @@ impl TsServer {
           new_notebook_keys,
         );
       }
+      Self::Go(ts_server) => {
+        let _ = (documents, configuration_changed);
+        ts_server.project_changed(snapshot);
+      }
     }
   }
 
@@ -97,6 +137,10 @@ impl TsServer {
     token: &CancellationToken,
   ) -> Result<Vec<String>, AnyError> {
     match self {
+      Self::Go(_) => {
+        let _ = (compiler_options_key, notebook_uri, snapshot, token);
+        Ok(Vec::new())
+      }
       Self::Js(ts_server) => {
         ts_server
           .get_ambient_modules(
@@ -117,6 +161,11 @@ impl TsServer {
     token: &CancellationToken,
   ) -> Result<Vec<lsp::Diagnostic>, AnyError> {
     match self {
+      Self::Go(ts_server) => {
+        ts_server
+          .provide_diagnostics(module, &snapshot, token)
+          .await
+      }
       Self::Js(ts_server) => {
         let mut ts_diagnostics = ts_server
           .get_diagnostics(snapshot.clone(), module, token)
@@ -147,13 +196,19 @@ impl TsServer {
   pub async fn provide_references(
     &self,
     document: &Document,
-    _module: &DocumentModule,
+    module: &DocumentModule,
     position: lsp::Position,
     context: lsp::ReferenceContext,
     snapshot: &Arc<StateSnapshot>,
     token: &CancellationToken,
   ) -> Result<Option<Vec<lsp::Location>>, AnyError> {
     match self {
+      Self::Go(ts_server) => {
+        let _ = document;
+        ts_server
+          .provide_references(module, position, context, snapshot, token)
+          .await
+      }
       Self::Js(ts_server) => {
         let mut locations = IndexSet::new();
         for module in snapshot
@@ -210,6 +265,11 @@ impl TsServer {
     token: &CancellationToken,
   ) -> Result<Option<Vec<lsp::CodeLens>>, AnyError> {
     match self {
+      Self::Go(_) => {
+        // TODO(denext): tsgo's reference/implementation code lenses.
+        let _ = (module, settings, snapshot, token);
+        Ok(None)
+      }
       Self::Js(ts_server) => {
         if !settings.implementations && !settings.references {
           return Ok(None);
@@ -247,6 +307,11 @@ impl TsServer {
     token: &CancellationToken,
   ) -> Result<Option<lsp::DocumentSymbolResponse>, AnyError> {
     match self {
+      Self::Go(ts_server) => {
+        ts_server
+          .provide_document_symbols(module, &snapshot, token)
+          .await
+      }
       Self::Js(ts_server) => {
         let navigation_tree = ts_server
           .get_navigation_tree(snapshot, module, token)
@@ -286,6 +351,11 @@ impl TsServer {
     token: &CancellationToken,
   ) -> Result<Option<lsp::Hover>, AnyError> {
     match self {
+      Self::Go(ts_server) => {
+        ts_server
+          .provide_hover(module, position, &snapshot, token)
+          .await
+      }
       Self::Js(ts_server) => {
         let position = module.line_index.offset_tsc(position)?;
         let quick_info = ts_server
@@ -304,6 +374,10 @@ impl TsServer {
     token: &CancellationToken,
   ) -> Result<Option<lsp_custom::InferredTypeResponse>, AnyError> {
     match self {
+      Self::Go(_) => {
+        let _ = (module, position, snapshot, token);
+        Ok(None)
+      }
       Self::Js(ts_server) => {
         let position = module.line_index.offset_tsc(position)?;
         let quick_info = ts_server
@@ -334,6 +408,12 @@ impl TsServer {
     token: &CancellationToken,
   ) -> Result<Option<lsp::CodeActionResponse>, AnyError> {
     match self {
+      Self::Go(ts_server) => {
+        let _ = (file_diagnostics, has_deno_code_actions, language_server);
+        ts_server
+          .provide_code_actions(module, range, context, &snapshot, token)
+          .await
+      }
       Self::Js(ts_server) => {
         let supported_code_fixes =
           ts_server.get_supported_code_fixes(snapshot.clone()).await?;
@@ -510,6 +590,11 @@ impl TsServer {
     token: &CancellationToken,
   ) -> Result<Option<Vec<lsp::DocumentHighlight>>, AnyError> {
     match self {
+      Self::Go(ts_server) => {
+        ts_server
+          .provide_document_highlights(module, position, &snapshot, token)
+          .await
+      }
       Self::Js(ts_server) => {
         let highlights = ts_server
           .get_document_highlights(
@@ -544,6 +629,11 @@ impl TsServer {
     token: &CancellationToken,
   ) -> Result<Option<lsp::GotoDefinitionResponse>, AnyError> {
     match self {
+      Self::Go(ts_server) => {
+        ts_server
+          .provide_definition(module, position, snapshot, token)
+          .await
+      }
       Self::Js(ts_server) => {
         let definition_info = ts_server
           .get_definition(
@@ -575,6 +665,11 @@ impl TsServer {
     token: &CancellationToken,
   ) -> Result<Option<lsp::request::GotoTypeDefinitionResponse>, AnyError> {
     match self {
+      Self::Go(ts_server) => {
+        ts_server
+          .provide_type_definition(module, position, snapshot, token)
+          .await
+      }
       Self::Js(ts_server) => {
         let definition_info = ts_server
           .get_type_definition(
@@ -609,6 +704,12 @@ impl TsServer {
     token: &CancellationToken,
   ) -> Result<Option<lsp::CompletionResponse>, AnyError> {
     match self {
+      Self::Go(ts_server) => {
+        let _ = language_server;
+        ts_server
+          .provide_completion(module, position, context, &snapshot, token)
+          .await
+      }
       Self::Js(ts_server) => {
         let position = module.line_index.offset_tsc(position)?;
         let completion_info = ts_server
@@ -664,6 +765,15 @@ impl TsServer {
     token: &CancellationToken,
   ) -> Result<lsp::CompletionItem, AnyError> {
     match self {
+      Self::Go(ts_server) => {
+        let _ = module;
+        let CompletionItemData::TsGo(data) = data else {
+          return Ok(item);
+        };
+        ts_server
+          .resolve_completion_item(item, data, &snapshot, token)
+          .await
+      }
       Self::Js(ts_server) => {
         let CompletionItemData::TsJs(data) = data else {
           return Ok(item);
@@ -711,12 +821,18 @@ impl TsServer {
   pub async fn provide_implementations(
     &self,
     document: &Document,
-    _module: &DocumentModule,
+    module: &DocumentModule,
     position: lsp::Position,
     snapshot: &Arc<StateSnapshot>,
     token: &CancellationToken,
   ) -> Result<Option<lsp::request::GotoImplementationResponse>, AnyError> {
     match self {
+      Self::Go(ts_server) => {
+        let _ = document;
+        ts_server
+          .provide_implementations(module, position, snapshot, token)
+          .await
+      }
       Self::Js(ts_server) => {
         let mut implementations_with_modules = IndexMap::new();
         for module in snapshot
@@ -773,6 +889,11 @@ impl TsServer {
     token: &CancellationToken,
   ) -> Result<Option<Vec<lsp::FoldingRange>>, AnyError> {
     match self {
+      Self::Go(ts_server) => {
+        ts_server
+          .provide_folding_range(module, &snapshot, token)
+          .await
+      }
       Self::Js(ts_server) => {
         let outlining_spans = ts_server
           .get_outlining_spans(snapshot.clone(), module, token)
@@ -802,12 +923,18 @@ impl TsServer {
   pub async fn provide_call_hierarchy_incoming_calls(
     &self,
     document: &Document,
-    _module: &DocumentModule,
+    module: &DocumentModule,
     item: &lsp::CallHierarchyItem,
     snapshot: &Arc<StateSnapshot>,
     token: &CancellationToken,
   ) -> Result<Option<Vec<lsp::CallHierarchyIncomingCall>>, AnyError> {
     match self {
+      Self::Go(ts_server) => {
+        let _ = (document, module);
+        ts_server
+          .provide_call_hierarchy_incoming_calls(item, snapshot, token)
+          .await
+      }
       Self::Js(ts_server) => {
         let mut incoming_calls_with_modules = IndexMap::new();
         for module in snapshot
@@ -861,6 +988,12 @@ impl TsServer {
     token: &CancellationToken,
   ) -> Result<Option<Vec<lsp::CallHierarchyOutgoingCall>>, AnyError> {
     match self {
+      Self::Go(ts_server) => {
+        let _ = module;
+        ts_server
+          .provide_call_hierarchy_outgoing_calls(item, snapshot, token)
+          .await
+      }
       Self::Js(ts_server) => {
         let outgoing_calls = ts_server
           .provide_call_hierarchy_outgoing_calls(
@@ -894,6 +1027,11 @@ impl TsServer {
     token: &CancellationToken,
   ) -> Result<Option<Vec<lsp::CallHierarchyItem>>, AnyError> {
     match self {
+      Self::Go(ts_server) => {
+        ts_server
+          .provide_prepare_call_hierarchy(module, position, snapshot, token)
+          .await
+      }
       Self::Js(ts_server) => {
         let items = ts_server
           .prepare_call_hierarchy(
@@ -928,7 +1066,7 @@ impl TsServer {
   pub async fn provide_rename(
     &self,
     document: &Document,
-    _module: &DocumentModule,
+    module: &DocumentModule,
     position: lsp::Position,
     new_name: &str,
     language_server: &language_server::Inner,
@@ -936,6 +1074,12 @@ impl TsServer {
     token: &CancellationToken,
   ) -> Result<Option<lsp::WorkspaceEdit>, AnyError> {
     match self {
+      Self::Go(ts_server) => {
+        let _ = (document, language_server);
+        ts_server
+          .provide_rename(module, position, new_name, snapshot, token)
+          .await
+      }
       Self::Js(ts_server) => {
         let mut locations_with_modules = IndexMap::new();
         for module in snapshot
@@ -998,6 +1142,11 @@ impl TsServer {
     token: &CancellationToken,
   ) -> Result<Option<Vec<lsp::SelectionRange>>, AnyError> {
     match self {
+      Self::Go(ts_server) => {
+        ts_server
+          .provide_selection_ranges(module, positions, &snapshot, token)
+          .await
+      }
       Self::Js(ts_server) => {
         let mut selection_ranges = Vec::with_capacity(positions.len());
         for &position in positions {
@@ -1029,6 +1178,8 @@ impl TsServer {
     let semantic_tokens = module
       .semantic_tokens_full
       .get_or_try_init(async || match self {
+        // TODO(denext): map tsgo's semantic-token legend onto Deno's.
+        Self::Go(_) => Ok(Default::default()),
         Self::Js(ts_server) => ts_server
           .get_encoded_semantic_classifications(
             snapshot,
@@ -1065,6 +1216,8 @@ impl TsServer {
       return Ok(result);
     }
     let semantic_tokens = match self {
+      // TODO(denext): map tsgo's semantic-token legend onto Deno's.
+      Self::Go(_) => Default::default(),
       Self::Js(ts_server) => ts_server
         .get_encoded_semantic_classifications(
           snapshot,
@@ -1094,6 +1247,17 @@ impl TsServer {
     token: &CancellationToken,
   ) -> Result<Option<lsp::SignatureHelp>, AnyError> {
     match self {
+      Self::Go(ts_server) => {
+        ts_server
+          .provide_signature_help(
+            module,
+            position,
+            context.cloned(),
+            &snapshot,
+            token,
+          )
+          .await
+      }
       Self::Js(ts_server) => {
         let options = if let Some(context) = context {
           tsc::SignatureHelpItemsOptions {
@@ -1136,6 +1300,10 @@ impl TsServer {
     token: &CancellationToken,
   ) -> Result<Option<lsp::WorkspaceEdit>, AnyError> {
     match self {
+      Self::Go(_) => {
+        let _ = (file_renames, language_server, snapshot, token);
+        Ok(None)
+      }
       Self::Js(ts_server) => {
         let mut changes_with_modules = IndexMap::new();
         for rename in file_renames {
@@ -1205,6 +1373,11 @@ impl TsServer {
     token: &CancellationToken,
   ) -> Result<Option<Vec<lsp::InlayHint>>, AnyError> {
     match self {
+      Self::Go(ts_server) => {
+        ts_server
+          .provide_inlay_hint(module, range, snapshot, token)
+          .await
+      }
       Self::Js(ts_server) => {
         let text_span = tsc::TextSpan::from_range(range, &module.line_index)
           .map_err(|err| {
@@ -1246,6 +1419,11 @@ impl TsServer {
     token: &CancellationToken,
   ) -> Result<Option<Vec<lsp::SymbolInformation>>, AnyError> {
     match self {
+      Self::Go(ts_server) => {
+        ts_server
+          .provide_workspace_symbol(query, snapshot, token)
+          .await
+      }
       Self::Js(ts_server) => {
         let mut items_with_scopes = IndexMap::new();
         for (compiler_options_key, compiler_options_data) in

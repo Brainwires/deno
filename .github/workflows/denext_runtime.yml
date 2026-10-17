@@ -676,11 +676,22 @@ jobs:
           py=python3; command -v python3 >/dev/null 2>&1 || py=python
           "$py" -I .github/denext-runtime/fetch_esbuild.py "$TARGET" "$RUNNER_TEMP/esbuild"
 
+      # The pinned TypeScript 7 nightly that `deno lsp`'s tsgo backend runs
+      # (cli/tsc/typescript_pins.json, role "lsp"; unstable, off by default),
+      # verified against its pinned npm integrity and shipped beside deno as
+      # typescript-lsp/ so the backend never downloads one.
+      - name: Fetch TypeScript (lsp)
+        run: |
+          set -euo pipefail
+          py=python3; command -v python3 >/dev/null 2>&1 || py=python
+          "$py" -I .github/denext-runtime/fetch_typescript.py lsp "$TARGET" "$RUNNER_TEMP/typescript-lsp"
+
       - name: Assemble
         env:
           DENO_BIN: target/release/${{ runner.os == 'Windows' && 'deno.exe' || 'deno' }}
           DENORT_BIN: target/release/${{ runner.os == 'Windows' && 'denort.exe' || 'denort' }}
           ESBUILD_DIR: ${{ runner.temp }}/esbuild
+          TYPESCRIPT_LSP_DIR: ${{ runner.temp }}/typescript-lsp
           OUT_DIR: dist
           DENO_VERSION: ${{ needs.setup.outputs.deno_version }}
           DENO_SHA: ${{ github.sha }}

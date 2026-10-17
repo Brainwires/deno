@@ -1064,6 +1064,51 @@ where the changes are discussed.
     quit-and-relaunch cycles (localStorage and IndexedDB carried over) go from 6
     to 10.
 
+42. **`feat(lsp)`: a TypeScript 7 (tsgo) language service for `deno lsp`,
+    unstable and off by default** (`feat/tsgo-lsp`; `cli/lsp/tsgo.rs`,
+    `cli/lsp/ts_server.rs`, `cli/tsc/native_pin.rs`,
+    `cli/tsc/typescript_pins.json`,
+    `.github/denext-runtime/fetch_typescript.py`,
+    `tools/update_typescript_pin.ts`). `"deno.unstable": ["tsgo-lsp"]` in the
+    editor's initialization settings, or `DENO_UNSTABLE_TSGO_LSP=1` in the
+    environment of `deno lsp` (which wins either way), puts a `TsServer::Go`
+    backend behind `deno lsp` instead of the in-isolate TypeScript 6 service.
+    `deno lsp` stays the editor's only server: Deno's own features (resolution
+    diagnostics, lint, formatting, test code lenses, registry and import-map
+    completions, the `deno/*` requests) are unchanged, and the TypeScript
+    features go to a pinned native `tsc --lsp` child that `deno lsp` is the LSP
+    client of. Open `file:` scripts are mirrored with `didOpen` / `didChange` /
+    `didClose` in the same write as the request that follows (so tsgo answers
+    against the text the positions refer to), the editor's watched-file events
+    are forwarded, diagnostics are pulled (`textDocument/diagnostic`), filtered
+    by the same ignored codes and attributed to `deno-ts`, and hover,
+    definition, type definition, implementation, references, rename, completion
+    (+ resolve), signature help, code actions (+ resolve, organize imports),
+    document symbols, highlights, folding and selection ranges, inlay hints,
+    call hierarchy and workspace symbols are standard requests whose URIs are
+    mapped back. tsgo has no resolution hooks over LSP, so the backend runs
+    `deno sync-types` (the generator the native `deno check` uses) in each
+    workspace root before starting tsgo, after `deno.cache` and after a config
+    change, then announces the regenerated root `tsconfig.json` and `.deno/`
+    files; `DENO_TSGO_LSP_SYNC_TYPES=0` leaves them to the user. The compiler is
+    pinned per role in `typescript_pins.json` (role `lsp`: a dated `7.1.0-dev`
+    nightly) by the npm `dist.integrity` of each
+    `@typescript/typescript-<platform>` tarball; it is found as
+    `DENO_TSGO_LSP_BIN`, else `typescript-lsp/tsc[.exe]` next to `deno` at the
+    pinned version (the CLI zip ships it, item 26), else downloaded once into
+    `DENO_DIR/dl/typescript-lsp-<version>/` and verified against the pin.
+    `tools/update_typescript_pin.ts lsp next` is the whole bump; then
+    `cargo test -p integration_tests --test integration --
+    lsp_tsgo`. Not
+    yet with tsgo: semantic tokens, TypeScript code lenses, file-rename import
+    edits, `deno/inferredType`, ambient-module listing, notebooks and remote
+    (`deno:`) documents. Tests: `native_pin` and `tsgo` unit tests;
+    `tests/integration/lsp_tsgo_tests.rs` (each feature, Deno lint and test code
+    lenses alongside, import-map / `jsr:` / `npm:` specifiers, Deno's lib types
+    and `Deno.SQL`), whose harness fetches the pinned build into `target/`;
+    `DENO_TSGO_LSP_PERF=1` adds a timing comparison with the TypeScript 6
+    service; `cli_smoke.sh` checks the shipped `typescript-lsp/tsc --version`.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41) are what the prebuilt
 `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are

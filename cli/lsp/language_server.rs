@@ -783,8 +783,7 @@ impl Inner {
             .into()
           })
         });
-    {
-      let TsServer::Js(ts_server) = self.ts_server.as_ref();
+    if let TsServer::Js(ts_server) = self.ts_server.as_ref() {
       ts_server
         .set_tracing_enabled(tracing.as_ref().is_some_and(|t| t.enabled()));
     }
@@ -1024,6 +1023,16 @@ impl Inner {
       self.config.set_client_capabilities(params.capabilities);
     }
 
+    if super::tsgo::is_enabled(Some(self.config.workspace_settings())) {
+      lsp_log!(
+        "Using the TypeScript 7 (tsgo) language service (unstable, \"deno.unstable\": [\"{}\"] or {}).",
+        super::tsgo::TSGO_LSP_UNSTABLE_FEATURE,
+        super::tsgo::TSGO_LSP_ENV,
+      );
+      self.ts_server =
+        Arc::new(TsServer::new_go(self.http_client_provider.clone()));
+    }
+
     if self.is_using_push_based_diagnostics() {
       let mut diagnostics_server = DiagnosticsServer::new(
         self.client.clone(),
@@ -1033,8 +1042,7 @@ impl Inner {
       diagnostics_server.start();
       self.diagnostics_server = Some(diagnostics_server);
     }
-    {
-      let TsServer::Js(ts_server) = self.ts_server.as_ref();
+    if let TsServer::Js(ts_server) = self.ts_server.as_ref() {
       ts_server
         .set_inspector_server_addr(self.config.internal_inspect().to_address());
     }
@@ -1673,6 +1681,7 @@ impl Inner {
     let mark = self
       .performance
       .mark_with_args("lsp.did_change_watched_files", &params);
+    self.ts_server.did_change_watched_files(&params.changes);
 
     let changes = params
       .changes
@@ -1764,9 +1773,11 @@ impl Inner {
         .collect::<Vec<_>>();
       project_changes.extend(server_doc_changes);
       self.project_changed(project_changes, ProjectScopesChange::None);
+      self.refresh_generated_types().await;
 
-      let TsServer::Js(ts_server) = self.ts_server.as_ref();
-      ts_server.cleanup_semantic_cache(self.snapshot()).await;
+      if let TsServer::Js(ts_server) = self.ts_server.as_ref() {
+        ts_server.cleanup_semantic_cache(self.snapshot()).await;
+      }
       self.send_diagnostics_update();
       if !self.is_using_push_based_diagnostics()
         && self.config.diagnostic_refresh_capable()
@@ -1807,8 +1818,9 @@ impl Inner {
       // bump the project version, refresh diagnostics, and clear stale TSC
       // script caches so dependents pick up the new state.
       self.project_changed(server_doc_changes, ProjectScopesChange::None);
-      let TsServer::Js(ts_server) = self.ts_server.as_ref();
-      ts_server.cleanup_semantic_cache(self.snapshot()).await;
+      if let TsServer::Js(ts_server) = self.ts_server.as_ref() {
+        ts_server.cleanup_semantic_cache(self.snapshot()).await;
+      }
       self.send_diagnostics_update();
       if !self.is_using_push_based_diagnostics()
         && self.config.diagnostic_refresh_capable()
@@ -2455,7 +2467,31 @@ impl Inner {
     let mark = self
       .performance
       .mark_with_args("lsp.code_action_resolve", &params);
-    let TsServer::Js(ts_server) = self.ts_server.as_ref();
+    let ts_server =
+      match self.ts_server.as_ref() {
+        TsServer::Js(ts_server) => ts_server,
+        TsServer::Go(ts_server) => {
+          let Some(data) = params.data.clone().and_then(|d| {
+            from_value::<super::tsgo::TsGoCodeActionData>(d).ok()
+          }) else {
+            self.performance.measure(mark);
+            return Ok(params);
+          };
+          let result = ts_server
+            .resolve_code_action(params, data, &self.snapshot(), token)
+            .await
+            .map_err(|err| {
+              if token.is_cancelled() {
+                LspError::request_cancelled()
+              } else {
+                error!("Unable to resolve a code action from tsgo: {:#}", err);
+                LspError::internal_error()
+              }
+            })?;
+          self.performance.measure(mark);
+          return Ok(result);
+        }
+      };
     let (Some(kind), Some(data)) = (params.kind.clone(), params.data.clone())
     else {
       return Ok(params);
@@ -2634,9 +2670,9 @@ impl Inner {
       &self.document_modules,
       module.scope.clone(),
       &self.resolver,
-      {
-        let TsServer::Js(ts_server) = self.ts_server.as_ref();
-        ts_server.specifier_map.clone()
+      match self.ts_server.as_ref() {
+        TsServer::Js(ts_server) => ts_server.specifier_map.clone(),
+        TsServer::Go(_) => Default::default(),
       },
     )
   }
@@ -3035,6 +3071,7 @@ impl Inner {
         });
       }
       CompletionItemData::TsJs(data) => &data.uri,
+      CompletionItemData::TsGo(data) => &data.uri,
     };
     let Some(document) = self.get_document(
       uri,
@@ -3700,6 +3737,19 @@ impl Inner {
     self.document_modules.remove_expired_modules();
   }
 
+  /// Let the TypeScript backend regenerate what it derives from configuration
+  /// and the dependency cache (tsgo: `deno sync-types`). Awaited, so requests
+  /// after a config change or `deno.cache` see the new types.
+  async fn refresh_generated_types(&self) {
+    if !matches!(self.ts_server.as_ref(), TsServer::Go(_)) {
+      return;
+    }
+    self
+      .ts_server
+      .refresh_generated_types(self.snapshot())
+      .await;
+  }
+
   #[cfg_attr(feature = "lsp-tracing", tracing::instrument(skip_all))]
   fn send_diagnostics_update(&self) {
     if let Some(diagnostics_server) = &self.diagnostics_server {
@@ -3763,13 +3813,23 @@ impl tower_lsp::LanguageServer for LanguageServer {
 
   async fn initialized(&self, _: InitializedParams) {
     self.refresh_configuration().await;
-    let (registrations, http_client) = {
+    let (registrations, http_client, ts_server, snapshot) = {
       let mut inner = self.inner.write().await;
       let registrations = inner.initialized().await;
       inner.task_queue.start(self.clone());
-      (registrations, inner.http_client_provider.clone())
+      (
+        registrations,
+        inner.http_client_provider.clone(),
+        inner.ts_server.clone(),
+        inner.snapshot(),
+      )
     };
     self.init_flag.raise();
+    // Start an out-of-process TypeScript backend now rather than on the
+    // first request (no-op for the in-isolate one).
+    spawn(async move {
+      ts_server.warm_up(snapshot).await;
+    });
 
     for registration in registrations {
       if let Err(err) = self
@@ -4467,8 +4527,10 @@ impl Inner {
     self.resolver.did_cache();
     self.refresh_dep_info();
     self.project_changed(vec![], ProjectScopesChange::Config);
-    let TsServer::Js(ts_server) = self.ts_server.as_ref();
-    ts_server.cleanup_semantic_cache(self.snapshot()).await;
+    if let TsServer::Js(ts_server) = self.ts_server.as_ref() {
+      ts_server.cleanup_semantic_cache(self.snapshot()).await;
+    }
+    self.refresh_generated_types().await;
     self.send_diagnostics_update();
     if !self.is_using_push_based_diagnostics()
       && self.config.diagnostic_refresh_capable()

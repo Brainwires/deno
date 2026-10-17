@@ -1,0 +1,32 @@
+{
+  "$comment": "Native TypeScript (tsgo) binaries this fork pins: one entry per role, each an exact npm version of the @typescript/typescript-<platform> packages, pinned by npm dist.integrity (sha512). Read by cli/tsc/native_pin.rs, .github/denext-runtime/fetch_typescript.py and the test server. Bump with tools/update_typescript_pin.ts, never by hand.",
+  "lsp": {
+    "version": "7.1.0-dev.20261017.1",
+    "platforms": {
+      "darwin-arm64": {
+        "tarball": "https://registry.npmjs.org/@typescript/typescript-darwin-arm64/-/typescript-darwin-arm64-7.1.0-dev.20261017.1.tgz",
+        "integrity": "sha512-IjfOdppCkPOGB1oXw5gzP3k2ymBQsmOmaNN1ILoqtT4J8KpxP68sJxF0yoDXoZfqVAwItXXRQtflUg2NobP3AA=="
+      },
+      "darwin-x64": {
+        "tarball": "https://registry.npmjs.org/@typescript/typescript-darwin-x64/-/typescript-darwin-x64-7.1.0-dev.20261017.1.tgz",
+        "integrity": "sha512-BHLQXCS75YjW9ncDITmaWQaH/uKMNDtx3W2lzyjxMi1wzS1HaA8YigFikm707SRiQ5vzChsUcA2dpBy2umDdVQ=="
+      },
+      "linux-arm64": {
+        "tarball": "https://registry.npmjs.org/@typescript/typescript-linux-arm64/-/typescript-linux-arm64-7.1.0-dev.20261017.1.tgz",
+        "integrity": "sha512-yVDp96vSAlCCwQ/khZTFAQAD1wQayuntYuba3Xz5CLZWBKEjkcn3JmyyglD3NfILlskuv2y+kuTm6JC9cy4k7g=="
+      },
+      "linux-x64": {
+        "tarball": "https://registry.npmjs.org/@typescript/typescript-linux-x64/-/typescript-linux-x64-7.1.0-dev.20261017.1.tgz",
+        "integrity": "sha512-kTmcAbZRuOywbOS4TwylKI4QjhdX/R3T+WdDaIhOhVmHlO2y9HPFF6amWxfa2/FlaMHhRFxaD8gniUrz1vcLpw=="
+      },
+      "win32-arm64": {
+        "tarball": "https://registry.npmjs.org/@typescript/typescript-win32-arm64/-/typescript-win32-arm64-7.1.0-dev.20261017.1.tgz",
+        "integrity": "sha512-1GiiEr2vygWZPhy3I1wD8jxN0MRr4iZrAK7EyI+dAQsPUbv4KM4ZUdzkpkx8PCGOwpdxN8yNbAPl/0FFZbrw2Q=="
+      },
+      "win32-x64": {
+        "tarball": "https://registry.npmjs.org/@typescript/typescript-win32-x64/-/typescript-win32-x64-7.1.0-dev.20261017.1.tgz",
+        "integrity": "sha512-BkEB741BL8QNLFnPehRLhXgHibE1/E9M6++9f4eA15MQAn7gItz2ITJYhaQoCVkauH4x8lQAJlqxY3sdGChJrA=="
+      }
+    }
+  }
+}

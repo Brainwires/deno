@@ -48,6 +48,7 @@ use crate::sys::CliSys;
 use crate::util::path::mapped_specifier_for_tsc;
 
 mod diagnostics;
+pub mod native_pin;
 
 pub use self::diagnostics::Diagnostic;
 pub use self::diagnostics::DiagnosticCategory;

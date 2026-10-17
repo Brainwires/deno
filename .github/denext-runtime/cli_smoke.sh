@@ -87,6 +87,21 @@ test ! -e "$work/bundle-deno-dir/dl" ||
   { echo "::error::deno bundle downloaded an esbuild: $(ls "$work/bundle-deno-dir/dl")" >&2; exit 1; }
 echo "deno bundle used the shipped esbuild"
 
+# The TypeScript build `deno lsp`'s tsgo backend uses: next to deno, at the
+# version cli/tsc/typescript_pins.json pins for "lsp".
+case "$TARGET" in
+  *-windows-msvc) tsc="$work/cli/typescript-lsp/tsc.exe" ;;
+  *) tsc="$work/cli/typescript-lsp/tsc" ;;
+esac
+test -f "$tsc" || { echo "::error::no typescript-lsp/$(basename "$tsc") in $ARCHIVE" >&2; exit 1; }
+test -f "$work/cli/typescript-lsp/LICENSE" || { echo "::error::no typescript-lsp/LICENSE in $ARCHIVE" >&2; exit 1; }
+py=python3; command -v python3 >/dev/null 2>&1 || py=python
+want_tsc=$("$py" -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["lsp"]["version"])' "$here/../../cli/tsc/typescript_pins.json")
+tsc_version=$("$tsc" --version | tr -d '\r')
+test "$tsc_version" = "Version $want_tsc" ||
+  { echo "::error::typescript-lsp tsc --version says '$tsc_version', want 'Version $want_tsc'" >&2; exit 1; }
+echo "typescript-lsp: $tsc_version"
+
 cp "$here/smoke/cli/vitest_test.ts" "$work/app/"
 echo "::group::deno test (vitest)"
 # -A as the vitest specs run it: the compatibility layer reads the env.
