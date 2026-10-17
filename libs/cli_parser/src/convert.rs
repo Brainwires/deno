@@ -3271,6 +3271,12 @@ fn audit_parse(
 }
 
 fn x_parse(result: &ParseResult, flags: &mut Flags) -> Result<(), CliError> {
+  if result.get_bool("install-node-shims") {
+    flags.subcommand = DenoSubcommand::X(XFlags {
+      kind: XFlagsKind::InstallNodeShims,
+    });
+    return Ok(());
+  }
   let kind = if let Some(alias) = result.get_one("install-alias") {
     if !result.contains("install-alias") {
       // Not provided, check for script_arg

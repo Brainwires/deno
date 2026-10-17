@@ -96,8 +96,19 @@ fn is_node_arg0(arg0: &OsString) -> bool {
   cfg!(windows) && file_name.eq_ignore_ascii_case("node.exe")
 }
 
+/// Returns whether `arg0`'s file name is exactly `npx` (or `npx.exe` on
+/// Windows): the shim `deno x --install-node-shims` writes.
+fn is_npx_arg0(arg0: &OsString) -> bool {
+  let Some(file_name) = Path::new(arg0).file_name() else {
+    return false;
+  };
+  file_name == "npx"
+    || cfg!(windows) && file_name.eq_ignore_ascii_case("npx.exe")
+}
+
 /// If the process was invoked as `node`, translate the Node.js CLI args into
-/// Deno args and return the rewritten argv. Otherwise returns `args` unchanged.
+/// Deno args and return the rewritten argv; invoked as `npx`, it is `deno x`.
+/// Otherwise returns `args` unchanged.
 ///
 /// Must be called before any threads are spawned, as it may mutate process
 /// environment variables (`NODE_OPTIONS`, `DENO_TLS_CA_STORE`, ...).
@@ -105,6 +116,14 @@ pub fn maybe_rewrite_node_arg0(args: Vec<OsString>) -> Vec<OsString> {
   let Some(arg0) = args.first() else {
     return args;
   };
+  if is_npx_arg0(arg0) && !env_disabled() {
+    // `npx [-y] [-p pkg] cmd args...` is `deno x [-y] [-p pkg] cmd args...`
+    let mut deno_args = Vec::with_capacity(args.len() + 1);
+    deno_args.push(OsString::from("deno"));
+    deno_args.push(OsString::from("x"));
+    deno_args.extend(args.into_iter().skip(1));
+    return deno_args;
+  }
   if !is_node_arg0(arg0) {
     return args;
   }
@@ -327,6 +346,20 @@ fn prepend_self_path(dir: &Path) {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn npx_arg0_is_deno_x() {
+    assert!(is_npx_arg0(&OsString::from("/usr/local/bin/npx")));
+    assert!(!is_npx_arg0(&OsString::from("npxx")));
+    assert!(!is_npx_arg0(&OsString::from("deno")));
+    let args = maybe_rewrite_node_arg0(vec![
+      OsString::from("/opt/bin/npx"),
+      OsString::from("-y"),
+      OsString::from("cowsay"),
+      OsString::from("hi"),
+    ]);
+    assert_eq!(args, ["deno", "x", "-y", "cowsay", "hi"]);
+  }
 
   #[test]
   fn detects_node_arg0() {

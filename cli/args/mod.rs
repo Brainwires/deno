@@ -871,6 +871,15 @@ impl CliOptions {
                   &run_flags.script,
                   self.initial_cwd(),
                 )?;
+                // `deno run .` / `deno run <dir>`: the directory's entry,
+                // as `node <dir>` finds it
+                if url.scheme() == "file"
+                  && let Ok(path) = deno_path_util::url_to_file_path(&url)
+                  && path.is_dir()
+                  && let Some(entry) = resolve_dir_main_entrypoint(&path)
+                {
+                  return Ok(deno_path_util::url_from_file_path(&entry)?);
+                }
                 if self.is_node_main()
                   && url.scheme() == "file"
                   && MediaType::from_specifier(&url) == MediaType::Unknown
@@ -1638,6 +1647,50 @@ impl CliOptions {
       NpmCachingStrategy::Eager
     }
   }
+}
+
+/// The file `node <dir>` runs for a directory (Node's `Module._findPath`):
+/// the package.json `"main"` (as a file, with `.js` or `.json`, or as a
+/// directory's `index.js` / `index.json`), else `index.js` / `index.json`.
+/// `"exports"` doesn't apply, as in Node.
+fn resolve_dir_main_entrypoint(dir: &Path) -> Option<PathBuf> {
+  fn try_file(path: &Path) -> Option<PathBuf> {
+    if path.is_file() {
+      return Some(path.to_path_buf());
+    }
+    for ext in ["js", "json"] {
+      let mut with_ext = path.as_os_str().to_owned();
+      with_ext.push(".");
+      with_ext.push(ext);
+      let with_ext = PathBuf::from(with_ext);
+      if with_ext.is_file() {
+        return Some(with_ext);
+      }
+    }
+    None
+  }
+  fn try_index(dir: &Path) -> Option<PathBuf> {
+    ["index.js", "index.json"]
+      .into_iter()
+      .map(|name| dir.join(name))
+      .find(|path| path.is_file())
+  }
+  let main = std::fs::read_to_string(dir.join("package.json"))
+    .ok()
+    .and_then(|text| {
+      deno_core::serde_json::from_str::<deno_core::serde_json::Value>(&text)
+        .ok()
+    })
+    .and_then(|json| json.get("main")?.as_str().map(|s| s.to_string()))
+    .filter(|main| !main.is_empty());
+  if let Some(main) = main {
+    let main_path = deno_path_util::normalize_path(Cow::Owned(dir.join(&main)));
+    if let Some(found) = try_file(&main_path).or_else(|| try_index(&main_path))
+    {
+      return Some(found);
+    }
+  }
+  try_index(dir)
 }
 
 fn try_resolve_node_binary_main_entrypoint(

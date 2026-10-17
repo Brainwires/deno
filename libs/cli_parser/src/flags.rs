@@ -563,6 +563,8 @@ impl DenoXShimName {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum XFlagsKind {
   InstallAlias(DenoXShimName),
+  /// `--install-node-shims`: `node` and `npx` beside the deno executable.
+  InstallNodeShims,
   Command(XCommandFlags),
   Print,
 }

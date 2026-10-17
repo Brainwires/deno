@@ -18,8 +18,10 @@ users:
   ```
 
 - **Features of the `deno` CLI and runtime itself**, such as Vitest / Jest
-  compatibility for `deno test` (item 23) and the built-in SQL client
-  (`Deno.SQL` / `Deno.sql`, item 24). These need this fork's own `deno` binary,
+  compatibility for `deno test` (item 23), the built-in SQL client (`Deno.SQL` /
+  `Deno.sql`, item 24) and Node.js compatibility beyond stock Deno's (items
+  42-49: CommonJS detection, npm's hoisted node_modules, npm's lifecycle-script
+  behavior, `node` / `npx` shims). These need this fork's own `deno` binary,
   published with each runtime release since `denext.15` (`deno-cli-*`, see
   [Release archives](#release-archives) and item 26) or built from a release
   line (see [Reproducing a build](#reproducing-a-build)); the stock CLI does not
@@ -1193,8 +1195,25 @@ where the changes are discussed.
       `DENO_NODE_GYP` names another (an `npm:` specifier). Specs:
       `npm/lifecycle_scripts_root`, `npm/lifecycle_scripts_node_compat`.
 
-The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41) are what the prebuilt
-`libdenort` carries. The CLI-side parts (for example writing
+49. **`feat`: `node` / `npx` executables and `deno run <dir>`** (behavior change
+    for `deno run <dir>`; `cli/tools/x.rs`, `cli/node_compat_shim.rs`,
+    `cli/args/mod.rs`).
+    - `deno x --install-node-shims` writes `node` and `npx` next to the deno
+      executable (as `--install-alias` writes `dx`): symlinks to `deno` on Unix,
+      hardlinks (or copies) on Windows; it refuses to replace a file that isn't
+      one. Invoked as `node`, deno already translated Node's command line and
+      ran in Node.js mode; invoked as `npx` it is now `deno x`. With that
+      directory on `PATH`, `node_modules/.bin/*`, `#!/usr/bin/env node` scripts,
+      git hooks, Makefiles and editors work with no Node.js installed. denext's
+      managed toolchain can run it from `denext toolchain link`.
+    - `deno run .` / `deno run <dir>` runs the directory's entry as `node <dir>`
+      does: package.json `"main"` (as a file, with `.js` or `.json`, or as a
+      directory's index), else `index.js`; before, it failed with
+      ERR_UNSUPPORTED_DIR_IMPORT. Spec: `run/dir_entrypoint`; unit tests for the
+      `npx` dispatch.
+
+The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41, 44, 46) are what the
+prebuilt `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
 in the branch too, but a stock CLI does not run them; denext's own launcher
 provides that environment.

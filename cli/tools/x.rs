@@ -484,6 +484,62 @@ fn create_package_temp_dir(
   Ok(XTempDir::New(temp_dir))
 }
 
+/// Writes `node` and `npx` beside the deno executable. They are the deno
+/// executable under another name: invoked as `node` it translates Node.js's
+/// command line and runs in Node.js mode, and as `npx` it is `deno x`
+/// (`cli/node_compat_shim.rs`). Refuses to replace a file that isn't one of
+/// these shims, such as a real Node.js.
+fn write_node_shims(
+  out_dir: &Path,
+  exe: &Path,
+) -> Result<Vec<String>, AnyError> {
+  let mut written = Vec::new();
+  for name in ["node", "npx"] {
+    #[cfg(unix)]
+    {
+      let out_path = out_dir.join(name);
+      match std::fs::symlink_metadata(&out_path) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+          std::fs::remove_file(&out_path)?;
+        }
+        Ok(_) => {
+          deno_core::anyhow::bail!(
+            "{} exists and is not a deno shim; not replacing it",
+            out_path.display()
+          );
+        }
+        Err(_) => {}
+      }
+      let _ = exe;
+      std::os::unix::fs::symlink("./deno", &out_path)?;
+      written.push(name.to_string());
+    }
+    #[cfg(windows)]
+    {
+      let out_path = out_dir.join(format!("{name}.exe"));
+      if out_path.exists() {
+        if !same_file::is_same_file(&out_path, exe).unwrap_or(false)
+          && std::fs::metadata(&out_path)?.len()
+            != std::fs::metadata(exe)?.len()
+        {
+          deno_core::anyhow::bail!(
+            "{} exists and is not a deno shim; not replacing it",
+            out_path.display()
+          );
+        }
+        std::fs::remove_file(&out_path)?;
+      }
+      // a real executable (Windows starts only .exe files from PATH for
+      // native callers): a hardlink shares the bytes, else a copy
+      if std::fs::hard_link(exe, &out_path).is_err() {
+        std::fs::copy(exe, &out_path)?;
+      }
+      written.push(format!("{name}.exe"));
+    }
+  }
+  Ok(written)
+}
+
 fn write_shim(
   out_dir: &Path,
   shim_name: DenoXShimName,
@@ -539,6 +595,14 @@ pub async fn run(flags: Arc<Flags>, x_flags: XFlags) -> Result<i32, AnyError> {
       let exe = std::env::current_exe()?;
       let out_dir = exe.parent().unwrap();
       write_shim(out_dir, shim_name)?;
+      return Ok(0);
+    }
+    XFlagsKind::InstallNodeShims => {
+      let exe = std::env::current_exe()?;
+      let out_dir = exe.parent().unwrap();
+      for name in write_node_shims(out_dir, &exe)? {
+        log::info!("Created {}", out_dir.join(name).display());
+      }
       return Ok(0);
     }
     XFlagsKind::Command(command) => command,
