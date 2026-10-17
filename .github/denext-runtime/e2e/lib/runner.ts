@@ -323,9 +323,10 @@ export async function launch(
   // a launcher that gives it another one names it in LAUFEY_CWD, which the
   // host changes back to (laufey docs/backends.md). A launch from a shell or
   // shortcut has no such launcher and starts in the executable's directory.
-  const cwdEnv = OS === "windows" && env.backend === "cef" && opts.cwd
-    ? { LAUFEY_CWD: opts.cwd }
-    : {};
+  const cwdEnv: Record<string, string> =
+    OS === "windows" && env.backend === "cef" && opts.cwd
+      ? { LAUFEY_CWD: opts.cwd }
+      : {};
   const child = new Deno.Command(exe, {
     args,
     cwd: opts.cwd,

@@ -171,6 +171,11 @@ jobs:
       - uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
         with:
           deno-version: ${{ env.STOCK_DENO_VERSION }}
+      # Type-check every e2e module (the runner, the areas and the test apps):
+      # `deno run` and the harness tests above skip type checking, so a type
+      # error would otherwise land unseen.
+      - name: Type-check the e2e TypeScript
+        run: deno check --no-config --no-lock $(find .github/denext-runtime/e2e -name '*.ts')
       - run: deno test -A --no-check --no-config --no-lock .github/denext-runtime/e2e/lib/
 
   # laufey's webview + CEF backend hosts, built the way laufey's own CI does.
