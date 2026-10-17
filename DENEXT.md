@@ -1167,7 +1167,45 @@ where the changes are discussed.
     area (quick quit-and-relaunch cycles keep localStorage and IndexedDB) is
     unchanged.
 
-The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-44) are what the
+45. **Item 44's follow-ups: IndexedDB, Windows, and a quit under load** (from
+    `denext.22`; laufey `integration/denext22` `3f25338`, no runtime API).
+    - IndexedDB's databases are LevelDB too (Chromium 149 keeps IndexedDB on
+      LevelDB; its SQLite backend is off by default), in the same storage
+      service and reusing their logs the same way, so a write the kill cuts
+      short tears them the same way. There the open after the next append fails
+      outright: IndexedDB opens with paranoid checks, so Chromium finds the
+      database corrupt and deletes the origin's IndexedDB (the page's `open`
+      reports `dataLoss: "total"`, "checksum mismatch"; reproduced on Linux CEF
+      by tearing the log's end). The host's tail repair now covers every
+      IndexedDB database of the profile (`IndexedDB/*.indexeddb.leveldb`,
+      `WebStorage/<bucket>/IndexedDB/indexeddb.leveldb`), still skipping one
+      whose `LOCK` is held (laufey `9f47c3e`).
+    - Windows had item 44's renderer race: a trace of 20 quick quits had a
+      renderer still running when `CefShutdown` started in 9. The Windows host
+      now runs the same drain (none in 20 with it, 4-100 ms). Linux does not:
+      its renderers had ended when `CefRunMessageLoop` returned in all 50 traced
+      quits, idle and with the CPU busy, so its host is unchanged (laufey
+      `9d76415`).
+    - With every core busy, the first macOS CEF quit never ended (laufey runs
+      39034783854 and 39033696992; it predates item 41). `CefShutdown` waited,
+      with no timeout, for thread-pool tasks queued for workers Chromium runs at
+      background QoS, which macOS gives no CPU while threads of a higher QoS
+      keep every core busy (a spindump had eight of the host's threads runnable
+      at priority 4 for 65-97 s); Chromium raises its workers for shutdown only
+      from inside each worker, which a starved one never runs. The same load at
+      background QoS, or none, hung nothing. Before `CefShutdown` the macOS host
+      now gives every thread a QoS override to user-initiated and turns any
+      later request for background QoS into user-initiated (an interposer in the
+      dylib it already loads for the keychain) (laufey `3f25338`). Its exit e2e
+      ends with a quit while every core is busy.
+
+    Tests: laufey's `cef_profile_lock_test` (the IndexedDB databases found, cut,
+    and left alone while their `LOCK` is held), `keychain_interpose_mac_test` (a
+    starved background thread raised, later requests turned), and its exit e2e
+    (a torn IndexedDB log is cut and the value written after it read back; the
+    quit under load). This fork's e2e is unchanged.
+
+The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45) are what the
 prebuilt `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
 in the branch too, but a stock CLI does not run them; denext's own launcher
