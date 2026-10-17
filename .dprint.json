@@ -44,6 +44,7 @@
     "gh-pages",
     "libs/config/testdata",
     "target",
+    "vendor",
     "tests/bench/testdata/express-router.js",
     "tests/bench/testdata/lsp_benchdata/",
     "tests/bench/testdata/npm/",
