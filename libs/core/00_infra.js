@@ -143,6 +143,25 @@
     errorMap[className] = errorBuilder;
   }
 
+  // Depth of runtime code creating promises it keeps to itself (an async
+  // op's promise, a lazily loaded module's evaluation). Promise hooks can ask
+  // (`isCreatingInternalPromise`) so that `node:async_hooks` leaves them out:
+  // Node's callback APIs create no promises, and code counting PROMISE
+  // resources must not see Deno's.
+  let internalPromiseDepth = 0;
+
+  function isCreatingInternalPromise() {
+    return internalPromiseDepth > 0;
+  }
+
+  function enterInternalPromiseScope() {
+    internalPromiseDepth++;
+  }
+
+  function exitInternalPromiseScope() {
+    internalPromiseDepth--;
+  }
+
   function setPromise(promiseId) {
     const idx = promiseId % RING_SIZE;
     // Move old promise from ring to map
@@ -157,17 +176,24 @@
       MapPrototypeSet(promiseMap, oldPromise[2], oldPromise);
     }
 
-    const promise = new Promise((resolve, reject) => {
-      promiseRing[idx] = [resolve, reject, promiseId];
-    });
-    const wrappedPromise = PromisePrototypeCatch(
-      promise,
-      function __opRejectHandler(res) {
-        // recreate the stacktrace and strip internal event loop frames
-        ErrorCaptureStackTrace(res, __opRejectHandler);
-        throw res;
-      },
-    );
+    // A promise hook (user code) runs while these are created and may throw.
+    internalPromiseDepth++;
+    let wrappedPromise;
+    try {
+      const promise = new Promise((resolve, reject) => {
+        promiseRing[idx] = [resolve, reject, promiseId];
+      });
+      wrappedPromise = PromisePrototypeCatch(
+        promise,
+        function __opRejectHandler(res) {
+          // recreate the stacktrace and strip internal event loop frames
+          ErrorCaptureStackTrace(res, __opRejectHandler);
+          throw res;
+        },
+      );
+    } finally {
+      internalPromiseDepth--;
+    }
     wrappedPromise[promiseIdSymbol] = promiseId;
     return wrappedPromise;
   }
@@ -535,6 +561,9 @@
     hasPromise,
     promiseIdSymbol,
     __setNextPromiseId,
+    isCreatingInternalPromise,
+    enterInternalPromiseScope,
+    exitInternalPromiseScope,
   });
 
   const infra = {

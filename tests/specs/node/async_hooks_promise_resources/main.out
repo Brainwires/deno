@@ -1,0 +1,10 @@
+main executionAsyncId 1
+init p1 PROMISE trigger=#1
+resolve p1
+init p2 PROMISE trigger=p1
+init p3 PROMISE trigger=p2
+before p2
+in then: executionAsyncId is p2
+resolve p2
+after p2
+before p3

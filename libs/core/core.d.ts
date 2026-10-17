@@ -305,6 +305,18 @@ export namespace core {
    * - `after_hook` is called at the end of the promise reaction.
    * - `resolve_hook` is called at the beginning of resolve or reject function.
    */
+  /**
+   * Whether the runtime is creating a promise it keeps to itself (an async
+   * op's, a lazily loaded module's evaluation), for promise hooks that leave
+   * those out.
+   */
+  function isCreatingInternalPromise(): boolean;
+
+  /** Promises created until the matching exit are the runtime's own. */
+  function enterInternalPromiseScope(): void;
+
+  function exitInternalPromiseScope(): void;
+
   function setPromiseHooks(
     init_hook?: (
       promise: Promise<unknown>,

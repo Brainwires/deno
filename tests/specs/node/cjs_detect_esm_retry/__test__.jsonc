@@ -1,0 +1,34 @@
+{
+  // Node runs an ambiguous file as an ES module when compiling it as CommonJS
+  // fails with an error only CommonJS throws: a top-level let/const/class of a
+  // wrapper name (require, module, exports, __filename, __dirname), or an
+  // await outside functions, which swc doesn't see in a nested top-level
+  // block.
+  "tests": {
+    "redeclared_require_is_esm": {
+      "cwd": "pkg",
+      "args": "run redeclare.js",
+      "output": "own require: node:fs\n"
+    },
+    "await_in_block_is_esm": {
+      "cwd": "pkg",
+      "args": "run block_tla.js",
+      "output": "esm undefined\n"
+    },
+    "await_in_block_is_esm_when_forced": {
+      "cwd": "pkg",
+      "args": "run --unstable-detect-cjs plain_block_tla.js",
+      "output": "block tla 1\n"
+    },
+    "nested_declaration_stays_cjs": {
+      "cwd": "pkg",
+      "args": "run nested_redeclare.js",
+      "output": "cjs local object\n"
+    },
+    "var_redeclaration_stays_cjs": {
+      "cwd": "pkg",
+      "args": "run var_require.js",
+      "output": "cjs 1\n"
+    }
+  }
+}

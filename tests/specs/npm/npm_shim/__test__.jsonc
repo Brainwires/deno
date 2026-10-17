@@ -1,0 +1,13 @@
+{
+  // `npm`, the shim `deno x --install-node-shims` writes beside deno, maps
+  // npm's common commands onto deno's. The test runs deno through a symlink
+  // named npm, as the shim is.
+  "tempDir": true,
+  "tests": {
+    "npm_shim": {
+      "if": "unix",
+      "args": "run -A main.ts",
+      "output": "main.out"
+    }
+  }
+}

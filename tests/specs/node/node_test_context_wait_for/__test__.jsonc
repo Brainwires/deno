@@ -1,0 +1,10 @@
+{
+  // node:test: t.waitFor(), t.plan()'s options, and t.mock restoring what a
+  // test mocked (its mock timers too) when the test finishes.
+  "tests": {
+    "node_test_context": {
+      "args": "test -A main.mjs",
+      "output": "main.out"
+    }
+  }
+}

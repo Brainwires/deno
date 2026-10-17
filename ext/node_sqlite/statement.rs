@@ -429,6 +429,13 @@ impl StatementExecution for StatementSync {
         return Ok(true);
       }
       if r != ffi::SQLITE_ROW {
+        if self.ignore_next_sqlite_error.replace(false) {
+          // A user function or aggregate threw and its exception is pending:
+          // stop here so it propagates. Treating the error as a row made
+          // all() step again, which reran the callback, which threw again:
+          // a hang.
+          return Ok(true);
+        }
         self.check_error_code_impl(r)?;
       }
     }
@@ -1187,5 +1194,37 @@ impl StatementSync {
     }
 
     Ok(v8::Array::new_with_elements(scope, &columns))
+  }
+}
+
+/// What better-sqlite3's API reports about a statement and node:sqlite's
+/// doesn't: whether it writes (`sqlite3_stmt_readonly`) and its parameters'
+/// names in index order (`None` for an anonymous `?`). For the
+/// `better-sqlite3` override (`ext/node/polyfills/internal/better_sqlite3.js`).
+#[op2]
+#[serde]
+pub fn op_node_sqlite_statement_info(
+  #[cppgc] statement: &StatementSync,
+) -> Result<(bool, Vec<Option<String>>), SqliteError> {
+  let raw = statement.stmt_ptr()?;
+  // SAFETY: `raw` is a live sqlite3_stmt owned by `statement`; the parameter
+  // names it returns live as long as the statement.
+  unsafe {
+    let readonly = ffi::sqlite3_stmt_readonly(raw) != 0;
+    let count = ffi::sqlite3_bind_parameter_count(raw);
+    let mut names = Vec::with_capacity(count.max(0) as usize);
+    for index in 1..=count {
+      let name = ffi::sqlite3_bind_parameter_name(raw, index);
+      names.push(if name.is_null() {
+        None
+      } else {
+        Some(
+          std::ffi::CStr::from_ptr(name)
+            .to_string_lossy()
+            .into_owned(),
+        )
+      });
+    }
+    Ok((readonly, names))
   }
 }

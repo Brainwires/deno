@@ -1,0 +1,15 @@
+{
+  // process.send() serializes the message in an op that runs JS: getters,
+  // toJSON and process.env's proxy (which calls op_get_env). A debug build
+  // panicked on that re-entrant op call.
+  "tests": {
+    "json": {
+      "args": "run -A parent.mjs json",
+      "output": "json.out"
+    },
+    "advanced": {
+      "args": "run -A parent.mjs advanced",
+      "output": "advanced.out"
+    }
+  }
+}

@@ -1,0 +1,11 @@
+{
+  // async_hooks reports promises as PROMISE resources (init, before, after,
+  // promiseResolve), with trigger ids from the parent promise, and leaves out
+  // the promises Deno's runtime makes for itself.
+  "tests": {
+    "promise_resources": {
+      "args": "run main.cjs",
+      "output": "main.out"
+    }
+  }
+}

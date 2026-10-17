@@ -6,7 +6,11 @@ const { core, primordials } = __bootstrap;
 const {
   validateFunction,
   validateObject,
+  validateString,
 } = core.loadExtScript("ext:deno_node/internal/validators.mjs");
+const { ERR_ASYNC_TYPE, ERR_INVALID_ASYNC_ID } = core.loadExtScript(
+  "ext:deno_node/internal/errors.ts",
+);
 const {
   AsyncHook,
   emitAfter,
@@ -16,7 +20,11 @@ const {
   enterAsyncResource,
   exitAsyncResource,
   executionAsyncId: internalExecutionAsyncId,
+  triggerAsyncId: internalTriggerAsyncId,
   executionAsyncResource: internalExecutionAsyncResource,
+  getDefaultTriggerAsyncId,
+  hasHooks,
+  constants: { kInit, kDestroy },
   newAsyncId,
 } = core.loadExtScript("ext:deno_node/internal/async_hooks.ts");
 const { kEmptyObject } = core.loadExtScript("ext:deno_node/internal/util.mjs");
@@ -26,6 +34,7 @@ const {
   ReflectApply,
   FunctionPrototypeBind,
   ArrayPrototypeUnshift,
+  NumberIsSafeInteger,
   ObjectFreeze,
   SafeFinalizationRegistry,
   SafeArrayIterator,
@@ -57,22 +66,55 @@ class AsyncResource {
   type: string;
   #snapshot: unknown;
   #asyncId: number;
+  #triggerAsyncId: number;
 
-  constructor(type: string) {
+  constructor(
+    type: string,
+    opts: number | { triggerAsyncId?: number; requireManualDestroy?: boolean } =
+      { __proto__: null },
+  ) {
+    validateString(type, "type");
+    let triggerAsyncId = opts;
+    let requireManualDestroy = false;
+    if (typeof opts !== "number") {
+      triggerAsyncId = opts.triggerAsyncId === undefined
+        ? getDefaultTriggerAsyncId()
+        : opts.triggerAsyncId;
+      requireManualDestroy = !!opts.requireManualDestroy;
+    }
+    // Unlike emitInitScript, AsyncResource doesn't support null as the
+    // triggerAsyncId.
+    if (
+      !NumberIsSafeInteger(triggerAsyncId) || (triggerAsyncId as number) < -1
+    ) {
+      throw new ERR_INVALID_ASYNC_ID("triggerAsyncId", triggerAsyncId);
+    }
     this.type = type;
     this.#snapshot = getAsyncContext();
     this.#asyncId = newAsyncId();
+    this.#triggerAsyncId = triggerAsyncId as number;
     // Fire the init hook so that async_hooks.createHook({ init }) callbacks
     // receive this resource, matching Node.js behaviour.
-    emitInit(this.#asyncId, type, internalExecutionAsyncId(), this);
+    if (hasHooks(kInit)) {
+      if (type.length === 0) {
+        throw new ERR_ASYNC_TYPE(type);
+      }
+      emitInit(this.#asyncId, type, this.#triggerAsyncId, this);
+    }
     // Register with the FinalizationRegistry so emitDestroy is called when
     // this object is garbage collected. Pass `this` as the unregister token so
     // emitDestroy() can cancel the finalizer.
-    asyncResourceRegistry.register(this, this.#asyncId, this);
+    if (!requireManualDestroy && hasHooks(kDestroy)) {
+      asyncResourceRegistry.register(this, this.#asyncId, this);
+    }
   }
 
   asyncId() {
     return this.#asyncId;
+  }
+
+  triggerAsyncId() {
+    return this.#triggerAsyncId;
   }
 
   runInAsyncScope(
@@ -81,7 +123,7 @@ class AsyncResource {
     ...args: unknown[]
   ) {
     const previousContext = getAsyncContext();
-    emitBefore(this.#asyncId);
+    emitBefore(this.#asyncId, this.#triggerAsyncId, this);
     try {
       setAsyncContext(this.#snapshot);
       // Enter this resource as the current executionAsyncResource() so that
@@ -234,9 +276,7 @@ class AsyncLocalStorage {
 // Re-export executionAsyncId from internal
 const executionAsyncId = internalExecutionAsyncId;
 
-function triggerAsyncId() {
-  return 0;
-}
+const triggerAsyncId = internalTriggerAsyncId;
 
 const executionAsyncResource = internalExecutionAsyncResource;
 
@@ -319,6 +359,7 @@ function createHook(callbacks: {
   after?: (asyncId: number) => void;
   destroy?: (asyncId: number) => void;
   promiseResolve?: (asyncId: number) => void;
+  trackPromises?: boolean;
 }) {
   return new AsyncHook(callbacks);
 }

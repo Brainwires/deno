@@ -106,9 +106,50 @@ fn is_npx_arg0(arg0: &OsString) -> bool {
     || cfg!(windows) && file_name.eq_ignore_ascii_case("npx.exe")
 }
 
+/// Returns whether `arg0`'s file name is exactly `npm` (or `npm.exe` on
+/// Windows): the shim `deno x --install-node-shims` writes.
+fn is_npm_arg0(arg0: &OsString) -> bool {
+  let Some(file_name) = Path::new(arg0).file_name() else {
+    return false;
+  };
+  file_name == "npm"
+    || cfg!(windows) && file_name.eq_ignore_ascii_case("npm.exe")
+}
+
+/// `npm <command> ...` as the deno command it maps to (`cli/npm_shim.rs`).
+fn rewrite_npm_args(args: Vec<OsString>) -> Vec<OsString> {
+  let npm_args: Vec<String> = args[1..]
+    .iter()
+    .map(|a| a.to_string_lossy().into_owned())
+    .collect();
+  match crate::npm_shim::translate(&npm_args) {
+    Ok(crate::npm_shim::NpmTranslation::Deno(deno_args)) => {
+      let mut out = Vec::with_capacity(deno_args.len() + 1);
+      out.push(OsString::from("deno"));
+      out.extend(deno_args.into_iter().map(OsString::from));
+      out
+    }
+    Ok(crate::npm_shim::NpmTranslation::Print(text)) => {
+      #[allow(clippy::print_stdout, reason = "npm shim help, before logging")]
+      {
+        print!("{text}");
+      }
+      deno_runtime::exit(0);
+    }
+    Err(message) => {
+      #[allow(clippy::print_stderr, reason = "npm shim error, before logging")]
+      {
+        eprintln!("npm ERR! {message}");
+      }
+      deno_runtime::exit(1);
+    }
+  }
+}
+
 /// If the process was invoked as `node`, translate the Node.js CLI args into
-/// Deno args and return the rewritten argv; invoked as `npx`, it is `deno x`.
-/// Otherwise returns `args` unchanged.
+/// Deno args and return the rewritten argv; invoked as `npx`, it is `deno x`,
+/// and as `npm`, the deno command npm's maps to. Otherwise returns `args`
+/// unchanged.
 ///
 /// Must be called before any threads are spawned, as it may mutate process
 /// environment variables (`NODE_OPTIONS`, `DENO_TLS_CA_STORE`, ...).
@@ -123,6 +164,9 @@ pub fn maybe_rewrite_node_arg0(args: Vec<OsString>) -> Vec<OsString> {
     deno_args.push(OsString::from("x"));
     deno_args.extend(args.into_iter().skip(1));
     return deno_args;
+  }
+  if is_npm_arg0(arg0) && !env_disabled() {
+    return rewrite_npm_args(args);
   }
   if !is_node_arg0(arg0) {
     return args;
@@ -359,6 +403,20 @@ mod tests {
       OsString::from("hi"),
     ]);
     assert_eq!(args, ["deno", "x", "-y", "cowsay", "hi"]);
+  }
+
+  #[test]
+  fn npm_arg0_maps_onto_deno() {
+    assert!(is_npm_arg0(&OsString::from("/usr/local/bin/npm")));
+    assert!(!is_npm_arg0(&OsString::from("pnpm")));
+    let args = maybe_rewrite_node_arg0(vec![
+      OsString::from("/opt/bin/npm"),
+      OsString::from("run"),
+      OsString::from("build"),
+      OsString::from("--"),
+      OsString::from("--watch"),
+    ]);
+    assert_eq!(args, ["deno", "task", "build", "--watch"]);
   }
 
   #[test]

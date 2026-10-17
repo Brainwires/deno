@@ -1,0 +1,22 @@
+{
+  // better-sqlite3 is a nan addon Deno can't load: its entry modules resolve
+  // to an implementation of its API over node:sqlite. The package here is a
+  // stand-in whose own code would throw, as the real one's addon load does.
+  "tempDir": true,
+  "tests": {
+    "require": {
+      "args": "run -A main.cjs",
+      "output": "main.out"
+    },
+    "import": {
+      "args": "run -A esm.mjs",
+      "output": "esm.out"
+    },
+    "opt_out": {
+      "args": "run -A esm.mjs",
+      "envs": { "DENO_NO_BETTER_SQLITE3_COMPAT": "1" },
+      "output": "opt_out.out",
+      "exitCode": 1
+    }
+  }
+}

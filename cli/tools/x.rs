@@ -484,17 +484,18 @@ fn create_package_temp_dir(
   Ok(XTempDir::New(temp_dir))
 }
 
-/// Writes `node` and `npx` beside the deno executable. They are the deno
-/// executable under another name: invoked as `node` it translates Node.js's
-/// command line and runs in Node.js mode, and as `npx` it is `deno x`
-/// (`cli/node_compat_shim.rs`). Refuses to replace a file that isn't one of
+/// Writes `node`, `npx` and `npm` beside the deno executable. They are the
+/// deno executable under another name: invoked as `node` it translates
+/// Node.js's command line and runs in Node.js mode, as `npx` it is `deno x`,
+/// and as `npm` it maps npm's common commands onto deno's
+/// (`cli/node_compat_shim.rs`, `cli/npm_shim.rs`). Refuses to replace a file that isn't one of
 /// these shims, such as a real Node.js.
 fn write_node_shims(
   out_dir: &Path,
   exe: &Path,
 ) -> Result<Vec<String>, AnyError> {
   let mut written = Vec::new();
-  for name in ["node", "npx"] {
+  for name in ["node", "npx", "npm"] {
     #[cfg(unix)]
     {
       let out_path = out_dir.join(name);

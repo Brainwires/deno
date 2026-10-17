@@ -20,11 +20,11 @@ users:
 - **Features of the `deno` CLI and runtime itself**, such as Vitest / Jest
   compatibility for `deno test` (item 23), the built-in SQL client (`Deno.SQL` /
   `Deno.sql`, item 24), native type checking on TypeScript 7 (item 47) and
-  Node.js compatibility beyond stock Deno's (items 48-59: CommonJS detection,
-  npm's hoisted node_modules, npm's lifecycle-script behavior, `node` / `npx`
-  shims). These need this fork's own `deno` binary, published with each
-  runtime release since `denext.15` (`deno-cli-*`, see
-  [Release archives](#release-archives) and item 26) or built from a release
+  Node.js compatibility beyond stock Deno's (items 48-66: CommonJS detection,
+  npm's hoisted node_modules, npm's lifecycle-script behavior, `node` / `npx` /
+  `npm` executables, `better-sqlite3`). These need this fork's own `deno`
+  binary, published with each runtime release since `denext.15` (`deno-cli-*`,
+  see [Release archives](#release-archives) and item 26) or built from a release
   line (see [Reproducing a build](#reproducing-a-build)); the stock CLI does not
   have them.
 
@@ -1664,11 +1664,168 @@ where the changes are discussed.
     `npm/lifecycle_scripts_root_output`; `npm/workspace_lifecycle_scripts` now
     expects the banners.
 
-The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52) are what the
-prebuilt `libdenort` carries. The CLI-side parts (for example writing
-`LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
-in the branch too, but a stock CLI does not run them; denext's own launcher
-provides that environment.
+60. **`fix(ext/node)`: `process.send()` may run JS while it serializes**
+    (`ext/node/ops/ipc.rs`). `op_node_ipc_write_json` and
+    `op_node_ipc_write_advanced` serialize the message inside the op, and that
+    runs JS: getters, `toJSON`, and the traps of `process.env`'s proxy, which
+    call `op_get_env`. A debug build panicked on that re-entrant op call ("op
+    op_node_ipc_write_json was not marked as #[op2(reentrant)]"); a release
+    build skips the check. Both ops are now `#[op2(reentrant)]` (neither holds
+    an `OpState` borrow while the message is serialized), and a `toJSON` or
+    getter that throws is an error instead of an `unwrap` panic. Node's
+    `test-child-process-fork-args.js` (`process.send({ env: process.env })`) is
+    enabled. Spec: `node/ipc_send_runs_js` (JSON and advanced serialization).
+
+61. **`feat(ext/node)`: `better-sqlite3` over `node:sqlite`** (behavior change
+    for projects that depend on better-sqlite3;
+    `ext/node/polyfills/internal/better_sqlite3.js`, `01_require.js`,
+    `ext/node_sqlite`). better-sqlite3 is a nan addon, built against Node's V8
+    C++ ABI, which Deno can't load, so `require("better-sqlite3")` and
+    `import Database from "better-sqlite3"` failed (no binding, or a prebuilt
+    binary that can't link). The package's entry modules (`lib/index.js`,
+    `lib/database.js`, `lib/sqlite-error.js` of a package whose package.json is
+    named `better-sqlite3`, installed or in the global cache) now resolve to a
+    built-in implementation of its API over the same SQLite engine as
+    `node:sqlite`: statements (`run`/`get`/`all`/`iterate`,
+    `pluck`/`raw`/`expand`, `bind`, `columns`, `reader`/`readonly`), binding
+    with better-sqlite3's rules and errors (arrays spread, one named object,
+    `undefined` as `NULL`, too few/many values are RangeErrors), Buffers for
+    blobs, lossy numbers for integers past 2^53 unless `safeIntegers()` /
+    `defaultSafeIntegers()`, transactions with savepoint nesting and the
+    `deferred`/`immediate`/`exclusive` variants, `pragma`, user functions and
+    aggregates (window functions too), `backup`, `serialize` and a database
+    opened from a buffer, `loadExtension`, `unsafeMode` (defensive mode off),
+    `verbose` (expanded SQL, long values shortened as better-sqlite3's build
+    does), the busy/iterating rules, and `SqliteError` with SQLite's extended
+    result-code names (`SQLITE_CONSTRAINT_PRIMARYKEY`). It opens with
+    better-sqlite3's build defaults (foreign keys on, a 16 MB page cache,
+    defensive mode). The real package's own test suite (v12.11.1, mocha) passes
+    252 of 301; the rest are virtual tables (`db.table()`, not available: 37),
+    the `progress` and abort semantics of `backup()` (7), `LIMIT` on
+    `UPDATE`/`DELETE` (a compile-time option, 2), a compiled test extension and
+    `nativeBinding` (3). Opt out with `DENO_NO_BETTER_SQLITE3_COMPAT=1`, which
+    loads the package's own code. The package's install script is not needed, so
+    it installs without `--allow-scripts`. Two new ops in `ext/node_sqlite`
+    report what better-sqlite3 needs and `node:sqlite` doesn't expose
+    (`sqlite3_stmt_readonly`, parameter names, `sqlite3_total_changes64`).
+    `node:sqlite` fixes found on the way, in Node's direction: an error SQLite
+    raised in `exec()` / `prepare()` / backup carries `errcode` / `errstr` like
+    the others (it came through rusqlite without them); `exec()` runs every
+    statement to completion as `sqlite3_exec()` does (rusqlite's
+    `execute_batch()` stepped a row-returning statement once, so
+    `SELECT f(x) FROM t` called a user function for one row); and a user
+    function or aggregate that throws inside `all()` / `iterate()` no longer
+    hangs (the step error was taken for a row and the statement stepped again,
+    rerunning the callback), nor does an aggregate's `start()` run again, or its
+    result function replace the pending exception, when SQLite finalizes the
+    failed aggregate. The npm matrix's `better-sqlite3` case now passes, and
+    three cases join it (57 programs): Drizzle, Knex and Kysely on
+    better-sqlite3. Spec: `node/better_sqlite3_override` (CommonJS, ESM, the
+    opt-out).
+
+62. **`fix`: CommonJS detection retries as ES module like Node**
+    (`libs/resolver/cjs/esm_only.rs`, `libs/resolver/cjs/mod.rs`). Node compiles
+    an ambiguous file as CommonJS first and runs it as an ES module when that
+    fails with an error only CommonJS throws: a top-level `let` / `const` /
+    `class` (or `using`) declaring one of the wrapper's parameters
+    (`const require = createRequire(...)`, `let module`), or an `await` outside
+    any function. Item 45's detection missed both: swc parses a file whose
+    `await` sits in a nested top-level block (`if (x) { await y; }`, a loop
+    body) as a script, so such a file that also used a CommonJS binding (by
+    default) or any ambiguous file (with `--unstable-detect-cjs`) ran as
+    CommonJS, failed to compile, and the retry in `Module._compile` then threw
+    "Cannot require() ES Module ... in a cycle" for the main module. The
+    resolver now parses an ambiguous file it would make CommonJS and keeps it
+    ESM when either applies (`var` and `function` may redeclare a parameter and
+    stay CommonJS, as do declarations in nested scopes), cached per file with
+    the textual check, and only when the text contains `await` or a wrapper
+    name. Spec: `node/cjs_detect_esm_retry`; unit tests for the walk.
+
+63. **`feat`: an `npm` executable** (`cli/npm_shim.rs`,
+    `cli/node_compat_shim.rs`, `cli/tools/x.rs`). The shims command
+    (`deno x --install-node-shims`) also writes `npm` (beside `node` and `npx`),
+    and deno invoked as `npm` maps npm's common commands onto its own:
+    `npm install` / `ci` (`--omit=dev`, `--production`: `--prod`),
+    `npm install <pkg>...` (`deno add npm:<pkg>`, with `-D`, `-O`, `-E`,
+    `--no-save`), `npm install -g` (`deno install -g -A -f`), `npm uninstall`
+    (`deno remove`), `npm run <script> [-- args]`, `npm test` / `start` / `stop`
+    / `restart` (`deno task`, with `--if-present`, `--workspaces`, `-w <name>`,
+    `--prefix`), `npm exec [-y] [-p pkg] [--] <cmd>` (`deno x`),
+    `npm init <initializer>` / `npm create` (`deno init --npm`), and
+    `npm init [-y]`, which writes npm's default package.json (keeping an
+    existing one's fields). npm's flags that change nothing here (`--no-audit`,
+    `--no-fund`, `--legacy-peer-deps`, `--loglevel`, ...) are accepted; anything
+    else, including other commands and git, file or tarball package specs, fails
+    with a message naming what the shim supports rather than doing something npm
+    wouldn't. `DENO_DISABLE_NODE_SHIM=1` turns it off with the others. Spec:
+    `npm/npm_shim` (run, test, install from the registry, init, an unsupported
+    command); unit tests for the mapping.
+
+64. **`fix`: a package's scope stops at `node_modules`**
+    (`libs/node_resolver/package_json.rs`, `libs/resolver/cjs/mod.rs`). Node
+    looks for the package.json whose `"type"` applies to a file
+    (`getPackageScopeConfig`) only up to the nearest `node_modules` folder: a
+    file in a folder under node_modules with no package.json of its own belongs
+    to no package. Deno kept walking up to the project's package.json, so with
+    `"type": "module"` there such a file (a vendored dependency without a
+    package.json, as in Node's `es-modules/package-type-module` fixture) ran as
+    an ES module and `module.exports` threw "module is not defined". CommonJS
+    detection now uses Node's lookup (`get_package_scope_config`); the
+    closest-package.json walk used elsewhere is unchanged. Enables Node's
+    `test-require-module.js`, `-twice.js`, `-dynamic-import-1.js` and `-2.js`
+    (ignored as "fixtures rely on Node's implicit CommonJS detection"), and
+    `test-esm-default-type.mjs` and `test-esm-type-field-errors.js`, which pass
+    now. Spec: `node/package_scope_node_modules`; a unit test for the lookup.
+
+65. **`feat(ext/node)`: `async_hooks` reports promises** (`libs/core`,
+    `ext/node/polyfills/internal/async_hooks.ts`, `async_hooks.ts`). The fork's
+    `async_hooks` emulation never emitted `PROMISE` resources (Node's
+    `updatePromiseHookMode` was a TODO), kept the execution context as a bare
+    stack (`executionAsyncId()` was 0 in the main script, where Node says 1, and
+    `triggerAsyncId()` was always 0), and its `AsyncResource` took no options.
+    Ported from Node's `lib/internal/async_hooks.js`: enabling a hook installs
+    promise hooks (`v8.promiseHooks`) that give each promise an async id and its
+    parent's as trigger, and emit `init` / `before` / `after` /
+    `promiseResolve`; `createHook({ trackPromises })` (Node 24) opts a hook out;
+    the execution and trigger ids live in `async_id_fields` with a stack of
+    saved pairs, so `executionAsyncId()` / `triggerAsyncId()` match Node in
+    promise reactions, timers and `runInAsyncScope`; `AsyncResource` takes
+    `{ triggerAsyncId, requireManualDestroy }` (or a trigger id), validates
+    them, and has `triggerAsyncId()`; hook callbacks are called with the hook as
+    `this`. Promises Deno's runtime makes for itself would be reported too,
+    which Node, whose callback APIs create no promises, never does: an async
+    op's promise and a lazily loaded module's evaluation are created inside a
+    new core scope (`Deno.core.isCreatingInternalPromise()`), and a promise
+    created or settled with no JS on the stack (a module evaluation V8 makes,
+    such as the one Deno runs a CommonJS main through) is left out as well.
+    Enables 23 Node tests (`async-hooks/test-promise*.js`,
+    `test-track-promises-*.js`, `test-embedder.api.async-resource*.js`,
+    `parallel/test-async-hooks-promise*.js`, `-enable-disable-enable.js`,
+    `-async-await.js`, `test-async-wrap-trigger-id.js`,
+    `async-hooks/test-crypto-pbkdf2.js` and `-randomBytes.js`, ...). Spec:
+    `node/async_hooks_promise_resources` (the event sequence Node 24 prints for
+    the same program, less Node's own TickObject).
+
+66. **`fix(ext/node)`: `node:test`'s `t.waitFor()`, `t.plan()` options and
+    per-test mocks** (`ext/node/polyfills/testing.ts`).
+    `t.waitFor(condition,
+    { interval, timeout })` (Node 22.14) was missing;
+    `t.plan(count,
+    options)` ignored and didn't validate `options`; and
+    `t.mock` was the process-wide mock, so a test's mock timers stayed enabled
+    for the next test ("MockTimers is already enabled") and its method mocks
+    stayed in place. Each test context now has its own `t.mock`, which restores
+    what the test mocked and resets the timers it enabled when the test finishes
+    (as Node resets each test's MockTracker), in `it()` inside `describe()` too;
+    and `mock.timers.enable({ now })` reports a negative or non-integer `now` as
+    `ERR_INVALID_ARG_VALUE`. Enables `test-runner-wait-for.js` and
+    `test-runner-plan.mjs`. Spec: `node/node_test_context_wait_for`.
+
+The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
+64-66) are what the prebuilt `libdenort` carries. The CLI-side parts (for
+example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's
+launchers) are in the branch too, but a stock CLI does not run them; denext's
+own launcher provides that environment.
 
 The laufey backend hosts are built from
 [Brainwires/laufey](https://github.com/Brainwires/laufey) branch

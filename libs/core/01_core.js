@@ -34,6 +34,8 @@
     hasPromise,
     promiseIdSymbol,
     registerErrorClass,
+    enterInternalPromiseScope,
+    exitInternalPromiseScope,
   } = window.Deno.core;
   const {
     __setLeakTracingEnabled,
@@ -962,7 +964,13 @@
 
     return function lazyLoad() {
       if (!value) {
-        value = op_lazy_load_esm(specifier);
+        // the module's evaluation promise is the runtime's own
+        enterInternalPromiseScope();
+        try {
+          value = op_lazy_load_esm(specifier);
+        } finally {
+          exitInternalPromiseScope();
+        }
       }
       return value;
     };
@@ -989,7 +997,13 @@
     if (specifier in loadedScripts) {
       return loadedScripts[specifier];
     }
-    const result = op_load_ext_script(specifier);
+    enterInternalPromiseScope();
+    let result;
+    try {
+      result = op_load_ext_script(specifier);
+    } finally {
+      exitInternalPromiseScope();
+    }
     loadedScripts[specifier] = result;
     return result;
   }
