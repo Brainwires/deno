@@ -549,7 +549,11 @@ impl TsGoServerInner {
       .config
       .root_url()
       .and_then(|u| u.to_file_path().ok())
-      .or_else(|| std::env::current_dir().ok());
+      .or_else(|| {
+        crate::util::env::resolve_cwd(None)
+          .ok()
+          .map(|cwd| cwd.into_owned())
+      });
     let mut command = std::process::Command::new(tsc);
     command
       .arg("--lsp")
