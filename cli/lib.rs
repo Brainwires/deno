@@ -14,6 +14,7 @@ mod module_loader;
 mod node;
 mod node_compat_shim;
 mod npm;
+mod npm_shim;
 mod ops;
 mod registry;
 mod resolver;

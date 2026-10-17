@@ -1315,6 +1315,27 @@ where the changes are discussed.
     the textual check, and only when the text contains `await` or a wrapper
     name. Spec: `node/cjs_detect_esm_retry`; unit tests for the walk.
 
+53. **`feat`: an `npm` executable** (`cli/npm_shim.rs`,
+    `cli/node_compat_shim.rs`, `cli/tools/x.rs`).
+    `deno x
+    --install-node-shims` also writes `npm` (beside `node` and
+    `npx`), and deno invoked as `npm` maps npm's common commands onto its own:
+    `npm install` / `ci` (`--omit=dev`, `--production`: `--prod`),
+    `npm install <pkg>...` (`deno add npm:<pkg>`, with `-D`, `-O`, `-E`,
+    `--no-save`), `npm install -g` (`deno install -g -A -f`), `npm uninstall`
+    (`deno remove`), `npm run <script> [-- args]`, `npm test` / `start` / `stop`
+    / `restart` (`deno task`, with `--if-present`, `--workspaces`, `-w <name>`,
+    `--prefix`), `npm exec [-y] [-p pkg] [--] <cmd>` (`deno x`),
+    `npm init <initializer>` / `npm create` (`deno init --npm`), and
+    `npm init [-y]`, which writes npm's default package.json (keeping an
+    existing one's fields). npm's flags that change nothing here (`--no-audit`,
+    `--no-fund`, `--legacy-peer-deps`, `--loglevel`, ...) are accepted; anything
+    else, including other commands and git, file or tarball package specs, fails
+    with a message naming what the shim supports rather than doing something npm
+    wouldn't. `DENO_DISABLE_NODE_SHIM=1` turns it off with the others. Spec:
+    `npm/npm_shim` (run, test, install from the registry, init, an unsupported
+    command); unit tests for the mapping.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41, 44, 46, 50, 51) are
 what the prebuilt `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are

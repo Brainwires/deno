@@ -1,0 +1,13 @@
+$ npm run hello -- world [exit 0]
+  hello world
+$ npm test [exit 0]
+  testing
+$ npm install @denotest/esm-basic [exit 0]
+[WILDCARD]
+dependency ^1.0.0
+$ npm init -y [exit 0]
+  Wrote to [WILDCARD]fresh/package.json:
+[WILDCARD]
+init fresh
+$ npm publish [exit 1]
+  npm ERR! `npm publish` is not supported by Deno's npm shim. Supported: install (i, add), ci, uninstall (rm, remove), run (run-script), test (t), start, stop, restart, exec (x), init (create).

@@ -2971,7 +2971,7 @@ pub static X_SUBCOMMAND: CommandDef = CommandDef {
       .long("install-node-shims")
       .set_true()
       .conflicts_with(&["script_arg", "install-alias"])
-.help("Creates node and npx next to the deno executable: they run Deno in Node.js mode, so node_modules/.bin scripts, #!/usr/bin/env node shebangs and tools that run node or npx work without Node.js installed"),
+.help("Creates node, npx and npm next to the deno executable: node runs Deno in Node.js mode, npx is deno x and npm maps its common commands (install, ci, run, test, exec, init) onto deno's, so node_modules/.bin scripts, #!/usr/bin/env node shebangs and tools that run node, npx or npm work without Node.js installed"),
     ArgDef::new("check")
       .long("check")
       .action(ArgAction::Set)
