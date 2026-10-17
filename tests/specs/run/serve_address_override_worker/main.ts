@@ -13,8 +13,13 @@ const workerPort = await new Promise((resolve) => {
 });
 console.log(`Worker listening on ${workerPort}`);
 
-console.log(`Main response: ${await (await fetch("http://127.0.0.1:9003/")).text()}`);
-console.log(`Worker response: ${await (await fetch(`http://127.0.0.1:${workerPort}/`)).text()}`);
+console.log(
+  `Main response: ${await (await fetch("http://127.0.0.1:9003/")).text()}`,
+);
+console.log(
+  `Worker response: ${await (await fetch(`http://127.0.0.1:${workerPort}/`))
+    .text()}`,
+);
 
 worker.terminate();
 await server.shutdown();
