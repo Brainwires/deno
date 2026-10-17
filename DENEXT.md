@@ -1115,13 +1115,15 @@ where the changes are discussed.
       of reach of user objects (#36249), and EC public keys not on the curve are
       refused at import (#37032).
 
-    Not carried: #36905 (the `--allow-sys=inspector` check on
-    `process.debugPort` and the inspector's enabled state).
-    `op_inspector_enabled` is also what the inspector Network bridge asks on
-    every `node:http` client request, so with the check any `http.get()` run
-    without `--allow-sys=inspector` throws `NotCapable`. The dependabot hickory
-    0.26.2 bump (#36971) is not carried either: it moves only `hickory-resolver`
-    and leaves `hickory-proto` 0.25.2, the crate the advisories name.
+    #36905 is carried in part, the scope of #36595: reading `process.debugPort`
+    (`op_inspector_port`) needs `--allow-sys=inspector`. Its other half, the
+    same check on `op_inspector_enabled`, is left out: the inspector Network
+    bridge asks that on every `node:http` client request, so with it any
+    `http.get()` run without `--allow-sys=inspector` threw `NotCapable`. The
+    spec `tests/specs/node/process_debug_port_permission` covers both, and that
+    `http.get()` works under `--allow-net` alone. The dependabot hickory 0.26.2
+    bump (#36971) is not carried: it moves only `hickory-resolver` and leaves
+    `hickory-proto` 0.25.2, the crate the advisories name.
 
     Tests: each pull request's own (`tests/specs/node`, `tests/specs/run`,
     `tests/specs/permission`, `tests/specs/npm`, `tests/specs/install`,
