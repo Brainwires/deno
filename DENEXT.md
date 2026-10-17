@@ -1064,6 +1064,21 @@ where the changes are discussed.
     quit-and-relaunch cycles (localStorage and IndexedDB carried over) go from 6
     to 10.
 
+42. **`test(node_compat)`: 229 more Node.js tests, and the suite in CI**
+    (`feat/node-compat`). Node's own test suite (`tests/node_compat`,
+    `denoland/node_test` at Node v26.5.1) had about 500 tests that passed on
+    `denext.21` but were not in `config.jsonc`, so nothing caught a regression
+    in them. Half of those only passed vacuously: they print
+    `1..0 # Skipped: ...` (`common.skip`, for example "missing FFI" or "no valid
+    readable TTY") and exit 0, so they are left out. Of the rest, the ones that
+    pass under this fork's own runner with a debug build are now enabled (229:
+    192 added, 37 whose `ignore` was stale; network tests, tests marked flaky or
+    timing out, and ones too slow for a debug build are left out). The harness
+    now collects `async-hooks/` (the `node:async_hooks` suite; still only the
+    listed tests run). The fork's CI had dropped upstream's node_compat job with
+    the generated workflows; `denext tests` runs it again on Linux (two shards,
+    `denext_tests_os.yml`). Before: 3343 enabled on linux-x86_64; after: 3572.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41) are what the prebuilt
 `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
