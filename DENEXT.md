@@ -1259,6 +1259,33 @@ where the changes are discussed.
     `--conditions`. Spec: `npm/deno_export_condition`; npm matrix: `stripe`
     passes (`expect` raised).
 
+51. **`feat`: TypeScript resolution as tsx and ts-node resolve it, in a
+    package.json project** (behavior change; `is_node_project` and
+    `CliOptions::node_project_sloppy_imports` /
+    `compiler_options_paths_for_execution` in `cli/args/mod.rs`,
+    `WorkspaceResolver::set_compiler_options_paths_for_execution` in
+    `libs/resolver/workspace.rs`). The rule: a workspace with a package.json and
+    no deno.json anywhere is a Node.js project, and gets
+    - Deno's sloppy imports by default: an extensionless (`./lib/a`), directory
+      (`./dir` to `./dir/index.ts`) or `.js`-for-`.ts` (`./a.js` naming `a.ts`)
+      relative import resolves, as tsx and ts-node (and TypeScript's
+      `moduleResolution: "bundler"`, which already turned them on) resolve it.
+      Opt out with `DENO_NO_SLOPPY_IMPORTS=1`.
+    - tsconfig.json's `compilerOptions.paths` (with `baseUrl`) for the code that
+      runs, not only for type checking: `@/lib/x` resolves through the pattern,
+      its candidates probed for extensions, and a specifier a pattern matches
+      but none of whose candidates exist falls back to the package of that name,
+      as tsconfig-paths does (type checking keeps reporting it). A package's own
+      imports (a referrer under `node_modules`) never go through it. Opt out
+      with `DENO_NO_TSCONFIG_PATHS=1`. A deno.json keeps Deno's strict
+      resolution, and so does a script with no config. Also:
+      `ignoreDeprecations` in compilerOptions reaches the type checker, so a
+      tsconfig.json with `baseUrl`, which TypeScript 6 deprecates, can keep it
+      as TypeScript says (`"ignoreDeprecations": "6.0"`); before, Deno dropped
+      the option and type checking failed. Not covered: `compilerOptions.paths`
+      in a `deno compile` binary's runtime. Spec:
+      `npm/node_project_ts_resolution`; npm matrix: `ts-paths`.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41, 44, 46) are what the
 prebuilt `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are

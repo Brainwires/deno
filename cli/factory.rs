@@ -1529,6 +1529,8 @@ impl CliFactory {
               .clone(),
           })),
           unstable_sloppy_imports: options.unstable_sloppy_imports(),
+          compiler_options_paths_for_execution: options
+            .compiler_options_paths_for_execution(),
           on_mapped_resolution_diagnostic: Some(Arc::new(
             on_resolve_diagnostic,
           )),

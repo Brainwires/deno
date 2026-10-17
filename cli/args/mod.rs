@@ -1521,6 +1521,25 @@ impl CliOptions {
   pub fn unstable_sloppy_imports(&self) -> bool {
     self.flags.unstable_config.sloppy_imports
       || self.workspace().has_unstable("sloppy-imports")
+      || self.node_project_sloppy_imports()
+  }
+
+  /// A package.json project (no deno.json) resolves an extensionless or
+  /// directory import, or a `.js` one naming a `.ts` file, the way tsx and
+  /// ts-node do (Deno's sloppy imports), unless `DENO_NO_SLOPPY_IMPORTS=1`.
+  /// See [`is_node_project`].
+  pub fn node_project_sloppy_imports(&self) -> bool {
+    is_node_project(self.workspace())
+      && !has_flag_env_var(&CliSys::default(), "DENO_NO_SLOPPY_IMPORTS")
+  }
+
+  /// A package.json project (no deno.json) honors tsconfig.json's
+  /// `compilerOptions.paths` (and `baseUrl`) for code that runs, as tsx and
+  /// ts-node with tsconfig-paths do, unless `DENO_NO_TSCONFIG_PATHS=1`. Every
+  /// project honors them for type checking.
+  pub fn compiler_options_paths_for_execution(&self) -> bool {
+    is_node_project(self.workspace())
+      && !has_flag_env_var(&CliSys::default(), "DENO_NO_TSCONFIG_PATHS")
   }
 
   pub fn unstable_features(&self) -> Vec<&str> {
@@ -2054,6 +2073,15 @@ fn flags_to_permissions_options(
     ),
     prompt: !resolve_no_prompt(flags),
   })
+}
+
+/// A project Node.js tooling would treat as its own: a package.json and no
+/// deno.json anywhere in the workspace. Such a project gets Node.js-style
+/// TypeScript resolution by default (sloppy imports, `compilerOptions.paths`
+/// for code that runs); a deno.json keeps Deno's strict resolution.
+pub fn is_node_project(workspace: &Workspace) -> bool {
+  workspace.package_jsons().next().is_some()
+    && workspace.deno_jsons().next().is_none()
 }
 
 fn augment_permissions_with_serve_flags(

@@ -1249,9 +1249,14 @@ impl<'a> ResolverFactory<'a> {
       let workspace_resolver = self
         .config_data
         .map(|d| {
+          // the same default as the CLI
+          // (`CliOptions::node_project_sloppy_imports`)
           let unstable_sloppy_imports =
             std::env::var("DENO_UNSTABLE_SLOPPY_IMPORTS").is_ok()
-              || d.unstable.contains("sloppy-imports");
+              || d.unstable.contains("sloppy-imports")
+              || crate::args::is_node_project(&d.member_dir.workspace)
+                && std::env::var_os("DENO_NO_SLOPPY_IMPORTS")
+                  .is_none_or(|v| v != "1");
           let pkg_json_dep_resolution = if d.byonm {
             PackageJsonDepResolution::Disabled
           } else {

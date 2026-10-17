@@ -1,0 +1,11 @@
+{
+  "compilerOptions": {
+    "baseUrl": ".",
+    "ignoreDeprecations": "6.0",
+    "paths": {
+      "@/*": ["./src/*"],
+      "~utils": ["./src/utils/index.ts"],
+      "@denotest/*": ["./vendor/@denotest/*"]
+    }
+  }
+}

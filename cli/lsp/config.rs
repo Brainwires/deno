@@ -1334,6 +1334,7 @@ impl WorkspaceConfigData {
         package_json_dep_resolution: None,
         specified_import_map: None,
         unstable_sloppy_imports: false,
+        compiler_options_paths_for_execution: false,
         require_modules: vec![],
       },
     );

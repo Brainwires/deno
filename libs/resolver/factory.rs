@@ -752,6 +752,9 @@ pub struct ResolverFactoryOptions {
   pub package_json_dep_resolution: Option<PackageJsonDepResolution>,
   pub specified_import_map: Option<Box<dyn SpecifiedImportMapProvider>>,
   pub unstable_sloppy_imports: bool,
+  /// Whether `compilerOptions.paths` maps the specifiers of code that runs,
+  /// not only of type information (a package.json project).
+  pub compiler_options_paths_for_execution: bool,
   #[cfg(feature = "graph")]
   pub on_mapped_resolution_diagnostic:
     Option<crate::graph::OnMappedResolutionDiagnosticFn>,
@@ -1338,6 +1341,9 @@ impl<TSys: WorkspaceFactorySys> ResolverFactory<TSys> {
           )?;
           resolver.set_compiler_options_resolver(
             self.compiler_options_resolver()?.clone(),
+          );
+          resolver.set_compiler_options_paths_for_execution(
+            self.options.compiler_options_paths_for_execution,
           );
           if !resolver.diagnostics().is_empty() {
             // todo(dsherret): do not log this in this crate... that should be
