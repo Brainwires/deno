@@ -1,0 +1,21 @@
+{
+  "tests": {
+    // process.debugPort is a host fact: without --allow-sys=inspector reading
+    // it is refused (#36519; the op_inspector_port half of denoland/deno#36905).
+    "denied_without_allow_sys": {
+      "args": "run main.mjs",
+      "output": "denied.out"
+    },
+    "allowed_with_allow_sys_inspector": {
+      "args": "run --allow-sys=inspector main.mjs",
+      "output": "allowed.out"
+    },
+    // Whether the inspector is enabled stays unchecked: the inspector Network
+    // bridge asks it on every node:http client request, so checking it would
+    // make http.get() need --allow-sys=inspector.
+    "http_get_needs_no_sys_permission": {
+      "args": "run --allow-net http_get.mjs",
+      "output": "http_get.out"
+    }
+  }
+}

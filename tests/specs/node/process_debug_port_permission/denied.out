@@ -1,0 +1,2 @@
+process.debugPort: NotCapable
+process._debugEnd(): ok
