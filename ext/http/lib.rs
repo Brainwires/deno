@@ -1854,11 +1854,23 @@ fn extract_network_stream<U: CanDowncastUpgrade>(
 
 #[op2]
 pub fn op_http_serve_address_override() -> (u8, String, u32, bool) {
+  // Handed out at most once per process: a Web Worker (or a second server in
+  // the same realm) that calls `Deno.serve` afterwards binds its own options,
+  // instead of re-binding the address the first server holds. The JS
+  // "consumed" flags in 00_serve.ts / address_override.js are per realm.
+  static CONSUMED: AtomicBool = AtomicBool::new(false);
+
   // Through the runtime's environment view, which includes variables an
   // embedder provides without `setenv` (`deno_os::set_env_overlay_var`).
   if let Ok(val) = deno_os::ProcessEnvGuard::lock().var("DENO_SERVE_ADDRESS") {
-    return parse_serve_address(&val);
-  };
+    let parsed = parse_serve_address(&val);
+    if parsed.0 != 0 && CONSUMED.swap(true, Ordering::AcqRel) {
+      // Already handed out to an earlier server in this process:
+      // behave as if the variable were unset.
+      return (0, String::new(), 0, false);
+    }
+    return parsed;
+  }
 
   if deno_net::tunnel::get_tunnel().is_some() {
     return (4, String::new(), 0, true);
