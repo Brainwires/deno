@@ -71,7 +71,7 @@ class AsyncResource {
   constructor(
     type: string,
     opts: number | { triggerAsyncId?: number; requireManualDestroy?: boolean } =
-      { __proto__: null },
+      kEmptyObject,
   ) {
     validateString(type, "type");
     let triggerAsyncId = opts;

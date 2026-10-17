@@ -1442,7 +1442,7 @@ class NodeTestContext {
     return getAssertObject();
   }
 
-  plan(count, options = { __proto__: null }) {
+  plan(count, options = kEmptyObject) {
     validateInteger(count, "count", 1);
     validateObject(options, "options");
     const { wait = false } = options;
@@ -1457,7 +1457,7 @@ class NodeTestContext {
 
   // Polls `condition` until it returns or resolves, rejecting with its last
   // failure as the cause once `timeout` passes (Node's TestContext#waitFor).
-  waitFor(condition, options = { __proto__: null }) {
+  waitFor(condition, options = kEmptyObject) {
     validateFunction(condition, "condition");
     validateObject(options, "options");
     const { interval = 50, timeout = 1000 } = options;
