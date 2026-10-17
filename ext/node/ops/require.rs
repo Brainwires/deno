@@ -34,6 +34,17 @@ use crate::NodeRequireLoaderRc;
 use crate::NodeResolverRc;
 use crate::PackageJsonResolverRc;
 
+/// The real paths `op_require_real_path` returned for paths it was allowed
+/// to read. The loader resolves every CommonJS module to its real path
+/// (`Module._findPath`), then resolves and reads it under that spelling,
+/// which differs from the one read access was granted for when the path
+/// goes through a symlink or, on Windows, an 8.3 short name (a working
+/// directory under `C:\Users\RUNNER~1` canonicalizes to the long name).
+/// Reading the real path of an allowed path reads the same file, so these
+/// count as allowed too.
+#[derive(Default)]
+struct AllowedRealPaths(std::collections::HashSet<PathBuf>);
+
 #[must_use = "the resolved return value to mitigate time-of-check to time-of-use issues"]
 fn ensure_read_permission<'a>(
   state: &mut OpState,
@@ -43,6 +54,12 @@ fn ensure_read_permission<'a>(
   // fetching the loader and the per-call work it does (e.g. module graph
   // lookups) entirely.
   if state.borrow::<PermissionsContainer>().query_read_all() {
+    return Ok(file_path);
+  }
+  if state
+    .try_borrow::<AllowedRealPaths>()
+    .is_some_and(|allowed| allowed.0.contains(file_path.as_ref()))
+  {
     return Ok(file_path);
   }
   let loader = state.borrow::<NodeRequireLoaderRc>().clone();
@@ -448,6 +465,17 @@ pub fn op_require_real_path<TSys: ExtNodeSys + 'static>(
         }
       }
     });
+  if canonicalized_path != path.as_ref()
+    && !state.borrow::<PermissionsContainer>().query_read_all()
+  {
+    if !state.has::<AllowedRealPaths>() {
+      state.put(AllowedRealPaths::default());
+    }
+    state
+      .borrow_mut::<AllowedRealPaths>()
+      .0
+      .insert(canonicalized_path.clone());
+  }
   Ok(canonicalized_path.to_string_lossy().into_owned())
 }
 

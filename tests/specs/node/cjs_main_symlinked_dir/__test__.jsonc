@@ -1,0 +1,16 @@
+{
+  // A CommonJS main module reached through a symlinked directory runs
+  // without --allow-read: the loader resolves it to its real path, and
+  // resolving that real path again must not ask for read access the main
+  // module was never granted under that spelling. (Windows hits the same
+  // with an 8.3 short name in the working directory, e.g. RUNNER~1.)
+  "if": "unix",
+  "tempDir": true,
+  "steps": [{
+    "args": ["eval", "Deno.symlinkSync('real', 'link')"],
+    "output": ""
+  }, {
+    "args": "run link/main.cjs",
+    "output": "main.cjs 3\n"
+  }]
+}
