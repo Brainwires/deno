@@ -90,6 +90,7 @@ const {
   validateObject,
   validateOneOf,
   validateJwkString,
+  validateString,
 } = core.loadExtScript("ext:deno_node/internal/validators.mjs");
 
 const getArrayBufferOrView = hideStackFrames(

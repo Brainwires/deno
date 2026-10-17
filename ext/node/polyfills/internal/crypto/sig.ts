@@ -49,6 +49,7 @@ const {
   validateString,
 } = core.loadExtScript("ext:deno_node/internal/validators.mjs");
 
+const { Buffer } = core.loadExtScript("ext:deno_node/internal/buffer.mjs");
 const { isAnyArrayBuffer } = core.loadExtScript(
   "ext:deno_node/internal/util/types.ts",
 );
