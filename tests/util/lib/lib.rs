@@ -159,37 +159,53 @@ pub fn root_path() -> PathRef {
   p.parent()
 }
 
-/// Path to the pre-downloaded native TypeScript compiler, if present.
-///
-/// `tools/download_tsc.ts` materializes it under
-/// `<target>/.native_tsc/deno_dir/tsc/<version>/<platform>/lib/tsc`. The harness
-/// injects this per-test as `DENO_TSC_BIN` (see `TestContextBuilder::build`) so
-/// `deno check`/`run --check`/`cache --check` reuse it instead of downloading
-/// the compiler into every test's fresh `DENO_DIR`. Returns `None` when it
-/// hasn't been downloaded yet.
-pub fn native_tsc_bin_path() -> Option<PathRef> {
-  let exe = if cfg!(windows) { "tsc.exe" } else { "tsc" };
-  // `tools/download_tsc.ts` defaults its cache to `./target/.native_tsc/deno_dir`
-  // (relative to the repo root), i.e. the `target` root - not the per-profile
-  // `target/debug`|`target/release` dir that `target_dir()` returns.
-  let tsc_root = root_path()
-    .join("target")
-    .join(".native_tsc")
-    .join("deno_dir")
-    .join("tsc");
-  for version in std::fs::read_dir(tsc_root.as_path()).ok()?.flatten() {
-    for platform in std::fs::read_dir(version.path())
-      .into_iter()
-      .flatten()
-      .flatten()
-    {
-      let bin = PathRef::new(platform.path()).join("lib").join(exe);
-      if bin.exists() {
-        return Some(bin);
+/// The pinned native TypeScript build type checking runs in the tests
+/// (denext): `target/typescript-check-<version>/tsc[.exe]`, the `check` role of
+/// `cli/tsc/typescript_pins.json`, fetched once with
+/// `.github/denext-runtime/fetch_typescript.py` (verified against the pin) as
+/// the tsgo LSP tests fetch theirs. The harness injects it per-test as
+/// `DENO_TSGO_BIN` (see `TestContextBuilder::build`). `None` when it can't be
+/// fetched (the native check then fails with its own "not found" error).
+pub fn tsgo_check_bin() -> Option<PathRef> {
+  static BIN: std::sync::OnceLock<Option<PathRef>> = std::sync::OnceLock::new();
+  BIN
+    .get_or_init(|| {
+      let root = root_path();
+      let pins: serde_json::Value = serde_json::from_str(
+        &root.join("cli/tsc/typescript_pins.json").read_to_string(),
+      )
+      .ok()?;
+      let version = pins["check"]["version"].as_str()?.to_string();
+      let dir = target_dir().join(format!("typescript-check-{version}"));
+      let exe = dir.join(if cfg!(windows) { "tsc.exe" } else { "tsc" });
+      if !exe.exists() {
+        let platform = match (std::env::consts::OS, std::env::consts::ARCH) {
+          ("linux", "x86_64") => "linux-x64",
+          ("linux", "aarch64") => "linux-arm64",
+          ("macos", "x86_64") => "darwin-x64",
+          ("macos", "aarch64") => "darwin-arm64",
+          ("windows", "x86_64") => "win32-x64",
+          ("windows", "aarch64") => "win32-arm64",
+          _ => return None,
+        };
+        let python = if cfg!(windows) { "python" } else { "python3" };
+        let status = std::process::Command::new(python)
+          .arg("-I")
+          .arg(root.join(".github/denext-runtime/fetch_typescript.py"))
+          .arg("--no-registry-check")
+          .arg("check")
+          .arg(platform)
+          .arg(dir.as_path())
+          .stdout(std::process::Stdio::null())
+          .status()
+          .ok()?;
+        if !status.success() {
+          return None;
+        }
       }
-    }
-  }
-  None
+      exe.exists().then_some(exe)
+    })
+    .clone()
 }
 
 pub fn prebuilt_path() -> PathRef {

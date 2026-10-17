@@ -253,7 +253,6 @@ pub async fn sync_types_command(
   sync_types_flags: SyncTypesFlags,
   root_tsconfig_mode: RootTsConfigMode,
 ) -> Result<(), AnyError> {
-  use crate::args::TsTypeLib;
   use crate::graph_container::CollectSpecifiersOptions;
 
   let factory = CliFactory::from_flags(flags);
@@ -436,7 +435,10 @@ pub async fn sync_types_command(
       .and_then(|resolver| {
         resolver
           .for_specifier(spec)
-          .compiler_options_for_lib(TsTypeLib::DenoWindow)
+          // denext: the desktop lib for `deno desktop` (see
+          // `CliOptions::ts_type_lib_window`), which the generated
+          // `@types/deno` then includes.
+          .compiler_options_for_lib(cli_options.ts_type_lib_window())
           .ok()
       })
       .map(|opts| opts.0.clone())

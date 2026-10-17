@@ -155,6 +155,27 @@ pub struct GeneratedTsConfig {
   pub tsconfig_path: PathBuf,
 }
 
+/// Write a generated file under `.deno/` atomically (a sibling temp file
+/// renamed into place), and not at all when it already holds `content`: two
+/// type checks of one project can run at once (the dev overlay and a test run,
+/// spec variants), and one must never read the other's half-written file
+/// (denext).
+fn write_generated(path: &Path, content: &str) -> Result<(), std::io::Error> {
+  if std::fs::read(path).is_ok_and(|existing| existing == content.as_bytes()) {
+    return Ok(());
+  }
+  static COUNTER: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+  let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+  let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("file");
+  let temp =
+    path.with_file_name(format!(".{file_name}.{}.{n}.tmp", std::process::id()));
+  std::fs::write(&temp, content)?;
+  std::fs::rename(&temp, path).inspect_err(|_| {
+    let _ = std::fs::remove_file(&temp);
+  })
+}
+
 /// Generate `.deno/tsconfig.json` and Deno type definitions for use with
 /// stock TypeScript tooling.
 ///
@@ -198,20 +219,36 @@ pub fn generate_tsconfig(
   // When the effective `lib` includes `dom`, the web-platform globals come from
   // the stock `dom` lib, so emit only the `Deno` namespace to avoid colliding
   // with it (the userland `"lib": ["deno.ns", "dom"]` pattern).
+  // denext: a `lib` that names `deno.window` (or `deno.worker`) next to `dom`
+  // (`["deno.window", "dom", ...]`) wants Deno's web libs as well: as in Deno's
+  // own checker, they merge into `dom`'s declarations (`Transformer.cancel`,
+  // ...) through the deferral markers. Only `dom` without them (the
+  // `["deno.ns", "dom"]` pattern) gets the `Deno` namespace alone.
   let has_dom =
-    effective_lib_has_dom(deno_compiler_options, resolved_compiler_options);
+    effective_lib_has_dom(deno_compiler_options, resolved_compiler_options)
+      && !["deno.window", "deno.worker"].iter().any(|lib| {
+        effective_lib_has(deno_compiler_options, resolved_compiler_options, lib)
+      });
+  // denext: `deno desktop` (and a `"lib": ["deno.desktop"]` config) types its
+  // app against Deno's desktop lib as well.
+  let has_desktop = effective_lib_has(
+    deno_compiler_options,
+    resolved_compiler_options,
+    "deno.desktop",
+  );
   write_deno_types(
     &types_dir.join("index.d.ts"),
     node_types_root.is_some(),
     has_dom,
+    has_desktop,
     &no_types_shims,
   )?;
 
   // Write a package.json for the @types/deno package so the typeRoots lookup
   // resolves the directory as a package.
-  std::fs::write(
-    types_dir.join("package.json"),
-    serde_json::to_string_pretty(&json!({
+  write_generated(
+    &types_dir.join("package.json"),
+    &serde_json::to_string_pretty(&json!({
       "name": "@types/deno",
       "version": "0.0.0",
       "types": "index.d.ts"
@@ -242,11 +279,11 @@ pub fn generate_tsconfig(
   // `.deno/` is a generated cache (materialized types, per-package projects).
   // Mark it ignored so gitignore-respecting tooling - `deno publish`, git,
   // formatters - skips it rather than treating it as project source.
-  std::fs::write(deno_dir.join(".gitignore"), "*\n")?;
+  write_generated(&deno_dir.join(".gitignore"), "*\n")?;
   let tsconfig_path = deno_dir.join("tsconfig.json");
   let content = serde_json::to_string_pretty(&tsconfig)
     .expect("failed to serialize tsconfig");
-  std::fs::write(&tsconfig_path, &content)?;
+  write_generated(&tsconfig_path, &content)?;
 
   // Ensure root tsconfig.json exists and extends .deno/tsconfig.json. `deno
   // check` skips this when it will point tsc at `.deno/tsconfig.json` directly,
@@ -537,13 +574,22 @@ fn effective_lib_has_dom(
   deno_compiler_options: Option<&Value>,
   resolved_compiler_options: Option<&Value>,
 ) -> bool {
+  effective_lib_has(deno_compiler_options, resolved_compiler_options, "dom")
+}
+
+/// Whether the effective `lib` (the project's or the resolved one) names `lib`.
+fn effective_lib_has(
+  deno_compiler_options: Option<&Value>,
+  resolved_compiler_options: Option<&Value>,
+  lib: &str,
+) -> bool {
   [deno_compiler_options, resolved_compiler_options]
     .into_iter()
     .flatten()
     .filter_map(|co| co.get("lib").and_then(|l| l.as_array()))
     .flatten()
     .filter_map(|v| v.as_str())
-    .any(|l| l.eq_ignore_ascii_case("dom"))
+    .any(|l| l.eq_ignore_ascii_case(lib))
 }
 
 /// Write the Deno type declarations to a `.d.ts` file. When `has_dom` is set the
@@ -553,10 +599,19 @@ fn write_deno_types(
   path: &Path,
   has_node_types: bool,
   has_dom: bool,
+  has_desktop: bool,
   no_types_shims: &[String],
 ) -> Result<(), std::io::Error> {
   let types_text = if has_dom {
     get_deno_ns_declaration_file_text()
+  } else if has_desktop {
+    // The desktop lib declares the window's DOM-like events and APIs on top of
+    // `deno.window` (which it references); with `dom` those come from `dom`.
+    format!(
+      "{}\n{}",
+      get_types_declaration_file_text(),
+      crate::tsc::get_desktop_declaration_file_text()
+    )
   } else {
     get_types_declaration_file_text()
   };
@@ -606,9 +661,9 @@ fn write_deno_types(
     format!("\n\n{}\n", no_types_shims.join("\n"))
   };
 
-  std::fs::write(
+  write_generated(
     path,
-    format!(
+    &format!(
       "// Auto-generated by Deno for stock TypeScript tooling.\n\
        // Do not edit — this file is regenerated as needed.\n\n\
        {filtered}{css_ambient}{no_types_ambient}"

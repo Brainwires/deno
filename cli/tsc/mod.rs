@@ -86,7 +86,15 @@ pub fn get_types_declaration_file_text() -> String {
 /// lib those globals come from `dom` instead, and including Deno's copies too
 /// collides. Mirrors the userland `"lib": ["deno.ns", "dom"]` pattern.
 pub fn get_deno_ns_declaration_file_text() -> String {
-  concat_lib_texts(&["deno.ns", "deno.net"])
+  // denext: `Deno.SQL` / `Deno.sql` are part of the `Deno` namespace.
+  concat_lib_texts(&["deno.ns", "deno.net", "deno.sql"])
+}
+
+/// Deno's desktop lib (`deno desktop` apps: the window's events, notifications,
+/// permissions, clipboard and `Deno.desktop`), for the native type checker's
+/// generated `@types/deno`.
+pub fn get_desktop_declaration_file_text() -> String {
+  concat_lib_texts(&["deno.desktop"])
 }
 
 fn concat_lib_texts(lib_names: &[&str]) -> String {

@@ -389,8 +389,13 @@ pub async fn setup_npm_compat(
   } else {
     project_root.join("node_modules/@jsr")
   };
-  let installed =
-    install_jsr_packages(&jsr_packages_dir, deno_imports, http_client).await?;
+  let installed = install_jsr_packages(
+    &jsr_packages_dir,
+    deno_imports,
+    &member_paths,
+    http_client,
+  )
+  .await?;
 
   // Mirror http(s): modules (and their transitive remote/relative imports)
   // into .deno/remote/<host><path>/...
@@ -923,6 +928,7 @@ fn generate_deno_tsconfig(
 async fn install_jsr_packages(
   jsr_packages_dir: &Path,
   deno_imports: Option<&Value>,
+  member_paths: &serde_json::Map<String, Value>,
   http_client: &HttpClient,
 ) -> Result<Vec<InstalledJsrPackage>, AnyError> {
   let mut installed = Vec::new();
@@ -942,6 +948,15 @@ async fn install_jsr_packages(
     else {
       continue;
     };
+
+    // denext: a package a workspace member provides (`"@scope/pkg":
+    // "jsr:@scope/pkg@1.2.3"` with that member at 1.2.3, as Deno resolves it)
+    // maps to the member's sources (`member_paths`), which win in the generated
+    // `paths`; the registry copy is never used, and may not exist yet.
+    let member_name = format!("@{}/{}", scope.trim_start_matches('@'), name);
+    if member_paths.contains_key(&member_name) {
+      continue;
+    }
 
     let npm_name = format!("{}__{}", scope.trim_start_matches('@'), name);
     let pkg_dir = jsr_packages_dir.join(&npm_name);
@@ -985,8 +1000,20 @@ async fn install_jsr_packages(
         anyhow!("Failed to parse metadata for {registry_name}: {e}")
       })?;
 
-    let resolved_version =
-      resolve_jsr_version(&metadata, req_version.as_deref(), &registry_name)?;
+    // An unresolvable version leaves this package unmapped (the compiler then
+    // reports its imports) rather than failing the whole config generation,
+    // like the other per-package failures here.
+    let resolved_version = match resolve_jsr_version(
+      &metadata,
+      req_version.as_deref(),
+      &registry_name,
+    ) {
+      Ok(version) => version,
+      Err(e) => {
+        log::debug!("{e}");
+        continue;
+      }
+    };
 
     let tarball_url = metadata
       .get("versions")

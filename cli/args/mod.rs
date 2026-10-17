@@ -554,6 +554,34 @@ impl WorkspaceMainModuleResolver {
 
 /// Holds the resolved options of many sources used by subcommands
 /// and provides some helper function for creating common objects.
+/// The env equivalent of `--check-engine` (`native` or `tsc`).
+pub const DENO_CHECK_ENGINE_ENV: &str = "DENO_CHECK_ENGINE";
+
+/// The type checker for `flags`: `--check-engine`, else `DENO_CHECK_ENGINE`,
+/// else [`CheckEngine::Native`]. An unknown env value warns and is ignored.
+pub fn resolve_check_engine(flags: &Flags) -> CheckEngine {
+  if let Some(engine) = flags.check_engine {
+    return engine;
+  }
+  check_engine_from_env(std::env::var(DENO_CHECK_ENGINE_ENV).ok().as_deref())
+}
+
+fn check_engine_from_env(value: Option<&str>) -> CheckEngine {
+  match value.map(str::trim) {
+    None | Some("") => CheckEngine::default(),
+    Some(value) => value.parse().unwrap_or_else(|err| {
+      log::warn!(
+        "{} {}={}: {}; type-checking natively",
+        colors::yellow("Warning"),
+        DENO_CHECK_ENGINE_ENV,
+        value,
+        err
+      );
+      CheckEngine::default()
+    }),
+  }
+}
+
 #[derive(Debug)]
 pub struct CliOptions {
   // the source of the options is a detail the rest of the
@@ -1448,6 +1476,18 @@ impl CliOptions {
     self.flags.type_check_mode
   }
 
+  /// The type checker to use: `--check-engine`, else `DENO_CHECK_ENGINE`,
+  /// else native.
+  pub fn check_engine(&self) -> CheckEngine {
+    resolve_check_engine(&self.flags)
+  }
+
+  /// The flags these options came from (the native type checker hands them to
+  /// the config generator, see `crate::tools::check::run_native_check`).
+  pub fn flags(&self) -> &Arc<Flags> {
+    &self.flags
+  }
+
   pub fn unsafely_ignore_certificate_errors(&self) -> &Option<Vec<String>> {
     &self.flags.unsafely_ignore_certificate_errors
   }
@@ -1999,6 +2039,23 @@ mod test {
 
   use super::*;
   use crate::util::env::resolve_cwd;
+
+  #[test]
+  fn check_engine_resolution() {
+    // the flag wins over the environment
+    let flags = Flags {
+      check_engine: Some(CheckEngine::Tsc),
+      ..Default::default()
+    };
+    assert_eq!(resolve_check_engine(&flags), CheckEngine::Tsc);
+    // the environment, when no flag
+    assert_eq!(check_engine_from_env(Some("tsc")), CheckEngine::Tsc);
+    assert_eq!(check_engine_from_env(Some(" native ")), CheckEngine::Native);
+    // native by default, and for an empty or unknown value
+    assert_eq!(check_engine_from_env(None), CheckEngine::Native);
+    assert_eq!(check_engine_from_env(Some("")), CheckEngine::Native);
+    assert_eq!(check_engine_from_env(Some("tsgo")), CheckEngine::Native);
+  }
 
   #[test]
   fn resolve_import_map_flags_take_precedence() {

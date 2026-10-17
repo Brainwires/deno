@@ -1,206 +1,133 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 
-// The native `deno check` path that consumes this module lands on top of this
-// PR, so everything here is unused until then.
-#![allow(dead_code, reason = "Will be used in a follow up")]
-
 use std::collections::HashMap;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Stdio;
-use std::sync::Arc;
 use std::sync::LazyLock;
 
 use deno_core::anyhow;
-use deno_core::anyhow::Context;
 use deno_core::error::AnyError;
 use deno_core::serde_json::Value;
-use deno_npm::registry::NpmRegistryApi;
-use deno_npm_cache::TarballCache;
-use deno_npmrc::ResolvedNpmRc;
-use deno_resolver::workspace::WorkspaceNpmLinkPackagesRc;
-use deno_semver::package::PackageNv;
 use regex::Regex;
 
-use crate::cache::DenoDir;
-use crate::npm::CliNpmCache;
-use crate::npm::CliNpmCacheHttpClient;
-use crate::npm::CliNpmRegistryInfoProvider;
-use crate::sys::CliSys;
 use crate::tsc::Diagnostic;
 use crate::tsc::DiagnosticCategory;
 use crate::tsc::Position;
+use crate::tsc::native_pin;
 
-/// Pinned version of the native TypeScript compiler (`typescript@N`, the
-/// Go/`tsgo` line) that `deno check` runs. Bumping this constant is the only
-/// supported way to change the compiler; `deno check` never floats to the
-/// latest published version so that a given Deno release always type-checks
-/// with a known compiler.
-pub const TYPESCRIPT_VERSION: &str = "7.0.2";
+/// The role in `typescript_pins.json` (see [`native_pin`]) of the native
+/// TypeScript compiler (`typescript@7`, "tsgo") that type checking runs.
+/// `tools/update_typescript_pin.ts check <version>` is the only supported way
+/// to change it: a given release always type-checks with a known compiler.
+pub const CHECK_ROLE: &str = "check";
 
-/// npm platform-package suffix for the current host, matching the
-/// `@typescript/typescript-<suffix>` optional dependencies shipped by
-/// `typescript`.
-fn typescript_platform() -> Result<&'static str, AnyError> {
-  typescript_platform_for(std::env::consts::ARCH, std::env::consts::OS)
+/// The pinned TypeScript version type checking runs (folded into the check
+/// cache's hash).
+pub fn typescript_version() -> &'static str {
+  &native_pin::pin(CHECK_ROLE).version
 }
 
-/// Map a Rust `(ARCH, OS)` pair (as in [`std::env::consts`]) to the
-/// `@typescript/typescript-<suffix>` package suffix. Split out so the mapping
-/// can be unit-tested for every supported host.
-fn typescript_platform_for(
-  arch: &str,
-  os: &str,
-) -> Result<&'static str, AnyError> {
-  Ok(match (arch, os) {
-    ("x86_64", "linux") => "linux-x64",
-    ("aarch64", "linux") => "linux-arm64",
-    ("x86_64", "macos") => "darwin-x64",
-    ("aarch64", "macos") => "darwin-arm64",
-    ("x86_64", "windows") => "win32-x64",
-    ("aarch64", "windows") => "win32-arm64",
-    _ => anyhow::bail!(
-      "Unsupported platform for the native TypeScript compiler: {arch} {os}"
-    ),
-  })
-}
+/// Environment variable naming a native `tsc` executable to use instead of the
+/// one vendored next to `deno` (denext).
+pub const DENO_TSGO_BIN_ENV: &str = "DENO_TSGO_BIN";
 
-/// Ensure the pinned native `tsc` for the host platform is available and
-/// return the path to the executable, downloading the
-/// `@typescript/typescript-<platform>` npm package if it isn't cached yet.
-///
-/// This deliberately fetches only the single host-platform package rather than
-/// resolving `typescript` itself (whose optional dependencies would pull every
-/// platform binary), mirroring how [`crate::tools::bundle::esbuild`] obtains
-/// esbuild. Unlike esbuild (a single standalone binary), the tsc binary lives
-/// in a `lib/` directory next to the default `lib.*.d.ts` files it loads at
-/// runtime, so the whole `lib/` tree is materialized alongside it.
-pub async fn ensure_native_tsc(
-  deno_dir: &DenoDir,
-  npmrc: &ResolvedNpmRc,
-  api: &Arc<CliNpmRegistryInfoProvider>,
-  workspace_link_packages: &WorkspaceNpmLinkPackagesRc,
-  tarball_cache: &Arc<TarballCache<CliNpmCacheHttpClient, CliSys>>,
-  npm_cache: &CliNpmCache,
+/// The cache directory (below `DENO_DIR`) where denext's managed toolchain
+/// installs the `deno` executable, one `<version>/<target>/` per release.
+const TOOLCHAIN_CACHE_NAME: &str = "denext-deno";
+
+/// Where to look for the compiler, in order: `DENO_TSGO_BIN`; the
+/// `typescript-check/` directory beside the running executable, what denext's
+/// CLI archives ship (also through a symlink to it, e.g.
+/// `denext toolchain link`); then denext's toolchain cache
+/// (`<DENO_DIR>/denext-deno/<version>/<target>/typescript-check/`, newest
+/// release first), for a fork build run from elsewhere such as
+/// `target/debug/deno`. Never downloaded: when none is found, an error names
+/// `denext toolchain install`.
+fn resolve_native_tsc(
+  override_path: Option<std::ffi::OsString>,
+  current_exe: Option<PathBuf>,
+  deno_dir_root: Option<&Path>,
 ) -> Result<PathBuf, AnyError> {
-  // Allow pointing at an already-available `tsc` binary instead of downloading
-  // one, mirroring `DENORT_BIN`. Used by the test harness and CI to avoid
-  // re-downloading the compiler for every run, and lets a user supply their
-  // own build.
-  if let Some(path) = std::env::var_os("DENO_TSC_BIN") {
-    let path = PathBuf::from(path);
-    if path.exists() {
-      return Ok(path);
-    }
-    log::warn!(
-      "DENO_TSC_BIN is set to {} but it does not exist; downloading the pinned compiler instead",
-      path.display()
+  if let Some(found) = native_pin::find_local(
+    CHECK_ROLE,
+    DENO_TSGO_BIN_ENV,
+    override_path,
+    current_exe.clone(),
+  )? {
+    return Ok(found);
+  }
+  let real_exe = current_exe
+    .as_deref()
+    .and_then(|exe| exe.canonicalize().ok())
+    .filter(|real| Some(real) != current_exe.as_ref());
+  if let Some(found) =
+    native_pin::find_local(CHECK_ROLE, DENO_TSGO_BIN_ENV, None, real_exe)?
+  {
+    return Ok(found);
+  }
+  if let Some(root) = deno_dir_root
+    && let Some(found) = toolchain_cache_tsc(&root.join(TOOLCHAIN_CACHE_NAME))
+  {
+    log::debug!(
+      "using the native tsc from denext's toolchain cache: {}",
+      found.display()
     );
+    return Ok(found);
   }
-
-  let target = typescript_platform()?;
-  // Keep the compiler under `$DENO_DIR/tsc/<version>/<platform>` so all of a
-  // given version's files live in one predictable, versioned directory.
-  let install_dir = deno_dir
-    .root
-    .join("tsc")
-    .join(TYPESCRIPT_VERSION)
-    .join(target);
-  let bin_name = if cfg!(windows) { "tsc.exe" } else { "tsc" };
-  let tsc_path = install_dir.join("lib").join(bin_name);
-
-  if tsc_path.exists() {
-    return Ok(tsc_path);
-  }
-
-  let pkg_name = format!("@typescript/typescript-{}", target);
-  let nv = PackageNv::from_str(&format!("{}@{}", pkg_name, TYPESCRIPT_VERSION))
-    .unwrap();
-  let mut info = api.package_info(&pkg_name).await?;
-  let version_info = match info.version_info(&nv, &workspace_link_packages.0) {
-    Ok(version_info) => version_info,
-    Err(_) => {
-      api.mark_force_reload();
-      info = api.package_info(&pkg_name).await?;
-      info.version_info(&nv, &workspace_link_packages.0)?
-    }
-  };
-  let Some(dist) = &version_info.dist else {
-    anyhow::bail!(
-      "could not resolve the native TypeScript compiler; download {} manually and copy its lib/ next to {}",
-      nv,
-      tsc_path.display()
-    );
-  };
-
-  let registry_url = npmrc.get_registry_url(&nv.name);
-  let package_folder =
-    npm_cache.package_folder_for_nv_and_url(&nv, registry_url);
-  let existed = package_folder.exists();
-  if !existed {
-    // `ensure_package` downloads the tarball and verifies it against the
-    // registry `dist` integrity/shasum before extracting (the standard npm
-    // pipeline), so the materialized compiler is checksum-validated at install.
-    tarball_cache
-      .ensure_package(&nv, dist)
-      .await
-      .with_context(|| {
-        format!(
-          "failed to download the TypeScript compiler tarball {} from {}",
-          nv, dist.tarball
-        )
-      })?;
-  }
-
-  // Materialize `lib/` (the native binary plus the default lib `.d.ts` files it
-  // resolves relative to itself) atomically: copy into a sibling temp dir and
-  // rename it into place. The rename is atomic, so a concurrent `deno check`
-  // never observes a half-copied tree through the `exists()` check above.
-  let version_dir = install_dir.parent().unwrap();
-  std::fs::create_dir_all(version_dir).with_context(|| {
-    format!("failed to create directory {}", version_dir.display())
-  })?;
-  let tmp_dir =
-    version_dir.join(format!(".{}-{}.tmp", target, std::process::id()));
-  let _ = std::fs::remove_dir_all(&tmp_dir);
-  crate::tools::compile::copy_dir_all(
-    &package_folder.join("lib"),
-    &tmp_dir.join("lib"),
+  let version = typescript_version();
+  anyhow::bail!(
+    "The native TypeScript compiler (typescript@{version}) was not found next to {}.\n  \
+     It ships in denext's Deno toolchain: run `denext toolchain install`.\n  \
+     Or set {DENO_TSGO_BIN_ENV} to a tsc {version} binary, or type-check with the \
+     in-process TypeScript 6.0.3 instead: --check-engine=tsc (DENO_CHECK_ENGINE=tsc).",
+    current_exe
+      .as_deref()
+      .and_then(Path::parent)
+      .map(|d| d.display().to_string())
+      .unwrap_or_else(|| "the deno executable".to_string())
   )
-  .with_context(|| {
-    format!(
-      "failed to copy the TypeScript compiler out of {}",
-      package_folder.display()
-    )
-  })?;
-  match std::fs::rename(&tmp_dir, &install_dir) {
-    Ok(()) => {}
-    // Another process won the race and installed it already; discard our copy.
-    Err(_) if tsc_path.exists() => {
-      let _ = std::fs::remove_dir_all(&tmp_dir);
-    }
-    Err(err) => {
-      let _ = std::fs::remove_dir_all(&tmp_dir);
-      return Err(err).with_context(|| {
-        format!(
-          "failed to move the TypeScript compiler into place at {}",
-          install_dir.display()
-        )
-      });
+}
+
+/// A vendored compiler in denext's toolchain cache:
+/// `<cache>/<version>/<target>/typescript-check/tsc`, newest release first.
+fn toolchain_cache_tsc(cache: &Path) -> Option<PathBuf> {
+  let mut versions: Vec<PathBuf> = std::fs::read_dir(cache)
+    .ok()?
+    .flatten()
+    .map(|e| e.path())
+    .filter(|p| p.is_dir())
+    .collect();
+  versions.sort();
+  for version in versions.iter().rev() {
+    let Ok(targets) = std::fs::read_dir(version) else {
+      continue;
+    };
+    for target in targets.flatten() {
+      // `find_local` looks beside an executable: point it at one in `target`.
+      if let Ok(Some(found)) = native_pin::find_local(
+        CHECK_ROLE,
+        DENO_TSGO_BIN_ENV,
+        None,
+        Some(target.path().join("deno")),
+      ) {
+        return Some(found);
+      }
     }
   }
+  None
+}
 
-  if !existed {
-    let _ = std::fs::remove_dir_all(&package_folder).inspect_err(|e| {
-      log::warn!(
-        "failed to remove directory {}: {}",
-        package_folder.display(),
-        e
-      )
-    });
-  }
-
-  Ok(tsc_path)
+/// The native `tsc` to run: never downloaded. See [`resolve_native_tsc`] for
+/// the lookup order and the error when it is missing.
+pub fn find_native_tsc(
+  deno_dir_root: Option<&Path>,
+) -> Result<PathBuf, AnyError> {
+  resolve_native_tsc(
+    std::env::var_os(DENO_TSGO_BIN_ENV),
+    std::env::current_exe().ok(),
+    deno_dir_root,
+  )
 }
 
 /// Run the native `tsc` at `tsc_path` against `tsconfig_path` and capture its
@@ -216,8 +143,10 @@ pub async fn run_native_tsc(
     .arg("--project")
     .arg(tsconfig_path)
     .arg("--noEmit")
+    // denext: the pretty form also carries each diagnostic's exact span and
+    // its related information (parse_tsc_pretty_diagnostics).
     .arg("--pretty")
-    .arg("false")
+    .arg("true")
     .arg("--diagnostics")
     .current_dir(project_root)
     // The native compiler is written in Go, whose `os.Getwd` trusts the `PWD`
@@ -255,12 +184,16 @@ static DIAGNOSTIC_NO_POS_RE: LazyLock<Regex> = LazyLock::new(|| {
 /// a genuine failure (tsc printed nothing parseable) from an expected non-zero
 /// exit after we filtered every diagnostic it did print.
 pub fn output_has_diagnostics(output: &str) -> bool {
-  output
-    .lines()
-    .any(|l| DIAGNOSTIC_RE.is_match(l) || DIAGNOSTIC_NO_POS_RE.is_match(l))
+  output.lines().any(|l| {
+    let l = ANSI_RE.replace_all(l, "");
+    DIAGNOSTIC_RE.is_match(&l)
+      || DIAGNOSTIC_NO_POS_RE.is_match(&l)
+      || PRETTY_HEADER_RE.is_match(&l)
+  })
 }
 
-/// Parse `tsc --pretty false` output into Deno diagnostics, remapping the
+/// Parse `tsc --pretty false` (or `--pretty true`, see
+/// [`parse_tsc_pretty_diagnostics`]) output into Deno diagnostics, remapping the
 /// compiler's mirror paths back onto the specifiers the user wrote.
 pub fn parse_tsc_diagnostics(
   output: &str,
@@ -276,7 +209,16 @@ pub fn parse_tsc_diagnostics(
   // specifier the user wrote, with the correct scheme and port.
   let remote_map = build_remote_url_map(project_root);
 
-  for line in output.lines() {
+  let pretty = is_pretty_output(output);
+  if pretty {
+    diagnostics = parse_tsc_pretty_diagnostics(
+      output,
+      project_root,
+      &remote_map,
+      &mut source_cache,
+    );
+  }
+  for line in output.lines().filter(|_| !pretty) {
     if let Some(caps) = DIAGNOSTIC_RE.captures(line) {
       let line_no: u64 = caps["line"].parse().unwrap_or(1);
       let col_no: u64 = caps["col"].parse().unwrap_or(1);
@@ -346,6 +288,183 @@ pub fn parse_tsc_diagnostics(
         .is_none_or(|f| f.starts_with("file:"))
   });
 
+  diagnostics
+}
+
+/// The header of a diagnostic in `tsc --pretty true` output (ANSI stripped):
+/// `path:line:col - error TS####: message`.
+static PRETTY_HEADER_RE: LazyLock<Regex> = LazyLock::new(|| {
+  Regex::new(
+    r"^(?P<file>[^\s].*?):(?P<line>\d+):(?P<col>\d+) - (?P<cat>error|warning|message) TS(?P<code>\d+): (?P<msg>.*)$",
+  )
+  .unwrap()
+});
+
+/// A related-information entry under a pretty diagnostic, indented by two:
+/// `  path:line:col - message`.
+static PRETTY_RELATED_RE: LazyLock<Regex> = LazyLock::new(|| {
+  Regex::new(r"^  (?P<file>[^\s].*?):(?P<line>\d+):(?P<col>\d+) - (?P<msg>.*)$")
+    .unwrap()
+});
+
+/// A source line of a pretty code frame: `<indent><line number> <source>`.
+static PRETTY_FRAME_LINE_RE: LazyLock<Regex> = LazyLock::new(|| {
+  Regex::new(r"^(?P<indent> *)(?P<num>\d+) (?P<src>.*)$").unwrap()
+});
+
+static ANSI_RE: LazyLock<Regex> =
+  LazyLock::new(|| Regex::new(r"\x1b\[[0-9;]*m").unwrap());
+
+/// Whether `output` is `tsc --pretty true` output (as `run_native_tsc` asks
+/// for), rather than the `--pretty false` form.
+fn is_pretty_output(output: &str) -> bool {
+  output.contains('\x1b')
+    || output.lines().any(|l| {
+      let l = ANSI_RE.replace_all(l, "");
+      PRETTY_HEADER_RE.is_match(&l) || PRETTY_RELATED_RE.is_match(&l)
+    })
+}
+
+/// The underlined span of the code frame that follows `lines[at]` (a header or
+/// related line): its 0-based start character and length, from the first
+/// source line and the `~` run under it.
+fn pretty_frame_span(lines: &[String], at: usize) -> Option<(u64, u64)> {
+  let mut i = at + 1;
+  // the frame may follow a blank line
+  while i < lines.len() && lines[i].trim().is_empty() {
+    i += 1;
+  }
+  let caps = PRETTY_FRAME_LINE_RE.captures(lines.get(i)?)?;
+  let prefix = caps["indent"].len() + caps["num"].len() + 1;
+  let underline = lines.get(i + 1)?;
+  let first = underline.find('~')?;
+  if first < prefix {
+    return None;
+  }
+  let len = underline[first..].chars().take_while(|&c| c == '~').count();
+  Some((underline[prefix..first].chars().count() as u64, len as u64))
+}
+
+/// Parse `tsc --pretty true` output: like [`parse_tsc_diagnostics`] for
+/// `--pretty false`, plus the exact underlined span of each diagnostic and its
+/// related information ("The expected type comes from ... declared here"),
+/// which only the pretty form reports (denext: the in-process checker shows
+/// both, and denext's diagnostic explanations read them).
+fn parse_tsc_pretty_diagnostics(
+  output: &str,
+  project_root: &Path,
+  remote_map: &HashMap<String, String>,
+  source_cache: &mut HashMap<PathBuf, Option<Vec<String>>>,
+) -> Vec<Diagnostic> {
+  let lines: Vec<String> = output
+    .lines()
+    .map(|l| ANSI_RE.replace_all(l, "").into_owned())
+    .collect();
+  let mut diagnostics: Vec<Diagnostic> = Vec::new();
+  // Whether the lines after the current header still continue its message
+  // chain (they do until the first blank line or code frame).
+  let mut in_chain = false;
+  let located =
+    |file: &str,
+     line: &str,
+     col: &str,
+     span: Option<(u64, u64)>,
+     cache: &mut HashMap<PathBuf, Option<Vec<String>>>| {
+      let start = Position {
+        line: line.parse::<u64>().unwrap_or(1).saturating_sub(1),
+        character: col.parse::<u64>().unwrap_or(1).saturating_sub(1),
+      };
+      let source_line =
+        read_source_line(cache, &project_root.join(file), start.line as usize);
+      let len = match span {
+        Some((_, len)) if len > 0 => Some(len),
+        _ => source_line
+          .as_deref()
+          .map(|sl| underline_len(sl, start.character as usize)),
+      };
+      let end = len.map(|len| Position {
+        line: start.line,
+        character: start.character + len,
+      });
+      (
+        Some(remap_path(file, project_root, remote_map)),
+        start,
+        end,
+        source_line,
+      )
+    };
+  for (i, line) in lines.iter().enumerate() {
+    if let Some(caps) = PRETTY_HEADER_RE.captures(line) {
+      let span = pretty_frame_span(&lines, i);
+      let (file_name, start, end, source_line) = located(
+        &caps["file"],
+        &caps["line"],
+        &caps["col"],
+        span,
+        source_cache,
+      );
+      diagnostics.push(make_diagnostic(
+        &caps["cat"],
+        caps["code"].parse().unwrap_or(0),
+        file_name,
+        Some(start),
+        end,
+        source_line,
+        caps["msg"].to_string(),
+      ));
+      in_chain = true;
+    } else if let Some(caps) = DIAGNOSTIC_NO_POS_RE.captures(line) {
+      diagnostics.push(make_diagnostic(
+        &caps["cat"],
+        caps["code"].parse().unwrap_or(0),
+        None,
+        None,
+        None,
+        None,
+        caps["msg"].to_string(),
+      ));
+      in_chain = true;
+    } else if line.trim().is_empty() {
+      in_chain = false;
+    } else if let Some(caps) = PRETTY_RELATED_RE.captures(line)
+      && let Some(last) = diagnostics.last_mut()
+    {
+      let span = pretty_frame_span(&lines, i);
+      let (file_name, start, end, source_line) = located(
+        &caps["file"],
+        &caps["line"],
+        &caps["col"],
+        span,
+        source_cache,
+      );
+      let related = make_diagnostic(
+        "message",
+        0,
+        file_name,
+        Some(start),
+        end,
+        source_line,
+        caps["msg"].to_string(),
+      );
+      // A location in the generated config ("matched by 'files' here") is the
+      // config Deno wrote, not the user's code: not shown.
+      if !caps["file"].ends_with(".json") {
+        last
+          .related_information
+          .get_or_insert_with(Vec::new)
+          .push(related);
+      }
+      in_chain = false;
+    } else if in_chain && line.starts_with([' ', '\t']) {
+      if let Some(last) = diagnostics.last_mut() {
+        let message = last.message_text.get_or_insert_with(String::new);
+        message.push('\n');
+        message.push_str(line.trim_end());
+      }
+    }
+    // Code frames, the "Found N errors" summary and the `--diagnostics`
+    // statistics are not diagnostics.
+  }
   diagnostics
 }
 
@@ -569,42 +688,6 @@ mod tests {
   use super::*;
 
   #[test]
-  fn typescript_platform_mapping() {
-    assert_eq!(
-      typescript_platform_for("x86_64", "linux").unwrap(),
-      "linux-x64"
-    );
-    assert_eq!(
-      typescript_platform_for("aarch64", "linux").unwrap(),
-      "linux-arm64"
-    );
-    assert_eq!(
-      typescript_platform_for("x86_64", "macos").unwrap(),
-      "darwin-x64"
-    );
-    assert_eq!(
-      typescript_platform_for("aarch64", "macos").unwrap(),
-      "darwin-arm64"
-    );
-    assert_eq!(
-      typescript_platform_for("x86_64", "windows").unwrap(),
-      "win32-x64"
-    );
-    assert_eq!(
-      typescript_platform_for("aarch64", "windows").unwrap(),
-      "win32-arm64"
-    );
-  }
-
-  #[test]
-  fn typescript_platform_unsupported() {
-    let err = typescript_platform_for("riscv64", "linux").unwrap_err();
-    assert!(err.to_string().contains("Unsupported platform"));
-    // The host's own platform must be supported (this is what CI runs on).
-    assert!(typescript_platform().is_ok());
-  }
-
-  #[test]
   fn parse_diagnostics_positioned() {
     // `project_root` doesn't exist on disk, so `source_line`/`end` stay `None`;
     // the parse of code/category/position/message/path is what's under test.
@@ -769,5 +852,190 @@ mod tests {
     assert_eq!(stats.check_time.as_deref(), Some("0.546s"));
     assert_eq!(stats.total_time.as_deref(), Some("0.729s"));
     assert_eq!(stats.memory_used.as_deref(), Some("555106K"));
+  }
+}
+
+#[cfg(all(test, unix))]
+mod resolve_tests {
+  use std::os::unix::fs::PermissionsExt;
+
+  use super::*;
+
+  /// A stand-in `typescript-check/tsc` in `dir` that prints
+  /// `Version <version>`.
+  fn fake_tsc(dir: &Path, version: &str) -> PathBuf {
+    let tsgo = dir.join(native_pin::vendored_dir_name(CHECK_ROLE));
+    std::fs::create_dir_all(&tsgo).unwrap();
+    let path = tsgo.join("tsc");
+    std::fs::write(&path, format!("#!/bin/sh\necho Version {version}\n"))
+      .unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+      .unwrap();
+    path
+  }
+
+  #[test]
+  fn vendored_sibling_of_the_pinned_version_is_used() {
+    let dir = tempfile::tempdir().unwrap();
+    let tsc = fake_tsc(dir.path(), typescript_version());
+    let found =
+      resolve_native_tsc(None, Some(dir.path().join("deno")), None).unwrap();
+    assert_eq!(found, tsc);
+  }
+
+  #[test]
+  fn vendored_sibling_through_a_symlinked_exe_is_used() {
+    let real = tempfile::tempdir().unwrap();
+    let tsc = fake_tsc(real.path(), typescript_version());
+    std::fs::write(real.path().join("deno"), "").unwrap();
+    let link_dir = tempfile::tempdir().unwrap();
+    let link = link_dir.path().join("deno");
+    std::os::unix::fs::symlink(real.path().join("deno"), &link).unwrap();
+    let found = resolve_native_tsc(None, Some(link), None).unwrap();
+    assert_eq!(found.canonicalize().unwrap(), tsc.canonicalize().unwrap());
+  }
+
+  #[test]
+  fn sibling_of_another_version_is_ignored_and_the_error_names_the_toolchain() {
+    let dir = tempfile::tempdir().unwrap();
+    fake_tsc(dir.path(), "6.0.3");
+    let err = resolve_native_tsc(None, Some(dir.path().join("deno")), None)
+      .unwrap_err()
+      .to_string();
+    assert!(err.contains("denext toolchain install"), "{err}");
+    assert!(err.contains(DENO_TSGO_BIN_ENV), "{err}");
+    assert!(err.contains("--check-engine=tsc"), "{err}");
+  }
+
+  #[test]
+  fn toolchain_cache_is_searched_newest_first() {
+    let exe_dir = tempfile::tempdir().unwrap();
+    let deno_dir = tempfile::tempdir().unwrap();
+    let cache = deno_dir.path().join(TOOLCHAIN_CACHE_NAME);
+    fake_tsc(&cache.join("2.9.7-denext.21").join("linux-x86_64"), "6.0.3");
+    let newest = fake_tsc(
+      &cache.join("2.9.7-denext.22").join("linux-x86_64"),
+      typescript_version(),
+    );
+    let found = resolve_native_tsc(
+      None,
+      Some(exe_dir.path().join("deno")),
+      Some(deno_dir.path()),
+    )
+    .unwrap();
+    assert_eq!(found, newest);
+  }
+
+  #[test]
+  fn override_wins_over_the_sibling() {
+    let dir = tempfile::tempdir().unwrap();
+    fake_tsc(dir.path(), typescript_version());
+    let other = tempfile::tempdir().unwrap();
+    let custom = fake_tsc(other.path(), "7.1.0");
+    let found = resolve_native_tsc(
+      Some(custom.clone().into_os_string()),
+      Some(dir.path().join("deno")),
+      None,
+    )
+    .unwrap();
+    assert_eq!(found, custom);
+  }
+
+  #[test]
+  fn override_that_is_not_a_file_is_an_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let err = resolve_native_tsc(
+      Some(dir.path().join("missing").into_os_string()),
+      None,
+      None,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains(DENO_TSGO_BIN_ENV), "{err}");
+  }
+}
+
+#[cfg(test)]
+mod pretty_tests {
+  use super::*;
+
+  #[test]
+  fn pretty_output_carries_span_chain_and_related_information() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+      dir.path().join("a.ts"),
+      "const theme: { mode: \"light\" | \"dark\" } = { mode: \"blue\" };\n",
+    )
+    .unwrap();
+    let output = concat!(
+      "\x1b[96ma.ts\x1b[0m:\x1b[93m1\x1b[0m:\x1b[93m45\x1b[0m - \x1b[91merror\x1b[0m\x1b[90m TS2322: \x1b[0mType '\"blue\"' is not assignable to type '\"dark\" | \"light\"'.\n",
+      "  Second line of the chain.\n",
+      "\n",
+      "\x1b[7m1\x1b[0m const theme: { mode: \"light\" | \"dark\" } = { mode: \"blue\" };\n",
+      "\x1b[7m \x1b[0m \x1b[91m                                            ~~~~\x1b[0m\n",
+      "\n",
+      "  \x1b[96ma.ts\x1b[0m:\x1b[93m1\x1b[0m:\x1b[93m16\x1b[0m - The expected type comes from property 'mode' which is declared here\n",
+      "    \x1b[7m1\x1b[0m const theme: { mode: \"light\" | \"dark\" } = { mode: \"blue\" };\n",
+      "    \x1b[7m \x1b[0m \x1b[96m               ~~~~\x1b[0m\n",
+      "\n",
+      "\n",
+      "Found 1 error in a.ts\x1b[90m:1\x1b[0m\n",
+      "\n",
+      "Files:                         1\n",
+    );
+    assert!(output_has_diagnostics(output));
+    let diags = parse_tsc_diagnostics(output, dir.path());
+    assert_eq!(diags.len(), 1, "{diags:?}");
+    let d = &diags[0];
+    assert_eq!(d.code, 2322);
+    assert_eq!(
+      d.message_text.as_deref(),
+      Some(
+        "Type '\"blue\"' is not assignable to type '\"dark\" | \"light\"'.\n  Second line of the chain."
+      )
+    );
+    let start = d.start.as_ref().unwrap();
+    assert_eq!((start.line, start.character), (0, 44));
+    // the exact `~~~~` span, not a guess
+    assert_eq!(d.end.as_ref().unwrap().character, 48);
+    let related = d.related_information.as_ref().unwrap();
+    assert_eq!(related.len(), 1);
+    assert!(
+      related[0]
+        .message_text
+        .as_deref()
+        .unwrap()
+        .starts_with("The expected type comes from property 'mode'")
+    );
+    let rstart = related[0].start.as_ref().unwrap();
+    assert_eq!((rstart.line, rstart.character), (0, 15));
+    assert_eq!(related[0].end.as_ref().unwrap().character, 19);
+    assert!(related[0].file_name.as_deref().unwrap().ends_with("/a.ts"));
+  }
+
+  #[test]
+  fn pretty_position_less_diagnostic_keeps_its_chain_and_drops_config_locations()
+   {
+    let dir = tempfile::tempdir().unwrap();
+    let output = concat!(
+      "\x1b[91merror\x1b[0m\x1b[90m TS6053: \x1b[0mFile '/p/sub/a.d.ts' not found.\n",
+      "  The file is in the program because:\n",
+      "    Part of 'files' list in tsconfig.json\n",
+      "  \x1b[96mtsconfig.json\x1b[0m:\x1b[93m1\x1b[0m:\x1b[93m55\x1b[0m - File is matched by 'files' list specified here.\n",
+      "    \x1b[7m1\x1b[0m {\"files\":[\"sub/a.d.ts\"]}\n",
+      "\n",
+      "Found 1 error.\n",
+    );
+    assert!(output_has_diagnostics(output));
+    let diags = parse_tsc_diagnostics(output, dir.path());
+    assert_eq!(diags.len(), 1, "{diags:?}");
+    assert_eq!(diags[0].code, 6053);
+    assert_eq!(
+      diags[0].message_text.as_deref(),
+      Some(
+        "File '/p/sub/a.d.ts' not found.\n  The file is in the program because:\n    Part of 'files' list in tsconfig.json"
+      )
+    );
+    assert!(diags[0].related_information.is_none());
   }
 }

@@ -4,16 +4,23 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use deno_core::ModuleSpecifier;
 use deno_core::error::AnyError;
+use deno_graph::ModuleGraph;
 use deno_terminal::colors;
 
+use crate::args::CheckEngine;
 use crate::args::CheckFlags;
+use crate::args::CliOptions;
 use crate::args::Flags;
 use crate::args::SyncTypesFlags;
+use crate::args::TsTypeLib;
+use crate::args::TypeCheckMode;
 use crate::factory::CliFactory;
 use crate::graph_container::CheckSpecifiersOptions;
 use crate::graph_container::CollectSpecifiersOptions;
 use crate::tsc::Diagnostics;
+use crate::type_checker::TypeChecker;
 use crate::util::extract;
 use crate::util::file_watcher;
 
@@ -21,17 +28,24 @@ pub async fn check(
   flags: Arc<Flags>,
   check_flags: CheckFlags,
 ) -> Result<(), AnyError> {
-  if std::env::var("DENO_CHECK_ENGINE").as_deref() == Ok("tsc") {
+  if crate::args::resolve_check_engine(&flags) == CheckEngine::Tsc {
     return legacy_check(flags, check_flags).await;
   }
+  if check_flags.doc || check_flags.doc_only {
+    // The code blocks `--doc` / `--doc-only` extract live in memory only, where
+    // the native compiler (which reads files) can't see them: those checks keep
+    // running on the in-process TypeScript 6.0.3.
+    log::debug!("--doc/--doc-only: type-checking with the in-process checker");
+    // The graph check below goes through `TypeChecker::check_graph`, which
+    // picks the engine from the flags: pin it to the in-process one.
+    let mut flags = (*flags).clone();
+    flags.check_engine = Some(CheckEngine::Tsc);
+    return legacy_check(Arc::new(flags), check_flags).await;
+  }
   if let Some(watch_flags) = &flags.watch {
-    // The native check path doesn't yet wire the resolved graph into the file
-    // watcher, so it runs once and never re-checks. Warn rather than appear to
-    // watch. See https://github.com/denoland/deno/issues/36089.
-    log::warn!(
-      "{} `deno check --watch` does not re-check on file changes yet; it runs once. See https://github.com/denoland/deno/issues/36089",
-      colors::yellow("Warning")
-    );
+    // A watcher-aware factory reports the graph's files to the watcher, so the
+    // native check re-runs on changes like the in-process one (upstream's
+    // native check ran once, denoland/deno#36089).
     let no_clear_screen = watch_flags.no_clear_screen;
     file_watcher::watch_func(
       flags,
@@ -39,12 +53,19 @@ pub async fn check(
       move |flags, watcher_communicator, changed_paths| {
         let check_flags = check_flags.clone();
         watcher_communicator.show_path_changed(changed_paths);
-        Ok(async move { native_check(flags, check_flags).await })
+        Ok(async move {
+          let factory = CliFactory::from_flags_for_watcher(
+            flags.clone(),
+            watcher_communicator.clone(),
+          );
+          native_check(&factory, flags, check_flags).await
+        })
       },
     )
     .await
   } else {
-    native_check(flags, check_flags).await
+    let factory = CliFactory::from_flags(flags.clone());
+    native_check(&factory, flags, check_flags).await
   }
 }
 
@@ -55,27 +76,11 @@ pub async fn check(
 /// runs the pinned native `tsc` against it and remaps the compiler's
 /// diagnostics back onto the original module specifiers.
 async fn native_check(
+  factory: &CliFactory,
   flags: Arc<Flags>,
   check_flags: CheckFlags,
 ) -> Result<(), AnyError> {
-  if check_flags.doc || check_flags.doc_only {
-    // Doc snippet extraction was handled by Deno 2.x's forked tsc; the native
-    // compiler does not type-check markdown/JSDoc snippets yet.
-    log::warn!(
-      "{} --doc/--doc-only is not yet supported by the native type checker and will be ignored",
-      colors::yellow("Warning")
-    );
-  }
-
-  let factory = CliFactory::from_flags(flags.clone());
   let cli_options = factory.cli_options()?;
-  let project_root = cli_options
-    .workspace()
-    .root_dir_url()
-    .to_file_path()
-    .map_err(|_| {
-      deno_core::anyhow::anyhow!("workspace root is not a local directory")
-    })?;
 
   // Build the module graph over the requested roots (or the whole project).
   // Deno owns resolution: this drives deno's own graph diagnostics (missing
@@ -148,6 +153,87 @@ async fn native_check(
     lockfile.write_if_changed()?;
   }
 
+  let type_checker = factory.type_checker().await?;
+  // A graph the generated stock project can't express keeps the in-process
+  // checker (see `TypeChecker::native_unsupported`).
+  if let Some(reason) = type_checker.native_unsupported(&graph) {
+    log::debug!("Type checking in-process: {reason}");
+    return legacy_check_with_factory(factory, check_flags).await;
+  }
+  let clean = run_native_check(NativeCheck {
+    flags: &flags,
+    cli_options,
+    type_checker,
+    deno_dir_root: factory.deno_dir().ok().map(|d| d.root.clone()),
+    graph: &graph,
+    roots: &roots,
+    sync_roots: check_flags.files.clone(),
+    lib: cli_options.ts_type_lib_window(),
+    type_check_mode: cli_options.type_check_mode(),
+    reload: cli_options.reload_flag(),
+    whole_project_fallback: true,
+  })
+  .await?;
+  if clean {
+    Ok(())
+  } else {
+    Err(deno_core::anyhow::anyhow!("Type checking failed."))
+  }
+}
+
+/// One native type check: the graph Deno resolved (for its check cache and
+/// its own diagnostics) and the roots the external compiler is pinned to.
+pub(crate) struct NativeCheck<'a> {
+  pub flags: &'a Arc<Flags>,
+  pub cli_options: &'a CliOptions,
+  pub type_checker: &'a TypeChecker,
+  /// `DENO_DIR`, where denext's toolchain cache may hold the compiler.
+  pub deno_dir_root: Option<PathBuf>,
+  pub graph: &'a ModuleGraph,
+  pub roots: &'a [ModuleSpecifier],
+  /// The roots to generate the config and materialize types for, as
+  /// `deno sync-types` takes them (paths, globs, remote URLs); none means the
+  /// whole project.
+  pub sync_roots: Vec<String>,
+  pub lib: TsTypeLib,
+  pub type_check_mode: TypeCheckMode,
+  pub reload: bool,
+  /// `deno check` falls back to the generated config's whole-project
+  /// `include` when no root maps to a file the compiler can load (an
+  /// extensionless remote module); the other commands check nothing then.
+  pub whole_project_fallback: bool,
+}
+
+/// Type-checks `check.roots` with the native TypeScript compiler, behind
+/// Deno's check cache: an unchanged graph that checked clean before skips the
+/// compiler (and the type materialization). Prints the `Check` lines and any
+/// diagnostics; returns whether the check was clean. Shared by `deno check`
+/// and every command that type-checks through [`TypeChecker`] (`run --check`,
+/// `test`, `bench`, `bundle --check`, `publish`, ...).
+pub(crate) async fn run_native_check(
+  check: NativeCheck<'_>,
+) -> Result<bool, AnyError> {
+  let NativeCheck {
+    flags,
+    cli_options,
+    type_checker,
+    deno_dir_root,
+    graph,
+    roots,
+    sync_roots,
+    lib,
+    type_check_mode,
+    reload,
+    whole_project_fallback,
+  } = check;
+  let project_root = cli_options
+    .workspace()
+    .root_dir_url()
+    .to_file_path()
+    .map_err(|_| {
+      deno_core::anyhow::anyhow!("workspace root is not a local directory")
+    })?;
+
   // Walk the graph exactly as Deno 2.x's forked tsc did to obtain the combined
   // check hash (tsc version folded in). The walk also produces deno's own graph
   // diagnostics (missing modules + hints), but merging them additively isn't
@@ -157,13 +243,8 @@ async fn native_check(
   // list, so deno would flag ambient specifiers tsc resolves fine. Use the walk
   // only for caching for now; additive diagnostics come once ambient modules
   // are handled.
-  let type_checker = factory.type_checker().await?;
-  let (missing_diagnostics, maybe_check_hash) = type_checker
-    .walk_graph_for_native_check(
-      &graph,
-      cli_options.ts_type_lib_window(),
-      cli_options.type_check_mode(),
-    )?;
+  let (missing_diagnostics, maybe_check_hash, any_roots) =
+    type_checker.walk_graph_for_native_check(graph, lib, type_check_mode)?;
 
   // A root (entrypoint) that deno's graph couldn't resolve - a local file that
   // doesn't exist, or a remote URL that failed to fetch - can't be type-checked.
@@ -180,19 +261,34 @@ async fn native_check(
       .as_ref()
       .is_some_and(|s| root_urls.contains(s))
   });
+  // Nothing to check (only plain JavaScript without `checkJs`, say): as the
+  // in-process checker does under `run`, `test` & co., report a missing root,
+  // else check nothing and print no `Check` line (`deno check` keeps
+  // upstream's native behaviour and lists its roots).
+  if !any_roots && !whole_project_fallback {
+    if root_diagnostics.has_diagnostic() {
+      let current_dir =
+        deno_path_util::url_from_directory_path(cli_options.initial_cwd())
+          .map_err(|e| deno_core::anyhow::anyhow!("{e}"))?;
+      log_check_roots(roots, &current_dir);
+      log::error!("{}\n", root_diagnostics);
+      return Ok(false);
+    }
+    return Ok(true);
+  }
   let type_check_cache = type_checker.type_check_cache();
 
   // Cache hit: the hash is only recorded after a clean check, so a match means
   // the project type-checked cleanly and nothing the compiler sees has changed.
   // Skip both the (expensive) type materialization and the tsc spawn. A missing
   // root means there's a diagnostic to report, so never take the cache path.
-  if !cli_options.reload_flag()
+  if !reload
     && !root_diagnostics.has_diagnostic()
     && let Some(check_hash) = maybe_check_hash
     && type_check_cache.has_check_hash(check_hash)
   {
     log::debug!("Already type checked (native tsc)");
-    return Ok(());
+    return Ok(true);
   }
 
   // Cache miss: generate the tsconfig.json and materialize dependency types so
@@ -202,20 +298,35 @@ async fn native_check(
   // level, which is not ideal; replacing it with source-level suppression (or
   // reusing the already-built graph so sync-types doesn't re-fetch) is tracked
   // as a follow-up.
+  //
+  // Resolve the compiler first: when it is missing, say so before writing
+  // anything into the project.
+  let tsc_path = crate::tsc::native::find_native_tsc(deno_dir_root.as_deref())?;
+  // denext: the built-in `vitest` / `@jest/globals` types (item 29), written
+  // before the config is generated so a `compilerOptions.types` entry naming
+  // one of them resolves (unless `test.vitestCompat` is `false`).
+  let vitest_compat = cli_options
+    .resolve_workspace_test_options(&Default::default())
+    .vitest_compat;
+  if vitest_compat {
+    crate::tools::test::vitest::write_native_check_types(&project_root)?;
+  }
   let prev_level = log::max_level();
   log::set_max_level(log::LevelFilter::Error);
   let sync_result = crate::tools::installer::sync_types_command(
     flags.clone(),
-    SyncTypesFlags {
-      roots: check_flags.files.clone(),
-    },
+    SyncTypesFlags { roots: sync_roots },
     crate::tools::installer::RootTsConfigMode::CheckMode,
   )
   .await;
   log::set_max_level(prev_level);
   sync_result?;
-
-  let tsc_path = ensure_native_tsc_downloaded(&factory).await?;
+  if vitest_compat {
+    crate::tools::test::vitest::add_native_check_type_paths(
+      &project_root,
+      &project_root.join(".deno").join("tsconfig.json"),
+    )?;
+  }
 
   // When Deno honors a user `tsconfig.json`, base tsc on a throwaway overlay of
   // it (its options + our generated `extends`/`references`) written to a temp
@@ -270,7 +381,7 @@ async fn native_check(
   // it under `.deno/remote/`. Pin tsc to those mirror files too, so a remote
   // entrypoint is checked as itself rather than triggering the whole-project
   // `include` fallback below (which would check unrelated files, or nothing).
-  files.extend(remote_root_mirror_files(&project_root, &roots));
+  files.extend(remote_root_mirror_files(&project_root, roots));
 
   // Render each root relative to the invocation directory, matching deno's own
   // `Check <specifier>` output.
@@ -283,9 +394,14 @@ async fn native_check(
   // directly instead of falling back to the base config's project-wide
   // `include` (which would check unrelated files).
   if files.is_empty() && root_diagnostics.has_diagnostic() {
-    log_check_roots(&roots, &current_dir);
+    log_check_roots(roots, &current_dir);
     log::error!("{}\n", root_diagnostics);
-    return Err(deno_core::anyhow::anyhow!("Type checking failed."));
+    return Ok(false);
+  }
+  // Nothing the compiler can load (only built-in or in-memory modules): when
+  // not `deno check`, that is nothing to check rather than the whole project.
+  if files.is_empty() && !whole_project_fallback {
+    return Ok(true);
   }
 
   // Holds the per-file config's temp file open until tsc has run (dropping it
@@ -350,7 +466,7 @@ async fn native_check(
     path
   };
 
-  log_check_roots(&roots, &current_dir);
+  log_check_roots(roots, &current_dir);
 
   let output = crate::tsc::native::run_native_tsc(
     &tsc_path,
@@ -374,7 +490,7 @@ async fn native_check(
 
   if diagnostics.has_diagnostic() {
     log::error!("{}\n", diagnostics);
-    return Err(deno_core::anyhow::anyhow!("Type checking failed."));
+    return Ok(false);
   }
 
   // tsc exited non-zero but we have nothing to show. If it printed diagnostic
@@ -407,28 +523,7 @@ async fn native_check(
     type_check_cache.add_check_hash(check_hash);
   }
 
-  Ok(())
-}
-
-async fn ensure_native_tsc_downloaded(
-  factory: &CliFactory,
-) -> Result<PathBuf, AnyError> {
-  let installer_factory = factory.npm_installer_factory()?;
-  let deno_dir = factory.deno_dir()?;
-  let npmrc = factory.npmrc()?;
-  let npm_registry_info = installer_factory.registry_info_provider()?;
-  let resolver_factory = factory.resolver_factory()?;
-  let workspace_factory = resolver_factory.workspace_factory();
-
-  crate::tsc::native::ensure_native_tsc(
-    deno_dir,
-    npmrc,
-    npm_registry_info,
-    workspace_factory.workspace_npm_link_packages()?,
-    installer_factory.tarball_cache()?,
-    factory.npm_cache()?,
-  )
-  .await
+  Ok(true)
 }
 
 /// Print a `Check <specifier>` line for each provided root, rendered relative

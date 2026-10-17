@@ -12,6 +12,9 @@
 #   typescript-lsp/        the pinned TypeScript 7 build `deno lsp`'s tsgo
 #                          backend runs (fetch_typescript.py lsp; tsc, its
 #                          lib.*.d.ts, LICENSE, NOTICE.txt, typescript.json)
+#   typescript-check/      the pinned TypeScript 7 build `deno check` and every
+#                          other type-checking command run (fetch_typescript.py
+#                          check; the same layout)
 #   BUILD_INFO.json        what was built from where (esbuild's source too)
 #   licenses/              the deno license
 #
@@ -20,14 +23,15 @@
 # `deno compile` (this CLI downloads it from the release:
 # cli/standalone/binary.rs, denext_denort).
 #
-# Env: TARGET VERSION DENO_BIN DENORT_BIN ESBUILD_DIR TYPESCRIPT_LSP_DIR OUT_DIR
-# DENO_VERSION DENO_SHA RUN_URL (ESBUILD_DIR: fetch_esbuild.py's output
-# directory; TYPESCRIPT_LSP_DIR: fetch_typescript.py lsp's)
+# Env: TARGET VERSION DENO_BIN DENORT_BIN ESBUILD_DIR TYPESCRIPT_LSP_DIR
+# TYPESCRIPT_CHECK_DIR OUT_DIR DENO_VERSION DENO_SHA RUN_URL (ESBUILD_DIR:
+# fetch_esbuild.py's output directory; TYPESCRIPT_LSP_DIR /
+# TYPESCRIPT_CHECK_DIR: fetch_typescript.py lsp's / check's)
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 . "$here/lib.sh"
 
-: "${TARGET:?}" "${VERSION:?}" "${DENO_BIN:?}" "${DENORT_BIN:?}" "${ESBUILD_DIR:?}" "${TYPESCRIPT_LSP_DIR:?}" "${OUT_DIR:?}"
+: "${TARGET:?}" "${VERSION:?}" "${DENO_BIN:?}" "${DENORT_BIN:?}" "${ESBUILD_DIR:?}" "${TYPESCRIPT_LSP_DIR:?}" "${TYPESCRIPT_CHECK_DIR:?}" "${OUT_DIR:?}"
 : "${DENO_VERSION:?}" "${DENO_SHA:?}"
 
 export COPYFILE_DISABLE=1 # no AppleDouble ._ files in macOS tarballs
@@ -62,6 +66,13 @@ done
 tsc_sha=$(sha256_of "$ts_lsp_dir/$tsc_bin")
 grep -q "\"sha256\": \"$tsc_sha\"" "$ts_lsp_dir/typescript.json" ||
   { echo "$ts_lsp_dir/$tsc_bin does not match typescript.json" >&2; exit 1; }
+ts_check_dir=$(unix_path "$TYPESCRIPT_CHECK_DIR")
+for f in "$tsc_bin" LICENSE NOTICE.txt typescript.json; do
+  test -f "$ts_check_dir/$f" || { echo "missing $ts_check_dir/$f (run fetch_typescript.py check)" >&2; exit 1; }
+done
+tsc_check_sha=$(sha256_of "$ts_check_dir/$tsc_bin")
+grep -q "\"sha256\": \"$tsc_check_sha\"" "$ts_check_dir/typescript.json" ||
+  { echo "$ts_check_dir/$tsc_bin does not match typescript.json" >&2; exit 1; }
 out_dir=$(unix_path "$OUT_DIR")
 mkdir -p "$out_dir"
 out_dir=$(cd "$out_dir" && pwd)
@@ -82,6 +93,9 @@ cp "$esbuild_dir/esbuild.LICENSE" "$root/esbuild.LICENSE"
 mkdir -p "$root/typescript-lsp"
 cp -R "$ts_lsp_dir/." "$root/typescript-lsp/"
 chmod +x "$root/typescript-lsp/$tsc_bin"
+mkdir -p "$root/typescript-check"
+cp -R "$ts_check_dir/." "$root/typescript-check/"
+chmod +x "$root/typescript-check/$tsc_bin"
 
 cat >"$root/BUILD_INFO.json" <<EOF
 {
@@ -92,6 +106,7 @@ cat >"$root/BUILD_INFO.json" <<EOF
   "deno": { "version": "$DENO_VERSION", "repository": "https://github.com/${GITHUB_REPOSITORY:-Brainwires/deno}", "sha": "$DENO_SHA" },
   "esbuild": $(cat "$esbuild_dir/esbuild.json"),
   "typescript_lsp": $(cat "$ts_lsp_dir/typescript.json"),
+  "typescript_check": $(cat "$ts_check_dir/typescript.json"),
   "build": { "run": "${RUN_URL:-}" }
 }
 EOF

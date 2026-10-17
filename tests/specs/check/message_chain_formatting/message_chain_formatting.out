@@ -5,4 +5,9 @@ foo("hello", 42);
     ~~~~~~~
     at file:///[WILDCARD]/message_chain_formatting.ts:8:5
 
+    The last overload is declared here.
+    function foo(ss: string[], b: Date): void;
+             ~~~
+        at file:///[WILDCARD]/message_chain_formatting.ts:3:10
+
 error: Type checking failed.

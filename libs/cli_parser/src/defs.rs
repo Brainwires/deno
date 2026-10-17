@@ -3091,6 +3091,16 @@ pub static GLOBAL_ARGS: &[ArgDef] = &[
     .set_true()
     .global()
 .help("Suppress diagnostic output"),
+  // denext: hidden so every subcommand's help stays as it was; documented
+  // with its env equivalent `DENO_CHECK_ENGINE`.
+  ArgDef::new("check-engine")
+    .long("check-engine")
+    .action(ArgAction::Set)
+    .num_args(NumArgs::Exact(1))
+    .value_parser(ValueParser::Choices(&["native", "tsc"]))
+    .global()
+    .hidden()
+.help("Type-check with the native TypeScript 7 compiler (native, the default) or the in-process TypeScript 6.0.3 (tsc)"),
 ];
 
 pub static DESKTOP_SUBCOMMAND: CommandDef = CommandDef {

@@ -300,15 +300,18 @@ impl ModuleLoadPreparer {
         // Arc<ModuleGraph> back from the return value.
         graph.clone()
       };
-      self.type_checker.check(
-        graph_to_check,
-        CheckOptions {
-          build_fast_check_graph: true,
-          lib,
-          reload: self.options.reload_flag(),
-          type_check_mode: self.options.type_check_mode(),
-        },
-      )?;
+      self
+        .type_checker
+        .check_graph(
+          graph_to_check,
+          CheckOptions {
+            build_fast_check_graph: true,
+            lib,
+            reload: self.options.reload_flag(),
+            type_check_mode: self.options.type_check_mode(),
+          },
+        )
+        .await?;
     }
 
     // write the lockfile if there is one and do so after type checking

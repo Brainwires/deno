@@ -25,6 +25,11 @@ pub static ENV_VARS: &[EnvVar] = &[
     example: None,
   },
   EnvVar {
+    name: "DENO_CHECK_ENGINE",
+    description: "The type checker: \"native\" (the native TypeScript 7 compiler, the default) or \"tsc\" (the in-process TypeScript 6.0.3). Same as --check-engine.",
+    example: None,
+  },
+  EnvVar {
     name: "DENO_COMPAT",
     description: "Enable Node.js compatibility mode - extensionless imports, built-in\nNode.js modules, CommonJS detection and more.",
     example: None,
@@ -132,8 +137,8 @@ pub static ENV_VARS: &[EnvVar] = &[
     example: None,
   },
   EnvVar {
-    name: "DENO_TSC_BIN",
-    description: "Path to a prebuilt native TypeScript compiler (tsc/tsgo) for `deno check` to use instead of downloading the pinned one.",
+    name: "DENO_TSGO_BIN",
+    description: "Path to a native TypeScript compiler (tsc 7) for type-checking to use instead of the one next to the deno executable.",
     example: None,
   },
   EnvVar {

@@ -463,6 +463,9 @@ fn global_args_parse(result: &ParseResult, flags: &mut Flags) {
   if result.get_bool("quiet") {
     flags.log_level = Some(log::Level::Error);
   }
+  if let Some(engine) = result.get_one("check-engine") {
+    flags.check_engine = engine.parse().ok();
+  }
 }
 
 // ============================================================

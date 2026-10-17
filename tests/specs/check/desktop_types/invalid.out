@@ -1,39 +1,44 @@
-Check [WILDCARD]invalid.ts
+Check invalid.ts
 TS2339 [ERROR]: Property 'then' does not exist on type 'boolean'.
 d.authSession.cancel().then(() => {});
                        ~~~~
-    at [WILDCARD]invalid.ts:3:24
+    at file:///[WILDCARD]/invalid.ts:3:24
 
 TS2322 [ERROR]: Type 'number' is not assignable to type 'boolean | undefined'.
 d.authSession.start({ url: "https://x", callbackScheme: "x", ephemeral: 1 });
                                                              ~~~~~~~~~
-    at [WILDCARD]invalid.ts:5:62
+    at file:///[WILDCARD]/invalid.ts:5:62
+
+    The expected type comes from property 'ephemeral' which is declared here on type 'AuthSessionStartOptions'
+          ephemeral?: boolean;
+          ~~~~~~~~~
+        at file:///[WILDCARD]/.deno/types/deno/index.d.ts:[WILDCARD]
 
 TS2322 [ERROR]: Type '"nope"' is not assignable to type 'AppUpdateErrorCode'.
 const code: Deno.desktop.AppUpdateErrorCode = "nope";
       ~~~~
-    at [WILDCARD]invalid.ts:7:7
+    at file:///[WILDCARD]/invalid.ts:7:7
 
-TS2345 [ERROR]: Argument of type 'UnsafeCallback<{ parameters: ["pointer"]; result: "pointer"; }>' is not assignable to parameter of type 'UnsafeFnPointer<any> | PointerObject<unknown>'.
+TS2345 [ERROR]: Argument of type 'UnsafeCallback<{ parameters: ["pointer"]; result: "pointer"; }>' is not assignable to parameter of type 'PointerObject<unknown> | UnsafeFnPointer<any>'.
   Property 'call' is missing in type 'UnsafeCallback<{ parameters: ["pointer"]; result: "pointer"; }>' but required in type 'UnsafeFnPointer<any>'.
 d.runOnMainThread(callback);
                   ~~~~~~~~
-    at [WILDCARD]invalid.ts:13:19
+    at file:///[WILDCARD]/invalid.ts:13:19
 
     'call' is declared here.
         call: FromForeignFunction<Fn>;
         ~~~~
-        at asset:///lib.deno.ns.d.ts:[WILDCARD]
+        at file:///[WILDCARD]/.deno/types/deno/index.d.ts:[WILDCARD]
 
-TS2322 [ERROR]: Type '"seccomp"' is not assignable to type '"namespace" | "setuid" | "chromium" | "off" | null'.
+TS2322 [ERROR]: Type '"seccomp"' is not assignable to type '"chromium" | "namespace" | "off" | "setuid" | null'.
 const sandbox: Deno.desktop.PlatformFeatures["sandbox"] = "seccomp";
       ~~~~~~~
-    at [WILDCARD]invalid.ts:15:7
+    at file:///[WILDCARD]/invalid.ts:15:7
 
-TS2322 [ERROR]: Type '"zenity"' is not assignable to type '"portal" | "gtk" | null'.
+TS2322 [ERROR]: Type '"zenity"' is not assignable to type '"gtk" | "portal" | null'.
 const chooser: Deno.desktop.PlatformFeatures["fileChooser"] = "zenity";
       ~~~~~~~
-    at [WILDCARD]invalid.ts:16:7
+    at file:///[WILDCARD]/invalid.ts:16:7
 
 Found 6 errors.
 

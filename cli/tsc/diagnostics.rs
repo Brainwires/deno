@@ -379,7 +379,12 @@ impl Diagnostic {
       && !related_information.is_empty()
     {
       write!(f, "\n\n")?;
-      for info in related_information {
+      for (i, info) in related_information.iter().enumerate() {
+        // denext: one blank line between entries, as before the first (they
+        // ran together on one line).
+        if i > 0 {
+          write!(f, "\n\n")?;
+        }
         info.fmt_stack(f, 4)?;
       }
     }

@@ -3,8 +3,11 @@ TS2769 [ERROR]: No overload matches this call.
 [WILDCARD]
               Type 'number' is not assignable to type 'string'.
 vi.mock(import("./greeting.ts"), () => ({ prefix: 1 }));
-   ~~~~
-    at [WILDCARD]type_error_test.ts:5:4
+                                 ^
+    at [WILDCARD]type_error_test.ts:5:34
+
+    The last overload is declared here.
+[WILDCARD]
 
 TS2345 [ERROR]: Argument of type 'string' is not assignable to parameter of type 'number'.
   add.mockReturnValue("three");

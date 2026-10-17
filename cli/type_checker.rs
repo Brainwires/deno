@@ -30,6 +30,8 @@ use once_cell::sync::Lazy;
 use regex::Regex;
 use rustc_hash::FxHashSet;
 
+use crate::args::CheckEngine;
+use crate::args::CheckFlags;
 use crate::args::CliOptions;
 use crate::args::CompilerOptions;
 use crate::args::DenoSubcommand;
@@ -247,7 +249,228 @@ impl TypeChecker {
     })
   }
 
-  /// Type check the module graph.
+  /// Type check the module graph with the selected engine (`--check-engine`,
+  /// `DENO_CHECK_ENGINE`): the native TypeScript compiler by default, else the
+  /// in-process one ([`Self::check`]). Every command that type-checks a graph
+  /// it built (`run --check`, `test`, `bench`, `bundle --check`, `cache
+  /// --check`, `publish`, ...) goes through here.
+  pub async fn check_graph(
+    &self,
+    graph: ModuleGraph,
+    options: CheckOptions,
+  ) -> Result<Arc<ModuleGraph>, CheckError> {
+    if self.cli_options.check_engine() == CheckEngine::Tsc {
+      return self.check(graph, options);
+    }
+    if !options.type_check_mode.is_true() || graph.roots.is_empty() {
+      return Ok(Arc::new(graph));
+    }
+    if let Some(reason) = self
+      .native_unsupported(&graph)
+      .or_else(|| missing_local_module(&graph))
+    {
+      log::debug!("Type checking in-process: {reason}");
+      return self.check(graph, options);
+    }
+    log::debug!("Type checking (native tsc)");
+    let roots: Vec<Url> = graph.roots.iter().cloned().collect();
+    // The roots the external compiler can load: local files and remote
+    // modules (mirrored under `.deno/remote/`). Built-in (`deno-vitest:`),
+    // `data:` and in-memory modules have nothing on disk to check.
+    let sync_roots: Vec<String> = roots
+      .iter()
+      .filter_map(|root| match root.scheme() {
+        "file" => root
+          .to_file_path()
+          .ok()
+          .map(|path| path.to_string_lossy().into_owned()),
+        "http" | "https" => Some(root.to_string()),
+        _ => None,
+      })
+      .collect();
+    if sync_roots.is_empty() {
+      return Ok(Arc::new(graph));
+    }
+    // The config generator reads the project as `deno check <roots>` would.
+    let mut flags = (**self.cli_options.flags()).clone();
+    flags.subcommand = DenoSubcommand::Check(CheckFlags {
+      files: sync_roots.clone(),
+      doc: false,
+      doc_only: false,
+      check_js: false,
+    });
+    flags.watch = None;
+    let flags = Arc::new(flags);
+    let clean =
+      crate::tools::check::run_native_check(crate::tools::check::NativeCheck {
+        flags: &flags,
+        cli_options: &self.cli_options,
+        type_checker: self,
+        deno_dir_root: self.caches.deno_dir_root(),
+        graph: &graph,
+        roots: &roots,
+        sync_roots,
+        lib: options.lib,
+        type_check_mode: options.type_check_mode,
+        reload: options.reload,
+        whole_project_fallback: false,
+      })
+      .await
+      .map_err(|err| {
+        CheckErrorKind::Other(JsErrorBox::generic(format!("{err:#}")))
+      })?;
+    if clean {
+      Ok(Arc::new(graph))
+    } else {
+      Err(
+        FailedTypeCheckingError {
+          can_skip: !matches!(
+            self.cli_options.sub_command(),
+            DenoSubcommand::Check(_)
+          ),
+        }
+        .into(),
+      )
+    }
+  }
+
+  /// Why the native compiler can't check `graph` as the in-process checker
+  /// does, if it can't: it reads only files on disk through a generated stock
+  /// `tsconfig.json`, so in-memory modules, Deno-only resolution (sloppy
+  /// imports, `--ext`, type redirects, raw imports, a custom JSR registry,
+  /// CommonJS detection) and a Vitest config's aliases have no stock
+  /// equivalent. Such a graph keeps the in-process checker, with its exact
+  /// diagnostics, rather than reporting the gaps of the stock project model.
+  pub(crate) fn native_unsupported(
+    &self,
+    graph: &ModuleGraph,
+  ) -> Option<&'static str> {
+    let options = &self.cli_options;
+    if options.ext_flag().is_some() {
+      return Some("--ext");
+    }
+    if options.unstable_sloppy_imports() {
+      return Some("sloppy imports");
+    }
+    if options.unstable_detect_cjs() {
+      return Some("--unstable-detect-cjs");
+    }
+    if !options.workspace().link_folders().is_empty() {
+      return Some("workspace `links` (patched packages)");
+    }
+    if let DenoSubcommand::Test(test_flags) = options.sub_command() {
+      if test_flags.doc {
+        return Some("test --doc");
+      }
+      if options
+        .resolve_workspace_test_options(&Default::default())
+        .vitest_compat
+        && crate::tools::test::vitest::has_test_config(
+          options.initial_cwd(),
+          test_flags.vitest.config.as_deref(),
+        )
+      {
+        return Some("a Vitest or Jest config (its aliases)");
+      }
+    }
+    // jsr types are materialized from npm.jsr.io, which mirrors jsr.io only.
+    let custom_jsr = std::env::var("JSR_URL").ok().filter(|url| {
+      !url.is_empty() && url.trim_end_matches('/') != "https://jsr.io"
+    });
+    for module in graph.modules() {
+      let Module::Js(js) = module else {
+        continue;
+      };
+      let specifier = &js.specifier;
+      match specifier.scheme() {
+        "data" | "blob" => return Some("a data: or blob: module"),
+        "file" | "http" | "https" => {}
+        _ => continue, // built-in modules (`deno-vitest:`, `node:`)
+      }
+      if specifier.fragment().is_some() {
+        return Some("an in-memory module (a code block)");
+      }
+      // An installed package (BYONM `node_modules`) is resolved by the
+      // compiler itself, the generated project's npm side.
+      if specifier.path().contains("/node_modules/") {
+        continue;
+      }
+      if let Some(jsr) = &custom_jsr
+        && specifier.as_str().starts_with(jsr.as_str())
+      {
+        return Some("a custom JSR registry");
+      }
+      if matches!(
+        js.media_type,
+        deno_ast::MediaType::Cts
+          | deno_ast::MediaType::Cjs
+          | deno_ast::MediaType::Dcts
+      ) {
+        return Some("a CommonJS module");
+      }
+      let path = specifier.path().to_ascii_lowercase();
+      if ![
+        ".ts", ".tsx", ".mts", ".js", ".jsx", ".mjs", ".d.ts", ".d.mts",
+      ]
+      .iter()
+      .any(|ext| path.ends_with(ext))
+      {
+        return Some("a module without a TypeScript or JavaScript extension");
+      }
+      if js.maybe_types_dependency.is_some() {
+        return Some("a type redirect (X-TypeScript-Types, @ts-self-types)");
+      }
+      for (key, dep) in js.dependencies.iter() {
+        if matches!(dep.maybe_attribute_type.as_deref(), Some("text" | "bytes"))
+        {
+          return Some("a text or bytes import");
+        }
+        // The JSX runtime of `jsxImportSource`: the generated project maps a
+        // package's, not one Deno finds through an import map, a remote
+        // module or a missing one.
+        if (key.ends_with("/jsx-runtime") || key.ends_with("/jsx-dev-runtime"))
+          && let deno_graph::Resolution::Ok(runtime) = &dep.maybe_code
+          && (key.contains(':')
+            || !matches!(runtime.specifier.scheme(), "file" | "npm")
+            || !matches!(graph.try_get(&runtime.specifier), Ok(Some(_))))
+        {
+          return Some(
+            "a JSX runtime Deno resolves (import map, remote, missing)",
+          );
+        }
+        // `@deno-types` / `@ts-types`: the types come from another module
+        // than the code (a type-only import, such as a JSDoc `import()`, has
+        // no code side).
+        if let (
+          deno_graph::Resolution::Ok(code),
+          deno_graph::Resolution::Ok(types),
+        ) = (&dep.maybe_code, &dep.maybe_type)
+          && code.specifier != types.specifier
+        {
+          return Some("a @deno-types redirect");
+        }
+      }
+      if specifier.scheme() == "file"
+        && js.source.text.contains("<reference lib=\"deno.")
+      {
+        return Some("a /// <reference lib=\"deno.*\" /> directive");
+      }
+      // A type reference resolves through `typeRoots` and packages, never
+      // through the generated `paths`: a scheme in it is Deno's.
+      if specifier.scheme() == "file"
+        && ["npm:", "jsr:", "http:", "https:"].iter().any(|scheme| {
+          js.source
+            .text
+            .contains(&format!("<reference types=\"{scheme}"))
+        })
+      {
+        return Some("a /// <reference types=\"npm:…\" /> directive");
+      }
+    }
+    None
+  }
+
+  /// Type check the module graph with the in-process TypeScript checker.
   ///
   /// It is expected that it is determined if a check and/or emit is validated
   /// before the function is called.
@@ -300,12 +523,14 @@ impl TypeChecker {
   /// Native check runs a single external tsc over the whole generated
   /// `tsconfig.json`, so the per-group hashes are combined into one: a hit means
   /// nothing the compiler sees has changed, and the spawn can be skipped.
+  /// denext: also whether any root needs checking at all (the in-process
+  /// checker skips a group whose roots are all plain JavaScript, say).
   pub(crate) fn walk_graph_for_native_check(
     &self,
     graph: &ModuleGraph,
     lib: TsTypeLib,
     type_check_mode: TypeCheckMode,
-  ) -> Result<(tsc::Diagnostics, Option<CacheDBHash>), CheckError> {
+  ) -> Result<(tsc::Diagnostics, Option<CacheDBHash>, bool), CheckError> {
     // Packages importable by bare specifier (workspace members + `links`),
     // used to enhance import errors. TODO: also chain `links` packages to match
     // `check_diagnostics` exactly.
@@ -319,8 +544,9 @@ impl TypeChecker {
     let groups = self.group_roots_by_compiler_options(graph, lib)?;
     let mut missing_diagnostics = tsc::Diagnostics::default();
     let mut combined = FastInsecureHasher::new_deno_versioned();
-    combined.write_hashable(crate::tsc::native::TYPESCRIPT_VERSION);
+    combined.write_hashable(crate::tsc::native::typescript_version());
     let mut any_hash = false;
+    let mut any_roots = false;
     for group in groups {
       let mut walker = GraphWalker::new(
         graph,
@@ -340,6 +566,7 @@ impl TypeChecker {
         walker.add_root(root);
       }
       let tsc_roots = walker.into_tsc_roots();
+      any_roots |= !tsc_roots.roots.is_empty();
       missing_diagnostics.extend(tsc_roots.missing_diagnostics);
       if let Some(hash) = tsc_roots.maybe_check_hash {
         combined.write_hashable(hash);
@@ -348,7 +575,7 @@ impl TypeChecker {
     }
     let maybe_check_hash =
       any_hash.then(|| CacheDBHash::new(combined.finish()));
-    Ok((missing_diagnostics, maybe_check_hash))
+    Ok((missing_diagnostics, maybe_check_hash, any_roots))
   }
 
   /// The type-check cache, used by the native check path to skip re-running the
@@ -469,6 +696,18 @@ impl TypeChecker {
     }
     Ok(groups_by_key.into_values().collect())
   }
+}
+
+/// A local module the graph could not load, if any: Deno reports it itself,
+/// with its hints (`--sloppy-imports`, the extension), where the native
+/// compiler's resolution would even accept some (`./a.js` for `a.ts`). Used
+/// for `run --check`, `test` & co.; `deno check` defers them to the compiler
+/// as upstream does.
+fn missing_local_module(graph: &ModuleGraph) -> Option<&'static str> {
+  graph
+    .specifiers()
+    .any(|(specifier, result)| result.is_err() && specifier.scheme() == "file")
+    .then_some("a local module Deno could not load")
 }
 
 /// This function assumes that 'graph imports' strictly refer to tsconfig

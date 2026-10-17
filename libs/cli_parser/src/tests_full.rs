@@ -10001,3 +10001,33 @@ fn sync_types_subcommand() {
       .unwrap();
   assert_eq!(flags.permissions.allow_import, Some(svec!["example.com"]));
 }
+
+#[test]
+fn check_engine_flag() {
+  // native unless asked: `None` leaves it to DENO_CHECK_ENGINE
+  let flags = flags_from_vec(svec!["deno", "check", "mod.ts"]).unwrap();
+  assert_eq!(flags.check_engine, None);
+  // global, before or after the subcommand, `=` or a separate value
+  let flags =
+    flags_from_vec(svec!["deno", "check", "--check-engine=tsc", "mod.ts"])
+      .unwrap();
+  assert_eq!(flags.check_engine, Some(CheckEngine::Tsc));
+  let flags =
+    flags_from_vec(svec!["deno", "--check-engine", "native", "test"]).unwrap();
+  assert_eq!(flags.check_engine, Some(CheckEngine::Native));
+  let flags = flags_from_vec(svec![
+    "deno",
+    "run",
+    "--check",
+    "--check-engine=tsc",
+    "main.ts"
+  ])
+  .unwrap();
+  assert_eq!(flags.check_engine, Some(CheckEngine::Tsc));
+  assert_eq!(flags.type_check_mode, TypeCheckMode::Local);
+  // anything else is refused
+  assert!(
+    flags_from_vec(svec!["deno", "check", "--check-engine=tsgo", "mod.ts"])
+      .is_err()
+  );
+}

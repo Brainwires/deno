@@ -6,4 +6,9 @@ const _data = fs.readFileSync("./node_builtin.js", 123);
                                                    ~~~
     at file:///[WILDCARD]/mod.js:3:52
 
+    The last overload is declared here.
+        export function readFileSync(
+                        ~~~~~~~~~~~~
+        at file:///[WILDCARD]/.deno/npm-compat/@types/node/fs.d.ts:[WILDCARD]
+
 error: Type checking failed.
