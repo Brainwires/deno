@@ -7,6 +7,15 @@ node readFileSync under dir link: denied
 node statSync existing: denied
 node readdirSync dir link: denied
 node loadEnvFile: denied
+realPath existing: denied
+realPath dangling: denied
+node realpathSync existing: denied
+node realpathSync dangling: denied
+node existsSync existing: denied
+node existsSync dangling: denied
+node statfsSync existing: denied
+node statfsSync dir link: denied
 lstat link: true
 readLink: ../denied/secret.env
 allowed entries: chain1,chain2,dangling,dir,env,existing,loop1,loop2,src.txt,src_rename.txt,via_dir
+chdir dir link: denied

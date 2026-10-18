@@ -1972,8 +1972,12 @@ where the changes are discussed.
     no-follow, so a link to a denied file was written or read: the `copyFile`
     destination, `chmod`, `chown`, `utime`, `stat`, `readDir` and
     `process.loadEnvFile` now use the following access kinds (`truncate` stays
-    no-follow; it opens with `O_NOFOLLOW`). Only a deny rule is applied to the
-    resolved path; an `--allow-*` scope is still matched against the path as
+    no-follow; it opens with `O_NOFOLLOW`). So do the ones that resolve the
+    final symlink and report on its target, which revealed through a link
+    whether a denied file exists, its resolved name or its metadata:
+    `Deno.realPath` (and `node:fs` `realpath`), `Deno.chdir`, `node:fs` `exists`
+    / `existsSync` and `statfs` / `statfsSync`. Only a deny rule is applied to
+    the resolved path; an `--allow-*` scope is still matched against the path as
     given, as in upstream Deno (creating a symlink needs full read and write
     access). Spec: `permission/symlink_resolve_deny` (`--deny-write` with
     `--allow-write` and with a scoped `--allow-write=allowed`, and

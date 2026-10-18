@@ -37,7 +37,7 @@
           "output": "setup done\n"
         },
         {
-          "args": "run --allow-env --allow-read=allowed --deny-read=denied read.ts",
+          "args": "run --allow-env --allow-sys=statfs --allow-read=allowed --deny-read=denied read.ts",
           "output": "read.out"
         }
       ]

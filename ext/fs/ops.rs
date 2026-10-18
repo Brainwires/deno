@@ -130,7 +130,7 @@ pub fn op_fs_chdir(
     .borrow_mut::<deno_permissions::PermissionsContainer>()
     .check_open(
       Cow::Borrowed(Path::new(directory)),
-      OpenAccessKind::ReadNoFollow,
+      OpenAccessKind::Read,
       Some("Deno.chdir()"),
     )?;
   state
@@ -696,7 +696,7 @@ pub fn op_fs_realpath_sync(
     state.borrow_mut::<deno_permissions::PermissionsContainer>();
   let path = permissions.check_open(
     Cow::Borrowed(Path::new(path)),
-    OpenAccessKind::ReadNoFollow,
+    OpenAccessKind::Read,
     Some("Deno.realPathSync()"),
   )?;
   let resolved_path =
@@ -719,7 +719,7 @@ pub async fn op_fs_realpath_async(
       state.borrow_mut::<deno_permissions::PermissionsContainer>();
     let path = permissions.check_open(
       Cow::Owned(PathBuf::from(path)),
-      OpenAccessKind::ReadNoFollow,
+      OpenAccessKind::Read,
       Some("Deno.realPath()"),
     )?;
     (fs, path)

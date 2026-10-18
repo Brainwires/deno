@@ -310,7 +310,7 @@ pub fn op_node_fs_exists_sync(
 ) -> Result<bool, deno_permissions::PermissionCheckError> {
   let path_or_err = state.borrow_mut::<PermissionsContainer>().check_open(
     Cow::Borrowed(Path::new(path)),
-    OpenAccessKind::ReadNoFollow,
+    OpenAccessKind::Read,
     Some("node:fs.existsSync()"),
   );
   match path_or_err {
@@ -332,7 +332,7 @@ pub async fn op_node_fs_exists(
     let mut state = state.borrow_mut();
     let path_or_err = state.borrow_mut::<PermissionsContainer>().check_open(
       Cow::Owned(PathBuf::from(path)),
-      OpenAccessKind::ReadNoFollow,
+      OpenAccessKind::Read,
       Some("node:fs.exists()"),
     );
     (state.borrow::<FileSystemRc>().clone(), path_or_err)
@@ -506,7 +506,7 @@ pub fn op_node_statfs_sync(
 ) -> Result<StatFs, FsError> {
   let path = state.borrow_mut::<PermissionsContainer>().check_open(
     Cow::Borrowed(Path::new(path)),
-    OpenAccessKind::ReadNoFollow,
+    OpenAccessKind::Read,
     Some("node:fs.statfsSync"),
   )?;
   state
@@ -527,7 +527,7 @@ pub async fn op_node_statfs(
     let mut state = state.borrow_mut();
     let path = state.borrow_mut::<PermissionsContainer>().check_open(
       Cow::Owned(PathBuf::from(path)),
-      OpenAccessKind::ReadNoFollow,
+      OpenAccessKind::Read,
       Some("node:fs.statfs"),
     )?;
     state
