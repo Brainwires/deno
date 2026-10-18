@@ -52,7 +52,7 @@ export async function checkCopyright() {
     // rust
     "*.rs",
     ":!:ops/optimizer_tests/**",
-    ":!:vendor/**",
+    ":!:libs/vendor/**",
 
     // c
     "*.c",

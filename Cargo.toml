@@ -84,7 +84,7 @@ members = [
 ]
 # tests/sqlite_extension is excluded because it requires rusqlite's "loadable_extension"
 # feature, which is incompatible with the "session" feature used by the rest of the workspace.
-exclude = ["tests/util/std/hash/_wasm", "tests/sqlite_extension", "vendor/dprint-core"]
+exclude = ["tests/util/std/hash/_wasm", "tests/sqlite_extension", "libs/vendor/dprint-core"]
 
 [workspace.package]
 authors = ["the Deno authors"]
@@ -651,4 +651,4 @@ opt-level = 3
 # 0.67.4 is vendored with that one-file change. Drop this once those plugins are
 # on the 0.68+ line and bump them instead.
 [patch.crates-io]
-dprint-core = { path = "vendor/dprint-core" }
+dprint-core = { path = "libs/vendor/dprint-core" }
