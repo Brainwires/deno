@@ -77,8 +77,31 @@ impl InvalidPackageNamePathError {
 ///
 /// npm package names are either `name` or `@scope/name`. They are not general
 /// paths, so reject anything that could escape, be interpreted as a Windows
-/// path, or create extra nested directories.
+/// path, or create extra nested directories. A period-prefixed component is
+/// rejected too: it could replace `node_modules/.bin` or `.deno`.
 pub fn package_name_for_node_modules_path_parts(
+  package_name: &str,
+) -> Result<Vec<&str>, InvalidPackageNamePathError> {
+  let parts = package_name_for_node_modules_lookup_parts(package_name)?;
+  if parts.iter().any(|part| part.starts_with('.')) {
+    return Err(InvalidPackageNamePathError::new(
+      package_name,
+      "package name must not contain empty or period-prefixed components",
+    ));
+  }
+  Ok(parts)
+}
+
+/// Returns the path components to look a package name up below a
+/// `node_modules` directory.
+///
+/// Resolution is looser than [`package_name_for_node_modules_path_parts`]:
+/// Node's CommonJS loader resolves `require(".name/sub")` to
+/// `node_modules/.name/sub`, so a period-prefixed component is allowed here.
+/// Anything that would leave the `node_modules` directory (`.`, `..`, empty
+/// components, separators, drive or absolute paths, and components Windows
+/// would trim into `..`) is still rejected.
+pub(crate) fn package_name_for_node_modules_lookup_parts(
   package_name: &str,
 ) -> Result<Vec<&str>, InvalidPackageNamePathError> {
   if package_name.is_empty() {
@@ -109,7 +132,7 @@ pub fn package_name_for_node_modules_path_parts(
   let parts = package_name.split('/').collect::<Vec<_>>();
   if parts
     .iter()
-    .any(|part| part.is_empty() || part.starts_with('.'))
+    .any(|part| part.is_empty() || *part == "." || *part == "..")
   {
     return Err(InvalidPackageNamePathError::new(
       package_name,
@@ -792,7 +815,7 @@ pub(crate) fn join_package_name_to_path(
   package_name: &str,
 ) -> PathBuf {
   // ensure backslashes are used on windows
-  let parts = package_name_for_node_modules_path_parts(package_name)
+  let parts = package_name_for_node_modules_lookup_parts(package_name)
     .unwrap_or_else(|_| vec![".invalid-package-name"]);
   for part in parts {
     debug_assert!(!matches!(
@@ -818,6 +841,36 @@ pub use deno_config::workspace::version_req_matches_including_pre;
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn join_package_name_to_path_resolves_period_prefixed_names() {
+    // Node's CommonJS loader resolves `require(".multipart/name")` below
+    // node_modules; only installs refuse to create such a link.
+    assert_eq!(
+      join_package_name_to_path(
+        Cow::Borrowed(Path::new("/project/node_modules")),
+        ".multipart",
+      ),
+      PathBuf::from("/project/node_modules/.multipart")
+    );
+    assert_eq!(
+      join_package_name_to_path(
+        Cow::Borrowed(Path::new("/project/node_modules")),
+        "@scope/.name",
+      ),
+      PathBuf::from("/project/node_modules/@scope/.name")
+    );
+    for invalid in [".", "..", ".. ", "...", "@scope/..", "../outside"] {
+      assert_eq!(
+        join_package_name_to_path(
+          Cow::Borrowed(Path::new("/project/node_modules")),
+          invalid,
+        ),
+        PathBuf::from("/project/node_modules/.invalid-package-name"),
+        "{invalid:?}"
+      );
+    }
+  }
 
   #[test]
   fn join_package_name_to_path_does_not_traverse_for_invalid_name() {
