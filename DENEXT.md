@@ -1310,37 +1310,46 @@ where the changes are discussed.
       and the fallback. `DENO_TSC_BIN` (documented upstream, read by nothing
       here) and `tools/download_tsc.ts` are gone; the test harness fetches the
       pinned build into `target/typescript-check-<version>/` once and passes it
-      as `DENO_TSGO_BIN`.
+      as `DENO_TSGO_BIN` (to `TestContextBuilder` commands and `deno_cmd()`
+      alike, so a unit test's `run --check` child finds it).
     - **Every entry point.** Upstream switched only `deno check` (#36086 left
       the rest on the in-process checker). Here `TypeChecker::check_graph` picks
       the engine for every graph a command checks, and `deno check` and it share
       `run_native_check`: Deno's own graph walk and its check cache stay in
       front of the compiler (an unchanged graph that checked clean skips both
       the type materialization and the spawn, about 0.04 s), then the config is
-      generated, the compiler runs pinned to the graph's roots (`files` in a
-      per-run tsconfig in the system temp dir) and its diagnostics are mapped
-      back. `run --check` & co. keep their `--no-check` hint. `deno publish`
-      type-checks the package sources natively; the extra check of the in-memory
-      fast-check output (Deno's own generated types, which the compiler cannot
-      read) runs only on the in-process engine. `deno check --watch` re-runs on
-      changes (a watcher-aware factory; upstream ran once, #36089). A graph the
-      generated stock project can't express keeps the in-process checker, for
-      every command including `deno check` (`TypeChecker::native_unsupported`):
-      sloppy imports, `--ext`, `--unstable-detect-cjs`, `test --doc`, a Vitest /
-      Jest config (its aliases), `data:` / `blob:` modules, in-memory code
-      blocks, CommonJS modules, a module without a TypeScript or JavaScript
-      extension, a type redirect (`X-TypeScript-Types`, `@ts-self-types`,
-      `@deno-types`), a `text` / `bytes` import, a
-      `/// <reference lib="deno.*" />` or `/// <reference types="npm:…" />` (any
-      scheme) in the project, a JSX runtime Deno resolves through an import map,
-      a remote or missing module, or a `jsxImportSource` with a scheme
-      (`npm:preact`), workspace `links`, and a `JSR_URL` other than jsr.io (the
-      native path takes `jsr:` types from npm.jsr.io, which mirrors jsr.io
-      only). For `run --check`, `test` & co. a local module the graph could not
-      load does too: Deno reports it with its hints, where the compiler's
-      resolution would even accept `./a.js` for `a.ts` (`deno
-      check`
-      reports it as the compiler does, as upstream).
+      generated (in the workspace the command found: the re-read as
+      `deno
+      check <roots>` starts the config discovery where the command
+      did, `InternalFlags::config_discovery_start`, and reads the config file
+      the workspace loaded, `--config x.json` or `publish`'s `jsr.json(c)`, and
+      the `--import-map` given), the compiler runs pinned to the graph's roots
+      (`files` in a per-run tsconfig in the system temp dir) and its diagnostics
+      are mapped back. `run --check` & co. keep their `--no-check` hint.
+      `deno publish` type-checks the package sources natively; the extra check
+      of the in-memory fast-check output (Deno's own generated types, which the
+      compiler cannot read) runs only on the in-process engine.
+      `deno check --watch` re-runs on changes (a watcher-aware factory; upstream
+      ran once, #36089). A graph the generated stock project can't express keeps
+      the in-process checker, for every command including `deno check`
+      (`TypeChecker::native_unsupported`): sloppy imports, `--ext`,
+      `--unstable-detect-cjs`, `test --doc`, a Vitest / Jest config (its
+      aliases), `data:` / `blob:` modules, in-memory code blocks, CommonJS
+      modules, a module without a TypeScript or JavaScript extension, a type
+      redirect (`X-TypeScript-Types`, `@ts-self-types`, `@deno-types`), a `text`
+      / `bytes` import, a `/// <reference lib="deno.*" />` or
+      `/// <reference types="npm:…" />` (any scheme) in the project, a JSX
+      runtime Deno resolves through an import map, a remote or missing module,
+      or a `jsxImportSource` with a scheme (`npm:preact`), workspace `links`,
+      workspace members that map one import key differently (a member's other
+      `imports` join the generated `paths`), a worker's graph (the `deno.worker`
+      lib), a remote `compilerOptions.types` entry, and a `JSR_URL` other than
+      jsr.io (the native path takes `jsr:` types from npm.jsr.io, which mirrors
+      jsr.io only). For `run --check`, `test` & co. a local module the graph
+      could not load does too: Deno reports it with its hints, where the
+      compiler's resolution would even accept `./a.js` for `a.ts`
+      (`deno
+      check` reports it as the compiler does, as upstream).
     - **The fallback.** `--check-engine=tsc` (a hidden global flag, so no help
       text changed) or `DENO_CHECK_ENGINE=tsc` type-checks with the in-process
       TypeScript 6.0.3 as before; `--check-engine=native` wins over the env, and
@@ -1365,15 +1374,26 @@ where the changes are discussed.
       `/// <reference types="vitest/globals" />` and `compilerOptions.types`;
       with a Vitest or Vite config, Vite's asset, CSS module, `?raw` / `?url` /
       `?inline` / `?worker` imports get ambient declarations.
-      `test.vitestCompat: false` turns all of it off. The check cache is item
-      28's `check_cache_v2_denext`, its hash keyed on the compiler version.
+      `test.vitestCompat: false` turns all of it off. `@types/node` is never
+      downloaded: unless the project has its own under `node_modules`, the copy
+      built into the binary (`cli/tsc/dts/node`, the in-process checker's,
+      `undici-types` included) is written to `.deno/npm-compat/@types/node`
+      (staged and renamed into place), so type checking needs no network for
+      Node's or the web's globals; a root `package.json` dependency maps to
+      `npm:` when there is no `node_modules`. The check cache is item 28's
+      `check_cache_v2_denext`, its hash keyed on the compiler version.
     - The compiler runs with `--pretty true`: the diagnostics keep their exact
       spans and their related information ("The expected type comes from ..."),
       as the in-process checker reports them (a location in the generated config
       is left out). Several related entries print a blank line apart (they ran
       together on one line before). The generated `.deno/` files are written
       atomically, so concurrent checks of one project never read each other's
-      half-written `@types/deno`.
+      half-written `@types/deno`, and `.deno/` is never one of the project's
+      modules (excluded from the generated `include` and from `deno check`'s
+      collected roots). While the project is generated, log records below
+      `Error` are dropped on the checking thread only
+      (`deno_lib::util::logger::quiet_below_error`), never through the global
+      level, which hid the inspector's "Debugger session started.".
     - `deno sync-types` skips a `jsr:` import whose package a workspace member
       provides (the generated `paths` already point at the member, and the
       published version may not exist yet), and an unresolvable `jsr:` version
