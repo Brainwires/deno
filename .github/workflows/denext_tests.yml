@@ -18,7 +18,8 @@
 #   - libs:  `cargo test --locked --lib` over upstream's crate list (every
 #            crate the fork touches is in it) against that test_server, plus
 #            the `#[ignore]`d LaunchServices scheme-registration test on the
-#            throwaway macOS runner.
+#            throwaway macOS runner, and the op layer's own crates (deno_core,
+#            serde_v8, deno_ops) in a second invocation.
 #   - unit / specs: `cargo test -p unit_tests --test unit` and
 #            `cargo test -p specs_tests --test specs` (2 shards) against them;
 #            on Linux also `integration` (2 shards) and `unit_node`.
