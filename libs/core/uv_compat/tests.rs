@@ -3324,7 +3324,7 @@ async fn pipe_connect_retries_on_error_pipe_busy() {
     .unwrap();
 
   // Client 1 connects, consuming the only instance.
-  let _client1 = ClientOptions::new().open(&pipe_name).unwrap();
+  let client1 = ClientOptions::new().open(&pipe_name).unwrap();
   // Drive the server's ConnectNamedPipe so the pair is fully established.
   server.connect().await.unwrap();
 
@@ -3352,16 +3352,20 @@ async fn pipe_connect_retries_on_error_pipe_busy() {
   tokio::time::sleep(std::time::Duration::from_millis(100)).await;
   assert!(!join.is_finished(), "wait must block while pipe is busy");
 
-  // Free the instance: drop the original server, then create a new one.
-  drop(server);
-  let new_server = ServerOptions::new()
-    .first_pipe_instance(false)
-    .create(&pipe_name)
-    .unwrap();
+  // Free the instance the way a server recycles one: disconnect the first
+  // client and listen again on the same instance. Dropping the server and
+  // creating a fresh instance does not work here: Tokio closes a named
+  // pipe's handle only once the reactor has seen its pending I/O cancelled,
+  // so the new `CreateNamedPipeW` still finds the one allowed instance and
+  // fails with ERROR_PIPE_BUSY; and once the handle is closed the pipe name
+  // has no instance at all, so `WaitNamedPipeW` fails with
+  // ERROR_FILE_NOT_FOUND (as it does in libuv).
+  server.disconnect().unwrap();
+  drop(client1);
   // Drive the server side so the client's CreateFileW can complete.
   let connect_fut = tokio::spawn(async move {
-    new_server.connect().await.unwrap();
-    new_server
+    server.connect().await.unwrap();
+    server
   });
 
   // The retry helper must observe the new instance and succeed.
@@ -3400,7 +3404,7 @@ async fn uv_pipe_connect_busy_then_succeeds() {
     .max_instances(1)
     .create(&pipe_name)
     .unwrap();
-  let _client1 = ClientOptions::new().open(&pipe_name).unwrap();
+  let client1 = ClientOptions::new().open(&pipe_name).unwrap();
   server.connect().await.unwrap();
 
   run_test(async |runtime, uv_loop| {
@@ -3430,18 +3434,17 @@ async fn uv_pipe_connect_busy_then_succeeds() {
       "callback must not fire before the pipe is free"
     );
 
-    // Free up the pipe and create a new server instance so the worker's
-    // WaitNamedPipeW returns.
-    drop(server);
-    let new_server = ServerOptions::new()
-      .first_pipe_instance(false)
-      .create(&pipe_name)
-      .unwrap();
+    // Free the instance (disconnect the first client, listen again on the
+    // same instance) so the worker's WaitNamedPipeW returns. See
+    // `pipe_connect_retries_on_error_pipe_busy` for why the test does not
+    // drop the server and create a new instance.
+    server.disconnect().unwrap();
+    drop(client1);
     // Drive the server side concurrently so the client's CreateFileW
     // (issued from the retry worker) can complete.
     let server_task = tokio::spawn(async move {
-      new_server.connect().await.unwrap();
-      new_server
+      server.connect().await.unwrap();
+      server
     });
 
     // Tick the loop until the callback fires (with timeout).
