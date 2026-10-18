@@ -1,4 +1,4 @@
-import { fork } from "node:child_process";
+import { fork, spawn } from "node:child_process";
 import net from "node:net";
 import process from "node:process";
 
@@ -35,10 +35,18 @@ if (process.argv[3] === "child") {
   server.listen(0, "127.0.0.1", () => {
     port = server.address().port;
 
-    const child = fork(new URL("./server_main.mjs", import.meta.url).pathname, [
-      serialization,
-      "child",
-    ], { serialization });
+    const script = new URL("./server_main.mjs", import.meta.url).pathname;
+    // "restricted": a child without --allow-all must still be able to take a
+    // handle received over IPC (it is registered as adoptable for it).
+    const child = process.argv[3] === "restricted"
+      ? spawn(Deno.execPath(), [
+        "run",
+        "--allow-net=127.0.0.1",
+        script,
+        serialization,
+        "child",
+      ], { stdio: ["inherit", "inherit", "inherit", "ipc"], serialization })
+      : fork(script, [serialization, "child"], { serialization });
 
     child.on("error", (e) => {
       console.error("child error:", e);

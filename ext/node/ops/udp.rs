@@ -709,6 +709,37 @@ pub fn op_node_udp_fd_for_ipc(
   }
 }
 
+/// The descriptor policy of `PipeWrap::open` / `TCPWrap::open` (see
+/// `FdTable::begin_uv_adopt`) for a UDP socket, which takes ownership of the
+/// fd (and closes it on drop): a descriptor received for this isolate may be
+/// adopted once; an untracked one only with all permissions, since the OS
+/// descriptor table is shared by every isolate in the process; stdio and fds
+/// this isolate already tracks are refused.
+#[cfg(unix)]
+fn claim_udp_fd(state: &mut OpState, fd: i32) -> Result<(), NodeUdpError> {
+  if fd < 0 {
+    return Err(std::io::Error::from_raw_os_error(libc::EBADF).into());
+  }
+  let fd_table = state.borrow::<deno_io::FdTable>();
+  if fd_table.is_uv_adoptable(fd) {
+    state.borrow_mut::<deno_io::FdTable>().remove(fd);
+    return Ok(());
+  }
+  if fd <= 2 || fd_table.contains(fd) {
+    return Err(std::io::Error::from_raw_os_error(libc::EEXIST).into());
+  }
+  if state
+    .borrow::<PermissionsContainer>()
+    .check_has_all_permissions(std::path::Path::new(
+      "node:dgram.Socket({ fd })",
+    ))
+    .is_err()
+  {
+    return Err(std::io::Error::from_raw_os_error(libc::EPERM).into());
+  }
+  Ok(())
+}
+
 /// Adopt an existing file descriptor as a UDP socket resource.  Used on the
 /// receiving side of IPC handle passing.
 #[op2]
@@ -720,7 +751,10 @@ pub fn op_node_udp_open(
   #[cfg(unix)]
   {
     use std::os::unix::io::FromRawFd;
-    // SAFETY: The fd was received via SCM_RIGHTS and is a valid, open socket.
+    claim_udp_fd(state, fd)?;
+    // SAFETY: claim_udp_fd accepted the fd: it was received for this isolate
+    // (SCM_RIGHTS), or the isolate has all permissions and nothing else in it
+    // tracks the fd.
     let std_socket = unsafe { std::net::UdpSocket::from_raw_fd(fd) };
     std_socket.set_nonblocking(true)?;
     let local_addr = std_socket.local_addr()?;

@@ -36,6 +36,18 @@
       "output": "server_main.out",
       "exitCode": 0
     },
+    "server_restricted_child_json": {
+      "if": "unix",
+      "args": "run -A server_main.mjs json restricted",
+      "output": "server_main.out",
+      "exitCode": 0
+    },
+    "server_restricted_child_advanced": {
+      "if": "unix",
+      "args": "run -A server_main.mjs advanced restricted",
+      "output": "server_main.out",
+      "exitCode": 0
+    },
     "unlistened_server_json": {
       "if": "unix",
       "args": "run -A unlistened_server_main.mjs json",

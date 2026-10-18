@@ -838,12 +838,24 @@ mod impl_ {
       Some((msg_bytes, raw_fd)) => (Some(msg_bytes), raw_fd),
       None => (None, None),
     };
+    register_received_fd(&state, raw_fd);
 
     Ok(AdvancedIpcReadResult {
       msg_bytes,
       raw_fd,
       constants: state.borrow().borrow::<AdvancedIpcConstants>().clone(),
     })
+  }
+
+  /// A descriptor received with a message (`SCM_RIGHTS`) was created for this
+  /// isolate, so the handle wraps may adopt it without all permissions.
+  fn register_received_fd(state: &Rc<RefCell<OpState>>, raw_fd: Option<i32>) {
+    if let Some(fd) = raw_fd {
+      state
+        .borrow_mut()
+        .borrow_mut::<deno_io::FdTable>()
+        .register_uv_adoptable(fd);
+    }
   }
 
   /// Value signaling that the other end ipc channel has closed.
@@ -890,6 +902,7 @@ mod impl_ {
       Some((msg, raw_fd)) => (msg, raw_fd),
       None => (stop_sentinel(), None),
     };
+    register_received_fd(&state, raw_fd);
     Ok(IpcJsonReadResult { msg, raw_fd })
   }
 
