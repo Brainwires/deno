@@ -91,7 +91,7 @@ where
   /// Set when `store` is a private copy of a shared or resizable buffer (see
   /// [`V8Slice::copy_of_parts`]): the changed bytes go back to that buffer
   /// once the last clone is dropped.
-  copy_back: Option<Arc<CopyBack>>,
+  _copy_back: Option<Arc<CopyBack>>,
   _phantom: PhantomData<T>,
 }
 
@@ -154,7 +154,7 @@ where
       store,
       range: range.start / std::mem::size_of::<T>()
         ..range.end / std::mem::size_of::<T>(),
-      copy_back: None,
+      _copy_back: None,
       _phantom: PhantomData,
     }
   }
@@ -194,7 +194,7 @@ where
     Some(Self {
       store: copy,
       range: 0..len,
-      copy_back: Some(Arc::new(copy_back)),
+      _copy_back: Some(Arc::new(copy_back)),
       _phantom: PhantomData,
     })
   }
