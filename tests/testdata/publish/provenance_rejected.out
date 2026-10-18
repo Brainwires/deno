@@ -1,6 +1,5 @@
 Check [WILDCARD]mod.ts
 Checking for slow types in the public API...
-Check [WILDCARD]mod.ts
 Publishing @foo/provenance-fails@1.0.0 ...
 Warning: the registry did not accept the provenance attestation: Internal Server Error (internalServerError)
   The package was published, but it will not show a provenance badge.
