@@ -2079,10 +2079,8 @@ where the changes are discussed.
       as `libs/vendor/dprint-core` 0.67.4 instead of the pull request's git
       dependency on a bot-hosted copy; drop it once dprint-plugin-typescript and
       -markdown are on dprint-core 0.68+);
-    - security: deny rules are checked again against the symlink-resolved path
-      (#33894, ported to v2.9.7's `check_open_with_requested`; a full deny of
-      the target refuses, a partial one under it does not), and a worker's
-      `permissions.import` applies to its static remote imports (#35114);
+    - security: a worker's `permissions.import` applies to its static remote
+      imports (#35114);
     - correctness: cloned `Request` / `Response` byte bodies no longer share
       storage (#36210); a closed `Deno.watchFs` releases its OS watch at once
       (#36964); setting an event handler attribute to `null` removes its
@@ -2095,22 +2093,22 @@ where the changes are discussed.
       the `poll_pending` loop #35607 gave `ext/signals`) and kills `unref()`'d
       children on restart (#36977).
 
-    Not carried, with the reasons in the reviews: #36260 (op buffer backing
-    stores; does not compile upstream yet), #36253 (would drop `ext/sql`'s error
-    fields until it moves to `registerErrorBuilder`), #36429 (Windows, design
-    open), #36659 (already fixed in v2.9.7; its sync-path hunk would keep an
-    unread body on a kept-alive connection), #35422, #36370, #35927, #36989 (a
-    retention leak with long-lived signals), #32872 (contradicts the Compression
-    Streams WPT), #36763, #36971 (see item 42), #33517 (already in v2.9.7), and
-    #36606, which item 68 carries with the same review fix.
+    Carried elsewhere: #33894 (item 69), #36260's ground (item 70), #36971's
+    (item 71, hickory 0.26) and #36606 (item 68). Not carried, with the reasons
+    in the reviews: #36253 (would drop `ext/sql`'s error fields until it moves
+    to `registerErrorBuilder`), #36429 (Windows, design open), #36659 (already
+    fixed in v2.9.7; its sync-path hunk would keep an unread body on a
+    kept-alive connection), #35422, #36370, #35927, #36989 (a retention leak
+    with long-lived signals), #32872 (contradicts the Compression Streams WPT),
+    #36763 and #33517 (already in v2.9.7).
 
     Tests: each pull request's own (`deno_http_h1`, `tests/unit` serve, http,
     body, fetch, streams, event_target, event, console, timers, fs_events,
-    urlpattern, websocket and worker suites, `tests/specs` serve, run,
-    permission, worker, node, install and fmt, the watcher and lint integration
-    tests); new here: the `console_test` revoked-proxy cases. The new serve,
-    body, event, streams, timers and fmt tests were run against the
-    `rel/denext22` build first and fail there.
+    urlpattern, websocket and worker suites, `tests/specs` serve, run, worker,
+    node, install and fmt, the watcher and lint integration tests); new here:
+    the `console_test` revoked-proxy cases. The new serve, body, event, streams,
+    timers and fmt tests were run against the `rel/denext22` build first and
+    fail there.
 
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-72) are what the prebuilt `libdenort` carries. The CLI-side parts (for
