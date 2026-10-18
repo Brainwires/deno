@@ -454,13 +454,15 @@ If you modified your global cache, run again with the --reload flag to restore i
     )
     .assert_exit_code(10);
 
-  // test it properly checks the checksum when loading from the cache
+  // the rejected bytes were not cached, so the next run downloads the module
+  // again and checks it again instead of loading it from the cache
   test_context
     .new_command()
     .args("run main.ts")
     .run()
     .assert_matches_text(
-      "error: Integrity check failed in package. The package may have been tampered with.
+      "Download http://127.0.0.1:4250/@denotest/bad-manifest-checksum/1.0.0/mod.ts
+error: Integrity check failed in package. The package may have been tampered with.
 
   Specifier: http://127.0.0.1:4250/@denotest/bad-manifest-checksum/1.0.0/mod.ts
   Actual: 9a30ac96b5d5c1b67eca69e1e2cf0798817d9578c8d7d904a81a67b983b35cba
