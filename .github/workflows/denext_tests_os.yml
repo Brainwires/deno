@@ -112,20 +112,26 @@ jobs:
       # serde_v8), which upstream's list leaves out: they hold the regression
       # tests for op buffers that are shared or resizable (DENEXT.md item 70).
       # A separate invocation, as `cargo test -p deno_core` selects its own
-      # default engine features. One test thread: deno_core's uv_compat tests
-      # use the terminal, named pipes and raw descriptor numbers, which
-      # parallel tests in the same process race for (tty state on macOS,
-      # "All pipe instances are busy" on Windows, a closed descriptor that
-      # another test reused, now and then a crash). The two Windows named-pipe
-      # busy-retry tests are skipped: they fail on the hosted runner with
-      # "All pipe instances are busy" on development-denext as well, serially
-      # too.
+      # default engine features. The tests run in parallel (DENEXT.md item
+      # 74), except the ones that create a V8 snapshot: a snapshot-creating
+      # isolate crashes V8 when any other isolate runs in the process at the
+      # same time (SIGSEGV / SIGTRAP in the read-only heap), and
+      # snapshot_test_lock() only keeps two of them apart. They run on their
+      # own afterwards, on one thread.
       - name: Test core libs
         run: >-
           cargo test --locked --lib -p deno_core -p serde_v8 -p deno_ops --
-          --test-threads=1
-          --skip uv_compat::tests::pipe_connect_retries_on_error_pipe_busy
-          --skip uv_compat::tests::uv_pipe_connect_busy_then_succeeds
+          --skip runtime::tests::snapshot::
+          --skip runtime::tests::jsrealm::es_snapshot
+          --skip modules::tests::dynamic_imports_snapshot
+          --skip modules::tests::import_meta_snapshot
+      - name: Test core libs (snapshot-creating tests, one thread)
+        run: >-
+          cargo test --locked --lib -p deno_core -- --test-threads=1
+          runtime::tests::snapshot::
+          runtime::tests::jsrealm::es_snapshot
+          modules::tests::dynamic_imports_snapshot
+          modules::tests::import_meta_snapshot
       # Registers a throwaway bundle with LaunchServices and checks the scheme
       # resolves to it; `#[ignore]`d because it writes the user's LaunchServices
       # database, which is exactly what a hosted macOS runner is for.

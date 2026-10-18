@@ -2135,6 +2135,70 @@ where the changes are discussed.
     cross-origin downloads never reach the dialog) and `cef_network_quiet_test`
     (each CEF default survives an emptied value). This fork's e2e is unchanged.
 
+74. **`test(core)`: deno_core's lib tests run in parallel, and the Windows
+    named-pipe busy tests run again** (`libs/core/uv_compat/tests.rs`,
+    `libs/core/runtime/tests/snapshot.rs`,
+    `.github/workflows/denext_tests_os.yml`). Test-only; no runtime change. The
+    `Test core libs` step had run deno_core, serde_v8 and deno_ops on one test
+    thread and skipped two Windows tests.
+    - The crashes are V8's, not uv_compat's. Core dumps of the suite run in
+      parallel (Ubuntu, `RUST_BACKTRACE=full`, `gdb` on the cores) crash in V8's
+      read-only heap: SIGSEGVs in `ReadOnlySpace::EnsureSpaceForAllocation`,
+      `ReadOnlyPageObjectIterator::Next` (under `Snapshot::Create`),
+      `AllocateRawOneByteInternalizedString` and `HeapObject::SizeFromMap`, and
+      V8 aborts (SIGTRAP). On Windows the same runs end in
+      `STATUS_ACCESS_VIOLATION` or libc++ hardening aborts
+      (`STATUS_STACK_BUFFER_OVERRUN`). The crashing thread is a test that
+      creates a snapshot (`JsRuntimeForSnapshot`) or, less often, a plain
+      `JsRuntime::new` running beside one. `snapshot_test_lock()` keeps two
+      snapshot creators apart (denoland/deno_core_revamp#17), but a snapshot
+      creator also crashes V8 next to any other isolate in the process. Two
+      tests from denoland/deno#36627
+      (`shared_array_buffer_available_during_snapshot`,
+      `shared_array_buffer_primordial_from_snapshot`) did not take the lock at
+      all; they take it now. That alone did not fix it: with the lock on every
+      creator, 30 of 30 parallel runs still crashed on Ubuntu and 24 of 30 on
+      Windows, each dump showing a lock-holding snapshot test beside ordinary
+      runtimes (before, 6 of 15 and 3 of 15). So the step skips the
+      snapshot-creating tests (`runtime::tests::snapshot::`,
+      `runtime::tests::jsrealm::es_snapshot`,
+      `modules::tests::dynamic_imports_snapshot`,
+      `modules::tests::import_meta_snapshot`) in the parallel run and runs them
+      afterwards on one thread. Products create a snapshot only at build time,
+      in a process of its own. The uv_compat tests never crashed: 200 parallel
+      runs of them alone passed on Ubuntu, macOS and Windows.
+    - The Windows busy tests (`pipe_connect_retries_on_error_pipe_busy`,
+      `uv_pipe_connect_busy_then_succeeds`): the test setup was wrong; the retry
+      was right. To end the busy state, the tests dropped the only server
+      instance (`max_instances(1)`) and created a new one. Tokio closes a named
+      pipe handle only once its reactor has seen the pending I/O cancelled, so
+      the new `CreateNamedPipeW` still found the one allowed instance and failed
+      with `ERROR_PIPE_BUSY` ("All pipe instances are busy"). Waiting for the
+      close does not help either: the name then has no instance, and
+      `WaitNamedPipeW` fails with `ERROR_FILE_NOT_FOUND`, as it does in libuv. A
+      standalone Tokio reproduction on a Windows x64 host showed both outcomes.
+      The tests now free the instance the way a server recycles one (disconnect
+      the first client, listen again on the same instance). The retry
+      (`WaitNamedPipeW`, then `CreateFileW`, looping on a lost race, as libuv's
+      `pipe_connect_thread_proc` does) is unchanged. The reproduction passed 20
+      of 20; on CI the two tests passed 10 of 10.
+    - Two real parallel-test races in uv_compat. The saved termios that
+      `uv_tty_reset_mode` restores is process-global, as in libuv, and every TTY
+      close takes its spinlock, so `uv_tty_reset_mode` could answer `UV_EBUSY`
+      (-16, seen on macOS) or restore another test's terminal. The TTY tests now
+      hold one `tokio::sync::Mutex`. `assert_fd_closed` had failed when another
+      test reused the closed descriptor number (Ubuntu, 1 run in 18 before the
+      fix). It now compares the open file (device and inode from `fstat`)
+      recorded before the close.
+    - Still open, and not from this change: on macOS a snapshot test can crash
+      on one thread too. The base commit failed 4 of 40 runs of the snapshot
+      tests on one thread, `es_snapshot` alone 1 of 40, and the whole deno_core
+      suite on one thread (the step as it was) 2 of 10. The abort is malloc
+      rejecting a `free()` (`find_zone_and_free`, an invalid or double free)
+      from `~BackingStore` under `ArrayBufferSweeper` while `JsRuntime`'s drop
+      disposes an isolate restored from a snapshot. Linux and Windows do not
+      show it. Not yet root-caused.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73) are what the prebuilt `libdenort` carries. The CLI-side parts (for
 example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's
