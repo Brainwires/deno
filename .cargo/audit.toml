@@ -8,15 +8,6 @@
 
 [advisories]
 ignore = [
-  # hickory-proto: NSEC3 closest-encloser proof validation can loop on
-  # cross-zone responses. The code is DNSSEC validation, which is only compiled
-  # with hickory's `dnssec-*` features; the tree enables only
-  # default/std/serde/access-control (checked with
-  # `cargo tree -e features -i hickory-proto --target all`). Since the move to
-  # hickory 0.26 (DENEXT.md item 71), cargo audit no longer reports this
-  # advisory for the locked version either; the entry stays until that is
-  # confirmed against the advisory's patched ranges.
-  "RUSTSEC-2026-0118",
   # rsa 0.9.x: Marvin timing side channel in PKCS#1 v1.5 decryption. No fixed
   # release exists (upstream Deno carries the same crate). Accepted risk, not
   # unreachable: WebCrypto RSA-OAEP and node:crypto privateDecrypt use it.

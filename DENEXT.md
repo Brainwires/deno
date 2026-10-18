@@ -1078,25 +1078,25 @@ where the changes are discussed.
     quick-xml 0.41.0 through plist 1.10.0 (RUSTSEC-2026-0194, -0195), unicycle
     0.10.3 (RUSTSEC-2026-0298) and crossbeam-epoch 0.9.21 (RUSTSEC-2026-0204),
     plus the crates flagged unsound or yanked (anyhow, faster-hex, memmap2, rand
-    0.8.6, scc, chacha20, der, digest, spin). `.cargo/audit.toml` lists the two
-    left, each with its reasoning: hickory-proto RUSTSEC-2026-0118 (DNSSEC
-    validation, not compiled: no `dnssec-*` feature is enabled) and rsa
-    RUSTSEC-2023-0071 (Marvin; no fixed release exists, an accepted risk for RSA
-    PKCS#1 v1.5 decryption in WebCrypto and `node:crypto`). hickory-proto
-    RUSTSEC-2026-0119 was ignored here until item 71 moved the tree to hickory
-    0.26. Two bumps change an API the tree uses: zip 9's `enclosed_name` drops a
-    leading root or drive prefix instead of refusing the name, so the laufey
-    archive extractor (`cli/tools/desktop.rs`) refuses an absolute entry name
-    itself first (`extract_zip_rejects_absolute_path`); and aws-lc-rs 1.18
-    stabilized ML-DSA, so `ext/crypto/mldsa.rs` uses `aws_lc_rs::signature::*`
-    and `to_pkcs8v1` (the deprecated `unstable` aliases failed clippy). The
-    `denext
-    tests` workflow runs `cargo audit` and fails on any advisory not
-    listed there. laufey `integration/denext22` (`58c0fdb`) does the same for
-    the hosts' `Cargo.lock` (bytes 1.12.1 for RUSTSEC-2026-0007,
-    crossbeam-epoch, quick-xml 0.41.0) with a `cargo audit` job in its CI; this
-    fork pins it (no API change). CEF (149.0.5) has no audit database; it
-    follows Chromium releases through laufey's `CEF_VERSION`.
+    0.8.6, scc, chacha20, der, digest, spin). `.cargo/audit.toml` lists the one
+    left, with its reasoning: rsa RUSTSEC-2023-0071 (Marvin; no fixed release
+    exists, an accepted risk for RSA PKCS#1 v1.5 decryption in WebCrypto and
+    `node:crypto`). hickory-proto RUSTSEC-2026-0118 (DNSSEC validation, not
+    compiled) and -0119 were ignored here until item 71 moved the tree to
+    hickory 0.26, which neither advisory affects. Two bumps change an API the
+    tree uses: zip 9's `enclosed_name` drops a leading root or drive prefix
+    instead of refusing the name, so the laufey archive extractor
+    (`cli/tools/desktop.rs`) refuses an absolute entry name itself first
+    (`extract_zip_rejects_absolute_path`); and aws-lc-rs 1.18 stabilized ML-DSA,
+    so `ext/crypto/mldsa.rs` uses `aws_lc_rs::signature::*` and `to_pkcs8v1`
+    (the deprecated `unstable` aliases failed clippy). The `denext
+    tests`
+    workflow runs `cargo audit` and fails on any advisory not listed there.
+    laufey `integration/denext22` (`58c0fdb`) does the same for the hosts'
+    `Cargo.lock` (bytes 1.12.1 for RUSTSEC-2026-0007, crossbeam-epoch, quick-xml
+    0.41.0) with a `cargo audit` job in its CI; this fork pins it (no API
+    change). CEF (149.0.5) has no audit database; it follows Chromium releases
+    through laufey's `CEF_VERSION`.
 
 43. **Upstream batch: `main` picks and open pull requests** (from `denext.22`).
     Cherry-picked from denoland/deno `main` with `-x`: `AbortSignal.any()`
@@ -2043,7 +2043,9 @@ where the changes are discussed.
     unit tests (the pull request's answer-section and server-order cases), the
     `test_resolve_dns` integration test on hickory-server 0.26, and the
     `node:dns` unit and node_compat tests. Before: `cargo audit` on the 0.25.2
-    lock without the ignore reports RUSTSEC-2026-0119.
+    lock without the ignore reports RUSTSEC-2026-0119. RUSTSEC-2026-0118 does
+    not affect 0.26 either, so `.cargo/audit.toml` no longer ignores any hickory
+    advisory.
 
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-71) are what the prebuilt `libdenort` carries. The CLI-side parts (for
