@@ -22,6 +22,7 @@ pub use magic::bigint::BigInt;
 pub use magic::buffer::JsBuffer;
 pub use magic::buffer::ToJsBuffer;
 pub use magic::bytestring::ByteString;
+pub use magic::copy_back;
 pub use magic::detached_buffer::DetachedBuffer;
 pub use magic::string_or_buffer::StringOrBuffer;
 pub use magic::u16string::U16String;

@@ -932,6 +932,26 @@ pub fn from_arg_array_or_buffer(
   }
 }
 
+fn buffer_can_copy_invalid_backing_store(buffer_type: BufferType) -> bool {
+  matches!(
+    buffer_type,
+    BufferType::Slice(RefType::Ref, _)
+      | BufferType::Vec(_)
+      | BufferType::BoxSlice(_)
+      | BufferType::Bytes
+      | BufferType::BytesMut
+  )
+}
+
+/// Mutable slices and raw pointers get a copy of a shared or resizable buffer
+/// whose changes are written back when the call ends.
+fn buffer_needs_copy_back(buffer_type: BufferType) -> bool {
+  matches!(
+    buffer_type,
+    BufferType::Slice(RefType::Mut, _) | BufferType::Ptr(_, _)
+  )
+}
+
 pub fn from_arg_buffer(
   generator_state: &mut GeneratorState,
   arg_ident: &Ident,
@@ -947,6 +967,10 @@ pub fn from_arg_buffer(
   let to_v8_slice = if matches!(buffer_mode, BufferMode::Detach) {
     generator_state.needs_scope = true;
     gs_quote!(generator_state(scope) => { deno_core::_ops::to_v8_slice_detachable::<#array>(&mut #scope, #arg_ident) })
+  } else if buffer_can_copy_invalid_backing_store(buffer_type) {
+    quote!(deno_core::_ops::to_v8_slice_or_copy::<#array>(#arg_ident))
+  } else if buffer_needs_copy_back(buffer_type) {
+    quote!(deno_core::_ops::to_v8_slice_mut_or_copy::<#array>(#arg_ident))
   } else {
     quote!(deno_core::_ops::to_v8_slice::<#array>(#arg_ident))
   };
@@ -980,6 +1004,10 @@ pub fn from_arg_arraybuffer(
 
   let to_v8_slice = if matches!(buffer_mode, BufferMode::Detach) {
     quote!(to_v8_slice_buffer_detachable)
+  } else if buffer_can_copy_invalid_backing_store(buffer_type) {
+    quote!(to_v8_slice_buffer_or_copy)
+  } else if buffer_needs_copy_back(buffer_type) {
+    quote!(to_v8_slice_buffer_mut_or_copy)
   } else {
     quote!(to_v8_slice_buffer)
   };
@@ -1013,6 +1041,10 @@ pub fn from_arg_any_buffer(
 
   let to_v8_slice = if matches!(buffer_mode, BufferMode::Detach) {
     quote!(to_v8_slice_any_detachable)
+  } else if buffer_can_copy_invalid_backing_store(buffer_type) {
+    quote!(to_v8_slice_any_or_copy)
+  } else if buffer_needs_copy_back(buffer_type) {
+    quote!(to_v8_slice_any_mut_or_copy)
   } else {
     quote!(to_v8_slice_any)
   };

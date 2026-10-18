@@ -5,7 +5,9 @@ use std::marker::PhantomData;
 use std::ops::Deref;
 use std::ops::DerefMut;
 use std::ops::Range;
+use std::sync::Arc;
 
+use super::copy_back::CopyBack;
 use super::transl8::FromV8;
 
 /// A type that may be represented as a [`V8Slice`].
@@ -86,6 +88,10 @@ where
 {
   pub(crate) store: v8::SharedRef<v8::BackingStore>,
   pub(crate) range: Range<usize>,
+  /// Set when `store` is a private copy of a shared or resizable buffer (see
+  /// [`V8Slice::copy_of_parts`]): the changed bytes go back to that buffer
+  /// once the last clone is dropped.
+  copy_back: Option<Arc<CopyBack>>,
   _phantom: PhantomData<T>,
 }
 
@@ -148,8 +154,49 @@ where
       store,
       range: range.start / std::mem::size_of::<T>()
         ..range.end / std::mem::size_of::<T>(),
+      copy_back: None,
       _phantom: PhantomData,
     }
+  }
+
+  /// Create a V8Slice over a private copy of the bytes at `range` in `target`,
+  /// a shared or resizable backing store that must not be lent out as a Rust
+  /// slice. The bytes changed through the slice are written back to `target`
+  /// when the last clone is dropped: atomically for a shared store, and for a
+  /// resizable one on the current thread (or, when dropped elsewhere, on this
+  /// thread before it resolves its next async op), clamped to its length at
+  /// that time. Returns `None` for an element type other than bytes.
+  ///
+  /// # Safety
+  ///
+  /// Must be called on the thread that owns `target`, with no JavaScript
+  /// running, and `range` must be within `target`'s current bounds.
+  pub unsafe fn copy_of_parts(
+    target: v8::SharedRef<v8::BackingStore>,
+    range: Range<usize>,
+  ) -> Option<Self> {
+    if std::mem::size_of::<T>() != 1 {
+      return None;
+    }
+    // SAFETY: the caller is on the owner thread with no JavaScript running.
+    let original =
+      unsafe { super::copy_back::snapshot(&target, range.start, range.len()) };
+    let len = original.len();
+    let copy = v8::ArrayBuffer::new_backing_store_from_vec(original.clone())
+      .make_shared();
+    let copy_back = CopyBack {
+      copy: copy.clone(),
+      target,
+      byte_offset: range.start,
+      original: original.into_boxed_slice(),
+      owner: std::thread::current().id(),
+    };
+    Some(Self {
+      store: copy,
+      range: 0..len,
+      copy_back: Some(Arc::new(copy_back)),
+      _phantom: PhantomData,
+    })
   }
 
   fn as_slice(&self) -> &[T] {

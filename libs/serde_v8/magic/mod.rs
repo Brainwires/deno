@@ -4,6 +4,7 @@ pub mod any_value;
 pub mod bigint;
 pub mod buffer;
 pub mod bytestring;
+pub mod copy_back;
 pub mod detached_buffer;
 mod external_pointer;
 mod global_value;

@@ -1980,11 +1980,44 @@ where the changes are discussed.
     `--allow-write` and with a scoped `--allow-write=allowed`, and
     `--deny-read`).
 
+70. **`fix(core)`: op buffers never borrow shared or resizable memory**
+    (`libs/core/runtime/ops.rs`, `libs/ops/op2`, `libs/serde_v8`). Ports
+    denoland/deno#36260, which does not compile upstream: the new fast-call code
+    handed the op `#temp.as_mut()`, borrowing a temporary for less than the
+    slice lifetime the op signature asks for (E0716 / E0521); the slice is now
+    cast to that lifetime, which is sound because the temporary lives to the end
+    of the fast call. The bug: op buffer arguments (`&[u8]`, `&mut [u8]`, raw
+    pointers, `JsBuffer` / `V8Slice` held across an await) borrowed the backing
+    store directly even when it was a `SharedArrayBuffer` (another thread writes
+    it while Rust holds a slice) or a resizable `ArrayBuffer` (JavaScript can
+    shrink it while an async op holds a slice; V8 decommits the pages and the
+    op's write faults). The pull request refuses such buffers for mutable
+    arguments with a `TypeError`, which would break Node code that reads into
+    `SharedArrayBuffer`-backed views (`fs.readSync` / `readvSync` / `read`,
+    `crypto.randomFill(Sync)`, `TextEncoder.encodeInto`, `Deno.readSync`). Here
+    they get a sound fallback instead: the op works on a private copy, and only
+    the bytes it changed are written back, with relaxed atomic stores for a
+    shared buffer, and for a resizable one on its own thread, clamped to its
+    current length. A sync op writes back when the call ends. A `JsBuffer`
+    writes back when its last clone drops; if that happens on another thread (a
+    blocking task), the bytes are queued and applied by the op driver before the
+    next op resolves. Bytes the op did not change are left alone, so JavaScript
+    or a worker writing the buffer while an async op runs is not overwritten.
+    Read-only arguments are copied as in the pull request. Tests: `deno_core`
+    `test_op_async_buffer_resized_during_op` (an op holding a slice across an
+    await while JavaScript shrinks a 16 MiB resizable buffer to 16 bytes),
+    `test_op_async_buffer_shared_and_cross_thread`, and the pull request's sync,
+    fast-call and `JsBuffer` cases changed from expecting a `TypeError` to
+    expecting the write-back; `unit_node/shared_buffer_test.ts`; the regenerated
+    `op2` expected outputs; the enabled node_compat `test-crypto-random.js`,
+    `test-buffer-sharedarraybuffer.js`, `test-buffer-resizable.js` and the
+    worker `SharedArrayBuffer` tests.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
-64-69) are what the prebuilt `libdenort` carries. The CLI-side parts (for
-example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's
-launchers) are in the branch too, but a stock CLI does not run them; denext's
-own launcher provides that environment.
+64-70) are what the prebuilt `libdenort` carries. The CLI-side parts
+(for example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged
+app's launchers) are in the branch too, but a stock CLI does not run them;
+denext's own launcher provides that environment.
 
 The laufey backend hosts are built from
 [Brainwires/laufey](https://github.com/Brainwires/laufey) branch

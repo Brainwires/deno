@@ -214,6 +214,9 @@ impl<C: OpMappingContext> OpDriver<C> for FuturesUnorderedDriver<C> {
     &self,
     cx: &mut Context,
   ) -> Poll<(PromiseId, OpId, OpResult<C>)> {
+    // An async op may have finished with a copy of a resizable buffer that was
+    // dropped on another thread; its changes land before the op resolves.
+    serde_v8::copy_back::apply_pending_copy_backs();
     let mut ops = self.completed_ops.borrow_mut();
     if ops.is_empty() {
       self.completed_waker.register(cx.waker());
