@@ -1312,6 +1312,7 @@ mod tests {
       op_async_fill_after_yield,
       op_async_set_first_after_yield,
       op_async_fill_on_thread,
+      op_stash_buffer,
       op_async_external,
       op_async_serde_option_v8,
 
@@ -3252,6 +3253,80 @@ mod tests {
     )
     .await?;
     Ok(())
+  }
+
+  static STASHED_BUFFERS: std::sync::Mutex<Vec<JsBuffer>> =
+    std::sync::Mutex::new(Vec::new());
+
+  /// Keeps its buffer past the end of the call (and of the runtime).
+  #[op2]
+  fn op_stash_buffer(#[buffer] buf: JsBuffer) {
+    STASHED_BUFFERS.lock().unwrap().push(buf);
+  }
+
+  fn wait_for_no_pending_copy_backs() {
+    // Other tests queue write-backs briefly too; wait for them to settle.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while serde_v8::copy_back::pending_copy_backs() != 0 {
+      assert!(
+        std::time::Instant::now() < deadline,
+        "queued write-backs were not freed"
+      );
+      std::thread::sleep(Duration::from_millis(10));
+    }
+  }
+
+  #[test]
+  pub fn test_copy_back_queue_freed_with_runtime() {
+    // A copy of a resizable buffer outlives the runtime (a terminated
+    // worker) that made it, and is dropped on another thread: before the
+    // runtime is gone (queued, then freed with the runtime) and after it.
+    for drop_while_alive in [true, false] {
+      let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+      let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
+      let worker = std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+          .enable_all()
+          .build()
+          .unwrap();
+        rt.block_on(async move {
+          let mut runtime = JsRuntime::new(RuntimeOptions {
+            extensions: vec![testing::init()],
+            ..Default::default()
+          });
+          runtime
+            .execute_script(
+              "",
+              r"
+              const { op_stash_buffer } = Deno.core.ops;
+              const view = new Uint8Array(
+                new ArrayBuffer(8, { maxByteLength: 16 }),
+              );
+              op_stash_buffer(view);",
+            )
+            .unwrap();
+          ready_tx.send(()).unwrap();
+          go_rx.recv().unwrap();
+          drop(runtime);
+        });
+      });
+      ready_rx.recv().unwrap();
+      let stashed = std::mem::take(&mut *STASHED_BUFFERS.lock().unwrap());
+      assert_eq!(stashed.len(), 1);
+      if drop_while_alive {
+        // The write-back is queued for the worker's runtime...
+        drop(stashed);
+        assert!(serde_v8::copy_back::pending_copy_backs() >= 1);
+        go_tx.send(()).unwrap();
+        worker.join().unwrap();
+      } else {
+        go_tx.send(()).unwrap();
+        worker.join().unwrap();
+        // ...or, with the runtime gone, never queued.
+        drop(stashed);
+      }
+      wait_for_no_pending_copy_backs();
+    }
   }
 
   #[tokio::test]

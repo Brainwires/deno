@@ -190,6 +190,7 @@ where
       byte_offset: range.start,
       original: original.into_boxed_slice(),
       owner: std::thread::current().id(),
+      queue: CopyBack::current_queue(),
     };
     Some(Self {
       store: copy,

@@ -8,6 +8,7 @@ use std::future::poll_fn;
 use std::future::ready;
 use std::pin::Pin;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::task::Context;
 use std::task::Poll;
 use std::task::Waker;
@@ -65,6 +66,9 @@ pub struct FuturesUnorderedDriver<
   completed_ops: Rc<RefCell<VecDeque<PendingOp<C>>>>,
   completed_waker: Rc<UnsyncWaker>,
   arena: FutureArena<PendingOp<C>, PendingOpInfo>,
+  /// Write-backs of buffer copies dropped on other threads (see
+  /// `serde_v8::copy_back`). Owned here so they go away with the runtime.
+  copy_backs: Arc<serde_v8::copy_back::CopyBackQueue>,
 }
 
 impl<C: OpMappingContext + 'static> Drop for FuturesUnorderedDriver<C> {
@@ -84,6 +88,8 @@ impl<C: OpMappingContext> Default for FuturesUnorderedDriver<C> {
       completed_waker.clone(),
     )))
     .into();
+    let copy_backs = serde_v8::copy_back::CopyBackQueue::new();
+    copy_backs.make_current();
 
     Self {
       len: Default::default(),
@@ -93,6 +99,7 @@ impl<C: OpMappingContext> Default for FuturesUnorderedDriver<C> {
       queue,
       completed_waker,
       arena: Default::default(),
+      copy_backs,
     }
   }
 }
@@ -216,7 +223,8 @@ impl<C: OpMappingContext> OpDriver<C> for FuturesUnorderedDriver<C> {
   ) -> Poll<(PromiseId, OpId, OpResult<C>)> {
     // An async op may have finished with a copy of a resizable buffer that was
     // dropped on another thread; its changes land before the op resolves.
-    serde_v8::copy_back::apply_pending_copy_backs();
+    self.copy_backs.make_current();
+    self.copy_backs.apply();
     let mut ops = self.completed_ops.borrow_mut();
     if ops.is_empty() {
       self.completed_waker.register(cx.waker());
@@ -238,6 +246,7 @@ impl<C: OpMappingContext> OpDriver<C> for FuturesUnorderedDriver<C> {
       h.abort()
     }
     self.completed_ops.borrow_mut().clear();
+    self.copy_backs.clear();
     self.queue.queue.queue.borrow_mut().clear();
   }
 

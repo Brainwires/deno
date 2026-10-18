@@ -11,7 +11,10 @@
 //! length. Bytes the op did not change are left alone, so JavaScript (or
 //! another thread) writing the buffer while the op runs is not overwritten.
 
+use std::cell::RefCell;
+use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::Weak;
 use std::sync::atomic::AtomicU8;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
@@ -111,10 +114,12 @@ pub(crate) struct CopyBack {
   pub(crate) byte_offset: usize,
   pub(crate) original: Box<[u8]>,
   pub(crate) owner: ThreadId,
+  /// Where a write-back dropped on another thread goes: the queue of the
+  /// runtime that made the copy. Dead once that runtime is gone.
+  pub(crate) queue: Weak<CopyBackQueue>,
 }
 
 struct PendingCopyBack {
-  owner: ThreadId,
   target: v8::SharedRef<v8::BackingStore>,
   byte_offset: usize,
   original: Box<[u8]>,
@@ -125,8 +130,98 @@ struct PendingCopyBack {
 // a pending write-back touches the target only on its owner thread.
 unsafe impl Send for PendingCopyBack {}
 
-static PENDING: Mutex<Vec<PendingCopyBack>> = Mutex::new(Vec::new());
-static PENDING_COUNT: AtomicUsize = AtomicUsize::new(0);
+/// Queued write-backs alive in the process (see [`pending_copy_backs`]).
+static LIVE_PENDING: AtomicUsize = AtomicUsize::new(0);
+
+impl Drop for PendingCopyBack {
+  fn drop(&mut self) {
+    LIVE_PENDING.fetch_sub(1, Ordering::Relaxed);
+  }
+}
+
+/// The number of write-backs queued and not yet applied or discarded, across
+/// all runtimes. For tests.
+#[doc(hidden)]
+pub fn pending_copy_backs() -> usize {
+  LIVE_PENDING.load(Ordering::Relaxed)
+}
+
+/// The write-backs other threads handed to one runtime for its resizable
+/// buffers. The runtime owns it (its op driver holds the only strong
+/// reference), so when the runtime is torn down its queued entries are freed
+/// with it, and later ones are dropped at once instead of queued.
+#[derive(Default)]
+pub struct CopyBackQueue {
+  entries: Mutex<Vec<PendingCopyBack>>,
+  len: AtomicUsize,
+}
+
+thread_local! {
+  static CURRENT_QUEUE: RefCell<Weak<CopyBackQueue>> =
+    const { RefCell::new(Weak::new()) };
+}
+
+impl CopyBackQueue {
+  pub fn new() -> Arc<Self> {
+    Arc::new(Self::default())
+  }
+
+  /// Makes this the queue that copies made on this thread report to. A
+  /// runtime calls it when it starts and whenever it polls its ops.
+  pub fn make_current(self: &Arc<Self>) {
+    CURRENT_QUEUE.with(|current| {
+      let mut current = current.borrow_mut();
+      if !std::ptr::eq(current.as_ptr(), Arc::as_ptr(self)) {
+        *current = Arc::downgrade(self);
+      }
+    });
+  }
+
+  fn current() -> Weak<Self> {
+    CURRENT_QUEUE.with(|current| current.borrow().clone())
+  }
+
+  fn push(&self, pending: PendingCopyBack) {
+    let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+    entries.push(pending);
+    self.len.store(entries.len(), Ordering::Release);
+  }
+
+  /// Applies the queued write-backs. Called on the owner thread by the op
+  /// driver before it resolves an async op.
+  pub fn apply(&self) {
+    if self.len.load(Ordering::Acquire) == 0 {
+      return;
+    }
+    let pending = {
+      let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+      self.len.store(0, Ordering::Release);
+      std::mem::take(&mut *entries)
+    };
+    for p in pending {
+      // SAFETY: the op driver calls this on the owner thread, running Rust
+      // code, not JavaScript.
+      unsafe { write_back(&p.target, p.byte_offset, &p.original, &p.changed) };
+    }
+  }
+
+  /// Drops the queued write-backs without applying them (runtime shutdown).
+  pub fn clear(&self) {
+    let pending = {
+      let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+      self.len.store(0, Ordering::Release);
+      std::mem::take(&mut *entries)
+    };
+    drop(pending);
+  }
+}
+
+impl CopyBack {
+  /// The queue copies made now on this thread report to.
+  pub(crate) fn current_queue() -> Weak<CopyBackQueue> {
+    CopyBackQueue::current()
+  }
+}
 
 impl Drop for CopyBack {
   fn drop(&mut self) {
@@ -152,37 +247,17 @@ impl Drop for CopyBack {
       return;
     }
     // A resizable buffer can only be written on its own thread: hand the
-    // bytes to it. It applies them before it resolves the next op.
-    let pending = PendingCopyBack {
-      owner: self.owner,
+    // bytes to its runtime, which applies them before it resolves the next
+    // op. If that runtime is gone, so is the buffer's isolate: drop them.
+    let Some(queue) = self.queue.upgrade() else {
+      return;
+    };
+    LIVE_PENDING.fetch_add(1, Ordering::Relaxed);
+    queue.push(PendingCopyBack {
       target: self.target.clone(),
       byte_offset: self.byte_offset,
       original: std::mem::take(&mut self.original),
       changed: changed.into(),
-    };
-    let mut queue = PENDING.lock().unwrap_or_else(|e| e.into_inner());
-    queue.push(pending);
-    PENDING_COUNT.fetch_add(1, Ordering::SeqCst);
-  }
-}
-
-/// Applies the write-backs other threads queued for buffers this thread owns.
-/// Called by the op driver before it resolves an async op.
-pub fn apply_pending_copy_backs() {
-  if PENDING_COUNT.load(Ordering::SeqCst) == 0 {
-    return;
-  }
-  let me = std::thread::current().id();
-  let mine = {
-    let mut queue = PENDING.lock().unwrap_or_else(|e| e.into_inner());
-    let (mine, others): (Vec<_>, Vec<_>) =
-      queue.drain(..).partition(|p| p.owner == me);
-    *queue = others;
-    PENDING_COUNT.fetch_sub(mine.len(), Ordering::SeqCst);
-    mine
-  };
-  for p in mine {
-    // SAFETY: this is the owner thread, running Rust code, not JavaScript.
-    unsafe { write_back(&p.target, p.byte_offset, &p.original, &p.changed) };
+    });
   }
 }
