@@ -1935,11 +1935,12 @@ where the changes are discussed.
     Not carried: #36719 (replaced, above); #37020
     (`deno desktop
     --engine=quickjs` only; a draft); #36201, #35614, #33210,
-    #36442, #36479, #36103 (red upstream CI in their own suites); #36330, #36831
-    (rework the installer's bin linking and lifecycle scripts, which items 53,
-    54 and 58 of the node-compat line also rewrite; port them on top of that);
-    #36349 (raw fd adoption, needs sidecar / `spawnSelf` testing); #36909 (perf,
-    not measured); #36455 (4.3k lines, needs a real `uv_poll` addon).
+    #36442, #36479, #36103 (red upstream CI in their own suites; carried with
+    fixes in item 75); #36330, #36831 (rework the installer's bin linking and
+    lifecycle scripts, which items 53, 54 and 58 of the node-compat line also
+    rewrite; port them on top of that); #36349 (raw fd adoption, needs sidecar /
+    `spawnSelf` testing; carried in item 75); #36909 (perf, not measured);
+    #36455 (4.3k lines, needs a real `uv_poll` addon).
 
     Tests: each pull request's own (`tests/unit_node`, `tests/specs`,
     `tests/napi` where present, Rust unit tests), plus `unit_node/tls_test.ts`'s
@@ -2096,10 +2097,11 @@ where the changes are discussed.
     Carried elsewhere: #33894 (item 69), #36260's ground (item 70), #36971's
     (item 71, hickory 0.26) and #36606 (item 68). Not carried, with the reasons
     in the reviews: #36253 (would drop `ext/sql`'s error fields until it moves
-    to `registerErrorBuilder`), #36429 (Windows, design open), #36659 (already
-    fixed in v2.9.7; its sync-path hunk would keep an unread body on a
-    kept-alive connection), #35422, #36370, #35927, #36989 (a retention leak
-    with long-lived signals), #32872 (contradicts the Compression Streams WPT),
+    to `registerErrorBuilder`; both done in item 75), #36429 (Windows, design
+    open; carried with our host rule in item 75), #36659 (already fixed in
+    v2.9.7; its sync-path hunk would keep an unread body on a kept-alive
+    connection), #35422, #36370, #35927, #36989 (a retention leak with
+    long-lived signals), #32872 (contradicts the Compression Streams WPT),
     #36763 and #33517 (already in v2.9.7).
 
     Tests: each pull request's own (`deno_http_h1`, `tests/unit` serve, http,
@@ -2199,8 +2201,88 @@ where the changes are discussed.
       disposes an isolate restored from a snapshot. Linux and Windows do not
       show it. Not yet root-caused.
 
+75. **Upstream batch: security pull requests** (`fix/security-23`, for runtime
+    `denext.23`). Carried from open denoland/deno pull requests, one commit each
+    with an `Original-Author:` trailer and the pull request's head, with our
+    fixes as separate commits after them:
+    - a remote module body that fails its checksum is no longer written to the
+      HTTP cache, where a later unchecked load would have served it (#36428);
+      its red integration test (`jsr::bad_manifest_checksum`) expected the
+      rejected bytes to be read back from the cache, and now expects the module
+      to be downloaded and checked again;
+    - a missing path under a symlink in `node_modules` is resolved through the
+      link before the registry read check, so `require()` no longer tells a
+      program without `--allow-read` whether a file outside `node_modules`
+      exists (#36479); its red spec never reached that code: `require()` of a
+      missing package also looks in every ancestor's `node_modules` (as Node
+      does), and the first one outside the project needs `--allow-read`, so the
+      spec now grants read access to the ancestors' `node_modules` only;
+    - `node:fs` `fchmod` / `fchown` / `futimes` (and their sync forms) need
+      write access to the path the descriptor was opened with (#36442), which is
+      the path its open was checked and resolved to, so a descriptor opened
+      through a link names a `--deny-write` target (tested); the pull request's
+      test failed on Linux and macOS because a scoped `--allow-run` may not pass
+      `LD_LIBRARY_PATH` / `DYLD_*` to the child, so it runs it with `clearEnv`;
+    - dependency aliases and workspace package names must be `name` or
+      `@scope/name` before an install links them under `node_modules` (no `..`,
+      separators, drive or absolute paths, period-prefixed components such as
+      `.deno` or `.bin`), so a `package.json` can't make an install write or
+      delete outside its package directory (#36103). Ours: package lookups
+      (byonm, local, global resolvers) keep the shape checks but allow a
+      period-prefixed name, which Node's CommonJS loader resolves
+      (`require(".multipart/x")`); the pull request rejected it there too, which
+      was its red `npm::cjs_export_analysis_require_re_export`;
+    - an op error of a registered class is built natively on both the slow and
+      the fast path from a prototype captured at registration, so a Proxy or
+      accessor on `Deno.core.errorConstructors` can't run JavaScript inside a
+      fast call (the GHSA-p4r3-6jgx-4cj5 shape), and the class constructor no
+      longer runs (#36253). Ours: `Deno.SQL`'s `PostgresError` / `SQLiteError`
+      move to `registerErrorBuilder` (as native construction would name them
+      `DenoSqlPostgresError` / `DenoSqlSQLiteError`), and `deno_sql`'s two
+      fast-compatible ops that return a `SqlError` are `nofast`, since a fast
+      call can't run a builder;
+    - Windows: a module on a network path (`file://host/share/x.ts`, UNC) is no
+      longer loaded with no permission at all (#36429). Our host rule replaces
+      the pull request's trusted roots: every kind, roots included (a worker's
+      root is chosen by code), needs import access to the host the path names
+      (`--allow-import=<host>`, the prompt, `--allow-import` or `-A`; the
+      default allow list never matches a share, and `--deny-import=<host>`
+      refuses it), and a dependency or dynamic import also needs `--allow-read`,
+      as in the pull request; a path with no host (device namespace) needs all
+      import access. Its red Windows test expected `file:////server/...` (one
+      separator, the current drive's root) to be a share;
+    - a Pipe / TCP wrap adopts an untracked descriptor only with all
+      permissions, since the descriptor table is shared by every isolate in the
+      process; pipes and child stdio created for an isolate are registered for
+      it (#36349). Ours: a descriptor received with an IPC message is registered
+      for the isolate that read it (a child without `-A` could no longer take a
+      server its parent sent), and `dgram`'s `UDP.open(fd)`, which took
+      ownership of any descriptor number with no check, follows the same policy.
+
+    Tests: each pull request's own (`deno_cache_dir`, `deno_core` error and
+    `error_builder_test.js`, `deno_ops` expected outputs, `deno_io` fd table,
+    `deno_permissions`, `deno_resolver` file fetcher and npm path,
+    `deno_npm_installer`, `cli/lib` permission checker, `cli/rt` VFS read link,
+    `unit_node` fs and child_process, `unit` webgpu, specs
+    `npm/require_missing_paths_across_symlinks`,
+    `install/package_json_invalid_alias`, `node/pipe_open_fd`); ours:
+    `permission/symlink_resolve_deny` (descriptor metadata through a link),
+    `sql/sqlite_basic` (an error from `simple()`), `node/pipe_open_fd`
+    `isolate_udp_fd_ownership`, `node/child_process_ipc_handle`
+    `server_restricted_child_*`, the `unit_node` fd metadata case through a
+    link, the resolver lookup unit test, and `deno_permissions`
+    `windows_network_path_hosts` /
+    `network_file_import_requires_import_access_to_host`. Each new test fails on
+    the base, or, for a fix on top of a pull request, on the pull requests alone
+    (the CI branches `fix/security-23-before` and `fix/security-23-prs-only`;
+    the Windows permission tests on windows-ci). Also: `uv_compat` gains
+    `UV_EPERM` / `UV_EEXIST`, so a refused `Pipe` / `TCP` open reports libuv's
+    code on Windows too, and #36103's alias check runs before #36469's value
+    parser, so `run` / `task` / `cache` refuse an invalid alias as `install`
+    does.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
-64-73) are what the prebuilt `libdenort` carries. The CLI-side parts (for
+64-73, 75) are what the prebuilt `libdenort` carries. The CLI-side parts (for
 example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's
 launchers) are in the branch too, but a stock CLI does not run them; denext's
 own launcher provides that environment.
