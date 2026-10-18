@@ -517,7 +517,7 @@ impl EntrySetupOutcome<'_> {
 /// Run after the registry packages' entries, so a direct dependency's bin
 /// takes a name a transitive package's also uses.
 pub fn set_up_local_package_bin_entries(
-  sys: &(impl SetupBinEntrySys + sys_traits::FsRead),
+  sys: &impl SetupBinEntrySys,
   local_pkgs: &[crate::package_json::InstallLocalPkg],
   root_node_modules_path: &Path,
   bin_node_modules_dir_path: &Path,

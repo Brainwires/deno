@@ -343,10 +343,10 @@ pub fn set_up_bin_shim<'a>(
   let shim = ShimData::new(rel_target.to_string_lossy(), shebang);
 
   let write_shim = |path: PathBuf, contents: &str| -> std::io::Result<()> {
-    if let Ok(existing) = sys.fs_read(&path) {
-      if existing == contents.as_bytes() {
-        return Ok(());
-      }
+    if let Ok(existing) = sys.fs_read(&path)
+      && existing == contents.as_bytes()
+    {
+      return Ok(());
     }
     // retry on Windows sharing violation (os error 32) when another deno process holds the file
     let mut last_err = None;
