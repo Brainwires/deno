@@ -311,15 +311,17 @@ pub(crate) async fn run_native_check(
   if vitest_compat {
     crate::tools::test::vitest::write_native_check_types(&project_root)?;
   }
-  let prev_level = log::max_level();
-  log::set_max_level(log::LevelFilter::Error);
+  // denext: quiet on this thread only - lowering the global `log` level hid
+  // other threads' output meanwhile (the inspector's "Debugger session
+  // started.", so a debugger client waited for it forever).
+  let quiet = deno_lib::util::logger::quiet_below_error();
   let sync_result = crate::tools::installer::sync_types_command(
     flags.clone(),
     SyncTypesFlags { roots: sync_roots },
     crate::tools::installer::RootTsConfigMode::CheckMode,
   )
   .await;
-  log::set_max_level(prev_level);
+  drop(quiet);
   sync_result?;
   if vitest_compat {
     crate::tools::test::vitest::add_native_check_type_paths(

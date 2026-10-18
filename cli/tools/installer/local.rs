@@ -337,8 +337,7 @@ pub async fn sync_types_command(
     // internal step (not the user's `deno check`), and the graph the user
     // installed was already validated by `deno install` — re-emitting e.g.
     // "workspace member ... was not used" warnings here is just noise.
-    let prev_log_level = log::max_level();
-    log::set_max_level(log::LevelFilter::Error);
+    let quiet = deno_lib::util::logger::quiet_below_error();
     let graph_result = graph_creator
       .create_graph_with_options(crate::graph_util::CreateGraphOptions {
         graph_kind: deno_graph::GraphKind::All,
@@ -349,7 +348,7 @@ pub async fn sync_types_command(
         npm_caching: cli_options.default_npm_caching_strategy(),
       })
       .await;
-    log::set_max_level(prev_log_level);
+    drop(quiet);
     let graph = match graph_result {
       Ok(graph) => graph,
       Err(e) => {

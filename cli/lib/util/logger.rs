@@ -1,5 +1,6 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 
+use std::cell::Cell;
 use std::io::Write;
 use std::sync::Arc;
 use std::sync::OnceLock;
@@ -26,9 +27,38 @@ impl CliLogger {
   }
 }
 
+thread_local! {
+  /// How many [`quiet_below_error`] guards this thread holds (denext).
+  static QUIET_DEPTH: Cell<usize> = const { Cell::new(0) };
+}
+
+/// While the returned guard lives, log records below `Error` from this
+/// thread are dropped (denext). Unlike lowering `log::max_level`, which is
+/// global, this leaves other threads' records alone, such as the inspector
+/// server's "Debugger session started.". Drop the guard on the thread that
+/// created it.
+pub fn quiet_below_error() -> QuietGuard {
+  QUIET_DEPTH.with(|depth| depth.set(depth.get() + 1));
+  QuietGuard(())
+}
+
+/// See [`quiet_below_error`].
+#[must_use]
+pub struct QuietGuard(());
+
+impl Drop for QuietGuard {
+  fn drop(&mut self) {
+    QUIET_DEPTH.with(|depth| depth.set(depth.get().saturating_sub(1)));
+  }
+}
+
+fn is_quieted(level: log::Level) -> bool {
+  level > log::Level::Error && QUIET_DEPTH.with(|depth| depth.get() > 0)
+}
+
 impl log::Log for CliLogger {
   fn enabled(&self, metadata: &log::Metadata) -> bool {
-    self.inner.load().logger.enabled(metadata)
+    !is_quieted(metadata.level()) && self.inner.load().logger.enabled(metadata)
   }
 
   fn log(&self, record: &log::Record) {
@@ -152,4 +182,27 @@ pub fn init(options: InitLoggingOptions) {
 
   let _ = log::set_logger(cli_logger);
   log::set_max_level(cli_logger.filter());
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn quiet_below_error_is_per_thread_and_nests() {
+    assert!(!is_quieted(log::Level::Info));
+    let outer = quiet_below_error();
+    let inner = quiet_below_error();
+    assert!(is_quieted(log::Level::Info));
+    assert!(is_quieted(log::Level::Warn));
+    assert!(!is_quieted(log::Level::Error));
+    // Another thread is not quieted.
+    std::thread::spawn(|| assert!(!is_quieted(log::Level::Info)))
+      .join()
+      .unwrap();
+    drop(inner);
+    assert!(is_quieted(log::Level::Info));
+    drop(outer);
+    assert!(!is_quieted(log::Level::Info));
+  }
 }
