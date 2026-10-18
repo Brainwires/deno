@@ -1,6 +1,7 @@
 {
-  // The compilation statistics are the in-process checker's; the native
-  // compiler reports its own (`--extendedDiagnostics`) at the debug level.
+  // The compilation statistics are the in-process checker's. The native
+  // compiler reports its own (`--diagnostics`) at the debug level, at times
+  // without a check time (seen on Windows).
   "tests": {
     "tsc": {
       "args": "cache --check-engine=tsc --reload --check=all --log-level debug hello.ts",
