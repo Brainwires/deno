@@ -1899,6 +1899,20 @@ where the changes are discussed.
     prebuild). `test-stream2-readable-wrap-proxy-methods.js` is enabled
     (#36566's test).
 
+    Found when the batch was first built and tested, on top of the node-compat
+    line: #36864's own test still failed, because the client stream closes in
+    the same nghttp2 batch as the final HEADERS and the deferred close ended its
+    readable side before the code awaiting `'response'` ran (Node reaches JS
+    through `MakeCallback`, which runs the nextTick queue and the microtasks
+    between callbacks); a clean close of a client stream whose `'response'` is
+    still queued now waits for `setImmediate`, and a reset keeps the nextTick so
+    its `'error'` is still emitted. The load hook's `"type"` lookup threw at the
+    file system root; it now walks parents as Node's `TraverseParent` does (not
+    the root, and not past a `node_modules` directory). #36912's raw key import
+    lost `validateString` (and `sig.ts` its `Buffer`) to the fork's
+    `loadExtScript` imports, which failed `test-crypto-sign-verify.js`. #36447
+    met item 58's bin linking with two clippy errors.
+
     Not carried: #36719 (replaced, above); #37020
     (`deno desktop
     --engine=quickjs` only; a draft); #36201, #35614, #33210,
