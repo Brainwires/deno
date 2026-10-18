@@ -1119,10 +1119,13 @@ fn dynamic_import_bad_data_uri() {
   };
   let file = dir.path().join("bad_data_uri.ts");
   file.write("await import('data:application/')");
+  // An unresolvable dynamic import is a runtime error for the in-process
+  // checker only (the native one reports it, see the test below).
   let output = context
     .new_command()
     .args_vec([
       "compile",
+      "--check-engine=tsc",
       "--output",
       &exe.to_string_lossy(),
       &file.to_string_lossy(),
@@ -1134,6 +1137,33 @@ fn dynamic_import_bad_data_uri() {
   output.assert_exit_code(1);
   output.assert_matches_text(
     "[WILDCARD]TypeError: Unable to decode data url.[WILDCARD]",
+  );
+}
+
+#[test]
+fn dynamic_import_bad_data_uri_native_check() {
+  let context = TestContextBuilder::new().build();
+  let dir = context.temp_dir();
+  let exe = if cfg!(windows) {
+    dir.path().join("app.exe")
+  } else {
+    dir.path().join("app")
+  };
+  let file = dir.path().join("bad_data_uri.ts");
+  file.write("await import('data:application/')");
+  // The native compiler reports the unresolvable dynamic import (TS2307).
+  let output = context
+    .new_command()
+    .args_vec([
+      "compile",
+      "--output",
+      &exe.to_string_lossy(),
+      &file.to_string_lossy(),
+    ])
+    .run();
+  output.assert_exit_code(1);
+  output.assert_matches_text(
+    "[WILDCARD]TS2307 [ERROR]: Cannot find module 'data:application/' or its corresponding type declarations.[WILDCARD]",
   );
 }
 

@@ -466,16 +466,22 @@ pub async fn sync_types_command(
     .workspace()
     .root_deno_json()
     .and_then(|config| config.specifier.to_file_path().ok());
+  // The import map given with `--import-map` (a local file), if any.
+  let import_map_flag = cli_options
+    .resolve_specified_import_map_specifier()
+    .ok()
+    .flatten()
+    .and_then(|specifier| specifier.to_file_path().ok());
   let installed = super::npm_compat::setup_npm_compat(
     &project_root,
     root_config.as_deref(),
+    import_map_flag.as_deref(),
     &file_fetcher,
     &http_client,
     &permissions,
     &graph_specifiers,
     &local_wasm_modules,
     &npm_resolver,
-    factory.npmrc()?,
     resolved_compiler_options.as_ref(),
     manage_root_tsconfig,
     type_check_remote,

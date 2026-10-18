@@ -23,7 +23,6 @@ use deno_core::serde_json;
 use deno_core::serde_json::Value;
 use deno_core::serde_json::json;
 use deno_core::url::Url;
-use deno_npmrc::ResolvedNpmRc;
 use deno_runtime::deno_permissions::PermissionsContainer;
 use deno_semver::Version;
 use deno_semver::VersionReq;
@@ -290,13 +289,13 @@ fn is_special_specifier(s: &str) -> bool {
 pub async fn setup_npm_compat(
   project_root: &Path,
   root_config: Option<&Path>,
+  import_map_flag: Option<&Path>,
   file_fetcher: &CliFileFetcher,
   http_client: &HttpClient,
   permissions: &PermissionsContainer,
   graph_specifiers: &[String],
   local_wasm_modules: &[(Url, String)],
   npm_resolver: &CliNpmResolver,
-  npmrc: &ResolvedNpmRc,
   resolved_compiler_options: Option<&Value>,
   manage_root_tsconfig: bool,
   type_check_remote: bool,
@@ -327,7 +326,15 @@ pub async fn setup_npm_compat(
     .and_then(|v| v.as_object())
     .cloned()
     .unwrap_or_default();
-  if let Some(map_imports) = deno_json
+  // denext: an import map given with `--import-map` is the one Deno uses (the
+  // config's `importMap` is then ignored, with a warning).
+  if let Some(map_path) = import_map_flag {
+    for (k, v) in
+      read_import_map_file(project_root, map_path).unwrap_or_default()
+    {
+      combined.insert(k, v);
+    }
+  } else if let Some(map_imports) = deno_json
     .as_ref()
     .and_then(|d| read_referenced_import_map(project_root, d))
   {
@@ -482,13 +489,7 @@ pub async fn setup_npm_compat(
 
   // Ensure @types/node is available so Node globals (timers, node: builtins,
   // Buffer, URLPattern, ...) resolve under stock tooling.
-  let node_types = ensure_types_node(
-    project_root,
-    http_client,
-    npmrc,
-    use_global_cache_layout,
-  )
-  .await;
+  let node_types = ensure_types_node(project_root, use_global_cache_layout);
   if let Some(undici_types_dir) = &node_types.undici_types_dir {
     member_paths.insert(
       "undici-types".to_string(),
@@ -528,6 +529,12 @@ pub async fn setup_npm_compat(
   if vendor_enabled || project_root.join("vendor").is_dir() {
     excludes.push("vendor".to_string());
   }
+  // denext: the generated `.deno/` itself is never a source of the project:
+  // what the compiler needs from it is reached through `types`, `typeRoots`
+  // and `paths`. Leaving it to the open `include` made a whole-project check
+  // pick up another check's staging directory (`.node.tmp-<pid>-<n>`) while it
+  // was being renamed into place.
+  excludes.push(".deno".to_string());
 
   // Generate .deno/tsconfig.json and ensure root tsconfig.json extends it
   generate_deno_tsconfig(
@@ -579,19 +586,19 @@ fn resolve_bare_against_import_map(
   Some(format!("{}{}", target, &spec[alias.len()..]))
 }
 
-/// Ensure a stock `@types/node` (and its `undici-types` dependency) is present
-/// so the generated tsconfig can load Node globals (timers, `node:` builtins,
-/// `Buffer`, `URLPattern`, ...).
+/// Ensure an `@types/node` (with its `undici-types`) is present so the
+/// generated tsconfig can load Node's and the web's globals (timers, `node:`
+/// builtins, `Buffer`, `URLPattern`, ...).
 ///
 /// If the project already installed `@types/node` under its `node_modules`, we
-/// reuse that in place. Otherwise we materialize a stock copy under
-/// `.deno/npm-compat` (which is gitignored) - never downloading into the
-/// project's real `node_modules`, so `deno check` doesn't mutate the user's tree
-/// (and doesn't dirty the working directory).
-async fn ensure_types_node(
+/// reuse that in place. Otherwise the copy built into the binary - the one the
+/// in-process checker uses (`cli/tsc/dts/node`, generated from
+/// `TYPES_NODE_VERSION`, `undici-types` included) - is written under
+/// `.deno/npm-compat` (gitignored): type checking never needs the network for
+/// these globals (denext), and never writes into the project's real
+/// `node_modules`.
+fn ensure_types_node(
   project_root: &Path,
-  http_client: &HttpClient,
-  npmrc: &ResolvedNpmRc,
   use_global_cache_layout: bool,
 ) -> NodeTypesSetup {
   // Reuse an @types/node the project already installed under node_modules.
@@ -608,119 +615,58 @@ async fn ensure_types_node(
       };
     }
   }
-  // Materialize under `.deno/npm-compat` (gitignored) in every other case.
-  let modules_dir = project_root.join(".deno/npm-compat");
-  let type_root = "./npm-compat/@types".to_string();
-  let node_dir = modules_dir.join("@types/node");
-  let undici_types_dir = modules_dir.join("undici-types");
-  // Only reuse a copy at the pinned version: one left behind by an earlier
-  // Deno (back when this followed the registry's `latest`) would otherwise keep
-  // being type-checked against forever.
-  if is_materialized_package_at_version(&node_dir, TYPES_NODE_VERSION) {
+  let node_dir = project_root.join(".deno/npm-compat/@types/node");
+  if let Err(e) = write_embedded_types_node(&node_dir) {
+    log::debug!("Failed to write the built-in @types/node: {e}");
     return NodeTypesSetup {
-      type_root: Some(type_root),
-      undici_types_dir: is_materialized_package(&undici_types_dir)
-        .then_some(undici_types_dir),
-    };
-  }
-  match download_npm_package(
-    &modules_dir,
-    "@types/node",
-    Some(TYPES_NODE_VERSION),
-    http_client,
-    npmrc,
-  )
-  .await
-  {
-    Ok(Some((_version, deps))) => {
-      if let Some(req) = deps.get("undici-types").and_then(|v| v.as_str()) {
-        let _ = download_npm_package(
-          &modules_dir,
-          "undici-types",
-          Some(req),
-          http_client,
-          npmrc,
-        )
-        .await;
-      }
-      NodeTypesSetup {
-        type_root: is_materialized_package(&node_dir).then_some(type_root),
-        undici_types_dir: is_materialized_package(&undici_types_dir)
-          .then_some(undici_types_dir),
-      }
-    }
-    _ => NodeTypesSetup {
       type_root: None,
       undici_types_dir: None,
-    },
+    };
+  }
+  NodeTypesSetup {
+    type_root: Some("./npm-compat/@types".to_string()),
+    undici_types_dir: Some(node_dir.join("undici")),
   }
 }
 
-/// Download an npm package tarball from registry.npmjs.org into
-/// `node_modules/<pkg>` and return its resolved version + dependency map.
-/// Resolves `req` (a semver range) if given, otherwise the `latest` dist-tag.
-async fn download_npm_package(
-  modules_dir: &Path,
-  pkg: &str,
-  req: Option<&str>,
-  http_client: &HttpClient,
-  npmrc: &ResolvedNpmRc,
-) -> Result<Option<(String, serde_json::Map<String, Value>)>, AnyError> {
-  // Go through the registry the project configured (`.npmrc`,
-  // `NPM_CONFIG_REGISTRY`) rather than hardcoding npmjs.org, so a private
-  // registry, a mirror or an offline setup is honored here too.
-  let meta_url = deno_npm_cache::get_package_url(npmrc, pkg);
-  let bytes = match http_client.download(meta_url).await {
-    Ok(b) => b,
-    Err(e) => {
-      log::debug!("Failed to fetch metadata for {pkg}: {e}");
-      return Ok(None);
+/// Whether `dir` holds the built-in `@types/node` this binary writes (an
+/// earlier Deno's npm download, with its separate `undici-types`, does not
+/// count: it is replaced).
+fn is_embedded_types_node(dir: &Path) -> bool {
+  crate::tsc::tsconfig_gen::is_built_in_types_node(dir)
+    && is_materialized_package_at_version(dir, TYPES_NODE_VERSION)
+}
+
+/// Write the built-in `@types/node` into `dest` as a package, atomically (see
+/// `publish_dir_atomic`). A complete copy already there is kept.
+fn write_embedded_types_node(dest: &Path) -> Result<(), AnyError> {
+  if is_embedded_types_node(dest) {
+    return Ok(());
+  }
+  publish_dir_atomic(dest, is_embedded_types_node, |dir| {
+    for (name, asset) in crate::tsc::LAZILY_LOADED_STATIC_ASSETS.iter() {
+      let Some(relative) = name.strip_prefix("node/") else {
+        continue;
+      };
+      let path = dir.join(relative);
+      if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+      }
+      std::fs::write(&path, asset.source.as_str())?;
     }
-  };
-  let meta: Value = serde_json::from_slice(&bytes)?;
-  let version = match req {
-    Some(r) => resolve_version_req(&meta, r),
-    None => meta
-      .get("dist-tags")
-      .and_then(|t| t.get("latest"))
-      .and_then(|v| v.as_str())
-      .map(String::from),
-  };
-  let Some(version) = version else {
-    return Ok(None);
-  };
-  let vinfo = meta.get("versions").and_then(|vs| vs.get(&version));
-  let Some(tarball) = vinfo
-    .and_then(|v| v.get("dist"))
-    .and_then(|d| d.get("tarball"))
-    .and_then(|t| t.as_str())
-  else {
-    return Ok(None);
-  };
-  let tb = http_client.download(Url::parse(tarball)?).await?;
-  let dest = modules_dir.join(pkg);
-  if let Err(e) = extract_tarball_gz_atomic(&tb, &dest, Some(&version)) {
-    log::debug!("Failed to extract {pkg}: {e}");
-    return Ok(None);
-  }
-  let deps = vinfo
-    .and_then(|v| v.get("dependencies"))
-    .and_then(|d| d.as_object())
-    .cloned()
-    .unwrap_or_default();
-  Ok(Some((version, deps)))
-}
-
-/// Highest version in the packument satisfying the npm semver range `req`.
-fn resolve_version_req(meta: &Value, req: &str) -> Option<String> {
-  let vr = VersionReq::parse_from_npm(req).ok()?;
-  let versions = meta.get("versions")?.as_object()?;
-  versions
-    .keys()
-    .filter_map(|v| Version::parse_from_npm(v).ok())
-    .filter(|v| vr.matches(v))
-    .max()
-    .map(|v| v.to_string())
+    let mut manifest = json!({
+      "name": "@types/node",
+      "version": TYPES_NODE_VERSION,
+      "types": "index.d.cts",
+    });
+    manifest[crate::tsc::tsconfig_gen::BUILT_IN_TYPES_NODE_MARKER] =
+      json!(true);
+    std::fs::write(
+      dir.join("package.json"),
+      serde_json::to_string_pretty(&manifest)?,
+    )?;
+    Ok(())
+  })
 }
 
 /// The root `package.json`'s npm dependencies (`dependencies`, then
@@ -768,16 +714,25 @@ fn read_referenced_import_map(
   deno_json: &Value,
 ) -> Option<serde_json::Map<String, Value>> {
   let rel = deno_json.get("importMap").and_then(|v| v.as_str())?;
-  let content = std::fs::read_to_string(project_root.join(rel)).ok()?;
+  read_import_map_file(project_root, &project_root.join(rel))
+}
+
+/// The `imports` of the import map file at `map_path`. A relative target is
+/// relative to the map file, which may live elsewhere (`"importMap":
+/// "../import_map.json"`, `--import-map other/map.json`); it is rebased onto
+/// the project root, as the generated `paths` take it (denext).
+fn read_import_map_file(
+  project_root: &Path,
+  map_path: &Path,
+) -> Option<serde_json::Map<String, Value>> {
+  let content = std::fs::read_to_string(map_path).ok()?;
   let parsed: Value = serde_json::from_str(&content).ok()?;
   let mut imports =
     parsed.get("imports").and_then(|v| v.as_object()).cloned()?;
-  // denext: a relative target is relative to the import map file, which may
-  // live elsewhere (`"importMap": "../import_map.json"`); the generated
-  // `paths` take it relative to the project root.
-  if let Some(map_dir) = Path::new(rel).parent().and_then(|d| d.to_str())
-    && !Path::new(rel).is_absolute()
-  {
+  let map_dir = map_path
+    .parent()
+    .and_then(|dir| pathdiff::diff_paths(dir, project_root));
+  if let Some(map_dir) = map_dir.as_deref().and_then(|d| d.to_str()) {
     for value in imports.values_mut() {
       if let Some(target) = value.as_str()
         && (target.starts_with("./") || target.starts_with("../"))
@@ -1272,16 +1227,30 @@ fn cleanup_stale_staging_dirs(
 }
 
 /// Extract a gzipped npm-style tarball so that `dest` is never observable in a
-/// half-extracted state: unpack into a sibling staging directory on the same
-/// filesystem, then `rename` it into place.
-///
-/// Concurrent `deno check` invocations sharing a cache race to materialize the
-/// same package. The rename makes each one either publish a complete tree or
-/// lose harmlessly to a winner that already did.
+/// half-extracted state (see `publish_dir_atomic`).
 fn extract_tarball_gz_atomic(
   gz_bytes: &[u8],
   dest: &Path,
   expected_version: Option<&str>,
+) -> Result<(), AnyError> {
+  publish_dir_atomic(
+    dest,
+    |dest| published_copy_is_current(dest, expected_version),
+    |dir| extract_tarball_gz(gz_bytes, dir),
+  )
+}
+
+/// Fill a sibling staging directory of `dest` on the same filesystem with
+/// `fill`, then `rename` it into place, so `dest` is never observable
+/// half-written.
+///
+/// Concurrent `deno check` invocations sharing a project race to materialize
+/// the same package. The rename makes each one either publish a complete tree
+/// or lose harmlessly to a winner that already did (`is_current`).
+fn publish_dir_atomic(
+  dest: &Path,
+  is_current: impl Fn(&Path) -> bool,
+  fill: impl FnOnce(&Path) -> Result<(), AnyError>,
 ) -> Result<(), AnyError> {
   let parent = dest.parent().ok_or_else(|| {
     anyhow!("Invalid extract destination: {}", dest.display())
@@ -1317,7 +1286,7 @@ fn extract_tarball_gz_atomic(
   // append to a foreign tree.
   let _ = std::fs::remove_dir_all(&tmp_dir);
 
-  if let Err(e) = extract_tarball_gz(gz_bytes, &tmp_dir) {
+  if let Err(e) = fill(&tmp_dir) {
     let _ = std::fs::remove_dir_all(&tmp_dir);
     return Err(e);
   }
@@ -1328,7 +1297,7 @@ fn extract_tarball_gz_atomic(
       // `dest` is in the way. On Windows a rename onto *any* existing directory
       // fails; on Unix only onto a non-empty one - so this is the normal path
       // for a lost race, not just an error path.
-      if published_copy_is_current(dest, expected_version) {
+      if is_current(dest) {
         // Another process published a complete copy first. Its tree is as good
         // as ours, so keep it and drop the staging dir.
         let _ = std::fs::remove_dir_all(&tmp_dir);
@@ -1346,7 +1315,7 @@ fn extract_tarball_gz_atomic(
         Err(e) => {
           let _ = std::fs::remove_dir_all(&tmp_dir);
           // A third process may have published `dest` in between.
-          if published_copy_is_current(dest, expected_version) {
+          if is_current(dest) {
             return Ok(());
           }
           Err(anyhow!(
@@ -1899,6 +1868,64 @@ mod tests {
   }
 
   #[test]
+  fn test_write_embedded_types_node() {
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("@types/node");
+    // A copy an earlier Deno downloaded from npm at the pinned version (its
+    // `undici-types` lived beside it): replaced by the built-in one.
+    std::fs::create_dir_all(&dest).unwrap();
+    std::fs::write(
+      dest.join("package.json"),
+      format!(r#"{{"name":"@types/node","version":"{TYPES_NODE_VERSION}"}}"#),
+    )
+    .unwrap();
+    std::fs::write(dest.join("index.d.ts"), "downloaded").unwrap();
+
+    write_embedded_types_node(&dest).unwrap();
+    assert!(is_embedded_types_node(&dest));
+    assert!(!dest.join("index.d.ts").exists());
+    let index = std::fs::read_to_string(dest.join("index.d.cts")).unwrap();
+    assert!(index.contains("/// <reference path=\"./globals.d.cts\" />"));
+    assert!(dest.join("fs/promises.d.cts").exists());
+    assert!(dest.join("undici/index.d.ts").exists());
+    let manifest: Value = serde_json::from_str(
+      &std::fs::read_to_string(dest.join("package.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(manifest["types"], json!("index.d.cts"));
+
+    // A complete built-in copy is kept as it is.
+    std::fs::write(dest.join("marker"), "").unwrap();
+    write_embedded_types_node(&dest).unwrap();
+    assert!(dest.join("marker").exists());
+    let leftovers = std::fs::read_dir(dir.path().join("@types"))
+      .unwrap()
+      .flatten()
+      .map(|e| e.file_name().to_string_lossy().into_owned())
+      .filter(|n| n != "node")
+      .collect::<Vec<_>>();
+    assert!(leftovers.is_empty(), "leftover staging dirs: {leftovers:?}");
+  }
+
+  #[test]
+  fn test_ensure_types_node_uses_the_built_in_copy_offline() {
+    let dir = tempfile::tempdir().unwrap();
+    let setup = ensure_types_node(dir.path(), true);
+    assert_eq!(setup.type_root.as_deref(), Some("./npm-compat/@types"));
+    let node_dir = dir.path().join(".deno/npm-compat/@types/node");
+    assert!(is_embedded_types_node(&node_dir));
+    assert_eq!(setup.undici_types_dir, Some(node_dir.join("undici")));
+
+    // A project's own `@types/node` under `node_modules` wins.
+    let project = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(project.path().join("node_modules/@types/node"))
+      .unwrap();
+    let setup = ensure_types_node(project.path(), false);
+    assert_eq!(setup.type_root.as_deref(), Some("../node_modules/@types"));
+    assert!(!project.path().join(".deno").exists());
+  }
+
+  #[test]
   fn test_rebase_relative_target() {
     assert_eq!(rebase_relative_target("foo", "./mod.ts"), "./foo/mod.ts");
     assert_eq!(
@@ -1910,6 +1937,27 @@ mod tests {
     assert_eq!(rebase_relative_target("", "./x.ts"), "./x.ts");
     assert_eq!(rebase_relative_target(".", "./x/"), "./x/");
     assert_eq!(rebase_relative_target("..", "./shared/"), "./../shared/");
+  }
+
+  #[test]
+  fn test_read_import_map_file_from_a_flag_rebases_onto_the_root() {
+    // `--import-map compile/map.json` with the project rooted at `app/`.
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("app");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::create_dir_all(dir.path().join("compile")).unwrap();
+    let map_path = dir.path().join("compile/map.json");
+    std::fs::write(
+      &map_path,
+      r#"{ "imports": { "hello": "../run/hello.js", "lib/": "./lib/" } }"#,
+    )
+    .unwrap();
+    let imports = read_import_map_file(&root, &map_path).unwrap();
+    assert_eq!(imports.get("hello"), Some(&json!("./../run/hello.js")));
+    assert_eq!(imports.get("lib/"), Some(&json!("./../compile/lib/")));
+    // In the project root itself, nothing to rebase.
+    let imports = read_import_map_file(dir.path(), &map_path).unwrap();
+    assert_eq!(imports.get("hello"), Some(&json!("./run/hello.js")));
   }
 
   #[test]

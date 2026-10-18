@@ -2044,6 +2044,8 @@ fn cache_test() {
     url::Url::parse("http://localhost:4545/run/006_url_imports.ts").unwrap();
   let output = Command::new(util::deno_exe_path())
     .env("DENO_DIR", deno_dir.path())
+    // denext: the pinned native compiler for `--check=all`.
+    .envs(util::tsgo_check_bin_env().map(|bin| ("DENO_TSGO_BIN", bin)))
     .current_dir(util::testdata_path())
     .arg("cache")
     .arg("--allow-import=localhost:4545")

@@ -236,9 +236,21 @@ pub fn generate_tsconfig(
     resolved_compiler_options,
     "deno.desktop",
   );
+  // denext: the built-in `@types/node` (`cli/tsc/dts/node`) leaves the web
+  // globals Deno declares itself (`QuotaExceededError`, ...) to Deno's libs;
+  // only an npm copy owns all of `NODE_OWNED_GLOBAL_TYPES`.
+  let node_types_built_in = node_types_root.is_some_and(|root| {
+    is_built_in_types_node(
+      &project_root
+        .join(".deno")
+        .join(root.trim_start_matches("./"))
+        .join("node"),
+    )
+  });
   write_deno_types(
     &types_dir.join("index.d.ts"),
     node_types_root.is_some(),
+    node_types_built_in,
     has_dom,
     has_desktop,
     &no_types_shims,
@@ -568,6 +580,36 @@ const NODE_OWNED_GLOBAL_TYPES: &[&str] = &[
   "QuotaExceededErrorOptions",
 ];
 
+/// What the built-in `@types/node` (`cli/tsc/dts/node`, see
+/// `tools/update_types_node.ts`) owns of `NODE_OWNED_GLOBAL_TYPES`: the
+/// `URLPattern` family; it leaves `QuotaExceededError` to Deno's libs (denext).
+const BUILT_IN_NODE_OWNED_GLOBAL_TYPES: &[&str] = &[
+  "URLPattern",
+  "URLPatternInit",
+  "URLPatternInput",
+  "URLPatternComponentResult",
+  "URLPatternResult",
+  "URLPatternOptions",
+];
+
+/// The `package.json` field that marks the built-in `@types/node` the native
+/// type check writes under `.deno/npm-compat` (denext).
+pub const BUILT_IN_TYPES_NODE_MARKER: &str = "denoBuiltIn";
+
+/// Whether `dir` holds the built-in `@types/node` (its `package.json` carries
+/// [`BUILT_IN_TYPES_NODE_MARKER`]).
+pub fn is_built_in_types_node(dir: &Path) -> bool {
+  std::fs::read_to_string(dir.join("package.json"))
+    .ok()
+    .and_then(|contents| serde_json::from_str::<Value>(&contents).ok())
+    .and_then(|manifest| {
+      manifest
+        .get(BUILT_IN_TYPES_NODE_MARKER)
+        .and_then(|v| v.as_bool())
+    })
+    == Some(true)
+}
+
 /// Whether the project's effective `lib` includes the `dom` lib, from either the
 /// raw deno.json/tsconfig compiler options or Deno's resolved options.
 fn effective_lib_has_dom(
@@ -598,6 +640,7 @@ fn effective_lib_has(
 fn write_deno_types(
   path: &Path,
   has_node_types: bool,
+  node_types_built_in: bool,
   has_dom: bool,
   has_desktop: bool,
   no_types_shims: &[String],
@@ -629,7 +672,14 @@ fn write_deno_types(
   // Defer node-owned web globals to @types/node so the instance type and the
   // constructor agree (see NODE_OWNED_GLOBAL_TYPES).
   let filtered = if has_node_types {
-    strip_top_level_type_decls(&filtered, NODE_OWNED_GLOBAL_TYPES)
+    strip_top_level_type_decls(
+      &filtered,
+      if node_types_built_in {
+        BUILT_IN_NODE_OWNED_GLOBAL_TYPES
+      } else {
+        NODE_OWNED_GLOBAL_TYPES
+      },
+    )
   } else {
     filtered
   };
@@ -2046,6 +2096,26 @@ fn merge_user_types(base_types: &mut Vec<Value>, user_types: &[Value]) {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn built_in_types_node_is_recognized_by_its_marker() {
+    let dir = tempfile::tempdir().unwrap();
+    assert!(!is_built_in_types_node(dir.path()));
+    std::fs::write(
+      dir.path().join("package.json"),
+      r#"{"name":"@types/node","version":"24.2.0"}"#,
+    )
+    .unwrap();
+    assert!(!is_built_in_types_node(dir.path()));
+    std::fs::write(
+      dir.path().join("package.json"),
+      format!(
+        r#"{{"name":"@types/node","version":"24.2.0","{BUILT_IN_TYPES_NODE_MARKER}":true}}"#
+      ),
+    )
+    .unwrap();
+    assert!(is_built_in_types_node(dir.path()));
+  }
 
   #[test]
   fn test_strip_top_level_type_decls() {

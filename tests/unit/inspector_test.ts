@@ -42,6 +42,26 @@ async function extractWsUrl(
   }
 }
 
+/** `read`, unless `deadline` (a `Date.now()` value) passes first. */
+async function readBefore<T>(
+  read: Promise<T>,
+  deadline: number,
+  what: string,
+): Promise<T> {
+  let timer: number | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () => reject(new Error(`Timeout waiting for ${what}`)),
+      Math.max(0, deadline - Date.now()),
+    );
+  });
+  try {
+    return await Promise.race([read, timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 class InspectorTester {
   private socket: WebSocket;
   private child: Deno.ChildProcess;
@@ -49,6 +69,14 @@ class InspectorTester {
   private stdoutReader: ReadableStreamDefaultReader<string>;
   private stderrBuffer: string = "";
   private stdoutBuffer: string = "";
+  // A read still pending when a line's deadline passed: the next read awaits
+  // it rather than dropping the chunk it resolves with.
+  private pendingStderrRead:
+    | Promise<ReadableStreamReadResult<string>>
+    | null = null;
+  private pendingStdoutRead:
+    | Promise<ReadableStreamReadResult<string>>
+    | null = null;
   private responseBuffer: Map<number, CDPMessage> = new Map();
   private notificationBuffer: CDPMessage[] = [];
   private messageWaiters: Array<() => void> = [];
@@ -163,7 +191,11 @@ class InspectorTester {
     const deadline = Date.now() + 30_000;
 
     while (Date.now() < deadline) {
-      const { value, done } = await reader.read();
+      const { value, done } = await readBefore(
+        reader.read(),
+        deadline,
+        "WebSocket URL in stderr",
+      );
       if (done) {
         throw new Error("Stderr closed before WebSocket URL found");
       }
@@ -348,7 +380,13 @@ class InspectorTester {
         return line;
       }
 
-      const { value, done } = await this.stdoutReader.read();
+      this.pendingStdoutRead ??= this.stdoutReader.read();
+      const { value, done } = await readBefore(
+        this.pendingStdoutRead,
+        deadline,
+        "stdout line",
+      );
+      this.pendingStdoutRead = null;
       if (done) {
         if (this.stdoutBuffer.length > 0) {
           const line = this.stdoutBuffer;
@@ -375,7 +413,13 @@ class InspectorTester {
         return line.replace(/\x1b\[[0-9;]*m/g, "");
       }
 
-      const { value, done } = await this.stderrReader.read();
+      this.pendingStderrRead ??= this.stderrReader.read();
+      const { value, done } = await readBefore(
+        this.pendingStderrRead,
+        deadline,
+        "stderr line",
+      );
+      this.pendingStderrRead = null;
       if (done) {
         if (this.stderrBuffer.length > 0) {
           const line = this.stderrBuffer;
