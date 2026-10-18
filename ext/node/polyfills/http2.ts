@@ -900,8 +900,10 @@ function onStreamClose(code) {
   // next callback, so a client that awaits 'response' has attached its
   // 'data' / 'end' listeners before the stream closes and its readable side
   // ends. Here both callbacks run before any of that, so wait until the
-  // 'response' handlers and the code awaiting them have run.
-  if (stream[kResponseEventPending]) {
+  // 'response' handlers and the code awaiting them have run. A close with an
+  // error code keeps the nextTick below, so the stream errors before the
+  // session can tear it down.
+  if (code === NGHTTP2_NO_ERROR && stream[kResponseEventPending]) {
     setImmediate(onStreamCloseDeferred, stream, code);
     return true;
   }
