@@ -48,7 +48,7 @@ async function readBefore<T>(
   deadline: number,
   what: string,
 ): Promise<T> {
-  let timer: number | undefined;
+  let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<never>((_, reject) => {
     timer = setTimeout(
       () => reject(new Error(`Timeout waiting for ${what}`)),
