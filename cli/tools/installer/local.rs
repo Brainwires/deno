@@ -462,8 +462,13 @@ pub async fn sync_types_command(
   let type_check_remote =
     cli_options.type_check_mode() == crate::args::TypeCheckMode::All;
 
+  let root_config = cli_options
+    .workspace()
+    .root_deno_json()
+    .and_then(|config| config.specifier.to_file_path().ok());
   let installed = super::npm_compat::setup_npm_compat(
     &project_root,
+    root_config.as_deref(),
     &file_fetcher,
     &http_client,
     &permissions,

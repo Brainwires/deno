@@ -342,27 +342,13 @@ pub(crate) async fn run_native_check(
       config_disabled,
     );
   let root_tsconfig = project_root.join("tsconfig.json");
-  // Holds the root overlay temp file open until tsc has run (dropping deletes
-  // it), keeping `deno check` side-effect-free on the user's tree.
-  let _root_tsconfig_guard;
-  let base_tsconfig = if honor_user_tsconfig && root_tsconfig.exists() {
-    let overlay = crate::tsc::tsconfig_gen::build_check_root_overlay(
+  let root_overlay = if honor_user_tsconfig && root_tsconfig.exists() {
+    Some(crate::tsc::tsconfig_gen::build_check_root_overlay(
       &project_root,
       &root_tsconfig,
-    )?;
-    let mut tmp = tempfile::Builder::new()
-      .prefix("deno-check-root-")
-      .suffix(".tsconfig.json")
-      .tempfile_in(&project_root)?;
-    std::io::Write::write_all(
-      &mut tmp,
-      deno_core::serde_json::to_string_pretty(&overlay)?.as_bytes(),
-    )?;
-    let path = tmp.path().to_path_buf();
-    _root_tsconfig_guard = tmp;
-    path
+    )?)
   } else {
-    project_root.join(".deno").join("tsconfig.json")
+    None
   };
   // Pin tsc to exactly the roots deno resolved (glob-expanded and exclude-applied
   // above), so `deno check *.ts` checks only the matched files - not the whole
@@ -404,11 +390,19 @@ pub(crate) async fn run_native_check(
     return Ok(true);
   }
 
-  // Holds the per-file config's temp file open until tsc has run (dropping it
-  // deletes the file).
+  // Holds the config's temp file open until tsc has run (dropping it deletes
+  // the file), keeping `deno check` side-effect-free on the user's tree.
   let _check_tsconfig_guard;
   let tsconfig_path = if files.is_empty() {
-    base_tsconfig
+    match root_overlay {
+      Some(overlay) => {
+        let tmp = write_root_overlay(&project_root, &overlay)?;
+        let path = tmp.path().to_path_buf();
+        _check_tsconfig_guard = tmp;
+        path
+      }
+      None => project_root.join(".deno").join("tsconfig.json"),
+    }
   } else {
     // `deno check <files>` checks only the named files (and their imports), not
     // the whole project. The generated `tsconfig.json` keeps an open `include`
@@ -439,31 +433,50 @@ pub(crate) async fn run_native_check(
         }
       }
     }
-    // Write to the system temp dir, not the project root: this config only
-    // references absolute paths (`extends` the base config by absolute path,
-    // `files` are absolute, `include` is empty), and tsc runs with its cwd
-    // pinned to `project_root` regardless of where the config lives, so its
-    // location does not affect resolution. Keeping it out of the project tree
-    // avoids leaving an artifact behind and, more importantly, avoids racing
-    // with anything enumerating the project directory - e.g. a sibling
-    // spec-test variant that copies the directory while this ephemeral file
-    // briefly exists (and then vanishes when the guard drops).
-    let content = deno_core::serde_json::json!({
-      "extends": base_tsconfig.to_string_lossy().replace('\\', "/"),
-      "include": [],
-      "files": files,
-    });
-    let mut tmp = tempfile::Builder::new()
-      .prefix("deno-check-")
-      .suffix(".tsconfig.json")
-      .tempfile()?;
-    std::io::Write::write_all(
-      &mut tmp,
-      deno_core::serde_json::to_string_pretty(&content)?.as_bytes(),
-    )?;
-    let path = tmp.path().to_path_buf();
-    _check_tsconfig_guard = tmp;
-    path
+    // denext: with the user's tsconfig honored, its overlay (a temp file in
+    // the project root) takes the `files` itself rather than being extended
+    // from the temp dir: the compiler resolves a path in a message about an
+    // option (TS5102's `baseUrl` hint) relative to the config it was given, as
+    // it does for the user's own file. Its `references` go, as they did when
+    // a per-file config extended it (`references` are not inherited).
+    if let Some(mut overlay) = root_overlay {
+      if let Some(object) = overlay.as_object_mut() {
+        object.insert("include".to_string(), deno_core::serde_json::json!([]));
+        object.insert("files".to_string(), deno_core::serde_json::json!(files));
+        object.remove("references");
+      }
+      let tmp = write_root_overlay(&project_root, &overlay)?;
+      let path = tmp.path().to_path_buf();
+      _check_tsconfig_guard = tmp;
+      path
+    } else {
+      // Write to the system temp dir, not the project root: this config only
+      // references absolute paths (`extends` the base config by absolute path,
+      // `files` are absolute, `include` is empty), and tsc runs with its cwd
+      // pinned to `project_root` regardless of where the config lives, so its
+      // location does not affect resolution. Keeping it out of the project tree
+      // avoids leaving an artifact behind and, more importantly, avoids racing
+      // with anything enumerating the project directory - e.g. a sibling
+      // spec-test variant that copies the directory while this ephemeral file
+      // briefly exists (and then vanishes when the guard drops).
+      let base_tsconfig = project_root.join(".deno").join("tsconfig.json");
+      let content = deno_core::serde_json::json!({
+        "extends": base_tsconfig.to_string_lossy().replace('\\', "/"),
+        "include": [],
+        "files": files,
+      });
+      let mut tmp = tempfile::Builder::new()
+        .prefix("deno-check-")
+        .suffix(".tsconfig.json")
+        .tempfile()?;
+      std::io::Write::write_all(
+        &mut tmp,
+        deno_core::serde_json::to_string_pretty(&content)?.as_bytes(),
+      )?;
+      let path = tmp.path().to_path_buf();
+      _check_tsconfig_guard = tmp;
+      path
+    }
   };
 
   log_check_roots(roots, &current_dir);
@@ -524,6 +537,24 @@ pub(crate) async fn run_native_check(
   }
 
   Ok(true)
+}
+
+/// Write the root overlay (the user's `tsconfig.json` on top of the generated
+/// one, see `build_check_root_overlay`) to a temp file in the project root, so
+/// the user's path-based options resolve as in their own file.
+fn write_root_overlay(
+  project_root: &Path,
+  overlay: &deno_core::serde_json::Value,
+) -> Result<tempfile::NamedTempFile, AnyError> {
+  let mut tmp = tempfile::Builder::new()
+    .prefix("deno-check-root-")
+    .suffix(".tsconfig.json")
+    .tempfile_in(project_root)?;
+  std::io::Write::write_all(
+    &mut tmp,
+    deno_core::serde_json::to_string_pretty(overlay)?.as_bytes(),
+  )?;
+  Ok(tmp)
 }
 
 /// Print a `Check <specifier>` line for each provided root, rendered relative

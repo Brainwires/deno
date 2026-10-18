@@ -289,6 +289,7 @@ fn is_special_specifier(s: &str) -> bool {
 )]
 pub async fn setup_npm_compat(
   project_root: &Path,
+  root_config: Option<&Path>,
   file_fetcher: &CliFileFetcher,
   http_client: &HttpClient,
   permissions: &PermissionsContainer,
@@ -300,7 +301,9 @@ pub async fn setup_npm_compat(
   manage_root_tsconfig: bool,
   type_check_remote: bool,
 ) -> Result<Vec<InstalledJsrPackage>, AnyError> {
-  let deno_json = read_deno_json(project_root)?;
+  // The root config the workspace loaded (denext): `--config other.json`, or
+  // `deno publish`'s `jsr.json(c)`, is not the root's `deno.json`.
+  let deno_json = root_config.map(read_config_file).transpose()?;
   let deno_compiler_options = deno_json
     .as_ref()
     .and_then(|d| d.get("compilerOptions"))
@@ -330,6 +333,27 @@ pub async fn setup_npm_compat(
   {
     for (k, v) in map_imports {
       combined.entry(k).or_insert(v);
+    }
+  }
+  // denext: a workspace member's own `imports` (`"bar": "jsr:@foo/bar@1"` in
+  // `foo/deno.json`) resolve that member's modules in Deno. The generated
+  // `paths` serve the whole project, so a member's entry joins them unless
+  // the root or an earlier member maps the key already (a key the members map
+  // differently keeps the in-process checker: `TypeChecker::native_unsupported`).
+  if let Some(d) = deno_json.as_ref() {
+    for (key, value) in workspace_member_imports(project_root, d) {
+      combined.entry(key).or_insert(value);
+    }
+  }
+  // denext: without a `node_modules` (`nodeModulesDir: "none"`) a bare import
+  // of a root `package.json` dependency resolves to npm in Deno, but nothing
+  // on disk holds it for the compiler: map it as an import map entry would.
+  let global_cache_layout = npm_resolver
+    .as_managed()
+    .is_some_and(|managed| managed.root_node_modules_path().is_none());
+  if global_cache_layout {
+    for (name, target) in package_json_dependency_imports(project_root) {
+      combined.entry(name).or_insert(Value::String(target));
     }
   }
   // Snapshot the import-map alias -> target pairs (before adding graph specs)
@@ -380,9 +404,7 @@ pub async fn setup_npm_compat(
   // project, so duplicate versions and peer-dependency copies remain distinct.
   let npm_cache_projects =
     generate_npm_cache_projects(project_root, deno_imports, npm_resolver)?;
-  let use_global_cache_layout = npm_resolver
-    .as_managed()
-    .is_some_and(|managed| managed.root_node_modules_path().is_none());
+  let use_global_cache_layout = global_cache_layout;
 
   let jsr_packages_dir = if use_global_cache_layout {
     project_root.join(".deno/npm-compat/@jsr")
@@ -701,6 +723,44 @@ fn resolve_version_req(meta: &Value, req: &str) -> Option<String> {
     .map(|v| v.to_string())
 }
 
+/// The root `package.json`'s npm dependencies (`dependencies`, then
+/// `devDependencies`) as import-map entries: `"picocolors": "1"` ->
+/// `npm:picocolors@1`, an `npm:` alias as written. Other kinds (`workspace:`,
+/// `file:`, git, URLs) are left to the compiler.
+fn package_json_dependency_imports(
+  project_root: &Path,
+) -> Vec<(String, String)> {
+  let Ok(content) = std::fs::read_to_string(project_root.join("package.json"))
+  else {
+    return Vec::new();
+  };
+  let Ok(package_json) = serde_json::from_str::<Value>(&content) else {
+    return Vec::new();
+  };
+  let mut imports = Vec::new();
+  for field in ["dependencies", "devDependencies"] {
+    let Some(deps) = package_json.get(field).and_then(|d| d.as_object()) else {
+      continue;
+    };
+    for (name, req) in deps {
+      let Some(req) = req.as_str() else {
+        continue;
+      };
+      let target = if req.starts_with("npm:") {
+        req.to_string()
+      } else if VersionReq::parse_from_npm(req).is_ok() {
+        format!("npm:{name}@{req}")
+      } else {
+        continue;
+      };
+      if !imports.iter().any(|(n, _)| n == name) {
+        imports.push((name.clone(), target));
+      }
+    }
+  }
+  imports
+}
+
 /// If `deno_json` references an external import map via `importMap`, read that
 /// file and return its `imports` object.
 fn read_referenced_import_map(
@@ -710,7 +770,23 @@ fn read_referenced_import_map(
   let rel = deno_json.get("importMap").and_then(|v| v.as_str())?;
   let content = std::fs::read_to_string(project_root.join(rel)).ok()?;
   let parsed: Value = serde_json::from_str(&content).ok()?;
-  parsed.get("imports").and_then(|v| v.as_object()).cloned()
+  let mut imports =
+    parsed.get("imports").and_then(|v| v.as_object()).cloned()?;
+  // denext: a relative target is relative to the import map file, which may
+  // live elsewhere (`"importMap": "../import_map.json"`); the generated
+  // `paths` take it relative to the project root.
+  if let Some(map_dir) = Path::new(rel).parent().and_then(|d| d.to_str())
+    && !Path::new(rel).is_absolute()
+  {
+    for value in imports.values_mut() {
+      if let Some(target) = value.as_str()
+        && (target.starts_with("./") || target.starts_with("../"))
+      {
+        *value = Value::String(rebase_relative_target(map_dir, target));
+      }
+    }
+  }
+  Some(imports)
 }
 
 /// Build tsconfig `paths` entries that map each workspace member's package name
@@ -768,6 +844,76 @@ fn workspace_member_paths(
     }
   }
   paths
+}
+
+/// The `imports` of each workspace member's `deno.json`, a relative target
+/// (`./lib/x.ts`) rebased onto the project root (`./member/lib/x.ts`) as the
+/// root import map's targets are.
+fn workspace_member_imports(
+  project_root: &Path,
+  deno_json: &Value,
+) -> Vec<(String, Value)> {
+  let Some(members) = deno_json.get("workspace").and_then(|w| w.as_array())
+  else {
+    return Vec::new();
+  };
+  let member_patterns: Vec<&str> =
+    members.iter().filter_map(|m| m.as_str()).collect();
+  let mut imports = Vec::new();
+  for member_rel in expand_member_patterns(project_root, &member_patterns) {
+    let Some(member_json) = read_deno_json(&project_root.join(&member_rel))
+      .ok()
+      .flatten()
+    else {
+      continue;
+    };
+    let Some(member_imports) =
+      member_json.get("imports").and_then(|i| i.as_object())
+    else {
+      continue;
+    };
+    for (key, value) in member_imports {
+      let value = match value.as_str() {
+        Some(target)
+          if target.starts_with("./") || target.starts_with("../") =>
+        {
+          Value::String(rebase_relative_target(&member_rel, target))
+        }
+        _ => value.clone(),
+      };
+      imports.push((key.clone(), value));
+    }
+  }
+  imports
+}
+
+/// `target`, relative to the directory `dir_rel` (itself relative to the
+/// project root), relative to the project root instead (`"pkg"`,
+/// `"../lib/x.ts"` -> `"./lib/x.ts"`).
+fn rebase_relative_target(dir_rel: &str, target: &str) -> String {
+  let mut parts: Vec<&str> = dir_rel
+    .split(['/', '\\'])
+    .filter(|p| !p.is_empty() && *p != ".")
+    .collect();
+  let trailing_slash = target.ends_with('/');
+  for part in target.split('/') {
+    match part {
+      "" | "." => {}
+      ".." => {
+        if parts.last().is_some_and(|last| *last != "..") {
+          parts.pop();
+        } else {
+          parts.push("..");
+        }
+      }
+      part => parts.push(part),
+    }
+  }
+  let mut rebased = format!("./{}", parts.join("/"));
+  if trailing_slash && !rebased.ends_with('/') {
+    rebased.push('/');
+  }
+  rebased
 }
 
 /// Expand workspace member patterns into concrete member directories (relative
@@ -858,18 +1004,22 @@ fn read_deno_json(project_root: &Path) -> Result<Option<Value>, AnyError> {
   let deno_jsonc_path = project_root.join("deno.jsonc");
 
   if deno_json_path.exists() {
-    let content = std::fs::read_to_string(&deno_json_path)?;
-    Ok(Some(serde_json::from_str(&content)?))
+    read_config_file(&deno_json_path).map(Some)
   } else if deno_jsonc_path.exists() {
-    let content = std::fs::read_to_string(&deno_jsonc_path)?;
-    let parsed: Option<Value> = jsonc_parser::parse_to_serde_value(
-      &content,
-      &jsonc_parser::ParseOptions::default(),
-    )?;
-    Ok(Some(parsed.unwrap_or(json!({}))))
+    read_config_file(&deno_jsonc_path).map(Some)
   } else {
     Ok(None)
   }
+}
+
+/// A config file's JSON, read as JSONC (as Deno reads a `deno.json` too).
+fn read_config_file(path: &Path) -> Result<Value, AnyError> {
+  let content = std::fs::read_to_string(path)?;
+  let parsed: Option<Value> = jsonc_parser::parse_to_serde_value(
+    &content,
+    &jsonc_parser::ParseOptions::default(),
+  )?;
+  Ok(parsed.unwrap_or(json!({})))
 }
 
 /// Generate tsconfig.deno.json at the project root with paths mappings.
@@ -1720,6 +1870,94 @@ mod tests {
     assert_eq!(scheme_package_name("npm:chalk").as_deref(), Some("chalk"));
     assert_eq!(scheme_package_name("./local.ts"), None);
     assert_eq!(scheme_package_name("https://example.com/x.ts"), None);
+  }
+
+  #[test]
+  fn test_package_json_dependency_imports() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+      dir.path().join("package.json"),
+      r#"{
+        "dependencies": { "picocolors": "1", "alias": "npm:chalk@5" },
+        "devDependencies": {
+          "picocolors": "2",
+          "local": "file:../local",
+          "ws": "workspace:*"
+        }
+      }"#,
+    )
+    .unwrap();
+    let mut imports = package_json_dependency_imports(dir.path());
+    imports.sort();
+    assert_eq!(
+      imports,
+      vec![
+        ("alias".to_string(), "npm:chalk@5".to_string()),
+        ("picocolors".to_string(), "npm:picocolors@1".to_string()),
+      ]
+    );
+  }
+
+  #[test]
+  fn test_rebase_relative_target() {
+    assert_eq!(rebase_relative_target("foo", "./mod.ts"), "./foo/mod.ts");
+    assert_eq!(
+      rebase_relative_target("pkgs/a", "../b/x.ts"),
+      "./pkgs/b/x.ts"
+    );
+    assert_eq!(rebase_relative_target("a", "../../x.ts"), "./../x.ts");
+    assert_eq!(rebase_relative_target("a", "./lib/"), "./a/lib/");
+    assert_eq!(rebase_relative_target("", "./x.ts"), "./x.ts");
+    assert_eq!(rebase_relative_target(".", "./x/"), "./x/");
+    assert_eq!(rebase_relative_target("..", "./shared/"), "./../shared/");
+  }
+
+  #[test]
+  fn test_read_referenced_import_map_rebases_onto_the_root() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("sub");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(
+      dir.path().join("import_map.json"),
+      r#"{ "imports": { "~/shared/": "./shared/", "x": "npm:x@1" } }"#,
+    )
+    .unwrap();
+    let imports = read_referenced_import_map(
+      &root,
+      &json!({ "importMap": "../import_map.json" }),
+    )
+    .unwrap();
+    assert_eq!(imports.get("~/shared/"), Some(&json!("./../shared/")));
+    assert_eq!(imports.get("x"), Some(&json!("npm:x@1")));
+  }
+
+  #[test]
+  fn test_workspace_member_imports() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::create_dir_all(root.join("foo")).unwrap();
+    std::fs::create_dir_all(root.join("packages/bar")).unwrap();
+    std::fs::write(
+      root.join("foo/deno.json"),
+      r#"{ "imports": { "bar": "jsr:@foo/bar@1", "util": "./util.ts" } }"#,
+    )
+    .unwrap();
+    std::fs::write(
+      root.join("packages/bar/deno.jsonc"),
+      "// a comment\n{ \"imports\": { \"lib/\": \"../lib/\" } }",
+    )
+    .unwrap();
+    let root_json = json!({ "workspace": ["./foo", "./packages/*"] });
+    let mut imports = workspace_member_imports(root, &root_json);
+    imports.sort_by(|a, b| a.0.cmp(&b.0));
+    assert_eq!(
+      imports,
+      vec![
+        ("bar".to_string(), json!("jsr:@foo/bar@1")),
+        ("lib/".to_string(), json!("./packages/lib/")),
+        ("util".to_string(), json!("./foo/util.ts")),
+      ]
+    );
   }
 
   #[test]

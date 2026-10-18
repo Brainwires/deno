@@ -35,6 +35,7 @@ use crate::args::CheckFlags;
 use crate::args::CliOptions;
 use crate::args::CompilerOptions;
 use crate::args::DenoSubcommand;
+use crate::args::FlagsExt;
 use crate::args::TsTypeLib;
 use crate::args::TypeCheckMode;
 use crate::cache::CacheDBHash;
@@ -265,8 +266,14 @@ impl TypeChecker {
     if !options.type_check_mode.is_true() || graph.roots.is_empty() {
       return Ok(Arc::new(graph));
     }
-    if let Some(reason) = self
-      .native_unsupported(&graph)
+    // A worker's graph is typed against `deno.worker` (`self.postMessage`,
+    // no `window`), but the generated project's `@types/deno` is the
+    // command's main lib, shared by every check of the project. Only the
+    // in-process checker selects the lib per graph.
+    let worker_lib = matches!(options.lib, TsTypeLib::DenoWorker)
+      .then_some("a worker's graph (the deno.worker lib)");
+    if let Some(reason) = worker_lib
+      .or_else(|| self.native_unsupported(&graph))
       .or_else(|| missing_local_module(&graph))
     {
       log::debug!("Type checking in-process: {reason}");
@@ -291,8 +298,19 @@ impl TypeChecker {
     if sync_roots.is_empty() {
       return Ok(Arc::new(graph));
     }
-    // The config generator reads the project as `deno check <roots>` would.
+    // The config generator reads the project as `deno check <roots>` would,
+    // in the workspace this command found: `deno check` discovers the config
+    // from the cwd, `deno run sub/main.ts` from `sub/` (and `deno publish`
+    // also from a `jsr.json`), and the generated project must be written
+    // where this check reads it, at this command's workspace root.
     let mut flags = (**self.cli_options.flags()).clone();
+    flags.internal.config_discovery_start = Some(
+      flags
+        .config_path_args(self.cli_options.initial_cwd())
+        .unwrap_or_default(),
+    );
+    flags.internal.config_discovery_jsr =
+      matches!(flags.subcommand, DenoSubcommand::Publish(_));
     flags.subcommand = DenoSubcommand::Check(CheckFlags {
       files: sync_roots.clone(),
       doc: false,
@@ -368,6 +386,9 @@ impl TypeChecker {
     if !options.workspace().link_folders().is_empty() {
       return Some("workspace `links` (patched packages)");
     }
+    if workspace_members_map_an_import_differently(options.workspace()) {
+      return Some("workspace members that map one import differently");
+    }
     if let DenoSubcommand::Test(test_flags) = options.sub_command() {
       if test_flags.doc {
         return Some("test --doc");
@@ -382,6 +403,19 @@ impl TypeChecker {
       {
         return Some("a Vitest or Jest config (its aliases)");
       }
+    }
+    // A remote `compilerOptions.types` entry (a graph import of the config)
+    // has no counterpart in the generated project, which mirrors only the
+    // remote modules the code imports.
+    if graph.imports.values().any(|import| {
+      import.dependencies.values().any(|dep| {
+        dep
+          .get_type()
+          .or_else(|| dep.get_code())
+          .is_some_and(|s| matches!(s.scheme(), "http" | "https"))
+      })
+    }) {
+      return Some("a remote `compilerOptions.types` entry");
     }
     // jsr types are materialized from npm.jsr.io, which mirrors jsr.io only.
     let custom_jsr = std::env::var("JSR_URL").ok().filter(|url| {
@@ -706,6 +740,43 @@ impl TypeChecker {
     }
     Ok(groups_by_key.into_values().collect())
   }
+}
+
+/// Whether two configs of the workspace (the root's and its members') map one
+/// import-map key to different targets. Deno scopes a member's `imports` to
+/// its own modules; the generated project has one `paths` table for all of
+/// them, which holds each key once (denext).
+fn workspace_members_map_an_import_differently(
+  workspace: &deno_config::workspace::Workspace,
+) -> bool {
+  let mut seen: HashMap<String, String> = HashMap::new();
+  for config in workspace.deno_jsons() {
+    let Some(imports) =
+      config.json.imports.as_ref().and_then(|i| i.as_object())
+    else {
+      continue;
+    };
+    for (key, value) in imports {
+      let Some(target) = value.as_str() else {
+        continue;
+      };
+      let target = if target.starts_with("./") || target.starts_with("../") {
+        config
+          .specifier
+          .join(target)
+          .map(|url| url.to_string())
+          .unwrap_or_else(|_| target.to_string())
+      } else {
+        target.to_string()
+      };
+      if let Some(previous) = seen.insert(key.clone(), target.clone())
+        && previous != target
+      {
+        return true;
+      }
+    }
+  }
+  false
 }
 
 /// A local module the graph could not load, if any: Deno reports it itself,

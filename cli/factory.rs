@@ -1554,14 +1554,23 @@ fn new_workspace_factory_options(
     additional_config_file_names: if matches!(
       flags.subcommand,
       DenoSubcommand::Publish(..)
-    ) {
+    ) || flags.internal.config_discovery_jsr
+    {
       &["jsr.json", "jsr.jsonc"]
     } else {
       &[]
     },
     config_discovery: match &flags.config_flag {
       ConfigFlag::Discover => {
-        if let Some(start_paths) = flags.config_path_args(initial_cwd) {
+        // denext: the native type check's re-read of the project starts where
+        // the type-checking command did (see `InternalFlags`).
+        let start_paths = match &flags.internal.config_discovery_start {
+          Some(start_paths) => {
+            (!start_paths.is_empty()).then(|| start_paths.clone())
+          }
+          None => flags.config_path_args(initial_cwd),
+        };
+        if let Some(start_paths) = start_paths {
           ConfigDiscoveryOption::Discover { start_paths }
         } else {
           ConfigDiscoveryOption::Disabled

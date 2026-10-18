@@ -208,6 +208,14 @@ pub fn tsgo_check_bin() -> Option<PathRef> {
     .clone()
 }
 
+/// The `DENO_TSGO_BIN` a test's `deno` gets (denext): an ambient one (e.g. a
+/// local `export`), else the pinned compiler [`tsgo_check_bin`] fetches.
+pub fn tsgo_check_bin_env() -> Option<String> {
+  std::env::var_os("DENO_TSGO_BIN")
+    .map(|v| v.to_string_lossy().into_owned())
+    .or_else(|| tsgo_check_bin().map(|p| p.to_string_lossy().into_owned()))
+}
+
 pub fn prebuilt_path() -> PathRef {
   third_party_path().join("prebuilt")
 }
@@ -613,12 +621,19 @@ pub fn deno_cmd() -> TestCommandBuilder {
 }
 
 pub fn deno_cmd_with_deno_dir(deno_dir: &TempDir) -> TestCommandBuilder {
-  TestCommandBuilder::new(deno_dir.clone())
+  let builder = TestCommandBuilder::new(deno_dir.clone())
     .env("DENO_DIR", deno_dir.path())
     .env("NPM_CONFIG_REGISTRY", npm_registry_unset_url())
     .env("JSR_NPM_URL", npm_jsr_registry_unset_url())
     .env("NODEJS_ORG_MIRROR", nodejs_org_mirror_unset_url())
-    .env("JSR_URL", jsr_registry_unset_url())
+    .env("JSR_URL", jsr_registry_unset_url());
+  // denext: the pinned native compiler, as `TestContextBuilder::build` passes
+  // it, for the `deno` this runs and every `deno` it spawns (a unit test's
+  // `run --check` child).
+  match tsgo_check_bin_env() {
+    Some(tsc_bin) => builder.env("DENO_TSGO_BIN", tsc_bin),
+    None => builder,
+  }
 }
 
 pub fn run_powershell_script_file(

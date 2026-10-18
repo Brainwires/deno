@@ -394,7 +394,23 @@ fn parse_tsc_pretty_diagnostics(
       )
     };
   for (i, line) in lines.iter().enumerate() {
-    if let Some(caps) = PRETTY_HEADER_RE.captures(line) {
+    if let Some(caps) = PRETTY_HEADER_RE.captures(line)
+      && is_check_config(&caps["file"])
+    {
+      // denext: an option's diagnostic located in the config Deno wrote for
+      // this run (the user's `tsconfig.json` re-serialized on top of the
+      // generated one) has no line of the user's own: shown without one.
+      diagnostics.push(make_diagnostic(
+        &caps["cat"],
+        caps["code"].parse().unwrap_or(0),
+        None,
+        None,
+        None,
+        None,
+        caps["msg"].to_string(),
+      ));
+      in_chain = true;
+    } else if let Some(caps) = PRETTY_HEADER_RE.captures(line) {
       let span = pretty_frame_span(&lines, i);
       let (file_name, start, end, source_line) = located(
         &caps["file"],
@@ -467,6 +483,16 @@ fn parse_tsc_pretty_diagnostics(
     // statistics are not diagnostics.
   }
   diagnostics
+}
+
+/// Whether `file` (as the compiler prints it) is a config `deno check` wrote
+/// for the run: `deno-check-root-*.tsconfig.json` in the project root (or
+/// `deno-check-*.tsconfig.json` in the temp dir) or `.deno/tsconfig.json`.
+fn is_check_config(file: &str) -> bool {
+  let file = file.replace('\\', "/");
+  let name = file.rsplit('/').next().unwrap_or(&file);
+  (name.starts_with("deno-check-") && name.ends_with(".tsconfig.json"))
+    || file.ends_with(".deno/tsconfig.json")
 }
 
 /// Compiler statistics reported by `tsc --diagnostics` (how many files/lines
@@ -1015,6 +1041,35 @@ mod pretty_tests {
     assert_eq!((rstart.line, rstart.character), (0, 15));
     assert_eq!(related[0].end.as_ref().unwrap().character, 19);
     assert!(related[0].file_name.as_deref().unwrap().ends_with("/a.ts"));
+  }
+
+  #[test]
+  fn pretty_diagnostic_in_the_check_config_has_no_location() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = concat!(
+      "\x1b[96mdeno-check-root-Ab12Cd.tsconfig.json\x1b[0m:\x1b[93m3\x1b[0m:\x1b[93m5\x1b[0m - \x1b[91merror\x1b[0m\x1b[90m TS5102: \x1b[0mOption 'baseUrl' has been removed. Please remove it from your configuration.\n",
+      "  Use '\"paths\": {\"*\": [\"./*\"]}' instead.\n",
+      "\n",
+      "\x1b[7m3\x1b[0m     \"baseUrl\": \".\",\n",
+      "\x1b[7m \x1b[0m \x1b[91m    ~~~~~~~~~\x1b[0m\n",
+      "\n",
+      "Found 1 error.\n",
+    );
+    let diags = parse_tsc_diagnostics(output, dir.path());
+    assert_eq!(diags.len(), 1, "{diags:?}");
+    assert_eq!(diags[0].code, 5102);
+    assert!(diags[0].file_name.is_none());
+    assert!(diags[0].start.is_none());
+    assert_eq!(
+      diags[0].message_text.as_deref(),
+      Some(
+        "Option 'baseUrl' has been removed. Please remove it from your configuration.\n  Use '\"paths\": {\"*\": [\"./*\"]}' instead."
+      )
+    );
+    assert!(is_check_config("/tmp/deno-check-x1.tsconfig.json"));
+    assert!(is_check_config("../.deno/tsconfig.json"));
+    assert!(!is_check_config("tsconfig.json"));
+    assert!(!is_check_config("src/deno-check.ts"));
   }
 
   #[test]

@@ -986,6 +986,15 @@ pub struct InternalFlags {
   /// of compilation pulls deep CJS files (e.g. `jiti.cjs`) into the
   /// module graph the same way `deno bundle` does.
   pub force_bundle_mode: bool,
+  /// Where the config file discovery starts, in place of the subcommand's own
+  /// start paths; an empty list disables the discovery (denext). Set by the
+  /// native type check, which re-reads the project as `deno check <roots>`
+  /// but must find the workspace of the command that type-checks (`deno run
+  /// sub/main.ts` discovers from `sub/`, `deno check` from the cwd).
+  pub config_discovery_start: Option<Vec<PathBuf>>,
+  /// Discover a `jsr.json(c)` as well, as `deno publish` does (denext; set
+  /// with `config_discovery_start` for a type check of `deno publish`).
+  pub config_discovery_jsr: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Default)]
