@@ -2110,8 +2110,33 @@ where the changes are discussed.
     timers and fmt tests were run against the `rel/denext22` build first and
     fail there.
 
+73. **laufey `development-denext` host changes** (from `denext.22`; laufey
+    `development-denext` `2dd0988`, code at `643a289`, no runtime API).
+    - Page-triggered downloads (`<a download>`,
+      `Content-Disposition:
+      attachment`, blob exports) ask where to save
+      with the platform's save dialog on every backend and are cancelled when it
+      is dismissed (carried from littledivy/laufey#126). The fork hardens it: a
+      download's URL, before and after redirects, must be on an origin the
+      window's top-level frame may load (a cross-origin iframe opens no dialog),
+      the proposed name is sanitized (no directory part, control or bidi
+      characters, reserved Windows names, leading dots; at most 200 bytes), the
+      dialog is the backend's own one-at-a-time file dialog, at most 3 save
+      dialogs per window in 10 s, and CEF never saves without a path.
+    - CEF on Windows keeps an app started elevated (UAC on) elevated
+      (`--do-not-de-elevate`) instead of exiting 1 after Chromium's de-elevation
+      relaunch, which also lost a cold-start deep link.
+    - A deep-link launch keeps CEF's own `--disable-features` defaults, so the
+      browser no longer crashes at startup in Chrome's tab code.
+
+    Tests: laufey's downloads e2e on every webview and CEF leg (a blob export
+    saved at the chosen path, a traversal name writes only the chosen path, a
+    dismissed dialog writes nothing, cross-origin frames and top-level
+    cross-origin downloads never reach the dialog) and `cef_network_quiet_test`
+    (each CEF default survives an emptied value). This fork's e2e is unchanged.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
-64-72) are what the prebuilt `libdenort` carries. The CLI-side parts (for
+64-73) are what the prebuilt `libdenort` carries. The CLI-side parts (for
 example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's
 launchers) are in the branch too, but a stock CLI does not run them; denext's
 own launcher provides that environment.
