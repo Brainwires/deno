@@ -711,10 +711,14 @@ pub unsafe fn to_fast_v8_slice<'a, T, const COPY_INVALID: bool>(
 where
   T: V8Sliceable,
 {
-  let Some(store) = view.get_backing_store() else {
-    return Err("buffer missing");
-  };
-  if store.is_resizable_by_user_javascript() || store.is_shared() {
+  // A typed array whose contents still live on the V8 heap has no
+  // ArrayBuffer yet and is never shared or resizable. Asking it for its
+  // backing store would materialize the buffer, a heap allocation that a fast
+  // call must not make, so only views that have a buffer are checked.
+  if view.has_buffer()
+    && let Some(store) = view.get_backing_store()
+    && (store.is_resizable_by_user_javascript() || store.is_shared())
+  {
     if COPY_INVALID {
       return copy_array_buffer_view(view).map(FastV8Slice::Copy);
     }
@@ -1095,10 +1099,13 @@ pub unsafe fn to_slice_buffer_any<'a>(
   unsafe {
     let (data, len) = {
       if let Ok(buf) = v8::Local::<v8::ArrayBufferView>::try_from(input) {
-        let Some(store) = buf.get_backing_store() else {
-          return Err("buffer missing");
-        };
-        if needs_copy(&store) {
+        // Only a view with an ArrayBuffer can be shared or resizable, and
+        // asking an on-heap view for its backing store would allocate inside
+        // the fast call (see `to_fast_v8_slice`).
+        if buf.has_buffer()
+          && let Some(store) = buf.get_backing_store()
+          && needs_copy(&store)
+        {
           // Lend a copy and write the changes back.
           return CopyBackBuffer::new(
             store,
