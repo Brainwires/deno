@@ -1292,8 +1292,6 @@ class CloseEvent extends Event {
   }
 }
 
-const CloseEventPrototype = CloseEvent.prototype;
-
 // Lazy reference to MessagePort.prototype - 13_message_port.js depends on
 // this module, so the script can't be loaded at definition time without
 // causing a load cycle. Cached on first access.
@@ -1452,8 +1450,6 @@ class MessageEvent extends Event {
   [SymbolToStringTag] = "MessageEvent";
 }
 
-const MessageEventPrototype = MessageEvent.prototype;
-
 class CustomEvent extends Event {
   #detail = null;
 
@@ -1490,8 +1486,6 @@ class CustomEvent extends Event {
   [SymbolToStringTag] = "CustomEvent";
 }
 
-const CustomEventPrototype = CustomEvent.prototype;
-
 ReflectDefineProperty(CustomEvent.prototype, "detail", {
   __proto__: null,
   enumerable: true,
@@ -1527,8 +1521,6 @@ class ProgressEvent extends Event {
   // TODO(lucacasonato): remove when this interface is spec aligned
   [SymbolToStringTag] = "ProgressEvent";
 }
-
-const ProgressEventPrototype = ProgressEvent.prototype;
 
 class PromiseRejectionEvent extends Event {
   #promise = null;
