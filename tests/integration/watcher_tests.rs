@@ -2594,6 +2594,12 @@ async fn run_watch_sigterm_reraise_on_restart() {
 /// around the graceful-restart window must still terminate the watcher.
 /// Suppression is one-shot: it swallows only the single re-raised SIGTERM, not
 /// a later external one. Guards against the flag being too broad/long-lived.
+///
+/// The external SIGTERM is sent once the restart is done (the new run printed
+/// "started"), never inside the 500 ms window: there it could arrive while the
+/// re-raise is still pending, and two pending SIGTERMs are delivered once, so
+/// the one-shot suppression would swallow both and the watcher (correctly,
+/// for that single delivery) would keep running.
 #[cfg(unix)]
 #[test(flaky)]
 async fn run_watch_external_sigterm_still_terminates() {
@@ -2606,6 +2612,7 @@ async fn run_watch_external_sigterm_still_terminates() {
   // Same unregister-and-re-raise pattern that opens the suppression window.
   let contents = r#"
     import process from "node:process";
+    console.log("started");
     const handler = () => {
       console.log("SIGTERM handler");
       process.off("SIGTERM", handler);
@@ -2632,14 +2639,28 @@ async fn run_watch_external_sigterm_still_terminates() {
 
   wait_for_watcher("file_to_watch.js", &mut stderr_lines).await;
 
+  wait_contains("started", &mut stdout_lines).await;
   file_to_watch.write(format!("{contents}\n// changed"));
   wait_contains("SIGTERM handler", &mut stdout_lines).await;
+  // The re-raise was consumed and the watcher restarted: the new run is up.
+  wait_contains("started", &mut stdout_lines).await;
 
-  // The one re-raise is consumed; a second, external SIGTERM must not be
+  // The one re-raise is consumed; a later, external SIGTERM must not be
   // suppressed and must bring the watcher down.
   signal::kill(Pid::from_raw(child.id() as i32), Signal::SIGTERM).unwrap();
 
-  let status = child.wait().unwrap();
+  // Bounded, so a regression fails the test instead of hanging the suite.
+  let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+  let status = loop {
+    if let Some(status) = child.try_wait().unwrap() {
+      break status;
+    }
+    if std::time::Instant::now() > deadline {
+      let _ = child.kill();
+      panic!("the watcher outlived an external SIGTERM by 30 s");
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+  };
   assert!(!status.success());
 }
 
