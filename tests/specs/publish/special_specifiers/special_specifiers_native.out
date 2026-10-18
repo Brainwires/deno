@@ -1,0 +1,22 @@
+Check [WILDCARD]mod.ts
+TS2882 [ERROR]: Cannot find module or type declarations for side-effect import of 'bun:sqlite'.
+import "bun:sqlite";
+       ~~~~~~~~~~~~
+    at file:///[WILDCARD]/mod.ts:1:8
+
+TS2882 [ERROR]: Cannot find module or type declarations for side-effect import of 'virtual:test'.
+import "virtual:test";
+       ~~~~~~~~~~~~~~
+    at file:///[WILDCARD]/mod.ts:2:8
+
+TS2882 [ERROR]: Cannot find module or type declarations for side-effect import of 'cloudflare:sockets'.
+import "cloudflare:sockets";
+       ~~~~~~~~~~~~~~~~~~~~
+    at file:///[WILDCARD]/mod.ts:3:8
+
+Found 3 errors.
+
+error: Type checking failed.
+
+  info: The program failed type-checking, but it still might work correctly.
+  hint: Re-run with --no-check to skip type-checking.

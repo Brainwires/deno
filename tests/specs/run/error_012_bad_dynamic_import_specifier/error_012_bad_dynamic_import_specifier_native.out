@@ -1,0 +1,10 @@
+Check [WILDCARD]error_012_bad_dynamic_import_specifier.ts
+TS2307 [ERROR]: Cannot find module 'bad-module.ts' or its corresponding type declarations.
+  const _badModule = await import("bad-module.ts");
+                                  ~~~~~~~~~~~~~~~
+    at file:///[WILDCARD]/error_012_bad_dynamic_import_specifier.ts:2:35
+
+error: Type checking failed.
+
+  info: The program failed type-checking, but it still might work correctly.
+  hint: Re-run with --no-check to skip type-checking.

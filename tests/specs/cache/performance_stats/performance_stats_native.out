@@ -1,0 +1,4 @@
+[WILDCARD]
+Check hello.ts
+DEBUG RS - [WILDCARD] - native tsc TscStats { files: Some([WILDCARD]), lines: Some([WILDCARD]), identifiers: Some([WILDCARD]), symbols: Some([WILDCARD]), types: Some([WILDCARD]), memory_used: Some([WILDCARD]), check_time: Some([WILDCARD]), total_time: Some([WILDCARD]) }
+[WILDCARD]

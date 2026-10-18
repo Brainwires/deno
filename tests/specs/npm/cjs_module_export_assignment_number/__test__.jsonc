@@ -1,4 +1,16 @@
 {
-  "args": "run -A --quiet --check=all main.ts",
-  "output": "main.out"
+  // A namespace import of a CommonJS `export =` module gets a `default` as
+  // Node.js and Deno load it, which only the in-process checker models; the
+  // native compiler's stock project (`moduleResolution: "bundler"`) does not.
+  "tests": {
+    "tsc": {
+      "args": "run --check-engine=tsc -A --quiet --check=all main.ts",
+      "output": "main.out"
+    },
+    "native": {
+      "args": "run -A --quiet --check=all main.ts",
+      "output": "main_native.out",
+      "exitCode": 1
+    }
+  }
 }

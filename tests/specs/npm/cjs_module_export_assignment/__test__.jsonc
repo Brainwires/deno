@@ -1,5 +1,18 @@
 {
-  "args": "run -A --quiet --check=all main.ts",
-  "output": "main.out",
-  "exitCode": 1
+  // The in-process checker types the package as Deno loads it and, under
+  // `--check=all`, reports its declaration file's errors. The native compiler
+  // reads the generated stock project (`moduleResolution: "bundler"`,
+  // `skipLibCheck`), which has neither, so this is pinned to the in-process
+  // engine and the native one is asserted on its own.
+  "tests": {
+    "tsc": {
+      "args": "run --check-engine=tsc -A --quiet --check=all main.ts",
+      "output": "main.out",
+      "exitCode": 1
+    },
+    "native": {
+      "args": "run -A --quiet --check=all main.ts",
+      "output": "main_native.out"
+    }
+  }
 }

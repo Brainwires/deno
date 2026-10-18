@@ -1,1 +1,10 @@
 Check [WILDCARD]ts_type_only_import.ts
+TS2846 [ERROR]: A declaration file cannot be imported without 'import type'. Did you mean to import an implementation file './ts_type_only_import.ts' instead?
+export * from "./ts_type_only_import.d.ts";
+              ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    at [WILDLINE]ts_type_only_import.ts:1:15
+
+error: Type checking failed.
+
+  info: The program failed type-checking, but it still might work correctly.
+  hint: Re-run with --no-check to skip type-checking.

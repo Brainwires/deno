@@ -1,4 +1,16 @@
 {
-  "args": "publish --token 'sadfasdf'",
-  "output": "special_specifiers.out"
+  // A side-effect import of a module Deno leaves external (`bun:`, `virtual:`,
+  // `cloudflare:`) type checks with the in-process checker only; the native
+  // compiler reports it (TS2882, `noUncheckedSideEffectImports`).
+  "tests": {
+    "tsc": {
+      "args": "publish --check-engine=tsc --token 'sadfasdf'",
+      "output": "special_specifiers.out"
+    },
+    "native": {
+      "args": "publish --token 'sadfasdf'",
+      "output": "special_specifiers_native.out",
+      "exitCode": 1
+    }
+  }
 }

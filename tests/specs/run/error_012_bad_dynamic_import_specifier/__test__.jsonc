@@ -1,5 +1,16 @@
 {
-  "args": "run --reload --check error_012_bad_dynamic_import_specifier.ts",
-  "output": "error_012_bad_dynamic_import_specifier.ts.out",
-  "exitCode": 1
+  // An unresolvable dynamic import is a runtime error for the in-process
+  // checker; the native compiler reports it while type checking (TS2307).
+  "tests": {
+    "tsc": {
+      "args": "run --check-engine=tsc --reload --check error_012_bad_dynamic_import_specifier.ts",
+      "output": "error_012_bad_dynamic_import_specifier.ts.out",
+      "exitCode": 1
+    },
+    "native": {
+      "args": "run --reload --check error_012_bad_dynamic_import_specifier.ts",
+      "output": "error_012_bad_dynamic_import_specifier_native.out",
+      "exitCode": 1
+    }
+  }
 }

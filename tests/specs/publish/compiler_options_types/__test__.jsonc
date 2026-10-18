@@ -1,4 +1,8 @@
 {
+  // Each variant in its own copy: the native type check writes the project's
+  // generated `.deno/tsconfig.json` from the config it was given, and the two
+  // configs here would race over one directory.
+  "tempDir": true,
   "tests": {
     "types_included": {
       "args": "publish --dry-run",

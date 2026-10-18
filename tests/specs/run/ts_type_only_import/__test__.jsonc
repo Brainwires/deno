@@ -1,4 +1,7 @@
 {
+  // TypeScript 7 rejects a re-export of a declaration file that is not
+  // type-only (TS2846); the native compiler reports what tsc 7.0.2 does.
   "args": "run --reload --check ts_type_only_import.ts",
-  "output": "ts_type_only_import.ts.out"
+  "output": "ts_type_only_import.ts.out",
+  "exitCode": 1
 }

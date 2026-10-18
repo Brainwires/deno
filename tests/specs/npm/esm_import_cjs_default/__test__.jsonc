@@ -1,4 +1,17 @@
 {
-  "args": "run --allow-read --allow-env --check=all main.ts",
-  "output": "main.out"
+  // The `default` of a CommonJS module imported from ESM, as Node.js and Deno
+  // load it, is modeled by the in-process checker only; the native compiler's
+  // stock project (`moduleResolution: "bundler"`) types the import as the
+  // module's `module.exports`.
+  "tests": {
+    "tsc": {
+      "args": "run --check-engine=tsc --allow-read --allow-env --check=all main.ts",
+      "output": "main.out"
+    },
+    "native": {
+      "args": "run --allow-read --allow-env --check=all main.ts",
+      "output": "main_native.out",
+      "exitCode": 1
+    }
+  }
 }

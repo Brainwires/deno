@@ -1,0 +1,5 @@
+Check [WILDCARD]typed.ts
+TS5102 [ERROR]: Option 'baseUrl' has been removed. Please remove it from your configuration.
+  Use '"paths": {"*": ["./*"]}' instead.
+
+error: Type checking failed.

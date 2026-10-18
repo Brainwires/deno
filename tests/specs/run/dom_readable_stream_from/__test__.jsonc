@@ -1,4 +1,7 @@
 {
+  // TypeScript 7's `dom` lib has no `ReadableStream.from` (the in-process
+  // TypeScript 6 lib has it): the native compiler reports what tsc 7.0.2 does.
   "args": "run --check main.ts",
-  "output": "main.out"
+  "output": "main.out",
+  "exitCode": 1
 }

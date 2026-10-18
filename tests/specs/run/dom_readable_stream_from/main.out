@@ -1,2 +1,10 @@
 Check [WILDCARD]main.ts
-ReadableStream[WILDCARD]
+TS2339 [ERROR]: Property 'from' does not exist on type '[WILDCARD]'.
+console.log(ReadableStream.from(asyncIterable));
+                           ~~~~
+    at [WILDLINE]main.ts:4:28
+
+error: Type checking failed.
+
+  info: The program failed type-checking, but it still might work correctly.
+  hint: Re-run with --no-check to skip type-checking.

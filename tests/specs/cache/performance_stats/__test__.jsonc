@@ -1,4 +1,14 @@
 {
-  "args": "cache --reload --check=all --log-level debug hello.ts",
-  "output": "performance_stats.out"
+  // The compilation statistics are the in-process checker's; the native
+  // compiler reports its own (`--extendedDiagnostics`) at the debug level.
+  "tests": {
+    "tsc": {
+      "args": "cache --check-engine=tsc --reload --check=all --log-level debug hello.ts",
+      "output": "performance_stats.out"
+    },
+    "native": {
+      "args": "cache --reload --check=all --log-level debug hello.ts",
+      "output": "performance_stats_native.out"
+    }
+  }
 }
