@@ -26,6 +26,21 @@
 # - macOS x64 (macos-15-intel) and Linux arm64 (ubuntu-22.04-arm), the other
 #   two release architectures: build + libs only.
 #
+# Scope (GitHub caps this account at 20 concurrent jobs, 5 of them macOS, and
+# agents push many fix/feat/ci branches): the full matrix above runs on a push
+# to development-denext and on a dispatch (`full` defaults to true); a tag
+# would too, but tags do not trigger this workflow (denext_runtime.yml's tag
+# build checks for a full run of the tagged commit instead).
+# Every other push, and a pull request, runs Linux x64 only: lint, cargo audit
+# and the ubuntu-22.04 leg (libs, unit, specs, integration, unit_node,
+# node_compat). For a full run on a branch:
+#   gh workflow run denext_tests.yml --ref <branch> -f full=true
+# or add one OS to a Linux run with `-f full=false -f macos=true` (or
+# windows=true). denext_runtime.yml's tag gate counts only a run whose five
+# legs (macos-14, windows-2022, ubuntu-22.04, macos-15-intel,
+# ubuntu-22.04-arm) all passed, so a Linux-only run never vouches for a
+# release.
+#
 # The test harness asks Deno's "hashy" service whether a test input hash
 # already passed and PUTs one when it did (tests/util/lib/hash.rs). That is
 # Deno's infrastructure, not ours: every job resolves its host to 127.0.0.1,
@@ -47,13 +62,29 @@ on:
       - 'rel/**'
       - 'development-denext'
   workflow_dispatch:
+    inputs:
+      full:
+        description: Run the full matrix (macOS arm64 + x64, Windows, Linux x64 + arm64); false runs Linux x64 plus the OSes picked below
+        type: boolean
+        default: true
+      macos:
+        description: With full=false, also run the macos-14 leg
+        type: boolean
+        default: false
+      windows:
+        description: With full=false, also run the windows-2022 leg
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
+# A newer push to the same branch or pull request supersedes its run. Never
+# cancelled: a tag's run, a run on `main`, and a dispatch (the event is part of
+# the group, so a push never cancels a dispatched full run either).
 concurrency:
-  group: denext-tests-${{ github.ref }}
-  cancel-in-progress: true
+  group: denext-tests-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' && !startsWith(github.ref, 'refs/tags/') && github.ref != 'refs/heads/main' }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -72,7 +103,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-14, windows-2022, ubuntu-22.04]
+        # Linux only unless the run is full (see the header); a dispatch's
+        # macos / windows inputs add those OSes.
+        os: ${{ fromJSON(format('[{0}{1}"ubuntu-22.04"]', (github.ref == 'refs/heads/development-denext' || startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.full) || (github.event_name == 'workflow_dispatch' && inputs.macos)) && '"macos-14",' || '', (github.ref == 'refs/heads/development-denext' || startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.full) || (github.event_name == 'workflow_dispatch' && inputs.windows)) && '"windows-2022",' || '')) }}
     defaults:
       run:
         shell: bash
@@ -123,12 +156,14 @@ jobs:
 
   macos:
     name: macos-14
+    if: ${{ github.ref == 'refs/heads/development-denext' || startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.full) || (github.event_name == 'workflow_dispatch' && inputs.macos) }}
     uses: ./.github/workflows/denext_tests_os.yml
     with:
       os: macos-14
 
   windows:
     name: windows-2022
+    if: ${{ github.ref == 'refs/heads/development-denext' || startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.full) || (github.event_name == 'workflow_dispatch' && inputs.windows) }}
     uses: ./.github/workflows/denext_tests_os.yml
     with:
       os: windows-2022
@@ -140,9 +175,10 @@ jobs:
       os: ubuntu-22.04
 
   # The other two release architectures: the debug build and the lib tests
-  # (the desktop, updater and config crates included).
+  # (the desktop, updater and config crates included). Full runs only.
   macos-x64:
     name: macos-15-intel
+    if: ${{ github.ref == 'refs/heads/development-denext' || startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.full) }}
     uses: ./.github/workflows/denext_tests_os.yml
     with:
       os: macos-15-intel
@@ -150,6 +186,7 @@ jobs:
 
   linux-arm64:
     name: ubuntu-22.04-arm
+    if: ${{ github.ref == 'refs/heads/development-denext' || startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.full) }}
     uses: ./.github/workflows/denext_tests_os.yml
     with:
       os: ubuntu-22.04-arm

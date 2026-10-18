@@ -2233,10 +2233,14 @@ The workflow is `.github/workflows/denext_runtime.yml` (helpers in
 `.github/denext-runtime/`). Run it from the Actions tab (`workflow_dispatch`,
 optional `targets` filter, `laufey_ref` override, and `reuse_*_run_id` to reuse
 a previous run's libdenort or laufey build), or push a `denext-runtime-v*` tag
-to publish. It also runs on every push to `development-denext` (or a `rel/**`
-branch) and nightly on the default branch. A tag publishes only when
-`denext tests` (`denext_tests.yml`) passed on exactly the tagged commit; the
-setup job checks and fails otherwise. Per target it:
+to publish. It also runs on a push to `development-denext` (or a `rel/**`
+branch) that changes what the runtime is built from: the `cli`, `runtime`, `ext`
+and `libs` crates, the workspace manifests and toolchain (`Cargo.toml`,
+`Cargo.lock`, `rust-toolchain.toml`, `.cargo/`), the laufey pin (`LAUFEY_SHA` in
+the workflow, `cli/rt_desktop/Cargo.toml`), the workflow and
+`.github/denext-runtime/`. A tag publishes only when a full `denext tests`
+(`denext_tests.yml`) run, every OS leg green, passed on exactly the tagged
+commit; the setup job checks and fails otherwise. Per target it:
 
 1. builds `libdenort` with `cargo build --release --locked -p denort_desktop`
    after patching `laufey` (`cargo metadata` rewrites laufey's lockfile entry;
@@ -2280,10 +2284,10 @@ Upstream Deno's own workflows are removed on `development-denext` and the
 Two workflows run instead:
 
 - `denext_runtime.yml` (above): the release build, the launch smoke and the e2e
-  suite (see Test coverage). Every push to `development-denext` (or a `rel/**`
-  branch), nightly on the default branch, manual dispatch, or a pushed
-  `denext-runtime-v*` tag (which publishes only when `denext_tests.yml` passed
-  on the tagged commit).
+  suite (see Test coverage). A push to `development-denext` (or a `rel/**`
+  branch) that changes the runtime's inputs (above), manual dispatch, or a
+  pushed `denext-runtime-v*` tag (which publishes only when a full
+  `denext_tests.yml` run passed on the tagged commit).
 - `denext_tests.yml` (with the per-OS `denext_tests_os.yml`): upstream Deno's
   own test bar over the fork, the way `v2.9.7`'s `ci.generated.yml` ran it, on
   macOS, Windows and Linux: `tools/lint.js` (workspace clippy with upstream's
@@ -2295,7 +2299,16 @@ Two workflows run instead:
   (sharded) and `unit_node` suites; and the build and lib tests on macOS x64 and
   Linux arm64. It runs on pushes to `development-denext`, `denext/**`, `rel/**`,
   `ci/**`, `feat/**` and `fix/**`, on pull requests to `development-denext`,
-  `denext/**` and `rel/**`, and by manual dispatch.
+  `denext/**` and `rel/**`, and by manual dispatch. The full matrix runs on a
+  push to `development-denext` and on a dispatch (input `full`, default true);
+  every other push and pull request runs Linux x64 only (lint, cargo audit, and
+  the `ubuntu-22.04` leg: libs, unit, specs, integration, unit_node,
+  node_compat), which keeps GitHub's concurrency cap (20 jobs, 5 macOS) free.
+  For a full run on a branch, dispatch it with `-f full=true`
+  (`gh workflow run denext_tests.yml --ref <branch> -f full=true`); for one more
+  OS on a Linux run, `-f full=false -f macos=true` (or `windows=true`). A newer
+  push cancels the run before it on the same ref; dispatched and tag runs are
+  never cancelled.
 
 ## The update helper
 

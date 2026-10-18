@@ -30,9 +30,12 @@ on:
 permissions:
   contents: read
 
+# A newer push to the same branch supersedes its run. Never cancelled: a tag's
+# run, a run on `main`, and a dispatch (the event is part of the group, so a
+# push never cancels a dispatch).
 concurrency:
-  group: denext-npm-matrix-${{ github.ref }}
-  cancel-in-progress: true
+  group: denext-npm-matrix-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' && !startsWith(github.ref, 'refs/tags/') && github.ref != 'refs/heads/main' }}
 
 env:
   CARGO_TERM_COLOR: always
