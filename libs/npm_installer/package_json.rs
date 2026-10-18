@@ -298,6 +298,22 @@ impl NpmInstallDepsProvider {
         let mut workspace_pkg_deps =
           Vec::with_capacity(deps.dependencies.len() + dev_deps.len());
         for (alias, dep) in deps.dependencies.iter().chain(dev_deps.iter()) {
+          // only aliases that are actually materialized below `node_modules`
+          // need a path-safe shape. Checked before the value: the fork's
+          // package.json parser (#36469) already refuses an invalid alias as
+          // a dependency error, which `deno run` / `task` / `cache` skip,
+          // while an invalid package name fails them too. An empty alias is
+          // left to the parser, which ignores it as before.
+          if !alias.is_empty()
+            && let Err(err) = package_name_for_node_modules_path_parts(alias)
+          {
+            invalid_package_name_errors.push(InvalidPackageNameError::Alias {
+              location: pkg_json.specifier(),
+              alias: alias.clone(),
+              source: err,
+            });
+            continue;
+          }
           let dep = match dep {
             Ok(dep) => dep,
             Err(err) => {
@@ -311,16 +327,6 @@ impl NpmInstallDepsProvider {
               continue;
             }
           };
-          // only aliases that are actually materialized below `node_modules`
-          // need a path-safe shape
-          if let Err(err) = package_name_for_node_modules_path_parts(alias) {
-            invalid_package_name_errors.push(InvalidPackageNameError::Alias {
-              location: pkg_json.specifier(),
-              alias: alias.clone(),
-              source: err,
-            });
-            continue;
-          }
           match dep {
             PackageJsonDepValue::File(specifier) => {
               // a tarball is extracted with the git and tarball URL ones
