@@ -74,6 +74,7 @@ impl Drop for SuppressDefaultExitGuard {
   }
 }
 
+#[cfg(unix)]
 fn is_terminating_signal(signal: i32) -> bool {
   signal == SIGHUP || signal == SIGTERM || signal == SIGINT
 }
