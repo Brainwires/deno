@@ -126,13 +126,21 @@ pub fn op_fs_chdir(
   state: &mut OpState,
   #[string] directory: &str,
 ) -> Result<(), FsOpsError> {
-  let d = state
-    .borrow_mut::<deno_permissions::PermissionsContainer>()
-    .check_open(
-      Cow::Borrowed(Path::new(directory)),
-      OpenAccessKind::Read,
-      Some("Deno.chdir()"),
-    )?;
+  let permissions =
+    state.borrow_mut::<deno_permissions::PermissionsContainer>();
+  // The deny rules apply to the directory a symlink leads to (a following
+  // check), but the working directory is set to the path as given, so
+  // `Deno.cwd()` keeps the caller's spelling (a symlink, an 8.3 short name).
+  let _resolved = permissions.check_open(
+    Cow::Borrowed(Path::new(directory)),
+    OpenAccessKind::Read,
+    Some("Deno.chdir()"),
+  )?;
+  let d = permissions.check_open(
+    Cow::Borrowed(Path::new(directory)),
+    OpenAccessKind::ReadNoFollow,
+    Some("Deno.chdir()"),
+  )?;
   state
     .borrow::<FileSystemRc>()
     .chdir(&d)
