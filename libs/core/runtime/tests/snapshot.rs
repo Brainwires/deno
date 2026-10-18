@@ -133,6 +133,7 @@ if (SharedArrayBufferPrototypeGetByteLength(sab) !== 4) {
 /// that destructure it at IIFE evaluation time get the real constructor.
 #[test]
 fn shared_array_buffer_available_during_snapshot() {
+  let _snapshot_lock = super::snapshot_test_lock();
   let snapshot = {
     let mut runtime = JsRuntimeForSnapshot::new(Default::default());
     runtime
@@ -182,6 +183,7 @@ if (!Deno.core.isSharedArrayBuffer(sab)) {
 
 #[test]
 fn shared_array_buffer_primordial_from_snapshot() {
+  let _snapshot_lock = super::snapshot_test_lock();
   let snapshot = {
     let runtime = JsRuntimeForSnapshot::new(Default::default());
     runtime.snapshot()
