@@ -6,21 +6,32 @@
       "output": ""
     },
     {
-      "args": "run main.js",
+      // require() looks a missing package up in every ancestor's
+      // node_modules too (as Node does), so those, and only those, are
+      // readable: the targets of the outside links are not under any of them.
+      "args": "run --allow-read=../node_modules,../../node_modules,../../../node_modules,../../../../node_modules,../../../../../node_modules,../../../../../../node_modules,../../../../../../../node_modules,../../../../../../../../node_modules,../../../../../../../../../node_modules,../../../../../../../../../../node_modules,../../../../../../../../../../../node_modules,../../../../../../../../../../../../node_modules,../../../../../../../../../../../../../node_modules,../../../../../../../../../../../../../../node_modules,../../../../../../../../../../../../../../../node_modules,../../../../../../../../../../../../../../../../node_modules main.js",
       "output": "main.out"
     },
     {
       // Registry link aliases do not grant access to their outside targets.
-      "args": "run --allow-read=node_modules/outside-link main.js",
+      "args": "run --allow-read=node_modules/outside-link,../node_modules,../../node_modules,../../../node_modules,../../../../node_modules,../../../../../node_modules,../../../../../../node_modules,../../../../../../../node_modules,../../../../../../../../node_modules,../../../../../../../../../node_modules,../../../../../../../../../../node_modules,../../../../../../../../../../../node_modules,../../../../../../../../../../../../node_modules,../../../../../../../../../../../../../node_modules,../../../../../../../../../../../../../../node_modules,../../../../../../../../../../../../../../../node_modules,../../../../../../../../../../../../../../../../node_modules main.js",
       "output": "main.out"
     },
     {
-      "args": "run --allow-read=outside,removed main_with_read.js",
-      "output": "main.out"
-    },
-    {
+      // Unix only: the Windows runner's temp dir is an 8.3 short name
+      // (RUNNER~1), and a relative --allow-read resolves against the cwd as
+      // spelled, while the link target is checked by its canonical path.
       "if": "unix",
-      "args": "compile --output compiled --include node_modules main_compiled.js",
+      "args": "run --allow-read=outside,removed,../node_modules,../../node_modules,../../../node_modules,../../../../node_modules,../../../../../node_modules,../../../../../../node_modules,../../../../../../../node_modules,../../../../../../../../node_modules,../../../../../../../../../node_modules,../../../../../../../../../../node_modules,../../../../../../../../../../../node_modules,../../../../../../../../../../../../node_modules,../../../../../../../../../../../../../node_modules,../../../../../../../../../../../../../../node_modules,../../../../../../../../../../../../../../../node_modules,../../../../../../../../../../../../../../../../node_modules main_with_read.js",
+      "output": "main.out"
+    },
+    {
+      // /var as well: on macOS the compiled binary's module root is under
+      // $TMPDIR as spelled (/var/folders/...), while the relative ladder
+      // resolves against the canonical cwd (/private/var/...). main_compiled.js
+      // only checks paths inside node_modules.
+      "if": "unix",
+      "args": "compile --allow-read=../node_modules,../../node_modules,../../../node_modules,../../../../node_modules,../../../../../node_modules,../../../../../../node_modules,../../../../../../../node_modules,../../../../../../../../node_modules,../../../../../../../../../node_modules,../../../../../../../../../../node_modules,../../../../../../../../../../../node_modules,../../../../../../../../../../../../node_modules,../../../../../../../../../../../../../node_modules,../../../../../../../../../../../../../../node_modules,../../../../../../../../../../../../../../../node_modules,../../../../../../../../../../../../../../../../node_modules,/var --output compiled --include node_modules main_compiled.js",
       "output": "[WILDCARD]"
     },
     {
@@ -31,7 +42,7 @@
     },
     {
       "if": "windows",
-      "args": "compile --output compiled.exe --include node_modules main_compiled.js",
+      "args": "compile --allow-read=../node_modules,../../node_modules,../../../node_modules,../../../../node_modules,../../../../../node_modules,../../../../../../node_modules,../../../../../../../node_modules,../../../../../../../../node_modules,../../../../../../../../../node_modules,../../../../../../../../../../node_modules,../../../../../../../../../../../node_modules,../../../../../../../../../../../../node_modules,../../../../../../../../../../../../../node_modules,../../../../../../../../../../../../../../node_modules,../../../../../../../../../../../../../../../node_modules,../../../../../../../../../../../../../../../../node_modules --output compiled.exe --include node_modules main_compiled.js",
       "output": "[WILDCARD]"
     },
     {
