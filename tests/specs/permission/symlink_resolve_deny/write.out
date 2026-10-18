@@ -13,6 +13,10 @@ chmod existing: denied
 chown existing: denied
 utime existing: denied
 node truncateSync existing: denied
+FsFile utime existing: denied
+node fchmodSync existing: denied
+node fchownSync existing: denied
+node futimesSync existing: denied
 remove under dir link: denied
 remove recursive under dir link: denied
 node rmSync recursive under dir link: denied

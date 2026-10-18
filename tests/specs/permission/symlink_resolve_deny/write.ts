@@ -69,6 +69,21 @@ attempt(
   () => fs.truncateSync("allowed/existing", 0),
 );
 
+// metadata changes through a descriptor opened (read-only) through the link
+{
+  const file = Deno.openSync("allowed/existing");
+  attempt("FsFile utime existing", () => file.utimeSync(1, 1));
+  file.close();
+  const fd = fs.openSync("allowed/existing", "r");
+  attempt("node fchmodSync existing", () => fs.fchmodSync(fd, 0o600));
+  attempt(
+    "node fchownSync existing",
+    () => fs.fchownSync(fd, Deno.uid()!, Deno.gid()!),
+  );
+  attempt("node futimesSync existing", () => fs.futimesSync(fd, 1, 1));
+  fs.closeSync(fd);
+}
+
 // no-follow operations under a symlinked directory
 attempt(
   "remove under dir link",

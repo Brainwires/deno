@@ -551,7 +551,9 @@ Deno.test({
   ignore: Deno.build.os === "windows",
   permissions: { read: true, write: true, run: [Deno.execPath()] },
   async fn() {
-    const dir = Deno.makeTempDirSync();
+    // Resolved, so the deny rule below names the path the symlink resolves to
+    // (macOS's temp dir is under the /var -> /private/var link).
+    const dir = Deno.realPathSync(Deno.makeTempDirSync());
     const target = join(dir, "target.txt");
     const script = join(dir, "fd_metadata.mjs");
     const originalTime = new Date(123_456_789_000);
@@ -622,22 +624,50 @@ closeSync(fd);
 `,
       );
 
-      const { code, stdout, stderr } = await new Deno.Command(
-        Deno.execPath(),
-        {
-          args: ["run", `--allow-read=${target}`, script, target],
-          stdout: "piped",
-          stderr: "piped",
-        },
-      ).output();
-      const stdoutText = decoder.decode(stdout);
-      assertEquals(code, 0, decoder.decode(stderr));
-      assert(stdoutText.includes("fchmod:NotCapable:true"));
-      assert(stdoutText.includes("fchmodSync:NotCapable:true"));
-      assert(stdoutText.includes("fchown:NotCapable:true"));
-      assert(stdoutText.includes("fchownSync:NotCapable:true"));
-      assert(stdoutText.includes("futimes:NotCapable:true"));
-      assert(stdoutText.includes("futimesSync:NotCapable:true"));
+      const runScript = async (permissionArgs: string[], path: string) => {
+        const { code, stdout, stderr } = await new Deno.Command(
+          Deno.execPath(),
+          {
+            // A scoped run permission may not pass on LD_LIBRARY_PATH /
+            // DYLD_* from the test environment.
+            clearEnv: true,
+            args: ["run", ...permissionArgs, script, path],
+            stdout: "piped",
+            stderr: "piped",
+          },
+        ).output();
+        const stdoutText = decoder.decode(stdout);
+        assertEquals(code, 0, decoder.decode(stderr));
+        for (
+          const name of [
+            "fchmod",
+            "fchmodSync",
+            "fchown",
+            "fchownSync",
+            "futimes",
+            "futimesSync",
+          ]
+        ) {
+          assert(
+            stdoutText.includes(`${name}:NotCapable:true`),
+            `${name}: ${stdoutText}`,
+          );
+        }
+      };
+
+      await runScript([`--allow-read=${target}`], target);
+
+      // A descriptor opened through a symlink is checked against the file it
+      // refers to: the link's own directory being writable is not enough.
+      const allowedDir = join(dir, "allowed");
+      Deno.mkdirSync(allowedDir);
+      const link = join(allowedDir, "link.txt");
+      Deno.symlinkSync(target, link);
+      await runScript([
+        "--allow-read",
+        `--allow-write=${allowedDir}`,
+        `--deny-write=${target}`,
+      ], link);
 
       const stat = Deno.statSync(target);
       assertEquals((stat.mode ?? 0) & 0o777, 0o600);
