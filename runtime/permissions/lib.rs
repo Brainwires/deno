@@ -4145,6 +4145,48 @@ fn is_windows_network_path(path: &Path) -> bool {
   cfg!(windows) && has_windows_network_path_prefix(path)
 }
 
+/// The host a Windows network path names: `server` in `\\server\share\...`
+/// or `\\?\UNC\server\share\...` (either separator). `None` for a
+/// device-namespace path (`\\.\...`, `\\?\GLOBALROOT\...`) or an empty
+/// host.
+fn windows_network_path_host(path: &Path) -> Option<&str> {
+  if !has_windows_network_path_prefix(path) {
+    return None;
+  }
+  let path = path.to_str()?;
+  let mut components = path[2..].split(['/', '\\']);
+  let host = match components.next()? {
+    "?" | "." => {
+      if !components.next()?.eq_ignore_ascii_case("UNC") {
+        return None;
+      }
+      components.next()?
+    }
+    host => host,
+  };
+  (!host.is_empty()).then_some(host)
+}
+
+/// The import check for a module on a Windows network path: the host it names
+/// must be allowed by `--allow-import` (or the user grants it at the prompt).
+/// The default import allow list names web hosts with their ports, so a share
+/// host is denied unless it is granted. A path whose host can't be read, or
+/// isn't a valid host name (WebDAV `host@SSL` forms), needs full import
+/// access.
+fn check_windows_network_import_host(
+  import: &mut UnaryPermission<ImportDescriptor>,
+  path: &Path,
+) -> Result<(), PermissionCheckError> {
+  let descriptor = windows_network_path_host(path)
+    .and_then(|host| NetDescriptor::parse_for_query(host).ok())
+    .map(ImportDescriptor);
+  match descriptor {
+    Some(descriptor) => import.check(&descriptor, Some("import()"))?,
+    None => import.check_all()?,
+  }
+  Ok(())
+}
+
 pub fn is_windows_network_file_url(specifier: &Url) -> bool {
   specifier.scheme() == "file"
     && url_to_file_path(specifier)
@@ -4410,6 +4452,14 @@ impl PermissionsContainer {
           PermissionCheckError::InvalidFilePath(specifier.clone())
         })?;
         let is_windows_network_path = is_windows_network_path(&path);
+        if is_windows_network_path {
+          // Loading code from a network share reaches the host the path
+          // names, so it is an import from that host: denied unless
+          // `--allow-import` covers it, for every kind, roots included (a
+          // worker's root is chosen by code). The read checks below still
+          // apply on top of this.
+          check_windows_network_import_host(&mut inner.import, &path)?;
+        }
 
         if inner.read.is_allow_all() {
           if kind == CheckSpecifierKind::Dynamic || is_windows_network_path {
@@ -6859,10 +6909,11 @@ mod tests {
     ];
 
     if cfg!(target_os = "windows") {
+      // a root on a share still needs import access to its host
       fixtures.push((
         Url::parse("file://server/share/entry.ts").unwrap(),
         CheckSpecifierKind::StaticRoot,
-        true,
+        false,
       ));
       fixtures.push((
         Url::parse("file://server/share/dependency.ts").unwrap(),
@@ -6973,13 +7024,137 @@ mod tests {
     }
   }
 
+  #[test]
+  fn windows_network_path_hosts() {
+    for (path, host) in [
+      (r"\\server\share\module.ts", Some("server")),
+      (r"//server/share/module.ts", Some("server")),
+      (r"/\server/share/module.ts", Some("server")),
+      (r"\\server", Some("server")),
+      (r"\\?\UNC\server\share\module.ts", Some("server")),
+      (r"\\?\unc\server\share\module.ts", Some("server")),
+      (r"//?/UNC/server/share/module.ts", Some("server")),
+      (r"\\.\UNC\server\share\module.ts", Some("server")),
+      (r"\\10.0.0.1\share\module.ts", Some("10.0.0.1")),
+      (r"\\host@SSL\DavWWWRoot\module.ts", Some("host@SSL")),
+      // device namespace paths name no host
+      (r"\\.\pipe\name", None),
+      (r"\\?\GLOBALROOT\Device\module.ts", None),
+      (r"\\?\UNC", None),
+      (r"\\\server\share", None),
+      (r"\\?\C:\project\module.ts", None),
+      (r"C:\project\module.ts", None),
+      (r"/project/module.ts", None),
+    ] {
+      assert_eq!(windows_network_path_host(Path::new(path)), host, "{path}");
+    }
+  }
+
+  #[cfg(windows)]
+  #[test]
+  fn network_file_import_requires_import_access_to_host() {
+    set_prompter(Box::new(TestPrompter));
+    let parser = TestPermissionDescriptorParser;
+    let container = |options: PermissionsOptions| {
+      PermissionsContainer::new(
+        Arc::new(TestPermissionDescriptorParser),
+        Permissions::from_options(&parser, &options).unwrap(),
+      )
+    };
+    let entry = Url::parse("file://server/share/entry.ts").unwrap();
+    let dependency = Url::parse("file://server/share/dependency.ts").unwrap();
+    let other_host = Url::parse("file://attacker/share/evil.ts").unwrap();
+    let device = Url::parse("file:///%5C.%5Cpipe%5Cname").unwrap();
+    let all_kinds = [
+      CheckSpecifierKind::StaticRoot,
+      CheckSpecifierKind::Static,
+      CheckSpecifierKind::Dynamic,
+    ];
+
+    // denied by default: --allow-read alone (even all of it) is not enough,
+    // and neither is the default import allow list
+    let perms = container(PermissionsOptions {
+      allow_read: Some(vec![]),
+      ..Default::default()
+    });
+    for kind in all_kinds {
+      assert!(perms.check_specifier(&entry, kind).is_err(), "{kind:?}");
+      assert!(perms.check_specifier(&other_host, kind).is_err(), "{kind:?}");
+    }
+
+    // import access to the host, plus read access for anything but a root
+    let perms = container(PermissionsOptions {
+      allow_import: Some(svec!["server"]),
+      ..Default::default()
+    });
+    assert!(
+      perms
+        .check_specifier(&entry, CheckSpecifierKind::StaticRoot)
+        .is_ok()
+    );
+    assert!(
+      perms
+        .check_specifier(&dependency, CheckSpecifierKind::Static)
+        .is_err()
+    );
+    for kind in all_kinds {
+      assert!(perms.check_specifier(&other_host, kind).is_err(), "{kind:?}");
+    }
+    let perms = container(PermissionsOptions {
+      allow_read: Some(svec![r"\\server\share"]),
+      allow_import: Some(svec!["server"]),
+      ..Default::default()
+    });
+    for kind in all_kinds {
+      assert!(perms.check_specifier(&dependency, kind).is_ok(), "{kind:?}");
+      assert!(perms.check_specifier(&other_host, kind).is_err(), "{kind:?}");
+    }
+
+    // --deny-import names the host
+    let perms = container(PermissionsOptions {
+      allow_read: Some(vec![]),
+      allow_import: Some(vec![]),
+      deny_import: Some(svec!["attacker"]),
+      ..Default::default()
+    });
+    assert!(
+      perms
+        .check_specifier(&entry, CheckSpecifierKind::StaticRoot)
+        .is_ok()
+    );
+    for kind in all_kinds {
+      assert!(perms.check_specifier(&other_host, kind).is_err(), "{kind:?}");
+    }
+
+    // a path with no host needs all import access
+    let perms = container(PermissionsOptions {
+      allow_read: Some(vec![]),
+      allow_import: Some(svec!["server"]),
+      ..Default::default()
+    });
+    assert!(
+      perms
+        .check_specifier(&device, CheckSpecifierKind::StaticRoot)
+        .is_err()
+    );
+    let perms = container(PermissionsOptions {
+      allow_read: Some(vec![]),
+      allow_import: Some(vec![]),
+      ..Default::default()
+    });
+    assert!(
+      perms
+        .check_specifier(&device, CheckSpecifierKind::StaticRoot)
+        .is_ok()
+    );
+  }
+
   #[cfg(windows)]
   #[test]
   fn windows_file_url_path_classification() {
     for specifier in [
       "file://server/share/module.ts",
       r"file:\\server\share\module.ts",
-      "file:////server/share/module.ts",
       "file:///%2Fserver/share/module.ts",
       "file:///%5Cserver/share/module.ts",
       "file:///%2F%2Fserver/share/module.ts",
@@ -6991,6 +7166,8 @@ mod tests {
     for specifier in [
       "file:///C:/project/module.ts",
       "file://localhost/C:/project/module.ts",
+      // one leading separator: the root of the current drive, not a share
+      "file:////server/share/module.ts",
     ] {
       let path = url_to_file_path(&Url::parse(specifier).unwrap()).unwrap();
       assert!(!is_windows_network_path(&path), "{specifier}: {path:?}");
@@ -7006,6 +7183,7 @@ mod tests {
       &parser,
       &PermissionsOptions {
         allow_read: Some(svec![r"\\server\share\allowed.ts"]),
+        allow_import: Some(svec!["server"]),
         ..Default::default()
       },
     )
