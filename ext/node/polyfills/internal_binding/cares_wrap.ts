@@ -448,6 +448,19 @@ class ChannelWrap extends AsyncWrap implements ChannelWrapQuery {
           // A "not found" error without a more specific c-ares code, e.g. an
           // empty answer. Report `ENOTFOUND`, matching Node.js.
           code = "ENOTFOUND";
+        } else if (
+          ObjectPrototypeIsPrototypeOf(
+            Deno.errors.ConnectionRefused.prototype,
+            e,
+          )
+        ) {
+          // The name server refused the connection.
+          code = "ECONNREFUSED";
+        } else if (
+          ObjectPrototypeIsPrototypeOf(Deno.errors.InvalidData.prototype, e)
+        ) {
+          // The server returned a response that could not be decoded.
+          code = "EBADRESP";
         } else {
           // TODO(cmorten): map errors to appropriate error codes.
           code = codeMap.get("UNKNOWN")!;

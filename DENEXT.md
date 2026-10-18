@@ -1078,26 +1078,25 @@ where the changes are discussed.
     quick-xml 0.41.0 through plist 1.10.0 (RUSTSEC-2026-0194, -0195), unicycle
     0.10.3 (RUSTSEC-2026-0298) and crossbeam-epoch 0.9.21 (RUSTSEC-2026-0204),
     plus the crates flagged unsound or yanked (anyhow, faster-hex, memmap2, rand
-    0.8.6, scc, chacha20, der, digest, spin). `.cargo/audit.toml` lists the
-    three left, each with its reasoning: hickory-proto RUSTSEC-2026-0118 (DNSSEC
-    validation, not compiled: no `dnssec-*` feature is enabled) and -0119 (fixed
-    only in the semver-breaking 0.26 line, which needs the denoland/deno#36322
-    port; Deno encodes only single-question queries), and rsa RUSTSEC-2023-0071
-    (Marvin; no fixed release exists, an accepted risk for RSA PKCS#1 v1.5
-    decryption in WebCrypto and `node:crypto`). Two bumps change an API the tree
-    uses: zip 9's `enclosed_name` drops a leading root or drive prefix instead
-    of refusing the name, so the laufey archive extractor
-    (`cli/tools/desktop.rs`) refuses an absolute entry name itself first
-    (`extract_zip_rejects_absolute_path`); and aws-lc-rs 1.18 stabilized ML-DSA,
-    so `ext/crypto/mldsa.rs` uses `aws_lc_rs::signature::*` and `to_pkcs8v1`
-    (the deprecated `unstable` aliases failed clippy). The `denext
-    tests`
-    workflow runs `cargo audit` and fails on any advisory not listed there.
-    laufey `integration/denext22` (`58c0fdb`) does the same for the hosts'
-    `Cargo.lock` (bytes 1.12.1 for RUSTSEC-2026-0007, crossbeam-epoch, quick-xml
-    0.41.0) with a `cargo audit` job in its CI; this fork pins it (no API
-    change). CEF (149.0.5) has no audit database; it follows Chromium releases
-    through laufey's `CEF_VERSION`.
+    0.8.6, scc, chacha20, der, digest, spin). `.cargo/audit.toml` lists the two
+    left, each with its reasoning: hickory-proto RUSTSEC-2026-0118 (DNSSEC
+    validation, not compiled: no `dnssec-*` feature is enabled) and rsa
+    RUSTSEC-2023-0071 (Marvin; no fixed release exists, an accepted risk for RSA
+    PKCS#1 v1.5 decryption in WebCrypto and `node:crypto`). hickory-proto
+    RUSTSEC-2026-0119 was ignored here until item 71 moved the tree to hickory
+    0.26. Two bumps change an API the tree uses: zip 9's `enclosed_name` drops a
+    leading root or drive prefix instead of refusing the name, so the laufey
+    archive extractor (`cli/tools/desktop.rs`) refuses an absolute entry name
+    itself first (`extract_zip_rejects_absolute_path`); and aws-lc-rs 1.18
+    stabilized ML-DSA, so `ext/crypto/mldsa.rs` uses `aws_lc_rs::signature::*`
+    and `to_pkcs8v1` (the deprecated `unstable` aliases failed clippy). The
+    `denext
+    tests` workflow runs `cargo audit` and fails on any advisory not
+    listed there. laufey `integration/denext22` (`58c0fdb`) does the same for
+    the hosts' `Cargo.lock` (bytes 1.12.1 for RUSTSEC-2026-0007,
+    crossbeam-epoch, quick-xml 0.41.0) with a `cargo audit` job in its CI; this
+    fork pins it (no API change). CEF (149.0.5) has no audit database; it
+    follows Chromium releases through laufey's `CEF_VERSION`.
 
 43. **Upstream batch: `main` picks and open pull requests** (from `denext.22`).
     Cherry-picked from denoland/deno `main` with `-x`: `AbortSignal.any()`
@@ -2013,11 +2012,34 @@ where the changes are discussed.
     `test-buffer-sharedarraybuffer.js`, `test-buffer-resizable.js` and the
     worker `SharedArrayBuffer` tests.
 
+71. **`fix(ext/net)`: hickory 0.26 (RUSTSEC-2026-0119)** (`Cargo.toml`,
+    `ext/net/ops.rs`, `ext/fetch/dns.rs`, `node:dns`'s `cares_wrap.ts`). Ports
+    denoland/deno#36322 (hickory-proto, -resolver and -server 0.26; locked at
+    0.26.3). hickory-proto 0.25 encodes names with O(n²) compression
+    (RUSTSEC-2026-0119), fixed only in the semver-breaking 0.26 line, so the
+    advisory was ignored in item 42; the ignore is gone and `cargo audit`
+    passes. The port follows the 0.26 API (`NetError` / `DnsError`,
+    `NameServerConfig` with per-protocol `ConnectionConfig`, `Resolver::build()`
+    returning a `Result`), and takes the pull request's behaviour fixes: an
+    explicit name server (`Resolver.setServers()`) is queried over a connected
+    UDP socket so a refused server is `ECONNREFUSED` instead of a timeout, an
+    undecodable response is `EBADRESP`, EDNS is sent only when asked for,
+    `Deno.resolveDns()` returns only the answer section, and `getServers()`
+    keeps the configured order. Merged with this fork's own DNS changes: the
+    query name is still parsed up front for an exact `EBADNAME`, the c-ares
+    codes (`ENOTFOUND` / `ENODATA`) are read from 0.26's `NoRecords` (a REFUSED
+    response, its own variant in 0.26, stays `ENODATA` as it was in 0.25), and
+    an `ANY` query still skips record types it cannot format. Tests: `deno_net`
+    unit tests (the pull request's answer-section and server-order cases), the
+    `test_resolve_dns` integration test on hickory-server 0.26, and the
+    `node:dns` unit and node_compat tests. Before: `cargo audit` on the 0.25.2
+    lock without the ignore reports RUSTSEC-2026-0119.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
-64-70) are what the prebuilt `libdenort` carries. The CLI-side parts
-(for example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged
-app's launchers) are in the branch too, but a stock CLI does not run them;
-denext's own launcher provides that environment.
+64-71) are what the prebuilt `libdenort` carries. The CLI-side parts (for
+example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's
+launchers) are in the branch too, but a stock CLI does not run them; denext's
+own launcher provides that environment.
 
 The laufey backend hosts are built from
 [Brainwires/laufey](https://github.com/Brainwires/laufey) branch
