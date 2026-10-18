@@ -167,9 +167,21 @@ class SQLiteError extends SQLError {
   }
 }
 
-// The class names `error.rs` builds errors with.
-core.registerErrorClass("DenoSqlPostgresError", PostgresError);
-core.registerErrorClass("DenoSqlSQLiteError", SQLiteError);
+// The class names `error.rs` builds errors with. Builders, not registered
+// classes: an op error of a registered class is constructed natively without
+// running its constructor, and is named after the registration key, so these
+// would come back named "DenoSqlPostgresError" / "DenoSqlSQLiteError". A
+// builder runs the constructor (`name`), then the op's fields are added as
+// own properties. A fast op can't call a builder, so no `deno_sql` op that
+// returns a `SqlError` may be `fast` (see `error.rs`).
+core.registerErrorBuilder(
+  "DenoSqlPostgresError",
+  (message) => new PostgresError(message),
+);
+core.registerErrorBuilder(
+  "DenoSqlSQLiteError",
+  (message) => new SQLiteError(message),
+);
 
 // ---------------------------------------------------------------------------
 // Engines

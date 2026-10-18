@@ -122,6 +122,18 @@ try {
 } catch (e) {
   console.log((e as Deno.SQLiteError).code);
 }
+try {
+  await sql.unsafe("selec 1").simple();
+} catch (e) {
+  const err = e as Deno.SQLiteError;
+  console.log(
+    "simple:",
+    err instanceof Deno.SQL.SQLiteError,
+    err.name,
+    err.code,
+    Object.hasOwn(err, "code"),
+  );
+}
 
 await sql.unsafe(
   "create table t2 (a); insert into t2 values (1); insert into t2 values (2)",

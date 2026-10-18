@@ -6,6 +6,11 @@ use deno_error::AdditionalProperties;
 use deno_error::JsErrorClass;
 use deno_error::PropertyValue;
 
+// `01_sql.js` registers both classes with `registerErrorBuilder`, which a
+// fast op cannot call (a fast call can't re-enter JavaScript; it would throw a
+// plain `Error`), so an op returning a `SqlError` is `#[op2(nofast)]` when it
+// would otherwise be fast-compatible.
+
 /// The class name `01_sql.js` registers `SQL.PostgresError` under.
 pub const POSTGRES_ERROR_CLASS: &str = "DenoSqlPostgresError";
 /// The class name `01_sql.js` registers `SQL.SQLiteError` under.

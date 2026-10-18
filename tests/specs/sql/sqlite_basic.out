@@ -18,6 +18,7 @@ committed [ [ "Tx" ] ]
 after commit: The transaction has already finished
 true true SQLiteError SQLITE_CONSTRAINT_UNIQUE 2067
 SQLITE_ERROR
+simple: true SQLiteError SQLITE_ERROR true
 [ { s: 3 } ]
 [ { a: 2 } ]
 [ [ 1 ], [ 2 ] ]

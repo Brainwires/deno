@@ -101,7 +101,8 @@ fn harden(
   Ok(())
 }
 
-#[op2(fast, stack_trace)]
+// `nofast`: a `SqlError` is built by a JavaScript builder (see `error.rs`).
+#[op2(nofast, stack_trace)]
 #[smi]
 pub fn op_sql_sqlite_open(
   state: &mut OpState,
@@ -274,7 +275,8 @@ pub fn op_sql_sqlite_query<'a>(
 
 /// Any number of statements, no parameters, no rows (transaction control,
 /// `sql.unsafe(...).simple()`, migrations).
-#[op2(fast)]
+// `nofast`: a `SqlError` is built by a JavaScript builder (see `error.rs`).
+#[op2(nofast)]
 pub fn op_sql_sqlite_exec(
   state: &OpState,
   #[smi] rid: ResourceId,
