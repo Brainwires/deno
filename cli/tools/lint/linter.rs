@@ -229,12 +229,16 @@ impl CliLinter {
 
     if fix_iterations > 0 {
       // everything looks good and the file still parses, so write it out
-      let mut perms = crate::cache::CACHE_PERM;
+      // Keep the file's mode (#36967); Windows has none to keep.
       #[cfg(unix)]
-      if let Ok(metadata) = std::fs::metadata(file_path) {
+      let perms = {
         use std::os::unix::fs::PermissionsExt;
-        perms = metadata.permissions().mode();
-      }
+        std::fs::metadata(file_path)
+          .map(|metadata| metadata.permissions().mode())
+          .unwrap_or(crate::cache::CACHE_PERM)
+      };
+      #[cfg(not(unix))]
+      let perms = crate::cache::CACHE_PERM;
 
       atomic_write_file_with_retries(
         &CliSys::default(),

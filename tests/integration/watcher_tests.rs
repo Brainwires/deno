@@ -202,8 +202,10 @@ fn check_alive_then_kill(mut child: DenoChild) {
   child.kill().unwrap();
 }
 
+#[cfg(unix)]
 struct KillOnDropDenoChild(Option<DenoChild>);
 
+#[cfg(unix)]
 impl Drop for KillOnDropDenoChild {
   fn drop(&mut self) {
     if let Some(child) = self.0.as_mut() {
