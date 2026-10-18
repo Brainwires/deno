@@ -7079,7 +7079,10 @@ mod tests {
     });
     for kind in all_kinds {
       assert!(perms.check_specifier(&entry, kind).is_err(), "{kind:?}");
-      assert!(perms.check_specifier(&other_host, kind).is_err(), "{kind:?}");
+      assert!(
+        perms.check_specifier(&other_host, kind).is_err(),
+        "{kind:?}"
+      );
     }
 
     // import access to the host, plus read access for anything but a root
@@ -7098,7 +7101,10 @@ mod tests {
         .is_err()
     );
     for kind in all_kinds {
-      assert!(perms.check_specifier(&other_host, kind).is_err(), "{kind:?}");
+      assert!(
+        perms.check_specifier(&other_host, kind).is_err(),
+        "{kind:?}"
+      );
     }
     let perms = container(PermissionsOptions {
       allow_read: Some(svec![r"\\server\share"]),
@@ -7107,7 +7113,10 @@ mod tests {
     });
     for kind in all_kinds {
       assert!(perms.check_specifier(&dependency, kind).is_ok(), "{kind:?}");
-      assert!(perms.check_specifier(&other_host, kind).is_err(), "{kind:?}");
+      assert!(
+        perms.check_specifier(&other_host, kind).is_err(),
+        "{kind:?}"
+      );
     }
 
     // --deny-import names the host
@@ -7123,7 +7132,10 @@ mod tests {
         .is_ok()
     );
     for kind in all_kinds {
-      assert!(perms.check_specifier(&other_host, kind).is_err(), "{kind:?}");
+      assert!(
+        perms.check_specifier(&other_host, kind).is_err(),
+        "{kind:?}"
+      );
     }
 
     // a path with no host needs all import access
