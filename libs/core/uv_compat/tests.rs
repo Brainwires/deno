@@ -1993,6 +1993,18 @@ unsafe fn open_pty_pair() -> (i32, i32) {
   }
 }
 
+/// Serializes the tests that open a TTY handle or reset the terminal mode.
+///
+/// The original termios that `uv_tty_reset_mode` restores is process-global,
+/// as in libuv: the first TTY to leave normal mode records its descriptor and
+/// settings, every TTY close takes the spinlock that guards them, and
+/// `uv_tty_reset_mode` answers `UV_EBUSY` while another thread holds it. Tests
+/// that run in parallel in one process would see each other's TTYs there.
+/// An async mutex, since the guard is held across the test's awaits; it does
+/// not poison, so one failing test does not fail the others.
+#[cfg(unix)]
+static TTY_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// RAII guard to close a file descriptor.
 #[cfg(unix)]
 struct FdGuard(i32);
@@ -2022,13 +2034,36 @@ fn get_errno() -> i32 {
     .unwrap_or_default()
 }
 
+/// The open file behind a descriptor: its device and inode numbers, which
+/// tell a pipe or socket apart from any other (sockets and pipes get their
+/// own inode on Linux and macOS).
 #[cfg(unix)]
-fn assert_fd_closed(fd: i32) {
-  unsafe {
-    set_errno(0);
-    assert_eq!(libc::fcntl(fd, libc::F_GETFD), -1);
+fn fd_identity(fd: i32) -> (libc::dev_t, libc::ino_t) {
+  let mut st: libc::stat = unsafe { std::mem::zeroed() };
+  assert_eq!(unsafe { libc::fstat(fd, &mut st) }, 0, "fstat({fd}) failed");
+  (st.st_dev, st.st_ino)
+}
+
+/// Asserts that descriptor `fd`, which referred to the open file `identity`
+/// (from `fd_identity`), has been closed.
+///
+/// The tests run in parallel in one process, so once the descriptor is
+/// closed another test may open a file and get the same number back; the
+/// number being open again is no evidence that ours leaked. It leaked only
+/// if the number still refers to the same open file.
+#[cfg(unix)]
+fn assert_fd_closed(fd: i32, identity: (libc::dev_t, libc::ino_t)) {
+  let mut st: libc::stat = unsafe { std::mem::zeroed() };
+  unsafe { set_errno(0) };
+  if unsafe { libc::fstat(fd, &mut st) } == -1 {
+    assert_eq!(get_errno(), libc::EBADF);
+    return;
   }
-  assert_eq!(get_errno(), libc::EBADF);
+  assert_ne!(
+    (st.st_dev, st.st_ino),
+    identity,
+    "descriptor {fd} still refers to the same open file"
+  );
 }
 
 #[cfg(unix)]
@@ -2047,6 +2082,7 @@ fn pipe_test_socket_path(name: &str) -> std::path::PathBuf {
 #[cfg(unix)]
 #[tokio::test(flavor = "current_thread")]
 async fn tty_init_sets_fields() {
+  let _tty = TTY_LOCK.lock().await;
   run_test(async |_runtime, uv_loop| {
     let (fdm, fds) = unsafe { open_pty_pair() };
     let _fdm_guard = FdGuard(fdm);
@@ -2098,6 +2134,7 @@ async fn tty_init_rejects_non_tty() {
 #[cfg(target_os = "macos")]
 #[tokio::test(flavor = "current_thread")]
 async fn tty_init_dev_tty_select_fallback() {
+  let _tty = TTY_LOCK.lock().await;
   run_test(async |runtime, uv_loop| {
     // Open /dev/tty directly — this produces an fd that kqueue rejects.
     let fd = unsafe { libc::open(c"/dev/tty".as_ptr(), libc::O_RDWR) };
@@ -2215,6 +2252,7 @@ async fn tty_init_dev_tty_select_fallback() {
 #[cfg(unix)]
 #[tokio::test(flavor = "current_thread")]
 async fn tty_get_winsize() {
+  let _tty = TTY_LOCK.lock().await;
   run_test(async |_runtime, uv_loop| {
     let (fdm, fds) = unsafe { open_pty_pair() };
     let _fdm_guard = FdGuard(fdm);
@@ -2251,6 +2289,7 @@ async fn tty_get_winsize() {
 #[cfg(unix)]
 #[tokio::test(flavor = "current_thread")]
 async fn tty_set_mode_raw_and_back() {
+  let _tty = TTY_LOCK.lock().await;
   run_test(async |_runtime, uv_loop| {
     let (fdm, fds) = unsafe { open_pty_pair() };
     let _fdm_guard = FdGuard(fdm);
@@ -2281,6 +2320,7 @@ async fn tty_set_mode_raw_and_back() {
 #[cfg(unix)]
 #[tokio::test(flavor = "current_thread")]
 async fn tty_set_mode_io() {
+  let _tty = TTY_LOCK.lock().await;
   run_test(async |_runtime, uv_loop| {
     let (fdm, fds) = unsafe { open_pty_pair() };
     let _fdm_guard = FdGuard(fdm);
@@ -2306,6 +2346,7 @@ async fn tty_set_mode_io() {
 #[cfg(unix)]
 #[tokio::test(flavor = "current_thread")]
 async fn tty_write_and_read_through_pty() {
+  let _tty = TTY_LOCK.lock().await;
   run_test(async |runtime, uv_loop| {
     let (fdm, fds) = unsafe { open_pty_pair() };
 
@@ -2389,6 +2430,7 @@ async fn tty_write_and_read_through_pty() {
 #[cfg(unix)]
 #[tokio::test(flavor = "current_thread")]
 async fn tty_read_from_pty() {
+  let _tty = TTY_LOCK.lock().await;
   run_test(async |runtime, uv_loop| {
     let (fdm, fds) = unsafe { open_pty_pair() };
 
@@ -2500,6 +2542,7 @@ async fn tty_read_from_pty() {
 #[cfg(unix)]
 #[tokio::test(flavor = "current_thread")]
 async fn tty_close_fires_callback() {
+  let _tty = TTY_LOCK.lock().await;
   run_test(async |runtime, uv_loop| {
     let (fdm, fds) = unsafe { open_pty_pair() };
     let _fdm_guard = FdGuard(fdm);
@@ -2534,6 +2577,7 @@ async fn tty_close_fires_callback() {
 #[cfg(unix)]
 #[tokio::test(flavor = "current_thread")]
 async fn tty_shutdown_fires_callback() {
+  let _tty = TTY_LOCK.lock().await;
   run_test(async |runtime, uv_loop| {
     let (fdm, fds) = unsafe { open_pty_pair() };
     let _fdm_guard = FdGuard(fdm);
@@ -2613,6 +2657,7 @@ fn new_tty_constructor() {
 #[cfg(unix)]
 #[test]
 fn tty_reset_mode_when_no_tty_modified() {
+  let _tty = TTY_LOCK.blocking_lock();
   // Should succeed (no-op) when no TTY has entered raw mode.
   assert_ok(uv_tty_reset_mode());
 }
@@ -2620,6 +2665,7 @@ fn tty_reset_mode_when_no_tty_modified() {
 #[cfg(unix)]
 #[tokio::test(flavor = "current_thread")]
 async fn tty_reset_mode_restores_termios() {
+  let _tty = TTY_LOCK.lock().await;
   run_test(async |runtime, uv_loop| {
     let (fdm, fds) = unsafe { open_pty_pair() };
     let _fdm_guard = FdGuard(fdm);
@@ -2672,6 +2718,7 @@ async fn tty_reset_mode_restores_termios() {
 #[cfg(unix)]
 #[tokio::test(flavor = "current_thread")]
 async fn tty_reset_mode_preserves_errno() {
+  let _tty = TTY_LOCK.lock().await;
   run_test(async |runtime, uv_loop| {
     let (fdm, fds) = unsafe { open_pty_pair() };
     let _fdm_guard = FdGuard(fdm);
@@ -2709,6 +2756,7 @@ fn tty_guess_handle_negative_fd() {
 #[cfg(unix)]
 #[tokio::test(flavor = "current_thread")]
 async fn tty_read_stop() {
+  let _tty = TTY_LOCK.lock().await;
   run_test(async |runtime, uv_loop| {
     let (fdm, fds) = unsafe { open_pty_pair() };
 
@@ -3083,6 +3131,7 @@ async fn pipe_open_not_active_until_read_start() {
     let mut pipe_fds = [0i32; 2];
     assert_eq!(unsafe { libc::pipe(pipe_fds.as_mut_ptr()) }, 0);
     let read_fd = pipe_fds[0];
+    let read_fd_id = fd_identity(read_fd);
     let write_fd = pipe_fds[1];
     let _write_guard = FdGuard(write_fd);
 
@@ -3156,7 +3205,7 @@ async fn pipe_open_not_active_until_read_start() {
       uv_close(&mut pipe as *mut uv_pipe_t as *mut uv_handle_t, None);
     }
     tick(runtime).await;
-    assert_fd_closed(read_fd);
+    assert_fd_closed(read_fd, read_fd_id);
   })
   .await;
 }
@@ -3174,6 +3223,7 @@ async fn pipe_listener_transfers_raw_fd_ownership() {
       assert_ok(pipe::uv_pipe_bind(&mut pipe, &socket_path));
     }
     let fd = pipe.fd().expect("bound pipe should have a descriptor");
+    let fd_id = fd_identity(fd);
     assert_eq!(pipe.internal_fd, Some(fd));
 
     unsafe {
@@ -3190,7 +3240,7 @@ async fn pipe_listener_transfers_raw_fd_ownership() {
       uv_close(&mut pipe as *mut uv_pipe_t as *mut uv_handle_t, None);
     }
     tick(runtime).await;
-    assert_fd_closed(fd);
+    assert_fd_closed(fd, fd_id);
   })
   .await;
 }
@@ -3205,6 +3255,7 @@ async fn pipe_accept_keeps_only_the_tokio_fd_owner() {
     accepted.set_nonblocking(true).unwrap();
     let accepted = tokio::net::UnixStream::from_std(accepted).unwrap();
     let fd = accepted.as_raw_fd();
+    let fd_id = fd_identity(fd);
 
     let mut server = new_pipe(false);
     let mut client = new_pipe(false);
@@ -3229,7 +3280,7 @@ async fn pipe_accept_keeps_only_the_tokio_fd_owner() {
       uv_close(&mut server as *mut uv_pipe_t as *mut uv_handle_t, None);
     }
     tick(runtime).await;
-    assert_fd_closed(fd);
+    assert_fd_closed(fd, fd_id);
     drop(peer);
   })
   .await;
@@ -3252,6 +3303,7 @@ async fn pipe_bound_connect_transfers_raw_fd_ownership() {
       assert_ok(pipe::uv_pipe_bind(&mut pipe, &client_path));
     }
     let fd = pipe.fd().expect("bound pipe should have a descriptor");
+    let fd_id = fd_identity(fd);
 
     unsafe {
       assert_ok(pipe::uv_pipe_connect(
@@ -3286,7 +3338,7 @@ async fn pipe_bound_connect_transfers_raw_fd_ownership() {
       uv_close(&mut pipe as *mut uv_pipe_t as *mut uv_handle_t, None);
     }
     tick(runtime).await;
-    assert_fd_closed(fd);
+    assert_fd_closed(fd, fd_id);
 
     drop(listener);
     #[allow(
