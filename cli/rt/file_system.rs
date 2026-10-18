@@ -802,6 +802,19 @@ impl sys_traits::BaseFsCanonicalize for DenoRtSys {
   }
 }
 
+impl sys_traits::BaseFsReadLink for DenoRtSys {
+  #[inline]
+  fn base_fs_read_link(&self, path: &Path) -> std::io::Result<PathBuf> {
+    self
+      .read_link_sync(
+        // PERMISSIONS: this is ok because JS code will never use sys_traits
+        // (see `base_fs_canonicalize`).
+        &CheckedPath::unsafe_new(Cow::Borrowed(path)),
+      )
+      .map_err(|err| err.into_io_error())
+  }
+}
+
 impl sys_traits::BaseFsMetadata for DenoRtSys {
   type Metadata = BoxedFsMetadataValue;
 

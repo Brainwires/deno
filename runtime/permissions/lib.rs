@@ -984,6 +984,12 @@ impl<
       && !has_broker()
   }
 
+  /// Whether a path-scoped deny or ignore rule exists (a global one already
+  /// refuses the path as given).
+  fn has_denied_descriptors(&self) -> bool {
+    self.descriptors.has_any_denied_or_ignored()
+  }
+
   pub fn check_all_api(
     &mut self,
     api_name: Option<&str>,
@@ -2972,7 +2978,7 @@ impl<'a> SpecialFilePathQueryDescriptor<'a> {
   }
 
   pub fn parse(
-    sys: &impl sys_traits::FsCanonicalize,
+    sys: &(impl sys_traits::FsCanonicalize + sys_traits::FsReadLink),
     path: PathQueryDescriptor<'a>,
   ) -> Result<Self, PathResolveError> {
     let PathQueryDescriptor {
@@ -2981,18 +2987,13 @@ impl<'a> SpecialFilePathQueryDescriptor<'a> {
       cmp_path: _,
       requested,
     } = path;
-    // On Linux, /proc may contain magic links that we don't want to resolve
-    let is_linux_special_path = cfg!(target_os = "linux")
-      && (path.starts_with("/proc") || path.starts_with("/dev"));
     let needs_canonicalization =
-      !is_windows_device_path && !is_linux_special_path;
+      !is_windows_device_path && !is_linux_special_path(&path);
     if needs_canonicalization {
       let original_path = path;
-      let new_path = deno_path_util::fs::canonicalize_path_maybe_not_exists(
-        sys,
-        &original_path,
-      )
-      .map_err(PathResolveError::Canonicalize)?;
+      let new_path =
+        canonicalize_path_maybe_not_exists_following_links(sys, &original_path)
+          .map_err(PathResolveError::Canonicalize)?;
       Ok(Self {
         requested: requested
           .or_else(|| Some(original_path.to_string_lossy().into_owned())),
@@ -3006,6 +3007,116 @@ impl<'a> SpecialFilePathQueryDescriptor<'a> {
         canonicalized: false,
       })
     }
+  }
+
+  /// For a no-follow access (lstat, unlink, rename, symlink, mkdir, …) the
+  /// kernel still follows every component but the last, so a symlinked
+  /// directory in the path can point anywhere. Returns the path with its
+  /// parent resolved and the final name kept as given, for re-checking deny
+  /// rules; `None` when the path is not resolved (device paths, the Linux
+  /// `/proc` and `/dev` trees, the root).
+  pub fn resolve_parent_for_no_follow(
+    sys: &(impl sys_traits::FsCanonicalize + sys_traits::FsReadLink),
+    path: &PathQueryDescriptor<'_>,
+  ) -> Result<Option<PathBuf>, PathResolveError> {
+    if path.is_windows_device_path || is_linux_special_path(&path.path) {
+      return Ok(None);
+    }
+    let (Some(parent), Some(name)) =
+      (path.path.parent(), path.path.file_name())
+    else {
+      return Ok(None);
+    };
+    let parent =
+      canonicalize_path_maybe_not_exists_following_links(sys, parent)
+        .map_err(PathResolveError::Canonicalize)?;
+    Ok(Some(parent.join(name)))
+  }
+}
+
+/// On Linux, /proc and /dev contain magic links that we don't want to resolve.
+fn is_linux_special_path(path: &Path) -> bool {
+  cfg!(target_os = "linux")
+    && (path.starts_with("/proc") || path.starts_with("/dev"))
+}
+
+/// The most symlinks followed while resolving one path (Linux's MAXSYMLINKS).
+const MAX_SYMLINK_HOPS: usize = 40;
+
+/// Like `deno_path_util::fs::canonicalize_path_maybe_not_exists`, but a
+/// component that does not resolve because it is a symlink to a path that does
+/// not exist yet (a dangling symlink) is followed to its target instead of
+/// being kept as named. Without this, a write through a dangling symlink is
+/// checked against the symlink's own location while the kernel creates the
+/// file at the target. The chain is followed at most `MAX_SYMLINK_HOPS` times;
+/// a longer chain or a cycle is an error.
+fn canonicalize_path_maybe_not_exists_following_links(
+  sys: &(impl sys_traits::FsCanonicalize + sys_traits::FsReadLink),
+  path: &Path,
+) -> std::io::Result<PathBuf> {
+  let mut path = path.to_path_buf();
+  let mut hops = 0;
+  'resolve: loop {
+    let mut names_stack = Vec::new();
+    let mut current: &Path = &path;
+    loop {
+      match sys.fs_canonicalize(current) {
+        Ok(mut canonicalized_path) => {
+          for name in names_stack.into_iter().rev() {
+            canonicalized_path.push(name);
+          }
+          return Ok(canonicalized_path);
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+          // `current` does not resolve. When it is a symlink, its target (or
+          // a later link in the chain) is missing: continue from the target.
+          if let Ok(target) = sys.fs_read_link(current) {
+            hops += 1;
+            if hops > MAX_SYMLINK_HOPS {
+              return Err(too_many_symlinks_error());
+            }
+            let mut next = if target.is_absolute() {
+              target
+            } else {
+              match current.parent() {
+                Some(parent) if !parent.as_os_str().is_empty() => {
+                  parent.join(target)
+                }
+                _ => target,
+              }
+            };
+            for name in names_stack.into_iter().rev() {
+              next.push(name);
+            }
+            path = next;
+            continue 'resolve;
+          }
+          names_stack.push(match current.file_name() {
+            Some(name) => name.to_owned(),
+            None => return Err(err),
+          });
+          current = match current.parent() {
+            // A relative path runs out of ancestors at the empty path; resolve
+            // the rest against the current directory.
+            Some(parent) if parent.as_os_str().is_empty() => Path::new("."),
+            Some(parent) => parent,
+            None => return Err(err),
+          };
+        }
+        Err(err) => return Err(err),
+      }
+    }
+  }
+}
+
+fn too_many_symlinks_error() -> std::io::Error {
+  #[cfg(unix)]
+  {
+    std::io::Error::from_raw_os_error(libc::ELOOP)
+  }
+  #[cfg(not(unix))]
+  {
+    std::io::Error::other("too many levels of symbolic links")
   }
 }
 
@@ -4410,6 +4521,19 @@ impl PermissionsContainer {
       // un-resolved path. The /proc, /dev, /sys prefix guard inside
       // `check_special_file` still fires when the caller-supplied path is
       // itself a kernel-magic location (e.g. `/proc/self/root/...`).
+      // The kernel still follows the parent directories, so a symlinked
+      // directory can point into a deny scope: re-check the deny rules
+      // against the path with its parent resolved.
+      if self.has_denied_descriptors(access_kind)
+        && let Some(resolved) =
+          self.descriptor_parser.resolve_no_follow_path(&path)?
+      {
+        self.check_resolved_path_not_denied(
+          &resolved,
+          access_kind,
+          api_name,
+        )?;
+      }
       SpecialFilePathQueryDescriptor::from_path_query_no_canonicalize(path)
     } else {
       let special_path =
@@ -4424,6 +4548,53 @@ impl PermissionsContainer {
       special_path
     };
     self.check_special_file(special_path, access_kind, api_name)
+  }
+
+  /// The no-follow write checks (`check_write_partial`, `check_write`) use the
+  /// path as given, but the kernel follows its parent directories: re-check
+  /// the deny rules against the path with its parent resolved. `recursive`
+  /// also refuses a deny scope inside the resolved path, as `check_write`
+  /// does for the path as given.
+  fn check_no_follow_write_resolved(
+    &self,
+    desc: &WriteQueryDescriptor<'_>,
+    recursive: bool,
+    api_name: &str,
+  ) -> Result<(), PermissionCheckError> {
+    if !self.has_denied_descriptors(OpenAccessKind::WriteNoFollow) {
+      return Ok(());
+    }
+    let Some(resolved) =
+      self.descriptor_parser.resolve_no_follow_path(&desc.0)?
+    else {
+      return Ok(());
+    };
+    if !recursive {
+      return self.check_resolved_path_not_denied(
+        &resolved,
+        OpenAccessKind::WriteNoFollow,
+        Some(api_name),
+      );
+    }
+    let resolved = self
+      .descriptor_parser
+      .parse_path_query(Cow::Owned(resolved))?
+      .into_write();
+    let mut inner = self.inner.lock();
+    if inner.write.query(Some(&resolved)) == PermissionState::Denied
+      || inner.write.is_partial_flag_denied(Some(&resolved))
+    {
+      inner.write.check(&resolved, Some(api_name))?;
+    }
+    Ok(())
+  }
+
+  /// Whether any deny (or ignore) rule exists for the kinds of access
+  /// `access_kind` performs; without one, a resolved path cannot be denied.
+  fn has_denied_descriptors(&self, access_kind: OpenAccessKind) -> bool {
+    let inner = self.inner.lock();
+    (access_kind.is_read() && inner.read.has_denied_descriptors())
+      || (access_kind.is_write() && inner.write.has_denied_descriptors())
   }
 
   /// Re-checks the deny rules against a symlink-resolved path. The checks in
@@ -4494,8 +4665,8 @@ impl PermissionsContainer {
     path: Cow<'a, Path>,
     api_name: &str,
   ) -> Result<CheckedPath<'a>, PermissionCheckError> {
-    let mut inner = self.inner.lock();
-    let inner = &mut inner.write;
+    let mut guard = self.inner.lock();
+    let inner = &mut guard.write;
     if inner.is_allow_all() {
       write_audit(WriteQueryDescriptor::flag_name(), &path);
       Ok(CheckedPath {
@@ -4508,6 +4679,8 @@ impl PermissionsContainer {
     } else {
       let desc = self.descriptor_parser.parse_path_query(path)?.into_write();
       inner.check_partial(&desc, Some(api_name))?;
+      drop(guard);
+      self.check_no_follow_write_resolved(&desc, false, api_name)?;
       // skip checking for special permissions because we consider
       // write_partial as WriteNoFollow because it's only used for
       // fs::remove
@@ -4532,8 +4705,8 @@ impl PermissionsContainer {
     path: Cow<'a, Path>,
     api_name: &str,
   ) -> Result<CheckedPath<'a>, PermissionCheckError> {
-    let mut inner = self.inner.lock();
-    let inner = &mut inner.write;
+    let mut guard = self.inner.lock();
+    let inner = &mut guard.write;
     if inner.is_allow_all() {
       write_audit(WriteQueryDescriptor::flag_name(), &path);
       Ok(CheckedPath {
@@ -4546,6 +4719,8 @@ impl PermissionsContainer {
     } else {
       let desc = self.descriptor_parser.parse_path_query(path)?.into_write();
       inner.check(&desc, Some(api_name))?;
+      drop(guard);
+      self.check_no_follow_write_resolved(&desc, true, api_name)?;
       // skip checking for special permissions because this is treated as
       // WriteNoFollow (it's only used for the recursive `fs::remove` path)
       Ok(CheckedPath {
@@ -5840,6 +6015,18 @@ pub trait PermissionDescriptorParser: Debug + Send + Sync {
     &self,
     path: PathQueryDescriptor<'a>,
   ) -> Result<SpecialFilePathQueryDescriptor<'a>, PathResolveError>;
+
+  /// The path a no-follow access reaches: its parent with symlinks resolved
+  /// and its final name as given (see
+  /// `SpecialFilePathQueryDescriptor::resolve_parent_for_no_follow`). Used
+  /// only to re-check deny rules. `None` when the parser does not resolve
+  /// paths.
+  fn resolve_no_follow_path(
+    &self,
+    _path: &PathQueryDescriptor<'_>,
+  ) -> Result<Option<PathBuf>, PathResolveError> {
+    Ok(None)
+  }
 
   fn parse_net_query(
     &self,

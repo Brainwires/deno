@@ -1,0 +1,29 @@
+writeTextFile dangling: denied
+open create dangling: denied
+writeTextFile chain: denied
+writeTextFile via dir link: denied
+copyFile to dangling: denied
+node writeFileSync dangling: denied
+node appendFileSync chain: denied
+node copyFileSync to dangling: denied
+node cpSync to dangling: denied
+copyFile to existing: denied
+truncate existing: error (FilesystemLoop)
+chmod existing: denied
+chown existing: denied
+utime existing: denied
+node truncateSync existing: denied
+remove under dir link: denied
+remove recursive under dir link: denied
+node rmSync recursive under dir link: denied
+rename from dir link: denied
+rename into dir link: denied
+mkdir under dir link: denied
+link into dir link: denied
+node unlinkSync under dir link: denied
+node mkdirSync under dir link: denied
+writeTextFile loop: error ([WILDCARD])
+links removable: ok
+denied entries: remove.txt,rename.txt,secret.env,secret.txt,tree
+secret: SECRET
+secret mode unchanged: true

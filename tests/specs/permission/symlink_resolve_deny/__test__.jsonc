@@ -1,0 +1,46 @@
+{
+  "tempDir": true,
+  "tests": {
+    // --allow-write with a --deny-write scope
+    "deny_write": {
+      "if": "unix",
+      "steps": [
+        {
+          "args": "run --allow-read --allow-write setup.ts",
+          "output": "setup done\n"
+        },
+        {
+          "args": "run --allow-read --allow-write --deny-write=denied write.ts",
+          "output": "write.out"
+        }
+      ]
+    },
+    // a scoped --allow-write with a --deny-write scope
+    "allow_write_scope": {
+      "if": "unix",
+      "steps": [
+        {
+          "args": "run --allow-read --allow-write setup.ts",
+          "output": "setup done\n"
+        },
+        {
+          "args": "run --allow-read --allow-write=allowed --deny-write=denied write.ts",
+          "output": "write.out"
+        }
+      ]
+    },
+    "deny_read": {
+      "if": "unix",
+      "steps": [
+        {
+          "args": "run --allow-read --allow-write setup.ts",
+          "output": "setup done\n"
+        },
+        {
+          "args": "run --allow-env --allow-read=allowed --deny-read=denied read.ts",
+          "output": "read.out"
+        }
+      ]
+    }
+  }
+}

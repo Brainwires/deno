@@ -314,7 +314,7 @@ pub fn op_fs_chmod_sync(
     .borrow_mut::<deno_permissions::PermissionsContainer>()
     .check_open(
       Cow::Borrowed(Path::new(path)),
-      OpenAccessKind::WriteNoFollow,
+      OpenAccessKind::Write,
       Some("Deno.chmodSync()"),
     )?;
   let fs = state.borrow::<FileSystemRc>();
@@ -333,7 +333,7 @@ pub fn op_fs_chmod_sync(
     .borrow_mut::<deno_permissions::PermissionsContainer>()
     .check_open(
       Cow::Borrowed(Path::new(path)),
-      OpenAccessKind::WriteNoFollow,
+      OpenAccessKind::Write,
       Some("Deno.chmodSync()"),
     )?;
   let fs = state.borrow::<FileSystemRc>();
@@ -354,7 +354,7 @@ pub async fn op_fs_chmod_async(
       .borrow_mut::<deno_permissions::PermissionsContainer>()
       .check_open(
         Cow::Owned(PathBuf::from(path)),
-        OpenAccessKind::WriteNoFollow,
+        OpenAccessKind::Write,
         Some("Deno.chmod()"),
       )?;
     (state.borrow::<FileSystemRc>().clone(), path)
@@ -378,7 +378,7 @@ pub async fn op_fs_chmod_async(
       .borrow_mut::<deno_permissions::PermissionsContainer>()
       .check_open(
         Cow::Owned(PathBuf::from(path)),
-        OpenAccessKind::WriteNoFollow,
+        OpenAccessKind::Write,
         Some("Deno.chmod()"),
       )?;
     (state.borrow::<FileSystemRc>().clone(), path)
@@ -400,7 +400,7 @@ pub fn op_fs_chown_sync(
     .borrow_mut::<deno_permissions::PermissionsContainer>()
     .check_open(
       Cow::Borrowed(Path::new(path)),
-      OpenAccessKind::WriteNoFollow,
+      OpenAccessKind::Write,
       Some("Deno.chownSync()"),
     )?;
   let fs = state.borrow::<FileSystemRc>();
@@ -422,7 +422,7 @@ pub async fn op_fs_chown_async(
       .borrow_mut::<deno_permissions::PermissionsContainer>()
       .check_open(
         Cow::Owned(PathBuf::from(path)),
-        OpenAccessKind::WriteNoFollow,
+        OpenAccessKind::Write,
         Some("Deno.chown()"),
       )?;
     (state.borrow::<FileSystemRc>().clone(), path)
@@ -559,7 +559,7 @@ pub fn op_fs_copy_file_sync(
   )?;
   let to = permissions.check_open(
     Cow::Borrowed(Path::new(to)),
-    OpenAccessKind::WriteNoFollow,
+    OpenAccessKind::Write,
     Some("Deno.copyFileSync()"),
   )?;
 
@@ -587,7 +587,7 @@ pub async fn op_fs_copy_file_async(
     )?;
     let to = permissions.check_open(
       Cow::Owned(PathBuf::from(to)),
-      OpenAccessKind::WriteNoFollow,
+      OpenAccessKind::Write,
       Some("Deno.copyFile()"),
     )?;
     (state.borrow::<FileSystemRc>().clone(), from, to)
@@ -609,7 +609,7 @@ pub fn op_fs_stat_sync(
     .borrow_mut::<deno_permissions::PermissionsContainer>()
     .check_open(
       Cow::Borrowed(Path::new(path)),
-      OpenAccessKind::ReadNoFollow,
+      OpenAccessKind::Read,
       Some("Deno.statSync()"),
     )?;
   let fs = state.borrow::<FileSystemRc>();
@@ -630,7 +630,7 @@ pub async fn op_fs_stat_async(
       state.borrow_mut::<deno_permissions::PermissionsContainer>();
     let path = permissions.check_open(
       Cow::Owned(PathBuf::from(path)),
-      OpenAccessKind::ReadNoFollow,
+      OpenAccessKind::Read,
       Some("Deno.stat()"),
     )?;
     (state.borrow::<FileSystemRc>().clone(), path)
@@ -742,7 +742,7 @@ pub fn op_fs_read_dir_sync(
     .borrow_mut::<deno_permissions::PermissionsContainer>()
     .check_open(
       Cow::Borrowed(Path::new(path)),
-      OpenAccessKind::ReadNoFollow,
+      OpenAccessKind::Read,
       Some("Deno.readDirSync()"),
     )?;
 
@@ -763,7 +763,7 @@ pub async fn op_fs_read_dir_async(
       .borrow_mut::<deno_permissions::PermissionsContainer>()
       .check_open(
         Cow::Owned(PathBuf::from(path)),
-        OpenAccessKind::ReadNoFollow,
+        OpenAccessKind::Read,
         Some("Deno.readDir()"),
       )?;
     (state.borrow::<FileSystemRc>().clone(), path)
@@ -1095,7 +1095,7 @@ pub fn op_fs_utime_sync(
     .borrow_mut::<deno_permissions::PermissionsContainer>()
     .check_open(
       Cow::Borrowed(Path::new(path)),
-      OpenAccessKind::WriteNoFollow,
+      OpenAccessKind::Write,
       Some("Deno.utime()"),
     )?;
 
@@ -1121,7 +1121,7 @@ pub async fn op_fs_utime_async(
       .borrow_mut::<deno_permissions::PermissionsContainer>()
       .check_open(
         Cow::Owned(PathBuf::from(path)),
-        OpenAccessKind::WriteNoFollow,
+        OpenAccessKind::Write,
         Some("Deno.utime()"),
       )?;
     (state.borrow::<FileSystemRc>().clone(), path)

@@ -1,0 +1,12 @@
+readTextFile existing: denied
+readTextFile under dir link: denied
+stat existing: denied
+readDir dir link: denied
+lstat under dir link: denied
+node readFileSync under dir link: denied
+node statSync existing: denied
+node readdirSync dir link: denied
+node loadEnvFile: denied
+lstat link: true
+readLink: ../denied/secret.env
+allowed entries: chain1,chain2,dangling,dir,env,existing,loop1,loop2,src.txt,src_rename.txt,via_dir

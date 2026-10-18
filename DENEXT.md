@@ -1951,8 +1951,37 @@ where the changes are discussed.
     `test-process-ref-unref.js` (#37016), `test-crypto-sign-verify.js` (#36912),
     `test-stream2-readable-wrap-proxy-methods.js`.
 
+69. **`fix(permissions)`: deny scopes hold through symlinks**
+    (`runtime/permissions`, `ext/fs/ops.rs`, `ext/node/lib.rs`). Builds on
+    denoland/deno#33894 (carried as its own commit), which re-checks the deny
+    rules against the canonicalized path. Three gaps were left. The
+    canonicalizer kept a dangling symlink as named:
+    `allowed/link ->
+    denied/new.txt` was checked as `allowed/link`, so
+    `Deno.copyFile` (and `node:fs` `copyFileSync`) created `denied/new.txt`
+    under `--deny-write`; on Unix a plain write already failed with `NotFound`
+    through `O_NOFOLLOW`, and Windows has no such guard. The path is now
+    resolved through the symlink chain (at most 40 hops; a cycle is `ELOOP`).
+    The no-follow checks (lstat, remove, rename, mkdir, link, and recursive
+    remove) skipped the re-check, but the kernel still follows the parent
+    directories, so `allowed/dir ->
+    denied` let
+    `Deno.removeSync("allowed/dir/x")` delete a denied file: when a path-scoped
+    deny or ignore rule exists, the parent is resolved and the deny rules
+    re-checked (a recursive remove also refuses a deny scope inside the resolved
+    path). And some operations that follow the final symlink were checked as
+    no-follow, so a link to a denied file was written or read: the `copyFile`
+    destination, `chmod`, `chown`, `utime`, `stat`, `readDir` and
+    `process.loadEnvFile` now use the following access kinds (`truncate` stays
+    no-follow; it opens with `O_NOFOLLOW`). Only a deny rule is applied to the
+    resolved path; an `--allow-*` scope is still matched against the path as
+    given, as in upstream Deno (creating a symlink needs full read and write
+    access). Spec: `permission/symlink_resolve_deny` (`--deny-write` with
+    `--allow-write` and with a scoped `--allow-write=allowed`, and
+    `--deny-read`).
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
-64-68) are what the prebuilt `libdenort` carries. The CLI-side parts (for
+64-69) are what the prebuilt `libdenort` carries. The CLI-side parts (for
 example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's
 launchers) are in the branch too, but a stock CLI does not run them; denext's
 own launcher provides that environment.

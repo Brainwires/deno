@@ -150,7 +150,7 @@ fn op_node_load_env_file(
   let path = permissions
     .check_open(
       Cow::Borrowed(Path::new(path)),
-      OpenAccessKind::ReadNoFollow,
+      OpenAccessKind::Read,
       Some("process.loadEnvFile"),
     )
     .map_err(DotEnvLoadErr::Permission)?;

@@ -24,7 +24,11 @@ use crate::WriteDescriptor;
 
 #[sys_traits::auto_impl]
 pub trait RuntimePermissionDescriptorParserSys:
-  crate::which::WhichSys + sys_traits::FsCanonicalize + Send + Sync
+  crate::which::WhichSys
+  + sys_traits::FsCanonicalize
+  + sys_traits::FsReadLink
+  + Send
+  + Sync
 {
 }
 
@@ -156,6 +160,15 @@ impl<TSys: RuntimePermissionDescriptorParserSys + std::fmt::Debug>
     path: PathQueryDescriptor<'a>,
   ) -> Result<SpecialFilePathQueryDescriptor<'a>, PathResolveError> {
     SpecialFilePathQueryDescriptor::parse(&self.sys, path)
+  }
+
+  fn resolve_no_follow_path(
+    &self,
+    path: &PathQueryDescriptor<'_>,
+  ) -> Result<Option<PathBuf>, PathResolveError> {
+    SpecialFilePathQueryDescriptor::resolve_parent_for_no_follow(
+      &self.sys, path,
+    )
   }
 
   fn parse_net_query(
