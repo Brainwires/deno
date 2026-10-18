@@ -115,7 +115,7 @@ pub(crate) struct CopyBack {
   pub(crate) original: Box<[u8]>,
   pub(crate) owner: ThreadId,
   /// Where a write-back dropped on another thread goes: the queue of the
-  /// runtime that made the copy. Dead once that runtime is gone.
+  /// thread that made the copy. Dead once no runtime is left on that thread.
   pub(crate) queue: Weak<CopyBackQueue>,
 }
 
@@ -146,10 +146,12 @@ pub fn pending_copy_backs() -> usize {
   LIVE_PENDING.load(Ordering::Relaxed)
 }
 
-/// The write-backs other threads handed to one runtime for its resizable
-/// buffers. The runtime owns it (its op driver holds the only strong
-/// reference), so when the runtime is torn down its queued entries are freed
-/// with it, and later ones are dropped at once instead of queued.
+/// The write-backs other threads handed back for the resizable buffers of one
+/// thread's runtimes. The op drivers of the runtimes on that thread hold the
+/// only strong references, and every one of them applies it before it
+/// resolves an op, so no realm can resolve an op ahead of its write-back. When
+/// the last runtime on the thread is torn down (a terminated worker), queued
+/// entries are freed with it and later ones are dropped at once.
 #[derive(Default)]
 pub struct CopyBackQueue {
   entries: Mutex<Vec<PendingCopyBack>>,
@@ -157,28 +159,27 @@ pub struct CopyBackQueue {
 }
 
 thread_local! {
-  static CURRENT_QUEUE: RefCell<Weak<CopyBackQueue>> =
+  static THREAD_QUEUE: RefCell<Weak<CopyBackQueue>> =
     const { RefCell::new(Weak::new()) };
 }
 
 impl CopyBackQueue {
-  pub fn new() -> Arc<Self> {
-    Arc::new(Self::default())
-  }
-
-  /// Makes this the queue that copies made on this thread report to. A
-  /// runtime calls it when it starts and whenever it polls its ops.
-  pub fn make_current(self: &Arc<Self>) {
-    CURRENT_QUEUE.with(|current| {
+  /// The queue of the current thread, created if no runtime on this thread
+  /// holds it. An op driver keeps the returned reference for its lifetime.
+  pub fn for_current_thread() -> Arc<Self> {
+    THREAD_QUEUE.with(|current| {
       let mut current = current.borrow_mut();
-      if !std::ptr::eq(current.as_ptr(), Arc::as_ptr(self)) {
-        *current = Arc::downgrade(self);
+      if let Some(queue) = current.upgrade() {
+        return queue;
       }
-    });
+      let queue = Arc::new(Self::default());
+      *current = Arc::downgrade(&queue);
+      queue
+    })
   }
 
   fn current() -> Weak<Self> {
-    CURRENT_QUEUE.with(|current| current.borrow().clone())
+    THREAD_QUEUE.with(|current| current.borrow().clone())
   }
 
   fn push(&self, pending: PendingCopyBack) {
@@ -203,16 +204,6 @@ impl CopyBackQueue {
       // code, not JavaScript.
       unsafe { write_back(&p.target, p.byte_offset, &p.original, &p.changed) };
     }
-  }
-
-  /// Drops the queued write-backs without applying them (runtime shutdown).
-  pub fn clear(&self) {
-    let pending = {
-      let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
-      self.len.store(0, Ordering::Release);
-      std::mem::take(&mut *entries)
-    };
-    drop(pending);
   }
 }
 
@@ -247,8 +238,9 @@ impl Drop for CopyBack {
       return;
     }
     // A resizable buffer can only be written on its own thread: hand the
-    // bytes to its runtime, which applies them before it resolves the next
-    // op. If that runtime is gone, so is the buffer's isolate: drop them.
+    // bytes to that thread's runtimes, which apply them before they resolve
+    // the next op. If none is left, neither is the buffer's isolate: drop
+    // them.
     let Some(queue) = self.queue.upgrade() else {
       return;
     };

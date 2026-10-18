@@ -67,7 +67,8 @@ pub struct FuturesUnorderedDriver<
   completed_waker: Rc<UnsyncWaker>,
   arena: FutureArena<PendingOp<C>, PendingOpInfo>,
   /// Write-backs of buffer copies dropped on other threads (see
-  /// `serde_v8::copy_back`). Owned here so they go away with the runtime.
+  /// `serde_v8::copy_back`), shared by the runtimes on this thread and freed
+  /// with the last of them.
   copy_backs: Arc<serde_v8::copy_back::CopyBackQueue>,
 }
 
@@ -88,8 +89,7 @@ impl<C: OpMappingContext> Default for FuturesUnorderedDriver<C> {
       completed_waker.clone(),
     )))
     .into();
-    let copy_backs = serde_v8::copy_back::CopyBackQueue::new();
-    copy_backs.make_current();
+    let copy_backs = serde_v8::copy_back::CopyBackQueue::for_current_thread();
 
     Self {
       len: Default::default(),
@@ -165,6 +165,9 @@ impl<C: OpMappingContext> OpDriver<C> for FuturesUnorderedDriver<C> {
             drop(pinned);
             self.spawn(self.arena.allocate(info, ready(res)).erase())
           } else {
+            // Resolved without a trip through `poll_ready`: land the
+            // write-backs other threads queued first (see `poll_ready`).
+            self.copy_backs.apply();
             return Some(res);
           }
         }
@@ -207,6 +210,9 @@ impl<C: OpMappingContext> OpDriver<C> for FuturesUnorderedDriver<C> {
             drop(pinned);
             self.spawn(self.arena.allocate(info, ready(res)).erase())
           } else {
+            // Resolved without a trip through `poll_ready`: land the
+            // write-backs other threads queued first (see `poll_ready`).
+            self.copy_backs.apply();
             return Some(res);
           }
         }
@@ -223,7 +229,6 @@ impl<C: OpMappingContext> OpDriver<C> for FuturesUnorderedDriver<C> {
   ) -> Poll<(PromiseId, OpId, OpResult<C>)> {
     // An async op may have finished with a copy of a resizable buffer that was
     // dropped on another thread; its changes land before the op resolves.
-    self.copy_backs.make_current();
     self.copy_backs.apply();
     let mut ops = self.completed_ops.borrow_mut();
     if ops.is_empty() {
@@ -246,7 +251,6 @@ impl<C: OpMappingContext> OpDriver<C> for FuturesUnorderedDriver<C> {
       h.abort()
     }
     self.completed_ops.borrow_mut().clear();
-    self.copy_backs.clear();
     self.queue.queue.queue.borrow_mut().clear();
   }
 
