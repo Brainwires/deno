@@ -78,6 +78,8 @@ uv_errno!(UV_ECONNRESET, libc::ECONNRESET, -4077);
 uv_errno!(UV_ECONNABORTED, libc::ECONNABORTED, -4079);
 uv_errno!(UV_ETIMEDOUT, libc::ETIMEDOUT, -4039);
 uv_errno!(UV_EACCES, libc::EACCES, -4092);
+uv_errno!(UV_EPERM, libc::EPERM, -4048);
+uv_errno!(UV_EEXIST, libc::EEXIST, -4075);
 pub const UV_EOF: i32 = -4095;
 
 pub fn uv_error_message(err: c_int) -> Option<&'static CStr> {
@@ -100,6 +102,8 @@ pub fn uv_error_message(err: c_int) -> Option<&'static CStr> {
     x if x == UV_ECONNABORTED => c"software caused connection abort",
     x if x == UV_ETIMEDOUT => c"connection timed out",
     x if x == UV_EACCES => c"permission denied",
+    x if x == UV_EPERM => c"operation not permitted",
+    x if x == UV_EEXIST => c"file already exists",
     x if x == UV_EOF => c"end of file",
     _ => return None,
   };

@@ -406,13 +406,13 @@ impl TCPWrap {
         .check_has_all_permissions(Path::new("node:net.Socket({ fd })"))
         .is_ok();
     if untracked && !allow_untracked {
-      return -libc::EPERM;
+      return uv_compat::UV_EPERM;
     }
     let Some(replace_registration) = state
       .borrow::<deno_io::FdTable>()
       .begin_uv_adopt(fd, allow_untracked)
     else {
-      return -libc::EEXIST;
+      return uv_compat::UV_EEXIST;
     };
     let tcp = self.tcp_ptr();
     if tcp.is_null() {
