@@ -203,7 +203,7 @@ const fn op_buffers() -> ::deno_core::_ops::OpDecl {
                 };
                 let mut buffer = [0; ::deno_core::v8::TYPED_ARRAY_MAX_SIZE_IN_HEAP];
                 let Ok(mut arg2_temp) = (unsafe {
-                    deno_core::_ops::to_fast_v8_slice::<u8, false>(arg2, &mut buffer)
+                    deno_core::_ops::to_fast_v8_slice_raw::<u8>(arg2, &mut buffer)
                 }) else {
                     {
                         let scope = ::std::pin::pin!(
@@ -240,7 +240,7 @@ const fn op_buffers() -> ::deno_core::_ops::OpDecl {
                 };
                 let mut buffer = [0; ::deno_core::v8::TYPED_ARRAY_MAX_SIZE_IN_HEAP];
                 let Ok(mut arg3_temp) = (unsafe {
-                    deno_core::_ops::to_fast_v8_slice::<u8, false>(arg3, &mut buffer)
+                    deno_core::_ops::to_fast_v8_slice_raw::<u8>(arg3, &mut buffer)
                 }) else {
                     {
                         let scope = ::std::pin::pin!(
@@ -307,7 +307,7 @@ const fn op_buffers() -> ::deno_core::_ops::OpDecl {
                 let arg2 = args.get(2usize as i32);
                 let mut arg2_temp;
                 arg2_temp = match unsafe {
-                    deno_core::_ops::to_v8_slice_mut_or_copy::<u8>(arg2)
+                    deno_core::_ops::to_v8_slice_raw::<u8>(arg2)
                 } {
                     Ok(arg2) => arg2,
                     Err(arg2_err) => {
@@ -323,7 +323,7 @@ const fn op_buffers() -> ::deno_core::_ops::OpDecl {
                 let arg3 = args.get(3usize as i32);
                 let mut arg3_temp;
                 arg3_temp = match unsafe {
-                    deno_core::_ops::to_v8_slice_mut_or_copy::<u8>(arg3)
+                    deno_core::_ops::to_v8_slice_raw::<u8>(arg3)
                 } {
                     Ok(arg3) => arg3,
                     Err(arg3_err) => {
@@ -561,7 +561,7 @@ const fn op_buffers_32() -> ::deno_core::_ops::OpDecl {
                 };
                 let mut buffer = [0; ::deno_core::v8::TYPED_ARRAY_MAX_SIZE_IN_HEAP];
                 let Ok(mut arg2_temp) = (unsafe {
-                    deno_core::_ops::to_fast_v8_slice::<u32, false>(arg2, &mut buffer)
+                    deno_core::_ops::to_fast_v8_slice_raw::<u32>(arg2, &mut buffer)
                 }) else {
                     {
                         let scope = ::std::pin::pin!(
@@ -600,7 +600,7 @@ const fn op_buffers_32() -> ::deno_core::_ops::OpDecl {
                 };
                 let mut buffer = [0; ::deno_core::v8::TYPED_ARRAY_MAX_SIZE_IN_HEAP];
                 let Ok(mut arg3_temp) = (unsafe {
-                    deno_core::_ops::to_fast_v8_slice::<u32, false>(arg3, &mut buffer)
+                    deno_core::_ops::to_fast_v8_slice_raw::<u32>(arg3, &mut buffer)
                 }) else {
                     {
                         let scope = ::std::pin::pin!(
@@ -669,7 +669,7 @@ const fn op_buffers_32() -> ::deno_core::_ops::OpDecl {
                 let arg2 = args.get(2usize as i32);
                 let mut arg2_temp;
                 arg2_temp = match unsafe {
-                    deno_core::_ops::to_v8_slice_mut_or_copy::<u32>(arg2)
+                    deno_core::_ops::to_v8_slice_raw::<u32>(arg2)
                 } {
                     Ok(arg2) => arg2,
                     Err(arg2_err) => {
@@ -685,7 +685,7 @@ const fn op_buffers_32() -> ::deno_core::_ops::OpDecl {
                 let arg3 = args.get(3usize as i32);
                 let mut arg3_temp;
                 arg3_temp = match unsafe {
-                    deno_core::_ops::to_v8_slice_mut_or_copy::<u32>(arg3)
+                    deno_core::_ops::to_v8_slice_raw::<u32>(arg3)
                 } {
                     Ok(arg3) => arg3,
                     Err(arg3_err) => {

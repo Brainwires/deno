@@ -690,15 +690,19 @@ fn fast_api_typed_array_to_buffer(
   let temp = format_ident!("{input}_temp");
   let element = buffer.element();
   let copy_invalid = buffer_can_copy_invalid_backing_store(buffer);
+  // A raw pointer points at the buffer itself, whatever its backing store.
+  let to_fast_slice = if matches!(buffer, BufferType::Ptr(..)) {
+    quote!(deno_core::_ops::to_fast_v8_slice_raw::<#element>(#input, &mut buffer))
+  } else {
+    quote!(deno_core::_ops::to_fast_v8_slice::<#element, #copy_invalid>(#input, &mut buffer))
+  };
   Ok(quote! {
     let Ok(#input) = #input.try_cast::<deno_core::v8::ArrayBufferView>() else {
         #throw_exception
     };
     let mut buffer = [0; ::deno_core::v8::TYPED_ARRAY_MAX_SIZE_IN_HEAP];
     // SAFETY: the temporary buffer does not outlive the fast call.
-    let Ok(mut #temp) = (unsafe {
-      deno_core::_ops::to_fast_v8_slice::<#element, #copy_invalid>(#input, &mut buffer)
-    }) else {
+    let Ok(mut #temp) = (unsafe { #to_fast_slice }) else {
       #throw_invalid_buffer
     };
     // SAFETY: `#temp` (and the inline storage it may point into) lives until
@@ -772,13 +776,19 @@ fn map_v8_fastcall_arg_to_arg(
       )
     }
     Arg::Buffer(buffer, _, BufferSource::ArrayBuffer) => {
+      let to_slice_fn = "to_slice_buffer";
       let throw_exception =
         throw_type_error(generator_state, "expected ArrayBuffer");
       let buf = byte_slice_to_buffer(arg_ident, &arg_temp, *buffer)?;
       let holder = format_ident!("{}_holder", arg_ident);
+      let to_slice = if matches!(buffer, BufferType::Ptr(..)) {
+        format_ident!("{}_raw", to_slice_fn)
+      } else {
+        format_ident!("{}", to_slice_fn)
+      };
       quote!(
         // SAFETY: This slice doesn't outlive the function
-        let Ok(mut #holder) = (unsafe { deno_core::_ops::to_slice_buffer(#arg_ident.into()) }) else {
+        let Ok(mut #holder) = (unsafe { deno_core::_ops::#to_slice(#arg_ident.into()) }) else {
           #throw_exception
         };
         // SAFETY: `#holder` lives until the end of the fast call and the slice
@@ -788,13 +798,19 @@ fn map_v8_fastcall_arg_to_arg(
       )
     }
     Arg::Buffer(buffer, _, BufferSource::Any) => {
+      let to_slice_fn = "to_slice_buffer_any";
       let throw_exception =
         throw_type_error(generator_state, "expected any buffer");
       let buf = byte_slice_to_buffer(arg_ident, &arg_temp, *buffer)?;
       let holder = format_ident!("{}_holder", arg_ident);
+      let to_slice = if matches!(buffer, BufferType::Ptr(..)) {
+        format_ident!("{}_raw", to_slice_fn)
+      } else {
+        format_ident!("{}", to_slice_fn)
+      };
       quote!(
         // SAFETY: This slice doesn't outlive the function
-        let Ok(mut #holder) = (unsafe { deno_core::_ops::to_slice_buffer_any(#arg_ident.into()) }) else {
+        let Ok(mut #holder) = (unsafe { deno_core::_ops::#to_slice(#arg_ident.into()) }) else {
           #throw_exception
         };
         // SAFETY: `#holder` lives until the end of the fast call and the slice

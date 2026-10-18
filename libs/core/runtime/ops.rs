@@ -748,6 +748,155 @@ where
   Ok(FastV8Slice::V8(slice))
 }
 
+/// Converts a fast-call ArrayBufferView for a raw pointer argument. A raw
+/// pointer has to point at the buffer itself (an op such as
+/// `Deno.UnsafePointer.of()` hands it out), so it is never a copy, whatever
+/// the backing store; dereferencing it safely is the op's contract.
+///
+/// # Safety
+///
+/// The returned buffer must not outlive the fast call or the `storage`
+/// provided for V8's inline typed-array contents.
+#[inline(always)]
+pub unsafe fn to_fast_v8_slice_raw<'a, T>(
+  view: v8::Local<v8::ArrayBufferView>,
+  storage: &'a mut [u8],
+) -> Result<FastV8Slice<'a, T>, &'static str>
+where
+  T: V8Sliceable,
+{
+  // SAFETY: `storage` outlives the returned slice, and the caller keeps the
+  // V8 view alive for the fast call.
+  let (input_ptr, input_len) = unsafe { view.get_contents_raw_parts(storage) };
+  let input_ptr = if input_ptr.is_null() {
+    std::ptr::dangling_mut()
+  } else {
+    input_ptr
+  };
+  // SAFETY: V8 returned `input_len` bytes either in `storage` or in the
+  // backing store kept alive by `view`.
+  let slice = unsafe { std::slice::from_raw_parts_mut(input_ptr, input_len) };
+  // SAFETY: the view's concrete typed-array class guarantees element
+  // alignment; the result is checked below before use.
+  let (before, slice, after) = unsafe { slice.align_to_mut::<T>() };
+  if !before.is_empty() || !after.is_empty() {
+    return Err("buffer length is not aligned");
+  }
+  Ok(FastV8Slice::V8(slice))
+}
+
+/// [`to_slice_buffer`] for a raw pointer argument: the buffer itself, whatever
+/// its backing store (see [`to_fast_v8_slice_raw`]).
+///
+/// # Safety
+///
+/// The returned slice must not outlive the fast call.
+pub unsafe fn to_slice_buffer_raw<'a>(
+  input: v8::Local<'_, v8::Value>,
+) -> Result<FastV8Slice<'a, u8>, &'static str> {
+  let Ok(buf) = v8::Local::<v8::ArrayBuffer>::try_from(input) else {
+    return Err("expected ArrayBuffer");
+  };
+  // SAFETY: the caller keeps the slice within the fast call.
+  Ok(FastV8Slice::V8(unsafe {
+    raw_byte_slice(buf.data(), buf.byte_length())
+  }))
+}
+
+/// [`to_slice_buffer_any`] for a raw pointer argument (see
+/// [`to_fast_v8_slice_raw`]).
+///
+/// # Safety
+///
+/// The returned slice must not outlive the fast call.
+pub unsafe fn to_slice_buffer_any_raw<'a>(
+  input: v8::Local<'_, v8::Value>,
+) -> Result<FastV8Slice<'a, u8>, &'static str> {
+  let (data, len) =
+    if let Ok(buf) = v8::Local::<v8::ArrayBufferView>::try_from(input) {
+      (NonNull::new(buf.data()), buf.byte_length())
+    } else if let Ok(buf) = v8::Local::<v8::ArrayBuffer>::try_from(input) {
+      (buf.data(), buf.byte_length())
+    } else {
+      return Err("expected ArrayBuffer or ArrayBufferView");
+    };
+  // SAFETY: the caller keeps the slice within the fast call.
+  Ok(FastV8Slice::V8(unsafe { raw_byte_slice(data, len) }))
+}
+
+/// # Safety
+///
+/// `data` must point at `len` bytes that stay allocated for `'a`.
+unsafe fn raw_byte_slice<'a>(
+  data: Option<NonNull<c_void>>,
+  len: usize,
+) -> &'a mut [u8] {
+  match data {
+    // SAFETY: guaranteed by the caller.
+    Some(ptr) if len > 0 => unsafe {
+      std::slice::from_raw_parts_mut(ptr.as_ptr() as _, len)
+    },
+    _ => &mut [],
+  }
+}
+
+/// A [`serde_v8::V8Slice`] for a raw pointer argument in the slow path (see
+/// [`to_fast_v8_slice_raw`]).
+pub fn to_v8_slice_raw<'a, T>(
+  input: v8::Local<'a, v8::Value>,
+) -> Result<serde_v8::V8Slice<T>, &'static str>
+where
+  T: V8Sliceable,
+  v8::Local<'a, T::V8>: TryFrom<v8::Local<'a, v8::Value>>,
+  v8::Local<'a, v8::ArrayBufferView>: From<v8::Local<'a, T::V8>>,
+{
+  let Ok(buf) = v8::Local::<T::V8>::try_from(input) else {
+    return Err("expected typed ArrayBufferView");
+  };
+  let buf: v8::Local<v8::ArrayBufferView> = buf.into();
+  let Some(store) = buf.get_backing_store() else {
+    return Err("buffer missing");
+  };
+  let offset = buf.byte_offset();
+  // SAFETY: the range comes from the live view.
+  Ok(unsafe {
+    serde_v8::V8Slice::from_parts(store, offset..offset + buf.byte_length())
+  })
+}
+
+/// [`to_v8_slice_raw`] for an ArrayBuffer.
+pub fn to_v8_slice_buffer_raw(
+  input: v8::Local<v8::Value>,
+) -> Result<serde_v8::V8Slice<u8>, &'static str> {
+  let Ok(buf) = v8::Local::<v8::ArrayBuffer>::try_from(input) else {
+    return Err("expected ArrayBuffer");
+  };
+  // SAFETY: the range comes from the live buffer.
+  Ok(unsafe {
+    serde_v8::V8Slice::from_parts(buf.get_backing_store(), 0..buf.byte_length())
+  })
+}
+
+/// [`to_v8_slice_raw`] for an ArrayBuffer or ArrayBufferView.
+pub fn to_v8_slice_any_raw(
+  input: v8::Local<v8::Value>,
+) -> Result<serde_v8::V8Slice<u8>, &'static str> {
+  if let Ok(buf) = v8::Local::<v8::ArrayBufferView>::try_from(input) {
+    let Some(store) = buf.get_backing_store() else {
+      return Err("buffer missing");
+    };
+    let offset = buf.byte_offset();
+    // SAFETY: the range comes from the live view.
+    return Ok(unsafe {
+      serde_v8::V8Slice::from_parts(store, offset..offset + buf.byte_length())
+    });
+  }
+  if v8::Local::<v8::ArrayBuffer>::try_from(input).is_ok() {
+    return to_v8_slice_buffer_raw(input);
+  }
+  Err("expected ArrayBuffer or ArrayBufferView")
+}
+
 /// Retrieve an immutable op buffer, copying backing stores whose contents
 /// cannot safely be represented by a borrowed Rust slice.
 pub fn to_v8_slice_or_copy<'a, T>(
@@ -2235,7 +2384,8 @@ mod tests {
           ),
         )?;
       }
-      // Raw pointer arguments get the same copies.
+      // Raw pointer arguments point at the buffer itself, whatever its
+      // backing store.
       for input in [
         format!(
           "new {arr}(new ArrayBuffer(10 * {size}, {{ maxByteLength: 100 * {size} }}))"

@@ -2002,15 +2002,18 @@ where the changes are discussed.
     blocking task), the bytes are queued and applied by the op driver before the
     next op resolves. Bytes the op did not change are left alone, so JavaScript
     or a worker writing the buffer while an async op runs is not overwritten.
-    Read-only arguments are copied as in the pull request. Tests: `deno_core`
-    `test_op_async_buffer_resized_during_op` (an op holding a slice across an
-    await while JavaScript shrinks a 16 MiB resizable buffer to 16 bytes),
-    `test_op_async_buffer_shared_and_cross_thread`, and the pull request's sync,
-    fast-call and `JsBuffer` cases changed from expecting a `TypeError` to
-    expecting the write-back; `unit_node/shared_buffer_test.ts`; the regenerated
-    `op2` expected outputs; the enabled node_compat `test-crypto-random.js`,
-    `test-buffer-sharedarraybuffer.js`, `test-buffer-resizable.js` and the
-    worker `SharedArrayBuffer` tests.
+    Read-only arguments are copied as in the pull request. A raw pointer
+    argument still points at the buffer itself (the pull request refused shared
+    and resizable ones): `Deno.UnsafePointer.of()` hands the pointer out, so a
+    copy would be wrong, and a raw pointer creates no Rust reference. Tests:
+    `deno_core` `test_op_async_buffer_resized_during_op` (an op holding a slice
+    across an await while JavaScript shrinks a 16 MiB resizable buffer to 16
+    bytes), `test_op_async_buffer_shared_and_cross_thread`, and the pull
+    request's sync, fast-call and `JsBuffer` cases changed from expecting a
+    `TypeError` to expecting the write-back; `unit_node/shared_buffer_test.ts`;
+    the regenerated `op2` expected outputs; the enabled node_compat
+    `test-crypto-random.js`, `test-buffer-sharedarraybuffer.js`,
+    `test-buffer-resizable.js` and the worker `SharedArrayBuffer` tests.
 
 71. **`fix(ext/net)`: hickory 0.26 (RUSTSEC-2026-0119)** (`Cargo.toml`,
     `ext/net/ops.rs`, `ext/fetch/dns.rs`, `node:dns`'s `cares_wrap.ts`). Ports

@@ -943,13 +943,15 @@ fn buffer_can_copy_invalid_backing_store(buffer_type: BufferType) -> bool {
   )
 }
 
-/// Mutable slices and raw pointers get a copy of a shared or resizable buffer
-/// whose changes are written back when the call ends.
+/// Mutable slices get a copy of a shared or resizable buffer whose changes
+/// are written back when the call ends.
 fn buffer_needs_copy_back(buffer_type: BufferType) -> bool {
-  matches!(
-    buffer_type,
-    BufferType::Slice(RefType::Mut, _) | BufferType::Ptr(_, _)
-  )
+  matches!(buffer_type, BufferType::Slice(RefType::Mut, _))
+}
+
+/// Raw pointers point at the buffer itself, whatever its backing store.
+fn buffer_is_ptr(buffer_type: BufferType) -> bool {
+  matches!(buffer_type, BufferType::Ptr(_, _))
 }
 
 pub fn from_arg_buffer(
@@ -971,6 +973,8 @@ pub fn from_arg_buffer(
     quote!(deno_core::_ops::to_v8_slice_or_copy::<#array>(#arg_ident))
   } else if buffer_needs_copy_back(buffer_type) {
     quote!(deno_core::_ops::to_v8_slice_mut_or_copy::<#array>(#arg_ident))
+  } else if buffer_is_ptr(buffer_type) {
+    quote!(deno_core::_ops::to_v8_slice_raw::<#array>(#arg_ident))
   } else {
     quote!(deno_core::_ops::to_v8_slice::<#array>(#arg_ident))
   };
@@ -1008,6 +1012,8 @@ pub fn from_arg_arraybuffer(
     quote!(to_v8_slice_buffer_or_copy)
   } else if buffer_needs_copy_back(buffer_type) {
     quote!(to_v8_slice_buffer_mut_or_copy)
+  } else if buffer_is_ptr(buffer_type) {
+    quote!(to_v8_slice_buffer_raw)
   } else {
     quote!(to_v8_slice_buffer)
   };
@@ -1045,6 +1051,8 @@ pub fn from_arg_any_buffer(
     quote!(to_v8_slice_any_or_copy)
   } else if buffer_needs_copy_back(buffer_type) {
     quote!(to_v8_slice_any_mut_or_copy)
+  } else if buffer_is_ptr(buffer_type) {
+    quote!(to_v8_slice_any_raw)
   } else {
     quote!(to_v8_slice_any)
   };

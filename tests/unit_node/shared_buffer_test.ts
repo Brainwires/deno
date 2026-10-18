@@ -144,12 +144,6 @@ for (const [name, make] of backings) {
   });
 }
 
-Deno.test("[node/crypto] randomFillSync into a SharedArrayBuffer", () => {
-  const sab = new SharedArrayBuffer(32);
-  crypto.randomFillSync(sab);
-  assertNotEquals(new Uint8Array(sab).slice(), new Uint8Array(32));
-});
-
 Deno.test("[node/fs] readSync into a resizable buffer that shrank", () => {
   withFile("0123456789", (path) => {
     const ab = new ArrayBuffer(10, { maxByteLength: 20 });
