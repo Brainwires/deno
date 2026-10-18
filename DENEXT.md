@@ -2047,8 +2047,73 @@ where the changes are discussed.
     not affect 0.26 either, so `.cargo/audit.toml` no longer ignores any hickory
     advisory.
 
+72. **Upstream batch: `Deno.serve`, runtime crash and correctness pull
+    requests** (`feat/upstream-prs-runtime-dd`, on `development-denext`).
+    Carried from open denoland/deno pull requests, one commit each with an
+    `Original-Author:` trailer and the pull request's head; reviews in the plans
+    file `deno-pr-reviews-runtime.md`:
+    - `Deno.serve` (HTTP/1.1): a request body read in the background is no
+      longer stranded while a streamed response is written (#36974); the
+      read-ahead while a response is pending is capped at 64 KiB, so a client
+      that keeps sending gets TCP backpressure instead of unbounded buffering
+      (#36869, hand-merged after #36974 in `libs/http_h1/conn.rs`); a graceful
+      `shutdown()` lets a finite request body finish instead of failing the
+      request with a 500 (#36825); malformed, non-ASCII and repeated `Host`
+      values get a 400 before the handler runs, in `Deno.serve` and
+      `Deno.serveHttp` only (#36481: its current head already dropped the
+      `node:http` half its review refused); `DENO_SERVE_ADDRESS` is handed out
+      once per process, so a worker's `Deno.serve` binds its own options instead
+      of the main server's address or item 1's `memory:` channel (#36760, ported
+      onto `ProcessEnvGuard`; its `run_headless_worker` hunk is left out, the
+      overlay variable is not inherited);
+    - crashes and hangs: chained snapshots keep their inherited extension
+      sources (#36911, a deserializer segfault); `node:worker_threads` resource
+      limits that overflow are a `RangeError` (#36200); a revoked `Proxy`
+      inspects as `<Revoked Proxy>` instead of throwing (#33642, ported to the
+      Rust formatter); a polluted `Object.prototype.signal` no longer recurses
+      `addEventListener` into a stack overflow (#37037); inspecting an `Event`
+      subclass prototype no longer throws (#36509, #36737);
+      `a.readable.pipeThrough(b)` no longer deadlocks when written before
+      `b.readable` is read (#36819); `deno fmt` no longer runs out of memory on
+      conditions that flip each other (#34476, with dprint/dprint#1137 vendored
+      as `libs/vendor/dprint-core` 0.67.4 instead of the pull request's git
+      dependency on a bot-hosted copy; drop it once dprint-plugin-typescript and
+      -markdown are on dprint-core 0.68+);
+    - security: deny rules are checked again against the symlink-resolved path
+      (#33894, ported to v2.9.7's `check_open_with_requested`; a full deny of
+      the target refuses, a partial one under it does not), and a worker's
+      `permissions.import` applies to its static remote imports (#35114);
+    - correctness: cloned `Request` / `Response` byte bodies no longer share
+      storage (#36210); a closed `Deno.watchFs` releases its OS watch at once
+      (#36964); setting an event handler attribute to `null` removes its
+      listener (#36892); `AbortSignal.timeout()` above 2^31-1 ms is clamped, not
+      fired at once (#34153); `deno lint --fix` keeps file modes (#36967);
+      `fetch()` sets TCP keepalive on pooled connections (#36549); WebSocket
+      frames are flushed to the transport (#36863, fastwebsockets 0.10, already
+      in the tree); `URLPattern` full-wildcard named groups keep their names
+      (#36916); `--watch` survives a re-raised SIGTERM (#36268, hand-merged into
+      the `poll_pending` loop #35607 gave `ext/signals`) and kills `unref()`'d
+      children on restart (#36977).
+
+    Not carried, with the reasons in the reviews: #36260 (op buffer backing
+    stores; does not compile upstream yet), #36253 (would drop `ext/sql`'s error
+    fields until it moves to `registerErrorBuilder`), #36429 (Windows, design
+    open), #36659 (already fixed in v2.9.7; its sync-path hunk would keep an
+    unread body on a kept-alive connection), #35422, #36370, #35927, #36989 (a
+    retention leak with long-lived signals), #32872 (contradicts the Compression
+    Streams WPT), #36763, #36971 (see item 42), #33517 (already in v2.9.7), and
+    #36606, which item 68 carries with the same review fix.
+
+    Tests: each pull request's own (`deno_http_h1`, `tests/unit` serve, http,
+    body, fetch, streams, event_target, event, console, timers, fs_events,
+    urlpattern, websocket and worker suites, `tests/specs` serve, run,
+    permission, worker, node, install and fmt, the watcher and lint integration
+    tests); new here: the `console_test` revoked-proxy cases. The new serve,
+    body, event, streams, timers and fmt tests were run against the
+    `rel/denext22` build first and fail there.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
-64-71) are what the prebuilt `libdenort` carries. The CLI-side parts (for
+64-72) are what the prebuilt `libdenort` carries. The CLI-side parts (for
 example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's
 launchers) are in the branch too, but a stock CLI does not run them; denext's
 own launcher provides that environment.
