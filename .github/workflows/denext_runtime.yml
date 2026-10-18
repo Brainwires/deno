@@ -4,7 +4,7 @@
 # builds and smoke-tests this fork's own `deno` CLI for the same targets,
 # and on a `denext-runtime-v*` tag publishes a GitHub Release with SHA256SUMS
 # and a manifest.json. It runs on every push to development-denext or a rel/** branch,
-# nightly on the default branch, by hand, and on a tag, which publishes only
+# by hand, and on a tag, which publishes only
 # when `denext tests` passed on the tagged commit. See DENEXT.md.
 name: denext runtime
 
@@ -41,9 +41,6 @@ on:
       - 'development-denext'
     tags:
       - 'denext-runtime-v*'
-  schedule:
-    # Nightly, on the default branch (the released line).
-    - cron: '17 6 * * *'
 
 permissions:
   contents: read
@@ -53,7 +50,7 @@ permissions:
 concurrency:
   group: denext-runtime-${{ github.ref }}-${{ inputs.targets }}-${{ inputs.reuse_denort_run_id }}-${{ inputs.reuse_laufey_run_id }}
   # A newer push to the same branch (or a new dispatch) supersedes a run; a
-  # tag's run and the nightly are never cancelled.
+  # tag's run is never cancelled.
   cancel-in-progress: ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref_type == 'branch') }}
 
 env:

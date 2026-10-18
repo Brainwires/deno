@@ -5,13 +5,11 @@
 # status its case.json expects, so a Node-compatibility regression shows up
 # before a runtime release; a case that does better is listed as improved.
 #
-# Nightly on the default branch, on demand (`only` narrows it to some cases),
-# and on a push that changes the matrix itself.
+# On demand (`only` narrows it to some cases), and on a push that changes the
+# matrix itself.
 name: denext npm matrix
 
 on:
-  schedule:
-    - cron: '43 4 * * *'
   workflow_dispatch:
     inputs:
       only:

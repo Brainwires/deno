@@ -171,7 +171,6 @@ const postSlack = step.dependsOn(uploadMonthSummary)({
 const workflow = createWorkflow({
   name: "node_compat_test",
   on: {
-    schedule: [{ cron: "0 10 * * *" }],
     workflow_dispatch: {},
   },
   jobs: [
