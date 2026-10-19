@@ -1,5 +1,5 @@
 {
-  // The low-download gate on `deno add` (DENEXT.md item 82). The stand-in
+  // The low-download gate on `deno add` (DENEXT.md item 83). The stand-in
   // downloads API (tests/util/server/servers/supply_chain.rs) gives
   // `*unpopular*` 12 weekly downloads and `*unknown-downloads*` no count;
   // DENO_NPM_DOWNLOADS_URL points at it, which also makes the test registry

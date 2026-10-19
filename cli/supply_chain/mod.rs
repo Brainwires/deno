@@ -1,6 +1,6 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 
-//! denext's npm supply-chain gates (DENEXT.md items 80-83):
+//! denext's npm supply-chain gates (DENEXT.md items 81-84):
 //!
 //! - [`advisories`]: refuse versions listed as malicious (OSV `MAL-*`).
 //! - [`downloads`]: `deno add` of a package with very low weekly downloads

@@ -1,5 +1,5 @@
 {
-  // paranoid (DENEXT.md item 83): every supply-chain gate on, each failing
+  // paranoid (DENEXT.md item 84): every supply-chain gate on, each failing
   // closed; a member set explicitly to something weaker is a config error.
   "tempDir": true,
   "envs": { "DENO_NPM_DOWNLOADS_URL": "http://localhost:4270/" },
