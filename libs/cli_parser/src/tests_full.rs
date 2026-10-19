@@ -9987,7 +9987,7 @@ fn bundle_define() {
     "DEBUG=false",
     "--define=process.env.NODE_ENV=\"production\"",
     "--define",
-    "A=b=c",
+    "A=\"b=c\"",
     "main.ts"
   ])
   .unwrap();
@@ -10003,7 +10003,7 @@ fn bundle_define() {
         "process.env.NODE_ENV".to_string(),
         "\"production\"".to_string()
       ),
-      ("A".to_string(), "b=c".to_string()),
+      ("A".to_string(), "\"b=c\"".to_string()),
     ]
   );
 
