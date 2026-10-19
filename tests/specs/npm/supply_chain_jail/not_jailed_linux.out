@@ -14,4 +14,6 @@ node: read project package.json: allowed
 node: own environ: readable
 node: ancestor environ: leaked
 node: fetch: allowed
+sh: own environ: readable
+sh: ancestor environ: leaked
 written outside: pwned-node.txt

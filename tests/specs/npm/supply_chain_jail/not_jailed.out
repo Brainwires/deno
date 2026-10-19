@@ -13,4 +13,5 @@ node: read .env: allowed
 node: read project package.json: allowed
 [WILDCARD]
 node: fetch: allowed
+[WILDCARD]
 written outside: pwned-node.txt

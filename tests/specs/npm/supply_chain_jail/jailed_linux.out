@@ -11,13 +11,15 @@ node: write via workspace link: denied
 node: create symlink: denied
 node: read .env: denied
 node: read project package.json: allowed
-node: own environ: readable
+node: own environ: unreadable
 node: ancestor environ: hidden
 node: fetch: denied
 sh: write project: denied
 sh: write via own symlink: denied
 sh: write via workspace link: denied
 sh: read .env: denied
+sh: own environ: readable
+sh: ancestor environ: hidden
 deno run -A: write project: denied (NotCapable)
 deno run -A: fetch: denied (NotCapable)
 npx: refused
