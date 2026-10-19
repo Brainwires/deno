@@ -580,7 +580,20 @@ pub static ALLOW_SCRIPTS_ARG: &[ArgDef] = &[ArgDef::new("allow-scripts")
   .num_args(NumArgs::ZeroOrMore)
   .require_equals()
   .value_delimiter(',')
-.help("Allow running npm lifecycle scripts for the given packages\n  Note: Scripts will only be executed when using a node_modules directory (`--node-modules-dir`)")];
+.help("Allow running npm lifecycle scripts for the given packages\n  Note: Scripts will only be executed when using a node_modules directory (`--node-modules-dir`)"),
+  ArgDef::new("jail-scripts")
+    .long("jail-scripts")
+    .set_true()
+.help("Run approved npm lifecycle scripts confined: a scrubbed environment, a temporary HOME, writes only to node_modules and temp, no network unless allowed (also `jail-scripts=true` in .npmrc or deno.json's `supplyChain.jailScripts`)"),
+];
+
+pub static LOW_DOWNLOADS_ARG: &[ArgDef] = &[ArgDef::new("allow-low-downloads")
+  .long("allow-low-downloads")
+  .action(ArgAction::Append)
+  .num_args(NumArgs::ZeroOrMore)
+  .require_equals()
+  .value_delimiter(',')
+.help("Add npm packages with very low weekly downloads without asking: the given packages, or all of them when no value is given")];
 
 // Standalone lock flags for subcommands that don't pull in COMPILE_ARGS
 // (which also defines these). Do not combine LOCK_ARGS with COMPILE_ARGS on the
@@ -2141,6 +2154,7 @@ pub static INSTALL_SUBCOMMAND: CommandDef = CommandDef {
     INSPECT_ARGS,
     RUNTIME_MISC_ARGS,
     ALLOW_SCRIPTS_ARG,
+    LOW_DOWNLOADS_ARG,
   ],
   subcommands: &[],
   default_subcommand: None,
@@ -2476,7 +2490,7 @@ pub static ADD_SUBCOMMAND: CommandDef = CommandDef {
       .require_equals()
 .help("Load environment variables from local file\n  Only the first environment variable with a given key is used.\n  Existing process environment variables are not overwritten, so if variables with the same names already exist in the environment, their values will be preserved.\n  Where multiple declarations for the same environment variable exist in your .env file, the first one encountered is applied. This is determined by the order of the files you pass as arguments."),
   ],
-  arg_groups: &[UNSTABLE_DEPRECATED_ARG, UNSTABLE_FEATURE_ARGS, ALLOW_SCRIPTS_ARG, COMPILE_ARGS],
+  arg_groups: &[UNSTABLE_DEPRECATED_ARG, UNSTABLE_FEATURE_ARGS, ALLOW_SCRIPTS_ARG, LOW_DOWNLOADS_ARG, COMPILE_ARGS],
   subcommands: &[],
   default_subcommand: None,
   trailing_var_arg: false,

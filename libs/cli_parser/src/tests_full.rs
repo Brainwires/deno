@@ -7130,6 +7130,42 @@ fn run_with_frozen_lockfile() {
 }
 
 #[test]
+fn jail_scripts_and_allow_low_downloads() {
+  let flags = flags_from_vec(svec![
+    "deno",
+    "install",
+    "--jail-scripts",
+    "--allow-scripts=npm:foo"
+  ])
+  .unwrap();
+  assert!(flags.jail_scripts);
+  assert_eq!(flags.allow_low_downloads, None);
+
+  let flags = flags_from_vec(svec![
+    "deno",
+    "add",
+    "--allow-low-downloads=npm:left-pad,@org/x",
+    "npm:left-pad"
+  ])
+  .unwrap();
+  assert!(!flags.jail_scripts);
+  assert_eq!(flags.allow_low_downloads, Some(svec!["left-pad", "@org/x"]));
+
+  let flags = flags_from_vec(svec![
+    "deno",
+    "install",
+    "--allow-low-downloads",
+    "npm:left-pad"
+  ])
+  .unwrap();
+  assert_eq!(flags.allow_low_downloads, Some(vec![]));
+
+  // only where packages are added
+  flags_from_vec(svec!["deno", "run", "--allow-low-downloads", "a.ts"])
+    .unwrap_err();
+}
+
+#[test]
 fn allow_scripts() {
   let cases = [
     (Some("--allow-scripts"), Ok(PackagesAllowedScripts::All)),

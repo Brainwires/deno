@@ -1056,6 +1056,10 @@ pub struct Flags {
   pub permissions: PermissionFlags,
   pub allow_scripts: PackagesAllowedScripts,
   pub deny_scripts: Vec<PackageReq>,
+  /// `--jail-scripts`: approved lifecycle scripts run confined.
+  pub jail_scripts: bool,
+  /// `--allow-low-downloads[=<names>]`: `Some(empty)` allows every package.
+  pub allow_low_downloads: Option<Vec<String>>,
   pub permission_set: Option<String>,
   pub eszip: bool,
   pub node_conditions: Vec<String>,

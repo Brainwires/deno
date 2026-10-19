@@ -17,6 +17,15 @@ use self::ini::KeyValueOrSection;
 use self::ini::Value;
 
 mod ini;
+mod supply_chain;
+
+pub use supply_chain::AdvisoryCheck;
+pub use supply_chain::DEFAULT_LOW_DOWNLOAD_THRESHOLD;
+pub use supply_chain::SupplyChainConfig;
+pub use supply_chain::SupplyChainConfigError;
+pub use supply_chain::SupplyChainSettings;
+pub use supply_chain::package_name_matches;
+pub use supply_chain::resolve_supply_chain;
 
 /// The default npm registry URL.
 pub static NPM_DEFAULT_REGISTRY: &str = "https://registry.npmjs.org";
@@ -33,6 +42,8 @@ pub enum ResolveError {
   },
   #[error("failed parsing npm registry url")]
   Url(#[source] url::ParseError),
+  #[error(transparent)]
+  SupplyChain(SupplyChainConfigError),
 }
 
 pub type NpmRcParseError = monch::ParseErrorFailureError;
@@ -207,6 +218,10 @@ pub struct NpmRc {
   pub node_linker: Option<NpmRcNodeLinker>,
   /// `ignore-scripts` value (npm's opt-out from lifecycle scripts).
   pub ignore_scripts: Option<bool>,
+  /// The supply-chain gates' settings this file sets (`paranoid`,
+  /// `jail-scripts`, `advisory-check`, `low-download-threshold`,
+  /// `allowed-unpopular-packages`).
+  pub supply_chain: SupplyChainSettings,
 }
 
 /// npm's boolean config values (`true`/`false`, as text in `.npmrc` or an
@@ -235,6 +250,7 @@ impl NpmRc {
     let mut trust_policy_ignore_after_minutes: Option<u64> = None;
     let mut trust_policy_exclude: Vec<String> = Vec::new();
     let mut node_linker = None;
+    let mut supply_chain = SupplyChainSettings::default();
     // npm reads every setting from `npm_config_<key>` too
     let mut ignore_scripts = sys
       .env_var("npm_config_ignore_scripts")
@@ -315,6 +331,9 @@ impl NpmRc {
               && let Value::String(text) = &kv.value
             {
               let value = expand_vars(text, sys);
+              if value.trim() == "off" {
+                supply_chain.trust_policy_off = true;
+              }
               trust_policy = match value.trim() {
                 "no-downgrade" => TrustPolicyConfig::NoDowngrade,
                 // unknown/`off` values fall back to off (npm is lenient about
@@ -340,6 +359,21 @@ impl NpmRc {
                 "hoisted" => Some(NpmRcNodeLinker::Hoisted),
                 _ => node_linker,
               };
+            } else if matches!(
+              key.as_ref(),
+              "paranoid"
+                | "jail-scripts"
+                | "advisory-check"
+                | "low-download-threshold"
+                | "allowed-unpopular-packages"
+            ) {
+              let text = match &kv.value {
+                Value::String(text) => expand_vars(text, sys),
+                Value::Boolean(value) => value.to_string(),
+                Value::Number(value) => value.to_string(),
+                _ => String::new(),
+              };
+              supply_chain.apply_key(key, &text);
             } else if key == "trust-policy-ignore-after" {
               // a number of minutes; ignore unparsable values (npm is lenient
               // about unknown/invalid config values)
@@ -356,6 +390,13 @@ impl NpmRc {
                 _ => {}
               }
             }
+          } else if let Key::Array(key) = &kv.key
+            && key == "allowed-unpopular-packages"
+            && let Value::String(text) = &kv.value
+          {
+            // repeated `allowed-unpopular-packages[]=<name>` entries
+            supply_chain
+              .apply_key("allowed-unpopular-packages", &expand_vars(text, sys));
           } else if let Key::Array(key) = &kv.key
             && key == "trust-policy-exclude"
             && let Value::String(text) = &kv.value
@@ -390,6 +431,7 @@ impl NpmRc {
       trust_policy_exclude,
       node_linker,
       ignore_scripts,
+      supply_chain,
     })
   }
 
@@ -418,6 +460,11 @@ impl NpmRc {
     let (default_url, default_config) =
       self.registry_url_and_config_for_maybe_scope(None, registry_url);
     let default_url = Url::parse(&default_url).map_err(ResolveError::Url)?;
+    let supply_chain = resolve_supply_chain(
+      &[(".npmrc", &self.supply_chain)],
+      self.supply_chain.clone(),
+    )
+    .map_err(ResolveError::SupplyChain)?;
     Ok(ResolvedNpmRc {
       default_config: RegistryConfigWithUrl {
         registry_url: default_url,
@@ -430,11 +477,16 @@ impl NpmRc {
         .clone()
         .unwrap_or_default(),
       min_release_age_days: self.min_release_age_days,
-      trust_policy: self.trust_policy,
       trust_policy_ignore_after_minutes: self.trust_policy_ignore_after_minutes,
       trust_policy_exclude: self.trust_policy_exclude.clone(),
       node_linker: self.node_linker,
       ignore_scripts: self.ignore_scripts.unwrap_or(false),
+      trust_policy: if supply_chain.paranoid {
+        TrustPolicyConfig::NoDowngrade
+      } else {
+        self.trust_policy
+      },
+      supply_chain,
     })
   }
 
@@ -535,9 +587,32 @@ pub struct ResolvedNpmRc {
   /// `ignore-scripts=true`: `deno install` runs no lifecycle scripts, the
   /// project's own included, as npm's `ignore-scripts`.
   pub ignore_scripts: bool,
+  /// The npm supply-chain gates, resolved (see [`SupplyChainConfig`]).
+  pub supply_chain: SupplyChainConfig,
 }
 
 impl ResolvedNpmRc {
+  /// Resolves the supply-chain gates again from the `.npmrc` files' settings
+  /// together with the environment's and deno.json's (`deno_json` carries the
+  /// name used in errors). `paranoid` also sets `trust-policy=no-downgrade`.
+  pub fn apply_supply_chain(
+    &mut self,
+    env: &SupplyChainSettings,
+    deno_json: Option<(&str, &SupplyChainSettings)>,
+  ) -> Result<(), SupplyChainConfigError> {
+    let npmrc_settings = self.supply_chain.npmrc_settings.clone();
+    let mut sources: Vec<(&str, &SupplyChainSettings)> =
+      vec![("the environment", env), (".npmrc", &npmrc_settings)];
+    if let Some(deno_json) = deno_json {
+      sources.push(deno_json);
+    }
+    self.supply_chain = resolve_supply_chain(&sources, npmrc_settings.clone())?;
+    if self.supply_chain.paranoid {
+      self.trust_policy = TrustPolicyConfig::NoDowngrade;
+    }
+    Ok(())
+  }
+
   pub fn get_registry_url(&self, package_name: &str) -> &Url {
     let Some(scope_name) = get_scope_name(package_name) else {
       return &self.default_config.registry_url;
@@ -1049,6 +1124,7 @@ registry=https://registry.npmjs.org/
         trust_policy_exclude: Vec::new(),
         node_linker: None,
         ignore_scripts: None,
+        supply_chain: Default::default(),
       }
     );
 
@@ -1117,6 +1193,7 @@ registry=https://registry.npmjs.org/
         trust_policy_exclude: Vec::new(),
         node_linker: None,
         ignore_scripts: false,
+        supply_chain: Default::default(),
       }
     );
 
@@ -1361,6 +1438,7 @@ registry=${VAR_FOUND}
         trust_policy_exclude: Vec::new(),
         node_linker: None,
         ignore_scripts: None,
+        supply_chain: Default::default(),
       }
     )
   }

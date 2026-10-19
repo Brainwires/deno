@@ -2508,6 +2508,7 @@ mod tests {
       trust_policy_exclude: Vec::new(),
       node_linker: None,
       ignore_scripts: false,
+      supply_chain: Default::default(),
     })
   }
 

@@ -11,6 +11,7 @@ use deno_npmrc::NpmRc;
 use deno_npmrc::NpmRegistryUrl;
 use deno_npmrc::RegistryConfigWithUrl;
 use deno_npmrc::ResolvedNpmRc;
+use deno_npmrc::SupplyChainSettings;
 use sys_traits::EnvHomeDir;
 use sys_traits::EnvVar;
 use sys_traits::FsRead;
@@ -32,6 +33,10 @@ pub enum NpmRcDiscoverErrorKind {
   Resolve(#[from] NpmRcOptionsResolveError),
   #[error(transparent)]
   UrlToFilePath(#[from] deno_path_util::UrlToFilePathError),
+  #[error(transparent)]
+  SupplyChainConfig(#[from] deno_config::deno_json::ToInvalidConfigError),
+  #[error(transparent)]
+  SupplyChain(#[from] deno_npmrc::SupplyChainConfigError),
 }
 
 #[derive(Debug, Error)]
@@ -68,7 +73,7 @@ pub fn discover_npmrc_from_workspace<TSys: EnvVar + EnvHomeDir + FsRead>(
   workspace: &Workspace,
 ) -> Result<(ResolvedNpmRc, Option<PathBuf>), NpmRcDiscoverError> {
   let root_folder = workspace.root_folder_configs();
-  discover_npmrc(
+  let (mut npmrc, path) = discover_npmrc(
     sys,
     root_folder.pkg_json.as_ref().map(|p| p.path.clone()),
     match &root_folder.deno_json {
@@ -77,7 +82,38 @@ pub fn discover_npmrc_from_workspace<TSys: EnvVar + EnvHomeDir + FsRead>(
       }
       _ => None,
     },
-  )
+  )?;
+  // denext: the npm supply-chain gates read the environment and deno.json's
+  // `supplyChain` too
+  let deno_json = workspace.supply_chain()?;
+  let deno_json_settings = supply_chain_settings_from_deno_json(&deno_json);
+  let deno_json_name = root_folder
+    .deno_json
+    .as_ref()
+    .map(|cf| cf.specifier.to_string())
+    .unwrap_or_else(|| "deno.json".to_string());
+  npmrc.apply_supply_chain(
+    &SupplyChainSettings::from_env(sys),
+    Some((deno_json_name.as_str(), &deno_json_settings)),
+  )?;
+  Ok((npmrc, path))
+}
+
+/// deno.json's `supplyChain` as the settings of one source.
+pub fn supply_chain_settings_from_deno_json(
+  config: &deno_config::deno_json::SupplyChainConfig,
+) -> SupplyChainSettings {
+  SupplyChainSettings {
+    paranoid: config.paranoid,
+    jail_scripts: config.jail_scripts,
+    advisory_check: config
+      .advisory_check
+      .as_deref()
+      .and_then(deno_npmrc::AdvisoryCheck::parse),
+    low_download_threshold: config.low_download_threshold,
+    allowed_unpopular_packages: config.allow_low_downloads.clone(),
+    trust_policy_off: false,
+  }
 }
 
 /// Discover only the `.npmrc` file in the user's home directory.
@@ -99,13 +135,21 @@ fn discover_npmrc<TSys: EnvVar + EnvHomeDir + FsRead>(
   const NPMRC_NAME: &str = ".npmrc";
 
   fn try_to_read_npmrc(
-    sys: &impl FsRead,
+    sys: &(impl FsRead + EnvVar),
     dir: &Path,
   ) -> Result<Option<(Cow<'static, str>, PathBuf)>, NpmRcLoadError> {
     let path = dir.join(NPMRC_NAME);
     let maybe_source = match sys.fs_read_to_string(&path) {
       Ok(source) => Some(source),
       Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+      // denext: a jailed npm lifecycle script can't read the project's
+      // .npmrc (it may hold credentials); its deno runs without it
+      Err(err)
+        if err.kind() == std::io::ErrorKind::PermissionDenied
+          && sys.env_var("DENO_INTERNAL_LIFECYCLE_JAIL").is_ok() =>
+      {
+        None
+      }
       Err(err) => return Err(NpmRcLoadError { path, source: err }),
     };
 
@@ -176,6 +220,9 @@ fn discover_npmrc<TSys: EnvVar + EnvHomeDir + FsRead>(
       },
       node_linker: project_rc.node_linker.or(home_rc.node_linker),
       ignore_scripts: project_rc.ignore_scripts.or(home_rc.ignore_scripts),
+      supply_chain: project_rc
+        .supply_chain
+        .merge_strictest(home_rc.supply_chain),
     }
   }
 
@@ -286,6 +333,7 @@ pub fn create_default_npmrc(sys: &impl EnvVar) -> ResolvedNpmRc {
     ignore_scripts: sys
       .env_var("npm_config_ignore_scripts")
       .is_ok_and(|v| v.trim() == "true"),
+    supply_chain: Default::default(),
   }
 }
 

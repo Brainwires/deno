@@ -1301,6 +1301,12 @@ impl Workspace {
           kind: WorkspaceDiagnosticKind::RootOnlyOption("allowScripts"),
         });
       }
+      if member_config.json.supply_chain.is_some() {
+        diagnostics.push(WorkspaceDiagnostic {
+          config_url: member_config.specifier.clone(),
+          kind: WorkspaceDiagnosticKind::RootOnlyOption("supplyChain"),
+        });
+      }
       if member_config.json.prefer_package_json.is_some() {
         diagnostics.push(WorkspaceDiagnostic {
           config_url: member_config.specifier.clone(),
@@ -1848,6 +1854,17 @@ impl Workspace {
     self
       .root_deno_json()
       .map(|c| c.to_minimum_dependency_age_config(sys))
+      .transpose()
+      .map(|v| v.unwrap_or_default())
+  }
+
+  /// The root deno.json's `supplyChain`.
+  pub fn supply_chain(
+    &self,
+  ) -> Result<deno_json::SupplyChainConfig, deno_json::ToInvalidConfigError> {
+    self
+      .root_deno_json()
+      .map(|c| c.to_supply_chain_config())
       .transpose()
       .map(|v| v.unwrap_or_default())
   }

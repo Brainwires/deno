@@ -985,6 +985,21 @@ fn allow_scripts_arg_parse(
   result: &ParseResult,
   flags: &mut Flags,
 ) -> Result<(), CliError> {
+  if result.get_bool("jail-scripts") {
+    flags.jail_scripts = true;
+  }
+  if let Some(values) = result.get_many("allow-low-downloads") {
+    let mut names = Vec::new();
+    for value in values {
+      for name in value.split(',') {
+        let name = name.trim();
+        if !name.is_empty() {
+          names.push(name.strip_prefix("npm:").unwrap_or(name).to_string());
+        }
+      }
+    }
+    flags.allow_low_downloads = Some(names);
+  }
   let Some(values) = result.get_many("allow-scripts") else {
     return Ok(());
   };

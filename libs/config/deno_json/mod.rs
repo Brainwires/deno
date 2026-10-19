@@ -119,6 +119,70 @@ pub struct AllowScriptsConfig {
   pub deny: Vec<JsrDepPackageReq>,
 }
 
+/// deno.json's `supplyChain` (denext): the npm supply-chain gates. Each
+/// field mirrors an `.npmrc` key; see `deno_npmrc::SupplyChainSettings`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SupplyChainConfig {
+  /// `paranoid`
+  pub paranoid: Option<bool>,
+  /// `jailScripts` (`jail-scripts`): `true`/`false`, or an object, which turns
+  /// it on.
+  pub jail_scripts: Option<bool>,
+  /// `jailScripts.net`: network for every jailed script.
+  pub jail_net: Option<bool>,
+  /// `jailScripts.packages`: per-package exceptions, keyed by npm package
+  /// name.
+  pub jail_packages: BTreeMap<String, JailPackageConfig>,
+  /// `advisoryCheck` (`advisory-check`): `"on"`, `"off"` or `"required"`.
+  pub advisory_check: Option<String>,
+  /// `lowDownloadThreshold` (`low-download-threshold`).
+  pub low_download_threshold: Option<u64>,
+  /// `allowLowDownloads` (`allowed-unpopular-packages`).
+  pub allow_low_downloads: Vec<String>,
+}
+
+/// A package's exception in `supplyChain.jailScripts.packages`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct JailPackageConfig {
+  /// Environment variables passed through to the package's scripts.
+  pub env: Vec<String>,
+  /// Extra directories its scripts may write to (absolute, resolved against
+  /// the deno.json's directory).
+  pub write: Vec<PathBuf>,
+  /// Network for its scripts.
+  pub net: Option<bool>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct RawSupplyChainConfig {
+  #[serde(default)]
+  paranoid: Option<bool>,
+  #[serde(default)]
+  jail_scripts: Option<RawJailScripts>,
+  #[serde(default)]
+  advisory_check: Option<String>,
+  #[serde(default)]
+  low_download_threshold: Option<u64>,
+  #[serde(default)]
+  allow_low_downloads: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum RawJailScripts {
+  Bool(bool),
+  Object(RawJailScriptsObject),
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+struct RawJailScriptsObject {
+  net: Option<bool>,
+  packages: BTreeMap<String, JailPackageConfig>,
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Hash, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct LintRulesConfig {
@@ -1613,6 +1677,7 @@ pub struct ConfigFileJson {
   pub publish: Option<Value>,
   pub deploy: Option<Value>,
   pub allow_scripts: Option<Value>,
+  pub supply_chain: Option<Value>,
 
   pub catalog: Option<IndexMap<String, String>>,
   pub catalogs: Option<IndexMap<String, IndexMap<String, String>>>,
@@ -2690,6 +2755,72 @@ impl ConfigFile {
     ensure_reqs_no_tag(&config.deny)?;
 
     Ok(config)
+  }
+
+  pub fn to_supply_chain_config(
+    &self,
+  ) -> Result<SupplyChainConfig, ToInvalidConfigError> {
+    let Some(value) = &self.json.supply_chain else {
+      return Ok(Default::default());
+    };
+    let parse_err = |msg: String| ToInvalidConfigError::Parse {
+      config: "supplyChain",
+      source: serde_json::Error::custom(msg),
+    };
+    let raw: RawSupplyChainConfig = serde_json::from_value(value.clone())
+      .map_err(|source| ToInvalidConfigError::Parse {
+        config: "supplyChain",
+        source,
+      })?;
+    if let Some(check) = &raw.advisory_check
+      && !matches!(check.as_str(), "on" | "off" | "required")
+    {
+      return Err(parse_err(format!(
+        "\"advisoryCheck\" must be \"on\", \"off\" or \"required\", got \"{check}\""
+      )));
+    }
+    let base_dir = deno_path_util::url_to_file_path(&self.specifier)
+      .ok()
+      .and_then(|p| p.parent().map(|p| p.to_path_buf()));
+    let (jail_scripts, jail_net, jail_packages) = match raw.jail_scripts {
+      None => (None, None, BTreeMap::new()),
+      Some(RawJailScripts::Bool(value)) => (Some(value), None, BTreeMap::new()),
+      Some(RawJailScripts::Object(obj)) => {
+        let mut packages = BTreeMap::new();
+        for (name, mut config) in obj.packages {
+          let name = name.strip_prefix("npm:").unwrap_or(&name).to_string();
+          if name.is_empty() {
+            return Err(parse_err(
+              "an empty package name in \"jailScripts.packages\"".into(),
+            ));
+          }
+          for path in &mut config.write {
+            if path.is_relative() {
+              match &base_dir {
+                Some(base_dir) => *path = base_dir.join(&*path),
+                None => {
+                  return Err(parse_err(format!(
+                    "\"jailScripts.packages\": a relative write path ({}) needs a local deno.json",
+                    path.display()
+                  )));
+                }
+              }
+            }
+          }
+          packages.insert(name, config);
+        }
+        (Some(true), obj.net, packages)
+      }
+    };
+    Ok(SupplyChainConfig {
+      paranoid: raw.paranoid,
+      jail_scripts,
+      jail_net,
+      jail_packages,
+      advisory_check: raw.advisory_check,
+      low_download_threshold: raw.low_download_threshold,
+      allow_low_downloads: raw.allow_low_downloads,
+    })
   }
 
   pub fn to_deploy_config(
@@ -4119,6 +4250,61 @@ mod tests {
     .unwrap();
 
     assert!(config.to_desktop_config().is_err());
+  }
+
+  #[test]
+  fn test_to_supply_chain_config() {
+    fn get_result(
+      text: &str,
+    ) -> Result<SupplyChainConfig, ToInvalidConfigError> {
+      let config_specifier = root_url().join("deno.json").unwrap();
+      let config_file = ConfigFile::new(text, config_specifier).unwrap();
+      config_file.to_supply_chain_config()
+    }
+
+    assert_eq!(get_result("{}").unwrap(), SupplyChainConfig::default());
+    let config = get_result(
+      r#"{ "supplyChain": {
+        "paranoid": true,
+        "advisoryCheck": "required",
+        "lowDownloadThreshold": 5000,
+        "allowLowDownloads": ["npm:left-pad", "@org/*"],
+        "jailScripts": {
+          "net": false,
+          "packages": {
+            "npm:sharp": { "env": ["SHARP_X"], "write": ["cache"], "net": true }
+          }
+        }
+      } }"#,
+    )
+    .unwrap();
+    assert_eq!(config.paranoid, Some(true));
+    assert_eq!(config.jail_scripts, Some(true));
+    assert_eq!(config.jail_net, Some(false));
+    assert_eq!(config.advisory_check.as_deref(), Some("required"));
+    assert_eq!(config.low_download_threshold, Some(5000));
+    assert_eq!(config.allow_low_downloads, vec!["npm:left-pad", "@org/*"]);
+    let sharp = &config.jail_packages["sharp"];
+    assert_eq!(sharp.env, vec!["SHARP_X"]);
+    assert_eq!(sharp.net, Some(true));
+    assert!(sharp.write[0].is_absolute());
+    assert!(sharp.write[0].ends_with("cache"));
+
+    let config =
+      get_result(r#"{ "supplyChain": { "jailScripts": false } }"#).unwrap();
+    assert_eq!(config.jail_scripts, Some(false));
+
+    // typos in a security setting are errors, not silently ignored
+    assert!(get_result(r#"{ "supplyChain": { "paranoia": true } }"#).is_err());
+    assert!(
+      get_result(r#"{ "supplyChain": { "advisoryCheck": "yes" } }"#).is_err()
+    );
+    assert!(
+      get_result(
+        r#"{ "supplyChain": { "jailScripts": { "packages": { "a": { "writes": [] } } } } }"#
+      )
+      .is_err()
+    );
   }
 
   #[test]

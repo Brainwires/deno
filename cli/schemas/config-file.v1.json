@@ -121,6 +121,71 @@
     }
   },
   "properties": {
+    "supplyChain": {
+      "type": "object",
+      "description": "(denext) npm supply-chain gates. Each key mirrors an .npmrc key; where several sources set one, the stricter value wins.",
+      "additionalProperties": false,
+      "properties": {
+        "paranoid": {
+          "type": "boolean",
+          "description": "Turn every gate on and make each fail closed: jailScripts on, advisoryCheck required, unknown download counts refuse `deno add`, trust-policy no-downgrade. A member set to something weaker is an error."
+        },
+        "jailScripts": {
+          "description": "Run approved npm lifecycle scripts confined (scrubbed environment, temporary HOME, writes only to node_modules and temp, no credential files, no network unless allowed). An object turns it on and sets exceptions.",
+          "oneOf": [{
+            "type": "boolean"
+          }, {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "net": {
+                "type": "boolean",
+                "description": "Allow the network for every jailed script."
+              },
+              "packages": {
+                "type": "object",
+                "description": "Per-package exceptions, keyed by npm package name.",
+                "additionalProperties": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "env": {
+                      "type": "array",
+                      "items": { "type": "string" },
+                      "description": "Environment variables passed through to the package's scripts."
+                    },
+                    "write": {
+                      "type": "array",
+                      "items": { "type": "string" },
+                      "description": "Extra directories the package's scripts may write to (relative to this file)."
+                    },
+                    "net": {
+                      "type": "boolean",
+                      "description": "Network for the package's scripts."
+                    }
+                  }
+                }
+              }
+            }
+          }]
+        },
+        "advisoryCheck": {
+          "type": "string",
+          "enum": ["on", "off", "required"],
+          "description": "Refuse npm versions listed as malicious (OSV MAL- advisories). on: refuse, warn when OSV can't be reached; required: also refuse when OSV can't be reached; off: no check."
+        },
+        "lowDownloadThreshold": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Weekly downloads below which `deno add` asks before adding a package (default 1000; 0 turns the check off)."
+        },
+        "allowLowDownloads": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "npm package names (or `@scope/*` / `prefix*` globs) `deno add` adds whatever their download counts."
+        }
+      }
+    },
     "allowScripts": {
       "oneOf": [{
         "description": "Whether to allow npm lifecycle scripts.",
