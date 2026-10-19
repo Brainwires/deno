@@ -1,2 +1,1 @@
 [WILDCARD]paranoid is on, but npm:@denotest/jail-control-probe@1.0.0's 'postinstall' script can't be confined here: windows has no OS sandbox Deno can apply to lifecycle scripts. It was not run.
-[WILDCARD]
