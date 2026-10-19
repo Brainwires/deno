@@ -1373,7 +1373,12 @@ where the changes are discussed.
       `/// <reference types="vitest/globals" />` and `compilerOptions.types`;
       with a Vitest or Vite config, Vite's asset, CSS module, `?raw` / `?url` /
       `?inline` / `?worker` imports get ambient declarations.
-      `test.vitestCompat: false` turns all of it off. `@types/node` is never
+      `test.vitestCompat: false` turns all of it off. An absolute `file:`
+      import (written in source, or an import-map target such as
+      `"lib/": "file:///a/lib/"`) is mapped to its file through `paths`, as
+      Deno resolves it from anywhere (the compiler alone read `file:///a/b.ts`
+      as a package name, TS2307; `tests/specs/check/file_url_imports`,
+      `test_add_file_url_paths`). `@types/node` is never
       downloaded: unless the project has its own under `node_modules`, the copy
       built into the binary (`cli/tsc/dts/node`, the in-process checker's,
       `undici-types` included) is written to `.deno/npm-compat/@types/node`

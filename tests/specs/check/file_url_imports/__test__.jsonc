@@ -1,0 +1,34 @@
+{
+  // denext: an absolute `file:` import (in source, or an import-map target)
+  // resolves under the native check as it does in Deno, also for a module
+  // outside the project.
+  "tempDir": true,
+  "steps": [
+    {
+      "cwd": "proj",
+      "args": "run --allow-write write.ts",
+      "output": "written\n"
+    },
+    {
+      "cwd": "proj",
+      "args": "check ok.ts",
+      "output": "Check ok.ts\n"
+    },
+    {
+      "cwd": "proj",
+      "args": "check bad.ts",
+      "output": "bad.out",
+      "exitCode": 1
+    },
+    {
+      "cwd": "proj",
+      "args": "check alias.ts",
+      "output": "Check alias.ts\n"
+    },
+    {
+      "cwd": "proj",
+      "args": "check --check-engine=tsc ok.ts alias.ts",
+      "output": "Check ok.ts\nCheck alias.ts\n"
+    }
+  ]
+}

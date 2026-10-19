@@ -378,7 +378,9 @@ pub async fn setup_npm_compat(
   // member's, and the two identical-looking types don't unify.
   add_member_alias_paths(&mut member_paths, &alias_targets);
   for spec in graph_specifiers {
-    if is_special_specifier(spec) {
+    // denext: an absolute `file:` import is keyed to itself too, and
+    // `add_file_url_paths` maps it to the file on disk below.
+    if is_special_specifier(spec) || spec.starts_with("file:") {
       // Direct scheme specifier: key it to itself.
       combined
         .entry(spec.clone())
@@ -394,6 +396,12 @@ pub async fn setup_npm_compat(
         .or_insert(Value::String(resolved));
     }
   }
+
+  // denext: the compiler's module resolution has no notion of a `file:` URL
+  // (Deno resolves one from anywhere, the in-process checker too), so map
+  // every `file:` import, written in source or reached through an import map,
+  // to its path.
+  add_file_url_paths(&mut member_paths, &combined);
 
   // Always generate the base config: even a project with no external deps needs
   // the generated tsconfig + private `@types/deno` so stock tooling sees the
@@ -950,6 +958,37 @@ fn add_member_alias_paths(
           .entry(format!("{alias}/{sub}"))
           .or_insert_with(|| member_val.clone());
       }
+    }
+  }
+}
+
+/// Map each import (a specifier written in source, or an import-map alias)
+/// whose target is a `file:` URL to that file for the generated `paths`: the
+/// stock compiler resolves `file:///a/b.ts` as a bare package name and reports
+/// TS2307. A prefix alias (`"lib/": "file:///a/lib/"`) maps its subpaths.
+fn add_file_url_paths(
+  paths: &mut serde_json::Map<String, Value>,
+  imports: &serde_json::Map<String, Value>,
+) {
+  for (key, target) in imports {
+    let Some(target) = target.as_str().filter(|t| t.starts_with("file:"))
+    else {
+      continue;
+    };
+    let Some(path) = Url::parse(target)
+      .ok()
+      .and_then(|url| url.to_file_path().ok())
+    else {
+      continue;
+    };
+    let path = path_for_typescript(&path);
+    if let (Some(prefix), true) = (key.strip_suffix('/'), target.ends_with('/'))
+    {
+      paths.entry(format!("{prefix}/*")).or_insert_with(|| {
+        json!([format!("{}/*", path.trim_end_matches('/'))])
+      });
+    } else {
+      paths.entry(key.clone()).or_insert_with(|| json!([path]));
     }
   }
 }
@@ -2006,6 +2045,44 @@ mod tests {
         ("util".to_string(), json!("./foo/util.ts")),
       ]
     );
+  }
+
+  #[test]
+  fn test_add_file_url_paths() {
+    let root = if cfg!(windows) {
+      "file:///C:/proj"
+    } else {
+      "file:///proj"
+    };
+    let path = |rel: &str| {
+      let url = Url::parse(&format!("{root}/{rel}")).unwrap();
+      path_for_typescript(&url.to_file_path().unwrap())
+    };
+    let mut imports = serde_json::Map::new();
+    // written in source: keyed to itself
+    let direct = format!("{root}/lib/a%20b.ts");
+    imports.insert(direct.clone(), json!(direct));
+    // import-map aliases to a file and to a directory
+    imports.insert("a".into(), json!(format!("{root}/lib/a.ts")));
+    imports.insert("lib/".into(), json!(format!("{root}/lib/")));
+    // other targets are left to their own generators
+    imports.insert("chalk".into(), json!("npm:chalk@5"));
+    imports.insert("rel".into(), json!("./rel.ts"));
+    let mut paths = serde_json::Map::new();
+    // an existing mapping wins
+    paths.insert("a".into(), json!(["../member/a.ts"]));
+
+    add_file_url_paths(&mut paths, &imports);
+
+    assert_eq!(paths.get(&direct).unwrap(), &json!([path("lib/a b.ts")]));
+    assert_eq!(paths.get("a").unwrap(), &json!(["../member/a.ts"]));
+    assert_eq!(
+      paths.get("lib/*").unwrap(),
+      &json!([format!("{}/*", path("lib"))])
+    );
+    assert!(!paths.contains_key("chalk"));
+    assert!(!paths.contains_key("rel"));
+    assert_eq!(paths.len(), 3);
   }
 
   #[test]
