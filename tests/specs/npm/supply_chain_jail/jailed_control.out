@@ -13,6 +13,6 @@ node: read .env: denied
 node: read project package.json: allowed
 [WILDCARD]
 node: fetch: denied
-sh: own environ: [WILDCARD]
+sh: parent environ: [WILDCARD]
 sh: ancestor environ: hidden
 written outside: nothing

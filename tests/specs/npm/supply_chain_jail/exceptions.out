@@ -9,6 +9,6 @@ node: write system temp: denied
 node: write project: allowed
 [WILDCARD]
 node: fetch: denied
-sh: own environ: [WILDCARD]
+sh: parent environ: [WILDCARD]
 sh: ancestor environ: hidden
 written outside: pwned-node.txt

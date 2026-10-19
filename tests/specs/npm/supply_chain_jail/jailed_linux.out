@@ -18,7 +18,7 @@ sh: write project: denied
 sh: write via own symlink: denied
 sh: write via workspace link: denied
 sh: read .env: denied
-sh: own environ: readable
+sh: parent environ: readable
 sh: ancestor environ: hidden
 deno run -A: write project: denied (NotCapable)
 deno run -A: fetch: denied (NotCapable)
