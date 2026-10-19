@@ -1130,6 +1130,7 @@ impl denort::desktop::DesktopApi for WefDesktopApi {
       file_dialogs: c.file_dialogs(),
       file_dialog_files_and_directories: c.file_dialog_files_and_directories(),
       file_dialog_modal: c.file_dialog_modal(),
+      blur: c.blur(),
     }
   }
 
@@ -2023,6 +2024,7 @@ fn laufey_backdrop(backdrop: i32, material: i32) -> Option<laufey::Backdrop> {
       22 => M::UnderPageBackground,
       _ => return None,
     }),
+    5 => laufey::Backdrop::Blur,
     _ => return None,
   })
 }
@@ -4123,6 +4125,22 @@ mod tests {
     // not show a badge.
     assert_eq!(laufey_dock_badge(""), None);
     assert_eq!(laufey_dock_badge("7"), Some("7"));
+  }
+
+  #[test]
+  fn backdrop_numbers_match_laufey() {
+    // DESKTOP_JS's BACKGROUND_MATERIALS / BACKDROP_VIBRANCY numbers.
+    use laufey::Backdrop as B;
+    assert_eq!(super::laufey_backdrop(0, 0), Some(B::None));
+    assert_eq!(super::laufey_backdrop(2, 0), Some(B::Acrylic));
+    assert_eq!(super::laufey_backdrop(3, 0), Some(B::MicaAlt));
+    assert_eq!(super::laufey_backdrop(5, 0), Some(B::Blur));
+    assert_eq!(
+      super::laufey_backdrop(4, 7),
+      Some(B::Vibrancy(laufey::VibrancyMaterial::Sidebar))
+    );
+    assert_eq!(super::laufey_backdrop(4, 99), None);
+    assert_eq!(super::laufey_backdrop(6, 0), None);
   }
 
   #[test]

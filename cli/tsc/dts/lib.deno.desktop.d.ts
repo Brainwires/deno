@@ -545,8 +545,15 @@ declare namespace Deno {
     y: number;
   }
 
-  /** Windows 11 backdrops: `"mica"`, `"acrylic"`, `"tabbed"` (Mica Alt). */
-  export type BackgroundMaterial = "none" | "mica" | "acrylic" | "tabbed";
+  /** Windows 11 backdrops: `"mica"`, `"acrylic"`, `"tabbed"` (Mica Alt);
+   * `"blur"`: the compositor blurs behind the window (KWin's blur on KDE
+   * Plasma, where `"acrylic"` is the same blur). */
+  export type BackgroundMaterial =
+    | "none"
+    | "mica"
+    | "acrylic"
+    | "tabbed"
+    | "blur";
 
   /** macOS vibrancy materials (NSVisualEffectMaterial). */
   export type VibrancyMaterial =
@@ -1074,10 +1081,12 @@ declare namespace Deno {
      * `trafficLightPosition`); `null` puts them back. Kept across resizes
      * and fullscreen. Returns `false` where unsupported. */
     setWindowButtonPosition(position: WindowButtonPosition | null): boolean;
-    /** Put a Windows 11 backdrop (Mica, Acrylic, tabbed Mica) behind the
-     * page; it shows where the page's background is transparent. Returns
-     * `false` (and changes nothing) where unsupported: other OSes, Windows
-     * before 11 (Acrylic and tabbed need 22H2), and the CEF backend. */
+    /** Put a Windows 11 backdrop (Mica, Acrylic, tabbed Mica) or, on KDE
+     * Plasma, KWin's blur (`"blur"`, or `"acrylic"`) behind the page; it
+     * shows where the page's background is transparent. Returns `false`
+     * (and changes nothing) where unsupported: other OSes and desktops,
+     * Windows before 11 (Acrylic and tabbed need 22H2), and the CEF backend.
+     * {@linkcode Deno.desktop.windowCapabilities} says which work. */
     setBackgroundMaterial(material: BackgroundMaterial): boolean;
     /** Put macOS vibrancy (an NSVisualEffectView) behind the page; it shows
      * where the page's background is transparent. `null` removes it. Returns
@@ -1698,13 +1707,27 @@ declare namespace Deno {
       fileChooser: "portal" | "gtk" | null;
       /** Why GTK's, when `fileChooser` is `"gtk"`; otherwise `null`. */
       fileChooserReason: string | null;
+      /** Linux: the compositor blurs behind translucent windows (KWin's
+       * Blur effect): `"kwin-wayland"` or `"kwin-x11"`, or `null`. Probed
+       * on every call. Whether this backend can use it is
+       * {@linkcode WindowCapabilities.blur}. `null` elsewhere. */
+      windowBlur: "kwin-wayland" | "kwin-x11" | null;
+      /** Why not, when `windowBlur` is `null` on Linux; otherwise `null`. */
+      windowBlurReason: string | null;
+      /** Linux: `"security-keys"` when passkeys with USB security keys work
+       * (`liblaufey_webauthn.so` is installed beside the backend host and
+       * can list HID devices), otherwise `null`. `null` elsewhere (macOS
+       * and Windows use the OS passkey API). */
+      passkeys: "security-keys" | null;
+      /** Why not, when `passkeys` is `null` on Linux; otherwise `null`. */
+      passkeysReason: string | null;
     }
 
     /** What this backend can do on this OS
      * ({@linkcode Deno.desktop.windowCapabilities}). A method for a feature
      * reported `false` changes nothing (and returns `false` where it returns
-     * a boolean): Linux has no title bar styles or backdrops, CEF no
-     * backdrops, Wayland can't place windows. */
+     * a boolean): Linux has no title bar styles and, as backdrops, only
+     * KWin's blur, CEF no backdrops, Wayland can't place windows. */
     export interface WindowCapabilities {
       /** maximize / minimize / fullscreen. */
       state: boolean;
@@ -1743,6 +1766,10 @@ declare namespace Deno {
       /** A dialog given a window is modal to it (a sheet on macOS); not on
        * CEF for Linux. */
       fileDialogModal: boolean;
+      /** `setBackgroundMaterial("blur")` works: the compositor blurs behind
+       * the window (KWin's blur on KDE Plasma, Wayland and X11; the WebView
+       * backend only). */
+      blur: boolean;
     }
 
     /** A file-type filter of a file dialog: a label and extensions without

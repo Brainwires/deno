@@ -13,8 +13,12 @@
 #     cef/build/Release/laufey[.exe] + libcef.* + resources  (Linux/Windows, cef)
 #     cef/build/Release/dictionaries/*.bdic     (Linux, cef: spellcheck;
 #                                                fetch_dictionaries.py)
+#     {webview/build,cef/build/Release}/liblaufey_webauthn.so
+#                                               (Linux: passkeys with
+#                                                security keys, libwebauthn)
 #   BUILD_INFO.json      what was built from where
-#   licenses/            deno, laufey and CEF licenses
+#   licenses/            deno, laufey and CEF licenses (and, on Linux,
+#                        libwebauthn's and the Hunspell dictionaries')
 #
 # On Linux/Windows `deno desktop` copies the WHOLE directory holding the
 # backend binary into the packaged app, so those directories hold only the
@@ -81,6 +85,23 @@ for backend in webview cef; do
         mkdir -p "$root/licenses/hunspell"
         cp "$dictionaries/licenses/"* "$root/licenses/hunspell/"
       fi
+      ;;
+  esac
+  # Linux: each host dlopen()s liblaufey_webauthn.so from its own directory
+  # for passkeys; an archive without it would ship no Linux passkeys.
+  case "$TARGET" in
+    *-linux-gnu)
+      host_dir="$root/laufey/webview/build"
+      [ "$backend" = cef ] && host_dir="$root/laufey/cef/build/Release"
+      test -f "$host_dir/liblaufey_webauthn.so" || {
+        echo "laufey stage has no liblaufey_webauthn.so beside the $backend host" >&2
+        exit 1
+      }
+      test -f "$work/laufey/licenses/libwebauthn/COPYING" || {
+        echo "laufey stage has no libwebauthn license" >&2
+        exit 1
+      }
+      cp -a "$work/laufey/licenses/libwebauthn" "$root/licenses/libwebauthn"
       ;;
   esac
   cp "$repo_root/LICENSE.md" "$root/licenses/deno-LICENSE.md"

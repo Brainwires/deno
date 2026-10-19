@@ -1493,6 +1493,9 @@ pub struct WindowCapabilitiesInfo {
   pub file_dialog_files_and_directories: bool,
   /// A dialog given a window is modal to it.
   pub file_dialog_modal: bool,
+  /// `setBackgroundMaterial("blur")` works: the compositor blurs behind the
+  /// window (KWin's blur on KDE Plasma; laufey `BACKDROP_BLUR`).
+  pub blur: bool,
 }
 
 /// `Deno.desktop.clipboard.capabilities()`.
@@ -8090,6 +8093,7 @@ mod tests {
     assert_eq!(caps["fileDialogs"], json!(false));
     assert_eq!(caps["fileDialogFilesAndDirectories"], json!(true));
     assert_eq!(caps["fileDialogModal"], json!(false));
+    assert_eq!(caps["blur"], json!(false));
     let clip = serde_json::to_value(super::ClipboardCapabilitiesInfo {
       text: true,
       change_events: true,

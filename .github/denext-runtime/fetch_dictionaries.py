@@ -12,7 +12,8 @@ OS spellchecker and get none.
 
 The files are Chromium's prebuilt `.bdic` files from
 chromium/deps/hunspell_dictionaries at the commit the CEF's Chromium pins in
-its DEPS (CEF 149.0.5 = Chromium 149.0.7827.197), so each name carries the
+its DEPS (CEF 150.0.21 = Chromium 150.0.7871.255; Chromium 149's DEPS pinned the
+same commit), so each name carries the
 version that Chromium asks for (`spellcheck_common.cc`,
 `GetVersionedFileName`). Each is pinned by SHA-256 here; a download that does
 not match fails. The license README of each dictionary and the repository's
@@ -31,7 +32,7 @@ import time
 import urllib.request
 
 REPO = "https://chromium.googlesource.com/chromium/deps/hunspell_dictionaries"
-# src/third_party/hunspell_dictionaries in Chromium 149.0.7827.197's DEPS.
+# src/third_party/hunspell_dictionaries in Chromium 150.0.7871.255's DEPS.
 COMMIT = "cccf64a8acc951afe3f47fee023908e55699bc58"
 
 # The common languages: file -> SHA-256.

@@ -2382,7 +2382,7 @@ fn released_laufey_refusal(backend: &str, target: &str) -> AnyError {
      app would fail at launch). Set {LAUFEY_DEV_DIR_ENV} to the `laufey` \
      directory of the matching denext desktop runtime archive \
      (https://github.com/Brainwires/deno/releases) or of a Brainwires/laufey \
-     `denext/integration` build to package the '{backend}' backend for \
+     `development-denext` build to package the '{backend}' backend for \
      '{target}'"
   )
 }

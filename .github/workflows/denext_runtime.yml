@@ -71,8 +71,9 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref_type == 'branch') }}
 
 env:
-  # laufey `denext/integration` as of the first runtime release.
-  LAUFEY_SHA: 353ba60bda104e88dd6368e8b68d2d01d1ba7515
+  # laufey `development-denext` (the Brainwires/laufey fork's stable branch;
+  # it replaced `denext/integration`), pinned to a commit.
+  LAUFEY_SHA: ef4185502e63cbe103c9dcd5b4e86b7989fce3fc
   LAUFEY_REPOSITORY: Brainwires/laufey
   # The stock CLI the archives are smoke-tested with (and that denext runs).
   STOCK_DENO_VERSION: 2.9.7
@@ -258,7 +259,13 @@ jobs:
             libatk1.0-dev libatk-bridge2.0-dev libcups2-dev libdrm-dev \
             libgbm-dev libasound2-dev libpango1.0-dev \
             libcairo2-dev libxcomposite-dev libxdamage-dev libxrandr-dev \
-            libxkbcommon-dev libdbus-1-dev libxext-dev libxfixes-dev
+            libxkbcommon-dev libdbus-1-dev libxext-dev libxfixes-dev \
+            libudev-dev
+          # libudev-dev + libdbus-1-dev: laufey's Makefile builds
+          # liblaufey_webauthn.so (Linux passkeys with security keys, through
+          # libwebauthn) only when both are present; without it the backends
+          # report no passkey capability.
+          pkg-config --exists libudev dbus-1
 
       - name: Install dependencies (macOS)
         if: runner.os == 'macOS'
@@ -343,8 +350,27 @@ jobs:
               ;;
             Linux)
               cp laufey/webview/build/laufey_webview "$st/webview/build/"
+              # Passkeys: each host dlopen()s liblaufey_webauthn.so from its
+              # own directory (laufey's Makefile copies it into both build
+              # dirs; CEF's comes with the whole Release dir).
+              cp laufey/webview/build/liblaufey_webauthn.so "$st/webview/build/"
               cp -a laufey/cef/build/Release "$st/cef/build/Release"
+              test -f "$st/cef/build/Release/liblaufey_webauthn.so"
               strip --strip-unneeded "$st/cef/build/Release/libcef.so"
+              # libwebauthn is LGPL-2.1-or-later: its license, and where the
+              # library's source is, go with it.
+              lw_version=$(awk '/^name = "libwebauthn"$/{getline; gsub(/"/, "", $3); print $3}' laufey/webauthn-linux/Cargo.lock)
+              lw_dir=$(find "${CARGO_HOME:-$HOME/.cargo}/registry/src" -mindepth 2 -maxdepth 2 -type d -name "libwebauthn-$lw_version" | head -1)
+              test -f "$lw_dir/COPYING"
+              mkdir -p "$st/licenses/libwebauthn"
+              cp "$lw_dir/COPYING" "$st/licenses/libwebauthn/COPYING"
+              cat >"$st/licenses/libwebauthn/NOTICE" <<EOF
+          liblaufey_webauthn.so (beside the webview and CEF hosts) contains
+          libwebauthn $lw_version (LGPL-2.1-or-later, COPYING here):
+          https://crates.io/crates/libwebauthn/$lw_version
+          It is built from https://github.com/Brainwires/laufey/tree/$LAUFEY_SHA/webauthn-linux
+          (make webauthn-linux) and may be replaced by a library built the same way.
+          EOF
               ;;
             Windows)
               cp laufey/webview/build/laufey_webview.exe "$st/webview/build/"

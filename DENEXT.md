@@ -2901,33 +2901,80 @@ where the changes are discussed.
     `suppression_consumes_only_a_self_sent_reraise` (`ext/signals/lib.rs`), and
     the node_compat test, 50/50 in the same loop idle and under load.
 
+88. **laufey `ef41855`: the CEF custom-scheme localStorage fix and Linux
+    parity** (`feat/laufey-ef41855`, for runtime `3.0.0-rc.1`; laufey
+    `development-denext` `ef41855`, API 49 unchanged; `cli/rt_desktop`,
+    `cli/rt/desktop.rs`, `runtime/ops/desktop.rs`,
+    `cli/tsc/dts/lib.deno.desktop.d.ts`, `.github/workflows/denext_runtime.yml`,
+    `.github/denext-runtime/`).
+    - CEF, every OS: a custom-scheme page that touched `localStorage` as it
+      loaded could, now and then, bind no storage area (Chromium drops a
+      StorageArea opened before the browser takes in the document's commit, and
+      a custom-scheme response arrives at once), so the launch read nothing and
+      lost what it stored; the next launch read the value from two launches
+      before. The CEF scheme handler now holds a frame document's body until
+      that frame's commit (at most 1 s). This is the race the e2e's appid check
+      "A's localStorage persists across launches" hit now and then on macOS
+      arm64 CEF; laufey's storage stress e2e loses 0 of 200 launches with the
+      fix (7 of 200 without).
+    - Linux: KWin's blur behind translucent windows (KDE Plasma, Wayland and
+      X11, the WebView backend): laufey's `LAUFEY_BACKDROP_BLUR` /
+      `LAUFEY_WINDOW_CAP_BACKDROP_BLUR`. `BrowserWindow.setBackgroundMaterial`
+      takes `"blur"` (backdrop 5, mapped to `laufey::Backdrop::Blur`; on KDE
+      Plasma `"acrylic"` is the same blur) and
+      `Deno.desktop.windowCapabilities()` reports `blur`.
+    - Linux: the X11 clipboard over XCB in X11 sessions.
+    - Linux: passkeys with USB security keys through libwebauthn, in
+      `liblaufey_webauthn.so` beside each host (dlopen()ed when a passkey is
+      first asked for; libwebauthn is LGPL-2.1-or-later and stays a separately
+      replaceable library). The laufey build job installs `libudev-dev` and
+      `libdbus-1-dev`, without which laufey's Makefile skips the library; the
+      stage copies it beside the webview host (CEF's comes with its Release
+      directory) and libwebauthn's `COPYING` and a source notice into
+      `licenses/libwebauthn/`. `assemble.sh` refuses a Linux archive without the
+      library, and `verify.sh` checks it in both archives (its
+      `laufey_webauthn_start` entry point, no virtual-authenticator test hooks,
+      its dependencies resolving).
+    - `Deno.desktop.platformFeatures()` passes laufey's new `windowBlur` /
+      `windowBlurReason` and `passkeys` / `passkeysReason` keys through; the
+      d.ts declares them.
+
+    Tests: `backdrop_numbers_match_laufey` (`cli/rt_desktop/lib.rs`),
+    `desktop_js_maps_blur_to_laufey_backdrop_blur` (`cli/rt/desktop.rs`), the
+    `blur` key in `io_capabilities_wire_format` and the `desktop_ops_inert`
+    spec, laufey's full CI on the commit (the commit gate, blur, XCB clipboard
+    and libwebauthn suites, and the storage stress e2e), and this fork's desktop
+    runtime build and e2e on every target.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
-64-73, 75-77, 80, 82, 87) are what the prebuilt `libdenort` carries. The
+64-73, 75-77, 80, 82, 87, 88) are what the prebuilt `libdenort` carries. The
 CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID`
 into a packaged app's launchers) are in the branch too, but a stock CLI does not
 run them; denext's own launcher provides that environment.
 
 The laufey backend hosts are built from
 [Brainwires/laufey](https://github.com/Brainwires/laufey) branch
-`denext/integration` (registered schemes, app data dir, WebKitGTK scheme request
-bodies, launch config, open-url / single instance, passkeys, the window API with
-littledivy/laufey#80 and #81, drag and drop / file dialogs / rich clipboard,
-global shortcuts / launch at login / DevTools control, menu accelerators /
-notifications, UI-thread tasks / auth sessions / non-blocking WebKitGTK scheme
-bodies, Windows bindgen fix, and API 43: auth session cancel, Local Network
-Access for the registered custom-scheme origins on CEF, Windows menu and
-file-dialog fixes, CEF file drops; then the 3.1.0 audits: scheme request
-cancellation (`on_cancel` on every backend), no aborts on a NUL in a string, the
-Linux window-destroy use-after-free, sync UI hops that can't hang exit; and API
-44, the 3.1.1 audit: each JS call's document origin, the launch file's
-`bridgeOrigins`, scheme response write backpressure, a packaged app loading only
-its own runtime and pinned launch keys, WebKitGTK sub-frames kept off the
-bridge, a strict bridge JSON parser; and every host runs the runtime's own
-helper and worker launches (`run …`, `NODE_CHANNEL_FD`, `NEXT_PRIVATE_WORKER`)
-headless before its single-instance check; and API 48, the navigation guard), at
-the commit pinned by `LAUFEY_SHA` in the workflow (or the `laufey_ref` input).
-The same commit is the `laufey` git dependency of `cli/rt_desktop/Cargo.toml`
-(crate 0.8.0, API 49, CEF 150.0.21).
+`development-denext` (formerly `denext/integration`; registered schemes, app
+data dir, WebKitGTK scheme request bodies, launch config, open-url / single
+instance, passkeys, the window API with littledivy/laufey#80 and #81, drag and
+drop / file dialogs / rich clipboard, global shortcuts / launch at login /
+DevTools control, menu accelerators / notifications, UI-thread tasks / auth
+sessions / non-blocking WebKitGTK scheme bodies, Windows bindgen fix, and API
+43: auth session cancel, Local Network Access for the registered custom-scheme
+origins on CEF, Windows menu and file-dialog fixes, CEF file drops; then the
+3.1.0 audits: scheme request cancellation (`on_cancel` on every backend), no
+aborts on a NUL in a string, the Linux window-destroy use-after-free, sync UI
+hops that can't hang exit; and API 44, the 3.1.1 audit: each JS call's document
+origin, the launch file's `bridgeOrigins`, scheme response write backpressure, a
+packaged app loading only its own runtime and pinned launch keys, WebKitGTK
+sub-frames kept off the bridge, a strict bridge JSON parser; and every host runs
+the runtime's own helper and worker launches (`run …`, `NODE_CHANNEL_FD`,
+`NEXT_PRIVATE_WORKER`) headless before its single-instance check; and API 48,
+the navigation guard; then, for runtime 3.0.0-rc.1, the CEF custom-scheme
+localStorage commit gate, KWin's blur, the XCB clipboard and Linux passkeys
+through libwebauthn (item 88)), at the commit pinned by `LAUFEY_SHA` in the
+workflow (or the `laufey_ref` input). The same commit is the `laufey` git
+dependency of `cli/rt_desktop/Cargo.toml` (crate 0.8.0, API 49, CEF 150.0.21).
 
 laufey's `init_api` rejects any C ABI version mismatch between the runtime and
 the host, so the `laufey` crate libdenort links and the hosts are built from the
@@ -3278,8 +3325,8 @@ What a hosted runner cannot do, reported `n/a` with the reason:
 | An unwritable install on Windows                    | the runner is an administrator                                                                                         |
 
 The suite's first full run found four failures in laufey's hosts (not in this
-fork's runtime), all fixed in laufey `denext/integration` at API 43 and now
-checked on every leg:
+fork's runtime), all fixed in laufey `denext/integration` (now
+`development-denext`) at API 43 and now checked on every leg:
 
 - origin, CEF on every OS: the page's WebSocket through the relay and a
   cross-origin fetch to loopback were held by Chromium's Local Network Access

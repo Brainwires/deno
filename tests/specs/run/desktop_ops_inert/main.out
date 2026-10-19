@@ -59,7 +59,7 @@ op_desktop_send_error_report -> null
 op_desktop_request_notification_permission -> "unsupported"
 op_desktop_query_notification_permission -> "unsupported"
 op_desktop_screens -> []
-op_desktop_window_capabilities -> {"state":false,"stateEvents":false,"sizeConstraints":false,"screens":false,"displayEvents":false,"titleBarHidden":false,"titleBarHiddenInset":false,"windowButtonPosition":false,"mica":false,"acrylic":false,"tabbed":false,"vibrancy":false,"normalBounds":false,"keepAlive":false,"setPosition":false,"fileDrop":false,"fileDropEnterPaths":false,"fileDragOut":false,"fileDialogs":false,"fileDialogFilesAndDirectories":false,"fileDialogModal":false}
+op_desktop_window_capabilities -> {"state":false,"stateEvents":false,"sizeConstraints":false,"screens":false,"displayEvents":false,"titleBarHidden":false,"titleBarHiddenInset":false,"windowButtonPosition":false,"mica":false,"acrylic":false,"tabbed":false,"vibrancy":false,"normalBounds":false,"keepAlive":false,"setPosition":false,"fileDrop":false,"fileDropEnterPaths":false,"fileDragOut":false,"fileDialogs":false,"fileDialogFilesAndDirectories":false,"fileDialogModal":false,"blur":false}
 op_desktop_quit -> null
 op_desktop_set_quit_on_last_window_closed -> null
 op_desktop_close_reply -> null

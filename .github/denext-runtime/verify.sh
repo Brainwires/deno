@@ -114,6 +114,29 @@ check_linux() {
         echo 1 >"$root/.verify-failed"
       fi
     done
+  # Passkeys: liblaufey_webauthn.so beside the host (webview or CEF), with
+  # its entry point and none of the virtual-authenticator test hooks.
+  local wa
+  for wa in "$root/laufey/webview/build" "$root/laufey/cef/build/Release"; do
+    [ -d "$wa" ] || continue
+    echo "== ${wa#"$root"/}/liblaufey_webauthn.so"
+    if [ ! -f "$wa/liblaufey_webauthn.so" ]; then
+      echo "   ERROR: missing (no Linux passkeys)" >&2
+      echo 1 >"$root/.verify-failed"
+    elif ! nm -D --defined-only "$wa/liblaufey_webauthn.so" | grep -q ' laufey_webauthn_start$'; then
+      echo "   ERROR: no laufey_webauthn_start" >&2
+      echo 1 >"$root/.verify-failed"
+    elif nm -D --defined-only "$wa/liblaufey_webauthn.so" | grep -q laufey_webauthn_test_; then
+      echo "   ERROR: a test build (virt-test hooks exported)" >&2
+      echo 1 >"$root/.verify-failed"
+    else
+      echo "   ok"
+    fi
+  done
+  if [ ! -f "$root/licenses/libwebauthn/COPYING" ]; then
+    echo "   ERROR: licenses/libwebauthn/COPYING missing" >&2
+    echo 1 >"$root/.verify-failed"
+  fi
   # A CEF archive carries the pinned spellcheck dictionaries beside the host.
   if [ -d "$root/laufey/cef/build/Release" ]; then
     echo "== laufey/cef/build/Release/dictionaries"

@@ -725,7 +725,13 @@ pub const DESKTOP_JS: &str = r#"
   const privateBackdrop = Symbol.for("Deno_privateDesktopBackdrop");
   const privateScreenId = Symbol.for("Deno_privateDesktopScreenId");
   const TITLE_BAR_STYLES = { default: 0, hidden: 1, hiddenInset: 2 };
-  const BACKGROUND_MATERIALS = { none: 0, mica: 1, acrylic: 2, tabbed: 3 };
+  const BACKGROUND_MATERIALS = {
+    none: 0,
+    mica: 1,
+    acrylic: 2,
+    tabbed: 3,
+    blur: 5,
+  };
   // Electron's vibrancy names -> NSVisualEffectMaterial.
   const VIBRANCY_MATERIALS = {
     "titlebar": 3,
@@ -3489,6 +3495,14 @@ mod tests {
     ] {
       assert!(DESKTOP_JS.contains(api), "{api}");
     }
+  }
+
+  #[test]
+  fn desktop_js_maps_blur_to_laufey_backdrop_blur() {
+    // setBackgroundMaterial("blur") passes LAUFEY_BACKDROP_BLUR (5), which
+    // rt_desktop's laufey_backdrop maps to laufey::Backdrop::Blur.
+    assert!(DESKTOP_JS.contains("    blur: 5,\n"));
+    assert!(DESKTOP_JS.contains("    tabbed: 3,\n"));
   }
 
   #[test]

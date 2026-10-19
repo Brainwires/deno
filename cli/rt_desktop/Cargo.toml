@@ -34,26 +34,29 @@ deno_runtime.workspace = true
 deno_snapshots.workspace = true
 deno_terminal.workspace = true
 denort = { path = "../rt", default-features = false }
-# laufey's `denext/integration` branch (API 44: open-url / file delivery,
-# single-instance forwarding, the `laufey-launch.json` launch file, native
-# passkeys, the window API, drag and drop / file dialogs / rich clipboard,
-# global shortcuts / launch at login / DevTools control, menu accelerators
-# and context-menu close, scheduled and actionable notifications, UI-thread
-# tasks, auth sessions and their cancel, non-blocking WebKitGTK scheme
-# bodies, CEF Local Network Access for registered schemes, in-process
-# dialogs, and the security audit's "--" end of options / packaged --runtime
-# / deep-link switch filter / pinned launch keys, the first window brought
-# to the front at launch on macOS; the 3.1.1 audit: each JS call's document
-# origin, `bridgeOrigins`, scheme write backpressure, packaged-launch
-# pinning; API 46: exit_app, which Deno.exit() ends the app with, and the
-# WebKit backends flushing localStorage before the app ends; API 47: title
-# bar preferences, the Linux secure store and portal file chooser, and the
-# denext.12 security fixes; denext.13: the macOS secure store and
-# maintenance fixes; denext.14: the launch messages on stderr and the
-# Windows passkey cancel; API 48: the navigation guard), pinned to a commit of the Brainwires/laufey fork.
+# laufey's `development-denext` branch (formerly `denext/integration`; API 44:
+# open-url / file delivery, single-instance forwarding, the
+# `laufey-launch.json` launch file, native passkeys, the window API, drag and
+# drop / file dialogs / rich clipboard, global shortcuts / launch at login /
+# DevTools control, menu accelerators and context-menu close, scheduled and
+# actionable notifications, UI-thread tasks, auth sessions and their cancel,
+# non-blocking WebKitGTK scheme bodies, CEF Local Network Access for
+# registered schemes, in-process dialogs, and the security audit's "--" end of
+# options / packaged --runtime / deep-link switch filter / pinned launch keys,
+# the first window brought to the front at launch on macOS; the 3.1.1 audit:
+# each JS call's document origin, `bridgeOrigins`, scheme write backpressure,
+# packaged-launch pinning; API 46: exit_app, which Deno.exit() ends the app
+# with, and the WebKit backends flushing localStorage before the app ends; API
+# 47: title bar preferences, the Linux secure store and portal file chooser,
+# and the denext.12 security fixes; denext.13: the macOS secure store and
+# maintenance fixes; denext.14: the launch messages on stderr and the Windows
+# passkey cancel; API 48: the navigation guard; runtime 3.0.0-rc.1: the CEF
+# custom-scheme localStorage fix, KWin's blur, the XCB clipboard and Linux
+# passkeys through libwebauthn), pinned to a commit of the Brainwires/laufey
+# fork.
 # The host built from the same commit must be used with it (the API version
 # check is exact).
-laufey = { git = "https://github.com/Brainwires/laufey", rev = "353ba60bda104e88dd6368e8b68d2d01d1ba7515" }
+laufey = { git = "https://github.com/Brainwires/laufey", rev = "ef4185502e63cbe103c9dcd5b4e86b7989fce3fc" }
 libsui.workspace = true
 
 bytes.workspace = true
