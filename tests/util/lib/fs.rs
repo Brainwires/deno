@@ -350,6 +350,15 @@ impl PathRef {
       let new_to = to.join(entry.file_name());
 
       if file_type.is_dir() {
+        // denext: the native type check's generated `.deno/` (marked by its
+        // `.gitignore` of `*`) is rewritten while a sibling spec variant
+        // copies the directory; it is never a fixture.
+        if entry.file_name() == ".deno"
+          && std::fs::read_to_string(new_from.join(".gitignore").as_path())
+            .is_ok_and(|text| text == "*\n")
+        {
+          continue;
+        }
         new_from.copy_to_recursive(&new_to);
       } else if file_type.is_file() && !file_exclusions.contains(&new_from) {
         new_from.copy(&new_to);
