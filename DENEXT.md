@@ -990,7 +990,7 @@ where the changes are discussed.
     en-GB, de-DE, fr-FR, es-ES, pt-BR, it-IT; about 14 MB) in
     `laufey/cef/build/Release/dictionaries/`, fetched by
     `.github/denext-runtime/fetch_dictionaries.py` from
-    chromium/deps/hunspell_dictionaries at the commit CEF 149's Chromium pins
+    chromium/deps/hunspell_dictionaries at the commit CEF 150's Chromium pins
     (so the versioned names are the ones it asks for) and pinned by SHA-256;
     each dictionary's license is in `licenses/hunspell/`. Before the first
     browser the host copies the dictionaries of the languages in use (the
@@ -2359,11 +2359,28 @@ where the changes are discussed.
     `tests/specs/sql/types.ts`, and the `deno_sql` unit test
     `json_array_elements_are_json_values` (fails before the `json[]` fix).
 
+77. **laufey on CEF 150** (from `denext.23`; laufey `development-denext`
+    `353ba60`, no runtime API). The CEF hosts move from CEF 149.0.5 (Chromium
+    149.0.7827.197) to CEF 150.0.21+ga61e9a5 (Chromium 150.0.7871.255) on every
+    platform; laufey's Makefile pins each platform's CEF archive by SHA-256. CEF
+    150 renamed `CEF_PERMISSION_TYPE_LOCAL_NETWORK_ACCESS` to `..._DEPRECATED`
+    (same bit), and the Local Network Access prompt handler takes either name.
+    CEF's own `--disable-features` defaults are unchanged from 149, and Chromium
+    150 still reads `--do-not-de-elevate` after the command-line hook, so item
+    73's elevated launch and deep-link fixes hold. The spellcheck dictionaries
+    (item 37) are unchanged: Chromium 150 pins the same hunspell_dictionaries
+    commit.
+
+    Tests: laufey's full CI on the commit, this fork's desktop runtime build and
+    e2e on every target, and the Windows elevated-launch check (UAC on, an
+    interactive session) on Windows arm64, whose CEF host laufey's CI does not
+    build.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
-64-73, 75, 76) are what the prebuilt `libdenort` carries. The CLI-side parts
-(for example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged
-app's launchers) are in the branch too, but a stock CLI does not run them;
-denext's own launcher provides that environment.
+64-73, 75-77) are what the prebuilt `libdenort` carries. The CLI-side parts (for
+example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's
+launchers) are in the branch too, but a stock CLI does not run them; denext's
+own launcher provides that environment.
 
 The laufey backend hosts are built from
 [Brainwires/laufey](https://github.com/Brainwires/laufey) branch
@@ -2385,7 +2402,7 @@ helper and worker launches (`run …`, `NODE_CHANNEL_FD`, `NEXT_PRIVATE_WORKER`)
 headless before its single-instance check; and API 48, the navigation guard), at
 the commit pinned by `LAUFEY_SHA` in the workflow (or the `laufey_ref` input).
 The same commit is the `laufey` git dependency of `cli/rt_desktop/Cargo.toml`
-(crate 0.8.0, API 48).
+(crate 0.8.0, API 49, CEF 150.0.21).
 
 laufey's `init_api` rejects any C ABI version mismatch between the runtime and
 the host, so the `laufey` crate libdenort links and the hosts are built from the
