@@ -71,7 +71,7 @@ uuid (uuid, simple): string "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11" -> string "a0
 int4[] (_int4, array of int4): [number 1, null, number 3] -> [number 1, null, number 3]
 int8[] (_int8, array of int8): [string "1", string "9007199254740993"] -> [string "1", string "9007199254740993"] (bigint: [bigint 1n, bigint 9007199254740993n])
 text[] (_text, array of text): [string "a", string "b c", null, string ""] -> [string "a", string "b c", null, string ""]
-jsonb[] (_jsonb, array of jsonb): [object {"x":1}, [number 2]] -> [object {"x":1}, [number 2]] (unnamed: error 22P02)
+jsonb[] (_jsonb, array of jsonb): [object {"x":1}, [number 2]] -> [object {"x":1}, [number 2]] (unnamed: string "error 22P02")
 date[] (_date, array of date): [string "2024-01-01"] -> [Date 2024-01-01T00:00:00.000Z]
 uuid[] (_uuid, array of uuid): [string "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11"] -> [string "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11"]
 bool[] (_bool, array of bool): [[boolean true, boolean false], [boolean false, boolean true]] -> [[boolean true, boolean false], [boolean false, boolean true]]
