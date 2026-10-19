@@ -2542,191 +2542,6 @@ where the changes are discussed.
     cron socket set at startup is still dialed) and
     `test_resolved_deny_error_is_found_in_the_send_error` in
     `ext/fetch/tests.rs`.
-81. **`feat(npm)`: confined lifecycle scripts (`jail-scripts`)**
-    (`feat/npm-supply-chain`, for `3.0.0-rc.2`; `cli/supply_chain/jail.rs`,
-    `sandbox_linux.rs`, `sandbox_macos.rs`, `cli/npm.rs`, `cli/task_runner.rs`,
-    `cli/args/mod.rs`, `cli/lib.rs`). Adapted from
-    [denoland/deno#35714](https://github.com/denoland/deno/issues/35714) (an
-    issue, no pull request). An approved dependency's lifecycle script ran with
-    the user's whole environment (`GITHUB_TOKEN`, `NPM_TOKEN`, `SSH_AUTH_SOCK`,
-    ...), the real HOME, and a `node` that is `deno run -A`; item 54 put that
-    `node` (and `node-gyp`) on `PATH` for every install. Opt-in for now:
-    `--jail-scripts`, `jail-scripts=true` in `.npmrc`
-    (`npm_config_jail_scripts`), or deno.json
-    `"supplyChain": { "jailScripts": true }`; `paranoid` (item 84) turns it on.
-    A jailed script runs in its own process
-    (`deno __deno_internal_jailed_lifecycle_script`, the script and its bins
-    read from stdin, then an empty stdin) with:
-    - an allow-listed environment: `PATH`, terminal and locale, `CI`, compiler
-      and `node-gyp` variables (`CC`, `CXX`, `PYTHON`, `CFLAGS`, `MAKEFLAGS`,
-      `SDKROOT`, `NODEJS_ORG_MIRROR`, ...), Windows' system and Visual Studio
-      variables, `npm_package_*` / `npm_lifecycle_*`, `npm_config_*` except keys
-      naming credentials (`auth`, `token`, `pass`, `secret`, `cert`, `key`,
-      `email`, `user`, `otp`, `//`), the proxy variables only when the network
-      is allowed, and Deno's internal ones (not `DENO_DIR` or
-      `DENO_AUTH_TOKENS`); `HOME`, `TMPDIR`/`TEMP`/`TMP`, `DENO_DIR`,
-      `XDG_*_HOME` (on Windows `USERPROFILE`, `APPDATA`, `LOCALAPPDATA`) point
-      at `node_modules/.deno/.jail/<package>/`, removed after the package's
-      scripts;
-    - the OS confining the whole process tree, whatever the script starts (`sh`,
-      `curl`, a compiler, `deno run -A`): writes only beneath node_modules (the
-      scratch directory and its `TMPDIR` are inside) and the package's own
-      `write` paths, not the shared system temp directory (a project, or another
-      program's files, can live there; a tool that insists on `/tmp` gets
-      `"write": ["/tmp"]`); no reading of credential files under the real home
-      (`.ssh`, `.aws`, `.azure`, `.gnupg`, `.kube`, `.docker`, `.npmrc`,
-      `.yarnrc`, `.netrc`, `.git-credentials`, `.pgpass`, `.pypirc`,
-      `.cargo/credentials`, `.config/gcloud`, `.config/gh`, ...,
-      `Library/Keychains`) or of the project's `.npmrc` / `.env*`; no network
-      unless allowed; no Unix sockets (a Docker or D-Bus socket would run
-      anything). On Linux, Landlock (writes, and reads through an
-      allow-everything-else rule set) and seccomp (`socket(2)` only for netlink,
-      plus IPv4/IPv6 when the network is allowed; no `io_uring`; another ABI's
-      syscalls kill the process), applied between fork and exec with
-      `no_new_privs`. Landlock checks the real file hierarchy, so a symlink in
-      node_modules (a workspace member's, or one the script makes) can't lead a
-      write outside, and its ptrace scoping keeps the script from reading the
-      installer's `/proc/<pid>/environ`. On macOS, `sandbox-exec` (Seatbelt)
-      with a generated profile, which also blocks DNS (mDNSResponder) without
-      network;
-    - every `deno` started inside it (the `node` shim, `.bin` wrappers,
-      `node-gyp`, a script's own `deno run -A`) clamping its permissions to the
-      jail (`DENO_INTERNAL_LIFECYCLE_JAIL`, in
-      `CliOptions::permissions_options_for_dir`): write access only to those
-      roots (a narrower list stays; a list outside them is dropped, never
-      widened to "all"), the symlinks in node_modules that lead outside them
-      denied, the credential files denied for reading, no FFI, the network and
-      remote imports per the jail, no prompts; and refusing the subcommands that
-      install or fetch (`install`, `add`, `x`, `ci`, ...; only `run`, `eval`,
-      `task`, `repl`, `test`, `bench`, `check`, `info`, `types`, `serve`,
-      `help`, `completions` run). `npm` / `npx` in the script no longer fall
-      back to a real npm (which would install packages the approval never
-      covered).
-
-    Network: off by default; on for every jailed script with
-    `supplyChain.jailScripts.net`, per package with `packages.<name>.net`, or
-    for the hosts a package declares as node-pre-gyp's `binary.host` /
-    `staging_host` / `production_host` (the OS allows the network, Deno only
-    those hosts; under `paranoid` a package can't grant itself anything).
-    Per-package exceptions in deno.json:
-    `"jailScripts": { "packages": { "<name>": { "env": [...], "write": [...], "net": true } } }`.
-    The project's own scripts (root package.json, workspace members; item 54)
-    are not jailed: they are the project's code, as `deno task` is.
-
-    Where the OS can't confine (Windows; Linux without Landlock, 5.13+; macOS
-    without a working `sandbox-exec`, for example inside another sandbox), the
-    environment, HOME and the Deno clamp still apply and a warning says the
-    script's other programs are not confined; `paranoid` refuses to run the
-    script there. What stays open by design: reads outside the credential list
-    (the spec asks reads to stay broad), writes anywhere in node_modules
-    (prisma's `node_modules/.prisma` and similar need it, so a script can still
-    change another installed package), and on Linux older than Landlock ABI 3
-    (6.2) `truncate(2)` of a file outside the roots.
-
-    Tests: `npm/supply_chain_jail` (Linux, macOS and Windows outputs of a probe
-    package that tries the ways out: node and `sh` writes to the project,
-    through its own symlink and a workspace member's link, reading `.env`, the
-    installer's environment through `/proc`, `fetch`, `deno run -A`, `npx`,
-    `deno install`; a control without the jail; the `.npmrc` key; per-package
-    `env` / `write`; a declared download host and an undeclared one; `paranoid`
-    jailing and ignoring the declaration; `paranoid` refusing on Windows), unit
-    tests for the environment allow-list and the permission clamp (`jail.rs`),
-    the seccomp program (`sandbox_linux.rs`) and the Seatbelt profile
-    (`sandbox_macos.rs`).
-
-82. **`feat(npm)`: refuse versions listed as malicious (`advisory-check`)**
-    (`cli/supply_chain/advisories.rs`, `NpmInstallGate` in
-    `libs/npm_installer`). Adapted from
-    [denoland/deno#35715](https://github.com/denoland/deno/issues/35715). Before
-    npm package versions are installed they are looked up in OSV
-    (`POST https://api.osv.dev/v1/querybatch`, no account, batches of 500, 30 s
-    timeout); a version with an advisory whose id starts with `MAL-` (the
-    OpenSSF malicious-packages data: typosquats, hijacked releases, credential
-    stealers) is refused, naming each advisory and its `osv.dev` link. Checked:
-    everything an explicit `deno install`, `add` or `ci` installs (a version
-    flagged after it was locked is caught), and in any other command the
-    packages a resolution adds to the lockfile (`deno run` / `eval` importing a
-    new package); `deno add` checks the selected versions before writing
-    deno.json / package.json, and puts them back as they were if the install
-    then refuses a dependency. Versions found clean are remembered in
-    `DENO_DIR/npm_advisories_v1.json` for 24 hours (`DENO_OSV_CACHE_TTL`
-    seconds), so repeated installs and CI runs don't query again; a hit is never
-    cached. `advisory-check=on` (the default): when OSV can't be reached a
-    warning is printed and the install goes on; `required` (and `paranoid`)
-    refuses instead; `off` doesn't query. `--cached-only` skips the query unless
-    required. `DENO_OSV_URL` names another OSV (a mirror; the spec tests'
-    stand-in). Not covered: OSV pages past 1000 advisories for one version, and
-    advisories that aren't `MAL-` (`deno audit`'s domain).
-
-    Tests: `npm/supply_chain_advisories` (a malicious version refused on `add`
-    with deno.json unchanged, a clean version of the same package added, a
-    malicious dependency of a clean package refused and deno.json put back,
-    `install` of a configured malicious version, `eval` importing one, `off`, an
-    unreachable OSV warning under `on` and refusing under `required` from
-    `.npmrc` and deno.json, a clean result reused from the cache and queried
-    again past the TTL), against the stand-in OSV in
-    `tests/util/server/servers/supply_chain.rs` (port 4270; every spec test gets
-    `DENO_OSV_URL` pointing at it).
-
-83. **`feat(npm)`: `deno add` asks before adding a package almost nobody
-    downloads** (`cli/supply_chain/downloads.rs`, `cli/tools/pm/mod.rs`).
-    Adapted from
-    [denoland/deno#35716](https://github.com/denoland/deno/issues/35716): a
-    typosquat guard. A package `deno add` (or `deno install <pkg>`) adds that
-    the lockfile doesn't know yet and that has fewer weekly downloads than
-    `low-download-threshold` (1000 by default; `0` turns it off) on
-    `api.npmjs.org/downloads/point/last-week/` asks for confirmation in a
-    terminal and is refused otherwise (or with `CI` set), naming the count and
-    how to allow it: `--allow-low-downloads=npm:<name>,...` (bare: all of them),
-    `allowed-unpopular-packages` (`.npmrc`, names or `@scope/*` / `prefix*`
-    globs) or deno.json `supplyChain.allowLowDownloads`. Packages from another
-    registry than `registry.npmjs.org` (a private one has no public counts) are
-    not checked; an unknown count (no count for the name, or the API can't be
-    reached) lets the add through unless `paranoid`. Nothing is written before
-    the check. `DENO_NPM_DOWNLOADS_URL` names another downloads API, and then
-    the default registry is checked against it whatever it is (the spec tests'
-    stand-in). Not covered: a "did you mean" suggestion, and transitive
-    dependencies.
-
-    Tests: `npm/supply_chain_low_downloads` (refused without a terminal with
-    deno.json unchanged, a package above the threshold added, allowed by name on
-    the command line but not by another name, allowed by the bare flag, by an
-    `.npmrc` glob, by deno.json, a threshold of 0, a name the lockfile already
-    has, an unknown count and an unreachable API letting it through, another
-    registry not checked).
-
-84. **`feat(npm)`: `paranoid`** (`libs/npmrc/supply_chain.rs`,
-    `libs/resolver/npmrc.rs`, `libs/config/deno_json`). Adapted from
-    [denoland/deno#35717](https://github.com/denoland/deno/issues/35717). One
-    switch for the strict posture: `paranoid=true` in `.npmrc`
-    (`npm_config_paranoid`), or deno.json `"supplyChain": { "paranoid": true }`.
-    Every gate is on and fails closed: `jail-scripts` on (and refusing to run a
-    script where the OS can't confine it, a package's own `binary.host` granting
-    no network), `advisory-check=required` (OSV unreachable refuses), unknown
-    download counts refuse `deno add` (and `--allow-low-downloads` needs names),
-    `trust-policy=no-downgrade`. Resolved in one place: each source (`.npmrc`
-    files, the environment, the root deno.json's `supplyChain`) gives the
-    settings it sets, and `resolve_supply_chain` combines them, so the resolver,
-    installer, `deno add` and the script executor read the hardened values.
-    Where several sources set a member the stricter value wins, so one file
-    can't quietly loosen another; `paranoid` can't be turned off by another
-    source. A member set to something weaker than `paranoid` requires
-    (`jail-scripts=false`, `advisory-check=off` or `on`,
-    `low-download-threshold=0`, `trust-policy=off`) is an error naming the
-    setting and where it is, so a configuration can't look strict while being
-    loose; a stricter member (a higher threshold) is kept, and the name
-    allow-lists stay honored. Not a member: `min-release-age` keeps its window
-    and its fallback to an older satisfying version (failing instead of falling
-    back is left for 3.0.0 final).
-
-    Tests: `npm/supply_chain_paranoid` (OSV unreachable, an unknown count and an
-    unreachable downloads API each refusing, `--allow-low-downloads` needing
-    names, a stricter threshold kept, the no-downgrade trust policy on, a weaker
-    member in `.npmrc`, deno.json and the environment, and `trust-policy=off`,
-    each an error), the `npm/supply_chain_jail` paranoid cases, and the
-    resolution unit tests in `libs/npmrc/supply_chain.rs` and
-    `libs/config/deno_json` (`test_to_supply_chain_config`).
-
 81. **`feat(check)`: TypeScript 7 everywhere (phase 3), and closing tsgo LSP
     gaps** (from `denext.23`; `feat/ts7-phase3`, CLI only;
     `cli/type_checker.rs`, `cli/tools/check.rs`, `cli/tools/installer/local.rs`,
@@ -2834,6 +2649,190 @@ where the changes are discussed.
     used; a runtime `NO_PROXY` does not bypass the startup proxy; control: a
     startup `HTTP_PROXY` is used) and `permission/jsr_url_set_at_runtime` (a
     guard: passes before and after).
+82. **`feat(npm)`: confined lifecycle scripts (`jail-scripts`)**
+    (`feat/npm-supply-chain`, for `3.0.0-rc.2`; `cli/supply_chain/jail.rs`,
+    `sandbox_linux.rs`, `sandbox_macos.rs`, `cli/npm.rs`, `cli/task_runner.rs`,
+    `cli/args/mod.rs`, `cli/lib.rs`). Adapted from
+    [denoland/deno#35714](https://github.com/denoland/deno/issues/35714) (an
+    issue, no pull request). An approved dependency's lifecycle script ran with
+    the user's whole environment (`GITHUB_TOKEN`, `NPM_TOKEN`, `SSH_AUTH_SOCK`,
+    ...), the real HOME, and a `node` that is `deno run -A`; item 54 put that
+    `node` (and `node-gyp`) on `PATH` for every install. Opt-in for now:
+    `--jail-scripts`, `jail-scripts=true` in `.npmrc`
+    (`npm_config_jail_scripts`), or deno.json
+    `"supplyChain": { "jailScripts": true }`; `paranoid` (item 85) turns it on.
+    A jailed script runs in its own process
+    (`deno __deno_internal_jailed_lifecycle_script`, the script and its bins
+    read from stdin, then an empty stdin) with:
+    - an allow-listed environment: `PATH`, terminal and locale, `CI`, compiler
+      and `node-gyp` variables (`CC`, `CXX`, `PYTHON`, `CFLAGS`, `MAKEFLAGS`,
+      `SDKROOT`, `NODEJS_ORG_MIRROR`, ...), Windows' system and Visual Studio
+      variables, `npm_package_*` / `npm_lifecycle_*`, `npm_config_*` except keys
+      naming credentials (`auth`, `token`, `pass`, `secret`, `cert`, `key`,
+      `email`, `user`, `otp`, `//`), the proxy variables only when the network
+      is allowed, and Deno's internal ones (not `DENO_DIR` or
+      `DENO_AUTH_TOKENS`); `HOME`, `TMPDIR`/`TEMP`/`TMP`, `DENO_DIR`,
+      `XDG_*_HOME` (on Windows `USERPROFILE`, `APPDATA`, `LOCALAPPDATA`) point
+      at `node_modules/.deno/.jail/<package>/`, removed after the package's
+      scripts;
+    - the OS confining the whole process tree, whatever the script starts (`sh`,
+      `curl`, a compiler, `deno run -A`): writes only beneath node_modules (the
+      scratch directory and its `TMPDIR` are inside) and the package's own
+      `write` paths, not the shared system temp directory (a project, or another
+      program's files, can live there; a tool that insists on `/tmp` gets
+      `"write": ["/tmp"]`); no reading of credential files under the real home
+      (`.ssh`, `.aws`, `.azure`, `.gnupg`, `.kube`, `.docker`, `.npmrc`,
+      `.yarnrc`, `.netrc`, `.git-credentials`, `.pgpass`, `.pypirc`,
+      `.cargo/credentials`, `.config/gcloud`, `.config/gh`, ...,
+      `Library/Keychains`) or of the project's `.npmrc` / `.env*`; no network
+      unless allowed; no Unix sockets (a Docker or D-Bus socket would run
+      anything). On Linux, Landlock (writes, and reads through an
+      allow-everything-else rule set) and seccomp (`socket(2)` only for netlink,
+      plus IPv4/IPv6 when the network is allowed; no `io_uring`; another ABI's
+      syscalls kill the process), applied between fork and exec with
+      `no_new_privs`. Landlock checks the real file hierarchy, so a symlink in
+      node_modules (a workspace member's, or one the script makes) can't lead a
+      write outside, and its ptrace scoping keeps the script from reading the
+      installer's `/proc/<pid>/environ`. On macOS, `sandbox-exec` (Seatbelt)
+      with a generated profile, which also blocks DNS (mDNSResponder) without
+      network;
+    - every `deno` started inside it (the `node` shim, `.bin` wrappers,
+      `node-gyp`, a script's own `deno run -A`) clamping its permissions to the
+      jail (`DENO_INTERNAL_LIFECYCLE_JAIL`, in
+      `CliOptions::permissions_options_for_dir`): write access only to those
+      roots (a narrower list stays; a list outside them is dropped, never
+      widened to "all"), the symlinks in node_modules that lead outside them
+      denied, the credential files denied for reading, no FFI, the network and
+      remote imports per the jail, no prompts; and refusing the subcommands that
+      install or fetch (`install`, `add`, `x`, `ci`, ...; only `run`, `eval`,
+      `task`, `repl`, `test`, `bench`, `check`, `info`, `types`, `serve`,
+      `help`, `completions` run). `npm` / `npx` in the script no longer fall
+      back to a real npm (which would install packages the approval never
+      covered).
+
+    Network: off by default; on for every jailed script with
+    `supplyChain.jailScripts.net`, per package with `packages.<name>.net`, or
+    for the hosts a package declares as node-pre-gyp's `binary.host` /
+    `staging_host` / `production_host` (the OS allows the network, Deno only
+    those hosts; under `paranoid` a package can't grant itself anything).
+    Per-package exceptions in deno.json:
+    `"jailScripts": { "packages": { "<name>": { "env": [...], "write": [...], "net": true } } }`.
+    The project's own scripts (root package.json, workspace members; item 54)
+    are not jailed: they are the project's code, as `deno task` is.
+
+    Where the OS can't confine (Windows; Linux without Landlock, 5.13+; macOS
+    without a working `sandbox-exec`, for example inside another sandbox), the
+    environment, HOME and the Deno clamp still apply and a warning says the
+    script's other programs are not confined; `paranoid` refuses to run the
+    script there. What stays open by design: reads outside the credential list
+    (the spec asks reads to stay broad), writes anywhere in node_modules
+    (prisma's `node_modules/.prisma` and similar need it, so a script can still
+    change another installed package), and on Linux older than Landlock ABI 3
+    (6.2) `truncate(2)` of a file outside the roots.
+
+    Tests: `npm/supply_chain_jail` (Linux, macOS and Windows outputs of a probe
+    package that tries the ways out: node and `sh` writes to the project,
+    through its own symlink and a workspace member's link, reading `.env`, the
+    installer's environment through `/proc`, `fetch`, `deno run -A`, `npx`,
+    `deno install`; a control without the jail; the `.npmrc` key; per-package
+    `env` / `write`; a declared download host and an undeclared one; `paranoid`
+    jailing and ignoring the declaration; `paranoid` refusing on Windows), unit
+    tests for the environment allow-list and the permission clamp (`jail.rs`),
+    the seccomp program (`sandbox_linux.rs`) and the Seatbelt profile
+    (`sandbox_macos.rs`).
+
+83. **`feat(npm)`: refuse versions listed as malicious (`advisory-check`)**
+    (`cli/supply_chain/advisories.rs`, `NpmInstallGate` in
+    `libs/npm_installer`). Adapted from
+    [denoland/deno#35715](https://github.com/denoland/deno/issues/35715). Before
+    npm package versions are installed they are looked up in OSV
+    (`POST https://api.osv.dev/v1/querybatch`, no account, batches of 500, 30 s
+    timeout); a version with an advisory whose id starts with `MAL-` (the
+    OpenSSF malicious-packages data: typosquats, hijacked releases, credential
+    stealers) is refused, naming each advisory and its `osv.dev` link. Checked:
+    everything an explicit `deno install`, `add` or `ci` installs (a version
+    flagged after it was locked is caught), and in any other command the
+    packages a resolution adds to the lockfile (`deno run` / `eval` importing a
+    new package); `deno add` checks the selected versions before writing
+    deno.json / package.json, and puts them back as they were if the install
+    then refuses a dependency. Versions found clean are remembered in
+    `DENO_DIR/npm_advisories_v1.json` for 24 hours (`DENO_OSV_CACHE_TTL`
+    seconds), so repeated installs and CI runs don't query again; a hit is never
+    cached. `advisory-check=on` (the default): when OSV can't be reached a
+    warning is printed and the install goes on; `required` (and `paranoid`)
+    refuses instead; `off` doesn't query. `--cached-only` skips the query unless
+    required. `DENO_OSV_URL` names another OSV (a mirror; the spec tests'
+    stand-in). Not covered: OSV pages past 1000 advisories for one version, and
+    advisories that aren't `MAL-` (`deno audit`'s domain).
+
+    Tests: `npm/supply_chain_advisories` (a malicious version refused on `add`
+    with deno.json unchanged, a clean version of the same package added, a
+    malicious dependency of a clean package refused and deno.json put back,
+    `install` of a configured malicious version, `eval` importing one, `off`, an
+    unreachable OSV warning under `on` and refusing under `required` from
+    `.npmrc` and deno.json, a clean result reused from the cache and queried
+    again past the TTL), against the stand-in OSV in
+    `tests/util/server/servers/supply_chain.rs` (port 4270; every spec test gets
+    `DENO_OSV_URL` pointing at it).
+
+84. **`feat(npm)`: `deno add` asks before adding a package almost nobody
+    downloads** (`cli/supply_chain/downloads.rs`, `cli/tools/pm/mod.rs`).
+    Adapted from
+    [denoland/deno#35716](https://github.com/denoland/deno/issues/35716): a
+    typosquat guard. A package `deno add` (or `deno install <pkg>`) adds that
+    the lockfile doesn't know yet and that has fewer weekly downloads than
+    `low-download-threshold` (1000 by default; `0` turns it off) on
+    `api.npmjs.org/downloads/point/last-week/` asks for confirmation in a
+    terminal and is refused otherwise (or with `CI` set), naming the count and
+    how to allow it: `--allow-low-downloads=npm:<name>,...` (bare: all of them),
+    `allowed-unpopular-packages` (`.npmrc`, names or `@scope/*` / `prefix*`
+    globs) or deno.json `supplyChain.allowLowDownloads`. Packages from another
+    registry than `registry.npmjs.org` (a private one has no public counts) are
+    not checked; an unknown count (no count for the name, or the API can't be
+    reached) lets the add through unless `paranoid`. Nothing is written before
+    the check. `DENO_NPM_DOWNLOADS_URL` names another downloads API, and then
+    the default registry is checked against it whatever it is (the spec tests'
+    stand-in). Not covered: a "did you mean" suggestion, and transitive
+    dependencies.
+
+    Tests: `npm/supply_chain_low_downloads` (refused without a terminal with
+    deno.json unchanged, a package above the threshold added, allowed by name on
+    the command line but not by another name, allowed by the bare flag, by an
+    `.npmrc` glob, by deno.json, a threshold of 0, a name the lockfile already
+    has, an unknown count and an unreachable API letting it through, another
+    registry not checked).
+
+85. **`feat(npm)`: `paranoid`** (`libs/npmrc/supply_chain.rs`,
+    `libs/resolver/npmrc.rs`, `libs/config/deno_json`). Adapted from
+    [denoland/deno#35717](https://github.com/denoland/deno/issues/35717). One
+    switch for the strict posture: `paranoid=true` in `.npmrc`
+    (`npm_config_paranoid`), or deno.json `"supplyChain": { "paranoid": true }`.
+    Every gate is on and fails closed: `jail-scripts` on (and refusing to run a
+    script where the OS can't confine it, a package's own `binary.host` granting
+    no network), `advisory-check=required` (OSV unreachable refuses), unknown
+    download counts refuse `deno add` (and `--allow-low-downloads` needs names),
+    `trust-policy=no-downgrade`. Resolved in one place: each source (`.npmrc`
+    files, the environment, the root deno.json's `supplyChain`) gives the
+    settings it sets, and `resolve_supply_chain` combines them, so the resolver,
+    installer, `deno add` and the script executor read the hardened values.
+    Where several sources set a member the stricter value wins, so one file
+    can't quietly loosen another; `paranoid` can't be turned off by another
+    source. A member set to something weaker than `paranoid` requires
+    (`jail-scripts=false`, `advisory-check=off` or `on`,
+    `low-download-threshold=0`, `trust-policy=off`) is an error naming the
+    setting and where it is, so a configuration can't look strict while being
+    loose; a stricter member (a higher threshold) is kept, and the name
+    allow-lists stay honored. Not a member: `min-release-age` keeps its window
+    and its fallback to an older satisfying version (failing instead of falling
+    back is left for 3.0.0 final).
+
+    Tests: `npm/supply_chain_paranoid` (OSV unreachable, an unknown count and an
+    unreachable downloads API each refusing, `--allow-low-downloads` needing
+    names, a stricter threshold kept, the no-downgrade trust policy on, a weaker
+    member in `.npmrc`, deno.json and the environment, and `trust-policy=off`,
+    each an error), the `npm/supply_chain_jail` paranoid cases, and the
+    resolution unit tests in `libs/npmrc/supply_chain.rs` and
+    `libs/config/deno_json` (`test_to_supply_chain_config`).
 
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82) are what the prebuilt `libdenort` carries. The CLI-side
@@ -2872,7 +2871,7 @@ package job fails if it differs from the hosts' `capi/include/laufey.h`.
 
 ## npm supply-chain settings
 
-Items 81-84. Each `.npmrc` key also reads `npm_config_<key>` /
+Items 82-85. Each `.npmrc` key also reads `npm_config_<key>` /
 `NPM_CONFIG_<KEY>` from the environment (`-` as `_`), and deno.json's
 `supplyChain` (the root deno.json only) mirrors them. Where several sources (the
 `.npmrc` files, the environment, deno.json) set a key, the stricter value wins;
@@ -2880,12 +2879,12 @@ under `paranoid`, a weaker one is an error.
 
 | `.npmrc` key                 | deno.json `supplyChain`                              | Flag                              | Default | What                                                                                                                            |
 | ---------------------------- | ---------------------------------------------------- | --------------------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------- |
-| `paranoid`                   | `paranoid`                                           |                                   | `false` | Every gate on and failing closed (item 84).                                                                                     |
-| `jail-scripts`               | `jailScripts`: `true`, or `{ net, packages }`        | `--jail-scripts`                  | `false` | Approved dependencies' lifecycle scripts run confined (item 81).                                                                |
+| `paranoid`                   | `paranoid`                                           |                                   | `false` | Every gate on and failing closed (item 85).                                                                                     |
+| `jail-scripts`               | `jailScripts`: `true`, or `{ net, packages }`        | `--jail-scripts`                  | `false` | Approved dependencies' lifecycle scripts run confined (item 82).                                                                |
 |                              | `jailScripts.net`                                    |                                   | `false` | Network for every jailed script.                                                                                                |
 |                              | `jailScripts.packages.<name>`: `{ env, write, net }` |                                   |         | A package's exceptions: environment variables passed through, extra writable directories (relative to deno.json), network.      |
-| `advisory-check`             | `advisoryCheck`: `"on"` / `"off"` / `"required"`     |                                   | `on`    | Refuse versions OSV lists as malicious; `required` also refuses when OSV can't be reached (item 82).                            |
-| `low-download-threshold`     | `lowDownloadThreshold`                               |                                   | `1000`  | Weekly downloads below which `deno add` asks; `0` turns it off (item 83).                                                       |
+| `advisory-check`             | `advisoryCheck`: `"on"` / `"off"` / `"required"`     |                                   | `on`    | Refuse versions OSV lists as malicious; `required` also refuses when OSV can't be reached (item 83).                            |
+| `low-download-threshold`     | `lowDownloadThreshold`                               |                                   | `1000`  | Weekly downloads below which `deno add` asks; `0` turns it off (item 84).                                                       |
 | `allowed-unpopular-packages` | `allowLowDownloads`                                  | `--allow-low-downloads[=<names>]` |         | Names (or `@scope/*`, `prefix*`) `deno add` adds whatever their counts; the flag without names allows all (not under paranoid). |
 | `trust-policy`               |                                                      |                                   | `off`   | `paranoid` sets `no-downgrade`.                                                                                                 |
 
@@ -3096,7 +3095,7 @@ Specs this fork adds for what its runtime exposes outside a desktop app:
 - `tests/specs/bundle/define`: `deno bundle --define` replaces identifiers and
   member expressions, drops the dead branch under `--minify`, and rejects bad
   names and values (item 78).
-- `tests/specs/npm/supply_chain_*`: the npm supply-chain gates (items 81-84)
+- `tests/specs/npm/supply_chain_*`: the npm supply-chain gates (items 82-85)
   against stand-ins for OSV and npm's downloads API
   (`tests/util/server/servers/supply_chain.rs`, port 4270); the jail's probe
   package tries the ways out of a confined lifecycle script on each OS.

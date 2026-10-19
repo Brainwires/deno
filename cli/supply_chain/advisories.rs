@@ -1,6 +1,6 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 
-//! The malicious-version gate (`advisory-check`, DENEXT.md item 82).
+//! The malicious-version gate (`advisory-check`, DENEXT.md item 83).
 //!
 //! Before npm package versions are installed, they are looked up in OSV
 //! (<https://osv.dev>, `POST /v1/querybatch`, no account needed). A version

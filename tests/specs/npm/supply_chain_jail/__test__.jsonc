@@ -1,5 +1,5 @@
 {
-  // jail-scripts (DENEXT.md item 81): an approved dependency's lifecycle
+  // jail-scripts (DENEXT.md item 82): an approved dependency's lifecycle
   // script runs with a scrubbed environment, a scratch HOME, writes confined
   // to node_modules + temp, no credential files, no network, and every deno
   // it starts clamped to the same. @denotest/jail-probe's postinstall tries

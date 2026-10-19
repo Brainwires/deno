@@ -1,6 +1,6 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 
-//! Confined npm lifecycle scripts (`jail-scripts`, DENEXT.md item 81).
+//! Confined npm lifecycle scripts (`jail-scripts`, DENEXT.md item 82).
 //!
 //! An approved dependency's lifecycle script normally runs with the user's
 //! whole environment, their real HOME, and a `node` that is `deno run -A`. A
