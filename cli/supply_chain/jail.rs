@@ -894,6 +894,48 @@ mod tests {
   }
 
   #[test]
+  fn declared_hosts() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+      dir.path().join("package.json"),
+      r#"{ "binary": { "host": "https://github.com/a/b/releases/", "staging_host": "https://s3.example.com:8443/x", "module_name": "m" } }"#,
+    )
+    .unwrap();
+    assert_eq!(
+      declared_net_hosts(dir.path()),
+      vec!["github.com".to_string(), "s3.example.com:8443".to_string()]
+    );
+    std::fs::write(dir.path().join("package.json"), "{}").unwrap();
+    assert!(declared_net_hosts(dir.path()).is_empty());
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn links_leading_outside_node_modules() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = canonicalize_path(dir.path()).unwrap();
+    let nm = root.join("node_modules");
+    let member = root.join("member");
+    std::fs::create_dir_all(nm.join(".deno/a@1.0.0/node_modules/a")).unwrap();
+    std::fs::create_dir_all(nm.join("@scope")).unwrap();
+    std::fs::create_dir_all(&member).unwrap();
+    // inside node_modules: fine
+    std::os::unix::fs::symlink(
+      nm.join(".deno/a@1.0.0/node_modules/a"),
+      nm.join("a"),
+    )
+    .unwrap();
+    // outside: denied
+    std::os::unix::fs::symlink(&member, nm.join("member")).unwrap();
+    std::os::unix::fs::symlink(&member, nm.join("@scope/member")).unwrap();
+    std::os::unix::fs::symlink(&root, nm.join(".deno/a@1.0.0/node_modules/up"))
+      .unwrap();
+    let mut links = outside_links(&nm, std::slice::from_ref(&nm));
+    links.sort();
+    assert_eq!(links, vec![root.clone(), member]);
+  }
+
+  #[test]
   fn clamp() {
     let jail = JailPermissions {
       write: vec![PathBuf::from("/nm")],

@@ -17,6 +17,7 @@
 ------ index.js
 ------ package.json
 ----- registry.json
+- npm_advisories_v1.json
 - v8_code_cache_v2[WILDCARD]
 
 ./node_modules

@@ -75,6 +75,23 @@
         }
       ]
     },
+    // on Linux the probe can read the installer's GITHUB_TOKEN through /proc
+    // when it isn't jailed: what `ancestor environ: hidden` above rules out
+    "not_jailed_linux": {
+      "if": "linux",
+      "steps": [
+        {
+          "cwd": "control",
+          "args": "install --allow-scripts=npm:@denotest/jail-control-probe",
+          "output": "[WILDCARD]"
+        },
+        {
+          "cwd": "control",
+          "args": "run -A check.mjs jail-control-probe",
+          "output": "not_jailed_linux.out"
+        }
+      ]
+    },
     // the same with npm_config_jail_scripts (an .npmrc key's environment form)
     "jailed_by_npmrc_key": {
       "if": "unix",

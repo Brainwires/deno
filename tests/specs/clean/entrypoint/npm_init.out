@@ -9,6 +9,7 @@
 ---- 5.0.1
 -----[WILDCARD]
 ---- registry.json
+- npm_advisories_v1.json
 - remote
 -- http
 --- localhost_port_4260

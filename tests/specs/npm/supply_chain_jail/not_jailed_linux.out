@@ -1,0 +1,17 @@
+node: GITHUB_TOKEN: visible
+node: NPM_TOKEN: visible
+node: npm auth config: visible
+node: JAIL_PASSED_VAR: passed
+node: home: real
+node: write own dir: allowed
+node: write TMPDIR: allowed
+node: write system temp: allowed
+node: write project: allowed
+node: write via workspace link: denied
+node: create symlink: allowed
+node: read .env: allowed
+node: read project package.json: allowed
+node: own environ: readable
+node: ancestor environ: leaked
+node: fetch: allowed
+written outside: pwned-node.txt

@@ -7,7 +7,10 @@ node: write own dir: allowed
 node: write TMPDIR: allowed
 node: write system temp: [WILDCARD]
 node: write project: allowed
-[WILDCARD]
+node: write via workspace link: denied
+node: create symlink: [WILDCARD]
 node: read .env: allowed
+node: read project package.json: allowed
 [WILDCARD]
+node: fetch: allowed
 written outside: pwned-node.txt

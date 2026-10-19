@@ -8,6 +8,7 @@
 ----- registry.json
 --- chalk
 ---- registry.json
+- npm_advisories_v1.json
 - remote
 
 ./node_modules
