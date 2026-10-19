@@ -11,6 +11,7 @@ use std::task::{self};
 use std::time::Duration;
 use std::vec;
 
+use deno_permissions::PermissionCheckError;
 use deno_permissions::PermissionsContainer;
 use http::Uri;
 use http::uri::Scheme;
@@ -285,9 +286,39 @@ fn check_resolved(
       permissions.check_import_resolved(ip, port, "import()")
     }
   }
-  .map_err(|e| {
-    io::Error::new(io::ErrorKind::PermissionDenied, e.to_string()).into()
-  })
+  // Keep the permission error itself (not just its text) inside the
+  // `io::Error`, so a caller can tell a denial from a network failure by
+  // downcasting it out of the client error chain (see `ext/kv/remote.rs`).
+  // The message is unchanged: an `io::Error` displays its inner error.
+  .map_err(|e| io::Error::new(io::ErrorKind::PermissionDenied, e).into())
+}
+
+/// Finds the permission error a [`PermissionedHttpConnector`] refused a
+/// resolved address with, anywhere in an error's source chain (a
+/// `ClientSendError` wraps hyper's error, which wraps the connector's).
+///
+/// Lets a client that retries network failures, such as remote KV's data
+/// path, tell a denial (which a retry cannot fix) from a transient error.
+pub fn find_resolved_deny_error<'a>(
+  err: &'a (dyn std::error::Error + 'static),
+) -> Option<&'a PermissionCheckError> {
+  let mut current = Some(err);
+  while let Some(err) = current {
+    if let Some(found) = err.downcast_ref::<PermissionCheckError>() {
+      return Some(found);
+    }
+    // `io::Error::source()` skips a custom payload and returns the payload's
+    // own source, so look inside it explicitly.
+    if let Some(found) = err
+      .downcast_ref::<io::Error>()
+      .and_then(|io_err| io_err.get_ref())
+      .and_then(|inner| inner.downcast_ref::<PermissionCheckError>())
+    {
+      return Some(found);
+    }
+    current = err.source();
+  }
+  None
 }
 
 /// Extracts the connection host (with IPv6 brackets stripped) and the

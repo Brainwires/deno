@@ -1,0 +1,6 @@
+startup child done
+PASS: DENO_UNSTABLE_CRON_SOCK set at startup is used
+cron worker done
+PASS: DENO_UNSTABLE_CRON_SOCK set at runtime was not used
+cache worker done
+PASS: DENO_CACHE_LSC_ENDPOINT set at runtime was not used

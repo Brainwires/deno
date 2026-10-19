@@ -501,7 +501,7 @@ impl WebWorker {
     let enable_testing_features = options.bootstrap.enable_testing_features;
 
     fn create_cache_inner(options: &WebWorkerOptions) -> Option<CreateCache> {
-      if let Ok(var) = std::env::var("DENO_CACHE_LSC_ENDPOINT") {
+      if let Some(var) = crate::worker::deploy_env().lsc_endpoint.as_deref() {
         let elems: Vec<_> = var.split(",").collect();
         if elems.len() == 2 {
           let endpoint = elems[0];
@@ -589,7 +589,9 @@ impl WebWorker {
         )),
         deno_kv::KvConfig::builder().build(),
       ),
-      deno_cron::deno_cron::init(Box::new(CronHandlerImpl::create_from_env())),
+      deno_cron::deno_cron::init(Box::new(CronHandlerImpl::from_socket(
+        crate::worker::deploy_env().cron_socket.clone(),
+      ))),
       deno_napi::deno_napi::init(services.deno_rt_native_addon_loader.clone()),
       deno_http::deno_http::init(deno_http::Options {
         no_legacy_abort: options.bootstrap.no_legacy_abort,

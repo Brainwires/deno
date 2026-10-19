@@ -2488,11 +2488,63 @@ where the changes are discussed.
     (`engines.deno:
     ">=1.0.0"` warned against `3.0.0-rc.1`).
 
+80. **`fix(permissions)`: the network clients that skipped the deny rules**
+    (`fix/dns-deny-gaps`, for runtime `denext.23`; `ext/kv/remote.rs`,
+    `ext/fetch/dns.rs`, `ext/cron/handler_impl.rs`, `runtime/worker.rs`,
+    `runtime/web_worker.rs`). The adapt of
+    [denoland/deno#30085](https://github.com/denoland/deno/pull/30085) (deny
+    check before and after DNS resolution): fetch, WebSocket, `ext/net`,
+    `node:net` and `Deno.SQL` already re-check `--deny-net` against the
+    addresses a host resolves to. An audit of every other client the runtime
+    opens connections with found three that user code could point somewhere it
+    may not connect:
+    - **Remote KV** built its HTTP client with no permissions, so the
+      hostname-level `check_net_url` (on the URL passed to `Deno.openKv` and, in
+      `denokv_remote`, on each database URL the metadata endpoint returns) was
+      the only check: a name resolving to a denied or internal address got
+      through, and a KV Connect server could point KV traffic at one. The client
+      now runs the resolved-address check on every connection (the metadata
+      exchange, its refreshes, and every data path call). Because
+      `denokv_remote` retries a failed data path call forever, the transport
+      records a denied origin and the permission checker reports it on the next
+      attempt, so the read or write rejects with `NotCapable` instead of
+      hanging; `Deno.openKv` itself rejects with `NotCapable` when the metadata
+      endpoint is refused, and checks every database URL the metadata names at
+      open time. `ext/fetch/dns.rs` keeps the permission error inside its
+      `io::Error` (same message) so `find_resolved_deny_error` can find it in a
+      send error's source chain.
+    - **`DENO_UNSTABLE_CRON_SOCK`** was read again whenever a `Worker` was
+      created, and the cron socket handler connects as soon as it exists, with
+      no permission check. With `--allow-env` but no `--allow-net`,
+      `Deno.env.set()` followed by `new Worker(...)` opened a TCP, Unix or vsock
+      connection to any address.
+    - **`DENO_CACHE_LSC_ENDPOINT`** likewise: a worker's `caches` sent HTTP
+      requests (with the cached bodies and the token) to whatever endpoint the
+      variable named when the worker started.
+
+    Both variables are Deno Deploy operator configuration, so they are now read
+    once, when the first main worker is created (before any user code runs, and
+    after a pre-warmed runtime's host has set them), and every later worker uses
+    that snapshot (`deno_runtime::worker::deploy_env`). The remaining clients
+    built without permissions can't be steered by the program: the CLI's own
+    module, npm, JSR, publish, upgrade and LSP fetches (module loads are checked
+    against `--deny-import`), the OpenTelemetry exporter and the permission
+    broker (environment read at process start), the inspector (a listener), and
+    the desktop dev tooling and scheme bridge (fixed loopback addresses). Tests:
+    `permission/deny_net_kv_remote_resolved_ip` (a metadata endpoint, and a
+    database URL from the metadata, reached through `localhost` under a
+    port-scoped `--deny-net=127.0.0.1:<port>`: both reject with `NotCapable` and
+    neither server is reached), `permission/deploy_env_set_at_runtime` (both
+    variables set at runtime and a worker started: no connection; control: the
+    cron socket set at startup is still dialed) and
+    `test_resolved_deny_error_is_found_in_the_send_error` in
+    `ext/fetch/tests.rs`.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
-64-73, 75-77) are what the prebuilt `libdenort` carries. The CLI-side parts (for
-example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's
-launchers) are in the branch too, but a stock CLI does not run them; denext's
-own launcher provides that environment.
+64-73, 75-77, 80) are what the prebuilt `libdenort` carries. The CLI-side parts
+(for example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged
+app's launchers) are in the branch too, but a stock CLI does not run them;
+denext's own launcher provides that environment.
 
 The laufey backend hosts are built from
 [Brainwires/laufey](https://github.com/Brainwires/laufey) branch

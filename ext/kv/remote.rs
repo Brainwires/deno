@@ -1,8 +1,10 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::sync::Mutex;
 
 use anyhow::Context;
 use async_trait::async_trait;
@@ -10,8 +12,12 @@ use bytes::Bytes;
 use deno_core::OpState;
 use deno_core::futures::Stream;
 use deno_error::JsErrorBox;
+use deno_error::JsErrorClass;
 use deno_fetch::CreateHttpClientOptions;
 use deno_fetch::create_http_client;
+use deno_fetch::dns::ResolvedDenyCheckKind;
+use deno_fetch::dns::find_resolved_deny_error;
+use deno_permissions::PermissionCheckError;
 use deno_permissions::PermissionsContainer;
 use deno_tls::Proxy;
 use deno_tls::RootCertStoreProvider;
@@ -54,30 +60,75 @@ impl RemoteDbHandler {
   }
 }
 
+/// The destinations remote KV's HTTP client refused after resolving them:
+/// each denied origin with the permission error (class and message) it was
+/// refused with.
+///
+/// The client re-checks every address a host resolves to against the
+/// `--deny-net` rules before it connects (as `fetch()` does), but
+/// `denokv_remote` retries a failed data path call forever, so a denial
+/// surfacing as a network error would hang the operation. The transport
+/// records the denial here, and [`PermissionChecker`] reports it when
+/// `denokv_remote` checks the URL again before its next attempt, so the call
+/// fails with the permission error instead.
+#[derive(Clone, Default)]
+struct ResolvedDenials(Arc<Mutex<HashMap<String, (String, String)>>>);
+
+impl ResolvedDenials {
+  fn origin_key(url: &Url) -> String {
+    url.origin().ascii_serialization()
+  }
+
+  fn record(&self, url: &Url, err: &PermissionCheckError) -> JsErrorBox {
+    let class = err.get_class().into_owned();
+    let message = err.to_string();
+    self
+      .0
+      .lock()
+      .unwrap()
+      .insert(Self::origin_key(url), (class.clone(), message.clone()));
+    JsErrorBox::new(class, message)
+  }
+
+  fn check(&self, url: &Url) -> Result<(), JsErrorBox> {
+    match self.0.lock().unwrap().get(&Self::origin_key(url)) {
+      Some((class, message)) => {
+        Err(JsErrorBox::new(class.clone(), message.clone()))
+      }
+      None => Ok(()),
+    }
+  }
+}
+
 pub struct PermissionChecker {
   state: Rc<RefCell<OpState>>,
+  denials: ResolvedDenials,
 }
 
 impl Clone for PermissionChecker {
   fn clone(&self) -> Self {
     Self {
       state: self.state.clone(),
+      denials: self.denials.clone(),
     }
   }
 }
 
 impl denokv_remote::RemotePermissions for PermissionChecker {
   fn check_net_url(&self, url: &Url) -> Result<(), JsErrorBox> {
-    let mut state = self.state.borrow_mut();
-    let permissions = state.borrow_mut::<PermissionsContainer>();
-    permissions
-      .check_net_url(url, "Deno.openKv")
-      .map_err(JsErrorBox::from_err)
+    {
+      let mut state = self.state.borrow_mut();
+      let permissions = state.borrow_mut::<PermissionsContainer>();
+      permissions
+        .check_net_url(url, "Deno.openKv")
+        .map_err(JsErrorBox::from_err)?;
+    }
+    self.denials.check(url)
   }
 }
 
 #[derive(Clone)]
-pub struct FetchClient(deno_fetch::Client);
+pub struct FetchClient(deno_fetch::Client, ResolvedDenials);
 pub struct FetchResponse(http::Response<deno_fetch::ResBody>);
 
 impl RemoteTransport for FetchClient {
@@ -97,12 +148,14 @@ impl RemoteTransport for FetchClient {
       })?;
     *req.headers_mut() = headers;
 
-    let res = self
-      .0
-      .clone()
-      .send(req)
-      .await
-      .map_err(JsErrorBox::from_err)?;
+    let res = self.0.clone().send(req).await.map_err(|err| {
+      match find_resolved_deny_error(&err) {
+        // A connection refused by the resolved-address deny check: report the
+        // permission error (and remember it, see `ResolvedDenials`).
+        Some(denied) => self.1.record(&url, denied),
+        None => JsErrorBox::from_err(err),
+      }
+    })?;
     let status = res.status();
     Ok((url, status, FetchResponse(res)))
   }
@@ -171,6 +224,13 @@ impl DatabaseHandler for RemoteDbHandler {
       access_token: access_token.clone(),
     };
 
+    // Every connection the client opens re-checks the addresses the host
+    // resolved to against `--deny-net`, as `fetch()` does: the checks above
+    // and `denokv_remote`'s (on each database URL the metadata endpoint
+    // returns) only see the hostname, so a name that resolves to a denied or
+    // internal address would otherwise get through.
+    let net_permissions =
+      state.borrow().borrow::<PermissionsContainer>().clone();
     let options = &self.http_options;
     let client = create_http_client(
       &options.user_agent,
@@ -179,8 +239,8 @@ impl DatabaseHandler for RemoteDbHandler {
         ca_certs: vec![],
         proxy: options.proxy.clone(),
         dns_resolver: Default::default(),
-        permissions: None,
-        resolved_deny_check_kind: Default::default(),
+        permissions: Some(net_permissions),
+        resolved_deny_check_kind: ResolvedDenyCheckKind::Net,
         unsafely_ignore_certificate_errors: options
           .unsafely_ignore_certificate_errors
           .clone(),
@@ -199,10 +259,12 @@ impl DatabaseHandler for RemoteDbHandler {
       },
     )
     .map_err(JsErrorBox::from_err)?;
-    let fetch_client = FetchClient(client);
+    let denials = ResolvedDenials::default();
+    let fetch_client = FetchClient(client, denials.clone());
 
     let permissions = PermissionChecker {
       state: state.clone(),
+      denials,
     };
 
     // Eagerly validate that the URL points at a real Deno KV database before
@@ -210,7 +272,8 @@ impl DatabaseHandler for RemoteDbHandler {
     // succeeds and only fails later — with an opaque error — when the
     // connection is first used (or hangs indefinitely on a network error).
     // See https://github.com/denoland/deno/issues/22248.
-    validate_metadata_endpoint(&fetch_client, &metadata_endpoint).await?;
+    validate_metadata_endpoint(&fetch_client, &permissions, &metadata_endpoint)
+      .await?;
 
     let remote = Remote::new(fetch_client, permissions, metadata_endpoint);
 
@@ -252,10 +315,12 @@ const METADATA_VALIDATION_TIMEOUT: std::time::Duration =
 /// validate through that.
 async fn validate_metadata_endpoint(
   client: &FetchClient,
+  permissions: &PermissionChecker,
   metadata_endpoint: &MetadataEndpoint,
 ) -> Result<(), JsErrorBox> {
   use denokv_proto::DatabaseMetadata;
   use denokv_proto::MetadataExchangeRequest;
+  use denokv_remote::RemotePermissions;
 
   let url = &metadata_endpoint.url;
   let body = serde_json::to_vec(&MetadataExchangeRequest {
@@ -267,6 +332,10 @@ async fn validate_metadata_endpoint(
   let (_, status, res) =
     match tokio::time::timeout(METADATA_VALIDATION_TIMEOUT, post).await {
       Ok(result) => result.map_err(|err| {
+        // A refused address is a permission error, not a connection failure.
+        if let Err(denied) = client.1.check(url) {
+          return denied;
+        }
         JsErrorBox::type_error(format!(
           "Could not open Deno KV database: failed to connect to '{url}': {err}"
         ))
@@ -330,12 +399,30 @@ async fn validate_metadata_endpoint(
     )));
   }
 
-  serde_json::from_str::<DatabaseMetadata>(&body).map_err(|err| {
-    JsErrorBox::type_error(format!(
-      "Could not open Deno KV database: '{url}' is not a valid KV Connect \
-       endpoint (failed to parse metadata response: {err})"
-    ))
-  })?;
+  let metadata =
+    serde_json::from_str::<DatabaseMetadata>(&body).map_err(|err| {
+      JsErrorBox::type_error(format!(
+        "Could not open Deno KV database: '{url}' is not a valid KV Connect \
+         endpoint (failed to parse metadata response: {err})"
+      ))
+    })?;
+
+  // Refuse a database the process may not reach at open time, rather than on
+  // its first read or write: check every database URL the endpoint handed
+  // back, resolved the way `denokv_remote` resolves it (absolute in version
+  // 1, relative to the metadata URL from version 2 on). A URL that doesn't
+  // parse is left to `denokv_remote` to report. The addresses each one
+  // resolves to are checked when the client connects.
+  for endpoint in &metadata.endpoints {
+    let endpoint_url = if version == 1 {
+      Url::parse(&endpoint.url)
+    } else {
+      Url::options().base_url(Some(url)).parse(&endpoint.url)
+    };
+    if let Ok(endpoint_url) = endpoint_url {
+      permissions.check_net_url(&endpoint_url)?;
+    }
+  }
 
   Ok(())
 }

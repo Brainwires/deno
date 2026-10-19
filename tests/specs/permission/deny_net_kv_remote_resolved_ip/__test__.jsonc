@@ -1,0 +1,8 @@
+{
+  "tests": {
+    "deny_net_kv_remote_resolved_ip": {
+      "args": "run -A main.ts",
+      "output": "main.out"
+    }
+  }
+}

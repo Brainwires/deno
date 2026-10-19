@@ -1,0 +1,4 @@
+PASS: openKv through a denied metadata address denied
+PASS: the metadata endpoint was never reached
+PASS: a read through a denied database address denied
+PASS: the database endpoint was never reached

@@ -471,7 +471,7 @@ impl MainWorker {
     mut options: WorkerOptions,
   ) -> (Self, BootstrapOptions) {
     fn create_cache_inner(options: &WorkerOptions) -> Option<CreateCache> {
-      if let Ok(var) = std::env::var("DENO_CACHE_LSC_ENDPOINT") {
+      if let Some(var) = crate::worker::deploy_env().lsc_endpoint.as_deref() {
         let elems: Vec<_> = var.split(",").collect();
         if elems.len() == 2 {
           let endpoint = elems[0];
@@ -1196,6 +1196,31 @@ impl MainWorker {
   }
 }
 
+/// Deno Deploy's infrastructure endpoints, read from the environment once:
+/// when the first main worker is created, before any user code runs.
+///
+/// A worker connects to them with no permission check (they are operator
+/// configuration, not destinations user code picks), so they must not be read
+/// again later: user code with `--allow-env` could `Deno.env.set()` them and
+/// then start a `Worker`, whose cron handler would connect to any TCP, Unix or
+/// vsock address, and whose `caches` would send requests (with the cache
+/// contents) to any HTTP endpoint, without `--allow-net`.
+pub(crate) struct DeployEnv {
+  /// `DENO_CACHE_LSC_ENDPOINT`: `<endpoint>,<token>` for the Cache API.
+  pub lsc_endpoint: Option<String>,
+  /// `DENO_UNSTABLE_CRON_SOCK`: the `Deno.cron` scheduler socket.
+  pub cron_socket: Option<String>,
+}
+
+static DEPLOY_ENV: OnceLock<DeployEnv> = OnceLock::new();
+
+pub(crate) fn deploy_env() -> &'static DeployEnv {
+  DEPLOY_ENV.get_or_init(|| DeployEnv {
+    lsc_endpoint: std::env::var("DENO_CACHE_LSC_ENDPOINT").ok(),
+    cron_socket: std::env::var("DENO_UNSTABLE_CRON_SOCK").ok(),
+  })
+}
+
 fn common_extensions<
   TInNpmPackageChecker: InNpmPackageChecker + 'static,
   TNpmPackageFolderResolver: NpmPackageFolderResolver + 'static,
@@ -1224,7 +1249,14 @@ fn common_extensions<
     deno_net::deno_net::lazy_init(),
     deno_tls::deno_tls::init(),
     deno_kv::deno_kv::lazy_init(),
-    deno_cron::deno_cron::init(Box::new(CronHandlerImpl::create_from_env())),
+    deno_cron::deno_cron::init(Box::new(if unconfigured_runtime {
+      // A pre-warmed runtime is created before its host sets the
+      // environment; `MainWorker::from_options` reloads the handler when it
+      // hydrates it, before any user code runs.
+      CronHandlerImpl::create_from_env()
+    } else {
+      CronHandlerImpl::from_socket(deploy_env().cron_socket.clone())
+    })),
     deno_napi::deno_napi::lazy_init(),
     deno_http::deno_http::lazy_init(),
     deno_io::deno_io::lazy_init(),

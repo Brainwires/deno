@@ -16,9 +16,19 @@ pub enum CronHandlerImpl {
 
 impl CronHandlerImpl {
   pub fn create_from_env() -> Self {
-    match std::env::var("DENO_UNSTABLE_CRON_SOCK") {
-      Ok(socket_addr) => Self::Socket(SocketCronHandler::new(socket_addr)),
-      Err(_) => Self::Local(LocalCronHandler::new()),
+    Self::from_socket(std::env::var("DENO_UNSTABLE_CRON_SOCK").ok())
+  }
+
+  /// A socket handler for `socket_addr` (a `DENO_UNSTABLE_CRON_SOCK` value),
+  /// or the local one when there is none.
+  ///
+  /// For a caller that read the variable before any user code ran: the socket
+  /// handler connects as soon as it is created, so a value user code set with
+  /// `Deno.env.set()` must not reach it (see `deno_runtime::worker`).
+  pub fn from_socket(socket_addr: Option<String>) -> Self {
+    match socket_addr {
+      Some(socket_addr) => Self::Socket(SocketCronHandler::new(socket_addr)),
+      None => Self::Local(LocalCronHandler::new()),
     }
   }
 }

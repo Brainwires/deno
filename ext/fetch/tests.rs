@@ -297,6 +297,58 @@ async fn test_import_client_denies_host_resolving_to_denied_ip() {
   );
 }
 
+// A client that retries network errors must be able to tell a resolved-address
+// denial apart from them: the permission error itself is reachable through the
+// send error's source chain (remote KV relies on this, see `ext/kv/remote.rs`),
+// and a plain connection failure carries none.
+#[tokio::test]
+async fn test_resolved_deny_error_is_found_in_the_send_error() {
+  let denied_ip = "192.0.2.1";
+  let resolver = dns::Resolver::custom(Arc::new(FixedResolver(
+    format!("{denied_ip}:0").parse().unwrap(),
+  )));
+  let client = create_http_client(
+    "fetch/test",
+    CreateHttpClientOptions {
+      dns_resolver: resolver,
+      permissions: Some(deny_net_permissions(&[denied_ip])),
+      resolved_deny_check_kind: dns::ResolvedDenyCheckKind::Net,
+      ..Default::default()
+    },
+  )
+  .unwrap();
+  let req = http::Request::builder()
+    .method(http::Method::POST)
+    .uri("http://kv.example/db/snapshot_read")
+    .body(crate::ReqBody::empty())
+    .unwrap();
+  let err = client.send(req).await.unwrap_err();
+  let denied = dns::find_resolved_deny_error(&err)
+    .unwrap_or_else(|| panic!("no permission error in the chain of: {err}"));
+  assert_eq!(
+    deno_error::JsErrorClass::get_class(denied),
+    "NotCapable",
+    "{denied}"
+  );
+  assert!(denied.to_string().contains(denied_ip), "{denied}");
+
+  // Nothing listens on port 1: a refused connection is not a denial.
+  let client = create_http_client(
+    "fetch/test",
+    CreateHttpClientOptions {
+      permissions: Some(deny_net_permissions(&[denied_ip])),
+      ..Default::default()
+    },
+  )
+  .unwrap();
+  let req = http::Request::builder()
+    .uri("http://127.0.0.1:1/")
+    .body(crate::ReqBody::empty())
+    .unwrap();
+  let err = client.send(req).await.unwrap_err();
+  assert!(dns::find_resolved_deny_error(&err).is_none(), "{err}");
+}
+
 // A destination routed through a proxy must still be checked against the net
 // deny list. The connection the connector opens is to the proxy, so without a
 // separate destination check an IP-level `--deny-net` rule could be bypassed by
