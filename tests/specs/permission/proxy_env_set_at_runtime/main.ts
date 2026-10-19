@@ -37,6 +37,16 @@ const NO_PROXY_ENV = Object.fromEntries(
   ].map((name) => [name, ""]),
 );
 
+function withoutCaseOf(
+  base: Record<string, string>,
+  set: Record<string, string>,
+): Record<string, string> {
+  const taken = new Set(Object.keys(set).map((name) => name.toLowerCase()));
+  return Object.fromEntries(
+    Object.entries(base).filter(([name]) => !taken.has(name.toLowerCase())),
+  );
+}
+
 async function runChild(script: string, env: Record<string, string> = {}) {
   const child = new Deno.Command(Deno.execPath(), {
     args: [
@@ -45,8 +55,10 @@ async function runChild(script: string, env: Record<string, string> = {}) {
       "--allow-env",
       "-",
     ],
-    // Start from an environment with no proxy configured.
-    env: { ...NO_PROXY_ENV, ...env, NO_COLOR: "1" },
+    // Start from an environment with no proxy configured, apart from `env`.
+    // Windows treats the two cases of a variable as one, so leave out the
+    // other case of anything `env` sets.
+    env: { ...withoutCaseOf(NO_PROXY_ENV, env), ...env, NO_COLOR: "1" },
     stdin: "piped",
     stdout: "piped",
     stderr: "null",
