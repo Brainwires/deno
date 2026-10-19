@@ -1,0 +1,1 @@
+[WILDCARD]`paranoid` is on, but trust-policy=off in .npmrc weakens it. Remove trust-policy=off (paranoid sets trust-policy=no-downgrade), or turn paranoid off.[WILDCARD]

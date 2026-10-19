@@ -1,0 +1,1 @@
+[WILDCARD]`paranoid` is on, but low-download-threshold=0 in file:///[WILDCARD]/threshold_off/deno.json weakens it. Remove low-download-threshold=0 (paranoid sets a non-zero threshold), or turn paranoid off.[WILDCARD]

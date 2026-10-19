@@ -1,0 +1,1 @@
+[WILDCARD]`paranoid` is on, but jail-scripts=false in file:///[WILDCARD]/weak_deno_json/deno.json weakens it. Remove jail-scripts=false (paranoid sets jail-scripts=true), or turn paranoid off.[WILDCARD]

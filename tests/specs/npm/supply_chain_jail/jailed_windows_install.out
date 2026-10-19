@@ -1,0 +1,2 @@
+[WILDCARD]Warning jail-scripts: windows has no OS sandbox Deno can apply to lifecycle scripts. Lifecycle scripts run with a scrubbed environment and a temporary HOME, and the JavaScript they run through Deno is confined, but other programs they start are not.
+[WILDCARD]

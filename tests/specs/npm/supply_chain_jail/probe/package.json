@@ -1,0 +1,9 @@
+{
+  "name": "app",
+  "version": "1.0.0",
+  "workspaces": ["member"],
+  "dependencies": {
+    "@denotest/jail-probe": "1.0.0",
+    "member": "workspace:*"
+  }
+}

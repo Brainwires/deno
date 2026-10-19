@@ -1,0 +1,3 @@
+{
+  "supplyChain": { "paranoid": true, "lowDownloadThreshold": 50000 }
+}

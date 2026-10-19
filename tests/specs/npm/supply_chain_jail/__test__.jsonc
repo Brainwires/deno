@@ -1,0 +1,172 @@
+{
+  // jail-scripts (DENEXT.md item 80): an approved dependency's lifecycle
+  // script runs with a scrubbed environment, a scratch HOME, writes confined
+  // to node_modules + temp, no credential files, no network, and every deno
+  // it starts clamped to the same. @denotest/jail-probe's postinstall tries
+  // the ways out (node, sh, a symlink of its own, a workspace member's link,
+  // `deno run -A`, npx, `deno install`) and records what happened.
+  "tempDir": true,
+  "envs": {
+    "GITHUB_TOKEN": "gh-secret",
+    "NPM_TOKEN": "npm-secret",
+    "npm_config__authToken": "npm-auth-secret",
+    "JAIL_PASSED_VAR": "passed"
+  },
+  "tests": {
+    "jailed_linux": {
+      "if": "linux",
+      "steps": [
+        {
+          "cwd": "probe",
+          "args": "install --allow-scripts=npm:@denotest/jail-probe --jail-scripts",
+          "output": "[WILDCARD]"
+        },
+        {
+          "cwd": "probe",
+          "args": "run -A check.mjs jail-probe",
+          "output": "jailed_linux.out"
+        }
+      ]
+    },
+    "jailed_mac": {
+      "if": "mac",
+      "steps": [
+        {
+          "cwd": "probe",
+          "args": "install --allow-scripts=npm:@denotest/jail-probe --jail-scripts",
+          "output": "[WILDCARD]"
+        },
+        {
+          "cwd": "probe",
+          "args": "run -A check.mjs jail-probe",
+          "output": "jailed_mac.out"
+        }
+      ]
+    },
+    // no OS sandbox: a warning; the environment, HOME and every deno the
+    // script starts are still confined
+    "jailed_windows": {
+      "if": "windows",
+      "steps": [
+        {
+          "cwd": "probe",
+          "args": "install --allow-scripts=npm:@denotest/jail-probe --jail-scripts",
+          "output": "jailed_windows_install.out"
+        },
+        {
+          "cwd": "probe",
+          "args": "run -A check.mjs jail-probe",
+          "output": "jailed_windows.out"
+        }
+      ]
+    },
+    // without jail-scripts, the same script sees and writes everything
+    "not_jailed": {
+      "steps": [
+        {
+          "cwd": "control",
+          "args": "install --allow-scripts=npm:@denotest/jail-control-probe",
+          "output": "[WILDCARD]"
+        },
+        {
+          "cwd": "control",
+          "args": "run -A check.mjs jail-control-probe",
+          "output": "not_jailed.out"
+        }
+      ]
+    },
+    // the same with npm_config_jail_scripts (an .npmrc key's environment form)
+    "jailed_by_npmrc_key": {
+      "if": "unix",
+      "steps": [
+        {
+          "cwd": "control",
+          "args": "install --allow-scripts=npm:@denotest/jail-control-probe",
+          "envs": { "npm_config_jail_scripts": "true" },
+          "output": "[WILDCARD]"
+        },
+        {
+          "cwd": "control",
+          "args": "run -A check.mjs jail-control-probe",
+          "output": "jailed_control.out"
+        }
+      ]
+    },
+    // deno.json's per-package exceptions: an environment variable passed
+    // through, and an extra write path (the project's own directory)
+    "per_package_exceptions": {
+      "if": "unix",
+      "steps": [
+        {
+          "cwd": "exceptions",
+          "args": "install --allow-scripts=npm:@denotest/jail-control-probe",
+          "output": "[WILDCARD]"
+        },
+        {
+          "cwd": "exceptions",
+          "args": "run -A check.mjs jail-control-probe",
+          "output": "exceptions.out"
+        }
+      ]
+    },
+    // a package that declares its download host (node-pre-gyp's
+    // binary.host) may reach that host, and only it
+    "declared_download_host": {
+      "if": "unix",
+      "steps": [
+        {
+          "cwd": "net",
+          "args": "install --allow-scripts=npm:@denotest/jail-net-declared --jail-scripts",
+          "output": "[WILDCARD]"
+        },
+        {
+          "cwd": "net",
+          "args": "eval console.log(Deno.readTextFileSync('node_modules/@denotest/jail-net-declared/results.txt').trim())",
+          "output": "declared host: allowed\nother host: denied\n"
+        }
+      ]
+    },
+    // paranoid: jailed without being asked, and a package can't grant itself
+    // the network
+    "paranoid_jails": {
+      "if": "unix",
+      "steps": [
+        {
+          "cwd": "paranoid",
+          "args": "install --allow-scripts=npm:@denotest/jail-control-probe",
+          "output": "[WILDCARD]"
+        },
+        {
+          "cwd": "paranoid",
+          "args": "run -A check.mjs jail-control-probe",
+          "output": "jailed_control.out"
+        }
+      ]
+    },
+    "paranoid_ignores_declared_host": {
+      "if": "unix",
+      "steps": [
+        {
+          "cwd": "net",
+          "args": "install --allow-scripts=npm:@denotest/jail-net-declared",
+          "envs": { "npm_config_paranoid": "true" },
+          "output": "[WILDCARD]"
+        },
+        {
+          "cwd": "net",
+          "args": "eval console.log(Deno.readTextFileSync('node_modules/@denotest/jail-net-declared/results.txt').trim())",
+          "output": "declared host: denied\nother host: denied\n"
+        }
+      ]
+    },
+    // where nothing can confine the script's other programs, paranoid
+    // refuses to run it
+    "paranoid_refuses_without_os_sandbox": {
+      "if": "windows",
+      "cwd": "paranoid",
+      "args": "install --allow-scripts=npm:@denotest/jail-control-probe",
+      "output": "paranoid_windows.out",
+      "exitCode": 1
+    }
+  }
+}

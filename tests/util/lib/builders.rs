@@ -977,6 +977,10 @@ impl TestCommandBuilder {
     if !envs.contains_key("NPM_CONFIG_REGISTRY") {
       envs.insert("NPM_CONFIG_REGISTRY".to_string(), npm_registry_unset_url());
     }
+    if !envs.contains_key("DENO_OSV_URL") {
+      // never the real OSV from a test
+      envs.insert("DENO_OSV_URL".to_string(), crate::supply_chain_api_url());
+    }
     if !envs.contains_key("DENO_NO_UPDATE_CHECK") {
       envs.insert("DENO_NO_UPDATE_CHECK".to_string(), "1".to_string());
     }

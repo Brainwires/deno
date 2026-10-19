@@ -1,0 +1,91 @@
+{
+  // paranoid (DENEXT.md item 83): every supply-chain gate on, each failing
+  // closed; a member set explicitly to something weaker is a config error.
+  "tempDir": true,
+  "envs": { "DENO_NPM_DOWNLOADS_URL": "http://localhost:4270/" },
+  "tests": {
+    "osv_unreachable_refuses": {
+      "cwd": "npmrc",
+      "args": "add npm:@denotest/malicious-version@1.0.0",
+      "envs": { "DENO_OSV_URL": "http://localhost:4270/down/" },
+      "output": "refused_unreachable.out",
+      "exitCode": 1
+    },
+    "unknown_downloads_refuse": {
+      "cwd": "npmrc",
+      "args": "add npm:@denotest/unknown-downloads-pkg@1.0.0",
+      "output": "refused_unknown.out",
+      "exitCode": 1
+    },
+    "downloads_api_unreachable_refuses": {
+      "cwd": "npmrc",
+      "args": "add npm:@denotest/add@1.0.0",
+      "envs": { "DENO_NPM_DOWNLOADS_URL": "http://localhost:4270/down/" },
+      "output": "refused_unknown_add.out",
+      "exitCode": 1
+    },
+    // allowing a package by name still works; allowing all of them doesn't
+    "allow_low_downloads_needs_names": {
+      "steps": [
+        {
+          "cwd": "npmrc",
+          "args": "add --allow-low-downloads npm:@denotest/unpopular-pkg@1.0.0",
+          "output": "refused_allow_all.out",
+          "exitCode": 1
+        },
+        {
+          "cwd": "npmrc",
+          "args": "add --allow-low-downloads=npm:@denotest/unpopular-pkg npm:@denotest/unpopular-pkg@1.0.0",
+          "output": "[WILDCARD]Add npm:@denotest/unpopular-pkg@1.0.0[WILDCARD]"
+        }
+      ]
+    },
+    // a stricter member is kept: 50000 weekly downloads
+    "stricter_member_kept": {
+      "cwd": "deno_json",
+      "args": "add npm:@denotest/modest-downloads@1.0.0",
+      "output": "refused_modest.out",
+      "exitCode": 1
+    },
+    // the no-downgrade trust policy is on
+    "trust_policy_no_downgrade": {
+      "cwd": "npmrc",
+      "args": "install npm:@denotest/trust-downgrade@1.1.0",
+      "output": "trust_downgrade.out",
+      "exitCode": 1
+    },
+    "weaker_member_in_npmrc_is_an_error": {
+      "cwd": "weak_npmrc",
+      "args": "install",
+      "output": "weak_npmrc.out",
+      "exitCode": 1
+    },
+    "weaker_member_in_deno_json_is_an_error": {
+      "cwd": "weak_deno_json",
+      "args": "install",
+      "output": "weak_deno_json.out",
+      "exitCode": 1
+    },
+    "weaker_member_in_the_environment_is_an_error": {
+      "cwd": "deno_json",
+      "args": "install",
+      "envs": { "npm_config_advisory_check": "off" },
+      "output": "weak_env.out",
+      "exitCode": 1
+    },
+    "trust_policy_off_is_an_error": {
+      "cwd": "trust_off",
+      "args": "install",
+      "output": "weak_trust.out",
+      "exitCode": 1
+    },
+    // paranoid from the environment and a threshold of 0 in deno.json
+    "threshold_zero_is_an_error": {
+      "cwd": "threshold_off",
+      "args": "install",
+      "envs": { "npm_config_paranoid": "true" },
+      "output": "weak_threshold.out",
+      "exitCode": 1
+    }
+  }
+}

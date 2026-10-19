@@ -45,6 +45,7 @@ mod jsr_registry;
 mod nodejs_org_mirror;
 mod npm_registry;
 mod socket_dev;
+mod supply_chain;
 mod ws;
 
 use hyper_utils::ServerKind;
@@ -152,6 +153,7 @@ pub async fn run_all_servers() {
   let npm_jsr_registry_server_futs =
     npm_registry::public_npm_jsr_registry(PUBLIC_NPM_JSR_REGISTRY_PORT);
   let socket_dev_api_futs = socket_dev::api(SOCKET_DEV_API_PORT);
+  let supply_chain_api_futs = supply_chain::api(SUPPLY_CHAIN_API_PORT);
 
   // for serving node header files to node-gyp in tests
   let node_js_mirror_server_fut =
@@ -193,6 +195,7 @@ pub async fn run_all_servers() {
   futures.extend(npm_jsr_registry_server_futs);
   futures.extend(private_npm_registry_mtls_futs);
   futures.extend(socket_dev_api_futs);
+  futures.extend(supply_chain_api_futs);
 
   assert_eq!(futures.len(), TEST_SERVERS_COUNT);
 

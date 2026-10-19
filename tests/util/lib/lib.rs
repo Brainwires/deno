@@ -68,6 +68,7 @@ pub fn env_vars_for_npm_tests() -> Vec<(String, String)> {
     ("NODEJS_ORG_MIRROR".to_string(), nodejs_org_mirror_url()),
     ("NO_COLOR".to_string(), "1".to_string()),
     ("SOCKET_DEV_URL".to_string(), socket_dev_api_url()),
+    ("DENO_OSV_URL".to_string(), supply_chain_api_url()),
   ]
 }
 
@@ -291,6 +292,12 @@ pub fn gha_token_url() -> String {
   )
 }
 
+/// The stand-in OSV / npm downloads API (`DENO_OSV_URL`,
+/// `DENO_NPM_DOWNLOADS_URL`).
+pub fn supply_chain_api_url() -> String {
+  format!("http://localhost:{}/", consts::SUPPLY_CHAIN_API_PORT)
+}
+
 pub fn socket_dev_api_url() -> String {
   format!("http://localhost:{}/", consts::SOCKET_DEV_API_PORT)
 }
@@ -369,7 +376,7 @@ fn ensure_test_server_built() {
   }
 }
 
-pub const TEST_SERVERS_COUNT: usize = 39;
+pub const TEST_SERVERS_COUNT: usize = 40;
 
 #[derive(Default)]
 struct HttpServerCount {

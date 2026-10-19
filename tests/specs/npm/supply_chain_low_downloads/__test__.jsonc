@@ -1,0 +1,105 @@
+{
+  // The low-download gate on `deno add` (DENEXT.md item 82). The stand-in
+  // downloads API (tests/util/server/servers/supply_chain.rs) gives
+  // `*unpopular*` 12 weekly downloads and `*unknown-downloads*` no count;
+  // DENO_NPM_DOWNLOADS_URL points at it, which also makes the test registry
+  // count as one whose downloads are checked.
+  "tempDir": true,
+  "envs": { "DENO_NPM_DOWNLOADS_URL": "http://localhost:4270/" },
+  "tests": {
+    // not a terminal: refused, nothing written
+    "refused_without_terminal": {
+      "steps": [
+        {
+          "cwd": "add",
+          "args": "add npm:@denotest/unpopular-pkg@1.0.0",
+          "output": "refused.out",
+          "exitCode": 1
+        },
+        {
+          "cwd": "add",
+          "args": "eval console.log(Deno.readTextFileSync('deno.json').trim())",
+          "output": "{}\n"
+        }
+      ]
+    },
+    // above the default threshold of 1000
+    "modest_package_added": {
+      "cwd": "add",
+      "args": "add npm:@denotest/modest-downloads@1.0.0",
+      "output": "[WILDCARD]Add npm:@denotest/modest-downloads@1.0.0[WILDCARD]"
+    },
+    "popular_package_added": {
+      "cwd": "add",
+      "args": "add npm:@denotest/add@1.0.0",
+      "output": "[WILDCARD]Add npm:@denotest/add@1.0.0[WILDCARD]"
+    },
+    "allowed_by_name_on_the_command_line": {
+      "cwd": "add",
+      "args": "add --allow-low-downloads=npm:@denotest/unpopular-pkg npm:@denotest/unpopular-pkg@1.0.0",
+      "output": "[WILDCARD]Add npm:@denotest/unpopular-pkg@1.0.0[WILDCARD]"
+    },
+    // another name on the flag doesn't allow it
+    "other_name_on_the_command_line": {
+      "cwd": "add",
+      "args": "add --allow-low-downloads=npm:left-pad npm:@denotest/unpopular-pkg@1.0.0",
+      "output": "refused.out",
+      "exitCode": 1
+    },
+    "allowed_all_on_the_command_line": {
+      "cwd": "add",
+      "args": "add --allow-low-downloads npm:@denotest/unpopular-pkg@1.0.0",
+      "output": "[WILDCARD]Add npm:@denotest/unpopular-pkg@1.0.0[WILDCARD]"
+    },
+    "allowed_by_npmrc_glob": {
+      "cwd": "allowed_npmrc",
+      "args": "add npm:@denotest/unpopular-pkg@1.0.0",
+      "output": "[WILDCARD]Add npm:@denotest/unpopular-pkg@1.0.0[WILDCARD]"
+    },
+    "allowed_by_deno_json": {
+      "cwd": "allowed_deno_json",
+      "args": "add npm:@denotest/unpopular-pkg@1.0.0",
+      "output": "[WILDCARD]Add npm:@denotest/unpopular-pkg@1.0.0[WILDCARD]"
+    },
+    "threshold_zero_turns_it_off": {
+      "cwd": "threshold_off",
+      "args": "add npm:@denotest/unpopular-pkg@1.0.0",
+      "output": "[WILDCARD]Add npm:@denotest/unpopular-pkg@1.0.0[WILDCARD]"
+    },
+    // a name the lockfile already has is not checked again
+    "known_to_the_lockfile": {
+      "steps": [
+        {
+          "cwd": "add",
+          "args": "add --allow-low-downloads=npm:@denotest/unpopular-pkg npm:@denotest/unpopular-pkg@1.0.0",
+          "output": "[WILDCARD]"
+        },
+        {
+          "cwd": "add",
+          "args": "add npm:@denotest/unpopular-pkg@1.0.0",
+          "output": "[WILDCARD]Add npm:@denotest/unpopular-pkg@1.0.0[WILDCARD]"
+        }
+      ]
+    },
+    // an unknown count fails open
+    "unknown_count_is_allowed": {
+      "cwd": "add",
+      "args": "add npm:@denotest/unknown-downloads-pkg@1.0.0",
+      "output": "[WILDCARD]Add npm:@denotest/unknown-downloads-pkg@1.0.0[WILDCARD]"
+    },
+    "unreachable_api_is_allowed": {
+      "cwd": "add",
+      "args": "add npm:@denotest/unpopular-pkg@1.0.0",
+      "envs": { "DENO_NPM_DOWNLOADS_URL": "http://localhost:4270/down/" },
+      "output": "[WILDCARD]Add npm:@denotest/unpopular-pkg@1.0.0[WILDCARD]"
+    },
+    // a registry other than npmjs.org (here, the test registry without the
+    // downloads API override) has no public counts: not checked
+    "other_registry_not_checked": {
+      "cwd": "add",
+      "args": "add npm:@denotest/unpopular-pkg@1.0.0",
+      "envs": { "DENO_NPM_DOWNLOADS_URL": "" },
+      "output": "[WILDCARD]Add npm:@denotest/unpopular-pkg@1.0.0[WILDCARD]"
+    }
+  }
+}

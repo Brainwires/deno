@@ -1,0 +1,12 @@
+{
+  "supplyChain": {
+    "jailScripts": {
+      "packages": {
+        "npm:@denotest/jail-control-probe": {
+          "env": ["JAIL_PASSED_VAR"],
+          "write": ["."]
+        }
+      }
+    }
+  }
+}

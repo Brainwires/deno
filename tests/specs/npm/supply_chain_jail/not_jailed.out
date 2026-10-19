@@ -1,0 +1,13 @@
+node: GITHUB_TOKEN: visible
+node: NPM_TOKEN: visible
+node: npm auth config: visible
+node: JAIL_PASSED_VAR: passed
+node: home: real
+node: write own dir: allowed
+node: write TMPDIR: allowed
+node: write system temp: [WILDCARD]
+node: write project: allowed
+[WILDCARD]
+node: read .env: allowed
+[WILDCARD]
+written outside: pwned-node.txt

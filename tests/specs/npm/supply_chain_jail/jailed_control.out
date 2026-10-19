@@ -1,0 +1,16 @@
+node: GITHUB_TOKEN: missing
+node: NPM_TOKEN: missing
+node: npm auth config: missing
+node: JAIL_PASSED_VAR: missing
+node: home: scratch
+node: write own dir: allowed
+node: write TMPDIR: allowed
+node: write system temp: denied
+node: write project: denied
+[WILDCARD]
+node: create symlink: denied
+node: read .env: denied
+node: read project package.json: allowed
+[WILDCARD]
+node: fetch: denied
+written outside: nothing

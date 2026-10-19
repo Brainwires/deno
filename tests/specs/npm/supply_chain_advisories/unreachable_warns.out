@@ -1,0 +1,3 @@
+[WILDCARD]Warning Could not check npm packages against OSV's malicious-package list ([WILDCARD]503[WILDCARD]); installing anyway. Set advisory-check=required (or paranoid) to refuse instead.
+[WILDCARD]Add npm:@denotest/malicious-version@1.0.0
+[WILDCARD]

@@ -1,0 +1,3 @@
+[WILDCARD]error: Refusing to install npm package versions listed as malicious:
+  npm:@denotest/malicious-version@2.0.0: MAL-2026-0001 (https://osv.dev/vulnerability/MAL-2026-0001)
+Use another version. To turn this check off (not recommended), set advisory-check=off in .npmrc or "supplyChain": { "advisoryCheck": "off" } in deno.json.

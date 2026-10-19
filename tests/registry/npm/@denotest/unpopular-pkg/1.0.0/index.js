@@ -1,0 +1,1 @@
+module.exports = 'unpopular-pkg';

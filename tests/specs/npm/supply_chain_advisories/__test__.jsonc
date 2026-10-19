@@ -1,0 +1,119 @@
+{
+  // The malicious-version gate (DENEXT.md item 81): versions OSV lists with a
+  // `MAL-` advisory are refused. The stand-in OSV (tests/util/server/servers/
+  // supply_chain.rs) lists `*malicious*@2.x`; under `/down/` it answers 503.
+  "tempDir": true,
+  "tests": {
+    "add_refuses_malicious_version": {
+      "steps": [
+        {
+          "cwd": "add",
+          "args": "add npm:@denotest/malicious-version@2.0.0",
+          "output": "refused_direct.out",
+          "exitCode": 1
+        },
+        {
+          "cwd": "add",
+          "args": "eval console.log(Deno.readTextFileSync('deno.json').trim())",
+          "output": "{}\n"
+        }
+      ]
+    },
+    "add_allows_clean_version": {
+      "cwd": "add",
+      "args": "add npm:@denotest/malicious-version@1.0.0",
+      "output": "[WILDCARD]Add npm:@denotest/malicious-version@1.0.0[WILDCARD]"
+    },
+    // the dependency a clean package brings in is checked too, and deno.json
+    // is put back as it was
+    "add_refuses_malicious_dependency": {
+      "steps": [
+        {
+          "cwd": "add",
+          "args": "add npm:@denotest/has-malicious-dep@1.0.0",
+          "output": "refused_transitive.out",
+          "exitCode": 1
+        },
+        {
+          "cwd": "add",
+          "args": "eval console.log(Deno.readTextFileSync('deno.json').trim())",
+          "output": "{}\n"
+        }
+      ]
+    },
+    "install_refuses_configured_version": {
+      "cwd": "configured",
+      "args": "install",
+      "output": "refused_transitive.out",
+      "exitCode": 1
+    },
+    // a resolution outside the package manager commands (here `deno eval`
+    // importing a new package) is checked too
+    "eval_refuses_malicious_version": {
+      "cwd": "add",
+      "args": "eval import('npm:@denotest/malicious-version@2.0.0')",
+      "output": "refused_transitive.out",
+      "exitCode": 1
+    },
+    "off": {
+      "cwd": "off",
+      "args": "add npm:@denotest/malicious-version@2.0.0",
+      "output": "[WILDCARD]Add npm:@denotest/malicious-version@2.0.0[WILDCARD]"
+    },
+    // OSV can't be reached: a warning, and the install goes on
+    "unreachable_warns": {
+      "cwd": "add",
+      "args": "add npm:@denotest/malicious-version@1.0.0",
+      "envs": { "DENO_OSV_URL": "http://localhost:4270/down/" },
+      "output": "unreachable_warns.out"
+    },
+    "unreachable_required_refuses": {
+      "steps": [
+        {
+          "cwd": "required",
+          "args": "add npm:@denotest/malicious-version@1.0.0",
+          "envs": { "DENO_OSV_URL": "http://localhost:4270/down/" },
+          "output": "refused_unreachable.out",
+          "exitCode": 1
+        },
+        {
+          "cwd": "deno_json_required",
+          "args": "add npm:@denotest/malicious-version@1.0.0",
+          "envs": { "DENO_OSV_URL": "http://localhost:4270/down/" },
+          "output": "refused_unreachable.out",
+          "exitCode": 1
+        }
+      ]
+    },
+    // a clean result is reused (no query), until it is older than the TTL
+    "clean_results_are_cached": {
+      "steps": [
+        {
+          "cwd": "add",
+          "args": "add npm:@denotest/malicious-version@1.0.0",
+          "output": "[WILDCARD]"
+        },
+        {
+          "cwd": "add",
+          "args": "install",
+          "envs": {
+            "DENO_OSV_URL": "http://localhost:4270/down/",
+            "npm_config_advisory_check": "required"
+          },
+          "output": "[WILDCARD]"
+        },
+        {
+          "cwd": "add",
+          "args": "install",
+          "envs": {
+            "DENO_OSV_URL": "http://localhost:4270/down/",
+            "npm_config_advisory_check": "required",
+            "DENO_OSV_CACHE_TTL": "0"
+          },
+          "output": "refused_unreachable.out",
+          "exitCode": 1
+        }
+      ]
+    }
+  }
+}

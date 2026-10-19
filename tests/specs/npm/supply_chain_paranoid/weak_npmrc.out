@@ -1,0 +1,1 @@
+[WILDCARD]`paranoid` is on, but advisory-check=off in .npmrc weakens it. Remove advisory-check=off (paranoid sets advisory-check=required), or turn paranoid off.[WILDCARD]

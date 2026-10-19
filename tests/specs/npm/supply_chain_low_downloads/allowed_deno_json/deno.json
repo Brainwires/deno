@@ -1,0 +1,3 @@
+{
+  "supplyChain": { "allowLowDownloads": ["npm:@denotest/unpopular-pkg"] }
+}
