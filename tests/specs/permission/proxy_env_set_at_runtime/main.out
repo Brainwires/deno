@@ -1,0 +1,12 @@
+from the target
+PASS: HTTP_PROXY set at runtime was not used
+from the target
+PASS: http_proxy set at runtime was not used
+from the target
+PASS: ALL_PROXY set at runtime was not used
+from the target
+PASS: all_proxy set at runtime was not used
+from the proxy
+PASS: NO_PROXY set at runtime was not used
+from the proxy
+PASS: HTTP_PROXY set at startup is used

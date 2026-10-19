@@ -14,6 +14,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::task::Context;
 use std::task::Poll;
 
@@ -149,6 +150,60 @@ enum Filter {
   All,
 }
 
+/// The proxy environment variables, both cases.
+const PROXY_ENV_VARS: [&str; 8] = [
+  "ALL_PROXY",
+  "all_proxy",
+  "HTTPS_PROXY",
+  "https_proxy",
+  "HTTP_PROXY",
+  "http_proxy",
+  "NO_PROXY",
+  "no_proxy",
+];
+
+/// The proxy configuration from the environment, read once.
+struct ProxyEnv {
+  vars: Vec<(&'static str, String)>,
+  /// Whether `REQUEST_METHOD` was set (a CGI context, see [`from_env`]).
+  cgi: bool,
+}
+
+static PROXY_ENV: OnceLock<ProxyEnv> = OnceLock::new();
+
+fn proxy_env() -> &'static ProxyEnv {
+  PROXY_ENV.get_or_init(|| ProxyEnv {
+    vars: PROXY_ENV_VARS
+      .iter()
+      .filter_map(|name| Some((*name, env::var(name).ok()?)))
+      .collect(),
+    cgi: env::var_os("REQUEST_METHOD").is_some(),
+  })
+}
+
+fn proxy_env_var(name: &str) -> Option<&'static str> {
+  proxy_env()
+    .vars
+    .iter()
+    .find(|(var, _)| *var == name)
+    .map(|(_, value)| value.as_str())
+}
+
+/// Reads the proxy environment variables (`HTTP_PROXY`, `HTTPS_PROXY`,
+/// `ALL_PROXY`, `NO_PROXY`, in either case) now, if they haven't been read
+/// yet; every HTTP client created afterwards uses these values.
+///
+/// The runtime calls this before any user code runs. HTTP clients are created
+/// lazily (`fetch()`'s on its first request), and the connection to an
+/// environment proxy is not checked against `--allow-net`: it is operator
+/// configuration. Read at client creation, a value set with `Deno.env.set()`
+/// would let a program with `--allow-env` route its requests through a host it
+/// may not connect to. An explicit `Deno.createHttpClient({ proxy })` is
+/// permission-checked and unaffected.
+pub fn snapshot_proxy_env() {
+  proxy_env();
+}
+
 pub(crate) fn from_env() -> Proxies {
   let mut intercepts = Vec::new();
 
@@ -176,7 +231,7 @@ pub(crate) fn from_env() -> Proxies {
 
   // In a CGI context, headers become environment variables. So, "Proxy:" becomes HTTP_PROXY.
   // To prevent an attacker from injecting a proxy, check if we are in CGI.
-  if env::var_os("REQUEST_METHOD").is_none() {
+  if !proxy_env().cgi {
     match parse_env_var("HTTP_PROXY", Filter::Http) {
       Some(proxy) => {
         intercepts.push(proxy);
@@ -215,8 +270,8 @@ pub fn basic_auth(user: &str, pass: Option<&str>) -> HeaderValue {
 }
 
 fn parse_env_var(name: &str, filter: Filter) -> Option<Intercept> {
-  let val = env::var(name).ok()?;
-  let target = Target::parse(&val)?;
+  let val = proxy_env_var(name)?;
+  let target = Target::parse(val)?;
   Some(Intercept { filter, target })
 }
 
@@ -394,11 +449,11 @@ impl NoProxy {
   /// Returns a new no-proxy configuration based on environment variables (or `None` if no variables are set)
   /// see [self::NoProxy::from_string()] for the string format
   fn from_env() -> Option<NoProxy> {
-    let raw = env::var("NO_PROXY")
-      .or_else(|_| env::var("no_proxy"))
+    let raw = proxy_env_var("NO_PROXY")
+      .or_else(|| proxy_env_var("no_proxy"))
       .unwrap_or_default();
 
-    Self::from_string(&raw)
+    Self::from_string(raw)
   }
 
   /// Returns a new no-proxy configuration based on a `no_proxy` string (or `None` if no variables

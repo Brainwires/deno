@@ -127,6 +127,11 @@ async fn run_subcommand(
   unconfigured_runtime: Option<UnconfiguredRuntime>,
   roots: LibWorkerFactoryRoots,
 ) -> Result<i32, AnyError> {
+  // `JSR_URL` is read lazily (on the first `jsr:` specifier); read it now,
+  // before any user code runs, so a value set with `Deno.env.set()` can't
+  // change where `jsr:` imports load from (as the proxy variables, see
+  // `deno_fetch::snapshot_proxy_env`).
+  let _ = args::jsr_url();
   let handle = match flags.subcommand.clone() {
     DenoSubcommand::Add(add_flags) => spawn_subcommand(async {
       tools::pm::add(Arc::new(flags), add_flags, tools::pm::AddCommandName::Add)

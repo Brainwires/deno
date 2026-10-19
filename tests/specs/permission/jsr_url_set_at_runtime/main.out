@@ -1,0 +1,2 @@
+PASS: JSR_URL set at runtime was not used
+PASS: JSR_URL set at startup is used

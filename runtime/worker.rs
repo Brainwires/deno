@@ -470,6 +470,13 @@ impl MainWorker {
     >,
     mut options: WorkerOptions,
   ) -> (Self, BootstrapOptions) {
+    // The environment that says where the runtime itself connects is read
+    // here, once, before any user code runs, so `Deno.env.set()` can't
+    // redirect it later: Deno Deploy's endpoints (`deploy_env`) and the proxy
+    // variables the lazily created HTTP clients use.
+    deploy_env();
+    deno_fetch::snapshot_proxy_env();
+
     fn create_cache_inner(options: &WorkerOptions) -> Option<CreateCache> {
       if let Some(var) = crate::worker::deploy_env().lsc_endpoint.as_deref() {
         let elems: Vec<_> = var.split(",").collect();

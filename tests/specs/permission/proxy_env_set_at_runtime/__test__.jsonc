@@ -1,0 +1,8 @@
+{
+  "tests": {
+    "proxy_env_set_at_runtime": {
+      "args": "run -A main.ts",
+      "output": "main.out"
+    }
+  }
+}

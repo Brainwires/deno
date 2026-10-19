@@ -100,6 +100,7 @@ use hyper_util::rt::TokioExecutor;
 use hyper_util::rt::TokioIo;
 use hyper_util::rt::TokioTimer;
 pub use proxy::basic_auth;
+pub use proxy::snapshot_proxy_env;
 use tokio_util::io::ReaderStream;
 use tokio_util::io::StreamReader;
 use tower::BoxError;

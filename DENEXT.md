@@ -2626,11 +2626,36 @@ where the changes are discussed.
     `lsp_tsgo_types_follow_a_new_import` in
     `tests/integration/lsp_tsgo_tests.rs`.
 
+82. **`fix(permissions)`: the proxy variables are read before user code**
+    (`fix/proxy-env-snapshot`, for runtime `denext.23`; `ext/fetch/proxy.rs`,
+    `runtime/worker.rs`, `cli/lib.rs`). Follows item 80. `fetch()` creates its
+    HTTP client lazily, on the first request, and `create_http_client` read
+    `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` / `NO_PROXY` (either case) at
+    that point. The connection to an environment proxy is operator configuration
+    and is not checked against `--allow-net`, so a program with `--allow-env`
+    could `Deno.env.set("HTTP_PROXY", ...)` before its first `fetch()` and send
+    its requests, bodies included, to a host it may not connect to (or set
+    `NO_PROXY` to skip the operator's proxy). The variables (and the
+    `REQUEST_METHOD` CGI guard) are now read once into a snapshot
+    (`deno_fetch::snapshot_proxy_env`), which `MainWorker::from_options` takes
+    before any user code runs, and every client uses it. An explicit
+    `Deno.createHttpClient({ proxy })` is unchanged: it is checked as before.
+    `node:http`'s own `NODE_USE_ENV_PROXY` support still reads the variables on
+    its first request, but it connects to the proxy through `node:net`, which
+    checks `--allow-net`. For consistency the CLI also reads `JSR_URL` as a
+    subcommand starts; it was already read at startup on the paths tested (the
+    default import allow list uses it), and a `jsr:` load is checked against
+    `--allow-import` either way. Tests: `permission/proxy_env_set_at_runtime`
+    (`HTTP_PROXY`, `http_proxy`, `ALL_PROXY`, `all_proxy` set at runtime are not
+    used; a runtime `NO_PROXY` does not bypass the startup proxy; control: a
+    startup `HTTP_PROXY` is used) and `permission/jsr_url_set_at_runtime` (a
+    guard: passes before and after).
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
-64-73, 75-77, 80) are what the prebuilt `libdenort` carries. The CLI-side parts
-(for example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged
-app's launchers) are in the branch too, but a stock CLI does not run them;
-denext's own launcher provides that environment.
+64-73, 75-77, 80, 82) are what the prebuilt `libdenort` carries. The CLI-side
+parts (for example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a
+packaged app's launchers) are in the branch too, but a stock CLI does not run
+them; denext's own launcher provides that environment.
 
 The laufey backend hosts are built from
 [Brainwires/laufey](https://github.com/Brainwires/laufey) branch
