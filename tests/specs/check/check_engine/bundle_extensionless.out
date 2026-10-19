@@ -1,0 +1,11 @@
+⚠️  deno bundle is experimental and subject to changes
+Check [WILDCARD]bundle_extensionless.ts
+TS2322 [ERROR]: Type 'number' is not assignable to type 'string'.
+export const s: string = ok;
+             ^
+    at [WILDCARD]bundle_extensionless.ts:3:14
+
+error: Type checking failed.
+
+  info: The program failed type-checking, but it still might work correctly.
+  hint: Re-run with --no-check to skip type-checking.

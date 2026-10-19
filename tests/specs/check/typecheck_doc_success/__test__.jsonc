@@ -1,8 +1,6 @@
 {
-  // Disabled during the TypeScript un-fork: `check --doc`/`--doc-only` is not
-  // yet supported by the native tsc backend. Tracked in
-  // https://github.com/denoland/deno/issues/35946.
-  "ignore": true,
+  // denext: the native compiler checks the code blocks written out (item 81;
+  // upstream ignored this, denoland/deno#35946)
   "args": "check --doc mod.ts",
   "exitCode": 0,
   "output": "mod.out"

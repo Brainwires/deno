@@ -32,9 +32,11 @@ mod npm_compat;
 pub use global::uninstall;
 use local::CategorizedInstalledDeps;
 pub use local::RootTsConfigMode;
+pub use local::SYNC_TYPES_EXTRA_SPECIFIERS_ENV;
 use local::categorize_installed_npm_deps;
 pub use local::ci_command;
 pub use local::sync_types_command;
+pub use local::sync_types_extra_specifiers_from_env;
 
 #[derive(Default)]
 pub struct InstallStats {

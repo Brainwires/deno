@@ -1294,14 +1294,16 @@ where the changes are discussed.
     `tools/update_typescript_pin.ts lsp next` is the whole bump; then
     `cargo test -p integration_tests --test integration --
     lsp_tsgo`. Not
-    yet with tsgo: semantic tokens, TypeScript code lenses, file-rename import
-    edits, `deno/inferredType`, ambient-module listing, notebooks and remote
-    (`deno:`) documents. Tests: `native_pin` and `tsgo` unit tests;
-    `tests/integration/lsp_tsgo_tests.rs` (each feature, Deno lint and test code
-    lenses alongside, import-map / `jsr:` / `npm:` specifiers, Deno's lib types
-    and `Deno.SQL`), whose harness fetches the pinned build into `target/`;
-    `DENO_TSGO_LSP_PERF=1` adds a timing comparison with the TypeScript 6
-    service; `cli_smoke.sh` checks the shipped `typescript-lsp/tsc --version`.
+    yet with tsgo: TypeScript code lenses, file-rename import edits,
+    `deno/inferredType`, ambient-module listing, notebooks and remote (`deno:`)
+    documents (semantic tokens, the Vitest / Jest types and types for a newly
+    imported cached dependency came with item 81). Tests: `native_pin` and
+    `tsgo` unit tests; `tests/integration/lsp_tsgo_tests.rs` (each feature, Deno
+    lint and test code lenses alongside, import-map / `jsr:` / `npm:`
+    specifiers, Deno's lib types and `Deno.SQL`), whose harness fetches the
+    pinned build into `target/`; `DENO_TSGO_LSP_PERF=1` adds a timing comparison
+    with the TypeScript 6 service; `cli_smoke.sh` checks the shipped
+    `typescript-lsp/tsc --version`.
 
 47. **`feat(check)`: native type checking on TypeScript 7** (from `denext.22` or
     later; `feat/native-check`, CLI only; `cli/tsc/native.rs`,
@@ -1375,11 +1377,11 @@ where the changes are discussed.
       ran once, #36089). A graph the generated stock project can't express keeps
       the in-process checker, for every command including `deno check`
       (`TypeChecker::native_unsupported`): sloppy imports, `--ext`,
-      `--unstable-detect-cjs`, `test --doc`, a Vitest / Jest config (its
-      aliases), `data:` / `blob:` modules, in-memory code blocks, CommonJS
-      modules, a module without a TypeScript or JavaScript extension, a type
-      redirect (`X-TypeScript-Types`, `@ts-self-types`, `@deno-types`), a `text`
-      / `bytes` import, a `/// <reference lib="deno.*" />` or
+      `--unstable-detect-cjs`, a Vitest / Jest config (its aliases), `data:` /
+      `blob:` modules, a remote module's code blocks, CommonJS modules, a module
+      without a TypeScript or JavaScript extension, a type redirect
+      (`X-TypeScript-Types`, `@ts-self-types`, `@deno-types`), a `text` /
+      `bytes` import, a `/// <reference lib="deno.*" />` or
       `/// <reference types="npm:…" />` (any scheme) in the project, a JSX
       runtime Deno resolves through an import map, a remote or missing module,
       or a `jsxImportSource` with a scheme (`npm:preact`), workspace `links`,
@@ -1395,9 +1397,10 @@ where the changes are discussed.
     - **The fallback.** `--check-engine=tsc` (a hidden global flag, so no help
       text changed) or `DENO_CHECK_ENGINE=tsc` type-checks with the in-process
       TypeScript 6.0.3 as before; `--check-engine=native` wins over the env, and
-      an unknown env value warns and checks natively. `deno check --doc` /
-      `--doc-only` always use the in-process engine (the extracted code blocks
-      exist only in memory). `deno lsp` keeps the in-process language service.
+      an unknown env value warns and checks natively. The code blocks of
+      `deno check --doc` / `--doc-only` and `deno test --doc` are checked
+      natively too (item 81). `deno lsp` keeps the in-process language service
+      unless item 46's tsgo backend is selected.
     - **Our own types on the native path.** The generated `@types/deno` carries
       `Deno.SQL` / `Deno.sql` (item 24) also for a
       `"lib":
@@ -2539,6 +2542,89 @@ where the changes are discussed.
     cron socket set at startup is still dialed) and
     `test_resolved_deny_error_is_found_in_the_send_error` in
     `ext/fetch/tests.rs`.
+
+81. **`feat(check)`: TypeScript 7 everywhere (phase 3), and closing tsgo LSP
+    gaps** (from `denext.23`; `feat/ts7-phase3`, CLI only;
+    `cli/type_checker.rs`, `cli/tools/check.rs`, `cli/tools/installer/local.rs`,
+    `cli/tools/bundle/mod.rs`, `cli/util/file_watcher.rs`, `cli/lsp/tsgo.rs`,
+    `cli/lsp/ts_server.rs`, `cli/lsp/language_server.rs`). Item 47 made the
+    native compiler the default for every command that type-checks; this closes
+    what still fell back.
+    - **Doc tests and `check --doc` natively.** The code blocks
+      `deno test
+      --doc` and `deno check --doc` / `--doc-only` extract
+      (`file:///a/mod.ts#3-7.ts`) live in memory, where the compiler can't read
+      them, so item 47 kept them on the in-process TypeScript 6.0.3. Now
+      `run_native_check` writes each block to a fresh directory under the
+      project's generated `.deno/doc/` (inside the project, so the generated
+      `paths` and `node_modules` resolve for it as for any module), with its
+      local imports (relative ones and the absolute `file:` import of the module
+      it documents) rewritten relative to the written file on their own line
+      only, adds the files to the run's `files`, hands the blocks' external
+      imports (`jsr:`, `npm:`, import-map keys) to the config generator
+      (`sync_types_command`'s new `extra_specifiers`, which reads the project
+      from disk and never saw them), and reports a diagnostic in a block against
+      the block's specifier, as the in-process checker does; the directory is
+      removed when the check ends. `deno check --doc` goes through
+      `TypeChecker::check_graph` like `deno test`, so the engine switch and the
+      fallback apply to it too. A block of a remote module (no file to write it
+      beside) keeps the in-process checker.
+    - **`--watch`.** The native check writes `.deno/` into the project (the
+      generated config on a cache miss, and now the doc blocks), which a watcher
+      observing the project directory (`test` / `bench --watch` on a directory)
+      took for a change and restarted on. The watcher now drops events inside a
+      generated `.deno/` (one whose `.gitignore` is the generator's `*`; a
+      user's own `.deno/` is still watched).
+    - **`deno bundle --check`.** `deno bundle` turns on sloppy imports for its
+      own (bundler) resolution, and item 47 kept every sloppy-imports graph
+      in-process, so `bundle --check` never checked natively. The command now
+      marks the setting as its own (`InternalFlags::implied_sloppy_imports`):
+      only sloppy imports the user asked for (`--unstable-sloppy-imports`,
+      `"unstable": ["sloppy-imports"]`) keep the in-process checker; the
+      generated project's `moduleResolution: "bundler"` resolves an
+      extensionless import as the bundler does.
+    - **The engine switch and the fallback** are item 47's:
+      `DENO_CHECK_ENGINE=tsc` or `--check-engine=tsc` keeps TypeScript 6.0.3 for
+      every command, and a graph the generated stock project can't express falls
+      back with one debug record (`Type checking in-process: <reason>`).
+      `deno publish` keeps the slow-types check (Deno's own, engine-independent)
+      and still skips the extra in-process check of the in-memory fast-check
+      output under the native engine, now with a debug record. Still in-process:
+      declaration emit (`deno bundle --declaration`,
+      `deno transpile --declaration`), a worker's graph, and item 47's other
+      fallback cases.
+    - **LSP (item 46, `TsServer::Go`).** `deno sync-types` writes the built-in
+      `vitest` / `vite-plus/test` / `@jest/globals` types and their `paths`
+      (unless `test.vitestCompat` is `false`), which the tsgo backend reads, so
+      a test file no longer shows TS2307 for an uninstalled `vitest`. Semantic
+      tokens come from tsgo (`textDocument/semanticTokens/full` and `/range`):
+      Deno declares the capability to tsgo with its own legend and re-encodes
+      tsgo's tokens against `semantic_tokens::get_legend()` by type and modifier
+      name, dropping a type Deno's legend lacks. tsgo's
+      `workspace/diagnostic/refresh` is no longer just acked: it makes Deno
+      diagnose its documents again (once per burst, through the language
+      server's task queue; a pull client gets `workspace/diagnostic/refresh`).
+      An external import tsgo reports unresolved (TS2307 / TS2792 for a `jsr:` /
+      `npm:` / bare specifier, typically one added by an edit whose package Deno
+      has cached already) re-runs `deno sync-types` in the background once per
+      specifier until the next cache or config change, then diagnoses again; the
+      generator reads the files on disk, which an unsaved buffer's import is not
+      in, so the backend names those imports to it
+      (`DENO_INTERNAL_SYNC_TYPES_SPECIFIERS`, one per line, internal).
+
+    Tests: `tests/specs/check/check_engine` (`run --check`, `test`, `bench`,
+    `bundle --check` (also with an extensionless import), `publish --dry-run`
+    with a type error and with a slow type, `test --doc`, `check --doc` and
+    `--doc-only`, a doc block with relative and documented-module imports, each
+    under both engines with one expected output file, and the fallback's debug
+    record); `tests/specs/check/typecheck_doc_*` re-enabled (upstream had
+    ignored them, denoland/deno#35946); `check_watch_test` re-enabled; unit
+    tests `code_block_diagnostics_name_the_block` (`cli/tools/check.rs`),
+    `generated_types_dir_is_not_a_change` (`cli/util/file_watcher.rs`),
+    `unresolved_external_imports` and `semantic_tokens_follow_denos_legend`
+    (`cli/lsp/tsgo.rs`); `lsp_tsgo_vitest_types`, `lsp_tsgo_semantic_tokens` and
+    `lsp_tsgo_types_follow_a_new_import` in
+    `tests/integration/lsp_tsgo_tests.rs`.
 
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80) are what the prebuilt `libdenort` carries. The CLI-side parts

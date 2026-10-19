@@ -1,0 +1,11 @@
+Check [WILDCARD]doc.ts
+Check [WILDCARD]doc.ts#2-5.ts
+TS2322 [ERROR]: Type 'string' is not assignable to type 'number'.
+    const n: number = "not a number";
+          ^
+    at [WILDCARD]/doc.ts#2-5.ts:3:11
+
+error: Type checking failed.
+
+  info: The program failed type-checking, but it still might work correctly.
+  hint: Re-run with --no-check to skip type-checking.

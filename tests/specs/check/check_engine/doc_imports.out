@@ -1,0 +1,11 @@
+Check [WILDCARD]doc_imports.ts
+Check [WILDCARD]doc_imports.ts#2-6.ts
+TS2322 [ERROR]: Type 'number' is not assignable to type 'string'.
+    const sum: string = ok + documented;
+          ~~~
+    at [WILDCARD]/doc_imports.ts#2-6.ts:4:11
+
+error: Type checking failed.
+
+  info: The program failed type-checking, but it still might work correctly.
+  hint: Re-run with --no-check to skip type-checking.

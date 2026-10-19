@@ -32,6 +32,7 @@
 //! Iwańczuk's `tsgo --lsp` proxy prototype (`feat/tsgo-npm-lsp`).
 
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::io::BufRead;
 use std::io::Read;
 use std::io::Write;
@@ -39,6 +40,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicI64;
 use std::sync::atomic::Ordering;
@@ -126,6 +128,13 @@ pub struct TsGoCodeActionData {
 
 type PendingRequests =
   Mutex<HashMap<i64, oneshot::Sender<Result<Value, String>>>>;
+
+/// Asks `deno lsp` to diagnose its documents again: tsgo's view of the
+/// project changed behind Deno's back (tsgo's own
+/// `workspace/diagnostic/refresh`, or types regenerated for an import tsgo
+/// could not resolve). Set by the language server once it is initialized.
+pub type DiagnosticsRefresh = Box<dyn Fn() + Send + Sync>;
+type SharedDiagnosticsRefresh = Arc<OnceLock<DiagnosticsRefresh>>;
 type SharedStdin = Arc<Mutex<std::process::ChildStdin>>;
 
 #[derive(Debug, Default)]
@@ -143,6 +152,8 @@ struct TsGoServerInner {
   child: Mutex<std::process::Child>,
   sync: Mutex<DocumentSyncState>,
   latest_snapshot: Arc<Mutex<Arc<StateSnapshot>>>,
+  /// tsgo's semantic-token legend (its `initialize` result), when it has one.
+  semantic_tokens_legend: OnceLock<Option<lsp::SemanticTokensLegend>>,
 }
 
 impl std::fmt::Debug for TsGoServerInner {
@@ -258,9 +269,14 @@ pub fn sync_types_roots(snapshot: &StateSnapshot) -> Vec<PathBuf> {
 
 /// Generate the stock `tsconfig.json` + `.deno/` types tsgo reads, with the
 /// same `deno` executable (and so the same generator) the native
-/// `deno check` uses. Failures are logged, never fatal: a project without the
-/// generated files still gets tsgo's features for plain relative imports.
-async fn run_sync_types(snapshot: &StateSnapshot) -> Vec<PathBuf> {
+/// `deno check` uses. `extra_specifiers` are external imports of the editor's
+/// buffers that no file on disk has yet. Failures are logged, never fatal: a
+/// project without the generated files still gets tsgo's features for plain
+/// relative imports.
+async fn run_sync_types(
+  snapshot: &StateSnapshot,
+  extra_specifiers: &[String],
+) -> Vec<PathBuf> {
   let mut generated = Vec::new();
   if !sync_types_enabled() {
     return generated;
@@ -271,13 +287,24 @@ async fn run_sync_types(snapshot: &StateSnapshot) -> Vec<PathBuf> {
   let deno_dir = snapshot.cache.deno_dir().root.clone();
   for root in sync_types_roots(snapshot) {
     let started = std::time::Instant::now();
-    let output = tokio::process::Command::new(&exe)
+    let mut command = tokio::process::Command::new(&exe);
+    command
       .arg("sync-types")
       .current_dir(&root)
       .env("DENO_DIR", &deno_dir)
       .env("NO_COLOR", "1")
       .env("PWD", &root)
-      .env_remove(TSGO_LSP_ENV)
+      .env_remove(TSGO_LSP_ENV);
+    if extra_specifiers.is_empty() {
+      command
+        .env_remove(crate::tools::installer::SYNC_TYPES_EXTRA_SPECIFIERS_ENV);
+    } else {
+      command.env(
+        crate::tools::installer::SYNC_TYPES_EXTRA_SPECIFIERS_ENV,
+        extra_specifiers.join("\n"),
+      );
+    }
+    let output = command
       .stdin(Stdio::null())
       .stdout(Stdio::piped())
       .stderr(Stdio::piped())
@@ -343,6 +370,26 @@ fn client_capabilities(snapshot: &StateSnapshot) -> Value {
     }),
     ..Default::default()
   });
+  // Semantic tokens: Deno serves them to the editor itself (against its own
+  // legend), so tsgo must offer them whatever the editor declared.
+  if let Some(text_document) = value
+    .get_mut("textDocument")
+    .and_then(|t| t.as_object_mut())
+    && text_document
+      .get("semanticTokens")
+      .is_none_or(|t| t.is_null())
+  {
+    let legend = super::semantic_tokens::get_legend();
+    text_document.insert(
+      "semanticTokens".to_string(),
+      json!({
+        "requests": { "range": true, "full": true },
+        "tokenTypes": legend.token_types,
+        "tokenModifiers": legend.token_modifiers,
+        "formats": ["relative"],
+      }),
+    );
+  }
   // Fields `lsp_types` doesn't model yet.
   if let Some(diagnostic) = value
     .pointer_mut("/textDocument/diagnostic")
@@ -411,6 +458,8 @@ fn handle_server_request(
           .collect(),
       ))
     }
+    // `workspace/diagnostic/refresh` is acked here and passed on to Deno's
+    // diagnostics by the reader loop.
     "client/registerCapability"
     | "client/unregisterCapability"
     | "window/workDoneProgress/create"
@@ -437,6 +486,7 @@ fn reader_loop(
   pending: Arc<PendingRequests>,
   alive: Arc<AtomicBool>,
   latest_snapshot: Arc<Mutex<Arc<StateSnapshot>>>,
+  diagnostics_refresh: SharedDiagnosticsRefresh,
 ) {
   let mut reader = std::io::BufReader::new(stdout);
   loop {
@@ -470,6 +520,11 @@ fn reader_loop(
             }),
           };
         let _ = write_message(&mut stdin.lock(), &response);
+        if method == "workspace/diagnostic/refresh"
+          && let Some(refresh) = diagnostics_refresh.get()
+        {
+          refresh();
+        }
       }
       // A notification from tsgo.
       (Some(method), None) => match method {
@@ -544,6 +599,7 @@ impl TsGoServerInner {
   async fn start(
     tsc: &Path,
     snapshot: Arc<StateSnapshot>,
+    diagnostics_refresh: SharedDiagnosticsRefresh,
   ) -> Result<Self, AnyError> {
     let cwd = snapshot
       .config
@@ -582,7 +638,14 @@ impl TsGoServerInner {
       std::thread::Builder::new()
         .name("tsgo-lsp-reader".to_string())
         .spawn(move || {
-          reader_loop(stdout, stdin, pending, alive, latest_snapshot)
+          reader_loop(
+            stdout,
+            stdin,
+            pending,
+            alive,
+            latest_snapshot,
+            diagnostics_refresh,
+          )
         })?;
     }
     let inner = Self {
@@ -593,6 +656,7 @@ impl TsGoServerInner {
       child: Mutex::new(child),
       sync: Default::default(),
       latest_snapshot,
+      semantic_tokens_legend: OnceLock::new(),
     };
     let root_uri = snapshot.config.root_url().map(|u| u.to_string());
     let workspace_folders = snapshot
@@ -601,7 +665,7 @@ impl TsGoServerInner {
       .iter()
       .map(|(_, f)| f.clone())
       .collect::<Vec<_>>();
-    let _: Value = inner
+    let initialize_result: Value = inner
       .request(
         "initialize",
         json!({
@@ -615,6 +679,10 @@ impl TsGoServerInner {
         &CancellationToken::new(),
       )
       .await?;
+    let legend = initialize_result
+      .pointer("/capabilities/semanticTokensProvider/legend")
+      .and_then(|legend| serde_json::from_value(legend.clone()).ok());
+    let _ = inner.semantic_tokens_legend.set(legend);
     inner.notify("initialized", json!({}))?;
     Ok(inner)
   }
@@ -758,7 +826,12 @@ pub struct TsGoServer {
   http_client_provider: Arc<HttpClientProvider>,
   inner: tokio::sync::OnceCell<Result<Arc<TsGoServerInner>, String>>,
   /// Serializes `deno sync-types` runs after startup.
-  sync_types_lock: tokio::sync::Mutex<()>,
+  sync_types_lock: Arc<tokio::sync::Mutex<()>>,
+  diagnostics_refresh: SharedDiagnosticsRefresh,
+  /// External imports tsgo reported unresolved that a `deno sync-types` run
+  /// was started for, so each one is tried once until the configuration or
+  /// the dependency cache changes ([`Self::refresh_generated_types`]).
+  unresolved_imports_tried: Arc<Mutex<HashSet<String>>>,
 }
 
 impl std::fmt::Debug for TsGoServer {
@@ -775,7 +848,15 @@ impl TsGoServer {
       http_client_provider,
       inner: Default::default(),
       sync_types_lock: Default::default(),
+      diagnostics_refresh: Default::default(),
+      unresolved_imports_tried: Default::default(),
     }
+  }
+
+  /// How the backend asks `deno lsp` to diagnose its documents again (see
+  /// [`DiagnosticsRefresh`]). Only the first call takes effect.
+  pub fn set_diagnostics_refresh(&self, refresh: DiagnosticsRefresh) {
+    let _ = self.diagnostics_refresh.set(refresh);
   }
 
   pub fn is_started(&self) -> bool {
@@ -819,11 +900,15 @@ impl TsGoServer {
         })?;
         {
           let _guard = self.sync_types_lock.lock().await;
-          run_sync_types(snapshot).await;
+          run_sync_types(snapshot, &[]).await;
         }
-        let inner = TsGoServerInner::start(&tsc, snapshot.clone())
-          .await
-          .map_err(|e| format!("{e:#}"))?;
+        let inner = TsGoServerInner::start(
+          &tsc,
+          snapshot.clone(),
+          self.diagnostics_refresh.clone(),
+        )
+        .await
+        .map_err(|e| format!("{e:#}"))?;
         lsp_log!(
           "tsgo: started TypeScript {} from {} ({}ms)",
           native_pin::pin(PIN_ROLE).version,
@@ -897,34 +982,56 @@ impl TsGoServer {
       Ok(inner) => inner.clone(),
       Err(_) => return,
     };
-    let roots = {
-      let _guard = self.sync_types_lock.lock().await;
-      run_sync_types(&snapshot).await
+    // The cache or the configuration changed: an import that stayed
+    // unresolved may resolve now (it is tried again once tsgo reports it).
+    self.unresolved_imports_tried.lock().clear();
+    regenerate_types(&inner, &self.sync_types_lock, &snapshot, &[]).await;
+  }
+
+  /// tsgo reported external imports (`jsr:`, `npm:`, an import-map key) it
+  /// can't resolve: the generated types predate them (an import added by
+  /// editing, whose package Deno has cached already). Regenerate them once
+  /// per import in the background, then have Deno diagnose again.
+  fn refresh_types_for_unresolved_imports(
+    &self,
+    imports: Vec<String>,
+    snapshot: &Arc<StateSnapshot>,
+  ) {
+    if !sync_types_enabled() {
+      return;
+    }
+    let Some(Ok(inner)) = self.inner.get() else {
+      return;
     };
-    let mut paths = Vec::new();
-    for root in &roots {
-      paths.push(root.join("tsconfig.json"));
-      collect_files(&root.join(".deno"), &mut paths, 20_000);
-    }
-    let changes = paths
-      .iter()
-      .filter_map(|path| {
-        let url = deno_path_util::url_from_file_path(path).ok()?;
-        let uri = crate::lsp::urls::url_to_uri(&url).ok()?;
-        Some(lsp::FileEvent {
-          uri,
-          typ: lsp::FileChangeType::CHANGED,
-        })
-      })
-      .collect::<Vec<_>>();
-    if !changes.is_empty()
-      && let Err(err) = inner.notify(
-        "workspace/didChangeWatchedFiles",
-        json!({ "changes": changes }),
-      )
     {
-      lsp_warn!("tsgo: failed to announce regenerated types: {err:#}");
+      let mut tried = self.unresolved_imports_tried.lock();
+      let mut any_new = false;
+      for import in imports {
+        any_new |= tried.insert(import);
+      }
+      if !any_new {
+        return;
+      }
     }
+    let inner = inner.clone();
+    let lock = self.sync_types_lock.clone();
+    let refresh = self.diagnostics_refresh.clone();
+    let snapshot = snapshot.clone();
+    // Every import tried since the last cache or config change: the generator
+    // reads the files on disk, which an unsaved buffer's imports aren't in.
+    let mut extra_specifiers = self
+      .unresolved_imports_tried
+      .lock()
+      .iter()
+      .cloned()
+      .collect::<Vec<_>>();
+    extra_specifiers.sort();
+    tokio::spawn(async move {
+      regenerate_types(&inner, &lock, &snapshot, &extra_specifiers).await;
+      if let Some(refresh) = refresh.get() {
+        refresh();
+      }
+    });
   }
 
   fn text_document_position(
@@ -960,6 +1067,13 @@ impl TsGoServer {
       }
       _ => Vec::new(),
     };
+    let unresolved = items
+      .iter()
+      .filter_map(unresolved_external_import)
+      .collect::<Vec<_>>();
+    if !unresolved.is_empty() {
+      self.refresh_types_for_unresolved_imports(unresolved, snapshot);
+    }
     let suggestion_actions_enabled = snapshot
       .config
       .language_settings_for_specifier(&module.specifier)
@@ -1443,6 +1557,62 @@ impl TsGoServer {
     Ok(calls)
   }
 
+  /// Semantic tokens for the whole document (`range` `None`) or a range,
+  /// encoded against Deno's legend (`semantic_tokens::get_legend`): tsgo
+  /// announces its own, mapped by token type and modifier name.
+  pub async fn provide_semantic_tokens(
+    &self,
+    module: &DocumentModule,
+    range: Option<lsp::Range>,
+    snapshot: &Arc<StateSnapshot>,
+    token: &CancellationToken,
+  ) -> Result<lsp::SemanticTokens, AnyError> {
+    if !is_tsgo_module(module) {
+      return Ok(Default::default());
+    }
+    let inner = self.inner(snapshot).await?;
+    let Some(Some(legend)) = inner.semantic_tokens_legend.get() else {
+      return Ok(Default::default());
+    };
+    let legend = legend.clone();
+    let tokens: Option<lsp::SemanticTokens> = match range {
+      Some(range) => {
+        self
+          .request(
+            "textDocument/semanticTokens/range",
+            json!({
+              "textDocument": { "uri": module.uri.as_ref() },
+              "range": range,
+            }),
+            snapshot,
+            token,
+          )
+          .await?
+      }
+      None => {
+        self
+          .request(
+            "textDocument/semanticTokens/full",
+            json!({ "textDocument": { "uri": module.uri.as_ref() } }),
+            snapshot,
+            token,
+          )
+          .await?
+      }
+    };
+    let Some(tokens) = tokens else {
+      return Ok(Default::default());
+    };
+    Ok(lsp::SemanticTokens {
+      result_id: None,
+      data: remap_semantic_tokens(
+        &tokens.data,
+        &legend,
+        &super::semantic_tokens::get_legend(),
+      ),
+    })
+  }
+
   pub async fn provide_workspace_symbol(
     &self,
     query: &str,
@@ -1464,6 +1634,136 @@ impl TsGoServer {
     }
     Ok(symbols)
   }
+}
+
+/// Regenerate the types tsgo reads (`deno sync-types`) and announce every
+/// generated file to tsgo as changed.
+async fn regenerate_types(
+  inner: &TsGoServerInner,
+  sync_types_lock: &tokio::sync::Mutex<()>,
+  snapshot: &StateSnapshot,
+  extra_specifiers: &[String],
+) {
+  let roots = {
+    let _guard = sync_types_lock.lock().await;
+    run_sync_types(snapshot, extra_specifiers).await
+  };
+  let mut paths = Vec::new();
+  for root in &roots {
+    paths.push(root.join("tsconfig.json"));
+    collect_files(&root.join(".deno"), &mut paths, 20_000);
+  }
+  let changes = paths
+    .iter()
+    .filter_map(|path| {
+      let url = deno_path_util::url_from_file_path(path).ok()?;
+      let uri = crate::lsp::urls::url_to_uri(&url).ok()?;
+      Some(lsp::FileEvent {
+        uri,
+        typ: lsp::FileChangeType::CHANGED,
+      })
+    })
+    .collect::<Vec<_>>();
+  if !changes.is_empty()
+    && let Err(err) = inner.notify(
+      "workspace/didChangeWatchedFiles",
+      json!({ "changes": changes }),
+    )
+  {
+    lsp_warn!("tsgo: failed to announce regenerated types: {err:#}");
+  }
+}
+
+/// The module an "unresolved import" diagnostic (TS2307, TS2792) names, when
+/// it is an external one `deno sync-types` maps (not a relative or absolute
+/// path, whose file simply doesn't exist).
+fn unresolved_external_import(diagnostic: &lsp::Diagnostic) -> Option<String> {
+  if !matches!(
+    diagnostic.code,
+    Some(lsp::NumberOrString::Number(2307 | 2792))
+  ) {
+    return None;
+  }
+  let message = &diagnostic.message;
+  let start = message.find('\'')? + 1;
+  let len = message[start..].find('\'')?;
+  let specifier = &message[start..start + len];
+  if specifier.is_empty()
+    || specifier.starts_with('.')
+    || specifier.starts_with('/')
+    || specifier.starts_with("file:")
+  {
+    return None;
+  }
+  Some(specifier.to_string())
+}
+
+/// Re-encode `tokens` (against tsgo's legend `from`) against `to`: types and
+/// modifiers are matched by name; a token whose type `to` lacks is dropped
+/// (and the next one's delta adjusted), an unknown modifier is cleared.
+fn remap_semantic_tokens(
+  tokens: &[lsp::SemanticToken],
+  from: &lsp::SemanticTokensLegend,
+  to: &lsp::SemanticTokensLegend,
+) -> Vec<lsp::SemanticToken> {
+  let types = from
+    .token_types
+    .iter()
+    .map(|t| {
+      to.token_types
+        .iter()
+        .position(|d| d.as_str() == t.as_str())
+        .map(|i| i as u32)
+    })
+    .collect::<Vec<_>>();
+  let modifiers = from
+    .token_modifiers
+    .iter()
+    .map(|m| {
+      to.token_modifiers
+        .iter()
+        .position(|d| d.as_str() == m.as_str())
+        .filter(|i| *i < 32)
+        .map(|i| i as u32)
+    })
+    .collect::<Vec<_>>();
+  let (mut line, mut start) = (0u32, 0u32);
+  let (mut last_line, mut last_start) = (0u32, 0u32);
+  let mut remapped = Vec::with_capacity(tokens.len());
+  for token in tokens {
+    if token.delta_line > 0 {
+      line += token.delta_line;
+      start = token.delta_start;
+    } else {
+      start += token.delta_start;
+    }
+    let Some(Some(token_type)) = types.get(token.token_type as usize) else {
+      continue;
+    };
+    let mut bitset = 0u32;
+    for (index, modifier) in modifiers.iter().enumerate().take(32) {
+      if token.token_modifiers_bitset & (1 << index) != 0
+        && let Some(modifier) = modifier
+      {
+        bitset |= 1 << modifier;
+      }
+    }
+    let delta_line = line - last_line;
+    remapped.push(lsp::SemanticToken {
+      delta_line,
+      delta_start: if delta_line == 0 {
+        start - last_start
+      } else {
+        start
+      },
+      length: token.length,
+      token_type: *token_type,
+      token_modifiers_bitset: bitset,
+    });
+    last_line = line;
+    last_start = start;
+  }
+  remapped
 }
 
 fn normalize_location(location: &mut lsp::Location) {
@@ -1636,5 +1936,84 @@ mod tests {
     let data: TsGoCodeActionData =
       serde_json::from_value(action.data.unwrap()).unwrap();
     assert_eq!(data.tsgo_data, json!({ "a": 1 }));
+  }
+  #[test]
+  fn unresolved_external_imports() {
+    let diagnostic = |code: i32, message: &str| lsp::Diagnostic {
+      code: Some(lsp::NumberOrString::Number(code)),
+      message: message.to_string(),
+      ..Default::default()
+    };
+    assert_eq!(
+      unresolved_external_import(&diagnostic(
+        2307,
+        "Cannot find module 'jsr:@std/assert' or its corresponding type declarations."
+      )),
+      Some("jsr:@std/assert".to_string())
+    );
+    assert_eq!(
+      unresolved_external_import(&diagnostic(
+        2792,
+        "Cannot find module 'chalk'. Did you mean to set the 'moduleResolution' option to 'nodenext', or to add aliases to the 'paths' option?"
+      )),
+      Some("chalk".to_string())
+    );
+    // A missing local file is not something generated types can fix.
+    assert_eq!(
+      unresolved_external_import(&diagnostic(
+        2307,
+        "Cannot find module './missing.ts' or its corresponding type declarations."
+      )),
+      None
+    );
+    assert_eq!(
+      unresolved_external_import(&diagnostic(
+        2322,
+        "Type 'number' is not assignable to type 'string'."
+      )),
+      None
+    );
+  }
+
+  #[test]
+  fn semantic_tokens_follow_denos_legend() {
+    let from = lsp::SemanticTokensLegend {
+      token_types: vec![
+        "namespace".into(),
+        "decorator".into(),
+        "variable".into(),
+        "function".into(),
+      ],
+      token_modifiers: vec!["readonly".into(), "declaration".into()],
+    };
+    let to = super::super::semantic_tokens::get_legend();
+    let token = |delta_line, delta_start, length, token_type, modifiers| {
+      lsp::SemanticToken {
+        delta_line,
+        delta_start,
+        length,
+        token_type,
+        token_modifiers_bitset: modifiers,
+      }
+    };
+    // `const a` (variable, declaration + readonly), a decorator at (0, 10)
+    // Deno's legend lacks, then `f` at (0, 14) and `ns` on the next line.
+    let tokens = vec![
+      token(0, 6, 1, 2, 0b11),
+      token(0, 4, 3, 1, 0),
+      token(0, 4, 1, 3, 0),
+      token(1, 2, 2, 0, 0),
+    ];
+    let remapped = remap_semantic_tokens(&tokens, &from, &to);
+    // Deno: variable = 7, function = 10, namespace = 3; declaration = bit 0,
+    // readonly = bit 3. The decorator is dropped and `f`'s delta grows by it.
+    assert_eq!(
+      remapped,
+      vec![
+        token(0, 6, 1, 7, 0b1001),
+        token(0, 8, 1, 10, 0),
+        token(1, 2, 2, 3, 0),
+      ]
+    );
   }
 }

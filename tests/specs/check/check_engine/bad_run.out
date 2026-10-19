@@ -1,0 +1,10 @@
+Check [WILDCARD]bad.ts
+TS2322 [ERROR]: Type 'string' is not assignable to type 'number'.
+export const bad: number = "one";
+             ~~~
+    at [WILDCARD]bad.ts:1:14
+
+error: Type checking failed.
+
+  info: The program failed type-checking, but it still might work correctly.
+  hint: Re-run with --no-check to skip type-checking.

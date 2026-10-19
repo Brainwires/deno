@@ -736,6 +736,117 @@ fn lsp_tsgo_deno_lib_types() {
   client.shutdown();
 }
 
+#[test(timeout = 300)]
+fn lsp_tsgo_vitest_types() {
+  if !sync_types_available() {
+    return;
+  }
+  // The built-in `vitest` / `@jest/globals` types (fork items 23 and 29)
+  // reach tsgo through `deno sync-types`, as they reach the native
+  // `deno check`: no TS2307 for an uninstalled `vitest`, and its types flow.
+  let context = TestContextBuilder::new().use_temp_cwd().build();
+  let temp_dir = context.temp_dir();
+  temp_dir.write("deno.json", "{}\n");
+  let file = temp_dir.source_file(
+    "a.test.ts",
+    "import { expect, test } from \"vitest\";\nimport { jest } from \"@jest/globals\";\ntest(\"adds\", () => {\n  expect(1 + 1).toBe(2);\n});\nconst n: string = expect(1).toBe;\nconsole.log(n, jest);\n",
+  );
+  let mut client = tsgo_client(&context);
+  let diagnostics = client.did_open_file(&file);
+  let messages = deno_ts_messages(&diagnostics.all());
+  assert_eq!(messages.len(), 1, "{messages:#?}");
+  assert!(
+    messages[0].contains("is not assignable to type 'string'"),
+    "{messages:#?}"
+  );
+  client.shutdown();
+}
+
+#[test(timeout = 300)]
+fn lsp_tsgo_semantic_tokens() {
+  // lsp_tests.rs: lsp_semantic_tokens_for_disabled_module — tsgo's tokens,
+  // encoded against Deno's legend (variable = 7; declaration | readonly = 9).
+  let context = TestContextBuilder::new().use_temp_cwd().build();
+  let temp_dir = context.temp_dir();
+  let file =
+    temp_dir.source_file("file.ts", "const someConst = 1; someConst\n");
+  let mut client = tsgo_client(&context);
+  client.did_open_file(&file);
+  let res = client.write_request(
+    "textDocument/semanticTokens/full",
+    json!({ "textDocument": file.identifier() }),
+  );
+  assert_eq!(res, json!({ "data": [0, 6, 9, 7, 9, 0, 15, 9, 7, 8] }));
+  let res = client.write_request(
+    "textDocument/semanticTokens/range",
+    json!({
+      "textDocument": file.identifier(),
+      "range": {
+        "start": { "line": 0, "character": 20 },
+        "end": { "line": 0, "character": 31 },
+      },
+    }),
+  );
+  assert_eq!(res, json!({ "data": [0, 21, 9, 7, 8] }));
+  client.shutdown();
+}
+
+#[test(timeout = 300)]
+fn lsp_tsgo_types_follow_a_new_import() {
+  if !sync_types_available() {
+    return;
+  }
+  // A dependency Deno has cached already, imported by an edit: tsgo reports
+  // it unresolved (the generated types predate it), the backend regenerates
+  // them once and Deno diagnoses again, with no `deno.cache` in between.
+  let context = TestContextBuilder::new()
+    .use_http_server()
+    .add_npm_env_vars()
+    .use_temp_cwd()
+    .build();
+  let temp_dir = context.temp_dir();
+  temp_dir.write("deno.json", "{}\n");
+  temp_dir.write(
+    "other.ts",
+    "import { add } from \"npm:@denotest/add@1\";\nconsole.log(add);\n",
+  );
+  context
+    .new_command()
+    .args("cache other.ts")
+    .run()
+    .skip_output_check()
+    .assert_exit_code(0);
+  // Cached (and in the lockfile), but imported by no file when the language
+  // server generates the types at startup.
+  temp_dir.remove_file("other.ts");
+  let file = temp_dir.source_file("file.ts", "console.log(1);\n");
+  let mut client = tsgo_client(&context);
+  let diagnostics = client.did_open_file(&file);
+  assert_eq!(deno_ts_messages(&diagnostics.all()), Vec::<String>::new());
+  client.write_notification(
+    "textDocument/didChange",
+    json!({
+      "textDocument": { "uri": file.uri(), "version": 2 },
+      "contentChanges": [{
+        "text": "import { add } from \"npm:@denotest/add@1\";\nconst n: string = add(1, 2);\nconsole.log(n);\n",
+      }],
+    }),
+  );
+  let expected =
+    vec!["Type 'number' is not assignable to type 'string'.".to_string()];
+  let started = Instant::now();
+  let mut messages = Vec::new();
+  while started.elapsed() < Duration::from_secs(60) {
+    messages = deno_ts_messages(&client.read_diagnostics().all());
+    if messages == expected {
+      break;
+    }
+    std::thread::sleep(Duration::from_millis(250));
+  }
+  assert_eq!(messages, expected);
+  client.shutdown();
+}
+
 /// Time to the first TypeScript diagnostics and the median completion latency
 /// for one backend on `std`'s `http/file_server.ts` (a medium graph: ~130
 /// modules of `tests/util/std`).

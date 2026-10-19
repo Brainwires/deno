@@ -484,6 +484,9 @@ impl PublishPreparer {
         // graph was built (`ModuleGraphCreator::create_publish_graph`); this
         // extra self-check of Deno's own output stays with the in-process
         // checker (`--check-engine=tsc`).
+        log::debug!(
+          "Not type checking the fast check output: it is in memory only (native tsc)"
+        );
         Ok(Arc::new(graph))
       } else {
         // fast check passed, type check the output as a temporary measure

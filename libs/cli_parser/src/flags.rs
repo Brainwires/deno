@@ -998,6 +998,11 @@ pub struct InternalFlags {
   /// Discover a `jsr.json(c)` as well, as `deno publish` does (denext; set
   /// with `config_discovery_start` for a type check of `deno publish`).
   pub config_discovery_jsr: bool,
+  /// Sloppy imports were turned on by the command itself (`deno bundle`
+  /// resolves as a bundler does), not asked for by the user (denext). The
+  /// native type check, whose generated project resolves like a bundler,
+  /// still handles such a graph.
+  pub implied_sloppy_imports: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Default)]

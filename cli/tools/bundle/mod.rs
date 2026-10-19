@@ -340,6 +340,10 @@ pub async fn bundle(
 ) -> Result<(), AnyError> {
   {
     let flags_mut = Arc::make_mut(&mut flags);
+    // denext: the type check below tells the user's sloppy imports from the
+    // bundler's own resolution (see `TypeChecker::native_unsupported`).
+    flags_mut.internal.implied_sloppy_imports =
+      !flags_mut.unstable_config.sloppy_imports;
     flags_mut.unstable_config.sloppy_imports = true;
   }
   // `--check[=all]` is documented in `bundle --help`; honour it before we

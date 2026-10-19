@@ -1031,6 +1031,25 @@ impl Inner {
       );
       self.ts_server =
         Arc::new(TsServer::new_go(self.http_client_provider.clone()));
+      if let TsServer::Go(ts_server) = self.ts_server.as_ref() {
+        // tsgo's view of the project can change behind Deno's back (its own
+        // `workspace/diagnostic/refresh`, or types regenerated for an
+        // unresolved import): diagnose again, once per burst.
+        let task_tx = self.task_queue.task_tx.clone();
+        let pending = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        ts_server.set_diagnostics_refresh(Box::new(move || {
+          if pending.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            return;
+          }
+          let pending = pending.clone();
+          let _ = task_tx.send(Box::new(move |ls: LanguageServer| {
+            spawn(async move {
+              pending.store(false, std::sync::atomic::Ordering::SeqCst);
+              ls.inner.write().await.refresh_backend_diagnostics();
+            });
+          }));
+        }));
+      }
     }
 
     if self.is_using_push_based_diagnostics() {
@@ -3735,6 +3754,18 @@ impl Inner {
     // entries.
     drop(documents);
     self.document_modules.remove_expired_modules();
+  }
+
+  /// The TypeScript backend's view of the project changed on its own (see
+  /// `tsgo::DiagnosticsRefresh`): diagnose the documents again.
+  fn refresh_backend_diagnostics(&mut self) {
+    self.project_changed(vec![], ProjectScopesChange::None);
+    self.send_diagnostics_update();
+    if !self.is_using_push_based_diagnostics()
+      && self.config.diagnostic_refresh_capable()
+    {
+      self.client.refresh_diagnostics();
+    }
   }
 
   /// Let the TypeScript backend regenerate what it derives from configuration

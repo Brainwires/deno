@@ -623,8 +623,9 @@ async fn fmt_check_all_files_on_each_change_test() {
   check_alive_then_kill(child);
 }
 
+// denext: the native check re-runs under --watch, and the watcher ignores the
+// generated `.deno/` it writes (item 81).
 #[test(flaky)]
-#[ignore = "native check under --watch is not yet supported: it writes .deno artifacts into the watched dir, which retriggers the watcher (#35946)"]
 async fn check_watch_test() {
   let t = TempDir::new();
   let file_to_check = t.path().join("main.ts");

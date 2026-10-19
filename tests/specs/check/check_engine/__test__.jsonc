@@ -47,6 +47,101 @@
       "output": "Check [WILDCARD]bad_test.ts\nTS2322 [ERROR][WILDCARD]",
       "exitCode": 1
     },
+    // parity: one expected output for both engines
+    "test_parity_native": {
+      "args": "test bad_test.ts",
+      "output": "bad_test.out",
+      "exitCode": 1
+    },
+    "test_parity_tsc": {
+      "args": "test bad_test.ts",
+      "envs": { "DENO_CHECK_ENGINE": "tsc" },
+      "output": "bad_test.out",
+      "exitCode": 1
+    },
+    "run_parity_native": {
+      "args": "run --check bad.ts",
+      "output": "bad_run.out",
+      "exitCode": 1
+    },
+    "run_parity_tsc": {
+      "args": "run --check --check-engine=tsc bad.ts",
+      "output": "bad_run.out",
+      "exitCode": 1
+    },
+    "bench_parity_native": {
+      "args": "bench bad_bench.ts",
+      "output": "bad_bench.out",
+      "exitCode": 1
+    },
+    "bench_parity_tsc": {
+      "args": "bench --check-engine=tsc bad_bench.ts",
+      "output": "bad_bench.out",
+      "exitCode": 1
+    },
+    "bundle_native": {
+      "args": "bundle -L debug --check bad.ts",
+      "output": "[WILDCARD]Type checking (native tsc)[WILDCARD]TS2322 [ERROR][WILDCARD]",
+      "exitCode": 1
+    },
+    "bundle_parity_native": {
+      "args": "bundle --check bad.ts",
+      "output": "bad_bundle.out",
+      "exitCode": 1
+    },
+    "bundle_parity_tsc": {
+      "args": "bundle --check --check-engine=tsc bad.ts",
+      "output": "bad_bundle.out",
+      "exitCode": 1
+    },
+    // `deno bundle`'s own sloppy resolution keeps the native compiler
+    "bundle_extensionless_native": {
+      "args": "bundle -L debug --check bundle_extensionless.ts",
+      "output": "[WILDCARD]Type checking (native tsc)[WILDCARD]TS2322 [ERROR][WILDCARD]",
+      "exitCode": 1
+    },
+    "bundle_extensionless_parity_native": {
+      "args": "bundle --check bundle_extensionless.ts",
+      "output": "bundle_extensionless.out",
+      "exitCode": 1
+    },
+    "bundle_extensionless_parity_tsc": {
+      "args": "bundle --check --check-engine=tsc bundle_extensionless.ts",
+      "output": "bundle_extensionless.out",
+      "exitCode": 1
+    },
+    "publish_native": {
+      "args": "publish -L debug --dry-run --allow-dirty",
+      "cwd": "publish_bad",
+      "output": "[WILDCARD]Type checking (native tsc)[WILDCARD]TS2322 [ERROR][WILDCARD]",
+      "exitCode": 1
+    },
+    "publish_parity_native": {
+      "args": "publish --dry-run --allow-dirty",
+      "cwd": "publish_bad",
+      "output": "publish_bad.out",
+      "exitCode": 1
+    },
+    "publish_parity_tsc": {
+      "args": "publish --dry-run --allow-dirty --check-engine=tsc",
+      "cwd": "publish_bad",
+      "output": "publish_bad.out",
+      "exitCode": 1
+    },
+    // the slow-types check is Deno's own, whichever engine type-checks
+    "publish_slow_types_native": {
+      "args": "publish --dry-run --allow-dirty",
+      "cwd": "publish_slow",
+      "output": "publish_slow.out",
+      "exitCode": 1
+    },
+    "publish_slow_types_tsc": {
+      "args": "publish --dry-run --allow-dirty",
+      "cwd": "publish_slow",
+      "envs": { "DENO_CHECK_ENGINE": "tsc" },
+      "output": "publish_slow.out",
+      "exitCode": 1
+    },
     "run_native": {
       "args": "run -L debug --check bad.ts",
       "output": "[WILDCARD]Type checking (native tsc)[WILDCARD]TS2322 [ERROR][WILDCARD]",
@@ -57,11 +152,65 @@
       "output": "[WILDCARD]Type checking (native tsc)[WILDCARD]TS2322 [ERROR][WILDCARD]",
       "exitCode": 1
     },
-    // --doc / --doc-only check code blocks held in memory: the in-process
-    // checker runs them
+    // the code blocks of --doc / --doc-only and `test --doc` are written out
+    // for the native compiler
     "doc_only": {
       "args": "check --doc-only -L debug doc.ts",
-      "output": "[WILDCARD]--doc/--doc-only: type-checking with the in-process checker[WILDCARD]TS2322 [ERROR][WILDCARD]",
+      "output": "[WILDCARD]Type checking (native tsc)[WILDCARD]TS2322 [ERROR][WILDCARD]",
+      "exitCode": 1
+    },
+    "doc_only_parity_native": {
+      "args": "check --doc-only doc.ts",
+      "output": "doc_only.out",
+      "exitCode": 1
+    },
+    "doc_only_parity_tsc": {
+      "args": "check --doc-only --check-engine=tsc doc.ts",
+      "output": "doc_only.out",
+      "exitCode": 1
+    },
+    "check_doc_parity_native": {
+      "args": "check --doc doc.ts",
+      "output": "check_doc.out",
+      "exitCode": 1
+    },
+    "check_doc_parity_tsc": {
+      "args": "check --doc doc.ts",
+      "envs": { "DENO_CHECK_ENGINE": "tsc" },
+      "output": "check_doc.out",
+      "exitCode": 1
+    },
+    "test_doc_native": {
+      "args": "test --doc -L debug doc.ts",
+      "output": "[WILDCARD]Type checking (native tsc)[WILDCARD]TS2322 [ERROR][WILDCARD]",
+      "exitCode": 1
+    },
+    "test_doc_parity_native": {
+      "args": "test --doc doc.ts",
+      "output": "test_doc.out",
+      "exitCode": 1
+    },
+    "test_doc_parity_tsc": {
+      "args": "test --doc --check-engine=tsc doc.ts",
+      "output": "test_doc.out",
+      "exitCode": 1
+    },
+    // a block's relative import and its auto-import of the documented module
+    "test_doc_imports_parity_native": {
+      "args": "test --doc doc_imports.ts",
+      "output": "doc_imports.out",
+      "exitCode": 1
+    },
+    "test_doc_imports_parity_tsc": {
+      "args": "test --doc --check-engine=tsc doc_imports.ts",
+      "output": "doc_imports.out",
+      "exitCode": 1
+    },
+    // a graph the native compiler can't express keeps the in-process checker,
+    // saying why at debug level
+    "fallback_debug_record": {
+      "args": "run -L debug --check fallback.ts",
+      "output": "[WILDCARD]Type checking in-process: a @deno-types redirect\n[WILDCARD]TS2322 [ERROR][WILDCARD]",
       "exitCode": 1
     },
     // the vendored compiler can be overridden; a path that is not a file is an

@@ -32,15 +32,11 @@ pub async fn check(
     return legacy_check(flags, check_flags).await;
   }
   if check_flags.doc || check_flags.doc_only {
-    // The code blocks `--doc` / `--doc-only` extract live in memory only, where
-    // the native compiler (which reads files) can't see them: those checks keep
-    // running on the in-process TypeScript 6.0.3.
-    log::debug!("--doc/--doc-only: type-checking with the in-process checker");
-    // The graph check below goes through `TypeChecker::check_graph`, which
-    // picks the engine from the flags: pin it to the in-process one.
-    let mut flags = (*flags).clone();
-    flags.check_engine = Some(CheckEngine::Tsc);
-    return legacy_check(Arc::new(flags), check_flags).await;
+    // The code blocks `--doc` / `--doc-only` extract live in memory: the graph
+    // check below goes through `TypeChecker::check_graph`, which writes them
+    // out for the native compiler (`run_native_check`), or keeps the
+    // in-process checker for a graph the native one can't express.
+    return legacy_check(flags, check_flags).await;
   }
   if let Some(watch_flags) = &flags.watch {
     // A watcher-aware factory reports the graph's files to the watcher, so the
@@ -302,15 +298,15 @@ pub(crate) async fn run_native_check(
   // Resolve the compiler first: when it is missing, say so before writing
   // anything into the project.
   let tsc_path = crate::tsc::native::find_native_tsc(deno_dir_root.as_deref())?;
-  // denext: the built-in `vitest` / `@jest/globals` types (item 29), written
-  // before the config is generated so a `compilerOptions.types` entry naming
-  // one of them resolves (unless `test.vitestCompat` is `false`).
-  let vitest_compat = cli_options
-    .resolve_workspace_test_options(&Default::default())
-    .vitest_compat;
-  if vitest_compat {
-    crate::tools::test::vitest::write_native_check_types(&project_root)?;
-  }
+  // denext: the code blocks a doc test or `check --doc` extracted live in
+  // memory only; the external specifiers they import are mapped with the
+  // project's, and the blocks themselves are written out below.
+  let has_code_blocks = code_block_modules(graph).next().is_some();
+  let extra_specifiers = if has_code_blocks {
+    code_block_external_specifiers(graph)
+  } else {
+    Vec::new()
+  };
   // denext: quiet on this thread only - lowering the global `log` level hid
   // other threads' output meanwhile (the inspector's "Debugger session
   // started.", so a debugger client waited for it forever).
@@ -319,16 +315,17 @@ pub(crate) async fn run_native_check(
     flags.clone(),
     SyncTypesFlags { roots: sync_roots },
     crate::tools::installer::RootTsConfigMode::CheckMode,
+    extra_specifiers,
   )
   .await;
   drop(quiet);
   sync_result?;
-  if vitest_compat {
-    crate::tools::test::vitest::add_native_check_type_paths(
-      &project_root,
-      &project_root.join(".deno").join("tsconfig.json"),
-    )?;
-  }
+  // Removed (with its directory) when the check is done.
+  let code_blocks = if has_code_blocks {
+    Some(materialize_code_blocks(&project_root, graph)?)
+  } else {
+    None
+  };
 
   // When Deno honors a user `tsconfig.json`, base tsc on a throwaway overlay of
   // it (its options + our generated `extends`/`references`) written to a temp
@@ -360,7 +357,7 @@ pub(crate) async fn run_native_check(
   // left out, falling back to the base config's `include`.
   let mut files: Vec<String> = roots
     .iter()
-    .filter(|s| s.scheme() == "file")
+    .filter(|s| s.scheme() == "file" && s.fragment().is_none())
     .filter_map(|s| s.to_file_path().ok())
     .filter(|p| p.exists())
     .map(|p| p.to_string_lossy().replace('\\', "/"))
@@ -370,6 +367,14 @@ pub(crate) async fn run_native_check(
   // entrypoint is checked as itself rather than triggering the whole-project
   // `include` fallback below (which would check unrelated files, or nothing).
   files.extend(remote_root_mirror_files(&project_root, roots));
+  if let Some(code_blocks) = &code_blocks {
+    files.extend(
+      code_blocks
+        .files
+        .iter()
+        .map(|(path, _)| path.to_string_lossy().replace('\\', "/")),
+    );
+  }
 
   // Render each root relative to the invocation directory, matching deno's own
   // `Check <specifier>` output.
@@ -492,9 +497,13 @@ pub(crate) async fn run_native_check(
 
   let stdout = String::from_utf8_lossy(&output.stdout);
   let stderr = String::from_utf8_lossy(&output.stderr);
-  let mut diagnostics = Diagnostics::from(
-    crate::tsc::native::parse_tsc_diagnostics(&stdout, &project_root),
-  );
+  let mut parsed =
+    crate::tsc::native::parse_tsc_diagnostics(&stdout, &project_root);
+  if let Some(code_blocks) = &code_blocks {
+    code_blocks.remap_diagnostics(&mut parsed);
+  }
+  drop(code_blocks);
+  let mut diagnostics = Diagnostics::from(parsed);
   // Fold in deno's own diagnostics for missing entrypoints (some roots existed
   // and were type-checked by tsc above; any that didn't are reported here).
   diagnostics.extend(root_diagnostics);
@@ -638,7 +647,178 @@ fn remote_root_mirror_files(
   files
 }
 
-/// The in-isolate TypeScript 6.0.3 checker (`--check-engine=tsc`).
+/// The code blocks a doc test or `check --doc` extracted
+/// (`file:///a/mod.ts#3-7.ts`), held in memory by the file fetcher.
+fn code_block_modules(
+  graph: &ModuleGraph,
+) -> impl Iterator<Item = &deno_graph::JsModule> {
+  graph.modules().filter_map(|module| match module {
+    deno_graph::Module::Js(js)
+      if js.specifier.scheme() == "file"
+        && js.specifier.fragment().is_some() =>
+    {
+      Some(js)
+    }
+    _ => None,
+  })
+}
+
+/// The external specifiers (`jsr:`, `npm:`, `http(s):`, import-map keys) the
+/// local modules of `graph`, code blocks included, import: what `deno
+/// sync-types` maps, which reads the project from disk and so never sees a
+/// code block's own imports.
+fn code_block_external_specifiers(graph: &ModuleGraph) -> Vec<String> {
+  let mut specifiers = std::collections::BTreeSet::new();
+  for module in graph.modules() {
+    if module.specifier().scheme() != "file" {
+      continue;
+    }
+    for raw in module.dependencies().keys() {
+      if raw.starts_with('.')
+        || raw.starts_with('/')
+        || raw.starts_with("node:")
+        || raw.starts_with("file:")
+      {
+        continue;
+      }
+      specifiers.insert(raw.clone());
+    }
+  }
+  specifiers.into_iter().collect()
+}
+
+/// Code blocks written out for the native compiler, which reads only files:
+/// one file per block in a fresh directory below the project's `.deno/doc/`
+/// (inside the project, so the generated `paths` and `node_modules` resolve
+/// as for its other modules), removed with the directory on drop.
+struct CodeBlocks {
+  dir: tempfile::TempDir,
+  /// Each written file and the block's specifier.
+  files: Vec<(PathBuf, ModuleSpecifier)>,
+}
+
+impl CodeBlocks {
+  /// Report a diagnostic in a written block against the block's specifier
+  /// (`file:///a/mod.ts#3-7.ts`), as the in-process checker does.
+  fn remap_diagnostics(&self, diagnostics: &mut [crate::tsc::Diagnostic]) {
+    let dir_name = self
+      .dir
+      .path()
+      .file_name()
+      .map(|name| name.to_string_lossy().into_owned())
+      .unwrap_or_default();
+    let by_suffix = self
+      .files
+      .iter()
+      .filter_map(|(path, specifier)| {
+        let name = path.file_name()?.to_string_lossy();
+        Some((format!("/{dir_name}/{name}"), specifier.to_string()))
+      })
+      .collect::<Vec<_>>();
+    fn remap(
+      diagnostic: &mut crate::tsc::Diagnostic,
+      by_suffix: &[(String, String)],
+    ) {
+      if let Some(file_name) = &diagnostic.file_name
+        && let Some((_, specifier)) = by_suffix
+          .iter()
+          .find(|(suffix, _)| file_name.replace('\\', "/").ends_with(suffix))
+      {
+        diagnostic.file_name = Some(specifier.clone());
+      }
+      if let Some(related) = &mut diagnostic.related_information {
+        for diagnostic in related {
+          remap(diagnostic, by_suffix);
+        }
+      }
+    }
+    for diagnostic in diagnostics {
+      remap(diagnostic, &by_suffix);
+    }
+  }
+}
+
+/// Write each code block of `graph` below `<project>/.deno/doc/`, its local
+/// imports (relative ones and the absolute `file:` import of the module it
+/// documents) rewritten relative to the written file. Only the import's own
+/// line is touched, so every other diagnostic position is the block's own.
+fn materialize_code_blocks(
+  project_root: &Path,
+  graph: &ModuleGraph,
+) -> Result<CodeBlocks, AnyError> {
+  let parent = project_root.join(".deno").join("doc");
+  std::fs::create_dir_all(&parent)?;
+  let dir = tempfile::Builder::new()
+    .prefix("check-")
+    .tempdir_in(&parent)?;
+  let mut files = Vec::new();
+  for (index, js) in code_block_modules(graph).enumerate() {
+    let fragment = js.specifier.fragment().unwrap_or_default();
+    let name = format!(
+      "{index}_{}",
+      fragment.replace(
+        |c: char| !(c.is_ascii_alphanumeric() || c == '-' || c == '.'),
+        "_"
+      )
+    );
+    let path = dir.path().join(name);
+    std::fs::write(&path, rewrite_local_imports(js, dir.path()))?;
+    files.push((path, js.specifier.clone()));
+  }
+  Ok(CodeBlocks { dir, files })
+}
+
+/// The block's source with each local import (`./x.ts`, `../x.ts`,
+/// `file:///a/x.ts`) pointing at the same file from `dir`.
+fn rewrite_local_imports(js: &deno_graph::JsModule, dir: &Path) -> String {
+  let mut lines = js
+    .source
+    .text
+    .split('\n')
+    .map(str::to_string)
+    .collect::<Vec<_>>();
+  for (raw, dependency) in &js.dependencies {
+    if !(raw.starts_with("./")
+      || raw.starts_with("../")
+      || raw.starts_with("file:"))
+    {
+      continue;
+    }
+    let Some(target) = dependency
+      .maybe_code
+      .maybe_specifier()
+      .or_else(|| dependency.maybe_type.maybe_specifier())
+      .filter(|specifier| specifier.scheme() == "file")
+      .and_then(|specifier| specifier.to_file_path().ok())
+    else {
+      continue;
+    };
+    let Some(relative) = pathdiff::diff_paths(&target, dir) else {
+      continue;
+    };
+    let mut relative = relative.to_string_lossy().replace('\\', "/");
+    if !relative.starts_with("../") {
+      relative = format!("./{relative}");
+    }
+    for import in &dependency.imports {
+      let Some(line) = lines.get_mut(import.specifier_range.range.start.line)
+      else {
+        continue;
+      };
+      for quote in ['"', '\''] {
+        *line = line.replace(
+          &format!("{quote}{raw}{quote}"),
+          &format!("{quote}{relative}{quote}"),
+        );
+      }
+    }
+  }
+  lines.join("\n")
+}
+
+/// The in-isolate TypeScript 6.0.3 checker (`--check-engine=tsc`), and
+/// `--doc` / `--doc-only` with either engine: their graph check goes through
+/// [`TypeChecker::check_graph`], which picks it.
 async fn legacy_check(
   flags: Arc<Flags>,
   check_flags: CheckFlags,
@@ -730,4 +910,59 @@ async fn legacy_check_with_factory(
       },
     )
     .await
+}
+
+#[cfg(test)]
+mod tests {
+  use deno_core::serde_json;
+  use deno_core::serde_json::json;
+
+  use super::*;
+
+  #[test]
+  fn code_block_diagnostics_name_the_block() {
+    let project = tempfile::tempdir().unwrap();
+    let dir = tempfile::Builder::new()
+      .prefix("check-")
+      .tempdir_in(project.path())
+      .unwrap();
+    let dir_name = dir
+      .path()
+      .file_name()
+      .unwrap()
+      .to_string_lossy()
+      .to_string();
+    let block = ModuleSpecifier::parse("file:///a/mod.ts#3-7.ts").unwrap();
+    let code_blocks = CodeBlocks {
+      files: vec![(dir.path().join("0_3-7.ts"), block.clone())],
+      dir,
+    };
+    let in_block = format!("file:///p/.deno/doc/{dir_name}/0_3-7.ts");
+    let mut diagnostics: Vec<crate::tsc::Diagnostic> =
+      serde_json::from_value(json!([
+        {
+          "category": 1,
+          "code": 2322,
+          "fileName": in_block,
+          "relatedInformation": [
+            { "category": 3, "code": 6500, "fileName": in_block },
+            { "category": 3, "code": 6500, "fileName": "file:///a/mod.ts" },
+          ],
+        },
+        { "category": 1, "code": 2322, "fileName": "file:///a/other.ts" },
+      ]))
+      .unwrap();
+    code_blocks.remap_diagnostics(&mut diagnostics);
+    assert_eq!(
+      diagnostics[0].file_name.as_deref(),
+      Some("file:///a/mod.ts#3-7.ts")
+    );
+    let related = diagnostics[0].related_information.as_ref().unwrap();
+    assert_eq!(related[0].file_name.as_deref(), Some(block.as_str()));
+    assert_eq!(related[1].file_name.as_deref(), Some("file:///a/mod.ts"));
+    assert_eq!(
+      diagnostics[1].file_name.as_deref(),
+      Some("file:///a/other.ts")
+    );
+  }
 }

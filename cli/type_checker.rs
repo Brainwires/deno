@@ -284,18 +284,35 @@ impl TypeChecker {
     // The roots the external compiler can load: local files and remote
     // modules (mirrored under `.deno/remote/`). Built-in (`deno-vitest:`),
     // `data:` and in-memory modules have nothing on disk to check.
-    let sync_roots: Vec<String> = roots
-      .iter()
-      .filter_map(|root| match root.scheme() {
+    // A code block a doc test extracted (`file:///a/mod.ts#3-7.ts`, in memory)
+    // is materialized for the compiler by `run_native_check`; its own file is
+    // the root to read the project from, when the compiler can load that.
+    let mut sync_roots: Vec<String> = Vec::new();
+    let mut any_code_block = false;
+    for root in &roots {
+      let sync_root = match root.scheme() {
+        "file" if root.fragment().is_some() => {
+          any_code_block = true;
+          root
+            .to_file_path()
+            .ok()
+            .filter(|path| has_script_extension(&path.to_string_lossy()))
+            .map(|path| path.to_string_lossy().into_owned())
+        }
         "file" => root
           .to_file_path()
           .ok()
           .map(|path| path.to_string_lossy().into_owned()),
         "http" | "https" => Some(root.to_string()),
         _ => None,
-      })
-      .collect();
-    if sync_roots.is_empty() {
+      };
+      if let Some(sync_root) = sync_root
+        && !sync_roots.contains(&sync_root)
+      {
+        sync_roots.push(sync_root);
+      }
+    }
+    if sync_roots.is_empty() && !any_code_block {
       return Ok(Arc::new(graph));
     }
     // The config generator reads the project as `deno check <roots>` would,
@@ -373,11 +390,14 @@ impl TypeChecker {
     // A package.json project's tsx-style resolution (extensionless,
     // directory and `.js`-for-`.ts` imports, on by default since item 57)
     // is what the generated project's `moduleResolution: "bundler"` does
-    // already. Only Deno's sloppy imports asked for in a deno.json project
-    // or by flag keep the in-process checker.
-    if options.unstable_sloppy_imports()
-      && !options.node_project_sloppy_imports()
-    {
+    // already, and so is `deno bundle`'s own (item 81). Only Deno's sloppy
+    // imports asked for in a deno.json project or by flag keep the
+    // in-process checker.
+    let flags = options.flags();
+    let sloppy_imports_asked_for = (flags.unstable_config.sloppy_imports
+      && !flags.internal.implied_sloppy_imports)
+      || options.workspace().has_unstable("sloppy-imports");
+    if sloppy_imports_asked_for && !options.node_project_sloppy_imports() {
       return Some("sloppy imports");
     }
     if options.unstable_detect_cjs() {
@@ -389,20 +409,16 @@ impl TypeChecker {
     if workspace_members_map_an_import_differently(options.workspace()) {
       return Some("workspace members that map one import differently");
     }
-    if let DenoSubcommand::Test(test_flags) = options.sub_command() {
-      if test_flags.doc {
-        return Some("test --doc");
-      }
-      if options
+    if let DenoSubcommand::Test(test_flags) = options.sub_command()
+      && options
         .resolve_workspace_test_options(&Default::default())
         .vitest_compat
-        && crate::tools::test::vitest::has_test_config(
-          options.initial_cwd(),
-          test_flags.vitest.config.as_deref(),
-        )
-      {
-        return Some("a Vitest or Jest config (its aliases)");
-      }
+      && crate::tools::test::vitest::has_test_config(
+        options.initial_cwd(),
+        test_flags.vitest.config.as_deref(),
+      )
+    {
+      return Some("a Vitest or Jest config (its aliases)");
     }
     // A remote `compilerOptions.types` entry (a graph import of the config)
     // has no counterpart in the generated project, which mirrors only the
@@ -431,8 +447,12 @@ impl TypeChecker {
         "file" | "http" | "https" => {}
         _ => continue, // built-in modules (`deno-vitest:`, `node:`)
       }
-      if specifier.fragment().is_some() {
-        return Some("an in-memory module (a code block)");
+      // A code block a doc test or `check --doc` extracted
+      // (`file:///a/mod.ts#3-7.ts`) is written out for the compiler
+      // (`run_native_check`); its fragment carries the block's extension.
+      let code_block = specifier.fragment();
+      if code_block.is_some() && specifier.scheme() != "file" {
+        return Some("an in-memory module (a remote code block)");
       }
       // An installed package (BYONM `node_modules`) is resolved by the
       // compiler itself, the generated project's npm side.
@@ -452,13 +472,7 @@ impl TypeChecker {
       ) {
         return Some("a CommonJS module");
       }
-      let path = specifier.path().to_ascii_lowercase();
-      if ![
-        ".ts", ".tsx", ".mts", ".js", ".jsx", ".mjs", ".d.ts", ".d.mts",
-      ]
-      .iter()
-      .any(|ext| path.ends_with(ext))
-      {
+      if !has_script_extension(code_block.unwrap_or(specifier.path())) {
         return Some("a module without a TypeScript or JavaScript extension");
       }
       if js.maybe_types_dependency.is_some() {
@@ -777,6 +791,17 @@ fn workspace_members_map_an_import_differently(
     }
   }
   false
+}
+
+/// Whether a path (or a code block's fragment, `3-7.ts`) names a module the
+/// native compiler loads by its extension.
+fn has_script_extension(path: &str) -> bool {
+  let path = path.to_ascii_lowercase();
+  [
+    ".ts", ".tsx", ".mts", ".js", ".jsx", ".mjs", ".d.ts", ".d.mts",
+  ]
+  .iter()
+  .any(|ext| path.ends_with(ext))
 }
 
 /// A local module the graph could not load, if any: Deno reports it itself,

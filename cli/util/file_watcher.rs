@@ -5,6 +5,7 @@ use std::cell::RefCell;
 use std::collections::HashSet;
 use std::future::Future;
 use std::io::IsTerminal;
+use std::path::Path;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -549,6 +550,7 @@ fn new_watcher(
       let paths: Vec<PathBuf> = canonicalized
         .iter()
         .filter(|path| !exclude_set.matches_path(path))
+        .filter(|path| !in_generated_types_dir(path))
         .cloned()
         .collect();
 
@@ -563,6 +565,18 @@ fn new_watcher(
     },
     Default::default(),
   )?)
+}
+
+/// Whether `path` is inside a project's generated `.deno/` directory (the
+/// stock `tsconfig.json` and types the native type check writes, marked by
+/// its `.gitignore` of `*`): the check of every run writes there, so a
+/// watcher that observes the project directory must not restart on it.
+fn in_generated_types_dir(path: &Path) -> bool {
+  path.ancestors().any(|dir| {
+    dir.file_name().is_some_and(|name| name == ".deno")
+      && std::fs::read_to_string(dir.join(".gitignore"))
+        .is_ok_and(|text| text == "*\n")
+  })
 }
 
 /// Computes the set of paths a watcher should observe for a given set of file
@@ -621,5 +635,24 @@ fn consume_paths_to_watch(
         _ => unreachable!(),
       },
     }
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn generated_types_dir_is_not_a_change() {
+    let temp = tempfile::tempdir().unwrap();
+    let generated = temp.path().join(".deno");
+    std::fs::create_dir_all(generated.join("doc")).unwrap();
+    let block = generated.join("doc").join("0_3-7.ts");
+    // A `.deno/` without the generator's marker (a user's own) is watched.
+    assert!(!in_generated_types_dir(&block));
+    std::fs::write(generated.join(".gitignore"), "*\n").unwrap();
+    assert!(in_generated_types_dir(&block));
+    assert!(in_generated_types_dir(&generated));
+    assert!(!in_generated_types_dir(&temp.path().join("main.ts")));
   }
 }

@@ -250,10 +250,35 @@ pub enum RootTsConfigMode {
   CheckMode,
 }
 
+/// The language server's tsgo backend (`cli/lsp/tsgo.rs`) runs `deno
+/// sync-types` for a project whose editor buffers import packages no file on
+/// disk imports yet; it names them here, one per line (internal).
+pub const SYNC_TYPES_EXTRA_SPECIFIERS_ENV: &str =
+  "DENO_INTERNAL_SYNC_TYPES_SPECIFIERS";
+
+/// The extra specifiers [`SYNC_TYPES_EXTRA_SPECIFIERS_ENV`] names.
+pub fn sync_types_extra_specifiers_from_env() -> Vec<String> {
+  std::env::var(SYNC_TYPES_EXTRA_SPECIFIERS_ENV)
+    .map(|value| {
+      value
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect()
+    })
+    .unwrap_or_default()
+}
+
+/// Generate the stock `tsconfig.json` and `.deno/` types (`deno sync-types`,
+/// and the native type check). `extra_specifiers` are external specifiers
+/// (`jsr:`, `npm:`, import-map keys) to map besides those the roots' graph
+/// imports: a doc test's code blocks, which live in the caller's memory only.
 pub async fn sync_types_command(
   flags: Arc<Flags>,
   sync_types_flags: SyncTypesFlags,
   root_tsconfig_mode: RootTsConfigMode,
+  extra_specifiers: Vec<String>,
 ) -> Result<(), AnyError> {
   use crate::graph_container::CollectSpecifiersOptions;
 
@@ -406,6 +431,7 @@ pub async fn sync_types_command(
         specifiers.insert(raw.clone());
       }
     }
+    specifiers.extend(extra_specifiers);
     (
       specifiers.into_iter().collect::<Vec<_>>(),
       local_wasm_modules,
@@ -471,6 +497,17 @@ pub async fn sync_types_command(
     .ok()
     .flatten()
     .and_then(|specifier| specifier.to_file_path().ok());
+  // denext: the built-in `vitest` / `@jest/globals` types (items 23 and 29),
+  // written before the config is generated so a `compilerOptions.types`
+  // entry naming one of them resolves, then mapped through its `paths`
+  // (unless `test.vitestCompat` is `false`). The native type check and the
+  // tsgo language service (which runs `deno sync-types`) both read them.
+  let vitest_compat = cli_options
+    .resolve_workspace_test_options(&Default::default())
+    .vitest_compat;
+  if vitest_compat {
+    crate::tools::test::vitest::write_native_check_types(&project_root)?;
+  }
   let installed = super::npm_compat::setup_npm_compat(
     &project_root,
     root_config.as_deref(),
@@ -486,6 +523,12 @@ pub async fn sync_types_command(
     type_check_remote,
   )
   .await?;
+  if vitest_compat {
+    crate::tools::test::vitest::add_native_check_type_paths(
+      &project_root,
+      &project_root.join(".deno").join("tsconfig.json"),
+    )?;
+  }
 
   log::info!(
     "{} tsconfig for stock TypeScript at {}",

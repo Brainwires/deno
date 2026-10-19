@@ -1178,8 +1178,11 @@ impl TsServer {
     let semantic_tokens = module
       .semantic_tokens_full
       .get_or_try_init(async || match self {
-        // TODO(denext): map tsgo's semantic-token legend onto Deno's.
-        Self::Go(_) => Ok(Default::default()),
+        Self::Go(ts_server) => {
+          ts_server
+            .provide_semantic_tokens(module, None, &snapshot, token)
+            .await
+        }
         Self::Js(ts_server) => ts_server
           .get_encoded_semantic_classifications(
             snapshot,
@@ -1216,8 +1219,11 @@ impl TsServer {
       return Ok(result);
     }
     let semantic_tokens = match self {
-      // TODO(denext): map tsgo's semantic-token legend onto Deno's.
-      Self::Go(_) => Default::default(),
+      Self::Go(ts_server) => {
+        ts_server
+          .provide_semantic_tokens(module, Some(range), &snapshot, token)
+          .await?
+      }
       Self::Js(ts_server) => ts_server
         .get_encoded_semantic_classifications(
           snapshot,
