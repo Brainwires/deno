@@ -501,6 +501,10 @@ pub(crate) async fn run_native_check(
     crate::tsc::native::parse_tsc_diagnostics(&stdout, &project_root);
   if let Some(code_blocks) = &code_blocks {
     code_blocks.remap_diagnostics(&mut parsed);
+    // The compiler reported the written blocks (under `.deno/`) before the
+    // project's own files; list them by module as the in-process checker
+    // does (`mod.ts` before `mod.ts#3-7.ts`), in order within each.
+    parsed.sort_by(|a, b| a.file_name.cmp(&b.file_name));
   }
   drop(code_blocks);
   let mut diagnostics = Diagnostics::from(parsed);

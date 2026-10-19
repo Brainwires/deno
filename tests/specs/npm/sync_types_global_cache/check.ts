@@ -16,7 +16,12 @@ function assertPathsResolve(
       // Wildcard mappings (`.../*`, `.../*.d.ts`) resolve a subpath under the
       // prefix before the `*`; assert that prefix directory exists.
       const star = target.indexOf("*");
-      const probe = star === -1 ? target : target.slice(0, star);
+      const prefix = star === -1 ? target : target.slice(0, star);
+      // A relative target resolves against the config's own directory, as
+      // the compiler resolves it.
+      const probe = prefix.startsWith("./") || prefix.startsWith("../")
+        ? `${cfgPath.slice(0, cfgPath.lastIndexOf("/") + 1)}${prefix}`
+        : prefix;
       try {
         Deno.statSync(probe);
       } catch (e) {
