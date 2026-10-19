@@ -778,6 +778,8 @@ pub struct BundleFlags {
   pub platform: BundlePlatform,
   pub watch: bool,
   pub declaration: bool,
+  /// `--define KEY=VALUE` substitutions, in the order given.
+  pub define: Vec<(String, String)>,
 }
 
 impl From<BundleOptions> for BundleFlags {
@@ -797,6 +799,7 @@ impl From<BundleOptions> for BundleFlags {
       inline_imports: value.inline_imports,
       packages: value.packages,
       declaration: false,
+      define: value.define.into_iter().collect(),
     }
   }
 }

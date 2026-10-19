@@ -1,0 +1,97 @@
+{
+  "tempDir": true,
+  "tests": {
+    "replaces_identifiers": {
+      "steps": [
+        {
+          "args": [
+            "bundle",
+            "--define",
+            "DEBUG=true",
+            "--define=VERSION=\"1.2.3\"",
+            "--define",
+            "BUILD='nightly'",
+            "--define",
+            "LIMITS={\"max\": 3}",
+            "--define",
+            "MISSING=undefined",
+            "-o",
+            "out.js",
+            "identifiers.ts"
+          ],
+          "output": "[WILDCARD]"
+        },
+        {
+          "args": "run --no-config out.js",
+          "output": "true 1.2.3 nightly 3 undefined\n"
+        }
+      ]
+    },
+    "replaces_member_expressions": {
+      "steps": [
+        {
+          "args": [
+            "bundle",
+            "--define",
+            "process.env.NODE_ENV=\"production\"",
+            "--define",
+            "import.meta.env.MODE=\"prod\"",
+            "-o",
+            "out.js",
+            "member.ts"
+          ],
+          "output": "[WILDCARD]"
+        },
+        {
+          "args": "run --no-config out.js",
+          "output": "production prod\n"
+        },
+        {
+          "args": "run --allow-read --no-config check_member.ts",
+          "output": "ok\n"
+        }
+      ]
+    },
+    "eliminates_dead_code_when_minified": {
+      "steps": [
+        {
+          "args": "bundle --minify --define FEATURE_NEW=false -o out.js dead_code.ts",
+          "output": "[WILDCARD]"
+        },
+        {
+          "args": "run --no-config out.js",
+          "output": "legacy\n"
+        },
+        {
+          "args": "run --allow-read --no-config check_dead_code.ts",
+          "output": "ok\n"
+        }
+      ]
+    },
+    "missing_equals": {
+      "args": "bundle --define DEBUG identifiers.ts",
+      "output": "missing_equals.out",
+      "exitCode": 1
+    },
+    "invalid_name": {
+      "args": "bundle --define a-b=1 identifiers.ts",
+      "output": "invalid_name.out",
+      "exitCode": 1
+    },
+    "reserved_name": {
+      "args": "bundle --define if=1 identifiers.ts",
+      "output": "reserved_name.out",
+      "exitCode": 1
+    },
+    "invalid_value": {
+      "args": "bundle --define A=foo-bar identifiers.ts",
+      "output": "invalid_value.out",
+      "exitCode": 1
+    },
+    "empty_value": {
+      "args": "bundle --define A= identifiers.ts",
+      "output": "empty_value.out",
+      "exitCode": 1
+    }
+  }
+}

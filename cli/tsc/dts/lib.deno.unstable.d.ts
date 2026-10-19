@@ -98,6 +98,24 @@ declare namespace Deno {
        * Target platform.
        */
       platform?: Platform;
+      /**
+       * Global identifiers or member expressions to replace with a constant
+       * expression at bundle time, as esbuild's `define`. Each value is
+       * source text: an entity name (`"undefined"`, `"globalThis.fetch"`) or
+       * a JSON literal (`"true"`, `"42"`, `'"production"'`), so substitute a
+       * string with `JSON.stringify(value)`.
+       *
+       * ```ts
+       * await Deno.bundle({
+       *   entrypoints: ["./main.ts"],
+       *   define: {
+       *     DEBUG: "false",
+       *     "process.env.NODE_ENV": JSON.stringify("production"),
+       *   },
+       * });
+       * ```
+       */
+      define?: Record<string, string>;
 
       /**
        * Whether to write the output to the filesystem.

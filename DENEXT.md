@@ -2376,6 +2376,41 @@ where the changes are discussed.
     interactive session) on Windows arm64, whose CEF host laufey's CI does not
     build.
 
+78. **`feat(bundle)`: `deno bundle --define` and `Deno.bundle({ define })`**
+    (`feat/bundle-define`, for runtime `denext.23`; `libs/cli_parser`,
+    `ext/bundle`, `cli/tools/bundle`, `cli/tsc/dts/lib.deno.unstable.d.ts`).
+    esbuild's `define`: a global identifier or member expression is replaced
+    with a constant expression at bundle time, so a branch on it folds and the
+    untaken side is dropped (`--minify` removes it entirely). The flag is
+    `--define KEY=VALUE` (also `--define=KEY=VALUE`), repeatable, split at the
+    first `=`; that is the shape upstream settled on in
+    [denoland/deno#30639](https://github.com/denoland/deno/issues/30639) (no
+    pull request yet), rather than esbuild's `--define:KEY=VALUE`.
+    `Deno.bundle()` takes `define: Record<string, string>`, esbuild's JS API
+    shape (each value is source text, so a string is `JSON.stringify(value)`).
+    `deno.json` has no `bundle` section, so there is no config key.
+    - Names and values are checked by esbuild's rules before esbuild starts
+      (`ext/bundle/src/define.rs`, shared by the flag parser, the op and
+      `bundle_init`): a name is an identifier that isn't a reserved word (`this`
+      and `import.meta` allowed) followed by `.name` or `["string"]` accesses
+      (`process.env.NODE_ENV`, `process.env["MY-VAR"]`); a value is an entity
+      name (`undefined`, `globalThis.fetch`) or a JSON literal as esbuild reads
+      it (single-quoted strings, trailing commas, comments, integer BigInts). A
+      bad flag is a usage error naming the define and what is wrong, an empty
+      value says to quote a string, and `Deno.bundle()` rejects with a
+      `TypeError` (also for a value that isn't a string). Esbuild accepts
+      `--define:=1` and ignores it; here an empty name is an error.
+
+    Tests: `tests/specs/bundle/define` (identifiers, JSON and single-quoted
+    values, `undefined`; `process.env.NODE_ENV` and `import.meta.env.MODE`
+    replaced and gone from the output; a `false` flag's branch and its function
+    eliminated under `--minify`; a missing `=`, a bad name, a reserved word, a
+    bad value and an empty value each fail), `tests/unit/bundle_test.ts`
+    (`define` through `Deno.bundle()`, and its errors), the `define.rs` unit
+    tests (every name and value case checked against esbuild 0.25.5's own
+    answer) and the parser tests `bundle_define` /
+    `bundle_define_rejects_invalid_input`.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77) are what the prebuilt `libdenort` carries. The CLI-side parts (for
 example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's
@@ -2607,6 +2642,9 @@ Specs this fork adds for what its runtime exposes outside a desktop app:
   the pool's limits and timeouts, TLS modes) run when
   `DENO_SQL_TEST_POSTGRES_URL` (and, for TLS, `DENO_SQL_TEST_POSTGRES_CA`) is
   set, and are skipped otherwise.
+- `tests/specs/bundle/define`: `deno bundle --define` replaces identifiers and
+  member expressions, drops the dead branch under `--minify`, and rejects bad
+  names and values (item 78).
 - `tests/specs/run/desktop_ops_inert` (`sys.js`): the integrations that need
   `--allow-sys` refuse without it (and with only some sys names) and are inert
   with it.

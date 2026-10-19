@@ -225,6 +225,15 @@ pub async fn bundle_init(
   bundle_flags: &BundleFlags,
   caller_permissions: Option<PermissionsContainer>,
 ) -> Result<EsbuildBundler, AnyError> {
+  // `deno bundle` validates these while parsing its flags and `Deno.bundle()`
+  // in its op; check again here so no caller hands esbuild a bad define.
+  deno_bundle_runtime::define::validate_defines(
+    bundle_flags
+      .define
+      .iter()
+      .map(|(k, v)| (k.as_str(), v.as_str())),
+  )
+  .map_err(|e| deno_core::anyhow::anyhow!(e))?;
   {
     let flags_mut = Arc::make_mut(&mut flags);
     flags_mut.unstable_config.sloppy_imports = true;
@@ -881,6 +890,7 @@ pub async fn bundle_for_compile(
     sourcemap: None,
     platform: BundlePlatform::Deno,
     watch: false,
+    define: Vec::new(),
   };
 
   // Force bundle-style resolver config for the duration of bundling.
@@ -2719,6 +2729,10 @@ fn configure_esbuild_flags(
 
   if bundle_flags.keep_names {
     builder.raw_flag("--keep-names");
+  }
+
+  for (key, value) in &bundle_flags.define {
+    builder.define(key, value);
   }
 
   if let Some(sourcemap_type) = bundle_flags.sourcemap {

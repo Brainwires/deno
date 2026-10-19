@@ -214,7 +214,7 @@ pub fn convert(result: ParseResult) -> Result<Flags, CliError> {
     Some("vendor") => vendor_parse(&mut flags),
     Some("deploy") => deploy_parse(&mut flags, false),
     Some("sandbox") => deploy_parse(&mut flags, true),
-    Some("bundle") => bundle_parse(&result, &mut flags),
+    Some("bundle") => bundle_parse(&result, &mut flags)?,
     Some("audit") => audit_parse(&result, &mut flags)?,
     Some("why") => why_parse(&result, &mut flags),
     Some("transpile") => transpile_parse(&result, &mut flags),
@@ -3177,7 +3177,10 @@ fn node_inspect_addr(word: &str, flag: &str) -> Option<SocketAddr> {
   }
 }
 
-fn bundle_parse(result: &ParseResult, flags: &mut Flags) {
+fn bundle_parse(
+  result: &ParseResult,
+  flags: &mut Flags,
+) -> Result<(), CliError> {
   compile_args_without_check_parse(result, flags);
   // `compile_args_without_check_parse` deliberately omits `--check`; apply it
   // here so `deno bundle --check=all` type-checks (mirrors clap, #30159).
@@ -3223,6 +3226,18 @@ fn bundle_parse(result: &ParseResult, flags: &mut Flags) {
     .get_many("external")
     .map(|v| v.to_vec())
     .unwrap_or_default();
+  let define = result
+    .get_many("define")
+    .unwrap_or_default()
+    .iter()
+    .map(|raw| {
+      let (key, value) = deno_bundle_runtime::define::parse_define(raw)
+        .map_err(|e| CliError::new(CliErrorKind::InvalidValue, e))?;
+      deno_bundle_runtime::define::validate_define(&key, &value)
+        .map_err(|e| CliError::new(CliErrorKind::InvalidValue, e))?;
+      Ok((key, value))
+    })
+    .collect::<Result<Vec<_>, CliError>>()?;
 
   flags.subcommand = DenoSubcommand::Bundle(BundleFlags {
     entrypoints,
@@ -3239,7 +3254,9 @@ fn bundle_parse(result: &ParseResult, flags: &mut Flags) {
     code_splitting: result.get_bool("code-splitting"),
     inline_imports: !matches!(result.get_one("inline-imports"), Some("false")),
     declaration: result.get_bool("declaration"),
+    define,
   });
+  Ok(())
 }
 
 fn audit_parse(

@@ -539,6 +539,76 @@ Deno.test("bundle: keep-names preserves names", async () => {
   assertMatch(minJs.text(), /export\s*\{[^}]*\badd\b[^}]*\}/);
 });
 
+Deno.test("bundle: define replaces identifiers and member expressions", async () => {
+  using dir = new TempDir();
+  const entry = dir.join("index.ts");
+
+  await Deno.writeTextFile(
+    entry,
+    unindent`
+      declare const DEBUG: boolean;
+      declare const process: { env: Record<string, string> };
+      if (DEBUG) {
+        console.log("debug-only branch");
+      }
+      export const mode = process.env.NODE_ENV;
+    `,
+  );
+
+  const result = await Deno.bundle({
+    entrypoints: [entry],
+    minify: true,
+    write: false,
+    define: {
+      DEBUG: "false",
+      "process.env.NODE_ENV": JSON.stringify("production"),
+    },
+  });
+  assertEquals(result.success, true);
+  const js = result.outputFiles!.find((f) => !!f.contents)!.text();
+  assertStringIncludes(js, '"production"');
+  assertFalse(js.includes("debug-only branch"));
+  assertFalse(js.includes("process.env"));
+});
+
+Deno.test("bundle: define rejects invalid names and values", async () => {
+  using dir = new TempDir();
+  const entry = dir.join("index.ts");
+  await Deno.writeTextFile(entry, "export const a = 1;\n");
+
+  await assertRejects(
+    () =>
+      Deno.bundle({
+        entrypoints: [entry],
+        write: false,
+        define: { "a-b": "1" },
+      }),
+    TypeError,
+    'Invalid define name "a-b"',
+  );
+  await assertRejects(
+    () =>
+      Deno.bundle({
+        entrypoints: [entry],
+        write: false,
+        define: { A: "foo-bar" },
+      }),
+    TypeError,
+    'Invalid define value for "A"',
+  );
+  await assertRejects(
+    () =>
+      Deno.bundle({
+        entrypoints: [entry],
+        write: false,
+        // deno-lint-ignore no-explicit-any
+        define: { A: 1 as any },
+      }),
+    TypeError,
+    'options.define["A"] must be a string',
+  );
+});
+
 Deno.test("bundle: code splitting with multiple entrypoints", async () => {
   using dir = new TempDir();
   const shared = dir.join("shared.ts");

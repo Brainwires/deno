@@ -4,14 +4,41 @@ import { op_bundle } from "ext:core/ops";
 import { core, primordials } from "ext:core/mod.js";
 const { TextDecoder } = core.loadExtScript("ext:deno_web/08_text_encoding.js");
 
-const { SafeArrayIterator, Uint8Array, ObjectPrototypeIsPrototypeOf } =
-  primordials;
+const {
+  ArrayIsArray,
+  ObjectEntries,
+  ObjectPrototypeIsPrototypeOf,
+  SafeArrayIterator,
+  TypeError,
+  Uint8Array,
+} = primordials;
 
 const decoder = new TextDecoder();
+
+function validateDefine(define: unknown) {
+  if (define === undefined) return;
+  if (define === null || typeof define !== "object" || ArrayIsArray(define)) {
+    throw new TypeError(
+      "Deno.bundle(): options.define must be an object mapping names to replacement source text",
+    );
+  }
+  for (
+    const { 0: key, 1: value } of new SafeArrayIterator(
+      ObjectEntries(define),
+    )
+  ) {
+    if (typeof value !== "string") {
+      throw new TypeError(
+        `Deno.bundle(): options.define["${key}"] must be a string of source text (got ${typeof value}); use JSON.stringify(value) to substitute a value`,
+      );
+    }
+  }
+}
 
 export async function bundle(
   options: Deno.bundle.Options,
 ): Promise<Deno.bundle.Result> {
+  validateDefine(options?.define);
   const result = {
     success: false,
     ...await op_bundle(

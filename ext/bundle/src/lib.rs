@@ -1,6 +1,7 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 
 use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -13,6 +14,8 @@ use deno_core::error::AnyError;
 use deno_core::op2;
 use deno_error::JsErrorBox;
 use deno_permissions::PermissionsContainer;
+
+pub mod define;
 
 deno_core::extension!(
   deno_bundle_runtime,
@@ -90,6 +93,10 @@ pub struct BundleOptions {
   pub platform: BundlePlatform,
   #[from_v8(default = true)]
   pub write: bool,
+  /// Global identifiers or member expressions to replace with a constant
+  /// expression at bundle time (esbuild's `define`).
+  #[from_v8(serde, default)]
+  pub define: BTreeMap<String, String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Copy, Default, serde::Deserialize)]
@@ -228,7 +235,10 @@ pub async fn op_bundle(
   state: Rc<RefCell<OpState>>,
   #[scoped] options: BundleOptions,
 ) -> Result<BuildResponse, JsErrorBox> {
-  // eprintln!("op_bundle: {:?}", options);
+  define::validate_defines(
+    options.define.iter().map(|(k, v)| (k.as_str(), v.as_str())),
+  )
+  .map_err(JsErrorBox::type_error)?;
   let (provider, permissions) = {
     let state = state.borrow();
     let permissions = state

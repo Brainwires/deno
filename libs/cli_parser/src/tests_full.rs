@@ -9979,6 +9979,59 @@ fn bundle_sourcemap_rejects_invalid_value() {
 }
 
 #[test]
+fn bundle_define() {
+  let flags = flags_from_vec(svec![
+    "deno",
+    "bundle",
+    "--define",
+    "DEBUG=false",
+    "--define=process.env.NODE_ENV=\"production\"",
+    "--define",
+    "A=b=c",
+    "main.ts"
+  ])
+  .unwrap();
+  let DenoSubcommand::Bundle(b) = flags.subcommand else {
+    unreachable!()
+  };
+  assert_eq!(b.entrypoints, svec!["main.ts"]);
+  assert_eq!(
+    b.define,
+    vec![
+      ("DEBUG".to_string(), "false".to_string()),
+      (
+        "process.env.NODE_ENV".to_string(),
+        "\"production\"".to_string()
+      ),
+      ("A".to_string(), "b=c".to_string()),
+    ]
+  );
+
+  let flags = flags_from_vec(svec!["deno", "bundle", "main.ts"]).unwrap();
+  let DenoSubcommand::Bundle(b) = flags.subcommand else {
+    unreachable!()
+  };
+  assert!(b.define.is_empty());
+}
+
+#[test]
+fn bundle_define_rejects_invalid_input() {
+  let cases = [
+    ("--define=DEBUG", "expected KEY=VALUE"),
+    ("--define==1", "Invalid define name \"\""),
+    ("--define=a-b=1", "Invalid define name \"a-b\""),
+    ("--define=if=1", "`if` is a reserved word"),
+    ("--define=A=", "the value is empty"),
+    ("--define=A=foo-bar", "Invalid define value for \"A\""),
+  ];
+  for (flag, expected) in cases {
+    let err =
+      flags_from_vec(svec!["deno", "bundle", flag, "main.ts"]).expect_err(flag);
+    assert!(err.message.contains(expected), "{flag}: {}", err.message);
+  }
+}
+
+#[test]
 fn sync_types_subcommand() {
   let flags = flags_from_vec(svec!["deno", "sync-types"]).unwrap();
   assert_eq!(

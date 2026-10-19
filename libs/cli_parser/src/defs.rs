@@ -2879,6 +2879,12 @@ pub static BUNDLE_SUBCOMMAND: CommandDef = CommandDef {
 .help("Minify the output"),
     ArgDef::new("keep-names").long("keep-names").set_true()
 .help("Keep function and class names"),
+    ArgDef::new("define")
+      .long("define")
+      .action(ArgAction::Append)
+      .num_args(NumArgs::Exact(1))
+      .value_name("KEY=VALUE")
+.help("Replace a global identifier or member expression with a constant expression, as esbuild's define (repeatable). The value is an identifier or a JSON literal: --define DEBUG=false --define 'process.env.NODE_ENV=\"production\"'"),
     ArgDef::new("code-splitting")
       .long("code-splitting")
       .set_true()
