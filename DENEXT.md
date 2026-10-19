@@ -2314,16 +2314,25 @@ where the changes are discussed.
       names there.
     - SQLite (`Deno.SQLiteColumn`): `database`, `table` and `column` of the
       column a value comes from (through views and subqueries;
-      `sqlite3_column_{database,table,origin}_name`), `type` its declared type,
-      and `nullable` `false` when that column is declared NOT NULL
-      (`sqlite3_table_column_metadata`); an expression has `null` for all of
-      them. `deno_sql` enables rusqlite's `column_metadata` feature (the bundled
-      SQLite is always built with `SQLITE_ENABLE_COLUMN_METADATA`).
+      `sqlite3_column_{database,table,origin}_name`), `type` its declared type
+      (as written, SQLite's own type names in capitals), and `nullable` `false`
+      when that column is declared NOT NULL (`sqlite3_table_column_metadata`);
+      an expression has `null` for all of them. `deno_sql` enables rusqlite's
+      `column_metadata` feature (the bundled SQLite is always built with
+      `SQLITE_ENABLE_COLUMN_METADATA`).
     - `tokio-postgres` 0.7.18 is vendored in `libs/vendor/tokio-postgres`
       (`[patch.crates-io]`) with one addition, `RowStream::columns()`: an
       unnamed statement (`prepare: false`, cursors) keeps its row description
       inside the stream, so without it a result with no rows could not name its
       columns. Every query now reads its columns from the stream.
+    - Fixed on the way: a `json[]` / `jsonb[]` parameter took an element that is
+      a JavaScript array as a further dimension (`[{ x: 1 }, [2]]` was
+      `{"{\"x\":1}",{"2"}}`, malformed); each element is now one JSON value
+      (`params::json_array_literal`). With `prepare: false` the parameter's type
+      is not known when it is encoded, so there it is still read as a dimension
+      (stringify such an element). A top-level JSON string comes back as a
+      JavaScript string, and a string bound to `json` / `jsonb` is JSON text, so
+      it has to be sent back as `JSON.stringify(value)`.
     - Values (unchanged, now tested as a matrix both ways, including the second
       round trip of what comes back): `int2` / `int4` / floats as numbers,
       `int8` and `numeric` as strings (`bigint: true`: `int8` as `bigint`),
@@ -2341,8 +2350,9 @@ where the changes are discussed.
     every declared type and back), `tests/specs/sql/pg_columns` (metadata with
     prepared and unnamed statements, empty results included, and the type matrix
     with the plain, unnamed and `bigint: true` clients, plus the second round
-    trip; needs `DENO_SQL_TEST_POSTGRES_URL`), and the typings in
-    `tests/specs/sql/types.ts`.
+    trip; needs `DENO_SQL_TEST_POSTGRES_URL`), the typings in
+    `tests/specs/sql/types.ts`, and the `deno_sql` unit test
+    `json_array_elements_are_json_values` (fails before the `json[]` fix).
 
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75, 76) are what the prebuilt `libdenort` carries. The CLI-side parts

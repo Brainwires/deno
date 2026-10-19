@@ -38,7 +38,10 @@ function show(label: string, result: Deno.SQLResult<unknown>) {
 
 for (const [name, client] of [["prepared", sql], ["unnamed", unnamed]]) {
   // No rows: the columns are still described (for unnamed statements too).
-  show(`${name} empty`, await client`select * from denosql_cols.pets`);
+  show(
+    `${name} empty`,
+    await client`select * from denosql_cols.pets where id < 0`,
+  );
   show(
     `${name} expressions`,
     await client`select 1::int4 as a, 'x'::text as a, null as n,
@@ -98,7 +101,8 @@ const matrix: [string, unknown][] = [
   ["varchar", "v"],
   ["json", { a: [1, null, "x"] }],
   ["jsonb", { b: { c: true } }],
-  ["jsonb", "a string"],
+  // A string is sent as text, so a JSON string value is its JSON text.
+  ["jsonb", JSON.stringify("a string")],
   ["bytea", new Uint8Array([0, 1, 254, 255])],
   ["timestamptz", new Date("2024-02-29T12:34:56.789Z")],
   ["timestamp", new Date("2024-02-29T12:34:56.789Z")],
@@ -120,7 +124,12 @@ const bigints = new Deno.SQL(url, { max: 1, bigint: true });
 for (const [type, value] of matrix) {
   const text = `select $1::${type} as v`;
   const [row] = await sql.unsafe(text, [value]);
-  const [unnamedRow] = await unnamed.unsafe(text, [value]);
+  // An unnamed statement's parameters are typed by the server after they
+  // are encoded, so a json[] element that is an array reads as a dimension.
+  const unnamedRow = await unnamed.unsafe(text, [value]).then(
+    ([r]) => r,
+    (e) => ({ v: `error ${e.code}` }),
+  );
   const result = await bigints.unsafe(text, [value]);
   const column = result.columns[0] as Deno.SQLPostgresColumn;
   const got = describe(row.v);
@@ -137,14 +146,18 @@ for (const [type, value] of matrix) {
   );
 }
 // The values that come back are accepted as parameters again: a second
-// round trip leaves them unchanged.
+// round trip leaves them unchanged. The exception is a top-level JSON string:
+// it comes back as a JavaScript string, and a string bound to json / jsonb
+// is taken as JSON text, so it has to be sent as JSON.stringify(value).
 for (const [type, value] of matrix) {
   const text = `select $1::${type} as v`;
   const [first] = await sql.unsafe(text, [value]);
-  const [second] = await sql.unsafe(text, [first.v]);
-  const same = describe(first.v) === describe(second.v);
-  if (!same) {
-    console.log(`${type}: ${describe(first.v)} -> ${describe(second.v)}`);
+  const second = await sql.unsafe(text, [first.v]).then(
+    ([r]) => describe(r.v),
+    (e) => `error ${e.code}`,
+  );
+  if (describe(first.v) !== second) {
+    console.log(`${type}: ${describe(first.v)} -> ${second}`);
   }
 }
 console.log("second round trip done");

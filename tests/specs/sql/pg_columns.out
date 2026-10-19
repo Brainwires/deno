@@ -1,0 +1,82 @@
+prepared empty 0 []
+  {"name":"id","type":"int8","nullable":null,"table":null,"column":null,"typeOid":20,"typeSchema":"pg_catalog","typeKind":"simple","typeModifier":-1,"baseType":null,"baseTypeOid":null,"tableOid":"pets","columnNumber":1}
+  {"name":"name","type":"varchar","nullable":null,"table":null,"column":null,"typeOid":1043,"typeSchema":"pg_catalog","typeKind":"simple","typeModifier":44,"baseType":null,"baseTypeOid":null,"tableOid":"pets","columnNumber":2}
+  {"name":"price","type":"numeric","nullable":null,"table":null,"column":null,"typeOid":1700,"typeSchema":"pg_catalog","typeKind":"simple","typeModifier":655366,"baseType":null,"baseTypeOid":null,"tableOid":"pets","columnNumber":3}
+  {"name":"mood","type":"mood","nullable":null,"table":null,"column":null,"typeOid":"user","typeSchema":"denosql_cols","typeKind":"enum","typeModifier":-1,"baseType":null,"baseTypeOid":null,"tableOid":"pets","columnNumber":4}
+  {"name":"tags","type":"_text","nullable":null,"table":null,"column":null,"typeOid":1009,"typeSchema":"pg_catalog","typeKind":"array","typeModifier":-1,"baseType":"text","baseTypeOid":25,"tableOid":"pets","columnNumber":5}
+prepared expressions 1 [ "0" ]
+  {"name":"a","type":"int4","nullable":null,"table":null,"column":null,"typeOid":23,"typeSchema":"pg_catalog","typeKind":"simple","typeModifier":-1,"baseType":null,"baseTypeOid":null,"tableOid":null,"columnNumber":null}
+  {"name":"a","type":"text","nullable":null,"table":null,"column":null,"typeOid":25,"typeSchema":"pg_catalog","typeKind":"simple","typeModifier":-1,"baseType":null,"baseTypeOid":null,"tableOid":null,"columnNumber":null}
+  {"name":"n","type":"text","nullable":null,"table":null,"column":null,"typeOid":25,"typeSchema":"pg_catalog","typeKind":"simple","typeModifier":-1,"baseType":null,"baseTypeOid":null,"tableOid":null,"columnNumber":null}
+  {"name":"arr","type":"_int8","nullable":null,"table":null,"column":null,"typeOid":1016,"typeSchema":"pg_catalog","typeKind":"array","typeModifier":-1,"baseType":"int8","baseTypeOid":20,"tableOid":null,"columnNumber":null}
+  {"name":"m","type":"mood","nullable":null,"table":null,"column":null,"typeOid":"user","typeSchema":"denosql_cols","typeKind":"enum","typeModifier":-1,"baseType":null,"baseTypeOid":null,"tableOid":null,"columnNumber":null}
+  {"name":"d","type":"int4","nullable":null,"table":null,"column":null,"typeOid":23,"typeSchema":"pg_catalog","typeKind":"simple","typeModifier":-1,"baseType":null,"baseTypeOid":null,"tableOid":null,"columnNumber":null}
+  {"name":"r","type":"int4range","nullable":null,"table":null,"column":null,"typeOid":3904,"typeSchema":"pg_catalog","typeKind":"range","typeModifier":-1,"baseType":"int4","baseTypeOid":23,"tableOid":null,"columnNumber":null}
+  {"name":"mr","type":"int4multirange","nullable":null,"table":null,"column":null,"typeOid":4451,"typeSchema":"pg_catalog","typeKind":"multirange","typeModifier":-1,"baseType":"int4","baseTypeOid":23,"tableOid":null,"columnNumber":null}
+  {"name":"num","type":"numeric","nullable":null,"table":null,"column":null,"typeOid":1700,"typeSchema":"pg_catalog","typeKind":"simple","typeModifier":327686,"baseType":null,"baseTypeOid":null,"tableOid":null,"columnNumber":null}
+prepared insert 0 []
+prepared returning 1 [ "0" ]
+  {"name":"id","type":"int8","nullable":null,"table":null,"column":null,"typeOid":20,"typeSchema":"pg_catalog","typeKind":"simple","typeModifier":-1,"baseType":null,"baseTypeOid":null,"tableOid":"pets","columnNumber":1}
+  {"name":"name","type":"varchar","nullable":null,"table":null,"column":null,"typeOid":1043,"typeSchema":"pg_catalog","typeKind":"simple","typeModifier":44,"baseType":null,"baseTypeOid":null,"tableOid":"pets","columnNumber":2}
+  {"name":"price","type":"numeric","nullable":null,"table":null,"column":null,"typeOid":1700,"typeSchema":"pg_catalog","typeKind":"simple","typeModifier":655366,"baseType":null,"baseTypeOid":null,"tableOid":"pets","columnNumber":3}
+unnamed empty 0 []
+  {"name":"id","type":"int8","nullable":null,"table":null,"column":null,"typeOid":20,"typeSchema":"pg_catalog","typeKind":"simple","typeModifier":-1,"baseType":null,"baseTypeOid":null,"tableOid":"pets","columnNumber":1}
+  {"name":"name","type":"varchar","nullable":null,"table":null,"column":null,"typeOid":1043,"typeSchema":"pg_catalog","typeKind":"simple","typeModifier":44,"baseType":null,"baseTypeOid":null,"tableOid":"pets","columnNumber":2}
+  {"name":"price","type":"numeric","nullable":null,"table":null,"column":null,"typeOid":1700,"typeSchema":"pg_catalog","typeKind":"simple","typeModifier":655366,"baseType":null,"baseTypeOid":null,"tableOid":"pets","columnNumber":3}
+  {"name":"mood","type":"mood","nullable":null,"table":null,"column":null,"typeOid":"user","typeSchema":"denosql_cols","typeKind":"enum","typeModifier":-1,"baseType":null,"baseTypeOid":null,"tableOid":"pets","columnNumber":4}
+  {"name":"tags","type":"_text","nullable":null,"table":null,"column":null,"typeOid":1009,"typeSchema":"pg_catalog","typeKind":"array","typeModifier":-1,"baseType":"text","baseTypeOid":25,"tableOid":"pets","columnNumber":5}
+unnamed expressions 1 [ "0" ]
+  {"name":"a","type":"int4","nullable":null,"table":null,"column":null,"typeOid":23,"typeSchema":"pg_catalog","typeKind":"simple","typeModifier":-1,"baseType":null,"baseTypeOid":null,"tableOid":null,"columnNumber":null}
+  {"name":"a","type":"text","nullable":null,"table":null,"column":null,"typeOid":25,"typeSchema":"pg_catalog","typeKind":"simple","typeModifier":-1,"baseType":null,"baseTypeOid":null,"tableOid":null,"columnNumber":null}
+  {"name":"n","type":"text","nullable":null,"table":null,"column":null,"typeOid":25,"typeSchema":"pg_catalog","typeKind":"simple","typeModifier":-1,"baseType":null,"baseTypeOid":null,"tableOid":null,"columnNumber":null}
+  {"name":"arr","type":"_int8","nullable":null,"table":null,"column":null,"typeOid":1016,"typeSchema":"pg_catalog","typeKind":"array","typeModifier":-1,"baseType":"int8","baseTypeOid":20,"tableOid":null,"columnNumber":null}
+  {"name":"m","type":"mood","nullable":null,"table":null,"column":null,"typeOid":"user","typeSchema":"denosql_cols","typeKind":"enum","typeModifier":-1,"baseType":null,"baseTypeOid":null,"tableOid":null,"columnNumber":null}
+  {"name":"d","type":"int4","nullable":null,"table":null,"column":null,"typeOid":23,"typeSchema":"pg_catalog","typeKind":"simple","typeModifier":-1,"baseType":null,"baseTypeOid":null,"tableOid":null,"columnNumber":null}
+  {"name":"r","type":"int4range","nullable":null,"table":null,"column":null,"typeOid":3904,"typeSchema":"pg_catalog","typeKind":"range","typeModifier":-1,"baseType":"int4","baseTypeOid":23,"tableOid":null,"columnNumber":null}
+  {"name":"mr","type":"int4multirange","nullable":null,"table":null,"column":null,"typeOid":4451,"typeSchema":"pg_catalog","typeKind":"multirange","typeModifier":-1,"baseType":"int4","baseTypeOid":23,"tableOid":null,"columnNumber":null}
+  {"name":"num","type":"numeric","nullable":null,"table":null,"column":null,"typeOid":1700,"typeSchema":"pg_catalog","typeKind":"simple","typeModifier":327686,"baseType":null,"baseTypeOid":null,"tableOid":null,"columnNumber":null}
+unnamed insert 0 []
+unnamed returning 1 [ "0" ]
+  {"name":"id","type":"int8","nullable":null,"table":null,"column":null,"typeOid":20,"typeSchema":"pg_catalog","typeKind":"simple","typeModifier":-1,"baseType":null,"baseTypeOid":null,"tableOid":"pets","columnNumber":1}
+  {"name":"name","type":"varchar","nullable":null,"table":null,"column":null,"typeOid":1043,"typeSchema":"pg_catalog","typeKind":"simple","typeModifier":44,"baseType":null,"baseTypeOid":null,"tableOid":"pets","columnNumber":2}
+  {"name":"price","type":"numeric","nullable":null,"table":null,"column":null,"typeOid":1700,"typeSchema":"pg_catalog","typeKind":"simple","typeModifier":655366,"baseType":null,"baseTypeOid":null,"tableOid":"pets","columnNumber":3}
+[ [ 1, 2 ] ] [ "x", "x" ]
+[ [ "a", "int4" ] ]
+batch 1 [ "int8" ]
+batch 1 [ "int8" ]
+batch 1 [ "int8" ]
+batch 1 [ "int8" ]
+[{"name":"a","type":null,"nullable":null,"table":null,"column":null,"typeOid":0,"typeSchema":null,"typeKind":null,"typeModifier":-1,"baseType":null,"baseTypeOid":null,"tableOid":null,"columnNumber":null},{"name":"b","type":null,"nullable":null,"table":null,"column":null,"typeOid":0,"typeSchema":null,"typeKind":null,"typeModifier":-1,"baseType":null,"baseTypeOid":null,"tableOid":null,"columnNumber":null}]
+[ { name: "Rex" }, { name: "Tom" }, { name: "Rex" }, { name: "Tom" } ] [ "0", "1", "2", "3" ] true
+int2 (int2, simple): number 7 -> number 7
+int4 (int4, simple): number -2147483648 -> number -2147483648
+int8 (int8, simple): string "9007199254740993" -> string "9007199254740993" (bigint: bigint 9007199254740993n)
+int8 (int8, simple): bigint 9007199254740993n -> string "9007199254740993" (bigint: bigint 9007199254740993n)
+float4 (float4, simple): number 1.5 -> number 1.5
+float8 (float8, simple): number 0.1 -> number 0.1
+numeric (numeric, simple): string "123456789012345678901234567890.123" -> string "123456789012345678901234567890.123"
+numeric (numeric, simple): string "NaN" -> string "NaN"
+bool (bool, simple): boolean false -> boolean false
+text (text, simple): string "héllo ✓ 𝒳" -> string "héllo ✓ 𝒳"
+varchar (varchar, simple): string "v" -> string "v"
+json (json, simple): object {"a":[1,null,"x"]} -> object {"a":[1,null,"x"]}
+jsonb (jsonb, simple): object {"b":{"c":true}} -> object {"b":{"c":true}}
+jsonb (jsonb, simple): string "\"a string\"" -> string "a string"
+bytea (bytea, simple): Uint8Array[0,1,254,255] -> Uint8Array[0,1,254,255]
+timestamptz (timestamptz, simple): Date 2024-02-29T12:34:56.789Z -> Date 2024-02-29T12:34:56.789Z
+timestamp (timestamp, simple): Date 2024-02-29T12:34:56.789Z -> Date 2024-02-29T12:34:56.789Z
+date (date, simple): string "2024-02-29" -> Date 2024-02-29T00:00:00.000Z
+date (date, simple): Date 2024-02-29T00:00:00.000Z -> Date 2024-02-29T00:00:00.000Z
+uuid (uuid, simple): string "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11" -> string "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11"
+int4[] (_int4, array of int4): [number 1, null, number 3] -> [number 1, null, number 3]
+int8[] (_int8, array of int8): [string "1", string "9007199254740993"] -> [string "1", string "9007199254740993"] (bigint: [bigint 1n, bigint 9007199254740993n])
+text[] (_text, array of text): [string "a", string "b c", null, string ""] -> [string "a", string "b c", null, string ""]
+jsonb[] (_jsonb, array of jsonb): [object {"x":1}, [number 2]] -> [object {"x":1}, [number 2]] (unnamed: error 22P02)
+date[] (_date, array of date): [string "2024-01-01"] -> [Date 2024-01-01T00:00:00.000Z]
+uuid[] (_uuid, array of uuid): [string "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11"] -> [string "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11"]
+bool[] (_bool, array of bool): [[boolean true, boolean false], [boolean false, boolean true]] -> [[boolean true, boolean false], [boolean false, boolean true]]
+denosql_cols.mood (mood, enum): string "happy" -> string "happy"
+denosql_cols.mood[] (_mood, array of mood): [string "sad", string "happy"] -> [string "sad", string "happy"]
+denosql_cols.posint (int4, simple): number 5 -> number 5
+jsonb: string "a string" -> error 22P02
+second round trip done

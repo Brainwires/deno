@@ -366,6 +366,41 @@ fn is_json(ty: &Type) -> bool {
   *ty == Type::JSON || *ty == Type::JSONB
 }
 
+fn is_json_array(ty: &Type) -> bool {
+  *ty == Type::JSON_ARRAY || *ty == Type::JSONB_ARRAY
+}
+
+/// A `json[]` / `jsonb[]` literal: each element of the JavaScript array is one
+/// JSON value, an array element included (`[{ x: 1 }, [2]]` is
+/// `{"{\"x\":1}","[2]"}`, not a two-dimensional array); a string element is
+/// the JSON text itself, as for a `json` parameter.
+fn json_array_literal(items: &[SqlParam]) -> Result<String, SqlError> {
+  let mut out = String::from("{");
+  for (i, item) in items.iter().enumerate() {
+    if i > 0 {
+      out.push(',');
+    }
+    let text = match item {
+      SqlParam::Null => {
+        out.push_str("NULL");
+        continue;
+      }
+      SqlParam::Text(s) => s.clone(),
+      other => json_text(other)?,
+    };
+    out.push('"');
+    for c in text.chars() {
+      if c == '"' || c == '\\' {
+        out.push('\\');
+      }
+      out.push(c);
+    }
+    out.push('"');
+  }
+  out.push('}');
+  Ok(out)
+}
+
 fn is_array(ty: &Type) -> bool {
   matches!(ty.kind(), Kind::Array(_))
 }
@@ -405,6 +440,7 @@ pub fn pg_text(p: &SqlParam, ty: &Type) -> Result<String, SqlError> {
     };
   }
   match p {
+    SqlParam::Array(items) if is_json_array(ty) => json_array_literal(items),
     SqlParam::Array(items) => {
       if is_array(ty) || ty.oid() == 0 || *ty == Type::UNKNOWN {
         array_literal(items, date_style(ty))
@@ -539,6 +575,19 @@ mod tests {
       pg_text(&SqlParam::Array(vec![d.clone()]), &Type::JSONB).unwrap(),
       r#"["2024-01-15T18:00:00.000Z"]"#
     );
+  }
+
+  #[test]
+  fn json_array_elements_are_json_values() {
+    let p = SqlParam::Array(vec![
+      SqlParam::Json("{\"x\":1}".into()),
+      SqlParam::Array(vec![SqlParam::Number(2.0)]),
+      SqlParam::Null,
+      SqlParam::Text("\"s\"".into()),
+    ]);
+    let expected = r#"{"{\"x\":1}","[2]",NULL,"\"s\""}"#;
+    assert_eq!(pg_text(&p, &Type::JSONB_ARRAY).unwrap(), expected);
+    assert_eq!(pg_text(&p, &Type::JSON_ARRAY).unwrap(), expected);
   }
 
   #[test]

@@ -1,0 +1,130 @@
+empty [] [{"name":"id","type":"INTEGER","nullable":true,"table":"pets","column":"id","database":"main"},{"name":"owner","type":"INTEGER","nullable":true,"table":"pets","column":"owner","database":"main"},{"name":"name","type":"varchar(40)","nullable":false,"table":"pets","column":"name","database":"main"},{"name":"weight","type":"REAL","nullable":true,"table":"pets","column":"weight","database":"main"},{"name":"photo","type":"BLOB","nullable":true,"table":"pets","column":"photo","database":"main"},{"name":"born","type":"date","nullable":true,"table":"pets","column":"born","database":"main"},{"name":"meta","type":"json","nullable":true,"table":"pets","column":"meta","database":"main"},{"name":"untyped","type":null,"nullable":true,"table":"pets","column":"untyped","database":"main"}]
+join [ "0" ] [{"name":"id","type":"INTEGER","nullable":true,"table":"pets","column":"id","database":"main"},{"name":"pet_name","type":"varchar(40)","nullable":false,"table":"pets","column":"name","database":"main"},{"name":"name","type":"TEXT","nullable":false,"table":"owners","column":"name","database":"main"},{"name":"up","type":null,"nullable":null,"table":null,"column":null,"database":null},{"name":"two","type":null,"nullable":null,"table":null,"column":null,"database":null},{"name":"heaviest","type":null,"nullable":null,"table":null,"column":null,"database":null}]
+view [ "0" ] [{"name":"pet","type":"varchar(40)","nullable":false,"table":"pets","column":"name","database":"main"},{"name":"owner","type":"TEXT","nullable":false,"table":"owners","column":"name","database":"main"}]
+subquery [ "0" ] [{"name":"x","type":"TEXT","nullable":false,"table":"owners","column":"name","database":"main"}]
+insert [] []
+returning [ "0" ] [{"name":"id","type":"INTEGER","nullable":true,"table":"owners","column":"id","database":"main"},{"name":"name","type":"TEXT","nullable":false,"table":"owners","column":"name","database":"main"}]
+[ [ 1, "Ada", 1 ] ] [ "id", "name", "id" ]
+1 name
+batch 2 id
+batch 1 id
+simple []
+[ { name: "Ada" }, { name: "Bob" }, { name: "Eve" } ] [ "0", "1", "2" ] true
+i (INTEGER):
+  number: number 42
+  fraction: number 1.5
+  max safe: number 9007199254740991
+  bigint: string "9007199254740993"
+  string: string "héllo ✓"
+  numeric string: number 12.5
+  boolean: number 1
+  bytes: Uint8Array[0,1,255]
+  date: string "2024-02-29T12:34:56.789Z"
+  object: string "{\"a\":[1,\"x\"]}"
+  array: string "[1,2]"
+  null: null
+r (REAL):
+  number: number 42
+  fraction: number 1.5
+  max safe: number 9007199254740991
+  bigint: number 9007199254740992
+  string: string "héllo ✓"
+  numeric string: number 12.5
+  boolean: number 1
+  bytes: Uint8Array[0,1,255]
+  date: string "2024-02-29T12:34:56.789Z"
+  object: string "{\"a\":[1,\"x\"]}"
+  array: string "[1,2]"
+  null: null
+t (TEXT):
+  number: string "42"
+  fraction: string "1.5"
+  max safe: string "9007199254740991"
+  bigint: string "9007199254740993"
+  string: string "héllo ✓"
+  numeric string: string "12.50"
+  boolean: string "1"
+  bytes: Uint8Array[0,1,255]
+  date: string "2024-02-29T12:34:56.789Z"
+  object: string "{\"a\":[1,\"x\"]}"
+  array: string "[1,2]"
+  null: null
+b (BLOB):
+  number: number 42
+  fraction: number 1.5
+  max safe: number 9007199254740991
+  bigint: string "9007199254740993"
+  string: string "héllo ✓"
+  numeric string: string "12.50"
+  boolean: number 1
+  bytes: Uint8Array[0,1,255]
+  date: string "2024-02-29T12:34:56.789Z"
+  object: string "{\"a\":[1,\"x\"]}"
+  array: string "[1,2]"
+  null: null
+n (numeric):
+  number: number 42
+  fraction: number 1.5
+  max safe: number 9007199254740991
+  bigint: string "9007199254740993"
+  string: string "héllo ✓"
+  numeric string: number 12.5
+  boolean: number 1
+  bytes: Uint8Array[0,1,255]
+  date: string "2024-02-29T12:34:56.789Z"
+  object: string "{\"a\":[1,\"x\"]}"
+  array: string "[1,2]"
+  null: null
+bo (boolean):
+  number: number 42
+  fraction: number 1.5
+  max safe: number 9007199254740991
+  bigint: string "9007199254740993"
+  string: string "héllo ✓"
+  numeric string: number 12.5
+  boolean: number 1
+  bytes: Uint8Array[0,1,255]
+  date: string "2024-02-29T12:34:56.789Z"
+  object: string "{\"a\":[1,\"x\"]}"
+  array: string "[1,2]"
+  null: null
+d (datetime):
+  number: number 42
+  fraction: number 1.5
+  max safe: number 9007199254740991
+  bigint: string "9007199254740993"
+  string: string "héllo ✓"
+  numeric string: number 12.5
+  boolean: number 1
+  bytes: Uint8Array[0,1,255]
+  date: string "2024-02-29T12:34:56.789Z"
+  object: string "{\"a\":[1,\"x\"]}"
+  array: string "[1,2]"
+  null: null
+j (json):
+  number: number 42
+  fraction: number 1.5
+  max safe: number 9007199254740991
+  bigint: string "9007199254740993"
+  string: string "héllo ✓"
+  numeric string: number 12.5
+  boolean: number 1
+  bytes: Uint8Array[0,1,255]
+  date: string "2024-02-29T12:34:56.789Z"
+  object: string "{\"a\":[1,\"x\"]}"
+  array: string "[1,2]"
+  null: null
+u (null):
+  number: number 42
+  fraction: number 1.5
+  max safe: number 9007199254740991
+  bigint: string "9007199254740993"
+  string: string "héllo ✓"
+  numeric string: string "12.50"
+  boolean: number 1
+  bytes: Uint8Array[0,1,255]
+  date: string "2024-02-29T12:34:56.789Z"
+  object: string "{\"a\":[1,\"x\"]}"
+  array: string "[1,2]"
+  null: null
+{ one: 1n, huge: 9007199254740993n, f: 1.5 }

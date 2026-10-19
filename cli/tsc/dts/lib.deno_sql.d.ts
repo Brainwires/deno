@@ -39,8 +39,9 @@ declare namespace Deno {
     name: string;
     /** The type: Postgres' type name (`pg_type.typname`: `"int4"`,
      * `"_int4"` for `int4[]`, an enum's own name), or SQLite's declared
-     * type of the column the value comes from (`"INTEGER"`,
-     * `"VARCHAR(20)"`, as written in its `CREATE TABLE`). `null` where the
+     * type of the column the value comes from, as its `CREATE TABLE` wrote
+     * it (`"varchar(20)"`, `"json"`) except that SQLite spells its own type
+     * names in capitals (`"INTEGER"`, `"REAL"`, `"TEXT"`, `"BLOB"`). `null` where the
      * database names none: a SQLite expression or a column declared without
      * a type, a Postgres `.simple()` result. */
     type: string | null;
