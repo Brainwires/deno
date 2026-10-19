@@ -1373,19 +1373,19 @@ where the changes are discussed.
       `/// <reference types="vitest/globals" />` and `compilerOptions.types`;
       with a Vitest or Vite config, Vite's asset, CSS module, `?raw` / `?url` /
       `?inline` / `?worker` imports get ambient declarations.
-      `test.vitestCompat: false` turns all of it off. An absolute `file:`
-      import (written in source, or an import-map target such as
-      `"lib/": "file:///a/lib/"`) is mapped to its file through `paths`, as
-      Deno resolves it from anywhere (the compiler alone read `file:///a/b.ts`
-      as a package name, TS2307; `tests/specs/check/file_url_imports`,
-      `test_add_file_url_paths`). `@types/node` is never
-      downloaded: unless the project has its own under `node_modules`, the copy
-      built into the binary (`cli/tsc/dts/node`, the in-process checker's,
-      `undici-types` included) is written to `.deno/npm-compat/@types/node`
-      (staged and renamed into place), so type checking needs no network for
-      Node's or the web's globals; a root `package.json` dependency maps to
-      `npm:` when there is no `node_modules`. The check cache is item 28's
-      `check_cache_v2_denext`, its hash keyed on the compiler version.
+      `test.vitestCompat: false` turns all of it off. An absolute `file:` import
+      (written in source, or an import-map target such as
+      `"lib/": "file:///a/lib/"`) is mapped to its file through `paths`, as Deno
+      resolves it from anywhere (the compiler alone read `file:///a/b.ts` as a
+      package name, TS2307; `tests/specs/check/file_url_imports`,
+      `test_add_file_url_paths`). `@types/node` is never downloaded: unless the
+      project has its own under `node_modules`, the copy built into the binary
+      (`cli/tsc/dts/node`, the in-process checker's, `undici-types` included) is
+      written to `.deno/npm-compat/@types/node` (staged and renamed into place),
+      so type checking needs no network for Node's or the web's globals; a root
+      `package.json` dependency maps to `npm:` when there is no `node_modules`.
+      The check cache is item 28's `check_cache_v2_denext`, its hash keyed on
+      the compiler version.
     - The compiler runs with `--pretty true`: the diagnostics keep their exact
       spans and their related information ("The expected type comes from ..."),
       as the in-process checker reports them (a location in the generated config
