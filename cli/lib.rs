@@ -19,6 +19,7 @@ mod ops;
 mod registry;
 mod resolver;
 mod standalone;
+mod supply_chain;
 mod task_runner;
 mod tools;
 mod tsc;
@@ -896,6 +897,16 @@ pub fn main() {
   boot_phase("after aws_lc install");
 
   let args: Vec<_> = env::args_os().collect();
+  // denext: a jailed npm lifecycle script's process (`jail-scripts`)
+  if args
+    .get(1)
+    .is_some_and(|a| a == supply_chain::jail::CHILD_ARG)
+  {
+    let code = deno_runtime::tokio_util::create_and_run_current_thread(
+      supply_chain::jail::run_child(),
+    );
+    deno_runtime::exit(code);
+  }
   // If we were invoked through a `node` shim (a symlink/hardlink named `node`
   // pointing at this binary), translate the Node.js CLI args to Deno args.
   // Done here, before any threads are spawned, because it may set env vars.
@@ -1001,6 +1012,10 @@ async fn resolve_flags_and_init(
       }
       Err(err) => exit_for_error(AnyError::from(err), initial_cwd.as_deref()),
     };
+  // denext: a jailed npm lifecycle script can't install or fetch packages
+  if let Err(err) = supply_chain::jail::check_subcommand(&flags) {
+    exit_for_error(err, initial_cwd.as_deref());
+  }
   // preserve already loaded env variables
   if flags.watch.is_some() {
     WatchEnvTracker::snapshot();

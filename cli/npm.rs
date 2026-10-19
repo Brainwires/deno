@@ -488,7 +488,13 @@ pub struct DenoTaskLifeCycleScriptsExecutor {
   progress_bar: ProgressBar,
   npm_resolver: ManagedNpmResolverRc<CliSys>,
   system_info: deno_npm::NpmSystemInfo,
+  /// `jail-scripts`: dependencies' scripts run confined.
+  jail: Option<Arc<crate::supply_chain::jail::JailConfig>>,
 }
+
+/// The bins a script can run by name, alongside their task-shell commands
+/// (a jailed script's process rebuilds the commands from them).
+type ScriptBins = HashMap<String, PathBuf>;
 
 struct PackageScriptResult<'a> {
   package: &'a NpmResolutionPackage,
@@ -506,7 +512,7 @@ impl LifecycleScriptsExecutor for DenoTaskLifeCycleScriptsExecutor {
     let mut bin_entries = BinEntries::new(sys.with_paths_in_errors());
     // get custom commands for each bin available in the node_modules dir (essentially
     // the scripts that are in `node_modules/.bin`)
-    let base = self
+    let (base, base_bins) = self
       .resolve_baseline_custom_commands(
         options.extra_info_provider,
         &mut bin_entries,
@@ -558,6 +564,7 @@ impl LifecycleScriptsExecutor for DenoTaskLifeCycleScriptsExecutor {
             pkg,
             &env_vars,
             &base,
+            &base_bins,
             &options,
             &kill_signal,
             &sys,
@@ -612,11 +619,13 @@ impl DenoTaskLifeCycleScriptsExecutor {
     npm_resolver: ManagedNpmResolverRc<CliSys>,
     progress_bar: ProgressBar,
     system_info: deno_npm::NpmSystemInfo,
+    jail: Option<Arc<crate::supply_chain::jail::JailConfig>>,
   ) -> Self {
     Self {
       npm_resolver,
       progress_bar,
       system_info,
+      jail,
     }
   }
 
@@ -635,6 +644,7 @@ impl DenoTaskLifeCycleScriptsExecutor {
     pkg: &'a PackageWithScript<'a>,
     env_vars: &HashMap<OsString, OsString>,
     base_custom_commands: &crate::task_runner::TaskCustomCommands,
+    base_bins: &ScriptBins,
     options: &LifecycleScriptsExecutorOptions<'a>,
     kill_signal: &KillSignal,
     sys: &CliSys,
@@ -674,10 +684,11 @@ impl DenoTaskLifeCycleScriptsExecutor {
     // this will take precedence over the baseline commands, so if the
     // package relies on a bin that conflicts with one higher in the
     // dependency tree, the correct bin will be used.
-    let custom_commands = self
+    let (custom_commands, bins) = self
       .resolve_custom_commands_from_deps(
         options.extra_info_provider,
         base_custom_commands.clone(),
+        base_bins.clone(),
         package,
         options.snapshot,
         options.additional_packages,
@@ -721,11 +732,37 @@ impl DenoTaskLifeCycleScriptsExecutor {
             log::info!("\n> {} {}\n> {}\n", package.id.nv, script_name, script);
             HideDrawThreadGuard::new()
           });
+          let jail = self.jail.as_ref().filter(|_| !*is_workspace);
           let crate::task_runner::TaskResult {
             exit_code,
             stderr,
             stdout,
-          } =
+          } = if let Some(jail) = jail {
+            // an approved dependency's script, confined (`jail-scripts`)
+            crate::supply_chain::jail::run_jailed_script(
+              jail,
+              crate::supply_chain::jail::JailedScript {
+                package_name: package.id.nv.name.as_str(),
+                package_id: package.id.nv.to_string(),
+                package_folder,
+                root_node_modules: options.root_node_modules_dir_path,
+                task_name: script_name,
+                script,
+                init_cwd,
+                env_vars: &env_vars,
+                bins: bins
+                  .iter()
+                  .map(|(name, path)| (name.clone(), path.clone()))
+                  .collect(),
+                node_modules_bin_dirs: vec![
+                  options.root_node_modules_dir_path.join(".bin"),
+                ],
+                kill_signal: kill_signal.clone(),
+              },
+            )
+            .await
+            .map_err(DenoTaskLifecycleScriptsError::Task)?
+          } else {
             crate::task_runner::run_task(crate::task_runner::RunTaskOptions {
               task_name: script_name,
               script,
@@ -749,7 +786,8 @@ impl DenoTaskLifeCycleScriptsExecutor {
               kill_signal: kill_signal.clone(),
             })
             .await
-            .map_err(DenoTaskLifecycleScriptsError::Task)?;
+            .map_err(DenoTaskLifecycleScriptsError::Task)?
+          };
           let stdout = stdout.unwrap_or_default();
           let stderr = stderr.unwrap_or_default();
           if exit_code != 0 {
@@ -796,7 +834,7 @@ impl DenoTaskLifeCycleScriptsExecutor {
     snapshot: &'a NpmResolutionSnapshot,
     packages: &'a [NpmResolutionPackage],
     resolve_pkg_folder: Option<ResolvePkgFolderFn<'_>>,
-  ) -> crate::task_runner::TaskCustomCommands {
+  ) -> (crate::task_runner::TaskCustomCommands, ScriptBins) {
     let mut custom_commands = crate::task_runner::TaskCustomCommands::new();
     custom_commands
       .insert("npx".to_string(), Rc::new(crate::task_runner::NpxCommand));
@@ -821,6 +859,7 @@ impl DenoTaskLifeCycleScriptsExecutor {
         extra_info_provider,
         bin_entries,
         custom_commands,
+        ScriptBins::new(),
         snapshot,
         packages,
         resolve_pkg_folder,
@@ -831,6 +870,7 @@ impl DenoTaskLifeCycleScriptsExecutor {
   // resolves the custom commands from an iterator of packages
   // and adds them to the existing custom commands.
   // note that this will overwrite any existing custom commands
+  #[allow(clippy::too_many_arguments, reason = "all arguments are needed")]
   async fn resolve_custom_commands_from_packages<
     'a,
     P: IntoIterator<Item = &'a NpmResolutionPackage>,
@@ -839,10 +879,11 @@ impl DenoTaskLifeCycleScriptsExecutor {
     extra_info_provider: &CachedNpmPackageExtraInfoProvider,
     bin_entries: &mut BinEntries<'a, CliSys>,
     mut commands: crate::task_runner::TaskCustomCommands,
+    mut bins_by_name: ScriptBins,
     snapshot: &'a NpmResolutionSnapshot,
     packages: P,
     resolve_pkg_folder: Option<ResolvePkgFolderFn<'_>>,
-  ) -> crate::task_runner::TaskCustomCommands {
+  ) -> (crate::task_runner::TaskCustomCommands, ScriptBins) {
     for package in packages {
       // prefer the installer-provided resolver, which knows the layout
       // being installed (e.g. hoisted); the npm resolver assumes the
@@ -882,6 +923,7 @@ impl DenoTaskLifeCycleScriptsExecutor {
 
     let bins: Vec<(String, PathBuf)> = bin_entries.collect_bin_files(snapshot);
     for (bin_name, script_path) in bins {
+      bins_by_name.insert(bin_name.clone(), script_path.clone());
       commands.insert(
         bin_name.clone(),
         Rc::new(crate::task_runner::NodeModulesFileRunCommand {
@@ -891,21 +933,23 @@ impl DenoTaskLifeCycleScriptsExecutor {
       );
     }
 
-    commands
+    (commands, bins_by_name)
   }
 
   // resolves the custom commands from the dependencies of a package
   // and adds them to the existing custom commands.
   // note that this will overwrite any existing custom commands.
+  #[allow(clippy::too_many_arguments, reason = "all arguments are needed")]
   async fn resolve_custom_commands_from_deps(
     &self,
     extra_info_provider: &CachedNpmPackageExtraInfoProvider,
     baseline: crate::task_runner::TaskCustomCommands,
+    baseline_bins: ScriptBins,
     package: &NpmResolutionPackage,
     snapshot: &NpmResolutionSnapshot,
     additional_packages: &[&NpmResolutionPackage],
     resolve_pkg_folder: Option<ResolvePkgFolderFn<'_>>,
-  ) -> crate::task_runner::TaskCustomCommands {
+  ) -> (crate::task_runner::TaskCustomCommands, ScriptBins) {
     let sys = CliSys::default();
     let mut bin_entries = BinEntries::new(sys.with_paths_in_errors());
     self
@@ -913,6 +957,7 @@ impl DenoTaskLifeCycleScriptsExecutor {
         extra_info_provider,
         &mut bin_entries,
         baseline,
+        baseline_bins,
         snapshot,
         package.dependencies.iter().filter_map(|(name, id)| {
           let dep = snapshot.package_from_id(id).or_else(|| {

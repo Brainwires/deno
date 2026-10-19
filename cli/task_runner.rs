@@ -340,6 +340,9 @@ impl ShellCommand for NpmCommand {
     }
 
     // fallback to running the real npm command
+    if refuse_in_jail(&mut context, "npm") {
+      return Box::pin(std::future::ready(ExecuteResult::from_exit_code(1)));
+    }
     let npm_path = match context.state.resolve_command_path(OsStr::new("npm")) {
       Ok(path) => path,
       Err(err) => {
@@ -351,6 +354,22 @@ impl ShellCommand for NpmCommand {
     };
     ExecutableCommand::new("npm".to_string(), npm_path).execute(context)
   }
+}
+
+/// In a jailed lifecycle script (`jail-scripts`), a real npm / npx would
+/// install or fetch packages the approval never covered: refuse it.
+fn refuse_in_jail(context: &mut ShellCommandContext, name: &str) -> bool {
+  if context
+    .state
+    .get_var(OsStr::new(crate::supply_chain::jail::JAIL_ENV_VAR))
+    .is_none()
+  {
+    return false;
+  }
+  let _ = context.stderr.write_line(&format!(
+    "{name}: running a real {name} is not allowed in a jailed npm lifecycle script (jail-scripts)"
+  ));
+  true
 }
 
 pub struct DenoCommand(ExecutableCommand);
@@ -551,6 +570,11 @@ impl ShellCommand for NpxCommand {
         }
         _ => {
           // can't find the command, so fallback to running the real npx command
+          if refuse_in_jail(&mut context, "npx") {
+            return Box::pin(std::future::ready(
+              ExecuteResult::from_exit_code(1),
+            ));
+          }
           let npx_path =
             match context.state.resolve_command_path(OsStr::new("npx")) {
               Ok(npx) => npx,

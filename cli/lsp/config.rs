@@ -1360,6 +1360,8 @@ impl WorkspaceConfigData {
         skip_types: false,
         install_remote_packages: false,
         resolve_npm_resolution_snapshot: Box::new(|| Ok(None)),
+        install_gate: None,
+        install_gate_all: false,
       },
     );
 

@@ -72,6 +72,11 @@ pub struct NpmInstallerFactoryOptions {
   pub install_remote_packages: bool,
   /// Resolves the npm resolution snapshot from the environment.
   pub resolve_npm_resolution_snapshot: ResolveNpmResolutionSnapshotFn,
+  /// Checks package versions before they are installed.
+  pub install_gate: Option<Arc<dyn crate::NpmInstallGate>>,
+  /// Run the install gate over every package being installed, not only the
+  /// ones a resolution adds.
+  pub install_gate_all: bool,
 }
 
 pub trait InstallReporter:
@@ -522,6 +527,8 @@ impl<
                 .workspace
                 .jsr_deps_in_node_modules()
                 .unwrap_or(false),
+              install_gate: self.options.install_gate.clone(),
+              install_gate_all: self.options.install_gate_all,
             },
           )))
         }

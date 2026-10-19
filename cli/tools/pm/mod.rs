@@ -739,6 +739,9 @@ pub async fn add(
     }
   }
 
+  // denext: the npm supply-chain gates, before anything is written
+  check_added_npm_packages(&cli_factory, &selected_packages).await?;
+
   let kind = if add_flags.dev {
     DependencyKind::Dev
   } else if add_flags.optional {
@@ -800,16 +803,25 @@ pub async fn add(
     }
   }
 
+  // the configuration files as they were, put back if a supply-chain gate
+  // refuses what the install resolves
+  let mut originals = Vec::new();
   if !add_flags.no_save {
     if let Some(npm) = npm_config {
+      if npm.modified {
+        originals.push((npm.path.clone(), std::fs::read(&npm.path).ok()));
+      }
       npm.commit()?;
     }
     if let Some(deno) = deno_config {
+      if deno.modified {
+        originals.push((deno.path.clone(), std::fs::read(&deno.path).ok()));
+      }
       deno.commit()?;
     }
   }
 
-  npm_install_after_modification(
+  let result = npm_install_after_modification(
     flags,
     Some(jsr_resolver),
     CacheTopLevelDepsOptions {
@@ -817,9 +829,74 @@ pub async fn add(
       additional_roots,
     },
   )
-  .await?;
+  .await;
+  if let Err(err) = result {
+    if crate::supply_chain::gate_refused() {
+      for (path, original) in originals {
+        if let Some(original) = original {
+          let _ = std::fs::write(&path, original);
+        }
+      }
+    }
+    return Err(err);
+  }
 
   Ok(())
+}
+
+/// The supply-chain gates over the npm packages `deno add` selected: the
+/// malicious-version gate on the selected versions, and the low-download gate
+/// on names the lockfile doesn't know yet.
+async fn check_added_npm_packages(
+  cli_factory: &CliFactory,
+  selected_packages: &[SelectedPackage],
+) -> Result<(), AnyError> {
+  let npm_packages = selected_packages
+    .iter()
+    .filter_map(|p| {
+      let name = p.package_name.strip_prefix("npm:")?;
+      let version =
+        deno_semver::Version::parse_standard(&p.selected_version).ok()?;
+      Some(PackageNv {
+        name: name.into(),
+        version,
+      })
+    })
+    .collect::<Vec<_>>();
+  if npm_packages.is_empty() {
+    return Ok(());
+  }
+  let npmrc = cli_factory.npmrc()?;
+  let cli_options = cli_factory.cli_options()?;
+  let lockfile = cli_factory.maybe_lockfile().await?.cloned();
+  crate::supply_chain::downloads::check_added_packages(
+    cli_factory.http_client_provider(),
+    npmrc,
+    &npmrc.supply_chain,
+    crate::supply_chain::downloads::LowDownloadsOptions {
+      allow_flag: cli_options.allow_low_downloads(),
+    },
+    &npm_packages
+      .iter()
+      .map(|nv| crate::supply_chain::downloads::AddedNpmPackage {
+        name: nv.name.to_string(),
+      })
+      .collect::<Vec<_>>(),
+    |name| {
+      let prefix = format!("{name}@");
+      lockfile.as_ref().is_some_and(|lockfile| {
+        lockfile
+          .lock()
+          .content
+          .packages
+          .npm
+          .keys()
+          .any(|key| key.starts_with(&prefix))
+      })
+    },
+  )
+  .await?;
+  cli_factory.osv_install_gate()?.check(npm_packages).await
 }
 
 struct SelectedPackage {

@@ -1301,6 +1301,15 @@ impl CliOptions {
         serve_flags,
       )?;
     }
+    // denext: inside a jailed npm lifecycle script, every deno clamps its
+    // permissions to the jail
+    if let Some(jail) = crate::supply_chain::jail::jail_from_env() {
+      crate::supply_chain::jail::clamp_permissions(
+        &mut permissions_options,
+        &jail,
+        &self.initial_cwd,
+      );
+    }
     Ok(permissions_options)
   }
 
@@ -1691,6 +1700,27 @@ impl CliOptions {
     }
 
     full_paths
+  }
+
+  /// `--jail-scripts`
+  pub fn jail_scripts_flag(&self) -> bool {
+    self.flags.jail_scripts
+  }
+
+  /// `--allow-low-downloads[=<names>]`
+  pub fn allow_low_downloads(&self) -> Option<&[String]> {
+    self.flags.allow_low_downloads.as_deref()
+  }
+
+  /// Whether an install gate should look at every package being installed
+  /// (an explicit install), not only the ones a resolution adds.
+  pub fn is_explicit_npm_install(&self) -> bool {
+    matches!(
+      self.sub_command(),
+      DenoSubcommand::Install(InstallFlags::Local(..))
+        | DenoSubcommand::Add(_)
+        | DenoSubcommand::Ci(_)
+    )
   }
 
   pub fn lifecycle_scripts_config(&self) -> LifecycleScriptsConfig {

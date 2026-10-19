@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use deno_bundle_runtime::BundlePlatform;
 use deno_cache_dir::GlobalOrLocalHttpCache;
+use deno_cache_dir::file_fetcher::CacheSetting;
 use deno_cache_dir::npm::NpmCacheDir;
 use deno_config::workspace::WorkspaceDirectory;
 use deno_core::anyhow::Context;
@@ -328,6 +329,8 @@ struct CliFactoryServices {
   workspace_factory: Deferred<Arc<CliWorkspaceFactory>>,
   install_reporter:
     Deferred<Option<Arc<crate::tools::installer::InstallReporter>>>,
+  osv_install_gate:
+    Deferred<Arc<crate::supply_chain::advisories::OsvInstallGate>>,
 }
 
 #[derive(Debug, Default)]
@@ -679,6 +682,7 @@ impl CliFactory {
               managed_npm_resolver.clone(),
               self.text_only_progress_bar().clone(),
               cli_options.npm_system_info(),
+              self.jail_config()?,
             )) as Arc<dyn LifecycleScriptsExecutor>
           }
           None => Arc::new(NullLifecycleScriptsExecutor),
@@ -795,9 +799,58 @@ impl CliFactory {
           resolve_npm_resolution_snapshot: Box::new(|| {
             deno_lib::args::resolve_npm_resolution_snapshot(&CliSys::default())
           }),
+          install_gate: Some(self.osv_install_gate()?.clone()
+            as Arc<dyn deno_npm_installer::NpmInstallGate>),
+          install_gate_all: cli_options.is_explicit_npm_install(),
         },
       ))
     })
+  }
+
+  /// The malicious-version gate (`advisory-check`).
+  pub fn osv_install_gate(
+    &self,
+  ) -> Result<&Arc<crate::supply_chain::advisories::OsvInstallGate>, AnyError>
+  {
+    self.services.osv_install_gate.get_or_try_init(|| {
+      let cli_options = self.cli_options()?;
+      let npmrc = self.npmrc()?;
+      Ok(Arc::new(
+        crate::supply_chain::advisories::OsvInstallGate::new(
+          self.http_client_provider().clone(),
+          npmrc.supply_chain.advisory_check,
+          self
+            .deno_dir()
+            .ok()
+            .map(|d| d.root.join("npm_advisories_v1.json")),
+          matches!(cli_options.cache_setting(), CacheSetting::Only),
+        ),
+      ))
+    })
+  }
+
+  /// `jail-scripts`: the confinement of dependencies' lifecycle scripts.
+  pub fn jail_config(
+    &self,
+  ) -> Result<Option<Arc<crate::supply_chain::jail::JailConfig>>, AnyError> {
+    let cli_options = self.cli_options()?;
+    let (npmrc, npmrc_path) = self.workspace_factory()?.npmrc_with_path()?;
+    if !npmrc.supply_chain.jail_scripts && !cli_options.jail_scripts_flag() {
+      return Ok(None);
+    }
+    let supply_chain = cli_options.workspace().supply_chain()?;
+    let mut project_dirs = vec![cli_options.workspace().root_dir_path()];
+    let initial_cwd = cli_options.initial_cwd().to_path_buf();
+    if !project_dirs.contains(&initial_cwd) {
+      project_dirs.push(initial_cwd);
+    }
+    Ok(Some(Arc::new(crate::supply_chain::jail::JailConfig::new(
+      npmrc.supply_chain.paranoid,
+      supply_chain.jail_net.unwrap_or(false),
+      supply_chain.jail_packages,
+      &project_dirs,
+      npmrc_path.as_deref(),
+    ))))
   }
 
   pub fn npm_version_resolver(

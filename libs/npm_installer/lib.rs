@@ -10,6 +10,7 @@ use deno_error::JsErrorBox;
 use deno_npm::NpmSystemInfo;
 use deno_npm::registry::NpmPackageInfo;
 use deno_npm::registry::NpmRegistryPackageInfoLoadError;
+use deno_npm::resolution::NpmResolutionSnapshot;
 use deno_npm::resolution::UnmetPeerDepDiagnostic;
 use deno_npm_cache::NpmCache;
 use deno_npm_cache::NpmCacheHttpClient;
@@ -140,6 +141,16 @@ impl Reporter for LogReporter {
   fn clear_guard(&self) -> Self::ClearGuard {}
 }
 
+/// Checks npm package versions before they are installed: denext's
+/// malicious-version gate (`advisory-check`). An error refuses the install.
+#[async_trait::async_trait(?Send)]
+pub trait NpmInstallGate: std::fmt::Debug + Send + Sync {
+  async fn check_packages(
+    &self,
+    packages: Vec<PackageNv>,
+  ) -> Result<(), JsErrorBox>;
+}
+
 /// Part of the resolution that interacts with the file system.
 #[async_trait::async_trait(?Send)]
 pub(crate) trait NpmPackageFsInstaller:
@@ -168,6 +179,11 @@ pub struct NpmInstallerOptions<TSys: NpmInstallerSys> {
   /// Whether `jsr:` dependencies are installed into `node_modules` via JSR's
   /// npm compatibility registry (the `jsrDepsInNodeModules` config option).
   pub jsr_deps_in_node_modules: bool,
+  /// Checks package versions before they are installed.
+  pub install_gate: Option<Arc<dyn NpmInstallGate>>,
+  /// Check every package being installed (an explicit `deno install`, `add`
+  /// or `ci`), not only the ones a resolution adds to the lockfile.
+  pub install_gate_all: bool,
 }
 
 #[derive(Debug)]
@@ -185,6 +201,9 @@ pub struct NpmInstaller<
   top_level_install_flag: AtomicFlag,
   install_queue: TaskQueue,
   cached_reqs: Mutex<FxHashSet<PackageReq>>,
+  install_gate: Option<Arc<dyn NpmInstallGate>>,
+  install_gate_all: bool,
+  gate_checked: Mutex<FxHashSet<PackageNv>>,
 }
 
 impl<TNpmCacheHttpClient: NpmCacheHttpClient, TSys: NpmInstallerSys>
@@ -280,7 +299,52 @@ impl<TNpmCacheHttpClient: NpmCacheHttpClient, TSys: NpmInstallerSys>
       top_level_install_flag: Default::default(),
       install_queue: Default::default(),
       cached_reqs: Default::default(),
+      install_gate: options.install_gate,
+      install_gate_all: options.install_gate_all,
+      gate_checked: Default::default(),
     }
+  }
+
+  /// Runs the install gate over the packages of the current resolution that
+  /// haven't been checked yet: all of them for an explicit install, otherwise
+  /// only the ones `previous` (the resolution before it changed) didn't have.
+  async fn run_install_gate(
+    &self,
+    previous: Option<&NpmResolutionSnapshot>,
+  ) -> Result<(), JsErrorBox> {
+    let Some(gate) = &self.install_gate else {
+      return Ok(());
+    };
+    if previous.is_none() && !self.install_gate_all {
+      return Ok(());
+    }
+    let snapshot = self.npm_resolution.snapshot();
+    let previous_nvs: Option<FxHashSet<&PackageNv>> = previous.map(|p| {
+      p.all_packages_for_every_system()
+        .map(|p| &p.id.nv)
+        .collect()
+    });
+    let packages = {
+      let checked = self.gate_checked.lock();
+      let mut seen = FxHashSet::default();
+      snapshot
+        .all_packages_for_every_system()
+        .map(|p| &p.id.nv)
+        .filter(|nv| {
+          self.install_gate_all
+            || previous_nvs.as_ref().is_some_and(|prev| !prev.contains(nv))
+        })
+        .filter(|nv| !checked.contains(*nv) && seen.insert(*nv))
+        .cloned()
+        .collect::<Vec<_>>()
+    };
+    if packages.is_empty() {
+      return Ok(());
+    }
+    gate.check_packages(packages.clone()).await?;
+    let mut checked = self.gate_checked.lock();
+    checked.extend(packages);
+    Ok(())
   }
 
   /// Adds package requirements to the resolver and ensures everything is setup.
@@ -362,10 +426,19 @@ impl<TNpmCacheHttpClient: NpmCacheHttpClient, TSys: NpmInstallerSys>
     #[cfg(debug_assertions)]
     self.npm_resolution_initializer.debug_assert_initialized();
 
+    let previous_snapshot = self
+      .install_gate
+      .is_some()
+      .then(|| self.npm_resolution.snapshot());
     let mut result = self
       .npm_resolution_installer
       .add_package_reqs(packages)
       .await;
+
+    if result.dependencies_result.is_ok() {
+      result.dependencies_result =
+        self.run_install_gate(previous_snapshot.as_ref()).await;
+    }
 
     if result.dependencies_result.is_ok()
       && let Some(lockfile) = self.maybe_lockfile.as_ref()
@@ -442,6 +515,7 @@ impl<TNpmCacheHttpClient: NpmCacheHttpClient, TSys: NpmInstallerSys>
       self.add_package_reqs(&[], caching).await
     } else {
       self.npm_resolution_initializer.ensure_initialized().await?;
+      self.run_install_gate(None).await?;
       self.fs_installer.cache_packages(caching).await
     }
   }
