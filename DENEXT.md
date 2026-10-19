@@ -2934,7 +2934,9 @@ where the changes are discussed.
       `licenses/libwebauthn/`. `assemble.sh` refuses a Linux archive without the
       library, and `verify.sh` checks it in both archives (its
       `laufey_webauthn_start` entry point, no virtual-authenticator test hooks,
-      its dependencies resolving).
+      its dependencies resolving). The e2e's passkeys area now expects
+      `securityKeys` on Linux and the same refusal codes as macOS and Windows,
+      and runs the OS-request checks there too.
     - `Deno.desktop.platformFeatures()` passes laufey's new `windowBlur` /
       `windowBlurReason` and `passkeys` / `passkeysReason` keys through; the
       d.ts declares them.

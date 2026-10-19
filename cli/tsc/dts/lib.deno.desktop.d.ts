@@ -2539,7 +2539,7 @@ declare namespace Deno {
     export interface PasskeyCapabilities {
       /** Touch ID / iCloud Keychain (macOS), Windows Hello (Windows). */
       platformAuthenticator: boolean;
-      /** Roaming security keys (USB / NFC / BLE). */
+      /** Roaming security keys (USB / NFC / BLE; USB only on Linux). */
       securityKeys: boolean;
     }
 
@@ -2589,8 +2589,14 @@ declare namespace Deno {
      * - Windows 10 1903+: `webauthn.dll`; any RP ID; clientDataJSON is built
      *   with origin `https://<rp-id>`. A request without `timeout` ends
      *   after 60 s.
-     * - Linux: not supported (`capabilities()` reports none and requests
-     *   resolve with `not_supported`).
+     * - Linux: no platform authenticator; USB security keys (FIDO2 / U2F)
+     *   through libwebauthn in `liblaufey_webauthn.so` beside the backend
+     *   host, which builds clientDataJSON with origin `https://<rp-id>`.
+     *   `capabilities()` reports `securityKeys` when the library is there and
+     *   can list HID devices; otherwise requests resolve with
+     *   `not_supported` (`platformFeatures().passkeysReason` says why). A
+     *   registration that asks for a `"platform"` attachment is
+     *   `not_supported`.
      *
      * Not available in workers.
      *

@@ -73,9 +73,12 @@ await r.step("passkeys", async () => {
     caps,
   );
   if (OS === "linux") {
+    // No platform authenticator on Linux; USB security keys through
+    // libwebauthn (liblaufey_webauthn.so, shipped beside the host), which
+    // reports them whenever it can list HID devices, with or without a key.
     r.check(
-      "Linux: no authenticators",
-      !caps.platformAuthenticator && !caps.securityKeys,
+      "Linux: security keys (libwebauthn), no platform authenticator",
+      !caps.platformAuthenticator && caps.securityKeys,
       caps,
     );
   }
@@ -98,7 +101,8 @@ await r.step("passkeys", async () => {
       TypeError,
   );
 
-  const expectNotSupported = OS === "linux";
+  // Linux without libwebauthn refuses everything as not_supported.
+  const expectNotSupported = OS === "linux" && !caps.securityKeys;
   const refusal = async (name: string, s: Promise<string>, want: string) => {
     const e = envelope(await s);
     r.check(
@@ -139,7 +143,7 @@ await r.step("passkeys", async () => {
   if (expectNotSupported) {
     r.na(
       "an OS ceremony and the one-at-a-time rule",
-      "Linux has no platform passkey API: every request is not_supported (checked above)",
+      "no passkey library beside the Linux host: every request is not_supported (checked above)",
     );
   } else {
     // A real OS request (it fails without a person / entitlement) and one made
