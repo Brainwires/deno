@@ -100,15 +100,87 @@ impl<'a> RowShape<'a> {
   }
 }
 
-/// The op result: `[rows, count, extra]`.
+/// The op result: `[rows, count, extra, columns]`, where `columns` is the
+/// array of column metadata objects (`result.columns`).
 pub fn result_tuple<'a>(
   scope: &mut v8::PinScope<'a, '_>,
   rows: &[v8::Local<'a, v8::Value>],
   count: f64,
   extra: v8::Local<'a, v8::Value>,
+  columns: &[v8::Local<'a, v8::Value>],
 ) -> v8::Local<'a, v8::Value> {
   let rows = v8::Array::new_with_elements(scope, rows);
   let count = v8::Number::new(scope, count);
-  v8::Array::new_with_elements(scope, &[rows.into(), count.into(), extra])
+  let columns = v8::Array::new_with_elements(scope, columns);
+  v8::Array::new_with_elements(
+    scope,
+    &[rows.into(), count.into(), extra, columns.into()],
+  )
+  .into()
+}
+
+/// Plain objects that all have the same keys in the same order (a result's
+/// column metadata), so they share one hidden class.
+pub struct Record<'a> {
+  names: Vec<v8::Local<'a, v8::Name>>,
+  proto: v8::Local<'a, v8::Value>,
+}
+
+impl<'a> Record<'a> {
+  pub fn new(scope: &mut v8::PinScope<'a, '_>, keys: &[&str]) -> Self {
+    let proto = v8::Object::new(scope)
+      .get_prototype(scope)
+      .unwrap_or_else(|| v8::null(scope).into());
+    let names = keys
+      .iter()
+      .map(|key| {
+        v8::String::new_from_one_byte(
+          scope,
+          key.as_bytes(),
+          v8::NewStringType::Internalized,
+        )
+        .unwrap()
+        .into()
+      })
+      .collect();
+    Self { names, proto }
+  }
+
+  /// An object with the record's keys and `values`, in that order.
+  pub fn build(
+    &self,
+    scope: &mut v8::PinScope<'a, '_>,
+    values: &[v8::Local<'a, v8::Value>],
+  ) -> v8::Local<'a, v8::Value> {
+    debug_assert_eq!(values.len(), self.names.len());
+    v8::Object::with_prototype_and_properties(
+      scope,
+      self.proto,
+      &self.names,
+      values,
+    )
     .into()
+  }
+}
+
+/// A string, or `null` for `None` (or text V8 can't hold).
+pub fn v8_str_or_null<'a>(
+  scope: &mut v8::PinScope<'a, '_>,
+  value: Option<&str>,
+) -> v8::Local<'a, v8::Value> {
+  value
+    .and_then(|s| v8::String::new(scope, s))
+    .map(Into::into)
+    .unwrap_or_else(|| v8::null(scope).into())
+}
+
+/// A number, or `null` for `None`.
+pub fn v8_num_or_null<'a>(
+  scope: &mut v8::PinScope<'a, '_>,
+  value: Option<f64>,
+) -> v8::Local<'a, v8::Value> {
+  match value {
+    Some(n) => v8::Number::new(scope, n).into(),
+    None => v8::null(scope).into(),
+  }
 }

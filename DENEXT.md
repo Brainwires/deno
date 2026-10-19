@@ -2281,11 +2281,74 @@ where the changes are discussed.
     parser, so `run` / `task` / `cache` refuse an invalid alias as `install`
     does.
 
+76. **`feat(sql)`: `Deno.SQL` result column metadata**
+    (`feat/sql-column-metadata`, for runtime `denext.23`; `ext/sql`,
+    `cli/tsc/dts/lib.deno_sql.d.ts`, `libs/vendor/tokio-postgres`). Every result
+    (objects, `.values()`, `.raw()`, `.simple()`, cursor batches, empty results)
+    carries `columns`, a non-enumerable array of one object per result column,
+    in order and with duplicate names kept, so `.values()` rows line up with it.
+    The shape is a property of the result rather than a `describe(sql)` method
+    because it is what an ORM's driver adapter needs from the query it just ran
+    (Prisma's `SqlResultSet` is column names, column types and rows from one
+    execution; its `pg` adapter reads `fields[].dataTypeID`, its SQLite adapters
+    `StatementSync#columns()` / better-sqlite3's `columns()`), and both engines
+    already have it at no cost: Postgres describes the result in the
+    `RowDescription` it sends with every query, SQLite in the prepared
+    statement. A `describe()` would cost a round trip (or a cache to invalidate)
+    per query, and can't prepare a named statement behind a transaction-mode
+    pooler (`prepare: false`). It follows postgres.js (`result.columns`) and
+    `node:sqlite`'s field names.
+    - Common fields: `name`, `type` (Postgres' `typname`, `"_int4"` for
+      `int4[]`; SQLite's declared type as written), `nullable`, `table`,
+      `column`.
+    - Postgres (`Deno.SQLPostgresColumn`, from the row description): `typeOid`,
+      `typeSchema`, `typeKind` (`simple` / `array` / `enum` / `domain` /
+      `composite` / `range` / `multirange` / `pseudo`), `typeModifier`
+      (`atttypmod`), `baseType` / `baseTypeOid` (an array's element type, a
+      domain's underlying type, a range's or multirange's subtype), `tableOid`
+      and `columnNumber` (`pg_attribute.attnum`; `null` for an expression). The
+      protocol carries neither the table's or column's name nor nullability, so
+      `table`, `column` and `nullable` are `null`; a domain column is described
+      by the server as its base type. `.simple()` results name their columns
+      only (`typeOid` 0, the rest `null`), since `tokio-postgres` keeps only
+      names there.
+    - SQLite (`Deno.SQLiteColumn`): `database`, `table` and `column` of the
+      column a value comes from (through views and subqueries;
+      `sqlite3_column_{database,table,origin}_name`), `type` its declared type,
+      and `nullable` `false` when that column is declared NOT NULL
+      (`sqlite3_table_column_metadata`); an expression has `null` for all of
+      them. `deno_sql` enables rusqlite's `column_metadata` feature (the bundled
+      SQLite is always built with `SQLITE_ENABLE_COLUMN_METADATA`).
+    - `tokio-postgres` 0.7.18 is vendored in `libs/vendor/tokio-postgres`
+      (`[patch.crates-io]`) with one addition, `RowStream::columns()`: an
+      unnamed statement (`prepare: false`, cursors) keeps its row description
+      inside the stream, so without it a result with no rows could not name its
+      columns. Every query now reads its columns from the stream.
+    - Values (unchanged, now tested as a matrix both ways, including the second
+      round trip of what comes back): `int2` / `int4` / floats as numbers,
+      `int8` and `numeric` as strings (`bigint: true`: `int8` as `bigint`),
+      `bool`, text types, enums and `uuid` as strings, `json` / `jsonb` parsed,
+      `bytea` as `Uint8Array`, `timestamptz` as `Date`, `timestamp` as local
+      wall-clock `Date`, `date` as UTC-midnight `Date`, arrays (of any of these,
+      enums included) as arrays. SQLite: integers as numbers (beyond 2^53 as
+      strings, `bigint: true` as `bigint`), reals as numbers, text as strings,
+      blobs as `Uint8Array`; a `Date` parameter is stored as its ISO text, an
+      object or array as JSON text, a boolean as 1 / 0.
+
+    Tests: `tests/specs/sql/sqlite_columns` (metadata for tables, joins, views,
+    subqueries, expressions, RETURNING, empty results, `.values()`, `.raw()`,
+    cursors, `.simple()`, and the type matrix: every kind of parameter into
+    every declared type and back), `tests/specs/sql/pg_columns` (metadata with
+    prepared and unnamed statements, empty results included, and the type matrix
+    with the plain, unnamed and `bigint: true` clients, plus the second round
+    trip; needs `DENO_SQL_TEST_POSTGRES_URL`), and the typings in
+    `tests/specs/sql/types.ts`.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
-64-73, 75) are what the prebuilt `libdenort` carries. The CLI-side parts (for
-example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's
-launchers) are in the branch too, but a stock CLI does not run them; denext's
-own launcher provides that environment.
+64-73, 75, 76) are what the prebuilt `libdenort` carries. The CLI-side parts
+(for example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged
+app's launchers) are in the branch too, but a stock CLI does not run them;
+denext's own launcher provides that environment.
 
 The laufey backend hosts are built from
 [Brainwires/laufey](https://github.com/Brainwires/laufey) branch
@@ -2504,12 +2567,14 @@ Specs this fork adds for what its runtime exposes outside a desktop app:
   `--desktop`, and misuses are type errors.
 - `tests/specs/sql`: `Deno.SQL` over SQLite (helpers, parameters that would
   break interpolation, transactions and savepoints, errors, permissions,
-  read-only files) and Postgres client failures against stand-in servers
-  (`sslmode=require` refused by a server without TLS, connect timeout, refused
-  port, net and env permissions). The `pg_*` tests that need a real server
-  (types both ways, SQLSTATE errors, transactions, the pool's limits and
-  timeouts, TLS modes) run when `DENO_SQL_TEST_POSTGRES_URL` (and, for TLS,
-  `DENO_SQL_TEST_POSTGRES_CA`) is set, and are skipped otherwise.
+  read-only files, result column metadata and the type round-trip matrix) and
+  Postgres client failures against stand-in servers (`sslmode=require` refused
+  by a server without TLS, connect timeout, refused port, net and env
+  permissions). The `pg_*` tests that need a real server (types both ways,
+  column metadata and the type round-trip matrix, SQLSTATE errors, transactions,
+  the pool's limits and timeouts, TLS modes) run when
+  `DENO_SQL_TEST_POSTGRES_URL` (and, for TLS, `DENO_SQL_TEST_POSTGRES_CA`) is
+  set, and are skipped otherwise.
 - `tests/specs/run/desktop_ops_inert` (`sys.js`): the integrations that need
   `--allow-sys` refuse without it (and with only some sys names) and are inert
   with it.

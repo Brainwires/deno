@@ -29,6 +29,96 @@ declare namespace Deno {
     | readonly SQLValue[]
     | { [key: string]: unknown };
 
+  /** What a result column is, as the database describes it. The fields
+   * here are common to both drivers; {@linkcode Deno.SQLPostgresColumn} and
+   * {@linkcode Deno.SQLiteColumn} add each driver's own.
+   *
+   * @category SQL */
+  export interface SQLColumnBase {
+    /** The column's name in the result (its alias, if it has one). */
+    name: string;
+    /** The type: Postgres' type name (`pg_type.typname`: `"int4"`,
+     * `"_int4"` for `int4[]`, an enum's own name), or SQLite's declared
+     * type of the column the value comes from (`"INTEGER"`,
+     * `"VARCHAR(20)"`, as written in its `CREATE TABLE`). `null` where the
+     * database names none: a SQLite expression or a column declared without
+     * a type, a Postgres `.simple()` result. */
+    type: string | null;
+    /** `false` when the column the value comes from is declared NOT NULL
+     * (SQLite; an outer join can still make it `null`), `true` when it is
+     * not, `null` when unknown: an expression, and every Postgres column
+     * (the wire protocol does not say; look up `pg_attribute.attnotnull`
+     * by `tableOid` / `columnNumber`). */
+    nullable: boolean | null;
+    /** SQLite: the table the value comes from (through views and
+     * subqueries), `null` for an expression. Postgres: always `null` (the
+     * protocol gives `tableOid`). */
+    table: string | null;
+    /** SQLite: the column of `table` the value comes from, `null` for an
+     * expression. Postgres: always `null` (the protocol gives
+     * `columnNumber`). */
+    column: string | null;
+  }
+
+  /** A Postgres type's kind (`pg_type.typtype`, arrays told apart).
+   *
+   * @category SQL */
+  export type SQLPostgresTypeKind =
+    | "simple"
+    | "array"
+    | "enum"
+    | "domain"
+    | "composite"
+    | "range"
+    | "multirange"
+    | "pseudo";
+
+  /** A Postgres result column, from the server's row description (no extra
+   * round trip).
+   *
+   * @category SQL */
+  export interface SQLPostgresColumn extends SQLColumnBase {
+    /** The type's OID (`pg_type.oid`): `23` for `int4`, `1007` for
+     * `int4[]`. `0` in a `.simple()` result. */
+    typeOid: number;
+    /** The schema of the type (`"pg_catalog"` for built-in types), `null`
+     * in a `.simple()` result. */
+    typeSchema: string | null;
+    /** What kind of type it is, `null` in a `.simple()` result. */
+    typeKind: SQLPostgresTypeKind | null;
+    /** The type modifier (`pg_attribute.atttypmod`: a `varchar(n)`'s length
+     * plus 4, a `numeric(p, s)`'s `(p << 16 | s) + 4`), `-1` for none. */
+    typeModifier: number;
+    /** The type this one is built on: an array's element type, a domain's
+     * underlying type, a range's or multirange's subtype; else `null`. */
+    baseType: string | null;
+    /** The OID of `baseType`, or `null`. */
+    baseTypeOid: number | null;
+    /** The OID of the table the column comes from (`pg_class.oid`), `null`
+     * for an expression. */
+    tableOid: number | null;
+    /** The column's attribute number in that table (`pg_attribute.attnum`),
+     * `null` for an expression. */
+    columnNumber: number | null;
+  }
+
+  /** A SQLite result column, with the names `node:sqlite`'s
+   * `StatementSync#columns()` uses.
+   *
+   * @category SQL */
+  export interface SQLiteColumn extends SQLColumnBase {
+    /** The database the value comes from (`"main"`, `"temp"`, an attached
+     * one), `null` for an expression. */
+    database: string | null;
+  }
+
+  /** A result column: {@linkcode Deno.SQLPostgresColumn} or
+   * {@linkcode Deno.SQLiteColumn} (tell them apart with `"typeOid" in
+   * column`).
+   *
+   * @category SQL */
+  export type SQLColumn = SQLPostgresColumn | SQLiteColumn;
+
   /** The rows of a query, plus what the server reported about it.
    *
    * @category SQL */
@@ -37,6 +127,19 @@ declare namespace Deno {
     count: number;
     /** The statement's command, such as `"SELECT"` or `"INSERT"`. */
     command: string;
+    /** The result's columns, in order, duplicates included (`.values()` and
+     * `.raw()` rows line up with them). There even when no rows came back;
+     * empty for a statement that returns no rows at all (an INSERT without
+     * RETURNING). Not enumerable, like `count` and `command`.
+     *
+     * ```ts
+     * const rows = await sql`select id, created_at from events`.values();
+     * for (const { name, typeOid } of rows.columns as Deno.SQLPostgresColumn[]) {
+     *   console.log(name, typeOid); // "id" 20, "created_at" 1184
+     * }
+     * ```
+     */
+    columns: SQLColumn[];
     /** SQLite only: the rowid of the last inserted row. */
     lastInsertRowid?: number | bigint;
   }

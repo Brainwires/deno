@@ -271,7 +271,7 @@ const sqlite = {
   // deno-lint-ignore require-await
   async simple(rid, text) {
     op_sql_sqlite_exec(rid, text);
-    return [[[], 0, undefined]];
+    return [[[], 0, undefined, []]];
   },
   // deno-lint-ignore require-await
   async control(rid, text) {
@@ -1041,11 +1041,15 @@ function commandOf(text) {
   return "WITH";
 }
 
+/** The op's `[rows, count, extra, columns]` as the result array, with
+ * `count`, `command`, `columns` (and SQLite's `lastInsertRowid`) as
+ * non-enumerable properties. */
 function finishResult(tuple, text) {
   const rows = tuple[0];
   const props = {
     count: { __proto__: null, value: tuple[1], writable: true },
     command: { __proto__: null, value: commandOf(text), writable: true },
+    columns: { __proto__: null, value: tuple[3], writable: true },
   };
   if (tuple[2] !== undefined) {
     props.lastInsertRowid = {
@@ -1213,7 +1217,10 @@ async function* cursorBatches(query, size, rowByRow = false) {
     }
     for (let i = 0; i < rows.length; i += size) {
       const batch = ArrayPrototypeSlice(rows, i, i + size);
-      yield finishResult([batch, batch.length, undefined], "SELECT");
+      yield finishResult(
+        [batch, batch.length, undefined, rows.columns],
+        "SELECT",
+      );
     }
     return;
   }

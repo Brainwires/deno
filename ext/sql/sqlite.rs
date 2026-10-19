@@ -34,8 +34,10 @@ use crate::params::json_text;
 use crate::pg_decode::v8_bytes;
 use crate::rows::FLAG_BIGINT;
 use crate::rows::FLAG_RAW;
+use crate::rows::Record;
 use crate::rows::RowShape;
 use crate::rows::result_tuple;
+use crate::rows::v8_str_or_null;
 
 const API_NAME: &str = "Deno.SQL";
 const MAX_SAFE_JS_INTEGER: i64 = 9_007_199_254_740_991;
@@ -213,6 +215,53 @@ fn to_v8<'a>(
   }
 }
 
+/// The keys of a SQLite column's metadata object (`result.columns`), as
+/// `node:sqlite`'s `StatementSync#columns()` names them, plus `nullable`.
+const SQLITE_COLUMN_KEYS: &[&str] =
+  &["name", "type", "nullable", "table", "column", "database"];
+
+/// The metadata of every result column of `stmt`. A column read straight
+/// from a table (or through a view or subquery) names its database, table
+/// and column, its declared type and whether that column is declared NOT
+/// NULL; an expression has `null` for all of them, as SQLite reports.
+fn column_objects<'a>(
+  scope: &mut v8::PinScope<'a, '_>,
+  stmt: &rusqlite::Statement<'_>,
+  names: &[String],
+) -> Vec<v8::Local<'a, v8::Value>> {
+  let record = Record::new(scope, SQLITE_COLUMN_KEYS);
+  let mut out = Vec::with_capacity(names.len());
+  for (i, name) in names.iter().enumerate() {
+    // An error (the table was dropped since) reads as an expression.
+    let meta = stmt.column_metadata(i).ok().flatten();
+    let text = |s: &std::ffi::CStr| s.to_string_lossy().into_owned();
+    let (database, table, column, decl_type, not_null) = match meta {
+      Some((database, table, column, decl_type, _, not_null, _, _)) => (
+        Some(text(database)),
+        Some(text(table)),
+        Some(text(column)),
+        decl_type.map(text),
+        Some(not_null),
+      ),
+      None => (None, None, None, None, None),
+    };
+    let nullable: v8::Local<v8::Value> = match not_null {
+      Some(not_null) => v8::Boolean::new(scope, !not_null).into(),
+      None => v8::null(scope).into(),
+    };
+    let values = [
+      v8_str_or_null(scope, Some(name.as_str())),
+      v8_str_or_null(scope, decl_type.as_deref()),
+      nullable,
+      v8_str_or_null(scope, table.as_deref()),
+      v8_str_or_null(scope, column.as_deref()),
+      v8_str_or_null(scope, database.as_deref()),
+    ];
+    out.push(record.build(scope, &values));
+  }
+  out
+}
+
 #[op2]
 pub fn op_sql_sqlite_query<'a>(
   scope: &mut v8::PinScope<'a, '_>,
@@ -259,6 +308,7 @@ pub fn op_sql_sqlite_query<'a>(
       out.push(shape.build(scope, &cells));
     }
   }
+  let columns = column_objects(scope, &stmt, &names);
   let count = if readonly {
     out.len() as f64
   } else {
@@ -270,7 +320,7 @@ pub fn op_sql_sqlite_query<'a>(
   } else {
     v8::Number::new(scope, last_id as f64).into()
   };
-  Ok(result_tuple(scope, &out, count, last_id))
+  Ok(result_tuple(scope, &out, count, last_id, &columns))
 }
 
 /// Any number of statements, no parameters, no rows (transaction control,

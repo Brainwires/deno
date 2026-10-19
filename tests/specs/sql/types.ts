@@ -8,6 +8,20 @@ export async function valid() {
   const count: number = rows.count;
   const command: string = rows.command;
   const values: Deno.SQLResult<unknown[]> = await sql`select 1`.values();
+  const column: Deno.SQLColumn = values.columns[0];
+  const name: string = column.name;
+  const type: string | null = column.type;
+  const nullable: boolean | null = column.nullable;
+  if ("typeOid" in column) {
+    const oid: number = column.typeOid;
+    const kind: Deno.SQLPostgresTypeKind | null = column.typeKind;
+    const table: number | null = column.tableOid;
+    console.log(oid, kind, table);
+  } else {
+    const database: string | null = column.database;
+    console.log(database);
+  }
+  console.log(name, type, nullable);
   await sql`insert into t ${sql({ a: 1 }, "a")}`;
   await sql.unsafe("select $1", [1]).simple();
   const n: number = await sql.begin(async (tx) => {
@@ -69,5 +83,7 @@ export async function invalid(sql: Deno.SQL) {
   sql.array(1);
   // @ts-expect-error: count is a number
   const s: string = (await sql`select 1`).count;
-  return s;
+  // @ts-expect-error: a column's name is a string
+  const c: number = (await sql`select 1`).columns[0].name;
+  return [s, c];
 }

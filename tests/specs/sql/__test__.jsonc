@@ -17,6 +17,10 @@
       "args": "run --allow-read=. --allow-write=. sqlite_basic.ts",
       "output": "sqlite_basic.out"
     },
+    "sqlite_columns": {
+      "args": "run sqlite_columns.ts",
+      "output": "sqlite_columns.out"
+    },
     "sqlite_permissions": {
       "args": "run sqlite_permissions.ts",
       "output": "sqlite_permissions.out"
@@ -55,6 +59,12 @@
       "envs": { "TZ": "UTC" },
       "args": "run --allow-env=DENO_SQL_TEST_POSTGRES_URL --allow-net=127.0.0.1,localhost pg_types.ts",
       "output": "pg_types.out"
+    },
+    "pg_columns": {
+      "if": "postgres",
+      "envs": { "TZ": "UTC" },
+      "args": "run --allow-env=DENO_SQL_TEST_POSTGRES_URL --allow-net=127.0.0.1,localhost pg_columns.ts",
+      "output": "pg_columns.out"
     },
     "pg_errors": {
       "if": "postgres",

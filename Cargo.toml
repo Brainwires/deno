@@ -84,7 +84,12 @@ members = [
 ]
 # tests/sqlite_extension is excluded because it requires rusqlite's "loadable_extension"
 # feature, which is incompatible with the "session" feature used by the rest of the workspace.
-exclude = ["tests/util/std/hash/_wasm", "tests/sqlite_extension", "libs/vendor/dprint-core"]
+exclude = [
+  "tests/util/std/hash/_wasm",
+  "tests/sqlite_extension",
+  "libs/vendor/dprint-core",
+  "libs/vendor/tokio-postgres",
+]
 
 [workspace.package]
 authors = ["the Deno authors"]
@@ -650,5 +655,12 @@ opt-level = 3
 # dprint-plugin-typescript / -markdown still depend on 0.67, so the published
 # 0.67.4 is vendored with that one-file change. Drop this once those plugins are
 # on the 0.68+ line and bump them instead.
+#
+# tokio-postgres 0.7.18 with one addition, `RowStream::columns()`: an unnamed
+# statement (`query_typed_raw`, used by Deno.SQL's `prepare: false` and its
+# cursors) keeps its `RowDescription` inside the stream, so a result with no
+# rows had no way to name its columns (Deno.SQL's `result.columns`;
+# DENEXT.md). Drop this once tokio-postgres exposes the stream's columns.
 [patch.crates-io]
 dprint-core = { path = "libs/vendor/dprint-core" }
+tokio-postgres = { path = "libs/vendor/tokio-postgres" }

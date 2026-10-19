@@ -45,6 +45,7 @@ use deno_tls::create_client_config;
 use deno_tls::load_certs;
 use deno_tls::load_private_keys;
 use postgres_types::FromSql;
+use postgres_types::Kind;
 use postgres_types::Type;
 use serde::Deserialize;
 use serde::Serialize;
@@ -58,6 +59,7 @@ use tokio::sync::mpsc;
 use tokio_postgres::AsyncMessage;
 use tokio_postgres::CancelToken;
 use tokio_postgres::Client;
+use tokio_postgres::Column;
 use tokio_postgres::NoTls;
 use tokio_postgres::Row;
 use tokio_postgres::SimpleQueryMessage;
@@ -76,8 +78,11 @@ use crate::rows::FLAG_GUARDED;
 use crate::rows::FLAG_ORDERED;
 use crate::rows::FLAG_RAW;
 use crate::rows::FLAG_UNNAMED;
+use crate::rows::Record;
 use crate::rows::RowShape;
 use crate::rows::result_tuple;
+use crate::rows::v8_num_or_null;
+use crate::rows::v8_str_or_null;
 
 const API_NAME: &str = "Deno.SQL";
 /// `SSLRequest`: length 8, code 1234.5679.
@@ -885,8 +890,117 @@ impl<'r> FromSql<'r> for RawCell<'r> {
   }
 }
 
+/// What the server's `RowDescription` says about a result column.
+struct PgColumn {
+  name: String,
+  ty: Type,
+  type_modifier: i32,
+  table_oid: Option<u32>,
+  column_id: Option<i16>,
+}
+
+impl From<&Column> for PgColumn {
+  fn from(column: &Column) -> Self {
+    Self {
+      name: column.name().to_string(),
+      ty: column.type_().clone(),
+      type_modifier: column.type_modifier(),
+      table_oid: column.table_oid(),
+      column_id: column.column_id(),
+    }
+  }
+}
+
+/// The keys of a Postgres column's metadata object (`result.columns`),
+/// the first five shared with SQLite's.
+const PG_COLUMN_KEYS: &[&str] = &[
+  "name",
+  "type",
+  "nullable",
+  "table",
+  "column",
+  "typeOid",
+  "typeSchema",
+  "typeKind",
+  "typeModifier",
+  "baseType",
+  "baseTypeOid",
+  "tableOid",
+  "columnNumber",
+];
+
+/// A type's kind, and the type it is built on: an array's element type, a
+/// domain's underlying type, a range's or multirange's subtype.
+fn type_kind(ty: &Type) -> (&'static str, Option<&Type>) {
+  match ty.kind() {
+    Kind::Simple => ("simple", None),
+    Kind::Enum(_) => ("enum", None),
+    Kind::Pseudo => ("pseudo", None),
+    Kind::Array(elem) => ("array", Some(elem)),
+    Kind::Range(elem) => ("range", Some(elem)),
+    Kind::Multirange(elem) => ("multirange", Some(elem)),
+    Kind::Domain(base) => ("domain", Some(base)),
+    Kind::Composite(_) => ("composite", None),
+    _ => ("simple", None),
+  }
+}
+
+/// A column's metadata object. The wire protocol names the type, the type
+/// modifier and the source table's OID and attribute number, but neither
+/// the table's or column's name nor nullability, which stay `null`.
+fn column_object<'a>(
+  scope: &mut v8::PinScope<'a, '_>,
+  record: &Record<'a>,
+  column: &PgColumn,
+) -> v8::Local<'a, v8::Value> {
+  let (kind, base) = type_kind(&column.ty);
+  let null: v8::Local<v8::Value> = v8::null(scope).into();
+  let values = [
+    v8_str_or_null(scope, Some(column.name.as_str())),
+    v8_str_or_null(scope, Some(column.ty.name())),
+    null,
+    null,
+    null,
+    v8::Number::new(scope, column.ty.oid() as f64).into(),
+    v8_str_or_null(scope, Some(column.ty.schema())),
+    v8_str_or_null(scope, Some(kind)),
+    v8::Number::new(scope, column.type_modifier as f64).into(),
+    v8_str_or_null(scope, base.map(Type::name)),
+    v8_num_or_null(scope, base.map(|t| t.oid() as f64)),
+    v8_num_or_null(scope, column.table_oid.map(|n| n as f64)),
+    v8_num_or_null(scope, column.column_id.map(|n| n as f64)),
+  ];
+  record.build(scope, &values)
+}
+
+/// A `.simple()` result's column: the simple protocol's rows are text, and
+/// `tokio-postgres` keeps only the names of its columns.
+fn simple_column_object<'a>(
+  scope: &mut v8::PinScope<'a, '_>,
+  record: &Record<'a>,
+  name: &str,
+) -> v8::Local<'a, v8::Value> {
+  let null: v8::Local<v8::Value> = v8::null(scope).into();
+  let values = [
+    v8_str_or_null(scope, Some(name)),
+    null,
+    null,
+    null,
+    null,
+    v8::Number::new(scope, 0.0).into(),
+    null,
+    null,
+    v8::Number::new(scope, -1.0).into(),
+    null,
+    null,
+    null,
+    null,
+  ];
+  record.build(scope, &values)
+}
+
 pub struct PgRows {
-  columns: Vec<(String, Type)>,
+  columns: Vec<PgColumn>,
   rows: Vec<Row>,
   affected: Option<u64>,
   flags: u32,
@@ -904,14 +1018,14 @@ impl<'a> ToV8<'a> for PgRows {
     };
     let raw = self.flags & FLAG_RAW != 0;
     let names: Vec<&str> =
-      self.columns.iter().map(|(n, _)| n.as_str()).collect();
+      self.columns.iter().map(|c| c.name.as_str()).collect();
     let shape = RowShape::new(scope, &names, self.flags)
       .map_err(|e| SqlError::postgres_client(codes::PROTOCOL, e))?;
     let mut out = Vec::with_capacity(self.rows.len());
     let mut cells = Vec::with_capacity(self.columns.len());
     for row in &self.rows {
       cells.clear();
-      for (i, (name, ty)) in self.columns.iter().enumerate() {
+      for (i, PgColumn { name, ty, .. }) in self.columns.iter().enumerate() {
         let cell: RawCell = row.try_get(i)?;
         cells.push(match cell.0 {
           None => v8::null(scope).into(),
@@ -933,7 +1047,13 @@ impl<'a> ToV8<'a> for PgRows {
     }
     let count = self.affected.unwrap_or(self.rows.len() as u64) as f64;
     let undefined = v8::undefined(scope).into();
-    Ok(result_tuple(scope, &out, count, undefined))
+    let record = Record::new(scope, PG_COLUMN_KEYS);
+    let columns: Vec<_> = self
+      .columns
+      .iter()
+      .map(|c| column_object(scope, &record, c))
+      .collect();
+    Ok(result_tuple(scope, &out, count, undefined, &columns))
   }
 }
 
@@ -1053,14 +1173,9 @@ pub async fn op_sql_pg_query(
       rows.push(row);
     }
     let affected = stream.rows_affected();
-    let columns = match (rows.first(), &statement) {
-      (Some(row), _) => row.columns(),
-      (None, Some(stmt)) => stmt.columns(),
-      (None, None) => &[],
-    }
-    .iter()
-    .map(|c| (c.name().to_string(), c.type_().clone()))
-    .collect();
+    // The stream's own description: also there for an unnamed statement
+    // that returned no rows (the vendored `RowStream::columns`).
+    let columns = stream.columns().iter().map(PgColumn::from).collect();
     Ok(PgRows {
       columns,
       rows,
@@ -1112,6 +1227,7 @@ impl<'a> ToV8<'a> for PgSimpleResults {
     scope: &mut v8::PinScope<'a, 'i>,
   ) -> Result<v8::Local<'a, v8::Value>, Self::Error> {
     let mut out = Vec::with_capacity(self.results.len());
+    let record = Record::new(scope, PG_COLUMN_KEYS);
     for (columns, rows, count) in &self.results {
       let shape = RowShape::new(scope, columns, self.flags)
         .map_err(|e| SqlError::postgres_client(codes::PROTOCOL, e))?;
@@ -1129,7 +1245,11 @@ impl<'a> ToV8<'a> for PgSimpleResults {
         built.push(shape.build(scope, &cells));
       }
       let undefined = v8::undefined(scope).into();
-      out.push(result_tuple(scope, &built, *count as f64, undefined));
+      let meta: Vec<_> = columns
+        .iter()
+        .map(|name| simple_column_object(scope, &record, name))
+        .collect();
+      out.push(result_tuple(scope, &built, *count as f64, undefined, &meta));
     }
     Ok(v8::Array::new_with_elements(scope, &out).into())
   }

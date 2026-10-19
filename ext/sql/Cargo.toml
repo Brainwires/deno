@@ -21,7 +21,10 @@ deno_permissions.workspace = true
 deno_tls.workspace = true
 postgres-protocol.workspace = true
 postgres-types.workspace = true
-rusqlite.workspace = true
+# column_metadata: the source database / table / column and declared type of
+# result columns (`result.columns`); the bundled SQLite is always built with
+# SQLITE_ENABLE_COLUMN_METADATA.
+rusqlite = { workspace = true, features = ["column_metadata"] }
 serde.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
