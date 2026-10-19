@@ -315,10 +315,26 @@ async fn print_release_notes(
 }
 
 pub fn upgrade_check_enabled() -> bool {
-  matches!(
-    env::var("DENO_NO_UPDATE_CHECK"),
-    Err(env::VarError::NotPresent)
-  )
+  // denext: a denext release is never offered an upstream Deno release.
+  version::DENO_VERSION_INFO.denext().is_none()
+    && matches!(
+      env::var("DENO_NO_UPDATE_CHECK"),
+      Err(env::VarError::NotPresent)
+    )
+}
+
+/// denext: why `deno upgrade` refuses to run in a denext release build, or
+/// `None` for any other build. Upstream's channels would replace this fork
+/// (its own version, `3.0.0-rc.N`, names no upstream release) with stock Deno.
+fn denext_upgrade_refusal(denext: Option<&str>) -> Option<String> {
+  denext.map(|version| {
+    format!(
+      "`deno upgrade` is not available in denext's Deno {version}: it would \
+       replace this build with upstream Deno.\n  Run `denext upgrade` (it \
+       moves denext's Deno toolchain pin) or `denext toolchain install`, or \
+       download a release from https://github.com/Brainwires/deno/releases."
+    )
+  })
 }
 
 pub fn check_for_upgrades(
@@ -986,6 +1002,11 @@ pub async fn upgrade(
   flags: Arc<Flags>,
   upgrade_flags: UpgradeFlags,
 ) -> Result<(), AnyError> {
+  if let Some(refusal) =
+    denext_upgrade_refusal(version::DENO_VERSION_INFO.denext())
+  {
+    bail!(refusal);
+  }
   if let Some(pr_number) = upgrade_flags.pr {
     return upgrade_from_pr(pr_number, &upgrade_flags);
   }
@@ -2122,6 +2143,26 @@ impl CheckVersionFile {
 
 #[cfg(test)]
 mod test {
+  #[test]
+  fn denext_release_builds_refuse_upstream_upgrades() {
+    assert_eq!(super::denext_upgrade_refusal(None), None);
+    let refusal = super::denext_upgrade_refusal(Some("3.0.0-rc.1")).unwrap();
+    assert!(refusal.contains("denext's Deno 3.0.0-rc.1"), "{refusal}");
+    assert!(refusal.contains("denext toolchain install"), "{refusal}");
+    assert!(
+      refusal.contains("https://github.com/Brainwires/deno/releases"),
+      "{refusal}"
+    );
+    // a build without DENEXT_VERSION (tests, a local build) keeps upstream's
+    // upgrade and its update check
+    if super::version::DENO_VERSION_INFO.denext().is_none() {
+      assert!(
+        super::upgrade_check_enabled()
+          || std::env::var_os("DENO_NO_UPDATE_CHECK").is_some()
+      );
+    }
+  }
+
   use std::cell::RefCell;
   use std::rc::Rc;
 

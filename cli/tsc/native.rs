@@ -90,7 +90,8 @@ fn resolve_native_tsc(
 }
 
 /// A vendored compiler in denext's toolchain cache:
-/// `<cache>/<version>/<target>/typescript-check/tsc`, newest release first.
+/// `<cache>/<version>/<target>/typescript-check/tsc`, newest release first
+/// (by semver: `3.0.0-rc.10` after `3.0.0-rc.9`, after `2.9.7-denext.22`).
 fn toolchain_cache_tsc(cache: &Path) -> Option<PathBuf> {
   let mut versions: Vec<PathBuf> = std::fs::read_dir(cache)
     .ok()?
@@ -98,7 +99,7 @@ fn toolchain_cache_tsc(cache: &Path) -> Option<PathBuf> {
     .map(|e| e.path())
     .filter(|p| p.is_dir())
     .collect();
-  versions.sort();
+  versions.sort_by_cached_key(|p| toolchain_version_key(p));
   for version in versions.iter().rev() {
     let Ok(targets) = std::fs::read_dir(version) else {
       continue;
@@ -116,6 +117,18 @@ fn toolchain_cache_tsc(cache: &Path) -> Option<PathBuf> {
     }
   }
   None
+}
+
+/// A toolchain cache directory's sort key: its name as a version (`None`,
+/// which sorts first, for a name that is not one), then the name.
+fn toolchain_version_key(
+  dir: &Path,
+) -> (Option<deno_semver::Version>, std::ffi::OsString) {
+  let name = dir.file_name().unwrap_or_default().to_os_string();
+  let version = name
+    .to_str()
+    .and_then(|n| deno_semver::Version::parse_standard(n).ok());
+  (version, name)
 }
 
 /// The native `tsc` to run: never downloaded. See [`resolve_native_tsc`] for
@@ -954,6 +967,39 @@ mod resolve_tests {
     )
     .unwrap();
     assert_eq!(found, newest);
+  }
+
+  #[test]
+  fn toolchain_cache_is_ordered_by_semver() {
+    for (older, newer) in [
+      ("2.9.7-denext.22", "3.0.0-rc.1"),
+      ("3.0.0-rc.9", "3.0.0-rc.10"),
+      ("2.9.7-denext.9", "2.9.7-denext.10"),
+    ] {
+      let exe_dir = tempfile::tempdir().unwrap();
+      let deno_dir = tempfile::tempdir().unwrap();
+      let cache = deno_dir.path().join(TOOLCHAIN_CACHE_NAME);
+      // every candidate is usable: only the order decides
+      fake_tsc(
+        &cache.join("not-a-version").join("linux-x86_64"),
+        typescript_version(),
+      );
+      fake_tsc(
+        &cache.join(older).join("linux-x86_64"),
+        typescript_version(),
+      );
+      let newest = fake_tsc(
+        &cache.join(newer).join("linux-x86_64"),
+        typescript_version(),
+      );
+      let found = resolve_native_tsc(
+        None,
+        Some(exe_dir.path().join("deno")),
+        Some(deno_dir.path()),
+      )
+      .unwrap();
+      assert_eq!(found, newest, "{newer} is newer than {older}");
+    }
   }
 
   #[test]

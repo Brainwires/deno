@@ -39,15 +39,17 @@ esac
 short=$("$deno" -V | tr -d '\r')
 test "$short" = "deno $VERSION" || { echo "::error::deno -V says '$short', want 'deno $VERSION'" >&2; exit 1; }
 
-# Deno.version.deno is the denext version too (denext tells its own CLI by
-# the `-denext.` in it), and still semver.
+# Deno.version.deno is the fork's version too (DENEXT.md "Versioning":
+# 3.0.0-rc.N, or 3.0.0-rc.N+ci.RUN for a CI build), and semver.
 deno_version=$("$deno" eval 'console.log(Deno.version.deno)' | tr -d '\r')
 test "$deno_version" = "$VERSION" || { echo "::error::Deno.version.deno is '$deno_version', want '$VERSION'" >&2; exit 1; }
 echo "Deno.version.deno: $deno_version"
-case "$deno_version" in
-  *-denext.*) ;;
-  *) echo "::error::Deno.version.deno '$deno_version' has no -denext. suffix" >&2; exit 1 ;;
-esac
+# `deno upgrade` must not replace a denext build with upstream Deno.
+if "$deno" upgrade --dry-run >"$work/upgrade.txt" 2>&1; then
+  echo "::error::deno upgrade ran in a denext build" >&2; cat "$work/upgrade.txt" >&2; exit 1
+fi
+grep -q "not available in denext's Deno $VERSION" "$work/upgrade.txt" ||
+  { echo "::error::deno upgrade did not refuse:" >&2; cat "$work/upgrade.txt" >&2; exit 1; }
 # On a Unix target the archive must keep the executable bit.
 case "$TARGET" in
   *-windows-msvc) ;;

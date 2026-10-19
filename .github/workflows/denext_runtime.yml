@@ -90,13 +90,17 @@ jobs:
       matrix: ${{ steps.plan.outputs.matrix }}
       version: ${{ steps.plan.outputs.version }}
       deno_version: ${{ steps.plan.outputs.deno_version }}
+      upstream_version: ${{ steps.plan.outputs.upstream_version }}
       laufey_sha: ${{ steps.plan.outputs.laufey_sha }}
       cef_version: ${{ steps.plan.outputs.cef_version }}
       laufey_api: ${{ steps.plan.outputs.laufey_api }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          sparse-checkout: cli/Cargo.toml
+          sparse-checkout: |
+            cli/Cargo.toml
+            cli/lib/version.txt
+            cli/lib/upstream_version.txt
           sparse-checkout-cone-mode: false
       - id: plan
         env:
@@ -110,8 +114,23 @@ jobs:
           RUN_NUMBER: ${{ github.run_number }}
         run: |
           set -euo pipefail
+          # The fork's own version (DENEXT.md "Versioning": 3.0.0-rc.N, ...),
+          # which the release is named after, and the upstream Deno release it
+          # is built from.
           deno_version=$(sed -n 's/^version = "\(.*\)"$/\1/p' cli/Cargo.toml | head -1)
           test -n "$deno_version"
+          lib_version=$(tr -d '[:space:]' <cli/lib/version.txt)
+          test "$lib_version" = "$deno_version" ||
+            { echo "::error::cli/lib/version.txt is '$lib_version', cli/Cargo.toml '$deno_version'"; exit 1; }
+          upstream_version=$(tr -d '[:space:]' <cli/lib/upstream_version.txt)
+          test -n "$upstream_version"
+          python3 - "$deno_version" "$upstream_version" <<'PY'
+          import re, sys
+          semver = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\.(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*))*)?$")
+          for v in sys.argv[1:]:
+              if not semver.match(v):
+                  raise SystemExit(f"::error::'{v}' is not a semver version without build metadata")
+          PY
 
           ref=${LAUFEY_REF:-$LAUFEY_SHA}
           laufey_sha=$(gh api "repos/$LAUFEY_REPOSITORY/commits/$ref" --jq .sha)
@@ -124,10 +143,8 @@ jobs:
 
           if [ "$REF_TYPE" = tag ]; then
             version=${REF_NAME#denext-runtime-v}
-            case "$version" in
-              "$deno_version"-denext.*) ;;
-              *) echo "::error::tag $REF_NAME does not match deno $deno_version (want denext-runtime-v$deno_version-denext.N)"; exit 1 ;;
-            esac
+            test "$version" = "$deno_version" ||
+              { echo "::error::tag $REF_NAME does not match the fork's version $deno_version (cli/Cargo.toml; want denext-runtime-v$deno_version)"; exit 1; }
             # A release needs a green FULL `denext tests` run (lint, libs,
             # unit, specs on every OS) of exactly the tagged commit, from its
             # development-denext push or a dispatch. A branch push runs Linux
@@ -151,7 +168,9 @@ jobs:
             echo "denext tests (full matrix, run $full_run) passed for $SHA"
             TARGETS=all
           else
-            version="$deno_version-denext.0-ci.$RUN_NUMBER"
+            # Build metadata: the same precedence as the version it builds
+            # toward, never mistaken for a release (DENEXT.md "Versioning").
+            version="$deno_version+ci.$RUN_NUMBER"
           fi
 
           matrix=$(TARGETS="$TARGETS" python3 - <<'PY'
@@ -178,11 +197,12 @@ jobs:
             echo "matrix=$matrix"
             echo "version=$version"
             echo "deno_version=$deno_version"
+            echo "upstream_version=$upstream_version"
             echo "laufey_sha=$laufey_sha"
             echo "cef_version=$cef_version"
             echo "laufey_api=$laufey_api"
           } >>"$GITHUB_OUTPUT"
-          echo "version=$version deno=$deno_version laufey=$laufey_sha cef=$cef_version"
+          echo "version=$version deno=$deno_version upstream=$upstream_version laufey=$laufey_sha cef=$cef_version"
           echo "matrix=$matrix"
 
   # The e2e runner's own logic (.github/denext-runtime/e2e/lib), which needs
@@ -731,7 +751,9 @@ jobs:
           TYPESCRIPT_LSP_DIR: ${{ runner.temp }}/typescript-lsp
           TYPESCRIPT_CHECK_DIR: ${{ runner.temp }}/typescript-check
           OUT_DIR: dist
-          DENO_VERSION: ${{ needs.setup.outputs.deno_version }}
+          # The upstream Deno release the fork is built from (BUILD_INFO.json's
+          # and manifest.json's deno.version; denext's pins read it as `deno`).
+          DENO_VERSION: ${{ needs.setup.outputs.upstream_version }}
           DENO_SHA: ${{ github.sha }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: bash .github/denext-runtime/assemble_cli.sh
@@ -874,7 +896,9 @@ jobs:
           DENORT_DIR: dl/denort
           LAUFEY_TAR: dl/laufey/laufey-${{ matrix.target }}.tar
           OUT_DIR: dist
-          DENO_VERSION: ${{ needs.setup.outputs.deno_version }}
+          # The upstream Deno release the fork is built from (BUILD_INFO.json's
+          # and manifest.json's deno.version; denext's pins read it as `deno`).
+          DENO_VERSION: ${{ needs.setup.outputs.upstream_version }}
           DENO_SHA: ${{ github.sha }}
           LAUFEY_SHA: ${{ needs.setup.outputs.laufey_sha }}
           CEF_VERSION: ${{ needs.setup.outputs.cef_version }}
@@ -1093,7 +1117,9 @@ jobs:
           VERSION: ${{ needs.setup.outputs.version }}
           TAG: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/denext-runtime-v') && github.ref_name || '' }}
           REPOSITORY: ${{ github.repository }}
-          DENO_VERSION: ${{ needs.setup.outputs.deno_version }}
+          # The upstream Deno release the fork is built from (BUILD_INFO.json's
+          # and manifest.json's deno.version; denext's pins read it as `deno`).
+          DENO_VERSION: ${{ needs.setup.outputs.upstream_version }}
           DENO_SHA: ${{ github.sha }}
           LAUFEY_SHA: ${{ needs.setup.outputs.laufey_sha }}
           CEF_VERSION: ${{ needs.setup.outputs.cef_version }}
@@ -1135,14 +1161,16 @@ jobs:
           TAG: ${{ github.ref_name }}
           # Every expression goes through the environment: values expand as
           # data inside the heredoc, never as shell source.
-          DENO_VERSION: ${{ needs.setup.outputs.deno_version }}
+          # The upstream Deno release the fork is built from (BUILD_INFO.json's
+          # and manifest.json's deno.version; denext's pins read it as `deno`).
+          DENO_VERSION: ${{ needs.setup.outputs.upstream_version }}
           LAUFEY_SHA: ${{ needs.setup.outputs.laufey_sha }}
           CEF_VERSION: ${{ needs.setup.outputs.cef_version }}
           REPO: ${{ github.repository }}
           SHA: ${{ github.sha }}
         run: |
           cat >notes.md <<EOF
-          denext's patched Deno Desktop runtime, deno ${DENO_VERSION} + denext patches ([DENEXT.md](https://github.com/${REPO}/blob/${SHA}/DENEXT.md)).
+          denext's Deno fork ${TAG#denext-runtime-v}: the patched Deno Desktop runtime and CLI, built from upstream Deno ${DENO_VERSION} plus denext's patches ([DENEXT.md](https://github.com/${REPO}/blob/${SHA}/DENEXT.md), "Versioning").
 
           - deno: \`${SHA}\`
           - laufey: [\`${LAUFEY_SHA}\`](https://github.com/Brainwires/laufey/commit/${LAUFEY_SHA})

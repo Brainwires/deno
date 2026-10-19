@@ -34,14 +34,56 @@ Changes that would help everyone can still be offered to denoland/deno, but
 nothing here depends on that: the fork keeps every change whether or not
 upstream takes it, and is rebased onto a newer Deno when we choose to move.
 
+## Versioning
+
+From runtime **3.0.0-rc.1** (the release that was going to be `denext.23`) the
+fork has its own version, a plain semver in `cli/Cargo.toml`,
+`cli/rt/Cargo.toml` and `cli/lib/version.txt` (`3.0.0-rc.1`, then `3.0.0-rc.2`,
+`3.0.0-rc.3`, ...). Before that every release was named after the upstream
+release it was built from: `2.9.7-denext.1` to `2.9.7-denext.22`. Semver sorts
+the two schemes in release order (`2.9.7-denext.22` < `3.0.0-rc.1` <
+`3.0.0-rc.2` < `3.0.0`), so a program comparing versions needs no special case.
+
+- **3.0.0 final** means upstream Deno's planned 3.0 milestone (denoland/deno
+  milestone 69) is carried or adapted here. Breaking changes may land in 3.0,
+  opt-in where possible (for example behind an environment variable that warns
+  otherwise).
+- **The upstream version** the fork is built from is in
+  `cli/lib/upstream_version.txt` (`2.9.7`; `UPSTREAM_DENO_VERSION` in
+  `cli/lib/version.rs`). Everything that means upstream Deno uses it, never the
+  fork's own version, which names no upstream release (and an upstream release
+  of the same number would be a different runtime): the release channel
+  (`deno --version` says `stable`, upstream's channel for 2.9.7, not
+  `release
+  candidate`), the `denort` / `libdenort` downloads from
+  dl.deno.land, the `engines.deno` check of `deno install` (npm ranges never
+  match a prerelease, so `>=1.0.0` would reject `3.0.0-rc.1`), and
+  `deno.version` in each archive's `BUILD_INFO.json` and in the release's
+  `manifest.json` (denext's pins read it as `deno`: the stock Deno whose
+  `deno desktop` packages with the runtime).
+- **A release** is tagged `denext-runtime-v<version>`
+  (`denext-runtime-v3.0.0-rc.1`); the release workflow refuses a tag that is not
+  exactly the version in `cli/Cargo.toml` (and `cli/lib/version.txt`), so bump
+  those first. Every archive is named after the version
+  (`deno-cli-3.0.0-rc.1-<target>.zip`, ...). An untagged workflow run builds
+  `<version>+ci.<run>`: build metadata, the same precedence as the version it
+  builds toward.
+- **A release build** bakes `DENEXT_VERSION=<version>` in (item 26). It marks
+  the binary as denext's: `deno compile` takes the release's own `denort`, and
+  `deno upgrade` (and its background update check) is off, because upstream's
+  channels would replace this fork with stock Deno. Update it through denext
+  (`denext upgrade`, `denext toolchain install`) or from this repository's
+  releases. A build without it (tests, a local `cargo build`) keeps upstream's
+  `deno upgrade`.
+
 ## Branches and tags
 
-| Ref                                                                                 | What it is                                                                                                                                                                                                                                                               |
-| ----------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `development-denext`                                                                | The working line: every feature and fix branch is merged here (`--no-ff`), and runtime releases are cut from it as `denext-runtime-v<deno version>-denext.<n>` tags. Replaces the per-release `rel/denext<n>` lines, which stay for history (`denext.6` to `denext.22`). |
-| `denext/v<deno version>` (e.g. `denext/v2.9.7`)                                     | The original line: upstream tag `v<deno version>` + the first feature commits + this file and the release workflow. The default branch of this fork.                                                                                                                     |
-| `feat/desktop-*`, `fix/*`, `ci/*`, `test/*`                                         | The feature and fix branches merged into `development-denext`. Kept for review and for rebasing onto a newer Deno.                                                                                                                                                       |
-| `denext-runtime-v<deno version>-denext.<n>` (e.g. `denext-runtime-v2.9.7-denext.1`) | A published runtime. PUSHING such a tag runs the workflow and creates the GitHub Release (a manual dispatch on a tag ref builds but never publishes). `<n>` counts runtime releases on one Deno version.                                                                 |
+| Ref                                                                                                           | What it is                                                                                                                                                                                                                                                                               |
+| ------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `development-denext`                                                                                          | The working line: every feature and fix branch is merged here (`--no-ff`), and runtime releases are cut from it as `denext-runtime-v<version>` tags (see [Versioning](#versioning)). Replaces the per-release `rel/denext<n>` lines, which stay for history (`denext.6` to `denext.22`). |
+| `denext/v<deno version>` (e.g. `denext/v2.9.7`)                                                               | The original line: upstream tag `v<deno version>` + the first feature commits + this file and the release workflow. The default branch of this fork.                                                                                                                                     |
+| `feat/desktop-*`, `fix/*`, `ci/*`, `test/*`                                                                   | The feature and fix branches merged into `development-denext`. Kept for review and for rebasing onto a newer Deno.                                                                                                                                                                       |
+| `denext-runtime-v<version>` (e.g. `denext-runtime-v3.0.0-rc.1`; before it `denext-runtime-v2.9.7-denext.<n>`) | A published runtime. PUSHING such a tag runs the workflow and creates the GitHub Release (a manual dispatch on a tag ref builds but never publishes). `<version>` is the fork's own ([Versioning](#versioning)).                                                                         |
 
 `main` and the other upstream branches are untouched mirrors from the fork
 point. Nothing here is proposed back from this fork; the upstream PRs below are
@@ -676,19 +718,20 @@ where the changes are discussed.
     CLI features (items 23, 24, and the CLI-side parts of the rest) pinned by
     version and SHA-256 like the runtime, with nothing else to install. The
     binary is still `deno`. A release build bakes `DENEXT_VERSION` (the release
-    version, e.g. `2.9.7-denext.15`) in at compile time: it becomes
+    version, e.g. `3.0.0-rc.1`; `2.9.7-denext.15` before the fork took its own
+    version, see [Versioning](#versioning)) in at compile time: it becomes
     `Deno.version.deno`, `deno --version` / `deno -V`
-    (`deno 2.9.7-denext.15 (stable, release, <target>)`) and the user agent
-    (`Deno/2.9.7-denext.15`), still a semver on the stable channel, so a program
-    (denext) can tell this CLI from a stock one. The `denort` / `libdenort`
-    downloads of `deno compile` / `deno desktop` and `deno upgrade` keep the
-    plain Deno version (`DENO_VERSION`, `2.9.7`). A value that does not extend
-    the build's own Deno version with `-` or `+` is ignored; without it every
-    version is upstream's (the `libdenort` build sets none). Each archive is
-    smoke-tested on its own runner (the version lines and `Deno.version.deno`,
-    `typeof Deno.SQL === "function"`, a Vitest suite passing under `deno test`)
-    and attested. Test: `denext_version_extends_the_deno_version` in
-    `cli/lib/version.rs`.
+    (`deno 3.0.0-rc.1 (stable, release, <target>)`) and the user agent
+    (`Deno/3.0.0-rc.1`), and marks the build as denext's. The `libdenort`
+    download of `deno desktop` (and `denort` when the build is not denext's)
+    keeps the upstream version (`UPSTREAM_DENO_VERSION`, `2.9.7`), and
+    `deno upgrade` refuses to run. A value that is not the build's own version
+    or does not extend it with `-` or `+` is ignored (the `libdenort` build sets
+    none). Each archive is smoke-tested on its own runner (the version lines and
+    `Deno.version.deno`, `typeof Deno.SQL === "function"`, a Vitest suite
+    passing under `deno test`) and attested. Tests:
+    `denext_version_is_or_extends_the_deno_version` in `cli/lib/version.rs`, and
+    item 79's.
 
 27. **Upstream fixes taken ahead of a Deno bump** (from `denext.16`), each
     cherry-picked from denoland/deno `main` with `-x` (the commit message names
@@ -2411,6 +2454,40 @@ where the changes are discussed.
     answer) and the parser tests `bundle_define` /
     `bundle_define_rejects_invalid_input`.
 
+79. **`chore(version)`: the fork's own version, 3.0.0-rc.1**
+    (`chore/version-3.0.0-rc`; `cli/Cargo.toml`, `cli/rt/Cargo.toml`,
+    `cli/lib/version.txt`, `cli/lib/upstream_version.txt`, `cli/lib/build.rs`,
+    `cli/lib/version.rs`, `cli/standalone/binary.rs`,
+    `cli/tools/installer/mod.rs`, `cli/tools/upgrade.rs`, `cli/tsc/native.rs`,
+    `.github/workflows/denext_runtime.yml`, `.github/denext-runtime/`). The
+    release that was going to be `denext.23` is `3.0.0-rc.1`; see
+    [Versioning](#versioning) for the scheme and what still uses the upstream
+    version. Besides the version itself:
+    - a release build is the one whose `DENEXT_VERSION` IS its version (it used
+      to have to extend it), so `deno compile` keeps taking the release's
+      `denort`;
+    - `deno upgrade` and the update check are off in a release build (they would
+      have offered upstream's release-candidate channel, or stock Deno, in place
+      of the fork);
+    - denext's toolchain cache is searched newest first by semver, not by name
+      (`3.0.0-rc.10` after `3.0.0-rc.9`; by name `2.9.7-denext.9` sorted after
+      `2.9.7-denext.10`);
+    - the release workflow names every archive after the fork's version, takes a
+      tag only when it is exactly that version, and records the upstream version
+      as `deno.version` in `BUILD_INFO.json` / `manifest.json`; `cli_smoke.sh`
+      checks that `deno upgrade` refuses.
+
+    Tests: `denext_version_is_or_extends_the_deno_version`,
+    `fork_versions_are_semver_and_sort_after_the_old_scheme` and
+    `the_release_channel_is_the_upstream_versions` (`cli/lib/version.rs`),
+    `deno_land_downloads_name_the_upstream_release` and
+    `denext_denort_is_the_release_asset` (`cli/standalone/binary.rs`),
+    `denext_release_builds_refuse_upstream_upgrades` (`cli/tools/upgrade.rs`),
+    `toolchain_cache_is_ordered_by_semver` (`cli/tsc/native.rs`) and the spec
+    test `install::package_json_engines::match_silent`
+    (`engines.deno:
+    ">=1.0.0"` warned against `3.0.0-rc.1`).
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77) are what the prebuilt `libdenort` carries. The CLI-side parts (for
 example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's
@@ -2449,7 +2526,8 @@ package job fails if it differs from the hosts' `capi/include/laufey.h`.
 ## Release archives
 
 One archive per target and backend:
-`deno-desktop-runtime-<deno version>-denext.<n>-<target>-<backend>.tar.gz`
+`deno-desktop-runtime-<version>-<target>-<backend>.tar.gz` (`<version>`: the
+fork's own, `3.0.0-rc.1`; up to `denext.22` it was `<deno version>-denext.<n>`)
 (`.zip` on Windows). Targets: `aarch64-apple-darwin`, `x86_64-apple-darwin`,
 `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`,
 `x86_64-pc-windows-msvc`, `aarch64-pc-windows-msvc` (from `denext.21`).
@@ -2474,11 +2552,11 @@ directory holding the backend binary into the packaged app, so those directories
 hold only the backend's runtime files.
 
 Since `denext.15` each release also has this fork's `deno` CLI (item 26), one
-zip per target (every OS): `deno-cli-<deno version>-denext.<n>-<target>.zip`, no
-wrapping directory:
+zip per target (every OS): `deno-cli-<version>-<target>.zip`, no wrapping
+directory:
 
 ```text
-deno | deno.exe        the CLI; `Deno.version.deno` is `<deno version>-denext.<n>`
+deno | deno.exe        the CLI; `Deno.version.deno` is `<version>`
 esbuild | esbuild.exe  the official esbuild 0.25.5 `deno bundle` uses
 esbuild.LICENSE        esbuild's MIT license
 typescript-check/      the native TypeScript 7.0.2 type checking runs (item 47;
@@ -2537,13 +2615,12 @@ commit; the setup job checks and fails otherwise. Per target it:
 4. attests the archives and, on a pushed tag, publishes the release;
 5. in a parallel `cli` job, builds this fork's `deno` CLI with
    `cargo build --release --locked --bin deno` and `DENEXT_VERSION` set to the
-   release version (`<deno version>-denext.0-ci.<run>` for untagged runs),
-   fetches and verifies esbuild with `fetch_esbuild.py`, packs both with
-   `assemble_cli.sh`, smoke-tests the unpacked archive with `cli_smoke.sh` and
-   attests it. The release needs every runtime archive and every CLI archive. A
-   dispatch with `cli_only: true` runs just this job and the manifest (no
-   laufey, libdenort or package jobs, and never a release): a dry run of the CLI
-   archives' layout.
+   release version (`<version>+ci.<run>` for untagged runs), fetches and
+   verifies esbuild with `fetch_esbuild.py`, packs both with `assemble_cli.sh`,
+   smoke-tests the unpacked archive with `cli_smoke.sh` and attests it. The
+   release needs every runtime archive and every CLI archive. A dispatch with
+   `cli_only: true` runs just this job and the manifest (no laufey, libdenort or
+   package jobs, and never a release): a dry run of the CLI archives' layout.
 
 Locally, the equivalent is:
 

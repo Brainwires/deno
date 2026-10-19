@@ -22,6 +22,8 @@
 #
 # Env: TARGET VERSION DENORT_DIR LAUFEY_TAR OUT_DIR DENO_VERSION DENO_SHA
 #      LAUFEY_SHA CEF_VERSION RUN_URL
+# (VERSION: the fork's own version, e.g. 3.0.0-rc.1; DENO_VERSION: the
+# upstream Deno release it is built from, DENEXT.md "Versioning")
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 . "$here/lib.sh"

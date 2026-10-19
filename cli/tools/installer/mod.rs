@@ -6,8 +6,8 @@ use dashmap::DashSet;
 use deno_core::error::AnyError;
 use deno_core::parking_lot::Mutex;
 use deno_core::url::Url;
-use deno_lib::version::DENO_VERSION;
 use deno_lib::version::NODE_VERSION;
+use deno_lib::version::UPSTREAM_DENO_VERSION;
 use deno_npm_installer::lifecycle_scripts::LifecycleScriptsWarning;
 use deno_package_json::EngineMismatchKind;
 use deno_resolver::workspace::WorkspaceResolver;
@@ -406,9 +406,15 @@ pub fn print_install_report(
 /// Modeled on `npm`/`yarn`'s default behavior: this is a warning, never an
 /// error. Engines other than `node` and `deno` are ignored — Deno has no way
 /// to verify them.
+///
+/// denext: `engines.deno` is checked against the upstream Deno release this
+/// fork is built from ([`UPSTREAM_DENO_VERSION`]), not the fork's own
+/// `3.0.0-rc.N`: a range names upstream Deno, and npm ranges never match a
+/// prerelease (`>=1.0.0` would reject `3.0.0-rc.1`).
 fn warn_on_engines_mismatch(workspace: &WorkspaceResolver<CliSys>) {
   for pkg_json in workspace.package_jsons() {
-    let mismatches = pkg_json.check_engines(DENO_VERSION, NODE_VERSION);
+    let mismatches =
+      pkg_json.check_engines(UPSTREAM_DENO_VERSION, NODE_VERSION);
     if mismatches.is_empty() {
       continue;
     }

@@ -8,6 +8,8 @@ archives `deno compile` builds onto, listed under "denort").
 
 Usage: manifest.py <dist dir>
 Env:   VERSION TAG REPOSITORY DENO_VERSION DENO_SHA LAUFEY_SHA CEF_VERSION RUN_URL
+       (VERSION: the fork's own version, e.g. 3.0.0-rc.1, which names every
+       archive; DENO_VERSION: the upstream Deno release it is built from)
        CLI_ONLY (1: a `cli_only` dry run, which has no runtime archives)
 """
 

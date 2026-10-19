@@ -10,6 +10,14 @@ fn main() {
   let text = std::fs::read_to_string(version_path).unwrap();
   println!("cargo:rustc-env=DENO_VERSION={}", text);
 
+  // denext: the upstream Deno release this fork is built from (DENEXT.md
+  // "Versioning"); downloads from dl.deno.land and `engines.deno` use it.
+  let upstream_path = std::path::Path::new(".").join("upstream_version.txt");
+  println!("cargo:rerun-if-changed={}", upstream_path.display());
+  #[allow(clippy::disallowed_methods, reason = "build code")]
+  let upstream = std::fs::read_to_string(upstream_path).unwrap();
+  println!("cargo:rustc-env=UPSTREAM_DENO_VERSION={}", upstream.trim());
+
   let commit_hash = git_commit_hash();
   println!("cargo:rustc-env=GIT_COMMIT_HASH={}", commit_hash);
   println!("cargo:rerun-if-env-changed=GIT_COMMIT_HASH");

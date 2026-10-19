@@ -1950,7 +1950,7 @@ dependencies = [
 
 [[package]]
 name = "deno"
-version = "2.9.7"
+version = "3.0.0-rc.1"
 dependencies = [
  "anstream",
  "async-trait",
@@ -3819,7 +3819,7 @@ dependencies = [
 
 [[package]]
 name = "denort"
-version = "2.9.7"
+version = "3.0.0-rc.1"
 dependencies = [
  "async-trait",
  "bincode",
