@@ -715,6 +715,12 @@ impl MainWorker {
           || options.should_wait_for_inspector_session,
       );
       js_runtime.op_state().borrow_mut().put(inspector_url);
+      // A frontend can attach as soon as the inspector is registered, while
+      // the main module still loads: it must already see the runtime as
+      // paused on start (`NodeRuntime.waitingForDebugger`).
+      if options.should_break_on_first_statement {
+        js_runtime.inspector().arm_break_on_start();
+      }
     }
 
     let (

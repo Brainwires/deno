@@ -1091,7 +1091,16 @@ impl JsRuntimeInspector {
   /// Frontend must send "Runtime.runIfWaitingForDebugger" message to resume
   /// execution.
   pub fn wait_for_session_and_break_on_next_statement(&self) {
-    self.state.flags.borrow_mut().paused_on_start = true;
+    {
+      // When `arm_break_on_start` ran, the runtime has counted as paused on
+      // start since the inspector was registered, and a frontend may already
+      // have resumed it (`Runtime.runIfWaitingForDebugger` while the main
+      // module loaded): don't block again for a resume that already came.
+      let mut flags = self.state.flags.borrow_mut();
+      if !std::mem::take(&mut flags.break_on_start_armed) {
+        flags.paused_on_start = true;
+      }
+    }
     // Block the main thread until Runtime.runIfWaitingForDebugger is
     // received (which clears paused_on_start). This matches Node.js
     // --inspect-brk behavior where execution is blocked until the
@@ -1131,6 +1140,28 @@ impl JsRuntimeInspector {
     }
     // Clear so it doesn't stale-reference a session in future cycles.
     self.state.flags.borrow_mut().resumed_by_session_id = None;
+  }
+
+  /// Marks the runtime as paused on start (`--inspect-brk`) from now on,
+  /// before the main module has loaded and
+  /// [`Self::wait_for_session_and_break_on_next_statement`] blocks.
+  ///
+  /// A frontend can connect while the module graph loads, when the event loop
+  /// already dispatches its messages; without this, a `NodeRuntime.enable`
+  /// handled then saw a runtime that was not paused on start and never got
+  /// `NodeRuntime.waitingForDebugger`, so a frontend that waits for it (Node's
+  /// inspector test helper, `--inspect-brk` tooling) hung. A
+  /// `Runtime.runIfWaitingForDebugger` received in that window resumes the
+  /// runtime, and the later wait does not block for another one.
+  pub fn arm_break_on_start(&self) {
+    let mut flags = self.state.flags.borrow_mut();
+    flags.paused_on_start = true;
+    flags.break_on_start_armed = true;
+  }
+
+  #[cfg(test)]
+  pub(crate) fn is_paused_on_start(&self) -> bool {
+    self.state.flags.borrow().paused_on_start
   }
 
   pub fn wait_for_runtime_run_if_waiting_for_debugger(&self) {
@@ -1439,6 +1470,9 @@ struct InspectorFlags {
   /// Runtime.runIfWaitingForDebugger is received, allowing
   /// NodeRuntime.waitingForDebugger to be emitted.
   paused_on_start: bool,
+  /// Set by `arm_break_on_start` until the main module's break-on-start wait
+  /// runs; `paused_on_start` then already reflects any early resume.
+  break_on_start_armed: bool,
   /// Set when a frontend explicitly sends Page.waitForDebugger.
   page_wait_for_debugger_received: bool,
   /// Tracks which session sent Runtime.runIfWaitingForDebugger,

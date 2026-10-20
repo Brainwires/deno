@@ -447,6 +447,71 @@ fn inspector() {
   runtime.execute_script("check.js", "null").unwrap();
 }
 
+/// `--inspect-brk`: a frontend that attaches while the main module still loads
+/// (the event loop already pumps its messages) sees the runtime as paused on
+/// start, and a resume it sends then is not waited for again. Before,
+/// `NodeRuntime.enable` in that window got no `NodeRuntime.waitingForDebugger`
+/// and a frontend waiting for it hung (node_compat's
+/// parallel/test-esm-loader-hooks-inspect-brk.js timed out).
+#[test]
+fn inspect_brk_frontend_attached_while_the_module_loads() {
+  let runtime = JsRuntime::new(RuntimeOptions {
+    inspector: true,
+    ..Default::default()
+  });
+  let inspector = runtime.inspector();
+  inspector.arm_break_on_start();
+
+  let (to_frontend_tx, mut to_frontend_rx) =
+    futures::channel::mpsc::unbounded::<InspectorMsg>();
+  let (from_frontend_tx, from_frontend_rx) =
+    futures::channel::mpsc::unbounded::<String>();
+  inspector
+    .get_session_sender()
+    .unbounded_send(InspectorSessionProxy {
+      channels: InspectorSessionChannels::Regular {
+        tx: to_frontend_tx,
+        rx: from_frontend_rx,
+      },
+      kind: InspectorSessionKind::NonBlocking {
+        wait_for_disconnect: false,
+      },
+    })
+    .unwrap();
+  let mut cx = Context::from_waker(futures::task::noop_waker_ref());
+  let mut send = |message: Value| {
+    from_frontend_tx
+      .unbounded_send(message.to_string())
+      .unwrap();
+    // What the event loop does while the module graph loads.
+    for _ in 0..4 {
+      inspector.poll_sessions_from_event_loop(&mut cx);
+    }
+  };
+
+  send(json!({ "id": 1, "method": "NodeRuntime.enable" }));
+  let mut methods = vec![];
+  while let Ok(Some(msg)) = to_frontend_rx.try_next() {
+    let value: Value = serde_json::from_str(&msg.content).unwrap();
+    if let Some(method) = value["method"].as_str() {
+      methods.push(method.to_string());
+    }
+  }
+  assert!(
+    methods
+      .iter()
+      .any(|m| m == "NodeRuntime.waitingForDebugger"),
+    "no NodeRuntime.waitingForDebugger, got {methods:?}"
+  );
+  assert!(inspector.is_paused_on_start());
+
+  // The frontend resumes before the runtime reaches its break-on-start wait.
+  send(json!({ "id": 2, "method": "Runtime.runIfWaitingForDebugger" }));
+  assert!(!inspector.is_paused_on_start());
+  // Returns at once instead of blocking for a second resume.
+  inspector.wait_for_session_and_break_on_next_statement();
+}
+
 #[rstest]
 // https://github.com/denoland/deno/issues/29059
 #[case(0.9999999999999999)]
