@@ -572,12 +572,23 @@ fn permission_args_parse(result: &ParseResult, flags: &mut Flags) {
   perm_flag!("deny-write", flags.permissions.deny_write);
   perm_flag!("allow-net", flags.permissions.allow_net);
   perm_flag!("deny-net", flags.permissions.deny_net);
+  perm_flag!("allow-net-connect", flags.permissions.allow_net_connect);
+  perm_flag!("deny-net-connect", flags.permissions.deny_net_connect);
+  perm_flag!("allow-net-listen", flags.permissions.allow_net_listen);
+  perm_flag!("deny-net-listen", flags.permissions.deny_net_listen);
 
   // Expand bare port entries in net lists
-  if let Some(ref mut net) = flags.permissions.allow_net {
-    *net = expand_net_list(std::mem::take(net));
-  }
-  if let Some(ref mut net) = flags.permissions.deny_net {
+  for net in [
+    &mut flags.permissions.allow_net,
+    &mut flags.permissions.deny_net,
+    &mut flags.permissions.allow_net_connect,
+    &mut flags.permissions.deny_net_connect,
+    &mut flags.permissions.allow_net_listen,
+    &mut flags.permissions.deny_net_listen,
+  ]
+  .into_iter()
+  .flatten()
+  {
     *net = expand_net_list(std::mem::take(net));
   }
   perm_flag!("allow-env", flags.permissions.allow_env);
@@ -1398,6 +1409,38 @@ fn validate_permission_args(
   }
   check_no_url_scheme(&flags.permissions.allow_net, "--allow-net")?;
   check_no_url_scheme(&flags.permissions.deny_net, "--deny-net")?;
+  check_no_url_scheme(
+    &flags.permissions.allow_net_connect,
+    "--allow-net-connect",
+  )?;
+  check_no_url_scheme(
+    &flags.permissions.deny_net_connect,
+    "--deny-net-connect",
+  )?;
+  check_no_url_scheme(
+    &flags.permissions.allow_net_listen,
+    "--allow-net-listen",
+  )?;
+  check_no_url_scheme(&flags.permissions.deny_net_listen, "--deny-net-listen")?;
+
+  // The legacy --allow-net / --deny-net and the direction-specific
+  // --{allow,deny}-net-{connect,listen} flags are two models: one per
+  // invocation, so no merge rules between them are needed. (A deno.json
+  // `permissions.net` grant is checked against the directional flags once
+  // merged, in `flags_to_permissions_options`.) See
+  // https://github.com/denoland/deno/issues/22902.
+  let has_legacy_net = flags.permissions.allow_net.is_some()
+    || flags.permissions.deny_net.is_some();
+  let has_directional_net = flags.permissions.allow_net_connect.is_some()
+    || flags.permissions.deny_net_connect.is_some()
+    || flags.permissions.allow_net_listen.is_some()
+    || flags.permissions.deny_net_listen.is_some();
+  if has_legacy_net && has_directional_net {
+    return Err(CliError::new(
+      CliErrorKind::InvalidValue,
+      "the legacy --allow-net / --deny-net flags cannot be combined with the direction-specific --allow-net-connect, --deny-net-connect, --allow-net-listen, or --deny-net-listen flags. Pick one model per invocation.",
+    ));
+  }
   check_no_url_scheme(&flags.permissions.allow_import, "--allow-import")?;
   check_no_url_scheme(&flags.permissions.deny_import, "--deny-import")?;
   check_no_url_scheme(
@@ -1411,6 +1454,8 @@ fn validate_permission_args(
       ("--allow-read", &flags.permissions.allow_read),
       ("--allow-write", &flags.permissions.allow_write),
       ("--allow-net", &flags.permissions.allow_net),
+      ("--allow-net-connect", &flags.permissions.allow_net_connect),
+      ("--allow-net-listen", &flags.permissions.allow_net_listen),
       ("--allow-env", &flags.permissions.allow_env),
       ("--allow-run", &flags.permissions.allow_run),
       ("--allow-sys", &flags.permissions.allow_sys),
@@ -2410,6 +2455,10 @@ fn install_parse(
       "deny-write",
       "allow-net",
       "deny-net",
+      "allow-net-connect",
+      "deny-net-connect",
+      "allow-net-listen",
+      "deny-net-listen",
       "allow-env",
       "deny-env",
       "allow-run",

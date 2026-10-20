@@ -280,7 +280,7 @@ fn check_resolved(
   let mut permissions = permissions.clone();
   match kind {
     ResolvedDenyCheckKind::Net => {
-      permissions.check_net_resolved(ip, port, "fetch()")
+      permissions.check_net_connect_resolved(ip, port, "fetch()")
     }
     ResolvedDenyCheckKind::Import => {
       permissions.check_import_resolved(ip, port, "import()")

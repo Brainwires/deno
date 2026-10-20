@@ -1088,6 +1088,15 @@ pub struct PermissionFlags {
   pub deny_ffi: Option<Vec<String>>,
   pub allow_net: Option<Vec<String>>,
   pub deny_net: Option<Vec<String>>,
+  /// `--allow-net-connect`: outbound connections only. Never together with
+  /// `allow_net` / `deny_net` (the parser refuses the mix).
+  pub allow_net_connect: Option<Vec<String>>,
+  /// `--deny-net-connect`.
+  pub deny_net_connect: Option<Vec<String>>,
+  /// `--allow-net-listen`: listeners only.
+  pub allow_net_listen: Option<Vec<String>>,
+  /// `--deny-net-listen`.
+  pub deny_net_listen: Option<Vec<String>>,
   pub allow_read: Option<Vec<String>>,
   pub deny_read: Option<Vec<String>>,
   pub ignore_read: Option<Vec<String>>,
@@ -1112,6 +1121,10 @@ impl PermissionFlags {
       || self.deny_ffi.is_some()
       || self.allow_net.is_some()
       || self.deny_net.is_some()
+      || self.allow_net_connect.is_some()
+      || self.deny_net_connect.is_some()
+      || self.allow_net_listen.is_some()
+      || self.deny_net_listen.is_some()
       || self.allow_read.is_some()
       || self.deny_read.is_some()
       || self.ignore_read.is_some()

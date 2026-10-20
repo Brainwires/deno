@@ -20,8 +20,12 @@ Docs: https://docs.deno.com/go/permissions
   -I, --allow-import[=<IP_OR_HOSTNAME>...]  Allow importing from remote hosts. Optionally specify allowed IP addresses and host names, with ports as necessary.
                                             Default value: deno.land:443,jsr.io:443,esm.sh:443,raw.esm.sh:443,cdn.jsdelivr.net:443,raw.githubusercontent.com:443,gist.githubusercontent.com:443
                                             --allow-import  |  --allow-import=\"example.com,github.com\"
-  -N, --allow-net[=<IP_OR_HOSTNAME>...]     Allow network access. Optionally specify allowed IP addresses and host names, with ports as necessary. A Unix domain socket can be scoped with unix:<absolute-path>.
+  -N, --allow-net[=<IP_OR_HOSTNAME>...]     Allow network access, both outbound and inbound. Optionally specify allowed IP addresses and host names, with ports as necessary. A Unix domain socket can be scoped with unix:<absolute-path>.
                                             --allow-net  |  --allow-net=\"localhost:8080,deno.land\"  |  --allow-net=\"unix:/var/run/docker.sock\"
+  --allow-net-connect[=<IP_OR_HOSTNAME>...] Allow outbound network connections only (fetch, WebSocket, Deno.connect, node:net connections, ...). Same host syntax as --allow-net; not combinable with --allow-net / --deny-net.
+                                            --allow-net-connect  |  --allow-net-connect=\"deno.land:443\"
+  --allow-net-listen[=<IP_OR_HOSTNAME>...]  Allow network listeners only (Deno.listen, Deno.serve, node:net servers, ...). Same host syntax as --allow-net; not combinable with --allow-net / --deny-net.
+                                            --allow-net-listen  |  --allow-net-listen=\"127.0.0.1:8080\"
   -E, --allow-env[=<VARIABLE_NAME>...]      Allow access to environment variables. Optionally specify accessible environment variables.
                                             --allow-env  |  --allow-env=\"PORT,HOME,PATH\"
   -S, --allow-sys[=<API_NAME>...]           Allow access to OS information. Optionally allow specific APIs by function name.
@@ -34,8 +38,12 @@ Docs: https://docs.deno.com/go/permissions
                                             --deny-read  |  --deny-read=\"/etc,/var/log.txt\"
   --deny-write[=<PATH>...]                  Deny file system write access. Optionally specify denied paths.
                                             --deny-write  |  --deny-write=\"/etc,/var/log.txt\"
-  --deny-net[=<IP_OR_HOSTNAME>...]          Deny network access. Optionally specify defined IP addresses and host names, with ports as necessary.
+  --deny-net[=<IP_OR_HOSTNAME>...]          Deny network access, both directions. Optionally specify defined IP addresses and host names, with ports as necessary.
                                             --deny-net  |  --deny-net=\"localhost:8080,deno.land\"
+  --deny-net-connect[=<IP_OR_HOSTNAME>...]  Deny outbound network connections only. Not combinable with --allow-net / --deny-net.
+                                            --deny-net-connect  |  --deny-net-connect=\"example.com:80\"
+  --deny-net-listen[=<IP_OR_HOSTNAME>...]   Deny network listeners only. Not combinable with --allow-net / --deny-net.
+                                            --deny-net-listen  |  --deny-net-listen=\"0.0.0.0:8080\"
   --deny-env[=<VARIABLE_NAME>...]           Deny access to environment variables. Optionally specify inacessible environment variables.
                                             --deny-env  |  --deny-env=\"PORT,HOME,PATH\"
   --deny-sys[=<API_NAME>...]                Deny access to OS information. Optionally deny specific APIs by function name.

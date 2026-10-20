@@ -259,6 +259,19 @@ impl FlagsExt for Flags {
       _ => {}
     }
 
+    for (flag, list) in [
+      ("--allow-net-connect", &self.permissions.allow_net_connect),
+      ("--deny-net-connect", &self.permissions.deny_net_connect),
+      ("--allow-net-listen", &self.permissions.allow_net_listen),
+      ("--deny-net-listen", &self.permissions.deny_net_listen),
+    ] {
+      match list {
+        Some(list) if list.is_empty() => args.push(flag.to_string()),
+        Some(list) => args.push(format!("{flag}={}", list.join(","))),
+        None => {}
+      }
+    }
+
     match &self.unsafely_ignore_certificate_errors {
       Some(ic_allowlist) if ic_allowlist.is_empty() => {
         args.push("--unsafely-ignore-certificate-errors".to_string());

@@ -107,7 +107,7 @@ pub fn op_inspector_open(
     let permissions = state.borrow_mut::<PermissionsContainer>();
     permissions.check_sys("inspector", "inspector.open")?;
     permissions
-      .check_net(&(host_ip.to_string(), Some(port)), "inspector.open")?;
+      .check_net_listen(&(host_ip.to_string(), Some(port)), "inspector.open")?;
   }
 
   let server =

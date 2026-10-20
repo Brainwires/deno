@@ -2999,6 +2999,261 @@ fn cache_multiple() {
 }
 
 #[test]
+fn allow_net_connect_allowlist() {
+  let r = flags_from_vec(svec![
+    "deno",
+    "run",
+    "--allow-net-connect=deno.land:443",
+    "script.ts"
+  ]);
+  assert_eq!(
+    r.unwrap().permissions.allow_net_connect,
+    Some(svec!["deno.land:443"])
+  );
+}
+
+#[test]
+fn deny_net_connect_denylist() {
+  let r = flags_from_vec(svec![
+    "deno",
+    "run",
+    "--deny-net-connect=evil.example.com",
+    "script.ts"
+  ]);
+  assert_eq!(
+    r.unwrap().permissions.deny_net_connect,
+    Some(svec!["evil.example.com"])
+  );
+}
+
+#[test]
+fn allow_net_listen_allowlist() {
+  let r = flags_from_vec(svec![
+    "deno",
+    "run",
+    "--allow-net-listen=127.0.0.1:8080",
+    "script.ts"
+  ]);
+  assert_eq!(
+    r.unwrap().permissions.allow_net_listen,
+    Some(svec!["127.0.0.1:8080"])
+  );
+}
+
+#[test]
+fn deny_net_listen_denylist() {
+  let r = flags_from_vec(svec![
+    "deno",
+    "run",
+    "--deny-net-listen=0.0.0.0:9000",
+    "script.ts"
+  ]);
+  assert_eq!(
+    r.unwrap().permissions.deny_net_listen,
+    Some(svec!["0.0.0.0:9000"])
+  );
+}
+
+#[test]
+fn allow_net_connect_and_deny_net_connect() {
+  let r = flags_from_vec(svec![
+    "deno",
+    "run",
+    "--allow-net-connect=deno.land",
+    "--deny-net-connect=evil.example.com",
+    "script.ts"
+  ]);
+  let flags = r.unwrap();
+  assert_eq!(
+    flags.permissions.allow_net_connect,
+    Some(svec!["deno.land"])
+  );
+  assert_eq!(
+    flags.permissions.deny_net_connect,
+    Some(svec!["evil.example.com"])
+  );
+}
+
+#[test]
+fn allow_net_listen_and_deny_net_listen() {
+  let r = flags_from_vec(svec![
+    "deno",
+    "run",
+    "--allow-net-listen=127.0.0.1:0",
+    "--deny-net-listen=0.0.0.0:22",
+    "script.ts"
+  ]);
+  let flags = r.unwrap();
+  assert_eq!(
+    flags.permissions.allow_net_listen,
+    Some(svec!["127.0.0.1:0"])
+  );
+  assert_eq!(flags.permissions.deny_net_listen, Some(svec!["0.0.0.0:22"]));
+}
+
+#[test]
+fn allow_net_connect_bare() {
+  let r =
+    flags_from_vec(svec!["deno", "run", "--allow-net-connect", "script.ts"]);
+  assert_eq!(r.unwrap().permissions.allow_net_connect, Some(svec![]));
+}
+
+#[test]
+fn allow_net_listen_bare() {
+  let r =
+    flags_from_vec(svec!["deno", "run", "--allow-net-listen", "script.ts"]);
+  assert_eq!(r.unwrap().permissions.allow_net_listen, Some(svec![]));
+}
+
+#[test]
+fn allow_net_connect_with_ipv6() {
+  let r = flags_from_vec(svec![
+    "deno",
+    "run",
+    "--allow-net-connect=[::1]:5678",
+    "script.ts"
+  ]);
+  assert_eq!(
+    r.unwrap().permissions.allow_net_connect,
+    Some(svec!["[::1]:5678"])
+  );
+}
+
+#[test]
+fn directional_net_flags_conflict_with_legacy_allow_net() {
+  // --allow-net cannot be combined with any of the directional flags.
+  for directional in [
+    "--allow-net-connect=deno.land",
+    "--deny-net-connect=deno.land",
+    "--allow-net-listen=127.0.0.1",
+    "--deny-net-listen=127.0.0.1",
+  ] {
+    let r = flags_from_vec(svec![
+      "deno",
+      "run",
+      "--allow-net=deno.land",
+      directional,
+      "script.ts"
+    ]);
+    let err = r.expect_err(&format!(
+      "expected error when combining --allow-net with {directional}"
+    ));
+    let msg = err.to_string();
+    assert!(
+      msg.contains("legacy --allow-net / --deny-net flags cannot be combined"),
+      "unexpected error message: {msg}"
+    );
+  }
+}
+
+#[test]
+fn directional_net_flags_conflict_with_legacy_deny_net() {
+  for directional in [
+    "--allow-net-connect=deno.land",
+    "--deny-net-connect=deno.land",
+    "--allow-net-listen=127.0.0.1",
+    "--deny-net-listen=127.0.0.1",
+  ] {
+    let r = flags_from_vec(svec![
+      "deno",
+      "run",
+      "--deny-net=evil.example.com",
+      directional,
+      "script.ts"
+    ]);
+    let err = r.expect_err(&format!(
+      "expected error when combining --deny-net with {directional}"
+    ));
+    let msg = err.to_string();
+    assert!(
+      msg.contains("legacy --allow-net / --deny-net flags cannot be combined"),
+      "unexpected error message: {msg}"
+    );
+  }
+}
+
+#[test]
+fn directional_net_flags_do_not_conflict_with_each_other() {
+  // All four directional flags together is fine — only the legacy
+  // (--allow-net/--deny-net) ↔ directional combinations are rejected.
+  let r = flags_from_vec(svec![
+    "deno",
+    "run",
+    "--allow-net-connect=deno.land",
+    "--deny-net-connect=evil.example.com",
+    "--allow-net-listen=127.0.0.1:8080",
+    "--deny-net-listen=0.0.0.0:22",
+    "script.ts"
+  ]);
+  let flags = r.unwrap();
+  assert_eq!(
+    flags.permissions.allow_net_connect,
+    Some(svec!["deno.land"])
+  );
+  assert_eq!(
+    flags.permissions.deny_net_connect,
+    Some(svec!["evil.example.com"])
+  );
+  assert_eq!(
+    flags.permissions.allow_net_listen,
+    Some(svec!["127.0.0.1:8080"])
+  );
+  assert_eq!(flags.permissions.deny_net_listen, Some(svec!["0.0.0.0:22"]));
+}
+
+#[test]
+fn directional_net_flags_expand_bare_ports_and_reject_urls() {
+  let flags = flags_from_vec(svec![
+    "deno",
+    "run",
+    "--allow-net-listen=:8080",
+    "script.ts"
+  ])
+  .unwrap();
+  let listen = flags.permissions.allow_net_listen.unwrap();
+  assert!(listen.contains(&"localhost:8080".to_string()), "{listen:?}");
+  for flag in [
+    "--allow-net-connect=https://deno.land",
+    "--deny-net-connect=https://deno.land",
+    "--allow-net-listen=http://127.0.0.1",
+    "--deny-net-listen=http://127.0.0.1",
+  ] {
+    let err =
+      flags_from_vec(svec!["deno", "run", flag, "script.ts"]).expect_err(flag);
+    assert!(err.message.contains("URLs are not supported"), "{flag}");
+  }
+}
+
+#[test]
+fn directional_net_flags_conflict_with_allow_all() {
+  for flag in ["--allow-net-connect", "--allow-net-listen"] {
+    let err = flags_from_vec(svec!["deno", "run", "-A", flag, "script.ts"])
+      .expect_err(flag);
+    assert!(err.message.contains("--allow-all conflicts with"), "{flag}");
+  }
+}
+
+#[test]
+fn directional_net_flags_are_permission_flags() {
+  let flags =
+    flags_from_vec(svec!["deno", "run", "--deny-net-listen", "script.ts"])
+      .unwrap();
+  assert!(flags.has_permission());
+  // `deno install` (local) refuses permission flags, directional ones too.
+  for flag in [
+    "--allow-net-connect",
+    "--deny-net-connect",
+    "--allow-net-listen",
+    "--deny-net-listen",
+  ] {
+    assert!(
+      flags_from_vec(svec!["deno", "install", flag]).is_err(),
+      "{flag}"
+    );
+  }
+}
+
+#[test]
 fn run_seed() {
   let r = flags_from_vec(svec!["deno", "run", "--seed", "250", "script.ts"]);
   assert_eq!(
