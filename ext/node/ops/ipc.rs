@@ -202,7 +202,13 @@ mod impl_ {
     let ref_tracker = IpcRefTracker::new(state.external_ops_tracker.clone());
     match serialization {
       ChildIpcSerialization::Json => {
-        match IpcJsonStreamResource::new(fd, ref_tracker) {
+        match IpcJsonStreamResource::new(fd, ref_tracker).map(|resource| {
+          if deno_process::ipc::child_ipc_channel_shared() {
+            resource.keep_open_on_drop()
+          } else {
+            resource
+          }
+        }) {
           Ok(resource) => Ok(Some((state.resource_table.add(resource), 0))),
           Err(err) => {
             log::error!(
@@ -213,7 +219,13 @@ mod impl_ {
         }
       }
       ChildIpcSerialization::Advanced => {
-        match IpcAdvancedStreamResource::new(fd, ref_tracker) {
+        match IpcAdvancedStreamResource::new(fd, ref_tracker).map(|resource| {
+          if deno_process::ipc::child_ipc_channel_shared() {
+            resource.keep_open_on_drop()
+          } else {
+            resource
+          }
+        }) {
           Ok(resource) => Ok(Some((state.resource_table.add(resource), 1))),
           Err(err) => {
             log::error!(
