@@ -1050,6 +1050,18 @@ impl WebWorker {
           return Poll::Ready(Err(e));
         }
 
+        // A heap limit (`deno.memoryMb`, `resourceLimits`) terminated the
+        // isolate while a callback ran (a message handler, a timer), which
+        // ends the event loop without an error: report it as one, so
+        // `run_web_worker` posts the out-of-memory error to the parent.
+        if self.oom_triggered.load(Ordering::SeqCst) {
+          return Poll::Ready(Err(CoreError::from(
+            deno_error::JsErrorBox::generic(
+              "Worker terminated due to reaching memory limit",
+            ),
+          )));
+        }
+
         if self.close_on_idle {
           if self.has_message_event_listener() {
             return Poll::Pending;

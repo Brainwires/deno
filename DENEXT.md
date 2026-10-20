@@ -3034,8 +3034,52 @@ where the changes are discussed.
     and libwebauthn suites, and the storage stress e2e), and this fork's desktop
     runtime build and e2e on every target.
 
+91. **`feat(workers)`: `new Worker(url, { deno: { memoryMb } })` caps a worker's
+    heap** (`feat/worker-memory-limit`, for runtime `3.0.0-rc.2`;
+    `runtime/js/11_workers.js`, `runtime/ops/worker_host.rs`,
+    `runtime/web_worker.rs`, `cli/tsc/dts/lib.deno.unstable.d.ts`). Carried from
+    the open upstream pull request
+    [denoland/deno#35766](https://github.com/denoland/deno/pull/35766) (head
+    `33374a6`), which reuses `node:worker_threads`' `resourceLimits` plumbing:
+    `memoryMb` becomes the worker isolate's `maxOldGenerationSizeMb`, and the
+    near-heap-limit callback that already stopped a Node worker over its limit
+    now stops a web worker too (the `WorkerThreadType::Node` guard in
+    `run_web_worker` is lifted; `oom_triggered` is only ever set when limits
+    were given, so a worker without one is unchanged). A worker over its limit
+    is terminated and the `Worker` gets an `error` event,
+    `Worker terminated due
+    to reaching memory limit: JS heap out of memory`;
+    a parent that handles it (`event.preventDefault()`) keeps running, and one
+    that doesn't ends as on any other uncaught worker error. The limit bounds
+    the JavaScript heap only (not `ArrayBuffer` backing stores). Our changes,
+    from the pull request's open review:
+    - `memoryMb` without `--unstable-worker-options` exits with the unstable-API
+      error (`Worker.deno.memoryMb`, exit code 70), as `deno.permissions` does,
+      where the pull request dropped the limit silently and started an unlimited
+      worker. `node:worker_threads`' `resourceLimits` stays ungated (stable).
+    - The value goes through WebIDL's `unsigned long long` with `enforceRange`,
+      so a negative or non-finite value is a `TypeError` naming `deno.memoryMb`,
+      and `0` (which the isolate setup reads as "no limit") a `RangeError`.
+    - A worker stopped by its limit inside a callback (a message handler, a
+      timer) panicked the process
+      (`coding error: either js is polling or the
+      worker is terminated`):
+      the terminated isolate ends the event loop without an error, and only Node
+      workers took the non-panicking path. `WebWorker::poll_event_loop` now
+      reports the out-of-memory termination as an error, so the parent gets its
+      `error` event (the pull request's spec only covered the limit reached
+      while the module evaluates).
+    - The spec's limits sit far from the boundary (the pull request's 8 MB OOM
+      case could pass by failing bootstrap): a worker that allocates without
+      bound against 32 MB, and a 16-32 MB allocation under 256 MB.
+
+    Tests: `worker/worker_memory_limit` (over the limit while the module
+    evaluates and in a message handler, each followed by a second worker to show
+    the parent alive; under the limit; an unhandled event ending the parent; the
+    flag required; invalid values).
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
-64-73, 75-77, 80, 82, 87-90) are what the prebuilt `libdenort` carries. The
+64-73, 75-77, 80, 82, 87-89, 91) are what the prebuilt `libdenort` carries. The
 CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID`
 into a packaged app's launchers) are in the branch too, but a stock CLI does not
 run them; denext's own launcher provides that environment.
