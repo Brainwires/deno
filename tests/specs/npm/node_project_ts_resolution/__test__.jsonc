@@ -24,7 +24,7 @@
         {
           // TypeScript 7 removed `baseUrl` (TS5102); the native check reads
           // the tsconfig's `paths` relative to it as the in-process one does
-          // (DENEXT.md item 89).
+          // (DENEXT.md item 90).
           "cwd": "app",
           "args": "check typed.ts",
           "output": "Check [WILDCARD]typed.ts\n"

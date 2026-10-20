@@ -2941,7 +2941,31 @@ where the changes are discussed.
       `windowBlurReason` and `passkeys` / `passkeysReason` keys through; the
       d.ts declares them.
 
-89. **`feat(check)`: tighter TypeScript 7 checks** (`feat/ts7-tight`, for
+89. **`fix(inspector)`: `--inspect-brk` is paused on start from the moment the
+    inspector is registered** (`fix/inspect-brk-flake`, for runtime `denext.23`;
+    `libs/core/inspector.rs`, `runtime/worker.rs`). node_compat's
+    `parallel/test-esm-loader-hooks-inspect-brk.js` timed out on most Linux runs
+    (in a loop on `ubuntu-22.04`: 20/50 passed idle, 16/50 under CPU load). Its
+    frontend (Node's inspector test helper) connects, sends `NodeRuntime.enable`
+    and waits for `NodeRuntime.waitingForDebugger` before it resumes. The main
+    worker registers its inspector with the server before it loads the main
+    module, and the event loop dispatches a connected session's messages while
+    the module graph loads; but the runtime counted as paused on start only once
+    `wait_for_session_and_break_on_next_statement` ran, after loading. A
+    `NodeRuntime.enable` handled before then got its result and no notification,
+    and the test waited until its timeout (the protocol log of every failed run
+    ends at `{"id":1,"result":{}}`). `JsRuntimeInspector::arm_break_on_start()`,
+    called where the main worker registers the inspector under `--inspect-brk`,
+    marks it paused on start from then on; a `Runtime.runIfWaitingForDebugger`
+    received while the module loads resumes it, and the later wait no longer
+    blocks for a second resume (it schedules the first-statement pause on the
+    resuming session as before). Test:
+    `inspect_brk_frontend_attached_while_the_module_loads`
+    (`libs/core/runtime/tests/misc.rs`, a proxied session as the WebSocket
+    server creates, pumped as the event loop does), and the node_compat test,
+    50/50 in the same loop idle and under load.
+
+90. **`feat(check)`: tighter TypeScript 7 checks** (`feat/ts7-tight`, for
     runtime `3.0.0-rc.2`; `cli/type_checker.rs`, `cli/tools/check.rs`,
     `cli/tsc/tsconfig_gen.rs`). Follows items 47 and 81.
     - **A JSX runtime reached through an import map checks natively.**
@@ -3009,30 +3033,6 @@ where the changes are discussed.
     spec, laufey's full CI on the commit (the commit gate, blur, XCB clipboard
     and libwebauthn suites, and the storage stress e2e), and this fork's desktop
     runtime build and e2e on every target.
-
-89. **`fix(inspector)`: `--inspect-brk` is paused on start from the moment the
-    inspector is registered** (`fix/inspect-brk-flake`, for runtime `denext.23`;
-    `libs/core/inspector.rs`, `runtime/worker.rs`). node_compat's
-    `parallel/test-esm-loader-hooks-inspect-brk.js` timed out on most Linux runs
-    (in a loop on `ubuntu-22.04`: 20/50 passed idle, 16/50 under CPU load). Its
-    frontend (Node's inspector test helper) connects, sends `NodeRuntime.enable`
-    and waits for `NodeRuntime.waitingForDebugger` before it resumes. The main
-    worker registers its inspector with the server before it loads the main
-    module, and the event loop dispatches a connected session's messages while
-    the module graph loads; but the runtime counted as paused on start only once
-    `wait_for_session_and_break_on_next_statement` ran, after loading. A
-    `NodeRuntime.enable` handled before then got its result and no notification,
-    and the test waited until its timeout (the protocol log of every failed run
-    ends at `{"id":1,"result":{}}`). `JsRuntimeInspector::arm_break_on_start()`,
-    called where the main worker registers the inspector under `--inspect-brk`,
-    marks it paused on start from then on; a `Runtime.runIfWaitingForDebugger`
-    received while the module loads resumes it, and the later wait no longer
-    blocks for a second resume (it schedules the first-statement pause on the
-    resuming session as before). Test:
-    `inspect_brk_frontend_attached_while_the_module_loads`
-    (`libs/core/runtime/tests/misc.rs`, a proxied session as the WebSocket
-    server creates, pumped as the event loop does), and the node_compat test,
-    50/50 in the same loop idle and under load.
 
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87, 88, 89) are what the prebuilt `libdenort` carries. The
