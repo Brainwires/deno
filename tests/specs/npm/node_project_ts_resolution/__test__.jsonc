@@ -17,17 +17,17 @@
           "output": "a b c d u vendored 3\n"
         },
         {
-          // TypeScript 7 removed `baseUrl` (TS5102): only the in-process
-          // checker reads the tsconfig's `paths` relative to it.
           "cwd": "app",
           "args": "check --check-engine=tsc typed.ts",
           "output": "Check [WILDCARD]typed.ts\n"
         },
         {
+          // TypeScript 7 removed `baseUrl` (TS5102); the native check reads
+          // the tsconfig's `paths` relative to it as the in-process one does
+          // (DENEXT.md item 89).
           "cwd": "app",
           "args": "check typed.ts",
-          "output": "check_native.out",
-          "exitCode": 1
+          "output": "Check [WILDCARD]typed.ts\n"
         }
       ]
     },

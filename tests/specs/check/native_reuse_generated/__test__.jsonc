@@ -10,7 +10,10 @@
       "exitCode": 1
     },
     {
-      "args": ["eval", "Deno.writeTextFileSync('a.ts', 'export const a = true;\\n')"],
+      "args": [
+        "eval",
+        "Deno.writeTextFileSync('a.ts', 'export const a = true;\\n')"
+      ],
       "output": ""
     },
     {

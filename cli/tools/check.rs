@@ -358,7 +358,14 @@ async fn run_native_check_once(
   // instead of generating it again (`generated_project_inputs`).
   let generated_dir = project_root.join(".deno");
   let inputs = (!reload && !has_code_blocks).then(|| {
-    generated_project_inputs(flags, cli_options, graph, lib, &sync_roots)
+    generated_project_inputs(
+      flags,
+      cli_options,
+      graph,
+      lib,
+      type_check_mode,
+      &sync_roots,
+    )
   });
   let reused = attempt == NativeAttempt::ReuseGenerated
     && inputs.as_deref().is_some_and(|inputs| {
@@ -632,7 +639,8 @@ const GENERATED_INPUTS_FILE: &str = "check-inputs";
 
 /// A digest of everything the generated project (`deno sync-types`'s
 /// `.deno/`) is made from, short of the project's own source: this Deno and
-/// its compiler, the command's flags (its roots among them), the type lib,
+/// its compiler, the command's flags (its roots among them), the type lib
+/// and check mode (`--check=all` checks remote modules too),
 /// the registries, the workspace's config files (deno.json, package.json, the
 /// import map, the lockfile, a root tsconfig.json, an installed
 /// `node_modules`' records), and the graph's modules from outside the project
@@ -643,6 +651,7 @@ fn generated_project_inputs(
   cli_options: &CliOptions,
   graph: &ModuleGraph,
   lib: TsTypeLib,
+  type_check_mode: TypeCheckMode,
   sync_roots: &[String],
 ) -> String {
   use deno_lib::util::hash::FastInsecureHasher;
@@ -652,7 +661,8 @@ fn generated_project_inputs(
   // permissions or a script's arguments, so the dev overlay's checks and
   // `deno check` of the same roots share one.
   hasher.write_str(&format!(
-    "{lib:?}\n{sync_roots:?}\n{:?}\n{:?}\n{:?}\n{:?}\n{:?}\n{:?}\n{:?}\n{:?}\n{:?}\n{:?}\n{:?}",
+    "{lib:?}\n{type_check_mode:?}\n{sync_roots:?}\n{:?}\n{:?}\n{:?}\n{:?}\n{:?}\n{:?}\n{:?}\n{:?}\n{:?}\n{:?}\n{:?}\n{:?}",
+    flags.subcommand,
     flags.initial_cwd,
     flags.config_flag,
     flags.import_map_path,
