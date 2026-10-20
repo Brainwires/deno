@@ -9,6 +9,9 @@ import net from "node:net";
 import { probe, settle } from "./probe.ts";
 
 const host = "127.0.0.1";
+// Nothing listens there; fetch and WebSocket refuse port 1 (a "bad port")
+// before any permission check, so URLs use this one.
+const closed = 59999;
 const cert = Deno.readTextFileSync(
   new URL("../../../testdata/tls/localhost.crt", import.meta.url),
 );
@@ -23,9 +26,9 @@ await probe(
   "quic connect",
   () => Deno.connectQuic({ hostname: host, port: 1, alpnProtocols: ["test"] }),
 );
-await probe("fetch", () => fetch(`http://${host}:1/`));
+await probe("fetch", () => fetch(`http://${host}:${closed}/`));
 await probe("websocket", () => {
-  const ws = new WebSocket(`ws://${host}:1/`);
+  const ws = new WebSocket(`ws://${host}:${closed}/`);
   return new Promise((resolve) => {
     ws.onerror = resolve;
     ws.onclose = resolve;
@@ -33,7 +36,9 @@ await probe("websocket", () => {
 });
 await probe(
   "http client proxy",
-  () => Deno.createHttpClient({ proxy: { url: `http://${host}:1` } }).close(),
+  () =>
+    Deno.createHttpClient({ proxy: { url: `http://${host}:${closed}` } })
+      .close(),
 );
 await probe(
   "resolveDns",
@@ -44,7 +49,7 @@ await probe(
 );
 await probe("kv remote", async () => {
   // the connection is made on first use
-  const kv = await Deno.openKv(`http://${host}:1/`);
+  const kv = await Deno.openKv(`http://${host}:${closed}/`);
   try {
     await kv.get(["key"]);
   } finally {
@@ -64,7 +69,7 @@ await probe("node net connect", () => {
   return settle(socket, "connect").finally(() => socket.destroy());
 });
 await probe("node http request", () => {
-  const req = http.get(`http://${host}:1/`);
+  const req = http.get(`http://${host}:${closed}/`);
   return settle(req, "response");
 });
 await probe(

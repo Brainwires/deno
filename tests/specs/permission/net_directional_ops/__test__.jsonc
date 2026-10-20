@@ -5,35 +5,43 @@
   // "allowed" or the permission a denial names.
   "tests": {
     "listen_only": {
-      "args": "run --no-prompt --unstable-net --unstable-kv --allow-read --allow-sys --allow-net-listen ops.ts",
+      "args": "run --no-prompt --unstable-net --unstable-kv --allow-env=DENO_KV_ACCESS_TOKEN --allow-read --allow-sys --allow-net-listen ops.ts",
+      "envs": { "DENO_KV_ACCESS_TOKEN": "token" },
       "output": "listen_only.out"
     },
     "connect_only": {
-      "args": "run --no-prompt --unstable-net --unstable-kv --allow-read --allow-sys --allow-net-connect ops.ts",
+      "args": "run --no-prompt --unstable-net --unstable-kv --allow-env=DENO_KV_ACCESS_TOKEN --allow-read --allow-sys --allow-net-connect ops.ts",
+      "envs": { "DENO_KV_ACCESS_TOKEN": "token" },
       "output": "connect_only.out"
     },
     "both_directions": {
-      "args": "run --no-prompt --unstable-net --unstable-kv --allow-read --allow-sys --allow-net-connect --allow-net-listen ops.ts",
+      "args": "run --no-prompt --unstable-net --unstable-kv --allow-env=DENO_KV_ACCESS_TOKEN --allow-read --allow-sys --allow-net-connect --allow-net-listen ops.ts",
+      "envs": { "DENO_KV_ACCESS_TOKEN": "token" },
       "output": "both.out"
     },
     "deny_connect": {
-      "args": "run --no-prompt --unstable-net --unstable-kv --allow-read --allow-sys --allow-net-connect --allow-net-listen --deny-net-connect=127.0.0.1,localhost ops.ts",
+      "args": "run --no-prompt --unstable-net --unstable-kv --allow-env=DENO_KV_ACCESS_TOKEN --allow-read --allow-sys --allow-net-connect --allow-net-listen --deny-net-connect=127.0.0.1,localhost ops.ts",
+      "envs": { "DENO_KV_ACCESS_TOKEN": "token" },
       "output": "deny_connect.out"
     },
     "deny_listen": {
-      "args": "run --no-prompt --unstable-net --unstable-kv --allow-read --allow-sys --allow-net-connect --allow-net-listen --deny-net-listen=127.0.0.1 ops.ts",
+      "args": "run --no-prompt --unstable-net --unstable-kv --allow-env=DENO_KV_ACCESS_TOKEN --allow-read --allow-sys --allow-net-connect --allow-net-listen --deny-net-listen=127.0.0.1 ops.ts",
+      "envs": { "DENO_KV_ACCESS_TOKEN": "token" },
       "output": "deny_listen.out"
     },
     "legacy_allow_net": {
-      "args": "run --no-prompt --unstable-net --unstable-kv --allow-read --allow-sys --allow-net ops.ts",
+      "args": "run --no-prompt --unstable-net --unstable-kv --allow-env=DENO_KV_ACCESS_TOKEN --allow-read --allow-sys --allow-net ops.ts",
+      "envs": { "DENO_KV_ACCESS_TOKEN": "token" },
       "output": "both.out"
     },
     "legacy_deny_net": {
-      "args": "run --no-prompt --unstable-net --unstable-kv --allow-read --allow-sys --allow-net --deny-net=127.0.0.1,localhost ops.ts",
+      "args": "run --no-prompt --unstable-net --unstable-kv --allow-env=DENO_KV_ACCESS_TOKEN --allow-read --allow-sys --allow-net --deny-net=127.0.0.1,localhost ops.ts",
+      "envs": { "DENO_KV_ACCESS_TOKEN": "token" },
       "output": "legacy_deny.out"
     },
     "no_net": {
-      "args": "run --no-prompt --unstable-net --unstable-kv --allow-read --allow-sys ops.ts",
+      "args": "run --no-prompt --unstable-net --unstable-kv --allow-env=DENO_KV_ACCESS_TOKEN --allow-read --allow-sys ops.ts",
+      "envs": { "DENO_KV_ACCESS_TOKEN": "token" },
       "output": "none.out"
     },
     // Unix domain sockets: also gated by the net permission (a `unix:<path>`
