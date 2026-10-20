@@ -2870,7 +2870,11 @@ where the changes are discussed.
       new crate feature), and the suppression consumes only a signal the process
       sent itself (`si_pid` is its own pid), which is what the re-raise is. A
       `kill` from another process inside the window terminates as it does
-      outside it.
+      outside it. Linux records the sender per signal; macOS records one per
+      process, so there a signal from another sender arriving at the same moment
+      can be attributed to the wrong one (best effort; the unit tests signal one
+      at a time for this reason, after a parallel pair failed on
+      `macos-15-intel`).
     - `deno_signals::delivery_count(signal)` counts the deliveries from other
       processes (and the kernel, and Windows console events), before the
       handlers run; `raise()` and self-sent signals are not counted.

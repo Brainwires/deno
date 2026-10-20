@@ -189,7 +189,9 @@ fn init() -> Handle {
             let signal = info.si_signo;
             // Whether this process sent the signal to itself (`kill(getpid())`,
             // e.g. `process.kill(process.pid)`), as opposed to another process
-            // or the kernel.
+            // or the kernel. Linux keeps the sender per signal; macOS keeps
+            // one per process, so a signal from another sender at the same
+            // moment can be attributed to this one there (best effort).
             // SAFETY: `info` is the siginfo the kernel filled in for this
             // delivery; reading its sender pid has no other precondition.
             let self_sent = u32::try_from(unsafe { info.si_pid() }).ok()
@@ -513,6 +515,15 @@ mod tests {
 
   use super::*;
 
+  // The tests signal the whole process; macOS records one sender per process,
+  // not per signal, so two tests signalling at once could see each other's
+  // sender. Run them one at a time.
+  static SERIAL: Mutex<()> = Mutex::new(());
+
+  fn serial() -> std::sync::MutexGuard<'static, ()> {
+    SERIAL.lock().unwrap_or_else(|e| e.into_inner())
+  }
+
   // Sends `signal` to this process from another process, as `kill <pid>`.
   fn kill_from_another_process(signal: i32) {
     let status = std::process::Command::new("kill")
@@ -541,6 +552,7 @@ mod tests {
   // delivery from another process counts.
   #[test]
   fn delivery_count_counts_only_signals_from_other_processes() {
+    let _serial = serial();
     let signal = SIGUSR2;
     let (tx, rx) = std::sync::mpsc::channel();
     let id = register(
@@ -575,6 +587,7 @@ mod tests {
   // does not use up the suppression.
   #[test]
   fn suppression_consumes_only_a_self_sent_reraise() {
+    let _serial = serial();
     let signal = SIGHUP;
     let (tx, rx) = std::sync::mpsc::channel();
     let id = register(
