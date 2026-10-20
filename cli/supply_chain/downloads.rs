@@ -1,6 +1,6 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 
-//! The low-download check on `deno add` (DENEXT.md item 84): a typosquat
+//! The low-download check on `deno add` (DENEXT.md item 85): a typosquat
 //! guard. A package added by name that the lockfile doesn't know yet, and
 //! that has fewer weekly downloads than `low-download-threshold` (1000 by
 //! default) on the public npm registry, gets a warning with its count and

@@ -1,5 +1,5 @@
 {
-  // The malicious-version gate (DENEXT.md item 83): versions OSV lists with a
+  // The malicious-version gate (DENEXT.md item 84): versions OSV lists with a
   // `MAL-` advisory are refused. The stand-in OSV (tests/util/server/servers/
   // supply_chain.rs) lists `*malicious*@2.x`; under `/down/` it answers 503.
   "tempDir": true,

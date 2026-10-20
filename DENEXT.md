@@ -2649,7 +2649,7 @@ where the changes are discussed.
     used; a runtime `NO_PROXY` does not bypass the startup proxy; control: a
     startup `HTTP_PROXY` is used) and `permission/jsr_url_set_at_runtime` (a
     guard: passes before and after).
-82. **`feat(npm)`: confined lifecycle scripts (`jail-scripts`)**
+83. **`feat(npm)`: confined lifecycle scripts (`jail-scripts`)**
     (`feat/npm-supply-chain`, for `3.0.0-rc.2`; `cli/supply_chain/jail.rs`,
     `sandbox_linux.rs`, `sandbox_macos.rs`, `cli/npm.rs`, `cli/task_runner.rs`,
     `cli/args/mod.rs`, `cli/lib.rs`). Adapted from
@@ -2660,7 +2660,7 @@ where the changes are discussed.
     `node` (and `node-gyp`) on `PATH` for every install. Opt-in for now:
     `--jail-scripts`, `jail-scripts=true` in `.npmrc`
     (`npm_config_jail_scripts`), or deno.json
-    `"supplyChain": { "jailScripts": true }`; `paranoid` (item 85) turns it on.
+    `"supplyChain": { "jailScripts": true }`; `paranoid` (item 86) turns it on.
     A jailed script runs in its own process
     (`deno __deno_internal_jailed_lifecycle_script`, the script and its bins
     read from stdin, then an empty stdin) with:
@@ -2741,7 +2741,7 @@ where the changes are discussed.
     the seccomp program (`sandbox_linux.rs`) and the Seatbelt profile
     (`sandbox_macos.rs`).
 
-83. **`feat(npm)`: refuse versions listed as malicious (`advisory-check`)**
+84. **`feat(npm)`: refuse versions listed as malicious (`advisory-check`)**
     (`cli/supply_chain/advisories.rs`, `NpmInstallGate` in
     `libs/npm_installer`). Adapted from
     [denoland/deno#35715](https://github.com/denoland/deno/issues/35715). Before
@@ -2775,7 +2775,7 @@ where the changes are discussed.
     `tests/util/server/servers/supply_chain.rs` (port 4270; every spec test gets
     `DENO_OSV_URL` pointing at it).
 
-84. **`feat(npm)`: `deno add` warns about a package almost nobody downloads, and
+85. **`feat(npm)`: `deno add` warns about a package almost nobody downloads, and
     can ask first** (`cli/supply_chain/downloads.rs`, `cli/tools/pm/mod.rs`).
     Adapted from
     [denoland/deno#35716](https://github.com/denoland/deno/issues/35716): a
@@ -2814,7 +2814,7 @@ where the changes are discussed.
     letting it through under `prompt`, `required` refusing an unknown count,
     another registry not checked).
 
-85. **`feat(npm)`: `paranoid`** (`libs/npmrc/supply_chain.rs`,
+86. **`feat(npm)`: `paranoid`** (`libs/npmrc/supply_chain.rs`,
     `libs/resolver/npmrc.rs`, `libs/config/deno_json`). Adapted from
     [denoland/deno#35717](https://github.com/denoland/deno/issues/35717). One
     switch for the strict posture: `paranoid=true` in `.npmrc`
@@ -2885,7 +2885,7 @@ package job fails if it differs from the hosts' `capi/include/laufey.h`.
 
 ## npm supply-chain settings
 
-Items 82-85. Each `.npmrc` key also reads `npm_config_<key>` /
+Items 83-86. Each `.npmrc` key also reads `npm_config_<key>` /
 `NPM_CONFIG_<KEY>` from the environment (`-` as `_`), and deno.json's
 `supplyChain` (the root deno.json only) mirrors them. Where several sources (the
 `.npmrc` files, the environment, deno.json) set a key, the stricter value wins;
@@ -2893,13 +2893,13 @@ under `paranoid`, a weaker one is an error.
 
 | `.npmrc` key                 | deno.json `supplyChain`                                            | Flag                              | Default | What                                                                                                                                    |
 | ---------------------------- | ------------------------------------------------------------------ | --------------------------------- | ------- | --------------------------------------------------------------------------------------------------------------------------------------- |
-| `paranoid`                   | `paranoid`                                                         |                                   | `false` | Every gate on and failing closed (item 85).                                                                                             |
-| `jail-scripts`               | `jailScripts`: `true`, or `{ net, packages }`                      | `--jail-scripts`                  | `false` | Approved dependencies' lifecycle scripts run confined (item 82).                                                                        |
+| `paranoid`                   | `paranoid`                                                         |                                   | `false` | Every gate on and failing closed (item 86).                                                                                             |
+| `jail-scripts`               | `jailScripts`: `true`, or `{ net, packages }`                      | `--jail-scripts`                  | `false` | Approved dependencies' lifecycle scripts run confined (item 83).                                                                        |
 |                              | `jailScripts.net`                                                  |                                   | `false` | Network for every jailed script.                                                                                                        |
 |                              | `jailScripts.packages.<name>`: `{ env, write, net }`               |                                   |         | A package's exceptions: environment variables passed through, extra writable directories (relative to deno.json), network.              |
-| `advisory-check`             | `advisoryCheck`: `"on"` / `"off"` / `"required"`                   |                                   | `on`    | Refuse versions OSV lists as malicious; `required` also refuses when OSV can't be reached (item 83).                                    |
-| `low-download-check`         | `lowDownloadCheck`: `"off"` / `"warn"` / `"prompt"` / `"required"` |                                   | `warn`  | What `deno add` does below the threshold: warn and add; ask in a terminal and refuse without one; also refuse unknown counts (item 84). |
-| `low-download-threshold`     | `lowDownloadThreshold`                                             |                                   | `1000`  | Weekly downloads below which the low-download check applies; `0` turns it off (item 84).                                                |
+| `advisory-check`             | `advisoryCheck`: `"on"` / `"off"` / `"required"`                   |                                   | `on`    | Refuse versions OSV lists as malicious; `required` also refuses when OSV can't be reached (item 84).                                    |
+| `low-download-check`         | `lowDownloadCheck`: `"off"` / `"warn"` / `"prompt"` / `"required"` |                                   | `warn`  | What `deno add` does below the threshold: warn and add; ask in a terminal and refuse without one; also refuse unknown counts (item 85). |
+| `low-download-threshold`     | `lowDownloadThreshold`                                             |                                   | `1000`  | Weekly downloads below which the low-download check applies; `0` turns it off (item 85).                                                |
 | `allowed-unpopular-packages` | `allowLowDownloads`                                                | `--allow-low-downloads[=<names>]` |         | Names (or `@scope/*`, `prefix*`) `deno add` adds whatever their counts; the flag without names allows all (not under paranoid).         |
 | `trust-policy`               |                                                                    |                                   | `off`   | `paranoid` sets `no-downgrade`.                                                                                                         |
 
@@ -3119,7 +3119,7 @@ Specs this fork adds for what its runtime exposes outside a desktop app:
 - `tests/specs/bundle/define`: `deno bundle --define` replaces identifiers and
   member expressions, drops the dead branch under `--minify`, and rejects bad
   names and values (item 78).
-- `tests/specs/npm/supply_chain_*`: the npm supply-chain gates (items 82-85)
+- `tests/specs/npm/supply_chain_*`: the npm supply-chain gates (items 83-86)
   against stand-ins for OSV and npm's downloads API
   (`tests/util/server/servers/supply_chain.rs`, port 4270); the jail's probe
   package tries the ways out of a confined lifecycle script on each OS.

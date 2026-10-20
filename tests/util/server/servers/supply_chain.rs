@@ -1,7 +1,7 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 
 //! Stand-ins for the web services denext's npm supply-chain gates call
-//! (DENEXT.md items 83 and 84), so their spec tests run offline:
+//! (DENEXT.md items 84 and 85), so their spec tests run offline:
 //!
 //! - OSV (`POST /v1/querybatch`): a version is malicious (an `MAL-` advisory)
 //!   when its package name contains `malicious` and the version starts with

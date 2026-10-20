@@ -1,5 +1,5 @@
 {
-  // The low-download check on `deno add` (DENEXT.md item 84). The stand-in
+  // The low-download check on `deno add` (DENEXT.md item 85). The stand-in
   // downloads API (tests/util/server/servers/supply_chain.rs) gives
   // `*unpopular*` 12 weekly downloads, `*modest*` 5000 and
   // `*unknown-downloads*` no count; DENO_NPM_DOWNLOADS_URL points at it,
