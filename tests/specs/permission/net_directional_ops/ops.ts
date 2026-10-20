@@ -42,7 +42,15 @@ await probe(
       nameServer: { ipAddr: host, port: 1 },
     }),
 );
-await probe("kv remote", () => Deno.openKv(`http://${host}:1/`));
+await probe("kv remote", async () => {
+  // the connection is made on first use
+  const kv = await Deno.openKv(`http://${host}:1/`);
+  try {
+    await kv.get(["key"]);
+  } finally {
+    kv.close();
+  }
+});
 await probe("sql postgres", async () => {
   const sql = new Deno.SQL(`postgres://u:p@${host}:1/db?sslmode=disable`);
   try {

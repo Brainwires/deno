@@ -2,7 +2,7 @@
 // check let it through: "allowed" (it succeeded, or failed for another
 // reason, such as a refused connection), or "denied (<permission>)" with the
 // permission the NotCapable error names ("net", "net connect" or
-// "net listen"). Node APIs report errors through callbacks and events, and
+// "net listen"; a Node API's errno where it reports one instead). Node APIs report errors through callbacks and events, and
 // some asynchronously, so uncaught errors and rejections during a probe count
 // too. An operation still pending after a while passed its check.
 
@@ -11,9 +11,18 @@ type Probe = (fail: (e: unknown) => void) => unknown;
 let current: ((result: string) => void) | null = null;
 
 function denial(e: unknown): string | null {
-  const message = e instanceof Error ? e.message : String(e);
-  const m = /Requires (net(?: connect| listen)?) access/.exec(message);
-  return m ? `denied (${m[1]})` : null;
+  // fetch wraps the error in `cause`
+  for (let cur = e, i = 0; cur != null && i < 5; i++) {
+    const message = cur instanceof Error ? cur.message : String(cur);
+    const m = /Requires (net(?: connect| listen)?) access/.exec(message);
+    if (m) return `denied (${m[1]})`;
+    cur = (cur as { cause?: unknown }).cause;
+  }
+  // Node's dns.lookup reports a refused check as EPERM and dgram's send as
+  // UNKNOWN (an errno, as Node would), without the permission's name.
+  const code = (e as { code?: unknown } | null)?.code;
+  if (code === "EPERM" || code === "UNKNOWN") return `denied (${code})`;
+  return null;
 }
 
 globalThis.addEventListener("error", (event) => {

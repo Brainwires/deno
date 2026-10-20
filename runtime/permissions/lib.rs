@@ -86,6 +86,17 @@ fn format_permission_error(name: &'static str) -> String {
   }
 }
 
+/// A permission's name as prompts and errors write it: the directional net
+/// permissions read "net connect" / "net listen" rather than their hyphenated
+/// identifiers.
+fn pretty_permission_name(name: &str) -> &str {
+  match name {
+    "net-connect" => "net connect",
+    "net-listen" => "net listen",
+    other => other,
+  }
+}
+
 fn write_audit<T>(flag_name: &str, value: T)
 where
   T: Serialize,
@@ -469,15 +480,7 @@ impl PermissionState {
   }
 
   fn fmt_access(name: &'static str, info: Option<&str>) -> String {
-    // For the prompt and error messages, render the hyphenated directional
-    // net flag names as a space-separated phrase so the human-facing text
-    // reads "net connect access" / "net listen access" rather than the
-    // hyphenated descriptor identifier.
-    let pretty_name = match name {
-      "net-connect" => "net connect",
-      "net-listen" => "net listen",
-      other => other,
-    };
+    let pretty_name = pretty_permission_name(name);
     format!(
       "{} access{}",
       pretty_name,
@@ -565,11 +568,7 @@ impl PermissionState {
       }
       PermissionState::Prompt if prompt => {
         let info = info();
-        let pretty_name = match name {
-          "net-connect" => "net connect",
-          "net-listen" => "net listen",
-          other => other,
-        };
+        let pretty_name = pretty_permission_name(name);
         let msg = StringBuilder::<String>::build(|builder| {
           builder.append(pretty_name);
           builder.append(" access");
@@ -1161,7 +1160,8 @@ impl<
     let maybe_formatted_display_name =
       desc.map(|d| format_display_name(d.display_name()));
     let message = StringBuilder::<String>::build(|builder| {
-      builder.append(TAllowDesc::QueryDesc::flag_name());
+      builder
+        .append(pretty_permission_name(TAllowDesc::QueryDesc::flag_name()));
       builder.append(" access");
       if let Some(display_name) = &maybe_formatted_display_name {
         builder.append(" to ");
