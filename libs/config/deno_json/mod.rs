@@ -4315,8 +4315,7 @@ mod tests {
       get_result(r#"{ "supplyChain": { "advisoryCheck": "yes" } }"#).is_err()
     );
     assert!(
-      get_result(r#"{ "supplyChain": { "lowDownloadCheck": "on" } }"#)
-        .is_err()
+      get_result(r#"{ "supplyChain": { "lowDownloadCheck": "on" } }"#).is_err()
     );
     assert!(
       get_result(
