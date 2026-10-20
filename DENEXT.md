@@ -3078,6 +3078,90 @@ where the changes are discussed.
     the parent alive; under the limit; an unhandled event ending the parent; the
     flag required; invalid values).
 
+92. **`feat(cli)`: `--max-memory`, `--max-cpu-time` and `--max-time`**
+    (`feat/resource-limits`, for runtime `3.0.0-rc.2`;
+    `cli/lib/resource_limits.rs`, `cli/lib/worker.rs`, `cli/lib.rs`,
+    `cli/rt/lib.rs`, `cli/rt/run.rs`, `cli/lib/standalone/binary.rs`,
+    `cli/standalone/binary.rs`, `ext/os/lib.rs`, `libs/cli_parser`). Adapted
+    from [denoland/deno#35723](https://github.com/denoland/deno/pull/35723)
+    (head `24fab7e`), closed after ten review rounds with a split into three
+    pull requests announced and never opened; this is that split, written
+    against the last review. Process resource limits for `deno run` (and a bare
+    `deno <script>`) and `deno compile`, which stores them in the binary's
+    metadata so the compiled program enforces them the way it keeps
+    `--unstable-no-legacy-abort` (item 36). Each ends the process with its own
+    exit code and one line on stderr:
+
+    | Flag                    | Limit                                               | Exit code | Message                                    |
+    | ----------------------- | --------------------------------------------------- | --------- | ------------------------------------------ |
+    | `--max-memory=<size>`   | the main isolate's V8 heap (young + old generation) | 137       | `Memory limit exceeded (--max-memory)`     |
+    | `--max-cpu-time=<secs>` | process CPU time, user + system, every thread       | 152       | `CPU time limit exceeded (--max-cpu-time)` |
+    | `--max-time=<secs>`     | wall-clock time, idle included                      | 124       | `Time limit exceeded (--max-time)`         |
+
+    124 is GNU `timeout`'s code, 137 how a shell reports a process the OOM
+    killer ended (128 + SIGKILL), 152 is 128 + SIGXCPU (what `RLIMIT_CPU`
+    sends), so supervisors read them as they read those. Sizes are a plain
+    number of megabytes or `k`/`m`/`g` (binary, any case), at least `32m` (below
+    that V8 can't deserialize its snapshot); times are whole seconds, at least
+    1. The CPU budget and the deadline count from when the main worker is
+       created (module loading included, Deno's own startup not).
+
+    How: `--max-memory` sets the isolate's heap limit at creation and a
+    near-heap-limit callback that records the limit, terminates execution and
+    raises the limit so the termination unwinds instead of V8 aborting. A
+    watchdog thread samples `getrusage(RUSAGE_SELF)` / `GetProcessTimes`
+    (`deno_os::process_cpu_time`, read from the `FILETIME`s directly, since
+    `op_runtime_cpu_usage`'s conversion wraps after 24 hours) and the clock
+    every 20 ms and terminates the main isolate at a limit. The exit path (the
+    CLI's `exit_for_error` and its success path, `denort`'s likewise) reports
+    the recorded limit instead of "execution terminated", and a limit recorded
+    decides the exit code even if the program then ends by itself. A program
+    that can't unwind (idle on a timer, blocked in a native call, or a busy
+    Worker while the main thread waits) is ended by the watchdog 2 s after the
+    limit; exactly one of the two prints the message.
+
+    Differences from the pull request, from its last review:
+    - `--max-memory` is the V8 heap limit only. The pull request also ran an RSS
+      watchdog with the same number, which (RSS being the heap plus Deno's own
+      40-80 MB) always fired first and made the precise heap path dead code; the
+      help said RSS while the body said heap. Values under 32 MB are refused
+      instead of flooring the heap cap, and sizes are kept in bytes, so `3000k`
+      is not truncated to 2 MB.
+    - The limits are refused with `--watch` / `--watch-hmr` (an error), where
+      the pull request's deadline was never disarmed and killed an idle watch
+      session. A limit ends the process; ending only one run under a watcher is
+      left for later. `deno run --max-*` of a missing script doesn't fall back
+      to a task of that name.
+    - The deadline and the CPU baseline are set together when the main worker is
+      created, so nothing is armed before it is reset, and a `--preload` module
+      can't spend CPU before the budget starts.
+    - `--max-cpu-time` is an error where the process CPU time can't be read
+      (`PROCESS_CPU_TIME_SUPPORTED`), not accepted and never enforced.
+    - The help text says these are best-effort guardrails, not a security
+      boundary: subprocesses are neither counted nor stopped, Workers have their
+      own heaps (item 89's `memoryMb`), memory outside the heap isn't counted,
+      and sampling can overshoot by a tick.
+    - One message source (`LimitKind`), no poisoning locks (`parking_lot`,
+      atomics), one parser (the fork has only `deno_cli_parser`, so the
+      clap-wording parity issue is gone), and a non-numeric seconds value is
+      tested.
+    - No deno.json key: the pull request has none either.
+
+    Tests: `run/resource_limits` (each limit reached, with its exit code and
+    message: memory with a program catching every error, in megabytes and
+    kilobytes; CPU in JavaScript and in a busy Worker while the main thread
+    idles; time busy and idle; idle time not counted as CPU time; room enough
+    keeping the program's own exit code; invalid, too small, zero and
+    non-numeric values; refused on `deno test` and with `--watch`; no task
+    fallback), `compile/resource_limits` (each limit enforced by the compiled
+    program, and the same program without limits running to its end), the parser
+    tests in `libs/cli_parser/src/tests_full.rs` (`run_resource_limits`,
+    `bare_run_resource_limits`, `compile_resource_limits`, `max_memory_sizes`,
+    `resource_limits_reject_invalid`, `resource_limits_only_on_run_and_compile`,
+    `resource_limits_conflict_with_watch`), `exit_codes_and_messages` and
+    `heap_limit_only_with_max_memory` (`cli/lib/resource_limits.rs`) and
+    `process_cpu_time_advances_with_work` (`ext/os`).
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91) are what the prebuilt `libdenort` carries. The
 CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID`

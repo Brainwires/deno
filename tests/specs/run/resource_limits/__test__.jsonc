@@ -38,7 +38,7 @@
     // CPU time is the whole process's: a busy worker uses up the budget while
     // the main thread waits, and the watchdog ends the process.
     "max_cpu_time_worker": {
-      "args": "run --max-cpu-time=1 busy_worker.js",
+      "args": "run --allow-read --max-cpu-time=1 busy_worker.js",
       "output": "max_cpu_time.out",
       "exitCode": 152
     },

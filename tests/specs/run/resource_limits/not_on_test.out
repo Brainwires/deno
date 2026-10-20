@@ -1,1 +1,2 @@
-error: [WILDCARD]'--max-cpu-time'[WILDCARD]
+error: unexpected argument '--max-cpu-time=1' found
+[WILDCARD]
