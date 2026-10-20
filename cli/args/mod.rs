@@ -589,6 +589,43 @@ fn check_engine_from_env(value: Option<&str>) -> CheckEngine {
   }
 }
 
+/// The Node IPC channel (`NODE_CHANNEL_FD`) a `deno run --watch` keeps for
+/// its whole life; see [`retain_node_ipc_for_watch`].
+#[cfg(unix)]
+static RETAINED_NODE_IPC: std::sync::OnceLock<(
+  std::os::fd::RawFd,
+  ChildIpcSerialization,
+)> = std::sync::OnceLock::new();
+
+/// Keeps the Node IPC channel this process inherited (`NODE_CHANNEL_FD`, set
+/// by a parent's `child_process.spawn(..., { stdio: [..., "ipc"] })`) for every
+/// run of a `--watch` process, as `node --watch` does.
+///
+/// Each run's worker opens the channel from the fd it is given and closes that
+/// fd when the run ends, and the variable is removed once read, so a restarted
+/// run had no channel (`process.send` was undefined). Called once before the
+/// first run: the inherited fd stays open (close-on-exec, so the program's own
+/// children don't inherit it), every run gets a duplicate of it, and a run's
+/// teardown leaves the socket open (no write-side shutdown, which would end
+/// the channel for every duplicate). A no-op without a channel, and on
+/// Windows, where the restarted run still has none.
+pub fn retain_node_ipc_for_watch(sys: &CliSys) -> Result<(), AnyError> {
+  #[cfg(unix)]
+  if let Some((fd, serialization)) = deno_lib::args::node_ipc_init(sys)? {
+    let fd = std::os::fd::RawFd::try_from(fd)?;
+    // SAFETY: sets close-on-exec on the inherited fd, which stays open.
+    if unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
+      return Err(std::io::Error::last_os_error().into());
+    }
+    let _ = RETAINED_NODE_IPC.set((fd, serialization));
+    // A run's teardown must not shut the shared socket down for the next run.
+    deno_runtime::deno_process::ipc::set_child_ipc_channel_shared();
+  }
+  #[cfg(not(unix))]
+  let _ = sys;
+  Ok(())
+}
+
 #[derive(Debug)]
 pub struct CliOptions {
   // the source of the options is a detail the rest of the
@@ -724,6 +761,15 @@ impl CliOptions {
     &self,
     sys: &CliSys,
   ) -> Result<Option<(i64, ChildIpcSerialization)>, AnyError> {
+    #[cfg(unix)]
+    if let Some(&(fd, serialization)) = RETAINED_NODE_IPC.get() {
+      // SAFETY: duplicates an fd this process keeps open until it exits.
+      let dup = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 0) };
+      if dup < 0 {
+        return Err(std::io::Error::last_os_error().into());
+      }
+      return Ok(Some((i64::from(dup), serialization)));
+    }
     deno_lib::args::node_ipc_init(sys)
   }
 

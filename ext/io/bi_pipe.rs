@@ -264,11 +264,81 @@ impl From<tokio::io::ReadHalf<tokio::net::windows::named_pipe::NamedPipeClient>>
   }
 }
 
+/// The write half of a Unix socket end that shuts the socket's write side
+/// down when dropped (tokio's `OwnedWriteHalf`), unless told to keep it open.
+#[cfg(unix)]
+struct UnixWriteHalf {
+  inner: std::mem::ManuallyDrop<tokio::net::unix::OwnedWriteHalf>,
+  keep_open_on_drop: bool,
+}
+
+#[cfg(unix)]
+impl UnixWriteHalf {
+  fn new(inner: tokio::net::unix::OwnedWriteHalf) -> Self {
+    Self {
+      inner: std::mem::ManuallyDrop::new(inner),
+      keep_open_on_drop: false,
+    }
+  }
+
+  fn stream(&self) -> &tokio::net::UnixStream {
+    (*self.inner).as_ref()
+  }
+}
+
+#[cfg(unix)]
+impl Drop for UnixWriteHalf {
+  fn drop(&mut self) {
+    // SAFETY: `inner` is taken exactly once, here, and never used again.
+    let inner = unsafe { std::mem::ManuallyDrop::take(&mut self.inner) };
+    if self.keep_open_on_drop {
+      inner.forget();
+    }
+  }
+}
+
+#[cfg(unix)]
+impl tokio::io::AsyncWrite for UnixWriteHalf {
+  fn poll_write_vectored(
+    mut self: std::pin::Pin<&mut Self>,
+    cx: &mut std::task::Context<'_>,
+    bufs: &[std::io::IoSlice<'_>],
+  ) -> std::task::Poll<Result<usize, std::io::Error>> {
+    std::pin::Pin::new(&mut *self.inner).poll_write_vectored(cx, bufs)
+  }
+
+  fn is_write_vectored(&self) -> bool {
+    self.inner.is_write_vectored()
+  }
+
+  fn poll_write(
+    mut self: std::pin::Pin<&mut Self>,
+    cx: &mut std::task::Context<'_>,
+    buf: &[u8],
+  ) -> std::task::Poll<Result<usize, std::io::Error>> {
+    std::pin::Pin::new(&mut *self.inner).poll_write(cx, buf)
+  }
+
+  fn poll_flush(
+    mut self: std::pin::Pin<&mut Self>,
+    cx: &mut std::task::Context<'_>,
+  ) -> std::task::Poll<Result<(), std::io::Error>> {
+    std::pin::Pin::new(&mut *self.inner).poll_flush(cx)
+  }
+
+  fn poll_shutdown(
+    mut self: std::pin::Pin<&mut Self>,
+    cx: &mut std::task::Context<'_>,
+  ) -> std::task::Poll<Result<(), std::io::Error>> {
+    std::pin::Pin::new(&mut *self.inner).poll_shutdown(cx)
+  }
+}
+
 #[pin_project::pin_project]
 pub struct BiPipeWrite {
   #[cfg(unix)]
   #[pin]
-  inner: tokio::net::unix::OwnedWriteHalf,
+  inner: UnixWriteHalf,
   #[cfg(windows)]
   #[pin]
   inner: tokio::io::WriteHalf<tokio::net::windows::named_pipe::NamedPipeClient>,
@@ -277,7 +347,23 @@ pub struct BiPipeWrite {
 #[cfg(unix)]
 impl From<tokio::net::unix::OwnedWriteHalf> for BiPipeWrite {
   fn from(value: tokio::net::unix::OwnedWriteHalf) -> Self {
-    Self { inner: value }
+    Self {
+      inner: UnixWriteHalf::new(value),
+    }
+  }
+}
+
+impl BiPipeWrite {
+  /// Don't shut the socket's write side down when this half is dropped; the
+  /// fd is still closed. For an end whose socket other fds share and which
+  /// must outlive this one (the IPC channel a `--watch` process hands each
+  /// run a duplicate of): a shutdown would end the channel for all of them.
+  /// A no-op on Windows, where dropping the pipe half only closes it.
+  pub fn keep_open_on_drop(&mut self) {
+    #[cfg(unix)]
+    {
+      self.inner.keep_open_on_drop = true;
+    }
   }
 }
 
@@ -295,7 +381,7 @@ impl BiPipeWrite {
     use tokio::io::Interest;
 
     debug_assert!(!buf.is_empty());
-    let stream = self.inner.as_ref();
+    let stream = self.inner.stream();
     let stream_fd = stream.as_raw_fd();
 
     // SAFETY: CMSG_SPACE only computes the required control-buffer size.
@@ -395,7 +481,7 @@ fn from_raw(
   unix_stream.set_nonblocking(true)?;
   let unix_stream = tokio::net::UnixStream::from_std(unix_stream)?;
   let (read, write) = unix_stream.into_split();
-  Ok((BiPipeRead { inner: read }, BiPipeWrite { inner: write }))
+  Ok((BiPipeRead { inner: read }, BiPipeWrite::from(write)))
 }
 
 #[cfg(windows)]

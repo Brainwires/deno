@@ -297,6 +297,7 @@ async fn run_with_watch(
   flags: Arc<Flags>,
   watch_flags: WatchFlagsWithPaths,
 ) -> Result<i32, AnyError> {
+  crate::args::retain_node_ipc_for_watch(&crate::sys::CliSys::default())?;
   util::file_watcher::watch_recv(
     flags,
     util::file_watcher::PrintConfig::new_with_banner(

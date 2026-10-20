@@ -3330,9 +3330,40 @@ where the changes are discussed.
     `.github/denext-runtime/manifest_test.py` (run by the lint job of
     `denext_tests.yml`).
 
+95. **`fix(watch)`: a `--watch` child keeps its parent's IPC channel across
+    restarts** (`fix/rc3-batch`, for runtime `3.0.0-rc.3`; `cli/args/mod.rs`,
+    `cli/tools/run/mod.rs`, `ext/io/bi_pipe.rs`, `ext/process/ipc.rs`,
+    `ext/node/ops/ipc.rs`). A parent's
+    `spawn(deno, ["run", "--watch", ...], { stdio: [..., "ipc"] })` (and so
+    `node --watch` under Deno, as node_compat's
+    `parallel/test-watch-mode-kill-signal-default.mjs` runs it) gave only the
+    first run a channel: `NODE_CHANNEL_FD` is removed once read and the run's
+    worker closes the fd when the run ends, so a restarted run had no
+    `process.send` and failed. `node --watch` keeps the channel for every run.
+    - `retain_node_ipc_for_watch()`, called by `run_with_watch` before the first
+      run, keeps the inherited fd open (close-on-exec, so the program's own
+      children don't inherit it), and `CliOptions::node_ipc_init` hands each run
+      an `F_DUPFD_CLOEXEC` duplicate, which that run's worker owns and closes.
+    - Closing a duplicate leaves the socket open, but tokio's `OwnedWriteHalf`
+      also shuts the socket's write side down when dropped, and a shutdown
+      applies to every fd of the socket: the restarted run's first
+      `process.send` then failed with `EPIPE`. `BiPipeWrite` takes
+      `keep_open_on_drop()` (tokio's `forget()` instead of the drop's shutdown;
+      the fd is still closed), and the IPC resources a run opens from
+      `NODE_CHANNEL_FD` use it once the watcher has marked the channel shared
+      (`deno_process::ipc::set_child_ipc_channel_shared()`). Every other IPC
+      channel still shuts down on drop, so a parent still sees `disconnect` at
+      once when a child's fd is shared with a grandchild.
+
+    Unix only; on Windows a restarted run still has no channel. Test:
+    `tests/specs/node/child_process_ipc_watch_restart` (JSON and advanced
+    serialization: the restarted run's message arrives; before, the parent
+    waited for it until its 30 s bound, and it prints the watcher's output when
+    that bound fires).
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
-64-73, 75-77, 80, 82, 87-89, 91, 93) are what the prebuilt `libdenort` carries.
-The CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` /
+64-73, 75-77, 80, 82, 87-89, 91, 93, 95) are what the prebuilt `libdenort`
+carries. The CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` /
 `LAUFEY_APP_ID` into a packaged app's launchers) are in the branch too, but a
 stock CLI does not run them; denext's own launcher provides that environment.
 

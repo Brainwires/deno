@@ -16,6 +16,23 @@ use deno_io::BiPipeWrite;
 use memchr::memchr;
 use tokio::io::AsyncWriteExt;
 
+/// Whether this process's own Node IPC channel (`NODE_CHANNEL_FD`) is shared:
+/// a `--watch` process keeps the channel it inherited and hands each run a
+/// duplicate of it, so a run's teardown must not shut the socket down.
+static CHILD_IPC_CHANNEL_SHARED: AtomicBool = AtomicBool::new(false);
+
+/// Marks this process's own Node IPC channel as shared by several runs; see
+/// [`child_ipc_channel_shared`].
+pub fn set_child_ipc_channel_shared() {
+  CHILD_IPC_CHANNEL_SHARED.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Whether the channel a run opens from `NODE_CHANNEL_FD` must be left open
+/// (not shut down) when the run drops it.
+pub fn child_ipc_channel_shared() -> bool {
+  CHILD_IPC_CHANNEL_SHARED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 #[cfg(unix)]
 type ReceivedRawFd = std::os::fd::OwnedFd;
 
@@ -149,6 +166,17 @@ impl deno_core::Resource for IpcJsonStreamResource {
 }
 
 impl IpcJsonStreamResource {
+  /// Leaves the socket open (no write-side shutdown) when this resource is
+  /// dropped, for a channel other fds share; see [`BiPipeWrite::keep_open_on_drop`].
+  pub fn keep_open_on_drop(self) -> Self {
+    let mut write_half = self.write_half.into_inner();
+    write_half.keep_open_on_drop();
+    Self {
+      write_half: AsyncRefCell::new(write_half),
+      ..self
+    }
+  }
+
   pub fn new(
     stream: i64,
     ref_tracker: IpcRefTracker,
@@ -444,6 +472,17 @@ pub struct IpcAdvancedStreamResource {
 }
 
 impl IpcAdvancedStreamResource {
+  /// Leaves the socket open (no write-side shutdown) when this resource is
+  /// dropped, for a channel other fds share; see [`BiPipeWrite::keep_open_on_drop`].
+  pub fn keep_open_on_drop(self) -> Self {
+    let mut write_half = self.write_half.into_inner();
+    write_half.keep_open_on_drop();
+    Self {
+      write_half: AsyncRefCell::new(write_half),
+      ..self
+    }
+  }
+
   pub fn new(
     stream: i64,
     ref_tracker: IpcRefTracker,

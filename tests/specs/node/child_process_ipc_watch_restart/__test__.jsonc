@@ -1,0 +1,18 @@
+{
+  // A `--watch` child keeps its parent's IPC channel across restarts, as
+  // `node --watch` does: the restarted run can still `process.send`.
+  "tests": {
+    "json_serialization": {
+      "if": "unix",
+      "args": "run -A main.mjs json",
+      "output": "main.out",
+      "exitCode": 0
+    },
+    "advanced_serialization": {
+      "if": "unix",
+      "args": "run -A main.mjs advanced",
+      "output": "main.out",
+      "exitCode": 0
+    }
+  }
+}
