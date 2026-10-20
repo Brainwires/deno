@@ -451,7 +451,7 @@ async fn open_tcp(
     state
       .borrow_mut()
       .borrow_mut::<PermissionsContainer>()
-      .check_net_resolved(&addr.ip(), addr.port(), API_NAME)?;
+      .check_net_connect_resolved(&addr.ip(), addr.port(), API_NAME)?;
     match TcpStream::connect(addr).await {
       Ok(stream) => {
         let _ = stream.set_nodelay(true);
@@ -486,13 +486,14 @@ fn check_endpoint(
   let permissions = state.borrow_mut::<PermissionsContainer>();
   match endpoint {
     Endpoint::Tcp { hostname, port } => {
-      permissions.check_net(&(hostname, Some(*port)), API_NAME)?;
+      permissions.check_net_connect(&(hostname, Some(*port)), API_NAME)?;
     }
     Endpoint::Unix(path) => {
       deno_net::check_unix_socket_path(
         permissions,
         Cow::Borrowed(path.as_path()),
         OpenAccessKind::ReadWriteNoFollow,
+        deno_net::NetDirection::Connect,
         Some(API_NAME),
       )?;
     }

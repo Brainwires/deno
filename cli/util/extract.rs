@@ -580,6 +580,18 @@ fn parse_shebang(shebang: &str) -> Shebang {
     Ok(flags) if has_scoped_deny(&flags.permissions) => invalid(
       "scoped --deny-* flags aren't supported yet, either remove them or ignore the test",
     ),
+    // `Deno.PermissionOptionsObject` has one `net` key, so it can't carry the
+    // direction-specific grants.
+    Ok(flags)
+      if flags.permissions.allow_net_connect.is_some()
+        || flags.permissions.deny_net_connect.is_some()
+        || flags.permissions.allow_net_listen.is_some()
+        || flags.permissions.deny_net_listen.is_some() =>
+    {
+      invalid(
+        "--allow-net-connect, --allow-net-listen and their --deny-* forms aren't supported yet, either use --allow-net or ignore the test",
+      )
+    }
     Ok(flags) => Shebang::Permissions(Box::new(flags.permissions)),
     Err(err) => invalid(&format!("could not parse flags: {}", err.message)),
   }

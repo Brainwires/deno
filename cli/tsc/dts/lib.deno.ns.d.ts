@@ -4503,6 +4503,8 @@ declare namespace Deno {
     | "read"
     | "write"
     | "net"
+    | "net-connect"
+    | "net-listen"
     | "env"
     | "sys"
     | "ffi";

@@ -4135,29 +4135,31 @@ pub struct Permissions {
   pub run: UnaryPermission<AllowRunDescriptor>,
   pub ffi: UnaryPermission<FfiDescriptor>,
   pub import: UnaryPermission<ImportDescriptor>,
+  /// The direction-specific net model (`--{allow,deny}-net-{connect,listen}`)
+  /// is in effect. Decided once, from the options the permissions were built
+  /// with (a worker takes its parent's), so nothing the program does later
+  /// (a prompt answered for the legacy `name: "net"`) can switch models and
+  /// drop the directional deny rules.
+  net_directional: bool,
 }
 
 impl Permissions {
-  /// Whether the directional net model is in effect: the legacy `net`
-  /// permission is empty *and* at least one of the `net_connect` / `net_listen`
-  /// permissions is populated (by a `--{allow,deny}-net-{connect,listen}` flag
-  /// or its config-file equivalent).
+  /// Whether the directional net model is in effect: built from options with
+  /// a `--{allow,deny}-net-{connect,listen}` flag (or its config-file
+  /// equivalent) and no legacy `net` one, or a worker of such a parent.
   ///
-  /// When false the legacy `net` permission serves *both* directions. Requiring
-  /// `net.is_empty()` keeps three cases in the legacy model:
-  ///   - the default no-flag case (all three empty) — so prompts/errors keep
-  ///     the original "net access" wording and grants land in the single `net`
-  ///     query surface;
-  ///   - plain `--allow-net` / `--deny-net` (legacy `net` populated);
-  ///   - `--allow-all` (which populates *all three* fields) — so `-A` keeps
-  ///     behaving like legacy `net`, including on spawned workers.
+  /// Otherwise the legacy `net` permission serves *both* directions: the
+  /// default no-flag case (so prompts and errors keep the "net access"
+  /// wording), plain `--allow-net` / `--deny-net`, and `--allow-all` (which
+  /// fills all three fields, so `-A` keeps behaving like legacy `net`,
+  /// spawned workers included).
   ///
-  /// The CLI/config layer guarantees the legacy and directional models are
-  /// mutually exclusive, so outside of `--allow-all` the directional fields are
-  /// populated only when the legacy `net` field is empty.
+  /// The CLI/config layer guarantees the legacy and directional options are
+  /// mutually exclusive. The model never changes afterwards: a prompt answered
+  /// for the legacy `name: "net"` can't switch it and drop the directional
+  /// deny rules.
   fn net_directional_active(&self) -> bool {
-    self.net.is_empty()
-      && (!self.net_connect.is_empty() || !self.net_listen.is_empty())
+    self.net_directional
   }
 
   pub fn all_granted(&self) -> bool {
@@ -4364,7 +4366,17 @@ impl Permissions {
       );
     }
 
+    // The directional model: a directional option and no legacy `net` one
+    // (the CLI refuses the mix; `--allow-all` fills the legacy field).
+    let net_directional = opts.allow_net.is_none()
+      && opts.deny_net.is_none()
+      && (opts.allow_net_connect.is_some()
+        || opts.deny_net_connect.is_some()
+        || opts.allow_net_listen.is_some()
+        || opts.deny_net_listen.is_some());
+
     Ok(Self {
+      net_directional,
       read: Permissions::new_unary_with_ignore(
         parse_maybe_vec(opts.allow_read.as_deref(), |item| {
           parser.parse_read_descriptor(item)
@@ -4473,6 +4485,7 @@ impl Permissions {
       run: UnaryPermission::allow_all(),
       ffi: UnaryPermission::allow_all(),
       import: UnaryPermission::allow_all(),
+      net_directional: false,
     }
   }
 
@@ -4498,6 +4511,7 @@ impl Permissions {
       run: Permissions::new_unary(None, None, prompt),
       ffi: Permissions::new_unary(None, None, prompt),
       import: Permissions::new_unary(None, None, prompt),
+      net_directional: false,
     }
   }
 }
@@ -4789,6 +4803,7 @@ impl PermissionsContainer {
     // permits *both* connect and listen to `host`; that is stricter than the
     // legacy model but never an escalation.
     let parent_directional = inner.net_directional_active();
+    worker_perms.net_directional = parent_directional;
     let (legacy_arg, directional_arg) = if parent_directional {
       (
         ChildUnaryPermissionArg::NotGranted,
@@ -5800,32 +5815,71 @@ impl PermissionsContainer {
     Ok(())
   }
 
-  /// Network permission check for Unix domain socket endpoints.
+  /// Network permission check for connecting to (or sending to) a Unix
+  /// domain socket endpoint.
   ///
   /// `path` must already be resolved to an absolute path (typically by the
   /// caller's earlier `check_open` pass). Matched lexically against
-  /// `--allow-net=unix:<absolute-path>` rules. Both sides are lexically
-  /// normalized (`.`/`..` components removed; rules at parse time, the query
-  /// path by `check_open`), but symlinks are deliberately not resolved,
-  /// mirroring `check_open`'s symlink-location semantics: a rule scopes the
-  /// socket *location*, not the inode it points at.
+  /// `--allow-net=unix:<absolute-path>` (or `--allow-net-connect=unix:...`)
+  /// rules. Both sides are lexically normalized (`.`/`..` components removed;
+  /// rules at parse time, the query path by `check_open`), but symlinks are
+  /// deliberately not resolved, mirroring `check_open`'s symlink-location
+  /// semantics: a rule scopes the socket *location*, not the inode it points
+  /// at.
   ///
   /// Abstract socket paths (Linux, leading NUL) are not absolute, so they
   /// cannot be expressed as a scoped `unix:` rule and are only reachable via
-  /// an unscoped `--allow-net` grant.
-  pub fn check_net_unix_socket(
+  /// an unscoped grant.
+  pub fn check_net_unix_socket_connect(
     &mut self,
     path: &Path,
     api_name: Option<&str>,
   ) -> Result<(), PermissionCheckError> {
     let mut inner = self.inner.lock();
-    audit_and_skip_check_if_is_permission_fully_granted!(
-      inner.net,
-      NetDescriptor::flag_name(),
-      format!("unix:{}", path.display())
-    );
     let desc = NetDescriptor(Host::UnixSocket(path.to_path_buf()), None);
-    inner.net.check(&desc, api_name)?;
+    if inner.net_directional_active() {
+      audit_and_skip_check_if_is_permission_fully_granted!(
+        inner.net_connect,
+        NetConnectDescriptor::flag_name(),
+        format!("unix:{}", path.display())
+      );
+      inner.net_connect.check(&desc.into_connect(), api_name)?;
+    } else {
+      audit_and_skip_check_if_is_permission_fully_granted!(
+        inner.net,
+        NetDescriptor::flag_name(),
+        format!("unix:{}", path.display())
+      );
+      inner.net.check(&desc, api_name)?;
+    }
+    Ok(())
+  }
+
+  /// Network permission check for listening on (binding) a Unix domain
+  /// socket endpoint: the listen-direction counterpart of
+  /// [`Self::check_net_unix_socket_connect`], with the same path rules.
+  pub fn check_net_unix_socket_listen(
+    &mut self,
+    path: &Path,
+    api_name: Option<&str>,
+  ) -> Result<(), PermissionCheckError> {
+    let mut inner = self.inner.lock();
+    let desc = NetDescriptor(Host::UnixSocket(path.to_path_buf()), None);
+    if inner.net_directional_active() {
+      audit_and_skip_check_if_is_permission_fully_granted!(
+        inner.net_listen,
+        NetListenDescriptor::flag_name(),
+        format!("unix:{}", path.display())
+      );
+      inner.net_listen.check(&desc.into_listen(), api_name)?;
+    } else {
+      audit_and_skip_check_if_is_permission_fully_granted!(
+        inner.net,
+        NetDescriptor::flag_name(),
+        format!("unix:{}", path.display())
+      );
+      inner.net.check(&desc, api_name)?;
+    }
     Ok(())
   }
 
@@ -6368,15 +6422,17 @@ impl PermissionsContainer {
     // field only, preserving the existing prompt text and single-prompt
     // behavior. To prompt for a specific direction, use
     // `name: "net-connect"` or `name: "net-listen"`.
-    Ok(
-      self.inner.lock().net.request(
-        match host {
-          None => None,
-          Some(h) => Some(self.descriptor_parser.parse_net_query(h)?),
-        }
-        .as_ref(),
-      ),
-    )
+    let query_desc = match host {
+      None => None,
+      Some(h) => Some(self.descriptor_parser.parse_net_query(h)?),
+    };
+    let mut inner = self.inner.lock();
+    if inner.net_directional_active() {
+      // Under the directional flags the legacy field grants nothing, so a
+      // prompt for it would only mislead: answer with its state instead.
+      return Ok(inner.net.query(query_desc.as_ref()));
+    }
+    Ok(inner.net.request(query_desc.as_ref()))
   }
 
   #[inline(always)]
@@ -12399,7 +12455,7 @@ mod tests {
     // Exact spelling is denied.
     assert!(
       perms
-        .check_net_unix_socket(Path::new("/run/app/Control.sock"), None)
+        .check_net_unix_socket_connect(Path::new("/run/app/Control.sock"), None)
         .is_err()
     );
 
@@ -12407,7 +12463,7 @@ mod tests {
     // filesystem is case-insensitive, so it must be denied there too. On
     // case-sensitive platforms it is a genuinely different path.
     let case_variant_result = perms
-      .check_net_unix_socket(Path::new("/run/app/control.sock"), None)
+      .check_net_unix_socket_connect(Path::new("/run/app/control.sock"), None)
       .is_err();
     if cfg!(any(target_os = "macos", windows)) {
       assert!(case_variant_result, "case variant must not bypass the deny");
@@ -12428,17 +12484,17 @@ mod tests {
 
     assert!(
       perms
-        .check_net_unix_socket(Path::new("/run/app/Control.sock"), None)
+        .check_net_unix_socket_connect(Path::new("/run/app/Control.sock"), None)
         .is_ok()
     );
     assert!(
       perms
-        .check_net_unix_socket(Path::new("/run/app/control.sock"), None)
+        .check_net_unix_socket_connect(Path::new("/run/app/control.sock"), None)
         .is_err()
     );
     assert!(
       perms
-        .check_net_unix_socket(Path::new("/run/app/other.sock"), None)
+        .check_net_unix_socket_connect(Path::new("/run/app/other.sock"), None)
         .is_err()
     );
   }
@@ -13513,6 +13569,50 @@ mod tests {
           net: ChildUnaryPermissionArg::GrantedList(svec!["deno.land"]),
           ..ChildPermissionsArg::none()
         })
+        .is_err()
+    );
+  }
+
+  #[test]
+  fn test_legacy_net_request_cannot_switch_out_of_directional() {
+    // Regression: the model used to be read from which fields were populated,
+    // so a granted prompt for the legacy `name: "net"` filled the legacy field
+    // and switched every check back to it, dropping `--deny-net-connect`.
+    set_prompter(Box::new(TestPrompter));
+    let prompt_value = PERMISSION_PROMPT_STUB_VALUE_SETTER.lock();
+    prompt_value.set(true);
+    let parser = TestPermissionDescriptorParser;
+    let perms = Permissions::from_options(
+      &parser,
+      &PermissionsOptions {
+        allow_net_listen: Some(svec!["127.0.0.1"]),
+        deny_net_connect: Some(svec!["evil.com"]),
+        prompt: true,
+        ..Default::default()
+      },
+    )
+    .unwrap();
+    let mut perms = PermissionsContainer::new(Arc::new(parser), perms);
+    // No prompt: the legacy field grants nothing under the directional flags.
+    assert_eq!(
+      perms.request_net(Some("evil.com")).unwrap(),
+      PermissionState::Prompt
+    );
+    assert!(perms.inner.lock().net_directional_active());
+    assert!(
+      perms
+        .check_net_connect(&("evil.com", Some(443)), "api()")
+        .is_err()
+    );
+    // A directional prompt still works, and keeps the model.
+    assert_eq!(
+      perms.request_net_listen(Some("0.0.0.0:8080")).unwrap(),
+      PermissionState::Granted
+    );
+    assert!(perms.inner.lock().net_directional_active());
+    assert!(
+      perms
+        .check_net_connect(&("evil.com", Some(443)), "api()")
         .is_err()
     );
   }

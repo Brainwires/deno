@@ -168,7 +168,7 @@ pub fn clamp_permissions(
       (!kept.is_empty()).then_some(kept)
     }
   };
-  options.allow_net = match (&jail.net, options.allow_net.take()) {
+  let clamp_net = |list: Option<Vec<String>>| match (&jail.net, list) {
     (_, None) | (JailNet::None, _) => None,
     (JailNet::All, list) => list,
     (JailNet::Hosts(hosts), Some(list)) if list.is_empty() => {
@@ -182,6 +182,11 @@ pub fn clamp_permissions(
       (!kept.is_empty()).then_some(kept)
     }
   };
+  options.allow_net = clamp_net(options.allow_net.take());
+  // The direction-specific grants are clamped the same way, so a `deno`
+  // started with `--allow-net-connect` can't reach past the jail either.
+  options.allow_net_connect = clamp_net(options.allow_net_connect.take());
+  options.allow_net_listen = clamp_net(options.allow_net_listen.take());
   if !jail.net.allowed() {
     options.allow_import = None;
     options.deny_import = Some(Vec::new());
@@ -986,5 +991,36 @@ mod tests {
     clamp_permissions(&mut options, &jail, Path::new("/nm/pkg"));
     assert_eq!(options.allow_net, Some(vec!["example.com".to_string()]));
     assert_eq!(options.deny_import, None);
+
+    // the direction-specific grants are clamped like `allow_net`
+    let mut options = PermissionsOptions {
+      allow_net_connect: Some(vec![]),
+      allow_net_listen: Some(vec![
+        "example.com".to_string(),
+        "evil.com".to_string(),
+      ]),
+      ..Default::default()
+    };
+    clamp_permissions(&mut options, &jail, Path::new("/nm/pkg"));
+    assert_eq!(
+      options.allow_net_connect,
+      Some(vec!["example.com".to_string()])
+    );
+    assert_eq!(
+      options.allow_net_listen,
+      Some(vec!["example.com".to_string()])
+    );
+    let jail = JailPermissions {
+      net: JailNet::None,
+      ..jail
+    };
+    let mut options = PermissionsOptions {
+      allow_net_connect: Some(vec![]),
+      allow_net_listen: Some(vec![]),
+      ..Default::default()
+    };
+    clamp_permissions(&mut options, &jail, Path::new("/nm/pkg"));
+    assert_eq!(options.allow_net_connect, None);
+    assert_eq!(options.allow_net_listen, None);
   }
 }

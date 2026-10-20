@@ -2248,7 +2248,21 @@ pub(crate) fn apply_desktop_permission_defaults(
     }
   }
 
-  extend(&mut permissions.allow_net, DESKTOP_LOOPBACK_HOSTS);
+  // An app compiled with the direction-specific net flags keeps that model:
+  // adding the loopback hosts to the legacy `allow_net` would switch the
+  // runtime back to the legacy model and drop every `--deny-net-connect` /
+  // `--deny-net-listen` rule. The loopback server is listened on and
+  // connected to, so both directions get the baseline.
+  let directional = permissions.allow_net_connect.is_some()
+    || permissions.deny_net_connect.is_some()
+    || permissions.allow_net_listen.is_some()
+    || permissions.deny_net_listen.is_some();
+  if directional {
+    extend(&mut permissions.allow_net_connect, DESKTOP_LOOPBACK_HOSTS);
+    extend(&mut permissions.allow_net_listen, DESKTOP_LOOPBACK_HOSTS);
+  } else {
+    extend(&mut permissions.allow_net, DESKTOP_LOOPBACK_HOSTS);
+  }
   extend(&mut permissions.allow_env, DESKTOP_ENV_KEYS);
 }
 
@@ -2301,6 +2315,24 @@ mod tests {
     // Other permission categories must remain untouched.
     assert_eq!(p.allow_read, None);
     assert_eq!(p.allow_write, None);
+  }
+
+  #[test]
+  fn defaults_keep_the_directional_net_model() {
+    // Adding the loopback hosts to `allow_net` would switch the runtime back
+    // to the legacy model and drop the directional deny rules.
+    let mut p = PermissionsOptions {
+      allow_net_connect: Some(vec!["example.com".to_string()]),
+      deny_net_listen: Some(vec!["0.0.0.0".to_string()]),
+      ..Default::default()
+    };
+    apply_desktop_permission_defaults(&mut p);
+    assert_eq!(p.allow_net, None);
+    let mut connect = vec!["example.com".to_string()];
+    connect.extend(strs(DESKTOP_LOOPBACK_HOSTS));
+    assert_eq!(p.allow_net_connect, Some(connect));
+    assert_eq!(p.allow_net_listen, Some(strs(DESKTOP_LOOPBACK_HOSTS)));
+    assert_eq!(p.deny_net_listen, Some(vec!["0.0.0.0".to_string()]));
   }
 
   #[test]

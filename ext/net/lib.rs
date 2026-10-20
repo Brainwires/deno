@@ -42,6 +42,7 @@ pub fn check_unix_socket_path<'a>(
   permissions: &mut deno_permissions::PermissionsContainer,
   path: std::borrow::Cow<'a, std::path::Path>,
   access_kind: deno_permissions::OpenAccessKind,
+  direction: NetDirection,
   api_name: Option<&str>,
 ) -> Result<
   deno_permissions::CheckedPath<'a>,
@@ -52,23 +53,41 @@ pub fn check_unix_socket_path<'a>(
   } else {
     permissions.check_open(path, access_kind, api_name)?
   };
-  permissions.check_net_unix_socket(&checked, api_name)?;
+  match direction {
+    NetDirection::Connect => {
+      permissions.check_net_unix_socket_connect(&checked, api_name)?
+    }
+    NetDirection::Listen => {
+      permissions.check_net_unix_socket_listen(&checked, api_name)?
+    }
+  }
   Ok(checked)
+}
+
+/// Which way a socket operation uses the network, for the directional
+/// `--allow-net-connect` / `--allow-net-listen` permissions: `Connect` for
+/// connecting and sending, `Listen` for binding and listening.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NetDirection {
+  Connect,
+  Listen,
 }
 
 /// Checks access to a multicast group using the UDP socket's bound port.
 ///
 /// The group is already an IP address, but both checks are required: the
 /// first applies the requested host-and-port grant, while the second preserves
-/// IP deny rules that also apply after name resolution.
+/// IP deny rules that also apply after name resolution. Joining a group is
+/// how a socket starts receiving the group's traffic, so it is a listen-side
+/// operation for the directional net permissions.
 pub fn check_multicast_membership_permission(
   permissions: &mut deno_permissions::PermissionsContainer,
   group: std::net::IpAddr,
   port: u16,
   api_name: &str,
 ) -> Result<(), deno_permissions::PermissionCheckError> {
-  permissions.check_net(&(group.to_string(), Some(port)), api_name)?;
-  permissions.check_net_resolved(&group, port, api_name)?;
+  permissions.check_net_listen(&(group.to_string(), Some(port)), api_name)?;
+  permissions.check_net_listen_resolved(&group, port, api_name)?;
   Ok(())
 }
 

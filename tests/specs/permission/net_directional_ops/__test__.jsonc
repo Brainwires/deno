@@ -1,0 +1,85 @@
+{
+  // Every network operation, run under each net permission model: the
+  // direction-specific flags grant and deny one direction only, and the
+  // legacy --allow-net / --deny-net keep covering both. probe.ts prints
+  // "allowed" or the permission a denial names.
+  "tests": {
+    "listen_only": {
+      "args": "run --no-prompt --unstable-net --unstable-kv --allow-read --allow-sys --allow-net-listen ops.ts",
+      "output": "listen_only.out"
+    },
+    "connect_only": {
+      "args": "run --no-prompt --unstable-net --unstable-kv --allow-read --allow-sys --allow-net-connect ops.ts",
+      "output": "connect_only.out"
+    },
+    "both_directions": {
+      "args": "run --no-prompt --unstable-net --unstable-kv --allow-read --allow-sys --allow-net-connect --allow-net-listen ops.ts",
+      "output": "both.out"
+    },
+    "deny_connect": {
+      "args": "run --no-prompt --unstable-net --unstable-kv --allow-read --allow-sys --allow-net-connect --allow-net-listen --deny-net-connect=127.0.0.1,localhost ops.ts",
+      "output": "deny_connect.out"
+    },
+    "deny_listen": {
+      "args": "run --no-prompt --unstable-net --unstable-kv --allow-read --allow-sys --allow-net-connect --allow-net-listen --deny-net-listen=127.0.0.1 ops.ts",
+      "output": "deny_listen.out"
+    },
+    "legacy_allow_net": {
+      "args": "run --no-prompt --unstable-net --unstable-kv --allow-read --allow-sys --allow-net ops.ts",
+      "output": "both.out"
+    },
+    "legacy_deny_net": {
+      "args": "run --no-prompt --unstable-net --unstable-kv --allow-read --allow-sys --allow-net --deny-net=127.0.0.1,localhost ops.ts",
+      "output": "legacy_deny.out"
+    },
+    "no_net": {
+      "args": "run --no-prompt --unstable-net --unstable-kv --allow-read --allow-sys ops.ts",
+      "output": "none.out"
+    },
+    // Unix domain sockets: also gated by the net permission (a `unix:<path>`
+    // rule scopes one), on top of read and write access to the path.
+    "unix_connect_only": {
+      "if": "unix",
+      "args": "run --no-prompt --allow-read --allow-write --allow-net-connect ops_unix.ts",
+      "output": "unix_connect_only.out"
+    },
+    "unix_listen_only": {
+      "if": "unix",
+      "args": "run --no-prompt --allow-read --allow-write --allow-net-listen ops_unix.ts",
+      "output": "unix_listen_only.out"
+    },
+    // Scoped `unix:` rules per direction (Linux: a fixed path that is no
+    // symlink, unlike macOS's /tmp).
+    "unix_scoped": {
+      "if": "linux",
+      "args": "run --no-prompt --allow-read --allow-write --allow-net-connect=unix:/tmp/deno-net-directional-test/a.sock --allow-net-listen=unix:/tmp/deno-net-directional-test/b.sock ops_unix.ts /tmp/deno-net-directional-test",
+      "output": "unix_scoped.out"
+    },
+    "unix_legacy_allow_net": {
+      "if": "unix",
+      "args": "run --no-prompt --allow-read --allow-write --allow-net ops_unix.ts",
+      "output": "unix_both.out"
+    },
+    "unix_no_net": {
+      "if": "unix",
+      "args": "run --no-prompt --allow-read --allow-write ops_unix.ts",
+      "output": "unix_none.out"
+    },
+    // The resolve-time deny check (a hostname whose addresses are denied)
+    // holds per direction.
+    "resolved_deny_connect": {
+      "args": "run --no-prompt --allow-net-listen --allow-net-connect --deny-net-connect=127.0.0.1,[::1] resolved.ts connect",
+      "output": "resolved_connect.out"
+    },
+    "resolved_deny_listen": {
+      "args": "run --no-prompt --allow-read --allow-net-listen --allow-net-connect --deny-net-listen=127.0.0.1,[::1] resolved.ts listen",
+      "output": "resolved_listen.out"
+    },
+    // A worker's single `net` option can't widen a directional parent: it
+    // inherits the split, and asking for more than the parent has fails.
+    "worker_inherits_direction": {
+      "args": "run --no-prompt --unstable-worker-options --allow-read --allow-net-listen=127.0.0.1 worker_parent.ts",
+      "output": "worker_parent.out"
+    }
+  }
+}

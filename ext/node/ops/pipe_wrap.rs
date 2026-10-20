@@ -377,6 +377,7 @@ impl PipeWrap {
       state.borrow_mut::<PermissionsContainer>(),
       std::borrow::Cow::Borrowed(std::path::Path::new(path)),
       deno_permissions::OpenAccessKind::ReadWriteNoFollow,
+      deno_net::NetDirection::Listen,
       Some("node:net.Server.listen()"),
     )?;
 
@@ -408,6 +409,7 @@ impl PipeWrap {
         state.borrow_mut::<PermissionsContainer>(),
         std::borrow::Cow::Borrowed(std::path::Path::new(path)),
         deno_permissions::OpenAccessKind::ReadWriteNoFollow,
+        deno_net::NetDirection::Listen,
         Some("node:net.Server.listen()"),
       )?;
     }
@@ -450,6 +452,7 @@ impl PipeWrap {
       state.borrow_mut::<PermissionsContainer>(),
       std::borrow::Cow::Borrowed(std::path::Path::new(path)),
       deno_permissions::OpenAccessKind::ReadWriteNoFollow,
+      deno_net::NetDirection::Connect,
       Some("node:net.createConnection()"),
     )?;
 

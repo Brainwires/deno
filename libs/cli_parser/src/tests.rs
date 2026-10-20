@@ -1616,6 +1616,14 @@ fn permission_help_section_is_rendered() {
   assert!(run.contains("Permission options:"));
   assert!(run.contains("Allow file system read access"));
   assert!(run.contains("DENO_TRACE_PERMISSIONS"));
+  for flag in [
+    "--allow-net-connect[=<IP_OR_HOSTNAME>...]",
+    "--allow-net-listen[=<IP_OR_HOSTNAME>...]",
+    "--deny-net-connect[=<IP_OR_HOSTNAME>...]",
+    "--deny-net-listen[=<IP_OR_HOSTNAME>...]",
+  ] {
+    assert!(run.contains(flag), "{flag}");
+  }
   // Hidden from the table above, documented in the section below.
   assert!(!run.contains("  -R, --allow-read[=VALUE...]  \n"));
 

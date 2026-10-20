@@ -150,6 +150,7 @@ pub async fn op_net_connect_unix(
       state.borrow_mut::<PermissionsContainer>(),
       Cow::Owned(PathBuf::from(address_path)),
       OpenAccessKind::ReadWriteNoFollow,
+      crate::NetDirection::Connect,
       Some("Deno.connect()"),
     )?
   };
@@ -199,6 +200,7 @@ pub async fn op_net_send_unixpacket(
       s.borrow_mut::<PermissionsContainer>(),
       Cow::Owned(PathBuf::from(address_path)),
       OpenAccessKind::WriteNoFollow,
+      crate::NetDirection::Connect,
       Some("Deno.DatagramConn.send()"),
     )?
   };
@@ -229,6 +231,7 @@ pub fn op_net_listen_unix(
     permissions,
     Cow::Borrowed(Path::new(address_path)),
     OpenAccessKind::ReadWriteNoFollow,
+    crate::NetDirection::Listen,
     Some(&api_call_expr),
   )?;
   let listener = UnixListener::bind(&address_path)?;
@@ -253,6 +256,7 @@ pub fn net_listen_unixpacket(
         permissions,
         Cow::Borrowed(Path::new(address_path)),
         OpenAccessKind::ReadWriteNoFollow,
+        crate::NetDirection::Listen,
         Some("Deno.listenDatagram()"),
       )?;
       bind_unix_datagram(address_path.as_ref())?

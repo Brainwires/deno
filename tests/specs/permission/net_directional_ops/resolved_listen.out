@@ -1,0 +1,3 @@
+tcp listen localhost: denied (net listen)
+node net listen localhost: denied (net listen)
+tcp connect localhost: allowed

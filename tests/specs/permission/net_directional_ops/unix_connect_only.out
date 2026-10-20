@@ -1,0 +1,5 @@
+unix connect: allowed
+node pipe connect: allowed
+sql postgres unix: allowed
+unix listen: denied (net listen)
+node pipe listen: denied (net listen)

@@ -1,0 +1,3 @@
+fetch localhost: denied (net connect)
+websocket localhost: denied (net connect)
+tcp listen localhost: allowed

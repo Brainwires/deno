@@ -1,0 +1,23 @@
+tcp connect: allowed
+tls connect: allowed
+quic connect: allowed
+fetch: allowed
+websocket: allowed
+http client proxy: allowed
+resolveDns: allowed
+kv remote: allowed
+sql postgres: allowed
+node net connect: allowed
+node http request: allowed
+node dns lookup: allowed
+tcp listen: denied (net listen)
+tls listen: denied (net listen)
+udp listen: denied (net listen)
+quic endpoint: denied (net listen)
+Deno.serve: denied (net listen)
+node net listen: denied (net listen)
+node http listen: denied (net listen)
+node dgram bind: denied (net listen)
+udp send: denied (net listen)
+node dgram send: denied (net listen)
+[WILDCARD]node inspector open: denied (net listen)

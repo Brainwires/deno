@@ -702,7 +702,7 @@ where
               proxy_dst.port().map(|p| p.as_u16()).unwrap_or(1080),
             );
             if let Some(permissions) = permissions.as_mut() {
-              permissions.check_net(
+              permissions.check_net_connect(
                 &(socks_addr.0, Some(socks_addr.1)),
                 "fetch() proxy",
               )?;
@@ -776,8 +776,10 @@ where
                   Some("fetch() proxy"),
                 )?
                 .into_path();
-              permissions
-                .check_net_unix_socket(&resolved_path, Some("fetch() proxy"))?;
+              permissions.check_net_unix_socket_connect(
+                &resolved_path,
+                Some("fetch() proxy"),
+              )?;
               path = resolved_path.into_owned();
             }
             let io = UnixStream::connect(&path).await?;
@@ -793,7 +795,11 @@ where
           let mut permissions = self.permissions.clone();
           Box::pin(async move {
             if let Some(permissions) = permissions.as_mut() {
-              permissions.check_net_vsock(cid, port, "fetch() proxy")?;
+              permissions.check_net_connect_vsock(
+                cid,
+                port,
+                "fetch() proxy",
+              )?;
             }
             let addr = tokio_vsock::VsockAddr::new(cid, port);
             let io = VsockStream::connect(addr).await?;

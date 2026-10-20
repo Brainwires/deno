@@ -1,0 +1,4 @@
+inherit: listen allowed, connect denied (net connect)
+same host: NotCapable: Can't escalate parent thread permissions
+all hosts: NotCapable: Can't escalate parent thread permissions
+other host: NotCapable: Can't escalate parent thread permissions

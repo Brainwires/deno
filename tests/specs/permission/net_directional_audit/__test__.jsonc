@@ -1,0 +1,14 @@
+{
+  "tempDir": true,
+  "steps": [{
+    // The permission audit names the direction each check was for.
+    "args": "run --no-prompt --allow-net-connect=127.0.0.1 --allow-net-listen=127.0.0.1 main.ts",
+    "envs": {
+      "DENO_AUDIT_PERMISSIONS": "$PWD/audit.jsonl"
+    },
+    "output": "main.out"
+  }, {
+    "args": "run --allow-read check_audit.ts",
+    "output": "check_audit.out"
+  }]
+}

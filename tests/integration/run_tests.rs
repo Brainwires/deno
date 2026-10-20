@@ -395,6 +395,32 @@ fn permissions_prompt_allow_all_lowercase_a() {
     });
 }
 
+#[test]
+fn permissions_prompt_net_directional() {
+  TestContext::default()
+    .new_command()
+    .args_vec([
+      "run",
+      "--quiet",
+      "--allow-net-listen=0.0.0.0",
+      "run/permission_net_directional_prompt.ts",
+    ])
+    .with_pty(|mut console| {
+      console.expect("Deno requests net connect access to \"example.com\".");
+      console
+        .expect("Run again with --allow-net-connect to bypass this prompt.");
+      console.human_delay();
+      console.write_line_raw("y");
+      console.expect("net-connect: granted");
+      console.expect("Deno requests net listen access to \"127.0.0.1:8080\".");
+      console
+        .expect("Run again with --allow-net-listen to bypass this prompt.");
+      console.human_delay();
+      console.write_line_raw("n");
+      console.expect("net-listen: denied");
+    });
+}
+
 // Regression test for https://github.com/denoland/deno/issues/34399
 // When stdin has been put into raw mode by user code (e.g. ts-node calling
 // `process.stdin.setRawMode(true)`), the prompt's line-buffered `read_line`
