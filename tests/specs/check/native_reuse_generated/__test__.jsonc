@@ -1,0 +1,36 @@
+{
+  // denext: the native check generates its project (`.deno/`) from the
+  // configuration and the external modules, not the project's own source, so
+  // a check after a local edit reuses it instead of generating it again ...
+  "tempDir": true,
+  "steps": [
+    {
+      "args": "check main.ts",
+      "output": "Check [WILDCARD]main.ts\nTS2322 [ERROR]: Type 'number' is not assignable to type 'string'.[WILDCARD]",
+      "exitCode": 1
+    },
+    {
+      "args": ["eval", "Deno.writeTextFileSync('a.ts', 'export const a = true;\\n')"],
+      "output": ""
+    },
+    {
+      "args": "check -L debug main.ts",
+      "output": "[WILDCARD]Reusing the generated project (native tsc)\n[WILDCARD]TS2322 [ERROR]: Type 'boolean' is not assignable to type 'string'.[WILDCARD]",
+      "exitCode": 1
+    },
+    // ... and generates it again when the configuration changes (an import
+    // map alias the old one did not map)
+    {
+      "args": [
+        "eval",
+        "Deno.writeTextFileSync('deno.json', JSON.stringify({ imports: { 'lib/': './lib/' } })); Deno.writeTextFileSync('main.ts', 'import { b } from \"lib/b.ts\";\\nexport const x: string = b;\\n')"
+      ],
+      "output": ""
+    },
+    {
+      "args": "check main.ts",
+      "output": "Check [WILDCARD]main.ts\n",
+      "exitCode": 0
+    }
+  ]
+}

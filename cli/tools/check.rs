@@ -179,6 +179,7 @@ async fn native_check(
 
 /// One native type check: the graph Deno resolved (for its check cache and
 /// its own diagnostics) and the roots the external compiler is pinned to.
+#[derive(Clone)]
 pub(crate) struct NativeCheck<'a> {
   pub flags: &'a Arc<Flags>,
   pub cli_options: &'a CliOptions,
@@ -209,6 +210,46 @@ pub(crate) struct NativeCheck<'a> {
 pub(crate) async fn run_native_check(
   check: NativeCheck<'_>,
 ) -> Result<bool, AnyError> {
+  // Boxed: the native check's future is large (clippy::large_futures).
+  match Box::pin(run_native_check_once(
+    check.clone(),
+    NativeAttempt::ReuseGenerated,
+  ))
+  .await?
+  {
+    NativeOutcome::Checked(clean) => Ok(clean),
+    // The reused generated project left an import unresolved: generate it
+    // again and check once more (the roots are listed already).
+    NativeOutcome::GeneratedStale => {
+      match Box::pin(run_native_check_once(check, NativeAttempt::Regenerate))
+        .await?
+      {
+        NativeOutcome::Checked(clean) => Ok(clean),
+        NativeOutcome::GeneratedStale => unreachable!("regenerated"),
+      }
+    }
+  }
+}
+
+/// Whether a native check may reuse the generated project (`.deno/`) when
+/// what it was generated from is unchanged, or must generate it again.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum NativeAttempt {
+  ReuseGenerated,
+  Regenerate,
+}
+
+enum NativeOutcome {
+  /// Checked; whether clean.
+  Checked(bool),
+  /// The reused generated project could not resolve an import.
+  GeneratedStale,
+}
+
+async fn run_native_check_once(
+  check: NativeCheck<'_>,
+  attempt: NativeAttempt,
+) -> Result<NativeOutcome, AnyError> {
   let NativeCheck {
     flags,
     cli_options,
@@ -268,9 +309,9 @@ pub(crate) async fn run_native_check(
           .map_err(|e| deno_core::anyhow::anyhow!("{e}"))?;
       log_check_roots(roots, &current_dir);
       log::error!("{}\n", root_diagnostics);
-      return Ok(false);
+      return Ok(NativeOutcome::Checked(false));
     }
-    return Ok(true);
+    return Ok(NativeOutcome::Checked(true));
   }
   let type_check_cache = type_checker.type_check_cache();
 
@@ -284,7 +325,7 @@ pub(crate) async fn run_native_check(
     && type_check_cache.has_check_hash(check_hash)
   {
     log::debug!("Already type checked (native tsc)");
-    return Ok(true);
+    return Ok(NativeOutcome::Checked(true));
   }
 
   // Cache miss: generate the tsconfig.json and materialize dependency types so
@@ -310,16 +351,36 @@ pub(crate) async fn run_native_check(
   // denext: quiet on this thread only - lowering the global `log` level hid
   // other threads' output meanwhile (the inspector's "Debugger session
   // started.", so a debugger client waited for it forever).
-  let quiet = deno_lib::util::logger::quiet_below_error();
-  let sync_result = crate::tools::installer::sync_types_command(
-    flags.clone(),
-    SyncTypesFlags { roots: sync_roots },
-    crate::tools::installer::RootTsConfigMode::CheckMode,
-    extra_specifiers,
-  )
-  .await;
-  drop(quiet);
-  sync_result?;
+  //
+  // denext: the generated project depends on the configuration, the external
+  // modules the graph reaches and the roots, not on the project's own source,
+  // so a check after a local edit (each of the dev overlay's) reuses it
+  // instead of generating it again (`generated_project_inputs`).
+  let generated_dir = project_root.join(".deno");
+  let inputs = (!reload && !has_code_blocks).then(|| {
+    generated_project_inputs(flags, cli_options, graph, lib, &sync_roots)
+  });
+  let reused = attempt == NativeAttempt::ReuseGenerated
+    && inputs.as_deref().is_some_and(|inputs| {
+      generated_project_is_current(&generated_dir, inputs)
+    });
+  if reused {
+    log::debug!("Reusing the generated project (native tsc)");
+  } else {
+    let quiet = deno_lib::util::logger::quiet_below_error();
+    let sync_result = crate::tools::installer::sync_types_command(
+      flags.clone(),
+      SyncTypesFlags { roots: sync_roots },
+      crate::tools::installer::RootTsConfigMode::CheckMode,
+      extra_specifiers,
+    )
+    .await;
+    drop(quiet);
+    sync_result?;
+    if let Some(inputs) = &inputs {
+      record_generated_project(&generated_dir, inputs);
+    }
+  }
   // Removed (with its directory) when the check is done.
   let code_blocks = if has_code_blocks {
     Some(materialize_code_blocks(&project_root, graph)?)
@@ -389,12 +450,12 @@ pub(crate) async fn run_native_check(
   if files.is_empty() && root_diagnostics.has_diagnostic() {
     log_check_roots(roots, &current_dir);
     log::error!("{}\n", root_diagnostics);
-    return Ok(false);
+    return Ok(NativeOutcome::Checked(false));
   }
   // Nothing the compiler can load (only built-in or in-memory modules): when
   // not `deno check`, that is nothing to check rather than the whole project.
   if files.is_empty() && !whole_project_fallback {
-    return Ok(true);
+    return Ok(NativeOutcome::Checked(true));
   }
 
   // Holds the config's temp file open until tsc has run (dropping it deletes
@@ -486,7 +547,9 @@ pub(crate) async fn run_native_check(
     }
   };
 
-  log_check_roots(roots, &current_dir);
+  if attempt == NativeAttempt::ReuseGenerated {
+    log_check_roots(roots, &current_dir);
+  }
 
   let output = crate::tsc::native::run_native_tsc(
     &tsc_path,
@@ -507,6 +570,14 @@ pub(crate) async fn run_native_check(
     parsed.sort_by(|a, b| a.file_name.cmp(&b.file_name));
   }
   drop(code_blocks);
+  // A reused generated project that can't resolve an import may predate a
+  // dependency (one cached, or a `node_modules` changed, since): generate it
+  // again rather than report what a fresh one would resolve.
+  if reused && parsed.iter().any(needs_generated_project) {
+    let _ = std::fs::remove_file(generated_dir.join(GENERATED_INPUTS_FILE));
+    log::debug!("The reused generated project left an import unresolved");
+    return Ok(NativeOutcome::GeneratedStale);
+  }
   let mut diagnostics = Diagnostics::from(parsed);
   // Fold in deno's own diagnostics for missing entrypoints (some roots existed
   // and were type-checked by tsc above; any that didn't are reported here).
@@ -518,7 +589,7 @@ pub(crate) async fn run_native_check(
 
   if diagnostics.has_diagnostic() {
     log::error!("{}\n", diagnostics);
-    return Ok(false);
+    return Ok(NativeOutcome::Checked(false));
   }
 
   // tsc exited non-zero but we have nothing to show. If it printed diagnostic
@@ -551,7 +622,202 @@ pub(crate) async fn run_native_check(
     type_check_cache.add_check_hash(check_hash);
   }
 
-  Ok(true)
+  Ok(NativeOutcome::Checked(true))
+}
+
+/// The file in the generated `.deno/` that records what its project was
+/// generated from (`generated_project_inputs`) and the generated
+/// `tsconfig.json` it then held (denext).
+const GENERATED_INPUTS_FILE: &str = "check-inputs";
+
+/// A digest of everything the generated project (`deno sync-types`'s
+/// `.deno/`) is made from, short of the project's own source: this Deno and
+/// its compiler, the command's flags (its roots among them), the type lib,
+/// the registries, the workspace's config files (deno.json, package.json, the
+/// import map, the lockfile, a root tsconfig.json, an installed
+/// `node_modules`' records), and the graph's modules from outside the project
+/// (remote, `jsr:` and `npm:` ones, with their resolved versions) and local
+/// Wasm modules (whose exports it types). A local edit changes none of them.
+fn generated_project_inputs(
+  flags: &Flags,
+  cli_options: &CliOptions,
+  graph: &ModuleGraph,
+  lib: TsTypeLib,
+  sync_roots: &[String],
+) -> String {
+  use deno_lib::util::hash::FastInsecureHasher;
+  let mut hasher = FastInsecureHasher::new_deno_versioned();
+  hasher.write_str(crate::tsc::native::typescript_version());
+  // The flags that change what is generated: not the log level, the
+  // permissions or a script's arguments, so the dev overlay's checks and
+  // `deno check` of the same roots share one.
+  hasher.write_str(&format!(
+    "{lib:?}\n{sync_roots:?}\n{:?}\n{:?}\n{:?}\n{:?}\n{:?}\n{:?}\n{:?}\n{:?}\n{:?}\n{:?}\n{:?}",
+    flags.initial_cwd,
+    flags.config_flag,
+    flags.import_map_path,
+    flags.node_modules_dir,
+    flags.node_modules_linker,
+    flags.vendor,
+    flags.unstable_config,
+    (flags.no_npm, flags.no_remote, flags.no_lock, flags.cached_only),
+    flags.lock,
+    flags.ext,
+    flags.internal,
+  ));
+  for name in [
+    "JSR_URL",
+    "NPM_CONFIG_REGISTRY",
+    "npm_config_registry",
+    "DENO_DIR",
+    "DENO_INTERNAL_SYNC_TYPES_SPECIFIERS",
+  ] {
+    hasher.write_str(name).write_u8(0);
+    hasher.write_str(&std::env::var(name).unwrap_or_default());
+    hasher.write_u8(0);
+  }
+  let workspace = cli_options.workspace();
+  let mut files: Vec<PathBuf> = workspace
+    .deno_jsons()
+    .filter_map(|config| config.specifier.to_file_path().ok())
+    .chain(workspace.package_jsons().map(|pkg| pkg.path.clone()))
+    .collect();
+  if let Ok(Some(path)) = workspace.to_import_map_path() {
+    files.push(path);
+  }
+  if let Ok(Some(path)) = workspace.resolve_lockfile_path() {
+    files.push(path);
+  }
+  if let Ok(root) = workspace.root_dir_url().to_file_path() {
+    files.push(root.join("tsconfig.json"));
+    let node_modules = root.join("node_modules");
+    files.push(node_modules.join(".package-lock.json"));
+    files.push(node_modules.join(".modules.yaml"));
+    files.push(node_modules.join(".deno").join(".setup-cache.bin"));
+  }
+  files.sort();
+  files.dedup();
+  for path in &files {
+    hasher.write_str(&path.to_string_lossy()).write_u8(0);
+    match std::fs::read(path) {
+      Ok(bytes) => hasher.write_u8(1).write(&bytes),
+      Err(_) => hasher.write_u8(0),
+    };
+  }
+  let mut modules: Vec<String> = Vec::new();
+  for module in graph.modules() {
+    let specifier = module.specifier();
+    if specifier.scheme() != "file" {
+      modules.push(specifier.to_string());
+    } else if matches!(module, deno_graph::Module::Wasm(_)) {
+      let stamp = specifier
+        .to_file_path()
+        .ok()
+        .and_then(|path| std::fs::metadata(path).ok())
+        .map(|meta| (meta.len(), meta.modified().ok()));
+      modules.push(format!("{specifier} {stamp:?}"));
+    }
+  }
+  modules.sort();
+  for module in &modules {
+    hasher.write_str(module).write_u8(0);
+  }
+  format!("{:016x}", hasher.finish())
+}
+
+/// A digest of a generated `tsconfig.json`'s text.
+fn generated_config_digest(text: &[u8]) -> String {
+  let mut hasher =
+    deno_lib::util::hash::FastInsecureHasher::new_without_deno_version();
+  hasher.write(text);
+  format!("{:016x}", hasher.finish())
+}
+
+/// Record that the generated project in `generated_dir` was made from
+/// `inputs` (best effort: without the record the next check generates it).
+fn record_generated_project(generated_dir: &Path, inputs: &str) {
+  let Ok(config) = std::fs::read(generated_dir.join("tsconfig.json")) else {
+    return;
+  };
+  let record = format!("{inputs}\n{}\n", generated_config_digest(&config));
+  let _ = std::fs::write(generated_dir.join(GENERATED_INPUTS_FILE), record);
+}
+
+/// Whether the generated project in `generated_dir` was made from `inputs`,
+/// is unchanged since (another check, `deno sync-types` or the tsgo language
+/// server may have generated it from other inputs), and every file outside
+/// the project its `paths`, `typeRoots` and `files` name still exists (a
+/// cleared Deno cache).
+fn generated_project_is_current(generated_dir: &Path, inputs: &str) -> bool {
+  let Ok(record) =
+    std::fs::read_to_string(generated_dir.join(GENERATED_INPUTS_FILE))
+  else {
+    return false;
+  };
+  let mut lines = record.lines();
+  if lines.next() != Some(inputs) {
+    return false;
+  }
+  let Ok(config) = std::fs::read(generated_dir.join("tsconfig.json")) else {
+    return false;
+  };
+  if lines.next() != Some(generated_config_digest(&config).as_str()) {
+    return false;
+  }
+  generated_targets_exist(generated_dir, &config)
+}
+
+/// Whether the targets a generated `tsconfig.json` names in `.deno/` or
+/// outside the project exist (a `*` pattern's directory part). Targets in the
+/// project's own tree are the user's to have.
+fn generated_targets_exist(generated_dir: &Path, config: &[u8]) -> bool {
+  let Ok(value) =
+    deno_core::serde_json::from_slice::<deno_core::serde_json::Value>(config)
+  else {
+    return false;
+  };
+  let Some(project_root) = generated_dir.parent() else {
+    return false;
+  };
+  let options = value.get("compilerOptions");
+  let paths = options
+    .and_then(|o| o.get("paths"))
+    .and_then(|p| p.as_object())
+    .into_iter()
+    .flat_map(|paths| paths.values())
+    .filter_map(|targets| targets.as_array())
+    .flatten();
+  let type_roots = options
+    .and_then(|o| o.get("typeRoots"))
+    .and_then(|t| t.as_array())
+    .into_iter()
+    .flatten();
+  let files = value
+    .get("files")
+    .and_then(|f| f.as_array())
+    .into_iter()
+    .flatten();
+  paths
+    .chain(type_roots)
+    .chain(files)
+    .filter_map(|target| target.as_str())
+    .all(|target| {
+      let target = target.split('*').next().unwrap_or_default();
+      let path = generated_dir.join(target);
+      let path = deno_path_util::normalize_path(std::borrow::Cow::Owned(path));
+      if path.starts_with(project_root) && !path.starts_with(generated_dir) {
+        return true;
+      }
+      path.exists()
+    })
+}
+
+/// Whether a compiler diagnostic says an import, a type package or a JSX
+/// runtime did not resolve: what a stale generated project reports.
+fn needs_generated_project(diagnostic: &crate::tsc::Diagnostic) -> bool {
+  // TS2307 / TS2792 cannot find module, TS2688 type definition file, TS2875
+  // JSX runtime, TS7016 no declaration file.
+  matches!(diagnostic.code, 2307 | 2792 | 2688 | 2875 | 7016)
 }
 
 /// Write the root overlay (the user's `tsconfig.json` on top of the generated
@@ -922,6 +1188,76 @@ mod tests {
   use deno_core::serde_json::json;
 
   use super::*;
+
+  #[test]
+  fn generated_project_is_reused_only_unchanged() {
+    let project = tempfile::tempdir().unwrap();
+    let generated = project.path().join(".deno");
+    std::fs::create_dir_all(generated.join("types").join("deno")).unwrap();
+    let config = json!({
+      "compilerOptions": {
+        "typeRoots": ["./types"],
+        "paths": {
+          "lib/*": ["../lib/*"],
+          "dep": ["./types/deno/index.d.ts"],
+        },
+      },
+    });
+    std::fs::write(generated.join("types/deno/index.d.ts"), "").unwrap();
+    std::fs::write(
+      generated.join("tsconfig.json"),
+      serde_json::to_string(&config).unwrap(),
+    )
+    .unwrap();
+    // never recorded
+    assert!(!generated_project_is_current(&generated, "inputs"));
+    record_generated_project(&generated, "inputs");
+    assert!(generated_project_is_current(&generated, "inputs"));
+    // other inputs
+    assert!(!generated_project_is_current(&generated, "other"));
+    // generated again since (by another check, the language server, ...)
+    std::fs::write(generated.join("tsconfig.json"), "{}").unwrap();
+    assert!(!generated_project_is_current(&generated, "inputs"));
+    // a file it maps went away
+    std::fs::write(
+      generated.join("tsconfig.json"),
+      serde_json::to_string(&config).unwrap(),
+    )
+    .unwrap();
+    record_generated_project(&generated, "inputs");
+    assert!(generated_project_is_current(&generated, "inputs"));
+    std::fs::remove_file(generated.join("types/deno/index.d.ts")).unwrap();
+    assert!(!generated_project_is_current(&generated, "inputs"));
+  }
+
+  #[test]
+  fn generated_targets_outside_the_project_must_exist() {
+    let root = tempfile::tempdir().unwrap();
+    let project = root.path().join("app");
+    let generated = project.join(".deno");
+    std::fs::create_dir_all(&generated).unwrap();
+    let cache = root.path().join("cache");
+    std::fs::create_dir_all(cache.join("pkg")).unwrap();
+    std::fs::write(cache.join("pkg").join("index.d.ts"), "").unwrap();
+    let config = |target: &std::path::Path| {
+      let target = target.to_string_lossy().replace('\\', "/");
+      serde_json::to_vec(&json!({
+        "compilerOptions": { "paths": { "pkg": [target], "@/*": ["../src/*"] } },
+        "files": [],
+      }))
+      .unwrap()
+    };
+    // the project's own targets are the user's (`../src/` need not exist)
+    assert!(generated_targets_exist(
+      &generated,
+      &config(&cache.join("pkg").join("index.d.ts"))
+    ));
+    assert!(!generated_targets_exist(
+      &generated,
+      &config(&cache.join("gone").join("index.d.ts"))
+    ));
+    assert!(!generated_targets_exist(&generated, b"not json"));
+  }
 
   #[test]
   fn code_block_diagnostics_name_the_block() {

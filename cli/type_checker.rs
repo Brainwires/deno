@@ -483,18 +483,21 @@ impl TypeChecker {
         {
           return Some("a text or bytes import");
         }
-        // The JSX runtime of `jsxImportSource`: the generated project maps a
-        // package's, not one Deno finds through an import map, a remote
-        // module or a missing one.
+        // The JSX runtime of `jsxImportSource` (see
+        // `jsx_runtime_unexpressible`).
         if (key.ends_with("/jsx-runtime") || key.ends_with("/jsx-dev-runtime"))
           && let deno_graph::Resolution::Ok(runtime) = &dep.maybe_code
-          && (key.contains(':')
-            || !matches!(runtime.specifier.scheme(), "file" | "npm")
-            || !matches!(graph.try_get(&runtime.specifier), Ok(Some(_))))
+          && jsx_runtime_unexpressible(
+            key,
+            &runtime.specifier,
+            match graph.try_get(&runtime.specifier) {
+              Ok(Some(_)) => Some(true),
+              Ok(None) => None,
+              Err(_) => Some(false),
+            },
+          )
         {
-          return Some(
-            "a JSX runtime Deno resolves (import map, remote, missing)",
-          );
+          return Some("a JSX runtime the generated project can't map");
         }
         // `@deno-types` / `@ts-types`: the types come from another module
         // than the code (a type-only import, such as a JSDoc `import()`, has
@@ -802,6 +805,35 @@ fn has_script_extension(path: &str) -> bool {
   ]
   .iter()
   .any(|ext| path.ends_with(ext))
+}
+
+/// Whether the generated project can't express the JSX runtime import `key`
+/// (`<jsxImportSource>/jsx-runtime`) that Deno resolved to `runtime`, given
+/// its graph slot (`Some(true)` loaded, `Some(false)` failed, `None` absent).
+///
+/// The generated `paths` map an import-map key to its target (a local file,
+/// an `npm:` package, a `jsr:` package's types from npm.jsr.io, a mirrored
+/// remote module), so a runtime reached through an import map, as
+/// `"jsxImportSource": "denext"` with `"denext/": "jsr:/@denext/denext@4/"`
+/// is, checks natively. A source written with a scheme (`npm:preact`) has no
+/// `paths` key, and a runtime Deno could not load would be reported
+/// differently by the compiler (TS2875).
+fn jsx_runtime_unexpressible(
+  key: &str,
+  runtime: &ModuleSpecifier,
+  slot: Option<bool>,
+) -> bool {
+  if key.contains(':') {
+    return true;
+  }
+  match runtime.scheme() {
+    // A package specifier's module is found through the package's own
+    // resolution (a jsr: one through a redirect), so only a failed load
+    // counts.
+    "jsr" | "npm" => slot == Some(false),
+    "file" | "http" | "https" => slot != Some(true),
+    _ => true,
+  }
 }
 
 /// A local module the graph could not load, if any: Deno reports it itself,
@@ -2100,10 +2132,73 @@ fn get_leading_comments(file_text: &str) -> Vec<String> {
 #[cfg(test)]
 mod test {
   use deno_ast::MediaType;
+  use deno_ast::ModuleSpecifier;
 
   use super::ambient_modules_to_regex_string;
   use super::get_leading_comments;
   use super::has_ts_check;
+  use super::jsx_runtime_unexpressible;
+
+  #[test]
+  fn jsx_runtime_through_an_import_map_is_expressible() {
+    let url = |s: &str| ModuleSpecifier::parse(s).unwrap();
+    // `"jsxImportSource": "denext"` with `"denext/": "jsr:/@denext/denext@4/"`
+    let jsr = url("jsr:@denext/denext@4/jsx-runtime");
+    assert!(!jsx_runtime_unexpressible("denext/jsx-runtime", &jsr, None));
+    assert!(!jsx_runtime_unexpressible(
+      "denext/jsx-runtime",
+      &jsr,
+      Some(true)
+    ));
+    let npm = url("npm:preact@10/jsx-runtime");
+    assert!(!jsx_runtime_unexpressible(
+      "preact/jsx-runtime",
+      &npm,
+      Some(true)
+    ));
+    let local = url("file:///app/jsx/jsx-runtime.ts");
+    assert!(!jsx_runtime_unexpressible(
+      "jsx/jsx-runtime",
+      &local,
+      Some(true)
+    ));
+    let remote = url("https://deno.land/x/lume/jsx-runtime.ts");
+    assert!(!jsx_runtime_unexpressible(
+      "lume/jsx-dev-runtime",
+      &remote,
+      Some(true)
+    ));
+  }
+
+  #[test]
+  fn jsx_runtime_with_a_scheme_or_not_loaded_is_not() {
+    let url = |s: &str| ModuleSpecifier::parse(s).unwrap();
+    let npm = url("npm:preact@10/jsx-runtime");
+    assert!(jsx_runtime_unexpressible(
+      "npm:preact/jsx-runtime",
+      &npm,
+      None
+    ));
+    let jsr = url("jsr:@denext/denext@4/jsx-runtime");
+    assert!(jsx_runtime_unexpressible(
+      "denext/jsx-runtime",
+      &jsr,
+      Some(false)
+    ));
+    let local = url("file:///app/jsx/jsx-runtime.ts");
+    assert!(jsx_runtime_unexpressible("jsx/jsx-runtime", &local, None));
+    assert!(jsx_runtime_unexpressible(
+      "jsx/jsx-runtime",
+      &local,
+      Some(false)
+    ));
+    let data = url("data:application/typescript,export%20{}");
+    assert!(jsx_runtime_unexpressible(
+      "jsx/jsx-runtime",
+      &data,
+      Some(true)
+    ));
+  }
 
   #[test]
   fn get_leading_comments_test() {

@@ -1,0 +1,9 @@
+{
+  "compilerOptions": {
+    "baseUrl": ".",
+    "moduleResolution": "node",
+    "target": "es5",
+    "strict": true,
+    "paths": { "@/*": ["src/*"] }
+  }
+}

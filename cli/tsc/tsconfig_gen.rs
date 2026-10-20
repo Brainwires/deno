@@ -95,6 +95,30 @@ pub fn build_check_root_overlay(
     };
     obj.insert("extends".to_string(), extends);
 
+    // denext: the user's own options as TypeScript 7 takes them (it refuses
+    // the ones 6.0 deprecated), and the generated `paths` kept beside the
+    // user's (an extending config's `paths` replaces its base's whole map,
+    // which dropped every import-map, `jsr:` and `npm:` mapping).
+    if let Some(co) = obj
+      .get_mut("compilerOptions")
+      .and_then(|co| co.as_object_mut())
+    {
+      let adapted = adapt_removed_compiler_options(co);
+      if !adapted.is_empty() {
+        log::debug!(
+          "tsconfig.json: options TypeScript 7 removed, adapted: {}",
+          adapted.join(", ")
+        );
+      }
+      if let Some(generated) = deno_value
+        .as_ref()
+        .and_then(|d| d.pointer("/compilerOptions/paths"))
+        .and_then(|p| p.as_object())
+      {
+        merge_generated_paths(co, generated);
+      }
+    }
+
     // A user `compilerOptions.types` overrides the generated `types` through the
     // `extends` chain, dropping our injected `deno`/`node` so every `Deno.*`
     // reference would error TS2304. Deno always provides its own libs, so when
@@ -146,6 +170,150 @@ pub fn build_check_root_overlay(
   }
 
   Ok(value)
+}
+
+/// Rewrite the compiler options TypeScript 6.0 deprecated and 7.0 removed
+/// (each a hard error, TS5102 / TS5108, that stops the whole check) into what
+/// they meant for a type check that emits nothing, returning the ones changed
+/// (denext). A Next.js app's `tsconfig.json` often carries `baseUrl` or
+/// `"moduleResolution": "node"`.
+///
+/// - `baseUrl`: its `paths` targets become relative to the config's
+///   directory, which is how Deno's resolver reads them. A bare specifier
+///   under `baseUrl` alone is not mapped: Deno does not resolve one (the
+///   in-process check reports it not a dependency).
+/// - `moduleResolution` `node` / `node10` / `classic`: the generated
+///   `bundler`.
+/// - `target` `es3` / `es5`, `module` `amd` / `umd` / `system` / `systemjs` /
+///   `none`, `downlevelIteration`, `outFile`, `esModuleInterop` /
+///   `allowSyntheticDefaultImports` / `alwaysStrict` set to `false`: dropped,
+///   the generated values apply.
+fn adapt_removed_compiler_options(co: &mut Map<String, Value>) -> Vec<String> {
+  let mut adapted = Vec::new();
+  if let Some(base_url) = co.remove("baseUrl") {
+    adapted.push("baseUrl".to_string());
+    let base = base_url.as_str().unwrap_or(".").trim_end_matches('/');
+    let rebase = |target: &str| -> String {
+      if target.starts_with('/')
+        || target.contains(":/")
+        || target.contains(":\\")
+      {
+        return target.to_string();
+      }
+      let target = target.trim_start_matches("./");
+      let joined = match base.trim_start_matches("./") {
+        "" | "." => target.to_string(),
+        base => format!("{base}/{target}"),
+      };
+      if joined.starts_with("../") {
+        joined
+      } else {
+        format!("./{joined}")
+      }
+    };
+    let mut paths = co
+      .remove("paths")
+      .and_then(|p| match p {
+        Value::Object(paths) => Some(paths),
+        _ => None,
+      })
+      .unwrap_or_default();
+    for targets in paths.values_mut() {
+      if let Some(targets) = targets.as_array_mut() {
+        for target in targets.iter_mut() {
+          if let Some(t) = target.as_str() {
+            *target = Value::String(rebase(t));
+          }
+        }
+      }
+    }
+    if !paths.is_empty() {
+      co.insert("paths".to_string(), Value::Object(paths));
+    }
+  }
+  let lowercase = |co: &Map<String, Value>, key: &str| {
+    co.get(key)
+      .and_then(|v| v.as_str())
+      .map(|v| v.to_ascii_lowercase())
+  };
+  if matches!(
+    lowercase(co, "moduleResolution").as_deref(),
+    Some("node" | "node10" | "classic")
+  ) {
+    co.insert("moduleResolution".to_string(), json!("bundler"));
+    adapted.push("moduleResolution".to_string());
+  }
+  if matches!(lowercase(co, "target").as_deref(), Some("es3" | "es5")) {
+    co.remove("target");
+    adapted.push("target".to_string());
+  }
+  if matches!(
+    lowercase(co, "module").as_deref(),
+    Some("amd" | "umd" | "system" | "systemjs" | "none")
+  ) {
+    co.remove("module");
+    adapted.push("module".to_string());
+  }
+  for key in ["downlevelIteration", "outFile"] {
+    if co.remove(key).is_some() {
+      adapted.push(key.to_string());
+    }
+  }
+  for key in [
+    "esModuleInterop",
+    "allowSyntheticDefaultImports",
+    "alwaysStrict",
+  ] {
+    if co.get(key) == Some(&Value::Bool(false)) {
+      co.remove(key);
+      adapted.push(key.to_string());
+    }
+  }
+  adapted
+}
+
+/// Add the generated config's `paths` (relative to `.deno/`) to the user's
+/// (relative to the project root, where the overlay is written), the user's
+/// entry winning for a key both map (denext).
+fn merge_generated_paths(
+  co: &mut Map<String, Value>,
+  generated: &Map<String, Value>,
+) {
+  let Some(user) = co.get_mut("paths").and_then(|p| p.as_object_mut()) else {
+    // Without paths of its own the user's config inherits the generated ones.
+    return;
+  };
+  for (key, targets) in generated {
+    if user.contains_key(key) {
+      continue;
+    }
+    let rebased = match targets {
+      Value::Array(targets) => Value::Array(
+        targets
+          .iter()
+          .map(|t| match t.as_str() {
+            Some(t) => Value::String(rebase_generated_path(t)),
+            None => t.clone(),
+          })
+          .collect(),
+      ),
+      other => other.clone(),
+    };
+    user.insert(key.clone(), rebased);
+  }
+}
+
+/// A path the generated `.deno/tsconfig.json` names, relative to the project
+/// root instead (an absolute one unchanged).
+fn rebase_generated_path(target: &str) -> String {
+  if target.starts_with('/') || target.contains(":/") || target.contains(":\\")
+  {
+    return target.to_string();
+  }
+  if let Some(rest) = target.strip_prefix("../") {
+    return format!("./{rest}");
+  }
+  format!("./.deno/{}", target.trim_start_matches("./"))
 }
 
 /// Result of generating a tsconfig for stock TypeScript.
@@ -2167,6 +2335,92 @@ interface AlsoKeep {
     assert_eq!(base.get("strict").unwrap(), &json!(false));
     assert_eq!(base.get("jsx").unwrap(), &json!("react-jsx"));
     assert_eq!(base.get("jsxImportSource").unwrap(), &json!("preact"));
+  }
+
+  #[test]
+  fn removed_options_are_adapted_for_typescript_7() {
+    let mut co = json!({
+      "baseUrl": "./src",
+      "paths": { "@/*": ["components/*"], "~/*": ["../shared/*"] },
+      "moduleResolution": "Node",
+      "target": "ES5",
+      "module": "amd",
+      "downlevelIteration": true,
+      "esModuleInterop": false,
+      "strict": true,
+    })
+    .as_object()
+    .unwrap()
+    .clone();
+    let mut adapted = adapt_removed_compiler_options(&mut co);
+    adapted.sort();
+    assert_eq!(
+      adapted,
+      [
+        "baseUrl",
+        "downlevelIteration",
+        "esModuleInterop",
+        "module",
+        "moduleResolution",
+        "target"
+      ]
+    );
+    assert_eq!(
+      Value::Object(co),
+      json!({
+        "paths": {
+          "@/*": ["./src/components/*"],
+          "~/*": ["./src/../shared/*"],
+        },
+        "moduleResolution": "bundler",
+        "strict": true,
+      })
+    );
+    // `baseUrl: "."` alone maps nothing
+    let mut co = json!({ "baseUrl": "." }).as_object().unwrap().clone();
+    assert_eq!(adapt_removed_compiler_options(&mut co), ["baseUrl"]);
+    assert_eq!(Value::Object(co), json!({}));
+    // options TypeScript 7 still takes are left alone
+    let kept = json!({
+      "moduleResolution": "bundler",
+      "target": "ES2017",
+      "esModuleInterop": true,
+      "paths": { "@/*": ["./src/*"] },
+    });
+    let mut co = kept.as_object().unwrap().clone();
+    assert!(adapt_removed_compiler_options(&mut co).is_empty());
+    assert_eq!(Value::Object(co), kept);
+  }
+
+  #[test]
+  fn user_paths_keep_the_generated_ones() {
+    let mut co =
+      json!({ "paths": { "@/*": ["./src/*"], "dep": ["./mine.ts"] } })
+        .as_object()
+        .unwrap()
+        .clone();
+    let generated = json!({
+      "dep": ["/cache/dep/index.d.ts"],
+      "denext": ["/cache/@jsr/denext__denext/_dist/mod.d.ts"],
+      "lib/*": ["../lib/*"],
+      "vitest": ["./types/deno-vitest/index.d.ts"],
+    });
+    merge_generated_paths(&mut co, generated.as_object().unwrap());
+    assert_eq!(
+      Value::Object(co),
+      json!({ "paths": {
+        "@/*": ["./src/*"],
+        "dep": ["./mine.ts"],
+        "denext": ["/cache/@jsr/denext__denext/_dist/mod.d.ts"],
+        "lib/*": ["./lib/*"],
+        "vitest": ["./.deno/types/deno-vitest/index.d.ts"],
+      }})
+    );
+    // no paths of its own: it inherits the generated ones through `extends`
+    let mut co = json!({ "strict": true }).as_object().unwrap().clone();
+    merge_generated_paths(&mut co, generated.as_object().unwrap());
+    assert_eq!(Value::Object(co), json!({ "strict": true }));
+    assert_eq!(rebase_generated_path("C:/cache/x.d.ts"), "C:/cache/x.d.ts");
   }
 
   #[test]

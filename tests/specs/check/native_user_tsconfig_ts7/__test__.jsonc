@@ -1,0 +1,11 @@
+{
+  // denext: a user tsconfig.json as Next.js apps write it. TypeScript 7
+  // refuses `baseUrl` and `"moduleResolution": "node"` (TS5102 / TS5108,
+  // which stopped the whole check), and its `paths` replaced the generated
+  // ones (the import map's `lib/` with them). The native check adapts the
+  // removed options and keeps the generated `paths` beside the user's.
+  "tempDir": true,
+  "args": "check main.ts",
+  "output": "main.out",
+  "exitCode": 1
+}

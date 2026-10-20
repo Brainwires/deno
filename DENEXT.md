@@ -2941,6 +2941,68 @@ where the changes are discussed.
       `windowBlurReason` and `passkeys` / `passkeysReason` keys through; the
       d.ts declares them.
 
+89. **`feat(check)`: tighter TypeScript 7 checks** (`feat/ts7-tight`, for
+    runtime `3.0.0-rc.2`; `cli/type_checker.rs`, `cli/tools/check.rs`,
+    `cli/tsc/tsconfig_gen.rs`). Follows items 47 and 81.
+    - **A JSX runtime reached through an import map checks natively.**
+      `TypeChecker::native_unsupported` kept every graph whose
+      `jsxImportSource` runtime resolved to anything but a local file or an
+      `npm:` package on the in-process TypeScript 6.0.3, so `deno test`,
+      `run --check` & co. of an app with `"jsxImportSource": "denext"` and
+      `"denext/": "jsr:/@denext/denext@4/"` never used the native compiler
+      (`deno check` reached it only by building the graph a second time). The
+      generated `paths` map the import-map key to the `jsr:` package's types,
+      a mirrored remote module or a local file, so only a source written with
+      a scheme (`npm:preact`) or a runtime Deno could not load keeps the
+      fallback (`jsx_runtime_unexpressible`).
+    - **The generated project is reused across local edits.** Every native
+      check that missed Deno's check cache ran `deno sync-types` again, which
+      builds its own module graph and rewrites `.deno/`; in a project on
+      `jsr:@denext/denext` that took about ten times the compiler's own time,
+      on every edit the dev type-check overlay checks. `run_native_check` now
+      records a digest of what the generated project is made from
+      (`.deno/check-inputs`: this Deno and its compiler, the flags that change
+      generation, the type lib and roots, the registries, the workspace's
+      deno.json / package.json / import map / lockfile / tsconfig.json, an
+      installed `node_modules`' records, the graph's remote, `jsr:` and `npm:`
+      modules and local Wasm modules, and the generated `tsconfig.json` it
+      wrote) and reuses `.deno/` while that digest matches, the generated
+      config is unchanged and every file it maps outside the project exists.
+      A local edit changes none of them. If a reused project still leaves an
+      import, a type package or the JSX runtime unresolved (TS2307, TS2792,
+      TS2688, TS2875, TS7016), the check generates it again and runs once more,
+      so a stale record never decides a result. `--reload` and `--doc` code
+      blocks always generate.
+    - **A user `tsconfig.json` as TypeScript 7 takes it.** The check overlays
+      the user's `tsconfig.json` (in a deno.json or package.json project) on
+      the generated one. Two things broke a typical Next.js-style config:
+      TypeScript 7 refuses the options 6.0 deprecated (`baseUrl`,
+      `"moduleResolution": "node"`, `"target": "es5"`: TS5102 / TS5108, which
+      stop the whole check), and the user's `paths` replaced the generated map
+      wholesale, so every import-map, `jsr:` and `npm:` import reported TS2307
+      and a JSX runtime TS2875. `build_check_root_overlay` now adapts the
+      removed options (`baseUrl`: its `paths` targets rebased onto the
+      config's directory, as Deno's resolver reads them; `moduleResolution`
+      `node` / `node10` / `classic` → `bundler`; `target` `es3` / `es5`,
+      `module` `amd` / `umd` / `system` / `none`, `downlevelIteration`,
+      `outFile` and `false` for `esModuleInterop` /
+      `allowSyntheticDefaultImports` / `alwaysStrict` dropped; a debug record
+      lists them) and adds the generated `paths` to the user's (rebased onto
+      the project root; the user's entry wins a key both map). The in-process
+      engine still reports TS5101 for a deprecated option, as TypeScript 6
+      does. Not covered: `paths` set only in a config the user's `extends`.
+
+    Tests: unit tests `jsx_runtime_through_an_import_map_is_expressible`,
+    `jsx_runtime_with_a_scheme_or_not_loaded_is_not` (`cli/type_checker.rs`),
+    `generated_project_is_reused_only_unchanged`,
+    `generated_targets_outside_the_project_must_exist` (`cli/tools/check.rs`),
+    `removed_options_are_adapted_for_typescript_7`,
+    `user_paths_keep_the_generated_ones` (`cli/tsc/tsconfig_gen.rs`); specs
+    `check/native_reuse_generated` (a local edit reuses the project and checks
+    the new source; a config change generates it again) and
+    `check/native_user_tsconfig_ts7` (`baseUrl`, `moduleResolution: node`,
+    `target: es5` and `paths` beside an import map).
+
     Tests: `backdrop_numbers_match_laufey` (`cli/rt_desktop/lib.rs`),
     `desktop_js_maps_blur_to_laufey_backdrop_blur` (`cli/rt/desktop.rs`), the
     `blur` key in `io_capabilities_wire_format` and the `desktop_ops_inert`
