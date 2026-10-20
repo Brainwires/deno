@@ -3162,11 +3162,103 @@ where the changes are discussed.
     `heap_limit_only_with_max_memory` (`cli/lib/resource_limits.rs`) and
     `process_cpu_time_advances_with_work` (`ext/os`).
 
+93. **`feat(permissions)`: `--allow-net-connect` / `--allow-net-listen`**
+    (`feat/net-connect-listen`, for runtime `3.0.0-rc.2`;
+    `runtime/permissions/lib.rs`, `runtime/ops/permissions.rs`,
+    `runtime/js/10_permissions.js`, `libs/cli_parser`, `cli/args`,
+    `cli/tsc/dts/lib.deno.ns.d.ts`, the network ops in `ext/net`, `ext/fetch`,
+    `ext/websocket`, `ext/kv`, `ext/node`, `ext/sql`). Carried from
+    [denoland/deno#34036](https://github.com/denoland/deno/pull/34036) (head
+    `41fbc2f`, its review's fixes included; closed upstream as superseded by
+    unpublished work, so this is the latest public design). Four flags grant or
+    deny one direction: `--allow-net-connect[=<hosts>]` /
+    `--deny-net-connect[=<hosts>]` for outbound connections and
+    `--allow-net-listen[=<hosts>]` / `--deny-net-listen[=<hosts>]` for
+    listeners, with `--allow-net`'s host syntax (host, `host:port`, IPv4,
+    `[IPv6]`, `*.example.com`, a bare `:port`, `unix:<absolute path>`).
+    `--allow-net` / `--deny-net` keep meaning both directions; the two models
+    are exclusive per invocation (an error, also for a deno.json
+    `permissions.net` combined with a directional flag, and for `--allow-all`
+    with an `--allow-net-*` flag), so no merge rules between them exist. Without
+    any of the new flags nothing changes, prompts and errors included. In the
+    directional model a prompt and a denial name the direction
+    (`Deno requests net connect access to ...`,
+    `Requires net listen access to ...`,
+    `run again with the
+    --allow-net-listen flag`),
+    `Deno.permissions.query/request/revoke` take
+    `{ name: "net-connect" | "net-listen", host }` (typed, also in
+    `PermissionName`; `name: "net"` keeps reading the legacy permission, which
+    is `prompt` there), and the permission audit (`DENO_AUDIT_PERMISSIONS`)
+    records `net-connect` / `net-listen`. A worker's single `net` option
+    inherits the parent's split, or is clamped against both directions (a list
+    or `true` needs the parent to have both).
+
+    Classified as connect: `Deno.connect` (TCP, Unix, vsock), `connectTls`,
+    `connectQuic`, `DatagramConn.send`, `resolveDns`'s name server, `fetch` (and
+    its proxies, `createHttpClient`), `WebSocket`, remote KV, `Deno.SQL` (TCP
+    and Unix), `node:net` / `node:http` / `node:tls` connections,
+    `node:dns.lookup`, `dgram`'s `send`. As listen: `Deno.listen` (TCP, Unix,
+    vsock), `listenTls`, `listenDatagram` (and joining a multicast group),
+    `QuicEndpoint`, `Deno.serve` (and `deno serve`'s address), `node:net` /
+    `node:http` servers and pipes, `dgram`'s `bind`, `node:inspector.open`. Not
+    permission-gated, as before: the `--inspect` debugger server and the LSP
+    (CLI flags, not program operations). Item 80's resolve-time deny check runs
+    per direction (`check_net_connect_resolved` / `check_net_listen_resolved`).
+    As before, Node's `dns.lookup` reports a refused check as `EPERM` and
+    `dgram`'s `send` as `UNKNOWN` (errnos, as Node would), so those two don't
+    name the direction.
+
+    Our changes on top of the pull request:
+    - **The model is fixed when the permissions are built** (a worker takes its
+      parent's). The pull request decided it at every check from which fields
+      were populated, so a granted prompt for the legacy `name: "net"` filled
+      the legacy field and switched every check back to it, dropping
+      `--deny-net-connect` / `--deny-net-listen`. In the directional model
+      `request({ name: "net" })` no longer prompts (the legacy field grants
+      nothing there) and answers with its state.
+    - The flags are ported to the fork's `deno_cli_parser` (the pull request
+      targets the clap parser the fork removed): parsing, the bare-port
+      expansion, URL rejection, the `--allow-all` conflict, local `deno install`
+      refusing them, the help text, and `to_permission_args` (what
+      `deno install -g` and `deno x` pass on).
+    - The fork's own call sites, which the pull request predates: Unix socket
+      paths (`check_net_unix_socket` split into `_connect` / `_listen`, and
+      `deno_net::check_unix_socket_path` takes a `NetDirection`), multicast
+      membership, `Deno.SQL`, the `fetch` proxy connector, the import and KV
+      resolve-time checks, and `normalize_ip` (IPv4-mapped IPv6) in the
+      directional resolved checks.
+    - A packaged desktop app keeps the directional model: its loopback baseline
+      goes to `allow_net_connect` and `allow_net_listen` instead of `allow_net`
+      (which would have switched it back to the legacy model). The npm
+      lifecycle-script jail (item 83) clamps the directional grants of a `deno`
+      started inside it as it clamps `--allow-net`. A doc test's shebang with a
+      directional flag is refused (`Deno.PermissionOptionsObject` has one `net`
+      key), like a scoped `--deny-*`.
+
+    Tests: `permission/net_directional` (the pull request's: each direction
+    allowed and denied, the legacy/directional conflicts on the command line and
+    from deno.json, the queries, a denied query reporting `denied`, the default
+    wording unchanged), `permission/net_directional_ops` (every operation above
+    under connect-only, listen-only, both, a connect deny, a listen deny, legacy
+    `--allow-net`, legacy `--deny-net` and no grant; Unix sockets connect-only,
+    listen-only, scoped `unix:` rules per direction (Linux), legacy and none;
+    the resolve-time deny per direction for `fetch`, `WebSocket`, `Deno.listen`
+    and `node:net`; a worker inheriting the split and refused a wider `net`),
+    `permission/net_directional_audit` (the audit names the direction),
+    `permissions_prompt_net_directional` (`tests/integration/run_tests.rs`, the
+    prompts' wording), the pull request's unit tests in
+    `runtime/permissions/lib.rs` plus
+    `test_legacy_net_request_cannot_switch_out_of_directional` (fails before:
+    the bypass above), the parser tests in `libs/cli_parser/src/tests_full.rs`
+    and `tests.rs`, `defaults_keep_the_directional_net_model` (`cli/rt/run.rs`)
+    and the jail's `clamp` test.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
-64-73, 75-77, 80, 82, 87-89, 91) are what the prebuilt `libdenort` carries. The
-CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID`
-into a packaged app's launchers) are in the branch too, but a stock CLI does not
-run them; denext's own launcher provides that environment.
+64-73, 75-77, 80, 82, 87-89, 91, 93) are what the prebuilt `libdenort` carries.
+The CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` /
+`LAUFEY_APP_ID` into a packaged app's launchers) are in the branch too, but a
+stock CLI does not run them; denext's own launcher provides that environment.
 
 The laufey backend hosts are built from
 [Brainwires/laufey](https://github.com/Brainwires/laufey) branch

@@ -22,6 +22,7 @@ const key = Deno.readTextFileSync(
 // connect
 await probe("tcp connect", () => Deno.connect({ hostname: host, port: 1 }));
 await probe("tls connect", () => Deno.connectTls({ hostname: host, port: 1 }));
+// (On Windows quinn logs a failed send from its dual-stack endpoint.)
 await probe(
   "quic connect",
   () => Deno.connectQuic({ hostname: host, port: 1, alpnProtocols: ["test"] }),

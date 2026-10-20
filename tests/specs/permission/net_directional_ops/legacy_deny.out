@@ -1,6 +1,6 @@
 tcp connect: denied (net)
 tls connect: denied (net)
-quic connect: denied (net)
+[WILDCARD]quic connect: denied (net)
 fetch: denied (net)
 websocket: denied (net)
 http client proxy: denied (net)

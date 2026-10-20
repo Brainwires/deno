@@ -1,6 +1,6 @@
 tcp connect: allowed
 tls connect: allowed
-quic connect: allowed
+[WILDCARD]quic connect: allowed
 fetch: allowed
 websocket: allowed
 http client proxy: allowed
