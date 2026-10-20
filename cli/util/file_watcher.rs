@@ -82,6 +82,29 @@ impl DebouncedReceiver {
   }
 }
 
+/// Resolves when a SIGTERM from another process reaches this one (a
+/// `kill <pid>`, a supervisor, or the parent of a `node --watch` child): one
+/// that raised the external delivery count above `baseline`. The watcher's own
+/// restart SIGTERM is synthetic and a program's `process.kill(process.pid)` is
+/// self-sent; neither stops the watcher, as neither stops `node --watch`.
+/// Never resolves when the stream could not be registered.
+async fn external_sigterm(
+  stream: &mut Option<deno_signals::SignalStream>,
+  baseline: u32,
+) {
+  let Some(stream) = stream else {
+    return std::future::pending().await;
+  };
+  loop {
+    if stream.recv().await.is_none() {
+      return std::future::pending().await;
+    }
+    if deno_signals::delivery_count(deno_signals::SIGTERM) != baseline {
+      return;
+    }
+  }
+}
+
 /// Runs a single watched operation, returning its exit code on success or
 /// `None` if the operation errored (after logging the error).
 async fn error_handler<F>(
@@ -364,6 +387,11 @@ where
     }
   });
 
+  // SIGTERMs from other processes before the watch started; any later one
+  // stops the watcher (the watcher's own restart SIGTERM is synthetic, and a
+  // signal the program sends itself is not counted). See `sigterm` below.
+  let sigterm_deliveries = deno_signals::delivery_count(deno_signals::SIGTERM);
+
   loop {
     // We may need to give the runtime a tick to settle, as cancellations may need to propagate
     // to tasks. We choose yielding 10 times to the runtime as a decent heuristic. If watch tests
@@ -379,6 +407,26 @@ where
     if let Some(initial_cwd) = &initial_cwd {
       let _ = std::env::set_current_dir(initial_cwd);
     }
+
+    // A SIGTERM from another process that arrived while the stream below was
+    // not polled (the graceful-restart window, where the old run's listener
+    // takes it) still means "stop watching": a `node --watch` parent kills
+    // the watcher as soon as the old run reports the restart's SIGTERM.
+    if deno_signals::delivery_count(deno_signals::SIGTERM) != sigterm_deliveries
+    {
+      return Ok(());
+    }
+
+    // Observe SIGTERM for this run before the program can register its own
+    // listener: a SIGTERM sent to the watcher process asks the watcher to
+    // stop, as Ctrl+C does and as `node --watch` does for its parent process.
+    // Without this, a listener in the program (`process.on("SIGTERM", ...)`)
+    // takes the signal, its `process.exit()` only ends the current run, and
+    // the watcher keeps waiting for file changes. The stream does not prevent
+    // the default action, so a program without a listener is still terminated
+    // by the signal itself.
+    let mut sigterm =
+      deno_signals::signal_stream_allow_default(deno_signals::SIGTERM).ok();
 
     let mut watcher = new_watcher(watcher_sender.clone(), exclude_set.clone())?;
     consume_paths_to_watch(&mut watcher, &mut paths_to_watch_rx, &exclude_set);
@@ -454,6 +502,20 @@ where
         }
         return Ok(());
       },
+      _ = external_sigterm(&mut sigterm, sigterm_deliveries) => {
+        // The OS delivery already dispatched SIGTERM to the program's
+        // listeners; give them the graceful window, then stop watching.
+        info!(
+          "{} Waiting for graceful termination...",
+          colors::intense_blue(banner),
+        );
+        let _ = tokio::time::timeout(
+          GRACEFUL_SHUTDOWN_TIMEOUT,
+          &mut operation_future,
+        )
+        .await;
+        return Ok(());
+      },
       _ = restart_rx.recv() => {
         // Dispatch SIGTERM to give JS code a chance for async cleanup
         // before restarting. If handlers are registered, wait for the
@@ -514,6 +576,12 @@ where
     select! {
       _ = receiver_future => {},
       _ = deno_signals::ctrl_c_allow_default() => {
+        return Ok(());
+      },
+      // The run has ended, but its listeners may still be registered and take
+      // the signal (a listener that called `process.exit()` ended the run
+      // without ending the process).
+      _ = external_sigterm(&mut sigterm, sigterm_deliveries) => {
         return Ok(());
       },
       _ = restart_rx.recv() => {

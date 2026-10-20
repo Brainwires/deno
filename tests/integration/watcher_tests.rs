@@ -2665,6 +2665,138 @@ async fn run_watch_external_sigterm_still_terminates() {
   assert!(!status.success());
 }
 
+/// An external SIGTERM stops the watcher even when the program listens for it
+/// and ends the run with `process.exit()`, as Ctrl+C does and as
+/// `node --watch` does for its parent process. Before, the listener took the
+/// signal, `process.exit()` ended only the current run, and the watcher kept
+/// waiting for file changes (node_compat's
+/// parallel/test-watch-mode-kill-signal-default.mjs timed out on it).
+#[cfg(unix)]
+#[test(flaky)]
+async fn run_watch_external_sigterm_with_listener_stops_watcher() {
+  use nix::sys::signal;
+  use nix::sys::signal::Signal;
+  use nix::unistd::Pid;
+
+  let t = TempDir::new();
+  let file_to_watch = t.path().join("file_to_watch.js");
+  file_to_watch.write(
+    r#"
+    import process from "node:process";
+    process.on("SIGTERM", () => {
+      console.log("SIGTERM handler");
+      process.exit();
+    });
+    console.log("started");
+    setInterval(() => {}, 1000);
+  "#,
+  );
+
+  let mut child = util::deno_cmd()
+    .current_dir(t.path())
+    .arg("run")
+    .arg("--watch")
+    .arg("-L")
+    .arg("debug")
+    .arg("--allow-all")
+    .arg(&file_to_watch)
+    .env("NO_COLOR", "1")
+    .piped_output()
+    .spawn()
+    .unwrap();
+  let (mut stdout_lines, mut stderr_lines) = child_lines(&mut child);
+
+  wait_for_watcher("file_to_watch.js", &mut stderr_lines).await;
+  wait_contains("started", &mut stdout_lines).await;
+
+  signal::kill(Pid::from_raw(child.id() as i32), Signal::SIGTERM).unwrap();
+  wait_contains("SIGTERM handler", &mut stdout_lines).await;
+
+  // Bounded, so a regression fails the test instead of hanging the suite.
+  let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+  let status = loop {
+    if let Some(status) = child.try_wait().unwrap() {
+      break status;
+    }
+    if std::time::Instant::now() > deadline {
+      let _ = child.kill();
+      panic!("the watcher outlived an external SIGTERM by 30 s");
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+  };
+  assert_eq!(status.code(), Some(0));
+}
+
+/// A SIGTERM from another process that lands inside the graceful-restart
+/// window, while the re-raise suppression is armed and no listener is left,
+/// terminates the watcher: the suppression consumes only a signal the process
+/// sent itself. Before, it consumed this one as if it were the re-raise and the
+/// watcher restarted the program (node_compat's
+/// parallel/test-watch-mode-kill-signal-default.mjs kills the watcher right
+/// when the old run reports the restart's SIGTERM, and timed out on it).
+#[cfg(unix)]
+#[test(flaky)]
+async fn run_watch_external_sigterm_in_restart_window_terminates() {
+  use std::os::unix::process::ExitStatusExt;
+
+  let t = TempDir::new();
+  let file_to_watch = t.path().join("file_to_watch.js");
+  // On the restart's SIGTERM the handler unregisters itself, has another
+  // process send this one SIGTERM, and gives the signal thread time to see it
+  // before ending the run (which closes the window).
+  let contents = r#"
+    import process from "node:process";
+    import { execFileSync } from "node:child_process";
+    console.log("started");
+    const handler = () => {
+      process.off("SIGTERM", handler);
+      console.log("SIGTERM handler");
+      execFileSync("kill", ["-TERM", String(process.pid)]);
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 300);
+      process.exit();
+    };
+    process.on("SIGTERM", handler);
+    setInterval(() => {}, 1000);
+  "#;
+  file_to_watch.write(contents);
+
+  let mut child = util::deno_cmd()
+    .current_dir(t.path())
+    .arg("run")
+    .arg("--watch")
+    .arg("-L")
+    .arg("debug")
+    .arg("--allow-all")
+    .arg(&file_to_watch)
+    .env("NO_COLOR", "1")
+    .piped_output()
+    .spawn()
+    .unwrap();
+  let (mut stdout_lines, mut stderr_lines) = child_lines(&mut child);
+
+  wait_for_watcher("file_to_watch.js", &mut stderr_lines).await;
+  wait_contains("started", &mut stdout_lines).await;
+  file_to_watch.write(format!("{contents}\n// changed"));
+  wait_contains("SIGTERM handler", &mut stdout_lines).await;
+
+  // Bounded, so a regression fails the test instead of hanging the suite.
+  let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+  let status = loop {
+    if let Some(status) = child.try_wait().unwrap() {
+      break status;
+    }
+    if std::time::Instant::now() > deadline {
+      let _ = child.kill();
+      panic!("the watcher outlived a SIGTERM sent inside the restart window");
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+  };
+  assert_eq!(
+    status.signal(),
+    Some(nix::sys::signal::Signal::SIGTERM as i32)
+  );
+}
+
 /// Ctrl+C (SIGINT) around the graceful-restart window must still exit the
 /// watcher: only the re-raised SIGTERM is suppressed, never SIGINT.
 #[cfg(unix)]

@@ -43,10 +43,11 @@ static SUPPRESSED_SIGNAL: AtomicI32 = AtomicI32::new(0);
 /// guard that disarms on drop.
 ///
 /// A graceful restart re-raises exactly one signal after unregistering its JS
-/// handler; only that single matching signal is consumed, so a genuine external
-/// signal (e.g. `kill <pid>` from a supervisor) in the same window still
-/// terminates. Signals other than `signal` — notably a real Ctrl+C — are never
-/// suppressed.
+/// handler; only that single matching signal, sent by this process to itself,
+/// is consumed, so a genuine external signal (e.g. `kill <pid>` from a
+/// supervisor) in the same window still terminates, whether it arrives before
+/// or after the re-raise. Signals other than `signal` — notably a real Ctrl+C —
+/// are never suppressed.
 ///
 /// This only works because the re-raise happens synchronously inside the signal
 /// handler thread. A signal that arrives after the guard is dropped, or a
@@ -72,6 +73,39 @@ impl Drop for SuppressDefaultExitGuard {
     #[cfg(unix)]
     SUPPRESSED_SIGNAL.store(0, Ordering::Relaxed);
   }
+}
+
+// How many times each signal arrived from another process or the kernel (the
+// OS signal thread) or, on Windows, from the console control handler, indexed
+// by signal number. `raise()` is synthetic and is not counted, and neither is a
+// signal the process sent itself. The file watcher uses this to tell a
+// `kill <pid>` from its own restart SIGTERM and from a program's
+// `process.kill(process.pid)`.
+const DELIVERY_COUNTS_LEN: usize = 65;
+static DELIVERY_COUNTS: [AtomicU32; DELIVERY_COUNTS_LEN] =
+  [const { AtomicU32::new(0) }; DELIVERY_COUNTS_LEN];
+
+fn count_delivery(signal: i32) {
+  if let Some(count) = usize::try_from(signal)
+    .ok()
+    .and_then(|index| DELIVERY_COUNTS.get(index))
+  {
+    count.fetch_add(1, Ordering::Relaxed);
+  }
+}
+
+/// The number of times `signal` has been delivered to the process from
+/// outside since startup: by another process or the kernel, or as a console
+/// control event on Windows. Synthetic [`raise`] calls and signals the process
+/// sent itself are not counted. Only signals Deno listens for (a registered
+/// handler, or SIGHUP / SIGTERM / SIGINT once any handler is registered) are
+/// observed, and the count is updated before the handlers run.
+pub fn delivery_count(signal: i32) -> u32 {
+  usize::try_from(signal)
+    .ok()
+    .and_then(|index| DELIVERY_COUNTS.get(index))
+    .map(|count| count.load(Ordering::Relaxed))
+    .unwrap_or(0)
 }
 
 #[cfg(unix)]
@@ -114,7 +148,7 @@ fn handle_signal(signal: i32) -> bool {
 #[cfg(unix)]
 fn init() -> Handle {
   use signal_hook::iterator::backend::SignalDelivery;
-  use signal_hook::iterator::exfiltrator::SignalOnly;
+  use signal_hook::iterator::exfiltrator::WithRawSiginfo;
 
   fn has_signals(read: &mut UnixStream) -> Result<bool, std::io::Error> {
     loop {
@@ -141,7 +175,7 @@ fn init() -> Handle {
   let mut signals = SignalDelivery::with_pipe(
     read,
     write,
-    SignalOnly,
+    WithRawSiginfo,
     [SIGHUP, SIGTERM, SIGINT],
   )
   .unwrap();
@@ -151,27 +185,43 @@ fn init() -> Handle {
     loop {
       match signals.poll_pending(&mut has_signals) {
         Ok(Some(pending)) => {
-          for signal in pending {
+          for info in pending {
+            let signal = info.si_signo;
+            // Whether this process sent the signal to itself (`kill(getpid())`,
+            // e.g. `process.kill(process.pid)`), as opposed to another process
+            // or the kernel.
+            // SAFETY: `info` is the siginfo the kernel filled in for this
+            // delivery; reading its sender pid has no other precondition.
+            let self_sent = u32::try_from(unsafe { info.si_pid() }).ok()
+              == Some(std::process::id());
+            if !self_sent {
+              count_delivery(signal);
+            }
             let handled = handle_signal(signal);
+            // A graceful restart (file watcher) may have unregistered the JS
+            // handler and re-raised this signal; consume that single re-raise
+            // instead of killing the process. Only a signal this process sent
+            // itself can be that re-raise: one from another process (a
+            // `kill <pid>`, a supervisor) still terminates, even inside the
+            // window. `compare_exchange` disarms as it matches, so at most one
+            // signal is swallowed. See
+            // https://github.com/denoland/deno/issues/35942.
+            if !handled
+              && self_sent
+              && is_terminating_signal(signal)
+              && SUPPRESSED_SIGNAL
+                .compare_exchange(
+                  signal,
+                  0,
+                  Ordering::Relaxed,
+                  Ordering::Relaxed,
+                )
+                .is_ok()
+            {
+              continue;
+            }
             if !handled {
               if is_terminating_signal(signal) {
-                // A graceful restart (file watcher) may have unregistered the
-                // JS handler and re-raised this signal; consume that single
-                // re-raise instead of killing the process. `compare_exchange`
-                // disarms as it matches, so at most one signal is swallowed
-                // and a genuine external signal still terminates. See
-                // https://github.com/denoland/deno/issues/35942.
-                if SUPPRESSED_SIGNAL
-                  .compare_exchange(
-                    signal,
-                    0,
-                    Ordering::Relaxed,
-                    Ordering::Relaxed,
-                  )
-                  .is_ok()
-                {
-                  continue;
-                }
                 run_exit();
               }
               signal_hook::low_level::emulate_default_handler(signal).unwrap();
@@ -200,6 +250,7 @@ fn init() -> Handle {
       6 => SIGTERM,
       _ => return 0,
     };
+    count_delivery(signal);
     let handled = handle_signal(signal);
     handled as _
   }
@@ -452,5 +503,103 @@ async fn ctrl_c_inner(mut stream: SignalStream) -> std::io::Result<()> {
   match stream.recv().await {
     Some(_) => Ok(()),
     None => Err(std::io::Error::other("failed to receive SIGINT signal")),
+  }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+  use std::time::Duration;
+  use std::time::Instant;
+
+  use super::*;
+
+  // Sends `signal` to this process from another process, as `kill <pid>`.
+  fn kill_from_another_process(signal: i32) {
+    let status = std::process::Command::new("kill")
+      .arg(format!("-{signal}"))
+      .arg(std::process::id().to_string())
+      .status()
+      .unwrap();
+    assert!(status.success());
+  }
+
+  fn kill_self(signal: i32) {
+    // SAFETY: signals this process; every caller has made the signal harmless.
+    assert_eq!(unsafe { libc::kill(libc::getpid(), signal) }, 0);
+  }
+
+  fn wait_until(what: &str, mut done: impl FnMut() -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !done() {
+      assert!(Instant::now() < deadline, "timed out waiting for {what}");
+      std::thread::sleep(Duration::from_millis(5));
+    }
+  }
+
+  // The file watcher relies on this to tell an external `kill` from its own
+  // synthetic restart signal and from a program signalling itself: only a
+  // delivery from another process counts.
+  #[test]
+  fn delivery_count_counts_only_signals_from_other_processes() {
+    let signal = SIGUSR2;
+    let (tx, rx) = std::sync::mpsc::channel();
+    let id = register(
+      signal,
+      true,
+      Box::new(move || {
+        let _ = tx.send(());
+      }),
+    )
+    .unwrap();
+    let before = delivery_count(signal);
+
+    assert!(raise(signal));
+    rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert_eq!(delivery_count(signal), before);
+
+    kill_self(signal);
+    rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert_eq!(delivery_count(signal), before);
+
+    kill_from_another_process(signal);
+    rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    // Counted before the handlers run.
+    assert_eq!(delivery_count(signal), before + 1);
+
+    unregister(signal, id);
+  }
+
+  // The suppression of a graceful restart consumes the re-raise the process
+  // sends itself, and only that: a SIGHUP from another process inside the
+  // window is a real request (here a handled one, so the test survives), and
+  // does not use up the suppression.
+  #[test]
+  fn suppression_consumes_only_a_self_sent_reraise() {
+    let signal = SIGHUP;
+    let (tx, rx) = std::sync::mpsc::channel();
+    let id = register(
+      signal,
+      true,
+      Box::new(move || {
+        let _ = tx.send(());
+      }),
+    )
+    .unwrap();
+    let guard = suppress_default_exit_for(signal);
+
+    // Handled by the listener: the suppression stays armed.
+    kill_from_another_process(signal);
+    rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert_eq!(SUPPRESSED_SIGNAL.load(Ordering::Relaxed), signal);
+
+    // The restart's re-raise comes after the listener unregistered itself.
+    unregister(signal, id);
+    let before = delivery_count(signal);
+    kill_self(signal);
+    wait_until("the re-raise to be consumed", || {
+      SUPPRESSED_SIGNAL.load(Ordering::Relaxed) == 0
+    });
+    drop(guard);
+    assert_eq!(delivery_count(signal), before);
   }
 }

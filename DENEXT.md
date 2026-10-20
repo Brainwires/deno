@@ -2848,11 +2848,60 @@ where the changes are discussed.
     resolution unit tests in `libs/npmrc/supply_chain.rs` and
     `libs/config/deno_json` (`test_to_supply_chain_config`).
 
+87. **`fix(watch)`: a SIGTERM from another process stops the watcher**
+    (`fix/watch-kill-signal`, for runtime `denext.23`; `ext/signals/lib.rs`,
+    `cli/util/file_watcher.rs`). node_compat's
+    `parallel/test-watch-mode-kill-signal-default.mjs` timed out on most Linux
+    runs (in a loop on `ubuntu-22.04`: 0/50 passed idle, 9/50 under CPU load).
+    It runs `node --watch` (`deno run --watch`) on a program whose SIGTERM
+    listener calls `process.exit()`, touches the file, and kills the watcher
+    with SIGTERM as soon as the old run prints that it got the restart's
+    SIGTERM. The watcher and the program are one process, and that `kill`
+    arrives inside the graceful-restart window, after the listener has run
+    (`process.exit()` has removed it) and while #36268's one-shot suppression
+    (item 72) is armed for a re-raise. The suppression could not tell the
+    re-raise from any other SIGTERM, so it consumed the `kill`; the watcher
+    restarted the program and waited for file changes until the test's 10 s
+    timeout. A `kill` that landed later reached the new run's listener, whose
+    `process.exit()` under `--watch` ends only the run (#35021), with the same
+    result; only one that fell between the runs (no listener, no suppression)
+    ended the process. Fixed:
+    - The OS signal thread reads each delivery's `siginfo` (`WithRawSiginfo`, no
+      new crate feature), and the suppression consumes only a signal the process
+      sent itself (`si_pid` is its own pid), which is what the re-raise is. A
+      `kill` from another process inside the window terminates as it does
+      outside it.
+    - `deno_signals::delivery_count(signal)` counts the deliveries from other
+      processes (and the kernel, and Windows console events), before the
+      handlers run; `raise()` and self-sent signals are not counted.
+    - The watcher stops on such a SIGTERM, as on Ctrl+C and as `node --watch`
+      does for its parent process: each run registers a SIGTERM stream that does
+      not prevent the default action before the program can add its own
+      listener, so a program without a listener is still terminated by the
+      signal itself; with a listener, the listener gets the signal and the
+      watcher waits the graceful window (500 ms) for the run to end and exits 0,
+      also after a run ended (its listeners may still be registered). A SIGTERM
+      that arrived while the stream was not polled is caught by the count before
+      the next run starts. The restart's own SIGTERM and a program's
+      `process.kill(process.pid, "SIGTERM")` do not stop it.
+
+    A program under `--watch` that handles an external SIGTERM to keep running
+    now stops the watcher after its handler, as with Ctrl+C. (In the same test
+    the restarted run has no IPC channel, since the first run consumes
+    `NODE_CHANNEL_FD`, so it fails on `process.send`; the hang did not depend on
+    that, and it is not changed here.) Tests:
+    `run_watch_external_sigterm_in_restart_window_terminates` and
+    `run_watch_external_sigterm_with_listener_stops_watcher`
+    (`tests/integration/watcher_tests.rs`; both outlived the SIGTERM before),
+    `delivery_count_counts_only_signals_from_other_processes` and
+    `suppression_consumes_only_a_self_sent_reraise` (`ext/signals/lib.rs`), and
+    the node_compat test, 50/50 in the same loop idle and under load.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
-64-73, 75-77, 80, 82) are what the prebuilt `libdenort` carries. The CLI-side
-parts (for example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a
-packaged app's launchers) are in the branch too, but a stock CLI does not run
-them; denext's own launcher provides that environment.
+64-73, 75-77, 80, 82, 87) are what the prebuilt `libdenort` carries. The
+CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID`
+into a packaged app's launchers) are in the branch too, but a stock CLI does not
+run them; denext's own launcher provides that environment.
 
 The laufey backend hosts are built from
 [Brainwires/laufey](https://github.com/Brainwires/laufey) branch
