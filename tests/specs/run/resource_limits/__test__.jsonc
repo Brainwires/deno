@@ -1,0 +1,101 @@
+{
+  "tests": {
+    // The heap reaches --max-memory: the program ends with 137 and the
+    // message, even though it catches every error it sees.
+    "max_memory": {
+      "args": "run --max-memory=64m max_memory.js",
+      "output": "max_memory.out",
+      "exitCode": 137
+    },
+    // The same limit in megabytes without a suffix, and in kilobytes.
+    "max_memory_plain_megabytes": {
+      "args": "run --max-memory=64 max_memory.js",
+      "output": "max_memory.out",
+      "exitCode": 137
+    },
+    "max_memory_kilobytes": {
+      "args": "run --max-memory=65536k max_memory.js",
+      "output": "max_memory.out",
+      "exitCode": 137
+    },
+    // A program that fits ends normally with its own exit code.
+    "max_memory_room_enough": {
+      "args": "run --max-memory=512m small.js 3",
+      "output": "small.out",
+      "exitCode": 3
+    },
+    // Busy JavaScript using up --max-cpu-time: 152.
+    "max_cpu_time": {
+      "args": "run --max-cpu-time=1 busy.js",
+      "output": "max_cpu_time.out",
+      "exitCode": 152
+    },
+    // Idle time is not CPU time: sleeping past the budget is fine.
+    "max_cpu_time_idle_not_counted": {
+      "args": "run --max-cpu-time=1 idle.js 2500",
+      "output": "idle.out"
+    },
+    // CPU time is the whole process's: a busy worker uses up the budget while
+    // the main thread waits, and the watchdog ends the process.
+    "max_cpu_time_worker": {
+      "args": "run --max-cpu-time=1 busy_worker.js",
+      "output": "max_cpu_time.out",
+      "exitCode": 152
+    },
+    // --max-time stops busy JavaScript...
+    "max_time_busy": {
+      "args": "run --max-time=1 busy.js",
+      "output": "max_time.out",
+      "exitCode": 124
+    },
+    // ...and an idle program, which can't unwind, through the watchdog.
+    "max_time_idle": {
+      "args": "run --max-time=1 idle.js 60000",
+      "output": "max_time.out",
+      "exitCode": 124
+    },
+    // All three limits with room to spare: the program's own exit code.
+    "within_limits": {
+      "args": "run --max-memory=1g --max-cpu-time=30 --max-time=60 small.js 0",
+      "output": "small.out"
+    },
+    "max_memory_invalid": {
+      "args": "run --max-memory=nope small.js",
+      "output": "max_memory_invalid.out",
+      "exitCode": 1
+    },
+    "max_memory_too_small": {
+      "args": "run --max-memory=16m small.js",
+      "output": "max_memory_too_small.out",
+      "exitCode": 1
+    },
+    "max_cpu_time_zero": {
+      "args": "run --max-cpu-time=0 small.js",
+      "output": "max_cpu_time_zero.out",
+      "exitCode": 1
+    },
+    "max_time_not_a_number": {
+      "args": "run --max-time=1m small.js",
+      "output": "max_time_not_a_number.out",
+      "exitCode": 1
+    },
+    // Only `run` and `compile` take the limits.
+    "not_on_test": {
+      "args": "test --max-cpu-time=1 small.js",
+      "output": "not_on_test.out",
+      "exitCode": 1
+    },
+    "not_with_watch": {
+      "args": "run --watch --max-time=5 small.js",
+      "output": "not_with_watch.out",
+      "exitCode": 1
+    },
+    // A missing script is not retried as a task under the limits.
+    "no_task_fallback": {
+      "args": "run --max-time=5 limited",
+      "cwd": "with_task",
+      "output": "no_task_fallback.out",
+      "exitCode": 1
+    }
+  }
+}

@@ -3016,6 +3016,150 @@ fn run_seed() {
 }
 
 #[test]
+fn run_resource_limits() {
+  let flags = flags_from_vec(svec![
+    "deno",
+    "run",
+    "--max-memory=512m",
+    "--max-cpu-time=30",
+    "--max-time",
+    "60",
+    "script.ts"
+  ])
+  .unwrap();
+  assert_eq!(flags.max_memory, Some(512 * 1024 * 1024));
+  assert_eq!(flags.max_cpu_time, Some(30));
+  assert_eq!(flags.max_time, Some(60));
+  assert!(flags.has_resource_limits());
+
+  let flags = flags_from_vec(svec!["deno", "run", "script.ts"]).unwrap();
+  assert!(!flags.has_resource_limits());
+
+  // A flag after the script is the script's argument.
+  let flags =
+    flags_from_vec(svec!["deno", "run", "script.ts", "--max-time=1"]).unwrap();
+  assert_eq!(flags.max_time, None);
+  assert_eq!(flags.argv, svec!["--max-time=1"]);
+}
+
+#[test]
+fn bare_run_resource_limits() {
+  let flags =
+    flags_from_vec(svec!["deno", "--max-time=5", "script.ts"]).unwrap();
+  assert_eq!(flags.max_time, Some(5));
+}
+
+#[test]
+fn compile_resource_limits() {
+  let flags = flags_from_vec(svec![
+    "deno",
+    "compile",
+    "--max-memory=1g",
+    "--max-cpu-time=2",
+    "--max-time=3",
+    "script.ts"
+  ])
+  .unwrap();
+  assert_eq!(flags.max_memory, Some(1024 * 1024 * 1024));
+  assert_eq!(flags.max_cpu_time, Some(2));
+  assert_eq!(flags.max_time, Some(3));
+  // Recompiling on change doesn't run the program, so `--watch` is fine.
+  let flags = flags_from_vec(svec![
+    "deno",
+    "compile",
+    "--watch",
+    "--max-time=3",
+    "script.ts"
+  ])
+  .unwrap();
+  assert_eq!(flags.max_time, Some(3));
+}
+
+#[test]
+fn max_memory_sizes() {
+  let mb = 1024 * 1024;
+  for (input, expected) in [
+    ("512", 512 * mb),
+    ("512m", 512 * mb),
+    ("512MB", 512 * mb),
+    ("2g", 2048 * mb),
+    ("2Gb", 2048 * mb),
+    ("65536k", 64 * mb),
+    ("40000kb", 40000 * 1024),
+    ("32m", 32 * mb),
+  ] {
+    let flags = flags_from_vec(svec![
+      "deno",
+      "run",
+      format!("--max-memory={input}"),
+      "script.ts"
+    ])
+    .unwrap();
+    assert_eq!(flags.max_memory, Some(expected), "input: {input}");
+  }
+}
+
+#[test]
+fn resource_limits_reject_invalid() {
+  for (arg, message) in [
+    ("--max-memory=0", "must be at least 32m"),
+    ("--max-memory=31m", "must be at least 32m"),
+    ("--max-memory=1024k", "must be at least 32m"),
+    ("--max-memory=abc", "expected a size"),
+    ("--max-memory=1.5g", "expected a size"),
+    ("--max-memory=-1", "expected a size"),
+    ("--max-memory=m", "expected a size"),
+    ("--max-memory=99999999999999999999g", "expected a size"),
+    ("--max-cpu-time=0", "must be at least 1 second"),
+    ("--max-cpu-time=abc", "expected a whole number of seconds"),
+    ("--max-cpu-time=1.5", "expected a whole number of seconds"),
+    ("--max-cpu-time=-1", "expected a whole number of seconds"),
+    ("--max-time=0", "must be at least 1 second"),
+    ("--max-time=30s", "expected a whole number of seconds"),
+    ("--max-time=99999999999999999999", "too large"),
+  ] {
+    let err =
+      flags_from_vec(svec!["deno", "run", arg, "script.ts"]).expect_err(arg);
+    assert_eq!(err.kind, CliErrorKind::InvalidValue, "{arg}");
+    assert!(err.message.contains(message), "{arg}: {}", err.message);
+    let flag = arg.split('=').next().unwrap();
+    assert!(err.message.contains(&format!("'{flag}'")), "{arg}");
+  }
+}
+
+#[test]
+fn resource_limits_only_on_run_and_compile() {
+  for subcommand in ["test", "bench", "serve"] {
+    assert!(
+      flags_from_vec(svec!["deno", subcommand, "--max-time=1", "x.ts"])
+        .is_err(),
+      "{subcommand}"
+    );
+  }
+}
+
+#[test]
+fn resource_limits_conflict_with_watch() {
+  for watch in ["--watch", "--watch-hmr"] {
+    let err = flags_from_vec(svec![
+      "deno",
+      "run",
+      watch,
+      "--max-memory=64m",
+      "script.ts"
+    ])
+    .unwrap_err();
+    assert!(
+      err.message.contains("cannot be used with --watch"),
+      "{watch}"
+    );
+  }
+  assert!(
+    flags_from_vec(svec!["deno", "watch", "--max-time=1", "x.ts"]).is_err()
+  );
+}
+
+#[test]
 fn run_seed_with_v8_flags() {
   let r = flags_from_vec(svec![
     "deno",

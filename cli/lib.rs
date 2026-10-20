@@ -382,7 +382,10 @@ async fn run_subcommand(
               .await;
             }
             let script_err_msg = script_err.to_string();
-            if should_fallback_on_run_error(script_err_msg.as_str()) {
+            // Resource limits apply to a script; a task isn't run under them.
+            if !flags.has_resource_limits()
+              && should_fallback_on_run_error(script_err_msg.as_str())
+            {
               if run_flags.bare {
                 let command_names = deno_cli_parser::defs::DENO_ROOT
                   .subcommands
@@ -764,6 +767,9 @@ fn unrecognized_subcommand_error(err: &deno_cli_parser::CliError) -> AnyError {
 }
 
 fn exit_for_error(error: AnyError, initial_cwd: Option<&std::path::Path>) -> ! {
+  // A resource limit that terminated the program surfaces as "execution
+  // terminated"; report the limit instead.
+  deno_lib::resource_limits::exit_if_exceeded();
   let mut error_string = match js_error_downcast_ref(&error) {
     Some(e) => {
       let initial_cwd = initial_cwd
@@ -975,7 +981,12 @@ pub fn main() {
   drop(profiler);
 
   match result {
-    Ok(exit_code) => deno_runtime::exit(exit_code),
+    Ok(exit_code) => {
+      // A resource limit reached decides the exit code even when the program
+      // then ended by itself.
+      deno_lib::resource_limits::exit_if_exceeded();
+      deno_runtime::exit(exit_code)
+    }
     Err(err) => exit_for_error(err, initial_cwd.as_deref()),
   }
 }

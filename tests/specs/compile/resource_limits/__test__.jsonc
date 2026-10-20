@@ -1,0 +1,65 @@
+{
+  "tempDir": true,
+  "tests": {
+    // Each limit given to `deno compile` is stored in the binary and enforced
+    // by the compiled program, with the same exit code and message as
+    // `deno run`.
+    "max_memory": {
+      "steps": [
+        {
+          "args": "compile --max-memory=64m --output out max_memory.js",
+          "output": "[WILDCARD]"
+        },
+        {
+          "commandName": "./out",
+          "args": [],
+          "output": "max_memory.out",
+          "exitCode": 137
+        }
+      ]
+    },
+    "max_cpu_time": {
+      "steps": [
+        {
+          "args": "compile --max-cpu-time=1 --output out busy.js",
+          "output": "[WILDCARD]"
+        },
+        {
+          "commandName": "./out",
+          "args": [],
+          "output": "max_cpu_time.out",
+          "exitCode": 152
+        }
+      ]
+    },
+    // An idle program: the watchdog ends it.
+    "max_time": {
+      "steps": [
+        {
+          "args": "compile --max-time=1 --output out idle.js",
+          "output": "[WILDCARD]"
+        },
+        {
+          "commandName": "./out",
+          "args": [],
+          "output": "max_time.out",
+          "exitCode": 124
+        }
+      ]
+    },
+    // Without limits the same program runs to its end.
+    "without_limits": {
+      "steps": [
+        {
+          "args": "compile --output out idle_short.js",
+          "output": "[WILDCARD]"
+        },
+        {
+          "commandName": "./out",
+          "args": [],
+          "output": "idle_short.out"
+        }
+      ]
+    }
+  }
+}

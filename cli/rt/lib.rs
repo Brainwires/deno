@@ -45,6 +45,9 @@ fn unwrap_or_exit<T>(result: Result<T, AnyError>) -> T {
   match result {
     Ok(value) => value,
     Err(error) => {
+      // A resource limit that terminated the program surfaces as "execution
+      // terminated"; report the limit instead.
+      deno_lib::resource_limits::exit_if_exceeded();
       let error_string = match js_error_downcast_ref(&error) {
         Some(js_error) => format_js_error(js_error, None),
         None => format!("{:?}", error),
@@ -103,6 +106,7 @@ pub fn main() {
         );
         load_env_vars(&data.metadata.env_vars_from_env_file);
         let exit_code = run::run(Arc::new(sys.clone()), sys, data).await?;
+        deno_lib::resource_limits::exit_if_exceeded();
         deno_runtime::exit(exit_code);
       }
       Err(err) => Err(err),

@@ -1859,6 +1859,13 @@ pub async fn run_with_options(
       std::env::var("DENO_DISABLE_OFFSCREEN_CANVAS").as_deref(),
       Ok("1") | Ok("true")
     ),
+    // `--max-memory` / `--max-cpu-time` / `--max-time` given to
+    // `deno compile`: the compiled program enforces them as `deno run` does.
+    resource_limits: deno_lib::resource_limits::ResourceLimits {
+      max_memory_bytes: metadata.max_memory,
+      max_cpu_time_secs: metadata.max_cpu_time,
+      max_time_secs: metadata.max_time,
+    },
   };
   let worker_factory = LibMainWorkerFactory::new(
     blob_store,

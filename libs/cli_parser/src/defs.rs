@@ -366,6 +366,31 @@ pub static RUNTIME_MISC_ARGS: &[ArgDef] = &[
 .help("Use this argument to specify custom conditions for npm package exports. You can also use DENO_CONDITIONS env var.\n\nDocs: https://docs.deno.com/go/conditional-exports"),
 ];
 
+// Resource limits, only on `run` and `compile` (and so in a compiled program):
+// the limits are process-wide and aimed at one program, so a subcommand that
+// runs several (`test`, `bench`, `serve --parallel`) doesn't take them. The
+// values are parsed in `convert.rs` (`resource_limit_args_parse`).
+pub static RESOURCE_LIMIT_ARGS: &[ArgDef] = &[
+  ArgDef::new("max-memory")
+    .long("max-memory")
+    .action(ArgAction::Set)
+    .num_args(NumArgs::Exact(1))
+    .value_name("SIZE")
+.help("Limit the main thread's JavaScript heap, e.g. --max-memory=512m (a plain number is megabytes; k, m and g suffixes are accepted; at least 32m).\n  Reaching it ends the program with exit code 137 and \"Memory limit exceeded\". Workers have their own heaps (see `deno: { memoryMb }`), and memory outside the heap (ArrayBuffers, native code) is not counted.\n  A best-effort guardrail against runaway programs, not a security boundary"),
+  ArgDef::new("max-cpu-time")
+    .long("max-cpu-time")
+    .action(ArgAction::Set)
+    .num_args(NumArgs::Exact(1))
+    .value_name("SECONDS")
+.help("Limit the CPU time (user + system, every thread of the process) the program may use, in whole seconds, e.g. --max-cpu-time=30.\n  Counted from when the program starts; using it up ends the program with exit code 152 and \"CPU time limit exceeded\". Subprocesses are not counted.\n  A best-effort guardrail against runaway programs, not a security boundary"),
+  ArgDef::new("max-time")
+    .long("max-time")
+    .action(ArgAction::Set)
+    .num_args(NumArgs::Exact(1))
+    .value_name("SECONDS")
+.help("Limit how long the program may run (wall-clock time), in whole seconds, e.g. --max-time=60.\n  Counted from when the program starts, idle time included; reaching it ends the program with exit code 124 and \"Time limit exceeded\". Subprocesses are not stopped.\n  A best-effort guardrail against runaway programs, not a security boundary"),
+];
+
 pub static CPU_PROF_ARGS: &[ArgDef] = &[
   ArgDef::new("cpu-prof").long("cpu-prof").set_true().hidden()
 .help("Start the V8 CPU profiler on startup and write the profile to disk on exit. Profiles are written to the current directory by default"),
@@ -712,6 +737,7 @@ static RUN_ARG_GROUPS: &[&[ArgDef]] = &[
   COMPILE_ARGS,
   INSPECT_ARGS,
   RUNTIME_MISC_ARGS,
+  RESOURCE_LIMIT_ARGS,
   CPU_PROF_ARGS,
   ALLOW_SCRIPTS_ARG,
 ];
@@ -1907,6 +1933,7 @@ pub static COMPILE_SUBCOMMAND: CommandDef = CommandDef {
     COMPILE_ARGS,
     INSPECT_ARGS,
     RUNTIME_MISC_ARGS,
+    RESOURCE_LIMIT_ARGS,
   ],
   subcommands: &[],
   default_subcommand: None,

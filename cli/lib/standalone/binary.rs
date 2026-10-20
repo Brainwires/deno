@@ -162,6 +162,16 @@ pub struct Metadata {
   /// other build, and in a binary from a CLI that predates the field.
   #[serde(default, skip_serializing_if = "std::ops::Not::not")]
   pub desktop_dev: bool,
+  /// `--max-memory` at compile time: the main thread's JavaScript heap limit,
+  /// in bytes. The compiled program enforces it as `deno run` would.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub max_memory: Option<u64>,
+  /// `--max-cpu-time` at compile time, in seconds.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub max_cpu_time: Option<u64>,
+  /// `--max-time` at compile time, in seconds.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub max_time: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]

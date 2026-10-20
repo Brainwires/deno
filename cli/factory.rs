@@ -1444,6 +1444,11 @@ impl CliFactory {
         std::env::var("DENO_DISABLE_OFFSCREEN_CANVAS").as_deref(),
         Ok("1") | Ok("true")
       ),
+      resource_limits: deno_lib::resource_limits::ResourceLimits {
+        max_memory_bytes: cli_options.max_memory(),
+        max_cpu_time_secs: cli_options.max_cpu_time(),
+        max_time_secs: cli_options.max_time(),
+      },
     })
   }
 

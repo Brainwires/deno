@@ -317,6 +317,9 @@ pub struct LibMainWorkerOptions {
   pub maybe_initial_cwd: Option<Url>,
   /// When true, the `OffscreenCanvas` global is removed at bootstrap.
   pub disable_offscreen_canvas: bool,
+  /// `--max-memory`, `--max-cpu-time` and `--max-time` (`deno run`, and a
+  /// program compiled with them). See [`crate::resource_limits`].
+  pub resource_limits: crate::resource_limits::ResourceLimits,
 }
 
 #[derive(Default, Clone)]
@@ -784,7 +787,11 @@ impl<TSys: DenoLibSys> LibMainWorkerFactory<TSys> {
       startup_snapshot: shared.options.startup_snapshot,
       residual_lazy_js_sources: shared.options.residual_lazy_js_sources,
       residual_lazy_esm_sources: shared.options.residual_lazy_esm_sources,
-      create_params: create_isolate_create_params(&shared.sys),
+      // `--max-memory` caps this (the main) isolate's heap.
+      create_params: shared
+        .options
+        .resource_limits
+        .apply_heap_limit(create_isolate_create_params(&shared.sys)),
       unsafely_ignore_certificate_errors: shared
         .options
         .unsafely_ignore_certificate_errors
@@ -809,6 +816,12 @@ impl<TSys: DenoLibSys> LibMainWorkerFactory<TSys> {
     let mut worker =
       MainWorker::bootstrap_from_options(&main_module, services, options);
     worker.setup_memory_trim_handler();
+    // `--max-memory` / `--max-cpu-time` / `--max-time`: the CPU budget and
+    // the deadline count from here.
+    crate::resource_limits::arm(
+      shared.options.resource_limits,
+      &mut worker.js_runtime,
+    );
 
     // Wire module hook registry into OpState so JS ops share it with the loader
     if let Some(registry) = hook_registry {

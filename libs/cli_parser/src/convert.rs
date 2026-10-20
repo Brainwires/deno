@@ -387,6 +387,7 @@ fn default_parse(
 
     // Bare run - same as `deno run` but with bare=true
     runtime_args_parse(result, flags, true, true)?;
+    resource_limit_args_parse(result, flags)?;
     ext_arg_parse(result, flags);
     flags.tunnel = result.get_bool("tunnel");
     flags.code_cache_enabled = !result.get_bool("no-code-cache");
@@ -402,6 +403,15 @@ fn default_parse(
       return Err(CliError::new(
         CliErrorKind::InvalidValue,
         "--watch and --watch-hmr cannot be used while reading from stdin.",
+      ));
+    }
+    // A resource limit ends the process; under a watcher it would have to end
+    // only the current run and leave the watcher waiting, which the limits
+    // don't do, so the two are refused together.
+    if watch.is_some() && flags.has_resource_limits() {
+      return Err(CliError::new(
+        CliErrorKind::InvalidValue,
+        "--max-memory, --max-cpu-time and --max-time cannot be used with --watch or --watch-hmr.",
       ));
     }
     flags.watch = watch;
@@ -852,6 +862,88 @@ fn seed_arg_parse(result: &ParseResult, flags: &mut Flags) {
     flags.seed = Some(seed);
     flags.v8_flags.push(format!("--random-seed={seed}"));
   }
+}
+
+/// The smallest `--max-memory`: below about this V8 can't deserialize its
+/// startup snapshot, and the process aborts before any code runs.
+pub const MIN_MAX_MEMORY_BYTES: u64 = 32 * 1024 * 1024;
+
+/// Parses a `--max-memory` size into bytes: a plain number is megabytes, and
+/// `k`/`kb`, `m`/`mb`, `g`/`gb` (any case) are binary units (1k = 1024 bytes).
+/// Zero, a size under [`MIN_MAX_MEMORY_BYTES`] and anything else is an error.
+pub fn parse_memory_size(value: &str) -> Result<u64, String> {
+  let lower = value.trim().to_ascii_lowercase();
+  let units: [(&str, u64); 6] = [
+    ("kb", 1 << 10),
+    ("k", 1 << 10),
+    ("mb", 1 << 20),
+    ("m", 1 << 20),
+    ("gb", 1 << 30),
+    ("g", 1 << 30),
+  ];
+  let (number, unit) = units
+    .iter()
+    .find_map(|(suffix, unit)| Some((lower.strip_suffix(suffix)?, *unit)))
+    .unwrap_or((lower.as_str(), 1 << 20));
+  let invalid = || {
+    format!(
+      "invalid value '{value}' for '--max-memory': expected a size such as 512m, 2g or 65536k"
+    )
+  };
+  let number = number.trim();
+  if number.is_empty() || !number.bytes().all(|b| b.is_ascii_digit()) {
+    return Err(invalid());
+  }
+  let bytes = number
+    .parse::<u64>()
+    .ok()
+    .and_then(|n| n.checked_mul(unit))
+    .ok_or_else(invalid)?;
+  if bytes < MIN_MAX_MEMORY_BYTES {
+    return Err(format!(
+      "invalid value '{value}' for '--max-memory': must be at least 32m"
+    ));
+  }
+  Ok(bytes)
+}
+
+/// Parses `--max-cpu-time` / `--max-time`: a whole number of seconds, at
+/// least 1.
+pub fn parse_limit_seconds(value: &str, flag: &str) -> Result<u64, String> {
+  let digits = value.trim();
+  if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+    return Err(format!(
+      "invalid value '{value}' for '{flag}': expected a whole number of seconds"
+    ));
+  }
+  match digits.parse::<u64>() {
+    Ok(0) => Err(format!(
+      "invalid value '{value}' for '{flag}': must be at least 1 second"
+    )),
+    Ok(seconds) => Ok(seconds),
+    Err(_) => Err(format!("invalid value '{value}' for '{flag}': too large")),
+  }
+}
+
+/// `--max-memory`, `--max-cpu-time` and `--max-time` (`run` and `compile`).
+fn resource_limit_args_parse(
+  result: &ParseResult,
+  flags: &mut Flags,
+) -> Result<(), CliError> {
+  let invalid =
+    |message: String| CliError::new(CliErrorKind::InvalidValue, message);
+  if let Some(value) = result.get_one("max-memory") {
+    flags.max_memory = Some(parse_memory_size(value).map_err(invalid)?);
+  }
+  if let Some(value) = result.get_one("max-cpu-time") {
+    flags.max_cpu_time =
+      Some(parse_limit_seconds(value, "--max-cpu-time").map_err(invalid)?);
+  }
+  if let Some(value) = result.get_one("max-time") {
+    flags.max_time =
+      Some(parse_limit_seconds(value, "--max-time").map_err(invalid)?);
+  }
+  Ok(())
 }
 
 fn enable_testing_features_arg_parse(result: &ParseResult, flags: &mut Flags) {
@@ -1401,6 +1493,7 @@ fn run_parse(
   force_hmr: bool,
 ) -> Result<(), CliError> {
   runtime_args_parse(result, flags, true, true)?;
+  resource_limit_args_parse(result, flags)?;
   ext_arg_parse(result, flags);
 
   flags.tunnel = result.get_bool("tunnel");
@@ -1447,6 +1540,15 @@ fn run_parse(
       return Err(CliError::new(
         CliErrorKind::InvalidValue,
         "--watch and --watch-hmr cannot be used while reading from stdin.",
+      ));
+    }
+    // A resource limit ends the process; under a watcher it would have to end
+    // only the current run and leave the watcher waiting, which the limits
+    // don't do, so the two are refused together.
+    if watch.is_some() && flags.has_resource_limits() {
+      return Err(CliError::new(
+        CliErrorKind::InvalidValue,
+        "--max-memory, --max-cpu-time and --max-time cannot be used with --watch or --watch-hmr.",
       ));
     }
     flags.watch = watch;
@@ -2117,6 +2219,7 @@ fn compile_parse(
 ) -> Result<(), CliError> {
   flags.type_check_mode = TypeCheckMode::Local;
   runtime_args_parse(result, flags, true, false)?;
+  resource_limit_args_parse(result, flags)?;
 
   let source_file = result
     .get_one("source_file")

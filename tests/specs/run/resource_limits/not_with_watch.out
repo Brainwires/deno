@@ -1,0 +1,2 @@
+error: --max-memory, --max-cpu-time and --max-time cannot be used with --watch or --watch-hmr.
+[WILDCARD]

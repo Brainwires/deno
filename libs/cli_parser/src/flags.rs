@@ -1045,6 +1045,12 @@ pub struct Flags {
   pub no_npm: bool,
   pub reload: bool,
   pub seed: Option<u64>,
+  /// `--max-memory`: the main thread's JavaScript heap limit, in bytes.
+  pub max_memory: Option<u64>,
+  /// `--max-cpu-time`: the process CPU time budget, in seconds.
+  pub max_cpu_time: Option<u64>,
+  /// `--max-time`: the wall-clock run time limit, in seconds.
+  pub max_time: Option<u64>,
   pub trace_ops: Option<Vec<String>>,
   pub unstable_config: UnstableConfig,
   /// `--no-detect-cjs`: ambiguous files are ES modules (the pre-denext
@@ -1120,6 +1126,13 @@ impl PermissionFlags {
   }
 }
 impl Flags {
+  /// Whether `--max-memory`, `--max-cpu-time` or `--max-time` was given.
+  pub fn has_resource_limits(&self) -> bool {
+    self.max_memory.is_some()
+      || self.max_cpu_time.is_some()
+      || self.max_time.is_some()
+  }
+
   pub fn has_permission(&self) -> bool {
     self.permissions.has_permission()
   }

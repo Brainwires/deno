@@ -3,6 +3,7 @@
 pub mod args;
 pub mod loader;
 pub mod npm;
+pub mod resource_limits;
 pub mod shared;
 pub mod standalone;
 pub mod sys;

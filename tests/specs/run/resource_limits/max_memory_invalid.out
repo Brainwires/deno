@@ -1,0 +1,2 @@
+error: invalid value 'nope' for '--max-memory': expected a size such as 512m, 2g or 65536k
+[WILDCARD]

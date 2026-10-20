@@ -1008,6 +1008,68 @@ fn get_cpu_usage() -> (std::time::Duration, std::time::Duration) {
   Default::default()
 }
 
+/// Whether [`process_cpu_time`] can measure this process on this platform.
+pub const PROCESS_CPU_TIME_SUPPORTED: bool = cfg!(any(unix, windows));
+
+/// The CPU time this process has used so far (user + system, all threads), or
+/// `None` where it can't be read. Unlike [`get_cpu_usage`] this reads
+/// Windows' `FILETIME`s directly, so it doesn't wrap after 24 hours.
+#[cfg(unix)]
+pub fn process_cpu_time() -> Option<std::time::Duration> {
+  let mut rusage = std::mem::MaybeUninit::uninit();
+  // SAFETY: libc call with a valid out pointer.
+  let ret = unsafe { libc::getrusage(libc::RUSAGE_SELF, rusage.as_mut_ptr()) };
+  if ret != 0 {
+    return None;
+  }
+  // SAFETY: getrusage succeeded, so it filled the struct.
+  let rusage = unsafe { rusage.assume_init() };
+  let timeval = |t: libc::timeval| {
+    std::time::Duration::from_secs(t.tv_sec as u64)
+      + std::time::Duration::from_micros(t.tv_usec as u64)
+  };
+  Some(timeval(rusage.ru_utime) + timeval(rusage.ru_stime))
+}
+
+#[cfg(windows)]
+pub fn process_cpu_time() -> Option<std::time::Duration> {
+  use windows_sys::Win32::Foundation::FILETIME;
+  use windows_sys::Win32::System::Threading::GetCurrentProcess;
+  use windows_sys::Win32::System::Threading::GetProcessTimes;
+
+  let empty = FILETIME {
+    dwLowDateTime: 0,
+    dwHighDateTime: 0,
+  };
+  let (mut creation, mut exit, mut kernel, mut user) =
+    (empty, empty, empty, empty);
+  // SAFETY: Win32 call with valid out pointers; the pseudo handle needs no
+  // closing.
+  let ok = unsafe {
+    GetProcessTimes(
+      GetCurrentProcess(),
+      &mut creation,
+      &mut exit,
+      &mut kernel,
+      &mut user,
+    )
+  };
+  if ok == 0 {
+    return None;
+  }
+  // A FILETIME duration counts 100-nanosecond intervals.
+  let filetime = |t: FILETIME| {
+    let ticks = ((t.dwHighDateTime as u64) << 32) | t.dwLowDateTime as u64;
+    std::time::Duration::from_nanos(ticks.saturating_mul(100))
+  };
+  Some(filetime(kernel) + filetime(user))
+}
+
+#[cfg(not(any(windows, unix)))]
+pub fn process_cpu_time() -> Option<std::time::Duration> {
+  None
+}
+
 #[op2(fast)]
 fn op_runtime_memory_usage(
   scope: &mut v8::PinScope<'_, '_>,
@@ -1208,5 +1270,27 @@ mod test {
     let mut items = SORTED_NODE_ENV_VAR_ALLOWLIST.to_vec();
     items.sort();
     assert_eq!(items, SORTED_NODE_ENV_VAR_ALLOWLIST);
+  }
+
+  #[test]
+  fn process_cpu_time_advances_with_work() {
+    let before = crate::process_cpu_time().unwrap();
+    // Spin until this process has used at least 50 ms more CPU time; the
+    // wall-clock bound only keeps a broken clock from hanging the test.
+    let started = std::time::Instant::now();
+    let mut x = 0u64;
+    loop {
+      for i in 0..100_000u64 {
+        x = std::hint::black_box(x.wrapping_mul(31).wrapping_add(i));
+      }
+      let used = crate::process_cpu_time().unwrap() - before;
+      if used >= std::time::Duration::from_millis(50) {
+        break;
+      }
+      assert!(
+        started.elapsed() < std::time::Duration::from_secs(30),
+        "CPU time did not advance: {used:?}"
+      );
+    }
   }
 }

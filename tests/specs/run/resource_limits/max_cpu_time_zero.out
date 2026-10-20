@@ -1,0 +1,2 @@
+error: invalid value '0' for '--max-cpu-time': must be at least 1 second
+[WILDCARD]
