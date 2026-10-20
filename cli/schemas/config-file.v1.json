@@ -128,7 +128,7 @@
       "properties": {
         "paranoid": {
           "type": "boolean",
-          "description": "Turn every gate on and make each fail closed: jailScripts on, advisoryCheck required, unknown download counts refuse `deno add`, trust-policy no-downgrade. A member set to something weaker is an error."
+          "description": "Turn every gate on and make each fail closed: jailScripts on, advisoryCheck required, lowDownloadCheck required, trust-policy no-downgrade. A member set to something weaker is an error."
         },
         "jailScripts": {
           "description": "Run approved npm lifecycle scripts confined (scrubbed environment, temporary HOME, writes only to node_modules and temp, no credential files, no network unless allowed). An object turns it on and sets exceptions.",
@@ -174,10 +174,15 @@
           "enum": ["on", "off", "required"],
           "description": "Refuse npm versions listed as malicious (OSV MAL- advisories). on: refuse, warn when OSV can't be reached; required: also refuse when OSV can't be reached; off: no check."
         },
+        "lowDownloadCheck": {
+          "type": "string",
+          "enum": ["off", "warn", "prompt", "required"],
+          "description": "What `deno add` does with a package whose weekly downloads are below lowDownloadThreshold. warn (default): print the count and how to allow it; prompt: ask in a terminal, refuse without one; required: like prompt, and an unknown count refuses too; off: no check."
+        },
         "lowDownloadThreshold": {
           "type": "integer",
           "minimum": 0,
-          "description": "Weekly downloads below which `deno add` asks before adding a package (default 1000; 0 turns the check off)."
+          "description": "Weekly downloads below which `deno add` warns, or asks with lowDownloadCheck prompt / required (default 1000; 0 turns the check off)."
         },
         "allowLowDownloads": {
           "type": "array",

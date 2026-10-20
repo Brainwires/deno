@@ -73,6 +73,13 @@
       "output": "weak_env.out",
       "exitCode": 1
     },
+    "weaker_low_download_check_is_an_error": {
+      "cwd": "npmrc",
+      "args": "install",
+      "envs": { "npm_config_low_download_check": "warn" },
+      "output": "weak_low_download_check.out",
+      "exitCode": 1
+    },
     "trust_policy_off_is_an_error": {
       "cwd": "trust_off",
       "args": "install",

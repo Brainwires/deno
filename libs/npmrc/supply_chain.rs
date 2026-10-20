@@ -1,8 +1,9 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 
 //! npm supply-chain gates (denext): the malicious-version gate
-//! (`advisory-check`), the low-download gate on `deno add`
-//! (`low-download-threshold`, `allowed-unpopular-packages`), confined
+//! (`advisory-check`), the low-download check on `deno add`
+//! (`low-download-check`, `low-download-threshold`,
+//! `allowed-unpopular-packages`), confined
 //! lifecycle scripts (`jail-scripts`) and `paranoid`, which turns all of them
 //! on and makes each one fail closed.
 //!
@@ -50,12 +51,51 @@ impl AdvisoryCheck {
   }
 }
 
+/// `low-download-check`: what `deno add` does with a package almost nobody
+/// downloads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
+pub enum LowDownloadCheck {
+  /// No download counts are fetched.
+  Off,
+  /// A warning with the count and how to allow the package (the default).
+  #[default]
+  Warn,
+  /// A terminal asks; without one the add is refused. An unknown count lets
+  /// the add through.
+  Prompt,
+  /// Like `Prompt`, and an unknown count (no count, the API can't be reached)
+  /// is treated as a low one.
+  Required,
+}
+
+impl LowDownloadCheck {
+  pub fn parse(value: &str) -> Option<Self> {
+    match value.trim() {
+      "off" | "false" => Some(Self::Off),
+      "warn" => Some(Self::Warn),
+      "prompt" | "on" | "true" => Some(Self::Prompt),
+      "required" => Some(Self::Required),
+      _ => None,
+    }
+  }
+
+  pub fn as_str(&self) -> &'static str {
+    match self {
+      Self::Off => "off",
+      Self::Warn => "warn",
+      Self::Prompt => "prompt",
+      Self::Required => "required",
+    }
+  }
+}
+
 /// The supply-chain settings one source sets. `None` means "not set here".
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct SupplyChainSettings {
   pub paranoid: Option<bool>,
   pub jail_scripts: Option<bool>,
   pub advisory_check: Option<AdvisoryCheck>,
+  pub low_download_check: Option<LowDownloadCheck>,
   pub low_download_threshold: Option<u64>,
   /// Package names or `@scope/*` / `prefix*` globs exempt from the
   /// low-download gate.
@@ -103,6 +143,11 @@ impl SupplyChainSettings {
           self.advisory_check = Some(value);
         }
       }
+      "low-download-check" => {
+        if let Some(value) = LowDownloadCheck::parse(value) {
+          self.low_download_check = Some(value);
+        }
+      }
       "low-download-threshold" => {
         if let Ok(value) = value.trim().parse::<u64>() {
           self.low_download_threshold = Some(value);
@@ -128,6 +173,7 @@ impl SupplyChainSettings {
       "paranoid",
       "jail-scripts",
       "advisory-check",
+      "low-download-check",
       "low-download-threshold",
       "allowed-unpopular-packages",
     ] {
@@ -164,6 +210,8 @@ impl SupplyChainSettings {
     self.paranoid = max_opt(self.paranoid, other.paranoid);
     self.jail_scripts = max_opt(self.jail_scripts, other.jail_scripts);
     self.advisory_check = max_opt(self.advisory_check, other.advisory_check);
+    self.low_download_check =
+      max_opt(self.low_download_check, other.low_download_check);
     // a threshold of 0 disables the gate: any other value is stricter
     self.low_download_threshold =
       match (self.low_download_threshold, other.low_download_threshold) {
@@ -189,11 +237,10 @@ pub struct SupplyChainConfig {
   /// Approved lifecycle scripts run confined (`jail-scripts`).
   pub jail_scripts: bool,
   pub advisory_check: AdvisoryCheck,
-  /// Weekly downloads below which `deno add` asks; `0` disables the gate.
+  /// What `deno add` does with a package below the threshold.
+  pub low_download_check: LowDownloadCheck,
+  /// Weekly downloads below which the check applies; `0` disables it.
   pub low_download_threshold: u64,
-  /// Whether an unknown download count (the downloads API can't be reached
-  /// or has no count) refuses the add instead of letting it through.
-  pub low_downloads_fail_closed: bool,
   pub allowed_unpopular_packages: Vec<String>,
   /// The settings the `.npmrc` files set, kept so the workspace can resolve
   /// them again together with the environment and deno.json.
@@ -206,8 +253,8 @@ impl Default for SupplyChainConfig {
       paranoid: false,
       jail_scripts: false,
       advisory_check: AdvisoryCheck::On,
+      low_download_check: LowDownloadCheck::Warn,
       low_download_threshold: DEFAULT_LOW_DOWNLOAD_THRESHOLD,
-      low_downloads_fail_closed: false,
       allowed_unpopular_packages: Vec::new(),
       npmrc_settings: Default::default(),
     }
@@ -284,6 +331,14 @@ pub fn resolve_supply_chain(
           "advisory-check=required",
         ));
       }
+      if let Some(check) = settings.low_download_check
+        && check != LowDownloadCheck::Required
+      {
+        return Err(conflict(
+          format!("low-download-check={}", check.as_str()),
+          "low-download-check=required",
+        ));
+      }
       if settings.low_download_threshold == Some(0) {
         return Err(conflict(
           "low-download-threshold=0".into(),
@@ -306,10 +361,14 @@ pub fn resolve_supply_chain(
     } else {
       merged.advisory_check.unwrap_or_default()
     },
+    low_download_check: if paranoid {
+      LowDownloadCheck::Required
+    } else {
+      merged.low_download_check.unwrap_or_default()
+    },
     low_download_threshold: merged
       .low_download_threshold
       .unwrap_or(DEFAULT_LOW_DOWNLOAD_THRESHOLD),
-    low_downloads_fail_closed: paranoid,
     allowed_unpopular_packages: merged.allowed_unpopular_packages,
     npmrc_settings,
   })
@@ -338,7 +397,7 @@ mod test {
     assert!(!config.jail_scripts);
     assert_eq!(config.advisory_check, AdvisoryCheck::On);
     assert_eq!(config.low_download_threshold, 1000);
-    assert!(!config.low_downloads_fail_closed);
+    assert_eq!(config.low_download_check, LowDownloadCheck::Warn);
   }
 
   #[test]
@@ -348,7 +407,7 @@ mod test {
     assert!(config.paranoid);
     assert!(config.jail_scripts);
     assert_eq!(config.advisory_check, AdvisoryCheck::Required);
-    assert!(config.low_downloads_fail_closed);
+    assert_eq!(config.low_download_check, LowDownloadCheck::Required);
     assert_eq!(config.low_download_threshold, 1000);
   }
 
@@ -371,6 +430,8 @@ mod test {
       ("jail-scripts", "false"),
       ("advisory-check", "off"),
       ("advisory-check", "on"),
+      ("low-download-check", "warn"),
+      ("low-download-check", "prompt"),
       ("low-download-threshold", "0"),
     ] {
       let weak = settings(&[(key, value)]);
@@ -418,10 +479,15 @@ mod test {
 
   #[test]
   fn strictest_value_wins_without_paranoid() {
-    let a = settings(&[("advisory-check", "off"), ("jail-scripts", "false")]);
+    let a = settings(&[
+      ("advisory-check", "off"),
+      ("jail-scripts", "false"),
+      ("low-download-check", "off"),
+    ]);
     let b = settings(&[
       ("advisory-check", "required"),
       ("jail-scripts", "true"),
+      ("low-download-check", "prompt"),
       ("low-download-threshold", "0"),
     ]);
     let c = settings(&[("low-download-threshold", "10")]);
@@ -433,10 +499,12 @@ mod test {
     assert_eq!(config.advisory_check, AdvisoryCheck::Required);
     assert!(config.jail_scripts);
     assert_eq!(config.low_download_threshold, 10);
+    assert_eq!(config.low_download_check, LowDownloadCheck::Prompt);
     // only off: off
     let config =
       resolve_supply_chain(&[("a", &a)], Default::default()).unwrap();
     assert_eq!(config.advisory_check, AdvisoryCheck::Off);
+    assert_eq!(config.low_download_check, LowDownloadCheck::Off);
     assert!(!config.jail_scripts);
   }
 

@@ -135,6 +135,9 @@ pub struct SupplyChainConfig {
   pub jail_packages: BTreeMap<String, JailPackageConfig>,
   /// `advisoryCheck` (`advisory-check`): `"on"`, `"off"` or `"required"`.
   pub advisory_check: Option<String>,
+  /// `lowDownloadCheck` (`low-download-check`): `"off"`, `"warn"`,
+  /// `"prompt"` or `"required"`.
+  pub low_download_check: Option<String>,
   /// `lowDownloadThreshold` (`low-download-threshold`).
   pub low_download_threshold: Option<u64>,
   /// `allowLowDownloads` (`allowed-unpopular-packages`).
@@ -163,6 +166,8 @@ struct RawSupplyChainConfig {
   jail_scripts: Option<RawJailScripts>,
   #[serde(default)]
   advisory_check: Option<String>,
+  #[serde(default)]
+  low_download_check: Option<String>,
   #[serde(default)]
   low_download_threshold: Option<u64>,
   #[serde(default)]
@@ -2779,6 +2784,13 @@ impl ConfigFile {
         "\"advisoryCheck\" must be \"on\", \"off\" or \"required\", got \"{check}\""
       )));
     }
+    if let Some(check) = &raw.low_download_check
+      && !matches!(check.as_str(), "off" | "warn" | "prompt" | "required")
+    {
+      return Err(parse_err(format!(
+        "\"lowDownloadCheck\" must be \"off\", \"warn\", \"prompt\" or \"required\", got \"{check}\""
+      )));
+    }
     let base_dir = deno_path_util::url_to_file_path(&self.specifier)
       .ok()
       .and_then(|p| p.parent().map(|p| p.to_path_buf()));
@@ -2818,6 +2830,7 @@ impl ConfigFile {
       jail_net,
       jail_packages,
       advisory_check: raw.advisory_check,
+      low_download_check: raw.low_download_check,
       low_download_threshold: raw.low_download_threshold,
       allow_low_downloads: raw.allow_low_downloads,
     })
@@ -4267,6 +4280,7 @@ mod tests {
       r#"{ "supplyChain": {
         "paranoid": true,
         "advisoryCheck": "required",
+        "lowDownloadCheck": "prompt",
         "lowDownloadThreshold": 5000,
         "allowLowDownloads": ["npm:left-pad", "@org/*"],
         "jailScripts": {
@@ -4282,6 +4296,7 @@ mod tests {
     assert_eq!(config.jail_scripts, Some(true));
     assert_eq!(config.jail_net, Some(false));
     assert_eq!(config.advisory_check.as_deref(), Some("required"));
+    assert_eq!(config.low_download_check.as_deref(), Some("prompt"));
     assert_eq!(config.low_download_threshold, Some(5000));
     assert_eq!(config.allow_low_downloads, vec!["npm:left-pad", "@org/*"]);
     let sharp = &config.jail_packages["sharp"];
@@ -4298,6 +4313,10 @@ mod tests {
     assert!(get_result(r#"{ "supplyChain": { "paranoia": true } }"#).is_err());
     assert!(
       get_result(r#"{ "supplyChain": { "advisoryCheck": "yes" } }"#).is_err()
+    );
+    assert!(
+      get_result(r#"{ "supplyChain": { "lowDownloadCheck": "on" } }"#)
+        .is_err()
     );
     assert!(
       get_result(

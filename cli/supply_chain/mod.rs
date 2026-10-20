@@ -4,7 +4,8 @@
 //!
 //! - [`advisories`]: refuse versions listed as malicious (OSV `MAL-*`).
 //! - [`downloads`]: `deno add` of a package with very low weekly downloads
-//!   asks first (a typosquat guard).
+//!   warns (or, with `low-download-check=prompt`, asks first): a typosquat
+//!   guard.
 //! - [`jail`]: approved lifecycle scripts run confined.
 //! - `paranoid` (resolved in `deno_npmrc::resolve_supply_chain`): all of them
 //!   on, each failing closed.

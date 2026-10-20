@@ -21,6 +21,7 @@ mod supply_chain;
 
 pub use supply_chain::AdvisoryCheck;
 pub use supply_chain::DEFAULT_LOW_DOWNLOAD_THRESHOLD;
+pub use supply_chain::LowDownloadCheck;
 pub use supply_chain::SupplyChainConfig;
 pub use supply_chain::SupplyChainConfigError;
 pub use supply_chain::SupplyChainSettings;
@@ -364,6 +365,7 @@ impl NpmRc {
               "paranoid"
                 | "jail-scripts"
                 | "advisory-check"
+                | "low-download-check"
                 | "low-download-threshold"
                 | "allowed-unpopular-packages"
             ) {

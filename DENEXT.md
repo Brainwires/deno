@@ -2775,32 +2775,44 @@ where the changes are discussed.
     `tests/util/server/servers/supply_chain.rs` (port 4270; every spec test gets
     `DENO_OSV_URL` pointing at it).
 
-84. **`feat(npm)`: `deno add` asks before adding a package almost nobody
-    downloads** (`cli/supply_chain/downloads.rs`, `cli/tools/pm/mod.rs`).
+84. **`feat(npm)`: `deno add` warns about a package almost nobody downloads, and
+    can ask first** (`cli/supply_chain/downloads.rs`, `cli/tools/pm/mod.rs`).
     Adapted from
     [denoland/deno#35716](https://github.com/denoland/deno/issues/35716): a
     typosquat guard. A package `deno add` (or `deno install <pkg>`) adds that
     the lockfile doesn't know yet and that has fewer weekly downloads than
     `low-download-threshold` (1000 by default; `0` turns it off) on
-    `api.npmjs.org/downloads/point/last-week/` asks for confirmation in a
-    terminal and is refused otherwise (or with `CI` set), naming the count and
-    how to allow it: `--allow-low-downloads=npm:<name>,...` (bare: all of them),
-    `allowed-unpopular-packages` (`.npmrc`, names or `@scope/*` / `prefix*`
-    globs) or deno.json `supplyChain.allowLowDownloads`. Packages from another
-    registry than `registry.npmjs.org` (a private one has no public counts) are
-    not checked; an unknown count (no count for the name, or the API can't be
-    reached) lets the add through unless `paranoid`. Nothing is written before
-    the check. `DENO_NPM_DOWNLOADS_URL` names another downloads API, and then
-    the default registry is checked against it whatever it is (the spec tests'
-    stand-in). Not covered: a "did you mean" suggestion, and transitive
-    dependencies.
+    `api.npmjs.org/downloads/point/last-week/` is handled per
+    `low-download-check` (`.npmrc`, `npm_config_low_download_check`, deno.json
+    `supplyChain.lowDownloadCheck`):
+    - `warn` (the default): a warning with the count and how to allow the
+      package, and the add goes on, so CI scripts that add small packages keep
+      working (opt-in first, per the 3.0 rule);
+    - `prompt`: a terminal asks for confirmation; without one (or with `CI` set)
+      the add is refused, naming the count and how to allow it;
+    - `required` (and `paranoid`): like `prompt`, and an unknown count (no count
+      for the name, or the API can't be reached) refuses too, where `prompt`
+      lets it through;
+    - `off`: no counts are fetched.
 
-    Tests: `npm/supply_chain_low_downloads` (refused without a terminal with
-    deno.json unchanged, a package above the threshold added, allowed by name on
-    the command line but not by another name, allowed by the bare flag, by an
-    `.npmrc` glob, by deno.json, a threshold of 0, a name the lockfile already
-    has, an unknown count and an unreachable API letting it through, another
-    registry not checked).
+    Allowing a package by name: `--allow-low-downloads=npm:<name>,...` (bare:
+    all of them, not under `paranoid`), `allowed-unpopular-packages` (`.npmrc`,
+    names or `@scope/*` / `prefix*` globs) or deno.json
+    `supplyChain.allowLowDownloads`. Packages from another registry than
+    `registry.npmjs.org` (a private one has no public counts) are not checked.
+    Nothing is written before the check. `DENO_NPM_DOWNLOADS_URL` names another
+    downloads API, and then the default registry is checked against it whatever
+    it is (the spec tests' stand-in). Not covered: a "did you mean" suggestion,
+    and transitive dependencies.
+
+    Tests: `npm/supply_chain_low_downloads` (the default warning with the add
+    going on, `off` silent, `prompt` refusing without a terminal with deno.json
+    unchanged, `prompt` from the environment, a package above the threshold
+    added, allowed by name on the command line but not by another name, allowed
+    by the bare flag, by an `.npmrc` glob, by deno.json, a threshold of 0, a
+    name the lockfile already has, an unknown count and an unreachable API
+    letting it through under `prompt`, `required` refusing an unknown count,
+    another registry not checked).
 
 85. **`feat(npm)`: `paranoid`** (`libs/npmrc/supply_chain.rs`,
     `libs/resolver/npmrc.rs`, `libs/config/deno_json`). Adapted from
@@ -2809,8 +2821,9 @@ where the changes are discussed.
     (`npm_config_paranoid`), or deno.json `"supplyChain": { "paranoid": true }`.
     Every gate is on and fails closed: `jail-scripts` on (and refusing to run a
     script where the OS can't confine it, a package's own `binary.host` granting
-    no network), `advisory-check=required` (OSV unreachable refuses), unknown
-    download counts refuse `deno add` (and `--allow-low-downloads` needs names),
+    no network), `advisory-check=required` (OSV unreachable refuses),
+    `low-download-check=required` (`deno add` asks, refuses without a terminal
+    and on unknown counts; `--allow-low-downloads` needs names),
     `trust-policy=no-downgrade`. Resolved in one place: each source (`.npmrc`
     files, the environment, the root deno.json's `supplyChain`) gives the
     settings it sets, and `resolve_supply_chain` combines them, so the resolver,
@@ -2819,12 +2832,13 @@ where the changes are discussed.
     can't quietly loosen another; `paranoid` can't be turned off by another
     source. A member set to something weaker than `paranoid` requires
     (`jail-scripts=false`, `advisory-check=off` or `on`,
-    `low-download-threshold=0`, `trust-policy=off`) is an error naming the
-    setting and where it is, so a configuration can't look strict while being
-    loose; a stricter member (a higher threshold) is kept, and the name
-    allow-lists stay honored. Not a member: `min-release-age` keeps its window
-    and its fallback to an older satisfying version (failing instead of falling
-    back is left for 3.0.0 final).
+    `low-download-check=off`, `warn` or `prompt`, `low-download-threshold=0`,
+    `trust-policy=off`) is an error naming the setting and where it is, so a
+    configuration can't look strict while being loose; a stricter member (a
+    higher threshold) is kept, and the name allow-lists stay honored. Not a
+    member: `min-release-age` keeps its window and its fallback to an older
+    satisfying version (failing instead of falling back is left for 3.0.0
+    final).
 
     Tests: `npm/supply_chain_paranoid` (OSV unreachable, an unknown count and an
     unreachable downloads API each refusing, `--allow-low-downloads` needing
@@ -2877,16 +2891,26 @@ Items 82-85. Each `.npmrc` key also reads `npm_config_<key>` /
 `.npmrc` files, the environment, deno.json) set a key, the stricter value wins;
 under `paranoid`, a weaker one is an error.
 
-| `.npmrc` key                 | deno.json `supplyChain`                              | Flag                              | Default | What                                                                                                                            |
-| ---------------------------- | ---------------------------------------------------- | --------------------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------- |
-| `paranoid`                   | `paranoid`                                           |                                   | `false` | Every gate on and failing closed (item 85).                                                                                     |
-| `jail-scripts`               | `jailScripts`: `true`, or `{ net, packages }`        | `--jail-scripts`                  | `false` | Approved dependencies' lifecycle scripts run confined (item 82).                                                                |
-|                              | `jailScripts.net`                                    |                                   | `false` | Network for every jailed script.                                                                                                |
-|                              | `jailScripts.packages.<name>`: `{ env, write, net }` |                                   |         | A package's exceptions: environment variables passed through, extra writable directories (relative to deno.json), network.      |
-| `advisory-check`             | `advisoryCheck`: `"on"` / `"off"` / `"required"`     |                                   | `on`    | Refuse versions OSV lists as malicious; `required` also refuses when OSV can't be reached (item 83).                            |
-| `low-download-threshold`     | `lowDownloadThreshold`                               |                                   | `1000`  | Weekly downloads below which `deno add` asks; `0` turns it off (item 84).                                                       |
-| `allowed-unpopular-packages` | `allowLowDownloads`                                  | `--allow-low-downloads[=<names>]` |         | Names (or `@scope/*`, `prefix*`) `deno add` adds whatever their counts; the flag without names allows all (not under paranoid). |
-| `trust-policy`               |                                                      |                                   | `off`   | `paranoid` sets `no-downgrade`.                                                                                                 |
+| `.npmrc` key                 | deno.json `supplyChain`                                            | Flag                              | Default | What                                                                                                                                    |
+| ---------------------------- | ------------------------------------------------------------------ | --------------------------------- | ------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| `paranoid`                   | `paranoid`                                                         |                                   | `false` | Every gate on and failing closed (item 85).                                                                                             |
+| `jail-scripts`               | `jailScripts`: `true`, or `{ net, packages }`                      | `--jail-scripts`                  | `false` | Approved dependencies' lifecycle scripts run confined (item 82).                                                                        |
+|                              | `jailScripts.net`                                                  |                                   | `false` | Network for every jailed script.                                                                                                        |
+|                              | `jailScripts.packages.<name>`: `{ env, write, net }`               |                                   |         | A package's exceptions: environment variables passed through, extra writable directories (relative to deno.json), network.              |
+| `advisory-check`             | `advisoryCheck`: `"on"` / `"off"` / `"required"`                   |                                   | `on`    | Refuse versions OSV lists as malicious; `required` also refuses when OSV can't be reached (item 83).                                    |
+| `low-download-check`         | `lowDownloadCheck`: `"off"` / `"warn"` / `"prompt"` / `"required"` |                                   | `warn`  | What `deno add` does below the threshold: warn and add; ask in a terminal and refuse without one; also refuse unknown counts (item 84). |
+| `low-download-threshold`     | `lowDownloadThreshold`                                             |                                   | `1000`  | Weekly downloads below which the low-download check applies; `0` turns it off (item 84).                                                |
+| `allowed-unpopular-packages` | `allowLowDownloads`                                                | `--allow-low-downloads[=<names>]` |         | Names (or `@scope/*`, `prefix*`) `deno add` adds whatever their counts; the flag without names allows all (not under paranoid).         |
+| `trust-policy`               |                                                                    |                                   | `off`   | `paranoid` sets `no-downgrade`.                                                                                                         |
+
+What each gate does by default, and under `paranoid`:
+
+| Gate                       | Default                                                     | `paranoid`                                                    |
+| -------------------------- | ----------------------------------------------------------- | ------------------------------------------------------------- |
+| Malicious versions (OSV)   | On: refused; OSV unreachable warns and installs             | Refused; OSV unreachable refuses                              |
+| Low downloads (`deno add`) | Warns with the count and how to allow it; adds              | Asks in a terminal, refuses without one and on unknown counts |
+| Lifecycle scripts          | Approved dependencies' scripts run unconfined (opt-in jail) | Jailed; not run where the OS can't confine them               |
+| Trust policy               | `off`                                                       | `no-downgrade`                                                |
 
 The services: `https://api.osv.dev/v1/querybatch` (no account) and
 `https://api.npmjs.org/downloads/point/last-week/<name>`, through Deno's HTTP

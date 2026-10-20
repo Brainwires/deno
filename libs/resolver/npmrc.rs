@@ -110,6 +110,10 @@ pub fn supply_chain_settings_from_deno_json(
       .advisory_check
       .as_deref()
       .and_then(deno_npmrc::AdvisoryCheck::parse),
+    low_download_check: config
+      .low_download_check
+      .as_deref()
+      .and_then(deno_npmrc::LowDownloadCheck::parse),
     low_download_threshold: config.low_download_threshold,
     allowed_unpopular_packages: config.allow_low_downloads.clone(),
     trust_policy_off: false,

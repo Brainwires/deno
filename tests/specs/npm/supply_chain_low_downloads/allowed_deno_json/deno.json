@@ -1,3 +1,6 @@
 {
-  "supplyChain": { "allowLowDownloads": ["npm:@denotest/unpopular-pkg"] }
+  "supplyChain": {
+    "lowDownloadCheck": "prompt",
+    "allowLowDownloads": ["npm:@denotest/unpopular-pkg"]
+  }
 }

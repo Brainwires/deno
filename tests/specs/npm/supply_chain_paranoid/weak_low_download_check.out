@@ -1,0 +1,1 @@
+[WILDCARD]`paranoid` is on, but low-download-check=warn in the environment weakens it. Remove low-download-check=warn (paranoid sets low-download-check=required), or turn paranoid off.[WILDCARD]

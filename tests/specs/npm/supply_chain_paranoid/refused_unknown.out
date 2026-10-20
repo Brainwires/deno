@@ -1,2 +1,2 @@
-[WILDCARD]error: The weekly downloads of npm:@denotest/unknown-downloads-pkg are unknown (paranoid refuses unknown counts). It may be a typosquat of a popular package: check the name.
+[WILDCARD]error: The weekly downloads of npm:@denotest/unknown-downloads-pkg are unknown (low-download-check=required, or paranoid, refuses unknown counts). It may be a typosquat of a popular package: check the name.
 [WILDCARD]

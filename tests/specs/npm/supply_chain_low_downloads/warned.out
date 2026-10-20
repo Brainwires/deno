@@ -1,0 +1,4 @@
+[WILDCARD]Warning npm:@denotest/unpopular-pkg has 12 weekly downloads (fewer than 1000). It may be a typosquat of a popular package: check the name.
+To silence this, pass --allow-low-downloads=npm:@denotest/unpopular-pkg, or list it in allowed-unpopular-packages (.npmrc) or "supplyChain": { "allowLowDownloads": ["@denotest/unpopular-pkg"] } (deno.json). To be asked first (and refused without a terminal), set low-download-check=prompt.
+Add npm:@denotest/unpopular-pkg@1.0.0
+[WILDCARD]

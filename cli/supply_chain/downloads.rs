@@ -1,16 +1,18 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 
-//! The low-download gate on `deno add` (DENEXT.md item 84): a typosquat
+//! The low-download check on `deno add` (DENEXT.md item 84): a typosquat
 //! guard. A package added by name that the lockfile doesn't know yet, and
 //! that has fewer weekly downloads than `low-download-threshold` (1000 by
-//! default) on the public npm registry, asks for confirmation in a terminal
-//! and is refused otherwise, unless `--allow-low-downloads=<name>` or
-//! `allowed-unpopular-packages` names it.
+//! default) on the public npm registry, gets a warning with its count and
+//! how to allow it (`low-download-check=warn`, the default). With
+//! `low-download-check=prompt` (or `required`, or `paranoid`) a terminal asks
+//! for confirmation and the add is refused without one, unless
+//! `--allow-low-downloads=<name>` or `allowed-unpopular-packages` names it.
 //!
 //! The count comes from `https://api.npmjs.org/downloads/point/last-week/`.
 //! Packages from another registry (a private one has no public counts) are
 //! not checked. An unknown count (the API can't be reached, or has no count
-//! for the name) lets the add through, unless `paranoid`.
+//! for the name) lets the add through, unless `required` (or `paranoid`).
 
 use std::io::IsTerminal;
 use std::io::Write;
@@ -20,6 +22,7 @@ use deno_core::anyhow::anyhow;
 use deno_core::anyhow::bail;
 use deno_core::error::AnyError;
 use deno_core::serde_json;
+use deno_npmrc::LowDownloadCheck;
 use deno_npmrc::ResolvedNpmRc;
 use deno_npmrc::SupplyChainConfig;
 use serde::Deserialize;
@@ -120,7 +123,8 @@ pub async fn check_added_packages(
   packages: &[AddedNpmPackage],
   is_in_lockfile: impl Fn(&str) -> bool,
 ) -> Result<(), AnyError> {
-  if config.low_download_threshold == 0 {
+  let mode = config.low_download_check;
+  if config.low_download_threshold == 0 || mode == LowDownloadCheck::Off {
     return Ok(());
   }
   let allow_all = options.allow_flag.is_some_and(|names| names.is_empty());
@@ -156,12 +160,22 @@ pub async fn check_added_packages(
           "npm:{name} has {count} weekly downloads (fewer than {threshold})"
         )
       }
-      None if config.low_downloads_fail_closed => format!(
-        "The weekly downloads of npm:{name} are unknown (paranoid refuses unknown counts)"
+      None if mode == LowDownloadCheck::Required => format!(
+        "The weekly downloads of npm:{name} are unknown (low-download-check=required, or paranoid, refuses unknown counts)"
       ),
       None => continue,
     };
     let hint = "It may be a typosquat of a popular package: check the name.";
+    let allow = format!(
+      "--allow-low-downloads=npm:{name}, or list it in allowed-unpopular-packages (.npmrc) or \"supplyChain\": {{ \"allowLowDownloads\": [\"{name}\"] }} (deno.json)"
+    );
+    if mode == LowDownloadCheck::Warn {
+      log::warn!(
+        "{} {reason}. {hint}\nTo silence this, pass {allow}. To be asked first (and refused without a terminal), set low-download-check=prompt.",
+        colors::yellow("Warning"),
+      );
+      continue;
+    }
     if is_interactive() {
       log::warn!("{} {reason}. {hint}", colors::yellow("Warning"));
       if confirm(&format!("Add npm:{name} anyway?")) {
@@ -171,9 +185,7 @@ pub async fn check_added_packages(
       bail!("Did not add npm:{name}.");
     }
     super::mark_gate_refused();
-    bail!(
-      "{reason}. {hint}\nTo add it anyway, pass --allow-low-downloads=npm:{name}, or list it in allowed-unpopular-packages (.npmrc) or \"supplyChain\": {{ \"allowLowDownloads\": [\"{name}\"] }} (deno.json)."
-    );
+    bail!("{reason}. {hint}\nTo add it anyway, pass {allow}.");
   }
   Ok(())
 }

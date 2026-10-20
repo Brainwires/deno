@@ -1,1 +1,1 @@
-[WILDCARD]error: The weekly downloads of npm:@denotest/add are unknown (paranoid refuses unknown counts).[WILDCARD]
+[WILDCARD]error: The weekly downloads of npm:@denotest/add are unknown (low-download-check=required, or paranoid, refuses unknown counts).[WILDCARD]

@@ -1,0 +1,2 @@
+[WILDCARD]error: The weekly downloads of npm:@denotest/unknown-downloads-pkg are unknown (low-download-check=required, or paranoid, refuses unknown counts). It may be a typosquat of a popular package: check the name.
+To add it anyway, pass --allow-low-downloads=npm:@denotest/unknown-downloads-pkg, or list it in allowed-unpopular-packages (.npmrc) or "supplyChain": { "allowLowDownloads": ["@denotest/unknown-downloads-pkg"] } (deno.json).
