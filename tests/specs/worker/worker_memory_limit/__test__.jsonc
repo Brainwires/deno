@@ -1,16 +1,38 @@
 {
   "tests": {
+    // A worker that keeps allocating past a 32 MB heap is terminated with an
+    // error event; the parent handles it and keeps running.
     "oom": {
-      "args": "run -A --unstable-worker-options main.ts --memoryMb 8",
+      "args": "run -A --unstable-worker-options main.ts 32 grow",
       "output": "oom.out"
     },
+    // The same once the module has evaluated: the worker allocates when a
+    // message arrives, on its event loop.
+    "oom_on_message": {
+      "args": "run -A --unstable-worker-options main.ts 32 grow_on_message",
+      "output": "oom.out"
+    },
+    // A limit well above what the worker needs doesn't get in its way.
     "success": {
-      "args": "run -A --unstable-worker-options main.ts --memoryMb 64",
+      "args": "run -A --unstable-worker-options main.ts 256 fixed",
       "output": "success.out"
     },
-    "ignored_without_flag": {
-      "args": "run -A main.ts --memoryMb 8",
-      "output": "success.out"
+    // An error event the parent does not handle ends the parent, as any other
+    // uncaught worker error does.
+    "unhandled": {
+      "args": "run -A --unstable-worker-options unhandled.ts",
+      "output": "unhandled.out",
+      "exitCode": 1
+    },
+    // Without the flag the limit is refused, not silently dropped.
+    "requires_flag": {
+      "args": "run -A main.ts 32 grow",
+      "output": "requires_flag.out",
+      "exitCode": 70
+    },
+    "invalid_values": {
+      "args": "run -A --unstable-worker-options invalid.ts",
+      "output": "invalid.out"
     }
   }
 }

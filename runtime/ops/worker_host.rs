@@ -339,7 +339,7 @@ pub enum CreateWorkerError {
 #[op2(stack_trace)]
 fn op_create_worker(
   state: &mut OpState,
-  #[scoped] mut args: CreateWorkerArgs,
+  #[scoped] args: CreateWorkerArgs,
   #[serde] maybe_worker_metadata: Option<JsMessageData>,
 ) -> Result<WorkerId, CreateWorkerError> {
   let specifier = args.specifier.clone();
@@ -364,13 +364,15 @@ fn op_create_worker(
     );
   }
 
+  // `node:worker_threads` `resourceLimits` is stable API, so only the web
+  // worker's `deno.memoryMb` is gated. Like `deno.permissions`, a limit
+  // without the flag is an error rather than silently dropped: a worker
+  // running with no memory limit when one was asked for is the wrong way to
+  // fail for a containment option.
   if args.resource_limits.is_some()
     && !matches!(worker_type, WorkerThreadType::Node)
-    && !state
-      .borrow::<Arc<crate::FeatureChecker>>()
-      .check(UNSTABLE_FEATURE_NAME)
   {
-    args.resource_limits = None;
+    super::check_unstable(state, UNSTABLE_FEATURE_NAME, "Worker.deno.memoryMb");
   }
 
   let parent_permissions = state.borrow_mut::<PermissionsContainer>();

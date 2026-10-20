@@ -1,1 +1,2 @@
 Worker terminated due to reaching memory limit: JS heap out of memory
+parent still running, second worker: allocated 4 chunks

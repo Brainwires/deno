@@ -1,0 +1,6 @@
+0: RangeError: Failed to construct 'Worker': deno.memoryMb must be at least 1
+-1: TypeError: Failed to construct 'Worker': deno.memoryMb is outside the accepted range of 0 to 9007199254740991, inclusive
+NaN: TypeError: Failed to construct 'Worker': deno.memoryMb is not a finite number
+Infinity: TypeError: Failed to construct 'Worker': deno.memoryMb is not a finite number
+many: TypeError: Failed to construct 'Worker': deno.memoryMb is not a finite number
+1152921504606846976: TypeError: Failed to construct 'Worker': deno.memoryMb is outside the accepted range of 0 to 9007199254740991, inclusive

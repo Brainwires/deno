@@ -4716,12 +4716,20 @@ interface WorkerOptions {
     /** Set to `"none"` to disable all the permissions in the worker. */
     permissions?: Deno.PermissionOptions;
     /**
-     * The maximum size of the worker's V8 heap, in MB. Reaching this limit
-     * terminates the worker with an `ERR_WORKER_OUT_OF_MEMORY` error.
+     * The maximum size of the worker's V8 heap (its old generation), in MB: a
+     * positive integer. Reaching this limit terminates the worker and fires an
+     * `error` event on the `Worker` with the message `Worker terminated due to
+     * reaching memory limit: JS heap out of memory`; the parent keeps running
+     * when it handles the event (`event.preventDefault()`), as with any other
+     * worker error.
      *
      * This only bounds the JavaScript heap, not external allocations such as
      * `ArrayBuffer`s, and the process may still abort on a global
      * out-of-memory situation.
+     *
+     * Requires `--unstable-worker-options`; without it, setting this option
+     * exits the program with an error instead of starting an unlimited worker.
+     * `0`, a negative number or a non-finite number throws.
      */
     memoryMb?: number;
   };

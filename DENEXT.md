@@ -3035,7 +3035,7 @@ where the changes are discussed.
     runtime build and e2e on every target.
 
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
-64-73, 75-77, 80, 82, 87, 88, 89) are what the prebuilt `libdenort` carries. The
+64-73, 75-77, 80, 82, 87-90) are what the prebuilt `libdenort` carries. The
 CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID`
 into a packaged app's launchers) are in the branch too, but a stock CLI does not
 run them; denext's own launcher provides that environment.

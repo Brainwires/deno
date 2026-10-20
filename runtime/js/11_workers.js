@@ -21,6 +21,7 @@ const {
   ObjectSetPrototypeOf,
   Promise,
   queueMicrotask,
+  RangeError,
   String,
   StringPrototypeStartsWith,
   Symbol,
@@ -163,7 +164,20 @@ class Worker extends EventTarget {
     // limit terminates the worker with an `ERR_WORKER_OUT_OF_MEMORY` error.
     let resourceLimits;
     if (deno?.memoryMb !== undefined) {
-      resourceLimits = { maxOldGenerationSizeMb: deno.memoryMb };
+      const memoryMb = webidl.converters["unsigned long long"](
+        deno.memoryMb,
+        "Failed to construct 'Worker'",
+        "deno.memoryMb",
+        { enforceRange: true },
+      );
+      if (memoryMb === 0) {
+        // The isolate setup reads 0 as "no limit"; refuse it rather than
+        // start an unlimited worker.
+        throw new RangeError(
+          "Failed to construct 'Worker': deno.memoryMb must be at least 1",
+        );
+      }
+      resourceLimits = { maxOldGenerationSizeMb: memoryMb };
     }
 
     const id = createWorker(
