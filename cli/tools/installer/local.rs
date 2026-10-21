@@ -246,7 +246,9 @@ pub enum RootTsConfigMode {
   /// Only manage the root `tsconfig.json` when Deno is honoring a user's
   /// tsconfig (a deno.json/package.json is present and config isn't disabled).
   /// Used by `deno check`, which otherwise points tsc at `.deno/tsconfig.json`
-  /// directly and must not rewrite a tsconfig Deno is ignoring.
+  /// directly and must not rewrite a tsconfig Deno is ignoring, and by the
+  /// language server's tsgo backend ([`SYNC_TYPES_FOR_EDITOR_ENV`], denext),
+  /// which never writes the root config at all.
   CheckMode,
 }
 
@@ -255,6 +257,23 @@ pub enum RootTsConfigMode {
 /// disk imports yet; it names them here, one per line (internal).
 pub const SYNC_TYPES_EXTRA_SPECIFIERS_ENV: &str =
   "DENO_INTERNAL_SYNC_TYPES_SPECIFIERS";
+
+/// The language server's tsgo backend runs `deno sync-types` with this set
+/// (internal): the root `tsconfig.json` is then left alone (neither created
+/// nor rewritten), because the backend gives tsgo the root config as an open
+/// document instead (`tsconfig_gen::build_editor_root_config`), so an editor
+/// session never changes a file in the user's repository besides `.deno/`.
+pub const SYNC_TYPES_FOR_EDITOR_ENV: &str =
+  "DENO_INTERNAL_SYNC_TYPES_FOR_EDITOR";
+
+/// How `deno sync-types` treats the root `tsconfig.json`: managed, unless the
+/// language server runs it ([`SYNC_TYPES_FOR_EDITOR_ENV`]).
+pub fn sync_types_root_tsconfig_mode() -> RootTsConfigMode {
+  match std::env::var_os(SYNC_TYPES_FOR_EDITOR_ENV) {
+    Some(value) if value == "1" => RootTsConfigMode::CheckMode,
+    _ => RootTsConfigMode::Always,
+  }
+}
 
 /// The extra specifiers [`SYNC_TYPES_EXTRA_SPECIFIERS_ENV`] names.
 pub fn sync_types_extra_specifiers_from_env() -> Vec<String> {
@@ -310,7 +329,7 @@ pub async fn sync_types_command(
   // project to discover every external (npm:/jsr:/http(s):) specifier the code
   // actually uses — including specifiers written directly in source and across
   // workspace members, not just those declared in the root import map.
-  let (graph_specifiers, local_wasm_modules) = {
+  let (graph_specifiers, local_wasm_modules, augmented_modules) = {
     let graph_container = factory.main_module_graph_container().await?;
     let roots = graph_container.collect_specifiers(
       &root_patterns,
@@ -431,10 +450,18 @@ pub async fn sync_types_command(
         specifiers.insert(raw.clone());
       }
     }
+    // denext: the modules the project's own files augment (`declare module
+    // "denext" { ... }`) are mapped like imports, and loaded through a
+    // generated file below (see `augmentations`): the native compiler does
+    // not load a module only an augmentation names.
+    let augmented_modules =
+      super::augmentations::graph_augmentation_names(&graph);
+    specifiers.extend(augmented_modules.iter().cloned());
     specifiers.extend(extra_specifiers);
     (
       specifiers.into_iter().collect::<Vec<_>>(),
       local_wasm_modules,
+      augmented_modules,
     )
   };
 
@@ -529,11 +556,21 @@ pub async fn sync_types_command(
       &project_root.join(".deno").join("tsconfig.json"),
     )?;
   }
+  super::augmentations::add_augmented_module_imports(
+    &project_root,
+    &project_root.join(".deno").join("tsconfig.json"),
+    &augmented_modules,
+  )?;
 
   log::info!(
     "{} tsconfig for stock TypeScript at {}",
     deno_terminal::colors::green("Synced"),
-    project_root.join("tsconfig.json").display(),
+    if manage_root_tsconfig {
+      project_root.join("tsconfig.json")
+    } else {
+      project_root.join(".deno").join("tsconfig.json")
+    }
+    .display(),
   );
   for pkg in &installed {
     log::debug!("  installed jsr package {}@{}", pkg.name, pkg.version);

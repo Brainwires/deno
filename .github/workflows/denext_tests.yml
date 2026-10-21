@@ -9,7 +9,8 @@
 #
 # - lint:  tools/lint.js (clippy over the whole workspace with upstream's deny
 #          flags, dlint, the copyright and repo-hygiene checks), plus
-#          tools/format.js --check, tools/jsdoc_checker.js and cargo fmt.
+#          tools/format.js --check, tools/jsdoc_checker.js, cargo fmt and the
+#          release manifest writer's tests (.github/denext-runtime/manifest_test.py).
 # - cargo-audit: RustSec advisories against Cargo.lock; .cargo/audit.toml
 #          lists the reviewed exceptions.
 # - per OS (denext_tests_os.yml), each OS on its own so one slow OS does not
@@ -132,6 +133,10 @@ jobs:
       - name: jsdoc_checker.js
         if: runner.os == 'Linux'
         run: deno run --allow-read --allow-env --allow-sys ./tools/jsdoc_checker.js
+      # The release manifest writer (denext_runtime.yml's manifest job).
+      - name: manifest_test.py
+        if: runner.os == 'Linux'
+        run: python3 -I .github/denext-runtime/manifest_test.py
       - name: lint.js
         env:
           GITHUB_TOKEN: ${{ github.token }}

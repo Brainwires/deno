@@ -616,6 +616,72 @@ fn lsp_tsgo_import_map_specifiers() {
     }),
   );
   assert!(hover_text(&res).contains("**Import Map**"), "{res}");
+  // tsgo reads the root config as an open document: none is written
+  assert!(!temp_dir.path().join("tsconfig.json").exists());
+  client.shutdown();
+}
+
+#[test(timeout = 300)]
+fn lsp_tsgo_leaves_the_users_tsconfig_alone() {
+  if !sync_types_available() {
+    return;
+  }
+  // A user's tsconfig.json applies (here `strictNullChecks: false`) and the
+  // generated mappings reach tsgo too, through the root config the backend
+  // gives tsgo as an open document; the file itself is never rewritten.
+  let context = TestContextBuilder::new().use_temp_cwd().build();
+  let temp_dir = context.temp_dir();
+  temp_dir.write("deno.json", r#"{ "imports": { "foo": "./lib/foo.ts" } }"#);
+  let user_tsconfig = "{\n  // the project's own\n  \"compilerOptions\": { \"strictNullChecks\": false }\n}\n";
+  temp_dir.write("tsconfig.json", user_tsconfig);
+  temp_dir.write("lib/foo.ts", "export const foo: number = 1;\n");
+  let file = temp_dir.source_file(
+    "main.ts",
+    "import { foo } from \"foo\";\nconst n: string = foo;\nconst s: string = null;\nconsole.log(n, s);\n",
+  );
+  let mut client = tsgo_client(&context);
+  let diagnostics = client.did_open_file(&file);
+  assert_eq!(
+    deno_ts_messages(&diagnostics.all()),
+    vec!["Type 'number' is not assignable to type 'string'.".to_string()]
+  );
+  assert_eq!(temp_dir.read_to_string("tsconfig.json"), user_tsconfig);
+  client.shutdown();
+  assert_eq!(temp_dir.read_to_string("tsconfig.json"), user_tsconfig);
+}
+
+#[test(timeout = 300)]
+fn lsp_tsgo_unavailable_falls_back_to_typescript_6() {
+  // tsgo selected, but its build can't be had (here an override that names
+  // no file): the session runs on the in-isolate TypeScript 6 service
+  // instead of a backend that never starts.
+  let context = TestContextBuilder::new().use_temp_cwd().build();
+  let temp_dir = context.temp_dir();
+  let file = temp_dir.source_file("a.ts", "const value = 1;\nvalue;\n");
+  let mut client = context
+    .new_lsp_command()
+    .env("DENO_UNSTABLE_TSGO_LSP", "1")
+    .env(
+      "DENO_TSGO_LSP_BIN",
+      temp_dir.path().join("no-tsgo").join("tsc").to_string(),
+    )
+    .build();
+  client.initialize_default();
+  client.wait_until_stderr_line(|line| {
+    line.contains("could not be found or downloaded")
+      && line.contains("using the TypeScript 6 language service")
+  });
+  client.did_open_file(&file);
+  let res = client.write_request(
+    "textDocument/hover",
+    json!({
+      "textDocument": file.identifier(),
+      "position": file.range_of("value;").start,
+    }),
+  );
+  let text = hover_text(&res);
+  assert!(text.contains("const value: 1"), "{res}");
+  assert!(!text.starts_with("```typescript\n"), "{text}");
   client.shutdown();
 }
 

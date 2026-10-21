@@ -1,0 +1,48 @@
+{
+  // denext: a module only a `declare module` augmentation names (nothing in
+  // the checked graph imports it) is loaded by the native check, as by the
+  // in-process TypeScript 6 (TypeScript 7 reported TS2664 for it).
+  "tempDir": true,
+  "steps": [
+    {
+      "args": "check main.ts",
+      "output": "Check [WILDCARD]main.ts\n",
+      "exitCode": 0
+    },
+    {
+      "args": "check --check-engine=tsc main.ts",
+      "output": "Check [WILDCARD]main.ts\n",
+      "exitCode": 0
+    },
+    // an augmentation added by a local edit regenerates the project (which a
+    // local edit otherwise reuses)
+    {
+      "args": [
+        "eval",
+        "Deno.writeTextFileSync('routes.ts', Deno.readTextFileSync('routes.ts') + '\\ndeclare module \"lib/sub.ts\" {\\n  interface SubRegistry {\\n    routes: Routes;\\n  }\\n}\\n')"
+      ],
+      "output": ""
+    },
+    {
+      "args": "check main.ts",
+      "output": "Check [WILDCARD]main.ts\n",
+      "exitCode": 0
+    },
+    {
+      "args": "check use.ts",
+      "output": "Check [WILDCARD]use.ts\n",
+      "exitCode": 0
+    },
+    // a name that resolves nowhere is still an error under both engines
+    {
+      "args": "check unresolved.ts",
+      "output": "Check [WILDCARD]unresolved.ts\nTS2664 [ERROR]: Invalid module name in augmentation, module 'nowhere' cannot be found.[WILDCARD]",
+      "exitCode": 1
+    },
+    {
+      "args": "check --check-engine=tsc unresolved.ts",
+      "output": "Check [WILDCARD]unresolved.ts\nTS2664 [ERROR]: Invalid module name in augmentation, module 'nowhere' cannot be found.[WILDCARD]",
+      "exitCode": 1
+    }
+  ]
+}

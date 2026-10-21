@@ -65,7 +65,36 @@ pub fn build_check_root_overlay(
       format!("failed to parse {}: {e}", user_tsconfig_path.display()),
     )
   })?;
-  let mut value = parsed.unwrap_or_else(|| json!({}));
+  Ok(root_overlay_of(
+    project_root,
+    parsed.unwrap_or_else(|| json!({})),
+  ))
+}
+
+/// The root `tsconfig.json` the language server's tsgo backend gives tsgo
+/// as an open document (denext): the user's own `tsconfig.json` with the
+/// generated `.deno/tsconfig.json` prepended to its `extends`, as
+/// [`build_check_root_overlay`] builds it for `deno check`, when Deno honors
+/// it ([`should_honor_user_tsconfig`]); else a config that extends the
+/// generated one (what `deno sync-types` writes when there is none). Nothing
+/// is written: a user's file is never rewritten, and none is created. A
+/// `tsconfig.json` that does not parse is reported and left out.
+pub fn build_editor_root_config(project_root: &Path) -> Value {
+  let root_tsconfig = project_root.join("tsconfig.json");
+  if should_honor_user_tsconfig(project_root, false) && root_tsconfig.is_file()
+  {
+    match build_check_root_overlay(project_root, &root_tsconfig) {
+      Ok(value) => return value,
+      Err(err) => log::warn!("{err}; using the generated tsconfig alone"),
+    }
+  }
+  root_overlay_of(project_root, json!({}))
+}
+
+/// `value` (a root `tsconfig.json`) with the generated config prepended to
+/// its `extends`, the generated `paths` / `types` merged into its own and the
+/// generated npm project `references` added.
+fn root_overlay_of(project_root: &Path, mut value: Value) -> Value {
   if !value.is_object() {
     value = json!({});
   }
@@ -84,6 +113,7 @@ pub fn build_check_root_overlay(
     // array `extends` left-to-right with later entries overriding earlier ones.
     let deno_generated = "./.deno/tsconfig.json";
     let extends = match obj.remove("extends") {
+      Some(Value::String(s)) if s == deno_generated => json!([deno_generated]),
       Some(Value::String(s)) => json!([deno_generated, s]),
       Some(Value::Array(mut arr)) => {
         if !arr.iter().any(|v| v.as_str() == Some(deno_generated)) {
@@ -169,7 +199,7 @@ pub fn build_check_root_overlay(
     set_root_npm_references(&mut value, &generated);
   }
 
-  Ok(value)
+  value
 }
 
 /// Rewrite the compiler options TypeScript 6.0 deprecated and 7.0 removed
@@ -2925,6 +2955,69 @@ interface AlsoKeep {
     assert_eq!(rebase_onto_deno_dir("src/*"), "../src/*");
     assert_eq!(rebase_onto_deno_dir("../shared"), "../../shared");
     assert_eq!(rebase_onto_deno_dir("/abs/path"), "/abs/path");
+  }
+
+  #[test]
+  fn editor_root_config_never_writes_the_root_tsconfig() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::create_dir_all(root.join(".deno")).unwrap();
+    std::fs::write(
+      root.join(".deno/tsconfig.json"),
+      r#"{ "compilerOptions": { "paths": { "lib": ["../lib.ts"] }, "types": ["deno"] }, "references": [{ "path": "./npm/a/tsconfig.json" }] }"#,
+    )
+    .unwrap();
+
+    // no tsconfig.json: one that extends the generated config, not written
+    let config = build_editor_root_config(root);
+    assert_eq!(config["extends"], json!(["./.deno/tsconfig.json"]));
+    assert_eq!(
+      config["references"],
+      json!([{ "path": "./.deno/npm/a/tsconfig.json" }])
+    );
+    assert!(!root.join("tsconfig.json").exists());
+
+    // the user's tsconfig.json, which Deno honors beside a deno.json: its
+    // options with the generated config first, the file itself untouched
+    std::fs::write(root.join("deno.json"), "{}").unwrap();
+    let user = "{\n  // the team's\n  \"extends\": \"./base.json\",\n  \"compilerOptions\": { \"strict\": true, \"paths\": { \"@/*\": [\"./src/*\"] } },\n}\n";
+    std::fs::write(root.join("tsconfig.json"), user).unwrap();
+    let config = build_editor_root_config(root);
+    assert_eq!(
+      config["extends"],
+      json!(["./.deno/tsconfig.json", "./base.json"])
+    );
+    assert_eq!(config["compilerOptions"]["strict"], json!(true));
+    assert_eq!(
+      config["compilerOptions"]["paths"],
+      json!({ "lib": ["./lib.ts"], "@/*": ["./src/*"] })
+    );
+    assert_eq!(
+      std::fs::read_to_string(root.join("tsconfig.json")).unwrap(),
+      user
+    );
+
+    // one an older `deno sync-types` wrote: the generated config once
+    std::fs::write(
+      root.join("tsconfig.json"),
+      r#"{ "_deno_generated": true, "extends": "./.deno/tsconfig.json" }"#,
+    )
+    .unwrap();
+    let config = build_editor_root_config(root);
+    assert_eq!(config["extends"], json!(["./.deno/tsconfig.json"]));
+
+    // without a deno.json / package.json Deno ignores a tsconfig.json
+    std::fs::remove_file(root.join("deno.json")).unwrap();
+    std::fs::write(root.join("tsconfig.json"), user).unwrap();
+    let config = build_editor_root_config(root);
+    assert_eq!(config["extends"], json!(["./.deno/tsconfig.json"]));
+    assert!(config.get("compilerOptions").is_none(), "{config}");
+
+    // one that doesn't parse: the generated config alone
+    std::fs::write(root.join("deno.json"), "{}").unwrap();
+    std::fs::write(root.join("tsconfig.json"), "{ nope").unwrap();
+    let config = build_editor_root_config(root);
+    assert_eq!(config["extends"], json!(["./.deno/tsconfig.json"]));
   }
 
   #[test]

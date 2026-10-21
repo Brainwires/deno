@@ -1257,9 +1257,9 @@ where the changes are discussed.
     quit under load). This fork's e2e is unchanged.
 
 46. **`feat(lsp)`: a TypeScript 7 (tsgo) language service for `deno lsp`,
-    unstable and off by default** (`feat/tsgo-lsp`; `cli/lsp/tsgo.rs`,
-    `cli/lsp/ts_server.rs`, `cli/tsc/native_pin.rs`,
-    `cli/tsc/typescript_pins.json`,
+    unstable and off by default** (the default of a denext release since item
+    94; `feat/tsgo-lsp`; `cli/lsp/tsgo.rs`, `cli/lsp/ts_server.rs`,
+    `cli/tsc/native_pin.rs`, `cli/tsc/typescript_pins.json`,
     `.github/denext-runtime/fetch_typescript.py`,
     `tools/update_typescript_pin.ts`). `"deno.unstable": ["tsgo-lsp"]` in the
     editor's initialization settings, or `DENO_UNSTABLE_TSGO_LSP=1` in the
@@ -1283,15 +1283,16 @@ where the changes are discussed.
     Deno needs. tsgo has no resolution hooks over LSP, so the backend runs
     `deno sync-types` (the generator the native `deno check` uses) in each
     workspace root before starting tsgo, after `deno.cache` and after a config
-    change, then announces the regenerated root `tsconfig.json` and `.deno/`
-    files; `DENO_TSGO_LSP_SYNC_TYPES=0` leaves them to the user. The compiler is
-    pinned per role in `typescript_pins.json` (role `lsp`: a dated `7.1.0-dev`
-    nightly) by the npm `dist.integrity` of each
-    `@typescript/typescript-<platform>` tarball; it is found as
-    `DENO_TSGO_LSP_BIN`, else `typescript-lsp/tsc[.exe]` next to `deno` at the
-    pinned version (the CLI zip ships it, item 26), else downloaded once into
-    `DENO_DIR/dl/typescript-lsp-<version>/` and verified against the pin.
-    `tools/update_typescript_pin.ts lsp next` is the whole bump; then
+    change, then announces the regenerated `.deno/` files (the root
+    `tsconfig.json` is an open document it gives tsgo since item 94);
+    `DENO_TSGO_LSP_SYNC_TYPES=0` leaves them to the user. The compiler is pinned
+    per role in `typescript_pins.json` (role `lsp`: a dated `7.1.0-dev` nightly)
+    by the npm `dist.integrity` of each `@typescript/typescript-<platform>`
+    tarball; it is found as `DENO_TSGO_LSP_BIN`, else `typescript-lsp/tsc[.exe]`
+    next to `deno` at the pinned version (the CLI zip ships it, item 26), else
+    downloaded once into `DENO_DIR/dl/typescript-lsp-<version>/` and verified
+    against the pin. `tools/update_typescript_pin.ts lsp next` is the whole
+    bump; then
     `cargo test -p integration_tests --test integration --
     lsp_tsgo`. Not
     yet with tsgo: TypeScript code lenses, file-rename import edits,
@@ -3254,6 +3255,81 @@ where the changes are discussed.
     and `tests.rs`, `defaults_keep_the_directional_net_model` (`cli/rt/run.rs`)
     and the jail's `clamp` test.
 
+94. **`feat(lsp)`: TypeScript 7 is the editor default, and its gaps closed**
+    (`feat/tsgo-lsp-polish`, CLI only; `cli/lsp/tsgo.rs`,
+    `cli/lsp/language_server.rs`, `cli/tsc/tsconfig_gen.rs`,
+    `cli/tools/installer/augmentations.rs`, `cli/tools/installer/local.rs`,
+    `cli/tools/check.rs`, `.github/denext-runtime/manifest.py`). Item 46's tsgo
+    backend becomes what a denext release's `deno lsp` uses, and what that
+    surfaced is fixed:
+    - **The default.** A denext release build (`DENEXT_VERSION` baked in, item
+      26) selects tsgo unless the editor's `deno.unstable` setting lists
+      features but not `tsgo-lsp`; an empty list (what editors send by default)
+      or no setting is the default. `DENO_UNSTABLE_TSGO_LSP` still wins either
+      way (`=0` keeps TypeScript 6), and any other build (tests, a local
+      `cargo build`) keeps upstream's TypeScript 6 unless asked, so upstream's
+      LSP tests run unchanged. The binary is resolved before the session
+      initializes (the override, `typescript-lsp/` beside `deno`, the `DENO_DIR`
+      copy, else a download within 120 s); when it can't be had the session uses
+      TypeScript 6 with a warning naming why, instead of a backend that never
+      starts. The log says which backend was picked and why
+      (`Using the TypeScript 7 (tsgo) language service (the default of this
+      runtime; ...)`).
+    - **No user files rewritten.** `deno sync-types` as the backend runs it
+      (`DENO_INTERNAL_SYNC_TYPES_FOR_EDITOR=1`, internal) no longer creates the
+      root `tsconfig.json` or rewrites a user's (it turned `extends` into an
+      array, a diff in the user's repository on every editor session). tsgo
+      reads an open document instead of the file, a missing one included, so the
+      backend gives it the root config as one (`didOpen`, then `didChange` when
+      it changes): the user's `tsconfig.json` with `./.deno/tsconfig.json` first
+      in its `extends`, the generated `paths` and `types` merged and the npm
+      project `references` added (what `deno check` builds for its own temp
+      config, `build_check_root_overlay`), when Deno honors it (a `deno.json` /
+      `package.json` beside it); else a config that extends the generated one. A
+      change to the user's file re-runs `sync-types` and updates the document.
+      Only `.deno/` (ignored by its own `.gitignore`) is written. The standalone
+      `deno sync-types` keeps writing the root config, its purpose (stock
+      tooling reads it).
+    - **Module augmentations (TS2664).** TypeScript 7 resolves the name in
+      `declare module "denext" { ... }` through the generated `paths` but,
+      unlike TypeScript 6, does not load the module it finds, so an augmentation
+      of a module the checked graph never imports failed with TS2664 ("Invalid
+      module name in augmentation") even with the import-map key mapped.
+      `deno sync-types` now finds the top-level `declare module
+      "<name>"`
+      blocks of the project's own TypeScript files (a declaration file only when
+      it is a module; not relative names, wildcard patterns or `node:`
+      builtins), maps each name as it maps imports, and writes
+      `.deno/module_augmentations.d.ts` with an `import type {} from "<name>"`
+      for each name the generated config resolves (a `paths` entry, or a package
+      in `node_modules`), listed in its `files`. A name that resolves nowhere
+      still reports TS2664, as under TypeScript 6. The augmented names are part
+      of the generated project's inputs, so an edit that adds one regenerates
+      it. The LSP's tsgo backend reads the same file.
+    - **Release manifest.** `manifest.json` lists
+      `typescript_lsp: { version, sha256, tree_sha256 }` per CLI target beside
+      `typescript_check`, recomputed from the zip's `typescript-lsp/` the same
+      way, and refuses an archive whose files disagree with its
+      `BUILD_INFO.json`; `cli_smoke.sh` checks that `deno lsp` defaults to the
+      shipped build and that `DENO_UNSTABLE_TSGO_LSP=0` keeps TypeScript 6.
+
+    Tests: `tests/specs/check/module_augmentation_unimported` (an augmentation
+    of an import-map module nothing imports passes under both engines; one of an
+    unresolvable name fails with TS2664 under both; an augmentation added by a
+    local edit regenerates the reused project), unit tests
+    `augmentations_are_top_level_declare_module_blocks`,
+    `ambient_declarations_and_patterns_are_not_augmentations`,
+    `imports_only_the_names_the_config_resolves`
+    (`cli/tools/installer/augmentations.rs`),
+    `editor_root_config_never_writes_the_root_tsconfig`
+    (`cli/tsc/tsconfig_gen.rs`), `backend_selection` (`cli/lsp/tsgo.rs`);
+    `lsp_tsgo_leaves_the_users_tsconfig_alone`,
+    `lsp_tsgo_unavailable_falls_back_to_typescript_6` and
+    `lsp_tsgo_import_map_specifiers` (no root `tsconfig.json` written) in
+    `tests/integration/lsp_tsgo_tests.rs`;
+    `.github/denext-runtime/manifest_test.py` (run by the lint job of
+    `denext_tests.yml`).
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93) are what the prebuilt `libdenort` carries.
 The CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` /
@@ -3373,9 +3449,10 @@ licenses/              the deno license
 Each release also has `SHA256SUMS` (every runtime and CLI archive) and
 `manifest.json` (target -> backend -> url, sha256, size; the CLI archives under
 `cli.targets` -> target -> binary, url, sha256, size and
-`esbuild: { version, sha256 }` and
-`typescript_check: { version, sha256, tree_sha256 }`; plus the deno SHA, laufey
-SHA and CEF version). Every archive has a build provenance attestation:
+`esbuild: { version, sha256 }`,
+`typescript_check: { version, sha256, tree_sha256 }` and
+`typescript_lsp: { version, sha256, tree_sha256 }` (item 94); plus the deno SHA,
+laufey SHA and CEF version). Every archive has a build provenance attestation:
 
 ```sh
 gh attestation verify deno-desktop-runtime-<...>.tar.gz -R Brainwires/deno

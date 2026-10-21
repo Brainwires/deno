@@ -250,7 +250,7 @@ async fn run_subcommand(
       tools::installer::sync_types_command(
         Arc::new(flags),
         sync_types_flags,
-        tools::installer::RootTsConfigMode::Always,
+        tools::installer::sync_types_root_tsconfig_mode(),
         tools::installer::sync_types_extra_specifiers_from_env(),
       )
       .await

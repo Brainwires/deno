@@ -37,7 +37,7 @@ use crate::lsp::urls::uri_to_url;
 #[derive(Debug)]
 pub enum TsServer {
   Js(TsJsServer),
-  /// TypeScript 7 through a pinned `tsc --lsp` (denext, unstable).
+  /// TypeScript 7 through a pinned `tsc --lsp` (denext).
   Go(TsGoServer),
 }
 
@@ -48,8 +48,9 @@ impl TsServer {
 
   pub fn new_go(
     http_client_provider: Arc<crate::http_util::HttpClientProvider>,
+    tsc: Option<std::path::PathBuf>,
   ) -> Self {
-    Self::Go(TsGoServer::new(http_client_provider))
+    Self::Go(TsGoServer::new(http_client_provider, tsc))
   }
 
   pub fn is_started(&self) -> bool {

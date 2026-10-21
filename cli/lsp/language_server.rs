@@ -926,11 +926,59 @@ impl Inner {
   }
 }
 
+/// The TypeScript backend a session uses (denext; see
+/// `Inner::select_ts_backend`).
+enum TsBackend {
+  /// TypeScript 7 through the pinned `tsc --lsp` at `tsc`.
+  Go { tsc: PathBuf, reason: &'static str },
+  /// The in-isolate TypeScript 6 service; `fallback` when tsgo was selected
+  /// but its build could not be had.
+  Js { reason: String, fallback: bool },
+}
+
 // lspower::LanguageServer methods. This file's LanguageServer delegates to us.
 impl Inner {
+  /// The TypeScript backend for this session (denext): tsgo when
+  /// [`super::tsgo::selected_backend`] asks for it and its pinned build is
+  /// found or downloaded, else TypeScript 6.
+  async fn select_ts_backend(&self, params: &InitializeParams) -> TsBackend {
+    let settings = params
+      .initialization_options
+      .clone()
+      .map(WorkspaceSettings::from_initialization_options);
+    let selection = super::tsgo::selected_backend(settings.as_ref());
+    if !selection.tsgo {
+      return TsBackend::Js {
+        reason: selection.reason.to_string(),
+        fallback: false,
+      };
+    }
+    match super::tsgo::resolve_tsgo_binary(
+      self.cache.deno_dir(),
+      &self.http_client_provider,
+      std::time::Duration::from_secs(120),
+    )
+    .await
+    {
+      Ok(tsc) => TsBackend::Go {
+        tsc,
+        reason: selection.reason,
+      },
+      Err(err) => TsBackend::Js {
+        reason: format!(
+          "{} selected TypeScript 7 (tsgo), but TypeScript {} could not be found or downloaded: {err:#}",
+          selection.reason,
+          crate::tsc::native_pin::pin(super::tsgo::PIN_ROLE).version,
+        ),
+        fallback: true,
+      },
+    }
+  }
+
   fn initialize(
     &mut self,
     params: InitializeParams,
+    ts_backend: TsBackend,
   ) -> LspResult<InitializeResult> {
     lsp_log!("Starting Deno language server...");
     let mark = self.performance.mark_with_args("lsp.initialize", &params);
@@ -1023,14 +1071,16 @@ impl Inner {
       self.config.set_client_capabilities(params.capabilities);
     }
 
-    if super::tsgo::is_enabled(Some(self.config.workspace_settings())) {
+    if let TsBackend::Go { tsc, reason } = ts_backend {
       lsp_log!(
-        "Using the TypeScript 7 (tsgo) language service (unstable, \"deno.unstable\": [\"{}\"] or {}).",
-        super::tsgo::TSGO_LSP_UNSTABLE_FEATURE,
+        "Using the TypeScript 7 (tsgo) language service ({reason}; {}=0 keeps TypeScript 6): {}",
         super::tsgo::TSGO_LSP_ENV,
+        tsc.display(),
       );
-      self.ts_server =
-        Arc::new(TsServer::new_go(self.http_client_provider.clone()));
+      self.ts_server = Arc::new(TsServer::new_go(
+        self.http_client_provider.clone(),
+        Some(tsc),
+      ));
       if let TsServer::Go(ts_server) = self.ts_server.as_ref() {
         // tsgo's view of the project can change behind Deno's back (its own
         // `workspace/diagnostic/refresh`, or types regenerated for an
@@ -1049,6 +1099,12 @@ impl Inner {
             });
           }));
         }));
+      }
+    } else if let TsBackend::Js { reason, fallback } = ts_backend {
+      if fallback {
+        lsp_warn!("{reason}; using the TypeScript 6 language service.");
+      } else {
+        lsp_log!("Using the TypeScript 6 language service ({reason}).");
       }
     }
 
@@ -3839,7 +3895,14 @@ impl tower_lsp::LanguageServer for LanguageServer {
     &self,
     params: InitializeParams,
   ) -> LspResult<InitializeResult> {
-    self.inner.write().await.initialize(params)
+    // denext: pick the TypeScript backend before initializing, so a tsgo
+    // build that can't be had (not beside `deno`, not cached, the download
+    // failing) leaves the in-isolate TypeScript 6 service in place.
+    let ts_backend = {
+      let inner = self.inner.read().await;
+      inner.select_ts_backend(&params).await
+    };
+    self.inner.write().await.initialize(params, ts_backend)
   }
 
   async fn initialized(&self, _: InitializedParams) {

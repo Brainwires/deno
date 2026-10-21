@@ -3,7 +3,8 @@
 # that the binary names its denext build (`deno --version`, `deno -V` and
 # `Deno.version.deno`), has `Deno.SQL`, and runs a Vitest suite under `deno test`
 # (smoke/cli/vitest_test.ts); that the bundled esbuild is ESBUILD_VERSION and
-# `deno bundle` uses it with an empty DENO_DIR and no reachable npm registry.
+# `deno bundle` uses it with an empty DENO_DIR and no reachable npm registry;
+# and that `deno lsp` defaults to the shipped tsgo build.
 #
 # Env: TARGET VERSION ESBUILD_VERSION ARCHIVE WORK_DIR (a directory that does
 # not exist yet)
@@ -103,6 +104,20 @@ tsc_version=$("$tsc" --version | tr -d '\r')
 test "$tsc_version" = "Version $want_tsc" ||
   { echo "::error::typescript-lsp tsc --version says '$tsc_version', want 'Version $want_tsc'" >&2; exit 1; }
 echo "typescript-lsp: $tsc_version"
+# `deno lsp` defaults to that tsgo build in a denext release (DENEXT.md item
+# 94) and keeps TypeScript 6 with DENO_UNSTABLE_TSGO_LSP=0.
+mkdir -p "$work/lsp"
+echo "::group::deno lsp (default backend)"
+DENO_DIR="$work/lsp-deno-dir" "$py" -I "$here/smoke/cli/lsp_backend.py" "$deno" "$work/lsp" | tee "$work/lsp-default.txt"
+echo "::endgroup::"
+grep -q "Using the TypeScript 7 (tsgo) language service (the default of this runtime" "$work/lsp-default.txt" ||
+  { echo "::error::deno lsp did not default to tsgo" >&2; exit 1; }
+grep -q "typescript-lsp" "$work/lsp-default.txt" ||
+  { echo "::error::deno lsp did not use the shipped typescript-lsp" >&2; exit 1; }
+DENO_UNSTABLE_TSGO_LSP=0 DENO_DIR="$work/lsp-deno-dir" "$py" -I "$here/smoke/cli/lsp_backend.py" "$deno" "$work/lsp" >"$work/lsp-off.txt"
+grep -q "Using the TypeScript 6 language service (DENO_UNSTABLE_TSGO_LSP=0)" "$work/lsp-off.txt" ||
+  { echo "::error::DENO_UNSTABLE_TSGO_LSP=0 did not keep TypeScript 6:" >&2; cat "$work/lsp-off.txt" >&2; exit 1; }
+echo "deno lsp: tsgo by default, TypeScript 6 with DENO_UNSTABLE_TSGO_LSP=0"
 
 # The TypeScript build type checking runs: next to deno, at the version
 # typescript_pins.json pins for "check". `deno check` runs it with an empty

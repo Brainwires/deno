@@ -1,0 +1,6 @@
+{
+  "imports": {
+    "mylib": "./lib/mod.ts",
+    "lib/": "./lib/"
+  }
+}

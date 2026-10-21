@@ -1,7 +1,7 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 
-//! The TypeScript 7 (tsgo) language-service backend of `deno lsp` (denext,
-//! unstable, off by default).
+//! The TypeScript 7 (tsgo) language-service backend of `deno lsp` (denext;
+//! the default of a denext release build, see [`select_backend`]).
 //!
 //! `deno lsp` stays the server the editor talks to. Its Deno features
 //! (resolution diagnostics, lint, formatting, `deno.json` / import-map
@@ -17,14 +17,18 @@
 //!
 //! tsgo has no module-resolution hooks over LSP, so it learns a Deno project's
 //! `npm:` / `jsr:` / `https:` / import-map specifiers and Deno's own lib types
-//! from the stock `tsconfig.json` + `.deno/` tree that `deno sync-types`
-//! generates (the same files the native `deno check` consumes). The backend
-//! runs `deno sync-types` for each workspace root before starting tsgo and
-//! again when configuration or the dependency cache changes.
+//! from the `.deno/` tree that `deno sync-types` generates (the same files
+//! the native `deno check` consumes). The backend runs `deno sync-types` for
+//! each workspace root before starting tsgo and again when configuration or
+//! the dependency cache changes, and gives tsgo the root `tsconfig.json` that
+//! extends the generated config as an open document: the user's own
+//! `tsconfig.json` is never rewritten, and none is created.
 //!
-//! Enable with `"deno.unstable": ["tsgo-lsp"]` in the editor's
-//! initialization settings, or with `DENO_UNSTABLE_TSGO_LSP=1` in the
-//! environment of `deno lsp`.
+//! A denext release build selects it unless the editor's `deno.unstable`
+//! setting lists other features but not `tsgo-lsp`; any build takes it with
+//! `"deno.unstable": ["tsgo-lsp"]` or `DENO_UNSTABLE_TSGO_LSP=1`, and
+//! `DENO_UNSTABLE_TSGO_LSP=0` keeps TypeScript 6. When the pinned tsgo build
+//! can't be found or downloaded, `deno lsp` uses TypeScript 6 instead.
 //!
 //! Derived in part from the earlier fork-based tsgo backend by Nayeem Rahman
 //! (denoland/deno#32149, #32016 and follow-ups; removed in #33133), whose
@@ -94,17 +98,97 @@ fn env_flag(name: &str) -> Option<bool> {
   Some(!matches!(value, "0" | "false" | "no" | "off"))
 }
 
-/// Whether the environment or the initialization settings select tsgo. The
-/// environment wins either way.
-pub fn is_enabled(settings: Option<&WorkspaceSettings>) -> bool {
-  if let Some(enabled) = env_flag(TSGO_LSP_ENV) {
-    return enabled;
+/// Which TypeScript backend `deno lsp` asks for, and why.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BackendSelection {
+  /// tsgo (TypeScript 7) rather than the in-isolate TypeScript 6 service.
+  pub tsgo: bool,
+  pub reason: &'static str,
+}
+
+/// Select the backend (denext): `DENO_UNSTABLE_TSGO_LSP` wins either way;
+/// else a `deno.unstable` setting that lists `tsgo-lsp` selects tsgo and one
+/// that lists other features only keeps TypeScript 6; else (no setting, or
+/// an empty list, which editors send by default) a denext release build
+/// selects tsgo and any other build (tests, a local `cargo build`) keeps
+/// upstream's TypeScript 6. The caller falls back to TypeScript 6 when the
+/// tsgo binary can't be had.
+pub fn select_backend(
+  env: Option<bool>,
+  unstable: &[String],
+  denext_release: bool,
+) -> BackendSelection {
+  if let Some(tsgo) = env {
+    return BackendSelection {
+      tsgo,
+      reason: if tsgo {
+        "DENO_UNSTABLE_TSGO_LSP=1"
+      } else {
+        "DENO_UNSTABLE_TSGO_LSP=0"
+      },
+    };
   }
-  settings.is_some_and(|s| {
-    s.unstable
-      .iter()
-      .any(|f| f.as_str() == TSGO_LSP_UNSTABLE_FEATURE)
-  })
+  if unstable.iter().any(|f| f == TSGO_LSP_UNSTABLE_FEATURE) {
+    return BackendSelection {
+      tsgo: true,
+      reason: "\"deno.unstable\" lists \"tsgo-lsp\"",
+    };
+  }
+  if !unstable.is_empty() {
+    return BackendSelection {
+      tsgo: false,
+      reason: "\"deno.unstable\" does not list \"tsgo-lsp\"",
+    };
+  }
+  if denext_release {
+    BackendSelection {
+      tsgo: true,
+      reason: "the default of this runtime",
+    }
+  } else {
+    BackendSelection {
+      tsgo: false,
+      reason: "the default of this build",
+    }
+  }
+}
+
+/// [`select_backend`] for this process: its environment and build, and the
+/// editor's initialization settings.
+pub fn selected_backend(
+  settings: Option<&WorkspaceSettings>,
+) -> BackendSelection {
+  let unstable = settings.map(|s| s.unstable.as_slice()).unwrap_or_default();
+  select_backend(
+    env_flag(TSGO_LSP_ENV),
+    unstable,
+    deno_lib::version::DENO_VERSION_INFO.denext().is_some(),
+  )
+}
+
+/// Find the pinned tsgo build for the backend (the override, the copy
+/// beside `deno`, else the one in `DENO_DIR`, downloaded and verified on
+/// first use, within `timeout`).
+pub async fn resolve_tsgo_binary(
+  deno_dir: &crate::cache::DenoDir,
+  http_client_provider: &HttpClientProvider,
+  timeout: std::time::Duration,
+) -> Result<PathBuf, AnyError> {
+  if let Some(local) = native_pin::find_local(
+    PIN_ROLE,
+    TSGO_LSP_BIN_ENV,
+    std::env::var_os(TSGO_LSP_BIN_ENV),
+    std::env::current_exe().ok(),
+  )? {
+    return Ok(local);
+  }
+  let http_client = http_client_provider.get_or_create()?;
+  tokio::time::timeout(
+    timeout,
+    native_pin::ensure_downloaded(PIN_ROLE, deno_dir, &http_client),
+  )
+  .await
+  .map_err(|_| anyhow!("download timed out after {}s", timeout.as_secs()))?
 }
 
 fn sync_types_enabled() -> bool {
@@ -154,6 +238,9 @@ struct TsGoServerInner {
   latest_snapshot: Arc<Mutex<Arc<StateSnapshot>>>,
   /// tsgo's semantic-token legend (its `initialize` result), when it has one.
   semantic_tokens_legend: OnceLock<Option<lsp::SemanticTokensLegend>>,
+  /// The root `tsconfig.json` of each workspace root, as the open document
+  /// tsgo reads instead of the file: its version and text.
+  root_configs: Mutex<HashMap<Uri, (i32, String)>>,
 }
 
 impl std::fmt::Debug for TsGoServerInner {
@@ -267,7 +354,7 @@ pub fn sync_types_roots(snapshot: &StateSnapshot) -> Vec<PathBuf> {
   roots
 }
 
-/// Generate the stock `tsconfig.json` + `.deno/` types tsgo reads, with the
+/// Generate the `.deno/` config and types tsgo reads, with the
 /// same `deno` executable (and so the same generator) the native
 /// `deno check` uses. `extra_specifiers` are external imports of the editor's
 /// buffers that no file on disk has yet. Failures are logged, never fatal: a
@@ -294,6 +381,9 @@ async fn run_sync_types(
       .env("DENO_DIR", &deno_dir)
       .env("NO_COLOR", "1")
       .env("PWD", &root)
+      // the root tsconfig.json is given to tsgo as an open document
+      // (`TsGoServerInner::set_root_configs`), never written
+      .env(crate::tools::installer::SYNC_TYPES_FOR_EDITOR_ENV, "1")
       .env_remove(TSGO_LSP_ENV);
     if extra_specifiers.is_empty() {
       command
@@ -657,6 +747,7 @@ impl TsGoServerInner {
       sync: Default::default(),
       latest_snapshot,
       semantic_tokens_legend: OnceLock::new(),
+      root_configs: Default::default(),
     };
     let root_uri = snapshot.config.root_url().map(|u| u.to_string());
     let workspace_folders = snapshot
@@ -685,6 +776,63 @@ impl TsGoServerInner {
     let _ = inner.semantic_tokens_legend.set(legend);
     inner.notify("initialized", json!({}))?;
     Ok(inner)
+  }
+
+  /// Give tsgo the root `tsconfig.json` of each of `roots` (where `deno
+  /// sync-types` just generated `.deno/`) as an open document: the user's own
+  /// config with the generated one prepended to its `extends`, or one that
+  /// extends the generated config. tsgo reads an open document instead of
+  /// the file (or of a missing file), so the user's `tsconfig.json` is never
+  /// rewritten and none is created. A config that did not change is not
+  /// sent again.
+  fn set_root_configs(&self, roots: &[PathBuf]) {
+    for root in roots {
+      let config = crate::tsc::tsconfig_gen::build_editor_root_config(root);
+      let Ok(text) = serde_json::to_string_pretty(&config) else {
+        continue;
+      };
+      let Some(uri) =
+        deno_path_util::url_from_file_path(&root.join("tsconfig.json"))
+          .ok()
+          .and_then(|url| crate::lsp::urls::url_to_uri(&url).ok())
+      else {
+        continue;
+      };
+      let mut root_configs = self.root_configs.lock();
+      let message = match root_configs.get(&uri) {
+        Some((_, current)) if *current == text => continue,
+        Some((version, _)) => {
+          let version = version + 1;
+          root_configs.insert(uri.clone(), (version, text.clone()));
+          json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didChange",
+            "params": {
+              "textDocument": { "uri": &uri, "version": version },
+              "contentChanges": [{ "text": text }],
+            },
+          })
+        }
+        None => {
+          root_configs.insert(uri.clone(), (1, text.clone()));
+          json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {
+              "textDocument": {
+                "uri": &uri,
+                "languageId": "json",
+                "version": 1,
+                "text": text,
+              },
+            },
+          })
+        }
+      };
+      if let Err(err) = write_message(&mut self.stdin.lock(), &message) {
+        lsp_warn!("tsgo: failed to send {}: {err:#}", uri.as_str());
+      }
+    }
   }
 
   fn notify(&self, method: &str, params: Value) -> Result<(), AnyError> {
@@ -823,6 +971,7 @@ impl TsGoServerInner {
 
 /// `deno lsp`'s tsgo backend. Starts lazily on the first request.
 pub struct TsGoServer {
+  tsc: Option<PathBuf>,
   http_client_provider: Arc<HttpClientProvider>,
   inner: tokio::sync::OnceCell<Result<Arc<TsGoServerInner>, String>>,
   /// Serializes `deno sync-types` runs after startup.
@@ -843,8 +992,14 @@ impl std::fmt::Debug for TsGoServer {
 }
 
 impl TsGoServer {
-  pub fn new(http_client_provider: Arc<HttpClientProvider>) -> Self {
+  /// `tsc`: the binary the language server already found (see
+  /// [`resolve_tsgo_binary`]); without one it is looked up on start.
+  pub fn new(
+    http_client_provider: Arc<HttpClientProvider>,
+    tsc: Option<PathBuf>,
+  ) -> Self {
     Self {
+      tsc,
       http_client_provider,
       inner: Default::default(),
       sync_types_lock: Default::default(),
@@ -867,19 +1022,13 @@ impl TsGoServer {
     &self,
     snapshot: &StateSnapshot,
   ) -> Result<PathBuf, AnyError> {
-    if let Some(local) = native_pin::find_local(
-      PIN_ROLE,
-      TSGO_LSP_BIN_ENV,
-      std::env::var_os(TSGO_LSP_BIN_ENV),
-      std::env::current_exe().ok(),
-    )? {
-      return Ok(local);
+    if let Some(tsc) = &self.tsc {
+      return Ok(tsc.clone());
     }
-    let http_client = self.http_client_provider.get_or_create()?;
-    native_pin::ensure_downloaded(
-      PIN_ROLE,
+    resolve_tsgo_binary(
       snapshot.cache.deno_dir(),
-      &http_client,
+      &self.http_client_provider,
+      std::time::Duration::from_secs(300),
     )
     .await
   }
@@ -898,10 +1047,10 @@ impl TsGoServer {
             native_pin::pin(PIN_ROLE).version
           )
         })?;
-        {
+        let generated = {
           let _guard = self.sync_types_lock.lock().await;
-          run_sync_types(snapshot, &[]).await;
-        }
+          run_sync_types(snapshot, &[]).await
+        };
         let inner = TsGoServerInner::start(
           &tsc,
           snapshot.clone(),
@@ -909,6 +1058,8 @@ impl TsGoServer {
         )
         .await
         .map_err(|e| format!("{e:#}"))?;
+        // before any document: tsgo loads each project from its root config
+        inner.set_root_configs(&generated);
         lsp_log!(
           "tsgo: started TypeScript {} from {} ({}ms)",
           native_pin::pin(PIN_ROLE).version,
@@ -975,8 +1126,9 @@ impl TsGoServer {
   }
 
   /// Re-run `deno sync-types` (config or dependencies changed) and tell tsgo
-  /// which generated files changed: the root and `.deno/` tsconfigs and every
-  /// file under `.deno/` (Deno's lib types and the mirrored dependency types).
+  /// what changed: the root tsconfig (an open document) and every file
+  /// under `.deno/` (its tsconfig, Deno's lib types and the mirrored
+  /// dependency types).
   pub async fn refresh_generated_types(&self, snapshot: Arc<StateSnapshot>) {
     let inner = match self.inner(&snapshot).await {
       Ok(inner) => inner.clone(),
@@ -1648,9 +1800,11 @@ async fn regenerate_types(
     let _guard = sync_types_lock.lock().await;
     run_sync_types(snapshot, extra_specifiers).await
   };
+  // The root config is an open document (the user's tsconfig.json may have
+  // changed too); the generated files are announced as changed on disk.
+  inner.set_root_configs(&roots);
   let mut paths = Vec::new();
   for root in &roots {
-    paths.push(root.join("tsconfig.json"));
     collect_files(&root.join(".deno"), &mut paths, 20_000);
   }
   let changes = paths
@@ -2015,5 +2169,30 @@ mod tests {
         token(1, 2, 2, 3, 0),
       ]
     );
+  }
+
+  #[test]
+  fn backend_selection() {
+    let none: &[String] = &[];
+    let tsgo = vec!["tsgo-lsp".to_string()];
+    let other = vec!["sloppy-imports".to_string()];
+    let both = vec!["sloppy-imports".to_string(), "tsgo-lsp".to_string()];
+    // a denext release build defaults to tsgo ...
+    assert!(select_backend(None, none, true).tsgo);
+    assert!(select_backend(None, &tsgo, true).tsgo);
+    assert!(select_backend(None, &both, true).tsgo);
+    // ... unless `deno.unstable` lists other features only ...
+    let selection = select_backend(None, &other, true);
+    assert!(!selection.tsgo);
+    assert!(selection.reason.contains("does not list"), "{selection:?}");
+    // ... and the environment wins either way
+    assert!(!select_backend(Some(false), &tsgo, true).tsgo);
+    assert!(!select_backend(Some(false), none, true).tsgo);
+    assert!(select_backend(Some(true), &other, true).tsgo);
+    // any other build keeps TypeScript 6 unless asked
+    assert!(!select_backend(None, none, false).tsgo);
+    assert!(!select_backend(None, &other, false).tsgo);
+    assert!(select_backend(None, &tsgo, false).tsgo);
+    assert!(select_backend(Some(true), none, false).tsgo);
   }
 }

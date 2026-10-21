@@ -644,8 +644,10 @@ const GENERATED_INPUTS_FILE: &str = "check-inputs";
 /// the registries, the workspace's config files (deno.json, package.json, the
 /// import map, the lockfile, a root tsconfig.json, an installed
 /// `node_modules`' records), and the graph's modules from outside the project
-/// (remote, `jsr:` and `npm:` ones, with their resolved versions) and local
-/// Wasm modules (whose exports it types). A local edit changes none of them.
+/// (remote, `jsr:` and `npm:` ones, with their resolved versions), local
+/// Wasm modules (whose exports it types) and the modules local files augment
+/// (`declare module "<name>"`). A local edit that changes none of them
+/// reuses the project.
 fn generated_project_inputs(
   flags: &Flags,
   cli_options: &CliOptions,
@@ -731,6 +733,12 @@ fn generated_project_inputs(
   modules.sort();
   for module in &modules {
     hasher.write_str(module).write_u8(0);
+  }
+  // denext: the modules the project's files augment are generated as imports
+  // (`deno sync-types`, `.deno/module_augmentations.d.ts`).
+  hasher.write_u8(0xff);
+  for name in crate::tools::installer::graph_augmentation_names(graph) {
+    hasher.write_str(&name).write_u8(0);
   }
   format!("{:016x}", hasher.finish())
 }

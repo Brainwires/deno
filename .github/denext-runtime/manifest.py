@@ -2,9 +2,9 @@
 """Write SHA256SUMS and manifest.json for a directory of runtime archives
 (and the `deno-cli-*` CLI archives, listed under "cli", each with the
 esbuild it ships: version and the binary's sha256, and the native TypeScript
-compiler in its `typescript-check/`: version, the binary's sha256 and a sha256
-over every file of the directory; and the `deno-denort-*`
-archives `deno compile` builds onto, listed under "denort").
+compilers in its `typescript-check/` and `typescript-lsp/`: version, the
+binary's sha256 and a sha256 over every file of the directory; and the
+`deno-denort-*` archives `deno compile` builds onto, listed under "denort").
 
 Usage: manifest.py <dist dir>
 Env:   VERSION TAG REPOSITORY DENO_VERSION DENO_SHA LAUFEY_SHA CEF_VERSION RUN_URL
@@ -89,20 +89,23 @@ def esbuild_of(name, target):
     return {"version": info["version"], "sha256": digest}
 
 
-def typescript_check_of(name, target):
-    """The native TypeScript compiler type checking runs, inside a CLI zip
-    (assemble_cli.sh, `typescript-check/`): its version, from BUILD_INFO.json
-    (fetch_typescript.py check), the sha256 of the binary and a tree sha256
-    (`<name>\\0<sha256>\\n` per file but typescript.json, sorted), each
-    recomputed from the zip: denext pins both."""
+def typescript_of(name, target, role):
+    """A native TypeScript compiler inside a CLI zip (assemble_cli.sh,
+    `typescript-<role>/`): `check` is the one type checking runs, `lsp` the
+    one `deno lsp`'s tsgo backend runs. Its version, from BUILD_INFO.json
+    (`typescript_<role>`, fetch_typescript.py <role>), the sha256 of the
+    binary and a tree sha256 (`<name>\\0<sha256>\\n` per file but
+    typescript.json, sorted), each recomputed from the zip: denext pins all
+    three."""
     binary = "tsc.exe" if target.endswith("windows-msvc") else "tsc"
-    prefix = "typescript-check/"
+    prefix = f"typescript-{role}/"
+    key = f"typescript_{role}"
     with zipfile.ZipFile(os.path.join(dist, name)) as z:
         names = set(z.namelist())
         for want in (prefix + binary, prefix + "LICENSE", prefix + "typescript.json", "BUILD_INFO.json"):
             if want not in names:
                 sys.exit(f"{name} has no {want}")
-        info = json.loads(z.read("BUILD_INFO.json")).get("typescript_check") or {}
+        info = json.loads(z.read("BUILD_INFO.json")).get(key) or {}
         files = {}
         for n in sorted(names):
             if n.startswith(prefix) and not n.endswith("/") and n != prefix + "typescript.json":
@@ -113,7 +116,7 @@ def typescript_check_of(name, target):
     if info.get("sha256") != files.get(binary):
         sys.exit(f"{name}: {prefix}{binary} sha256 {files.get(binary)} != BUILD_INFO.json {info.get('sha256')}")
     if not info.get("version"):
-        sys.exit(f"{name}: BUILD_INFO.json names no typescript_check version")
+        sys.exit(f"{name}: BUILD_INFO.json names no {key} version")
     return {"version": info["version"], "sha256": files[binary], "tree_sha256": tree.hexdigest()}
 
 
@@ -140,7 +143,8 @@ for name in sorted(os.listdir(dist)):
             "binary": "deno.exe" if m["target"].endswith("windows-msvc") else "deno",
             **describe(name, m["ext"]),
             "esbuild": esbuild_of(name, m["target"]),
-            "typescript_check": typescript_check_of(name, m["target"]),
+            "typescript_check": typescript_of(name, m["target"], "check"),
+            "typescript_lsp": typescript_of(name, m["target"], "lsp"),
         }
 
 if not targets and not (env.get("CLI_ONLY") == "1" and cli_targets):

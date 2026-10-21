@@ -24,19 +24,23 @@ use crate::npm::CliNpmResolver;
 use crate::sys::CliSys;
 use crate::util::display;
 
+mod augmentations;
 mod bin_name_resolver;
 mod global;
 mod local;
 mod npm_compat;
 
+pub use augmentations::graph_augmentation_names;
 pub use global::uninstall;
 use local::CategorizedInstalledDeps;
 pub use local::RootTsConfigMode;
 pub use local::SYNC_TYPES_EXTRA_SPECIFIERS_ENV;
+pub use local::SYNC_TYPES_FOR_EDITOR_ENV;
 use local::categorize_installed_npm_deps;
 pub use local::ci_command;
 pub use local::sync_types_command;
 pub use local::sync_types_extra_specifiers_from_env;
+pub use local::sync_types_root_tsconfig_mode;
 
 #[derive(Default)]
 pub struct InstallStats {
