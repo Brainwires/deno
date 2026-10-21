@@ -106,7 +106,8 @@ fn is_resolvable_name(name: &str) -> bool {
     && !name.starts_with("node:")
 }
 
-/// The names the local modules of `graph` augment.
+/// The names the project's own modules in `graph` augment (local ones, not
+/// a package's in a `node_modules` directory).
 pub fn graph_augmentation_names(
   graph: &deno_graph::ModuleGraph,
 ) -> BTreeSet<String> {
@@ -114,6 +115,7 @@ pub fn graph_augmentation_names(
   for module in graph.modules() {
     if let deno_graph::Module::Js(js) = module
       && js.specifier.scheme() == "file"
+      && !js.specifier.path().contains("/node_modules/")
     {
       names.extend(module_augmentation_names(
         &js.specifier,
