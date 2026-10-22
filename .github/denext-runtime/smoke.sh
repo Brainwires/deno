@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Package the smoke app with the STOCK `deno desktop` CLI (whatever `deno` is
-# on PATH; CI pins 2.9.7) against a runtime archive, the way denext does:
+# on PATH; CI pins 2.9.8) against a runtime archive, the way denext does:
 #
 #   DENORT_DESKTOP_BIN=<unpacked>/<runtime lib>
 #   LAUFEY_DEV_DIR=<unpacked>/laufey
