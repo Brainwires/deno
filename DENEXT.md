@@ -3361,6 +3361,29 @@ where the changes are discussed.
     waited for it until its 30 s bound, and it prints the watcher's output when
     that bound fires).
 
+96. **`fix(resolver)`: a linked package on another Windows drive keeps its
+    import map** (`fix/rc3-batch`, for runtime `3.0.0-rc.3`, CLI only;
+    `libs/resolver/workspace.rs`). The workspace's synthetic import map scopes
+    each workspace member and `links` package by its directory, relative to the
+    root config's (`import_map::ext::create_synthetic_import_map`), and
+    `Url::make_relative` knows nothing of drive letters: from `file:///C:/app/`
+    a package at `file:///D:/lib/` became the scope `./../../D:/lib/`, which
+    resolves to `file:///C:/D:/lib/`. Its modules then lost the package's own
+    import map
+    (`Import "x" not a dependency and not in
+    import map from "file:///D:/lib/mod.ts"`),
+    which is how an app on `C:` importing a denext checkout on `D:`
+    (`migrate --denext-local-path`) failed; on one drive it worked. A child on
+    another drive than the base map is now scoped by absolute URLs (its
+    directory, and each import resolved against it); the rest still go through
+    the crate. Reproduced on Windows with a `subst` drive and
+    `"links": ["file:///Q:/"]` (stock 2.9.7 and rc.2 alike).
+
+    Tests: `synthetic_import_map_scopes_a_child_on_another_drive` (a linked
+    package's bare import resolves on its drive; the same drive in another case
+    still goes through the crate) and `windows_drive_letters`
+    (`libs/resolver/workspace.rs`).
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95) are what the prebuilt `libdenort`
 carries. The CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` /
