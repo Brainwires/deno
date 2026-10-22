@@ -9239,9 +9239,9 @@ fn lsp_completions() {
       "label": "build",
       "kind": 6,
       "detail": if false {
-        "const Deno.build: { target: string; arch: \"aarch64\" | \"x86_64\"; os: \"aix\" | \"android\" | \"darwin\" | \"freebsd\" | \"illumos\" | \"linux\" | \"netbsd\" | \"solaris\" | \"windows\"; standalone: boolean; vendor: string; env?: string | undefined; }"
+        "const Deno.build: { target: string; arch: \"aarch64\" | \"x86_64\"; os: \"aix\" | \"android\" | \"darwin\" | \"freebsd\" | \"illumos\" | \"linux\" | \"netbsd\" | \"solaris\" | \"windows\"; standalone: boolean; vendor: string; env?: string | undefined; denext?: string | undefined; }"
       } else {
-        "const Deno.build: {\n    target: string;\n    arch: \"x86_64\" | \"aarch64\";\n    os: \"darwin\" | \"linux\" | \"android\" | \"windows\" | \"freebsd\" | \"netbsd\" | \"aix\" | \"solaris\" | \"illumos\";\n    standalone: boolean;\n    vendor: string;\n    env?: string;\n}"
+        "const Deno.build: {\n    target: string;\n    arch: \"x86_64\" | \"aarch64\";\n    os: \"darwin\" | \"linux\" | \"android\" | \"windows\" | \"freebsd\" | \"netbsd\" | \"aix\" | \"solaris\" | \"illumos\";\n    standalone: boolean;\n    vendor: string;\n    env?: string;\n    denext?: string;\n}"
       },
       "documentation": {
         "kind": "markdown",
