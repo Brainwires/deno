@@ -3477,8 +3477,36 @@ where the changes are discussed.
     `test_cli_records_the_identity_marker`
     (`.github/denext-runtime/manifest_test.py`).
 
+100. **`chore`: Rust 1.99.1** (`chore/rust-1.99.1`, CLI and runtime;
+     `rust-toolchain.toml`, `Cargo.lock`). The toolchain moves from upstream's
+     1.95.0 to 1.99.1 (stable, 2026-10-15). Every CI job, the runtime release
+     workflow and the nix shell read the version from `rust-toolchain.toml`, so
+     the file is the only pin. The new compiler and clippy needed:
+     - **Lints new in 1.96-1.99** (clippy runs with `-D warnings`):
+       `useless_borrows_in_formatting` (a redundant `&` in `format!` arguments,
+       across the workspace), `chunks_exact_to_as_chunks` (the
+       `crypto.randomUUID()` batch op and `ext/node`'s UTF-16 writer iterate
+       fixed-size arrays), `for_kv_map`, `question_mark`, `needless_late_init`
+       and collapsible `if let` (machine-applicable suggestions, applied as
+       written).
+     - **`result_large_err`** (a 128-byte limit the error types now reached):
+       `ClientSendError` boxes its `Uri`, `NpmModuleLoadError`'s `DirImport` /
+       `UnableToLoad` box their referrer `Url` (a Windows `PathBuf` is larger),
+       and the CLI registry's `ApiError` boxes its flattened `data`.
+     - **Deprecated `std::f64` module constants**: the CSS numeric parser uses
+       `f64::INFINITY` / `NEG_INFINITY` / `NAN` and `std::f64::consts`.
+     - **Lints fired inside derive / attribute macros**, fixed upstream:
+       `async-trait` 0.1.88 -> 0.1.92 (`double_must_use` in `#[async_trait]`
+       expansions) and `thiserror` 2.0.12 -> 2.0.21 (`redundant_field_names` in
+       `#[from]` conversions). Lockfile-only.
+     - One reasoned `allow`: the npm resolution bench's download progress line
+       keeps `eprintln!` (`clippy::print_stderr`).
+
+     No behaviour change; covered by the existing suites (`denext tests` full
+     matrix, `denext runtime` release builds).
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
-64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99) are what the prebuilt
+64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99, 100) are what the prebuilt
 `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
 in the branch too, but a stock CLI does not run them; denext's own launcher
