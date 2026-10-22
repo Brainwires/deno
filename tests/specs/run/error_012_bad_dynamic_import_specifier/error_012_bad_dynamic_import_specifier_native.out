@@ -1,5 +1,5 @@
 Check [WILDCARD]error_012_bad_dynamic_import_specifier.ts
-TS2307 [ERROR]: Cannot find module 'bad-module.ts' or its corresponding type declarations.
+TS2307 [ERROR]: Import "bad-module.ts" not a dependency
   const _badModule = await import("bad-module.ts");
                                   ~~~~~~~~~~~~~~~
     at file:///[WILDCARD]/error_012_bad_dynamic_import_specifier.ts:2:35

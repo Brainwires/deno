@@ -3379,10 +3379,12 @@ where the changes are discussed.
     the crate. Reproduced on Windows with a `subst` drive and
     `"links": ["file:///Q:/"]` (stock 2.9.7 and rc.2 alike).
 
+    Drives are compared as spelled (`make_relative` takes `c:` and `C:` for
+    different drives as well).
+
     Tests: `synthetic_import_map_scopes_a_child_on_another_drive` (a linked
-    package's bare import resolves on its drive; the same drive in another case
-    still goes through the crate) and `windows_drive_letters`
-    (`libs/resolver/workspace.rs`).
+    package's bare import resolves on its drive; a child on the same drive still
+    goes through the crate) and `windows_drives` (`libs/resolver/workspace.rs`).
 
 97. **`fix(ext/node, npm)`: a handle that fails to open reports its errno, and a
     bin named `..` is skipped** (`fix/rc3-batch`, for runtime `3.0.0-rc.3`;
@@ -3407,8 +3409,9 @@ where the changes are discussed.
     Tests:
     `[child_process ipc] a received handle that fails to open throws
     its errno error`
-    (`tests/unit_node/child_process_test.ts`, through `createIpcHandle`, now
-    exported by the polyfill module); `bin_names_that_name_no_file_are_skipped`,
+    (`tests/unit_node/child_process_test.ts`, through
+    `require("internal/child_process").createIpcHandle`, now exported);
+    `bin_names_that_name_no_file_are_skipped`,
     `collect_bin_files_skips_bin_names_that_name_no_file`,
     `set_up_bin_entry_skips_a_dot_dot_bin_name`
     (`libs/npm_installer/bin_entries.rs`).
@@ -3430,8 +3433,9 @@ where the changes are discussed.
       import the graph recorded a resolution error for (one that is not "module
       not found": a bare specifier not in the import map, a missing `./` prefix,
       an unresolvable package) takes Deno's message for it, as TS2307, keeping
-      the compiler's position and source line. A module Deno resolved but could
-      not find keeps the compiler's message.
+      the compiler's position and source line (so `node:unknown` reads
+      `No such built-in module: node:unknown` again). A module Deno resolved but
+      could not find keeps the compiler's message.
 
     Tests: `check_files_after_double_dash`
     (`libs/cli_parser/src/tests_full.rs`); spec `check/double_dash_files` (a

@@ -792,6 +792,7 @@ mod test {
 
   #[cfg(unix)]
   #[test]
+  #[allow(clippy::disallowed_methods, reason = "test code")]
   fn set_up_bin_entry_skips_a_dot_dot_bin_name() {
     let sys = sys_traits::impls::RealSys;
     let (dir, _cleanup) = test_dir("dot_dot_bin_name");

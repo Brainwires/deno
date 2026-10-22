@@ -1926,7 +1926,10 @@ fn create_synthetic_import_map(
   base: import_map::ext::ImportMapConfig,
   children: Vec<import_map::ext::ImportMapConfig>,
 ) -> (Url, serde_json::Value) {
-  let base_dir = base.base_url.join(".").unwrap_or(base.base_url.clone());
+  let base_dir = base
+    .base_url
+    .join(".")
+    .unwrap_or_else(|_| base.base_url.clone());
   let (other_drive, same_drive): (Vec<_>, Vec<_>) = children
     .into_iter()
     .partition(|child| on_other_windows_drive(&base_dir, &child.base_url));
@@ -1976,8 +1979,10 @@ fn create_synthetic_import_map(
   (url, value)
 }
 
-/// The drive letter of a Windows `file:` URL (`file:///C:/...` -> `C`).
-fn windows_drive_letter(url: &Url) -> Option<char> {
+/// The drive of a Windows `file:` URL (`file:///C:/...` -> `C:`), as spelled:
+/// `Url::make_relative` compares path segments literally, so `c:` and `C:`
+/// are different drives to it too.
+fn windows_drive(url: &Url) -> Option<&str> {
   if url.scheme() != "file" {
     return None;
   }
@@ -1985,7 +1990,7 @@ fn windows_drive_letter(url: &Url) -> Option<char> {
   let mut chars = first.chars();
   match (chars.next(), chars.next(), chars.next()) {
     (Some(letter), Some(':' | '|'), None) if letter.is_ascii_alphabetic() => {
-      Some(letter.to_ascii_uppercase())
+      Some(first)
     }
     _ => None,
   }
@@ -1993,7 +1998,7 @@ fn windows_drive_letter(url: &Url) -> Option<char> {
 
 /// Whether `target` is a `file:` URL on another Windows drive than `base`.
 fn on_other_windows_drive(base: &Url, target: &Url) -> bool {
-  match (windows_drive_letter(base), windows_drive_letter(target)) {
+  match (windows_drive(base), windows_drive(target)) {
     (Some(base), Some(target)) => base != target,
     _ => false,
   }
@@ -3516,7 +3521,7 @@ mod test {
         }),
       },
       import_map::ext::ImportMapConfig {
-        base_url: Url::parse("file:///c:/work/shared/deno.json").unwrap(),
+        base_url: Url::parse("file:///C:/work/shared/deno.json").unwrap(),
         import_map_value: json!({ "imports": { "same": "./same.ts" } }),
       },
     ];
@@ -3538,7 +3543,7 @@ mod test {
       resolve("lib", "file:///C:/work/app/main.ts"),
       "file:///D:/lib/mod.ts"
     );
-    // The same drive (any case) still goes through the crate's relative scope.
+    // The same drive still goes through the crate's relative scope.
     assert_eq!(
       resolve("same", "file:///C:/work/shared/mod.ts"),
       "file:///C:/work/shared/same.ts"
@@ -3546,10 +3551,11 @@ mod test {
   }
 
   #[test]
-  fn windows_drive_letters() {
-    let drive = |url: &str| windows_drive_letter(&Url::parse(url).unwrap());
-    assert_eq!(drive("file:///C:/work/"), Some('C'));
-    assert_eq!(drive("file:///d:/"), Some('D'));
+  fn windows_drives() {
+    let drive =
+      |url: &str| windows_drive(&Url::parse(url).unwrap()).map(str::to_owned);
+    assert_eq!(drive("file:///C:/work/"), Some("C:".to_owned()));
+    assert_eq!(drive("file:///d:/"), Some("d:".to_owned()));
     assert_eq!(drive("file:///home/user/"), None);
     assert_eq!(drive("file:///CC:/x"), None);
     assert_eq!(drive("https://example.com/C:/"), None);
@@ -3557,7 +3563,9 @@ mod test {
       on_other_windows_drive(&Url::parse(a).unwrap(), &Url::parse(b).unwrap())
     };
     assert!(other("file:///C:/app/", "file:///D:/lib/deno.json"));
-    assert!(!other("file:///C:/app/", "file:///c:/lib/deno.json"));
+    assert!(!other("file:///C:/app/", "file:///C:/lib/deno.json"));
+    // `make_relative` sees another drive in another case, too.
+    assert!(other("file:///C:/app/", "file:///c:/lib/deno.json"));
     assert!(!other("file:///home/app/", "file:///home/lib/deno.json"));
   }
 

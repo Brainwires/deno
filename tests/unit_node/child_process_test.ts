@@ -3,6 +3,7 @@
 import CP from "node:child_process";
 import net from "node:net";
 import { Buffer } from "node:buffer";
+import { createRequire } from "node:module";
 import {
   assert,
   assertEquals,
@@ -1916,9 +1917,9 @@ Deno.test({
   // negative libuv error number. It was looked up as an error code name, so
   // the receiver threw a TypeError from `errnoException(undefined)` instead
   // of the open error.
-  // deno-lint-ignore no-explicit-any
-  const { createIpcHandle } = (Deno as any)[(Deno as any).internal].core
-    .loadExtScript("ext:deno_node/internal/child_process.ts");
+  const { createIpcHandle } = createRequire(import.meta.url)(
+    "internal/child_process",
+  );
   const messages = [
     { type: "net.Socket", nativeKind: "tcp" },
     { type: "net.Socket", nativeKind: "pipe" },

@@ -3090,6 +3090,7 @@ return {
     stdioStringToArray,
     spawnSync,
     setupChannel,
+    createIpcHandle,
   },
 };
 })();
