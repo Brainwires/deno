@@ -876,9 +876,11 @@ Deno.test("tls.connect rejects X.509v1 server cert not signed by the CA", async 
         client.on("error", resolve);
       });
 
+      // Node (OpenSSL) finds the CA by the leaf's issuer name, then fails
+      // the signature check.
       assertEquals(
         (error as Error & { code?: string }).code,
-        "UNABLE_TO_VERIFY_LEAF_SIGNATURE",
+        "CERT_SIGNATURE_FAILURE",
       );
     },
   );
@@ -904,9 +906,12 @@ Deno.test("tls.connect rejects X.509v1 chain through a non-CA cert", async () =>
         client.on("error", resolve);
       });
 
+      // Rejected either way; the code differs from Node's. Node 24 reports
+      // `UNSPECIFIED` ("key usage does not include certificate signing")
+      // and Deno's OpenSSL-aligned path `INVALID_PURPOSE`.
       assertEquals(
         (error as Error & { code?: string }).code,
-        "UNABLE_TO_GET_ISSUER_CERT_LOCALLY",
+        "INVALID_PURPOSE",
       );
     },
   );
@@ -960,7 +965,7 @@ Deno.test("tls.connect rejectUnauthorized:false proceeds for forged X.509v1 serv
         assertEquals(socket.authorized, false);
         assertEquals(
           socket.authorizationError as unknown as string,
-          "UNABLE_TO_VERIFY_LEAF_SIGNATURE",
+          "CERT_SIGNATURE_FAILURE",
         );
       } finally {
         socket.destroy();

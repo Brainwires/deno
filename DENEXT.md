@@ -64,7 +64,8 @@ merge commit, so the history shows each sync. The fork keeps its own version
     (item 68); our three other commits there (empty TLS writes #36986, the
     onread backing store #37013, `setMaxSendFragment`) re-applied on top
     cleanly. `deno_node`'s `x509-parser` dependency (only #36248 used it)
-    dropped.
+    dropped. #36248's `tls_test.ts` cases now expect upstream's error codes (see
+    item 68).
   - `libs/npm_installer/{local,hoisted}.rs`: upstream's new
     `symlink_package_dir(sys, target, node_modules, name)` signature at the two
     workspace-link call sites; the carried #36103 checks stay (see item 75), and
@@ -2005,7 +2006,12 @@ where the changes are discussed.
       with backtracking. #36248's `tls_wrap.rs` changes and its `x509-parser`
       dependency of `deno_node` were dropped; its `tests/unit_node/tls_test.ts`
       cases and `tests/testdata/tls/localhost_v1*` fixtures stay, now run
-      against upstream's code); UTF-16LE Buffer writes through V8 (#36804).
+      against upstream's code: a forged v1 leaf is `CERT_SIGNATURE_FAILURE`, as
+      in Node 24, where #36248 said `UNABLE_TO_VERIFY_LEAF_SIGNATURE`; a v1 leaf
+      signed by a `CA:FALSE` certificate is `INVALID_PURPOSE`, where Node 24
+      says `UNSPECIFIED` (key usage does not include certificate signing) and
+      #36248 said `UNABLE_TO_GET_ISSUER_CERT_LOCALLY`); UTF-16LE Buffer writes
+      through V8 (#36804).
     - npm: unchanged `.bin` shims are not rewritten (Windows os error 32,
       #36447); an optional dependency that doesn't exist is skipped with a
       warning (#36606); BYONM lookups stay inside the configured root (#36134).
