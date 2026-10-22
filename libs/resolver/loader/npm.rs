@@ -51,7 +51,8 @@ pub enum NpmModuleLoadError {
   #[error("Unable to load {}{}", file_path.display(), maybe_referrer.as_ref().map(|r| format!(" imported from {}", r)).unwrap_or_default())]
   UnableToLoad {
     file_path: PathBuf,
-    maybe_referrer: Option<Url>,
+    // Boxed to keep the error type under clippy's result_large_err limit.
+    maybe_referrer: Option<Box<Url>>,
     #[source]
     #[inherit]
     source: std::io::Error,
@@ -194,7 +195,7 @@ impl<
       } else {
         NpmModuleLoadError::UnableToLoad {
           file_path,
-          maybe_referrer: maybe_referrer.cloned(),
+          maybe_referrer: maybe_referrer.cloned().map(Box::new),
           source,
         }
       }

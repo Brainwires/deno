@@ -147,7 +147,10 @@ impl NpmRegistryApi for TargetFolderCachedRegistryApi {
       return Ok(data);
     }
     let url = packument_url(name);
-    eprintln!("Downloading {}", url);
+    #[allow(clippy::print_stderr, reason = "benchmark progress output")]
+    {
+      eprintln!("Downloading {}", url);
+    }
     let resp = reqwest::get(&url).await.unwrap();
     if resp.status() == StatusCode::NOT_FOUND {
       return Err(NpmRegistryPackageInfoLoadError::PackageNotExists {

@@ -62,8 +62,9 @@ pub struct PublishingTask {
 pub struct ApiError {
   pub code: String,
   pub message: String,
+  // Boxed to keep the error type under clippy's result_large_err limit.
   #[serde(flatten)]
-  pub data: serde_json::Value,
+  pub data: Box<serde_json::Value>,
   #[serde(skip)]
   pub x_deno_ray: Option<String>,
 }
@@ -117,7 +118,7 @@ pub async fn parse_response<T: DeserializeOwned>(
           code: "unknown".to_string(),
           message: format!("{}: {}", status, text),
           x_deno_ray,
-          data: serde_json::json!({}),
+          data: Box::new(serde_json::json!({})),
         };
         return Err(err);
       }
@@ -128,7 +129,7 @@ pub async fn parse_response<T: DeserializeOwned>(
     code: "unknown".to_string(),
     message: format!("Failed to parse response: {}, response: '{}'", err, text),
     x_deno_ray,
-    data: serde_json::json!({}),
+    data: Box::new(serde_json::json!({})),
   })
 }
 
@@ -428,7 +429,7 @@ mod test {
     let err = ApiError {
       code: "bad\u{202e}code".to_string(),
       message: "failed\x1b[2J\nagain".to_string(),
-      data: serde_json::json!({}),
+      data: Box::new(serde_json::json!({})),
       x_deno_ray: Some("ray\u{009b}31m".to_string()),
     };
 
