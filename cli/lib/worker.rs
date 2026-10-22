@@ -528,6 +528,11 @@ impl<TSys: DenoLibSys> LibWorkerFactorySharedState<TSys> {
           no_legacy_abort: shared.options.no_legacy_abort,
           close_on_idle: args.close_on_idle,
           disable_offscreen_canvas: shared.options.disable_offscreen_canvas,
+          denext_version: Some(
+            crate::version::DENO_VERSION_INFO
+              .denext_runtime()
+              .to_string(),
+          ),
         },
         extensions: vec![],
         startup_snapshot: shared.options.startup_snapshot,
@@ -782,6 +787,11 @@ impl<TSys: DenoLibSys> LibMainWorkerFactory<TSys> {
         otel_config: shared.options.otel_config.clone(),
         close_on_idle: shared.options.close_on_idle,
         disable_offscreen_canvas: shared.options.disable_offscreen_canvas,
+        denext_version: Some(
+          crate::version::DENO_VERSION_INFO
+            .denext_runtime()
+            .to_string(),
+        ),
       },
       extensions: custom_extensions,
       startup_snapshot: shared.options.startup_snapshot,

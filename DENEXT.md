@@ -3444,11 +3444,45 @@ where the changes are discussed.
     `check/ts_suppression_unresolved_import` (their expectations from before the
     native check, with the compiler's source line).
 
+99. **`feat(cli,runtime)`: an identity marker for denext's runtime**
+    (`feat/identity-marker`, for runtime `3.0.0-rc.3`; `cli/lib/version.rs`,
+    `cli/args/flags.rs`, `cli/lib/worker.rs`, `runtime/worker_bootstrap.rs`,
+    `runtime/js/99_main.js`, `cli/tsc/dts/lib.deno.ns.d.ts`). Upstream Deno is
+    releasing a 3.0.0 too, so a version string such as `3.0.0-rc.3` no longer
+    says whose runtime it is. Every build of this fork now carries a marker
+    upstream Deno has no equivalent of:
+    - **`deno --version`** prints a last line `denext <version> (Brainwires)`
+      after upstream's three, which keep their format (`deno -V` stays one
+      line).
+    - **`Deno.build.denext`**: the same version as a string, in the main runtime
+      and in workers (absent on upstream Deno; typed in `lib.deno.ns.d.ts` as a
+      denext extension). It is passed in the bootstrap options
+      (`BootstrapOptions::denext_version`) and set before `Deno.build` is
+      frozen.
+    - The version is the release's (`DENEXT_VERSION`, item 26) on a release or
+      CI build and the fork's own `cli/Cargo.toml` version on any other build
+      (tests, a local `cargo build`), so it equals `Deno.version.deno`.
+    - **The release manifest** records it under `cli.identity` (`buildDenext`,
+      `versionLine`), and `cli_smoke.sh` checks both on every CLI archive.
+
+    denext detects its runtime by this marker (`Deno.build.denext` in process,
+    the `--version` line for a child binary) and keeps its version-pattern check
+    only for the runtimes from before it (`3.0.0-rc.2` and earlier).
+
+    Tests: `denext_runtime_marks_every_build_of_the_fork`
+    (`cli/lib/version.rs`); `buildInfoDenextMarker` /
+    `buildInfoDenextMarkerInWorker` (`tests/unit/build_test.ts`); spec
+    `flags/version_flag` (`long_version_names_denext`,
+    `short_version_is_one_line`, `build_denext_matches_version_line`);
+    `test_cli_records_the_identity_marker`
+    (`.github/denext-runtime/manifest_test.py`).
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
-64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97) are what the prebuilt `libdenort`
-carries. The CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` /
-`LAUFEY_APP_ID` into a packaged app's launchers) are in the branch too, but a
-stock CLI does not run them; denext's own launcher provides that environment.
+64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99) are what the prebuilt
+`libdenort` carries. The CLI-side parts (for example writing
+`LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
+in the branch too, but a stock CLI does not run them; denext's own launcher
+provides that environment.
 
 The laufey backend hosts are built from
 [Brainwires/laufey](https://github.com/Brainwires/laufey) branch

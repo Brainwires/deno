@@ -1117,9 +1117,15 @@ function bootstrapMainRuntime(runtimeOptions, warmup = false) {
       17: nodeClusterUniqueId,
       18: nodeClusterSchedPolicy,
       19: disableOffscreenCanvas,
+      20: denextVersion,
     } = runtimeOptions;
 
     denoNs.build.standalone = standalone;
+    // denext: the identity marker of this fork's runtime (DENEXT.md item
+    // 99), absent on upstream Deno. Set before runtimeStart() freezes build.
+    if (typeof denextVersion === "string") {
+      denoNs.build.denext = denextVersion;
+    }
 
     let serveIsMain_ = serveIsMain;
     let serveWorkerCountOrIndex_ = serveWorkerCountOrIndex;
@@ -1384,9 +1390,15 @@ function bootstrapWorkerRuntime(
       17: nodeClusterUniqueId,
       18: nodeClusterSchedPolicy,
       19: disableOffscreenCanvas,
+      20: denextVersion,
     } = runtimeOptions;
 
     denoNs.build.standalone = standalone;
+    // denext: the identity marker of this fork's runtime (DENEXT.md item
+    // 99), absent on upstream Deno. Set before runtimeStart() freezes build.
+    if (typeof denextVersion === "string") {
+      denoNs.build.denext = denextVersion;
+    }
 
     closeOnIdle = runtimeOptions[14];
 

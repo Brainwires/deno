@@ -104,6 +104,19 @@ class ManifestTest(unittest.TestCase):
         )
         self.assertNotEqual(entry["typescript_lsp"]["tree_sha256"], entry["typescript_check"]["tree_sha256"])
 
+    def test_cli_records_the_identity_marker(self):
+        check, lsp = compiler("7.0.2"), compiler("7.1.0-dev.1")
+        with tempfile.TemporaryDirectory() as dist:
+            write_cli_zip(dist, check, lsp)
+            result = run_manifest(dist)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            with open(os.path.join(dist, "manifest.json")) as f:
+                manifest = json.load(f)
+        self.assertEqual(
+            manifest["cli"]["identity"],
+            {"buildDenext": VERSION, "versionLine": f"denext {VERSION} (Brainwires)"},
+        )
+
     def test_lsp_binary_that_disagrees_with_build_info_is_refused(self):
         check, lsp = compiler("7.0.2"), compiler("7.1.0-dev.1")
         with tempfile.TemporaryDirectory() as dist:

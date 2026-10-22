@@ -773,13 +773,18 @@ pub fn render_version(long: bool) -> String {
   if long {
     debug_assert_eq!(DENO_VERSION_INFO.typescript, deno_snapshots::TS_VERSION);
     format!(
-      "deno {} ({}, {}, {})\nv8 {}\ntypescript {}\n",
+      "deno {} ({}, {}, {})\nv8 {}\ntypescript {}\n{}\n",
       DENO_VERSION_INFO.deno,
       DENO_VERSION_INFO.release_channel.name(),
       env!("PROFILE"),
       env!("TARGET"),
       deno_core::v8::VERSION_STRING,
       DENO_VERSION_INFO.typescript,
+      // denext: the identity line (DENEXT.md item 99), after upstream's
+      // lines so the first line keeps its format.
+      deno_lib::version::denext_version_line(
+        DENO_VERSION_INFO.denext_runtime()
+      ),
     )
   } else {
     format!("deno {}\n", DENO_VERSION_INFO.deno)

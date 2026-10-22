@@ -4983,6 +4983,12 @@ declare namespace Deno {
     vendor: string;
     /** Optional environment flags that were set for this build of Deno CLI. */
     env?: string;
+    /** **denext extension** (Brainwires/deno, not upstream Deno): the
+     * version of denext's runtime this build is (e.g. `"3.0.0-rc.3"`), the
+     * same as the `denext <version> (Brainwires)` line of `deno --version`.
+     * Absent on upstream Deno, so `typeof Deno.build.denext === "string"`
+     * tells denext's runtime from an upstream release of the same number. */
+    denext?: string;
   };
 
   /** Version information related to the current Deno CLI runtime environment.

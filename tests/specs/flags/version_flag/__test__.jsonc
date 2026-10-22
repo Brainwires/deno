@@ -11,6 +11,20 @@
     "long_version": {
       "args": "--version",
       "output": "[WILDCARD]"
+    },
+    // denext (DENEXT.md item 99): upstream's lines first, then the line that
+    // identifies denext's runtime.
+    "long_version_names_denext": {
+      "args": "--version",
+      "output": "long_version_denext.out"
+    },
+    "short_version_is_one_line": {
+      "args": "-V",
+      "output": "short_version.out"
+    },
+    "build_denext_matches_version_line": {
+      "args": "run --allow-run --allow-read identity.ts",
+      "output": "identity.out"
     }
   }
 }

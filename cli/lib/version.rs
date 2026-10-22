@@ -134,6 +134,17 @@ impl DenoVersionInfo {
     self.denext
   }
 
+  /// denext: the identity marker of this fork's runtime (DENEXT.md item 99),
+  /// on every build of it, release or not: the release's version
+  /// ([`DenoVersionInfo::denext`]) or else the fork's own version
+  /// ([`DENO_VERSION`]). It is `Deno.build.denext` and the
+  /// `denext <version> (Brainwires)` line of `deno --version`, which upstream
+  /// Deno has neither of, so a program can tell this runtime from an upstream
+  /// release of the same number (upstream ships a 3.0.0 too).
+  pub fn denext_runtime(&self) -> &'static str {
+    denext_runtime(self.denext)
+  }
+
   /// For stable release, a semver like, eg. `v1.46.2`.
   /// For canary release a full git hash, eg. `9bdab6fb6b93eb43b1930f40987fa4997287f9c8`.
   pub fn version_or_git_hash(&self) -> &'static str {
@@ -164,6 +175,16 @@ fn denext_version(
       rest.is_empty() || (rest.len() > 1 && rest.starts_with(['-', '+']))
     })
   })
+}
+
+fn denext_runtime(denext: Option<&'static str>) -> &'static str {
+  denext.unwrap_or(DENO_VERSION)
+}
+
+/// denext: the line `deno --version` adds after upstream's lines
+/// (DENEXT.md item 99), naming this fork's runtime and its version.
+pub fn denext_version_line(version: &str) -> String {
+  format!("denext {version} (Brainwires)")
 }
 
 fn release_channel_from_version_string(version: &str) -> ReleaseChannel {
@@ -217,6 +238,20 @@ mod tests {
       ReleaseChannel::Stable
     );
     assert!(deno_semver::Version::parse_standard("2.9.7-denext.15").is_ok());
+  }
+
+  #[test]
+  fn denext_runtime_marks_every_build_of_the_fork() {
+    // a release build: the release's version
+    assert_eq!(denext_runtime(Some("3.0.0-rc.3")), "3.0.0-rc.3");
+    assert_eq!(denext_runtime(Some("3.0.0-rc.3+ci.42")), "3.0.0-rc.3+ci.42");
+    // any other build of the fork (tests, a local build): its own version
+    assert_eq!(denext_runtime(None), DENO_VERSION);
+    assert!(!DENO_VERSION_INFO.denext_runtime().is_empty());
+    assert_eq!(
+      denext_version_line("3.0.0-rc.3"),
+      "denext 3.0.0-rc.3 (Brainwires)"
+    );
   }
 
   #[test]

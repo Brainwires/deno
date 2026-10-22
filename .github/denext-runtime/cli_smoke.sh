@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Smoke-test a `deno` CLI archive from assemble_cli.sh: unpack it and check
-# that the binary names its denext build (`deno --version`, `deno -V` and
-# `Deno.version.deno`), has `Deno.SQL`, and runs a Vitest suite under `deno test`
+# that the binary names its denext build (`deno --version` with its
+# `denext <version> (Brainwires)` line, `deno -V`, `Deno.version.deno` and
+# `Deno.build.denext`), has `Deno.SQL`, and runs a Vitest suite under `deno test`
 # (smoke/cli/vitest_test.ts); that the bundled esbuild is ESBUILD_VERSION and
 # `deno bundle` uses it with an empty DENO_DIR and no reachable npm registry;
 # and that `deno lsp` defaults to the shipped tsgo build.
@@ -45,6 +46,15 @@ test "$short" = "deno $VERSION" || { echo "::error::deno -V says '$short', want 
 deno_version=$("$deno" eval 'console.log(Deno.version.deno)' | tr -d '\r')
 test "$deno_version" = "$VERSION" || { echo "::error::Deno.version.deno is '$deno_version', want '$VERSION'" >&2; exit 1; }
 echo "Deno.version.deno: $deno_version"
+# The identity marker (DENEXT.md item 99): the last line of `deno --version`
+# and Deno.build.denext name the runtime, so denext can tell it from an
+# upstream Deno release of the same number.
+last=$(tail -1 "$work/version.txt" | tr -d '\r')
+test "$last" = "denext $VERSION (Brainwires)" ||
+  { echo "::error::deno --version ends with '$last', want 'denext $VERSION (Brainwires)'" >&2; exit 1; }
+build_denext=$("$deno" eval 'console.log(Deno.build.denext)' | tr -d '\r')
+test "$build_denext" = "$VERSION" || { echo "::error::Deno.build.denext is '$build_denext', want '$VERSION'" >&2; exit 1; }
+echo "Deno.build.denext: $build_denext"
 # `deno upgrade` must not replace a denext build with upstream Deno.
 if "$deno" upgrade --dry-run >"$work/upgrade.txt" 2>&1; then
   echo "::error::deno upgrade ran in a denext build" >&2; cat "$work/upgrade.txt" >&2; exit 1

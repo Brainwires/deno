@@ -191,9 +191,17 @@ manifest = {
         for t, backends in sorted(targets.items())
     },
     # This fork's own `deno` CLI, a zip per target with the binary at the
-    # top: `deno --version` and Deno.version.deno are `version`.
+    # top: `deno --version`, Deno.version.deno and Deno.build.denext are
+    # `version`.
     "cli": {
         "version": version,
+        # The identity marker (DENEXT.md item 99): what this release's
+        # runtime reports as `Deno.build.denext` and as the last line of
+        # `deno --version`, which an upstream Deno of the same number lacks.
+        "identity": {
+            "buildDenext": version,
+            "versionLine": f"denext {version} (Brainwires)",
+        },
         "targets": dict(sorted(cli_targets.items())),
     },
     # The standalone runtime the CLI's `deno compile` downloads from this

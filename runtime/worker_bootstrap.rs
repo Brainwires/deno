@@ -122,6 +122,10 @@ pub struct BootstrapOptions {
   pub close_on_idle: bool,
   /// When true, the `OffscreenCanvas` global is removed at bootstrap.
   pub disable_offscreen_canvas: bool,
+  /// denext: this runtime's identity marker, the fork's own version (e.g.
+  /// `3.0.0-rc.3`). Becomes `Deno.build.denext`; `None` leaves the property
+  /// absent, as on upstream Deno (DENEXT.md item 99).
+  pub denext_version: Option<String>,
 }
 
 impl Default for BootstrapOptions {
@@ -162,6 +166,7 @@ impl Default for BootstrapOptions {
       otel_config: Default::default(),
       close_on_idle: false,
       disable_offscreen_canvas: false,
+      denext_version: None,
     }
   }
 }
@@ -217,6 +222,8 @@ struct BootstrapV8<'a>(
   Option<&'a str>,
   // disable offscreen canvas
   bool,
+  // denext: the fork's version, `Deno.build.denext`
+  Option<&'a str>,
 );
 
 impl BootstrapOptions {
@@ -253,6 +260,7 @@ impl BootstrapOptions {
       self.node_cluster_unique_id.as_deref(),
       self.node_cluster_sched_policy.as_deref(),
       self.disable_offscreen_canvas,
+      self.denext_version.as_deref(),
     );
 
     bootstrap.serialize(ser).unwrap()
