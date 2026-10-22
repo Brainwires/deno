@@ -87,8 +87,8 @@ pub fn op_node_buffer_write_utf16le(
   for bytes in buffer.chunks_mut(scratch.len() * 2) {
     let words = &mut scratch[..bytes.len() / 2];
     string.write_v2(scope, start, words, v8::WriteFlags::empty());
-    for (word, bytes) in words.iter().zip(bytes.chunks_exact_mut(2)) {
-      bytes.copy_from_slice(&word.to_le_bytes());
+    for (word, bytes) in words.iter().zip(bytes.as_chunks_mut::<2>().0) {
+      *bytes = word.to_le_bytes();
     }
     start += words.len() as u32;
   }

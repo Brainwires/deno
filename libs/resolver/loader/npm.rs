@@ -63,7 +63,8 @@ pub enum NpmModuleLoadError {
   )]
   DirImport {
     file_path: PathBuf,
-    maybe_referrer: Option<Url>,
+    // Boxed to keep the error type under clippy's result_large_err limit.
+    maybe_referrer: Option<Box<Url>>,
     suggestion: Option<&'static str>,
     #[source]
     #[inherit]
@@ -81,7 +82,7 @@ pub enum NpmModuleLoadError {
 
 fn format_dir_import_message(
   file_path: &std::path::Path,
-  maybe_referrer: &Option<Url>,
+  maybe_referrer: &Option<Box<Url>>,
   suggestion: &Option<&'static str>,
 ) -> String {
   // directory imports are not allowed when importing from an
@@ -186,7 +187,7 @@ impl<
           .find(|e| self.sys.fs_is_file_no_err(file_path.join(e)));
         NpmModuleLoadError::DirImport {
           file_path,
-          maybe_referrer: maybe_referrer.cloned(),
+          maybe_referrer: maybe_referrer.cloned().map(Box::new),
           suggestion,
           source,
         }
