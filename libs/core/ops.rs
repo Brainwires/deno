@@ -379,7 +379,7 @@ impl ExternalOpsTracker {
     let _ =
       self
         .counter
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |x| {
+        .try_update(Ordering::Relaxed, Ordering::Relaxed, |x| {
           if x == 0 { None } else { Some(x - 1) }
         });
   }

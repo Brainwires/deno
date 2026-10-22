@@ -594,7 +594,7 @@ mod tests {
 
   #[test]
   fn refuses_special_entries() {
-    for kind in [b'1', b'3', b'4', b'6'] {
+    for kind in *b"1346" {
       let r = extract(&[("App/", b'5', b"", ""), ("App/x", kind, b"", "y")]);
       assert_eq!(r.unwrap_err().code, Code::UnsafeArchive, "{}", kind as char);
     }

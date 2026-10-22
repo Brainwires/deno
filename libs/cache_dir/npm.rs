@@ -166,11 +166,9 @@ impl NpmCacheDir {
         .split('/')
         .map(ToOwned::to_owned)
         .collect::<Vec<_>>();
-      match mixed_case_package_name_decode(&parts[0]) {
-        Some(part) => {
-          parts[0] = part;
-        }
-        None => return None,
+      {
+        let part = mixed_case_package_name_decode(&parts[0])?;
+        parts[0] = part;
       }
       relative_url = parts.join("/");
     }

@@ -1414,7 +1414,6 @@ mod tests {
 
   mod linux_owner {
     use super::super::linux::*;
-    use super::super::*;
     use super::*;
 
     fn dirs() -> XdgDirs {

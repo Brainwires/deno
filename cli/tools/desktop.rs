@@ -11190,7 +11190,9 @@ def456  other.zip
         let mut s = comp.open_stream(format!("/{raw}")).unwrap();
         let mut b = Vec::new();
         s.read_to_end(&mut b).unwrap();
-        b.chunks_exact(2)
+        b.as_chunks::<2>()
+          .0
+          .iter()
           .map(|c| u16::from_le_bytes([c[0], c[1]]))
           .collect()
       };

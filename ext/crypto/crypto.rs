@@ -34,11 +34,12 @@ pub fn op_crypto_random_uuid_batch<'s>(
   let mut output = [0u8; UUID_STRING_BYTES * UUID_BATCH_SIZE];
   thread_rng().fill(&mut entropy[..]);
 
-  for (bytes, uuid_output) in entropy
-    .chunks_exact_mut(UUID_BYTES)
-    .zip(output.chunks_exact_mut(UUID_STRING_BYTES))
+  // Both lengths are exact multiples, so the remainders are empty.
+  let (entropy_chunks, _) = entropy.as_chunks_mut::<UUID_BYTES>();
+  let (output_chunks, _) = output.as_chunks_mut::<UUID_STRING_BYTES>();
+  for (bytes, uuid_output) in
+    entropy_chunks.iter_mut().zip(output_chunks.iter_mut())
   {
-    let bytes: &mut [u8; UUID_BYTES] = bytes.try_into().unwrap();
     let uuid = fast_uuid_v4_bytes(bytes);
     uuid_output.copy_from_slice(&uuid);
   }

@@ -281,7 +281,7 @@ impl TsServer {
           .map_err(|err| {
             anyhow!(
               "Error getting navigation tree for \"{}\": {:#}",
-              &module.specifier,
+              module.specifier,
               err,
             )
           })?;
@@ -320,7 +320,7 @@ impl TsServer {
           .map_err(|err| {
             anyhow!(
               "Error getting navigation tree for \"{}\": {:#}",
-              &module.specifier,
+              module.specifier,
               err,
             )
           })?;

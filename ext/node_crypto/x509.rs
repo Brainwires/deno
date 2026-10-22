@@ -593,7 +593,9 @@ fn attribute_value_to_string(
       }
       attr
         .data
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|chunk| {
           char::from_u32(u16::from_be_bytes([chunk[0], chunk[1]]) as u32)
             .ok_or(X509Error::InvalidAttributes)
@@ -606,7 +608,9 @@ fn attribute_value_to_string(
       }
       attr
         .data
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|chunk| {
           char::from_u32(u32::from_be_bytes([
             chunk[0], chunk[1], chunk[2], chunk[3],

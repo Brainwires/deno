@@ -1,6 +1,5 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 
-use std::f64;
 use std::ops;
 
 use cssparser::ParseError;
@@ -136,7 +135,7 @@ impl Angle {
         (value * (Self::TURN_TO_DEG / Self::TURN_TO_GRAD)).to_radians()
       }
       AngleUnit::Rad => value,
-      AngleUnit::Turn => value * f64::consts::TAU,
+      AngleUnit::Turn => value * std::f64::consts::TAU,
     }
   }
 }
@@ -1454,8 +1453,8 @@ impl NumericValue {
         }
         match_ignore_ascii_case! { &ident,
           // https://www.w3.org/TR/css-values-4/#calc-constants
-          "e" => Ok(NumericValue::Number(f64::consts::E).into()),
-          "pi" => Ok(NumericValue::Number(f64::consts::PI).into()),
+          "e" => Ok(NumericValue::Number(std::f64::consts::E).into()),
+          "pi" => Ok(NumericValue::Number(std::f64::consts::PI).into()),
           // https://www.w3.org/TR/css-values-4/#calc-error-constants
           "infinity" => Ok(NumericValue::Number(f64::INFINITY).into()),
           "-infinity" => Ok(NumericValue::Number(f64::NEG_INFINITY).into()),
@@ -1620,7 +1619,7 @@ mod tests {
       }
     );
     assert_eq!(angle.to_degrees(), 180.0);
-    assert_relative_eq!(angle.to_radians(), f64::consts::PI);
+    assert_relative_eq!(angle.to_radians(), std::f64::consts::PI);
   }
 
   #[test]
@@ -1698,7 +1697,7 @@ mod tests {
     let mut input = ParserInput::new("calc(e)");
     let mut parser = Parser::new(&mut input);
     let result = NumericValue::parse(&mut parser);
-    assert_eq!(result, Ok(NumericValue::Number(f64::consts::E)));
+    assert_eq!(result, Ok(NumericValue::Number(std::f64::consts::E)));
   }
 
   #[test]
@@ -1706,7 +1705,7 @@ mod tests {
     let mut input = ParserInput::new("calc(pi)");
     let mut parser = Parser::new(&mut input);
     let result = NumericValue::parse(&mut parser);
-    assert_eq!(result, Ok(NumericValue::Number(f64::consts::PI)));
+    assert_eq!(result, Ok(NumericValue::Number(std::f64::consts::PI)));
   }
 
   #[test]
