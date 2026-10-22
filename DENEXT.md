@@ -3384,8 +3384,37 @@ where the changes are discussed.
     still goes through the crate) and `windows_drive_letters`
     (`libs/resolver/workspace.rs`).
 
+97. **`fix(ext/node, npm)`: a handle that fails to open reports its errno, and a
+    bin named `..` is skipped** (`fix/rc3-batch`, for runtime `3.0.0-rc.3`;
+    `ext/node/polyfills/internal/child_process.ts`,
+    `libs/npm_installer/bin_entries.rs`).
+    - **`createIpcHandle`.** A handle received over IPC (a `net.Socket`,
+      `net.Server`, native `TCP` / `Pipe` or `dgram.Socket`) is wrapped with
+      `open(fd)`, which returns a negative libuv error number. It was looked up
+      in `codeMap` (code name -> number) as if it were a name, so
+      `errnoException(undefined, "open")` threw
+      `TypeError
+      [ERR_INVALID_ARG_TYPE]` instead of the open error. The
+      number goes to `errnoException` as it is (`open EBADF`, `errno`, `code`,
+      `syscall`), and the wrap that failed to open is closed.
+    - **Bin names.** `normalize_bin_name` kept the last path segment of a `bin`
+      map key, so `..` (or `x/..`) linked `node_modules/.bin/..`, which is
+      `node_modules` itself: the symlink failed with `AlreadyExists` and the
+      retry's `remove_file` on the directory failed the install. A key that
+      names no file (empty, `.`, `..`, after trailing separators) is skipped, as
+      npm's `npm-normalize-package-bin` drops it.
+
+    Tests:
+    `[child_process ipc] a received handle that fails to open throws
+    its errno error`
+    (`tests/unit_node/child_process_test.ts`, through `createIpcHandle`, now
+    exported by the polyfill module); `bin_names_that_name_no_file_are_skipped`,
+    `collect_bin_files_skips_bin_names_that_name_no_file`,
+    `set_up_bin_entry_skips_a_dot_dot_bin_name`
+    (`libs/npm_installer/bin_entries.rs`).
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
-64-73, 75-77, 80, 82, 87-89, 91, 93, 95) are what the prebuilt `libdenort`
+64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97) are what the prebuilt `libdenort`
 carries. The CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` /
 `LAUFEY_APP_ID` into a packaged app's launchers) are in the branch too, but a
 stock CLI does not run them; denext's own launcher provides that environment.

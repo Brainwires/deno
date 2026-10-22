@@ -2506,7 +2506,9 @@ function createIpcHandle(message, rawFd) {
       : new TCP(tcpSocketType.SOCKET);
     const err = inner.open(rawFd);
     if (err !== 0) {
-      throw errnoException(codeMap.get(err), "open");
+      // `open()` returns a negative libuv error number, not a code name.
+      inner.close();
+      throw errnoException(err, "open");
     }
     try {
       return new Socket({
@@ -2525,7 +2527,8 @@ function createIpcHandle(message, rawFd) {
       : new TCP(tcpSocketType.SERVER);
     const err = inner.open(rawFd);
     if (err !== 0) {
-      throw errnoException(codeMap.get(err), "open");
+      inner.close();
+      throw errnoException(err, "open");
     }
     // Match Node's handleConversion["net.Server"].got: hand the wrapped
     // handle to a fresh net.Server via listen(handle), which registers the
@@ -2548,7 +2551,8 @@ function createIpcHandle(message, rawFd) {
       const pipe = new Pipe(st);
       const err = pipe.open(rawFd);
       if (err !== 0) {
-        throw errnoException(codeMap.get(err), "open");
+        pipe.close();
+        throw errnoException(err, "open");
       }
       return pipe;
     }
@@ -2558,7 +2562,8 @@ function createIpcHandle(message, rawFd) {
     const tcp = new TCP(st);
     const err = tcp.open(rawFd);
     if (err !== 0) {
-      throw errnoException(codeMap.get(err), "open");
+      tcp.close();
+      throw errnoException(err, "open");
     }
     // Match Node's handleConversion["net.Native"].got: just hand the raw
     // wrap to the listener. Cluster's worker-side onconnection() / shared()
@@ -2569,7 +2574,8 @@ function createIpcHandle(message, rawFd) {
     const udp = new (lazyUdpWrap().UDP)();
     const err = udp.open(rawFd);
     if (err !== 0) {
-      throw errnoException(codeMap.get(err), "open");
+      udp.close();
+      throw errnoException(err, "open");
     }
     // Reconstruct a dgram.Socket from the transferred handle, mirroring
     // Node's handleConversion["dgram.Socket"].got which calls
@@ -3076,6 +3082,7 @@ return {
   normalizeSpawnArguments,
   spawnSync,
   setupChannel,
+  createIpcHandle,
   default: {
     ChildProcess,
     getValidStdio,

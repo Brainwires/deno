@@ -41,16 +41,20 @@ fn default_bin_name(package: &NpmResolutionPackage) -> &str {
     .unwrap_or(package.id.nv.name.as_str())
 }
 
-fn normalize_bin_name(bin_name: &str) -> &str {
+/// The file name a `bin` map key links as in `node_modules/.bin`: its last
+/// path segment, so embedded separators create no directories there.
+///
+/// `None` for a key that names no file (empty, `.` or `..`, after trailing
+/// separators are dropped): such an entry is skipped, as npm drops it
+/// (`npm-normalize-package-bin`). A `..` entry would otherwise be linked as
+/// `node_modules/.bin/..`, which is `node_modules` itself.
+fn normalize_bin_name(bin_name: &str) -> Option<&str> {
   let trimmed = bin_name.trim_end_matches(['/', '\\']);
-  // Leave validation of empty or special path component names to package
-  // metadata handling. This only prevents embedded separators from creating
-  // directories inside node_modules/.bin.
-  trimmed
-    .rsplit(['/', '\\'])
-    .next()
-    .filter(|name| !name.is_empty())
-    .unwrap_or(trimmed)
+  let name = trimmed.rsplit(['/', '\\']).next().unwrap_or(trimmed);
+  match name {
+    "" | "." | ".." => None,
+    name => Some(name),
+  }
 }
 
 /// Checks that a bin target cannot escape its package directory.
@@ -152,8 +156,10 @@ impl<'a, TSys: SetupBinEntrySys> BinEntries<'a, TSys> {
           if !bin_script_stays_in_package(script) {
             continue;
           }
+          let Some(name) = normalize_bin_name(name) else {
+            continue;
+          };
           has_valid_bin = true;
-          let name = normalize_bin_name(name);
           if let Some(other) =
             self.seen_names.insert(name.to_string(), &package.id)
           {
@@ -221,7 +227,9 @@ impl<'a, TSys: SetupBinEntrySys> BinEntries<'a, TSys> {
               if !bin_script_stays_in_package(script) {
                 continue;
               }
-              let name = normalize_bin_name(name);
+              let Some(name) = normalize_bin_name(name) else {
+                continue;
+              };
               if !seen.insert(name) {
                 already_seen(self.sys, package_path, script)?;
                 // we already set up a bin entry with this name
@@ -416,7 +424,10 @@ pub fn set_up_bin_entry<'a>(
   package_path: &'a Path,
   bin_node_modules_dir_path: &Path,
 ) -> Result<EntrySetupOutcome<'a>, std::io::Error> {
-  let bin_name = normalize_bin_name(bin_name);
+  let Some(bin_name) = normalize_bin_name(bin_name) else {
+    // Names no file in `.bin` (`.`, `..`, empty): nothing to link, as in npm.
+    return Ok(EntrySetupOutcome::Success);
+  };
   if !bin_script_stays_in_package(bin_script) {
     return Ok(EntrySetupOutcome::MissingEntrypoint {
       bin_name,
@@ -731,14 +742,88 @@ mod test {
 
   #[test]
   fn normalizes_bin_name_path_segments() {
-    assert_eq!(normalize_bin_name("eslint"), "eslint");
+    assert_eq!(normalize_bin_name("eslint"), Some("eslint"));
     assert_eq!(
       normalize_bin_name("@eslint/config-inspector"),
-      "config-inspector"
+      Some("config-inspector")
     );
-    assert_eq!(normalize_bin_name("nested/bin/tool"), "tool");
-    assert_eq!(normalize_bin_name("nested\\bin\\tool"), "tool");
-    assert_eq!(normalize_bin_name("nested/bin/tool/"), "tool");
+    assert_eq!(normalize_bin_name("nested/bin/tool"), Some("tool"));
+    assert_eq!(normalize_bin_name("nested\\bin\\tool"), Some("tool"));
+    assert_eq!(normalize_bin_name("nested/bin/tool/"), Some("tool"));
+    assert_eq!(normalize_bin_name("..."), Some("..."));
+    assert_eq!(normalize_bin_name(".tool"), Some(".tool"));
+  }
+
+  #[test]
+  fn bin_names_that_name_no_file_are_skipped() {
+    for name in ["", "/", ".", "..", "../", "..\\", "nested/..", "nested\\."] {
+      assert_eq!(normalize_bin_name(name), None, "{name:?}");
+    }
+  }
+
+  #[test]
+  fn collect_bin_files_skips_bin_names_that_name_no_file() {
+    let sys = sys_traits::impls::RealSys;
+    let package = test_package("dot-bin-names");
+    let extra = NpmPackageExtraInfo {
+      bin: Some(deno_npm::registry::NpmPackageVersionBinEntry::Map(
+        [
+          ("tool".to_string(), "bin/cli.js".to_string()),
+          ("..".to_string(), "bin/cli.js".to_string()),
+          (".".to_string(), "bin/cli.js".to_string()),
+          ("".to_string(), "bin/cli.js".to_string()),
+        ]
+        .into_iter()
+        .collect(),
+      )),
+      ..Default::default()
+    };
+    let mut entries = BinEntries::new(sys.with_paths_in_errors());
+    entries.add(&package, &extra, PathBuf::from("/node_modules/pkg"));
+
+    assert_eq!(
+      entries.collect_bin_files(&empty_snapshot()),
+      vec![(
+        "tool".to_string(),
+        PathBuf::from("/node_modules/pkg/bin/cli.js")
+      )]
+    );
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn set_up_bin_entry_skips_a_dot_dot_bin_name() {
+    let sys = sys_traits::impls::RealSys;
+    let (dir, _cleanup) = test_dir("dot_dot_bin_name");
+    let package_path = dir.join("package");
+    let bin_dir = dir.join("node_modules").join(".bin");
+    sys.fs_create_dir_all(package_path.join("bin")).unwrap();
+    sys.fs_create_dir_all(&bin_dir).unwrap();
+    write_and_chmod(
+      &package_path.join("bin/cli.js"),
+      b"#!/usr/bin/env node\n",
+      0o644,
+    );
+
+    let package = test_package("dot-dot-bin");
+    let extra = NpmPackageExtraInfo::default();
+    let outcome = set_up_bin_entry(
+      &sys,
+      &package,
+      &extra,
+      "..",
+      "bin/cli.js",
+      &package_path,
+      &bin_dir,
+    )
+    .unwrap();
+
+    assert!(matches!(outcome, EntrySetupOutcome::Success));
+    // `node_modules` is still a directory, not replaced by a link.
+    let node_modules =
+      std::fs::symlink_metadata(dir.join("node_modules")).unwrap();
+    assert!(node_modules.is_dir());
+    assert_eq!(std::fs::read_dir(&bin_dir).unwrap().count(), 0);
   }
 
   #[test]

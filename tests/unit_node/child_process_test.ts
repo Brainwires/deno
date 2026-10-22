@@ -1906,3 +1906,36 @@ Deno.test({
     }
   },
 });
+
+Deno.test({
+  name:
+    "[child_process ipc] a received handle that fails to open throws its errno error",
+  ignore: Deno.build.os === "windows",
+}, () => {
+  // A handle received over IPC is wrapped with `open(fd)`, which returns a
+  // negative libuv error number. It was looked up as an error code name, so
+  // the receiver threw a TypeError from `errnoException(undefined)` instead
+  // of the open error.
+  // deno-lint-ignore no-explicit-any
+  const { createIpcHandle } = (Deno as any)[(Deno as any).internal].core
+    .loadExtScript("ext:deno_node/internal/child_process.ts");
+  const messages = [
+    { type: "net.Socket", nativeKind: "tcp" },
+    { type: "net.Socket", nativeKind: "pipe" },
+    { type: "net.Server", nativeKind: "tcp" },
+    { type: "net.Server", nativeKind: "pipe" },
+    { type: "net.Native", nativeKind: "tcp", socketType: 0 },
+    { type: "net.Native", nativeKind: "pipe", socketType: 1 },
+  ];
+  for (const message of messages) {
+    const err = assertThrows(
+      () => createIpcHandle({ cmd: "NODE_HANDLE", ...message }, -1),
+      Error,
+      "open EBADF",
+      JSON.stringify(message),
+    ) as Error & { code: string; errno: number; syscall: string };
+    assertEquals(err.code, "EBADF");
+    assertEquals(err.syscall, "open");
+    assert(err.errno < 0);
+  }
+});
