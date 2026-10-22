@@ -1,0 +1,22 @@
+{
+  // denext: `deno check -- <files>` checks those files only; the files after
+  // `--` were dropped and the whole directory checked (bad.ts too).
+  "tempDir": true,
+  "tests": {
+    "files_after_double_dash": {
+      "args": "check -- good.ts",
+      "output": "Check [WILDCARD]good.ts\n",
+      "exitCode": 0
+    },
+    "hyphen_file_after_double_dash": {
+      "args": "check -- -dash.ts",
+      "output": "Check [WILDCARD]-dash.ts\n",
+      "exitCode": 0
+    },
+    "files_before_and_after_double_dash": {
+      "args": "check good.ts -- bad.ts",
+      "output": "Check [WILDCARD]good.ts\nCheck [WILDCARD]bad.ts\nTS2322 [ERROR]:[WILDCARD]",
+      "exitCode": 1
+    }
+  }
+}

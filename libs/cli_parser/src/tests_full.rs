@@ -8772,6 +8772,45 @@ fn require_flag_test() {
 }
 
 #[test]
+fn check_files_after_double_dash() {
+  // Files after `--` are checked (a leading hyphen included), not dropped
+  // into `argv`; before, `deno check -- a.ts` checked the whole project.
+  for (args, files) in [
+    (
+      svec!["deno", "check", "--", "a.ts", "-b.ts"],
+      svec!["a.ts", "-b.ts"],
+    ),
+    (
+      svec!["deno", "check", "a.ts", "--", "b.ts"],
+      svec!["a.ts", "b.ts"],
+    ),
+    (
+      svec!["deno", "check", "--doc", "--", "--x.ts"],
+      svec!["--x.ts"],
+    ),
+    (svec!["deno", "check", "--"], svec!["."]),
+  ] {
+    let doc = args.iter().any(|a| a == "--doc");
+    let flags = flags_from_vec(args.clone()).unwrap();
+    assert_eq!(
+      flags,
+      Flags {
+        subcommand: DenoSubcommand::Check(CheckFlags {
+          files,
+          doc,
+          doc_only: false,
+          check_js: false,
+        }),
+        type_check_mode: TypeCheckMode::Local,
+        code_cache_enabled: true,
+        ..Flags::default()
+      },
+      "{args:?}"
+    );
+  }
+}
+
+#[test]
 fn check_with_v8_flags() {
   let flags =
     flags_from_vec(svec!["deno", "check", "--v8-flags=--help", "script.ts",])

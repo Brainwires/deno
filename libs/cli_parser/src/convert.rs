@@ -258,7 +258,8 @@ pub fn convert(result: ParseResult) -> Result<Flags, CliError> {
   // Trailing args go into flags.argv (unless already handled by the subcommand)
   let handled_trailing = matches!(
     result.subcommand.as_deref(),
-    Some("create")
+    Some("check")
+      | Some("create")
       | Some("init")
       | Some("compile")
       | Some("install")
@@ -2045,10 +2046,16 @@ fn check_parse(result: &ParseResult, flags: &mut Flags) {
   compile_args_without_check_parse(result, flags);
   v8_flags_arg_parse(result, flags);
 
-  let files = result
+  let mut files: Vec<String> = result
     .get_many("files")
     .map(|v| v.iter().map(|s| s.to_string()).collect())
-    .unwrap_or_else(|| vec![".".to_string()]);
+    .unwrap_or_default();
+  // `deno check -- <files>`: what follows `--` are files too (one may start
+  // with a hyphen), not script arguments, which `check` has none of.
+  files.extend(result.trailing.iter().cloned());
+  if files.is_empty() {
+    files.push(".".to_string());
+  }
 
   if result.get_bool("all") || result.get_bool("remote") {
     flags.type_check_mode = TypeCheckMode::All;

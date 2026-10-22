@@ -3,7 +3,8 @@ TS2578 [ERROR]: Unused '@ts-expect-error' directive.
 ~~~~~~~~~~~~~~~~~~~
     at file:///[WILDCARD]/ts_expect_error_multiline.ts:2:1
 
-TS2307 [ERROR]: Cannot find module 'missing-package' or its corresponding type declarations.
+TS2307 [ERROR]: Import "missing-package" not a dependency
+  hint: If you want to use the npm package, try running `deno add npm:missing-package`
 } from "missing-package";
        ~~~~~~~~~~~~~~~~~
     at file:///[WILDCARD]/ts_expect_error_multiline.ts:5:8

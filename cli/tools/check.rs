@@ -585,6 +585,15 @@ async fn run_native_check_once(
     log::debug!("The reused generated project left an import unresolved");
     return Ok(NativeOutcome::GeneratedStale);
   }
+  // denext: an import Deno could not resolve (a bare specifier that is not a
+  // dependency, say) gets Deno's message and `deno add` hint instead of the
+  // compiler's bare "Cannot find module", as the in-process checker reports it.
+  let bare_importable_pkg_names: Vec<String> = cli_options
+    .workspace()
+    .resolver_jsr_pkgs()
+    .map(|pkg| pkg.name)
+    .collect();
+  explain_unresolved_imports(graph, &mut parsed, &bare_importable_pkg_names);
   let mut diagnostics = Diagnostics::from(parsed);
   // Fold in deno's own diagnostics for missing entrypoints (some roots existed
   // and were type-checked by tsc above; any that didn't are reported here).
@@ -630,6 +639,66 @@ async fn run_native_check_once(
   }
 
   Ok(NativeOutcome::Checked(true))
+}
+
+/// Gives a compiler diagnostic for an import it could not find (TS2307,
+/// TS2792, TS2882) the message of the resolution error Deno's graph recorded
+/// for that import, when Deno could not resolve it either: `Import "x" not a
+/// dependency` with its `deno add` hint, an unmapped bare specifier, and so
+/// on. A module Deno resolved but could not find keeps the compiler's message,
+/// as does any import the graph has no error for. Matched by the import's
+/// position (the compiler and the graph both point at the specifier string).
+fn explain_unresolved_imports(
+  graph: &ModuleGraph,
+  diagnostics: &mut [crate::tsc::Diagnostic],
+  bare_importable_pkg_names: &[String],
+) {
+  for diagnostic in diagnostics.iter_mut() {
+    if !matches!(diagnostic.code, 2307 | 2792 | 2882) {
+      continue;
+    }
+    let (Some(file_name), Some(start)) =
+      (diagnostic.file_name.as_deref(), diagnostic.start.as_ref())
+    else {
+      continue;
+    };
+    let Ok(specifier) = ModuleSpecifier::parse(file_name) else {
+      continue;
+    };
+    let Some(deno_graph::Module::Js(module)) = graph.get(&specifier) else {
+      continue;
+    };
+    let at_start = |range: &deno_graph::Range| {
+      range.range.start.line as u64 == start.line
+        && range.range.start.character as u64 == start.character
+    };
+    let explained = module.dependencies.values().find_map(|dep| {
+      [&dep.maybe_code, &dep.maybe_type]
+        .into_iter()
+        .find_map(|resolution| {
+          let deno_graph::Resolution::Err(error) = resolution else {
+            return None;
+          };
+          let error_ref =
+            crate::graph_util::resolution_error_for_tsc_diagnostic(error)?;
+          if error_ref.is_module_not_found
+            || !(at_start(error_ref.range)
+              || dep.imports.iter().any(|i| at_start(&i.specifier_range)))
+          {
+            return None;
+          }
+          crate::tsc::Diagnostic::maybe_from_resolution_error(
+            error,
+            bare_importable_pkg_names,
+          )
+        })
+    });
+    if let Some(explained) = explained {
+      diagnostic.code = explained.code;
+      diagnostic.message_text = explained.message_text;
+      diagnostic.message_chain = None;
+    }
+  }
 }
 
 /// The file in the generated `.deno/` that records what its project was

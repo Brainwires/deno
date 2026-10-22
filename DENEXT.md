@@ -3413,6 +3413,33 @@ where the changes are discussed.
     `set_up_bin_entry_skips_a_dot_dot_bin_name`
     (`libs/npm_installer/bin_entries.rs`).
 
+98. **`fix(check)`: `deno check -- <files>`, and the `deno add` hint on the
+    native check** (`fix/rc3-batch`, for runtime `3.0.0-rc.3`, CLI only;
+    `libs/cli_parser/src/convert.rs`, `cli/tools/check.rs`).
+    - **Files after `--`.** `check` has no script arguments, but the parser put
+      what follows `--` into `argv`, so `deno check -- a.ts` dropped the file
+      and checked the whole project (stock 2.9.7 too; denext's dev type-check
+      overlay passed its files that way). They are files now, one starting with
+      a hyphen included (`deno check -- -x.ts`).
+    - **The `deno add` hint.** The native check (item 47) printed the compiler's
+      `TS2307 Cannot find module 'x' or its corresponding type
+      declarations.`
+      (or TS2882 for a side-effect import) for an import Deno itself could not
+      resolve, where the in-process checker said `Import "x" not a dependency`
+      with a hint to run `deno add npm:x`. A TS2307 / TS2792 / TS2882 at an
+      import the graph recorded a resolution error for (one that is not "module
+      not found": a bare specifier not in the import map, a missing `./` prefix,
+      an unresolvable package) takes Deno's message for it, as TS2307, keeping
+      the compiler's position and source line. A module Deno resolved but could
+      not find keeps the compiler's message.
+
+    Tests: `check_files_after_double_dash`
+    (`libs/cli_parser/src/tests_full.rs`); spec `check/double_dash_files` (a
+    file after `--`, one starting with a hyphen, files on both sides of `--`);
+    the hint in `check/bare_specifier_not_found`, `check/with_bare_import` and
+    `check/ts_suppression_unresolved_import` (their expectations from before the
+    native check, with the compiler's source line).
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97) are what the prebuilt `libdenort`
 carries. The CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` /
