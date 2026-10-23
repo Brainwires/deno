@@ -3689,6 +3689,91 @@ where the changes are discussed.
      (`libs/npmrc/supply_chain.rs`), `jail_scripts_and_allow_low_downloads`
      (`libs/cli_parser`), `env_allow_list` (`cli/supply_chain/jail.rs`).
 
+104. **`feat(lint)`: type-aware lint rules through a pinned tsgolint**
+     (`feat/tsgolint-type-aware-lint`, for runtime `3.0.0-rc.5`; CLI only:
+     `cli/tools/lint/tsgolint.rs`, `cli/tools/lint/tsgolint_pin.json`,
+     `cli/tools/lint/linter.rs`, `cli/tools/lint/mod.rs`,
+     `cli/tools/lint/rules/mod.rs`, `cli/args/mod.rs`, `libs/cli_parser`,
+     `libs/config`, `cli/schemas`, `.github/denext-runtime`). Adapted from
+     [denoland/deno#35584](https://github.com/denoland/deno/pull/35584) (closed
+     unmerged), the user's decision of 2026-10-22 for the Deno 3.0 scope.
+     `deno lint --type-aware` (or `"lint": { "typeAware": true }` in the root
+     config; `--no-type-aware` overrides it) also runs typescript-eslint's
+     type-aware rules (`no-floating-promises`, `no-misused-promises`,
+     `await-thenable`, ...) through
+     [tsgolint](https://github.com/oxc-project/tsgolint) 7.0.2004, the Go binary
+     built on typescript-go that oxlint uses. Off by default.
+     - **How it runs**: `deno lint` stays the host. tsgolint's headless protocol
+       (v2) gets every TypeScript/JavaScript file of a workspace member batch in
+       one request (it builds one program per `tsconfig.json`, and an inferred
+       ESNext/bundler/strict one for files with none); its diagnostics come back
+       through deno_lint's external-linter callback, so `// deno-lint-ignore`,
+       `ban-unused-ignore` and the pretty, compact and JSON reporters treat them
+       like any other rule's (each links to
+       `https://typescript-eslint.io/rules/<rule>`). The incremental cache is
+       off while type-aware rules run (a file's type errors depend on its
+       imports). Ranges are tsgolint's UTF-8 offsets into the BOM-stripped text;
+       if a `--fix` pass rewrote the file, its type-aware diagnostics are placed
+       at the start of the file with a note to lint again (deno_lint drops a
+       diagnostic without a range).
+     - **Rules**: upstream's 14 defaults (`await-thenable`, `no-base-to-string`,
+       `no-duplicate-type-constituents`, `no-floating-promises`,
+       `no-for-in-array`, `no-implied-eval`, `no-misused-promises`,
+       `no-redundant-type-constituents`, `no-unnecessary-type-assertion`,
+       `only-throw-error`, `prefer-promise-reject-errors`,
+       `restrict-plus-operands`, `restrict-template-expressions`,
+       `unbound-method`); `lint.rules.include` adds any of the other 45 tsgolint
+       implements, `lint.rules.exclude` removes one. tsgolint's `require-await`
+       is left out: the name is deno_lint's. All 59 names are known rule codes
+       even with type-aware linting off (an ignore directive for one is not an
+       unknown code), and are in `cli/schemas/lint-rules.v1.json`.
+     - **The binary** (never upstream's npm-on-first-use): pinned in
+       `tsgolint_pin.json` per platform by the npm tarball's integrity (sha512)
+       and the binary's sha256. Looked up as `DENO_TSGOLINT_BIN` (used as is),
+       then `tsgolint/` beside the `deno` executable (what the CLI archive
+       ships; also through a symlink), then denext's toolchain cache
+       (`<DENO_DIR>/denext-deno/<version>/<target>/tsgolint/`), then
+       `<DENO_DIR>/dl/tsgolint-7.0.2004/<platform>/`, downloaded once from the
+       pinned tarball and checked against both pins. Every candidate but the
+       override must hash to the pinned sha256 (checked on each run), so a
+       cached copy works offline and a changed one is not run. When none is
+       found and the download fails, `deno lint` fails and names the fixes
+       (`denext toolchain install`, `DENO_TSGOLINT_BIN`, `--no-type-aware`):
+       type-aware rules that were asked for are never dropped silently. Bump
+       with
+       `python3 -I .github/denext-runtime/fetch_tsgolint.py --pin
+       <version>`
+       (downloads all six tarballs and records both hashes).
+     - **Release archives**: `fetch_tsgolint.py` verifies the target's build and
+       `assemble_cli.sh` ships it as `tsgolint/` (`tsgolint[.exe]`, `LICENSE`
+       (MIT), `tsgolint.json`) next to `typescript-check/`; `BUILD_INFO.json`
+       has `tsgolint`, and `manifest.json` lists
+       `cli.targets.<target>.tsgolint: { version, sha256, tree_sha256 }`
+       (`manifest.py`, recomputed from the zip like `typescript_lsp`).
+       `cli_smoke.sh` lints a floating promise with `--type-aware` from an empty
+       `DENO_DIR` with no reachable registry.
+     - Not yet: the LSP (`deno lsp` shows no type-aware diagnostics), stdin
+       (`deno lint -` warns and skips them), rule options, tsgolint's own fixes
+       (`--fix`), and Deno's compiler options / import map: tsgolint resolves
+       with its own `tsconfig.json` discovery, so `jsr:`/`npm:`/remote imports
+       are untyped to it (upstream's open follow-up; the headless protocol has
+       no tsconfig field).
+
+     Tests: spec `lint/type_aware` (a rule firing in pretty and `--json` output,
+     off by default, `lint.typeAware` and `--no-type-aware`,
+     `lint.rules.exclude`, `deno-lint-ignore` with and without the flag, a
+     missing override and a failed download each a clear error);
+     `cli/tools/lint/tsgolint.rs` (pin coverage, rule lists, frame parsing,
+     ranges against the linted text, both pins on a tarball, the cached binary
+     reused offline and refused once changed, the local lookup order);
+     `lint_type_aware` (`libs/cli_parser`);
+     `test_lint_type_aware_must_be_a_boolean` and
+     `test_root_member_lint_combinations` (`libs/config`);
+     `.github/denext-runtime/manifest_test.py` (`tsgolint` recorded, refused
+     when it disagrees with BUILD_INFO.json or is missing). The harness fetches
+     the pinned binary into `target/tsgolint-<version>/` for a spec env value of
+     `${TSGOLINT_BIN}` (`tests/util/lib/lib.rs`, `tests/specs/mod.rs`).
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102) are what the prebuilt
 `libdenort` carries. The CLI-side parts (for example writing
@@ -3802,7 +3887,9 @@ esbuild | esbuild.exe  the official esbuild 0.25.5 `deno bundle` uses
 esbuild.LICENSE        esbuild's MIT license
 typescript-check/      the native TypeScript 7.0.2 type checking runs (item 47;
                        tsc | tsc.exe, lib.*.d.ts, LICENSE, NOTICE.txt, typescript.json)
-BUILD_INFO.json        deno version + SHA, run URL, esbuild and TypeScript sources + SHA-256
+tsgolint/              the tsgolint 7.0.2004 `deno lint --type-aware` runs (item 106;
+                       tsgolint | tsgolint.exe, LICENSE, tsgolint.json)
+BUILD_INFO.json        deno version + SHA, run URL, esbuild, TypeScript and tsgolint sources + SHA-256
 licenses/              the deno license
 ```
 
@@ -3811,7 +3898,8 @@ Each release also has `SHA256SUMS` (every runtime and CLI archive) and
 `cli.targets` -> target -> binary, url, sha256, size and
 `esbuild: { version, sha256 }`,
 `typescript_check: { version, sha256, tree_sha256 }` and
-`typescript_lsp: { version, sha256, tree_sha256 }` (item 94); plus the deno SHA,
+`typescript_lsp: { version, sha256, tree_sha256 }` (item 94) and
+`tsgolint: { version, sha256, tree_sha256 }` (item 106); plus the deno SHA,
 laufey SHA and CEF version). Every archive has a build provenance attestation:
 
 ```sh

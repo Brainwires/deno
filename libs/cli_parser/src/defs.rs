@@ -1140,6 +1140,15 @@ pub static LINT_SUBCOMMAND: CommandDef = CommandDef {
       .set_true()
       .conflicts_with(&["json"])
 .help("Output lint result in compact format"),
+    ArgDef::new("type-aware")
+      .long("type-aware")
+      .set_true()
+      .conflicts_with(&["no-type-aware"])
+.help("Also run type-aware lint rules (e.g. no-floating-promises) through the pinned tsgolint"),
+    ArgDef::new("no-type-aware")
+      .long("no-type-aware")
+      .set_true()
+.help("Don't run type-aware lint rules, even when lint.typeAware is set in the config file"),
     ArgDef::new("ignore")
       .long("ignore")
       .action(ArgAction::Append)

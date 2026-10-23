@@ -190,6 +190,13 @@ impl LintRuleProvider {
     for rule in &all_rules {
       all_rule_names.insert(rule.code().into());
     }
+    // The type-aware rules (`--type-aware`) are known codes whether or not
+    // they run, so ignore directives for them stay valid either way.
+    all_rule_names.extend(
+      super::tsgolint::TYPE_AWARE_RULES
+        .iter()
+        .map(|code| Cow::Borrowed(*code)),
+    );
     let rules = filtered_rules(
       all_rules.into_iter(),
       rules

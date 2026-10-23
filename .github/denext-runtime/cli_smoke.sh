@@ -5,7 +5,8 @@
 # `Deno.build.denext`), has `Deno.SQL`, and runs a Vitest suite under `deno test`
 # (smoke/cli/vitest_test.ts); that the bundled esbuild is ESBUILD_VERSION and
 # `deno bundle` uses it with an empty DENO_DIR and no reachable npm registry;
-# and that `deno lsp` defaults to the shipped tsgo build.
+# that `deno lsp` defaults to the shipped tsgo build; and that `deno lint
+# --type-aware` runs the shipped tsgolint offline.
 #
 # Env: TARGET VERSION ESBUILD_VERSION ARCHIVE WORK_DIR (a directory that does
 # not exist yet)
@@ -164,6 +165,33 @@ test "$native_rc" != 0 && grep -q "TS2322" "$work/check-native.txt" ||
 test "$tsc_rc" != 0 && grep -q "TS2322" "$work/check-tsc.txt" ||
   { echo "::error::deno check --check-engine=tsc did not report TS2322 (exit $tsc_rc)" >&2; exit 1; }
 echo "deno check used the shipped typescript-check; --check-engine=tsc works"
+
+# The tsgolint `deno lint --type-aware` runs: next to deno, matching the
+# sha256 tsgolint_pin.json pins for this target. With an empty DENO_DIR and
+# nothing reachable it reports a floating promise; without the flag it does
+# not run.
+case "$TARGET" in
+  *-windows-msvc) tsgolint="$work/cli/tsgolint/tsgolint.exe" ;;
+  *) tsgolint="$work/cli/tsgolint/tsgolint" ;;
+esac
+test -f "$tsgolint" || { echo "::error::no tsgolint/$(basename "$tsgolint") in $ARCHIVE" >&2; exit 1; }
+mkdir -p "$work/lint"
+printf 'async function work(): Promise<void> {}\nwork();\n' >"$work/lint/floating.ts"
+echo "::group::deno lint --type-aware (offline)"
+set +e
+(cd "$work/lint" && DENO_DIR="$work/lint-deno-dir" NPM_CONFIG_REGISTRY=http://127.0.0.1:9/ \
+  "$deno" lint --type-aware --json --no-config floating.ts) >"$work/lint-type-aware.txt" 2>&1
+type_aware_rc=$?
+(cd "$work/lint" && DENO_DIR="$work/lint-deno-dir" "$deno" lint --no-config floating.ts) >"$work/lint-plain.txt" 2>&1
+plain_rc=$?
+set -e
+cat "$work/lint-type-aware.txt" "$work/lint-plain.txt"
+echo "::endgroup::"
+test "$type_aware_rc" != 0 && grep -q '"no-floating-promises"' "$work/lint-type-aware.txt" ||
+  { echo "::error::deno lint --type-aware did not report no-floating-promises (exit $type_aware_rc)" >&2; exit 1; }
+test "$plain_rc" = 0 ||
+  { echo "::error::deno lint without --type-aware failed (exit $plain_rc)" >&2; exit 1; }
+echo "deno lint --type-aware used the shipped tsgolint"
 
 cp "$here/smoke/cli/vitest_test.ts" "$work/app/"
 echo "::group::deno test (vitest)"

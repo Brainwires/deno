@@ -581,19 +581,17 @@ fn run_step(
 ) {
   let substs = variant_substitutions(&step.variants, &metadata.variants);
 
-  let command = if substs.is_empty() {
-    let envs = metadata.envs.iter().chain(step.envs.iter());
-    context.new_command().envs(envs)
-  } else {
-    let mut envs = metadata
-      .envs
-      .iter()
-      .chain(step.envs.iter())
-      .map(|(key, value)| (key.clone(), value.clone()))
-      .collect::<HashMap<_, _>>();
+  let mut envs = metadata
+    .envs
+    .iter()
+    .chain(step.envs.iter())
+    .map(|(key, value)| (key.clone(), value.clone()))
+    .collect::<HashMap<_, _>>();
+  if !substs.is_empty() {
     substitute_variants_into_envs(&substs, &mut envs);
-    context.new_command().envs(envs)
-  };
+  }
+  substitute_tsgolint_bin(&mut envs);
+  let command = context.new_command().envs(envs);
 
   let command = match &step.args {
     VecOrString::Vec(args) => {
@@ -801,6 +799,21 @@ fn variant_substitutions(
     .collect::<Vec<_>>();
   pairs.sort_by(|a, b| a.0.cmp(&b.0).reverse());
   pairs
+}
+
+/// denext: `${TSGOLINT_BIN}` in an env value is the pinned tsgolint
+/// (`test_util::tsgolint_bin`, fetched into `target/` the first time a test
+/// asks for it), as denext's CLI archive ships it beside `deno`.
+fn substitute_tsgolint_bin(envs: &mut HashMap<String, String>) {
+  const VAR: &str = "${TSGOLINT_BIN}";
+  for value in envs.values_mut() {
+    if value.contains(VAR) {
+      let bin = test_util::tsgolint_bin().expect(
+        "the pinned tsgolint (.github/denext-runtime/fetch_tsgolint.py failed)",
+      );
+      *value = value.replace(VAR, &bin.to_string_lossy());
+    }
+  }
 }
 
 fn substitute_variants_into_envs(

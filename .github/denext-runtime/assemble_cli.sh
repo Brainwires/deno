@@ -15,6 +15,9 @@
 #   typescript-check/      the pinned TypeScript 7 build `deno check` and every
 #                          other type-checking command run (fetch_typescript.py
 #                          check; the same layout)
+#   tsgolint/              the pinned tsgolint `deno lint --type-aware` runs
+#                          (fetch_tsgolint.py; tsgolint, LICENSE,
+#                          tsgolint.json)
 #   BUILD_INFO.json        what was built from where (esbuild's source too)
 #   licenses/              the deno license
 #
@@ -24,16 +27,17 @@
 # cli/standalone/binary.rs, denext_denort).
 #
 # Env: TARGET VERSION DENO_BIN DENORT_BIN ESBUILD_DIR TYPESCRIPT_LSP_DIR
-# TYPESCRIPT_CHECK_DIR OUT_DIR DENO_VERSION DENO_SHA RUN_URL (ESBUILD_DIR:
-# fetch_esbuild.py's output directory; TYPESCRIPT_LSP_DIR /
-# TYPESCRIPT_CHECK_DIR: fetch_typescript.py lsp's / check's)
+# TYPESCRIPT_CHECK_DIR TSGOLINT_DIR OUT_DIR DENO_VERSION DENO_SHA RUN_URL
+# (ESBUILD_DIR: fetch_esbuild.py's output directory; TYPESCRIPT_LSP_DIR /
+# TYPESCRIPT_CHECK_DIR: fetch_typescript.py lsp's / check's; TSGOLINT_DIR:
+# fetch_tsgolint.py's)
 # (VERSION: the fork's own version, e.g. 3.0.0-rc.1; DENO_VERSION: the
 # upstream Deno release it is built from, DENEXT.md "Versioning")
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 . "$here/lib.sh"
 
-: "${TARGET:?}" "${VERSION:?}" "${DENO_BIN:?}" "${DENORT_BIN:?}" "${ESBUILD_DIR:?}" "${TYPESCRIPT_LSP_DIR:?}" "${TYPESCRIPT_CHECK_DIR:?}" "${OUT_DIR:?}"
+: "${TARGET:?}" "${VERSION:?}" "${DENO_BIN:?}" "${DENORT_BIN:?}" "${ESBUILD_DIR:?}" "${TYPESCRIPT_LSP_DIR:?}" "${TYPESCRIPT_CHECK_DIR:?}" "${TSGOLINT_DIR:?}" "${OUT_DIR:?}"
 : "${DENO_VERSION:?}" "${DENO_SHA:?}"
 
 export COPYFILE_DISABLE=1 # no AppleDouble ._ files in macOS tarballs
@@ -75,6 +79,18 @@ done
 tsc_check_sha=$(sha256_of "$ts_check_dir/$tsc_bin")
 grep -q "\"sha256\": \"$tsc_check_sha\"" "$ts_check_dir/typescript.json" ||
   { echo "$ts_check_dir/$tsc_bin does not match typescript.json" >&2; exit 1; }
+tsgolint_dir=$(unix_path "$TSGOLINT_DIR")
+case "$TARGET" in
+  *-windows-msvc) tsgolint_bin=tsgolint.exe ;;
+  *) tsgolint_bin=tsgolint ;;
+esac
+for f in "$tsgolint_bin" LICENSE tsgolint.json; do
+  test -f "$tsgolint_dir/$f" || { echo "missing $tsgolint_dir/$f (run fetch_tsgolint.py)" >&2; exit 1; }
+done
+# The binary must be the one fetch_tsgolint.py verified.
+tsgolint_sha=$(sha256_of "$tsgolint_dir/$tsgolint_bin")
+grep -q "\"sha256\": \"$tsgolint_sha\"" "$tsgolint_dir/tsgolint.json" ||
+  { echo "$tsgolint_dir/$tsgolint_bin does not match tsgolint.json" >&2; exit 1; }
 out_dir=$(unix_path "$OUT_DIR")
 mkdir -p "$out_dir"
 out_dir=$(cd "$out_dir" && pwd)
@@ -98,6 +114,9 @@ chmod +x "$root/typescript-lsp/$tsc_bin"
 mkdir -p "$root/typescript-check"
 cp -R "$ts_check_dir/." "$root/typescript-check/"
 chmod +x "$root/typescript-check/$tsc_bin"
+mkdir -p "$root/tsgolint"
+cp -R "$tsgolint_dir/." "$root/tsgolint/"
+chmod +x "$root/tsgolint/$tsgolint_bin"
 
 cat >"$root/BUILD_INFO.json" <<EOF
 {
@@ -109,6 +128,7 @@ cat >"$root/BUILD_INFO.json" <<EOF
   "esbuild": $(cat "$esbuild_dir/esbuild.json"),
   "typescript_lsp": $(cat "$ts_lsp_dir/typescript.json"),
   "typescript_check": $(cat "$ts_check_dir/typescript.json"),
+  "tsgolint": $(cat "$tsgolint_dir/tsgolint.json"),
   "build": { "run": "${RUN_URL:-}" }
 }
 EOF

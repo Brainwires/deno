@@ -508,6 +508,10 @@ pub struct LintFlags {
   pub permit_no_files: bool,
   pub json: bool,
   pub compact: bool,
+  /// Type-aware lint rules through tsgolint (denext): `Some(true)` for
+  /// `--type-aware`, `Some(false)` for `--no-type-aware`, `None` to follow
+  /// `lint.typeAware` in the config file (off by default).
+  pub type_aware: Option<bool>,
 }
 
 impl LintFlags {

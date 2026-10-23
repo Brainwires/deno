@@ -31,6 +31,7 @@ use super::plugins;
 use super::plugins::PluginHostProxy;
 use super::rules::FileOrPackageLintRule;
 use super::rules::PackageLintRule;
+use super::tsgolint::TsgolintResults;
 use crate::sys::CliSys;
 use crate::util::fs::specifier_from_file_path;
 use crate::util::text_encoding::Utf16Map;
@@ -40,6 +41,8 @@ pub struct CliLinterOptions {
   pub fix: bool,
   pub deno_lint_config: DenoLintConfig,
   pub maybe_plugin_runner: Option<Arc<PluginHostProxy>>,
+  /// tsgolint's diagnostics for the files being linted (`--type-aware`).
+  pub maybe_tsgolint: Option<Arc<TsgolintResults>>,
 }
 
 #[derive(Debug)]
@@ -49,6 +52,7 @@ pub struct CliLinter {
   linter: DenoLintLinter,
   deno_lint_config: DenoLintConfig,
   maybe_plugin_runner: Option<Arc<PluginHostProxy>>,
+  maybe_tsgolint: Option<Arc<TsgolintResults>>,
 }
 
 impl CliLinter {
@@ -77,6 +81,7 @@ impl CliLinter {
       }),
       deno_lint_config: options.deno_lint_config,
       maybe_plugin_runner: options.maybe_plugin_runner,
+      maybe_tsgolint: options.maybe_tsgolint,
     }
   }
 
@@ -107,6 +112,7 @@ impl CliLinter {
   ) -> Result<Vec<LintDiagnostic>, AnyError> {
     let external_linter_container = ExternalLinterContainer::new(
       self.maybe_plugin_runner.clone(),
+      self.maybe_tsgolint.clone(),
       Some(token),
     );
 
@@ -136,8 +142,11 @@ impl CliLinter {
       MediaType::from_specifier(&specifier)
     };
 
-    let external_linter_container =
-      ExternalLinterContainer::new(self.maybe_plugin_runner.clone(), None);
+    let external_linter_container = ExternalLinterContainer::new(
+      self.maybe_plugin_runner.clone(),
+      self.maybe_tsgolint.clone(),
+      None,
+    );
 
     if self.fix {
       self.lint_file_and_fix(
@@ -443,39 +452,65 @@ struct ExternalLinterContainer {
 impl ExternalLinterContainer {
   pub fn new(
     maybe_plugin_runner: Option<Arc<PluginHostProxy>>,
+    maybe_tsgolint: Option<Arc<TsgolintResults>>,
     maybe_token: Option<CancellationToken>,
   ) -> Self {
     let mut s = Self {
       cb: None,
       error: None,
     };
-    if let Some(plugin_runner) = maybe_plugin_runner {
-      s.error = Some(Arc::new(Mutex::new(None)));
-      let error_ = s.error.clone();
-      let cb = Arc::new(move |parsed_source: ParsedSource| {
-        let token_ = maybe_token.clone();
-        let file_path =
-          match deno_path_util::url_to_file_path(parsed_source.specifier()) {
-            Ok(path) => path,
-            Err(err) => {
-              *error_.as_ref().unwrap().lock() = Some(err.into());
-              return None;
-            }
-          };
-
-        let r =
-          run_plugins(plugin_runner.clone(), parsed_source, file_path, token_);
-
-        match r {
-          Ok(d) => Some(d),
+    if maybe_plugin_runner.is_none() && maybe_tsgolint.is_none() {
+      return s;
+    }
+    let error = Arc::new(Mutex::new(None));
+    s.error = Some(error.clone());
+    let cb = Arc::new(move |parsed_source: ParsedSource| {
+      let token_ = maybe_token.clone();
+      let file_path =
+        match deno_path_util::url_to_file_path(parsed_source.specifier()) {
+          Ok(path) => path,
           Err(err) => {
-            *error_.as_ref().unwrap().lock() = Some(err);
-            None
+            *error.lock() = Some(err.into());
+            return None;
+          }
+        };
+
+      let mut diagnostics = Vec::new();
+      let mut rules: Vec<Cow<'static, str>> = Vec::new();
+
+      // tsgolint's precomputed diagnostics: returned as external diagnostics,
+      // so `// deno-lint-ignore` and `ban-unused-ignore` apply to them.
+      if let Some(tsgolint) = &maybe_tsgolint {
+        diagnostics.extend(tsgolint.diagnostics_for(
+          &file_path,
+          parsed_source.specifier(),
+          parsed_source.text_info_lazy(),
+        ));
+        rules.extend(tsgolint.rule_codes());
+      }
+
+      // JS plugins last: `run_plugins` takes the parsed source.
+      if let Some(plugin_runner) = &maybe_plugin_runner {
+        match run_plugins(
+          plugin_runner.clone(),
+          parsed_source,
+          file_path,
+          token_,
+        ) {
+          Ok(result) => {
+            diagnostics.extend(result.diagnostics);
+            rules.extend(result.rules);
+          }
+          Err(err) => {
+            *error.lock() = Some(err);
+            return None;
           }
         }
-      });
-      s.cb = Some(cb);
-    }
+      }
+
+      Some(ExternalLinterResult { diagnostics, rules })
+    });
+    s.cb = Some(cb);
     s
   }
 
