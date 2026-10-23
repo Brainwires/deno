@@ -34,6 +34,8 @@ use std::time::Instant;
 pub const DEFAULT_IDLE_DELAY: Duration = Duration::from_millis(1000);
 /// The minimum spacing between two trims.
 pub const DEFAULT_MIN_INTERVAL: Duration = Duration::from_secs(10);
+/// How much the RSS must have grown since the last trim for another one.
+pub const DEFAULT_MIN_GROWTH_BYTES: u64 = 16 * 1024 * 1024;
 
 /// Whether a trim can do anything on this target (glibc Linux).
 pub const SUPPORTED: bool = cfg!(all(target_os = "linux", target_env = "gnu"));
@@ -44,12 +46,19 @@ pub const SUPPORTED: bool = cfg!(all(target_os = "linux", target_env = "gnu"));
 /// - `DENO_IDLE_TRIM_DELAY_MS`: [`IdleTrimConfig::delay`] (default 1000).
 /// - `DENO_IDLE_TRIM_MIN_INTERVAL_MS`: [`IdleTrimConfig::min_interval`]
 ///   (default 10000).
+/// - `DENO_IDLE_TRIM_MIN_GROWTH_MB`: [`IdleTrimConfig::min_growth`] in MiB
+///   (default 16).
 /// - `DENO_IDLE_TRIM_TRACE=1`: print one line per trim to stderr (GC and
 ///   `malloc_trim` durations, RSS before and after).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct IdleTrimConfig {
   pub delay: Duration,
   pub min_interval: Duration,
+  /// After the first trim, a due trim is skipped (and the idle period counted
+  /// as handled) unless the RSS has grown by this much since the last trim
+  /// left it: a server woken by its own periodic timers would otherwise run a
+  /// full GC every `min_interval` for nothing.
+  pub min_growth: u64,
   pub trace: bool,
 }
 
@@ -58,6 +67,7 @@ impl Default for IdleTrimConfig {
     Self {
       delay: DEFAULT_IDLE_DELAY,
       min_interval: DEFAULT_MIN_INTERVAL,
+      min_growth: DEFAULT_MIN_GROWTH_BYTES,
       trace: false,
     }
   }
@@ -69,11 +79,10 @@ impl IdleTrimConfig {
   }
 
   fn from_lookup(get: impl Fn(&str) -> Option<String>) -> Self {
+    let number =
+      |name: &str| get(name).and_then(|value| value.trim().parse::<u64>().ok());
     let millis = |name: &str, default: Duration| {
-      get(name)
-        .and_then(|value| value.trim().parse::<u64>().ok())
-        .map(Duration::from_millis)
-        .unwrap_or(default)
+      number(name).map(Duration::from_millis).unwrap_or(default)
     };
     Self {
       delay: millis("DENO_IDLE_TRIM_DELAY_MS", DEFAULT_IDLE_DELAY),
@@ -81,6 +90,9 @@ impl IdleTrimConfig {
         "DENO_IDLE_TRIM_MIN_INTERVAL_MS",
         DEFAULT_MIN_INTERVAL,
       ),
+      min_growth: number("DENO_IDLE_TRIM_MIN_GROWTH_MB")
+        .map(|mb| mb.saturating_mul(1024 * 1024))
+        .unwrap_or(DEFAULT_MIN_GROWTH_BYTES),
       trace: matches!(get("DENO_IDLE_TRIM_TRACE").as_deref(), Some("1")),
     }
   }
@@ -167,10 +179,21 @@ pub(crate) struct IdleTrim {
   waker: Option<(Waker, Waker)>,
   sleep: Pin<Box<tokio::time::Sleep>>,
   sleep_deadline: Option<Instant>,
+  /// Reads the process RSS in bytes (`None` where it can't).
+  read_rss: fn() -> Option<u64>,
+  /// The RSS the last trim left.
+  rss_after_trim: Option<u64>,
 }
 
 impl IdleTrim {
   pub(crate) fn new(config: IdleTrimConfig) -> Self {
+    Self::with_rss_reader(config, rss_bytes)
+  }
+
+  fn with_rss_reader(
+    config: IdleTrimConfig,
+    read_rss: fn() -> Option<u64>,
+  ) -> Self {
     let now = Instant::now();
     Self {
       config,
@@ -182,6 +205,18 @@ impl IdleTrim {
         tokio::time::Instant::from_std(now + config.delay),
       )),
       sleep_deadline: None,
+      read_rss,
+      rss_after_trim: None,
+    }
+  }
+
+  /// Whether the memory grew enough since the last trim to trim again.
+  fn grown_since_last_trim(&self) -> bool {
+    match (self.rss_after_trim, (self.read_rss)()) {
+      (Some(after), Some(now)) => {
+        now >= after.saturating_add(self.config.min_growth)
+      }
+      _ => true,
     }
   }
 
@@ -239,9 +274,12 @@ impl IdleTrim {
       // The sleep fired for `deadline`, so the trim is due (the timer's
       // millisecond rounding never lets this spin).
       if self.scheduler.take_due(Instant::now().max(deadline)) {
-        trim(state);
-        // The GC's own follow-up work (finalizers) is not new activity.
-        self.woken.store(false, Ordering::Release);
+        if self.grown_since_last_trim() {
+          trim(state);
+          self.rss_after_trim = (self.read_rss)();
+          // The GC's own follow-up work (finalizers) is not new activity.
+          self.woken.store(false, Ordering::Release);
+        }
         // Disarmed until the next wake-up.
         return Poll::Pending;
       }
@@ -294,6 +332,11 @@ fn print_trace(
 #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
 pub(crate) fn trim_now(_isolate: &mut deno_core::v8::Isolate, _trace: bool) {}
 
+#[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+fn rss_bytes() -> Option<u64> {
+  None
+}
+
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
 fn rss_bytes() -> Option<u64> {
   #[allow(clippy::disallowed_methods, reason = "procfs read")]
@@ -315,6 +358,7 @@ mod tests {
     IdleTrimConfig {
       delay: Duration::from_millis(delay_ms),
       min_interval: Duration::from_millis(min_interval_ms),
+      min_growth: DEFAULT_MIN_GROWTH_BYTES,
       trace: false,
     }
   }
@@ -326,6 +370,7 @@ mod tests {
     let set = IdleTrimConfig::from_lookup(|name| match name {
       "DENO_IDLE_TRIM_DELAY_MS" => Some("250".into()),
       "DENO_IDLE_TRIM_MIN_INTERVAL_MS" => Some(" 3000 ".into()),
+      "DENO_IDLE_TRIM_MIN_GROWTH_MB" => Some("64".into()),
       "DENO_IDLE_TRIM_TRACE" => Some("1".into()),
       _ => None,
     });
@@ -334,6 +379,7 @@ mod tests {
       IdleTrimConfig {
         delay: Duration::from_millis(250),
         min_interval: Duration::from_millis(3000),
+        min_growth: 64 * 1024 * 1024,
         trace: true,
       }
     );
@@ -471,5 +517,45 @@ mod tests {
       .await;
     assert_eq!(trims.get(), 1);
     assert!(fake.borrow().polls > 30);
+  }
+
+  static FAKE_RSS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+  fn fake_rss() -> Option<u64> {
+    Some(FAKE_RSS.load(Ordering::SeqCst))
+  }
+
+  /// Polls an always-pending loop through `idle`, letting one idle period
+  /// pass; returns how many trims ran.
+  async fn one_idle_period(idle: &mut IdleTrim) -> usize {
+    let trims = Cell::new(0);
+    // Activity first, then idle past the delay.
+    idle.woken.store(true, Ordering::SeqCst);
+    let fut = std::future::poll_fn(|cx| {
+      idle.poll(
+        cx,
+        &mut (),
+        |_, _| Poll::<()>::Pending,
+        |_| trims.set(trims.get() + 1),
+      )
+    });
+    let _ = tokio::time::timeout(Duration::from_millis(400), fut).await;
+    trims.get()
+  }
+
+  #[tokio::test]
+  async fn skips_a_trim_unless_memory_grew_since_the_last() {
+    const MB: u64 = 1024 * 1024;
+    let mut idle = IdleTrim::with_rss_reader(config(50, 0), fake_rss);
+    FAKE_RSS.store(500 * MB, Ordering::SeqCst);
+    // The first trim always runs; the fake RSS stays at 500 MB after it.
+    assert_eq!(one_idle_period(&mut idle).await, 1);
+    // Woken by a timer, idle again, no growth: skipped.
+    FAKE_RSS.store(510 * MB, Ordering::SeqCst);
+    assert_eq!(one_idle_period(&mut idle).await, 0);
+    // Grown by the threshold (16 MB): trims again.
+    FAKE_RSS.store(516 * MB, Ordering::SeqCst);
+    assert_eq!(one_idle_period(&mut idle).await, 1);
   }
 }
