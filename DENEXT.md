@@ -3454,9 +3454,8 @@ where the changes are discussed.
     Drives are compared as spelled (`make_relative` takes `c:` and `C:` for
     different drives as well).
 
-    Tests: `synthetic_import_map_scopes_a_child_on_another_drive` (a linked
-    package's bare import resolves on its drive; a child on the same drive still
-    goes through the crate) and `windows_drives` (`libs/resolver/workspace.rs`).
+    Superseded by item 106, which replaces this wrapper with the general fix
+    (every value and scope key, not only a child on another drive).
 
 97. **`fix(ext/node, npm)`: a handle that fails to open reports its errno, and a
     bin named `..` is skipped** (`fix/rc3-batch`, for runtime `3.0.0-rc.3`;
@@ -3688,6 +3687,46 @@ where the changes are discussed.
      `defaults`, `paranoid_turns_every_member_on` and `jail_scripts_opt_out`
      (`libs/npmrc/supply_chain.rs`), `jail_scripts_and_allow_low_downloads`
      (`libs/cli_parser`), `env_allow_list` (`cli/supply_chain/jail.rs`).
+
+106. **`fix(resolver)`: the workspace's synthetic import map across Windows
+     drives** (`fix/cross-drive-import-map`, for runtime `3.0.0-rc.5`, CLI
+     only; `libs/resolver/synthetic_import_map.rs`,
+     `libs/resolver/workspace.rs`). The general fix behind item 96. The
+     workspace layers every non-root config (workspace members, `links`
+     packages, auto-linked config folders) into the root's import map as a
+     scope, writing paths relative to the root config's directory with
+     `Url::make_relative` (`import_map::ext::create_synthetic_import_map`,
+     import_map 0.25.0). `make_relative` knows nothing of drives: from
+     `file:///C:/root/` it spells `file:///D:/x` as `../D:/x`, which resolves to
+     `file:///C:/D:/x`. Every rewritten value, the member's scope key and each
+     rewritten scope key broke that way. Item 96 covered a child on another
+     drive; a member on the root's drive mapping a module on another drive
+     still failed: `%TEMP%\mono\deno.json` = `{"workspace":["./web"]}`,
+     `web\deno.json` = `{"imports":{"lib":"file:///Q:/lib/mod.ts"}}`, and
+     `deno run web\main.ts` importing `"lib"` gave
+     `Import 'file:///C:/Q:/lib/mod.ts' failed` (stock 2.9.7, rc.3). A child on
+     a UNC share (another host) panicked on the crate's `unwrap()`.
+
+     The function now lives in `libs/resolver/synthetic_import_map.rs`, one
+     code path for every child (item 96's wrapper is gone). A path is written
+     relative to the root's directory only when the relative form resolves
+     back to the same URL: never across drives (letters compared without
+     regard to case), schemes or hosts, and not where `make_relative`'s answer
+     doesn't round-trip (`c:` against `C:`). Otherwise the absolute URL is
+     written. On one drive the output is byte for byte the crate's.
+
+     Tests: `libs/resolver/synthetic_import_map.rs`
+     (`same_output_as_the_crate_on_one_drive`,
+     `a_member_value_on_another_drive_stays_absolute`,
+     `a_member_on_another_drive_is_scoped_absolutely`,
+     `a_root_on_another_drive_than_its_member`,
+     `drive_letters_in_another_case_are_one_drive`,
+     `a_member_on_a_unc_share`,
+     `relative_only_where_it_round_trips`, `windows_drives`; with `C:/` /
+     `D:/` URLs, run on every OS; 5 of them fail against the crate's function),
+     and on Windows `workspace_import_map_across_drives`
+     (`tests/integration/run_tests.rs`: a `subst` drive holding a member's
+     mapped module, a `links` package and an auto-linked config folder).
 
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102) are what the prebuilt

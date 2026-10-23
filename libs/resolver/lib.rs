@@ -64,6 +64,7 @@ pub mod npmrc;
 pub mod pnpm_lockfile_import;
 #[cfg(feature = "sync")]
 mod rt;
+pub mod synthetic_import_map;
 pub mod workspace;
 pub mod yarn_lockfile_import;
 
