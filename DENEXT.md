@@ -3575,8 +3575,28 @@ where the changes are discussed.
      No behaviour change; covered by the existing suites (`denext tests` full
      matrix, `denext runtime` release builds).
 
+101. **laufey `a0f2c26`: downloads from the app's own scheme** (runtime
+     `3.0.0-rc.4`; laufey `development-denext` `a0f2c26`, API 49 unchanged;
+     `LAUFEY_SHA` in `.github/workflows/denext_runtime.yml`,
+     `cli/rt_desktop/Cargo.toml`, `Cargo.lock`). A `Content-Disposition:
+     attachment` response or an `<a download>` link served by the app's custom
+     scheme (`myapp://app`) silently never started a download on any backend:
+     WebKit hands a download to its network process, which never had the
+     scheme handler's load, and Chromium's link download (CEF, WebView2) has no
+     URL loader for an embedder scheme. Every host now saves such a download
+     itself: the download policy and the save dialog as for any download, then
+     a GET of the URL through the app's scheme handler, written to a temporary
+     file that replaces the chosen path once the whole 2xx response arrived (a
+     non-GET attachment is refused and logged, never sent again; Windows paths
+     outside the ANSI code page work). WKWebView also honours an attachment for
+     a type it could display. The same laufey commit pins Rust 1.99.1 (as item
+     100 does here) and takes rustls-webpki 0.103.16 in `webauthn-linux`
+     (RUSTSEC-2026-0382). No change on the runtime side; covered by laufey's
+     downloads unit test and native e2e battery (a custom-scheme step) and this
+     fork's `denext runtime` e2e.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
-64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99, 100) are what the prebuilt
+64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-101) are what the prebuilt
 `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
 in the branch too, but a stock CLI does not run them; denext's own launcher
