@@ -210,6 +210,14 @@ impl IdleTrim {
     }
   }
 
+  fn arm(&mut self, deadline: Instant) {
+    self
+      .sleep
+      .as_mut()
+      .reset(tokio::time::Instant::from_std(deadline));
+    self.sleep_deadline = Some(deadline);
+  }
+
   /// Whether the memory grew enough since the last trim to trim again.
   fn grown_since_last_trim(&self) -> bool {
     match (self.rss_after_trim, (self.read_rss)()) {
@@ -261,15 +269,20 @@ impl IdleTrim {
       return Poll::Pending;
     }
     while let Some(deadline) = self.scheduler.deadline() {
-      if self.sleep_deadline != Some(deadline) {
-        self
-          .sleep
-          .as_mut()
-          .reset(tokio::time::Instant::from_std(deadline));
-        self.sleep_deadline = Some(deadline);
+      // Activity only ever moves the deadline later, so the sleep is not
+      // re-armed on every busy poll (a timer-wheel update each time): one
+      // armed for an earlier instant fires, and is re-armed then. Under
+      // steady load that is one reset per `delay`.
+      match self.sleep_deadline {
+        Some(armed) if armed <= deadline => {}
+        _ => self.arm(deadline),
       }
       if self.sleep.as_mut().poll(cx).is_pending() {
         return Poll::Pending;
+      }
+      if self.sleep_deadline.is_some_and(|fired| fired < deadline) {
+        self.arm(deadline);
+        continue;
       }
       // The sleep fired for `deadline`, so the trim is due (the timer's
       // millisecond rounding never lets this spin).
