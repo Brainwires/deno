@@ -203,7 +203,7 @@ pub struct MainWorker {
   dispatch_process_beforeexit_event_fn_global: v8::Global<v8::Function>,
   dispatch_process_exit_event_fn_global: v8::Global<v8::Function>,
   memory_trim_handle: Option<tokio::task::JoinHandle<()>>,
-  /// denext (DENEXT.md item 101): `--unstable-idle-trim`.
+  /// denext (DENEXT.md item 104): `--unstable-idle-trim`.
   idle_trim: Option<crate::idle_trim::IdleTrim>,
 }
 
@@ -921,7 +921,7 @@ impl MainWorker {
     self.memory_trim_handle = Some(memory_trim_handle);
   }
 
-  /// denext (DENEXT.md item 101): once the event loop has gone
+  /// denext (DENEXT.md item 104): once the event loop has gone
   /// `config.delay` without a wake-up after activity, run a full GC and
   /// `malloc_trim(0)` from [`MainWorker::run_event_loop`] (at most once per
   /// idle period, `config.min_interval` apart). glibc Linux only; a no-op on

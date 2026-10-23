@@ -1769,7 +1769,7 @@ pub async fn run_with_options(
     .iter()
     .any(|f| f == "legacy-abort")
     || deno_lib::args::legacy_abort_from_env(&sys));
-  // denext (DENEXT.md item 101): `--unstable-idle-trim` at compile time, or
+  // denext (DENEXT.md item 104): `--unstable-idle-trim` at compile time, or
   // `DENO_UNSTABLE_IDLE_TRIM=1` when the binary runs.
   let idle_trim = metadata
     .unstable_config

@@ -306,7 +306,7 @@ pub struct LibMainWorkerOptions {
   pub skip_op_registration: bool,
   pub node_ipc_init: Option<(i64, ChildIpcSerialization)>,
   pub no_legacy_abort: bool,
-  /// denext (DENEXT.md item 101): `--unstable-idle-trim` (or
+  /// denext (DENEXT.md item 104): `--unstable-idle-trim` (or
   /// `DENO_UNSTABLE_IDLE_TRIM=1`) on the main worker.
   pub idle_trim: bool,
   pub startup_snapshot: Option<&'static [u8]>,

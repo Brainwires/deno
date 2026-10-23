@@ -10584,7 +10584,7 @@ fn check_engine_flag() {
   );
 }
 
-// denext (DENEXT.md item 101): `--unstable-idle-trim` is a feature like any
+// denext (DENEXT.md item 104): `--unstable-idle-trim` is a feature like any
 // other unstable flag, on `run`, `serve` and `compile`.
 #[test]
 fn unstable_idle_trim_flag() {

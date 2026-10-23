@@ -1,4 +1,4 @@
-// denext (DENEXT.md item 101): `--unstable-idle-trim`. glibc Linux trims
+// denext (DENEXT.md item 104): `--unstable-idle-trim`. glibc Linux trims
 // (a full GC, then malloc_trim(0)) once the event loop has been idle for
 // DENO_IDLE_TRIM_DELAY_MS; every other target accepts the flag and does
 // nothing.

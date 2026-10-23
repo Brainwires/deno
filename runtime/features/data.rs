@@ -73,7 +73,7 @@ pub static FEATURE_DESCRIPTIONS: &[UnstableFeatureDescription] = &[
     kind: UnstableFeatureKind::Runtime,
     env_var: None,
   },
-  // denext (DENEXT.md item 101): release freed heap memory to the OS once
+  // denext (DENEXT.md item 104): release freed heap memory to the OS once
   // the event loop goes idle (glibc Linux only; a no-op elsewhere).
   UnstableFeatureDescription {
     name: "idle-trim",

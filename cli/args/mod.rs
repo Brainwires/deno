@@ -850,7 +850,7 @@ impl CliOptions {
       && !self.workspace().has_unstable("legacy-abort")
   }
 
-  /// denext (DENEXT.md item 101): `--unstable-idle-trim`,
+  /// denext (DENEXT.md item 104): `--unstable-idle-trim`,
   /// `"unstable": ["idle-trim"]` or `DENO_UNSTABLE_IDLE_TRIM=1`.
   pub fn idle_trim(&self) -> bool {
     self

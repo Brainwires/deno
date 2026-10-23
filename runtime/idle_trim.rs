@@ -1,6 +1,6 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 
-//! denext (DENEXT.md item 101): `--unstable-idle-trim`.
+//! denext (DENEXT.md item 104): `--unstable-idle-trim`.
 //!
 //! A long-running server's resident memory after a load burst is dominated by
 //! memory glibc's allocator keeps in its arenas after the JavaScript heap has

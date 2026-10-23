@@ -3689,8 +3689,98 @@ where the changes are discussed.
      (`libs/npmrc/supply_chain.rs`), `jail_scripts_and_allow_low_downloads`
      (`libs/cli_parser`), `env_allow_list` (`cli/supply_chain/jail.rs`).
 
+104. **`feat(runtime)`: `--unstable-idle-trim`, memory back to the OS when the
+     event loop goes idle** (`feat/idle-trim`, CLI and runtime;
+     `runtime/idle_trim.rs`, `runtime/worker.rs`, `runtime/features/data.rs`,
+     `cli/args/mod.rs`, `cli/lib/worker.rs`, `cli/factory.rs`, `cli/rt/run.rs`,
+     `libs/cli_parser`). A long-running server's resident memory after a load
+     burst is mostly memory glibc's allocator keeps in its arenas after the
+     JavaScript heap let go of it: on `examples/hello` under `denext start`, a
+     full GC followed by `malloc_trim(0)` frees 120-220 MB that otherwise stays
+     resident. Opt-in, behind an unstable feature:
+     - **On:** `--unstable-idle-trim` (`run`, `serve`, `compile`; a compiled
+       binary keeps it, as it keeps `--unstable-legacy-abort`, item 102),
+       `"unstable": ["idle-trim"]` in the config file, or
+       `DENO_UNSTABLE_IDLE_TRIM=1` (read by `deno` and by a compiled binary at
+       start).
+     - **What:** once the main worker's event loop has gone
+       `DENO_IDLE_TRIM_DELAY_MS` (default 1000) without being woken (no timer
+       fired, no I/O, no op completed, no cross-thread task) after activity, it
+       runs `low_memory_notification()` (a full GC) and then `malloc_trim(0)`.
+       At most once per idle period (it re-arms only on the next wake-up) and
+       never twice within `DENO_IDLE_TRIM_MIN_INTERVAL_MS` (default 10000).
+       After the first trim, a due trim is skipped unless the RSS has grown by
+       `DENO_IDLE_TRIM_MIN_GROWTH_MB` (default 16) since the last trim left it:
+       a server woken by its own periodic timers otherwise ran a 4-30 ms full GC
+       every 10 s for nothing (measured below, before the gate). It runs between
+       event loop polls, so never while JavaScript (a request handler included)
+       runs; work that arrives during a trim waits for it. A process whose loop
+       is woken more often than the delay (an interval timer, steady traffic) is
+       never trimmed.
+     - **Where:** glibc Linux only. On macOS, Windows and musl the flag is
+       accepted and does nothing (no wrapper around the event loop either).
+     - **How:** `MainWorker::run_event_loop` polls the loop with a waker that
+       records every wake-up of the task; while the loop stays pending, a tokio
+       sleep fires at the deadline (`IdleTrimScheduler`, clock-free). The sleep
+       is re-armed lazily: activity only moves the deadline later, so an armed
+       sleep fires early and is re-armed then (one timer update per delay under
+       load, not one per poll). Only the main worker is wrapped; the trim itself
+       is process-wide.
+     - **Diagnostics:** `DENO_IDLE_TRIM_TRACE=1` prints one line per trim to
+       stderr: the GC and `malloc_trim` durations and the RSS before and after.
+     - glibc's own `MALLOC_ARENA_MAX` needs no flag (glibc reads it from the
+       environment); it was measured alongside, below.
+
+     Measured on biscuits (8 vCPU EPYC-Milan KVM, 15 GB), a throwaway
+     `denoland/deno:2.9.7` container per run with this branch's release CLI
+     (`denext runtime` `cli_only` build) mounted. Server on CPUs 0-3, a
+     closed-loop fetch load (concurrency 32) on CPUs 4-5, 1-min load < 1.8 at
+     each start. Per run: one 10,000-request warm-up, five 10,000-request
+     bursts, RSS sampled after 3 s and 30 s idle, a second burst, 30 s idle
+     again. `hello` is denext's `examples/hello` (`denext start`, in-process,
+     `DENEXT_DENO=stock`); `plain` is a `Deno.serve` handler that builds a
+     400-row JSON + HTML page per request. Three alternating rounds (final
+     build, with the growth gate and lazy sleep):
+
+     | server | mode | req/s (median per round) | p99 ms (median) | RSS after load (MB) | after 3 s idle  | after 30 s idle | after burst 2 + 30 s | trims |
+     | ------ | ---- | ------------------------ | --------------- | ------------------- | --------------- | --------------- | -------------------- | ----- |
+     | hello  | off  | 2006 / 2096 / 2208       | 23.3            | 652 / 605 / 541     | 652 / 605 / 541 | 447 / 451 / 400 | 447 / 451 / 400      | 0     |
+     | hello  | on   | 2122 / 2258 / 2072       | 23.1            | 542 / 592 / 538     | 173 / 173 / 174 | 172 / 172 / 173 | 172 / 170 / 173      | 2     |
+     | plain  | off  | 6379 / 6994 / 7027       | 11.5            | 142 / 139 / 148     | 142 / 139 / 148 | 142 / 139 / 148 | 142 / 139 / 142      | 0     |
+     | plain  | on   | 7206 / 6797 / 6650       | 11.3            | 149 / 150 / 149     | 65 / 65 / 65    | 65 / 65 / 65    | 65 / 65 / 65         | 2     |
+
+     - **Memory:** with the flag, `hello` settles at ~172 MB within 3 s of going
+       idle, against 541-652 MB (and still 400-451 MB 30 s later, once V8's own
+       memory reducer has run) without it; `plain` 65 MB against 139-148 MB.
+     - **Throughput / latency:** no difference beyond round-to-round noise
+       (req/s and p99 overlap in both directions); no trim ever ran during a
+       burst (bursts keep the loop woken).
+     - **Cost of a trim** (at idle only, from `DENO_IDLE_TRIM_TRACE`): `hello`
+       after a burst, GC 112-217 ms + `malloc_trim` 9-26 ms; `plain` GC 8-18 ms
+       - 1-2 ms. A request that arrives during one waits that long once.
+     - **Before the growth gate** (first build, one round of each mode): the
+       same memory results, but 5 trims per run instead of 2; the extra three
+       ran on an already-trimmed process every 10 s (GC 4-30 ms, RSS change
+       under 1 MB), woken by periodic timers. The gate removed them.
+     - **`MALLOC_ARENA_MAX=2`** (first build, two rounds): no consistent effect
+       on peak RSS (504-577 MB vs 534-538 MB for `hello`), 5% lower idle RSS
+       without the trim (369-378 vs 399 MB), none with it (168-169 vs 170-171
+       MB), req/s within noise. Not worth a knob: the trim subsumes it.
+
+     Tests: the scheduler and the poll wrapper in `runtime/idle_trim.rs`
+     (`trims_once_the_loop_is_idle_for_the_delay`,
+     `trims_at_most_once_per_idle_period`,
+     `skips_a_trim_unless_memory_grew_since_the_last`,
+     `keeps_the_minimum_spacing_between_trims`, `config_reads_the_environment`,
+     `trims_an_idle_loop_once_and_not_a_busy_one`); spec `run/idle_trim` (on
+     Linux, ~300 MB allocated and dropped, then idle: one trim and the RSS falls
+     by more than half the growth, with the flag, the environment variable, the
+     config file and in a compiled binary; off by default; a busy loop never
+     trimmed; the flag accepted on every target); the parser test
+     `unstable_idle_trim_flag` (`libs/cli_parser/src/tests_full.rs`).
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
-64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102) are what the prebuilt
+64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104) are what the prebuilt
 `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
 in the branch too, but a stock CLI does not run them; denext's own launcher
