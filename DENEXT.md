@@ -42,15 +42,15 @@ merge commit, so the history shows each sync. The fork keeps its own version
 (`3.0.0-rc.N`) until upstream's 3.0.0, which gets a full reconcile;
 `cli/lib/upstream_version.txt` names the merged upstream release.
 
-- **2.9.8** (merged 2026-10-22, `sync/upstream-2.9.8-b`, on top of
-  3.0.0-rc.3 and the Rust 1.99.1 pin of item 100). Already carried before
-  the merge and now upstream's own commits: #36925, #36962, #36942, #36901,
-  #36968 and the rand 0.9.3 bump (item 27), and #37026 (item 33, identical to
-  ours). New from upstream: X.509v1 handling aligned with OpenSSL (#36933), npm
-  package link names validated (#37047), zsh completion of script paths for a
-  bare `deno run` (#36976), `assert` message functions and format arguments
-  (#36944), `mock.reset()` restoring `mock.method()` (#36886) and the distrusted
-  eMudhra CAs (#37046). Conflicts and how they were resolved:
+- **2.9.8** (merged 2026-10-22, `sync/upstream-2.9.8-b`, on top of 3.0.0-rc.3
+  and the Rust 1.99.1 pin of item 100). Already carried before the merge and now
+  upstream's own commits: #36925, #36962, #36942, #36901, #36968 and the rand
+  0.9.3 bump (item 27), and #37026 (item 33, identical to ours). New from
+  upstream: X.509v1 handling aligned with OpenSSL (#36933), npm package link
+  names validated (#37047), zsh completion of script paths for a bare `deno run`
+  (#36976), `assert` message functions and format arguments (#36944),
+  `mock.reset()` restoring `mock.method()` (#36886) and the distrusted eMudhra
+  CAs (#37046). Conflicts and how they were resolved:
   - `cli/lib/version.txt`, `cli/Cargo.toml`, `cli/rt/Cargo.toml`: our
     `3.0.0-rc.3` kept; `upstream_version.txt` set to `2.9.8`.
   - `Cargo.toml`: upstream's crate version bumps taken, our `deno_sql` kept;
@@ -3578,22 +3578,22 @@ where the changes are discussed.
 101. **laufey `a0f2c26`: downloads from the app's own scheme** (runtime
      `3.0.0-rc.4`; laufey `development-denext` `a0f2c26`, API 49 unchanged;
      `LAUFEY_SHA` in `.github/workflows/denext_runtime.yml`,
-     `cli/rt_desktop/Cargo.toml`, `Cargo.lock`). A `Content-Disposition:
-     attachment` response or an `<a download>` link served by the app's custom
-     scheme (`myapp://app`) silently never started a download on any backend:
-     WebKit hands a download to its network process, which never had the
-     scheme handler's load, and Chromium's link download (CEF, WebView2) has no
-     URL loader for an embedder scheme. Every host now saves such a download
-     itself: the download policy and the save dialog as for any download, then
-     a GET of the URL through the app's scheme handler, written to a temporary
-     file that replaces the chosen path once the whole 2xx response arrived (a
-     non-GET attachment is refused and logged, never sent again; Windows paths
-     outside the ANSI code page work). WKWebView also honours an attachment for
-     a type it could display. The same laufey commit pins Rust 1.99.1 (as item
-     100 does here) and takes rustls-webpki 0.103.16 in `webauthn-linux`
-     (RUSTSEC-2026-0382). No change on the runtime side; covered by laufey's
-     downloads unit test and native e2e battery (a custom-scheme step) and this
-     fork's `denext runtime` e2e.
+     `cli/rt_desktop/Cargo.toml`, `Cargo.lock`). An attachment response
+     (`Content-Disposition: attachment`) or an `<a download>` link served by the
+     app's custom scheme (`myapp://app`) silently never started a download on
+     any backend: WebKit hands a download to its network process, which never
+     had the scheme handler's load, and Chromium's link download (CEF, WebView2)
+     has no URL loader for an embedder scheme. Every host now saves such a
+     download itself: the download policy and the save dialog as for any
+     download, then a GET of the URL through the app's scheme handler, written
+     to a temporary file that replaces the chosen path once the whole 2xx
+     response arrived (a non-GET attachment is refused and logged, never sent
+     again; Windows paths outside the ANSI code page work). WKWebView also
+     honours an attachment for a type it could display. The same laufey commit
+     pins Rust 1.99.1 (as item 100 does here) and takes rustls-webpki 0.103.16
+     in `webauthn-linux` (RUSTSEC-2026-0382). No change on the runtime side;
+     covered by laufey's downloads unit test and native e2e battery (a
+     custom-scheme step) and this fork's `denext runtime` e2e.
 
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-101) are what the prebuilt
