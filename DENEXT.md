@@ -3779,9 +3779,45 @@ where the changes are discussed.
      trimmed; the flag accepted on every target); the parser test
      `unstable_idle_trim_flag` (`libs/cli_parser/src/tests_full.rs`).
 
+105. **`fix(process)`: a Windows child inherits only its own handles**
+     (`fix/windows-spawn-handle-inheritance`, CLI and runtime;
+     `runtime/subprocess_windows/src/process.rs`, `lib.rs`, `process_stdio.rs`,
+     `ext/process/lib.rs`). Every Windows spawn (`Deno.Command`,
+     `node:child_process`, so Workers, `deno test --parallel`, sidecars and edge
+     functions too) called `CreateProcessW` with `bInheritHandles = TRUE` and no
+     handle list, while the child's pipe ends were inheritable from their
+     creation until after the spawn. A child spawned at the same moment on
+     another thread inherited them, and a long-lived one kept the other spawn's
+     stdout write end open, so that spawn's `.output()` (or `execFile` callback)
+     waited for the unrelated process to exit: on a Windows host, `cmd /c echo`
+     stalled 45 s, the life of the concurrent long-lived children (stock Deno
+     too).
+     - **`PROC_THREAD_ATTRIBUTE_HANDLE_LIST`** (`STARTUPINFOEXW`): the child
+       inherits exactly its CRT stdio slots (stdin, stdout, stderr, the extra
+       `stdio` pipes) and the handles it is given by value, which
+       `Command::inherit_handle` now lists: the npm state file
+       (`DENO_DONT_USE_INTERNAL_NODE_COMPAT_STATE_FD`) and the IPC pipe
+       (`NODE_CHANNEL_FD`). With nothing to list, `bInheritHandles` is `FALSE`.
+     - **The child's pipe ends are created non-inheritable**; the spawn's own
+       inheritable duplicates exist only around `CreateProcessW`.
+     - **The duplicates are closed on every return path**: a failed
+       `CreateProcessW` used to leak them, inheritable, for good.
+
+     A program spawned through Rust's `std::process::Command` in the same
+     process still inherits every inheritable handle; it gets the narrower
+     window above.
+
+     Test: `commandConcurrentSpawnsDoNotLeakPipes`
+     (`tests/unit/command_test.ts`, Windows only, with
+     `tests/testdata/workers/concurrent_spawn_worker.js`): two Workers keep
+     spawning `ping` children that live 45 s while three Workers each run 60
+     `cmd /c echo` spawns, two through `Deno.Command` and one through
+     `node:child_process`; the slowest must finish within 15 s (45.5 s in all
+     three before the fix).
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
-64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104) are what the prebuilt
-`libdenort` carries. The CLI-side parts (for example writing
+64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105) are what the
+prebuilt `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
 in the branch too, but a stock CLI does not run them; denext's own launcher
 provides that environment.

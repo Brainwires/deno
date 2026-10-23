@@ -284,6 +284,7 @@ pub struct Command {
   stdout: Stdio,
   stderr: Stdio,
   extra_handles: Vec<Option<HANDLE>>,
+  inherit_handles: Vec<HANDLE>,
   kill_on_drop: bool,
   verbatim_arguments: bool,
   windows_hide: bool,
@@ -301,6 +302,7 @@ impl Command {
       stdout: Stdio::Inherit,
       stderr: Stdio::Inherit,
       extra_handles: vec![],
+      inherit_handles: vec![],
       kill_on_drop: false,
       verbatim_arguments: false,
       windows_hide: false,
@@ -408,6 +410,15 @@ impl Command {
     self
   }
 
+  /// Lets the child inherit `handle`, whose number it learns some other way
+  /// (an environment variable). The child inherits ONLY its stdio and the
+  /// handles given here, never another spawn's pipes. The caller keeps
+  /// ownership; `spawn` marks the handle inheritable.
+  pub fn inherit_handle(&mut self, handle: HANDLE) -> &mut Self {
+    self.inherit_handles.push(handle);
+    self
+  }
+
   pub fn spawn(&mut self) -> Result<Child, std::io::Error> {
     let mut flags = 0;
     if self.detached {
@@ -422,7 +433,9 @@ impl Command {
 
     let (stdin, child_stdin) = match self.stdin {
       Stdio::Pipe => {
-        let pipes = crate::anon_pipe::anon_pipe(false, true)?;
+        // The child's end stays non-inheritable: the spawn duplicates it
+        // inheritable and lists the copy for this child alone.
+        let pipes = crate::anon_pipe::anon_pipe(false, false)?;
         let child_stdin_handle = pipes.ours.into_handle();
         let stdin_handle = pipes.theirs.into_handle().into_raw_handle();
 
@@ -437,7 +450,7 @@ impl Command {
     };
     let (stdout, child_stdout) = match self.stdout {
       Stdio::Pipe => {
-        let pipes = crate::anon_pipe::anon_pipe(true, true)?;
+        let pipes = crate::anon_pipe::anon_pipe(true, false)?;
         let child_stdout_handle = pipes.ours.into_handle();
         let stdout_handle = pipes.theirs.into_handle().into_raw_handle();
 
@@ -452,7 +465,7 @@ impl Command {
     };
     let (stderr, child_stderr) = match self.stderr {
       Stdio::Pipe => {
-        let pipes = crate::anon_pipe::anon_pipe(true, true)?;
+        let pipes = crate::anon_pipe::anon_pipe(true, false)?;
         let child_stderr_handle = pipes.ours.into_handle();
         let stderr_handle = pipes.theirs.into_handle().into_raw_handle();
 
@@ -484,6 +497,7 @@ impl Command {
       env: &self.envs,
       cwd: self.cwd.as_deref().map(Cow::Borrowed),
       stdio,
+      inherit_handles: self.inherit_handles.clone(),
     })
     .map(|process| Child {
       inner: FusedChild::Child(ChildDropGuard {

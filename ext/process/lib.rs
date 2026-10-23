@@ -1094,6 +1094,9 @@ fn create_command(
     let mut ipc_rid = None;
     let mut handles_to_close = Vec::with_capacity(1);
     if let Some(handle) = maybe_npm_process_state {
+      // The child finds this handle by the number in its environment; list
+      // it so the child inherits it (and nothing another spawn is creating).
+      command.inherit_handle(handle as _);
       handles_to_close.push(handle);
     }
     if let Some(ipc) = args.ipc
@@ -1127,6 +1130,8 @@ fn create_command(
           .to_string(),
       );
 
+      // Passed by value in NODE_CHANNEL_FD: list it for this child.
+      command.inherit_handle(hd2 as _);
       handles_to_close.push(hd2);
 
       ipc_rid = Some(pipe_rid);

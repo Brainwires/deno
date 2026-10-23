@@ -198,10 +198,6 @@ pub unsafe fn uv_duplicate_handle(
   Ok(dup)
 }
 
-pub unsafe fn free_stdio_buffer(buffer: *mut u8) {
-  let _ = unsafe { StdioBuffer::from_raw(buffer) };
-}
-
 /*INLINE static HANDLE uv__get_osfhandle(int fd)
 {
   /* _get_osfhandle() raises an assert in debug builds if the FD is invalid.
@@ -347,7 +343,6 @@ pub fn disable_stdio_inheritance() {
 
 mod buffer {
   use std::ffi::c_uint;
-  use std::mem::ManuallyDrop;
 
   use super::*;
   pub struct StdioBuffer {
@@ -401,16 +396,6 @@ mod buffer {
   }
 
   impl StdioBuffer {
-    /// # Safety
-    /// The buffer pointer must be valid and point to memory allocated by
-    /// `std::alloc::alloc`.
-    pub unsafe fn from_raw(ptr: *mut u8) -> Self {
-      Self {
-        ptr,
-        borrowed: false,
-      }
-    }
-
     pub unsafe fn from_raw_borrowed(ptr: *mut u8, size: usize) -> Option<Self> {
       if unsafe { !verify_buffer(ptr, size) } {
         return None;
@@ -422,8 +407,9 @@ mod buffer {
       })
     }
 
-    pub fn into_raw(self) -> *mut u8 {
-      ManuallyDrop::new(self).ptr
+    /// The buffer for `STARTUPINFOW::lpReserved2`; it stays owned by `self`.
+    pub fn as_ptr(&self) -> *mut u8 {
+      self.ptr
     }
 
     fn create_raw(count: usize) -> Self {

@@ -54,9 +54,11 @@ use windows_sys::Win32::Foundation::FALSE;
 use windows_sys::Win32::Foundation::GENERIC_WRITE;
 use windows_sys::Win32::Foundation::GetLastError;
 use windows_sys::Win32::Foundation::HANDLE;
+use windows_sys::Win32::Foundation::HANDLE_FLAG_INHERIT;
 use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
 use windows_sys::Win32::Foundation::LocalFree;
 use windows_sys::Win32::Foundation::STILL_ACTIVE;
+use windows_sys::Win32::Foundation::SetHandleInformation;
 use windows_sys::Win32::Foundation::TRUE;
 use windows_sys::Win32::Foundation::WAIT_FAILED;
 use windows_sys::Win32::Foundation::WAIT_OBJECT_0;
@@ -99,11 +101,16 @@ use windows_sys::Win32::System::Threading::CREATE_SUSPENDED;
 use windows_sys::Win32::System::Threading::CREATE_UNICODE_ENVIRONMENT;
 use windows_sys::Win32::System::Threading::CreateProcessW;
 use windows_sys::Win32::System::Threading::DETACHED_PROCESS;
+use windows_sys::Win32::System::Threading::DeleteProcThreadAttributeList;
+use windows_sys::Win32::System::Threading::EXTENDED_STARTUPINFO_PRESENT;
 use windows_sys::Win32::System::Threading::GetCurrentProcess;
 use windows_sys::Win32::System::Threading::GetExitCodeProcess;
 use windows_sys::Win32::System::Threading::GetProcessId;
 use windows_sys::Win32::System::Threading::INFINITE;
+use windows_sys::Win32::System::Threading::InitializeProcThreadAttributeList;
+use windows_sys::Win32::System::Threading::LPPROC_THREAD_ATTRIBUTE_LIST;
 use windows_sys::Win32::System::Threading::OpenProcess;
+use windows_sys::Win32::System::Threading::PROC_THREAD_ATTRIBUTE_HANDLE_LIST;
 use windows_sys::Win32::System::Threading::PROCESS_INFORMATION;
 use windows_sys::Win32::System::Threading::PROCESS_QUERY_INFORMATION;
 use windows_sys::Win32::System::Threading::PROCESS_TERMINATE;
@@ -111,9 +118,11 @@ use windows_sys::Win32::System::Threading::RegisterWaitForSingleObject;
 use windows_sys::Win32::System::Threading::ResumeThread;
 use windows_sys::Win32::System::Threading::STARTF_USESHOWWINDOW;
 use windows_sys::Win32::System::Threading::STARTF_USESTDHANDLES;
+use windows_sys::Win32::System::Threading::STARTUPINFOEXW;
 use windows_sys::Win32::System::Threading::STARTUPINFOW;
 use windows_sys::Win32::System::Threading::TerminateProcess;
 use windows_sys::Win32::System::Threading::UnregisterWaitEx;
+use windows_sys::Win32::System::Threading::UpdateProcThreadAttribute;
 use windows_sys::Win32::System::Threading::WT_EXECUTEINWAITTHREAD;
 use windows_sys::Win32::System::Threading::WT_EXECUTEONLYONCE;
 use windows_sys::Win32::System::Threading::WaitForSingleObject;
@@ -126,7 +135,6 @@ use windows_sys::w;
 use crate::env::CommandEnv;
 use crate::env::EnvKey;
 use crate::process_stdio::StdioContainer;
-use crate::process_stdio::free_stdio_buffer;
 use crate::process_stdio::uv_stdio_create;
 use crate::uv_error;
 use crate::widestr::WCStr;
@@ -266,6 +274,9 @@ pub struct SpawnOptions<'a> {
   pub env: &'a CommandEnv,
   pub cwd: Option<Cow<'a, OsStr>>,
   pub stdio: Vec<super::process_stdio::StdioContainer>,
+  /// Handles the child inherits by value (their numbers are passed to it some
+  /// other way, e.g. an environment variable), beyond its stdio slots.
+  pub inherit_handles: Vec<HANDLE>,
 }
 
 macro_rules! wchar {
@@ -522,8 +533,87 @@ impl Future for ChildProcess {
   }
 }
 
+/// Adds `handle` to the child's inherit list once, skipping null and invalid
+/// handles.
+fn push_inherit_handle(list: &mut Vec<HANDLE>, handle: HANDLE) {
+  if handle.is_null() || handle == INVALID_HANDLE_VALUE {
+    return;
+  }
+  if !list.contains(&handle) {
+    list.push(handle);
+  }
+}
+
+/// A `PROC_THREAD_ATTRIBUTE_LIST` holding one `PROC_THREAD_ATTRIBUTE_HANDLE_LIST`
+/// entry, so `CreateProcessW` hands the child ONLY the listed handles.
+///
+/// With `bInheritHandles = TRUE` alone, a child inherits every inheritable
+/// handle in the process, including the pipe ends another thread is creating
+/// for its own child at the same moment (Workers, `deno test --parallel`). If
+/// the child that picks one up is long-lived, the other spawner never sees
+/// end-of-file on that pipe and its `.output()` hangs until that unrelated
+/// child exits. Rust's standard library and libuv face the same race.
+struct HandleListAttribute<'a> {
+  // `usize` elements keep the opaque list pointer-aligned.
+  buffer: Vec<usize>,
+  // The list stores a pointer to these handles: they must outlive it.
+  _handles: std::marker::PhantomData<&'a [HANDLE]>,
+}
+
+impl<'a> HandleListAttribute<'a> {
+  fn new(handles: &'a [HANDLE]) -> Result<Self, std::io::Error> {
+    let mut size = 0usize;
+    // SAFETY: a null list with a size pointer only asks for the needed size;
+    // it "fails" with ERROR_INSUFFICIENT_BUFFER by design.
+    unsafe {
+      InitializeProcThreadAttributeList(ptr::null_mut(), 1, 0, &mut size)
+    };
+    if size == 0 {
+      return Err(std::io::Error::last_os_error());
+    }
+    let mut buffer = vec![0usize; size.div_ceil(mem::size_of::<usize>())];
+    // SAFETY: `buffer` holds at least `size` bytes.
+    cvt(unsafe {
+      InitializeProcThreadAttributeList(
+        buffer.as_mut_ptr().cast(),
+        1,
+        0,
+        &mut size,
+      )
+    })?;
+    let list = Self {
+      buffer,
+      _handles: std::marker::PhantomData,
+    };
+    // SAFETY: the list is initialized; `handles` outlives it (lifetime 'a).
+    cvt(unsafe {
+      UpdateProcThreadAttribute(
+        list.as_ptr(),
+        0,
+        PROC_THREAD_ATTRIBUTE_HANDLE_LIST as usize,
+        handles.as_ptr().cast(),
+        mem::size_of_val(handles),
+        ptr::null_mut(),
+        ptr::null(),
+      )
+    })?;
+    Ok(list)
+  }
+
+  fn as_ptr(&self) -> LPPROC_THREAD_ATTRIBUTE_LIST {
+    self.buffer.as_ptr().cast_mut().cast()
+  }
+}
+
+impl Drop for HandleListAttribute<'_> {
+  fn drop(&mut self) {
+    // SAFETY: the list was initialized in `new`.
+    unsafe { DeleteProcThreadAttributeList(self.as_ptr()) };
+  }
+}
+
 pub fn spawn(options: &SpawnOptions) -> Result<ChildProcess, std::io::Error> {
-  let mut startup = unsafe { mem::zeroed::<STARTUPINFOW>() };
+  let mut startup_ex = unsafe { mem::zeroed::<STARTUPINFOEXW>() };
   let mut info = unsafe { mem::zeroed::<PROCESS_INFORMATION>() };
 
   if options.file.is_empty() || options.args.is_empty() {
@@ -642,8 +732,41 @@ pub fn spawn(options: &SpawnOptions) -> Result<ChildProcess, std::io::Error> {
     )
   };
 
+  // The handles this child, and only this child, inherits: its CRT stdio
+  // slots plus the handles it is given by value. Each must be inheritable to
+  // appear in a handle list.
+  let mut inherit_list: Vec<HANDLE> = Vec::with_capacity(
+    child_stdio_buffer.get_count() + options.inherit_handles.len(),
+  );
+  for fd in 0..child_stdio_buffer.get_count() {
+    // SAFETY: `fd` is within the buffer's count.
+    push_inherit_handle(&mut inherit_list, unsafe {
+      child_stdio_buffer.get_handle(fd as i32)
+    });
+  }
+  for &handle in &options.inherit_handles {
+    if handle.is_null() || handle == INVALID_HANDLE_VALUE {
+      continue;
+    }
+    // SAFETY: the caller passes a handle it owns until the spawn returns.
+    cvt(unsafe {
+      SetHandleInformation(handle, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT)
+    })?;
+    push_inherit_handle(&mut inherit_list, handle);
+  }
+  let handle_list = if inherit_list.is_empty() {
+    None
+  } else {
+    Some(HandleListAttribute::new(&inherit_list)?)
+  };
+
   // Set up process creation
-  startup.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
+  let startup = &mut startup_ex.StartupInfo;
+  startup.cb = if handle_list.is_some() {
+    std::mem::size_of::<STARTUPINFOEXW>() as u32
+  } else {
+    std::mem::size_of::<STARTUPINFOW>() as u32
+  };
   startup.lpReserved = ptr::null_mut();
   startup.lpDesktop = ptr::null_mut();
   startup.lpTitle = ptr::null_mut();
@@ -654,10 +777,16 @@ pub fn spawn(options: &SpawnOptions) -> Result<ChildProcess, std::io::Error> {
   startup.hStdOutput = unsafe { child_stdio_buffer.get_handle(1) };
   startup.hStdError = unsafe { child_stdio_buffer.get_handle(2) };
 
-  startup.lpReserved2 = child_stdio_buffer.into_raw();
+  // The buffer stays owned here: dropping it closes the child's copies of its
+  // stdio handles on every return path, a failed `CreateProcessW` included.
+  startup.lpReserved2 = child_stdio_buffer.as_ptr();
 
   // Set up process flags
   let mut process_flags = CREATE_UNICODE_ENVIRONMENT;
+  if let Some(handle_list) = &handle_list {
+    startup_ex.lpAttributeList = handle_list.as_ptr();
+    process_flags |= EXTENDED_STARTUPINFO_PRESENT;
+  }
 
   // Handle console window visibility
   if (options.flags & uv_process_flags::WindowsHideConsole) != 0
@@ -704,12 +833,13 @@ pub fn spawn(options: &SpawnOptions) -> Result<ChildProcess, std::io::Error> {
       args_ptr as *mut u16, // Command line
       ptr::null(),          // Process attributes
       ptr::null(),          // Thread attributes
-      TRUE,                 // Inherit handles
-      process_flags,        // Creation flags
-      env_ptr as *mut _,    // Environment
-      cwd_ptr,              // Current directory
-      &startup,             // Startup info
-      &mut info,            // Process information
+      // Inherit only the handles in the list (none without one).
+      if handle_list.is_some() { TRUE } else { FALSE },
+      process_flags,     // Creation flags
+      env_ptr as *mut _, // Environment
+      cwd_ptr,           // Current directory
+      (&raw const startup_ex).cast::<STARTUPINFOW>(), // Startup info
+      &mut info,         // Process information
     )
   };
 
@@ -759,9 +889,9 @@ pub fn spawn(options: &SpawnOptions) -> Result<ChildProcess, std::io::Error> {
   // Close the thread handle as we don't need it
   unsafe { windows_sys::Win32::Foundation::CloseHandle(info.hThread) };
 
-  if !startup.lpReserved2.is_null() {
-    unsafe { free_stdio_buffer(startup.lpReserved2) };
-  }
+  // The child holds its own copies now; close ours.
+  drop(handle_list);
+  drop(child_stdio_buffer);
 
   Ok(child)
 }
