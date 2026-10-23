@@ -234,8 +234,13 @@ impl SupplyChainSettings {
 pub struct SupplyChainConfig {
   /// `paranoid`: every gate is on and fails closed.
   pub paranoid: bool,
-  /// Approved lifecycle scripts run confined (`jail-scripts`).
+  /// Approved lifecycle scripts run confined (`jail-scripts`). On by
+  /// default (the Deno 3.0 default, DENEXT.md item 103); `jail-scripts=false`
+  /// turns it off.
   pub jail_scripts: bool,
+  /// Whether a setting (or `paranoid`) asked for `jail-scripts`, rather than
+  /// the default turning it on.
+  pub jail_scripts_explicit: bool,
   pub advisory_check: AdvisoryCheck,
   /// What `deno add` does with a package below the threshold.
   pub low_download_check: LowDownloadCheck,
@@ -251,7 +256,8 @@ impl Default for SupplyChainConfig {
   fn default() -> Self {
     Self {
       paranoid: false,
-      jail_scripts: false,
+      jail_scripts: true,
+      jail_scripts_explicit: false,
       advisory_check: AdvisoryCheck::On,
       low_download_check: LowDownloadCheck::Warn,
       low_download_threshold: DEFAULT_LOW_DOWNLOAD_THRESHOLD,
@@ -355,7 +361,10 @@ pub fn resolve_supply_chain(
   }
   Ok(SupplyChainConfig {
     paranoid,
-    jail_scripts: paranoid || merged.jail_scripts.unwrap_or(false),
+    // denext: on unless a source turns it off (DENEXT.md item 103); where
+    // sources disagree the stricter value (on) wins
+    jail_scripts: paranoid || merged.jail_scripts.unwrap_or(true),
+    jail_scripts_explicit: paranoid || merged.jail_scripts == Some(true),
     advisory_check: if paranoid {
       AdvisoryCheck::Required
     } else {
@@ -394,7 +403,9 @@ mod test {
   fn defaults() {
     let config = resolve_supply_chain(&[], Default::default()).unwrap();
     assert_eq!(config, SupplyChainConfig::default());
-    assert!(!config.jail_scripts);
+    // DENEXT.md item 103: jailed by default, but not asked for
+    assert!(config.jail_scripts);
+    assert!(!config.jail_scripts_explicit);
     assert_eq!(config.advisory_check, AdvisoryCheck::On);
     assert_eq!(config.low_download_threshold, 1000);
     assert_eq!(config.low_download_check, LowDownloadCheck::Warn);
@@ -406,6 +417,7 @@ mod test {
     let config = resolve_supply_chain(&[(".npmrc", &s)], s.clone()).unwrap();
     assert!(config.paranoid);
     assert!(config.jail_scripts);
+    assert!(config.jail_scripts_explicit);
     assert_eq!(config.advisory_check, AdvisoryCheck::Required);
     assert_eq!(config.low_download_check, LowDownloadCheck::Required);
     assert_eq!(config.low_download_threshold, 1000);
@@ -506,6 +518,27 @@ mod test {
     assert_eq!(config.advisory_check, AdvisoryCheck::Off);
     assert_eq!(config.low_download_check, LowDownloadCheck::Off);
     assert!(!config.jail_scripts);
+  }
+
+  // DENEXT.md item 103: `jail-scripts=false` from any source turns the
+  // default off, unless another source asks for it
+  #[test]
+  fn jail_scripts_opt_out() {
+    let off = settings(&[("jail-scripts", "false")]);
+    let on = settings(&[("jail-scripts", "true")]);
+    for source in [".npmrc", "environment", "deno.json"] {
+      let config =
+        resolve_supply_chain(&[(source, &off)], Default::default()).unwrap();
+      assert!(!config.jail_scripts, "{source}");
+      assert!(!config.jail_scripts_explicit, "{source}");
+    }
+    let config = resolve_supply_chain(
+      &[(".npmrc", &off), ("deno.json", &on)],
+      Default::default(),
+    )
+    .unwrap();
+    assert!(config.jail_scripts);
+    assert!(config.jail_scripts_explicit);
   }
 
   #[test]

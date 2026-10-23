@@ -1,5 +1,15 @@
 {
-  "args": "run -A main.ts",
-  "output": "main.out",
-  "exitCode": 0
+  "tests": {
+    "default": {
+      "args": "run -A main.ts",
+      "output": "main.out",
+      "exitCode": 0
+    },
+    // the opt-out of DENEXT.md item 102: the legacy abort, after the body
+    "legacy_abort": {
+      "args": "run --unstable-legacy-abort -A main.ts",
+      "output": "legacy.out",
+      "exitCode": 0
+    }
+  }
 }

@@ -131,7 +131,7 @@
           "description": "Turn every gate on and make each fail closed: jailScripts on, advisoryCheck required, lowDownloadCheck required, trust-policy no-downgrade. A member set to something weaker is an error."
         },
         "jailScripts": {
-          "description": "Run approved npm lifecycle scripts confined (scrubbed environment, temporary HOME, writes only to node_modules and temp, no credential files, no network unless allowed). An object turns it on and sets exceptions.",
+          "description": "Run approved npm lifecycle scripts confined (scrubbed environment, temporary HOME, writes only to node_modules and temp, no credential files, no network unless allowed). On by default; false runs them unconfined (not allowed under paranoid). An object keeps it on and sets exceptions.",
           "oneOf": [{
             "type": "boolean"
           }, {
@@ -1390,6 +1390,7 @@
           "fmt-sql",
           "http",
           "kv",
+          "legacy-abort",
           "net",
           "node-globals",
           "raw-imports",

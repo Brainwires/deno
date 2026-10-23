@@ -1,3 +1,2 @@
-Deno.serve: request.signal aborts on successful responses (legacy behavior).[WILDLINE]
 body: ok
 signal aborted after a successful response: true

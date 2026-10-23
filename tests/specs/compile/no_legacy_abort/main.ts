@@ -1,7 +1,8 @@
-// A compiled app keeps the unstable no-legacy-abort setting it was compiled
-// with: request.signal does not abort once a response was sent successfully,
-// and Deno.serve prints no legacy-behavior notice on the first request. With
-// the setting off, both happen, as under `deno run`.
+// A compiled app keeps the request.signal behavior it was compiled with
+// (DENEXT.md item 102): by default request.signal does not abort once a
+// response was sent successfully; compiled with the legacy-abort opt-out (or
+// run with DENO_LEGACY_ABORT=1) it does, as under `deno run`. Neither prints
+// a notice.
 let signal: AbortSignal | undefined;
 const aborted = Promise.withResolvers<void>();
 

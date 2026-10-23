@@ -526,6 +526,11 @@ ArgDef::new("unstable-bare-node-builtins")
     .set_true()
     .hidden()
 .help("Lazily loads statically analyzable dynamic imports when not running with type checking. Warning: This may change the order of semver specifier resolution."),
+  ArgDef::new("unstable-legacy-abort")
+    .long("unstable-legacy-abort")
+    .set_true()
+    .hidden()
+.help("Restore the legacy `request.signal` behavior in Deno.serve: abort the signal when the response has been sent, not only when the client disconnects or the request times out."),
   ArgDef::new("unstable-lockfile-v5")
     .long("unstable-lockfile-v5")
     .set_true()
@@ -540,7 +545,7 @@ ArgDef::new("unstable-bare-node-builtins")
     .long("unstable-no-legacy-abort")
     .set_true()
     .hidden()
-.help("Enable abort signal in Deno.serve without legacy behavior. This will not abort the server when the request is handled successfully."),
+.help("Deprecated. `request.signal` in Deno.serve no longer aborts on successfully completed requests, so this flag has no effect."),
   ArgDef::new("unstable-node-globals")
     .long("unstable-node-globals")
     .set_true()
@@ -637,7 +642,12 @@ pub static ALLOW_SCRIPTS_ARG: &[ArgDef] = &[ArgDef::new("allow-scripts")
   ArgDef::new("jail-scripts")
     .long("jail-scripts")
     .set_true()
-.help("Run approved npm lifecycle scripts confined: a scrubbed environment, a temporary HOME, writes only to node_modules and temp, no network unless allowed (also `jail-scripts=true` in .npmrc or deno.json's `supplyChain.jailScripts`)"),
+    .conflicts_with(&["no-jail-scripts"])
+.help("Run approved npm lifecycle scripts confined (the default): a scrubbed environment, a temporary HOME, writes only to node_modules and temp, no network unless allowed"),
+  ArgDef::new("no-jail-scripts")
+    .long("no-jail-scripts")
+    .set_true()
+.help("Run approved npm lifecycle scripts unconfined, with the user's environment and HOME (also `jail-scripts=false` in .npmrc, or `jailScripts: false` in deno.json's `supplyChain`; not allowed under `paranoid`)"),
 ];
 
 pub static LOW_DOWNLOADS_ARG: &[ArgDef] = &[ArgDef::new("allow-low-downloads")

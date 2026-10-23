@@ -96,11 +96,19 @@ pub static UNSTABLE_FEATURES: &[UnstableFeatureDefinition] = &[
     kind: UnstableFeatureKind::Cli,
   },
   UnstableFeatureDefinition {
+    name: "legacy-abort",
+    flag_name: "unstable-legacy-abort",
+    help_text: "Restore the legacy `request.signal` behavior in Deno.serve: abort the signal when the response has been sent, not only when the client disconnects or the request times out.",
+    show_in_help: true,
+    id: 11,
+    kind: UnstableFeatureKind::Runtime,
+  },
+  UnstableFeatureDefinition {
     name: "lockfile-v5",
     flag_name: "unstable-lockfile-v5",
     help_text: "Enable unstable lockfile v5",
     show_in_help: true,
-    id: 11,
+    id: 12,
     kind: UnstableFeatureKind::Cli,
   },
   UnstableFeatureDefinition {
@@ -108,15 +116,15 @@ pub static UNSTABLE_FEATURES: &[UnstableFeatureDefinition] = &[
     flag_name: "unstable-net",
     help_text: "enable unstable net APIs",
     show_in_help: true,
-    id: 12,
+    id: 13,
     kind: UnstableFeatureKind::Runtime,
   },
   UnstableFeatureDefinition {
     name: "no-legacy-abort",
     flag_name: "unstable-no-legacy-abort",
-    help_text: "Enable abort signal in Deno.serve without legacy behavior. This will not abort the server when the request is handled successfully.",
-    show_in_help: true,
-    id: 13,
+    help_text: "Deprecated. `request.signal` in Deno.serve no longer aborts on successfully completed requests, so this flag has no effect.",
+    show_in_help: false,
+    id: 14,
     kind: UnstableFeatureKind::Runtime,
   },
   UnstableFeatureDefinition {
@@ -124,7 +132,7 @@ pub static UNSTABLE_FEATURES: &[UnstableFeatureDefinition] = &[
     flag_name: "unstable-node-globals",
     help_text: "Deprecated. Node.js `setTimeout` and `setInterval` globals are now always enabled, so this flag has no effect.",
     show_in_help: false,
-    id: 14,
+    id: 15,
     kind: UnstableFeatureKind::Runtime,
   },
   UnstableFeatureDefinition {
@@ -132,7 +140,7 @@ pub static UNSTABLE_FEATURES: &[UnstableFeatureDefinition] = &[
     flag_name: "unstable-npm-lazy-caching",
     help_text: "Enable unstable lazy caching of npm dependencies, downloading them only as needed (disabled: all npm packages in package.json are installed on startup; enabled: only npm packages that are actually referenced in an import are installed",
     show_in_help: true,
-    id: 15,
+    id: 16,
     kind: UnstableFeatureKind::Cli,
   },
   UnstableFeatureDefinition {
@@ -140,7 +148,7 @@ pub static UNSTABLE_FEATURES: &[UnstableFeatureDefinition] = &[
     flag_name: "unstable-otel",
     help_text: "Enable unstable OpenTelemetry features",
     show_in_help: false,
-    id: 16,
+    id: 17,
     kind: UnstableFeatureKind::Runtime,
   },
   UnstableFeatureDefinition {
@@ -148,7 +156,7 @@ pub static UNSTABLE_FEATURES: &[UnstableFeatureDefinition] = &[
     flag_name: "unstable-process",
     help_text: "Enable unstable process APIs",
     show_in_help: false,
-    id: 17,
+    id: 18,
     kind: UnstableFeatureKind::Runtime,
   },
   UnstableFeatureDefinition {
@@ -156,7 +164,7 @@ pub static UNSTABLE_FEATURES: &[UnstableFeatureDefinition] = &[
     flag_name: "unstable-raw-imports",
     help_text: "Enable unstable 'bytes' imports.",
     show_in_help: true,
-    id: 18,
+    id: 19,
     kind: UnstableFeatureKind::Runtime,
   },
   UnstableFeatureDefinition {
@@ -164,7 +172,7 @@ pub static UNSTABLE_FEATURES: &[UnstableFeatureDefinition] = &[
     flag_name: "unstable-sloppy-imports",
     help_text: "Enable unstable resolving of specifiers by extension probing, .js to .ts, and directory probing",
     show_in_help: true,
-    id: 19,
+    id: 20,
     kind: UnstableFeatureKind::Cli,
   },
   UnstableFeatureDefinition {
@@ -172,7 +180,7 @@ pub static UNSTABLE_FEATURES: &[UnstableFeatureDefinition] = &[
     flag_name: "unstable-subdomain-wildcards",
     help_text: "Enable subdomain wildcards support for the `--allow-net` flag",
     show_in_help: false,
-    id: 20,
+    id: 21,
     kind: UnstableFeatureKind::Cli,
   },
   UnstableFeatureDefinition {
@@ -180,7 +188,7 @@ pub static UNSTABLE_FEATURES: &[UnstableFeatureDefinition] = &[
     flag_name: "unstable-temporal",
     help_text: "Enable unstable Temporal API",
     show_in_help: false,
-    id: 21,
+    id: 22,
     kind: UnstableFeatureKind::Runtime,
   },
   UnstableFeatureDefinition {
@@ -188,7 +196,7 @@ pub static UNSTABLE_FEATURES: &[UnstableFeatureDefinition] = &[
     flag_name: "unstable-unsafe-proto",
     help_text: "Enable unsafe __proto__ support. This is a security risk.",
     show_in_help: true,
-    id: 22,
+    id: 23,
     kind: UnstableFeatureKind::Runtime,
   },
   UnstableFeatureDefinition {
@@ -196,7 +204,7 @@ pub static UNSTABLE_FEATURES: &[UnstableFeatureDefinition] = &[
     flag_name: "unstable-vsock",
     help_text: "Enable unstable VSOCK APIs",
     show_in_help: false,
-    id: 23,
+    id: 24,
     kind: UnstableFeatureKind::Runtime,
   },
   UnstableFeatureDefinition {
@@ -204,7 +212,7 @@ pub static UNSTABLE_FEATURES: &[UnstableFeatureDefinition] = &[
     flag_name: "unstable-webgpu",
     help_text: "Enable unstable WebGPU APIs",
     show_in_help: true,
-    id: 24,
+    id: 25,
     kind: UnstableFeatureKind::Runtime,
   },
   UnstableFeatureDefinition {
@@ -212,13 +220,14 @@ pub static UNSTABLE_FEATURES: &[UnstableFeatureDefinition] = &[
     flag_name: "unstable-worker-options",
     help_text: "Enable unstable Web Worker APIs",
     show_in_help: true,
-    id: 25,
+    id: 26,
     kind: UnstableFeatureKind::Runtime,
   },
 ];
 pub struct UnstableEnvVarNames {
   pub bare_node_builtins: &'static str,
   pub lazy_dynamic_imports: &'static str,
+  pub legacy_abort: &'static str,
   pub lockfile_v5: &'static str,
   pub npm_lazy_caching: &'static str,
   pub raw_imports: &'static str,
@@ -228,6 +237,7 @@ pub struct UnstableEnvVarNames {
 pub static UNSTABLE_ENV_VAR_NAMES: UnstableEnvVarNames = UnstableEnvVarNames {
   bare_node_builtins: "DENO_UNSTABLE_BARE_NODE_BUILTINS",
   lazy_dynamic_imports: "DENO_UNSTABLE_LAZY_DYNAMIC_IMPORTS",
+  legacy_abort: "DENO_LEGACY_ABORT",
   lockfile_v5: "DENO_UNSTABLE_LOCKFILE_V5",
   npm_lazy_caching: "DENO_UNSTABLE_NPM_LAZY_CACHING",
   raw_imports: "DENO_UNSTABLE_RAW_IMPORTS",

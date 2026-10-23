@@ -422,10 +422,15 @@ impl FlagsExt for Flags {
   }
 
   fn no_legacy_abort(&self) -> bool {
-    self
+    // denext (DENEXT.md item 102): `request.signal` aborts only on a client
+    // disconnect or a timeout, as in Deno 3.0; `--unstable-no-legacy-abort`
+    // is a no-op. `--unstable-legacy-abort` or `DENO_LEGACY_ABORT=1` restore
+    // the legacy abort when the response has been sent.
+    !(self
       .unstable_config
       .features
-      .contains(&String::from("no-legacy-abort"))
+      .contains(&String::from("legacy-abort"))
+      || deno_lib::args::legacy_abort_from_env(&crate::sys::CliSys::default()))
   }
 
   fn otel_config(&self) -> OtelConfig {
@@ -920,6 +925,38 @@ mod tests {
 
   fn flags_from_vec(args: Vec<OsString>) -> Result<Flags, CliError> {
     flags_from_vec_with_initial_cwd(args, None)
+  }
+
+  // denext (DENEXT.md item 102): no legacy request.signal abort by default;
+  // `--unstable-legacy-abort` restores it, `--unstable-no-legacy-abort` is a
+  // no-op.
+  #[test]
+  fn no_legacy_abort_by_default() {
+    if deno_lib::args::legacy_abort_from_env(&crate::sys::CliSys::default()) {
+      return; // DENO_LEGACY_ABORT=1 in the test environment
+    }
+    let flags = flags_from_vec(svec!["deno", "run", "main.ts"]).unwrap();
+    assert!(flags.no_legacy_abort());
+    let flags = flags_from_vec(svec![
+      "deno",
+      "run",
+      "--unstable-no-legacy-abort",
+      "main.ts"
+    ])
+    .unwrap();
+    assert!(flags.no_legacy_abort());
+    let flags = flags_from_vec(svec![
+      "deno",
+      "serve",
+      "--unstable-legacy-abort",
+      "main.ts"
+    ])
+    .unwrap();
+    assert_eq!(
+      flags.unstable_config.features,
+      vec!["legacy-abort".to_string()]
+    );
+    assert!(!flags.no_legacy_abort());
   }
 
   /// The bare-run fast path in `flags_from_vec_with_initial_cwd` bypasses the

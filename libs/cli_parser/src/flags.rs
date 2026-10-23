@@ -1062,8 +1062,11 @@ pub struct Flags {
   pub permissions: PermissionFlags,
   pub allow_scripts: PackagesAllowedScripts,
   pub deny_scripts: Vec<PackageReq>,
-  /// `--jail-scripts`: approved lifecycle scripts run confined.
+  /// `--jail-scripts`: approved lifecycle scripts run confined (already the
+  /// default).
   pub jail_scripts: bool,
+  /// `--no-jail-scripts`: approved lifecycle scripts run unconfined.
+  pub no_jail_scripts: bool,
   /// `--allow-low-downloads[=<names>]`: `Some(empty)` allows every package.
   pub allow_low_downloads: Option<Vec<String>>,
   pub permission_set: Option<String>,

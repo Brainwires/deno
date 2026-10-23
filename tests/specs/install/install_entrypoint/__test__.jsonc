@@ -12,7 +12,7 @@
     "allow_scripts": {
       "steps": [
         {
-          "args": "install --allow-scripts --node-modules-dir=auto --entrypoint lifecycle.ts",
+          "args": "install --allow-scripts --no-jail-scripts --node-modules-dir=auto --entrypoint lifecycle.ts",
           "output": "lifecycle.out"
         }
       ]

@@ -4,7 +4,7 @@
     "node_gyp": {
       "steps": [
         {
-          "args": "cache --allow-scripts=npm:@denotest/node-addon main.js",
+          "args": "cache --allow-scripts=npm:@denotest/node-addon --no-jail-scripts main.js",
           "output": "[WILDCARD]Initialize @denotest/node-addon@1.0.0: running 'install' script\n[WILDCARD]"
         },
         {
@@ -31,7 +31,7 @@
           // node-gyp in a lifecycle script is the pinned one from npm, which
           // the test registry doesn't have: the script fails, as npm's would
           // fail without a working node-gyp (it used to warn and succeed)
-          "args": "cache --allow-scripts implicit_node_gyp.js",
+          "args": "cache --allow-scripts --no-jail-scripts implicit_node_gyp.js",
           "output": "node_gyp_not_found.out",
           "exitCode": 1
         }
@@ -46,7 +46,7 @@
         },
         {
           // now run scripts
-          "args": "cache --allow-scripts all_lifecycles.js",
+          "args": "cache --allow-scripts --no-jail-scripts all_lifecycles.js",
           // this test package covers running preinstall, install, and postinstall scripts
           // it also exercises running bin packages (esbuild in this case), using `node` in a script
           // (with and without node-only CLI flags), and using `npx` in a script
@@ -63,7 +63,7 @@
         },
         {
           // now run scripts
-          "args": "run --allow-scripts all_lifecycles.js",
+          "args": "run --allow-scripts --no-jail-scripts all_lifecycles.js",
           // this test package covers running preinstall, install, and postinstall scripts
           // it also exercises running bin packages (esbuild in this case), using `node` in a script
           // (with and without node-only CLI flags), and using `npx` in a script
@@ -144,7 +144,7 @@
           // bin called `say-hello` as well. `@denotest/says-hello-on-install` wins (gets put into
           // node_modules/.bin/say-hello) because it's closer in the dependency tree, but when
           // we run the install script, we should use the correct binary (relative to the package)
-          "args": "cache --allow-scripts conflicting_bin.js",
+          "args": "cache --allow-scripts --no-jail-scripts conflicting_bin.js",
           "output": "conflicting_bin.out"
         },
         {
@@ -165,7 +165,7 @@
         },
         {
           "if": "mac",
-          "args": "cache --allow-scripts fsevents.js",
+          "args": "cache --allow-scripts --no-jail-scripts fsevents.js",
           "output": ""
         }
       ]
@@ -177,7 +177,7 @@
           "output": ""
         },
         {
-          "args": "cache --allow-scripts --node-modules-dir=auto no_deno_json.js",
+          "args": "cache --allow-scripts --no-jail-scripts --node-modules-dir=auto no_deno_json.js",
           "output": "no_deno_json.out"
         }
       ]
@@ -189,7 +189,7 @@
           "output": ""
         },
         {
-          "args": "cache --allow-scripts --node-modules-dir=auto conflicting_bin.js",
+          "args": "cache --allow-scripts --no-jail-scripts --node-modules-dir=auto conflicting_bin.js",
           "output": "conflicting_bin.out"
         }
       ]

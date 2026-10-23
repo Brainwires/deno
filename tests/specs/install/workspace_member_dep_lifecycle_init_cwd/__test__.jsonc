@@ -1,7 +1,10 @@
 {
   "tempDir": true,
   "steps": [
-    { "args": "install --allow-scripts", "output": "install.out" },
+    {
+      "args": "install --allow-scripts --no-jail-scripts",
+      "output": "install.out"
+    },
     { "args": "run -A check.ts", "output": "check.out" }
   ]
 }

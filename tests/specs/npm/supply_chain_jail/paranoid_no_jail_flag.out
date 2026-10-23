@@ -1,0 +1,1 @@
+[WILDCARD]`paranoid` is on, but --no-jail-scripts weakens it. Remove --no-jail-scripts (paranoid sets jail-scripts=true), or turn paranoid off.

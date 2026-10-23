@@ -835,9 +835,21 @@ impl CliFactory {
   ) -> Result<Option<Arc<crate::supply_chain::jail::JailConfig>>, AnyError> {
     let cli_options = self.cli_options()?;
     let (npmrc, npmrc_path) = self.workspace_factory()?.npmrc_with_path()?;
+    // denext: on by default (DENEXT.md item 103); `--no-jail-scripts` or
+    // `jail-scripts=false` turn it off, never under `paranoid`
+    if cli_options.no_jail_scripts_flag() {
+      if npmrc.supply_chain.paranoid {
+        deno_core::anyhow::bail!(
+          "`paranoid` is on, but --no-jail-scripts weakens it. Remove --no-jail-scripts (paranoid sets jail-scripts=true), or turn paranoid off."
+        );
+      }
+      return Ok(None);
+    }
     if !npmrc.supply_chain.jail_scripts && !cli_options.jail_scripts_flag() {
       return Ok(None);
     }
+    let explicit = npmrc.supply_chain.jail_scripts_explicit
+      || cli_options.jail_scripts_flag();
     let supply_chain = cli_options.workspace().supply_chain()?;
     let mut project_dirs = vec![cli_options.workspace().root_dir_path()];
     let initial_cwd = cli_options.initial_cwd().to_path_buf();
@@ -846,6 +858,7 @@ impl CliFactory {
     }
     Ok(Some(Arc::new(crate::supply_chain::jail::JailConfig::new(
       npmrc.supply_chain.paranoid,
+      explicit,
       supply_chain.jail_net.unwrap_or(false),
       supply_chain.jail_packages,
       &project_dirs,

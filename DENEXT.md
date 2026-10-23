@@ -1074,7 +1074,8 @@ where the changes are discussed.
     when it was compiled with the flag or with `"unstable": ["no-legacy-abort"]`
     in its config. The setting now comes from the metadata, so the compiled app
     behaves as `deno run` with it. Test: the `compile::no_legacy_abort` spec
-    (the flag, the config, and without it).
+    (the flag, the config, and without it). Since item 102 the new behavior is
+    the default and the metadata carries the opt-out, `legacy-abort`, instead.
 
 37. **Spellcheck on Linux CEF** (from `denext.21`; laufey `integration/denext21`
     `df1d8c8`, no runtime API). The Linux CEF host never lets Chromium download
@@ -2728,11 +2729,12 @@ where the changes are discussed.
     issue, no pull request). An approved dependency's lifecycle script ran with
     the user's whole environment (`GITHUB_TOKEN`, `NPM_TOKEN`, `SSH_AUTH_SOCK`,
     ...), the real HOME, and a `node` that is `deno run -A`; item 54 put that
-    `node` (and `node-gyp`) on `PATH` for every install. Opt-in for now:
+    `node` (and `node-gyp`) on `PATH` for every install. Introduced opt-in:
     `--jail-scripts`, `jail-scripts=true` in `.npmrc`
     (`npm_config_jail_scripts`), or deno.json
     `"supplyChain": { "jailScripts": true }`; `paranoid` (item 86) turns it on.
-    A jailed script runs in its own process
+    On by default since item 103 (`--no-jail-scripts` / `jail-scripts=false` to
+    opt out). A jailed script runs in its own process
     (`deno __deno_internal_jailed_lifecycle_script`, the script and its bins
     read from stdin, then an empty stdin) with:
     - an allow-listed environment: `PATH`, terminal and locale, `CI`, compiler
@@ -3595,8 +3597,100 @@ where the changes are discussed.
      covered by laufey's downloads unit test and native e2e battery (a
      custom-scheme step) and this fork's `denext runtime` e2e.
 
+102. **`feat(ext/http)`: `request.signal` aborts only on a disconnect or a
+     timeout, by default** (`feat/deno3-default-flips`, for runtime
+     `3.0.0-rc.5`; `runtime/features/data.rs`, `cli/args/flags.rs`,
+     `cli/args/mod.rs`, `cli/lib/args.rs`, `cli/rt/run.rs`,
+     `runtime/worker_bootstrap.rs`, `ext/http/00_serve.ts`). Adapted from
+     [denoland/deno#35733](https://github.com/denoland/deno/pull/35733) (open,
+     for Deno 3.0), the user's decision of 2026-10-22. `Deno.serve` aborted
+     `request.signal` when the handler's response had been sent, so code that
+     ties work to the signal (Vite's `http-proxy`, `http-proxy-middleware`, a
+     `fetch` forwarded with `signal: req.signal`) saw an `AbortError` on every
+     successful request (denoland/deno#28850). The fixed behavior was opt-in as
+     `--unstable-no-legacy-abort`; it is now the default for `deno run`,
+     `serve`, `test`, workers and compiled programs (item 36): the signal fires
+     only when the client disconnects or the request times out. To learn that a
+     response was delivered, use the handler's `info.completed` promise.
+     - `--unstable-no-legacy-abort` and `"unstable": ["no-legacy-abort"]` are
+       accepted and do nothing (hidden from `--help`), as upstream's PR does.
+     - **The opt-out** (upstream's PR has none; kept for code that relied on the
+       abort as a completion signal): `--unstable-legacy-abort`,
+       `"unstable": ["legacy-abort"]` in deno.json, or `DENO_LEGACY_ABORT=1` in
+       the environment. A program compiled with the flag or the config entry
+       keeps it, and a compiled program run with `DENO_LEGACY_ABORT=1` gets it
+       too.
+     - The legacy-behavior warning on the first request (denoland/deno#34397) is
+       gone: legacy mode is now something you ask for. An embedder of
+       `deno_runtime` gets the new default from `BootstrapOptions::default()`
+       and can still set `no_legacy_abort: false`.
+
+     Tests: `httpServerSignalCancelled`,
+     `httpServerSignalNotAbortedOnSuccessfulRequest` and
+     `httpServerLegacyAbortOptOut` (`tests/unit/serve_test.ts`: the default, the
+     no-op flag, the opt-out flag and `DENO_LEGACY_ABORT=1` / `=0`, no notice);
+     `no_legacy_abort_by_default` (`cli/args/flags.rs`); spec
+     `serve/request_signal_streaming` (`default`, and `legacy_abort` aborting
+     only after the streamed body); spec `compile/no_legacy_abort` (the default,
+     the no-op flag and config entry, the opt-out as a flag, a config entry and
+     `DENO_LEGACY_ABORT=1` at run time).
+
+103. **`feat(npm)`: lifecycle scripts are jailed by default** (`jail-scripts`
+     on; `feat/deno3-default-flips`, for runtime `3.0.0-rc.5`;
+     `libs/npmrc/supply_chain.rs`, `cli/factory.rs`, `cli/supply_chain/jail.rs`,
+     `libs/cli_parser`). The user's decision of 2026-10-22, the "default-on only
+     in a future major" step of item 83 (denoland/deno#35714). An approved
+     dependency's lifecycle script (`--allow-scripts`, `allowScripts`) now runs
+     in item 83's jail unless something turns it off: a scrubbed environment, a
+     scratch HOME, writes only beneath node_modules and the package's `write`
+     paths, no credential files, no network unless allowed, every `deno` it
+     starts clamped. The project's own scripts (item 54) are still not jailed.
+     - **The opt-out**: `--no-jail-scripts` (on every command that takes
+       `--allow-scripts`; it conflicts with `--jail-scripts`),
+       `jail-scripts=false` in `.npmrc` or `npm_config_jail_scripts=false`, or
+       deno.json `"supplyChain": { "jailScripts": false }`. Where sources
+       disagree, item 86's rule still holds (the stricter value, on, wins), so a
+       `.npmrc` can't quietly turn off what deno.json asks for; the command line
+       flag, the user's own request, overrides the files. Under `paranoid` every
+       opt-out is an error, `--no-jail-scripts` included.
+     - `--jail-scripts` stays (it is the default now); per-package exceptions
+       (`jailScripts.packages`) and `jailScripts.net` are unchanged.
+     - Where the OS can't confine the script's other programs (Windows; Linux
+       without Landlock; macOS without a working `sandbox-exec`), a default jail
+       applies the environment, HOME and Deno clamp quietly; the warning is kept
+       for a jail that was asked for (`--jail-scripts`, `jail-scripts=true`, an
+       object `jailScripts`, `paranoid`), so every Windows install doesn't print
+       it.
+     - `npm_config_user_agent` now passes into the jail (it names the package
+       manager; the `user` in its name had dropped it with the credential keys).
+
+     What changes for an app: a dependency's script that writes outside
+     node_modules (to `$INIT_CWD`, the project, the system temp directory),
+     reads a token from the environment, downloads at install time (node-gyp's
+     headers, a prebuilt binary from an undeclared host) or runs `npx` now fails
+     unless the package gets an exception or the jail is turned off. Spec tests
+     that exercise exactly that unjailed behavior pass `--no-jail-scripts`
+     (`npm/lifecycle_scripts/argument`,
+     `npm/lifecycle_scripts/hoisted_dep_bins`,
+     `npm/lifecycle_scripts_node_compat`,
+     `install/workspace_member_dep_lifecycle_init_cwd`, `compile/node_api`,
+     `compile/bundle/native_addon`, `compile/self_extracting/npm_and_jsr`, and
+     `install/install_entrypoint`, `npm/lifecycle_scripts/config/allow_all`
+     through its deno.json, and the `approve_scripts_*` tests
+     (`tests/integration/pm_tests.rs`) through `npm_config_jail_scripts=false`:
+     they build a native addon with node-gyp, write to `$INIT_CWD` or the
+     project, or run `npx`).
+
+     Tests: `npm/supply_chain_jail` (`jailed_by_default`; the opt-out restoring
+     the old behavior as `--no-jail-scripts` (`not_jailed`, `not_jailed_linux`),
+     as the `.npmrc` key's environment form (`not_jailed_by_npmrc_key`) and in
+     deno.json (`not_jailed_by_deno_json`); `paranoid_refuses_no_jail_scripts`),
+     `defaults`, `paranoid_turns_every_member_on` and `jail_scripts_opt_out`
+     (`libs/npmrc/supply_chain.rs`), `jail_scripts_and_allow_low_downloads`
+     (`libs/cli_parser`), `env_allow_list` (`cli/supply_chain/jail.rs`).
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
-64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-101) are what the prebuilt
+64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102) are what the prebuilt
 `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
 in the branch too, but a stock CLI does not run them; denext's own launcher
@@ -3641,26 +3735,26 @@ Items 83-86. Each `.npmrc` key also reads `npm_config_<key>` /
 `.npmrc` files, the environment, deno.json) set a key, the stricter value wins;
 under `paranoid`, a weaker one is an error.
 
-| `.npmrc` key                 | deno.json `supplyChain`                                            | Flag                              | Default | What                                                                                                                                    |
-| ---------------------------- | ------------------------------------------------------------------ | --------------------------------- | ------- | --------------------------------------------------------------------------------------------------------------------------------------- |
-| `paranoid`                   | `paranoid`                                                         |                                   | `false` | Every gate on and failing closed (item 86).                                                                                             |
-| `jail-scripts`               | `jailScripts`: `true`, or `{ net, packages }`                      | `--jail-scripts`                  | `false` | Approved dependencies' lifecycle scripts run confined (item 83).                                                                        |
-|                              | `jailScripts.net`                                                  |                                   | `false` | Network for every jailed script.                                                                                                        |
-|                              | `jailScripts.packages.<name>`: `{ env, write, net }`               |                                   |         | A package's exceptions: environment variables passed through, extra writable directories (relative to deno.json), network.              |
-| `advisory-check`             | `advisoryCheck`: `"on"` / `"off"` / `"required"`                   |                                   | `on`    | Refuse versions OSV lists as malicious; `required` also refuses when OSV can't be reached (item 84).                                    |
-| `low-download-check`         | `lowDownloadCheck`: `"off"` / `"warn"` / `"prompt"` / `"required"` |                                   | `warn`  | What `deno add` does below the threshold: warn and add; ask in a terminal and refuse without one; also refuse unknown counts (item 85). |
-| `low-download-threshold`     | `lowDownloadThreshold`                                             |                                   | `1000`  | Weekly downloads below which the low-download check applies; `0` turns it off (item 85).                                                |
-| `allowed-unpopular-packages` | `allowLowDownloads`                                                | `--allow-low-downloads[=<names>]` |         | Names (or `@scope/*`, `prefix*`) `deno add` adds whatever their counts; the flag without names allows all (not under paranoid).         |
-| `trust-policy`               |                                                                    |                                   | `off`   | `paranoid` sets `no-downgrade`.                                                                                                         |
+| `.npmrc` key                 | deno.json `supplyChain`                                            | Flag                                   | Default | What                                                                                                                                    |
+| ---------------------------- | ------------------------------------------------------------------ | -------------------------------------- | ------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| `paranoid`                   | `paranoid`                                                         |                                        | `false` | Every gate on and failing closed (item 86).                                                                                             |
+| `jail-scripts`               | `jailScripts`: `true` / `false`, or `{ net, packages }`            | `--jail-scripts` / `--no-jail-scripts` | `true`  | Approved dependencies' lifecycle scripts run confined (item 83; on by default, item 103). `false` opts out, not under `paranoid`.       |
+|                              | `jailScripts.net`                                                  |                                        | `false` | Network for every jailed script.                                                                                                        |
+|                              | `jailScripts.packages.<name>`: `{ env, write, net }`               |                                        |         | A package's exceptions: environment variables passed through, extra writable directories (relative to deno.json), network.              |
+| `advisory-check`             | `advisoryCheck`: `"on"` / `"off"` / `"required"`                   |                                        | `on`    | Refuse versions OSV lists as malicious; `required` also refuses when OSV can't be reached (item 84).                                    |
+| `low-download-check`         | `lowDownloadCheck`: `"off"` / `"warn"` / `"prompt"` / `"required"` |                                        | `warn`  | What `deno add` does below the threshold: warn and add; ask in a terminal and refuse without one; also refuse unknown counts (item 85). |
+| `low-download-threshold`     | `lowDownloadThreshold`                                             |                                        | `1000`  | Weekly downloads below which the low-download check applies; `0` turns it off (item 85).                                                |
+| `allowed-unpopular-packages` | `allowLowDownloads`                                                | `--allow-low-downloads[=<names>]`      |         | Names (or `@scope/*`, `prefix*`) `deno add` adds whatever their counts; the flag without names allows all (not under paranoid).         |
+| `trust-policy`               |                                                                    |                                        | `off`   | `paranoid` sets `no-downgrade`.                                                                                                         |
 
 What each gate does by default, and under `paranoid`:
 
-| Gate                       | Default                                                     | `paranoid`                                                    |
-| -------------------------- | ----------------------------------------------------------- | ------------------------------------------------------------- |
-| Malicious versions (OSV)   | On: refused; OSV unreachable warns and installs             | Refused; OSV unreachable refuses                              |
-| Low downloads (`deno add`) | Warns with the count and how to allow it; adds              | Asks in a terminal, refuses without one and on unknown counts |
-| Lifecycle scripts          | Approved dependencies' scripts run unconfined (opt-in jail) | Jailed; not run where the OS can't confine them               |
-| Trust policy               | `off`                                                       | `no-downgrade`                                                |
+| Gate                       | Default                                          | `paranoid`                                                    |
+| -------------------------- | ------------------------------------------------ | ------------------------------------------------------------- |
+| Malicious versions (OSV)   | On: refused; OSV unreachable warns and installs  | Refused; OSV unreachable refuses                              |
+| Low downloads (`deno add`) | Warns with the count and how to allow it; adds   | Asks in a terminal, refuses without one and on unknown counts |
+| Lifecycle scripts          | Jailed (item 103); `jail-scripts=false` opts out | Jailed; not run where the OS can't confine them               |
+| Trust policy               | `off`                                            | `no-downgrade`                                                |
 
 The services: `https://api.osv.dev/v1/querybatch` (no account) and
 `https://api.npmjs.org/downloads/point/last-week/<name>`, through Deno's HTTP

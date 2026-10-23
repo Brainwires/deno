@@ -60,12 +60,13 @@
         }
       ]
     },
-    // without jail-scripts, the same script sees and writes everything
+    // without jail-scripts (`--no-jail-scripts`, the opt-out of the default,
+    // DENEXT.md item 103), the same script sees and writes everything
     "not_jailed": {
       "steps": [
         {
           "cwd": "control",
-          "args": "install --allow-scripts=npm:@denotest/jail-control-probe",
+          "args": "install --allow-scripts=npm:@denotest/jail-control-probe --no-jail-scripts",
           "output": "[WILDCARD]"
         },
         {
@@ -82,7 +83,7 @@
       "steps": [
         {
           "cwd": "control",
-          "args": "install --allow-scripts=npm:@denotest/jail-control-probe",
+          "args": "install --allow-scripts=npm:@denotest/jail-control-probe --no-jail-scripts",
           "output": "[WILDCARD]"
         },
         {
@@ -91,6 +92,61 @@
           "output": "not_jailed_linux.out"
         }
       ]
+    },
+    // DENEXT.md item 103: jailed without being asked
+    "jailed_by_default": {
+      "if": "unix",
+      "steps": [
+        {
+          "cwd": "control",
+          "args": "install --allow-scripts=npm:@denotest/jail-control-probe",
+          "output": "[WILDCARD]"
+        },
+        {
+          "cwd": "control",
+          "args": "run -A check.mjs jail-control-probe",
+          "output": "jailed_control.out"
+        }
+      ]
+    },
+    // the opt-out as an .npmrc key (its environment form) restores the old
+    // behavior
+    "not_jailed_by_npmrc_key": {
+      "steps": [
+        {
+          "cwd": "control",
+          "args": "install --allow-scripts=npm:@denotest/jail-control-probe",
+          "envs": { "npm_config_jail_scripts": "false" },
+          "output": "[WILDCARD]"
+        },
+        {
+          "cwd": "control",
+          "args": "run -A check.mjs jail-control-probe",
+          "output": "not_jailed.out"
+        }
+      ]
+    },
+    // ... and in deno.json (`"supplyChain": { "jailScripts": false }`)
+    "not_jailed_by_deno_json": {
+      "steps": [
+        {
+          "cwd": "optout",
+          "args": "install --allow-scripts=npm:@denotest/jail-control-probe",
+          "output": "[WILDCARD]"
+        },
+        {
+          "cwd": "optout",
+          "args": "run -A check.mjs jail-control-probe",
+          "output": "not_jailed.out"
+        }
+      ]
+    },
+    // paranoid doesn't take the opt-out
+    "paranoid_refuses_no_jail_scripts": {
+      "cwd": "paranoid",
+      "args": "install --allow-scripts=npm:@denotest/jail-control-probe --no-jail-scripts",
+      "output": "paranoid_no_jail_flag.out",
+      "exitCode": 1
     },
     // the same with npm_config_jail_scripts (an .npmrc key's environment form)
     "jailed_by_npmrc_key": {

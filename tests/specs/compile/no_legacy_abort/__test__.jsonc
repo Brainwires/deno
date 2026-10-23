@@ -1,8 +1,22 @@
 {
   "tempDir": true,
   "tests": {
-    // `--unstable-no-legacy-abort` is carried into the binary.
-    "flag": {
+    // DENEXT.md item 102: no legacy abort by default.
+    "default": {
+      "steps": [
+        {
+          "args": "compile -A --output out main.ts",
+          "output": "[WILDCARD]"
+        },
+        {
+          "commandName": "./out",
+          "args": [],
+          "output": "no_legacy.out"
+        }
+      ]
+    },
+    // `--unstable-no-legacy-abort` is a no-op now.
+    "deprecated_flag": {
       "steps": [
         {
           "args": "compile --unstable-no-legacy-abort -A --output out main.ts",
@@ -16,7 +30,7 @@
       ]
     },
     // So is `"unstable": ["no-legacy-abort"]` in the config file.
-    "config": {
+    "deprecated_config": {
       "steps": [
         {
           "cwd": "config",
@@ -31,8 +45,38 @@
         }
       ]
     },
-    // Without it the compiled app keeps the legacy behavior and its notice.
-    "legacy": {
+    // The opt-out, `--unstable-legacy-abort`, is carried into the binary.
+    "legacy_flag": {
+      "steps": [
+        {
+          "args": "compile --unstable-legacy-abort -A --output out main.ts",
+          "output": "[WILDCARD]"
+        },
+        {
+          "commandName": "./out",
+          "args": [],
+          "output": "legacy.out"
+        }
+      ]
+    },
+    // So is `"unstable": ["legacy-abort"]` in the config file.
+    "legacy_config": {
+      "steps": [
+        {
+          "cwd": "config_legacy",
+          "args": "compile -A --output out main.ts",
+          "output": "[WILDCARD]"
+        },
+        {
+          "cwd": "config_legacy",
+          "commandName": "./out",
+          "args": [],
+          "output": "legacy.out"
+        }
+      ]
+    },
+    // A compiled app run with DENO_LEGACY_ABORT=1 gets the legacy abort too.
+    "legacy_env": {
       "steps": [
         {
           "args": "compile -A --output out main.ts",
@@ -41,6 +85,7 @@
         {
           "commandName": "./out",
           "args": [],
+          "envs": { "DENO_LEGACY_ABORT": "1" },
           "output": "legacy.out"
         }
       ]

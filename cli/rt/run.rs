@@ -1758,15 +1758,17 @@ pub async fn run_with_options(
       Permissions::from_options(desc_parser.as_ref(), &permissions)?;
     PermissionsContainer::new(desc_parser, permissions)
   };
-  // `--unstable-no-legacy-abort` (or `"unstable": ["no-legacy-abort"]` in
-  // the config) at compile time: the compiled app's `Deno.serve` behaves as
-  // `deno run` with the flag would (no legacy request.signal abort, no notice
-  // on the first request).
-  let no_legacy_abort = metadata
+  // denext (DENEXT.md item 102): a compiled app's `request.signal` is free of
+  // the legacy abort on a sent response, as `deno run`'s, unless it was
+  // compiled with `--unstable-legacy-abort` (or `"unstable": ["legacy-abort"]`
+  // in the config), or runs with `DENO_LEGACY_ABORT=1`.
+  // `--unstable-no-legacy-abort` is a no-op.
+  let no_legacy_abort = !(metadata
     .unstable_config
     .features
     .iter()
-    .any(|f| f == "no-legacy-abort");
+    .any(|f| f == "legacy-abort")
+    || deno_lib::args::legacy_abort_from_env(&sys));
   let feature_checker = Arc::new({
     let mut checker = FeatureChecker::default();
     checker.set_exit_cb(Box::new(crate::unstable_exit_cb));

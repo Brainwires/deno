@@ -10,7 +10,7 @@
       "steps": [
         {
           "cwd": "node_e",
-          "args": "install --allow-scripts",
+          "args": "install --allow-scripts --no-jail-scripts",
           "envs": { "PATH": "/usr/bin:/bin" },
           "output": "[WILDCARD]"
         },
@@ -26,7 +26,7 @@
       "steps": [
         {
           "cwd": "node_gyp",
-          "args": "install --allow-scripts",
+          "args": "install --allow-scripts --no-jail-scripts",
           "envs": {
             "PATH": "/usr/bin:/bin",
             "DENO_NODE_GYP": "npm:node-gyp@10.1.0"

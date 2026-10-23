@@ -30,7 +30,6 @@ const {
   serveHttpOnListener,
   serveHttpOnConnection,
   getCachedAbortSignal,
-  resetLegacyAbortWarning,
   // @ts-expect-error TypeScript (as of 3.7) does not support indexing namespaces by symbol
 } = Deno[Deno.internal];
 
@@ -4613,10 +4612,8 @@ for (const delay of ["delay", "nodelay"]) {
   }
 }
 
-// NOTE: This test will start failing when we disable "deno_http/legacy_abort" feature.
-//
 // Test for the internal implementation detail of cached request signals. Ensure that the request's
-// signal is aborted if we try to access it after the request has been completed.
+// signal is NOT aborted if we access it after the request has completed successfully.
 Deno.test(
   { permissions: { net: true } },
   async function httpServerSignalCancelled() {
@@ -4631,10 +4628,11 @@ Deno.test(
     abort();
     await finished;
 
-    // `false` is a semaphore for a signal that should be aborted on creation
-    assertEquals(getCachedAbortSignal(stashedRequest!), false);
-    // Requesting the signal causes it to be materialized
-    assert(stashedRequest!.signal.aborted);
+    // The request completed successfully, so no abort semaphore was recorded
+    // (DENEXT.md item 102: no legacy abort by default)
+    assertEquals(getCachedAbortSignal(stashedRequest!), undefined);
+    // Requesting the signal causes it to be materialized, unaborted
+    assert(!stashedRequest!.signal.aborted);
     // The cached signal is now a full `AbortSignal`
     assertEquals(
       getCachedAbortSignal(stashedRequest!).constructor,
@@ -6511,103 +6509,92 @@ Deno.test(
   },
 );
 
-async function captureLegacyAbortWarnings(
-  fn: () => Promise<void>,
-): Promise<string[]> {
-  resetLegacyAbortWarning();
-  const warnings: string[] = [];
-  const originalWarn = console.warn;
-  console.warn = (...args: unknown[]) => {
-    if (typeof args[0] === "string" && args[0].includes("request.signal")) {
-      warnings.push(args[0]);
-      return;
+// denext (DENEXT.md item 102): `request.signal` no longer aborts when a
+// request completes successfully (the Deno 3.0 default).
+Deno.test(
+  { permissions: { net: true } },
+  async function httpServerSignalNotAbortedOnSuccessfulRequest() {
+    let aborted = false;
+    const { finished, shutdown } = await makeServer((req) => {
+      req.signal.addEventListener("abort", () => {
+        aborted = true;
+      });
+      return new Response("ok");
+    });
+    for (let i = 0; i < 3; i++) {
+      await (await fetch(`http://localhost:${servePort}`)).text();
     }
-    originalWarn(...args);
-  };
-  try {
-    await fn();
-  } finally {
-    console.warn = originalWarn;
-    resetLegacyAbortWarning();
-  }
-  return warnings;
+    await shutdown();
+    await finished;
+    assertEquals(aborted, false);
+  },
+);
+
+// Runs a server in a subprocess and reports whether `request.signal` aborted
+// after a successful response.
+async function signalAbortedAfterSuccess(
+  args: string[],
+  env: Record<string, string> = {},
+): Promise<string> {
+  const subprocessPort = servePort + 1;
+  const code = `
+    let aborted = false;
+    const { promise, resolve } = Promise.withResolvers();
+    const server = Deno.serve({
+      port: ${subprocessPort},
+      handler: (req) => {
+        req.signal.addEventListener("abort", () => {
+          aborted = true;
+        });
+        return new Response("ok");
+      },
+      onListen: resolve,
+    });
+    await promise;
+    await (await fetch("http://localhost:${subprocessPort}")).text();
+    await new Promise((r) => setTimeout(r, 100));
+    console.log(aborted ? "ABORTED" : "NOT ABORTED");
+    await server.shutdown();
+  `;
+  const { code: exitCode, stdout, stderr } = await new Deno.Command(
+    Deno.execPath(),
+    {
+      args: ["eval", ...args, code],
+      env,
+      stdout: "piped",
+      stderr: "piped",
+    },
+  ).output();
+  const errText = new TextDecoder().decode(stderr);
+  assertEquals(exitCode, 0, errText);
+  // legacy mode is an explicit opt-out now: no deprecation notice
+  assert(!errText.includes("request.signal"), errText);
+  return new TextDecoder().decode(stdout).trim();
 }
 
 Deno.test(
-  { permissions: { net: true } },
-  async function httpServerLegacyAbortWarningFiresOnce() {
-    const warnings = await captureLegacyAbortWarnings(async () => {
-      const { finished, shutdown } = await makeServer((req) => {
-        req.signal.addEventListener("abort", () => {});
-        return new Response("ok");
-      });
-      for (let i = 0; i < 3; i++) {
-        await (await fetch(`http://localhost:${servePort}`)).text();
-      }
-      await shutdown();
-      await finished;
-    });
-    assertEquals(warnings.length, 1);
-    assertStringIncludes(warnings[0], "request.signal");
-    assertStringIncludes(warnings[0], "--unstable-no-legacy-abort");
-  },
-);
-
-Deno.test(
-  { permissions: { net: true } },
-  async function httpServerLegacyAbortWarningSkipsWhenSignalUntouched() {
-    const warnings = await captureLegacyAbortWarnings(async () => {
-      const { finished, shutdown } = await makeServer(() => {
-        return new Response("ok");
-      });
-      for (let i = 0; i < 3; i++) {
-        await (await fetch(`http://localhost:${servePort}`)).text();
-      }
-      await shutdown();
-      await finished;
-    });
-    assertEquals(warnings.length, 0);
-  },
-);
-
-Deno.test(
   { permissions: { net: true, run: true, read: true } },
-  async function httpServerLegacyAbortWarningSilentUnderUnstableFlag() {
-    const subprocessPort = servePort + 1;
-    const code = `
-      const originalWarn = console.warn;
-      let warned = false;
-      console.warn = (...args) => {
-        if (typeof args[0] === "string" && args[0].includes("request.signal")) {
-          warned = true;
-        }
-        originalWarn(...args);
-      };
-      const { promise, resolve } = Promise.withResolvers();
-      const server = Deno.serve({
-        port: ${subprocessPort},
-        handler: (req) => {
-          req.signal.addEventListener("abort", () => {});
-          return new Response("ok");
-        },
-        onListen: resolve,
-      });
-      await promise;
-      for (let i = 0; i < 3; i++) {
-        await (await fetch("http://localhost:${subprocessPort}")).text();
-      }
-      console.log(warned ? "WARNED" : "QUIET");
-      await server.shutdown();
-    `;
-    const command = new Deno.Command(Deno.execPath(), {
-      args: ["eval", "--unstable-no-legacy-abort", code],
-      stdout: "piped",
-      stderr: "piped",
-    });
-    const { code: exitCode, stdout } = await command.output();
-    const output = new TextDecoder().decode(stdout);
-    assertEquals(exitCode, 0);
-    assertStringIncludes(output, "QUIET");
-    assert(!output.includes("WARNED"));
+  async function httpServerLegacyAbortOptOut() {
+    // the default
+    assertEquals(await signalAbortedAfterSuccess([]), "NOT ABORTED");
+    // the former opt-in is a no-op
+    assertEquals(
+      await signalAbortedAfterSuccess(["--unstable-no-legacy-abort"]),
+      "NOT ABORTED",
+    );
+    // the opt-out restores the legacy abort, as a flag ...
+    assertEquals(
+      await signalAbortedAfterSuccess(["--unstable-legacy-abort"]),
+      "ABORTED",
+    );
+    // ... and as an environment variable
+    assertEquals(
+      await signalAbortedAfterSuccess([], { DENO_LEGACY_ABORT: "1" }),
+      "ABORTED",
+    );
+    assertEquals(
+      await signalAbortedAfterSuccess([], { DENO_LEGACY_ABORT: "0" }),
+      "NOT ABORTED",
+    );
   },
 );

@@ -1057,6 +1057,7 @@ fn unstable_args_parse(result: &ParseResult, flags: &mut Flags) {
     ("unstable-fs", None),
     ("unstable-http", None),
     ("unstable-kv", None),
+    ("unstable-legacy-abort", None),
     ("unstable-lockfile-v5", None),
     ("unstable-net", None),
     ("unstable-no-legacy-abort", None),
@@ -1091,6 +1092,9 @@ fn allow_scripts_arg_parse(
 ) -> Result<(), CliError> {
   if result.get_bool("jail-scripts") {
     flags.jail_scripts = true;
+  }
+  if result.get_bool("no-jail-scripts") {
+    flags.no_jail_scripts = true;
   }
   if let Some(values) = result.get_many("allow-low-downloads") {
     let mut names = Vec::new();

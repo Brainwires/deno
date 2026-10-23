@@ -8,7 +8,7 @@
     "install_with_dep_bins": {
       "steps": [
         {
-          "args": "install --allow-scripts",
+          "args": "install --allow-scripts --no-jail-scripts",
           "output": "install.out"
         },
         {

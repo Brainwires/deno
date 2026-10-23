@@ -222,6 +222,10 @@ pub fn clamp_permissions(
 #[derive(Debug)]
 pub struct JailConfig {
   pub paranoid: bool,
+  /// Asked for (`--jail-scripts`, `jail-scripts=true`, `paranoid`) rather
+  /// than on by default (DENEXT.md item 103): only then does a platform the
+  /// OS can't confine on get a warning.
+  pub explicit: bool,
   /// `supplyChain.jailScripts.net`
   pub net: bool,
   pub packages: BTreeMap<String, JailPackageConfig>,
@@ -234,6 +238,7 @@ pub struct JailConfig {
 impl JailConfig {
   pub fn new(
     paranoid: bool,
+    explicit: bool,
     net: bool,
     packages: BTreeMap<String, JailPackageConfig>,
     project_dirs: &[PathBuf],
@@ -260,6 +265,7 @@ impl JailConfig {
       .collect();
     Self {
       paranoid,
+      explicit,
       net,
       packages,
       project_secret_files,
@@ -500,6 +506,12 @@ fn keep_env_var(name: &str, net: bool) -> bool {
   if lower.starts_with("npm_package_") || lower.starts_with("npm_lifecycle_") {
     return true;
   }
+  // the package manager's identity (`deno/<version> npm/? ...`), which
+  // install scripts read to tell package managers apart; it names no
+  // credential despite the `user` in its name
+  if lower == "npm_config_user_agent" {
+    return true;
+  }
   if lower.starts_with("npm_config_") {
     // `npm_config_//registry/:_authToken` and friends carry credentials
     const SECRET: &[&str] = &[
@@ -590,9 +602,13 @@ pub async fn run_jailed_script(
         s.task_name
       );
     }
-    if !config
-      .warned
-      .swap(true, std::sync::atomic::Ordering::SeqCst)
+    // on by default, the jail stays quiet where the OS can't confine: the
+    // environment, HOME and the Deno clamp still apply, and a warning on
+    // every install there would be noise the user can't act on
+    if config.explicit
+      && !config
+        .warned
+        .swap(true, std::sync::atomic::Ordering::SeqCst)
     {
       log::warn!(
         "{} jail-scripts: {reason}. Lifecycle scripts run with a scrubbed environment and a temporary HOME, and the JavaScript they run through Deno is confined, but other programs they start are not.",
@@ -877,7 +893,13 @@ mod tests {
 
   #[test]
   fn env_allow_list() {
-    for name in ["PATH", "LC_ALL", "npm_package_name", "npm_config_registry"] {
+    for name in [
+      "PATH",
+      "LC_ALL",
+      "npm_package_name",
+      "npm_config_registry",
+      "npm_config_user_agent",
+    ] {
       assert!(keep_env_var(name, false), "{name}");
     }
     for name in [

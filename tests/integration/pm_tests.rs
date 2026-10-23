@@ -316,6 +316,9 @@ fn approve_scripts_basic() {
     .skip_output_check();
   context
     .new_command()
+    // node-lifecycle-scripts writes to $INIT_CWD and runs npx: outside
+    // the default jail (DENEXT.md item 103)
+    .env("npm_config_jail_scripts", "false")
     .args("approve-scripts")
     .with_pty(|mut pty| {
       pty.expect("Select which packages to approve lifecycle scripts for");
@@ -359,6 +362,9 @@ fn approve_scripts_deny_some() {
     .skip_output_check();
   context
     .new_command()
+    // node-lifecycle-scripts writes to $INIT_CWD and runs npx: outside
+    // the default jail (DENEXT.md item 103)
+    .env("npm_config_jail_scripts", "false")
     .args("approve-scripts")
     .with_pty(|mut pty| {
       pty.expect("Select which packages to approve lifecycle scripts for");
@@ -405,6 +411,9 @@ fn approve_scripts_no_lock_explicit_package() {
     .skip_output_check();
   context
     .new_command()
+    // node-lifecycle-scripts writes to $INIT_CWD and runs npx: outside
+    // the default jail (DENEXT.md item 103)
+    .env("npm_config_jail_scripts", "false")
     .args("approve-scripts npm:@denotest/node-lifecycle-scripts")
     .run()
     .assert_matches_text(
@@ -434,6 +443,9 @@ fn approve_scripts_no_lock_detects_packages() {
   // with lifecycle scripts and show the interactive picker.
   context
     .new_command()
+    // node-lifecycle-scripts writes to $INIT_CWD and runs npx: outside
+    // the default jail (DENEXT.md item 103)
+    .env("npm_config_jail_scripts", "false")
     .args("approve-scripts")
     .with_pty(|mut pty| {
       pty.expect("Select which packages to approve lifecycle scripts for");

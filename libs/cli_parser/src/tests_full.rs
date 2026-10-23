@@ -7538,7 +7538,32 @@ fn jail_scripts_and_allow_low_downloads() {
   ])
   .unwrap();
   assert!(flags.jail_scripts);
+  assert!(!flags.no_jail_scripts);
   assert_eq!(flags.allow_low_downloads, None);
+
+  // DENEXT.md item 103: the opt-out of the default jail
+  let flags = flags_from_vec(svec![
+    "deno",
+    "install",
+    "--no-jail-scripts",
+    "--allow-scripts=npm:foo"
+  ])
+  .unwrap();
+  assert!(flags.no_jail_scripts);
+  assert!(!flags.jail_scripts);
+  let flags =
+    flags_from_vec(svec!["deno", "add", "--no-jail-scripts", "npm:foo"])
+      .unwrap();
+  assert!(flags.no_jail_scripts);
+  assert!(
+    flags_from_vec(svec![
+      "deno",
+      "install",
+      "--jail-scripts",
+      "--no-jail-scripts"
+    ])
+    .is_err()
+  );
 
   let flags = flags_from_vec(svec![
     "deno",

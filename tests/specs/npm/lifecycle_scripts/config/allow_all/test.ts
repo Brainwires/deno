@@ -1,3 +1,6 @@
+// The scripts build a native addon and run npx, which the default jail
+// (DENEXT.md item 103) refuses: deno.json opts out with
+// `"supplyChain": { "jailScripts": false }`.
 const kind = Deno.args[0];
 
 switch (kind) {

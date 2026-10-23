@@ -88,6 +88,14 @@ pub static FEATURE_DESCRIPTIONS: &[UnstableFeatureDescription] = &[
     env_var: Some("DENO_UNSTABLE_LAZY_DYNAMIC_IMPORTS"),
   },
   UnstableFeatureDescription {
+    // denext: the opt-out of the Deno 3.0 default (DENEXT.md item 102).
+    name: "legacy-abort",
+    help_text: "Restore the legacy `request.signal` behavior in Deno.serve: abort the signal when the response has been sent, not only when the client disconnects or the request times out.",
+    show_in_help: true,
+    kind: UnstableFeatureKind::Runtime,
+    env_var: Some("DENO_LEGACY_ABORT"),
+  },
+  UnstableFeatureDescription {
     name: "lockfile-v5",
     help_text: "Enable unstable lockfile v5",
     show_in_help: true,
@@ -102,9 +110,13 @@ pub static FEATURE_DESCRIPTIONS: &[UnstableFeatureDescription] = &[
     env_var: None,
   },
   UnstableFeatureDescription {
+    // denext: `request.signal` in Deno.serve no longer aborts on successfully
+    // completed requests by default (DENEXT.md item 102), so this flag is a
+    // no-op kept only for backwards compatibility. `legacy-abort` restores
+    // the old behavior.
     name: "no-legacy-abort",
-    help_text: "Enable abort signal in Deno.serve without legacy behavior. This will not abort the server when the request is handled successfully.",
-    show_in_help: true,
+    help_text: "Deprecated. `request.signal` in Deno.serve no longer aborts on successfully completed requests, so this flag has no effect.",
+    show_in_help: false,
     kind: UnstableFeatureKind::Runtime,
     env_var: None,
   },

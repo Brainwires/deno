@@ -842,9 +842,12 @@ impl CliOptions {
     self.flags.otel_config()
   }
 
+  /// Whether `request.signal` is free of the legacy abort on a sent response:
+  /// the default (DENEXT.md item 102), unless `--unstable-legacy-abort`,
+  /// `"unstable": ["legacy-abort"]` or `DENO_LEGACY_ABORT=1` restore it.
   pub fn no_legacy_abort(&self) -> bool {
     self.flags.no_legacy_abort()
-      || self.workspace().has_unstable("no-legacy-abort")
+      && !self.workspace().has_unstable("legacy-abort")
   }
 
   pub fn env_file_names(
@@ -1766,6 +1769,11 @@ impl CliOptions {
   /// `--jail-scripts`
   pub fn jail_scripts_flag(&self) -> bool {
     self.flags.jail_scripts
+  }
+
+  /// `--no-jail-scripts` (DENEXT.md item 103)
+  pub fn no_jail_scripts_flag(&self) -> bool {
+    self.flags.no_jail_scripts
   }
 
   /// `--allow-low-downloads[=<names>]`

@@ -43,6 +43,13 @@ pub fn has_flag_env_var(sys: &impl EnvVar, name: &str) -> bool {
   }
 }
 
+/// denext (DENEXT.md item 102): `DENO_LEGACY_ABORT=1` restores the legacy
+/// `request.signal` behavior of `Deno.serve` (aborting when the response has
+/// been sent), the environment form of `--unstable-legacy-abort`.
+pub fn legacy_abort_from_env(sys: &impl EnvVar) -> bool {
+  has_flag_env_var(sys, UNSTABLE_ENV_VAR_NAMES.legacy_abort)
+}
+
 /// Reads the node IPC channel configuration that `node:child_process.fork()`
 /// passes to a child process through `NODE_CHANNEL_FD` (and the optional
 /// `NODE_CHANNEL_SERIALIZATION_MODE`), returning the channel fd and
