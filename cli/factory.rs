@@ -1440,6 +1440,7 @@ impl CliFactory {
       serve_host: cli_options.serve_host(),
       otel_config: cli_options.otel_config(),
       no_legacy_abort: cli_options.no_legacy_abort(),
+      idle_trim: cli_options.idle_trim(),
       startup_snapshot: deno_snapshots::CLI_SNAPSHOT,
       residual_lazy_js_sources: deno_snapshots::RESIDUAL_LAZY_JS,
       residual_lazy_esm_sources: deno_snapshots::RESIDUAL_LAZY_ESM,

@@ -850,6 +850,22 @@ impl CliOptions {
       && !self.workspace().has_unstable("legacy-abort")
   }
 
+  /// denext (DENEXT.md item 101): `--unstable-idle-trim`,
+  /// `"unstable": ["idle-trim"]` or `DENO_UNSTABLE_IDLE_TRIM=1`.
+  pub fn idle_trim(&self) -> bool {
+    self
+      .flags
+      .unstable_config
+      .features
+      .iter()
+      .any(|f| f == "idle-trim")
+      || self.workspace().has_unstable("idle-trim")
+      || has_flag_env_var(
+        &CliSys::default(),
+        deno_runtime::UNSTABLE_ENV_VAR_NAMES.idle_trim,
+      )
+  }
+
   pub fn env_file_names(
     &self,
   ) -> impl DoubleEndedIterator<Item = &'_ str> + '_ {

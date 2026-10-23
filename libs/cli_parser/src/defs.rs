@@ -516,6 +516,11 @@ ArgDef::new("unstable-bare-node-builtins")
     .set_true()
     .hidden()
 .help("Enable unstable HTTP APIs"),
+  ArgDef::new("unstable-idle-trim")
+    .long("unstable-idle-trim")
+    .set_true()
+    .hidden()
+.help("Return freed memory to the OS when the event loop goes idle (a full GC, then malloc_trim; glibc Linux only)"),
   ArgDef::new("unstable-kv")
     .long("unstable-kv")
     .set_true()

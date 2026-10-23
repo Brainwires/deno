@@ -1,0 +1,84 @@
+// denext (DENEXT.md item 101): `--unstable-idle-trim`. glibc Linux trims
+// (a full GC, then malloc_trim(0)) once the event loop has been idle for
+// DENO_IDLE_TRIM_DELAY_MS; every other target accepts the flag and does
+// nothing.
+{
+  "tests": {
+    // The flag: one trim during the idle wait, and the RSS falls back.
+    "flag": {
+      "if": "linux",
+      "args": "run --unstable-idle-trim main.js",
+      "envs": {
+        "DENO_IDLE_TRIM_DELAY_MS": "200",
+        "DENO_IDLE_TRIM_TRACE": "1"
+      },
+      "output": "trimmed.out"
+    },
+    // The environment variable turns it on too.
+    "env": {
+      "if": "linux",
+      "args": "run main.js",
+      "envs": {
+        "DENO_UNSTABLE_IDLE_TRIM": "1",
+        "DENO_IDLE_TRIM_DELAY_MS": "200",
+        "DENO_IDLE_TRIM_TRACE": "1"
+      },
+      "output": "trimmed.out"
+    },
+    // So does `"unstable": ["idle-trim"]` in the config file.
+    "config": {
+      "if": "linux",
+      "cwd": "config",
+      "args": "run main.js",
+      "envs": {
+        "DENO_IDLE_TRIM_DELAY_MS": "200",
+        "DENO_IDLE_TRIM_TRACE": "1"
+      },
+      "output": "trimmed.out"
+    },
+    // Off by default: no trim runs (no trace line).
+    "off_by_default": {
+      "args": "run main.js quiet",
+      "envs": {
+        "DENO_IDLE_TRIM_DELAY_MS": "200",
+        "DENO_IDLE_TRIM_TRACE": "1"
+      },
+      "output": "done\n"
+    },
+    // A busy event loop (woken more often than the delay) is never trimmed.
+    "busy_loop_not_trimmed": {
+      "args": "run --unstable-idle-trim busy.js",
+      "envs": {
+        "DENO_IDLE_TRIM_DELAY_MS": "500",
+        "DENO_IDLE_TRIM_TRACE": "1"
+      },
+      "output": "done\n"
+    },
+    // Accepted on every target; a no-op off glibc Linux.
+    "accepted_everywhere": {
+      "args": "run --unstable-idle-trim main.js quiet",
+      "output": "done\n"
+    },
+    // Carried into a compiled binary.
+    "compile": {
+      "tempDir": true,
+      "steps": [
+        {
+          "if": "linux",
+          "args": "compile --unstable-idle-trim --output out main.js",
+          "output": "[WILDCARD]"
+        },
+        {
+          "if": "linux",
+          "commandName": "./out",
+          "args": [],
+          "envs": {
+            "DENO_IDLE_TRIM_DELAY_MS": "200",
+            "DENO_IDLE_TRIM_TRACE": "1"
+          },
+          "output": "trimmed.out"
+        }
+      ]
+    }
+  }
+}

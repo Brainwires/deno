@@ -1056,6 +1056,7 @@ fn unstable_args_parse(result: &ParseResult, flags: &mut Flags) {
     ("unstable-cron", None),
     ("unstable-fs", None),
     ("unstable-http", None),
+    ("unstable-idle-trim", None),
     ("unstable-kv", None),
     ("unstable-legacy-abort", None),
     ("unstable-lockfile-v5", None),

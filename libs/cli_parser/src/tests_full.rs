@@ -10583,3 +10583,23 @@ fn check_engine_flag() {
       .is_err()
   );
 }
+
+// denext (DENEXT.md item 101): `--unstable-idle-trim` is a feature like any
+// other unstable flag, on `run`, `serve` and `compile`.
+#[test]
+fn unstable_idle_trim_flag() {
+  for subcommand in ["run", "serve", "compile"] {
+    let flags = flags_from_vec(svec![
+      "deno",
+      subcommand,
+      "--unstable-idle-trim",
+      "main.ts"
+    ])
+    .unwrap();
+    assert_eq!(
+      flags.unstable_config.features,
+      svec!["idle-trim"],
+      "{subcommand}"
+    );
+  }
+}

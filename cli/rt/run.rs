@@ -1769,6 +1769,17 @@ pub async fn run_with_options(
     .iter()
     .any(|f| f == "legacy-abort")
     || deno_lib::args::legacy_abort_from_env(&sys));
+  // denext (DENEXT.md item 101): `--unstable-idle-trim` at compile time, or
+  // `DENO_UNSTABLE_IDLE_TRIM=1` when the binary runs.
+  let idle_trim = metadata
+    .unstable_config
+    .features
+    .iter()
+    .any(|f| f == "idle-trim")
+    || deno_lib::args::has_flag_env_var(
+      &sys,
+      deno_runtime::UNSTABLE_ENV_VAR_NAMES.idle_trim,
+    );
   let feature_checker = Arc::new({
     let mut checker = FeatureChecker::default();
     checker.set_exit_cb(Box::new(crate::unstable_exit_cb));
@@ -1851,6 +1862,7 @@ pub async fn run_with_options(
     serve_host: options.serve_host,
     otel_config: metadata.otel_config,
     no_legacy_abort,
+    idle_trim,
     startup_snapshot: deno_snapshots::CLI_SNAPSHOT,
     residual_lazy_js_sources: deno_snapshots::RESIDUAL_LAZY_JS,
     residual_lazy_esm_sources: deno_snapshots::RESIDUAL_LAZY_ESM,

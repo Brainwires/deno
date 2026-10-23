@@ -73,6 +73,15 @@ pub static FEATURE_DESCRIPTIONS: &[UnstableFeatureDescription] = &[
     kind: UnstableFeatureKind::Runtime,
     env_var: None,
   },
+  // denext (DENEXT.md item 101): release freed heap memory to the OS once
+  // the event loop goes idle (glibc Linux only; a no-op elsewhere).
+  UnstableFeatureDescription {
+    name: "idle-trim",
+    help_text: "Return freed memory to the OS when the event loop goes idle (a full GC, then malloc_trim; glibc Linux only)",
+    show_in_help: false,
+    kind: UnstableFeatureKind::Cli,
+    env_var: Some("DENO_UNSTABLE_IDLE_TRIM"),
+  },
   UnstableFeatureDescription {
     name: "kv",
     help_text: "Enable unstable KV APIs",

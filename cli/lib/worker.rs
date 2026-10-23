@@ -306,6 +306,9 @@ pub struct LibMainWorkerOptions {
   pub skip_op_registration: bool,
   pub node_ipc_init: Option<(i64, ChildIpcSerialization)>,
   pub no_legacy_abort: bool,
+  /// denext (DENEXT.md item 101): `--unstable-idle-trim` (or
+  /// `DENO_UNSTABLE_IDLE_TRIM=1`) on the main worker.
+  pub idle_trim: bool,
   pub startup_snapshot: Option<&'static [u8]>,
   /// Residual `lazy_loaded_js` sources from the snapshot build script.
   pub residual_lazy_js_sources: &'static [(&'static str, &'static str)],
@@ -826,6 +829,10 @@ impl<TSys: DenoLibSys> LibMainWorkerFactory<TSys> {
     let mut worker =
       MainWorker::bootstrap_from_options(&main_module, services, options);
     worker.setup_memory_trim_handler();
+    if shared.options.idle_trim {
+      worker
+        .enable_idle_trim(deno_runtime::idle_trim::IdleTrimConfig::from_env());
+    }
     // `--max-memory` / `--max-cpu-time` / `--max-time`: the CPU budget and
     // the deadline count from here.
     crate::resource_limits::arm(

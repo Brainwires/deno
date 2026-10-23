@@ -203,6 +203,8 @@ pub struct MainWorker {
   dispatch_process_beforeexit_event_fn_global: v8::Global<v8::Function>,
   dispatch_process_exit_event_fn_global: v8::Global<v8::Function>,
   memory_trim_handle: Option<tokio::task::JoinHandle<()>>,
+  /// denext (DENEXT.md item 101): `--unstable-idle-trim`.
+  idle_trim: Option<crate::idle_trim::IdleTrim>,
 }
 
 impl Drop for MainWorker {
@@ -825,6 +827,7 @@ impl MainWorker {
       dispatch_process_beforeexit_event_fn_global,
       dispatch_process_exit_event_fn_global,
       memory_trim_handle: None,
+      idle_trim: None,
     };
     (worker, options.bootstrap)
   }
@@ -916,6 +919,17 @@ impl MainWorker {
     });
 
     self.memory_trim_handle = Some(memory_trim_handle);
+  }
+
+  /// denext (DENEXT.md item 101): once the event loop has gone
+  /// `config.delay` without a wake-up after activity, run a full GC and
+  /// `malloc_trim(0)` from [`MainWorker::run_event_loop`] (at most once per
+  /// idle period, `config.min_interval` apart). glibc Linux only; a no-op on
+  /// every other target. Must be called within a tokio runtime.
+  pub fn enable_idle_trim(&mut self, config: crate::idle_trim::IdleTrimConfig) {
+    if crate::idle_trim::SUPPORTED {
+      self.idle_trim = Some(crate::idle_trim::IdleTrim::new(config));
+    }
   }
 
   /// See [JsRuntime::execute_script](deno_core::JsRuntime::execute_script)
@@ -1038,10 +1052,21 @@ impl MainWorker {
     &mut self,
     wait_for_inspector: bool,
   ) -> Result<(), CoreError> {
-    self
-      .js_runtime
-      .run_event_loop(PollEventLoopOptions { wait_for_inspector })
-      .await
+    let options = PollEventLoopOptions { wait_for_inspector };
+    let Some(idle_trim) = self.idle_trim.as_mut() else {
+      return self.js_runtime.run_event_loop(options).await;
+    };
+    let trace = idle_trim.config().trace;
+    let js_runtime = &mut self.js_runtime;
+    std::future::poll_fn(|cx| {
+      idle_trim.poll(
+        cx,
+        js_runtime,
+        |js_runtime, cx| js_runtime.poll_event_loop(cx, options),
+        |js_runtime| crate::idle_trim::trim_now(js_runtime.v8_isolate(), trace),
+      )
+    })
+    .await
   }
 
   /// If a debugger session is attached and would otherwise be dropped on
