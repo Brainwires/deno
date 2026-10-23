@@ -1576,3 +1576,62 @@ Deno.test(
     );
   },
 );
+
+// A child spawned on one thread must not inherit the pipe ends another thread
+// is creating for its own child at the same moment. When a long-lived child
+// picked up a short-lived child's stdout write end, the short child's
+// `.output()` waited for that unrelated process to exit.
+Deno.test(
+  {
+    ignore: Deno.build.os !== "windows",
+    // `env`: `node:child_process` reads the parent's environment.
+    permissions: { run: true, read: true, env: true },
+  },
+  async function commandConcurrentSpawnsDoNotLeakPipes() {
+    // The long-lived children run for ~45 s; a leaked pipe end stalls a short
+    // spawn until one of them exits, far past this bound.
+    const STALL_BOUND_MS = 15_000;
+    const url = import.meta.resolve(
+      "../testdata/workers/concurrent_spawn_worker.js",
+    );
+    const start = (data: Record<string, unknown>) => {
+      const worker = new Worker(url, { type: "module" });
+      const replies: Array<Record<string, unknown>> = [];
+      let notify = () => {};
+      worker.onmessage = (e) => {
+        replies.push(e.data);
+        notify();
+      };
+      const next = async () => {
+        while (replies.length === 0) {
+          await new Promise<void>((resolve) => notify = resolve);
+        }
+        const reply = replies.shift()!;
+        if (reply.error) throw new Error(String(reply.error));
+        return reply;
+      };
+      worker.postMessage(data);
+      return { worker, next };
+    };
+
+    const long = [0, 1].map(() =>
+      start({ kind: "long", max: 60, seconds: 46 })
+    );
+    const short = ["deno", "deno", "node"].map((api) =>
+      start({ kind: "short", count: 60, api })
+    );
+    try {
+      const results = await Promise.all(short.map((s) => s.next()));
+      for (const { max } of results) {
+        assert(
+          (max as number) < STALL_BOUND_MS,
+          `a short spawn took ${Math.round(max as number)} ms`,
+        );
+      }
+    } finally {
+      for (const l of long) l.worker.postMessage("stop");
+      await Promise.all(long.map((l) => l.next()));
+      for (const w of [...long, ...short]) w.worker.terminate();
+    }
+  },
+);
