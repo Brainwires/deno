@@ -209,6 +209,59 @@ pub fn tsgo_check_bin() -> Option<PathRef> {
     .clone()
 }
 
+/// The pinned tsgolint `deno lint --type-aware` runs (denext):
+/// `target/tsgolint-<version>/tsgolint[.exe]`, from
+/// `cli/tools/lint/tsgolint_pin.json`, fetched once with
+/// `.github/denext-runtime/fetch_tsgolint.py` (verified against the pin). Spec
+/// tests reach it as `${TSGOLINT_BIN}` in an env value. `None` when it can't
+/// be fetched.
+pub fn tsgolint_bin() -> Option<PathRef> {
+  static BIN: std::sync::OnceLock<Option<PathRef>> = std::sync::OnceLock::new();
+  BIN
+    .get_or_init(|| {
+      let root = root_path();
+      let pin: serde_json::Value = serde_json::from_str(
+        &root
+          .join("cli/tools/lint/tsgolint_pin.json")
+          .read_to_string(),
+      )
+      .ok()?;
+      let version = pin["version"].as_str()?.to_string();
+      let dir = target_dir().join(format!("tsgolint-{version}"));
+      let exe = dir.join(if cfg!(windows) {
+        "tsgolint.exe"
+      } else {
+        "tsgolint"
+      });
+      if !exe.exists() {
+        let platform = match (std::env::consts::OS, std::env::consts::ARCH) {
+          ("linux", "x86_64") => "linux-x64",
+          ("linux", "aarch64") => "linux-arm64",
+          ("macos", "x86_64") => "darwin-x64",
+          ("macos", "aarch64") => "darwin-arm64",
+          ("windows", "x86_64") => "win32-x64",
+          ("windows", "aarch64") => "win32-arm64",
+          _ => return None,
+        };
+        let python = if cfg!(windows) { "python" } else { "python3" };
+        let status = std::process::Command::new(python)
+          .arg("-I")
+          .arg(root.join(".github/denext-runtime/fetch_tsgolint.py"))
+          .arg("--no-registry-check")
+          .arg(platform)
+          .arg(dir.as_path())
+          .stdout(std::process::Stdio::null())
+          .status()
+          .ok()?;
+        if !status.success() {
+          return None;
+        }
+      }
+      exe.exists().then_some(exe)
+    })
+    .clone()
+}
+
 /// The `DENO_TSGO_BIN` a test's `deno` gets (denext): an ambient one (e.g. a
 /// local `export`), else the pinned compiler [`tsgo_check_bin`] fetches.
 pub fn tsgo_check_bin_env() -> Option<String> {

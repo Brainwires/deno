@@ -34,7 +34,7 @@ pub const DENO_TSGO_BIN_ENV: &str = "DENO_TSGO_BIN";
 
 /// The cache directory (below `DENO_DIR`) where denext's managed toolchain
 /// installs the `deno` executable, one `<version>/<target>/` per release.
-const TOOLCHAIN_CACHE_NAME: &str = "denext-deno";
+pub(crate) const TOOLCHAIN_CACHE_NAME: &str = "denext-deno";
 
 /// Where to look for the compiler, in order: `DENO_TSGO_BIN`; the
 /// `typescript-check/` directory beside the running executable, what denext's
@@ -121,7 +121,7 @@ fn toolchain_cache_tsc(cache: &Path) -> Option<PathBuf> {
 
 /// A toolchain cache directory's sort key: its name as a version (`None`,
 /// which sorts first, for a name that is not one), then the name.
-fn toolchain_version_key(
+pub(crate) fn toolchain_version_key(
   dir: &Path,
 ) -> (Option<deno_semver::Version>, std::ffi::OsString) {
   let name = dir.file_name().unwrap_or_default().to_os_string();

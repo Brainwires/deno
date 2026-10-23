@@ -1,0 +1,3 @@
+[WILDCARD]error: Type-aware linting needs tsgolint [WILDCARD], which was not found and could not be downloaded: [WILDCARD]
+  It ships in denext's Deno toolchain: run `denext toolchain install`.
+  Or set DENO_TSGOLINT_BIN to a tsgolint [WILDCARD] binary, or lint without type-aware rules: --no-type-aware.

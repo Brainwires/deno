@@ -769,6 +769,16 @@ jobs:
           py=python3; command -v python3 >/dev/null 2>&1 || py=python
           "$py" -I .github/denext-runtime/fetch_typescript.py check "$TARGET" "$RUNNER_TEMP/typescript-check"
 
+      # The pinned tsgolint that `deno lint --type-aware` runs
+      # (cli/tools/lint/tsgolint_pin.json), verified against its pinned npm
+      # integrity and binary sha256 and shipped beside deno as tsgolint/, so
+      # type-aware linting works offline.
+      - name: Fetch tsgolint
+        run: |
+          set -euo pipefail
+          py=python3; command -v python3 >/dev/null 2>&1 || py=python
+          "$py" -I .github/denext-runtime/fetch_tsgolint.py "$TARGET" "$RUNNER_TEMP/tsgolint"
+
       - name: Assemble
         env:
           DENO_BIN: target/release/${{ runner.os == 'Windows' && 'deno.exe' || 'deno' }}
@@ -776,6 +786,7 @@ jobs:
           ESBUILD_DIR: ${{ runner.temp }}/esbuild
           TYPESCRIPT_LSP_DIR: ${{ runner.temp }}/typescript-lsp
           TYPESCRIPT_CHECK_DIR: ${{ runner.temp }}/typescript-check
+          TSGOLINT_DIR: ${{ runner.temp }}/tsgolint
           OUT_DIR: dist
           # The upstream Deno release the fork is built from (BUILD_INFO.json's
           # and manifest.json's deno.version; denext's pins read it as `deno`).
@@ -1212,7 +1223,8 @@ jobs:
           the official esbuild ${ESBUILD_VERSION} (\`esbuild.LICENSE\`), which \`deno bundle\` uses
           instead of downloading one, and in \`typescript-check/\` the official native TypeScript 7.0 compiler
           (Apache-2.0), which \`deno check\` and the other type-checking commands run
-          (\`--check-engine=tsc\` keeps the in-process TypeScript 6.0.3). The CLI's
+          (\`--check-engine=tsc\` keeps the in-process TypeScript 6.0.3), and in \`tsgolint/\` the
+          official tsgolint (MIT), which \`deno lint --type-aware\` runs. The CLI's
           \`deno --version\` and \`Deno.version.deno\` name this release (\`${TAG#denext-runtime-v}\`).
           They are listed under \`cli\` in \`manifest.json\`.
 

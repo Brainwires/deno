@@ -1278,6 +1278,7 @@ fn lint() {
         permit_no_files: false,
         json: false,
         compact: false,
+        type_aware: None,
       }),
       ..Flags::default()
     }
@@ -1308,6 +1309,7 @@ fn lint() {
         permit_no_files: true,
         json: false,
         compact: false,
+        type_aware: None,
       }),
       permissions: PermissionFlags {
         allow_import: Some(vec![]),
@@ -1342,6 +1344,7 @@ fn lint() {
         permit_no_files: false,
         json: false,
         compact: false,
+        type_aware: None,
       }),
       watch: Some(WatchFlagsWithPaths {
         paths: vec![],
@@ -1375,6 +1378,7 @@ fn lint() {
         permit_no_files: false,
         json: false,
         compact: false,
+        type_aware: None,
       }),
       ..Flags::default()
     }
@@ -1397,6 +1401,7 @@ fn lint() {
         permit_no_files: false,
         json: false,
         compact: false,
+        type_aware: None,
       }),
       ..Flags::default()
     }
@@ -1424,6 +1429,7 @@ fn lint() {
         permit_no_files: false,
         json: false,
         compact: false,
+        type_aware: None,
       }),
       ..Flags::default()
     }
@@ -1452,6 +1458,7 @@ fn lint() {
         permit_no_files: false,
         json: false,
         compact: false,
+        type_aware: None,
       }),
       ..Flags::default()
     }
@@ -1474,6 +1481,7 @@ fn lint() {
         permit_no_files: false,
         json: true,
         compact: false,
+        type_aware: None,
       }),
       ..Flags::default()
     }
@@ -1503,6 +1511,7 @@ fn lint() {
         permit_no_files: false,
         json: true,
         compact: false,
+        type_aware: None,
       }),
       config_flag: ConfigFlag::Path("Deno.jsonc".to_string()),
       ..Flags::default()
@@ -1533,10 +1542,39 @@ fn lint() {
         permit_no_files: false,
         json: false,
         compact: true,
+        type_aware: None,
       }),
       config_flag: ConfigFlag::Path("Deno.jsonc".to_string()),
       ..Flags::default()
     }
+  );
+}
+
+#[test]
+fn lint_type_aware() {
+  let lint_type_aware =
+    |args: Vec<String>| match flags_from_vec(args).unwrap().subcommand {
+      DenoSubcommand::Lint(lint_flags) => lint_flags.type_aware,
+      _ => panic!("not lint"),
+    };
+  assert_eq!(lint_type_aware(svec!["deno", "lint", "a.ts"]), None);
+  assert_eq!(
+    lint_type_aware(svec!["deno", "lint", "--type-aware", "a.ts"]),
+    Some(true)
+  );
+  assert_eq!(
+    lint_type_aware(svec!["deno", "lint", "--no-type-aware", "a.ts"]),
+    Some(false)
+  );
+  assert!(
+    flags_from_vec(svec![
+      "deno",
+      "lint",
+      "--type-aware",
+      "--no-type-aware",
+      "a.ts"
+    ])
+    .is_err()
   );
 }
 

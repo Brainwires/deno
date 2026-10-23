@@ -204,6 +204,8 @@ pub fn version_req_matches_including_pre(
 #[derive(Clone, Debug, Default, Hash, PartialEq)]
 pub struct WorkspaceLintConfig {
   pub report: Option<String>,
+  /// `lint.typeAware` (denext): run type-aware rules through tsgolint.
+  pub type_aware: Option<bool>,
 }
 
 #[derive(Debug, Clone, Error, JsError, PartialEq, Eq)]
@@ -528,8 +530,12 @@ impl FolderConfigs {
 
 #[derive(Debug, Error, JsError)]
 #[class(type)]
-#[error("lint.report must be a string")]
-pub struct LintConfigError;
+pub enum LintConfigError {
+  #[error("lint.report must be a string")]
+  Report,
+  #[error("lint.typeAware must be a boolean")]
+  TypeAware,
+}
 
 #[derive(Debug, Default)]
 struct WorkspaceCachedValues {
@@ -1321,6 +1327,14 @@ impl Workspace {
           kind: WorkspaceDiagnosticKind::RootOnlyOption("lint.report"),
         });
       }
+      if let Some(value) = &member_config.json.lint
+        && value.get("typeAware").is_some()
+      {
+        diagnostics.push(WorkspaceDiagnostic {
+          config_url: member_config.specifier.clone(),
+          kind: WorkspaceDiagnosticKind::RootOnlyOption("lint.typeAware"),
+        });
+      }
     }
 
     // Whether the config's `imports`/`scopes` contain `npm:`/`jsr:`
@@ -1541,13 +1555,9 @@ impl Workspace {
   pub fn to_lint_config(&self) -> Result<WorkspaceLintConfig, LintConfigError> {
     self
       .with_root_config_only(|root_config| {
+        let lint = root_config.json.lint.as_ref();
         Ok(WorkspaceLintConfig {
-          report: match root_config
-            .json
-            .lint
-            .as_ref()
-            .and_then(|l| l.get("report"))
-          {
+          report: match lint.and_then(|l| l.get("report")) {
             Some(report) => match report {
               serde_json::Value::String(value) => Some(value.to_string()),
               serde_json::Value::Null => None,
@@ -1555,10 +1565,15 @@ impl Workspace {
               | serde_json::Value::Number(_)
               | serde_json::Value::Array(_)
               | serde_json::Value::Object(_) => {
-                return Err(LintConfigError);
+                return Err(LintConfigError::Report);
               }
             },
             None => None,
+          },
+          type_aware: match lint.and_then(|l| l.get("typeAware")) {
+            Some(serde_json::Value::Bool(value)) => Some(*value),
+            Some(serde_json::Value::Null) | None => None,
+            Some(_) => return Err(LintConfigError::TypeAware),
           },
         })
       })
@@ -4139,11 +4154,34 @@ pub mod test {
   }
 
   #[test]
+  fn test_lint_type_aware_must_be_a_boolean() {
+    let workspace_dir = workspace_for_root_and_member(
+      json!({ "lint": { "typeAware": "yes" } }),
+      json!({}),
+    );
+    assert_eq!(
+      workspace_dir
+        .workspace
+        .to_lint_config()
+        .unwrap_err()
+        .to_string(),
+      "lint.typeAware must be a boolean"
+    );
+    let workspace_dir =
+      workspace_for_root_and_member(json!({ "lint": {} }), json!({}));
+    assert_eq!(
+      workspace_dir.workspace.to_lint_config().unwrap().type_aware,
+      None
+    );
+  }
+
+  #[test]
   fn test_root_member_lint_combinations() {
     let workspace_dir = workspace_for_root_and_member(
       json!({
         "lint": {
           "report": "json",
+          "typeAware": true,
           "rules": {
             "tags": ["tag1"],
             "include": ["rule1"],
@@ -4155,6 +4193,7 @@ pub mod test {
       json!({
         "lint": {
           "report": "pretty",
+          "typeAware": false,
           "include": ["subdir"],
           "rules": {
             "tags": ["tag1"],
@@ -4170,16 +4209,24 @@ pub mod test {
     );
     assert_eq!(
       workspace_dir.workspace.diagnostics(),
-      vec![WorkspaceDiagnostic {
-        kind: WorkspaceDiagnosticKind::RootOnlyOption("lint.report"),
-        config_url: url_from_file_path(&root_dir().join("member/deno.json"))
-          .unwrap(),
-      }]
+      vec![
+        WorkspaceDiagnostic {
+          kind: WorkspaceDiagnosticKind::RootOnlyOption("lint.report"),
+          config_url: url_from_file_path(&root_dir().join("member/deno.json"))
+            .unwrap(),
+        },
+        WorkspaceDiagnostic {
+          kind: WorkspaceDiagnosticKind::RootOnlyOption("lint.typeAware"),
+          config_url: url_from_file_path(&root_dir().join("member/deno.json"))
+            .unwrap(),
+        },
+      ]
     );
     assert_eq!(
       workspace_dir.workspace.to_lint_config().unwrap(),
       WorkspaceLintConfig {
         report: Some("json".to_string()),
+        type_aware: Some(true),
       }
     );
     let lint_config = workspace_dir

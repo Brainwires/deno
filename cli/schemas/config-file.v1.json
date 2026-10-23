@@ -930,6 +930,11 @@
           "default": "pretty",
           "enum": ["pretty", "json", "compact"],
           "description": "The default report format to use when linting"
+        },
+        "typeAware": {
+          "type": "boolean",
+          "default": false,
+          "description": "Also run type-aware lint rules (e.g. `no-floating-promises`) through the pinned tsgolint. Off by default; `deno lint --type-aware` / `--no-type-aware` override it. Only allowed in the workspace root."
         }
       }
     },

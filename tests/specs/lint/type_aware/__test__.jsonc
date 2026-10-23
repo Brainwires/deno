@@ -1,0 +1,72 @@
+{
+  // denext: `deno lint --type-aware` / `lint.typeAware` run type-aware rules
+  // through the pinned tsgolint (cli/tools/lint/tsgolint.rs).
+  // `${TSGOLINT_BIN}` is that binary, fetched into target/ by the harness.
+  "tempDir": true,
+  "tests": {
+    "floating": {
+      "args": "lint --type-aware floating.ts",
+      "envs": { "DENO_TSGOLINT_BIN": "${TSGOLINT_BIN}" },
+      "output": "floating.out",
+      "exitCode": 1
+    },
+    "json": {
+      "args": "lint --type-aware --json floating.ts",
+      "envs": { "DENO_TSGOLINT_BIN": "${TSGOLINT_BIN}" },
+      "output": "floating_json.out",
+      "exitCode": 1
+    },
+    // Off by default: no type-aware rule runs (and no tsgolint is needed).
+    "off_by_default": {
+      "args": "lint floating.ts",
+      "envs": { "DENO_TSGOLINT_BIN": "/definitely/not/here/tsgolint" },
+      "output": "Checked 1 file\n"
+    },
+    "config_opt_in": {
+      "args": "lint --config type_aware.json floating.ts",
+      "envs": { "DENO_TSGOLINT_BIN": "${TSGOLINT_BIN}" },
+      "output": "floating.out",
+      "exitCode": 1
+    },
+    "flag_opts_out_of_config": {
+      "args": "lint --config type_aware.json --no-type-aware floating.ts",
+      "envs": { "DENO_TSGOLINT_BIN": "/definitely/not/here/tsgolint" },
+      "output": "Checked 1 file\n"
+    },
+    "rules_exclude": {
+      "args": "lint --config exclude_rule.json floating.ts",
+      "envs": { "DENO_TSGOLINT_BIN": "${TSGOLINT_BIN}" },
+      "output": "Checked 1 file\n"
+    },
+    // deno-lint-ignore applies to type-aware diagnostics, and the type-aware
+    // codes stay known (no ban-unknown-rule-code / ban-unused-ignore) when
+    // type-aware linting is off.
+    "ignore_directive": {
+      "args": "lint --type-aware ignored.ts",
+      "envs": { "DENO_TSGOLINT_BIN": "${TSGOLINT_BIN}" },
+      "output": "Checked 1 file\n"
+    },
+    "ignore_directive_off": {
+      "args": "lint ignored.ts",
+      "output": "Checked 1 file\n"
+    },
+    // Asked for but unavailable: a clear error, never a silent skip.
+    "override_missing": {
+      "args": "lint --type-aware floating.ts",
+      "envs": { "DENO_TSGOLINT_BIN": "/definitely/not/here/tsgolint" },
+      "output": "error: DENO_TSGOLINT_BIN is set to /definitely/not/here/tsgolint, which is not a file\n",
+      "exitCode": 1
+    },
+    "download_fails": {
+      "args": "lint --type-aware floating.ts",
+      "envs": {
+        "DENO_TSGOLINT_BIN": "",
+        "HTTPS_PROXY": "http://127.0.0.1:9",
+        "HTTP_PROXY": "http://127.0.0.1:9",
+        "NO_PROXY": ""
+      },
+      "output": "download_fails.out",
+      "exitCode": 1
+    }
+  }
+}

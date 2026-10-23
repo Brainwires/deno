@@ -296,6 +296,9 @@ pub enum LintReporterKind {
 #[derive(Clone, Debug)]
 pub struct WorkspaceLintOptions {
   pub reporter_kind: LintReporterKind,
+  /// Run type-aware rules through tsgolint (denext): `--type-aware` /
+  /// `--no-type-aware`, else `lint.typeAware`, else off.
+  pub type_aware: bool,
 }
 
 impl WorkspaceLintOptions {
@@ -325,6 +328,10 @@ impl WorkspaceLintOptions {
     }
     Ok(Self {
       reporter_kind: maybe_reporter_kind.unwrap_or_default(),
+      type_aware: lint_flags
+        .type_aware
+        .or(lint_config.type_aware)
+        .unwrap_or(false),
     })
   }
 }

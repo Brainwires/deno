@@ -280,6 +280,9 @@ struct SerializedLintConfig {
   pub deprecated_files: serde_json::Value,
   pub report: Option<String>,
   pub plugins: Vec<String>,
+  /// Root-only, read by the workspace (`WorkspaceLintConfig::type_aware`).
+  #[serde(rename = "typeAware")]
+  pub type_aware: Option<bool>,
 }
 
 impl SerializedLintConfig {

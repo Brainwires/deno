@@ -1,0 +1,10 @@
+error[no-floating-promises]: Promises must be awaited, add void operator to ignore.
+ --> [WILDCARD]floating.ts:6:1
+  | 
+6 | work();
+  | ^^^^^^
+[WILDCARD]
+  docs: https://typescript-eslint.io/rules/no-floating-promises
+[WILDCARD]
+Found 1 problem
+Checked 1 file

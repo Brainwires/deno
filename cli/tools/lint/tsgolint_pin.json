@@ -1,0 +1,36 @@
+{
+  "$comment": "The tsgolint binary `deno lint --type-aware` runs (denext): an exact version of the @oxlint-tsgolint/<platform> npm packages, each pinned by the tarball's npm dist.integrity (sha512) and the sha256 of the binary inside it. Read by cli/tools/lint/tsgolint.rs, .github/denext-runtime/fetch_tsgolint.py and the test harness. Bump with `python3 -I .github/denext-runtime/fetch_tsgolint.py --pin <version>`, never by hand.",
+  "version": "7.0.2004",
+  "platforms": {
+    "darwin-arm64": {
+      "tarball": "https://registry.npmjs.org/@oxlint-tsgolint/darwin-arm64/-/darwin-arm64-7.0.2004.tgz",
+      "integrity": "sha512-uJk3ttju7Lz+Nv8WG4CsLyewoL1qf/Ny8S8OksJ7Bm/F14Tc9gMfW6arM1PCc57IzH/X/I79YsCWTgxX1FKibQ==",
+      "sha256": "d40de2b828d91ac188e3dc897991be8a512b29935fddae5f223a9f9bde356fb1"
+    },
+    "darwin-x64": {
+      "tarball": "https://registry.npmjs.org/@oxlint-tsgolint/darwin-x64/-/darwin-x64-7.0.2004.tgz",
+      "integrity": "sha512-0BFfHTzDxNDFPcu0UZAXT6CyCJHAXM0dZveyDb4KEHa2qF/DSnOKOrmvK/wFuFol9kvijbGM9JfuOsor+zWXRw==",
+      "sha256": "f1767f5a44d1895a6ad76cac69f1b970325a8f99c1598f990265e6c2568b38d0"
+    },
+    "linux-arm64": {
+      "tarball": "https://registry.npmjs.org/@oxlint-tsgolint/linux-arm64/-/linux-arm64-7.0.2004.tgz",
+      "integrity": "sha512-TAehQc+qdRXyDN3nl/r/3/oPrBVrbtrDeGMkFyG6mf+XphpoJ2lAMVFLclyvrVZCw02RbKROjyw8h72XwQQHcw==",
+      "sha256": "cc5b426032db3e08197210fe57f32cd0c777947e17ef8e60115f1d188a1235e4"
+    },
+    "linux-x64": {
+      "tarball": "https://registry.npmjs.org/@oxlint-tsgolint/linux-x64/-/linux-x64-7.0.2004.tgz",
+      "integrity": "sha512-LPunZvm6ZbWPfHMAyfZf9ci3HHvNEzLejO8zdqO3GoVGoSEHqqufHUD7+OgeatVSaJP7uXDJ2HaNOHIoH7go4Q==",
+      "sha256": "99ee9267df9ea81db27130a8ecdfb67eeaf88a1e0b20d90e02d2ae6574bdc516"
+    },
+    "win32-arm64": {
+      "tarball": "https://registry.npmjs.org/@oxlint-tsgolint/win32-arm64/-/win32-arm64-7.0.2004.tgz",
+      "integrity": "sha512-FVWplzDImWhiuawnIZVETaQecv4GWom6Jv4Fx2xj7hhXXDZ5okEgiw1gTCImHTIQsi2ycC5oSxVwrn69bMh7iw==",
+      "sha256": "330a1da55f5e23ee8a0f7be24d4dacfb604429f2295868980451792cf5a6aefc"
+    },
+    "win32-x64": {
+      "tarball": "https://registry.npmjs.org/@oxlint-tsgolint/win32-x64/-/win32-x64-7.0.2004.tgz",
+      "integrity": "sha512-7PsxuUx11Ry9DYTWcljTzRbmZY9B6O9fFFfZV+aodQEMy6pfRT3fhoQRv9PtGN/89z1pPz3nFKrsFm6WqNtX7w==",
+      "sha256": "5a0d7fdcdfbeaf5aea16b450fd5ce0b8b67c1396e7bad243ec14c13b0239e143"
+    }
+  }
+}

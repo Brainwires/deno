@@ -18,6 +18,7 @@ use deno_config::glob::FileCollector;
 use deno_config::glob::FilePatterns;
 use deno_config::workspace::WorkspaceDirectory;
 use deno_config::workspace::WorkspaceDirectoryRc;
+use deno_core::anyhow::Context;
 use deno_core::anyhow::anyhow;
 use deno_core::anyhow::bail;
 use deno_core::error::AnyError;
@@ -62,6 +63,7 @@ mod linter;
 mod plugins;
 mod reporters;
 mod rules;
+mod tsgolint;
 
 // TODO(bartlomieju): remove once we wire plugins through the CLI linter
 pub use ast_buffer::serialize_ast_to_buffer;
@@ -98,6 +100,12 @@ pub async fn lint(
   let workspace_lint_options =
     cli_options.resolve_workspace_lint_options(&lint_flags)?;
   let success = if is_stdin {
+    if workspace_lint_options.type_aware {
+      log::warn!(
+        "{} type-aware lint rules don't run on standard input",
+        colors::yellow("Warning")
+      );
+    }
     lint_stdin(
       cli_options,
       lint_rule_provider,
@@ -106,6 +114,11 @@ pub async fn lint(
       compiler_options_resolver,
     )?
   } else {
+    let maybe_tsgolint_bin = if workspace_lint_options.type_aware {
+      Some(tsgolint::resolve_bin(&factory).await?)
+    } else {
+      None
+    };
     let mut linter = WorkspaceLinter::new(
       factory.caches()?.clone(),
       lint_rule_provider,
@@ -113,6 +126,7 @@ pub async fn lint(
       compiler_options_resolver.clone(),
       cli_options.start_dir.clone(),
       &workspace_lint_options,
+      maybe_tsgolint_bin,
     );
     let paths_with_options_batches =
       resolve_paths_with_options_batches(cli_options, &lint_flags)?;
@@ -170,13 +184,21 @@ async fn lint_with_watch_inner(
     };
   }
 
+  let workspace_lint_options =
+    cli_options.resolve_workspace_lint_options(&lint_flags)?;
+  let maybe_tsgolint_bin = if workspace_lint_options.type_aware {
+    Some(tsgolint::resolve_bin(&factory).await?)
+  } else {
+    None
+  };
   let mut linter = WorkspaceLinter::new(
     factory.caches()?.clone(),
     factory.lint_rule_provider().await?,
     factory.module_graph_creator().await?.clone(),
     factory.compiler_options_resolver()?.clone(),
     cli_options.start_dir.clone(),
-    &cli_options.resolve_workspace_lint_options(&lint_flags)?,
+    &workspace_lint_options,
+    maybe_tsgolint_bin,
   );
   for paths_with_options in paths_with_options_batches {
     linter
@@ -263,6 +285,9 @@ struct WorkspaceLinter {
   workspace_module_graph: Option<WorkspaceModuleGraphFuture>,
   has_error: Arc<AtomicFlag>,
   file_count: usize,
+  /// The tsgolint to run for type-aware rules (`--type-aware`), resolved
+  /// once up front.
+  maybe_tsgolint_bin: Option<PathBuf>,
 }
 
 impl WorkspaceLinter {
@@ -273,6 +298,7 @@ impl WorkspaceLinter {
     compiler_options_resolver: Arc<CompilerOptionsResolver>,
     workspace_dir: Arc<WorkspaceDirectory>,
     workspace_options: &WorkspaceLintOptions,
+    maybe_tsgolint_bin: Option<PathBuf>,
   ) -> Self {
     let reporter_lock =
       Arc::new(Mutex::new(create_reporter(workspace_options.reporter_kind)));
@@ -286,6 +312,7 @@ impl WorkspaceLinter {
       workspace_module_graph: None,
       has_error: Default::default(),
       file_count: 0,
+      maybe_tsgolint_bin,
     }
   }
 
@@ -299,6 +326,10 @@ impl WorkspaceLinter {
     self.file_count += paths.len();
 
     let exclude = lint_options.rules.exclude.clone();
+    let maybe_tsgolint_rules = self
+      .maybe_tsgolint_bin
+      .as_ref()
+      .map(|_| tsgolint::resolve_rules(&lint_options.rules));
 
     let plugin_specifiers = lint_options.plugins.clone();
     let lint_rules = self
@@ -309,7 +340,12 @@ impl WorkspaceLinter {
 
     // TODO(bartlomieju): for now we don't support incremental caching if plugins are being used.
     // https://github.com/denoland/deno/issues/28025
-    if lint_rules.supports_incremental_cache() && plugin_specifiers.is_empty() {
+    // Nor with type-aware rules: a file's type-aware diagnostics depend on
+    // the files it imports, which its cache entry doesn't cover.
+    if lint_rules.supports_incremental_cache()
+      && plugin_specifiers.is_empty()
+      && self.maybe_tsgolint_bin.is_none()
+    {
       let mut hasher = FastInsecureHasher::new_deno_versioned();
       hasher.write_hashable(lint_rules.incremental_cache_state());
       if !plugin_specifiers.is_empty() {
@@ -348,6 +384,25 @@ impl WorkspaceLinter {
       bail!("No rules have been configured")
     }
 
+    // Type-aware rules: tsgolint runs once over the whole batch; the
+    // per-file external linter callback looks its diagnostics up.
+    let maybe_tsgolint = match (&self.maybe_tsgolint_bin, maybe_tsgolint_rules)
+    {
+      (Some(bin), Some(rules)) => {
+        let bin = bin.clone();
+        let cwd = member_dir.dir_path();
+        let paths = paths.clone();
+        let results = deno_core::unsync::spawn_blocking(move || {
+          tsgolint::run(&bin, &cwd, &paths, &rules)
+        })
+        .await?
+        .context("Type-aware lint (tsgolint) failed")?;
+        results.warn_program_diagnostics();
+        Some(Arc::new(results))
+      }
+      _ => None,
+    };
+
     let linter = Arc::new(CliLinter::new(CliLinterOptions {
       configured_rules: lint_rules,
       fix: lint_options.fix,
@@ -356,6 +411,7 @@ impl WorkspaceLinter {
         member_dir.dir_url(),
       )?,
       maybe_plugin_runner: plugin_runner,
+      maybe_tsgolint,
     }));
 
     let has_error = self.has_error.clone();
@@ -618,6 +674,7 @@ fn lint_stdin(
     configured_rules,
     deno_lint_config,
     maybe_plugin_runner: None,
+    maybe_tsgolint: None,
   });
 
   let r = linter.lint_file(&file_path, deno_ast::strip_bom(source_code), None);

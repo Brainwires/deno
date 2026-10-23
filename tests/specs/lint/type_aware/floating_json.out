@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "diagnostics": [
+    {
+      "filename": "[WILDCARD]floating.ts",
+      "range": {
+        "start": {
+          "line": 6,
+          "col": 0,
+          "bytePos": 120
+        },
+        "end": {
+          "line": 6,
+          "col": 6,
+          "bytePos": 126
+        }
+      },
+      "message": "Promises must be awaited, add void operator to ignore.",
+      "code": "no-floating-promises",
+      "hint": [WILDCARD]
+    }
+  ],
+  "errors": [],
+  "checked_files": [
+    "[WILDCARD]floating.ts"
+  ]
+}

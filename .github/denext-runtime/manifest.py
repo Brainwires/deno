@@ -2,8 +2,9 @@
 """Write SHA256SUMS and manifest.json for a directory of runtime archives
 (and the `deno-cli-*` CLI archives, listed under "cli", each with the
 esbuild it ships: version and the binary's sha256, and the native TypeScript
-compilers in its `typescript-check/` and `typescript-lsp/`: version, the
-binary's sha256 and a sha256 over every file of the directory; and the
+compilers in its `typescript-check/` and `typescript-lsp/` and the tsgolint
+in its `tsgolint/`: version, the binary's sha256 and a sha256 over every file
+of the directory; and the
 `deno-denort-*` archives `deno compile` builds onto, listed under "denort").
 
 Usage: manifest.py <dist dir>
@@ -89,26 +90,20 @@ def esbuild_of(name, target):
     return {"version": info["version"], "sha256": digest}
 
 
-def typescript_of(name, target, role):
-    """A native TypeScript compiler inside a CLI zip (assemble_cli.sh,
-    `typescript-<role>/`): `check` is the one type checking runs, `lsp` the
-    one `deno lsp`'s tsgo backend runs. Its version, from BUILD_INFO.json
-    (`typescript_<role>`, fetch_typescript.py <role>), the sha256 of the
-    binary and a tree sha256 (`<name>\\0<sha256>\\n` per file but
-    typescript.json, sorted), each recomputed from the zip: denext pins all
-    three."""
-    binary = "tsc.exe" if target.endswith("windows-msvc") else "tsc"
-    prefix = f"typescript-{role}/"
-    key = f"typescript_{role}"
+def vendored_tree(name, prefix, binary, meta_file, key):
+    """A pinned tool shipped in a directory of a CLI zip (assemble_cli.sh):
+    its version, from BUILD_INFO.json (`key`), the sha256 of the binary and a
+    tree sha256 (`<name>\\0<sha256>\\n` per file but `meta_file`, sorted),
+    each recomputed from the zip: denext pins all three."""
     with zipfile.ZipFile(os.path.join(dist, name)) as z:
         names = set(z.namelist())
-        for want in (prefix + binary, prefix + "LICENSE", prefix + "typescript.json", "BUILD_INFO.json"):
+        for want in (prefix + binary, prefix + "LICENSE", prefix + meta_file, "BUILD_INFO.json"):
             if want not in names:
                 sys.exit(f"{name} has no {want}")
         info = json.loads(z.read("BUILD_INFO.json")).get(key) or {}
         files = {}
         for n in sorted(names):
-            if n.startswith(prefix) and not n.endswith("/") and n != prefix + "typescript.json":
+            if n.startswith(prefix) and not n.endswith("/") and n != prefix + meta_file:
                 files[n[len(prefix):]] = hashlib.sha256(z.read(n)).hexdigest()
     tree = hashlib.sha256()
     for rel in sorted(files):
@@ -118,6 +113,22 @@ def typescript_of(name, target, role):
     if not info.get("version"):
         sys.exit(f"{name}: BUILD_INFO.json names no {key} version")
     return {"version": info["version"], "sha256": files[binary], "tree_sha256": tree.hexdigest()}
+
+
+def typescript_of(name, target, role):
+    """A native TypeScript compiler inside a CLI zip (`typescript-<role>/`):
+    `check` is the one type checking runs, `lsp` the one `deno lsp`'s tsgo
+    backend runs (BUILD_INFO.json `typescript_<role>`, fetch_typescript.py
+    <role>)."""
+    binary = "tsc.exe" if target.endswith("windows-msvc") else "tsc"
+    return vendored_tree(name, f"typescript-{role}/", binary, "typescript.json", f"typescript_{role}")
+
+
+def tsgolint_of(name, target):
+    """The tsgolint inside a CLI zip (`tsgolint/`), which `deno lint
+    --type-aware` runs (BUILD_INFO.json `tsgolint`, fetch_tsgolint.py)."""
+    binary = "tsgolint.exe" if target.endswith("windows-msvc") else "tsgolint"
+    return vendored_tree(name, "tsgolint/", binary, "tsgolint.json", "tsgolint")
 
 
 targets = {}
@@ -145,6 +156,7 @@ for name in sorted(os.listdir(dist)):
             "esbuild": esbuild_of(name, m["target"]),
             "typescript_check": typescript_of(name, m["target"], "check"),
             "typescript_lsp": typescript_of(name, m["target"], "lsp"),
+            "tsgolint": tsgolint_of(name, m["target"]),
         }
 
 if not targets and not (env.get("CLI_ONLY") == "1" and cli_targets):
