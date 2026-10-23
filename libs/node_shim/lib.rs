@@ -3827,36 +3827,41 @@ fn add_common_flags(
   add_preload_flags(deno_args, env_opts);
 }
 
-/// Node's preload flags. `--require` maps to Deno's `--require`, `--import`
-/// to `--preload`, and `--experimental-loader` (`--loader`) to a generated
-/// preload module that registers the loader with `module.register()`, which
-/// is what Node does for it. Deno evaluates `--preload` modules before
-/// `--require` ones, where Node evaluates `--require` first.
+/// Node's preload flags, as `--preload` modules in Node's order: the
+/// `--require` modules, then the `--experimental-loader` (`--loader`) hooks,
+/// then the `--import` modules. A `--require` module is loaded with a
+/// `require` rooted at the working directory, as Node does (so `-r pkg` finds a
+/// package or a self-reference); a loader is registered with
+/// `module.register()`, which is what Node does for `--experimental-loader`.
 fn add_preload_flags(
   deno_args: &mut Vec<String>,
   env_opts: &EnvironmentOptions,
 ) {
+  for module in &env_opts.preload_cjs_modules {
+    let source = format!(
+      "import{{createRequire}}from\"node:module\";\
+       import process from\"node:process\";\
+       createRequire(process.cwd()+\"/\")({});",
+      serde_json::Value::String(module.to_string())
+    );
+    deno_args.push(format!("--preload={}", data_url(&source)));
+  }
   for loader in &env_opts.userland_loaders {
-    deno_args.push(format!("--preload={}", loader_preload_url(loader)));
+    let source = format!(
+      "import{{register}}from\"node:module\";\
+       import{{pathToFileURL}}from\"node:url\";\
+       register({},pathToFileURL(\"./\"));",
+      serde_json::Value::String(loader.to_string())
+    );
+    deno_args.push(format!("--preload={}", data_url(&source)));
   }
   for module in &env_opts.preload_esm_modules {
     deno_args.push(format!("--preload={module}"));
   }
-  for module in &env_opts.preload_cjs_modules {
-    deno_args.push(format!("--require={module}"));
-  }
 }
 
-/// A `data:` module that registers `loader` (resolved against the working
-/// directory, as Node resolves `--experimental-loader`) with
-/// `module.register()`.
-fn loader_preload_url(loader: &str) -> String {
-  let source = format!(
-    "import{{register}}from\"node:module\";\
-     import{{pathToFileURL}}from\"node:url\";\
-     register({},pathToFileURL(\"./\"));",
-    serde_json::Value::String(loader.to_string())
-  );
+/// A percent-encoded `data:text/javascript` URL for `source`.
+fn data_url(source: &str) -> String {
   let mut url = String::from("data:text/javascript,");
   for byte in source.bytes() {
     if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~')
@@ -5405,31 +5410,49 @@ mod tests {
     ]
   );
 
-  test!(
-    test_run_script_with_preloads,
-    [
+  fn preload_sources(deno_args: &[String]) -> Vec<String> {
+    deno_args
+      .iter()
+      .filter_map(|arg| arg.strip_prefix("--preload="))
+      .map(|value| match value.strip_prefix("data:text/javascript,") {
+        Some(source) => {
+          assert!(!source.contains(' '), "{source}");
+          percent_decode(source)
+        }
+        None => value.to_string(),
+      })
+      .collect()
+  }
+
+  #[test]
+  fn test_run_script_with_preloads() {
+    let parsed = parse_args(svec![
+      "--import",
+      "./b.mjs",
       "--require",
       "./a.cjs",
       "-r",
       "dotenv/config",
-      "--import",
-      "./b.mjs",
       "foo.js"
-    ],
-    [
-      "node",
-      "run",
-      "-A",
-      "--unstable-bare-node-builtins",
-      "--unstable-detect-cjs",
-      "--node-modules-dir=manual",
-      "--no-config",
-      "--preload=./b.mjs",
-      "--require=./a.cjs",
-      "--require=dotenv/config",
-      "foo.js"
-    ]
-  );
+    ])
+    .unwrap();
+    let result =
+      translate_to_deno_args(parsed, &TranslateOptions::for_node_cli());
+    // Node's order: the --require modules first, then the --import ones.
+    assert_eq!(
+      preload_sources(&result.deno_args),
+      svec![
+        "import{createRequire}from\"node:module\";\
+         import process from\"node:process\";\
+         createRequire(process.cwd()+\"/\")(\"./a.cjs\");",
+        "import{createRequire}from\"node:module\";\
+         import process from\"node:process\";\
+         createRequire(process.cwd()+\"/\")(\"dotenv/config\");",
+        "./b.mjs"
+      ]
+    );
+    assert_eq!(result.deno_args.last().unwrap(), "foo.js");
+  }
 
   fn percent_decode(input: &str) -> String {
     let bytes = input.as_bytes();
@@ -5455,20 +5478,13 @@ mod tests {
         parse_args(svec![flag, "./my loader.mjs", "script.mjs"]).unwrap();
       let result =
         translate_to_deno_args(parsed, &TranslateOptions::for_child_process());
-      let preload = result
-        .deno_args
-        .iter()
-        .find_map(|arg| arg.strip_prefix("--preload="))
-        .expect("a --preload flag");
-      let source = preload
-        .strip_prefix("data:text/javascript,")
-        .expect("a data: URL");
-      assert!(!source.contains(' '), "{source}");
       assert_eq!(
-        percent_decode(source),
-        "import{register}from\"node:module\";\
-         import{pathToFileURL}from\"node:url\";\
-         register(\"./my loader.mjs\",pathToFileURL(\"./\"));"
+        preload_sources(&result.deno_args),
+        svec![
+          "import{register}from\"node:module\";\
+           import{pathToFileURL}from\"node:url\";\
+           register(\"./my loader.mjs\",pathToFileURL(\"./\"));"
+        ]
       );
       assert_eq!(result.deno_args.last().unwrap(), "script.mjs");
     }

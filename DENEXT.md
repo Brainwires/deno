@@ -3923,10 +3923,16 @@ where the changes are discussed.
        and `source` overrides (string, `ArrayBuffer`, typed array) behave like
        Node's. A value thrown in a hook is rethrown on the loading thread (an
        error keeps its `name`, `message`, `stack` and `code`), and
-       `process.exit()` in a hook ends the process.
+       `process.exit()` in a hook ends the process. The hooks modules see
+       `workerData` as `null`, not the worker's channel.
+     - **`Module.register`.** The static is exposed again, as in Node.
+       denoland/deno#34868 had hidden it because Playwright and tsx probe it and
+       then wait for their loader's `initialize` handshake, which the stub never
+       answered; with this implementation they get it, so they take their
+       `register()` path instead of falling back.
      - **Where they apply.** To what `registerHooks()` hooks see on the ESM
-       side: `import`, `import()` and the main module's load, in the user's code
-       and in npm packages. As in Node, they do not apply to `require()`.
+       side: `import`, `import()` and an ES main module's load, in the user's
+       code and in npm packages. As in Node, they do not apply to `require()`.
        In-thread `registerHooks()` hooks always run first, whichever was
        registered first, and the off-thread chain runs after them.
      - **Deno's resolver.** The end of the off-thread chain is not a copy of
@@ -3944,17 +3950,27 @@ where the changes are discussed.
      - **Node's CLI flags.** The Node CLI shim (`node` in tasks and
        `child_process` spawning `process.execPath`) used to drop `--require`,
        `--import` and `--experimental-loader` / `--loader`. They now become
-       `--require`, `--preload` and a generated `data:` preload module that
-       calls `register(<loader>, pathToFileURL("./"))`, which is what Node does
-       for `--experimental-loader`. (Deno evaluates `--preload` modules before
-       `--require` ones; Node runs `--require` first.)
+       `--preload` modules in Node's order (`--require`, then the loaders, then
+       `--import`): a `--require` module is loaded through a generated `data:`
+       module with a `require` rooted at the working directory (so `-r pkg`
+       finds a package or the project's self-reference, as in Node), and a
+       loader through one that calls
+       `register(<loader>,
+       pathToFileURL("./"))`, which is what Node does
+       for `--experimental-loader`.
      - **Not done:** a hooks chain that never settles blocks the loading thread
-       (Node detects it and exits with code 13); hooks registered on the main
-       thread do not reach `worker_threads` workers (each thread registers its
-       own); the hooks worker's own module loading is not customized by earlier
-       `register()` calls; `--input-type=module --eval` is still run as a script
-       by the CLI shim; an error from an ESM resolve or load hook reaches the
-       importer as a message (its `code` is lost), as for `registerHooks()`.
+       (Node resolves `import()` asynchronously, so other imports go on, and
+       detects the stall and exits with code 13); a CommonJS main module is
+       loaded by the CommonJS loader, out of the hooks' reach (Node's `--import`
+       routes it through the ESM loader); as with `registerHooks()`, the ESM
+       load hooks are not called for `node:` builtins; the main module is
+       resolved before preloads run, so a hook can't resolve a bare main
+       specifier; hooks registered on the main thread do not reach
+       `worker_threads` workers (each thread registers its own); the hooks
+       worker's own module loading is not customized by earlier `register()`
+       calls; `--input-type=module --eval` is still run as a script by the CLI
+       shim; an error from an ESM resolve or load hook reaches the importer as a
+       message (its `code` is lost), as for `registerHooks()`.
 
      Tests: spec `node/module_register` (`resolve_remap`, a resolve hook that
      remaps a bare specifier; `load_transform`, a load hook that rewrites
@@ -3966,13 +3982,20 @@ where the changes are discussed.
      `node_cli_flags`, `--experimental-loader` / `--import` / `--require` from
      `child_process`); `test_run_script_with_preloads`,
      `test_experimental_loader_registers_through_preload` and
-     `test_eval_with_preloads` (`libs/node_shim`); node_compat
-     `module-hooks/test-async-loader-hooks-register-with-{ports,cjs,url-parenturl}.mjs`,
-     `-initialize-in-sequence.mjs`, `-process-exit-top-level.mjs`,
-     `-mixed-opt-in.mjs`, `test-module-hooks-load-async-and-sync.js`,
-     `test-module-hooks-preload.js` and
-     `test-module-hooks-resolve-require-resolve-loaded-with-source.js` enabled;
-     the other `test-async-loader-hooks-*` entries say what each still needs.
+     `test_eval_with_preloads` (`libs/node_shim`);
+     `[node/module register]
+     runs the hooks module's initialize` and
+     `Module.register and
+     Module.registerHooks are exposed`
+     (`tests/unit_node/module_test.ts`); node_compat
+     `module-hooks/test-async-loader-hooks-register-with-ports.mjs`,
+     `-initialize-in-sequence.mjs`, `-process-exit-top-level.mjs` and
+     `test-module-hooks-resolve-require-resolve-loaded-with-source.js` enabled,
+     and `parallel/test-preload-self-referential.js` now passing for real (it
+     passed while `-r` was dropped); the other `test-async-loader-hooks-*`
+     entries say what each still needs. `-never-settling-race-{cjs,esm}.mjs` and
+     `-no-leak-internals.mjs`, which passed only because the shim dropped
+     `--experimental-loader`, are now ignored with the reason.
 
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 108) are what the

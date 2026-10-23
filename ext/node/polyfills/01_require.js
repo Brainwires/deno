@@ -3449,8 +3449,10 @@ Module.stripTypeScriptTypes = stripTypeScriptTypes;
 // process's permissions: a hook that reads a file needs `--allow-read` like any
 // other code.
 const kHooksWorkerSource = `"use strict";
-const { workerData } = require("node:worker_threads");
-const { port, lock } = workerData;
+const workerThreads = require("node:worker_threads");
+const { port, lock } = workerThreads.workerData;
+// Hooks modules must not reach the channel to the loading thread.
+workerThreads.workerData = null;
 const lockView = new Int32Array(lock);
 const chain = [];
 const pending = new Map();
@@ -3769,6 +3771,10 @@ export function register(specifier, parentURL = undefined, options) {
   return reply.result;
 }
 
+// Node exposes it as a static too. (Playwright and tsx probe
+// `Module.register`; with this implementation their loaders get the
+// `initialize` handshake they wait for. denoland/deno#34868 hid it while it
+// was a stub.)
 Module.register = register;
 
 /**

@@ -320,8 +320,10 @@ try {
 });
 
 // https://github.com/denoland/deno/issues/24902
-Deno.test("[node/module register] is a function", () => {
-  assertEquals(register("foo"), undefined);
+Deno.test("[node/module register] runs the hooks module's initialize", () => {
+  const hooks = "data:text/javascript,export function initialize(data) " +
+    "{ return data.n * 2; }";
+  assertEquals(register(hooks, { data: { n: 21 } }), 42);
 });
 
 Deno.test("[node/module stripTypeScriptTypes] strips TypeScript types", () => {
@@ -354,18 +356,12 @@ Deno.test("[node/module stripTypeScriptTypes] rejects unsupported strip-only syn
   );
 });
 
-// Regression test for https://github.com/denoland/deno/issues/34868.
-// We don't implement the out-of-thread `module.register()` loader (it's a
-// no-op stub), so `Module.register` must NOT be exposed as a static. Tools
-// like Playwright and tsx feature-probe `import M from "node:module";
-// M.register`; when it's present they set up an ESM loader and wait on a
-// `MessagePort` handshake that our stub never answers, hanging silently.
-// With it absent they fall back to a path that works: Playwright skips the
-// loader and tsx uses `Module.registerHooks` (which we do implement) now
-// that the emulated Node version (>= 24.11.1) clears tsx's feature gate.
-Deno.test("[node/module] Module.register is not exposed, registerHooks is", () => {
+// denoland/deno#34868 hid `Module.register` while `register()` was a stub
+// that never answered a loader's `initialize` handshake (Playwright and tsx
+// probe the static). It is implemented now, so the static is back, as in Node.
+Deno.test("[node/module] Module.register and Module.registerHooks are exposed", () => {
   // @ts-ignore Not in our bundled @types/node yet.
-  assertEquals(Module.register, undefined);
+  assertEquals(Module.register, register);
   // @ts-ignore Not in our bundled @types/node yet.
   assertEquals(typeof Module.registerHooks, "function");
 });

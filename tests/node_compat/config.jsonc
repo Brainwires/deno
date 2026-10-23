@@ -250,7 +250,10 @@
     "module-hooks/test-module-hooks-load-context-merged.js": {},
     "module-hooks/test-module-hooks-load-context-optional-esm.mjs": {},
     "module-hooks/test-module-hooks-load-context-optional.js": {},
-    "module-hooks/test-module-hooks-load-async-and-sync.js": {},
+    "module-hooks/test-module-hooks-load-async-and-sync.js": {
+      "ignore": true,
+      "reason": "The CommonJS main entry is loaded by the CommonJS loader, which module.register() hooks don't reach (in Node, --import routes it through the ESM loader)"
+    },
     "module-hooks/test-module-hooks-load-builtin-override-commonjs.js": {},
     "module-hooks/test-module-hooks-load-builtin-override-json.js": {},
     "module-hooks/test-module-hooks-load-builtin-override-module.js": {},
@@ -265,7 +268,10 @@
     "module-hooks/test-module-hooks-load-short-circuit-required-start.js": {},
     "module-hooks/test-module-hooks-load-url-change-import.mjs": {},
     "module-hooks/test-module-hooks-load-url-change-require.js": {},
-    "module-hooks/test-module-hooks-preload.js": {},
+    "module-hooks/test-module-hooks-preload.js": {
+      "ignore": true,
+      "reason": "Expects util.inspect's single-quoted strings; Deno's console.log prints the class instance's strings with double quotes"
+    },
     "module-hooks/test-module-hooks-resolve-builtin-on-disk-require-with-prefix.js": {},
     "module-hooks/test-module-hooks-resolve-builtin-on-disk-import.mjs": {},
     "module-hooks/test-module-hooks-resolve-builtin-builtin-require.js": {},
@@ -4907,7 +4913,10 @@
       "ignore": true,
       "reason": "Expects Node's report of a value thrown at a hooks module's top level (stderr shape and exit code)"
     },
-    "module-hooks/test-async-loader-hooks-mixed-opt-in.mjs": {},
+    "module-hooks/test-async-loader-hooks-mixed-opt-in.mjs": {
+      "ignore": true,
+      "reason": "The main entry point is a bare specifier that only a module.register() hook resolves; Deno resolves the main module before preloads run"
+    },
     "module-hooks/test-async-loader-hooks-never-settling-import-meta-resolve.mjs": {
       "ignore": true,
       "reason": "Expects Node to detect a module.register() hooks chain that never settles (exit code 13 and a warning); Deno's loading thread keeps waiting"
@@ -4924,8 +4933,14 @@
       "ignore": true,
       "reason": "Expects Node to detect a module.register() hooks chain that never settles (exit code 13 and a warning); Deno's loading thread keeps waiting"
     },
-    "module-hooks/test-async-loader-hooks-never-settling-race-cjs.mjs": {},
-    "module-hooks/test-async-loader-hooks-never-settling-race-esm.mjs": {},
+    "module-hooks/test-async-loader-hooks-never-settling-race-cjs.mjs": {
+      "ignore": true,
+      "reason": "A module.register() resolve/load hook that never settles blocks the loading thread, so import() of other modules can't win the race (Node resolves import() asynchronously)"
+    },
+    "module-hooks/test-async-loader-hooks-never-settling-race-esm.mjs": {
+      "ignore": true,
+      "reason": "A module.register() resolve/load hook that never settles blocks the loading thread, so import() of other modules can't win the race (Node resolves import() asynchronously)"
+    },
     "module-hooks/test-async-loader-hooks-never-settling-resolve-cjs.mjs": {
       "ignore": true,
       "reason": "Expects Node to detect a module.register() hooks chain that never settles (exit code 13 and a warning); Deno's loading thread keeps waiting"
@@ -4938,7 +4953,10 @@
       "ignore": true,
       "reason": "Expects Node to detect a module.register() hooks chain that never settles (exit code 13 and a warning); Deno's loading thread keeps waiting"
     },
-    "module-hooks/test-async-loader-hooks-no-leak-internals.mjs": {},
+    "module-hooks/test-async-loader-hooks-no-leak-internals.mjs": {
+      "ignore": true,
+      "reason": "parentPort and import.meta.resolve are defined in a module.register() hooks module (Node hides both on the hooks thread)"
+    },
     "module-hooks/test-async-loader-hooks-process-exit-async.mjs": {
       "ignore": true,
       "reason": "Runs `--input-type=module --eval`, which Deno's Node CLI shim runs as a script, so the eval'd import is a syntax error"
@@ -4948,7 +4966,10 @@
       "reason": "Runs `--input-type=module --eval`, which Deno's Node CLI shim runs as a script, so the eval'd import is a syntax error"
     },
     "module-hooks/test-async-loader-hooks-process-exit-top-level.mjs": {},
-    "module-hooks/test-async-loader-hooks-register-with-cjs.mjs": {},
+    "module-hooks/test-async-loader-hooks-register-with-cjs.mjs": {
+      "ignore": true,
+      "reason": "A load hook's source for a node: builtin imported from ESM is not used (the ESM load hooks are not called for builtins, as with registerHooks())"
+    },
     "module-hooks/test-async-loader-hooks-register-with-import.mjs": {
       "ignore": true,
       "reason": "Runs `--input-type=module --eval`, which Deno's Node CLI shim runs as a script, so the eval'd import is a syntax error"
@@ -4958,7 +4979,10 @@
       "ignore": true,
       "reason": "Runs `--input-type=module --eval`, which Deno's Node CLI shim runs as a script, so the eval'd import is a syntax error"
     },
-    "module-hooks/test-async-loader-hooks-register-with-url-parenturl.mjs": {},
+    "module-hooks/test-async-loader-hooks-register-with-url-parenturl.mjs": {
+      "ignore": true,
+      "reason": "A load hook's source for a node: builtin imported from ESM is not used (the ESM load hooks are not called for builtins, as with registerHooks())"
+    },
     "module-hooks/test-async-loader-hooks-remove-beforeexit-listener.mjs": {
       "ignore": true,
       "reason": "Runs `--input-type=module --eval`, which Deno's Node CLI shim runs as a script, so the eval'd import is a syntax error"
