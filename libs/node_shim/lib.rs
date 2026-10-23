@@ -3610,6 +3610,7 @@ pub fn translate_to_deno_args(
     // Add conditions and inspector flags for eval
     add_conditions(deno_args, env_opts);
     add_inspector_flags(deno_args, env_opts);
+    add_preload_flags(deno_args, env_opts);
 
     // Get the eval code from either the explicit eval_string or the first remaining arg (for -p)
     let raw_eval_code = eval_string_for_print
@@ -3822,6 +3823,50 @@ fn add_common_flags(
 
   // Add inspector flags
   add_inspector_flags(deno_args, env_opts);
+
+  add_preload_flags(deno_args, env_opts);
+}
+
+/// Node's preload flags. `--require` maps to Deno's `--require`, `--import`
+/// to `--preload`, and `--experimental-loader` (`--loader`) to a generated
+/// preload module that registers the loader with `module.register()`, which
+/// is what Node does for it. Deno evaluates `--preload` modules before
+/// `--require` ones, where Node evaluates `--require` first.
+fn add_preload_flags(
+  deno_args: &mut Vec<String>,
+  env_opts: &EnvironmentOptions,
+) {
+  for loader in &env_opts.userland_loaders {
+    deno_args.push(format!("--preload={}", loader_preload_url(loader)));
+  }
+  for module in &env_opts.preload_esm_modules {
+    deno_args.push(format!("--preload={module}"));
+  }
+  for module in &env_opts.preload_cjs_modules {
+    deno_args.push(format!("--require={module}"));
+  }
+}
+
+/// A `data:` module that registers `loader` (resolved against the working
+/// directory, as Node resolves `--experimental-loader`) with
+/// `module.register()`.
+fn loader_preload_url(loader: &str) -> String {
+  let source = format!(
+    "import{{register}}from\"node:module\";\
+     import{{pathToFileURL}}from\"node:url\";\
+     register({},pathToFileURL(\"./\"));",
+    serde_json::Value::String(loader.to_string())
+  );
+  let mut url = String::from("data:text/javascript,");
+  for byte in source.bytes() {
+    if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~')
+    {
+      url.push(byte as char);
+    } else {
+      url.push_str(&format!("%{byte:02X}"));
+    }
+  }
+  url
 }
 
 fn add_conditions(deno_args: &mut Vec<String>, env_opts: &EnvironmentOptions) {
@@ -5359,6 +5404,98 @@ mod tests {
       "foo.js"
     ]
   );
+
+  test!(
+    test_run_script_with_preloads,
+    [
+      "--require",
+      "./a.cjs",
+      "-r",
+      "dotenv/config",
+      "--import",
+      "./b.mjs",
+      "foo.js"
+    ],
+    [
+      "node",
+      "run",
+      "-A",
+      "--unstable-bare-node-builtins",
+      "--unstable-detect-cjs",
+      "--node-modules-dir=manual",
+      "--no-config",
+      "--preload=./b.mjs",
+      "--require=./a.cjs",
+      "--require=dotenv/config",
+      "foo.js"
+    ]
+  );
+
+  fn percent_decode(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+      if bytes[i] == b'%' {
+        let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap();
+        out.push(u8::from_str_radix(hex, 16).unwrap());
+        i += 3;
+      } else {
+        out.push(bytes[i]);
+        i += 1;
+      }
+    }
+    String::from_utf8(out).unwrap()
+  }
+
+  #[test]
+  fn test_experimental_loader_registers_through_preload() {
+    for flag in ["--experimental-loader", "--loader"] {
+      let parsed =
+        parse_args(svec![flag, "./my loader.mjs", "script.mjs"]).unwrap();
+      let result =
+        translate_to_deno_args(parsed, &TranslateOptions::for_child_process());
+      let preload = result
+        .deno_args
+        .iter()
+        .find_map(|arg| arg.strip_prefix("--preload="))
+        .expect("a --preload flag");
+      let source = preload
+        .strip_prefix("data:text/javascript,")
+        .expect("a data: URL");
+      assert!(!source.contains(' '), "{source}");
+      assert_eq!(
+        percent_decode(source),
+        "import{register}from\"node:module\";\
+         import{pathToFileURL}from\"node:url\";\
+         register(\"./my loader.mjs\",pathToFileURL(\"./\"));"
+      );
+      assert_eq!(result.deno_args.last().unwrap(), "script.mjs");
+    }
+  }
+
+  #[test]
+  fn test_eval_with_preloads() {
+    let parsed = parse_args(svec![
+      "--import",
+      "./b.mjs",
+      "--input-type=module",
+      "--eval",
+      "1"
+    ])
+    .unwrap();
+    let result =
+      translate_to_deno_args(parsed, &TranslateOptions::for_child_process());
+    assert!(
+      result
+        .deno_args
+        .iter()
+        .any(|arg| arg == "--preload=./b.mjs"),
+      "{:?}",
+      result.deno_args
+    );
+    assert_eq!(result.deno_args[0], "eval");
+  }
 
   /// Helper for the deno-subcommand pass-through path (used when a tool spawns
   /// Deno with deno-style args). Translation is mode-independent here, so use
