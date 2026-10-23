@@ -689,10 +689,8 @@ impl<
         crate::local::symlink_package_dir(
           sys.as_ref(),
           &pkg.target_dir,
-          &join_package_name(
-            Cow::Borrowed(&self.root_node_modules_path),
-            pkg_alias,
-          ),
+          &self.root_node_modules_path,
+          pkg_alias,
         )?;
       }
       // and the `bin` of `file:`, git and tarball dependencies
@@ -803,7 +801,8 @@ impl<
             crate::local::symlink_package_dir(
               sys.as_ref(),
               &target_path,
-              &join_package_name(Cow::Borrowed(&member_node_modules), alias),
+              &member_node_modules,
+              alias,
             )?;
           }
         }

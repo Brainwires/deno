@@ -76,7 +76,7 @@ env:
   LAUFEY_SHA: ef4185502e63cbe103c9dcd5b4e86b7989fce3fc
   LAUFEY_REPOSITORY: Brainwires/laufey
   # The stock CLI the archives are smoke-tested with (and that denext runs).
-  STOCK_DENO_VERSION: 2.9.7
+  STOCK_DENO_VERSION: 2.9.8
   # The esbuild every `deno-cli-*` archive ships next to `deno`: the
   # official @esbuild/<platform> binary, pinned by npm integrity in
   # .github/denext-runtime/fetch_esbuild.py. Must equal ESBUILD_VERSION in

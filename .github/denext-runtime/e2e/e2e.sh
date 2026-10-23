@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Run the denext runtime e2e suite (run.ts) against one runtime archive and
 # backend, with the STOCK `deno` on PATH as the packaging CLI (CI pins
-# 2.9.7). On Linux it runs inside Xvfb + a private D-Bus session with a
+# 2.9.8). On Linux it runs inside Xvfb + a private D-Bus session with a
 # window manager and a stand-in notification server (linux/session.sh).
 #
 # Env: TARGET ARCHIVE BACKEND WORK_DIR [E2E_OUT] [E2E_AREAS=a,b,...]

@@ -9,7 +9,7 @@ users:
 - **The Deno Desktop runtime**: the `libdenort` library `deno desktop` embeds an
   app into, plus [laufey](https://github.com/littledivy/laufey)'s backend hosts
   (items 1-22 below, plus the `deno_core` fix in item 25). It is published as
-  prebuilt archives that also work with the stock `deno desktop` CLI (2.9.7):
+  prebuilt archives that also work with the stock `deno desktop` CLI (2.9.8):
 
   ```sh
   DENORT_DESKTOP_BIN=<unpacked archive>/libdenort.dylib   # .so on Linux, denort.dll on Windows
@@ -34,6 +34,51 @@ Changes that would help everyone can still be offered to denoland/deno, but
 nothing here depends on that: the fork keeps every change whether or not
 upstream takes it, and is rebased onto a newer Deno when we choose to move.
 
+### Upstream syncs
+
+Every upstream Deno release is merged into `development-denext` as it ships, by
+hand (there is no sync automation), on a `sync/upstream-<version>` branch with a
+merge commit, so the history shows each sync. The fork keeps its own version
+(`3.0.0-rc.N`) until upstream's 3.0.0, which gets a full reconcile;
+`cli/lib/upstream_version.txt` names the merged upstream release.
+
+- **2.9.8** (merged 2026-10-22, `sync/upstream-2.9.8-b`, on top of
+  3.0.0-rc.3 and the Rust 1.99.1 pin of item 100). Already carried before
+  the merge and now upstream's own commits: #36925, #36962, #36942, #36901,
+  #36968 and the rand 0.9.3 bump (item 27), and #37026 (item 33, identical to
+  ours). New from upstream: X.509v1 handling aligned with OpenSSL (#36933), npm
+  package link names validated (#37047), zsh completion of script paths for a
+  bare `deno run` (#36976), `assert` message functions and format arguments
+  (#36944), `mock.reset()` restoring `mock.method()` (#36886) and the distrusted
+  eMudhra CAs (#37046). Conflicts and how they were resolved:
+  - `cli/lib/version.txt`, `cli/Cargo.toml`, `cli/rt/Cargo.toml`: our
+    `3.0.0-rc.3` kept; `upstream_version.txt` set to `2.9.8`.
+  - `Cargo.toml`: upstream's crate version bumps taken, our `deno_sql` kept;
+    `aws-lc-sys` stays at our `0.46.0` (upstream 0.40.0). Our rustls 0.23.46,
+    rustls-webpki 0.103.16, webpki-roots 1.0.10, hyper 1.11.1, hyper-util 0.1.21
+    and rand 0.9.3 already matched or exceeded upstream's.
+  - `Cargo.lock`: ours, with the workspace versions refreshed and `deno_graph`
+    0.111.1 (upstream's bump) taken; upstream's extra `webpki-roots` 0.26.11
+    shim is not needed (nothing here depends on 0.26).
+  - `ext/node/ops/tls_wrap.rs`: upstream's #36933 replaces the carried #36248
+    (item 68); our three other commits there (empty TLS writes #36986, the
+    onread backing store #37013, `setMaxSendFragment`) re-applied on top
+    cleanly. `deno_node`'s `x509-parser` dependency (only #36248 used it)
+    dropped.
+  - `libs/npm_installer/{local,hoisted}.rs`: upstream's new
+    `symlink_package_dir(sys, target, node_modules, name)` signature at the two
+    workspace-link call sites; the carried #36103 checks stay (see item 75), and
+    its two unit tests moved to the new signature (a `.hidden` case added so the
+    hidden-component check is still reached).
+  - `tests/node_compat/config.jsonc`: our enabled async-hooks tests kept next to
+    upstream's re-enabled `test-assert.js`.
+  - `tests/specs/node/node_test_mock_timers/test.js`: identical assertion; our
+    comment kept.
+  - `.github/workflows/ci.generated.yml`: stays deleted (the fork's
+    `denext_tests*.yml` replace it).
+  - `STOCK_DENO_VERSION` in `denext_runtime.yml` (the stock `deno desktop` the
+    smoke and e2e jobs package with) follows the upstream version, now 2.9.8.
+
 ## Versioning
 
 From runtime **3.0.0-rc.1** (the release that was going to be `denext.23`) the
@@ -49,11 +94,11 @@ the two schemes in release order (`2.9.7-denext.22` < `3.0.0-rc.1` <
   opt-in where possible (for example behind an environment variable that warns
   otherwise).
 - **The upstream version** the fork is built from is in
-  `cli/lib/upstream_version.txt` (`2.9.7`; `UPSTREAM_DENO_VERSION` in
+  `cli/lib/upstream_version.txt` (`2.9.8`; `UPSTREAM_DENO_VERSION` in
   `cli/lib/version.rs`). Everything that means upstream Deno uses it, never the
   fork's own version, which names no upstream release (and an upstream release
   of the same number would be a different runtime): the release channel
-  (`deno --version` says `stable`, upstream's channel for 2.9.7, not
+  (`deno --version` says `stable`, upstream's channel for 2.9.8, not
   `release
   candidate`), the `denort` / `libdenort` downloads from
   dl.deno.land, the `engines.deno` check of `deno install` (npm ranges never
@@ -89,7 +134,7 @@ the two schemes in release order (`2.9.7-denext.22` < `3.0.0-rc.1` <
 point. Nothing here is proposed back from this fork; the upstream PRs below are
 where the changes are discussed.
 
-## What is patched (on top of `v2.9.7`)
+## What is patched (on top of `v2.9.8`)
 
 1. **`feat(net,http)`: in-process memory transport for `Deno.serve`** —
    `DENO_SERVE_ADDRESS=memory:<name>`. Ported from
@@ -724,7 +769,7 @@ where the changes are discussed.
     (`deno 3.0.0-rc.1 (stable, release, <target>)`) and the user agent
     (`Deno/3.0.0-rc.1`), and marks the build as denext's. The `libdenort`
     download of `deno desktop` (and `denort` when the build is not denext's)
-    keeps the upstream version (`UPSTREAM_DENO_VERSION`, `2.9.7`), and
+    keeps the upstream version (`UPSTREAM_DENO_VERSION`, `2.9.8`), and
     `deno upgrade` refuses to run. A value that is not the build's own version
     or does not extend it with `-` or `+` is ignored (the `libdenort` build sets
     none). Each archive is smoke-tested on its own runner (the version lines and
@@ -735,7 +780,9 @@ where the changes are discussed.
 
 27. **Upstream fixes taken ahead of a Deno bump** (from `denext.16`), each
     cherry-picked from denoland/deno `main` with `-x` (the commit message names
-    the upstream commit):
+    the upstream commit). All of them shipped in upstream 2.9.8, so since the
+    [2.9.8 sync](#upstream-syncs) the fork carries upstream's commits and this
+    item records only when they arrived:
     - `fix(compile)`: a compiled program checks the read permission for a local
       file it imports dynamically (denoland/deno#36925, a security fix).
     - `fix(ext/napi)`: `napi_create_dataview` checks its bounds for overflow
@@ -972,7 +1019,10 @@ where the changes are discussed.
     drops them after disposing of the isolate; `deno lint` waits (bounded) for
     its plugin host thread instead of detaching it. Covered by
     `op_ctxs_outlive_isolate` (`libs/core/runtime/tests/misc.rs`) and the spec
-    `tests/specs/lint/lint_plugin_shutdown`.
+    `tests/specs/lint/lint_plugin_shutdown`. Upstream merged #37026 unchanged
+    and shipped it in 2.9.8 (a36142b28c); since the
+    [2.9.8 sync](#upstream-syncs) this is upstream's fix and the fork carries
+    nothing of its own here.
 
 34. **`feat(desktop)`: delivered notifications, destructive menu items, the
     share sheet, Handoff and Spotlight** (from `denext.20`, laufey API 49):
@@ -1947,8 +1997,15 @@ where the changes are discussed.
     - crypto: RSA JWK modulus check (#36156), `raw-private` / `raw-public`
       KeyObject formats (#36912), X.509 name string types (#36252),
       `checkHost()` prefers SAN (#36250), X.509 v1 chains verified by signature
-      instead of name matching (#36248); UTF-16LE Buffer writes through V8
-      (#36804).
+      instead of name matching (#36248; replaced at the
+      [2.9.8 sync](#upstream-syncs) by upstream's own
+      [#36933](https://github.com/denoland/deno/pull/36933), which validates v1
+      chains the way OpenSSL does: signatures, validity, `basicConstraints`,
+      `keyUsage` / `extendedKeyUsage`, `CertificateVerify` and path building
+      with backtracking. #36248's `tls_wrap.rs` changes and its `x509-parser`
+      dependency of `deno_node` were dropped; its `tests/unit_node/tls_test.ts`
+      cases and `tests/testdata/tls/localhost_v1*` fixtures stay, now run
+      against upstream's code); UTF-16LE Buffer writes through V8 (#36804).
     - npm: unchanged `.bin` shims are not rewritten (Windows os error 32,
       #36447); an optional dependency that doesn't exist is skipped with a
       warning (#36606); BYONM lookups stay inside the configured root (#36134).
@@ -2279,11 +2336,18 @@ where the changes are discussed.
       `@scope/name` before an install links them under `node_modules` (no `..`,
       separators, drive or absolute paths, period-prefixed components such as
       `.deno` or `.bin`), so a `package.json` can't make an install write or
-      delete outside its package directory (#36103). Ours: package lookups
-      (byonm, local, global resolvers) keep the shape checks but allow a
-      period-prefixed name, which Node's CommonJS loader resolves
-      (`require(".multipart/x")`); the pull request rejected it there too, which
-      was its red `npm::cjs_export_analysis_require_re_export`;
+      delete outside its package directory (#36103). Upstream's narrower
+      [#37047](https://github.com/denoland/deno/pull/37047) (2.9.8: link names
+      checked inside `symlink_package_dir`, which now takes the `node_modules`
+      directory and the name) merged alongside it at the
+      [2.9.8 sync](#upstream-syncs); both checks run, #36103's
+      `ensure_safe_package_symlink_path` after upstream's `package_link_path`,
+      and #36103 still covers the resolvers and `package.json` validation that
+      #37047 does not. Ours: package lookups (byonm, local, global resolvers)
+      keep the shape checks but allow a period-prefixed name, which Node's
+      CommonJS loader resolves (`require(".multipart/x")`); the pull request
+      rejected it there too, which was its red
+      `npm::cjs_export_analysis_require_re_export`;
     - an op error of a registered class is built natively on both the slow and
       the fast path from a prototype captured at registration, so a Proxy or
       accessor on `Deno.core.errorConstructors` can't run JavaScript inside a
@@ -3666,7 +3730,7 @@ commit; the setup job checks and fails otherwise. Per target it:
 3. assembles the archives, checks architectures and dynamic dependencies (`file`
    / `lipo` / `otool -L` / `ldd`, and the import table of every Windows `.exe` /
    `.dll` with `pe_deps.py`; any dependency that resolves nowhere fails it),
-   packages a small `Deno.serve` app with the stock `deno desktop` 2.9.7 for
+   packages a small `Deno.serve` app with the stock `deno desktop` 2.9.8 for
    both backends, and launches it (Linux under Xvfb): the page, served from
    `t3code://app`, POSTs back to `Deno.serve` and the app exits. A launch
    failure fails the job;
@@ -3799,7 +3863,7 @@ Layout:
 
 | Path                  | What                                                                                                                                                                                                          |
 | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `e2e.sh`              | Unpacks the archive under test, sets up the Linux session, runs `run.ts` with the stock `deno` (2.9.7).                                                                                                       |
+| `e2e.sh`              | Unpacks the archive under test, sets up the Linux session, runs `run.ts` with the stock `deno` (2.9.8).                                                                                                       |
 | `run.ts`              | Runs every area (`E2E_AREAS` / the workflow's `e2e_areas` input narrows it), writes `e2e-<target>-<backend>.json` and the step summary, exits 1 on any failure.                                               |
 | `lib/runner.ts`       | Packages an app with the stock `deno desktop` against `DENORT_DESKTOP_BIN` / `LAUFEY_DEV_DIR`, writes `.deno-desktop/app.json` and `laufey-launch.json` as denext's packager does, launches, collects, kills. |
 | `apps/<area>/main.ts` | One small app per area; `apps/_shared` has the reporting (`e2e.ts`) and real input (`input.ts`: XTEST / `keybd_event` / CoreGraphics key presses, the window manager's close).                                |
