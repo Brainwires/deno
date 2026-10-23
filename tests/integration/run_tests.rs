@@ -3904,3 +3904,109 @@ fn readline_muted_multi_prompt_pty() {
       console.expect("A2: world");
     });
 }
+
+/// A drive letter `subst`ed onto a directory for the life of the value.
+#[cfg(windows)]
+struct SubstDrive(String);
+
+#[cfg(windows)]
+impl SubstDrive {
+  fn new(target: &PathRef) -> Self {
+    for letter in ('G'..='Z').rev() {
+      let drive = format!("{letter}:");
+      if std::path::Path::new(&format!("{drive}\\")).exists() {
+        continue;
+      }
+      let status = Command::new("subst")
+        .arg(&drive)
+        .arg(target.as_path())
+        .status()
+        .unwrap();
+      if status.success() {
+        return Self(drive);
+      }
+    }
+    panic!("no free drive letter for subst");
+  }
+}
+
+#[cfg(windows)]
+impl Drop for SubstDrive {
+  fn drop(&mut self) {
+    let _ = Command::new("subst").arg(&self.0).arg("/d").status();
+  }
+}
+
+// A workspace member, a `links` package and an auto-linked config folder on
+// another drive than the workspace root: the synthetic import map wrote their
+// paths relative to the root (`./../../Q:/lib/mod.ts`), which resolves to
+// `file:///C:/Q:/lib/mod.ts`.
+#[cfg(windows)]
+#[test]
+fn workspace_import_map_across_drives() {
+  let context = TestContext::default();
+  let temp_dir = context.temp_dir();
+  temp_dir.create_dir_all("other/lib");
+  temp_dir.create_dir_all("other/linked");
+  temp_dir.create_dir_all("other/auto");
+  temp_dir.create_dir_all("mono/web");
+  let drive = SubstDrive::new(&temp_dir.path().join("other"));
+  let on_drive = |path: &str| format!("file:///{}/{path}", drive.0);
+
+  temp_dir.write("other/lib/mod.ts", "export const lib = 'lib';\n");
+  temp_dir.write(
+    "other/linked/deno.json",
+    json!({
+      "name": "@scope/linked",
+      "version": "1.0.0",
+      "exports": "./mod.ts",
+      "imports": { "linked-inner": "./inner.ts" },
+    })
+    .to_string(),
+  );
+  temp_dir.write(
+    "other/linked/mod.ts",
+    "export { inner as linked } from 'linked-inner';\n",
+  );
+  temp_dir.write("other/linked/inner.ts", "export const inner = 'linked';\n");
+  temp_dir.write(
+    "other/auto/deno.json",
+    json!({ "imports": { "auto-inner": "./inner.ts" } }).to_string(),
+  );
+  temp_dir.write(
+    "other/auto/mod.ts",
+    "export { inner as auto } from 'auto-inner';\n",
+  );
+  temp_dir.write("other/auto/inner.ts", "export const inner = 'auto';\n");
+
+  temp_dir.write(
+    "mono/deno.json",
+    json!({
+      "workspace": ["./web"],
+      "links": [on_drive("linked/")],
+      "imports": { "auto": on_drive("auto/mod.ts") },
+    })
+    .to_string(),
+  );
+  temp_dir.write(
+    "mono/web/deno.json",
+    json!({ "imports": { "lib": on_drive("lib/mod.ts") } }).to_string(),
+  );
+  temp_dir.write(
+    "mono/web/main.ts",
+    concat!(
+      "import { lib } from 'lib';\n",
+      "import { linked } from '@scope/linked';\n",
+      "import { auto } from 'auto';\n",
+      "console.log(lib, linked, auto);\n",
+    ),
+  );
+
+  context
+    .new_command()
+    .current_dir(temp_dir.path().join("mono/web"))
+    .args("run main.ts")
+    .run()
+    .assert_matches_text("lib linked auto\n")
+    .assert_exit_code(0);
+}

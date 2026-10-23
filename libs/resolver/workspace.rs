@@ -1102,10 +1102,11 @@ impl<TSys: FsMetadata + FsRead> WorkspaceResolver<TSys> {
           child_import_map_config(sys, config, workspace.catalogs())
         })
         .collect::<Result<Vec<_>, _>>()?;
-      let (import_map_url, mut import_map) = create_synthetic_import_map(
-        base_import_map_config,
-        child_import_map_configs,
-      );
+      let (import_map_url, mut import_map) =
+        crate::synthetic_import_map::create_synthetic_import_map(
+          base_import_map_config,
+          child_import_map_configs,
+        );
       // When `jsrDepsInNodeModules` is enabled, install and resolve `jsr:`
       // dependencies through the npm machinery by rewriting them to their
       // npm-compat (`@jsr/scope__name`) form. This mirrors how pnpm/npm install
@@ -1910,98 +1911,6 @@ pub struct SerializableWorkspaceResolver<'a> {
   pub fs_cache_options: FsCacheOptions,
   #[serde(default)]
   pub catalogs: IndexMap<String, IndexMap<String, String>>,
-}
-
-/// `import_map::ext::create_synthetic_import_map`, for children on another
-/// Windows drive too.
-///
-/// The crate scopes each child (a workspace member or linked package) by its
-/// directory and maps its imports with paths relative to the base map's
-/// directory, from `Url::make_relative`, which knows nothing of drive letters:
-/// from `file:///C:/app/` a child at `file:///D:/lib/` became
-/// `./../../D:/lib/`, which resolves to `file:///C:/D:/lib/`. A linked
-/// package on another drive then lost its own import map. Such children are
-/// scoped here by absolute URLs instead; the rest go through the crate.
-fn create_synthetic_import_map(
-  base: import_map::ext::ImportMapConfig,
-  children: Vec<import_map::ext::ImportMapConfig>,
-) -> (Url, serde_json::Value) {
-  let base_dir = base
-    .base_url
-    .join(".")
-    .unwrap_or_else(|_| base.base_url.clone());
-  let (other_drive, same_drive): (Vec<_>, Vec<_>) = children
-    .into_iter()
-    .partition(|child| on_other_windows_drive(&base_dir, &child.base_url));
-  let (url, mut value) =
-    ::import_map::ext::create_synthetic_import_map(base, same_drive);
-  if other_drive.is_empty() {
-    return (url, value);
-  }
-  let serde_json::Value::Object(map) = &mut value else {
-    return (url, value);
-  };
-  let scopes = map
-    .entry("scopes")
-    .or_insert_with(|| serde_json::Value::Object(Default::default()));
-  let serde_json::Value::Object(scopes) = scopes else {
-    return (url, value);
-  };
-  for child in other_drive {
-    let Ok(child_dir) = child.base_url.join(".") else {
-      continue;
-    };
-    let serde_json::Value::Object(mut child_map) = child.import_map_value
-    else {
-      continue;
-    };
-    let Some(serde_json::Value::Object(imports)) = child_map.remove("imports")
-    else {
-      continue;
-    };
-    let scope = scopes
-      .entry(child_dir.to_string())
-      .or_insert_with(|| serde_json::Value::Object(Default::default()));
-    let serde_json::Value::Object(scope) = scope else {
-      continue;
-    };
-    for (key, target) in imports {
-      let Some(target) = target.as_str() else {
-        continue;
-      };
-      let target = match child_dir.join(target) {
-        Ok(url) => url.to_string(),
-        Err(_) => target.to_string(),
-      };
-      scope.insert(key, serde_json::Value::String(target));
-    }
-  }
-  (url, value)
-}
-
-/// The drive of a Windows `file:` URL (`file:///C:/...` -> `C:`), as spelled:
-/// `Url::make_relative` compares path segments literally, so `c:` and `C:`
-/// are different drives to it too.
-fn windows_drive(url: &Url) -> Option<&str> {
-  if url.scheme() != "file" {
-    return None;
-  }
-  let first = url.path_segments()?.next()?;
-  let mut chars = first.chars();
-  match (chars.next(), chars.next(), chars.next()) {
-    (Some(letter), Some(':' | '|'), None) if letter.is_ascii_alphabetic() => {
-      Some(first)
-    }
-    _ => None,
-  }
-}
-
-/// Whether `target` is a `file:` URL on another Windows drive than `base`.
-fn on_other_windows_drive(base: &Url, target: &Url) -> bool {
-  match (windows_drive(base), windows_drive(target)) {
-    (Some(base), Some(target)) => base != target,
-    _ => false,
-  }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -3502,71 +3411,6 @@ mod test {
       }
       _ => unreachable!(),
     }
-  }
-
-  #[test]
-  fn synthetic_import_map_scopes_a_child_on_another_drive() {
-    // A linked package on another Windows drive keeps its own import map: the
-    // relative scope the import map crate computes across drives
-    // (`./../../D:/lib/`) resolves to `file:///C:/D:/lib/`.
-    let base = import_map::ext::ImportMapConfig {
-      base_url: Url::parse("file:///C:/work/app/deno.json").unwrap(),
-      import_map_value: json!({ "imports": { "lib": "file:///D:/lib/mod.ts" } }),
-    };
-    let children = vec![
-      import_map::ext::ImportMapConfig {
-        base_url: Url::parse("file:///D:/lib/deno.json").unwrap(),
-        import_map_value: json!({
-          "imports": { "inner": "./sub/b.ts", "dep": "jsr:@std/path@1" },
-        }),
-      },
-      import_map::ext::ImportMapConfig {
-        base_url: Url::parse("file:///C:/work/shared/deno.json").unwrap(),
-        import_map_value: json!({ "imports": { "same": "./same.ts" } }),
-      },
-    ];
-    let (url, value) = create_synthetic_import_map(base, children);
-    let import_map =
-      import_map::parse_from_value(url, value).unwrap().import_map;
-    let resolve = |specifier: &str, referrer: &str| {
-      import_map
-        .resolve(specifier, &Url::parse(referrer).unwrap())
-        .unwrap()
-        .to_string()
-    };
-    assert_eq!(
-      resolve("inner", "file:///D:/lib/mod.ts"),
-      "file:///D:/lib/sub/b.ts"
-    );
-    assert_eq!(resolve("dep", "file:///D:/lib/mod.ts"), "jsr:@std/path@1");
-    assert_eq!(
-      resolve("lib", "file:///C:/work/app/main.ts"),
-      "file:///D:/lib/mod.ts"
-    );
-    // The same drive still goes through the crate's relative scope.
-    assert_eq!(
-      resolve("same", "file:///C:/work/shared/mod.ts"),
-      "file:///C:/work/shared/same.ts"
-    );
-  }
-
-  #[test]
-  fn windows_drives() {
-    let drive =
-      |url: &str| windows_drive(&Url::parse(url).unwrap()).map(str::to_owned);
-    assert_eq!(drive("file:///C:/work/"), Some("C:".to_owned()));
-    assert_eq!(drive("file:///d:/"), Some("d:".to_owned()));
-    assert_eq!(drive("file:///home/user/"), None);
-    assert_eq!(drive("file:///CC:/x"), None);
-    assert_eq!(drive("https://example.com/C:/"), None);
-    let other = |a: &str, b: &str| {
-      on_other_windows_drive(&Url::parse(a).unwrap(), &Url::parse(b).unwrap())
-    };
-    assert!(other("file:///C:/app/", "file:///D:/lib/deno.json"));
-    assert!(!other("file:///C:/app/", "file:///C:/lib/deno.json"));
-    // `make_relative` sees another drive in another case, too.
-    assert!(other("file:///C:/app/", "file:///c:/lib/deno.json"));
-    assert!(!other("file:///home/app/", "file:///home/lib/deno.json"));
   }
 
   #[test]
