@@ -242,6 +242,8 @@ impl IdleTrim {
         trim(state);
         // The GC's own follow-up work (finalizers) is not new activity.
         self.woken.store(false, Ordering::Release);
+        // Disarmed until the next wake-up.
+        return Poll::Pending;
       }
     }
     Poll::Pending
