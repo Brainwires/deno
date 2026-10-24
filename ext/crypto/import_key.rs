@@ -4,9 +4,9 @@ use base64::Engine;
 use deno_core::JsBuffer;
 use deno_core::ToV8;
 use deno_core::convert::Uint8Array;
-use elliptic_curve::pkcs8::PrivateKeyInfo;
 use p256::pkcs8::EncodePrivateKey;
 use rsa::pkcs1::UintRef;
+use rsa::pkcs8::PrivateKeyInfo;
 use rsa::pkcs8::der::Encode;
 use serde::Deserialize;
 use spki::der::Decode;
@@ -658,19 +658,19 @@ fn import_key_ec_jwk_to_point(
       let x = decode_b64url_to_field_bytes::<p256::NistP256>(&x)?;
       let y = decode_b64url_to_field_bytes::<p256::NistP256>(&y)?;
 
-      p256::EncodedPoint::from_affine_coordinates(&x, &y, false).to_bytes()
+      p256::Sec1Point::from_affine_coordinates(&x, &y, false).to_bytes()
     }
     EcNamedCurve::P384 => {
       let x = decode_b64url_to_field_bytes::<p384::NistP384>(&x)?;
       let y = decode_b64url_to_field_bytes::<p384::NistP384>(&y)?;
 
-      p384::EncodedPoint::from_affine_coordinates(&x, &y, false).to_bytes()
+      p384::Sec1Point::from_affine_coordinates(&x, &y, false).to_bytes()
     }
     EcNamedCurve::P521 => {
       let x = decode_b64url_to_field_bytes::<p521::NistP521>(&x)?;
       let y = decode_b64url_to_field_bytes::<p521::NistP521>(&y)?;
 
-      p521::EncodedPoint::from_affine_coordinates(&x, &y, false).to_bytes()
+      p521::Sec1Point::from_affine_coordinates(&x, &y, false).to_bytes()
     }
   };
 
@@ -753,7 +753,7 @@ fn import_key_ec(
       match named_curve {
         EcNamedCurve::P256 => {
           // 1-2.
-          let point = p256::EncodedPoint::from_bytes(&data)
+          let point = p256::Sec1Point::from_bytes(&data)
             .map_err(|_| ImportKeyError::InvalidP256ECPoint)?;
           // 3.
           if point.is_identity() {
@@ -762,7 +762,7 @@ fn import_key_ec(
         }
         EcNamedCurve::P384 => {
           // 1-2.
-          let point = p384::EncodedPoint::from_bytes(&data)
+          let point = p384::Sec1Point::from_bytes(&data)
             .map_err(|_| ImportKeyError::InvalidP384ECPoint)?;
           // 3.
           if point.is_identity() {
@@ -771,7 +771,7 @@ fn import_key_ec(
         }
         EcNamedCurve::P521 => {
           // 1-2.
-          let point = p521::EncodedPoint::from_bytes(&data)
+          let point = p521::Sec1Point::from_bytes(&data)
             .map_err(|_| ImportKeyError::InvalidP521ECPoint)?;
           // 3.
           if point.is_identity() {
@@ -821,7 +821,7 @@ fn import_key_ec(
       // 4.
       let alg = pk_info.algorithm.oid;
       // id-ecPublicKey
-      if alg != elliptic_curve::ALGORITHM_OID {
+      if alg != ID_EC_PUBLIC_KEY_OID {
         return Err(ImportKeyError::UnsupportedAlgorithm);
       }
 
@@ -856,7 +856,7 @@ fn import_key_ec(
 
         let bytes_consumed = match named_curve {
           EcNamedCurve::P256 => {
-            let point = p256::EncodedPoint::from_bytes(&*encoded_key)
+            let point = p256::Sec1Point::from_bytes(&*encoded_key)
               .map_err(|_| ImportKeyError::InvalidP256ECSPKIData)?;
             if point.is_identity() {
               return Err(ImportKeyError::InvalidP256ECPoint);
@@ -865,7 +865,7 @@ fn import_key_ec(
             point.as_bytes().len()
           }
           EcNamedCurve::P384 => {
-            let point = p384::EncodedPoint::from_bytes(&*encoded_key)
+            let point = p384::Sec1Point::from_bytes(&*encoded_key)
               .map_err(|_| ImportKeyError::InvalidP384ECSPKIData)?;
 
             if point.is_identity() {
@@ -875,7 +875,7 @@ fn import_key_ec(
             point.as_bytes().len()
           }
           EcNamedCurve::P521 => {
-            let point = p521::EncodedPoint::from_bytes(&*encoded_key)
+            let point = p521::Sec1Point::from_bytes(&*encoded_key)
               .map_err(|_| ImportKeyError::InvalidP521ECSPKIData)?;
 
             if point.is_identity() {

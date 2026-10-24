@@ -1,12 +1,14 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 use core::ops::Add;
 
+use ecdsa::EcdsaCurve;
 use ecdsa::der::MaxOverhead;
 use ecdsa::der::MaxSize;
+use ecdsa::signature::hazmat::PrehashSigner as _;
+use ecdsa::signature::hazmat::PrehashVerifier as _;
 use elliptic_curve::FieldBytesSize;
-use elliptic_curve::generic_array::ArrayLength;
+use elliptic_curve::array::ArraySize;
 use rand::rngs::OsRng;
-use rsa::signature::hazmat::PrehashSigner as _;
 use rsa::signature::hazmat::PrehashVerifier as _;
 use rsa::traits::PublicKeyParts as _;
 use rsa::traits::SignatureScheme as _;
@@ -28,13 +30,13 @@ const RSA_PKCS1_PSS_PADDING: u32 = 6;
 /// OpenSSL RSA_PKCS1_OAEP_PADDING constant value.
 const RSA_PKCS1_OAEP_PADDING: u32 = 4;
 
-fn dsa_signature<C: elliptic_curve::PrimeCurve>(
+fn dsa_signature<C: EcdsaCurve>(
   encoding: u32,
   signature: ecdsa::Signature<C>,
 ) -> Result<Box<[u8]>, KeyObjectHandlePrehashedSignAndVerifyError>
 where
-  MaxSize<C>: ArrayLength<u8>,
-  <FieldBytesSize<C> as Add>::Output: Add<MaxOverhead> + ArrayLength<u8>,
+  MaxSize<C>: ArraySize,
+  <FieldBytesSize<C> as Add>::Output: Add<MaxOverhead> + ArraySize,
 {
   match encoding {
     // DER
@@ -44,6 +46,35 @@ where
     _ => Err(
       KeyObjectHandlePrehashedSignAndVerifyError::InvalidDsaSignatureEncoding,
     ),
+  }
+}
+
+/// Whether ECDSA accepts `prehash` for a curve whose field elements are
+/// `field_len` bytes. ecdsa 0.16 (elliptic-curve 0.13) refused a prehash
+/// shorter than half the field (so P-384 with SHA-1, or P-521 with SHA-256,
+/// failed to sign and never verified); ecdsa 0.17 accepts any length. The
+/// old rule is kept so signing and verification behave exactly as before.
+pub(crate) fn ecdsa_prehash_len_ok(field_len: usize, prehash: &[u8]) -> bool {
+  prehash.len() >= field_len / 2
+}
+
+/// Field element size in bytes of an EC key's curve.
+fn ec_field_len(key: &EcPublicKey) -> usize {
+  match key {
+    EcPublicKey::P224(_) => 28,
+    EcPublicKey::P256(_) | EcPublicKey::Secp256k1(_) => 32,
+    EcPublicKey::P384(_) => 48,
+    EcPublicKey::P521(_) => 66,
+  }
+}
+
+/// Field element size in bytes of an EC private key's curve.
+fn ec_private_field_len(key: &EcPrivateKey) -> usize {
+  match key {
+    EcPrivateKey::P224(_) => 28,
+    EcPrivateKey::P256(_) | EcPrivateKey::Secp256k1(_) => 32,
+    EcPrivateKey::P384(_) => 48,
+    EcPrivateKey::P521(_) => 66,
   }
 }
 
@@ -440,6 +471,11 @@ impl KeyObjectHandle {
           Ok(dsa_sig_to_p1363(&signature, q_len))
         }
       }
+      AsymmetricPrivateKey::Ec(key)
+        if !ecdsa_prehash_len_ok(ec_private_field_len(key), digest) =>
+      {
+        Err(KeyObjectHandlePrehashedSignAndVerifyError::FailedToSignDigest)
+      }
       AsymmetricPrivateKey::Ec(key) => match key {
         EcPrivateKey::P224(key) => {
           let signing_key = p224::ecdsa::SigningKey::from(key);
@@ -607,6 +643,11 @@ impl KeyObjectHandle {
           sig
         };
         Ok(key.verify_prehash(digest, &sig).is_ok())
+      }
+      AsymmetricPublicKey::Ec(key)
+        if !ecdsa_prehash_len_ok(ec_field_len(key), digest) =>
+      {
+        Ok(false)
       }
       AsymmetricPublicKey::Ec(key) => match key {
         EcPublicKey::P224(key) => {

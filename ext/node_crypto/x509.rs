@@ -1382,20 +1382,30 @@ pub fn op_node_x509_verify(
         _ => return Ok(false),
       };
 
+      // ecdsa 0.16 refused a prehash shorter than half the field (SHA-1
+      // with P-384); keep that, see `ecdsa_prehash_len_ok`.
+      use crate::sign::ecdsa_prehash_len_ok;
+
       match ec_key {
         EcPublicKey::P256(key) => {
           use p256::ecdsa::signature::hazmat::PrehashVerifier;
           let verifying_key = p256::ecdsa::VerifyingKey::from(key);
           let sig = p256::ecdsa::Signature::from_der(sig_value)
             .map_err(|_| X509VerifyError::ParseFailed)?;
-          Ok(verifying_key.verify_prehash(&prehash, &sig).is_ok())
+          Ok(
+            ecdsa_prehash_len_ok(32, &prehash)
+              && verifying_key.verify_prehash(&prehash, &sig).is_ok(),
+          )
         }
         EcPublicKey::P384(key) => {
           use p384::ecdsa::signature::hazmat::PrehashVerifier;
           let verifying_key = p384::ecdsa::VerifyingKey::from(key);
           let sig = p384::ecdsa::Signature::from_der(sig_value)
             .map_err(|_| X509VerifyError::ParseFailed)?;
-          Ok(verifying_key.verify_prehash(&prehash, &sig).is_ok())
+          Ok(
+            ecdsa_prehash_len_ok(48, &prehash)
+              && verifying_key.verify_prehash(&prehash, &sig).is_ok(),
+          )
         }
         _ => Err(X509VerifyError::UnsupportedEcCurve),
       }

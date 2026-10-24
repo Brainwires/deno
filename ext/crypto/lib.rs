@@ -13,7 +13,9 @@ use deno_error::JsErrorBox;
 use p256::ecdsa::Signature as P256Signature;
 use p256::ecdsa::SigningKey as P256SigningKey;
 use p256::ecdsa::VerifyingKey as P256VerifyingKey;
-use p256::elliptic_curve::sec1::FromEncodedPoint;
+use p256::ecdsa::signature::hazmat::PrehashSigner;
+use p256::ecdsa::signature::hazmat::PrehashVerifier;
+use p256::elliptic_curve::sec1::FromSec1Point;
 use p256::pkcs8::DecodePrivateKey;
 use p384::ecdsa::Signature as P384Signature;
 use p384::ecdsa::SigningKey as P384SigningKey;
@@ -43,8 +45,6 @@ use sha2::Sha512;
 use sha3::Sha3_256;
 use sha3::Sha3_384;
 use sha3::Sha3_512;
-use signature::hazmat::PrehashSigner;
-use signature::hazmat::PrehashVerifier;
 
 mod algorithm;
 mod crypto;
@@ -182,6 +182,11 @@ pub enum CryptoError {
   #[class(generic)]
   #[error(transparent)]
   P256Ecdsa(#[from] p256::ecdsa::Error),
+  /// `signature` 2.x error, from the `rsa` 0.9 signature paths (the EC
+  /// crates use `signature` 3.x, `P256Ecdsa` above).
+  #[class(generic)]
+  #[error(transparent)]
+  RsaSignature(#[from] rsa::signature::Error),
   #[class(type)]
   #[error("Unexpected error decoding private key")]
   DecodePrivateKey,
@@ -306,6 +311,31 @@ impl SignArg {
   }
 }
 
+/// Whether ECDSA accepts `prehash` for a curve whose field elements are
+/// `field_len` bytes. ecdsa 0.16 (elliptic-curve 0.13) refused a prehash
+/// shorter than half the field (P-384 with SHA-1 failed to sign and never
+/// verified); ecdsa 0.17 accepts any length. The old rule is kept so
+/// WebCrypto behaves exactly as before.
+fn ecdsa_prehash_len_ok(field_len: usize, prehash: &[u8]) -> bool {
+  prehash.len() >= field_len / 2
+}
+
+/// `sign_prehash`, refusing what ecdsa 0.16 refused (see
+/// [`ecdsa_prehash_len_ok`]).
+fn ecdsa_sign_prehash<K, S>(
+  signing_key: &K,
+  field_len: usize,
+  prehash: &[u8],
+) -> Result<S, p256::ecdsa::Error>
+where
+  K: PrehashSigner<S>,
+{
+  if !ecdsa_prehash_len_ok(field_len, prehash) {
+    return Err(p256::ecdsa::Error::new());
+  }
+  signing_key.sign_prehash(prehash)
+}
+
 /// Synchronous per-algorithm sign dispatch. Called from
 /// [`crate::subtle_sign::run`] inside `spawn_blocking`; the op-layer
 /// wrapper that previously fronted this for the JS shim has been
@@ -396,7 +426,7 @@ pub(crate) fn sign_key_sync(
             };
             // Sign the prehashed message, producing a raw r||s signature.
             let signature: P256Signature =
-              signing_key.sign_prehash(&prehash)?;
+              ecdsa_sign_prehash(&signing_key, 32, &prehash)?;
             signature.to_bytes().to_vec()
           }
           CryptoNamedCurve::P384 => {
@@ -411,7 +441,7 @@ pub(crate) fn sign_key_sync(
               _ => return Err(CryptoError::UnsupportedAlgorithm),
             };
             let signature: P384Signature =
-              signing_key.sign_prehash(&prehash)?;
+              ecdsa_sign_prehash(&signing_key, 48, &prehash)?;
             signature.to_bytes().to_vec()
           }
           CryptoNamedCurve::P521 => {
@@ -438,7 +468,7 @@ pub(crate) fn sign_key_sync(
               prehash
             };
             let signature: P521Signature =
-              signing_key.sign_prehash(&prehash)?;
+              ecdsa_sign_prehash(&signing_key, 66, &prehash)?;
             signature.to_bytes().to_vec()
           }
         }
@@ -644,7 +674,8 @@ pub(crate) fn verify_key_sync(
                   CryptoHash::Sha512 => sha2::Sha512::digest(data).to_vec(),
                   _ => return Err(CryptoError::UnsupportedAlgorithm),
                 };
-                verifying_key.verify_prehash(&prehash, &signature).is_ok()
+                ecdsa_prehash_len_ok(32, &prehash)
+                  && verifying_key.verify_prehash(&prehash, &signature).is_ok()
               }
               _ => false,
             }
@@ -670,7 +701,8 @@ pub(crate) fn verify_key_sync(
                   CryptoHash::Sha512 => sha2::Sha512::digest(data).to_vec(),
                   _ => return Err(CryptoError::UnsupportedAlgorithm),
                 };
-                verifying_key.verify_prehash(&prehash, &signature).is_ok()
+                ecdsa_prehash_len_ok(48, &prehash)
+                  && verifying_key.verify_prehash(&prehash, &signature).is_ok()
               }
               _ => false,
             }
@@ -708,7 +740,8 @@ pub(crate) fn verify_key_sync(
                 } else {
                   prehash
                 };
-                verifying_key.verify_prehash(&prehash, &signature).is_ok()
+                ecdsa_prehash_len_ok(66, &prehash)
+                  && verifying_key.verify_prehash(&prehash, &signature).is_ok()
               }
               _ => false,
             }
@@ -783,10 +816,10 @@ pub(crate) fn derive_bits_sync(
                 .public_key()
             }
             KeyType::Public => {
-              let point = p256::EncodedPoint::from_bytes(public_key.data)
+              let point = p256::Sec1Point::from_bytes(public_key.data)
                 .map_err(|_| CryptoError::DecodePrivateKey)?;
 
-              let pk = p256::PublicKey::from_encoded_point(&point);
+              let pk = p256::PublicKey::from_sec1_point(&point);
               // pk is a constant time Option.
               if pk.is_some().into() {
                 pk.unwrap()
@@ -816,10 +849,10 @@ pub(crate) fn derive_bits_sync(
                 .public_key()
             }
             KeyType::Public => {
-              let point = p384::EncodedPoint::from_bytes(public_key.data)
+              let point = p384::Sec1Point::from_bytes(public_key.data)
                 .map_err(|_| CryptoError::DecodePrivateKey)?;
 
-              let pk = p384::PublicKey::from_encoded_point(&point);
+              let pk = p384::PublicKey::from_sec1_point(&point);
               // pk is a constant time Option.
               if pk.is_some().into() {
                 pk.unwrap()
@@ -849,10 +882,10 @@ pub(crate) fn derive_bits_sync(
                 .public_key()
             }
             KeyType::Public => {
-              let point = p521::EncodedPoint::from_bytes(public_key.data)
+              let point = p521::Sec1Point::from_bytes(public_key.data)
                 .map_err(|_| CryptoError::DecodePrivateKey)?;
 
-              let pk = p521::PublicKey::from_encoded_point(&point);
+              let pk = p521::PublicKey::from_sec1_point(&point);
               // pk is a constant time Option.
               if pk.is_some().into() {
                 pk.unwrap()

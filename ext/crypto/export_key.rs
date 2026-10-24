@@ -2,11 +2,10 @@
 
 use base64::Engine;
 use base64::prelude::BASE64_URL_SAFE_NO_PAD;
-use const_oid::AssociatedOid;
 use const_oid::ObjectIdentifier;
 use deno_core::ToV8;
 use deno_core::convert::Uint8Array;
-use elliptic_curve::sec1::ToEncodedPoint;
+use elliptic_curve::sec1::ToSec1Point;
 use p256::pkcs8::DecodePrivateKey;
 use rsa::pkcs1::der::Decode;
 use rsa::pkcs8::der::Encode;
@@ -297,16 +296,16 @@ pub(crate) fn export_key_ec(
 
       let alg_id = match named_curve {
         EcNamedCurve::P256 => AlgorithmIdentifierOwned {
-          oid: elliptic_curve::ALGORITHM_OID,
-          parameters: Some((&p256::NistP256::OID).into()),
+          oid: ID_EC_PUBLIC_KEY_OID,
+          parameters: Some((&ID_SECP256R1_OID).into()),
         },
         EcNamedCurve::P384 => AlgorithmIdentifierOwned {
-          oid: elliptic_curve::ALGORITHM_OID,
-          parameters: Some((&p384::NistP384::OID).into()),
+          oid: ID_EC_PUBLIC_KEY_OID,
+          parameters: Some((&ID_SECP384R1_OID).into()),
         },
         EcNamedCurve::P521 => AlgorithmIdentifierOwned {
-          oid: elliptic_curve::ALGORITHM_OID,
-          parameters: Some((&p521::NistP521::OID).into()),
+          oid: ID_EC_PUBLIC_KEY_OID,
+          parameters: Some((&ID_SECP521R1_OID).into()),
         },
       };
 
@@ -389,7 +388,7 @@ pub(crate) fn export_key_ec(
           let ec_key = p256::SecretKey::from_pkcs8_der(private_key)
             .map_err(|_| SharedError::FailedDecodePrivateKey)?;
 
-          let point = ec_key.public_key().to_encoded_point(false);
+          let point = ec_key.public_key().to_sec1_point(false);
           if let elliptic_curve::sec1::Coordinates::Uncompressed { x, y } =
             point.coordinates()
           {
@@ -407,7 +406,7 @@ pub(crate) fn export_key_ec(
           let ec_key = p384::SecretKey::from_pkcs8_der(private_key)
             .map_err(|_| SharedError::FailedDecodePrivateKey)?;
 
-          let point = ec_key.public_key().to_encoded_point(false);
+          let point = ec_key.public_key().to_sec1_point(false);
           if let elliptic_curve::sec1::Coordinates::Uncompressed { x, y } =
             point.coordinates()
           {
@@ -424,7 +423,7 @@ pub(crate) fn export_key_ec(
           let ec_key = p521::SecretKey::from_pkcs8_der(private_key)
             .map_err(|_| SharedError::FailedDecodePrivateKey)?;
 
-          let point = ec_key.public_key().to_encoded_point(false);
+          let point = ec_key.public_key().to_sec1_point(false);
           if let elliptic_curve::sec1::Coordinates::Uncompressed { x, y } =
             point.coordinates()
           {

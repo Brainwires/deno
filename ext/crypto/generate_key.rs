@@ -2,8 +2,8 @@
 
 use aws_lc_rs::rand::SecureRandom;
 use aws_lc_rs::signature::EcdsaKeyPair;
+use elliptic_curve::Generate as _;
 use elliptic_curve::pkcs8::EncodePrivateKey;
-use elliptic_curve::rand_core::OsRng;
 use num_traits::FromPrimitive;
 use once_cell::sync::Lazy;
 use rsa::BigUint;
@@ -84,7 +84,7 @@ fn generate_key_rsa(
     return Err(GenerateKeyError::BadPublicExponent);
   }
 
-  let mut rng = OsRng;
+  let mut rng = rand::rngs::OsRng;
 
   let private_key =
     RsaPrivateKey::new_with_exp(&mut rng, modulus_length as usize, &exponent)
@@ -98,8 +98,8 @@ fn generate_key_rsa(
 }
 
 fn generate_key_ec_p521() -> Result<Vec<u8>, GenerateKeyError> {
-  let mut rng = OsRng;
-  let key = p521::SecretKey::random(&mut rng);
+  // The OS RNG, as before (elliptic-curve 0.14 takes rand_core 0.10).
+  let key = p521::SecretKey::generate();
   let pkcs8 = key
     .to_pkcs8_der()
     .map_err(|_| GenerateKeyError::FailedECKeyGeneration)?;

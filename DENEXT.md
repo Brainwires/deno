@@ -4111,24 +4111,56 @@ where the changes are discussed.
      `-no-leak-internals.mjs`, which passed only because the shim dropped
      `--experimental-loader`, are now ignored with the reason.
 
-110. **`fix(deps)`: crypto-bigint 0.7.6 (RUSTSEC-2026-0387)** (`Cargo.lock`
-     only). crypto-bigint before 0.7.6 could branch on secret data in
-     subtraction (`borrowing_sub`), zero counting, `div_rem` and Montgomery
-     multiplication, compare `UintRef`s limb by limb, and branch on
-     invertibility in `BoxedMontyForm::invert`. The 0.7 prerelease line
-     (0.7.0-rc.28, through elliptic-curve 0.14.0-rc.28 for ed448-goldilocks and
-     X448 in `libs/crypto`) moves to 0.7.6, with ctutils 0.4.5, hybrid-array
-     0.4.15 and typenum 1.20.1 (semver-compatible; no API change). Item 42's
-     ctutils 0.4.4 (RUSTSEC-2026-0385) was the first half of the same fixes.
-     crypto-bigint 0.5.5 is still in the tree: elliptic-curve 0.13 and the p224
-     / p256 / p384 / p521 / k256 0.13 and ecdsa 0.16 crates that `ext/crypto`,
-     `ext/node_crypto`, `cli` (provenance) and `runtime` (desktop update
-     manifests) use need it, and no 0.5.x release is patched. Moving off it
-     means migrating to the 0.14 line (elliptic-curve 0.14, ecdsa 0.17, with
-     pkcs8 0.11, spki 0.8, sec1 0.8, signature 3, digest / sha2 0.11 and
-     rand_core 0.10), which upstream Deno hasn't done yet; until then, or until
-     the advisory is accepted, `cargo audit` reports it. Tests:
-     `cargo test -p deno_crypto_provider` (X448 RFC 7748 vectors, Ed448).
+110. **`fix(deps)`: RUSTSEC-2026-0387 — crypto-bigint 0.7.6, and the EC crates
+     off crypto-bigint 0.5.5** (`Cargo.toml`, `Cargo.lock`, `ext/crypto`,
+     `ext/node_crypto`, `cli/tools/publish/provenance.rs`,
+     `runtime/ops/desktop_update`). crypto-bigint before 0.7.6 could branch on
+     secret data in subtraction (`borrowing_sub`), zero counting, `div_rem` and
+     Montgomery multiplication, compare `UintRef`s limb by limb, and branch on
+     invertibility in `BoxedMontyForm::invert`; no 0.5.x release is patched. The
+     0.7 line moves to 0.7.6 (with ctutils 0.4.5, hybrid-array 0.4.15, typenum
+     1.20.1; item 42's ctutils 0.4.4, RUSTSEC-2026-0385, was the first half of
+     the same fixes). crypto-bigint 0.5.5 is gone from `Cargo.lock`, so
+     `cargo audit` reports no RUSTSEC-2026-0387 and nothing ignores it: the EC
+     stack moves from elliptic-curve 0.13.8 / ecdsa 0.16.9 / p256 0.13.2 / p384
+     0.13.0 / p521 0.13.3 / k256 0.13.3 / p224 0.13.2 / primeorder 0.13.6 to
+     elliptic-curve 0.14.1, ecdsa 0.17.0, p256 / p384 / p521 / k256 / primeorder
+     0.14.0 and p224 `=0.14.0-rc.15` (no 0.14.0 final yet; pinned exactly), with
+     pkcs8 0.11.0, spki 0.8.1, sec1 0.8.1, der 0.8.2, signature 3.0.0, rfc6979
+     0.6.0 and rand_core 0.10 under them. ed448-goldilocks moves from
+     0.14.0-pre.10 (built for elliptic-curve 0.14.0-rc.28, which does not
+     compile against 0.14.1) to `=0.14.0-pre.15` and ed448 from 0.5.0-rc.5 to
+     0.5.0 (rc.5 does not build against pkcs8 0.11.0); X448 / Ed448 keep their
+     RFC 7748 / RFC 8032 vectors. Coexistence: rsa 0.9 (pkcs8 0.10, spki 0.7,
+     der 0.7, const-oid 0.9, signature 2, digest / sha2 0.10, rand 0.8) stays,
+     side by side with the 0.14 line; the boundary is bytes. The ASN.1 plumbing
+     shared with RSA/DSA (PKCS#8 / SPKI / SEC1 documents, PEM labels, OIDs)
+     keeps the old codecs (sec1 0.7 stays as that codec in `ext/node_crypto`;
+     the OIDs elliptic-curve now types as const-oid 0.10 are spelled as
+     const-oid 0.9 constants), and a curve key is built from, or written to, the
+     same DER / SEC1 / raw bytes by the 0.14 crates. Message digests stay sha1 /
+     sha2 0.10: ECDSA takes the digest bytes. Keys are generated with
+     elliptic-curve's `Generate` (the OS RNG; rand 0.8's `thread_rng` is not a
+     rand_core 0.10 RNG). elliptic-curve 0.14 dropped JWK, so
+     `ext/node_crypto/jwk_ec.rs` ports 0.13.8's `JwkEcKey` (same member order,
+     same parse rules and errors, same `d`-matches-`x`/`y` check). ecdsa 0.17
+     accepts a prehash shorter than half the field, which 0.16 refused; the old
+     rule is kept (`ecdsa_prehash_len_ok`), so P-384 with SHA-1 (and, in
+     `node:crypto`, P-521 with a digest of 32 bytes or less) still fails to sign
+     and never verifies. One observable difference: P-521 ECDSA signatures were
+     randomized (p521 0.13's `sign_prehash` drew the nonce from `OsRng`) and are
+     now RFC 6979 deterministic, like every other curve; both verify everywhere.
+     Tests: known-answer vectors produced independently (Python `cryptography` /
+     OpenSSL 3.6) and run before and after the migration —
+     `ext/node_crypto/ec_golden_tests.rs` (P-224, P-256, P-384, P-521,
+     secp256k1: PKCS#8 / SEC1 / SPKI DER, raw and compressed points, JWK, DER
+     and P1363 RFC 6979 signatures with every digest, the RFC 6979 A.2.5 vector,
+     ECDH secrets and public keys) and `ext/crypto/ec_golden_tests.rs`
+     (WebCrypto import / export in every format, sign / verify with every hash,
+     ECDH `deriveBits`, generated PKCS#8 layout), plus
+     `signature_format_known_answer` (`runtime/ops/desktop_update/manifest.rs`)
+     and `p256_spki_pem_known_answer` (`cli/tools/publish/provenance.rs`);
+     `cargo test -p deno_crypto -p deno_node_crypto -p deno_crypto_provider`.
 
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110) are

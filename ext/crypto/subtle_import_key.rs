@@ -1346,8 +1346,8 @@ impl OkpKind {
     true
   }
   fn import_pkcs8(self, key_data: &[u8], out: &mut [u8]) -> bool {
-    use elliptic_curve::pkcs8::PrivateKeyInfo;
-    use elliptic_curve::pkcs8::der::Decode;
+    use rsa::pkcs8::PrivateKeyInfo;
+    use rsa::pkcs8::der::Decode;
     let oid = match self {
       Self::Ed25519 => crate::ed25519::ED25519_OID,
       Self::X25519 => crate::x25519::X25519_OID,
