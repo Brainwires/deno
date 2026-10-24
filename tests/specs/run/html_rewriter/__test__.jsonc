@@ -32,9 +32,9 @@
       "args": "run --quiet main.js",
       "output": "config/main.out"
     },
-    // Off by default.
+    // Off by default (outside `config/`, whose deno.json turns it on).
     "off_by_default": {
-      "args": "run --quiet config/main.js",
+      "args": "run --quiet off.js",
       "output": "off.out"
     }
   }
