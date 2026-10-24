@@ -66,6 +66,16 @@ pub static FEATURE_DESCRIPTIONS: &[UnstableFeatureDescription] = &[
     kind: UnstableFeatureKind::Runtime,
     env_var: None,
   },
+  // denext (DENEXT.md item 108): the `HTMLRewriter` global (Cloudflare
+  // Workers' streaming HTML rewriting API on lol_html), from
+  // denoland/deno#35112.
+  UnstableFeatureDescription {
+    name: "html-rewriter",
+    help_text: "Enable unstable `HTMLRewriter` API",
+    show_in_help: true,
+    kind: UnstableFeatureKind::Runtime,
+    env_var: None,
+  },
   UnstableFeatureDescription {
     name: "http",
     help_text: "Enable unstable HTTP APIs",
