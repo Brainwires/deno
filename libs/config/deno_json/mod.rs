@@ -157,6 +157,10 @@ pub struct JailPackageConfig {
   pub write: Vec<PathBuf>,
   /// Network for its scripts: `true` / `false`, or the hosts they may reach.
   pub net: Option<JailNetConfig>,
+  /// Whether its scripts may leave executable files in its `~` write paths
+  /// (a browser download); without it they are removed and the script fails
+  /// (denext item 111).
+  pub executables: bool,
 }
 
 /// `supplyChain.jailScripts.packages.<name>.net`.
@@ -167,6 +171,30 @@ pub enum JailNetConfig {
   All(bool),
   /// Only these hosts (`host` or `host:port`), as `--allow-net=<hosts>`.
   Hosts(Vec<String>),
+}
+
+/// Whether a `jailScripts.packages.<name>.net` entry has the shape of
+/// `host`, `host:port`, `[v6]`, `[v6]:port` or a bare v6 address (the jail's
+/// proxy parses the host itself).
+fn valid_host_port(entry: &str) -> bool {
+  let port_ok = |port: &str| port.parse::<u16>().is_ok();
+  if let Some(rest) = entry.strip_prefix('[') {
+    return match rest.split_once(']') {
+      Some((addr, "")) => !addr.is_empty(),
+      Some((addr, after)) => {
+        !addr.is_empty() && after.strip_prefix(':').is_some_and(port_ok)
+      }
+      None => false,
+    };
+  }
+  match entry.matches(':').count() {
+    0 => true,
+    1 => {
+      let (host, port) = entry.split_once(':').unwrap();
+      !host.is_empty() && port_ok(port)
+    }
+    _ => !entry.contains(['[', ']']),
+  }
 }
 
 /// Whether a `write` path in `jailScripts.packages` is relative to the
@@ -2845,6 +2873,7 @@ impl ConfigFile {
               if host.is_empty()
                 || host.contains(['/', '\\', '@', '?', '#'])
                 || host.chars().any(|c| c.is_whitespace())
+                || !valid_host_port(host)
               {
                 return Err(parse_err(format!(
                   "\"jailScripts.packages\": {name}'s \"net\" lists \"{host}\"; expected a host or host:port, as --allow-net takes"
@@ -4371,6 +4400,17 @@ mod tests {
       ]))
     );
     assert_eq!(puppeteer.write, vec![PathBuf::from("~/.cache/puppeteer")]);
+    assert!(!puppeteer.executables);
+    // item 111: a cache that may hold executables, and the host forms the
+    // proxy takes
+    let config = get_result(
+      r#"{ "supplyChain": { "jailScripts": { "packages": {
+        "a": { "write": ["~/.cache/a"], "executables": true,
+               "net": ["[::1]:443", "::1", "127.0.0.1:80", "bücher.example"] }
+      } } } }"#,
+    )
+    .unwrap();
+    assert!(config.jail_packages["a"].executables);
     // `~user` is not the home directory: relative to the deno.json
     let config = get_result(
       r#"{ "supplyChain": { "jailScripts": { "packages": { "a": { "write": ["~other/x"] } } } } }"#,
@@ -4384,6 +4424,13 @@ mod tests {
       r#"["example.com/path"]"#,
       r#"["a b"]"#,
       r#""example.com""#,
+      // item 111: ports and brackets the proxy couldn't take
+      r#"["example.com:"]"#,
+      r#"["example.com:https"]"#,
+      r#"["example.com:70000"]"#,
+      r#"[":443"]"#,
+      r#"["[::1"]"#,
+      r#"["[::1]443"]"#,
     ] {
       assert!(
         get_result(&format!(

@@ -19,7 +19,11 @@
 //!   `~/.aws`, `~/.npmrc`, the project's `.npmrc` / `.env*`, ...); no network
 //!   unless the package declares a download host (node-pre-gyp's `binary.host`)
 //!   or the config allows it; no Unix sockets. Landlock + seccomp on Linux
-//!   (`sandbox_linux`), Seatbelt on macOS (`sandbox_macos`);
+//!   (`sandbox_linux`), Seatbelt on macOS (`sandbox_macos`). Since item 111 a
+//!   script writes only beneath its own package's folder (not the rest of
+//!   node_modules), and one that may reach only some hosts reaches them
+//!   through an allow-listing proxy (`jail_proxy`), the only address the OS
+//!   lets it connect to;
 //! - every `deno` started inside it clamping its permissions to the same set
 //!   (`DENO_INTERNAL_LIFECYCLE_JAIL`): `-A` from the `node` shim and the bin
 //!   wrappers becomes write access to those roots only, no FFI, network per
@@ -38,6 +42,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::OnceLock;
+use std::time::SystemTime;
 
 use deno_config::deno_json::JailNetConfig;
 use deno_config::deno_json::JailPackageConfig;
@@ -90,6 +95,20 @@ pub struct JailPermissions {
   pub deny_write: Vec<PathBuf>,
   pub deny_read: Vec<PathBuf>,
   pub net: JailNet,
+  /// The script's allow-listing proxy (`127.0.0.1:<port>`) when `net` is a
+  /// host list: a `deno` may connect to it besides the hosts (DENEXT.md item
+  /// 111; Node's `http` with `NODE_USE_ENV_PROXY` connects there itself).
+  #[serde(default)]
+  pub proxy: Option<String>,
+}
+
+/// What the OS sandbox lets a jailed script's processes connect to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OsNet {
+  Denied,
+  Open,
+  /// Only the allow-listing proxy on this loopback port.
+  ProxyOnly(u16),
 }
 
 /// The jail of the current process, when it runs inside a jailed script.
@@ -170,18 +189,26 @@ pub fn clamp_permissions(
       (!kept.is_empty()).then_some(kept)
     }
   };
+  let with_proxy = |mut list: Vec<String>| {
+    if let Some(proxy) = &jail.proxy
+      && !list.contains(proxy)
+    {
+      list.push(proxy.clone());
+    }
+    list
+  };
   let clamp_net = |list: Option<Vec<String>>| match (&jail.net, list) {
     (_, None) | (JailNet::None, _) => None,
     (JailNet::All, list) => list,
     (JailNet::Hosts(hosts), Some(list)) if list.is_empty() => {
-      Some(hosts.clone())
+      Some(with_proxy(hosts.clone()))
     }
     (JailNet::Hosts(hosts), Some(list)) => {
       let kept = list
         .into_iter()
         .filter(|h| hosts.contains(h))
         .collect::<Vec<_>>();
-      (!kept.is_empty()).then_some(kept)
+      (!kept.is_empty()).then(|| with_proxy(kept))
     }
   };
   options.allow_net = clamp_net(options.allow_net.take());
@@ -236,6 +263,7 @@ pub struct JailConfig {
   pub project_secret_files: Vec<PathBuf>,
   outside_links: OnceLock<Vec<PathBuf>>,
   warned: std::sync::atomic::AtomicBool,
+  warned_net: std::sync::atomic::AtomicBool,
 }
 
 impl JailConfig {
@@ -274,7 +302,48 @@ impl JailConfig {
       project_secret_files,
       outside_links: Default::default(),
       warned: Default::default(),
+      warned_net: Default::default(),
     }
+  }
+}
+
+/// Whether the OS sandbox can hold a script's connections to one loopback
+/// port (its proxy): Seatbelt can; Landlock from ABI 4 (Linux 6.7).
+fn can_confine_to_proxy() -> bool {
+  #[cfg(target_os = "linux")]
+  {
+    super::sandbox_linux::can_confine_to_port()
+  }
+  #[cfg(target_os = "macos")]
+  {
+    true
+  }
+  #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+  {
+    false
+  }
+}
+
+/// What the OS sandbox allows a script's processes to connect to
+/// (DENEXT.md item 111). A host list goes through the proxy where the OS can
+/// hold every program to it. Where it can't (Linux before 6.7), hosts the
+/// package declares for itself, and any list under `paranoid`, get no
+/// network (fail closed: the package granted itself that, or the project
+/// asked for every gate to fail closed); a list the project's deno.json
+/// grants keeps the network open, with a warning, as before item 111.
+fn choose_os_net(
+  net: &JailNet,
+  declared: bool,
+  paranoid: bool,
+  proxy_port: u16,
+  can_confine_to_proxy: bool,
+) -> OsNet {
+  match net {
+    JailNet::None => OsNet::Denied,
+    JailNet::All => OsNet::Open,
+    JailNet::Hosts(_) if can_confine_to_proxy => OsNet::ProxyOnly(proxy_port),
+    JailNet::Hosts(_) if declared || paranoid => OsNet::Denied,
+    JailNet::Hosts(_) => OsNet::Open,
   }
 }
 
@@ -422,30 +491,34 @@ fn declared_net_hosts(package_folder: &Path) -> Vec<String> {
   hosts
 }
 
-/// Network access of a package's scripts: the package's own `net` (a host
-/// list is the narrower grant and wins over `jailScripts.net`), the config's,
-/// or the hosts the package declares (not under paranoid: a package doesn't
-/// grant itself anything there).
+/// Network access of a package's scripts, and whether it is the hosts the
+/// package declares for itself: the package's own `net` (a host list is the
+/// narrower grant and wins over `jailScripts.net`; `false` wins over both
+/// `jailScripts.net` and the declared hosts, DENEXT.md item 111), the
+/// config's, or the hosts the package declares (not under paranoid: a
+/// package doesn't grant itself anything there).
 fn jail_net(
   config: &JailConfig,
   package: Option<&JailPackageConfig>,
   package_folder: &Path,
-) -> JailNet {
+) -> (JailNet, bool) {
   match package.and_then(|p| p.net.as_ref()) {
-    Some(JailNetConfig::Hosts(hosts)) => return JailNet::Hosts(hosts.clone()),
-    Some(JailNetConfig::All(true)) => return JailNet::All,
-    _ if config.net => return JailNet::All,
-    Some(JailNetConfig::All(false)) => return JailNet::None,
+    Some(JailNetConfig::Hosts(hosts)) => {
+      return (JailNet::Hosts(hosts.clone()), false);
+    }
+    Some(JailNetConfig::All(true)) => return (JailNet::All, false),
+    Some(JailNetConfig::All(false)) => return (JailNet::None, false),
+    None if config.net => return (JailNet::All, false),
     None => {}
   }
   if config.paranoid {
-    return JailNet::None;
+    return (JailNet::None, false);
   }
   let hosts = declared_net_hosts(package_folder);
   if hosts.is_empty() {
-    JailNet::None
+    (JailNet::None, false)
   } else {
-    JailNet::Hosts(hosts)
+    (JailNet::Hosts(hosts), true)
   }
 }
 
@@ -478,7 +551,119 @@ fn package_write_paths(
     .collect()
 }
 
+#[cfg(unix)]
+/// The `~` paths among a package's `write` paths, resolved: download caches
+/// other projects use, where a new executable file is refused unless the
+/// package lists `executables: true` (DENEXT.md item 111).
+fn home_write_paths(
+  package: &JailPackageConfig,
+  home: Option<&Path>,
+) -> Vec<PathBuf> {
+  let Some(home) = home else {
+    return Vec::new();
+  };
+  package
+    .write
+    .iter()
+    .filter(|path| is_home_relative_path(path))
+    .filter_map(|path| Some(home.join(path.strip_prefix("~").ok()?)))
+    .collect()
+}
+
+/// Removes what a script left in `dirs` since `since` that other programs
+/// could run: regular files with an execute (or set-id) bit, and symlinks
+/// to such files. Returns the paths removed. Removing rather than clearing
+/// the bit also takes out a hard link to a file elsewhere without changing
+/// that file.
+#[cfg(unix)]
+fn remove_new_executables(dirs: &[PathBuf], since: SystemTime) -> Vec<PathBuf> {
+  use std::os::unix::fs::MetadataExt;
+  let since = since
+    .duration_since(SystemTime::UNIX_EPOCH)
+    .map(|d| d.as_secs() as i64)
+    .unwrap_or(0);
+  fn executable(meta: &std::fs::Metadata) -> bool {
+    meta.is_file() && meta.mode() & 0o7111 != 0
+  }
+  fn visit(dir: &Path, since: i64, depth: usize, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+      return;
+    };
+    for entry in entries.flatten() {
+      let path = entry.path();
+      let Ok(meta) = std::fs::symlink_metadata(&path) else {
+        continue;
+      };
+      if meta.is_dir() {
+        if depth < 64 {
+          visit(&path, since, depth + 1, out);
+        }
+        continue;
+      }
+      // the inode's change time, which a script can't set back
+      if meta.ctime() < since {
+        continue;
+      }
+      let runnable = if meta.file_type().is_symlink() {
+        std::fs::metadata(&path).is_ok_and(|m| executable(&m))
+      } else {
+        executable(&meta)
+      };
+      if runnable && std::fs::remove_file(&path).is_ok() {
+        out.push(path);
+      }
+    }
+  }
+  let mut out = Vec::new();
+  for dir in dirs {
+    visit(dir, since, 0, &mut out);
+  }
+  out
+}
+
+/// Points every HTTP client a jailed script may start at its proxy.
+fn set_proxy_env(env: &mut HashMap<OsString, OsString>, proxy_url: &str) {
+  // the installer's own settings (a NO_PROXY would send a client around the
+  // proxy, where the OS refuses it)
+  env.retain(|key, _| {
+    let lower = key.to_string_lossy().to_ascii_lowercase();
+    !matches!(
+      lower.as_str(),
+      "no_proxy"
+        | "npm_config_proxy"
+        | "npm_config_https_proxy"
+        | "npm_config_noproxy"
+        | "npm_config_no_proxy"
+    )
+  });
+  for key in [
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+    // npm's config keys, which node-pre-gyp, prebuild-install and others read
+    "npm_config_proxy",
+    "npm_config_https_proxy",
+    // global-agent (@electron/get, ...)
+    "GLOBAL_AGENT_HTTP_PROXY",
+    "GLOBAL_AGENT_HTTPS_PROXY",
+  ] {
+    let key = if cfg!(windows) {
+      key.to_ascii_uppercase()
+    } else {
+      key.to_string()
+    };
+    env.insert(key.into(), proxy_url.into());
+  }
+  // Node's `http` / `https` (Deno's included) honor the variables only then
+  env.insert("NODE_USE_ENV_PROXY".into(), "1".into());
+}
+
 /// Environment variables a jailed script keeps (Windows names upper-cased).
+/// The installer's proxy settings pass only with the whole network: a host
+/// list goes through the jail's own proxy.
 fn keep_env_var(name: &str, net: bool) -> bool {
   const EXACT: &[&str] = &[
     "PATH",
@@ -693,12 +878,10 @@ async fn run_in_dirs(
   let canonical =
     |p: &Path| canonicalize_path(p).unwrap_or_else(|_| p.to_path_buf());
 
-  // writable roots
-  let mut write = vec![
-    canonical(s.root_node_modules),
-    canonical(s.package_folder),
-    canonical(&dirs.root),
-  ];
+  // writable roots: the package's own folder, not the rest of node_modules
+  // (DENEXT.md item 111), so one package's script can't rewrite another's
+  // files, which run later outside the jail
+  let mut write = vec![canonical(s.package_folder), canonical(&dirs.root)];
   if let Some(package) = package {
     write.extend(
       package_write_paths(package, home_dir().as_deref())
@@ -708,19 +891,80 @@ async fn run_in_dirs(
   }
   write.dedup();
 
-  let net = jail_net(config, package, s.package_folder);
+  let (net, declared) = jail_net(config, package, s.package_folder);
+  // a host list: the allow-listing proxy, the only address the OS lets the
+  // script connect to where it can hold it there
+  let mut proxy = match &net {
+    JailNet::Hosts(hosts) => {
+      let allow = super::jail_proxy::AllowList::parse(hosts)
+        .map_err(|err| deno_core::anyhow::anyhow!("jail-scripts: {err}"))?;
+      let upstream = super::jail_proxy::Upstream::from_env(s.env_vars);
+      Some(
+        super::jail_proxy::JailProxy::start(allow, upstream)
+          .await
+          .context("Failed to start the jail's network proxy")?,
+      )
+    }
+    _ => None,
+  };
+  let os_net = choose_os_net(
+    &net,
+    declared,
+    config.paranoid,
+    proxy.as_ref().map(|p| p.port()).unwrap_or_default(),
+    os_sandbox && can_confine_to_proxy(),
+  );
+  let net = match (net, os_net) {
+    (JailNet::Hosts(hosts), OsNet::Denied) if os_sandbox => {
+      log::warn!(
+        "{} jail-scripts: this system can't hold npm:{}'s '{}' script to its hosts ({}), so it runs without network. Linux 6.7+ (Landlock ABI 4) can.",
+        colors::yellow("Warning"),
+        s.package_id,
+        s.task_name,
+        hosts.join(", ")
+      );
+      proxy = None;
+      JailNet::None
+    }
+    (JailNet::Hosts(hosts), OsNet::Open) if os_sandbox => {
+      if !config
+        .warned_net
+        .swap(true, std::sync::atomic::Ordering::SeqCst)
+      {
+        log::warn!(
+          "{} jail-scripts: this system can't hold lifecycle scripts to the hosts deno.json lists for them (npm:{}: {}); programs other than Deno that they start can reach any host. Linux 6.7+ (Landlock ABI 4) can.",
+          colors::yellow("Warning"),
+          s.package_id,
+          hosts.join(", ")
+        );
+      }
+      JailNet::Hosts(hosts)
+    }
+    (net, _) => net,
+  };
 
   let mut deny_read = credential_paths();
   deny_read.extend(config.project_secret_files.iter().cloned());
+  // links in node_modules that lead outside it, where a package's own
+  // `write` paths don't reach
   let deny_write = config
     .outside_links
-    .get_or_init(|| outside_links(&canonical(s.root_node_modules), &write))
-    .clone();
+    .get_or_init(|| {
+      let root = canonical(s.root_node_modules);
+      outside_links(&root, std::slice::from_ref(&root))
+    })
+    .iter()
+    .filter(|target| !path_within(target, &write))
+    .cloned()
+    .collect();
   let permissions = JailPermissions {
     write: write.clone(),
     deny_write,
     deny_read: deny_read.clone(),
     net: net.clone(),
+    proxy: proxy
+      .as_ref()
+      .map(|proxy| format!("127.0.0.1:{}", proxy.port())),
   };
 
   // the environment
@@ -732,9 +976,12 @@ async fn run_in_dirs(
         n == name.as_ref() || (cfg!(windows) && n.eq_ignore_ascii_case(&name))
       })
     });
-    if passed || keep_env_var(&name, net.allowed()) {
+    if passed || keep_env_var(&name, net == JailNet::All) {
       env.insert(key.clone(), value.clone());
     }
+  }
+  if let Some(proxy) = &proxy {
+    set_proxy_env(&mut env, &proxy.url());
   }
   let mut set = |key: &str, value: &Path| {
     let key = if cfg!(windows) {
@@ -791,11 +1038,9 @@ async fn run_in_dirs(
   let mut command = if os_sandbox {
     let mut command =
       tokio::process::Command::new(super::sandbox_macos::SANDBOX_EXEC);
-    command.arg("-p").arg(super::sandbox_macos::profile(
-      &write,
-      &deny_read,
-      net.allowed(),
-    ));
+    command
+      .arg("-p")
+      .arg(super::sandbox_macos::profile(&write, &deny_read, os_net));
     command.arg(&current_exe);
     command
   } else {
@@ -815,20 +1060,22 @@ async fn run_in_dirs(
 
   #[cfg(target_os = "linux")]
   let _ruleset = if os_sandbox {
-    let ruleset = super::sandbox_linux::build_ruleset(&write, &deny_read)
-      .context("Failed to set up the Landlock sandbox")?;
-    super::sandbox_linux::apply_to_command(
-      &mut command,
-      &ruleset,
-      net.allowed(),
-    );
+    let proxy_port = match os_net {
+      OsNet::ProxyOnly(port) => Some(port),
+      _ => None,
+    };
+    let ruleset =
+      super::sandbox_linux::build_ruleset(&write, &deny_read, proxy_port)
+        .context("Failed to set up the Landlock sandbox")?;
+    super::sandbox_linux::apply_to_command(&mut command, &ruleset, os_net);
     Some(ruleset)
   } else {
     None
   };
   #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-  let _ = os_sandbox;
+  let _ = os_net;
 
+  let started = SystemTime::now();
   let mut child = command.spawn().with_context(|| {
     format!("Failed to start the jailed '{}' script", s.task_name)
   })?;
@@ -861,13 +1108,66 @@ async fn run_in_dirs(
     }
   };
   let stdout = read_out.await.unwrap_or_default();
-  let stderr = read_err.await.unwrap_or_default();
-  let exit_code = status.code().unwrap_or(1);
+  let mut stderr = read_err.await.unwrap_or_default();
+  let mut exit_code = status.code().unwrap_or(1);
+  drop(proxy);
+  refuse_new_executables(s, package, started, &mut stderr, &mut exit_code);
   Ok(TaskResult {
     exit_code,
     stdout: Some(stdout),
     stderr: Some(stderr),
   })
+}
+
+/// Removes the executables a script left in its package's `~` write paths,
+/// unless the package lists `executables: true`, and fails the script then
+/// (DENEXT.md item 111).
+#[cfg(unix)]
+fn refuse_new_executables(
+  s: &JailedScript<'_>,
+  package: Option<&JailPackageConfig>,
+  started: SystemTime,
+  stderr: &mut Vec<u8>,
+  exit_code: &mut i32,
+) {
+  let Some(package) = package else {
+    return;
+  };
+  if package.executables {
+    return;
+  }
+  let removed = remove_new_executables(
+    &home_write_paths(package, home_dir().as_deref()),
+    started,
+  );
+  if removed.is_empty() {
+    return;
+  }
+  let list = removed
+    .iter()
+    .map(|p| format!("  {}", p.display()))
+    .collect::<Vec<_>>()
+    .join("\n");
+  stderr.extend_from_slice(
+    format!(
+      "\njail-scripts: npm:{}'s '{}' script left executable files in a directory outside the project; they were removed:\n{list}\nOther projects run what such a cache holds outside any jail. If the package needs them (a browser download), add \"executables\": true to its entry in supplyChain.jailScripts.packages.\n",
+      s.package_id, s.task_name
+    )
+    .as_bytes(),
+  );
+  if *exit_code == 0 {
+    *exit_code = 1;
+  }
+}
+
+#[cfg(not(unix))]
+fn refuse_new_executables(
+  _s: &JailedScript<'_>,
+  _package: Option<&JailPackageConfig>,
+  _started: SystemTime,
+  _stderr: &mut Vec<u8>,
+  _exit_code: &mut i32,
+) {
 }
 
 /// The jailed script's process: reads the script from stdin and runs it with
@@ -1020,7 +1320,7 @@ mod tests {
           Some(&package(Some(hosts.clone()))),
           dir.path()
         ),
-        expected_hosts,
+        (expected_hosts.clone(), false),
         "net {net}, paranoid {paranoid}"
       );
     }
@@ -1029,24 +1329,177 @@ mod tests {
     let none = package(Some(JailNetConfig::All(false)));
     assert_eq!(
       jail_net(&config(false, true), Some(&all), dir.path()),
-      JailNet::All
+      (JailNet::All, false)
     );
     assert_eq!(
       jail_net(&config(false, false), Some(&none), dir.path()),
-      JailNet::None
+      (JailNet::None, false)
     );
     assert_eq!(
       jail_net(&config(true, false), None, dir.path()),
-      JailNet::All
+      (JailNet::All, false)
     );
+    // the declared hosts, marked as the package's own
     assert_eq!(
       jail_net(&config(false, false), None, dir.path()),
-      JailNet::Hosts(vec!["declared.example.com".to_string()])
+      (
+        JailNet::Hosts(vec!["declared.example.com".to_string()]),
+        true
+      )
     );
     assert_eq!(
       jail_net(&config(false, true), None, dir.path()),
-      JailNet::None
+      (JailNet::None, false)
     );
+  }
+
+  // DENEXT.md item 111 (R3): a package's `net: false` drops the hosts it
+  // declares and wins over `jailScripts.net: true`
+  #[test]
+  fn package_net_false_wins() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+      dir.path().join("package.json"),
+      r#"{ "binary": { "host": "https://declared.example.com/" } }"#,
+    )
+    .unwrap();
+    let none = JailPackageConfig {
+      net: Some(JailNetConfig::All(false)),
+      ..Default::default()
+    };
+    for (net, paranoid) in
+      [(false, false), (true, false), (false, true), (true, true)]
+    {
+      let config =
+        JailConfig::new(paranoid, false, net, BTreeMap::new(), &[], None);
+      assert_eq!(
+        jail_net(&config, Some(&none), dir.path()),
+        (JailNet::None, false),
+        "net {net}, paranoid {paranoid}"
+      );
+    }
+    // a package entry without `net` still takes the global setting
+    let env_only = JailPackageConfig::default();
+    let config =
+      JailConfig::new(false, false, true, BTreeMap::new(), &[], None);
+    assert_eq!(
+      jail_net(&config, Some(&env_only), dir.path()),
+      (JailNet::All, false)
+    );
+  }
+
+  // DENEXT.md item 111: what the OS lets a script connect to
+  #[test]
+  fn os_net_choice() {
+    let hosts = JailNet::Hosts(vec!["example.com".to_string()]);
+    assert_eq!(
+      choose_os_net(&JailNet::None, false, false, 9, true),
+      OsNet::Denied
+    );
+    assert_eq!(
+      choose_os_net(&JailNet::All, false, true, 9, false),
+      OsNet::Open
+    );
+    // a host list goes through the proxy where the OS can hold it there
+    for (declared, paranoid) in
+      [(false, false), (true, false), (false, true), (true, true)]
+    {
+      assert_eq!(
+        choose_os_net(&hosts, declared, paranoid, 9, true),
+        OsNet::ProxyOnly(9)
+      );
+    }
+    // where it can't: closed for the package's own hosts and under paranoid,
+    // open (with a warning) for the project's list
+    assert_eq!(choose_os_net(&hosts, true, false, 9, false), OsNet::Denied);
+    assert_eq!(choose_os_net(&hosts, false, true, 9, false), OsNet::Denied);
+    assert_eq!(choose_os_net(&hosts, false, false, 9, false), OsNet::Open);
+  }
+
+  #[test]
+  fn proxy_env() {
+    let mut env = HashMap::new();
+    for (k, v) in [
+      ("NO_PROXY", "*"),
+      ("no_proxy", "*"),
+      ("npm_config_noproxy", "*"),
+      ("npm_config_proxy", "http://user:secret@corp:3128"),
+      ("PATH", "/bin"),
+    ] {
+      env.insert(OsString::from(k), OsString::from(v));
+    }
+    set_proxy_env(&mut env, "http://127.0.0.1:9");
+    let get = |k: &str| {
+      env
+        .iter()
+        .find(|(key, _)| key.to_string_lossy().eq_ignore_ascii_case(k))
+        .map(|(_, v)| v.to_string_lossy().into_owned())
+    };
+    for key in ["HTTP_PROXY", "HTTPS_PROXY", "npm_config_proxy"] {
+      assert_eq!(get(key).as_deref(), Some("http://127.0.0.1:9"), "{key}");
+    }
+    assert_eq!(get("NODE_USE_ENV_PROXY").as_deref(), Some("1"));
+    assert_eq!(get("NO_PROXY"), None);
+    assert_eq!(get("npm_config_noproxy"), None);
+    assert_eq!(get("PATH").as_deref(), Some("/bin"));
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn new_executables_removed() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let cache = dir.path().join("cache");
+    let elsewhere = dir.path().join("elsewhere");
+    std::fs::create_dir_all(cache.join("chrome")).unwrap();
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    let old = cache.join("old-tool");
+    std::fs::write(&old, "#!/bin/sh\n").unwrap();
+    std::fs::set_permissions(&old, std::fs::Permissions::from_mode(0o755))
+      .unwrap();
+    let since = SystemTime::now() + std::time::Duration::from_secs(1);
+    // what the script leaves (ctime is in whole seconds)
+    std::thread::sleep(std::time::Duration::from_millis(2100));
+    let binary = cache.join("chrome/chrome");
+    std::fs::write(&binary, "elf").unwrap();
+    std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755))
+      .unwrap();
+    let data = cache.join("chrome/data.pak");
+    std::fs::write(&data, "data").unwrap();
+    let payload = elsewhere.join("payload");
+    std::fs::write(&payload, "x").unwrap();
+    std::fs::set_permissions(&payload, std::fs::Permissions::from_mode(0o700))
+      .unwrap();
+    let link = cache.join("run-me");
+    std::os::unix::fs::symlink(&payload, &link).unwrap();
+    let data_link = cache.join("data-link");
+    std::os::unix::fs::symlink(&data, &data_link).unwrap();
+    let mut removed =
+      remove_new_executables(std::slice::from_ref(&cache), since);
+    removed.sort();
+    assert_eq!(removed, vec![binary.clone(), link.clone()]);
+    assert!(!binary.exists() && std::fs::symlink_metadata(&link).is_err());
+    // the link's target, the data, and what was there before stay
+    assert!(payload.exists() && data.exists() && data_link.exists());
+    assert!(old.exists());
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn home_paths() {
+    let package = JailPackageConfig {
+      write: vec![
+        PathBuf::from("~/.cache/puppeteer"),
+        PathBuf::from("/abs/cache"),
+      ],
+      ..Default::default()
+    };
+    let home = Path::new("/home/u");
+    assert_eq!(
+      home_write_paths(&package, Some(home)),
+      vec![home.join(".cache/puppeteer")]
+    );
+    assert!(home_write_paths(&package, None).is_empty());
   }
 
   // DENEXT.md item 108: a download cache outside node_modules
@@ -1115,6 +1568,7 @@ mod tests {
       deny_write: vec![PathBuf::from("/ws/member")],
       deny_read: vec![PathBuf::from("/home/u/.ssh")],
       net: JailNet::None,
+      proxy: None,
     };
     let mut options = PermissionsOptions {
       allow_write: Some(vec![]),
@@ -1159,6 +1613,29 @@ mod tests {
     clamp_permissions(&mut options, &jail, Path::new("/nm/pkg"));
     assert_eq!(options.allow_net, Some(vec!["example.com".to_string()]));
     assert_eq!(options.deny_import, None);
+
+    // DENEXT.md item 111: a deno may also connect to the script's proxy
+    let proxied = JailPermissions {
+      proxy: Some("127.0.0.1:9".to_string()),
+      ..jail.clone()
+    };
+    for list in [vec![], vec!["example.com".to_string()]] {
+      let mut options = PermissionsOptions {
+        allow_net: Some(list),
+        ..Default::default()
+      };
+      clamp_permissions(&mut options, &proxied, Path::new("/nm/pkg"));
+      assert_eq!(
+        options.allow_net,
+        Some(vec!["example.com".to_string(), "127.0.0.1:9".to_string()])
+      );
+    }
+    let mut options = PermissionsOptions {
+      allow_net: Some(vec!["evil.com".to_string()]),
+      ..Default::default()
+    };
+    clamp_permissions(&mut options, &proxied, Path::new("/nm/pkg"));
+    assert_eq!(options.allow_net, None);
 
     // the direction-specific grants are clamped like `allow_net`
     let mut options = PermissionsOptions {

@@ -6,13 +6,16 @@
 //! - [`downloads`]: `deno add` of a package with very low weekly downloads
 //!   warns (or, with `low-download-check=prompt`, asks first): a typosquat
 //!   guard.
-//! - [`jail`]: approved lifecycle scripts run confined.
+//! - [`jail`]: approved lifecycle scripts run confined; `jail_proxy` is the
+//!   allow-listing proxy a script with a host list reaches the network
+//!   through.
 //! - `paranoid` (resolved in `deno_npmrc::resolve_supply_chain`): all of them
 //!   on, each failing closed.
 
 pub mod advisories;
 pub mod downloads;
 pub mod jail;
+mod jail_proxy;
 #[cfg(target_os = "linux")]
 mod sandbox_linux;
 #[cfg(target_os = "macos")]

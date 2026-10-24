@@ -131,7 +131,7 @@
           "description": "Turn every gate on and make each fail closed: jailScripts on, advisoryCheck required, lowDownloadCheck required, trust-policy no-downgrade. A member set to something weaker is an error."
         },
         "jailScripts": {
-          "description": "Run approved npm lifecycle scripts confined (scrubbed environment, temporary HOME, writes only to node_modules and temp, no credential files, no network unless allowed). On by default; false runs them unconfined (not allowed under paranoid). An object sets exceptions; with `net`, or without `packages`, it also asks for the jail (where the OS can't confine scripts, a warning says so).",
+          "description": "Run approved npm lifecycle scripts confined (scrubbed environment, temporary HOME, writes only to the package's own folder and temp, no credential files, no network unless allowed). On by default; false runs them unconfined (not allowed under paranoid). An object sets exceptions; with `net`, or without `packages`, it also asks for the jail (where the OS can't confine scripts, a warning says so).",
           "oneOf": [{
             "type": "boolean"
           }, {
@@ -159,8 +159,12 @@
                       "items": { "type": "string" },
                       "description": "Extra directories the package's scripts may write to (relative to this file; `~/` is the user's home), created when missing. For a download cache kept outside node_modules, list it here and pass its variable in env (PUPPETEER_CACHE_DIR, PLAYWRIGHT_BROWSERS_PATH, CYPRESS_CACHE_FOLDER)."
                     },
+                    "executables": {
+                      "type": "boolean",
+                      "description": "Let the package's scripts leave executable files in its `~/` write paths (a browser download in a cache other projects use). Without it, such files are removed and the script fails."
+                    },
                     "net": {
-                      "description": "Network for the package's scripts: true / false, or the hosts (host or host:port) they may reach, as --allow-net=<hosts>.",
+                      "description": "Network for the package's scripts: true / false, or the hosts (host or host:port) they may reach, as --allow-net=<hosts>. Every program the script starts reaches them through an allow-listing proxy; false also drops the hosts a package declares for itself and wins over jailScripts.net.",
                       "oneOf": [{
                         "type": "boolean"
                       }, {

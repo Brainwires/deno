@@ -1,0 +1,11 @@
+{
+  "supplyChain": {
+    "jailScripts": {
+      "packages": {
+        "npm:@denotest/jail-net-declared": {
+          "env": ["JAIL_PASSED_VAR"]
+        }
+      }
+    }
+  }
+}

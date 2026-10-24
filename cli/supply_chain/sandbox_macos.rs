@@ -4,12 +4,17 @@
 //! process tree runs under `sandbox-exec` (Seatbelt) with a profile that
 //! allows writes only beneath the jail's roots, denies reads of credential
 //! files, and denies the network (IP, the DNS resolver, and every Unix socket
-//! but the resolver's when the network is allowed). Seatbelt checks the
+//! but the resolver's when the network is allowed). A script that may reach
+//! only some hosts may connect only to its allow-listing proxy
+//! (`localhost:<port>`, `jail_proxy`), with no DNS; without the whole
+//! network a script can't listen for connections either. Seatbelt checks the
 //! resolved path, so a symlink in a writable root can't lead outside it.
 
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::OnceLock;
+
+use super::jail::OsNet;
 
 pub const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
 
@@ -48,7 +53,7 @@ fn quote(path: &Path) -> String {
 pub fn profile(
   write_roots: &[PathBuf],
   deny_read: &[PathBuf],
-  net: bool,
+  net: OsNet,
 ) -> String {
   let mut p =
     String::from("(version 1)\n(allow default)\n(deny file-write*)\n");
@@ -77,17 +82,30 @@ pub fn profile(
   // Unix sockets reach other daemons (a Docker socket runs anything): none,
   // whatever the network setting, but the DNS resolver's when it's allowed
   p.push_str("(deny network-outbound (remote unix-socket))\n");
-  if net {
-    p.push_str(
-      "(allow network-outbound (remote unix-socket (path-literal \"/private/var/run/mDNSResponder\")))\n",
-    );
-  } else {
-    p.push_str("(deny network-outbound (remote ip))\n");
-    // DNS lookups go through mDNSResponder, which would carry data out
-    p.push_str(
-      "(deny mach-lookup (global-name \"com.apple.dnssd.service\"))\n",
-    );
+  match net {
+    OsNet::Open => {
+      p.push_str(
+        "(allow network-outbound (remote unix-socket (path-literal \"/private/var/run/mDNSResponder\")))\n",
+      );
+      return p;
+    }
+    OsNet::Denied => {
+      p.push_str("(deny network-outbound (remote ip))\n");
+    }
+    OsNet::ProxyOnly(port) => {
+      // the last matching rule wins: the proxy's port on the loopback
+      // interface only (TCP and UDP to anywhere else are denied)
+      p.push_str("(deny network-outbound (remote ip))\n");
+      p.push_str(&format!(
+        "(allow network-outbound (remote ip \"localhost:{port}\"))\n"
+      ));
+    }
   }
+  // nor serving: a listening socket would hand data to whoever connects in
+  p.push_str("(deny network-inbound (local ip))\n");
+  // DNS lookups go through mDNSResponder, which would carry data out; the
+  // proxy resolves names itself
+  p.push_str("(deny mach-lookup (global-name \"com.apple.dnssd.service\"))\n");
   p
 }
 
@@ -100,13 +118,33 @@ mod tests {
     let p = profile(
       &[PathBuf::from("/a \"b\"/c\\d")],
       &[PathBuf::from("/home/.ssh")],
-      false,
+      OsNet::Denied,
     );
     assert!(p.contains("(subpath \"/a \\\"b\\\"/c\\\\d\")"), "{p}");
     assert!(p.contains("(deny file-read* (subpath \"/home/.ssh\"))"));
     assert!(p.contains("(deny network-outbound (remote ip))"));
-    let p = profile(&[], &[], true);
+    assert!(p.contains("com.apple.dnssd.service"));
+    assert!(p.contains("(deny network-inbound (local ip))"));
+    let p = profile(&[], &[], OsNet::Open);
+    assert!(!p.contains("network-inbound"));
     assert!(!p.contains("(remote ip)"));
     assert!(p.contains("mDNSResponder"));
+    assert!(!p.contains("com.apple.dnssd.service"));
+  }
+
+  // DENEXT.md item 111: only the proxy's port, no DNS
+  #[test]
+  fn profile_proxy_only() {
+    let p = profile(&[], &[], OsNet::ProxyOnly(4321));
+    let deny = p.find("(deny network-outbound (remote ip))").unwrap();
+    let allow = p
+      .find("(allow network-outbound (remote ip \"localhost:4321\"))")
+      .unwrap();
+    // later rules win in Seatbelt
+    assert!(deny < allow, "{p}");
+    assert!(p.contains("(deny network-outbound (remote unix-socket))"));
+    assert!(!p.contains("mDNSResponder"), "{p}");
+    assert!(p.contains("(deny network-inbound (local ip))"));
+    assert!(p.contains("com.apple.dnssd.service"));
   }
 }

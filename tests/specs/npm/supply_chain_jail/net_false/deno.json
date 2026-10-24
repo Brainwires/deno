@@ -1,0 +1,12 @@
+{
+  "supplyChain": {
+    "jailScripts": {
+      "net": true,
+      "packages": {
+        "npm:@denotest/jail-net-curl": {
+          "net": false
+        }
+      }
+    }
+  }
+}

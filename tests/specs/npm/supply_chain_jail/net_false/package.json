@@ -1,0 +1,7 @@
+{
+  "name": "app",
+  "version": "1.0.0",
+  "dependencies": {
+    "@denotest/jail-net-curl": "1.0.0"
+  }
+}
