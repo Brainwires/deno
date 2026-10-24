@@ -4223,11 +4223,10 @@ where the changes are discussed.
      `per_package_hosts_bind_every_program`, the same for deno.json's host list;
      `package_net_false_wins`; `no_writes_into_other_packages`, `node` and `sh`
      writing into a sibling package, through its link and its real path, and
-     elsewhere in node_modules; `packages_only_quiet_on_windows`, item 108's
-     exceptions-only object printing no confinement warning on Windows),
-     `jail_proxy` unit tests (`allow_list_host_and_port`, `allow_list_idna`,
-     `allow_list_ip_literals`, `allow_list_rejects_non_hosts`,
-     `connect_requests`, `absolute_uri_requests`, `upstream_from_env`,
+     elsewhere in node_modules), `jail_proxy` unit tests
+     (`allow_list_host_and_port`, `allow_list_idna`, `allow_list_ip_literals`,
+     `allow_list_rejects_non_hosts`, `connect_requests`,
+     `absolute_uri_requests`, `upstream_from_env`,
      `forwards_allowed_and_refuses_others`, `tunnels_allowed`,
      `chains_through_upstream_proxy`), `package_net_false_wins`,
      `os_net_choice`, `proxy_env`, `new_executables_removed`, `home_paths` and

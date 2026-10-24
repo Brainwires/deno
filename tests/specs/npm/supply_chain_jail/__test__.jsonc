@@ -307,12 +307,12 @@
         {
           "cwd": "sibling_write",
           "args": "eval console.log(Deno.readTextFileSync('node_modules/@denotest/jail-sibling-write/results.txt').trim())",
-          "output": "node: write own dir: allowed\nnode: write sibling package: denied\nnode: write node_modules: denied\nsh: write sibling package: denied\nsh: write sibling real path: denied\nsh: write node_modules: denied\n"
+          "output": "sibling_write.out"
         },
         {
           "cwd": "sibling_write",
-          "args": "eval console.log(Deno.readTextFileSync('node_modules/@denotest/jail-net-declared/index.js').includes('pwned') ? 'modified' : 'intact')",
-          "output": "intact\n"
+          "args": "eval console.log(Deno.readTextFileSync('node_modules/@denotest/jail-net-declared/index.js').includes('pwned'))",
+          "output": "false\n"
         }
       ]
     },
