@@ -4760,6 +4760,40 @@ pub mod test {
     );
   }
 
+  // DENEXT.md item 108: `supplyChain` is read from the workspace root only,
+  // as `allowScripts` is (the approvals and the jail's exceptions are about
+  // the one node_modules the root installs); a member's is reported and
+  // ignored, never merged, so a member can't loosen what the root sets
+  #[test]
+  fn test_supply_chain_root_only() {
+    let workspace_dir = workspace_for_root_and_member(
+      json!({
+        "supplyChain": {
+          "advisoryCheck": "required",
+          "jailScripts": { "packages": { "a": { "env": ["ROOT"] } } }
+        },
+      }),
+      json!({
+        "supplyChain": {
+          "jailScripts": false,
+          "advisoryCheck": "off",
+        },
+      }),
+    );
+    let supply_chain = workspace_dir.workspace.supply_chain().unwrap();
+    assert_eq!(supply_chain.advisory_check.as_deref(), Some("required"));
+    assert_eq!(supply_chain.jail_scripts, None);
+    assert_eq!(supply_chain.jail_packages["a"].env, vec!["ROOT"]);
+    assert_eq!(
+      workspace_dir.workspace.diagnostics(),
+      vec![WorkspaceDiagnostic {
+        kind: WorkspaceDiagnosticKind::RootOnlyOption("supplyChain"),
+        config_url: url_from_file_path(&root_dir().join("member/deno.json"))
+          .unwrap(),
+      }]
+    );
+  }
+
   #[test]
   fn test_member_pkg_json_overrides_diagnostic() {
     let sys = InMemorySys::default();

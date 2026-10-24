@@ -3659,7 +3659,7 @@ where the changes are discussed.
        applies the environment, HOME and Deno clamp quietly; the warning is kept
        for a jail that was asked for (`--jail-scripts`, `jail-scripts=true`, an
        object `jailScripts`, `paranoid`), so every Windows install doesn't print
-       it.
+       it. (Since item 108 an object that holds only `packages` doesn't count.)
      - `npm_config_user_agent` now passes into the jail (it names the package
        manager; the `user` in its name had dropped it with the credential keys).
 
@@ -3937,6 +3937,72 @@ where the changes are discussed.
      Windows `workspace_import_map_across_drives`
      (`tests/integration/run_tests.rs`: a `subst` drive holding a member's
      mapped module, a `links` package and an auto-linked config folder).
+
+108. **`feat(npm)`: jail follow-ups: per-package host lists, download caches,
+     exception-only objects, workspace members** (`feat/jail-followups`, CLI
+     only; `libs/config/deno_json/mod.rs`, `cli/supply_chain/jail.rs`,
+     `cli/schemas/config-file.v1.json`). Four follow-ups to items 83 and 103.
+     - **A host list per package.** `jailScripts.packages.<name>.net` takes,
+       besides `true` / `false`, the hosts the package's scripts may reach:
+       `"net": ["registry.npmjs.org", "github.com"]` (`host` or `host:port`). It
+       is enforced as the declared download hosts are (item 83): the OS sandbox
+       allows the network (it can't tell hosts apart), and every `deno` in the
+       jail (the `node` shim, `.bin` wrappers, a script's own `deno run -A`)
+       gets `--allow-net=<hosts>`. A program that isn't Deno (`curl`) can reach
+       any host, as with `true`. The list is the narrower grant, so it wins over
+       `jailScripts.net: true` and replaces the hosts the package declares; it
+       applies under `paranoid` too (it is the project's setting, not one the
+       package grants itself). An empty list, an empty host, or one with a
+       scheme, path, `@`, `?`, `#` or whitespace is a config error (`false`
+       means no network).
+     - **Download caches outside node_modules** (puppeteer's
+       `PUPPETEER_CACHE_DIR`, playwright's `PLAYWRIGHT_BROWSERS_PATH`, cypress's
+       `CYPRESS_CACHE_FOLDER`). By default such a download lands in the jail's
+       scratch HOME and is removed with it, so the browser is missing at run
+       time. The way to keep it is explicit, per package: list the directory in
+       `write` and pass the variable in `env`, with the variable set in the
+       environment of the install and of the app:
+       `"puppeteer": { "net": ["storage.googleapis.com"], "env": ["PUPPETEER_CACHE_DIR"], "write": ["~/.cache/puppeteer"] }`.
+       Two changes make that work: a `write` path starting with `~` (`~/...`,
+       not `~user`) is the user's home directory, resolved when the jail runs
+       (dropped when there is no home, never widened), so a checked-in deno.json
+       needn't name one user's home; and a `write` directory is created when
+       missing before the jail starts. Without that a first install failed:
+       Landlock opens each writable root (a missing one made the sandbox setup
+       fail) and Seatbelt matches real paths, which `canonicalize` only knows
+       for an existing directory. Persisting these directories by default
+       whenever a package gets the network was rejected: the caches hold
+       executables that other projects run outside any jail, so a default grant
+       would let one compromised package with network access plant a browser
+       binary every other project then runs. Granting the write per package
+       keeps it visible in the reviewed deno.json.
+     - **An object that only lists exceptions doesn't ask for the jail.**
+       `"jailScripts": { "packages": { ... } }` configures the default jail
+       (item 103) instead of counting as `jail-scripts=true`, so where the OS
+       can't confine (Windows) it no longer prints the "other programs are not
+       confined" warning to a project that only listed exceptions, and it no
+       longer outvotes `jail-scripts=false` from another source. An object with
+       `net`, or one without `packages` (`{}`), still asks for the jail as
+       before.
+     - **Workspace members: root only, as before, now pinned.** `supplyChain` is
+       read from the workspace root's deno.json alone, like `allowScripts`: the
+       approvals and the jail's exceptions are about the one node_modules the
+       root installs, and a member that could merge its own settings could
+       loosen the root's (`jailScripts: false`, `advisoryCheck: "off"`). A
+       member's `supplyChain` is ignored with the existing warning
+       (`"supplyChain" field can only be specified in the workspace root
+       deno.json file.`).
+       Relative `write` paths are resolved against the root deno.json's
+       directory.
+
+     Tests: `npm/supply_chain_jail` (`per_package_net_hosts`: the listed host
+     reached, another refused; `download_cache_persists`: a simulated browser
+     download into a missing `PUPPETEER_CACHE_DIR` under the project, kept after
+     the install), `test_to_supply_chain_config` (`libs/config/deno_json`: host
+     lists and their errors, `~` paths, an exceptions-only object),
+     `test_supply_chain_root_only` (`libs/config/workspace`: a member's
+     `supplyChain` reported and not merged), `package_net` and `package_write`
+     (`cli/supply_chain/jail.rs`).
 
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105) are what the

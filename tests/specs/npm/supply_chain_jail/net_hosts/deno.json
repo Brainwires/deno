@@ -1,0 +1,11 @@
+{
+  "supplyChain": {
+    "jailScripts": {
+      "packages": {
+        "npm:@denotest/jail-cache-download": {
+          "net": ["localhost:5548"]
+        }
+      }
+    }
+  }
+}

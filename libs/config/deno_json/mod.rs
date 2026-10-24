@@ -126,7 +126,8 @@ pub struct SupplyChainConfig {
   /// `paranoid`
   pub paranoid: Option<bool>,
   /// `jailScripts` (`jail-scripts`): `true`/`false`, or an object, which turns
-  /// it on.
+  /// it on. An object that holds only `packages` sets exceptions to the
+  /// default jail without asking for it, so it leaves this `None`.
   pub jail_scripts: Option<bool>,
   /// `jailScripts.net`: network for every jailed script.
   pub jail_net: Option<bool>,
@@ -151,10 +152,31 @@ pub struct JailPackageConfig {
   /// Environment variables passed through to the package's scripts.
   pub env: Vec<String>,
   /// Extra directories its scripts may write to (absolute, resolved against
-  /// the deno.json's directory).
+  /// the deno.json's directory). A path starting with `~` stays as written
+  /// and is resolved against the user's home directory when the jail runs.
   pub write: Vec<PathBuf>,
-  /// Network for its scripts.
-  pub net: Option<bool>,
+  /// Network for its scripts: `true` / `false`, or the hosts they may reach.
+  pub net: Option<JailNetConfig>,
+}
+
+/// `supplyChain.jailScripts.packages.<name>.net`.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(untagged)]
+pub enum JailNetConfig {
+  /// The whole network, or none.
+  All(bool),
+  /// Only these hosts (`host` or `host:port`), as `--allow-net=<hosts>`.
+  Hosts(Vec<String>),
+}
+
+/// Whether a `write` path in `jailScripts.packages` is relative to the
+/// user's home directory (`~`, `~/...`).
+pub fn is_home_relative_path(path: &Path) -> bool {
+  let mut components = path.components();
+  matches!(
+    components.next(),
+    Some(std::path::Component::Normal(first)) if first == "~"
+  )
 }
 
 #[derive(Deserialize)]
@@ -185,7 +207,7 @@ enum RawJailScripts {
 #[serde(default, deny_unknown_fields)]
 struct RawJailScriptsObject {
   net: Option<bool>,
-  packages: BTreeMap<String, JailPackageConfig>,
+  packages: Option<BTreeMap<String, JailPackageConfig>>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Hash, PartialEq)]
@@ -2801,16 +2823,37 @@ impl ConfigFile {
       None => (None, None, BTreeMap::new()),
       Some(RawJailScripts::Bool(value)) => (Some(value), None, BTreeMap::new()),
       Some(RawJailScripts::Object(obj)) => {
+        // an object that only lists exceptions doesn't ask for the jail: it
+        // configures the default one (DENEXT.md item 108), so a platform that
+        // can't confine stays quiet about it
+        let asks_for_jail = obj.net.is_some() || obj.packages.is_none();
         let mut packages = BTreeMap::new();
-        for (name, mut config) in obj.packages {
+        for (name, mut config) in obj.packages.unwrap_or_default() {
           let name = name.strip_prefix("npm:").unwrap_or(&name).to_string();
           if name.is_empty() {
             return Err(parse_err(
               "an empty package name in \"jailScripts.packages\"".into(),
             ));
           }
+          if let Some(JailNetConfig::Hosts(hosts)) = &config.net {
+            if hosts.is_empty() {
+              return Err(parse_err(format!(
+                "\"jailScripts.packages\": {name}'s \"net\" is an empty host list; use false for no network"
+              )));
+            }
+            for host in hosts {
+              if host.is_empty()
+                || host.contains(['/', '\\', '@', '?', '#'])
+                || host.chars().any(|c| c.is_whitespace())
+              {
+                return Err(parse_err(format!(
+                  "\"jailScripts.packages\": {name}'s \"net\" lists \"{host}\"; expected a host or host:port, as --allow-net takes"
+                )));
+              }
+            }
+          }
           for path in &mut config.write {
-            if path.is_relative() {
+            if path.is_relative() && !is_home_relative_path(path) {
               match &base_dir {
                 Some(base_dir) => *path = base_dir.join(&*path),
                 None => {
@@ -2824,7 +2867,7 @@ impl ConfigFile {
           }
           packages.insert(name, config);
         }
-        (Some(true), obj.net, packages)
+        (asks_for_jail.then_some(true), obj.net, packages)
       }
     };
     Ok(SupplyChainConfig {
@@ -4304,9 +4347,70 @@ mod tests {
     assert_eq!(config.allow_low_downloads, vec!["npm:left-pad", "@org/*"]);
     let sharp = &config.jail_packages["sharp"];
     assert_eq!(sharp.env, vec!["SHARP_X"]);
-    assert_eq!(sharp.net, Some(true));
+    assert_eq!(sharp.net, Some(JailNetConfig::All(true)));
     assert!(sharp.write[0].is_absolute());
     assert!(sharp.write[0].ends_with("cache"));
+
+    // DENEXT.md item 108: a per-package host allow-list, and `~` write paths
+    // kept for the jail to resolve against the user's home
+    let config = get_result(
+      r#"{ "supplyChain": { "jailScripts": { "net": true, "packages": {
+        "puppeteer": {
+          "net": ["storage.googleapis.com", "localhost:4545"],
+          "write": ["~/.cache/puppeteer"]
+        }
+      } } } }"#,
+    )
+    .unwrap();
+    let puppeteer = &config.jail_packages["puppeteer"];
+    assert_eq!(
+      puppeteer.net,
+      Some(JailNetConfig::Hosts(vec![
+        "storage.googleapis.com".to_string(),
+        "localhost:4545".to_string()
+      ]))
+    );
+    assert_eq!(puppeteer.write, vec![PathBuf::from("~/.cache/puppeteer")]);
+    // `~user` is not the home directory: relative to the deno.json
+    let config = get_result(
+      r#"{ "supplyChain": { "jailScripts": { "packages": { "a": { "write": ["~other/x"] } } } } }"#,
+    )
+    .unwrap();
+    assert!(config.jail_packages["a"].write[0].is_absolute());
+    for bad in [
+      r#"[]"#,
+      r#"[""]"#,
+      r#"["https://example.com"]"#,
+      r#"["example.com/path"]"#,
+      r#"["a b"]"#,
+      r#""example.com""#,
+    ] {
+      assert!(
+        get_result(&format!(
+          r#"{{ "supplyChain": {{ "jailScripts": {{ "packages": {{ "a": {{ "net": {bad} }} }} }} }} }}"#
+        ))
+        .is_err(),
+        "{bad}"
+      );
+    }
+
+    // DENEXT.md item 108: an object that only lists exceptions configures the
+    // default jail rather than asking for it; `net` or an object without
+    // `packages` still asks for it
+    let config = get_result(
+      r#"{ "supplyChain": { "jailScripts": { "packages": { "a": { "env": ["X"] } } } } }"#,
+    )
+    .unwrap();
+    assert_eq!(config.jail_scripts, None);
+    assert_eq!(config.jail_packages["a"].env, vec!["X"]);
+    let config = get_result(
+      r#"{ "supplyChain": { "jailScripts": { "net": false, "packages": {} } } }"#,
+    )
+    .unwrap();
+    assert_eq!(config.jail_scripts, Some(true));
+    let config =
+      get_result(r#"{ "supplyChain": { "jailScripts": {} } }"#).unwrap();
+    assert_eq!(config.jail_scripts, Some(true));
 
     let config =
       get_result(r#"{ "supplyChain": { "jailScripts": false } }"#).unwrap();

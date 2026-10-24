@@ -131,7 +131,7 @@
           "description": "Turn every gate on and make each fail closed: jailScripts on, advisoryCheck required, lowDownloadCheck required, trust-policy no-downgrade. A member set to something weaker is an error."
         },
         "jailScripts": {
-          "description": "Run approved npm lifecycle scripts confined (scrubbed environment, temporary HOME, writes only to node_modules and temp, no credential files, no network unless allowed). On by default; false runs them unconfined (not allowed under paranoid). An object keeps it on and sets exceptions.",
+          "description": "Run approved npm lifecycle scripts confined (scrubbed environment, temporary HOME, writes only to node_modules and temp, no credential files, no network unless allowed). On by default; false runs them unconfined (not allowed under paranoid). An object sets exceptions; with `net`, or without `packages`, it also asks for the jail (where the OS can't confine scripts, a warning says so).",
           "oneOf": [{
             "type": "boolean"
           }, {
@@ -157,11 +157,17 @@
                     "write": {
                       "type": "array",
                       "items": { "type": "string" },
-                      "description": "Extra directories the package's scripts may write to (relative to this file)."
+                      "description": "Extra directories the package's scripts may write to (relative to this file; `~/` is the user's home), created when missing. For a download cache kept outside node_modules, list it here and pass its variable in env (PUPPETEER_CACHE_DIR, PLAYWRIGHT_BROWSERS_PATH, CYPRESS_CACHE_FOLDER)."
                     },
                     "net": {
-                      "type": "boolean",
-                      "description": "Network for the package's scripts."
+                      "description": "Network for the package's scripts: true / false, or the hosts (host or host:port) they may reach, as --allow-net=<hosts>.",
+                      "oneOf": [{
+                        "type": "boolean"
+                      }, {
+                        "type": "array",
+                        "minItems": 1,
+                        "items": { "type": "string" }
+                      }]
                     }
                   }
                 }
