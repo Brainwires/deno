@@ -3957,7 +3957,14 @@ where the changes are discussed.
        loader through one that calls
        `register(<loader>,
        pathToFileURL("./"))`, which is what Node does
-       for `--experimental-loader`.
+       for `--experimental-loader`. An absolute `--require` path is required
+       from itself and an absolute loader is registered as its own file URL, so
+       neither reads the working directory (a deleted one does not stop them, as
+       in Node). In a command string run through a shell
+       (`child_process.exec()`), a `--require` value that still holds a `$VAR` /
+       `${VAR}` reference becomes Deno's own `--require`, since the shell
+       expands it after the translation and could not inside a `data:` URL; such
+       a module runs after the loaders and the `--import` modules.
      - **Not done:** a hooks chain that never settles blocks the loading thread
        (Node resolves `import()` asynchronously, so other imports go on, and
        detects the stall and exits with code 13); a CommonJS main module is
@@ -3982,7 +3989,10 @@ where the changes are discussed.
      `node_cli_flags`, `--experimental-loader` / `--import` / `--require` from
      `child_process`); `test_run_script_with_preloads`,
      `test_experimental_loader_registers_through_preload` and
-     `test_eval_with_preloads` (`libs/node_shim`);
+     `test_eval_with_preloads`, `test_absolute_preloads_do_not_read_the_cwd` and
+     `test_shell_command_require_with_variable` (`libs/node_shim`); node_compat
+     `parallel/test-cwd-enoent-preload.js` and `parallel/test-preload-worker.js`
+     (a deleted working directory and a `-r "${VAR}"` in a shell command);
      `[node/module register]
      runs the hooks module's initialize` and
      `Module.register and

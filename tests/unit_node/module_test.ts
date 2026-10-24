@@ -320,10 +320,19 @@ try {
 });
 
 // https://github.com/denoland/deno/issues/24902
-Deno.test("[node/module register] runs the hooks module's initialize", () => {
-  const hooks = "data:text/javascript,export function initialize(data) " +
-    "{ return data.n * 2; }";
-  assertEquals(register(hooks, { data: { n: 21 } }), 42);
+Deno.test({
+  name: "[node/module register] runs the hooks module's initialize",
+  // The hooks worker and its message port live as long as the process, as in
+  // Node: hooks can't be unregistered.
+  sanitizeResources: false,
+  fn() {
+    const hooks = "data:text/javascript,export function initialize(data) " +
+      "{ return data.n * 2; }";
+    // Node returns what `initialize` returned, but @types/node declares
+    // `register()` as returning void, so read the value as `unknown`.
+    const result: unknown = register(hooks, { data: { n: 21 } });
+    assertEquals(result, 42);
+  },
 });
 
 Deno.test("[node/module stripTypeScriptTypes] strips TypeScript types", () => {
