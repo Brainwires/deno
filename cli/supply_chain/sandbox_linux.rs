@@ -525,7 +525,9 @@ mod tests {
     let word = |offset: u32| match offset {
       SECCOMP_DATA_NR => nr,
       SECCOMP_DATA_ARCH => AUDIT_ARCH,
-      o if o >= SECCOMP_DATA_ARG0 && (o - SECCOMP_DATA_ARG0) % 8 == 0 => {
+      o if o >= SECCOMP_DATA_ARG0
+        && (o - SECCOMP_DATA_ARG0).is_multiple_of(8) =>
+      {
         args[((o - SECCOMP_DATA_ARG0) / 8) as usize]
       }
       o => panic!("an unexpected load at {o}"),
