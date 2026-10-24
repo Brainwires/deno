@@ -1189,6 +1189,16 @@ pub fn op_node_ecdh_encode_pubkey(
   #[buffer] pubkey: &[u8],
   compress: bool,
 ) -> Result<Uint8Array, EcdhEncodePubKey> {
+  ecdh_encode_pubkey(curve, pubkey, compress)
+}
+
+/// Body of [`op_node_ecdh_encode_pubkey`]: re-encode a SEC1 point,
+/// compressed or not.
+pub(crate) fn ecdh_encode_pubkey(
+  curve: &str,
+  pubkey: &[u8],
+  compress: bool,
+) -> Result<Uint8Array, EcdhEncodePubKey> {
   use elliptic_curve::sec1::FromEncodedPoint;
 
   match curve {
@@ -1346,6 +1356,19 @@ pub fn op_node_ecdh_compute_secret(
   #[buffer] secret: &mut [u8],
 ) -> Result<(), EcdhError> {
   let this_priv = this_priv.ok_or(EcdhError::InvalidPrivateKey)?;
+  ecdh_compute_secret(curve, &this_priv, this_pub.as_deref(), their_pub, secret)
+}
+
+/// Body of [`op_node_ecdh_compute_secret`]: `secret` receives the
+/// x-coordinate of `this_priv * their_pub`. `this_pub`, when given, must be
+/// the public key of `this_priv`.
+pub(crate) fn ecdh_compute_secret(
+  curve: &str,
+  this_priv: &[u8],
+  this_pub: Option<&[u8]>,
+  their_pub: &[u8],
+  secret: &mut [u8],
+) -> Result<(), EcdhError> {
   match curve {
     "secp256k1" => {
       let their_public_key =
@@ -1354,13 +1377,13 @@ pub fn op_node_ecdh_compute_secret(
         )
         .map_err(|_| EcdhError::InvalidPublicKey)?;
       let this_private_key =
-        elliptic_curve::SecretKey::<k256::Secp256k1>::from_slice(&this_priv)
+        elliptic_curve::SecretKey::<k256::Secp256k1>::from_slice(this_priv)
           .map_err(|_| EcdhError::InvalidPrivateKey)?;
       if let Some(this_pub) = this_pub {
         let derived = this_private_key.public_key();
         let stored =
           elliptic_curve::PublicKey::<k256::Secp256k1>::from_sec1_bytes(
-            &this_pub,
+            this_pub,
           )
           .map_err(|_| EcdhError::InvalidKeyPair)?;
         if derived != stored {
@@ -1378,12 +1401,12 @@ pub fn op_node_ecdh_compute_secret(
         elliptic_curve::PublicKey::<NistP256>::from_sec1_bytes(their_pub)
           .map_err(|_| EcdhError::InvalidPublicKey)?;
       let this_private_key =
-        elliptic_curve::SecretKey::<NistP256>::from_slice(&this_priv)
+        elliptic_curve::SecretKey::<NistP256>::from_slice(this_priv)
           .map_err(|_| EcdhError::InvalidPrivateKey)?;
       if let Some(this_pub) = this_pub {
         let derived = this_private_key.public_key();
         let stored =
-          elliptic_curve::PublicKey::<NistP256>::from_sec1_bytes(&this_pub)
+          elliptic_curve::PublicKey::<NistP256>::from_sec1_bytes(this_pub)
             .map_err(|_| EcdhError::InvalidKeyPair)?;
         if derived != stored {
           return Err(EcdhError::InvalidKeyPair);
@@ -1400,12 +1423,12 @@ pub fn op_node_ecdh_compute_secret(
         elliptic_curve::PublicKey::<NistP384>::from_sec1_bytes(their_pub)
           .map_err(|_| EcdhError::InvalidPublicKey)?;
       let this_private_key =
-        elliptic_curve::SecretKey::<NistP384>::from_slice(&this_priv)
+        elliptic_curve::SecretKey::<NistP384>::from_slice(this_priv)
           .map_err(|_| EcdhError::InvalidPrivateKey)?;
       if let Some(this_pub) = this_pub {
         let derived = this_private_key.public_key();
         let stored =
-          elliptic_curve::PublicKey::<NistP384>::from_sec1_bytes(&this_pub)
+          elliptic_curve::PublicKey::<NistP384>::from_sec1_bytes(this_pub)
             .map_err(|_| EcdhError::InvalidKeyPair)?;
         if derived != stored {
           return Err(EcdhError::InvalidKeyPair);
@@ -1422,12 +1445,12 @@ pub fn op_node_ecdh_compute_secret(
         elliptic_curve::PublicKey::<NistP521>::from_sec1_bytes(their_pub)
           .map_err(|_| EcdhError::InvalidPublicKey)?;
       let this_private_key =
-        elliptic_curve::SecretKey::<NistP521>::from_slice(&this_priv)
+        elliptic_curve::SecretKey::<NistP521>::from_slice(this_priv)
           .map_err(|_| EcdhError::InvalidPrivateKey)?;
       if let Some(this_pub) = this_pub {
         let derived = this_private_key.public_key();
         let stored =
-          elliptic_curve::PublicKey::<NistP521>::from_sec1_bytes(&this_pub)
+          elliptic_curve::PublicKey::<NistP521>::from_sec1_bytes(this_pub)
             .map_err(|_| EcdhError::InvalidKeyPair)?;
         if derived != stored {
           return Err(EcdhError::InvalidKeyPair);
@@ -1444,12 +1467,12 @@ pub fn op_node_ecdh_compute_secret(
         elliptic_curve::PublicKey::<NistP224>::from_sec1_bytes(their_pub)
           .map_err(|_| EcdhError::InvalidPublicKey)?;
       let this_private_key =
-        elliptic_curve::SecretKey::<NistP224>::from_slice(&this_priv)
+        elliptic_curve::SecretKey::<NistP224>::from_slice(this_priv)
           .map_err(|_| EcdhError::InvalidPrivateKey)?;
       if let Some(this_pub) = this_pub {
         let derived = this_private_key.public_key();
         let stored =
-          elliptic_curve::PublicKey::<NistP224>::from_sec1_bytes(&this_pub)
+          elliptic_curve::PublicKey::<NistP224>::from_sec1_bytes(this_pub)
             .map_err(|_| EcdhError::InvalidKeyPair)?;
         if derived != stored {
           return Err(EcdhError::InvalidKeyPair);
@@ -1471,6 +1494,16 @@ pub fn op_node_ecdh_compute_public_key(
   #[string] curve: &str,
   #[buffer] privkey: &[u8],
   #[buffer] pubkey: &mut [u8],
+) -> Result<(), EcdhError> {
+  ecdh_compute_public_key(curve, privkey, pubkey)
+}
+
+/// Body of [`op_node_ecdh_compute_public_key`]: `pubkey` receives the
+/// uncompressed SEC1 public key of `privkey`.
+pub(crate) fn ecdh_compute_public_key(
+  curve: &str,
+  privkey: &[u8],
+  pubkey: &mut [u8],
 ) -> Result<(), EcdhError> {
   match curve {
     "secp256k1" => {

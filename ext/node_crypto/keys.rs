@@ -3762,6 +3762,30 @@ pub fn op_node_export_public_key_raw(
   #[cppgc] handle: &KeyObjectHandle,
   compressed: bool,
 ) -> Result<Box<[u8]>, RawAsymmetricKeyError> {
+  handle.export_public_key_raw(compressed)
+}
+
+impl KeyObjectHandle {
+  /// Body of [`op_node_export_public_key_raw`].
+  pub(crate) fn export_public_key_raw(
+    &self,
+    compressed: bool,
+  ) -> Result<Box<[u8]>, RawAsymmetricKeyError> {
+    export_public_key_raw(self, compressed)
+  }
+
+  /// Body of [`op_node_export_private_key_raw`].
+  pub(crate) fn export_private_key_raw(
+    &self,
+  ) -> Result<Box<[u8]>, RawAsymmetricKeyError> {
+    export_private_key_raw(self)
+  }
+}
+
+fn export_public_key_raw(
+  handle: &KeyObjectHandle,
+  compressed: bool,
+) -> Result<Box<[u8]>, RawAsymmetricKeyError> {
   use elliptic_curve::sec1::ToEncodedPoint;
 
   let key = handle
@@ -4399,6 +4423,12 @@ pub fn op_node_export_private_key_der(
 pub fn op_node_export_private_key_raw(
   #[cppgc] handle: &KeyObjectHandle,
 ) -> Result<Box<[u8]>, RawAsymmetricKeyError> {
+  handle.export_private_key_raw()
+}
+
+fn export_private_key_raw(
+  handle: &KeyObjectHandle,
+) -> Result<Box<[u8]>, RawAsymmetricKeyError> {
   let key = handle
     .as_private_key()
     .ok_or(RawAsymmetricKeyError::InvalidKey)?;
@@ -4983,6 +5013,10 @@ pub fn op_node_validate_crl(
   }
   Ok(())
 }
+
+#[cfg(test)]
+#[path = "ec_golden_tests.rs"]
+mod ec_golden_tests;
 
 #[cfg(test)]
 mod tests {

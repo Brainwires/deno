@@ -658,6 +658,40 @@ mod tests {
     serde_json::to_vec(&envelope).unwrap()
   }
 
+  // Known answer, produced independently (Python `cryptography` / OpenSSL,
+  // RFC 6979): the update key's SPKI encoding and the r||s signature over
+  // the domain-prefixed signed bytes must not change across RustCrypto
+  // upgrades, or manifests signed by older publishers stop verifying.
+  #[test]
+  fn signature_format_known_answer() {
+    const SPKI_B64: &str = concat!(
+      "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEHhhTL9R1TALzBB2cdc6zO4P/2BrHzk/o",
+      "gsyxyYvFiW6kbDEcTi/0DdlqNlPm5FRF0y3+SG7O11x6kMahiIHAow==",
+    );
+    const SIG_B64: &str = concat!(
+      "GUG0nCaZkNQA7nwPG7lGsrkr0hTSXS0JXoW7V2hgexzsNG7G82S36rgovUFEmSq8A8Z0",
+      "X0YKYOygHLT2hyK80Q==",
+    );
+    let signer = key(7);
+    assert_eq!(public_b64(&signer), SPKI_B64);
+    let envelope: serde_json::Value =
+      serde_json::from_slice(&sign(&signer, r#"{"golden":true}"#)).unwrap();
+    assert_eq!(envelope["signature"], SIG_B64);
+
+    let mut msg = SIGNATURE_DOMAIN.to_vec();
+    msg.extend_from_slice(br#"{"golden":true}"#);
+    let verifying_key = parse_public_key(SPKI_B64).unwrap();
+    let sig = Signature::from_slice(
+      &base64::engine::general_purpose::STANDARD
+        .decode(SIG_B64)
+        .unwrap(),
+    )
+    .unwrap();
+    assert!(verifying_key.verify(&msg, &sig).is_ok());
+    msg.push(b' ');
+    assert!(verifying_key.verify(&msg, &sig).is_err());
+  }
+
   fn payload(version: &str) -> serde_json::Value {
     serde_json::json!({
       "schema": 1,

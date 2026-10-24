@@ -82,6 +82,9 @@ mod subtle_wrap_key;
 mod x25519;
 mod x448;
 
+#[cfg(test)]
+mod ec_golden_tests;
+
 pub use crate::decrypt::DecryptError;
 pub use crate::ed25519::Ed25519Error;
 pub use crate::encrypt::EncryptError;
