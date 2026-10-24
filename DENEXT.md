@@ -4111,9 +4111,28 @@ where the changes are discussed.
      `-no-leak-internals.mjs`, which passed only because the shim dropped
      `--experimental-loader`, are now ignored with the reason.
 
+110. **`fix(deps)`: crypto-bigint 0.7.6 (RUSTSEC-2026-0387)** (`Cargo.lock`
+     only). crypto-bigint before 0.7.6 could branch on secret data in
+     subtraction (`borrowing_sub`), zero counting, `div_rem` and Montgomery
+     multiplication, compare `UintRef`s limb by limb, and branch on
+     invertibility in `BoxedMontyForm::invert`. The 0.7 prerelease line
+     (0.7.0-rc.28, through elliptic-curve 0.14.0-rc.28 for ed448-goldilocks and
+     X448 in `libs/crypto`) moves to 0.7.6, with ctutils 0.4.5, hybrid-array
+     0.4.15 and typenum 1.20.1 (semver-compatible; no API change). Item 42's
+     ctutils 0.4.4 (RUSTSEC-2026-0385) was the first half of the same fixes.
+     crypto-bigint 0.5.5 is still in the tree: elliptic-curve 0.13 and the p224
+     / p256 / p384 / p521 / k256 0.13 and ecdsa 0.16 crates that `ext/crypto`,
+     `ext/node_crypto`, `cli` (provenance) and `runtime` (desktop update
+     manifests) use need it, and no 0.5.x release is patched. Moving off it
+     means migrating to the 0.14 line (elliptic-curve 0.14, ecdsa 0.17, with
+     pkcs8 0.11, spki 0.8, sec1 0.8, signature 3, digest / sha2 0.11 and
+     rand_core 0.10), which upstream Deno hasn't done yet; until then, or until
+     the advisory is accepted, `cargo audit` reports it. Tests:
+     `cargo test -p deno_crypto_provider` (X448 RFC 7748 vectors, Ed448).
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
-64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109) are what the
-prebuilt `libdenort` carries. The CLI-side parts (for example writing
+64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110) are
+what the prebuilt `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
 in the branch too, but a stock CLI does not run them; denext's own launcher
 provides that environment.
