@@ -3155,6 +3155,9 @@ pub struct TranslateOptions {
   pub add_standalone_config: bool,
   /// Wrap eval code for Node.js compatibility (builtin modules as globals)
   pub wrap_eval_code: bool,
+  /// The translated args go back into a shell command string, which the
+  /// shell expands afterwards (`$VAR` / `${VAR}` references are still in them)
+  pub shell_command: bool,
 }
 
 impl TranslateOptions {
@@ -3165,6 +3168,7 @@ impl TranslateOptions {
       add_unstable_flags: true,
       add_standalone_config: true,
       wrap_eval_code: false,
+      shell_command: false,
     }
   }
 
@@ -3175,6 +3179,7 @@ impl TranslateOptions {
       add_unstable_flags: true,
       add_standalone_config: false,
       wrap_eval_code: true,
+      shell_command: false,
     }
   }
 
@@ -3187,6 +3192,7 @@ impl TranslateOptions {
       add_unstable_flags: true,
       add_standalone_config: false,
       wrap_eval_code: false,
+      shell_command: true,
     }
   }
 }
@@ -3610,6 +3616,7 @@ pub fn translate_to_deno_args(
     // Add conditions and inspector flags for eval
     add_conditions(deno_args, env_opts);
     add_inspector_flags(deno_args, env_opts);
+    add_preload_flags(deno_args, env_opts, options);
 
     // Get the eval code from either the explicit eval_string or the first remaining arg (for -p)
     let raw_eval_code = eval_string_for_print
@@ -3670,7 +3677,7 @@ pub fn translate_to_deno_args(
       deno_args.push("--no-config".to_string());
     }
 
-    add_common_flags(deno_args, &parsed_args, env_opts);
+    add_common_flags(deno_args, &parsed_args, env_opts, options);
     append_remaining_args(
       deno_args,
       parsed_args.remaining_args,
@@ -3720,7 +3727,7 @@ pub fn translate_to_deno_args(
     deno_args.push("--no-config".to_string());
   }
 
-  add_common_flags(deno_args, &parsed_args, env_opts);
+  add_common_flags(deno_args, &parsed_args, env_opts, options);
 
   // Handle --no-warnings -> --quiet
   if !env_opts.warnings {
@@ -3785,6 +3792,7 @@ fn add_common_flags(
   deno_args: &mut Vec<String>,
   parsed_args: &ParseResult,
   env_opts: &EnvironmentOptions,
+  options: &TranslateOptions,
 ) {
   // Add watch mode if enabled
   if env_opts.watch_mode {
@@ -3822,6 +3830,84 @@ fn add_common_flags(
 
   // Add inspector flags
   add_inspector_flags(deno_args, env_opts);
+
+  add_preload_flags(deno_args, env_opts, options);
+}
+
+/// Node's preload flags, as `--preload` modules in Node's order: the
+/// `--require` modules, then the `--experimental-loader` (`--loader`) hooks,
+/// then the `--import` modules. A `--require` module is loaded with a
+/// `require` rooted at the working directory, as Node does (so `-r pkg` finds a
+/// package or a self-reference); an absolute path is required from itself, so
+/// it loads even when the working directory no longer exists. A loader is
+/// registered with `module.register()`, which is what Node does for
+/// `--experimental-loader`.
+///
+/// In a shell command, a `--require` value that still holds a shell variable
+/// reference becomes Deno's own `--require`: the shell expands it after the
+/// translation, which it can't do inside a percent-encoded `data:` URL.
+fn add_preload_flags(
+  deno_args: &mut Vec<String>,
+  env_opts: &EnvironmentOptions,
+  options: &TranslateOptions,
+) {
+  for module in &env_opts.preload_cjs_modules {
+    if options.shell_command && module.contains('$') {
+      deno_args.push(format!("--require={module}"));
+      continue;
+    }
+    let specifier = serde_json::Value::String(module.to_string());
+    let source = if std::path::Path::new(module).is_absolute() {
+      format!(
+        "import{{createRequire}}from\"node:module\";\
+         createRequire({specifier})({specifier});"
+      )
+    } else {
+      format!(
+        "import{{createRequire}}from\"node:module\";\
+         import process from\"node:process\";\
+         createRequire(process.cwd()+\"/\")({specifier});"
+      )
+    };
+    deno_args.push(format!("--preload={}", data_url(&source)));
+  }
+  for loader in &env_opts.userland_loaders {
+    let specifier = serde_json::Value::String(loader.to_string());
+    // An absolute path is registered as its own file URL, so it does not
+    // need the working directory either.
+    let source = if std::path::Path::new(loader).is_absolute() {
+      format!(
+        "import{{register}}from\"node:module\";\
+         import{{pathToFileURL}}from\"node:url\";\
+         const url=pathToFileURL({specifier});\
+         register(url,url);"
+      )
+    } else {
+      format!(
+        "import{{register}}from\"node:module\";\
+         import{{pathToFileURL}}from\"node:url\";\
+         register({specifier},pathToFileURL(\"./\"));"
+      )
+    };
+    deno_args.push(format!("--preload={}", data_url(&source)));
+  }
+  for module in &env_opts.preload_esm_modules {
+    deno_args.push(format!("--preload={module}"));
+  }
+}
+
+/// A percent-encoded `data:text/javascript` URL for `source`.
+fn data_url(source: &str) -> String {
+  let mut url = String::from("data:text/javascript,");
+  for byte in source.bytes() {
+    if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~')
+    {
+      url.push(byte as char);
+    } else {
+      url.push_str(&format!("%{byte:02X}"));
+    }
+  }
+  url
 }
 
 fn add_conditions(deno_args: &mut Vec<String>, env_opts: &EnvironmentOptions) {
@@ -5359,6 +5445,188 @@ mod tests {
       "foo.js"
     ]
   );
+
+  fn preload_sources(deno_args: &[String]) -> Vec<String> {
+    deno_args
+      .iter()
+      .filter_map(|arg| arg.strip_prefix("--preload="))
+      .map(|value| match value.strip_prefix("data:text/javascript,") {
+        Some(source) => {
+          assert!(!source.contains(' '), "{source}");
+          percent_decode(source)
+        }
+        None => value.to_string(),
+      })
+      .collect()
+  }
+
+  #[test]
+  fn test_run_script_with_preloads() {
+    let parsed = parse_args(svec![
+      "--import",
+      "./b.mjs",
+      "--require",
+      "./a.cjs",
+      "-r",
+      "dotenv/config",
+      "foo.js"
+    ])
+    .unwrap();
+    let result =
+      translate_to_deno_args(parsed, &TranslateOptions::for_node_cli());
+    // Node's order: the --require modules first, then the --import ones.
+    assert_eq!(
+      preload_sources(&result.deno_args),
+      svec![
+        "import{createRequire}from\"node:module\";\
+         import process from\"node:process\";\
+         createRequire(process.cwd()+\"/\")(\"./a.cjs\");",
+        "import{createRequire}from\"node:module\";\
+         import process from\"node:process\";\
+         createRequire(process.cwd()+\"/\")(\"dotenv/config\");",
+        "./b.mjs"
+      ]
+    );
+    assert_eq!(result.deno_args.last().unwrap(), "foo.js");
+  }
+
+  fn percent_decode(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+      if bytes[i] == b'%' {
+        let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap();
+        out.push(u8::from_str_radix(hex, 16).unwrap());
+        i += 3;
+      } else {
+        out.push(bytes[i]);
+        i += 1;
+      }
+    }
+    String::from_utf8(out).unwrap()
+  }
+
+  #[test]
+  fn test_experimental_loader_registers_through_preload() {
+    for flag in ["--experimental-loader", "--loader"] {
+      let parsed =
+        parse_args(svec![flag, "./my loader.mjs", "script.mjs"]).unwrap();
+      let result =
+        translate_to_deno_args(parsed, &TranslateOptions::for_child_process());
+      assert_eq!(
+        preload_sources(&result.deno_args),
+        svec![
+          "import{register}from\"node:module\";\
+           import{pathToFileURL}from\"node:url\";\
+           register(\"./my loader.mjs\",pathToFileURL(\"./\"));"
+        ]
+      );
+      assert_eq!(result.deno_args.last().unwrap(), "script.mjs");
+    }
+  }
+
+  #[test]
+  fn test_eval_with_preloads() {
+    let parsed = parse_args(svec![
+      "--import",
+      "./b.mjs",
+      "--input-type=module",
+      "--eval",
+      "1"
+    ])
+    .unwrap();
+    let result =
+      translate_to_deno_args(parsed, &TranslateOptions::for_child_process());
+    assert!(
+      result
+        .deno_args
+        .iter()
+        .any(|arg| arg == "--preload=./b.mjs"),
+      "{:?}",
+      result.deno_args
+    );
+    assert_eq!(result.deno_args[0], "eval");
+  }
+
+  #[test]
+  fn test_absolute_preloads_do_not_read_the_cwd() {
+    // A deleted working directory must not stop an absolute preload
+    // (node's parallel/test-cwd-enoent-preload.js).
+    let dir = if cfg!(windows) { "C:\\app\\" } else { "/app/" };
+    let required = format!("{dir}a.cjs");
+    let loader = format!("{dir}loader.mjs");
+    let parsed = parse_args(svec![
+      "-r",
+      required.clone(),
+      "--experimental-loader",
+      loader.clone(),
+      "-e",
+      "0"
+    ])
+    .unwrap();
+    let result =
+      translate_to_deno_args(parsed, &TranslateOptions::for_child_process());
+    let sources = preload_sources(&result.deno_args);
+    let required_json = serde_json::Value::String(required).to_string();
+    let loader_json = serde_json::Value::String(loader).to_string();
+    assert_eq!(
+      sources,
+      vec![
+        format!(
+          "import{{createRequire}}from\"node:module\";\
+           createRequire({required_json})({required_json});"
+        ),
+        format!(
+          "import{{register}}from\"node:module\";\
+           import{{pathToFileURL}}from\"node:url\";\
+           const url=pathToFileURL({loader_json});\
+           register(url,url);"
+        ),
+      ]
+    );
+    assert!(sources.iter().all(|source| !source.contains("cwd")));
+  }
+
+  #[test]
+  fn test_shell_command_require_with_variable() {
+    // The shell expands `${VAR}` after the translation, so the value has to
+    // stay a plain argument (node's parallel/test-preload-worker.js).
+    let parsed =
+      parse_args(svec!["-r", "${ESCAPED_1}", "-r", "./b.cjs", "-pe", "1+1"])
+        .unwrap();
+    let result =
+      translate_to_deno_args(parsed, &TranslateOptions::for_shell_command());
+    assert!(
+      result
+        .deno_args
+        .iter()
+        .any(|arg| arg == "--require=${ESCAPED_1}"),
+      "{:?}",
+      result.deno_args
+    );
+    assert_eq!(
+      preload_sources(&result.deno_args),
+      svec![
+        "import{createRequire}from\"node:module\";\
+         import process from\"node:process\";\
+         createRequire(process.cwd()+\"/\")(\"./b.cjs\");"
+      ]
+    );
+    // Outside a shell, `$` is part of the path.
+    let parsed = parse_args(svec!["-r", "./$a.cjs", "x.js"]).unwrap();
+    let result =
+      translate_to_deno_args(parsed, &TranslateOptions::for_child_process());
+    assert!(
+      !result
+        .deno_args
+        .iter()
+        .any(|arg| arg.starts_with("--require")),
+      "{:?}",
+      result.deno_args
+    );
+    assert_eq!(preload_sources(&result.deno_args).len(), 1);
+  }
 
   /// Helper for the deno-subcommand pass-through path (used when a tool spawns
   /// Deno with deno-style args). Translation is mode-independent here, so use

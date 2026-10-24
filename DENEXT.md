@@ -4004,8 +4004,115 @@ where the changes are discussed.
      `supplyChain` reported and not merged), `package_net` and `package_write`
      (`cli/supply_chain/jail.rs`).
 
+109. **`feat(ext/node)`: `module.register()` asynchronous customization hooks**
+     (`feat/module-register-async-hooks`; `ext/node/polyfills/01_require.js`,
+     `libs/node_shim/lib.rs`). The user's decision of 2026-10-22 (decision 6,
+     for denext 5.0). `register()` from `node:module` was a stub that returned
+     `undefined`, so ts-node / tsx ESM loaders, APM agents (OpenTelemetry's
+     instrumentation through import-in-the-middle), Yarn PnP and module mocks
+     that install their hooks with it silently did nothing. Upstream has no PR;
+     Node itself now recommends `registerHooks()` (which this fork already has)
+     and has deprecated `register()`, but the ecosystem still calls it.
+     - **How it runs.** As in Node, the hooks run off the main thread: the first
+       `register(specifier, parentURL, { data, transferList })` starts a
+       `node:worker_threads` worker that imports each hooks module, awaits its
+       `initialize(data)` (`register()` returns what it returned; `data` and
+       `transferList`, e.g. a `MessagePort`, are transferred), and serves
+       `resolve` / `load` requests. The loading thread posts each request and
+       blocks in `Atomics.wait` until the worker answers. Several `register()`
+       calls chain last-registered first; `nextResolve` / `nextLoad` (with or
+       without a context, merged like Node's), `shortCircuit`
+       (`ERR_LOADER_CHAIN_INCOMPLETE` when a hook neither calls next nor short
+       circuits), `format` (`module` / `commonjs` / `json` / `wasm` / `builtin`)
+       and `source` overrides (string, `ArrayBuffer`, typed array) behave like
+       Node's. A value thrown in a hook is rethrown on the loading thread (an
+       error keeps its `name`, `message`, `stack` and `code`), and
+       `process.exit()` in a hook ends the process. The hooks modules see
+       `workerData` as `null`, not the worker's channel.
+     - **`Module.register`.** The static is exposed again, as in Node.
+       denoland/deno#34868 had hidden it because Playwright and tsx probe it and
+       then wait for their loader's `initialize` handshake, which the stub never
+       answered; with this implementation they get it, so they take their
+       `register()` path instead of falling back.
+     - **Where they apply.** To what `registerHooks()` hooks see on the ESM
+       side: `import`, `import()` and an ES main module's load, in the user's
+       code and in npm packages. As in Node, they do not apply to `require()`.
+       In-thread `registerHooks()` hooks always run first, whichever was
+       registered first, and the off-thread chain runs after them.
+     - **Deno's resolver.** The end of the off-thread chain is not a copy of
+       Node's resolver: when the last hook calls `nextResolve()` / `nextLoad()`,
+       the worker asks the loading thread, which runs the same terminal step
+       `registerHooks()` uses (Deno's resolver: import maps, `npm:` / `jsr:`
+       specifiers, package exports; Deno's loader for the source). So hooks see
+       the specifier as written and Deno's resolved URL from `nextResolve()`,
+       and a hook can still return any URL (a custom scheme, a `data:` URL) with
+       `shortCircuit: true`.
+     - **Permissions.** The hooks worker runs with the process's permissions,
+       and the default load reads files on the loading thread as before: a hook
+       that reads a file needs `--allow-read` for it like any other code, and
+       returning `source` for a URL never grants access to a file.
+     - **Node's CLI flags.** The Node CLI shim (`node` in tasks and
+       `child_process` spawning `process.execPath`) used to drop `--require`,
+       `--import` and `--experimental-loader` / `--loader`. They now become
+       `--preload` modules in Node's order (`--require`, then the loaders, then
+       `--import`): a `--require` module is loaded through a generated `data:`
+       module with a `require` rooted at the working directory (so `-r pkg`
+       finds a package or the project's self-reference, as in Node), and a
+       loader through one that calls
+       `register(<loader>,
+       pathToFileURL("./"))`, which is what Node does
+       for `--experimental-loader`. An absolute `--require` path is required
+       from itself and an absolute loader is registered as its own file URL, so
+       neither reads the working directory (a deleted one does not stop them, as
+       in Node). In a command string run through a shell
+       (`child_process.exec()`), a `--require` value that still holds a `$VAR` /
+       `${VAR}` reference becomes Deno's own `--require`, since the shell
+       expands it after the translation and could not inside a `data:` URL; such
+       a module runs after the loaders and the `--import` modules.
+     - **Not done:** a hooks chain that never settles blocks the loading thread
+       (Node resolves `import()` asynchronously, so other imports go on, and
+       detects the stall and exits with code 13); a CommonJS main module is
+       loaded by the CommonJS loader, out of the hooks' reach (Node's `--import`
+       routes it through the ESM loader); as with `registerHooks()`, the ESM
+       load hooks are not called for `node:` builtins; the main module is
+       resolved before preloads run, so a hook can't resolve a bare main
+       specifier; hooks registered on the main thread do not reach
+       `worker_threads` workers (each thread registers its own); the hooks
+       worker's own module loading is not customized by earlier `register()`
+       calls; `--input-type=module --eval` is still run as a script by the CLI
+       shim; an error from an ESM resolve or load hook reaches the importer as a
+       message (its `code` is lost), as for `registerHooks()`.
+
+     Tests: spec `node/module_register` (`resolve_remap`, a resolve hook that
+     remaps a bare specifier; `load_transform`, a load hook that rewrites
+     source, and `require()` left alone; `chained`, two registers with
+     `initialize` data and return values, LIFO; `short_circuit`, a virtual
+     module and `ERR_LOADER_CHAIN_INCOMPLETE`; `with_register_hooks`, sync hooks
+     first; `initialize_ports`, a transferred `MessagePort`;
+     `permission_denied`, a hook reading outside `--allow-read=.`;
+     `node_cli_flags`, `--experimental-loader` / `--import` / `--require` from
+     `child_process`); `test_run_script_with_preloads`,
+     `test_experimental_loader_registers_through_preload` and
+     `test_eval_with_preloads`, `test_absolute_preloads_do_not_read_the_cwd` and
+     `test_shell_command_require_with_variable` (`libs/node_shim`); node_compat
+     `parallel/test-cwd-enoent-preload.js` and `parallel/test-preload-worker.js`
+     (a deleted working directory and a `-r "${VAR}"` in a shell command);
+     `[node/module register]
+     runs the hooks module's initialize` and
+     `Module.register and
+     Module.registerHooks are exposed`
+     (`tests/unit_node/module_test.ts`); node_compat
+     `module-hooks/test-async-loader-hooks-register-with-ports.mjs`,
+     `-initialize-in-sequence.mjs`, `-process-exit-top-level.mjs` and
+     `test-module-hooks-resolve-require-resolve-loaded-with-source.js` enabled,
+     and `parallel/test-preload-self-referential.js` now passing for real (it
+     passed while `-r` was dropped); the other `test-async-loader-hooks-*`
+     entries say what each still needs. `-never-settling-race-{cjs,esm}.mjs` and
+     `-no-leak-internals.mjs`, which passed only because the shim dropped
+     `--experimental-loader`, are now ignored with the reason.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
-64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105) are what the
+64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109) are what the
 prebuilt `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
 in the branch too, but a stock CLI does not run them; denext's own launcher

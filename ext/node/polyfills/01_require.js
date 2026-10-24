@@ -533,6 +533,10 @@ let patched = false;
 
 // module.registerHooks() infrastructure
 const hookEntries = [];
+// The off-thread `module.register()` chain, as one entry that the ESM resolve
+// and load chains run after every in-thread hook. Like Node's, it does not
+// apply to `require()`. Null until the first `register()`.
+let asyncHooksEntry = null;
 const cjsHookResolvedFilenames = new SafeSet();
 let insideResolveHook = false;
 let insideLoadHook = false;
@@ -712,6 +716,9 @@ function executeEsmResolveHookChain(specifier, context) {
       ArrayPrototypePush(resolveHooks, hookEntries[i].resolve);
     }
   }
+  if (asyncHooksEntry?.resolve) {
+    ArrayPrototypePush(resolveHooks, asyncHooksEntry.resolve);
+  }
   if (resolveHooks.length === 0) return null;
 
   let index = 0;
@@ -797,6 +804,9 @@ function executeEsmLoadHookChain(fileUrl, context) {
     if (hookEntries[i].load !== null) {
       ArrayPrototypePush(loadHooks, hookEntries[i].load);
     }
+  }
+  if (asyncHooksEntry?.load) {
+    ArrayPrototypePush(loadHooks, asyncHooksEntry.load);
   }
   if (loadHooks.length === 0) return null;
 
@@ -920,6 +930,8 @@ function _activateEsmHooks() {
     if (hookEntries[i].resolve !== null) hasResolve = true;
     if (hookEntries[i].load !== null) hasLoad = true;
   }
+  if (asyncHooksEntry?.resolve) hasResolve = true;
+  if (asyncHooksEntry?.load) hasLoad = true;
   op_module_hooks_register(hasResolve ? esmResolveHookCallback : null, hasLoad);
   if (hasLoad) _startEsmLoadLoop();
 }
@@ -3419,18 +3431,351 @@ export function stripTypeScriptTypes(code, options = undefined) {
 
 Module.stripTypeScriptTypes = stripTypeScriptTypes;
 
-/**
- * @param {string | URL} _specifier
- * @param {string | URL} _parentUrl
- * @param {{ parentURL: string | URL, data: any, transferList: any[] }} [_options]
- */
-export function register(_specifier, _parentUrl, _options) {
-  // TODO(@marvinhagemeister): Stub implementation for programs registering
-  // TypeScript loaders. We don't support registering loaders for file
-  // types that Deno itself doesn't support at the moment.
-
-  return undefined;
+// module.register() asynchronous customization hooks.
+//
+// Node runs the hooks registered with `module.register()` on a dedicated
+// hooks thread and blocks the loading thread on each resolve/load. Deno does
+// the same: the first `register()` starts a `node:worker_threads` worker that
+// imports each hooks module, runs its `initialize(data)` and serves resolve
+// and load requests. On this thread the whole off-thread chain is one entry at
+// the bottom of the `registerHooks()` chain (in-thread hooks run first, as in
+// Node), whose resolve/load post a request to the worker and block with
+// `Atomics.wait` until the worker answers. When an async hook calls
+// `nextResolve()`/`nextLoad()` past the end of the off-thread chain, the
+// worker asks this thread to run the rest of the chain (Deno's resolver and
+// loader, through the same terminal step `registerHooks()` uses), so hooks see
+// the URLs Deno resolves (import maps, `npm:`/`jsr:`, package exports) and the
+// worker never touches files on the loader's behalf. Hook code runs with the
+// process's permissions: a hook that reads a file needs `--allow-read` like any
+// other code.
+const kHooksWorkerSource = `"use strict";
+const workerThreads = require("node:worker_threads");
+const { port, lock } = workerThreads.workerData;
+// Hooks modules must not reach the channel to the loading thread.
+workerThreads.workerData = null;
+const lockView = new Int32Array(lock);
+const chain = [];
+const pending = new Map();
+let seq = 0;
+function send(msg, transferList) {
+  port.postMessage(msg, transferList);
+  Atomics.add(lockView, 0, 1);
+  Atomics.notify(lockView, 0);
 }
+function serializeError(e) {
+  if (e !== null && typeof e === "object") {
+    return {
+      isError: true,
+      name: e.name,
+      message: e.message,
+      stack: e.stack,
+      code: e.code,
+    };
+  }
+  if (typeof e === "symbol" || typeof e === "function") {
+    return { isError: false, value: String(e) };
+  }
+  return { isError: false, value: e };
+}
+function makeError(Ctor, code, message) {
+  const err = new Ctor(message);
+  err.code = code;
+  return err;
+}
+function callNext(id, kind, arg, context) {
+  const s = ++seq;
+  return new Promise((resolve, reject) => {
+    pending.set(s, { resolve, reject });
+    send({ type: "next", id, seq: s, kind, arg, context });
+  });
+}
+function validateResult(entry, kind, result, nextCalled) {
+  const hookName = entry.url + " '" + kind + "'";
+  if (result === null || typeof result !== "object") {
+    throw makeError(
+      TypeError,
+      "ERR_INVALID_RETURN_VALUE",
+      "Expected an object to be returned from the " + hookName + " hook",
+    );
+  }
+  if (!nextCalled && result.shortCircuit !== true) {
+    throw makeError(
+      Error,
+      "ERR_LOADER_CHAIN_INCOMPLETE",
+      '"' + hookName + '" did not call the next hook in its chain and did ' +
+        "not explicitly signal a short circuit. If this is intentional, " +
+        "include \`shortCircuit: true\` in the hook's return.",
+    );
+  }
+  if (kind === "resolve" && typeof result.url !== "string") {
+    throw makeError(
+      TypeError,
+      "ERR_INVALID_RETURN_PROPERTY_VALUE",
+      'Expected a URL string to be returned for the "url" from the ' +
+        hookName + " hook",
+    );
+  }
+  if (kind === "load") {
+    const source = result.source;
+    if (
+      source != null && typeof source !== "string" &&
+      !ArrayBuffer.isView(source) && !(source instanceof ArrayBuffer) &&
+      !(source instanceof SharedArrayBuffer)
+    ) {
+      throw makeError(
+        TypeError,
+        "ERR_INVALID_RETURN_PROPERTY_VALUE",
+        'Expected a string, an ArrayBuffer, or a TypedArray to be returned ' +
+          'for the "source" from the ' + hookName + " hook",
+      );
+    }
+  }
+}
+function runChain(id, kind, arg, context) {
+  const hooks = [];
+  for (let i = chain.length - 1; i >= 0; i--) {
+    if (typeof chain[i][kind] === "function") hooks.push(chain[i]);
+  }
+  let current = context;
+  let index = 0;
+  const next = async (nextArg, nextContext) => {
+    if (nextContext !== undefined && nextContext !== null) {
+      current = { ...current, ...nextContext };
+    }
+    if (index >= hooks.length) {
+      return await callNext(id, kind, nextArg, current);
+    }
+    const entry = hooks[index++];
+    let nextCalled = false;
+    const wrappedNext = (a, c) => {
+      nextCalled = true;
+      return next(a, c);
+    };
+    const result = await entry[kind](nextArg, current, wrappedNext);
+    validateResult(entry, kind, result, nextCalled);
+    return result;
+  };
+  return next(arg, context);
+}
+process.on("exit", (code) => {
+  try {
+    send({ type: "exit", code });
+  } catch {
+    // The port is gone; nothing is waiting.
+  }
+});
+port.on("message", async (msg) => {
+  if (msg.type === "next-result") {
+    const waiter = pending.get(msg.seq);
+    pending.delete(msg.seq);
+    if (waiter === undefined) return;
+    if (msg.ok) waiter.resolve(msg.value);
+    else waiter.reject(msg.error);
+    return;
+  }
+  try {
+    let value;
+    if (msg.type === "register") {
+      const ns = await import(msg.url);
+      const entry = { url: msg.url, resolve: ns.resolve, load: ns.load };
+      let initResult;
+      if (typeof ns.initialize === "function") {
+        initResult = await ns.initialize(msg.data);
+      }
+      chain.push(entry);
+      let hasResolve = false;
+      let hasLoad = false;
+      for (const e of chain) {
+        if (typeof e.resolve === "function") hasResolve = true;
+        if (typeof e.load === "function") hasLoad = true;
+      }
+      value = { result: initResult, hasResolve, hasLoad };
+    } else {
+      const result = await runChain(msg.id, msg.type, msg.arg, msg.context);
+      value = { ...result };
+    }
+    send({ type: "done", id: msg.id, ok: true, value });
+  } catch (e) {
+    send({ type: "done", id: msg.id, ok: false, error: serializeError(e) });
+  }
+});
+`;
+
+const AtomicsLoad = Atomics.load;
+const AtomicsWait = Atomics.wait;
+
+let asyncHooksState = null;
+
+function reviveAsyncHookError(serialized) {
+  if (!serialized?.isError) {
+    return serialized?.value;
+  }
+  const err = new Error(serialized.message);
+  if (serialized.name !== undefined && serialized.name !== "Error") {
+    ObjectDefineProperty(err, "name", {
+      __proto__: null,
+      value: serialized.name,
+      writable: true,
+      enumerable: false,
+      configurable: true,
+    });
+  }
+  if (serialized.stack !== undefined) err.stack = serialized.stack;
+  if (serialized.code !== undefined) err.code = serialized.code;
+  return err;
+}
+
+function asyncHooksRequest(msg, transferList, onNext) {
+  const state = asyncHooksState;
+  const id = ++state.nextId;
+  msg.id = id;
+  state.port.postMessage(msg, transferList);
+  while (true) {
+    const seen = AtomicsLoad(state.lock, 0);
+    const received = workerThreads.receiveMessageOnPort(state.port);
+    if (received === undefined) {
+      AtomicsWait(state.lock, 0, seen);
+      continue;
+    }
+    const reply = received.message;
+    if (reply.type === "exit") {
+      process.exit(reply.code);
+    }
+    if (reply.type === "next") {
+      let response;
+      try {
+        const value = onNext(reply.arg, reply.context);
+        response = {
+          type: "next-result",
+          seq: reply.seq,
+          ok: true,
+          value: value !== null && typeof value === "object"
+            ? { ...value }
+            : value,
+        };
+      } catch (e) {
+        response = {
+          type: "next-result",
+          seq: reply.seq,
+          ok: false,
+          error: e,
+        };
+      }
+      try {
+        state.port.postMessage(response);
+      } catch (e) {
+        state.port.postMessage({
+          type: "next-result",
+          seq: reply.seq,
+          ok: false,
+          error: e,
+        });
+      }
+      continue;
+    }
+    if (reply.id !== id) continue;
+    if (reply.ok) return reply.value;
+    throw reviveAsyncHookError(reply.error);
+  }
+}
+
+function asyncResolveHook(specifier, context, nextResolve) {
+  return asyncHooksRequest(
+    { type: "resolve", arg: specifier, context: { ...context } },
+    [],
+    nextResolve,
+  );
+}
+
+function asyncLoadHook(loadUrl, context, nextLoad) {
+  return asyncHooksRequest(
+    { type: "load", arg: loadUrl, context: { ...context } },
+    [],
+    nextLoad,
+  );
+}
+
+function startAsyncHooksWorker() {
+  const lockBuffer = new globalThis.SharedArrayBuffer(4);
+  const { port1, port2 } = new workerThreads.MessageChannel();
+  const worker = new workerThreads.Worker(kHooksWorkerSource, {
+    eval: true,
+    workerData: { port: port2, lock: lockBuffer },
+    transferList: [port2],
+  });
+  worker.unref();
+  port1.unref?.();
+  asyncHooksState = {
+    port: port1,
+    lock: new Int32Array(lockBuffer),
+    worker,
+    nextId: 0,
+  };
+  asyncHooksEntry = { resolve: null, load: null };
+}
+
+function resolveRegisterSpecifier(specifier, parentURL) {
+  const parent = parentURL === undefined || parentURL === "data:"
+    ? url.pathToFileURL(process.cwd() + "/").href
+    : parentURL;
+  try {
+    return op_module_default_resolve(specifier, parent);
+  } catch {
+    // Not resolvable by Deno's resolver (an ad-hoc scheme, or a relative
+    // specifier against a non-file parent): resolve it as a URL.
+    return new url.URL(specifier, parent).href;
+  }
+}
+
+/**
+ * Register asynchronous module customization hooks that run off the main
+ * thread (Node's `module.register()`).
+ * @param {string | URL} specifier
+ * @param {string | URL | { parentURL?: string | URL, data?: any, transferList?: any[] }} [parentURL]
+ * @param {{ parentURL?: string | URL, data?: any, transferList?: any[] }} [options]
+ * @returns {any} The value the hooks module's `initialize` returned.
+ */
+export function register(specifier, parentURL = undefined, options) {
+  if (
+    parentURL !== null && typeof parentURL === "object" &&
+    !(parentURL instanceof url.URL)
+  ) {
+    options = parentURL;
+    parentURL = options.parentURL;
+  }
+  if (typeof specifier !== "string" && !(specifier instanceof url.URL)) {
+    throw new internalErrors.ERR_INVALID_ARG_TYPE(
+      "specifier",
+      ["string", "URL"],
+      specifier,
+    );
+  }
+  const resolvedUrl = resolveRegisterSpecifier(
+    `${specifier}`,
+    parentURL == null ? undefined : `${parentURL}`,
+  );
+  if (asyncHooksState === null) {
+    startAsyncHooksWorker();
+  }
+  const transferList = options?.transferList ?? [];
+  const reply = asyncHooksRequest(
+    { type: "register", url: resolvedUrl, data: options?.data },
+    transferList,
+    () => {
+      throw new Error("module.register(): unexpected next hook call");
+    },
+  );
+  asyncHooksEntry.resolve = reply.hasResolve ? asyncResolveHook : null;
+  asyncHooksEntry.load = reply.hasLoad ? asyncLoadHook : null;
+  _activateEsmHooks();
+  return reply.result;
+}
+
+// Node exposes it as a static too. (Playwright and tsx probe
+// `Module.register`; with this implementation their loaders get the
+// `initialize` handshake they wait for. denoland/deno#34868 hid it while it
+// was a stub.)
+Module.register = register;
 
 /**
  * Register synchronous module loader hooks.

@@ -1,0 +1,5 @@
+initialized a
+initialized b
+b resolve chain:x
+a resolve chain:x+b
+chain:x+b+a
