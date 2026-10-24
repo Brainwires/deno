@@ -1420,6 +1420,7 @@
           "fs",
           "fmt-component",
           "fmt-sql",
+          "html-rewriter",
           "http",
           "kv",
           "legacy-abort",

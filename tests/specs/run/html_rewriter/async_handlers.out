@@ -1,0 +1,9 @@
+<!doctype html><html><head><title>rewritten</title></head><body><!-- changed --><p id="a" data-id="a">[a]first<i>!</i></p><p id="b" data-id="b">[b]second<i>!</i></p><img src="x.png"><figcaption>x</figcaption></body></html><!-- end -->
+title
+p a
+text done
+end p a
+p b
+text done
+end p b
+document end

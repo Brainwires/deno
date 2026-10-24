@@ -1,0 +1,10 @@
+sync throw MyError from element
+bad selector TypeError [WILDCARD]
+unsupported selector TypeError [WILDCARD]
+stale token TypeError This content token is no longer valid.
+async on string TypeError Async handlers are not supported when transforming a string; transform a Response instead
+void onEndTag TypeError Element does not have an end tag
+same error true
+async reject MyError from async element
+source error RangeError source broke
+<p>ok</p>

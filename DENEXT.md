@@ -6064,9 +6064,83 @@ where the changes are discussed.
      `test_cli_records_the_glibc_ceiling` and
      `test_a_malformed_glibc_ceiling_is_refused`.
 
+<!-- Items 152-157 are on fix/node-compat2-denext3, fix/npm-lows-denext3 and fix/vitest-sanitizers-denext3; renumber at integration. -->
+
+158. **`feat(ext/html_rewriter)`: `HTMLRewriter`, behind
+     `--unstable-html-rewriter`** (`feat/html-rewriter`, CLI and runtime;
+     `ext/html_rewriter`, `runtime/js/98_global_scope_shared.js`,
+     `runtime/features/data.rs`,
+     `runtime/{shared,snapshot,snapshot_info,worker,web_worker}.rs`,
+     `libs/cli_parser`, `cli/tsc/dts/lib.deno.unstable.d.ts`,
+     `cli/schemas/config-file.v1.json`). Cloudflare Workers' (and Bun's)
+     streaming HTML rewriting API as a global, ported from denoland/deno#35112
+     (Bartek Iwańczuk's pull request, closed unmerged when upstream stopped
+     taking features; its branch is the fork's June `feat/html-rewriter`).
+     Upstream's review settled the placement: a global like Workers and Bun, not
+     `Deno.HTMLRewriter`.
+     - **On:** `--unstable-html-rewriter` or `"unstable": ["html-rewriter"]` in
+       the config file; the global is absent otherwise (main thread and
+       workers).
+     - **API:**
+       `new HTMLRewriter().on(selector, { element, comments, text
+       }).onDocument({ doctype, comments, text, end }).transform(input)`.
+       `transform(response)` returns a `Response` whose body streams as the
+       input arrives; `transform(string)` returns the rewritten string
+       synchronously. Element tokens: `tagName` (settable), `attributes`,
+       `namespaceURI`, `removed`, `getAttribute` / `hasAttribute` /
+       `setAttribute` / `removeAttribute`, `before` / `after` / `prepend` /
+       `append` / `replace` / `setInnerContent` with `{ html }`, `remove`,
+       `removeAndKeepContent`, `onEndTag(handler)` (end tags: `name`, `before`,
+       `after`, `remove`). Text chunks: `text`, `lastInTextNode`, `before` /
+       `after` / `replace` / `remove`. Comments: `text` (settable), `before` /
+       `after` / `replace` / `remove`. Doctype: `name`, `publicId`, `systemId`,
+       `remove`. Document end: `append`. Selectors are lol_html's: type, `*`,
+       `.class`, `#id`, `[attr]` with `=`, `~=`, `|=`, `^=`, `$=`, `*=`,
+       descendant and child combinators, `:first-child`, `:nth-child()`,
+       `:first-of-type`, `:nth-of-type()`, `:not()`; an unsupported one throws a
+       `TypeError` from `on()`.
+     - **Async handlers:** a handler may return a promise when the input is a
+       `Response`; parsing of that transform waits for it. A string transform
+       refuses one with a `TypeError`.
+     - **Errors:** a handler's exception, or its promise's rejection, aborts the
+       transform and reaches the caller as the same error object: thrown by a
+       string transform, the body stream's error for a `Response`. A token used
+       after its handler returned throws a `TypeError`.
+     - **How:** a `lol_html::send::HtmlRewriter` per transform on a cppgc
+       object; each `write` / `end` runs on the shared blocking pool, and a
+       content handler parks that task until JavaScript has run the user handler
+       (and awaited its promise) on the main thread, mutating the token through
+       generation-checked sync ops meanwhile. An idle streaming transform holds
+       no thread.
+     - **On top of the upstream pull request:** the review's one correctness
+       finding is fixed: the transformed `Response` drops the input's
+       `Content-Length` and `Transfer-Encoding` (the body length changes), and
+       `Content-Encoding` when `fetch` decompressed the input (the output is the
+       decoded body), as Workers and Bun do. The fork's lazily computed
+       `content-type` of a string body is materialized before the headers are
+       copied (`toInnerResponse`). The flag is registered in the fork's own
+       parser (`libs/cli_parser`) and the config schema.
+     - **Dependency:** `lol_html` `=3.0.1` (Cloudflare, BSD-3-Clause; 3.0.2 is
+       younger than the dependency age hold), with `selectors` 0.37,
+       `servo_arc`, `precomputed-hash`, `phf_codegen` and `derive_more` 2;
+       `bitflags` 2.9.3 → 2.11.1 and `cfg-if` 1.0.3 → 1.0.4 (lol_html's
+       minimums).
+     - **Limits:** UTF-8 input only (no `<meta charset>` sniffing); a string
+       transform occupies a blocking-pool thread while it parses.
+
+     Tests: `tests/unit/html_rewriter_test.ts` (upstream's 21, plus
+     `htmlRewriterDropsStaleContentLength`, `htmlRewriterKeepsLazyContentType`,
+     `htmlRewriterFetchedGzipResponse` and
+     `htmlRewriterAsyncHandlerRejectionPropagates`); specs `run/html_rewriter`
+     (`large_body`: ~6 MB in 2,000 pulled chunks, output readable before the
+     source is drained and every element seen; `selectors`; `async_handlers`;
+     `errors`; `config`; `off_by_default`) and upstream's
+     `run/unstable_html_rewriter_{enabled,disabled}` (main thread and worker);
+     the parser test `unstable_html_rewriter_flag`.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
-118, 119, 126, 127, 129, 136, 137, 144-148, 150) are what the prebuilt
+118, 119, 126, 127, 129, 136, 137, 144-148, 150, 158) are what the prebuilt
 `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
 in the branch too, but a stock CLI does not run them; denext's own launcher

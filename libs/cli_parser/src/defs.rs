@@ -511,6 +511,11 @@ ArgDef::new("unstable-bare-node-builtins")
     .set_true()
     .hidden()
 .help("Enable unstable file system APIs"),
+  ArgDef::new("unstable-html-rewriter")
+    .long("unstable-html-rewriter")
+    .set_true()
+    .hidden()
+.help("Enable unstable `HTMLRewriter` API"),
   ArgDef::new("unstable-http")
     .long("unstable-http")
     .set_true()
