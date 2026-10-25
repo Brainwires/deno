@@ -1,0 +1,13 @@
+{
+  "supplyChain": {
+    "jailScripts": {
+      "packages": {
+        "npm:@denotest/jail-cache-download": {
+          "net": true,
+          "env": ["PUPPETEER_CACHE_DIR"],
+          "write": [".cache/puppeteer"]
+        }
+      }
+    }
+  }
+}

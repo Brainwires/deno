@@ -199,6 +199,47 @@
         }
       ]
     },
+    // DENEXT.md item 108: a package's `net` as a host list reaches those
+    // hosts only, as --allow-net=<hosts>
+    "per_package_net_hosts": {
+      "if": "unix",
+      "steps": [
+        {
+          "cwd": "net_hosts",
+          "args": "install --allow-scripts=npm:@denotest/jail-cache-download",
+          "output": "[WILDCARD]"
+        },
+        {
+          "cwd": "net_hosts",
+          "args": "eval console.log(Deno.readTextFileSync('node_modules/@denotest/jail-cache-download/results.txt').trim())",
+          "output": "listed host: allowed\nother host: denied\ncache: saved\n"
+        }
+      ]
+    },
+    // DENEXT.md item 108: a download cache outside node_modules (here
+    // PUPPETEER_CACHE_DIR) persists through `write` + `env`, its directory
+    // created for the jail when missing
+    "download_cache_persists": {
+      "if": "unix",
+      "steps": [
+        {
+          "cwd": "download_cache",
+          "args": "install --allow-scripts=npm:@denotest/jail-cache-download",
+          "envs": { "PUPPETEER_CACHE_DIR": ".cache/puppeteer" },
+          "output": "[WILDCARD]"
+        },
+        {
+          "cwd": "download_cache",
+          "args": "eval console.log(Deno.readTextFileSync('node_modules/@denotest/jail-cache-download/results.txt').trim())",
+          "output": "listed host: allowed\nother host: allowed\ncache: saved\n"
+        },
+        {
+          "cwd": "download_cache",
+          "args": "eval console.log(Deno.readTextFileSync('.cache/puppeteer/chrome/browser.txt').trim())",
+          "output": "browser\n"
+        }
+      ]
+    },
     // paranoid: jailed without being asked, and a package can't grant itself
     // the network
     "paranoid_jails": {

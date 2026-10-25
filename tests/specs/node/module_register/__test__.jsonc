@@ -1,0 +1,36 @@
+{
+  "tests": {
+    "resolve_remap": {
+      "args": "run -A resolve_remap.mjs",
+      "output": "resolve_remap.out"
+    },
+    "load_transform": {
+      "args": "run -A load_transform.mjs",
+      "output": "load_transform.out"
+    },
+    "chained": {
+      "args": "run -A chained.mjs",
+      "output": "chained.out"
+    },
+    "short_circuit": {
+      "args": "run -A short_circuit.mjs",
+      "output": "short_circuit.out"
+    },
+    "with_register_hooks": {
+      "args": "run -A with_register_hooks.mjs",
+      "output": "with_register_hooks.out"
+    },
+    "initialize_ports": {
+      "args": "run -A initialize_ports.mjs",
+      "output": "initialize_ports.out"
+    },
+    "permission_denied": {
+      "args": "run --allow-read=. permission_denied.mjs",
+      "output": "permission_denied.out"
+    },
+    "node_cli_flags": {
+      "args": "run -A node_cli_flags.mjs",
+      "output": "node_cli_flags.out"
+    }
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "name": "@denotest/jail-cache-download",
+  "version": "1.0.0",
+  "main": "index.js",
+  "publishDate": "2025-06-01T20:00:00.000Z",
+  "scripts": {
+    "install": "node download.js"
+  }
+}

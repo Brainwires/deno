@@ -39,7 +39,9 @@ use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::OnceLock;
 
+use deno_config::deno_json::JailNetConfig;
 use deno_config::deno_json::JailPackageConfig;
+use deno_config::deno_json::is_home_relative_path;
 use deno_core::anyhow::Context;
 use deno_core::anyhow::bail;
 use deno_core::error::AnyError;
@@ -222,9 +224,10 @@ pub fn clamp_permissions(
 #[derive(Debug)]
 pub struct JailConfig {
   pub paranoid: bool,
-  /// Asked for (`--jail-scripts`, `jail-scripts=true`, `paranoid`) rather
-  /// than on by default (DENEXT.md item 103): only then does a platform the
-  /// OS can't confine on get a warning.
+  /// Asked for (`--jail-scripts`, `jail-scripts=true`, `paranoid`, a
+  /// `jailScripts` object with more than `packages`) rather than on by
+  /// default (DENEXT.md items 103, 108): only then does a platform the OS
+  /// can't confine on get a warning.
   pub explicit: bool,
   /// `supplyChain.jailScripts.net`
   pub net: bool,
@@ -417,6 +420,62 @@ fn declared_net_hosts(package_folder: &Path) -> Vec<String> {
     }
   }
   hosts
+}
+
+/// Network access of a package's scripts: the package's own `net` (a host
+/// list is the narrower grant and wins over `jailScripts.net`), the config's,
+/// or the hosts the package declares (not under paranoid: a package doesn't
+/// grant itself anything there).
+fn jail_net(
+  config: &JailConfig,
+  package: Option<&JailPackageConfig>,
+  package_folder: &Path,
+) -> JailNet {
+  match package.and_then(|p| p.net.as_ref()) {
+    Some(JailNetConfig::Hosts(hosts)) => return JailNet::Hosts(hosts.clone()),
+    Some(JailNetConfig::All(true)) => return JailNet::All,
+    _ if config.net => return JailNet::All,
+    Some(JailNetConfig::All(false)) => return JailNet::None,
+    None => {}
+  }
+  if config.paranoid {
+    return JailNet::None;
+  }
+  let hosts = declared_net_hosts(package_folder);
+  if hosts.is_empty() {
+    JailNet::None
+  } else {
+    JailNet::Hosts(hosts)
+  }
+}
+
+/// A package's extra `write` paths, `~` resolved against the user's home (a
+/// `~` path is dropped when there is no home: never a wider grant), each
+/// created when missing. A download cache a package keeps outside
+/// node_modules (puppeteer's `PUPPETEER_CACHE_DIR`, playwright's
+/// `PLAYWRIGHT_BROWSERS_PATH`, cypress's `CYPRESS_CACHE_FOLDER`) usually
+/// doesn't exist before the first install, and the OS sandbox can only grant
+/// a directory that does: Landlock opens it, and Seatbelt matches the real
+/// path, which `canonicalize` only knows for an existing one.
+fn package_write_paths(
+  package: &JailPackageConfig,
+  home: Option<&Path>,
+) -> Vec<PathBuf> {
+  package
+    .write
+    .iter()
+    .filter_map(|path| {
+      if is_home_relative_path(path) {
+        let rest = path.strip_prefix("~").ok()?;
+        Some(home?.join(rest))
+      } else {
+        Some(path.clone())
+      }
+    })
+    .inspect(|path| {
+      let _ = std::fs::create_dir_all(path);
+    })
+    .collect()
 }
 
 /// Environment variables a jailed script keeps (Windows names upper-cased).
@@ -641,24 +700,15 @@ async fn run_in_dirs(
     canonical(&dirs.root),
   ];
   if let Some(package) = package {
-    write.extend(package.write.iter().map(|p| canonical(p)));
+    write.extend(
+      package_write_paths(package, home_dir().as_deref())
+        .iter()
+        .map(|p| canonical(p)),
+    );
   }
   write.dedup();
 
-  // network: the config's, or the hosts the package declares (not under
-  // paranoid: a package doesn't grant itself anything there)
-  let net = if config.net || package.and_then(|p| p.net) == Some(true) {
-    JailNet::All
-  } else if package.and_then(|p| p.net) == Some(false) || config.paranoid {
-    JailNet::None
-  } else {
-    let hosts = declared_net_hosts(s.package_folder);
-    if hosts.is_empty() {
-      JailNet::None
-    } else {
-      JailNet::Hosts(hosts)
-    }
-  };
+  let net = jail_net(config, package, s.package_folder);
 
   let mut deny_read = credential_paths();
   deny_read.extend(config.project_secret_files.iter().cloned());
@@ -934,6 +984,102 @@ mod tests {
     );
     std::fs::write(dir.path().join("package.json"), "{}").unwrap();
     assert!(declared_net_hosts(dir.path()).is_empty());
+  }
+
+  // DENEXT.md item 108: a per-package host allow-list
+  #[test]
+  fn package_net() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+      dir.path().join("package.json"),
+      r#"{ "binary": { "host": "https://declared.example.com/" } }"#,
+    )
+    .unwrap();
+    let config = |net: bool, paranoid: bool| {
+      JailConfig::new(paranoid, false, net, BTreeMap::new(), &[], None)
+    };
+    let package = |net: Option<JailNetConfig>| JailPackageConfig {
+      net,
+      ..Default::default()
+    };
+    let hosts = JailNetConfig::Hosts(vec![
+      "registry.npmjs.org".to_string(),
+      "github.com".to_string(),
+    ]);
+    let expected_hosts = JailNet::Hosts(vec![
+      "registry.npmjs.org".to_string(),
+      "github.com".to_string(),
+    ]);
+    // the listed hosts, whatever else would apply
+    for (net, paranoid) in
+      [(false, false), (true, false), (false, true), (true, true)]
+    {
+      assert_eq!(
+        jail_net(
+          &config(net, paranoid),
+          Some(&package(Some(hosts.clone()))),
+          dir.path()
+        ),
+        expected_hosts,
+        "net {net}, paranoid {paranoid}"
+      );
+    }
+    // the boolean forms keep their meaning
+    let all = package(Some(JailNetConfig::All(true)));
+    let none = package(Some(JailNetConfig::All(false)));
+    assert_eq!(
+      jail_net(&config(false, true), Some(&all), dir.path()),
+      JailNet::All
+    );
+    assert_eq!(
+      jail_net(&config(false, false), Some(&none), dir.path()),
+      JailNet::None
+    );
+    assert_eq!(
+      jail_net(&config(true, false), None, dir.path()),
+      JailNet::All
+    );
+    assert_eq!(
+      jail_net(&config(false, false), None, dir.path()),
+      JailNet::Hosts(vec!["declared.example.com".to_string()])
+    );
+    assert_eq!(
+      jail_net(&config(false, true), None, dir.path()),
+      JailNet::None
+    );
+  }
+
+  // DENEXT.md item 108: a download cache outside node_modules
+  #[test]
+  fn package_write() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    let package = JailPackageConfig {
+      write: vec![
+        PathBuf::from("~/.cache/puppeteer"),
+        PathBuf::from("~"),
+        dir.path().join("project/.cache/ms-playwright"),
+      ],
+      ..Default::default()
+    };
+    let paths = package_write_paths(&package, Some(&home));
+    assert_eq!(
+      paths,
+      vec![
+        home.join(".cache/puppeteer"),
+        home.clone(),
+        dir.path().join("project/.cache/ms-playwright"),
+      ]
+    );
+    // created, so the OS sandbox can grant them
+    for path in &paths {
+      assert!(path.is_dir(), "{}", path.display());
+    }
+    // no home: a `~` path is dropped, never widened
+    assert_eq!(
+      package_write_paths(&package, None),
+      vec![dir.path().join("project/.cache/ms-playwright")]
+    );
   }
 
   #[cfg(unix)]

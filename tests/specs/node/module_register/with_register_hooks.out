@@ -1,0 +1,3 @@
+sync resolve ./math.mjs
+async resolve ./math.mjs
+math
