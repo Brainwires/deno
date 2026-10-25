@@ -1385,6 +1385,34 @@ impl CliOptions {
     Ok(permissions_options)
   }
 
+  /// denext: the permissions the Jupyter kernel runs notebook cells with: the
+  /// config's `jupyter` permission set, else its `default` set, or `None`
+  /// when it has neither (the kernel then keeps allowing everything, as it
+  /// always has). Adapted from denoland/deno#35587.
+  pub fn jupyter_permissions_options(
+    &self,
+  ) -> Result<Option<PermissionsOptions>, AnyError> {
+    let config = self.start_dir.to_permissions_config()?;
+    let Some(set) = config
+      .sets
+      .get("jupyter")
+      .or_else(|| config.sets.get("default"))
+    else {
+      return Ok(None);
+    };
+    let mut options =
+      flags_to_permissions_options(&self.flags.permissions, Some(set))?;
+    self.augment_import_permissions(&mut options);
+    if let Some(jail) = crate::supply_chain::jail::jail_from_env() {
+      crate::supply_chain::jail::clamp_permissions(
+        &mut options,
+        &jail,
+        &self.initial_cwd,
+      );
+    }
+    Ok(Some(options))
+  }
+
   /// Permissions options holding nothing but the resolved `deny_import` rules.
   ///
   /// Used to build the deny-only permissions the module fetcher checks

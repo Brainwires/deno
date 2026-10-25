@@ -401,11 +401,24 @@ pub fn op_jupyter_input(
   is_password: bool,
 ) -> Option<String> {
   let sender = state.borrow::<ReplInputSender>().tx.clone();
+  request_input_blocking(&sender, prompt, is_password)
+}
+
+/// Sends an `input_request` to the frontend (through the kernel thread) and
+/// blocks the calling thread until its `input_reply` arrives. `None` when
+/// stdin is disabled, the channel is closed, or the frontend declines to
+/// answer. Shared by `prompt()` / `confirm()` and the permission prompter,
+/// which both run synchronously on the REPL thread.
+pub fn request_input_blocking(
+  sender: &mpsc::UnboundedSender<PendingInputRequest>,
+  prompt: String,
+  password: bool,
+) -> Option<String> {
   let (resp_tx, resp_rx) = oneshot::channel();
   if sender
     .send(PendingInputRequest {
       prompt,
-      password: is_password,
+      password,
       resp_tx,
     })
     .is_err()

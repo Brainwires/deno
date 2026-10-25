@@ -4080,6 +4080,37 @@ where the changes are discussed.
      end with the summary (as upstream's PR updated them), which they lack on
      `3.0.0-rc.5`.
 
+112. **`feat(jupyter)`: notebook cells run with the config's permissions**
+     (`feat/dx-batch`, CLI only; `cli/tools/jupyter/mod.rs`,
+     `cli/tools/jupyter/prompter.rs`, `cli/ops/jupyter.rs`, `cli/args/mod.rs`).
+     Adapted from
+     [denoland/deno#35587](https://github.com/denoland/deno/pull/35587) (closed
+     unmerged with the 2.9 LTS feature freeze). The Jupyter kernel ran every
+     cell with every permission, so a notebook could not be limited.
+     - **The set**: a `permissions.jupyter` set in the `deno.json` found from
+       the kernel's working directory (as for any subcommand, so one beside the
+       notebook), else the `default` set. With neither, cells keep every
+       permission, as before. A set in use prints the same "experimental" notice
+       as other config-file permissions. The kernel's own worker (the ZMQ
+       sockets, no user code) keeps every permission. Inside a jailed npm
+       lifecycle script the set is clamped to the jail, like every other
+       command's permissions.
+     - **Prompts**: an access outside the set is asked about in the notebook,
+       over Jupyter's stdin channel (as `prompt()` / `confirm()` are): `y`
+       allows it once, `A` allows all of that permission, anything else denies
+       it. A frontend without stdin support (or `allow_stdin: false`) denies, as
+       the terminal prompter does when it cannot ask.
+     - Not done: `--allow-*` flags on `deno jupyter`, whose parser takes no
+       permission flags (a kernel is started from its `kernel.json`, which
+       `deno jupyter --install` writes without them).
+
+     Tests: `jupyter_permissions_jupyter_set`,
+     `jupyter_permissions_default_set`, `jupyter_permissions_default_allow_all`,
+     `jupyter_permission_prompt_allow`, `jupyter_permission_prompt_deny`
+     (`tests/integration/jupyter_tests.rs`; the set and prompt cases fail on
+     `3.0.0-rc.5`, where every access is allowed and nothing is asked);
+     `prompt_names_the_choices`, `answers` (`cli/tools/jupyter/prompter.rs`).
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109) are what the
 prebuilt `libdenort` carries. The CLI-side parts (for example writing
