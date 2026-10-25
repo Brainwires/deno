@@ -3981,8 +3981,53 @@ where the changes are discussed.
      `participants_flush_before_the_signal_returns`
      (`cli/util/signal_flush.rs`).
 
+109. **`feat(node)`: Node's SIGINT trace and SIGINT watchdog** (`feat/dx-batch`,
+     CLI and runtime; `ext/node/ops/util.rs`, `ext/node/polyfills/util.ts`,
+     `ext/node/polyfills/internal_binding/mod.ts`, `ext/signals/lib.rs`,
+     `libs/node_shim/lib.rs`, `cli/worker.rs`). Adapted from
+     [denoland/deno#32423](https://github.com/denoland/deno/pull/32423) (closed
+     unmerged with the 2.9 LTS feature freeze). A SIGINT that ends a hung
+     program now says where its main thread was, as Node's `--trace-sigint`
+     does.
+     - **Opt in** with `util.setTraceSigInt(true)` (a no-op before), or with
+       `--trace-sigint` in `NODE_OPTIONS`:
+       `NODE_OPTIONS=--trace-sigint deno
+       run main.ts`, or
+       `node --trace-sigint main.js` through the Node shim, which now forwards
+       the flag there (the last of `--trace-sigint` / `--no-trace-sigint` wins).
+       Off by default.
+     - **What it prints**: Node's banner,
+       `` KEYBOARD_INTERRUPT: Script
+       execution was interrupted by `SIGINT` ``,
+       then the JavaScript stack of the main thread (source-mapped, without the
+       synthetic first line), on stderr; then SIGINT ends the process as before
+       (killed by `SIGINT`, not a clean exit).
+     - **How**: a hook before SIGINT's default action
+       (`deno_signals::register_before_default_action`, item 108), so a program
+       that listens for SIGINT itself keeps it and nothing is printed. The hook
+       asks V8 to interrupt the main thread, which captures and prints the
+       stack, and waits for it. Unlike upstream's PR, a main thread that runs no
+       JavaScript (an idle event loop) can't be interrupted: after 250 ms the
+       hook prints the banner alone, as Node does on idle, instead of the signal
+       being swallowed and the process left running.
+     - **Watchdog**: `internalBinding('contextify')`'s `startSigintWatchdog` /
+       `stopSigintWatchdog` / `watchdogHasPendingSigint`, which Node's REPL and
+       `vm` use to see a Ctrl+C during an evaluation. While it watches, it
+       consumes SIGINT through a new `deno_signals::set_interceptor` (runs
+       before the handlers; returning `true` hides the signal from them).
+
+     Tests: spec `node/trace_sigint` (Unix: the trace through
+     `util.setTraceSigInt` and through `NODE_OPTIONS`, a busy main thread
+     printing the banner and the `innerWork` frame, an idle one the banner
+     alone, both ended by SIGINT; a SIGINT listener keeps the signal; off by
+     default; the three trace cases print nothing on `3.0.0-rc.5`);
+     `node_compat` `parallel/test-util-sigint-watchdog.js` (enabled);
+     `an_interceptor_consumes_the_signal` (`ext/signals/lib.rs`);
+     `node_options_turn_the_trace_on` (`ext/node/ops/util.rs`);
+     `trace_sigint_rides_along_in_node_options` (`libs/node_shim`).
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
-64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105) are what the
+64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109) are what the
 prebuilt `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
 in the branch too, but a stock CLI does not run them; denext's own launcher

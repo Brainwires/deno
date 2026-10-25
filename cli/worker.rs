@@ -146,6 +146,20 @@ impl CliMainWorker {
       self.install_watcher_exit_handle();
     }
 
+    // denext: Node's `--trace-sigint` (in `NODE_OPTIONS`, where `node
+    // --trace-sigint` puts it): a SIGINT that ends the process first prints
+    // where the main thread was (denoland/deno#32423).
+    if std::env::var("NODE_OPTIONS").is_ok_and(|options| {
+      deno_runtime::deno_node::ops::util::node_options_trace_sigint(&options)
+    }) {
+      let js_runtime = self.worker.js_runtime();
+      let context = js_runtime.main_context();
+      let isolate = js_runtime.v8_isolate().thread_safe_handle();
+      deno_runtime::deno_node::ops::util::set_trace_sigint(
+        isolate, context, true,
+      );
+    }
+
     // Like Node.js, allow activating the inspector on an already running
     // process by sending it SIGUSR1.
     #[cfg(unix)]

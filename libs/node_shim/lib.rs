@@ -3507,6 +3507,11 @@ pub fn translate_to_deno_args(
   if !opts.trace_event_categories.is_empty() {
     result.trace_event_categories = opts.trace_event_categories.clone();
   }
+  // denext: `--trace-sigint` rides along in NODE_OPTIONS, which the CLI reads
+  // at startup (denoland/deno#32423). Also before the early returns.
+  if opts.trace_sigint {
+    node_options.push("--trace-sigint".to_string());
+  }
 
   // Check for system CA usage
   if opts.use_system_ca || opts.use_openssl_ca {
@@ -5367,6 +5372,23 @@ mod tests {
     let parsed_args = parse_args(input).unwrap();
     let options = TranslateOptions::for_child_process();
     translate_to_deno_args(parsed_args, &options).deno_args
+  }
+
+  #[test]
+  fn trace_sigint_rides_along_in_node_options() {
+    for args in [
+      svec!["--trace-sigint", "main.js"],
+      svec!["--trace-sigint", "-e", "1"],
+    ] {
+      let parsed_args = parse_args(args).unwrap();
+      let options = TranslateOptions::for_child_process();
+      let result = translate_to_deno_args(parsed_args, &options);
+      assert_eq!(result.node_options, svec!["--trace-sigint"]);
+    }
+    let parsed_args = parse_args(svec!["main.js"]).unwrap();
+    let options = TranslateOptions::for_child_process();
+    let result = translate_to_deno_args(parsed_args, &options);
+    assert!(result.node_options.is_empty());
   }
 
   #[test]
