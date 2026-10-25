@@ -14,7 +14,8 @@
 //!   it never runs while JavaScript, a request handler included, is running.
 //!   Work that arrives during a trim waits for it to finish.
 //! - At most once per idle period (it re-arms only after the loop is woken
-//!   again) and never twice within [`IdleTrimConfig::min_interval`].
+//!   again) and never twice within [`IdleTrimConfig::min_interval`]. A check
+//!   the growth gate skips runs no GC and does not count toward the interval.
 //! - glibc Linux only. On every other target (macOS, Windows, musl) enabling
 //!   it does nothing.
 
@@ -139,16 +140,23 @@ impl IdleTrimScheduler {
     })
   }
 
-  /// Claims the trim if it is due at `now`.
+  /// Claims this idle period's check if it is due at `now` (disarming until
+  /// the next wake-up). Only [`Self::record_trim`] counts toward
+  /// `min_interval`: a check that finds nothing to do runs no GC, so it must
+  /// not push back the trim that follows the next burst of load.
   fn take_due(&mut self, now: Instant) -> bool {
     match self.deadline() {
       Some(deadline) if now >= deadline => {
         self.armed = false;
-        self.last_trim = Some(now);
         true
       }
       _ => false,
     }
+  }
+
+  /// Records a trim that ran at `now`.
+  fn record_trim(&mut self, now: Instant) {
+    self.last_trim = Some(now);
   }
 }
 
@@ -286,8 +294,10 @@ impl IdleTrim {
       }
       // The sleep fired for `deadline`, so the trim is due (the timer's
       // millisecond rounding never lets this spin).
-      if self.scheduler.take_due(Instant::now().max(deadline)) {
+      let now = Instant::now().max(deadline);
+      if self.scheduler.take_due(now) {
         if self.grown_since_last_trim() {
+          self.scheduler.record_trim(now);
           trim(state);
           self.rss_after_trim = (self.read_rss)();
           // The GC's own follow-up work (finalizers) is not new activity.
@@ -423,13 +433,13 @@ mod tests {
     let t0 = Instant::now();
     let ms = Duration::from_millis;
     let mut s = IdleTrimScheduler::new(&config(1000, 0), t0);
-    assert!(s.take_due(t0 + ms(1000)));
+    assert!(trim_if_due(&mut s, t0 + ms(1000)));
     // Still idle: nothing more to do until the loop is woken again.
     assert_eq!(s.deadline(), None);
-    assert!(!s.take_due(t0 + ms(60_000)));
+    assert!(!trim_if_due(&mut s, t0 + ms(60_000)));
     s.on_activity(t0 + ms(60_000));
     assert_eq!(s.deadline(), Some(t0 + ms(61_000)));
-    assert!(s.take_due(t0 + ms(61_000)));
+    assert!(trim_if_due(&mut s, t0 + ms(61_000)));
   }
 
   #[test]
@@ -437,16 +447,48 @@ mod tests {
     let t0 = Instant::now();
     let ms = Duration::from_millis;
     let mut s = IdleTrimScheduler::new(&config(1000, 10_000), t0);
-    assert!(s.take_due(t0 + ms(1000)));
+    assert!(trim_if_due(&mut s, t0 + ms(1000)));
     // A short burst right after the trim, then idle again: the next trim
     // waits for the spacing, not just the idle delay.
     s.on_activity(t0 + ms(2000));
     assert_eq!(s.deadline(), Some(t0 + ms(11_000)));
-    assert!(!s.take_due(t0 + ms(3000)));
-    assert!(s.take_due(t0 + ms(11_000)));
+    assert!(!trim_if_due(&mut s, t0 + ms(3000)));
+    assert!(trim_if_due(&mut s, t0 + ms(11_000)));
     // Long after the spacing, the idle delay alone decides.
     s.on_activity(t0 + ms(50_000));
     assert_eq!(s.deadline(), Some(t0 + ms(51_000)));
+  }
+
+  /// The scheduler as `IdleTrim::poll` drives it when the trim runs.
+  fn trim_if_due(s: &mut IdleTrimScheduler, now: Instant) -> bool {
+    let due = s.take_due(now);
+    if due {
+      s.record_trim(now);
+    }
+    due
+  }
+
+  #[test]
+  fn a_skipped_check_does_not_delay_the_next_trim() {
+    let t0 = Instant::now();
+    let ms = Duration::from_millis;
+    let mut s = IdleTrimScheduler::new(&config(1000, 10_000), t0);
+    assert!(trim_if_due(&mut s, t0 + ms(1000)));
+    // A wake-up that brings no load (a keep-alive connection closing) 4 s
+    // after the trim, then idle: the check comes at the spacing and the
+    // growth gate skips it (the caller records no trim).
+    s.on_activity(t0 + ms(5000));
+    assert_eq!(s.deadline(), Some(t0 + ms(11_000)));
+    assert!(s.take_due(t0 + ms(11_000)));
+    // A burst of load 3 s later, then idle: its trim is due after the idle
+    // delay, the spacing counted from the last trim that ran. (Counting the
+    // skipped check put it at 21 s: 5 s late on a 15 s burst cycle.)
+    s.on_activity(t0 + ms(14_000));
+    assert_eq!(s.deadline(), Some(t0 + ms(15_000)));
+    assert!(trim_if_due(&mut s, t0 + ms(15_000)));
+    // And the spacing still holds after that trim.
+    s.on_activity(t0 + ms(16_000));
+    assert_eq!(s.deadline(), Some(t0 + ms(25_000)));
   }
 
   /// A stand-in event loop: pending until `done`, woken by whoever holds the
@@ -542,6 +584,11 @@ mod tests {
   /// Polls an always-pending loop through `idle`, letting one idle period
   /// pass; returns how many trims ran.
   async fn one_idle_period(idle: &mut IdleTrim) -> usize {
+    idle_period_within(idle, Duration::from_millis(400)).await
+  }
+
+  /// [`one_idle_period`], waiting `window` for the trim.
+  async fn idle_period_within(idle: &mut IdleTrim, window: Duration) -> usize {
     let trims = Cell::new(0);
     // Activity first, then idle past the delay.
     idle.woken.store(true, Ordering::SeqCst);
@@ -553,7 +600,7 @@ mod tests {
         |_| trims.set(trims.get() + 1),
       )
     });
-    let _ = tokio::time::timeout(Duration::from_millis(400), fut).await;
+    let _ = tokio::time::timeout(window, fut).await;
     trims.get()
   }
 
@@ -570,5 +617,30 @@ mod tests {
     // Grown by the threshold (16 MB): trims again.
     FAKE_RSS.store(516 * MB, Ordering::SeqCst);
     assert_eq!(one_idle_period(&mut idle).await, 1);
+  }
+
+  static FAKE_RSS_SPACED: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+  fn fake_rss_spaced() -> Option<u64> {
+    Some(FAKE_RSS_SPACED.load(Ordering::SeqCst))
+  }
+
+  #[tokio::test]
+  async fn a_skipped_check_leaves_the_spacing_to_the_last_trim() {
+    const MB: u64 = 1024 * 1024;
+    let ms = Duration::from_millis;
+    let mut idle = IdleTrim::with_rss_reader(config(50, 1000), fake_rss_spaced);
+    FAKE_RSS_SPACED.store(500 * MB, Ordering::SeqCst);
+    // The first trim, 50 ms into the period.
+    assert_eq!(idle_period_within(&mut idle, ms(200)).await, 1);
+    // Woken 200 ms later by something that brings no load: its check waits
+    // for the spacing (1 s after the trim) and is skipped (no growth).
+    assert_eq!(idle_period_within(&mut idle, ms(1200)).await, 0);
+    // Then load that grew the heap: trimmed after the idle delay, as the
+    // last trim was over a second ago. Counting the skipped check as a trim
+    // pushed this one past the window.
+    FAKE_RSS_SPACED.store(600 * MB, Ordering::SeqCst);
+    assert_eq!(idle_period_within(&mut idle, ms(400)).await, 1);
   }
 }

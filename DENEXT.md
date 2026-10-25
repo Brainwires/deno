@@ -3778,6 +3778,36 @@ where the changes are discussed.
      trimmed; the flag accepted on every target); the parser test
      `unstable_idle_trim_flag` (`libs/cli_parser/src/tests_full.rs`).
 
+     **Follow-up (`fix/idle-trim-guard`, runtime only; `runtime/idle_trim.rs`):
+     a check the growth gate skips no longer counts toward `min_interval`.**
+     `take_due` recorded the last trim when it claimed the idle period's check,
+     whether or not the trim then ran, so a wake-up that brought no load shortly
+     after a trim (a keep-alive connection closing) left a skipped check at the
+     10 s mark, and the trim after the next burst of load waited 10 s from that
+     check instead of 1 s of idle. Under `denext start` with a 2 s burst every
+     15 s, every other trim came 5 s late. Only a trim that runs is recorded now
+     (`record_trim`); a skipped check still disarms the idle period, runs no GC
+     and reads only `/proc/self/statm`. Tests:
+     `a_skipped_check_does_not_delay_the_next_trim` (scheduler) and
+     `a_skipped_check_leaves_the_spacing_to_the_last_trim` (poll wrapper, fake
+     RSS); both fail on rc.5.
+
+     Soak (rc.5 release CLI, `DENO_IDLE_TRIM_TRACE=1`, one throwaway
+     `debian:bookworm-slim` container per scenario on biscuits, 1-2 CPUs each):
+     no scenario trimmed more than once per 10 s, and no idle scenario trimmed
+     again after its first trim without RSS growth.
+
+     | scenario                                                                       | trims (after the first)       | RSS start / max / end (MB)             | p99 on / off (ms)                  |
+     | ------------------------------------------------------------------------------ | ----------------------------- | -------------------------------------- | ---------------------------------- |
+     | idle `Deno.serve`, 10 min                                                      | 1 (0)                         | 60 / 60 / 60                           | -                                  |
+     | `setInterval` 900 ms / 1.1 s / 5 s / 30 s                                      | 0 / 1 / 1 / 1 (0)             | 60-61 / 60-67 / 60-67                  | timer lag p99 2.2 / 2.2 / 2.2 / 14 |
+     | 200k FinalizationRegistry + WeakRef, then idle                                 | 2 (1, after the warm-up load) | 74 / 112 / 72                          | -                                  |
+     | same, each finalizer batch schedules a timer that makes new registered garbage | 2 (1)                         | 74 / 111 / 65                          | -                                  |
+     | 2 s burst every 15 s, 20 min                                                   | 81 (80: one per burst)        | 60 / 87 / 65 (off: 62 / 103 / 91)      | 24.1 / 29.0                        |
+     | 2 s burst every 60 s, 20 min                                                   | 20 (19: one per burst)        | 60 / 87 / 82 (off: 61 / 102 / 77)      | 49.8 / 49.5                        |
+     | 1 request every 1.5 s, 10 min                                                  | 1 (0: growth under 16 MB)     | 60 / 71 / 71 (off: 62 / 73 / 72)       | 2.66 / 2.72                        |
+     | `examples/hello` under `denext start`, 2 s burst every 15 s, 10 min            | 41 (40: one per burst)        | 217 / 279 / 181 (off: 218 / 353 / 261) | 17.4 / 17.3                        |
+
 105. **`fix(process)`: a Windows child inherits only its own handles**
      (`fix/windows-spawn-handle-inheritance`, CLI and runtime;
      `runtime/subprocess_windows/src/process.rs`, `lib.rs`, `process_stdio.rs`,
