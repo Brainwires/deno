@@ -360,14 +360,32 @@ jobs:
               # libwebauthn is LGPL-2.1-or-later: its license, and where the
               # library's source is, go with it.
               lw_version=$(awk '/^name = "libwebauthn"$/{getline; gsub(/"/, "", $3); print $3}' laufey/webauthn-linux/Cargo.lock)
-              lw_dir=$(find "${CARGO_HOME:-$HOME/.cargo}/registry/src" -mindepth 2 -maxdepth 2 -type d -name "libwebauthn-$lw_version" | head -1)
-              test -f "$lw_dir/COPYING"
+              # crates.io, or a [patch] git source (RUSTSEC-2026-0387: laufey
+              # builds Brainwires/libwebauthn at a pinned rev).
+              lw_source=$(awk '/^name = "libwebauthn"$/{getline; getline; sub(/^source = "/, ""); sub(/"$/, ""); print}' laufey/webauthn-linux/Cargo.lock)
+              cargo_home="${CARGO_HOME:-$HOME/.cargo}"
+              case "$lw_source" in
+                git+*)
+                  lw_repo=${lw_source#git+}; lw_repo=${lw_repo%%\?*}; lw_repo=${lw_repo%.git}
+                  lw_rev=${lw_source##*#}
+                  lw_dir=$(find "$cargo_home/git/checkouts" -mindepth 2 -maxdepth 2 -type d -path "*/libwebauthn-*/${lw_rev:0:7}" | head -1)
+                  lw_where="$lw_repo/tree/$lw_rev (libwebauthn $lw_version with the RUSTSEC-2026-0387 dependency update)"
+                  ;;
+                *)
+                  lw_dir=$(find "$cargo_home/registry/src" -mindepth 2 -maxdepth 2 -type d -name "libwebauthn-$lw_version" | head -1)
+                  lw_where="https://crates.io/crates/libwebauthn/$lw_version"
+                  ;;
+              esac
+              if [ ! -f "$lw_dir/COPYING" ]; then
+                echo "::error::libwebauthn's COPYING not found (source: $lw_source, dir: '$lw_dir')"
+                exit 1
+              fi
               mkdir -p "$st/licenses/libwebauthn"
               cp "$lw_dir/COPYING" "$st/licenses/libwebauthn/COPYING"
               cat >"$st/licenses/libwebauthn/NOTICE" <<EOF
           liblaufey_webauthn.so (beside the webview and CEF hosts) contains
-          libwebauthn $lw_version (LGPL-2.1-or-later, COPYING here):
-          https://crates.io/crates/libwebauthn/$lw_version
+          libwebauthn $lw_version (LGPL-2.1-or-later, COPYING here), source:
+          $lw_where
           It is built from https://github.com/Brainwires/laufey/tree/$LAUFEY_SHA/webauthn-linux
           (make webauthn-linux) and may be replaced by a library built the same way.
           EOF
