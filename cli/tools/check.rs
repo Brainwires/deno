@@ -672,7 +672,11 @@ fn unresolved_types_entries(
     .into_iter()
     .filter(|(entry, _)| {
       !generated.join("types").join(entry).exists()
-        && !generated.join("npm-compat").join("@types").join(entry).exists()
+        && !generated
+          .join("npm-compat")
+          .join("@types")
+          .join(entry)
+          .exists()
     })
     .collect()
 }
@@ -1377,8 +1381,7 @@ mod tests {
     std::fs::create_dir_all(project.path().join(".deno/types/vitest")).unwrap();
     std::fs::create_dir_all(project.path().join(".deno/npm-compat/@types/bun"))
       .unwrap();
-    let config =
-      ModuleSpecifier::parse("file:///p/deno.json").unwrap();
+    let config = ModuleSpecifier::parse("file:///p/deno.json").unwrap();
     let entries = ["vitest", "bun", "asdfasdf"]
       .into_iter()
       .map(|entry| {

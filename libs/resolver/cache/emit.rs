@@ -393,7 +393,9 @@ mod test {
       None
     );
     let transformed_code = "transformed".to_string();
-    cache.set_transformed_emit_code(&specifier1, 30,
+    cache.set_transformed_emit_code(
+      &specifier1,
+      30,
       transformed_code.as_bytes(),
     );
     assert_eq!(
@@ -478,7 +480,10 @@ mod test {
         .unwrap(),
       "no verbatim"
     );
-    assert_eq!(cache.get_transformed_emit_code(&specifier, 4).unwrap(), "mocked");
+    assert_eq!(
+      cache.get_transformed_emit_code(&specifier, 4).unwrap(),
+      "mocked"
+    );
     assert_eq!(cache.get_emit_code(&specifier, Some("other"), 1), None);
 
     // Laid out under readable names, the usual emit where it always was.

@@ -160,8 +160,7 @@ mod tests {
     // Both still flushing.
     assert!(!wait_for_flush(Duration::from_millis(20)));
 
-    let waiter =
-      std::thread::spawn(|| wait_for_flush(Duration::from_secs(10)));
+    let waiter = std::thread::spawn(|| wait_for_flush(Duration::from_secs(10)));
     trigger(15);
     // A later signal does not replace the first.
     trigger(2);

@@ -2001,6 +2001,9 @@ mod emit_cache_name_tests {
       emit_cache_name: Some("preserve-jsx".to_string()),
       ..options
     };
-    assert_eq!(options.emit_cache_name_with("vitest"), "preserve-jsx+vitest");
+    assert_eq!(
+      options.emit_cache_name_with("vitest"),
+      "preserve-jsx+vitest"
+    );
   }
 }

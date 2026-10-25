@@ -75,16 +75,31 @@ mod tests {
 
   #[test]
   fn answers() {
-    assert!(matches!(parse_answer(Some("y"), true), PromptResponse::Allow));
-    assert!(matches!(parse_answer(Some(" Y\n"), false), PromptResponse::Allow));
+    assert!(matches!(
+      parse_answer(Some("y"), true),
+      PromptResponse::Allow
+    ));
+    assert!(matches!(
+      parse_answer(Some(" Y\n"), false),
+      PromptResponse::Allow
+    ));
     assert!(matches!(
       parse_answer(Some("A"), true),
       PromptResponse::AllowAll
     ));
     // "Allow all" is only offered for a unary permission.
-    assert!(matches!(parse_answer(Some("A"), false), PromptResponse::Deny));
-    assert!(matches!(parse_answer(Some("n"), true), PromptResponse::Deny));
-    assert!(matches!(parse_answer(Some("yes"), true), PromptResponse::Deny));
+    assert!(matches!(
+      parse_answer(Some("A"), false),
+      PromptResponse::Deny
+    ));
+    assert!(matches!(
+      parse_answer(Some("n"), true),
+      PromptResponse::Deny
+    ));
+    assert!(matches!(
+      parse_answer(Some("yes"), true),
+      PromptResponse::Deny
+    ));
     assert!(matches!(parse_answer(None, true), PromptResponse::Deny));
   }
 }

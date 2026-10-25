@@ -172,8 +172,7 @@ unsafe extern "C" fn trace_sigint_interrupt(
   eprintln!("{TRACE_SIGINT_BANNER}");
   // The stack starts with the synthetic "Error: SIGINT" line; print only the
   // frames, as Node does.
-  if let Some((_, frames)) = stack.as_deref().and_then(|s| s.split_once('\n'))
-  {
+  if let Some((_, frames)) = stack.as_deref().and_then(|s| s.split_once('\n')) {
     eprintln!("{frames}");
   }
   let (printed, cvar) = &TRACE_SIGINT_PRINTED;
@@ -182,7 +181,10 @@ unsafe extern "C" fn trace_sigint_interrupt(
 }
 
 #[op2(fast)]
-pub fn op_node_set_trace_sigint(scope: &mut v8::PinScope<'_, '_>, enable: bool) {
+pub fn op_node_set_trace_sigint(
+  scope: &mut v8::PinScope<'_, '_>,
+  enable: bool,
+) {
   let isolate = scope.thread_safe_handle();
   let context = scope.get_current_context();
   let context = v8::Global::new(scope, context);
@@ -214,8 +216,12 @@ mod trace_sigint_tests {
     assert!(node_options_trace_sigint(
       "--max-old-space-size=100 \"--trace-sigint\" --no-warnings"
     ));
-    assert!(!node_options_trace_sigint("--trace-sigint --no-trace-sigint"));
-    assert!(node_options_trace_sigint("--no-trace-sigint --trace-sigint"));
+    assert!(!node_options_trace_sigint(
+      "--trace-sigint --no-trace-sigint"
+    ));
+    assert!(node_options_trace_sigint(
+      "--no-trace-sigint --trace-sigint"
+    ));
     assert!(!node_options_trace_sigint("--trace-sigint-other"));
     assert!(!node_options_trace_sigint("--trace-warnings"));
   }

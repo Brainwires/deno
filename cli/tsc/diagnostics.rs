@@ -243,7 +243,9 @@ impl Diagnostic {
   ) -> Option<Self> {
     let suggestion = types_entry_suggestion(entry)?;
     let hint = if suggestion == format!("npm:{entry}") {
-      format!("Write \"{suggestion}\" to load it from npm, or remove the entry.")
+      format!(
+        "Write \"{suggestion}\" to load it from npm, or remove the entry."
+      )
     } else {
       format!(
         "Write \"{suggestion}\" for the package's types (or \"npm:{entry}\" when the package ships its own), or remove the entry."
@@ -253,12 +255,12 @@ impl Diagnostic {
     Some(Self {
       category: DiagnosticCategory::Error,
       code: 2688,
-      start: Some(
-        position
-          .as_ref()
-          .map(|p| p.start.clone())
-          .unwrap_or(Position { line: 0, character: 0 }),
-      ),
+      start: Some(position.as_ref().map(|p| p.start.clone()).unwrap_or(
+        Position {
+          line: 0,
+          character: 0,
+        },
+      )),
       end: position.as_ref().map(|p| p.end.clone()),
       original_source_start: None,
       message_text: Some(format!(
@@ -651,7 +653,9 @@ fn find_types_entry(text: &str, entry: &str) -> Option<TypesEntryPosition> {
       line,
       character: character + quoted.chars().count() as u64,
     },
-    line_text: text[line_start..line_end].trim_end_matches('\r').to_string(),
+    line_text: text[line_start..line_end]
+      .trim_end_matches('\r')
+      .to_string(),
   })
 }
 
@@ -690,9 +694,24 @@ mod tests {
   fn types_entries_are_found_in_the_config() {
     let text = "{\n  \"compilerOptions\": {\n    \"types\": [\"node\", \"asdfasdf\"]\n  }\n}\n";
     let position = super::find_types_entry(text, "asdfasdf").unwrap();
-    assert_eq!(position.start, super::Position { line: 2, character: 22 });
-    assert_eq!(position.end, super::Position { line: 2, character: 32 });
-    assert_eq!(position.line_text, "    \"types\": [\"node\", \"asdfasdf\"]");
+    assert_eq!(
+      position.start,
+      super::Position {
+        line: 2,
+        character: 22
+      }
+    );
+    assert_eq!(
+      position.end,
+      super::Position {
+        line: 2,
+        character: 32
+      }
+    );
+    assert_eq!(
+      position.line_text,
+      "    \"types\": [\"node\", \"asdfasdf\"]"
+    );
     // Only within the list: an earlier mention of the name does not count.
     let text = "{ \"imports\": { \"x\": \"./asdfasdf\" }, \"asdfasdf\": 1, \"compilerOptions\": { \"types\": [\"asdfasdf\"] } }";
     let position = super::find_types_entry(text, "asdfasdf").unwrap();
@@ -702,7 +721,8 @@ mod tests {
 
   #[test]
   fn unresolved_types_entry_diagnostic() {
-    let config = deno_ast::ModuleSpecifier::parse("file:///p/deno.json").unwrap();
+    let config =
+      deno_ast::ModuleSpecifier::parse("file:///p/deno.json").unwrap();
     let text = "{ \"compilerOptions\": { \"types\": [\"asdfasdf\"] } }";
     let diagnostic = super::Diagnostic::maybe_from_unresolved_types_entry(
       "asdfasdf",
@@ -713,17 +733,18 @@ mod tests {
     assert_eq!(diagnostic.code, 2688);
     assert_eq!(diagnostic.file_name.as_deref(), Some("file:///p/deno.json"));
     assert_eq!(diagnostic.start.as_ref().unwrap().character, 33);
-    let message = test_util::strip_ansi_codes(
-      diagnostic.message_text.as_deref().unwrap(),
-    )
-    .to_string();
+    let message =
+      test_util::strip_ansi_codes(diagnostic.message_text.as_deref().unwrap())
+        .to_string();
     assert_eq!(
       message,
       "Cannot find type definition file for 'asdfasdf' in \"compilerOptions.types\".\n  hint: Write \"npm:@types/asdfasdf\" for the package's types (or \"npm:asdfasdf\" when the package ships its own), or remove the entry."
     );
     assert!(
       super::Diagnostic::maybe_from_unresolved_types_entry(
-        "node", &config, Some(text)
+        "node",
+        &config,
+        Some(text)
       )
       .is_none()
     );
