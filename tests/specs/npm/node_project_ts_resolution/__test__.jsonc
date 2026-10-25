@@ -19,7 +19,7 @@
         {
           "cwd": "app",
           "args": "check --check-engine=tsc typed.ts",
-          "output": "Check [WILDCARD]typed.ts\n"
+          "output": "Check [WILDCARD]typed.ts\nChecked 1 file\n"
         },
         {
           // TypeScript 7 removed `baseUrl` (TS5102); the native check reads
@@ -27,7 +27,7 @@
           // (DENEXT.md item 90).
           "cwd": "app",
           "args": "check typed.ts",
-          "output": "Check [WILDCARD]typed.ts\n"
+          "output": "Check [WILDCARD]typed.ts\nChecked 1 file\n"
         }
       ]
     },

@@ -1,0 +1,37 @@
+{
+  // `deno check` ends a clean check with a summary, as `deno fmt` and
+  // `deno lint` do (denoland/deno#35739), on both engines.
+  "tempDir": true,
+  "tests": {
+    "one_file": {
+      "args": "check a.ts",
+      "output": "Check a.ts\nChecked 1 file\n"
+    },
+    "two_files_then_cached": {
+      "steps": [
+        {
+          "args": "check a.ts b.ts",
+          "output": "Check a.ts\nCheck b.ts\nChecked 2 files\n"
+        },
+        {
+          // Already checked: no `Check` lines, still the summary.
+          "args": "check a.ts b.ts",
+          "output": "Checked 2 files\n"
+        }
+      ]
+    },
+    "tsc_engine": {
+      "args": "check --check-engine=tsc a.ts b.ts",
+      "output": "Check a.ts\nCheck b.ts\nChecked 2 files\n"
+    },
+    "quiet": {
+      "args": "check --quiet a.ts",
+      "output": ""
+    },
+    "failure": {
+      "args": "check bad.ts",
+      "output": "Check bad.ts\nTS2322 [WILDCARD]error: Type checking failed.\n",
+      "exitCode": 1
+    }
+  }
+}

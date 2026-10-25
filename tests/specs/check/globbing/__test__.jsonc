@@ -2,7 +2,7 @@
   "tests": {
     "star": {
       "args": "check *.ts",
-      "output": "Check [WILDLINE]\n",
+      "output": "Check [WILDLINE]\nChecked 1 file\n",
       "exitCode": 0
     },
     "star_not_found": {

@@ -3,7 +3,7 @@
     // The fork's Deno.desktop APIs type-check as documented with --desktop.
     "valid": {
       "args": "check --desktop valid.ts",
-      "output": "Check [WILDCARD]valid.ts\n",
+      "output": "Check [WILDCARD]valid.ts\nChecked 1 file\n",
       "exitCode": 0
     },
     // ... and misuses are type errors (a wrong option, a wrong return use,
@@ -18,7 +18,7 @@
     // TypeScript 6.0.3 fallback keeps its own form.
     "valid_tsc": {
       "args": "check --check-engine=tsc --desktop valid.ts",
-      "output": "Check [WILDCARD]valid.ts\n",
+      "output": "Check [WILDCARD]valid.ts\nChecked 1 file\n",
       "exitCode": 0
     },
     "invalid_tsc": {

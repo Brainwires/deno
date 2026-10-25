@@ -5,12 +5,12 @@
   "tests": {
     "files_after_double_dash": {
       "args": "check -- good.ts",
-      "output": "Check [WILDCARD]good.ts\n",
+      "output": "Check [WILDCARD]good.ts\nChecked 1 file\n",
       "exitCode": 0
     },
     "hyphen_file_after_double_dash": {
       "args": "check -- -dash.ts",
-      "output": "Check [WILDCARD]-dash.ts\n",
+      "output": "Check [WILDCARD]-dash.ts\nChecked 1 file\n",
       "exitCode": 0
     },
     "files_before_and_after_double_dash": {

@@ -171,6 +171,7 @@ async fn native_check(
   })
   .await?;
   if clean {
+    log_checked_summary(roots.len());
     Ok(())
   } else {
     Err(deno_core::anyhow::anyhow!("Type checking failed."))
@@ -1266,7 +1267,27 @@ async fn legacy_check_with_factory(
         ..Default::default()
       },
     )
-    .await
+    .await?;
+  log_checked_summary(specifiers_for_typecheck.len());
+  Ok(())
+}
+
+/// denext: `deno check`'s closing summary, like `deno fmt`'s and `deno
+/// lint`'s, counting the roots it checked: printed after a clean check (the
+/// type-checked files may be cached), on either engine; nothing when no file
+/// matched, and nothing under `--quiet` (denoland/deno#35739).
+fn log_checked_summary(roots: usize) {
+  if let Some(summary) = checked_summary(roots) {
+    log::info!("{summary}");
+  }
+}
+
+fn checked_summary(roots: usize) -> Option<String> {
+  match roots {
+    0 => None,
+    1 => Some("Checked 1 file".to_string()),
+    n => Some(format!("Checked {n} files")),
+  }
 }
 
 #[cfg(test)]
@@ -1275,6 +1296,13 @@ mod tests {
   use deno_core::serde_json::json;
 
   use super::*;
+
+  #[test]
+  fn checked_summary_counts_the_roots() {
+    assert_eq!(checked_summary(0), None);
+    assert_eq!(checked_summary(1).as_deref(), Some("Checked 1 file"));
+    assert_eq!(checked_summary(3).as_deref(), Some("Checked 3 files"));
+  }
 
   #[test]
   fn generated_project_is_reused_only_unchanged() {

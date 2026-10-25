@@ -4060,6 +4060,26 @@ where the changes are discussed.
      `overrides_name_the_emit_cache_directory`, `emit_cache_name_with_appends`
      (`libs/resolver/deno_json.rs`).
 
+111. **`feat(check)`: `deno check` ends with a "Checked N files" summary**
+     (`feat/dx-batch`, CLI only; `cli/tools/check.rs`). For
+     [denoland/deno#35739](https://github.com/denoland/deno/pull/35739) (closed
+     unmerged with the 2.9 LTS feature freeze; it closed
+     [#32709](https://github.com/denoland/deno/issues/32709)). `deno fmt` and
+     `deno lint` end with `Checked N files`; `deno check` printed only its
+     `Check <specifier>` lines, and nothing at all when everything was already
+     checked and cached. It now prints `Checked 1 file` / `Checked N files`
+     after a clean check, counting the roots it checked, on both engines: the
+     native one (the default, where the summary was captured but only logged at
+     debug level) and the in-process one (`--check-engine=tsc`, `--doc`).
+     Nothing when the check fails, when no file matched, or under `--quiet`.
+     Other commands that type-check (`run --check`, `test`, ...) print no
+     summary.
+
+     Tests: `checked_summary_counts_the_roots` (`cli/tools/check.rs`); the
+     `deno check` spec and integration outputs that end after a clean check now
+     end with the summary (as upstream's PR updated them), which they lack on
+     `3.0.0-rc.5`.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109) are what the
 prebuilt `libdenort` carries. The CLI-side parts (for example writing

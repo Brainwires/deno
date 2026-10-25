@@ -6,12 +6,12 @@
   "steps": [
     {
       "args": "check main.ts",
-      "output": "Check [WILDCARD]main.ts\n",
+      "output": "Check [WILDCARD]main.ts\nChecked 1 file\n",
       "exitCode": 0
     },
     {
       "args": "check --check-engine=tsc main.ts",
-      "output": "Check [WILDCARD]main.ts\n",
+      "output": "Check [WILDCARD]main.ts\nChecked 1 file\n",
       "exitCode": 0
     },
     // an augmentation added by a local edit regenerates the project (which a
@@ -25,12 +25,12 @@
     },
     {
       "args": "check main.ts",
-      "output": "Check [WILDCARD]main.ts\n",
+      "output": "Check [WILDCARD]main.ts\nChecked 1 file\n",
       "exitCode": 0
     },
     {
       "args": "check use.ts",
-      "output": "Check [WILDCARD]use.ts\n",
+      "output": "Check [WILDCARD]use.ts\nChecked 1 file\n",
       "exitCode": 0
     },
     // a name that resolves nowhere is still an error under both engines
