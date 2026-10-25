@@ -521,7 +521,105 @@ impl Resource for ChildStdinResource {
   }
 }
 
+/// The parent's read end of a child's stdout or stderr pipe on Windows: the
+/// overlapped named pipe server end that `deno_subprocess_windows` creates,
+/// read through the runtime's I/O completion port.
+///
+/// tokio's own `ChildStdout` / `ChildStderr` read a Windows pipe with a
+/// blocking `ReadFile` on the runtime's blocking thread pool, and a pending
+/// read holds its pool thread until data or EOF arrives. A child's stderr
+/// usually has nothing to say until it exits, so every live piped child pins
+/// a thread (two while it runs quiet), and a read that was cancelled keeps its
+/// thread until the pipe's writer closes. The pool is capped (four threads per
+/// CPU on Windows): once pending reads fill it, the stdout read a busy child
+/// needs never gets a thread, the child blocks writing a full pipe, never
+/// exits, and so never frees the threads its own reads hold. Overlapped reads
+/// hold no thread.
+#[cfg(windows)]
+pub struct ChildPipeReader(tokio::net::windows::named_pipe::NamedPipeServer);
+
+#[cfg(windows)]
+impl ChildPipeReader {
+  /// Takes ownership of `handle`, which must be the server end of a named
+  /// pipe opened with `FILE_FLAG_OVERLAPPED` (the parent's end of a pipe that
+  /// `deno_subprocess_windows` created), and registers it with the current
+  /// runtime's I/O driver.
+  pub fn from_overlapped_handle(
+    handle: std::os::windows::io::OwnedHandle,
+  ) -> io::Result<Self> {
+    use std::os::windows::io::IntoRawHandle;
+    // SAFETY: the caller hands over sole ownership of an overlapped named pipe
+    // server handle, which is what `NamedPipeServer` requires.
+    let pipe = unsafe {
+      tokio::net::windows::named_pipe::NamedPipeServer::from_raw_handle(
+        handle.into_raw_handle(),
+      )?
+    };
+    Ok(Self(pipe))
+  }
+}
+
+#[cfg(windows)]
+impl AsyncRead for ChildPipeReader {
+  fn poll_read(
+    mut self: std::pin::Pin<&mut Self>,
+    cx: &mut std::task::Context<'_>,
+    buf: &mut tokio::io::ReadBuf<'_>,
+  ) -> std::task::Poll<io::Result<()>> {
+    std::pin::Pin::new(&mut self.0).poll_read(cx, buf)
+  }
+}
+
+/// A child's stdout on Windows ([`ChildPipeReader`]).
+#[cfg(windows)]
+pub struct ChildStdoutReader(pub ChildPipeReader);
+
+/// A child's stderr on Windows ([`ChildPipeReader`]).
+#[cfg(windows)]
+pub struct ChildStderrReader(pub ChildPipeReader);
+
+#[cfg(windows)]
+impl AsyncRead for ChildStdoutReader {
+  fn poll_read(
+    mut self: std::pin::Pin<&mut Self>,
+    cx: &mut std::task::Context<'_>,
+    buf: &mut tokio::io::ReadBuf<'_>,
+  ) -> std::task::Poll<io::Result<()>> {
+    std::pin::Pin::new(&mut self.0).poll_read(cx, buf)
+  }
+}
+
+#[cfg(windows)]
+impl AsyncRead for ChildStderrReader {
+  fn poll_read(
+    mut self: std::pin::Pin<&mut Self>,
+    cx: &mut std::task::Context<'_>,
+    buf: &mut tokio::io::ReadBuf<'_>,
+  ) -> std::task::Poll<io::Result<()>> {
+    std::pin::Pin::new(&mut self.0).poll_read(cx, buf)
+  }
+}
+
+#[cfg(windows)]
+impl ChildStdoutReader {
+  /// The reader for a child's stdout pipe (see [`ChildPipeReader`]).
+  pub fn from_std(stdout: std::process::ChildStdout) -> io::Result<Self> {
+    ChildPipeReader::from_overlapped_handle(stdout.into()).map(Self)
+  }
+}
+
+#[cfg(windows)]
+impl ChildStderrReader {
+  /// The reader for a child's stderr pipe (see [`ChildPipeReader`]).
+  pub fn from_std(stderr: std::process::ChildStderr) -> io::Result<Self> {
+    ChildPipeReader::from_overlapped_handle(stderr.into()).map(Self)
+  }
+}
+
+#[cfg(not(windows))]
 pub type ChildStdoutResource = ReadOnlyResource<process::ChildStdout>;
+#[cfg(windows)]
+pub type ChildStdoutResource = ReadOnlyResource<ChildStdoutReader>;
 
 impl Resource for ChildStdoutResource {
   deno_core::impl_readable_byob!();
@@ -543,7 +641,10 @@ impl Resource for ChildStdoutResource {
   }
 }
 
+#[cfg(not(windows))]
 pub type ChildStderrResource = ReadOnlyResource<process::ChildStderr>;
+#[cfg(windows)]
+pub type ChildStderrResource = ReadOnlyResource<ChildStderrReader>;
 
 impl Resource for ChildStderrResource {
   deno_core::impl_readable_byob!();
