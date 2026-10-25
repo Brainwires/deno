@@ -276,6 +276,26 @@
         }
       ]
     },
+    // a listed name that resolves to this machine (here /etc/hosts's
+    // ip6-localhost, ::1) is refused by the proxy, plainly and as a tunnel:
+    // a package's declared host or a rebinding DNS answer can't reach local
+    // services; the address listed as itself still goes through. Linux only:
+    // macOS's /etc/hosts names no loopback host but localhost, which is exempt
+    "listed_name_resolving_to_loopback_refused": {
+      "if": "linux",
+      "steps": [
+        {
+          "cwd": "net_private",
+          "args": "install --allow-scripts=npm:@denotest/jail-net-private",
+          "output": "[WILDCARD]"
+        },
+        {
+          "cwd": "net_private",
+          "args": "eval console.log(Deno.readTextFileSync('node_modules/@denotest/jail-net-private/results.txt').trim())",
+          "output": "literal 127.0.0.1:4546: reached\nname to loopback: refused\nname to loopback, tunnel: refused\n"
+        }
+      ]
+    },
     // (R3) a package's `net: false` drops the host it declares and wins over
     // `jailScripts.net: true`
     "package_net_false_wins": {

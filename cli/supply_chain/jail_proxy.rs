@@ -13,6 +13,16 @@
 //! answers anything else with `403`. It resolves names itself, so the script
 //! needs no DNS: a lookup can't carry data out either.
 //!
+//! A NAME is allowed, not where it leads: a package's declared host or a
+//! listed name whose DNS an attacker controls (rebinding) could resolve to
+//! this machine or its network. So the proxy refuses (`403`) a name that
+//! resolves to any internal address (loopback, RFC 1918 / ULA private,
+//! link-local with cloud metadata's `169.254.169.254`, CGNAT, unspecified;
+//! [`is_internal`]) and connects to exactly the addresses it checked, never
+//! resolving again. An allow-list entry that is itself an IP literal, the name
+//! `localhost`, and a package entry with `"allowPrivate": true` in deno.json
+//! are exempt.
+//!
 //! When the installer's own environment names an `http://` proxy
 //! (`HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY`, minus `NO_PROXY`), allowed
 //! connections go through it, so a network that only reaches the internet
@@ -23,10 +33,13 @@ use std::ffi::OsString;
 use std::io;
 use std::net::IpAddr;
 use std::net::Ipv4Addr;
+use std::net::Ipv6Addr;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
 use base64::Engine;
+use deno_core::futures::future::BoxFuture;
 use deno_core::url::Host;
 use deno_core::url::Url;
 use tokio::io::AsyncReadExt;
@@ -75,7 +88,7 @@ impl ProxyHost {
     })
   }
 
-  /// The host as `TcpStream::connect` takes it.
+  /// The host as `NO_PROXY` entries match it.
   fn unbracketed(&self) -> String {
     match self {
       ProxyHost::Domain(domain) => domain.clone(),
@@ -122,7 +135,12 @@ pub struct AllowEntry {
 
 /// The hosts a jailed script may reach.
 #[derive(Debug, Clone, Default)]
-pub struct AllowList(Vec<AllowEntry>);
+pub struct AllowList {
+  entries: Vec<AllowEntry>,
+  /// Whether a listed name may resolve to an internal address (the
+  /// package's `"allowPrivate": true` in deno.json).
+  allow_private: bool,
+}
 
 impl AllowList {
   /// Parses `host` / `host:port` entries; one that isn't a host is an error.
@@ -140,15 +158,129 @@ impl AllowList {
         None => return Err(format!("\"{entry}\" is not a host or host:port")),
       }
     }
-    Ok(Self(list))
+    Ok(Self {
+      entries: list,
+      allow_private: false,
+    })
+  }
+
+  /// Lets listed names resolve to internal addresses (a mirror on the
+  /// local network).
+  pub fn with_allow_private(mut self, allow_private: bool) -> Self {
+    self.allow_private = allow_private;
+    self
   }
 
   pub fn allows(&self, host: &ProxyHost, port: u16) -> bool {
     self
-      .0
+      .entries
       .iter()
       .any(|entry| &entry.host == host && entry.port.is_none_or(|p| p == port))
   }
+}
+
+/// Whether an IPv4 address is on this machine or its networks: `0.0.0.0/8`
+/// (unspecified, "this network"), loopback `127/8`, RFC 1918 private
+/// (`10/8`, `172.16/12`, `192.168/16`), link-local `169.254/16` (cloud
+/// metadata services), CGNAT `100.64/10`.
+fn is_internal_v4(ip: Ipv4Addr) -> bool {
+  let [a, b, ..] = ip.octets();
+  a == 0
+    || a == 10
+    || a == 127
+    || (a == 169 && b == 254)
+    || (a == 172 && (16..=31).contains(&b))
+    || (a == 192 && b == 168)
+    || (a == 100 && (64..=127).contains(&b))
+}
+
+/// Whether an address is one a listed NAME must not lead to: the internal
+/// IPv4 ranges ([`is_internal_v4`]), also inside IPv6 (IPv4-mapped
+/// `::ffff:a.b.c.d`, IPv4-compatible `::a.b.c.d`, NAT64 `64:ff9b::/96`),
+/// and IPv6 unspecified `::`, loopback `::1`, unique-local `fc00::/7`,
+/// link-local `fe80::/10` and the retired site-local `fec0::/10`.
+pub(crate) fn is_internal(ip: IpAddr) -> bool {
+  let v6 = match ip {
+    IpAddr::V4(v4) => return is_internal_v4(v4),
+    IpAddr::V6(v6) => v6,
+  };
+  let s = v6.segments();
+  let embedded = || Ipv4Addr::from(((s[6] as u32) << 16) | s[7] as u32);
+  if let Some(v4) = v6.to_ipv4_mapped() {
+    return is_internal_v4(v4);
+  }
+  // `::` and `::1` are in here too (`0.0.0.0` and `0.0.0.1`)
+  if s[..6] == [0; 6] || s[..6] == [0x64, 0xff9b, 0, 0, 0, 0] {
+    return is_internal_v4(embedded());
+  }
+  v6 == Ipv6Addr::UNSPECIFIED
+    || v6 == Ipv6Addr::LOCALHOST
+    || (s[0] & 0xfe00) == 0xfc00
+    || (s[0] & 0xffc0) == 0xfe80
+    || (s[0] & 0xffc0) == 0xfec0
+}
+
+/// Resolves a name to the addresses to connect to.
+pub(crate) type Resolver = Arc<
+  dyn Fn(String, u16) -> BoxFuture<'static, io::Result<Vec<SocketAddr>>>
+    + Send
+    + Sync,
+>;
+
+fn system_resolver() -> Resolver {
+  Arc::new(|host, port| {
+    Box::pin(async move {
+      Ok(
+        tokio::net::lookup_host((host.as_str(), port))
+          .await?
+          .collect(),
+      )
+    })
+  })
+}
+
+/// Why the proxy won't connect to an allowed target.
+#[derive(Debug)]
+enum Refusal {
+  /// The name resolves to this internal address.
+  Internal(IpAddr),
+  /// The name doesn't resolve.
+  Unresolved(io::Error),
+}
+
+/// The addresses an allowed target may be reached at, each checked: an IP
+/// literal (it is in the allow-list as itself) as is, `localhost` as it
+/// resolves, and any other name as it resolves when none of its addresses
+/// is internal (one is enough to refuse: a rebinding answer mixes them), or
+/// when the package allows private addresses. The caller connects to these
+/// and never resolves the name again.
+async fn resolve_target(
+  host: &ProxyHost,
+  port: u16,
+  allow_private: bool,
+  resolve: &Resolver,
+) -> Result<Vec<SocketAddr>, Refusal> {
+  let name = match host {
+    ProxyHost::Ip(ip) => return Ok(vec![SocketAddr::new(*ip, port)]),
+    ProxyHost::Domain(name) => name,
+  };
+  let mut addrs = resolve(name.clone(), port)
+    .await
+    .map_err(Refusal::Unresolved)?;
+  addrs.dedup();
+  if addrs.is_empty() {
+    return Err(Refusal::Unresolved(io::Error::new(
+      io::ErrorKind::NotFound,
+      "no addresses",
+    )));
+  }
+  if !allow_private
+    && name != "localhost"
+    && let Some(addr) = addrs.iter().find(|addr| is_internal(addr.ip()))
+  {
+    return Err(Refusal::Internal(addr.ip()));
+  }
+  Ok(addrs)
 }
 
 /// What a request asks the proxy for.
@@ -160,11 +292,49 @@ enum Request {
   Forward {
     host: ProxyHost,
     port: u16,
-    /// The request line and headers to send on (to the origin, or to an
-    /// upstream proxy, which takes the absolute form).
-    origin_head: Vec<u8>,
-    proxy_head: Vec<u8>,
+    head: ForwardHead,
   },
+}
+
+/// The request line and headers of a forwarded request, minus the hop
+/// headers, plus `Connection: close`.
+#[derive(Debug, PartialEq, Eq)]
+struct ForwardHead {
+  method: String,
+  version: String,
+  url: Url,
+  headers: String,
+}
+
+impl ForwardHead {
+  fn build(&self, target: &str) -> Vec<u8> {
+    let ForwardHead {
+      method,
+      version,
+      headers,
+      ..
+    } = self;
+    format!("{method} {target} {version}\r\n{headers}").into_bytes()
+  }
+
+  /// The head an origin server takes: the origin-form target.
+  fn origin_head(&self) -> Vec<u8> {
+    let mut path = self.url.path().to_string();
+    if let Some(query) = self.url.query() {
+      path.push('?');
+      path.push_str(query);
+    }
+    self.build(&path)
+  }
+
+  /// The head an upstream proxy takes: the absolute form, its host the
+  /// address the jail checked (the proxy must not resolve the name again),
+  /// the client's `Host` header unchanged.
+  fn proxy_head(&self, pinned: IpAddr) -> Vec<u8> {
+    let mut url = self.url.clone();
+    let _ = url.set_ip_host(pinned);
+    self.build(url.as_str())
+  }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -223,11 +393,6 @@ fn parse_request(head: &[u8]) -> Result<Request, ParseError> {
     .and_then(ProxyHost::parse)
     .ok_or(ParseError::BadRequest("a URL without a host"))?;
   let port = url.port_or_known_default().unwrap_or(80);
-  let mut path = url.path().to_string();
-  if let Some(query) = url.query() {
-    path.push('?');
-    path.push_str(query);
-  }
   let mut headers = String::new();
   for line in lines {
     if line.is_empty() {
@@ -242,14 +407,15 @@ fn parse_request(head: &[u8]) -> Result<Request, ParseError> {
   }
   // one request per connection: whatever follows goes to the same host
   headers.push_str("Connection: close\r\n");
-  let build = |target: &str| {
-    format!("{method} {target} {version}\r\n{headers}").into_bytes()
-  };
   Ok(Request::Forward {
     host,
     port,
-    origin_head: build(&path),
-    proxy_head: build(url.as_str()),
+    head: ForwardHead {
+      method: method.to_string(),
+      version: version.to_string(),
+      url,
+      headers,
+    },
   })
 }
 
@@ -383,6 +549,14 @@ impl Drop for JailProxy {
 impl JailProxy {
   /// Listens on 127.0.0.1 on a free port.
   pub async fn start(allow: AllowList, upstream: Upstream) -> io::Result<Self> {
+    Self::start_with(allow, upstream, system_resolver()).await
+  }
+
+  async fn start_with(
+    allow: AllowList,
+    upstream: Upstream,
+    resolver: Resolver,
+  ) -> io::Result<Self> {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?;
     let port = listener.local_addr()?.port();
     let allow = Arc::new(allow);
@@ -395,8 +569,9 @@ impl JailProxy {
             if let Ok((stream, _)) = accepted {
               let allow = allow.clone();
               let upstream = upstream.clone();
+              let resolver = resolver.clone();
               connections.spawn(async move {
-                let _ = handle(stream, &allow, &upstream).await;
+                let _ = handle(stream, &allow, &upstream, &resolver).await;
               });
             }
           }
@@ -459,6 +634,22 @@ async fn connect(host: &str, port: u16) -> io::Result<TcpStream> {
     .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "connect timed out"))?
 }
 
+/// Connects to the first of the checked addresses that answers.
+async fn connect_pinned(addrs: &[SocketAddr]) -> io::Result<TcpStream> {
+  let mut last = io::Error::new(io::ErrorKind::NotFound, "no addresses");
+  for addr in addrs {
+    match tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(addr)).await
+    {
+      Ok(Ok(stream)) => return Ok(stream),
+      Ok(Err(err)) => last = err,
+      Err(_) => {
+        last = io::Error::new(io::ErrorKind::TimedOut, "connect timed out")
+      }
+    }
+  }
+  Err(last)
+}
+
 /// Opens a tunnel to `target` through an upstream proxy; returns it and the
 /// bytes that already came through it.
 async fn connect_via(
@@ -489,6 +680,7 @@ async fn handle(
   mut client: TcpStream,
   allow: &AllowList,
   upstream: &Upstream,
+  resolver: &Resolver,
 ) -> io::Result<()> {
   let head = tokio::time::timeout(HEAD_TIMEOUT, read_head(&mut client))
     .await
@@ -520,18 +712,55 @@ async fn handle(
     )
     .await;
   }
+  // the target's addresses, checked; every path below connects to these
+  // (or hands them to the upstream proxy), never to the name
+  let addrs = match resolve_target(host, port, allow.allow_private, resolver)
+    .await
+  {
+    Ok(addrs) => addrs,
+    Err(Refusal::Internal(ip)) => {
+      log::debug!("jail-scripts: refused {target}, which resolves to {ip}");
+      return respond(
+          &mut client,
+          "403 Forbidden",
+          &format!(
+            "jail-scripts: {target} resolves to {ip}, an address on this machine or its network (loopback, private, link-local or CGNAT), which a listed name may not lead to; list the address itself, or set \"allowPrivate\": true on the package's entry in supplyChain.jailScripts.packages"
+          ),
+        )
+        .await;
+    }
+    Err(Refusal::Unresolved(err)) => {
+      return respond(
+        &mut client,
+        "502 Bad Gateway",
+        &format!("jail-scripts: couldn't resolve {target}: {err}"),
+      )
+      .await;
+    }
+  };
   let tunnel = matches!(request, Request::Tunnel { .. });
   let via = upstream.for_target(host, tunnel);
   let server = match (&request, via) {
-    (Request::Tunnel { .. }, Some(proxy)) => connect_via(proxy, &target).await,
+    (Request::Tunnel { .. }, Some(proxy)) => {
+      // the user's own proxy may be on a private address; the target it is
+      // asked for is the checked address
+      let mut result = Err(io::Error::other("no addresses"));
+      for addr in &addrs {
+        result = connect_via(proxy, &addr.to_string()).await;
+        if result.is_ok() {
+          break;
+        }
+      }
+      result.map(|(stream, early)| (stream, early, None))
+    }
     (Request::Forward { .. }, Some(proxy)) => connect(&proxy.host, proxy.port)
       .await
-      .map(|stream| (stream, Vec::new())),
-    (_, None) => connect(&host.unbracketed(), port)
+      .map(|stream| (stream, Vec::new(), Some(addrs[0].ip()))),
+    (_, None) => connect_pinned(&addrs)
       .await
-      .map(|stream| (stream, Vec::new())),
+      .map(|stream| (stream, Vec::new(), None)),
   };
-  let (mut server, early) = match server {
+  let (mut server, early, pinned) = match server {
     Ok(server) => server,
     Err(err) => {
       return respond(
@@ -549,14 +778,10 @@ async fn handle(
         .await?;
       client.write_all(&early).await?;
     }
-    Request::Forward {
-      origin_head,
-      proxy_head,
-      ..
-    } => {
-      let mut out = match via {
-        Some(proxy) => {
-          let mut out = proxy_head;
+    Request::Forward { head, .. } => {
+      let mut out = match (via, pinned) {
+        (Some(proxy), Some(pinned)) => {
+          let mut out = head.proxy_head(pinned);
           if let Some(auth) = &proxy.authorization {
             out.extend_from_slice(
               format!("Proxy-Authorization: {auth}\r\n").as_bytes(),
@@ -564,7 +789,7 @@ async fn handle(
           }
           out
         }
-        None => origin_head,
+        _ => head.origin_head(),
       };
       out.extend_from_slice(b"\r\n");
       server.write_all(&out).await?;
@@ -678,12 +903,7 @@ mod tests {
 
   #[test]
   fn absolute_uri_requests() {
-    let Ok(Request::Forward {
-      host: h,
-      port,
-      origin_head,
-      proxy_head,
-    }) = parse_request(
+    let Ok(Request::Forward { host: h, port, head }) = parse_request(
       b"GET http://Example.com:8080/a/b?c=d HTTP/1.1\r\nHost: example.com:8080\r\nProxy-Connection: keep-alive\r\nProxy-Authorization: Basic eDp5\r\nConnection: keep-alive\r\nAccept: */*\r\n\r\n",
     )
     else {
@@ -692,12 +912,22 @@ mod tests {
     assert_eq!(h, host("example.com"));
     assert_eq!(port, 8080);
     assert_eq!(
-      String::from_utf8(origin_head).unwrap(),
+      String::from_utf8(head.origin_head()).unwrap(),
       "GET /a/b?c=d HTTP/1.1\r\nHost: example.com:8080\r\nAccept: */*\r\nConnection: close\r\n"
     );
+    // an upstream proxy gets the checked address, the Host header as sent
     assert_eq!(
-      String::from_utf8(proxy_head).unwrap(),
-      "GET http://example.com:8080/a/b?c=d HTTP/1.1\r\nHost: example.com:8080\r\nAccept: */*\r\nConnection: close\r\n"
+      String::from_utf8(head.proxy_head("93.184.215.14".parse().unwrap()))
+        .unwrap(),
+      "GET http://93.184.215.14:8080/a/b?c=d HTTP/1.1\r\nHost: example.com:8080\r\nAccept: */*\r\nConnection: close\r\n"
+    );
+    assert_eq!(
+      String::from_utf8(head.proxy_head("2001:db8::1".parse().unwrap()))
+        .unwrap()
+        .lines()
+        .next()
+        .unwrap(),
+      "GET http://[2001:db8::1]:8080/a/b?c=d HTTP/1.1"
     );
     // the default port
     let Ok(Request::Forward { port, .. }) =
@@ -888,10 +1118,15 @@ mod tests {
       OsString::from("HTTPS_PROXY"),
       OsString::from(format!("http://me:pw@127.0.0.1:{upstream_port}")),
     );
-    let proxy =
-      JailProxy::start(list(&["registry.example"]), Upstream::from_env(&env))
-        .await
-        .unwrap();
+    let (resolver, _) =
+      stub_resolver(&[("registry.example", &["93.184.215.14"])]);
+    let proxy = JailProxy::start_with(
+      list(&["registry.example"]),
+      Upstream::from_env(&env),
+      resolver,
+    )
+    .await
+    .unwrap();
     let response = roundtrip(
       proxy.port(),
       "CONNECT registry.example:443 HTTP/1.1\r\n\r\n",
@@ -900,12 +1135,306 @@ mod tests {
     assert!(response.ends_with("through"), "{response}");
     let head = upstream_task.await.unwrap();
     assert!(
-      head.starts_with("CONNECT registry.example:443 HTTP/1.1\r\n"),
+      head.starts_with("CONNECT 93.184.215.14:443 HTTP/1.1\r\n"),
       "{head}"
     );
     assert!(
       head.contains("Proxy-Authorization: Basic bWU6cHc=\r\n"),
       "{head}"
+    );
+  }
+  #[test]
+  fn internal_addresses() {
+    let internal = |text: &str| is_internal(text.parse().unwrap());
+    for ip in [
+      // IPv4: unspecified / this network, loopback, RFC 1918, link-local
+      // (cloud metadata), CGNAT, with their edges
+      "0.0.0.0",
+      "0.255.255.255",
+      "127.0.0.1",
+      "127.255.255.254",
+      "10.0.0.1",
+      "10.255.255.255",
+      "172.16.0.1",
+      "172.31.255.255",
+      "192.168.0.1",
+      "192.168.255.255",
+      "169.254.169.254",
+      "169.254.0.1",
+      "100.64.0.1",
+      "100.127.255.255",
+      // IPv6: unspecified, loopback, unique-local, link-local, site-local
+      "::",
+      "::1",
+      "fc00::1",
+      "fd12:3456::1",
+      "fe80::1",
+      "febf::1",
+      "fec0::1",
+      // IPv4 inside IPv6: mapped, compatible, NAT64
+      "::ffff:127.0.0.1",
+      "::ffff:10.1.2.3",
+      "::ffff:169.254.169.254",
+      "::ffff:0.0.0.0",
+      "::127.0.0.1",
+      "64:ff9b::a9fe:a9fe",
+      "64:ff9b::192.168.1.1",
+    ] {
+      assert!(internal(ip), "{ip} should be internal");
+    }
+    for ip in [
+      "1.1.1.1",
+      "8.8.8.8",
+      "9.255.255.255",
+      "11.0.0.1",
+      "100.63.255.255",
+      "100.128.0.1",
+      "126.255.255.255",
+      "128.0.0.1",
+      "169.253.255.255",
+      "169.255.0.1",
+      "172.15.255.255",
+      "172.32.0.1",
+      "192.167.255.255",
+      "192.169.0.1",
+      "2606:4700::1111",
+      "2001:db8::1",
+      "fbff::1",
+      "ff02::1",
+      "::ffff:8.8.8.8",
+      "::8.8.8.8",
+      "64:ff9b::808:808",
+    ] {
+      assert!(!internal(ip), "{ip} should not be internal");
+    }
+  }
+
+  /// A resolver answering from a table (a name missing from it doesn't
+  /// resolve), counting its lookups.
+  fn stub_resolver(
+    table: &[(&str, &[&str])],
+  ) -> (Resolver, Arc<std::sync::atomic::AtomicUsize>) {
+    let table: HashMap<String, Vec<IpAddr>> = table
+      .iter()
+      .map(|(name, ips)| {
+        (
+          name.to_string(),
+          ips.iter().map(|ip| ip.parse().unwrap()).collect(),
+        )
+      })
+      .collect();
+    let lookups = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = lookups.clone();
+    let resolver: Resolver = Arc::new(move |name, port| {
+      counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+      let found = table
+        .get(&name)
+        .map(|ips| ips.iter().map(|ip| SocketAddr::new(*ip, port)).collect());
+      Box::pin(async move {
+        found.ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "nxdomain"))
+      })
+    });
+    (resolver, lookups)
+  }
+
+  #[tokio::test]
+  async fn resolve_then_refuse() {
+    let (resolver, lookups) = stub_resolver(&[
+      ("public.example", &["93.184.215.14", "2606:2800::1"]),
+      ("rebound.example", &["127.0.0.1"]),
+      ("metadata.example", &["169.254.169.254"]),
+      // a rebinding answer that mixes a public address with an internal one
+      ("mixed.example", &["93.184.215.14", "10.0.0.5"]),
+      ("mapped.example", &["::ffff:127.0.0.1"]),
+      ("ula.example", &["fd00::5"]),
+      ("localhost", &["127.0.0.1", "::1"]),
+    ]);
+    let target = |name: &str| ProxyHost::parse(name).unwrap();
+    let ok = resolve_target(&target("public.example"), 443, false, &resolver)
+      .await
+      .unwrap();
+    assert_eq!(
+      ok,
+      vec![
+        "93.184.215.14:443".parse::<SocketAddr>().unwrap(),
+        "[2606:2800::1]:443".parse().unwrap()
+      ]
+    );
+    for (name, ip) in [
+      ("rebound.example", "127.0.0.1"),
+      ("metadata.example", "169.254.169.254"),
+      ("mixed.example", "10.0.0.5"),
+      ("mapped.example", "::ffff:127.0.0.1"),
+      ("ula.example", "fd00::5"),
+    ] {
+      match resolve_target(&target(name), 443, false, &resolver).await {
+        Err(Refusal::Internal(got)) => {
+          assert_eq!(got, ip.parse::<IpAddr>().unwrap(), "{name}")
+        }
+        other => panic!("{name}: {other:?}"),
+      }
+    }
+    // the package's allowPrivate: internal answers pass
+    assert_eq!(
+      resolve_target(&target("mixed.example"), 80, true, &resolver)
+        .await
+        .unwrap()
+        .len(),
+      2
+    );
+    // `localhost` is exempt, as resolved
+    assert_eq!(
+      resolve_target(&target("localhost"), 4545, false, &resolver)
+        .await
+        .unwrap()[0],
+      "127.0.0.1:4545".parse().unwrap()
+    );
+    // a name that doesn't resolve
+    assert!(matches!(
+      resolve_target(&target("nowhere.example"), 443, false, &resolver).await,
+      Err(Refusal::Unresolved(_))
+    ));
+    // an IP literal (listed as itself) is never looked up
+    let before = lookups.load(std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(
+      resolve_target(&target("[::1]"), 8, false, &resolver)
+        .await
+        .unwrap(),
+      vec!["[::1]:8".parse::<SocketAddr>().unwrap()]
+    );
+    assert_eq!(lookups.load(std::sync::atomic::Ordering::SeqCst), before);
+  }
+
+  #[tokio::test]
+  async fn refuses_names_that_resolve_internal() {
+    let (origin_port, origin) =
+      serve_once(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok").await;
+    // a listed name whose DNS answers this machine (rebinding, or a
+    // package's declared host), next to the literal address
+    let (resolver, lookups) =
+      stub_resolver(&[("rebound.example", &["127.0.0.1"])]);
+    let proxy = JailProxy::start_with(
+      list(&["rebound.example", &format!("127.0.0.1:{origin_port}")]),
+      Upstream::default(),
+      resolver,
+    )
+    .await
+    .unwrap();
+    for request in [
+      format!("GET http://rebound.example:{origin_port}/ HTTP/1.1\r\n\r\n"),
+      format!("CONNECT rebound.example:{origin_port} HTTP/1.1\r\n\r\n"),
+    ] {
+      let response = roundtrip(proxy.port(), &request).await;
+      assert!(response.starts_with("HTTP/1.1 403 "), "{response}");
+      assert!(response.contains("resolves to 127.0.0.1"), "{response}");
+    }
+    assert_eq!(lookups.load(std::sync::atomic::Ordering::SeqCst), 2);
+    // the literal entry still reaches the same server
+    let response = roundtrip(
+      proxy.port(),
+      &format!("GET http://127.0.0.1:{origin_port}/x HTTP/1.1\r\n\r\n"),
+    )
+    .await;
+    assert!(response.ends_with("ok"), "{response}");
+    origin.await.unwrap();
+  }
+
+  #[tokio::test]
+  async fn allow_private_and_pinned_address() {
+    let (origin_port, origin) =
+      serve_once(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok").await;
+    // the package opted in: the name may lead to this machine, and the proxy
+    // connects to the address it resolved (one lookup), whatever the name
+    // would answer later
+    let (resolver, lookups) =
+      stub_resolver(&[("mirror.internal", &["127.0.0.1"])]);
+    let proxy = JailProxy::start_with(
+      list(&["mirror.internal"]).with_allow_private(true),
+      Upstream::default(),
+      resolver,
+    )
+    .await
+    .unwrap();
+    let response = roundtrip(
+      proxy.port(),
+      &format!(
+        "GET http://mirror.internal:{origin_port}/x HTTP/1.1\r\nHost: mirror.internal\r\n\r\n"
+      ),
+    )
+    .await;
+    assert!(response.ends_with("ok"), "{response}");
+    assert_eq!(lookups.load(std::sync::atomic::Ordering::SeqCst), 1);
+    let head = String::from_utf8(origin.await.unwrap()).unwrap();
+    assert!(head.contains("Host: mirror.internal\r\n"), "{head}");
+  }
+
+  #[tokio::test]
+  async fn upstream_gets_the_checked_address() {
+    // the user's proxy is on loopback (allowed); the target is checked, and
+    // the proxy is asked for the address, not the name
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let upstream_port = listener.local_addr().unwrap().port();
+    let upstream_task = tokio::spawn(async move {
+      let mut heads = Vec::new();
+      for _ in 0..2 {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let (head, _) = read_head(&mut stream).await.unwrap().unwrap();
+        stream
+          .write_all(b"HTTP/1.1 200 Connection established\r\n\r\n")
+          .await
+          .unwrap();
+        stream.shutdown().await.unwrap();
+        heads.push(String::from_utf8(head).unwrap());
+      }
+      heads
+    });
+    let mut env = HashMap::new();
+    for name in ["HTTPS_PROXY", "HTTP_PROXY"] {
+      env.insert(
+        OsString::from(name),
+        OsString::from(format!("http://127.0.0.1:{upstream_port}")),
+      );
+    }
+    let (resolver, _) = stub_resolver(&[
+      ("registry.example", &["93.184.215.14"]),
+      ("rebound.example", &["192.168.1.1"]),
+    ]);
+    let proxy = JailProxy::start_with(
+      list(&["registry.example", "rebound.example"]),
+      Upstream::from_env(&env),
+      resolver,
+    )
+    .await
+    .unwrap();
+    let response = roundtrip(
+      proxy.port(),
+      "CONNECT registry.example:443 HTTP/1.1\r\n\r\n",
+    )
+    .await;
+    assert!(response.starts_with("HTTP/1.1 200 "), "{response}");
+    roundtrip(
+      proxy.port(),
+      "GET http://registry.example/p HTTP/1.1\r\nHost: registry.example\r\n\r\n",
+    )
+    .await;
+    for request in [
+      "CONNECT rebound.example:443 HTTP/1.1\r\n\r\n",
+      "GET http://rebound.example/ HTTP/1.1\r\n\r\n",
+    ] {
+      let response = roundtrip(proxy.port(), request).await;
+      assert!(response.starts_with("HTTP/1.1 403 "), "{response}");
+    }
+    let heads = upstream_task.await.unwrap();
+    assert!(
+      heads[0].starts_with("CONNECT 93.184.215.14:443 HTTP/1.1\r\n"),
+      "{}",
+      heads[0]
+    );
+    assert!(
+      heads[1].starts_with("GET http://93.184.215.14/p HTTP/1.1\r\n")
+        && heads[1].contains("Host: registry.example\r\n"),
+      "{}",
+      heads[1]
     );
   }
 }

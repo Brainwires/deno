@@ -159,6 +159,10 @@
                       "items": { "type": "string" },
                       "description": "Extra directories the package's scripts may write to (relative to this file; `~/` is the user's home), created when missing. For a download cache kept outside node_modules, list it here and pass its variable in env (PUPPETEER_CACHE_DIR, PLAYWRIGHT_BROWSERS_PATH, CYPRESS_CACHE_FOLDER)."
                     },
+                    "allowPrivate": {
+                      "type": "boolean",
+                      "description": "Let the names in this package's net host list resolve to addresses on this machine or its network (loopback, private, link-local, CGNAT), such as a mirror on the local network. Without it the jail's proxy refuses such a name, so a hostile DNS answer can't reach local services; an IP address listed as itself, and localhost, are always allowed. Needs a net host list."
+                    },
                     "executables": {
                       "type": "boolean",
                       "description": "Let the package's scripts leave executable files in its `~/` write paths (a browser download in a cache other projects use). Without it, such files are removed and the script fails."

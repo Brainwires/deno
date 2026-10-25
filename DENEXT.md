@@ -4215,8 +4215,36 @@ where the changes are discussed.
        (`ctime`, which a script can't set back) and removes rather than clears
        the bit, so a hard link to a file elsewhere leaves that file alone; a
        process the script left running could still create one after the sweep.
+     - **A listed name may not lead to this machine (High).** The proxy allows a
+       host by NAME and resolves it itself, so a package's declared host
+       (node-pre-gyp's `binary.host`) or a listed name whose DNS an attacker
+       controls (rebinding) could resolve to loopback and reach local services
+       from a jailed script. Now a name is refused (`403`) when ANY address it
+       resolves to is internal (one is enough: a rebinding answer mixes them):
+       IPv4 `0/8` (unspecified), loopback `127/8`, RFC 1918 private (`10/8`,
+       `172.16/12`, `192.168/16`), link-local `169.254/16` (cloud metadata's
+       `169.254.169.254`) and CGNAT `100.64/10`, also inside IPv6 (IPv4-mapped
+       `::ffff:a.b.c.d`, IPv4-compatible `::a.b.c.d`, NAT64 `64:ff9b::/96`);
+       IPv6 `::`, `::1`, unique-local `fc00::/7`, link-local `fe80::/10` and the
+       retired site-local `fec0::/10`. The proxy then connects to exactly the
+       addresses it checked and never resolves the name again (no check-then-use
+       gap). Through the installer's own upstream proxy, which may itself be on
+       a private address, the target is checked the same way and the upstream is
+       asked for the checked address (`CONNECT 93.184.215.14:443`, an absolute
+       `http://<address>/` URL with the client's `Host` header), not the name,
+       so it can't resolve it differently; an upstream that only allows names,
+       or a network where only the upstream resolves names, refuses such
+       scripts. Exempt: an allow-list entry that is the IP literal itself
+       (`127.0.0.1:4545`, `[::1]`), the name `localhost`, and the names in a
+       package's deno.json host list when its entry sets `"allowPrivate": true`
+       (a mirror on the local network; it needs a `net` host list, a config
+       error otherwise, and never covers the hosts a package declares for
+       itself). A name that doesn't resolve is a `502`.
 
-     Tests: `npm/supply_chain_jail` (`declared_host_binds_every_program`: curl
+     Tests: `npm/supply_chain_jail`
+     (`listed_name_resolving_to_loopback_refused`, Linux: a listed
+     `ip6-localhost` is refused plainly and as a tunnel while the listed
+     `127.0.0.1:4546` goes through; `declared_host_binds_every_program`: curl
      through the proxy reaches the declared host, plainly and through a CONNECT
      tunnel, the proxy refuses another host, and curl around the proxy, to the
      declared host too, and a raw socket from `node` are refused;
@@ -4228,13 +4256,15 @@ where the changes are discussed.
      `allow_list_rejects_non_hosts`, `connect_requests`,
      `absolute_uri_requests`, `upstream_from_env`,
      `forwards_allowed_and_refuses_others`, `tunnels_allowed`,
-     `chains_through_upstream_proxy`), `package_net_false_wins`,
-     `os_net_choice`, `proxy_env`, `new_executables_removed`, `home_paths` and
-     the proxy grant in `clamp` (`cli/supply_chain/jail.rs`),
-     `profile_proxy_only` (`sandbox_macos`), `seccomp_program_semantics` (a
-     small BPF interpreter over the generated program, `sandbox_linux`), and the
-     host forms and `executables` in `test_to_supply_chain_config`
-     (`libs/config/deno_json`).
+     `chains_through_upstream_proxy`, `internal_addresses`,
+     `resolve_then_refuse`, `refuses_names_that_resolve_internal`,
+     `allow_private_and_pinned_address`, `upstream_gets_the_checked_address`),
+     `package_net_false_wins`, `os_net_choice`, `proxy_env`,
+     `new_executables_removed`, `home_paths` and the proxy grant in `clamp`
+     (`cli/supply_chain/jail.rs`), `profile_proxy_only` (`sandbox_macos`),
+     `seccomp_program_semantics` (a small BPF interpreter over the generated
+     program, `sandbox_linux`), and the host forms, `executables` and
+     `allowPrivate` in `test_to_supply_chain_config` (`libs/config/deno_json`).
 
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110) are

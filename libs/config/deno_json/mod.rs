@@ -161,6 +161,12 @@ pub struct JailPackageConfig {
   /// (a browser download); without it they are removed and the script fails
   /// (denext item 111).
   pub executables: bool,
+  /// Whether the names in its `net` host list may resolve to addresses on
+  /// this machine or its network (loopback, private, link-local, CGNAT): a
+  /// mirror on the local network. Without it the jail's proxy refuses such
+  /// a name (denext item 111).
+  #[serde(rename = "allowPrivate")]
+  pub allow_private: bool,
 }
 
 /// `supplyChain.jailScripts.packages.<name>.net`.
@@ -2863,6 +2869,13 @@ impl ConfigFile {
               "an empty package name in \"jailScripts.packages\"".into(),
             ));
           }
+          if config.allow_private
+            && !matches!(config.net, Some(JailNetConfig::Hosts(_)))
+          {
+            return Err(parse_err(format!(
+              "\"jailScripts.packages\": {name}'s \"allowPrivate\" needs a \"net\" host list (the names it lets resolve to private addresses)"
+            )));
+          }
           if let Some(JailNetConfig::Hosts(hosts)) = &config.net {
             if hosts.is_empty() {
               return Err(parse_err(format!(
@@ -4411,6 +4424,26 @@ mod tests {
     )
     .unwrap();
     assert!(config.jail_packages["a"].executables);
+    assert!(!config.jail_packages["a"].allow_private);
+    // a mirror on the local network: allowPrivate, with a host list only
+    let config = get_result(
+      r#"{ "supplyChain": { "jailScripts": { "packages": {
+        "a": { "net": ["mirror.corp.internal"], "allowPrivate": true }
+      } } } }"#,
+    )
+    .unwrap();
+    assert!(config.jail_packages["a"].allow_private);
+    for bad in [
+      r#"{ "allowPrivate": true }"#,
+      r#"{ "net": true, "allowPrivate": true }"#,
+      r#"{ "net": false, "allowPrivate": true }"#,
+    ] {
+      let json = format!(
+        r#"{{ "supplyChain": {{ "jailScripts": {{ "packages": {{ "a": {bad} }} }} }} }}"#
+      );
+      let err = format!("{:?}", get_result(&json).unwrap_err());
+      assert!(err.contains("allowPrivate"), "{bad}: {err}");
+    }
     // `~user` is not the home directory: relative to the deno.json
     let config = get_result(
       r#"{ "supplyChain": { "jailScripts": { "packages": { "a": { "write": ["~other/x"] } } } } }"#,

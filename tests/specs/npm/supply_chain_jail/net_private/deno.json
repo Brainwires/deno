@@ -1,0 +1,11 @@
+{
+  "supplyChain": {
+    "jailScripts": {
+      "packages": {
+        "npm:@denotest/jail-net-private": {
+          "net": ["127.0.0.1:4546", "ip6-localhost:4545"]
+        }
+      }
+    }
+  }
+}

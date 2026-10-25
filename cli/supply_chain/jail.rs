@@ -896,8 +896,13 @@ async fn run_in_dirs(
   // script connect to where it can hold it there
   let mut proxy = match &net {
     JailNet::Hosts(hosts) => {
+      // the project's opt-in for a mirror on the local network covers the
+      // host list it wrote, never the hosts a package declares for itself
+      let allow_private =
+        !declared && package.is_some_and(|package| package.allow_private);
       let allow = super::jail_proxy::AllowList::parse(hosts)
-        .map_err(|err| deno_core::anyhow::anyhow!("jail-scripts: {err}"))?;
+        .map_err(|err| deno_core::anyhow::anyhow!("jail-scripts: {err}"))?
+        .with_allow_private(allow_private);
       let upstream = super::jail_proxy::Upstream::from_env(s.env_vars);
       Some(
         super::jail_proxy::JailProxy::start(allow, upstream)
