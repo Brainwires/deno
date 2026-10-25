@@ -66,14 +66,20 @@ impl<TSys: EmitCacheSys> EmitCache<TSys> {
   ///
   /// Cached emits from previous CLI releases will not be returned
   /// or emits that do not match the source.
+  ///
+  /// `name` is the options' cache directory (see
+  /// `TranspileAndEmitOptions::emit_cache_name`): `None` for a module's usual
+  /// options, kept in the cache's root.
   pub fn get_emit_code(
     &self,
     specifier: &Url,
+    name: Option<&str>,
     expected_source_hash: u64,
   ) -> Option<String> {
     self.get_emit_code_of(
       specifier,
       EmitForm::Plain,
+      name,
       Some(expected_source_hash),
     )
   }
@@ -82,7 +88,8 @@ impl<TSys: EmitCacheSys> EmitCache<TSys> {
   /// transform changed (`deno test`'s Vitest compatibility), which is cached
   /// apart from the module's plain emit: a run with the transform and one
   /// without it each keep theirs, so `deno coverage` can read the profiles of
-  /// both.
+  /// both. It stays in the cache's root whatever the options, where
+  /// `deno coverage` finds it without them.
   pub fn get_transformed_emit_code(
     &self,
     specifier: &Url,
@@ -91,6 +98,7 @@ impl<TSys: EmitCacheSys> EmitCache<TSys> {
     self.get_emit_code_of(
       specifier,
       EmitForm::Transformed,
+      None,
       Some(expected_source_hash),
     )
   }
@@ -105,29 +113,36 @@ impl<TSys: EmitCacheSys> EmitCache<TSys> {
     &self,
     specifier: &Url,
   ) -> Option<String> {
-    self.get_emit_code_of(specifier, EmitForm::Transformed, None)
+    self.get_emit_code_of(specifier, EmitForm::Transformed, None, None)
   }
 
   fn get_emit_code_of(
     &self,
     specifier: &Url,
     form: EmitForm,
+    name: Option<&str>,
     expected_source_hash: Option<u64>,
   ) -> Option<String> {
     if matches!(self.mode, Mode::Disable) {
       return None;
     }
 
-    let emit_filename = self.get_emit_filename(specifier, form)?;
+    let emit_filename = self.get_emit_filename(specifier, form, name)?;
     let bytes = self.disk_cache.get(&emit_filename).ok()?;
     self
       .file_serializer
       .deserialize(bytes, expected_source_hash)
   }
 
-  /// Sets the emit code in the cache.
-  pub fn set_emit_code(&self, specifier: &Url, source_hash: u64, code: &[u8]) {
-    self.set_emit_code_of(specifier, EmitForm::Plain, source_hash, code)
+  /// Sets the emit code in the cache (`name` as in [`Self::get_emit_code`]).
+  pub fn set_emit_code(
+    &self,
+    specifier: &Url,
+    name: Option<&str>,
+    source_hash: u64,
+    code: &[u8],
+  ) {
+    self.set_emit_code_of(specifier, EmitForm::Plain, name, source_hash, code)
   }
 
   /// Sets the emit code of a module that a program transform changed (see
@@ -138,18 +153,25 @@ impl<TSys: EmitCacheSys> EmitCache<TSys> {
     source_hash: u64,
     code: &[u8],
   ) {
-    self.set_emit_code_of(specifier, EmitForm::Transformed, source_hash, code)
+    self.set_emit_code_of(
+      specifier,
+      EmitForm::Transformed,
+      None,
+      source_hash,
+      code,
+    )
   }
 
   fn set_emit_code_of(
     &self,
     specifier: &Url,
     form: EmitForm,
+    name: Option<&str>,
     source_hash: u64,
     code: &[u8],
   ) {
     if let Err(err) =
-      self.set_emit_code_result(specifier, form, source_hash, code)
+      self.set_emit_code_result(specifier, form, name, source_hash, code)
     {
       // might error in cases such as a readonly file system
       log::debug!("Error saving emit data ({}): {}", specifier, err);
@@ -162,6 +184,7 @@ impl<TSys: EmitCacheSys> EmitCache<TSys> {
     &self,
     specifier: &Url,
     form: EmitForm,
+    name: Option<&str>,
     source_hash: u64,
     code: &[u8],
   ) -> Result<(), AnyError> {
@@ -171,7 +194,7 @@ impl<TSys: EmitCacheSys> EmitCache<TSys> {
     }
 
     let emit_filename = self
-      .get_emit_filename(specifier, form)
+      .get_emit_filename(specifier, form, name)
       .ok_or_else(|| anyhow!("Could not get emit filename."))?;
     let cache_data = self.file_serializer.serialize(code, source_hash);
     self.disk_cache.set(&emit_filename, &cache_data)?;
@@ -183,15 +206,36 @@ impl<TSys: EmitCacheSys> EmitCache<TSys> {
     &self,
     specifier: &Url,
     form: EmitForm,
+    name: Option<&str>,
   ) -> Option<PathBuf> {
     let extension = match form {
       EmitForm::Plain => "js",
       EmitForm::Transformed => "transformed.js",
     };
-    self
+    let filename = self
       .disk_cache
-      .get_cache_filename_with_extension(specifier, extension)
+      .get_cache_filename_with_extension(specifier, extension)?;
+    // denext: emits made with other options than a module's usual ones live
+    // in a sub-directory named for them (denoland/deno#30791). The usual
+    // ones stay where they always were.
+    match name {
+      Some(name) if is_valid_cache_dir_name(name) => {
+        Some(PathBuf::from(name).join(filename))
+      }
+      Some(_) => None,
+      None => Some(filename),
+    }
   }
+}
+
+/// A cache directory name is one plain path segment (letters, digits, `-`,
+/// `_`, `+` and `.`, not only dots), so it can't leave the cache.
+fn is_valid_cache_dir_name(name: &str) -> bool {
+  !name.is_empty()
+    && name.chars().any(|c| c != '.')
+    && name
+      .chars()
+      .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '+' | '.'))
 }
 
 /// Which emit of a module a cache entry holds: there is one entry for each.
@@ -296,19 +340,19 @@ mod test {
       temp_dir.path().join("file2.ts").as_path(),
     )
     .unwrap();
-    assert_eq!(cache.get_emit_code(&specifier1, 1), None);
+    assert_eq!(cache.get_emit_code(&specifier1, None, 1), None);
     let emit_code1 = "text1".to_string();
     let emit_code2 = "text2".to_string();
-    cache.set_emit_code(&specifier1, 10, emit_code1.as_bytes());
-    cache.set_emit_code(&specifier2, 2, emit_code2.as_bytes());
+    cache.set_emit_code(&specifier1, None, 10, emit_code1.as_bytes());
+    cache.set_emit_code(&specifier2, None, 2, emit_code2.as_bytes());
     // providing the incorrect source hash
-    assert_eq!(cache.get_emit_code(&specifier1, 5), None);
+    assert_eq!(cache.get_emit_code(&specifier1, None, 5), None);
     // providing the correct source hash
     assert_eq!(
-      cache.get_emit_code(&specifier1, 10),
+      cache.get_emit_code(&specifier1, None, 10),
       Some(emit_code1.clone()),
     );
-    assert_eq!(cache.get_emit_code(&specifier2, 2), Some(emit_code2));
+    assert_eq!(cache.get_emit_code(&specifier2, None, 2), Some(emit_code2));
 
     // try changing the cli version (should not load previous ones)
     let cache = EmitCache {
@@ -319,8 +363,8 @@ mod test {
       emit_failed_flag: Default::default(),
       mode: Mode::Normal,
     };
-    assert_eq!(cache.get_emit_code(&specifier1, 10), None);
-    cache.set_emit_code(&specifier1, 5, emit_code1.as_bytes());
+    assert_eq!(cache.get_emit_code(&specifier1, None, 10), None);
+    cache.set_emit_code(&specifier1, None, 5, emit_code1.as_bytes());
 
     // recreating the cache should still load the data because the CLI version is the same
     let cache = EmitCache {
@@ -331,14 +375,14 @@ mod test {
       emit_failed_flag: Default::default(),
       mode: Mode::Normal,
     };
-    assert_eq!(cache.get_emit_code(&specifier1, 5), Some(emit_code1));
+    assert_eq!(cache.get_emit_code(&specifier1, None, 5), Some(emit_code1));
 
     // adding when already exists should not cause issue
     let emit_code3 = "asdf".to_string();
-    cache.set_emit_code(&specifier1, 20, emit_code3.as_bytes());
-    assert_eq!(cache.get_emit_code(&specifier1, 5), None);
+    cache.set_emit_code(&specifier1, None, 20, emit_code3.as_bytes());
+    assert_eq!(cache.get_emit_code(&specifier1, None, 5), None);
     assert_eq!(
-      cache.get_emit_code(&specifier1, 20),
+      cache.get_emit_code(&specifier1, None, 20),
       Some(emit_code3.clone())
     );
 
@@ -349,23 +393,21 @@ mod test {
       None
     );
     let transformed_code = "transformed".to_string();
-    cache.set_transformed_emit_code(
-      &specifier1,
-      30,
+    cache.set_transformed_emit_code(&specifier1, 30,
       transformed_code.as_bytes(),
     );
     assert_eq!(
-      cache.get_emit_code(&specifier1, 20),
+      cache.get_emit_code(&specifier1, None, 20),
       Some(emit_code3.clone())
     );
-    assert_eq!(cache.get_emit_code(&specifier1, 30), None);
+    assert_eq!(cache.get_emit_code(&specifier1, None, 30), None);
     assert_eq!(
       cache.get_transformed_emit_code(&specifier1, 30),
       Some(transformed_code.clone())
     );
     assert_eq!(cache.get_transformed_emit_code(&specifier1, 20), None);
     // and a later plain emit leaves it in place
-    cache.set_emit_code(&specifier1, 40, emit_code3.as_bytes());
+    cache.set_emit_code(&specifier1, None, 40, emit_code3.as_bytes());
     // whatever the source hash
     assert_eq!(
       cache.get_transformed_emit_code_any_source_hash(&specifier1),
@@ -392,5 +434,81 @@ mod test {
       cache.get_transformed_emit_code_any_source_hash(&specifier1),
       None
     );
+  }
+
+  // denext: emits made with other options than a module's usual ones are
+  // kept in a named sub-directory, apart from the usual ones and from each
+  // other (denoland/deno#30791).
+  #[test]
+  pub fn emit_cache_named_dirs() {
+    let temp_dir = TempDir::new();
+    let disk_cache =
+      DiskCache::new(sys_traits::impls::RealSys, temp_dir.path().to_path_buf());
+    let cache = EmitCache {
+      disk_cache,
+      file_serializer: EmitFileSerializer {
+        cache_version: "1.0.0".into(),
+      },
+      emit_failed_flag: Default::default(),
+      mode: Mode::Normal,
+    };
+    let specifier = deno_path_util::url_from_file_path(
+      temp_dir.path().join("mod.ts").as_path(),
+    )
+    .unwrap();
+
+    cache.set_emit_code(&specifier, None, 1, b"usual");
+    cache.set_emit_code(&specifier, Some("vitest"), 2, b"vitest");
+    cache.set_emit_code(
+      &specifier,
+      Some("no-verbatim-module-syntax"),
+      3,
+      b"no verbatim",
+    );
+    cache.set_transformed_emit_code(&specifier, 4, b"mocked");
+    // Each keeps its own entry: none overwrote another.
+    assert_eq!(cache.get_emit_code(&specifier, None, 1).unwrap(), "usual");
+    assert_eq!(
+      cache.get_emit_code(&specifier, Some("vitest"), 2).unwrap(),
+      "vitest"
+    );
+    assert_eq!(
+      cache
+        .get_emit_code(&specifier, Some("no-verbatim-module-syntax"), 3)
+        .unwrap(),
+      "no verbatim"
+    );
+    assert_eq!(cache.get_transformed_emit_code(&specifier, 4).unwrap(), "mocked");
+    assert_eq!(cache.get_emit_code(&specifier, Some("other"), 1), None);
+
+    // Laid out under readable names, the usual emit where it always was.
+    let usual = cache
+      .get_emit_filename(&specifier, EmitForm::Plain, None)
+      .unwrap();
+    assert!(!usual.starts_with("vitest"));
+    assert!(temp_dir.path().join(&usual).is_file());
+    let named = cache
+      .get_emit_filename(&specifier, EmitForm::Plain, Some("vitest"))
+      .unwrap();
+    assert_eq!(named, PathBuf::from("vitest").join(&usual));
+    assert!(temp_dir.path().join(&named).is_file());
+    assert!(
+      temp_dir
+        .path()
+        .join("no-verbatim-module-syntax")
+        .join(&usual)
+        .is_file()
+    );
+
+    // A name is one path segment.
+    for bad in ["", "..", ".", "a/b", "a\\b", "/abs"] {
+      assert_eq!(
+        cache.get_emit_filename(&specifier, EmitForm::Plain, Some(bad)),
+        None,
+        "{bad}"
+      );
+      cache.set_emit_code(&specifier, Some(bad), 9, b"x");
+      assert_eq!(cache.get_emit_code(&specifier, Some(bad), 9), None);
+    }
   }
 }

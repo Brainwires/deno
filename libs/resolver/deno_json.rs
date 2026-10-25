@@ -382,6 +382,25 @@ pub struct TranspileAndEmitOptions {
   pub emit: deno_ast::EmitOptions,
   // stored ahead of time so we don't have to recompute this a lot
   pub pre_computed_hash: u64,
+  /// denext: the name of the emit cache's sub-directory for emits made with
+  /// these options, when they are not a module's usual ones (an embedder's
+  /// override, a test transform's): `$DENO_DIR/gen/<name>/...`. `None` keeps
+  /// them in `gen/` itself, where `deno run` puts its emits. Keeps two ways of
+  /// emitting a module from overwriting each other's cache entry
+  /// (denoland/deno#30791).
+  pub emit_cache_name: Option<String>,
+}
+
+#[cfg(feature = "deno_ast")]
+impl TranspileAndEmitOptions {
+  /// `emit_cache_name` with `name` added: the names of the options' sources,
+  /// joined with `+`.
+  pub fn emit_cache_name_with(&self, name: &str) -> String {
+    match &self.emit_cache_name {
+      Some(existing) => format!("{existing}+{name}"),
+      None => name.to_string(),
+    }
+  }
 }
 
 #[cfg(feature = "deno_ast")]
@@ -1857,11 +1876,28 @@ fn compiler_options_to_transpile_and_emit_options(
     emit.hash(&mut hasher);
     hasher.finish()
   };
+  // denext: an override that changes the emit puts it in its own, readable,
+  // cache directory.
+  let mut emit_cache_names = Vec::new();
+  if overrides.preserve_jsx {
+    emit_cache_names.push("preserve-jsx");
+  }
+  if options.verbatim_module_syntax
+    && overrides.force_disable_verbatim_module_syntax
+  {
+    emit_cache_names.push("no-verbatim-module-syntax");
+  }
+  if overrides.source_map_base.is_some() {
+    emit_cache_names.push("source-map-base");
+  }
+  let emit_cache_name =
+    (!emit_cache_names.is_empty()).then(|| emit_cache_names.join("+"));
   Ok(TranspileAndEmitOptions {
     no_transpile: overrides.no_transpile,
     transpile,
     emit,
     pre_computed_hash: transpile_and_emit_options_hash,
+    emit_cache_name,
   })
 }
 
@@ -1891,5 +1927,80 @@ fn check_warn_compiler_options(
       "{} experimentalDecorators compiler option is deprecated and may be removed at any time",
       colors::yellow("Warning"),
     );
+  }
+}
+
+#[cfg(all(test, feature = "deno_ast"))]
+mod emit_cache_name_tests {
+  use super::*;
+
+  /// The emit options of a config whose `compilerOptions` are `config`,
+  /// merged over the defaults as the resolver does.
+  fn options(
+    config: serde_json::Value,
+    overrides: &CompilerOptionsOverrides,
+  ) -> TranspileAndEmitOptions {
+    let mut base = get_base_compiler_options_for_emit(
+      CompilerOptionsType::Emit,
+      CompilerOptionsSourceKind::DenoJson,
+    );
+    let object = base.0.as_object_mut().unwrap();
+    for (key, value) in config.as_object().unwrap() {
+      object.insert(key.clone(), value.clone());
+    }
+    compiler_options_to_transpile_and_emit_options(
+      deno_config::deno_json::CompilerOptions(base.0),
+      overrides,
+    )
+    .unwrap()
+  }
+
+  fn name(
+    config: serde_json::Value,
+    overrides: CompilerOptionsOverrides,
+  ) -> Option<String> {
+    options(config, &overrides).emit_cache_name
+  }
+
+  // denoland/deno#30791: an override that changes the emit names its cache
+  // directory; a module's usual options keep the cache's root.
+  #[test]
+  fn overrides_name_the_emit_cache_directory() {
+    let verbatim = serde_json::json!({ "verbatimModuleSyntax": true });
+    assert_eq!(name(verbatim.clone(), Default::default()), None);
+    let no_verbatim = CompilerOptionsOverrides {
+      force_disable_verbatim_module_syntax: true,
+      ..Default::default()
+    };
+    assert_eq!(
+      name(verbatim.clone(), no_verbatim.clone()).as_deref(),
+      Some("no-verbatim-module-syntax")
+    );
+    // Nothing to turn off: the emit is the usual one.
+    assert_eq!(name(serde_json::json!({}), no_verbatim), None);
+    assert_eq!(
+      name(
+        verbatim,
+        CompilerOptionsOverrides {
+          preserve_jsx: true,
+          force_disable_verbatim_module_syntax: true,
+          source_map_base: Some(Url::parse("file:///base/").unwrap()),
+          ..Default::default()
+        }
+      )
+      .as_deref(),
+      Some("preserve-jsx+no-verbatim-module-syntax+source-map-base")
+    );
+  }
+
+  #[test]
+  fn emit_cache_name_with_appends() {
+    let options = options(serde_json::json!({}), &Default::default());
+    assert_eq!(options.emit_cache_name_with("vitest"), "vitest");
+    let options = TranspileAndEmitOptions {
+      emit_cache_name: Some("preserve-jsx".to_string()),
+      ..options
+    };
+    assert_eq!(options.emit_cache_name_with("vitest"), "preserve-jsx+vitest");
   }
 }

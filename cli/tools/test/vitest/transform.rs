@@ -175,6 +175,9 @@ impl EmitProgramTransform for VitestTransform {
       transpile,
       emit: options.emit.clone(),
       pre_computed_hash,
+      // denext: kept apart from `deno run`'s emits of the same modules
+      // (denoland/deno#30791).
+      emit_cache_name: Some(options.emit_cache_name_with("vitest")),
     }))
   }
 

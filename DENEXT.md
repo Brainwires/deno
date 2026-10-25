@@ -4026,6 +4026,40 @@ where the changes are discussed.
      `node_options_turn_the_trace_on` (`ext/node/ops/util.rs`);
      `trace_sigint_rides_along_in_node_options` (`libs/node_shim`).
 
+110. **`perf(emit)`: named emit-cache directories** (`feat/dx-batch`, CLI only;
+     `libs/resolver/cache/emit.rs`, `libs/resolver/emit.rs`,
+     `libs/resolver/deno_json.rs`, `cli/tools/test/vitest/transform.rs`). For
+     [denoland/deno#30791](https://github.com/denoland/deno/pull/30791) (open),
+     along its review's suggestion: the emit cache kept one entry per module, so
+     two ways of emitting the same module (a process with
+     `DENO_DISABLE_VERBATIM_MODULE_SYNTAX=1` and one without, `deno test`'s
+     Vitest JSX override and `deno run`, an embedder's overrides such as
+     `@deno/loader`'s) overwrote each other's entry and re-emitted on every
+     alternation. The source hash kept a stale entry from being used, so this
+     cost time, never correctness.
+     - **Layout**: a module's usual options keep `$DENO_DIR/gen/<as before>`, so
+       `deno run`'s emits and existing caches are unchanged. Emits made with
+       other options live in `gen/<name>/<as before>`, the name made of readable
+       tags instead of upstream's options hash: `preserve-jsx`,
+       `no-verbatim-module-syntax` (only when the config has it on),
+       `source-map-base` (from `CompilerOptionsOverrides`), and `vitest` for the
+       Vitest transform's JSX options, joined with `+`
+       (`TranspileAndEmitOptions::emit_cache_name`).
+     - The emit of a module a program transform changed (`*.transformed.js`)
+       stays in the root, where `deno coverage` looks for it without the
+       transform. A name that is not one plain path segment is refused (no cache
+       entry).
+     - `deno clean --except` keeps only the root entries, as it already did for
+       transformed emits.
+
+     Tests: spec `run/emit_cache_named_dirs` (one `DENO_DIR`, `deno run` with
+     the usual options, with `DENO_DISABLE_VERBATIM_MODULE_SYNTAX=1`, then usual
+     again: the module has an emit under `file` and one under
+     `no-verbatim-module-syntax`; `3.0.0-rc.5` keeps only one);
+     `emit_cache_named_dirs` (`libs/resolver/cache/emit.rs`);
+     `overrides_name_the_emit_cache_directory`, `emit_cache_name_with_appends`
+     (`libs/resolver/deno_json.rs`).
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109) are what the
 prebuilt `libdenort` carries. The CLI-side parts (for example writing
