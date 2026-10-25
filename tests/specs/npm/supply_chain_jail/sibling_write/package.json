@@ -1,0 +1,8 @@
+{
+  "name": "app",
+  "version": "1.0.0",
+  "dependencies": {
+    "@denotest/jail-net-declared": "1.0.0",
+    "@denotest/jail-sibling-write": "1.0.0"
+  }
+}

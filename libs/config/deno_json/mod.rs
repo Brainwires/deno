@@ -134,6 +134,12 @@ pub struct SupplyChainConfig {
   /// `jailScripts.packages`: per-package exceptions, keyed by npm package
   /// name.
   pub jail_packages: BTreeMap<String, JailPackageConfig>,
+  /// `jailScripts.upstreamByName`: through the installer's own upstream
+  /// proxy, ask for an allowed host by its name (`CONNECT host:port`) after
+  /// the jail's proxy has checked where the name resolves, instead of for the
+  /// checked address. For corporate proxies that only accept host names; the
+  /// upstream then resolves the name itself (denext item 111).
+  pub jail_upstream_by_name: bool,
   /// `advisoryCheck` (`advisory-check`): `"on"`, `"off"` or `"required"`.
   pub advisory_check: Option<String>,
   /// `lowDownloadCheck` (`low-download-check`): `"off"`, `"warn"`,
@@ -157,6 +163,16 @@ pub struct JailPackageConfig {
   pub write: Vec<PathBuf>,
   /// Network for its scripts: `true` / `false`, or the hosts they may reach.
   pub net: Option<JailNetConfig>,
+  /// Whether its scripts may leave executable files in its `~` write paths
+  /// (a browser download); without it they are removed and the script fails
+  /// (denext item 111).
+  pub executables: bool,
+  /// Whether the names in its `net` host list may resolve to addresses on
+  /// this machine or its network (loopback, private, link-local, CGNAT): a
+  /// mirror on the local network. Without it the jail's proxy refuses such
+  /// a name (denext item 111).
+  #[serde(rename = "allowPrivate")]
+  pub allow_private: bool,
 }
 
 /// `supplyChain.jailScripts.packages.<name>.net`.
@@ -167,6 +183,30 @@ pub enum JailNetConfig {
   All(bool),
   /// Only these hosts (`host` or `host:port`), as `--allow-net=<hosts>`.
   Hosts(Vec<String>),
+}
+
+/// Whether a `jailScripts.packages.<name>.net` entry has the shape of
+/// `host`, `host:port`, `[v6]`, `[v6]:port` or a bare v6 address (the jail's
+/// proxy parses the host itself).
+fn valid_host_port(entry: &str) -> bool {
+  let port_ok = |port: &str| port.parse::<u16>().is_ok();
+  if let Some(rest) = entry.strip_prefix('[') {
+    return match rest.split_once(']') {
+      Some((addr, "")) => !addr.is_empty(),
+      Some((addr, after)) => {
+        !addr.is_empty() && after.strip_prefix(':').is_some_and(port_ok)
+      }
+      None => false,
+    };
+  }
+  match entry.matches(':').count() {
+    0 => true,
+    1 => {
+      let (host, port) = entry.split_once(':').unwrap();
+      !host.is_empty() && port_ok(port)
+    }
+    _ => !entry.contains(['[', ']']),
+  }
 }
 
 /// Whether a `write` path in `jailScripts.packages` is relative to the
@@ -208,6 +248,8 @@ enum RawJailScripts {
 struct RawJailScriptsObject {
   net: Option<bool>,
   packages: Option<BTreeMap<String, JailPackageConfig>>,
+  #[serde(rename = "upstreamByName")]
+  upstream_by_name: bool,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Hash, PartialEq)]
@@ -2819,6 +2861,7 @@ impl ConfigFile {
     let base_dir = deno_path_util::url_to_file_path(&self.specifier)
       .ok()
       .and_then(|p| p.parent().map(|p| p.to_path_buf()));
+    let mut jail_upstream_by_name = false;
     let (jail_scripts, jail_net, jail_packages) = match raw.jail_scripts {
       None => (None, None, BTreeMap::new()),
       Some(RawJailScripts::Bool(value)) => (Some(value), None, BTreeMap::new()),
@@ -2827,6 +2870,7 @@ impl ConfigFile {
         // configures the default one (DENEXT.md item 108), so a platform that
         // can't confine stays quiet about it
         let asks_for_jail = obj.net.is_some() || obj.packages.is_none();
+        jail_upstream_by_name = obj.upstream_by_name;
         let mut packages = BTreeMap::new();
         for (name, mut config) in obj.packages.unwrap_or_default() {
           let name = name.strip_prefix("npm:").unwrap_or(&name).to_string();
@@ -2834,6 +2878,13 @@ impl ConfigFile {
             return Err(parse_err(
               "an empty package name in \"jailScripts.packages\"".into(),
             ));
+          }
+          if config.allow_private
+            && !matches!(config.net, Some(JailNetConfig::Hosts(_)))
+          {
+            return Err(parse_err(format!(
+              "\"jailScripts.packages\": {name}'s \"allowPrivate\" needs a \"net\" host list (the names it lets resolve to private addresses)"
+            )));
           }
           if let Some(JailNetConfig::Hosts(hosts)) = &config.net {
             if hosts.is_empty() {
@@ -2845,6 +2896,7 @@ impl ConfigFile {
               if host.is_empty()
                 || host.contains(['/', '\\', '@', '?', '#'])
                 || host.chars().any(|c| c.is_whitespace())
+                || !valid_host_port(host)
               {
                 return Err(parse_err(format!(
                   "\"jailScripts.packages\": {name}'s \"net\" lists \"{host}\"; expected a host or host:port, as --allow-net takes"
@@ -2875,6 +2927,7 @@ impl ConfigFile {
       jail_scripts,
       jail_net,
       jail_packages,
+      jail_upstream_by_name,
       advisory_check: raw.advisory_check,
       low_download_check: raw.low_download_check,
       low_download_threshold: raw.low_download_threshold,
@@ -4371,6 +4424,37 @@ mod tests {
       ]))
     );
     assert_eq!(puppeteer.write, vec![PathBuf::from("~/.cache/puppeteer")]);
+    assert!(!puppeteer.executables);
+    // item 111: a cache that may hold executables, and the host forms the
+    // proxy takes
+    let config = get_result(
+      r#"{ "supplyChain": { "jailScripts": { "packages": {
+        "a": { "write": ["~/.cache/a"], "executables": true,
+               "net": ["[::1]:443", "::1", "127.0.0.1:80", "bücher.example"] }
+      } } } }"#,
+    )
+    .unwrap();
+    assert!(config.jail_packages["a"].executables);
+    assert!(!config.jail_packages["a"].allow_private);
+    // a mirror on the local network: allowPrivate, with a host list only
+    let config = get_result(
+      r#"{ "supplyChain": { "jailScripts": { "packages": {
+        "a": { "net": ["mirror.corp.internal"], "allowPrivate": true }
+      } } } }"#,
+    )
+    .unwrap();
+    assert!(config.jail_packages["a"].allow_private);
+    for bad in [
+      r#"{ "allowPrivate": true }"#,
+      r#"{ "net": true, "allowPrivate": true }"#,
+      r#"{ "net": false, "allowPrivate": true }"#,
+    ] {
+      let json = format!(
+        r#"{{ "supplyChain": {{ "jailScripts": {{ "packages": {{ "a": {bad} }} }} }} }}"#
+      );
+      let err = format!("{:?}", get_result(&json).unwrap_err());
+      assert!(err.contains("allowPrivate"), "{bad}: {err}");
+    }
     // `~user` is not the home directory: relative to the deno.json
     let config = get_result(
       r#"{ "supplyChain": { "jailScripts": { "packages": { "a": { "write": ["~other/x"] } } } } }"#,
@@ -4384,6 +4468,13 @@ mod tests {
       r#"["example.com/path"]"#,
       r#"["a b"]"#,
       r#""example.com""#,
+      // item 111: ports and brackets the proxy couldn't take
+      r#"["example.com:"]"#,
+      r#"["example.com:https"]"#,
+      r#"["example.com:70000"]"#,
+      r#"[":443"]"#,
+      r#"["[::1"]"#,
+      r#"["[::1]443"]"#,
     ] {
       assert!(
         get_result(&format!(
@@ -4415,6 +4506,38 @@ mod tests {
     let config =
       get_result(r#"{ "supplyChain": { "jailScripts": false } }"#).unwrap();
     assert_eq!(config.jail_scripts, Some(false));
+    assert!(!config.jail_upstream_by_name);
+
+    // item 111: ask the installer's upstream proxy for the checked name
+    // rather than its address; off unless set, a boolean only
+    let config = get_result(
+      r#"{ "supplyChain": { "jailScripts": { "upstreamByName": true, "packages": {} } } }"#,
+    )
+    .unwrap();
+    assert!(config.jail_upstream_by_name);
+    let config = get_result(
+      r#"{ "supplyChain": { "jailScripts": { "upstreamByName": false } } }"#,
+    )
+    .unwrap();
+    assert!(!config.jail_upstream_by_name);
+    assert_eq!(config.jail_scripts, Some(true));
+    assert!(
+      !get_result(r#"{ "supplyChain": { "jailScripts": { "net": true } } }"#)
+        .unwrap()
+        .jail_upstream_by_name
+    );
+    for bad in [r#""yes""#, "1", "null", "[]", "{}"] {
+      let json = format!(
+        r#"{{ "supplyChain": {{ "jailScripts": {{ "upstreamByName": {bad} }} }} }}"#
+      );
+      assert!(get_result(&json).is_err(), "{bad}");
+    }
+    assert!(
+      get_result(
+        r#"{ "supplyChain": { "jailScripts": { "upstreamByname": true } } }"#
+      )
+      .is_err()
+    );
 
     // typos in a security setting are errors, not silently ignored
     assert!(get_result(r#"{ "supplyChain": { "paranoia": true } }"#).is_err());

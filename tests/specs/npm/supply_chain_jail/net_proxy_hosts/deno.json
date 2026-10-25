@@ -1,0 +1,11 @@
+{
+  "supplyChain": {
+    "jailScripts": {
+      "packages": {
+        "npm:@denotest/jail-net-curl": {
+          "net": ["localhost:4546"]
+        }
+      }
+    }
+  }
+}

@@ -240,6 +240,102 @@
         }
       ]
     },
+    // DENEXT.md item 111 (R1): a declared download host binds every program
+    // the script starts, not only Deno: curl reaches the host through the
+    // jail's allow-listing proxy (plain and as a CONNECT tunnel), the proxy
+    // refuses another host, and the OS refuses any connection around it
+    "declared_host_binds_every_program": {
+      "if": "unix",
+      "steps": [
+        {
+          "cwd": "net_proxy",
+          "args": "install --allow-scripts=npm:@denotest/jail-net-curl",
+          "output": "[WILDCARD]"
+        },
+        {
+          "cwd": "net_proxy",
+          "args": "eval console.log(Deno.readTextFileSync('node_modules/@denotest/jail-net-curl/results.txt').trim())",
+          "output": "proxy 4545: allowed\nproxy 4546: denied\ntunnel 4545: allowed\ndirect 4545: denied\ndirect 4546: denied\ndirect 127.0.0.1:4546: denied\nnode socket 4546: denied\n"
+        }
+      ]
+    },
+    // (R2) the same for deno.json's per-package host list, which replaces the
+    // declared host
+    "per_package_hosts_bind_every_program": {
+      "if": "unix",
+      "steps": [
+        {
+          "cwd": "net_proxy_hosts",
+          "args": "install --allow-scripts=npm:@denotest/jail-net-curl",
+          "output": "[WILDCARD]"
+        },
+        {
+          "cwd": "net_proxy_hosts",
+          "args": "eval console.log(Deno.readTextFileSync('node_modules/@denotest/jail-net-curl/results.txt').trim())",
+          "output": "proxy 4545: denied\nproxy 4546: allowed\ntunnel 4545: denied\ndirect 4545: denied\ndirect 4546: denied\ndirect 127.0.0.1:4546: denied\nnode socket 4546: denied\n"
+        }
+      ]
+    },
+    // a listed name that resolves to this machine (here /etc/hosts's
+    // ip6-localhost, ::1) is refused by the proxy, plainly and as a tunnel:
+    // a package's declared host or a rebinding DNS answer can't reach local
+    // services; the address listed as itself still goes through. Linux only:
+    // macOS's /etc/hosts names no loopback host but localhost, which is exempt
+    "listed_name_resolving_to_loopback_refused": {
+      "if": "linux",
+      "steps": [
+        {
+          "cwd": "net_private",
+          "args": "install --allow-scripts=npm:@denotest/jail-net-private",
+          "output": "[WILDCARD]"
+        },
+        {
+          "cwd": "net_private",
+          "args": "eval console.log(Deno.readTextFileSync('node_modules/@denotest/jail-net-private/results.txt').trim())",
+          "output": "literal 127.0.0.1:4546: reached\nname to loopback: refused\nname to loopback, tunnel: refused\n"
+        }
+      ]
+    },
+    // (R3) a package's `net: false` drops the host it declares and wins over
+    // `jailScripts.net: true`
+    "package_net_false_wins": {
+      "if": "unix",
+      "steps": [
+        {
+          "cwd": "net_false",
+          "args": "install --allow-scripts=npm:@denotest/jail-net-curl",
+          "output": "[WILDCARD]"
+        },
+        {
+          "cwd": "net_false",
+          "args": "eval console.log(Deno.readTextFileSync('node_modules/@denotest/jail-net-curl/results.txt').trim())",
+          "output": "proxy 4545: denied\nproxy 4546: denied\ntunnel 4545: denied\ndirect 4545: denied\ndirect 4546: denied\ndirect 127.0.0.1:4546: denied\nnode socket 4546: denied\n"
+        }
+      ]
+    },
+    // (R4) a script writes only beneath its own package: not into another
+    // package (whose files run later, outside the jail), through the link or
+    // the real path, nor elsewhere in node_modules
+    "no_writes_into_other_packages": {
+      "if": "unix",
+      "steps": [
+        {
+          "cwd": "sibling_write",
+          "args": "install --allow-scripts=npm:@denotest/jail-sibling-write",
+          "output": "[WILDCARD]"
+        },
+        {
+          "cwd": "sibling_write",
+          "args": "eval console.log(Deno.readTextFileSync('node_modules/@denotest/jail-sibling-write/results.txt').trim())",
+          "output": "sibling_write.out"
+        },
+        {
+          "cwd": "sibling_write",
+          "args": "eval console.log(Deno.readTextFileSync('node_modules/@denotest/jail-net-declared/index.js').includes('pwned'))",
+          "output": "false\n"
+        }
+      ]
+    },
     // paranoid: jailed without being asked, and a package can't grant itself
     // the network
     "paranoid_jails": {

@@ -1,0 +1,14 @@
+{
+  "name": "@denotest/jail-net-curl",
+  "version": "1.0.0",
+  "main": "index.js",
+  "publishDate": "2025-06-01T20:00:00.000Z",
+  "binary": {
+    "module_name": "fake",
+    "module_path": "./build",
+    "host": "http://localhost:4545/"
+  },
+  "scripts": {
+    "install": "sh probe.sh"
+  }
+}

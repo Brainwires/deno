@@ -1,0 +1,6 @@
+node: write own dir: allowed
+node: write sibling package: denied
+node: write node_modules: denied
+sh: write sibling package: denied
+sh: write sibling real path: denied
+sh: write node_modules: denied

@@ -856,14 +856,17 @@ impl CliFactory {
     if !project_dirs.contains(&initial_cwd) {
       project_dirs.push(initial_cwd);
     }
-    Ok(Some(Arc::new(crate::supply_chain::jail::JailConfig::new(
-      npmrc.supply_chain.paranoid,
-      explicit,
-      supply_chain.jail_net.unwrap_or(false),
-      supply_chain.jail_packages,
-      &project_dirs,
-      npmrc_path.as_deref(),
-    ))))
+    Ok(Some(Arc::new(
+      crate::supply_chain::jail::JailConfig::new(
+        npmrc.supply_chain.paranoid,
+        explicit,
+        supply_chain.jail_net.unwrap_or(false),
+        supply_chain.jail_packages,
+        &project_dirs,
+        npmrc_path.as_deref(),
+      )
+      .with_upstream_by_name(supply_chain.jail_upstream_by_name),
+    )))
   }
 
   pub fn npm_version_resolver(
