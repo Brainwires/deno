@@ -13,10 +13,15 @@ pub struct PipeRead {
 // The asynchronous read end of a unidirectional pipe.
 pub struct AsyncPipeRead {
   #[cfg(windows)]
-  /// We use a `ChildStdout` here as it's a much better fit for a Windows named pipe on Windows. We
-  /// might also be able to use `tokio::net::windows::named_pipe::NamedPipeClient` in the future
-  /// if those can be created from raw handles down the road.
-  read: tokio::process::ChildStdout,
+  /// The client end of the overlapped named pipe [`pipe`] creates, read
+  /// through the runtime's I/O completion port. tokio's `ChildStdout`, used
+  /// here before, read it with a blocking `ReadFile` on the runtime's
+  /// blocking pool, and a pending read held its pool thread until data or EOF
+  /// arrived: a quiet pipe (a test worker's stderr) pinned a thread for as
+  /// long as it stayed quiet. The pool is capped (four threads per CPU on
+  /// Windows), so enough of them starved every other blocking task (file
+  /// system ops, child process I/O). An overlapped read holds no thread.
+  read: tokio::net::windows::named_pipe::NamedPipeClient,
   #[cfg(not(windows))]
   read: tokio::net::unix::pipe::Receiver,
 }
@@ -42,11 +47,18 @@ impl PipeRead {
   /// unavailable.
   #[cfg(windows)]
   pub fn into_async(self) -> io::Result<AsyncPipeRead> {
+    use std::os::windows::io::IntoRawHandle;
     let owned: std::os::windows::io::OwnedHandle = self.file.into();
-    let stdout = std::process::ChildStdout::from(owned);
-    Ok(AsyncPipeRead {
-      read: tokio::process::ChildStdout::from_std(stdout)?,
-    })
+    // SAFETY: a `PipeRead` holds the client end of the named pipe
+    // `pipe_impl` creates, opened with `FILE_FLAG_OVERLAPPED`, which is what
+    // `NamedPipeClient` requires; ownership moves to it (it closes the handle,
+    // also when registering it fails).
+    let read = unsafe {
+      tokio::net::windows::named_pipe::NamedPipeClient::from_raw_handle(
+        owned.into_raw_handle(),
+      )?
+    };
+    Ok(AsyncPipeRead { read })
   }
 
   /// Converts this sync reader into an async reader. May fail if the Tokio runtime is
@@ -68,12 +80,18 @@ impl PipeRead {
 }
 
 impl AsyncPipeRead {
-  /// Converts this async reader into an sync reader. May fail if the Tokio runtime is
-  /// unavailable.
+  /// Converts this async reader into an sync reader.
+  ///
+  /// Not supported on Windows: the handle stays bound to the runtime's I/O
+  /// completion port (tokio's `NamedPipeClient` can't hand it back), and the
+  /// reader may already hold data it read ahead, which a sync reader would
+  /// never see.
   #[cfg(windows)]
   pub fn into_sync(self) -> io::Result<PipeRead> {
-    let owned = self.read.into_owned_handle()?;
-    Ok(PipeRead { file: owned.into() })
+    Err(io::Error::new(
+      io::ErrorKind::Unsupported,
+      "an async pipe reader can't be made synchronous again on Windows",
+    ))
   }
 
   /// Converts this async reader into an sync reader. May fail if the Tokio runtime is
@@ -349,14 +367,24 @@ mod tests {
     read.read_exact(&mut buf).await.unwrap();
     assert_eq!(&buf, b"hello");
 
-    let mut read = read.into_sync().unwrap();
-    let mut write = write.into_sync().unwrap();
+    // Windows can't detach a handle from the I/O completion port (see
+    // `AsyncPipeRead::into_sync`).
+    #[cfg(windows)]
+    assert_eq!(
+      read.into_sync().err().map(|e| e.kind()),
+      Some(io::ErrorKind::Unsupported)
+    );
+    #[cfg(not(windows))]
+    {
+      let mut read = read.into_sync().unwrap();
+      let mut write = write.into_sync().unwrap();
 
-    // Sync
-    write.write_all(b"hello").unwrap();
-    let mut buf: [u8; 5] = Default::default();
-    read.read_exact(&mut buf).unwrap();
-    assert_eq!(&buf, b"hello");
+      // Sync
+      write.write_all(b"hello").unwrap();
+      let mut buf: [u8; 5] = Default::default();
+      read.read_exact(&mut buf).unwrap();
+      assert_eq!(&buf, b"hello");
+    }
   }
 
   #[tokio::test]
@@ -376,5 +404,61 @@ mod tests {
 
     a.await.unwrap();
     b.await.unwrap();
+  }
+
+  /// A pending read of a quiet pipe holds no thread of the runtime's blocking
+  /// pool (DENEXT.md item 119). On Windows the read end used to be read with
+  /// a blocking `ReadFile` on that pool, so more quiet pipes than the pool
+  /// has threads (a `deno test --parallel` worker's stdout and stderr each
+  /// held one) left no thread for anything else: here the `spawn_blocking`
+  /// task never ran, and neither did the read of the pipe that has data.
+  #[test]
+  fn quiet_async_pipes_hold_no_blocking_thread() {
+    const POOL: usize = 2;
+    let rt = tokio::runtime::Builder::new_current_thread()
+      .enable_all()
+      .max_blocking_threads(POOL)
+      .build()
+      .unwrap();
+    rt.block_on(async {
+      let mut writers = Vec::new();
+      let mut quiet = Vec::new();
+      for _ in 0..4 * POOL {
+        let (read, write) = pipe().unwrap();
+        let mut read = read.into_async().unwrap();
+        writers.push(write);
+        quiet.push(tokio::spawn(async move {
+          let mut buf = [0_u8; 1];
+          read.read(&mut buf).await
+        }));
+      }
+      // Let every quiet read start.
+      tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+      let (read, write) = pipe().unwrap();
+      let mut read = read.into_async().unwrap();
+      let mut write = write.into_async().unwrap();
+      let busy = async move {
+        write.write_all(b"hello").await.unwrap();
+        let mut buf: [u8; 5] = Default::default();
+        read.read_exact(&mut buf).await.unwrap();
+        buf
+      };
+      let outcome =
+        tokio::time::timeout(std::time::Duration::from_secs(20), async {
+          tokio::join!(tokio::task::spawn_blocking(|| 42), busy)
+        })
+        .await;
+      // Closing the writers ends the quiet reads (at EOF) either way, so a
+      // failure doesn't leave the pool's threads blocked behind it.
+      drop(writers);
+      let (blocking, busy) =
+        outcome.expect("quiet pipe reads starved the blocking pool");
+      assert_eq!(blocking.unwrap(), 42);
+      assert_eq!(&busy, b"hello");
+      for read in quiet {
+        assert_eq!(read.await.unwrap().unwrap(), 0);
+      }
+    });
   }
 }

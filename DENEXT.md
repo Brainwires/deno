@@ -4602,17 +4602,47 @@ where the changes are discussed.
 
      Not changed: `node:child_process` (its own stdio path) and the
      `Deno.pipe`-style `AsyncPipeRead`, which still reads through tokio's
-     `ChildStdout`.
+     `ChildStdout` (item 119 moves it).
 
      Test: `commandManyPipedChildrenDoNotExhaustBlockingPool`
      (`tests/unit/command_test.ts`, Windows only): `4 * hardwareConcurrency + 4`
      concurrent children each write 256 KiB to a piped stdout with stderr piped
      and quiet; all must finish within 60 s.
 
+119. **`fix(io)`: a `deno_io` async pipe reader holds no blocking-pool thread on
+     Windows** (`fix/rc7-robustness`, CLI and runtime; `ext/io/pipe.rs`). The
+     rest of item 118: `PipeRead::into_async` wrapped the read end of
+     `deno_io::pipe()` (the client end of an overlapped named pipe) in tokio's
+     `ChildStdout`, which reads with a blocking `ReadFile` on the runtime's
+     blocking pool, so every pending read of a quiet pipe pinned a pool thread
+     (four per CPU on Windows) until data or EOF. `deno test` reads each
+     worker's stdout and stderr through it, so a `--parallel` run with more
+     workers than the pool could spare left none for file system ops or child
+     process I/O. `AsyncPipeRead` is now a
+     `tokio::net::windows::named_pipe::NamedPipeClient` read through the I/O
+     completion port: a pending read holds no thread, and `ERROR_BROKEN_PIPE`
+     reads as EOF. `AsyncPipeRead::into_sync` now fails with `Unsupported` on
+     Windows (tokio's `NamedPipeClient` can't hand the handle back, it stays
+     bound to the completion port, and the reader may hold data it read ahead);
+     nothing in the tree calls it.
+
+     Audited and left as they are: `bi_pipe` (IPC) and `node:child_process`'s
+     stdio (`uv_compat` pipes) already read through the completion port;
+     `AsyncPipeWrite` (`ChildStdin`) holds a thread only while the pipe is full,
+     and nothing in the tree writes through it; stdin and files read through
+     `spawn_blocking` one resource at a time; `deno task`'s output pipes are
+     `deno_task_shell`'s (an external crate, its own `spawn_blocking`).
+
+     Test: `quiet_async_pipes_hold_no_blocking_thread` (`ext/io/pipe.rs`): with
+     a two-thread blocking pool, eight quiet pipe reads pending, a
+     `spawn_blocking` task and a pipe with data must still finish within 20 s.
+     On a 2-CPU Windows host a standalone copy of the old reader starved every
+     time (5 of 5) and the new one never did.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
-118) are what the prebuilt `libdenort` carries. The CLI-side parts (for example
-writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's
+118, 119) are what the prebuilt `libdenort` carries. The CLI-side parts (for
+example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's
 launchers) are in the branch too, but a stock CLI does not run them; denext's
 own launcher provides that environment.
 
