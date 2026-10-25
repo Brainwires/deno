@@ -2762,8 +2762,45 @@ mod tests {
     .unwrap()
   }
 
+  /// Runs the test `name` (in this module) alone, in a child test process;
+  /// `true` in this process, once it passed there, and `false` in the child,
+  /// which then runs the body.
+  ///
+  /// For the tests that check the helper lock is free right after it was
+  /// released. On macOS `posix_spawn` copies the spawning process's whole
+  /// descriptor table into the child, close-on-exec descriptors included
+  /// (they close only once the new image is activated), and a child whose
+  /// exec failed is torn down after `posix_spawn` has returned; Linux's
+  /// fork-based spawn has the same window. A process spawned by another test
+  /// thread while a test held the lock could so keep it held for a moment
+  /// after the test released it, and the test's next take found it locked.
+  /// In a process of its own, nothing spawns while the test holds the lock.
+  fn run_alone(name: &str) -> bool {
+    const CHILD: &str = "DENEXT_SWAP_TEST_ALONE";
+    if std::env::var_os(CHILD).is_some() {
+      return false;
+    }
+    let module = module_path!().split_once("::").unwrap().1;
+    let out = std::process::Command::new(std::env::current_exe().unwrap())
+      .args([&format!("{module}::{name}"), "--exact", "--test-threads=1"])
+      .env(CHILD, "1")
+      .stdin(std::process::Stdio::null())
+      .output()
+      .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+      out.status.success() && stdout.contains("1 passed"),
+      "{name} in its own process:\n{stdout}{}",
+      String::from_utf8_lossy(&out.stderr)
+    );
+    true
+  }
+
   #[test]
   fn one_helper_at_a_time() {
+    if run_alone("one_helper_at_a_time") {
+      return;
+    }
     let f = fixture(Some("2.0.0"));
     let l = &f.layout;
     // The OS lock decides: while one is held (its own open file, as another
@@ -2798,8 +2835,26 @@ mod tests {
   fn a_withdrawn_apply_is_never_swapped() {
     // The app asked for the swap, its quit was refused, and it withdrew the
     // request: the waiting helper stands down without waiting for the app.
+    if run_alone("a_withdrawn_apply_is_never_swapped") {
+      return;
+    }
     let f = fixture(Some("2.0.0"));
     let l = &f.layout;
+    // The staged app gets an executable, so the relaunch after the swap
+    // starts it: a relaunch whose exec failed would hold the helper's lock
+    // for a moment after the helper released it (see `run_alone`).
+    #[cfg(unix)]
+    {
+      use std::os::unix::fs::PermissionsExt;
+      let staged = read_state(l).unwrap().staged_path(l).unwrap();
+      let app = l.exe_in(&staged);
+      std::fs::write(&app, "#!/bin/sh\n").unwrap();
+      std::fs::set_permissions(&app, std::fs::Permissions::from_mode(0o755))
+        .unwrap();
+      let mut s = read_state(l).unwrap();
+      s.staged_digest = Some(tree_digest(&staged).unwrap());
+      write_state(l, &s).unwrap();
+    }
     let mut app = long_running();
     let mut s = read_state(l).unwrap();
     s.apply_pid = None;
@@ -2827,8 +2882,13 @@ mod tests {
     let mut s = read_state(l).unwrap();
     s.apply_pid = Some(app.id());
     write_state(l, &s).unwrap();
-    run_helper(l, HelperMode::Apply, app.id(), &accept_staged);
+    let code = run_helper(l, HelperMode::Apply, app.id(), &accept_staged);
     assert_eq!(installed(l), "2.0.0");
+    // The relaunch started the new app (on Windows the fixture has none).
+    #[cfg(unix)]
+    assert_eq!(code, 0);
+    #[cfg(windows)]
+    let _ = code;
     // The helper released its lock.
     assert!(take_helper_lock(l).is_some());
   }
