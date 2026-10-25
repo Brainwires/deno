@@ -17,8 +17,6 @@ use deno_core::serde_json;
 use deno_core::url::Url;
 use http_body_util::BodyExt;
 use once_cell::sync::Lazy;
-use p256::elliptic_curve;
-use p256::pkcs8::AssociatedOid;
 use serde::Deserialize;
 use serde::Serialize;
 use sha2::Digest;
@@ -382,6 +380,26 @@ static DEFAULT_FULCIO_URL: Lazy<String> = Lazy::new(|| {
     .unwrap_or_else(|_| "https://fulcio.sigstore.dev".to_string())
 });
 
+/// `id-ecPublicKey` (RFC 5480).
+const ID_EC_PUBLIC_KEY: spki::ObjectIdentifier =
+  spki::ObjectIdentifier::new_unwrap("1.2.840.10045.2.1");
+/// `secp256r1` (RFC 5480).
+const ID_SECP256R1: spki::ObjectIdentifier =
+  spki::ObjectIdentifier::new_unwrap("1.2.840.10045.3.1.7");
+
+/// PEM `PUBLIC KEY` (SPKI) of an uncompressed P-256 point, as sent to
+/// Fulcio with the signing-certificate request.
+fn p256_spki_pem(subject_public_key: &[u8]) -> Result<String, AnyError> {
+  let spki = spki::SubjectPublicKeyInfoRef {
+    algorithm: spki::AlgorithmIdentifier {
+      oid: ID_EC_PUBLIC_KEY,
+      parameters: Some((&ID_SECP256R1).into()),
+    },
+    subject_public_key: asn1::BitStringRef::from_bytes(subject_public_key)?,
+  };
+  Ok(spki.to_pem(LineEnding::LF)?)
+}
+
 static ALGORITHM: &aws_lc_rs::signature::EcdsaSigningAlgorithm =
   &aws_lc_rs::signature::ECDSA_P256_SHA256_ASN1_SIGNING;
 
@@ -470,16 +488,7 @@ impl<'a> FulcioSigner<'a> {
     let challenge =
       self.ephemeral_signer.sign(&self.rng, subject.as_bytes())?;
 
-    let subject_public_key = self.ephemeral_signer.public_key().as_ref();
-    let algorithm = spki::AlgorithmIdentifier {
-      oid: elliptic_curve::ALGORITHM_OID,
-      parameters: Some((&p256::NistP256::OID).into()),
-    };
-    let spki = spki::SubjectPublicKeyInfoRef {
-      algorithm,
-      subject_public_key: asn1::BitStringRef::from_bytes(subject_public_key)?,
-    };
-    let pem = spki.to_pem(LineEnding::LF)?;
+    let pem = p256_spki_pem(self.ephemeral_signer.public_key().as_ref())?;
 
     // Create signing certificate
     let certificates =
@@ -764,5 +773,27 @@ mod tests {
     );
     assert_eq!(slsa.subject[0].name, "jsr:@divy/sdl2@0.0.1");
     assert_eq!(slsa.subject[0].digest.sha256, "yourmom");
+  }
+
+  // Known answer (OpenSSL): the SPKI PEM sent to Fulcio for a P-256 key.
+  #[test]
+  fn p256_spki_pem_known_answer() {
+    let point = concat!(
+      "04b764d9e8b3f4e8f06b7f7720b83323c3b94d1c61cb182381e6a185584266a515",
+      "83df7f1ae11522ac03a7d059ee4d03f7615532a3ec0159e8adf412f03275e859",
+    );
+    let point: Vec<u8> = (0..point.len())
+      .step_by(2)
+      .map(|i| u8::from_str_radix(&point[i..i + 2], 16).unwrap())
+      .collect();
+    assert_eq!(
+      super::p256_spki_pem(&point).unwrap(),
+      concat!(
+        "-----BEGIN PUBLIC KEY-----\n",
+        "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEt2TZ6LP06PBrf3cguDMjw7lNHGHL\n",
+        "GCOB5qGFWEJmpRWD338a4RUirAOn0FnuTQP3YVUyo+wBWeit9BLwMnXoWQ==\n",
+        "-----END PUBLIC KEY-----\n",
+      )
+    );
   }
 }

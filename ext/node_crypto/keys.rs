@@ -14,7 +14,8 @@ use deno_error::JsErrorBox;
 use digest::Digest;
 use digest::FixedOutputReset;
 use ed25519_dalek::pkcs8::BitStringRef;
-use elliptic_curve::JwkEcKey;
+use elliptic_curve::Generate as _;
+use elliptic_curve::pkcs8::EncodePrivateKey as _;
 use hmac::Hmac;
 use hmac::Mac;
 use num_bigint::BigInt;
@@ -62,6 +63,8 @@ use x509_parser::x509;
 use super::dh;
 use super::dh::DiffieHellmanGroup;
 use super::digest::match_fixed_digest_with_oid;
+use super::jwk_ec;
+use super::jwk_ec::JwkEcKey;
 use super::pkcs3;
 use super::pkcs3::DhParameter;
 use super::primes::Prime;
@@ -286,10 +289,10 @@ impl EcPublicKey {
       EcPublicKey::P224(_) => {
         Err(AsymmetricPublicKeyJwkError::UnsupportedJwkEcCurveP224)
       }
-      EcPublicKey::P256(key) => Ok(key.to_jwk()),
-      EcPublicKey::P384(key) => Ok(key.to_jwk()),
-      EcPublicKey::P521(key) => Ok(key.to_jwk()),
-      EcPublicKey::Secp256k1(key) => Ok(key.to_jwk()),
+      EcPublicKey::P256(key) => Ok(jwk_ec::public_key_to_jwk(key)),
+      EcPublicKey::P384(key) => Ok(jwk_ec::public_key_to_jwk(key)),
+      EcPublicKey::P521(key) => Ok(jwk_ec::public_key_to_jwk(key)),
+      EcPublicKey::Secp256k1(key) => Ok(jwk_ec::public_key_to_jwk(key)),
     }
   }
 }
@@ -311,10 +314,10 @@ impl EcPrivateKey {
       EcPrivateKey::P224(_) => {
         Err(AsymmetricPrivateKeyJwkError::UnsupportedJwkEcCurveP224)
       }
-      EcPrivateKey::P256(key) => Ok(key.to_jwk()),
-      EcPrivateKey::P384(key) => Ok(key.to_jwk()),
-      EcPrivateKey::P521(key) => Ok(key.to_jwk()),
-      EcPrivateKey::Secp256k1(key) => Ok(key.to_jwk()),
+      EcPrivateKey::P256(key) => Ok(jwk_ec::secret_key_to_jwk(key)),
+      EcPrivateKey::P384(key) => Ok(jwk_ec::secret_key_to_jwk(key)),
+      EcPrivateKey::P521(key) => Ok(jwk_ec::secret_key_to_jwk(key)),
+      EcPrivateKey::Secp256k1(key) => Ok(jwk_ec::secret_key_to_jwk(key)),
     }
   }
 }
@@ -913,7 +916,10 @@ fn ec_private_key_from_named_curve_and_sec1_der(
   named_curve: Option<const_oid::ObjectIdentifier>,
   sec1_der: &[u8],
 ) -> Result<AsymmetricPrivateKey, AsymmetricPrivateKeyError> {
-  let ec_key = sec1::EcPrivateKey::from_der(sec1_der)
+  // Parsed with the `sec1` 0.7 codec first (the error precedence of
+  // before); the curve key itself is read from the same DER bytes by
+  // elliptic-curve 0.14.
+  sec1::EcPrivateKey::from_der(sec1_der)
     .map_err(|_| AsymmetricPrivateKeyError::InvalidSec1PrivateKey)?;
 
   let oid = named_curve.ok_or(
@@ -922,27 +928,27 @@ fn ec_private_key_from_named_curve_and_sec1_der(
 
   match oid {
     ID_SECP224R1_OID => {
-      let key = p224::SecretKey::try_from(ec_key)
+      let key = p224::SecretKey::from_sec1_der(sec1_der)
         .map_err(|_| AsymmetricPrivateKeyError::InvalidSec1PrivateKey)?;
       Ok(AsymmetricPrivateKey::Ec(EcPrivateKey::P224(key)))
     }
     ID_SECP256R1_OID => {
-      let key = p256::SecretKey::try_from(ec_key)
+      let key = p256::SecretKey::from_sec1_der(sec1_der)
         .map_err(|_| AsymmetricPrivateKeyError::InvalidSec1PrivateKey)?;
       Ok(AsymmetricPrivateKey::Ec(EcPrivateKey::P256(key)))
     }
     ID_SECP384R1_OID => {
-      let key = p384::SecretKey::try_from(ec_key)
+      let key = p384::SecretKey::from_sec1_der(sec1_der)
         .map_err(|_| AsymmetricPrivateKeyError::InvalidSec1PrivateKey)?;
       Ok(AsymmetricPrivateKey::Ec(EcPrivateKey::P384(key)))
     }
     ID_SECP521R1_OID => {
-      let key = p521::SecretKey::try_from(ec_key)
+      let key = p521::SecretKey::from_sec1_der(sec1_der)
         .map_err(|_| AsymmetricPrivateKeyError::InvalidSec1PrivateKey)?;
       Ok(AsymmetricPrivateKey::Ec(EcPrivateKey::P521(key)))
     }
     ID_SECP256K1_OID => {
-      let key = k256::SecretKey::try_from(ec_key)
+      let key = k256::SecretKey::from_sec1_der(sec1_der)
         .map_err(|_| AsymmetricPrivateKeyError::InvalidSec1PrivateKey)?;
       Ok(AsymmetricPrivateKey::Ec(EcPrivateKey::Secp256k1(key)))
     }
@@ -1418,40 +1424,40 @@ impl KeyObjectHandle {
   ) -> Result<KeyObjectHandle, EcJwkError> {
     //  https://datatracker.ietf.org/doc/html/rfc7518#section-6.2.1.1
     let handle = match jwk.crv() {
-      "P-256" if is_public => {
-        KeyObjectHandle::AsymmetricPublic(AsymmetricPublicKey::Ec(
-          EcPublicKey::P256(p256::PublicKey::from_jwk(jwk)?),
-        ))
-      }
+      "P-256" if is_public => KeyObjectHandle::AsymmetricPublic(
+        AsymmetricPublicKey::Ec(EcPublicKey::P256(
+          jwk_ec::public_key_from_jwk::<p256::NistP256>(jwk)?,
+        )),
+      ),
       "P-256" => KeyObjectHandle::AsymmetricPrivate(AsymmetricPrivateKey::Ec(
-        EcPrivateKey::P256(p256::SecretKey::from_jwk(jwk)?),
+        EcPrivateKey::P256(jwk_ec::secret_key_from_jwk::<p256::NistP256>(jwk)?),
       )),
-      "P-384" if is_public => {
-        KeyObjectHandle::AsymmetricPublic(AsymmetricPublicKey::Ec(
-          EcPublicKey::P384(p384::PublicKey::from_jwk(jwk)?),
-        ))
-      }
+      "P-384" if is_public => KeyObjectHandle::AsymmetricPublic(
+        AsymmetricPublicKey::Ec(EcPublicKey::P384(
+          jwk_ec::public_key_from_jwk::<p384::NistP384>(jwk)?,
+        )),
+      ),
       "P-384" => KeyObjectHandle::AsymmetricPrivate(AsymmetricPrivateKey::Ec(
-        EcPrivateKey::P384(p384::SecretKey::from_jwk(jwk)?),
+        EcPrivateKey::P384(jwk_ec::secret_key_from_jwk::<p384::NistP384>(jwk)?),
       )),
-      "P-521" if is_public => {
-        KeyObjectHandle::AsymmetricPublic(AsymmetricPublicKey::Ec(
-          EcPublicKey::P521(p521::PublicKey::from_jwk(jwk)?),
-        ))
-      }
+      "P-521" if is_public => KeyObjectHandle::AsymmetricPublic(
+        AsymmetricPublicKey::Ec(EcPublicKey::P521(
+          jwk_ec::public_key_from_jwk::<p521::NistP521>(jwk)?,
+        )),
+      ),
       "P-521" => KeyObjectHandle::AsymmetricPrivate(AsymmetricPrivateKey::Ec(
-        EcPrivateKey::P521(p521::SecretKey::from_jwk(jwk)?),
+        EcPrivateKey::P521(jwk_ec::secret_key_from_jwk::<p521::NistP521>(jwk)?),
       )),
-      "secp256k1" if is_public => {
-        KeyObjectHandle::AsymmetricPublic(AsymmetricPublicKey::Ec(
-          EcPublicKey::Secp256k1(k256::PublicKey::from_jwk(jwk)?),
-        ))
-      }
-      "secp256k1" => {
-        KeyObjectHandle::AsymmetricPrivate(AsymmetricPrivateKey::Ec(
-          EcPrivateKey::Secp256k1(k256::SecretKey::from_jwk(jwk)?),
-        ))
-      }
+      "secp256k1" if is_public => KeyObjectHandle::AsymmetricPublic(
+        AsymmetricPublicKey::Ec(EcPublicKey::Secp256k1(
+          jwk_ec::public_key_from_jwk::<k256::Secp256k1>(jwk)?,
+        )),
+      ),
+      "secp256k1" => KeyObjectHandle::AsymmetricPrivate(
+        AsymmetricPrivateKey::Ec(EcPrivateKey::Secp256k1(
+          jwk_ec::secret_key_from_jwk::<k256::Secp256k1>(jwk)?,
+        )),
+      ),
       _ => {
         return Err(EcJwkError::UnsupportedCurve(jwk.crv().to_string()));
       }
@@ -2240,26 +2246,26 @@ impl AsymmetricPublicKey {
             // Always emit the uncompressed SEC1 form for SPKI export — that
             // is what Node.js / OpenSSL produce, regardless of the curve's
             // `PointCompression` default (k256 defaults to compressed).
-            use elliptic_curve::sec1::ToEncodedPoint;
+            use elliptic_curve::sec1::ToSec1Point;
             let (sec1, oid): (Box<[u8]>, _) = match key {
               EcPublicKey::P224(key) => (
-                key.to_encoded_point(false).as_bytes().to_vec().into_boxed_slice(),
+                key.to_sec1_point(false).as_bytes().to_vec().into_boxed_slice(),
                 ID_SECP224R1_OID,
               ),
               EcPublicKey::P256(key) => (
-                key.to_encoded_point(false).as_bytes().to_vec().into_boxed_slice(),
+                key.to_sec1_point(false).as_bytes().to_vec().into_boxed_slice(),
                 ID_SECP256R1_OID,
               ),
               EcPublicKey::P384(key) => (
-                key.to_encoded_point(false).as_bytes().to_vec().into_boxed_slice(),
+                key.to_sec1_point(false).as_bytes().to_vec().into_boxed_slice(),
                 ID_SECP384R1_OID,
               ),
               EcPublicKey::P521(key) => (
-                key.to_encoded_point(false).as_bytes().to_vec().into_boxed_slice(),
+                key.to_sec1_point(false).as_bytes().to_vec().into_boxed_slice(),
                 ID_SECP521R1_OID,
               ),
               EcPublicKey::Secp256k1(key) => (
-                key.to_encoded_point(false).as_bytes().to_vec().into_boxed_slice(),
+                key.to_sec1_point(false).as_bytes().to_vec().into_boxed_slice(),
                 ID_SECP256K1_OID,
               ),
             };
@@ -3358,28 +3364,29 @@ pub async fn op_node_generate_dsa_key_async(
 }
 
 fn ec_generate(named_curve: &str) -> Result<KeyObjectHandlePair, JsErrorBox> {
-  let mut rng = rand::thread_rng();
+  // OS randomness: elliptic-curve 0.14 takes rand_core 0.10, which
+  // rand 0.8's thread_rng does not implement.
   // TODO(@littledivy): Support public key point encoding.
   // Default is uncompressed.
   let private_key = match named_curve {
     "P-224" | "prime224v1" | "secp224r1" => {
-      let key = p224::SecretKey::random(&mut rng);
+      let key = p224::SecretKey::generate();
       AsymmetricPrivateKey::Ec(EcPrivateKey::P224(key))
     }
     "P-256" | "prime256v1" | "secp256r1" => {
-      let key = p256::SecretKey::random(&mut rng);
+      let key = p256::SecretKey::generate();
       AsymmetricPrivateKey::Ec(EcPrivateKey::P256(key))
     }
     "P-384" | "prime384v1" | "secp384r1" => {
-      let key = p384::SecretKey::random(&mut rng);
+      let key = p384::SecretKey::generate();
       AsymmetricPrivateKey::Ec(EcPrivateKey::P384(key))
     }
     "P-521" | "secp521r1" => {
-      let key = p521::SecretKey::random(&mut rng);
+      let key = p521::SecretKey::generate();
       AsymmetricPrivateKey::Ec(EcPrivateKey::P521(key))
     }
     "secp256k1" => {
-      let key = k256::SecretKey::random(&mut rng);
+      let key = k256::SecretKey::generate();
       AsymmetricPrivateKey::Ec(EcPrivateKey::Secp256k1(key))
     }
     _ => {
@@ -3762,7 +3769,31 @@ pub fn op_node_export_public_key_raw(
   #[cppgc] handle: &KeyObjectHandle,
   compressed: bool,
 ) -> Result<Box<[u8]>, RawAsymmetricKeyError> {
-  use elliptic_curve::sec1::ToEncodedPoint;
+  handle.export_public_key_raw(compressed)
+}
+
+impl KeyObjectHandle {
+  /// Body of [`op_node_export_public_key_raw`].
+  pub(crate) fn export_public_key_raw(
+    &self,
+    compressed: bool,
+  ) -> Result<Box<[u8]>, RawAsymmetricKeyError> {
+    export_public_key_raw(self, compressed)
+  }
+
+  /// Body of [`op_node_export_private_key_raw`].
+  pub(crate) fn export_private_key_raw(
+    &self,
+  ) -> Result<Box<[u8]>, RawAsymmetricKeyError> {
+    export_private_key_raw(self)
+  }
+}
+
+fn export_public_key_raw(
+  handle: &KeyObjectHandle,
+  compressed: bool,
+) -> Result<Box<[u8]>, RawAsymmetricKeyError> {
+  use elliptic_curve::sec1::ToSec1Point;
 
   let key = handle
     .as_public_key()
@@ -3770,19 +3801,19 @@ pub fn op_node_export_public_key_raw(
   let bytes = match key.as_ref() {
     AsymmetricPublicKey::Ec(key) => match key {
       EcPublicKey::P224(key) => {
-        key.to_encoded_point(compressed).as_bytes().to_vec()
+        key.to_sec1_point(compressed).as_bytes().to_vec()
       }
       EcPublicKey::P256(key) => {
-        key.to_encoded_point(compressed).as_bytes().to_vec()
+        key.to_sec1_point(compressed).as_bytes().to_vec()
       }
       EcPublicKey::P384(key) => {
-        key.to_encoded_point(compressed).as_bytes().to_vec()
+        key.to_sec1_point(compressed).as_bytes().to_vec()
       }
       EcPublicKey::P521(key) => {
-        key.to_encoded_point(compressed).as_bytes().to_vec()
+        key.to_sec1_point(compressed).as_bytes().to_vec()
       }
       EcPublicKey::Secp256k1(key) => {
-        key.to_encoded_point(compressed).as_bytes().to_vec()
+        key.to_sec1_point(compressed).as_bytes().to_vec()
       }
     },
     AsymmetricPublicKey::X25519(key) => key.as_bytes().to_vec(),
@@ -4399,6 +4430,12 @@ pub fn op_node_export_private_key_der(
 pub fn op_node_export_private_key_raw(
   #[cppgc] handle: &KeyObjectHandle,
 ) -> Result<Box<[u8]>, RawAsymmetricKeyError> {
+  handle.export_private_key_raw()
+}
+
+fn export_private_key_raw(
+  handle: &KeyObjectHandle,
+) -> Result<Box<[u8]>, RawAsymmetricKeyError> {
   let key = handle
     .as_private_key()
     .ok_or(RawAsymmetricKeyError::InvalidKey)?;
@@ -4983,6 +5020,10 @@ pub fn op_node_validate_crl(
   }
   Ok(())
 }
+
+#[cfg(test)]
+#[path = "ec_golden_tests.rs"]
+mod ec_golden_tests;
 
 #[cfg(test)]
 mod tests {
