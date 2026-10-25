@@ -171,6 +171,7 @@ async fn native_check(
   })
   .await?;
   if clean {
+    log_checked_summary(roots.len());
     Ok(())
   } else {
     Err(deno_core::anyhow::anyhow!("Type checking failed."))
@@ -280,8 +281,12 @@ async fn run_native_check_once(
   // list, so deno would flag ambient specifiers tsc resolves fine. Use the walk
   // only for caching for now; additive diagnostics come once ambient modules
   // are handled.
-  let (missing_diagnostics, maybe_check_hash, any_roots) =
-    type_checker.walk_graph_for_native_check(graph, lib, type_check_mode)?;
+  let crate::type_checker::NativeGraphWalk {
+    missing_diagnostics,
+    types_entry_diagnostics,
+    maybe_check_hash,
+    any_roots,
+  } = type_checker.walk_graph_for_native_check(graph, lib, type_check_mode)?;
 
   // A root (entrypoint) that deno's graph couldn't resolve - a local file that
   // doesn't exist, or a remote URL that failed to fetch - can't be type-checked.
@@ -594,6 +599,19 @@ async fn run_native_check_once(
     .map(|pkg| pkg.name)
     .collect();
   explain_unresolved_imports(graph, &mut parsed, &bare_importable_pkg_names);
+  // denext: Deno's own diagnostics for the `compilerOptions.types` entries
+  // nothing resolves, in place of the compiler's TS2688 (or its silence: the
+  // generated project leaves a subpath entry out), as the in-process checker
+  // reports them (denoland/deno#32764).
+  let types_entry_diagnostics =
+    unresolved_types_entries(&project_root, types_entry_diagnostics);
+  parsed.retain(|d| {
+    d.code != 2688
+      || !types_entry_diagnostics
+        .iter()
+        .any(|(entry, _)| types_entry_of_ts2688(d) == Some(entry.as_str()))
+  });
+  parsed.extend(types_entry_diagnostics.into_iter().map(|(_, d)| d));
   let mut diagnostics = Diagnostics::from(parsed);
   // Fold in deno's own diagnostics for missing entrypoints (some roots existed
   // and were type-checked by tsc above; any that didn't are reported here).
@@ -639,6 +657,35 @@ async fn run_native_check_once(
   }
 
   Ok(NativeOutcome::Checked(true))
+}
+
+/// The `compilerOptions.types` entries Deno's graph could not resolve that
+/// the generated project does not provide either: an entry that names one of
+/// its type roots (`.deno/types/<entry>`, `.deno/npm-compat/@types/<entry>`)
+/// resolves for the compiler.
+fn unresolved_types_entries(
+  project_root: &Path,
+  entries: Vec<(String, crate::tsc::Diagnostic)>,
+) -> Vec<(String, crate::tsc::Diagnostic)> {
+  let generated = project_root.join(".deno");
+  entries
+    .into_iter()
+    .filter(|(entry, _)| {
+      !generated.join("types").join(entry).exists()
+        && !generated.join("npm-compat").join("@types").join(entry).exists()
+    })
+    .collect()
+}
+
+/// The entry a compiler's TS2688 ("Cannot find type definition file for
+/// 'x'") is about.
+fn types_entry_of_ts2688(diagnostic: &crate::tsc::Diagnostic) -> Option<&str> {
+  diagnostic
+    .message_text
+    .as_deref()?
+    .strip_prefix("Cannot find type definition file for '")?
+    .split_once('\'')
+    .map(|(entry, _)| entry)
 }
 
 /// Gives a compiler diagnostic for an import it could not find (TS2307,
@@ -1266,7 +1313,27 @@ async fn legacy_check_with_factory(
         ..Default::default()
       },
     )
-    .await
+    .await?;
+  log_checked_summary(specifiers_for_typecheck.len());
+  Ok(())
+}
+
+/// denext: `deno check`'s closing summary, like `deno fmt`'s and `deno
+/// lint`'s, counting the roots it checked: printed after a clean check (the
+/// type-checked files may be cached), on either engine; nothing when no file
+/// matched, and nothing under `--quiet` (denoland/deno#35739).
+fn log_checked_summary(roots: usize) {
+  if let Some(summary) = checked_summary(roots) {
+    log::info!("{summary}");
+  }
+}
+
+fn checked_summary(roots: usize) -> Option<String> {
+  match roots {
+    0 => None,
+    1 => Some("Checked 1 file".to_string()),
+    n => Some(format!("Checked {n} files")),
+  }
 }
 
 #[cfg(test)]
@@ -1275,6 +1342,68 @@ mod tests {
   use deno_core::serde_json::json;
 
   use super::*;
+
+  #[test]
+  fn ts2688_names_its_types_entry() {
+    let diagnostic = |message: &str| crate::tsc::Diagnostic {
+      category: crate::tsc::DiagnosticCategory::Error,
+      code: 2688,
+      start: None,
+      end: None,
+      original_source_start: None,
+      message_text: Some(message.to_string()),
+      message_chain: None,
+      source: None,
+      source_line: None,
+      file_name: None,
+      related_information: None,
+      reports_deprecated: None,
+      reports_unnecessary: None,
+      other: Default::default(),
+      missing_specifier: None,
+    };
+    assert_eq!(
+      types_entry_of_ts2688(&diagnostic(
+        "Cannot find type definition file for 'asdfasdf'.\n  The file is in the program because:"
+      )),
+      Some("asdfasdf")
+    );
+    assert_eq!(types_entry_of_ts2688(&diagnostic("Something else")), None);
+  }
+
+  #[test]
+  fn types_entries_the_generated_project_provides_resolve() {
+    let project = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(project.path().join(".deno/types/vitest")).unwrap();
+    std::fs::create_dir_all(project.path().join(".deno/npm-compat/@types/bun"))
+      .unwrap();
+    let config =
+      ModuleSpecifier::parse("file:///p/deno.json").unwrap();
+    let entries = ["vitest", "bun", "asdfasdf"]
+      .into_iter()
+      .map(|entry| {
+        (
+          entry.to_string(),
+          crate::tsc::Diagnostic::maybe_from_unresolved_types_entry(
+            entry, &config, None,
+          )
+          .unwrap(),
+        )
+      })
+      .collect();
+    let left: Vec<String> = unresolved_types_entries(project.path(), entries)
+      .into_iter()
+      .map(|(entry, _)| entry)
+      .collect();
+    assert_eq!(left, vec!["asdfasdf".to_string()]);
+  }
+
+  #[test]
+  fn checked_summary_counts_the_roots() {
+    assert_eq!(checked_summary(0), None);
+    assert_eq!(checked_summary(1).as_deref(), Some("Checked 1 file"));
+    assert_eq!(checked_summary(3).as_deref(), Some("Checked 3 files"));
+  }
 
   #[test]
   fn generated_project_is_reused_only_unchanged() {

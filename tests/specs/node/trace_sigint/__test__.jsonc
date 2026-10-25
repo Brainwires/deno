@@ -1,0 +1,31 @@
+{
+  // Node's SIGINT trace (denoland/deno#32423). Unix only: a console Ctrl+C on
+  // Windows reaches the whole console group.
+  "tests": {
+    "set_trace_sigint_busy": {
+      "if": "unix",
+      "args": "run -A parent.ts api busy",
+      "output": "busy.out"
+    },
+    "node_options_busy": {
+      "if": "unix",
+      "args": "run -A parent.ts node_options busy",
+      "output": "busy.out"
+    },
+    "node_options_idle": {
+      "if": "unix",
+      "args": "run -A parent.ts node_options idle",
+      "output": "idle.out"
+    },
+    "listener_keeps_the_signal": {
+      "if": "unix",
+      "args": "run -A parent.ts api listener",
+      "output": "listener.out"
+    },
+    "off_by_default": {
+      "if": "unix",
+      "args": "run -A parent.ts none busy",
+      "output": "off.out"
+    }
+  }
+}

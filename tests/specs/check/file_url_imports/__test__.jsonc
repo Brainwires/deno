@@ -12,7 +12,7 @@
     {
       "cwd": "proj",
       "args": "check ok.ts",
-      "output": "Check ok.ts\n"
+      "output": "Check ok.ts\nChecked 1 file\n"
     },
     {
       "cwd": "proj",
@@ -23,12 +23,12 @@
     {
       "cwd": "proj",
       "args": "check alias.ts",
-      "output": "Check alias.ts\n"
+      "output": "Check alias.ts\nChecked 1 file\n"
     },
     {
       "cwd": "proj",
       "args": "check --check-engine=tsc ok.ts alias.ts",
-      "output": "Check ok.ts\nCheck alias.ts\n"
+      "output": "Check ok.ts\nCheck alias.ts\nChecked 2 files\n"
     }
   ]
 }

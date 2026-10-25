@@ -4350,9 +4350,229 @@ where the changes are discussed.
      `allowPrivate`, `upstreamByName` in `test_to_supply_chain_config`
      (`libs/config/deno_json`).
 
+112. **`fix(coverage)`: a process ended by SIGINT / SIGTERM still writes its
+     coverage** (`feat/dx-batch`, CLI only; `ext/signals/lib.rs`,
+     `cli/util/signal_flush.rs`, `cli/worker.rs`, `cli/tools/test/mod.rs`).
+     Adapted from
+     [denoland/deno#32362](https://github.com/denoland/deno/pull/32362) (open).
+     `deno run` with `DENO_COVERAGE_DIR` / `--coverage` (or `--cpu-prof`) and
+     `deno test --coverage` wrote nothing when a signal ended them: a test
+     runner's or supervisor's teardown (SIGTERM), Ctrl+C. The data is flushed
+     through each isolate's inspector, which only the isolate's own thread can
+     drive, so the signal cannot write it itself.
+     - **`deno_signals::register_before_default_action`**: a hook that runs when
+       a signal arrives and its default action is about to run, that is only
+       when no handler prevents the default; the default action runs once the
+       hooks return. A program's own `Deno.addSignalListener("SIGTERM", …)` (or
+       `process.on("SIGINT")`) keeps the signal: nothing is flushed early, and
+       its own exit writes the coverage as before. Hooks run with no lock held,
+       so the thread a hook waits for can still register a signal handler
+       meanwhile (`deno run` registers its SIGUSR1 inspector listener 500 ms in;
+       holding the lock deadlocked the flush until it gave up).
+     - **`cli/util/signal_flush.rs`**: each thread with coverage joins as a
+       participant and races its work against the signal; once signalled it
+       stops collecting (the run's main worker also stops the CPU profiler) and
+       leaves. The hook (SIGINT and SIGTERM; SIGINT only on Windows) waits for
+       every participant, for at most 10 s; then the default action ends the
+       process, so the parent still sees `SIGTERM` / `SIGINT`. `deno run`'s main
+       worker and each `deno test` worker join; the test runner's own SIGINT
+       report (exit 130) waits for its workers the same way.
+     - Not under `--watch`, which restarts on signals. A thread stuck in
+       synchronous JavaScript cannot flush: the process ends after the 10 s wait
+       without its coverage. SIGKILL cannot be caught (upstream's follow-up is
+       periodic flushing). A Web Worker still alive at the signal is not
+       flushed.
+
+     Tests: spec `coverage/signal_flush` (Unix: `deno run` ended by SIGTERM and
+     by SIGINT, `deno test --coverage` ended by SIGTERM and by SIGINT, each
+     writing the module's coverage and ended by the signal (the test runner's
+     SIGINT by exit code 130); a program with its own SIGTERM listener keeps it;
+     the four signal cases print `missing` on `3.0.0-rc.5`);
+     `hooks_run_only_before_the_default_action`,
+     `a_waiting_hook_does_not_block_registration` (`ext/signals/lib.rs`);
+     `participants_flush_before_the_signal_returns`
+     (`cli/util/signal_flush.rs`).
+
+113. **`feat(node)`: Node's SIGINT trace and SIGINT watchdog** (`feat/dx-batch`,
+     CLI and runtime; `ext/node/ops/util.rs`, `ext/node/polyfills/util.ts`,
+     `ext/node/polyfills/internal_binding/mod.ts`, `ext/signals/lib.rs`,
+     `libs/node_shim/lib.rs`, `cli/worker.rs`). Adapted from
+     [denoland/deno#32423](https://github.com/denoland/deno/pull/32423) (closed
+     unmerged with the 2.9 LTS feature freeze). A SIGINT that ends a hung
+     program now says where its main thread was, as Node's `--trace-sigint`
+     does.
+     - **Opt in** with `util.setTraceSigInt(true)` (a no-op before), or with
+       `--trace-sigint` in `NODE_OPTIONS`:
+       `NODE_OPTIONS=--trace-sigint deno
+       run main.ts`, or
+       `node --trace-sigint main.js` through the Node shim, which now forwards
+       the flag there (the last of `--trace-sigint` / `--no-trace-sigint` wins).
+       Off by default.
+     - **What it prints**: Node's banner,
+       `` KEYBOARD_INTERRUPT: Script
+       execution was interrupted by `SIGINT` ``,
+       then the JavaScript stack of the main thread (source-mapped, without the
+       synthetic first line), on stderr; then SIGINT ends the process as before
+       (killed by `SIGINT`, not a clean exit).
+     - **How**: a hook before SIGINT's default action
+       (`deno_signals::register_before_default_action`, item 112), so a program
+       that listens for SIGINT itself keeps it and nothing is printed. The hook
+       asks V8 to interrupt the main thread, which captures and prints the
+       stack, and waits for it. Unlike upstream's PR, a main thread that runs no
+       JavaScript (an idle event loop) can't be interrupted: after 250 ms the
+       hook prints the banner alone, as Node does on idle, instead of the signal
+       being swallowed and the process left running.
+     - **Watchdog**: `internalBinding('contextify')`'s `startSigintWatchdog` /
+       `stopSigintWatchdog` / `watchdogHasPendingSigint`, which Node's REPL and
+       `vm` use to see a Ctrl+C during an evaluation. While it watches, it
+       consumes SIGINT through a new `deno_signals::set_interceptor` (runs
+       before the handlers; returning `true` hides the signal from them).
+
+     Tests: spec `node/trace_sigint` (Unix: the trace through
+     `util.setTraceSigInt` and through `NODE_OPTIONS`, a busy main thread
+     printing the banner and the `innerWork` frame, an idle one the banner
+     alone, both ended by SIGINT; a SIGINT listener keeps the signal; off by
+     default; the three trace cases print nothing on `3.0.0-rc.5`);
+     `node_compat` `parallel/test-util-sigint-watchdog.js` (enabled);
+     `an_interceptor_consumes_the_signal` (`ext/signals/lib.rs`);
+     `node_options_turn_the_trace_on` (`ext/node/ops/util.rs`);
+     `trace_sigint_rides_along_in_node_options` (`libs/node_shim`).
+
+114. **`perf(emit)`: named emit-cache directories** (`feat/dx-batch`, CLI only;
+     `libs/resolver/cache/emit.rs`, `libs/resolver/emit.rs`,
+     `libs/resolver/deno_json.rs`, `cli/tools/test/vitest/transform.rs`). For
+     [denoland/deno#30791](https://github.com/denoland/deno/pull/30791) (open),
+     along its review's suggestion: the emit cache kept one entry per module, so
+     two ways of emitting the same module (a process with
+     `DENO_DISABLE_VERBATIM_MODULE_SYNTAX=1` and one without, `deno test`'s
+     Vitest JSX override and `deno run`, an embedder's overrides such as
+     `@deno/loader`'s) overwrote each other's entry and re-emitted on every
+     alternation. The source hash kept a stale entry from being used, so this
+     cost time, never correctness.
+     - **Layout**: a module's usual options keep `$DENO_DIR/gen/<as before>`, so
+       `deno run`'s emits and existing caches are unchanged. Emits made with
+       other options live in `gen/<name>/<as before>`, the name made of readable
+       tags instead of upstream's options hash: `preserve-jsx`,
+       `no-verbatim-module-syntax` (only when the config has it on),
+       `source-map-base` (from `CompilerOptionsOverrides`), and `vitest` for the
+       Vitest transform's JSX options, joined with `+`
+       (`TranspileAndEmitOptions::emit_cache_name`).
+     - The emit of a module a program transform changed (`*.transformed.js`)
+       stays in the root, where `deno coverage` looks for it without the
+       transform. A name that is not one plain path segment is refused (no cache
+       entry).
+     - `deno clean --except` keeps only the root entries, as it already did for
+       transformed emits.
+
+     Tests: spec `run/emit_cache_named_dirs` (one `DENO_DIR`, `deno run` with
+     the usual options, with `DENO_DISABLE_VERBATIM_MODULE_SYNTAX=1`, then usual
+     again: the module has an emit under `file` and one under
+     `no-verbatim-module-syntax`; `3.0.0-rc.5` keeps only one);
+     `emit_cache_named_dirs` (`libs/resolver/cache/emit.rs`);
+     `overrides_name_the_emit_cache_directory`, `emit_cache_name_with_appends`
+     (`libs/resolver/deno_json.rs`).
+
+115. **`feat(check)`: `deno check` ends with a "Checked N files" summary**
+     (`feat/dx-batch`, CLI only; `cli/tools/check.rs`). For
+     [denoland/deno#35739](https://github.com/denoland/deno/pull/35739) (closed
+     unmerged with the 2.9 LTS feature freeze; it closed
+     [#32709](https://github.com/denoland/deno/issues/32709)). `deno fmt` and
+     `deno lint` end with `Checked N files`; `deno check` printed only its
+     `Check <specifier>` lines, and nothing at all when everything was already
+     checked and cached. It now prints `Checked 1 file` / `Checked N files`
+     after a clean check, counting the roots it checked, on both engines: the
+     native one (the default, where the summary was captured but only logged at
+     debug level) and the in-process one (`--check-engine=tsc`, `--doc`).
+     Nothing when the check fails, when no file matched, or under `--quiet`.
+     Other commands that type-check (`run --check`, `test`, ...) print no
+     summary.
+
+     Tests: `checked_summary_counts_the_roots` (`cli/tools/check.rs`); the
+     `deno check` spec and integration outputs that end after a clean check now
+     end with the summary (as upstream's PR updated them), which they lack on
+     `3.0.0-rc.5`.
+
+116. **`feat(jupyter)`: notebook cells run with the config's permissions**
+     (`feat/dx-batch`, CLI only; `cli/tools/jupyter/mod.rs`,
+     `cli/tools/jupyter/prompter.rs`, `cli/ops/jupyter.rs`, `cli/args/mod.rs`).
+     Adapted from
+     [denoland/deno#35587](https://github.com/denoland/deno/pull/35587) (closed
+     unmerged with the 2.9 LTS feature freeze). The Jupyter kernel ran every
+     cell with every permission, so a notebook could not be limited.
+     - **The set**: a `permissions.jupyter` set in the `deno.json` found from
+       the kernel's working directory (as for any subcommand, so one beside the
+       notebook), else the `default` set. With neither, cells keep every
+       permission, as before. A set in use prints the same "experimental" notice
+       as other config-file permissions. The kernel's own worker (the ZMQ
+       sockets, no user code) keeps every permission. Inside a jailed npm
+       lifecycle script the set is clamped to the jail, like every other
+       command's permissions.
+     - **Prompts**: an access outside the set is asked about in the notebook,
+       over Jupyter's stdin channel (as `prompt()` / `confirm()` are): `y`
+       allows it once, `A` allows all of that permission, anything else denies
+       it. A frontend without stdin support (or `allow_stdin: false`) denies, as
+       the terminal prompter does when it cannot ask.
+     - Not done: `--allow-*` flags on `deno jupyter`, whose parser takes no
+       permission flags (a kernel is started from its `kernel.json`, which
+       `deno jupyter --install` writes without them).
+
+     Tests: `jupyter_permissions_jupyter_set`,
+     `jupyter_permissions_default_set`, `jupyter_permissions_default_allow_all`,
+     `jupyter_permission_prompt_allow`, `jupyter_permission_prompt_deny`
+     (`tests/integration/jupyter_tests.rs`; the set and prompt cases fail on
+     `3.0.0-rc.5`, where every access is allowed and nothing is asked);
+     `prompt_names_the_choices`, `answers` (`cli/tools/jupyter/prompter.rs`).
+
+117. **`fix(check)`: a `compilerOptions.types` entry nothing resolves is an
+     error** (`feat/dx-batch`, CLI only; `cli/tsc/diagnostics.rs`,
+     `cli/type_checker.rs`, `cli/tools/check.rs`). For
+     [denoland/deno#32764](https://github.com/denoland/deno/issues/32764), which
+     upstream deferred to Deno 3.0 "together with a purpose-built diagnostic for
+     unresolvable `compilerOptions.types` entries (correct suggestion such as
+     `npm:@types/node` or removing the entry, pointed at the entry's position in
+     the config file)"; its prototype,
+     [denoland/deno#35693](https://github.com/denoland/deno/pull/35693), was
+     closed for the generic message. `"types": ["asdfasdf"]` passed
+     `deno check --check-engine=tsc` without a word (Deno's graph records the
+     unresolvable entry and the walk dropped it), the native engine reported the
+     compiler's bare TS2688, and a subpath entry such as `"vite/client"` passed
+     both (the generated project leaves subpath entries out).
+     - **One diagnostic on both engines**, from Deno's graph: an entry that is a
+       bare name nothing maps (no import map entry, no `node_modules`) gets
+       TS2688
+       `Cannot find type definition file for 'asdfasdf' in
+       "compilerOptions.types".`,
+       a hint
+       (`Write "npm:@types/asdfasdf" for the
+       package's types (or "npm:asdfasdf" when the package ships its own), or
+       remove the entry.`;
+       `"npm:vite/client"` for a subpath, `"npm:@types/scope__name"` for a
+       scoped package), and the entry's line and column in the config file with
+       a code frame. The native engine drops the compiler's own TS2688 for that
+       entry.
+     - **Left alone**: `"node"` and `"deno"` (Deno provides their types), an
+       entry the native engine's generated project provides as a type root
+       (`.deno/types/<entry>`, such as the Vitest types), and entries that
+       resolve (a mapped name, a `node_modules` package, an `npm:` / `jsr:`
+       specifier). A relative path that does not exist keeps its own error
+       (TS2307 / TS6053), and an entry whose resolution failed for another
+       reason keeps Deno's resolution message (upstream's prototype).
+     - This turns configs that passed into failures (a `"vite/client"` carried
+       over from a `tsconfig.json`, say), as upstream planned for 3.0; the hint
+       says what to write.
+
+     Tests: spec `check/compiler_options_types_not_found` (a bare entry and a
+     subpath entry, each on both engines; `"node"` beside them is fine; on
+     `3.0.0-rc.5` the in-process engine and the subpath entry pass);
+     `types_entry_suggestions`, `types_entries_are_found_in_the_config`,
+     `unresolved_types_entry_diagnostic` (`cli/tsc/diagnostics.rs`);
+     `ts2688_names_its_types_entry`,
+     `types_entries_the_generated_project_provides_resolve`
+     (`cli/tools/check.rs`).
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
-64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110) are
-what the prebuilt `libdenort` carries. The CLI-side parts (for example writing
+64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
+118) are what the prebuilt `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
 in the branch too, but a stock CLI does not run them; denext's own launcher
 provides that environment.

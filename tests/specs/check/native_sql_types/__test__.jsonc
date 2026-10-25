@@ -4,7 +4,7 @@
     // checker's generated @types/deno ...
     "valid": {
       "args": "check valid.ts",
-      "output": "Check [WILDCARD]valid.ts\n",
+      "output": "Check [WILDCARD]valid.ts\nChecked 1 file\n",
       "exitCode": 0
     },
     "invalid": {
@@ -16,7 +16,7 @@
     // `Deno` namespace from it
     "valid_ns_dom": {
       "args": "check --config ns_dom.json valid.ts",
-      "output": "Check [WILDCARD]valid.ts\n",
+      "output": "Check [WILDCARD]valid.ts\nChecked 1 file\n",
       "exitCode": 0
     }
   }

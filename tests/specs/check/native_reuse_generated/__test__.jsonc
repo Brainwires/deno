@@ -32,7 +32,7 @@
     },
     {
       "args": "check main.ts",
-      "output": "Check [WILDCARD]main.ts\n",
+      "output": "Check [WILDCARD]main.ts\nChecked 1 file\n",
       "exitCode": 0
     }
   ]

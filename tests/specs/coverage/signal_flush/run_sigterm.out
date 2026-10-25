@@ -1,0 +1,3 @@
+signal: SIGTERM
+code: 143
+coverage of server.ts: written

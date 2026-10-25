@@ -116,6 +116,20 @@ fn is_terminating_signal(signal: i32) -> bool {
 type Handler = Box<dyn Fn() + Send>;
 type Handlers = HashMap<i32, Vec<(u32, bool, Handler)>>;
 static HANDLERS: OnceLock<(Handle, Mutex<Handlers>)> = OnceLock::new();
+/// Interceptors run before the handlers and can consume a signal: when one
+/// returns `true`, no handler runs. Used by Node's SIGINT watchdog
+/// (`internalBinding('contextify')`), denoland/deno#32423.
+type Interceptor = Box<dyn Fn() -> bool + Send>;
+static INTERCEPTORS: OnceLock<Mutex<HashMap<i32, Interceptor>>> =
+  OnceLock::new();
+
+// denext: hooks run before a signal's default action: (id, hook, the id of
+// the no-op handler that keeps the signal listened for).
+type BeforeDefaultActionHook = std::sync::Arc<dyn Fn() + Send + Sync>;
+type BeforeDefaultAction =
+  HashMap<i32, Vec<(u32, BeforeDefaultActionHook, u32)>>;
+static BEFORE_DEFAULT_ACTION: OnceLock<Mutex<BeforeDefaultAction>> =
+  OnceLock::new();
 
 #[cfg(unix)]
 struct Handle(signal_hook::iterator::Handle);
@@ -124,22 +138,54 @@ struct Handle(signal_hook::iterator::Handle);
 struct Handle;
 
 fn handle_signal(signal: i32) -> bool {
+  // An interceptor consumes the signal before the handlers see it.
+  if let Some(interceptors) = INTERCEPTORS.get()
+    && let Some(interceptor) = interceptors.lock().unwrap().get(&signal)
+    && interceptor()
+  {
+    return true;
+  }
+
   let Some((_, handlers)) = HANDLERS.get() else {
     return false;
   };
-  let handlers = handlers.lock().unwrap();
-  let Some(handlers) = handlers.get(&signal) else {
-    return false;
+  let handled = {
+    let handlers = handlers.lock().unwrap();
+    let Some(handlers) = handlers.get(&signal) else {
+      return false;
+    };
+
+    let mut handled = false;
+
+    for (_, prevent_default, f) in handlers {
+      if *prevent_default {
+        handled = true;
+      }
+
+      f();
+    }
+    handled
   };
 
-  let mut handled = false;
-
-  for (_, prevent_default, f) in handlers {
-    if *prevent_default {
-      handled = true;
+  // denext: the signal's default action is about to run (no handler took the
+  // signal over); run what must happen before it (see
+  // `register_before_default_action`). A hook may block for a while: it runs
+  // with no lock held, so the thread it waits for can still register and
+  // unregister handlers meanwhile.
+  if !handled {
+    let hooks: Vec<BeforeDefaultActionHook> = BEFORE_DEFAULT_ACTION
+      .get()
+      .and_then(|hooks| {
+        hooks
+          .lock()
+          .unwrap()
+          .get(&signal)
+          .map(|hooks| hooks.iter().map(|(_, f, _)| f.clone()).collect())
+      })
+      .unwrap_or_default();
+    for f in hooks {
+      f();
     }
-
-    f();
   }
 
   handled
@@ -381,6 +427,73 @@ pub fn register(
   Ok(id)
 }
 
+/// Sets the interceptor of `signal`, which runs before the handlers; when it
+/// returns `true` the signal is consumed and no handler runs. `None` removes
+/// it.
+pub fn set_interceptor(signal: i32, f: Option<Interceptor>) {
+  // The signal thread (or console handler) must exist to call it.
+  HANDLERS.get_or_init(|| {
+    let handle = init();
+    let handlers = Mutex::new(HashMap::new());
+    (handle, handlers)
+  });
+  let mut interceptors = INTERCEPTORS
+    .get_or_init(|| Mutex::new(HashMap::new()))
+    .lock()
+    .unwrap();
+  match f {
+    Some(f) => {
+      interceptors.insert(signal, f);
+    }
+    None => {
+      interceptors.remove(&signal);
+    }
+  }
+}
+
+/// denext: registers `f` to run when `signal` arrives and its default action
+/// is about to run: when no handler registered with [`register`] prevents the
+/// default (a JS signal listener, say). `f` runs on the signal thread (the
+/// console control thread on Windows) before the default action, which runs
+/// once every such hook has returned; for SIGINT / SIGTERM that action ends
+/// the process. A hook may block for a while to finish work first. Used to
+/// write coverage and to print a stack trace when a signal ends the process.
+pub fn register_before_default_action(
+  signal: i32,
+  f: Box<dyn Fn() + Send + Sync>,
+) -> Result<u32, std::io::Error> {
+  // A no-op handler that does not prevent the default makes the OS (or the
+  // console) deliver the signal to us, as `register` does.
+  let listen_id = register(signal, false, Box::new(|| {}))?;
+  let id = COUNTER.fetch_add(1, Ordering::Relaxed);
+  BEFORE_DEFAULT_ACTION
+    .get_or_init(|| Mutex::new(HashMap::new()))
+    .lock()
+    .unwrap()
+    .entry(signal)
+    .or_default()
+    .push((id, f.into(), listen_id));
+  Ok(id)
+}
+
+/// Removes a hook added with [`register_before_default_action`].
+pub fn unregister_before_default_action(signal: i32, id: u32) {
+  let mut listen_id = None;
+  if let Some(hooks) = BEFORE_DEFAULT_ACTION.get()
+    && let Some(hooks) = hooks.lock().unwrap().get_mut(&signal)
+  {
+    hooks.retain(|(hook_id, _, hook_listen_id)| {
+      if *hook_id == id {
+        listen_id = Some(*hook_listen_id);
+      }
+      *hook_id != id
+    });
+  }
+  if let Some(listen_id) = listen_id {
+    unregister(signal, listen_id);
+  }
+}
+
 pub fn unregister(signal: i32, id: u32) {
   let Some((_, handlers)) = HANDLERS.get() else {
     return;
@@ -579,6 +692,116 @@ mod tests {
     assert_eq!(delivery_count(signal), before + 1);
 
     unregister(signal, id);
+  }
+
+  // A hook before the default action runs only when the default runs: a
+  // handler that prevents the default (a JS listener) keeps it from running,
+  // one that only observes the signal does not.
+  #[test]
+  fn hooks_run_only_before_the_default_action() {
+    let _serial = serial();
+    let signal = SIGUSR1;
+    let (tx, rx) = std::sync::mpsc::channel();
+    let hook = register_before_default_action(
+      signal,
+      Box::new(move || {
+        let _ = tx.send(());
+      }),
+    )
+    .unwrap();
+    // The default action is left to run.
+    assert!(!raise(signal));
+    rx.recv_timeout(Duration::from_secs(5)).unwrap();
+
+    let observer = register(signal, false, Box::new(|| {})).unwrap();
+    assert!(!raise(signal));
+    rx.recv_timeout(Duration::from_secs(5)).unwrap();
+
+    let listener = register(signal, true, Box::new(|| {})).unwrap();
+    assert!(raise(signal));
+    assert!(rx.recv_timeout(Duration::from_millis(100)).is_err());
+
+    // A signal from another process, handled by the listener so the test
+    // process survives: still no hook.
+    kill_from_another_process(signal);
+    assert!(rx.recv_timeout(Duration::from_millis(200)).is_err());
+    unregister(signal, listener);
+    unregister(signal, observer);
+
+    unregister_before_default_action(signal, hook);
+    assert!(!raise(signal));
+    assert!(rx.recv_timeout(Duration::from_millis(100)).is_err());
+  }
+
+  // A hook runs with no lock held: while it waits, another thread can still
+  // register and unregister handlers (`deno run` registers its SIGUSR1
+  // listener at any time), instead of deadlocking until the hook gives up.
+  #[test]
+  fn a_waiting_hook_does_not_block_registration() {
+    let _serial = serial();
+    let signal = SIGUSR1;
+    let (registered_tx, registered_rx) = std::sync::mpsc::channel();
+    let registered_rx = Mutex::new(registered_rx);
+    let hook = register_before_default_action(
+      signal,
+      Box::new(move || {
+        // Waits for another thread to register a handler, as the signal
+        // flush waits for the main thread.
+        let ok = registered_rx
+          .lock()
+          .unwrap()
+          .recv_timeout(Duration::from_secs(5))
+          .is_ok();
+        assert!(ok, "the other thread could not register a handler");
+      }),
+    )
+    .unwrap();
+    let other = std::thread::spawn(move || {
+      std::thread::sleep(Duration::from_millis(50));
+      let id = register(SIGUSR2, true, Box::new(|| {})).unwrap();
+      unregister(SIGUSR2, id);
+      registered_tx.send(()).unwrap();
+    });
+    let started = Instant::now();
+    assert!(!raise(signal));
+    assert!(started.elapsed() < Duration::from_secs(5));
+    other.join().unwrap();
+    unregister_before_default_action(signal, hook);
+  }
+
+  // An interceptor that consumes the signal keeps every handler (and the
+  // hooks before the default action) from running.
+  #[test]
+  fn an_interceptor_consumes_the_signal() {
+    let _serial = serial();
+    let signal = SIGUSR1;
+    let (tx, rx) = std::sync::mpsc::channel();
+    let tx2 = tx.clone();
+    let handler = register(
+      signal,
+      true,
+      Box::new(move || {
+        let _ = tx.send("handler");
+      }),
+    )
+    .unwrap();
+    set_interceptor(
+      signal,
+      Some(Box::new(move || {
+        let _ = tx2.send("interceptor");
+        true
+      })),
+    );
+    assert!(raise(signal));
+    assert_eq!(
+      rx.recv_timeout(Duration::from_secs(5)).unwrap(),
+      "interceptor"
+    );
+    assert!(rx.recv_timeout(Duration::from_millis(100)).is_err());
+    set_interceptor(signal, None);
+    assert!(raise(signal));
+    assert_eq!(rx.recv_timeout(Duration::from_secs(5)).unwrap(), "handler");
+    unregister(signal, handler);
   }
 
   // The suppression of a graceful restart consumes the re-raise the process

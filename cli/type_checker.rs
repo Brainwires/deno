@@ -591,7 +591,7 @@ impl TypeChecker {
     graph: &ModuleGraph,
     lib: TsTypeLib,
     type_check_mode: TypeCheckMode,
-  ) -> Result<(tsc::Diagnostics, Option<CacheDBHash>, bool), CheckError> {
+  ) -> Result<NativeGraphWalk, CheckError> {
     // Packages importable by bare specifier (workspace members + `links`),
     // used to enhance import errors. TODO: also chain `links` packages to match
     // `check_diagnostics` exactly.
@@ -604,6 +604,7 @@ impl TypeChecker {
     let npm_check_state_hash = check_state_hash(&self.npm_resolver);
     let groups = self.group_roots_by_compiler_options(graph, lib)?;
     let mut missing_diagnostics = tsc::Diagnostics::default();
+    let mut types_entry_diagnostics = Vec::new();
     let mut combined = FastInsecureHasher::new_deno_versioned();
     combined.write_hashable(crate::tsc::native::typescript_version());
     let mut any_hash = false;
@@ -623,12 +624,22 @@ impl TypeChecker {
       for import in group.imports.iter() {
         walker.add_config_import(import, &group.referrer);
       }
+      if let Some(root) = group.roots.first() {
+        walker.add_unresolved_types_entries(
+          self.compiler_options_resolver.for_specifier(root),
+        );
+      }
       for root in &group.roots {
         walker.add_root(root);
       }
       let tsc_roots = walker.into_tsc_roots();
       any_roots |= !tsc_roots.roots.is_empty();
       missing_diagnostics.extend(tsc_roots.missing_diagnostics);
+      for (entry, diagnostic) in tsc_roots.types_entry_diagnostics {
+        if !types_entry_diagnostics.iter().any(|(e, _)| *e == entry) {
+          types_entry_diagnostics.push((entry, diagnostic));
+        }
+      }
       if let Some(hash) = tsc_roots.maybe_check_hash {
         combined.write_hashable(hash);
         any_hash = true;
@@ -636,7 +647,12 @@ impl TypeChecker {
     }
     let maybe_check_hash =
       any_hash.then(|| CacheDBHash::new(combined.finish()));
-    Ok((missing_diagnostics, maybe_check_hash, any_roots))
+    Ok(NativeGraphWalk {
+      missing_diagnostics,
+      types_entry_diagnostics,
+      maybe_check_hash,
+      any_roots,
+    })
   }
 
   /// The type-check cache, used by the native check path to skip re-running the
@@ -1048,6 +1064,13 @@ impl DiagnosticsByFolderRealIterator<'_> {
     for import in check_group.imports.iter() {
       graph_walker.add_config_import(import, &check_group.referrer);
     }
+    // denext: a `compilerOptions.types` entry nothing resolves is an error,
+    // as the native checker reports it (denoland/deno#32764).
+    if let Some(root) = check_group.roots.first() {
+      graph_walker.add_unresolved_types_entries(
+        self.compiler_options_resolver.for_specifier(root),
+      );
+    }
 
     for root in &check_group.roots {
       graph_walker.add_root(root);
@@ -1061,10 +1084,17 @@ impl DiagnosticsByFolderRealIterator<'_> {
 
     let TscRoots {
       roots: root_names,
-      missing_diagnostics,
+      mut missing_diagnostics,
+      types_entry_diagnostics,
       used_ts_expect_error_directives,
       maybe_check_hash,
     } = graph_walker.into_tsc_roots();
+    missing_diagnostics.extend(tsc::Diagnostics::from(
+      types_entry_diagnostics
+        .into_iter()
+        .map(|(_, d)| d)
+        .collect::<Vec<_>>(),
+    ));
 
     let mut missing_diagnostics = missing_diagnostics.filter(|d| {
       self.should_include_diagnostic(self.options.type_check_mode, d)
@@ -1303,9 +1333,28 @@ impl DiagnosticsByFolderRealIterator<'_> {
   }
 }
 
+/// `compilerOptions.types` entries whose types Deno provides itself.
+const BUILT_IN_TYPES_ENTRIES: [&str; 2] = ["node", "deno"];
+
+/// What [`TypeChecker::walk_graph_for_native_check`] found.
+pub(crate) struct NativeGraphWalk {
+  /// Deno's own graph diagnostics (missing modules + hints).
+  pub missing_diagnostics: tsc::Diagnostics,
+  /// denext: the `compilerOptions.types` entries nothing resolves, each with
+  /// its diagnostic (denoland/deno#32764).
+  pub types_entry_diagnostics: Vec<(String, tsc::Diagnostic)>,
+  /// The combined check hash, when there is one.
+  pub maybe_check_hash: Option<CacheDBHash>,
+  /// Whether any root needs checking at all.
+  pub any_roots: bool,
+}
+
 pub(crate) struct TscRoots {
   pub(crate) roots: Vec<(ModuleSpecifier, MediaType)>,
   pub(crate) missing_diagnostics: tsc::Diagnostics,
+  /// denext: the `compilerOptions.types` entries nothing resolves, each with
+  /// its diagnostic (see `GraphWalker::add_unresolved_types_entries`).
+  pub(crate) types_entry_diagnostics: Vec<(String, tsc::Diagnostic)>,
   used_ts_expect_error_directives: HashSet<TsDirective>,
   pub(crate) maybe_check_hash: Option<CacheDBHash>,
 }
@@ -1343,6 +1392,7 @@ struct GraphWalker<'a> {
   has_seen_node_builtin: bool,
   roots: Vec<(ModuleSpecifier, MediaType)>,
   missing_diagnostics: tsc::Diagnostics,
+  types_entry_diagnostics: Vec<(String, tsc::Diagnostic)>,
   used_ts_expect_error_directives: HashSet<TsDirective>,
 }
 
@@ -1393,6 +1443,7 @@ impl<'a> GraphWalker<'a> {
       has_seen_node_builtin: false,
       roots: Vec::with_capacity(graph.imports.len() + graph.specifiers_count()),
       missing_diagnostics: Default::default(),
+      types_entry_diagnostics: Default::default(),
       used_ts_expect_error_directives: Default::default(),
     }
   }
@@ -1428,6 +1479,60 @@ impl<'a> GraphWalker<'a> {
     }
   }
 
+  /// denext: the entries of `compilerOptions.types` that Deno's graph could
+  /// not resolve, which the graph otherwise drops without a word (`tsc`
+  /// reports TS2688 for them, denoland/deno#32764). `"node"` and `"deno"`
+  /// are left alone: Deno provides their types.
+  pub fn add_unresolved_types_entries(
+    &mut self,
+    compiler_options_data: &CompilerOptionsData,
+  ) {
+    for (referrer, types) in
+      compiler_options_data.compiler_options_types().iter()
+    {
+      let Some(graph_import) = self.graph.imports.get(referrer) else {
+        continue;
+      };
+      let mut config_text = None;
+      for entry in types {
+        if BUILT_IN_TYPES_ENTRIES.contains(&entry.as_str())
+          || self.types_entry_diagnostics.iter().any(|(e, _)| e == entry)
+        {
+          continue;
+        }
+        let Some(dep) = graph_import.dependencies.get(entry) else {
+          continue;
+        };
+        let deno_graph::Resolution::Err(error) = &dep.maybe_type else {
+          continue;
+        };
+        let config_text: &Option<String> =
+          config_text.get_or_insert_with(|| {
+            referrer
+              .to_file_path()
+              .ok()
+              .and_then(|path| std::fs::read_to_string(path).ok())
+          });
+        let diagnostic = tsc::Diagnostic::maybe_from_unresolved_types_entry(
+          entry,
+          referrer,
+          config_text.as_deref(),
+        )
+        .or_else(|| {
+          tsc::Diagnostic::maybe_from_resolution_error(
+            error,
+            self.bare_importable_pkg_names,
+          )
+        });
+        if let Some(diagnostic) = diagnostic {
+          self
+            .types_entry_diagnostics
+            .push((entry.clone(), diagnostic));
+        }
+      }
+    }
+  }
+
   pub fn add_root(&mut self, root: &'a Url) {
     let specifier = self.graph.resolve(root);
     if self.seen.insert(specifier) {
@@ -1458,6 +1563,7 @@ impl<'a> GraphWalker<'a> {
     TscRoots {
       roots: self.roots,
       missing_diagnostics: self.missing_diagnostics,
+      types_entry_diagnostics: self.types_entry_diagnostics,
       used_ts_expect_error_directives: self.used_ts_expect_error_directives,
       maybe_check_hash: self.maybe_hasher.map(|h| CacheDBHash::new(h.finish())),
     }

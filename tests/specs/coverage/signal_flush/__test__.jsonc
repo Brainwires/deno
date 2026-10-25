@@ -1,0 +1,36 @@
+{
+  // A process ended by SIGTERM / SIGINT still writes its coverage
+  // (denoland/deno#32362), and is still ended by that signal. Unix only:
+  // SIGTERM has no cross-process equivalent on Windows, and a console Ctrl+C
+  // reaches the whole console group.
+  "tempDir": true,
+  "tests": {
+    "run_sigterm": {
+      "if": "unix",
+      "args": "run -A kill_and_count.ts SIGTERM run server.ts",
+      "output": "run_sigterm.out"
+    },
+    "run_sigint": {
+      "if": "unix",
+      "args": "run -A kill_and_count.ts SIGINT run server.ts",
+      "output": "run_sigint.out"
+    },
+    "run_own_listener": {
+      // A program that handles the signal itself keeps it: no early flush,
+      // and the program's own exit writes the coverage.
+      "if": "unix",
+      "args": "run -A kill_and_count.ts SIGTERM run server_with_listener.ts",
+      "output": "run_own_listener.out"
+    },
+    "test_sigterm": {
+      "if": "unix",
+      "args": "run -A kill_and_count.ts SIGTERM test hanging_test.ts",
+      "output": "test_sigterm.out"
+    },
+    "test_sigint": {
+      "if": "unix",
+      "args": "run -A kill_and_count.ts SIGINT test hanging_test.ts",
+      "output": "test_sigint.out"
+    }
+  }
+}

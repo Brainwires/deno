@@ -1,0 +1,8 @@
+Check main.ts
+TS2688 [ERROR]: Cannot find type definition file for 'asdfasdf' in "compilerOptions.types".
+  hint: Write "npm:@types/asdfasdf" for the package's types (or "npm:asdfasdf" when the package ships its own), or remove the entry.
+    "types": ["node", "asdfasdf"]
+                      ~~~~~~~~~~
+    at file:///[WILDLINE]/deno.json:3:23
+
+error: Type checking failed.

@@ -1,0 +1,8 @@
+{
+  // Emits made with other options than a module's usual ones get their own,
+  // readable, emit cache directory instead of overwriting the usual emit
+  // (denoland/deno#30791).
+  "tempDir": true,
+  "args": "run -A emit_twice.ts",
+  "output": "emit_twice.out"
+}

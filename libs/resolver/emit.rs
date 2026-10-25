@@ -233,7 +233,11 @@ impl<TInNpmPackageChecker: InNpmPackageChecker, TSys: EmitterSys>
       Some(_) => self
         .emit_cache
         .get_transformed_emit_code(specifier, source_hash),
-      None => self.emit_cache.get_emit_code(specifier, source_hash),
+      None => self.emit_cache.get_emit_code(
+        specifier,
+        transpile_and_emit_options.emit_cache_name.as_deref(),
+        source_hash,
+      ),
     })
   }
 
@@ -353,6 +357,7 @@ impl<TInNpmPackageChecker: InNpmPackageChecker, TSys: EmitterSys>
         let transpiled_source = emit()?;
         helper.post_emit_parsed_source(
           &specifier,
+          &transpile_and_emit_options,
           &transpiled_source,
           source_hash,
           transformed,
@@ -423,6 +428,7 @@ impl<TInNpmPackageChecker: InNpmPackageChecker, TSys: EmitterSys>
         .text;
         helper.post_emit_parsed_source(
           specifier,
+          &transpile_and_emit_options,
           &transpiled_source,
           source_hash,
           transformed,
@@ -669,7 +675,11 @@ impl<TInNpmPackageChecker: InNpmPackageChecker, TSys: EmitterSys>
         .emit_cache
         .get_transformed_emit_code(specifier, source_hash)
     } else {
-      self.0.emit_cache.get_emit_code(specifier, source_hash)
+      self.0.emit_cache.get_emit_code(
+        specifier,
+        transpile_and_emit_options.emit_cache_name.as_deref(),
+        source_hash,
+      )
     };
     if let Some(emit_code) = cached {
       PreEmitResult::Cached(emit_code)
@@ -684,6 +694,7 @@ impl<TInNpmPackageChecker: InNpmPackageChecker, TSys: EmitterSys>
   pub fn post_emit_parsed_source(
     &self,
     specifier: &Url,
+    transpile_and_emit_options: &TranspileAndEmitOptions,
     transpiled_source: &str,
     source_hash: u64,
     transformed: bool,
@@ -697,6 +708,7 @@ impl<TInNpmPackageChecker: InNpmPackageChecker, TSys: EmitterSys>
     } else {
       self.0.emit_cache.set_emit_code(
         specifier,
+        transpile_and_emit_options.emit_cache_name.as_deref(),
         source_hash,
         transpiled_source.as_bytes(),
       );

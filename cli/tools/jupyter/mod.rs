@@ -14,6 +14,7 @@ use deno_path_util::resolve_url_or_path;
 use deno_runtime::WorkerExecutionMode;
 use deno_runtime::deno_io::Stdio;
 use deno_runtime::deno_io::StdioPipe;
+use deno_runtime::deno_permissions::Permissions;
 use deno_runtime::deno_permissions::PermissionsContainer;
 use deno_terminal::colors;
 use tokio::sync::mpsc;
@@ -37,6 +38,7 @@ use crate::tools::test::TestEventWorkerSender;
 use crate::tools::test::create_single_test_event_channel;
 
 mod install;
+mod prompter;
 
 pub async fn kernel(
   flags: Arc<Flags>,
@@ -78,8 +80,26 @@ pub async fn kernel(
 
   let factory = CliFactory::from_flags(flags);
   let cli_options = factory.cli_options()?;
-  let permissions =
-    PermissionsContainer::allow_all(factory.permission_desc_parser()?.clone());
+  let desc_parser = factory.permission_desc_parser()?.clone();
+  // The ZMQ kernel worker only binds the kernel's loopback sockets and drives
+  // the protocol; it runs no user code, so it keeps every permission.
+  let permissions = PermissionsContainer::allow_all(desc_parser.clone());
+  // denext: notebook cells run in the REPL worker, with the config's
+  // `permissions.jupyter` set (else its `default` one) when it has one;
+  // otherwise with every permission, as before (denoland/deno#35587).
+  let repl_permissions = match cli_options.jupyter_permissions_options()? {
+    Some(options) => {
+      log::info!(
+        "{} Applying \"permissions\" from the config file to the Jupyter kernel is experimental and may change in the future.",
+        colors::yellow("Warning"),
+      );
+      PermissionsContainer::new(
+        desc_parser.clone(),
+        Permissions::from_options(desc_parser.as_ref(), &options)?,
+      )
+    }
+    None => permissions.clone(),
+  };
   let npm_installer = factory.npm_installer_if_managed().await?.cloned();
   let compiler_options_resolver_arc =
     factory.compiler_options_resolver()?.clone();
@@ -111,8 +131,8 @@ pub async fn kernel(
   )
   .unwrap();
   let repl_main_module2 = repl_main_module.clone();
-  let repl_permissions = permissions.clone();
   let repl_iopub_tx = iopub_tx.clone();
+  let prompter_input_tx = input_tx.clone();
   let repl_input_tx = input_tx;
 
   let repl_thread = std::thread::spawn(move || {
@@ -150,6 +170,13 @@ pub async fn kernel(
         "Deno[Deno.internal].enableJupyter();",
       )?;
       let worker = worker.into_main_worker();
+
+      // Permission prompts go to the notebook over the stdin channel: a
+      // kernel has no terminal, so an access outside the cells' permission
+      // set would otherwise fail with no way to grant it.
+      deno_runtime::deno_permissions::prompter::set_prompter(Box::new(
+        prompter::JupyterPrompter::new(prompter_input_tx),
+      ));
 
       let mut repl_session = repl::ReplSession::initialize(
         &cli_options_arc,

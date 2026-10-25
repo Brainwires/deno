@@ -1,0 +1,8 @@
+Check main.ts
+TS2688 [ERROR]: Cannot find type definition file for 'vite/client' in "compilerOptions.types".
+  hint: Write "npm:vite/client" to load it from npm, or remove the entry.
+    "types": ["vite/client"]
+              ~~~~~~~~~~~~~
+    at file:///[WILDLINE]/subpath/deno.json:3:15
+
+error: Type checking failed.

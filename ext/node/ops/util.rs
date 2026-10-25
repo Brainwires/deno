@@ -1,8 +1,15 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 
 use std::path::Path;
+use std::sync::Condvar;
+use std::sync::Mutex;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicI32;
+use std::sync::atomic::Ordering;
+use std::time::Duration;
 
 use deno_core::OpState;
+use deno_core::error::JsError;
 use deno_core::op2;
 use deno_core::v8;
 use deno_dotenv::parse_env_content_hook;
@@ -12,6 +19,207 @@ use node_resolver::NpmPackageFolderResolver;
 
 use crate::ExtNodeSys;
 use crate::NodeResolverRc;
+
+// === SIGINT watchdog ===
+// `internalBinding('contextify')`'s watchdog, which Node uses to tell whether
+// a Ctrl+C arrived while a script was being evaluated (the REPL, `vm`'s
+// `breakOnSigint`). Reference-counted so nested start/stop pairs work. Ported
+// from denoland/deno#32423.
+
+static SIGINT_WATCHDOG_REFCOUNT: AtomicI32 = AtomicI32::new(0);
+static SIGINT_WATCHDOG_PENDING: AtomicBool = AtomicBool::new(false);
+
+#[op2(fast)]
+pub fn op_node_start_sigint_watchdog() {
+  let prev = SIGINT_WATCHDOG_REFCOUNT.fetch_add(1, Ordering::SeqCst);
+  if prev == 0 {
+    SIGINT_WATCHDOG_PENDING.store(false, Ordering::SeqCst);
+    // The watchdog consumes SIGINT: other listeners (the test runner,
+    // `Deno.addSignalListener`) don't see it while it watches.
+    deno_signals::set_interceptor(
+      deno_signals::SIGINT,
+      Some(Box::new(|| {
+        SIGINT_WATCHDOG_PENDING.store(true, Ordering::SeqCst);
+        true
+      })),
+    );
+  }
+}
+
+#[op2(fast)]
+pub fn op_node_stop_sigint_watchdog() -> bool {
+  let prev = SIGINT_WATCHDOG_REFCOUNT.fetch_sub(1, Ordering::SeqCst);
+  let had_pending = SIGINT_WATCHDOG_PENDING.swap(false, Ordering::SeqCst);
+  if prev == 1 {
+    deno_signals::set_interceptor(deno_signals::SIGINT, None);
+  }
+  had_pending
+}
+
+#[op2(fast)]
+pub fn op_node_watchdog_has_pending_sigint() -> bool {
+  SIGINT_WATCHDOG_PENDING.load(Ordering::SeqCst)
+}
+
+// === SIGINT trace ===
+// Node's `--trace-sigint` / `util.setTraceSigInt(true)`: when SIGINT is about
+// to end the process (no listener took it over), print where the main thread
+// was, then let the signal end it. Adapted from denoland/deno#32423.
+
+/// How long the signal waits for the isolate to service the interrupt before
+/// it reports an idle main thread (no JavaScript running).
+const TRACE_SIGINT_IDLE_GRACE: Duration = Duration::from_millis(250);
+/// How long the signal waits for a trace that has started printing.
+const TRACE_SIGINT_PRINT_TIMEOUT: Duration = Duration::from_secs(5);
+const TRACE_SIGINT_BANNER: &str =
+  "KEYBOARD_INTERRUPT: Script execution was interrupted by `SIGINT`";
+
+static TRACE_SIGINT_HOOK_ID: Mutex<Option<u32>> = Mutex::new(None);
+/// Who prints the report for this SIGINT: the interrupt (with the stack) or
+/// the signal (an idle main thread), whichever claims it first.
+static TRACE_SIGINT_CLAIMED: AtomicBool = AtomicBool::new(false);
+static TRACE_SIGINT_PRINTED: (Mutex<bool>, Condvar) =
+  (Mutex::new(false), Condvar::new());
+
+/// Turns the SIGINT trace on or off for the isolate behind `isolate`, whose
+/// stack is captured in `context`. Used by `util.setTraceSigInt()` and by
+/// `--trace-sigint` in `NODE_OPTIONS` (the embedder calls it at startup).
+pub fn set_trace_sigint(
+  isolate: v8::IsolateHandle,
+  context: v8::Global<v8::Context>,
+  enable: bool,
+) {
+  let mut hook_id = TRACE_SIGINT_HOOK_ID.lock().unwrap();
+  if !enable {
+    if let Some(id) = hook_id.take() {
+      deno_signals::unregister_before_default_action(deno_signals::SIGINT, id);
+    }
+    return;
+  }
+  if hook_id.is_some() {
+    return;
+  }
+  // Leaked on purpose: the interrupt may fire after the trace is turned off,
+  // and a `v8::Global` must not be dropped off its isolate's thread.
+  let context_ptr = Box::into_raw(Box::new(context)) as usize;
+  let result = deno_signals::register_before_default_action(
+    deno_signals::SIGINT,
+    Box::new(move || {
+      isolate.request_interrupt(
+        trace_sigint_interrupt,
+        context_ptr as *mut std::ffi::c_void,
+      );
+      wait_for_trace_sigint();
+    }),
+  );
+  match result {
+    Ok(id) => *hook_id = Some(id),
+    Err(err) => log::debug!("Could not trace SIGINT: {err}"),
+  }
+}
+
+/// Runs on the signal thread, before SIGINT's default action ends the
+/// process: waits for the interrupt to print the stack, or reports an idle
+/// main thread (which runs no JavaScript to interrupt), as Node does.
+#[allow(clippy::print_stderr, reason = "Node's --trace-sigint report")]
+fn wait_for_trace_sigint() {
+  let (printed, cvar) = &TRACE_SIGINT_PRINTED;
+  let guard = printed.lock().unwrap();
+  let (guard, _) = cvar
+    .wait_timeout_while(guard, TRACE_SIGINT_IDLE_GRACE, |printed| !*printed)
+    .unwrap();
+  if *guard {
+    return;
+  }
+  if !TRACE_SIGINT_CLAIMED.swap(true, Ordering::SeqCst) {
+    eprintln!("{TRACE_SIGINT_BANNER}");
+    return;
+  }
+  // The interrupt claimed it and is printing.
+  drop(
+    cvar
+      .wait_timeout_while(guard, TRACE_SIGINT_PRINT_TIMEOUT, |printed| {
+        !*printed
+      })
+      .unwrap(),
+  );
+}
+
+#[allow(clippy::print_stderr, reason = "Node's --trace-sigint report")]
+unsafe extern "C" fn trace_sigint_interrupt(
+  isolate_ptr: v8::UnsafeRawIsolatePtr,
+  data: *mut std::ffi::c_void,
+) {
+  if TRACE_SIGINT_CLAIMED.swap(true, Ordering::SeqCst) {
+    return;
+  }
+  let mut raw_ptr = isolate_ptr;
+  // SAFETY: V8 passes the isolate the interrupt was requested on, and runs
+  // the callback on its thread.
+  let isolate =
+    unsafe { v8::Isolate::ref_from_raw_isolate_ptr_mut(&mut raw_ptr) };
+  // SAFETY: `data` is the `v8::Global<v8::Context>` leaked by
+  // `set_trace_sigint`, never freed.
+  let context_global = unsafe { &*(data as *const v8::Global<v8::Context>) };
+  let stack = {
+    v8::scope!(scope, isolate);
+    let context = v8::Local::new(scope, context_global);
+    let scope = &mut v8::ContextScope::new(scope, context);
+    let message = v8::String::new(scope, "SIGINT").unwrap();
+    let exception = v8::Exception::error(scope, message);
+    JsError::from_v8_exception(scope, exception).stack
+  };
+  eprintln!("{TRACE_SIGINT_BANNER}");
+  // The stack starts with the synthetic "Error: SIGINT" line; print only the
+  // frames, as Node does.
+  if let Some((_, frames)) = stack.as_deref().and_then(|s| s.split_once('\n'))
+  {
+    eprintln!("{frames}");
+  }
+  let (printed, cvar) = &TRACE_SIGINT_PRINTED;
+  *printed.lock().unwrap() = true;
+  cvar.notify_all();
+}
+
+#[op2(fast)]
+pub fn op_node_set_trace_sigint(scope: &mut v8::PinScope<'_, '_>, enable: bool) {
+  let isolate = scope.thread_safe_handle();
+  let context = scope.get_current_context();
+  let context = v8::Global::new(scope, context);
+  set_trace_sigint(isolate, context, enable);
+}
+
+/// Whether `NODE_OPTIONS` turns Node's `--trace-sigint` on (the last of
+/// `--trace-sigint` / `--no-trace-sigint` wins).
+pub fn node_options_trace_sigint(node_options: &str) -> bool {
+  let mut enabled = false;
+  for option in node_options.split_ascii_whitespace() {
+    match option.trim_matches(|c| c == '"' || c == '\'') {
+      "--trace-sigint" => enabled = true,
+      "--no-trace-sigint" => enabled = false,
+      _ => {}
+    }
+  }
+  enabled
+}
+
+#[cfg(test)]
+mod trace_sigint_tests {
+  use super::node_options_trace_sigint;
+
+  #[test]
+  fn node_options_turn_the_trace_on() {
+    assert!(!node_options_trace_sigint(""));
+    assert!(node_options_trace_sigint("--trace-sigint"));
+    assert!(node_options_trace_sigint(
+      "--max-old-space-size=100 \"--trace-sigint\" --no-warnings"
+    ));
+    assert!(!node_options_trace_sigint("--trace-sigint --no-trace-sigint"));
+    assert!(node_options_trace_sigint("--no-trace-sigint --trace-sigint"));
+    assert!(!node_options_trace_sigint("--trace-sigint-other"));
+    assert!(!node_options_trace_sigint("--trace-warnings"));
+  }
+}
 
 #[repr(u32)]
 enum HandleType {
