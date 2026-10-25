@@ -151,9 +151,35 @@ impl CliMainWorker {
     #[cfg(unix)]
     self.spawn_sigusr1_inspector_listener();
 
-    let mut result = self
-      .run_to_completion(&mut maybe_hmr_runner, has_coverage)
-      .await;
+    // denext: a process killed by SIGINT / SIGTERM (a test runner's or a
+    // supervisor's teardown, Ctrl+C) still writes its coverage and CPU
+    // profile, unless the program handles the signal itself
+    // (denoland/deno#32362). Not under a watcher, which restarts on signals.
+    let has_profiler = profiler_cell.borrow().is_some();
+    let mut flush_on_signal =
+      ((has_coverage || has_profiler) && !under_watcher).then(|| {
+        crate::util::signal_flush::install();
+        crate::util::signal_flush::Participant::join()
+      });
+    let mut result = match flush_on_signal.as_mut() {
+      Some(participant) => {
+        let run = self
+          .run_to_completion(&mut maybe_hmr_runner, has_coverage)
+          .boxed_local();
+        select! {
+          result = run => result,
+          signal = participant.signalled().boxed_local() => {
+            log::debug!("Writing coverage and profiles on signal {signal}");
+            Ok(())
+          }
+        }
+      }
+      None => {
+        self
+          .run_to_completion(&mut maybe_hmr_runner, has_coverage)
+          .await
+      }
+    };
 
     // If the script called `Deno.exit()` under a watcher, `op_exit` terminated
     // the isolate instead of the process. Treat it as a normal end of run:
@@ -172,6 +198,15 @@ impl CliMainWorker {
     }
     if let Some(hmr_runner) = maybe_hmr_runner.as_mut() {
       hmr_runner.stop();
+    }
+    // The signal's default action ends the process once every participant
+    // is done; don't return (and exit normally) before it does.
+    if flush_on_signal.take().is_some_and(|participant| {
+      let signalled = participant.is_signalled();
+      drop(participant);
+      signalled
+    }) {
+      std::future::pending::<()>().await;
     }
 
     result?;

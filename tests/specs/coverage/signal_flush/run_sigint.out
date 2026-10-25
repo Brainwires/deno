@@ -1,0 +1,3 @@
+signal: SIGINT
+code: 130
+coverage of server.ts: written

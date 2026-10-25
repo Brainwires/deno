@@ -1008,6 +1008,62 @@ async fn test_specifier_inner(
   event_tracker: &TestEventTracker,
   options: TestSpecifierOptions,
 ) -> Result<(), TestSpecifierError> {
+  // denext: a run ended by SIGINT / SIGTERM still writes this worker's
+  // coverage (denoland/deno#32362): the signal waits for it.
+  let mut flush_on_signal = coverage_collector.is_some().then(|| {
+    crate::util::signal_flush::install();
+    crate::util::signal_flush::Participant::join()
+  });
+  let run = run_specifier_tests(
+    worker,
+    &specifier,
+    &fail_fast_tracker,
+    event_tracker,
+    &options,
+  );
+  let result = match flush_on_signal.as_mut() {
+    Some(participant) => {
+      tokio::select! {
+        result = run => result,
+        _ = participant.signalled() => Ok(()),
+      }
+    }
+    None => run.await,
+  };
+  // Stop coverage before waiting for external debugger sessions. Coverage owns
+  // a blocking local inspector session, so waiting first would hang forever.
+  if let Some(mut coverage_collector) = coverage_collector.take() {
+    coverage_collector.stop_collecting()?;
+  }
+  if flush_on_signal.take().is_some_and(|participant| {
+    let signalled = participant.is_signalled();
+    drop(participant);
+    signalled
+  }) {
+    // The process is ending; the runner reports and exits.
+    return Ok(());
+  }
+  result?;
+
+  // If a debugger session is still attached (e.g. Chrome DevTools holding
+  // the connection open for an in-progress Performance recording), wait for
+  // it to disconnect before tearing down the worker. Mirrors `deno run`'s
+  // behavior; otherwise the connection is dropped mid-flight, making it
+  // impossible to profile `deno test` runs. See issue #19289.
+  worker.wait_for_inspector_session_disconnect().await?;
+
+  Ok(())
+}
+
+/// The tests of one module, from its `load` event to its last settled
+/// promise.
+async fn run_specifier_tests(
+  worker: &mut MainWorker,
+  specifier: &ModuleSpecifier,
+  fail_fast_tracker: &FailFastTracker,
+  event_tracker: &TestEventTracker,
+  options: &TestSpecifierOptions,
+) -> Result<(), TestSpecifierError> {
   // Ensure that there are no pending exceptions before we start running tests
   worker.run_up_to_duration(Duration::from_millis(0)).await?;
 
@@ -1017,9 +1073,9 @@ async fn test_specifier_inner(
 
   run_tests_for_worker(
     worker,
-    &specifier,
-    &options,
-    &fail_fast_tracker,
+    specifier,
+    options,
+    fail_fast_tracker,
     event_tracker,
   )
   .await?;
@@ -1050,19 +1106,6 @@ async fn test_specifier_inner(
   // Ensure the worker has settled so we can catch any remaining unhandled rejections. We don't
   // want to wait forever here.
   worker.run_up_to_duration(Duration::from_millis(0)).await?;
-
-  // Stop coverage before waiting for external debugger sessions. Coverage owns
-  // a blocking local inspector session, so waiting first would hang forever.
-  if let Some(mut coverage_collector) = coverage_collector.take() {
-    coverage_collector.stop_collecting()?;
-  }
-
-  // If a debugger session is still attached (e.g. Chrome DevTools holding
-  // the connection open for an in-progress Performance recording), wait for
-  // it to disconnect before tearing down the worker. Mirrors `deno run`'s
-  // behavior; otherwise the connection is dropped mid-flight, making it
-  // impossible to profile `deno test` runs. See issue #19289.
-  worker.wait_for_inspector_session_disconnect().await?;
 
   Ok(())
 }
@@ -1974,6 +2017,12 @@ pub async fn report_tests(
         if let Err(err) = reporter.flush_report(&elapsed, &tests, &test_steps) {
           eprint!("Test reporter failed to flush: {}", err)
         }
+        // denext: the test workers write their coverage first
+        // (denoland/deno#32362).
+        crate::util::signal_flush::trigger(deno_signals::SIGINT);
+        crate::util::signal_flush::wait_for_flush(
+          crate::util::signal_flush::FLUSH_TIMEOUT,
+        );
         #[allow(
           clippy::disallowed_methods,
           reason = "TODO: why is this not using deno_runtime::exit?"

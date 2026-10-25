@@ -3938,6 +3938,49 @@ where the changes are discussed.
      (`tests/integration/run_tests.rs`: a `subst` drive holding a member's
      mapped module, a `links` package and an auto-linked config folder).
 
+108. **`fix(coverage)`: a process ended by SIGINT / SIGTERM still writes its
+     coverage** (`feat/dx-batch`, CLI only; `ext/signals/lib.rs`,
+     `cli/util/signal_flush.rs`, `cli/worker.rs`, `cli/tools/test/mod.rs`).
+     Adapted from
+     [denoland/deno#32362](https://github.com/denoland/deno/pull/32362) (open).
+     `deno run` with `DENO_COVERAGE_DIR` / `--coverage` (or `--cpu-prof`) and
+     `deno test --coverage` wrote nothing when a signal ended them: a test
+     runner's or supervisor's teardown (SIGTERM), Ctrl+C. The data is flushed
+     through each isolate's inspector, which only the isolate's own thread can
+     drive, so the signal cannot write it itself.
+     - **`deno_signals::register_before_default_action`**: a hook that runs when
+       a signal arrives and its default action is about to run, that is only
+       when no handler prevents the default; the default action runs once the
+       hooks return. A program's own `Deno.addSignalListener("SIGTERM", …)` (or
+       `process.on("SIGINT")`) keeps the signal: nothing is flushed early, and
+       its own exit writes the coverage as before. Hooks run with no lock held,
+       so the thread a hook waits for can still register a signal handler
+       meanwhile (`deno run` registers its SIGUSR1 inspector listener 500 ms in;
+       holding the lock deadlocked the flush until it gave up).
+     - **`cli/util/signal_flush.rs`**: each thread with coverage joins as a
+       participant and races its work against the signal; once signalled it
+       stops collecting (the run's main worker also stops the CPU profiler) and
+       leaves. The hook (SIGINT and SIGTERM; SIGINT only on Windows) waits for
+       every participant, for at most 10 s; then the default action ends the
+       process, so the parent still sees `SIGTERM` / `SIGINT`. `deno run`'s main
+       worker and each `deno test` worker join; the test runner's own SIGINT
+       report (exit 130) waits for its workers the same way.
+     - Not under `--watch`, which restarts on signals. A thread stuck in
+       synchronous JavaScript cannot flush: the process ends after the 10 s wait
+       without its coverage. SIGKILL cannot be caught (upstream's follow-up is
+       periodic flushing). A Web Worker still alive at the signal is not
+       flushed.
+
+     Tests: spec `coverage/signal_flush` (Unix: `deno run` ended by SIGTERM and
+     by SIGINT, `deno test --coverage` ended by SIGTERM and by SIGINT, each
+     writing the module's coverage and ended by the signal (the test runner's
+     SIGINT by exit code 130); a program with its own SIGTERM listener keeps it;
+     the four signal cases print `missing` on `3.0.0-rc.5`);
+     `hooks_run_only_before_the_default_action`,
+     `a_waiting_hook_does_not_block_registration` (`ext/signals/lib.rs`);
+     `participants_flush_before_the_signal_returns`
+     (`cli/util/signal_flush.rs`).
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105) are what the
 prebuilt `libdenort` carries. The CLI-side parts (for example writing
