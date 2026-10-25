@@ -4570,6 +4570,39 @@ where the changes are discussed.
      `types_entries_the_generated_project_provides_resolve`
      (`cli/tools/check.rs`).
 
+118. **`fix(process)`: a child's Windows stdout and stderr hold no blocking-pool
+     thread** (`fix/win-concurrent-hang`, CLI and runtime; `ext/io/lib.rs`,
+     `ext/process/lib.rs`). `Deno.Command` (and the legacy `Deno.run`) wrapped a
+     piped child's stdout / stderr in tokio's `ChildStdout` / `ChildStderr`,
+     which on Windows read the pipe with a blocking `ReadFile` on the runtime's
+     blocking pool. A pending read holds its pool thread until data or EOF, and
+     a child's stderr is usually quiet until it exits, so each live piped child
+     pinned one or two threads; a cancelled read kept its thread until the
+     pipe's writer closed. The pool is capped at four threads per CPU on Windows
+     (`runtime/tokio_util.rs`). Once pending reads filled it, the stdout read a
+     busy child needed never got a thread: the child blocked in `WriteFile` on
+     its full pipe, never exited, and never released the threads its own reads
+     held. Every piped spawn in that runtime then hung, `deno info --json` /
+     `deno bundle` children of a build or of a `deno test --parallel` file
+     included (upstream's code as well; on a 2-CPU host 8 concurrent `deno info`
+     children with stdout and stderr piped hung every time, 7 never did, and
+     with stderr `"null"` 32 finished).
+     - The parent's end is the overlapped named pipe server that
+       `deno_subprocess_windows`' `anon_pipe` creates, so it is now read as a
+       `tokio::net::windows::named_pipe::NamedPipeServer` (`ChildPipeReader`,
+       `ChildStdoutReader`, `ChildStderrReader` in `deno_io`) through the I/O
+       completion port: a pending read holds no thread, and dropping one cancels
+       it. `ERROR_BROKEN_PIPE` reads as EOF, as before.
+
+     Not changed: `node:child_process` (its own stdio path) and the
+     `Deno.pipe`-style `AsyncPipeRead`, which still reads through tokio's
+     `ChildStdout`.
+
+     Test: `commandManyPipedChildrenDoNotExhaustBlockingPool`
+     (`tests/unit/command_test.ts`, Windows only): `4 * hardwareConcurrency + 4`
+     concurrent children each write 256 KiB to a piped stdout with stderr piped
+     and quiet; all must finish within 60 s.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118) are what the prebuilt `libdenort` carries. The CLI-side parts (for example writing

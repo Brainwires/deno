@@ -1577,6 +1577,59 @@ Deno.test(
   },
 );
 
+// A pending read of a child's stdout or stderr must not hold a thread of the
+// runtime's blocking pool (capped at four per CPU on Windows). With blocking
+// reads, enough children whose stderr stays quiet filled the pool; the stdout
+// reads then never ran, every child blocked writing a full pipe, and none of
+// them ever exited.
+Deno.test(
+  {
+    ignore: Deno.build.os !== "windows",
+    permissions: { run: true, read: true },
+  },
+  async function commandManyPipedChildrenDoNotExhaustBlockingPool() {
+    // More pending reads than the pool has threads: two per child.
+    const count = 4 * navigator.hardwareConcurrency + 4;
+    // Well past a 64 KiB pipe buffer, so each child waits for its reader.
+    const script = "const b = new Uint8Array(256 * 1024).fill(97); " +
+      "let o = 0; while (o < b.length) o += Deno.stdout.writeSync(b.subarray(o));";
+    const children = Array.from(
+      { length: count },
+      () =>
+        new Deno.Command(Deno.execPath(), {
+          args: ["eval", script],
+          stdin: "null",
+          stdout: "piped",
+          stderr: "piped",
+        }).spawn(),
+    );
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const stalled = new Promise<"stalled">((resolve) => {
+      timer = setTimeout(() => resolve("stalled"), 60_000);
+    });
+    try {
+      const outcome = await Promise.race([
+        Promise.all(children.map((c) => c.output())),
+        stalled,
+      ]);
+      assert(outcome !== "stalled", `${count} piped children never finished`);
+      for (const { success, stdout } of outcome) {
+        assert(success);
+        assertEquals(stdout.length, 256 * 1024);
+      }
+    } finally {
+      clearTimeout(timer);
+      for (const child of children) {
+        try {
+          child.kill();
+        } catch {
+          // it already exited
+        }
+      }
+    }
+  },
+);
+
 // A child spawned on one thread must not inherit the pipe ends another thread
 // is creating for its own child at the same moment. When a long-lived child
 // picked up a short-lived child's stdout write end, the short child's

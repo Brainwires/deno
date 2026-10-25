@@ -1322,7 +1322,7 @@ fn spawn_child(
   let stdout_rid = child
     .stdout
     .take()
-    .map(tokio::process::ChildStdout::from_std)
+    .map(deno_io::ChildStdoutReader::from_std)
     .transpose()?
     .map(|stdout| state.resource_table.add(ChildStdoutResource::from(stdout)));
 
@@ -1336,7 +1336,7 @@ fn spawn_child(
   let stderr_rid = child
     .stderr
     .take()
-    .map(tokio::process::ChildStderr::from_std)
+    .map(deno_io::ChildStderrReader::from_std)
     .transpose()?
     .map(|stderr| state.resource_table.add(ChildStderrResource::from(stderr)));
 
@@ -2330,7 +2330,7 @@ mod deprecated {
     let stdout_rid = match child.stdout.take() {
       Some(child_stdout) => {
         #[cfg(windows)]
-        let child_stdout = tokio::process::ChildStdout::from_std(child_stdout)?;
+        let child_stdout = deno_io::ChildStdoutReader::from_std(child_stdout)?;
         let rid = state
           .resource_table
           .add(ChildStdoutResource::from(child_stdout));
@@ -2342,7 +2342,7 @@ mod deprecated {
     let stderr_rid = match child.stderr.take() {
       Some(child_stderr) => {
         #[cfg(windows)]
-        let child_stderr = tokio::process::ChildStderr::from_std(child_stderr)?;
+        let child_stderr = deno_io::ChildStderrReader::from_std(child_stderr)?;
         let rid = state
           .resource_table
           .add(ChildStderrResource::from(child_stderr));
