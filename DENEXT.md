@@ -4111,6 +4111,53 @@ where the changes are discussed.
      `3.0.0-rc.5`, where every access is allowed and nothing is asked);
      `prompt_names_the_choices`, `answers` (`cli/tools/jupyter/prompter.rs`).
 
+113. **`fix(check)`: a `compilerOptions.types` entry nothing resolves is an
+     error** (`feat/dx-batch`, CLI only; `cli/tsc/diagnostics.rs`,
+     `cli/type_checker.rs`, `cli/tools/check.rs`). For
+     [denoland/deno#32764](https://github.com/denoland/deno/issues/32764), which
+     upstream deferred to Deno 3.0 "together with a purpose-built diagnostic for
+     unresolvable `compilerOptions.types` entries (correct suggestion such as
+     `npm:@types/node` or removing the entry, pointed at the entry's position in
+     the config file)"; its prototype,
+     [denoland/deno#35693](https://github.com/denoland/deno/pull/35693), was
+     closed for the generic message. `"types": ["asdfasdf"]` passed
+     `deno check --check-engine=tsc` without a word (Deno's graph records the
+     unresolvable entry and the walk dropped it), the native engine reported the
+     compiler's bare TS2688, and a subpath entry such as `"vite/client"` passed
+     both (the generated project leaves subpath entries out).
+     - **One diagnostic on both engines**, from Deno's graph: an entry that is a
+       bare name nothing maps (no import map entry, no `node_modules`) gets
+       TS2688
+       `Cannot find type definition file for 'asdfasdf' in
+       "compilerOptions.types".`,
+       a hint
+       (`Write "npm:@types/asdfasdf" for the
+       package's types (or "npm:asdfasdf" when the package ships its own), or
+       remove the entry.`;
+       `"npm:vite/client"` for a subpath, `"npm:@types/scope__name"` for a
+       scoped package), and the entry's line and column in the config file with
+       a code frame. The native engine drops the compiler's own TS2688 for that
+       entry.
+     - **Left alone**: `"node"` and `"deno"` (Deno provides their types), an
+       entry the native engine's generated project provides as a type root
+       (`.deno/types/<entry>`, such as the Vitest types), and entries that
+       resolve (a mapped name, a `node_modules` package, an `npm:` / `jsr:`
+       specifier). A relative path that does not exist keeps its own error
+       (TS2307 / TS6053), and an entry whose resolution failed for another
+       reason keeps Deno's resolution message (upstream's prototype).
+     - This turns configs that passed into failures (a `"vite/client"` carried
+       over from a `tsconfig.json`, say), as upstream planned for 3.0; the hint
+       says what to write.
+
+     Tests: spec `check/compiler_options_types_not_found` (a bare entry and a
+     subpath entry, each on both engines; `"node"` beside them is fine; on
+     `3.0.0-rc.5` the in-process engine and the subpath entry pass);
+     `types_entry_suggestions`, `types_entries_are_found_in_the_config`,
+     `unresolved_types_entry_diagnostic` (`cli/tsc/diagnostics.rs`);
+     `ts2688_names_its_types_entry`,
+     `types_entries_the_generated_project_provides_resolve`
+     (`cli/tools/check.rs`).
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109) are what the
 prebuilt `libdenort` carries. The CLI-side parts (for example writing

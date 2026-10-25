@@ -229,6 +229,54 @@ impl Diagnostic {
     }
   }
 
+  /// denext: the diagnostic for an entry of `compilerOptions.types` that
+  /// names a type library nothing resolves (a bare name with no mapping, such
+  /// as `"asdfasdf"` or `"vite/client"` without a `node_modules`): `tsc`'s
+  /// TS2688, pointed at the entry in the config file, with what to write
+  /// instead (denoland/deno#32764). `None` for an entry this is not about: a
+  /// path, a URL or a `jsr:` / `npm:` specifier, which fail with their own
+  /// error, and `"node"`, whose types Deno provides.
+  pub fn maybe_from_unresolved_types_entry(
+    entry: &str,
+    config_specifier: &ModuleSpecifier,
+    config_text: Option<&str>,
+  ) -> Option<Self> {
+    let suggestion = types_entry_suggestion(entry)?;
+    let hint = if suggestion == format!("npm:{entry}") {
+      format!("Write \"{suggestion}\" to load it from npm, or remove the entry.")
+    } else {
+      format!(
+        "Write \"{suggestion}\" for the package's types (or \"npm:{entry}\" when the package ships its own), or remove the entry."
+      )
+    };
+    let position = config_text.and_then(|text| find_types_entry(text, entry));
+    Some(Self {
+      category: DiagnosticCategory::Error,
+      code: 2688,
+      start: Some(
+        position
+          .as_ref()
+          .map(|p| p.start.clone())
+          .unwrap_or(Position { line: 0, character: 0 }),
+      ),
+      end: position.as_ref().map(|p| p.end.clone()),
+      original_source_start: None,
+      message_text: Some(format!(
+        "Cannot find type definition file for '{entry}' in \"compilerOptions.types\".\n  {} {hint}",
+        colors::cyan("hint:"),
+      )),
+      message_chain: None,
+      source: None,
+      source_line: position.map(|p| p.line_text),
+      file_name: Some(config_specifier.to_string()),
+      related_information: None,
+      reports_deprecated: None,
+      reports_unnecessary: None,
+      other: Default::default(),
+      missing_specifier: None,
+    })
+  }
+
   pub fn maybe_from_resolution_error(
     error: &ResolutionError,
     bare_importable_pkg_names: &[String],
@@ -547,8 +595,140 @@ fn display_diagnostics(
 
 impl Error for Diagnostics {}
 
+/// The `npm:` specifier of the types a bare `compilerOptions.types` entry
+/// most likely means: `@types/<name>` for a package (`@types/scope__name` for
+/// a scoped one), the package itself for a subpath (`vite/client`). `None` for
+/// anything but a bare name, and for `"node"`.
+fn types_entry_suggestion(entry: &str) -> Option<String> {
+  let is_bare = !entry.is_empty()
+    && !entry.starts_with('.')
+    && !entry.starts_with('/')
+    && !entry.contains(':')
+    && !entry.contains('\\');
+  if !is_bare || entry == "node" {
+    return None;
+  }
+  let segments: Vec<&str> = entry.split('/').collect();
+  let (package, has_subpath) = match segments.as_slice() {
+    [scope, name, rest @ ..] if scope.starts_with('@') => {
+      (format!("{scope}/{name}"), !rest.is_empty())
+    }
+    [_scope] if entry.starts_with('@') => return None,
+    [name, rest @ ..] => (name.to_string(), !rest.is_empty()),
+    [] => return None,
+  };
+  if has_subpath || package.starts_with("@types/") {
+    return Some(format!("npm:{entry}"));
+  }
+  Some(match package.strip_prefix('@') {
+    Some(scoped) => format!("npm:@types/{}", scoped.replace('/', "__")),
+    None => format!("npm:@types/{package}"),
+  })
+}
+
+struct TypesEntryPosition {
+  start: Position,
+  end: Position,
+  line_text: String,
+}
+
+/// Where the string `entry` is in the `"types"` list of a config file's text:
+/// the first `"<entry>"` after a `"types"` key.
+fn find_types_entry(text: &str, entry: &str) -> Option<TypesEntryPosition> {
+  let types_key = text.find("\"types\"")?;
+  let quoted = deno_core::serde_json::to_string(entry).ok()?;
+  let offset = types_key + text[types_key..].find(&quoted)?;
+  let line_start = text[..offset].rfind('\n').map(|i| i + 1).unwrap_or(0);
+  let line = text[..offset].matches('\n').count() as u64;
+  let line_end = text[offset..]
+    .find('\n')
+    .map(|i| offset + i)
+    .unwrap_or(text.len());
+  let character = text[line_start..offset].chars().count() as u64;
+  Some(TypesEntryPosition {
+    start: Position { line, character },
+    end: Position {
+      line,
+      character: character + quoted.chars().count() as u64,
+    },
+    line_text: text[line_start..line_end].trim_end_matches('\r').to_string(),
+  })
+}
+
 #[cfg(test)]
 mod tests {
+  #[test]
+  fn types_entry_suggestions() {
+    use super::types_entry_suggestion as suggest;
+    assert_eq!(suggest("asdfasdf").as_deref(), Some("npm:@types/asdfasdf"));
+    assert_eq!(suggest("vite/client").as_deref(), Some("npm:vite/client"));
+    assert_eq!(
+      suggest("@scope/pkg").as_deref(),
+      Some("npm:@types/scope__pkg")
+    );
+    assert_eq!(
+      suggest("@scope/pkg/sub").as_deref(),
+      Some("npm:@scope/pkg/sub")
+    );
+    assert_eq!(suggest("@types/bun").as_deref(), Some("npm:@types/bun"));
+    for not_bare in [
+      "node",
+      "",
+      "./types.d.ts",
+      "../x",
+      "/abs.d.ts",
+      "npm:@types/node",
+      "jsr:@std/x",
+      "https://example.com/x.d.ts",
+      "@scope",
+    ] {
+      assert_eq!(suggest(not_bare), None, "{not_bare}");
+    }
+  }
+
+  #[test]
+  fn types_entries_are_found_in_the_config() {
+    let text = "{\n  \"compilerOptions\": {\n    \"types\": [\"node\", \"asdfasdf\"]\n  }\n}\n";
+    let position = super::find_types_entry(text, "asdfasdf").unwrap();
+    assert_eq!(position.start, super::Position { line: 2, character: 22 });
+    assert_eq!(position.end, super::Position { line: 2, character: 32 });
+    assert_eq!(position.line_text, "    \"types\": [\"node\", \"asdfasdf\"]");
+    // Only within the list: an earlier mention of the name does not count.
+    let text = "{ \"imports\": { \"x\": \"./asdfasdf\" }, \"asdfasdf\": 1, \"compilerOptions\": { \"types\": [\"asdfasdf\"] } }";
+    let position = super::find_types_entry(text, "asdfasdf").unwrap();
+    assert_eq!(position.start.character, 82);
+    assert!(super::find_types_entry("{}", "asdfasdf").is_none());
+  }
+
+  #[test]
+  fn unresolved_types_entry_diagnostic() {
+    let config = deno_ast::ModuleSpecifier::parse("file:///p/deno.json").unwrap();
+    let text = "{ \"compilerOptions\": { \"types\": [\"asdfasdf\"] } }";
+    let diagnostic = super::Diagnostic::maybe_from_unresolved_types_entry(
+      "asdfasdf",
+      &config,
+      Some(text),
+    )
+    .unwrap();
+    assert_eq!(diagnostic.code, 2688);
+    assert_eq!(diagnostic.file_name.as_deref(), Some("file:///p/deno.json"));
+    assert_eq!(diagnostic.start.as_ref().unwrap().character, 33);
+    let message = test_util::strip_ansi_codes(
+      diagnostic.message_text.as_deref().unwrap(),
+    )
+    .to_string();
+    assert_eq!(
+      message,
+      "Cannot find type definition file for 'asdfasdf' in \"compilerOptions.types\".\n  hint: Write \"npm:@types/asdfasdf\" for the package's types (or \"npm:asdfasdf\" when the package ships its own), or remove the entry."
+    );
+    assert!(
+      super::Diagnostic::maybe_from_unresolved_types_entry(
+        "node", &config, Some(text)
+      )
+      .is_none()
+    );
+  }
+
   use deno_core::serde_json;
   use deno_core::serde_json::json;
   use test_util::strip_ansi_codes;

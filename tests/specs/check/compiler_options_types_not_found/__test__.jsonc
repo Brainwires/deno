@@ -1,0 +1,29 @@
+{
+  // An entry of `compilerOptions.types` that nothing resolves is an error on
+  // both engines, pointed at the entry with what to write instead
+  // (denoland/deno#32764). "node" stays fine: Deno provides its types.
+  "tests": {
+    "native": {
+      "args": "check main.ts",
+      "output": "check.out",
+      "exitCode": 1
+    },
+    "tsc": {
+      "args": "check --check-engine=tsc main.ts",
+      "output": "check.out",
+      "exitCode": 1
+    },
+    "subpath_native": {
+      "cwd": "subpath",
+      "args": "check main.ts",
+      "output": "subpath.out",
+      "exitCode": 1
+    },
+    "subpath_tsc": {
+      "cwd": "subpath",
+      "args": "check --check-engine=tsc main.ts",
+      "output": "subpath.out",
+      "exitCode": 1
+    }
+  }
+}
