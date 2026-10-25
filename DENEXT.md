@@ -4181,16 +4181,22 @@ where the changes are discussed.
      and never verifies. One observable difference: P-521 ECDSA signatures were
      randomized (p521 0.13's `sign_prehash` drew the nonce from `OsRng`) and are
      now RFC 6979 deterministic, like every other curve; both verify everywhere.
-     Tests: known-answer vectors produced independently (Python `cryptography` /
-     OpenSSL 3.6) and run before and after the migration —
-     `ext/node_crypto/ec_golden_tests.rs` (P-224, P-256, P-384, P-521,
-     secp256k1: PKCS#8 / SEC1 / SPKI DER, raw and compressed points, JWK, DER
-     and P1363 RFC 6979 signatures with every digest, the RFC 6979 A.2.5 vector,
-     ECDH secrets and public keys) and `ext/crypto/ec_golden_tests.rs`
-     (WebCrypto import / export in every format, sign / verify with every hash,
-     ECDH `deriveBits`, generated PKCS#8 layout), plus
-     `signature_format_known_answer` (`runtime/ops/desktop_update/manifest.rs`)
-     and `p256_spki_pem_known_answer` (`cli/tools/publish/provenance.rs`);
+     The laufey pin (`LAUFEY_SHA`, the `laufey` git dependency of
+     `cli/rt_desktop/Cargo.toml`) moves from `a0f2c26` to `f5325d4` (laufey
+     `development-denext`), which takes the Linux passkey host
+     (`webauthn-linux`, its own lockfile) off crypto-bigint 0.5.5 for the same
+     advisory: libwebauthn and snow from Brainwires forks on p256 0.14; the
+     laufey crate and API 49 are unchanged. Tests: known-answer vectors produced
+     independently (Python `cryptography` / OpenSSL 3.6) and run before and
+     after the migration — `ext/node_crypto/ec_golden_tests.rs` (P-224, P-256,
+     P-384, P-521, secp256k1: PKCS#8 / SEC1 / SPKI DER, raw and compressed
+     points, JWK, DER and P1363 RFC 6979 signatures with every digest, the RFC
+     6979 A.2.5 vector, ECDH secrets and public keys) and
+     `ext/crypto/ec_golden_tests.rs` (WebCrypto import / export in every format,
+     sign / verify with every hash, ECDH `deriveBits`, generated PKCS#8 layout),
+     plus `signature_format_known_answer`
+     (`runtime/ops/desktop_update/manifest.rs`) and `p256_spki_pem_known_answer`
+     (`cli/tools/publish/provenance.rs`);
      `cargo test -p deno_crypto -p deno_node_crypto -p deno_crypto_provider`.
 
 111. **`fix(npm)`: a jailed script's host list binds every program, and
@@ -4605,10 +4611,10 @@ where the changes are discussed.
 
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
-118) are what the prebuilt `libdenort` carries. The CLI-side parts (for example writing
-`LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
-in the branch too, but a stock CLI does not run them; denext's own launcher
-provides that environment.
+118) are what the prebuilt `libdenort` carries. The CLI-side parts (for example
+writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's
+launchers) are in the branch too, but a stock CLI does not run them; denext's
+own launcher provides that environment.
 
 The laufey backend hosts are built from
 [Brainwires/laufey](https://github.com/Brainwires/laufey) branch
