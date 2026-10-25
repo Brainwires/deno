@@ -259,6 +259,9 @@ pub struct JailConfig {
   /// `supplyChain.jailScripts.net`
   pub net: bool,
   pub packages: BTreeMap<String, JailPackageConfig>,
+  /// `supplyChain.jailScripts.upstreamByName`: the installer's upstream
+  /// proxy is asked for a checked host by name, not by address.
+  pub upstream_by_name: bool,
   /// The project's own files with secrets (`.npmrc`, `.env*`).
   pub project_secret_files: Vec<PathBuf>,
   outside_links: OnceLock<Vec<PathBuf>>,
@@ -299,11 +302,18 @@ impl JailConfig {
       explicit,
       net,
       packages,
+      upstream_by_name: false,
       project_secret_files,
       outside_links: Default::default(),
       warned: Default::default(),
       warned_net: Default::default(),
     }
+  }
+
+  /// Sets `upstream_by_name`.
+  pub fn with_upstream_by_name(mut self, upstream_by_name: bool) -> Self {
+    self.upstream_by_name = upstream_by_name;
+    self
   }
 }
 
@@ -903,7 +913,8 @@ async fn run_in_dirs(
       let allow = super::jail_proxy::AllowList::parse(hosts)
         .map_err(|err| deno_core::anyhow::anyhow!("jail-scripts: {err}"))?
         .with_allow_private(allow_private);
-      let upstream = super::jail_proxy::Upstream::from_env(s.env_vars);
+      let upstream = super::jail_proxy::Upstream::from_env(s.env_vars)
+        .with_by_name(config.upstream_by_name);
       Some(
         super::jail_proxy::JailProxy::start(allow, upstream)
           .await

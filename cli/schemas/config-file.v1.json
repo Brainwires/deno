@@ -142,6 +142,11 @@
                 "type": "boolean",
                 "description": "Allow the network for every jailed script."
               },
+              "upstreamByName": {
+                "type": "boolean",
+                "default": false,
+                "description": "When the installer's environment names an http:// proxy (HTTPS_PROXY / HTTP_PROXY / ALL_PROXY), ask it for an allowed host by NAME (CONNECT host:port, http://host/...) instead of by the address the jail checked. For corporate proxies that only accept host names. The jail still resolves the name first and refuses one that leads to this machine or its network, but the upstream proxy then resolves the name again itself, so a name whose DNS answers differently there (rebinding) can reach what the upstream reaches. Without an upstream proxy it has no effect."
+              },
               "packages": {
                 "type": "object",
                 "description": "Per-package exceptions, keyed by npm package name.",

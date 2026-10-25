@@ -4240,6 +4240,25 @@ where the changes are discussed.
        (a mirror on the local network; it needs a `net` host list, a config
        error otherwise, and never covers the hosts a package declares for
        itself). A name that doesn't resolve is a `502`.
+     - **Corporate proxies that only take host names
+       (`supplyChain.jailScripts.upstreamByName`).** Some upstream proxies
+       refuse a `CONNECT` to an address, so jailed scripts that need the network
+       failed there. With `"upstreamByName": true` (default `false`) and an
+       upstream proxy configured, the jail still checks the allow-list and
+       resolves the name, refusing one that leads to an internal address exactly
+       as above, then asks the upstream for the NAME (`CONNECT host:port`,
+       `http://host/...`), which it resolves and reaches itself. The trade-off:
+       the address the upstream uses is no longer the one the jail checked, so a
+       name whose DNS answers differently at the upstream (rebinding between the
+       two lookups, or split-horizon DNS) can reach whatever the upstream
+       reaches; the corporate proxy's own policy then holds. Without an upstream
+       proxy (or for a `NO_PROXY` host) it changes nothing. Without the flag, an
+       upstream that answers the address form with `400`, `403`, `502`, or `407`
+       although credentials were sent fails the tunnel with a `502` whose body,
+       and a warning in the install log, say to set `"upstreamByName": true` if
+       this network's proxy only accepts host names; there is no automatic
+       fallback. A forwarded `http://` request passes the answer through
+       unchanged (it may be the server's own) and only logs the warning.
 
      Tests: `npm/supply_chain_jail`
      (`listed_name_resolving_to_loopback_refused`, Linux: a listed
@@ -4258,13 +4277,16 @@ where the changes are discussed.
      `forwards_allowed_and_refuses_others`, `tunnels_allowed`,
      `chains_through_upstream_proxy`, `internal_addresses`,
      `resolve_then_refuse`, `refuses_names_that_resolve_internal`,
-     `allow_private_and_pinned_address`, `upstream_gets_the_checked_address`),
+     `allow_private_and_pinned_address`, `upstream_gets_the_checked_address`,
+     `upstream_refusing_addresses_hints_by_name`,
+     `upstream_missing_credentials_is_not_a_name_problem`, `upstream_by_name`),
      `package_net_false_wins`, `os_net_choice`, `proxy_env`,
      `new_executables_removed`, `home_paths` and the proxy grant in `clamp`
      (`cli/supply_chain/jail.rs`), `profile_proxy_only` (`sandbox_macos`),
      `seccomp_program_semantics` (a small BPF interpreter over the generated
      program, `sandbox_linux`), and the host forms, `executables` and
-     `allowPrivate` in `test_to_supply_chain_config` (`libs/config/deno_json`).
+     `allowPrivate`, `upstreamByName` in `test_to_supply_chain_config`
+     (`libs/config/deno_json`).
 
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110) are

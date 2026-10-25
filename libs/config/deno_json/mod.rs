@@ -134,6 +134,12 @@ pub struct SupplyChainConfig {
   /// `jailScripts.packages`: per-package exceptions, keyed by npm package
   /// name.
   pub jail_packages: BTreeMap<String, JailPackageConfig>,
+  /// `jailScripts.upstreamByName`: through the installer's own upstream
+  /// proxy, ask for an allowed host by its name (`CONNECT host:port`) after
+  /// the jail's proxy has checked where the name resolves, instead of for the
+  /// checked address. For corporate proxies that only accept host names; the
+  /// upstream then resolves the name itself (denext item 111).
+  pub jail_upstream_by_name: bool,
   /// `advisoryCheck` (`advisory-check`): `"on"`, `"off"` or `"required"`.
   pub advisory_check: Option<String>,
   /// `lowDownloadCheck` (`low-download-check`): `"off"`, `"warn"`,
@@ -242,6 +248,8 @@ enum RawJailScripts {
 struct RawJailScriptsObject {
   net: Option<bool>,
   packages: Option<BTreeMap<String, JailPackageConfig>>,
+  #[serde(rename = "upstreamByName")]
+  upstream_by_name: bool,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Hash, PartialEq)]
@@ -2853,6 +2861,7 @@ impl ConfigFile {
     let base_dir = deno_path_util::url_to_file_path(&self.specifier)
       .ok()
       .and_then(|p| p.parent().map(|p| p.to_path_buf()));
+    let mut jail_upstream_by_name = false;
     let (jail_scripts, jail_net, jail_packages) = match raw.jail_scripts {
       None => (None, None, BTreeMap::new()),
       Some(RawJailScripts::Bool(value)) => (Some(value), None, BTreeMap::new()),
@@ -2861,6 +2870,7 @@ impl ConfigFile {
         // configures the default one (DENEXT.md item 108), so a platform that
         // can't confine stays quiet about it
         let asks_for_jail = obj.net.is_some() || obj.packages.is_none();
+        jail_upstream_by_name = obj.upstream_by_name;
         let mut packages = BTreeMap::new();
         for (name, mut config) in obj.packages.unwrap_or_default() {
           let name = name.strip_prefix("npm:").unwrap_or(&name).to_string();
@@ -2917,6 +2927,7 @@ impl ConfigFile {
       jail_scripts,
       jail_net,
       jail_packages,
+      jail_upstream_by_name,
       advisory_check: raw.advisory_check,
       low_download_check: raw.low_download_check,
       low_download_threshold: raw.low_download_threshold,
@@ -4495,6 +4506,38 @@ mod tests {
     let config =
       get_result(r#"{ "supplyChain": { "jailScripts": false } }"#).unwrap();
     assert_eq!(config.jail_scripts, Some(false));
+    assert!(!config.jail_upstream_by_name);
+
+    // item 111: ask the installer's upstream proxy for the checked name
+    // rather than its address; off unless set, a boolean only
+    let config = get_result(
+      r#"{ "supplyChain": { "jailScripts": { "upstreamByName": true, "packages": {} } } }"#,
+    )
+    .unwrap();
+    assert!(config.jail_upstream_by_name);
+    let config = get_result(
+      r#"{ "supplyChain": { "jailScripts": { "upstreamByName": false } } }"#,
+    )
+    .unwrap();
+    assert!(!config.jail_upstream_by_name);
+    assert_eq!(config.jail_scripts, Some(true));
+    assert!(
+      !get_result(r#"{ "supplyChain": { "jailScripts": { "net": true } } }"#)
+        .unwrap()
+        .jail_upstream_by_name
+    );
+    for bad in [r#""yes""#, "1", "null", "[]", "{}"] {
+      let json = format!(
+        r#"{{ "supplyChain": {{ "jailScripts": {{ "upstreamByName": {bad} }} }} }}"#
+      );
+      assert!(get_result(&json).is_err(), "{bad}");
+    }
+    assert!(
+      get_result(
+        r#"{ "supplyChain": { "jailScripts": { "upstreamByname": true } } }"#
+      )
+      .is_err()
+    );
 
     // typos in a security setting are errors, not silently ignored
     assert!(get_result(r#"{ "supplyChain": { "paranoia": true } }"#).is_err());

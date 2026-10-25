@@ -26,7 +26,10 @@
 //! When the installer's own environment names an `http://` proxy
 //! (`HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY`, minus `NO_PROXY`), allowed
 //! connections go through it, so a network that only reaches the internet
-//! through a proxy keeps working.
+//! through a proxy keeps working. The upstream is asked for the address the
+//! jail checked, so it can't resolve the name differently; with
+//! `supplyChain.jailScripts.upstreamByName` (a proxy that only takes host
+//! names) it is asked for the name, after the same check.
 
 use std::collections::HashMap;
 use std::ffi::OsString;
@@ -329,10 +332,13 @@ impl ForwardHead {
 
   /// The head an upstream proxy takes: the absolute form, its host the
   /// address the jail checked (the proxy must not resolve the name again),
-  /// the client's `Host` header unchanged.
-  fn proxy_head(&self, pinned: IpAddr) -> Vec<u8> {
+  /// or with `None` the name as the client sent it (`upstreamByName`), the
+  /// client's `Host` header unchanged.
+  fn proxy_head(&self, pinned: Option<IpAddr>) -> Vec<u8> {
     let mut url = self.url.clone();
-    let _ = url.set_ip_host(pinned);
+    if let Some(pinned) = pinned {
+      let _ = url.set_ip_host(pinned);
+    }
     self.build(url.as_str())
   }
 }
@@ -482,6 +488,9 @@ pub struct Upstream {
   https: Option<UpstreamProxy>,
   http: Option<UpstreamProxy>,
   no_proxy: Vec<String>,
+  /// Ask the upstream for a checked target by name rather than by address
+  /// (`supplyChain.jailScripts.upstreamByName`).
+  by_name: bool,
 }
 
 impl Upstream {
@@ -511,7 +520,17 @@ impl Upstream {
             .collect()
         })
         .unwrap_or_default(),
+      by_name: false,
     }
+  }
+
+  /// Asks the upstream proxy for a target by its name (after the jail has
+  /// checked where it resolves) instead of by the checked address: for
+  /// proxies that only accept host names. The upstream then resolves the
+  /// name itself.
+  pub fn with_by_name(mut self, by_name: bool) -> Self {
+    self.by_name = by_name;
+    self
   }
 
   fn for_target(
@@ -650,12 +669,71 @@ async fn connect_pinned(addrs: &[SocketAddr]) -> io::Result<TcpStream> {
   Err(last)
 }
 
+/// What the jail says when the upstream proxy refuses a checked address in a
+/// way that suggests it only takes host names (it is also logged, once).
+const BY_NAME_HINT: &str = "if this network's proxy only accepts host names, set \"upstreamByName\": true in supplyChain.jailScripts in deno.json (the jail still refuses names that resolve to internal addresses, but the proxy then resolves the name again itself)";
+
+fn warn_by_name_hint(what: &str) {
+  static WARNED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+  if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+    log::warn!("jail-scripts: {what}; {BY_NAME_HINT}.");
+  }
+}
+
+/// The status code of a response head (`HTTP/1.1 403 Forbidden`).
+fn response_status(head: &[u8]) -> Option<u16> {
+  let line = head.split(|b| *b == b'\r').next()?;
+  let code = line.split(|b| *b == b' ').nth(1)?;
+  if code.len() != 3 {
+    return None;
+  }
+  std::str::from_utf8(code).ok()?.parse().ok()
+}
+
+/// Whether an upstream proxy's answer to a request for an ADDRESS suggests it
+/// wants a host name instead: `400`, `403`, a `502` (it couldn't or wouldn't
+/// connect), or a `407` although credentials were sent (a destination rule,
+/// not missing authentication).
+fn suggests_name(status: u16, sent_credentials: bool) -> bool {
+  matches!(status, 400 | 403 | 502) || (status == 407 && sent_credentials)
+}
+
+/// Why a tunnel through the upstream proxy failed.
+#[derive(Debug)]
+enum ViaError {
+  Io(io::Error),
+  /// The upstream answered the `CONNECT` with this status (`None`: a
+  /// malformed status line).
+  Refused(Option<u16>),
+}
+
+impl From<io::Error> for ViaError {
+  fn from(err: io::Error) -> Self {
+    ViaError::Io(err)
+  }
+}
+
+impl std::fmt::Display for ViaError {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    match self {
+      ViaError::Io(err) => err.fmt(f),
+      ViaError::Refused(Some(status)) => {
+        write!(f, "the upstream proxy refused the tunnel ({status})")
+      }
+      ViaError::Refused(None) => {
+        write!(f, "the upstream proxy refused the tunnel")
+      }
+    }
+  }
+}
+
 /// Opens a tunnel to `target` through an upstream proxy; returns it and the
 /// bytes that already came through it.
 async fn connect_via(
   proxy: &UpstreamProxy,
   target: &str,
-) -> io::Result<(TcpStream, Vec<u8>)> {
+) -> Result<(TcpStream, Vec<u8>), ViaError> {
   let mut stream = connect(&proxy.host, proxy.port).await?;
   let mut request = format!("CONNECT {target} HTTP/1.1\r\nHost: {target}\r\n");
   if let Some(auth) = &proxy.authorization {
@@ -664,16 +742,58 @@ async fn connect_via(
   request.push_str("\r\n");
   stream.write_all(request.as_bytes()).await?;
   let Some((head, rest)) = read_head(&mut stream).await? else {
-    return Err(io::Error::other("the upstream proxy closed the connection"));
+    return Err(
+      io::Error::other("the upstream proxy closed the connection").into(),
+    );
   };
-  let status_ok = head
-    .split(|b| *b == b' ')
-    .nth(1)
-    .is_some_and(|code| code.first() == Some(&b'2') && code.len() == 3);
-  if !status_ok {
-    return Err(io::Error::other("the upstream proxy refused the tunnel"));
+  match response_status(&head) {
+    Some(200..=299) => Ok((stream, rest)),
+    status => Err(ViaError::Refused(status)),
   }
-  Ok((stream, rest))
+}
+
+/// Copies a forwarded request's response from an upstream proxy, logging the
+/// `upstreamByName` hint when its status suggests the upstream refused the
+/// checked address (it may also be the server's own answer, so it is passed
+/// through unchanged).
+async fn relay_via_upstream(
+  client: &mut TcpStream,
+  server: &mut TcpStream,
+  target: &str,
+  sent_credentials: bool,
+) -> io::Result<()> {
+  let (mut client_read, mut client_write) = client.split();
+  let (mut server_read, mut server_write) = server.split();
+  let up = async {
+    tokio::io::copy(&mut client_read, &mut server_write).await?;
+    server_write.shutdown().await
+  };
+  let down = async {
+    // enough of the response for its status line
+    let mut first = Vec::with_capacity(512);
+    let mut chunk = [0u8; 512];
+    while !first.contains(&b'\n') && first.len() < 4096 {
+      let n = server_read.read(&mut chunk).await?;
+      if n == 0 {
+        break;
+      }
+      first.extend_from_slice(&chunk[..n]);
+    }
+    if let Some(status) = response_status(&first)
+      && suggests_name(status, sent_credentials)
+    {
+      warn_by_name_hint(&format!(
+        "the upstream proxy (or the server) answered {status} to a request for {target} by its checked address"
+      ));
+    }
+    client_write.write_all(&first).await?;
+    tokio::io::copy(&mut server_read, &mut client_write).await?;
+    client_write.shutdown().await
+  };
+  // the response is what matters: an upstream that answers before reading a
+  // request body, then closes, fails the upload direction only
+  let (_, down) = tokio::join!(up, down);
+  down
 }
 
 async fn handle(
@@ -740,35 +860,58 @@ async fn handle(
   };
   let tunnel = matches!(request, Request::Tunnel { .. });
   let via = upstream.for_target(host, tunnel);
+  // `upstreamByName`: the upstream is asked for the name, which the checks
+  // above have passed; it resolves the name itself
+  let by_name = upstream.by_name;
+  // whether the upstream's refusal of a checked address suggests it wants
+  // the name (a listed IP literal has none to send)
+  let name_may_help = !by_name && matches!(host, ProxyHost::Domain(_));
+  let mut wants_name = false;
   let server = match (&request, via) {
+    (Request::Tunnel { .. }, Some(proxy)) if by_name => {
+      connect_via(proxy, &target)
+        .await
+        .map(|(stream, early)| (stream, early, None))
+    }
     (Request::Tunnel { .. }, Some(proxy)) => {
       // the user's own proxy may be on a private address; the target it is
       // asked for is the checked address
-      let mut result = Err(io::Error::other("no addresses"));
+      let mut result = Err(ViaError::Refused(None));
       for addr in &addrs {
         result = connect_via(proxy, &addr.to_string()).await;
-        if result.is_ok() {
-          break;
+        match &result {
+          Ok(_) => break,
+          Err(ViaError::Refused(Some(status)))
+            if suggests_name(*status, proxy.authorization.is_some()) =>
+          {
+            wants_name = name_may_help;
+          }
+          Err(_) => {}
         }
       }
       result.map(|(stream, early)| (stream, early, None))
     }
     (Request::Forward { .. }, Some(proxy)) => connect(&proxy.host, proxy.port)
       .await
-      .map(|stream| (stream, Vec::new(), Some(addrs[0].ip()))),
+      .map_err(ViaError::Io)
+      .map(|stream| (stream, Vec::new(), (!by_name).then(|| addrs[0].ip()))),
     (_, None) => connect_pinned(&addrs)
       .await
+      .map_err(ViaError::Io)
       .map(|stream| (stream, Vec::new(), None)),
   };
   let (mut server, early, pinned) = match server {
     Ok(server) => server,
     Err(err) => {
-      return respond(
-        &mut client,
-        "502 Bad Gateway",
-        &format!("jail-scripts: couldn't reach {target}: {err}"),
-      )
-      .await;
+      let mut message = format!("jail-scripts: couldn't reach {target}: {err}");
+      if wants_name {
+        warn_by_name_hint(&format!(
+          "the upstream proxy refused a tunnel to {target} by its checked address ({err})"
+        ));
+        message.push_str("; ");
+        message.push_str(BY_NAME_HINT);
+      }
+      return respond(&mut client, "502 Bad Gateway", &message).await;
     }
   };
   match request {
@@ -778,9 +921,9 @@ async fn handle(
         .await?;
       client.write_all(&early).await?;
     }
-    Request::Forward { head, .. } => {
-      let mut out = match (via, pinned) {
-        (Some(proxy), Some(pinned)) => {
+    Request::Forward { ref head, .. } => {
+      let mut out = match via {
+        Some(proxy) => {
           let mut out = head.proxy_head(pinned);
           if let Some(auth) = &proxy.authorization {
             out.extend_from_slice(
@@ -789,7 +932,7 @@ async fn handle(
           }
           out
         }
-        _ => head.origin_head(),
+        None => head.origin_head(),
       };
       out.extend_from_slice(b"\r\n");
       server.write_all(&out).await?;
@@ -797,6 +940,17 @@ async fn handle(
   }
   if !rest.is_empty() {
     server.write_all(&rest).await?;
+  }
+  if let (Request::Forward { .. }, Some(proxy)) = (&request, via)
+    && name_may_help
+  {
+    return relay_via_upstream(
+      &mut client,
+      &mut server,
+      &target,
+      proxy.authorization.is_some(),
+    )
+    .await;
   }
   tokio::io::copy_bidirectional(&mut client, &mut server).await?;
   Ok(())
@@ -917,17 +1071,24 @@ mod tests {
     );
     // an upstream proxy gets the checked address, the Host header as sent
     assert_eq!(
-      String::from_utf8(head.proxy_head("93.184.215.14".parse().unwrap()))
-        .unwrap(),
+      String::from_utf8(
+        head.proxy_head(Some("93.184.215.14".parse().unwrap()))
+      )
+      .unwrap(),
       "GET http://93.184.215.14:8080/a/b?c=d HTTP/1.1\r\nHost: example.com:8080\r\nAccept: */*\r\nConnection: close\r\n"
     );
     assert_eq!(
-      String::from_utf8(head.proxy_head("2001:db8::1".parse().unwrap()))
+      String::from_utf8(head.proxy_head(Some("2001:db8::1".parse().unwrap())))
         .unwrap()
         .lines()
         .next()
         .unwrap(),
       "GET http://[2001:db8::1]:8080/a/b?c=d HTTP/1.1"
+    );
+    // `upstreamByName`: the name, as sent
+    assert_eq!(
+      String::from_utf8(head.proxy_head(None)).unwrap(),
+      "GET http://example.com:8080/a/b?c=d HTTP/1.1\r\nHost: example.com:8080\r\nAccept: */*\r\nConnection: close\r\n"
     );
     // the default port
     let Ok(Request::Forward { port, .. }) =
@@ -1436,5 +1597,205 @@ mod tests {
       "{}",
       heads[1]
     );
+  }
+
+  /// An upstream proxy that only takes host names: a request for an address
+  /// (`CONNECT 93.184.215.14:443`, `GET http://93.184.215.14/`) gets
+  /// `status`, a name `200` and `through`. Returns its port and the request
+  /// lines it saw.
+  async fn names_only_upstream(
+    status: &'static str,
+  ) -> (
+    u16,
+    Arc<std::sync::Mutex<Vec<String>>>,
+    tokio::task::JoinHandle<()>,
+  ) {
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let log = seen.clone();
+    let task = tokio::spawn(async move {
+      loop {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let (head, _) = read_head(&mut stream).await.unwrap().unwrap();
+        let head = String::from_utf8(head).unwrap();
+        let line = head.lines().next().unwrap().to_string();
+        let target = line.split(' ').nth(1).unwrap();
+        let host = target.strip_prefix("http://").unwrap_or(target);
+        let by_address = host.starts_with(|c: char| c.is_ascii_digit())
+          || host.starts_with('[');
+        log.lock().unwrap().push(line.clone());
+        let response = if by_address {
+          format!("HTTP/1.1 {status}\r\nContent-Length: 0\r\n\r\n")
+        } else if line.starts_with("CONNECT ") {
+          "HTTP/1.1 200 Connection established\r\n\r\nthrough".to_string()
+        } else {
+          "HTTP/1.1 200 OK\r\nContent-Length: 7\r\n\r\nthrough".to_string()
+        };
+        stream.write_all(response.as_bytes()).await.unwrap();
+        stream.shutdown().await.unwrap();
+      }
+    });
+    (port, seen, task)
+  }
+
+  fn proxy_env(upstream_port: u16, credentials: &str) -> Upstream {
+    let mut env = HashMap::new();
+    for name in ["HTTPS_PROXY", "HTTP_PROXY"] {
+      env.insert(
+        OsString::from(name),
+        OsString::from(format!(
+          "http://{credentials}127.0.0.1:{upstream_port}"
+        )),
+      );
+    }
+    Upstream::from_env(&env)
+  }
+
+  #[tokio::test]
+  async fn upstream_refusing_addresses_hints_by_name() {
+    for status in ["403 Forbidden", "400 Bad Request", "502 Bad Gateway"] {
+      let (upstream_port, seen, upstream_task) =
+        names_only_upstream(status).await;
+      let (resolver, _) = stub_resolver(&[(
+        "registry.example",
+        &["93.184.215.14", "93.184.215.15"],
+      )]);
+      let proxy = JailProxy::start_with(
+        list(&["registry.example", "93.184.215.16"]),
+        proxy_env(upstream_port, ""),
+        resolver,
+      )
+      .await
+      .unwrap();
+      // by default the upstream is asked for each checked address; its
+      // refusal fails the tunnel with a 502 that names the setting
+      let response = roundtrip(
+        proxy.port(),
+        "CONNECT registry.example:443 HTTP/1.1\r\n\r\n",
+      )
+      .await;
+      assert!(
+        response.starts_with("HTTP/1.1 502 "),
+        "{status}: {response}"
+      );
+      assert!(
+        response.contains("\"upstreamByName\": true"),
+        "{status}: {response}"
+      );
+      assert_eq!(
+        *seen.lock().unwrap(),
+        vec![
+          "CONNECT 93.184.215.14:443 HTTP/1.1",
+          "CONNECT 93.184.215.15:443 HTTP/1.1"
+        ]
+      );
+      // a listed address has no name to send: no hint
+      let response =
+        roundtrip(proxy.port(), "CONNECT 93.184.215.16:443 HTTP/1.1\r\n\r\n")
+          .await;
+      assert!(response.starts_with("HTTP/1.1 502 "), "{response}");
+      assert!(!response.contains("upstreamByName"), "{response}");
+      // a forwarded request: the answer is passed through (it may be the
+      // server's own), the hint is logged
+      let response = roundtrip(
+        proxy.port(),
+        "GET http://registry.example/p HTTP/1.1\r\nHost: registry.example\r\n\r\n",
+      )
+      .await;
+      assert!(
+        response.starts_with(&format!("HTTP/1.1 {status}\r\n")),
+        "{response}"
+      );
+      upstream_task.abort();
+    }
+  }
+
+  #[tokio::test]
+  async fn upstream_missing_credentials_is_not_a_name_problem() {
+    // a 407 without credentials asks for them, not for a name; with
+    // credentials sent it is a destination rule
+    for (credentials, hint) in [("", false), ("me:pw@", true)] {
+      let (upstream_port, _, upstream_task) =
+        names_only_upstream("407 Proxy Authentication Required").await;
+      let (resolver, _) =
+        stub_resolver(&[("registry.example", &["93.184.215.14"])]);
+      let proxy = JailProxy::start_with(
+        list(&["registry.example"]),
+        proxy_env(upstream_port, credentials),
+        resolver,
+      )
+      .await
+      .unwrap();
+      let response = roundtrip(
+        proxy.port(),
+        "CONNECT registry.example:443 HTTP/1.1\r\n\r\n",
+      )
+      .await;
+      assert!(response.starts_with("HTTP/1.1 502 "), "{response}");
+      assert!(response.contains("(407)"), "{response}");
+      assert_eq!(response.contains("upstreamByName"), hint, "{response}");
+      upstream_task.abort();
+    }
+  }
+
+  #[tokio::test]
+  async fn upstream_by_name() {
+    let (upstream_port, seen, upstream_task) =
+      names_only_upstream("403 Forbidden").await;
+    let (resolver, lookups) = stub_resolver(&[
+      ("registry.example", &["93.184.215.14"]),
+      ("rebound.example", &["127.0.0.1"]),
+      ("metadata.example", &["169.254.169.254"]),
+    ]);
+    let proxy = JailProxy::start_with(
+      list(&["registry.example", "rebound.example", "metadata.example"]),
+      proxy_env(upstream_port, "me:pw@").with_by_name(true),
+      resolver,
+    )
+    .await
+    .unwrap();
+    // the name goes to the upstream, which takes it
+    let response = roundtrip(
+      proxy.port(),
+      "CONNECT registry.example:443 HTTP/1.1\r\n\r\n",
+    )
+    .await;
+    assert!(
+      response.starts_with("HTTP/1.1 200 Connection Established\r\n\r\n"),
+      "{response}"
+    );
+    assert!(response.ends_with("through"), "{response}");
+    let response = roundtrip(
+      proxy.port(),
+      "GET http://registry.example/p HTTP/1.1\r\nHost: registry.example\r\n\r\n",
+    )
+    .await;
+    assert!(response.ends_with("through"), "{response}");
+    // the name is still checked first: one that resolves internal is
+    // refused, and the upstream never hears of it
+    for request in [
+      "CONNECT rebound.example:443 HTTP/1.1\r\n\r\n",
+      "GET http://rebound.example/ HTTP/1.1\r\n\r\n",
+      "CONNECT metadata.example:80 HTTP/1.1\r\n\r\n",
+    ] {
+      let response = roundtrip(proxy.port(), request).await;
+      assert!(response.starts_with("HTTP/1.1 403 "), "{response}");
+      assert!(response.contains("resolves to"), "{response}");
+    }
+    // and so is the allow-list
+    let response =
+      roundtrip(proxy.port(), "CONNECT other.example:443 HTTP/1.1\r\n\r\n")
+        .await;
+    assert!(response.starts_with("HTTP/1.1 403 "), "{response}");
+    assert_eq!(lookups.load(std::sync::atomic::Ordering::SeqCst), 5);
+    assert_eq!(
+      *seen.lock().unwrap(),
+      vec![
+        "CONNECT registry.example:443 HTTP/1.1",
+        "GET http://registry.example/p HTTP/1.1"
+      ]
+    );
+    upstream_task.abort();
   }
 }
