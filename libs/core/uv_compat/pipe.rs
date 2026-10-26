@@ -236,6 +236,7 @@ pub(crate) fn register_raw_fd(
     .map_err(std::io::Error::from)
 }
 
+#[cfg(unix)]
 impl std::os::unix::io::AsRawFd for RawFdWrapper {
   fn as_raw_fd(&self) -> RawFd {
     self.0

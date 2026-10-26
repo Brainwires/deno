@@ -4721,9 +4721,13 @@ where the changes are discussed.
        and the cwd's `.npmrc` / `.env*` were hidden, one level deep. Now `.env*`
        (`.env`, `.env.local`, `.envrc`, ...), `.dev.vars`, `.npmrc`, `.netrc`,
        `.pypirc` and `.git-credentials` are hidden at any depth under the
-       project (to 12 levels; `node_modules`, `.git` and the jail's own
-       directory are not entered; symlinks are not followed), so a monorepo's
-       `apps/web/.env.local` is as hidden as the root's.
+       project (to 12 levels and at most 20,000 directories, with a warning past
+       that; `node_modules`, `.git` and the jail's own directory are not
+       entered; symlinks are not followed; a project directory that is a
+       filesystem root or the home directory is looked into one level deep
+       only), scanned once per install when the first script is jailed (never by
+       a `deno` run that jails nothing), so a monorepo's `apps/web/.env.local`
+       is as hidden as the root's.
      - **Hard links (Medium):** under the Seatbelt profile above, `file-link` is
        allowed only when the source lies beneath a write root; Landlock already
        refused them (`REFER`).
@@ -4785,9 +4789,14 @@ where the changes are discussed.
      - **Dependencies.** tokio 1.47.1 → 1.54.1 (RUSTSEC-2026-0386, the unsound
        `AsyncFd` constructors; `signal-hook-mio` 0.2.4 → 0.2.5 and `mio` 1.0.4 →
        1.2.4 to let it move; `io-uring` dropped from the lock), crypto-bigint
-       0.7.6 (yanked) → 0.7.9. `cargo audit`: no vulnerabilities, no new
-       ignores; the unmaintained-crate warnings and the yanked clipboard-win
-       5.3.0 are as before.
+       0.7.6 (yanked) → 0.7.9, clipboard-win 5.3.0 (yanked) → 5.4.3.
+       `cargo
+       audit`: no vulnerabilities, no new ignores; the
+       unmaintained-crate warnings are as before. tokio 1.50 shortened its
+       worker thread name to `tokio-rt-worker`, which
+       `test/recursive_permissions_pledge` expects now. `libs/core/uv_compat`
+       registers its descriptors through `AsyncFd::register` (the deprecated
+       `AsyncFd::new` fails CI's clippy).
 
      Validated install scripts (macOS 15.8, the deny-by-default profile,
      `deno

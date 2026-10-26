@@ -284,9 +284,12 @@ pub struct JailConfig {
   /// `supplyChain.jailScripts.upstreamByName`: the installer's upstream
   /// proxy is asked for a checked host by name, not by address.
   pub upstream_by_name: bool,
-  /// The project's own files with secrets (`.npmrc`, `.env*`, `.dev.vars`,
-  /// `.netrc`, `.pypirc`, `.git-credentials`), at any depth.
-  pub project_secret_files: Vec<PathBuf>,
+  /// The project directories (the workspace root and the initial cwd) and
+  /// the `.npmrc` the installer resolved: where the secret files are looked
+  /// for, the first time a script is jailed.
+  project_dirs: Vec<PathBuf>,
+  npmrc_path: Option<PathBuf>,
+  project_secret_files: OnceLock<Vec<PathBuf>>,
   outside_links: OnceLock<Vec<PathBuf>>,
   warned: std::sync::atomic::AtomicBool,
   warned_net: std::sync::atomic::AtomicBool,
@@ -302,6 +305,10 @@ pub struct JailConfig {
 
 /// How deep below a project directory secret files are looked for.
 const SECRET_SCAN_DEPTH: usize = 12;
+/// How many directories the scan reads at most, over every project
+/// directory: a bound on the work an install does, not a security limit a
+/// script could lean on (a tree that large is reported, below).
+const SECRET_SCAN_MAX_DIRS: usize = 20_000;
 
 /// Whether a file name is one a project keeps secrets in: `.env`, `.env.*`,
 /// `.envrc`, `.dev.vars`, `.npmrc`, `.netrc`, `.pypirc`, `.git-credentials`.
@@ -313,10 +320,33 @@ fn is_secret_file_name(name: &str) -> bool {
     )
 }
 
+/// Whether a project directory is one to look into only one level deep: a
+/// filesystem root or the user's home directory (a project that resolved to
+/// one of those isn't a project tree, and walking it would read the disk).
+fn shallow_project_dir(dir: &Path) -> bool {
+  dir.parent().is_none()
+    || home_dir().is_some_and(|home| {
+      canonicalize_path(&home).unwrap_or(home)
+        == canonicalize_path(dir).unwrap_or_else(|_| dir.to_path_buf())
+    })
+}
+
 /// The secret files under `dirs` (workspace members included), to a bounded
-/// depth, not entering `node_modules` or `.git` and not following symlinks.
-fn project_secret_files(dirs: &[PathBuf]) -> Vec<PathBuf> {
-  fn visit(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
+/// depth and a bounded number of directories, not entering `node_modules`
+/// or `.git` and not following symlinks. Returns the files and whether the
+/// bound cut the scan short.
+fn project_secret_files(dirs: &[PathBuf]) -> (Vec<PathBuf>, bool) {
+  fn visit(
+    dir: &Path,
+    depth: usize,
+    max_depth: usize,
+    budget: &mut usize,
+    out: &mut Vec<PathBuf>,
+  ) {
+    if *budget == 0 {
+      return;
+    }
+    *budget -= 1;
     let Ok(entries) = std::fs::read_dir(dir) else {
       return;
     };
@@ -327,12 +357,12 @@ fn project_secret_files(dirs: &[PathBuf]) -> Vec<PathBuf> {
       let name = entry.file_name();
       let name = name.to_string_lossy();
       if file_type.is_dir() {
-        if depth < SECRET_SCAN_DEPTH
+        if depth < max_depth
           && name != "node_modules"
           && name != ".git"
           && name != ".jail"
         {
-          visit(&entry.path(), depth + 1, out);
+          visit(&entry.path(), depth + 1, max_depth, budget, out);
         }
       } else if !file_type.is_symlink() && is_secret_file_name(&name) {
         out.push(entry.path());
@@ -340,10 +370,16 @@ fn project_secret_files(dirs: &[PathBuf]) -> Vec<PathBuf> {
     }
   }
   let mut out = Vec::new();
+  let mut budget = SECRET_SCAN_MAX_DIRS;
   for dir in dirs {
-    visit(dir, 0, &mut out);
+    let max_depth = if shallow_project_dir(dir) {
+      0
+    } else {
+      SECRET_SCAN_DEPTH
+    };
+    visit(dir, 0, max_depth, &mut budget, &mut out);
   }
-  out
+  (out, budget == 0)
 }
 
 impl JailConfig {
@@ -354,29 +390,48 @@ impl JailConfig {
     project_dirs: &[PathBuf],
     npmrc_path: Option<&Path>,
   ) -> Self {
-    let mut secret_files = project_secret_files(project_dirs);
-    if let Some(path) = npmrc_path {
-      secret_files.push(path.to_path_buf());
-    }
-    let mut project_secret_files = secret_files
-      .into_iter()
-      .filter_map(|p| canonicalize_path(&p).ok())
-      .collect::<Vec<_>>();
-    project_secret_files.sort();
-    project_secret_files.dedup();
     Self {
       paranoid,
       net,
       packages,
       known_packages: BTreeMap::new(),
       upstream_by_name: false,
-      project_secret_files,
+      project_dirs: project_dirs.to_vec(),
+      npmrc_path: npmrc_path.map(Path::to_path_buf),
+      project_secret_files: Default::default(),
       outside_links: Default::default(),
       warned: Default::default(),
       warned_net: Default::default(),
       warned_netns: Default::default(),
       warned_declared: Default::default(),
     }
+  }
+
+  /// The project's own files with secrets (`.npmrc`, `.env*`, `.dev.vars`,
+  /// `.netrc`, `.pypirc`, `.git-credentials`) at any depth, canonical,
+  /// found the first time they are needed (the scan is work every install
+  /// shouldn't repeat, and `deno` runs that never jail a script shouldn't
+  /// do at all).
+  pub fn project_secret_files(&self) -> &[PathBuf] {
+    self.project_secret_files.get_or_init(|| {
+      let (mut files, cut_short) = project_secret_files(&self.project_dirs);
+      if cut_short {
+        log::warn!(
+          "{} jail-scripts: the project has more than {SECRET_SCAN_MAX_DIRS} directories; secret files (.env*, .npmrc, ...) deeper in it than the scan reached are not hidden from lifecycle scripts.",
+          colors::yellow("Warning")
+        );
+      }
+      if let Some(path) = &self.npmrc_path {
+        files.push(path.clone());
+      }
+      let mut files = files
+        .into_iter()
+        .filter_map(|p| canonicalize_path(&p).ok())
+        .collect::<Vec<_>>();
+      files.sort();
+      files.dedup();
+      files
+    })
   }
 
   /// Sets `upstream_by_name`.
@@ -1360,7 +1415,7 @@ async fn run_in_dirs(
   }
 
   let mut deny_read = credential_paths();
-  deny_read.extend(config.project_secret_files.iter().cloned());
+  deny_read.extend(config.project_secret_files().iter().cloned());
   // links in node_modules that lead outside it, where a package's own
   // `write` paths don't reach
   let deny_write = config
@@ -2074,7 +2129,7 @@ mod tests {
       None,
     );
     let mut found = config
-      .project_secret_files
+      .project_secret_files()
       .iter()
       .map(|p| {
         p.strip_prefix(&root)
@@ -2108,7 +2163,7 @@ mod tests {
     );
     assert_eq!(
       config
-        .project_secret_files
+        .project_secret_files()
         .iter()
         .filter(|p| p.ends_with(".npmrc"))
         .count(),

@@ -71,6 +71,7 @@ fn register_tty_fd(fd: RawFd) -> std::io::Result<AsyncFd<TtyFd>> {
   unsafe { AsyncFd::register(TtyFd(fd)) }.map_err(std::io::Error::from)
 }
 
+#[cfg(unix)]
 impl AsRawFd for TtyFd {
   fn as_raw_fd(&self) -> RawFd {
     self.0

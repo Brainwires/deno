@@ -2312,21 +2312,75 @@ mod tests {
     origin.await.unwrap();
   }
 
-  /// A server that reads everything the proxy sends it (the request head,
-  /// body and whatever follows, until the proxy closes its write side),
-  /// then answers.
+  /// A server that reads one framed request (its head, then a
+  /// `Content-Length` body or chunks through the terminator) as a real
+  /// server does, answers it, and then watches briefly for anything more
+  /// arriving on the connection. Returns what it read of the request and
+  /// what arrived after it (which must be nothing: the proxy forwards one
+  /// request per connection).
   async fn serve_reading_all(
     response: &'static [u8],
-  ) -> (u16, tokio::task::JoinHandle<Vec<u8>>) {
+  ) -> (u16, tokio::task::JoinHandle<(Vec<u8>, Vec<u8>)>) {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let task = tokio::spawn(async move {
       let (mut stream, _) = listener.accept().await.unwrap();
-      let mut seen = Vec::new();
-      stream.read_to_end(&mut seen).await.unwrap();
+      let (head, mut rest) = read_head(&mut stream).await.unwrap().unwrap();
+      let text = String::from_utf8_lossy(&head).to_ascii_lowercase();
+      let mut seen = head.clone();
+      let mut chunk = [0u8; 4096];
+      if let Some(line) =
+        text.lines().find(|l| l.starts_with("content-length:"))
+      {
+        let length: usize =
+          line["content-length:".len()..].trim().parse().unwrap();
+        while rest.len() < length {
+          let n = stream.read(&mut chunk).await.unwrap();
+          assert!(n > 0, "the request ended before its body");
+          rest.extend_from_slice(&chunk[..n]);
+        }
+        seen.extend_from_slice(&rest[..length]);
+        rest.drain(..length);
+      } else if text.contains("transfer-encoding: chunked") {
+        // through the last chunk (`0\r\n`) and the trailer section's blank
+        // line
+        loop {
+          let last = if rest.starts_with(b"0\r\n") {
+            Some(0)
+          } else {
+            rest
+              .windows(5)
+              .position(|w| w == b"\r\n0\r\n")
+              .map(|i| i + 2)
+          };
+          if let Some(z) = last
+            && let Some(e) = rest[z..].windows(4).position(|w| w == b"\r\n\r\n")
+          {
+            let end = z + e + 4;
+            seen.extend_from_slice(&rest[..end]);
+            rest.drain(..end);
+            break;
+          }
+          let n = stream.read(&mut chunk).await.unwrap();
+          assert!(n > 0, "the request ended before its last chunk");
+          rest.extend_from_slice(&chunk[..n]);
+        }
+      }
       stream.write_all(response).await.unwrap();
-      stream.shutdown().await.unwrap();
-      seen
+      // whatever follows the request within a moment (an EOF or a timeout
+      // ends the watch)
+      let mut extra = rest;
+      let _ = tokio::time::timeout(Duration::from_millis(300), async {
+        loop {
+          match stream.read(&mut chunk).await {
+            Ok(0) | Err(_) => break,
+            Ok(n) => extra.extend_from_slice(&chunk[..n]),
+          }
+        }
+      })
+      .await;
+      let _ = stream.shutdown().await;
+      (seen, extra)
     });
     (port, task)
   }
@@ -2352,13 +2406,15 @@ mod tests {
     )
     .await;
     assert!(response.ends_with("ok"), "{response}");
-    let seen = String::from_utf8(origin.await.unwrap()).unwrap();
+    let (seen, extra) = origin.await.unwrap();
+    let seen = String::from_utf8(seen).unwrap();
     assert_eq!(
       seen,
       format!(
         "GET /a HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
       )
     );
+    assert!(extra.is_empty(), "{}", String::from_utf8_lossy(&extra));
     // a Content-Length body: exactly that many bytes
     let (port, origin) = serve_reading_all(ok).await;
     let proxy = JailProxy::start(
@@ -2375,8 +2431,10 @@ mod tests {
     )
     .await;
     assert!(response.ends_with("ok"), "{response}");
-    let seen = String::from_utf8(origin.await.unwrap()).unwrap();
+    let (seen, extra) = origin.await.unwrap();
+    let seen = String::from_utf8(seen).unwrap();
     assert!(seen.ends_with("Connection: close\r\n\r\nabc"), "{seen}");
+    assert!(extra.is_empty(), "{}", String::from_utf8_lossy(&extra));
     // a chunked body: through the last chunk and the trailers, the body
     // arriving in pieces
     let (port, origin) = serve_reading_all(ok).await;
@@ -2402,7 +2460,8 @@ mod tests {
     let mut out = Vec::new();
     stream.read_to_end(&mut out).await.unwrap();
     assert!(out.ends_with(b"ok"), "{}", String::from_utf8_lossy(&out));
-    let seen = String::from_utf8(origin.await.unwrap()).unwrap();
+    let (seen, extra) = origin.await.unwrap();
+    let seen = String::from_utf8(seen).unwrap();
     assert!(
       seen.ends_with(
         "Connection: close\r\n\r\n3\r\nabc\r\n5;ext=1\r\nhello\r\n0\r\nX-Trailer: 1\r\n\r\n"
@@ -2410,6 +2469,7 @@ mod tests {
       "{seen}"
     );
     assert!(!seen.contains("/b"), "{seen}");
+    assert!(extra.is_empty(), "{}", String::from_utf8_lossy(&extra));
     // a smuggling head is refused before anything is sent
     let (port, origin) = serve_reading_all(ok).await;
     let proxy = JailProxy::start(
