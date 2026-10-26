@@ -2716,7 +2716,7 @@ laufey::main!(|| {
         "\n============================================================"
       );
       eprintln!("Deno has panicked. This is a bug in Deno. Please report this");
-      eprintln!("at https://github.com/denoland/deno/issues/new.");
+      eprintln!("at https://github.com/Brainwires/deno/issues/new.");
       eprintln!();
       eprintln!("Platform: {} {}", env::consts::OS, env::consts::ARCH);
       eprintln!();
