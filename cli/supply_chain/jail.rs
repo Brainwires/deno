@@ -35,9 +35,10 @@
 //!   orphaned descendants, as the installer is a child subreaper there);
 //! - every `deno` started inside it clamping its permissions to the same set
 //!   (`DENO_INTERNAL_LIFECYCLE_JAIL`): `-A` from the `node` shim and the bin
-//!   wrappers becomes write access to those roots only, no FFI, network per
-//!   the jail; package-manager subcommands (`deno install`, `x`, `add`, ...)
-//!   are refused, as are `npm` / `npx` falling back to a real npm.
+//!   wrappers becomes write access to those roots only, FFI (native addons)
+//!   only from the package's own folder, network per the jail;
+//!   package-manager subcommands (`deno install`, `x`, `add`, ...) are
+//!   refused, as are `npm` / `npx` falling back to a real npm.
 //!
 //! Where the OS can't confine (Windows, Linux without Landlock, macOS without
 //! a working `sandbox-exec`), only the environment, HOME and the Deno
@@ -110,6 +111,13 @@ pub struct JailPermissions {
   /// 111; Node's `http` with `NODE_USE_ENV_PROXY` connects there itself).
   #[serde(default)]
   pub proxy: Option<String>,
+  /// Where a `deno` may load native code (FFI, Node-API addons) from: the
+  /// package's own folder, so its install check can load the prebuilt
+  /// `.node` it ships (`node-gyp-build-test`), as it will at run time.
+  /// Nothing else: a script could already run any program it can write
+  /// there, under the same OS sandbox, so this adds no reach.
+  #[serde(default)]
+  pub ffi: Vec<PathBuf>,
 }
 
 /// What the OS sandbox lets a jailed script's processes connect to.
@@ -244,7 +252,30 @@ pub fn clamp_permissions(
     options.allow_import = None;
     options.deny_import = Some(Vec::new());
   }
-  options.allow_ffi = None;
+  // FFI only from the package's own folder (`-A` / `--allow-ffi` become
+  // that; a path list keeps the entries inside it), never more
+  options.allow_ffi = match options.allow_ffi.take() {
+    None => None,
+    Some(_) if jail.ffi.is_empty() => None,
+    Some(list) if list.is_empty() => Some(
+      jail
+        .ffi
+        .iter()
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect(),
+    ),
+    Some(list) => {
+      let kept = list
+        .into_iter()
+        .filter(|entry| {
+          let path = cwd.join(entry);
+          let path = canonicalize_path(&path).unwrap_or(path);
+          path_within(&path, &jail.ffi)
+        })
+        .collect::<Vec<_>>();
+      (!kept.is_empty()).then_some(kept)
+    }
+  };
   for (deny, extra) in [
     (&mut options.deny_write, &jail.deny_write),
     (&mut options.deny_read, &jail.deny_read),
@@ -1266,6 +1297,19 @@ pub async fn run_jailed_script(
   result
 }
 
+/// The package's own folder, as its script reaches it and resolved (an
+/// isolated `node_modules` links it from `node_modules/.deno/`): where a
+/// jailed `deno` may load a native addon from.
+fn package_ffi_roots(package_folder: &Path) -> Vec<PathBuf> {
+  let mut roots = vec![package_folder.to_path_buf()];
+  if let Ok(canonical) = canonicalize_path(package_folder)
+    && canonical != package_folder
+  {
+    roots.push(canonical);
+  }
+  roots
+}
+
 async fn run_in_dirs(
   config: &JailConfig,
   s: &JailedScript<'_>,
@@ -1442,6 +1486,7 @@ async fn run_in_dirs(
     deny_read: deny_read.clone(),
     net: net.clone(),
     proxy: proxy_address.clone(),
+    ffi: package_ffi_roots(s.package_folder),
   };
 
   // the environment
@@ -2458,6 +2503,7 @@ mod tests {
       deny_read: vec![PathBuf::from("/home/u/.ssh")],
       net: JailNet::None,
       proxy: None,
+      ffi: vec![],
     };
     let mut options = PermissionsOptions {
       allow_write: Some(vec![]),
@@ -2556,5 +2602,44 @@ mod tests {
     clamp_permissions(&mut options, &jail, Path::new("/nm/pkg"));
     assert_eq!(options.allow_net_connect, None);
     assert_eq!(options.allow_net_listen, None);
+  }
+
+  #[test]
+  fn clamp_ffi_to_package_folder() {
+    let jail = JailPermissions {
+      write: vec![PathBuf::from("/nm/pkg")],
+      ffi: vec![PathBuf::from("/nm/pkg")],
+      ..Default::default()
+    };
+    // `-A` (the node shim's) loads native addons from the package only
+    let mut options = PermissionsOptions {
+      allow_ffi: Some(vec![]),
+      ..Default::default()
+    };
+    clamp_permissions(&mut options, &jail, Path::new("/nm/pkg"));
+    assert_eq!(options.allow_ffi, Some(vec!["/nm/pkg".to_string()]));
+    // a path list keeps what lies inside it, never widened to "all"
+    let mut options = PermissionsOptions {
+      allow_ffi: Some(vec![
+        "prebuilds/addon.node".to_string(),
+        "/usr/lib/libc.so".to_string(),
+      ]),
+      ..Default::default()
+    };
+    clamp_permissions(&mut options, &jail, Path::new("/nm/pkg"));
+    assert_eq!(
+      options.allow_ffi,
+      Some(vec!["prebuilds/addon.node".to_string()])
+    );
+    let mut options = PermissionsOptions {
+      allow_ffi: Some(vec!["/usr/lib/libc.so".to_string()]),
+      ..Default::default()
+    };
+    clamp_permissions(&mut options, &jail, Path::new("/nm/pkg"));
+    assert_eq!(options.allow_ffi, None);
+    // not asked for, not granted
+    let mut options = PermissionsOptions::default();
+    clamp_permissions(&mut options, &jail, Path::new("/nm/pkg"));
+    assert_eq!(options.allow_ffi, None);
   }
 }

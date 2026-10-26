@@ -4844,6 +4844,104 @@ where the changes are discussed.
      `knownPackages` in `test_to_supply_chain_config` (`libs/config/deno_json`),
      and `lifecycleJail` in `info/json`.
 
+120. **`fix(node)`: `node <script>` without its extension through the `node`
+     shim** (`feat/nest-phase1`, CLI only; `cli/node_compat_shim.rs`,
+     `libs/node_shim/lib.rs`). `node dist/main` (what `nest start` and
+     `npm run start:prod` run) failed with
+     `Module not found "file:///%20Copyright…"` whenever `node` was Deno: the
+     PATH shim `deno x --install-node-shims` writes, and the `node` Deno puts on
+     its own `PATH` for `child_process.spawn("node")`. An entrypoint that does
+     not exist as written is resolved by a child `<exe> eval <resolve.js>`, and
+     `<exe>` was `current_exe()`, which is the shim's own path on macOS (a
+     symlink) and on Windows (a hardlink or copy named `node.exe`). The child
+     re-entered Node.js argument translation, so `eval` became the entrypoint
+     and the resolver's source its first argument. The child now runs with
+     `DENO_DISABLE_NODE_SHIM=1` (a plain `deno eval` whatever its file name),
+     and the arg0 dispatch canonicalizes the executable first. Linux was
+     unaffected (`/proc/self/exe` resolves the link).
+
+     Tests: spec `node/node_compat_shim` `spawn_node_extensionless` (unix: the
+     `node` Deno puts on `PATH`) and `node_shim_extensionless` (every OS: a
+     `node` symlink, or a `node.exe` hardlink / copy on Windows, of the deno
+     executable runs `node dist/main a b`); both fail on `3.0.0-rc.5`.
+
+121. **`fix(graph)`: a type-only import of a subpath only `@types` provides**
+     (`feat/nest-phase1`, CLI only; `cli/graph_util.rs`).
+     `import { App } from "supertest/types"` (Nest's default e2e test) failed
+     `deno run` / `deno test` with `ERR_MODULE_NOT_FOUND`, `--no-check`
+     included: `supertest/types` exists only as `@types/supertest/types.d.ts`,
+     and the module graph resolves every static import for code before emit
+     elides the type-only ones, which tsc + Node.js and Node's TypeScript
+     loaders never resolve. The graph walk now leaves out that resolution error
+     when all of these hold: Node.js resolution failed with
+     `ERR_MODULE_NOT_FOUND` or `ERR_PACKAGE_PATH_NOT_EXPORTED` for a bare
+     specifier; the importer is TypeScript; every import of the specifier there
+     is a static ES import or re-export with bindings (no side-effect import,
+     dynamic import, `require()` or import attributes); and in a typed graph its
+     types resolution found a declaration file. When every use is a type the
+     emitted JavaScript drops the import; when a value is used the runtime
+     resolves it and fails with the same error before any code runs. Type
+     checking keeps its own resolution, and a failed one is still reported.
+
+     Tests: spec `npm/types_only_subpath` (`run` without and with `--check`
+     prints the value; a value use of the type-only subpath still fails with
+     `ERR_MODULE_NOT_FOUND`; the first fails on `3.0.0-rc.5`).
+
+122. **`fix(check)`: a package.json project's tsconfig.json checks the same on
+     both engines** (`feat/nest-phase1`, CLI only; `libs/resolver/deno_json.rs`,
+     `libs/resolver/graph.rs`, `cli/graph_util.rs`, `cli/tsc/tsconfig_gen.rs`).
+     Nest's default tsconfig.json failed `deno test` and `deno compile` while
+     `deno check` passed, and none of them saw `@types/jest`'s globals.
+     - **`baseUrl`**: the in-process TypeScript 6 checker (which `deno test`
+       uses for a project with a Jest or Vitest config, and `deno compile` for a
+       graph with npm types) stopped on TS5101 (`baseUrl` is deprecated), which
+       the native checker adapts away (item 90). Module resolution, `paths`
+       included, is Deno's on both, so the in-process checker now gets
+       `ignoreDeprecations: "6.0"` beside a `baseUrl`, unless the config sets
+       its own.
+     - **`compilerOptions.types`**: a tsconfig's entry is a type reference
+       directive, which TypeScript looks up in `@types` first. The in-process
+       graph resolved `"jest"` to the `jest` package (the runner's API, no
+       globals), and the native generator turned it into that package's
+       declaration file. Both now take `@types/jest` when a
+       `node_modules/@types` holds it (`@scope/name` → `@types/scope__name`);
+       `node`, `deno`, deno.json entries and entries that aren't a bare package
+       name are unchanged.
+     - **No `types`**: TypeScript 5 includes every `node_modules/@types` package
+       (in the config's directory and its ancestors) on its own. In a
+       package.json project (no deno.json) both engines now do the same for a
+       tsconfig.json whose `compilerOptions` (its `extends` chain included, for
+       the in-process engine) set no `types`; the native engine leaves a config
+       with `extends` to its chain. `node` and `deno` are Deno's; a package with
+       `"typings": null` opts out. TypeScript 6 changed the default of `types`
+       to `[]`, but such a project's own compiler is usually 5.x.
+
+     Tests: spec `npm/node_project_types` (a `baseUrl` tsconfig without `types`
+     and one with `"types": ["testglobals"]` beside a `testglobals` package of
+     its own, each checked with `--check-engine=tsc` and natively; all four fail
+     on `3.0.0-rc.5`); `tsconfig_types_entry_package_maps_to_at_types`
+     (`libs/resolver/graph.rs`).
+
+123. **`fix(npm)`: a jailed install check may load the package's own native
+     addon** (`feat/nest-phase1`, CLI only; `cli/supply_chain/jail.rs`).
+     Approving bcrypt 6 (likewise bufferutil, utf-8-validate and any
+     `node-gyp-build` package) failed in the jail: `node-gyp-build-test` loads
+     the package's prebuilt `.node` to check it, the clamped `deno` had no FFI
+     (`NotCapable: Requires ffi access to …/prebuilds/darwin-x64/bcrypt.node`),
+     and the fallback to a source build (`node-gyp`) is not there. A jailed
+     `deno` now gets FFI scoped to the package's own folder (as the script
+     reaches it, and resolved) where it asked for FFI (`-A` from the `node`
+     shim, `--allow-ffi`); a path list keeps only the entries inside it, and
+     native code anywhere else stays refused. This adds no reach: a jailed
+     script already writes and runs programs in its own folder, under the same
+     OS sandbox, and a native addon is loaded from there at run time anyway.
+
+     Tests: spec `npm/supply_chain_jail` `native_addon_own_folder`
+     (`@denotest/jail-native-addon`'s install script loads its own
+     `prebuilds/addon.node`, allowed, and one in the project, denied; on
+     `3.0.0-rc.5` both are denied); `clamp_ffi_to_package_folder`
+     (`cli/supply_chain/jail.rs`).
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118) are what the prebuilt `libdenort` carries. The CLI-side parts (for example

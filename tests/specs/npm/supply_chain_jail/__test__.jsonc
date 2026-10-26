@@ -189,6 +189,22 @@
         }
       ]
     },
+    // an install check that loads the package's own prebuilt Node-API addon
+    // (node-gyp-build-test) may: native code from the package's folder only
+    "native_addon_own_folder": {
+      "steps": [
+        {
+          "cwd": "native_addon",
+          "args": "install --allow-scripts=npm:@denotest/jail-native-addon --jail-scripts",
+          "output": "[WILDCARD]"
+        },
+        {
+          "cwd": "native_addon",
+          "args": "run -A check.mjs",
+          "output": "native_addon.out"
+        }
+      ]
+    },
     // DENEXT.md item 124 (M2): the download host a package declares
     // (node-pre-gyp's binary.host) is a request, not a grant: without the
     // project's say-so it reaches nothing, and the install names the host

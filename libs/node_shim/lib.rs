@@ -3413,6 +3413,12 @@ pub fn resolve_entrypoint(
     .arg(url.to_string())
     .arg(format!("./{}", entrypoint))
     .env_clear()
+    // `deno_exe` may itself be a `node` shim: a symlink on macOS (where
+    // `current_exe()` returns the link's path), a hardlink or a copy named
+    // `node.exe` on Windows. Without this the child would re-enter Node.js
+    // argument translation and run `eval` as the entrypoint. The variable
+    // makes it a plain `deno eval` whatever its file name.
+    .env("DENO_DISABLE_NODE_SHIM", "1")
     .stdout(Stdio::piped())
     .stderr(Stdio::inherit());
   // A fully-cleared environment breaks process creation / DLL loading on
