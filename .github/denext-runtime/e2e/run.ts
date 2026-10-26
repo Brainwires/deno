@@ -6,11 +6,15 @@
 //   deno run -A run.ts
 //
 // Env: TARGET BACKEND RUNTIME_DIR WORK_DIR [E2E_OUT] [E2E_AREAS=a,b]
+//      [E2E_VARIANT=default] [E2E_NA_BASELINE=enforce|report]
 //
 // Every check is pass, fail or n/a; an n/a carries the reason the check
-// cannot run on this runner (never a silent skip). Writes
+// cannot run on this runner (never a silent skip). The n/a checks must be
+// the ones expected-na.json lists for <target>/<backend>/<E2E_VARIANT>: a
+// new one fails the run (enforce: the default under GitHub Actions; report
+// elsewhere, where a developer's host has other capabilities). Writes
 // $E2E_OUT/e2e-<target>-<backend>.json and a table to $GITHUB_STEP_SUMMARY.
-// Exits 1 when any check failed.
+// Exits 1 when any check failed or an n/a was unexpected.
 
 import {
   AreaReport,
@@ -21,6 +25,7 @@ import {
   rm,
   short,
 } from "./lib/runner.ts";
+import { baselineKey, compareNa, type NaBaseline } from "./lib/na_baseline.ts";
 
 const AREAS: Record<
   string,
@@ -152,11 +157,41 @@ function count(rep: AreaReport, s: string) {
 const failed = reports.flatMap((r) =>
   r.checks.filter((c) => c.status === "fail").map((c) => `${r.area}: ${c.name}`)
 );
+
+// The n/a baseline (P7).
+const variant = Deno.env.get("E2E_VARIANT") || "default";
+const naMode = Deno.env.get("E2E_NA_BASELINE") ??
+  (Deno.env.get("GITHUB_ACTIONS") === "true" ? "enforce" : "report");
+if (naMode !== "enforce" && naMode !== "report") {
+  throw new Error(`E2E_NA_BASELINE: enforce or report, not ${naMode}`);
+}
+const baseline = JSON.parse(
+  await Deno.readTextFile(new URL("./expected-na.json", import.meta.url)),
+) as NaBaseline;
+const na = compareNa(
+  baseline,
+  baselineKey(env.target, env.backend, variant),
+  areas,
+  reports.flatMap((r) =>
+    r.checks.filter((c) => c.status === "n/a").map((c) => ({
+      area: r.area,
+      name: c.name,
+      reason: c.reason,
+    }))
+  ),
+);
+const unexpectedNa = naMode === "enforce" ? na.unexpected : [];
 const summary = {
   target: env.target,
   backend: env.backend,
   os: Deno.build.os,
-  ok: failed.length === 0,
+  ok: failed.length === 0 && unexpectedNa.length === 0,
+  naBaseline: {
+    key: na.key,
+    mode: naMode,
+    unexpected: na.unexpected,
+    noLongerNa: na.noLongerNa,
+  },
   areas: Object.fromEntries(
     reports.map((r) => [r.area, { checks: r.checks, notes: r.notes }]),
   ),
@@ -166,7 +201,10 @@ await Deno.writeTextFile(file, JSON.stringify(summary, null, 2));
 
 const md: string[] = [
   `### e2e ${env.target} / ${env.backend}: ${
-    failed.length === 0 ? "passed" : `${failed.length} failed`
+    failed.length === 0 && unexpectedNa.length === 0 ? "passed" : [
+      failed.length ? `${failed.length} failed` : "",
+      unexpectedNa.length ? `${unexpectedNa.length} unexpected n/a` : "",
+    ].filter(Boolean).join(", ")
   }`,
   "",
   "| area | pass | fail | n/a |",
@@ -203,9 +241,41 @@ if (failed.length) {
   }
   md.push("");
 }
+if (na.unexpected.length) {
+  md.push(
+    `${
+      naMode === "enforce" ? "Unexpected n/a (fails the run)" : "Unexpected n/a"
+    }, not in expected-na.json under \`${na.key}\`:`,
+    "",
+    ...na.unexpected.map((c) => `- ${c.area}: ${c.name} — ${c.reason ?? ""}`),
+    "",
+  );
+  if (naMode === "enforce") {
+    for (const c of na.unexpected) {
+      console.log(
+        `::error::e2e ${na.key}: ${c.area}: "${c.name}" is n/a but expected-na.json does not list it (${
+          c.reason ?? "no reason"
+        })`,
+      );
+    }
+  }
+}
+if (na.noLongerNa.length) {
+  md.push(
+    `No longer n/a (drop them from expected-na.json under \`${na.key}\`):`,
+    "",
+    ...na.noLongerNa.map((c) => `- ${c.area}: ${c.name}`),
+    "",
+  );
+  for (const c of na.noLongerNa) {
+    console.log(
+      `::notice::e2e ${na.key}: ${c.area}: "${c.name}" ran this time; remove it from expected-na.json`,
+    );
+  }
+}
 const stepSummary = Deno.env.get("GITHUB_STEP_SUMMARY");
 if (stepSummary) {
   await Deno.writeTextFile(stepSummary, md.join("\n") + "\n", { append: true });
 }
 log(`\n${md.join("\n")}\nresults: ${file}`);
-Deno.exit(failed.length === 0 ? 0 : 1);
+Deno.exit(failed.length === 0 && unexpectedNa.length === 0 ? 0 : 1);

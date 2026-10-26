@@ -9,8 +9,10 @@
 # the laufey pin — LAUFEY_SHA below and cli/rt_desktop/Cargo.toml — and this
 # workflow with its scripts), by hand, and on a tag (path filters are not
 # evaluated for tags), which publishes only when a full `denext tests` run
-# (every OS leg, not a branch's Linux-only run) passed on the tagged commit.
-# See DENEXT.md.
+# (every OS leg, not a branch's Linux-only run) passed on the tagged commit
+# and no run of it has a failed job that was not re-run green
+# (.github/denext-runtime/release_gate.py), and only from an annotated tag
+# that was never moved. See DENEXT.md.
 name: denext runtime
 
 on:
@@ -82,6 +84,14 @@ env:
   # .github/denext-runtime/fetch_esbuild.py. Must equal ESBUILD_VERSION in
   # cli/tools/bundle/esbuild.rs (the cli job checks).
   ESBUILD_VERSION: 0.25.5
+  # The Apple Developer Team the macOS release binaries are signed by
+  # (sign_macos.sh refuses any other identity and checks the signature
+  # against it).
+  APPLE_TEAM_ID: WT957SC7MJ
+  # The newest glibc symbol version a Linux release binary may require
+  # (P2). The binaries are built on ubuntu-22.04 and need 2.35 today; the
+  # ceiling only ever goes DOWN (an older build baseline), never up.
+  GLIBC_CEILING: '2.35'
 
 jobs:
   setup:
@@ -95,6 +105,10 @@ jobs:
       laufey_sha: ${{ steps.plan.outputs.laufey_sha }}
       cef_version: ${{ steps.plan.outputs.cef_version }}
       laufey_api: ${{ steps.plan.outputs.laufey_api }}
+      # The tag gate's verdict (tags only): the full run it accepted and the
+      # jobs that passed only on a re-run, for the release notes.
+      full_run: ${{ steps.plan.outputs.full_run }}
+      retried: ${{ steps.plan.outputs.retried }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -102,6 +116,7 @@ jobs:
             cli/Cargo.toml
             cli/lib/version.txt
             cli/lib/upstream_version.txt
+            .github/denext-runtime/release_gate.py
           sparse-checkout-cone-mode: false
       - id: plan
         env:
@@ -119,12 +134,14 @@ jobs:
           # which the release is named after, and the upstream Deno release it
           # is built from.
           deno_version=$(sed -n 's/^version = "\(.*\)"$/\1/p' cli/Cargo.toml | head -1)
-          test -n "$deno_version"
+          test -n "$deno_version" ||
+            { echo "::error::no version = \"...\" line in cli/Cargo.toml"; exit 1; }
           lib_version=$(tr -d '[:space:]' <cli/lib/version.txt)
           test "$lib_version" = "$deno_version" ||
             { echo "::error::cli/lib/version.txt is '$lib_version', cli/Cargo.toml '$deno_version'"; exit 1; }
           upstream_version=$(tr -d '[:space:]' <cli/lib/upstream_version.txt)
-          test -n "$upstream_version"
+          test -n "$upstream_version" ||
+            { echo "::error::cli/lib/upstream_version.txt is empty"; exit 1; }
           python3 - "$deno_version" "$upstream_version" <<'PY'
           import re, sys
           semver = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\.(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*))*)?$")
@@ -137,36 +154,49 @@ jobs:
           laufey_sha=$(gh api "repos/$LAUFEY_REPOSITORY/commits/$ref" --jq .sha)
           cef_version=$(gh api "repos/$LAUFEY_REPOSITORY/contents/Makefile?ref=$laufey_sha" --jq .content |
             base64 -d | sed -n 's/^CEF_FULL_VERSION := //p')
-          test -n "$cef_version"
+          test -n "$cef_version" ||
+            { echo "::error::no CEF_FULL_VERSION in $LAUFEY_REPOSITORY's Makefile at $laufey_sha"; exit 1; }
           laufey_api=$(gh api "repos/$LAUFEY_REPOSITORY/contents/capi/include/laufey.h?ref=$laufey_sha" --jq .content |
             base64 -d | sed -n 's/^#define LAUFEY_API_VERSION \([0-9]*\).*/\1/p')
-          test -n "$laufey_api"
+          test -n "$laufey_api" ||
+            { echo "::error::no LAUFEY_API_VERSION in $LAUFEY_REPOSITORY's capi/include/laufey.h at $laufey_sha"; exit 1; }
 
           if [ "$REF_TYPE" = tag ]; then
             version=${REF_NAME#denext-runtime-v}
             test "$version" = "$deno_version" ||
               { echo "::error::tag $REF_NAME does not match the fork's version $deno_version (cli/Cargo.toml; want denext-runtime-v$deno_version)"; exit 1; }
-            # A release needs a green FULL `denext tests` run (lint, libs,
-            # unit, specs on every OS) of exactly the tagged commit, from its
-            # development-denext push or a dispatch. A branch push runs Linux
-            # x64 only and its other legs are skipped, so a run counts only
-            # when each OS leg has a job that passed.
-            full_run=
-            for id in $(gh api "repos/$REPO/actions/workflows/denext_tests.yml/runs?head_sha=$SHA&status=success&per_page=20" --jq '.workflow_runs[].id'); do
-              legs=$(gh api --paginate "repos/$REPO/actions/runs/$id/jobs?per_page=100" \
-                --jq '.jobs[] | select(.conclusion == "success") | .name' | sed -n 's| / .*||p' | sort -u)
-              missing=
-              for leg in macos-14 windows-2022 ubuntu-22.04 macos-15-intel ubuntu-22.04-arm; do
-                grep -qx "$leg" <<<"$legs" || missing="$missing $leg"
-              done
-              if [ -z "$missing" ]; then full_run=$id; break; fi
-              echo "denext tests run $id skipped or lacks:$missing"
-            done
-            if [ -z "$full_run" ]; then
-              echo "::error::no successful full 'denext tests' run for $SHA: push the commit to development-denext (or run 'gh workflow run denext_tests.yml --ref <branch> -f full=true') and wait for it to pass before tagging"
+            # The tag is immutable (P8): annotated, on exactly this commit,
+            # never moved from another commit, and not released before. A
+            # failed tag build is fixed by releasing the next version, not by
+            # moving the tag.
+            tag_obj=$(gh api "repos/$REPO/git/ref/tags/$REF_NAME" --jq '.object.type + " " + .object.sha')
+            if [ "${tag_obj%% *}" != tag ]; then
+              echo "::error::$REF_NAME is a lightweight tag: release tags must be annotated (git tag -a $REF_NAME -m 'denext runtime $deno_version' <sha>)"
               exit 1
             fi
-            echo "denext tests (full matrix, run $full_run) passed for $SHA"
+            tag_commit=$(gh api "repos/$REPO/git/tags/${tag_obj#* }" --jq '.object.type + " " + .object.sha')
+            if [ "$tag_commit" != "commit $SHA" ]; then
+              echo "::error::$REF_NAME points at '$tag_commit', not commit $SHA"
+              exit 1
+            fi
+            moved=$(gh api --paginate "repos/$REPO/actions/workflows/denext_runtime.yml/runs?branch=$REF_NAME&event=push&per_page=100" \
+              --jq ".workflow_runs[] | select(.head_sha != \"$SHA\") | \"\\(.id) \\(.head_sha)\"")
+            if [ -n "$moved" ]; then
+              echo "::error::$REF_NAME was pushed before on another commit (run, sha: $(tr '\n' ' ' <<<"$moved")): a release tag is never moved; tag the next version instead"
+              exit 1
+            fi
+            if gh release view "$REF_NAME" --repo "$REPO" >/dev/null 2>&1; then
+              echo "::error::release $REF_NAME already exists: a published release is never replaced; tag the next version instead"
+              exit 1
+            fi
+            # A release needs a green FULL `denext tests` run (every OS
+            # leg) of exactly the tagged commit, and no run of that commit
+            # with a failed job that was not re-run green: the rule is
+            # spelled out in release_gate.py (RULE) and printed here.
+            python3 -I .github/denext-runtime/release_gate.py tests "$REPO" "$SHA" || {
+              echo "::error::the tag gate refused $SHA (see the rule and the runs above)"
+              exit 1
+            }
             TARGETS=all
           else
             # Build metadata: the same precedence as the version it builds
@@ -265,7 +295,8 @@ jobs:
           # liblaufey_webauthn.so (Linux passkeys with security keys, through
           # libwebauthn) only when both are present; without it the backends
           # report no passkey capability.
-          pkg-config --exists libudev dbus-1
+          pkg-config --exists libudev dbus-1 ||
+            { echo "::error::pkg-config finds no libudev / dbus-1 (liblaufey_webauthn.so would not be built)"; exit 1; }
 
       - name: Install dependencies (macOS)
         if: runner.os == 'macOS'
@@ -355,7 +386,8 @@ jobs:
               # dirs; CEF's comes with the whole Release dir).
               cp laufey/webview/build/liblaufey_webauthn.so "$st/webview/build/"
               cp -a laufey/cef/build/Release "$st/cef/build/Release"
-              test -f "$st/cef/build/Release/liblaufey_webauthn.so"
+              test -f "$st/cef/build/Release/liblaufey_webauthn.so" ||
+                { echo "::error::laufey's cef/build/Release has no liblaufey_webauthn.so (make cef did not copy it)"; exit 1; }
               strip --strip-unneeded "$st/cef/build/Release/libcef.so"
               # libwebauthn is LGPL-2.1-or-later: its license, and where the
               # library's source is, go with it.
@@ -402,7 +434,8 @@ jobs:
           # The C ABI version the hosts were built with (checked against the
           # one libdenort was compiled with in the package job).
           sed -n 's/^#define LAUFEY_API_VERSION \([0-9]*\).*/\1/p' laufey/capi/include/laufey.h >"$st/LAUFEY_API_VERSION"
-          test -s "$st/LAUFEY_API_VERSION"
+          test -s "$st/LAUFEY_API_VERSION" ||
+            { echo "::error::no LAUFEY_API_VERSION in laufey/capi/include/laufey.h"; exit 1; }
           echo "laufey API $(cat "$st/LAUFEY_API_VERSION")"
           find "$st" -maxdepth 4 | sort
           du -sh "$st"/webview "$st"/cef
@@ -560,7 +593,8 @@ jobs:
           echo "laufey crate compiled from: $manifest"
           if command -v cygpath >/dev/null; then manifest=$(cygpath -u "$manifest"); fi
           api=$(sed -n 's/^pub const LAUFEY_API_VERSION: u32 = \([0-9]*\);/\1/p' "$(dirname "$manifest")/src/lib.rs")
-          test -n "$api"
+          test -n "$api" ||
+            { echo "::error::no 'pub const LAUFEY_API_VERSION: u32' in $(dirname "$manifest")/src/lib.rs (the laufey crate libdenort compiled against)"; exit 1; }
           mkdir -p out
           echo "$api" >out/LAUFEY_API_VERSION
           git -C "$LAUFEY_SRC" rev-parse HEAD >out/LAUFEY_SHA
@@ -598,6 +632,43 @@ jobs:
               ;;
           esac
           ls -la out
+
+      # The signatures go on before the package job archives (and pins) the
+      # library, so the SHA-256 in manifest.json is the signed file's.
+      - name: Sign (macOS)
+        if: runner.os == 'macOS'
+        env:
+          APPLE_DEVELOPER_ID_CERT: ${{ secrets.APPLE_DEVELOPER_ID_CERT }}
+          APPLE_DEVELOPER_ID_CERT_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_CERT_PASSWORD }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+        run: bash .github/denext-runtime/sign_macos.sh out/libdenort.dylib
+
+      - name: Sign (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          WINDOWS_CODESIGN_PFX: ${{ secrets.WINDOWS_CODESIGN_PFX }}
+          WINDOWS_CODESIGN_PFX_PASSWORD: ${{ secrets.WINDOWS_CODESIGN_PFX_PASSWORD }}
+        run: '& ./.github/denext-runtime/sign_windows.ps1 out/denort.dll'
+
+      # The release profile's split debug info (Cargo.toml: packed,
+      # line-tables-only), so a crash address in a shipped libdenort can be
+      # symbolicated. Tags (release assets) and dispatches only.
+      - name: Debug symbols
+        if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
+        env:
+          VERSION: ${{ needs.setup.outputs.version }}
+        run: bash .github/denext-runtime/collect_symbols.sh "deno-desktop-runtime-symbols-$VERSION-${{ matrix.target }}" symbols ${{ runner.os == 'Windows' && 'denort.dll' || runner.os == 'macOS' && 'libdenort.dylib' || 'libdenort.so' }}
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
+        with:
+          name: symbols-denort-${{ matrix.target }}
+          path: symbols/
+          retention-days: 14
+          if-no-files-found: warn
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -745,6 +816,20 @@ jobs:
                 file "$b"
                 ldd "$b" || true
                 objdump -T "$b" | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -3
+                # The newest glibc the binary requires, at most GLIBC_CEILING:
+                # older distros (RHEL 9: 2.34, Debian 11: 2.31) fail to exec
+                # a binary that needs a newer one.
+                newest=$(objdump -T "$b" | grep -o 'GLIBC_[0-9][0-9.]*' | sed 's/^GLIBC_//' | sort -uV | tail -1)
+                if [ -z "$newest" ]; then
+                  echo "::error::objdump -T $b lists no GLIBC_ symbol versions"; exit 1
+                fi
+                top=$(printf '%s\n%s\n' "$newest" "$GLIBC_CEILING" | sort -V | tail -1)
+                if [ "$top" != "$GLIBC_CEILING" ]; then
+                  echo "::error::$b requires GLIBC_$newest, newer than the ceiling GLIBC_$GLIBC_CEILING"
+                  objdump -T "$b" | grep -F "GLIBC_$newest" | head -20
+                  exit 1
+                fi
+                echo "$b: newest glibc symbol GLIBC_$newest (ceiling $GLIBC_CEILING)"
               done
               ;;
             *-windows-msvc)
@@ -755,6 +840,41 @@ jobs:
               python .github/denext-runtime/pe_deps.py "$machine" target/release/deno.exe target/release/denort.exe
               ;;
           esac
+
+      # Developer ID + notarization (macOS) / Authenticode (Windows), before
+      # Assemble: the archives and their SHA-256 pins are made from the
+      # signed binaries, and the smoke tests below run them.
+      - name: Sign (macOS)
+        if: runner.os == 'macOS'
+        env:
+          APPLE_DEVELOPER_ID_CERT: ${{ secrets.APPLE_DEVELOPER_ID_CERT }}
+          APPLE_DEVELOPER_ID_CERT_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_CERT_PASSWORD }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+        run: bash .github/denext-runtime/sign_macos.sh --entitlements cli/entitlements.plist target/release/deno target/release/denort
+
+      - name: Sign (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          WINDOWS_CODESIGN_PFX: ${{ secrets.WINDOWS_CODESIGN_PFX }}
+          WINDOWS_CODESIGN_PFX_PASSWORD: ${{ secrets.WINDOWS_CODESIGN_PFX_PASSWORD }}
+        run: '& ./.github/denext-runtime/sign_windows.ps1 target/release/deno.exe target/release/denort.exe'
+
+      # The split debug info of deno and denort (see the denort job's
+      # "Debug symbols"). Tags (release assets) and dispatches only.
+      - name: Debug symbols
+        if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
+        run: bash .github/denext-runtime/collect_symbols.sh "deno-symbols-$VERSION-$TARGET" symbols ${{ runner.os == 'Windows' && 'deno.exe denort.exe' || 'deno denort' }}
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
+        with:
+          name: symbols-cli-${{ matrix.target }}
+          path: symbols/
+          retention-days: 14
+          if-no-files-found: warn
 
       # The official esbuild for this target, verified against its pinned npm
       # integrity (and the registry's), for `deno bundle` to use offline.
@@ -1047,6 +1167,8 @@ jobs:
           BACKEND: cef
           WORK_DIR: ${{ runner.temp }}/e2e-keyring
           E2E_OUT: ${{ runner.temp }}/e2e-out-keyring
+          # The n/a baseline key (e2e/expected-na.json).
+          E2E_VARIANT: keyring-locked
           E2E_AREAS: keyring
           E2E_SECRET_SERVICE: locked
           E2E_SESSION_TYPE: unset
@@ -1063,6 +1185,8 @@ jobs:
           BACKEND: cef
           WORK_DIR: ${{ runner.temp }}/e2e-keyring-kwallet
           E2E_OUT: ${{ runner.temp }}/e2e-out-keyring-kwallet
+          # The n/a baseline key (e2e/expected-na.json).
+          E2E_VARIANT: keyring-kwallet
           E2E_AREAS: keyring
           E2E_SECRET_SERVICE: locked
           E2E_SESSION_TYPE: unset
@@ -1082,6 +1206,8 @@ jobs:
           BACKEND: cef
           WORK_DIR: ${{ runner.temp }}/e2e-keyring-persist
           E2E_OUT: ${{ runner.temp }}/e2e-out-keyring-persist
+          # The n/a baseline key (e2e/expected-na.json).
+          E2E_VARIANT: keyring-persist
           E2E_AREAS: keyringpersist
           E2E_SECRET_SERVICE: locked
           E2E_SESSION_TYPE: unset
@@ -1167,6 +1293,15 @@ jobs:
           path: dist
           merge-multiple: true
 
+      # The debug info (collect_symbols.sh), released beside the archives but
+      # not in manifest.json: denext never downloads it.
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
+        with:
+          pattern: symbols-*
+          path: symbols
+          merge-multiple: true
+
       - name: SHA256SUMS + manifest.json
         env:
           VERSION: ${{ needs.setup.outputs.version }}
@@ -1201,19 +1336,24 @@ jobs:
         run: |
           n=$(python3 -c 'import json;m=json.load(open("dist/manifest.json"));print(sum(len([k for k in v if k!="runtimeLib"]) for v in m["targets"].values()))')
           echo "archives: $n"
-          test "$n" = 12
+          test "$n" = 12 ||
+            { echo "::error::manifest.json lists $n desktop runtime archives, want 12 (6 targets x webview + cef)"; exit 1; }
           c=$(python3 -c 'import json;m=json.load(open("dist/manifest.json"));print(len(m["cli"]["targets"]))')
           echo "cli archives: $c"
-          test "$c" = 6
+          test "$c" = 6 ||
+            { echo "::error::manifest.json lists $c CLI archives, want 6 (one per target)"; exit 1; }
           r=$(python3 -c 'import json;m=json.load(open("dist/manifest.json"));print(len(m["denort"]["targets"]))')
           echo "denort archives: $r"
-          test "$r" = 6
+          test "$r" = 6 ||
+            { echo "::error::manifest.json lists $r denort archives, want 6 (one per target)"; exit 1; }
 
       - name: GitHub Release
         if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/denext-runtime-v')
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
+          FULL_RUN: ${{ needs.setup.outputs.full_run }}
+          RETRIED: ${{ needs.setup.outputs.retried }}
           # Every expression goes through the environment: values expand as
           # data inside the heredoc, never as shell source.
           # The upstream Deno release the fork is built from (BUILD_INFO.json's
@@ -1224,6 +1364,33 @@ jobs:
           REPO: ${{ github.repository }}
           SHA: ${{ github.sha }}
         run: |
+          set -euo pipefail
+          version=${TAG#denext-runtime-v}
+          # Immutable (P8): the tag is still the annotated tag of this commit
+          # the setup job checked hours ago, and the release is created on it
+          # (--verify-tag: never a tag of its own) or not at all.
+          tag_obj=$(gh api "repos/$REPO/git/ref/tags/$TAG" --jq '.object.type + " " + .object.sha')
+          if [ "${tag_obj%% *}" != tag ]; then
+            echo "::error::$TAG is no longer an annotated tag ($tag_obj)"; exit 1
+          fi
+          tag_commit=$(gh api "repos/$REPO/git/tags/${tag_obj#* }" --jq '.object.sha')
+          if [ "$tag_commit" != "$SHA" ]; then
+            echo "::error::$TAG moved to $tag_commit while $SHA was being built: not publishing"; exit 1
+          fi
+          # GitHub "Latest" goes to the newest version by semver (an older
+          # line's patch release never takes it), set explicitly every time.
+          others=$(gh release list --repo "$REPO" --limit 500 --json tagName --jq '.[].tagName' |
+            sed -n 's/^denext-runtime-v//p')
+          # shellcheck disable=SC2086 # one version per word
+          latest=$(python3 -I .github/denext-runtime/release_gate.py latest "$version" $others)
+          echo "latest: $latest"
+          symbols=()
+          if compgen -G 'symbols/*.tar.gz' >/dev/null; then
+            (cd symbols && cat ./*.sha256 >SYMBOLS.SHA256SUMS && sha256sum -c SYMBOLS.SHA256SUMS && rm -f ./*.tar.gz.sha256)
+            symbols=(symbols/*.tar.gz symbols/SYMBOLS.SHA256SUMS)
+          else
+            echo "::warning::no debug symbols to attach"
+          fi
           cat >notes.md <<EOF
           denext's Deno fork ${TAG#denext-runtime-v}: the patched Deno Desktop runtime and CLI, built from upstream Deno ${DENO_VERSION} plus denext's patches ([DENEXT.md](https://github.com/${REPO}/blob/${SHA}/DENEXT.md), "Versioning").
 
@@ -1249,7 +1416,19 @@ jobs:
           \`deno-denort-*\` is the standalone runtime that CLI's \`deno compile\` builds onto (a zip
           holding \`denort\` / \`denort.exe\`), so a compiled app carries the same patches and
           \`Deno.SQL\`; the CLI downloads it from this release by itself. Listed under \`denort\`.
+
+          \`*-symbols-*.tar.gz\` hold the release binaries' debug info (\`.dSYM\` / \`.dwp\` / \`.pdb\`)
+          for symbolicating a crash report (\`SYMBOLS.SHA256SUMS\`); they are not in \`manifest.json\`.
+
+          Tag gate: full \`denext tests\` run [${FULL_RUN}](https://github.com/${REPO}/actions/runs/${FULL_RUN}).
           EOF
+          if [ -n "${RETRIED//[[:space:]]/}" ]; then
+            {
+              echo
+              echo "Jobs of that commit that passed only on a re-run:"
+              while IFS= read -r line; do [ -z "$line" ] || echo "- $line"; done <<<"$RETRIED"
+            } >>notes.md
+          fi
           gh release create "$TAG" --repo "$REPO" --title "$TAG" \
-            --notes-file notes.md --target "$SHA" \
-            dist/*.tar.gz dist/*.zip dist/SHA256SUMS dist/manifest.json
+            --notes-file notes.md --verify-tag --latest="$latest" \
+            dist/*.tar.gz dist/*.zip dist/SHA256SUMS dist/manifest.json "${symbols[@]}"

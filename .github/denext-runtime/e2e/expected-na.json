@@ -1,0 +1,438 @@
+{
+  "$comment": "The e2e checks expected to be n/a, per <target>/<backend>/<variant> and area (run.ts): any other n/a fails the run (P7). Taken from the runtime runs of rc.5, rc.6 and ee49f60f0, which agree. When a check stops being n/a, run.ts says so: drop it here. A check may only be added with the reason it cannot run on that runner.",
+  "aarch64-apple-darwin/webview/default": {
+    "deeplink": [
+      "install from the .msi"
+    ],
+    "dnd": [
+      "launch: a real file drop and a completed drag-out"
+    ],
+    "keyringpersist": [
+      "OS-key cookies survive a launch that can't reach the key"
+    ],
+    "menus": [
+      "a click on a notification while the app is not running launches it",
+      "launch: a click on an action button fires action (not click)",
+      "launch: a click on the body fires click",
+      "launch: a notification the user dismisses fires close",
+      "launch: a scheduled notification's click is a notificationresponse"
+    ],
+    "origin": [
+      "launch: a POST from an opaque-origin frame is marked x-deno-desktop-cross-origin: 1",
+      "launch: a stream the page stops reading is held back (backpressure), not drained"
+    ],
+    "passkeys": [
+      "launch: a completed registration / authentication ceremony"
+    ],
+    "update": [
+      "a staged update signed by the same Developer ID / Authenticode signer is accepted"
+    ],
+    "window": [
+      "launch: close() of a WebGPU window closes it (isClosed)",
+      "launch: share() shows the OS share sheet"
+    ]
+  },
+  "aarch64-apple-darwin/cef/default": {
+    "deeplink": [
+      "install from the .msi"
+    ],
+    "dnd": [
+      "launch: a real file drop and a completed drag-out"
+    ],
+    "keyringpersist": [
+      "OS-key cookies survive a launch that can't reach the key"
+    ],
+    "menus": [
+      "a click on a notification while the app is not running launches it",
+      "launch: a click on an action button fires action (not click)",
+      "launch: a click on the body fires click",
+      "launch: a notification the user dismisses fires close",
+      "launch: a scheduled notification's click is a notificationresponse"
+    ],
+    "origin": [
+      "launch: a POST from an opaque-origin frame is marked x-deno-desktop-cross-origin: 1"
+    ],
+    "passkeys": [
+      "launch: a completed registration / authentication ceremony"
+    ],
+    "update": [
+      "a staged update signed by the same Developer ID / Authenticode signer is accepted"
+    ],
+    "window": [
+      "launch: close() of a WebGPU window closes it (isClosed)",
+      "launch: share() shows the OS share sheet"
+    ]
+  },
+  "x86_64-apple-darwin/webview/default": {
+    "deeplink": [
+      "install from the .msi"
+    ],
+    "dnd": [
+      "launch: a real file drop and a completed drag-out"
+    ],
+    "keyringpersist": [
+      "OS-key cookies survive a launch that can't reach the key"
+    ],
+    "menus": [
+      "a click on a notification while the app is not running launches it",
+      "launch: a click on an action button fires action (not click)",
+      "launch: a click on the body fires click",
+      "launch: a notification the user dismisses fires close",
+      "launch: a scheduled notification's click is a notificationresponse"
+    ],
+    "origin": [
+      "launch: a POST from an opaque-origin frame is marked x-deno-desktop-cross-origin: 1",
+      "launch: a stream the page stops reading is held back (backpressure), not drained"
+    ],
+    "passkeys": [
+      "launch: a completed registration / authentication ceremony"
+    ],
+    "update": [
+      "a staged update signed by the same Developer ID / Authenticode signer is accepted"
+    ],
+    "window": [
+      "launch: close() of a WebGPU window closes it (isClosed)",
+      "launch: share() shows the OS share sheet"
+    ]
+  },
+  "x86_64-apple-darwin/cef/default": {
+    "deeplink": [
+      "install from the .msi"
+    ],
+    "dnd": [
+      "launch: a real file drop and a completed drag-out"
+    ],
+    "keyringpersist": [
+      "OS-key cookies survive a launch that can't reach the key"
+    ],
+    "menus": [
+      "a click on a notification while the app is not running launches it",
+      "launch: a click on an action button fires action (not click)",
+      "launch: a click on the body fires click",
+      "launch: a notification the user dismisses fires close",
+      "launch: a scheduled notification's click is a notificationresponse"
+    ],
+    "origin": [
+      "launch: a POST from an opaque-origin frame is marked x-deno-desktop-cross-origin: 1"
+    ],
+    "passkeys": [
+      "launch: a completed registration / authentication ceremony"
+    ],
+    "update": [
+      "a staged update signed by the same Developer ID / Authenticode signer is accepted"
+    ],
+    "window": [
+      "launch: close() of a WebGPU window closes it (isClosed)",
+      "launch: share() shows the OS share sheet"
+    ]
+  },
+  "x86_64-unknown-linux-gnu/webview/default": {
+    "asmt": [
+      "launch: a real OS auth session"
+    ],
+    "deeplink": [
+      "a file opened with the running app (openfile)",
+      "install from the .msi"
+    ],
+    "dnd": [
+      "launch: a real file drop and a completed drag-out"
+    ],
+    "keyringpersist": [
+      "OS-key cookies survive a launch that can't reach the key"
+    ],
+    "menus": [
+      "a click on a notification while the app is not running launches it"
+    ],
+    "origin": [
+      "launch: a POST from an opaque-origin frame is marked x-deno-desktop-cross-origin: 1",
+      "launch: a stream the page stops reading is held back (backpressure), not drained"
+    ],
+    "passkeys": [
+      "launch: a completed registration / authentication ceremony"
+    ],
+    "update": [
+      "a staged update signed by the same Developer ID / Authenticode signer is accepted"
+    ],
+    "window": [
+      "launch: close() of a WebGPU window closes it (isClosed)",
+      "launch: the tray rule"
+    ]
+  },
+  "x86_64-unknown-linux-gnu/cef/default": {
+    "asmt": [
+      "launch: a real OS auth session"
+    ],
+    "deeplink": [
+      "a file opened with the running app (openfile)",
+      "install from the .msi"
+    ],
+    "dnd": [
+      "launch: a real file drop and a completed drag-out"
+    ],
+    "keyringpersist": [
+      "OS-key cookies survive a launch that can't reach the key"
+    ],
+    "menus": [
+      "a click on a notification while the app is not running launches it"
+    ],
+    "origin": [
+      "launch: a POST from an opaque-origin frame is marked x-deno-desktop-cross-origin: 1"
+    ],
+    "passkeys": [
+      "launch: a completed registration / authentication ceremony"
+    ],
+    "update": [
+      "a staged update signed by the same Developer ID / Authenticode signer is accepted"
+    ],
+    "window": [
+      "launch: close() of a WebGPU window closes it (isClosed)",
+      "launch: the tray rule"
+    ]
+  },
+  "x86_64-unknown-linux-gnu/cef/keyring-locked": {},
+  "x86_64-unknown-linux-gnu/cef/keyring-kwallet": {},
+  "x86_64-unknown-linux-gnu/cef/keyring-persist": {},
+  "aarch64-unknown-linux-gnu/webview/default": {
+    "asmt": [
+      "launch: a real OS auth session"
+    ],
+    "deeplink": [
+      "a file opened with the running app (openfile)",
+      "install from the .msi"
+    ],
+    "dnd": [
+      "launch: a real file drop and a completed drag-out"
+    ],
+    "keyringpersist": [
+      "OS-key cookies survive a launch that can't reach the key"
+    ],
+    "menus": [
+      "a click on a notification while the app is not running launches it"
+    ],
+    "origin": [
+      "launch: a POST from an opaque-origin frame is marked x-deno-desktop-cross-origin: 1",
+      "launch: a stream the page stops reading is held back (backpressure), not drained"
+    ],
+    "passkeys": [
+      "launch: a completed registration / authentication ceremony"
+    ],
+    "update": [
+      "a staged update signed by the same Developer ID / Authenticode signer is accepted"
+    ],
+    "window": [
+      "launch: close() of a WebGPU window closes it (isClosed)",
+      "launch: the tray rule"
+    ]
+  },
+  "aarch64-unknown-linux-gnu/cef/default": {
+    "asmt": [
+      "launch: a real OS auth session"
+    ],
+    "deeplink": [
+      "a file opened with the running app (openfile)",
+      "install from the .msi"
+    ],
+    "dnd": [
+      "launch: a real file drop and a completed drag-out"
+    ],
+    "keyringpersist": [
+      "OS-key cookies survive a launch that can't reach the key"
+    ],
+    "menus": [
+      "a click on a notification while the app is not running launches it"
+    ],
+    "origin": [
+      "launch: a POST from an opaque-origin frame is marked x-deno-desktop-cross-origin: 1"
+    ],
+    "passkeys": [
+      "launch: a completed registration / authentication ceremony"
+    ],
+    "update": [
+      "a staged update signed by the same Developer ID / Authenticode signer is accepted"
+    ],
+    "window": [
+      "launch: close() of a WebGPU window closes it (isClosed)",
+      "launch: the tray rule"
+    ]
+  },
+  "aarch64-unknown-linux-gnu/cef/keyring-locked": {},
+  "aarch64-unknown-linux-gnu/cef/keyring-kwallet": {},
+  "aarch64-unknown-linux-gnu/cef/keyring-persist": {},
+  "x86_64-pc-windows-msvc/webview/default": {
+    "asmt": [
+      "launch: a real OS auth session"
+    ],
+    "deeplink": [
+      "a file opened with the running app (openfile)"
+    ],
+    "dnd": [
+      "launch: a real file drop and a completed drag-out"
+    ],
+    "keyringpersist": [
+      "OS-key cookies survive a launch that can't reach the key"
+    ],
+    "menus": [
+      "launch: a click on a live toast's action button fires action (not click)",
+      "launch: a click on a live toast's body fires click",
+      "launch: a notification the user dismisses fires close"
+    ],
+    "origin": [
+      "launch: a POST from an opaque-origin frame is marked x-deno-desktop-cross-origin: 1"
+    ],
+    "passkeys": [
+      "launch: a completed registration / authentication ceremony"
+    ],
+    "update": [
+      "a staged update signed by the same Developer ID / Authenticode signer is accepted",
+      "an install the user can't write -> install_not_writable"
+    ],
+    "window": [
+      "launch: close() of a WebGPU window closes it (isClosed)",
+      "launch: share() shows the OS share sheet"
+    ]
+  },
+  "x86_64-pc-windows-msvc/cef/default": {
+    "asmt": [
+      "launch: a real OS auth session"
+    ],
+    "deeplink": [
+      "a file opened with the running app (openfile)",
+      "install from the .msi"
+    ],
+    "dnd": [
+      "launch: a real file drop and a completed drag-out"
+    ],
+    "exit": [
+      "#1 deno-exit(3): nothing it started outlived it",
+      "#10 quit(0): nothing it started outlived it",
+      "#11 quit(0): nothing it started outlived it",
+      "#12 quit(0): nothing it started outlived it",
+      "#13 quit(0): nothing it started outlived it",
+      "#14 quit(0): nothing it started outlived it",
+      "#15 quit(0): nothing it started outlived it",
+      "#2 process-exit(4): nothing it started outlived it",
+      "#3 quit(0): nothing it started outlived it",
+      "#4 deno-exit(0): nothing it started outlived it",
+      "#5 deno-exit(5): nothing it started outlived it",
+      "#6 quit(0): nothing it started outlived it",
+      "#7 quit(0): nothing it started outlived it",
+      "#8 quit(0): nothing it started outlived it",
+      "#9 quit(0): nothing it started outlived it"
+    ],
+    "keyringpersist": [
+      "OS-key cookies survive a launch that can't reach the key"
+    ],
+    "menus": [
+      "launch: a click on a live toast's action button fires action (not click)",
+      "launch: a click on a live toast's body fires click",
+      "launch: a notification the user dismisses fires close"
+    ],
+    "origin": [
+      "launch: a POST from an opaque-origin frame is marked x-deno-desktop-cross-origin: 1",
+      "slow proxy configuration (direct): a POST from an opaque-origin frame is marked x-deno-desktop-cross-origin: 1",
+      "slow proxy configuration (system): a POST from an opaque-origin frame is marked x-deno-desktop-cross-origin: 1"
+    ],
+    "passkeys": [
+      "launch: a completed registration / authentication ceremony"
+    ],
+    "update": [
+      "a staged update signed by the same Developer ID / Authenticode signer is accepted",
+      "an install the user can't write -> install_not_writable"
+    ],
+    "window": [
+      "launch: close() of a WebGPU window closes it (isClosed)",
+      "launch: share() shows the OS share sheet"
+    ]
+  },
+  "aarch64-pc-windows-msvc/webview/default": {
+    "asmt": [
+      "launch: a real OS auth session"
+    ],
+    "deeplink": [
+      "a file opened with the running app (openfile)",
+      "msi: the stock CLI's Arm64 .msi installs as built"
+    ],
+    "dnd": [
+      "launch: a real file drop and a completed drag-out"
+    ],
+    "keyringpersist": [
+      "OS-key cookies survive a launch that can't reach the key"
+    ],
+    "menus": [
+      "launch: a click on a live toast's action button fires action (not click)",
+      "launch: a click on a live toast's body fires click",
+      "launch: a context menu dismissed / chosen from the keyboard",
+      "launch: a notification the user dismisses fires close",
+      "launch: an application-menu accelerator fires its item"
+    ],
+    "origin": [
+      "launch: a POST from an opaque-origin frame is marked x-deno-desktop-cross-origin: 1"
+    ],
+    "passkeys": [
+      "launch: a completed registration / authentication ceremony"
+    ],
+    "update": [
+      "a staged update signed by the same Developer ID / Authenticode signer is accepted",
+      "an install the user can't write -> install_not_writable"
+    ],
+    "window": [
+      "launch: close() of a WebGPU window closes it (isClosed)",
+      "launch: share() shows the OS share sheet"
+    ]
+  },
+  "aarch64-pc-windows-msvc/cef/default": {
+    "asmt": [
+      "launch: a real OS auth session"
+    ],
+    "deeplink": [
+      "a file opened with the running app (openfile)",
+      "install from the .msi"
+    ],
+    "dnd": [
+      "launch: a real file drop and a completed drag-out"
+    ],
+    "exit": [
+      "#1 deno-exit(3): nothing it started outlived it",
+      "#10 quit(0): nothing it started outlived it",
+      "#11 quit(0): nothing it started outlived it",
+      "#12 quit(0): nothing it started outlived it",
+      "#13 quit(0): nothing it started outlived it",
+      "#14 quit(0): nothing it started outlived it",
+      "#15 quit(0): nothing it started outlived it",
+      "#2 process-exit(4): nothing it started outlived it",
+      "#3 quit(0): nothing it started outlived it",
+      "#4 deno-exit(0): nothing it started outlived it",
+      "#5 deno-exit(5): nothing it started outlived it",
+      "#6 quit(0): nothing it started outlived it",
+      "#7 quit(0): nothing it started outlived it",
+      "#8 quit(0): nothing it started outlived it",
+      "#9 quit(0): nothing it started outlived it"
+    ],
+    "keyringpersist": [
+      "OS-key cookies survive a launch that can't reach the key"
+    ],
+    "menus": [
+      "launch: a click on a live toast's action button fires action (not click)",
+      "launch: a click on a live toast's body fires click",
+      "launch: a context menu dismissed / chosen from the keyboard",
+      "launch: a notification the user dismisses fires close",
+      "launch: an application-menu accelerator fires its item"
+    ],
+    "origin": [
+      "launch: a POST from an opaque-origin frame is marked x-deno-desktop-cross-origin: 1",
+      "slow proxy configuration (direct): a POST from an opaque-origin frame is marked x-deno-desktop-cross-origin: 1",
+      "slow proxy configuration (system): a POST from an opaque-origin frame is marked x-deno-desktop-cross-origin: 1"
+    ],
+    "passkeys": [
+      "launch: a completed registration / authentication ceremony"
+    ],
+    "update": [
+      "a staged update signed by the same Developer ID / Authenticode signer is accepted",
+      "an install the user can't write -> install_not_writable"
+    ],
+    "window": [
+      "launch: close() of a WebGPU window closes it (isClosed)",
+      "launch: share() shows the OS share sheet"
+    ]
+  }
+}
