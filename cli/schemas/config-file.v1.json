@@ -147,6 +147,14 @@
                 "default": false,
                 "description": "When the installer's environment names an http:// proxy (HTTPS_PROXY / HTTP_PROXY / ALL_PROXY), ask it for an allowed host by NAME (CONNECT host:port, http://host/...) instead of by the address the jail checked. For corporate proxies that only accept host names. The jail still resolves the name first and refuses one that leads to this machine or its network, but the upstream proxy then resolves the name again itself, so a name whose DNS answers differently there (rebinding) can reach what the upstream reaches. Without an upstream proxy it has no effect."
               },
+              "knownPackages": {
+                "type": "object",
+                "description": "Per npm package name, the download hosts (host or host:port) its package.json may declare for itself (node-pre-gyp's binary.host). A declared host is a request, not a grant: one not listed here (and not in the package's net list) is refused, with the line that allows it printed. A declared host that is or resolves to an address on this machine or its network is refused whatever its form.",
+                "additionalProperties": {
+                  "type": "array",
+                  "items": { "type": "string" }
+                }
+              },
               "packages": {
                 "type": "object",
                 "description": "Per-package exceptions, keyed by npm package name.",

@@ -265,6 +265,9 @@ fn print_cache_info(
       "registryCache": registry_cache,
       "originStorage": origin_dir,
       "webCacheStorage": web_cache_dir,
+      // denext: what the OS confines npm lifecycle scripts here (DENEXT.md
+      // item 124; denext's doctor reads it)
+      "lifecycleJail": crate::supply_chain::jail::confinement(),
     });
 
     if location.is_some() {

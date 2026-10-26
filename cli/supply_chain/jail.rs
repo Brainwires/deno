@@ -15,15 +15,24 @@
 //!   (`sh`, `curl`, a compiler, `deno run -A`): writes only beneath
 //!   node_modules (the scratch directory, its TMPDIR, is inside) and the
 //!   package's own `write` paths (not the shared system temp directory: a
-//!   project, or another program's files, can live there); no reading of credential files (`~/.ssh`,
-//!   `~/.aws`, `~/.npmrc`, the project's `.npmrc` / `.env*`, ...); no network
-//!   unless the package declares a download host (node-pre-gyp's `binary.host`)
-//!   or the config allows it; no Unix sockets. Landlock + seccomp on Linux
+//!   project, or another program's files, can live there); no reading of
+//!   credential files (`~/.ssh`, `~/.aws`, `~/.npmrc`, the project's
+//!   `.npmrc` / `.env*` / `.dev.vars` / `.netrc` / `.pypirc` /
+//!   `.git-credentials` at any depth, ...); no network unless the config
+//!   allows it; no Unix sockets. Landlock + seccomp on Linux
 //!   (`sandbox_linux`), Seatbelt on macOS (`sandbox_macos`). Since item 111 a
 //!   script writes only beneath its own package's folder (not the rest of
 //!   node_modules), and one that may reach only some hosts reaches them
 //!   through an allow-listing proxy (`jail_proxy`), the only address the OS
-//!   lets it connect to;
+//!   lets it connect to. The download host a package declares for itself
+//!   (node-pre-gyp's `binary.host`) is a request, not a grant: it is
+//!   honoured only when the project's `jailScripts.knownPackages` lists it
+//!   for that package, and then never when it is (or resolves to) an
+//!   internal address (DENEXT.md item 124);
+//! - its own session and process group (`setsid`): no controlling terminal
+//!   to type into (`TIOCSTI`), and when the script ends the whole group is
+//!   killed, so nothing it started outlives it (Linux also adopts and ends
+//!   orphaned descendants, as the installer is a child subreaper there);
 //! - every `deno` started inside it clamping its permissions to the same set
 //!   (`DENO_INTERNAL_LIFECYCLE_JAIL`): `-A` from the `node` shim and the bin
 //!   wrappers becomes write access to those roots only, no FFI, network per
@@ -32,8 +41,9 @@
 //!
 //! Where the OS can't confine (Windows, Linux without Landlock, macOS without
 //! a working `sandbox-exec`), only the environment, HOME and the Deno
-//! permission clamp apply; a warning says so, and `paranoid` refuses to run
-//! the script instead.
+//! permission clamp apply; a warning on every install says so (and `deno
+//! info --json` reports it as `lifecycleJail`), and `paranoid` refuses to
+//! run the script instead.
 
 use std::collections::BTreeMap;
 use std::collections::HashMap;
@@ -160,6 +170,27 @@ fn path_within(path: &Path, roots: &[PathBuf]) -> bool {
   roots.iter().any(|root| path.starts_with(root))
 }
 
+/// Keeps the entries of a permission path list that lie within `roots`:
+/// each resolved against `cwd`, canonicalized when it exists, else
+/// normalized (`..` folded) so `../../etc/x` can't pass as beneath a root.
+fn clamp_path_list(
+  list: Vec<String>,
+  roots: &[PathBuf],
+  cwd: &Path,
+) -> Vec<String> {
+  list
+    .into_iter()
+    .filter(|entry| {
+      let path = cwd.join(entry);
+      let path = canonicalize_path(&path).unwrap_or_else(|_| {
+        deno_path_util::normalize_path(std::borrow::Cow::Borrowed(&path))
+          .into_owned()
+      });
+      path_within(&path, roots)
+    })
+    .collect()
+}
+
 /// Clamps a `deno` process's permissions to the jail.
 pub fn clamp_permissions(
   options: &mut PermissionsOptions,
@@ -177,14 +208,7 @@ pub fn clamp_permissions(
     None => None,
     Some(list) if list.is_empty() => Some(roots_text()),
     Some(list) => {
-      let kept = list
-        .into_iter()
-        .filter(|entry| {
-          let path = cwd.join(entry);
-          let path = canonicalize_path(&path).unwrap_or(path);
-          path_within(&path, &jail.write)
-        })
-        .collect::<Vec<_>>();
+      let kept = clamp_path_list(list, &jail.write, cwd);
       // an empty list would mean "everything"
       (!kept.is_empty()).then_some(kept)
     }
@@ -251,62 +275,107 @@ pub fn clamp_permissions(
 #[derive(Debug)]
 pub struct JailConfig {
   pub paranoid: bool,
-  /// Asked for (`--jail-scripts`, `jail-scripts=true`, `paranoid`, a
-  /// `jailScripts` object with more than `packages`) rather than on by
-  /// default (DENEXT.md items 103, 108): only then does a platform the OS
-  /// can't confine on get a warning.
-  pub explicit: bool,
   /// `supplyChain.jailScripts.net`
   pub net: bool,
   pub packages: BTreeMap<String, JailPackageConfig>,
+  /// `supplyChain.jailScripts.knownPackages`: per package, the download
+  /// hosts it may declare for itself (DENEXT.md item 124).
+  pub known_packages: BTreeMap<String, Vec<String>>,
   /// `supplyChain.jailScripts.upstreamByName`: the installer's upstream
   /// proxy is asked for a checked host by name, not by address.
   pub upstream_by_name: bool,
-  /// The project's own files with secrets (`.npmrc`, `.env*`).
+  /// The project's own files with secrets (`.npmrc`, `.env*`, `.dev.vars`,
+  /// `.netrc`, `.pypirc`, `.git-credentials`), at any depth.
   pub project_secret_files: Vec<PathBuf>,
   outside_links: OnceLock<Vec<PathBuf>>,
   warned: std::sync::atomic::AtomicBool,
   warned_net: std::sync::atomic::AtomicBool,
+  /// Linux: the missing-network-namespace warning was printed.
+  #[cfg_attr(
+    not(target_os = "linux"),
+    allow(dead_code, reason = "read on the Linux namespace path")
+  )]
+  warned_netns: std::sync::atomic::AtomicBool,
+  /// The packages whose refused declared hosts were reported.
+  warned_declared: std::sync::Mutex<std::collections::BTreeSet<String>>,
+}
+
+/// How deep below a project directory secret files are looked for.
+const SECRET_SCAN_DEPTH: usize = 12;
+
+/// Whether a file name is one a project keeps secrets in: `.env`, `.env.*`,
+/// `.envrc`, `.dev.vars`, `.npmrc`, `.netrc`, `.pypirc`, `.git-credentials`.
+fn is_secret_file_name(name: &str) -> bool {
+  name.starts_with(".env")
+    || matches!(
+      name,
+      ".dev.vars" | ".npmrc" | ".netrc" | ".pypirc" | ".git-credentials"
+    )
+}
+
+/// The secret files under `dirs` (workspace members included), to a bounded
+/// depth, not entering `node_modules` or `.git` and not following symlinks.
+fn project_secret_files(dirs: &[PathBuf]) -> Vec<PathBuf> {
+  fn visit(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+      return;
+    };
+    for entry in entries.flatten() {
+      let Ok(file_type) = entry.file_type() else {
+        continue;
+      };
+      let name = entry.file_name();
+      let name = name.to_string_lossy();
+      if file_type.is_dir() {
+        if depth < SECRET_SCAN_DEPTH
+          && name != "node_modules"
+          && name != ".git"
+          && name != ".jail"
+        {
+          visit(&entry.path(), depth + 1, out);
+        }
+      } else if !file_type.is_symlink() && is_secret_file_name(&name) {
+        out.push(entry.path());
+      }
+    }
+  }
+  let mut out = Vec::new();
+  for dir in dirs {
+    visit(dir, 0, &mut out);
+  }
+  out
 }
 
 impl JailConfig {
   pub fn new(
     paranoid: bool,
-    explicit: bool,
     net: bool,
     packages: BTreeMap<String, JailPackageConfig>,
     project_dirs: &[PathBuf],
     npmrc_path: Option<&Path>,
   ) -> Self {
-    let mut project_secret_files = Vec::new();
-    for dir in project_dirs {
-      if let Ok(entries) = std::fs::read_dir(dir) {
-        for entry in entries.flatten() {
-          let name = entry.file_name();
-          let name = name.to_string_lossy();
-          if name == ".npmrc" || name == ".env" || name.starts_with(".env.") {
-            project_secret_files.push(entry.path());
-          }
-        }
-      }
-    }
+    let mut secret_files = project_secret_files(project_dirs);
     if let Some(path) = npmrc_path {
-      project_secret_files.push(path.to_path_buf());
+      secret_files.push(path.to_path_buf());
     }
-    let project_secret_files = project_secret_files
+    let mut project_secret_files = secret_files
       .into_iter()
       .filter_map(|p| canonicalize_path(&p).ok())
-      .collect();
+      .collect::<Vec<_>>();
+    project_secret_files.sort();
+    project_secret_files.dedup();
     Self {
       paranoid,
-      explicit,
       net,
       packages,
+      known_packages: BTreeMap::new(),
       upstream_by_name: false,
       project_secret_files,
       outside_links: Default::default(),
       warned: Default::default(),
       warned_net: Default::default(),
+      warned_netns: Default::default(),
+      warned_declared: Default::default(),
     }
   }
 
@@ -315,14 +384,26 @@ impl JailConfig {
     self.upstream_by_name = upstream_by_name;
     self
   }
+
+  /// Sets `known_packages`.
+  pub fn with_known_packages(
+    mut self,
+    known_packages: BTreeMap<String, Vec<String>>,
+  ) -> Self {
+    self.known_packages = known_packages;
+    self
+  }
 }
 
 /// Whether the OS sandbox can hold a script's connections to one loopback
-/// port (its proxy): Seatbelt can; Landlock from ABI 4 (Linux 6.7).
+/// port (its proxy): Seatbelt can; Linux in a network namespace of its own
+/// (the proxy the only thing on its loopback), or Landlock from ABI 4
+/// (Linux 6.7) by port.
 fn can_confine_to_proxy() -> bool {
   #[cfg(target_os = "linux")]
   {
-    super::sandbox_linux::can_confine_to_port()
+    super::sandbox_linux::netns_available().is_ok()
+      || super::sandbox_linux::can_confine_to_port()
   }
   #[cfg(target_os = "macos")]
   {
@@ -332,6 +413,82 @@ fn can_confine_to_proxy() -> bool {
   {
     false
   }
+}
+
+/// What the OS confines a lifecycle script here, for `deno info --json`
+/// (`lifecycleJail`) and denext's doctor (DENEXT.md item 124).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Confinement {
+  /// `"seatbelt"`, `"landlock"` or `"none"`.
+  pub os_sandbox: &'static str,
+  /// Why there is none.
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub reason: Option<String>,
+  /// Whether every program a script starts is held to its host list:
+  /// `"proxy"` (only its allow-listing proxy is reachable), or
+  /// `"unconfined"` (the proxy and the Deno clamp apply, other programs
+  /// reach any host; a package's own hosts then get no network).
+  pub host_lists: &'static str,
+  /// Linux: whether a script with a host list runs in its own network
+  /// namespace (nothing but the proxy on its loopback, no route elsewhere).
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub network_namespace: Option<bool>,
+  /// The warnings an install prints here, one line each.
+  pub warnings: Vec<String>,
+}
+
+/// The confinement this machine gives lifecycle scripts.
+pub fn confinement() -> Confinement {
+  let sandbox = os_sandbox();
+  let mut warnings = Vec::new();
+  let os_sandbox = match &sandbox {
+    Ok(()) if cfg!(target_os = "macos") => "seatbelt",
+    Ok(()) => "landlock",
+    Err(reason) => {
+      warnings.push(unconfined_warning(reason));
+      "none"
+    }
+  };
+  let host_lists = if sandbox.is_ok() && can_confine_to_proxy() {
+    "proxy"
+  } else {
+    "unconfined"
+  };
+  #[cfg(target_os = "linux")]
+  let network_namespace = {
+    let netns = super::sandbox_linux::netns_available();
+    if sandbox.is_ok()
+      && let Err(reason) = &netns
+    {
+      warnings.push(no_netns_warning(reason));
+    }
+    Some(netns.is_ok())
+  };
+  #[cfg(not(target_os = "linux"))]
+  let network_namespace = None;
+  Confinement {
+    os_sandbox,
+    reason: sandbox.err(),
+    host_lists,
+    network_namespace,
+    warnings,
+  }
+}
+
+/// The one-line warning for a platform the OS can't confine on.
+fn unconfined_warning(reason: &str) -> String {
+  format!(
+    "jail-scripts: the OS can't confine lifecycle scripts here ({reason}). They still get a scrubbed environment, a temporary HOME and a clamped Deno, but any other program they start (a shell, a compiler, curl) can read and write anything and reach any host."
+  )
+}
+
+/// The one-line warning for Linux without an unprivileged network namespace.
+#[cfg(target_os = "linux")]
+fn no_netns_warning(reason: &str) -> String {
+  format!(
+    "jail-scripts: lifecycle scripts can't get a network namespace of their own here ({reason}); a script held to a host list is held to its proxy's port number, which another machine could answer on."
+  )
 }
 
 /// What the OS sandbox allows a script's processes to connect to
@@ -501,35 +658,110 @@ fn declared_net_hosts(package_folder: &Path) -> Vec<String> {
   hosts
 }
 
-/// Network access of a package's scripts, and whether it is the hosts the
-/// package declares for itself: the package's own `net` (a host list is the
-/// narrower grant and wins over `jailScripts.net`; `false` wins over both
-/// `jailScripts.net` and the declared hosts, DENEXT.md item 111), the
-/// config's, or the hosts the package declares (not under paranoid: a
-/// package doesn't grant itself anything there).
+/// The network a package's scripts get.
+#[derive(Debug, PartialEq, Eq)]
+struct NetChoice {
+  net: JailNet,
+  /// Whether `net` is the hosts the package declares for itself.
+  declared: bool,
+  /// Declared hosts the project hasn't allowed (`knownPackages`), which the
+  /// script can't reach.
+  refused_declared: Vec<String>,
+}
+
+/// Whether a declared `host[:port]` is covered by a `knownPackages` entry
+/// (`host` covers every port, `host:port` that port), compared as the
+/// proxy's allow-list compares hosts.
+fn declared_host_known(declared: &str, known: &[String]) -> bool {
+  let Ok(declared) = super::jail_proxy::AllowList::parse(std::slice::from_ref(
+    &declared.to_string(),
+  )) else {
+    return false;
+  };
+  let Some(entry) = declared.entries().first() else {
+    return false;
+  };
+  super::jail_proxy::AllowList::parse(known).is_ok_and(|known| {
+    known.entries().iter().any(|k| {
+      k.host == entry.host && k.port.is_none_or(|p| Some(p) == entry.port)
+    })
+  })
+}
+
+/// Network access of a package's scripts: the package's own `net` (a host
+/// list is the narrower grant and wins over `jailScripts.net`; `false` wins
+/// over both `jailScripts.net` and the declared hosts, DENEXT.md item 111),
+/// the config's, or the hosts the package declares for itself, each only
+/// when `jailScripts.knownPackages` lists it for the package (DENEXT.md item
+/// 124: a declaration is a request, not a grant), and none under paranoid.
 fn jail_net(
   config: &JailConfig,
   package: Option<&JailPackageConfig>,
+  package_name: &str,
   package_folder: &Path,
-) -> (JailNet, bool) {
+) -> NetChoice {
+  let plain = |net: JailNet| NetChoice {
+    net,
+    declared: false,
+    refused_declared: Vec::new(),
+  };
   match package.and_then(|p| p.net.as_ref()) {
     Some(JailNetConfig::Hosts(hosts)) => {
-      return (JailNet::Hosts(hosts.clone()), false);
+      return plain(JailNet::Hosts(hosts.clone()));
     }
-    Some(JailNetConfig::All(true)) => return (JailNet::All, false),
-    Some(JailNetConfig::All(false)) => return (JailNet::None, false),
-    None if config.net => return (JailNet::All, false),
+    Some(JailNetConfig::All(true)) => return plain(JailNet::All),
+    Some(JailNetConfig::All(false)) => return plain(JailNet::None),
+    None if config.net => return plain(JailNet::All),
     None => {}
   }
   if config.paranoid {
-    return (JailNet::None, false);
+    return plain(JailNet::None);
   }
-  let hosts = declared_net_hosts(package_folder);
-  if hosts.is_empty() {
-    (JailNet::None, false)
-  } else {
-    (JailNet::Hosts(hosts), true)
+  let known = config
+    .known_packages
+    .get(package_name)
+    .map(Vec::as_slice)
+    .unwrap_or_default();
+  let (allowed, refused): (Vec<String>, Vec<String>) =
+    declared_net_hosts(package_folder)
+      .into_iter()
+      .partition(|host| declared_host_known(host, known));
+  NetChoice {
+    net: if allowed.is_empty() {
+      JailNet::None
+    } else {
+      JailNet::Hosts(allowed)
+    },
+    declared: true,
+    refused_declared: refused,
   }
+}
+
+/// Strips the credentials (`user:password@`) out of a URL-valued setting,
+/// so a proxy or registry URL passed into the jail carries none (DENEXT.md
+/// item 124). A value that isn't a URL, or has no credentials, is returned as
+/// it is.
+fn strip_url_credentials(value: &str) -> String {
+  if !value.contains("://") {
+    return value.to_string();
+  }
+  match deno_core::url::Url::parse(value.trim()) {
+    Ok(mut url) if !url.username().is_empty() || url.password().is_some() => {
+      let _ = url.set_username("");
+      let _ = url.set_password(None);
+      url.to_string()
+    }
+    _ => value.to_string(),
+  }
+}
+
+/// Whether an environment variable's value may be a URL with credentials:
+/// npm's config keys and the proxy settings.
+fn url_valued_env_var(name: &str) -> bool {
+  let lower = name.to_ascii_lowercase();
+  lower.starts_with("npm_config_")
+    || lower.ends_with("_proxy")
+    || lower.starts_with("global_agent_")
 }
 
 /// A package's extra `write` paths, `~` resolved against the user's home (a
@@ -584,49 +816,146 @@ fn home_write_paths(
 /// could run: regular files with an execute (or set-id) bit, and symlinks
 /// to such files. Returns the paths removed. Removing rather than clearing
 /// the bit also takes out a hard link to a file elsewhere without changing
-/// that file.
+/// that file. The walk is relative to directory descriptors opened with
+/// `O_NOFOLLOW` (`openat` / `fstatat` / `unlinkat`), so a directory swapped
+/// for a symlink while it runs can't make it unlink a file elsewhere
+/// (DENEXT.md item 124); it runs once the script's process group is gone.
 #[cfg(unix)]
 fn remove_new_executables(dirs: &[PathBuf], since: SystemTime) -> Vec<PathBuf> {
-  use std::os::unix::fs::MetadataExt;
+  use std::ffi::CStr;
+  use std::ffi::CString;
+  use std::os::fd::AsRawFd;
+  use std::os::fd::FromRawFd;
+  use std::os::fd::OwnedFd;
+  use std::os::unix::ffi::OsStrExt;
+  use std::os::unix::ffi::OsStringExt;
+
   let since = since
     .duration_since(SystemTime::UNIX_EPOCH)
     .map(|d| d.as_secs() as i64)
     .unwrap_or(0);
-  fn executable(meta: &std::fs::Metadata) -> bool {
-    meta.is_file() && meta.mode() & 0o7111 != 0
-  }
-  fn visit(dir: &Path, since: i64, depth: usize, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-      return;
+
+  fn open_dir(parent: Option<&OwnedFd>, name: &CStr) -> Option<OwnedFd> {
+    let dirfd = parent.map(|p| p.as_raw_fd()).unwrap_or(libc::AT_FDCWD);
+    // SAFETY: a valid directory fd and C string; the fd returned is owned
+    let fd = unsafe {
+      libc::openat(
+        dirfd,
+        name.as_ptr(),
+        libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+      )
     };
-    for entry in entries.flatten() {
-      let path = entry.path();
-      let Ok(meta) = std::fs::symlink_metadata(&path) else {
+    if fd < 0 {
+      return None;
+    }
+    // SAFETY: just opened
+    Some(unsafe { OwnedFd::from_raw_fd(fd) })
+  }
+
+  fn stat_at(dir: &OwnedFd, name: &CStr, follow: bool) -> Option<libc::stat> {
+    let mut st = std::mem::MaybeUninit::<libc::stat>::uninit();
+    let flags = if follow { 0 } else { libc::AT_SYMLINK_NOFOLLOW };
+    // SAFETY: a valid directory fd, C string and out-pointer
+    let res = unsafe {
+      libc::fstatat(dir.as_raw_fd(), name.as_ptr(), st.as_mut_ptr(), flags)
+    };
+    if res != 0 {
+      return None;
+    }
+    // SAFETY: fstatat filled it
+    Some(unsafe { st.assume_init() })
+  }
+
+  fn executable(st: &libc::stat) -> bool {
+    st.st_mode & libc::S_IFMT == libc::S_IFREG && st.st_mode & 0o7111 != 0
+  }
+
+  /// The entry names of an open directory (not `.` / `..`).
+  fn entry_names(dir: &OwnedFd) -> Vec<CString> {
+    // fdopendir takes the descriptor over, so it gets a duplicate
+    // SAFETY: a valid fd
+    let dup = unsafe { libc::fcntl(dir.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 0) };
+    if dup < 0 {
+      return Vec::new();
+    }
+    // SAFETY: a valid, owned descriptor; closedir below releases it
+    let stream = unsafe { libc::fdopendir(dup) };
+    if stream.is_null() {
+      // SAFETY: the duplicate is still ours
+      unsafe { libc::close(dup) };
+      return Vec::new();
+    }
+    let mut names = Vec::new();
+    loop {
+      // SAFETY: a valid stream; the entry pointer is read before the next call
+      let entry = unsafe { libc::readdir(stream) };
+      if entry.is_null() {
+        break;
+      }
+      // SAFETY: readdir returned a valid entry with a NUL-terminated name
+      let name = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) };
+      let bytes = name.to_bytes();
+      if bytes != b"." && bytes != b".." {
+        names.push(name.to_owned());
+      }
+    }
+    // SAFETY: a valid stream, closed once
+    unsafe { libc::closedir(stream) };
+    names
+  }
+
+  fn visit(
+    dir: &OwnedFd,
+    dir_path: &Path,
+    since: i64,
+    depth: usize,
+    out: &mut Vec<PathBuf>,
+  ) {
+    for name in entry_names(dir) {
+      let path =
+        dir_path.join(std::ffi::OsString::from_vec(name.to_bytes().to_vec()));
+      let Some(st) = stat_at(dir, &name, false) else {
         continue;
       };
-      if meta.is_dir() {
-        if depth < 64 {
-          visit(&path, since, depth + 1, out);
+      if st.st_mode & libc::S_IFMT == libc::S_IFDIR {
+        if depth < 64
+          && let Some(child) = open_dir(Some(dir), &name)
+        {
+          visit(&child, &path, since, depth + 1, out);
         }
         continue;
       }
       // the inode's change time, which a script can't set back
-      if meta.ctime() < since {
+      if st.st_ctime < since {
         continue;
       }
-      let runnable = if meta.file_type().is_symlink() {
-        std::fs::metadata(&path).is_ok_and(|m| executable(&m))
+      let runnable = if st.st_mode & libc::S_IFMT == libc::S_IFLNK {
+        stat_at(dir, &name, true).is_some_and(|target| executable(&target))
       } else {
-        executable(&meta)
+        executable(&st)
       };
-      if runnable && std::fs::remove_file(&path).is_ok() {
+      if !runnable {
+        continue;
+      }
+      // SAFETY: a valid directory fd and C string
+      if unsafe { libc::unlinkat(dir.as_raw_fd(), name.as_ptr(), 0) } == 0 {
         out.push(path);
       }
     }
   }
+
   let mut out = Vec::new();
   for dir in dirs {
-    visit(dir, since, 0, &mut out);
+    // the root is opened as it really is (a cache on another volume may be
+    // a link; what's beneath is walked without following any) and reported
+    // as given
+    let real = canonicalize_path(dir).unwrap_or_else(|_| dir.clone());
+    let Ok(name) = CString::new(real.as_os_str().as_bytes()) else {
+      continue;
+    };
+    if let Some(fd) = open_dir(None, &name) {
+      visit(&fd, dir, since, 0, &mut out);
+    }
   }
   out
 }
@@ -856,19 +1185,23 @@ pub async fn run_jailed_script(
         s.task_name
       );
     }
-    // on by default, the jail stays quiet where the OS can't confine: the
-    // environment, HOME and the Deno clamp still apply, and a warning on
-    // every install there would be noise the user can't act on
-    if config.explicit
-      && !config
-        .warned
-        .swap(true, std::sync::atomic::Ordering::SeqCst)
+    // where the OS can't confine, the environment, HOME and the Deno clamp
+    // still apply; one warning per install says what doesn't (DENEXT.md
+    // item 124: asked for or on by default alike)
+    if !config
+      .warned
+      .swap(true, std::sync::atomic::Ordering::SeqCst)
     {
       log::warn!(
-        "{} jail-scripts: {reason}. Lifecycle scripts run with a scrubbed environment and a temporary HOME, and the JavaScript they run through Deno is confined, but other programs they start are not.",
-        colors::yellow("Warning")
+        "{} {}",
+        colors::yellow("Warning"),
+        unconfined_warning(reason)
       );
     }
+  }
+  #[cfg(target_os = "linux")]
+  if sandbox.is_ok() {
+    super::sandbox_linux::become_subreaper();
   }
 
   let dirs = JailDirs::create(s.root_node_modules, &s.package_id)
@@ -901,39 +1234,91 @@ async fn run_in_dirs(
   }
   write.dedup();
 
-  let (net, declared) = jail_net(config, package, s.package_folder);
+  let NetChoice {
+    net,
+    declared,
+    refused_declared,
+  } = jail_net(config, package, s.package_name, s.package_folder);
+  if !refused_declared.is_empty()
+    && config
+      .warned_declared
+      .lock()
+      .map(|mut seen| seen.insert(s.package_id.clone()))
+      .unwrap_or(true)
+  {
+    // a declaration is a request: say what it asked for and the exact line
+    // that grants it (DENEXT.md item 124)
+    let hosts = refused_declared
+      .iter()
+      .map(|h| format!("\"{h}\""))
+      .collect::<Vec<_>>()
+      .join(", ");
+    log::warn!(
+      "{} jail-scripts: npm:{}'s package.json declares a download host this project hasn't allowed: {}. Its scripts can't reach it. To allow it, add to deno.json: \"supplyChain\": {{ \"jailScripts\": {{ \"packages\": {{ \"{}\": {{ \"net\": [{hosts}] }} }} }} }}",
+      colors::yellow("Warning"),
+      s.package_id,
+      refused_declared.join(", "),
+      s.package_name
+    );
+  }
   // a host list: the allow-listing proxy, the only address the OS lets the
   // script connect to where it can hold it there
-  let mut proxy = match &net {
+  let allow = match &net {
     JailNet::Hosts(hosts) => {
       // the project's opt-in for a mirror on the local network covers the
-      // host list it wrote, never the hosts a package declares for itself
+      // host list it wrote, never the hosts a package declares for itself,
+      // which get no exemption at all (DENEXT.md item 124)
       let allow_private =
         !declared && package.is_some_and(|package| package.allow_private);
-      let allow = super::jail_proxy::AllowList::parse(hosts)
-        .map_err(|err| deno_core::anyhow::anyhow!("jail-scripts: {err}"))?
-        .with_allow_private(allow_private);
-      let upstream = super::jail_proxy::Upstream::from_env(s.env_vars)
-        .with_by_name(config.upstream_by_name);
       Some(
-        super::jail_proxy::JailProxy::start(allow, upstream)
-          .await
-          .context("Failed to start the jail's network proxy")?,
+        super::jail_proxy::AllowList::parse(hosts)
+          .map_err(|err| deno_core::anyhow::anyhow!("jail-scripts: {err}"))?
+          .with_allow_private(allow_private)
+          .with_declared(declared),
       )
     }
     _ => None,
   };
+  let upstream = super::jail_proxy::Upstream::from_env(s.env_vars)
+    .with_by_name(config.upstream_by_name);
+  // Linux: a script with a host list gets a network namespace of its own,
+  // where the proxy listens on a port chosen here (nothing else is on that
+  // loopback); the listener is handed back from the child (DENEXT.md item
+  // 124). Without one, the proxy listens on the host's loopback as before.
+  #[cfg(target_os = "linux")]
+  let netns = os_sandbox
+    && allow.is_some()
+    && super::sandbox_linux::netns_available().is_ok();
+  #[cfg(not(target_os = "linux"))]
+  let netns = false;
+  let mut proxy = match &allow {
+    Some(allow) if !netns => Some(
+      super::jail_proxy::JailProxy::start(allow.clone(), upstream.clone())
+        .await
+        .context("Failed to start the jail's network proxy")?,
+    ),
+    _ => None,
+  };
+  #[cfg(target_os = "linux")]
+  let netns_port = netns.then(super::sandbox_linux::pick_proxy_port);
+  #[cfg(not(target_os = "linux"))]
+  let netns_port: Option<u16> = None;
+  let proxy_port = proxy
+    .as_ref()
+    .map(|p| p.port())
+    .or(netns_port)
+    .unwrap_or_default();
   let os_net = choose_os_net(
     &net,
     declared,
     config.paranoid,
-    proxy.as_ref().map(|p| p.port()).unwrap_or_default(),
+    proxy_port,
     os_sandbox && can_confine_to_proxy(),
   );
   let net = match (net, os_net) {
     (JailNet::Hosts(hosts), OsNet::Denied) if os_sandbox => {
       log::warn!(
-        "{} jail-scripts: this system can't hold npm:{}'s '{}' script to its hosts ({}), so it runs without network. Linux 6.7+ (Landlock ABI 4) can.",
+        "{} jail-scripts: this system can't hold npm:{}'s '{}' script to its hosts ({}), so it runs without network. Linux 6.7+ (Landlock ABI 4), or unprivileged user namespaces, can.",
         colors::yellow("Warning"),
         s.package_id,
         s.task_name,
@@ -948,7 +1333,7 @@ async fn run_in_dirs(
         .swap(true, std::sync::atomic::Ordering::SeqCst)
       {
         log::warn!(
-          "{} jail-scripts: this system can't hold lifecycle scripts to the hosts deno.json lists for them (npm:{}: {}); programs other than Deno that they start can reach any host. Linux 6.7+ (Landlock ABI 4) can.",
+          "{} jail-scripts: this system can't hold lifecycle scripts to the hosts deno.json lists for them (npm:{}: {}); programs other than Deno that they start can reach any host. Linux 6.7+ (Landlock ABI 4), or unprivileged user namespaces, can.",
           colors::yellow("Warning"),
           s.package_id,
           hosts.join(", ")
@@ -958,6 +1343,21 @@ async fn run_in_dirs(
     }
     (net, _) => net,
   };
+  #[cfg(target_os = "linux")]
+  if os_sandbox
+    && matches!(os_net, OsNet::ProxyOnly(_))
+    && !netns
+    && let Err(reason) = super::sandbox_linux::netns_available()
+    && !config
+      .warned_netns
+      .swap(true, std::sync::atomic::Ordering::SeqCst)
+  {
+    log::warn!(
+      "{} {}",
+      colors::yellow("Warning"),
+      no_netns_warning(&reason)
+    );
+  }
 
   let mut deny_read = credential_paths();
   deny_read.extend(config.project_secret_files.iter().cloned());
@@ -973,14 +1373,20 @@ async fn run_in_dirs(
     .filter(|target| !path_within(target, &write))
     .cloned()
     .collect();
+  // the proxy's address: the one started here, or the port the script's
+  // process binds in its namespace (none when the host list got no network:
+  // the proxy was dropped above)
+  let proxy_address = proxy
+    .as_ref()
+    .map(|p| p.port())
+    .or(netns_port)
+    .map(|port| format!("127.0.0.1:{port}"));
   let permissions = JailPermissions {
     write: write.clone(),
     deny_write,
     deny_read: deny_read.clone(),
     net: net.clone(),
-    proxy: proxy
-      .as_ref()
-      .map(|proxy| format!("127.0.0.1:{}", proxy.port())),
+    proxy: proxy_address.clone(),
   };
 
   // the environment
@@ -993,11 +1399,17 @@ async fn run_in_dirs(
       })
     });
     if passed || keep_env_var(&name, net == JailNet::All) {
-      env.insert(key.clone(), value.clone());
+      // a registry or proxy URL goes in without its credentials
+      let value = if url_valued_env_var(&name) {
+        OsString::from(strip_url_credentials(&value.to_string_lossy()))
+      } else {
+        value.clone()
+      };
+      env.insert(key.clone(), value);
     }
   }
-  if let Some(proxy) = &proxy {
-    set_proxy_env(&mut env, &proxy.url());
+  if let Some(address) = &proxy_address {
+    set_proxy_env(&mut env, &format!("http://{address}"));
   }
   let mut set = |key: &str, value: &Path| {
     let key = if cfg!(windows) {
@@ -1073,7 +1485,21 @@ async fn run_in_dirs(
     .stdout(Stdio::piped())
     .stderr(Stdio::piped())
     .kill_on_drop(true);
+  // its own session and process group, before anything else: no controlling
+  // terminal, and one group to end when the script does
+  #[cfg(unix)]
+  detach_session(&mut command);
 
+  #[cfg(target_os = "linux")]
+  let netns_handoff = match netns_port {
+    Some(port) => {
+      let handoff = super::sandbox_linux::NetnsHandoff::new(port)
+        .context("Failed to set up the jail's network namespace")?;
+      handoff.apply_to_command(&mut command);
+      Some(handoff)
+    }
+    None => None,
+  };
   #[cfg(target_os = "linux")]
   let _ruleset = if os_sandbox {
     let proxy_port = match os_net {
@@ -1090,6 +1516,10 @@ async fn run_in_dirs(
   };
   #[cfg(not(any(target_os = "linux", target_os = "macos")))]
   let _ = os_net;
+  // the installer's children before the script: what it adopts later as a
+  // child subreaper and doesn't recognize is a stray of the script
+  #[cfg(target_os = "linux")]
+  let children_before = os_sandbox.then(super::sandbox_linux::children_of_self);
 
   let started = SystemTime::now();
   let mut child = command.spawn().with_context(|| {
@@ -1097,6 +1527,24 @@ async fn run_in_dirs(
   })?;
   #[cfg(target_os = "linux")]
   drop(_ruleset);
+  let child_pid = child.id();
+  #[cfg(target_os = "linux")]
+  if let Some(handoff) = netns_handoff {
+    // the listener the child bound on its own loopback; the proxy accepts
+    // on it here and dials upstream from the host's network
+    let listener = handoff
+      .receive()
+      .await
+      .context("The jailed script's network namespace wasn't set up")?;
+    proxy = Some(
+      super::jail_proxy::JailProxy::start_on(
+        listener,
+        allow.clone().unwrap_or_default(),
+        upstream.clone(),
+      )
+      .context("Failed to start the jail's network proxy")?,
+    );
+  }
 
   let spec = serde_json::to_vec(&spec)?;
   if let Some(mut stdin) = child.stdin.take() {
@@ -1119,10 +1567,26 @@ async fn run_in_dirs(
   let status = tokio::select! {
     status = child.wait() => status?,
     _ = s.kill_signal.wait_any() => {
+      #[cfg(unix)]
+      if let Some(pid) = child_pid {
+        kill_process_group(pid);
+      }
       let _ = child.kill().await;
       child.wait().await?
     }
   };
+  // whatever the script started and left behind goes with it, before the
+  // sweep below looks at what it wrote (DENEXT.md item 124)
+  #[cfg(unix)]
+  if let Some(pid) = child_pid {
+    end_process_group(pid).await;
+  }
+  #[cfg(target_os = "linux")]
+  if let Some(before) = children_before {
+    super::sandbox_linux::end_adopted_strays(&before);
+  }
+  #[cfg(not(unix))]
+  let _ = child_pid;
   let stdout = read_out.await.unwrap_or_default();
   let mut stderr = read_err.await.unwrap_or_default();
   let mut exit_code = status.code().unwrap_or(1);
@@ -1133,6 +1597,65 @@ async fn run_in_dirs(
     stdout: Some(stdout),
     stderr: Some(stderr),
   })
+}
+
+/// Puts the command's process in a session and process group of its own
+/// (`setsid`), inherited by everything it starts: no controlling terminal
+/// to type into (`TIOCSTI`), and `kill(-pid)` reaches the whole tree.
+#[cfg(unix)]
+fn detach_session(command: &mut tokio::process::Command) {
+  // SAFETY: setsid is async-signal-safe and touches no memory
+  unsafe {
+    command.pre_exec(|| {
+      if libc::setsid() < 0 {
+        return Err(std::io::Error::last_os_error());
+      }
+      Ok(())
+    });
+  }
+}
+
+/// Sends SIGKILL to the process group whose id is `pid` (the jailed
+/// script's, a session leader since [`detach_session`]).
+#[cfg(unix)]
+fn kill_process_group(pid: u32) {
+  let Ok(pgid) = i32::try_from(pid) else {
+    return;
+  };
+  // SAFETY: a signal to a group id; a stale id means ESRCH, not harm (the
+  // group is the script's own session, created by this install)
+  unsafe { libc::kill(-pgid, libc::SIGKILL) };
+}
+
+/// Ends the script's process group and waits (briefly) until no member is
+/// left: the installer has reaped the script itself already; its orphaned
+/// descendants are reaped here where they became the installer's (Linux, a
+/// child subreaper) or by init elsewhere.
+#[cfg(unix)]
+async fn end_process_group(pid: u32) {
+  let Ok(pgid) = i32::try_from(pid) else {
+    return;
+  };
+  kill_process_group(pid);
+  for _ in 0..300 {
+    // reap what's ours in the group (adopted orphans), without blocking
+    loop {
+      let mut status = 0;
+      // SAFETY: waitpid on a group id with WNOHANG
+      let reaped = unsafe { libc::waitpid(-pgid, &mut status, libc::WNOHANG) };
+      if reaped <= 0 {
+        break;
+      }
+    }
+    // SAFETY: signal 0 probes the group
+    if unsafe { libc::kill(-pgid, 0) } != 0
+      && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+    {
+      return;
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+  }
+  log::debug!("jail-scripts: process group {pgid} did not end in time");
 }
 
 /// Removes the executables a script left in its package's `~` write paths,
@@ -1257,6 +1780,16 @@ async fn run_child_inner() -> Result<i32, AnyError> {
 mod tests {
   use super::*;
 
+  /// A config with no package entries.
+  fn config(net: bool, paranoid: bool) -> JailConfig {
+    JailConfig::new(paranoid, net, BTreeMap::new(), &[], None)
+  }
+
+  /// The parts of a [`NetChoice`] the older tests compare.
+  fn net_of(choice: NetChoice) -> (JailNet, bool) {
+    (choice.net, choice.declared)
+  }
+
   #[test]
   fn env_allow_list() {
     for name in [
@@ -1311,9 +1844,6 @@ mod tests {
       r#"{ "binary": { "host": "https://declared.example.com/" } }"#,
     )
     .unwrap();
-    let config = |net: bool, paranoid: bool| {
-      JailConfig::new(paranoid, false, net, BTreeMap::new(), &[], None)
-    };
     let package = |net: Option<JailNetConfig>| JailPackageConfig {
       net,
       ..Default::default()
@@ -1331,11 +1861,12 @@ mod tests {
       [(false, false), (true, false), (false, true), (true, true)]
     {
       assert_eq!(
-        jail_net(
+        net_of(jail_net(
           &config(net, paranoid),
           Some(&package(Some(hosts.clone()))),
+          "pkg",
           dir.path()
-        ),
+        )),
         (expected_hosts.clone(), false),
         "net {net}, paranoid {paranoid}"
       );
@@ -1344,28 +1875,123 @@ mod tests {
     let all = package(Some(JailNetConfig::All(true)));
     let none = package(Some(JailNetConfig::All(false)));
     assert_eq!(
-      jail_net(&config(false, true), Some(&all), dir.path()),
+      net_of(jail_net(
+        &config(false, true),
+        Some(&all),
+        "pkg",
+        dir.path()
+      )),
       (JailNet::All, false)
     );
     assert_eq!(
-      jail_net(&config(false, false), Some(&none), dir.path()),
+      net_of(jail_net(
+        &config(false, false),
+        Some(&none),
+        "pkg",
+        dir.path()
+      )),
       (JailNet::None, false)
     );
     assert_eq!(
-      jail_net(&config(true, false), None, dir.path()),
+      net_of(jail_net(&config(true, false), None, "pkg", dir.path())),
       (JailNet::All, false)
     );
-    // the declared hosts, marked as the package's own
+    // the declared host, marked as the package's own, once the project's
+    // `knownPackages` allows it (DENEXT.md item 124)
+    let known = config(false, false).with_known_packages(BTreeMap::from([(
+      "pkg".to_string(),
+      vec!["declared.example.com".to_string()],
+    )]));
     assert_eq!(
-      jail_net(&config(false, false), None, dir.path()),
-      (
-        JailNet::Hosts(vec!["declared.example.com".to_string()]),
-        true
-      )
+      jail_net(&known, None, "pkg", dir.path()),
+      NetChoice {
+        net: JailNet::Hosts(vec!["declared.example.com".to_string()]),
+        declared: true,
+        refused_declared: Vec::new(),
+      }
     );
     assert_eq!(
-      jail_net(&config(false, true), None, dir.path()),
+      net_of(jail_net(&config(false, true), None, "pkg", dir.path())),
       (JailNet::None, false)
+    );
+  }
+
+  // DENEXT.md item 124 (M2): a declared host is a request; without the
+  // project's say-so it is refused and named
+  #[test]
+  fn declared_hosts_need_a_grant() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+      dir.path().join("package.json"),
+      r#"{ "binary": { "host": "https://declared.example.com/", "staging_host": "https://s3.example.com:8443/x" } }"#,
+    )
+    .unwrap();
+    // nothing known: no network, both hosts refused
+    assert_eq!(
+      jail_net(&config(false, false), None, "pkg", dir.path()),
+      NetChoice {
+        net: JailNet::None,
+        declared: true,
+        refused_declared: vec![
+          "declared.example.com".to_string(),
+          "s3.example.com:8443".to_string()
+        ],
+      }
+    );
+    // one known (any port covers the declared port), the other refused
+    let known = |hosts: &[&str]| {
+      config(false, false).with_known_packages(BTreeMap::from([(
+        "pkg".to_string(),
+        hosts.iter().map(|h| h.to_string()).collect(),
+      )]))
+    };
+    assert_eq!(
+      jail_net(&known(&["s3.example.com"]), None, "pkg", dir.path()),
+      NetChoice {
+        net: JailNet::Hosts(vec!["s3.example.com:8443".to_string()]),
+        declared: true,
+        refused_declared: vec!["declared.example.com".to_string()],
+      }
+    );
+    // a port in the table must match; names compare as the proxy does
+    assert_eq!(
+      jail_net(&known(&["s3.example.com:8444"]), None, "pkg", dir.path()).net,
+      JailNet::None
+    );
+    assert_eq!(
+      jail_net(
+        &known(&["DECLARED.example.com.", "s3.example.com:8443"]),
+        None,
+        "pkg",
+        dir.path()
+      ),
+      NetChoice {
+        net: JailNet::Hosts(vec![
+          "declared.example.com".to_string(),
+          "s3.example.com:8443".to_string()
+        ]),
+        declared: true,
+        refused_declared: Vec::new(),
+      }
+    );
+    // another package's entry doesn't count
+    assert_eq!(
+      jail_net(&known(&["declared.example.com"]), None, "other", dir.path())
+        .net,
+      JailNet::None
+    );
+    // the project's own list for the package replaces the declaration
+    let listed = JailPackageConfig {
+      net: Some(JailNetConfig::Hosts(vec!["github.com".to_string()])),
+      ..Default::default()
+    };
+    assert_eq!(
+      jail_net(&config(false, false), Some(&listed), "pkg", dir.path()),
+      NetChoice {
+        net: JailNet::Hosts(vec!["github.com".to_string()]),
+        declared: false,
+        refused_declared: Vec::new(),
+      }
     );
   }
 
@@ -1386,22 +2012,214 @@ mod tests {
     for (net, paranoid) in
       [(false, false), (true, false), (false, true), (true, true)]
     {
-      let config =
-        JailConfig::new(paranoid, false, net, BTreeMap::new(), &[], None);
       assert_eq!(
-        jail_net(&config, Some(&none), dir.path()),
+        net_of(jail_net(
+          &config(net, paranoid),
+          Some(&none),
+          "pkg",
+          dir.path()
+        )),
         (JailNet::None, false),
         "net {net}, paranoid {paranoid}"
       );
     }
     // a package entry without `net` still takes the global setting
     let env_only = JailPackageConfig::default();
-    let config =
-      JailConfig::new(false, false, true, BTreeMap::new(), &[], None);
     assert_eq!(
-      jail_net(&config, Some(&env_only), dir.path()),
+      net_of(jail_net(
+        &config(true, false),
+        Some(&env_only),
+        "pkg",
+        dir.path()
+      )),
       (JailNet::All, false)
     );
+  }
+
+  // DENEXT.md item 124 (M3): secrets at any depth under the project
+  #[test]
+  fn secret_files_at_any_depth() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = canonicalize_path(dir.path()).unwrap();
+    for file in [
+      ".env",
+      ".env.local",
+      ".envrc",
+      ".npmrc",
+      "apps/web/.env.local",
+      "apps/web/.dev.vars",
+      "packages/x/.netrc",
+      "packages/x/deep/er/.pypirc",
+      "packages/x/.git-credentials",
+      // not secrets, or not looked at
+      "package.json",
+      "apps/web/environment.ts",
+      "node_modules/pkg/.env",
+      ".git/.env",
+    ] {
+      let path = root.join(file);
+      std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+      std::fs::write(&path, "x").unwrap();
+    }
+    // a symlink to a secret elsewhere is not followed (the target is
+    // outside the project; a link inside node_modules is handled by the OS
+    // layer's real-path checks)
+    std::os::unix::fs::symlink(root.join(".env"), root.join("apps/.env.link"))
+      .unwrap();
+    let config = JailConfig::new(
+      false,
+      false,
+      BTreeMap::new(),
+      std::slice::from_ref(&root),
+      None,
+    );
+    let mut found = config
+      .project_secret_files
+      .iter()
+      .map(|p| {
+        p.strip_prefix(&root)
+          .unwrap()
+          .to_string_lossy()
+          .into_owned()
+      })
+      .collect::<Vec<_>>();
+    found.sort();
+    assert_eq!(
+      found,
+      vec![
+        ".env",
+        ".env.local",
+        ".envrc",
+        ".npmrc",
+        "apps/web/.dev.vars",
+        "apps/web/.env.local",
+        "packages/x/.git-credentials",
+        "packages/x/.netrc",
+        "packages/x/deep/er/.pypirc",
+      ]
+    );
+    // the .npmrc the installer resolved is added, once
+    let config = JailConfig::new(
+      false,
+      false,
+      BTreeMap::new(),
+      std::slice::from_ref(&root),
+      Some(&root.join(".npmrc")),
+    );
+    assert_eq!(
+      config
+        .project_secret_files
+        .iter()
+        .filter(|p| p.ends_with(".npmrc"))
+        .count(),
+      1
+    );
+  }
+
+  // DENEXT.md item 124: credentials in URL-valued settings stay out
+  #[test]
+  fn url_credentials_stripped() {
+    assert_eq!(
+      strip_url_credentials("http://user:secret@corp:3128"),
+      "http://corp:3128/"
+    );
+    assert_eq!(
+      strip_url_credentials("https://user:apikey@artifactory.example/api/npm/"),
+      "https://artifactory.example/api/npm/"
+    );
+    assert_eq!(
+      strip_url_credentials("https://registry.npmjs.org/"),
+      "https://registry.npmjs.org/"
+    );
+    assert_eq!(strip_url_credentials("true"), "true");
+    assert_eq!(strip_url_credentials("corp:3128"), "corp:3128");
+    for name in [
+      "npm_config_registry",
+      "npm_config_proxy",
+      "HTTPS_PROXY",
+      "all_proxy",
+      "GLOBAL_AGENT_HTTP_PROXY",
+    ] {
+      assert!(url_valued_env_var(name), "{name}");
+    }
+    assert!(!url_valued_env_var("PATH"));
+  }
+
+  // DENEXT.md item 124: a path list with `..` can't pass the clamp
+  #[test]
+  fn clamp_folds_dotdot() {
+    let jail = JailPermissions {
+      write: vec![PathBuf::from("/nm/pkg")],
+      ..Default::default()
+    };
+    let mut options = PermissionsOptions {
+      allow_write: Some(vec![
+        "../../etc/does-not-exist".to_string(),
+        "/nm/pkg/../other/x".to_string(),
+        "out/../build".to_string(),
+      ]),
+      ..Default::default()
+    };
+    clamp_permissions(&mut options, &jail, Path::new("/nm/pkg"));
+    assert_eq!(options.allow_write, Some(vec!["out/../build".to_string()]));
+  }
+
+  // DENEXT.md item 124 (H2, M6): the script's process is a session leader
+  // and its whole group is ended, a detached grandchild included
+  #[cfg(unix)]
+  #[tokio::test]
+  async fn detached_session_and_group_ended() {
+    let dir = tempfile::tempdir().unwrap();
+    let pid_file = dir.path().join("grandchild.pid");
+    let mut command = tokio::process::Command::new("/bin/sh");
+    command
+      .arg("-c")
+      .arg(format!(
+        "nohup sleep 300 >/dev/null 2>&1 & echo $! > '{}'; exec sleep 300",
+        pid_file.display()
+      ))
+      .stdin(Stdio::null())
+      .stdout(Stdio::null())
+      .stderr(Stdio::null())
+      .kill_on_drop(true);
+    detach_session(&mut command);
+    let mut child = command.spawn().unwrap();
+    let pid = child.id().unwrap();
+    // its own session and group
+    // SAFETY: pid lookups
+    let (sid, pgid) = unsafe {
+      (
+        libc::getsid(pid as libc::pid_t),
+        libc::getpgid(pid as libc::pid_t),
+      )
+    };
+    assert_eq!(sid as u32, pid);
+    assert_eq!(pgid as u32, pid);
+    // SAFETY: our own session
+    assert_ne!(sid, unsafe { libc::getsid(0) });
+    let grandchild = loop {
+      if let Ok(text) = std::fs::read_to_string(&pid_file)
+        && let Ok(pid) = text.trim().parse::<libc::pid_t>()
+      {
+        break pid;
+      }
+      tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    };
+    // SAFETY: a probe
+    assert_eq!(unsafe { libc::kill(grandchild, 0) }, 0);
+    kill_process_group(pid);
+    child.wait().await.unwrap();
+    end_process_group(pid).await;
+    // the grandchild (nohup, in the group) is gone too
+    let gone = (0..200).any(|_| {
+      // SAFETY: a probe; a reparented zombie is reaped by init shortly
+      if unsafe { libc::kill(grandchild, 0) } != 0 {
+        return true;
+      }
+      std::thread::sleep(std::time::Duration::from_millis(10));
+      false
+    });
+    assert!(gone, "the grandchild {grandchild} outlived the group");
   }
 
   // DENEXT.md item 111: what the OS lets a script connect to

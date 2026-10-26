@@ -1,0 +1,9 @@
+{
+  "supplyChain": {
+    "jailScripts": {
+      "knownPackages": {
+        "npm:@denotest/jail-net-declared": ["localhost:4545"]
+      }
+    }
+  }
+}

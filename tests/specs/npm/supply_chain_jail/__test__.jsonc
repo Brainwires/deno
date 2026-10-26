@@ -60,6 +60,13 @@
         }
       ]
     },
+    // DENEXT.md item 124 (M7): the jail on by default warns there too
+    "jailed_windows_default": {
+      "if": "windows",
+      "cwd": "control",
+      "args": "install --allow-scripts=npm:@denotest/jail-control-probe",
+      "output": "jailed_windows_install.out"
+    },
     // without jail-scripts (`--no-jail-scripts`, the opt-out of the default,
     // DENEXT.md item 103), the same script sees and writes everything
     "not_jailed": {
@@ -182,20 +189,77 @@
         }
       ]
     },
-    // a package that declares its download host (node-pre-gyp's
-    // binary.host) may reach that host, and only it
-    "declared_download_host": {
+    // DENEXT.md item 124 (M2): the download host a package declares
+    // (node-pre-gyp's binary.host) is a request, not a grant: without the
+    // project's say-so it reaches nothing, and the install names the host
+    // and the deno.json line that allows it
+    "declared_download_host_refused": {
       "if": "unix",
       "steps": [
         {
           "cwd": "net",
           "args": "install --allow-scripts=npm:@denotest/jail-net-declared --jail-scripts",
-          "output": "[WILDCARD]"
+          "output": "declared_refused.out"
         },
         {
           "cwd": "net",
           "args": "eval console.log(Deno.readTextFileSync('node_modules/@denotest/jail-net-declared/results.txt').trim())",
-          "output": "declared host: allowed\nother host: denied\n"
+          "output": "declared host: denied\nother host: denied\n"
+        }
+      ]
+    },
+    // (H3) a declared host the project lists in `knownPackages` is honoured
+    // as declared: no hint, but `localhost` (or any address on this
+    // machine, in any form) is refused by the proxy whatever the
+    // declaration says; only the project's own `net` list is exempt
+    // (`per_package_net_hosts`)
+    "declared_download_host_known_but_internal": {
+      "if": "unix",
+      "steps": [
+        {
+          "cwd": "net_known",
+          "args": "install --allow-scripts=npm:@denotest/jail-net-declared --jail-scripts",
+          "output": "declared_known.out"
+        },
+        {
+          "cwd": "net_known",
+          "args": "eval console.log(Deno.readTextFileSync('node_modules/@denotest/jail-net-declared/results.txt').trim())",
+          "output": "declared host: denied\nother host: denied\n"
+        }
+      ]
+    },
+    // (H1, H2, M4, M6) the ways out of the jail: typing into the terminal
+    // (TIOCSTI; the script has its own session and no /dev/tty), a hard
+    // link from outside the writable roots, a process left behind (killed
+    // with the script's process group), and on macOS the system services
+    // (LaunchServices, launchd, the keychain, AppleEvents, the pasteboard)
+    "escapes_denied_linux": {
+      "if": "linux",
+      "steps": [
+        {
+          "cwd": "escape",
+          "args": "install --allow-scripts=npm:@denotest/jail-escape-probe",
+          "output": "[WILDCARD]"
+        },
+        {
+          "cwd": "escape",
+          "args": "run -A check.mjs",
+          "output": "escape_linux.out"
+        }
+      ]
+    },
+    "escapes_denied_mac": {
+      "if": "mac",
+      "steps": [
+        {
+          "cwd": "escape",
+          "args": "install --allow-scripts=npm:@denotest/jail-escape-probe",
+          "output": "[WILDCARD]"
+        },
+        {
+          "cwd": "escape",
+          "args": "run -A check.mjs",
+          "output": "escape_mac.out"
         }
       ]
     },
@@ -240,10 +304,9 @@
         }
       ]
     },
-    // DENEXT.md item 111 (R1): a declared download host binds every program
-    // the script starts, not only Deno: curl reaches the host through the
-    // jail's allow-listing proxy (plain and as a CONNECT tunnel), the proxy
-    // refuses another host, and the OS refuses any connection around it
+    // DENEXT.md item 111 (R1), narrowed by item 124 (M2): a declared
+    // download host the project hasn't allowed binds every program the
+    // script starts to nothing at all: no proxy, no direct connection
     "declared_host_binds_every_program": {
       "if": "unix",
       "steps": [
@@ -255,12 +318,14 @@
         {
           "cwd": "net_proxy",
           "args": "eval console.log(Deno.readTextFileSync('node_modules/@denotest/jail-net-curl/results.txt').trim())",
-          "output": "proxy 4545: allowed\nproxy 4546: denied\ntunnel 4545: allowed\ndirect 4545: denied\ndirect 4546: denied\ndirect 127.0.0.1:4546: denied\nnode socket 4546: denied\n"
+          "output": "proxy 4545: denied\nproxy 4546: denied\ntunnel 4545: denied\ndirect 4545: denied\ndirect 4546: denied\ndirect 127.0.0.1:4546: denied\nnode socket 4546: denied\n"
         }
       ]
     },
-    // (R2) the same for deno.json's per-package host list, which replaces the
-    // declared host
+    // (R2) deno.json's per-package host list, which replaces the declared
+    // host: curl reaches the listed host through the jail's allow-listing
+    // proxy (plain and as a CONNECT tunnel), the proxy refuses another
+    // host, and the OS refuses any connection around it
     "per_package_hosts_bind_every_program": {
       "if": "unix",
       "steps": [

@@ -17,11 +17,22 @@
 //! listed name whose DNS an attacker controls (rebinding) could resolve to
 //! this machine or its network. So the proxy refuses (`403`) a name that
 //! resolves to any internal address (loopback, RFC 1918 / ULA private,
-//! link-local with cloud metadata's `169.254.169.254`, CGNAT, unspecified;
-//! [`is_internal`]) and connects to exactly the addresses it checked, never
-//! resolving again. An allow-list entry that is itself an IP literal, the name
-//! `localhost`, and a package entry with `"allowPrivate": true` in deno.json
-//! are exempt.
+//! link-local with cloud metadata's `169.254.169.254`, CGNAT, the other
+//! RFC 6890 special-purpose ranges, unspecified; [`is_internal`]) and connects
+//! to exactly the addresses it checked, never resolving again. An allow-list
+//! entry that is itself an IP literal, the name `localhost`, and a package
+//! entry with `"allowPrivate": true` in deno.json are exempt, but only when
+//! the list is the PROJECT's (deno.json): the hosts a package declares for
+//! itself (`AllowList::with_declared`) are checked whatever their form, so
+//! `"host": "http://169.254.169.254"`, `http://localhost:2375` or
+//! `http://0x7f000001` reach nothing (DENEXT.md item 124).
+//!
+//! A forwarded `http://` request is one request per upstream connection: its
+//! head is parsed (no bare CR or LF, no `Transfer-Encoding` with a
+//! `Content-Length`), its `Host` must name the URL's authority, exactly the
+//! declared body (`Content-Length`, or chunked) is copied and the upstream's
+//! write side is then closed, so a second request pipelined behind the first
+//! never reaches the server (or the installer's authenticated upstream proxy).
 //!
 //! When the installer's own environment names an `http://` proxy
 //! (`HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY`, minus `NO_PROXY`), allowed
@@ -143,6 +154,11 @@ pub struct AllowList {
   /// Whether a listed name may resolve to an internal address (the
   /// package's `"allowPrivate": true` in deno.json).
   allow_private: bool,
+  /// Whether the entries are the hosts the package declares for itself
+  /// (node-pre-gyp's `binary.host`) rather than the project's deno.json
+  /// list: then nothing is exempt from the internal-address check, not an
+  /// IP literal, not `localhost` (DENEXT.md item 124).
+  declared: bool,
 }
 
 impl AllowList {
@@ -164,6 +180,7 @@ impl AllowList {
     Ok(Self {
       entries: list,
       allow_private: false,
+      declared: false,
     })
   }
 
@@ -174,6 +191,23 @@ impl AllowList {
     self
   }
 
+  /// Marks the entries as the package's own declared hosts: every target is
+  /// checked against the internal ranges, whatever its form.
+  pub fn with_declared(mut self, declared: bool) -> Self {
+    self.declared = declared;
+    self
+  }
+
+  /// Whether an IP literal in the list, and the name `localhost`, pass
+  /// without the internal-address check: only for the project's own list.
+  fn exempt_literals(&self) -> bool {
+    !self.declared
+  }
+
+  pub fn entries(&self) -> &[AllowEntry] {
+    &self.entries
+  }
+
   pub fn allows(&self, host: &ProxyHost, port: u16) -> bool {
     self
       .entries
@@ -182,45 +216,73 @@ impl AllowList {
   }
 }
 
-/// Whether an IPv4 address is on this machine or its networks: `0.0.0.0/8`
-/// (unspecified, "this network"), loopback `127/8`, RFC 1918 private
-/// (`10/8`, `172.16/12`, `192.168/16`), link-local `169.254/16` (cloud
-/// metadata services), CGNAT `100.64/10`.
+/// Whether an IPv4 address is on this machine or its networks, or in another
+/// range no download host lives in (RFC 6890's special-purpose registry):
+/// `0.0.0.0/8` (unspecified, "this network"), loopback `127/8`, RFC 1918
+/// private (`10/8`, `172.16/12`, `192.168/16`), link-local `169.254/16`
+/// (cloud metadata services), CGNAT `100.64/10`, IETF protocol assignments
+/// `192.0.0.0/24`, the documentation nets `192.0.2.0/24`, `198.51.100.0/24`
+/// and `203.0.113.0/24`, benchmarking `198.18.0.0/15` (internal appliances
+/// use it), multicast `224/4` and reserved `240/4` with the broadcast
+/// address.
 fn is_internal_v4(ip: Ipv4Addr) -> bool {
-  let [a, b, ..] = ip.octets();
+  let [a, b, c, _] = ip.octets();
   a == 0
     || a == 10
     || a == 127
     || (a == 169 && b == 254)
     || (a == 172 && (16..=31).contains(&b))
     || (a == 192 && b == 168)
+    || (a == 192 && b == 0 && (c == 0 || c == 2))
+    || (a == 198 && (b == 18 || b == 19))
+    || (a == 198 && b == 51 && c == 100)
+    || (a == 203 && b == 0 && c == 113)
     || (a == 100 && (64..=127).contains(&b))
+    || a >= 224
 }
 
 /// Whether an address is one a listed NAME must not lead to: the internal
 /// IPv4 ranges ([`is_internal_v4`]), also inside IPv6 (IPv4-mapped
-/// `::ffff:a.b.c.d`, IPv4-compatible `::a.b.c.d`, NAT64 `64:ff9b::/96`),
-/// and IPv6 unspecified `::`, loopback `::1`, unique-local `fc00::/7`,
-/// link-local `fe80::/10` and the retired site-local `fec0::/10`.
+/// `::ffff:a.b.c.d`, IPv4-translated `::ffff:0:a.b.c.d`, IPv4-compatible
+/// `::a.b.c.d`, NAT64 `64:ff9b::/96`, 6to4 `2002:a.b.c.d::/48` and the
+/// client address a Teredo `2001::/32` address carries), the local-use NAT64
+/// `64:ff9b:1::/48`, and IPv6 unspecified `::`, loopback `::1`, unique-local
+/// `fc00::/7`, link-local `fe80::/10`, the retired site-local `fec0::/10`
+/// and multicast `ff00::/8`.
 pub(crate) fn is_internal(ip: IpAddr) -> bool {
   let v6 = match ip {
     IpAddr::V4(v4) => return is_internal_v4(v4),
     IpAddr::V6(v6) => v6,
   };
   let s = v6.segments();
-  let embedded = || Ipv4Addr::from(((s[6] as u32) << 16) | s[7] as u32);
+  let embedded =
+    |hi: u16, lo: u16| Ipv4Addr::from(((hi as u32) << 16) | lo as u32);
   if let Some(v4) = v6.to_ipv4_mapped() {
     return is_internal_v4(v4);
   }
-  // `::` and `::1` are in here too (`0.0.0.0` and `0.0.0.1`)
-  if s[..6] == [0; 6] || s[..6] == [0x64, 0xff9b, 0, 0, 0, 0] {
-    return is_internal_v4(embedded());
+  // `::` and `::1` are in here too (`0.0.0.0` and `0.0.0.1`); the SIIT
+  // IPv4-translated form `::ffff:0:a.b.c.d` is the second
+  if s[..6] == [0; 6]
+    || s[..6] == [0, 0, 0, 0, 0xffff, 0]
+    || s[..6] == [0x64, 0xff9b, 0, 0, 0, 0]
+  {
+    return is_internal_v4(embedded(s[6], s[7]));
+  }
+  // 6to4 carries its IPv4 address in the next 32 bits
+  if s[0] == 0x2002 {
+    return is_internal_v4(embedded(s[1], s[2]));
+  }
+  // Teredo carries the client's IPv4 address inverted in the last 32 bits
+  if s[0] == 0x2001 && s[1] == 0 {
+    return is_internal_v4(embedded(!s[6], !s[7]));
   }
   v6 == Ipv6Addr::UNSPECIFIED
     || v6 == Ipv6Addr::LOCALHOST
+    || (s[0] == 0x64 && s[1] == 0xff9b && s[2] == 1)
     || (s[0] & 0xfe00) == 0xfc00
     || (s[0] & 0xffc0) == 0xfe80
     || (s[0] & 0xffc0) == 0xfec0
+    || (s[0] & 0xff00) == 0xff00
 }
 
 /// Resolves a name to the addresses to connect to.
@@ -255,16 +317,24 @@ enum Refusal {
 /// literal (it is in the allow-list as itself) as is, `localhost` as it
 /// resolves, and any other name as it resolves when none of its addresses
 /// is internal (one is enough to refuse: a rebinding answer mixes them), or
-/// when the package allows private addresses. The caller connects to these
-/// and never resolves the name again.
+/// when the package allows private addresses. Without `exempt_literals`
+/// (the hosts a package declares for itself) the literal and `localhost`
+/// are checked like any other target. The caller connects to these and
+/// never resolves the name again.
 async fn resolve_target(
   host: &ProxyHost,
   port: u16,
   allow_private: bool,
+  exempt_literals: bool,
   resolve: &Resolver,
 ) -> Result<Vec<SocketAddr>, Refusal> {
   let name = match host {
-    ProxyHost::Ip(ip) => return Ok(vec![SocketAddr::new(*ip, port)]),
+    ProxyHost::Ip(ip) => {
+      if !exempt_literals && is_internal(*ip) {
+        return Err(Refusal::Internal(*ip));
+      }
+      return Ok(vec![SocketAddr::new(*ip, port)]);
+    }
     ProxyHost::Domain(name) => name,
   };
   let mut addrs = resolve(name.clone(), port)
@@ -278,7 +348,7 @@ async fn resolve_target(
     )));
   }
   if !allow_private
-    && name != "localhost"
+    && !(exempt_literals && name == "localhost")
     && let Some(addr) = addrs.iter().find(|addr| is_internal(addr.ip()))
   {
     return Err(Refusal::Internal(addr.ip()));
@@ -299,14 +369,25 @@ enum Request {
   },
 }
 
+/// How a forwarded request's body is delimited (RFC 9112 §6): the proxy
+/// copies exactly that much, then closes its write side to the server.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BodyFraming {
+  None,
+  Length(u64),
+  Chunked,
+}
+
 /// The request line and headers of a forwarded request, minus the hop
-/// headers, plus `Connection: close`.
+/// headers, with `Host` set to the URL's authority, plus `Connection:
+/// close`.
 #[derive(Debug, PartialEq, Eq)]
 struct ForwardHead {
   method: String,
   version: String,
   url: Url,
   headers: String,
+  body: BodyFraming,
 }
 
 impl ForwardHead {
@@ -399,20 +480,79 @@ fn parse_request(head: &[u8]) -> Result<Request, ParseError> {
     .and_then(ProxyHost::parse)
     .ok_or(ParseError::BadRequest("a URL without a host"))?;
   let port = url.port_or_known_default().unwrap_or(80);
+  // the authority every request to this server names: the URL's, so the
+  // `Host` header can't select another virtual host behind a shared address
+  let authority = match url.port() {
+    Some(port) => format!("{}:{port}", url.host_str().unwrap_or_default()),
+    None => url.host_str().unwrap_or_default().to_string(),
+  };
   let mut headers = String::new();
+  let mut body = BodyFraming::None;
+  let mut saw_host = false;
   for line in lines {
     if line.is_empty() {
       break;
     }
-    let name = line.split(':').next().unwrap_or_default().trim();
+    // a bare CR or LF inside a line is a second line to some servers: a
+    // smuggled header or request
+    if line.contains(['\r', '\n']) {
+      return Err(ParseError::BadRequest("a bare CR or LF in the head"));
+    }
+    let (name, value) = line.split_once(':').unwrap_or((line, ""));
+    let name = name.trim();
+    let value = value.trim();
     if hop_header(name) {
       continue;
+    }
+    if name.eq_ignore_ascii_case("host") {
+      let (host_name, host_port) = split_host_port(value)
+        .ok_or(ParseError::BadRequest("a malformed Host header"))?;
+      // the name must be the URL's (the header is rewritten to the URL's
+      // authority anyway, so a port the client left out is no mismatch)
+      let same = ProxyHost::parse(host_name).as_ref() == Some(&host)
+        && host_port.is_none_or(|p| p == port);
+      if !same {
+        return Err(ParseError::BadRequest(
+          "the Host header doesn't name the URL's host",
+        ));
+      }
+      if saw_host {
+        return Err(ParseError::BadRequest("more than one Host header"));
+      }
+      saw_host = true;
+      continue;
+    }
+    if name.eq_ignore_ascii_case("content-length") {
+      let length: u64 = value
+        .parse()
+        .map_err(|_| ParseError::BadRequest("a malformed Content-Length"))?;
+      match body {
+        BodyFraming::None => body = BodyFraming::Length(length),
+        BodyFraming::Length(seen) if seen == length => {}
+        _ => {
+          return Err(ParseError::BadRequest(
+            "conflicting Content-Length / Transfer-Encoding headers",
+          ));
+        }
+      }
+    }
+    if name.eq_ignore_ascii_case("transfer-encoding") {
+      // only chunked can be framed; a length next to it is a smuggling
+      // request (RFC 9112 §6.1)
+      if !value.eq_ignore_ascii_case("chunked") || body != BodyFraming::None {
+        return Err(ParseError::BadRequest(
+          "conflicting Content-Length / Transfer-Encoding headers",
+        ));
+      }
+      body = BodyFraming::Chunked;
     }
     headers.push_str(line);
     headers.push_str("\r\n");
   }
+  let mut head = format!("Host: {authority}\r\n");
+  head.push_str(&headers);
   // one request per connection: whatever follows goes to the same host
-  headers.push_str("Connection: close\r\n");
+  head.push_str("Connection: close\r\n");
   Ok(Request::Forward {
     host,
     port,
@@ -420,9 +560,127 @@ fn parse_request(head: &[u8]) -> Result<Request, ParseError> {
       method: method.to_string(),
       version: version.to_string(),
       url,
-      headers,
+      headers: head,
+      body,
     },
   })
+}
+
+/// A chunk-size line longer than this isn't one.
+const MAX_CHUNK_LINE: usize = 1024;
+
+/// Copies a request body from the client to the server, exactly as framed:
+/// `pending` is what came after the head. A `Length` body is that many
+/// bytes; a chunked one is copied chunk by chunk through the last chunk and
+/// the trailer section. Bytes beyond the body (a pipelined request) are not
+/// copied. Returns `Ok(false)` when the client ends before the body does.
+async fn copy_body<
+  R: tokio::io::AsyncRead + Unpin,
+  W: AsyncWriteExt + Unpin,
+>(
+  client: &mut R,
+  server: &mut W,
+  pending: Vec<u8>,
+  framing: BodyFraming,
+) -> io::Result<bool> {
+  let mut buf = pending;
+  let mut chunk = [0u8; 8192];
+  // reads more from the client into `buf`; false at its end
+  async fn fill<R: tokio::io::AsyncRead + Unpin>(
+    client: &mut R,
+    buf: &mut Vec<u8>,
+    chunk: &mut [u8],
+  ) -> io::Result<bool> {
+    let n = client.read(chunk).await?;
+    buf.extend_from_slice(&chunk[..n]);
+    Ok(n > 0)
+  }
+  match framing {
+    BodyFraming::None => Ok(true),
+    BodyFraming::Length(length) => {
+      let mut left = length;
+      loop {
+        let take = buf.len().min(usize::try_from(left).unwrap_or(usize::MAX));
+        if take > 0 {
+          server.write_all(&buf[..take]).await?;
+          buf.drain(..take);
+          left -= take as u64;
+        }
+        if left == 0 {
+          return Ok(true);
+        }
+        if !fill(client, &mut buf, &mut chunk).await? {
+          return Ok(false);
+        }
+      }
+    }
+    BodyFraming::Chunked => {
+      loop {
+        // the chunk-size line
+        let line_end = loop {
+          if let Some(i) = buf.windows(2).position(|w| w == b"\r\n") {
+            break i;
+          }
+          if buf.len() > MAX_CHUNK_LINE {
+            return Err(io::Error::new(
+              io::ErrorKind::InvalidData,
+              "a malformed chunk",
+            ));
+          }
+          if !fill(client, &mut buf, &mut chunk).await? {
+            return Ok(false);
+          }
+        };
+        let size_text =
+          std::str::from_utf8(&buf[..line_end]).map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidData, "a malformed chunk")
+          })?;
+        let size_text = size_text.split(';').next().unwrap_or_default().trim();
+        let size = u64::from_str_radix(size_text, 16).map_err(|_| {
+          io::Error::new(io::ErrorKind::InvalidData, "a malformed chunk")
+        })?;
+        server.write_all(&buf[..line_end + 2]).await?;
+        buf.drain(..line_end + 2);
+        if size == 0 {
+          // the trailer section, through its blank line
+          loop {
+            if let Some(i) = buf.windows(2).position(|w| w == b"\r\n") {
+              server.write_all(&buf[..i + 2]).await?;
+              let blank = i == 0;
+              buf.drain(..i + 2);
+              if blank {
+                return Ok(true);
+              }
+              continue;
+            }
+            if buf.len() > MAX_HEAD {
+              return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "a malformed trailer",
+              ));
+            }
+            if !fill(client, &mut buf, &mut chunk).await? {
+              return Ok(false);
+            }
+          }
+        }
+        // the chunk's data and its CRLF
+        let mut left = size + 2;
+        while left > 0 {
+          let take = buf.len().min(usize::try_from(left).unwrap_or(usize::MAX));
+          if take > 0 {
+            server.write_all(&buf[..take]).await?;
+            buf.drain(..take);
+            left -= take as u64;
+            continue;
+          }
+          if !fill(client, &mut buf, &mut chunk).await? {
+            return Ok(false);
+          }
+        }
+      }
+    }
+  }
 }
 
 /// An `http://` proxy the installer itself goes through.
@@ -577,6 +835,31 @@ impl JailProxy {
     resolver: Resolver,
   ) -> io::Result<Self> {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?;
+    Self::serve(listener, allow, upstream, resolver)
+  }
+
+  /// Serves on a listener bound elsewhere: the one the jailed script's
+  /// process bound on the loopback of its own network namespace (Linux,
+  /// DENEXT.md item 124). Connections come from inside the namespace;
+  /// upstream connections are made from here, the host's network.
+  #[cfg_attr(
+    not(target_os = "linux"),
+    allow(dead_code, reason = "the Linux jail's namespace path")
+  )]
+  pub fn start_on(
+    listener: TcpListener,
+    allow: AllowList,
+    upstream: Upstream,
+  ) -> io::Result<Self> {
+    Self::serve(listener, allow, upstream, system_resolver())
+  }
+
+  fn serve(
+    listener: TcpListener,
+    allow: AllowList,
+    upstream: Upstream,
+    resolver: Resolver,
+  ) -> io::Result<Self> {
     let port = listener.local_addr()?.port();
     let allow = Arc::new(allow);
     let upstream = Arc::new(upstream);
@@ -603,11 +886,6 @@ impl JailProxy {
 
   pub fn port(&self) -> u16 {
     self.port
-  }
-
-  /// `http://127.0.0.1:<port>`
-  pub fn url(&self) -> String {
-    format!("http://127.0.0.1:{}", self.port)
   }
 }
 
@@ -752,45 +1030,55 @@ async fn connect_via(
   }
 }
 
-/// Copies a forwarded request's response from an upstream proxy, logging the
-/// `upstreamByName` hint when its status suggests the upstream refused the
-/// checked address (it may also be the server's own answer, so it is passed
-/// through unchanged).
-async fn relay_via_upstream(
+/// Relays one forwarded request: exactly its body goes up (then the server's
+/// write side is closed, so nothing pipelined behind it is sent), and the
+/// whole response comes down. With `hint` (the target, and whether
+/// credentials went to an upstream proxy) a status that suggests the
+/// upstream refused the checked address logs the `upstreamByName` hint; the
+/// answer may also be the server's own, so it is passed through unchanged.
+async fn relay_forward(
   client: &mut TcpStream,
   server: &mut TcpStream,
-  target: &str,
-  sent_credentials: bool,
+  pending: Vec<u8>,
+  framing: BodyFraming,
+  hint: Option<(&str, bool)>,
 ) -> io::Result<()> {
   let (mut client_read, mut client_write) = client.split();
   let (mut server_read, mut server_write) = server.split();
   let up = async {
-    tokio::io::copy(&mut client_read, &mut server_write).await?;
+    copy_body(&mut client_read, &mut server_write, pending, framing).await?;
+    // nothing more goes up (a request pipelined behind the body is
+    // dropped); the server's side stays open until the client is done, as
+    // an HTTP/1 server may take an early EOF as the request being abandoned
+    let mut sink = [0u8; 4096];
+    while client_read.read(&mut sink).await? > 0 {}
     server_write.shutdown().await
   };
   let down = async {
-    // enough of the response for its status line
-    let mut first = Vec::with_capacity(512);
-    let mut chunk = [0u8; 512];
-    while !first.contains(&b'\n') && first.len() < 4096 {
-      let n = server_read.read(&mut chunk).await?;
-      if n == 0 {
-        break;
+    if let Some((target, sent_credentials)) = hint {
+      // enough of the response for its status line
+      let mut first = Vec::with_capacity(512);
+      let mut chunk = [0u8; 512];
+      while !first.contains(&b'\n') && first.len() < 4096 {
+        let n = server_read.read(&mut chunk).await?;
+        if n == 0 {
+          break;
+        }
+        first.extend_from_slice(&chunk[..n]);
       }
-      first.extend_from_slice(&chunk[..n]);
+      if let Some(status) = response_status(&first)
+        && suggests_name(status, sent_credentials)
+      {
+        warn_by_name_hint(&format!(
+          "the upstream proxy (or the server) answered {status} to a request for {target} by its checked address"
+        ));
+      }
+      client_write.write_all(&first).await?;
     }
-    if let Some(status) = response_status(&first)
-      && suggests_name(status, sent_credentials)
-    {
-      warn_by_name_hint(&format!(
-        "the upstream proxy (or the server) answered {status} to a request for {target} by its checked address"
-      ));
-    }
-    client_write.write_all(&first).await?;
     tokio::io::copy(&mut server_read, &mut client_write).await?;
     client_write.shutdown().await
   };
-  // the response is what matters: an upstream that answers before reading a
+  // the response is what matters: a server that answers before reading the
   // request body, then closes, fails the upload direction only
   let (_, down) = tokio::join!(up, down);
   down
@@ -834,20 +1122,28 @@ async fn handle(
   }
   // the target's addresses, checked; every path below connects to these
   // (or hands them to the upstream proxy), never to the name
-  let addrs = match resolve_target(host, port, allow.allow_private, resolver)
-    .await
+  let addrs = match resolve_target(
+    host,
+    port,
+    allow.allow_private,
+    allow.exempt_literals(),
+    resolver,
+  )
+  .await
   {
     Ok(addrs) => addrs,
     Err(Refusal::Internal(ip)) => {
       log::debug!("jail-scripts: refused {target}, which resolves to {ip}");
-      return respond(
-          &mut client,
-          "403 Forbidden",
-          &format!(
-            "jail-scripts: {target} resolves to {ip}, an address on this machine or its network (loopback, private, link-local or CGNAT), which a listed name may not lead to; list the address itself, or set \"allowPrivate\": true on the package's entry in supplyChain.jailScripts.packages"
-          ),
+      let message = if allow.declared {
+        format!(
+          "jail-scripts: {target} is (or resolves to) {ip}, an address on this machine or its network (loopback, private, link-local or CGNAT); a host a package declares for itself may not lead there in any form. If the project trusts it, list it under the package's \"net\" in supplyChain.jailScripts.packages in deno.json"
         )
-        .await;
+      } else {
+        format!(
+          "jail-scripts: {target} resolves to {ip}, an address on this machine or its network (loopback, private, link-local or CGNAT), which a listed name may not lead to; list the address itself, or set \"allowPrivate\": true on the package's entry in supplyChain.jailScripts.packages"
+        )
+      };
+      return respond(&mut client, "403 Forbidden", &message).await;
     }
     Err(Refusal::Unresolved(err)) => {
       return respond(
@@ -936,21 +1232,20 @@ async fn handle(
       };
       out.extend_from_slice(b"\r\n");
       server.write_all(&out).await?;
+      // exactly the declared body, then the response: one request per
+      // connection, nothing pipelined behind it
+      let hint = match via {
+        Some(proxy) if name_may_help => {
+          Some((target.as_str(), proxy.authorization.is_some()))
+        }
+        _ => None,
+      };
+      return relay_forward(&mut client, &mut server, rest, head.body, hint)
+        .await;
     }
   }
   if !rest.is_empty() {
     server.write_all(&rest).await?;
-  }
-  if let (Request::Forward { .. }, Some(proxy)) = (&request, via)
-    && name_may_help
-  {
-    return relay_via_upstream(
-      &mut client,
-      &mut server,
-      &target,
-      proxy.authorization.is_some(),
-    )
-    .await;
   }
   tokio::io::copy_bidirectional(&mut client, &mut server).await?;
   Ok(())
@@ -1114,6 +1409,83 @@ mod tests {
     }
   }
 
+  // DENEXT.md item 124 (M5): a forwarded head is one well-framed request
+  // whose Host is the URL's authority
+  #[test]
+  fn forwarded_heads_are_framed_and_host_tied() {
+    let forward = |head: &[u8]| match parse_request(head) {
+      Ok(Request::Forward { head, .. }) => Ok(head),
+      Ok(other) => panic!("{other:?}"),
+      Err(err) => Err(err),
+    };
+    // the body framing
+    let head = forward(
+      b"POST http://example.com/p HTTP/1.1\r\nContent-Length: 12\r\n\r\n",
+    )
+    .unwrap();
+    assert_eq!(head.body, BodyFraming::Length(12));
+    let head = forward(
+      b"POST http://example.com/p HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n",
+    )
+    .unwrap();
+    assert_eq!(head.body, BodyFraming::Chunked);
+    let head = forward(b"GET http://example.com/p HTTP/1.1\r\n\r\n").unwrap();
+    assert_eq!(head.body, BodyFraming::None);
+    // a repeated, equal Content-Length is fine; the headers come through,
+    // with Host set from the URL
+    let head = forward(
+      b"POST http://example.com/p HTTP/1.1\r\nContent-Length: 2\r\nContent-Length: 2\r\n\r\n",
+    )
+    .unwrap();
+    assert_eq!(head.body, BodyFraming::Length(2));
+    assert_eq!(
+      String::from_utf8(head.origin_head()).unwrap(),
+      "POST /p HTTP/1.1\r\nHost: example.com\r\nContent-Length: 2\r\nContent-Length: 2\r\nConnection: close\r\n"
+    );
+    // a Host that names the URL's host (with or without the port) passes,
+    // and is replaced by the URL's authority
+    let head = forward(
+      b"GET http://Example.com:8080/ HTTP/1.1\r\nHost: EXAMPLE.com:8080\r\nX: 1\r\n\r\n",
+    )
+    .unwrap();
+    assert_eq!(
+      String::from_utf8(head.origin_head()).unwrap(),
+      "GET / HTTP/1.1\r\nHost: example.com:8080\r\nX: 1\r\nConnection: close\r\n"
+    );
+    assert!(
+      forward(
+        b"GET http://example.com:8080/ HTTP/1.1\r\nHost: example.com\r\n\r\n"
+      )
+      .is_ok()
+    );
+    assert!(
+      forward(b"GET http://[::1]:8080/ HTTP/1.1\r\nHost: [::1]:8080\r\n\r\n")
+        .is_ok()
+    );
+    // smuggling shapes: a bare CR or LF in a line, a length next to chunked,
+    // a Transfer-Encoding that can't be framed, differing lengths, a Host
+    // naming another server (domain fronting) or another port, two Hosts
+    for bad in [
+      &b"GET http://example.com/ HTTP/1.1\r\nX: a\nConnection: keep-alive\r\n\r\n"[..],
+      b"GET http://example.com/ HTTP/1.1\r\nX: a\rY: b\r\n\r\n",
+      b"POST http://example.com/ HTTP/1.1\r\nContent-Length: 3\r\nTransfer-Encoding: chunked\r\n\r\n",
+      b"POST http://example.com/ HTTP/1.1\r\nTransfer-Encoding: chunked\r\nContent-Length: 3\r\n\r\n",
+      b"POST http://example.com/ HTTP/1.1\r\nTransfer-Encoding: gzip, chunked\r\n\r\n",
+      b"POST http://example.com/ HTTP/1.1\r\nContent-Length: 3\r\nContent-Length: 4\r\n\r\n",
+      b"POST http://example.com/ HTTP/1.1\r\nContent-Length: -1\r\n\r\n",
+      b"GET http://example.com/ HTTP/1.1\r\nHost: internal-admin.corp\r\n\r\n",
+      b"GET http://example.com/ HTTP/1.1\r\nHost: example.com:81\r\n\r\n",
+      b"GET http://example.com/ HTTP/1.1\r\nHost: example.com\r\nHost: example.com\r\n\r\n",
+      b"GET http://example.com/ HTTP/1.1\r\nHost: \r\n\r\n",
+    ] {
+      assert!(
+        forward(bad).is_err(),
+        "{}",
+        String::from_utf8_lossy(bad).escape_debug()
+      );
+    }
+  }
+
   #[test]
   fn upstream_from_env() {
     let env = |pairs: &[(&str, &str)]| {
@@ -1206,7 +1578,7 @@ mod tests {
     let response = roundtrip(
       proxy.port(),
       &format!(
-        "GET http://127.0.0.1:{origin_port}/x HTTP/1.1\r\nHost: 127.0.0.1\r\nProxy-Connection: keep-alive\r\n\r\n"
+        "GET http://127.0.0.1:{origin_port}/x HTTP/1.1\r\nHost: 127.0.0.1:{origin_port}\r\nProxy-Connection: keep-alive\r\n\r\n"
       ),
     )
     .await;
@@ -1340,6 +1712,30 @@ mod tests {
       "::127.0.0.1",
       "64:ff9b::a9fe:a9fe",
       "64:ff9b::192.168.1.1",
+      // DENEXT.md item 124: the rest of RFC 6890's special-purpose ranges
+      "192.0.0.1",
+      "192.0.0.255",
+      "192.0.2.1",
+      "198.18.0.1",
+      "198.19.255.255",
+      "198.51.100.7",
+      "203.0.113.9",
+      "224.0.0.1",
+      "239.255.255.255",
+      "240.0.0.1",
+      "255.255.255.255",
+      // IPv4-translated, local-use NAT64, 6to4 and Teredo carrying an
+      // internal IPv4 address, multicast
+      "::ffff:0:127.0.0.1",
+      "::ffff:0:10.0.0.1",
+      "64:ff9b:1::1",
+      "64:ff9b:1:ffff::1",
+      "2002:7f00:1::1",
+      "2002:a9fe:a9fe::",
+      "2002:c0a8:101::1",
+      "2001:0:4136:e378:8000:63bf:80ff:fffe",
+      "ff02::1",
+      "ff0e::1",
     ] {
       assert!(internal(ip), "{ip} should be internal");
     }
@@ -1358,13 +1754,24 @@ mod tests {
       "172.32.0.1",
       "192.167.255.255",
       "192.169.0.1",
+      "192.0.1.1",
+      "192.0.3.1",
+      "198.17.255.255",
+      "198.20.0.1",
+      "198.51.101.1",
+      "203.0.112.1",
+      "223.255.255.255",
       "2606:4700::1111",
       "2001:db8::1",
       "fbff::1",
-      "ff02::1",
       "::ffff:8.8.8.8",
+      "::ffff:0:8.8.8.8",
       "::8.8.8.8",
       "64:ff9b::808:808",
+      "64:ff9b:2::1",
+      "2002:808:808::1",
+      "2001:0:4136:e378:8000:63bf:f7f7:f7f7",
+      "2001:1::1",
     ] {
       assert!(!internal(ip), "{ip} should not be internal");
     }
@@ -1411,9 +1818,10 @@ mod tests {
       ("localhost", &["127.0.0.1", "::1"]),
     ]);
     let target = |name: &str| ProxyHost::parse(name).unwrap();
-    let ok = resolve_target(&target("public.example"), 443, false, &resolver)
-      .await
-      .unwrap();
+    let ok =
+      resolve_target(&target("public.example"), 443, false, true, &resolver)
+        .await
+        .unwrap();
     assert_eq!(
       ok,
       vec![
@@ -1428,7 +1836,7 @@ mod tests {
       ("mapped.example", "::ffff:127.0.0.1"),
       ("ula.example", "fd00::5"),
     ] {
-      match resolve_target(&target(name), 443, false, &resolver).await {
+      match resolve_target(&target(name), 443, false, true, &resolver).await {
         Err(Refusal::Internal(got)) => {
           assert_eq!(got, ip.parse::<IpAddr>().unwrap(), "{name}")
         }
@@ -1437,7 +1845,7 @@ mod tests {
     }
     // the package's allowPrivate: internal answers pass
     assert_eq!(
-      resolve_target(&target("mixed.example"), 80, true, &resolver)
+      resolve_target(&target("mixed.example"), 80, true, true, &resolver)
         .await
         .unwrap()
         .len(),
@@ -1445,20 +1853,21 @@ mod tests {
     );
     // `localhost` is exempt, as resolved
     assert_eq!(
-      resolve_target(&target("localhost"), 4545, false, &resolver)
+      resolve_target(&target("localhost"), 4545, false, true, &resolver)
         .await
         .unwrap()[0],
       "127.0.0.1:4545".parse().unwrap()
     );
     // a name that doesn't resolve
     assert!(matches!(
-      resolve_target(&target("nowhere.example"), 443, false, &resolver).await,
+      resolve_target(&target("nowhere.example"), 443, false, true, &resolver)
+        .await,
       Err(Refusal::Unresolved(_))
     ));
     // an IP literal (listed as itself) is never looked up
     let before = lookups.load(std::sync::atomic::Ordering::SeqCst);
     assert_eq!(
-      resolve_target(&target("[::1]"), 8, false, &resolver)
+      resolve_target(&target("[::1]"), 8, false, true, &resolver)
         .await
         .unwrap(),
       vec!["[::1]:8".parse::<SocketAddr>().unwrap()]
@@ -1525,8 +1934,12 @@ mod tests {
     .await;
     assert!(response.ends_with("ok"), "{response}");
     assert_eq!(lookups.load(std::sync::atomic::Ordering::SeqCst), 1);
+    // the Host sent on is the URL's authority (DENEXT.md item 124)
     let head = String::from_utf8(origin.await.unwrap()).unwrap();
-    assert!(head.contains("Host: mirror.internal\r\n"), "{head}");
+    assert!(
+      head.contains(&format!("Host: mirror.internal:{origin_port}\r\n")),
+      "{head}"
+    );
   }
 
   #[tokio::test]
@@ -1797,5 +2210,230 @@ mod tests {
       ]
     );
     upstream_task.abort();
+  }
+
+  // DENEXT.md item 124 (H3): the hosts a package declares for itself get
+  // no exemption from the internal-address check, whatever their form
+  #[tokio::test]
+  async fn declared_hosts_get_no_exemption() {
+    let (resolver, _) = stub_resolver(&[
+      ("localhost", &["127.0.0.1", "::1"]),
+      ("public.example", &["93.184.215.14"]),
+    ]);
+    let target = |name: &str| ProxyHost::parse(name).unwrap();
+    // the project's list: a literal and localhost pass as themselves
+    for name in ["127.0.0.1", "localhost", "[::1]", "169.254.169.254"] {
+      assert!(
+        resolve_target(&target(name), 80, false, true, &resolver)
+          .await
+          .is_ok(),
+        "{name}"
+      );
+    }
+    // the package's own: every form of an internal address is refused
+    for (name, ip) in [
+      ("127.0.0.1", "127.0.0.1"),
+      ("localhost", "127.0.0.1"),
+      ("[::1]", "::1"),
+      ("169.254.169.254", "169.254.169.254"),
+      ("0x7f000001", "127.0.0.1"),
+      ("2130706433", "127.0.0.1"),
+      ("0177.0.0.1", "127.0.0.1"),
+      ("[::ffff:127.0.0.1]", "::ffff:127.0.0.1"),
+      ("10.0.0.5", "10.0.0.5"),
+    ] {
+      match resolve_target(&target(name), 80, false, false, &resolver).await {
+        Err(Refusal::Internal(got)) => {
+          assert_eq!(got, ip.parse::<IpAddr>().unwrap(), "{name}")
+        }
+        other => panic!("{name}: {other:?}"),
+      }
+    }
+    // a public address still goes through, and `allowPrivate` never applies
+    // to a declared host (the jail passes false for it)
+    assert!(
+      resolve_target(&target("public.example"), 443, false, false, &resolver)
+        .await
+        .is_ok()
+    );
+    assert!(
+      resolve_target(&target("8.8.8.8"), 443, false, false, &resolver)
+        .await
+        .is_ok()
+    );
+    // through the proxy: a declared `127.0.0.1:<port>` and `localhost`
+    // reach nothing, plainly, as a tunnel, and in another literal form
+    let (origin_port, origin) =
+      serve_once(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok").await;
+    let proxy = JailProxy::start_with(
+      list(&[
+        &format!("127.0.0.1:{origin_port}"),
+        &format!("localhost:{origin_port}"),
+      ])
+      .with_declared(true),
+      Upstream::default(),
+      resolver.clone(),
+    )
+    .await
+    .unwrap();
+    for request in [
+      format!("GET http://127.0.0.1:{origin_port}/ HTTP/1.1\r\n\r\n"),
+      format!("GET http://localhost:{origin_port}/ HTTP/1.1\r\n\r\n"),
+      format!("GET http://2130706433:{origin_port}/ HTTP/1.1\r\n\r\n"),
+      format!("GET http://0x7f.1:{origin_port}/ HTTP/1.1\r\n\r\n"),
+      format!("CONNECT 127.0.0.1:{origin_port} HTTP/1.1\r\n\r\n"),
+      format!("CONNECT localhost:{origin_port} HTTP/1.1\r\n\r\n"),
+    ] {
+      let response = roundtrip(proxy.port(), &request).await;
+      assert!(
+        response.starts_with("HTTP/1.1 403 "),
+        "{request}: {response}"
+      );
+      assert!(
+        response.contains("declares for itself"),
+        "{request}: {response}"
+      );
+    }
+    // the same list as the project's reaches the server
+    drop(proxy);
+    let proxy = JailProxy::start_with(
+      list(&[&format!("127.0.0.1:{origin_port}")]),
+      Upstream::default(),
+      resolver,
+    )
+    .await
+    .unwrap();
+    let response = roundtrip(
+      proxy.port(),
+      &format!("GET http://127.0.0.1:{origin_port}/ HTTP/1.1\r\n\r\n"),
+    )
+    .await;
+    assert!(response.ends_with("ok"), "{response}");
+    origin.await.unwrap();
+  }
+
+  /// A server that reads everything the proxy sends it (the request head,
+  /// body and whatever follows, until the proxy closes its write side),
+  /// then answers.
+  async fn serve_reading_all(
+    response: &'static [u8],
+  ) -> (u16, tokio::task::JoinHandle<Vec<u8>>) {
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let task = tokio::spawn(async move {
+      let (mut stream, _) = listener.accept().await.unwrap();
+      let mut seen = Vec::new();
+      stream.read_to_end(&mut seen).await.unwrap();
+      stream.write_all(response).await.unwrap();
+      stream.shutdown().await.unwrap();
+      seen
+    });
+    (port, task)
+  }
+
+  // DENEXT.md item 124 (M5): one request per upstream connection; a second
+  // request pipelined behind the first never reaches the server
+  #[tokio::test]
+  async fn forwarded_requests_are_not_pipelined() {
+    let ok = &b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"[..];
+    // no body: the head, then the proxy closes its write side
+    let (port, origin) = serve_reading_all(ok).await;
+    let proxy = JailProxy::start(
+      list(&[&format!("127.0.0.1:{port}")]),
+      Upstream::default(),
+    )
+    .await
+    .unwrap();
+    let response = roundtrip(
+      proxy.port(),
+      &format!(
+        "GET http://127.0.0.1:{port}/a HTTP/1.1\r\nContent-Length: 0\r\n\r\nGET http://127.0.0.1:{port}/b HTTP/1.1\r\n\r\n"
+      ),
+    )
+    .await;
+    assert!(response.ends_with("ok"), "{response}");
+    let seen = String::from_utf8(origin.await.unwrap()).unwrap();
+    assert_eq!(
+      seen,
+      format!(
+        "GET /a HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+      )
+    );
+    // a Content-Length body: exactly that many bytes
+    let (port, origin) = serve_reading_all(ok).await;
+    let proxy = JailProxy::start(
+      list(&[&format!("127.0.0.1:{port}")]),
+      Upstream::default(),
+    )
+    .await
+    .unwrap();
+    let response = roundtrip(
+      proxy.port(),
+      &format!(
+        "POST http://127.0.0.1:{port}/a HTTP/1.1\r\nContent-Length: 3\r\n\r\nabcGET http://127.0.0.1:{port}/b HTTP/1.1\r\n\r\n"
+      ),
+    )
+    .await;
+    assert!(response.ends_with("ok"), "{response}");
+    let seen = String::from_utf8(origin.await.unwrap()).unwrap();
+    assert!(seen.ends_with("Connection: close\r\n\r\nabc"), "{seen}");
+    // a chunked body: through the last chunk and the trailers, the body
+    // arriving in pieces
+    let (port, origin) = serve_reading_all(ok).await;
+    let proxy = JailProxy::start(
+      list(&[&format!("127.0.0.1:{port}")]),
+      Upstream::default(),
+    )
+    .await
+    .unwrap();
+    let mut stream = TcpStream::connect((Ipv4Addr::LOCALHOST, proxy.port()))
+      .await
+      .unwrap();
+    for piece in [
+      format!(
+        "POST http://127.0.0.1:{port}/a HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nab"
+      ),
+      "c\r\n5;ext=1\r\nhello\r\n0\r\nX-Trailer: 1\r\n".to_string(),
+      format!("\r\nGET http://127.0.0.1:{port}/b HTTP/1.1\r\n\r\n"),
+    ] {
+      stream.write_all(piece.as_bytes()).await.unwrap();
+      tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let mut out = Vec::new();
+    stream.read_to_end(&mut out).await.unwrap();
+    assert!(out.ends_with(b"ok"), "{}", String::from_utf8_lossy(&out));
+    let seen = String::from_utf8(origin.await.unwrap()).unwrap();
+    assert!(
+      seen.ends_with(
+        "Connection: close\r\n\r\n3\r\nabc\r\n5;ext=1\r\nhello\r\n0\r\nX-Trailer: 1\r\n\r\n"
+      ),
+      "{seen}"
+    );
+    assert!(!seen.contains("/b"), "{seen}");
+    // a smuggling head is refused before anything is sent
+    let (port, origin) = serve_reading_all(ok).await;
+    let proxy = JailProxy::start(
+      list(&[&format!("127.0.0.1:{port}")]),
+      Upstream::default(),
+    )
+    .await
+    .unwrap();
+    for request in [
+      format!(
+        "POST http://127.0.0.1:{port}/a HTTP/1.1\r\nContent-Length: 3\r\nTransfer-Encoding: chunked\r\n\r\nabc"
+      ),
+      format!(
+        "GET http://127.0.0.1:{port}/a HTTP/1.1\r\nHost: other.example\r\n\r\n"
+      ),
+      format!("GET http://127.0.0.1:{port}/a HTTP/1.1\r\nX: 1\nY: 2\r\n\r\n"),
+    ] {
+      let response = roundtrip(proxy.port(), &request).await;
+      assert!(
+        response.starts_with("HTTP/1.1 400 "),
+        "{request}: {response}"
+      );
+    }
+    drop(proxy);
+    origin.abort();
   }
 }

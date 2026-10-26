@@ -879,9 +879,7 @@ unsafe fn write_pipe(
       && (*pipe).internal_fd.is_some()
     {
       let fd = (*pipe).internal_fd.unwrap();
-      if let Ok(afd) =
-        tokio::io::unix::AsyncFd::new(super::pipe::RawFdWrapper(fd))
-      {
+      if let Ok(afd) = super::pipe::register_raw_fd(fd) {
         (*pipe).internal_async_fd = Some(afd);
       }
     }

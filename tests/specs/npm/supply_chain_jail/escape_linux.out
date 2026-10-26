@@ -1,0 +1,8 @@
+tty open: denied
+tiocsti: denied
+own session: yes
+hard link from outside: denied
+hard link inside: allowed
+sleeper: started
+sleeper after install: gone
+open ran its script: no

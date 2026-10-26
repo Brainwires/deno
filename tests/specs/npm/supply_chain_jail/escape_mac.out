@@ -1,0 +1,15 @@
+tty open: denied
+tiocsti: denied
+own session: yes
+process table: hidden
+hard link from outside: denied
+hard link inside: allowed
+sleeper: started
+open .command: denied
+open -a: denied
+launchctl list: denied
+keychain: denied
+appleevents: denied
+pasteboard write: denied
+sleeper after install: gone
+open ran its script: no

