@@ -737,7 +737,7 @@ impl<
       });
     let node_resolution_kind =
       node_resolver::NodeResolutionKind::from_deno_graph(resolution_kind);
-    let resolve = |kind| match self.maybe_graph {
+    let resolve_specifier = |raw_specifier: &str, kind| match self.maybe_graph {
       Some(graph) => self.resolver.resolve_with_graph(
         graph,
         raw_specifier,
@@ -760,6 +760,18 @@ impl<
         )
         .map_err(|err| err.into()),
     };
+    let resolve = |kind| resolve_specifier(raw_specifier, kind);
+
+    // A tsconfig.json's `compilerOptions.types` entry is a type reference
+    // directive, which TypeScript looks up in `@types` first: `"jest"` is
+    // `@types/jest` (Jest's globals), not the `jest` package itself.
+    if node_resolution_kind == node_resolver::NodeResolutionKind::Types
+      && let Some(types_package) =
+        tsconfig_types_entry_package(raw_specifier, &referrer_range.specifier)
+      && let Ok(url) = resolve_specifier(&types_package, node_resolution_kind)
+    {
+      return Ok(url);
+    }
 
     let result = resolve(node_resolution_kind);
     if node_resolution_kind == node_resolver::NodeResolutionKind::Types
@@ -774,6 +786,42 @@ impl<
     }
 
     result.map_err(|err| err.into_deno_graph_error())
+  }
+}
+
+/// The `@types` package TypeScript looks up first for a `compilerOptions.types`
+/// entry of a tsconfig file (`referrer`): `jest` → `@types/jest`,
+/// `@babel/core` → `@types/babel__core`. `None` for any other referrer (a
+/// deno.json's `types` are Deno's own imports), an entry that isn't a bare
+/// package name, one that already names an `@types` package, and `node` /
+/// `deno`, whose types Deno provides.
+fn tsconfig_types_entry_package(entry: &str, referrer: &Url) -> Option<String> {
+  let file_name = referrer.path().rsplit('/').next()?;
+  if referrer.scheme() != "file"
+    || !file_name.ends_with(".json")
+    || matches!(file_name, "deno.json" | "deno.jsonc" | "package.json")
+  {
+    return None;
+  }
+  if entry.is_empty()
+    || entry.contains(':')
+    || entry.contains('\\')
+    || entry.starts_with('.')
+    || entry.starts_with("@types/")
+    || matches!(entry, "node" | "deno")
+  {
+    return None;
+  }
+  match entry.strip_prefix('@') {
+    Some(scoped) => {
+      let (scope, name) = scoped.split_once('/')?;
+      if scope.is_empty() || name.is_empty() || name.contains('/') {
+        return None;
+      }
+      Some(format!("@types/{scope}__{name}"))
+    }
+    None if !entry.contains('/') => Some(format!("@types/{entry}")),
+    None => None,
   }
 }
 
@@ -1294,6 +1342,30 @@ mod test {
       };
       assert_eq!(get_resolution_error_bare_node_specifier(&err), output,);
     }
+  }
+
+  #[test]
+  fn tsconfig_types_entry_package_maps_to_at_types() {
+    let tsconfig = Url::parse("file:///project/tsconfig.json").unwrap();
+    let base = Url::parse("file:///project/tsconfig.base.json").unwrap();
+    let deno_json = Url::parse("file:///project/deno.json").unwrap();
+    let f = super::tsconfig_types_entry_package;
+    assert_eq!(f("jest", &tsconfig).as_deref(), Some("@types/jest"));
+    assert_eq!(f("jest", &base).as_deref(), Some("@types/jest"));
+    assert_eq!(
+      f("@babel/core", &tsconfig).as_deref(),
+      Some("@types/babel__core")
+    );
+    // Deno's own types and entries that aren't a bare package name
+    assert_eq!(f("node", &tsconfig), None);
+    assert_eq!(f("deno", &tsconfig), None);
+    assert_eq!(f("@types/jest", &tsconfig), None);
+    assert_eq!(f("./types.d.ts", &tsconfig), None);
+    assert_eq!(f("npm:@types/jest", &tsconfig), None);
+    assert_eq!(f("vite/client", &tsconfig), None);
+    assert_eq!(f("@scope", &tsconfig), None);
+    // a deno.json's `types` are imports
+    assert_eq!(f("jest", &deno_json), None);
   }
 
   #[test]

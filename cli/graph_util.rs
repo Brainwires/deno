@@ -168,11 +168,15 @@ pub fn graph_walk_errors<'a>(
   options: GraphWalkErrorsOptions<'a>,
 ) -> impl Iterator<Item = EnhancedGraphError> + 'a {
   fn should_ignore_error(
+    graph: &ModuleGraph,
     sys: &CliSys,
     allow_unknown_media_types: bool,
     will_type_check: bool,
     error: &ModuleGraphError,
   ) -> bool {
+    if is_unresolved_elidable_npm_import(graph, error) {
+      return true;
+    }
     if allow_unknown_media_types
       && matches!(
         error.as_module_error_kind(),
@@ -205,6 +209,7 @@ pub fn graph_walk_errors<'a>(
     .errors()
     .flat_map(move |error| {
       if should_ignore_error(
+        graph,
         sys,
         options.allow_unknown_media_types,
         options.will_type_check,
@@ -246,6 +251,94 @@ pub fn graph_walk_errors<'a>(
       );
 
       Some(enhanced)
+    })
+}
+
+/// Whether `error` is a code resolution error that TypeScript's import
+/// elision makes moot, as it does for tsc + Node.js and every TypeScript
+/// loader for Node.js: a TypeScript module's static named import of a package
+/// subpath that only a declaration file provides (`import { App } from
+/// "supertest/types"`, where `supertest/types` exists only as
+/// `@types/supertest/types.d.ts`).
+///
+/// When every use of the import is a type, the emitted JavaScript drops it
+/// and nothing asks for the module at run time; when a value is used, the
+/// runtime resolves the specifier and fails with the same error before any
+/// code runs. Type checking keeps its own resolution: the types resolution
+/// (`maybe_type`) is untouched, and a failed one is still reported.
+fn is_unresolved_elidable_npm_import(
+  graph: &ModuleGraph,
+  error: &ModuleGraphError,
+) -> bool {
+  let ModuleGraphError::ResolutionError(ResolutionError::ResolverError {
+    error: resolve_error,
+    specifier,
+    range,
+  }) = error
+  else {
+    return false;
+  };
+  let ResolveError::Other(other) = resolve_error.as_ref() else {
+    return false;
+  };
+  let Some(err) = downcast_ref_deno_resolve_error(other) else {
+    return false;
+  };
+  // only a package subpath that isn't there for code: not an unknown package,
+  // a malformed specifier or a broken package.json
+  if !matches!(
+    err.maybe_node_code(),
+    Some(
+      NodeJsErrorCode::ERR_MODULE_NOT_FOUND
+        | NodeJsErrorCode::ERR_PACKAGE_PATH_NOT_EXPORTED
+    )
+  ) {
+    return false;
+  }
+  // a bare specifier (`pkg/sub`), not a relative or absolute one
+  if specifier.starts_with('.')
+    || specifier.starts_with('/')
+    || deno_core::url::Url::parse(specifier).is_ok()
+  {
+    return false;
+  }
+  let Some(deno_graph::Module::Js(referrer)) = graph.get(&range.specifier)
+  else {
+    return false;
+  };
+  // elision only happens when TypeScript is transpiled
+  if !matches!(
+    referrer.media_type,
+    MediaType::TypeScript | MediaType::Mts | MediaType::Cts | MediaType::Tsx
+  ) {
+    return false;
+  }
+  let Some(dep) = referrer.dependencies.get(specifier.as_str()) else {
+    return false;
+  };
+  // a typed graph resolved the specifier for type checking too: that
+  // resolution must have found the declaration file
+  match &dep.maybe_type {
+    deno_graph::Resolution::Err(_) => return false,
+    deno_graph::Resolution::Ok(resolved) => {
+      if !MediaType::from_specifier(&resolved.specifier).is_declaration() {
+        return false;
+      }
+    }
+    deno_graph::Resolution::None => {}
+  }
+  // every import of it is one TypeScript may elide: a static ES import or
+  // re-export with bindings, never a side-effect import (`import "x"`), a
+  // dynamic import, a `require()` or an import with attributes
+  !dep.imports.is_empty()
+    && dep.imports.iter().all(|import| {
+      import.kind == deno_graph::ImportKind::Es
+        && !import.is_dynamic
+        && !import.is_side_effect
+        && matches!(
+          import.attributes,
+          deno_graph::analysis::ImportAttributes::None
+        )
     })
 }
 
@@ -1307,9 +1400,72 @@ impl ModuleGraphBuilder {
     graph_kind: GraphKind,
   ) -> Vec<deno_graph::ReferrerImports> {
     if graph_kind.include_types() {
-      self.compiler_options_resolver.to_graph_imports()
+      let mut imports = self.compiler_options_resolver.to_graph_imports();
+      if crate::args::is_node_project(self.cli_options.workspace()) {
+        add_automatic_types_imports(
+          &self.compiler_options_resolver,
+          &mut imports,
+        );
+      }
+      imports
     } else {
       Vec::new()
+    }
+  }
+}
+
+/// A package.json project's tsconfig.json without `compilerOptions.types`
+/// includes every `@types` package TypeScript 5 would include on its own
+/// (`@types/jest`'s `describe` / `it` / `expect` globals), as type reference
+/// directives of that config (resolved through `@types`, see
+/// `tsconfig_types_entry_package` in deno_resolver).
+fn add_automatic_types_imports(
+  compiler_options_resolver: &CompilerOptionsResolver,
+  imports: &mut Vec<deno_graph::ReferrerImports>,
+) {
+  for (_, data, _) in compiler_options_resolver.entries() {
+    if data.source_kind
+      != deno_resolver::deno_json::CompilerOptionsSourceKind::TsConfig
+    {
+      continue;
+    }
+    let Some(config) = data.sources.last() else {
+      continue;
+    };
+    let sets_types = data.sources.iter().any(|source| {
+      source
+        .compiler_options
+        .as_ref()
+        .and_then(|co| co.0.as_object())
+        .is_some_and(|co| co.contains_key("types"))
+    });
+    if sets_types {
+      continue;
+    }
+    let Some(config_dir) = url_to_file_path(&config.specifier)
+      .ok()
+      .and_then(|path| path.parent().map(|dir| dir.to_path_buf()))
+    else {
+      continue;
+    };
+    let names =
+      crate::tsc::tsconfig_gen::automatic_type_directive_names(&config_dir);
+    if names.is_empty() {
+      continue;
+    }
+    let referrer = config.specifier.as_ref().clone();
+    match imports.iter_mut().find(|i| i.referrer == referrer) {
+      Some(existing) => {
+        for name in names {
+          if !existing.imports.contains(&name) {
+            existing.imports.push(name);
+          }
+        }
+      }
+      None => imports.push(deno_graph::ReferrerImports {
+        referrer,
+        imports: names,
+      }),
     }
   }
 }

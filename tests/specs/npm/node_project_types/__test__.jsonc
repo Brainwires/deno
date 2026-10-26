@@ -1,0 +1,30 @@
+{
+  // A package.json project's tsconfig.json as Node.js tooling reads it: a
+  // `baseUrl` (deprecated in TypeScript 6, TS5101) checks with either engine,
+  // `compilerOptions.types` entries are `@types` packages first (`"jest"` is
+  // `@types/jest`, its globals, not the `jest` package), and without `types`
+  // every `@types` package is included, as TypeScript 5 does.
+  "tempDir": true,
+  "tests": {
+    "automatic_types_in_process": {
+      "cwd": "auto",
+      "args": "check --check-engine=tsc main.spec.ts",
+      "output": "Check [WILDCARD]main.spec.ts\nChecked 1 file\n"
+    },
+    "automatic_types_native": {
+      "cwd": "auto",
+      "args": "check main.spec.ts",
+      "output": "Check [WILDCARD]main.spec.ts\nChecked 1 file\n"
+    },
+    "listed_types_in_process": {
+      "cwd": "listed",
+      "args": "check --check-engine=tsc main.spec.ts",
+      "output": "Check [WILDCARD]main.spec.ts\nChecked 1 file\n"
+    },
+    "listed_types_native": {
+      "cwd": "listed",
+      "args": "check main.spec.ts",
+      "output": "Check [WILDCARD]main.spec.ts\nChecked 1 file\n"
+    }
+  }
+}

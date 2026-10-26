@@ -182,6 +182,22 @@
         }
       ]
     },
+    // an install check that loads the package's own prebuilt Node-API addon
+    // (node-gyp-build-test) may: native code from the package's folder only
+    "native_addon_own_folder": {
+      "steps": [
+        {
+          "cwd": "native_addon",
+          "args": "install --allow-scripts=npm:@denotest/jail-native-addon --jail-scripts",
+          "output": "[WILDCARD]"
+        },
+        {
+          "cwd": "native_addon",
+          "args": "run -A check.mjs",
+          "output": "native_addon.out"
+        }
+      ]
+    },
     // a package that declares its download host (node-pre-gyp's
     // binary.host) may reach that host, and only it
     "declared_download_host": {
