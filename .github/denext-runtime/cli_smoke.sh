@@ -43,7 +43,7 @@ short=$("$deno" -V | tr -d '\r')
 test "$short" = "deno $VERSION" || { echo "::error::deno -V says '$short', want 'deno $VERSION'" >&2; exit 1; }
 
 # Deno.version.deno is the fork's version too (DENEXT.md "Versioning":
-# 3.0.0-rc.N, or 3.0.0-rc.N+ci.RUN for a CI build), and semver.
+# 3.0.0-denext.N, or 3.0.0-denext.N+ci.RUN for a CI build), and semver.
 deno_version=$("$deno" eval 'console.log(Deno.version.deno)' | tr -d '\r')
 test "$deno_version" = "$VERSION" || { echo "::error::Deno.version.deno is '$deno_version', want '$VERSION'" >&2; exit 1; }
 echo "Deno.version.deno: $deno_version"

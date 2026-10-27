@@ -19,7 +19,7 @@ pub const DENO_VERSION: &str = env!("DENO_VERSION");
 
 /// denext: the upstream Deno release this fork is built from
 /// (`cli/lib/upstream_version.txt`; DENEXT.md "Versioning"). The fork's own
-/// version ([`DENO_VERSION`], `3.0.0-rc.N`) names no upstream release, so
+/// version ([`DENO_VERSION`], `3.0.0-denext.N`) names no upstream release, so
 /// everything that means upstream Deno uses this instead: the release channel,
 /// the `denort` / `libdenort` downloads from dl.deno.land and the
 /// `engines.deno` check.
@@ -128,8 +128,8 @@ pub struct DenoVersionInfo {
 
 impl DenoVersionInfo {
   /// A denext release build's version (`DENEXT_VERSION` at compile time,
-  /// e.g. `3.0.0-rc.1`, or `2.9.7-denext.22` before the fork took its own
-  /// version), or `None` for any other build.
+  /// e.g. `3.0.0-denext.1`; earlier `3.0.0-rc.N`, and `2.9.7-denext.22`
+  /// before the fork took its own version), or `None` for any other build.
   pub fn denext(&self) -> Option<&'static str> {
     self.denext
   }
@@ -139,8 +139,8 @@ impl DenoVersionInfo {
   /// ([`DenoVersionInfo::denext`]) or else the fork's own version
   /// ([`DENO_VERSION`]). It is `Deno.build.denext` and the
   /// `denext <version> (Brainwires)` line of `deno --version`, which upstream
-  /// Deno has neither of, so a program can tell this runtime from an upstream
-  /// release of the same number (upstream ships a 3.0.0 too).
+  /// Deno has neither of, so a program can tell this runtime from upstream
+  /// Deno by more than its version.
   pub fn denext_runtime(&self) -> &'static str {
     denext_runtime(self.denext)
   }
@@ -157,10 +157,10 @@ impl DenoVersionInfo {
 }
 
 /// A denext release build's version: `DENEXT_VERSION` at compile time (the
-/// release, e.g. `3.0.0-rc.1`; see DENEXT.md "Versioning" and "Release
+/// release, e.g. `3.0.0-denext.1`; see DENEXT.md "Versioning" and "Release
 /// archives"), used only when it is this build's Deno version (a release:
-/// `3.0.0-rc.1`) or extends it with `-` or `+` (a CI build:
-/// `3.0.0-rc.1+ci.42`). It becomes `Deno.version.deno`, `deno --version` and
+/// `3.0.0-denext.1`) or extends it with `-` or `+` (a CI build:
+/// `3.0.0-denext.1+ci.42`). It becomes `Deno.version.deno`, `deno --version` and
 /// the user agent, so the binary says which build it is; it marks the build
 /// as denext's, so `deno compile` takes the release's own `denort`
 /// (cli/standalone/binary.rs, `denext_denort`) and `deno upgrade` refuses to
@@ -203,7 +203,17 @@ mod tests {
 
   #[test]
   fn denext_version_is_or_extends_the_deno_version() {
-    // the fork's own version (3.0.0-rc.N on): a release build is exactly it
+    // the fork's own version (3.0.0-denext.N, after 3.0.0-rc.N): a release
+    // build is exactly it
+    assert_eq!(
+      denext_version(Some("3.0.0-denext.1"), "3.0.0-denext.1"),
+      Some("3.0.0-denext.1")
+    );
+    assert_eq!(
+      denext_version(Some("3.0.0-denext.1+ci.42"), "3.0.0-denext.1"),
+      Some("3.0.0-denext.1+ci.42")
+    );
+    assert_eq!(denext_version(Some("3.0.0-denext.10"), "3.0.0-denext.1"), None);
     assert_eq!(
       denext_version(Some("3.0.0-rc.1"), "3.0.0-rc.1"),
       Some("3.0.0-rc.1")
@@ -252,6 +262,10 @@ mod tests {
       denext_version_line("3.0.0-rc.3"),
       "denext 3.0.0-rc.3 (Brainwires)"
     );
+    assert_eq!(
+      denext_version_line("3.0.0-denext.1"),
+      "denext 3.0.0-denext.1 (Brainwires)"
+    );
   }
 
   #[test]
@@ -261,6 +275,16 @@ mod tests {
     assert!(v("3.0.0-rc.1") < v("3.0.0-rc.2"));
     assert!(v("3.0.0-rc.9") < v("3.0.0-rc.10"));
     assert!(v("3.0.0-rc.10") < v("3.0.0"));
+    // 3.0.0-denext.N is semver too, on the stable channel. Plain semver puts
+    // it below 3.0.0-rc.1 (`d` < `r`); nothing in the fork compares its own
+    // versions, and denext and the release gate (tag_gate.py) order every
+    // denext.N after every rc.N.
+    assert!(v("3.0.0-denext.1") < v("3.0.0-denext.2"));
+    assert!(v("3.0.0-denext.9") < v("3.0.0-denext.10"));
+    assert_eq!(
+      release_channel_from_version_string("3.0.0-denext.1"),
+      ReleaseChannel::Stable
+    );
     // this checkout's own versions parse
     assert!(deno_semver::Version::parse_standard(DENO_VERSION).is_ok());
     assert!(
@@ -270,8 +294,9 @@ mod tests {
 
   #[test]
   fn the_release_channel_is_the_upstream_versions() {
-    // 3.0.0-rc.N names the fork's release, not an upstream release
-    // candidate: the channel follows the upstream version it is built from.
+    // 3.0.0-rc.N / 3.0.0-denext.N name the fork's release, not an upstream
+    // release candidate: the channel follows the upstream version it is
+    // built from.
     if IS_CANARY || IS_RC {
       return;
     }

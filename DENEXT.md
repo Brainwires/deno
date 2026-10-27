@@ -38,9 +38,11 @@ upstream takes it, and is rebased onto a newer Deno when we choose to move.
 
 Every upstream Deno release is merged into `development-denext` as it ships, by
 hand (there is no sync automation), on a `sync/upstream-<version>` branch with a
-merge commit, so the history shows each sync. The fork keeps its own version
-(`3.0.0-rc.N`) until upstream's 3.0.0, which gets a full reconcile;
-`cli/lib/upstream_version.txt` names the merged upstream release.
+merge commit, so the history shows each sync. Upstream will not ship a 3.0
+(denoland/deno#37030: `main` goes back to 2.9, and 2.9.x is an LTS line until
+2027-10), so these syncs take upstream's 2.9.x bug and security fixes into the
+fork's own line (`3.0.0-denext.N`); `cli/lib/upstream_version.txt` names the
+merged upstream release.
 
 - **2.9.8** (merged 2026-10-22, `sync/upstream-2.9.8-b`, on top of 3.0.0-rc.3
   and the Rust 1.99.1 pin of item 100). Already carried before the merge and now
@@ -82,45 +84,58 @@ merge commit, so the history shows each sync. The fork keeps its own version
 
 ## Versioning
 
-From runtime **3.0.0-rc.1** (the release that was going to be `denext.23`) the
-fork has its own version, a plain semver in `cli/Cargo.toml`,
-`cli/rt/Cargo.toml` and `cli/lib/version.txt` (`3.0.0-rc.1`, then `3.0.0-rc.2`,
-`3.0.0-rc.3`, ...). Before that every release was named after the upstream
-release it was built from: `2.9.7-denext.1` to `2.9.7-denext.22`. Semver sorts
-the two schemes in release order (`2.9.7-denext.22` < `3.0.0-rc.1` <
-`3.0.0-rc.2` < `3.0.0`), so a program comparing versions needs no special case.
+The fork has its own version, a plain semver in `cli/Cargo.toml`,
+`cli/rt/Cargo.toml` and `cli/lib/version.txt`. Three schemes so far:
 
-- **3.0.0 final** means upstream Deno's planned 3.0 milestone (denoland/deno
-  milestone 69) is carried or adapted here. Breaking changes may land in 3.0,
-  opt-in where possible (for example behind an environment variable that warns
-  otherwise).
+- `2.9.7-denext.1` to `2.9.7-denext.22`: each release named after the upstream
+  release it was built from;
+- `3.0.0-rc.1` to `3.0.0-rc.6`: the fork's own version, as release candidates
+  of a 3.0 that was to follow upstream's;
+- from **3.0.0-denext.1** (the release that was going to be `3.0.0-rc.7`):
+  `3.0.0-denext.1`, `3.0.0-denext.2`, ... There are no more release candidates.
+  Upstream Deno will not ship a 3.0 (denoland/deno#37030: `main` goes back to
+  2.9, and 2.9.x is an LTS line until 2027-10), so this is the fork's stable,
+  forward line; the core stays `3.0.0` and `N` counts releases.
+
+Release order is `2.9.7-denext.22` < `3.0.0-rc.1` < ... < `3.0.0-rc.6` <
+`3.0.0-denext.1` < `3.0.0-denext.2` < .... Plain semver gets every step right
+but one: it puts `3.0.0-denext.N` below `3.0.0-rc.1`, because prerelease
+identifiers compare as ASCII (`d` < `r`). Whatever orders the fork's releases
+must therefore rank the `denext` line above the `rc` line on the `3.0.0` core:
+denext's `compareDenoVersions` does, and so does the release gate's "Latest"
+choice (`.github/denext-runtime/tag_gate.py`, `version_key`). The fork itself
+compares none of its own versions: `deno upgrade` refuses in a release build
+(below), the desktop updater's downgrade guard compares the app's version, and
+`DENEXT_VERSION` is matched as a string.
+
 - **The upstream version** the fork is built from is in
   `cli/lib/upstream_version.txt` (`2.9.8`; `UPSTREAM_DENO_VERSION` in
   `cli/lib/version.rs`). Everything that means upstream Deno uses it, never the
-  fork's own version, which names no upstream release (and an upstream release
-  of the same number would be a different runtime): the release channel
+  fork's own version, which names no upstream release: the release channel
   (`deno --version` says `stable`, upstream's channel for 2.9.8, not
-  `release
-  candidate`), the `denort` / `libdenort` downloads from
-  dl.deno.land, the `engines.deno` check of `deno install` (npm ranges never
-  match a prerelease, so `>=1.0.0` would reject `3.0.0-rc.1`), and
-  `deno.version` in each archive's `BUILD_INFO.json` and in the release's
-  `manifest.json` (denext's pins read it as `deno`: the stock Deno whose
-  `deno desktop` packages with the runtime).
+  `release candidate`), the `denort` / `libdenort` downloads from dl.deno.land,
+  the `engines.deno` check of `deno install` (npm ranges never match a
+  prerelease, so `>=1.0.0` would reject `3.0.0-denext.1`), and `deno.version` in
+  each archive's `BUILD_INFO.json` and in the release's `manifest.json`
+  (denext's pins read it as `deno`: the stock Deno whose `deno desktop`
+  packages with the runtime).
 - **A release** is tagged `denext-runtime-v<version>`
-  (`denext-runtime-v3.0.0-rc.1`); the release workflow refuses a tag that is not
-  exactly the version in `cli/Cargo.toml` (and `cli/lib/version.txt`), so bump
-  those first. Every archive is named after the version
-  (`deno-cli-3.0.0-rc.1-<target>.zip`, ...). An untagged workflow run builds
+  (`denext-runtime-v3.0.0-denext.1`); the release workflow refuses a tag that is
+  not exactly the version in `cli/Cargo.toml` (and `cli/lib/version.txt`), so
+  bump those first. Every archive is named after the version
+  (`deno-cli-3.0.0-denext.1-<target>.zip`, ...). A `3.0.0-denext.N` release is
+  a full GitHub release (the repository's "Latest" when it is the newest); only
+  a `3.0.0-rc.N` was published as a pre-release. An untagged workflow run builds
   `<version>+ci.<run>`: build metadata, the same precedence as the version it
   builds toward.
 - **A release build** bakes `DENEXT_VERSION=<version>` in (item 26). It marks
-  the binary as denext's: `deno compile` takes the release's own `denort`, and
-  `deno upgrade` (and its background update check) is off, because upstream's
-  channels would replace this fork with stock Deno. Update it through denext
-  (`denext upgrade`, `denext toolchain install`) or from this repository's
-  releases. A build without it (tests, a local `cargo build`) keeps upstream's
-  `deno upgrade`.
+  the binary as denext's: `deno --version` ends with
+  `denext <version> (Brainwires)` and `Deno.build.denext` is the version (item
+  99), `deno compile` takes the release's own `denort`, and `deno upgrade` (and
+  its background update check) is off, because upstream's channels would replace
+  this fork with stock Deno. Update it through denext (`denext upgrade`,
+  `denext toolchain install`) or from this repository's releases. A build
+  without it (tests, a local `cargo build`) keeps upstream's `deno upgrade`.
 
 ## Branches and tags
 
@@ -129,7 +144,7 @@ the two schemes in release order (`2.9.7-denext.22` < `3.0.0-rc.1` <
 | `development-denext`                                                                                          | The working line: every feature and fix branch is merged here (`--no-ff`), and runtime releases are cut from it as `denext-runtime-v<version>` tags (see [Versioning](#versioning)). Replaces the per-release `rel/denext<n>` lines, which stay for history (`denext.6` to `denext.22`). |
 | `denext/v<deno version>` (e.g. `denext/v2.9.7`)                                                               | The original line: upstream tag `v<deno version>` + the first feature commits + this file and the release workflow. The default branch of this fork.                                                                                                                                     |
 | `feat/desktop-*`, `fix/*`, `ci/*`, `test/*`                                                                   | The feature and fix branches merged into `development-denext`. Kept for review and for rebasing onto a newer Deno.                                                                                                                                                                       |
-| `denext-runtime-v<version>` (e.g. `denext-runtime-v3.0.0-rc.1`; before it `denext-runtime-v2.9.7-denext.<n>`) | A published runtime. PUSHING such a tag runs the workflow and creates the GitHub Release (a manual dispatch on a tag ref builds but never publishes). `<version>` is the fork's own ([Versioning](#versioning)).                                                                         |
+| `denext-runtime-v<version>` (e.g. `denext-runtime-v3.0.0-denext.1`; before it `-v3.0.0-rc.<n>`, `-v2.9.7-denext.<n>`) | A published runtime. PUSHING such a tag runs the workflow and creates the GitHub Release (a manual dispatch on a tag ref builds but never publishes). `<version>` is the fork's own ([Versioning](#versioning)).                                                                         |
 
 `main` and the other upstream branches are untouched mirrors from the fork
 point. Nothing here is proposed back from this fork; the upstream PRs below are

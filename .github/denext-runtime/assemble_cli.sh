@@ -31,7 +31,7 @@
 # (ESBUILD_DIR: fetch_esbuild.py's output directory; TYPESCRIPT_LSP_DIR /
 # TYPESCRIPT_CHECK_DIR: fetch_typescript.py lsp's / check's; TSGOLINT_DIR:
 # fetch_tsgolint.py's)
-# (VERSION: the fork's own version, e.g. 3.0.0-rc.1; DENO_VERSION: the
+# (VERSION: the fork's own version, e.g. 3.0.0-denext.1; DENO_VERSION: the
 # upstream Deno release it is built from, DENEXT.md "Versioning")
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)

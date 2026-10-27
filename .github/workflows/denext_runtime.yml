@@ -129,7 +129,7 @@ jobs:
           RUN_NUMBER: ${{ github.run_number }}
         run: |
           set -euo pipefail
-          # The fork's own version (DENEXT.md "Versioning": 3.0.0-rc.N, ...),
+          # The fork's own version (DENEXT.md "Versioning": 3.0.0-denext.N, ...),
           # which the release is named after, and the upstream Deno release it
           # is built from.
           deno_version=$(sed -n 's/^version = "\(.*\)"$/\1/p' cli/Cargo.toml | head -1)
