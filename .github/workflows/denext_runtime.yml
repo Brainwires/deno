@@ -89,10 +89,14 @@ env:
   # (sign_macos.sh refuses any other identity and checks the signature
   # against it).
   APPLE_TEAM_ID: WT957SC7MJ
-  # The newest glibc symbol version a Linux release binary may require
-  # (P2). The binaries are built on ubuntu-22.04 and need 2.35 today; the
-  # ceiling only ever goes DOWN (an older build baseline), never up.
-  GLIBC_CEILING: '2.35'
+  # The newest glibc version a Linux `deno` / `denort` may require (the fork
+  # audit's P2). The cli job links them against upstream Deno's Ubuntu 18.04
+  # sysroot (linux_sysroot.sh), so they run on any glibc >= 2.27, and "Check
+  # binary" fails one that requires a newer GLIBC_ version
+  # (glibc_ceiling.py). denext reads the same value from the pin data before
+  # it downloads the toolchain. Only ever lowered, never raised. See
+  # DENEXT.md item 134.
+  GLIBC_CEILING: '2.27'
 
 jobs:
   setup:
@@ -774,9 +778,19 @@ jobs:
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          prefix-key: denext-cli-v1
+          prefix-key: denext-cli-v2
           key: ${{ matrix.target }}-${{ matrix.os }}
           cache-on-failure: false
+
+      # Linux: link against upstream Deno's glibc 2.27 sysroot (clang + lld,
+      # the sysroot's flags and tools/'s shims) instead of the runner's glibc
+      # 2.35, so the binaries run on RHEL 8 / 9, Amazon Linux 2023, Debian 10+
+      # and Ubuntu 18.04+. Writes CC, CFLAGS and the target's cargo linker and
+      # rustflags to $GITHUB_ENV, and mounts the sysroot for "Check binary".
+      - name: glibc 2.27 sysroot (Linux)
+        if: runner.os == 'Linux'
+        timeout-minutes: 15
+        run: bash .github/denext-runtime/linux_sysroot.sh "$TARGET"
 
       # And `denort`, the standalone runtime `deno compile` puts under a
       # compiled app: this CLI downloads the release's own
@@ -816,22 +830,21 @@ jobs:
               for b in target/release/deno target/release/denort; do
                 file "$b"
                 ldd "$b" || true
-                objdump -T "$b" | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -3
-                # The newest glibc the binary requires, at most GLIBC_CEILING:
-                # older distros (RHEL 9: 2.34, Debian 11: 2.31) fail to exec
-                # a binary that needs a newer one.
-                newest=$(objdump -T "$b" | grep -o 'GLIBC_[0-9][0-9.]*' | sed 's/^GLIBC_//' | sort -uV | tail -1)
-                if [ -z "$newest" ]; then
-                  echo "::error::objdump -T $b lists no GLIBC_ symbol versions"; exit 1
-                fi
-                top=$(printf '%s\n%s\n' "$newest" "$GLIBC_CEILING" | sort -V | tail -1)
-                if [ "$top" != "$GLIBC_CEILING" ]; then
-                  echo "::error::$b requires GLIBC_$newest, newer than the ceiling GLIBC_$GLIBC_CEILING"
-                  objdump -T "$b" | grep -F "GLIBC_$newest" | head -20
-                  exit 1
-                fi
-                echo "$b: newest glibc symbol GLIBC_$newest (ceiling $GLIBC_CEILING)"
               done
+              # The newest glibc each binary requires (its version
+              # references), at most GLIBC_CEILING: an older distro fails to
+              # exec a binary that needs a newer one.
+              python3 -I .github/denext-runtime/glibc_ceiling.py "$GLIBC_CEILING" target/release/deno target/release/denort
+              # And they run on that glibc: inside the sysroot (Ubuntu 18.04,
+              # glibc 2.27) that linux_sysroot.sh mounted. denort has no app
+              # embedded, so it gets as far as looking for one.
+              sudo chroot /sysroot "$PWD/target/release/deno" --version
+              sudo chroot /sysroot "$PWD/target/release/deno" eval 'console.log(`eval ok on ${Deno.build.target}`)'
+              out=$(sudo chroot /sysroot "$PWD/target/release/denort" 2>&1 || true)
+              if ! grep -q 'Could not find standalone binary section' <<<"$out"; then
+                echo "::error::denort did not start in the glibc 2.27 sysroot: $out"
+                exit 1
+              fi
               ;;
             *-windows-msvc)
               ls -la target/release/deno.exe target/release/denort.exe

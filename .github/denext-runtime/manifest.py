@@ -26,6 +26,13 @@ env = os.environ
 version = env["VERSION"]
 tag = env.get("TAG", "")
 repo = env["REPOSITORY"]
+# The newest glibc version the Linux `deno` and `denort` require: the
+# workflow's GLIBC_CEILING, which their "Check binary" step asserts
+# (glibc_ceiling.py, DENEXT.md item 134). denext pins it and refuses a Linux
+# host with an older glibc (or musl) before it downloads them.
+glibc = env.get("GLIBC_CEILING") or None
+if glibc is not None and not re.fullmatch(r"\d+\.\d+", glibc):
+    raise SystemExit(f"GLIBC_CEILING '{glibc}' is not a glibc version (want e.g. 2.27)")
 
 pattern = re.compile(
     r"^deno-desktop-runtime-"
@@ -214,6 +221,9 @@ manifest = {
             "buildDenext": version,
             "versionLine": f"denext {version} (Brainwires)",
         },
+        # The newest glibc version the Linux binaries (this section's and
+        # denort's) require, or null when the build recorded none.
+        "glibc": glibc,
         "targets": dict(sorted(cli_targets.items())),
     },
     # The standalone runtime the CLI's `deno compile` downloads from this

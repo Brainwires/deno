@@ -77,7 +77,7 @@ def write_cli_zip(dist, check, lsp, info_overrides=None, tsgolint=None):
     return name
 
 
-def run_manifest(dist):
+def run_manifest(dist, glibc=None):
     env = {
         "PATH": os.environ.get("PATH", ""),
         "VERSION": VERSION,
@@ -89,6 +89,8 @@ def run_manifest(dist):
         "CEF_VERSION": "150.0.21",
         "CLI_ONLY": "1",
     }
+    if glibc is not None:
+        env["GLIBC_CEILING"] = glibc
     return subprocess.run(
         [sys.executable, "-I", MANIFEST, dist],
         env=env,
@@ -165,6 +167,27 @@ class ManifestTest(unittest.TestCase):
             manifest["cli"]["identity"],
             {"buildDenext": VERSION, "versionLine": f"denext {VERSION} (Brainwires)"},
         )
+
+    def test_cli_records_the_glibc_ceiling(self):
+        check, lsp = compiler("7.0.2"), compiler("7.1.0-dev.1")
+        for glibc, want in (("2.27", "2.27"), (None, None), ("", None)):
+            with tempfile.TemporaryDirectory() as dist:
+                write_cli_zip(dist, check, lsp)
+                result = run_manifest(dist, glibc)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                with open(os.path.join(dist, "manifest.json")) as f:
+                    manifest = json.load(f)
+            self.assertIn("glibc", manifest["cli"])
+            self.assertEqual(manifest["cli"]["glibc"], want)
+
+    def test_a_malformed_glibc_ceiling_is_refused(self):
+        check, lsp = compiler("7.0.2"), compiler("7.1.0-dev.1")
+        for glibc in ("2", "2.27.1", "GLIBC_2.27", "latest"):
+            with tempfile.TemporaryDirectory() as dist:
+                write_cli_zip(dist, check, lsp)
+                result = run_manifest(dist, glibc)
+            self.assertNotEqual(result.returncode, 0, glibc)
+            self.assertIn("is not a glibc version", result.stderr)
 
     def test_lsp_binary_that_disagrees_with_build_info_is_refused(self):
         check, lsp = compiler("7.0.2"), compiler("7.1.0-dev.1")

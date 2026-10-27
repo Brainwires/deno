@@ -5311,6 +5311,72 @@ where the changes are discussed.
      hosted" while `macos-15` jobs in other repositories got runners. The tag
      gate requires the arm64 leg by name, so it now names `macos-15`.
 
+134. **`ci`: the Linux `deno` and `denort` run on glibc 2.27**
+     (`feat/glibc-ceiling`, CI only; `denext_runtime.yml`,
+     `.github/denext-runtime/linux_sysroot.sh`, `glibc_ceiling.py`,
+     `manifest.py`). The fork production audit's P2: the release CLI and
+     `denort` were linked against the runner's glibc (ubuntu-22.04: 2.35), so
+     they failed to exec on RHEL / Rocky / Alma 9 and Amazon Linux 2023 (2.34),
+     Debian 11 (2.31), Debian 10 and RHEL 8 (2.28) and Ubuntu 20.04 (2.31), all
+     of which upstream Deno 2.9.8 runs on. The `cli` job now links both Linux
+     targets against upstream Deno's own sysroot (`denoland/deno_sysroot_build`
+     release `sysroot-20250207`, Ubuntu 18.04, glibc 2.27), as upstream's
+     release builds do (`ci.ts` `sysRootConfig`): the archive is checked against
+     a pinned SHA-256 per architecture, CC is Ubuntu 22.04's `clang-15` with the
+     sysroot's `CFLAGS`, and the target's cargo linker is `clang-15` with
+     `lld-15`, the sysroot's `-L` / `--sysroot` flags, `-ldl`,
+     `--allow-shlib-undefined`, `tools/memfd_create_shim.c`,
+     `tools/glibc_math_shim.c` and its five `--wrap`s. The flags go in
+     `CARGO_TARGET_<TRIPLE>_RUSTFLAGS`, which joins `.cargo/config.toml`'s
+     `--cfg tokio_unstable` (a `RUSTFLAGS` variable would replace it).
+     Upstream's linker-plugin LTO is left out; the release profile's own LTO is
+     unchanged.
+
+     The ceiling is 2.27, and no lower, because that is the newest glibc the
+     binaries need even from upstream's sysroot: upstream's own 2.9.8 `deno` and
+     `denort` require `GLIBC_2.27` on both architectures, for `copy_file_range`
+     (both) and V8's `pkey_*` memory-protection-key calls (x86_64), with
+     `getrandom` / `getentropy` at 2.25 below them. A lower ceiling would need
+     an older sysroot plus shims for those, which neither upstream nor the
+     prebuilt `rusty_v8` archives are built or tested against. The alternatives
+     were weighed and not taken: a `manylinux_2_28` container would give 2.28
+     (one release worse) and move the job into a container on both runner
+     architectures; `cargo zigbuild` with a `.2.27` target links the prebuilt
+     `librusty_v8.a` (its own libc++, built by Chromium's clang) with zig's
+     linker and libc stubs, which nothing upstream runs. CEF does not constrain
+     the CLI (it links no laufey or CEF; `libcef.so` 150 itself needs
+     `GLIBC_2.25`), and `libdenort` / the laufey hosts keep building on
+     ubuntu-22.04: the desktop runtime needs WebKitGTK 4.1, which is Ubuntu
+     22.04-era anyway.
+
+     `GLIBC_CEILING` is now `2.27`. "Check binary" runs `glibc_ceiling.py`,
+     which reads each binary's version references (`objdump -p`, the
+     `.gnu.version_r` section the loader checks) from every library, compares
+     versions numerically (2.2.5 < 2.17 < 2.27), and fails a binary that
+     requires a newer `GLIBC_` version, or none at all, listing the symbols over
+     the ceiling (`objdump -T`). Then it runs `deno --version`, a `deno eval`
+     and `denort` (which, with no app embedded, gets as far as "Could not find
+     standalone binary section") inside the sysroot (`chroot /sysroot`), so both
+     are shown to load on the ceiling's own glibc. The `cli` job's rust-cache
+     prefix moves to `denext-cli-v2`. `manifest.py` records the ceiling as the
+     manifest's `cli.glibc` (`null` when the workflow sets none; a malformed one
+     fails the job), and denext pins it and refuses an older-glibc or musl Linux
+     host before it downloads the toolchain (denext `feat/glibc-probe`).
+
+     Verified on biscuits with the same script in an `ubuntu:22.04` container
+     (x86_64): a dev-profile `cargo build --locked --bin deno --bin denort` of
+     this branch links against the sysroot with Ubuntu's clang 15.0.7 and LLD
+     15.0.7; `glibc_ceiling.py 2.27` passes both binaries (`GLIBC_2.27` from
+     `libc.so.6`) and `2.26` fails them, naming `copy_file_range` and the five
+     `pkey_*` symbols; `deno --version` (`3.0.0-denext.1`, V8 15.0.245.2),
+     `deno eval` and `denort` start in the chroot. The release profile and
+     aarch64 are left to the workflow. Tests:
+     `.github/denext-runtime/glibc_ceiling_test.py` (parsing, numeric
+     comparison, the failure listing, and the script against a stand-in
+     `objdump`), run by `denext_tests.yml`'s lint job, and `manifest_test.py`'s
+     `test_cli_records_the_glibc_ceiling` and
+     `test_a_malformed_glibc_ceiling_is_refused`.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129) are what the prebuilt `libdenort` carries. The CLI-side
@@ -5463,9 +5529,12 @@ app is still signed with its author's identity when it is packaged.
 info the release profile splits off (`.dSYM` / `.dwp` / `.pdb`), for
 symbolicating a crash report; they are not in `manifest.json`.
 
-The Linux binaries need glibc 2.35 (Ubuntu 22.04's); the `cli` job fails when
-one requires a newer `GLIBC_` symbol than `GLIBC_CEILING`, which is only ever
-lowered.
+The Linux `deno` and `denort` need glibc 2.27 or newer: the `cli` job links them
+against upstream Deno's Ubuntu 18.04 sysroot (`linux_sysroot.sh`) and fails when
+one requires a newer `GLIBC_` version than `GLIBC_CEILING`, which is only ever
+lowered (item 134); `manifest.json` records it as `cli.glibc`. The Deno Desktop
+runtime's `libdenort` and laufey hosts are still built on Ubuntu 22.04 (glibc
+2.35), which WebKitGTK 4.1 needs anyway.
 
 ## Reproducing a build
 
@@ -5509,12 +5578,14 @@ version is the newest. Per target it:
 4. attests the archives and, on a pushed tag, publishes the release;
 5. in a parallel `cli` job, builds this fork's `deno` CLI with
    `cargo build --release --locked --bin deno` and `DENEXT_VERSION` set to the
-   release version (`<version>+ci.<run>` for untagged runs), fetches and
-   verifies esbuild with `fetch_esbuild.py`, packs both with `assemble_cli.sh`,
-   smoke-tests the unpacked archive with `cli_smoke.sh` and attests it. The
-   release needs every runtime archive and every CLI archive. A dispatch with
-   `cli_only: true` runs just this job and the manifest (no laufey, libdenort or
-   package jobs, and never a release): a dry run of the CLI archives' layout.
+   release version (`<version>+ci.<run>` for untagged runs), on Linux linked
+   against the glibc 2.27 sysroot and checked against `GLIBC_CEILING` (item
+   134), fetches and verifies esbuild with `fetch_esbuild.py`, packs both with
+   `assemble_cli.sh`, smoke-tests the unpacked archive with `cli_smoke.sh` and
+   attests it. The release needs every runtime archive and every CLI archive. A
+   dispatch with `cli_only: true` runs just this job and the manifest (no
+   laufey, libdenort or package jobs, and never a release): a dry run of the CLI
+   archives' layout.
 
 Locally, the equivalent is:
 
