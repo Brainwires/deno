@@ -295,10 +295,12 @@ fn is_unresolved_elidable_npm_import(
   ) {
     return false;
   }
-  // a bare specifier (`pkg/sub`), not a relative or absolute one
+  // a bare specifier with a subpath (`pkg/sub`, `@scope/pkg/sub`), not a
+  // package root (`pkg`) or a relative or absolute one
   if specifier.starts_with('.')
     || specifier.starts_with('/')
     || deno_core::url::Url::parse(specifier).is_ok()
+    || !is_bare_package_subpath(specifier)
   {
     return false;
   }
@@ -340,6 +342,16 @@ fn is_unresolved_elidable_npm_import(
           deno_graph::analysis::ImportAttributes::None
         )
     })
+}
+
+/// Whether a bare specifier names a path inside a package (`pkg/sub`,
+/// `@scope/pkg/sub`) rather than the package itself (`pkg`, `@scope/pkg`).
+fn is_bare_package_subpath(specifier: &str) -> bool {
+  let package_segments = if specifier.starts_with('@') { 2 } else { 1 };
+  specifier
+    .splitn(package_segments + 1, '/')
+    .nth(package_segments)
+    .is_some_and(|subpath| !subpath.is_empty())
 }
 
 fn has_module_graph_error_for_tsc_diagnostic(
@@ -1547,5 +1559,21 @@ pub struct CliJsrUrlProvider;
 impl deno_graph::source::JsrUrlProvider for CliJsrUrlProvider {
   fn url(&self) -> &'static ModuleSpecifier {
     jsr_url()
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::is_bare_package_subpath;
+
+  #[test]
+  fn bare_package_subpaths() {
+    assert!(is_bare_package_subpath("supertest/types"));
+    assert!(is_bare_package_subpath("@denotest/c/non-existent"));
+    assert!(is_bare_package_subpath("pkg/a/b"));
+    assert!(!is_bare_package_subpath("package"));
+    assert!(!is_bare_package_subpath("@scope/pkg"));
+    assert!(!is_bare_package_subpath("pkg/"));
+    assert!(!is_bare_package_subpath("@scope/pkg/"));
   }
 }

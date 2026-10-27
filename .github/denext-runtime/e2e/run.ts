@@ -252,6 +252,7 @@ if (na.unexpected.length) {
   );
   if (naMode === "enforce") {
     for (const c of na.unexpected) {
+      // deno-lint-ignore no-console
       console.log(
         `::error::e2e ${na.key}: ${c.area}: "${c.name}" is n/a but expected-na.json does not list it (${
           c.reason ?? "no reason"
@@ -268,6 +269,7 @@ if (na.noLongerNa.length) {
     "",
   );
   for (const c of na.noLongerNa) {
+    // deno-lint-ignore no-console
     console.log(
       `::notice::e2e ${na.key}: ${c.area}: "${c.name}" ran this time; remove it from expected-na.json`,
     );

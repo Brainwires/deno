@@ -4695,17 +4695,24 @@ where the changes are discussed.
      loaders never resolve. The graph walk now leaves out that resolution error
      when all of these hold: Node.js resolution failed with
      `ERR_MODULE_NOT_FOUND` or `ERR_PACKAGE_PATH_NOT_EXPORTED` for a bare
-     specifier; the importer is TypeScript; every import of the specifier there
-     is a static ES import or re-export with bindings (no side-effect import,
-     dynamic import, `require()` or import attributes); and in a typed graph its
-     types resolution found a declaration file. When every use is a type the
-     emitted JavaScript drops the import; when a value is used the runtime
-     resolves it and fails with the same error before any code runs. Type
-     checking keeps its own resolution, and a failed one is still reported.
+     package subpath (`pkg/sub`, `@scope/pkg/sub`; a package root such as a
+     phantom dependency keeps the graph error); the importer is TypeScript;
+     every import of the specifier there is a static ES import or re-export with
+     bindings (no side-effect import, dynamic import, `require()` or import
+     attributes); and in a typed graph its types resolution found a declaration
+     file. When every use is a type the emitted JavaScript drops the import;
+     when a value is used the runtime resolves it and fails with the same error
+     before any code runs (the runtime resolver's message ends in a blank line,
+     as it always has). Type checking keeps its own resolution, and a failed one
+     is still reported.
 
      Tests: spec `npm/types_only_subpath` (`run` without and with `--check`
      prints the value; a value use of the type-only subpath still fails with
-     `ERR_MODULE_NOT_FOUND`; the first fails on `3.0.0-rc.5`).
+     `ERR_MODULE_NOT_FOUND`; the first fails on `3.0.0-rc.5`); the
+     `npm/workspace_basic` `*_sub_path_not_exists` outputs now come from the
+     runtime resolver; `node/byonm_phantom_dep_res_failure` (a package root)
+     keeps the graph error; unit test
+     `graph_util::tests::bare_package_subpaths`.
 
 122. **`fix(check)`: a package.json project's tsconfig.json checks the same on
      both engines** (`feat/nest-phase1`, CLI only; `libs/resolver/deno_json.rs`,
@@ -5262,6 +5269,24 @@ where the changes are discussed.
      `denext_denort_cache_is_not_trusted_blindly`,
      `sha256sums_entry_reads_the_listing` and
      `release_sums_url_is_beside_the_asset`.
+
+131. **`fix`: the 3.0.0-denext.1 CI round** (`fix/denext1-ci`, CLI and CI only;
+     `cli/tools/desktop.rs`, `cli/graph_util.rs`,
+     `cli/tools/installer/global.rs`, `.github/denext-runtime/`). An AppImage
+     packaged on a Windows host stored a symlink's target as `read_link`
+     returned it, with `\` separators that dangle on Linux; targets are now
+     written with `/` (entry names already were: backhand pushes them one
+     component at a time). Item 121's elision applies to package subpaths only,
+     as documented, so a missing package root keeps the graph error.
+     `denort_smoke.sh` accepts the release's `SHA256SUMS` as the failed request
+     (item 130 fetches it before the zip). `install_unicode` is ignored on
+     Windows Arm64, where the shim's debug `deno.exe` exits non-zero under a
+     cleared environment without printing anything (a release build passes the
+     same run on Windows 11 Arm64). Tests:
+     `appimage_symlink_targets_use_forward_slashes`,
+     `graph_util::tests::bare_package_subpaths`, and
+     `appimage_zstd_blocks_and_fragments_round_trip` now finds files by path
+     components, since backhand's reader joins them with the host separator.
 
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,

@@ -3,8 +3,9 @@
 # beside it: `deno compile` onto the unpacked denort (DENORT_BIN) makes an app
 # that has Deno.SQL and names this release in Deno.version.deno; and with no
 # DENORT_BIN the CLI asks the release for deno-denort-<version>-<target>.zip
-# (DENEXT_DENORT_BASE_URL pointed at a closed loopback port, so the request
-# fails and the error names the URL), not Deno's stock denort.
+# or, first, its SHA256SUMS (DENEXT_DENORT_BASE_URL pointed at a closed
+# loopback port, so the request fails and the error names the URL), not Deno's
+# stock denort.
 #
 # Env: TARGET VERSION ARCHIVE DENORT_ARCHIVE WORK_DIR (a directory that does
 # not exist yet)
@@ -60,9 +61,14 @@ rc=$?
 set -e
 echo "$err"
 echo "::endgroup::"
-url="http://127.0.0.1:9/denext-runtime-v$VERSION/deno-denort-$VERSION-$TARGET.zip"
+# The CLI fetches the release's SHA256SUMS before the zip (DENEXT.md item
+# 130), so the failed request is for either one; both are in the release.
+release="http://127.0.0.1:9/denext-runtime-v$VERSION"
+url="$release/deno-denort-$VERSION-$TARGET.zip"
+sums="$release/SHA256SUMS"
 test "$rc" != 0 || { echo "::error::deno compile succeeded without a reachable denort" >&2; exit 1; }
 case "$err" in
   *"$url"*) echo "deno compile asks for $url" ;;
-  *) echo "::error::deno compile did not ask for $url" >&2; exit 1 ;;
+  *"$sums"*) echo "deno compile asks for $sums (to verify $url)" ;;
+  *) echo "::error::deno compile asked for neither $sums nor $url" >&2; exit 1 ;;
 esac

@@ -4630,7 +4630,7 @@ fn push_dir_contents_to_squashfs(
       let mode = unix_mode_of(&meta);
       let ft = meta.file_type();
       if ft.is_symlink() {
-        let target = std::fs::read_link(&path)?;
+        let target = squashfs_link_target(&std::fs::read_link(&path)?);
         writer.push_symlink(target, &arc_path, node_header(mode))?;
       } else if ft.is_dir() {
         writer.push_dir(&arc_path, node_header(mode))?;
@@ -4642,6 +4642,19 @@ fn push_dir_contents_to_squashfs(
     }
   }
   Ok(())
+}
+
+/// A symlink's target as the image stores it: SquashFS (and the Linux host
+/// that mounts it) separates path components with `/` only. Entry names are
+/// pushed component by component, but a target is stored verbatim, so one
+/// read on a Windows host (cross-packaging a Linux AppImage) would keep its
+/// `\` separators and dangle on Linux.
+fn squashfs_link_target(target: &Path) -> PathBuf {
+  if cfg!(windows) {
+    PathBuf::from(target.to_string_lossy().replace('\\', "/"))
+  } else {
+    target.to_path_buf()
+  }
 }
 
 /// AppImage `AppRun` shim: sets `$DIR`, exports the window app_id, then execs
@@ -9891,7 +9904,9 @@ def456  other.zip
     for (name, want) in expected {
       let node = filesystem
         .files()
-        .find(|n| n.fullpath.to_string_lossy() == format!("/{name}"))
+        // backhand rebuilds `fullpath` with the host's separator (`\` on
+        // Windows); compare components, not the string.
+        .find(|n| n.fullpath == Path::new("/").join(name))
         .unwrap_or_else(|| panic!("{name} missing"));
       let backhand::InnerNode::File(file) = &node.inner else {
         panic!("{name} is not a file");
@@ -9908,6 +9923,20 @@ def456  other.zip
     // An independent reader, when the host has one.
     #[cfg(unix)]
     appimage_unsquashfs_matches(&appimage_path, runtime_offset, &expected);
+  }
+
+  #[test]
+  fn appimage_symlink_targets_use_forward_slashes() {
+    assert_eq!(
+      squashfs_link_target(Path::new("../lib/libfoo.so")),
+      PathBuf::from("../lib/libfoo.so")
+    );
+    // A target read on a Windows host keeps `\`; the image must not.
+    #[cfg(windows)]
+    assert_eq!(
+      squashfs_link_target(Path::new(r"..\lib\libfoo.so")).to_str(),
+      Some("../lib/libfoo.so")
+    );
   }
 
   /// Extract the AppImage's SquashFS with squashfs-tools' `unsquashfs` and
