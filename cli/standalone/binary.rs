@@ -639,11 +639,9 @@ impl<'a> DenoCompileBinaryWriter<'a> {
             )
             .await
             .with_context(|| format!("Failed downloading '{url}'"))?;
-          Ok(
-            response
-              .into_maybe_bytes()
-              .with_context(|| format!("Failed downloading '{url}'"))?,
-          )
+          response
+            .into_maybe_bytes()
+            .with_context(|| format!("Failed downloading '{url}'"))
         };
       load_verified_denext_denort(
         &binary_path,

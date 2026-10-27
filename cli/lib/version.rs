@@ -213,7 +213,10 @@ mod tests {
       denext_version(Some("3.0.0-denext.1+ci.42"), "3.0.0-denext.1"),
       Some("3.0.0-denext.1+ci.42")
     );
-    assert_eq!(denext_version(Some("3.0.0-denext.10"), "3.0.0-denext.1"), None);
+    assert_eq!(
+      denext_version(Some("3.0.0-denext.10"), "3.0.0-denext.1"),
+      None
+    );
     assert_eq!(
       denext_version(Some("3.0.0-rc.1"), "3.0.0-rc.1"),
       Some("3.0.0-rc.1")

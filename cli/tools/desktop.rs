@@ -9913,6 +9913,10 @@ def456  other.zip
   /// Extract the AppImage's SquashFS with squashfs-tools' `unsquashfs` and
   /// compare `expected`'s files; skipped where it isn't installed.
   #[cfg(unix)]
+  #[allow(
+    clippy::print_stderr,
+    reason = "a test helper says why it skipped the squashfs-tools check"
+  )]
   fn appimage_unsquashfs_matches(
     appimage_path: &Path,
     runtime_offset: u64,

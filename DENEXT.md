@@ -89,8 +89,8 @@ The fork has its own version, a plain semver in `cli/Cargo.toml`,
 
 - `2.9.7-denext.1` to `2.9.7-denext.22`: each release named after the upstream
   release it was built from;
-- `3.0.0-rc.1` to `3.0.0-rc.6`: the fork's own version, as release candidates
-  of a 3.0 that was to follow upstream's;
+- `3.0.0-rc.1` to `3.0.0-rc.6`: the fork's own version, as release candidates of
+  a 3.0 that was to follow upstream's;
 - from **3.0.0-denext.1** (the release that was going to be `3.0.0-rc.7`):
   `3.0.0-denext.1`, `3.0.0-denext.2`, ... There are no more release candidates.
   Upstream Deno will not ship a 3.0 (denoland/deno#37030: `main` goes back to
@@ -117,15 +117,15 @@ compares none of its own versions: `deno upgrade` refuses in a release build
   the `engines.deno` check of `deno install` (npm ranges never match a
   prerelease, so `>=1.0.0` would reject `3.0.0-denext.1`), and `deno.version` in
   each archive's `BUILD_INFO.json` and in the release's `manifest.json`
-  (denext's pins read it as `deno`: the stock Deno whose `deno desktop`
-  packages with the runtime).
+  (denext's pins read it as `deno`: the stock Deno whose `deno desktop` packages
+  with the runtime).
 - **A release** is tagged `denext-runtime-v<version>`
   (`denext-runtime-v3.0.0-denext.1`); the release workflow refuses a tag that is
   not exactly the version in `cli/Cargo.toml` (and `cli/lib/version.txt`), so
   bump those first. Every archive is named after the version
-  (`deno-cli-3.0.0-denext.1-<target>.zip`, ...). A `3.0.0-denext.N` release is
-  a full GitHub release (the repository's "Latest" when it is the newest); only
-  a `3.0.0-rc.N` was published as a pre-release. An untagged workflow run builds
+  (`deno-cli-3.0.0-denext.1-<target>.zip`, ...). A `3.0.0-denext.N` release is a
+  full GitHub release (the repository's "Latest" when it is the newest); only a
+  `3.0.0-rc.N` was published as a pre-release. An untagged workflow run builds
   `<version>+ci.<run>`: build metadata, the same precedence as the version it
   builds toward.
 - **A release build** bakes `DENEXT_VERSION=<version>` in (item 26). It marks
@@ -139,11 +139,11 @@ compares none of its own versions: `deno upgrade` refuses in a release build
 
 ## Branches and tags
 
-| Ref                                                                                                           | What it is                                                                                                                                                                                                                                                                               |
-| ------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `development-denext`                                                                                          | The working line: every feature and fix branch is merged here (`--no-ff`), and runtime releases are cut from it as `denext-runtime-v<version>` tags (see [Versioning](#versioning)). Replaces the per-release `rel/denext<n>` lines, which stay for history (`denext.6` to `denext.22`). |
-| `denext/v<deno version>` (e.g. `denext/v2.9.7`)                                                               | The original line: upstream tag `v<deno version>` + the first feature commits + this file and the release workflow. The default branch of this fork.                                                                                                                                     |
-| `feat/desktop-*`, `fix/*`, `ci/*`, `test/*`                                                                   | The feature and fix branches merged into `development-denext`. Kept for review and for rebasing onto a newer Deno.                                                                                                                                                                       |
+| Ref                                                                                                                   | What it is                                                                                                                                                                                                                                                                               |
+| --------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `development-denext`                                                                                                  | The working line: every feature and fix branch is merged here (`--no-ff`), and runtime releases are cut from it as `denext-runtime-v<version>` tags (see [Versioning](#versioning)). Replaces the per-release `rel/denext<n>` lines, which stay for history (`denext.6` to `denext.22`). |
+| `denext/v<deno version>` (e.g. `denext/v2.9.7`)                                                                       | The original line: upstream tag `v<deno version>` + the first feature commits + this file and the release workflow. The default branch of this fork.                                                                                                                                     |
+| `feat/desktop-*`, `fix/*`, `ci/*`, `test/*`                                                                           | The feature and fix branches merged into `development-denext`. Kept for review and for rebasing onto a newer Deno.                                                                                                                                                                       |
 | `denext-runtime-v<version>` (e.g. `denext-runtime-v3.0.0-denext.1`; before it `-v3.0.0-rc.<n>`, `-v2.9.7-denext.<n>`) | A published runtime. PUSHING such a tag runs the workflow and creates the GitHub Release (a manual dispatch on a tag ref builds but never publishes). `<version>` is the fork's own ([Versioning](#versioning)).                                                                         |
 
 `main` and the other upstream branches are untouched mirrors from the fork
@@ -5233,28 +5233,26 @@ where the changes are discussed.
      had run here before (E-L3).
 
 130. **`fix(compile)`: the release's `denort` is checked against its
-     `SHA256SUMS`** (`fix/denort-sha256`; `cli/standalone/binary.rs`, CLI
-     only). The fork production audit's P8: `deno compile` without
-     `DENORT_BIN`, in a denext release build, downloads
-     `deno-denort-<version>-<target>.zip` from the release
-     `denext-runtime-v<version>` (item 79) and used it with no integrity check,
-     and trusted the copy in the download cache forever. A swapped release
-     asset (a token with `contents: write`, a compromised session, a
-     `DENEXT_DENORT_BASE_URL` pointing elsewhere) was baked into every
-     compiled binary. Now the CLI also fetches that release's `SHA256SUMS`
-     (which the release workflow publishes, listing every archive) and uses
-     the zip only when its SHA-256 is the one listed for it. A missing
-     `SHA256SUMS`, no entry for the asset, two entries that disagree, or a
-     different hash is an error naming the asset and, for a mismatch, both
-     hashes; nothing unverified is written to the cache. The verified hash is
-     recorded beside the cached zip (`<zip>.sha256`) and the zip is re-hashed
-     on every use: one that no longer matches its record (or has none, as an
-     older CLI's cache) is checked against `SHA256SUMS` again, and downloaded
-     again when it doesn't match. Upstream's `dl.deno.land` downloads (a
-     build that is not denext's, `--engine quickjs`, `deno desktop`'s
-     `libdenort`) are unchanged. Release assets are immutable since
-     2026-10-27 (GitHub immutable releases), so a published `SHA256SUMS`
-     can't be replaced afterwards either.
+     `SHA256SUMS`** (`fix/denort-sha256`; `cli/standalone/binary.rs`, CLI only).
+     The fork production audit's P8: `deno compile` without `DENORT_BIN`, in a
+     denext release build, downloads `deno-denort-<version>-<target>.zip` from
+     the release `denext-runtime-v<version>` (item 79) and used it with no
+     integrity check, and trusted the copy in the download cache forever. A
+     swapped release asset (a token with `contents: write`, a compromised
+     session, a `DENEXT_DENORT_BASE_URL` pointing elsewhere) was baked into
+     every compiled binary. Now the CLI also fetches that release's `SHA256SUMS`
+     (which the release workflow publishes, listing every archive) and uses the
+     zip only when its SHA-256 is the one listed for it. A missing `SHA256SUMS`,
+     no entry for the asset, two entries that disagree, or a different hash is
+     an error naming the asset and, for a mismatch, both hashes; nothing
+     unverified is written to the cache. The verified hash is recorded beside
+     the cached zip (`<zip>.sha256`) and the zip is re-hashed on every use: one
+     that no longer matches its record (or has none, as an older CLI's cache) is
+     checked against `SHA256SUMS` again, and downloaded again when it doesn't
+     match. Upstream's `dl.deno.land` downloads (a build that is not denext's,
+     `--engine quickjs`, `deno desktop`'s `libdenort`) are unchanged. Release
+     assets are immutable since 2026-10-27 (GitHub immutable releases), so a
+     published `SHA256SUMS` can't be replaced afterwards either.
 
      Tests (`cli/standalone/binary.rs`):
      `denext_denort_with_a_good_hash_is_used_and_cached`,
@@ -5267,10 +5265,10 @@ where the changes are discussed.
 
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
-118, 119, 126, 127, 129) are what the prebuilt `libdenort` carries. The
-CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID`
-into a packaged app's launchers) are in the branch too, but a stock CLI does
-not run them; denext's own launcher provides that environment.
+118, 119, 126, 127, 129) are what the prebuilt `libdenort` carries. The CLI-side
+parts (for example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a
+packaged app's launchers) are in the branch too, but a stock CLI does not run
+them; denext's own launcher provides that environment.
 
 The laufey backend hosts are built from
 [Brainwires/laufey](https://github.com/Brainwires/laufey) branch
@@ -5439,11 +5437,10 @@ replaced: a failed tag build is fixed by the next version); and (`tag_gate.py`)
 a full `denext tests` (`denext_tests.yml`) run, every OS leg green (Windows
 arm64 included), passed on exactly the tagged commit, no `denext tests` run of
 that commit failed in any attempt (a green re-run does not clear a red one) or
-is still running, and the commit is on `development-denext` or
-`rel/<version>`. A pre-release version (`3.0.0-rc.N`) is published as a GitHub
-pre-release, never as the repository's "Latest"; otherwise the release is
-"Latest" exactly when its version is the newest. Per
-target it:
+is still running, and the commit is on `development-denext` or `rel/<version>`.
+A pre-release version (`3.0.0-rc.N`) is published as a GitHub pre-release, never
+as the repository's "Latest"; otherwise the release is "Latest" exactly when its
+version is the newest. Per target it:
 
 1. builds `libdenort` with `cargo build --release --locked -p denort_desktop`
    after patching `laufey` (`cargo metadata` rewrites laufey's lockfile entry;

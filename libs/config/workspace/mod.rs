@@ -1937,7 +1937,10 @@ impl Workspace {
       SupplyChainSettingsHome::DenoJson(c) => c.to_allow_scripts_config(),
       SupplyChainSettingsHome::PackageJson(pkg_json) => {
         deno_json::parse_allow_scripts_config(
-          pkg_json.deno.as_ref().and_then(|d| d.allow_scripts.as_ref()),
+          pkg_json
+            .deno
+            .as_ref()
+            .and_then(|d| d.allow_scripts.as_ref()),
           "deno.allowScripts",
         )
       }

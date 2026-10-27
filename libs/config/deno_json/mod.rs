@@ -2122,7 +2122,6 @@ pub fn parse_supply_chain_config(
   })
 }
 
-
 #[derive(Debug, Error, JsError)]
 #[class(type)]
 pub enum ResolveTaskConfigError {

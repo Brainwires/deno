@@ -55,18 +55,19 @@ pub async fn approve_scripts(
     options = factory.cli_options()?;
   }
   let workspace = options.workspace();
-  let (config_kind, config_path) =
-    match workspace.supply_chain_settings_home() {
-      SupplyChainSettingsHome::DenoJson(deno_json) => {
-        (ConfigKind::DenoJson, url_to_file_path(&deno_json.specifier)?)
-      }
-      SupplyChainSettingsHome::PackageJson(pkg_json) => {
-        (ConfigKind::PackageJson, pkg_json.path.clone())
-      }
-      SupplyChainSettingsHome::None => {
-        bail!("A deno.json file could not be found or created")
-      }
-    };
+  let (config_kind, config_path) = match workspace.supply_chain_settings_home()
+  {
+    SupplyChainSettingsHome::DenoJson(deno_json) => (
+      ConfigKind::DenoJson,
+      url_to_file_path(&deno_json.specifier)?,
+    ),
+    SupplyChainSettingsHome::PackageJson(pkg_json) => {
+      (ConfigKind::PackageJson, pkg_json.path.clone())
+    }
+    SupplyChainSettingsHome::None => {
+      bail!("A deno.json file could not be found or created")
+    }
+  };
 
   let mut config_updater = ConfigUpdater::new(config_kind, config_path)?;
 
