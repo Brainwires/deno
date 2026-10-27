@@ -212,7 +212,7 @@ jobs:
           matrix=$(TARGETS="$TARGETS" python3 - <<'PY'
           import json, os
           all_targets = [
-              {"target": "aarch64-apple-darwin", "os": "macos-14"},
+              {"target": "aarch64-apple-darwin", "os": "macos-15"},
               {"target": "x86_64-apple-darwin", "os": "macos-15-intel"},
               {"target": "x86_64-unknown-linux-gnu", "os": "ubuntu-22.04"},
               {"target": "aarch64-unknown-linux-gnu", "os": "ubuntu-22.04-arm"},

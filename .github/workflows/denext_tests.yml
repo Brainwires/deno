@@ -40,7 +40,7 @@
 #   gh workflow run denext_tests.yml --ref <branch> -f full=true
 # or add one OS to a Linux run with `-f full=false -f macos=true` (or
 # windows=true). denext_runtime.yml's tag gate (.github/denext-runtime/tag_gate.py)
-# counts only a run whose six legs (macos-14, windows-2022, ubuntu-22.04,
+# counts only a run whose six legs (macos-15, windows-2022, ubuntu-22.04,
 # macos-15-intel, ubuntu-22.04-arm, windows-11-arm) all passed, so a
 # Linux-only run never vouches for a release, and refuses a commit that has
 # any failed run at all.
@@ -72,7 +72,7 @@ on:
         type: boolean
         default: true
       macos:
-        description: With full=false, also run the macos-14 leg
+        description: With full=false, also run the macos-15 leg
         type: boolean
         default: false
       windows:
@@ -109,7 +109,7 @@ jobs:
       matrix:
         # Linux only unless the run is full (see the header); a dispatch's
         # macos / windows inputs add those OSes.
-        os: ${{ fromJSON(format('[{0}{1}"ubuntu-22.04"]', (github.ref == 'refs/heads/development-denext' || startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.full) || (github.event_name == 'workflow_dispatch' && inputs.macos)) && '"macos-14",' || '', (github.ref == 'refs/heads/development-denext' || startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.full) || (github.event_name == 'workflow_dispatch' && inputs.windows)) && '"windows-2022",' || '')) }}
+        os: ${{ fromJSON(format('[{0}{1}"ubuntu-22.04"]', (github.ref == 'refs/heads/development-denext' || startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.full) || (github.event_name == 'workflow_dispatch' && inputs.macos)) && '"macos-15",' || '', (github.ref == 'refs/heads/development-denext' || startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.full) || (github.event_name == 'workflow_dispatch' && inputs.windows)) && '"windows-2022",' || '')) }}
     defaults:
       run:
         shell: bash
@@ -167,11 +167,11 @@ jobs:
         run: cargo audit --file Cargo.lock
 
   macos:
-    name: macos-14
+    name: macos-15
     if: ${{ github.ref == 'refs/heads/development-denext' || startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.full) || (github.event_name == 'workflow_dispatch' && inputs.macos) }}
     uses: ./.github/workflows/denext_tests_os.yml
     with:
-      os: macos-14
+      os: macos-15
 
   windows:
     name: windows-2022

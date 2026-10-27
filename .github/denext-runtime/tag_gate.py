@@ -39,7 +39,7 @@ import sys
 
 WORKFLOW = "denext_tests.yml"
 REQUIRED_LEGS = (
-    "macos-14",
+    "macos-15",
     "windows-2022",
     "ubuntu-22.04",
     "macos-15-intel",
