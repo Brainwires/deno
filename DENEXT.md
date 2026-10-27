@@ -5220,6 +5220,39 @@ where the changes are discussed.
      first lookup during the first run of the updated app, only when that app
      had run here before (E-L3).
 
+121. **`fix(compile)`: the release's `denort` is checked against its
+     `SHA256SUMS`** (`fix/denort-sha256`; `cli/standalone/binary.rs`, CLI
+     only). The fork production audit's P8: `deno compile` without
+     `DENORT_BIN`, in a denext release build, downloads
+     `deno-denort-<version>-<target>.zip` from the release
+     `denext-runtime-v<version>` (item 79) and used it with no integrity check,
+     and trusted the copy in the download cache forever. A swapped release
+     asset (a token with `contents: write`, a compromised session, a
+     `DENEXT_DENORT_BASE_URL` pointing elsewhere) was baked into every
+     compiled binary. Now the CLI also fetches that release's `SHA256SUMS`
+     (which the release workflow publishes, listing every archive) and uses
+     the zip only when its SHA-256 is the one listed for it. A missing
+     `SHA256SUMS`, no entry for the asset, two entries that disagree, or a
+     different hash is an error naming the asset and, for a mismatch, both
+     hashes; nothing unverified is written to the cache. The verified hash is
+     recorded beside the cached zip (`<zip>.sha256`) and the zip is re-hashed
+     on every use: one that no longer matches its record (or has none, as an
+     older CLI's cache) is checked against `SHA256SUMS` again, and downloaded
+     again when it doesn't match. Upstream's `dl.deno.land` downloads (a
+     build that is not denext's, `--engine quickjs`, `deno desktop`'s
+     `libdenort`) are unchanged. Release assets are immutable since
+     2026-10-27 (GitHub immutable releases), so a published `SHA256SUMS`
+     can't be replaced afterwards either.
+
+     Tests (`cli/standalone/binary.rs`):
+     `denext_denort_with_a_good_hash_is_used_and_cached`,
+     `denext_denort_tampered_archive_is_refused`,
+     `denext_denort_missing_sums_entry_is_refused`,
+     `denext_denort_missing_sums_is_refused`,
+     `denext_denort_cache_is_not_trusted_blindly`,
+     `sha256sums_entry_reads_the_listing` and
+     `release_sums_url_is_beside_the_asset`.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 120) are what the prebuilt `libdenort` carries. The CLI-side parts (for
@@ -5340,7 +5373,8 @@ BUILD_INFO.json        deno version + SHA, run URL, esbuild, TypeScript and tsgo
 licenses/              the deno license
 ```
 
-Each release also has `SHA256SUMS` (every runtime and CLI archive) and
+Each release also has `SHA256SUMS` (every runtime, CLI and `denort` archive;
+`deno compile` checks the `denort` it downloads against it, item 121) and
 `manifest.json` (target -> backend -> url, sha256, size; the CLI archives under
 `cli.targets` -> target -> binary, url, sha256, size and
 `esbuild: { version, sha256 }`,
