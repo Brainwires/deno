@@ -9,7 +9,9 @@
 # the laufey pin — LAUFEY_SHA below and cli/rt_desktop/Cargo.toml — and this
 # workflow with its scripts), by hand, and on a tag (path filters are not
 # evaluated for tags), which publishes only when a full `denext tests` run
-# (every OS leg, not a branch's Linux-only run) passed on the tagged commit.
+# (every OS leg, not a branch's Linux-only run) passed on the tagged commit,
+# no run of it failed, and it is on development-denext or rel/<version>
+# (.github/denext-runtime/tag_gate.py).
 # See DENEXT.md.
 name: denext runtime
 
@@ -102,6 +104,7 @@ jobs:
             cli/Cargo.toml
             cli/lib/version.txt
             cli/lib/upstream_version.txt
+            .github/denext-runtime/tag_gate.py
           sparse-checkout-cone-mode: false
       - id: plan
         env:
@@ -147,26 +150,12 @@ jobs:
             test "$version" = "$deno_version" ||
               { echo "::error::tag $REF_NAME does not match the fork's version $deno_version (cli/Cargo.toml; want denext-runtime-v$deno_version)"; exit 1; }
             # A release needs a green FULL `denext tests` run (lint, libs,
-            # unit, specs on every OS) of exactly the tagged commit, from its
-            # development-denext push or a dispatch. A branch push runs Linux
-            # x64 only and its other legs are skipped, so a run counts only
-            # when each OS leg has a job that passed.
-            full_run=
-            for id in $(gh api "repos/$REPO/actions/workflows/denext_tests.yml/runs?head_sha=$SHA&status=success&per_page=20" --jq '.workflow_runs[].id'); do
-              legs=$(gh api --paginate "repos/$REPO/actions/runs/$id/jobs?per_page=100" \
-                --jq '.jobs[] | select(.conclusion == "success") | .name' | sed -n 's| / .*||p' | sort -u)
-              missing=
-              for leg in macos-14 windows-2022 ubuntu-22.04 macos-15-intel ubuntu-22.04-arm; do
-                grep -qx "$leg" <<<"$legs" || missing="$missing $leg"
-              done
-              if [ -z "$missing" ]; then full_run=$id; break; fi
-              echo "denext tests run $id skipped or lacks:$missing"
-            done
-            if [ -z "$full_run" ]; then
-              echo "::error::no successful full 'denext tests' run for $SHA: push the commit to development-denext (or run 'gh workflow run denext_tests.yml --ref <branch> -f full=true') and wait for it to pass before tagging"
-              exit 1
-            fi
-            echo "denext tests (full matrix, run $full_run) passed for $SHA"
+            # unit, specs on every OS leg, Windows arm64 included) of exactly
+            # the tagged commit, no failed run or attempt of it at all (a
+            # re-run that passes does not clear one), and the commit on
+            # development-denext or rel/<version>. See tag_gate.py.
+            REPO="$REPO" SHA="$SHA" VERSION="$version" \
+              python3 -I .github/denext-runtime/tag_gate.py
             TARGETS=all
           else
             # Build metadata: the same precedence as the version it builds
@@ -478,20 +467,18 @@ jobs:
           echo "::error::libclang.dll not found"; exit 1
 
       # ld64.lld: the aarch64-apple-darwin rustflags in .cargo/config.toml link
-      # with -fuse-ld=lld, as deno's release does.
+      # with -fuse-ld=lld, as deno's release does. The Deno that fetches it is
+      # pinned and the linker is checked against a pinned SHA-256: this job
+      # attests what it builds.
       - uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
         if: matrix.target == 'aarch64-apple-darwin'
         with:
-          deno-version: v2.x
+          deno-version: ${{ env.STOCK_DENO_VERSION }}
       - name: Install ld64.lld (macOS aarch64)
         if: matrix.target == 'aarch64-apple-darwin'
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: |
-          # tools/util.js imports the std submodule.
-          git submodule update --init --depth=1 -- ./tests/util/std
-          ./tools/install_prebuilt.js ld64.lld
-          echo "$GITHUB_WORKSPACE/third_party/prebuilt/mac" >>"$GITHUB_PATH"
+        run: bash .github/denext-runtime/install_ld64.sh
 
       - name: Rust toolchain
         run: |
@@ -676,20 +663,18 @@ jobs:
           echo "::error::libclang.dll not found"; exit 1
 
       # ld64.lld: the aarch64-apple-darwin rustflags in .cargo/config.toml link
-      # with -fuse-ld=lld, as deno's release does.
+      # with -fuse-ld=lld, as deno's release does. The Deno that fetches it is
+      # pinned and the linker is checked against a pinned SHA-256: this job
+      # attests what it builds.
       - uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
         if: matrix.target == 'aarch64-apple-darwin'
         with:
-          deno-version: v2.x
+          deno-version: ${{ env.STOCK_DENO_VERSION }}
       - name: Install ld64.lld (macOS aarch64)
         if: matrix.target == 'aarch64-apple-darwin'
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: |
-          # tools/util.js imports the std submodule.
-          git submodule update --init --depth=1 -- ./tests/util/std
-          ./tools/install_prebuilt.js ld64.lld
-          echo "$GITHUB_WORKSPACE/third_party/prebuilt/mac" >>"$GITHUB_PATH"
+        run: bash .github/denext-runtime/install_ld64.sh
 
       - name: Rust toolchain
         run: |
@@ -1250,6 +1235,10 @@ jobs:
           holding \`denort\` / \`denort.exe\`), so a compiled app carries the same patches and
           \`Deno.SQL\`; the CLI downloads it from this release by itself. Listed under \`denort\`.
           EOF
+          # A release candidate (a version with a pre-release part) is marked
+          # one, so it never becomes the repository's "Latest" release.
+          prerelease=
+          case "${TAG#denext-runtime-v}" in *-*) prerelease=--prerelease ;; esac
           gh release create "$TAG" --repo "$REPO" --title "$TAG" \
-            --notes-file notes.md --target "$SHA" \
+            --notes-file notes.md --target "$SHA" $prerelease \
             dist/*.tar.gz dist/*.zip dist/SHA256SUMS dist/manifest.json

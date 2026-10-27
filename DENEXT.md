@@ -4831,8 +4831,8 @@ where the changes are discussed.
      node-gyp build) fail unjailed too on this machine, so nothing is
      attributable; puppeteer 23.11.1: `deno install` ran no postinstall for it,
      jailed or not, so it was not exercised. No failure was a Seatbelt denial.
-     The tunnel-agent `CONNECT` under `NODE_USE_ENV_PROXY` is a node-compat gap
-     to fix in `_http_client`.
+     The tunnel-agent `CONNECT` under `NODE_USE_ENV_PROXY` and puppeteer's
+     missing postinstall are fixed in item 120.
 
      Tests: `npm/supply_chain_jail` (`escapes_denied_mac`: `/dev/tty`,
      `TIOCSTI`, the session, the process table, hard links both ways, a `nohup`
@@ -4857,10 +4857,83 @@ where the changes are discussed.
      `knownPackages` in `test_to_supply_chain_config` (`libs/config/deno_json`),
      and `lifecycleJail` in `info/json`.
 
+120. **`fix`: the rest of the fork audit's Lows, and the release gate**
+     (`fix/rc7-lows`; `runtime/ops/desktop_update/oscheck.rs`,
+     `runtime/permissions/lib.rs`, `ext/node/polyfills/_http_client.js`,
+     `libs/npm_installer/extra_info.rs`, `.github/workflows/denext_*.yml`,
+     `.github/denext-tests/setup/action.yml`, `.github/denext-runtime/`). The
+     2026-10-25 security and production audits' remaining Lows (item 119 took
+     the jail's), two install failures item 119's validation found, and the
+     release pipeline's integrity findings:
+     - **macOS update check: an Apple anchor, not just a Team ID (E-L4).** The
+       update helper compared the staged app's Team ID with the running app's,
+       but the Team ID is the leaf certificate's OU, which a self-signed
+       certificate can carry, and `codesign --verify` asks for no Apple anchor;
+       only `spctl --assess` did, and it accepts everything once the user has
+       turned Gatekeeper off. Now the staged bundle must also satisfy
+       `codesign --verify --deep --strict -R='anchor apple generic and
+       certificate leaf[subject.OU] = "<team>"'`,
+       with the Team ID checked to be ten upper-case letters and digits before
+       it goes into the requirement.
+     - **`--deny-import` and IPv4-mapped addresses (B-I1, upstream-shared).**
+       The import deny check after DNS resolution compared the address as
+       resolved, so a name whose AAAA record is `::ffff:127.0.0.1` passed
+       `--deny-import=127.0.0.1`. It normalizes the address first, as the net
+       checks do.
+     - **`agent: false` and `NODE_USE_ENV_PROXY`.** Node routes only its global
+       agents through the environment's proxy; a request made with
+       `agent: false` gets a fresh agent without `proxyEnv` and connects
+       directly. Deno's `node:http` routed it through the proxy too, so
+       tunnel-agent's `CONNECT` (sharp's libvips download, prebuild-install's
+       binaries: item 119's validation) was itself proxied and its `host:port`
+       target refused as an invalid URL ("Invalid URL: github.com:443"), inside
+       the jail (which sets the variable) or out.
+     - **A deprecated package's lifecycle scripts never ran.** The extra info of
+       a deprecated package (its deprecation message is not in its package.json)
+       came from the registry's packument, and the abbreviated packument the
+       installer fetches has `hasInstallScript` but no `scripts`: no script was
+       found, so none ran and none was reported as not run (puppeteer 23.11.1's
+       postinstall, which downloads Chrome: item 119's validation). The scripts
+       now come from the package's own package.json in that case (npm's
+       `node-gyp rebuild` default for a `binding.gyp` included).
+     - **The release gate (P3, P4, P5, P11).** A tag was published when any one
+       full `denext tests` run of the commit passed, so a crash that fails one
+       run in three shipped after a re-dispatch (the arm64 and macOS SIGABRTs of
+       rc.3 and rc.6), any commit with a green dispatch could be tagged (a
+       `fix/*` branch never merged), and Windows arm64, a shipped target, had no
+       test leg at all. Now `.github/denext-runtime/tag_gate.py` (with
+       `tag_gate_test.py`, run in the lint job) refuses a commit with any
+       failed, timed-out or unstarted `denext tests` run, in any attempt (a
+       "re-run failed jobs" that turns a run green keeps its failed first
+       attempt), or with one still running; requires a full run with a
+       `windows-11-arm` leg besides the other five; and requires the commit on
+       `development-denext` or `rel/<version>`. `denext_tests.yml` gains that
+       leg on full runs: build, lib tests and the unit suite (`libs_and_unit`;
+       the shared setup names the ARM64 host for rustup and finds VS's ARM64
+       libclang). When the lib tests fail, each leg runs them again on one
+       thread, where libtest prints a test's name before running it, so a test
+       that aborts the whole binary (the unnamed SIGABRTs) is named. A
+       pre-release is published as a GitHub pre-release, so an rc is never the
+       repository's "Latest" (P8, in part).
+     - **Pinned build tools in attested jobs (D-L2).** The libdenort and CLI
+       jobs (which hold `id-token` and attestation rights) set up a floating
+       `deno-version: v2.x` to fetch the `ld64.lld` that links the macOS arm64
+       release binaries. They now use `STOCK_DENO_VERSION`, and
+       `.github/denext-runtime/install_ld64.sh` (also used by the test setup)
+       checks the linker against a pinned SHA-256 and the `deno_third_party`
+       commit `tools/util.js` pins.
+
+     Tests: `team_must_be_apple_anchored` and `team_requirement_names_the_team`
+     (`oscheck.rs`), `test_check_import_deny_resolved_ipv4_mapped`
+     (`deno_permissions`), `node/http_proxy_agent_false`,
+     `npm/deprecated_package_lifecycle_scripts` (with the
+     `@denotest/deprecated-lifecycle-scripts` test package) and
+     `tag_gate_test.py`.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
-118) are what the prebuilt `libdenort` carries. The CLI-side parts (for example
-writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's
+118, 120) are what the prebuilt `libdenort` carries. The CLI-side parts (for
+example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's
 launchers) are in the branch too, but a stock CLI does not run them; denext's
 own launcher provides that environment.
 
@@ -5007,8 +5080,13 @@ and `libs` crates, the workspace manifests and toolchain (`Cargo.toml`,
 `Cargo.lock`, `rust-toolchain.toml`, `.cargo/`), the laufey pin (`LAUFEY_SHA` in
 the workflow, `cli/rt_desktop/Cargo.toml`), the workflow and
 `.github/denext-runtime/`. A tag publishes only when a full `denext tests`
-(`denext_tests.yml`) run, every OS leg green, passed on exactly the tagged
-commit; the setup job checks and fails otherwise. Per target it:
+(`denext_tests.yml`) run, every OS leg green (Windows arm64 included), passed on
+exactly the tagged commit, no `denext tests` run of that commit failed in any
+attempt (a green re-run does not clear a red one) or is still running, and the
+commit is on `development-denext` or `rel/<version>`; the setup job checks
+(`tag_gate.py`) and fails otherwise. A pre-release version (`3.0.0-rc.N`) is
+published as a GitHub pre-release, never as the repository's "Latest". Per
+target it:
 
 1. builds `libdenort` with `cargo build --release --locked -p denort_desktop`
    after patching `laufey` (`cargo metadata` rewrites laufey's lockfile entry;
@@ -5063,15 +5141,17 @@ Two workflows run instead:
   `jsdoc_checker.js`, `cargo fmt --check`, `cargo test --locked --lib` over
   upstream's crate list plus the fork's crates, a debug build, and the unit and
   (sharded) spec suites against it; on Linux also upstream's `integration`
-  (sharded) and `unit_node` suites; and the build and lib tests on macOS x64 and
-  Linux arm64. It runs on pushes to `development-denext`, `denext/**`, `rel/**`,
-  `ci/**`, `feat/**` and `fix/**`, on pull requests to `development-denext`,
-  `denext/**` and `rel/**`, and by manual dispatch. The full matrix runs on a
-  push to `development-denext` and on a dispatch (input `full`, default true);
-  every other push and pull request runs Linux x64 only (lint, cargo audit, and
-  the `ubuntu-22.04` leg: libs, unit, specs, integration, unit_node,
-  node_compat), which keeps GitHub's concurrency cap (20 jobs, 5 macOS) free.
-  For a full run on a branch, dispatch it with `-f full=true`
+  (sharded) and `unit_node` suites; the build and lib tests on macOS x64 and
+  Linux arm64; and the build, lib tests and unit suite on Windows arm64
+  (`windows-11-arm`). It runs on pushes to `development-denext`, `denext/**`,
+  `rel/**`, `ci/**`, `feat/**` and `fix/**`, on pull requests to
+  `development-denext`, `denext/**` and `rel/**`, and by manual dispatch. The
+  full matrix runs on a push to `development-denext` and on a dispatch (input
+  `full`, default true); every other push and pull request runs Linux x64 only
+  (lint, cargo audit, and the `ubuntu-22.04` leg: libs, unit, specs,
+  integration, unit_node, node_compat), which keeps GitHub's concurrency cap (20
+  jobs, 5 macOS) free. For a full run on a branch, dispatch it with
+  `-f full=true`
   (`gh workflow run denext_tests.yml --ref <branch> -f full=true`); for one more
   OS on a Linux run, `-f full=false -f macos=true` (or `windows=true`). A newer
   push cancels the run before it on the same ref; dispatched and tag runs are

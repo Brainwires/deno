@@ -108,7 +108,25 @@ impl NpmPackageExtraInfoProvider {
       // we need the registry version info to get the deprecated string, since it's not in the
       // package's package.json
       match self.fetch_from_registry(package_nv).await {
-        Ok(extra_info) => return Ok(extra_info),
+        Ok(mut extra_info) => {
+          // An abbreviated packument (what the installer asks the registry
+          // for) has `hasInstallScript` but no `scripts`: take them from the
+          // package's own package.json, or a deprecated package's lifecycle
+          // scripts would never run (or be reported as not run).
+          if expected.scripts && extra_info.scripts.is_empty() {
+            extra_info.scripts = self
+              .fetch_from_package_json(package_path)
+              .await
+              .map(|from_disk| from_disk.scripts)
+              .unwrap_or_default();
+            self.add_default_install_script(
+              &mut extra_info,
+              package_path,
+              expected,
+            );
+          }
+          return Ok(extra_info);
+        }
         Err(err) => {
           // The registry packument may be unavailable, for example when running
           // with `--cached-only` and the packument was never cached. The
@@ -132,22 +150,11 @@ impl NpmPackageExtraInfoProvider {
         if expected.bin && extra_info.bin.is_none() && !registry_unavailable {
           self.fetch_from_registry(package_nv).await
         } else {
-          // When a package has a binding.gyp and no install/preinstall script,
-          // npm injects `"install": "node-gyp rebuild"` at publish time. This
-          // script appears in the packument but not in the tarball's package.json.
-          // Match pnpm's behavior and detect this case by checking for the file.
-          if expected.scripts
-            && extra_info.scripts.is_empty()
-            && self
-              .sys
-              .base_fs_read(&package_path.join("binding.gyp"))
-              .is_ok()
-          {
-            extra_info.scripts = HashMap::from([(
-              "install".into(),
-              "node-gyp rebuild".to_string(),
-            )]);
-          }
+          self.add_default_install_script(
+            &mut extra_info,
+            package_path,
+            expected,
+          );
           Ok(extra_info)
         }
       }
@@ -168,6 +175,28 @@ impl NpmPackageExtraInfoProvider {
           self.fetch_from_registry(package_nv).await
         }
       }
+    }
+  }
+
+  /// When a package has a binding.gyp and no install/preinstall script, npm
+  /// injects `"install": "node-gyp rebuild"` at publish time. This script
+  /// appears in the packument but not in the tarball's package.json. Match
+  /// pnpm's behavior and detect this case by checking for the file.
+  fn add_default_install_script(
+    &self,
+    extra_info: &mut NpmPackageExtraInfo,
+    package_path: &Path,
+    expected: ExpectedExtraInfo,
+  ) {
+    if expected.scripts
+      && extra_info.scripts.is_empty()
+      && self
+        .sys
+        .base_fs_read(&package_path.join("binding.gyp"))
+        .is_ok()
+    {
+      extra_info.scripts =
+        HashMap::from([("install".into(), "node-gyp rebuild".to_string())]);
     }
   }
 

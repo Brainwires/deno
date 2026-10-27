@@ -595,7 +595,15 @@ function ClientRequest(input, options, cb) {
   // is keyed by target host:port so users can look it up the same way as
   // a direct connection - the proxy is a transport detail tracked under
   // _proxy on the options.
-  const proxyConfig = httpProxy.resolveAgentProxyConfig(this.agent);
+  //
+  // `agent: false` gets a fresh agent with no `proxyEnv`, which Node never
+  // routes through the environment's proxy (only the global agents take
+  // NODE_USE_ENV_PROXY). tunnel-agent and the like send their `CONNECT` to
+  // the proxy that way; routing it through the same proxy again would turn
+  // its `host:port` target into an absolute-form URL, which fails.
+  const proxyConfig = options.agent === false
+    ? null
+    : httpProxy.resolveAgentProxyConfig(this.agent);
   const proxyEntry = httpProxy.selectProxy(
     proxyConfig,
     protocol,

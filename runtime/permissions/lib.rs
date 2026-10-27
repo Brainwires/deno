@@ -5681,8 +5681,10 @@ impl PermissionsContainer {
     _api_name: &str,
   ) -> Result<(), PermissionCheckError> {
     let mut inner = self.inner.lock();
+    // As the net checks do: `::ffff:127.0.0.1` is 127.0.0.1 to the socket,
+    // so it must be to the deny list.
     let desc = ImportDescriptor(NetDescriptor(
-      Host::Ip(*resolved_ip),
+      Host::Ip(normalize_ip(*resolved_ip)),
       Some(port.into()),
     ));
     inner.import.check_resolved_ip_deny(&desc)?;
@@ -5721,8 +5723,10 @@ impl PermissionsContainer {
     }
     let inner = self.inner.lock();
     for ip in ips {
-      let desc =
-        ImportDescriptor(NetDescriptor(Host::Ip(ip), Some(port.into())));
+      let desc = ImportDescriptor(NetDescriptor(
+        Host::Ip(normalize_ip(ip)),
+        Some(port.into()),
+      ));
       check_deny_only(&inner.import, &desc)?;
     }
     Ok(())
@@ -7572,6 +7576,44 @@ mod tests {
               "api"
             )
             .is_ok()
+        );
+      }
+    }
+  }
+
+  #[test]
+  fn test_check_import_deny_resolved_ipv4_mapped() {
+    // A name whose AAAA record is `::ffff:127.0.0.1` reaches 127.0.0.1, so a
+    // `--deny-import=127.0.0.1` rule must refuse it as it refuses the bare
+    // address (the net checks normalize the same way).
+    set_prompter(Box::new(TestPrompter));
+    for deny_rule in ["127.0.0.1", "127.0.0.1:443"] {
+      let parser = TestPermissionDescriptorParser;
+      let perms = Permissions::from_options(
+        &parser,
+        &PermissionsOptions {
+          allow_import: Some(svec!["example.com"]),
+          deny_import: Some(vec![deny_rule.to_string()]),
+          prompt: false,
+          ..Default::default()
+        },
+      )
+      .unwrap();
+      let mut perms = PermissionsContainer::new(Arc::new(parser), perms);
+      for ip in ["127.0.0.1", "::ffff:127.0.0.1"] {
+        assert!(
+          perms
+            .check_import_resolved(&ip.parse().unwrap(), 443, "api")
+            .is_err(),
+          "resolved {ip}:443 should be denied by {deny_rule}"
+        );
+      }
+      for ip in ["192.168.1.1", "::ffff:192.168.1.1", "::1"] {
+        assert!(
+          perms
+            .check_import_resolved(&ip.parse().unwrap(), 443, "api")
+            .is_ok(),
+          "resolved {ip}:443 should not be denied by {deny_rule}"
         );
       }
     }

@@ -10,7 +10,8 @@
 # - lint:  tools/lint.js (clippy over the whole workspace with upstream's deny
 #          flags, dlint, the copyright and repo-hygiene checks), plus
 #          tools/format.js --check, tools/jsdoc_checker.js, cargo fmt and the
-#          release manifest writer's tests (.github/denext-runtime/manifest_test.py).
+#          release manifest writer's and tag gate's tests
+#          (.github/denext-runtime/manifest_test.py, tag_gate_test.py).
 # - cargo-audit: RustSec advisories against Cargo.lock; .cargo/audit.toml
 #          lists the reviewed exceptions.
 # - per OS (denext_tests_os.yml), each OS on its own so one slow OS does not
@@ -24,8 +25,9 @@
 #   - unit / specs: `cargo test -p unit_tests --test unit` and
 #            `cargo test -p specs_tests --test specs` (2 shards) against them;
 #            on Linux also `integration` (2 shards) and `unit_node`.
-# - macOS x64 (macos-15-intel) and Linux arm64 (ubuntu-22.04-arm), the other
-#   two release architectures: build + libs only.
+# - macOS x64 (macos-15-intel) and Linux arm64 (ubuntu-22.04-arm), two of the
+#   other release architectures: build + libs only; Windows arm64
+#   (windows-11-arm): build + libs + unit.
 #
 # Scope (GitHub caps this account at 20 concurrent jobs, 5 of them macOS, and
 # agents push many fix/feat/ci branches): the full matrix above runs on a push
@@ -37,10 +39,11 @@
 # node_compat). For a full run on a branch:
 #   gh workflow run denext_tests.yml --ref <branch> -f full=true
 # or add one OS to a Linux run with `-f full=false -f macos=true` (or
-# windows=true). denext_runtime.yml's tag gate counts only a run whose five
-# legs (macos-14, windows-2022, ubuntu-22.04, macos-15-intel,
-# ubuntu-22.04-arm) all passed, so a Linux-only run never vouches for a
-# release.
+# windows=true). denext_runtime.yml's tag gate (.github/denext-runtime/tag_gate.py)
+# counts only a run whose six legs (macos-14, windows-2022, ubuntu-22.04,
+# macos-15-intel, ubuntu-22.04-arm, windows-11-arm) all passed, so a
+# Linux-only run never vouches for a release, and refuses a commit that has
+# any failed run at all.
 #
 # The test harness asks Deno's "hashy" service whether a test input hash
 # already passed and PUTs one when it did (tests/util/lib/hash.rs). That is
@@ -65,7 +68,7 @@ on:
   workflow_dispatch:
     inputs:
       full:
-        description: Run the full matrix (macOS arm64 + x64, Windows, Linux x64 + arm64); false runs Linux x64 plus the OSes picked below
+        description: Run the full matrix (macOS arm64 + x64, Windows x64 + arm64, Linux x64 + arm64); false runs Linux x64 plus the OSes picked below
         type: boolean
         default: true
       macos:
@@ -137,6 +140,10 @@ jobs:
       - name: manifest_test.py
         if: runner.os == 'Linux'
         run: python3 -I .github/denext-runtime/manifest_test.py
+      # The release tag gate (denext_runtime.yml's setup job).
+      - name: tag_gate_test.py
+        if: runner.os == 'Linux'
+        run: python3 -I .github/denext-runtime/tag_gate_test.py
       - name: lint.js
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -196,3 +203,14 @@ jobs:
     with:
       os: ubuntu-22.04-arm
       libs_only: true
+
+  # Windows arm64 ships (CLI, denort, runtime) and has its own code paths
+  # (DENEXT.md items 105 and 118 fixed x64 ones): build, libs and the unit
+  # suite. Full runs only; the tag gate requires it.
+  windows-arm64:
+    name: windows-11-arm
+    if: ${{ github.ref == 'refs/heads/development-denext' || startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.full) }}
+    uses: ./.github/workflows/denext_tests_os.yml
+    with:
+      os: windows-11-arm
+      libs_and_unit: true

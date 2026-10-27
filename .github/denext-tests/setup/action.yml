@@ -51,7 +51,8 @@ runs:
       run: |
         set -euo pipefail
         vs=$("/c/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe" -latest -property installationPath)
-        for d in "$(cygpath -u "$vs")/VC/Tools/Llvm/x64/bin" "/c/Program Files/LLVM/bin"; do
+        # VS's own LLVM (x64, or ARM64 on windows-11-arm), else a system one.
+        for d in "$(cygpath -u "$vs")/VC/Tools/Llvm/${{ runner.arch == 'ARM64' && 'ARM64' || 'x64' }}/bin" "$(cygpath -u "$vs")/VC/Tools/Llvm/x64/bin" "/c/Program Files/LLVM/bin"; do
           if [ -f "$d/libclang.dll" ]; then
             echo "LIBCLANG_PATH=$(cygpath -w "$d")" >>"$GITHUB_ENV"
             exit 0
@@ -64,6 +65,9 @@ runs:
       run: |
         set -euo pipefail
         tc=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)
+        # Name the host on Windows on Arm: an emulated x64 rustup would
+        # otherwise install (and test with) an x86_64 toolchain.
+        if [ "$RUNNER_OS" = Windows ] && [ "$RUNNER_ARCH" = ARM64 ]; then tc="$tc-aarch64-pc-windows-msvc"; fi
         rustup toolchain install "$tc" --profile minimal --component rustfmt,clippy --no-self-update
         echo "RUSTUP_TOOLCHAIN=$tc" >>"$GITHUB_ENV"
 
@@ -78,9 +82,7 @@ runs:
       shell: bash
       env:
         GITHUB_TOKEN: ${{ github.token }}
-      run: |
-        ./tools/install_prebuilt.js ld64.lld
-        echo "$GITHUB_WORKSPACE/third_party/prebuilt/mac" >>"$GITHUB_PATH"
+      run: bash .github/denext-runtime/install_ld64.sh
 
     - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       with:

@@ -1,0 +1,9 @@
+{
+  "name": "@denotest/deprecated-lifecycle-scripts",
+  "version": "1.0.0",
+  "main": "index.js",
+  "deprecated": "Deprecated version",
+  "scripts": {
+    "postinstall": "echo postinstall ran > postinstall.txt"
+  }
+}

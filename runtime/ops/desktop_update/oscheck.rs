@@ -4,9 +4,12 @@
 //!
 //! - **macOS:** `codesign --verify --deep --strict` must pass on the staged
 //!   bundle. When the running app is signed with a Developer ID (it has a
-//!   Team ID), the staged bundle must carry the SAME Team ID and pass
-//!   Gatekeeper (`spctl --assess --type execute`), and its signing
-//!   identifier must match the running app's (the same app).
+//!   Team ID), the staged bundle must carry the SAME Team ID, satisfy the
+//!   requirement `anchor apple generic and certificate leaf[subject.OU] =
+//!   "<team>"` (a Team ID is only the leaf's OU, and `spctl` accepts
+//!   everything with Gatekeeper off), pass Gatekeeper (`spctl --assess
+//!   --type execute`), and its signing identifier must match the running
+//!   app's (the same app).
 //! - **Windows:** when the running executable has a trusted Authenticode
 //!   signature (`WinVerifyTrust`), EVERY PE image in the staged app must
 //!   verify too (see [`pe_files`]: any file with a PE header, whatever its
@@ -129,6 +132,23 @@ pub fn parse_codesign_display(out: &CmdOutput) -> MacSignInfo {
   }
 }
 
+/// A Team ID as Apple issues them: ten upper-case letters and digits. Checked
+/// before the ID goes into a code requirement, where a quote would end the
+/// string.
+fn is_team_id(team: &str) -> bool {
+  team.len() == 10
+    && team
+      .bytes()
+      .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
+}
+
+/// `codesign -R=` for "signed through Apple's CA by this team".
+fn team_requirement(team: &str) -> String {
+  format!(
+    "-R=anchor apple generic and certificate leaf[subject.OU] = \"{team}\""
+  )
+}
+
 fn codesign_info(runner: &dyn CommandRunner, path: &Path) -> MacSignInfo {
   parse_codesign_display(&runner.run(
     "/usr/bin/codesign",
@@ -173,6 +193,39 @@ pub fn verify_macos(
             .team_id
             .as_deref()
             .unwrap_or("(none: ad-hoc/unsigned)")
+        ),
+      );
+    }
+    // The Team ID read above is the leaf certificate's OU, which anyone can
+    // put in a self-signed certificate, and `codesign --verify` does not ask
+    // for an Apple anchor; `spctl --assess` does, but says "accepted" for
+    // everything once the user has turned Gatekeeper off. So verify again
+    // against an explicit designated requirement: an Apple-issued chain
+    // whose leaf names the running app's team.
+    if !is_team_id(team) {
+      return err(
+        Code::OsSignature,
+        format!("the running app's Team ID {team:?} is not a Team ID"),
+      );
+    }
+    let requirement = team_requirement(team);
+    let anchored = runner.run(
+      "/usr/bin/codesign",
+      &[
+        "--verify".as_ref(),
+        "--deep".as_ref(),
+        "--strict".as_ref(),
+        requirement.as_ref(),
+        staged.as_os_str(),
+      ],
+    );
+    if !anchored.success {
+      return err(
+        Code::OsSignature,
+        format!(
+          "the staged app is not signed by an Apple-issued certificate for \
+           Team ID {team}: {}",
+          anchored.stderr.trim()
         ),
       );
     }
@@ -559,6 +612,8 @@ mod tests {
       let last = args.last().unwrap().to_string_lossy().into_owned();
       let verb = if program.ends_with("spctl") {
         "spctl".to_string()
+      } else if args.iter().any(|a| a.to_string_lossy().starts_with("-R=")) {
+        "anchor".to_string()
       } else if args[0] == "--verify" {
         "verify".to_string()
       } else {
@@ -651,34 +706,36 @@ mod tests {
   #[test]
   fn same_team_passes() {
     let f = Fake::default()
-      .on("display", "/run", true, &team("com.a", "TEAM1"))
-      .on("display", "/new", true, &team("com.a", "TEAM1"))
+      .on("display", "/run", true, &team("com.a", "TEAM100000"))
+      .on("display", "/new", true, &team("com.a", "TEAM100000"))
       .on("verify", "/new", true, "")
+      .on("anchor", "/new", true, "")
       .on("spctl", "/new", true, "");
     let r = verify_macos(&f, "/run".as_ref(), "/new".as_ref(), false).unwrap();
     assert_eq!(r.mode, "team");
-    assert_eq!(r.identity.as_deref(), Some("TEAM1"));
+    assert_eq!(r.identity.as_deref(), Some("TEAM100000"));
   }
 
   #[test]
   fn different_team_is_refused_even_with_the_opt_out() {
     let f = Fake::default()
-      .on("display", "/run", true, &team("com.a", "TEAM1"))
-      .on("display", "/new", true, &team("com.a", "EVIL2"))
+      .on("display", "/run", true, &team("com.a", "TEAM100000"))
+      .on("display", "/new", true, &team("com.a", "EVIL200000"))
       .on("verify", "/new", true, "")
+      .on("anchor", "/new", true, "")
       .on("spctl", "/new", true, "");
     for opt_out in [false, true] {
       let e = verify_macos(&f, "/run".as_ref(), "/new".as_ref(), opt_out)
         .unwrap_err();
       assert_eq!(e.code, Code::OsSignature);
-      assert!(e.message.contains("EVIL2"), "{}", e.message);
+      assert!(e.message.contains("EVIL200000"), "{}", e.message);
     }
   }
 
   #[test]
   fn adhoc_staged_under_a_team_app_is_refused() {
     let f = Fake::default()
-      .on("display", "/run", true, &team("com.a", "TEAM1"))
+      .on("display", "/run", true, &team("com.a", "TEAM100000"))
       .on("display", "/new", true, &team("com.a", "not set"))
       .on("verify", "/new", true, "");
     let e =
@@ -689,17 +746,19 @@ mod tests {
   #[test]
   fn gatekeeper_and_identifier_are_enforced() {
     let f = Fake::default()
-      .on("display", "/run", true, &team("com.a", "TEAM1"))
-      .on("display", "/new", true, &team("com.a", "TEAM1"))
+      .on("display", "/run", true, &team("com.a", "TEAM100000"))
+      .on("display", "/new", true, &team("com.a", "TEAM100000"))
       .on("verify", "/new", true, "")
+      .on("anchor", "/new", true, "")
       .on("spctl", "/new", false, "rejected");
     let e =
       verify_macos(&f, "/run".as_ref(), "/new".as_ref(), false).unwrap_err();
     assert_eq!(e.code, Code::OsSignature);
     let f = Fake::default()
-      .on("display", "/run", true, &team("com.a", "TEAM1"))
-      .on("display", "/new", true, &team("com.b", "TEAM1"))
+      .on("display", "/run", true, &team("com.a", "TEAM100000"))
+      .on("display", "/new", true, &team("com.b", "TEAM100000"))
       .on("verify", "/new", true, "")
+      .on("anchor", "/new", true, "")
       .on("spctl", "/new", true, "");
     let e =
       verify_macos(&f, "/run".as_ref(), "/new".as_ref(), false).unwrap_err();
@@ -731,6 +790,56 @@ mod tests {
     assert_eq!(r.mode, "dev-unsigned");
     // Gatekeeper is not consulted for a dev build.
     assert!(!f.calls.borrow().iter().any(|c| c.starts_with("spctl")));
+  }
+
+  // A leaf certificate's OU is whatever its maker wrote: with Gatekeeper
+  // off (`spctl --assess` then accepts everything), a self-signed bundle
+  // naming the running app's team must still be refused, by the explicit
+  // Apple-anchor requirement.
+  #[test]
+  fn team_must_be_apple_anchored() {
+    let f = Fake::default()
+      .on("display", "/run", true, &team("com.a", "TEAM100000"))
+      .on("display", "/new", true, &team("com.a", "TEAM100000"))
+      .on("verify", "/new", true, "")
+      .on(
+        "anchor",
+        "/new",
+        false,
+        "test-requirement: code failed to satisfy",
+      )
+      .on("spctl", "/new", true, "");
+    for opt_out in [false, true] {
+      let e = verify_macos(&f, "/run".as_ref(), "/new".as_ref(), opt_out)
+        .unwrap_err();
+      assert_eq!(e.code, Code::OsSignature);
+      assert!(e.message.contains("Apple-issued"), "{}", e.message);
+    }
+    assert!(f.calls.borrow().iter().any(|c| c == "anchor /new"));
+  }
+
+  #[test]
+  fn team_requirement_names_the_team() {
+    assert_eq!(
+      team_requirement("ABCDE12345"),
+      "-R=anchor apple generic and certificate leaf[subject.OU] = \"ABCDE12345\""
+    );
+    assert!(is_team_id("ABCDE12345"));
+    // A quote (or anything but A-Z 0-9), or another length, never reaches a
+    // requirement.
+    for bad in ["ABCDE1234", "ABCDE123456", "abcde12345", "ABCDE\"1234", ""] {
+      assert!(!is_team_id(bad), "{bad:?}");
+    }
+    let f = Fake::default()
+      .on("display", "/run", true, &team("com.a", "TEAM1\" or"))
+      .on("display", "/new", true, &team("com.a", "TEAM1\" or"))
+      .on("verify", "/new", true, "")
+      .on("anchor", "/new", true, "")
+      .on("spctl", "/new", true, "");
+    let e =
+      verify_macos(&f, "/run".as_ref(), "/new".as_ref(), false).unwrap_err();
+    assert_eq!(e.code, Code::OsSignature);
+    assert!(!f.calls.borrow().iter().any(|c| c == "anchor /new"));
   }
 
   #[test]
