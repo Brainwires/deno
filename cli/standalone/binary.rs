@@ -607,37 +607,72 @@ impl<'a> DenoCompileBinaryWriter<'a> {
 
     // A denext build compiles onto its own release's denort (the runtime
     // patches, Deno.SQL, ...), never Deno's stock one of the same version.
-    let denext = (compile_flags.engine == JavaScriptEngine::V8)
+    let denext_version = (compile_flags.engine == JavaScriptEngine::V8)
       .then(|| DENO_VERSION_INFO.denext())
-      .flatten()
-      .map(|version| denext_denort(version, &target));
-    let (binary_path_suffix, download_url) = match denext {
-      Some(denext) => denext,
-      None => {
-        let suffix = deno_land_suffix(
-          DENO_VERSION_INFO.release_channel,
-          DENO_VERSION_INFO.git_hash,
-          &binary_name,
-        );
-        let url = format!("https://dl.deno.land/{suffix}");
-        (suffix, url)
-      }
-    };
-
-    let download_directory = self.deno_dir.dl_folder_path();
-    let binary_path = download_directory.join(&binary_path_suffix);
-    log::debug!("Resolved denort: {}", binary_path.display());
-
+      .flatten();
     let read_file = |path: &Path| -> Result<Vec<u8>, AnyError> {
       std::fs::read(path).with_context(|| format!("Reading {}", path.display()))
     };
-    let archive_data = if binary_path.exists() {
-      read_file(&binary_path)?
+    let download_directory = self.deno_dir.dl_folder_path();
+    let archive_data = if let Some(version) = denext_version {
+      // denext (DENEXT.md item 121): the release's own denort, checked
+      // against the same release's SHA256SUMS before it is used or cached.
+      let (binary_path_suffix, download_url) = denext_denort(version, &target);
+      let binary_path = download_directory.join(&binary_path_suffix);
+      log::debug!("Resolved denort: {}", binary_path.display());
+      let asset = denext_denort_asset_name(version, &target);
+      let sums_url = denext_release_sums_url(&download_url);
+      let client = self.http_client_provider.get_or_create()?;
+      let fetch =
+        async |what: DenortFetch| -> Result<Option<Vec<u8>>, AnyError> {
+          let url = match what {
+            DenortFetch::Archive => download_url.as_str(),
+            DenortFetch::Sums => sums_url.as_str(),
+          };
+          let progress_bars = ProgressBar::new(ProgressBarStyle::DownloadBars);
+          let progress = progress_bars.update(url);
+          let response = client
+            .download_with_progress_and_retries(
+              url.parse()?,
+              &Default::default(),
+              &progress,
+            )
+            .await
+            .with_context(|| format!("Failed downloading '{url}'"))?;
+          Ok(
+            response
+              .into_maybe_bytes()
+              .with_context(|| format!("Failed downloading '{url}'"))?,
+          )
+        };
+      load_verified_denext_denort(
+        &binary_path,
+        &DenextDenortSource {
+          asset: &asset,
+          archive_url: &download_url,
+          sums_url: &sums_url,
+        },
+        fetch,
+      )
+      .await
+      .context("Setting up base binary.")?
     } else {
-      self
-        .download_base_binary(&binary_path, &download_url)
-        .await
-        .context("Setting up base binary.")?
+      let binary_path_suffix = deno_land_suffix(
+        DENO_VERSION_INFO.release_channel,
+        DENO_VERSION_INFO.git_hash,
+        &binary_name,
+      );
+      let download_url = format!("https://dl.deno.land/{binary_path_suffix}");
+      let binary_path = download_directory.join(&binary_path_suffix);
+      log::debug!("Resolved denort: {}", binary_path.display());
+      if binary_path.exists() {
+        read_file(&binary_path)?
+      } else {
+        self
+          .download_base_binary(&binary_path, &download_url)
+          .await
+          .context("Setting up base binary.")?
+      }
     };
     let temp_dir = tempfile::TempDir::new()?;
     let base_binary_path = archive::unpack_into_dir(archive::UnpackArgs {
@@ -2010,6 +2045,162 @@ fn denext_denort_asset_name(version: &str, target: &str) -> String {
   format!("deno-denort-{version}-{target}.zip")
 }
 
+/// The `SHA256SUMS` asset of the release that `asset_url` (one of its
+/// assets) belongs to.
+fn denext_release_sums_url(asset_url: &str) -> String {
+  match asset_url.rsplit_once('/') {
+    Some((release, _)) => format!("{release}/SHA256SUMS"),
+    None => "SHA256SUMS".to_string(),
+  }
+}
+
+/// What [`load_verified_denext_denort`] asks its fetcher for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DenortFetch {
+  /// The `deno-denort-<version>-<target>.zip` asset.
+  Archive,
+  /// The release's `SHA256SUMS`.
+  Sums,
+}
+
+/// A denext release's `denort` asset and where it and the release's
+/// `SHA256SUMS` are downloaded from (the URLs are for error messages).
+struct DenextDenortSource<'a> {
+  asset: &'a str,
+  archive_url: &'a str,
+  sums_url: &'a str,
+}
+
+fn sha256_hex(data: &[u8]) -> String {
+  use sha2::Digest;
+  faster_hex::hex_string(&sha2::Sha256::digest(data))
+}
+
+/// The path beside a cached archive that records the SHA-256 it was
+/// verified with.
+fn verified_hash_path(archive_path: &Path) -> PathBuf {
+  let mut name = archive_path.file_name().unwrap_or_default().to_os_string();
+  name.push(".sha256");
+  archive_path.with_file_name(name)
+}
+
+/// `asset`'s SHA-256 in a `sha256sum` listing (`<hex>  <name>`, or
+/// `<hex> *<name>` in binary mode). `None` when the listing has no entry for
+/// it; an error when it has two that disagree or a malformed hash for it.
+fn sha256sums_entry(
+  sums: &str,
+  asset: &str,
+) -> Result<Option<String>, AnyError> {
+  let mut found: Option<String> = None;
+  for line in sums.lines() {
+    let Some((hash, name)) = line.trim_end().split_once(char::is_whitespace)
+    else {
+      continue;
+    };
+    let name = name.trim_start();
+    let name = name.strip_prefix('*').unwrap_or(name);
+    if name != asset {
+      continue;
+    }
+    if hash.len() != 64 || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
+      bail!("SHA256SUMS has a malformed hash for {asset}: '{hash}'");
+    }
+    let hash = hash.to_ascii_lowercase();
+    match &found {
+      Some(previous) if *previous != hash => {
+        bail!(
+          "SHA256SUMS lists {asset} twice with different hashes ({previous} and {hash})"
+        )
+      }
+      _ => found = Some(hash),
+    }
+  }
+  Ok(found)
+}
+
+/// A cached archive whose recorded hash (see [`verified_hash_path`]) still
+/// matches its bytes. Anything else (no record, a different hash, an
+/// unreadable file) is `None`: the cache is re-verified, never trusted.
+fn read_verified_cache(archive_path: &Path) -> Option<Vec<u8>> {
+  let recorded =
+    std::fs::read_to_string(verified_hash_path(archive_path)).ok()?;
+  let recorded = recorded.split_whitespace().next()?.to_ascii_lowercase();
+  let bytes = std::fs::read(archive_path).ok()?;
+  (sha256_hex(&bytes) == recorded).then_some(bytes)
+}
+
+/// denext (DENEXT.md item 121): a denext release's `denort` archive, verified
+/// against the SHA-256 the same release's `SHA256SUMS` lists for it. A
+/// missing `SHA256SUMS`, a missing entry or a mismatch is an error (fail
+/// closed); nothing unverified is cached. A cached archive is used only
+/// while its bytes still hash to the SHA-256 recorded beside it when it was
+/// verified; otherwise it is checked against `SHA256SUMS` again (and
+/// downloaded again if it does not match).
+async fn load_verified_denext_denort(
+  cache_path: &Path,
+  source: &DenextDenortSource<'_>,
+  fetch: impl AsyncFn(DenortFetch) -> Result<Option<Vec<u8>>, AnyError>,
+) -> Result<Vec<u8>, AnyError> {
+  let DenextDenortSource {
+    asset,
+    archive_url,
+    sums_url,
+  } = *source;
+  if let Some(bytes) = read_verified_cache(cache_path) {
+    return Ok(bytes);
+  }
+
+  let Some(sums) = fetch(DenortFetch::Sums).await? else {
+    bail!(
+      "The denext release has no SHA256SUMS ({sums_url} was not found), so \
+       {asset} cannot be verified. Refusing to use it."
+    );
+  };
+  let sums = String::from_utf8(sums)
+    .with_context(|| format!("{sums_url} is not UTF-8 text"))?;
+  let Some(expected) = sha256sums_entry(&sums, asset)? else {
+    bail!(
+      "{sums_url} has no entry for {asset}, so it cannot be verified. \
+       Refusing to use it."
+    );
+  };
+
+  let cached = std::fs::read(cache_path)
+    .ok()
+    .filter(|bytes| sha256_hex(bytes) == expected);
+  let archive = match cached {
+    Some(bytes) => bytes,
+    None => match fetch(DenortFetch::Archive).await? {
+      Some(bytes) => bytes,
+      None => bail!("{archive_url} was not found"),
+    },
+  };
+  let actual = sha256_hex(&archive);
+  if actual != expected {
+    bail!(
+      "{asset} from {archive_url} does not match the release's SHA256SUMS: \
+       expected SHA-256 {expected}, got {actual}. Refusing to use it."
+    );
+  }
+
+  let sys = CliSys::default();
+  if let Some(dir) = cache_path.parent() {
+    std::fs::create_dir_all(dir)
+      .with_context(|| format!("Creating {}", dir.display()))?;
+  }
+  atomic_write_file_with_retries(&sys, cache_path, &archive, CACHE_PERM)
+    .with_context(|| format!("Writing {}", cache_path.display()))?;
+  let hash_path = verified_hash_path(cache_path);
+  atomic_write_file_with_retries(
+    &sys,
+    &hash_path,
+    format!("{actual}  {asset}\n").as_bytes(),
+    CACHE_PERM,
+  )
+  .with_context(|| format!("Writing {}", hash_path.display()))?;
+  Ok(archive)
+}
+
 fn runtime_archive_name(
   prefix: &str,
   engine: &JavaScriptEngine,
@@ -2147,12 +2338,23 @@ fn update_public_key_from_config<E: std::fmt::Display>(
 
 #[cfg(test)]
 mod tests {
+  use std::cell::Cell;
+  use std::path::Path;
+
+  use deno_core::error::AnyError;
+
+  use super::DenextDenortSource;
+  use super::DenortFetch;
   use super::check_desktop_app_identity;
   use super::default_app_name;
   use super::denext_denort;
   use super::denext_denort_asset_name;
+  use super::denext_release_sums_url;
   use super::deno_land_suffix;
+  use super::load_verified_denext_denort;
   use super::runtime_archive_name;
+  use super::sha256_hex;
+  use super::sha256sums_entry;
   use super::update_public_key_from_config;
   use crate::args::JavaScriptEngine;
 
@@ -2212,6 +2414,204 @@ mod tests {
         )
       );
     }
+  }
+
+  const DENORT_ASSET: &str =
+    "deno-denort-3.0.0-rc.7-x86_64-unknown-linux-gnu.zip";
+  const DENORT_ARCHIVE_URL: &str = "https://example.test/denext-runtime-v3.0.0-rc.7/deno-denort-3.0.0-rc.7-x86_64-unknown-linux-gnu.zip";
+  const DENORT_SUMS_URL: &str =
+    "https://example.test/denext-runtime-v3.0.0-rc.7/SHA256SUMS";
+
+  fn denort_source() -> DenextDenortSource<'static> {
+    DenextDenortSource {
+      asset: DENORT_ASSET,
+      archive_url: DENORT_ARCHIVE_URL,
+      sums_url: DENORT_SUMS_URL,
+    }
+  }
+
+  /// A release serving `archive` and `sums` (`None`: a 404), counting the
+  /// downloads of each.
+  struct FakeRelease {
+    archive: Vec<u8>,
+    sums: Option<String>,
+    archive_fetches: Cell<usize>,
+    sums_fetches: Cell<usize>,
+  }
+
+  impl FakeRelease {
+    fn new(archive: &[u8], sums: Option<String>) -> Self {
+      Self {
+        archive: archive.to_vec(),
+        sums,
+        archive_fetches: Cell::new(0),
+        sums_fetches: Cell::new(0),
+      }
+    }
+
+    async fn load(&self, cache: &Path) -> Result<Vec<u8>, AnyError> {
+      load_verified_denext_denort(cache, &denort_source(), async |what| {
+        match what {
+          DenortFetch::Archive => {
+            self.archive_fetches.set(self.archive_fetches.get() + 1);
+            Ok(Some(self.archive.clone()))
+          }
+          DenortFetch::Sums => {
+            self.sums_fetches.set(self.sums_fetches.get() + 1);
+            Ok(self.sums.clone().map(String::into_bytes))
+          }
+        }
+      })
+      .await
+    }
+  }
+
+  fn sums_listing(entries: &[(&str, &[u8])]) -> String {
+    entries
+      .iter()
+      .map(|(name, bytes)| format!("{}  {name}\n", sha256_hex(bytes)))
+      .collect()
+  }
+
+  #[test]
+  fn release_sums_url_is_beside_the_asset() {
+    assert_eq!(denext_release_sums_url(DENORT_ARCHIVE_URL), DENORT_SUMS_URL);
+  }
+
+  #[test]
+  fn sha256sums_entry_reads_the_listing() {
+    let hash = "AB".repeat(32);
+    let sums = format!(
+      "{}  deno-cli.zip\n{hash} *{DENORT_ASSET}\n",
+      "cd".repeat(32)
+    );
+    assert_eq!(
+      sha256sums_entry(&sums, DENORT_ASSET).unwrap(),
+      Some("ab".repeat(32))
+    );
+    assert_eq!(sha256sums_entry(&sums, "other.zip").unwrap(), None);
+    // A prefix of a listed name is not an entry.
+    assert_eq!(
+      sha256sums_entry(&sums, "deno-denort-3.0.0-rc.7").unwrap(),
+      None
+    );
+    let conflicting = format!(
+      "{hash}  {DENORT_ASSET}\n{}  {DENORT_ASSET}\n",
+      "cd".repeat(32)
+    );
+    let err = sha256sums_entry(&conflicting, DENORT_ASSET)
+      .unwrap_err()
+      .to_string();
+    assert!(err.contains("twice"), "{err}");
+    let malformed = format!("xyz  {DENORT_ASSET}\n");
+    assert!(sha256sums_entry(&malformed, DENORT_ASSET).is_err());
+  }
+
+  #[tokio::test]
+  async fn denext_denort_with_a_good_hash_is_used_and_cached() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let cache = dir.path().join("denext/v3.0.0-rc.7").join(DENORT_ASSET);
+    let archive = b"the real denort zip";
+    let release = FakeRelease::new(
+      archive,
+      Some(sums_listing(&[
+        ("deno-cli-3.0.0-rc.7-x86_64-unknown-linux-gnu.zip", b"cli"),
+        (DENORT_ASSET, archive),
+      ])),
+    );
+    assert_eq!(release.load(&cache).await.unwrap(), archive);
+    assert_eq!(std::fs::read(&cache).unwrap(), archive);
+    let recorded =
+      std::fs::read_to_string(super::verified_hash_path(&cache)).unwrap();
+    assert!(recorded.starts_with(&sha256_hex(archive)), "{recorded}");
+
+    // The verified cache is used again without any download.
+    assert_eq!(release.load(&cache).await.unwrap(), archive);
+    assert_eq!(release.archive_fetches.get(), 1);
+    assert_eq!(release.sums_fetches.get(), 1);
+  }
+
+  #[tokio::test]
+  async fn denext_denort_tampered_archive_is_refused() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let cache = dir.path().join(DENORT_ASSET);
+    let release = FakeRelease::new(
+      b"a swapped denort zip",
+      Some(sums_listing(&[(DENORT_ASSET, b"the real denort zip")])),
+    );
+    let err = format!("{:#}", release.load(&cache).await.unwrap_err());
+    assert!(err.contains(DENORT_ASSET), "{err}");
+    assert!(err.contains(&sha256_hex(b"the real denort zip")), "{err}");
+    assert!(err.contains(&sha256_hex(b"a swapped denort zip")), "{err}");
+    assert!(err.contains("does not match"), "{err}");
+    // Nothing unverified is cached.
+    assert!(!cache.exists());
+    assert!(!super::verified_hash_path(&cache).exists());
+  }
+
+  #[tokio::test]
+  async fn denext_denort_missing_sums_entry_is_refused() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let cache = dir.path().join(DENORT_ASSET);
+    let release = FakeRelease::new(
+      b"the real denort zip",
+      Some(sums_listing(&[(
+        "deno-cli-3.0.0-rc.7-x86_64-unknown-linux-gnu.zip",
+        b"cli",
+      )])),
+    );
+    let err = format!("{:#}", release.load(&cache).await.unwrap_err());
+    assert!(err.contains("has no entry for"), "{err}");
+    assert!(err.contains(DENORT_ASSET), "{err}");
+    assert_eq!(release.archive_fetches.get(), 0);
+    assert!(!cache.exists());
+  }
+
+  #[tokio::test]
+  async fn denext_denort_missing_sums_is_refused() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let cache = dir.path().join(DENORT_ASSET);
+    let release = FakeRelease::new(b"the real denort zip", None);
+    let err = format!("{:#}", release.load(&cache).await.unwrap_err());
+    assert!(err.contains("no SHA256SUMS"), "{err}");
+    assert!(err.contains(DENORT_SUMS_URL), "{err}");
+    assert!(err.contains(DENORT_ASSET), "{err}");
+    assert_eq!(release.archive_fetches.get(), 0);
+    assert!(!cache.exists());
+  }
+
+  #[tokio::test]
+  async fn denext_denort_cache_is_not_trusted_blindly() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let cache = dir.path().join(DENORT_ASSET);
+    let archive = b"the real denort zip";
+    let sums = sums_listing(&[(DENORT_ASSET, archive)]);
+
+    // A cached archive with no recorded hash (an older CLI's cache) that
+    // does not match SHA256SUMS is replaced with a verified download.
+    std::fs::write(&cache, b"a swapped denort zip").unwrap();
+    let release = FakeRelease::new(archive, Some(sums.clone()));
+    assert_eq!(release.load(&cache).await.unwrap(), archive);
+    assert_eq!(release.archive_fetches.get(), 1);
+    assert_eq!(std::fs::read(&cache).unwrap(), archive);
+
+    // A verified cache changed afterwards no longer matches its record: it
+    // is checked again, and with the release serving a swapped archive too,
+    // refused.
+    std::fs::write(&cache, b"a swapped denort zip").unwrap();
+    let swapped = FakeRelease::new(b"a swapped denort zip", Some(sums.clone()));
+    let err = format!("{:#}", swapped.load(&cache).await.unwrap_err());
+    assert!(err.contains("does not match"), "{err}");
+    assert_eq!(swapped.sums_fetches.get(), 1);
+
+    // A cached archive with no record that matches SHA256SUMS is used
+    // without downloading it again, and recorded.
+    std::fs::write(&cache, archive).unwrap();
+    std::fs::remove_file(super::verified_hash_path(&cache)).unwrap();
+    let release = FakeRelease::new(b"unused", Some(sums));
+    assert_eq!(release.load(&cache).await.unwrap(), archive);
+    assert_eq!(release.archive_fetches.get(), 0);
+    assert!(super::verified_hash_path(&cache).exists());
   }
 
   #[test]
