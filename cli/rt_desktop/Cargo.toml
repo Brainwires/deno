@@ -53,11 +53,12 @@ denort = { path = "../rt", default-features = false }
 # passkey cancel; API 48: the navigation guard; runtime 3.0.0-rc.1: the CEF
 # custom-scheme localStorage fix, KWin's blur, the XCB clipboard and Linux
 # passkeys through libwebauthn; runtime 3.0.0-rc.4: downloads from the app's
-# own scheme saved on every backend), pinned to a commit of the Brainwires/laufey
-# fork.
+# own scheme saved on every backend; runtime 3.0.0-denext.1: the fail-closed
+# `strictPolicy` launch key and the per-app Linux secure store, laufey branch
+# `release/denext-1`), pinned to a commit of the Brainwires/laufey fork.
 # The host built from the same commit must be used with it (the API version
 # check is exact).
-laufey = { git = "https://github.com/Brainwires/laufey", rev = "f5325d454f7219edb12e57c3c7782c722ae48038" }
+laufey = { git = "https://github.com/Brainwires/laufey", rev = "ec6a30bd281e5034185817bb6c1bde7f0af6c627" }
 libsui.workspace = true
 
 bytes.workspace = true
