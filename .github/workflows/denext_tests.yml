@@ -10,10 +10,11 @@
 # - lint:  tools/lint.js (clippy over the whole workspace with upstream's deny
 #          flags, dlint, the copyright and repo-hygiene checks), plus
 #          tools/format.js --check, tools/jsdoc_checker.js, cargo fmt and the
-#          release manifest writer's, tag gate's and engine staleness gate's
-#          tests (.github/denext-runtime/manifest_test.py, tag_gate_test.py,
-#          engine_staleness_test.py) and the bare-assertion guard over the
-#          release scripts (assert_guard.py and its test).
+#          release manifest writer's, tag gate's, engine staleness gate's and
+#          glibc ceiling check's tests (.github/denext-runtime/manifest_test.py,
+#          tag_gate_test.py, engine_staleness_test.py, glibc_ceiling_test.py)
+#          and the bare-assertion guard over the release scripts
+#          (assert_guard.py and its test).
 # - cargo-audit: RustSec advisories against Cargo.lock; .cargo/audit.toml
 #          lists the reviewed exceptions.
 # - per OS (denext_tests_os.yml), each OS on its own so one slow OS does not
@@ -158,6 +159,10 @@ jobs:
       - name: engine_staleness_test.py
         if: runner.os == 'Linux'
         run: python3 -I .github/denext-runtime/engine_staleness_test.py
+      # The glibc ceiling check (denext_runtime.yml's cli job).
+      - name: glibc_ceiling_test.py
+        if: runner.os == 'Linux'
+        run: python3 -I .github/denext-runtime/glibc_ceiling_test.py
       - name: lint.js
         env:
           GITHUB_TOKEN: ${{ github.token }}
