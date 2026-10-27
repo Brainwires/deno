@@ -123,6 +123,37 @@ class Evaluate(unittest.TestCase):
             gate.release_branches("3.0.0-rc.7"),
             ["development-denext", "rel/3.0.0-rc.7"],
         )
+        self.assertEqual(
+            gate.release_branches("3.0.0-denext.1"),
+            ["development-denext", "rel/3.0.0-denext.1"],
+        )
+
+    def test_only_a_release_candidate_is_a_prerelease(self):
+        for version in ("3.0.0-rc.1", "3.0.0-rc.6", "3.0.0-rc.7+ci.3", "3.0.0-rc"):
+            self.assertTrue(gate.is_prerelease(version), version)
+        # The fork's stable line after its release candidates: full releases.
+        for version in (
+            "3.0.0-denext.1",
+            "3.0.0-denext.2",
+            "3.0.0-denext.10",
+            "3.0.0-denext.1+ci.4",
+            "3.0.0",
+            "2.9.7-denext.22",
+            "3.0.0-rcx.1",
+        ):
+            self.assertFalse(gate.is_prerelease(version), version)
+
+    def test_prerelease_flag_cli(self):
+        def flag(version):
+            return subprocess.run(
+                [sys.executable, "-I", GATE, "--prerelease-flag", version],
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout.strip()
+
+        self.assertEqual(flag("3.0.0-rc.6"), "--prerelease")
+        self.assertEqual(flag("3.0.0-denext.1"), "")
 
 
 FAKE_GH = r'''#!/usr/bin/env python3

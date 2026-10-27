@@ -1422,9 +1422,10 @@ jobs:
           Tag gate: full \`denext tests\` run [${FULL_RUN}](https://github.com/${REPO}/actions/runs/${FULL_RUN}).
           EOF
           # A release candidate (3.0.0-rc.N) is marked a pre-release, so it
-          # never becomes the repository's "Latest" release.
-          prerelease=
-          case "${TAG#denext-runtime-v}" in *-*) prerelease=--prerelease ;; esac
+          # never becomes the repository's "Latest" release; the fork's
+          # 3.0.0-denext.N line is its stable line, released in full
+          # (tag_gate.py is_prerelease).
+          prerelease=$(python3 -I .github/denext-runtime/tag_gate.py --prerelease-flag "${TAG#denext-runtime-v}")
           gh release create "$TAG" --repo "$REPO" --title "$TAG" \
             --notes-file notes.md --verify-tag --latest="$latest" $prerelease \
             dist/*.tar.gz dist/*.zip dist/SHA256SUMS dist/manifest.json "${symbols[@]}"
