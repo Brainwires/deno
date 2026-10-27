@@ -21,6 +21,22 @@
       },
       "output": "spawn_node_disabled.out"
     },
+    // `node dist/main` through the shim Deno puts on PATH: the extensionless
+    // entrypoint resolves to `dist/main.js`.
+    "spawn_node_extensionless": {
+      "if": "unix",
+      "args": "run -A spawn_node_extensionless.mjs",
+      "envs": {
+        "PATH": ""
+      },
+      "output": "extensionless.out"
+    },
+    // The same through a `node` shim of the deno executable (a symlink on
+    // unix, a hardlink or copy named `node.exe` on Windows).
+    "node_shim_extensionless": {
+      "args": "run -A node_shim_extensionless.mjs",
+      "output": "extensionless.out"
+    },
     // A real `node` already on PATH must never be shadowed by the shim.
     "real_node_not_shadowed": {
       "if": "unix",

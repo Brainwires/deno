@@ -1,0 +1,10 @@
+{
+  "name": "app",
+  "version": "1.0.0",
+  "dependencies": {
+    "@denotest/lifecycle-scripts-simple": "1.0.0"
+  },
+  "deno": {
+    "allowScripts": ["npm:@denotest/lifecycle-scripts-simple"]
+  }
+}

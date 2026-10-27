@@ -1,0 +1,21 @@
+{
+  // A type-only use of a package subpath that only an `@types` package
+  // provides (Nest's default e2e test imports `App` from `supertest/types`):
+  // the import is elided, as tsc and Node.js TypeScript loaders do, so the
+  // module graph does not fail on it. A value use still fails.
+  "tests": {
+    "elided_no_check": {
+      "args": "run main.ts",
+      "output": "from typesonly\n"
+    },
+    "elided_check": {
+      "args": "run --check --check-engine=tsc main.ts",
+      "output": "Check [WILDCARD]main.ts\nfrom typesonly\n"
+    },
+    "value_use_fails": {
+      "args": "run value_use.ts",
+      "output": "[WILDCARD]ERR_MODULE_NOT_FOUND[WILDCARD]typesonly/types[WILDCARD]",
+      "exitCode": 1
+    }
+  }
+}

@@ -1,0 +1,4 @@
+[WILDCARD]"deno.allowScripts" in package.json is ignored because a deno.json applies. Move it to the deno.json as "allowScripts".
+[WILDCARD]Ignored build scripts for packages:
+│  npm:@denotest/lifecycle-scripts-simple@1.0.0
+[WILDCARD]

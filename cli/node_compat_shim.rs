@@ -208,12 +208,16 @@ pub fn maybe_rewrite_node_arg0(args: Vec<OsString>) -> Vec<OsString> {
   let mut deno_args = result.deno_args;
 
   // Resolve the entrypoint for the run path the same way the standalone shim
-  // does, sharing a single implementation. `current_exe` resolves to the real
-  // deno binary (not the `node` symlink), so the resolution subprocess runs as
-  // plain `deno eval` without re-entering arg0 dispatch.
+  // does, sharing a single implementation. `current_exe` is the `node` shim's
+  // own path on macOS (a symlink) and Windows (a hardlink or copy), so it is
+  // canonicalized here and the resolution subprocess runs with the shim
+  // disabled (see `node_shim::resolve_entrypoint`): it is a plain
+  // `deno eval`, never a re-entry into arg0 dispatch.
   #[allow(clippy::disallowed_methods, reason = "resolving the node shim exe")]
   let current_exe =
     std::env::current_exe().unwrap_or_else(|_| PathBuf::from("deno"));
+  let current_exe =
+    crate::util::fs::canonicalize_path(&current_exe).unwrap_or(current_exe);
   node_shim::resolve_run_entrypoint(&current_exe, &mut deno_args);
 
   // `deno_args[0]` is the program-name slot ("node") that deno's flag parser

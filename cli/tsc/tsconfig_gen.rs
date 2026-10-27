@@ -65,10 +65,39 @@ pub fn build_check_root_overlay(
       format!("failed to parse {}: {e}", user_tsconfig_path.display()),
     )
   })?;
-  Ok(root_overlay_of(
-    project_root,
-    parsed.unwrap_or_else(|| json!({})),
-  ))
+  let mut parsed = parsed.unwrap_or_else(|| json!({}));
+  add_automatic_types(project_root, &mut parsed);
+  Ok(root_overlay_of(project_root, parsed))
+}
+
+/// A package.json project's (no deno.json) tsconfig.json without
+/// `compilerOptions.types` gets the `@types` packages TypeScript 5 would
+/// include on its own ([`automatic_type_directive_names`]) as its `types`,
+/// which the generated `deno` / `node` entries then join. The generated
+/// config's `types` turn the automatic inclusion off otherwise. A config
+/// that `extends` another leaves `types` to that chain.
+fn add_automatic_types(project_root: &Path, tsconfig: &mut Value) {
+  let is_node_project = project_root.join("package.json").is_file()
+    && !project_root.join("deno.json").exists()
+    && !project_root.join("deno.jsonc").exists();
+  if !is_node_project || tsconfig.get("extends").is_some() {
+    return;
+  }
+  let Some(object) = tsconfig.as_object_mut() else {
+    return;
+  };
+  let compiler_options =
+    object.entry("compilerOptions").or_insert_with(|| json!({}));
+  let Some(compiler_options) = compiler_options.as_object_mut() else {
+    return;
+  };
+  if compiler_options.contains_key("types") {
+    return;
+  }
+  let names = automatic_type_directive_names(project_root);
+  if !names.is_empty() {
+    compiler_options.insert("types".to_string(), json!(names));
+  }
 }
 
 /// The root `tsconfig.json` the language server's tsgo backend gives tsgo
@@ -200,6 +229,50 @@ fn root_overlay_of(project_root: &Path, mut value: Value) -> Value {
   }
 
   value
+}
+
+/// The `@types` packages TypeScript 5 includes on its own when a tsconfig's
+/// `compilerOptions.types` is unset (denext): every package directory in a
+/// `node_modules/@types` of `config_dir` or one of its ancestors (the default
+/// `typeRoots`), by the name a `types` entry would give it (`jest`,
+/// `babel__core`). A package whose package.json sets `"typings": null` opts
+/// out, as in TypeScript. `node` and `deno` are left out: Deno provides their
+/// types. Only a package.json project (no deno.json) gets these (see
+/// `is_node_project`); TypeScript 6 changed the default of `types` to `[]`,
+/// but such a project's own compiler is usually TypeScript 5.
+pub fn automatic_type_directive_names(config_dir: &Path) -> Vec<String> {
+  let mut names = Vec::new();
+  for dir in config_dir.ancestors() {
+    let types_dir = dir.join("node_modules").join("@types");
+    let Ok(entries) = std::fs::read_dir(&types_dir) else {
+      continue;
+    };
+    let mut found = Vec::new();
+    for entry in entries.flatten() {
+      let Ok(name) = entry.file_name().into_string() else {
+        continue;
+      };
+      if name.starts_with('.') || matches!(name.as_str(), "node" | "deno") {
+        continue;
+      }
+      // a symlinked package (pnpm, a linked workspace) counts as well
+      let package_dir = entry.path();
+      if !package_dir.is_dir() {
+        continue;
+      }
+      let typings_opt_out =
+        std::fs::read_to_string(package_dir.join("package.json"))
+          .ok()
+          .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+          .is_some_and(|pkg| pkg.get("typings") == Some(&Value::Null));
+      if !typings_opt_out && !names.contains(&name) {
+        found.push(name);
+      }
+    }
+    found.sort();
+    names.extend(found);
+  }
+  names
 }
 
 /// Rewrite the compiler options TypeScript 6.0 deprecated and 7.0 removed
@@ -1082,6 +1155,24 @@ fn build_tsconfig(
     compiler_options
       .insert("typeRoots".to_string(), json!(["./types", node_types_root]));
     compiler_options.insert("types".to_string(), json!(["deno", "node"]));
+  }
+  // denext: the project's `node_modules/@types` (and its ancestors'), where
+  // TypeScript looks up a `types` entry such as `jest`: the generated
+  // `typeRoots` replace the default ones, which include them.
+  if let Some(Value::Array(type_roots)) = compiler_options.get_mut("typeRoots")
+  {
+    for dir in project_root.ancestors() {
+      let types_dir = dir.join("node_modules").join("@types");
+      if !types_dir.is_dir() {
+        continue;
+      }
+      let relative_to_generated = dir == project_root
+        && node_types_root == Some("../node_modules/@types");
+      let entry = Value::String(types_dir.to_string_lossy().replace('\\', "/"));
+      if !relative_to_generated && !type_roots.contains(&entry) {
+        type_roots.push(entry);
+      }
+    }
   }
 
   // Merge user's deno.json compilerOptions (filtered to stock-tsc-compatible
@@ -2256,6 +2347,13 @@ fn partition_user_types(
       );
       continue;
     }
+    // denext: a type reference directive is looked up in `@types` first, as
+    // the generated `typeRoots` do: `"jest"` is `@types/jest` (the globals),
+    // not the declaration file of the `jest` package itself.
+    if has_at_types_package(project_root, s) {
+      keep_in_types.push(entry.clone());
+      continue;
+    }
     // A bare npm package the user imports: pull in its declaration file.
     if let Some(pkg_dir) =
       npm_types_pkg_dir(project_root, s, deno_imports, npm_package_paths)
@@ -2269,6 +2367,28 @@ fn partition_user_types(
     keep_in_types.push(entry.clone());
   }
   (keep_in_types, type_files)
+}
+
+/// Whether a `node_modules/@types` of `project_root` or an ancestor holds the
+/// package a `types` entry names (`jest` → `@types/jest`, `@babel/core` →
+/// `@types/babel__core`).
+fn has_at_types_package(project_root: &Path, entry: &str) -> bool {
+  let name = match entry.strip_prefix('@') {
+    Some(scoped) => match scoped.split_once('/') {
+      Some((scope, name)) if !name.contains('/') => {
+        format!("{scope}__{name}")
+      }
+      _ => return false,
+    },
+    None if !entry.contains('/') && !entry.contains(':') => entry.to_string(),
+    None => return false,
+  };
+  if matches!(name.as_str(), "" | "node" | "deno") {
+    return false;
+  }
+  project_root
+    .ancestors()
+    .any(|dir| dir.join("node_modules").join("@types").join(&name).is_dir())
 }
 
 fn merge_user_types(base_types: &mut Vec<Value>, user_types: &[Value]) {
@@ -2869,6 +2989,100 @@ interface AlsoKeep {
     assert!(tsconfig.get("exclude").is_none());
     let files_arr = tsconfig.get("files").unwrap().as_array().unwrap();
     assert_eq!(files_arr, &vec![json!("main.ts"), json!("lib.ts")]);
+  }
+
+  // DENEXT.md item 122: the `@types` packages TypeScript 5 includes on its
+  // own, which a package.json project's tsconfig.json without `types` gets
+  #[test]
+  fn automatic_type_directive_names_reads_every_types_root() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let project = root.join("app");
+    let write_pkg = |dir: &Path, name: &str, pkg: &str| {
+      let pkg_dir = dir.join("node_modules").join("@types").join(name);
+      std::fs::create_dir_all(&pkg_dir).unwrap();
+      std::fs::write(pkg_dir.join("package.json"), pkg).unwrap();
+    };
+    write_pkg(&project, "jest", "{}");
+    write_pkg(&project, "babel__core", "{}");
+    // Deno provides these
+    write_pkg(&project, "node", "{}");
+    write_pkg(&project, "deno", "{}");
+    // opted out, as TypeScript reads it
+    write_pkg(&project, "opted-out", r#"{ "typings": null }"#);
+    // an ancestor's, after the project's own; a duplicate counted once
+    write_pkg(root, "supertest", "{}");
+    write_pkg(root, "jest", "{}");
+    std::fs::write(
+      project.join("node_modules").join("@types").join(".bin"),
+      "",
+    )
+    .unwrap();
+    assert_eq!(
+      automatic_type_directive_names(&project),
+      vec!["babel__core", "jest", "supertest"]
+    );
+  }
+
+  #[test]
+  fn types_entry_resolves_through_at_types_first() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("app");
+    for name in ["jest", "babel__core", "node"] {
+      std::fs::create_dir_all(
+        dir.path().join("node_modules").join("@types").join(name),
+      )
+      .unwrap();
+    }
+    std::fs::create_dir_all(&project).unwrap();
+    assert!(has_at_types_package(&project, "jest"));
+    assert!(has_at_types_package(&project, "@babel/core"));
+    // Deno's own, no package of that name, or not a package name
+    assert!(!has_at_types_package(&project, "node"));
+    assert!(!has_at_types_package(&project, "vitest"));
+    assert!(!has_at_types_package(&project, "jest/globals"));
+    assert!(!has_at_types_package(&project, "@babel/core/sub"));
+    assert!(!has_at_types_package(&project, "npm:jest"));
+  }
+
+  #[test]
+  fn generated_type_roots_keep_the_projects_at_types() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("app");
+    let at_types = project.join("node_modules").join("@types");
+    let parent_at_types = dir.path().join("node_modules").join("@types");
+    std::fs::create_dir_all(&at_types).unwrap();
+    std::fs::create_dir_all(&parent_at_types).unwrap();
+    let type_roots = |node_types_root: Option<&str>| {
+      build_tsconfig(
+        &project,
+        None,
+        None,
+        None,
+        &[],
+        &BTreeMap::new(),
+        &Map::new(),
+        &project.join("node_modules").join("@jsr"),
+        &BTreeMap::new(),
+        &[],
+        node_types_root,
+        &[],
+        false,
+      )["compilerOptions"]["typeRoots"]
+        .clone()
+    };
+    let slash = |p: &Path| p.to_string_lossy().replace('\\', "/");
+    // no `@types/node`: the project's and its ancestors' `@types` still
+    // resolve a `types` entry such as `jest`
+    assert_eq!(
+      type_roots(None),
+      json!(["./types", slash(&at_types), slash(&parent_at_types)])
+    );
+    // the project's own already present, relative to the generated config
+    assert_eq!(
+      type_roots(Some("../node_modules/@types")),
+      json!(["./types", "../node_modules/@types", slash(&parent_at_types)])
+    );
   }
 
   #[test]

@@ -863,7 +863,11 @@ impl CliFactory {
         npmrc_path.as_deref(),
       )
       .with_upstream_by_name(supply_chain.jail_upstream_by_name)
-      .with_known_packages(supply_chain.jail_known_packages),
+      .with_known_packages(supply_chain.jail_known_packages)
+      .with_settings_in_package_json(matches!(
+        cli_options.workspace().supply_chain_settings_home(),
+        deno_config::workspace::SupplyChainSettingsHome::PackageJson(_)
+      )),
     )))
   }
 

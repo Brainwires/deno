@@ -266,6 +266,10 @@ pub enum WorkspaceDiagnosticKind {
     "\"imports\" and \"scopes\" in the config file are ignored for dependency management when \"preferPackageJson\" is enabled. Move these dependencies to package.json."
   )]
   PreferPackageJsonWithImports,
+  #[error(
+    "\"deno.{0}\" in package.json is ignored because a deno.json applies. Move it to the deno.json as \"{0}\"."
+  )]
+  PkgJsonDenoSettingShadowed(&'static str),
 }
 
 #[derive(Debug, Error, JsError, Clone, PartialEq, Eq)]
@@ -1510,6 +1514,39 @@ impl Workspace {
 
         check_all_configs(config, &mut diagnostics);
       }
+      if let Some(pkg_json) = &folder.pkg_json
+        && let Some(settings) = &pkg_json.deno
+      {
+        // the `"deno"` object is read from the root package.json, and only
+        // without a root deno.json
+        for (key, path, is_set) in [
+          (
+            "allowScripts",
+            "deno.allowScripts",
+            settings.allow_scripts.is_some(),
+          ),
+          (
+            "supplyChain",
+            "deno.supplyChain",
+            settings.supply_chain.is_some(),
+          ),
+        ] {
+          if !is_set {
+            continue;
+          }
+          let kind = if !is_root {
+            WorkspaceDiagnosticKind::PkgJsonRootOnlyOption(path)
+          } else if folder.deno_json.is_some() {
+            WorkspaceDiagnosticKind::PkgJsonDenoSettingShadowed(key)
+          } else {
+            continue;
+          };
+          diagnostics.push(WorkspaceDiagnostic {
+            config_url: pkg_json.specifier(),
+            kind,
+          });
+        }
+      }
       if !is_root && let Some(pkg_json) = &folder.pkg_json {
         if pkg_json.overrides.is_some() {
           diagnostics.push(WorkspaceDiagnostic {
@@ -1873,26 +1910,63 @@ impl Workspace {
       .map(|v| v.unwrap_or_default())
   }
 
-  /// The root deno.json's `supplyChain`.
+  /// The project's `supplyChain`: the root deno.json's, else (no root
+  /// deno.json) the root package.json's `"deno"` object's.
   pub fn supply_chain(
     &self,
   ) -> Result<deno_json::SupplyChainConfig, deno_json::ToInvalidConfigError> {
-    self
-      .root_deno_json()
-      .map(|c| c.to_supply_chain_config())
-      .transpose()
-      .map(|v| v.unwrap_or_default())
+    match self.supply_chain_settings_home() {
+      SupplyChainSettingsHome::DenoJson(c) => c.to_supply_chain_config(),
+      SupplyChainSettingsHome::PackageJson(pkg_json) => {
+        deno_json::parse_supply_chain_config(
+          pkg_json.deno.as_ref().and_then(|d| d.supply_chain.as_ref()),
+          "deno.supplyChain",
+          pkg_json.path.parent(),
+        )
+      }
+      SupplyChainSettingsHome::None => Ok(Default::default()),
+    }
   }
 
+  /// The project's `allowScripts`: the root deno.json's, else (no root
+  /// deno.json) the root package.json's `"deno"` object's.
   pub fn allow_scripts(
     &self,
   ) -> Result<AllowScriptsConfig, deno_json::ToInvalidConfigError> {
-    self
-      .root_deno_json()
-      .map(|c| c.to_allow_scripts_config())
-      .transpose()
-      .map(|v| v.unwrap_or_default())
+    match self.supply_chain_settings_home() {
+      SupplyChainSettingsHome::DenoJson(c) => c.to_allow_scripts_config(),
+      SupplyChainSettingsHome::PackageJson(pkg_json) => {
+        deno_json::parse_allow_scripts_config(
+          pkg_json.deno.as_ref().and_then(|d| d.allow_scripts.as_ref()),
+          "deno.allowScripts",
+        )
+      }
+      SupplyChainSettingsHome::None => Ok(Default::default()),
+    }
   }
+
+  /// Where the project keeps `allowScripts` and `supplyChain`: the root
+  /// deno.json when there is one (a package.json's `"deno"` object is then
+  /// ignored, with a diagnostic), else the root package.json, whose
+  /// `"deno"` object holds them so that a Node.js project needs no deno.json
+  /// (which would change how it resolves and installs) to approve scripts or
+  /// configure the lifecycle-script jail.
+  pub fn supply_chain_settings_home(&self) -> SupplyChainSettingsHome<'_> {
+    match (self.root_deno_json(), self.root_pkg_json()) {
+      (Some(deno_json), _) => SupplyChainSettingsHome::DenoJson(deno_json),
+      (None, Some(pkg_json)) => SupplyChainSettingsHome::PackageJson(pkg_json),
+      (None, None) => SupplyChainSettingsHome::None,
+    }
+  }
+}
+
+/// See [`Workspace::supply_chain_settings_home`].
+#[derive(Debug, Clone, Copy)]
+pub enum SupplyChainSettingsHome<'a> {
+  DenoJson(&'a ConfigFileRc),
+  /// `allowScripts` / `supplyChain` in its `"deno"` object.
+  PackageJson(&'a PackageJsonRc),
+  None,
 }
 
 #[derive(Debug, Clone)]
@@ -4791,6 +4865,130 @@ pub mod test {
         config_url: url_from_file_path(&root_dir().join("member/deno.json"))
           .unwrap(),
       }]
+    );
+  }
+
+  // DENEXT.md item 125: a package.json project (no deno.json) keeps
+  // `allowScripts` and `supplyChain` in package.json's `"deno"` object, since
+  // a deno.json would take it out of Node.js resolution
+  #[test]
+  fn test_pkg_json_deno_settings() {
+    let sys = InMemorySys::default();
+    sys.fs_insert_json(
+      root_dir().join("package.json"),
+      json!({
+        "workspaces": ["./member"],
+        "deno": {
+          "allowScripts": ["npm:bcrypt@6"],
+          "supplyChain": {
+            "jailScripts": {
+              "packages": { "npm:sharp": { "write": ["./vendor"] } }
+            }
+          }
+        }
+      }),
+    );
+    sys.fs_insert_json(
+      root_dir().join("member/package.json"),
+      json!({ "name": "member", "deno": { "allowScripts": true } }),
+    );
+    let workspace_dir =
+      workspace_at_start_dir(&sys, &root_dir().join("member"));
+    let workspace = &workspace_dir.workspace;
+    assert!(matches!(
+      workspace.supply_chain_settings_home(),
+      SupplyChainSettingsHome::PackageJson(_)
+    ));
+    let allow_scripts = workspace.allow_scripts().unwrap();
+    assert_eq!(
+      allow_scripts.allow,
+      crate::deno_json::AllowScriptsValueConfig::Limited(vec![
+        JsrDepPackageReq::from_str("npm:bcrypt@6").unwrap()
+      ])
+    );
+    let supply_chain = workspace.supply_chain().unwrap();
+    // an exceptions-only object configures the default jail
+    assert_eq!(supply_chain.jail_scripts, None);
+    // relative to the package.json
+    assert_eq!(
+      supply_chain.jail_packages["sharp"].write,
+      vec![root_dir().join("vendor")]
+    );
+    // a member's is reported, never applied
+    assert_eq!(
+      workspace.diagnostics(),
+      vec![WorkspaceDiagnostic {
+        kind: WorkspaceDiagnosticKind::PkgJsonRootOnlyOption(
+          "deno.allowScripts"
+        ),
+        config_url: url_from_file_path(&root_dir().join("member/package.json"))
+          .unwrap(),
+      }]
+    );
+  }
+
+  #[test]
+  fn test_pkg_json_deno_settings_invalid() {
+    let sys = InMemorySys::default();
+    sys.fs_insert_json(
+      root_dir().join("package.json"),
+      json!({ "deno": { "allowScripts": "bcrypt" } }),
+    );
+    let workspace_dir = workspace_at_start_dir(&sys, &root_dir());
+    let err = workspace_dir.workspace.allow_scripts().unwrap_err();
+    assert_eq!(
+      err.to_string(),
+      "Failed to parse \"deno.allowScripts\" configuration"
+    );
+  }
+
+  #[test]
+  fn test_pkg_json_deno_settings_shadowed_by_deno_json() {
+    let sys = InMemorySys::default();
+    sys.fs_insert_json(
+      root_dir().join("deno.json"),
+      json!({ "allowScripts": ["npm:esbuild"] }),
+    );
+    sys.fs_insert_json(
+      root_dir().join("package.json"),
+      json!({
+        "deno": {
+          "allowScripts": ["npm:bcrypt"],
+          "supplyChain": { "paranoid": true }
+        }
+      }),
+    );
+    let workspace_dir = workspace_at_start_dir(&sys, &root_dir());
+    let workspace = &workspace_dir.workspace;
+    assert!(matches!(
+      workspace.supply_chain_settings_home(),
+      SupplyChainSettingsHome::DenoJson(_)
+    ));
+    assert_eq!(
+      workspace.allow_scripts().unwrap().allow,
+      crate::deno_json::AllowScriptsValueConfig::Limited(vec![
+        JsrDepPackageReq::from_str("npm:esbuild").unwrap()
+      ])
+    );
+    assert_eq!(workspace.supply_chain().unwrap().paranoid, None);
+    let pkg_json_url =
+      url_from_file_path(&root_dir().join("package.json")).unwrap();
+    assert_eq!(
+      workspace.diagnostics(),
+      vec![
+        WorkspaceDiagnostic {
+          kind: WorkspaceDiagnosticKind::PkgJsonDenoSettingShadowed(
+            "allowScripts"
+          ),
+          config_url: pkg_json_url.clone(),
+        },
+        WorkspaceDiagnostic {
+          kind: WorkspaceDiagnosticKind::PkgJsonDenoSettingShadowed(
+            "supplyChain"
+          ),
+          config_url: pkg_json_url,
+        },
+      ]
     );
   }
 

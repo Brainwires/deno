@@ -340,15 +340,21 @@ impl ConfigUpdater {
     removed
   }
 
+  /// Sets `allowScripts`: top level in a deno.json, in the `"deno"` object
+  /// of a package.json (DENEXT.md item 125).
   fn set_allow_scripts_value(
     &mut self,
     value: jsonc_parser::cst::CstInputValue,
   ) {
-    if let Some(prop) = self.root_object.get("allowScripts") {
+    let object = match self.kind {
+      ConfigKind::DenoJson => self.root_object.clone(),
+      ConfigKind::PackageJson => self.root_object.object_value_or_set("deno"),
+    };
+    if let Some(prop) = object.get("allowScripts") {
       prop.set_value(value);
     } else {
-      let index = self.root_object.properties().len();
-      self.root_object.insert(index, "allowScripts", value);
+      let index = object.properties().len();
+      object.insert(index, "allowScripts", value);
     }
     self.modified = true;
   }

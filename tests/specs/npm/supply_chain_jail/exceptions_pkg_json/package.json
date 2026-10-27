@@ -1,0 +1,20 @@
+{
+  "name": "app",
+  "version": "1.0.0",
+  "dependencies": {
+    "@denotest/jail-control-probe": "1.0.0"
+  },
+  "deno": {
+    "allowScripts": ["npm:@denotest/jail-control-probe"],
+    "supplyChain": {
+      "jailScripts": {
+        "packages": {
+          "npm:@denotest/jail-control-probe": {
+            "env": ["JAIL_PASSED_VAR"],
+            "write": ["."]
+          }
+        }
+      }
+    }
+  }
+}

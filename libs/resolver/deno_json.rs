@@ -659,6 +659,20 @@ impl CompilerOptionsData {
           result.ignored_options.push(ignored);
         }
       }
+      // TypeScript 6 deprecates `baseUrl` (TS5101, which fails the whole
+      // check) and 7 removes it; the native checker adapts it away
+      // (`adapt_removed_compiler_options`). Module resolution, `paths`
+      // included, is Deno's in either case, so the in-process checker keeps
+      // the option and silences the deprecation the way the error itself
+      // suggests, unless the config chose an `ignoreDeprecations` of its own.
+      if matches!(typ, CompilerOptionsType::Check { .. })
+        && let Some(compiler_options) =
+          result.compiler_options.0.as_object_mut()
+        && compiler_options.contains_key("baseUrl")
+        && !compiler_options.contains_key("ignoreDeprecations")
+      {
+        compiler_options.insert("ignoreDeprecations".into(), "6.0".into());
+      }
       if matches!(typ, CompilerOptionsType::Check { .. })
         && self.overrides.force_check_js
         && let Some(compiler_options) =

@@ -704,8 +704,21 @@ pub struct PackageJson {
   /// Read from the project's own package.json.
   #[serde(skip_serializing_if = "Option::is_none")]
   pub deno_condition: Option<Value>,
+  /// The `"deno"` object's settings: where a project with a package.json
+  /// and no deno.json keeps `allowScripts` and `supplyChain`. Read from the
+  /// project's own (workspace root) package.json only.
+  #[serde(skip_serializing)]
+  pub deno: Option<PackageJsonDenoSettings>,
   #[serde(skip_serializing)]
   resolved_deps: PackageJsonDepsRcCell,
+}
+
+/// The settings a package.json's `"deno"` object holds for the project, as
+/// written (deno.json's `allowScripts` and `supplyChain`, same shapes).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PackageJsonDenoSettings {
+  pub allow_scripts: Option<Value>,
+  pub supply_chain: Option<Value>,
 }
 
 impl PackageJson {
@@ -783,6 +796,7 @@ impl PackageJson {
         catalogs: None,
         side_effects: None,
         deno_condition: None,
+        deno: None,
         resolved_deps: Default::default(),
       });
     }
@@ -991,6 +1005,18 @@ impl PackageJson {
         _ => None,
       });
     let deno_condition = package_json.remove("denoCondition");
+    // a dependency's own `"deno"` field may be anything (some name an entry
+    // point); only an object with these keys is the project's settings
+    let deno = match package_json.remove("deno") {
+      Some(Value::Object(mut map)) => {
+        let settings = PackageJsonDenoSettings {
+          allow_scripts: map.remove("allowScripts"),
+          supply_chain: map.remove("supplyChain"),
+        };
+        (settings != PackageJsonDenoSettings::default()).then_some(settings)
+      }
+      _ => None,
+    };
     // Top-level catalog/catalogs take precedence; fall back to those
     // extracted from the workspaces object form.
     let catalog = package_json
@@ -1046,6 +1072,7 @@ impl PackageJson {
       catalogs,
       side_effects,
       deno_condition,
+      deno,
       resolved_deps: Default::default(),
     })
   }
@@ -1995,5 +2022,33 @@ mod test {
     // Top-level catalog should win
     let catalog = pj.catalog.unwrap();
     assert_eq!(catalog.get("foo").unwrap(), "1.0.0");
+  }
+
+  #[test]
+  fn test_deno_settings_object() {
+    let load = |value: serde_json::Value| {
+      PackageJson::load_from_value(PathBuf::from("/package.json"), value)
+        .unwrap()
+        .deno
+    };
+    assert_eq!(
+      load(serde_json::json!({
+        "deno": {
+          "allowScripts": ["npm:bcrypt"],
+          "supplyChain": { "jailScripts": { "packages": {} } },
+          "other": 1
+        }
+      })),
+      Some(PackageJsonDenoSettings {
+        allow_scripts: Some(serde_json::json!(["npm:bcrypt"])),
+        supply_chain: Some(serde_json::json!({
+          "jailScripts": { "packages": {} }
+        })),
+      })
+    );
+    // a dependency's entry point, an object without the settings, none
+    assert_eq!(load(serde_json::json!({ "deno": "./mod.ts" })), None);
+    assert_eq!(load(serde_json::json!({ "deno": { "main": "x" } })), None);
+    assert_eq!(load(serde_json::json!({})), None);
   }
 }
