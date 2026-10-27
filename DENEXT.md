@@ -4857,6 +4857,34 @@ where the changes are discussed.
      `knownPackages` in `test_to_supply_chain_config` (`libs/config/deno_json`),
      and `lifecycleJail` in `info/json`.
 
+120. **`fix(deps)`: the AppImage's zstd on zstd 0.14, the zstd 0.13 copy gone**
+     (`fix/backhand-zstd`, CLI only; `cli/tools/desktop.rs`, `Cargo.toml`,
+     `Cargo.lock`, `.cargo/audit.toml`). backhand 0.25 (the AppImage's
+     squashfs writer and reader) kept zstd 0.13.2 / zstd-safe 7.2.4 in the lock
+     beside the workspace's 0.14.3 / 8.2.0 (item 119). Its `zstd` feature is
+     off now, and `AppImageZstd`, a backhand `CompressionAction`, does the
+     zstd blocks on the workspace zstd the way backhand's `DefaultCompressor`
+     did (one-shot `bulk` contexts, level 3, no compression options, the
+     decompressed size bounded by the block backhand reserves), handing any
+     other compressor id to `DefaultCompressor` when reading. The writer and
+     the tests' readers use it through `Kind::new_v4`
+     (`appimage_squashfs_kind`); the image bytes are standard zstd SquashFS 4.0
+     as before. backhand stays the crates.io release: no `[patch]`, no vendored
+     copy. `.cargo/audit.toml` drops its RUSTSEC-2026-0391, -0398 and -0403
+     ignores, and `cargo audit` lists no vulnerability and none of the ten
+     `unsound` warnings (RUSTSEC-2026-0395 to -0406) any more; the lock before
+     this change, audited with the ignores gone, reports those three
+     vulnerabilities and ten warnings. Turn backhand's `zstd` feature back on
+     (and drop `AppImageZstd`) once a backhand release is on zstd 0.14. The
+     image's root directory is still written with mode 0 (backhand's
+     `FilesystemWriter` default, unchanged here), which `unsquashfs` and
+     `--appimage-extract` restore as an unreadable directory. Tests:
+     `appimage_zstd_blocks_and_fragments_round_trip` (compressible files over
+     two data blocks and inside a fragment, read back through `AppImageZstd`
+     and, where squashfs-tools is installed, extracted with `unsquashfs`) and
+     `appimage_zstd_decompress_is_bounded_and_delegates`; without the custom
+     `Kind` the four AppImage tests that write an image fail.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118) are what the prebuilt `libdenort` carries. The CLI-side parts (for example

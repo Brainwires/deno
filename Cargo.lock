@@ -469,8 +469,6 @@ dependencies = [
  "thiserror 2.0.21",
  "tracing",
  "xxhash-rust",
- "zstd 0.13.2",
- "zstd-safe 7.2.4",
 ]
 
 [[package]]
@@ -794,7 +792,7 @@ name = "bsdiff_helper"
 version = "0.1.0"
 dependencies = [
  "bsdiff",
- "zstd 0.14.3",
+ "zstd",
 ]
 
 [[package]]
@@ -2093,7 +2091,7 @@ dependencies = [
  "winres",
  "yaml_parser",
  "zip",
- "zstd 0.14.3",
+ "zstd",
 ]
 
 [[package]]
@@ -2967,7 +2965,7 @@ dependencies = [
  "url",
  "webpki-root-certs",
  "windows-sys 0.59.0",
- "zstd 0.14.3",
+ "zstd",
 ]
 
 [[package]]
@@ -8958,7 +8956,7 @@ dependencies = [
  "sha3",
  "thiserror 2.0.21",
  "zeroize",
- "zstd 0.14.3",
+ "zstd",
 ]
 
 [[package]]
@@ -13165,29 +13163,11 @@ dependencies = [
 
 [[package]]
 name = "zstd"
-version = "0.13.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fcf2b778a664581e31e389454a7072dab1647606d44f7feea22cd5abb9c9f3f9"
-dependencies = [
- "zstd-safe 7.2.4",
-]
-
-[[package]]
-name = "zstd"
 version = "0.14.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "db3ae9bf90af6e40197bef767eeefc46ad6397420fe873830bd85e5fbbfb3c70"
 dependencies = [
- "zstd-safe 8.2.0",
-]
-
-[[package]]
-name = "zstd-safe"
-version = "7.2.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8f49c4d5f0abb602a93fb8736af2a4f4dd9512e36f7f570d66e65ff867ed3b9d"
-dependencies = [
- "zstd-sys",
+ "zstd-safe",
 ]
 
 [[package]]
