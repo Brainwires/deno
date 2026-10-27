@@ -21,9 +21,25 @@
 //!   allows only TCP sockets (no UDP, so no DNS or other datagrams; no SCTP
 //!   or MPTCP, which Landlock's port rules don't cover) and no TCP Fast Open
 //!   sends (`MSG_FASTOPEN` connects without `connect(2)`). Landlock matches
-//!   the port, not the address: a connection to another machine on the
-//!   proxy's (random) port number isn't refused by the kernel. Without ABI 4
-//!   the jail decides what to do (`jail::choose_os_net`).
+//!   the port, not the address, so where unprivileged user namespaces are
+//!   allowed the script also runs in a network namespace of its own
+//!   (`unshare(CLONE_NEWUSER | CLONE_NEWNET)`, [`NetnsHandoff`], DENEXT.md
+//!   item 124): only a loopback interface exists there, the proxy's
+//!   listening socket is bound on it by the script's process before it
+//!   starts and handed to the installer over a socketpair (`SCM_RIGHTS`),
+//!   and no route leads anywhere else. Without a namespace (a sysctl or
+//!   AppArmor restriction), a connection to another machine on the proxy's
+//!   (random) port number isn't refused by the kernel, which a warning says;
+//!   without ABI 4 either, the jail decides what to do
+//!   (`jail::choose_os_net`).
+//! - seccomp also refuses `ioctl(TIOCSTI)` / `ioctl(TIOCLINUX)`, which type
+//!   into a terminal; the script has none (its own session) and `/dev/tty`
+//!   is not writable, but a kernel before 6.2 would still take `TIOCSTI` on
+//!   a terminal opened by path.
+//! - The installer is a child subreaper (`PR_SET_CHILD_SUBREAPER`): a
+//!   descendant the script orphaned becomes the installer's child, and is
+//!   ended and reaped with the script's process group
+//!   ([`end_adopted_strays`]).
 
 use std::ffi::CString;
 use std::io;
@@ -36,6 +52,411 @@ use std::path::PathBuf;
 use std::sync::OnceLock;
 
 use super::jail::OsNet;
+
+/// Makes this process a child subreaper, once: orphaned descendants of a
+/// jailed script are re-parented here rather than to init, so they can be
+/// ended and reaped.
+pub fn become_subreaper() {
+  static DONE: OnceLock<()> = OnceLock::new();
+  DONE.get_or_init(|| {
+    // SAFETY: a plain prctl with no pointers
+    let res = unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) };
+    if res != 0 {
+      log::debug!(
+        "jail-scripts: PR_SET_CHILD_SUBREAPER failed: {}",
+        io::Error::last_os_error()
+      );
+    }
+  });
+}
+
+/// The parent of a process from `/proc/<pid>/stat`.
+fn parent_of(pid: u32) -> Option<u32> {
+  let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+  // the command name is in parentheses and may hold spaces
+  let after = &stat[stat.rfind(')')? + 1..];
+  after.split_whitespace().nth(1)?.parse().ok()
+}
+
+/// The pids of this process's children.
+pub fn children_of_self() -> Vec<u32> {
+  // SAFETY: getpid has no failure mode
+  let me = unsafe { libc::getpid() } as u32;
+  let Ok(entries) = std::fs::read_dir("/proc") else {
+    return Vec::new();
+  };
+  entries
+    .flatten()
+    .filter_map(|entry| entry.file_name().to_str()?.parse::<u32>().ok())
+    .filter(|pid| parent_of(*pid) == Some(me))
+    .collect()
+}
+
+/// Ends and reaps the children this process adopted since `before` (the
+/// subreaper's) that are not in its own session: what a jailed script left
+/// running (it runs in a session of its own, as does anything that detached
+/// from it). The installer's own children, in its session, are left alone.
+pub fn end_adopted_strays(before: &[u32]) {
+  // SAFETY: getsid(0) is this process's session
+  let my_session = unsafe { libc::getsid(0) };
+  for pid in children_of_self() {
+    if before.contains(&pid) {
+      continue;
+    }
+    let Ok(raw) = libc::pid_t::try_from(pid) else {
+      continue;
+    };
+    // SAFETY: a pid lookup; a gone process means -1
+    let session = unsafe { libc::getsid(raw) };
+    if session < 0 || session == my_session {
+      continue;
+    }
+    log::debug!(
+      "jail-scripts: ending a process the script left behind ({pid})"
+    );
+    // SAFETY: a child of this process, by the /proc scan above; after
+    // SIGKILL the blocking wait returns at once
+    unsafe {
+      libc::kill(raw, libc::SIGKILL);
+      let mut status = 0;
+      libc::waitpid(raw, &mut status, 0);
+    }
+  }
+}
+
+/// Whether this process can give a child a user and network namespace of
+/// its own (unprivileged user namespaces), or why not.
+pub fn netns_available() -> Result<(), String> {
+  static AVAILABLE: OnceLock<Result<(), String>> = OnceLock::new();
+  AVAILABLE
+    .get_or_init(|| {
+      if let Ok(max) = std::fs::read_to_string("/proc/sys/user/max_user_namespaces")
+        && max.trim() == "0"
+      {
+        return Err(
+          "user namespaces are disabled (user.max_user_namespaces = 0)".into(),
+        );
+      }
+      // SAFETY: getuid / getgid have no failure mode
+      let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
+      let uid_map = format!("{uid} {uid} 1\n");
+      let gid_map = format!("{gid} {gid} 1\n");
+      // tried in a child, so this process keeps its namespaces; the child
+      // runs only async-signal-safe calls and exits with the errno
+      // SAFETY: fork; the child does no allocation
+      let pid = unsafe { libc::fork() };
+      if pid < 0 {
+        return Err(format!("fork failed: {}", io::Error::last_os_error()));
+      }
+      if pid == 0 {
+        let code = match enter_user_netns(&uid_map, &gid_map) {
+          Ok(()) => 0,
+          Err(err) => err.raw_os_error().unwrap_or(libc::EPERM),
+        };
+        // SAFETY: the child ends here
+        unsafe { libc::_exit(code) };
+      }
+      let mut status = 0;
+      // SAFETY: waiting for the child just forked
+      unsafe { libc::waitpid(pid, &mut status, 0) };
+      if !libc::WIFEXITED(status) {
+        return Err("the namespace probe died".into());
+      }
+      match libc::WEXITSTATUS(status) {
+        0 => Ok(()),
+        errno => {
+          let err = io::Error::from_raw_os_error(errno);
+          let hint = if errno == libc::EPERM || errno == libc::EACCES {
+            " (unprivileged user namespaces are restricted here: sysctl kernel.unprivileged_userns_clone, kernel.apparmor_restrict_unprivileged_userns, or a seccomp policy)"
+          } else {
+            ""
+          };
+          Err(format!("unshare(CLONE_NEWUSER | CLONE_NEWNET) failed: {err}{hint}"))
+        }
+      }
+    })
+    .clone()
+}
+
+/// Writes `data` to `path` whole (async-signal-safe: open, write, close).
+fn write_proc_file(path: &[u8], data: &[u8]) -> io::Result<()> {
+  // SAFETY: a NUL-terminated path (the callers pass literals)
+  let fd = unsafe {
+    libc::open(
+      path.as_ptr() as *const libc::c_char,
+      libc::O_WRONLY | libc::O_CLOEXEC,
+    )
+  };
+  if fd < 0 {
+    return Err(io::Error::last_os_error());
+  }
+  // SAFETY: a valid fd and buffer
+  let written = unsafe {
+    libc::write(fd, data.as_ptr() as *const libc::c_void, data.len())
+  };
+  // SAFETY: just opened
+  unsafe { libc::close(fd) };
+  if written != data.len() as isize {
+    return Err(io::Error::last_os_error());
+  }
+  Ok(())
+}
+
+/// Moves this process into a new user and network namespace, maps its
+/// user and group to themselves, and brings the loopback interface up.
+/// Async-signal-safe (it runs between fork and exec).
+fn enter_user_netns(uid_map: &str, gid_map: &str) -> io::Result<()> {
+  // SAFETY: a plain syscall
+  if unsafe { libc::unshare(libc::CLONE_NEWUSER | libc::CLONE_NEWNET) } != 0 {
+    return Err(io::Error::last_os_error());
+  }
+  write_proc_file(b"/proc/self/setgroups\0", b"deny")?;
+  write_proc_file(b"/proc/self/uid_map\0", uid_map.as_bytes())?;
+  write_proc_file(b"/proc/self/gid_map\0", gid_map.as_bytes())?;
+  // SAFETY: a datagram socket for the interface ioctl
+  let sock = unsafe {
+    libc::socket(libc::AF_INET, libc::SOCK_DGRAM | libc::SOCK_CLOEXEC, 0)
+  };
+  if sock < 0 {
+    return Err(io::Error::last_os_error());
+  }
+  // SAFETY: an ifreq zeroed, then named and flagged; the ioctl reads it
+  let res = unsafe {
+    let mut req: libc::ifreq = std::mem::zeroed();
+    req.ifr_name[0] = b'l' as libc::c_char;
+    req.ifr_name[1] = b'o' as libc::c_char;
+    req.ifr_ifru.ifru_flags =
+      (libc::IFF_UP | libc::IFF_RUNNING) as libc::c_short;
+    libc::ioctl(sock, libc::SIOCSIFFLAGS, &req as *const libc::ifreq)
+  };
+  let err = io::Error::last_os_error();
+  // SAFETY: just opened
+  unsafe { libc::close(sock) };
+  if res != 0 {
+    return Err(err);
+  }
+  Ok(())
+}
+
+/// A port for the proxy inside a script's network namespace: nothing else
+/// is on that loopback, so any port does; a random one keeps a script from
+/// assuming it.
+pub fn pick_proxy_port() -> u16 {
+  use rand::Rng;
+  rand::thread_rng().gen_range(20_000..60_000)
+}
+
+/// Hands the installer a listening socket bound inside the script's
+/// network namespace: the script's process (between fork and exec) enters
+/// the namespace, binds `127.0.0.1:<port>`, and sends the socket over a
+/// socketpair; the installer receives it and serves the proxy on it.
+pub struct NetnsHandoff {
+  parent: OwnedFd,
+  child: OwnedFd,
+  port: u16,
+}
+
+impl NetnsHandoff {
+  pub fn new(port: u16) -> io::Result<Self> {
+    let mut fds = [0; 2];
+    // SAFETY: a socketpair into a two-element array
+    let res = unsafe {
+      libc::socketpair(
+        libc::AF_UNIX,
+        libc::SOCK_STREAM | libc::SOCK_CLOEXEC,
+        0,
+        fds.as_mut_ptr(),
+      )
+    };
+    if res != 0 {
+      return Err(io::Error::last_os_error());
+    }
+    // SAFETY: just created, owned here
+    let (parent, child) =
+      unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) };
+    Ok(Self {
+      parent,
+      child,
+      port,
+    })
+  }
+
+  /// Adds the namespace setup to the command's `pre_exec` (before the
+  /// Landlock / seccomp one, which must come last).
+  pub fn apply_to_command(&self, command: &mut tokio::process::Command) {
+    let child_fd = self.child.as_raw_fd();
+    let port = self.port;
+    // SAFETY: getuid / getgid have no failure mode
+    let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
+    let uid_map = format!("{uid} {uid} 1\n");
+    let gid_map = format!("{gid} {gid} 1\n");
+    // SAFETY: only async-signal-safe syscalls run between fork and exec, on
+    // memory allocated before the fork
+    unsafe {
+      command.pre_exec(move || {
+        enter_user_netns(&uid_map, &gid_map)?;
+        let listener = bind_loopback(port)?;
+        let sent = send_fd(child_fd, listener);
+        libc::close(listener);
+        libc::close(child_fd);
+        sent
+      });
+    }
+  }
+
+  /// Receives the listener the child bound (within a few seconds, or an
+  /// error: the child failed before sending it).
+  pub async fn receive(self) -> io::Result<tokio::net::TcpListener> {
+    let Self { parent, child, .. } = self;
+    // the child's end closes here, so a child that exits without sending
+    // ends the wait with EOF rather than a timeout
+    drop(child);
+    let fd = tokio::task::spawn_blocking(move || recv_fd(&parent))
+      .await
+      .map_err(io::Error::other)??;
+    let listener = std::net::TcpListener::from(fd);
+    listener.set_nonblocking(true)?;
+    tokio::net::TcpListener::from_std(listener)
+  }
+}
+
+/// Binds and listens on `127.0.0.1:<port>` (async-signal-safe); returns the
+/// raw descriptor.
+fn bind_loopback(port: u16) -> io::Result<libc::c_int> {
+  // SAFETY: a TCP socket
+  let fd = unsafe {
+    libc::socket(libc::AF_INET, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0)
+  };
+  if fd < 0 {
+    return Err(io::Error::last_os_error());
+  }
+  let addr = libc::sockaddr_in {
+    sin_family: libc::AF_INET as libc::sa_family_t,
+    sin_port: port.to_be(),
+    sin_addr: libc::in_addr {
+      s_addr: u32::from(std::net::Ipv4Addr::LOCALHOST).to_be(),
+    },
+    sin_zero: [0; 8],
+  };
+  // SAFETY: a valid socket and address
+  let res = unsafe {
+    libc::bind(
+      fd,
+      &addr as *const libc::sockaddr_in as *const libc::sockaddr,
+      std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t,
+    )
+  };
+  if res != 0 {
+    let err = io::Error::last_os_error();
+    // SAFETY: just opened
+    unsafe { libc::close(fd) };
+    return Err(err);
+  }
+  // SAFETY: a bound socket
+  if unsafe { libc::listen(fd, 128) } != 0 {
+    let err = io::Error::last_os_error();
+    // SAFETY: just opened
+    unsafe { libc::close(fd) };
+    return Err(err);
+  }
+  Ok(fd)
+}
+
+/// Sends a descriptor over a Unix socket (`SCM_RIGHTS`); async-signal-safe.
+fn send_fd(sock: libc::c_int, fd: libc::c_int) -> io::Result<()> {
+  let mut byte = [1u8];
+  let mut iov = libc::iovec {
+    iov_base: byte.as_mut_ptr() as *mut libc::c_void,
+    iov_len: 1,
+  };
+  // SAFETY: CMSG_SPACE of one int is a constant small size
+  let space =
+    unsafe { libc::CMSG_SPACE(std::mem::size_of::<libc::c_int>() as u32) }
+      as usize;
+  let mut control = [0u8; 64];
+  debug_assert!(space <= control.len());
+  // SAFETY: a msghdr over stack buffers, the control message filled through
+  // the CMSG macros
+  let res = unsafe {
+    let mut msg: libc::msghdr = std::mem::zeroed();
+    msg.msg_iov = &mut iov;
+    msg.msg_iovlen = 1;
+    msg.msg_control = control.as_mut_ptr() as *mut libc::c_void;
+    msg.msg_controllen = space as _;
+    let cmsg = libc::CMSG_FIRSTHDR(&msg);
+    (*cmsg).cmsg_level = libc::SOL_SOCKET;
+    (*cmsg).cmsg_type = libc::SCM_RIGHTS;
+    (*cmsg).cmsg_len =
+      libc::CMSG_LEN(std::mem::size_of::<libc::c_int>() as u32) as _;
+    std::ptr::write_unaligned(libc::CMSG_DATA(cmsg) as *mut libc::c_int, fd);
+    libc::sendmsg(sock, &msg, 0)
+  };
+  if res < 0 {
+    return Err(io::Error::last_os_error());
+  }
+  Ok(())
+}
+
+/// Receives one descriptor over a Unix socket (`SCM_RIGHTS`), waiting at
+/// most a few seconds.
+fn recv_fd(sock: &OwnedFd) -> io::Result<OwnedFd> {
+  let mut poll = libc::pollfd {
+    fd: sock.as_raw_fd(),
+    events: libc::POLLIN,
+    revents: 0,
+  };
+  // SAFETY: one pollfd
+  let ready = unsafe { libc::poll(&mut poll, 1, 10_000) };
+  if ready < 0 {
+    return Err(io::Error::last_os_error());
+  }
+  if ready == 0 {
+    return Err(io::Error::new(
+      io::ErrorKind::TimedOut,
+      "the jailed script's process didn't hand its listener over",
+    ));
+  }
+  let mut byte = [0u8];
+  let mut iov = libc::iovec {
+    iov_base: byte.as_mut_ptr() as *mut libc::c_void,
+    iov_len: 1,
+  };
+  let mut control = [0u8; 64];
+  // SAFETY: a msghdr over stack buffers
+  let (received, fd) = unsafe {
+    let mut msg: libc::msghdr = std::mem::zeroed();
+    msg.msg_iov = &mut iov;
+    msg.msg_iovlen = 1;
+    msg.msg_control = control.as_mut_ptr() as *mut libc::c_void;
+    msg.msg_controllen = control.len() as _;
+    let received =
+      libc::recvmsg(sock.as_raw_fd(), &mut msg, libc::MSG_CMSG_CLOEXEC);
+    let mut fd = None;
+    if received > 0 {
+      let cmsg = libc::CMSG_FIRSTHDR(&msg);
+      if !cmsg.is_null()
+        && (*cmsg).cmsg_level == libc::SOL_SOCKET
+        && (*cmsg).cmsg_type == libc::SCM_RIGHTS
+      {
+        fd = Some(std::ptr::read_unaligned(
+          libc::CMSG_DATA(cmsg) as *const libc::c_int
+        ));
+      }
+    }
+    (received, fd)
+  };
+  if received < 0 {
+    return Err(io::Error::last_os_error());
+  }
+  match fd {
+    // SAFETY: a descriptor the kernel just installed for this process
+    Some(fd) if fd >= 0 => Ok(unsafe { OwnedFd::from_raw_fd(fd) }),
+    _ => Err(io::Error::new(
+      io::ErrorKind::UnexpectedEof,
+      "the jailed script's process ended before handing its listener over",
+    )),
+  }
+}
 
 // the same numbers on every architecture since Linux 5.13
 const SYS_LANDLOCK_CREATE_RULESET: libc::c_long = 444;
@@ -219,18 +640,16 @@ pub fn can_confine_to_port() -> bool {
 }
 
 /// Builds the Landlock ruleset for a jailed script; with `proxy_port`, TCP
-/// `connect` is allowed only to that port (it needs ABI 4+).
+/// `connect` is allowed only to that port and `bind` not at all, where the
+/// kernel has network rules (ABI 4+; before that the script's own network
+/// namespace is what holds it to the proxy, `jail::choose_os_net`).
 pub fn build_ruleset(
   write_roots: &[PathBuf],
   deny_read: &[PathBuf],
   proxy_port: Option<u16>,
 ) -> io::Result<OwnedFd> {
   let abi = landlock_abi().map_err(io::Error::other)?;
-  if proxy_port.is_some() && abi < LANDLOCK_NET_ABI {
-    return Err(io::Error::other(format!(
-      "Landlock ABI {abi} has no network rules (ABI {LANDLOCK_NET_ABI}, Linux 6.7+, has)"
-    )));
-  }
+  let proxy_port = proxy_port.filter(|_| abi >= LANDLOCK_NET_ABI);
   let write = write_rights(abi);
   let read = if deny_read.is_empty() {
     0
@@ -269,11 +688,12 @@ pub fn build_ruleset(
   for root in write_roots {
     add_rule(&ruleset, root, write)?;
   }
+  // not /dev/tty: output goes through the pipes, and a terminal is what
+  // TIOCSTI types into (DENEXT.md item 124)
   for dev in [
     "/dev/null",
     "/dev/zero",
     "/dev/full",
-    "/dev/tty",
     "/dev/random",
     "/dev/urandom",
   ] {
@@ -344,9 +764,15 @@ const AF_NETLINK: u32 = 16;
 const AF_INET: u32 = 2;
 const AF_INET6: u32 = 10;
 const NR_IO_URING_SETUP: u32 = 425;
+/// `ioctl` requests that type into a terminal (asm-generic, the same on
+/// x86_64 and aarch64).
+const TIOCSTI: u32 = 0x5412;
+const TIOCLINUX: u32 = 0x541C;
 
 #[cfg(target_arch = "x86_64")]
 const AUDIT_ARCH: u32 = 0xC000_003E;
+#[cfg(target_arch = "x86_64")]
+const NR_IOCTL: u32 = 16;
 #[cfg(target_arch = "x86_64")]
 const NR_SOCKET: u32 = 41;
 #[cfg(target_arch = "x86_64")]
@@ -357,6 +783,8 @@ const NR_SENDMSG: u32 = 46;
 const NR_SENDMMSG: u32 = 307;
 #[cfg(target_arch = "aarch64")]
 const AUDIT_ARCH: u32 = 0xC000_00B7;
+#[cfg(target_arch = "aarch64")]
+const NR_IOCTL: u32 = 29;
 #[cfg(target_arch = "aarch64")]
 const NR_SOCKET: u32 = 198;
 #[cfg(target_arch = "aarch64")]
@@ -381,8 +809,9 @@ const fn jump(code: u16, k: u32, jt: u8, jf: u8) -> SockFilter {
 
 /// The seccomp program: `socket(2)` only for netlink, and for IPv4/IPv6 when
 /// the network is open (TCP only, and no Fast Open sends, when it goes
-/// through the proxy); `io_uring_setup` fails; another architecture's
-/// syscalls (x32, the 32-bit compat ABI) kill the process.
+/// through the proxy); `io_uring_setup` fails; `ioctl(TIOCSTI)` and
+/// `ioctl(TIOCLINUX)` fail with EPERM; another architecture's syscalls
+/// (x32, the 32-bit compat ABI) kill the process.
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 pub fn seccomp_program(net: OsNet) -> Vec<u8> {
   let errno = |e: i32| SECCOMP_RET_ERRNO | (e as u32 & 0xffff);
@@ -399,6 +828,14 @@ pub fn seccomp_program(net: OsNet) -> Vec<u8> {
   }
   f.push(jump(BPF_JEQ_K, NR_IO_URING_SETUP, 0, 1));
   f.push(stmt(BPF_RET_K, errno(libc::ENOSYS)));
+  // ioctl (request: argument 1) with TIOCSTI or TIOCLINUX: EPERM; any other
+  // ioctl goes on with the syscall number reloaded
+  f.push(jump(BPF_JEQ_K, NR_IOCTL, 0, 5));
+  f.push(stmt(BPF_LD_W_ABS, seccomp_arg(1)));
+  f.push(jump(BPF_JEQ_K, TIOCSTI, 1, 0));
+  f.push(jump(BPF_JEQ_K, TIOCLINUX, 0, 1));
+  f.push(stmt(BPF_RET_K, errno(libc::EPERM)));
+  f.push(stmt(BPF_LD_W_ABS, SECCOMP_DATA_NR));
   if matches!(net, OsNet::ProxyOnly(_)) {
     // sendto / sendmmsg (flags: argument 3) and sendmsg (argument 2) with
     // MSG_FASTOPEN connect a TCP socket without connect(2), past Landlock
@@ -620,5 +1057,39 @@ mod tests {
       ),
       allow
     );
+  }
+
+  // DENEXT.md item 124 (H2): typing into a terminal is refused, other
+  // ioctls and the syscalls after the check still get their own answers
+  #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+  #[test]
+  fn seccomp_refuses_tiocsti() {
+    let eperm = SECCOMP_RET_ERRNO | libc::EPERM as u32;
+    let eacces = SECCOMP_RET_ERRNO | libc::EACCES as u32;
+    for net in [OsNet::Denied, OsNet::Open, OsNet::ProxyOnly(1)] {
+      let program = seccomp_program(net);
+      assert_eq!(
+        run_filter(&program, NR_IOCTL, [0, TIOCSTI, 0, 0, 0, 0]),
+        eperm
+      );
+      assert_eq!(
+        run_filter(&program, NR_IOCTL, [5, TIOCLINUX, 0, 0, 0, 0]),
+        eperm
+      );
+      // TIOCGWINSZ, FIONBIO: fine
+      assert_eq!(
+        run_filter(&program, NR_IOCTL, [0, 0x5413, 0, 0, 0, 0]),
+        SECCOMP_RET_ALLOW
+      );
+      assert_eq!(
+        run_filter(&program, NR_IOCTL, [0, 0x5421, 0, 0, 0, 0]),
+        SECCOMP_RET_ALLOW
+      );
+      // the check doesn't disturb what follows it
+      assert_eq!(
+        run_filter(&program, NR_SOCKET, [libc::AF_UNIX as u32, 1, 0, 0, 0, 0]),
+        eacces
+      );
+    }
   }
 }

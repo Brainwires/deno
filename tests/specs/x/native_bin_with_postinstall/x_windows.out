@@ -1,0 +1,6 @@
+Download [WILDLINE]
+Download [WILDLINE]
+Initialize @denotest/deno@1.0.0
+Initialize @denotest/deno@1.0.0: running 'postinstall' script
+Warning jail-scripts: the OS can't confine lifecycle scripts here (windows has no OS sandbox Deno can apply to lifecycle scripts). They still get a scrubbed environment, a temporary HOME and a clamped Deno, but any other program they start (a shell, a compiler, curl) can read and write anything and reach any host.
+deno [WILDCARD]

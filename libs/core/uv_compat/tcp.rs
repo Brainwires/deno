@@ -850,6 +850,10 @@ pub unsafe fn uv_tcp_nodelay(tcp: *mut uv_tcp_t, enable: c_int) -> c_int {
 ///
 /// ### Safety
 /// `tcp` must be a valid pointer to a `uv_tcp_t` initialized by `uv_tcp_init`.
+#[allow(
+  deprecated,
+  reason = "tokio deprecates set_linger because a linger time blocks the drop; a zero linger is the point here: the close sends RST, as libuv's uv_tcp_reset does"
+)]
 pub unsafe fn uv_tcp_reset(tcp: *mut uv_tcp_t) -> c_int {
   // SAFETY: Caller guarantees tcp is valid and initialized.
   unsafe {

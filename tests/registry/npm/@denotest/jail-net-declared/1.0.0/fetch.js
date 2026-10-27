@@ -4,8 +4,9 @@ const fs = require("node:fs");
 const path = require("node:path");
 async function attempt(url) {
   try {
-    await fetch(url);
-    return "allowed";
+    // the jail's proxy answers a refused host with 403 (DENEXT.md item 124)
+    const response = await fetch(url);
+    return response.status === 403 ? "denied" : "allowed";
   } catch {
     return "denied";
   }

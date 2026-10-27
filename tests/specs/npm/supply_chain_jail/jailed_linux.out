@@ -10,6 +10,7 @@ node: write project: denied
 node: write via workspace link: denied
 node: create symlink: denied
 node: read .env: denied
+node: read member .env.local: denied
 node: read project package.json: allowed
 node: own environ: unreadable
 node: ancestor environ: hidden

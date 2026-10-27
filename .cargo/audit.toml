@@ -13,4 +13,15 @@ ignore = [
   # unreachable: WebCrypto RSA-OAEP and node:crypto privateDecrypt use it.
   # Revisit when rsa 0.10 is released.
   "RUSTSEC-2023-0071",
+  # zstd 0.13.2 / zstd-safe 7.2.4: a second copy the lock keeps for backhand
+  # 0.25 (the AppImage's squashfs writer and reader, cli/tools/desktop.rs),
+  # which still depends on zstd ^0.13 (its master too, 2026-10). Everything
+  # else is on zstd 0.14.3 / zstd-safe 8.2.0 / zstd-sys 2.1.2, which fix
+  # these. Unreachable through backhand: it compresses and decompresses
+  # squashfs blocks one at a time with fresh contexts (RUSTSEC-2026-0391 is
+  # a reused streaming context), uses no seekable frames (-0398) and no
+  # legacy frames (-0403). Remove when backhand moves to zstd 0.14.
+  "RUSTSEC-2026-0391",
+  "RUSTSEC-2026-0398",
+  "RUSTSEC-2026-0403",
 ]

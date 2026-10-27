@@ -1,5 +1,15 @@
 {
   "tempDir": true,
-  "args": "install --allow-scripts",
-  "output": "output.out"
+  "steps": [
+    {
+      "if": "unix",
+      "args": "install --allow-scripts",
+      "output": "output.out"
+    },
+    {
+      "if": "windows",
+      "args": "install --allow-scripts",
+      "output": "output_windows.out"
+    }
+  ]
 }

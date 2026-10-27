@@ -52,6 +52,8 @@ attempt("write via workspace link", () =>
 attempt("create symlink", () =>
   fs.symlinkSync(initCwd, path.join(__dirname, "node-link")));
 attempt("read .env", () => fs.readFileSync(path.join(initCwd, ".env")));
+attempt("read member .env.local", () =>
+  fs.readFileSync(path.join(initCwd, "member", ".env.local")));
 attempt("read project package.json", () =>
   fs.readFileSync(path.join(initCwd, "package.json")));
 

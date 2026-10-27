@@ -140,6 +140,11 @@ pub struct SupplyChainConfig {
   /// checked address. For corporate proxies that only accept host names; the
   /// upstream then resolves the name itself (denext item 111).
   pub jail_upstream_by_name: bool,
+  /// `jailScripts.knownPackages`: per npm package name, the download hosts
+  /// (`host` or `host:port`) it may declare for itself in its package.json
+  /// (node-pre-gyp's `binary.host`). A declared host not listed here is
+  /// refused (denext item 124).
+  pub jail_known_packages: BTreeMap<String, Vec<String>>,
   /// `advisoryCheck` (`advisory-check`): `"on"`, `"off"` or `"required"`.
   pub advisory_check: Option<String>,
   /// `lowDownloadCheck` (`low-download-check`): `"off"`, `"warn"`,
@@ -250,6 +255,18 @@ struct RawJailScriptsObject {
   packages: Option<BTreeMap<String, JailPackageConfig>>,
   #[serde(rename = "upstreamByName")]
   upstream_by_name: bool,
+  #[serde(rename = "knownPackages")]
+  known_packages: Option<BTreeMap<String, Vec<String>>>,
+}
+
+/// Whether a host entry (`jailScripts.packages.<name>.net`,
+/// `jailScripts.knownPackages.<name>`) has the shape of a host or
+/// host:port.
+fn valid_host_entry(host: &str) -> bool {
+  !host.is_empty()
+    && !host.contains(['/', '\\', '@', '?', '#'])
+    && !host.chars().any(|c| c.is_whitespace())
+    && valid_host_port(host)
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Hash, PartialEq)]
@@ -2862,15 +2879,32 @@ impl ConfigFile {
       .ok()
       .and_then(|p| p.parent().map(|p| p.to_path_buf()));
     let mut jail_upstream_by_name = false;
+    let mut jail_known_packages = BTreeMap::new();
     let (jail_scripts, jail_net, jail_packages) = match raw.jail_scripts {
       None => (None, None, BTreeMap::new()),
       Some(RawJailScripts::Bool(value)) => (Some(value), None, BTreeMap::new()),
       Some(RawJailScripts::Object(obj)) => {
         // an object that only lists exceptions doesn't ask for the jail: it
-        // configures the default one (DENEXT.md item 108), so a platform that
-        // can't confine stays quiet about it
-        let asks_for_jail = obj.net.is_some() || obj.packages.is_none();
+        // configures the default one (DENEXT.md item 108)
+        let asks_for_jail = obj.net.is_some()
+          || (obj.packages.is_none() && obj.known_packages.is_none());
         jail_upstream_by_name = obj.upstream_by_name;
+        for (name, hosts) in obj.known_packages.unwrap_or_default() {
+          let name = name.strip_prefix("npm:").unwrap_or(&name).to_string();
+          if name.is_empty() {
+            return Err(parse_err(
+              "an empty package name in \"jailScripts.knownPackages\"".into(),
+            ));
+          }
+          for host in &hosts {
+            if !valid_host_entry(host) {
+              return Err(parse_err(format!(
+                "\"jailScripts.knownPackages\": {name} lists \"{host}\"; expected a host or host:port"
+              )));
+            }
+          }
+          jail_known_packages.insert(name, hosts);
+        }
         let mut packages = BTreeMap::new();
         for (name, mut config) in obj.packages.unwrap_or_default() {
           let name = name.strip_prefix("npm:").unwrap_or(&name).to_string();
@@ -2893,11 +2927,7 @@ impl ConfigFile {
               )));
             }
             for host in hosts {
-              if host.is_empty()
-                || host.contains(['/', '\\', '@', '?', '#'])
-                || host.chars().any(|c| c.is_whitespace())
-                || !valid_host_port(host)
-              {
+              if !valid_host_entry(host) {
                 return Err(parse_err(format!(
                   "\"jailScripts.packages\": {name}'s \"net\" lists \"{host}\"; expected a host or host:port, as --allow-net takes"
                 )));
@@ -2928,6 +2958,7 @@ impl ConfigFile {
       jail_net,
       jail_packages,
       jail_upstream_by_name,
+      jail_known_packages,
       advisory_check: raw.advisory_check,
       low_download_check: raw.low_download_check,
       low_download_threshold: raw.low_download_threshold,
@@ -4538,6 +4569,43 @@ mod tests {
       )
       .is_err()
     );
+
+    // DENEXT.md item 124: the hosts a package may declare for itself, keyed
+    // by package name (`npm:` dropped), host or host:port; an object that
+    // only holds them configures the default jail, as `packages` does
+    let config = get_result(
+      r#"{ "supplyChain": { "jailScripts": { "knownPackages": {
+        "npm:canvas": ["github.com"],
+        "puppeteer": ["storage.googleapis.com:443", "[::1]:4545"]
+      } } } }"#,
+    )
+    .unwrap();
+    assert_eq!(config.jail_scripts, None);
+    assert_eq!(config.jail_known_packages["canvas"], vec!["github.com"]);
+    assert_eq!(
+      config.jail_known_packages["puppeteer"],
+      vec!["storage.googleapis.com:443", "[::1]:4545"]
+    );
+    assert!(
+      get_result(r#"{ "supplyChain": { "jailScripts": {} } }"#)
+        .unwrap()
+        .jail_known_packages
+        .is_empty()
+    );
+    for bad in [
+      r#"{ "": ["github.com"] }"#,
+      r#"{ "a": ["https://github.com"] }"#,
+      r#"{ "a": ["github.com/x"] }"#,
+      r#"{ "a": [""] }"#,
+      r#"{ "a": ["a b"] }"#,
+      r#"{ "a": "github.com" }"#,
+      r#"["github.com"]"#,
+    ] {
+      let json = format!(
+        r#"{{ "supplyChain": {{ "jailScripts": {{ "knownPackages": {bad} }} }} }}"#
+      );
+      assert!(get_result(&json).is_err(), "{bad}");
+    }
 
     // typos in a security setting are errors, not silently ignored
     assert!(get_result(r#"{ "supplyChain": { "paranoia": true } }"#).is_err());

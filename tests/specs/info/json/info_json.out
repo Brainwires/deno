@@ -7,5 +7,8 @@
   "typescriptCache": "[WILDCARD]gen",
   "registryCache": "[WILDCARD]registries",
   "originStorage": "[WILDCARD]location_data",
-  "webCacheStorage": [WILDCARD]location_data[WILDCARD]web_cache"
+  "webCacheStorage": [WILDCARD]location_data[WILDCARD]web_cache",
+  "lifecycleJail": {
+[WILDCARD]
+  }
 }

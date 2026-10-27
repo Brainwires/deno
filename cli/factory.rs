@@ -848,8 +848,6 @@ impl CliFactory {
     if !npmrc.supply_chain.jail_scripts && !cli_options.jail_scripts_flag() {
       return Ok(None);
     }
-    let explicit = npmrc.supply_chain.jail_scripts_explicit
-      || cli_options.jail_scripts_flag();
     let supply_chain = cli_options.workspace().supply_chain()?;
     let mut project_dirs = vec![cli_options.workspace().root_dir_path()];
     let initial_cwd = cli_options.initial_cwd().to_path_buf();
@@ -859,13 +857,13 @@ impl CliFactory {
     Ok(Some(Arc::new(
       crate::supply_chain::jail::JailConfig::new(
         npmrc.supply_chain.paranoid,
-        explicit,
         supply_chain.jail_net.unwrap_or(false),
         supply_chain.jail_packages,
         &project_dirs,
         npmrc_path.as_deref(),
       )
-      .with_upstream_by_name(supply_chain.jail_upstream_by_name),
+      .with_upstream_by_name(supply_chain.jail_upstream_by_name)
+      .with_known_packages(supply_chain.jail_known_packages),
     )))
   }
 
