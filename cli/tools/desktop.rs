@@ -4469,6 +4469,89 @@ fn unix_mode_of(meta: &std::fs::Metadata) -> u16 {
   }
 }
 
+/// The AppImage SquashFS's zstd, on the workspace's zstd 0.14 crate.
+///
+/// backhand 0.25's own zstd support (its `zstd` feature) still depends on
+/// zstd 0.13 / zstd-safe 7, which would put a second, advisory-affected zstd
+/// copy in the lock. That feature is off; this `CompressionAction` does the
+/// zstd blocks itself, exactly as backhand's `DefaultCompressor` does them
+/// (one-shot `bulk` contexts, level 3 when the image has no compression
+/// options). Reading hands every other compressor id (only `Uncompressed`
+/// is built in without features) to `DefaultCompressor`.
+struct AppImageZstd;
+
+static APPIMAGE_ZSTD: AppImageZstd = AppImageZstd;
+
+/// zstd's default level, and backhand's when an image carries no options.
+const APPIMAGE_ZSTD_DEFAULT_LEVEL: i32 = 3;
+
+impl backhand::compression::CompressionAction for AppImageZstd {
+  type Error = backhand::BackhandError;
+  type Compressor = backhand::compression::Compressor;
+  type FilesystemCompressor = backhand::FilesystemCompressor;
+  type SuperBlock = backhand::SuperBlock;
+
+  fn decompress(
+    &self,
+    bytes: &[u8],
+    out: &mut Vec<u8>,
+    compressor: Self::Compressor,
+  ) -> Result<(), Self::Error> {
+    if compressor != backhand::compression::Compressor::Zstd {
+      return backhand::compression::DefaultCompressor
+        .decompress(bytes, out, compressor);
+    }
+    // backhand sizes `out`'s capacity to the block (or metadata) size; a
+    // frame that decompresses past it is an error, not a reallocation.
+    let mut decoder = zstd::bulk::Decompressor::new().map_err(|e| {
+      backhand::BackhandError::CompressionInit(format!(
+        "zstd decompressor: {e}"
+      ))
+    })?;
+    decoder.decompress_to_buffer(bytes, out)?;
+    Ok(())
+  }
+
+  /// Every block and metadata chunk the AppImage writer compresses. That
+  /// writer (`create_linux_appimage`, the only user of this `Kind`) is set to
+  /// `Compressor::Zstd` with no compression options, and `fc`'s fields are
+  /// private to backhand, so this compresses at backhand's no-options level
+  /// without reading `fc`.
+  fn compress(
+    &self,
+    bytes: &[u8],
+    _fc: Self::FilesystemCompressor,
+    _block_size: u32,
+  ) -> Result<Vec<u8>, Self::Error> {
+    let mut encoder = zstd::bulk::Compressor::new(APPIMAGE_ZSTD_DEFAULT_LEVEL)?;
+    let mut buf =
+      Vec::with_capacity(zstd::zstd_safe::compress_bound(bytes.len()));
+    encoder.compress_to_buffer(bytes, &mut buf)?;
+    Ok(buf)
+  }
+
+  fn compression_options(
+    &self,
+    superblock: &mut Self::SuperBlock,
+    kind: &backhand::kind::Kind,
+    fs_compressor: Self::FilesystemCompressor,
+  ) -> Result<Option<Vec<u8>>, Self::Error> {
+    // With no options set (the AppImage writer's case) this writes none and
+    // compresses nothing, so DefaultCompressor's answer is the same as before.
+    backhand::compression::DefaultCompressor.compression_options(
+      superblock,
+      kind,
+      fs_compressor,
+    )
+  }
+}
+
+/// The SquashFS `Kind` the AppImage is written and read with: standard
+/// little-endian SquashFS 4.0, with zstd done by [`AppImageZstd`].
+fn appimage_squashfs_kind() -> backhand::kind::Kind {
+  backhand::kind::Kind::new_v4(&APPIMAGE_ZSTD)
+}
+
 fn node_header(mode: u16) -> backhand::NodeHeader {
   backhand::NodeHeader {
     permissions: mode,
@@ -4590,6 +4673,7 @@ fn create_linux_appimage(
   let runtime_elf = appimage_runtime_for_target(target)?;
 
   let mut writer = backhand::FilesystemWriter::default();
+  writer.set_kind(appimage_squashfs_kind());
   let compressor = backhand::FilesystemCompressor::new(
     backhand::compression::Compressor::Zstd,
     None,
@@ -9688,14 +9772,164 @@ def456  other.zip
       appimage_runtime_for_target(target).unwrap().len() as u64;
     let appimage =
       std::io::BufReader::new(std::fs::File::open(&appimage_path).unwrap());
-    let filesystem = backhand::FilesystemReader::from_reader_with_offset(
-      appimage,
-      runtime_offset,
-    )
-    .unwrap();
+    let filesystem =
+      backhand::FilesystemReader::from_reader_with_offset_and_kind(
+        appimage,
+        runtime_offset,
+        appimage_squashfs_kind(),
+      )
+      .unwrap();
     assert_eq!(
       filesystem.compressor,
       backhand::compression::Compressor::Zstd
+    );
+  }
+
+  #[test]
+  fn appimage_zstd_blocks_and_fragments_round_trip() {
+    use std::io::Read as _;
+    // Compressible content, so squashfs keeps zstd's output instead of
+    // storing it raw: a file over two 128 KiB data blocks (full blocks plus a
+    // tail fragment) and a small one (a fragment only). Both are read back
+    // through AppImageZstd's decompressor and, where squashfs-tools is
+    // installed, through `unsquashfs` (what the AppImage runtime's squashfuse
+    // and the kernel expect: standard zstd SquashFS).
+    let tmp = tempfile::tempdir().unwrap();
+    let app_dir = fake_linux_app_dir(tmp.path(), "MyApp");
+    let big: Vec<u8> = (0..300_000u32)
+      .flat_map(|i| format!("line {}\n", i % 977).into_bytes())
+      .take(300_000)
+      .collect();
+    let small = b"console.log('hello');\n".repeat(64);
+    std::fs::create_dir_all(app_dir.join("resources")).unwrap();
+    std::fs::write(app_dir.join("resources/app.js"), &big).unwrap();
+    std::fs::write(app_dir.join("resources/small.js"), &small).unwrap();
+    let appimage_path = tmp.path().join("MyApp.AppImage");
+    let target = Some("x86_64-unknown-linux-gnu");
+    create_linux_appimage(&app_dir, &appimage_path, target, None, &[], false)
+      .unwrap();
+
+    let runtime_offset =
+      appimage_runtime_for_target(target).unwrap().len() as u64;
+    let image_len =
+      std::fs::metadata(&appimage_path).unwrap().len() - runtime_offset;
+    assert!(
+      image_len < (big.len() / 4) as u64,
+      "squashfs image is {image_len} bytes: the blocks were not compressed"
+    );
+    let appimage =
+      std::io::BufReader::new(std::fs::File::open(&appimage_path).unwrap());
+    let filesystem =
+      backhand::FilesystemReader::from_reader_with_offset_and_kind(
+        appimage,
+        runtime_offset,
+        appimage_squashfs_kind(),
+      )
+      .unwrap();
+    let expected = [
+      ("resources/app.js", big.as_slice()),
+      ("resources/small.js", small.as_slice()),
+    ];
+    for (name, want) in expected {
+      let node = filesystem
+        .files()
+        .find(|n| n.fullpath.to_string_lossy() == format!("/{name}"))
+        .unwrap_or_else(|| panic!("{name} missing"));
+      let backhand::InnerNode::File(file) = &node.inner else {
+        panic!("{name} is not a file");
+      };
+      let mut bytes = Vec::new();
+      filesystem
+        .file(file)
+        .reader()
+        .read_to_end(&mut bytes)
+        .unwrap();
+      assert!(bytes == want, "{name}: content differs after round trip");
+    }
+
+    // An independent reader, when the host has one.
+    #[cfg(unix)]
+    appimage_unsquashfs_matches(&appimage_path, runtime_offset, &expected);
+  }
+
+  /// Extract the AppImage's SquashFS with squashfs-tools' `unsquashfs` and
+  /// compare `expected`'s files; skipped where it isn't installed.
+  #[cfg(unix)]
+  fn appimage_unsquashfs_matches(
+    appimage_path: &Path,
+    runtime_offset: u64,
+    expected: &[(&str, &[u8])],
+  ) {
+    use std::os::unix::fs::PermissionsExt;
+    // `-version` exits 1 on squashfs-tools 4.6: only whether it starts counts.
+    let has_unsquashfs = std::process::Command::new("unsquashfs")
+      .arg("-version")
+      .output()
+      .is_ok();
+    if !has_unsquashfs {
+      eprintln!("unsquashfs not installed; skipped the squashfs-tools check");
+      return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let extracted = tmp.path().join("extracted");
+    let status = std::process::Command::new("unsquashfs")
+      .arg("-no-progress")
+      .arg("-quiet")
+      .arg("-o")
+      .arg(runtime_offset.to_string())
+      .arg("-d")
+      .arg(&extracted)
+      .arg(appimage_path)
+      .status()
+      .unwrap();
+    assert!(status.success(), "unsquashfs failed: {status}");
+    // The image's root directory is written with mode 0 (backhand's
+    // FilesystemWriter default), which unsquashfs restores; open it up to
+    // read the files back.
+    std::fs::set_permissions(
+      &extracted,
+      std::fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    for (name, want) in expected {
+      let bytes = std::fs::read(extracted.join(name)).unwrap();
+      assert!(
+        bytes == *want,
+        "{name}: unsquashfs extracted different bytes"
+      );
+    }
+  }
+
+  #[test]
+  fn appimage_zstd_decompress_is_bounded_and_delegates() {
+    use backhand::compression::CompressionAction as _;
+    use backhand::compression::Compressor;
+    let data = b"squashfs block ".repeat(1000);
+    let frame = zstd::bulk::compress(&data, 3).unwrap();
+    // backhand reserves the block size; the frame fits it.
+    let mut out = Vec::with_capacity(data.len());
+    APPIMAGE_ZSTD
+      .decompress(&frame, &mut out, Compressor::Zstd)
+      .unwrap();
+    assert_eq!(out, data);
+    // A frame larger than the reserved block is refused, not grown into.
+    let mut small = Vec::with_capacity(data.len() / 2);
+    assert!(
+      APPIMAGE_ZSTD
+        .decompress(&frame, &mut small, Compressor::Zstd)
+        .is_err()
+    );
+    // Other ids go to DefaultCompressor: stored blocks pass through, and a
+    // compressor this build doesn't carry is an error.
+    let mut raw = Vec::new();
+    APPIMAGE_ZSTD
+      .decompress(b"raw", &mut raw, Compressor::Uncompressed)
+      .unwrap();
+    assert_eq!(raw, b"raw");
+    assert!(
+      APPIMAGE_ZSTD
+        .decompress(&frame, &mut Vec::new(), Compressor::Gzip)
+        .is_err()
     );
   }
 
@@ -10365,11 +10599,13 @@ def456  other.zip
       appimage_runtime_for_target(target).unwrap().len() as u64;
     let appimage =
       std::io::BufReader::new(std::fs::File::open(&appimage_path).unwrap());
-    let filesystem = backhand::FilesystemReader::from_reader_with_offset(
-      appimage,
-      runtime_offset,
-    )
-    .unwrap();
+    let filesystem =
+      backhand::FilesystemReader::from_reader_with_offset_and_kind(
+        appimage,
+        runtime_offset,
+        appimage_squashfs_kind(),
+      )
+      .unwrap();
     let names: Vec<String> = filesystem
       .files()
       .map(|n| n.fullpath.to_string_lossy().into_owned())
@@ -10404,11 +10640,13 @@ def456  other.zip
       appimage_runtime_for_target(target).unwrap().len() as u64;
     let appimage =
       std::io::BufReader::new(std::fs::File::open(&appimage_path).unwrap());
-    let filesystem = backhand::FilesystemReader::from_reader_with_offset(
-      appimage,
-      runtime_offset,
-    )
-    .unwrap();
+    let filesystem =
+      backhand::FilesystemReader::from_reader_with_offset_and_kind(
+        appimage,
+        runtime_offset,
+        appimage_squashfs_kind(),
+      )
+      .unwrap();
     for name in ["/com.acme.tool.png", "/.DirIcon"] {
       let node = filesystem
         .files()
