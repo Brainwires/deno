@@ -5311,6 +5311,18 @@ where the changes are discussed.
      hosted" while `macos-15` jobs in other repositories got runners. The tag
      gate requires the arm64 leg by name, so it now names `macos-15`.
 
+134. **`ci`: a run that lost its jobs to the runner pool doesn't block the tag**
+     (`.github/denext-runtime/tag_gate.py`). GitHub concludes a run `failure`
+     when it cancels jobs no hosted runner picked up ("not acquired by Runner of
+     type hosted"), which happened to every macOS arm64 job of runs 40479031441,
+     40515239498 and 40542036404 while other jobs of the account held the macOS
+     runners. The gate read that run conclusion, so a commit no test had failed
+     on could never be tagged. It now reads the jobs of a `failure` attempt: one
+     where no job failed or timed out counts as `no_runner`, which isn't red.
+     Such a run still never vouches for a commit; only a green run with every
+     leg does, and a `failure` with no jobs at all (a workflow that never
+     started) stays red.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129) are what the prebuilt `libdenort` carries. The CLI-side

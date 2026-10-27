@@ -81,6 +81,33 @@ class Evaluate(unittest.TestCase):
         )
         self.assertEqual((full, errors), (2, []))
 
+    def test_a_run_that_lost_its_jobs_to_the_runner_pool_is_not_red(self):
+        # GitHub cancels jobs no runner picked up and concludes the run
+        # `failure`: no test failed, so it doesn't block a later green run.
+        full, errors = gate.evaluate(
+            [run(4, conclusion=gate.NO_RUNNER), run(5)],
+            legs({5: ALL_LEGS}),
+            ON_DEV,
+        )
+        self.assertEqual((full, errors), (5, []))
+
+    def test_classify(self):
+        self.assertEqual(
+            gate.classify("failure", ["success", "cancelled", "skipped"]),
+            gate.NO_RUNNER,
+        )
+        self.assertEqual(
+            gate.classify("failure", ["success", "failure", "cancelled"]),
+            "failure",
+        )
+        self.assertEqual(gate.classify("failure", ["timed_out"]), "failure")
+        # No jobs at all (a workflow that never started): keep it red.
+        self.assertEqual(gate.classify("failure", []), "failure")
+        self.assertEqual(gate.classify("success", []), "success")
+        self.assertEqual(
+            gate.classify("startup_failure", ["cancelled"]), "startup_failure"
+        )
+
     def test_a_run_in_progress_holds_the_release(self):
         _, errors = gate.evaluate(
             [run(1), run(2, None, "in_progress")],
@@ -271,9 +298,26 @@ class Script(unittest.TestCase):
         answers = self.base()
         answers[RUNS] = '{"id":11,"status":"completed","conclusion":"success","run_attempt":2}\n'
         answers[f"repos/{REPO}/actions/runs/11/attempts/1"] = "failure\n"
+        answers[f"repos/{REPO}/actions/runs/11/attempts/1/jobs?per_page=100"] = (
+            "success\nfailure\ncancelled\n"
+        )
         result = self.gate(answers)
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn("::error::denext tests failed on this commit: 11", result.stdout)
+
+    def test_an_attempt_that_only_lost_runners_does_not_block(self):
+        answers = self.base()
+        answers[RUNS] = (
+            '{"id":10,"status":"completed","conclusion":"failure","run_attempt":1}\n'
+            '{"id":11,"status":"completed","conclusion":"success","run_attempt":1}\n'
+        )
+        answers[f"repos/{REPO}/actions/runs/10/attempts/1/jobs?per_page=100"] = (
+            "success\ncancelled\ncancelled\nskipped\n"
+        )
+        answers[f"repos/{REPO}/actions/runs/10/jobs?per_page=100"] = jobs("ubuntu-22.04")
+        result = self.gate(answers)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("full_run=11", result.stdout)
 
     def test_refuses_an_unmerged_commit(self):
         answers = self.base()

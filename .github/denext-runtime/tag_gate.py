@@ -47,6 +47,21 @@ REQUIRED_LEGS = (
     "windows-11-arm",
 )
 RED = ("failure", "timed_out", "startup_failure")
+# A run (or attempt) GitHub concludes `failure` with no job that failed or
+# timed out lost its jobs to the runner pool ("not acquired by Runner of type
+# hosted"): GitHub cancels them and marks the run failed. No test failed, so it
+# isn't red; it still never vouches, since only a green run with every leg does.
+NO_RUNNER = "no_runner"
+
+
+def classify(conclusion, job_conclusions):
+    """The conclusion the gate counts for one attempt: `failure` becomes
+    NO_RUNNER when none of the attempt's jobs failed or timed out."""
+    if conclusion != "failure" or not job_conclusions:
+        return conclusion
+    if any(c in ("failure", "timed_out") for c in job_conclusions):
+        return conclusion
+    return NO_RUNNER
 # `compare/<sha>...<branch>`: the branch contains the commit.
 CONTAINED = ("ahead", "identical")
 
@@ -189,18 +204,42 @@ def gh_runs(repo, sha):
         run = json.loads(line)
         # A re-run replaces the run's conclusion: read each earlier attempt
         # (`--jq` prints a string unquoted; a null conclusion prints "null").
+        last = int(run.get("run_attempt") or 1)
         run["attempts"] = [
-            gh_lines(
-                [
-                    f"repos/{repo}/actions/runs/{run['id']}/attempts/{n}",
-                    "--jq",
-                    ".conclusion",
-                ]
-            )[0]
-            for n in range(1, int(run.get("run_attempt") or 1))
+            attempt_conclusion(
+                repo,
+                run["id"],
+                n,
+                gh_lines(
+                    [
+                        f"repos/{repo}/actions/runs/{run['id']}/attempts/{n}",
+                        "--jq",
+                        ".conclusion",
+                    ]
+                )[0],
+            )
+            for n in range(1, last)
         ]
+        run["conclusion"] = attempt_conclusion(
+            repo, run["id"], last, run["conclusion"]
+        )
         runs.append(run)
     return runs
+
+
+def attempt_conclusion(repo, run_id, attempt, conclusion):
+    if conclusion != "failure":
+        return conclusion
+    jobs = gh_lines(
+        [
+            "--paginate",
+            f"repos/{repo}/actions/runs/{run_id}/attempts/{attempt}/jobs"
+            "?per_page=100",
+            "--jq",
+            ".jobs[] | .conclusion",
+        ]
+    )
+    return classify(conclusion, jobs)
 
 
 def gh_legs(repo, run_id):
