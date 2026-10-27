@@ -2092,6 +2092,7 @@ mod tests {
   }
 
   // DENEXT.md item 124 (M3): secrets at any depth under the project
+  #[cfg(unix)]
   #[test]
   fn secret_files_at_any_depth() {
     let dir = tempfile::tempdir().unwrap();

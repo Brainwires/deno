@@ -13,7 +13,7 @@
   }, {
     "if": "windows",
     "args": "install -g --allow-scripts --root ./bins --name lifecycle-scripts-simple npm:@denotest/lifecycle-scripts-simple",
-    "output": "install.out"
+    "output": "install_windows.out"
   }, {
     "if": "windows",
     "commandName": "./bins/bin/lifecycle-scripts-simple.cmd",

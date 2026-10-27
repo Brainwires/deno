@@ -4786,17 +4786,30 @@ where the changes are discussed.
        Deno permission clamp folds `..` in a path list it can't canonicalize (a
        file that doesn't exist yet), so `--allow-write=../../etc/x` no longer
        passes as beneath a root.
-     - **Dependencies.** tokio 1.47.1 → 1.54.1 (RUSTSEC-2026-0386, the unsound
+     - **Dependencies.** tokio 1.47.1 → 1.53.3 (RUSTSEC-2026-0386, the unsound
        `AsyncFd` constructors; `signal-hook-mio` 0.2.4 → 0.2.5 and `mio` 1.0.4 →
-       1.2.4 to let it move; `io-uring` dropped from the lock), crypto-bigint
-       0.7.6 (yanked) → 0.7.9, clipboard-win 5.3.0 (yanked) → 5.4.3.
-       `cargo
-       audit`: no vulnerabilities, no new ignores; the
-       unmaintained-crate warnings are as before. tokio 1.50 shortened its
-       worker thread name to `tokio-rt-worker`, which
+       1.2.4 to let it move; `io-uring` dropped from the lock; not 1.54: its
+       accepted sockets start readable and writable (tokio#8435), and with that
+       Windows' `tlsHandshakeWithTcpCorruptionImmediately` sees `InvalidData`
+       instead of `UnexpectedEof`), crypto-bigint 0.7.6 (yanked) → 0.7.9,
+       clipboard-win 5.3.0 (yanked) → 5.4.3, zstd 0.13.2 → 0.14.3 with zstd-safe
+       8.2.0 and zstd-sys 2.1.2 (RUSTSEC-2026-0391, -0398, -0403, -0410) and rpm
+       0.25.1 → 0.30.2 to follow it. backhand 0.25 (the AppImage's squashfs)
+       still depends on zstd 0.13 / zstd-safe 7, so that second copy stays in
+       the lock and `.cargo/audit.toml` ignores -0391, -0398 and -0403 for it,
+       with the reason written there (squashfs block compression reuses no
+       stream context, has no seekable frames and no legacy frames); remove the
+       ignores when backhand moves. `cargo audit`: no other vulnerability; the
+       unmaintained-crate warnings as before, plus ten `unsound` warnings on
+       that same zstd-safe 7 copy (RUSTSEC-2026-0395 to -0406: multithreaded
+       contexts, dictionaries, `try_clone`, none of which backhand uses). tokio
+       1.50 shortened its worker thread name to `tokio-rt-worker`, which
        `test/recursive_permissions_pledge` expects now. `libs/core/uv_compat`
        registers its descriptors through `AsyncFd::register` (the deprecated
-       `AsyncFd::new` fails CI's clippy).
+       `AsyncFd::new` fails CI's clippy). The jail's "can't confine here"
+       warning (M7) shows up in every Windows install that runs a lifecycle
+       script, so the lifecycle spec tests carry Windows expectations with it
+       (`*_windows.out`).
 
      Validated install scripts (macOS 15.8, the deny-by-default profile,
      `deno

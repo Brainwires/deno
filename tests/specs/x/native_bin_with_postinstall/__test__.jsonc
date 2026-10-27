@@ -1,5 +1,15 @@
 {
   "tempDir": true,
-  "args": "x -y @denotest/deno --version",
-  "output": "x.out"
+  "steps": [
+    {
+      "if": "unix",
+      "args": "x -y @denotest/deno --version",
+      "output": "x.out"
+    },
+    {
+      "if": "windows",
+      "args": "x -y @denotest/deno --version",
+      "output": "x_windows.out"
+    }
+  ]
 }

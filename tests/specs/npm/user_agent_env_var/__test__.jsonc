@@ -36,8 +36,15 @@
     "set_for_lifecycle_scripts": {
       "steps": [
         {
+          "if": "unix",
           "args": "install --allow-scripts",
           "output": "postinstall.out",
+          "exitCode": 1
+        },
+        {
+          "if": "windows",
+          "args": "install --allow-scripts",
+          "output": "postinstall_windows.out",
           "exitCode": 1
         }
       ]

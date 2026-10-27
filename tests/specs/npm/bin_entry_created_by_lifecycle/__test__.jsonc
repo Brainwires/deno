@@ -4,8 +4,14 @@
     "all_at_once": {
       "steps": [
         {
+          "if": "unix",
           "args": "install --allow-scripts",
           "output": "all_at_once_install.out"
+        },
+        {
+          "if": "windows",
+          "args": "install --allow-scripts",
+          "output": "all_at_once_install_windows.out"
         },
         { "args": "task run-testbin", "output": "run_testbin.out" }
       ]
