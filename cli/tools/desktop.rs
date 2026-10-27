@@ -1892,6 +1892,7 @@ async fn package_windows_app_dir(
         .as_deref(),
     )
     .as_deref(),
+    &desktop_bridge_origin(cli_options)?,
     desktop_flags.single_instance,
   )?;
 
@@ -2089,6 +2090,7 @@ async fn package_linux_app_dir(
         .as_deref(),
     )
     .as_deref(),
+    &desktop_bridge_origin(cli_options)?,
     desktop_flags.single_instance,
   )?;
 
@@ -3985,6 +3987,7 @@ async fn package_macos_app_bundle(
         .as_deref(),
     )
     .as_deref(),
+    &desktop_bridge_origin(cli_options)?,
     desktop_flags.single_instance,
   )?;
 
@@ -4102,12 +4105,17 @@ const LAUFEY_LAUNCH_CONFIG_FILE: &str = "laufey-launch.json";
 
 /// The contents of [`LAUFEY_LAUNCH_CONFIG_FILE`] for a packaged app. Every
 /// value is validated by the caller: `app_id` against laufey's rule
-/// ([`ensure_laufey_app_id`]), `custom_schemes` as an app origin scheme.
-/// `singleInstance` is always written, so the file records the packaged
-/// setting even when it is off.
+/// ([`ensure_laufey_app_id`]), `custom_schemes` as an app origin scheme,
+/// `bridge_origins` as normalized app origins. `singleInstance` and
+/// `bridgeOrigins` are always written: the file records the packaged
+/// single-instance setting even when it is off, and pins the documents the
+/// window's JS bridge serves (DENEXT.md item 122, E-L1) even when the app
+/// keeps the default origin, where laufey would otherwise let every document
+/// the window navigates to call the app.
 fn laufey_launch_config_json(
   app_id: Option<&str>,
   custom_schemes: &[&str],
+  bridge_origins: &[&str],
   single_instance: bool,
 ) -> String {
   let mut config = serde_json::Map::new();
@@ -4120,6 +4128,10 @@ fn laufey_launch_config_json(
       serde_json::Value::from(custom_schemes.to_vec()),
     );
   }
+  config.insert(
+    "bridgeOrigins".to_string(),
+    serde_json::Value::from(bridge_origins.to_vec()),
+  );
   config.insert(
     "singleInstance".to_string(),
     serde_json::Value::Bool(single_instance),
@@ -4134,11 +4146,14 @@ fn laufey_launch_config_json(
 /// Write [`LAUFEY_LAUNCH_CONFIG_FILE`] into `dir` (the executable's directory,
 /// or a macOS bundle's `Contents/Resources`). The custom scheme is the app
 /// origin's, for CEF (see [`cef_custom_scheme`]); the WebView backends ignore
-/// it, so it is written regardless of the backend.
+/// it, so it is written regardless of the backend. `bridge_origin` is the
+/// origin the app's pages are served from ([`desktop_bridge_origin`]), the
+/// only one whose documents may call the app through the JS bridge.
 fn write_laufey_launch_config(
   dir: &Path,
   app_id: Option<&str>,
   cef_scheme: Option<&str>,
+  bridge_origin: &str,
   single_instance: bool,
 ) -> Result<(), AnyError> {
   if let Some(id) = app_id {
@@ -4154,7 +4169,12 @@ fn write_laufey_launch_config(
   let schemes: Vec<&str> = cef_scheme.into_iter().collect();
   std::fs::write(
     dir.join(LAUFEY_LAUNCH_CONFIG_FILE),
-    laufey_launch_config_json(app_id, &schemes, single_instance),
+    laufey_launch_config_json(
+      app_id,
+      &schemes,
+      &[bridge_origin],
+      single_instance,
+    ),
   )
   .with_context(|| {
     format!(
@@ -4163,6 +4183,36 @@ fn write_laufey_launch_config(
     )
   })?;
   Ok(())
+}
+
+/// The origin a packaged app's pages are served from, which its launch file
+/// pins the JS bridge to: deno.json `desktop.app.origin`, else the `origin`
+/// of the project's `.deno-desktop/app.json` (the runtime reads the embedded
+/// copy when deno.json has none), else the runtime's default
+/// `app://localhost`. Normalized.
+fn desktop_bridge_origin(cli_options: &CliOptions) -> Result<String, AnyError> {
+  if let Some(origin) =
+    crate::standalone::binary::resolve_desktop_app_origin(cli_options)?
+  {
+    return Ok(origin);
+  }
+  let app_config = cli_options
+    .start_dir
+    .dir_path()
+    .join(deno_lib::standalone::app_origin::APP_CONFIG_FILE);
+  Ok(project_app_config_origin(&app_config).unwrap_or_else(|| {
+    deno_lib::standalone::app_origin::DEFAULT_APP_ORIGIN.to_string()
+  }))
+}
+
+/// The normalized `origin` of the `.deno-desktop/app.json` at `path`, or
+/// `None` when the file is missing, sets none, or doesn't parse (the runtime
+/// refuses such a file at startup anyway).
+fn project_app_config_origin(path: &Path) -> Option<String> {
+  let bytes = std::fs::read(path).ok()?;
+  let config =
+    deno_lib::standalone::app_origin::parse_app_config_file(&bytes).ok()?;
+  Some(config.origin?.as_origin_string())
 }
 
 /// The shell `NAME=value` assignments a Linux launcher (a `.desktop` `Exec`
@@ -4674,6 +4724,9 @@ fn create_linux_appimage(
 
   let mut writer = backhand::FilesystemWriter::default();
   writer.set_kind(appimage_squashfs_kind());
+  // backhand writes the root directory with mode 0 unless told otherwise;
+  // `unsquashfs` and `--appimage-extract` then restore an unreadable root.
+  writer.set_root_mode(0o755);
   let compressor = backhand::FilesystemCompressor::new(
     backhand::compression::Compressor::Zstd,
     None,
@@ -9826,6 +9879,11 @@ def456  other.zip
         appimage_squashfs_kind(),
       )
       .unwrap();
+    assert_eq!(
+      filesystem.root.root().header.permissions,
+      0o755,
+      "the image's root directory mode"
+    );
     let expected = [
       ("resources/app.js", big.as_slice()),
       ("resources/small.js", small.as_slice()),
@@ -9883,14 +9941,11 @@ def456  other.zip
       .status()
       .unwrap();
     assert!(status.success(), "unsquashfs failed: {status}");
-    // The image's root directory is written with mode 0 (backhand's
-    // FilesystemWriter default), which unsquashfs restores; open it up to
-    // read the files back.
-    std::fs::set_permissions(
-      &extracted,
-      std::fs::Permissions::from_mode(0o755),
-    )
-    .unwrap();
+    // unsquashfs restores the image's root mode on the extraction directory,
+    // as `--appimage-extract` does: it must come out readable.
+    let root_mode =
+      std::fs::metadata(&extracted).unwrap().permissions().mode() & 0o7777;
+    assert_eq!(root_mode, 0o755, "extracted root mode {root_mode:o}");
     for (name, want) in expected {
       let bytes = std::fs::read(extracted.join(name)).unwrap();
       assert!(
@@ -10914,8 +10969,12 @@ def456  other.zip
   #[test]
   fn laufey_launch_config_content() {
     // Every key, in laufey's `laufey-launch.json` schema.
-    let json =
-      laufey_launch_config_json(Some("com.acme.notes"), &["acme"], true);
+    let json = laufey_launch_config_json(
+      Some("com.acme.notes"),
+      &["acme"],
+      &["acme://app"],
+      true,
+    );
     assert!(json.ends_with('\n'));
     let value: serde_json::Value = serde_json::from_str(&json).unwrap();
     assert_eq!(
@@ -10923,20 +10982,30 @@ def456  other.zip
       serde_json::json!({
         "appId": "com.acme.notes",
         "customSchemes": ["acme"],
+        "bridgeOrigins": ["acme://app"],
         "singleInstance": true,
       })
     );
-    // Absent values are omitted; singleInstance is always recorded.
-    let value: serde_json::Value =
-      serde_json::from_str(&laufey_launch_config_json(None, &[], false))
-        .unwrap();
-    assert_eq!(value, serde_json::json!({ "singleInstance": false }));
+    // Absent values are omitted; singleInstance and the bridge's origins
+    // (DENEXT.md item 122) are always recorded.
+    let value: serde_json::Value = serde_json::from_str(
+      &laufey_launch_config_json(None, &[], &["app://localhost"], false),
+    )
+    .unwrap();
+    assert_eq!(
+      value,
+      serde_json::json!({
+        "bridgeOrigins": ["app://localhost"],
+        "singleInstance": false,
+      })
+    );
 
     let tmp = tempfile::tempdir().unwrap();
     write_laufey_launch_config(
       tmp.path(),
       Some("com.acme.notes"),
       Some("acme"),
+      "acme://app",
       true,
     )
     .unwrap();
@@ -10947,14 +11016,45 @@ def456  other.zip
     .unwrap();
     assert_eq!(written["appId"], "com.acme.notes");
     assert_eq!(written["customSchemes"], serde_json::json!(["acme"]));
+    assert_eq!(written["bridgeOrigins"], serde_json::json!(["acme://app"]));
     assert_eq!(written["singleInstance"], true);
     // An id laufey would ignore fails packaging instead.
     assert!(
-      write_laufey_launch_config(tmp.path(), Some("a/b"), None, false).is_err()
+      write_laufey_launch_config(
+        tmp.path(),
+        Some("a/b"),
+        None,
+        "app://localhost",
+        false
+      )
+      .is_err()
     );
     // Single instance without an id still writes the file (laufey warns and
     // runs unlocked).
-    write_laufey_launch_config(tmp.path(), None, None, true).unwrap();
+    write_laufey_launch_config(tmp.path(), None, None, "app://localhost", true)
+      .unwrap();
+  }
+
+  #[test]
+  fn bridge_origin_from_the_project_app_config() {
+    // DENEXT.md item 122: with no `desktop.app.origin` in deno.json, the
+    // origin the runtime reads from the embedded `.deno-desktop/app.json`.
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("app.json");
+    assert_eq!(project_app_config_origin(&path), None);
+    std::fs::write(&path, r#"{ "identifier": "com.acme.notes" }"#).unwrap();
+    assert_eq!(project_app_config_origin(&path), None);
+    std::fs::write(
+      &path,
+      r#"{ "origin": "Acme://App/", "identifier": "com.acme.notes" }"#,
+    )
+    .unwrap();
+    assert_eq!(
+      project_app_config_origin(&path).as_deref(),
+      Some("acme://app")
+    );
+    std::fs::write(&path, r#"{ "origin": 1 }"#).unwrap();
+    assert_eq!(project_app_config_origin(&path), None);
   }
 
   #[test]

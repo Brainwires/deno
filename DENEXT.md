@@ -4932,31 +4932,95 @@ where the changes are discussed.
 
 121. **`fix(deps)`: the AppImage's zstd on zstd 0.14, the zstd 0.13 copy gone**
      (`fix/backhand-zstd`, CLI only; `cli/tools/desktop.rs`, `Cargo.toml`,
-     `Cargo.lock`, `.cargo/audit.toml`). backhand 0.25 (the AppImage's
-     squashfs writer and reader) kept zstd 0.13.2 / zstd-safe 7.2.4 in the lock
-     beside the workspace's 0.14.3 / 8.2.0 (item 119). Its `zstd` feature is
-     off now, and `AppImageZstd`, a backhand `CompressionAction`, does the
-     zstd blocks on the workspace zstd the way backhand's `DefaultCompressor`
-     did (one-shot `bulk` contexts, level 3, no compression options, the
-     decompressed size bounded by the block backhand reserves), handing any
-     other compressor id to `DefaultCompressor` when reading. The writer and
-     the tests' readers use it through `Kind::new_v4`
-     (`appimage_squashfs_kind`); the image bytes are standard zstd SquashFS 4.0
-     as before. backhand stays the crates.io release: no `[patch]`, no vendored
-     copy. `.cargo/audit.toml` drops its RUSTSEC-2026-0391, -0398 and -0403
-     ignores, and `cargo audit` lists no vulnerability and none of the ten
-     `unsound` warnings (RUSTSEC-2026-0395 to -0406) any more; the lock before
-     this change, audited with the ignores gone, reports those three
-     vulnerabilities and ten warnings. Turn backhand's `zstd` feature back on
-     (and drop `AppImageZstd`) once a backhand release is on zstd 0.14. The
-     image's root directory is still written with mode 0 (backhand's
-     `FilesystemWriter` default, unchanged here), which `unsquashfs` and
-     `--appimage-extract` restore as an unreadable directory. Tests:
+     `Cargo.lock`, `.cargo/audit.toml`). backhand 0.25 (the AppImage's squashfs
+     writer and reader) kept zstd 0.13.2 / zstd-safe 7.2.4 in the lock beside
+     the workspace's 0.14.3 / 8.2.0 (item 119). Its `zstd` feature is off now,
+     and `AppImageZstd`, a backhand `CompressionAction`, does the zstd blocks on
+     the workspace zstd the way backhand's `DefaultCompressor` did (one-shot
+     `bulk` contexts, level 3, no compression options, the decompressed size
+     bounded by the block backhand reserves), handing any other compressor id to
+     `DefaultCompressor` when reading. The writer and the tests' readers use it
+     through `Kind::new_v4` (`appimage_squashfs_kind`); the image bytes are
+     standard zstd SquashFS 4.0 as before. backhand stays the crates.io release:
+     no `[patch]`, no vendored copy. `.cargo/audit.toml` drops its
+     RUSTSEC-2026-0391, -0398 and -0403 ignores, and `cargo audit` lists no
+     vulnerability and none of the ten `unsound` warnings (RUSTSEC-2026-0395 to
+     -0406) any more; the lock before this change, audited with the ignores
+     gone, reports those three vulnerabilities and ten warnings. Turn backhand's
+     `zstd` feature back on (and drop `AppImageZstd`) once a backhand release is
+     on zstd 0.14. The image's root directory is still written with mode 0
+     (backhand's `FilesystemWriter` default, unchanged here), which `unsquashfs`
+     and `--appimage-extract` restore as an unreadable directory. Tests:
      `appimage_zstd_blocks_and_fragments_round_trip` (compressible files over
      two data blocks and inside a fragment, read back through `AppImageZstd`
      and, where squashfs-tools is installed, extracted with `unsquashfs`) and
      `appimage_zstd_decompress_is_bounded_and_delegates`; without the custom
      `Kind` the four AppImage tests that write an image fail.
+
+122. **`fix`: AppImage root mode, symlinks in the lifecycle-script jail, the
+     launch file's bridge pin** (`fix/rc7-lows2`, CLI only;
+     `cli/tools/desktop.rs`, `cli/supply_chain/jail.rs`,
+     `runtime/permissions/lib.rs`, `ext/fs/ops.rs`; the laufey half, E-L1 to
+     E-L3, is Brainwires/laufey `fix/rc7-lows` and lands with the next
+     `LAUFEY_SHA` pin):
+     - **The AppImage's root directory was mode 0 (upstreamable).**
+       `create_linux_appimage` never called backhand's `set_root_mode`, and
+       `FilesystemWriter` writes the root inode with permissions 0, so
+       `unsquashfs` and `--appimage-extract` restored an unreadable
+       (`d---------`) root (item 121's test had to `chmod` it open). The root is
+       written `0755` now. Upstream Deno's `deno desktop` writes its AppImage
+       the same way and has the same bug. Test:
+       `appimage_zstd_blocks_and_fragments_round_trip` asserts the image's root
+       mode through backhand and the extracted directory's mode through
+       `unsquashfs` (the `chmod` workaround is gone); it fails without the fix
+       (`0` / `0` instead of `0o755`).
+     - **Symlinks inside a confined lifecycle-script jail.** `Deno.symlink()`
+       and `node:fs.symlink` need unscoped `--allow-read` and `--allow-write`,
+       which the jail's clamp never grants, so electron's postinstall
+       (extract-zip unpacking the macOS app bundle's `Versions/Current -> A`
+       links) failed with `create symlink: denied` (item 119's validation).
+       Where an OS sandbox (Landlock, Seatbelt) confines the script, the
+       installer now marks the jail `osConfined`, and the clamp hands its write
+       roots to `deno_permissions::set_jail_symlink_roots`. `check_symlink`
+       (used by both ops, unchanged for everyone else) then also accepts a link
+       whose path (its parent resolved) and target (resolved from that parent
+       through existing links, a missing tail kept as named, so a dangling link
+       works) both lie within those roots and pass the container's write (link)
+       and read + write (target) checks. A `..` after a name in the target is
+       refused (the name may be a link the kernel follows first). Nothing new is
+       reachable: any program the script starts may already `ln -s` there, and
+       the OS sandbox, not this check, holds writes through a link. Never set on
+       Windows or wherever the OS can't confine, where symlinks keep needing
+       unscoped grants; an older installer's jail JSON (no `osConfined`) means
+       unconfined. Tests: `npm/supply_chain_jail::symlinks_within_own_folder`
+       (the `@denotest/jail-symlinks` postinstall: the electron-shaped links
+       from `fs.symlinkSync`, `fs.promises.symlink` and `deno run -A`'s
+       `Deno.symlink[Sync]`, a dangling one, read back through the links; an
+       absolute or relative target outside the package, a link outside it,
+       `shout/../x` through an `ln -s` link that leaves the folder, and `/` all
+       refused), `test_check_symlink_jail_roots` (`deno_permissions`) and
+       `symlink_roots_only_when_confined` (`jail.rs`). Without the allowance the
+       spec test's six "allowed" lines read "denied".
+     - **The launch file always pins the bridge (E-L1).** The
+       `laufey-launch.json` that `deno desktop` writes now always has
+       `bridgeOrigins`: the app origin (deno.json `desktop.app.origin`, else the
+       project's `.deno-desktop/app.json` origin the runtime reads, else
+       `app://localhost`). Without the key laufey let every document the window
+       navigated to (an identity provider listed in `allowedNavigationOrigins`)
+       call the app through the bridge when the app had no custom scheme. Tests:
+       `laufey_launch_config_content`,
+       `bridge_origin_from_the_project_app_config`.
+
+     laufey (`fix/rc7-lows`): a launch file with `"strictPolicy": true` (the one
+     denext's packaging writes) fails closed: no `bridgeOrigins` (and no
+     `customSchemes`) pins the bridge to no document, and no `passkeyRpIds`
+     refuses every passkey ceremony (E-L1, E-L2); without the key (no file, or
+     the stock `deno desktop` file) both keep today's defaults. The Linux secure
+     store keys each item by the app id too (`laufey-app-id`), so two apps using
+     the same service and account no longer share it, and an item an older build
+     wrote under the shared attributes moves into the app's namespace on its
+     first lookup during the first run of the updated app, only when that app
+     had run here before (E-L3).
 
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
