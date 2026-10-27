@@ -1376,12 +1376,14 @@ jobs:
           if [ "$tag_commit" != "$SHA" ]; then
             echo "::error::$TAG moved to $tag_commit while $SHA was being built: not publishing"; exit 1
           fi
-          # GitHub "Latest" goes to the newest version by semver (an older
-          # line's patch release never takes it), set explicitly every time.
+          # GitHub "Latest" goes to the newest version in the fork's order
+          # (tag_gate.py version_key: 3.0.0-rc.N < 3.0.0-denext.N), never to a
+          # pre-release or an older line's patch release, set explicitly every
+          # time.
           others=$(gh release list --repo "$REPO" --limit 500 --json tagName --jq '.[].tagName' |
             sed -n 's/^denext-runtime-v//p')
           # shellcheck disable=SC2086 # one version per word
-          latest=$(python3 -I .github/denext-runtime/release_gate.py latest "$version" $others)
+          latest=$(python3 -I .github/denext-runtime/tag_gate.py --latest "$version" $others)
           echo "latest: $latest"
           symbols=()
           if compgen -G 'symbols/*.tar.gz' >/dev/null; then

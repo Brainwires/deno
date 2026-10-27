@@ -24,10 +24,16 @@ reason with an `::error::` prefix and exits 1.
 Usage: tag_gate.py --prerelease-flag <version>
 Prints `--prerelease` when the GitHub release of <version> is marked a
 pre-release (see `is_prerelease`), else nothing.
+
+Usage: tag_gate.py --latest <version> [<other release version>...]
+Prints `true` when the release of <version> becomes the repository's
+"Latest": it is not a pre-release and no other version given is newer (the
+fork's order, `version_key`), else `false`.
 """
 
 import json
 import os
+import re
 import subprocess
 import sys
 
@@ -57,6 +63,50 @@ def is_prerelease(version):
     """
     pre = version.split("+", 1)[0].partition("-")[2]
     return pre == "rc" or pre.startswith("rc.")
+
+
+# The fork's own-version line: on this core, every `denext.N` prerelease is
+# newer than every `rc.N` one (semver's ASCII order would put `d` below `r`).
+# denext orders the fork's versions the same way (compareDenoVersions).
+OWN_LINE_CORE = (3, 0, 0)
+OWN_LINE_RANK = {"rc": 0, "denext": 1}
+
+
+def version_key(version):
+    """A sort key for a release version, or None when it isn't semver.
+
+    Semver precedence (build metadata ignored), except that on the 3.0.0
+    core `3.0.0-rc.N` < `3.0.0-denext.N`: `2.9.7-denext.22` < `3.0.0-rc.1`
+    < `3.0.0-rc.10` < `3.0.0-denext.1` < `3.0.0-denext.10` < `3.0.0`.
+    """
+    m = re.fullmatch(
+        r"(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?",
+        version,
+    )
+    if not m:
+        return None
+    core = tuple(int(x) for x in m.group(1, 2, 3))
+    if m.group(4) is None:
+        # A release sorts after every prerelease of the same core.
+        return core + ((1,),)
+    parts = m.group(4).split(".")
+    rank = OWN_LINE_RANK.get(parts[0], -1) if core == OWN_LINE_CORE else -1
+    ids = tuple(
+        (0, int(p), "") if p.isdigit() else (1, 0, p) for p in parts
+    )
+    return core + ((0, rank) + ids,)
+
+
+def is_latest(version, others):
+    """Whether the release of `version` is marked the repository's "Latest":
+    never a pre-release, and only when no other release is newer."""
+    mine = version_key(version)
+    if mine is None:
+        raise SystemExit(f"::error::'{version}' is not a semver version")
+    if is_prerelease(version):
+        return False
+    keys = [k for k in (version_key(v) for v in others) if k is not None]
+    return all(mine >= k for k in keys)
 
 
 def evaluate(runs, legs_of, contained_in):
@@ -205,5 +255,8 @@ def main():
 if __name__ == "__main__":
     if len(sys.argv) == 3 and sys.argv[1] == "--prerelease-flag":
         print("--prerelease" if is_prerelease(sys.argv[2]) else "")
+        sys.exit(0)
+    if len(sys.argv) >= 3 and sys.argv[1] == "--latest":
+        print("true" if is_latest(sys.argv[2], sys.argv[3:]) else "false")
         sys.exit(0)
     sys.exit(main())

@@ -156,6 +156,55 @@ class Evaluate(unittest.TestCase):
         self.assertEqual(flag("3.0.0-denext.1"), "")
 
 
+class Latest(unittest.TestCase):
+    def test_newest_rc(self):
+        self.assertFalse(
+            gate.is_latest("3.0.0-rc.6", ["3.0.0-rc.5", "2.9.7-denext.22"]),
+            "a release candidate is a pre-release, never Latest",
+        )
+        self.assertGreater(
+            gate.version_key("3.0.0-rc.10"), gate.version_key("3.0.0-rc.9")
+        )
+        self.assertGreater(
+            gate.version_key("3.0.0-rc.1"), gate.version_key("2.9.7-denext.22")
+        )
+
+    def test_denext_line_is_newer_than_every_rc(self):
+        self.assertTrue(
+            gate.is_latest("3.0.0-denext.1", ["3.0.0-rc.6", "3.0.0-rc.10"])
+        )
+        self.assertTrue(
+            gate.is_latest("3.0.0-denext.10", ["3.0.0-denext.9", "3.0.0-rc.6"])
+        )
+        self.assertFalse(gate.is_latest("3.0.0-denext.2", ["3.0.0-denext.10"]))
+
+    def test_release_after_its_prereleases(self):
+        self.assertTrue(gate.is_latest("3.0.0", ["3.0.0-denext.12", "3.0.0-rc.6"]))
+        self.assertFalse(gate.is_latest("3.0.0-denext.13", ["3.0.0"]))
+
+    def test_the_rule_is_kept_to_the_3_0_0_core(self):
+        # elsewhere semver's own order holds: `denext` < `rc`
+        self.assertLess(
+            gate.version_key("3.0.1-denext.1"), gate.version_key("3.0.1-rc.1")
+        )
+
+    def test_an_older_line_is_not_latest(self):
+        self.assertFalse(gate.is_latest("2.9.7-denext.23", ["3.0.0-rc.6"]))
+
+    def test_unparseable_others_and_build_metadata(self):
+        self.assertTrue(gate.is_latest("3.0.0-denext.1", ["nightly", "3.0.0-rc.5"]))
+        self.assertTrue(gate.is_latest("3.0.0-denext.1", ["3.0.0-denext.1+ci.4"]))
+
+    def test_latest_cli(self):
+        out = subprocess.run(
+            [sys.executable, "-I", GATE, "--latest", "3.0.0-denext.1", "3.0.0-rc.6"],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        self.assertEqual(out, "true")
+
+
 FAKE_GH = r'''#!/usr/bin/env python3
 import json, os, sys
 answers = json.load(open(os.environ["FAKE_GH_ANSWERS"]))
