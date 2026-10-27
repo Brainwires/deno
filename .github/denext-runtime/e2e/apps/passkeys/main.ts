@@ -155,9 +155,18 @@ await r.step("passkeys", async () => {
     });
     await sleep(1500);
     let firstDone = false;
-    const first = p.get(getOpts("example.com"), { window: win }).finally(() => {
-      firstDone = true;
-    });
+    // macOS refuses an unsigned app's request itself (invalid_rp), but not
+    // always at once: under WKWebView on an x86_64 runner the refusal has
+    // taken 0.4 to 1.9 s, and once over 2 s, which the ceremony's own
+    // 2000 ms timeout then answered first. Give the OS 30 s there, so the
+    // answer checked is the OS's; a request that really hangs still ends
+    // as `timeout` and fails the invalid_rp check. Elsewhere the request
+    // waits for a person, so it keeps the short timeout.
+    const osTimeout = OS === "darwin" ? 30000 : 2000;
+    const first = p.get(getOpts("example.com", osTimeout), { window: win })
+      .finally(() => {
+        firstDone = true;
+      });
     // A second request while the first runs is refused as busy. The first
     // can end before the second is made (macOS refuses an unsigned app at
     // once), so keep asking until it is either busy or the first ended.

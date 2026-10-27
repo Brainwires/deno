@@ -5288,6 +5288,22 @@ where the changes are discussed.
      `appimage_zstd_blocks_and_fragments_round_trip` now finds files by path
      components, since backhand's reader joins them with the host separator.
 
+132. **`test(e2e)`: the macOS passkeys refusal gets the OS's answer, not the
+     ceremony timeout's** (`fix/denext1-passkey-webview`, CI only;
+     `.github/denext-runtime/e2e/apps/passkeys/main.ts`). The passkeys area
+     sent its one real OS request with a 2000 ms WebAuthn `timeout` and then
+     required `invalid_rp` on macOS. laufey's macOS path starts that timer
+     just before `performRequests`, and AuthenticationServices' refusal of
+     an unsigned app is not always quick: under WKWebView on
+     x86_64-apple-darwin it answered in 435, 1299 and 1870 ms in the last
+     three green runs, against 7 to 44 ms under CEF and 43 to 333 ms on
+     aarch64. In run 40515238488 it took longer than 2 s, so the request
+     ended as `timeout` and the check failed, on the same laufey (ec6a30b)
+     and no macOS code change since the green 1870 ms run (40479029675). On macOS the request now carries a
+     30 s timeout, so the check sees the OS's answer, and a request that
+     really hangs still fails it as `timeout`; elsewhere, where the request
+     waits for a person, it keeps 2000 ms.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129) are what the prebuilt `libdenort` carries. The CLI-side
