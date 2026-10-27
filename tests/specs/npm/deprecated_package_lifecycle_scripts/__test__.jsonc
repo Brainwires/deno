@@ -1,0 +1,27 @@
+{
+  "tempDir": true,
+  "tests": {
+    // A deprecated package's extra info comes from the registry (package.json
+    // has no deprecation message), and the abbreviated packument the
+    // installer asks for has `hasInstallScript` but no `scripts`. Its
+    // lifecycle scripts must still be found (in package.json) and run
+    // (puppeteer 23's postinstall was silently skipped).
+    "postinstall_runs": {
+      "steps": [
+        {
+          "args": "install --allow-scripts --no-jail-scripts npm:@denotest/deprecated-lifecycle-scripts",
+          "output": "install.out"
+        },
+        {
+          "args": "eval console.log(Deno.readTextFileSync('node_modules/@denotest/deprecated-lifecycle-scripts/postinstall.txt').trim())",
+          "output": "postinstall ran\n"
+        }
+      ]
+    },
+    // Without --allow-scripts the skipped script is reported.
+    "not_run_is_reported": {
+      "args": "install npm:@denotest/deprecated-lifecycle-scripts",
+      "output": "not_run.out"
+    }
+  }
+}

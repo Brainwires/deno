@@ -4831,8 +4831,8 @@ where the changes are discussed.
      node-gyp build) fail unjailed too on this machine, so nothing is
      attributable; puppeteer 23.11.1: `deno install` ran no postinstall for it,
      jailed or not, so it was not exercised. No failure was a Seatbelt denial.
-     The tunnel-agent `CONNECT` under `NODE_USE_ENV_PROXY` is a node-compat gap
-     to fix in `_http_client`.
+     The tunnel-agent `CONNECT` under `NODE_USE_ENV_PROXY` and puppeteer's
+     missing postinstall are fixed in item 120.
 
      Tests: `npm/supply_chain_jail` (`escapes_denied_mac`: `/dev/tty`,
      `TIOCSTI`, the session, the process table, hard links both ways, a `nohup`
@@ -5055,9 +5055,174 @@ where the changes are discussed.
      Test: `tests/specs/test/recursive_permissions_pledge` (its expected panic
      output).
 
+120. **`fix`: the rest of the fork audit's Lows, and the release gate**
+     (`fix/rc7-lows`; `runtime/ops/desktop_update/oscheck.rs`,
+     `runtime/permissions/lib.rs`, `ext/node/polyfills/_http_client.js`,
+     `libs/npm_installer/extra_info.rs`, `.github/workflows/denext_*.yml`,
+     `.github/denext-tests/setup/action.yml`, `.github/denext-runtime/`). The
+     2026-10-25 security and production audits' remaining Lows (item 119 took
+     the jail's), two install failures item 119's validation found, and the
+     release pipeline's integrity findings:
+     - **macOS update check: an Apple anchor, not just a Team ID (E-L4).** The
+       update helper compared the staged app's Team ID with the running app's,
+       but the Team ID is the leaf certificate's OU, which a self-signed
+       certificate can carry, and `codesign --verify` asks for no Apple anchor;
+       only `spctl --assess` did, and it accepts everything once the user has
+       turned Gatekeeper off. Now the staged bundle must also satisfy
+       `codesign --verify --deep --strict -R='anchor apple generic and
+       certificate leaf[subject.OU] = "<team>"'`,
+       with the Team ID checked to be ten upper-case letters and digits before
+       it goes into the requirement.
+     - **`--deny-import` and IPv4-mapped addresses (B-I1, upstream-shared).**
+       The import deny check after DNS resolution compared the address as
+       resolved, so a name whose AAAA record is `::ffff:127.0.0.1` passed
+       `--deny-import=127.0.0.1`. It normalizes the address first, as the net
+       checks do.
+     - **`agent: false` and `NODE_USE_ENV_PROXY`.** Node routes only its global
+       agents through the environment's proxy; a request made with
+       `agent: false` gets a fresh agent without `proxyEnv` and connects
+       directly. Deno's `node:http` routed it through the proxy too, so
+       tunnel-agent's `CONNECT` (sharp's libvips download, prebuild-install's
+       binaries: item 119's validation) was itself proxied and its `host:port`
+       target refused as an invalid URL ("Invalid URL: github.com:443"), inside
+       the jail (which sets the variable) or out.
+     - **A deprecated package's lifecycle scripts never ran.** The extra info of
+       a deprecated package (its deprecation message is not in its package.json)
+       came from the registry's packument, and the abbreviated packument the
+       installer fetches has `hasInstallScript` but no `scripts`: no script was
+       found, so none ran and none was reported as not run (puppeteer 23.11.1's
+       postinstall, which downloads Chrome: item 119's validation). The scripts
+       now come from the package's own package.json in that case (npm's
+       `node-gyp rebuild` default for a `binding.gyp` included).
+     - **The release gate (P3, P4, P5, P11).** A tag was published when any one
+       full `denext tests` run of the commit passed, so a crash that fails one
+       run in three shipped after a re-dispatch (the arm64 and macOS SIGABRTs of
+       rc.3 and rc.6), any commit with a green dispatch could be tagged (a
+       `fix/*` branch never merged), and Windows arm64, a shipped target, had no
+       test leg at all. Now `.github/denext-runtime/tag_gate.py` (with
+       `tag_gate_test.py`, run in the lint job) refuses a commit with any
+       failed, timed-out or unstarted `denext tests` run, in any attempt (a
+       "re-run failed jobs" that turns a run green keeps its failed first
+       attempt), or with one still running; requires a full run with a
+       `windows-11-arm` leg besides the other five; and requires the commit on
+       `development-denext` or `rel/<version>`. `denext_tests.yml` gains that
+       leg on full runs: build, lib tests and the unit suite (`libs_and_unit`;
+       the shared setup names the ARM64 host for rustup and finds VS's ARM64
+       libclang). When the lib tests fail, each leg runs them again on one
+       thread, where libtest prints a test's name before running it, so a test
+       that aborts the whole binary (the unnamed SIGABRTs) is named. A
+       pre-release is published as a GitHub pre-release, so an rc is never the
+       repository's "Latest" (P8, in part).
+     - **Pinned build tools in attested jobs (D-L2).** The libdenort and CLI
+       jobs (which hold `id-token` and attestation rights) set up a floating
+       `deno-version: v2.x` to fetch the `ld64.lld` that links the macOS arm64
+       release binaries. They now use `STOCK_DENO_VERSION`, and
+       `.github/denext-runtime/install_ld64.sh` (also used by the test setup)
+       checks the linker against a pinned SHA-256 and the `deno_third_party`
+       commit `tools/util.js` pins.
+
+     Tests: `team_must_be_apple_anchored` and `team_requirement_names_the_team`
+     (`oscheck.rs`), `test_check_import_deny_resolved_ipv4_mapped`
+     (`deno_permissions`), `node/http_proxy_agent_false`,
+     `npm/deprecated_package_lifecycle_scripts` (with the
+     `@denotest/deprecated-lifecycle-scripts` test package) and
+     `tag_gate_test.py`.
+
+121. **`fix(deps)`: the AppImage's zstd on zstd 0.14, the zstd 0.13 copy gone**
+     (`fix/backhand-zstd`, CLI only; `cli/tools/desktop.rs`, `Cargo.toml`,
+     `Cargo.lock`, `.cargo/audit.toml`). backhand 0.25 (the AppImage's squashfs
+     writer and reader) kept zstd 0.13.2 / zstd-safe 7.2.4 in the lock beside
+     the workspace's 0.14.3 / 8.2.0 (item 119). Its `zstd` feature is off now,
+     and `AppImageZstd`, a backhand `CompressionAction`, does the zstd blocks on
+     the workspace zstd the way backhand's `DefaultCompressor` did (one-shot
+     `bulk` contexts, level 3, no compression options, the decompressed size
+     bounded by the block backhand reserves), handing any other compressor id to
+     `DefaultCompressor` when reading. The writer and the tests' readers use it
+     through `Kind::new_v4` (`appimage_squashfs_kind`); the image bytes are
+     standard zstd SquashFS 4.0 as before. backhand stays the crates.io release:
+     no `[patch]`, no vendored copy. `.cargo/audit.toml` drops its
+     RUSTSEC-2026-0391, -0398 and -0403 ignores, and `cargo audit` lists no
+     vulnerability and none of the ten `unsound` warnings (RUSTSEC-2026-0395 to
+     -0406) any more; the lock before this change, audited with the ignores
+     gone, reports those three vulnerabilities and ten warnings. Turn backhand's
+     `zstd` feature back on (and drop `AppImageZstd`) once a backhand release is
+     on zstd 0.14. The image's root directory is still written with mode 0
+     (backhand's `FilesystemWriter` default, unchanged here), which `unsquashfs`
+     and `--appimage-extract` restore as an unreadable directory. Tests:
+     `appimage_zstd_blocks_and_fragments_round_trip` (compressible files over
+     two data blocks and inside a fragment, read back through `AppImageZstd`
+     and, where squashfs-tools is installed, extracted with `unsquashfs`) and
+     `appimage_zstd_decompress_is_bounded_and_delegates`; without the custom
+     `Kind` the four AppImage tests that write an image fail.
+
+122. **`fix`: AppImage root mode, symlinks in the lifecycle-script jail, the
+     launch file's bridge pin** (`fix/rc7-lows2`, CLI only;
+     `cli/tools/desktop.rs`, `cli/supply_chain/jail.rs`,
+     `runtime/permissions/lib.rs`, `ext/fs/ops.rs`; the laufey half, E-L1 to
+     E-L3, is Brainwires/laufey `fix/rc7-lows` and lands with the next
+     `LAUFEY_SHA` pin):
+     - **The AppImage's root directory was mode 0 (upstreamable).**
+       `create_linux_appimage` never called backhand's `set_root_mode`, and
+       `FilesystemWriter` writes the root inode with permissions 0, so
+       `unsquashfs` and `--appimage-extract` restored an unreadable
+       (`d---------`) root (item 121's test had to `chmod` it open). The root is
+       written `0755` now. Upstream Deno's `deno desktop` writes its AppImage
+       the same way and has the same bug. Test:
+       `appimage_zstd_blocks_and_fragments_round_trip` asserts the image's root
+       mode through backhand and the extracted directory's mode through
+       `unsquashfs` (the `chmod` workaround is gone); it fails without the fix
+       (`0` / `0` instead of `0o755`).
+     - **Symlinks inside a confined lifecycle-script jail.** `Deno.symlink()`
+       and `node:fs.symlink` need unscoped `--allow-read` and `--allow-write`,
+       which the jail's clamp never grants, so electron's postinstall
+       (extract-zip unpacking the macOS app bundle's `Versions/Current -> A`
+       links) failed with `create symlink: denied` (item 119's validation).
+       Where an OS sandbox (Landlock, Seatbelt) confines the script, the
+       installer now marks the jail `osConfined`, and the clamp hands its write
+       roots to `deno_permissions::set_jail_symlink_roots`. `check_symlink`
+       (used by both ops, unchanged for everyone else) then also accepts a link
+       whose path (its parent resolved) and target (resolved from that parent
+       through existing links, a missing tail kept as named, so a dangling link
+       works) both lie within those roots and pass the container's write (link)
+       and read + write (target) checks. A `..` after a name in the target is
+       refused (the name may be a link the kernel follows first). Nothing new is
+       reachable: any program the script starts may already `ln -s` there, and
+       the OS sandbox, not this check, holds writes through a link. Never set on
+       Windows or wherever the OS can't confine, where symlinks keep needing
+       unscoped grants; an older installer's jail JSON (no `osConfined`) means
+       unconfined. Tests: `npm/supply_chain_jail::symlinks_within_own_folder`
+       (the `@denotest/jail-symlinks` postinstall: the electron-shaped links
+       from `fs.symlinkSync`, `fs.promises.symlink` and `deno run -A`'s
+       `Deno.symlink[Sync]`, a dangling one, read back through the links; an
+       absolute or relative target outside the package, a link outside it,
+       `shout/../x` through an `ln -s` link that leaves the folder, and `/` all
+       refused), `test_check_symlink_jail_roots` (`deno_permissions`) and
+       `symlink_roots_only_when_confined` (`jail.rs`). Without the allowance the
+       spec test's six "allowed" lines read "denied".
+     - **The launch file always pins the bridge (E-L1).** The
+       `laufey-launch.json` that `deno desktop` writes now always has
+       `bridgeOrigins`: the app origin (deno.json `desktop.app.origin`, else the
+       project's `.deno-desktop/app.json` origin the runtime reads, else
+       `app://localhost`). Without the key laufey let every document the window
+       navigated to (an identity provider listed in `allowedNavigationOrigins`)
+       call the app through the bridge when the app had no custom scheme. Tests:
+       `laufey_launch_config_content`,
+       `bridge_origin_from_the_project_app_config`.
+
+     laufey (`fix/rc7-lows`): a launch file with `"strictPolicy": true` (the one
+     denext's packaging writes) fails closed: no `bridgeOrigins` (and no
+     `customSchemes`) pins the bridge to no document, and no `passkeyRpIds`
+     refuses every passkey ceremony (E-L1, E-L2); without the key (no file, or
+     the stock `deno desktop` file) both keep today's defaults. The Linux secure
+     store keys each item by the app id too (`laufey-app-id`), so two apps using
+     the same service and account no longer share it, and an item an older build
+     wrote under the shared attributes moves into the app's namespace on its
+     first lookup during the first run of the updated app, only when that app
+     had run here before (E-L3).
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
-118, 119) are what the prebuilt `libdenort` carries. The CLI-side parts (for
+118, 120) are what the prebuilt `libdenort` carries. The CLI-side parts (for
 example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's
 launchers) are in the branch too, but a stock CLI does not run them; denext's
 own launcher provides that environment.
@@ -5221,16 +5386,17 @@ branch) that changes what the runtime is built from: the `cli`, `runtime`, `ext`
 and `libs` crates, the workspace manifests and toolchain (`Cargo.toml`,
 `Cargo.lock`, `rust-toolchain.toml`, `.cargo/`), the laufey pin (`LAUFEY_SHA` in
 the workflow, `cli/rt_desktop/Cargo.toml`), the workflow and
-`.github/denext-runtime/`. A tag publishes only when the setup job's gates pass
-(`release_gate.py`): the tag is annotated, points at the commit being built, was
-never pushed on another commit and has no release yet (tags and releases are
-never moved or replaced: a failed tag build is fixed by the next version); every
-`denext tests` (`denext_tests.yml`) run of exactly that commit has finished, the
-newest full one (every OS leg) succeeded, and no run of it (push or dispatch)
-has a job whose newest attempt failed: a failure counts until that run's job is
-re-run green (`gh run rerun <id> --failed`), and another green run does not
-clear it. Jobs that passed only on a re-run are listed in the release notes. The
-release is GitHub "Latest" exactly when its version is the newest by semver. Per
+`.github/denext-runtime/`. A tag publishes only when the setup job's gates pass:
+the tag is annotated, points at the commit being built, was never pushed on
+another commit and has no release yet (tags and releases are never moved or
+replaced: a failed tag build is fixed by the next version); and (`tag_gate.py`)
+a full `denext tests` (`denext_tests.yml`) run, every OS leg green (Windows
+arm64 included), passed on exactly the tagged commit, no `denext tests` run of
+that commit failed in any attempt (a green re-run does not clear a red one) or
+is still running, and the commit is on `development-denext` or
+`rel/<version>`. A pre-release version (`3.0.0-rc.N`) is published as a GitHub
+pre-release, never as the repository's "Latest"; otherwise the release is
+"Latest" exactly when its version is the newest. Per
 target it:
 
 1. builds `libdenort` with `cargo build --release --locked -p denort_desktop`
@@ -5286,9 +5452,10 @@ Two workflows run instead:
   `jsdoc_checker.js`, `cargo fmt --check`, `cargo test --locked --lib` over
   upstream's crate list plus the fork's crates, a debug build, and the unit and
   (sharded) spec suites against it; on Linux also upstream's `integration`
-  (sharded) and `unit_node` suites; and the build and lib tests on macOS x64,
-  Linux arm64 and Windows arm64. It runs on pushes to `development-denext`,
-  `denext/**`, `rel/**`, `ci/**`, `feat/**` and `fix/**`, on pull requests to
+  (sharded) and `unit_node` suites; the build and lib tests on macOS x64 and
+  Linux arm64; and the build, lib tests and unit suite on Windows arm64
+  (`windows-11-arm`). It runs on pushes to `development-denext`, `denext/**`,
+  `rel/**`, `ci/**`, `feat/**` and `fix/**`, on pull requests to
   `development-denext`, `denext/**` and `rel/**`, and by manual dispatch. The
   full matrix runs on a push to `development-denext` and on a dispatch (input
   `full`, default true); every other push and pull request runs Linux x64 only

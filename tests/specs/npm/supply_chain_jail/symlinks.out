@@ -1,0 +1,12 @@
+node: Versions/Current -> A: allowed
+node: binary -> Versions/Current/...: allowed
+node: async Resources -> Versions/Current/Resources: allowed
+node: dangling Libraries -> Versions/Current/Libraries: allowed
+node: read through the links: binary
+node: target outside (absolute): denied
+node: target outside (relative): denied
+node: link outside the package: denied
+node: target through a link, then ..: denied
+deno run -A: Deno.symlinkSync in own dir: allowed
+deno run -A: Deno.symlink in own dir: allowed
+deno run -A: Deno.symlinkSync to /: denied (NotCapable)

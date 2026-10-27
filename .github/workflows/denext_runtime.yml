@@ -9,10 +9,10 @@
 # the laufey pin — LAUFEY_SHA below and cli/rt_desktop/Cargo.toml — and this
 # workflow with its scripts), by hand, and on a tag (path filters are not
 # evaluated for tags), which publishes only when a full `denext tests` run
-# (every OS leg, not a branch's Linux-only run) passed on the tagged commit
-# and no run of it has a failed job that was not re-run green
-# (.github/denext-runtime/release_gate.py), and only from an annotated tag
-# that was never moved. See DENEXT.md.
+# (every OS leg, not a branch's Linux-only run) passed on the tagged commit,
+# no run of it failed, and it is on development-denext or rel/<version>
+# (.github/denext-runtime/tag_gate.py), and only from an annotated tag that
+# was never moved. See DENEXT.md.
 name: denext runtime
 
 on:
@@ -105,10 +105,9 @@ jobs:
       laufey_sha: ${{ steps.plan.outputs.laufey_sha }}
       cef_version: ${{ steps.plan.outputs.cef_version }}
       laufey_api: ${{ steps.plan.outputs.laufey_api }}
-      # The tag gate's verdict (tags only): the full run it accepted and the
-      # jobs that passed only on a re-run, for the release notes.
+      # The tag gate's verdict (tags only): the full run it accepted, for the
+      # release notes.
       full_run: ${{ steps.plan.outputs.full_run }}
-      retried: ${{ steps.plan.outputs.retried }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -116,7 +115,7 @@ jobs:
             cli/Cargo.toml
             cli/lib/version.txt
             cli/lib/upstream_version.txt
-            .github/denext-runtime/release_gate.py
+            .github/denext-runtime/tag_gate.py
           sparse-checkout-cone-mode: false
       - id: plan
         env:
@@ -189,14 +188,19 @@ jobs:
               echo "::error::release $REF_NAME already exists: a published release is never replaced; tag the next version instead"
               exit 1
             fi
-            # A release needs a green FULL `denext tests` run (every OS
-            # leg) of exactly the tagged commit, and no run of that commit
-            # with a failed job that was not re-run green: the rule is
-            # spelled out in release_gate.py (RULE) and printed here.
-            python3 -I .github/denext-runtime/release_gate.py tests "$REPO" "$SHA" || {
-              echo "::error::the tag gate refused $SHA (see the rule and the runs above)"
+            # A release needs a green FULL `denext tests` run (lint, libs,
+            # unit, specs on every OS leg, Windows arm64 included) of exactly
+            # the tagged commit, no failed run or attempt of it at all (a
+            # re-run that passes does not clear one), and the commit on
+            # development-denext or rel/<version>. See tag_gate.py.
+            if ! gate=$(REPO="$REPO" SHA="$SHA" VERSION="$version" \
+              python3 -I .github/denext-runtime/tag_gate.py); then
+              echo "$gate"
+              echo "::error::the tag gate refused $SHA (see above)"
               exit 1
-            }
+            fi
+            echo "$gate"
+            sed -n 's/^full_run=//p' <<<"$gate" | sed 's/^/full_run=/' >>"$GITHUB_OUTPUT"
             TARGETS=all
           else
             # Build metadata: the same precedence as the version it builds
@@ -511,20 +515,18 @@ jobs:
           echo "::error::libclang.dll not found"; exit 1
 
       # ld64.lld: the aarch64-apple-darwin rustflags in .cargo/config.toml link
-      # with -fuse-ld=lld, as deno's release does.
+      # with -fuse-ld=lld, as deno's release does. The Deno that fetches it is
+      # pinned and the linker is checked against a pinned SHA-256: this job
+      # attests what it builds.
       - uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
         if: matrix.target == 'aarch64-apple-darwin'
         with:
-          deno-version: v2.x
+          deno-version: ${{ env.STOCK_DENO_VERSION }}
       - name: Install ld64.lld (macOS aarch64)
         if: matrix.target == 'aarch64-apple-darwin'
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: |
-          # tools/util.js imports the std submodule.
-          git submodule update --init --depth=1 -- ./tests/util/std
-          ./tools/install_prebuilt.js ld64.lld
-          echo "$GITHUB_WORKSPACE/third_party/prebuilt/mac" >>"$GITHUB_PATH"
+        run: bash .github/denext-runtime/install_ld64.sh
 
       - name: Rust toolchain
         run: |
@@ -747,20 +749,18 @@ jobs:
           echo "::error::libclang.dll not found"; exit 1
 
       # ld64.lld: the aarch64-apple-darwin rustflags in .cargo/config.toml link
-      # with -fuse-ld=lld, as deno's release does.
+      # with -fuse-ld=lld, as deno's release does. The Deno that fetches it is
+      # pinned and the linker is checked against a pinned SHA-256: this job
+      # attests what it builds.
       - uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
         if: matrix.target == 'aarch64-apple-darwin'
         with:
-          deno-version: v2.x
+          deno-version: ${{ env.STOCK_DENO_VERSION }}
       - name: Install ld64.lld (macOS aarch64)
         if: matrix.target == 'aarch64-apple-darwin'
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: |
-          # tools/util.js imports the std submodule.
-          git submodule update --init --depth=1 -- ./tests/util/std
-          ./tools/install_prebuilt.js ld64.lld
-          echo "$GITHUB_WORKSPACE/third_party/prebuilt/mac" >>"$GITHUB_PATH"
+        run: bash .github/denext-runtime/install_ld64.sh
 
       - name: Rust toolchain
         run: |
@@ -1353,7 +1353,6 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
           FULL_RUN: ${{ needs.setup.outputs.full_run }}
-          RETRIED: ${{ needs.setup.outputs.retried }}
           # Every expression goes through the environment: values expand as
           # data inside the heredoc, never as shell source.
           # The upstream Deno release the fork is built from (BUILD_INFO.json's
@@ -1422,13 +1421,10 @@ jobs:
 
           Tag gate: full \`denext tests\` run [${FULL_RUN}](https://github.com/${REPO}/actions/runs/${FULL_RUN}).
           EOF
-          if [ -n "${RETRIED//[[:space:]]/}" ]; then
-            {
-              echo
-              echo "Jobs of that commit that passed only on a re-run:"
-              while IFS= read -r line; do [ -z "$line" ] || echo "- $line"; done <<<"$RETRIED"
-            } >>notes.md
-          fi
+          # A release candidate (3.0.0-rc.N) is marked a pre-release, so it
+          # never becomes the repository's "Latest" release.
+          prerelease=
+          case "${TAG#denext-runtime-v}" in *-*) prerelease=--prerelease ;; esac
           gh release create "$TAG" --repo "$REPO" --title "$TAG" \
-            --notes-file notes.md --verify-tag --latest="$latest" \
+            --notes-file notes.md --verify-tag --latest="$latest" $prerelease \
             dist/*.tar.gz dist/*.zip dist/SHA256SUMS dist/manifest.json "${symbols[@]}"

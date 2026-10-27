@@ -1,0 +1,4 @@
+[WILDCARD]
+│  Ignored build scripts for packages:
+│  npm:@denotest/deprecated-lifecycle-scripts@1.0.0
+[WILDCARD]

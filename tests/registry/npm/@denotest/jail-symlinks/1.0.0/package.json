@@ -1,0 +1,9 @@
+{
+  "name": "@denotest/jail-symlinks",
+  "version": "1.0.0",
+  "main": "index.js",
+  "publishDate": "2025-06-01T20:00:00.000Z",
+  "scripts": {
+    "postinstall": "ln -s \"$INIT_CWD\" shout; node symlinks.js && deno run -A deno_symlink.mjs"
+  }
+}

@@ -453,6 +453,33 @@
         }
       ]
     },
+    // DENEXT.md item 122: where the OS confines the script, a jailed deno
+    // (the `node` shim, `deno run -A`) creates symlinks whose link and target
+    // both stay in the package's folder, as electron's postinstall does when
+    // it unpacks an app bundle; a link or target outside it is still refused
+    "symlinks_within_own_folder": {
+      "if": "unix",
+      "steps": [
+        {
+          "cwd": "symlinks",
+          "args": "install --allow-scripts=npm:@denotest/jail-symlinks",
+          "output": "[WILDCARD]"
+        },
+        {
+          "cwd": "symlinks",
+          "args": "eval console.log(Deno.readTextFileSync('node_modules/@denotest/jail-symlinks/results.txt').trim())",
+          "output": "symlinks.out"
+        },
+        {
+          "cwd": "symlinks",
+          "args": [
+            "eval",
+            "console.log(Deno.readLinkSync('node_modules/@denotest/jail-symlinks/dist/Electron.app/Contents/Frameworks/Electron Framework.framework/Versions/Current'))"
+          ],
+          "output": "A\n"
+        }
+      ]
+    },
     // paranoid: jailed without being asked, and a package can't grant itself
     // the network
     "paranoid_jails": {

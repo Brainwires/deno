@@ -120,6 +120,20 @@ pub struct JailPermissions {
   /// the OS can't confine (no native code at all).
   #[serde(default)]
   pub ffi: Vec<PathBuf>,
+  /// An OS sandbox (Landlock, Seatbelt) confines the script's whole process
+  /// tree. The clamp then lets a `deno` create symlinks whose link and
+  /// target both lie within `write` (DENEXT.md item 122: electron's
+  /// postinstall unpacks an app bundle full of them); never set where the OS
+  /// can't confine (Windows), where symlinks keep needing unscoped grants.
+  #[serde(default)]
+  pub os_confined: bool,
+}
+
+/// The roots a jailed `deno` may create symlinks within (DENEXT.md item
+/// 122): the jail's write roots, when an OS sandbox confines it.
+pub fn jail_symlink_roots(jail: &JailPermissions) -> Option<&[PathBuf]> {
+  (jail.os_confined && !cfg!(windows) && !jail.write.is_empty())
+    .then_some(jail.write.as_slice())
 }
 
 /// What the OS sandbox lets a jailed script's processes connect to.
@@ -296,6 +310,9 @@ pub fn clamp_permissions(
     }
   }
   options.prompt = false;
+  if let Some(roots) = jail_symlink_roots(jail) {
+    deno_runtime::deno_permissions::set_jail_symlink_roots(roots.to_vec());
+  }
 }
 
 /// The jail of an install (`jail-scripts`).
@@ -1521,6 +1538,7 @@ async fn run_in_dirs(
     net: net.clone(),
     proxy: proxy_address.clone(),
     ffi: package_ffi_roots(s.package_folder, os_sandbox),
+    os_confined: os_sandbox && !cfg!(windows),
   };
 
   // the environment
@@ -2280,6 +2298,40 @@ mod tests {
     assert!(!url_valued_env_var("PATH"));
   }
 
+  // DENEXT.md item 122: symlinks within the write roots only where an OS
+  // sandbox confines the script, and never on Windows
+  #[test]
+  fn symlink_roots_only_when_confined() {
+    let mut jail = JailPermissions {
+      write: vec![PathBuf::from("/nm/pkg"), PathBuf::from("/nm/.jail/x")],
+      ..Default::default()
+    };
+    assert_eq!(jail_symlink_roots(&jail), None);
+    jail.os_confined = true;
+    if cfg!(windows) {
+      assert_eq!(jail_symlink_roots(&jail), None);
+    } else {
+      assert_eq!(jail_symlink_roots(&jail), Some(jail.write.as_slice()));
+    }
+    // no write roots: nothing
+    assert_eq!(
+      jail_symlink_roots(&JailPermissions {
+        os_confined: true,
+        ..Default::default()
+      }),
+      None
+    );
+    // the flag survives the trip through the environment, and an older
+    // installer's JSON (without it) means unconfined
+    let json = serde_json::to_string(&jail).unwrap();
+    assert!(json.contains("\"osConfined\":true"), "{json}");
+    let old: JailPermissions = serde_json::from_str(
+      r#"{"write":["/nm"],"denyWrite":[],"denyRead":[],"net":"none"}"#,
+    )
+    .unwrap();
+    assert!(!old.os_confined);
+  }
+
   // DENEXT.md item 124: a path list with `..` can't pass the clamp
   #[test]
   fn clamp_folds_dotdot() {
@@ -2539,6 +2591,7 @@ mod tests {
       net: JailNet::None,
       proxy: None,
       ffi: vec![],
+      os_confined: false,
     };
     let mut options = PermissionsOptions {
       allow_write: Some(vec![]),

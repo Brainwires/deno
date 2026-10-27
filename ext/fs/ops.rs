@@ -924,11 +924,12 @@ pub async fn op_fs_link_async(
 // the problem, so we replace it with a clearer one.
 fn check_symlink_permissions(
   permissions: &deno_permissions::PermissionsContainer,
+  oldpath: &str,
+  newpath: &str,
   api_name: &str,
 ) -> Result<(), FsOpsError> {
   permissions
-    .check_write_all(api_name)
-    .and_then(|()| permissions.check_read_all(api_name))
+    .check_symlink(Path::new(oldpath), Path::new(newpath), api_name)
     .map_err(|err| {
       let err = match err {
         PermissionCheckError::PermissionDenied(mut denied)
@@ -954,7 +955,12 @@ pub fn op_fs_symlink_sync(
 ) -> Result<(), FsOpsError> {
   let permissions =
     state.borrow_mut::<deno_permissions::PermissionsContainer>();
-  check_symlink_permissions(permissions, "Deno.symlinkSync()")?;
+  check_symlink_permissions(
+    permissions,
+    oldpath,
+    newpath,
+    "Deno.symlinkSync()",
+  )?;
 
   // PERMISSIONS: ok because we verified --allow-write and --allow-read above
   let oldpath = CheckedPath::unsafe_new(Cow::Borrowed(Path::new(oldpath)));
@@ -978,7 +984,12 @@ pub async fn op_fs_symlink_async(
     let mut state = state.borrow_mut();
     let permissions =
       state.borrow_mut::<deno_permissions::PermissionsContainer>();
-    check_symlink_permissions(permissions, "Deno.symlink()")?;
+    check_symlink_permissions(
+      permissions,
+      &oldpath,
+      &newpath,
+      "Deno.symlink()",
+    )?;
     state.borrow::<FileSystemRc>().clone()
   };
 

@@ -66,6 +66,22 @@ pub enum AuditSink {
 
 pub static AUDIT_SINK: OnceLock<AuditSink> = OnceLock::new();
 
+/// denext (DENEXT.md item 122): the write roots of a jailed npm lifecycle
+/// script whose OS sandbox confines it. See [`set_jail_symlink_roots`].
+static JAIL_SYMLINK_ROOTS: OnceLock<Vec<PathBuf>> = OnceLock::new();
+
+/// denext (DENEXT.md item 122): lets [`PermissionsContainer::check_symlink`]
+/// accept a symlink whose link path and resolved target both lie within
+/// `roots`, without unscoped read and write. Set only by the lifecycle-script
+/// jail's permission clamp, and only where an OS sandbox (Landlock, Seatbelt)
+/// confines the script: there any program it starts (`ln -s`) may already
+/// create symlinks beneath those roots, and the sandbox, not this check, is
+/// what holds writes through them. Process-wide and set at most once; nothing
+/// else sets it, so the permission model elsewhere is unchanged.
+pub fn set_jail_symlink_roots(roots: Vec<PathBuf>) {
+  let _ = JAIL_SYMLINK_ROOTS.set(roots);
+}
+
 #[derive(Debug, thiserror::Error, deno_error::JsError)]
 #[error("{}", custom_message.as_ref().cloned().unwrap_or_else(|| format!("Requires {access}, {}", format_permission_error(.name))))]
 #[class("NotCapable")]
@@ -5182,6 +5198,118 @@ impl PermissionsContainer {
     Ok(())
   }
 
+  /// Checks the creation of a symlink at `link` pointing to `target`
+  /// (`Deno.symlink()`, `node:fs.symlink`). That takes unscoped read and
+  /// write, since a link's target is only resolved when it is traversed;
+  /// inside a confined lifecycle-script jail (see [`set_jail_symlink_roots`])
+  /// a link within the jail's write roots to a target within them passes
+  /// with the scoped grants too. On refusal the unscoped check's error is
+  /// returned.
+  pub fn check_symlink(
+    &self,
+    target: &Path,
+    link: &Path,
+    api_name: &str,
+  ) -> Result<(), PermissionCheckError> {
+    self.check_symlink_with_jail_roots(
+      JAIL_SYMLINK_ROOTS.get().map(|roots| roots.as_slice()),
+      target,
+      link,
+      api_name,
+    )
+  }
+
+  fn check_symlink_with_jail_roots(
+    &self,
+    jail_roots: Option<&[PathBuf]>,
+    target: &Path,
+    link: &Path,
+    api_name: &str,
+  ) -> Result<(), PermissionCheckError> {
+    let err = match self
+      .check_write_all(api_name)
+      .and_then(|()| self.check_read_all(api_name))
+    {
+      Ok(()) => return Ok(()),
+      Err(err) => err,
+    };
+    match jail_roots {
+      Some(roots)
+        if self.jail_symlink_within_roots(roots, target, link, api_name) =>
+      {
+        Ok(())
+      }
+      _ => Err(err),
+    }
+  }
+
+  /// Whether a symlink at `link` to `target` stays within `roots`: the link
+  /// with its parent resolved, and the target resolved from that parent the
+  /// way the kernel will (through existing links, a missing tail kept as
+  /// named), both beneath a root, and both granted by this container
+  /// (write for the link; read and write for the target).
+  fn jail_symlink_within_roots(
+    &self,
+    roots: &[PathBuf],
+    target: &Path,
+    link: &Path,
+    api_name: &str,
+  ) -> bool {
+    use std::path::Component;
+    // `..` is folded against the (resolved) parent only while it leads the
+    // target: after a name, that name may be a link the kernel follows
+    // first, so folding it away would check a different place.
+    let mut seen_name = false;
+    for component in target.components() {
+      match component {
+        Component::ParentDir if seen_name => return false,
+        Component::ParentDir | Component::CurDir => {}
+        Component::Normal(_) => seen_name = true,
+        Component::RootDir | Component::Prefix(_) => {}
+      }
+    }
+    let within = |path: &Path| roots.iter().any(|root| path.starts_with(root));
+    let parser = &self.descriptor_parser;
+    let Ok(link_query) = parser.parse_path_query(Cow::Borrowed(link)) else {
+      return false;
+    };
+    let Ok(Some(link_path)) = parser.resolve_no_follow_path(&link_query) else {
+      return false;
+    };
+    let Some(link_parent) = link_path.parent() else {
+      return false;
+    };
+    let Ok(target_query) =
+      parser.parse_path_query(Cow::Owned(link_parent.join(target)))
+    else {
+      return false;
+    };
+    let Ok(target_path) = parser.parse_special_file_descriptor(target_query)
+    else {
+      return false;
+    };
+    if !target_path.canonicalized {
+      return false;
+    }
+    let target_path = target_path.path.into_owned();
+    within(&link_path)
+      && within(&target_path)
+      && self
+        .check_open(
+          Cow::Owned(link_path),
+          OpenAccessKind::WriteNoFollow,
+          Some(api_name),
+        )
+        .is_ok()
+      && self
+        .check_open(
+          Cow::Owned(target_path),
+          OpenAccessKind::ReadWrite,
+          Some(api_name),
+        )
+        .is_ok()
+  }
+
   #[inline(always)]
   pub fn check_write_partial<'a>(
     &self,
@@ -5681,8 +5809,10 @@ impl PermissionsContainer {
     _api_name: &str,
   ) -> Result<(), PermissionCheckError> {
     let mut inner = self.inner.lock();
+    // As the net checks do: `::ffff:127.0.0.1` is 127.0.0.1 to the socket,
+    // so it must be to the deny list.
     let desc = ImportDescriptor(NetDescriptor(
-      Host::Ip(*resolved_ip),
+      Host::Ip(normalize_ip(*resolved_ip)),
       Some(port.into()),
     ));
     inner.import.check_resolved_ip_deny(&desc)?;
@@ -5721,8 +5851,10 @@ impl PermissionsContainer {
     }
     let inner = self.inner.lock();
     for ip in ips {
-      let desc =
-        ImportDescriptor(NetDescriptor(Host::Ip(ip), Some(port.into())));
+      let desc = ImportDescriptor(NetDescriptor(
+        Host::Ip(normalize_ip(ip)),
+        Some(port.into()),
+      ));
       check_deny_only(&inner.import, &desc)?;
     }
     Ok(())
@@ -7572,6 +7704,122 @@ mod tests {
               "api"
             )
             .is_ok()
+        );
+      }
+    }
+  }
+
+  // denext (DENEXT.md item 122): a confined lifecycle-script jail lets a
+  // scoped `deno` create symlinks whose link and target both stay within its
+  // write roots (electron's app bundle); without the jail roots, or for a
+  // target or link outside them, symlinks still need unscoped grants.
+  #[cfg(unix)]
+  #[test]
+  #[allow(clippy::disallowed_methods, reason = "a real directory tree")]
+  fn test_check_symlink_jail_roots() {
+    use sys_traits::EnvTempDir;
+    set_prompter(Box::new(TestPrompter));
+    let sys = sys_traits::impls::RealSys;
+    let base = sys.env_temp_dir().unwrap().join(format!(
+      "deno_permissions_jail_symlink_{}",
+      std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(base.join("pkg/Versions/A")).unwrap();
+    std::fs::create_dir_all(base.join("other")).unwrap();
+    let base = std::fs::canonicalize(&base).unwrap();
+    let pkg = base.join("pkg");
+    std::os::unix::fs::symlink(&base, pkg.join("out")).unwrap();
+
+    let parser =
+      runtime_descriptor_parser::RuntimePermissionDescriptorParser::new(sys);
+    let perms = Permissions::from_options(
+      &parser,
+      &PermissionsOptions {
+        allow_read: Some(vec![]),
+        deny_read: Some(vec![base.join("other/secret").display().to_string()]),
+        allow_write: Some(vec![pkg.display().to_string()]),
+        prompt: false,
+        ..Default::default()
+      },
+    )
+    .unwrap();
+    let perms = PermissionsContainer::new(Arc::new(parser), perms);
+    let roots = vec![pkg.clone()];
+    let check = |roots: Option<&[PathBuf]>, target: &str, link: PathBuf| {
+      perms
+        .check_symlink_with_jail_roots(roots, Path::new(target), &link, "api")
+        .is_ok()
+    };
+    let current = pkg.join("Versions/Current");
+
+    // scoped write: refused without the jail's roots, as upstream
+    assert!(!check(None, "A", current.clone()));
+    // within the roots: a relative target, one through another link, and
+    // one that doesn't exist yet
+    assert!(check(Some(&roots), "A", current.clone()));
+    std::os::unix::fs::symlink("A", &current).unwrap();
+    assert!(check(Some(&roots), "Versions/Current/A", pkg.join("bin")));
+    assert!(check(
+      Some(&roots),
+      "Versions/Current/Libs",
+      pkg.join("Libs")
+    ));
+    assert!(check(Some(&roots), "../pkg/Versions", pkg.join("v")));
+    // a target outside the roots
+    assert!(!check(Some(&roots), "/", pkg.join("root")));
+    assert!(!check(Some(&roots), "../other", pkg.join("o")));
+    assert!(!check(Some(&roots), "Versions/../../other", pkg.join("o2")));
+    // `..` after a link the kernel follows first
+    assert!(!check(Some(&roots), "out/../pkg/x", pkg.join("o3")));
+    // a target behind a link that leaves the roots
+    assert!(!check(Some(&roots), "out/other", pkg.join("o4")));
+    // a link outside the roots
+    assert!(!check(
+      Some(&roots),
+      &pkg.display().to_string(),
+      base.join("other/l")
+    ));
+    // roots wider than the write grant: the grant still applies
+    let wide = vec![base.clone()];
+    assert!(!check(Some(&wide), "pkg", base.join("other/l")));
+    assert!(!check(Some(&wide), "../other", pkg.join("o5")));
+    let _ = std::fs::remove_dir_all(&base);
+  }
+
+  #[test]
+  fn test_check_import_deny_resolved_ipv4_mapped() {
+    // A name whose AAAA record is `::ffff:127.0.0.1` reaches 127.0.0.1, so a
+    // `--deny-import=127.0.0.1` rule must refuse it as it refuses the bare
+    // address (the net checks normalize the same way).
+    set_prompter(Box::new(TestPrompter));
+    for deny_rule in ["127.0.0.1", "127.0.0.1:443"] {
+      let parser = TestPermissionDescriptorParser;
+      let perms = Permissions::from_options(
+        &parser,
+        &PermissionsOptions {
+          allow_import: Some(svec!["example.com"]),
+          deny_import: Some(vec![deny_rule.to_string()]),
+          prompt: false,
+          ..Default::default()
+        },
+      )
+      .unwrap();
+      let mut perms = PermissionsContainer::new(Arc::new(parser), perms);
+      for ip in ["127.0.0.1", "::ffff:127.0.0.1"] {
+        assert!(
+          perms
+            .check_import_resolved(&ip.parse().unwrap(), 443, "api")
+            .is_err(),
+          "resolved {ip}:443 should be denied by {deny_rule}"
+        );
+      }
+      for ip in ["192.168.1.1", "::ffff:192.168.1.1", "::1"] {
+        assert!(
+          perms
+            .check_import_resolved(&ip.parse().unwrap(), 443, "api")
+            .is_ok(),
+          "resolved {ip}:443 should not be denied by {deny_rule}"
         );
       }
     }

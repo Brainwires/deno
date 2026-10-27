@@ -1,0 +1,20 @@
+{
+  "tests": {
+    // NODE_USE_ENV_PROXY applies to the global agents only, as in Node: a
+    // request made with `agent: false` connects directly. HTTP_PROXY names a
+    // port nothing listens on, so a request routed through it would fail.
+    //
+    // tunnel-agent (sharp's and prebuild-install's downloads) sends its
+    // CONNECT to the proxy that way; before, the CONNECT was itself routed
+    // through the env proxy and its `host:port` target refused as an invalid
+    // URL.
+    "connect_with_agent_false_is_direct": {
+      "args": "run --allow-net=127.0.0.1 main.mjs",
+      "envs": {
+        "NODE_USE_ENV_PROXY": "1",
+        "HTTP_PROXY": "http://127.0.0.1:1"
+      },
+      "output": "main.out"
+    }
+  }
+}

@@ -200,7 +200,12 @@ async-stream = "0.3"
 async-trait = "0.1.73"
 aws-lc-rs = { version = "1.18.2" }
 aws-lc-sys = { version = "0.46.0", features = ["prebuilt-nasm"] }
-backhand = { version = "0.25.1", default-features = false, features = ["zstd"] }
+# No `zstd` feature: backhand 0.25's own zstd is on zstd 0.13 / zstd-safe 7
+# (RUSTSEC-2026-0391, -0398, -0403). cli/tools/desktop.rs does the AppImage's
+# zstd blocks on the workspace zstd through backhand's `CompressionAction`
+# (`AppImageZstd`). Turn the feature back on once a backhand release is on
+# zstd 0.14.
+backhand = { version = "0.25.1", default-features = false }
 base32 = "=0.5.1"
 base64 = "0.22.1"
 bencher = "0.1"

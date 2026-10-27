@@ -13,6 +13,10 @@ on:
         description: Build and run the lib tests only (the extra architecture legs)
         type: boolean
         default: false
+      libs_and_unit:
+        description: Build, run the lib tests and the unit suite only (Windows arm64)
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -107,7 +111,16 @@ jobs:
       # Cargo does not unify deno_v8's `v8` feature in, and deno_v8 then
       # refuses to compile.
       - name: Test libs
+        id: libs
         run: cargo test --locked --lib -p deno -p denort -p node_shim -p bsdiff_helper -p deno_lib -p denort_desktop -p deno_snapshots -p deno_bundle_runtime -p deno_cache -p deno_canvas -p deno_cron -p deno_crypto -p deno_fetch -p deno_ffi -p deno_fs -p deno_http -p deno_image -p deno_io -p deno_kv -p deno_napi -p napi_sym -p deno_net -p deno_node -p deno_node_crypto -p deno_node_sqlite -p deno_sql -p denort_helper -p deno_signals -p deno_telemetry -p deno_url -p deno_web -p deno_webgpu -p deno_webidl -p deno_websocket -p deno_webstorage -p deno_cache_dir -p deno_cli_parser -p deno_config -p deno_crypto_provider -p deno_v8 -p deno_dotenv -p eszip -p deno_http_h1 -p deno_inspector_server -p deno_lockfile -p deno_maybe_sync -p napi_sys -p node_resolver -p deno_npm -p deno_npm_cache -p deno_npm_installer -p deno_npmrc -p deno_package_json -p deno_print -p deno_resolver -p deno_runtime -p deno_features -p deno_permissions -p deno_subprocess_windows -p deno_os -p deno_process
+      # A test that aborts (SIGABRT, a V8 fatal error) takes the whole test
+      # binary down with no name and no backtrace, as the arm64 and macOS lib
+      # runs of rc.3 and rc.6 did. Run the same tests again on one thread,
+      # where libtest prints each test's name before running it, so the last
+      # name printed is the culprit. The job has failed either way.
+      - name: Name the aborting test (Test libs again, one thread)
+        if: failure() && steps.libs.outcome == 'failure'
+        run: cargo test --locked --lib -p deno -p denort -p node_shim -p bsdiff_helper -p deno_lib -p denort_desktop -p deno_snapshots -p deno_bundle_runtime -p deno_cache -p deno_canvas -p deno_cron -p deno_crypto -p deno_fetch -p deno_ffi -p deno_fs -p deno_http -p deno_image -p deno_io -p deno_kv -p deno_napi -p napi_sym -p deno_net -p deno_node -p deno_node_crypto -p deno_node_sqlite -p deno_sql -p denort_helper -p deno_signals -p deno_telemetry -p deno_url -p deno_web -p deno_webgpu -p deno_webidl -p deno_websocket -p deno_webstorage -p deno_cache_dir -p deno_cli_parser -p deno_config -p deno_crypto_provider -p deno_v8 -p deno_dotenv -p eszip -p deno_http_h1 -p deno_inspector_server -p deno_lockfile -p deno_maybe_sync -p napi_sys -p node_resolver -p deno_npm -p deno_npm_cache -p deno_npm_installer -p deno_npmrc -p deno_package_json -p deno_print -p deno_resolver -p deno_runtime -p deno_features -p deno_permissions -p deno_subprocess_windows -p deno_os -p deno_process -- --test-threads=1
       # The op layer's own unit tests (deno_core, the op2 macro's codegen and
       # serde_v8), which upstream's list leaves out: they hold the regression
       # tests for op buffers that are shared or resizable (DENEXT.md item 70).
@@ -154,7 +167,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJSON(inputs.os == 'ubuntu-22.04' && '[{"suite":"unit","package":"unit_tests","shard":"","shard_total":"","shard_label":""},{"suite":"specs","package":"specs_tests","shard":"0","shard_total":"2","shard_label":" (1/2)"},{"suite":"specs","package":"specs_tests","shard":"1","shard_total":"2","shard_label":" (2/2)"},{"suite":"integration","package":"integration_tests","shard":"0","shard_total":"2","shard_label":" (1/2)"},{"suite":"integration","package":"integration_tests","shard":"1","shard_total":"2","shard_label":" (2/2)"},{"suite":"unit_node","package":"unit_node_tests","shard":"","shard_total":"","shard_label":""},{"suite":"node_compat","package":"node_compat_tests","shard":"0","shard_total":"2","shard_label":" (1/2)"},{"suite":"node_compat","package":"node_compat_tests","shard":"1","shard_total":"2","shard_label":" (2/2)"}]' || '[{"suite":"unit","package":"unit_tests","shard":"","shard_total":"","shard_label":""},{"suite":"specs","package":"specs_tests","shard":"0","shard_total":"2","shard_label":" (1/2)"},{"suite":"specs","package":"specs_tests","shard":"1","shard_total":"2","shard_label":" (2/2)"}]') }}
+        include: ${{ fromJSON(inputs.libs_and_unit && '[{"suite":"unit","package":"unit_tests","shard":"","shard_total":"","shard_label":""}]' || inputs.os == 'ubuntu-22.04' && '[{"suite":"unit","package":"unit_tests","shard":"","shard_total":"","shard_label":""},{"suite":"specs","package":"specs_tests","shard":"0","shard_total":"2","shard_label":" (1/2)"},{"suite":"specs","package":"specs_tests","shard":"1","shard_total":"2","shard_label":" (2/2)"},{"suite":"integration","package":"integration_tests","shard":"0","shard_total":"2","shard_label":" (1/2)"},{"suite":"integration","package":"integration_tests","shard":"1","shard_total":"2","shard_label":" (2/2)"},{"suite":"unit_node","package":"unit_node_tests","shard":"","shard_total":"","shard_label":""},{"suite":"node_compat","package":"node_compat_tests","shard":"0","shard_total":"2","shard_label":" (1/2)"},{"suite":"node_compat","package":"node_compat_tests","shard":"1","shard_total":"2","shard_label":" (2/2)"}]' || '[{"suite":"unit","package":"unit_tests","shard":"","shard_total":"","shard_label":""},{"suite":"specs","package":"specs_tests","shard":"0","shard_total":"2","shard_label":" (1/2)"},{"suite":"specs","package":"specs_tests","shard":"1","shard_total":"2","shard_label":" (2/2)"}]') }}
     defaults:
       run:
         shell: bash
