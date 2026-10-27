@@ -20,6 +20,10 @@ Env:   REPO (owner/name), SHA (the tagged commit), VERSION (the fork's version)
        and GH_TOKEN for the gh CLI.
 Prints the full run's id as `full_run=<id>` and exits 0, or prints every
 reason with an `::error::` prefix and exits 1.
+
+Usage: tag_gate.py --prerelease-flag <version>
+Prints `--prerelease` when the GitHub release of <version> is marked a
+pre-release (see `is_prerelease`), else nothing.
 """
 
 import json
@@ -43,6 +47,16 @@ CONTAINED = ("ahead", "identical")
 
 def release_branches(version):
     return ["development-denext", f"rel/{version}"]
+
+
+def is_prerelease(version):
+    """Whether the GitHub release of `version` is marked a pre-release: only
+    a release candidate (`3.0.0-rc.N`). After its last release candidate the
+    fork releases `3.0.0-denext.N`, its stable line, as full releases (the
+    repository's "Latest"), and denext orders them after every `rc.N`.
+    """
+    pre = version.split("+", 1)[0].partition("-")[2]
+    return pre == "rc" or pre.startswith("rc.")
 
 
 def evaluate(runs, legs_of, contained_in):
@@ -189,4 +203,7 @@ def main():
 
 
 if __name__ == "__main__":
+    if len(sys.argv) == 3 and sys.argv[1] == "--prerelease-flag":
+        print("--prerelease" if is_prerelease(sys.argv[2]) else "")
+        sys.exit(0)
     sys.exit(main())
