@@ -5044,6 +5044,17 @@ where the changes are discussed.
      On a 2-CPU Windows host a standalone copy of the old reader starved every
      time (5 of 5) and the new one never did.
 
+119. **`chore(panic)`: a panic points at this fork's issue tracker** (CLI and
+     runtime; `cli/lib.rs`, `cli/rt_desktop/lib.rs`). The panic hooks of the CLI
+     and of a packaged desktop app said "Please report this at
+     https://github.com/denoland/deno/issues/new", which sent the fork's users
+     to upstream with a trace of a binary upstream never built. They now name
+     https://github.com/Brainwires/deno/issues/new; the release's debug info
+     (`*-symbols-*.tar.gz`, see Release archives) symbolicates such a report.
+
+     Test: `tests/specs/test/recursive_permissions_pledge` (its expected panic
+     output).
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119) are what the prebuilt `libdenort` carries. The CLI-side parts (for
@@ -5178,9 +5189,26 @@ gh attestation verify deno-desktop-runtime-<...>.tar.gz -R Brainwires/deno
 gh attestation verify deno-cli-<...>.zip -R Brainwires/deno
 ```
 
-Binaries are not code-signed or notarized: an app is signed with its author's
-identity when it is packaged. The macOS `libdenort.dylib` is ad-hoc signed after
-stripping, because arm64 macOS will not load unsigned code.
+The release binaries are signed before they are archived, so the SHA-256 pins
+cover the signed bytes (`sign_macos.sh`, `sign_windows.ps1`): on macOS `deno`
+and `denort` with the Developer ID of Team `WT957SC7MJ` (hardened runtime,
+`cli/entitlements.plist`) and `libdenort.dylib` with the same identity, then
+notarized (a bare Mach-O cannot be stapled: Gatekeeper checks the ticket
+online); on Windows `deno.exe`, `denort.exe` and `denort.dll` with Authenticode
+(SHA-256, RFC 3161 timestamp). Without the signing secrets
+(`APPLE_DEVELOPER_ID_CERT`, `APPLE_DEVELOPER_ID_CERT_PASSWORD`, `APPLE_API_KEY`,
+`APPLE_API_KEY_ID`, `APPLE_API_ISSUER`; `WINDOWS_CODESIGN_PFX`,
+`WINDOWS_CODESIGN_PFX_PASSWORD`) each step warns and the binaries keep an ad-hoc
+signature (macOS; arm64 macOS will not load unsigned code) or none (Windows). An
+app is still signed with its author's identity when it is packaged.
+
+`*-symbols-<version>-<target>.tar.gz` (with `SYMBOLS.SHA256SUMS`) hold the debug
+info the release profile splits off (`.dSYM` / `.dwp` / `.pdb`), for
+symbolicating a crash report; they are not in `manifest.json`.
+
+The Linux binaries need glibc 2.35 (Ubuntu 22.04's); the `cli` job fails when
+one requires a newer `GLIBC_` symbol than `GLIBC_CEILING`, which is only ever
+lowered.
 
 ## Reproducing a build
 
@@ -5193,9 +5221,17 @@ branch) that changes what the runtime is built from: the `cli`, `runtime`, `ext`
 and `libs` crates, the workspace manifests and toolchain (`Cargo.toml`,
 `Cargo.lock`, `rust-toolchain.toml`, `.cargo/`), the laufey pin (`LAUFEY_SHA` in
 the workflow, `cli/rt_desktop/Cargo.toml`), the workflow and
-`.github/denext-runtime/`. A tag publishes only when a full `denext tests`
-(`denext_tests.yml`) run, every OS leg green, passed on exactly the tagged
-commit; the setup job checks and fails otherwise. Per target it:
+`.github/denext-runtime/`. A tag publishes only when the setup job's gates pass
+(`release_gate.py`): the tag is annotated, points at the commit being built, was
+never pushed on another commit and has no release yet (tags and releases are
+never moved or replaced: a failed tag build is fixed by the next version); every
+`denext tests` (`denext_tests.yml`) run of exactly that commit has finished, the
+newest full one (every OS leg) succeeded, and no run of it (push or dispatch)
+has a job whose newest attempt failed: a failure counts until that run's job is
+re-run green (`gh run rerun <id> --failed`), and another green run does not
+clear it. Jobs that passed only on a re-run are listed in the release notes. The
+release is GitHub "Latest" exactly when its version is the newest by semver. Per
+target it:
 
 1. builds `libdenort` with `cargo build --release --locked -p denort_desktop`
    after patching `laufey` (`cargo metadata` rewrites laufey's lockfile entry;
@@ -5250,15 +5286,16 @@ Two workflows run instead:
   `jsdoc_checker.js`, `cargo fmt --check`, `cargo test --locked --lib` over
   upstream's crate list plus the fork's crates, a debug build, and the unit and
   (sharded) spec suites against it; on Linux also upstream's `integration`
-  (sharded) and `unit_node` suites; and the build and lib tests on macOS x64 and
-  Linux arm64. It runs on pushes to `development-denext`, `denext/**`, `rel/**`,
-  `ci/**`, `feat/**` and `fix/**`, on pull requests to `development-denext`,
-  `denext/**` and `rel/**`, and by manual dispatch. The full matrix runs on a
-  push to `development-denext` and on a dispatch (input `full`, default true);
-  every other push and pull request runs Linux x64 only (lint, cargo audit, and
-  the `ubuntu-22.04` leg: libs, unit, specs, integration, unit_node,
-  node_compat), which keeps GitHub's concurrency cap (20 jobs, 5 macOS) free.
-  For a full run on a branch, dispatch it with `-f full=true`
+  (sharded) and `unit_node` suites; and the build and lib tests on macOS x64,
+  Linux arm64 and Windows arm64. It runs on pushes to `development-denext`,
+  `denext/**`, `rel/**`, `ci/**`, `feat/**` and `fix/**`, on pull requests to
+  `development-denext`, `denext/**` and `rel/**`, and by manual dispatch. The
+  full matrix runs on a push to `development-denext` and on a dispatch (input
+  `full`, default true); every other push and pull request runs Linux x64 only
+  (lint, cargo audit, and the `ubuntu-22.04` leg: libs, unit, specs,
+  integration, unit_node, node_compat), which keeps GitHub's concurrency cap (20
+  jobs, 5 macOS) free. For a full run on a branch, dispatch it with
+  `-f full=true`
   (`gh workflow run denext_tests.yml --ref <branch> -f full=true`); for one more
   OS on a Linux run, `-f full=false -f macos=true` (or `windows=true`). A newer
   push cancels the run before it on the same ref; dispatched and tag runs are

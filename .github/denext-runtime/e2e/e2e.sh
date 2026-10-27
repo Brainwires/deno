@@ -19,7 +19,7 @@ archive=$(unix_path "$ARCHIVE")
 rm -rf "$work"
 mkdir -p "$work/w/logs"
 unpack_archive "$archive" "$work/runtime"
-test -f "$work/runtime/$(runtime_lib_name "$TARGET")"
+need "the runtime library in $ARCHIVE" test -f "$work/runtime/$(runtime_lib_name "$TARGET")"
 
 export RUNTIME_DIR WORK_DIR E2E_OUT
 RUNTIME_DIR=$(native_path "$work/runtime")

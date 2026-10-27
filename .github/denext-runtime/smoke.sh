@@ -23,11 +23,11 @@ lib=$(runtime_lib_name "$TARGET")
 rm -rf "$work"
 mkdir -p "$work"
 unpack_archive "$archive" "$work/runtime"
-test -f "$work/runtime/$lib"
-test -d "$work/runtime/laufey"
+need "the runtime library $lib in $ARCHIVE" test -f "$work/runtime/$lib"
+need "laufey/ (the backend hosts) in $ARCHIVE" test -d "$work/runtime/laufey"
 
 cp -R "$here/smoke" "$work/app"
-test -f "$work/app/.deno-desktop/app.json"
+need "the smoke app's .deno-desktop/app.json" test -f "$work/app/.deno-desktop/app.json"
 
 export DENORT_DESKTOP_BIN
 DENORT_DESKTOP_BIN=$(native_path "$work/runtime/$lib")

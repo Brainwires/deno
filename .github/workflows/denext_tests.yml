@@ -24,8 +24,9 @@
 #   - unit / specs: `cargo test -p unit_tests --test unit` and
 #            `cargo test -p specs_tests --test specs` (2 shards) against them;
 #            on Linux also `integration` (2 shards) and `unit_node`.
-# - macOS x64 (macos-15-intel) and Linux arm64 (ubuntu-22.04-arm), the other
-#   two release architectures: build + libs only.
+# - macOS x64 (macos-15-intel), Linux arm64 (ubuntu-22.04-arm) and Windows
+#   arm64 (windows-11-arm), the other three release architectures: build +
+#   libs only.
 #
 # Scope (GitHub caps this account at 20 concurrent jobs, 5 of them macOS, and
 # agents push many fix/feat/ci branches): the full matrix above runs on a push
@@ -37,10 +38,12 @@
 # node_compat). For a full run on a branch:
 #   gh workflow run denext_tests.yml --ref <branch> -f full=true
 # or add one OS to a Linux run with `-f full=false -f macos=true` (or
-# windows=true). denext_runtime.yml's tag gate counts only a run whose five
+# windows=true). denext_runtime.yml's tag gate counts only a run whose six
 # legs (macos-14, windows-2022, ubuntu-22.04, macos-15-intel,
-# ubuntu-22.04-arm) all passed, so a Linux-only run never vouches for a
-# release.
+# ubuntu-22.04-arm, windows-11-arm) all ran, and refuses the tag while any
+# run of the commit has a failed job that was not re-run green
+# (.github/denext-runtime/release_gate.py), so a Linux-only run never
+# vouches for a release.
 #
 # The test harness asks Deno's "hashy" service whether a test input hash
 # already passed and PUTs one when it did (tests/util/lib/hash.rs). That is
@@ -65,7 +68,7 @@ on:
   workflow_dispatch:
     inputs:
       full:
-        description: Run the full matrix (macOS arm64 + x64, Windows, Linux x64 + arm64); false runs Linux x64 plus the OSes picked below
+        description: Run the full matrix (macOS arm64 + x64, Windows x64 + arm64, Linux x64 + arm64); false runs Linux x64 plus the OSes picked below
         type: boolean
         default: true
       macos:
@@ -137,6 +140,10 @@ jobs:
       - name: manifest_test.py
         if: runner.os == 'Linux'
         run: python3 -I .github/denext-runtime/manifest_test.py
+      # The release tag gate's rule and the "Latest" choice.
+      - name: release_gate_test.py
+        if: runner.os == 'Linux'
+        run: python3 -I .github/denext-runtime/release_gate_test.py
       - name: lint.js
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -195,4 +202,15 @@ jobs:
     uses: ./.github/workflows/denext_tests_os.yml
     with:
       os: ubuntu-22.04-arm
+      libs_only: true
+
+  # aarch64-pc-windows-msvc ships (CLI, denort, desktop runtime) and is
+  # built on windows-11-arm by denext_runtime.yml; its debug build and lib
+  # tests run here. Full runs only.
+  windows-arm64:
+    name: windows-11-arm
+    if: ${{ github.ref == 'refs/heads/development-denext' || startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.full) }}
+    uses: ./.github/workflows/denext_tests_os.yml
+    with:
+      os: windows-11-arm
       libs_only: true

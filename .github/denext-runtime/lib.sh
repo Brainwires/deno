@@ -1,5 +1,14 @@
 # Shared helpers for the denext runtime scripts. Source, don't execute.
 
+# An assertion that fails with a message naming what it checked, instead of
+# `set -e`'s silent exit on a bare `test` / `[`:
+#   need "the runtime library in the archive" test -f "$dir/$lib"
+need() {
+  local what=$1
+  shift
+  "$@" || { echo "::error::check failed: $what ($*)" >&2; exit 1; }
+}
+
 # The runtime library `deno desktop` reads through DENORT_DESKTOP_BIN.
 runtime_lib_name() {
   case "$1" in

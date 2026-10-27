@@ -640,7 +640,7 @@ fn setup_panic_hook() {
 
     eprintln!("\n============================================================");
     eprintln!("Deno has panicked. This is a bug in Deno. Please report this");
-    eprintln!("at https://github.com/denoland/deno/issues/new.");
+    eprintln!("at https://github.com/Brainwires/deno/issues/new.");
     eprintln!("If you can reliably reproduce this panic, include the");
     #[cfg(not(all(
       feature = "panic-trace-frame-pointer",

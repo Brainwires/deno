@@ -6,7 +6,7 @@ on:
   workflow_call:
     inputs:
       os:
-        description: The runner image (macos-14, macos-15-intel, windows-2022, ubuntu-22.04, ubuntu-22.04-arm)
+        description: The runner image (macos-14, macos-15-intel, windows-2022, windows-11-arm, ubuntu-22.04, ubuntu-22.04-arm)
         type: string
         required: true
       libs_only:
