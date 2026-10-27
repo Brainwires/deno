@@ -66,11 +66,11 @@ pub enum AuditSink {
 
 pub static AUDIT_SINK: OnceLock<AuditSink> = OnceLock::new();
 
-/// denext (DENEXT.md item 122): the write roots of a jailed npm lifecycle
+/// denext (DENEXT.md item 129): the write roots of a jailed npm lifecycle
 /// script whose OS sandbox confines it. See [`set_jail_symlink_roots`].
 static JAIL_SYMLINK_ROOTS: OnceLock<Vec<PathBuf>> = OnceLock::new();
 
-/// denext (DENEXT.md item 122): lets [`PermissionsContainer::check_symlink`]
+/// denext (DENEXT.md item 129): lets [`PermissionsContainer::check_symlink`]
 /// accept a symlink whose link path and resolved target both lie within
 /// `roots`, without unscoped read and write. Set only by the lifecycle-script
 /// jail's permission clamp, and only where an OS sandbox (Landlock, Seatbelt)
@@ -7709,7 +7709,7 @@ mod tests {
     }
   }
 
-  // denext (DENEXT.md item 122): a confined lifecycle-script jail lets a
+  // denext (DENEXT.md item 129): a confined lifecycle-script jail lets a
   // scoped `deno` create symlinks whose link and target both stay within its
   // write roots (electron's app bundle); without the jail roots, or for a
   // target or link outside them, symlinks still need unscoped grants.

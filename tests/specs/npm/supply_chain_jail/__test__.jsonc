@@ -453,7 +453,7 @@
         }
       ]
     },
-    // DENEXT.md item 122: where the OS confines the script, a jailed deno
+    // DENEXT.md item 129: where the OS confines the script, a jailed deno
     // (the `node` shim, `deno run -A`) creates symlinks whose link and target
     // both stay in the package's folder, as electron's postinstall does when
     // it unpacks an app bundle; a link or target outside it is still refused

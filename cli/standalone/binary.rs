@@ -615,7 +615,7 @@ impl<'a> DenoCompileBinaryWriter<'a> {
     };
     let download_directory = self.deno_dir.dl_folder_path();
     let archive_data = if let Some(version) = denext_version {
-      // denext (DENEXT.md item 121): the release's own denort, checked
+      // denext (DENEXT.md item 130): the release's own denort, checked
       // against the same release's SHA256SUMS before it is used or cached.
       let (binary_path_suffix, download_url) = denext_denort(version, &target);
       let binary_path = download_directory.join(&binary_path_suffix);
@@ -2129,7 +2129,7 @@ fn read_verified_cache(archive_path: &Path) -> Option<Vec<u8>> {
   (sha256_hex(&bytes) == recorded).then_some(bytes)
 }
 
-/// denext (DENEXT.md item 121): a denext release's `denort` archive, verified
+/// denext (DENEXT.md item 130): a denext release's `denort` archive, verified
 /// against the SHA-256 the same release's `SHA256SUMS` lists for it. A
 /// missing `SHA256SUMS`, a missing entry or a mismatch is an error (fail
 /// closed); nothing unverified is cached. A cached archive is used only

@@ -4109,7 +4109,7 @@ const LAUFEY_LAUNCH_CONFIG_FILE: &str = "laufey-launch.json";
 /// `bridge_origins` as normalized app origins. `singleInstance` and
 /// `bridgeOrigins` are always written: the file records the packaged
 /// single-instance setting even when it is off, and pins the documents the
-/// window's JS bridge serves (DENEXT.md item 122, E-L1) even when the app
+/// window's JS bridge serves (DENEXT.md item 129, E-L1) even when the app
 /// keeps the default origin, where laufey would otherwise let every document
 /// the window navigates to call the app.
 fn laufey_launch_config_json(
@@ -10987,7 +10987,7 @@ def456  other.zip
       })
     );
     // Absent values are omitted; singleInstance and the bridge's origins
-    // (DENEXT.md item 122) are always recorded.
+    // (DENEXT.md item 129) are always recorded.
     let value: serde_json::Value = serde_json::from_str(
       &laufey_launch_config_json(None, &[], &["app://localhost"], false),
     )
@@ -11037,7 +11037,7 @@ def456  other.zip
 
   #[test]
   fn bridge_origin_from_the_project_app_config() {
-    // DENEXT.md item 122: with no `desktop.app.origin` in deno.json, the
+    // DENEXT.md item 129: with no `desktop.app.origin` in deno.json, the
     // origin the runtime reads from the embedded `.deno-desktop/app.json`.
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join("app.json");

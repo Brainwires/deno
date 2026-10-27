@@ -122,7 +122,7 @@ pub struct JailPermissions {
   pub ffi: Vec<PathBuf>,
   /// An OS sandbox (Landlock, Seatbelt) confines the script's whole process
   /// tree. The clamp then lets a `deno` create symlinks whose link and
-  /// target both lie within `write` (DENEXT.md item 122: electron's
+  /// target both lie within `write` (DENEXT.md item 129: electron's
   /// postinstall unpacks an app bundle full of them); never set where the OS
   /// can't confine (Windows), where symlinks keep needing unscoped grants.
   #[serde(default)]
@@ -130,7 +130,7 @@ pub struct JailPermissions {
 }
 
 /// The roots a jailed `deno` may create symlinks within (DENEXT.md item
-/// 122): the jail's write roots, when an OS sandbox confines it.
+/// 129): the jail's write roots, when an OS sandbox confines it.
 pub fn jail_symlink_roots(jail: &JailPermissions) -> Option<&[PathBuf]> {
   (jail.os_confined && !cfg!(windows) && !jail.write.is_empty())
     .then_some(jail.write.as_slice())
@@ -2298,7 +2298,7 @@ mod tests {
     assert!(!url_valued_env_var("PATH"));
   }
 
-  // DENEXT.md item 122: symlinks within the write roots only where an OS
+  // DENEXT.md item 129: symlinks within the write roots only where an OS
   // sandbox confines the script, and never on Windows
   #[test]
   fn symlink_roots_only_when_confined() {

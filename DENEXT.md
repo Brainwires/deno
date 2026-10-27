@@ -4619,7 +4619,142 @@ where the changes are discussed.
      concurrent children each write 256 KiB to a piped stdout with stderr piped
      and quiet; all must finish within 60 s.
 
-119. **`fix(npm)`: the lifecycle-script jail, hardened** (`fix/jail-hardening`,
+119. **`fix(io)`: a `deno_io` async pipe reader holds no blocking-pool thread on
+     Windows** (`fix/rc7-robustness`, CLI and runtime; `ext/io/pipe.rs`). The
+     rest of item 118: `PipeRead::into_async` wrapped the read end of
+     `deno_io::pipe()` (the client end of an overlapped named pipe) in tokio's
+     `ChildStdout`, which reads with a blocking `ReadFile` on the runtime's
+     blocking pool, so every pending read of a quiet pipe pinned a pool thread
+     (four per CPU on Windows) until data or EOF. `deno test` reads each
+     worker's stdout and stderr through it, so a `--parallel` run with more
+     workers than the pool could spare left none for file system ops or child
+     process I/O. `AsyncPipeRead` is now a
+     `tokio::net::windows::named_pipe::NamedPipeClient` read through the I/O
+     completion port: a pending read holds no thread, and `ERROR_BROKEN_PIPE`
+     reads as EOF. `AsyncPipeRead::into_sync` now fails with `Unsupported` on
+     Windows (tokio's `NamedPipeClient` can't hand the handle back, it stays
+     bound to the completion port, and the reader may hold data it read ahead);
+     nothing in the tree calls it.
+
+     Audited and left as they are: `bi_pipe` (IPC) and `node:child_process`'s
+     stdio (`uv_compat` pipes) already read through the completion port;
+     `AsyncPipeWrite` (`ChildStdin`) holds a thread only while the pipe is full,
+     and nothing in the tree writes through it; stdin and files read through
+     `spawn_blocking` one resource at a time; `deno task`'s output pipes are
+     `deno_task_shell`'s (an external crate, its own `spawn_blocking`).
+
+     Test: `quiet_async_pipes_hold_no_blocking_thread` (`ext/io/pipe.rs`): with
+     a two-thread blocking pool, eight quiet pipe reads pending, a
+     `spawn_blocking` task and a pipe with data must still finish within 20 s.
+     On a 2-CPU Windows host a standalone copy of the old reader starved every
+     time (5 of 5) and the new one never did.
+
+120. **`fix(node)`: `node <script>` without its extension through the `node`
+     shim** (`feat/nest-phase1`, CLI only; `cli/node_compat_shim.rs`,
+     `libs/node_shim/lib.rs`). `node dist/main` (what `nest start` and
+     `npm run start:prod` run) failed with
+     `Module not found "file:///%20Copyright…"` whenever `node` was Deno: the
+     PATH shim `deno x --install-node-shims` writes, and the `node` Deno puts on
+     its own `PATH` for `child_process.spawn("node")`. An entrypoint that does
+     not exist as written is resolved by a child `<exe> eval <resolve.js>`, and
+     `<exe>` was `current_exe()`, which is the shim's own path on macOS (a
+     symlink) and on Windows (a hardlink or copy named `node.exe`). The child
+     re-entered Node.js argument translation, so `eval` became the entrypoint
+     and the resolver's source its first argument. The child now runs with
+     `DENO_DISABLE_NODE_SHIM=1` (a plain `deno eval` whatever its file name),
+     and the arg0 dispatch canonicalizes the executable first. Linux was
+     unaffected (`/proc/self/exe` resolves the link).
+
+     Tests: spec `node/node_compat_shim` `spawn_node_extensionless` (unix: the
+     `node` Deno puts on `PATH`) and `node_shim_extensionless` (every OS: a
+     `node` symlink, or a `node.exe` hardlink / copy on Windows, of the deno
+     executable runs `node dist/main a b`); both fail on `3.0.0-rc.5`.
+
+121. **`fix(graph)`: a type-only import of a subpath only `@types` provides**
+     (`feat/nest-phase1`, CLI only; `cli/graph_util.rs`).
+     `import { App } from "supertest/types"` (Nest's default e2e test) failed
+     `deno run` / `deno test` with `ERR_MODULE_NOT_FOUND`, `--no-check`
+     included: `supertest/types` exists only as `@types/supertest/types.d.ts`,
+     and the module graph resolves every static import for code before emit
+     elides the type-only ones, which tsc + Node.js and Node's TypeScript
+     loaders never resolve. The graph walk now leaves out that resolution error
+     when all of these hold: Node.js resolution failed with
+     `ERR_MODULE_NOT_FOUND` or `ERR_PACKAGE_PATH_NOT_EXPORTED` for a bare
+     specifier; the importer is TypeScript; every import of the specifier there
+     is a static ES import or re-export with bindings (no side-effect import,
+     dynamic import, `require()` or import attributes); and in a typed graph its
+     types resolution found a declaration file. When every use is a type the
+     emitted JavaScript drops the import; when a value is used the runtime
+     resolves it and fails with the same error before any code runs. Type
+     checking keeps its own resolution, and a failed one is still reported.
+
+     Tests: spec `npm/types_only_subpath` (`run` without and with `--check`
+     prints the value; a value use of the type-only subpath still fails with
+     `ERR_MODULE_NOT_FOUND`; the first fails on `3.0.0-rc.5`).
+
+122. **`fix(check)`: a package.json project's tsconfig.json checks the same on
+     both engines** (`feat/nest-phase1`, CLI only; `libs/resolver/deno_json.rs`,
+     `libs/resolver/graph.rs`, `cli/graph_util.rs`, `cli/tsc/tsconfig_gen.rs`).
+     Nest's default tsconfig.json failed `deno test` and `deno compile` while
+     `deno check` passed, and none of them saw `@types/jest`'s globals.
+     - **`baseUrl`**: the in-process TypeScript 6 checker (which `deno test`
+       uses for a project with a Jest or Vitest config, and `deno compile` for a
+       graph with npm types) stopped on TS5101 (`baseUrl` is deprecated), which
+       the native checker adapts away (item 90). Module resolution, `paths`
+       included, is Deno's on both, so the in-process checker now gets
+       `ignoreDeprecations: "6.0"` beside a `baseUrl`, unless the config sets
+       its own.
+     - **`compilerOptions.types`**: a tsconfig's entry is a type reference
+       directive, which TypeScript looks up in `@types` first. The in-process
+       graph resolved `"jest"` to the `jest` package (the runner's API, no
+       globals), and the native generator turned it into that package's
+       declaration file. Both now take `@types/jest` when a
+       `node_modules/@types` holds it (`@scope/name` → `@types/scope__name`);
+       `node`, `deno`, deno.json entries and entries that aren't a bare package
+       name are unchanged.
+     - **No `types`**: TypeScript 5 includes every `node_modules/@types` package
+       (in the config's directory and its ancestors) on its own. In a
+       package.json project (no deno.json) both engines now do the same for a
+       tsconfig.json whose `compilerOptions` (its `extends` chain included, for
+       the in-process engine) set no `types`; the native engine leaves a config
+       with `extends` to its chain. `node` and `deno` are Deno's; a package with
+       `"typings": null` opts out. TypeScript 6 changed the default of `types`
+       to `[]`, but such a project's own compiler is usually 5.x.
+
+     Tests: spec `npm/node_project_types` (a `baseUrl` tsconfig without `types`
+     and one with `"types": ["testglobals"]` beside a `testglobals` package of
+     its own, each checked with `--check-engine=tsc` and natively; all four fail
+     on `3.0.0-rc.5`); `tsconfig_types_entry_package_maps_to_at_types`
+     (`libs/resolver/graph.rs`).
+
+123. **`fix(npm)`: a jailed install check may load the package's own native
+     addon** (`feat/nest-phase1`, CLI only; `cli/supply_chain/jail.rs`).
+     Approving bcrypt 6 (likewise bufferutil, utf-8-validate and any
+     `node-gyp-build` package) failed in the jail: `node-gyp-build-test` loads
+     the package's prebuilt `.node` to check it, the clamped `deno` had no FFI
+     (`NotCapable: Requires ffi access to …/prebuilds/darwin-x64/bcrypt.node`),
+     and the fallback to a source build (`node-gyp`) is not there. A jailed
+     `deno` now gets FFI scoped to the package's own folder (as the script
+     reaches it, and resolved) where it asked for FFI (`-A` from the `node`
+     shim, `--allow-ffi`); a path list keeps only the entries inside it, clamped
+     as the write list is (`clamp_path_list`: resolved against the cwd,
+     canonicalized, `..` folded), and native code anywhere else stays refused.
+     This adds no reach: a jailed script already writes and runs programs in its
+     own folder, under the same OS sandbox, and a native addon is loaded from
+     there at run time anyway. Where the OS can't confine (Windows, Linux
+     without Landlock, macOS without a working `sandbox-exec`), nothing would
+     hold what the addon does, so the jail grants no FFI at all there, as
+     before.
+
+     Tests: spec `npm/supply_chain_jail` `native_addon_own_folder` (unix:
+     `@denotest/jail-native-addon`'s install script loads its own
+     `prebuilds/addon.node`, allowed, and one in the project, denied; on
+     `3.0.0-rc.5` both are denied) and `native_addon_unconfined` (Windows: both
+     denied); `clamp_ffi_to_package_folder` (a `..` path list entry, and no FFI
+     roots, refused) and `ffi_roots_only_under_an_os_sandbox`
+     (`cli/supply_chain/jail.rs`).
+
+124. **`fix(npm)`: the lifecycle-script jail, hardened** (`fix/jail-hardening`,
      CLI only; `cli/supply_chain/jail.rs`, `cli/supply_chain/jail_proxy.rs`,
      `cli/supply_chain/sandbox_macos.rs`, `cli/supply_chain/sandbox_linux.rs`,
      `cli/factory.rs`, `cli/tools/info.rs`, `libs/config/deno_json/mod.rs`,
@@ -4832,7 +4967,7 @@ where the changes are discussed.
      attributable; puppeteer 23.11.1: `deno install` ran no postinstall for it,
      jailed or not, so it was not exercised. No failure was a Seatbelt denial.
      The tunnel-agent `CONNECT` under `NODE_USE_ENV_PROXY` and puppeteer's
-     missing postinstall are fixed in item 120.
+     missing postinstall are fixed in item 127.
 
      Tests: `npm/supply_chain_jail` (`escapes_denied_mac`: `/dev/tty`,
      `TIOCSTI`, the session, the process table, hard links both ways, a `nohup`
@@ -4856,114 +4991,6 @@ where the changes are discussed.
      (`sandbox_macos`), `seccomp_refuses_tiocsti` (`sandbox_linux`),
      `knownPackages` in `test_to_supply_chain_config` (`libs/config/deno_json`),
      and `lifecycleJail` in `info/json`.
-
-120. **`fix(node)`: `node <script>` without its extension through the `node`
-     shim** (`feat/nest-phase1`, CLI only; `cli/node_compat_shim.rs`,
-     `libs/node_shim/lib.rs`). `node dist/main` (what `nest start` and
-     `npm run start:prod` run) failed with
-     `Module not found "file:///%20Copyright…"` whenever `node` was Deno: the
-     PATH shim `deno x --install-node-shims` writes, and the `node` Deno puts on
-     its own `PATH` for `child_process.spawn("node")`. An entrypoint that does
-     not exist as written is resolved by a child `<exe> eval <resolve.js>`, and
-     `<exe>` was `current_exe()`, which is the shim's own path on macOS (a
-     symlink) and on Windows (a hardlink or copy named `node.exe`). The child
-     re-entered Node.js argument translation, so `eval` became the entrypoint
-     and the resolver's source its first argument. The child now runs with
-     `DENO_DISABLE_NODE_SHIM=1` (a plain `deno eval` whatever its file name),
-     and the arg0 dispatch canonicalizes the executable first. Linux was
-     unaffected (`/proc/self/exe` resolves the link).
-
-     Tests: spec `node/node_compat_shim` `spawn_node_extensionless` (unix: the
-     `node` Deno puts on `PATH`) and `node_shim_extensionless` (every OS: a
-     `node` symlink, or a `node.exe` hardlink / copy on Windows, of the deno
-     executable runs `node dist/main a b`); both fail on `3.0.0-rc.5`.
-
-121. **`fix(graph)`: a type-only import of a subpath only `@types` provides**
-     (`feat/nest-phase1`, CLI only; `cli/graph_util.rs`).
-     `import { App } from "supertest/types"` (Nest's default e2e test) failed
-     `deno run` / `deno test` with `ERR_MODULE_NOT_FOUND`, `--no-check`
-     included: `supertest/types` exists only as `@types/supertest/types.d.ts`,
-     and the module graph resolves every static import for code before emit
-     elides the type-only ones, which tsc + Node.js and Node's TypeScript
-     loaders never resolve. The graph walk now leaves out that resolution error
-     when all of these hold: Node.js resolution failed with
-     `ERR_MODULE_NOT_FOUND` or `ERR_PACKAGE_PATH_NOT_EXPORTED` for a bare
-     specifier; the importer is TypeScript; every import of the specifier there
-     is a static ES import or re-export with bindings (no side-effect import,
-     dynamic import, `require()` or import attributes); and in a typed graph its
-     types resolution found a declaration file. When every use is a type the
-     emitted JavaScript drops the import; when a value is used the runtime
-     resolves it and fails with the same error before any code runs. Type
-     checking keeps its own resolution, and a failed one is still reported.
-
-     Tests: spec `npm/types_only_subpath` (`run` without and with `--check`
-     prints the value; a value use of the type-only subpath still fails with
-     `ERR_MODULE_NOT_FOUND`; the first fails on `3.0.0-rc.5`).
-
-122. **`fix(check)`: a package.json project's tsconfig.json checks the same on
-     both engines** (`feat/nest-phase1`, CLI only; `libs/resolver/deno_json.rs`,
-     `libs/resolver/graph.rs`, `cli/graph_util.rs`, `cli/tsc/tsconfig_gen.rs`).
-     Nest's default tsconfig.json failed `deno test` and `deno compile` while
-     `deno check` passed, and none of them saw `@types/jest`'s globals.
-     - **`baseUrl`**: the in-process TypeScript 6 checker (which `deno test`
-       uses for a project with a Jest or Vitest config, and `deno compile` for a
-       graph with npm types) stopped on TS5101 (`baseUrl` is deprecated), which
-       the native checker adapts away (item 90). Module resolution, `paths`
-       included, is Deno's on both, so the in-process checker now gets
-       `ignoreDeprecations: "6.0"` beside a `baseUrl`, unless the config sets
-       its own.
-     - **`compilerOptions.types`**: a tsconfig's entry is a type reference
-       directive, which TypeScript looks up in `@types` first. The in-process
-       graph resolved `"jest"` to the `jest` package (the runner's API, no
-       globals), and the native generator turned it into that package's
-       declaration file. Both now take `@types/jest` when a
-       `node_modules/@types` holds it (`@scope/name` → `@types/scope__name`);
-       `node`, `deno`, deno.json entries and entries that aren't a bare package
-       name are unchanged.
-     - **No `types`**: TypeScript 5 includes every `node_modules/@types` package
-       (in the config's directory and its ancestors) on its own. In a
-       package.json project (no deno.json) both engines now do the same for a
-       tsconfig.json whose `compilerOptions` (its `extends` chain included, for
-       the in-process engine) set no `types`; the native engine leaves a config
-       with `extends` to its chain. `node` and `deno` are Deno's; a package with
-       `"typings": null` opts out. TypeScript 6 changed the default of `types`
-       to `[]`, but such a project's own compiler is usually 5.x.
-
-     Tests: spec `npm/node_project_types` (a `baseUrl` tsconfig without `types`
-     and one with `"types": ["testglobals"]` beside a `testglobals` package of
-     its own, each checked with `--check-engine=tsc` and natively; all four fail
-     on `3.0.0-rc.5`); `tsconfig_types_entry_package_maps_to_at_types`
-     (`libs/resolver/graph.rs`).
-
-123. **`fix(npm)`: a jailed install check may load the package's own native
-     addon** (`feat/nest-phase1`, CLI only; `cli/supply_chain/jail.rs`).
-     Approving bcrypt 6 (likewise bufferutil, utf-8-validate and any
-     `node-gyp-build` package) failed in the jail: `node-gyp-build-test` loads
-     the package's prebuilt `.node` to check it, the clamped `deno` had no FFI
-     (`NotCapable: Requires ffi access to …/prebuilds/darwin-x64/bcrypt.node`),
-     and the fallback to a source build (`node-gyp`) is not there. A jailed
-     `deno` now gets FFI scoped to the package's own folder (as the script
-     reaches it, and resolved) where it asked for FFI (`-A` from the `node`
-     shim, `--allow-ffi`); a path list keeps only the entries inside it, clamped
-     as the write list is (`clamp_path_list`: resolved against the cwd,
-     canonicalized, `..` folded), and native code anywhere else stays refused.
-     This adds no reach: a jailed script already writes and runs programs in its
-     own folder, under the same OS sandbox, and a native addon is loaded from
-     there at run time anyway. Where the OS can't confine (Windows, Linux
-     without Landlock, macOS without a working `sandbox-exec`), nothing would
-     hold what the addon does, so the jail grants no FFI at all there, as
-     before.
-
-     Tests: spec `npm/supply_chain_jail` `native_addon_own_folder` (unix:
-     `@denotest/jail-native-addon`'s install script loads its own
-     `prebuilds/addon.node`, allowed, and one in the project, denied; on
-     `3.0.0-rc.5` both are denied) and `native_addon_unconfined` (Windows: both
-     denied); `clamp_ffi_to_package_folder` (a `..` path list entry, and no FFI
-     roots, refused) and `ffi_roots_only_under_an_os_sandbox`
-     (`cli/supply_chain/jail.rs`).
-
-124. _(reserved: `fix/jail-hardening`'s lifecycle-script jail item, numbered 119
-     on that branch and 124 in its commits and code comments.)_
 
 125. **`feat(npm)`: a package.json project's `allowScripts` and `supplyChain`
      live in package.json's `"deno"` object** (`feat/nest-phase1`, CLI only;
@@ -5014,37 +5041,7 @@ where the changes are discussed.
      (`libs/package_json/lib.rs`), `supply_chain_line_names_the_home`
      (`cli/supply_chain/jail.rs`).
 
-119. **`fix(io)`: a `deno_io` async pipe reader holds no blocking-pool thread on
-     Windows** (`fix/rc7-robustness`, CLI and runtime; `ext/io/pipe.rs`). The
-     rest of item 118: `PipeRead::into_async` wrapped the read end of
-     `deno_io::pipe()` (the client end of an overlapped named pipe) in tokio's
-     `ChildStdout`, which reads with a blocking `ReadFile` on the runtime's
-     blocking pool, so every pending read of a quiet pipe pinned a pool thread
-     (four per CPU on Windows) until data or EOF. `deno test` reads each
-     worker's stdout and stderr through it, so a `--parallel` run with more
-     workers than the pool could spare left none for file system ops or child
-     process I/O. `AsyncPipeRead` is now a
-     `tokio::net::windows::named_pipe::NamedPipeClient` read through the I/O
-     completion port: a pending read holds no thread, and `ERROR_BROKEN_PIPE`
-     reads as EOF. `AsyncPipeRead::into_sync` now fails with `Unsupported` on
-     Windows (tokio's `NamedPipeClient` can't hand the handle back, it stays
-     bound to the completion port, and the reader may hold data it read ahead);
-     nothing in the tree calls it.
-
-     Audited and left as they are: `bi_pipe` (IPC) and `node:child_process`'s
-     stdio (`uv_compat` pipes) already read through the completion port;
-     `AsyncPipeWrite` (`ChildStdin`) holds a thread only while the pipe is full,
-     and nothing in the tree writes through it; stdin and files read through
-     `spawn_blocking` one resource at a time; `deno task`'s output pipes are
-     `deno_task_shell`'s (an external crate, its own `spawn_blocking`).
-
-     Test: `quiet_async_pipes_hold_no_blocking_thread` (`ext/io/pipe.rs`): with
-     a two-thread blocking pool, eight quiet pipe reads pending, a
-     `spawn_blocking` task and a pipe with data must still finish within 20 s.
-     On a 2-CPU Windows host a standalone copy of the old reader starved every
-     time (5 of 5) and the new one never did.
-
-119. **`chore(panic)`: a panic points at this fork's issue tracker** (CLI and
+126. **`chore(panic)`: a panic points at this fork's issue tracker** (CLI and
      runtime; `cli/lib.rs`, `cli/rt_desktop/lib.rs`). The panic hooks of the CLI
      and of a packaged desktop app said "Please report this at
      https://github.com/denoland/deno/issues/new", which sent the fork's users
@@ -5055,13 +5052,13 @@ where the changes are discussed.
      Test: `tests/specs/test/recursive_permissions_pledge` (its expected panic
      output).
 
-120. **`fix`: the rest of the fork audit's Lows, and the release gate**
+127. **`fix`: the rest of the fork audit's Lows, and the release gate**
      (`fix/rc7-lows`; `runtime/ops/desktop_update/oscheck.rs`,
      `runtime/permissions/lib.rs`, `ext/node/polyfills/_http_client.js`,
      `libs/npm_installer/extra_info.rs`, `.github/workflows/denext_*.yml`,
      `.github/denext-tests/setup/action.yml`, `.github/denext-runtime/`). The
-     2026-10-25 security and production audits' remaining Lows (item 119 took
-     the jail's), two install failures item 119's validation found, and the
+     2026-10-25 security and production audits' remaining Lows (item 124 took
+     the jail's), two install failures item 124's validation found, and the
      release pipeline's integrity findings:
      - **macOS update check: an Apple anchor, not just a Team ID (E-L4).** The
        update helper compared the staged app's Team ID with the running app's,
@@ -5083,7 +5080,7 @@ where the changes are discussed.
        `agent: false` gets a fresh agent without `proxyEnv` and connects
        directly. Deno's `node:http` routed it through the proxy too, so
        tunnel-agent's `CONNECT` (sharp's libvips download, prebuild-install's
-       binaries: item 119's validation) was itself proxied and its `host:port`
+       binaries: item 124's validation) was itself proxied and its `host:port`
        target refused as an invalid URL ("Invalid URL: github.com:443"), inside
        the jail (which sets the variable) or out.
      - **A deprecated package's lifecycle scripts never ran.** The extra info of
@@ -5091,7 +5088,7 @@ where the changes are discussed.
        came from the registry's packument, and the abbreviated packument the
        installer fetches has `hasInstallScript` but no `scripts`: no script was
        found, so none ran and none was reported as not run (puppeteer 23.11.1's
-       postinstall, which downloads Chrome: item 119's validation). The scripts
+       postinstall, which downloads Chrome: item 124's validation). The scripts
        now come from the package's own package.json in that case (npm's
        `node-gyp rebuild` default for a `binding.gyp` included).
      - **The release gate (P3, P4, P5, P11).** A tag was published when any one
@@ -5128,11 +5125,11 @@ where the changes are discussed.
      `@denotest/deprecated-lifecycle-scripts` test package) and
      `tag_gate_test.py`.
 
-121. **`fix(deps)`: the AppImage's zstd on zstd 0.14, the zstd 0.13 copy gone**
+128. **`fix(deps)`: the AppImage's zstd on zstd 0.14, the zstd 0.13 copy gone**
      (`fix/backhand-zstd`, CLI only; `cli/tools/desktop.rs`, `Cargo.toml`,
      `Cargo.lock`, `.cargo/audit.toml`). backhand 0.25 (the AppImage's squashfs
      writer and reader) kept zstd 0.13.2 / zstd-safe 7.2.4 in the lock beside
-     the workspace's 0.14.3 / 8.2.0 (item 119). Its `zstd` feature is off now,
+     the workspace's 0.14.3 / 8.2.0 (item 124). Its `zstd` feature is off now,
      and `AppImageZstd`, a backhand `CompressionAction`, does the zstd blocks on
      the workspace zstd the way backhand's `DefaultCompressor` did (one-shot
      `bulk` contexts, level 3, no compression options, the decompressed size
@@ -5155,7 +5152,7 @@ where the changes are discussed.
      `appimage_zstd_decompress_is_bounded_and_delegates`; without the custom
      `Kind` the four AppImage tests that write an image fail.
 
-122. **`fix`: AppImage root mode, symlinks in the lifecycle-script jail, the
+129. **`fix`: AppImage root mode, symlinks in the lifecycle-script jail, the
      launch file's bridge pin** (`fix/rc7-lows2`, CLI only;
      `cli/tools/desktop.rs`, `cli/supply_chain/jail.rs`,
      `runtime/permissions/lib.rs`, `ext/fs/ops.rs`; the laufey half, E-L1 to
@@ -5165,7 +5162,7 @@ where the changes are discussed.
        `create_linux_appimage` never called backhand's `set_root_mode`, and
        `FilesystemWriter` writes the root inode with permissions 0, so
        `unsquashfs` and `--appimage-extract` restored an unreadable
-       (`d---------`) root (item 121's test had to `chmod` it open). The root is
+       (`d---------`) root (item 128's test had to `chmod` it open). The root is
        written `0755` now. Upstream Deno's `deno desktop` writes its AppImage
        the same way and has the same bug. Test:
        `appimage_zstd_blocks_and_fragments_round_trip` asserts the image's root
@@ -5176,7 +5173,7 @@ where the changes are discussed.
        and `node:fs.symlink` need unscoped `--allow-read` and `--allow-write`,
        which the jail's clamp never grants, so electron's postinstall
        (extract-zip unpacking the macOS app bundle's `Versions/Current -> A`
-       links) failed with `create symlink: denied` (item 119's validation).
+       links) failed with `create symlink: denied` (item 124's validation).
        Where an OS sandbox (Landlock, Seatbelt) confines the script, the
        installer now marks the jail `osConfined`, and the clamp hands its write
        roots to `deno_permissions::set_jail_symlink_roots`. `check_symlink`
@@ -5220,7 +5217,7 @@ where the changes are discussed.
      first lookup during the first run of the updated app, only when that app
      had run here before (E-L3).
 
-121. **`fix(compile)`: the release's `denort` is checked against its
+130. **`fix(compile)`: the release's `denort` is checked against its
      `SHA256SUMS`** (`fix/denort-sha256`; `cli/standalone/binary.rs`, CLI
      only). The fork production audit's P8: `deno compile` without
      `DENORT_BIN`, in a denext release build, downloads
@@ -5255,10 +5252,10 @@ where the changes are discussed.
 
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
-118, 120) are what the prebuilt `libdenort` carries. The CLI-side parts (for
-example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's
-launchers) are in the branch too, but a stock CLI does not run them; denext's
-own launcher provides that environment.
+118, 119, 126, 127, 129) are what the prebuilt `libdenort` carries. The
+CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID`
+into a packaged app's launchers) are in the branch too, but a stock CLI does
+not run them; denext's own launcher provides that environment.
 
 The laufey backend hosts are built from
 [Brainwires/laufey](https://github.com/Brainwires/laufey) branch
@@ -5374,7 +5371,7 @@ licenses/              the deno license
 ```
 
 Each release also has `SHA256SUMS` (every runtime, CLI and `denort` archive;
-`deno compile` checks the `denort` it downloads against it, item 121) and
+`deno compile` checks the `denort` it downloads against it, item 130) and
 `manifest.json` (target -> backend -> url, sha256, size; the CLI archives under
 `cli.targets` -> target -> binary, url, sha256, size and
 `esbuild: { version, sha256 }`,
