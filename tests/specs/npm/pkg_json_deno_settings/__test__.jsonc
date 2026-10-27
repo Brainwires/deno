@@ -1,0 +1,42 @@
+{
+  // DENEXT.md item 125: a package.json project (no deno.json) keeps
+  // `allowScripts` and `supplyChain` in package.json's "deno" object, because
+  // a deno.json would take it out of Node.js resolution and installs
+  "tempDir": true,
+  "tests": {
+    // `deno approve-scripts` writes the approval there instead of creating a
+    // deno.json; the install honours it, and the project still resolves as
+    // Node.js does (an extensionless import)
+    "approve_scripts_writes_package_json": {
+      "steps": [
+        {
+          "cwd": "approve",
+          "args": "install",
+          "output": "[WILDCARD]"
+        },
+        {
+          "cwd": "approve",
+          "args": "approve-scripts npm:@denotest/lifecycle-scripts-simple",
+          "output": "[WILDCARD]Approved npm:@denotest/lifecycle-scripts-simple[WILDCARD]"
+        },
+        {
+          "cwd": "approve",
+          "args": "run -A check.mjs",
+          "output": "approve.out"
+        },
+        {
+          "cwd": "approve",
+          "args": "run main.ts",
+          "output": "extensionless import\n"
+        }
+      ]
+    },
+    // with a deno.json, the deno.json's settings apply and package.json's
+    // "deno" object is reported as ignored
+    "shadowed_by_deno_json": {
+      "cwd": "shadowed",
+      "args": "install",
+      "output": "shadowed.out"
+    }
+  }
+}

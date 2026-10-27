@@ -1,2 +1,2 @@
-[WILDCARD]Warning jail-scripts: npm:@denotest/jail-net-declared@1.0.0's package.json declares a download host this project hasn't allowed: localhost:4545. Its scripts can't reach it. To allow it, add to deno.json: "supplyChain": { "jailScripts": { "packages": { "@denotest/jail-net-declared": { "net": ["localhost:4545"] } } } }
+[WILDCARD]Warning jail-scripts: npm:@denotest/jail-net-declared@1.0.0's package.json declares a download host this project hasn't allowed: localhost:4545. Its scripts can't reach it. To allow it, add to package.json: "deno": { "supplyChain": { "jailScripts": { "packages": { "@denotest/jail-net-declared": { "net": ["localhost:4545"] } } } } }
 [WILDCARD]

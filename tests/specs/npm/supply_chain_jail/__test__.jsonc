@@ -189,9 +189,28 @@
         }
       ]
     },
+    // DENEXT.md item 125: a package.json project (no deno.json) keeps its
+    // approvals and exceptions in package.json's "deno" object; the same
+    // exceptions, and the approval without --allow-scripts
+    "per_package_exceptions_package_json": {
+      "if": "unix",
+      "steps": [
+        {
+          "cwd": "exceptions_pkg_json",
+          "args": "install",
+          "output": "[WILDCARD]"
+        },
+        {
+          "cwd": "exceptions_pkg_json",
+          "args": "run -A check.mjs jail-control-probe",
+          "output": "exceptions.out"
+        }
+      ]
+    },
     // an install check that loads the package's own prebuilt Node-API addon
     // (node-gyp-build-test) may: native code from the package's folder only
     "native_addon_own_folder": {
+      "if": "unix",
       "steps": [
         {
           "cwd": "native_addon",
@@ -205,10 +224,27 @@
         }
       ]
     },
+    // no OS sandbox to confine what an addon does: no native code at all
+    "native_addon_unconfined": {
+      "if": "windows",
+      "steps": [
+        {
+          "cwd": "native_addon",
+          "args": "install --allow-scripts=npm:@denotest/jail-native-addon --jail-scripts",
+          "output": "[WILDCARD]"
+        },
+        {
+          "cwd": "native_addon",
+          "args": "run -A check.mjs",
+          "output": "native_addon_unconfined.out"
+        }
+      ]
+    },
     // DENEXT.md item 124 (M2): the download host a package declares
     // (node-pre-gyp's binary.host) is a request, not a grant: without the
     // project's say-so it reaches nothing, and the install names the host
-    // and the deno.json line that allows it
+    // and the config line that allows it (a package.json "deno" entry here,
+    // a project with no deno.json: DENEXT.md item 125)
     "declared_download_host_refused": {
       "if": "unix",
       "steps": [

@@ -2991,6 +2991,100 @@ interface AlsoKeep {
     assert_eq!(files_arr, &vec![json!("main.ts"), json!("lib.ts")]);
   }
 
+  // DENEXT.md item 122: the `@types` packages TypeScript 5 includes on its
+  // own, which a package.json project's tsconfig.json without `types` gets
+  #[test]
+  fn automatic_type_directive_names_reads_every_types_root() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let project = root.join("app");
+    let write_pkg = |dir: &Path, name: &str, pkg: &str| {
+      let pkg_dir = dir.join("node_modules").join("@types").join(name);
+      std::fs::create_dir_all(&pkg_dir).unwrap();
+      std::fs::write(pkg_dir.join("package.json"), pkg).unwrap();
+    };
+    write_pkg(&project, "jest", "{}");
+    write_pkg(&project, "babel__core", "{}");
+    // Deno provides these
+    write_pkg(&project, "node", "{}");
+    write_pkg(&project, "deno", "{}");
+    // opted out, as TypeScript reads it
+    write_pkg(&project, "opted-out", r#"{ "typings": null }"#);
+    // an ancestor's, after the project's own; a duplicate counted once
+    write_pkg(root, "supertest", "{}");
+    write_pkg(root, "jest", "{}");
+    std::fs::write(
+      project.join("node_modules").join("@types").join(".bin"),
+      "",
+    )
+    .unwrap();
+    assert_eq!(
+      automatic_type_directive_names(&project),
+      vec!["babel__core", "jest", "supertest"]
+    );
+  }
+
+  #[test]
+  fn types_entry_resolves_through_at_types_first() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("app");
+    for name in ["jest", "babel__core", "node"] {
+      std::fs::create_dir_all(
+        dir.path().join("node_modules").join("@types").join(name),
+      )
+      .unwrap();
+    }
+    std::fs::create_dir_all(&project).unwrap();
+    assert!(has_at_types_package(&project, "jest"));
+    assert!(has_at_types_package(&project, "@babel/core"));
+    // Deno's own, no package of that name, or not a package name
+    assert!(!has_at_types_package(&project, "node"));
+    assert!(!has_at_types_package(&project, "vitest"));
+    assert!(!has_at_types_package(&project, "jest/globals"));
+    assert!(!has_at_types_package(&project, "@babel/core/sub"));
+    assert!(!has_at_types_package(&project, "npm:jest"));
+  }
+
+  #[test]
+  fn generated_type_roots_keep_the_projects_at_types() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("app");
+    let at_types = project.join("node_modules").join("@types");
+    let parent_at_types = dir.path().join("node_modules").join("@types");
+    std::fs::create_dir_all(&at_types).unwrap();
+    std::fs::create_dir_all(&parent_at_types).unwrap();
+    let type_roots = |node_types_root: Option<&str>| {
+      build_tsconfig(
+        &project,
+        None,
+        None,
+        None,
+        &[],
+        &BTreeMap::new(),
+        &Map::new(),
+        &project.join("node_modules").join("@jsr"),
+        &BTreeMap::new(),
+        &[],
+        node_types_root,
+        &[],
+        false,
+      )["compilerOptions"]["typeRoots"]
+        .clone()
+    };
+    let slash = |p: &Path| p.to_string_lossy().replace('\\', "/");
+    // no `@types/node`: the project's and its ancestors' `@types` still
+    // resolve a `types` entry such as `jest`
+    assert_eq!(
+      type_roots(None),
+      json!(["./types", slash(&at_types), slash(&parent_at_types)])
+    );
+    // the project's own already present, relative to the generated config
+    assert_eq!(
+      type_roots(Some("../node_modules/@types")),
+      json!(["./types", "../node_modules/@types", slash(&parent_at_types)])
+    );
+  }
+
   #[test]
   fn test_build_tsconfig_with_npm_project_references() {
     let references = vec![

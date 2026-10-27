@@ -4931,15 +4931,74 @@ where the changes are discussed.
      and the fallback to a source build (`node-gyp`) is not there. A jailed
      `deno` now gets FFI scoped to the package's own folder (as the script
      reaches it, and resolved) where it asked for FFI (`-A` from the `node`
-     shim, `--allow-ffi`); a path list keeps only the entries inside it, and
-     native code anywhere else stays refused. This adds no reach: a jailed
-     script already writes and runs programs in its own folder, under the same
-     OS sandbox, and a native addon is loaded from there at run time anyway.
+     shim, `--allow-ffi`); a path list keeps only the entries inside it, clamped
+     as the write list is (`clamp_path_list`: resolved against the cwd,
+     canonicalized, `..` folded), and native code anywhere else stays refused.
+     This adds no reach: a jailed script already writes and runs programs in its
+     own folder, under the same OS sandbox, and a native addon is loaded from
+     there at run time anyway. Where the OS can't confine (Windows, Linux
+     without Landlock, macOS without a working `sandbox-exec`), nothing would
+     hold what the addon does, so the jail grants no FFI at all there, as
+     before.
 
-     Tests: spec `npm/supply_chain_jail` `native_addon_own_folder`
-     (`@denotest/jail-native-addon`'s install script loads its own
+     Tests: spec `npm/supply_chain_jail` `native_addon_own_folder` (unix:
+     `@denotest/jail-native-addon`'s install script loads its own
      `prebuilds/addon.node`, allowed, and one in the project, denied; on
-     `3.0.0-rc.5` both are denied); `clamp_ffi_to_package_folder`
+     `3.0.0-rc.5` both are denied) and `native_addon_unconfined` (Windows: both
+     denied); `clamp_ffi_to_package_folder` (a `..` path list entry, and no FFI
+     roots, refused) and `ffi_roots_only_under_an_os_sandbox`
+     (`cli/supply_chain/jail.rs`).
+
+124. _(reserved: `fix/jail-hardening`'s lifecycle-script jail item, numbered 119
+     on that branch and 124 in its commits and code comments.)_
+
+125. **`feat(npm)`: a package.json project's `allowScripts` and `supplyChain`
+     live in package.json's `"deno"` object** (`feat/nest-phase1`, CLI only;
+     `libs/package_json/lib.rs`, `libs/config/deno_json/mod.rs`,
+     `libs/config/workspace/mod.rs`, `cli/tools/pm/approve_scripts.rs`,
+     `cli/tools/pm/mod.rs`, `cli/supply_chain/jail.rs`, `cli/factory.rs`). A
+     project with a package.json and no deno.json resolves and installs as
+     Node.js does (hoisted `node_modules`, extensionless imports, Node's
+     conditions), and any deno.json turns that off. `deno approve-scripts`,
+     which every install's "Ignored build scripts" box tells users to run,
+     created a deno.json holding only `allowScripts`, so approving a script
+     broke such a project (a Nest app: `Module not found …/src/app.module`) and
+     reinstalled `node_modules` isolated; and the lifecycle-script jail's
+     exceptions (`supplyChain.jailScripts`) had no home but deno.json either.
+     Now, when there is no root deno.json, the root package.json's `"deno"`
+     object holds both, in deno.json's shapes:
+     `"deno": { "allowScripts": [...], "supplyChain": { ... } }`.
+     - `deno install` and every other reader of the two settings
+       (`Workspace::allow_scripts` / `supply_chain`, the `.npmrc` supply-chain
+       merge) take them from there; relative `jailScripts.packages.<name>.write`
+       paths resolve against the package.json's directory; errors name
+       `"deno.allowScripts"` / `"deno.supplyChain"`.
+     - `deno approve-scripts` writes `deno.allowScripts` into the package.json
+       (creating the object) instead of creating a deno.json; it still creates a
+       deno.json where there is neither file.
+     - A root deno.json, when there is one, stays the only home: a package.json
+       `"deno"` object beside it is ignored with a warning naming the key to
+       move, and a workspace member's is reported as root-only (as `overrides`
+       is), never applied.
+     - The jail's warnings that print the setting to add (a refused declared
+       download host) print it as a package.json `"deno"` entry in such a
+       project.
+     - Only an object with one of the two keys counts: a dependency's own
+       `"deno"` field (some name an entry point) is not read, and other keys in
+       the object are ignored.
+
+     Tests: spec `npm/pkg_json_deno_settings` (`approve-scripts` in a
+     package.json project writes `"deno": { "allowScripts": [...] }`, creates no
+     deno.json, the approved script runs, and an extensionless import still
+     resolves; on `3.0.0-rc.5` it creates a deno.json and the import fails; with
+     a deno.json beside it the object is reported as ignored); spec
+     `npm/supply_chain_jail` `per_package_exceptions_package_json` (the
+     `per_package_exceptions` probe with its approval and exceptions in the
+     package.json, installed without `--allow-scripts`); unit
+     `test_pkg_json_deno_settings`, `test_pkg_json_deno_settings_invalid`,
+     `test_pkg_json_deno_settings_shadowed_by_deno_json`
+     (`libs/config/workspace/mod.rs`), `test_deno_settings_object`
+     (`libs/package_json/lib.rs`), `supply_chain_line_names_the_home`
      (`cli/supply_chain/jail.rs`).
 
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,

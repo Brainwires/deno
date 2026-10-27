@@ -36,7 +36,8 @@
 //! - every `deno` started inside it clamping its permissions to the same set
 //!   (`DENO_INTERNAL_LIFECYCLE_JAIL`): `-A` from the `node` shim and the bin
 //!   wrappers becomes write access to those roots only, FFI (native addons)
-//!   only from the package's own folder, network per the jail;
+//!   only from the package's own folder (none where the OS can't confine),
+//!   network per the jail;
 //!   package-manager subcommands (`deno install`, `x`, `add`, ...) are
 //!   refused, as are `npm` / `npx` falling back to a real npm.
 //!
@@ -115,7 +116,8 @@ pub struct JailPermissions {
   /// package's own folder, so its install check can load the prebuilt
   /// `.node` it ships (`node-gyp-build-test`), as it will at run time.
   /// Nothing else: a script could already run any program it can write
-  /// there, under the same OS sandbox, so this adds no reach.
+  /// there, under the same OS sandbox, so this adds no reach. Empty where
+  /// the OS can't confine (no native code at all).
   #[serde(default)]
   pub ffi: Vec<PathBuf>,
 }
@@ -265,14 +267,8 @@ pub fn clamp_permissions(
         .collect(),
     ),
     Some(list) => {
-      let kept = list
-        .into_iter()
-        .filter(|entry| {
-          let path = cwd.join(entry);
-          let path = canonicalize_path(&path).unwrap_or(path);
-          path_within(&path, &jail.ffi)
-        })
-        .collect::<Vec<_>>();
+      let kept = clamp_path_list(list, &jail.ffi, cwd);
+      // an empty list would mean "everything"
       (!kept.is_empty()).then_some(kept)
     }
   };
@@ -315,6 +311,9 @@ pub struct JailConfig {
   /// `supplyChain.jailScripts.upstreamByName`: the installer's upstream
   /// proxy is asked for a checked host by name, not by address.
   pub upstream_by_name: bool,
+  /// `supplyChain` lives in package.json's `"deno"` object (a project with
+  /// no deno.json, DENEXT.md item 125): what the warnings tell users to edit.
+  pub settings_in_package_json: bool,
   /// The project directories (the workspace root and the initial cwd) and
   /// the `.npmrc` the installer resolved: where the secret files are looked
   /// for, the first time a script is jailed.
@@ -427,6 +426,7 @@ impl JailConfig {
       packages,
       known_packages: BTreeMap::new(),
       upstream_by_name: false,
+      settings_in_package_json: false,
       project_dirs: project_dirs.to_vec(),
       npmrc_path: npmrc_path.map(Path::to_path_buf),
       project_secret_files: Default::default(),
@@ -478,6 +478,31 @@ impl JailConfig {
   ) -> Self {
     self.known_packages = known_packages;
     self
+  }
+
+  /// Sets `settings_in_package_json`.
+  pub fn with_settings_in_package_json(mut self, value: bool) -> Self {
+    self.settings_in_package_json = value;
+    self
+  }
+
+  /// The `supplyChain` setting `inner` (JSON text of its value) as the
+  /// project writes it, with the file to add it to.
+  fn supply_chain_line(&self, inner: &str) -> String {
+    if self.settings_in_package_json {
+      format!("add to package.json: \"deno\": {{ \"supplyChain\": {inner} }}")
+    } else {
+      format!("add to deno.json: \"supplyChain\": {inner}")
+    }
+  }
+
+  /// The file that holds the project's `supplyChain`, for messages.
+  fn settings_file(&self) -> &'static str {
+    if self.settings_in_package_json {
+      "package.json"
+    } else {
+      "deno.json"
+    }
   }
 }
 
@@ -1299,8 +1324,13 @@ pub async fn run_jailed_script(
 
 /// The package's own folder, as its script reaches it and resolved (an
 /// isolated `node_modules` links it from `node_modules/.deno/`): where a
-/// jailed `deno` may load a native addon from.
-fn package_ffi_roots(package_folder: &Path) -> Vec<PathBuf> {
+/// jailed `deno` may load a native addon from. Only where the OS confines
+/// what the addon does, as it confines the programs a script writes there;
+/// without an OS sandbox, no native code at all.
+fn package_ffi_roots(package_folder: &Path, os_sandbox: bool) -> Vec<PathBuf> {
+  if !os_sandbox {
+    return Vec::new();
+  }
   let mut roots = vec![package_folder.to_path_buf()];
   if let Ok(canonical) = canonicalize_path(package_folder)
     && canonical != package_folder
@@ -1352,12 +1382,15 @@ async fn run_in_dirs(
       .map(|h| format!("\"{h}\""))
       .collect::<Vec<_>>()
       .join(", ");
+    let line = config.supply_chain_line(&format!(
+      "{{ \"jailScripts\": {{ \"packages\": {{ \"{}\": {{ \"net\": [{hosts}] }} }} }} }}",
+      s.package_name
+    ));
     log::warn!(
-      "{} jail-scripts: npm:{}'s package.json declares a download host this project hasn't allowed: {}. Its scripts can't reach it. To allow it, add to deno.json: \"supplyChain\": {{ \"jailScripts\": {{ \"packages\": {{ \"{}\": {{ \"net\": [{hosts}] }} }} }} }}",
+      "{} jail-scripts: npm:{}'s package.json declares a download host this project hasn't allowed: {}. Its scripts can't reach it. To allow it, {line}",
       colors::yellow("Warning"),
       s.package_id,
       refused_declared.join(", "),
-      s.package_name
     );
   }
   // a host list: the allow-listing proxy, the only address the OS lets the
@@ -1432,8 +1465,9 @@ async fn run_in_dirs(
         .swap(true, std::sync::atomic::Ordering::SeqCst)
       {
         log::warn!(
-          "{} jail-scripts: this system can't hold lifecycle scripts to the hosts deno.json lists for them (npm:{}: {}); programs other than Deno that they start can reach any host. Linux 6.7+ (Landlock ABI 4), or unprivileged user namespaces, can.",
+          "{} jail-scripts: this system can't hold lifecycle scripts to the hosts {} lists for them (npm:{}: {}); programs other than Deno that they start can reach any host. Linux 6.7+ (Landlock ABI 4), or unprivileged user namespaces, can.",
           colors::yellow("Warning"),
+          config.settings_file(),
           s.package_id,
           hosts.join(", ")
         );
@@ -1486,7 +1520,7 @@ async fn run_in_dirs(
     deny_read: deny_read.clone(),
     net: net.clone(),
     proxy: proxy_address.clone(),
-    ffi: package_ffi_roots(s.package_folder),
+    ffi: package_ffi_roots(s.package_folder, os_sandbox),
   };
 
   // the environment
@@ -2637,9 +2671,54 @@ mod tests {
     };
     clamp_permissions(&mut options, &jail, Path::new("/nm/pkg"));
     assert_eq!(options.allow_ffi, None);
+    // `..` can't climb out of the package
+    let mut options = PermissionsOptions {
+      allow_ffi: Some(vec!["prebuilds/../../other/addon.node".to_string()]),
+      ..Default::default()
+    };
+    clamp_permissions(&mut options, &jail, Path::new("/nm/pkg"));
+    assert_eq!(options.allow_ffi, None);
     // not asked for, not granted
     let mut options = PermissionsOptions::default();
     clamp_permissions(&mut options, &jail, Path::new("/nm/pkg"));
     assert_eq!(options.allow_ffi, None);
+    // no FFI roots (no OS sandbox): `-A` gets no native code
+    let unconfined = JailPermissions {
+      write: vec![PathBuf::from("/nm/pkg")],
+      ..Default::default()
+    };
+    let mut options = PermissionsOptions {
+      allow_ffi: Some(vec![]),
+      ..Default::default()
+    };
+    clamp_permissions(&mut options, &unconfined, Path::new("/nm/pkg"));
+    assert_eq!(options.allow_ffi, None);
+  }
+
+  #[test]
+  fn supply_chain_line_names_the_home() {
+    let config = JailConfig::new(false, false, BTreeMap::new(), &[], None);
+    assert_eq!(
+      config.supply_chain_line("{}"),
+      "add to deno.json: \"supplyChain\": {}"
+    );
+    assert_eq!(config.settings_file(), "deno.json");
+    let config = config.with_settings_in_package_json(true);
+    assert_eq!(
+      config.supply_chain_line("{}"),
+      "add to package.json: \"deno\": { \"supplyChain\": {} }"
+    );
+    assert_eq!(config.settings_file(), "package.json");
+  }
+
+  #[test]
+  fn ffi_roots_only_under_an_os_sandbox() {
+    let dir = tempfile::tempdir().unwrap();
+    let package = dir.path().join("pkg");
+    std::fs::create_dir(&package).unwrap();
+    let roots = package_ffi_roots(&package, true);
+    assert!(roots.contains(&package));
+    assert!(roots.contains(&canonicalize_path(&package).unwrap()));
+    assert_eq!(package_ffi_roots(&package, false), Vec::<PathBuf>::new());
   }
 }

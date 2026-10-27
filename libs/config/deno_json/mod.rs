@@ -1917,6 +1917,212 @@ pub enum ToInvalidConfigError {
   CoverageThresholdOutOfRange { metric: &'static str, value: f64 },
 }
 
+/// Parses an `allowScripts` value (deno.json's, or the `"deno"` object's in
+/// a package.json); `key` names it in errors.
+pub fn parse_allow_scripts_config(
+  value: Option<&Value>,
+  key: &'static str,
+) -> Result<AllowScriptsConfig, ToInvalidConfigError> {
+  let config = match value {
+    Some(Value::Array(value)) => {
+      let items: Vec<JsrDepPackageReq> =
+        serde_json::from_value(value.clone().into()).map_err(|error| {
+          ToInvalidConfigError::Parse {
+            config: key,
+            source: error,
+          }
+        })?;
+      AllowScriptsConfig {
+        allow: AllowScriptsValueConfig::Limited(items),
+        deny: vec![],
+      }
+    }
+    Some(Value::Object(value)) => {
+      let config: AllowScriptsConfig =
+        serde_json::from_value(value.clone().into()).map_err(|error| {
+          ToInvalidConfigError::Parse {
+            config: key,
+            source: error,
+          }
+        })?;
+      config
+    }
+    Some(Value::Bool(value)) => {
+      if *value {
+        AllowScriptsConfig {
+          allow: AllowScriptsValueConfig::All,
+          deny: Vec::new(),
+        }
+      } else {
+        AllowScriptsConfig {
+          allow: AllowScriptsValueConfig::Limited(Vec::new()),
+          deny: Vec::new(),
+        }
+      }
+    }
+    Some(Value::Number(_) | Value::String(_)) => {
+      return Err(ToInvalidConfigError::Parse {
+        config: key,
+        source: serde_json::Error::custom(
+          "expected string array, boolean, or object",
+        ),
+      });
+    }
+    Some(Value::Null) | None => AllowScriptsConfig {
+      allow: AllowScriptsValueConfig::Limited(Vec::new()),
+      deny: Vec::new(),
+    },
+  };
+  let ensure_reqs_no_tag = |reqs: &[JsrDepPackageReq]| {
+    // it's too much of a hassle to support tags,
+    // so error if someone uses one
+    for req in reqs {
+      if req.req.version_req.tag().is_some() {
+        return Err(ToInvalidConfigError::Parse {
+          config: key,
+          source: serde_json::Error::custom(format!(
+            "tags are not supported in '{}'",
+            req
+          )),
+        });
+      }
+    }
+    Ok(())
+  };
+  match &config.allow {
+    AllowScriptsValueConfig::All => {}
+    AllowScriptsValueConfig::Limited(reqs) => {
+      ensure_reqs_no_tag(reqs)?;
+    }
+  }
+  ensure_reqs_no_tag(&config.deny)?;
+
+  Ok(config)
+}
+
+/// Parses a `supplyChain` value (deno.json's, or the `"deno"` object's in a
+/// package.json); `key` names it in errors, and relative `write` paths
+/// resolve against `base_dir`, the config file's directory.
+pub fn parse_supply_chain_config(
+  value: Option<&Value>,
+  key: &'static str,
+  base_dir: Option<&Path>,
+) -> Result<SupplyChainConfig, ToInvalidConfigError> {
+  let Some(value) = value else {
+    return Ok(Default::default());
+  };
+  let parse_err = |msg: String| ToInvalidConfigError::Parse {
+    config: key,
+    source: serde_json::Error::custom(msg),
+  };
+  let raw: RawSupplyChainConfig = serde_json::from_value(value.clone())
+    .map_err(|source| ToInvalidConfigError::Parse {
+      config: key,
+      source,
+    })?;
+  if let Some(check) = &raw.advisory_check
+    && !matches!(check.as_str(), "on" | "off" | "required")
+  {
+    return Err(parse_err(format!(
+      "\"advisoryCheck\" must be \"on\", \"off\" or \"required\", got \"{check}\""
+    )));
+  }
+  if let Some(check) = &raw.low_download_check
+    && !matches!(check.as_str(), "off" | "warn" | "prompt" | "required")
+  {
+    return Err(parse_err(format!(
+      "\"lowDownloadCheck\" must be \"off\", \"warn\", \"prompt\" or \"required\", got \"{check}\""
+    )));
+  }
+  let mut jail_upstream_by_name = false;
+  let mut jail_known_packages = BTreeMap::new();
+  let (jail_scripts, jail_net, jail_packages) = match raw.jail_scripts {
+    None => (None, None, BTreeMap::new()),
+    Some(RawJailScripts::Bool(value)) => (Some(value), None, BTreeMap::new()),
+    Some(RawJailScripts::Object(obj)) => {
+      // an object that only lists exceptions doesn't ask for the jail: it
+      // configures the default one (DENEXT.md item 108)
+      let asks_for_jail = obj.net.is_some()
+        || (obj.packages.is_none() && obj.known_packages.is_none());
+      jail_upstream_by_name = obj.upstream_by_name;
+      for (name, hosts) in obj.known_packages.unwrap_or_default() {
+        let name = name.strip_prefix("npm:").unwrap_or(&name).to_string();
+        if name.is_empty() {
+          return Err(parse_err(
+            "an empty package name in \"jailScripts.knownPackages\"".into(),
+          ));
+        }
+        for host in &hosts {
+          if !valid_host_entry(host) {
+            return Err(parse_err(format!(
+              "\"jailScripts.knownPackages\": {name} lists \"{host}\"; expected a host or host:port"
+            )));
+          }
+        }
+        jail_known_packages.insert(name, hosts);
+      }
+      let mut packages = BTreeMap::new();
+      for (name, mut config) in obj.packages.unwrap_or_default() {
+        let name = name.strip_prefix("npm:").unwrap_or(&name).to_string();
+        if name.is_empty() {
+          return Err(parse_err(
+            "an empty package name in \"jailScripts.packages\"".into(),
+          ));
+        }
+        if config.allow_private
+          && !matches!(config.net, Some(JailNetConfig::Hosts(_)))
+        {
+          return Err(parse_err(format!(
+            "\"jailScripts.packages\": {name}'s \"allowPrivate\" needs a \"net\" host list (the names it lets resolve to private addresses)"
+          )));
+        }
+        if let Some(JailNetConfig::Hosts(hosts)) = &config.net {
+          if hosts.is_empty() {
+            return Err(parse_err(format!(
+              "\"jailScripts.packages\": {name}'s \"net\" is an empty host list; use false for no network"
+            )));
+          }
+          for host in hosts {
+            if !valid_host_entry(host) {
+              return Err(parse_err(format!(
+                "\"jailScripts.packages\": {name}'s \"net\" lists \"{host}\"; expected a host or host:port, as --allow-net takes"
+              )));
+            }
+          }
+        }
+        for path in &mut config.write {
+          if path.is_relative() && !is_home_relative_path(path) {
+            match base_dir {
+              Some(base_dir) => *path = base_dir.join(&*path),
+              None => {
+                return Err(parse_err(format!(
+                  "\"jailScripts.packages\": a relative write path ({}) needs a local config file",
+                  path.display()
+                )));
+              }
+            }
+          }
+        }
+        packages.insert(name, config);
+      }
+      (asks_for_jail.then_some(true), obj.net, packages)
+    }
+  };
+  Ok(SupplyChainConfig {
+    paranoid: raw.paranoid,
+    jail_scripts,
+    jail_net,
+    jail_packages,
+    jail_upstream_by_name,
+    jail_known_packages,
+    advisory_check: raw.advisory_check,
+    low_download_check: raw.low_download_check,
+    low_download_threshold: raw.low_download_threshold,
+    allow_low_downloads: raw.allow_low_downloads,
+  })
+}
+
+
 #[derive(Debug, Error, JsError)]
 #[class(type)]
 pub enum ResolveTaskConfigError {
@@ -2769,201 +2975,20 @@ impl ConfigFile {
   pub fn to_allow_scripts_config(
     &self,
   ) -> Result<AllowScriptsConfig, ToInvalidConfigError> {
-    let config = match &self.json.allow_scripts {
-      Some(Value::Array(value)) => {
-        let items: Vec<JsrDepPackageReq> =
-          serde_json::from_value(value.clone().into()).map_err(|error| {
-            ToInvalidConfigError::Parse {
-              config: "allowScripts",
-              source: error,
-            }
-          })?;
-        AllowScriptsConfig {
-          allow: AllowScriptsValueConfig::Limited(items),
-          deny: vec![],
-        }
-      }
-      Some(Value::Object(value)) => {
-        let config: AllowScriptsConfig =
-          serde_json::from_value(value.clone().into()).map_err(|error| {
-            ToInvalidConfigError::Parse {
-              config: "allowScripts",
-              source: error,
-            }
-          })?;
-        config
-      }
-      Some(Value::Bool(value)) => {
-        if *value {
-          AllowScriptsConfig {
-            allow: AllowScriptsValueConfig::All,
-            deny: Vec::new(),
-          }
-        } else {
-          AllowScriptsConfig {
-            allow: AllowScriptsValueConfig::Limited(Vec::new()),
-            deny: Vec::new(),
-          }
-        }
-      }
-      Some(Value::Number(_) | Value::String(_)) => {
-        return Err(ToInvalidConfigError::Parse {
-          config: "allowScripts",
-          source: serde_json::Error::custom(
-            "expected string array, boolean, or object",
-          ),
-        });
-      }
-      Some(Value::Null) | None => AllowScriptsConfig {
-        allow: AllowScriptsValueConfig::Limited(Vec::new()),
-        deny: Vec::new(),
-      },
-    };
-    let ensure_reqs_no_tag = |reqs: &[JsrDepPackageReq]| {
-      // it's too much of a hassle to support tags,
-      // so error if someone uses one
-      for req in reqs {
-        if req.req.version_req.tag().is_some() {
-          return Err(ToInvalidConfigError::Parse {
-            config: "allowScripts",
-            source: serde_json::Error::custom(format!(
-              "tags are not supported in '{}'",
-              req
-            )),
-          });
-        }
-      }
-      Ok(())
-    };
-    match &config.allow {
-      AllowScriptsValueConfig::All => {}
-      AllowScriptsValueConfig::Limited(reqs) => {
-        ensure_reqs_no_tag(reqs)?;
-      }
-    }
-    ensure_reqs_no_tag(&config.deny)?;
-
-    Ok(config)
+    parse_allow_scripts_config(self.json.allow_scripts.as_ref(), "allowScripts")
   }
 
   pub fn to_supply_chain_config(
     &self,
   ) -> Result<SupplyChainConfig, ToInvalidConfigError> {
-    let Some(value) = &self.json.supply_chain else {
-      return Ok(Default::default());
-    };
-    let parse_err = |msg: String| ToInvalidConfigError::Parse {
-      config: "supplyChain",
-      source: serde_json::Error::custom(msg),
-    };
-    let raw: RawSupplyChainConfig = serde_json::from_value(value.clone())
-      .map_err(|source| ToInvalidConfigError::Parse {
-        config: "supplyChain",
-        source,
-      })?;
-    if let Some(check) = &raw.advisory_check
-      && !matches!(check.as_str(), "on" | "off" | "required")
-    {
-      return Err(parse_err(format!(
-        "\"advisoryCheck\" must be \"on\", \"off\" or \"required\", got \"{check}\""
-      )));
-    }
-    if let Some(check) = &raw.low_download_check
-      && !matches!(check.as_str(), "off" | "warn" | "prompt" | "required")
-    {
-      return Err(parse_err(format!(
-        "\"lowDownloadCheck\" must be \"off\", \"warn\", \"prompt\" or \"required\", got \"{check}\""
-      )));
-    }
     let base_dir = deno_path_util::url_to_file_path(&self.specifier)
       .ok()
       .and_then(|p| p.parent().map(|p| p.to_path_buf()));
-    let mut jail_upstream_by_name = false;
-    let mut jail_known_packages = BTreeMap::new();
-    let (jail_scripts, jail_net, jail_packages) = match raw.jail_scripts {
-      None => (None, None, BTreeMap::new()),
-      Some(RawJailScripts::Bool(value)) => (Some(value), None, BTreeMap::new()),
-      Some(RawJailScripts::Object(obj)) => {
-        // an object that only lists exceptions doesn't ask for the jail: it
-        // configures the default one (DENEXT.md item 108)
-        let asks_for_jail = obj.net.is_some()
-          || (obj.packages.is_none() && obj.known_packages.is_none());
-        jail_upstream_by_name = obj.upstream_by_name;
-        for (name, hosts) in obj.known_packages.unwrap_or_default() {
-          let name = name.strip_prefix("npm:").unwrap_or(&name).to_string();
-          if name.is_empty() {
-            return Err(parse_err(
-              "an empty package name in \"jailScripts.knownPackages\"".into(),
-            ));
-          }
-          for host in &hosts {
-            if !valid_host_entry(host) {
-              return Err(parse_err(format!(
-                "\"jailScripts.knownPackages\": {name} lists \"{host}\"; expected a host or host:port"
-              )));
-            }
-          }
-          jail_known_packages.insert(name, hosts);
-        }
-        let mut packages = BTreeMap::new();
-        for (name, mut config) in obj.packages.unwrap_or_default() {
-          let name = name.strip_prefix("npm:").unwrap_or(&name).to_string();
-          if name.is_empty() {
-            return Err(parse_err(
-              "an empty package name in \"jailScripts.packages\"".into(),
-            ));
-          }
-          if config.allow_private
-            && !matches!(config.net, Some(JailNetConfig::Hosts(_)))
-          {
-            return Err(parse_err(format!(
-              "\"jailScripts.packages\": {name}'s \"allowPrivate\" needs a \"net\" host list (the names it lets resolve to private addresses)"
-            )));
-          }
-          if let Some(JailNetConfig::Hosts(hosts)) = &config.net {
-            if hosts.is_empty() {
-              return Err(parse_err(format!(
-                "\"jailScripts.packages\": {name}'s \"net\" is an empty host list; use false for no network"
-              )));
-            }
-            for host in hosts {
-              if !valid_host_entry(host) {
-                return Err(parse_err(format!(
-                  "\"jailScripts.packages\": {name}'s \"net\" lists \"{host}\"; expected a host or host:port, as --allow-net takes"
-                )));
-              }
-            }
-          }
-          for path in &mut config.write {
-            if path.is_relative() && !is_home_relative_path(path) {
-              match &base_dir {
-                Some(base_dir) => *path = base_dir.join(&*path),
-                None => {
-                  return Err(parse_err(format!(
-                    "\"jailScripts.packages\": a relative write path ({}) needs a local deno.json",
-                    path.display()
-                  )));
-                }
-              }
-            }
-          }
-          packages.insert(name, config);
-        }
-        (asks_for_jail.then_some(true), obj.net, packages)
-      }
-    };
-    Ok(SupplyChainConfig {
-      paranoid: raw.paranoid,
-      jail_scripts,
-      jail_net,
-      jail_packages,
-      jail_upstream_by_name,
-      jail_known_packages,
-      advisory_check: raw.advisory_check,
-      low_download_check: raw.low_download_check,
-      low_download_threshold: raw.low_download_threshold,
-      allow_low_downloads: raw.allow_low_downloads,
-    })
+    parse_supply_chain_config(
+      self.json.supply_chain.as_ref(),
+      "supplyChain",
+      base_dir.as_deref(),
+    )
   }
 
   pub fn to_deploy_config(

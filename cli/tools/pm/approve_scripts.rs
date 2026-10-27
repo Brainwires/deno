@@ -7,7 +7,7 @@ use std::sync::Arc;
 use console_static_text::TextItem;
 use deno_config::deno_json::AllowScriptsConfig;
 use deno_config::deno_json::AllowScriptsValueConfig;
-use deno_core::anyhow;
+use deno_config::workspace::SupplyChainSettingsHome;
 use deno_core::anyhow::Context;
 use deno_core::anyhow::bail;
 use deno_core::error::AnyError;
@@ -44,20 +44,33 @@ pub async fn approve_scripts(
 ) -> Result<(), AnyError> {
   let mut factory = CliFactory::from_flags(flags.clone());
   let mut options = factory.cli_options()?;
-  if options.start_dir.member_or_root_deno_json().is_none() {
+  // a package.json project keeps its approvals in package.json's `"deno"`
+  // object: creating a deno.json would take it out of Node.js resolution
+  // (DENEXT.md item 125)
+  if matches!(
+    options.workspace().supply_chain_settings_home(),
+    SupplyChainSettingsHome::None
+  ) {
     factory = create_deno_json(&flags, options)?;
     options = factory.cli_options()?;
   }
-  let deno_json = options.workspace().root_deno_json().ok_or_else(|| {
-    anyhow::anyhow!("A deno.json file could not be found or created")
-  })?;
+  let workspace = options.workspace();
+  let (config_kind, config_path) =
+    match workspace.supply_chain_settings_home() {
+      SupplyChainSettingsHome::DenoJson(deno_json) => {
+        (ConfigKind::DenoJson, url_to_file_path(&deno_json.specifier)?)
+      }
+      SupplyChainSettingsHome::PackageJson(pkg_json) => {
+        (ConfigKind::PackageJson, pkg_json.path.clone())
+      }
+      SupplyChainSettingsHome::None => {
+        bail!("A deno.json file could not be found or created")
+      }
+    };
 
-  let deno_json_path = url_to_file_path(&deno_json.specifier)?;
+  let mut config_updater = ConfigUpdater::new(config_kind, config_path)?;
 
-  let mut config_updater =
-    ConfigUpdater::new(ConfigKind::DenoJson, deno_json_path.clone())?;
-
-  let allow_scripts_config = deno_json.to_allow_scripts_config()?;
+  let allow_scripts_config = workspace.allow_scripts()?;
 
   let (mut allow_list, mut deny_list) = match allow_scripts_config.allow {
     AllowScriptsValueConfig::All => {
