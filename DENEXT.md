@@ -5987,6 +5987,42 @@ The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 146-149) are what the prebuilt `libdenort` carries. The
+
+144. **`chore(deps)`: V8 15.2 (the `v8` crate 152.2.0), and an engine staleness
+     gate** (`chore/v8-bump-denext2`; runtime and CI; `libs/deno_v8`,
+     `libs/core`, `ext/node`, `ext/webgpu`,
+     `.github/denext-runtime/engine_staleness.py`). The runtime was on `v8`
+     150.4.0 (V8 15.0.245.2, 2026-07-24), which gets no upstream V8 fixes any
+     more, so a public JIT or type-confusion bug reachable from untrusted
+     JavaScript could escape the permission sandbox. It now takes `v8` 152.2.0,
+     V8 15.2.124.1: the newest rusty_v8 release (2026-08-20; its `main` still
+     carries 15.2), and the one upstream's open
+     [denoland/deno#36665](https://github.com/denoland/deno/pull/36665) adopts.
+     Its five commits are cherry-picked (`-x`, authors kept): `Global::open` is
+     now `unsafe`, so every call site takes the safe
+     `v8::Local::new(scope, handle)` (this fork's `modules/map/dynamic.rs` too,
+     where its dynamic-import code lives); setter and definer interceptors
+     return `ReturnValue<Boolean>` (a `PropertyInterceptorReturnValue` alias in
+     the facade keeps the QuickJS backend building); `MicrotaskQueue::new`
+     returns an owning handle, which `node:vm` contexts now hold
+     (`OwnedMicrotaskQueue`) instead of leaking; and `--no-validate-asm` is gone
+     from the V8 flags: V8 removed the flag, and an unknown first flag made it
+     drop every flag after it. The heap-limit tests in `libs/core` cap the
+     isolate at 20 MB, since V8 15.2 no longer bootstraps in 5 MB.
+
+     V8 15.2 is still behind Chrome stable (156 on 2026-10-27), so the setup job
+     of `denext_runtime.yml` now runs `engine_staleness.py`: a V8 (Cargo.lock's
+     `v8` crate, whose major is the Chrome milestone) or CEF (laufey's
+     `CEF_FULL_VERSION`) pin more than one Chrome stable major behind is a
+     warning on every run, and fails a release tag while
+     `ENGINE_STALENESS_ENFORCE` is `tag` (`warn` keeps a tag at a warning).
+     Chrome stable comes from Google's versionhistory API; when it can't be
+     reached or read, the gate warns and passes. Covered by
+     `engine_staleness_test.py` (the lint job of `denext_tests.yml`).
+
+The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
+64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
+118, 119, 126, 127, 129, 144) are what the prebuilt `libdenort` carries. The
 CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID`
 into a packaged app's launchers) are in the branch too, but a stock CLI does not
 run them; denext's own launcher provides that environment.
