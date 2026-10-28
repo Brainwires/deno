@@ -2833,7 +2833,7 @@ impl Inner {
       .performance
       .mark_with_args("lsp.code_lens_resolve", &code_lens);
     let result = if code_lens.data.is_some() {
-      code_lens::resolve_code_lens(code_lens, self, token)
+      Box::pin(code_lens::resolve_code_lens(code_lens, self, token))
         .await
         .map_err(|err| {
           if token.is_cancelled() {
@@ -3160,21 +3160,25 @@ impl Inner {
     let Some(module) = self.get_primary_module(&document)? else {
       return Ok(params);
     };
-    let item = self
-      .ts_server
-      .resolve_completion_item(&module, params, data, self.snapshot(), token)
-      .await
-      .map_err(|err| {
-        if token.is_cancelled() {
-          LspError::request_cancelled()
-        } else {
-          error!(
-            "Unable to resolve completion item from TypeScript: {:#}",
-            err
-          );
-          LspError::internal_error()
-        }
-      })?;
+    let item = Box::pin(self.ts_server.resolve_completion_item(
+      &module,
+      params,
+      data,
+      self.snapshot(),
+      token,
+    ))
+    .await
+    .map_err(|err| {
+      if token.is_cancelled() {
+        LspError::request_cancelled()
+      } else {
+        error!(
+          "Unable to resolve completion item from TypeScript: {:#}",
+          err
+        );
+        LspError::internal_error()
+      }
+    })?;
     Ok(item)
   }
 
@@ -4145,12 +4149,7 @@ impl tower_lsp::LanguageServer for LanguageServer {
     token: CancellationToken,
   ) -> LspResult<CodeAction> {
     self.init_flag.wait_raised().await;
-    self
-      .inner
-      .read()
-      .await
-      .code_action_resolve(params, &token)
-      .await
+    Box::pin(self.inner.read().await.code_action_resolve(params, &token)).await
   }
 
   async fn code_lens(
@@ -4168,12 +4167,7 @@ impl tower_lsp::LanguageServer for LanguageServer {
     token: CancellationToken,
   ) -> LspResult<CodeLens> {
     self.init_flag.wait_raised().await;
-    self
-      .inner
-      .read()
-      .await
-      .code_lens_resolve(params, &token)
-      .await
+    Box::pin(self.inner.read().await.code_lens_resolve(params, &token)).await
   }
 
   async fn document_highlight(
@@ -4242,12 +4236,7 @@ impl tower_lsp::LanguageServer for LanguageServer {
     token: CancellationToken,
   ) -> LspResult<CompletionItem> {
     self.init_flag.wait_raised().await;
-    self
-      .inner
-      .read()
-      .await
-      .completion_resolve(params, &token)
-      .await
+    Box::pin(self.inner.read().await.completion_resolve(params, &token)).await
   }
 
   async fn diagnostic(

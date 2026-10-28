@@ -551,12 +551,12 @@ async fn compile_desktop(
   // environment (see `Metadata::desktop_dev`).
   temp_flags.internal.is_desktop_dev = desktop_flags.hmr || inspector_requested;
 
-  let output_path = super::compile::compile_binary(
+  let output_path = Box::pin(super::compile::compile_binary(
     Arc::new(temp_flags),
     compile_flags,
     true,
     None,
-  )
+  ))
   .await?;
 
   // The temp entrypoint is embedded in the compiled dylib's VFS now; nothing

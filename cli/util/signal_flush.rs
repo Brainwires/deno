@@ -100,12 +100,14 @@ pub fn trigger(signal: i32) {
 const GIVE_UP_POLL: Duration = Duration::from_millis(50);
 
 /// Waits until no participant is left, or for `timeout`. Returns whether
-/// every participant finished.
+/// every participant finished. The signal hooks use
+/// [`wait_for_flush_unless`]; this plain wait is for the tests.
+#[cfg(test)]
 pub fn wait_for_flush(timeout: Duration) -> bool {
   wait_for_flush_unless(timeout, || false)
 }
 
-/// Like [`wait_for_flush`], but also stops waiting (returning `false`) once
+/// Like `wait_for_flush`, but also stops waiting (returning `false`) once
 /// `give_up` returns `true`, checked every [`GIVE_UP_POLL`]: the signal
 /// that ends the process arrived again, so whoever sent it wants the process
 /// gone now.

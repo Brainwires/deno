@@ -5971,32 +5971,32 @@ where the changes are discussed.
      V8 15.2.124.1: the newest rusty_v8 release (2026-08-20; its `main` still
      carries 15.2), and the one upstream's open
      [denoland/deno#36665](https://github.com/denoland/deno/pull/36665) adopts.
-     Upstream's five commits and this fork's `dynamic.rs` adaptation land as
-     one squashed commit (author kept, the upstream SHAs in its `cherry picked
-     from` trailer), so every commit on the line builds: `Global::open` is
-     now `unsafe`, so every call site takes the safe
-     `v8::Local::new(scope, handle)` (this fork's `modules/map/dynamic.rs` too,
-     where its dynamic-import code lives); setter and definer interceptors
-     return `ReturnValue<Boolean>` (a `PropertyInterceptorReturnValue` alias in
-     the facade keeps the QuickJS backend building); `MicrotaskQueue::new`
-     returns an owning handle, which `node:vm` contexts now hold
-     (`OwnedMicrotaskQueue`) instead of leaking; and `--no-validate-asm` is gone
-     from the V8 flags: V8 removed the flag, and an unknown first flag made it
-     drop every flag after it. The heap-limit tests in `libs/core` cap the
-     isolate at 20 MB, since V8 15.2 no longer bootstraps in 5 MB.
+     Upstream's five commits and this fork's `dynamic.rs` adaptation land as one
+     squashed commit (author kept, the upstream SHAs listed in its trailer), so
+     every commit on the line builds: `Global::open` is now `unsafe`, so every
+     call site takes the safe `v8::Local::new(scope, handle)` (this fork's
+     `modules/map/dynamic.rs` too, where its dynamic-import code lives); setter
+     and definer interceptors return `ReturnValue<Boolean>` (a
+     `PropertyInterceptorReturnValue` alias in the facade keeps the QuickJS
+     backend building); `MicrotaskQueue::new` returns an owning handle, which
+     `node:vm` contexts now hold (`OwnedMicrotaskQueue`) instead of leaking; and
+     `--no-validate-asm` is gone from the V8 flags: V8 removed the flag, and an
+     unknown first flag made it drop every flag after it. The heap-limit tests
+     in `libs/core` cap the isolate at 20 MB, since V8 15.2 no longer bootstraps
+     in 5 MB.
 
      V8 15.2 is still behind Chrome stable (156 on 2026-10-27), so the setup job
      of `denext_runtime.yml` now runs `engine_staleness.py`: a V8 (Cargo.lock's
      `v8` crate, whose major is the Chrome milestone) or CEF (laufey's
      `CEF_FULL_VERSION`) pin more than one Chrome stable major behind is a
      warning on every run, and fails a release tag while
-     `ENGINE_STALENESS_ENFORCE` is `tag` (`warn` keeps a tag at a warning).
-     The workflow sets `warn` for now: rusty_v8 152.2.0 is the newest release
-     there is, so `tag` would refuse every tag today; set it back to `tag` once
-     a newer rusty_v8 can be taken.
-     Chrome stable comes from Google's versionhistory API; when it can't be
-     reached or read, the gate warns and passes. Covered by
-     `engine_staleness_test.py` (the lint job of `denext_tests.yml`).
+     `ENGINE_STALENESS_ENFORCE` is `tag` (`warn` keeps a tag at a warning). The
+     workflow sets `warn` for now: rusty_v8 152.2.0 is the newest release there
+     is, so `tag` would refuse every tag today; set it back to `tag` once a
+     newer rusty_v8 can be taken. Chrome stable comes from Google's
+     versionhistory API; when it can't be reached or read, the gate warns and
+     passes. Covered by `engine_staleness_test.py` (the lint job of
+     `denext_tests.yml`).
 
 151. **`ci`: the Linux `deno` and `denort` run on glibc 2.27**
      (`feat/glibc-ceiling`, CI only; `denext_runtime.yml`,
@@ -6095,9 +6095,9 @@ localStorage commit gate, KWin's blur, the XCB clipboard and Linux passkeys
 through libwebauthn (item 88); and, for runtime 3.0.0-denext.2, legacy Linux
 secure-store items read over an encrypted Secret Service session (laufey
 879ee0e) and tokio 1.53.3 with laufey's own `.cargo/audit.toml`), at the commit
-pinned by `LAUFEY_SHA` in the
-workflow (or the `laufey_ref` input). The same commit is the `laufey` git
-dependency of `cli/rt_desktop/Cargo.toml` (crate 0.8.0, API 49, CEF 150.0.21).
+pinned by `LAUFEY_SHA` in the workflow (or the `laufey_ref` input). The same
+commit is the `laufey` git dependency of `cli/rt_desktop/Cargo.toml` (crate
+0.8.0, API 49, CEF 150.0.21).
 
 laufey's `init_api` rejects any C ABI version mismatch between the runtime and
 the host, so the `laufey` crate libdenort links and the hosts are built from the

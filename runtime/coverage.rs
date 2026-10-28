@@ -214,6 +214,10 @@ mod tests {
   // A coverage file is renamed into place once written, so the directory
   // only ever holds whole `.json` files (and no temporary file is left).
   #[test]
+  #[allow(
+    clippy::disallowed_methods,
+    reason = "the test reads the real directory the collector wrote to"
+  )]
   fn coverage_files_are_written_whole() {
     let dir = tempfile::tempdir().unwrap();
     let state = CoverageCollectorState::new(dir.path().to_path_buf());

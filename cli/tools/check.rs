@@ -380,12 +380,12 @@ async fn run_native_check_once(
     log::debug!("Reusing the generated project (native tsc)");
   } else {
     let quiet = deno_lib::util::logger::quiet_below_error();
-    let sync_result = crate::tools::installer::sync_types_command(
+    let sync_result = Box::pin(crate::tools::installer::sync_types_command(
       flags.clone(),
       SyncTypesFlags { roots: sync_roots },
       crate::tools::installer::RootTsConfigMode::CheckMode,
       extra_specifiers,
-    )
+    ))
     .await;
     drop(quiet);
     sync_result?;

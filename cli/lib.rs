@@ -247,12 +247,12 @@ async fn run_subcommand(
       tools::installer::ci_command(Arc::new(flags), ci_flags).await
     }),
     DenoSubcommand::SyncTypes(sync_types_flags) => spawn_subcommand(async {
-      tools::installer::sync_types_command(
+      Box::pin(tools::installer::sync_types_command(
         Arc::new(flags),
         sync_types_flags,
         tools::installer::sync_types_root_tsconfig_mode(),
         tools::installer::sync_types_extra_specifiers_from_env(),
-      )
+      ))
       .await
     }),
     DenoSubcommand::JSONReference(json_reference) => {
@@ -511,7 +511,7 @@ async fn run_subcommand(
     }),
     #[cfg(feature = "upgrade")]
     DenoSubcommand::Upgrade(upgrade_flags) => spawn_subcommand(async {
-      tools::upgrade::upgrade(Arc::new(flags), upgrade_flags).await
+      Box::pin(tools::upgrade::upgrade(Arc::new(flags), upgrade_flags)).await
     }),
     #[cfg(not(feature = "upgrade"))]
     DenoSubcommand::Upgrade(_) => exit_with_message(
