@@ -143,7 +143,7 @@ imara-diff.workspace = true
 import_map.workspace = true
 indexmap.workspace = true
 jsonc-parser = { workspace = true, features = ["cst", "serde"] }
-keyring = { version = "3.6.3", features = ["apple-native", "sync-secret-service", "windows-native", "vendored"] }
+keyring = { version = "3.6.3", features = ["apple-native", "sync-secret-service", "crypto-rust", "windows-native", "vendored"] }
 lax-css.workspace = true
 lax-markup.workspace = true
 lax-sql.workspace = true
@@ -216,6 +216,11 @@ deno_subprocess_windows.workspace = true
 nix.workspace = true
 [target.'cfg(any(target_os = "android", target_os = "linux", target_os = "macos"))'.dependencies]
 tokio-vsock.workspace = true
+
+# The stand-in Secret Service of tools::deploy's keyring session test (the
+# same dbus crate keyring's Secret Service backend uses).
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+dbus = "0.9.7"
 
 [dev-dependencies]
 # unsafe_use_unprotected_platform is a workaround for a segfault that may occur
