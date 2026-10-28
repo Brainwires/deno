@@ -5333,6 +5333,21 @@ where the changes are discussed.
      `notificationresponse` when no `close` came, and still fails when neither a
      click nor a response ever arrives.
 
+     Two more e2e harness fixes from the same round (run 40608590678):
+     - **WebView2 has no response backpressure.** The `origin` check "a stream
+       the page stops reading is held back" is now expected n/a on both Windows
+       webview legs, as it already was on Linux webview. WebView2 requires a
+       custom-scheme response stream to have all its content by the time the
+       WebResourceRequested deferral completes, so the engine reads the whole
+       response itself (76 MB read while the page held 1.2 MB); laufey's
+       high-water mark bounds only its own queue. CEF keeps the check.
+     - **The locked-keyring session raced the bus.** `e2e/linux/session.sh`
+       asked `org.freedesktop.secrets` for the default collection's `Locked`
+       before its own gnome-keyring owned the name, so the bus activated the
+       host's gnome-keyring (no login keyring there) and the setup exited 1
+       without a message. It now waits for `NameHasOwner` first and prints an
+       `::error::` when the session can't start.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129) are what the prebuilt `libdenort` carries. The CLI-side

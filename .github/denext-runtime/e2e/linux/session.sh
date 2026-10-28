@@ -42,16 +42,33 @@ if [ "${E2E_SECRET_SERVICE:-}" = locked ]; then
   "${kr_env[@]}" gnome-keyring-daemon --foreground --components=secrets \
     </dev/null >"${E2E_LOG_DIR:-/tmp}/keyring.log" 2>&1 &
   keyring=$!
-  locked=
+  # Wait for this daemon to own the name before asking it anything: a
+  # get-property on an unowned name makes the bus activate the host's own
+  # gnome-keyring (its default XDG dirs, no login keyring), which then holds
+  # the name and answers "unknown".
+  owned=
   for _ in $(seq 1 50); do
-    locked=$(busctl --user get-property org.freedesktop.secrets \
-      /org/freedesktop/secrets/aliases/default \
-      org.freedesktop.Secret.Collection Locked 2>/dev/null || true)
-    [ -n "$locked" ] && break
+    owned=$(busctl --user call org.freedesktop.DBus /org/freedesktop/DBus \
+      org.freedesktop.DBus NameHasOwner s org.freedesktop.secrets 2>/dev/null || true)
+    [ "$owned" = "b true" ] && break
     sleep 0.2
   done
+  locked=
+  if [ "$owned" = "b true" ]; then
+    for _ in $(seq 1 50); do
+      locked=$(busctl --user get-property org.freedesktop.secrets \
+        /org/freedesktop/secrets/aliases/default \
+        org.freedesktop.Secret.Collection Locked 2>/dev/null || true)
+      [ -n "$locked" ] && break
+      sleep 0.2
+    done
+  fi
   echo "secret service: gnome-keyring, default collection Locked: ${locked:-unknown}"
-  [ "$locked" = "b true" ] || { kill "$keyring" "$ns" "$wm" 2>/dev/null; exit 1; }
+  [ "$locked" = "b true" ] || {
+    echo "::error::the locked-keyring session did not start (name owned: ${owned:-no}, Locked: ${locked:-unknown}); see keyring.log" >&2
+    kill "$keyring" "$ns" "$wm" 2>/dev/null
+    exit 1
+  }
 fi
 
 status=0
