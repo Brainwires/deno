@@ -14,6 +14,12 @@
 //!
 //! A thread stuck in synchronous JavaScript cannot be reached: its data is
 //! lost, and the process ends once the timeout passes.
+//!
+//! The wait blocks the thread that handles signals, so the same signal
+//! arriving again (a second Ctrl+C, a second SIGTERM) can't be handled until
+//! it ends. The wait watches [`deno_signals::arrival_count`] instead and
+//! gives up as soon as the signal arrives again, so the default action ends
+//! the process at once.
 
 use std::sync::Condvar;
 use std::sync::LazyLock;
@@ -50,8 +56,11 @@ pub fn install() {
       let result = deno_signals::register_before_default_action(
         signal,
         Box::new(move || {
+          let arrived = deno_signals::arrival_count(signal);
           trigger(signal);
-          wait_for_flush(FLUSH_TIMEOUT);
+          wait_for_flush_unless(FLUSH_TIMEOUT, || {
+            deno_signals::arrival_count(signal) != arrived
+          });
         }),
       );
       if let Err(err) = result {
@@ -85,17 +94,34 @@ pub fn trigger(signal: i32) {
   });
 }
 
+/// How often a wait checks whether it should give up early (see
+/// [`wait_for_flush_unless`]). A signal handler can't wake a condition
+/// variable (that isn't async-signal-safe), so the wait polls.
+const GIVE_UP_POLL: Duration = Duration::from_millis(50);
+
 /// Waits until no participant is left, or for `timeout`. Returns whether
 /// every participant finished.
 pub fn wait_for_flush(timeout: Duration) -> bool {
+  wait_for_flush_unless(timeout, || false)
+}
+
+/// Like [`wait_for_flush`], but also stops waiting (returning `false`) once
+/// `give_up` returns `true`, checked every [`GIVE_UP_POLL`]: the signal
+/// that ends the process arrived again, so whoever sent it wants the process
+/// gone now.
+pub fn wait_for_flush_unless(
+  timeout: Duration,
+  give_up: impl Fn() -> bool,
+) -> bool {
   let deadline = Instant::now() + timeout;
   let mut active = STATE.active.lock().unwrap();
   while *active > 0 {
     let now = Instant::now();
-    if now >= deadline {
+    if now >= deadline || give_up() {
       return false;
     }
-    active = STATE.idle.wait_timeout(active, deadline - now).unwrap().0;
+    let slice = (deadline - now).min(GIVE_UP_POLL);
+    active = STATE.idle.wait_timeout(active, slice).unwrap().0;
   }
   true
 }
@@ -173,5 +199,28 @@ mod tests {
     // A participant joining after the signal is signalled at once.
     let mut late = Participant::join();
     assert_eq!(late.signalled().await, 15);
+
+    // The signal arriving again ends the wait early, without the participant.
+    let again = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let waiter = {
+      let again = again.clone();
+      std::thread::spawn(move || {
+        let start = Instant::now();
+        let flushed = wait_for_flush_unless(Duration::from_secs(10), || {
+          again.load(std::sync::atomic::Ordering::Relaxed)
+        });
+        (flushed, start.elapsed())
+      })
+    };
+    std::thread::sleep(Duration::from_millis(100));
+    assert!(!waiter.is_finished());
+    again.store(true, std::sync::atomic::Ordering::Relaxed);
+    let (flushed, elapsed) = waiter.join().unwrap();
+    assert!(!flushed);
+    assert!(elapsed < Duration::from_secs(5), "{elapsed:?}");
+
+    // Nothing to give up on when every participant is done.
+    drop(late);
+    assert!(wait_for_flush_unless(Duration::from_secs(10), || true));
   }
 }

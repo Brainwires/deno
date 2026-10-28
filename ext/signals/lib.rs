@@ -108,6 +108,42 @@ pub fn delivery_count(signal: i32) -> u32 {
     .unwrap_or(0)
 }
 
+// denext: how many times each signal arrived at all, counted the moment it
+// arrives: on Unix in the signal handler itself (an atomic increment is
+// async-signal-safe), on Windows when the console control handler is called.
+// Unlike `DELIVERY_COUNTS`, which the signal thread updates when it gets to a
+// signal, this keeps counting while that thread is busy (a hook from
+// `register_before_default_action` that waits), so a hook can tell that the
+// signal it is handling arrived again (a second Ctrl+C). Self-sent signals
+// are counted too.
+static ARRIVAL_COUNTS: [AtomicU32; DELIVERY_COUNTS_LEN] =
+  [const { AtomicU32::new(0) }; DELIVERY_COUNTS_LEN];
+
+fn count_arrival(signal: i32) {
+  if let Some(count) = usize::try_from(signal)
+    .ok()
+    .and_then(|index| ARRIVAL_COUNTS.get(index))
+  {
+    count.fetch_add(1, Ordering::Relaxed);
+  }
+}
+
+/// denext: the number of times `signal` has arrived since Deno started
+/// listening for it, counted as it arrives, also while the signal thread is
+/// busy running an earlier delivery's hooks (see
+/// [`register_before_default_action`]). A hook compares it with the value it
+/// saw when it started to tell that the signal came again, e.g. a second
+/// Ctrl+C, and stop waiting. Counted for SIGHUP, SIGTERM and SIGINT (and on
+/// Windows every console control event Deno maps to a signal); 0 for other
+/// signals.
+pub fn arrival_count(signal: i32) -> u32 {
+  usize::try_from(signal)
+    .ok()
+    .and_then(|index| ARRIVAL_COUNTS.get(index))
+    .map(|count| count.load(Ordering::Relaxed))
+    .unwrap_or(0)
+}
+
 #[cfg(unix)]
 fn is_terminating_signal(signal: i32) -> bool {
   signal == SIGHUP || signal == SIGTERM || signal == SIGINT
@@ -227,6 +263,20 @@ fn init() -> Handle {
   .unwrap();
   let handle = signals.handle();
 
+  // denext: count each arrival in the signal handler itself (see
+  // `ARRIVAL_COUNTS`), so it is seen even while the signal thread below is
+  // blocked in a hook.
+  for signal in [SIGHUP, SIGTERM, SIGINT] {
+    // SAFETY: the action only does an atomic increment, which is
+    // async-signal-safe, and none of these signals is forbidden.
+    // Registering can't fail for these signals (they aren't forbidden, and
+    // `SignalDelivery` above already installed a handler for them); if it
+    // did, a hook would only miss a repeated signal and wait as before.
+    let _ = unsafe {
+      signal_hook::low_level::register(signal, move || count_arrival(signal))
+    };
+  }
+
   std::thread::spawn(move || {
     loop {
       match signals.poll_pending(&mut has_signals) {
@@ -298,6 +348,7 @@ fn init() -> Handle {
       6 => SIGTERM,
       _ => return 0,
     };
+    count_arrival(signal);
     count_delivery(signal);
     let handled = handle_signal(signal);
     handled as _
@@ -731,6 +782,60 @@ mod tests {
     unregister_before_default_action(signal, hook);
     assert!(!raise(signal));
     assert!(rx.recv_timeout(Duration::from_millis(100)).is_err());
+  }
+
+  // A hook that waits (the coverage flush) blocks the signal thread, so a
+  // second Ctrl+C or SIGTERM is not handled until the hook returns. Its
+  // arrival is still counted as it arrives, which is how the hook can tell
+  // that the signal came again and stop waiting.
+  #[test]
+  fn arrivals_are_counted_while_the_signal_thread_is_busy() {
+    let _serial = serial();
+    let signal = SIGTERM;
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let release_rx = Mutex::new(release_rx);
+    // A listener that takes the signal over (so the test process survives)
+    // and holds the signal thread until released, like a waiting hook.
+    let id = register(
+      signal,
+      true,
+      Box::new(move || {
+        let _ = entered_tx.send(());
+        let _ = release_rx
+          .lock()
+          .unwrap()
+          .recv_timeout(Duration::from_secs(10));
+      }),
+    )
+    .unwrap();
+    let arrived = arrival_count(signal);
+    let delivered = delivery_count(signal);
+
+    kill_from_another_process(signal);
+    entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert_eq!(arrival_count(signal), arrived + 1);
+
+    // The signal thread is busy in the listener: the second delivery is
+    // counted as it arrives, but not handled yet.
+    kill_from_another_process(signal);
+    wait_until("the second arrival", || {
+      arrival_count(signal) == arrived + 2
+    });
+    assert_eq!(delivery_count(signal), delivered + 1);
+
+    release_tx.send(()).unwrap();
+    entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    release_tx.send(()).unwrap();
+    wait_until("the second delivery", || {
+      delivery_count(signal) == delivered + 2
+    });
+    // A synthetic signal does not arrive from anywhere.
+    release_tx.send(()).unwrap();
+    assert!(raise(signal));
+    assert_eq!(arrival_count(signal), arrived + 2);
+
+    unregister(signal, id);
   }
 
   // A hook runs with no lock held: while it waits, another thread can still

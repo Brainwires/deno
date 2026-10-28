@@ -31,6 +31,23 @@
       "if": "unix",
       "args": "run -A kill_and_count.ts SIGINT test hanging_test.ts",
       "output": "test_sigint.out"
+    },
+    // The flush waits up to 10 s for a thread stuck in synchronous code; the
+    // same signal arriving again ends the wait, and the process, at once.
+    "run_sigterm_twice": {
+      "if": "unix",
+      "args": "run -A kill_twice.ts SIGTERM run busy.ts",
+      "output": "run_sigterm_twice.out"
+    },
+    "run_sigint_twice": {
+      "if": "unix",
+      "args": "run -A kill_twice.ts SIGINT run busy.ts",
+      "output": "run_sigint_twice.out"
+    },
+    "test_sigint_twice": {
+      "if": "unix",
+      "args": "run -A kill_twice.ts SIGINT test busy_test.ts",
+      "output": "test_sigint_twice.out"
     }
   }
 }

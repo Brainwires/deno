@@ -1,0 +1,3 @@
+signal: SIGTERM
+code: 143
+ended before the flush timeout: true

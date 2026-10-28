@@ -2018,10 +2018,12 @@ pub async fn report_tests(
           eprint!("Test reporter failed to flush: {}", err)
         }
         // denext: the test workers write their coverage first
-        // (denoland/deno#32362).
+        // (denoland/deno#32362), unless Ctrl+C comes again meanwhile.
+        let arrived = deno_signals::arrival_count(deno_signals::SIGINT);
         crate::util::signal_flush::trigger(deno_signals::SIGINT);
-        crate::util::signal_flush::wait_for_flush(
+        crate::util::signal_flush::wait_for_flush_unless(
           crate::util::signal_flush::FLUSH_TIMEOUT,
+          || deno_signals::arrival_count(deno_signals::SIGINT) != arrived,
         );
         #[allow(
           clippy::disallowed_methods,

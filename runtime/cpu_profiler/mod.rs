@@ -5,9 +5,6 @@ mod flamegraph;
 
 use std::cell::RefCell;
 use std::fs;
-use std::fs::File;
-use std::io::BufWriter;
-use std::io::Write;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -64,6 +61,8 @@ use deno_core::SourceMapper;
 use deno_core::error::CoreError;
 use deno_core::parking_lot::Mutex;
 use deno_core::serde_json;
+use deno_path_util::fs::atomic_write_file_with_retries;
+use sys_traits::impls::RealSys;
 
 static NEXT_MSG_ID: AtomicI32 = AtomicI32::new(0);
 
@@ -145,19 +144,6 @@ impl CpuProfilerState {
     let inner = self.0.lock();
     let filepath = inner.dir.join(&inner.filename);
 
-    let file = match File::create(&filepath) {
-      Ok(f) => f,
-      Err(err) => {
-        log::error!(
-          "Failed to create CPU profile file at {:?}, reason: {:?}",
-          filepath,
-          err
-        );
-        return;
-      }
-    };
-
-    let mut out = BufWriter::new(file);
     let profile_str = match serde_json::to_string_pretty(&profile) {
       Ok(s) => s,
       Err(err) => {
@@ -166,21 +152,21 @@ impl CpuProfilerState {
       }
     };
 
-    if let Err(err) = out.write_all(profile_str.as_bytes()) {
+    // denext: written to a temporary file and renamed into place, so a
+    // process ended while it writes (a signal's flush that ran out of time,
+    // see `cli/util/signal_flush.rs`) leaves the whole profile or none.
+    if let Err(err) = atomic_write_file_with_retries(
+      &RealSys,
+      &filepath,
+      profile_str.as_bytes(),
+      0o666,
+    ) {
       log::error!(
         "Failed to write CPU profile file at {:?}, reason: {:?}",
         filepath,
         err
       );
       return;
-    }
-
-    if let Err(err) = out.flush() {
-      log::error!(
-        "Failed to flush CPU profile file at {:?}, reason: {:?}",
-        filepath,
-        err
-      );
     }
 
     // Generate markdown report if requested

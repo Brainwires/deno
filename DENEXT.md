@@ -5348,6 +5348,44 @@ where the changes are discussed.
        without a message. It now waits for `NameHasOwner` first and prints an
        `::error::` when the session can't start.
 
+136. **`fix(coverage)`: a second Ctrl+C or SIGTERM ends a coverage flush at
+     once, and coverage files are written whole**
+     (`fix/prod-robustness-denext2`, CLI and runtime; `ext/signals/lib.rs`,
+     `cli/util/signal_flush.rs`, `cli/tools/test/mod.rs`, `runtime/coverage.rs`,
+     `runtime/cpu_profiler/mod.rs`). Item 112's hook waits up to 10 s for the
+     coverage flush on the one thread that handles signals, so a second Ctrl+C
+     or SIGTERM during the wait was not handled until it ended: a hung
+     `--coverage` run could only be stopped sooner by SIGKILL. When the wait ran
+     out, the process ended while a coverage file might be half written
+     (`File::create` + `write_all`), and `deno coverage` then failed on the
+     whole directory over one truncated `.json`.
+     - **`deno_signals::arrival_count`**: SIGHUP, SIGTERM and SIGINT are now
+       also counted the moment they arrive, in the signal handler itself (an
+       atomic increment, async-signal-safe; on Windows when the console control
+       handler is called), so the count moves while the signal thread is blocked
+       in a hook. The hook notes the count when it starts and
+       `wait_for_flush_unless` gives up (checked every 50 ms: a signal handler
+       can't wake a condition variable) once it changes; the default action then
+       ends the process. The test runner's own SIGINT report waits the same way.
+       Two signals that both arrive before the signal thread reads the first one
+       still wait the full 10 s (the count already includes the second), as
+       before.
+     - Coverage files and `--cpu-prof` profiles are written to a temporary file
+       in the same directory and renamed into place
+       (`deno_path_util::fs::atomic_write_file_with_retries`); the temporary
+       file ends in `.tmp`, which `deno coverage` doesn't read. A process ended
+       mid-write leaves the whole file or none.
+
+     Tests: spec `coverage/signal_flush` `run_sigterm_twice`,
+     `run_sigint_twice`, `test_sigint_twice` (Unix: a program stuck in
+     synchronous code, signalled twice a second apart, ends by the signal in
+     well under the 10 s timeout, and every `.json` left parses);
+     `arrivals_are_counted_while_the_signal_thread_is_busy`
+     (`ext/signals/lib.rs`); the early give-up in
+     `participants_flush_before_the_signal_returns`
+     (`cli/util/signal_flush.rs`); `coverage_files_are_written_whole`
+     (`runtime/coverage.rs`).
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129) are what the prebuilt `libdenort` carries. The CLI-side

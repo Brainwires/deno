@@ -1,9 +1,6 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 
 use std::fs;
-use std::fs::File;
-use std::io::BufWriter;
-use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicI32;
@@ -16,6 +13,8 @@ use deno_core::error::CoreError;
 use deno_core::parking_lot::Mutex;
 use deno_core::serde_json;
 use deno_core::url::Url;
+use deno_path_util::fs::atomic_write_file_with_retries;
+use sys_traits::impls::RealSys;
 use uuid::Uuid;
 
 static NEXT_MSG_ID: AtomicI32 = AtomicI32::new(0);
@@ -76,31 +75,20 @@ impl CoverageCollectorState {
       let filename = format!("{}.json", Uuid::new_v4());
       let filepath = self.0.lock().dir.join(filename);
 
-      let file = match File::create(&filepath) {
-        Ok(f) => f,
-        Err(err) => {
-          log::error!(
-            "Failed to create coverage file at {:?}, reason: {:?}",
-            filepath,
-            err
-          );
-          continue;
-        }
-      };
-      let mut out = BufWriter::new(file);
       let coverage = serde_json::to_string_pretty(&script_coverage).unwrap();
-
-      if let Err(err) = out.write_all(coverage.as_bytes()) {
+      // denext: written to a temporary file and renamed into place, so a
+      // process ended while it writes (a signal's flush that ran out of time,
+      // see `cli/util/signal_flush.rs`) leaves either the whole file or none,
+      // never a truncated `.json` that `deno coverage` can't parse. The
+      // temporary file ends in `.tmp`, which `deno coverage` doesn't read.
+      if let Err(err) = atomic_write_file_with_retries(
+        &RealSys,
+        &filepath,
+        coverage.as_bytes(),
+        0o666,
+      ) {
         log::error!(
           "Failed to write coverage file at {:?}, reason: {:?}",
-          filepath,
-          err
-        );
-        continue;
-      }
-      if let Err(err) = out.flush() {
-        log::error!(
-          "Failed to flush coverage file at {:?}, reason: {:?}",
           filepath,
           err
         );
@@ -216,5 +204,42 @@ mod cdp {
     pub call_count: bool,
     pub detailed: bool,
     pub allow_triggered_updates: bool,
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  // A coverage file is renamed into place once written, so the directory
+  // only ever holds whole `.json` files (and no temporary file is left).
+  #[test]
+  fn coverage_files_are_written_whole() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = CoverageCollectorState::new(dir.path().to_path_buf());
+    state.write_coverages(vec![
+      cdp::ScriptCoverage {
+        script_id: "1".to_string(),
+        url: "file:///a.ts".to_string(),
+        functions: vec![],
+      },
+      // Not written: internal.
+      cdp::ScriptCoverage {
+        script_id: "2".to_string(),
+        url: "ext:core/a.js".to_string(),
+        functions: vec![],
+      },
+    ]);
+    let names = std::fs::read_dir(dir.path())
+      .unwrap()
+      .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+      .collect::<Vec<_>>();
+    assert_eq!(names.len(), 1, "{names:?}");
+    assert!(names[0].ends_with(".json"), "{names:?}");
+    let written: cdp::ScriptCoverage = serde_json::from_str(
+      &std::fs::read_to_string(dir.path().join(&names[0])).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(written.url, "file:///a.ts");
   }
 }
