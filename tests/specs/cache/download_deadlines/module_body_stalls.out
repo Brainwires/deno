@@ -1,0 +1,7 @@
+Download http://localhost:4545/download_deadlines/stall_body/mod.ts
+error: [WILDCARD]Timed out downloading 'http://localhost:4545/download_deadlines/stall_body/mod.ts' (3 attempts, each on a new connection):
+    attempt 1: no data received for 1s (DENO_DOWNLOAD_IDLE_TIMEOUT_MS)
+    attempt 2: no data received for 1s (DENO_DOWNLOAD_IDLE_TIMEOUT_MS)
+    attempt 3: no data received for 1s (DENO_DOWNLOAD_IDLE_TIMEOUT_MS)
+    (set DENO_DOWNLOAD_ATTEMPTS or the deadline variables to change this, 0 for no deadline)
+[WILDCARD]

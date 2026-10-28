@@ -200,6 +200,7 @@ pub struct PermissionedHttpConnector {
   local_address: Option<IpAddr>,
   permissions: Option<PermissionsContainer>,
   deny_check_kind: ResolvedDenyCheckKind,
+  connect_timeout: Option<std::time::Duration>,
 }
 
 impl PermissionedHttpConnector {
@@ -214,7 +215,17 @@ impl PermissionedHttpConnector {
       local_address,
       permissions,
       deny_check_kind,
+      connect_timeout: None,
     }
+  }
+
+  /// Gives up on a TCP connect after `timeout` (`None`: the OS's own).
+  pub fn with_connect_timeout(
+    mut self,
+    timeout: Option<std::time::Duration>,
+  ) -> Self {
+    self.connect_timeout = timeout;
+    self
   }
 
   fn http_connector(&self, resolver: Resolver) -> HttpConnector<Resolver> {
@@ -224,6 +235,7 @@ impl PermissionedHttpConnector {
     connector.set_keepalive(Some(TCP_KEEPALIVE_TIME));
     connector.set_keepalive_interval(Some(TCP_KEEPALIVE_INTERVAL));
     connector.set_keepalive_retries(Some(TCP_KEEPALIVE_RETRIES));
+    connector.set_connect_timeout(self.connect_timeout);
     connector
   }
 }

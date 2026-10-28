@@ -50,6 +50,31 @@ pub static ENV_VARS: &[EnvVar] = &[
     example: None,
   },
   EnvVar {
+    name: "DENO_DOWNLOAD_ATTEMPTS",
+    description: "How many times a module, npm or JSR download is tried, each retry\non a new connection.",
+    example: Some("(defaults to 4)"),
+  },
+  EnvVar {
+    name: "DENO_DOWNLOAD_CONNECT_TIMEOUT_MS",
+    description: "Milliseconds a download's TCP connect may take before it is retried.\n0 disables the deadline.",
+    example: Some("(defaults to 10000)"),
+  },
+  EnvVar {
+    name: "DENO_DOWNLOAD_IDLE_TIMEOUT_MS",
+    description: "Milliseconds a download's body may go without data before it is\nretried. 0 disables the deadline.",
+    example: Some("(defaults to 20000)"),
+  },
+  EnvVar {
+    name: "DENO_DOWNLOAD_RESPONSE_TIMEOUT_MS",
+    description: "Milliseconds a download waits for the response headers before it is\nretried. 0 disables the deadline.",
+    example: Some("(defaults to 15000)"),
+  },
+  EnvVar {
+    name: "DENO_DOWNLOAD_TOTAL_TIMEOUT_MS",
+    description: "Milliseconds after a download's first attempt when no new attempt\nstarts; an attempt still receiving data is never cut off. 0 disables it.",
+    example: Some("(defaults to 120000)"),
+  },
+  EnvVar {
     name: "DENO_INSTALL_ROOT",
     description: "Set deno install's output directory",
     example: Some("(defaults to $HOME/.deno/bin)"),

@@ -358,6 +358,7 @@ pub fn create_client_from_options(
       local_address: None,
       client_builder_hook: options.client_builder_hook,
       http2_max_header_list_size: None,
+      connect_timeout: None,
     },
   )
 }
@@ -963,6 +964,7 @@ pub fn op_fetch_custom_client(
       local_address: args.local_address,
       client_builder_hook: options.client_builder_hook,
       http2_max_header_list_size: args.http2_max_header_list_size,
+      connect_timeout: None,
     },
   )?;
 
@@ -993,6 +995,10 @@ pub struct CreateHttpClientOptions {
   pub local_address: Option<String>,
   pub client_builder_hook: Option<fn(HyperClientBuilder) -> HyperClientBuilder>,
   pub http2_max_header_list_size: Option<u32>,
+  /// How long a TCP connect may take (hyper-util's
+  /// `HttpConnector::set_connect_timeout`, split across the addresses a name
+  /// resolves to). `None`, the default, waits for the OS.
+  pub connect_timeout: Option<std::time::Duration>,
 }
 
 impl Default for CreateHttpClientOptions {
@@ -1013,6 +1019,7 @@ impl Default for CreateHttpClientOptions {
       local_address: None,
       client_builder_hook: None,
       http2_max_header_list_size: None,
+      connect_timeout: None,
     }
   }
 }
@@ -1093,7 +1100,8 @@ pub fn create_http_client(
     local_address,
     options.permissions,
     options.resolved_deny_check_kind,
-  );
+  )
+  .with_connect_timeout(options.connect_timeout);
 
   let user_agent = user_agent.parse::<HeaderValue>().map_err(|_| {
     HttpClientCreateError::InvalidUserAgent(user_agent.to_string())

@@ -5653,6 +5653,82 @@ where the changes are discussed.
      electron-updater checks code signatures on macOS and Windows only
      ([electron-builder: auto update](https://www.electron.build/auto-update)).
 
+<!-- 136-146 are held by unmerged branches; renumber at integration. -->
+
+147. **`fix(http)`: the CLI's downloads give up on a stalled connection and
+     retry on a new one** (`fix/download-deadlines-denext2`, CLI only;
+     `cli/http_util.rs`, `cli/util/download_deadline.rs`, `cli/file_fetcher.rs`,
+     `cli/npm.rs`, `ext/fetch/{lib,dns}.rs`, `libs/cli_parser/src/env_vars.rs`).
+     Every download the CLI makes (npm packuments and tarballs, JSR and remote
+     modules, the denort of `deno compile`, `deno upgrade`, `deno desktop`'s
+     runtime) runs on a deno_fetch client whose only timeout is
+     `pool_idle_timeout`, and was retried only after an error response. A
+     registry that accepted a request and never answered, or stopped halfway
+     through a body, held `deno install` / `deno cache` forever: denext's e2e
+     sat silent for 10 minutes after about 606 `Download` lines (run
+     40657805948), and a `deno cache` of a JSR module ran 551 s until a test
+     watchdog killed it (run 40657792784). A stalled connection almost never
+     recovers, and a new one usually answers at once, so each stage now has a
+     short deadline and a download retries on a new connection:
+     - **connect** (`DENO_DOWNLOAD_CONNECT_TIMEOUT_MS`, 10000): the TCP connect,
+       set on the client's connector (hyper-util's `set_connect_timeout` through
+       a new `CreateHttpClientOptions::connect_timeout`, `None` for every other
+       client);
+     - **response** (`DENO_DOWNLOAD_RESPONSE_TIMEOUT_MS`, 15000): from sending
+       each request (and each redirect hop) to its response headers;
+     - **idle** (`DENO_DOWNLOAD_IDLE_TIMEOUT_MS`, 20000): the longest gap
+       between two reads of the body. It measures gaps, not the total, so a
+       large tarball over a slow link keeps going as long as data arrives;
+     - **attempts** (`DENO_DOWNLOAD_ATTEMPTS`, 4) with exponential backoff from
+       250 ms (capped at 4 s) and equal jitter, and **total**
+       (`DENO_DOWNLOAD_TOTAL_TIMEOUT_MS`, 120000): no new attempt starts once
+       that much time has passed since the first. It never cuts off an attempt
+       that is still receiving data.
+
+     `0` turns a deadline off; a value that isn't a whole number keeps the
+     default. All five are listed in `deno --help`.
+     - **A retry after a stalled or broken connection runs on a new one.** The
+       provider's client is now replaceable (`ClientPool`): the first request to
+       hit a deadline on it replaces it, and with it its connection pool, so its
+       retry, the retries of every other request that was in flight on the same
+       HTTP/2 connection (each fails over on its own deadline), and every later
+       request open one new connection instead of queueing on the dead one. The
+       module loader's `HttpClient::send` path does the same.
+     - **The final error lists every attempt**:
+       `Timed out downloading '<url>'
+       (4 attempts, each on a new connection):`
+       then one line per attempt with the deadline that fired
+       (`no response within 15s
+       (DENO_DOWNLOAD_RESPONSE_TIMEOUT_MS)`,
+       `no data received for 20s`, `could not connect within 10s`) or the error,
+       and whether the total budget stopped the retries. When no attempt hit a
+       deadline (only error responses), the first error is returned as before.
+     - `download()` (used for lookups such as `deno upgrade`'s version checks)
+       retries only connection failures and deadlines, not error responses.
+     - The client is built as before apart from the connect timeout, so proxies,
+       `--cert`, `DENO_TLS_CA_STORE` and `--unsafely-ignore-certificate-errors`
+       are unchanged. Web `fetch()` in programs is not affected.
+       `cli/util/retry.rs` is gone (its only callers now use the new loop).
+
+     Tests (`cli/http_util.rs`, `cli/util/download_deadline.rs`):
+     `download_retries_a_dead_http2_connection_on_a_new_one` (an HTTP/2 server
+     whose first connection takes three concurrent downloads and never answers:
+     all three succeed on one new connection, 15-30 s under the default
+     deadlines), `send_replaces_a_stalled_connection`,
+     `download_retries_a_server_that_never_answers_then_reports` and
+     `download_retries_a_body_that_stops` (four attempts, four connections, the
+     per-attempt report), `download_keeps_a_slow_but_steady_body` (a 22-byte
+     body sent one byte every 100 ms under 500 ms deadlines and a 500 ms total),
+     `parse_deadlines`, `retry_waits_grow_with_jitter`,
+     `retry_budget_counts_attempts_and_total` and `deadline_error_message`; and
+     the `cache::download_deadlines` spec (the test server's
+     `/download_deadlines/` routes, 1 s deadlines, 3 attempts): a remote module,
+     a JSR registry and an npm registry that never answer, a module and an npm
+     registry whose body stalls, all failing with the per-attempt report; a
+     module that stalls once and loads on the retry; and a module dripped two
+     bytes every 200 ms that loads. Before the fix every stalled case ran until
+     the step timeout.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137) are what the prebuilt `libdenort` carries.

@@ -4,6 +4,7 @@
 pub mod archive;
 pub mod console;
 pub mod display;
+pub mod download_deadline;
 pub mod draw_thread;
 pub mod env;
 pub mod extract;
@@ -13,7 +14,6 @@ pub mod git;
 pub mod path;
 pub mod pnpm_workspace;
 pub mod progress_bar;
-pub mod retry;
 pub mod signal_flush;
 pub mod sync;
 pub mod temp;

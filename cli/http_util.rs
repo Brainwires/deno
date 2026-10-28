@@ -3,6 +3,8 @@
 use std::io::BufReader;
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::Mutex;
+use std::time::Duration;
 
 use boxed_error::Boxed;
 use dashmap::DashMap;
@@ -35,6 +37,13 @@ use http_body_util::BodyExt;
 use once_cell::sync::OnceCell;
 use thiserror::Error;
 
+use crate::util::download_deadline::AttemptFailure;
+use crate::util::download_deadline::AttemptsError;
+use crate::util::download_deadline::DeadlineError;
+use crate::util::download_deadline::DeadlineKind;
+use crate::util::download_deadline::DownloadDeadlines;
+use crate::util::download_deadline::RetryBudget;
+use crate::util::download_deadline::within;
 use crate::util::progress_bar::UpdateGuard;
 
 #[derive(Debug, Error)]
@@ -43,13 +52,103 @@ pub enum SendError {
   Send(#[from] deno_fetch::ClientSendError),
   #[error(transparent)]
   InvalidUri(#[from] http::uri::InvalidUri),
+  #[error(transparent)]
+  Deadline(#[from] DeadlineError),
+}
+
+impl SendError {
+  /// Whether the connection, not the server's answer, failed: a deadline, or
+  /// an error sending the request. A retry should use a new connection.
+  pub fn is_connection_failure(&self) -> bool {
+    matches!(self, Self::Send(_) | Self::Deadline(_))
+  }
+
+  /// This failure, for a download's per-attempt report.
+  pub fn attempt_failure(&self) -> AttemptFailure {
+    match self {
+      Self::Deadline(err) => AttemptFailure::Deadline(err.kind, err.after),
+      Self::Send(err) => match connect_timed_out(err) {
+        Some(after) => AttemptFailure::Deadline(DeadlineKind::Connect, after),
+        None => AttemptFailure::Error(err.to_string()),
+      },
+      Self::InvalidUri(err) => AttemptFailure::Error(err.to_string()),
+    }
+  }
+}
+
+/// The connect deadline, when `err` is the connector giving up on a TCP
+/// connect (hyper-util reports an `io::ErrorKind::TimedOut` there).
+fn connect_timed_out(err: &deno_fetch::ClientSendError) -> Option<Duration> {
+  if !err.is_connect_error() {
+    return None;
+  }
+  let mut source: Option<&(dyn std::error::Error + 'static)> =
+    Some(&err.source);
+  while let Some(err) = source {
+    if let Some(io) = err.downcast_ref::<std::io::Error>()
+      && io.kind() == std::io::ErrorKind::TimedOut
+    {
+      return DownloadDeadlines::from_env().connect;
+    }
+    source = err.source();
+  }
+  None
+}
+
+/// denext (DENEXT.md item 147): the deno_fetch client a provider hands out,
+/// replaceable. When a download's connection stalls or breaks, the client
+/// (and with it its connection pool) is replaced, so the retry, and every
+/// other request after it, opens a new connection instead of queueing on the
+/// dead one; with HTTP/2 one connection carries many requests. Requests
+/// already in flight on the old client fail over on their own deadlines.
+#[derive(Debug)]
+struct ClientPool {
+  options: CreateHttpClientOptions,
+  /// The current client and its generation, counted from 0.
+  current: Mutex<(u64, deno_fetch::Client)>,
+}
+
+impl ClientPool {
+  fn new(options: CreateHttpClientOptions) -> Result<Self, JsErrorBox> {
+    let client = Self::create(&options)?;
+    Ok(Self {
+      options,
+      current: Mutex::new((0, client)),
+    })
+  }
+
+  fn create(
+    options: &CreateHttpClientOptions,
+  ) -> Result<deno_fetch::Client, JsErrorBox> {
+    create_http_client(DENO_VERSION_INFO.user_agent, options.clone())
+      .map_err(JsErrorBox::from_err)
+  }
+
+  fn current(&self) -> (u64, deno_fetch::Client) {
+    self.current.lock().unwrap().clone()
+  }
+
+  /// The client to use after a connection of generation `failed` stalled or
+  /// broke: a new one, unless another request has already replaced it.
+  fn replace(
+    &self,
+    failed: u64,
+  ) -> Result<(u64, deno_fetch::Client), JsErrorBox> {
+    let mut current = self.current.lock().unwrap();
+    if current.0 == failed {
+      log::debug!("Replacing the download client (generation {failed}).");
+      *current = (failed + 1, Self::create(&self.options)?);
+    }
+    Ok(current.clone())
+  }
 }
 
 pub struct HttpClientProvider {
   options: CreateHttpClientOptions,
   root_cert_store_provider: Option<Arc<dyn RootCertStoreProvider>>,
-  client: OnceCell<deno_fetch::Client>,
-  cert_clients: DashMap<(String, String), deno_fetch::Client>,
+  deadlines: DownloadDeadlines,
+  client: OnceCell<Arc<ClientPool>>,
+  cert_clients: DashMap<(String, String), Arc<ClientPool>>,
 }
 
 impl std::fmt::Debug for HttpClientProvider {
@@ -65,15 +164,25 @@ impl HttpClientProvider {
     root_cert_store_provider: Option<Arc<dyn RootCertStoreProvider>>,
     unsafely_ignore_certificate_errors: Option<Vec<String>>,
   ) -> Self {
+    let deadlines = DownloadDeadlines::from_env();
     Self {
       options: CreateHttpClientOptions {
         unsafely_ignore_certificate_errors,
+        connect_timeout: deadlines.connect,
         ..Default::default()
       },
       root_cert_store_provider,
+      deadlines,
       client: OnceCell::new(),
       cert_clients: DashMap::new(),
     }
+  }
+
+  #[cfg(test)]
+  fn with_deadlines(mut self, deadlines: DownloadDeadlines) -> Self {
+    self.options.connect_timeout = deadlines.connect;
+    self.deadlines = deadlines;
+    self
   }
 
   /// Makes every connection this provider's clients open re-check the address
@@ -93,20 +202,17 @@ impl HttpClientProvider {
   }
 
   pub fn get_or_create(&self) -> Result<HttpClient, JsErrorBox> {
-    let client = self.client.get_or_try_init(|| {
-      create_http_client(
-        DENO_VERSION_INFO.user_agent,
-        CreateHttpClientOptions {
-          root_cert_store: match &self.root_cert_store_provider {
-            Some(provider) => Some(provider.get_or_try_init()?.clone()),
-            None => None,
-          },
-          ..self.options.clone()
+    let pool = self.client.get_or_try_init(|| {
+      ClientPool::new(CreateHttpClientOptions {
+        root_cert_store: match &self.root_cert_store_provider {
+          Some(provider) => Some(provider.get_or_try_init()?.clone()),
+          None => None,
         },
-      )
-      .map_err(JsErrorBox::from_err)
+        ..self.options.clone()
+      })
+      .map(Arc::new)
     })?;
-    Ok(HttpClient::new(client.clone()))
+    Ok(HttpClient::new(pool.clone(), self.deadlines))
   }
 
   pub fn get_or_create_with_client_cert(
@@ -118,8 +224,8 @@ impl HttpClientProvider {
       certfile.to_string_lossy().into_owned(),
       keyfile.to_string_lossy().into_owned(),
     );
-    if let Some(client) = self.cert_clients.get(&cache_key) {
-      return Ok(HttpClient::new(client.clone()));
+    if let Some(pool) = self.cert_clients.get(&cache_key) {
+      return Ok(HttpClient::new(pool.clone(), self.deadlines));
     }
     let cert_data = std::fs::read(certfile).map_err(|e| {
       JsErrorBox::generic(format!(
@@ -153,20 +259,16 @@ impl HttpClientProvider {
       )));
     }
     let tls_key = TlsKey(certs, keys.remove(0));
-    let client = create_http_client(
-      DENO_VERSION_INFO.user_agent,
-      CreateHttpClientOptions {
-        root_cert_store: match &self.root_cert_store_provider {
-          Some(provider) => Some(provider.get_or_try_init()?.clone()),
-          None => None,
-        },
-        client_cert_chain_and_key: Some(tls_key),
-        ..self.options.clone()
+    let pool = Arc::new(ClientPool::new(CreateHttpClientOptions {
+      root_cert_store: match &self.root_cert_store_provider {
+        Some(provider) => Some(provider.get_or_try_init()?.clone()),
+        None => None,
       },
-    )
-    .map_err(JsErrorBox::from_err)?;
-    self.cert_clients.insert(cache_key, client.clone());
-    Ok(HttpClient::new(client))
+      client_cert_chain_and_key: Some(tls_key),
+      ..self.options.clone()
+    })?);
+    self.cert_clients.insert(cache_key, pool.clone());
+    Ok(HttpClient::new(pool, self.deadlines))
   }
 }
 
@@ -215,7 +317,69 @@ pub enum DownloadErrorKind {
   UnhandledNotModified,
   #[class(inherit)]
   #[error(transparent)]
+  Deadline(DeadlineError),
+  #[class(inherit)]
+  #[error(transparent)]
+  Attempts(AttemptsError),
+  #[class(inherit)]
+  #[error(transparent)]
   Other(JsErrorBox),
+}
+
+// Plain functions, not `From` impls: `Boxed` already converts anything
+// `DownloadErrorKind` converts from.
+fn download_error_from_send(err: SendError) -> DownloadError {
+  match err {
+    SendError::Send(err) => DownloadErrorKind::Fetch(err).into_box(),
+    SendError::InvalidUri(err) => {
+      DownloadErrorKind::HttpParse(http::Error::from(err)).into_box()
+    }
+    SendError::Deadline(err) => DownloadErrorKind::Deadline(err).into_box(),
+  }
+}
+
+fn download_error_from_body(err: ResponseBodyError) -> DownloadError {
+  match err {
+    ResponseBodyError::Deadline(err) => {
+      DownloadErrorKind::Deadline(err).into_box()
+    }
+    ResponseBodyError::Read(err) => DownloadErrorKind::Other(err).into_box(),
+  }
+}
+
+impl DownloadError {
+  /// Whether the connection, not the server's answer, failed, so a retry
+  /// should use a new connection.
+  fn is_connection_failure(&self) -> bool {
+    matches!(
+      self.as_kind(),
+      DownloadErrorKind::Fetch(_) | DownloadErrorKind::Deadline(_)
+    )
+  }
+
+  fn attempt_failure(&self) -> AttemptFailure {
+    match self.as_kind() {
+      DownloadErrorKind::Deadline(err) => {
+        AttemptFailure::Deadline(err.kind, err.after)
+      }
+      DownloadErrorKind::Fetch(err) => match connect_timed_out(err) {
+        Some(after) => AttemptFailure::Deadline(DeadlineKind::Connect, after),
+        None => AttemptFailure::Error(err.to_string()),
+      },
+      _ => AttemptFailure::Error(self.to_string()),
+    }
+  }
+}
+
+/// A response body that could not be read.
+#[derive(Debug, Error, JsError)]
+pub enum ResponseBodyError {
+  #[class(inherit)]
+  #[error(transparent)]
+  Deadline(DeadlineError),
+  #[class(inherit)]
+  #[error(transparent)]
+  Read(JsErrorBox),
 }
 
 #[derive(Debug)]
@@ -252,14 +416,71 @@ impl HttpClientResponse {
 
 #[derive(Debug)]
 pub struct HttpClient {
+  pool: Arc<ClientPool>,
+  generation: u64,
   client: deno_fetch::Client,
+  deadlines: DownloadDeadlines,
 }
 
 impl HttpClient {
   // DO NOT make this public. You should always be creating one of these from
   // the HttpClientProvider
-  fn new(client: deno_fetch::Client) -> Self {
-    Self { client }
+  fn new(pool: Arc<ClientPool>, deadlines: DownloadDeadlines) -> Self {
+    let (generation, client) = pool.current();
+    Self {
+      pool,
+      generation,
+      client,
+      deadlines,
+    }
+  }
+
+  #[cfg(test)]
+  fn for_test(client: deno_fetch::Client) -> Self {
+    let pool = ClientPool {
+      options: Default::default(),
+      current: Mutex::new((0, client)),
+    };
+    Self::new(Arc::new(pool), DownloadDeadlines::default())
+  }
+
+  /// The deadlines this client's downloads run under.
+  pub fn deadlines(&self) -> DownloadDeadlines {
+    self.deadlines
+  }
+
+  /// Retires this client's connections after one stalled or broke: the
+  /// provider's next client (`get_or_create`) opens a new connection.
+  pub fn replace_connection(&self) {
+    if let Err(err) = self.pool.replace(self.generation) {
+      log::debug!("Could not create a new download client: {err}");
+    }
+  }
+
+  /// Sends `req` on `client`, giving up when no response headers arrive
+  /// within the response deadline.
+  async fn send_within_deadline(
+    &self,
+    client: &deno_fetch::Client,
+    url: &Url,
+    req: http::Request<deno_fetch::ReqBody>,
+    should_decompress: bool,
+  ) -> Result<http::Response<ResBody>, SendError> {
+    let send = async {
+      if should_decompress {
+        client.clone().send(req).await
+      } else {
+        client.clone().send_no_decompress(req).await
+      }
+    };
+    match within(self.deadlines.response, send).await {
+      Ok(result) => result.map_err(SendError::Send),
+      Err(after) => Err(SendError::Deadline(DeadlineError {
+        url: url.clone(),
+        kind: DeadlineKind::Response,
+        after,
+      })),
+    }
   }
 
   pub fn get(&self, url: Url) -> Result<RequestBuilder, http::Error> {
@@ -313,12 +534,15 @@ impl HttpClient {
     *request.uri_mut() = http::Uri::try_from(url.as_str())?;
     *request.headers_mut() = headers;
 
-    self
-      .client
-      .clone()
-      .send(request)
-      .await
-      .map_err(SendError::Send)
+    let result = self
+      .send_within_deadline(&self.client, url, request, true)
+      .await;
+    if let Err(err) = &result
+      && err.is_connection_failure()
+    {
+      self.replace_connection();
+    }
+    result
   }
 
   pub async fn download_text(&self, url: Url) -> Result<String, AnyError> {
@@ -328,7 +552,13 @@ impl HttpClient {
 
   pub async fn download(&self, url: Url) -> Result<Vec<u8>, DownloadError> {
     let response = self
-      .download_inner(url, &Default::default(), None, true)
+      .download_with_retries(
+        url,
+        &Default::default(),
+        None,
+        true,
+        RetryOn::ConnectionFailures,
+      )
       .await?;
     response.into_bytes()
   }
@@ -339,16 +569,15 @@ impl HttpClient {
     headers: &HeaderMap,
     progress_guard: &UpdateGuard,
   ) -> Result<HttpClientResponse, DownloadError> {
-    crate::util::retry::retry(
-      || self.download_inner(url.clone(), headers, Some(progress_guard), true),
-      |e| {
-        matches!(
-          e.as_kind(),
-          DownloadErrorKind::BadResponse(_) | DownloadErrorKind::Fetch(_)
-        )
-      },
-    )
-    .await
+    self
+      .download_with_retries(
+        url,
+        headers,
+        Some(progress_guard),
+        true,
+        RetryOn::AnyFailure,
+      )
+      .await
   }
 
   /// Like `download_with_progress_and_retries`, but bypasses the transparent
@@ -361,16 +590,77 @@ impl HttpClient {
     headers: &HeaderMap,
     progress_guard: &UpdateGuard,
   ) -> Result<HttpClientResponse, DownloadError> {
-    crate::util::retry::retry(
-      || self.download_inner(url.clone(), headers, Some(progress_guard), false),
-      |e| {
-        matches!(
-          e.as_kind(),
-          DownloadErrorKind::BadResponse(_) | DownloadErrorKind::Fetch(_)
+    self
+      .download_with_retries(
+        url,
+        headers,
+        Some(progress_guard),
+        false,
+        RetryOn::AnyFailure,
+      )
+      .await
+  }
+
+  /// Downloads `url`, retrying within the [`DownloadDeadlines`]: a retry
+  /// after a stalled or broken connection runs on a new one. When every
+  /// attempt failed and one of them on a deadline, the error lists each
+  /// attempt; otherwise it is the first attempt's error.
+  async fn download_with_retries(
+    &self,
+    url: Url,
+    headers: &HeaderMap,
+    progress_guard: Option<&UpdateGuard>,
+    should_decompress: bool,
+    retry_on: RetryOn,
+  ) -> Result<HttpClientResponse, DownloadError> {
+    let mut budget = RetryBudget::new(self.deadlines);
+    let (mut generation, mut client) = (self.generation, self.client.clone());
+    let mut first_error = None;
+    loop {
+      let err = match self
+        .download_inner(
+          &client,
+          url.clone(),
+          headers,
+          progress_guard,
+          should_decompress,
         )
-      },
-    )
-    .await
+        .await
+      {
+        Ok(response) => return Ok(response),
+        Err(err) => err,
+      };
+      let retryable = match retry_on {
+        RetryOn::AnyFailure => matches!(
+          err.as_kind(),
+          DownloadErrorKind::BadResponse(_)
+            | DownloadErrorKind::Fetch(_)
+            | DownloadErrorKind::Deadline(_)
+        ),
+        RetryOn::ConnectionFailures => err.is_connection_failure(),
+      };
+      if !retryable {
+        return Err(err);
+      }
+      log::debug!("Downloading '{url}' failed: {err}");
+      if err.is_connection_failure() {
+        (generation, client) = self
+          .pool
+          .replace(generation)
+          .map_err(|e| DownloadErrorKind::Other(e).into_box())?;
+      }
+      let wait = budget.record(err.attempt_failure());
+      first_error.get_or_insert(err);
+      match wait {
+        Some(wait) => tokio::time::sleep(wait).await,
+        None => break,
+      }
+    }
+    if budget.saw_deadline() {
+      Err(DownloadErrorKind::Attempts(budget.into_error(url)).into_box())
+    } else {
+      Err(first_error.unwrap())
+    }
   }
 
   pub async fn get_redirected_url(
@@ -378,19 +668,22 @@ impl HttpClient {
     url: Url,
     headers: &HeaderMap<HeaderValue>,
   ) -> Result<Url, AnyError> {
-    let (_, url) = self.get_redirected_response(url, headers, true).await?;
+    let (_, url) = self
+      .get_redirected_response(&self.client, url, headers, true)
+      .await?;
     Ok(url)
   }
 
   async fn download_inner(
     &self,
+    client: &deno_fetch::Client,
     url: Url,
     headers: &HeaderMap<HeaderValue>,
     progress_guard: Option<&UpdateGuard>,
     should_decompress: bool,
   ) -> Result<HttpClientResponse, DownloadError> {
-    let (response, _) = self
-      .get_redirected_response(url, headers, should_decompress)
+    let (response, url) = self
+      .get_redirected_response(client, url, headers, should_decompress)
       .await?;
 
     if response.status() == 404 {
@@ -399,7 +692,11 @@ impl HttpClient {
       return Ok(HttpClientResponse::NotModified);
     } else if !response.status().is_success() {
       let status = response.status();
-      let maybe_response_text = body_to_string(response).await.ok();
+      let maybe_response_text =
+        get_response_body_with_deadline(response, &url, None, self.deadlines)
+          .await
+          .ok()
+          .and_then(|(_, body)| String::from_utf8(body).ok());
       return Err(
         DownloadErrorKind::BadResponse(BadResponseError {
           status_code: status,
@@ -411,26 +708,30 @@ impl HttpClient {
       );
     }
 
-    get_response_body_with_progress(response, progress_guard)
-      .await
-      .map(|(headers, body)| HttpClientResponse::Success { headers, body })
-      .map_err(|err| DownloadErrorKind::Other(err).into_box())
+    get_response_body_with_deadline(
+      response,
+      &url,
+      progress_guard,
+      self.deadlines,
+    )
+    .await
+    .map(|(headers, body)| HttpClientResponse::Success { headers, body })
+    .map_err(download_error_from_body)
   }
 
   async fn get_redirected_response(
     &self,
+    client: &deno_fetch::Client,
     mut url: Url,
     headers: &HeaderMap<HeaderValue>,
     should_decompress: bool,
   ) -> Result<(http::Response<deno_fetch::ResBody>, Url), DownloadError> {
     let mut req = self.get(url.clone())?.build();
     *req.headers_mut() = headers.clone();
-    let mut response = if should_decompress {
-      self.client.clone().send(req).await
-    } else {
-      self.client.clone().send_no_decompress(req).await
-    }
-    .map_err(|e| DownloadErrorKind::Fetch(e).into_box())?;
+    let mut response = self
+      .send_within_deadline(client, &url, req, should_decompress)
+      .await
+      .map_err(download_error_from_send)?;
     let status = response.status();
     if status.is_redirection() && status != http::StatusCode::NOT_MODIFIED {
       let mut redirect_headers = headers.clone();
@@ -443,12 +744,10 @@ impl HttpClient {
         }
         *req.headers_mut() = redirect_headers.clone();
 
-        let new_response = if should_decompress {
-          self.client.clone().send(req).await
-        } else {
-          self.client.clone().send_no_decompress(req).await
-        }
-        .map_err(|e| DownloadErrorKind::Fetch(e).into_box())?;
+        let new_response = self
+          .send_within_deadline(client, &new_url, req, should_decompress)
+          .await
+          .map_err(download_error_from_send)?;
         let status = new_response.status();
         if status.is_redirection() {
           response = new_response;
@@ -474,13 +773,29 @@ fn should_strip_auth_on_redirect(original: &Url, new_url: &Url) -> bool {
     || (original.scheme() == "https" && new_url.scheme() == "http")
 }
 
-pub async fn get_response_body_with_progress(
+/// Which failures `download_with_retries` retries.
+#[derive(Debug, Clone, Copy)]
+enum RetryOn {
+  /// A failed request, an error response, or a deadline.
+  AnyFailure,
+  /// Only a failed request or a deadline (`download`, which callers use for
+  /// lookups that answer with an error status on purpose).
+  ConnectionFailures,
+}
+
+/// Reads `response`'s body, reporting progress to `progress_guard`. Gives up
+/// when no data arrives for the idle deadline in `deadlines`; a body that
+/// keeps arriving, however slowly, is read to the end.
+pub async fn get_response_body_with_deadline(
   response: http::Response<deno_fetch::ResBody>,
+  url: &Url,
   progress_guard: Option<&UpdateGuard>,
-) -> Result<(HeaderMap, Vec<u8>), JsErrorBox> {
+  deadlines: DownloadDeadlines,
+) -> Result<(HeaderMap, Vec<u8>), ResponseBodyError> {
   use http_body::Body as _;
-  if let Some(progress_guard) = progress_guard {
-    let mut total_size = response.body().size_hint().exact();
+  let mut total_size = None;
+  if progress_guard.is_some() {
+    total_size = response.body().size_hint().exact();
     if total_size.is_none() {
       // `Content-Length` describes the encoded body, so it can't be used as
       // the progress total when the body was transparently decompressed.
@@ -491,25 +806,38 @@ pub async fn get_response_body_with_progress(
         .and_then(|val| val.to_str().ok())
         .and_then(|s| s.parse::<u64>().ok());
     }
-    if let Some(total_size) = total_size {
-      progress_guard.set_total_size(total_size);
-      let mut current_size = 0;
-      let mut data = Vec::with_capacity(total_size as usize);
-      let (parts, body) = response.into_parts();
-      let mut stream = body.into_data_stream();
-      while let Some(item) = stream.next().await {
-        let bytes = item?;
-        current_size += bytes.len() as u64;
-        progress_guard.set_position(current_size);
-        data.extend_from_slice(&bytes);
-      }
-      return Ok((parts.headers, data));
-    }
+  }
+  // Only a known total drives the progress bar.
+  let progress_guard = progress_guard.filter(|_| total_size.is_some());
+  if let (Some(progress_guard), Some(total_size)) = (progress_guard, total_size)
+  {
+    progress_guard.set_total_size(total_size);
   }
 
   let (parts, body) = response.into_parts();
-  let bytes = body.collect().await?.to_bytes();
-  Ok((parts.headers, bytes.into()))
+  let mut data = Vec::with_capacity(total_size.unwrap_or(0) as usize);
+  let mut stream = body.into_data_stream();
+  loop {
+    let item =
+      within(deadlines.idle, stream.next())
+        .await
+        .map_err(|after| {
+          ResponseBodyError::Deadline(DeadlineError {
+            url: url.clone(),
+            kind: DeadlineKind::Idle,
+            after,
+          })
+        })?;
+    let Some(item) = item else {
+      break;
+    };
+    let bytes = item.map_err(|err| ResponseBodyError::Read(err.into()))?;
+    data.extend_from_slice(&bytes);
+    if let Some(progress_guard) = progress_guard {
+      progress_guard.set_position(data.len() as u64);
+    }
+  }
+  Ok((parts.headers, data))
 }
 
 fn resolve_redirect_from_response<B>(
@@ -573,6 +901,9 @@ impl RequestBuilder {
 mod test {
   use std::collections::HashSet;
   use std::hash::RandomState;
+  use std::sync::atomic::AtomicUsize;
+  use std::sync::atomic::Ordering;
+  use std::time::Instant;
 
   use deno_runtime::deno_tls::rustls::RootCertStore;
   use tokio::io::AsyncReadExt;
@@ -580,6 +911,8 @@ mod test {
   use tokio::net::TcpListener;
 
   use super::*;
+  use crate::util::progress_bar::ProgressBar;
+  use crate::util::progress_bar::ProgressBarStyle;
 
   #[tokio::test]
   async fn test_http_client_download_redirect() {
@@ -721,7 +1054,7 @@ mod test {
     let _http_server_guard = test_util::http_server();
     let url = Url::parse("https://localhost:5545/assets/fixture.json").unwrap();
 
-    let client = HttpClient::new(
+    let client = HttpClient::for_test(
       create_http_client(
         DENO_VERSION_INFO.user_agent,
         CreateHttpClientOptions {
@@ -765,7 +1098,7 @@ mod test {
       let url = Url::parse(url).unwrap();
       eprintln!("Attempting to fetch {url}...");
 
-      let client = HttpClient::new(
+      let client = HttpClient::for_test(
         create_http_client(
           DENO_VERSION_INFO.user_agent,
           CreateHttpClientOptions::default(),
@@ -808,7 +1141,7 @@ mod test {
     let url = Url::parse(url).unwrap();
     eprintln!("Attempting to fetch {url}...");
 
-    let client = HttpClient::new(
+    let client = HttpClient::for_test(
       create_http_client(
         DENO_VERSION_INFO.user_agent,
         CreateHttpClientOptions {
@@ -829,7 +1162,7 @@ mod test {
     let url =
       Url::parse("https://localhost:5545/run/import_compression/gziped")
         .unwrap();
-    let client = HttpClient::new(
+    let client = HttpClient::for_test(
       create_http_client(
         DENO_VERSION_INFO.user_agent,
         CreateHttpClientOptions {
@@ -864,7 +1197,7 @@ mod test {
   async fn test_fetch_with_cafile_with_etag() {
     let _http_server_guard = test_util::http_server();
     let url = Url::parse("https://localhost:5545/etag_script.ts").unwrap();
-    let client = HttpClient::new(
+    let client = HttpClient::for_test(
       create_http_client(
         DENO_VERSION_INFO.user_agent,
         CreateHttpClientOptions {
@@ -907,7 +1240,7 @@ mod test {
     let url =
       Url::parse("https://localhost:5545/run/import_compression/brotli")
         .unwrap();
-    let client = HttpClient::new(
+    let client = HttpClient::for_test(
       create_http_client(
         DENO_VERSION_INFO.user_agent,
         CreateHttpClientOptions {
@@ -970,5 +1303,262 @@ mod test {
       &Url::parse("https://npm.pkg.github.com/package").unwrap(),
       &Url::parse("http://npm.pkg.github.com/package").unwrap(),
     ));
+  }
+
+  // denext (DENEXT.md item 147): download deadlines and retries.
+
+  fn short_deadlines(ms: u64) -> DownloadDeadlines {
+    DownloadDeadlines {
+      connect: Some(Duration::from_millis(ms)),
+      response: Some(Duration::from_millis(ms)),
+      idle: Some(Duration::from_millis(ms)),
+      attempts: 4,
+      total: Some(Duration::from_secs(60)),
+    }
+  }
+
+  /// A server on loopback; `serve` handles each connection, numbered from 0.
+  async fn numbered_server<F, Fut>(serve: F) -> (Url, Arc<AtomicUsize>)
+  where
+    F: Fn(tokio::net::TcpStream, usize) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = ()> + Send + 'static,
+  {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let connections = Arc::new(AtomicUsize::new(0));
+    let count = connections.clone();
+    tokio::spawn(async move {
+      loop {
+        let (stream, _) = listener.accept().await.unwrap();
+        let n = count.fetch_add(1, Ordering::SeqCst);
+        tokio::spawn(serve(stream, n));
+      }
+    });
+    (
+      Url::parse(&format!("http://{addr}/registry/pkg")).unwrap(),
+      connections,
+    )
+  }
+
+  async fn download_under(
+    provider: &HttpClientProvider,
+    url: &Url,
+  ) -> Result<HttpClientResponse, DownloadError> {
+    let client = provider.get_or_create().unwrap();
+    let progress_bar = ProgressBar::new(ProgressBarStyle::DownloadBars);
+    let guard = progress_bar.update(url.as_str());
+    client
+      .download_with_progress_and_retries(
+        url.clone(),
+        &Default::default(),
+        &guard,
+      )
+      .await
+  }
+
+  fn attempts_of(err: &DownloadError) -> &AttemptsError {
+    match err.as_kind() {
+      DownloadErrorKind::Attempts(err) => err,
+      _ => panic!("expected the per-attempt report, got {err:?}"),
+    }
+  }
+
+  #[tokio::test]
+  async fn download_retries_a_server_that_never_answers_then_reports() {
+    let (url, connections) = numbered_server(|mut stream, _| async move {
+      read_request(&mut stream).await;
+      // Accepted, read, and never answered.
+      tokio::time::sleep(Duration::from_secs(600)).await;
+      drop(stream);
+    })
+    .await;
+    let provider =
+      HttpClientProvider::new(None, None).with_deadlines(short_deadlines(300));
+    let started = Instant::now();
+    let err = download_under(&provider, &url).await.unwrap_err();
+    assert!(started.elapsed() < Duration::from_secs(10));
+    let report = attempts_of(&err);
+    assert_eq!(report.url, url);
+    assert_eq!(
+      report.attempts,
+      vec![
+        AttemptFailure::Deadline(
+          DeadlineKind::Response,
+          Duration::from_millis(300)
+        );
+        4
+      ]
+    );
+    // Every attempt on a new connection.
+    assert_eq!(connections.load(Ordering::SeqCst), 4);
+    let message = err.to_string();
+    assert!(
+      message.starts_with(&format!(
+        "Timed out downloading '{url}' (4 attempts, each on a new connection):\n    attempt 1: no response within 300ms (DENO_DOWNLOAD_RESPONSE_TIMEOUT_MS)\n"
+      )),
+      "{message}"
+    );
+  }
+
+  #[tokio::test]
+  async fn download_retries_a_body_that_stops() {
+    let (url, connections) = numbered_server(|mut stream, _| async move {
+      read_request(&mut stream).await;
+      stream
+        .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n0123456789")
+        .await
+        .unwrap();
+      // 10 of the 100 bytes, then nothing.
+      tokio::time::sleep(Duration::from_secs(600)).await;
+      drop(stream);
+    })
+    .await;
+    let provider =
+      HttpClientProvider::new(None, None).with_deadlines(short_deadlines(300));
+    let err = download_under(&provider, &url).await.unwrap_err();
+    assert_eq!(
+      attempts_of(&err).attempts,
+      vec![
+        AttemptFailure::Deadline(
+          DeadlineKind::Idle,
+          Duration::from_millis(300)
+        );
+        4
+      ]
+    );
+    assert!(
+      err.to_string().contains(
+        "attempt 4: no data received for 300ms (DENO_DOWNLOAD_IDLE_TIMEOUT_MS)"
+      ),
+      "{err}"
+    );
+    assert_eq!(connections.load(Ordering::SeqCst), 4);
+  }
+
+  #[tokio::test]
+  async fn download_keeps_a_slow_but_steady_body() {
+    const BODY: &[u8] = b"a slow but steady body";
+    let (url, connections) = numbered_server(|mut stream, _| async move {
+      read_request(&mut stream).await;
+      tokio::time::sleep(Duration::from_millis(100)).await;
+      stream
+        .write_all(
+          format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", BODY.len())
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+      // One byte every 100 ms: the body takes far longer than any deadline,
+      // but data never stops for long.
+      for byte in BODY {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        stream.write_all(&[*byte]).await.unwrap();
+        stream.flush().await.unwrap();
+      }
+    })
+    .await;
+    let mut deadlines = short_deadlines(500);
+    // Even an overall budget shorter than the body doesn't cut it off.
+    deadlines.total = Some(Duration::from_millis(500));
+    let provider =
+      HttpClientProvider::new(None, None).with_deadlines(deadlines);
+    let started = Instant::now();
+    let response = download_under(&provider, &url).await.unwrap();
+    assert!(started.elapsed() > Duration::from_secs(2));
+    assert_eq!(response.into_bytes().unwrap(), BODY);
+    assert_eq!(connections.load(Ordering::SeqCst), 1);
+  }
+
+  /// An HTTP/2 (prior knowledge) server whose first connection takes every
+  /// request and never answers; later connections answer at once.
+  async fn h2_server_with_a_dead_first_connection()
+  -> (Url, Arc<AtomicUsize>, Arc<AtomicUsize>) {
+    let stalled_requests = Arc::new(AtomicUsize::new(0));
+    let stalled = stalled_requests.clone();
+    let (url, connections) = numbered_server(move |stream, n| {
+      let stalled = stalled.clone();
+      async move {
+        let service = hyper::service::service_fn(
+          move |req: http::Request<hyper::body::Incoming>| {
+            let stalled = stalled.clone();
+            async move {
+              if n == 0 {
+                stalled.fetch_add(1, Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_secs(600)).await;
+              }
+              Ok::<_, std::convert::Infallible>(http::Response::new(
+                http_body_util::Full::new(bytes::Bytes::from(format!(
+                  "{} from connection {n}",
+                  req.uri().path()
+                ))),
+              ))
+            }
+          },
+        );
+        let _ = hyper::server::conn::http2::Builder::new(
+          hyper_util::rt::TokioExecutor::new(),
+        )
+        .serve_connection(hyper_util::rt::TokioIo::new(stream), service)
+        .await;
+      }
+    })
+    .await;
+    (url, connections, stalled_requests)
+  }
+
+  #[tokio::test]
+  async fn download_retries_a_dead_http2_connection_on_a_new_one() {
+    let (url, connections, stalled_requests) =
+      h2_server_with_a_dead_first_connection().await;
+    // The default deadlines: the retry must come within about 30 s.
+    let mut provider = HttpClientProvider::new(None, None)
+      .with_deadlines(DownloadDeadlines::default());
+    provider.options.http1 = false; // HTTP/2 with prior knowledge
+    let started = Instant::now();
+    // Three downloads at once: all ride the first connection, all stall on
+    // it, and all must fail over to a new one instead of queueing on it.
+    let urls = ["/a", "/b", "/c"].map(|path| url.join(path).unwrap());
+    let results = deno_core::futures::future::join_all(
+      urls.iter().map(|url| download_under(&provider, url)),
+    )
+    .await;
+    let elapsed = started.elapsed();
+    for (url, result) in urls.iter().zip(results) {
+      let body = result.unwrap().into_bytes().unwrap();
+      let body = String::from_utf8(body).unwrap();
+      assert!(body.starts_with(url.path()), "{body}");
+      assert!(!body.ends_with("from connection 0"), "{body}");
+    }
+    assert!(stalled_requests.load(Ordering::SeqCst) >= 1);
+    assert!(
+      elapsed >= Duration::from_secs(15) && elapsed < Duration::from_secs(30),
+      "{elapsed:?}"
+    );
+    // The stalled connection's client was replaced once; the retries share
+    // the new connection rather than each opening one.
+    assert_eq!(connections.load(Ordering::SeqCst), 2);
+  }
+
+  #[tokio::test]
+  async fn send_replaces_a_stalled_connection() {
+    // The module loader's path: `HttpClient::send`, then `get_or_create`
+    // again for the retry.
+    let (url, connections, _) = h2_server_with_a_dead_first_connection().await;
+    let mut provider =
+      HttpClientProvider::new(None, None).with_deadlines(short_deadlines(300));
+    provider.options.http1 = false;
+    let client = provider.get_or_create().unwrap();
+    let Err(SendError::Deadline(deadline)) =
+      client.send(&url, Default::default()).await
+    else {
+      panic!("expected a deadline error");
+    };
+    assert_eq!(deadline.kind, DeadlineKind::Response);
+    let client = provider.get_or_create().unwrap();
+    let Ok(response) = client.send(&url, Default::default()).await else {
+      panic!("the retry should have used a new connection");
+    };
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(connections.load(Ordering::SeqCst), 2);
   }
 }

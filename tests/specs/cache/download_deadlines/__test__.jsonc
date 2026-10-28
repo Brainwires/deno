@@ -1,0 +1,61 @@
+// denext (DENEXT.md item 147): a download from a server that stops answering
+// is retried on a new connection and then fails with a report of every
+// attempt (1 s deadlines and 3 attempts here) instead of waiting forever; one
+// that is slow but keeps sending data finishes, and one that stalls once
+// succeeds on the retry. Before the deadlines, every stalled case ran until
+// the step timeout killed it.
+{
+  "tempDir": true,
+  "timeout": 90,
+  "envs": {
+    "DENO_DIR": "$PWD/deno_dir",
+    "DENO_DOWNLOAD_CONNECT_TIMEOUT_MS": "1000",
+    "DENO_DOWNLOAD_RESPONSE_TIMEOUT_MS": "1000",
+    "DENO_DOWNLOAD_IDLE_TIMEOUT_MS": "1000",
+    "DENO_DOWNLOAD_ATTEMPTS": "3"
+  },
+  "tests": {
+    "module_never_answers": {
+      "args": "cache http://localhost:4545/download_deadlines/stall_headers/mod.ts",
+      "output": "module_never_answers.out",
+      "exitCode": 1
+    },
+    "module_body_stalls": {
+      "args": "cache http://localhost:4545/download_deadlines/stall_body/mod.ts",
+      "output": "module_body_stalls.out",
+      "exitCode": 1
+    },
+    "module_stalls_once": {
+      "args": "run http://localhost:4545/download_deadlines/stall_once/mod.ts",
+      "output": "module_stalls_once.out"
+    },
+    "module_slow_but_steady": {
+      "args": "run http://localhost:4545/download_deadlines/drip/mod.ts",
+      "output": "module_slow_but_steady.out"
+    },
+    "jsr_never_answers": {
+      "envs": {
+        "JSR_URL": "http://localhost:4545/download_deadlines/stall_headers/"
+      },
+      "args": "cache jsr:@denotest/add",
+      "output": "jsr_never_answers.out",
+      "exitCode": 1
+    },
+    "npm_registry_never_answers": {
+      "envs": {
+        "NPM_CONFIG_REGISTRY": "http://localhost:4545/download_deadlines/stall_headers/"
+      },
+      "args": "install npm:@denotest/esm-basic",
+      "output": "npm_registry_never_answers.out",
+      "exitCode": 1
+    },
+    "npm_registry_body_stalls": {
+      "envs": {
+        "NPM_CONFIG_REGISTRY": "http://localhost:4545/download_deadlines/stall_body/"
+      },
+      "args": "install npm:@denotest/esm-basic",
+      "output": "npm_registry_body_stalls.out",
+      "exitCode": 1
+    }
+  }
+}

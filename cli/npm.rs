@@ -193,6 +193,8 @@ impl deno_npm_cache::NpmCacheHttpClient for CliNpmCacheHttpClient {
           | TooManyRedirects
           | UnhandledNotModified
           | NotFound
+          | Deadline(_)
+          | Attempts(_)
           | Other(_) => None,
           BadResponse(bad_response_error) => {
             Some(bad_response_error.status_code.as_u16())

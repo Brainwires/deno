@@ -423,6 +423,9 @@ async fn main_server(
     (&Method::POST, "/-/npm/v1/security/advisories/bulk") => {
       npm_registry::npm_security_advisories_bulk(req).await
     }
+    (_, path) if path.starts_with("/download_deadlines/") => {
+      Ok(download_deadlines(path).await)
+    }
     (_, "/echo_server") => {
       let (parts, body) = req.into_parts();
       let mut response = Response::new(UnsyncBoxBody::new(Full::new(
@@ -1613,4 +1616,91 @@ pub fn custom_headers(
 fn sha2_digest(data: &[u8]) -> String {
   let hash = sha2::Sha256::digest(data);
   faster_hex::hex_string(&hash)
+}
+
+/// denext (DENEXT.md item 147): a registry or module host that stops
+/// answering, for the CLI's download deadlines.
+///
+/// - `/download_deadlines/stall_headers/<any>`: reads the request and never
+///   answers.
+/// - `/download_deadlines/stall_body/<any>`: sends the headers and the start
+///   of the body, then nothing.
+/// - `/download_deadlines/stall_once/<any>.ts`: the first request for a path
+///   never gets an answer; later ones get a module at once.
+/// - `/download_deadlines/drip/<any>.ts`: a module sent two bytes every
+///   200 ms (about 3.4 s in all): slow, but never idle for long.
+async fn download_deadlines(
+  path: &str,
+) -> Response<UnsyncBoxBody<Bytes, Infallible>> {
+  // Long enough to outlast any test; bounded so a stalled connection's task
+  // still ends.
+  const STALL: Duration = Duration::from_secs(600);
+  let content_type = if path.ends_with(".ts") {
+    "application/typescript"
+  } else {
+    "application/json"
+  };
+  let rest = path.trim_start_matches("/download_deadlines/");
+  if rest.starts_with("stall_headers/") {
+    tokio::time::sleep(STALL).await;
+    let mut res = Response::new(empty_body());
+    *res.status_mut() = StatusCode::NOT_FOUND;
+    return res;
+  }
+  if rest.starts_with("stall_body/") {
+    let body = async_stream::stream! {
+      yield Ok::<_, Infallible>(hyper::body::Frame::data(Bytes::from_static(
+        b"{\"name\": \"stalled\", ",
+      )));
+      tokio::time::sleep(STALL).await;
+    };
+    return Response::builder()
+      .status(StatusCode::OK)
+      .header("content-type", content_type)
+      .header("content-length", "4096")
+      .body(UnsyncBoxBody::new(http_body_util::StreamBody::new(body)))
+      .unwrap();
+  }
+  if rest.starts_with("stall_once/") {
+    static STALLED: std::sync::Mutex<Vec<String>> =
+      std::sync::Mutex::new(Vec::new());
+    let first = {
+      let mut stalled = STALLED.lock().unwrap();
+      let first = !stalled.iter().any(|p| p == path);
+      if first {
+        stalled.push(path.to_string());
+      }
+      first
+    };
+    if first {
+      tokio::time::sleep(STALL).await;
+    }
+    return Response::builder()
+      .status(StatusCode::OK)
+      .header("content-type", content_type)
+      .body(string_body(
+        "console.log(\"stalled once, then answered\");\n",
+      ))
+      .unwrap();
+  }
+  if rest.starts_with("drip/") {
+    const MODULE: &[u8] = b"console.log(\"slow but steady\");\n";
+    let body = async_stream::stream! {
+      for chunk in MODULE.chunks(2) {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        yield Ok::<_, Infallible>(hyper::body::Frame::data(
+          Bytes::copy_from_slice(chunk),
+        ));
+      }
+    };
+    return Response::builder()
+      .status(StatusCode::OK)
+      .header("content-type", content_type)
+      .header("content-length", MODULE.len().to_string())
+      .body(UnsyncBoxBody::new(http_body_util::StreamBody::new(body)))
+      .unwrap();
+  }
+  let mut res = Response::new(empty_body());
+  *res.status_mut() = StatusCode::NOT_FOUND;
+  res
 }

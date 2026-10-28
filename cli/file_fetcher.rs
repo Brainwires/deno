@@ -21,8 +21,11 @@ use http::StatusCode;
 
 use crate::colors;
 use crate::http_util::HttpClientProvider;
-use crate::http_util::get_response_body_with_progress;
+use crate::http_util::ResponseBodyError;
+use crate::http_util::get_response_body_with_deadline;
 use crate::sys::CliSys;
+use crate::util::download_deadline::AttemptFailure;
+use crate::util::download_deadline::RetryBudget;
 use crate::util::progress_bar::ProgressBar;
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -164,27 +167,49 @@ impl deno_cache_dir::file_fetcher::HttpClient for HttpClientAdapter {
     }
 
     let mut retried = false; // retry intermittent failures
+    // denext (DENEXT.md item 147): a stalled request or body is retried on a
+    // new connection (`HttpClient::send` / `replace_connection` retire the
+    // stalled one) within the download deadlines' attempts and budget.
+    let mut deadline_budget = None;
     loop {
-      let response = match self
+      let client = self
         .http_client_provider
         .get_or_create()
-        .map_err(|err| SendError::Failed(err.into()))?
-        .send(url, headers.clone())
-        .await
-      {
+        .map_err(|err| SendError::Failed(err.into()))?;
+      let deadline_budget = deadline_budget
+        .get_or_insert_with(|| RetryBudget::new(client.deadlines()));
+      let response = match client.send(url, headers.clone()).await {
         Ok(response) => response,
-        Err(crate::http_util::SendError::Send(err)) => {
-          if err.is_connect_error() {
-            handle_request_or_server_error(&mut retried, url, err.to_string())
-              .await
-              .map_err(|()| SendError::Failed(err.into()))?;
+        Err(err) => {
+          // No response within the response deadline, or the connector's
+          // connect deadline.
+          let failure = err.attempt_failure();
+          if matches!(failure, AttemptFailure::Deadline(..)) {
+            retry_after_deadline(deadline_budget, url, failure).await?;
             continue;
-          } else {
-            return Err(SendError::Failed(err.into()));
           }
-        }
-        Err(crate::http_util::SendError::InvalidUri(err)) => {
-          return Err(SendError::Failed(err.into()));
+          match err {
+            crate::http_util::SendError::Send(err) => {
+              if err.is_connect_error() {
+                handle_request_or_server_error(
+                  &mut retried,
+                  url,
+                  err.to_string(),
+                )
+                .await
+                .map_err(|()| SendError::Failed(err.into()))?;
+                continue;
+              } else {
+                return Err(SendError::Failed(err.into()));
+              }
+            }
+            crate::http_util::SendError::InvalidUri(err) => {
+              return Err(SendError::Failed(err.into()));
+            }
+            crate::http_util::SendError::Deadline(err) => {
+              return Err(SendError::Failed(err.into()));
+            }
+          }
         }
       };
       if response.status() == StatusCode::NOT_MODIFIED {
@@ -219,15 +244,27 @@ impl deno_cache_dir::file_fetcher::HttpClient for HttpClientAdapter {
         };
         return Err(err);
       } else {
-        let body_result = get_response_body_with_progress(
+        let body_result = get_response_body_with_deadline(
           response,
+          url,
           maybe_progress_guard.as_ref(),
+          client.deadlines(),
         )
         .await;
 
         match body_result {
           Ok((headers, body)) => {
             return Ok(SendResponse::Success(headers, body));
+          }
+          Err(ResponseBodyError::Deadline(err)) => {
+            client.replace_connection();
+            retry_after_deadline(
+              deadline_budget,
+              url,
+              AttemptFailure::Deadline(err.kind, err.after),
+            )
+            .await?;
+            continue;
           }
           Err(err) => {
             handle_request_or_server_error(&mut retried, url, err.to_string())
@@ -237,6 +274,27 @@ impl deno_cache_dir::file_fetcher::HttpClient for HttpClientAdapter {
           }
         }
       }
+    }
+  }
+}
+
+/// Waits before the next attempt after one failed on a deadline, or fails
+/// with every attempt's failure once the budget is spent.
+async fn retry_after_deadline(
+  budget: &mut RetryBudget,
+  url: &Url,
+  failure: AttemptFailure,
+) -> Result<(), SendError> {
+  log::debug!("Downloading '{url}' failed: {failure}");
+  match budget.record(failure) {
+    Some(wait) => {
+      tokio::time::sleep(wait).await;
+      Ok(())
+    }
+    None => {
+      let budget =
+        std::mem::replace(budget, RetryBudget::new(Default::default()));
+      Err(SendError::Failed(budget.into_error(url.clone()).into()))
     }
   }
 }
