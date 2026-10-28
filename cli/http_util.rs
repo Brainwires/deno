@@ -831,7 +831,7 @@ pub async fn get_response_body_with_deadline(
     let Some(item) = item else {
       break;
     };
-    let bytes = item.map_err(|err| ResponseBodyError::Read(err.into()))?;
+    let bytes = item.map_err(ResponseBodyError::Read)?;
     data.extend_from_slice(&bytes);
     if let Some(progress_guard) = progress_guard {
       progress_guard.set_position(data.len() as u64);
@@ -1030,6 +1030,7 @@ mod test {
     );
     let (response, url) = client
       .get_redirected_response(
+        &client.client,
         Url::parse(&format!("http://{source_addr}/start")).unwrap(),
         &headers,
         true,

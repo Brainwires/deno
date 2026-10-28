@@ -294,7 +294,7 @@ pub async fn within<T>(
 
 pub fn format_duration(after: Duration) -> String {
   let ms = after.as_millis();
-  if ms % 1000 == 0 {
+  if ms.is_multiple_of(1000) {
     format!("{}s", ms / 1000)
   } else {
     format!("{ms}ms")
