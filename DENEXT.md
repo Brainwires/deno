@@ -5456,6 +5456,23 @@ where the changes are discussed.
      pool, still leaves room for a `spawn_blocking` task and then delivers the
      bytes written to it).
 
+138. **`fix(ext/node)`: `brotliDecompressSync` throws on invalid input**
+     (`fix/supply-denext2`; `ext/node/ops/zlib/mod.rs`, `Cargo.toml`,
+     `Cargo.lock`, `tests/unit_node/zlib_test.ts`). Cherry-picked from
+     denoland/deno `main` with `-x` (6e9f66f5dc, #37084): the sync Brotli decode
+     op ignored `BrotliDecoderDecompressStream`'s result, so a malformed stream
+     (Node's `test-zlib-invalid-input.js` vector, a block switch after one
+     declared block type; CVE-2026-111497's shape) came back as the output
+     decoded so far instead of throwing, and a small input could expand into a
+     large one first. It now reports the decoder's error through `onerror` as
+     the async `write` path does. brotli 6.0.0 / brotli-decompressor 4.0.1 move
+     to 9.1.1 / 6.2.0 (upstream: 9.1.0) and async-compression to 0.4.51
+     (compression-codecs 0.4.46 / compression-core 0.4.34), so one brotli is in
+     the lock, as upstream did. The lock was re-resolved here rather than taken
+     from upstream's, which also moved unrelated `windows-sys` pins. Test:
+     "brotli decompress rejects invalid block switch" (sync throws; the
+     streaming decoder emits `error`, never `end`).
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137) are what the prebuilt `libdenort` carries.
