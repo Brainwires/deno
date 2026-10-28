@@ -34,10 +34,13 @@ pub struct PipeWrite {
 // The asynchronous write end of a unidirectional pipe.
 pub struct AsyncPipeWrite {
   #[cfg(windows)]
-  /// We use a `ChildStdin` here as it's a much better fit for a Windows named pipe on Windows. We
-  /// might also be able to use `tokio::net::windows::named_pipe::NamedPipeClient` in the future
-  /// if those can be created from raw handles down the road.
-  write: tokio::process::ChildStdin,
+  /// The server end of the overlapped named pipe [`pipe`] creates, written
+  /// through the runtime's I/O completion port. tokio's `ChildStdin`, used
+  /// here before, wrote it with a blocking `WriteFile` on the runtime's
+  /// blocking pool, and a write the reader didn't take yet (more than the
+  /// pipe's 4 KiB buffer) held its pool thread until it did (DENEXT.md item
+  /// 137, the write side of item 119).
+  write: tokio::net::windows::named_pipe::NamedPipeServer,
   #[cfg(not(windows))]
   write: tokio::net::unix::pipe::Sender,
 }
@@ -131,11 +134,18 @@ impl PipeWrite {
   /// unavailable.
   #[cfg(windows)]
   pub fn into_async(self) -> io::Result<AsyncPipeWrite> {
+    use std::os::windows::io::IntoRawHandle;
     let owned: std::os::windows::io::OwnedHandle = self.file.into();
-    let stdin = std::process::ChildStdin::from(owned);
-    Ok(AsyncPipeWrite {
-      write: tokio::process::ChildStdin::from_std(stdin)?,
-    })
+    // SAFETY: a `PipeWrite` holds the server end of the named pipe
+    // `pipe_impl` creates, opened with `FILE_FLAG_OVERLAPPED`, which is what
+    // `NamedPipeServer` requires; ownership moves to it (it closes the handle,
+    // also when registering it fails).
+    let write = unsafe {
+      tokio::net::windows::named_pipe::NamedPipeServer::from_raw_handle(
+        owned.into_raw_handle(),
+      )?
+    };
+    Ok(AsyncPipeWrite { write })
   }
 
   /// Converts this sync writer into an async writer. May fail if the Tokio runtime is
@@ -157,12 +167,17 @@ impl PipeWrite {
 }
 
 impl AsyncPipeWrite {
-  /// Converts this async writer into an sync writer. May fail if the Tokio runtime is
-  /// unavailable.
+  /// Converts this async writer into an sync writer.
+  ///
+  /// Not supported on Windows: the handle stays bound to the runtime's I/O
+  /// completion port (tokio's `NamedPipeServer` can't hand it back), and a
+  /// write may still be in flight on it. Nothing in the tree calls it.
   #[cfg(windows)]
   pub fn into_sync(self) -> io::Result<PipeWrite> {
-    let owned = self.write.into_owned_handle()?;
-    Ok(PipeWrite { file: owned.into() })
+    Err(io::Error::new(
+      io::ErrorKind::Unsupported,
+      "an async pipe writer can't be made synchronous again on Windows",
+    ))
   }
 
   /// Converts this async writer into an sync writer. May fail if the Tokio runtime is
@@ -368,12 +383,18 @@ mod tests {
     assert_eq!(&buf, b"hello");
 
     // Windows can't detach a handle from the I/O completion port (see
-    // `AsyncPipeRead::into_sync`).
+    // `AsyncPipeRead::into_sync`, `AsyncPipeWrite::into_sync`).
     #[cfg(windows)]
-    assert_eq!(
-      read.into_sync().err().map(|e| e.kind()),
-      Some(io::ErrorKind::Unsupported)
-    );
+    {
+      assert_eq!(
+        read.into_sync().err().map(|e| e.kind()),
+        Some(io::ErrorKind::Unsupported)
+      );
+      assert_eq!(
+        write.into_sync().err().map(|e| e.kind()),
+        Some(io::ErrorKind::Unsupported)
+      );
+    }
     #[cfg(not(windows))]
     {
       let mut read = read.into_sync().unwrap();
@@ -459,6 +480,67 @@ mod tests {
       for read in quiet {
         assert_eq!(read.await.unwrap().unwrap(), 0);
       }
+    });
+  }
+  /// A write the reader doesn't take yet holds no thread of the runtime's
+  /// blocking pool either (DENEXT.md item 137). On Windows the write end used
+  /// to be written with a blocking `WriteFile` on that pool, which waited
+  /// there for the reader once the pipe's 4 KiB buffer was full.
+  #[test]
+  fn pending_async_pipe_writes_hold_no_blocking_thread() {
+    const POOL: usize = 2;
+    let rt = tokio::runtime::Builder::new_current_thread()
+      .enable_all()
+      .max_blocking_threads(POOL)
+      .build()
+      .unwrap();
+    rt.block_on(async {
+      let mut readers = Vec::new();
+      let mut writes = Vec::new();
+      for _ in 0..4 * POOL {
+        let (read, write) = pipe().unwrap();
+        let mut write = write.into_async().unwrap();
+        readers.push(read);
+        writes.push(tokio::spawn(async move {
+          // Well past the pipe's buffer, and nobody reads it yet.
+          write.write_all(&[97; 256 * 1024]).await?;
+          write.shutdown().await?;
+          Ok::<_, io::Error>(write)
+        }));
+      }
+      // Let every write start.
+      tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+      let blocking = tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        tokio::task::spawn_blocking(|| 42),
+      )
+      .await;
+      // Reading the pipes (through the completion port, item 119) ends the
+      // writes either way, so a failure doesn't leave the pool's threads
+      // blocked behind them.
+      let reads = readers
+        .into_iter()
+        .map(|read| {
+          let mut read = read.into_async().unwrap();
+          tokio::spawn(async move {
+            let mut buf = vec![0_u8; 256 * 1024];
+            read.read_exact(&mut buf).await.map(|_| buf)
+          })
+        })
+        .collect::<Vec<_>>();
+      for read in reads {
+        assert!(read.await.unwrap().unwrap().iter().all(|b| *b == 97));
+      }
+      for write in writes {
+        write.await.unwrap().unwrap();
+      }
+      assert_eq!(
+        blocking
+          .expect("pending pipe writes starved the blocking pool")
+          .unwrap(),
+        42
+      );
     });
   }
 }

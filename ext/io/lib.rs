@@ -52,6 +52,7 @@ use tokio::io::AsyncRead;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWrite;
 use tokio::io::AsyncWriteExt;
+#[cfg(not(windows))]
 use tokio::process;
 #[cfg(windows)]
 use windows_sys::Win32::System::Console::GetStdHandle;
@@ -507,7 +508,76 @@ where
   }
 }
 
+/// The parent's write end of a child's stdin pipe on Windows: the overlapped
+/// named pipe server end that `deno_subprocess_windows` creates (outbound),
+/// written through the runtime's I/O completion port.
+///
+/// tokio's own `ChildStdin` writes a Windows pipe with a blocking `WriteFile`
+/// on the runtime's blocking pool, and a write the child doesn't read yet
+/// (more than the pipe's 64 KiB buffer, to a child that reads its stdin late)
+/// holds its pool thread until the child reads it or exits. Enough such
+/// children filled the pool (four threads per CPU on Windows), and every other
+/// blocking task (file system ops, DNS) waited behind them; a child waiting
+/// for one of those before it read its stdin never did. An overlapped write
+/// holds no thread: the data is handed to the I/O completion port, and a
+/// second write waits (without a thread) until the first one completes. A
+/// write that is still pending when the writer is dropped is not cancelled; it
+/// completes (or fails) before the handle closes, so the child still reads
+/// all of it and then EOF (DENEXT.md item 137).
+#[cfg(windows)]
+pub struct ChildStdinWriter(tokio::net::windows::named_pipe::NamedPipeServer);
+
+#[cfg(windows)]
+impl ChildStdinWriter {
+  /// The writer for a child's stdin pipe. Takes ownership of `stdin`, which
+  /// must be the server end of a named pipe opened with
+  /// `FILE_FLAG_OVERLAPPED` (the parent's end of a pipe that
+  /// `deno_subprocess_windows` or the standard library created), and
+  /// registers it with the current runtime's I/O driver.
+  pub fn from_std(stdin: std::process::ChildStdin) -> io::Result<Self> {
+    use std::os::windows::io::IntoRawHandle;
+    let handle: std::os::windows::io::OwnedHandle = stdin.into();
+    // SAFETY: the caller hands over sole ownership of an overlapped named pipe
+    // server handle, which is what `NamedPipeServer` requires; it closes the
+    // handle, also when registering it fails.
+    let pipe = unsafe {
+      tokio::net::windows::named_pipe::NamedPipeServer::from_raw_handle(
+        handle.into_raw_handle(),
+      )?
+    };
+    Ok(Self(pipe))
+  }
+}
+
+#[cfg(windows)]
+impl AsyncWrite for ChildStdinWriter {
+  fn poll_write(
+    mut self: std::pin::Pin<&mut Self>,
+    cx: &mut std::task::Context<'_>,
+    buf: &[u8],
+  ) -> std::task::Poll<io::Result<usize>> {
+    std::pin::Pin::new(&mut self.0).poll_write(cx, buf)
+  }
+
+  fn poll_flush(
+    mut self: std::pin::Pin<&mut Self>,
+    cx: &mut std::task::Context<'_>,
+  ) -> std::task::Poll<io::Result<()>> {
+    std::pin::Pin::new(&mut self.0).poll_flush(cx)
+  }
+
+  fn poll_shutdown(
+    mut self: std::pin::Pin<&mut Self>,
+    cx: &mut std::task::Context<'_>,
+  ) -> std::task::Poll<io::Result<()>> {
+    std::pin::Pin::new(&mut self.0).poll_shutdown(cx)
+  }
+}
+
+#[cfg(not(windows))]
 pub type ChildStdinResource = WriteOnlyResource<process::ChildStdin>;
+#[cfg(windows)]
+pub type ChildStdinResource = WriteOnlyResource<ChildStdinWriter>;
 
 impl Resource for ChildStdinResource {
   fn name(&self) -> Cow<'_, str> {

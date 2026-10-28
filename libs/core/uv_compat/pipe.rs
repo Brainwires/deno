@@ -54,14 +54,10 @@ pub struct uv_pipe_t {
 
   #[cfg(windows)]
   pub(crate) internal_handle: Option<std::os::windows::io::RawHandle>,
-  /// Pending blocking read result from a spawned thread.
+  /// The pending read of `internal_handle` (a pipe without
+  /// `FILE_FLAG_OVERLAPPED`), on its own thread; see [`WinPipeRead`].
   #[cfg(windows)]
-  #[allow(
-    clippy::type_complexity,
-    reason = "JoinHandle<Result<(Vec,usize)>> is inherently complex"
-  )]
-  pub(crate) internal_pending_read:
-    Option<tokio::task::JoinHandle<std::io::Result<(Vec<u8>, usize)>>>,
+  pub(crate) internal_pending_read: Option<WinPipeRead>,
   /// Windows named pipe server (waiting for or connected to a client).
   /// Wrapped in Arc so the connect future can hold its own reference
   /// without self-referential lifetime issues.
@@ -1263,8 +1259,8 @@ pub(crate) unsafe fn close_pipe(pipe: *mut uv_pipe_t) {
 
     #[cfg(windows)]
     {
-      if let Some(handle) = (*pipe).internal_pending_read.take() {
-        handle.abort();
+      if let Some(read) = (*pipe).internal_pending_read.take() {
+        read.cancel();
       }
       if let Some(retry) = (*pipe).internal_win_connect_retry.take() {
         retry.abort();
@@ -1371,42 +1367,158 @@ pub(crate) unsafe fn read_start_pipe(
 pub(crate) unsafe fn read_stop_pipe(pipe: *mut uv_pipe_t) -> c_int {
   unsafe {
     (*pipe).internal_reading = false;
-    // Abort pending read if any.
-    if let Some(handle) = (*pipe).internal_pending_read.take() {
-      handle.abort();
-    }
+    // denext: a pending read of a raw handle keeps going: its result is
+    // delivered by the next `read_start` (see `WinPipeRead`).
   }
   0
 }
 
-/// Windows: spawn a blocking read on a thread if one isn't already pending.
+#[cfg(windows)]
+type WinPipeReadResult = std::io::Result<(Vec<u8>, usize)>;
+
+/// denext: one pending read of a pipe handle opened without
+/// `FILE_FLAG_OVERLAPPED` (an anonymous pipe from `CreatePipe`, or the client
+/// end a parent hands its child as stdio), which can only be read with a
+/// blocking `ReadFile`.
+///
+/// It runs on a thread of its own, the way libuv reads such a pipe (a
+/// `QueueUserWorkItem` per read, `src/win/pipe.c`), not on the runtime's
+/// blocking pool: a pending read lasts until data or EOF arrives, which for a
+/// quiet pipe can be forever, and the pool is capped (four threads per CPU on
+/// Windows), so reads that held its threads starved every file system op and
+/// child process write behind them. A `JoinHandle::abort()` doesn't stop a
+/// blocking task that is already running either: `read_stop` used to drop the
+/// read that way, so its thread stayed pinned, the data it went on to read was
+/// lost, and the next `read_start` started a second read beside it
+/// (DENEXT.md item 137).
+///
+/// So a read is never dropped while the pipe is open: one stopped by
+/// `read_stop` keeps its result for the next `read_start`. Closing the pipe
+/// cancels it (`CancelSynchronousIo`, as libuv's `uv__pipe_interrupt_read`).
+/// The thread reads a duplicate of the handle, so closing the pipe's own
+/// handle never leaves it reading a closed (or reused) handle value.
+#[cfg(windows)]
+pub(crate) struct WinPipeRead {
+  result: tokio::sync::oneshot::Receiver<WinPipeReadResult>,
+  thread: Option<std::thread::JoinHandle<()>>,
+  cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[cfg(windows)]
+impl WinPipeRead {
+  /// Starts a read of `handle` on a thread of its own.
+  fn start(handle: std::os::windows::io::RawHandle) -> Self {
+    use windows_sys::Win32::Foundation::DUPLICATE_SAME_ACCESS;
+    use windows_sys::Win32::Foundation::DuplicateHandle;
+    use windows_sys::Win32::System::Threading::GetCurrentProcess;
+
+    let (tx, result) = tokio::sync::oneshot::channel();
+    let cancelled =
+      std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mut dup: windows_sys::Win32::Foundation::HANDLE = std::ptr::null_mut();
+    // SAFETY: `handle` is the valid pipe handle `uv_pipe_open` stored; the
+    // duplicate is owned by the read thread, which closes it.
+    let ok = unsafe {
+      let process = GetCurrentProcess();
+      DuplicateHandle(
+        process,
+        handle as _,
+        process,
+        &mut dup,
+        0,
+        0,
+        DUPLICATE_SAME_ACCESS,
+      )
+    };
+    if ok == 0 {
+      let _ = tx.send(Err(std::io::Error::last_os_error()));
+      return Self {
+        result,
+        thread: None,
+        cancelled,
+      };
+    }
+
+    let dup = dup as usize; // a raw handle isn't `Send`
+    let thread_cancelled = cancelled.clone();
+    let spawned = std::thread::Builder::new()
+      .name("uv-pipe-read".to_string())
+      .spawn(move || {
+        use std::io::Read;
+        use std::os::windows::io::FromRawHandle;
+        // SAFETY: the duplicate is owned by this thread alone; the `File`
+        // closes it when the read is done.
+        let file = unsafe {
+          std::fs::File::from_raw_handle(dup as std::os::windows::io::RawHandle)
+        };
+        if thread_cancelled.load(std::sync::atomic::Ordering::SeqCst) {
+          return;
+        }
+        let mut buf = vec![0u8; 65536];
+        // `std` reads ERROR_BROKEN_PIPE (the writer closed) as EOF.
+        let read = (&file).read(&mut buf).map(|n| (buf, n));
+        let _ = tx.send(read);
+      });
+    match spawned {
+      Ok(thread) => Self {
+        result,
+        thread: Some(thread),
+        cancelled,
+      },
+      Err(_) => {
+        // The closure (and with it the sender and the duplicate) was
+        // dropped without running: close the duplicate here. The receiver
+        // sees the sender gone and reports the read as cancelled.
+        // SAFETY: `dup` is the duplicate made above, owned by nobody else.
+        unsafe {
+          windows_sys::Win32::Foundation::CloseHandle(dup as _);
+        }
+        Self {
+          result,
+          thread: None,
+          cancelled,
+        }
+      }
+    }
+  }
+
+  /// Cancels the read when the pipe closes: its result is dropped, and the
+  /// thread's blocking `ReadFile` is interrupted if it is in one. A thread
+  /// that is just about to call `ReadFile` misses the interruption; it then
+  /// returns at the next data or EOF on the pipe, holding no thread of the
+  /// runtime's pool meanwhile.
+  fn cancel(self) {
+    use std::os::windows::io::AsRawHandle;
+    self
+      .cancelled
+      .store(true, std::sync::atomic::Ordering::SeqCst);
+    if let Some(thread) = &self.thread
+      && !thread.is_finished()
+    {
+      // SAFETY: the thread handle is valid while the `JoinHandle` lives.
+      // Failure (ERROR_NOT_FOUND: no synchronous I/O in progress) is fine.
+      unsafe {
+        windows_sys::Win32::System::IO::CancelSynchronousIo(
+          thread.as_raw_handle() as _,
+        );
+      }
+    }
+    // Dropping the `JoinHandle` detaches the thread.
+  }
+}
+
+/// Windows: start a read of the raw pipe handle if one isn't already
+/// pending (see [`WinPipeRead`]).
 #[cfg(windows)]
 unsafe fn maybe_spawn_win_read(pipe_ptr: *mut uv_pipe_t) {
   unsafe {
     if (*pipe_ptr).internal_pending_read.is_some() {
       return; // already reading
     }
-    let handle = match (*pipe_ptr).internal_handle {
-      Some(h) => h as usize, // usize is Send
-      None => return,
+    let Some(handle) = (*pipe_ptr).internal_handle else {
+      return;
     };
-
-    let join = tokio::task::spawn_blocking(move || {
-      use std::io::Read;
-      use std::os::windows::io::FromRawHandle;
-      // SAFETY: handle is a valid OS handle stored by uv_pipe_open.
-      // We reconstruct a File temporarily, read from it, then leak it
-      // back to avoid double-close.
-      let mut file = std::fs::File::from_raw_handle(
-        handle as std::os::windows::io::RawHandle,
-      );
-      let mut buf = vec![0u8; 65536];
-      let result = file.read(&mut buf);
-      // Don't drop the File -- the handle is owned by uv_pipe_t.
-      let _ = std::os::windows::io::IntoRawHandle::into_raw_handle(file);
-      result.map(|n| (buf, n))
-    });
-    (*pipe_ptr).internal_pending_read = Some(join);
+    (*pipe_ptr).internal_pending_read = Some(WinPipeRead::start(handle));
   }
 }
 
@@ -1573,8 +1685,9 @@ pub(crate) unsafe fn poll_pipe_handle(
       // For raw handle (uv_pipe_open path), use blocking read thread.
       if (*pipe_ptr).internal_handle.is_some() {
         maybe_spawn_win_read(pipe_ptr);
-        if let Some(ref mut join) = (*pipe_ptr).internal_pending_read
-          && let Poll::Ready(result) = std::pin::Pin::new(join).poll(cx)
+        if let Some(ref mut read) = (*pipe_ptr).internal_pending_read
+          && let Poll::Ready(result) =
+            std::pin::Pin::new(&mut read.result).poll(cx)
         {
           (*pipe_ptr).internal_pending_read = None;
           let alloc_cb = (*pipe_ptr).internal_alloc_cb;

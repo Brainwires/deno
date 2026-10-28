@@ -5386,12 +5386,82 @@ where the changes are discussed.
      (`cli/util/signal_flush.rs`); `coverage_files_are_written_whole`
      (`runtime/coverage.rs`).
 
+137. **`fix(process)`: a child's Windows stdin, a `deno_io` pipe writer and a
+     `node:child_process` blocking pipe read hold no blocking-pool thread**
+     (`fix/prod-robustness-denext2`, CLI and runtime; `ext/io/lib.rs`,
+     `ext/io/pipe.rs`, `ext/process/lib.rs`, `libs/core/uv_compat/pipe.rs`). The
+     rest of items 118 and 119 (the audit's R1). Not validated on a Windows
+     build yet: the fork's Windows CI is its first run.
+     - **Piped stdin**: `Deno.Command` (and `Deno.run`) wrapped a child's piped
+       stdin in tokio's `ChildStdin`, which on Windows writes the pipe with a
+       blocking `WriteFile` on the runtime's blocking pool (tokio's
+       `process/windows.rs` wraps it in `io::blocking::Blocking`). A write a
+       child doesn't read yet (more than the pipe's 64 KiB buffer) held its pool
+       thread until the child read it; with one such write per child, `4 * CPUs`
+       children filled the pool, and a child that waited for anything that needs
+       a pool thread (a file write of the parent's, say) before it read its
+       stdin never did. The parent's end is the overlapped, outbound named pipe
+       server `deno_subprocess_windows`' `anon_pipe` creates, so it is now
+       written as a `tokio::net::windows::named_pipe::NamedPipeServer`
+       (`ChildStdinWriter`) through the I/O completion port, as
+       `node:child_process`' stdin already was (`uv_compat`). mio hands each
+       write to the port and reports it written; a second write waits, holding
+       no thread, until the first completes, and dropping the writer doesn't
+       cancel a pending write, so the child still reads all of it and then EOF.
+       Unlike tokio's `ChildStdin`, `shutdown` no longer waits for that write: a
+       parent that exits right after closing stdin, without waiting for the
+       child, can lose what the child had not read.
+     - **`AsyncPipeWrite`** (`deno_io::pipe()`'s write end) is the overlapped
+       server end of that pipe written the same way; `into_sync` now fails with
+       `Unsupported` on Windows, like `AsyncPipeRead::into_sync` (item 119).
+       Nothing in the tree writes through it.
+     - **`node:child_process` / `uv_pipe_open` on a pipe without
+       `FILE_FLAG_OVERLAPPED`** (an anonymous pipe from `CreatePipe`, the client
+       end a parent hands a child): tokio can't register such a handle with the
+       completion port (`CreateIoCompletionPort` needs a handle opened for
+       overlapped I/O,
+       [docs](https://learn.microsoft.com/en-us/windows/win32/fileio/createiocompletionport)),
+       so it is read with a blocking `ReadFile`, which ran on the blocking pool.
+       `read_stop` dropped a pending read with `JoinHandle::abort()`, which
+       doesn't stop a blocking task that is already running: its thread stayed
+       blocked, the data it then read was thrown away, and the next `read_start`
+       started a second read beside it (Node streams stop and restart reading on
+       backpressure). A read now runs on a thread of its own (libuv does the
+       same with a long-running `QueueUserWorkItem` per read, `src/win/pipe.c`),
+       reads a duplicate of the handle (so closing the pipe never leaves it
+       reading a closed or reused handle value), and is never dropped while the
+       pipe is open: one stopped by `read_stop` keeps its result for the next
+       `read_start`. Closing the pipe cancels it with `CancelSynchronousIo`, as
+       libuv's `uv__pipe_interrupt_read` does
+       ([docs](https://learn.microsoft.com/en-us/windows/win32/fileio/cancelsynchronousio-func):
+       a thread not yet inside `ReadFile` misses it and returns at the next data
+       or EOF, holding no pool thread).
+
+     Not changed (the audit's R2, upstream behaviour): `Deno.open` on a
+     `\\.\pipe\` path and `Deno.stdin` read through the file system's
+     `spawn_blocking`, one pending read per handle.
+
+     Tests: `commandManyPipedStdinsDoNotExhaustBlockingPool`
+     (`tests/unit/command_test.ts`, Windows only:
+     `4 * hardwareConcurrency +
+     4` children each wait for a file the parent
+     writes before they read the 256 KiB written to their stdin; the file write
+     and every child must finish within 60 s);
+     `pending_async_pipe_writes_hold_no_blocking_thread` (`ext/io/pipe.rs`: with
+     a two-thread blocking pool, eight 256 KiB writes nobody reads yet must
+     leave room for a `spawn_blocking` task);
+     `raw_pipe_reads_hold_no_blocking_thread_and_lose_no_data`
+     (`libs/core/uv_compat/tests.rs`, Windows only: a `CreatePipe` pipe read
+     through `uv_pipe_open`, stopped and restarted eight times on a two-thread
+     pool, still leaves room for a `spawn_blocking` task and then delivers the
+     bytes written to it).
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
-118, 119, 126, 127, 129) are what the prebuilt `libdenort` carries. The CLI-side
-parts (for example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a
-packaged app's launchers) are in the branch too, but a stock CLI does not run
-them; denext's own launcher provides that environment.
+118, 119, 126, 127, 129, 136, 137) are what the prebuilt `libdenort` carries.
+The CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` /
+`LAUFEY_APP_ID` into a packaged app's launchers) are in the branch too, but a
+stock CLI does not run them; denext's own launcher provides that environment.
 
 The laufey backend hosts are built from
 [Brainwires/laufey](https://github.com/Brainwires/laufey) branch

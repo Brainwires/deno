@@ -3525,6 +3525,166 @@ async fn uv_pipe_connect_busy_then_succeeds() {
   .await;
 }
 
+/// A pipe without `FILE_FLAG_OVERLAPPED` (an anonymous pipe from
+/// `CreatePipe`, as a non-Deno parent hands its child for stdio) is read with
+/// a blocking `ReadFile`. Those reads ran on the runtime's blocking pool, and
+/// `read_stop` dropped a pending one with `JoinHandle::abort()`, which doesn't
+/// stop a blocking task that is already running: each stop/start cycle left
+/// one more thread of the pool blocked on the pipe, the data the abandoned
+/// read went on to get was lost, and with the pool full nothing else got a
+/// thread (DENEXT.md item 137). A read now runs on a thread of its own and
+/// survives `read_stop`.
+#[cfg(windows)]
+#[test]
+fn raw_pipe_reads_hold_no_blocking_thread_and_lose_no_data() {
+  use std::sync::Mutex;
+
+  use windows_sys::Win32::Foundation::CloseHandle;
+  use windows_sys::Win32::Foundation::HANDLE;
+  use windows_sys::Win32::Storage::FileSystem::WriteFile;
+  use windows_sys::Win32::System::Pipes::CreatePipe;
+
+  static RECEIVED: Mutex<Vec<u8>> = Mutex::new(Vec::new());
+
+  unsafe extern "C" fn alloc_cb(
+    _handle: *mut uv_handle_t,
+    suggested_size: usize,
+    buf: *mut uv_buf_t,
+  ) {
+    // SAFETY: malloc + writing to out-param buf.
+    unsafe {
+      let ptr = libc::malloc(suggested_size) as *mut c_char;
+      (*buf).base = ptr;
+      (*buf).len = suggested_size;
+    }
+  }
+  unsafe extern "C" fn read_cb(
+    _stream: *mut uv_stream_t,
+    nread: isize,
+    buf: *const uv_buf_t,
+  ) {
+    // SAFETY: `buf` holds `nread` bytes read into the buffer from alloc_cb,
+    // which is freed here.
+    unsafe {
+      if nread > 0 {
+        let data =
+          std::slice::from_raw_parts((*buf).base as *const u8, nread as usize);
+        RECEIVED.lock().unwrap().extend_from_slice(data);
+      }
+      if !(*buf).base.is_null() {
+        libc::free((*buf).base as *mut c_void);
+      }
+    }
+  }
+
+  const POOL: usize = 2;
+  let rt = tokio::runtime::Builder::new_current_thread()
+    .enable_all()
+    .max_blocking_threads(POOL)
+    .build()
+    .unwrap();
+  rt.block_on(run_test(async |runtime, uv_loop| {
+    let mut read: HANDLE = std::ptr::null_mut();
+    let mut write: HANDLE = std::ptr::null_mut();
+    // SAFETY: out-params for a new anonymous pipe.
+    assert_ne!(
+      unsafe { CreatePipe(&mut read, &mut write, std::ptr::null(), 0) },
+      0
+    );
+    // SAFETY: the CRT fd takes ownership of the read handle.
+    let fd = unsafe { libc::open_osfhandle(read as isize, libc::O_RDONLY) };
+    assert!(fd >= 0);
+
+    let mut pipe = pipe::new_pipe(false);
+    unsafe {
+      assert_ok(pipe::uv_pipe_init(uv_loop, &mut pipe, 0));
+      assert_ok(pipe::uv_pipe_open(&mut pipe, fd));
+    }
+    // Not overlapped: the blocking read path.
+    assert!(pipe.internal_handle.is_some());
+
+    // More stop/start cycles than the pool has threads, on a quiet pipe.
+    for _ in 0..4 * POOL {
+      unsafe {
+        assert_ok(pipe::read_start_pipe(
+          &mut pipe,
+          Some(alloc_cb),
+          Some(read_cb),
+        ));
+      }
+      tick(runtime).await;
+      unsafe {
+        pipe::read_stop_pipe(&mut pipe);
+      }
+      tick(runtime).await;
+    }
+
+    let blocking = tokio::time::timeout(
+      std::time::Duration::from_secs(20),
+      tokio::task::spawn_blocking(|| 42),
+    )
+    .await;
+
+    // Data written now reaches the reader, once.
+    let mut written = 0u32;
+    // SAFETY: `write` is the pipe's write handle; the buffer outlives the
+    // call.
+    assert_ne!(
+      unsafe {
+        WriteFile(
+          write,
+          b"hello".as_ptr(),
+          5,
+          &mut written,
+          std::ptr::null_mut(),
+        )
+      },
+      0
+    );
+    assert_eq!(written, 5);
+    unsafe {
+      assert_ok(pipe::read_start_pipe(
+        &mut pipe,
+        Some(alloc_cb),
+        Some(read_cb),
+      ));
+    }
+    let deadline =
+      std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while RECEIVED.lock().unwrap().len() < 5
+      && std::time::Instant::now() < deadline
+    {
+      tick(runtime).await;
+      tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let received = RECEIVED.lock().unwrap().clone();
+
+    // Closing the write end ends any read still blocked (at EOF), so a
+    // failure doesn't leave the pool's threads blocked behind it.
+    // SAFETY: closes the write handle CreatePipe returned.
+    unsafe {
+      CloseHandle(write);
+    }
+    unsafe {
+      pipe::read_stop_pipe(&mut pipe);
+      uv_close(&mut pipe as *mut uv_pipe_t as *mut uv_handle_t, None);
+    }
+    tick(runtime).await;
+    // SAFETY: closes the CRT fd (and the read handle it owns).
+    unsafe {
+      libc::close(fd);
+    }
+
+    assert_eq!(
+      blocking
+        .expect("pending pipe reads starved the blocking pool")
+        .unwrap(),
+      42
+    );
+    assert_eq!(received, b"hello");
+  }));
+}
+
 // ========== Waker thread safety ==========
 
 /// Regression test for https://github.com/denoland/deno/issues/35171.

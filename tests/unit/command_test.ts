@@ -1630,6 +1630,84 @@ Deno.test(
   },
 );
 
+// A write to a child's stdin that the child doesn't read yet must not hold a
+// thread of the runtime's blocking pool either (DENEXT.md item 137). With
+// blocking writes, one pending write per child filled the pool; the file
+// write the children wait for before they read their stdin then never ran,
+// and none of them ever exited.
+Deno.test(
+  {
+    ignore: Deno.build.os !== "windows",
+    permissions: { run: true, read: true, write: true },
+  },
+  async function commandManyPipedStdinsDoNotExhaustBlockingPool() {
+    // More pending writes than the pool has threads: one per child.
+    const count = 4 * navigator.hardwareConcurrency + 4;
+    const dir = await Deno.makeTempDir();
+    const go = `${dir}/go`;
+    // Each child reads its stdin only once `go` exists.
+    const script = "const go = Deno.env.get('GO_FILE'); " +
+      "while (true) { try { Deno.statSync(go); break; } catch { " +
+      "await new Promise((r) => setTimeout(r, 50)); } } " +
+      "const n = (await new Response(Deno.stdin.readable).arrayBuffer())" +
+      ".byteLength; console.log(n);";
+    const children = Array.from(
+      { length: count },
+      () =>
+        new Deno.Command(Deno.execPath(), {
+          args: ["eval", script],
+          env: { GO_FILE: go },
+          stdin: "piped",
+          stdout: "piped",
+          stderr: "null",
+        }).spawn(),
+    );
+    // Well past a 64 KiB pipe buffer, so each write waits for its reader.
+    const payload = new Uint8Array(256 * 1024).fill(97);
+    const writes = children.map(async (child) => {
+      const writer = child.stdin.getWriter();
+      await writer.write(payload);
+      await writer.close();
+    });
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const stalled = new Promise<"stalled">((resolve) => {
+      timer = setTimeout(() => resolve("stalled"), 60_000);
+    });
+    try {
+      // Let every write start.
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      // A file write runs on the blocking pool.
+      const wrote = await Promise.race([Deno.writeTextFile(go, ""), stalled]);
+      assert(
+        wrote !== "stalled",
+        `${count} pending stdin writes starved the blocking pool`,
+      );
+      const outcome = await Promise.race([
+        Promise.all([
+          Promise.all(writes),
+          Promise.all(children.map((c) => c.output())),
+        ]),
+        stalled,
+      ]);
+      assert(outcome !== "stalled", `${count} piped children never finished`);
+      for (const { success, stdout } of outcome[1]) {
+        assert(success);
+        assertEquals(new TextDecoder().decode(stdout).trim(), "262144");
+      }
+    } finally {
+      clearTimeout(timer);
+      for (const child of children) {
+        try {
+          child.kill();
+        } catch {
+          // it already exited
+        }
+      }
+      await Deno.remove(dir, { recursive: true });
+    }
+  },
+);
+
 // A child spawned on one thread must not inherit the pipe ends another thread
 // is creating for its own child at the same moment. When a long-lived child
 // picked up a short-lived child's stdout write end, the short child's

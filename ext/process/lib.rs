@@ -1308,7 +1308,7 @@ fn spawn_child(
   let stdin_rid = child
     .stdin
     .take()
-    .map(tokio::process::ChildStdin::from_std)
+    .map(deno_io::ChildStdinWriter::from_std)
     .transpose()?
     .map(|stdin| state.resource_table.add(ChildStdinResource::from(stdin)));
 
@@ -2318,7 +2318,7 @@ mod deprecated {
     let stdin_rid = match child.stdin.take() {
       Some(child_stdin) => {
         #[cfg(windows)]
-        let child_stdin = tokio::process::ChildStdin::from_std(child_stdin)?;
+        let child_stdin = deno_io::ChildStdinWriter::from_std(child_stdin)?;
         let rid = state
           .resource_table
           .add(ChildStdinResource::from(child_stdin));
