@@ -11,7 +11,9 @@
 #          flags, dlint, the copyright and repo-hygiene checks), plus
 #          tools/format.js --check, tools/jsdoc_checker.js, cargo fmt and the
 #          release manifest writer's and tag gate's tests
-#          (.github/denext-runtime/manifest_test.py, tag_gate_test.py).
+#          (.github/denext-runtime/manifest_test.py, tag_gate_test.py) and the
+#          bare-assertion guard over the release scripts (assert_guard.py and
+#          its test).
 # - cargo-audit: RustSec advisories against Cargo.lock; .cargo/audit.toml
 #          lists the reviewed exceptions.
 # - per OS (denext_tests_os.yml), each OS on its own so one slow OS does not
@@ -144,6 +146,14 @@ jobs:
       - name: tag_gate_test.py
         if: runner.os == 'Linux'
         run: python3 -I .github/denext-runtime/tag_gate_test.py
+      # Every assertion in the release and test scripts names what it checked
+      # (DENEXT.md item 141): no bare test / [ / grep -q statements.
+      - name: assert_guard.py
+        if: runner.os == 'Linux'
+        run: python3 -I .github/denext-runtime/assert_guard.py
+      - name: assert_guard_test.py
+        if: runner.os == 'Linux'
+        run: python3 -I .github/denext-runtime/assert_guard_test.py
       - name: lint.js
         env:
           GITHUB_TOKEN: ${{ github.token }}

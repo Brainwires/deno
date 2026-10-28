@@ -5512,6 +5512,49 @@ where the changes are discussed.
      the failed run's id as `reuse_laufey_run_id` (its green legs' artifacts are
      there).
 
+136. **`fix(security)`: the Deno Deploy token crosses the session bus
+     encrypted** (`fix/secret-service-session-denext2`, CLI only;
+     `cli/Cargo.toml`, `Cargo.lock`, `cli/tools/deploy.rs`,
+     `.github/denext-runtime/assert_guard.py`,
+     `.github/denext-runtime/assert_guard_test.py`,
+     `.github/denext-runtime/e2e/linux/session.sh`,
+     `.github/workflows/denext_tests.yml`). The CLI keeps the Deno Deploy token
+     (`deno deploy`'s `op_deploy_token_get` / `_set` / `_delete`, and the
+     tunnel's stored token in `cli/lib.rs`) in the OS store through the
+     `keyring` crate, which on Linux talks to the Secret Service with
+     `dbus-secret-service`. `keyring` 3.6.3 picks the transfer session at
+     compile time: with neither `crypto-rust` nor `crypto-openssl` it opens
+     `EncryptionType::Plain` (`keyring` `src/secret_service.rs`, `set_secret`
+     and `map_matching_items`), so the token went over the session bus in clear,
+     for any process that can monitor that bus to read. The CLI built `keyring`
+     with `sync-secret-service` and `vendored` only. It now enables
+     `crypto-rust` (RustCrypto, no OpenSSL), so every session is
+     `dh-ietf1024-sha256-aes128-cbc-pkcs7` (Diffie-Hellman, then AES-128-CBC).
+     `dbus-secret-service` does not fall back to plain, so a provider without
+     that algorithm now refuses the call instead of taking the token in clear;
+     gnome-keyring, KWallet and KeePassXC all offer it.
+     - The lock gains `secret-service` 4.0.0 and its `zbus` tree because
+       `keyring`'s `crypto-rust` names `secret-service?/crypto-rust`; Cargo
+       locks weak dependencies, but `cargo tree` shows none of them is built
+       (only `dbus-secret-service` with `crypto-rust`). `cargo audit` reports
+       three new unmaintained warnings for them (`zbus_names`, `zvariant`,
+       `zvariant_derive`: RUSTSEC-2026-0370 to -0372), and no vulnerability.
+     - Test: `tools::deploy::tests::keyring_opens_an_encrypted_session` (Linux)
+       starts a private `dbus-daemon`, owns `org.freedesktop.secrets` with a
+       stand-in that records every `OpenSession` algorithm, runs a token lookup
+       in a child process on that bus and requires the DH algorithm. Without
+       `crypto-rust` it fails with `a plain transfer session was opened`. It
+       skips without `dbus-daemon` unless `CI` is set.
+     - The production audit's P6 guard: `assert_guard.py`, run by the lint job
+       with its test, refuses a bare `test` / `[` / `[[` / `grep -q` statement
+       (or one whose `||` branch exits with no message) in
+       `.github/denext-runtime/**/*.sh` and the `run:` blocks of
+       `.github/workflows/denext_*.yml`. The one it found, the e2e session's
+       locked-keyring check, now prints an `::error::`.
+     - tokio RUSTSEC-2026-0386 (`AsyncFd` constructors and I/O safety) is
+       patched in 1.53.3, the only tokio in the lock; `cargo audit` with the
+       advisory database of 2026-10-27 does not report it.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137) are what the prebuilt `libdenort` carries.
