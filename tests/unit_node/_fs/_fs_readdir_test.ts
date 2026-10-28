@@ -1,5 +1,11 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
-import { assertEquals, assertNotEquals, fail } from "@std/assert";
+import {
+  assert,
+  assertEquals,
+  assertNotEquals,
+  assertThrows,
+  fail,
+} from "@std/assert";
 import { assertCallbackErrorUncaught } from "../_test_utils.ts";
 import { type Dirent, readdir, readdirSync } from "node:fs";
 import { Buffer } from "node:buffer";
@@ -284,4 +290,43 @@ Deno.test("[std/node/fs] readdir callback isn't called twice if error is thrown"
       await Deno.remove(tempDir);
     },
   });
+});
+
+Deno.test("[node/fs] readdir reads its options once, at the call", async () => {
+  // Node copies the options before it starts: changing the caller's object
+  // afterwards doesn't change the result of the read in flight.
+  const dir = Deno.makeTempDirSync();
+  Deno.writeTextFileSync(join(dir, "file.txt"), "hi");
+  try {
+    const options: { recursive: boolean; withFileTypes: true } = {
+      recursive: true,
+      withFileTypes: true,
+    };
+    const entries = await new Promise<Dirent[]>((resolve, reject) => {
+      readdir(dir, options, (err, files) => {
+        if (err) reject(err);
+        resolve(files);
+      });
+      (options as { withFileTypes: boolean }).withFileTypes = false;
+    });
+    assertEquals(entries.length, 1);
+    assertEquals(entries[0].name, "file.txt");
+    assertEquals(entries[0].isFile(), true);
+  } finally {
+    Deno.removeSync(dir, { recursive: true });
+  }
+});
+
+Deno.test("[node/fs] readdir errors name the scandir syscall", () => {
+  // libuv's uv_fs_scandir backs Node's readdir: "ENOTDIR: not a directory,
+  // scandir '<path>'".
+  const file = Deno.makeTempFileSync();
+  try {
+    const err = assertThrows(() => readdirSync(file)) as NodeJS.ErrnoException;
+    assertEquals(err.code, "ENOTDIR");
+    assertEquals(err.syscall, "scandir");
+    assert(err.message.startsWith("ENOTDIR: not a directory, scandir"));
+  } finally {
+    Deno.removeSync(file);
+  }
 });

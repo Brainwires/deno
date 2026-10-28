@@ -5717,6 +5717,154 @@ stock CLI does not run them; denext's own launcher provides that environment.
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 145) are what the prebuilt `libdenort` carries. The
+
+<!-- 136-145 are held by unmerged branches; renumber at integration. -->
+
+146. **`fix(ext/node)`: `node:fs` argument checks, errors and `Dir` as in Node
+     26** (`fix/node-compat-denext2`, runtime; `ext/node/polyfills/fs.ts`,
+     `_fs/_fs_dir.ts`, `_fs/_fs_readdir.ts`, `_fs/cp/cp.ts`,
+     `internal/fs/promises.ts`, `internal/fs/handle.ts`). The largest `fs`
+     cluster of the 2026-10-28 node_compat re-measure
+     (`plans/node-compat-gaps.md` in denext): calls that Node rejects at once
+     reached the file system, and errors carried other codes, syscalls or stacks
+     than Node's.
+     - **`Dir` follows `lib/internal/fs/dir.js`.** `opendir` / `opendirSync`
+       take `recursive: true` (Node 20.1; a returned directory entry is read
+       after the entries already buffered, symlinks not followed), and
+       `bufferSize` is checked by `Dir` as Node does (it was required to be set
+       whenever `options` was an object, so `{ recursive: true }` threw). An
+       asynchronous read that goes to the file system makes `readSync()` /
+       `closeSync()` throw `ERR_DIR_CONCURRENT_OPERATION` and queues other calls
+       behind it; a closed `Dir` throws `ERR_DIR_CLOSED` (also from
+       `read(callback)`); `read(callback)` / `close(callback)` call back
+       asynchronously and return `undefined`; the `path` getter is brand checked
+       (`ERR_INVALID_THIS`). The directory is read once (the entries read to
+       check it at open time are the ones handed out).
+     - **`fs.promises` errors name the caller.** The promise functions are
+       `async` functions named after the method, and a rejection's stack is
+       captured in a reaction the method awaits, as Node's
+       `handleErrorFromBinding` does: the trace shows `at async Object.access`
+       and the user code that awaited it, not a frame inside the polyfill. An
+       argument error now rejects instead of throwing.
+     - **Checks before the call.** `writeFile` / `writeFileSync` / `appendFile*`
+       validate the path (a null byte is `ERR_INVALID_ARG_VALUE`, not `EINVAL`
+       from the OS), and `fs.promises.writeFile` / `appendFile` validate `data`
+       before they open, so a bad `data` no longer creates the file. An unknown
+       encoding is `ERR_INVALID_ARG_VALUE` for `readdir` (was an `Error` whose
+       message held a Node 12 code), `readlink*` (a string option was ignored,
+       and any encoding but utf8 / buffer threw "not implemented"; the link is
+       now returned in any Buffer encoding, a `Buffer` for `"buffer"`),
+       `mkdtemp*` (was `ERR_INVALID_ARG_TYPE` with a value reason) and
+       `fs.watch` (whose string `options` were ignored).
+       `FileHandle.read(0, ...)` rejects with `ERR_INVALID_ARG_TYPE`, and a
+       `FileHandle` method called on another object rejects with
+       `ERR_INTERNAL_ASSERTION`, as Node's `fsCall` does.
+     - **Node 26 behaviour.** `fs.stat` with an already aborted `options.signal`
+       calls back with an `AbortError`; async `fs.cp` with
+       `errorOnExist: true, force: false` fails with `ERR_FS_CP_EEXIST` on an
+       existing destination directory (Node's `onDir`; `cpSync` keeps erroring
+       only on files, as Node's does); `readdir` errors name the `scandir`
+       syscall (libuv's `uv_fs_scandir`), and `readdir` reads its options once,
+       so changing the object after the call no longer changes a read in flight.
+
+     Tests: node_compat `parallel/test-fs-access.js`, `-append-file.js`,
+     `-assert-encoding-error.js`, `-cp-async-dir-exists-error-on-exist.mjs`,
+     `-null-bytes.js`, `-opendir.js`, `-promises.js`, `-stat-abort-test.js` and
+     `sequential/test-fs-opendir-recursive.js` enabled; unit tests in
+     `tests/unit_node/_fs/_fs_dir_test.ts` (recursive reads, the concurrent
+     operation error; the callback tests now expect Node's asynchronous
+     callbacks), `_fs_opendir_test.ts` (an invalid encoding throws),
+     `_fs_readdir_test.ts` (options read once, the `scandir` syscall) and
+     `_fs_readlink_test.ts` (encodings).
+
+<!-- -->
+
+147. **`feat(ext/node)`: a hook's `format: "commonjs"` source is imported as
+     CommonJS, and `--input-type=module --eval` runs a module**
+     (`fix/node-compat-denext2`, CLI and runtime; `cli/module_loader.rs`,
+     `cli/rt/run.rs`, `ext/node/polyfills/01_require.js`,
+     `libs/node_shim/lib.rs`). Follow-ups to item 109.
+     - **CommonJS source from an ESM load hook.** When a
+       `module.registerHooks()` / `module.register()` load hook answered an
+       `import` with `format: "commonjs"` and a `source`, the source was
+       evaluated as an ES module (`require is not defined`). As Node's ESM
+       translator for CommonJS does, the module loader now wraps it: the source
+       is compiled as a CommonJS module under the resolved URL (a file path for
+       a `file:` URL), without a second load, and its `require()` calls go
+       through the hooks; `module.exports` is the default export, the
+       `"module.exports"` export and, by a static CommonJS export analysis (Node
+       uses cjs-module-lexer), named exports. A `require()` of a URL a resolve
+       hook invented without `//` (`virtual:shared`) now hands the load hook
+       that URL instead of a file path under the working directory.
+     - **`--input-type=module` with `--eval`.** The Node CLI shim wrapped every
+       `--eval` string into a script for `vm.runInThisContext`, so an `import`
+       statement was a syntax error. With `--input-type=module` (or
+       `module-typescript`) the string is now passed to `deno eval` as the
+       module it is, with `--ext=js` (`--ext=ts`), so TypeScript's emit can't
+       drop an unused import binding and hide a missing export, and without the
+       CommonJS `require` / builtin globals Node gives only a script.
+
+     Tests: node_compat
+     `module-hooks/test-module-hooks-load-import-cjs-custom-source.js`,
+     `-require-wasm.js` and `test-async-loader-hooks-initialize-invoke.mjs`,
+     `-initialize-process-exit.mjs`, `-initialize-rejecting.mjs`,
+     `-process-exit-async.mjs`, `-register-with-import.mjs`,
+     `-remove-beforeexit-listener.mjs` enabled (the last six were ignored for
+     `--input-type=module --eval`; the three still ignored for it say what else
+     they need); `es-module/test-esm-export-not-found.mjs` keeps passing for the
+     right reason; `test_eval_input_type_module_is_not_wrapped`
+     (`libs/node_shim`).
+
+<!-- -->
+
+148. **`fix(ext/node)`: an HTTP server parse error carries llhttp's code**
+     (`fix/node-compat-denext2`, runtime; `ext/node/ops/llhttp/binding.rs`,
+     `ext/node/polyfills/_http_server.js`). On the server's consume fast path
+     every llhttp error but a header overflow and an HTTP/2 preface became
+     `HPE_ERROR` / "Parse Error", so a `clientError` listener couldn't tell an
+     invalid method from a smuggling attempt, and only the `Transfer-Encoding` +
+     `Content-Length` case was recovered in JavaScript. The error now has
+     llhttp's errno name and reason, as `node_http_parser.cc` reports them
+     (`HPE_INVALID_METHOD`, "Invalid method encountered"; message
+     `Parse Error: <reason>`), and a server without a `clientError` listener
+     answers `HPE_CHUNK_EXTENSIONS_OVERFLOW` with `413 Payload Too Large`, as
+     Node's `socketOnError` does (the CVE-2024-22019 limit). An exception thrown
+     in a parser callback stays `HPE_ERROR`.
+
+     Tests: node_compat `parallel/test-http-server-client-error.js`,
+     `-server-destroy-socket-on-client-error.js` and `-double-content-length.js`
+     enabled.
+
+<!-- -->
+
+149. **`fix(ext/node)`: Node 26's option sets for `NODE_OPTIONS` and Worker
+     `execArgv`** (`fix/node-compat-denext2`, runtime;
+     `ext/node/polyfills/internal/process/per_thread.mjs`,
+     `ext/node/polyfills/worker_threads.ts`).
+     `process.allowedNodeEnvironmentFlags` was a Node 16 list: 143 of Node
+     26.5.1's flags were missing (`--disable-warning`, `--no-addons`,
+     `--experimental-strip-types`, ...) and ten long-removed ones were listed.
+     It is now Node 26.5.1's (the options its parser marks `kAllowedInEnvvar`,
+     the `--no-` form of each boolean one, the aliases that expand to them),
+     which tools such as mocha use to decide which flags go to `node`. A
+     Worker's `execArgv` was checked against that same list, but Node parses it
+     with the per-isolate option parser: every debug, environment and
+     per-isolate option is valid there (`--expose-internals`,
+     `--disable-warning=...`), and V8 options (`--expose-gc`,
+     `--max-old-space-size`) are not, so both are now as in Node. A Worker `env`
+     whose `NODE_OPTIONS` equals the parent's may carry the parent's per-process
+     options (`{ env: process.env }`), as node_worker.cc allows.
+
+     Tests: node_compat `es-module/test-esm-no-addons.mjs` enabled;
+     `parallel/test-worker-execargv-invalid.js` and
+     `test-process-env-allowed-flags.js` keep passing; unit tests
+     `execArgv takes Node options that NODE_OPTIONS can't hold` and
+     `V8 options in execArgv are rejected`
+     (`tests/unit_node/worker_threads_test.ts`).
+
+The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
+64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
+118, 119, 126, 127, 129, 146-149) are what the prebuilt `libdenort` carries. The
 CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID`
 into a packaged app's launchers) are in the branch too, but a stock CLI does not
 run them; denext's own launcher provides that environment.

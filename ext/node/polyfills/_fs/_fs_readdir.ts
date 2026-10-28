@@ -5,6 +5,7 @@ const { denoErrorToNodeError } = core.loadExtScript(
   "ext:deno_node/internal/errors.ts",
 );
 import {
+  assertEncoding,
   type Dirent,
   direntFromDeno,
   getValidatedPathToString,
@@ -119,23 +120,29 @@ async function collectReadDir(path: string): Promise<Deno.DirEntry[]> {
 }
 
 // Mirrors Node's lib/internal/fs/utils.js getOptions(): a bare string options
-// arg is treated as { encoding: <string> }.
+// arg is treated as { encoding: <string> }. The fields are read once, as Node
+// does before it starts, so changing the caller's object after the call
+// doesn't change an asynchronous read in flight.
 function normalizeOptions(
   options: readDirOptions | string | null | undefined,
 ): readDirOptions | null {
   if (typeof options === "string") {
     return { encoding: options };
   }
-  return options ?? null;
+  if (options == null) {
+    return null;
+  }
+  return {
+    encoding: options.encoding,
+    withFileTypes: options.withFileTypes,
+    recursive: options.recursive,
+  };
 }
 
+// Node's getOptions(): an unknown encoding is `ERR_INVALID_ARG_VALUE`.
 function validateEncoding(encoding: string | undefined) {
-  if (!encoding || encoding === "buffer") return;
-  if (!Buffer.isEncoding(encoding)) {
-    throw new Error(
-      `TypeError [ERR_INVALID_OPT_VALUE_ENCODING]: The value "${encoding}" is invalid for option "encoding"`,
-    );
-  }
+  if (encoding === "buffer") return;
+  assertEncoding(encoding);
 }
 
 export function readdir(
@@ -206,7 +213,7 @@ export function readdir(
       } catch (err) {
         callback(
           denoErrorToNodeError(err as Error, {
-            syscall: "readdir",
+            syscall: "scandir",
             path: current,
           }),
         );
@@ -304,7 +311,7 @@ export function readdirSync(
       }
     } catch (e) {
       throw denoErrorToNodeError(e as Error, {
-        syscall: "readdir",
+        syscall: "scandir",
         path: current,
       });
     }

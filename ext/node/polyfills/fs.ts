@@ -43,9 +43,10 @@ const { copyFile, copyFileSync } = core.createLazyLoader(
   "ext:deno_node/_fs/_fs_copy.ts",
 )();
 const { cp, cpSync } = core.loadExtScript("ext:deno_node/_fs/_fs_cp.ts");
-const { default: Dir } = core.createLazyLoader(
-  "ext:deno_node/_fs/_fs_dir.ts",
-)();
+const { default: Dir, openDirHandle, openDirHandleSync } = core
+  .createLazyLoader(
+    "ext:deno_node/_fs/_fs_dir.ts",
+  )();
 const { exists, existsSync } = core.createLazyLoader(
   "ext:deno_node/_fs/_fs_exists.ts",
 )();
@@ -67,7 +68,6 @@ const { readdir, readdirSync } = core.createLazyLoader(
 const { EventEmitter } = core.loadExtScript("ext:deno_node/_events.mjs");
 const lazyTimers = core.createLazyLoader("node:timers");
 const { clearTimeout, setTimeout } = lazyTimers();
-const { notImplemented } = core.loadExtScript("ext:deno_node/_utils.ts");
 type MaybeEmpty<T> = T | null | undefined;
 const { deprecate, promisify } = core.loadExtScript("ext:deno_node/util.ts");
 // internal/fs/{promises,streams,handle}.ts call `lazyFs()` at top-level to
@@ -248,9 +248,6 @@ const {
   queueMicrotask,
 } = primordials;
 
-const { TextEncoder } = core.loadExtScript(
-  "ext:deno_web/08_text_encoding.js",
-);
 const abortSignal = core.loadExtScript("ext:deno_web/03_abort_signal.js");
 const { pathFromURL } = core.loadExtScript("ext:deno_web/00_infra.js");
 const { URLPrototype } = core.loadExtScript("ext:deno_web/00_url.js");
@@ -294,6 +291,14 @@ function stat(
   }
   callback = makeCallback(callback);
   path = getValidatedPathToString(path);
+
+  // Node's lib/fs.js stat(): an already aborted `options.signal` fails the
+  // call with an `AbortError` instead of starting it.
+  const signal = (options as statOptions)?.signal;
+  if (signal?.aborted) {
+    callback(new AbortError(undefined, { cause: signal.reason }));
+    return;
+  }
 
   PromisePrototypeThen(
     Deno.stat(path),
@@ -902,36 +907,31 @@ interface ReadlinkOptions {
   encoding?: string | null;
 }
 
+// Node's readlink(): the link is returned in `options.encoding`, a `Buffer`
+// for `"buffer"`; `getOptions()` rejects an unknown encoding with
+// `ERR_INVALID_ARG_VALUE`.
 function readlinkMaybeEncode(
   data: string,
   encoding: string | null,
 ): string | Uint8Array {
-  if (encoding === "buffer") {
-    return new TextEncoder().encode(data);
+  if (encoding === null || encoding === "utf8" || encoding === "utf-8") {
+    return data;
   }
-  return data;
+  const buffer = Buffer.from(data, "utf8");
+  if (encoding === "buffer") {
+    return buffer;
+  }
+  // deno-lint-ignore deno-internal/prefer-primordials
+  return buffer.toString(encoding);
 }
 
 function readlinkGetEncoding(
   optOrCallback?: ReadlinkOptions | ReadlinkCallback,
 ): string | null {
-  if (!optOrCallback || typeof optOrCallback === "function") {
-    return null;
-  } else {
-    if (optOrCallback.encoding) {
-      if (
-        optOrCallback.encoding === "utf8" ||
-        optOrCallback.encoding === "utf-8"
-      ) {
-        return "utf8";
-      } else if (optOrCallback.encoding === "buffer") {
-        return "buffer";
-      } else {
-        notImplemented(`fs.readlink encoding=${optOrCallback.encoding}`);
-      }
-    }
+  if (typeof optOrCallback === "function") {
     return null;
   }
+  return getOptions(optOrCallback, kEmptyObject).encoding ?? null;
 }
 
 function readlink(
@@ -978,12 +978,10 @@ function readlinkSync(
   opt?: ReadlinkOptions,
 ): string | Uint8Array {
   path = getValidatedPathToString(path);
+  const encoding = readlinkGetEncoding(opt);
 
   try {
-    return readlinkMaybeEncode(
-      Deno.readLinkSync(path),
-      readlinkGetEncoding(opt),
-    );
+    return readlinkMaybeEncode(Deno.readLinkSync(path), encoding);
   } catch (error) {
     throw denoErrorToNodeError(error, {
       syscall: "readlink",
@@ -2211,7 +2209,7 @@ function parseMkdtempEncoding(
 
   const parsedEncoding = normalizeEncoding(encoding);
   if (!parsedEncoding) {
-    throw new ERR_INVALID_ARG_TYPE(
+    throw new ERR_INVALID_ARG_VALUE(
       "encoding",
       encoding,
       "is invalid encoding",
@@ -2328,14 +2326,9 @@ function openSync(
 type OpendirOptions = {
   encoding?: string;
   bufferSize?: number;
+  recursive?: boolean;
 };
 type OpendirCallback = (err?: Error | null, dir?: Dir) => void;
-
-function _opendirValidateFunction(
-  callback: unknown,
-): asserts callback is OpendirCallback {
-  validateFunction(callback, "callback");
-}
 
 function _opendirGetPathString(
   path: string | Buffer | URL,
@@ -2348,36 +2341,32 @@ function _opendirGetPathString(
   return StringPrototypeToString(path);
 }
 
+// Node's `lib/internal/fs/dir.js`: the directory is opened first (an
+// `opendir` error), then `Dir` validates `options.bufferSize`.
 function opendir(
   path: string | Buffer | URL,
   options: OpendirOptions | OpendirCallback,
   callback?: OpendirCallback,
 ) {
   callback = typeof options === "function" ? options : callback;
-  _opendirValidateFunction(callback);
+  validateFunction(callback, "callback");
 
   path = _opendirGetPathString(getValidatedPath(path));
+  options = getOptions(options, { encoding: "utf8" });
 
-  let err, dir;
-  try {
-    const { bufferSize } = getOptions(options, {
-      encoding: "utf8",
-      bufferSize: 32,
-    });
-    validateInteger(bufferSize, "options.bufferSize", 1, 4294967295);
-
-    /** Throws if path is invalid */
-    Deno.readDirSync(path);
-
-    dir = new Dir(path);
-  } catch (error) {
-    err = denoErrorToNodeError(error as Error, { syscall: "opendir" });
-  }
-  if (err) {
-    callback(err);
-  } else {
-    callback(null, dir);
-  }
+  PromisePrototypeThen(
+    openDirHandle(path),
+    (handle) => {
+      let dir;
+      try {
+        dir = new Dir(path, options, handle);
+      } catch (err) {
+        return callback(err as Error);
+      }
+      callback(null, dir);
+    },
+    (err) => callback(err),
+  );
 }
 
 function opendirSync(
@@ -2385,22 +2374,9 @@ function opendirSync(
   options?: OpendirOptions,
 ): Dir {
   path = _opendirGetPathString(getValidatedPath(path));
-
-  const { bufferSize } = getOptions(options, {
-    encoding: "utf8",
-    bufferSize: 32,
-  });
-
-  validateInteger(bufferSize, "options.bufferSize", 1, 4294967295);
-
-  try {
-    /** Throws if path is invalid */
-    Deno.readDirSync(path);
-
-    return new Dir(path);
-  } catch (err) {
-    throw denoErrorToNodeError(err as Error, { syscall: "opendir" });
-  }
+  options = getOptions(options, { encoding: "utf8" });
+  const handle = openDirHandleSync(path);
+  return new Dir(path, options, handle);
 }
 
 /**
@@ -2808,6 +2784,12 @@ function writeFile(
     data = Buffer.from(data, encoding);
   }
 
+  // Node opens the path with fs.open(), which validates it at once: a null
+  // byte is ERR_INVALID_ARG_VALUE, thrown, not passed to the callback.
+  if (typeof pathOrRid !== "number") {
+    getValidatedPath(pathOrRid);
+  }
+
   const isRid = typeof pathOrRid === "number";
   let file;
 
@@ -2892,6 +2874,11 @@ function writeFileSync(
   if (!ArrayBufferIsView(data)) {
     validateStringAfterArrayBufferView(data, "data");
     data = Buffer.from(data, encoding);
+  }
+
+  // As in writeFile(): a path with a null byte is ERR_INVALID_ARG_VALUE.
+  if (typeof pathOrRid !== "number") {
+    getValidatedPath(pathOrRid);
   }
 
   const isRid = typeof pathOrRid === "number";
@@ -3481,8 +3468,11 @@ function watch(
     : typeof optionsOrListener2 === "function"
     ? optionsOrListener2
     : undefined;
-  const options = typeof optionsOrListener === "object"
-    ? optionsOrListener
+  // Node's watch() runs the options through getOptions(): a string is the
+  // encoding, and an unknown encoding is ERR_INVALID_ARG_VALUE.
+  const options = typeof optionsOrListener === "object" ||
+      typeof optionsOrListener === "string"
+    ? getOptions(optionsOrListener)
     : typeof optionsOrListener2 === "object"
     ? optionsOrListener2
     : undefined;

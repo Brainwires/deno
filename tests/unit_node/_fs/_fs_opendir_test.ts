@@ -17,13 +17,19 @@ Deno.test("[node/fs] opendir()", async (t) => {
 
   await t.step(
     "fails if encoding is invalid",
-    () =>
-      opendir(
-        path,
-        // @ts-expect-error Type '"invalid-encoding"' is not assignable to type 'BufferEncoding | undefined'
-        { encoding: "invalid-encoding" },
-        (err) => assertInstanceOf(err, TypeError),
-      ),
+    // As in Node, getOptions() throws before the directory is opened.
+    () => {
+      assertThrows(
+        () =>
+          opendir(
+            path,
+            // @ts-expect-error Type '"invalid-encoding"' is not assignable to type 'BufferEncoding | undefined'
+            { encoding: "invalid-encoding" },
+            () => {},
+          ),
+        TypeError,
+      );
+    },
   );
 
   await t.step(

@@ -705,12 +705,20 @@ enum ParseError {
   #[property("reason" = "Pause on PRI/Upgrade")]
   #[property("bytesParsed" = self.bytes_parsed())]
   PausedH2Upgrade { bytes_parsed: i32 },
+  // Any other llhttp error, with llhttp's own errno name and reason as
+  // node_http_parser.cc reports them (`HPE_INVALID_METHOD` / "Invalid method
+  // encountered"), so a server's 'clientError' listener (and its 413 / 431
+  // responses) can tell them apart.
   #[class(generic)]
-  #[error("Parse Error")]
-  #[property("code" = "HPE_ERROR")]
-  #[property("reason" = "Parse Error")]
+  #[error("Parse Error: {reason}")]
+  #[property("code" = self.code())]
+  #[property("reason" = self.reason())]
   #[property("bytesParsed" = self.bytes_parsed())]
-  Generic { bytes_parsed: i32 },
+  Generic {
+    bytes_parsed: i32,
+    code: String,
+    reason: String,
+  },
 }
 
 impl ParseError {
@@ -718,8 +726,56 @@ impl ParseError {
     match self {
       ParseError::HeaderOverflow { bytes_parsed } => *bytes_parsed,
       ParseError::PausedH2Upgrade { bytes_parsed } => *bytes_parsed,
-      ParseError::Generic { bytes_parsed } => *bytes_parsed,
+      ParseError::Generic { bytes_parsed, .. } => *bytes_parsed,
     }
+  }
+
+  fn code(&self) -> String {
+    match self {
+      ParseError::Generic { code, .. } => code.clone(),
+      _ => String::new(),
+    }
+  }
+
+  fn reason(&self) -> String {
+    match self {
+      ParseError::Generic { reason, .. } => reason.clone(),
+      _ => String::new(),
+    }
+  }
+}
+
+/// llhttp's name for `errno` (`"HPE_INVALID_METHOD"`), `"HPE_ERROR"` when it
+/// has none.
+fn llhttp_errno_code(errno: i32) -> String {
+  // SAFETY: llhttp_errno_name returns a pointer to a static string or null.
+  let name_ptr = unsafe { sys::llhttp_errno_name(errno) };
+  if name_ptr.is_null() {
+    return String::from("HPE_ERROR");
+  }
+  // SAFETY: non-null, NUL-terminated static string from llhttp.
+  let name = unsafe { CStr::from_ptr(name_ptr) }.to_string_lossy();
+  if name == "HPE_OK" {
+    String::from("HPE_ERROR")
+  } else {
+    name.into_owned()
+  }
+}
+
+/// The reason llhttp recorded for the parser's last error, `"Parse Error"`
+/// when it recorded none.
+fn llhttp_error_reason(parser: &sys::llhttp_t) -> String {
+  // SAFETY: llhttp_get_error_reason returns the parser's reason or null.
+  let reason_ptr = unsafe { sys::llhttp_get_error_reason(parser) };
+  if reason_ptr.is_null() {
+    return String::from("Parse Error");
+  }
+  // SAFETY: non-null, NUL-terminated string owned by llhttp.
+  let reason = unsafe { CStr::from_ptr(reason_ptr) }.to_string_lossy();
+  if reason.is_empty() {
+    String::from("Parse Error")
+  } else {
+    reason.into_owned()
   }
 }
 
@@ -867,8 +923,18 @@ unsafe fn consume_read_callback(
         ParseError::HeaderOverflow { bytes_parsed }
       } else if err == sys::HPE_PAUSED_H2_UPGRADE {
         ParseError::PausedH2Upgrade { bytes_parsed }
+      } else if inner.got_exception {
+        ParseError::Generic {
+          bytes_parsed,
+          code: String::from("HPE_ERROR"),
+          reason: String::from("Parse Error"),
+        }
       } else {
-        ParseError::Generic { bytes_parsed }
+        ParseError::Generic {
+          bytes_parsed,
+          code: llhttp_errno_code(err as i32),
+          reason: llhttp_error_reason(&inner.parser),
+        }
       };
       deno_core::error::to_v8_error(scope, &parse_err)
     } else {

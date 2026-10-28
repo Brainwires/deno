@@ -982,6 +982,16 @@ impl ModuleLoader for EmbeddedModuleLoader {
               // `format` (Node's hook contract) first, then fall back to
               // the importer's `with { type: "..." }` attribute, so e.g.
               // a passthrough hook on a JSON import still parses as JSON.
+              if format.as_deref() == Some("commonjs") {
+                return Ok(deno_core::ModuleSource::new(
+                  deno_core::ModuleType::JavaScript,
+                  ModuleSourceCode::String(
+                    hooked_commonjs_module_source(&specifier, &source).into(),
+                  ),
+                  &specifier,
+                  None,
+                ));
+              }
               let module_type = pick_hook_module_type(
                 format.as_deref(),
                 &requested_module_type,
@@ -2134,6 +2144,51 @@ fn hook_load_import_attributes(
       .or_insert_with(|| ty.to_string());
   }
   attrs
+}
+
+/// The ES module source for a module whose `module.registerHooks()` load hook
+/// returned `format: "commonjs"` with a `source`. As Node's ESM translator for
+/// CommonJS does, the source runs as a CommonJS module (`require()` inside it
+/// goes through the hooks) and the wrapper re-exports `module.exports` as the
+/// default export, under `"module.exports"`, and by the names a static CommonJS
+/// export analysis finds (Node uses cjs-module-lexer).
+fn hooked_commonjs_module_source(
+  specifier: &deno_core::ModuleSpecifier,
+  source: &str,
+) -> String {
+  let mut names = std::collections::BTreeSet::new();
+  if let Ok(parsed) = deno_ast::parse_program(deno_ast::ParseParams {
+    specifier: specifier.clone(),
+    text: source.into(),
+    media_type: deno_ast::MediaType::Cjs,
+    capture_tokens: true,
+    scope_analysis: false,
+    maybe_syntax: None,
+  }) {
+    for name in parsed.analyze_cjs().exports {
+      if name != "default" && name != "module.exports" {
+        names.insert(name);
+      }
+    }
+  }
+  let quote = |text: &str| {
+    deno_core::serde_json::to_string(text).unwrap_or_else(|_| "\"\"".into())
+  };
+  let mut code = format!(
+    "const __denoHookedCjs = Deno[Deno.internal].loadHookedCommonJS({}, {});\n\
+     export default __denoHookedCjs;\n\
+     export {{ __denoHookedCjs as \"module.exports\" }};\n",
+    quote(specifier.as_str()),
+    quote(source),
+  );
+  for (i, name) in names.iter().enumerate() {
+    code.push_str(&format!(
+      "const __denoHookedCjs{i} = __denoHookedCjs[{0}];\n\
+       export {{ __denoHookedCjs{i} as {0} }};\n",
+      quote(name),
+    ));
+  }
+  code
 }
 
 /// Pick the `ModuleType` for source returned by a `module.registerHooks()`

@@ -14,7 +14,13 @@ import { readdirPromise } from "ext:deno_node/_fs/_fs_readdir.ts";
 const { lstatPromise } = core.loadExtScript("ext:deno_node/_fs/_fs_lstat.ts");
 const lazyFs = core.createLazyLoader("node:fs");
 import { globPromise } from "ext:deno_node/_fs/_fs_glob.ts";
-import { getValidatedPathToString } from "ext:deno_node/internal/fs/utils.mjs";
+import {
+  getValidatedPathToString,
+  validateStringAfterArrayBufferView,
+} from "ext:deno_node/internal/fs/utils.mjs";
+const { isIterable } = core.loadExtScript(
+  "ext:deno_node/internal/streams/utils.js",
+);
 import type { Buffer } from "node:buffer";
 import Dir from "ext:deno_node/_fs/_fs_dir.ts";
 import { FileHandle } from "ext:deno_node/internal/fs/handle.ts";
@@ -31,12 +37,32 @@ const lazyPath = core.createLazyLoader("node:path");
 const lazyProcess = core.createLazyLoader("node:process");
 
 const {
+  ArrayBufferIsView,
+  ErrorCaptureStackTrace,
+  ErrorPrototype,
+  ObjectDefineProperty,
   ObjectPrototypeIsPrototypeOf,
   Promise,
+  PromisePrototypeThen,
   PromiseReject,
   SafeArrayIterator,
   SymbolAsyncDispose,
 } = primordials;
+
+// Node's lib/internal/fs/promises.js `handleErrorFromBinding`: a rejection's
+// error gets its stack captured here, inside a promise reaction the calling
+// `fs.promises` function awaits, so the trace has no internal frames and
+// lists the caller's own async frames (`at async Object.access`, then the
+// user code that awaited it) instead of a frame inside the polyfill.
+function handleErrorFromBinding(err: unknown): never {
+  if (
+    err !== null && typeof err === "object" &&
+    ObjectPrototypeIsPrototypeOf(ErrorPrototype, err)
+  ) {
+    ErrorCaptureStackTrace(err, handleErrorFromBinding);
+  }
+  throw err;
+}
 
 // Promisified fs.X wrappers MUST NOT be built at module body. handle.ts /
 // internal/fs/promises.ts are loaded during the initial `fs.promises`
@@ -54,15 +80,24 @@ const _promisifyCache: Record<string, any> = { __proto__: null } as any;
 // own `fs.promises.*` wrappers don't go through `util.promisify` and so don't
 // have this issue.
 function lazyPromisifyFs(name: string, arity: number): any {
-  return (...args: any[]) => {
+  // An `async function` (not an arrow) named after the `fs.promises` method,
+  // as Node's are: argument errors reject instead of throwing, and an
+  // error's async stack trace names the method.
+  const wrapper = async function (...args: any[]) {
     let fn = _promisifyCache[name];
     if (fn === undefined) {
       fn = promisify((lazyFs() as any)[name]);
       _promisifyCache[name] = fn;
     }
     if (args.length > arity) args.length = arity;
-    return fn(...new SafeArrayIterator(args));
+    return await PromisePrototypeThen(
+      fn(...new SafeArrayIterator(args)),
+      undefined,
+      handleErrorFromBinding,
+    );
   };
+  ObjectDefineProperty(wrapper, "name", { __proto__: null, value: name });
+  return wrapper;
 }
 
 // Mirrors Node's lib/internal/fs/promises.js handleFdClose(): run the file op,
@@ -359,6 +394,13 @@ function writeFilePromise(
   const flag = opts.flag ?? "w";
   const mode = opts.mode ?? 0o666;
   return (async () => {
+    // Node validates `data` before it opens (and so creates) the file.
+    if (
+      !ArrayBufferIsView(data) &&
+      (typeof data === "string" || !isIterable(data))
+    ) {
+      validateStringAfterArrayBufferView(data, "data");
+    }
     // Match the existing path-based behavior: surface the same `DOMException`
     // that `signal.throwIfAborted()` produces (the fd-based fallback would
     // throw Deno's `AbortError` instead). Inside the async IIFE so the throw

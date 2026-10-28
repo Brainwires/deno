@@ -8,12 +8,19 @@ const Dir = DirOrig as any;
 
 Deno.test({
   name: "Closing current directory with callback is successful",
-  fn() {
+  async fn() {
+    // As in Node, the callback is called asynchronously and close() returns
+    // undefined when given one.
     let calledBack = false;
-    // deno-lint-ignore no-explicit-any
-    new Dir(".").close((valOrErr: any) => {
-      assert(!valOrErr);
-      calledBack = true;
+    await new Promise<void>((resolve) => {
+      // deno-lint-ignore no-explicit-any
+      const ret = new Dir(".").close((valOrErr: any) => {
+        assert(!valOrErr);
+        calledBack = true;
+        resolve();
+      });
+      assertEquals(ret, undefined);
+      assert(!calledBack);
     });
     assert(calledBack);
   },
@@ -51,17 +58,16 @@ Deno.test({
       const file: Dirent | null = await new Dir(testDir).read();
       assert(file === null);
 
-      let calledBack = false;
-      const fileFromCallback: Dirent | null = await new Dir(
-        testDir,
-        // deno-lint-ignore no-explicit-any
-      ).read((err: any, res: Dirent) => {
-        assert(res === null);
-        assert(err === null);
-        calledBack = true;
-      });
+      const fileFromCallback = await new Promise<Dirent | null>(
+        (resolve) => {
+          // deno-lint-ignore no-explicit-any
+          new Dir(testDir).read((err: any, res: Dirent | null) => {
+            assert(err === null);
+            resolve(res);
+          });
+        },
+      );
       assert(fileFromCallback === null);
-      assert(calledBack);
 
       assertEquals(new Dir(testDir).readSync(), null);
     } finally {
@@ -83,15 +89,16 @@ Deno.test({
       let secondCallback = false;
       const dir = new Dir(testDir);
       const firstRead: Dirent | null = await dir.read();
-      const secondRead: Dirent | null = await dir.read(
+      const secondRead = await new Promise<Dirent | null>((resolve) => {
         // deno-lint-ignore no-explicit-any
-        (_err: any, secondResult: Dirent) => {
+        dir.read((_err: any, secondResult: Dirent) => {
           assert(
             secondResult.name === "bar.txt" || secondResult.name === "foo.txt",
           );
           secondCallback = true;
-        },
-      );
+          resolve(secondResult);
+        });
+      });
       const thirdRead: Dirent | null = await dir.read();
       const fourthRead: Dirent | null = await dir.read();
 
@@ -265,23 +272,67 @@ Deno.test({
 });
 
 Deno.test({
-  name: "Dir.read callback receives ERR_DIR_CLOSED after close",
+  name: "Dir.read with a callback throws ERR_DIR_CLOSED after close",
   async fn() {
+    // Node's Dir#readImpl throws at once on a closed Dir, callback or not.
     const testDir: string = Deno.makeTempDirSync();
     try {
       const dir = new Dir(testDir);
       await dir.close();
-      await new Promise<void>((resolve, reject) => {
+      try {
+        dir.read(() => fail("callback must not be called"));
+        fail("Expected ERR_DIR_CLOSED to be thrown");
+      } catch (e) {
         // deno-lint-ignore no-explicit-any
-        dir.read((err: any) => {
-          try {
-            assertEquals(err.code, "ERR_DIR_CLOSED");
-            resolve();
-          } catch (e) {
-            reject(e);
-          }
-        });
-      });
+        assertEquals((e as any).code, "ERR_DIR_CLOSED");
+      }
+    } finally {
+      Deno.removeSync(testDir, { recursive: true });
+    }
+  },
+});
+
+Deno.test({
+  name: "Dir with recursive: true reads the subdirectories after their parent",
+  fn() {
+    const testDir: string = Deno.makeTempDirSync();
+    Deno.mkdirSync(testDir + "/a/b", { recursive: true });
+    Deno.writeTextFileSync(testDir + "/a/b/c.txt", "");
+    Deno.writeTextFileSync(testDir + "/d.txt", "");
+    try {
+      const dir = new Dir(testDir, { recursive: true });
+      const names: string[] = [];
+      let dirent: Dirent | null;
+      while ((dirent = dir.readSync()) !== null) {
+        names.push(
+          (dirent.parentPath + "/" + dirent.name).slice(testDir.length + 1),
+        );
+      }
+      dir.closeSync();
+      assertEquals(names.sort(), ["a", "a/b", "a/b/c.txt", "d.txt"]);
+    } finally {
+      Deno.removeSync(testDir, { recursive: true });
+    }
+  },
+});
+
+Deno.test({
+  name: "Dir.readSync during an asynchronous read throws",
+  async fn() {
+    const testDir: string = Deno.makeTempDirSync();
+    Deno.writeTextFileSync(testDir + "/a.txt", "");
+    try {
+      const dir = new Dir(testDir);
+      const pending = dir.read();
+      try {
+        dir.readSync();
+        fail("Expected ERR_DIR_CONCURRENT_OPERATION to be thrown");
+      } catch (e) {
+        // deno-lint-ignore no-explicit-any
+        assertEquals((e as any).code, "ERR_DIR_CONCURRENT_OPERATION");
+      }
+      assertEquals((await pending)?.name, "a.txt");
+      dir.closeSync();
     } finally {
       Deno.removeSync(testDir, { recursive: true });
     }

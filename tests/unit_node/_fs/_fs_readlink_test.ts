@@ -1,7 +1,7 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 import { assertCallbackErrorUncaught } from "../_test_utils.ts";
 import { readlink, readlinkSync } from "node:fs";
-import { assert, assertEquals } from "@std/assert";
+import { assert, assertEquals, assertThrows } from "@std/assert";
 import * as path from "@std/path";
 import { Buffer } from "node:buffer";
 
@@ -90,4 +90,27 @@ Deno.test("[node/fs] readlink accepts Buffer as path", async () => {
 Deno.test("[node/fs] readlinkSync accepts Buffer as path", () => {
   const data = readlinkSync(Buffer.from(newname));
   assertEquals(data, oldname);
+});
+
+Deno.test("[node/fs] readlinkSync returns the link in options.encoding", () => {
+  // Node encodes the link's bytes in any Buffer encoding, as a Buffer for
+  // "buffer"; a string option is the encoding.
+  assertEquals(
+    readlinkSync(newname, "hex"),
+    Buffer.from(oldname).toString("hex"),
+  );
+  const data = readlinkSync(newname, { encoding: "buffer" });
+  assert(Buffer.isBuffer(data));
+  assertEquals(data.toString(), oldname);
+});
+
+Deno.test("[node/fs] readlink rejects an unknown encoding before the call", () => {
+  for (
+    const call of [
+      () => readlinkSync(newname, "bogus" as BufferEncoding),
+      () => readlink(newname, "bogus" as BufferEncoding, () => {}),
+    ]
+  ) {
+    assertThrows(call, TypeError, "is invalid encoding");
+  }
 });

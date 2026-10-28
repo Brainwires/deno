@@ -49,6 +49,7 @@ const CpEntryFlags = {
 
 const {
   Number,
+  PromiseReject,
   PromiseResolve,
   SymbolAsyncIterator,
 } = primordials;
@@ -261,6 +262,21 @@ function onDir(
   if (!(statInfo & CpEntryFlags.IsDestExists)) {
     const srcMode = Number(statInfo & CpEntryFlags.SrcModeMask);
     return mkDirAndCopy(srcMode, src, dest, opts);
+  }
+  // Node's lib/internal/fs/cp/cp.js onDir(): with `errorOnExist` and without
+  // `force`, an existing destination directory is an error even when none of
+  // its entries would be overwritten.
+  if (opts.errorOnExist && !opts.force) {
+    const { EEXIST } = lazyConstants();
+    return PromiseReject(
+      new ERR_FS_CP_EEXIST({
+        message: `${dest} already exists`,
+        path: dest,
+        syscall: "cp",
+        errno: EEXIST,
+        code: "EEXIST",
+      }),
+    );
   }
   return copyDir(src, dest, opts);
 }

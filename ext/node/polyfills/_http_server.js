@@ -908,6 +908,8 @@ const requestHeaderFieldsTooLargeResponse =
   "HTTP/1.1 431 Request Header Fields Too Large\r\nConnection: close\r\n\r\n";
 const requestTimeoutResponse =
   "HTTP/1.1 408 Request Timeout\r\nConnection: close\r\n\r\n";
+const requestChunkExtensionsTooLargeResponse =
+  "HTTP/1.1 413 Payload Too Large\r\nConnection: close\r\n\r\n";
 
 function socketOnError(e) {
   // Ignore further errors
@@ -929,6 +931,9 @@ function socketOnError(e) {
       switch (e.code) {
         case "HPE_HEADER_OVERFLOW":
           response = requestHeaderFieldsTooLargeResponse;
+          break;
+        case "HPE_CHUNK_EXTENSIONS_OVERFLOW":
+          response = requestChunkExtensionsTooLargeResponse;
           break;
         case "ERR_HTTP_REQUEST_TIMEOUT":
           response = requestTimeoutResponse;

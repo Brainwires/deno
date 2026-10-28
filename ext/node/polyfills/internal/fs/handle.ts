@@ -40,7 +40,9 @@ const { kEmptyObject, promisify } = core.loadExtScript(
 );
 
 // CreateReadStreamOptions, CreateWriteStreamOptions types from node:fs/promises
-const { default: assert } = core.loadExtScript("ext:deno_node/assert.ts");
+// Node's fsCall() uses internal/assert: a method called on something that
+// isn't a FileHandle rejects with ERR_INTERNAL_ASSERTION.
+const assert = core.loadExtScript("ext:deno_node/internal/assert.mjs");
 const {
   denoErrorToNodeError,
   ERR_INVALID_STATE,
@@ -89,6 +91,7 @@ const {
   Promise,
   PromisePrototypeCatch,
   PromisePrototypeThen,
+  PromiseReject,
   SafePromisePrototypeFinally,
   PromiseResolve,
   SafeArrayIterator,
@@ -204,7 +207,16 @@ export class FileHandle extends EventEmitter {
         if (position == null) position = null;
       }
     } else {
-      // fileHandle.read(options)
+      // fileHandle.read(options): Node's validateObject(options, 'options',
+      // kValidateObjectAllowNullable) rejects anything else (a number, an
+      // array) with ERR_INVALID_ARG_TYPE.
+      if (bufferOrOpt !== undefined) {
+        try {
+          validateObject(bufferOrOpt, "options", { nullable: true });
+        } catch (err) {
+          return PromiseReject(err);
+        }
+      }
       const opts = (bufferOrOpt ?? {}) as {
         buffer?: ArrayBufferView;
         offset?: number;

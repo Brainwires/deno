@@ -1437,6 +1437,50 @@ Deno.test({
 
 Deno.test({
   name:
+    "[node/worker_threads] execArgv takes Node options that NODE_OPTIONS can't hold",
+  async fn() {
+    // Node parses a worker's execArgv with its per-isolate option parser:
+    // `--expose-internals` and `--disable-warning=` are valid there, though
+    // not in process.allowedNodeEnvironmentFlags.
+    const worker = new workerThreads.Worker(
+      `
+      const { parentPort } = require("node:worker_threads");
+      parentPort.postMessage("ok");
+      `,
+      {
+        eval: true,
+        execArgv: [
+          "--expose-internals",
+          "--disable-warning=ExperimentalWarning",
+          "--no-addons",
+        ],
+      },
+    );
+    const msg = await once(worker, "message");
+    assertEquals(msg[0], "ok");
+    await worker.terminate();
+  },
+});
+
+Deno.test({
+  name: "[node/worker_threads] V8 options in execArgv are rejected",
+  fn() {
+    for (const flag of ["--expose-gc", "--max-old-space-size=100"]) {
+      assertThrows(
+        () =>
+          new workerThreads.Worker("/*noop*/", {
+            eval: true,
+            execArgv: [flag],
+          }),
+        Error,
+        "Initiated Worker with invalid execArgv flags",
+      );
+    }
+  },
+});
+
+Deno.test({
+  name:
     "[node/worker_threads] unknown execArgv flags still throw ERR_WORKER_INVALID_EXEC_ARGV",
   fn() {
     assertThrows(

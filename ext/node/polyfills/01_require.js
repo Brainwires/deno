@@ -1991,7 +1991,11 @@ Module.prototype.load = function (filename) {
         fileUrl = this.filename;
       } else if (
         StringPrototypeStartsWith(this.filename, "file://") ||
-        StringPrototypeIncludes(this.filename, "://")
+        StringPrototypeIncludes(this.filename, "://") ||
+        // A resolve hook's URL with no `//` (`virtual:shared`) is a URL too.
+        (SetPrototypeHas(cjsHookResolvedFilenames, this.filename) &&
+          RegExpPrototypeTest(RE_URL_SCHEME, this.filename) &&
+          !isAbsolute(this.filename))
       ) {
         // Already a URL (e.g. from a resolve hook returning a virtual URL)
         fileUrl = this.filename;
@@ -3969,6 +3973,47 @@ function closeIdleConnections() {
 }
 
 internals.closeIdleConnections = closeIdleConnections;
+
+// `import` of a module whose `module.registerHooks()` load hook returned
+// `format: "commonjs"` with a `source`: as Node's ESM translator for
+// CommonJS does, the source is compiled as a CommonJS module under the
+// resolved URL (a file path for a `file:` URL) without loading it again, and
+// its `require()` calls go through the hooks. The module loader's wrapper
+// calls this and re-exports `module.exports`.
+function loadHookedCommonJS(moduleUrl, source) {
+  let filename = moduleUrl;
+  if (StringPrototypeStartsWith(moduleUrl, "file:")) {
+    try {
+      filename = url.fileURLToPath(moduleUrl);
+    } catch {
+      // A virtual `file:` URL with no path on this OS keeps the URL.
+    }
+  }
+  const cached = Module._cache[filename];
+  if (cached !== undefined) {
+    return cached.exports;
+  }
+  const mod = new Module(filename, null);
+  mod.filename = filename;
+  mod.paths = filename === moduleUrl
+    ? []
+    : Module._nodeModulePaths(pathDirname(filename));
+  mod[kSourceURL] = moduleUrl;
+  Module._cache[filename] = mod;
+  let threw = true;
+  try {
+    mod._compile(source, filename, "commonjs");
+    threw = false;
+  } finally {
+    if (threw) {
+      delete Module._cache[filename];
+    }
+  }
+  mod.loaded = true;
+  return mod.exports;
+}
+
+internals.loadHookedCommonJS = loadHookedCommonJS;
 
 export {
   builtinModules,

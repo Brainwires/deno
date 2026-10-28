@@ -3651,7 +3651,20 @@ pub fn translate_to_deno_args(
       raw_eval_code.as_str()
     };
 
-    let eval_code = if options.wrap_eval_code {
+    // `--input-type=module` makes the string an ES module, as `deno eval`
+    // already runs it: Node gives it no `require` or builtin globals, so it
+    // isn't wrapped into a script for `vm.runInThisContext` (where an
+    // `import` statement is a syntax error). `--ext` keeps it JavaScript
+    // (`deno eval` defaults to TypeScript, whose emit drops an import binding
+    // nothing uses, so a missing export would go unreported).
+    let input_is_module =
+      matches!(env_opts.input_type.as_str(), "module" | "module-typescript");
+    if env_opts.input_type == "module" {
+      deno_args.push("--ext=js".to_string());
+    } else if env_opts.input_type == "module-typescript" {
+      deno_args.push("--ext=ts".to_string());
+    }
+    let eval_code = if options.wrap_eval_code && !input_is_module {
       wrap_eval_code(raw_eval_code)
     } else {
       raw_eval_code.to_string()
@@ -5558,6 +5571,61 @@ mod tests {
       result.deno_args
     );
     assert_eq!(result.deno_args[0], "eval");
+  }
+
+  #[test]
+  fn test_eval_input_type_module_is_not_wrapped() {
+    // `node --input-type=module --eval 'import "node:os"'` (node's
+    // module-hooks/test-async-loader-hooks-register-with-import.mjs): the
+    // string is a module, so it is passed to `deno eval` as is.
+    let parsed =
+      parse_args(svec!["--input-type=module", "--eval", "import \"node:os\""])
+        .unwrap();
+    let result =
+      translate_to_deno_args(parsed, &TranslateOptions::for_child_process());
+    assert_eq!(result.deno_args[0], "eval");
+    assert!(
+      result.deno_args.iter().any(|arg| arg == "--ext=js"),
+      "{:?}",
+      result.deno_args
+    );
+    assert_eq!(
+      result.deno_args.last().map(String::as_str),
+      Some("import \"node:os\""),
+      "{:?}",
+      result.deno_args
+    );
+
+    let parsed = parse_args(svec![
+      "--input-type=module-typescript",
+      "-e",
+      "const x: number = 1;"
+    ])
+    .unwrap();
+    let result =
+      translate_to_deno_args(parsed, &TranslateOptions::for_child_process());
+    assert!(
+      result.deno_args.iter().any(|arg| arg == "--ext=ts"),
+      "{:?}",
+      result.deno_args
+    );
+    assert_eq!(
+      result.deno_args.last().map(String::as_str),
+      Some("const x: number = 1;")
+    );
+
+    // Without `--input-type=module`, the string is still wrapped as a script.
+    let parsed = parse_args(svec!["-e", "1"]).unwrap();
+    let result =
+      translate_to_deno_args(parsed, &TranslateOptions::for_child_process());
+    assert!(
+      result
+        .deno_args
+        .last()
+        .is_some_and(|code| code.contains("runInThisContext")),
+      "{:?}",
+      result.deno_args
+    );
   }
 
   #[test]

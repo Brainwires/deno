@@ -122,6 +122,7 @@
     "es-module/test-esm-loader-dependency.mjs": {},
     "es-module/test-esm-loader-event-loop.mjs": {},
     "es-module/test-esm-nowarn-exports.mjs": {},
+    "es-module/test-esm-no-addons.mjs": {},
     "es-module/test-esm-path-posix.mjs": {},
     "es-module/test-esm-path-win32.mjs": {},
     "es-module/test-esm-process.mjs": {},
@@ -263,6 +264,7 @@
     "module-hooks/test-module-hooks-load-mock.js": {},
     "module-hooks/test-module-hooks-load-invalid.js": {},
     "module-hooks/test-module-hooks-load-import-cjs.js": {},
+    "module-hooks/test-module-hooks-load-import-cjs-custom-source.js": {},
     "module-hooks/test-module-hooks-load-short-circuit.js": {},
     "module-hooks/test-module-hooks-load-short-circuit-required-middle.js": {},
     "module-hooks/test-module-hooks-load-short-circuit-required-start.js": {},
@@ -302,6 +304,7 @@
     "module-hooks/test-module-hooks-resolve-short-circuit.js": {},
     "module-hooks/test-module-hooks-resolve-short-circuit-required-middle.js": {},
     "module-hooks/test-module-hooks-resolve-short-circuit-required-start.js": {},
+    "module-hooks/test-module-hooks-require-wasm.js": {},
     "parallel/test-abort-controller-any-timeout.js": {},
     "parallel/test-abortcontroller-internal.js": {
       "ignore": true,
@@ -1433,6 +1436,9 @@
     },
     "parallel/test-fs-append-file-flush.js": {},
     "parallel/test-fs-append-file-sync.js": {},
+    "parallel/test-fs-append-file.js": {},
+    "parallel/test-fs-access.js": {},
+    "parallel/test-fs-assert-encoding-error.js": {},
     "parallel/test-fs-buffer.js": {},
     "parallel/test-fs-buffertype-writesync.js": {},
     "parallel/test-fs-chmod-mask.js": {},
@@ -1453,6 +1459,7 @@
     "parallel/test-fs-cp-async-dereference-symlink.mjs": {},
     "parallel/test-fs-cp-async-dest-symlink-points-to-src-error.mjs": {},
     "parallel/test-fs-cp-async-dir-to-file.mjs": {},
+    "parallel/test-fs-cp-async-dir-exists-error-on-exist.mjs": {},
     "parallel/test-fs-cp-async-error-on-exist.mjs": {},
     "parallel/test-fs-cp-async-file-to-dir.mjs": {},
     "parallel/test-fs-cp-async-file-to-file.mjs": {},
@@ -1562,6 +1569,7 @@
     "parallel/test-fs-mkdtempDisposableSync.js": {},
     "parallel/test-fs-negative-zero.js": {},
     "parallel/test-fs-non-number-arguments-throw.js": {},
+    "parallel/test-fs-null-bytes.js": {},
     "parallel/test-fs-open-flags.js": {},
     "parallel/test-fs-open-mode-mask.js": {
       "windows": false,
@@ -1570,6 +1578,7 @@
     "parallel/test-fs-open-no-close.js": {},
     "parallel/test-fs-open-numeric-flags.js": {},
     "parallel/test-fs-open.js": {},
+    "parallel/test-fs-opendir.js": {},
     "parallel/test-fs-operations-with-surrogate-pairs.js": {},
     "parallel/test-fs-options-immutable.js": {},
     "parallel/test-fs-promises-exists.js": {},
@@ -1611,6 +1620,7 @@
     "parallel/test-fs-promises-writefile-typedarray.js": {},
     "parallel/test-fs-promises-writefile-with-fd.js": {},
     "parallel/test-fs-promises-writefile.js": {},
+    "parallel/test-fs-promises.js": {},
     "parallel/test-fs-promisified.js": {},
     "parallel/test-fs-read-empty-buffer.js": {},
     "parallel/test-fs-read-file-assert-encoding.js": {},
@@ -1922,6 +1932,7 @@
     "parallel/test-http-dont-set-default-headers-with-set-header.js": {},
     "parallel/test-http-dont-set-default-headers-with-setHost.js": {},
     "parallel/test-http-dont-set-default-headers.js": {},
+    "parallel/test-http-double-content-length.js": {},
     "parallel/test-http-dummy-characters-smuggling.js": {},
     "parallel/test-http-early-hints.js": {},
     "parallel/test-http-end-throw-socket-handling.js": {},
@@ -2066,6 +2077,7 @@
     "parallel/test-http-server-consumed-timeout.js": {},
     "parallel/test-http-server-de-chunked-trailer.js": {},
     "parallel/test-http-server-delete-parser.js": {},
+    "parallel/test-http-server-destroy-socket-on-client-error.js": {},
     "parallel/test-http-server-incomingmessage-destroy.js": {},
     "parallel/test-http-server-keep-alive-defaults.js": {},
     "parallel/test-http-server-keep-alive-max-requests-null.js": {},
@@ -4641,6 +4653,7 @@
     "sequential/test-dgram-pingpong.js": {},
     "sequential/test-fs-readdir-recursive.js": {},
     "sequential/test-fs-stat-sync-overflow.js": {},
+    "sequential/test-fs-opendir-recursive.js": {},
     "sequential/test-get-heapsnapshot-options.js": {
       "ignore": true,
       "reason": "Node.js snapshot/heap profiling features (--build-snapshot, --heap-prof, --heapsnapshot-near-heap-limit) are not implemented in Deno"
@@ -4885,7 +4898,7 @@
     },
     "module-hooks/test-async-loader-hooks-called-with-register.mjs": {
       "ignore": true,
-      "reason": "Runs `--input-type=module --eval`, which Deno's Node CLI shim runs as a script, so the eval'd import is a syntax error"
+      "reason": "The hooks see the `--eval` module's own URL (`$deno$eval.js`) as a `parentURL`, where Node's eval entry has none"
     },
     "module-hooks/test-async-loader-hooks-globalpreload-no-warning-with-initialize.mjs": {},
     "module-hooks/test-async-loader-hooks-globalpreload-warning.mjs": {
@@ -4893,22 +4906,13 @@
       "reason": "Tests the warning for Node's removed globalPreload hook"
     },
     "module-hooks/test-async-loader-hooks-initialize-in-sequence.mjs": {},
-    "module-hooks/test-async-loader-hooks-initialize-invoke.mjs": {
-      "ignore": true,
-      "reason": "Runs `--input-type=module --eval`, which Deno's Node CLI shim runs as a script, so the eval'd import is a syntax error"
-    },
+    "module-hooks/test-async-loader-hooks-initialize-invoke.mjs": {},
     "module-hooks/test-async-loader-hooks-initialize-never-settling.mjs": {
       "ignore": true,
       "reason": "Expects Node to detect a module.register() hooks chain that never settles (exit code 13 and a warning); Deno's loading thread keeps waiting"
     },
-    "module-hooks/test-async-loader-hooks-initialize-process-exit.mjs": {
-      "ignore": true,
-      "reason": "Runs `--input-type=module --eval`, which Deno's Node CLI shim runs as a script, so the eval'd import is a syntax error"
-    },
-    "module-hooks/test-async-loader-hooks-initialize-rejecting.mjs": {
-      "ignore": true,
-      "reason": "Runs `--input-type=module --eval`, which Deno's Node CLI shim runs as a script, so the eval'd import is a syntax error"
-    },
+    "module-hooks/test-async-loader-hooks-initialize-process-exit.mjs": {},
+    "module-hooks/test-async-loader-hooks-initialize-rejecting.mjs": {},
     "module-hooks/test-async-loader-hooks-initialize-throw-null.mjs": {
       "ignore": true,
       "reason": "Expects Node's report of a value thrown at a hooks module's top level (stderr shape and exit code)"
@@ -4957,36 +4961,27 @@
       "ignore": true,
       "reason": "parentPort and import.meta.resolve are defined in a module.register() hooks module (Node hides both on the hooks thread)"
     },
-    "module-hooks/test-async-loader-hooks-process-exit-async.mjs": {
-      "ignore": true,
-      "reason": "Runs `--input-type=module --eval`, which Deno's Node CLI shim runs as a script, so the eval'd import is a syntax error"
-    },
+    "module-hooks/test-async-loader-hooks-process-exit-async.mjs": {},
     "module-hooks/test-async-loader-hooks-process-exit-sync.mjs": {
       "ignore": true,
-      "reason": "Runs `--input-type=module --eval`, which Deno's Node CLI shim runs as a script, so the eval'd import is a syntax error"
+      "reason": "`import.meta.resolve()` in a `data:` module does not reach the `register()` resolve hook, so its `process.exit(42)` never runs"
     },
     "module-hooks/test-async-loader-hooks-process-exit-top-level.mjs": {},
     "module-hooks/test-async-loader-hooks-register-with-cjs.mjs": {
       "ignore": true,
       "reason": "A load hook's source for a node: builtin imported from ESM is not used (the ESM load hooks are not called for builtins, as with registerHooks())"
     },
-    "module-hooks/test-async-loader-hooks-register-with-import.mjs": {
-      "ignore": true,
-      "reason": "Runs `--input-type=module --eval`, which Deno's Node CLI shim runs as a script, so the eval'd import is a syntax error"
-    },
+    "module-hooks/test-async-loader-hooks-register-with-import.mjs": {},
     "module-hooks/test-async-loader-hooks-register-with-ports.mjs": {},
     "module-hooks/test-async-loader-hooks-register-with-require.mjs": {
       "ignore": true,
-      "reason": "Runs `--input-type=module --eval`, which Deno's Node CLI shim runs as a script, so the eval'd import is a syntax error"
+      "reason": "The `--eval` entry module is not resolved through hooks a `--require` preload registers; only its `node:os` import is"
     },
     "module-hooks/test-async-loader-hooks-register-with-url-parenturl.mjs": {
       "ignore": true,
       "reason": "A load hook's source for a node: builtin imported from ESM is not used (the ESM load hooks are not called for builtins, as with registerHooks())"
     },
-    "module-hooks/test-async-loader-hooks-remove-beforeexit-listener.mjs": {
-      "ignore": true,
-      "reason": "Runs `--input-type=module --eval`, which Deno's Node CLI shim runs as a script, so the eval'd import is a syntax error"
-    },
+    "module-hooks/test-async-loader-hooks-remove-beforeexit-listener.mjs": {},
     "module-hooks/test-async-loader-hooks-require-resolve-default.mjs": {
       "ignore": true,
       "reason": "Expects module.register() hooks to resolve the CommonJS main entry point; Deno resolves the main module before preloads run"
@@ -5207,6 +5202,7 @@
       "reason": "error: Uncaught (in promise) AssertionError: Expected values to be strictly deep"
     },
     "parallel/test-fs-stat-date.mjs": {},
+    "parallel/test-fs-stat-abort-test.js": {},
     "parallel/test-fs-watch-close-when-destroyed.js": {
       "windows": false,
       "reason": "times out"
@@ -5261,6 +5257,7 @@
     "parallel/test-http-response-multi-content-length.js": {},
     "parallel/test-http-server-async-dispose.js": {},
     "parallel/test-http-server-close-destroy-timeout.js": {},
+    "parallel/test-http-server-client-error.js": {},
     "parallel/test-http-server-headers-timeout-delayed-headers.js": {},
     "parallel/test-http-server-headers-timeout-interrupted-headers.js": {},
     "parallel/test-http-server-headers-timeout-pipelining.js": {},
