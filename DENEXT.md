@@ -5497,6 +5497,21 @@ where the changes are discussed.
      goes 300.5.5 → 300.6.0+3.6.2. Bump again when a 300.5.6+ appears, and
      re-check this if anything enables `crypto-openssl`.
 
+140. **`ci`: a failed laufey or denort build skips `package`**
+     (`fix/supply-denext2`; `.github/workflows/denext_runtime.yml`). The fork
+     production audit's P10: `package` ran under `always()` whenever laufey and
+     denort were not `cancelled`, so after a failed laufey (runs 40219825669,
+     40212070048, 39521569522, 39271729376) every target's package job failed in
+     `download-artifact` and then in each `!cancelled()` e2e step, burying the
+     build failure and costing macOS minutes. `always()` was there for a
+     `reuse_laufey_run_id` / `reuse_denort_run_id` dispatch, where those jobs
+     are `skipped`; nothing in the workflow, its history or this file chose to
+     package after a failure. `package` now needs each of them `success`, or
+     `skipped` with its reuse run id set. With `fail-fast: false` one failed leg
+     also skips the other targets' packaging; re-dispatch those `targets` with
+     the failed run's id as `reuse_laufey_run_id` (its green legs' artifacts are
+     there).
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137) are what the prebuilt `libdenort` carries.

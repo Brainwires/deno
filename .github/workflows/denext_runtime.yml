@@ -980,10 +980,14 @@ jobs:
   # Assemble the archives, check them, package the smoke app with the stock
   # CLI, try to launch it, run the e2e suite (.github/denext-runtime/e2e)
   # on both backends, attest.
+  # `always()` lets it run when laufey or denort was skipped because a
+  # reuse_*_run_id supplies its artifacts. A failed laufey or denort skips it:
+  # running anyway only failed in download-artifact and then in every
+  # `!cancelled()` e2e step, burying the build failure under red packaging.
   package:
     name: package / ${{ matrix.target }}
     needs: [setup, laufey, denort]
-    if: ${{ always() && !inputs.cli_only && needs.setup.result == 'success' && needs.laufey.result != 'cancelled' && needs.denort.result != 'cancelled' }}
+    if: ${{ always() && !inputs.cli_only && needs.setup.result == 'success' && (needs.laufey.result == 'success' || (needs.laufey.result == 'skipped' && inputs.reuse_laufey_run_id != '')) && (needs.denort.result == 'success' || (needs.denort.result == 'skipped' && inputs.reuse_denort_run_id != '')) }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 180
     permissions:
