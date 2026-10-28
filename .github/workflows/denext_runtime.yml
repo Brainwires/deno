@@ -93,6 +93,12 @@ env:
   # (P2). The binaries are built on ubuntu-22.04 and need 2.35 today; the
   # ceiling only ever goes DOWN (an older build baseline), never up.
   GLIBC_CEILING: '2.35'
+  # The engine staleness gate (.github/denext-runtime/engine_staleness.py):
+  # a V8 (Cargo.lock's v8 crate) or CEF (laufey's CEF_FULL_VERSION) pin more
+  # than one Chrome stable major behind warns on every run and, with `tag`,
+  # fails a release tag; `warn` keeps a tag at a warning. A failed Chrome
+  # stable lookup only warns.
+  ENGINE_STALENESS_ENFORCE: tag
 
 jobs:
   setup:
@@ -116,7 +122,9 @@ jobs:
             cli/Cargo.toml
             cli/lib/version.txt
             cli/lib/upstream_version.txt
+            Cargo.lock
             .github/denext-runtime/tag_gate.py
+            .github/denext-runtime/engine_staleness.py
           sparse-checkout-cone-mode: false
       - id: plan
         env:
@@ -160,6 +168,14 @@ jobs:
             base64 -d | sed -n 's/^#define LAUFEY_API_VERSION \([0-9]*\).*/\1/p')
           test -n "$laufey_api" ||
             { echo "::error::no LAUFEY_API_VERSION in $LAUFEY_REPOSITORY's capi/include/laufey.h at $laufey_sha"; exit 1; }
+
+          # Engine staleness: V8 and CEF more than one Chrome stable major
+          # behind get no upstream security fixes. Warns on branches, fails a
+          # tag (ENGINE_STALENESS_ENFORCE); offline it warns and passes.
+          tag_flag=()
+          if [ "$REF_TYPE" = tag ]; then tag_flag=(--tag); fi
+          python3 -I .github/denext-runtime/engine_staleness.py "${tag_flag[@]}" --cef "$cef_version" ||
+            { echo "::error::the engine staleness gate refused this release (see above)"; exit 1; }
 
           if [ "$REF_TYPE" = tag ]; then
             version=${REF_NAME#denext-runtime-v}
