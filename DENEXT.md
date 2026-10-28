@@ -5660,6 +5660,67 @@ The CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` /
 `LAUFEY_APP_ID` into a packaged app's launchers) are in the branch too, but a
 stock CLI does not run them; denext's own launcher provides that environment.
 
+<!-- 136-144 are held by unmerged branches; renumber at integration. -->
+
+145. **`fix(process)`: a Windows spawn without a handle list never overlaps
+     another spawn's inheritable handles** (`fix/win-spawn-handle-list-denext2`,
+     CLI and runtime; `runtime/subprocess_windows/src/process.rs`, `lib.rs`,
+     `tests.rs`, `ext/io/bi_pipe.rs`, `ext/process/lib.rs`,
+     `runtime/ops/desktop_update/swap.rs`, `cli/tsc/native.rs`). The rest of
+     item 105. Every spawn through `deno_subprocess_windows` (`Deno.Command`,
+     `Deno.run`, `node:child_process` with its IPC channel and extra `stdio`
+     pipes) already passes `PROC_THREAD_ATTRIBUTE_HANDLE_LIST`, so those spawns
+     never take each other's pipe ends. Rust's and tokio's
+     `std::process::Command` can't: they call `CreateProcessW` with
+     `bInheritHandles = TRUE` and no list (`CommandExt::raw_attribute`, which
+     could pass one, is unstable, rust-lang/rust#114854), so a process spawned
+     that way inherited whatever was inheritable at that moment: the duplicates
+     a concurrent `Deno.Command` spawn had just made for its child, an IPC or
+     extra-pipe end from `bi_pipe_pair_raw` (inheritable from birth), or a
+     handle passed with `inherit_handle` (left inheritable after its spawn). A
+     long-lived one kept that spawn's stdout open, as in item 105.
+     - **One process-wide lock over the inheritable windows** (`INHERIT_WINDOW`,
+       an `RwLock`): a `deno_subprocess_windows` spawn holds it shared from the
+       moment it makes its child's inheritable handles until they are closed
+       again (spawns with a handle list still overlap freely);
+       `with_exclusive_inheritance(f)` (re-exported by `deno_process`) runs a
+       list-less spawn holding it exclusively. Raymond Chen's fallback for when
+       the handle list isn't available, applied only where it isn't.
+     - **The list-less spawns that run beside a program's own spawns use it**:
+       the desktop update helper (`spawn_detached` on Windows, which lives until
+       the app exits) and the native `tsc` a type check starts.
+     - **`bi_pipe_pair_raw`'s ends are created non-inheritable**: the spawn
+       duplicates an extra pipe's end, and marks the IPC end inheritable for its
+       own spawn only.
+     - **A handle passed with `inherit_handle` gets its inherit flag back** as
+       it was before the spawn, on every return path.
+
+     Not changed (no program's spawn runs beside them in the same process, or
+     the child is short-lived): `deno task`'s shell (`deno_task_shell` on tokio,
+     under Rust's own spawn lock, with `os_pipe` pipes that are
+     non-inheritable), npm lifecycle scripts, `deno upgrade` / `compile` /
+     `install` / `x`, the LSP's tsgo server, git, and the npm state file of
+     `cli/npm.rs` / `cli/tools/x.rs` (a file, not a pipe). Not fixable here: a
+     grandchild a child leaves running holds the child's pipes on every OS.
+
+     Tests: `inherit_handle_is_inheritable_only_during_its_spawn` and
+     `std_spawns_take_no_pipe_ends_meant_for_another_child`
+     (`runtime/subprocess_windows/src/tests.rs`: four threads run 25 piped
+     `cmd /c echo` spawns each while two threads keep starting 30 s `ping`s
+     through `std::process::Command`; the slowest must finish within 15 s),
+     `bi_pipe_pair_raw_ends_are_not_inheritable` (`ext/io/bi_pipe.rs`), and
+     `commandConcurrentExtraStdioSpawnsDoNotLeakPipes`
+     (`tests/unit/command_test.ts`, Windows only; item 105's test extended to
+     `node:child_process` with two extra `stdio` pipes on the short children and
+     one on some long-lived ones).
+
+The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
+64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
+118, 119, 126, 127, 129, 145) are what the prebuilt `libdenort` carries. The
+CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID`
+into a packaged app's launchers) are in the branch too, but a stock CLI does not
+run them; denext's own launcher provides that environment.
+
 The laufey backend hosts are built from
 [Brainwires/laufey](https://github.com/Brainwires/laufey) branch
 `development-denext` (formerly `denext/integration`; registered schemes, app

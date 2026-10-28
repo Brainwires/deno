@@ -41,6 +41,7 @@ use std::pin::Pin;
 use std::ptr::null_mut;
 use std::ptr::{self};
 use std::sync::OnceLock;
+use std::sync::RwLock;
 use std::task::Poll;
 
 use futures_channel::oneshot;
@@ -52,6 +53,7 @@ use windows_sys::Win32::Foundation::ERROR_INVALID_PARAMETER;
 use windows_sys::Win32::Foundation::ERROR_SUCCESS;
 use windows_sys::Win32::Foundation::FALSE;
 use windows_sys::Win32::Foundation::GENERIC_WRITE;
+use windows_sys::Win32::Foundation::GetHandleInformation;
 use windows_sys::Win32::Foundation::GetLastError;
 use windows_sys::Win32::Foundation::HANDLE;
 use windows_sys::Win32::Foundation::HANDLE_FLAG_INHERIT;
@@ -533,6 +535,37 @@ impl Future for ChildProcess {
   }
 }
 
+/// Guards the windows in which this process holds inheritable handles meant
+/// for one particular child.
+///
+/// A spawn through this crate holds it shared from the moment it creates its
+/// child's inheritable handles until it has closed them (or cleared their
+/// inherit flag) again. Those spawns pass a `PROC_THREAD_ATTRIBUTE_HANDLE_LIST`,
+/// so they never pick up each other's handles and may overlap freely.
+///
+/// A spawn that can't pass a handle list (Rust's `std::process::Command` and
+/// tokio's, which call `CreateProcessW` with `bInheritHandles = TRUE` and no
+/// list: the list API, `CommandExt::raw_attribute`, is unstable) inherits
+/// EVERY inheritable handle in the process, so it runs through
+/// [`with_exclusive_inheritance`], which holds the lock exclusively. Without
+/// it such a child could take another spawn's stdout write end with it, and
+/// that spawn's reader would see no end-of-file until the unrelated child
+/// exits. This is the serialization Raymond Chen describes as the fallback to
+/// the handle list ("Programmatically controlling which handles are inherited
+/// by new processes in Win32"), applied only where the list isn't available.
+static INHERIT_WINDOW: RwLock<()> = RwLock::new(());
+
+/// Runs `f`, a spawn that inherits every inheritable handle in the process
+/// (`std::process::Command::spawn`, tokio's `Command::spawn`), while no spawn
+/// through this crate holds inheritable handles meant for its own child.
+///
+/// `f` must not spawn through this crate itself (the lock isn't re-entrant).
+pub fn with_exclusive_inheritance<T>(f: impl FnOnce() -> T) -> T {
+  // A panic inside another holder leaves no handle state to repair.
+  let _guard = INHERIT_WINDOW.write().unwrap_or_else(|e| e.into_inner());
+  f()
+}
+
 /// Adds `handle` to the child's inherit list once, skipping null and invalid
 /// handles.
 fn push_inherit_handle(list: &mut Vec<HANDLE>, handle: HANDLE) {
@@ -613,6 +646,10 @@ impl Drop for HandleListAttribute<'_> {
 }
 
 pub fn spawn(options: &SpawnOptions) -> Result<ChildProcess, std::io::Error> {
+  // Held until every inheritable handle made for this child is closed or
+  // non-inheritable again (see `INHERIT_WINDOW`).
+  let _inherit_window =
+    INHERIT_WINDOW.read().unwrap_or_else(|e| e.into_inner());
   let mut startup_ex = unsafe { mem::zeroed::<STARTUPINFOEXW>() };
   let mut info = unsafe { mem::zeroed::<PROCESS_INFORMATION>() };
 
@@ -744,14 +781,23 @@ pub fn spawn(options: &SpawnOptions) -> Result<ChildProcess, std::io::Error> {
       child_stdio_buffer.get_handle(fd as i32)
     });
   }
+  // Handles given by value are inheritable only for this spawn: each one's
+  // flag is put back as it was when the spawn returns, whatever the outcome.
+  let mut restore_inherit = RestoreInherit(Vec::new());
   for &handle in &options.inherit_handles {
     if handle.is_null() || handle == INVALID_HANDLE_VALUE {
       continue;
     }
+    let mut flags = 0u32;
     // SAFETY: the caller passes a handle it owns until the spawn returns.
-    cvt(unsafe {
-      SetHandleInformation(handle, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT)
-    })?;
+    cvt(unsafe { GetHandleInformation(handle, &mut flags) })?;
+    if flags & HANDLE_FLAG_INHERIT == 0 {
+      // SAFETY: as above.
+      cvt(unsafe {
+        SetHandleInformation(handle, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT)
+      })?;
+      restore_inherit.0.push(handle);
+    }
     push_inherit_handle(&mut inherit_list, handle);
   }
   let handle_list = if inherit_list.is_empty() {
@@ -892,8 +938,22 @@ pub fn spawn(options: &SpawnOptions) -> Result<ChildProcess, std::io::Error> {
   // The child holds its own copies now; close ours.
   drop(handle_list);
   drop(child_stdio_buffer);
+  drop(restore_inherit);
 
   Ok(child)
+}
+
+/// Clears the inherit flag of handles a spawn made inheritable, on drop.
+struct RestoreInherit(Vec<HANDLE>);
+
+impl Drop for RestoreInherit {
+  fn drop(&mut self) {
+    for &handle in &self.0 {
+      // SAFETY: the caller keeps the handle open until the spawn returns,
+      // and this runs before it does.
+      unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0) };
+    }
+  }
 }
 
 macro_rules! impl_bitops {

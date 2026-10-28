@@ -59,6 +59,11 @@ use deno_subprocess_windows::Child as AsyncChild;
 use deno_subprocess_windows::Command;
 #[cfg(windows)]
 use deno_subprocess_windows::Stdio as StdStdio;
+/// Runs a spawn that inherits every inheritable handle (Rust's or tokio's
+/// `Command::spawn`) while no Deno spawn holds handles meant for its own
+/// child. See `deno_subprocess_windows`.
+#[cfg(windows)]
+pub use deno_subprocess_windows::with_exclusive_inheritance;
 use serde::Deserialize;
 #[cfg(unix)]
 use tokio::process::Child as AsyncChild;

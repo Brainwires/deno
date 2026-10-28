@@ -152,7 +152,8 @@ pub async fn run_native_tsc(
   tsconfig_path: &Path,
   project_root: &Path,
 ) -> Result<std::process::Output, AnyError> {
-  tokio::process::Command::new(tsc_path)
+  let mut command = tokio::process::Command::new(tsc_path);
+  command
     .arg("--project")
     .arg(tsconfig_path)
     .arg("--noEmit")
@@ -169,9 +170,22 @@ pub async fn run_native_tsc(
     // the symlink and make tsc report every path relative to it. Pin `PWD` to
     // the same directory we chdir'd into.
     .env("PWD", project_root)
+    // `output()` would default stdin to null; `spawn()` doesn't.
+    .stdin(Stdio::null())
     .stdout(Stdio::piped())
-    .stderr(Stdio::piped())
-    .output()
+    .stderr(Stdio::piped());
+  // A check can run while the program spawns its own children (a dynamic
+  // import under `--check`): on Windows, never while one of those holds its
+  // child's pipe ends, which this spawn would inherit.
+  #[cfg(windows)]
+  let child =
+    deno_subprocess_windows::with_exclusive_inheritance(|| command.spawn());
+  #[cfg(not(windows))]
+  let child = command.spawn();
+  let child =
+    child.map_err(|e| anyhow::anyhow!("failed to run native tsc: {e}"))?;
+  child
+    .wait_with_output()
     .await
     .map_err(|e| anyhow::anyhow!("failed to run native tsc: {e}"))
 }

@@ -688,10 +688,15 @@ pub fn bi_pipe_pair_raw()
       };
 
       /* Create child pipe handle. */
+      // Not inheritable: a spawn that hands it to a child (an IPC channel,
+      // an extra `stdio` pipe) duplicates it or marks it inheritable for
+      // that spawn alone. Inheritable from birth, any other process this
+      // process started before then (one with no handle list) took it too
+      // and held the channel open.
       let s = SECURITY_ATTRIBUTES {
         nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
         lpSecurityDescriptor: ptr::null_mut(),
-        bInheritHandle: 1,
+        bInheritHandle: 0,
       };
       let hd2 = CreateFileW(
         path.as_ptr(),
@@ -716,6 +721,29 @@ pub fn bi_pipe_pair_raw()
       }
 
       Ok((hd1 as _, hd2 as _))
+    }
+  }
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+  use windows_sys::Win32::Foundation::CloseHandle;
+  use windows_sys::Win32::Foundation::GetHandleInformation;
+  use windows_sys::Win32::Foundation::HANDLE_FLAG_INHERIT;
+
+  /// Neither end is inheritable when created: a process spawned without a
+  /// handle list (Rust's `Command`) before the end is handed to its own child
+  /// must not take it and hold the channel open.
+  #[test]
+  fn bi_pipe_pair_raw_ends_are_not_inheritable() {
+    let (ours, theirs) = super::bi_pipe_pair_raw().unwrap();
+    for handle in [ours, theirs] {
+      let mut flags = 0u32;
+      // SAFETY: `handle` is open until the CloseHandle below.
+      assert_ne!(unsafe { GetHandleInformation(handle as _, &mut flags) }, 0);
+      assert_eq!(flags & HANDLE_FLAG_INHERIT, 0);
+      // SAFETY: we own `handle`.
+      unsafe { CloseHandle(handle as _) };
     }
   }
 }

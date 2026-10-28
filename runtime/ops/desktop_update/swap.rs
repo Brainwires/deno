@@ -1980,14 +1980,17 @@ pub fn spawn_detached(
     cmd.creation_flags(
       DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB,
     );
-    match cmd.spawn() {
+    // Rust's spawn hands the child every inheritable handle in the process:
+    // never while a `Deno.Command` spawn holds its child's pipe ends, which
+    // this long-lived helper would otherwise keep open.
+    deno_process::with_exclusive_inheritance(|| match cmd.spawn() {
       Ok(_) => Ok(()),
       // A job that forbids breakaway: start inside it instead.
       Err(_) => {
         cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
         cmd.spawn().map(|_| ())
       }
-    }
+    })
   }
 }
 

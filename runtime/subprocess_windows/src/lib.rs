@@ -63,6 +63,7 @@ use std::task::Poll;
 use anon_pipe::read2;
 use env::CommandEnv;
 pub use process::process_kill;
+pub use process::with_exclusive_inheritance;
 pub use process_stdio::disable_stdio_inheritance;
 
 use crate::process::*;
@@ -413,7 +414,8 @@ impl Command {
   /// Lets the child inherit `handle`, whose number it learns some other way
   /// (an environment variable). The child inherits ONLY its stdio and the
   /// handles given here, never another spawn's pipes. The caller keeps
-  /// ownership; `spawn` marks the handle inheritable.
+  /// ownership; `spawn` marks the handle inheritable for the spawn only and
+  /// puts its inherit flag back as it was before returning.
   pub fn inherit_handle(&mut self, handle: HANDLE) -> &mut Self {
     self.inherit_handles.push(handle);
     self
