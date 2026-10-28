@@ -55,10 +55,11 @@ denort = { path = "../rt", default-features = false }
 # passkeys through libwebauthn; runtime 3.0.0-rc.4: downloads from the app's
 # own scheme saved on every backend; runtime 3.0.0-denext.1: the fail-closed
 # `strictPolicy` launch key and the per-app Linux secure store, laufey branch
-# `release/denext-1`), pinned to a commit of the Brainwires/laufey fork.
+# `release/denext-1`; runtime 3.0.0-denext.2: legacy Linux secure-store items
+# read over an encrypted session, tokio 1.53.3), pinned to a commit of the Brainwires/laufey fork.
 # The host built from the same commit must be used with it (the API version
 # check is exact).
-laufey = { git = "https://github.com/Brainwires/laufey", rev = "ec6a30bd281e5034185817bb6c1bde7f0af6c627" }
+laufey = { git = "https://github.com/Brainwires/laufey", rev = "253e75b6f4c4a04adb70491b98e8ec826ffd3229" }
 libsui.workspace = true
 
 bytes.workspace = true
