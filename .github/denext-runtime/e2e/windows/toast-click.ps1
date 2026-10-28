@@ -16,6 +16,9 @@ param(
   [string]$Data = ""
 )
 $ErrorActionPreference = "Stop"
+# Each phase's time goes to stdout (the menus app records it): on a slow
+# runner this script outlasts a short wait for the click it makes.
+$clock = [Diagnostics.Stopwatch]::StartNew()
 $clsid = (Get-ItemProperty "HKCU:\Software\Classes\AppUserModelId\$Aumid").CustomActivator
 if (-not $clsid) { throw "no toast activator registered for $Aumid" }
 Add-Type -TypeDefinition @"
@@ -39,6 +42,7 @@ public static class ToastClick {
   }
 }
 "@
+$compiled = $clock.ElapsedMilliseconds
 $invoked = "laufey=1&tag=" + [Uri]::EscapeDataString($Tag)
 if ($Action) { $invoked += "&action=" + [Uri]::EscapeDataString($Action) }
 if ($Data) { $invoked += "&data=" + [Uri]::EscapeDataString($Data) }
@@ -58,5 +62,6 @@ for ($i = 0; $i -lt 32; $i++) { $key[$i] = [Convert]::ToByte($hex.Substring(2 * 
 $hmac = New-Object Security.Cryptography.HMACSHA256 (, $key)
 $mac = $hmac.ComputeHash([Text.Encoding]::UTF8.GetBytes("laufey-notification-click/1`n" + $invoked))
 $invoked += "&mac=" + (($mac | ForEach-Object { $_.ToString("x2") }) -join "")
+$signed = $clock.ElapsedMilliseconds
 [ToastClick]::Click($clsid, $Aumid, $invoked)
-Write-Host "clicked $Tag ($Action) via $clsid"
+Write-Host "clicked $Tag ($Action) via $clsid (Add-Type done at $compiled ms, Activate at $signed ms, returned at $($clock.ElapsedMilliseconds) ms)"

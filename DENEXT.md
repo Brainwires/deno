@@ -5333,6 +5333,52 @@ where the changes are discussed.
      `notificationresponse` when no `close` came, and still fails when neither a
      click nor a response ever arrives.
 
+     That wait was not the cause. In the denext.1 tag run (40645227860) the
+     action-button and body clicks both failed with no click, no `close` and no
+     response, though `toast-click.ps1` reported success. The script calls the
+     app's COM activator directly (`CoCreateInstance` +
+     `INotificationActivationCallback::Activate`). It never looks a toast up in
+     the Action Center history, so registration and history timing don't apply:
+     the `e2e-due` click went through the same activator in the same process and
+     arrived.
+
+     The cause was the harness's clock. Each click listened with
+     `once(n, "click" | "action", 15000)`. Those 15 s started before the `show`
+     wait and the script run. One script run (PowerShell start, Add-Type's C#
+     compile, `Activate`) outlasts that window on windows-11-arm. The apps' own
+     `stages` show this in failing and passing runs alike. The live-notification
+     stage took 46-61 s for its two toasts. The old code could spend that long
+     only if each script run took about 20 s or more; on the Windows on Arm VM a
+     run takes 2.5-3 s. So `once` had already resolved null when laufey
+     dispatched the click, and the click reached no listener.
+     - If the shell had already retired the toast (a shown banner times out
+       after at most 7 s and laufey reports `close`), laufey routed the click as
+       a `notificationresponse`. No deadline bounds that, so the check passed.
+     - If the shell raised no `Dismissed` for the toast (`closedAt` 0), the
+       click went to the live object after `once` had given up. This is the
+       intermittent failure, and the reason the live paths have never passed on
+       a hosted runner.
+
+     The checks now record `click` / `action` events from before the click, with
+     no deadline, and wait 10 s for them once the script returns. Each run of
+     `toast-click.ps1` prints its phase times. The app records each run's
+     duration and output under `toastClick:<tag>` in its results file, so the
+     next slow run measures the script directly.
+
+     Reproduced on the Windows on Arm VM (rc.6 cef runtime, console session),
+     with the timing scaled down so the toast stays live:
+     - With a 3 s pause before `Activate` and a 3 s `once` window, the old
+       harness failed exactly as CI did: the action check gave
+       `{"event":"none","closedAt":0,"responses":[e2e-due]}`, and the body check
+       got no click and no response.
+     - The fixed harness passed both checks with the same pause, with no pause,
+       and with an 18 s pause. With the 18 s pause the VM's shell times the
+       toasts out first, so the clicks are checked as responses.
+
+     The live paths stay in the expected n/a list for windows-11-arm, since a
+     shell that retires the toast still makes them n/a. A run whose toast stays
+     live now passes them, with a notice.
+
      Two more e2e harness fixes from the same round (run 40608590678):
      - **WebView2 has no response backpressure.** The `origin` check "a stream
        the page stops reading is held back" is now expected n/a on both Windows

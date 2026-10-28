@@ -27,7 +27,6 @@ import {
   sleep,
   titledWindow,
   waitFor,
-  within,
 } from "../_shared/e2e.ts";
 import {
   activate,
@@ -104,7 +103,26 @@ const win = titledWindow(TITLE);
 await sleep(3000);
 const cannotPress = await canPressKeys();
 
-/** Click a notification as the OS would (null) or say why it can't. */
+/** Every `types` event `target` fires from now on, with when it came. No
+ * deadline: on windows-11-arm one toast-click.ps1 run takes ~20 s (PowerShell
+ * start, Add-Type's C# compile, COM; `toastClick:<tag>` records it), so a
+ * click COM delivers while the script runs must still count; the wait for it
+ * starts once osClick returns.
+ * (A `once(target, type, 15000)` started before the click resolved null
+ * first and the live toast's click event then reached no one: item 135.) */
+function record(target: EventTarget, ...types: string[]) {
+  const got: { type: string; event: any; at: number }[] = [];
+  for (const type of types) {
+    target.addEventListener(
+      type,
+      (event) => got.push({ type, event, at: Date.now() }),
+    );
+  }
+  return got;
+}
+
+/** Click a notification as the OS would (null) or say why it can't. On
+ * Windows the run's duration and output go under `toastClick:<tag>`. */
 async function osClick(
   tag: string,
   title: string,
@@ -126,14 +144,21 @@ async function osClick(
     ];
     if (action) args.push("-Action", action);
     if (data) args.push("-Data", data);
+    const startedAt = Date.now();
     const o = await new Deno.Command("powershell", {
       args,
       stdout: "piped",
       stderr: "piped",
     }).output();
-    return o.success
-      ? null
-      : new TextDecoder().decode(o.stderr) + new TextDecoder().decode(o.stdout);
+    const out = new TextDecoder().decode(o.stderr) +
+      new TextDecoder().decode(o.stdout);
+    r.set(`toastClick:${tag}`, {
+      startedAt,
+      ms: Date.now() - startedAt,
+      ok: o.success,
+      out: out.trim(),
+    });
+    return o.success ? null : out;
   }
   if (OS === "linux") return null; // the body asked the stand-in server to click
   return "macOS delivers a click only from a person clicking the banner (no API or automation posts one for an unsigned app)";
@@ -408,11 +433,9 @@ await r.step("notifications", async () => {
       data: { n: 1 },
       actions: [{ action: "yes", title: "Yes" }],
     });
-    const clicked: string[] = [];
-    a.addEventListener("click", () => clicked.push("click"));
+    const aEvents = record(a, "action", "click");
     let aClosedAt = 0;
     a.addEventListener("close", () => (aClosedAt ||= Date.now()));
-    const actionP = once(a, "action", 15000);
     const shown = await once(a, "show", 10000);
     r.check("a live notification fires show", shown !== null);
     r.check(
@@ -424,9 +447,11 @@ await r.step("notifications", async () => {
     if (why) {
       r.na("a click on an action button fires action (not click)", why);
     } else {
-      const ev: any = await within(actionP, 10000);
-      const event = "value" in ev ? ev.value : null;
       const resp = () => responses.find((x) => x.tag === "e2e-action");
+      const actionEv = () => aEvents.find((x) => x.type === "action");
+      await waitFor(() => !!actionEv() || (!!aClosedAt && !!resp()), 10000);
+      const event = actionEv()?.event ?? null;
+      const clicked = aEvents.filter((x) => x.type === "click");
       if (!event && aClosedAt && await waitFor(() => !!resp(), 5000)) {
         // The shell retired the toast before the click reached it (a hosted
         // runner's session hides toasts within ~2 s and reports them
@@ -451,9 +476,12 @@ await r.step("notifications", async () => {
         r.check(
           "a click on an action button fires action with its id, not click",
           event?.action === "yes" && clicked.length === 0,
-          event
-            ? { action: event.action, clicked }
-            : { event: "none", closedAt: aClosedAt, responses },
+          event ? { action: event.action, clicked: clicked.length } : {
+            event: "none",
+            closedAt: aClosedAt,
+            responses,
+            toastClick: r.data["toastClick:e2e-action"],
+          },
         );
       }
     }
@@ -462,19 +490,24 @@ await r.step("notifications", async () => {
       body: clickBody("default"),
       tag: "e2e-click",
     });
-    const clickP = once(b, "click", 15000);
+    const bEvents = record(b, "click");
     let bClosedAt = 0;
     b.addEventListener("close", () => (bClosedAt ||= Date.now()));
     await once(b, "show", 10000);
     const whyB = await osClick("e2e-click", "E2E click", null);
     if (whyB) r.na("a click on the body fires click", whyB);
     else {
-      const got = await within(clickP, 10000);
+      const clickedB = await waitFor(
+        () =>
+          bEvents.length > 0 ||
+          (!!bClosedAt && responses.some((x) => x.tag === "e2e-click")),
+        10000,
+      ) && bEvents.length > 0;
       // A slow shell (windows-11-arm) may retire the toast and route the
       // activation as a notificationresponse well after the 10 s window, with
       // no close seen yet; wait for that response before calling it lost.
       if (
-        !("value" in got && got.value) &&
+        !clickedB &&
         await waitFor(
           () => responses.some((x) => x.tag === "e2e-click"),
           bClosedAt ? 5000 : 15000,
@@ -491,8 +524,12 @@ await r.step("notifications", async () => {
       } else {
         r.check(
           "a click on the body fires click",
-          "value" in got && got.value !== null,
-          { closedAt: bClosedAt, responses },
+          bEvents.length > 0,
+          {
+            closedAt: bClosedAt,
+            responses,
+            toastClick: r.data["toastClick:e2e-click"],
+          },
         );
       }
     }
