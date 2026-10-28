@@ -5323,6 +5323,16 @@ where the changes are discussed.
      leg does, and a `failure` with no jobs at all (a workflow that never
      started) stays red.
 
+135. **`test(e2e)`: a toast body click on a slow shell waits for its response**
+     (`.github/denext-runtime/e2e/apps/menus/main.ts`). On windows-11-arm
+     (runtime run 40564206355) the scripted activation of the body toast
+     produced neither a `click` within 10 s nor a `close`, so the check failed
+     with no response recorded, while the same run's action-button toast was
+     answered as a `notificationresponse`. The check took the retired-toast path
+     only after a `close`; it now also waits up to 15 s for the toast's
+     `notificationresponse` when no `close` came, and still fails when neither a
+     click nor a response ever arrives.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129) are what the prebuilt `libdenort` carries. The CLI-side

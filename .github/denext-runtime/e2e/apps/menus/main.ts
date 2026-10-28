@@ -470,9 +470,15 @@ await r.step("notifications", async () => {
     if (whyB) r.na("a click on the body fires click", whyB);
     else {
       const got = await within(clickP, 10000);
+      // A slow shell (windows-11-arm) may retire the toast and route the
+      // activation as a notificationresponse well after the 10 s window, with
+      // no close seen yet; wait for that response before calling it lost.
       if (
-        !("value" in got && got.value) && bClosedAt &&
-        await waitFor(() => responses.some((x) => x.tag === "e2e-click"), 5000)
+        !("value" in got && got.value) &&
+        await waitFor(
+          () => responses.some((x) => x.tag === "e2e-click"),
+          bClosedAt ? 5000 : 15000,
+        )
       ) {
         r.check(
           "a body click on a toast the shell already retired is a notificationresponse",
