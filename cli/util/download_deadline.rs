@@ -1,6 +1,6 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 
-//! denext (DENEXT.md item 147): deadlines and retries for the CLI's downloads.
+//! denext (DENEXT.md item 149): deadlines and retries for the CLI's downloads.
 //!
 //! A stalled connection almost never recovers, and a new one usually answers
 //! at once, so a download waits a short time at each stage and then retries on

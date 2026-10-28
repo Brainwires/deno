@@ -1,4 +1,4 @@
-// denext (DENEXT.md item 147): a download from a server that stops answering
+// denext (DENEXT.md item 149): a download from a server that stops answering
 // is retried on a new connection and then fails with a report of every
 // attempt (1 s deadlines and 3 attempts here) instead of waiting forever; one
 // that is slow but keeps sending data finishes, and one that stalls once

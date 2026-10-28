@@ -167,7 +167,7 @@ impl deno_cache_dir::file_fetcher::HttpClient for HttpClientAdapter {
     }
 
     let mut retried = false; // retry intermittent failures
-    // denext (DENEXT.md item 147): a stalled request or body is retried on a
+    // denext (DENEXT.md item 149): a stalled request or body is retried on a
     // new connection (`HttpClient::send` / `replace_connection` retire the
     // stalled one) within the download deadlines' attempts and budget.
     let mut deadline_budget = None;

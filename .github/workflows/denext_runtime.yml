@@ -76,7 +76,7 @@ env:
   # laufey `development-denext` (the Brainwires/laufey fork's stable branch;
   # it replaced `denext/integration`) or a release branch cut from it
   # (`release/denext-1` for 3.0.0-denext.1), pinned to a commit.
-  LAUFEY_SHA: ec6a30bd281e5034185817bb6c1bde7f0af6c627
+  LAUFEY_SHA: 253e75b6f4c4a04adb70491b98e8ec826ffd3229
   LAUFEY_REPOSITORY: Brainwires/laufey
   # The stock CLI the archives are smoke-tested with (and that denext runs).
   STOCK_DENO_VERSION: 2.9.8
@@ -95,7 +95,7 @@ env:
   # binary" fails one that requires a newer GLIBC_ version
   # (glibc_ceiling.py). denext reads the same value from the pin data before
   # it downloads the toolchain. Only ever lowered, never raised. See
-  # DENEXT.md item 134.
+  # DENEXT.md item 151.
   GLIBC_CEILING: '2.27'
   # The engine staleness gate (.github/denext-runtime/engine_staleness.py):
   # a V8 (Cargo.lock's v8 crate) or CEF (laufey's CEF_FULL_VERSION) pin more
@@ -103,7 +103,7 @@ env:
   # fails a release tag; `warn` keeps a tag at a warning. A failed Chrome
   # stable lookup only warns. `warn` for 3.0.0-denext.2: rusty_v8 152.2.0 is
   # the newest there is, and `tag` would refuse every tag today (DENEXT.md
-  # item 152).
+  # item 150).
   ENGINE_STALENESS_ENFORCE: warn
 
 jobs:

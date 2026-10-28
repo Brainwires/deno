@@ -8,7 +8,7 @@
 # upstream's .github/workflows/ci.ts (`sysRootConfig`): the same sysroot
 # release, its `.env` flags, the memfd_create and libm shims in tools/ and the
 # same `--wrap`s, linked by clang + lld. It leaves out upstream's linker-plugin
-# LTO: the release profile's own LTO is unchanged. See DENEXT.md item 134.
+# LTO: the release profile's own LTO is unchanged. See DENEXT.md item 151.
 #
 # Usage: linux_sysroot.sh <target triple>
 #   Installs clang + lld, unpacks the sysroot (checked against its pinned

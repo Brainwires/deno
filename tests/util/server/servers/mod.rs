@@ -1618,7 +1618,7 @@ fn sha2_digest(data: &[u8]) -> String {
   faster_hex::hex_string(&hash)
 }
 
-/// denext (DENEXT.md item 147): a registry or module host that stops
+/// denext (DENEXT.md item 149): a registry or module host that stops
 /// answering, for the CLI's download deadlines.
 ///
 /// - `/download_deadlines/stall_headers/<any>`: reads the request and never

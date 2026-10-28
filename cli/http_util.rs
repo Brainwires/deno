@@ -95,7 +95,7 @@ fn connect_timed_out(err: &deno_fetch::ClientSendError) -> Option<Duration> {
   None
 }
 
-/// denext (DENEXT.md item 147): the deno_fetch client a provider hands out,
+/// denext (DENEXT.md item 149): the deno_fetch client a provider hands out,
 /// replaceable. When a download's connection stalls or breaks, the client
 /// (and with it its connection pool) is replaced, so the retry, and every
 /// other request after it, opens a new connection instead of queueing on the
@@ -1306,7 +1306,7 @@ mod test {
     ));
   }
 
-  // denext (DENEXT.md item 147): download deadlines and retries.
+  // denext (DENEXT.md item 149): download deadlines and retries.
 
   fn short_deadlines(ms: u64) -> DownloadDeadlines {
     DownloadDeadlines {

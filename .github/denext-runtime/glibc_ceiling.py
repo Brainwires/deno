@@ -13,7 +13,7 @@ Usage: glibc_ceiling.py <ceiling, e.g. 2.27> <file>...
 Exits 0 when every file is at or under the ceiling, 1 when one is over it or
 requires no GLIBC_ version at all (not a dynamically linked glibc binary),
 2 on a usage error. denext_runtime.yml's cli job runs it in "Check binary"
-with GLIBC_CEILING (DENEXT.md item 134).
+with GLIBC_CEILING (DENEXT.md item 151).
 """
 
 import re

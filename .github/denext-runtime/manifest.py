@@ -28,7 +28,7 @@ tag = env.get("TAG", "")
 repo = env["REPOSITORY"]
 # The newest glibc version the Linux `deno` and `denort` require: the
 # workflow's GLIBC_CEILING, which their "Check binary" step asserts
-# (glibc_ceiling.py, DENEXT.md item 134). denext pins it and refuses a Linux
+# (glibc_ceiling.py, DENEXT.md item 151). denext pins it and refuses a Linux
 # host with an older glibc (or musl) before it downloads them.
 glibc = env.get("GLIBC_CEILING") or None
 if glibc is not None and not re.fullmatch(r"\d+\.\d+", glibc):

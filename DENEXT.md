@@ -5558,7 +5558,7 @@ where the changes are discussed.
      the failed run's id as `reuse_laufey_run_id` (its green legs' artifacts are
      there).
 
-136. **`fix(security)`: the Deno Deploy token crosses the session bus
+141. **`fix(security)`: the Deno Deploy token crosses the session bus
      encrypted** (`fix/secret-service-session-denext2`, CLI only;
      `cli/Cargo.toml`, `Cargo.lock`, `cli/tools/deploy.rs`,
      `.github/denext-runtime/assert_guard.py`,
@@ -5601,7 +5601,7 @@ where the changes are discussed.
        patched in 1.53.3, the only tokio in the lock; `cargo audit` with the
        advisory database of 2026-10-27 does not report it.
 
-136. **`docs(desktop)`: why a packaged app's loopback grant covers every port**
+142. **`docs(desktop)`: why a packaged app's loopback grant covers every port**
      (fork security audit B-I2; `cli/rt/run.rs` comments only, no behavior
      change). `apply_desktop_permission_defaults` adds `127.0.0.1`, `localhost`
      and `[::1]` with no port to a packaged desktop app's net grant
@@ -5647,7 +5647,7 @@ where the changes are discussed.
      process has bound) would need new permission state shared with workers and
      is not done here.
 
-137. **`docs(desktop)`: the Linux full-app update has no OS signature check, by
+143. **`docs(desktop)`: the Linux full-app update has no OS signature check, by
      design** (fork security audit E-I1; `runtime/ops/desktop_update/oscheck.rs`
      comment only). macOS requires the same Developer ID Team ID under an Apple
      anchor, and Windows the same Authenticode signer on every PE image (item
@@ -5699,9 +5699,195 @@ where the changes are discussed.
      electron-updater checks code signatures on macOS and Windows only
      ([electron-builder: auto update](https://www.electron.build/auto-update)).
 
-<!-- 136-146 are held by unmerged branches; renumber at integration. -->
+144. **`fix(process)`: a Windows spawn without a handle list never overlaps
+     another spawn's inheritable handles** (`fix/win-spawn-handle-list-denext2`,
+     CLI and runtime; `runtime/subprocess_windows/src/process.rs`, `lib.rs`,
+     `tests.rs`, `ext/io/bi_pipe.rs`, `ext/process/lib.rs`,
+     `runtime/ops/desktop_update/swap.rs`, `cli/tsc/native.rs`). The rest of
+     item 105. Every spawn through `deno_subprocess_windows` (`Deno.Command`,
+     `Deno.run`, `node:child_process` with its IPC channel and extra `stdio`
+     pipes) already passes `PROC_THREAD_ATTRIBUTE_HANDLE_LIST`, so those spawns
+     never take each other's pipe ends. Rust's and tokio's
+     `std::process::Command` can't: they call `CreateProcessW` with
+     `bInheritHandles = TRUE` and no list (`CommandExt::raw_attribute`, which
+     could pass one, is unstable, rust-lang/rust#114854), so a process spawned
+     that way inherited whatever was inheritable at that moment: the duplicates
+     a concurrent `Deno.Command` spawn had just made for its child, an IPC or
+     extra-pipe end from `bi_pipe_pair_raw` (inheritable from birth), or a
+     handle passed with `inherit_handle` (left inheritable after its spawn). A
+     long-lived one kept that spawn's stdout open, as in item 105.
+     - **One process-wide lock over the inheritable windows** (`INHERIT_WINDOW`,
+       an `RwLock`): a `deno_subprocess_windows` spawn holds it shared from the
+       moment it makes its child's inheritable handles until they are closed
+       again (spawns with a handle list still overlap freely);
+       `with_exclusive_inheritance(f)` (re-exported by `deno_process`) runs a
+       list-less spawn holding it exclusively. Raymond Chen's fallback for when
+       the handle list isn't available, applied only where it isn't.
+     - **The list-less spawns that run beside a program's own spawns use it**:
+       the desktop update helper (`spawn_detached` on Windows, which lives until
+       the app exits) and the native `tsc` a type check starts.
+     - **`bi_pipe_pair_raw`'s ends are created non-inheritable**: the spawn
+       duplicates an extra pipe's end, and marks the IPC end inheritable for its
+       own spawn only.
+     - **A handle passed with `inherit_handle` gets its inherit flag back** as
+       it was before the spawn, on every return path.
 
-147. **`fix(http)`: the CLI's downloads give up on a stalled connection and
+     Not changed (no program's spawn runs beside them in the same process, or
+     the child is short-lived): `deno task`'s shell (`deno_task_shell` on tokio,
+     under Rust's own spawn lock, with `os_pipe` pipes that are
+     non-inheritable), npm lifecycle scripts, `deno upgrade` / `compile` /
+     `install` / `x`, the LSP's tsgo server, git, and the npm state file of
+     `cli/npm.rs` / `cli/tools/x.rs` (a file, not a pipe). Not fixable here: a
+     grandchild a child leaves running holds the child's pipes on every OS.
+
+     Tests: `inherit_handle_is_inheritable_only_during_its_spawn` and
+     `std_spawns_take_no_pipe_ends_meant_for_another_child`
+     (`runtime/subprocess_windows/src/tests.rs`: four threads run 25 piped
+     `cmd /c echo` spawns each while two threads keep starting 30 s `ping`s
+     through `std::process::Command`; the slowest must finish within 15 s),
+     `bi_pipe_pair_raw_ends_are_not_inheritable` (`ext/io/bi_pipe.rs`), and
+     `commandConcurrentExtraStdioSpawnsDoNotLeakPipes`
+     (`tests/unit/command_test.ts`, Windows only; item 105's test extended to
+     `node:child_process` with two extra `stdio` pipes on the short children and
+     one on some long-lived ones).
+
+145. **`fix(ext/node)`: `node:fs` argument checks, errors and `Dir` as in Node
+     26** (`fix/node-compat-denext2`, runtime; `ext/node/polyfills/fs.ts`,
+     `_fs/_fs_dir.ts`, `_fs/_fs_readdir.ts`, `_fs/cp/cp.ts`,
+     `internal/fs/promises.ts`, `internal/fs/handle.ts`). The largest `fs`
+     cluster of the 2026-10-28 node_compat re-measure
+     (`plans/node-compat-gaps.md` in denext): calls that Node rejects at once
+     reached the file system, and errors carried other codes, syscalls or stacks
+     than Node's.
+     - **`Dir` follows `lib/internal/fs/dir.js`.** `opendir` / `opendirSync`
+       take `recursive: true` (Node 20.1; a returned directory entry is read
+       after the entries already buffered, symlinks not followed), and
+       `bufferSize` is checked by `Dir` as Node does (it was required to be set
+       whenever `options` was an object, so `{ recursive: true }` threw). An
+       asynchronous read that goes to the file system makes `readSync()` /
+       `closeSync()` throw `ERR_DIR_CONCURRENT_OPERATION` and queues other calls
+       behind it; a closed `Dir` throws `ERR_DIR_CLOSED` (also from
+       `read(callback)`); `read(callback)` / `close(callback)` call back
+       asynchronously and return `undefined`; the `path` getter is brand checked
+       (`ERR_INVALID_THIS`). The directory is read once (the entries read to
+       check it at open time are the ones handed out).
+     - **`fs.promises` errors name the caller.** The promise functions are
+       `async` functions named after the method, and a rejection's stack is
+       captured in a reaction the method awaits, as Node's
+       `handleErrorFromBinding` does: the trace shows `at async Object.access`
+       and the user code that awaited it, not a frame inside the polyfill. An
+       argument error now rejects instead of throwing.
+     - **Checks before the call.** `writeFile` / `writeFileSync` / `appendFile*`
+       validate the path (a null byte is `ERR_INVALID_ARG_VALUE`, not `EINVAL`
+       from the OS), and `fs.promises.writeFile` / `appendFile` validate `data`
+       before they open, so a bad `data` no longer creates the file. An unknown
+       encoding is `ERR_INVALID_ARG_VALUE` for `readdir` (was an `Error` whose
+       message held a Node 12 code), `readlink*` (a string option was ignored,
+       and any encoding but utf8 / buffer threw "not implemented"; the link is
+       now returned in any Buffer encoding, a `Buffer` for `"buffer"`),
+       `mkdtemp*` (was `ERR_INVALID_ARG_TYPE` with a value reason) and
+       `fs.watch` (whose string `options` were ignored).
+       `FileHandle.read(0, ...)` rejects with `ERR_INVALID_ARG_TYPE`, and a
+       `FileHandle` method called on another object rejects with
+       `ERR_INTERNAL_ASSERTION`, as Node's `fsCall` does.
+     - **Node 26 behaviour.** `fs.stat` with an already aborted `options.signal`
+       calls back with an `AbortError`; async `fs.cp` with
+       `errorOnExist: true, force: false` fails with `ERR_FS_CP_EEXIST` on an
+       existing destination directory (Node's `onDir`; `cpSync` keeps erroring
+       only on files, as Node's does); `readdir` errors name the `scandir`
+       syscall (libuv's `uv_fs_scandir`), and `readdir` reads its options once,
+       so changing the object after the call no longer changes a read in flight.
+
+     Tests: node_compat `parallel/test-fs-access.js`, `-append-file.js`,
+     `-assert-encoding-error.js`, `-cp-async-dir-exists-error-on-exist.mjs`,
+     `-null-bytes.js`, `-opendir.js`, `-promises.js`, `-stat-abort-test.js` and
+     `sequential/test-fs-opendir-recursive.js` enabled; unit tests in
+     `tests/unit_node/_fs/_fs_dir_test.ts` (recursive reads, the concurrent
+     operation error; the callback tests now expect Node's asynchronous
+     callbacks), `_fs_opendir_test.ts` (an invalid encoding throws),
+     `_fs_readdir_test.ts` (options read once, the `scandir` syscall) and
+     `_fs_readlink_test.ts` (encodings).
+
+146. **`feat(ext/node)`: a hook's `format: "commonjs"` source is imported as
+     CommonJS, and `--input-type=module --eval` runs a module**
+     (`fix/node-compat-denext2`, CLI and runtime; `cli/module_loader.rs`,
+     `cli/rt/run.rs`, `ext/node/polyfills/01_require.js`,
+     `libs/node_shim/lib.rs`). Follow-ups to item 109.
+     - **CommonJS source from an ESM load hook.** When a
+       `module.registerHooks()` / `module.register()` load hook answered an
+       `import` with `format: "commonjs"` and a `source`, the source was
+       evaluated as an ES module (`require is not defined`). As Node's ESM
+       translator for CommonJS does, the module loader now wraps it: the source
+       is compiled as a CommonJS module under the resolved URL (a file path for
+       a `file:` URL), without a second load, and its `require()` calls go
+       through the hooks; `module.exports` is the default export, the
+       `"module.exports"` export and, by a static CommonJS export analysis (Node
+       uses cjs-module-lexer), named exports. A `require()` of a URL a resolve
+       hook invented without `//` (`virtual:shared`) now hands the load hook
+       that URL instead of a file path under the working directory.
+     - **`--input-type=module` with `--eval`.** The Node CLI shim wrapped every
+       `--eval` string into a script for `vm.runInThisContext`, so an `import`
+       statement was a syntax error. With `--input-type=module` (or
+       `module-typescript`) the string is now passed to `deno eval` as the
+       module it is, with `--ext=js` (`--ext=ts`), so TypeScript's emit can't
+       drop an unused import binding and hide a missing export, and without the
+       CommonJS `require` / builtin globals Node gives only a script.
+
+     Tests: node_compat
+     `module-hooks/test-module-hooks-load-import-cjs-custom-source.js`,
+     `-require-wasm.js` and `test-async-loader-hooks-initialize-invoke.mjs`,
+     `-initialize-process-exit.mjs`, `-initialize-rejecting.mjs`,
+     `-process-exit-async.mjs`, `-register-with-import.mjs`,
+     `-remove-beforeexit-listener.mjs` enabled (the last six were ignored for
+     `--input-type=module --eval`; the three still ignored for it say what else
+     they need); `es-module/test-esm-export-not-found.mjs` keeps passing for the
+     right reason; `test_eval_input_type_module_is_not_wrapped`
+     (`libs/node_shim`).
+
+147. **`fix(ext/node)`: an HTTP server parse error carries llhttp's code**
+     (`fix/node-compat-denext2`, runtime; `ext/node/ops/llhttp/binding.rs`,
+     `ext/node/polyfills/_http_server.js`). On the server's consume fast path
+     every llhttp error but a header overflow and an HTTP/2 preface became
+     `HPE_ERROR` / "Parse Error", so a `clientError` listener couldn't tell an
+     invalid method from a smuggling attempt, and only the `Transfer-Encoding` +
+     `Content-Length` case was recovered in JavaScript. The error now has
+     llhttp's errno name and reason, as `node_http_parser.cc` reports them
+     (`HPE_INVALID_METHOD`, "Invalid method encountered"; message
+     `Parse Error: <reason>`), and a server without a `clientError` listener
+     answers `HPE_CHUNK_EXTENSIONS_OVERFLOW` with `413 Payload Too Large`, as
+     Node's `socketOnError` does (the CVE-2024-22019 limit). An exception thrown
+     in a parser callback stays `HPE_ERROR`.
+
+     Tests: node_compat `parallel/test-http-server-client-error.js`,
+     `-server-destroy-socket-on-client-error.js` and `-double-content-length.js`
+     enabled.
+
+148. **`fix(ext/node)`: Node 26's option sets for `NODE_OPTIONS` and Worker
+     `execArgv`** (`fix/node-compat-denext2`, runtime;
+     `ext/node/polyfills/internal/process/per_thread.mjs`,
+     `ext/node/polyfills/worker_threads.ts`).
+     `process.allowedNodeEnvironmentFlags` was a Node 16 list: 143 of Node
+     26.5.1's flags were missing (`--disable-warning`, `--no-addons`,
+     `--experimental-strip-types`, ...) and ten long-removed ones were listed.
+     It is now Node 26.5.1's (the options its parser marks `kAllowedInEnvvar`,
+     the `--no-` form of each boolean one, the aliases that expand to them),
+     which tools such as mocha use to decide which flags go to `node`. A
+     Worker's `execArgv` was checked against that same list, but Node parses it
+     with the per-isolate option parser: every debug, environment and
+     per-isolate option is valid there (`--expose-internals`,
+     `--disable-warning=...`), and V8 options (`--expose-gc`,
+     `--max-old-space-size`) are not, so both are now as in Node. A Worker `env`
+     whose `NODE_OPTIONS` equals the parent's may carry the parent's per-process
+     options (`{ env: process.env }`), as node_worker.cc allows.
+
+     Tests: node_compat `es-module/test-esm-no-addons.mjs` enabled;
+     `parallel/test-worker-execargv-invalid.js` and
+     `test-process-env-allowed-flags.js` keep passing; unit tests
+     `execArgv takes Node options that NODE_OPTIONS can't hold` and
+     `V8 options in execArgv are rejected`
+     (`tests/unit_node/worker_threads_test.ts`).
+
+149. **`fix(http)`: the CLI's downloads give up on a stalled connection and
      retry on a new one** (`fix/download-deadlines-denext2`, CLI only;
      `cli/http_util.rs`, `cli/util/download_deadline.rs`, `cli/file_fetcher.rs`,
      `cli/npm.rs`, `ext/fetch/{lib,dns}.rs`, `libs/cli_parser/src/env_vars.rs`).
@@ -5775,7 +5961,44 @@ where the changes are discussed.
      bytes every 200 ms that loads. Before the fix every stalled case ran until
      the step timeout.
 
-134. **`ci`: the Linux `deno` and `denort` run on glibc 2.27**
+150. **`chore(deps)`: V8 15.2 (the `v8` crate 152.2.0), and an engine staleness
+     gate** (`chore/v8-bump-denext2`; runtime and CI; `libs/deno_v8`,
+     `libs/core`, `ext/node`, `ext/webgpu`,
+     `.github/denext-runtime/engine_staleness.py`). The runtime was on `v8`
+     150.4.0 (V8 15.0.245.2, 2026-07-24), which gets no upstream V8 fixes any
+     more, so a public JIT or type-confusion bug reachable from untrusted
+     JavaScript could escape the permission sandbox. It now takes `v8` 152.2.0,
+     V8 15.2.124.1: the newest rusty_v8 release (2026-08-20; its `main` still
+     carries 15.2), and the one upstream's open
+     [denoland/deno#36665](https://github.com/denoland/deno/pull/36665) adopts.
+     Upstream's five commits and this fork's `dynamic.rs` adaptation land as
+     one squashed commit (author kept, the upstream SHAs in its `cherry picked
+     from` trailer), so every commit on the line builds: `Global::open` is
+     now `unsafe`, so every call site takes the safe
+     `v8::Local::new(scope, handle)` (this fork's `modules/map/dynamic.rs` too,
+     where its dynamic-import code lives); setter and definer interceptors
+     return `ReturnValue<Boolean>` (a `PropertyInterceptorReturnValue` alias in
+     the facade keeps the QuickJS backend building); `MicrotaskQueue::new`
+     returns an owning handle, which `node:vm` contexts now hold
+     (`OwnedMicrotaskQueue`) instead of leaking; and `--no-validate-asm` is gone
+     from the V8 flags: V8 removed the flag, and an unknown first flag made it
+     drop every flag after it. The heap-limit tests in `libs/core` cap the
+     isolate at 20 MB, since V8 15.2 no longer bootstraps in 5 MB.
+
+     V8 15.2 is still behind Chrome stable (156 on 2026-10-27), so the setup job
+     of `denext_runtime.yml` now runs `engine_staleness.py`: a V8 (Cargo.lock's
+     `v8` crate, whose major is the Chrome milestone) or CEF (laufey's
+     `CEF_FULL_VERSION`) pin more than one Chrome stable major behind is a
+     warning on every run, and fails a release tag while
+     `ENGINE_STALENESS_ENFORCE` is `tag` (`warn` keeps a tag at a warning).
+     The workflow sets `warn` for now: rusty_v8 152.2.0 is the newest release
+     there is, so `tag` would refuse every tag today; set it back to `tag` once
+     a newer rusty_v8 can be taken.
+     Chrome stable comes from Google's versionhistory API; when it can't be
+     reached or read, the gate warns and passes. Covered by
+     `engine_staleness_test.py` (the lint job of `denext_tests.yml`).
+
+151. **`ci`: the Linux `deno` and `denort` run on glibc 2.27**
      (`feat/glibc-ceiling`, CI only; `denext_runtime.yml`,
      `.github/denext-runtime/linux_sysroot.sh`, `glibc_ceiling.py`,
      `manifest.py`). The fork production audit's P2: the release CLI and
@@ -5843,255 +6066,11 @@ where the changes are discussed.
 
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
-118, 119, 126, 127, 129, 136, 137) are what the prebuilt `libdenort` carries.
-The CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` /
-`LAUFEY_APP_ID` into a packaged app's launchers) are in the branch too, but a
-stock CLI does not run them; denext's own launcher provides that environment.
-
-<!-- 136-144 are held by unmerged branches; renumber at integration. -->
-
-145. **`fix(process)`: a Windows spawn without a handle list never overlaps
-     another spawn's inheritable handles** (`fix/win-spawn-handle-list-denext2`,
-     CLI and runtime; `runtime/subprocess_windows/src/process.rs`, `lib.rs`,
-     `tests.rs`, `ext/io/bi_pipe.rs`, `ext/process/lib.rs`,
-     `runtime/ops/desktop_update/swap.rs`, `cli/tsc/native.rs`). The rest of
-     item 105. Every spawn through `deno_subprocess_windows` (`Deno.Command`,
-     `Deno.run`, `node:child_process` with its IPC channel and extra `stdio`
-     pipes) already passes `PROC_THREAD_ATTRIBUTE_HANDLE_LIST`, so those spawns
-     never take each other's pipe ends. Rust's and tokio's
-     `std::process::Command` can't: they call `CreateProcessW` with
-     `bInheritHandles = TRUE` and no list (`CommandExt::raw_attribute`, which
-     could pass one, is unstable, rust-lang/rust#114854), so a process spawned
-     that way inherited whatever was inheritable at that moment: the duplicates
-     a concurrent `Deno.Command` spawn had just made for its child, an IPC or
-     extra-pipe end from `bi_pipe_pair_raw` (inheritable from birth), or a
-     handle passed with `inherit_handle` (left inheritable after its spawn). A
-     long-lived one kept that spawn's stdout open, as in item 105.
-     - **One process-wide lock over the inheritable windows** (`INHERIT_WINDOW`,
-       an `RwLock`): a `deno_subprocess_windows` spawn holds it shared from the
-       moment it makes its child's inheritable handles until they are closed
-       again (spawns with a handle list still overlap freely);
-       `with_exclusive_inheritance(f)` (re-exported by `deno_process`) runs a
-       list-less spawn holding it exclusively. Raymond Chen's fallback for when
-       the handle list isn't available, applied only where it isn't.
-     - **The list-less spawns that run beside a program's own spawns use it**:
-       the desktop update helper (`spawn_detached` on Windows, which lives until
-       the app exits) and the native `tsc` a type check starts.
-     - **`bi_pipe_pair_raw`'s ends are created non-inheritable**: the spawn
-       duplicates an extra pipe's end, and marks the IPC end inheritable for its
-       own spawn only.
-     - **A handle passed with `inherit_handle` gets its inherit flag back** as
-       it was before the spawn, on every return path.
-
-     Not changed (no program's spawn runs beside them in the same process, or
-     the child is short-lived): `deno task`'s shell (`deno_task_shell` on tokio,
-     under Rust's own spawn lock, with `os_pipe` pipes that are
-     non-inheritable), npm lifecycle scripts, `deno upgrade` / `compile` /
-     `install` / `x`, the LSP's tsgo server, git, and the npm state file of
-     `cli/npm.rs` / `cli/tools/x.rs` (a file, not a pipe). Not fixable here: a
-     grandchild a child leaves running holds the child's pipes on every OS.
-
-     Tests: `inherit_handle_is_inheritable_only_during_its_spawn` and
-     `std_spawns_take_no_pipe_ends_meant_for_another_child`
-     (`runtime/subprocess_windows/src/tests.rs`: four threads run 25 piped
-     `cmd /c echo` spawns each while two threads keep starting 30 s `ping`s
-     through `std::process::Command`; the slowest must finish within 15 s),
-     `bi_pipe_pair_raw_ends_are_not_inheritable` (`ext/io/bi_pipe.rs`), and
-     `commandConcurrentExtraStdioSpawnsDoNotLeakPipes`
-     (`tests/unit/command_test.ts`, Windows only; item 105's test extended to
-     `node:child_process` with two extra `stdio` pipes on the short children and
-     one on some long-lived ones).
-
-The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
-64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
-118, 119, 126, 127, 129, 145) are what the prebuilt `libdenort` carries. The
-
-<!-- 136-145 are held by unmerged branches; renumber at integration. -->
-
-146. **`fix(ext/node)`: `node:fs` argument checks, errors and `Dir` as in Node
-     26** (`fix/node-compat-denext2`, runtime; `ext/node/polyfills/fs.ts`,
-     `_fs/_fs_dir.ts`, `_fs/_fs_readdir.ts`, `_fs/cp/cp.ts`,
-     `internal/fs/promises.ts`, `internal/fs/handle.ts`). The largest `fs`
-     cluster of the 2026-10-28 node_compat re-measure
-     (`plans/node-compat-gaps.md` in denext): calls that Node rejects at once
-     reached the file system, and errors carried other codes, syscalls or stacks
-     than Node's.
-     - **`Dir` follows `lib/internal/fs/dir.js`.** `opendir` / `opendirSync`
-       take `recursive: true` (Node 20.1; a returned directory entry is read
-       after the entries already buffered, symlinks not followed), and
-       `bufferSize` is checked by `Dir` as Node does (it was required to be set
-       whenever `options` was an object, so `{ recursive: true }` threw). An
-       asynchronous read that goes to the file system makes `readSync()` /
-       `closeSync()` throw `ERR_DIR_CONCURRENT_OPERATION` and queues other calls
-       behind it; a closed `Dir` throws `ERR_DIR_CLOSED` (also from
-       `read(callback)`); `read(callback)` / `close(callback)` call back
-       asynchronously and return `undefined`; the `path` getter is brand checked
-       (`ERR_INVALID_THIS`). The directory is read once (the entries read to
-       check it at open time are the ones handed out).
-     - **`fs.promises` errors name the caller.** The promise functions are
-       `async` functions named after the method, and a rejection's stack is
-       captured in a reaction the method awaits, as Node's
-       `handleErrorFromBinding` does: the trace shows `at async Object.access`
-       and the user code that awaited it, not a frame inside the polyfill. An
-       argument error now rejects instead of throwing.
-     - **Checks before the call.** `writeFile` / `writeFileSync` / `appendFile*`
-       validate the path (a null byte is `ERR_INVALID_ARG_VALUE`, not `EINVAL`
-       from the OS), and `fs.promises.writeFile` / `appendFile` validate `data`
-       before they open, so a bad `data` no longer creates the file. An unknown
-       encoding is `ERR_INVALID_ARG_VALUE` for `readdir` (was an `Error` whose
-       message held a Node 12 code), `readlink*` (a string option was ignored,
-       and any encoding but utf8 / buffer threw "not implemented"; the link is
-       now returned in any Buffer encoding, a `Buffer` for `"buffer"`),
-       `mkdtemp*` (was `ERR_INVALID_ARG_TYPE` with a value reason) and
-       `fs.watch` (whose string `options` were ignored).
-       `FileHandle.read(0, ...)` rejects with `ERR_INVALID_ARG_TYPE`, and a
-       `FileHandle` method called on another object rejects with
-       `ERR_INTERNAL_ASSERTION`, as Node's `fsCall` does.
-     - **Node 26 behaviour.** `fs.stat` with an already aborted `options.signal`
-       calls back with an `AbortError`; async `fs.cp` with
-       `errorOnExist: true, force: false` fails with `ERR_FS_CP_EEXIST` on an
-       existing destination directory (Node's `onDir`; `cpSync` keeps erroring
-       only on files, as Node's does); `readdir` errors name the `scandir`
-       syscall (libuv's `uv_fs_scandir`), and `readdir` reads its options once,
-       so changing the object after the call no longer changes a read in flight.
-
-     Tests: node_compat `parallel/test-fs-access.js`, `-append-file.js`,
-     `-assert-encoding-error.js`, `-cp-async-dir-exists-error-on-exist.mjs`,
-     `-null-bytes.js`, `-opendir.js`, `-promises.js`, `-stat-abort-test.js` and
-     `sequential/test-fs-opendir-recursive.js` enabled; unit tests in
-     `tests/unit_node/_fs/_fs_dir_test.ts` (recursive reads, the concurrent
-     operation error; the callback tests now expect Node's asynchronous
-     callbacks), `_fs_opendir_test.ts` (an invalid encoding throws),
-     `_fs_readdir_test.ts` (options read once, the `scandir` syscall) and
-     `_fs_readlink_test.ts` (encodings).
-
-<!-- -->
-
-147. **`feat(ext/node)`: a hook's `format: "commonjs"` source is imported as
-     CommonJS, and `--input-type=module --eval` runs a module**
-     (`fix/node-compat-denext2`, CLI and runtime; `cli/module_loader.rs`,
-     `cli/rt/run.rs`, `ext/node/polyfills/01_require.js`,
-     `libs/node_shim/lib.rs`). Follow-ups to item 109.
-     - **CommonJS source from an ESM load hook.** When a
-       `module.registerHooks()` / `module.register()` load hook answered an
-       `import` with `format: "commonjs"` and a `source`, the source was
-       evaluated as an ES module (`require is not defined`). As Node's ESM
-       translator for CommonJS does, the module loader now wraps it: the source
-       is compiled as a CommonJS module under the resolved URL (a file path for
-       a `file:` URL), without a second load, and its `require()` calls go
-       through the hooks; `module.exports` is the default export, the
-       `"module.exports"` export and, by a static CommonJS export analysis (Node
-       uses cjs-module-lexer), named exports. A `require()` of a URL a resolve
-       hook invented without `//` (`virtual:shared`) now hands the load hook
-       that URL instead of a file path under the working directory.
-     - **`--input-type=module` with `--eval`.** The Node CLI shim wrapped every
-       `--eval` string into a script for `vm.runInThisContext`, so an `import`
-       statement was a syntax error. With `--input-type=module` (or
-       `module-typescript`) the string is now passed to `deno eval` as the
-       module it is, with `--ext=js` (`--ext=ts`), so TypeScript's emit can't
-       drop an unused import binding and hide a missing export, and without the
-       CommonJS `require` / builtin globals Node gives only a script.
-
-     Tests: node_compat
-     `module-hooks/test-module-hooks-load-import-cjs-custom-source.js`,
-     `-require-wasm.js` and `test-async-loader-hooks-initialize-invoke.mjs`,
-     `-initialize-process-exit.mjs`, `-initialize-rejecting.mjs`,
-     `-process-exit-async.mjs`, `-register-with-import.mjs`,
-     `-remove-beforeexit-listener.mjs` enabled (the last six were ignored for
-     `--input-type=module --eval`; the three still ignored for it say what else
-     they need); `es-module/test-esm-export-not-found.mjs` keeps passing for the
-     right reason; `test_eval_input_type_module_is_not_wrapped`
-     (`libs/node_shim`).
-
-<!-- -->
-
-148. **`fix(ext/node)`: an HTTP server parse error carries llhttp's code**
-     (`fix/node-compat-denext2`, runtime; `ext/node/ops/llhttp/binding.rs`,
-     `ext/node/polyfills/_http_server.js`). On the server's consume fast path
-     every llhttp error but a header overflow and an HTTP/2 preface became
-     `HPE_ERROR` / "Parse Error", so a `clientError` listener couldn't tell an
-     invalid method from a smuggling attempt, and only the `Transfer-Encoding` +
-     `Content-Length` case was recovered in JavaScript. The error now has
-     llhttp's errno name and reason, as `node_http_parser.cc` reports them
-     (`HPE_INVALID_METHOD`, "Invalid method encountered"; message
-     `Parse Error: <reason>`), and a server without a `clientError` listener
-     answers `HPE_CHUNK_EXTENSIONS_OVERFLOW` with `413 Payload Too Large`, as
-     Node's `socketOnError` does (the CVE-2024-22019 limit). An exception thrown
-     in a parser callback stays `HPE_ERROR`.
-
-     Tests: node_compat `parallel/test-http-server-client-error.js`,
-     `-server-destroy-socket-on-client-error.js` and `-double-content-length.js`
-     enabled.
-
-<!-- -->
-
-149. **`fix(ext/node)`: Node 26's option sets for `NODE_OPTIONS` and Worker
-     `execArgv`** (`fix/node-compat-denext2`, runtime;
-     `ext/node/polyfills/internal/process/per_thread.mjs`,
-     `ext/node/polyfills/worker_threads.ts`).
-     `process.allowedNodeEnvironmentFlags` was a Node 16 list: 143 of Node
-     26.5.1's flags were missing (`--disable-warning`, `--no-addons`,
-     `--experimental-strip-types`, ...) and ten long-removed ones were listed.
-     It is now Node 26.5.1's (the options its parser marks `kAllowedInEnvvar`,
-     the `--no-` form of each boolean one, the aliases that expand to them),
-     which tools such as mocha use to decide which flags go to `node`. A
-     Worker's `execArgv` was checked against that same list, but Node parses it
-     with the per-isolate option parser: every debug, environment and
-     per-isolate option is valid there (`--expose-internals`,
-     `--disable-warning=...`), and V8 options (`--expose-gc`,
-     `--max-old-space-size`) are not, so both are now as in Node. A Worker `env`
-     whose `NODE_OPTIONS` equals the parent's may carry the parent's per-process
-     options (`{ env: process.env }`), as node_worker.cc allows.
-
-     Tests: node_compat `es-module/test-esm-no-addons.mjs` enabled;
-     `parallel/test-worker-execargv-invalid.js` and
-     `test-process-env-allowed-flags.js` keep passing; unit tests
-     `execArgv takes Node options that NODE_OPTIONS can't hold` and
-     `V8 options in execArgv are rejected`
-     (`tests/unit_node/worker_threads_test.ts`).
-
-The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
-64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
-118, 119, 126, 127, 129, 146-149) are what the prebuilt `libdenort` carries. The
-
-144. **`chore(deps)`: V8 15.2 (the `v8` crate 152.2.0), and an engine staleness
-     gate** (`chore/v8-bump-denext2`; runtime and CI; `libs/deno_v8`,
-     `libs/core`, `ext/node`, `ext/webgpu`,
-     `.github/denext-runtime/engine_staleness.py`). The runtime was on `v8`
-     150.4.0 (V8 15.0.245.2, 2026-07-24), which gets no upstream V8 fixes any
-     more, so a public JIT or type-confusion bug reachable from untrusted
-     JavaScript could escape the permission sandbox. It now takes `v8` 152.2.0,
-     V8 15.2.124.1: the newest rusty_v8 release (2026-08-20; its `main` still
-     carries 15.2), and the one upstream's open
-     [denoland/deno#36665](https://github.com/denoland/deno/pull/36665) adopts.
-     Its five commits are cherry-picked (`-x`, authors kept): `Global::open` is
-     now `unsafe`, so every call site takes the safe
-     `v8::Local::new(scope, handle)` (this fork's `modules/map/dynamic.rs` too,
-     where its dynamic-import code lives); setter and definer interceptors
-     return `ReturnValue<Boolean>` (a `PropertyInterceptorReturnValue` alias in
-     the facade keeps the QuickJS backend building); `MicrotaskQueue::new`
-     returns an owning handle, which `node:vm` contexts now hold
-     (`OwnedMicrotaskQueue`) instead of leaking; and `--no-validate-asm` is gone
-     from the V8 flags: V8 removed the flag, and an unknown first flag made it
-     drop every flag after it. The heap-limit tests in `libs/core` cap the
-     isolate at 20 MB, since V8 15.2 no longer bootstraps in 5 MB.
-
-     V8 15.2 is still behind Chrome stable (156 on 2026-10-27), so the setup job
-     of `denext_runtime.yml` now runs `engine_staleness.py`: a V8 (Cargo.lock's
-     `v8` crate, whose major is the Chrome milestone) or CEF (laufey's
-     `CEF_FULL_VERSION`) pin more than one Chrome stable major behind is a
-     warning on every run, and fails a release tag while
-     `ENGINE_STALENESS_ENFORCE` is `tag` (`warn` keeps a tag at a warning).
-     Chrome stable comes from Google's versionhistory API; when it can't be
-     reached or read, the gate warns and passes. Covered by
-     `engine_staleness_test.py` (the lint job of `denext_tests.yml`).
-
-The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
-64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
-118, 119, 126, 127, 129, 144) are what the prebuilt `libdenort` carries. The
-CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID`
-into a packaged app's launchers) are in the branch too, but a stock CLI does not
-run them; denext's own launcher provides that environment.
+118, 119, 126, 127, 129, 136, 137, 144-148, 150) are what the prebuilt
+`libdenort` carries. The CLI-side parts (for example writing
+`LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
+in the branch too, but a stock CLI does not run them; denext's own launcher
+provides that environment.
 
 The laufey backend hosts are built from
 [Brainwires/laufey](https://github.com/Brainwires/laufey) branch
@@ -6113,7 +6092,10 @@ the runtime's own helper and worker launches (`run …`, `NODE_CHANNEL_FD`,
 `NEXT_PRIVATE_WORKER`) headless before its single-instance check; and API 48,
 the navigation guard; then, for runtime 3.0.0-rc.1, the CEF custom-scheme
 localStorage commit gate, KWin's blur, the XCB clipboard and Linux passkeys
-through libwebauthn (item 88)), at the commit pinned by `LAUFEY_SHA` in the
+through libwebauthn (item 88); and, for runtime 3.0.0-denext.2, legacy Linux
+secure-store items read over an encrypted Secret Service session (laufey
+879ee0e) and tokio 1.53.3 with laufey's own `.cargo/audit.toml`), at the commit
+pinned by `LAUFEY_SHA` in the
 workflow (or the `laufey_ref` input). The same commit is the `laufey` git
 dependency of `cli/rt_desktop/Cargo.toml` (crate 0.8.0, API 49, CEF 150.0.21).
 
@@ -6241,7 +6223,7 @@ symbolicating a crash report; they are not in `manifest.json`.
 The Linux `deno` and `denort` need glibc 2.27 or newer: the `cli` job links them
 against upstream Deno's Ubuntu 18.04 sysroot (`linux_sysroot.sh`) and fails when
 one requires a newer `GLIBC_` version than `GLIBC_CEILING`, which is only ever
-lowered (item 134); `manifest.json` records it as `cli.glibc`. The Deno Desktop
+lowered (item 151); `manifest.json` records it as `cli.glibc`. The Deno Desktop
 runtime's `libdenort` and laufey hosts are still built on Ubuntu 22.04 (glibc
 2.35), which WebKitGTK 4.1 needs anyway.
 
@@ -6289,7 +6271,7 @@ version is the newest. Per target it:
    `cargo build --release --locked --bin deno` and `DENEXT_VERSION` set to the
    release version (`<version>+ci.<run>` for untagged runs), on Linux linked
    against the glibc 2.27 sysroot and checked against `GLIBC_CEILING` (item
-   134), fetches and verifies esbuild with `fetch_esbuild.py`, packs both with
+   151), fetches and verifies esbuild with `fetch_esbuild.py`, packs both with
    `assemble_cli.sh`, smoke-tests the unpacked archive with `cli_smoke.sh` and
    attests it. The release needs every runtime archive and every CLI archive. A
    dispatch with `cli_only: true` runs just this job and the manifest (no
