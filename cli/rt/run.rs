@@ -1732,16 +1732,14 @@ pub async fn run_with_options(
     sys: sys.clone(),
   };
 
-  // Desktop runtimes always need a baseline set of permissions to function:
-  // the app's own code reaches its WebSocket relay and the DevTools mux over
-  // loopback, so net access to 127.0.0.1 is mandatory; the desktop init JS
+  // Desktop runtimes get a baseline set of permissions: the desktop init JS
   // and the app read `DENO_DESKTOP_*` env vars to discover the inspector
-  // mux, HMR watch dir, page origin, etc. Without these, the
-  // very first `Deno.serve(...)` or `Deno.env.get(...)` throws NotCapable
-  // and aborts script execution before the event-loop IIFE registers —
-  // which manifests as a blank window where nothing works (no input,
-  // no auto-tests, no bindings). Granting them up front avoids forcing
-  // every `deno desktop` user to remember `-A`.
+  // mux, HMR watch dir, page origin, etc. (without them the first
+  // `Deno.env.get(...)` throws NotCapable before the event-loop IIFE
+  // registers: a blank window where nothing works), and loopback net on any
+  // port for the app's own loopback servers and clients (see
+  // `DESKTOP_LOOPBACK_HOSTS` for why it is not port-scoped). Granting them up
+  // front avoids forcing every `deno desktop` user to remember `-A`.
   let has_desktop = op_state_init.is_some();
   let permissions = {
     let mut permissions = metadata.permissions;
@@ -2207,10 +2205,17 @@ pub(crate) fn grant_vfs_read_access(
   }
 }
 
-/// Loopback hosts a desktop runtime must be able to reach. The compiled
-/// app's page reaches `Deno.serve()` over the in-process memory transport,
-/// but its WebSocket relay (`DENO_DESKTOP_WS_ORIGIN`) and the DevTools mux
-/// are loopback TCP, so net access here is structural, not optional.
+/// Loopback hosts a desktop app may listen on and connect to, on any port.
+///
+/// The runtime itself needs none of this: the app's first `Deno.serve()` is
+/// the in-process memory transport (`op_net_listen_memory`, no net check),
+/// and the WebSocket relay (`DENO_DESKTOP_WS_ORIGIN`) and the DevTools mux are
+/// bound and served in Rust, outside the permission checks. The grant is for
+/// the app's own loopback servers and clients, whose ports are chosen at
+/// launch (a second `Deno.serve` or a worker's, a sidecar's `port: "auto"`, a
+/// loopback OAuth redirect listener and the probes that reach them), and a
+/// packaged app can't prompt for a port it learns at run time. It is not
+/// narrowed to ports for that reason; see DENEXT.md item 142.
 const DESKTOP_LOOPBACK_HOSTS: &[&str] = &["127.0.0.1", "localhost", "[::1]"];
 
 /// Env vars the DESKTOP_JS init script reads, plus the two the desktop

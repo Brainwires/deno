@@ -19,7 +19,9 @@
 //!   every other DLL the app loads (CEF's, an addon's) unchecked: a
 //!   same-named DLL is all a DLL-planting attack needs.
 //! - **Linux:** the OS has no code signature; the manifest signature and the
-//!   archive's SHA-256 are the whole check.
+//!   archive's SHA-256 are the whole check. A detached signature from the
+//!   same key would add nothing, and there is no OS trust root to stand in
+//!   for a second key; the threat model is in DENEXT.md item 143.
 //!
 //! A running app WITHOUT that identity (ad-hoc or unsigned: a dev build)
 //! cannot prove who may replace it, so the update is refused unless the

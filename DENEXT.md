@@ -5555,6 +5555,104 @@ where the changes are discussed.
        patched in 1.53.3, the only tokio in the lock; `cargo audit` with the
        advisory database of 2026-10-27 does not report it.
 
+136. **`docs(desktop)`: why a packaged app's loopback grant covers every port**
+     (fork security audit B-I2; `cli/rt/run.rs` comments only, no behavior
+     change). `apply_desktop_permission_defaults` adds `127.0.0.1`, `localhost`
+     and `[::1]` with no port to a packaged desktop app's net grant
+     (`allow_net`, or `allow_net_connect` + `allow_net_listen` in the
+     directional model, item 93's split). The audit asked for it to be narrowed
+     to the ports the runtime needs. It stays as it is:
+     - **The runtime itself needs no port.** The app's first `Deno.serve` is the
+       in-process memory transport (`DENO_SERVE_ADDRESS=memory:…`,
+       `op_net_listen_memory`, which checks no permission), the WebSocket relay
+       is bound by `scheme_bridge::bind_ws_loopback_listener` and served in
+       Rust, and the DevTools mux is the CLI's; the desktop init JS only reads
+       `DENO_DESKTOP_MUX_WS`. The old comment calling the grant "structural" for
+       the relay and the mux was wrong and is corrected; narrowing to the
+       runtime's own ports means removing the grant.
+     - **What uses it are loopback ports chosen at launch.** In denext: a
+       sidecar's `port: "auto"` (`freePort()` in `src/desktop/sidecar-host.ts`
+       binds `127.0.0.1:0`, then a `run: { module }` sidecar's worker binds that
+       port and `sidecar-supervisor.ts` polls
+       `http://127.0.0.1:<port><ready.http>`), `spa.proxy` / `proxy: true` to
+       such a sidecar, and `openAuthSession`'s loopback redirect listener
+       (`auth-session-runtime.ts`: `127.0.0.1:0`, or the app's `loopbackPort`,
+       on `::1` for a `[::1]` redirect). Permissions are fixed when the worker's
+       `Permissions` are built and a packaged app can't prompt, so a port
+       learned at run time can't be added then; a compile-time port list would
+       refuse every one of these.
+     - **denext bakes the same grant itself.** `desktopBuildFlags`
+       (`src/build/desktop-capabilities.ts`, `DESKTOP_LISTEN_BASELINE`) passes
+       `127.0.0.1,localhost` to both directions, documented as "any port: the
+       app's server picks one at launch" (`DesktopExtraPermissions.netListen` in
+       `src/server/config.ts`), so narrowing the runtime's default would not
+       narrow a denext app's grant at all. It would only remove `[::1]`, which
+       denext does not bake and which a fixed-port `[::1]` OAuth redirect binds:
+       that is the one documented feature narrowing would break.
+     - `desktop.extraPermissions` is unaffected either way (the default only
+       ever extends a scoped list and leaves an unscoped one alone).
+
+     Risk accepted: app code (the trusted side; the page has no Deno
+     permissions) can reach any loopback service, as `--allow-net=127.0.0.1`
+     does in `deno run`
+     ([Deno: permissions](https://docs.deno.com/runtime/fundamentals/security/)).
+     An app that wants less passes `--deny-net-connect=127.0.0.1:<port>` (deny
+     wins over allow). A narrower model (connect only to loopback ports this
+     process has bound) would need new permission state shared with workers and
+     is not done here.
+
+137. **`docs(desktop)`: the Linux full-app update has no OS signature check, by
+     design** (fork security audit E-I1; `runtime/ops/desktop_update/oscheck.rs`
+     comment only). macOS requires the same Developer ID Team ID under an Apple
+     anchor, and Windows the same Authenticode signer on every PE image (item
+     18, item 127's E-L4); Linux reports `mode: "none"`. What guards a Linux
+     update, and why nothing is added:
+     - **The manifest signature is the whole trust chain, and it is the same one
+       the other platforms start from.** The public key is baked into the
+       running app at compile time (`desktop.update.publicKey`); the manifest is
+       ECDSA P-256 over `"denext-app-update-v1\n" + signed`, and `signed` names
+       the app identifier, version, `sequence` (a high-water mark), `expiresAt`,
+       and per platform the archive's URL, size and SHA-256. The archive is
+       refused unless its size and SHA-256 match, and the staged app's own
+       embedded version must equal the manifest's and be newer than the
+       installed one (`embedded.rs`; an AppImage's runtime is inside its
+       squashfs, so it relies on the manifest alone). An attacker without the
+       update key (a hostile mirror, a network attacker, a replaced file on the
+       feed host) can't get an archive past this.
+     - **What the OS check adds on macOS and Windows is a second, independent
+       key**: a stolen update key alone still can't ship code there. Linux has
+       no OS trust root to play that part. Desktop Linux runs any executable the
+       user can write; kernel IMA appraisal is a machine policy with keys on the
+       `.ima` keyring, set by the administrator, not something a per-user
+       install can rely on
+       ([IMA Kconfig](https://kernelsources.org/source/xref/linux/security/integrity/ima/Kconfig)).
+       AppImage's embedded GPG signature isn't checked by the AppImage runtime
+       ([AppImage docs: signing](https://docs.appimage.org/packaging-guide/optional/signatures.html);
+       [Tauri: Linux code signing](https://v2.tauri.app/distribute/sign/linux/),
+       "AppImage does not validate the signature"), and `.deb` / `.rpm`
+       signatures are checked by the package manager, which a self-update
+       doesn't go through.
+     - **A detached signature from the same key adds nothing.** It is the same
+       trust root, over bytes whose SHA-256 the signed manifest already binds;
+       counting one key twice is the mistake TUF fixed in CVE-2020-6174
+       ([TUF security](https://theupdateframework.io/security/)).
+     - **A second, separately held key would add something** (Sparkle uses Apple
+       code signing this way to trust a change of its EdDSA keys:
+       [Sparkle: EdDSA migration](https://sparkle-project.github.io/documentation/eddsa-migration/);
+       AppImageUpdate's proposed rule is the new image's signer must match the
+       old one's), but it is a new publishing requirement (a second key to
+       generate, hold offline and rotate) for denext's packaging and
+       `publish-update`, not a check this runtime can add alone.
+
+     Threat model on Linux, then: an update is as trustworthy as the custody of
+     the update signing key. Keep it offline (`denext ota keygen`'s private key
+     never belongs on the feed host), and rotate by shipping a release that
+     bakes the new public key, signed with the old one. Comparable updaters do
+     the same or less on Linux: Tauri's updater checks one minisign key on every
+     platform ([Tauri updater](https://v2.tauri.app/plugin/updater/)), and
+     electron-updater checks code signatures on macOS and Windows only
+     ([electron-builder: auto update](https://www.electron.build/auto-update)).
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137) are what the prebuilt `libdenort` carries.
