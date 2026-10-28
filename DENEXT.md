@@ -5473,6 +5473,30 @@ where the changes are discussed.
      "brotli decompress rejects invalid block switch" (sync throws; the
      streaming decoder emits `error`, never `end`).
 
+139. **`fix(deps)`: the locked vendored OpenSSL 3.5.0 → 3.5.5**
+     (`fix/supply-denext2`; `Cargo.lock`). The fork production audit's U8:
+     `openssl-src` 300.5.0+3.5.0 is in the lock through `keyring`'s `vendored`
+     feature (`cli/Cargo.toml`) → `dbus-secret-service`'s `openssl?/vendored`.
+     That is a weak feature: `openssl` is optional in `dbus-secret-service` and
+     only its `crypto-openssl` feature turns it on, which nothing here enables,
+     so no build of the fork compiles or links OpenSSL:
+     `cargo tree -i openssl-sys --target all` prints nothing, and a Linux build
+     has no `openssl-sys` build dir. The lock entry is what `cargo audit` and
+     other lock scanners read, so it moves to 300.5.5+3.5.5, the newest 3.5
+     release of the crate, with
+     `cargo update -p openssl-src --precise 300.5.5+3.5.5` (a plain
+     `-p openssl-src` would take 300.6.1+3.6.3, since `openssl-sys` asks for
+     `^300.2.0`). OpenSSL's 3.5 advisories between the two
+     (https://openssl-library.org/news/vulnerabilities-3.5/): 3.5.1
+     CVE-2025-4575; 3.5.4 CVE-2025-9230, -9231, -9232; 3.5.5 CVE-2025-15467
+     (High, CMS AuthEnvelopedData stack overflow), CVE-2025-11187, -15468,
+     -15469, -66199, -68160, -69418, -69419, -69420, -69421, CVE-2026-22795,
+     -22796. OpenSSL has since released 3.5.6 to 3.5.9 (among them High
+     CVE-2026-45447, a `PKCS7_verify()` use-after-free, and CVE-2026-84782, DTLS
+     retransmission), but no `openssl-src` 300.5.x carries them yet; the crate
+     goes 300.5.5 → 300.6.0+3.6.2. Bump again when a 300.5.6+ appears, and
+     re-check this if anything enables `crypto-openssl`.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137) are what the prebuilt `libdenort` carries.
