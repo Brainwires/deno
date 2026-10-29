@@ -1,0 +1,41 @@
+// denext (DENEXT.md item 158): the `HTMLRewriter` global behind
+// `--unstable-html-rewriter`.
+{
+  "tests": {
+    // A multi-megabyte body is rewritten as it streams: output is readable
+    // before the source has been fully pulled, and every element is seen.
+    "large_body": {
+      "args": "run --quiet --unstable-html-rewriter large_body.js",
+      "output": "large_body.out"
+    },
+    // lol_html's selector grammar: type, class, id, attribute operators,
+    // combinators and pseudo-classes.
+    "selectors": {
+      "args": "run --quiet --unstable-html-rewriter selectors.js",
+      "output": "selectors.out"
+    },
+    // Element, text, comment, end-tag and document-end handlers that await
+    // before mutating the token, on a streamed Response.
+    "async_handlers": {
+      "args": "run --quiet --unstable-html-rewriter async_handlers.js",
+      "output": "async_handlers.out"
+    },
+    // Errors reach the caller: the handler's own exception (sync and async),
+    // invalid selectors, stale tokens, async handlers on a string transform.
+    "errors": {
+      "args": "run --quiet --unstable-html-rewriter errors.js",
+      "output": "errors.out"
+    },
+    // `"unstable": ["html-rewriter"]` in the config file turns it on too.
+    "config": {
+      "cwd": "config",
+      "args": "run --quiet main.js",
+      "output": "config/main.out"
+    },
+    // Off by default (outside `config/`, whose deno.json turns it on).
+    "off_by_default": {
+      "args": "run --quiet off.js",
+      "output": "off.out"
+    }
+  }
+}

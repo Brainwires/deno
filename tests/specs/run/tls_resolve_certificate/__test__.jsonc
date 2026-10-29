@@ -1,0 +1,17 @@
+{
+  "tests": {
+    "per_hostname": {
+      "args": "run --quiet --unstable-net --allow-net --allow-read main.js",
+      "output": "main.out"
+    },
+    "serve": {
+      "args": "run --quiet --unstable-net --allow-net --allow-read serve.js",
+      "output": "serve.out"
+    },
+    "requires_unstable_net": {
+      "args": "run --quiet --allow-net --allow-read main.js",
+      "output": "requires_unstable_net.out",
+      "exitCode": 70
+    }
+  }
+}

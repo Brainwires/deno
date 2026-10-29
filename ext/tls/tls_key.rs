@@ -11,6 +11,7 @@
 //! key lookup can handle closing one end of the pair, in which case they will just
 //! attempt to clean up the associated resources.
 
+use std::cell::Cell;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fmt::Debug;
@@ -57,6 +58,28 @@ impl Clone for TlsKey {
   fn clone(&self) -> Self {
     Self(self.0.clone(), self.1.clone_key())
   }
+}
+
+/// The relevant parts of a TLS ClientHello, passed to a `TlsKeyResolver`
+/// callback so it can pick a certificate for the requested server name.
+///
+/// The numeric fields are raw IANA TLS code points (the same values used by
+/// fingerprinting schemes such as JA4), exposed for observability. Note that
+/// resolutions are cached per server name, so for a given name these reflect
+/// the ClientHello of the connection that first triggered a lookup.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TlsClientHelloInfo {
+  /// The server name requested via SNI (empty if the client sent none).
+  pub sni: String,
+  /// The ALPN protocols offered by the client, in order of preference.
+  pub alpn: Vec<Vec<u8>>,
+  /// The cipher suites offered by the client, as IANA code points.
+  pub cipher_suites: Vec<u16>,
+  /// The signature schemes offered by the client, as IANA code points.
+  pub signature_schemes: Vec<u16>,
+  /// The named groups ("supported groups") offered by the client, as IANA
+  /// code points.
+  pub supported_groups: Vec<u16>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -116,12 +139,84 @@ enum TlsKeyState {
   Resolved(Result<TlsKey, ErrorType>),
 }
 
+/// Cache key for a resolution: the requested server name (SNI). Resolutions
+/// are cached per name, matching the documented `resolveCertificate`
+/// contract.
+type CacheKey = String;
+
+/// Upper bound on the number of cached resolutions. The cache key (SNI) is
+/// client-controlled, so without a bound a peer varying it could grow the
+/// cache without limit. Errors are never cached (see
+/// [`TlsKeyResolver::resolve`]), so only successful resolutions count toward
+/// this; when the cache is full the oldest resolved entry is evicted and a
+/// later handshake for it simply re-resolves. In-flight resolutions are never
+/// evicted (see [`BoundedTlsKeyCache::insert`]).
+const MAX_CACHED_RESOLUTIONS: usize = 1024;
+
+struct CacheEntry {
+  state: TlsKeyState,
+  /// Insertion-order stamp, used to evict the oldest entry when the cache is
+  /// full.
+  seq: u64,
+}
+
+/// A size-bounded cache of TLS key resolutions, keyed by [`CacheKey`].
+#[derive(Default)]
+struct BoundedTlsKeyCache {
+  entries: HashMap<CacheKey, CacheEntry>,
+  next_seq: u64,
+}
+
+impl BoundedTlsKeyCache {
+  fn get(&self, key: &CacheKey) -> Option<&TlsKeyState> {
+    self.entries.get(key).map(|entry| &entry.state)
+  }
+
+  fn insert(&mut self, key: CacheKey, state: TlsKeyState) {
+    let seq = self.next_seq;
+    self.next_seq = self.next_seq.wrapping_add(1);
+    self.entries.insert(key.clone(), CacheEntry { state, seq });
+    // Evict the oldest resolved entries while over the bound. An in-flight
+    // `Resolving` entry is never evicted: dropping it would let the next
+    // handshake for that name start a second, concurrent callback for it, and
+    // the first one's completion would then overwrite (or remove) the second
+    // one's entry. In-flight entries are bounded by the handshakes in flight,
+    // and each turns into a resolved entry (or is removed) when it settles.
+    while self.entries.len() > MAX_CACHED_RESOLUTIONS {
+      let Some(oldest) = self
+        .entries
+        .iter()
+        .filter(|(k, entry)| {
+          **k != key && matches!(entry.state, TlsKeyState::Resolved(..))
+        })
+        .min_by_key(|(_, entry)| entry.seq)
+        .map(|(oldest_key, _)| oldest_key.clone())
+      else {
+        break;
+      };
+      self.entries.remove(&oldest);
+    }
+  }
+
+  fn remove(&mut self, key: &CacheKey) {
+    self.entries.remove(key);
+  }
+}
+
+type TlsKeyCache = Rc<RefCell<BoundedTlsKeyCache>>;
+
+type ResolutionRequest = (
+  String,
+  TlsClientHelloInfo,
+  broadcast::Sender<Result<TlsKey, ErrorType>>,
+);
+
 struct TlsKeyResolverInner {
-  resolution_tx: mpsc::UnboundedSender<(
-    String,
-    broadcast::Sender<Result<TlsKey, ErrorType>>,
-  )>,
-  cache: RefCell<HashMap<String, TlsKeyState>>,
+  resolution_tx: mpsc::UnboundedSender<ResolutionRequest>,
+  cache: TlsKeyCache,
+  // Monotonic counter for the opaque resolution id handed to the lookup side
+  // (and round-tripped through JS), decoupled from the cache key.
+  next_id: Cell<u64>,
 }
 
 #[derive(Clone)]
@@ -132,10 +227,10 @@ pub struct TlsKeyResolver {
 impl TlsKeyResolver {
   async fn resolve_internal(
     &self,
-    sni: String,
+    hello: TlsClientHelloInfo,
     alpn: Vec<Vec<u8>>,
   ) -> Result<Arc<ServerConfig>, TlsKeyError> {
-    let key = self.resolve(sni).await?;
+    let key = self.resolve(hello).await?;
 
     let mut tls_config = ServerConfig::builder()
       .with_no_client_auth()
@@ -155,20 +250,42 @@ impl TlsKeyResolver {
     // required to be wrapped in an Arc. To fix this, we spawn a task in our current runtime
     // to respond to the requests.
     spawn(async move {
-      while let Some((sni, txr)) = rx.recv().await {
+      while let Some((hello, txr)) = rx.recv().await {
         let resolver = self.clone();
         let alpn = alpn.clone();
         spawn(async move {
-          _ = txr.send(resolver.resolve_internal(sni, alpn).await);
+          _ = txr.send(resolver.resolve_internal(hello, alpn).await);
         });
       }
     });
 
     Arc::new(move |hello| {
-      // Take ownership of the SNI information
-      let sni = hello.server_name().unwrap_or_default().to_owned();
+      // Take ownership of the ClientHello information
+      let info = TlsClientHelloInfo {
+        sni: hello.server_name().unwrap_or_default().to_owned(),
+        alpn: hello
+          .alpn()
+          .map(|protos| protos.map(|p| p.to_vec()).collect())
+          .unwrap_or_default(),
+        cipher_suites: hello
+          .cipher_suites()
+          .iter()
+          .map(|cs| u16::from(*cs))
+          .collect(),
+        signature_schemes: hello
+          .signature_schemes()
+          .iter()
+          .map(|ss| u16::from(*ss))
+          .collect(),
+        supported_groups: hello
+          .named_groups()
+          .unwrap_or_default()
+          .iter()
+          .map(|g| u16::from(*g))
+          .collect(),
+      };
       let (txr, rxr) = tokio::sync::oneshot::channel::<_>();
-      _ = tx.send((sni, txr));
+      _ = tx.send((info, txr));
       rxr
         .map(|res| match res {
           Err(e) => Err(std::io::Error::new(ErrorKind::InvalidData, e)),
@@ -188,11 +305,13 @@ impl Debug for TlsKeyResolver {
 
 pub fn new_resolver() -> (TlsKeyResolver, TlsKeyLookup) {
   let (resolution_tx, resolution_rx) = mpsc::unbounded_channel();
+  let cache = TlsKeyCache::default();
   (
     TlsKeyResolver {
       inner: Rc::new(TlsKeyResolverInner {
         resolution_tx,
-        cache: Default::default(),
+        cache,
+        next_id: Cell::new(0),
       }),
     },
     TlsKeyLookup {
@@ -203,18 +322,22 @@ pub fn new_resolver() -> (TlsKeyResolver, TlsKeyLookup) {
 }
 
 impl TlsKeyResolver {
-  /// Resolve the certificate and key for a given host. This immediately spawns a task in the
-  /// background and is therefore cancellation-safe.
+  /// Resolve the certificate and key for a given ClientHello. This immediately spawns a task
+  /// in the background and is therefore cancellation-safe.
   pub fn resolve(
     &self,
-    sni: String,
+    hello: TlsClientHelloInfo,
   ) -> impl Future<Output = Result<TlsKey, TlsKeyError>> + use<> {
+    let cache_key = hello.sni.clone();
     let mut cache = self.inner.cache.borrow_mut();
-    let mut recv = match cache.get(&sni) {
+    let mut recv = match cache.get(&cache_key) {
       None => {
         let (tx, rx) = broadcast::channel(1);
-        cache.insert(sni.clone(), TlsKeyState::Resolving(rx.resubscribe()));
-        _ = self.inner.resolution_tx.send((sni.clone(), tx));
+        cache
+          .insert(cache_key.clone(), TlsKeyState::Resolving(rx.resubscribe()));
+        let id = self.inner.next_id.get();
+        self.inner.next_id.set(id.wrapping_add(1));
+        _ = self.inner.resolution_tx.send((id.to_string(), hello, tx));
         rx
       }
       Some(TlsKeyState::Resolving(recv)) => recv.resubscribe(),
@@ -229,9 +352,19 @@ impl TlsKeyResolver {
     let handle = spawn(async move {
       let res = recv.recv().await?;
       let mut cache = inner.cache.borrow_mut();
-      match cache.get(&sni) {
+      // Never cache errors: otherwise a peer varying the SNI could grow the
+      // cache without bound with failed resolutions, and a transient failure
+      // would be sticky. The next handshake retries instead.
+      let cacheable = res.is_ok();
+      match cache.get(&cache_key) {
         None | Some(TlsKeyState::Resolving(..)) => {
-          cache.insert(sni, TlsKeyState::Resolved(res.clone()));
+          if cacheable {
+            cache.insert(cache_key, TlsKeyState::Resolved(res.clone()));
+          } else {
+            // The resolution failed: forget the in-flight state so the next
+            // handshake resolves freshly.
+            cache.remove(&cache_key);
+          }
         }
         Some(TlsKeyState::Resolved(..)) => {
           // Someone beat us to it
@@ -244,13 +377,7 @@ impl TlsKeyResolver {
 }
 
 pub struct TlsKeyLookup {
-  #[allow(clippy::type_complexity, reason = "complex type is necessary here")]
-  resolution_rx: RefCell<
-    mpsc::UnboundedReceiver<(
-      String,
-      broadcast::Sender<Result<TlsKey, ErrorType>>,
-    )>,
-  >,
+  resolution_rx: RefCell<mpsc::UnboundedReceiver<ResolutionRequest>>,
   pending:
     RefCell<HashMap<String, broadcast::Sender<Result<TlsKey, ErrorType>>>>,
 }
@@ -267,22 +394,25 @@ unsafe impl deno_core::GarbageCollected for TlsKeyLookup {
 impl TlsKeyLookup {
   /// Multiple `poll` calls are safe, but this method is not starvation-safe. Generally
   /// only one `poll`er should be active at any time.
-  pub async fn poll(&self) -> Option<String> {
+  ///
+  /// Returns an opaque resolution id (pass it back to [`Self::resolve`])
+  /// and the ClientHello information.
+  pub async fn poll(&self) -> Option<(String, TlsClientHelloInfo)> {
     match poll_fn(|cx| self.resolution_rx.borrow_mut().poll_recv(cx)).await {
-      Some((sni, sender)) => {
-        self.pending.borrow_mut().insert(sni.clone(), sender);
-        Some(sni)
+      Some((id, hello, sender)) => {
+        self.pending.borrow_mut().insert(id.clone(), sender);
+        Some((id, hello))
       }
       _ => None,
     }
   }
 
   /// Resolve a previously polled item.
-  pub fn resolve(&self, sni: String, res: Result<TlsKey, String>) {
+  pub fn resolve(&self, id: String, res: Result<TlsKey, String>) {
     _ = self
       .pending
       .borrow_mut()
-      .remove(&sni)
+      .remove(&id)
       .unwrap()
       .send(res.map_err(|e| Arc::new(e.into_boxed_str())));
   }
@@ -309,16 +439,23 @@ pub mod tests {
     TlsKey(vec![cert], prikey)
   }
 
+  fn hello(sni: &str) -> TlsClientHelloInfo {
+    TlsClientHelloInfo {
+      sni: sni.to_owned(),
+      ..Default::default()
+    }
+  }
+
   #[tokio::test]
   async fn test_resolve_once() {
     let (resolver, lookup) = new_resolver();
     let task = spawn(async move {
-      while let Some(sni) = lookup.poll().await {
-        lookup.resolve(sni.clone(), Ok(tls_key_for_test(&sni)));
+      while let Some((id, hello)) = lookup.poll().await {
+        lookup.resolve(id, Ok(tls_key_for_test(&hello.sni)));
       }
     });
 
-    let key = resolver.resolve("example1.com".to_owned()).await.unwrap();
+    let key = resolver.resolve(hello("example1.com")).await.unwrap();
     assert_eq!(tls_key_for_test("example1.com"), key);
     drop(resolver);
 
@@ -329,13 +466,13 @@ pub mod tests {
   async fn test_resolve_concurrent() {
     let (resolver, lookup) = new_resolver();
     let task = spawn(async move {
-      while let Some(sni) = lookup.poll().await {
-        lookup.resolve(sni.clone(), Ok(tls_key_for_test(&sni)));
+      while let Some((id, hello)) = lookup.poll().await {
+        lookup.resolve(id, Ok(tls_key_for_test(&hello.sni)));
       }
     });
 
-    let f1 = resolver.resolve("example1.com".to_owned());
-    let f2 = resolver.resolve("example1.com".to_owned());
+    let f1 = resolver.resolve(hello("example1.com"));
+    let f2 = resolver.resolve(hello("example1.com"));
 
     let key = f1.await.unwrap();
     assert_eq!(tls_key_for_test("example1.com"), key);
@@ -350,13 +487,13 @@ pub mod tests {
   async fn test_resolve_multiple_concurrent() {
     let (resolver, lookup) = new_resolver();
     let task = spawn(async move {
-      while let Some(sni) = lookup.poll().await {
-        lookup.resolve(sni.clone(), Ok(tls_key_for_test(&sni)));
+      while let Some((id, hello)) = lookup.poll().await {
+        lookup.resolve(id, Ok(tls_key_for_test(&hello.sni)));
       }
     });
 
-    let f1 = resolver.resolve("example1.com".to_owned());
-    let f2 = resolver.resolve("example2.com".to_owned());
+    let f1 = resolver.resolve(hello("example1.com"));
+    let f2 = resolver.resolve(hello("example2.com"));
 
     let key = f1.await.unwrap();
     assert_eq!(tls_key_for_test("example1.com"), key);
@@ -364,6 +501,147 @@ pub mod tests {
     assert_eq!(tls_key_for_test("example2.com"), key);
     drop(resolver);
 
+    task.await.unwrap();
+  }
+
+  #[tokio::test]
+  async fn test_resolve_cached_by_name() {
+    let (resolver, lookup) = new_resolver();
+    let task = spawn(async move {
+      let mut count = 0;
+      while let Some((id, hello)) = lookup.poll().await {
+        count += 1;
+        lookup.resolve(id, Ok(tls_key_for_test(&hello.sni)));
+      }
+      count
+    });
+
+    // The same name resolves once and is then served from cache, even when
+    // the ALPN offer differs between connections.
+    resolver.resolve(hello("example1.com")).await.unwrap();
+    let with_alpn = TlsClientHelloInfo {
+      sni: "example1.com".to_owned(),
+      alpn: vec![b"h2".to_vec()],
+      ..Default::default()
+    };
+    resolver.resolve(with_alpn).await.unwrap();
+
+    drop(resolver);
+    assert_eq!(task.await.unwrap(), 1);
+  }
+
+  #[tokio::test]
+  async fn test_errors_are_not_cached() {
+    let (resolver, lookup) = new_resolver();
+    let task = spawn(async move {
+      let mut count = 0;
+      while let Some((id, hello)) = lookup.poll().await {
+        count += 1;
+        // Fail the first resolution, succeed afterwards.
+        if count == 1 {
+          lookup.resolve(id, Err("boom".to_owned()));
+        } else {
+          lookup.resolve(id, Ok(tls_key_for_test(&hello.sni)));
+        }
+      }
+      count
+    });
+
+    // The first resolution errors and must not be cached.
+    assert!(resolver.resolve(hello("example1.com")).await.is_err());
+    // The next handshake hits the lookup queue again and succeeds.
+    let key = resolver.resolve(hello("example1.com")).await.unwrap();
+    assert_eq!(tls_key_for_test("example1.com"), key);
+
+    drop(resolver);
+    assert_eq!(task.await.unwrap(), 2);
+  }
+
+  #[tokio::test]
+  async fn test_cache_is_bounded() {
+    let (resolver, lookup) = new_resolver();
+    // Reuse a single loaded cert for every resolution; only the cache key
+    // (the SNI) varies, so each resolve adds a distinct cache entry.
+    let key = tls_key_for_test("example1.com");
+    let task = spawn(async move {
+      while let Some((id, _hello)) = lookup.poll().await {
+        lookup.resolve(id, Ok(key.clone()));
+      }
+    });
+
+    // Resolve more distinct SNIs than the cache can hold.
+    for i in 0..(MAX_CACHED_RESOLUTIONS + 50) {
+      resolver
+        .resolve(hello(&format!("example{i}.com")))
+        .await
+        .unwrap();
+    }
+
+    // The cache stays bounded; older entries were evicted.
+    assert_eq!(
+      resolver.inner.cache.borrow().entries.len(),
+      MAX_CACHED_RESOLUTIONS
+    );
+
+    drop(resolver);
+    task.await.unwrap();
+  }
+
+  #[tokio::test]
+  async fn test_in_flight_resolution_is_not_evicted() {
+    let (resolver, lookup) = new_resolver();
+    let lookup = Rc::new(lookup);
+    let (release_tx, release_rx) = oneshot::channel::<()>();
+    let slow_polls = Rc::new(Cell::new(0));
+    let key = tls_key_for_test("example1.com");
+    let task = spawn({
+      let slow_polls = slow_polls.clone();
+      async move {
+        let mut release_rx = Some(release_rx);
+        while let Some((id, hello)) = lookup.poll().await {
+          if hello.sni == "slow.com" {
+            slow_polls.set(slow_polls.get() + 1);
+            // Hold this one until the test releases it; keep serving others.
+            let release_rx = release_rx.take().unwrap();
+            let lookup = lookup.clone();
+            let key = key.clone();
+            spawn(async move {
+              release_rx.await.unwrap();
+              lookup.resolve(id, Ok(key));
+            });
+          } else {
+            lookup.resolve(id, Ok(key.clone()));
+          }
+        }
+      }
+    });
+
+    // Start the slow name's resolution, then push more resolved names
+    // through the cache than it can hold while that one is still in flight.
+    let slow = resolver.resolve(hello("slow.com"));
+    for i in 0..(MAX_CACHED_RESOLUTIONS + 50) {
+      resolver
+        .resolve(hello(&format!("example{i}.com")))
+        .await
+        .unwrap();
+    }
+    assert_eq!(
+      resolver.inner.cache.borrow().entries.len(),
+      MAX_CACHED_RESOLUTIONS
+    );
+    // The in-flight entry survived the evictions, so a second handshake for
+    // the same name joins it instead of starting another callback.
+    assert!(matches!(
+      resolver.inner.cache.borrow().get(&"slow.com".to_owned()),
+      Some(TlsKeyState::Resolving(..))
+    ));
+    let slow_again = resolver.resolve(hello("slow.com"));
+    release_tx.send(()).unwrap();
+    assert_eq!(tls_key_for_test("example1.com"), slow.await.unwrap());
+    assert_eq!(tls_key_for_test("example1.com"), slow_again.await.unwrap());
+    assert_eq!(slow_polls.get(), 1);
+
+    drop(resolver);
     task.await.unwrap();
   }
 }

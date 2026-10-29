@@ -1,0 +1,6 @@
+a.test: rsa
+b.test: ecc
+a.test again: rsa
+unknown.test: refused
+no SNI: rsa
+calls: ["a.test","b.test","unknown.test",""]

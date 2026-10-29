@@ -10641,3 +10641,23 @@ fn unstable_idle_trim_flag() {
     );
   }
 }
+
+// denext (DENEXT.md item 158): `--unstable-html-rewriter` turns on the
+// `HTMLRewriter` global, on every subcommand that runs code.
+#[test]
+fn unstable_html_rewriter_flag() {
+  for subcommand in ["run", "serve", "test", "compile"] {
+    let flags = flags_from_vec(svec![
+      "deno",
+      subcommand,
+      "--unstable-html-rewriter",
+      "main.ts"
+    ])
+    .unwrap();
+    assert_eq!(
+      flags.unstable_config.features,
+      svec!["html-rewriter"],
+      "{subcommand}"
+    );
+  }
+}

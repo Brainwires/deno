@@ -6499,10 +6499,135 @@ where the changes are discussed.
      enabled runs passed every test; with the options removed alone, the fake
      clock and the hooks were reported as leaks.
 
+
+<!-- Items 152-157 are on fix/node-compat2-denext3, fix/npm-lows-denext3 and fix/vitest-sanitizers-denext3; renumber at integration. -->
+
+158. **`feat(ext/html_rewriter)`: `HTMLRewriter`, behind
+     `--unstable-html-rewriter`** (`feat/html-rewriter`, CLI and runtime;
+     `ext/html_rewriter`, `runtime/js/98_global_scope_shared.js`,
+     `runtime/features/data.rs`,
+     `runtime/{shared,snapshot,snapshot_info,worker,web_worker}.rs`,
+     `libs/cli_parser`, `cli/tsc/dts/lib.deno.unstable.d.ts`,
+     `cli/schemas/config-file.v1.json`). Cloudflare Workers' (and Bun's)
+     streaming HTML rewriting API as a global, ported from denoland/deno#35112
+     (Bartek Iwańczuk's pull request, closed unmerged when upstream stopped
+     taking features; its branch is the fork's June `feat/html-rewriter`).
+     Upstream's review settled the placement: a global like Workers and Bun, not
+     `Deno.HTMLRewriter`.
+     - **On:** `--unstable-html-rewriter` or `"unstable": ["html-rewriter"]` in
+       the config file; the global is absent otherwise (main thread and
+       workers).
+     - **API:**
+       `new HTMLRewriter().on(selector, { element, comments, text
+       }).onDocument({ doctype, comments, text, end }).transform(input)`.
+       `transform(response)` returns a `Response` whose body streams as the
+       input arrives; `transform(string)` returns the rewritten string
+       synchronously. Element tokens: `tagName` (settable), `attributes`,
+       `namespaceURI`, `removed`, `getAttribute` / `hasAttribute` /
+       `setAttribute` / `removeAttribute`, `before` / `after` / `prepend` /
+       `append` / `replace` / `setInnerContent` with `{ html }`, `remove`,
+       `removeAndKeepContent`, `onEndTag(handler)` (end tags: `name`, `before`,
+       `after`, `remove`). Text chunks: `text`, `lastInTextNode`, `before` /
+       `after` / `replace` / `remove`. Comments: `text` (settable), `before` /
+       `after` / `replace` / `remove`. Doctype: `name`, `publicId`, `systemId`,
+       `remove`. Document end: `append`. Selectors are lol_html's: type, `*`,
+       `.class`, `#id`, `[attr]` with `=`, `~=`, `|=`, `^=`, `$=`, `*=`,
+       descendant and child combinators, `:first-child`, `:nth-child()`,
+       `:first-of-type`, `:nth-of-type()`, `:not()`; an unsupported one throws a
+       `TypeError` from `on()`.
+     - **Async handlers:** a handler may return a promise when the input is a
+       `Response`; parsing of that transform waits for it. A string transform
+       refuses one with a `TypeError`.
+     - **Errors:** a handler's exception, or its promise's rejection, aborts the
+       transform and reaches the caller as the same error object: thrown by a
+       string transform, the body stream's error for a `Response`. A token used
+       after its handler returned throws a `TypeError`.
+     - **How:** a `lol_html::send::HtmlRewriter` per transform on a cppgc
+       object; each `write` / `end` runs on the shared blocking pool, and a
+       content handler parks that task until JavaScript has run the user handler
+       (and awaited its promise) on the main thread, mutating the token through
+       generation-checked sync ops meanwhile. An idle streaming transform holds
+       no thread.
+     - **On top of the upstream pull request:** the review's one correctness
+       finding is fixed: the transformed `Response` drops the input's
+       `Content-Length` and `Transfer-Encoding` (the body length changes), and
+       `Content-Encoding` when `fetch` decompressed the input (the output is the
+       decoded body), as Workers and Bun do. The fork's lazily computed
+       `content-type` of a string body is materialized before the headers are
+       copied (`toInnerResponse`). The flag is registered in the fork's own
+       parser (`libs/cli_parser`) and the config schema.
+     - **Dependency:** `lol_html` `=3.0.1` (Cloudflare, BSD-3-Clause; 3.0.2 is
+       younger than the dependency age hold), with `selectors` 0.37,
+       `servo_arc`, `precomputed-hash`, `phf_codegen` and `derive_more` 2;
+       `bitflags` 2.9.3 → 2.11.1 and `cfg-if` 1.0.3 → 1.0.4 (lol_html's
+       minimums).
+     - **Limits:** UTF-8 input only (no `<meta charset>` sniffing); a string
+       transform occupies a blocking-pool thread while it parses.
+
+     Tests: `tests/unit/html_rewriter_test.ts` (upstream's 21, plus
+     `htmlRewriterDropsStaleContentLength`, `htmlRewriterKeepsLazyContentType`,
+     `htmlRewriterFetchedGzipResponse` and
+     `htmlRewriterAsyncHandlerRejectionPropagates`); specs `run/html_rewriter`
+     (`large_body`: ~6 MB in 2,000 pulled chunks, output readable before the
+     source is drained and every element seen; `selectors`; `async_handlers`;
+     `errors`; `config`; `off_by_default`) and upstream's
+     `run/unstable_html_rewriter_{enabled,disabled}` (main thread and worker);
+     the parser test `unstable_html_rewriter_flag`.
+
+159. **`feat(tls)`: `resolveCertificate`, a certificate per server name for
+     `Deno.listenTls` and `Deno.serve`** (`feat/platform-apis-denext3`, runtime;
+     `ext/tls/tls_key.rs`, `ext/net/{02_tls.js,ops_tls.rs}`,
+     `ext/http/00_serve.ts`, `cli/tsc/dts/lib.deno{.ns,_net}.d.ts`). Ported by
+     hand from denoland/deno#35179 (the fork's June
+     `feat/tls-clienthello-resolver`, closed unmerged upstream), keeping its
+     API. It replaces the internal `Symbol.for("unstableSniResolver")` option.
+     - **On:** `--unstable-net` (or `"unstable": ["net"]`); without it a
+       `resolveCertificate` listener exits the process with the unstable-API
+       error.
+     - **API:**
+       `Deno.listenTls({ port, resolveCertificate(serverName,
+       clientHello) { return { cert, key }; } })`,
+       and the same option on `Deno.serve` in place of `cert` / `key`.
+       `serverName` is the SNI host name, `""` when the client sent none (an IP
+       address, say). `clientHello` (`Deno.TlsClientHello`, frozen) carries the
+       offered `alpnProtocols` and the raw IANA code points of `cipherSuites`,
+       `signatureSchemes` and `supportedGroups`. The callback may return a
+       promise. A throw, a rejection or a result without `cert` and `key` aborts
+       that handshake; returning a default pair is how an app falls back for
+       unknown names.
+     - **Caching:** a successful result is cached per server name (the newest
+       1024 names; the oldest resolved one is evicted beyond that), so the
+       callback normally runs once per name and never twice at once for one
+       name. Errors are not cached, so the next handshake retries. Different
+       names resolve concurrently (the fork's own change to the resolver: a slow
+       callback for one name does not hold up the others).
+     - **On top of the pull request:** its one open review point is fixed. An
+       in-flight resolution is never evicted from the bounded cache: evicting it
+       let the next handshake for that name start a second, concurrent callback,
+       and the first one's completion then overwrote or removed the second one's
+       entry. In-flight entries are bounded by the handshakes in flight; the
+       bound is enforced again as each one settles.
+     - **denext:** multi-domain TLS for `denext start` and compiled servers
+       without a proxy, and a hook for userland ACME. A stock Deno has no such
+       option, so denext gates it on the runtime version (`Deno.build.denext`
+       and the release that carries this item) and keeps `cert` / `key` for
+       stock Deno.
+
+     Tests: `ext/tls/tls_key.rs` (upstream's `test_resolve_cached_by_name`,
+     `test_errors_are_not_cached`, `test_cache_is_bounded`, and
+     `test_in_flight_resolution_is_not_evicted`), `tests/unit/tls_sni_test.ts`
+     (`listenResolver`, `listenResolverDoesNotBlockUnrelatedSni`,
+     `listenResolverClientHello`, `listenResolverCachedByName`,
+     `serveResolver`), and the spec `run/tls_resolve_certificate`: two host
+     names on one listener get different certificates (RSA and ECDSA, checked
+     against the peer certificate's DER), an unknown name is refused, a client
+     without SNI gets the fallback, a name is resolved once, `Deno.serve` serves
+     HTTPS through it, and it requires `--unstable-net`.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
-118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 169-174) are what the
-prebuilt `libdenort` carries. The CLI-side parts (for example writing
+118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158, 159, 169-174) are
+what the prebuilt `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
 in the branch too, but a stock CLI does not run them; denext's own launcher
 provides that environment.
