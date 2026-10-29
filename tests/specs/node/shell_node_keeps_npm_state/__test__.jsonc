@@ -1,0 +1,12 @@
+{
+  // A shell command that runs the `node` Deno puts on PATH (no real Node.js
+  // there) on a script in the global npm cache gets this process's npm
+  // resolution, as a child spawned on Deno.execPath() does: the script's own
+  // dependencies resolve.
+  "if": "unix",
+  "args": "run -A main.ts",
+  "envs": {
+    "PATH": ""
+  },
+  "output": "main.out"
+}
