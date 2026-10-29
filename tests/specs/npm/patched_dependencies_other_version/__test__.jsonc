@@ -1,0 +1,10 @@
+{
+  // A patch keyed to a version that isn't installed is reported, not applied.
+  "tempDir": true,
+  "tests": {
+    "reports_unapplied_patch": {
+      "args": "run -A main.ts",
+      "output": "main.out"
+    }
+  }
+}

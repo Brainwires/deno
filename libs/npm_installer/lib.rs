@@ -17,6 +17,7 @@ use deno_npm_cache::NpmCacheHttpClient;
 use deno_resolver::lockfile::LockfileLock;
 use deno_resolver::npm::managed::NpmResolutionCell;
 use deno_resolver::workspace::WorkspaceNpmLinkPackagesRc;
+use deno_resolver::workspace::WorkspaceNpmPatchPackagesRc;
 use deno_semver::package::PackageNv;
 use deno_semver::package::PackageReq;
 
@@ -32,6 +33,7 @@ pub mod initializer;
 pub mod lifecycle_scripts;
 mod local;
 pub mod package_json;
+pub mod patch;
 pub mod process_state;
 pub mod remote;
 pub mod resolution;
@@ -184,6 +186,7 @@ pub struct NpmInstallerOptions<TSys: NpmInstallerSys> {
   /// Check every package being installed (an explicit `deno install`, `add`
   /// or `ci`), not only the ones a resolution adds to the lockfile.
   pub install_gate_all: bool,
+  pub workspace_patch_packages: WorkspaceNpmPatchPackagesRc,
 }
 
 #[derive(Debug)]
@@ -254,6 +257,7 @@ impl<TNpmCacheHttpClient: NpmCacheHttpClient, TSys: NpmInstallerSys>
                   reporter: install_reporter,
                   node_modules_folder,
                   jsr_deps_in_node_modules: options.jsr_deps_in_node_modules,
+                  patch_packages: options.workspace_patch_packages,
                 },
               ))
             }
@@ -274,6 +278,7 @@ impl<TNpmCacheHttpClient: NpmCacheHttpClient, TSys: NpmInstallerSys>
                   reporter: install_reporter,
                   node_modules_folder,
                   jsr_deps_in_node_modules: options.jsr_deps_in_node_modules,
+                  patch_packages: options.workspace_patch_packages,
                 },
               ))
             }

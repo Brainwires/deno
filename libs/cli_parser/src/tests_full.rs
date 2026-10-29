@@ -10661,3 +10661,24 @@ fn unstable_html_rewriter_flag() {
     );
   }
 }
+
+// denext (DENEXT.md item 160): `--unstable-cookies` turns on the cookie jar
+// (`Deno.CookieJar`, `Deno.Cookie`, `Deno.CookieMap`) on every subcommand that
+// runs code.
+#[test]
+fn unstable_cookies_flag() {
+  for subcommand in ["run", "serve", "test", "compile"] {
+    let flags = flags_from_vec(svec![
+      "deno",
+      subcommand,
+      "--unstable-cookies",
+      "main.ts"
+    ])
+    .unwrap();
+    assert_eq!(
+      flags.unstable_config.features,
+      svec!["cookies"],
+      "{subcommand}"
+    );
+  }
+}

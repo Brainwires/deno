@@ -486,6 +486,11 @@ ArgDef::new("unstable-bare-node-builtins")
     .long("unstable-byonm")
     .set_true()
     .hidden(),
+  ArgDef::new("unstable-cookies")
+    .long("unstable-cookies")
+    .set_true()
+    .hidden()
+.help("Enable unstable cookie APIs (`Deno.CookieJar`, `Deno.Cookie`, `Deno.CookieMap` and the `cookieJar` option of `Deno.createHttpClient()`)"),
   ArgDef::new("unstable-cron")
     .long("unstable-cron")
     .set_true()

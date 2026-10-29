@@ -33,6 +33,7 @@ use deno_npm_cache::NpmCache;
 use deno_npm_cache::NpmCacheHttpClient;
 use deno_npm_cache::TarballCache;
 use deno_resolver::npm::managed::NpmResolutionCell;
+use deno_resolver::workspace::WorkspaceNpmPatchPackagesRc;
 use deno_semver::StackString;
 use deno_semver::package::PackageNv;
 use deno_terminal::colors;
@@ -334,6 +335,7 @@ pub struct HoistedNpmPackageInstaller<
   root_node_modules_path: PathBuf,
   system_info: NpmSystemInfo,
   install_reporter: Option<Arc<dyn crate::InstallReporter>>,
+  patch_packages: WorkspaceNpmPatchPackagesRc,
 }
 
 impl<
@@ -384,6 +386,7 @@ impl<
       root_node_modules_path: options.node_modules_folder,
       install_reporter: options.reporter,
       system_info: options.system_info,
+      patch_packages: options.patch_packages,
     }
   }
 
@@ -1001,11 +1004,38 @@ impl<
     // stays as it is, as npm leaves it: no copy, no "Initialize", and its
     // lifecycle scripts don't run again (`HoistedLifecycleScripts::has_run`).
     // (`--reload` copies it again, as the isolated layout does)
+    // A configured `patchedDependencies` diff for this package, applied to the
+    // freshly cloned copy. The patch's hash is recorded beside the scripts-run
+    // markers, so adding, changing or removing a patch re-clones the package
+    // and re-applies it instead of keeping the installed copy.
+    let patch_path = self
+      .patch_packages
+      .0
+      .get(&package.id.nv)
+      .map(Path::to_path_buf);
+    let patch_marker_path = crate::local::local_node_modules_package_folder(
+      &hoisted_patched_dir(&self.root_node_modules_path),
+      package,
+    );
+    let patch_marker = patch_path.as_ref().map(|patch_path| {
+      use std::hash::Hasher;
+      let mut hasher = twox_hash::XxHash64::default();
+      if let Ok(contents) = self.sys.fs_read_to_string(patch_path) {
+        hasher.write(contents.as_bytes());
+      }
+      format!("{:x}", hasher.finish())
+    });
     let installed = self
       .npm_cache
       .cache_setting()
       .should_use_for_npm_package(&package.id.nv.name)
-      && is_installed_at(&self.sys, &package_path, &package.id.nv);
+      && is_installed_at(&self.sys, &package_path, &package.id.nv)
+      && self
+        .sys
+        .fs_read_to_string_lossy(&patch_marker_path)
+        .ok()
+        .map(|s| s.into_owned())
+        == patch_marker;
     let mut pb_guard = None;
     let mut _initialization_guard = None;
     let handle = if installed {
@@ -1043,7 +1073,17 @@ impl<
           remove_isolated_link(&sys, &package_path);
           // a fresh copy has not run its scripts
           let _ = sys.fs_remove_file(&ran_marker);
+          let _ = sys.fs_remove_file(&patch_marker_path);
           clone_dir_recursive(&sys, &cache_folder, &package_path)?;
+          if let (Some(patch_path), Some(patch_marker)) =
+            (&patch_path, &patch_marker)
+          {
+            crate::patch::apply_patch(&sys, &package_path, patch_path)?;
+            if let Some(parent) = patch_marker_path.parent() {
+              let _ = sys.fs_create_dir_all(parent);
+            }
+            let _ = sys.fs_write(&patch_marker_path, patch_marker.as_bytes());
+          }
           Ok::<_, SyncResolutionWithFsError>(())
         }
       }))
@@ -1289,6 +1329,12 @@ impl<
     &self,
     caching: PackageCaching<'a>,
   ) -> Result<(), JsErrorBox> {
+    if !self.patch_packages.0.is_empty() {
+      crate::patch::warn_unapplied_patches(
+        &self.patch_packages.0,
+        &self.resolution.snapshot(),
+      );
+    }
     let snapshot = match caching {
       PackageCaching::All => self.resolution.snapshot(),
       PackageCaching::Only(reqs) => self.resolution.subset(&reqs),
@@ -1320,6 +1366,14 @@ fn is_alias_copy(
 /// version whose lifecycle scripts ran (removed when the package is copied
 /// again), so an install doesn't rerun the scripts of packages it left in
 /// place, as npm doesn't.
+/// Where the hoisted layout records the hash of the `patchedDependencies`
+/// diff applied to each package.
+fn hoisted_patched_dir(root_node_modules_path: &Path) -> PathBuf {
+  root_node_modules_path
+    .join(".deno")
+    .join(".hoisted-patched")
+}
+
 fn hoisted_ran_dir(root_node_modules_path: &Path) -> PathBuf {
   root_node_modules_path
     .join(".deno")

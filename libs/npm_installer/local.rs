@@ -38,6 +38,7 @@ use deno_path_util::fs::atomic_write_file_with_retries;
 use deno_resolver::npm::get_package_folder_id_folder_name;
 use deno_resolver::npm::managed::NpmResolutionCell;
 use deno_resolver::npm::package_name_for_node_modules_path_parts;
+use deno_resolver::workspace::WorkspaceNpmPatchPackagesRc;
 use deno_semver::StackString;
 use deno_semver::package::PackageNv;
 use deno_terminal::colors;
@@ -104,6 +105,7 @@ pub struct LocalNpmPackageInstallerOptions {
   /// option). Gates the `@scope/name` alias symlinks and the `.npmrc` write
   /// for `@jsr/*` packages.
   pub jsr_deps_in_node_modules: bool,
+  pub patch_packages: WorkspaceNpmPatchPackagesRc,
 }
 
 /// Resolver that creates a local node_modules directory
@@ -127,6 +129,7 @@ pub struct LocalNpmPackageInstaller<
   system_info: NpmSystemInfo,
   install_reporter: Option<Arc<dyn crate::InstallReporter>>,
   jsr_deps_in_node_modules: bool,
+  patch_packages: WorkspaceNpmPatchPackagesRc,
 }
 
 impl<
@@ -195,6 +198,7 @@ impl<
       install_reporter: options.reporter,
       system_info: options.system_info,
       jsr_deps_in_node_modules: options.jsr_deps_in_node_modules,
+      patch_packages: options.patch_packages,
     }
   }
 
@@ -338,13 +342,33 @@ impl<
           .unwrap()
         })
         .unwrap_or_default();
+      let patch_path = self
+        .patch_packages
+        .0
+        .get(&package.id.nv)
+        .map(std::path::Path::to_path_buf);
+      // Fold the patch contents into the folder marker stored in `.initialized`
+      // so adding, changing or removing a `patchedDependencies` entry forces a
+      // re-clone and re-apply on the next install.
+      let folder_marker = match &patch_path {
+        Some(patch_path) => {
+          use std::hash::Hasher;
+          let mut hasher = twox_hash::XxHash64::default();
+          hasher.write(tags.as_bytes());
+          if let Ok(contents) = self.sys.fs_read_to_string(patch_path) {
+            hasher.write(contents.as_bytes());
+          }
+          format!("{}\npatch:{:x}", tags, hasher.finish())
+        }
+        None => tags,
+      };
       enum PackageFolderState {
         UpToDate,
         Uninitialized,
         TagsOutdated,
       }
       let initialized_file = folder_path.join(".initialized");
-      let package_state = if tags.is_empty() {
+      let package_state = if folder_marker.is_empty() {
         if sys.fs_exists_no_err(&initialized_file) {
           PackageFolderState::UpToDate
         } else {
@@ -355,7 +379,7 @@ impl<
           .sys
           .fs_read_to_string(&initialized_file)
           .map(|s| {
-            if s != tags {
+            if s != folder_marker {
               PackageFolderState::TagsOutdated
             } else {
               PackageFolderState::UpToDate
@@ -368,6 +392,10 @@ impl<
         .cache_setting()
         .should_use_for_npm_package(&package.id.nv.name)
         || matches!(package_state, PackageFolderState::Uninitialized)
+        // a changed/added patch must re-clone the package and re-apply, not
+        // just refresh the marker like a plain tag change does
+        || (patch_path.is_some()
+          && matches!(package_state, PackageFolderState::TagsOutdated))
       {
         if let Some(dist) = &package.dist {
           // cache bust the dep from the dep setup cache so the symlinks
@@ -413,8 +441,17 @@ impl<
                 let sys = self.sys.clone();
                 move || {
                   clone_dir_recursive(&sys, &cache_folder, &package_path)?;
+                  // apply a configured `patchedDependencies` diff to the
+                  // freshly-cloned package (breaks hardlinks back to the cache)
+                  if let Some(patch_path) = &patch_path {
+                    crate::patch::apply_patch(&sys, &package_path, patch_path)?;
+                  }
                   // write out a file that indicates this folder has been initialized
-                  write_initialized_file(&sys, &initialized_file, &tags)?;
+                  write_initialized_file(
+                    &sys,
+                    &initialized_file,
+                    &folder_marker,
+                  )?;
 
                   Ok::<_, SyncResolutionWithFsError>(())
                 }
@@ -500,7 +537,11 @@ impl<
         }
       } else {
         if matches!(package_state, PackageFolderState::TagsOutdated) {
-          write_initialized_file(sys.as_ref(), &initialized_file, &tags)?;
+          write_initialized_file(
+            sys.as_ref(),
+            &initialized_file,
+            &folder_marker,
+          )?;
         }
 
         if package.has_bin || package.has_scripts {
@@ -1260,6 +1301,12 @@ impl<
     &self,
     caching: PackageCaching<'a>,
   ) -> Result<(), JsErrorBox> {
+    if !self.patch_packages.0.is_empty() {
+      crate::patch::warn_unapplied_patches(
+        &self.patch_packages.0,
+        &self.resolution.snapshot(),
+      );
+    }
     let snapshot = match caching {
       PackageCaching::All => self.resolution.snapshot(),
       PackageCaching::Only(reqs) => self.resolution.subset(&reqs),
@@ -1282,6 +1329,9 @@ pub enum SyncResolutionWithFsError {
   #[class(inherit)]
   #[error(transparent)]
   Other(#[from] JsErrorBox),
+  #[class(inherit)]
+  #[error(transparent)]
+  ApplyPatch(#[from] crate::patch::ApplyPatchError),
 }
 
 pub(crate) fn clone_dir_recursive_except_node_modules_child(

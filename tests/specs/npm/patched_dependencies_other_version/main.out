@@ -1,0 +1,2 @@
+[WILDCARD]Warning "patchedDependencies" entry "@denotest/say-hello@2.0.0" was not applied: no installed version matches it (installed: 1.0.0).
+[WILDCARD]@denotest/say-hello says hello!
