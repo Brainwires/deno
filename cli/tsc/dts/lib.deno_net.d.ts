@@ -357,6 +357,58 @@ declare namespace Deno {
     cert: string;
   }
 
+  /** The parts of a connecting client's TLS ClientHello message that are made
+   * available to a {@linkcode TlsCertificateResolverOption.resolveCertificate}
+   * callback.
+   *
+   * The numeric fields are the raw IANA TLS code points offered by the client,
+   * which are useful for observability and fingerprinting. Because
+   * certificates are resolved (and cached) per server name, these values
+   * reflect the ClientHello of the connection that first triggered resolution
+   * for a given name.
+   *
+   * @experimental **UNSTABLE**: New API, yet to be vetted.
+   *
+   * @category Network */
+  export interface TlsClientHello {
+    /** The Application-Layer Protocol Negotiation (ALPN) protocol identifiers
+     * offered by the client, in order of preference. */
+    alpnProtocols: string[];
+    /** The cipher suites offered by the client, as IANA code points. */
+    cipherSuites: number[];
+    /** The signature schemes offered by the client, as IANA code points. */
+    signatureSchemes: number[];
+    /** The named groups ("supported groups") offered by the client, as IANA
+     * code points. */
+    supportedGroups: number[];
+  }
+
+  /** Selects the certificate and key to present to a connecting client based
+   * on the server name it requests (SNI), as an alternative to a single static
+   * {@linkcode TlsCertifiedKeyPem}. Used with {@linkcode Deno.listenTls} and
+   * {@linkcode Deno.serve}.
+   *
+   * @experimental **UNSTABLE**: New API, yet to be vetted.
+   *
+   * @category Network */
+  export interface TlsCertificateResolverOption {
+    /** Returns the certificate and key to use for a connection requesting
+     * `serverName` (the SNI hostname, which is empty if the client sent none).
+     * The `clientHello` argument carries additional details of the client's
+     * TLS handshake offer.
+     *
+     * A successful result is cached by server name (the most recent 1024
+     * names), so the function normally runs once per name, and never
+     * concurrently for the same name; calls for different names may overlap.
+     * If it throws or rejects, the TLS handshake is aborted and nothing is
+     * cached, so the next handshake for that name calls it again. To serve a
+     * default certificate for unknown names instead, return it. */
+    resolveCertificate(
+      serverName: string,
+      clientHello: TlsClientHello,
+    ): TlsCertifiedKeyPem | Promise<TlsCertifiedKeyPem>;
+  }
+
   /** Options which can be set when opening a TLS listener via
    * {@linkcode Deno.listenTls}.
    *
@@ -383,13 +435,31 @@ declare namespace Deno {
    * });
    * ```
    *
+   * Instead of a static `cert`/`key`, a `resolveCertificate` callback may be
+   * provided to select the certificate per connection based on the requested
+   * server name (SNI). This form requires the `--unstable-net` flag.
+   *
+   * ```ts
+   * using listener = Deno.listenTls({
+   *   port: 443,
+   *   resolveCertificate(serverName) {
+   *     return {
+   *       cert: Deno.readTextFileSync(`./certs/${serverName}.crt`),
+   *       key: Deno.readTextFileSync(`./certs/${serverName}.key`),
+   *     };
+   *   },
+   * });
+   * ```
+   *
    * Requires `allow-net` permission.
    *
    * @tags allow-net
    * @category Network
    */
   export function listenTls(
-    options: ListenTlsOptions & TlsCertifiedKeyPem,
+    options:
+      | (ListenTlsOptions & TlsCertifiedKeyPem)
+      | (ListenTlsOptions & TlsCertificateResolverOption),
   ): TlsListener;
 
   /** Options which can be set when connecting via {@linkcode Deno.connect}.
