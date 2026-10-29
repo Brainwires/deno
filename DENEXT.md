@@ -6064,9 +6064,117 @@ where the changes are discussed.
      `test_cli_records_the_glibc_ceiling` and
      `test_a_malformed_glibc_ceiling_is_refused`.
 
+152. **`test(node_compat)`: 24 tests that already pass are enabled**
+     (`fix/node-compat2-denext3`, test config only;
+     `tests/node_compat/config.jsonc`). The 2026-10-28 re-measure
+     (`plans/node-compat-gaps.md` in denext) listed 280 tests that pass on a
+     debug build of item 148's branch but weren't enabled. Each was run alone
+     (runner parallelism 1, report mode, the CI 10 s timeout) three times on
+     Linux x86_64, and once more the runner's way to read its output: 248 of
+     them pass only by a whole-file `common.skip()` (230 QUIC tests on a build
+     without QUIC, ESLint, FFI, FIPS, LIEF, Temporal, Windows-only and system-CA
+     tests) and stay off, as do 7 that failed or timed out in at least one run
+     (`test-cluster-send-deadlock`, `-gc-http-client-connaborted`,
+     `-http-server-headers-timeout-keepalive`,
+     `-http-server-request-timeout-keepalive`, `-http2-forget-closed-streams`,
+     `-inspector-exit-worker-in-wait-for-connection`,
+     `sequential/test-net-server-listen-ipv6-link-local`) and
+     `test-crypto-hash.js` (a partial skip, and ignored for CI flakiness). The
+     platform switches follow upstream Deno's own per-OS report
+     (`dl.deno.land/node-compat-test/2026-10-2{7,8}/report-{darwin,windows}-*`,
+     Node 26.5.1): where upstream passes a test on macOS or Windows it runs
+     there; where upstream fails it there too (most of these pass only through
+     this fork's fixes) the entry is Linux-only, with that reason, until it is
+     checked on those systems.
+     - Everywhere: `internet/test-https-autoselectfamily-slow-timeout.js` (was
+       off on Linux), `parallel/test-webcrypto-digest-turboshake-rfc.js`,
+       `-worker-http2-stream-terminate.js`, `-worker-terminate-source-map.js`.
+     - Linux and macOS:
+       `parallel/test-child-process-fork-closed-channel-segfault.js` (was off on
+       Linux).
+     - Linux and Windows: `parallel/test-child-process-pipe-dataflow.js`,
+       `-socket-writes-before-passed-to-tls-socket.js`,
+       `sequential/test-cluster-net-listen-ipv6only-rr.js` (were off on Linux).
+     - Linux x86_64 only: `parallel/test-v8-serialize-leak.js` (was ignored; the
+       leak check fails on macOS, Windows and Linux aarch64).
+     - Linux only: `es-module/test-require-module-preload.js`,
+       `module-hooks/test-async-loader-hooks-initialize-throw-null.mjs`,
+       `-throw-symbol.mjs`,
+       `parallel/test-process-threadCpuUsage-worker-threads.js` (were ignored),
+       `es-module/test-esm-loader-mock.mjs`, `-thenable.mjs`,
+       `-with-syntax-error.mjs`, `test-esm-virtual-json.mjs`,
+       `parallel/test-gc-net-timeout.js`, `-http-no-read-no-dump.js`,
+       `-http-server-keepalive-end.js`, `-https-expect-continue-reuse-race.js`,
+       `-net-listen-ipv6only.js`, `-preload-print-process-argv.js`,
+       `sequential/test-cluster-net-listen-ipv6only-none.js`.
+
+153. **`fix(ext/node)`: `node:test` mocks as Node's `MockTracker`, mock timers
+     for `scheduler.wait` and the `node:timers` exports, `assert.register()` and
+     the context's `filePath` / `passed` / `attempt`**
+     (`fix/node-compat2-denext3`, runtime; `ext/node/polyfills/testing.ts`,
+     `testing_esm.ts`, `timers.ts`). The `node:test` runner is the largest open
+     cluster of the 2026-10-28 re-measure (146 failing tests); this takes its
+     API-fidelity part, against Node 26.5.1's
+     `lib/internal/test_runner/mock/mock.js`, `mock_timers.js`, `assert.js`,
+     `test.js` and `lib/test.js`.
+     - **Mocks.** `mock.fn()` / `mock.method()` return a `Proxy` of the
+       original, as Node's do: the mock has the original's `name`, `length` and
+       `prototype`, and `new mock()` constructs with `new.target` the mock (so a
+       mocked constructor's instance is an instance of the original class even
+       with another implementation), records `target` and, for a constructor
+       that throws, `this: undefined`. A method spy found on a prototype is
+       defined on the object itself and its restore leaves that own descriptor
+       (Node's). Arguments are checked as Node checks them:
+       `ERR_INVALID_ARG_TYPE` for a non-object target or a method name that
+       isn't a string or symbol, `ERR_INVALID_ARG_VALUE` for a missing method
+       ("must be a method"), `getter` with `setter`, `getter: false` /
+       `setter: false` on the sugar, and a `times` that isn't an integer >= 1;
+       `mockImplementationOnce(fn, onCall)` refuses a call already made.
+       `fn.mock.restore()` makes a function mock call its original again (it can
+       be re-mocked), and `times` restores after the last mocked call.
+     - **Trackers.** Each `t.mock` and the module's `mock` are their own
+       `MockTracker`: `reset()` restores the mocks _that_ tracker created and
+       forgets them, keeping their recorded calls (it cleared every mock's call
+       history, and restored nothing for `mock.fn()`), and `restoreAll()`
+       restores them; `fn.mock.resetCalls()` only clears calls (it also restored
+       the mock). A test's `t.mock` is reset after its parent's `afterEach()`
+       hooks, which still see the subtest's mocks (it was reset before them).
+     - **Mock timers.** `scheduler.wait` is a mockable API
+       (`enable({ apis: ["scheduler.wait"] })`): `timers/promises`'s
+       `scheduler.wait` runs on the virtual clock, and its abort clears the mock
+       timer. While enabled, the mocked functions are also the
+       `require("node:timers")` / `node:timers/promises` exports (their own
+       property descriptors are back after `reset()`), as Node's MockTimers
+       replaces them; bindings captured earlier keep going through the installed
+       instance. A mock timer has `close()` and `[Symbol.dispose]()`, and the
+       mocked globals take a missing callback as Node's do.
+     - **`t.assert`.** `require("node:test").assert.register(name, fn)` adds or
+       overrides an assertion; each context's `t.assert` holds every registered
+       one, called with the context as `this` and counted against `t.plan()`,
+       plus `ok` (reporting from the caller's frame) and `fileSnapshot`.
+       `t.assert.x` is no longer `assert.x` itself.
+     - **Context.** `filePath` (the test file being run, also for tests a module
+       it imports declares), `passed` and `attempt` (always 0; there is no
+       `--test-rerun-failures`) on test and suite contexts.
+
+     Left open (in the gaps file): an unawaited `t.test()` is still "INCOMPLETE"
+     rather than awaited by its parent, which keeps
+     `test-runner-test-fullname.js`, `-test-filepath.js` and
+     `-mock-timers-date.js` failing (draining it, tried here, turns a subtest
+     held only by an unref'd timer into "the event loop has already resolved"
+     for the whole parent); `t.assert.snapshot` and the removed
+     `assert.CallTracker` (Node 25) keep `test-runner-assert.js` failing.
+
+     Tests: node_compat `parallel/test-runner-mocking.js`, `-mock-timers.js`,
+     `-mock-timers-scheduler.js` and `-custom-assertions.js` enabled (each
+     passed three isolated runs). Specs: `node/node_test_mock` (`mock.reset()`
+     keeps calls and restores `mock.fn()`; the non-method error is Node's) and
+     `node/node_test_module` (`t.assert` methods are wrappers that work, not
+     `node:assert`'s own).
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
-118, 119, 126, 127, 129, 136, 137, 144-148, 150) are what the prebuilt
+118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153) are what the prebuilt
 `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
 in the branch too, but a stock CLI does not run them; denext's own launcher
