@@ -101,9 +101,13 @@ env:
   # a V8 (Cargo.lock's v8 crate) or CEF (laufey's CEF_FULL_VERSION) pin more
   # than one Chrome stable major behind warns on every run and, with `tag`,
   # fails a release tag; `warn` keeps a tag at a warning. A failed Chrome
-  # stable lookup only warns. `warn` for 3.0.0-denext.2: rusty_v8 152.2.0 is
-  # the newest there is, and `tag` would refuse every tag today (DENEXT.md
-  # item 150).
+  # stable lookup only warns. `warn` for 3.0.0-denext.3: V8 15.2.124.45
+  # (DENEXT.md item 162) carries the 15.2 branch's security merges for the
+  # Extended Stable milestone 152, but the gate counts milestones, not patch
+  # level, and CEF 150 is behind too, so `tag` would refuse every tag
+  # (items 150, 162). It stays `warn` until the fork builds its own current
+  # V8 line and the rule is reworked (stable - 1 or Extended Stable, plus a
+  # patch-age limit).
   ENGINE_STALENESS_ENFORCE: warn
 
 jobs:
