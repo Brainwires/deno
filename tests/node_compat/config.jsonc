@@ -952,6 +952,11 @@
     "parallel/test-crypto-random.js": {},
     "parallel/test-crypto-randomfillsync-regression.js": {},
     "parallel/test-crypto-randomuuid.js": {},
+    "parallel/test-crypto-randomuuidv7.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build) with the fork's node:test / node:crypto changes; not verified on macOS or Windows, where upstream Deno's report still fails it"
+    },
     "parallel/test-crypto-prime.js": {},
     "parallel/test-crypto-rsa-dsa.js": {
       // The PKCS#1 v1.5 branch of this Node test depends on
@@ -3375,6 +3380,11 @@
     "parallel/test-require-unicode.js": {},
     "parallel/test-runner-aftereach-runtime-skip.js": {},
     "parallel/test-runner-aliases.js": {},
+    "parallel/test-runner-assert.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build) with the fork's node:test / node:crypto changes; not verified on macOS or Windows, where upstream Deno's report still fails it"
+    },
     "parallel/test-runner-cli-concurrency.js": {
       "ignore": true,
       "reason": "Tests Node.js-specific CLI flags/options that are not supported in Deno"
@@ -3400,6 +3410,11 @@
     "parallel/test-runner-filter-warning.js": {},
     "parallel/test-runner-mock-timers-with-timeout.js": {},
     "parallel/test-runner-mock-timers-scheduler.js": {},
+    "parallel/test-runner-mock-timers-date.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build) with the fork's node:test / node:crypto changes; not verified on macOS or Windows, where upstream Deno's report still fails it"
+    },
     "parallel/test-runner-mock-timers.js": {},
     "parallel/test-runner-mocking.js": {},
     "parallel/test-runner-root-after-with-refed-handles.js": {},
@@ -3418,6 +3433,16 @@
     "parallel/test-runner-tags-validation.mjs": {},
     "parallel/test-runner-todo-skip-tests.js": {},
     "parallel/test-runner-typechecking.js": {},
+    "parallel/test-runner-test-fullname.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build) with the fork's node:test / node:crypto changes; not verified on macOS or Windows, where upstream Deno's report still fails it"
+    },
+    "parallel/test-runner-test-filepath.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build) with the fork's node:test / node:crypto changes; not verified on macOS or Windows, where upstream Deno's report still fails it"
+    },
     "parallel/test-runner-wait-for.js": {},
     "parallel/test-runner-xfail.js": {},
     "parallel/test-set-incoming-message-header.js": {},
@@ -4780,6 +4805,11 @@
     "system-ca/test-set-default-ca-certificates-system-combinations.js": {},
     "test-runner/test-output-arbitrary-output-colored.mjs": {},
     "test-runner/test-output-assertion-color-tty.mjs": {},
+    "test-runner/test-output-async-test-scheduling.mjs": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build) with the fork's node:test / node:crypto changes; not verified on macOS or Windows, where upstream Deno's report still fails it"
+    },
     "test-runner/test-output-coverage-width-80-color.mjs": {},
     "test-runner/test-output-coverage-width-80-uncovered-lines-color.mjs": {},
     "test-runner/test-output-junit-reporter.mjs": {
@@ -4798,7 +4828,17 @@
     "test-runner/test-output-name-and-skip-patterns.mjs": {},
     "test-runner/test-output-no-refs.mjs": {},
     "test-runner/test-output-no-tests.mjs": {},
+    "test-runner/test-output-non-tty-forced-color-output.mjs": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build) with the fork's node:test / node:crypto changes; not verified on macOS or Windows, where upstream Deno's report still fails it"
+    },
     "test-runner/test-output-skip-pattern.mjs": {},
+    "test-runner/test-output-skip-each-hooks.mjs": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build) with the fork's node:test / node:crypto changes; not verified on macOS or Windows, where upstream Deno's report still fails it"
+    },
     "test-runner/test-output-output.mjs": {
       "exitCode": 1,
       "reason": "Runs without the previous missing test.expectFailure TypeError, but reporter snapshot output still differs from Node"
@@ -4814,6 +4854,16 @@
     "test-runner/test-output-spec-reporter-cli.mjs": {
       "ignore": true,
       "reason": "Tests Node.js-specific CLI flags/options that are not supported in Deno"
+    },
+    "test-runner/test-output-spec-reporter-successful.mjs": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build) with the fork's node:test / node:crypto changes; not verified on macOS or Windows, where upstream Deno's report still fails it"
+    },
+    "test-runner/test-output-suite-skip-hooks.mjs": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build) with the fork's node:test / node:crypto changes; not verified on macOS or Windows, where upstream Deno's report still fails it"
     },
     "test-runner/test-output-tap-escape.mjs": {},
     "test-runner/test-output-typescript-coverage.mjs": {},
@@ -5805,6 +5855,11 @@
       "linux": false,
       "darwin": false,
       "reason": "Expected values to be strictly equal"
+    },
+    "test-runner/test-output-force-exit.mjs": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build) with the fork's node:test / node:crypto changes; not verified on macOS or Windows, where upstream Deno's report still fails it"
     },
     "wasi/test-return-on-exit.js": {},
     "wasi/test-wasi-not-started.js": {},
