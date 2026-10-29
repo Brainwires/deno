@@ -1069,6 +1069,7 @@ impl<
       Some(crate::rt::spawn_blocking({
         let package_path = package_path.clone();
         let sys = self.sys.clone();
+        let package_name = package.id.nv.name.clone();
         move || {
           remove_isolated_link(&sys, &package_path);
           // a fresh copy has not run its scripts
@@ -1084,6 +1085,11 @@ impl<
             }
             let _ = sys.fs_write(&patch_marker_path, patch_marker.as_bytes());
           }
+          crate::local::write_better_sqlite3_placeholder(
+            &sys,
+            package_name.as_str(),
+            &package_path,
+          )?;
           Ok::<_, SyncResolutionWithFsError>(())
         }
       }))

@@ -72,6 +72,7 @@ const {
   ObjectHasOwn,
   StringPrototypeIncludes,
   StringPrototypeStartsWith,
+  StringPrototypeToLowerCase,
   StringPrototypeToUpperCase,
 } = core.loadExtScript("ext:deno_node/internal/primordials.mjs");
 const { default: assert } = core.loadExtScript("ext:deno_node/assert.ts");
@@ -1783,6 +1784,32 @@ function findFirstNonFlagArg(args) {
 }
 
 /**
+ * Whether a shell command starts the `node` that Deno put on PATH for its
+ * children (itself; `ensure_node_on_path`, only when no real Node.js is
+ * installed) on a script inside an npm package, as
+ * `spawn('node "<pkg>/bin/x.js" ...', { shell: true })` does (@nestjs/cli
+ * runs @angular-devkit/schematics-cli this way). Such a child needs this
+ * process's npm resolution, as one spawned on `Deno.execPath()` gets it, or a
+ * package in the global npm cache can't resolve its own dependencies.
+ */
+function shellRunsNodeShimOnNpmScript(command, isCmdExe) {
+  const shimActive = op_get_env_no_permission_check("DENO_NODE_SHIM_ACTIVE");
+  if (shimActive == null || shimActive === "" || shimActive === "0") {
+    return false;
+  }
+  const { args } = op_node_parse_shell_args(command, isCmdExe);
+  const program = args[0];
+  if (
+    program !== "node" &&
+    !(isWindows && StringPrototypeToLowerCase(program ?? "") === "node.exe")
+  ) {
+    return false;
+  }
+  const script = findFirstNonFlagArg(ArrayPrototypeSlice(args, 1));
+  return script !== null && op_node_in_npm_package(script);
+}
+
+/**
  * This function is based on https://github.com/nodejs/node/blob/fc6426ccc4b4cb73076356fb6dbf46a28953af01/lib/child_process.js#L504-L528.
  * Copyright Joyent, Inc. and other Node contributors. All rights reserved. MIT license.
  */
@@ -1848,6 +1875,7 @@ function buildCommand(
       args = ArrayPrototypeSlice(args);
       args[1] = transformed;
     }
+    includeNpmProcessState ||= shellRunsNodeShimOnNpmScript(args[1], false);
   }
 
   // Windows cmd.exe: args are ["/d", "/s", "/c", '"command"']
@@ -1868,6 +1896,7 @@ function buildCommand(
       args = ArrayPrototypeSlice(args);
       args[3] = hasWrappingQuotes ? `"${transformed}"` : transformed;
     }
+    includeNpmProcessState ||= shellRunsNodeShimOnNpmScript(cmdStr, true);
   }
 
   // When spawning a non-deno process that has Deno.execPath() in its args

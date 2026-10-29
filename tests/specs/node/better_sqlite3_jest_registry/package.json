@@ -1,0 +1,5 @@
+{
+  "name": "better-sqlite3-jest-registry",
+  "private": true,
+  "dependencies": { "better-sqlite3": "12.11.1" }
+}

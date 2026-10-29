@@ -439,6 +439,7 @@ impl<
               let handle = crate::rt::spawn_blocking({
                 let package_path = package_path.clone();
                 let sys = self.sys.clone();
+                let package_name = package.id.nv.name.clone();
                 move || {
                   clone_dir_recursive(&sys, &cache_folder, &package_path)?;
                   // apply a configured `patchedDependencies` diff to the
@@ -446,6 +447,11 @@ impl<
                   if let Some(patch_path) = &patch_path {
                     crate::patch::apply_patch(&sys, &package_path, patch_path)?;
                   }
+                  write_better_sqlite3_placeholder(
+                    &sys,
+                    package_name.as_str(),
+                    &package_path,
+                  )?;
                   // write out a file that indicates this folder has been initialized
                   write_initialized_file(
                     &sys,
@@ -2113,6 +2119,46 @@ fn write_initialized_file(
   }
 }
 
+/// better-sqlite3 runs over `node:sqlite` (its nan addon can't load), so its
+/// install script, which builds `build/Release/better_sqlite3.node`, normally
+/// doesn't run. A loader that evaluates the package's own JavaScript (Jest's
+/// module registry) finds the addon through `bindings`, which needs a file of
+/// that name to resolve; the runtime's `.node` loader serves the
+/// implementation for it (`maybeBetterSqlite3Addon` in `01_require.js`).
+/// Written into a fresh copy unless a file is already there (a hard link
+/// into the cache must not be written through) or
+/// `DENO_NO_BETTER_SQLITE3_COMPAT` is set; an install script that does run
+/// replaces it.
+pub(crate) fn write_better_sqlite3_placeholder<
+  TSys: sys_traits::EnvVar + FsMetadata + FsWrite + sys_traits::FsCreateDirAll,
+>(
+  sys: &TSys,
+  package_name: &str,
+  package_path: &Path,
+) -> Result<(), std::io::Error> {
+  if package_name != "better-sqlite3" {
+    return Ok(());
+  }
+  if sys
+    .env_var("DENO_NO_BETTER_SQLITE3_COMPAT")
+    .is_ok_and(|value| !value.is_empty() && value != "0")
+  {
+    return Ok(());
+  }
+  let dir = package_path.join("build").join("Release");
+  deno_npm_cache::create_dir_all_no_symlink(sys, &dir)?;
+  let file = dir.join("better_sqlite3.node");
+  if sys.fs_symlink_metadata(&file).is_ok() {
+    return Ok(());
+  }
+  sys.with_paths_in_errors().fs_write(
+    &file,
+    "Deno runs better-sqlite3 over node:sqlite. This placeholder lets the \
+     `bindings` package resolve the addon; Deno serves its implementation \
+     for it.\n",
+  )
+}
+
 pub(crate) fn create_initialized_file<
   F: sys_traits::boxed::FsOpenBoxed + ?Sized,
 >(
@@ -2430,6 +2476,49 @@ mod test {
 
     assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
     assert!(sys.fs_read_to_string(target.join("file")).is_err());
+  }
+
+  #[test]
+  fn better_sqlite3_placeholder() {
+    use sys_traits::EnvSetVar;
+
+    let sys = sys_traits::impls::InMemorySys::default();
+    let file = Path::new("/pkg/build/Release/better_sqlite3.node");
+
+    // another package gets nothing
+    sys.fs_create_dir_all("/other").unwrap();
+    write_better_sqlite3_placeholder(&sys, "bindings", Path::new("/other"))
+      .unwrap();
+    assert!(!sys.fs_exists_no_err("/other/build"));
+
+    // better-sqlite3 gets the file `bindings` resolves
+    sys.fs_create_dir_all("/pkg").unwrap();
+    write_better_sqlite3_placeholder(&sys, "better-sqlite3", Path::new("/pkg"))
+      .unwrap();
+    assert!(
+      sys
+        .fs_read_to_string(file)
+        .unwrap()
+        .starts_with("Deno runs better-sqlite3 over node:sqlite.")
+    );
+
+    // a file already there (a built addon, or a hard link into the cache)
+    // is left as it is
+    sys.fs_write(file, "built").unwrap();
+    write_better_sqlite3_placeholder(&sys, "better-sqlite3", Path::new("/pkg"))
+      .unwrap();
+    assert_eq!(sys.fs_read_to_string(file).unwrap(), "built");
+
+    // the opt-out leaves the package as published
+    sys.env_set_var("DENO_NO_BETTER_SQLITE3_COMPAT", "1");
+    sys.fs_create_dir_all("/opted-out").unwrap();
+    write_better_sqlite3_placeholder(
+      &sys,
+      "better-sqlite3",
+      Path::new("/opted-out"),
+    )
+    .unwrap();
+    assert!(!sys.fs_exists_no_err("/opted-out/build"));
   }
 
   #[test]

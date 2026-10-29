@@ -1,0 +1,5 @@
+{
+  "tasks": {
+    "deno_echo": "echo args:"
+  }
+}

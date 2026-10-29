@@ -269,6 +269,19 @@ pub async fn execute_script(
   .await
 }
 
+/// The arguments a package.json script gets, as `npm run <script> -- <args>`
+/// passes them: a `--` right after the script name only ends npm's own
+/// options and isn't passed on (`deno task test -- --forceExit` runs
+/// `jest --forceExit`, not `jest -- --forceExit`). Only a leading one: the
+/// npm shim (`cli/npm_shim.rs`) has already dropped npm's and forwards the
+/// rest as they are. A deno.json task gets every argument.
+fn npm_script_argv(argv: &[String]) -> &[String] {
+  match argv.first() {
+    Some(first) if first == "--" => &argv[1..],
+    _ => argv,
+  }
+}
+
 #[derive(Clone, Copy)]
 struct ParallelInfo {
   color_index: usize,
@@ -847,6 +860,8 @@ impl<'a> TaskRunner<'a> {
   ) -> Result<i32, deno_core::anyhow::Error> {
     // ensure the npm packages are installed if using a managed resolver
     self.maybe_npm_install().await?;
+
+    let argv = npm_script_argv(argv);
 
     let cwd = match &self.task_flags.cwd {
       Some(path) => Cow::Owned(canonicalize_path(Path::new(path))?),
