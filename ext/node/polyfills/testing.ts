@@ -5,9 +5,7 @@
 const { core, primordials } = __bootstrap;
 const {
   ArrayIsArray,
-  ArrayPrototypeForEach,
   ArrayPrototypeIncludes,
-  ArrayPrototypeIndexOf,
   ArrayPrototypeJoin,
   ArrayPrototypeLastIndexOf,
   ArrayPrototypePop,
@@ -18,6 +16,7 @@ const {
   DatePrototypeToString,
   Error,
   ErrorPrototype,
+  FunctionPrototypeCall,
   JSONStringify,
   MapPrototypeClear,
   MapPrototypeDelete,
@@ -224,6 +223,11 @@ const {
   tapIndent,
 } = core.loadExtScript("ext:deno_node/internal/test/reporters.ts");
 
+// `t.assert`, as Node's `lib/internal/test_runner/assert.js`: the methods
+// copied from `node:assert`, plus `fileSnapshot`, plus whatever
+// `require("node:test").assert.register(name, fn)` adds or overrides. `ok`
+// isn't in the map; a context supplies its own so the stack starts at the
+// caller (as Node's `innerOk` hack).
 const methodsToCopy = [
   "deepEqual",
   "deepStrictEqual",
@@ -242,17 +246,47 @@ const methodsToCopy = [
   "rejects",
   "strictEqual",
   "throws",
-  "ok",
 ];
 
-let assertObject = undefined;
-function getAssertObject() {
-  if (assertObject === undefined) {
-    assertObject = { __proto__: null };
-    ArrayPrototypeForEach(methodsToCopy, (method) => {
-      assertObject[method] = assert[method];
-    });
-    assertObject.fileSnapshot = fileSnapshot;
+let assertionMap;
+function getAssertionMap() {
+  if (assertionMap === undefined) {
+    assertionMap = new SafeMap();
+    for (let i = 0; i < methodsToCopy.length; i++) {
+      MapPrototypeSet(assertionMap, methodsToCopy[i], assert[methodsToCopy[i]]);
+    }
+    MapPrototypeSet(assertionMap, "fileSnapshot", fileSnapshot);
+  }
+  return assertionMap;
+}
+
+function registerAssertion(name, fn) {
+  validateString(name, "name");
+  validateFunction(fn, "fn");
+  MapPrototypeSet(getAssertionMap(), name, fn);
+}
+
+let innerOk;
+// A context's `t.assert`: every registered assertion, called with the
+// context as `this` and counted against its plan (`getPlan()`).
+function createContextAssert(context, getPlan) {
+  const assertObject = { __proto__: null };
+  for (
+    const { 0: name, 1: method } of new SafeMapIterator(getAssertionMap())
+  ) {
+    assertObject[name] = (...args) => {
+      getPlan()?.increment();
+      return ReflectApply(method, context, args);
+    };
+  }
+  if (!MapPrototypeHas(getAssertionMap(), "ok")) {
+    innerOk ??= core.loadExtScript("ext:deno_node/internal/assert/utils.ts")
+      .innerOk;
+    const ok = function ok(...args) {
+      getPlan()?.increment();
+      innerOk(ok, ...new SafeArrayIterator(args));
+    };
+    assertObject.ok = ok;
   }
   return assertObject;
 }
@@ -791,6 +825,7 @@ class TapContext {
   // When set via `runOnly(true)`, only direct subtests registered with the
   // `only: true` option are executed; all other subtests are filtered out.
   #runOnly = false;
+  #assert;
 
   constructor(name, depth, parentChildren) {
     this.#name = name;
@@ -818,7 +853,8 @@ class TapContext {
   }
 
   get assert() {
-    return getAssertObject();
+    this.#assert ??= createContextAssert(this, () => undefined);
+    return this.#assert;
   }
 
   get mock() {
@@ -1369,7 +1405,8 @@ class NodeTestContext {
   #name;
   #abortController = new AbortController();
   #plan;
-  #planAssert;
+  #assert;
+  #passed = false;
   #beforeEachHooks = [];
   #afterEachHooks = [];
   // Guards so the once-per-test `before()`/`after()` hooks run a single time
@@ -1420,26 +1457,8 @@ class NodeTestContext {
   }
 
   get assert() {
-    if (this.#plan) {
-      if (!this.#planAssert) {
-        const plan = this.#plan;
-        const base = getAssertObject();
-        const wrapped = { __proto__: null };
-        ArrayPrototypeForEach(methodsToCopy, (method) => {
-          wrapped[method] = function (...args) {
-            plan.increment();
-            return ReflectApply(base[method], this, args);
-          };
-        });
-        wrapped.fileSnapshot = function (...args) {
-          plan.increment();
-          return ReflectApply(base.fileSnapshot, this, args);
-        };
-        this.#planAssert = wrapped;
-      }
-      return this.#planAssert;
-    }
-    return getAssertObject();
+    this.#assert ??= createContextAssert(this, () => this.#plan);
+    return this.#assert;
   }
 
   plan(count, options = kEmptyObject) {
@@ -1524,6 +1543,26 @@ class NodeTestContext {
     return this.#name;
   }
 
+  // The test file being run (Node's `entryFile`), also for tests a module it
+  // imports declares.
+  get filePath() {
+    return getEntryFilePath();
+  }
+
+  // Whether the test (or suite) has finished and passed; `false` while it runs.
+  get passed() {
+    return this.#passed;
+  }
+
+  _setPassed() {
+    this.#passed = true;
+  }
+
+  // Node's `--test-rerun-failures` attempt number; Deno runs each test once.
+  get attempt() {
+    return 0;
+  }
+
   diagnostic(message) {
     // deno-lint-ignore no-console
     console.log("DIAGNOSTIC:", message);
@@ -1532,7 +1571,7 @@ class NodeTestContext {
   // Each test's own tracker (Node's `t.mock`): what it mocks is restored, and
   // the timers it enabled reset, when the test finishes.
   get mock() {
-    this.#mock ??= createContextMock();
+    this.#mock ??= new MockTracker();
     return this.#mock;
   }
 
@@ -1592,6 +1631,7 @@ class NodeTestContext {
             // all of its own subtests have completed. The parent's `after()`
             // hooks run after the parent finishes, not here.
             await newNodeTextContext._runAfterHooksOnce();
+            newNodeTextContext._setPassed();
           } catch (err) {
             if (!bodyOk) {
               try {
@@ -1602,16 +1642,22 @@ class NodeTestContext {
               throw err;
             }
           } finally {
-            for (
-              const hook of new SafeArrayIterator(
-                parentContext.#afterEachHooks,
-              )
-            ) {
-              // `t.afterEach()` hooks likewise run in the parent's context.
-              await runInTestContext(
-                parentContext,
-                () => hook(newNodeTextContext),
-              );
+            try {
+              for (
+                const hook of new SafeArrayIterator(
+                  parentContext.#afterEachHooks,
+                )
+              ) {
+                // `t.afterEach()` hooks likewise run in the parent's context.
+                await runInTestContext(
+                  parentContext,
+                  () => hook(newNodeTextContext),
+                );
+              }
+            } finally {
+              // As Node, the subtest's `t.mock` is reset after its parent's
+              // `afterEach()` hooks, which still see the subtest's mocks.
+              newNodeTextContext._resetMock();
             }
           }
         },
@@ -1705,19 +1751,15 @@ class NodeTestContext {
     this.#afterHooksRun = true;
     // deno-lint-ignore no-this-alias
     const ctx = this;
-    try {
-      for (const hook of new SafeArrayIterator(this.#afterHooks)) {
-        await runInTestContext(ctx, () => hook(ctx));
-      }
-    } finally {
-      this._resetMock();
+    for (const hook of new SafeArrayIterator(this.#afterHooks)) {
+      await runInTestContext(ctx, () => hook(ctx));
     }
   }
 
   // Restores what this test mocked through `t.mock` (Node resets each test's
   // MockTracker when the test finishes).
   _resetMock() {
-    this.#mock?.[kResetContextMock]();
+    this.#mock?.reset();
   }
 }
 
@@ -1861,11 +1903,13 @@ class TestSuite {
               await runInTestContext(suiteCtx, () => hook(newNodeTextContext));
             }
           }
-          return await runPossiblyExpectingFailure(
+          const result = await runPossiblyExpectingFailure(
             prepared.fn,
             newNodeTextContext,
             prepared.options,
           );
+          newNodeTextContext._setPassed();
+          return result;
         } catch (err) {
           if (newNodeTextContext[skippedSymbol]) {
             return undefined;
@@ -2020,6 +2064,7 @@ function wrapTestFn(fn, resolve, name, options) {
       // The test's own `after()` hooks run once, after its body and all of its
       // subtests complete (a top-level test awaits its subtests inline).
       await nodeTestContext._runAfterHooksOnce();
+      nodeTestContext._setPassed();
     } catch (err) {
       try {
         await nodeTestContext._runAfterHooksOnce();
@@ -2038,9 +2083,13 @@ function wrapTestFn(fn, resolve, name, options) {
           } catch { /* swallow to match node behavior on hook error */ }
         }
       }
-      activeNodeTests--;
-      await runRootAfterIfDone();
-      resolve();
+      try {
+        nodeTestContext._resetMock();
+      } finally {
+        activeNodeTests--;
+        await runRootAfterIfDone();
+        resolve();
+      }
     }
   };
 }
@@ -2285,14 +2334,20 @@ test.beforeEach = beforeEach;
 test.afterEach = afterEach;
 test.getTestContext = getTestContext;
 
-const activeMocks = [];
+// `node:test` mocking, as Node's `lib/internal/test_runner/mock/mock.js`:
+// a mock function is a Proxy of the function it spies on (so its name,
+// length, prototype and `new.target` are the original's), and each
+// MockTracker (the module's `mock`, and every test's own `t.mock`) keeps the
+// mocks it created so that `reset()` / `restoreAll()` restore exactly those.
+
+function kDefaultFunction() {}
 
 class MockFunctionContext {
   #calls = [];
+  #mocks = new SafeMap();
   #implementation;
   #restore;
   #times;
-  #onceImplementations = new SafeMap();
 
   constructor(implementation, restore, times) {
     this.#implementation = implementation;
@@ -2301,7 +2356,7 @@ class MockFunctionContext {
   }
 
   get calls() {
-    return this.#calls;
+    return ArrayPrototypeSlice(this.#calls, 0);
   }
 
   callCount() {
@@ -2315,67 +2370,59 @@ class MockFunctionContext {
 
   mockImplementationOnce(implementation, onCall) {
     validateFunction(implementation, "implementation");
-    if (onCall !== undefined) {
-      validateInteger(onCall, "onCall", 0);
-    }
-    const call = onCall ?? this.#calls.length;
-    MapPrototypeSet(this.#onceImplementations, call, implementation);
-  }
-
-  resetCalls() {
-    ArrayPrototypeSplice(this.#calls, 0, this.#calls.length);
-    // Node's MockTracker.reset() restores mocked methods (and Deno's
-    // mock.reset() already restores module mocks via MockModuleContext).
-    // Invoke restore here without splicing activeMocks mid-iteration.
-    if (this.#restore) {
-      this.#restore();
-      this.#restore = undefined;
-    }
+    const nextCall = this.#calls.length;
+    const call = onCall ?? nextCall;
+    validateInteger(call, "onCall", nextCall);
+    MapPrototypeSet(this.#mocks, call, implementation);
   }
 
   restore() {
-    if (this.#restore) {
-      this.#restore();
-      this.#restore = undefined;
+    const { descriptor, object, original, methodName } = this.#restore;
+
+    if (object !== undefined) {
+      // An object method spy: put the original descriptor back. Node checks
+      // `typeof methodName === "string"` here, which leaves a method mocked
+      // under a symbol in place; any property key is restored.
+      ObjectDefineProperty(object, methodName, {
+        __proto__: null,
+        ...descriptor,
+      });
+    } else {
+      // A bare function spy: the mock calls the original function again.
+      this.#implementation = original;
     }
-    this._restored = true;
-    const idx = ArrayPrototypeIndexOf(activeMocks, this);
-    if (idx !== -1) {
-      ArrayPrototypeSplice(activeMocks, idx, 1);
-    }
   }
 
-  _recordCall(thisArg, args, result, error, target) {
-    ArrayPrototypePush(this.#calls, {
-      arguments: args,
-      error,
-      result,
-      stack: new Error(),
-      target,
-      this: thisArg,
-    });
+  resetCalls() {
+    this.#calls = [];
   }
 
-  _shouldMock() {
-    if (this._restored) return false;
-    if (this.#times === undefined) return true;
-    return this.#calls.length < this.#times;
+  trackCall(call) {
+    ArrayPrototypePush(this.#calls, call);
   }
 
-  _getImplementation() {
-    return this.#implementation;
-  }
-
-  _nextImpl() {
+  nextImpl() {
     const nextCall = this.#calls.length;
-    const onceImpl = MapPrototypeGet(this.#onceImplementations, nextCall);
-    if (onceImpl) {
-      MapPrototypeDelete(this.#onceImplementations, nextCall);
-      return onceImpl;
+    const mock = MapPrototypeGet(this.#mocks, nextCall);
+    const impl = mock ?? this.#implementation;
+
+    if (nextCall + 1 === this.#times) {
+      this.restore();
     }
-    return this.#implementation;
+
+    MapPrototypeDelete(this.#mocks, nextCall);
+    return impl;
   }
 }
+
+// Node keeps these off the public prototype.
+const {
+  nextImpl: mockNextImpl,
+  restore: restoreMockFunction,
+  trackCall: mockTrackCall,
+} = MockFunctionContext.prototype;
+delete MockFunctionContext.prototype.trackCall;
+delete MockFunctionContext.prototype.nextImpl;
 
 class MockPropertyContext {
   #object;
@@ -2385,11 +2432,12 @@ class MockPropertyContext {
   #descriptor;
   #accesses = [];
   #onceValues = new SafeMap();
-  _restored = false;
 
-  constructor(object, propertyName, hasValue, value) {
+  constructor(object, propertyName, value) {
     this.#object = object;
     this.#propertyName = propertyName;
+    this.#originalValue = object[propertyName];
+    this.#value = arguments.length > 2 ? value : this.#originalValue;
     this.#descriptor = ObjectGetOwnPropertyDescriptor(object, propertyName);
     if (!this.#descriptor) {
       throw new ERR_INVALID_ARG_VALUE(
@@ -2398,8 +2446,6 @@ class MockPropertyContext {
         "is not a property of the object",
       );
     }
-    this.#originalValue = object[propertyName];
-    this.#value = hasValue ? value : this.#originalValue;
 
     const { configurable, enumerable } = this.#descriptor;
     ObjectDefineProperty(object, propertyName, {
@@ -2409,6 +2455,7 @@ class MockPropertyContext {
       get: () => {
         const nextValue = this.#getAccessValue(this.#value);
         ArrayPrototypePush(this.#accesses, {
+          __proto__: null,
           type: "get",
           value: nextValue,
           stack: new Error(),
@@ -2437,6 +2484,7 @@ class MockPropertyContext {
     }
     const nextValue = this.#getAccessValue(value);
     ArrayPrototypePush(this.#accesses, {
+      __proto__: null,
       type: "set",
       value: nextValue,
       stack: new Error(),
@@ -2467,166 +2515,46 @@ class MockPropertyContext {
     this.#accesses = [];
   }
 
-  // Alias used by mock.reset() which iterates activeMocks calling resetCalls().
-  resetCalls() {
-    this.resetAccesses();
-  }
-
   restore() {
-    if (!this._restored) {
-      // Reinstall the pristine original descriptor. Unlike Node we don't force
-      // a `value` field, since the original property may be an accessor (e.g.
-      // `process.platform` is a getter in Deno) and mixing `value` with
-      // `get`/`set` is an invalid descriptor.
-      ObjectDefineProperty(this.#object, this.#propertyName, {
-        __proto__: null,
-        ...this.#descriptor,
-      });
-      this._restored = true;
-    }
-    const idx = ArrayPrototypeIndexOf(activeMocks, this);
-    if (idx !== -1) {
-      ArrayPrototypeSplice(activeMocks, idx, 1);
-    }
-  }
-}
-
-function createMockFunction(original, implementation, ctx) {
-  const mockFn = function (...args) {
-    const newTarget = new.target;
-    const isCtor = newTarget !== undefined;
-    // The IIFE wrapping this module is sloppy, so a plain call leaks
-    // globalThis as `this`. Match strict-mode/Node semantics.
-    const thisArg = !isCtor && this === globalThis ? undefined : this;
-    const impl = ctx._shouldMock()
-      ? (ctx._nextImpl() ?? implementation ?? original)
-      : original;
-
-    let result;
-    let error;
-
-    // If called directly (not via subclass), use the original constructor
-    // so the produced instance has its prototype, and so call.target reports
-    // the user's class (not the mock wrapper).
-    const ctorTarget = isCtor && newTarget === mockFn ? impl : newTarget;
-    try {
-      if (isCtor) {
-        result = impl ? ReflectConstruct(impl, args, ctorTarget) : undefined;
-      } else {
-        result = impl ? ReflectApply(impl, thisArg, args) : undefined;
-      }
-    } catch (e) {
-      error = e;
-      ctx._recordCall(
-        isCtor ? thisArg : thisArg,
-        args,
-        undefined,
-        error,
-        ctorTarget,
-      );
-      throw e;
-    }
-
-    ctx._recordCall(
-      isCtor ? result : thisArg,
-      args,
-      result,
-      undefined,
-      ctorTarget,
-    );
-    return result;
-  };
-
-  ObjectDefineProperty(mockFn, "mock", {
-    __proto__: null,
-    value: ctx,
-    writable: false,
-    enumerable: false,
-    configurable: false,
-  });
-
-  return mockFn;
-}
-
-function findPropertyDescriptor(obj, name) {
-  let current = obj;
-  while (current !== null && current !== undefined) {
-    const desc = ObjectGetOwnPropertyDescriptor(current, name);
-    if (desc) return desc;
-    current = ObjectGetPrototypeOf(current);
-  }
-  return undefined;
-}
-
-function mockMethodImpl(object, methodName, implementation, options) {
-  if (
-    implementation !== null && typeof implementation === "object" &&
-    typeof implementation !== "function"
-  ) {
-    options = implementation;
-    implementation = undefined;
-  }
-
-  const descriptor = findPropertyDescriptor(object, methodName);
-  if (!descriptor) {
-    throw new TypeError(
-      `Cannot mock property '${String(methodName)}' because it does not exist`,
-    );
-  }
-
-  const isGetter = options?.getter ?? false;
-  const isSetter = options?.setter ?? false;
-
-  let original;
-  if (isGetter) {
-    original = descriptor.get;
-  } else if (isSetter) {
-    original = descriptor.set;
-  } else {
-    original = descriptor.value;
-  }
-
-  if (typeof original !== "function") {
-    throw new TypeError(
-      `Cannot mock property '${
-        String(methodName)
-      }' because it is not a function`,
-    );
-  }
-
-  const restore = () => {
-    ObjectDefineProperty(object, methodName, {
+    // Reinstall the original descriptor. Unlike Node we don't force a `value`
+    // field, since the original property may be an accessor (e.g.
+    // `process.platform` is a getter in Deno) and mixing `value` with
+    // `get`/`set` is an invalid descriptor.
+    ObjectDefineProperty(this.#object, this.#propertyName, {
       __proto__: null,
-      ...descriptor,
+      ...this.#descriptor,
     });
-  };
+  }
+}
 
-  const impl = implementation === undefined ? original : implementation;
-  const ctx = new MockFunctionContext(impl, restore, options?.times);
-  ArrayPrototypePush(activeMocks, ctx);
+const { restore: restoreMockProperty } = MockPropertyContext.prototype;
 
-  const mockFn = createMockFunction(original, impl, ctx);
+function validateStringOrSymbol(value, name) {
+  if (typeof value !== "string" && typeof value !== "symbol") {
+    throw new ERR_INVALID_ARG_TYPE(name, ["string", "symbol"], value);
+  }
+}
 
-  const mockDescriptor = {
-    __proto__: null,
-    configurable: descriptor.configurable,
-    enumerable: descriptor.enumerable,
-  };
+function validateTimes(value, name) {
+  if (value === Infinity) {
+    return;
+  }
+  validateInteger(value, name, 1);
+}
 
-  if (isGetter) {
-    mockDescriptor.get = mockFn;
-    mockDescriptor.set = descriptor.set;
-  } else if (isSetter) {
-    mockDescriptor.get = descriptor.get;
-    mockDescriptor.set = mockFn;
-  } else {
-    mockDescriptor.writable = descriptor.writable;
-    mockDescriptor.value = mockFn;
+function findMethodOnPrototypeChain(instance, methodName) {
+  let host = instance;
+  let descriptor;
+
+  while (host !== null) {
+    descriptor = ObjectGetOwnPropertyDescriptor(host, methodName);
+    if (descriptor) {
+      break;
+    }
+    host = ObjectGetPrototypeOf(host);
   }
 
-  ObjectDefineProperty(object, methodName, mockDescriptor);
-
-  return mockFn;
+  return descriptor;
 }
 
 const SUPPORTED_APIS = [
@@ -2634,6 +2562,7 @@ const SUPPORTED_APIS = [
   "setInterval",
   "setImmediate",
   "Date",
+  "scheduler.wait",
   "AbortSignal.timeout",
 ];
 
@@ -2658,6 +2587,13 @@ class MockTimersHandle {
   }
   hasRef() {
     return this.#refed;
+  }
+  close() {
+    this.#timers._clearTimer(this);
+    return this;
+  }
+  [SymbolDispose]() {
+    this.#timers._clearTimer(this);
   }
   refresh() {
     if (this.#timer && !this.#timer.interval) {
@@ -2694,11 +2630,35 @@ class MockTimers {
   #abortSignalTimeoutOriginal = null;
   #abortSignalTimeoutMocked = false;
 
+  // Own property descriptors of the `node:timers` / `node:timers/promises`
+  // exports replaced while enabled, as [object, key, descriptor].
+  #moduleOriginals = [];
+
   #mockGlobal(name, value) {
     if (!MapPrototypeHas(this.#originals, name)) {
       MapPrototypeSet(this.#originals, name, globalThis[name]);
     }
     globalThis[name] = value;
+  }
+
+  // Replaces an export of the `node:timers` modules, as Node's MockTimers
+  // does, so `require("node:timers").setTimeout` is the mock while enabled and
+  // the original (same descriptor) after `reset()`. The module functions also
+  // consult the installed instance (`kInstallMockTimers`), which covers
+  // bindings captured before `enable()`.
+  #mockModuleExport(object, key, value) {
+    ArrayPrototypePush(this.#moduleOriginals, [
+      object,
+      key,
+      ObjectGetOwnPropertyDescriptor(object, key),
+    ]);
+    ObjectDefineProperty(object, key, {
+      __proto__: null,
+      value,
+      writable: true,
+      enumerable: true,
+      configurable: true,
+    });
   }
 
   // Whether `api` (e.g. `"setTimeout"`) is currently being intercepted. Read by
@@ -2794,12 +2754,42 @@ class MockTimers {
 
     // Route the `node:timers` / `node:timers/promises` module functions through
     // this instance too (see `kInstallMockTimers` in `timers.ts`).
-    core.loadExtScript("ext:deno_node/timers.ts")[kInstallMockTimers](this);
+    const timersModule = core.loadExtScript("ext:deno_node/timers.ts");
+    timersModule[kInstallMockTimers](this);
+    const timersPromisesModule = core.loadExtScript(
+      "ext:deno_node/timers/promises.ts",
+    );
+    const pairs = [
+      ["setTimeout", "clearTimeout"],
+      ["setInterval", "clearInterval"],
+      ["setImmediate", "clearImmediate"],
+    ];
+    for (let i = 0; i < pairs.length; i++) {
+      const { 0: set, 1: clear } = pairs[i];
+      if (!this._apiEnabled(set)) continue;
+      // The global mocks installed above.
+      this.#mockModuleExport(timersModule, set, globalThis[set]);
+      this.#mockModuleExport(timersModule, clear, globalThis[clear]);
+      const realPromise = timersPromisesModule[set];
+      this.#mockModuleExport(
+        timersPromisesModule,
+        set,
+        function (...args) {
+          return ReflectApply(realPromise, this, args);
+        },
+      );
+    }
   }
 
   reset() {
     if (!this._enabled) return;
     core.loadExtScript("ext:deno_node/timers.ts")[kInstallMockTimers](null);
+    while (this.#moduleOriginals.length > 0) {
+      const { 0: object, 1: key, 2: descriptor } = ArrayPrototypePop(
+        this.#moduleOriginals,
+      );
+      ObjectDefineProperty(object, key, { __proto__: null, ...descriptor });
+    }
     for (
       const { 0: name, 1: original } of new SafeMapIterator(this.#originals)
     ) {
@@ -2892,8 +2882,9 @@ class MockTimers {
     return controller.signal;
   }
 
+  // Like Node's mocked timers, these take the callback as given: the
+  // `node:timers` functions validate it before they get here.
   _setTimeout(callback, delay, args, immediate) {
-    validateFunction(callback, "callback");
     if (delay === undefined || delay === null) delay = 1;
     if (typeof delay !== "number") delay = +delay;
     if (!NumberIsFinite(delay) || delay < 0) delay = 1;
@@ -2913,7 +2904,6 @@ class MockTimers {
   }
 
   _setInterval(callback, delay, args) {
-    validateFunction(callback, "callback");
     if (delay === undefined || delay === null) delay = 1;
     if (typeof delay !== "number") delay = +delay;
     if (!NumberIsFinite(delay) || delay < 1) delay = 1;
@@ -3104,6 +3094,16 @@ function getCallerUrl() {
         return candidate;
       }
     }
+  }
+  return undefined;
+}
+
+// The path of the test file being run, as Node's `entryFile`: the main
+// module, not the module that declared the test.
+function getEntryFilePath() {
+  const main = globalThis.Deno?.mainModule;
+  if (typeof main === "string" && StringPrototypeStartsWith(main, "file:")) {
+    return getNodeUrl().fileURLToPath(main);
   }
   return undefined;
 }
@@ -3393,23 +3393,10 @@ class MockModuleContext {
       this.#restore();
       this.#restore = undefined;
     }
-    const idx = ArrayPrototypeIndexOf(activeMocks, this);
-    if (idx !== -1) {
-      ArrayPrototypeSplice(activeMocks, idx, 1);
-    }
-  }
-
-  // `mock.reset()` iterates `activeMocks` calling `resetCalls()`. Node's
-  // `MockTracker.reset()` restores module mocks, so alias it to the restore
-  // behavior. The splice from `activeMocks` is deferred to `restore()` to
-  // avoid mutating the array mid iteration.
-  resetCalls() {
-    if (this.#restore !== undefined) {
-      this.#restore();
-      this.#restore = undefined;
-    }
   }
 }
+
+const { restore: restoreMockModule } = MockModuleContext.prototype;
 
 function mockModule(specifier, options = kEmptyObject) {
   let specStr;
@@ -3523,76 +3510,251 @@ function mockModule(specifier, options = kEmptyObject) {
     }
   };
 
-  const ctx = new MockModuleContext(restore);
-  ArrayPrototypePush(activeMocks, ctx);
-  return ctx;
+  return new MockModuleContext(restore);
 }
 
-const mock = {
-  fn: (original, implementation, options) => {
+// A tracker's `timers`. There is one virtual clock (`mockTimers`, which the
+// `node:timers` module functions consult), so each tracker's `timers` drives
+// that clock and remembers whether it enabled it: `reset()` on a tracker
+// (as at the end of a test) resets the clock only if that tracker enabled it.
+class MockTrackerTimers {
+  _owns = false;
+
+  enable(options) {
+    mockTimers.enable(options);
+    this._owns = true;
+  }
+
+  reset() {
+    mockTimers.reset();
+    this._owns = false;
+  }
+
+  tick(milliseconds) {
+    mockTimers.tick(milliseconds);
+  }
+
+  runAll() {
+    mockTimers.runAll();
+  }
+
+  setTime(milliseconds) {
+    // deno-lint-ignore deno-internal/prefer-primordials
+    mockTimers.setTime(milliseconds);
+  }
+
+  [SymbolDispose]() {
+    this.reset();
+  }
+}
+
+class MockTracker {
+  #mocks = [];
+  #timers;
+
+  get timers() {
+    this.#timers ??= new MockTrackerTimers();
+    return this.#timers;
+  }
+
+  fn(
+    original = function () {},
+    implementation = original,
+    options = kEmptyObject,
+  ) {
     if (original !== null && typeof original === "object") {
       options = original;
-      original = undefined;
-      implementation = undefined;
-    } else if (
-      implementation !== null && typeof implementation === "object"
-    ) {
+      original = function () {};
+      implementation = original;
+    } else if (implementation !== null && typeof implementation === "object") {
       options = implementation;
       implementation = original;
     }
 
+    validateFunction(original, "original");
+    validateFunction(implementation, "implementation");
+    validateObject(options, "options");
+    const { times = Infinity } = options;
+    validateTimes(times, "options.times");
     const ctx = new MockFunctionContext(
-      implementation ?? original,
-      undefined,
-      options?.times,
+      implementation,
+      { __proto__: null, original },
+      times,
     );
-    ArrayPrototypePush(activeMocks, ctx);
+    return this.#setupMock(ctx, original);
+  }
 
-    const mockFn = createMockFunction(
-      original,
-      implementation ?? original,
-      ctx,
-    );
-    return mockFn;
-  },
+  method(
+    objectOrFunction,
+    methodName,
+    implementation = kDefaultFunction,
+    options = kEmptyObject,
+  ) {
+    validateStringOrSymbol(methodName, "methodName");
+    if (typeof objectOrFunction !== "function") {
+      validateObject(objectOrFunction, "object");
+    }
 
-  getter: (object, methodName, implementation, options) => {
     if (implementation !== null && typeof implementation === "object") {
       options = implementation;
-      implementation = undefined;
+      implementation = kDefaultFunction;
     }
-    return mockMethodImpl(object, methodName, implementation, {
-      ...options,
-      getter: true,
-    });
-  },
 
-  method: (object, methodName, implementation, options) => {
-    return mockMethodImpl(object, methodName, implementation, options);
-  },
+    validateFunction(implementation, "implementation");
+    validateObject(options, "options");
 
-  module: mockModule,
+    const {
+      getter = false,
+      setter = false,
+      times = Infinity,
+    } = options;
 
-  property: function (object, propertyName, value) {
-    validateObject(object, "object");
-    if (
-      typeof propertyName !== "string" && typeof propertyName !== "symbol"
-    ) {
-      throw new ERR_INVALID_ARG_TYPE(
-        "propertyName",
-        ["string", "symbol"],
-        propertyName,
+    validateBoolean(getter, "options.getter");
+    validateBoolean(setter, "options.setter");
+    validateTimes(times, "options.times");
+
+    if (setter && getter) {
+      throw new ERR_INVALID_ARG_VALUE(
+        "options.setter",
+        setter,
+        "cannot be used with 'options.getter'",
+      );
+    }
+    const descriptor = findMethodOnPrototypeChain(objectOrFunction, methodName);
+
+    let original;
+
+    if (getter) {
+      original = descriptor?.get;
+    } else if (setter) {
+      original = descriptor?.set;
+    } else {
+      original = descriptor?.value;
+    }
+
+    if (typeof original !== "function") {
+      throw new ERR_INVALID_ARG_VALUE(
+        "methodName",
+        original,
+        "must be a method",
       );
     }
 
-    const hasValue = arguments.length > 2;
-    const ctx = new MockPropertyContext(
-      object,
-      propertyName,
-      hasValue,
-      value,
-    );
-    ArrayPrototypePush(activeMocks, ctx);
+    const restore = {
+      __proto__: null,
+      descriptor,
+      object: objectOrFunction,
+      methodName,
+    };
+    const impl = implementation === kDefaultFunction
+      ? original
+      : implementation;
+    const ctx = new MockFunctionContext(impl, restore, times);
+    const mock = this.#setupMock(ctx, original);
+    const mockDescriptor = {
+      __proto__: null,
+      configurable: descriptor.configurable,
+      enumerable: descriptor.enumerable,
+    };
+
+    if (getter) {
+      mockDescriptor.get = mock;
+      mockDescriptor.set = descriptor.set;
+    } else if (setter) {
+      mockDescriptor.get = descriptor.get;
+      mockDescriptor.set = mock;
+    } else {
+      mockDescriptor.writable = descriptor.writable;
+      mockDescriptor.value = mock;
+    }
+
+    ObjectDefineProperty(objectOrFunction, methodName, mockDescriptor);
+
+    return mock;
+  }
+
+  getter(
+    object,
+    methodName,
+    implementation = kDefaultFunction,
+    options = kEmptyObject,
+  ) {
+    if (implementation !== null && typeof implementation === "object") {
+      options = implementation;
+      implementation = kDefaultFunction;
+    } else {
+      validateObject(options, "options");
+    }
+
+    const { getter = true } = options;
+
+    if (getter === false) {
+      throw new ERR_INVALID_ARG_VALUE(
+        "options.getter",
+        getter,
+        "cannot be false",
+      );
+    }
+
+    return this.method(object, methodName, implementation, {
+      __proto__: null,
+      ...options,
+      getter,
+    });
+  }
+
+  setter(
+    object,
+    methodName,
+    implementation = kDefaultFunction,
+    options = kEmptyObject,
+  ) {
+    if (implementation !== null && typeof implementation === "object") {
+      options = implementation;
+      implementation = kDefaultFunction;
+    } else {
+      validateObject(options, "options");
+    }
+
+    const { setter = true } = options;
+
+    if (setter === false) {
+      throw new ERR_INVALID_ARG_VALUE(
+        "options.setter",
+        setter,
+        "cannot be false",
+      );
+    }
+
+    return this.method(object, methodName, implementation, {
+      __proto__: null,
+      ...options,
+      setter,
+    });
+  }
+
+  module(specifier, options) {
+    const ctx = mockModule(specifier, options);
+    ArrayPrototypePush(this.#mocks, {
+      __proto__: null,
+      ctx,
+      restore: restoreMockModule,
+    });
+    return ctx;
+  }
+
+  property(object, propertyName, value) {
+    validateObject(object, "object");
+    validateStringOrSymbol(propertyName, "propertyName");
+
+    const ctx = arguments.length > 2
+      ? new MockPropertyContext(object, propertyName, value)
+      : new MockPropertyContext(object, propertyName);
+    ArrayPrototypePush(this.#mocks, {
+      __proto__: null,
+      ctx,
+      restore: restoreMockProperty,
+    });
 
     return new Proxy(object, {
       __proto__: null,
@@ -3603,112 +3765,103 @@ const mock = {
         return ReflectGet(target, property, receiver);
       },
     });
-  },
+  }
 
-  reset: () => {
-    mockTimers.reset();
-    ArrayPrototypeForEach(activeMocks, (ctx) => {
-      ctx.resetCalls();
-    });
-  },
-
-  restoreAll: () => {
-    while (activeMocks.length > 0) {
-      const ctx = activeMocks[activeMocks.length - 1];
-      ctx.restore();
+  // Restores every mock this tracker created and forgets them; the mocks'
+  // recorded calls are kept. Resets the mock timers if this tracker enabled
+  // them.
+  reset() {
+    this.restoreAll();
+    if (this.#timers?._owns) {
+      this.#timers.reset();
     }
-  },
+    this.#mocks = [];
+  }
 
-  setter: (object, methodName, implementation, options) => {
-    if (implementation !== null && typeof implementation === "object") {
-      options = implementation;
-      implementation = undefined;
+  restoreAll() {
+    for (let i = 0; i < this.#mocks.length; i++) {
+      const { ctx, restore } = this.#mocks[i];
+      FunctionPrototypeCall(restore, ctx);
     }
-    return mockMethodImpl(object, methodName, implementation, {
-      ...options,
-      setter: true,
-    });
-  },
+  }
 
-  timers: {
-    enable: (options) => mockTimers.enable(options),
-    reset: () => mockTimers.reset(),
-    tick: (ms) => mockTimers.tick(ms),
-    runAll: () => mockTimers.runAll(),
-    // `setTime` is MockTimers' own method, not Date.prototype.setTime.
-    // deno-lint-ignore deno-internal/prefer-primordials
-    setTime: (ms) => mockTimers.setTime(ms),
-    [SymbolDispose]: () => mockTimers.reset(),
-  },
-};
-
-const kResetContextMock = Symbol("kResetContextMock");
-
-// A test context's `t.mock`: the shared mock API, keeping the mocks this test
-// created (to restore them) and whether it enabled the mock timers (to reset
-// them) when the test finishes, as Node resets each test's MockTracker.
-function createContextMock() {
-  const own = [];
-  let ownsTimers = false;
-  const tracked = (fn) =>
-    function (...args) {
-      const before = activeMocks.length;
-      const result = ReflectApply(fn, this, args);
-      for (let i = before; i < activeMocks.length; i++) {
-        ArrayPrototypePush(own, activeMocks[i]);
-      }
-      return result;
-    };
-  return {
-    __proto__: null,
-    fn: tracked(mock.fn),
-    getter: tracked(mock.getter),
-    method: tracked(mock.method),
-    module: tracked(mock.module),
-    property: tracked(mock.property),
-    setter: tracked(mock.setter),
-    reset: () => {
-      mock.reset();
-    },
-    restoreAll: () => {
-      mock.restoreAll();
-      own.length = 0;
-    },
-    timers: {
+  #setupMock(ctx, fnToMatch) {
+    const mock = new Proxy(fnToMatch, {
       __proto__: null,
-      enable: (options) => {
-        mockTimers.enable(options);
-        ownsTimers = true;
+      apply(_fn, thisArg, argList) {
+        const fn = FunctionPrototypeCall(mockNextImpl, ctx);
+        let result;
+        let error;
+
+        try {
+          result = ReflectApply(fn, thisArg, argList);
+        } catch (err) {
+          error = err;
+          throw err;
+        } finally {
+          FunctionPrototypeCall(mockTrackCall, ctx, {
+            __proto__: null,
+            arguments: argList,
+            error,
+            result,
+            stack: new Error(),
+            target: undefined,
+            this: thisArg,
+          });
+        }
+
+        return result;
       },
-      reset: () => {
-        mockTimers.reset();
-        ownsTimers = false;
+      construct(target, argList, newTarget) {
+        const realTarget = FunctionPrototypeCall(mockNextImpl, ctx);
+        let result;
+        let error;
+
+        try {
+          result = ReflectConstruct(realTarget, argList, newTarget);
+        } catch (err) {
+          error = err;
+          throw err;
+        } finally {
+          FunctionPrototypeCall(mockTrackCall, ctx, {
+            __proto__: null,
+            arguments: argList,
+            error,
+            result,
+            stack: new Error(),
+            target,
+            this: result,
+          });
+        }
+
+        return result;
       },
-      tick: (ms) => mockTimers.tick(ms),
-      runAll: () => mockTimers.runAll(),
-      // `setTime` is MockTimers' own method, not Date.prototype.setTime.
-      // deno-lint-ignore deno-internal/prefer-primordials
-      setTime: (ms) => mockTimers.setTime(ms),
-      [SymbolDispose]: () => {
-        mockTimers.reset();
-        ownsTimers = false;
+      get(target, property, receiver) {
+        if (property === "mock") {
+          return ctx;
+        }
+        return ReflectGet(target, property, receiver);
       },
-    },
-    [kResetContextMock]() {
-      while (own.length > 0) {
-        const ctx = ArrayPrototypePop(own);
-        if (ArrayPrototypeIncludes(activeMocks, ctx)) ctx.restore?.();
-      }
-      if (ownsTimers) {
-        ownsTimers = false;
-        mockTimers.reset();
-      }
-    },
-  };
+    });
+
+    ArrayPrototypePush(this.#mocks, {
+      __proto__: null,
+      ctx,
+      restore: restoreMockFunction,
+    });
+    return mock;
+  }
 }
+
+const mock = new MockTracker();
+
+// `require("node:test").assert`: `register(name, fn)` adds or overrides a
+// `t.assert` method.
+const testAssert = { __proto__: null, register: registerAssertion };
 
 test.test = test;
 test.mock = mock;
+test.assert = testAssert;
 test.before = before;
 test.after = after;
 test.beforeEach = beforeEach;
@@ -3726,6 +3879,7 @@ return {
   beforeEach,
   afterEach,
   mock,
+  assert: testAssert,
   getTestContext,
   default: test,
 };

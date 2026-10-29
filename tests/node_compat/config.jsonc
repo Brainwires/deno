@@ -3387,6 +3387,7 @@
       "ignore": true,
       "reason": "Tests Node.js-specific CLI flags/options that are not supported in Deno"
     },
+    "parallel/test-runner-custom-assertions.js": {},
     // TODO(bartlomieju): disabled during work on `node:inspector`, this test didn't actualy run before
     // "parallel/test-runner-coverage-source-map.js": {},
     // TODO(bartlomieju): disabled during work on `node:inspector`, this test didn't actualy run before
@@ -3398,6 +3399,9 @@
     "parallel/test-runner-enqueue-file-syntax-error.js": {},
     "parallel/test-runner-filter-warning.js": {},
     "parallel/test-runner-mock-timers-with-timeout.js": {},
+    "parallel/test-runner-mock-timers-scheduler.js": {},
+    "parallel/test-runner-mock-timers.js": {},
+    "parallel/test-runner-mocking.js": {},
     "parallel/test-runner-root-after-with-refed-handles.js": {},
     "parallel/test-runner-snapshot-file-tests.js": {
       "ignore": true,

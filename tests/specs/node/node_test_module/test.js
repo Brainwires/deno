@@ -145,26 +145,38 @@ suite("suite", () => {
 });
 
 test("assertions available via text context", async (t) => {
-  assert.strictEqual(t.assert.deepEqual, assert.deepEqual);
-  assert.strictEqual(t.assert.deepStrictEqual, assert.deepStrictEqual);
-  assert.strictEqual(t.assert.doesNotMatch, assert.doesNotMatch);
-  assert.strictEqual(t.assert.doesNotReject, assert.doesNotReject);
-  assert.strictEqual(t.assert.doesNotThrow, assert.doesNotThrow);
-  assert.strictEqual(t.assert.equal, assert.equal);
-  assert.strictEqual(t.assert.fail, assert.fail);
-  assert.strictEqual(t.assert.ifError, assert.ifError);
-  assert.strictEqual(t.assert.match, assert.match);
-  assert.strictEqual(t.assert.notDeepEqual, assert.notDeepEqual);
-  assert.strictEqual(t.assert.notDeepStrictEqual, assert.notDeepStrictEqual);
-  assert.strictEqual(t.assert.notEqual, assert.notEqual);
-  assert.strictEqual(t.assert.notStrictEqual, assert.notStrictEqual);
-  assert.strictEqual(
-    t.assert.partialDeepStrictEqual,
-    assert.partialDeepStrictEqual,
-  );
-  assert.strictEqual(t.assert.rejects, assert.rejects);
-  assert.strictEqual(t.assert.strictEqual, assert.strictEqual);
-  assert.strictEqual(t.assert.throws, assert.throws);
+  // As in Node, each `t.assert` method wraps the `node:assert` one (it counts
+  // against `t.plan()` and runs with the context as `this`).
+  for (
+    const name of [
+      "deepEqual",
+      "deepStrictEqual",
+      "doesNotMatch",
+      "doesNotReject",
+      "doesNotThrow",
+      "equal",
+      "fail",
+      "ifError",
+      "match",
+      "notDeepEqual",
+      "notDeepStrictEqual",
+      "notEqual",
+      "notStrictEqual",
+      "partialDeepStrictEqual",
+      "rejects",
+      "strictEqual",
+      "throws",
+      "ok",
+      "fileSnapshot",
+    ]
+  ) {
+    assert.strictEqual(typeof t.assert[name], "function", name);
+  }
+  t.assert.strictEqual(1, 1);
+  t.assert.deepStrictEqual({ a: 1 }, { a: 1 });
+  t.assert.ok(true);
+  assert.throws(() => t.assert.strictEqual(1, 2), assert.AssertionError);
+  await t.assert.rejects(Promise.reject(new Error("boom")), /boom/);
 });
 
 test("unhandled rejection - passes but warns", () => {

@@ -13,6 +13,7 @@ export const {
   beforeEach,
   afterEach,
   mock,
+  assert,
   getTestContext,
 } = mod;
 

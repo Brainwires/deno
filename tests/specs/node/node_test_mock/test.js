@@ -114,29 +114,27 @@ test("mock.method() throws for non-function property", () => {
   const obj = { value: 42 };
   assert.throws(
     () => mock.method(obj, "value"),
-    { message: "Cannot mock property 'value' because it is not a function" },
+    {
+      code: "ERR_INVALID_ARG_VALUE",
+      message: "The argument 'methodName' must be a method. Received 42",
+    },
   );
 
   mock.restoreAll();
 });
 
-test("mock.reset() clears call history of all mocks", () => {
-  const fn1 = mock.fn();
-  const fn2 = mock.fn();
+test("mock.reset() restores mock.fn() implementations, keeping calls", () => {
+  // Node's MockTracker.reset() restores every mock and forgets it; the
+  // recorded calls stay (`fn.mock.resetCalls()` clears them).
+  const fn = mock.fn((a, b) => a + b, (a, b) => a - b);
 
-  fn1();
-  fn1();
-  fn2();
-
-  assert.strictEqual(fn1.mock.callCount(), 2);
-  assert.strictEqual(fn2.mock.callCount(), 1);
+  assert.strictEqual(fn(3, 4), -1);
+  assert.strictEqual(fn.mock.callCount(), 1);
 
   mock.reset();
 
-  assert.strictEqual(fn1.mock.callCount(), 0);
-  assert.strictEqual(fn2.mock.callCount(), 0);
-
-  mock.restoreAll();
+  assert.strictEqual(fn(3, 4), 7);
+  assert.strictEqual(fn.mock.callCount(), 2);
 });
 
 test("mock.reset() restores mock.method() implementations", () => {
