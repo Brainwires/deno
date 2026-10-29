@@ -36,6 +36,20 @@
       },
       "output": "trimmed.out"
     },
+    // A trim whose GC leaves the heap at DENO_IDLE_TRIM_MAX_GC_HEAP_MB or
+    // more makes the next trim skip the GC (malloc_trim only).
+    "large_heap_skips_gc": {
+      "if": "linux",
+      "args": "run --unstable-idle-trim large_heap.js",
+      "envs": {
+        "DENO_IDLE_TRIM_DELAY_MS": "200",
+        "DENO_IDLE_TRIM_MIN_INTERVAL_MS": "0",
+        "DENO_IDLE_TRIM_MIN_GROWTH_MB": "0",
+        "DENO_IDLE_TRIM_MAX_GC_HEAP_MB": "32",
+        "DENO_IDLE_TRIM_TRACE": "1"
+      },
+      "output": "large_heap.out"
+    },
     // Off by default: no trim runs (no trace line).
     "off_by_default": {
       "args": "run main.js quiet",

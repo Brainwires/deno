@@ -1380,36 +1380,128 @@ pub struct PendingBindCall {
   pub response: tokio::sync::oneshot::Sender<Result<DesktopValue, String>>,
 }
 
-type PendingBindResponsesMap =
-  HashMap<u32, tokio::sync::oneshot::Sender<Result<DesktopValue, String>>>;
+type BindResponseSender =
+  tokio::sync::oneshot::Sender<Result<DesktopValue, String>>;
 
-#[derive(Clone)]
-pub struct PendingBindResponses(
-  pub Arc<std::sync::Mutex<PendingBindResponsesMap>>,
-);
+/// The rejection a bind call gets once the page that made it is gone.
+pub const BIND_CALL_PAGE_GONE: &str =
+  "the page that called this binding has navigated away or closed";
+
+/// A bind call waiting for the app's answer.
+struct PendingBind {
+  response: BindResponseSender,
+  window_id: u32,
+  /// The window's completed page loads when the call arrived.
+  page_loads: u64,
+}
+
+#[derive(Default)]
+struct PendingBindState {
+  calls: HashMap<u32, PendingBind>,
+  /// Completed page loads per window ([`PendingBindResponses::page_loaded`]).
+  page_loads: HashMap<u32, u64>,
+}
+
+/// The bind calls (page to app) waiting for the app's answer, by call id.
+///
+/// A call leaves when the app answers it ([`Self::take`]), when nothing
+/// waits for the answer any more (pruned on the next register), or when the
+/// page that made it is gone ([`Self::page_loaded`], [`Self::window_gone`]):
+/// a handler that never settles must not keep its entry, and the page's
+/// promise, forever.
+#[derive(Clone, Default)]
+pub struct PendingBindResponses(Arc<std::sync::Mutex<PendingBindState>>);
 
 impl PendingBindResponses {
   pub fn new() -> Self {
     Self::default()
   }
+
+  /// Takes the sender of call `call_id`, if it is still waiting.
+  pub fn take(&self, call_id: u32) -> Option<BindResponseSender> {
+    self
+      .0
+      .lock()
+      .unwrap()
+      .calls
+      .remove(&call_id)
+      .map(|call| call.response)
+  }
+
+  /// How many calls are waiting.
+  pub fn len(&self) -> usize {
+    self.0.lock().unwrap().calls.len()
+  }
+
+  pub fn is_empty(&self) -> bool {
+    self.len() == 0
+  }
+
+  /// A page finished loading in `window_id`. Bind calls come only from a
+  /// window's top-level document, and nothing identifies the document a call
+  /// came from: a call that arrived after load `n` completed may be from the
+  /// page load `n + 1` shows, which can call before its own load completes.
+  /// Calls that arrived before load `n` completed are from documents the
+  /// window no longer shows once load `n + 1` has: they are rejected with
+  /// [`BIND_CALL_PAGE_GONE`].
+  pub fn page_loaded(&self, window_id: u32) {
+    let mut state = self.0.lock().unwrap();
+    let loads = state.page_loads.entry(window_id).or_insert(0);
+    *loads += 1;
+    let current = *loads;
+    reject_calls(&mut state.calls, |call| {
+      call.window_id == window_id && call.page_loads + 1 < current
+    });
+  }
+
+  /// `window_id` was destroyed: its calls are rejected with
+  /// [`BIND_CALL_PAGE_GONE`].
+  pub fn window_gone(&self, window_id: u32) {
+    let mut state = self.0.lock().unwrap();
+    state.page_loads.remove(&window_id);
+    reject_calls(&mut state.calls, |call| call.window_id == window_id);
+  }
 }
 
-impl Default for PendingBindResponses {
-  fn default() -> Self {
-    Self(Arc::new(std::sync::Mutex::new(HashMap::new())))
+fn reject_calls(
+  calls: &mut HashMap<u32, PendingBind>,
+  gone: impl Fn(&PendingBind) -> bool,
+) {
+  let ids: Vec<u32> = calls
+    .iter()
+    .filter(|(_, call)| gone(call))
+    .map(|(id, _)| *id)
+    .collect();
+  for id in ids {
+    if let Some(call) = calls.remove(&id) {
+      let _ = call.response.send(Err(BIND_CALL_PAGE_GONE.to_string()));
+    }
   }
 }
 
 static BIND_CALL_COUNTER: AtomicU32 = AtomicU32::new(1);
 
-/// Assign a call_id for a bind call and register its response sender.
-/// Returns the call_id to embed in the `DesktopEvent::BindCall`.
+/// Assign a call_id for a bind call from `window_id` and register its
+/// response sender. Returns the call_id to embed in the
+/// `DesktopEvent::BindCall`. Calls whose receiver is gone (nobody waits for
+/// their answer any more) are dropped first.
 pub fn register_bind_call(
   responses: &PendingBindResponses,
-  response: tokio::sync::oneshot::Sender<Result<DesktopValue, String>>,
+  window_id: u32,
+  response: BindResponseSender,
 ) -> u32 {
   let call_id = BIND_CALL_COUNTER.fetch_add(1, Ordering::Relaxed);
-  responses.0.lock().unwrap().insert(call_id, response);
+  let mut state = responses.0.lock().unwrap();
+  state.calls.retain(|_, call| !call.response.is_closed());
+  let page_loads = state.page_loads.get(&window_id).copied().unwrap_or(0);
+  state.calls.insert(
+    call_id,
+    PendingBind {
+      response,
+      window_id,
+      page_loads,
+    },
+  );
   call_id
 }
 
@@ -3868,7 +3960,7 @@ fn op_desktop_resolve_bind_call(
   // the call with it instead.
   reject_nul_in_value(&result)?;
   if let Some(responses) = state.try_borrow::<PendingBindResponses>()
-    && let Some(tx) = responses.0.lock().unwrap().remove(&call_id)
+    && let Some(tx) = responses.take(call_id)
   {
     let _ = tx.send(Ok(result));
   }
@@ -3882,7 +3974,7 @@ fn op_desktop_reject_bind_call(
   #[string] error: String,
 ) {
   if let Some(responses) = state.try_borrow::<PendingBindResponses>()
-    && let Some(tx) = responses.0.lock().unwrap().remove(&call_id)
+    && let Some(tx) = responses.take(call_id)
   {
     // The rejection must reach the page whatever the message holds.
     let _ = tx.send(Err(replace_nul(error)));
@@ -7856,13 +7948,13 @@ mod tests {
   // tiny op2 wrapper.
 
   fn resolve(responses: &PendingBindResponses, id: u32, v: DesktopValue) {
-    if let Some(tx) = responses.0.lock().unwrap().remove(&id) {
+    if let Some(tx) = responses.take(id) {
       let _ = tx.send(Ok(v));
     }
   }
 
   fn reject(responses: &PendingBindResponses, id: u32, e: String) {
-    if let Some(tx) = responses.0.lock().unwrap().remove(&id) {
+    if let Some(tx) = responses.take(id) {
       let _ = tx.send(Err(e));
     }
   }
@@ -7871,7 +7963,7 @@ mod tests {
   async fn bind_call_resolve_round_trips_value() {
     let responses = PendingBindResponses::new();
     let (tx, rx) = tokio::sync::oneshot::channel();
-    let id = register_bind_call(&responses, tx);
+    let id = register_bind_call(&responses, 1, tx);
     // The runtime resolves with a DesktopValue.
     resolve(
       &responses,
@@ -7891,7 +7983,7 @@ mod tests {
     );
     // After resolve, the map entry is gone.
     assert!(
-      responses.0.lock().unwrap().is_empty(),
+      responses.is_empty(),
       "responses map must be drained after resolve"
     );
   }
@@ -7900,11 +7992,11 @@ mod tests {
   async fn bind_call_reject_delivers_error_string() {
     let responses = PendingBindResponses::new();
     let (tx, rx) = tokio::sync::oneshot::channel();
-    let id = register_bind_call(&responses, tx);
+    let id = register_bind_call(&responses, 1, tx);
     reject(&responses, id, "binding threw".to_string());
     let e = rx.await.unwrap().expect_err("must be Err");
     assert_eq!(e, "binding threw");
-    assert!(responses.0.lock().unwrap().is_empty());
+    assert!(responses.is_empty());
   }
 
   #[test]
@@ -7914,10 +8006,14 @@ mod tests {
     // would silently route a renderer response to the wrong pending
     // call.
     let responses = PendingBindResponses::new();
+    // The receivers are kept: a call nobody waits for is dropped on the next
+    // register.
+    let mut receivers = Vec::new();
     let ids: Vec<u32> = (0..50)
       .map(|_| {
-        let (tx, _rx) = tokio::sync::oneshot::channel();
-        register_bind_call(&responses, tx)
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        receivers.push(rx);
+        register_bind_call(&responses, 1, tx)
       })
       .collect();
     let mut seen: std::collections::HashSet<u32> =
@@ -7926,7 +8022,7 @@ mod tests {
       assert!(seen.insert(*id), "duplicate bind call id: {id}");
     }
     // All 50 are registered in the map.
-    assert_eq!(responses.0.lock().unwrap().len(), 50);
+    assert_eq!(responses.len(), 50);
   }
 
   #[test]
@@ -7936,7 +8032,7 @@ mod tests {
     // and must not affect any state.
     resolve(&responses, 999_999, DesktopValue::Null);
     reject(&responses, 999_999, "x".to_string());
-    assert!(responses.0.lock().unwrap().is_empty());
+    assert!(responses.is_empty());
   }
 
   #[tokio::test]
@@ -7949,10 +8045,87 @@ mod tests {
     let responses = PendingBindResponses::new();
     let (tx, rx) =
       tokio::sync::oneshot::channel::<Result<DesktopValue, String>>();
-    let id = register_bind_call(&responses, tx);
+    let id = register_bind_call(&responses, 1, tx);
     drop(rx);
     resolve(&responses, id, DesktopValue::Null);
     // If we reach this line without panicking, the test passes.
+  }
+
+  #[test]
+  fn bind_call_register_drops_calls_nobody_waits_for() {
+    // A call whose waiter is gone (its future dropped) can never be
+    // answered: the next register drops it instead of keeping it forever.
+    let responses = PendingBindResponses::new();
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let abandoned = register_bind_call(&responses, 1, tx);
+    drop(rx);
+    let (tx, _waiting) = tokio::sync::oneshot::channel();
+    let live = register_bind_call(&responses, 1, tx);
+    assert_eq!(responses.len(), 1);
+    assert!(responses.take(abandoned).is_none());
+    assert!(responses.take(live).is_some());
+  }
+
+  #[test]
+  fn bind_calls_of_a_page_that_navigated_away_are_rejected() {
+    let responses = PendingBindResponses::new();
+    // Window 1 loads page A, which calls a binding whose handler never
+    // settles.
+    responses.page_loaded(1);
+    let (tx, mut from_a) = tokio::sync::oneshot::channel();
+    register_bind_call(&responses, 1, tx);
+    // A navigates to B. B calls before its own load completes: that call
+    // can't be told from A's yet, so neither is rejected when B's load
+    // completes.
+    let (tx, mut from_b_early) = tokio::sync::oneshot::channel();
+    register_bind_call(&responses, 1, tx);
+    responses.page_loaded(1);
+    assert!(from_a.try_recv().is_err(), "rejected too early");
+    assert!(from_b_early.try_recv().is_err(), "rejected too early");
+    let (tx, mut from_b) = tokio::sync::oneshot::channel();
+    register_bind_call(&responses, 1, tx);
+    // Another window's call is untouched throughout.
+    let (tx, mut other_window) = tokio::sync::oneshot::channel();
+    register_bind_call(&responses, 2, tx);
+    assert_eq!(responses.len(), 4);
+    // B navigates to C: A's call and B's early one are from pages the window
+    // no longer shows. Each is rejected (its waiter answers the page) and
+    // its entry dropped. B's later call is kept until the load after C's
+    // (it can't be told from one C made while loading).
+    responses.page_loaded(1);
+    for rx in [&mut from_a, &mut from_b_early] {
+      assert_eq!(
+        rx.try_recv().unwrap(),
+        Err(super::BIND_CALL_PAGE_GONE.to_string())
+      );
+    }
+    assert!(from_b.try_recv().is_err());
+    assert!(other_window.try_recv().is_err());
+    assert_eq!(responses.len(), 2);
+    responses.page_loaded(1);
+    assert_eq!(
+      from_b.try_recv().unwrap(),
+      Err(super::BIND_CALL_PAGE_GONE.to_string())
+    );
+    assert!(other_window.try_recv().is_err());
+    assert_eq!(responses.len(), 1);
+  }
+
+  #[test]
+  fn bind_calls_of_a_destroyed_window_are_rejected() {
+    let responses = PendingBindResponses::new();
+    responses.page_loaded(7);
+    let (tx, mut rx) = tokio::sync::oneshot::channel();
+    register_bind_call(&responses, 7, tx);
+    let (tx, mut other) = tokio::sync::oneshot::channel();
+    register_bind_call(&responses, 8, tx);
+    responses.window_gone(7);
+    assert_eq!(
+      rx.try_recv().unwrap(),
+      Err(super::BIND_CALL_PAGE_GONE.to_string())
+    );
+    assert!(other.try_recv().is_err());
+    assert_eq!(responses.len(), 1);
   }
 
   #[test]

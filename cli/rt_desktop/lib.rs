@@ -482,6 +482,8 @@ struct CloseBook {
   quit_on_last_window_closed: Arc<AtomicBool>,
   /// Tells DESKTOP_JS the window is gone (`WindowClosed`).
   event_tx: deno_runtime::ops::desktop::DesktopEventTx,
+  /// A destroyed window's pending bind calls are rejected.
+  pending_responses: deno_runtime::ops::desktop::PendingBindResponses,
 }
 
 impl CloseBook {
@@ -505,7 +507,10 @@ impl CloseBook {
       self.quit_on_last_window_closed.load(Ordering::Acquire),
       others_open,
     ) {
-      NativeClose::Destroy => laufey::Window::from_id(window_id).close(),
+      NativeClose::Destroy => {
+        laufey::Window::from_id(window_id).close();
+        self.pending_responses.window_gone(window_id);
+      }
       NativeClose::HideAndKeep { quit } => {
         log::warn!(
           "[desktop] window {window_id}: a WebGPU surface is attached; \
@@ -539,6 +544,7 @@ impl WefDesktopApi {
       surface_windows: self.surface_windows.clone(),
       quit_on_last_window_closed: self.quit_on_last_window_closed.clone(),
       event_tx: self.event_tx.clone(),
+      pending_responses: self.pending_responses.clone(),
     }
   }
 
@@ -556,6 +562,7 @@ impl WefDesktopApi {
     let resize_tx = self.event_tx.clone();
     let move_tx = self.event_tx.clone();
     let page_load_tx = self.event_tx.clone();
+    let page_load_responses = self.pending_responses.clone();
     let close_tx = self.event_tx.clone();
     let state_tx = self.event_tx.clone();
     let close_book = self.close_book();
@@ -701,6 +708,9 @@ impl WefDesktopApi {
         {
           laufey::Window::from_id(ev.window_id).show();
         }
+        // Bind calls from the documents this load replaced can't be answered
+        // any more: reject them rather than keep them forever.
+        page_load_responses.page_loaded(ev.window_id);
         let _ = page_load_tx.try_send(
           deno_runtime::ops::desktop::DesktopEvent::PageLoad {
             window_id: ev.window_id,
@@ -1044,8 +1054,9 @@ impl denort::desktop::DesktopApi for WefDesktopApi {
             }
           };
           let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
-          let call_id =
-            deno_runtime::ops::desktop::register_bind_call(&responses, resp_tx);
+          let call_id = deno_runtime::ops::desktop::register_bind_call(
+            &responses, window_id, resp_tx,
+          );
           let event = deno_runtime::ops::desktop::DesktopEvent::BindCall {
             // Attribute the call to the window the binding was registered on,
             // not to `js_call.window_id`. The backend's per-call renderer id
@@ -1070,7 +1081,7 @@ impl denort::desktop::DesktopApi for WefDesktopApi {
               }
             };
             // Nobody will answer this call: don't keep its slot.
-            responses.0.lock().unwrap().remove(&call_id);
+            responses.take(call_id);
             js_call.reject(laufey::Value::String(msg));
             return;
           }
