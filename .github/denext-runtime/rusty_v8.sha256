@@ -1,0 +1,11 @@
+# The prebuilt V8 for the `v8` crate (Cargo.toml's [patch.crates-io]), read by
+# fetch_rusty_v8.py (DENEXT.md item 162). One `<sha256>  <file>` line per
+# release asset: the static library archive and the bindgen output for each of
+# the six release targets. The lines are the release's own SHA256SUMS, checked
+# again with `gh attestation verify <file> -R Brainwires/rusty_v8`; a V8 bump
+# changes the tag and every line in the same commit as Cargo.toml's rev.
+#
+# PENDING: the hashes are added from SHA256SUMS once release v152.2.1-denext.1
+# is published. Until then the fetch fails closed (no entry for the target).
+# repo: Brainwires/rusty_v8
+# tag: v152.2.1-denext.1

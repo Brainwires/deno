@@ -71,6 +71,17 @@ runs:
         rustup toolchain install "$tc" --profile minimal --component rustfmt,clippy --no-self-update
         echo "RUSTUP_TOOLCHAIN=$tc" >>"$GITHUB_ENV"
 
+    # The `v8` crate is Brainwires/rusty_v8 (Cargo.toml's [patch.crates-io]):
+    # its prebuilt library and binding come from that repository's release,
+    # checked against .github/denext-runtime/rusty_v8.sha256, never from
+    # denoland's (DENEXT.md item 162). Fails closed.
+    - name: Prebuilt V8
+      shell: bash
+      run: |
+        set -euo pipefail
+        target=$(rustc -vV | sed -n 's/^host: //p')
+        python3 -I .github/denext-runtime/fetch_rusty_v8.py --target "$target" --dest "$RUNNER_TEMP/rusty_v8" --github-env
+
     - uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
       with:
         deno-version: ${{ env.TOOLS_DENO_VERSION }}

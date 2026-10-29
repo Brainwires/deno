@@ -669,6 +669,16 @@ opt-level = 3
 # cursors) keeps its `RowDescription` inside the stream, so a result with no
 # rows had no way to name its columns (Deno.SQL's `result.columns`;
 # DENEXT.md). Drop this once tokio-postgres exposes the stream's columns.
+#
+# v8 152.2.1+denext.1: Brainwires/rusty_v8, upstream's 152.2.0 on V8
+# 15.2.124.45 (the 15.2 security merges, CVE-2026-85046 and CVE-2026-87491
+# among them; DENEXT.md item 162). The rev is a commit of that repository's
+# `crate` branch, which holds only the `cargo package` output, so Cargo never
+# clones the V8 submodules. Its build script takes the prebuilt library and
+# binding from RUSTY_V8_ARCHIVE / RUSTY_V8_SRC_BINDING_PATH, which
+# .github/denext-runtime/fetch_rusty_v8.py fetches from the matching release
+# and checks against rusty_v8.sha256.
 [patch.crates-io]
 dprint-core = { path = "libs/vendor/dprint-core" }
 tokio-postgres = { path = "libs/vendor/tokio-postgres" }
+v8 = { git = "https://github.com/Brainwires/rusty_v8", rev = "fa293f06d735ca8bbaf4a52aa98cf94d33ee1c75" }

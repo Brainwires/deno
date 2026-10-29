@@ -6064,9 +6064,65 @@ where the changes are discussed.
      `test_cli_records_the_glibc_ceiling` and
      `test_a_malformed_glibc_ceiling_is_refused`.
 
+<!-- Items 152-161 are on the other denext3 branches; renumber at integration. -->
+
+162. **`chore(deps)`: V8 15.2.124.45 from Brainwires/rusty_v8** (`v8` crate
+     `152.2.1+denext.1`; `chore/v8-15.2.124.45-denext3`; runtime and CI;
+     `Cargo.toml`, `.github/denext-runtime/fetch_rusty_v8.py`,
+     `.github/denext-runtime/rusty_v8.sha256`). Item 150's `v8` 152.2.0 carries
+     V8 15.2.124.1, but Google kept merging security fixes onto V8's 15.2 branch
+     for Chrome 152 and Extended Stable 152 up to 15.2.124.45 (2026-10-14),
+     among them the fixes for two V8 bugs exploited in the wild: CVE-2026-85046
+     (a type confusion, fixed in 15.2.124.21) and CVE-2026-87491 (an
+     out-of-bounds write, crbug 543557673). Upstream rusty_v8 has released
+     nothing since 152.2.0 (its V8 autoroll fails every day), so the fork builds
+     its own: Brainwires/rusty_v8's branch `denext/v152.2.0-v8.15.2.124.45` is
+     upstream's `v152.2.0` with the `v8` submodule moved to denoland/v8
+     `7d033dd9d2` (`15.2-lkgr-denoland`: 15.2.124.45 plus denoland's embedder
+     patches). V8's `DEPS` pins and public headers are unchanged between the two
+     (only `v8-version.h` moves), so no other submodule and no binding changes.
+     The version is a patch above upstream with build metadata, so it satisfies
+     `libs/deno_v8`'s `152.2.0` requirement through `[patch.crates-io]`; a
+     pre-release (`152.2.0-denext.1`) would sort below `152.2.0` and not match.
+
+     The crate comes by git rev from that repository's `crate` branch, which
+     holds only the `cargo package` output, so Cargo never clones V8's
+     submodules. The prebuilt library and bindgen output come from release
+     `v152.2.1-denext.1` (rusty_v8's `release-denext.yml`, dispatch only: built
+     from source on GitHub-hosted runners for the six release targets,
+     rusty_v8's tests run, `SHA256SUMS` and build-provenance attestations).
+     `fetch_rusty_v8.py`, run by `denext_runtime.yml`'s `denort` and `cli` jobs
+     and by the test setup action before any cargo build, downloads both files
+     for the target, checks each against `rusty_v8.sha256`, and exports
+     `RUSTY_V8_ARCHIVE`, `RUSTY_V8_ARCHIVE_SHA256` (the build script checks the
+     archive again) and `RUSTY_V8_SRC_BINDING_PATH`. It fails closed: an
+     unlisted target, a failed download, a changed file, a manifest tag that
+     does not match Cargo.lock's `v8` version, or a `RUSTY_V8_MIRROR` in the
+     environment stops the job, and nothing is ever taken from denoland's
+     releases (their 152.2.1+denext.1 does not exist, so the build script's own
+     default fails too). Locally,
+     `fetch_rusty_v8.py --from <dir>
+     --print-env` verifies files already on
+     disk the same way.
+
+     Verified on biscuits (Linux x86_64): rusty_v8 from source with
+     `V8_FROM_SOURCE=1` in 34 min (`librusty_v8.a` 198 MB), its own
+     `cargo test --release` 369 passed, 0 failed, and `v8::V8::get_version()` is
+     `15.2.124.45-rusty`; this fork's dev build against that library, verified
+     through `fetch_rusty_v8.py --from`, reports `v8 15.2.124.45-rusty` in
+     `deno --version` and `Deno.version.v8`, runs `deno eval` with WebAssembly,
+     and passes `cargo test --lib -p deno_core` (495 passed),
+     `-p serde_v8 -p deno_v8`, and the `version`, `wasm`, `structured_clone` and
+     `text_encoding` unit tests (38 of 39; the 39th fetches from the test
+     server, which was not running). Tests: `fetch_rusty_v8_test.py` (the
+     manifest format, the tag check, hash mismatches, unlisted targets, a mirror
+     in the environment, local files, and that the checked-in manifest pins all
+     twelve files for Cargo.lock's release), run by `denext_tests.yml`'s lint
+     job.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
-118, 119, 126, 127, 129, 136, 137, 144-148, 150) are what the prebuilt
+118, 119, 126, 127, 129, 136, 137, 144-148, 150, 162) are what the prebuilt
 `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
 in the branch too, but a stock CLI does not run them; denext's own launcher
