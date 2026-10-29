@@ -90,8 +90,8 @@ level 0a ... ok ([WILDLINE])
 top level ...
   +long running ... INCOMPLETE
   +short running ...
-    ++short running ... INCOMPLETE
-  +short running ... INCOMPLETE
+    ++short running ... ok ([WILDLINE])
+  +short running ... ok ([WILDLINE])
 top level ... FAILED (due to incomplete steps) ([WILDLINE])
 invalid subtest - pass but subtest fails ... ok ([WILDLINE])
 sync skip option ... ignored ([WILDLINE])
@@ -139,19 +139,19 @@ rejected thenable ... FAILED ([WILDLINE])
 unfinished test with uncaughtException ... FAILED ([WILDLINE])
 unfinished test with unhandledRejection ... FAILED ([WILDLINE])
 [WILDCARD] ERRORS [WILDCARD]
-rejected thenable => ./test.js:455:1
+rejected thenable => ./test.js:469:1
 error: "custom error"
 
-unfinished test with uncaughtException => ./test.js:466:1
+unfinished test with uncaughtException => ./test.js:480:1
 error: Promise resolution is still pending but the event loop has already resolved.
 
-unfinished test with unhandledRejection => ./test.js:474:1
+unfinished test with unhandledRejection => ./test.js:488:1
 error: Error: bar
 [WILDCARD] FAILURES [WILDCARD]
-rejected thenable => ./test.js:455:1
-unfinished test with uncaughtException => ./test.js:466:1
-unfinished test with unhandledRejection => ./test.js:474:1
+rejected thenable => ./test.js:469:1
+unfinished test with uncaughtException => ./test.js:480:1
+unfinished test with unhandledRejection => ./test.js:488:1
 
-FAILED | 41 passed (27 steps) | 21 failed (11 steps) | 7 ignored ([WILDLINE])
+FAILED | 41 passed (29 steps) | 21 failed (9 steps) | 7 ignored ([WILDLINE])
 
 error: Test failed

@@ -18,6 +18,7 @@ const {
   ObjectPrototypeIsPrototypeOf,
   ReflectDefineProperty,
   ReflectHas,
+  StringPrototypeSplit,
   TypeError,
   TypeErrorPrototype,
 } = primordials;
@@ -36,6 +37,22 @@ const {
 
 const loadProcess = createLazyLoader<NodeJS.Process>("node:process");
 let nodeProcess: NodeJS.Process | undefined;
+let envDeprecationWarned = false;
+
+// `--pending-deprecation` on the command line or in `NODE_OPTIONS`.
+function isPendingDeprecation() {
+  nodeProcess ??= loadProcess();
+  if (
+    ArrayPrototypeIncludes(nodeProcess.execArgv ?? [], "--pending-deprecation")
+  ) {
+    return true;
+  }
+  const nodeOptions = denoEnvGet("NODE_OPTIONS") ?? "";
+  return ArrayPrototypeIncludes(
+    StringPrototypeSplit(nodeOptions, " "),
+    "--pending-deprecation",
+  );
+}
 
 /** Returns the operating system CPU architecture for which the Deno binary was compiled */
 function arch(): string {
@@ -161,7 +178,15 @@ const env:
         throw new TypeError("Cannot convert a Symbol value to a string");
       }
 
-      if (typeof value !== "string") {
+      // Node's `EnvSetter` (src/node_env_var.cc): only under
+      // `--pending-deprecation`, only for a value that is not a string,
+      // number or boolean, and only once.
+      if (
+        !envDeprecationWarned &&
+        typeof value !== "string" && typeof value !== "number" &&
+        typeof value !== "boolean" && isPendingDeprecation()
+      ) {
+        envDeprecationWarned = true;
         nodeProcess ??= loadProcess();
         nodeProcess.emitWarning(
           "Assigning any value other than a string, number, or boolean to a " +

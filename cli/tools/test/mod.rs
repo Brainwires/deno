@@ -1422,6 +1422,23 @@ enum AttemptInvocation {
 /// Runs the wrapped test function once, applying the timeout/watchdog handling.
 /// This is the unit that `retry`/`repeats` re-invoke.
 #[allow(clippy::too_many_arguments, reason = "internal helper")]
+/// How many times one test may be polled again after `node:test` gave up a
+/// wait on an idle event loop (each run ends at least one wait).
+const MAX_EVENT_LOOP_IDLE_HOOK_RUNS: usize = 1024;
+
+/// Calls `node:test`'s event-loop-idle hook, if it is loaded. Returns whether
+/// it gave up a wait, so the pending test can make progress.
+fn run_event_loop_idle_hook(worker: &mut MainWorker) -> bool {
+  let Ok(value) = worker.js_runtime.execute_script(
+    located_script_name!(),
+    "Deno[Deno.internal].nodeTestOnEventLoopIdle?.() === true",
+  ) else {
+    return false;
+  };
+  deno_core::scope!(scope, &mut worker.js_runtime);
+  v8::Local::new(scope, value).is_true()
+}
+
 async fn invoke_test_function(
   worker: &mut MainWorker,
   function: &v8::Global<v8::Function>,
@@ -1435,14 +1452,36 @@ async fn invoke_test_function(
     watchdog.arm(ms);
   }
 
-  let call = worker.js_runtime.call(function);
+  let mut call = worker.js_runtime.call(function);
 
   let slow_test_warning =
     spawn(slow_test_watchdog(event_tracker.clone(), test_id));
 
-  let test_fut = worker
-    .js_runtime
-    .with_event_loop_promise(call, PollEventLoopOptions::default());
+  // denext: when the test's promise is pending but the event loop has nothing
+  // left to run, `node:test` may give up waiting for subtests held only by
+  // unref'd work (Node cancels those on 'beforeExit'); the test is then polled
+  // again.
+  let test_fut = async {
+    let mut idle_hook_runs = 0;
+    loop {
+      let result = worker
+        .js_runtime
+        .with_event_loop_promise(&mut call, PollEventLoopOptions::default())
+        .await;
+      match result {
+        Err(err)
+          if matches!(
+            err.as_kind(),
+            CoreErrorKind::PendingPromiseResolution
+          ) && idle_hook_runs < MAX_EVENT_LOOP_IDLE_HOOK_RUNS
+            && run_event_loop_idle_hook(worker) =>
+        {
+          idle_hook_runs += 1;
+        }
+        result => break result,
+      }
+    }
+  };
 
   let raced = match timeout_ms {
     Some(ms) => {

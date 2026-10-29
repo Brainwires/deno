@@ -34,6 +34,7 @@ const {
   randomFillSync,
   randomInt,
   randomUUID,
+  randomUUIDv7,
 } = core.loadExtScript("ext:deno_node/internal/crypto/random.ts");
 const { pbkdf2, pbkdf2Sync } = core.loadExtScript(
   "ext:deno_node/internal/crypto/pbkdf2.ts",
@@ -437,6 +438,7 @@ const defaultExport = {
   randomFillSync,
   randomInt,
   randomUUID,
+  randomUUIDv7,
   scrypt,
   scryptSync,
   secureHeapUsed,
@@ -546,6 +548,7 @@ return {
   randomFillSync,
   randomInt,
   randomUUID,
+  randomUUIDv7,
   scrypt,
   scryptSync,
   secureHeapUsed,

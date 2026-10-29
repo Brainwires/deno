@@ -39,6 +39,11 @@ Deno.test("[node/assert] CallTracker correctly exported", () => {
   assert.strictEqual(typeof assert.CallTracker, "function");
   assert.strictEqual(typeof assert.default.CallTracker, "function");
   assert.strictEqual(assert.CallTracker, assert.default.CallTracker);
+  assert.strictEqual(assert.default.strict.CallTracker, assert.CallTracker);
+  // Node 25 removed it (DEP0173): it isn't among the module's keys, which
+  // `node:test`'s `t.assert` mirrors.
+  assert.ok(!Object.keys(assert.default).includes("CallTracker"));
+  assert.ok(!Object.keys(assert.default.strict).includes("CallTracker"));
 });
 
 Deno.test("[node/assert] error message from strictEqual should be the same as AssertionError message", () => {

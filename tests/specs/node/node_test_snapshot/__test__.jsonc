@@ -1,0 +1,7 @@
+{
+  // `t.assert.snapshot()`: snapshots in `<test file>.snapshot`, keyed by the
+  // test's full name and a counter, compared with the stored ones.
+  "tempDir": true,
+  "args": "test -A test.js",
+  "output": "test.out"
+}

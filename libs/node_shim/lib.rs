@@ -3777,6 +3777,13 @@ pub fn translate_to_deno_args(
   for pattern in &env_opts.test_skip_pattern {
     node_options.push(format!("--test-skip-pattern={}", pattern));
   }
+  // denext: `--test-only` and `--test-force-exit` ride along the same way.
+  if env_opts.test_only {
+    node_options.push("--test-only".to_string());
+  }
+  if env_opts.test_runner_force_exit {
+    node_options.push("--test-force-exit".to_string());
+  }
 
   // Add the script and remaining args
   append_remaining_args(
@@ -5731,6 +5738,23 @@ mod tests {
     let options = TranslateOptions::for_child_process();
     let result = translate_to_deno_args(parsed_args, &options);
     assert!(result.node_options.is_empty());
+  }
+
+  #[test]
+  fn test_only_and_force_exit_ride_along_in_node_options() {
+    let parsed_args = parse_args(svec![
+      "--test-only",
+      "--test-force-exit",
+      "--test-reporter=spec",
+      "main.js"
+    ])
+    .unwrap();
+    let options = TranslateOptions::for_child_process();
+    let result = translate_to_deno_args(parsed_args, &options);
+    assert_eq!(
+      result.node_options,
+      svec!["--test-reporter=spec", "--test-only", "--test-force-exit"]
+    );
   }
 
   #[test]

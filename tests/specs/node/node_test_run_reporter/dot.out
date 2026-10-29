@@ -1,0 +1,9 @@
+beforeEach passes
+beforeEach fails
+...X.
+
+Failed tests:
+
+✖ fails ([WILDLINE]ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+[WILDCARD]

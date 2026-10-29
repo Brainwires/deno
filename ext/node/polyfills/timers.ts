@@ -81,6 +81,18 @@ function setTimeoutPromise<T = void>(
   value: T,
   options: TimerOptions = kEmptyObject,
 ): Promise<T> {
+  return timeoutPromise(after, value, options, "setTimeout");
+}
+
+// `timers/promises.setTimeout` and `scheduler.wait`. `api` names the
+// `mock.timers` API that, when enabled, drives this promise on the virtual
+// clock: Node mocks `scheduler.wait` separately from `setTimeout`.
+function timeoutPromise<T = void>(
+  after: number | undefined,
+  value: T,
+  options: TimerOptions = kEmptyObject,
+  api: string,
+): Promise<T> {
   try {
     if (typeof after !== "undefined") {
       validateNumber(after, "delay");
@@ -109,14 +121,17 @@ function setTimeoutPromise<T = void>(
   const { promise, resolve, reject } = PromiseWithResolvers();
   // When mocking is active the timer is driven by the virtual clock, so the
   // promise resolves on `tick()`/`runAll()` instead of a real timer.
-  const timeout = mockTimers !== null && mockTimers._apiEnabled("setTimeout")
-    ? mockTimers._setTimeout(resolve, after, [value], false)
+  const mock = mockTimers !== null && mockTimers._apiEnabled(api)
+    ? mockTimers
+    : null;
+  const timeout = mock !== null
+    ? mock._setTimeout(resolve, after, [value], false)
     : new Timeout(resolve, after, [value], false, ref);
   if (signal) {
     oncancel = FunctionPrototypeBind(
       cancelListenerHandler,
       timeout,
-      clearTimeout,
+      mock !== null ? (t) => mock._clearTimer(t) : clearTimeout,
       reject,
       signal,
     );
@@ -377,7 +392,7 @@ class Scheduler {
     options?: { signal?: AbortSignal },
   ): Promise<void> {
     validateScheduler(this);
-    return setTimeoutPromise(delay, undefined, options);
+    return timeoutPromise(delay, undefined, options, "scheduler.wait");
   }
   yield() {
     validateScheduler(this);

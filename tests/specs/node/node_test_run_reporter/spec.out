@@ -1,0 +1,23 @@
+beforeEach passes
+beforeEach fails
+▶ suite
+  ✔ passes ([WILDLINE]ms)
+  ﹣ is skipped ([WILDLINE]ms) # SKIP
+✔ suite ([WILDLINE]ms)
+✖ fails ([WILDLINE]ms)
+✔ is todo ([WILDLINE]ms) # TODO
+ℹ tests 4
+ℹ suites 1
+ℹ pass 1
+ℹ fail 1
+ℹ cancelled 0
+ℹ skipped 1
+ℹ todo 1
+ℹ duration_ms [WILDLINE]
+
+✖ failing tests:
+
+test at main.cjs:11:1
+✖ fails ([WILDLINE]ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+[WILDCARD]

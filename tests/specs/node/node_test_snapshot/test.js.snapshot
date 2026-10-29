@@ -1,0 +1,28 @@
+exports[`a mismatch is an AssertionError 1`] = `
+{
+  "changed": false
+}
+`;
+
+exports[`custom serializers 1`] = `
+doubled: 10
+`;
+
+exports[`matches the stored snapshots, counted per test 1`] = `
+{
+  "value1": 1,
+  "value2": 2
+}
+`;
+
+exports[`matches the stored snapshots, counted per test 2`] = `
+"a \`template\` with \${dollar} and \\\\ backslash"
+`;
+
+exports[`suite > keys include the suite 1`] = `
+[
+  1,
+  2,
+  3
+]
+`;

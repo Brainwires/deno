@@ -56,6 +56,7 @@ export const {
   randomFillSync,
   randomInt,
   randomUUID,
+  randomUUIDv7,
   scrypt,
   scryptSync,
   secureHeapUsed,

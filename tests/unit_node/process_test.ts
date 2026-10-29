@@ -504,6 +504,35 @@ Deno.test({
 });
 
 Deno.test({
+  name: "process.env takes a number or boolean without DEP0104",
+  async fn() {
+    const codes: (string | undefined)[] = [];
+    const onWarning = (warning: Error & { code?: string }) =>
+      codes.push(warning.code);
+    process.on("warning", onWarning);
+    try {
+      // As Node: only `--pending-deprecation` warns, and never for a number
+      // or boolean.
+      // deno-lint-ignore no-explicit-any
+      (process.env as any).DENO_NODE_ENV_NUMBER = 1;
+      // deno-lint-ignore no-explicit-any
+      (process.env as any).DENO_NODE_ENV_BOOLEAN = true;
+      // deno-lint-ignore no-explicit-any
+      (process.env as any).DENO_NODE_ENV_OBJECT = {};
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      assertEquals(process.env.DENO_NODE_ENV_NUMBER, "1");
+      assertEquals(process.env.DENO_NODE_ENV_BOOLEAN, "true");
+      assertEquals(codes, []);
+    } finally {
+      process.off("warning", onWarning);
+      delete process.env.DENO_NODE_ENV_NUMBER;
+      delete process.env.DENO_NODE_ENV_BOOLEAN;
+      delete process.env.DENO_NODE_ENV_OBJECT;
+    }
+  },
+});
+
+Deno.test({
   name: "process.env",
   fn() {
     assert(Object.prototype.hasOwnProperty.call(process, "env"));
