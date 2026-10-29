@@ -13,4 +13,11 @@ ignore = [
   # unreachable: WebCrypto RSA-OAEP and node:crypto privateDecrypt use it.
   # Revisit when rsa 0.10 is released.
   "RUSTSEC-2023-0071",
+  # libz-sys <= 1.1.30: the build script prints the build's environment into
+  # target/, but only when built with cc 1.6.0 or later (RustSec lists pinning
+  # cc below 1.6.0 as a workaround); Cargo.lock has cc 1.2.56. The fixed
+  # 1.1.31 fails to link Windows debug test binaries (zlib-ng's SIMD objects
+  # import `_wassert` from the DLL CRT), so the fork stays on 1.1.20. Remove
+  # this entry when cc reaches 1.6 or libz-sys links on Windows.
+  "RUSTSEC-2026-0418",
 ]

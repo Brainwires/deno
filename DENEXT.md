@@ -1224,9 +1224,13 @@ where the changes are discussed.
     exists, an accepted risk for RSA PKCS#1 v1.5 decryption in WebCrypto and
     `node:crypto`). hickory-proto RUSTSEC-2026-0118 (DNSSEC validation, not
     compiled) and -0119 were ignored here until item 71 moved the tree to
-    hickory 0.26, which neither advisory affects. Two bumps change an API the
-    tree uses: zip 9's `enclosed_name` drops a leading root or drive prefix
-    instead of refusing the name, so the laufey archive extractor
+    hickory 0.26, which neither advisory affects. libz-sys RUSTSEC-2026-0418
+    (3.0.0-denext.3; the build script prints the build environment into
+    `target/`, only with cc 1.6.0 or later, and the lock has cc 1.2.56) is
+    listed too: the fixed 1.1.31 fails to link the Windows debug test binaries
+    (unresolved `__imp__wassert` from zlib-ng's SIMD objects). Two bumps change
+    an API the tree uses: zip 9's `enclosed_name` drops a leading root or drive
+    prefix instead of refusing the name, so the laufey archive extractor
     (`cli/tools/desktop.rs`) refuses an absolute entry name itself first
     (`extract_zip_rejects_absolute_path`); and aws-lc-rs 1.18 stabilized ML-DSA,
     so `ext/crypto/mldsa.rs` uses `aws_lc_rs::signature::*` and `to_pkcs8v1`
