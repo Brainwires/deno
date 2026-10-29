@@ -202,6 +202,10 @@ impl GcGate {
   /// skipped only while the heap is over the limit both as the last GC left
   /// it (live data, not a burst's garbage) and now (it hasn't shrunk below
   /// the limit since); the first trim always runs it.
+  #[cfg_attr(
+    not(all(target_os = "linux", target_env = "gnu")),
+    allow(dead_code, reason = "only trim_now on glibc Linux runs the GC")
+  )]
   pub(crate) fn should_gc(&self, heap_used_now: u64) -> bool {
     match (self.max_heap, self.heap_after_last_gc) {
       (Some(max), Some(after_gc)) => after_gc < max || heap_used_now < max,
@@ -210,6 +214,10 @@ impl GcGate {
   }
 
   /// Records the heap's used size right after a trim's GC.
+  #[cfg_attr(
+    not(all(target_os = "linux", target_env = "gnu")),
+    allow(dead_code, reason = "only trim_now on glibc Linux runs the GC")
+  )]
   pub(crate) fn record_gc(&mut self, heap_used_after: u64) {
     self.heap_after_last_gc = Some(heap_used_after);
   }
