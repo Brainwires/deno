@@ -1,0 +1,39 @@
+{
+  // The hoisted layout keeps an installed package as it is, unless its patch
+  // was added, changed or removed since it was installed.
+  "tempDir": true,
+  "steps": [
+    {
+      "args": "install",
+      "output": "[WILDCARD]"
+    },
+    {
+      "args": "run -A main.ts",
+      "output": "[WILDCARD]says hello! (patched v1)\n"
+    },
+    {
+      "args": "eval Deno.copyFileSync('patches/say-hello-v2.patch','patches/say-hello.patch')",
+      "output": ""
+    },
+    {
+      "args": "install",
+      "output": "[WILDCARD]"
+    },
+    {
+      "args": "run -A main.ts",
+      "output": "[WILDCARD]says hello! (patched v2)\n"
+    },
+    {
+      "args": "run -A drop_patches.ts",
+      "output": ""
+    },
+    {
+      "args": "install",
+      "output": "[WILDCARD]"
+    },
+    {
+      "args": "run -A main.ts",
+      "output": "@denotest/say-hello says hello!\n"
+    }
+  ]
+}

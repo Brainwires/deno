@@ -495,6 +495,8 @@ impl<
           let workspace_npm_link_packages =
             workspace_factory.workspace_npm_link_packages()?;
           let fetched_pkgs = self.install_remote_packages().await?;
+          let workspace_npm_patch_packages =
+            workspace_factory.workspace_npm_patch_packages()?;
           Ok(Arc::new(NpmInstaller::new(
             self.install_reporter.clone(),
             self.lifecycle_scripts_executor.clone(),
@@ -529,6 +531,7 @@ impl<
                 .unwrap_or(false),
               install_gate: self.options.install_gate.clone(),
               install_gate_all: self.options.install_gate_all,
+              workspace_patch_packages: workspace_npm_patch_packages.clone(),
             },
           )))
         }

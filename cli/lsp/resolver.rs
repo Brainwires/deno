@@ -1176,6 +1176,7 @@ impl<'a> ResolverFactory<'a> {
           jsr_deps_in_node_modules: false,
           install_gate: None,
           install_gate_all: false,
+          workspace_patch_packages: Default::default(),
         },
       ));
       self.set_npm_installer(npm_installer);

@@ -6261,6 +6261,83 @@ where the changes are discussed.
      `run/unstable_cookies_{enabled,disabled}` (main thread and worker), and the
      parser test `unstable_cookies_flag`.
 
+161. **`feat(npm)`: `patchedDependencies`, diffs applied to npm packages on
+     install** (`feat/carries2-denext3`, CLI;
+     `libs/npm_installer/{patch.rs,
+     local.rs,hoisted.rs,lib.rs,factory.rs}`,
+     `libs/config/{deno_json,
+     workspace}/mod.rs`,
+     `libs/package_json/lib.rs`,
+     `libs/resolver/{factory,workspace,lockfile}.rs`,
+     `libs/lockfile/{lib,printer}.rs`, `cli/schemas/config-file.v1.json`).
+     Ported from denoland/deno#35247 (Bartek Iwańczuk's pull request, closed
+     unmerged; the fork's June `feat/patched-dependencies-clean`, five commits),
+     keeping its config shape, which is pnpm's and Bun's:
+     ```json
+     {
+       "nodeModulesDir": "auto",
+       "patchedDependencies": {
+         "pkg@1.2.3": "patches/pkg@1.2.3.patch",
+         "@scope/pkg@^2": "patches/scope-pkg.patch",
+         "other": "patches/other.patch"
+       }
+     }
+     ```
+     - **Keys:** `<name>@<version>` (exact), `<name>@<range>`, or a bare
+       `<name>` (every version). The most specific matching entry applies:
+       exact, then range, then name. A dist-tag key (`pkg@latest`) is a parse
+       error. **Values:** a path to a unified (git-style or `diff -u`) diff,
+       relative to the config file; one patch may touch several files.
+     - **Where:** the workspace root `deno.json` and/or the root `package.json`
+       (top-level `patchedDependencies`, as Bun and pnpm 10 read it); for the
+       same key `deno.json` wins. It requires a `node_modules` directory
+       (`nodeModulesDir` `auto` or `manual`, or a package.json project);
+       otherwise resolution stops with an error.
+     - **Applying:** the diff is applied to the project's `node_modules` copy
+       after the package is cloned from the global cache (the hardlink is broken
+       first, so the cache stays pristine), in both the isolated and the hoisted
+       layout. A patch that fails to apply fails the install. A change to,
+       addition or removal of a patch re-clones and re-applies the package (the
+       isolated layout folds the patch hash into the folder's `.initialized`
+       marker; the hoisted layout records it under
+       `node_modules/.deno/.hoisted-patched/`).
+     - **Lockfile:** `deno.lock` records each key with a 64-bit xxHash of its
+       patch file under `workspace.patchedDependencies`, so an edited patch
+       shows up in review and `--frozen` refuses the drift.
+     - **On top of the pull request:** an entry for an installed package that
+       applies to none of its installed versions (`pkg@1.0.0` while `pkg@2.0.0`
+       is installed, or an entry shadowed by a more specific one) is reported
+       once per run:
+       `Warning "patchedDependencies" entry
+       "pkg@1.0.0" was not applied: no installed version matches it
+       (installed: 2.0.0).`
+       (pnpm fails the install instead, unless `allowUnusedPatches`; the pull
+       request's config shape has no such switch, so this is a warning.) A patch
+       naming a file outside its package (`../`, an absolute path) is refused.
+       The hoisted layout, which the fork made skip an already installed package
+       (item 47), re-installs a package whose patch changed rather than keeping
+       the stale copy.
+     - **denext:** `denext patch` can write `patchedDependencies` (the shape
+       above: key `<name>@<exact version>`, value the patch's path relative to
+       the root `deno.json`) for npm targets when the toolchain carries this
+       item (`Deno.build.denext` and the release that carries it), and keeps its
+       own mechanism for denext self-patches and stock Deno.
+       `denext
+       migrate` can carry a pnpm or Bun project's
+       `patchedDependencies` over as they are.
+
+     Tests: `libs/config/deno_json`
+     (`patched_dependencies_key_formats_and_priority`,
+     `patched_dependencies_rejects_dist_tag`, `patched_dependencies_unapplied`),
+     `libs/npm_installer/patch.rs` (`applies_a_git_style_patch`,
+     `refuses_a_target_outside_the_package`), the lockfile crate's spec and
+     integration tests, and the specs `npm/patched_dependencies` (applied on
+     install), `_package_json`, `_range`, `_name_only`, `_reapply`,
+     `_apply_error`, `_hoisted`, `_hoisted_reapply` (changed and removed patch,
+     hoisted layout), `_other_version` (a patch for another version is reported
+     and not applied) and `lockfile/patched_dependencies` (the hash in
+     `deno.lock`, `--frozen` refuses a changed patch).
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 158-160) are what the prebuilt
