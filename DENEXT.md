@@ -6095,7 +6095,7 @@ where the changes are discussed.
      `test_cli_records_the_glibc_ceiling` and
      `test_a_malformed_glibc_ceiling_is_refused`.
 
-152. **`test(node_compat)`: 24 tests that already pass are enabled**
+152. **`test(node_compat)`: 23 tests that already pass are enabled**
      (`fix/node-compat2-denext3`, test config only;
      `tests/node_compat/config.jsonc`). The 2026-10-28 re-measure
      (`plans/node-compat-gaps.md` in denext) listed 280 tests that pass on a
@@ -6134,10 +6134,13 @@ where the changes are discussed.
        `parallel/test-process-threadCpuUsage-worker-threads.js` (were ignored),
        `es-module/test-esm-loader-mock.mjs`, `-thenable.mjs`,
        `-with-syntax-error.mjs`, `test-esm-virtual-json.mjs`,
-       `parallel/test-gc-net-timeout.js`, `-http-no-read-no-dump.js`,
-       `-http-server-keepalive-end.js`, `-https-expect-continue-reuse-race.js`,
-       `-net-listen-ipv6only.js`, `-preload-print-process-argv.js`,
+       `parallel/test-http-no-read-no-dump.js`, `-http-server-keepalive-end.js`,
+       `-https-expect-continue-reuse-race.js`, `-net-listen-ipv6only.js`,
+       `-preload-print-process-argv.js`,
        `sequential/test-cluster-net-listen-ipv6only-none.js`.
+     - Left out again at integration: `parallel/test-gc-net-timeout.js` passes
+       on biscuits but waits on the GC and fails on the hosted Linux runner, as
+       when it was first left out (3.0.0-denext.3's first CI run).
 
 153. **`fix(ext/node)`: `node:test` mocks as Node's `MockTracker`, mock timers
      for `scheduler.wait` and the `node:timers` exports, `assert.register()` and

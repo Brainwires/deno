@@ -5331,11 +5331,6 @@
     "parallel/test-fs-write.js": {},
     "parallel/test-fs-writefile-with-fd.js": {},
     "parallel/test-gc-tls-external-memory.js": {},
-    "parallel/test-gc-net-timeout.js": {
-      "darwin": false,
-      "windows": false,
-      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno's report still fails it"
-    },
     "parallel/test-http-agent-abort-controller.js": {},
     "parallel/test-http-autoselectfamily.js": {},
     "parallel/test-http-client-abort-destroy.js": {},
