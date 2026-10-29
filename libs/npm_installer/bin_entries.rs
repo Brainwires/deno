@@ -44,13 +44,20 @@ fn default_bin_name(package: &NpmResolutionPackage) -> &str {
 /// The file name a `bin` map key links as in `node_modules/.bin`: its last
 /// path segment, so embedded separators create no directories there.
 ///
+/// A `:` separates segments too, as in npm (`npm-normalize-package-bin`
+/// replaces `\\` and `:` with `/` before taking the basename), so `a:b` links
+/// as `b`. On Windows a `:` in a file name would otherwise name an NTFS
+/// alternate data stream (`.bin\\a:b` writes the stream `b` of the file `a`),
+/// and a drive-relative key such as `C:tool` would leave `.bin`.
+///
 /// `None` for a key that names no file (empty, `.` or `..`, after trailing
 /// separators are dropped): such an entry is skipped, as npm drops it
 /// (`npm-normalize-package-bin`). A `..` entry would otherwise be linked as
 /// `node_modules/.bin/..`, which is `node_modules` itself.
 fn normalize_bin_name(bin_name: &str) -> Option<&str> {
-  let trimmed = bin_name.trim_end_matches(['/', '\\']);
-  let name = trimmed.rsplit(['/', '\\']).next().unwrap_or(trimmed);
+  const SEPARATORS: [char; 3] = ['/', '\\', ':'];
+  let trimmed = bin_name.trim_end_matches(SEPARATORS);
+  let name = trimmed.rsplit(SEPARATORS).next().unwrap_or(trimmed);
   match name {
     "" | "." | ".." => None,
     name => Some(name),
@@ -757,6 +764,21 @@ mod test {
   #[test]
   fn bin_names_that_name_no_file_are_skipped() {
     for name in ["", "/", ".", "..", "../", "..\\", "nested/..", "nested\\."] {
+      assert_eq!(normalize_bin_name(name), None, "{name:?}");
+    }
+  }
+
+  // npm-normalize-package-bin: `binKey.replace(/\\|:/g, '/')`, then the
+  // basename, so a `:` is a separator and a name ending in one keeps the
+  // segment before it.
+  #[test]
+  fn bin_names_split_at_colons_like_npm() {
+    assert_eq!(normalize_bin_name("tool:sub"), Some("sub"));
+    assert_eq!(normalize_bin_name("C:tool"), Some("tool"));
+    assert_eq!(normalize_bin_name("C:\\bin\\tool"), Some("tool"));
+    assert_eq!(normalize_bin_name("tool:"), Some("tool"));
+    assert_eq!(normalize_bin_name("@scope/a:b"), Some("b"));
+    for name in [":", "::", "a:..", "a:.", ":/"] {
       assert_eq!(normalize_bin_name(name), None, "{name:?}");
     }
   }

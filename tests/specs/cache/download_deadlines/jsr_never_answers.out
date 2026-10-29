@@ -1,2 +1,7 @@
 Download http://localhost:4545/download_deadlines/stall_headers/@denotest/add/meta.json
 error: JSR package manifest for '@denotest/add' failed to load. Import 'http://localhost:4545/download_deadlines/stall_headers/@denotest/add/meta.json' failed.
+    0: Timed out downloading 'http://localhost:4545/download_deadlines/stall_headers/@denotest/add/meta.json' (3 attempts, each on a new connection):
+           attempt 1: no response within 1s (DENO_DOWNLOAD_RESPONSE_TIMEOUT_MS)
+           attempt 2: no response within 1s (DENO_DOWNLOAD_RESPONSE_TIMEOUT_MS)
+           attempt 3: no response within 1s (DENO_DOWNLOAD_RESPONSE_TIMEOUT_MS)
+           (set DENO_DOWNLOAD_ATTEMPTS or the deadline variables to change this, 0 for no deadline)

@@ -1,0 +1,2 @@
+Created deno.json configuration file.
+error: jsr:@denotest/this-package-does-not-exist was not found.

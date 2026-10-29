@@ -1629,6 +1629,8 @@ fn sha2_digest(data: &[u8]) -> String {
 ///   never gets an answer; later ones get a module at once.
 /// - `/download_deadlines/drip/<any>.ts`: a module sent two bytes every
 ///   200 ms (about 3.4 s in all): slow, but never idle for long.
+/// - `/download_deadlines/server_error/<any>`: answers 500 at once (a
+///   registry that is up but failing, DENEXT.md item 154).
 async fn download_deadlines(
   path: &str,
 ) -> Response<UnsyncBoxBody<Bytes, Infallible>> {
@@ -1641,6 +1643,11 @@ async fn download_deadlines(
     "application/json"
   };
   let rest = path.trim_start_matches("/download_deadlines/");
+  if rest.starts_with("server_error/") {
+    let mut res = Response::new(empty_body());
+    *res.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
+    return res;
+  }
   if rest.starts_with("stall_headers/") {
     tokio::time::sleep(STALL).await;
     let mut res = Response::new(empty_body());

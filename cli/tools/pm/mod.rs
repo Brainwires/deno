@@ -37,6 +37,7 @@ use crate::file_fetcher::CreateCliFileFetcherOptions;
 use crate::file_fetcher::create_cli_file_fetcher;
 use crate::jsr::JsrFetchResolver;
 use crate::npm::NpmFetchResolver;
+use crate::npm::PackageInfoLoadError;
 
 mod approve_scripts;
 mod audit;
@@ -952,6 +953,12 @@ trait PackageInfoProvider {
     req: &PackageReq,
   ) -> Result<Option<PackageNv>, AnyError>;
   async fn latest_version(&self, name: &PackageName) -> Option<Version>;
+  /// Why the package's metadata failed to load, when it did. Read from the
+  /// cache the lookups above filled; never fetches.
+  async fn load_error(
+    &self,
+    name: &PackageName,
+  ) -> Option<Arc<PackageInfoLoadError>>;
 }
 
 impl PackageInfoProvider for Arc<JsrFetchResolver> {
@@ -975,6 +982,13 @@ impl PackageInfoProvider for Arc<JsrFetchResolver> {
     )
     .cloned()
   }
+
+  async fn load_error(
+    &self,
+    name: &PackageName,
+  ) -> Option<Arc<PackageInfoLoadError>> {
+    self.package_info_with_reason(name).await.err()
+  }
 }
 
 impl PackageInfoProvider for Arc<NpmFetchResolver> {
@@ -991,6 +1005,13 @@ impl PackageInfoProvider for Arc<NpmFetchResolver> {
     let info = self.package_info(name).await?;
     best_version(self.applicable_version_infos(&info).map(|vi| &vi.version))
       .cloned()
+  }
+
+  async fn load_error(
+    &self,
+    name: &PackageName,
+  ) -> Option<Arc<PackageInfoLoadError>> {
+    self.package_info_with_reason(name).await.err()
   }
 }
 
@@ -1057,6 +1078,18 @@ async fn find_package_and_select_version_for_req(
       }
     };
     let Some(nv) = maybe_nv else {
+      // The lookups above read no metadata either when the registry answered
+      // that the package doesn't exist or when it couldn't be asked at all.
+      // Only the first is "not found"; report anything else (a connection
+      // failure, a download deadline, a 5xx) as it is.
+      if let Some(err) = main_resolver.load_error(&req.name).await
+        && !err.not_found
+      {
+        return Err(err.to_error(format!(
+          "Failed loading package information for {} from {}",
+          prefixed_name, err.registry_url
+        )));
+      }
       // Not in the primary registry; point at the other one if it's there.
       let help = fallback_resolver
         .req_to_nv(req)

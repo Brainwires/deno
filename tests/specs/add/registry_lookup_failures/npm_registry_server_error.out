@@ -1,0 +1,5 @@
+Created deno.json configuration file.
+error: Failed loading package information for npm:@denotest/esm-basic from http://localhost:4545/download_deadlines/server_error/
+
+Caused by:
+    Import 'http://localhost:4545/download_deadlines/server_error/@denotest%2fesm-basic' failed: 500 Internal Server Error

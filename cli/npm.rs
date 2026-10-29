@@ -266,6 +266,55 @@ pub struct PackageInfoLoadError {
   pub registry_url: String,
   /// A human readable description of what went wrong.
   pub reason: String,
+  /// Whether the registry answered that the package doesn't exist (a 404).
+  /// Anything else (a connection failure, a download deadline, a 5xx, a
+  /// refused authorization, metadata that doesn't parse) is a failure to
+  /// look the package up, not an answer that it is missing.
+  pub not_found: bool,
+  /// The failure itself, causes included (e.g. the per-attempt report of a
+  /// download that hit its deadlines).
+  error: Arc<AnyError>,
+}
+
+impl PackageInfoLoadError {
+  pub fn new(registry_url: String, error: AnyError, not_found: bool) -> Self {
+    Self {
+      registry_url,
+      reason: format!("{error:#}"),
+      not_found,
+      error: Arc::new(error),
+    }
+  }
+
+  /// The failure as an error to report, under `context` and with every cause
+  /// of the original error kept.
+  pub fn to_error(&self, context: String) -> AnyError {
+    AnyError::new(SharedError(self.error.clone())).context(context)
+  }
+}
+
+/// A cached error reported again: displays as the error and hands out its
+/// causes, so the report shows the whole chain.
+#[derive(Debug)]
+struct SharedError(Arc<AnyError>);
+
+impl std::fmt::Display for SharedError {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    std::fmt::Display::fmt(&**self.0, f)
+  }
+}
+
+impl std::error::Error for SharedError {
+  fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+    self.0.source()
+  }
+}
+
+/// Whether a registry fetch failed because the registry answered 404.
+pub fn is_registry_not_found(
+  err: &deno_resolver::file_fetcher::FetchError,
+) -> bool {
+  deno_error::JsErrorClass::get_class(err) == "NotFound"
 }
 
 #[derive(Debug)]
@@ -347,26 +396,25 @@ impl NpmFetchResolver {
       return info.value().clone();
     }
     let registry_url = self.npmrc.get_registry_url(name).to_string();
-    let result =
-      self
-        .fetch_package_info(name)
-        .await
-        .map(Arc::new)
-        .map_err(|reason| {
-          Arc::new(PackageInfoLoadError {
-            registry_url: registry_url.clone(),
-            reason,
-          })
-        });
+    let result = self.fetch_package_info(name).await.map(Arc::new).map_err(
+      |(error, not_found)| {
+        Arc::new(PackageInfoLoadError::new(
+          registry_url.clone(),
+          error,
+          not_found,
+        ))
+      },
+    );
     self.info_by_name.insert(name.to_string(), result.clone());
     result
   }
 
   // todo(#27198): use RegistryInfoProvider instead
+  /// The error says whether the registry answered 404.
   async fn fetch_package_info(
     &self,
     name: &str,
-  ) -> Result<NpmPackageInfo, String> {
+  ) -> Result<NpmPackageInfo, (AnyError, bool)> {
     let info_url = deno_npm_cache::get_package_url(&self.npmrc, name);
     let registry_config = self.npmrc.get_registry_config(name);
     let maybe_auth_header =
@@ -379,7 +427,7 @@ impl NpmFetchResolver {
           ))),
           None => Ok(None),
         })
-        .map_err(|e| format!("{e:#}"))?;
+        .map_err(|e| (e, false))?;
     // Identify as an npm client. Some registries (e.g. self-hosted GitLab) only
     // serve package metadata to requests that send the npm `Accept` header and
     // otherwise redirect to registry.npmjs.org, which drops the auth header on
@@ -415,16 +463,23 @@ impl NpmFetchResolver {
         },
       )
       .await
-      .map_err(|e| format!("{e:#}"))?;
+      .map_err(|e| {
+        let not_found = is_registry_not_found(&e);
+        (AnyError::from(e), not_found)
+      })?;
+    let parse_error = |e: serde_json::Error| {
+      (
+        AnyError::msg(format!("failed to parse package metadata: {e}")),
+        false,
+      )
+    };
     let mut info = serde_json::from_slice::<NpmPackageInfo>(&file.source)
-      .map_err(|e| format!("failed to parse package metadata: {e}"))?;
+      .map_err(parse_error)?;
     if self.deserialize_export_keys {
       // `exports` subpath keys are skipped by the shared parse; the LSP is the
       // only consumer, so fill them in here rather than making every command
       // retain them (see denoland/deno#35664).
-      info
-        .fill_export_keys(&file.source)
-        .map_err(|e| format!("failed to parse package metadata: {e}"))?;
+      info.fill_export_keys(&file.source).map_err(parse_error)?;
     }
     Ok(info)
   }

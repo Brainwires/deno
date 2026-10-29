@@ -6337,6 +6337,70 @@ where the changes are discussed.
      `-non-tty-forced-color-output.mjs`, `-skip-each-hooks.mjs`,
      `-spec-reporter-successful.mjs`, `-suite-skip-hooks.mjs`.
 
+<!-- Items 152 and 153 are on fix/node-compat2-denext3; renumber at integration. -->
+
+154. **`fix(pm)`: `deno add` / `deno install <pkg>` say "was not found" only for
+     a 404** (`fix/npm-lows-denext3`, CLI only; `cli/tools/pm/mod.rs`,
+     `cli/npm.rs`, `cli/jsr.rs`). The registry lookup behind `deno add`,
+     `deno install npm:x` / `jsr:x` read a package's metadata with
+     `package_info`, which turned every failure into "no metadata", and
+     `find_package_and_select_version_for_req` reported that as
+     `npm:x was not found.` A connection failure, a 5xx or a download that hit
+     its deadlines (item 149) all read as a missing package, and the per-attempt
+     deadline report was never shown; a stalled JSR registry even read
+     `jsr:@denotest/add was not found, but a matching npm package exists`.
+     `PackageInfoLoadError` now keeps the failure itself (causes included) and
+     whether the registry answered 404 (the fetch error's class is `NotFound`,
+     which for a registry URL means a 404). When no version was selected and the
+     metadata failed for any other reason, the command fails with
+     `Failed loading package information for npm:x from <registry>` and the
+     chain under it (the `Import '…' failed.` line, then the deadline report or
+     `500 Internal Server Error`). A 404, and a version the package doesn't
+     have, keep the "was not found" message and its npm / JSR hints, as npm
+     keeps `E404` for a package the registry doesn't have and reports
+     `ETIMEDOUT` / `ECONNREFUSED` / `E500` as such. The `Reason:` line that
+     `deno outdated` prints at debug level now carries the chain too.
+
+     Tests: the `add::registry_lookup_failures` spec (1 s deadlines, 2
+     attempts): an npm registry that never answers (`deno add` and
+     `deno install`), an npm registry that answers 500 (a new
+     `/download_deadlines/server_error/` test-server route), a JSR registry that
+     never answers, each showing the real error; an npm and a JSR package that
+     don't exist, still `was not found.` Before the fix the four failure cases
+     printed `… was not found.`
+
+155. **`fix(npm)`: a `:` in a bin name separates segments, as in npm**
+     (`fix/npm-lows-denext3`, CLI only; `libs/npm_installer/bin_entries.rs`).
+     npm links a `bin` key under the basename it gets after replacing `\` and
+     `:` with `/` (`npm-normalize-package-bin`, which `bin-links` runs before
+     linking), so `a:b` links as `b`, `C:tool` as `tool`, `tool:` as `tool`, and
+     `:` or `a:..` is dropped. `normalize_bin_name` (item 97) split only at `/`
+     and `\`, so `a:b` was linked as `node_modules/.bin/a:b`: on Windows a `:`
+     in a file name names an NTFS alternate data stream (the stream `b` of a
+     file `a`), and a drive-relative key such as `C:tool` replaced the whole
+     path when joined to `.bin`. `:` is now a separator too. (The earlier note
+     that "npm strips `:`" was close: npm splits at it and keeps the last
+     segment.) `deno install -g` is unaffected: it refuses any executable name
+     outside `[a-z0-9][\w-]*`.
+
+     Test: `bin_names_split_at_colons_like_npm`
+     (`libs/npm_installer/bin_entries.rs`); it fails before the fix
+     (`left: Some("tool:sub")`).
+
+156. **`fix(graph)`: a JSR manifest that fails to load shows why**
+     (`fix/npm-lows-denext3`, CLI only; `libs/resolver/graph.rs`). deno_graph's
+     `JsrLoadError::PackageManifestLoad` (and `PackageVersionManifestLoad`)
+     prints its load error into the message with `{:#}` but doesn't return it
+     from `source()`, so `format_deno_graph_error`'s cause chain stopped at the
+     manifest line (`JSR package manifest for '…' failed to load.` followed by
+     `Import '…/meta.json' failed.`), and the deadline report (item 149) under
+     that import was lost. `enhance_graph_error` now matches those two variants
+     and lists the load error's own causes under the message (the same numbered
+     format, a cause that repeats the line before it skipped), so deno_graph (an
+     external crate) needs no patch. Test: `cache::download_deadlines`'s
+     `jsr_never_answers` now expects the per-attempt report under the manifest
+     line; before the fix it ended at `failed.`
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 169-174) are what the

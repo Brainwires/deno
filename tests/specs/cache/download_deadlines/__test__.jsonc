@@ -3,7 +3,8 @@
 // attempt (1 s deadlines and 3 attempts here) instead of waiting forever; one
 // that is slow but keeps sending data finishes, and one that stalls once
 // succeeds on the retry. Before the deadlines, every stalled case ran until
-// the step timeout killed it.
+// the step timeout killed it. A JSR package manifest that stalls lists the
+// report under deno_graph's "failed to load" message (item 156).
 {
   "tempDir": true,
   "timeout": 90,
