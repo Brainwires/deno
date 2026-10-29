@@ -1,0 +1,60 @@
+// denext (DENEXT.md item 154): `deno add` / `deno install <pkg>` say a
+// package "was not found" only when the registry answers 404. A registry that
+// can't be reached in time, or that fails, is reported as it is, with the
+// download deadlines' per-attempt report (item 149); before, every one of
+// these failures read "npm:<pkg> was not found."
+{
+  "tempDir": true,
+  "timeout": 90,
+  "envs": {
+    "DENO_DIR": "$PWD/deno_dir",
+    "DENO_DOWNLOAD_CONNECT_TIMEOUT_MS": "1000",
+    "DENO_DOWNLOAD_RESPONSE_TIMEOUT_MS": "1000",
+    "DENO_DOWNLOAD_IDLE_TIMEOUT_MS": "1000",
+    "DENO_DOWNLOAD_ATTEMPTS": "2"
+  },
+  "tests": {
+    "npm_registry_never_answers": {
+      "envs": {
+        "NPM_CONFIG_REGISTRY": "http://localhost:4545/download_deadlines/stall_headers/"
+      },
+      "args": "add npm:@denotest/esm-basic",
+      "output": "npm_registry_never_answers.out",
+      "exitCode": 1
+    },
+    "npm_install_registry_never_answers": {
+      "envs": {
+        "NPM_CONFIG_REGISTRY": "http://localhost:4545/download_deadlines/stall_headers/"
+      },
+      "args": "install npm:@denotest/esm-basic",
+      "output": "npm_registry_never_answers.out",
+      "exitCode": 1
+    },
+    "npm_registry_server_error": {
+      "envs": {
+        "NPM_CONFIG_REGISTRY": "http://localhost:4545/download_deadlines/server_error/"
+      },
+      "args": "add npm:@denotest/esm-basic",
+      "output": "npm_registry_server_error.out",
+      "exitCode": 1
+    },
+    "jsr_never_answers": {
+      "envs": {
+        "JSR_URL": "http://localhost:4545/download_deadlines/stall_headers/"
+      },
+      "args": "add jsr:@denotest/add",
+      "output": "jsr_never_answers.out",
+      "exitCode": 1
+    },
+    "npm_not_found": {
+      "args": "add npm:@denotest/this-package-does-not-exist",
+      "output": "npm_not_found.out",
+      "exitCode": 1
+    },
+    "jsr_not_found": {
+      "args": "add jsr:@denotest/this-package-does-not-exist",
+      "output": "jsr_not_found.out",
+      "exitCode": 1
+    }
+  }
+}

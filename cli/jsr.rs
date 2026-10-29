@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use dashmap::DashMap;
+use deno_core::error::AnyError;
 use deno_core::serde_json;
 use deno_graph::JsrPackageReqNotFoundError;
 use deno_graph::packages::JsrPackageInfo;
@@ -16,6 +17,7 @@ use deno_semver::package::PackageReq;
 use crate::args::jsr_url;
 use crate::file_fetcher::CliFileFetcher;
 use crate::npm::PackageInfoLoadError;
+use crate::npm::is_registry_not_found;
 
 /// This is similar to a subset of `JsrCacheResolver` which fetches rather than
 /// just reads the cache. Keep in sync!
@@ -150,35 +152,44 @@ impl JsrFetchResolver {
     if let Some(info) = self.info_by_name.get(name) {
       return info.value().clone();
     }
-    let result =
-      self
-        .fetch_package_info(name)
-        .await
-        .map(Arc::new)
-        .map_err(|reason| {
-          Arc::new(PackageInfoLoadError {
-            registry_url: jsr_url().to_string(),
-            reason,
-          })
-        });
+    let result = self.fetch_package_info(name).await.map(Arc::new).map_err(
+      |(error, not_found)| {
+        Arc::new(PackageInfoLoadError::new(
+          jsr_url().to_string(),
+          error,
+          not_found,
+        ))
+      },
+    );
     self.info_by_name.insert(name.to_string(), result.clone());
     result
   }
 
+  /// The error says whether the registry answered 404.
   async fn fetch_package_info(
     &self,
     name: &str,
-  ) -> Result<JsrPackageInfo, String> {
-    let meta_url = self
-      .meta_url(name)
-      .ok_or_else(|| format!("invalid package name: {name}"))?;
+  ) -> Result<JsrPackageInfo, (AnyError, bool)> {
+    let meta_url = self.meta_url(name).ok_or_else(|| {
+      (
+        AnyError::msg(format!("invalid package name: {name}")),
+        false,
+      )
+    })?;
     let file = self
       .file_fetcher
       .fetch_bypass_permissions(&meta_url)
       .await
-      .map_err(|e| format!("{e:#}"))?;
-    serde_json::from_slice::<JsrPackageInfo>(&file.source)
-      .map_err(|e| format!("failed to parse package metadata: {e}"))
+      .map_err(|e| {
+        let not_found = is_registry_not_found(&e);
+        (AnyError::from(e), not_found)
+      })?;
+    serde_json::from_slice::<JsrPackageInfo>(&file.source).map_err(|e| {
+      (
+        AnyError::msg(format!("failed to parse package metadata: {e}")),
+        false,
+      )
+    })
   }
 
   pub async fn package_version_info(

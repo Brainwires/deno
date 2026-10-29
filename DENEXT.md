@@ -6064,6 +6064,38 @@ where the changes are discussed.
      `test_cli_records_the_glibc_ceiling` and
      `test_a_malformed_glibc_ceiling_is_refused`.
 
+<!-- Items 152 and 153 are on fix/node-compat2-denext3; renumber at integration. -->
+
+154. **`fix(pm)`: `deno add` / `deno install <pkg>` say "was not found" only for
+     a 404** (`fix/npm-lows-denext3`, CLI only; `cli/tools/pm/mod.rs`,
+     `cli/npm.rs`, `cli/jsr.rs`). The registry lookup behind `deno add`,
+     `deno install npm:x` / `jsr:x` read a package's metadata with
+     `package_info`, which turned every failure into "no metadata", and
+     `find_package_and_select_version_for_req` reported that as
+     `npm:x was not found.` A connection failure, a 5xx or a download that hit
+     its deadlines (item 149) all read as a missing package, and the per-attempt
+     deadline report was never shown; a stalled JSR registry even read
+     `jsr:@denotest/add was not found, but a matching npm package exists`.
+     `PackageInfoLoadError` now keeps the failure itself (causes included) and
+     whether the registry answered 404 (the fetch error's class is `NotFound`,
+     which for a registry URL means a 404). When no version was selected and the
+     metadata failed for any other reason, the command fails with
+     `Failed loading package information for npm:x from <registry>` and the
+     chain under it (the `Import '…' failed.` line, then the deadline report or
+     `500 Internal Server Error`). A 404, and a version the package doesn't
+     have, keep the "was not found" message and its npm / JSR hints, as npm
+     keeps `E404` for a package the registry doesn't have and reports
+     `ETIMEDOUT` / `ECONNREFUSED` / `E500` as such. The `Reason:` line that
+     `deno outdated` prints at debug level now carries the chain too.
+
+     Tests: the `add::registry_lookup_failures` spec (1 s deadlines, 2
+     attempts): an npm registry that never answers (`deno add` and
+     `deno install`), an npm registry that answers 500 (a new
+     `/download_deadlines/server_error/` test-server route), a JSR registry that
+     never answers, each showing the real error; an npm and a JSR package that
+     don't exist, still `was not found.` Before the fix the four failure cases
+     printed `… was not found.`
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150) are what the prebuilt

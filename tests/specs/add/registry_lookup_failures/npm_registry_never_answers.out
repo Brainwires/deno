@@ -1,0 +1,9 @@
+Created deno.json configuration file.
+error: Failed loading package information for npm:@denotest/esm-basic from http://localhost:4545/download_deadlines/stall_headers/
+
+Caused by:
+    0: Import 'http://localhost:4545/download_deadlines/stall_headers/@denotest%2fesm-basic' failed.
+    1: Timed out downloading 'http://localhost:4545/download_deadlines/stall_headers/@denotest%2fesm-basic' (2 attempts, each on a new connection):
+           attempt 1: no response within 1s (DENO_DOWNLOAD_RESPONSE_TIMEOUT_MS)
+           attempt 2: no response within 1s (DENO_DOWNLOAD_RESPONSE_TIMEOUT_MS)
+           (set DENO_DOWNLOAD_ATTEMPTS or the deadline variables to change this, 0 for no deadline)
