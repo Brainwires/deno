@@ -63,7 +63,9 @@ console.log("a.test:", await connect("a.test"));
 console.log("b.test:", await connect("b.test"));
 console.log("a.test again:", await connect("a.test"));
 console.log("unknown.test:", await connect("unknown.test"));
-console.log("no SNI:", await connect(undefined, "127.0.0.1"));
+// An IP address sends no SNI. Dial the address the listener bound: "localhost"
+// is ::1 on some hosts and 127.0.0.1 on others, and they are separate sockets.
+console.log("no SNI:", await connect(undefined, listener.addr.hostname));
 listener.close();
 // Cached per name: a.test resolved once; the failed name is not cached.
 console.log("calls:", JSON.stringify(calls));
