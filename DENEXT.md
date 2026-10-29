@@ -6092,6 +6092,45 @@ where the changes are discussed.
      sloppy import suggestion`, and `run/sloppy_imports`, `compile`, `bundle`,
      `check`, `lint`, `publish` and `npm` sloppy-import specs still pass.
 
+164. **`fix(desktop)`: bind calls whose page is gone are rejected and dropped**
+     (`fix/audit-lows-denext3`, runtime; `runtime/ops/desktop.rs`,
+     `cli/rt_desktop/lib.rs`). The fork production audit's R4: every page→app
+     bind call (`BrowserWindow.bind`) registers a oneshot sender in
+     `PendingBindResponses`, which only the app's answer
+     (`op_desktop_resolve_bind_call` / `op_desktop_reject_bind_call`) or a full
+     event queue removed. A handler that never settled, or a page that
+     navigated away while its handler awaited, kept the entry, the waiting
+     future and laufey's `JsCall` forever, so a long-running app with a polling
+     binding whose handler sometimes hangs grew without bound. Now:
+     - **Pruned on insert:** `register_bind_call` first drops calls whose
+       receiver is closed (nobody can take the answer any more).
+     - **Page loads:** the window's `on_page_load` calls
+       `PendingBindResponses::page_loaded`, which counts the window's completed
+       loads; each call records the count it arrived under. laufey reports no
+       navigation start and no per-call document, and a page can call a binding
+       before its own load completes, so a call that arrived after load `n` may
+       be from the page load `n + 1` shows. Once load `n + 1` completes, calls
+       that arrived before load `n` did are from documents the window no longer
+       shows: they are rejected with "the page that called this binding has
+       navigated away or closed" (which answers laufey's `JsCall` and ends the
+       waiting future) and dropped. A hung call from a page that navigated away
+       is so released on the second load after it; calls from a page still
+       shown are never rejected.
+     - **Destroyed windows:** `CloseBook::close` rejects a destroyed window's
+       calls the same way (`window_gone`); a window kept hidden for a WebGPU
+       surface keeps them.
+     - `PendingBindResponses`' map is private now (`take`, `len`), and
+       `register_bind_call` takes the window id.
+     An optional per-bind timeout was not added: it needs a new option on
+     `BrowserWindow.bind(name, fn, { origins })` (JS API, DESKTOP_JS, types)
+     and the app can already race its own handler against a timer. Tests
+     (`runtime/ops/desktop.rs`): `bind_call_register_drops_calls_nobody_waits_for`
+     (fails on the base: 2 entries, not 1),
+     `bind_calls_of_a_page_that_navigated_away_are_rejected`,
+     `bind_calls_of_a_destroyed_window_are_rejected`; and
+     `bind_call_ids_are_unique_across_concurrent_registers` keeps its
+     receivers.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150) are what the prebuilt
