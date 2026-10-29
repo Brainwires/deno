@@ -1,0 +1,11 @@
+running 7 tests from ./fake_timers_test.ts
+fake timers > leaves fake timers queued ... ok ([WILDCARD])
+fake timers > advances asynchronously ... ok ([WILDCARD])
+fake timers > ticks on its own (nextTimerAsync) ... ok ([WILDCARD])
+fake timers > ticks on its own (interval) ... ok ([WILDCARD])
+a clock left installed across tests > installs a clock that advances with real time ... ok ([WILDCARD])
+a clock left installed across tests > still uses it ... ok ([WILDCARD])
+a clock left installed across tests > uninstalls it ... ok ([WILDCARD])
+
+ok | 7 passed | 0 failed ([WILDCARD])
+

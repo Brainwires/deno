@@ -13,7 +13,12 @@
 // has finished with it (and has run the hooks between it and the next test).
 
 // Vitest's chunks export their bindings under minified names.
-import { i as getFn, s as startTests } from "./vendor/runner.js";
+import {
+  denoGetTestFixtures as getTestFixtures,
+  h as getHooks,
+  i as getFn,
+  s as startTests,
+} from "./vendor/runner.js";
 import {
   c as createExpect,
   g as globalExpect,
@@ -33,6 +38,8 @@ const TEST_SKIP = Symbol.for("Deno.test.skip");
 const TEST_LOCATION = Symbol.for("Deno.test.location");
 const MODULE_IMPORTED = Symbol.for("deno.vitest.moduleImported");
 const MOCKER = Symbol.for("deno.vitest.mocker");
+/** The fixtures a test function asks for (set by the vendored runner). */
+const USED_FIXTURES = Symbol.for("deno.vitest.usedFixtures");
 
 const { fileURLToPath } = await import("node:url");
 
@@ -391,24 +398,139 @@ function applyNameFilter(tasks, matches) {
   return anyRuns;
 }
 
+/** Whether `deno test` invokes the Deno test registered for `test`. */
+function isInvoked(test) {
+  return (test.mode === "run" || test.mode === "queued") &&
+    test.denoFilteredOut !== true;
+}
+
+/** Whether `suite` has hooks that run once around all of its tests. */
+function hasSuiteHooks(suite) {
+  const hooks = getHooks(suite);
+  return !!(hooks?.beforeAll?.length || hooks?.afterAll?.length ||
+    hooks?.aroundAll?.length);
+}
+
+function isScoped(fixture) {
+  return fixture.scope === "file" || fixture.scope === "worker";
+}
+
+/** Whether `suite` or a suite around it has per-test hooks. */
+function hasEachHooks(suite) {
+  for (let current = suite; current;) {
+    const hooks = getHooks(current);
+    if (
+      hooks?.beforeEach?.length || hooks?.afterEach?.length ||
+      hooks?.aroundEach?.length
+    ) {
+      return true;
+    }
+    if (current === current.file) break;
+    current = current.suite ?? current.file;
+  }
+  return false;
+}
+
+/**
+ * Whether `test` can set up a fixture that outlives it (file or worker
+ * scope): its function asks for one, directly or through another fixture, or
+ * one is `auto`. A per-test hook can ask for one too, so under such hooks a
+ * test counts whenever its `test` has one.
+ */
+function hasScopedFixture(test) {
+  const suite = test.suite ?? test.file;
+  const registrations = getTestFixtures(test.context)?.get(suite);
+  if (!registrations?.size) return false;
+  const all = [...registrations.values()];
+  if (!all.some(isScoped)) return false;
+  const used = test[USED_FIXTURES];
+  if (used === undefined || hasEachHooks(suite)) return true;
+  const seen = new Set();
+  const pending = all.filter((fixture) =>
+    fixture.auto || used.has(fixture.name)
+  );
+  while (pending.length) {
+    const fixture = pending.pop();
+    if (seen.has(fixture)) continue;
+    seen.add(fixture);
+    if (isScoped(fixture)) return true;
+    for (const name of fixture.deps ?? []) {
+      const dep = name === fixture.name
+        ? fixture.parent
+        : registrations.get(name);
+      if (dep) pending.push(dep);
+    }
+  }
+  return false;
+}
+
+/**
+ * The tests whose Deno test can't be checked for leaks.
+ *
+ * Deno's sanitizers check what a test starts and finishes while its Deno test
+ * function runs. For a Vitest test that span is the test with its
+ * `beforeEach` / `afterEach` hooks, and also whatever Vitest's runner does
+ * before it stops at the next test: the `afterAll` hooks of the suites the
+ * test ends and the `beforeAll` hooks of the suites the next test starts
+ * (`aroundAll` too). What those hooks open is meant to outlive the test
+ * (a server a whole `describe` uses), so a test whose span runs one, or that
+ * can set up a file- or worker-scoped fixture (or tear them down, as the last
+ * test does), is registered with both sanitizers off. Its leaks are not
+ * blamed on later tests (see `record_ignored_leaks` in
+ * cli/tools/test/sanitizers.rs). The first test is exempt too when hooks run
+ * before it: Vitest's runner starts them while Deno loads the module.
+ */
+function sanitizerExemptTests(files) {
+  const exempt = new Set();
+  let current;
+  let hooksBeforeFirst = false;
+  let scopedFixtures = false;
+  const suiteBoundary = (suite) => {
+    if (!hasSuiteHooks(suite)) return;
+    if (current) exempt.add(current);
+    else hooksBeforeFirst = true;
+  };
+  const visit = (suite) => {
+    if (suite.mode === "skip" || suite.mode === "todo") return;
+    suiteBoundary(suite);
+    for (const task of suite.tasks ?? []) {
+      if (task.type === "suite") {
+        visit(task);
+      } else if (task.type === "test" && isInvoked(task)) {
+        if (!current && hooksBeforeFirst) exempt.add(task);
+        if (hasScopedFixture(task)) {
+          scopedFixtures = true;
+          exempt.add(task);
+        }
+        current = task;
+      }
+    }
+    suiteBoundary(suite);
+  };
+  for (const file of files) visit(file);
+  if (scopedFixtures && current) exempt.add(current);
+  return exempt;
+}
+
 function registerDenoTests(files, bridge, prefix = "") {
+  const exempt = sanitizerExemptTests(files);
   for (const file of files) {
-    registerTasks(file.tasks, bridge, prefix);
+    registerTasks(file.tasks, bridge, prefix, exempt);
   }
 }
 
-function registerTasks(tasks, bridge, prefix) {
+function registerTasks(tasks, bridge, prefix, exempt) {
   for (const task of tasks) {
     if (task.type === "suite") {
-      registerTasks(task.tasks, bridge, prefix);
+      registerTasks(task.tasks, bridge, prefix, exempt);
       continue;
     }
     if (task.type !== "test") continue;
-    registerTest(task, bridge, prefix);
+    registerTest(task, bridge, prefix, exempt.has(task));
   }
 }
 
-function registerTest(test, bridge, prefix) {
+function registerTest(test, bridge, prefix, sanitizerExempt) {
   const name = prefix + testFullName(test);
   const runnable = test.mode === "run" || test.mode === "queued" ||
     test.denoFilteredOut === true;
@@ -449,12 +571,16 @@ function registerTest(test, bridge, prefix) {
       fileUrl(test.file.filepath)
     }:${test.location.line}:${test.location.column}`;
   }
+  // The sanitizers follow `deno test`'s own settings (a `Deno.test.sanitizer()`
+  // call, `--sanitize-ops` / `--sanitize-resources`, the `DENO_TEST_SANITIZE_*`
+  // variables or deno.json's `test` options), except for the tests above.
   Deno.test({
     name,
     fn,
     ignore: !runnable,
-    sanitizeOps: false,
-    sanitizeResources: false,
+    ...(sanitizerExempt
+      ? { sanitizeOps: false, sanitizeResources: false }
+      : {}),
   });
 }
 
@@ -888,11 +1014,13 @@ export async function startFile(specifier, config = {}, runnerFs) {
         file.denoCollectionError = toThrowable(file.result.errors);
       }
     }
-    registerDenoTests(files, bridge, config.testNamePrefix);
+    // Filtered first: which tests run decides which are exempt from the
+    // sanitizers (see `sanitizerExemptTests`).
     const matches = createNameFilter(config.filter);
     if (matches) {
       for (const file of files) applyNameFilter(file.tasks, matches);
     }
+    registerDenoTests(files, bridge, config.testNamePrefix);
     collected.resolve(files);
   });
 

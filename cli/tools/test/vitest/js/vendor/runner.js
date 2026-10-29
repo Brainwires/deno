@@ -2681,6 +2681,9 @@ function createSuiteCollector(name, factory = () => {}, mode, each, suiteOptions
 			enumerable: false
 		});
 		setTestFixture(context, options.fixtures ?? new TestFixtures());
+		if (handler) try {
+			Object.defineProperty(task, Symbol.for("deno.vitest.usedFixtures"), { value: getUsedProps(handler) });
+		} catch {}
 		const limit = Error.stackTraceLimit;
 		Error.stackTraceLimit = 10;
 		const stackTraceError = /* @__PURE__ */ new Error("STACK_TRACE_ERROR");
@@ -3793,12 +3796,12 @@ function throttle(fn, ms) {
 		const now = unixNow();
 		if (now - last > ms) {
 			last = now;
-			clearTimeout(pendingCall);
+			(globalThis.Deno?.[globalThis.Deno.internal]?.vitestSystemTimers?.clearTimeout ?? clearTimeout)(pendingCall);
 			pendingCall = void 0;
 			return fn.apply(this, args);
 		}
 		// Make sure fn is still called even if there are no further calls
-		pendingCall ??= setTimeout(call.bind(this), ms, ...args);
+		pendingCall ??= (globalThis.Deno?.[globalThis.Deno.internal]?.vitestSystemTimers?.setTimeout ?? setTimeout)(() => call.apply(this, args), ms);
 	};
 }
 // throttle based on summary reporter's DURATION_UPDATE_INTERVAL_MS
@@ -4191,4 +4194,4 @@ async function publicCollect(specs, runner) {
 	return files;
 }
 
-export { limitConcurrency as A, shuffle as B, createTagsFilter as C, TestSyntaxError as T, processError as a, printDiffOrStringify as b, createTaskCollector as c, diff as d, getCurrentSuite as e, createChainable as f, getCurrentTest as g, getHooks as h, getFn as i, afterAll as j, afterEach as k, aroundAll as l, matchesTags as m, aroundEach as n, beforeAll as o, publicCollect as p, beforeEach as q, describe as r, startTests as s, it as t, onTestFailed as u, onTestFinished as v, recordArtifact as w, suite as x, test as y, validateTags as z };
+export { getTestFixtures as denoGetTestFixtures, limitConcurrency as A, shuffle as B, createTagsFilter as C, TestSyntaxError as T, processError as a, printDiffOrStringify as b, createTaskCollector as c, diff as d, getCurrentSuite as e, createChainable as f, getCurrentTest as g, getHooks as h, getFn as i, afterAll as j, afterEach as k, aroundAll as l, matchesTags as m, aroundEach as n, beforeAll as o, publicCollect as p, beforeEach as q, describe as r, startTests as s, it as t, onTestFailed as u, onTestFinished as v, recordArtifact as w, suite as x, test as y, validateTags as z };

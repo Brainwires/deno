@@ -1,0 +1,41 @@
+{
+  // A Vitest test is checked for leaks as `deno test` is configured to check
+  // tests (see `sanitizerExemptTests` in cli/tools/test/vitest/js/runtime.js
+  // for the tests that can't be).
+  "tests": {
+    "config_enabled": {
+      "args": "test -A --no-check --config=deno_sanitize.json leak_test.ts",
+      "output": "leak_enabled.out",
+      "exitCode": 1
+    },
+    "config_disabled": {
+      "args": "test -A --no-check --config=deno_no_sanitize.json leak_test.ts",
+      "output": "leak_disabled.out",
+      "exitCode": 0
+    },
+    "flags_enabled": {
+      "args": "test -A --no-check --config=deno_no_sanitize.json --sanitize-ops --sanitize-resources leak_test.ts",
+      "output": "leak_enabled.out",
+      "exitCode": 1
+    },
+    "env_enabled": {
+      "args": "test -A --no-check --config=deno_no_sanitize.json leak_test.ts",
+      "envs": { "DENO_TEST_SANITIZE_OPS": "1" },
+      "output": "leak_enabled.out",
+      "exitCode": 1
+    },
+    // Vitest's fake clock keeps real timers of its own; they aren't the test's.
+    "fake_timers": {
+      "args": "test -A --no-check --config=deno_sanitize.json fake_timers_test.ts",
+      "output": "fake_timers.out",
+      "exitCode": 0
+    },
+    // What suite hooks and file-scoped fixtures open spans tests; the tests
+    // around them aren't checked, the rest are.
+    "suite_hooks_and_scoped_fixtures": {
+      "args": "test -A --no-check --config=deno_sanitize.json hooks_test.ts",
+      "output": "hooks.out",
+      "exitCode": 1
+    }
+  }
+}
