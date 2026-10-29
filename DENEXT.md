@@ -6661,26 +6661,26 @@ where the changes are discussed.
      `cli/graph_util.rs`, `cli/module_loader.rs`, `cli/graph_container.rs`,
      `cli/tools/check.rs`, `cli/tools/pm/cache_deps.rs`,
      `libs/resolver/graph.rs`, and the callers that pass the new option). The
-     fork production audit's U6, carried from upstream `b23cb76e6d` (on denoland/deno
-     `main` since 2026-07-22; no v2.9.x release has it). A module that
-     failed to load got a "maybe add `.ts` / use `--sloppy-imports`" hint from a
-     file-system lookup of its neighbours, and a runtime-computed
+     fork production audit's U6, carried from upstream `b23cb76e6d` (on
+     denoland/deno `main` since 2026-07-22; no v2.9.x release has it). A module
+     that failed to load got a "maybe add `.ts` / use `--sloppy-imports`" hint
+     from a file-system lookup of its neighbours, and a runtime-computed
      `import(specifier)` did that lookup for a path the static graph never
-     prepared, without a read permission check: the error told a program with
-     no `--allow-read` whether `<path>.ts`, `<path>.js` or `<path>/index.ts`
+     prepared, without a read permission check: the error told a program with no
+     `--allow-read` whether `<path>.ts`, `<path>.js` or `<path>/index.ts`
      exists. The lookup now runs only for graph roots and the dependencies and
      literal dynamic imports the graph prepared; a computed dynamic-import or
      worker root that no module references gets the plain "Module not found".
      Conflicts: the fork's `prepare_load` keeps its Vitest-adjusted
      `is_dynamic_import` (item 23: the Vitest runner's own imports load as
-     static ones), and
-     `cli/tools/check.rs` keeps the fork's imports beside
+     static ones), and `cli/tools/check.rs` keeps the fork's imports beside
      `GraphRootsValidOptions`. Tests: upstream's
-     `run/sloppy_import_hints_runtime` spec (six cases; `computed_no_read` is the
-     no-permission case); before this change `computed_no_read` and
-     `computed_requested_read` fail on this branch's base with `Unexpected
-     sloppy import suggestion`, and `run/sloppy_imports`, `compile`, `bundle`,
-     `check`, `lint`, `publish` and `npm` sloppy-import specs still pass.
+     `run/sloppy_import_hints_runtime` spec (six cases; `computed_no_read` is
+     the no-permission case); before this change `computed_no_read` and
+     `computed_requested_read` fail on this branch's base with
+     `Unexpected sloppy import suggestion`, and `run/sloppy_imports`, `compile`,
+     `bundle`, `check`, `lint`, `publish` and `npm` sloppy-import specs still
+     pass.
 
 164. **`fix(desktop)`: bind calls whose page is gone are rejected and dropped**
      (`fix/audit-lows-denext3`, runtime; `runtime/ops/desktop.rs`,
@@ -6688,10 +6688,10 @@ where the changes are discussed.
      bind call (`BrowserWindow.bind`) registers a oneshot sender in
      `PendingBindResponses`, which only the app's answer
      (`op_desktop_resolve_bind_call` / `op_desktop_reject_bind_call`) or a full
-     event queue removed. A handler that never settled, or a page that
-     navigated away while its handler awaited, kept the entry, the waiting
-     future and laufey's `JsCall` forever, so a long-running app with a polling
-     binding whose handler sometimes hangs grew without bound. Now:
+     event queue removed. A handler that never settled, or a page that navigated
+     away while its handler awaited, kept the entry, the waiting future and
+     laufey's `JsCall` forever, so a long-running app with a polling binding
+     whose handler sometimes hangs grew without bound. Now:
      - **Pruned on insert:** `register_bind_call` first drops calls whose
        receiver is closed (nobody can take the answer any more).
      - **Page loads:** the window's `on_page_load` calls
@@ -6704,63 +6704,63 @@ where the changes are discussed.
        shows: they are rejected with "the page that called this binding has
        navigated away or closed" (which answers laufey's `JsCall` and ends the
        waiting future) and dropped. A hung call from a page that navigated away
-       is so released on the second load after it; calls from a page still
-       shown are never rejected.
+       is so released on the second load after it; calls from a page still shown
+       are never rejected.
      - **Destroyed windows:** `CloseBook::close` rejects a destroyed window's
        calls the same way (`window_gone`); a window kept hidden for a WebGPU
        surface keeps them.
      - `PendingBindResponses`' map is private now (`take`, `len`), and
-       `register_bind_call` takes the window id.
-     An optional per-bind timeout was not added: it needs a new option on
-     `BrowserWindow.bind(name, fn, { origins })` (JS API, DESKTOP_JS, types)
-     and the app can already race its own handler against a timer. Tests
-     (`runtime/ops/desktop.rs`): `bind_call_register_drops_calls_nobody_waits_for`
-     (fails on the base: 2 entries, not 1),
-     `bind_calls_of_a_page_that_navigated_away_are_rejected`,
-     `bind_calls_of_a_destroyed_window_are_rejected`; and
-     `bind_call_ids_are_unique_across_concurrent_registers` keeps its
-     receivers.
+       `register_bind_call` takes the window id. An optional per-bind timeout
+       was not added: it needs a new option on
+       `BrowserWindow.bind(name, fn, { origins })` (JS API, DESKTOP_JS, types)
+       and the app can already race its own handler against a timer. Tests
+       (`runtime/ops/desktop.rs`):
+       `bind_call_register_drops_calls_nobody_waits_for` (fails on the base: 2
+       entries, not 1), `bind_calls_of_a_page_that_navigated_away_are_rejected`,
+       `bind_calls_of_a_destroyed_window_are_rejected`; and
+       `bind_call_ids_are_unique_across_concurrent_registers` keeps its
+       receivers.
 
-165. **`fix(runtime)`: idle trim keeps a wake-up that arrives during a trim,
-     and skips the GC on a large live heap** (`fix/audit-lows-denext3`,
-     runtime; `runtime/idle_trim.rs`, `runtime/worker.rs`). The fork production
-     audit's R3, two edge behaviours of item 104:
+165. **`fix(runtime)`: idle trim keeps a wake-up that arrives during a trim, and
+     skips the GC on a large live heap** (`fix/audit-lows-denext3`, runtime;
+     `runtime/idle_trim.rs`, `runtime/worker.rs`). The fork production audit's
+     R3, two edge behaviours of item 104:
      - **A wake-up during the trim** (a blocking op completing, a worker's
        message, from another thread during the 100-220 ms GC) was discarded by
-       the `woken.store(false)` after the trim, which was there for the GC's
-       own follow-up wake-ups (V8 posting tasks, finalizers); the task was
-       still polled but the scheduler stayed disarmed until the next wake-up.
-       One flag can't tell the two apart, so a compare-and-swap on it would
-       either drop both (as before) or keep both; they differ by thread: the
-       trim runs on the event loop's thread, and anything that wakes the loop
-       from that thread during the trim is the trim's own work. The trim now
-       sets a thread-local flag, `ActivityWake` doesn't record a wake-up made
-       on that thread while it is set, and the post-trim store is gone, so a
-       wake-up from any other thread re-arms the scheduler. (A V8 helper
-       thread that posts a task during the GC counts as activity; the growth
-       gate then skips that idle period's check.)
+       the `woken.store(false)` after the trim, which was there for the GC's own
+       follow-up wake-ups (V8 posting tasks, finalizers); the task was still
+       polled but the scheduler stayed disarmed until the next wake-up. One flag
+       can't tell the two apart, so a compare-and-swap on it would either drop
+       both (as before) or keep both; they differ by thread: the trim runs on
+       the event loop's thread, and anything that wakes the loop from that
+       thread during the trim is the trim's own work. The trim now sets a
+       thread-local flag, `ActivityWake` doesn't record a wake-up made on that
+       thread while it is set, and the post-trim store is gone, so a wake-up
+       from any other thread re-arms the scheduler. (A V8 helper thread that
+       posts a task during the GC counts as activity; the growth gate then skips
+       that idle period's check.)
      - **Large heaps:** the full GC's cost grows with the live heap (on
        biscuits, 140-150 ms for a ~190 MB heap of small objects in this spec),
        and a server holding a large heap on purpose (an in-memory cache) that
        grows 16 MB between sparse requests paid it in front of a request every
        `min_interval`. Raising `DENO_IDLE_TRIM_MIN_GROWTH_MB` / `DELAY_MS` only
-       spaces those GCs out, so the trim now skips the GC instead: once a
-       trim's GC leaves the V8 heap at `DENO_IDLE_TRIM_MAX_GC_HEAP_MB` or more
-       (default 1024; `0` never skips), later trims run only `malloc_trim(0)`
-       while the heap's used size is still over the limit. The size the last
-       GC left is live data, not a burst's garbage, so a burst on a small heap
-       is still collected; once V8's own GCs bring the heap under the limit the
-       next trim runs the GC again. The first trim always runs it.
-       `DENO_IDLE_TRIM_TRACE` prints `gc skipped (heap N MB)` for such a trim.
-     Tests (`runtime/idle_trim.rs`):
-     `a_wake_from_another_thread_during_a_trim_is_activity` (fails on the
-     base: one trim, not two), `a_wake_from_the_trim_itself_is_not_activity`,
-     `a_large_heap_skips_the_gc_after_the_first`,
-     `the_gc_is_never_skipped_without_a_limit`,
-     `trim_now_skips_the_gc_while_the_live_heap_is_over_the_limit` (glibc
-     Linux, a real isolate), `config_reads_the_environment`; spec
-     `run/idle_trim` `large_heap_skips_gc` (fails on the base: the second trim
-     runs a 140 ms GC).
+       spaces those GCs out, so the trim now skips the GC instead: once a trim's
+       GC leaves the V8 heap at `DENO_IDLE_TRIM_MAX_GC_HEAP_MB` or more (default
+       1024; `0` never skips), later trims run only `malloc_trim(0)` while the
+       heap's used size is still over the limit. The size the last GC left is
+       live data, not a burst's garbage, so a burst on a small heap is still
+       collected; once V8's own GCs bring the heap under the limit the next trim
+       runs the GC again. The first trim always runs it. `DENO_IDLE_TRIM_TRACE`
+       prints `gc skipped (heap N MB)` for such a trim. Tests
+       (`runtime/idle_trim.rs`):
+       `a_wake_from_another_thread_during_a_trim_is_activity` (fails on the
+       base: one trim, not two), `a_wake_from_the_trim_itself_is_not_activity`,
+       `a_large_heap_skips_the_gc_after_the_first`,
+       `the_gc_is_never_skipped_without_a_limit`,
+       `trim_now_skips_the_gc_while_the_live_heap_is_over_the_limit` (glibc
+       Linux, a real isolate), `config_reads_the_environment`; spec
+       `run/idle_trim` `large_heap_skips_gc` (fails on the base: the second trim
+       runs a 140 ms GC).
 
 166. **`fix(ext/node)`: better-sqlite3 under Jest's module registry**
      (`feat/nest-g6-g8-denext3`; `ext/node/polyfills/01_require.js`,
