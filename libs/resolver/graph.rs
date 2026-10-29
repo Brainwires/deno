@@ -906,6 +906,7 @@ pub fn enhance_graph_error(
     }
     ModuleGraphError::ModuleError(error) => {
       enhanced_integrity_error_message(error)
+        .or_else(|| enhanced_jsr_manifest_load_error_message(error))
         .or_else(|| enhanced_sloppy_imports_error_message(sys, error))
         .or_else(|| enhanced_unsupported_import_attribute(error))
         .unwrap_or_else(|| format_deno_graph_error(error))
@@ -1101,6 +1102,38 @@ pub fn enhanced_integrity_error_message(err: &ModuleError) -> Option<String> {
   }
 }
 
+/// A JSR package (or package version) manifest that failed to load: the
+/// message with the load error's causes listed under it.
+///
+/// deno_graph's `JsrLoadError::PackageManifestLoad` and
+/// `PackageVersionManifestLoad` print the load error into their message but
+/// don't hand it out as their `source()`, so the causes stop there: a
+/// `meta.json` that hit the download deadlines read only
+/// `Import '…/meta.json' failed.`, without the per-attempt report under it
+/// (DENEXT.md item 156).
+fn enhanced_jsr_manifest_load_error_message(
+  err: &ModuleError,
+) -> Option<String> {
+  let ModuleErrorKind::Load {
+    err: ModuleLoadError::Jsr(jsr_err),
+    ..
+  } = err.as_kind()
+  else {
+    return None;
+  };
+  let cause: &dyn std::error::Error = match jsr_err {
+    JsrLoadError::PackageManifestLoad(_, load_err) => load_err.as_ref(),
+    JsrLoadError::PackageVersionManifestLoad(_, load_err) => load_err.as_ref(),
+    _ => return None,
+  };
+  let first_source = cause.source()?;
+  Some(format_error_causes(
+    format!("{}", err),
+    &cause.to_string(),
+    Some(first_source),
+  ))
+}
+
 fn enhanced_unsupported_import_attribute(err: &ModuleError) -> Option<String> {
   match err.as_kind() {
     ModuleErrorKind::UnsupportedImportAttributeType { kind, .. }
@@ -1250,13 +1283,22 @@ pub fn format_range_with_colors(referrer: &deno_graph::Range) -> String {
 }
 
 pub fn format_deno_graph_error(err: &dyn std::error::Error) -> String {
+  let message = format!("{}", err);
+  format_error_causes(message.clone(), &message, err.source())
+}
+
+/// Appends the chain from `maybe_source` on to `message`, one numbered line
+/// per cause, skipping a cause whose text repeats the one before it (the
+/// first is compared with `past_message`).
+fn format_error_causes(
+  mut message: String,
+  past_message: &str,
+  mut maybe_source: Option<&dyn std::error::Error>,
+) -> String {
   use std::fmt::Write;
 
-  let mut message = format!("{}", err);
-  let mut maybe_source = err.source();
-
   if maybe_source.is_some() {
-    let mut past_message = message.clone();
+    let mut past_message = past_message.to_string();
     let mut count = 0;
     let mut display_count = 0;
     while let Some(source) = maybe_source {

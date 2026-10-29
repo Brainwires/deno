@@ -6114,6 +6114,20 @@ where the changes are discussed.
      (`libs/npm_installer/bin_entries.rs`); it fails before the fix
      (`left: Some("tool:sub")`).
 
+156. **`fix(graph)`: a JSR manifest that fails to load shows why**
+     (`fix/npm-lows-denext3`, CLI only; `libs/resolver/graph.rs`). deno_graph's
+     `JsrLoadError::PackageManifestLoad` (and `PackageVersionManifestLoad`)
+     prints its load error into the message with `{:#}` but doesn't return it
+     from `source()`, so `format_deno_graph_error`'s cause chain stopped at the
+     manifest line (`JSR package manifest for '…' failed to load.` followed by
+     `Import '…/meta.json' failed.`), and the deadline report (item 149) under
+     that import was lost. `enhance_graph_error` now matches those two variants
+     and lists the load error's own causes under the message (the same numbered
+     format, a cause that repeats the line before it skipped), so deno_graph (an
+     external crate) needs no patch. Test: `cache::download_deadlines`'s
+     `jsr_never_answers` now expects the per-attempt report under the manifest
+     line; before the fix it ended at `failed.`
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150) are what the prebuilt
