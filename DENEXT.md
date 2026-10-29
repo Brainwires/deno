@@ -6096,6 +6096,24 @@ where the changes are discussed.
      don't exist, still `was not found.` Before the fix the four failure cases
      printed `… was not found.`
 
+155. **`fix(npm)`: a `:` in a bin name separates segments, as in npm**
+     (`fix/npm-lows-denext3`, CLI only; `libs/npm_installer/bin_entries.rs`).
+     npm links a `bin` key under the basename it gets after replacing `\` and
+     `:` with `/` (`npm-normalize-package-bin`, which `bin-links` runs before
+     linking), so `a:b` links as `b`, `C:tool` as `tool`, `tool:` as `tool`, and
+     `:` or `a:..` is dropped. `normalize_bin_name` (item 97) split only at `/`
+     and `\`, so `a:b` was linked as `node_modules/.bin/a:b`: on Windows a `:`
+     in a file name names an NTFS alternate data stream (the stream `b` of a
+     file `a`), and a drive-relative key such as `C:tool` replaced the whole
+     path when joined to `.bin`. `:` is now a separator too. (The earlier note
+     that "npm strips `:`" was close: npm splits at it and keeps the last
+     segment.) `deno install -g` is unaffected: it refuses any executable name
+     outside `[a-z0-9][\w-]*`.
+
+     Test: `bin_names_split_at_colons_like_npm`
+     (`libs/npm_installer/bin_entries.rs`); it fails before the fix
+     (`left: Some("tool:sub")`).
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150) are what the prebuilt
