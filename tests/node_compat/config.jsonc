@@ -121,6 +121,21 @@
     "es-module/test-esm-loader-cache-clearing.js": {},
     "es-module/test-esm-loader-dependency.mjs": {},
     "es-module/test-esm-loader-event-loop.mjs": {},
+    "es-module/test-esm-loader-mock.mjs": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno's report still fails it"
+    },
+    "es-module/test-esm-loader-thenable.mjs": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno's report still fails it"
+    },
+    "es-module/test-esm-loader-with-syntax-error.mjs": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno's report still fails it"
+    },
     "es-module/test-esm-nowarn-exports.mjs": {},
     "es-module/test-esm-no-addons.mjs": {},
     "es-module/test-esm-path-posix.mjs": {},
@@ -178,8 +193,9 @@
     },
     "es-module/test-require-module-instantiated.mjs": {},
     "es-module/test-require-module-preload.js": {
-      "ignore": true,
-      "reason": "Tests Node's --require / --import preload CLI flags, which Deno does not implement."
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno's report still fails it"
     },
     "es-module/test-require-module-synchronous-rejection-handling.js": {},
     "es-module/test-require-module-tla-execution.js": {
@@ -2002,6 +2018,11 @@
     "parallel/test-http-mutable-headers.js": {},
     "parallel/test-http-nodelay.js": {},
     "parallel/test-http-no-content-length.js": {},
+    "parallel/test-http-no-read-no-dump.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno's report still fails it"
+    },
     "parallel/test-http-outgoing-buffer.js": {},
     "parallel/test-http-outgoing-destroy.js": {},
     "parallel/test-http-outgoing-end-cork.js": {},
@@ -2083,6 +2104,11 @@
     "parallel/test-http-server-keep-alive-max-requests-null.js": {},
     "parallel/test-http-server-keep-alive-timeout.js": {},
     "parallel/test-http-server-keepalive-req-gc.js": {},
+    "parallel/test-http-server-keepalive-end.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno's report still fails it"
+    },
     "parallel/test-http-server-method.query.js": {},
     "parallel/test-http-server-multiheaders.js": {},
     "parallel/test-http-server-multiheaders2.js": {},
@@ -2431,6 +2457,11 @@
     "parallel/test-https-connect-address-family.js": {},
     "parallel/test-https-connecting-to-http.js": {},
     "parallel/test-https-eof-for-eom.js": {},
+    "parallel/test-https-expect-continue-reuse-race.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno's report still fails it"
+    },
     "parallel/test-https-foafssl.js": {},
     "parallel/test-https-host-headers.js": {},
     "parallel/test-https-hwm.js": {},
@@ -2758,6 +2789,11 @@
     "parallel/test-net-listen-error.js": {},
     "parallel/test-net-listen-fd0.js": {},
     "parallel/test-net-listen-invalid-port.js": {},
+    "parallel/test-net-listen-ipv6only.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno's report still fails it"
+    },
     "parallel/test-net-listening.js": {},
     "parallel/test-net-local-address-port.js": {},
     "parallel/test-net-localerror.js": {},
@@ -3092,6 +3128,11 @@
     "parallel/test-pipe-writev.js": {},
     "parallel/test-preload-self-referential.js": {},
     "parallel/test-preload-worker.js": {},
+    "parallel/test-preload-print-process-argv.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno's report still fails it"
+    },
     "parallel/test-primordials-apply.js": {
       "ignore": true,
       "reason": "Tests Node.js internal modules (require('internal/...')) which are not exposed in Deno"
@@ -3176,8 +3217,9 @@
     "parallel/test-process-release.js": {},
     "parallel/test-process-threadCpuUsage-main-thread.js": {},
     "parallel/test-process-threadCpuUsage-worker-threads.js": {
-      "ignore": true,
-      "reason": "This test is flaky and/or timing out. Needs to be investigated"
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno's report still fails it"
     },
     "parallel/test-process-umask-mask.js": {},
     "parallel/test-process-umask.js": {},
@@ -4181,6 +4223,7 @@
       "ignore": true,
       "reason": "Deno throws 'Invalid XOF parameters' where Node expects its 'Invalid TurboShakeParams outputLength' wording"
     },
+    "parallel/test-webcrypto-digest-turboshake-rfc.js": {},
     "parallel/test-webcrypto-encap-decap-ml-kem.js": {
       "ignore": true,
       "reason": "node:crypto createPublicKey/createPrivateKey does not support ML-KEM post-quantum keys used to seed the test"
@@ -4353,6 +4396,7 @@
     "parallel/test-worker-exit-heapsnapshot.js": {},
     "parallel/test-worker-fs-stat-watcher.js": {},
     "parallel/test-worker-http2-generic-streams-terminate.js": {},
+    "parallel/test-worker-http2-stream-terminate.js": {},
     "parallel/test-worker-invalid-workerdata.js": {},
     "parallel/test-worker-load-file-with-extension-other-than-js.js": {},
     "parallel/test-worker-memory.js": {},
@@ -4417,6 +4461,7 @@
     "parallel/test-worker-terminate-timers.js": {},
     "parallel/test-worker-terminate-null-handler.js": {},
     "parallel/test-worker-terminate-unrefed.js": {},
+    "parallel/test-worker-terminate-source-map.js": {},
     "parallel/test-worker-uncaught-exception.js": {},
     "parallel/test-worker-uncaught-exception-async.js": {},
     "parallel/test-worker-unref-from-message-during-exit.js": {},
@@ -4850,6 +4895,11 @@
     "es-module/test-esm-namespace.mjs": {},
     "es-module/test-esm-symlink-main.js": {},
     "es-module/test-esm-syntax-error.mjs": {},
+    "es-module/test-esm-virtual-json.mjs": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno's report still fails it"
+    },
     "es-module/test-require-module-conditional-exports.js": {},
     "es-module/test-vm-compile-function-leak.js": {},
     "es-module/test-vm-contextified-script-leak.js": {},
@@ -4878,10 +4928,7 @@
     "internet/test-http-dns-fail.js": {},
     "internet/test-http-https-default-ports.js": {},
     "internet/test-http2-issue-32922.js": {},
-    "internet/test-https-autoselectfamily-slow-timeout.js": {
-      "linux": false,
-      "reason": "AggregateError"
-    },
+    "internet/test-https-autoselectfamily-slow-timeout.js": {},
     "internet/test-net-autoselectfamily-events-failure.js": {},
     "internet/test-net-autoselectfamily-events-timeout.js": {},
     "internet/test-net-autoselectfamily-timeout-close.js": {
@@ -4914,8 +4961,9 @@
     "module-hooks/test-async-loader-hooks-initialize-process-exit.mjs": {},
     "module-hooks/test-async-loader-hooks-initialize-rejecting.mjs": {},
     "module-hooks/test-async-loader-hooks-initialize-throw-null.mjs": {
-      "ignore": true,
-      "reason": "Expects Node's report of a value thrown at a hooks module's top level (stderr shape and exit code)"
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno's report still fails it"
     },
     "module-hooks/test-async-loader-hooks-mixed-opt-in.mjs": {
       "ignore": true,
@@ -5031,8 +5079,9 @@
       "reason": "Expects Node's report of a value thrown at a hooks module's top level (stderr shape and exit code)"
     },
     "module-hooks/test-async-loader-hooks-throw-symbol.mjs": {
-      "ignore": true,
-      "reason": "Expects Node's report of a value thrown at a hooks module's top level (stderr shape and exit code)"
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno's report still fails it"
     },
     "module-hooks/test-async-loader-hooks-throw-undefined.mjs": {
       "ignore": true,
@@ -5063,7 +5112,6 @@
       "reason": "Command failed"
     },
     "parallel/test-child-process-fork-closed-channel-segfault.js": {
-      "linux": false,
       "windows": false,
       "reason": "times out"
     },
@@ -5072,7 +5120,6 @@
       "reason": "Expected values to be strictly equal"
     },
     "parallel/test-child-process-pipe-dataflow.js": {
-      "linux": false,
       "darwin": false,
       "reason": "times out"
     },
@@ -5230,6 +5277,11 @@
     "parallel/test-fs-write.js": {},
     "parallel/test-fs-writefile-with-fd.js": {},
     "parallel/test-gc-tls-external-memory.js": {},
+    "parallel/test-gc-net-timeout.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno's report still fails it"
+    },
     "parallel/test-http-agent-abort-controller.js": {},
     "parallel/test-http-autoselectfamily.js": {},
     "parallel/test-http-client-abort-destroy.js": {},
@@ -5473,7 +5525,6 @@
     },
     "parallel/test-socket-options-invalid.js": {},
     "parallel/test-socket-writes-before-passed-to-tls-socket.js": {
-      "linux": false,
       "darwin": false,
       "reason": "times out"
     },
@@ -5529,7 +5580,9 @@
     "parallel/test-util-inspect-namespace.js": {},
     "parallel/test-util-sigint-watchdog.js": {},
     "parallel/test-v8-serialize-leak.js": {
-      "ignore": true,
+      "darwin": false,
+      "windows": false,
+      "linuxAarch64": false,
       "reason": "memory leak check fails on windows/darwin; also fails on linux-aarch64"
     },
     "parallel/test-vm-module-evaluate-source-text-module.js": {},
@@ -5687,9 +5740,13 @@
     },
     "sequential/test-cluster-inspect-brk.js": {},
     "sequential/test-cluster-net-listen-ipv6only-rr.js": {
-      "linux": false,
       "darwin": false,
       "reason": "error: Uncaught Error: listen EADDRINUSE: address already in use 0.0.0.0:12346"
+    },
+    "sequential/test-cluster-net-listen-ipv6only-none.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno's report still fails it"
     },
     "sequential/test-cluster-port-reuse-between-workers.js": {
       "windows": false,
