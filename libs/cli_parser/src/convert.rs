@@ -1053,6 +1053,7 @@ fn unstable_args_parse(result: &ParseResult, flags: &mut Flags) {
     ("unstable-broadcast-channel", None),
     ("unstable-bundle", None),
     ("unstable-byonm", None),
+    ("unstable-cookies", None),
     ("unstable-cron", None),
     ("unstable-fs", None),
     ("unstable-html-rewriter", None),

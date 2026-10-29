@@ -6188,9 +6188,82 @@ where the changes are discussed.
      without SNI gets the fallback, a name is resolved once, `Deno.serve` serves
      HTTPS through it, and it requires `--unstable-net`.
 
+160. **`feat(unstable)`: a cookie jar for `fetch`, `Deno.Cookie` and
+     `Deno.CookieMap`, behind `--unstable-cookies`** (`feat/carries2-denext3`,
+     runtime;
+     `ext/fetch/{cookies.rs,public_suffix.rs,public_suffix_list.dat,
+     27_cookies.js,22_http_client.js,lib.rs}`,
+     `runtime/js/90_deno_ns.js`, `runtime/features/data.rs`, `libs/cli_parser`,
+     `cli/schemas/config-file.v1.json`, `cli/tsc/dts/lib.deno.unstable.d.ts`).
+     Ported from denoland/deno#35117 (Bartek Iwańczuk's pull request, closed
+     unmerged; the fork's June `feat/fetch-cookie-jar`), keeping its API: a
+     hand-rolled RFC 6265bis cookie model, no new crate.
+     - **On:** `--unstable-cookies` or `"unstable": ["cookies"]`; the
+       `Deno.Cookie*` names are absent otherwise and `new Deno.CookieJar()`
+       exits with the unstable-API error.
+     - **API:** `Deno.createHttpClient({ cookieJar: true | jar })` stores each
+       response's `Set-Cookie` (every redirect hop included) and sends the
+       matching cookies on later requests through that client; an explicit
+       `Cookie` request header bypasses the jar. `client.cookieJar` returns the
+       jar. `Deno.CookieJar` (`setCookie(header | init, url?)`,
+       `getCookies(url?)`, `getCookieString(url)`, `deleteCookie`, `clear`,
+       `toJSON()` and a constructor seed for persistence, `close` / `using`) can
+       be shared between clients. `Deno.Cookie.parse` / `serialize` for
+       `Set-Cookie` values, and `Deno.CookieMap`, a `Map`-like view of a
+       request's `Cookie` header for `Deno.serve` and `node:http`.
+     - **Storage rules:** host-only versus domain cookies, the default path and
+       path matching, `Max-Age` over `Expires` with the 400-day cap, `Secure`
+       only from and to `https`/`wss` or loopback, no shadowing of a secure
+       cookie from an insecure connection, the `__Secure-` / `__Host-` prefixes,
+       and per-domain and total limits with least-recently-used eviction.
+       `HttpOnly` is kept and reported, and sent (there is no page script to
+       hide it from); `SameSite` is kept and reported but not enforced on
+       sending (a server-side client has no site for cookies).
+     - **On top of the pull request:** a `Domain=` attribute is limited to the
+       request host's registrable domain (its public suffix plus one label),
+       from a pinned Public Suffix List snapshot compiled into the binary, with
+       no network access. The pull request only refused a dotless `Domain`.
+       `Domain=co.uk` from `www.example.co.uk`, or `Domain=github.io` from
+       `foo.github.io` (the list's PRIVATE section counts, as in browsers), is
+       refused; a host that is itself a public suffix may name itself and gets a
+       host-only cookie (RFC 6265bis section 5.7, step 9). A jar seeded without
+       a URL refuses a public-suffix domain too. Also: `SameSite=None` without
+       `Secure` is refused (section 5.7, step 19), and the flag is registered in
+       the fork's own parser and the config schema.
+     - **The PSL snapshot:** `ext/fetch/public_suffix_list.dat`, unmodified,
+       from https://github.com/publicsuffix/list commit
+       `9dfbe81931367b3f0af21035c36ae7eeb830dd88` (2026-10-28), SHA-256
+       `d3e6243b51695327984abb3e2a5aa7077096867f75121e031e6a5a3840ca8bcd` (MPL
+       2.0, see its header). Matching follows the list's format specification
+       (wildcards, exception rules, the default `*` rule; Unicode rules compared
+       in their punycode form). To update it, download `public_suffix_list.dat`
+       from https://publicsuffix.org/list/ (or the raw file at a GitHub commit),
+       replace the file, and update the commit, date and hash here and in
+       `ext/fetch/public_suffix.rs`; the `public_suffix_snapshot_is_pinned` test
+       fails until the hash matches. Refresh it with each runtime release cut.
+     - **denext:** `denext/testing`'s `CookieJar` and server-side `fetch`
+       sessions (OAuth back-channel calls, backend proxies) can use a
+       `Deno.createHttpClient({ cookieJar })` client when `Deno.build.denext`
+       reports a release that carries this item and the process runs with
+       `--unstable-cookies`; `Deno.CookieMap` could back `cookies()` parsing.
+       denext keeps its own code for stock Deno.
+
+     Tests: `ext/fetch/cookies.rs` (upstream's parser, date, matching, storage
+     and serialization tests, plus
+     `storage_domain_limited_to_registrable_domain` and
+     `storage_same_site_none_requires_secure`), `ext/fetch/public_suffix.rs`
+     (`registrable_domains`: ICANN, PRIVATE, wildcard, exception, default and
+     Unicode rules; `public_suffixes`; `public_suffix_snapshot_is_pinned`),
+     `tests/unit/cookie_test.ts` (upstream's 17, including the `fetch` round
+     trip, the redirect hop and a shared jar, plus
+     `cookieJarDomainLimitedToRegistrableDomain`, `cookieJarPathMatching`,
+     `cookieJarAttributes` and `cookieJarExpiresAttribute`), upstream's specs
+     `run/unstable_cookies_{enabled,disabled}` (main thread and worker), and the
+     parser test `unstable_cookies_flag`.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
-118, 119, 126, 127, 129, 136, 137, 144-148, 150, 158, 159) are what the prebuilt
+118, 119, 126, 127, 129, 136, 137, 144-148, 150, 158-160) are what the prebuilt
 `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
 in the branch too, but a stock CLI does not run them; denext's own launcher

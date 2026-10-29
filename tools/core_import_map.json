@@ -518,6 +518,7 @@
     "ext:deno_fetch/23_request.js": "../ext/fetch/23_request.js",
     "ext:deno_fetch/23_response.js": "../ext/fetch/23_response.js",
     "ext:deno_fetch/26_fetch.js": "../ext/fetch/26_fetch.js",
+    "ext:deno_fetch/27_cookies.js": "../ext/fetch/27_cookies.js",
     "ext:deno_ffi/00_ffi.js": "../ext/ffi/00_ffi.js",
     "ext:deno_fs/30_fs.js": "../ext/fs/30_fs.js",
     "ext:deno_html_rewriter/01_html_rewriter.js": "../ext/html_rewriter/01_html_rewriter.js",

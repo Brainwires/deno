@@ -1414,6 +1414,7 @@
           "bare-node-builtins",
           "bundle",
           "byonm",
+          "cookies",
           "cron",
           "detect-cjs",
           "ffi",
