@@ -4,8 +4,17 @@
 # the six release targets. The lines are the release's own SHA256SUMS, checked
 # again with `gh attestation verify <file> -R Brainwires/rusty_v8`; a V8 bump
 # changes the tag and every line in the same commit as Cargo.toml's rev.
-#
-# PENDING: the hashes are added from SHA256SUMS once release v152.2.1-denext.1
-# is published. Until then the fetch fails closed (no entry for the target).
 # repo: Brainwires/rusty_v8
 # tag: v152.2.1-denext.1
+689bf67f08d4fbb47e1c59fcfb212bf006d5c7b18da53d3c83751f3ca557b83b  librusty_v8_release_aarch64-apple-darwin.a.gz
+4394a64b034de477c27d6859f8d6b3d53bbdd7ed914c8a59e9318248369bed21  librusty_v8_release_aarch64-unknown-linux-gnu.a.gz
+ea35fa5b44b30cb1ba808b32319577b9809bea71fc66a89e5b17dae5a6070a5e  librusty_v8_release_x86_64-apple-darwin.a.gz
+cd3fd619ba0b59dd4457315e0c070575a2a2fb8b7238e72b5ed4604dd0c1498f  librusty_v8_release_x86_64-unknown-linux-gnu.a.gz
+511d615126d2d6babb101528a64dabb6ea4b74afd9eea6617371f49b55d74b03  rusty_v8_release_aarch64-pc-windows-msvc.lib.gz
+4b52b57796b050cfd4f7b81cb087741879aaab541b69e06b87e58dccaefa538c  rusty_v8_release_x86_64-pc-windows-msvc.lib.gz
+d38c7b512b22f375259f360af0c24e5038995ef2263d4efdd08f6bb5445fa1a2  src_binding_release_aarch64-apple-darwin.rs
+3c208b35226d033f66ec77ae15cd4b8e718ae5618ec166c31ebbeb902f20639a  src_binding_release_aarch64-pc-windows-msvc.rs
+6186718d3da2af6db6411ffdcf3e37e7e8bde50252b4244ee3c3ea305713e7ed  src_binding_release_aarch64-unknown-linux-gnu.rs
+d38c7b512b22f375259f360af0c24e5038995ef2263d4efdd08f6bb5445fa1a2  src_binding_release_x86_64-apple-darwin.rs
+3c208b35226d033f66ec77ae15cd4b8e718ae5618ec166c31ebbeb902f20639a  src_binding_release_x86_64-pc-windows-msvc.rs
+6186718d3da2af6db6411ffdcf3e37e7e8bde50252b4244ee3c3ea305713e7ed  src_binding_release_x86_64-unknown-linux-gnu.rs
