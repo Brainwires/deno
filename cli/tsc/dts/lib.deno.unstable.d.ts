@@ -273,10 +273,18 @@ declare namespace Deno {
    */
   export namespace Cookie {
     /** Parses a `Set-Cookie` header value into a {@linkcode Deno.Cookie}.
-     * Throws a `TypeError` when the header is not a valid cookie. */
+     * Throws a `TypeError` when the header is not a valid cookie.
+     *
+     * @category Fetch
+     * @experimental
+     */
     export function parse(setCookie: string): Cookie;
     /** Serializes a {@linkcode Deno.Cookie} into a `Set-Cookie` header
-     * value, validating the name, value and attributes. */
+     * value, validating the name, value and attributes.
+     *
+     * @category Fetch
+     * @experimental
+     */
     export function serialize(cookie: Cookie): string;
   }
 
