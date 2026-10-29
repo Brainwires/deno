@@ -1,0 +1,29 @@
+{
+  // A package.json script gets its arguments as `npm run <script> -- <args>`
+  // passes them: a leading `--` isn't passed on. A deno.json task gets every
+  // argument.
+  "tests": {
+    "package_json": {
+      "args": "task -q echo -- --forceExit a",
+      "output": "args: --forceExit a\n"
+    },
+    "package_json_second_double_dash": {
+      "args": "task -q echo -- a -- b",
+      "output": "args: a -- b\n"
+    },
+    // only a leading `--` (the npm shim forwards `npm run echo -- a -- b`
+    // as `deno task echo a -- b`)
+    "package_json_inner_double_dash": {
+      "args": "task -q echo a -- b",
+      "output": "args: a -- b\n"
+    },
+    "package_json_no_double_dash": {
+      "args": "task -q echo a",
+      "output": "args: a\n"
+    },
+    "deno_json": {
+      "args": "task -q deno_echo -- --forceExit a",
+      "output": "args: -- --forceExit a\n"
+    }
+  }
+}
