@@ -18,7 +18,13 @@
 //!   the growth gate skips runs no GC and does not count toward the interval.
 //! - glibc Linux only. On every other target (macOS, Windows, musl) enabling
 //!   it does nothing.
+//! - The full GC's cost grows with the live heap. Once a trim's GC has left
+//!   the heap at [`IdleTrimConfig::max_gc_heap`] or more, later trims skip the
+//!   GC (and only `malloc_trim`) while the heap stays that large, so a process
+//!   that holds a large heap on purpose (an in-memory cache) doesn't pay a
+//!   long GC in front of the next request every `min_interval`.
 
+use std::cell::Cell;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -37,6 +43,8 @@ pub const DEFAULT_IDLE_DELAY: Duration = Duration::from_millis(1000);
 pub const DEFAULT_MIN_INTERVAL: Duration = Duration::from_secs(10);
 /// How much the RSS must have grown since the last trim for another one.
 pub const DEFAULT_MIN_GROWTH_BYTES: u64 = 16 * 1024 * 1024;
+/// The V8 heap size (after a trim's GC) from which later trims skip the GC.
+pub const DEFAULT_MAX_GC_HEAP_BYTES: u64 = 1024 * 1024 * 1024;
 
 /// Whether a trim can do anything on this target (glibc Linux).
 pub const SUPPORTED: bool = cfg!(all(target_os = "linux", target_env = "gnu"));
@@ -49,6 +57,8 @@ pub const SUPPORTED: bool = cfg!(all(target_os = "linux", target_env = "gnu"));
 ///   (default 10000).
 /// - `DENO_IDLE_TRIM_MIN_GROWTH_MB`: [`IdleTrimConfig::min_growth`] in MiB
 ///   (default 16).
+/// - `DENO_IDLE_TRIM_MAX_GC_HEAP_MB`: [`IdleTrimConfig::max_gc_heap`] in MiB
+///   (default 1024; `0` never skips the GC).
 /// - `DENO_IDLE_TRIM_TRACE=1`: print one line per trim to stderr (GC and
 ///   `malloc_trim` durations, RSS before and after).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -60,6 +70,11 @@ pub struct IdleTrimConfig {
   /// left it: a server woken by its own periodic timers would otherwise run a
   /// full GC every `min_interval` for nothing.
   pub min_growth: u64,
+  /// A trim skips the full GC (and only runs `malloc_trim`) while the V8 heap
+  /// is at least this large, both as the last trim's GC left it and now: the
+  /// GC's cost grows with the live heap, and a heap that survived a full GC
+  /// at this size is mostly live data the GC can't free. `None`: never skip.
+  pub max_gc_heap: Option<u64>,
   pub trace: bool,
 }
 
@@ -69,6 +84,7 @@ impl Default for IdleTrimConfig {
       delay: DEFAULT_IDLE_DELAY,
       min_interval: DEFAULT_MIN_INTERVAL,
       min_growth: DEFAULT_MIN_GROWTH_BYTES,
+      max_gc_heap: Some(DEFAULT_MAX_GC_HEAP_BYTES),
       trace: false,
     }
   }
@@ -94,6 +110,11 @@ impl IdleTrimConfig {
       min_growth: number("DENO_IDLE_TRIM_MIN_GROWTH_MB")
         .map(|mb| mb.saturating_mul(1024 * 1024))
         .unwrap_or(DEFAULT_MIN_GROWTH_BYTES),
+      max_gc_heap: match number("DENO_IDLE_TRIM_MAX_GC_HEAP_MB") {
+        Some(0) => None,
+        Some(mb) => Some(mb.saturating_mul(1024 * 1024)),
+        None => Some(DEFAULT_MAX_GC_HEAP_BYTES),
+      },
       trace: matches!(get("DENO_IDLE_TRIM_TRACE").as_deref(), Some("1")),
     }
   }
@@ -160,6 +181,45 @@ impl IdleTrimScheduler {
   }
 }
 
+/// Whether a trim runs the full GC ([`IdleTrimConfig::max_gc_heap`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct GcGate {
+  max_heap: Option<u64>,
+  /// The V8 heap's used size right after the last trim's full GC: mostly
+  /// live data.
+  heap_after_last_gc: Option<u64>,
+}
+
+impl GcGate {
+  fn new(config: &IdleTrimConfig) -> Self {
+    Self {
+      max_heap: config.max_gc_heap,
+      heap_after_last_gc: None,
+    }
+  }
+
+  /// Whether this trim runs the GC, with the heap's used size now. It is
+  /// skipped only while the heap is over the limit both as the last GC left
+  /// it (live data, not a burst's garbage) and now (it hasn't shrunk below
+  /// the limit since); the first trim always runs it.
+  pub(crate) fn should_gc(&self, heap_used_now: u64) -> bool {
+    match (self.max_heap, self.heap_after_last_gc) {
+      (Some(max), Some(after_gc)) => after_gc < max || heap_used_now < max,
+      _ => true,
+    }
+  }
+
+  /// Records the heap's used size right after a trim's GC.
+  pub(crate) fn record_gc(&mut self, heap_used_after: u64) {
+    self.heap_after_last_gc = Some(heap_used_after);
+  }
+}
+
+thread_local! {
+  /// Set on the event loop's thread while it runs a trim.
+  static TRIMMING: Cell<bool> = const { Cell::new(false) };
+}
+
 /// Wraps the task's waker so a wake-up of the event loop (a timer, I/O, an op
 /// completing, a cross-thread task) is recorded as activity.
 struct ActivityWake {
@@ -173,7 +233,13 @@ impl Wake for ActivityWake {
   }
 
   fn wake_by_ref(self: &Arc<Self>) {
-    self.woken.store(true, Ordering::Release);
+    // A wake-up on the trimming thread during a trim comes from the trim
+    // itself (V8 posting the GC's follow-up tasks, finalizers): not new
+    // activity. One from any other thread (a blocking op completing, a
+    // worker's message) is, and is kept.
+    if !TRIMMING.with(Cell::get) {
+      self.woken.store(true, Ordering::Release);
+    }
     self.inner.wake_by_ref();
   }
 }
@@ -191,6 +257,7 @@ pub(crate) struct IdleTrim {
   read_rss: fn() -> Option<u64>,
   /// The RSS the last trim left.
   rss_after_trim: Option<u64>,
+  gc_gate: GcGate,
 }
 
 impl IdleTrim {
@@ -215,6 +282,7 @@ impl IdleTrim {
       sleep_deadline: None,
       read_rss,
       rss_after_trim: None,
+      gc_gate: GcGate::new(&config),
     }
   }
 
@@ -262,7 +330,7 @@ impl IdleTrim {
     cx: &mut Context<'_>,
     state: &mut S,
     poll_loop: impl FnOnce(&mut S, &mut Context<'_>) -> Poll<T>,
-    trim: impl FnOnce(&mut S),
+    trim: impl FnOnce(&mut S, &mut GcGate),
   ) -> Poll<T> {
     if self.woken.swap(false, Ordering::AcqRel) {
       self.scheduler.on_activity(Instant::now());
@@ -298,10 +366,14 @@ impl IdleTrim {
       if self.scheduler.take_due(now) {
         if self.grown_since_last_trim() {
           self.scheduler.record_trim(now);
-          trim(state);
+          // The GC's own follow-up wake-ups (V8's posted tasks, finalizers)
+          // come on this thread and are not new activity (`ActivityWake`);
+          // a wake-up from another thread during the trim is, and re-arms.
+          TRIMMING.with(|t| t.set(true));
+          let guard = TrimmingGuard;
+          trim(state, &mut self.gc_gate);
+          drop(guard);
           self.rss_after_trim = (self.read_rss)();
-          // The GC's own follow-up work (finalizers) is not new activity.
-          self.woken.store(false, Ordering::Release);
         }
         // Disarmed until the next wake-up.
         return Poll::Pending;
@@ -311,27 +383,50 @@ impl IdleTrim {
   }
 }
 
-/// A full GC, then `malloc_trim(0)`.
+/// Clears [`TRIMMING`] when the trim ends, unwinding included.
+struct TrimmingGuard;
+
+impl Drop for TrimmingGuard {
+  fn drop(&mut self) {
+    TRIMMING.with(|t| t.set(false));
+  }
+}
+
+/// A full GC (unless `gate` skips it), then `malloc_trim(0)`. Returns whether
+/// the GC ran.
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
-pub(crate) fn trim_now(isolate: &mut deno_core::v8::Isolate, trace: bool) {
+pub(crate) fn trim_now(
+  isolate: &mut deno_core::v8::Isolate,
+  trace: bool,
+  gate: &mut GcGate,
+) -> bool {
   let rss_before = if trace { rss_bytes() } else { None };
-  let start = Instant::now();
-  isolate.low_memory_notification();
-  let gc = start.elapsed();
+  let heap_used = isolate.get_heap_statistics().used_heap_size() as u64;
+  let gc = if gate.should_gc(heap_used) {
+    let start = Instant::now();
+    isolate.low_memory_notification();
+    let elapsed = start.elapsed();
+    gate.record_gc(isolate.get_heap_statistics().used_heap_size() as u64);
+    Some(elapsed)
+  } else {
+    None
+  };
   let start = Instant::now();
   // SAFETY: calling into libc; `malloc_trim` is thread-safe and touches no
   // Rust-side state.
   let released = unsafe { libc::malloc_trim(0) } != 0;
   let trim = start.elapsed();
   if trace {
-    print_trace(gc, trim, released, rss_before, rss_bytes());
+    print_trace(gc, heap_used, trim, released, rss_before, rss_bytes());
   }
+  gc.is_some()
 }
 
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
 #[allow(clippy::print_stderr, reason = "opt-in trace output")]
 fn print_trace(
-  gc: Duration,
+  gc: Option<Duration>,
+  heap_used: u64,
   trim: Duration,
   released: bool,
   rss_before: Option<u64>,
@@ -341,9 +436,12 @@ fn print_trace(
     b.map(|b| format!("{:.1}", b as f64 / 1048576.0))
       .unwrap_or_else(|| "?".into())
   };
+  let gc = match gc {
+    Some(gc) => format!("gc {:.2} ms", gc.as_secs_f64() * 1000.0),
+    None => format!("gc skipped (heap {} MB)", mb(Some(heap_used))),
+  };
   eprintln!(
-    "idle-trim: gc {:.2} ms, malloc_trim {:.2} ms (released: {}), rss {} -> {} MB",
-    gc.as_secs_f64() * 1000.0,
+    "idle-trim: {gc}, malloc_trim {:.2} ms (released: {}), rss {} -> {} MB",
     trim.as_secs_f64() * 1000.0,
     released,
     mb(rss_before),
@@ -353,7 +451,13 @@ fn print_trace(
 
 /// No-op off glibc Linux.
 #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
-pub(crate) fn trim_now(_isolate: &mut deno_core::v8::Isolate, _trace: bool) {}
+pub(crate) fn trim_now(
+  _isolate: &mut deno_core::v8::Isolate,
+  _trace: bool,
+  _gate: &mut GcGate,
+) -> bool {
+  false
+}
 
 #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
 fn rss_bytes() -> Option<u64> {
@@ -382,6 +486,7 @@ mod tests {
       delay: Duration::from_millis(delay_ms),
       min_interval: Duration::from_millis(min_interval_ms),
       min_growth: DEFAULT_MIN_GROWTH_BYTES,
+      max_gc_heap: Some(DEFAULT_MAX_GC_HEAP_BYTES),
       trace: false,
     }
   }
@@ -394,6 +499,7 @@ mod tests {
       "DENO_IDLE_TRIM_DELAY_MS" => Some("250".into()),
       "DENO_IDLE_TRIM_MIN_INTERVAL_MS" => Some(" 3000 ".into()),
       "DENO_IDLE_TRIM_MIN_GROWTH_MB" => Some("64".into()),
+      "DENO_IDLE_TRIM_MAX_GC_HEAP_MB" => Some("4096".into()),
       "DENO_IDLE_TRIM_TRACE" => Some("1".into()),
       _ => None,
     });
@@ -403,9 +509,15 @@ mod tests {
         delay: Duration::from_millis(250),
         min_interval: Duration::from_millis(3000),
         min_growth: 64 * 1024 * 1024,
+        max_gc_heap: Some(4096 * 1024 * 1024),
         trace: true,
       }
     );
+    // `0` turns the GC limit off.
+    let unlimited = IdleTrimConfig::from_lookup(|name| {
+      (name == "DENO_IDLE_TRIM_MAX_GC_HEAP_MB").then(|| "0".into())
+    });
+    assert_eq!(unlimited.max_gc_heap, None);
     // Garbage falls back to the default.
     let bad = IdleTrimConfig::from_lookup(|name| match name {
       "DENO_IDLE_TRIM_DELAY_MS" => Some("soon".into()),
@@ -522,7 +634,7 @@ mod tests {
             Poll::Pending
           }
         },
-        move |_| trims.set(trims.get() + 1),
+        move |_, _| trims.set(trims.get() + 1),
       )
     })
   }
@@ -597,7 +709,7 @@ mod tests {
         cx,
         &mut (),
         |_, _| Poll::<()>::Pending,
-        |_| trims.set(trims.get() + 1),
+        |_, _| trims.set(trims.get() + 1),
       )
     });
     let _ = tokio::time::timeout(window, fut).await;
@@ -642,5 +754,139 @@ mod tests {
     // pushed this one past the window.
     FAKE_RSS_SPACED.store(600 * MB, Ordering::SeqCst);
     assert_eq!(idle_period_within(&mut idle, ms(400)).await, 1);
+  }
+  fn no_rss() -> Option<u64> {
+    None
+  }
+
+  /// Lets idle periods pass on an always-pending loop whose trim calls
+  /// `during_trim` with the task's waker the first time; returns how many
+  /// trims ran within `window`.
+  async fn trims_with_a_wake_during_the_first(
+    during_trim: fn(&Waker),
+    window: Duration,
+  ) -> usize {
+    // No RSS reading: the growth gate never skips.
+    let mut idle = IdleTrim::with_rss_reader(config(50, 0), no_rss);
+    let waker = std::cell::RefCell::new(None::<Waker>);
+    let trims = Cell::new(0);
+    let fut = std::future::poll_fn(|cx| {
+      idle.poll(
+        cx,
+        &mut (),
+        |_, cx| {
+          *waker.borrow_mut() = Some(cx.waker().clone());
+          Poll::<()>::Pending
+        },
+        |_, _| {
+          trims.set(trims.get() + 1);
+          if trims.get() == 1
+            && let Some(waker) = waker.borrow().as_ref()
+          {
+            during_trim(waker);
+          }
+        },
+      )
+    });
+    let _ = tokio::time::timeout(window, fut).await;
+    trims.get()
+  }
+
+  #[tokio::test]
+  async fn a_wake_from_another_thread_during_a_trim_is_activity() {
+    // Work that arrives during the trim (a blocking op completing, a
+    // worker's message) wakes the loop from another thread: it is activity,
+    // so once that is idle again the loop is trimmed again. Clearing the flag
+    // after the trim dropped it, and the loop stayed disarmed (one trim).
+    let trims = trims_with_a_wake_during_the_first(
+      |waker| {
+        let waker = waker.clone();
+        std::thread::spawn(move || waker.wake()).join().unwrap();
+      },
+      Duration::from_millis(400),
+    )
+    .await;
+    assert_eq!(trims, 2);
+  }
+
+  #[tokio::test]
+  async fn a_wake_from_the_trim_itself_is_not_activity() {
+    // The GC's follow-up wake-ups (V8's posted tasks, finalizers) come on the
+    // trimming thread during the trim: not activity, so one trim only.
+    let trims = trims_with_a_wake_during_the_first(
+      Waker::wake_by_ref,
+      Duration::from_millis(400),
+    )
+    .await;
+    assert_eq!(trims, 1);
+    assert!(!TRIMMING.with(Cell::get), "the trim flag is left set");
+  }
+
+  #[test]
+  fn a_large_heap_skips_the_gc_after_the_first() {
+    const MB: u64 = 1024 * 1024;
+    let mut gate = GcGate::new(&IdleTrimConfig {
+      max_gc_heap: Some(1024 * MB),
+      ..IdleTrimConfig::default()
+    });
+    // The first trim always runs the GC, however large the heap.
+    assert!(gate.should_gc(3000 * MB));
+    // It left 2 GB live: later trims skip the GC while the heap is over the
+    // limit.
+    gate.record_gc(2000 * MB);
+    assert!(!gate.should_gc(2100 * MB));
+    assert!(!gate.should_gc(1024 * MB));
+    // The heap has shrunk below the limit (V8's own GCs freed the cache):
+    // cheap again, so the GC runs and its result is the new reference.
+    assert!(gate.should_gc(900 * MB));
+    gate.record_gc(300 * MB);
+    // A burst's garbage over a small live heap is still collected.
+    assert!(gate.should_gc(3000 * MB));
+  }
+
+  #[test]
+  fn the_gc_is_never_skipped_without_a_limit() {
+    let mut gate = GcGate::new(&IdleTrimConfig {
+      max_gc_heap: None,
+      ..IdleTrimConfig::default()
+    });
+    gate.record_gc(u64::MAX / 2);
+    assert!(gate.should_gc(u64::MAX / 2));
+    // The default limit is 1 GiB.
+    assert_eq!(
+      IdleTrimConfig::default().max_gc_heap,
+      Some(DEFAULT_MAX_GC_HEAP_BYTES)
+    );
+  }
+
+  /// On glibc Linux, against a real isolate: a trim whose GC leaves the heap
+  /// over the limit makes the next trim skip the GC.
+  #[cfg(all(target_os = "linux", target_env = "gnu"))]
+  #[tokio::test]
+  async fn trim_now_skips_the_gc_while_the_live_heap_is_over_the_limit() {
+    // In a tokio runtime: V8 posts delayed tasks (its memory reducer) through
+    // deno_core's platform, which needs one.
+    const MB: u64 = 1024 * 1024;
+    let mut runtime = deno_core::JsRuntime::new(Default::default());
+    // About 40 MB kept alive by a global.
+    runtime
+      .execute_script(
+        "keep.js",
+        "globalThis.keep = Array.from({ length: 400_000 }, (_, i) => \
+         ({ i, s: `item-${i}-${'x'.repeat(48)}` }));",
+      )
+      .unwrap();
+    let mut gate = GcGate::new(&IdleTrimConfig {
+      max_gc_heap: Some(16 * MB),
+      ..IdleTrimConfig::default()
+    });
+    assert!(trim_now(runtime.v8_isolate(), false, &mut gate));
+    assert!(!trim_now(runtime.v8_isolate(), false, &mut gate));
+    // Dropped: the heap falls below the limit and the GC runs again.
+    runtime
+      .execute_script("drop.js", "globalThis.keep = null;")
+      .unwrap();
+    runtime.v8_isolate().low_memory_notification();
+    assert!(trim_now(runtime.v8_isolate(), false, &mut gate));
   }
 }

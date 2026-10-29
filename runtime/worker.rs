@@ -1063,7 +1063,9 @@ impl MainWorker {
         cx,
         js_runtime,
         |js_runtime, cx| js_runtime.poll_event_loop(cx, options),
-        |js_runtime| crate::idle_trim::trim_now(js_runtime.v8_isolate(), trace),
+        |js_runtime, gc_gate| {
+          crate::idle_trim::trim_now(js_runtime.v8_isolate(), trace, gc_gate);
+        },
       )
     })
     .await

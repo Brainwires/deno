@@ -6131,6 +6131,47 @@ where the changes are discussed.
      `bind_call_ids_are_unique_across_concurrent_registers` keeps its
      receivers.
 
+165. **`fix(runtime)`: idle trim keeps a wake-up that arrives during a trim,
+     and skips the GC on a large live heap** (`fix/audit-lows-denext3`,
+     runtime; `runtime/idle_trim.rs`, `runtime/worker.rs`). The fork production
+     audit's R3, two edge behaviours of item 104:
+     - **A wake-up during the trim** (a blocking op completing, a worker's
+       message, from another thread during the 100-220 ms GC) was discarded by
+       the `woken.store(false)` after the trim, which was there for the GC's
+       own follow-up wake-ups (V8 posting tasks, finalizers); the task was
+       still polled but the scheduler stayed disarmed until the next wake-up.
+       One flag can't tell the two apart, so a compare-and-swap on it would
+       either drop both (as before) or keep both; they differ by thread: the
+       trim runs on the event loop's thread, and anything that wakes the loop
+       from that thread during the trim is the trim's own work. The trim now
+       sets a thread-local flag, `ActivityWake` doesn't record a wake-up made
+       on that thread while it is set, and the post-trim store is gone, so a
+       wake-up from any other thread re-arms the scheduler. (A V8 helper
+       thread that posts a task during the GC counts as activity; the growth
+       gate then skips that idle period's check.)
+     - **Large heaps:** the full GC's cost grows with the live heap (on
+       biscuits, 140-150 ms for a ~190 MB heap of small objects in this spec),
+       and a server holding a large heap on purpose (an in-memory cache) that
+       grows 16 MB between sparse requests paid it in front of a request every
+       `min_interval`. Raising `DENO_IDLE_TRIM_MIN_GROWTH_MB` / `DELAY_MS` only
+       spaces those GCs out, so the trim now skips the GC instead: once a
+       trim's GC leaves the V8 heap at `DENO_IDLE_TRIM_MAX_GC_HEAP_MB` or more
+       (default 1024; `0` never skips), later trims run only `malloc_trim(0)`
+       while the heap's used size is still over the limit. The size the last
+       GC left is live data, not a burst's garbage, so a burst on a small heap
+       is still collected; once V8's own GCs bring the heap under the limit the
+       next trim runs the GC again. The first trim always runs it.
+       `DENO_IDLE_TRIM_TRACE` prints `gc skipped (heap N MB)` for such a trim.
+     Tests (`runtime/idle_trim.rs`):
+     `a_wake_from_another_thread_during_a_trim_is_activity` (fails on the
+     base: one trim, not two), `a_wake_from_the_trim_itself_is_not_activity`,
+     `a_large_heap_skips_the_gc_after_the_first`,
+     `the_gc_is_never_skipped_without_a_limit`,
+     `trim_now_skips_the_gc_while_the_live_heap_is_over_the_limit` (glibc
+     Linux, a real isolate), `config_reads_the_environment`; spec
+     `run/idle_trim` `large_heap_skips_gc` (fails on the base: the second trim
+     runs a 140 ms GC).
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150) are what the prebuilt

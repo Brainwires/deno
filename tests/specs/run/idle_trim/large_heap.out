@@ -1,0 +1,5 @@
+first
+idle-trim: gc [WILDLINE] ms, malloc_trim [WILDLINE] ms (released: [WILDLINE]), rss [WILDLINE] MB
+second
+idle-trim: gc skipped (heap [WILDLINE] MB), malloc_trim [WILDLINE] ms (released: [WILDLINE]), rss [WILDLINE] MB
+kept: 600000
