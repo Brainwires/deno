@@ -5485,7 +5485,7 @@ function requireFakeTimersSrc () {
 	            }
 
 	            if (oldMode === "interval") {
-	                originalClearInterval(clock.attachedInterval);
+	                (globalThis.Deno?.[globalThis.Deno.internal]?.vitestSystemTimers?.clearInterval ?? originalClearInterval)(clock.attachedInterval);
 	            }
 
 	            clock.tickMode = {
@@ -5526,7 +5526,7 @@ function requireFakeTimersSrc () {
 	                channel.port2.close();
 	                // setTimeout ensures microtask queue is emptied
 	                await new Promise((resolve) => {
-	                    originalSetTimeout(resolve);
+	                    (globalThis.Deno?.[globalThis.Deno.internal]?.vitestSystemTimers?.setTimeout ?? originalSetTimeout)(resolve);
 	                });
 	            }
 
@@ -6300,7 +6300,7 @@ function requireFakeTimersSrc () {
 	     */
 	    function createIntervalTick(clock, delta) {
 	        const intervalTick = doIntervalTick.bind(null, clock, delta);
-	        const intervalId = originalSetInterval(intervalTick, delta);
+	        const intervalId = (globalThis.Deno?.[globalThis.Deno.internal]?.vitestSystemTimers?.setInterval ?? originalSetInterval)(intervalTick, delta);
 	        clock.attachedInterval = intervalId;
 	    }
 

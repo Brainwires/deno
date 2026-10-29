@@ -975,6 +975,25 @@ globalThis.Deno[globalThis.Deno.internal].takeVitestRunnerFs = () => {
     allowImport: (url) => op_vitest_runner_allow_import(token, String(url)),
   });
 };
+// Timers the Vitest compatibility layer keeps for Vitest's own machinery,
+// not for the test that happens to be running: the runner's throttled task
+// updates, and the timers Vitest's fake clock keeps while it is installed (the
+// interval that advances mocked time with `shouldAdvanceTime` or tick mode
+// "interval", and the "nextTimerAsync" tick loop), which Vitest leaves
+// installed across tests until `vi.useRealTimers()`. They are system timers,
+// which the leak sanitizers ignore (like `AbortSignal.timeout`'s). Refed, like
+// the timers they replace.
+globalThis.Deno[globalThis.Deno.internal].vitestSystemTimers = ObjectFreeze({
+  setTimeout: (callback, delay) =>
+    core.createSystemTimer(callback, delay, true),
+  setInterval: (callback, delay) =>
+    core.createSystemInterval(callback, delay, true),
+  clearTimeout: cancelSystemTimer,
+  clearInterval: cancelSystemTimer,
+});
+function cancelSystemTimer(timer) {
+  if (timer != null) core.cancelTimer(timer);
+}
 // Used by the Vitest compatibility layer's module mocking (see
 // cli/tools/test/vitest/mocks.rs).
 globalThis.Deno[globalThis.Deno.internal].vitestMocks = {

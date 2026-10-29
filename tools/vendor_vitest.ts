@@ -69,6 +69,10 @@ interface Patch {
 /** Vitest's own environment reads, which need no --allow-env. */
 const INTERNAL_ENV = "globalThis.Deno[globalThis.Deno.internal].vitestEnv()";
 
+/** Timers for Vitest's own machinery, invisible to the leak sanitizers. */
+const SYSTEM_TIMERS =
+  "globalThis.Deno?.[globalThis.Deno.internal]?.vitestSystemTimers";
+
 const PATCHES: Patch[] = [
   {
     file: "tinyrainbow.js",
@@ -195,6 +199,76 @@ const PATCHES: Patch[] = [
     replace: `function formatTitle(template, items, idx) {
 	const denoFormatTitle = globalThis[Symbol.for("deno.vitest.formatTitle")];
 	if (denoFormatTitle) return denoFormatTitle(template, items, idx);`,
+  },
+  {
+    file: "runner.js",
+    why: "let the Deno bridge see which tests can set up a file- or " +
+      "worker-scoped fixture (exempt from the leak sanitizers, see " +
+      "runtime.js)",
+    find: "export { limitConcurrency as A,",
+    replace:
+      "export { getTestFixtures as denoGetTestFixtures, limitConcurrency as A,",
+  },
+  {
+    file: "runner.js",
+    why: "record the fixtures a test function asks for when it is " +
+      "collected, so the Deno bridge knows which tests can set up a file- " +
+      "or worker-scoped fixture (a malformed one still fails when it runs)",
+    find:
+      `		setTestFixture(context, options.fixtures ?? new TestFixtures());\n`,
+    replace:
+      `		setTestFixture(context, options.fixtures ?? new TestFixtures());\n` +
+      `		if (handler) try {\n` +
+      `			Object.defineProperty(task, Symbol.for("deno.vitest.usedFixtures"), { value: getUsedProps(handler) });\n` +
+      `		} catch {}\n`,
+  },
+  {
+    file: "runner.js",
+    why: "the runner's throttled task updates use a system timer the leak " +
+      "sanitizers ignore (Deno.internal.vitestSystemTimers, see " +
+      "cli/js/40_test.js): it is the runner's, not the running test's",
+    find: `			clearTimeout(pendingCall);
+			pendingCall = void 0;`,
+    replace:
+      `			(${SYSTEM_TIMERS}?.clearTimeout ?? clearTimeout)(pendingCall);
+			pendingCall = void 0;`,
+  },
+  {
+    file: "runner.js",
+    why: "start the throttled task update with the system timer (see the " +
+      "patch above)",
+    find: `		pendingCall ??= setTimeout(call.bind(this), ms, ...args);`,
+    replace:
+      `		pendingCall ??= (${SYSTEM_TIMERS}?.setTimeout ?? setTimeout)(() => call.apply(this, args), ms);`,
+  },
+  {
+    file: "vitest_core.js",
+    why: "the fake clock's own auto-advance interval (shouldAdvanceTime, " +
+      'tick mode "interval") is a system timer the leak sanitizers ignore ' +
+      "(Deno.internal.vitestSystemTimers, see cli/js/40_test.js)",
+    find:
+      `	        const intervalId = originalSetInterval(intervalTick, delta);`,
+    replace:
+      `	        const intervalId = (${SYSTEM_TIMERS}?.setInterval ?? originalSetInterval)(intervalTick, delta);`,
+  },
+  {
+    file: "vitest_core.js",
+    why: "clear the fake clock's auto-advance interval with the function " +
+      "that started it (see the patch above)",
+    find: `	                originalClearInterval(clock.attachedInterval);`,
+    replace:
+      `	                (${SYSTEM_TIMERS}?.clearInterval ?? originalClearInterval)(clock.attachedInterval);`,
+  },
+  {
+    file: "vitest_core.js",
+    why: 'the fake clock\'s own "nextTimerAsync" tick loop uses a system ' +
+      "timer the leak sanitizers ignore (see the patches above)",
+    find: `	                await new Promise((resolve) => {
+	                    originalSetTimeout(resolve);
+	                });`,
+    replace: `	                await new Promise((resolve) => {
+	                    (${SYSTEM_TIMERS}?.setTimeout ?? originalSetTimeout)(resolve);
+	                });`,
   },
   {
     file: "environments.js",

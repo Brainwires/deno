@@ -593,6 +593,37 @@ where the changes are discussed.
     patches for these (test name separator, `formatTitle` hook, unawaited async
     assertions, array equality).
 
+    **Leak sanitizers** (item 157): a Vitest or Jest test is checked for leaks
+    the way `deno test` is configured to check any test (deno.json's
+    `test.sanitizeOps` / `test.sanitizeResources`, `--sanitize-ops` /
+    `--sanitize-resources`, `DENO_TEST_SANITIZE_OPS` /
+    `DENO_TEST_SANITIZE_RESOURCES`, `Deno.test.sanitizer()`). Deno checks what
+    starts and finishes while a test's Deno test function runs; for a Vitest
+    test that is the test with its `beforeEach` / `afterEach` / `aroundEach`
+    hooks and test-scoped fixtures, plus what Vitest's runner does before it
+    stops at the next test. Left out, registered with both sanitizers off (their
+    leaks are not blamed on a later test either):
+
+    - the test whose span runs the start of a suite with `beforeAll` /
+      `aroundAll` hooks (the test run just before the suite's first test, or the
+      file's first test when the hooks run before any), and the suite's last
+      test, whose span runs its `afterAll` hooks and the end of its `aroundAll`
+      hooks; setup files' hooks are the file's;
+    - a test that can set up a file- or worker-scoped fixture: its function asks
+      for one (directly or through another fixture) or one is `auto`; under a
+      `beforeEach` / `afterEach` / `aroundEach` hook, which can ask for one too,
+      every test whose `test` has one; and the file's last test when any test
+      can, as its span tears them down.
+
+    Vitest's own timers are system timers, which the sanitizers ignore (like
+    `AbortSignal.timeout`'s), through `Deno[Deno.internal].vitestSystemTimers`
+    and marked patches of the vendored runtime: the runner's throttled
+    task-update timer, and the real timers the fake clock keeps while installed
+    (the interval that advances mocked time with `shouldAdvanceTime` or tick
+    mode `"interval"`, and the `"nextTimerAsync"` loop's timer). A fake timer
+    never was a real one, so queued fake timers are not leaks. `.concurrent`
+    tests need no exception: the bridge runs one at a time.
+
 24. **`feat(sql)`: `Deno.SQL` / `Deno.sql`, a built-in SQL client** (`feat/sql`,
     `ext/sql`): Bun's `Bun.sql` surface over Postgres and SQLite, with no npm.
     `new Deno.SQL(url | options)` returns a tagged-template function; every
@@ -6400,6 +6431,73 @@ where the changes are discussed.
      external crate) needs no patch. Test: `cache::download_deadlines`'s
      `jsr_never_answers` now expects the per-attempt report under the manifest
      line; before the fix it ended at `failed.`
+
+<!-- Items 152-156 are on fix/node-compat2-denext3 and fix/npm-lows-denext3; renumber at integration. -->
+
+157. **`fix(test)`: Vitest tests follow `deno test`'s sanitizer settings**
+     (`fix/vitest-sanitizers-denext3`, CLI only;
+     `cli/tools/test/vitest/js/runtime.js`, `cli/js/40_test.js`,
+     `tools/vendor_vitest.ts` and the vendored `runner.js` / `vitest_core.js`).
+     The Vitest layer (item 23) registered every Vitest and Jest test with
+     `Deno.test({ sanitizeOps: false, sanitizeResources: false
+     })`. A
+     test's own options outrank everything else (`Deno.test.sanitizer()`, the
+     flags, the `DENO_TEST_SANITIZE_*` variables, deno.json's `test` options),
+     so no Vitest test was ever checked for leaks: a project that turned the
+     sanitizers on (denext, for its own suite) found its Vitest tests exempt.
+     The options came with the bridge itself, unexplained; turning them back on
+     showed what they hid besides real leaks. Deno checks what starts and
+     finishes while a test's Deno test function runs, and the bridge's function
+     for a Vitest test waits until Vitest's runner stops at the next test, so a
+     test's span also holds the `afterAll` hooks of the suites it ends and the
+     `beforeAll` hooks of the suites the next test starts: a server a `describe`
+     opens in `beforeAll` and closes in `afterAll` was a leak of the test before
+     the suite and a "closed during the test" of its last test. File- and
+     worker-scoped fixtures (set up by the first test that asks, torn down after
+     the last) did the same, and so did Vitest's own timers: the runner's
+     throttled task-update timer (pending for up to 100 ms after a task update)
+     landed on whichever test was running, and the fake clock's real
+     auto-advance interval (`shouldAdvanceTime`) lives as long as the clock,
+     which Vitest keeps installed across tests until `vi.useRealTimers()`;
+     neither Vitest nor `@sinonjs/fake-timers` resets it per test.
+
+     The options are gone, so the normal precedence applies, except for tests
+     whose span cannot be the test's alone (`sanitizerExemptTests`, computed
+     from the collected tree after `--filter` is applied, since which tests run
+     decides the spans): the test whose span starts a suite with `beforeAll` /
+     `aroundAll` hooks (the file's first test when they run before any test, as
+     Vitest's runner starts them while Deno loads the module), a suite's last
+     test when it has `afterAll` / `aroundAll` hooks, a test that can set up a
+     file- or worker-scoped fixture (its function asks for one, directly or
+     through another fixture, or one is `auto`; every test of such a
+     `test.extend` under per-test hooks, which can ask for one too), and the
+     file's last test when any can. Those register with both sanitizers off, and
+     their leaks are not blamed on later tests (`record_ignored_leaks`). The
+     runner's throttle timer and the fake clock's own timers (the auto-advance
+     interval, also for tick mode `"interval"`, and the `"nextTimerAsync"`
+     loop's timer) become system timers, which the sanitizers ignore like
+     `AbortSignal.timeout`'s: a new `Deno[Deno.internal].vitestSystemTimers`
+     (`core.createSystemTimer` / `createSystemInterval` / `cancelTimer`, refed
+     like the timers they replace) and five marked patches in
+     `tools/vendor_vitest.ts`. Two more patches let the bridge see fixtures:
+     `getTestFixtures` is exported, and a test's requested fixtures (Vitest's
+     `getUsedProps`) are recorded when it is collected (a malformed
+     destructuring still fails when the test runs). Fake timers queued and never
+     run were never real timers and are not leaks; `.concurrent` tests need
+     nothing, as the bridge runs one at a time. Vitest has no per-test leak
+     check of its own (`teardownTimeout` and the `hanging-process` reporter are
+     about the whole process), so this is Deno's check on Vitest's semantics,
+     not a port of a Vitest feature.
+
+     Tests: `tests/specs/test/vitest_sanitizers` (a timer leaked by one Vitest
+     test fails it, and only it, with the sanitizers enabled by deno.json, by
+     the flags and by `DENO_TEST_SANITIZE_OPS`, and passes with them disabled;
+     queued fake timers, `advanceTimersByTimeAsync`, both auto-tick modes and a
+     `shouldAdvanceTime` clock left installed across three tests pass with them
+     enabled; suite hooks and a file-scoped fixture holding listeners pass,
+     while a leak in a test between them still fails). Before the fix the
+     enabled runs passed every test; with the options removed alone, the fake
+     clock and the hooks were reported as leaks.
 
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,

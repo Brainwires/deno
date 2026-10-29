@@ -1,0 +1,19 @@
+running 3 tests from ./leak_test.ts
+leaks > clears its timer ... ok ([WILDCARD])
+leaks > leaks a timer ... FAILED ([WILDCARD])
+leaks > after the leak ... ok ([WILDCARD])
+
+ ERRORS 
+
+leaks > leaks a timer => ./leak_test.ts:9:3
+error: Leaks detected:
+  - A timer was started in this test, but never completed. This is often caused by not calling `clearTimeout`.
+To get more details where leaks occurred, run again with the --trace-leaks flag.
+
+ FAILURES 
+
+leaks > leaks a timer => ./leak_test.ts:9:3
+
+FAILED | 2 passed | 1 failed ([WILDCARD])
+
+error: Test failed

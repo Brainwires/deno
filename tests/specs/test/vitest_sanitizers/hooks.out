@@ -1,0 +1,29 @@
+running 7 tests from ./hooks_test.ts
+a server for the whole suite > first ... ok ([WILDCARD])
+a server for the whole suite > leaks a timer ... FAILED ([WILDCARD])
+a server for the whole suite > last ... ok ([WILDCARD])
+a file-scoped fixture > sets it up ... ok ([WILDCARD])
+a file-scoped fixture > uses it again ... ok ([WILDCARD])
+a file-scoped fixture > leaks a timer too ... FAILED ([WILDCARD])
+a file-scoped fixture > tears it down ... ok ([WILDCARD])
+
+ ERRORS 
+
+a server for the whole suite > leaks a timer => ./hooks_test.ts:29:3
+error: Leaks detected:
+  - A timer was started in this test, but never completed. This is often caused by not calling `clearTimeout`.
+To get more details where leaks occurred, run again with the --trace-leaks flag.
+
+a file-scoped fixture > leaks a timer too => ./hooks_test.ts:47:3
+error: Leaks detected:
+  - A timer was started in this test, but never completed. This is often caused by not calling `clearTimeout`.
+To get more details where leaks occurred, run again with the --trace-leaks flag.
+
+ FAILURES 
+
+a server for the whole suite > leaks a timer => ./hooks_test.ts:29:3
+a file-scoped fixture > leaks a timer too => ./hooks_test.ts:47:3
+
+FAILED | 5 passed | 2 failed ([WILDCARD])
+
+error: Test failed
