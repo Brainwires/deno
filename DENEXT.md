@@ -6064,9 +6064,104 @@ where the changes are discussed.
      `test_cli_records_the_glibc_ceiling` and
      `test_a_malformed_glibc_ceiling_is_refused`.
 
+<!-- Items 152-165 are on the other denext3 branches; renumber at integration. -->
+
+166. **`fix(ext/node)`: better-sqlite3 under Jest's module registry**
+     (`feat/nest-g6-g8-denext3`; `ext/node/polyfills/01_require.js`,
+     `ext/node/polyfills/internal/better_sqlite3.js`,
+     `libs/npm_installer/local.rs`, `libs/npm_installer/hoisted.rs`). Item 61
+     serves better-sqlite3's entry modules from the host's CommonJS loader, but
+     Jest's module registry reads and evaluates the package's `lib/database.js`
+     itself, so under real Jest an app on better-sqlite3 (TypeORM
+     `type: 'better-sqlite3'`, Drizzle, Knex) failed with
+     `Could not locate the bindings file` while `deno run` / `deno test` worked
+     (the Nest phase 0 report's G6). `database.js` loads its addon with
+     `require('bindings')('better_sqlite3.node')`; `bindings` finds the file on
+     disk through Jest's resolver, and Jest hands a `.node` file to the host's
+     `require`. Two parts:
+     - the host's `.node` loader (and so `process.dlopen`) answers a file named
+       `better_sqlite3.node` whose nearest package.json, at most five
+       directories up, is named `better-sqlite3` with the implementation in the
+       addon's own shape (`createAddon()`): `setErrorConstructor()`, then
+       `new addon.Database(filename, filenameGiven, anonymous, readonly,
+       fileMustExist, timeout, verbose, buffer)`
+       with the methods the package's JavaScript calls on `this[cppdb]`
+       (`prepare(sql, db,
+       pragmaMode)`, `function` / `aggregate` with
+       their positional options, `backup` as a `transfer()` / `close()` object
+       the package polls, `serialize(attached)`, ...). A statement's `database`
+       is the package's own Database object, a pragma-mode statement reads as
+       the native one does (`reader` true, `[]` for a pragma that sets), and
+       SQLite errors are the package's own `SqliteError` class (the one its
+       JavaScript gave `setErrorConstructor()`), so `instanceof` holds inside
+       the registry. The host's require cache keeps one addon per process while
+       Jest evaluates the package once per test file, so the addon's
+       `isInitialized` always reads false: each `new Database()` passes its own
+       registry's class, which that database keeps (the native addon keeps the
+       first test file's, and a later file's `toThrow(SqliteError)` fails when
+       the files share a worker);
+     - `deno install` writes a placeholder `build/Release/better_sqlite3.node`
+       into a fresh better-sqlite3 copy in `node_modules` (isolated and hoisted
+       layouts) for `bindings` to find, since the package's install script,
+       which builds the real file, doesn't run (item 61). Not over a file that
+       is already there (a hard link into the npm cache is never written
+       through), and not with `DENO_NO_BETTER_SQLITE3_COMPAT` set; an install
+       script that does run replaces it. A package an earlier install already
+       put in `node_modules` gets it on its next fresh copy (remove
+       `node_modules/better-sqlite3`, or `--reload`).
+       `DENO_NO_BETTER_SQLITE3_COMPAT=1` loads the file as an addon, as before.
+       Within Jest the implementation's objects (rows, `TypeError`s) come from
+       the host realm, not the test's vm context, as Node's own built-ins' do
+       there: `toEqual` matches a row, `toStrictEqual` against a literal does
+       not (Jest's cross-realm constructor check). Tests: spec
+       `node/better_sqlite3_jest_registry` (a registry like jest-runtime's
+       evaluating the real better-sqlite3 12.11.1 `lib/` and `bindings` 1.5.0 in
+       a vm context: pragmas, a nested transaction, user function and aggregate,
+       the package's `SqliteError`, `iterate`, `serialize`, `backup`; and the
+       opt-out); unit test `better_sqlite3_placeholder`
+       (`libs/npm_installer/local.rs`). Without the fix the spec fails with
+       `invalid ELF header` on the placeholder, and with no placeholder with
+       `Could not locate the bindings file`, as real Jest 30.2.0 did on
+       `3.0.0-denext.2`.
+
+167. **`fix(ext/node)`: a shell-spawned `node` shim on an npm script gets the
+     npm resolution** (`feat/nest-g6-g8-denext3`;
+     `ext/node/polyfills/internal/child_process.ts`).
+     `deno run -A npm:@nestjs/cli new <app>` failed with
+     `Cannot find module 'symbol-observable'` (the Nest phase 0 report's G7):
+     the CLI runs
+     `spawn('node "<cache>/@angular-devkit/schematics-cli/bin/schematics.js" ...', { shell: true })`,
+     the `node` Deno puts on `PATH` (no real Node.js installed) ran the script
+     from the global npm cache, and without the parent's npm resolution the
+     package's own dependencies didn't resolve. A child spawned on
+     `Deno.execPath()` already gets that state (upstream's
+     `spawn_keeps_npm_state`); a shell command didn't. When this process put the
+     `node` shim on `PATH` (`DENO_NODE_SHIM_ACTIVE`) and a `/bin/sh -c` or
+     `cmd.exe /d /s /c` command starts with `node` (or `node.exe` on Windows) on
+     a script inside an npm package, the child now gets the state file too. With
+     a real `node` on `PATH` nothing changes. Test: spec
+     `node/shell_node_keeps_npm_state` (unix, `PATH` empty: a package in the
+     global cache runs `node "<its script>"` through a shell and the script
+     imports its dependency), new test package
+     `@denotest/shell-node-keeps-npm-state`.
+
+168. **`fix(task)`: a package.json script doesn't get npm's `--`**
+     (`feat/nest-g6-g8-denext3`, CLI only; `cli/tools/task.rs`).
+     `deno task test:e2e -- --forceExit` ran `jest -- --forceExit`, so Jest took
+     `--forceExit` for a test path pattern (the Nest phase 0 report's G8);
+     `npm run x -- args` passes `args` only ("Use `--` to pass `-`-prefixed
+     flags and options which would otherwise be parsed by npm",
+     docs.npmjs.com/cli/commands/npm-run-script). A package.json script now gets
+     its arguments without a leading `--` (`-- a -- b` gives `a -- b`). Only a
+     leading one: the npm shim (`cli/npm_shim.rs`) already drops npm's own `--`
+     and forwards `npm run x -- a -- b` as `deno task x a -- b`, which must keep
+     its `--`. A deno.json task is unchanged: it gets every argument, `--`
+     included (upstream's behaviour, unchanged on its `main`). Spec:
+     `task/package_json_double_dash` (`args: -- --forceExit a` before).
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
-118, 119, 126, 127, 129, 136, 137, 144-148, 150) are what the prebuilt
+118, 119, 126, 127, 129, 136, 137, 144-148, 150, 166, 167) are what the prebuilt
 `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
 in the branch too, but a stock CLI does not run them; denext's own launcher
