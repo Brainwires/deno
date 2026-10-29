@@ -560,6 +560,13 @@ jobs:
           rustup toolchain install "$tc" --profile minimal --no-self-update
           echo "RUSTUP_TOOLCHAIN=$tc" >>"$GITHUB_ENV"
 
+      # The `v8` crate is Brainwires/rusty_v8 (Cargo.toml's [patch.crates-io]):
+      # its prebuilt library and binding come from that repository's release,
+      # checked against .github/denext-runtime/rusty_v8.sha256, never from
+      # denoland's (DENEXT.md item 162). Fails closed.
+      - name: Prebuilt V8
+        run: python3 -I .github/denext-runtime/fetch_rusty_v8.py --target "${{ matrix.target }}" --dest "$RUNNER_TEMP/rusty_v8" --github-env
+
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           prefix-key: denext-denort-v1
@@ -793,6 +800,13 @@ jobs:
           if [ "${{ matrix.target }}" = aarch64-pc-windows-msvc ]; then tc="$tc-${{ matrix.target }}"; fi
           rustup toolchain install "$tc" --profile minimal --no-self-update
           echo "RUSTUP_TOOLCHAIN=$tc" >>"$GITHUB_ENV"
+
+      # The `v8` crate is Brainwires/rusty_v8 (Cargo.toml's [patch.crates-io]):
+      # its prebuilt library and binding come from that repository's release,
+      # checked against .github/denext-runtime/rusty_v8.sha256, never from
+      # denoland's (DENEXT.md item 162). Fails closed.
+      - name: Prebuilt V8
+        run: python3 -I .github/denext-runtime/fetch_rusty_v8.py --target "${{ matrix.target }}" --dest "$RUNNER_TEMP/rusty_v8" --github-env
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
