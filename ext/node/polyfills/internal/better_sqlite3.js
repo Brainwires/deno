@@ -163,11 +163,13 @@ Object.defineProperty(SqliteError.prototype, "name", {
 
 // node:sqlite reports an error SQLite raised as ERR_SQLITE_ERROR with the
 // extended result code in `errcode`; better-sqlite3 throws SqliteError with
-// the code's name. Its own state errors are TypeErrors.
-function convertError(err) {
+// the code's name. Its own state errors are TypeErrors. A database opened
+// through the addon shape (`createAddon`) throws the package's own
+// SqliteError class, the one its JavaScript gave `setErrorConstructor()`.
+function convertError(err, ErrorClass = SqliteError) {
   if (err === null || typeof err !== "object") return err;
   if (err.code === "ERR_SQLITE_ERROR" && typeof err.errcode === "number") {
-    const converted = new SqliteError(err.message, codeName(err.errcode));
+    const converted = new ErrorClass(err.message, codeName(err.errcode));
     converted.stack = err.stack?.replace(/^Error/, "SqliteError");
     return converted;
   }
@@ -182,6 +184,14 @@ function convertError(err) {
 const kDb = Symbol("db");
 const kStmt = Symbol("stmt");
 const kState = Symbol("state");
+// a statement's connection (its public `database` may be the package's own
+// Database object, through the addon shape)
+const kOwner = Symbol("owner");
+const kAddon = Symbol("addon");
+
+function errorClassOf(database) {
+  return database[kState].SqliteError;
+}
 
 const BUSY = "This database connection is busy executing a query";
 
@@ -385,7 +395,13 @@ function hasTrailingStatement(sql) {
   return false;
 }
 
-function prepareStatement(database, sql, internal) {
+function prepareStatement(
+  database,
+  sql,
+  internal,
+  publicDatabase = database,
+  pragmaMode = false,
+) {
   if (typeof sql !== "string") {
     throw new TypeError("Expected first argument to be a string");
   }
@@ -405,9 +421,9 @@ function prepareStatement(database, sql, internal) {
   try {
     stmt = database[kDb].prepare(sql);
   } catch (err) {
-    throw convertError(err);
+    throw convertError(err, errorClassOf(database));
   }
-  return new Statement(stmt, sql, database, kStmt);
+  return new Statement(stmt, sql, database, kStmt, publicDatabase, pragmaMode);
 }
 
 // Rows come back from node:sqlite as arrays (so a join's same-named columns
@@ -543,7 +559,7 @@ function expandSql(source, info, params) {
 }
 
 class Statement {
-  constructor(stmt, source, database, token) {
+  constructor(stmt, source, database, token, publicDatabase, pragmaMode) {
     if (token !== kStmt) {
       throw new TypeError(
         "Statements can only be constructed by the db.prepare() method",
@@ -555,8 +571,9 @@ class Statement {
       info = statementInfo(stmt);
       columns = stmt.columns();
     } catch (err) {
-      throw convertError(err);
+      throw convertError(err, errorClassOf(database));
     }
+    this[kOwner] = database;
     this[kState] = {
       info,
       columns,
@@ -569,12 +586,14 @@ class Statement {
     };
     stmt.setReturnArrays(true);
     Object.defineProperty(this, "database", {
-      value: database,
+      value: publicDatabase ?? database,
       enumerable: true,
     });
     Object.defineProperty(this, "source", { value: source, enumerable: true });
+    // the addon's pragma mode (the package's `pragma()`) reads any
+    // statement, as better-sqlite3's native Statement does
     Object.defineProperty(this, "reader", {
-      value: columns.length > 0,
+      value: columns.length > 0 || pragmaMode === true,
       enumerable: true,
     });
     Object.defineProperty(this, "readonly", {
@@ -588,7 +607,7 @@ class Statement {
   }
 
   #assertUsable() {
-    const database = this.database;
+    const database = this[kOwner];
     assertOpen(database);
     assertNotBusy(database);
     if (this[kState].iterating) {
@@ -599,7 +618,7 @@ class Statement {
   // Options may change while the connection is closed, not while this
   // statement is running.
   #assertIdle() {
-    assertNotBusy(this.database);
+    assertNotBusy(this[kOwner]);
     if (this[kState].iterating) {
       throw new TypeError("This statement is busy executing a query");
     }
@@ -627,19 +646,19 @@ class Statement {
   }
 
   #trace(params) {
-    const verbose = this.database[kState].verbose;
+    const verbose = this[kOwner][kState].verbose;
     if (verbose) verbose(expandSql(this.source, this[kState].info, params));
   }
 
   // Runs `fn` with the connection marked busy, converting node:sqlite's
   // errors to better-sqlite3's.
   #execute(fn) {
-    const dbState = this.database[kState];
+    const dbState = this[kOwner][kState];
     dbState.busy = true;
     try {
       return fn(this[kStmt]);
     } catch (err) {
-      throw convertError(err);
+      throw convertError(err, errorClassOf(this[kOwner]));
     } finally {
       dbState.busy = false;
     }
@@ -699,7 +718,7 @@ class Statement {
 
   run(...args) {
     this.#assertUsable();
-    const database = this.database;
+    const database = this[kOwner];
     if (!this.readonly) assertUsable(database);
     const params = this.#params(args);
     const state = this[kState];
@@ -749,7 +768,8 @@ class Statement {
     const params = this.#params(args);
     const state = this[kState];
     const stmt = this[kStmt];
-    const dbState = this.database[kState];
+    const dbState = this[kOwner][kState];
+    const ErrorClass = errorClassOf(this[kOwner]);
     stmt.setReadBigInts(state.safeIntegers || state.lossy);
     const inner = this.#execute((stmt) => stmt.iterate(...params));
     let done = false;
@@ -791,7 +811,7 @@ class Statement {
         } catch (err) {
           dbState.busy = false;
           finish();
-          throw convertError(err);
+          throw convertError(err, ErrorClass);
         }
         dbState.busy = false;
         if (result.done) {
@@ -846,13 +866,13 @@ class Statement {
 
   columns() {
     this.#assertReader("columns");
-    assertOpen(this.database);
-    assertNotBusy(this.database);
+    assertOpen(this[kOwner]);
+    assertNotBusy(this[kOwner]);
     let columns;
     try {
       columns = this[kStmt].columns();
     } catch (err) {
-      throw convertError(err);
+      throw convertError(err, errorClassOf(this[kOwner]));
     }
     this[kState].columns = columns;
     return columns.map((c) => ({
@@ -1008,7 +1028,11 @@ function Database(filenameGiven, options) {
 }
 
 class DatabaseImpl {
-  constructor(filenameGiven, options) {
+  // `addon` is the addon shape's internal options, never a user's argument
+  constructor(filenameGiven, options, addon) {
+    const ErrorClass = addon?.[kAddon] === true
+      ? addon.SqliteError
+      : SqliteError;
     let buffer;
     if (isBlob(filenameGiven)) {
       buffer = filenameGiven;
@@ -1063,7 +1087,7 @@ class DatabaseImpl {
         );
       }
       if ((fileMustExist || readonly) && !fs.existsSync(filename)) {
-        throw new SqliteError(
+        throw new ErrorClass(
           "unable to open database file",
           "SQLITE_CANTOPEN",
         );
@@ -1096,7 +1120,7 @@ class DatabaseImpl {
       db.exec(`PRAGMA busy_timeout = ${timeout}`);
       db.enableDefensive(true);
     } catch (err) {
-      throw convertError(err);
+      throw convertError(err, ErrorClass);
     }
 
     this[kDb] = db;
@@ -1106,6 +1130,7 @@ class DatabaseImpl {
       busy: false,
       iterators: 0,
       verbose: verbose ?? null,
+      SqliteError: ErrorClass,
     };
     Object.defineProperty(this, "name", {
       value: filenameGiven,
@@ -1146,7 +1171,7 @@ class DatabaseImpl {
     try {
       this[kDb].exec(sql);
     } catch (err) {
-      throw convertError(err);
+      throw convertError(err, errorClassOf(this));
     } finally {
       state.busy = false;
     }
@@ -1240,7 +1265,7 @@ class DatabaseImpl {
         useBigIntArguments: true,
       }, varargs ? wrapped : withLength(wrapped, argCount));
     } catch (err) {
-      throw convertError(err);
+      throw convertError(err, errorClassOf(this));
     }
     return this;
   }
@@ -1307,7 +1332,7 @@ class DatabaseImpl {
     try {
       this[kDb].aggregate(name, definition);
     } catch (err) {
-      throw convertError(err);
+      throw convertError(err, errorClassOf(this));
     }
     return this;
   }
@@ -1336,7 +1361,7 @@ class DatabaseImpl {
         db.enableLoadExtension(false);
       }
     } catch (err) {
-      throw convertError(err);
+      throw convertError(err, errorClassOf(this));
     }
     return this;
   }
@@ -1403,7 +1428,7 @@ class DatabaseImpl {
       });
       return { totalPages: totalPages ?? lastTotal, remainingPages: 0 };
     } catch (err) {
-      throw convertError(err);
+      throw convertError(err, errorClassOf(this));
     }
   }
 
@@ -1424,7 +1449,7 @@ class DatabaseImpl {
     try {
       bytes = this[kDb].serialize(attached);
     } catch (err) {
-      throw convertError(err);
+      throw convertError(err, errorClassOf(this));
     }
     return Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   }
@@ -1446,7 +1471,7 @@ class DatabaseImpl {
     try {
       this[kDb].enableDefensive(!toggle);
     } catch (err) {
-      throw convertError(err);
+      throw convertError(err, errorClassOf(this));
     }
     return this;
   }
@@ -1458,7 +1483,7 @@ class DatabaseImpl {
       try {
         db.close();
       } catch (err) {
-        throw convertError(err);
+        throw convertError(err, errorClassOf(this));
       }
     }
     return this;
@@ -1486,5 +1511,134 @@ Database.prototype[Symbol.for("nodejs.util.inspect.custom")] = function (
 
 Database.SqliteError = SqliteError;
 
-return { Database, SqliteError };
+// better-sqlite3's native addon (`better_sqlite3.node`), in the shape the
+// package's own `lib/database.js` uses it: `setErrorConstructor()`, then
+// `new addon.Database(...)` as `this[cppdb]`, whose methods take the
+// package's internal arguments. A module loader that evaluates the package's
+// JavaScript itself (Jest's module registry) never reaches
+// `maybeBetterSqlite3Override`; `bindings` then requires this file through
+// the host's `.node` loader (`maybeBetterSqlite3Addon` in 01_require.js),
+// and the package runs on the same implementation.
+function createAddon() {
+  let ErrorClass = SqliteError;
+
+  class AddonDatabase extends DatabaseImpl {
+    constructor(
+      _filename,
+      filenameGiven,
+      _anonymous,
+      readonly,
+      fileMustExist,
+      timeout,
+      verbose,
+      buffer,
+    ) {
+      super(buffer ?? filenameGiven, {
+        readonly,
+        fileMustExist,
+        timeout,
+        verbose,
+      }, { [kAddon]: true, SqliteError: ErrorClass });
+    }
+
+    prepare(sql, database, pragmaMode) {
+      return prepareStatement(this, sql, false, database, pragmaMode === true);
+    }
+
+    // safeIntegers: 0 or 1, or 2 for the connection's default
+    function(fn, name, argCount, safeIntegers, deterministic, directOnly) {
+      const options = { deterministic, directOnly, varargs: argCount === -1 };
+      if (safeIntegers !== 2) options.safeIntegers = safeIntegers === 1;
+      return super.function(name, options, fn);
+    }
+
+    aggregate(
+      start,
+      step,
+      inverse,
+      result,
+      name,
+      argCount,
+      safeIntegers,
+      deterministic,
+      directOnly,
+    ) {
+      const options = {
+        start,
+        step,
+        inverse,
+        result,
+        deterministic,
+        directOnly,
+        varargs: argCount === -1,
+      };
+      if (safeIntegers !== 2) options.safeIntegers = safeIntegers === 1;
+      return super.aggregate(name, options);
+    }
+
+    // The package steps a native backup with transfer() from setImmediate()
+    // until no pages remain; node:sqlite's backup runs on its own, so
+    // transfer() reports its progress until it settles.
+    backup(_database, attached, filename, _isNewFile) {
+      let progress = { totalPages: 0, remainingPages: 1 };
+      let settled = false;
+      let error;
+      super.backup(filename, {
+        attached,
+        progress: (value) => {
+          progress = value;
+        },
+      }).then((value) => {
+        progress = value;
+        settled = true;
+      }, (err) => {
+        error = err;
+        settled = true;
+      });
+      return {
+        transfer() {
+          if (error !== undefined) throw error;
+          if (settled) return { ...progress };
+          return {
+            totalPages: progress.totalPages,
+            remainingPages: Math.max(progress.remainingPages, 1),
+          };
+        },
+        close() {},
+      };
+    }
+
+    serialize(attached) {
+      return super.serialize({ attached });
+    }
+
+    table() {
+      return super.table();
+    }
+  }
+
+  return {
+    Database: AddonDatabase,
+    Statement,
+    setErrorConstructor(ctor) {
+      if (typeof ctor !== "function") {
+        throw new TypeError("Expected first argument to be a function");
+      }
+      ErrorClass = ctor;
+    },
+    // The package sets this after its first setErrorConstructor() call. The
+    // host's require cache keeps one addon per process, while Jest evaluates
+    // the package once per test file: always unset, each `new Database()`
+    // gives this its own module registry's SqliteError, which the database
+    // then keeps.
+    get isInitialized() {
+      return false;
+    },
+    set isInitialized(_value) {
+      // stays unset
+    },
+  };
+}
+
+return { Database, SqliteError, createAddon };
 })();

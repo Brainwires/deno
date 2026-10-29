@@ -1,0 +1,22 @@
+{
+  // A loader that evaluates better-sqlite3's own JavaScript itself (Jest's
+  // module registry, here `registry.cjs`) never reaches the entry-module
+  // override: the package's `lib/database.js` loads `better_sqlite3.node`
+  // through `bindings`, and the host's `.node` loader serves the
+  // implementation's addon shape for it. node_modules holds the package's real
+  // `lib/` (v12.11.1), `bindings` and `file-uri-to-path`, and the placeholder
+  // addon file `deno install` writes.
+  "tempDir": true,
+  "tests": {
+    "registry": {
+      "args": "run -A main.cjs",
+      "output": "main.out"
+    },
+    "opt_out": {
+      "args": "run -A main.cjs",
+      "envs": { "DENO_NO_BETTER_SQLITE3_COMPAT": "1" },
+      "output": "opt_out.out",
+      "exitCode": 1
+    }
+  }
+}

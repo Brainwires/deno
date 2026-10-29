@@ -2287,16 +2287,20 @@ const BETTER_SQLITE3_ENTRY =
   /^(.*[\\/]better-sqlite3(?:[\\/][^\\/]+)?)[\\/]lib[\\/](index|database|sqlite-error)\.js$/;
 let betterSqlite3OptedOut;
 
-function maybeBetterSqlite3Override(filename) {
-  const match = RegExpPrototypeExec(BETTER_SQLITE3_ENTRY, filename);
-  if (match === null) return undefined;
+function isBetterSqlite3OptedOut() {
   if (betterSqlite3OptedOut === undefined) {
     const value = op_get_env_no_permission_check(
       "DENO_NO_BETTER_SQLITE3_COMPAT",
     );
     betterSqlite3OptedOut = value != null && value !== "" && value !== "0";
   }
-  if (betterSqlite3OptedOut) return undefined;
+  return betterSqlite3OptedOut;
+}
+
+function maybeBetterSqlite3Override(filename) {
+  const match = RegExpPrototypeExec(BETTER_SQLITE3_ENTRY, filename);
+  if (match === null) return undefined;
+  if (isBetterSqlite3OptedOut()) return undefined;
   const sep = StringPrototypeIncludes(match[1], "/") ? "/" : "\\";
   const pkg = op_require_read_package_scope(match[1] + sep + "package.json");
   if (pkg?.name !== "better-sqlite3") return undefined;
@@ -2304,6 +2308,38 @@ function maybeBetterSqlite3Override(filename) {
     "ext:deno_node/internal/better_sqlite3.js",
   );
   return match[2] === "sqlite-error" ? SqliteError : Database;
+}
+
+// better-sqlite3's addon file, `better_sqlite3.node` (or the install's
+// placeholder of that name), inside a better-sqlite3 package: a loader that
+// evaluates the package's JavaScript itself (Jest's module registry) loads it
+// through `bindings`, and gets the implementation's addon shape.
+const BETTER_SQLITE3_ADDON = /[\\/]better_sqlite3\.node$/;
+// how far `bindings`' candidates sit below the package root
+// (lib/binding/node-v<abi>-<platform>-<arch>/, compiled/<v>/<platform>/<arch>/)
+const BETTER_SQLITE3_ADDON_DEPTH = 5;
+
+function maybeBetterSqlite3Addon(filename) {
+  if (RegExpPrototypeExec(BETTER_SQLITE3_ADDON, filename) === null) {
+    return undefined;
+  }
+  if (isBetterSqlite3OptedOut()) return undefined;
+  const sep = StringPrototypeIncludes(filename, "/") ? "/" : "\\";
+  let dir = filename;
+  for (let i = 0; i <= BETTER_SQLITE3_ADDON_DEPTH; i++) {
+    const index = StringPrototypeLastIndexOf(dir, sep);
+    if (index <= 0) return undefined;
+    dir = StringPrototypeSlice(dir, 0, index);
+    const pkg = op_require_read_package_scope(dir + sep + "package.json");
+    // the nearest package.json decides
+    if (pkg != null) {
+      if (pkg.name !== "better-sqlite3") return undefined;
+      return core.loadExtScript(
+        "ext:deno_node/internal/better_sqlite3.js",
+      ).createAddon();
+    }
+  }
+  return undefined;
 }
 
 function loadMaybeCjs(module, filename) {
@@ -2475,6 +2511,11 @@ function napiAsyncHooksEmitDestroy(asyncId) {
 
 // Native extension for .node
 Module._extensions[".node"] = function (module, filename) {
+  const betterSqlite3Addon = maybeBetterSqlite3Addon(filename);
+  if (betterSqlite3Addon !== undefined) {
+    module.exports = betterSqlite3Addon;
+    return;
+  }
   if (filename.endsWith("cpufeatures.node")) {
     throw new Error("Using cpu-features module is currently not supported");
   }

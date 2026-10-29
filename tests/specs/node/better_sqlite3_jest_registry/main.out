@@ -1,0 +1,16 @@
+foreign_keys: 1
+pragma set: []
+statement database: true
+names: [ "a", "b", "c", "d" ]
+function: 42
+aggregate: abcd
+error: true SQLITE_CONSTRAINT_NOTNULL
+second registry: true true false
+first registry kept: true
+row: { id: 1, name: "a" }
+row: { id: 2, name: "b" }
+state: :memory: true false false
+serialized: 4
+backup: 0
+restored: 4
+open: false
