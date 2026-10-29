@@ -15,6 +15,7 @@ const {
   DataViewPrototypeGetByteLength,
   DataViewPrototypeGetByteOffset,
   DataViewPrototypeGetUint8,
+  DateNow,
   MathClz32,
   NumberParseInt,
   ObjectPrototypeIsPrototypeOf,
@@ -422,7 +423,13 @@ function randomUUID(options) {
 function randomUUIDUncached() {
   const bytes = new Uint8Array(16);
   globalThis.crypto.getRandomValues(bytes);
-  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  return serializeUUID(bytes, 0x40);
+}
+
+// Node's `serializeUUID`: the 16 bytes as a UUID string, with `version` in the
+// high nibble of byte 6 and the RFC 9562 variant (0b10) in byte 8.
+function serializeUUID(bytes: Uint8Array, version: number) {
+  bytes[6] = (bytes[6] & 0x0f) | version;
   bytes[8] = (bytes[8] & 0x3f) | 0x80;
 
   const chars: number[] = new Array(36);
@@ -442,12 +449,40 @@ function randomUUIDUncached() {
   return StringFromCharCode(...new SafeArrayIterator(chars));
 }
 
+// A version 7 UUID (RFC 9562 section 5.7): a 48-bit big-endian Unix timestamp
+// in milliseconds, then random bits (Node 26's `crypto.randomUUIDv7()`, whose
+// `writeTimestamp` this follows). `disableEntropyCache` is accepted as Node's
+// is; every call draws fresh random bytes here.
+function randomUUIDv7(options) {
+  if (options !== undefined) {
+    validateObject(options, "options");
+  }
+  const {
+    disableEntropyCache = false,
+  } = options || {};
+
+  validateBoolean(disableEntropyCache, "options.disableEntropyCache");
+
+  const bytes = new Uint8Array(16);
+  globalThis.crypto.getRandomValues(bytes);
+  const now = DateNow();
+  const msb = now / (2 ** 32);
+  bytes[0] = msb >>> 8;
+  bytes[1] = msb;
+  bytes[2] = now >>> 24;
+  bytes[3] = now >>> 16;
+  bytes[4] = now >>> 8;
+  bytes[5] = now;
+  return serializeUUID(bytes, 0x70);
+}
+
 return {
   checkPrime,
   checkPrimeSync,
   generatePrime,
   generatePrimeSync,
   randomUUID,
+  randomUUIDv7,
   randomInt,
   randomBytes,
   randomFill,
@@ -458,6 +493,7 @@ return {
     generatePrime,
     generatePrimeSync,
     randomUUID,
+    randomUUIDv7,
     randomInt,
     randomBytes,
     randomFill,

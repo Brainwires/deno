@@ -21,6 +21,25 @@ Deno.test("[node/crypto.randomUUID] supports disableEntropyCache", () => {
   assertMatch(randomUUID({ disableEntropyCache: true }), UUID_REGEX);
 });
 
+Deno.test("[node/crypto.randomUUIDv7] a version 7 UUID led by the time", async () => {
+  // Node 26 API; the bundled @types/node predates it.
+  const { randomUUIDv7 } = (await import("node:crypto")) as unknown as {
+    randomUUIDv7: (options?: unknown) => string;
+  };
+  const UUID_V7_REGEX =
+    /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+  const before = Date.now();
+  const uuid = randomUUIDv7();
+  const after = Date.now();
+  assertMatch(uuid, UUID_V7_REGEX);
+  const ms = parseInt(uuid.slice(0, 8) + uuid.slice(9, 13), 16);
+  assert(ms >= before && ms <= after, `${ms} not in [${before}, ${after}]`);
+  assertMatch(randomUUIDv7({ disableEntropyCache: true }), UUID_V7_REGEX);
+  assertNotEquals(randomUUIDv7(), randomUUIDv7());
+  assertThrows(() => randomUUIDv7(1), TypeError);
+  assertThrows(() => randomUUIDv7({ disableEntropyCache: "" }), TypeError);
+});
+
 Deno.test("[node/crypto.randomFillSync] supported arguments", () => {
   const buf = new Uint8Array(10);
 
