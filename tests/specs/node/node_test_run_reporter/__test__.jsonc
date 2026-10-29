@@ -1,0 +1,30 @@
+{
+  // Outside `deno test`, `node:test` runs the tests itself and reports them as
+  // Node's runner does: `spec` by default, `tap` or `dot` by
+  // `--test-reporter` (which the node shim forwards in NODE_OPTIONS). A failed
+  // test makes the exit code 1.
+  "tests": {
+    "spec": {
+      "args": "run -A main.cjs",
+      "output": "spec.out",
+      "exitCode": 1
+    },
+    "tap": {
+      "args": "run -A main.cjs",
+      "envs": { "NODE_OPTIONS": "--test-reporter=tap" },
+      "output": "tap.out",
+      "exitCode": 1
+    },
+    "dot": {
+      "args": "run -A main.cjs",
+      "envs": { "NODE_OPTIONS": "--test-reporter=dot" },
+      "output": "dot.out",
+      "exitCode": 1
+    },
+    "unawaited_subtest": {
+      "args": "run -A unawaited.cjs",
+      "output": "unawaited.out",
+      "exitCode": 0
+    }
+  }
+}

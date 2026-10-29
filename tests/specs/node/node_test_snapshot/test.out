@@ -1,0 +1,12 @@
+running 6 tests from ./test.js
+matches the stored snapshots, counted per test ... ok ([WILDLINE])
+suite ...
+  keys include the suite ... ok ([WILDLINE])
+suite ... ok ([WILDLINE])
+a mismatch is an AssertionError ... ok ([WILDLINE])
+a missing snapshot names the --test-update-snapshots flag ... ok ([WILDLINE])
+custom serializers ... ok ([WILDLINE])
+snapshot API validation ... ok ([WILDLINE])
+
+ok | 6 passed (1 step) | 0 failed ([WILDLINE])
+

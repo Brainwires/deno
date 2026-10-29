@@ -932,7 +932,6 @@ ArrayPrototypeForEach([
 ObjectAssign(strict, {
   Assert,
   AssertionError,
-  CallTracker: CallTracker_,
   deepEqual: deepStrictEqual,
   deepStrictEqual,
   doesNotMatch,
@@ -957,7 +956,6 @@ ObjectAssign(strict, {
 const default_ = ObjectAssign(assert, {
   Assert,
   AssertionError,
-  CallTracker: CallTracker_,
   deepEqual,
   deepStrictEqual,
   doesNotMatch,
@@ -977,6 +975,24 @@ const default_ = ObjectAssign(assert, {
   strict,
   strictEqual,
   throws,
+});
+
+// Node 25 removed `assert.CallTracker` (DEP0173, End-of-Life), so it is not
+// among `node:assert`'s keys (which `t.assert` mirrors); it stays reachable,
+// deprecated and non-enumerable, for code written against older Node.
+ObjectDefineProperty(assert, "CallTracker", {
+  __proto__: null,
+  configurable: true,
+  enumerable: false,
+  value: CallTracker_,
+  writable: true,
+});
+ObjectDefineProperty(strict, "CallTracker", {
+  __proto__: null,
+  configurable: true,
+  enumerable: false,
+  value: CallTracker_,
+  writable: true,
 });
 
 return {

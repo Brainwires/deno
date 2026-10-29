@@ -266,6 +266,8 @@ test("level 0a", { concurrency: 4 }, async (t) => {
   return p0a;
 });
 
+// The parent waits for its unawaited subtests, as Node's does; one held only
+// by an unref'd timer is given up when the event loop idles (INCOMPLETE).
 test("top level", { concurrency: 2 }, async (t) => {
   t.test("+long running", async (t) => {
     return new Promise((resolve, reject) => {
