@@ -1394,7 +1394,9 @@ function normalizeSpawnArguments(
         escapeShellArg(stripShellArgQuotes(file)),
         ...new SafeArrayIterator(ArrayPrototypeMap(
           args,
-          (arg) => escapeShellArg(stripShellArgQuotes(arg)),
+          // Node joins the arguments into the command line, so a
+          // non-string one (`[fixture, 42]`) is its string form.
+          (arg) => escapeShellArg(stripShellArgQuotes(String(arg))),
         )),
       ];
       command = ArrayPrototypeJoin(escapedParts, " ");

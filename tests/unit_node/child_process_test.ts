@@ -1823,6 +1823,28 @@ Deno.test({
 });
 
 Deno.test({
+  name: "execFile shell takes non-string arguments as their string form",
+  ignore: Deno.build.os === "windows",
+  async fn() {
+    const { promise, resolve, reject } = Promise.withResolvers<string>();
+    CP.execFile(
+      "printf",
+      ["<%s|%s|%s>", 42, true, 1n] as unknown as string[],
+      { shell: true, encoding: "utf-8" },
+      (err, stdout) => err ? reject(err) : resolve(stdout),
+    );
+    assertEquals(await promise, "<42|true|1>");
+
+    const ret = spawnSync("printf", ["<%s>", 7] as unknown as string[], {
+      shell: true,
+      encoding: "utf-8",
+    });
+    assertEquals(ret.status, 0);
+    assertEquals(ret.stdout, "<7>");
+  },
+});
+
+Deno.test({
   name: "spawnSync shell preserves pre-quoted arguments",
   ignore: Deno.build.os === "windows",
   fn() {
