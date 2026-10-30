@@ -1225,13 +1225,17 @@ where the changes are discussed.
     `node:crypto`). hickory-proto RUSTSEC-2026-0118 (DNSSEC validation, not
     compiled) and -0119 were ignored here until item 71 moved the tree to
     hickory 0.26, which neither advisory affects. libz-sys RUSTSEC-2026-0418
-    (3.0.0-denext.3; the build script prints the build environment into
-    `target/`, only with cc 1.6.0 or later, and the lock has cc 1.2.56) is
-    listed too: the fixed 1.1.31 fails to link the Windows debug test binaries
-    (unresolved `__imp__wassert` from zlib-ng's SIMD objects). Two bumps change
-    an API the tree uses: zip 9's `enclosed_name` drops a leading root or drive
-    prefix instead of refusing the name, so the laufey archive extractor
-    (`cli/tools/desktop.rs`) refuses an absolute entry name itself first
+    (3.0.0-denext.3) is listed as unreachable: a build-time leak in the build
+    script's system-zlib probe, which prints the compiler command, and only cc
+    1.6.0 or later puts the build environment on it. Cargo.lock pins cc 1.2.56,
+    `deno` always builds libz-sys with `zlib-ng` (whose build skips the probe),
+    and no affected code is in the shipped binaries. The fixed 1.1.31 fails to
+    link the Windows debug test binaries (unresolved `__imp__wassert` from
+    zlib-ng's SIMD objects), and `node:zlib` needs libz-sys's raw C API, so no
+    flate2 backend switch replaces it. Two bumps change an API the tree uses:
+    zip 9's `enclosed_name` drops a leading root or drive prefix instead of
+    refusing the name, so the laufey archive extractor (`cli/tools/desktop.rs`)
+    refuses an absolute entry name itself first
     (`extract_zip_rejects_absolute_path`); and aws-lc-rs 1.18 stabilized ML-DSA,
     so `ext/crypto/mldsa.rs` uses `aws_lc_rs::signature::*` and `to_pkcs8v1`
     (the deprecated `unstable` aliases failed clippy). The `denext

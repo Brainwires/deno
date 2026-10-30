@@ -13,11 +13,18 @@ ignore = [
   # unreachable: WebCrypto RSA-OAEP and node:crypto privateDecrypt use it.
   # Revisit when rsa 0.10 is released.
   "RUSTSEC-2023-0071",
-  # libz-sys <= 1.1.30: the build script prints the build's environment into
-  # target/, but only when built with cc 1.6.0 or later (RustSec lists pinning
-  # cc below 1.6.0 as a workaround); Cargo.lock has cc 1.2.56. The fixed
-  # 1.1.31 fails to link Windows debug test binaries (zlib-ng's SIMD objects
-  # import `_wassert` from the DLL CRT), so the fork stays on 1.1.20. Remove
-  # this entry when cc reaches 1.6 or libz-sys links on Windows.
+  # libz-sys <= 1.1.30 (RUSTSEC-2026-0418): a build-time leak, not runtime
+  # code. The system-zlib probe in its build script (`zlib_installed`) prints
+  # the compiler command, and cc 1.6.0 or later puts the whole build
+  # environment on that command, so secrets can land in target/. Unreachable
+  # here: Cargo.lock pins cc 1.2.56 (every build is --locked), and `deno`
+  # always enables `libz-sys/zlib-ng` (v8 -> __runtime_defaults ->
+  # __vendored_zlib_ng), whose build returns before the probe. The shipped
+  # deno / denort contain no affected code. The fixed 1.1.31 fails to link
+  # the Windows debug test binaries ("unresolved external symbol
+  # __imp__wassert" from zlib-ng's SIMD objects, LNK1120), and node:zlib
+  # (ext/node/ops/zlib) uses the raw zlib C API through libz-sys, so a
+  # flate2 backend switch cannot replace it. Remove this entry when libz-sys
+  # links on Windows, and before cc 1.6 enters Cargo.lock.
   "RUSTSEC-2026-0418",
 ]
