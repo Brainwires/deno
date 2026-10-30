@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Tests for engine_staleness.py, denext_runtime.yml's engine staleness gate:
 a V8 (Cargo.lock's v8 crate) or CEF (laufey's CEF_FULL_VERSION) pin more than
-one Chrome stable major behind warns, and fails a release tag; a Chrome stable
-lookup that fails warns and passes. The last cases run the script against a
+one Chrome stable major behind, and not on Chrome's Extended Stable milestone,
+warns, and fails a release tag; one on Extended Stable only warns, saying it
+is still patched; a Chrome stable lookup that fails warns and passes. The last cases run the script against a
 canned versionhistory answer (file://) and a closed port.
 
 Usage: python3 -I .github/denext-runtime/engine_staleness_test.py
@@ -87,6 +88,27 @@ class Evaluate(unittest.TestCase):
         self.assertNotIn("::", lines[0])
         self.assertTrue(lines[1].startswith("::error::CEF is 6 Chrome stable majors behind"))
 
+    def test_on_extended_stable_warns_but_never_fails_a_tag(self):
+        # V8 152 with stable 154 and Extended Stable 152: still patched.
+        code, lines = gate.evaluate([("V8", 152)], 154, tag=True, enforce="tag", extended=152)
+        self.assertEqual(code, 0)
+        self.assertTrue(lines[0].startswith("::warning::V8 is 2 Chrome stable majors behind"))
+        self.assertIn("on Chrome's Extended Stable milestone 152", lines[0])
+        self.assertIn("still gets upstream security fixes", lines[0])
+        self.assertNotIn("no longer receives", lines[0])
+
+    def test_behind_extended_stable_is_stale(self):
+        code, lines = gate.evaluate([("V8", 152)], 156, tag=True, enforce="tag", extended=156)
+        self.assertEqual(code, 1)
+        self.assertTrue(lines[0].startswith("::error::V8 is 4 Chrome stable majors behind"))
+        self.assertIn("Extended Stable 156", lines[0])
+        self.assertIn("no longer receives upstream security fixes", lines[0])
+
+    def test_extended_stable_unknown_judges_by_stable(self):
+        code, lines = gate.evaluate([("V8", 152)], 154, tag=True, enforce="tag", extended=None)
+        self.assertEqual(code, 1)
+        self.assertNotIn("Extended Stable", lines[0])
+
     def test_warn_mode_keeps_a_tag_at_a_warning(self):
         code, lines = gate.evaluate([("V8", 150)], 156, tag=True, enforce="warn")
         self.assertEqual(code, 0)
@@ -100,18 +122,20 @@ class Script(unittest.TestCase):
         self.lock = os.path.join(self.dir.name, "Cargo.lock")
         pathlib.Path(self.lock).write_text(LOCK)
 
-    def answer(self, *versions):
-        path = os.path.join(self.dir.name, "answer.json")
+    def answer(self, *versions, name="answer.json"):
+        path = os.path.join(self.dir.name, name)
         pathlib.Path(path).write_text(
             json.dumps({"versions": [{"version": v} for v in versions]})
         )
         return pathlib.Path(path).as_uri()
 
-    def gate(self, *args, url=None, enforce=None):
+    def gate(self, *args, url=None, enforce=None, extended_url="http://127.0.0.1:9/versions"):
         env = dict(os.environ)
         env.pop("ENGINE_STALENESS_ENFORCE", None)
         if url is not None:
             env["CHROME_STABLE_URL"] = url
+        # A closed port unless a case gives an answer: never the network.
+        env["CHROME_EXTENDED_URL"] = extended_url
         if enforce is not None:
             env["ENGINE_STALENESS_ENFORCE"] = enforce
         return subprocess.run(
@@ -142,6 +166,28 @@ class Script(unittest.TestCase):
         r = self.gate("--tag", "--cef", CEF, url=self.answer("156.0.8078.73"), enforce="warn")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertEqual(r.stdout.count("::warning::"), 2)
+
+    def test_a_pin_on_extended_stable_passes_a_tag(self):
+        r = self.gate(
+            "--tag",
+            url=self.answer("154.0.1.2"),
+            extended_url=self.answer("152.0.7.8", name="extended.json"),
+        )
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("::warning::V8 15.2 (v8 crate 152.2.0) is 2 Chrome stable majors behind", r.stdout)
+        self.assertIn("on Chrome's Extended Stable milestone 152", r.stdout)
+
+    def test_extended_flag_skips_its_lookup(self):
+        r = self.gate("--tag", "--stable", "154", "--extended", "152")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertNotIn("could not learn the Chrome Extended Stable", r.stdout)
+        self.assertIn("Extended Stable milestone 152", r.stdout)
+
+    def test_extended_lookup_failure_is_a_notice(self):
+        r = self.gate("--tag", "--stable", "154")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("::notice::could not learn the Chrome Extended Stable milestone", r.stdout)
+        self.assertIn("::error::V8 15.2 (v8 crate 152.2.0) is 2 Chrome stable majors behind", r.stdout)
 
     def test_an_unknown_mode_fails(self):
         r = self.gate("--stable", "152", enforce="always")

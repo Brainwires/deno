@@ -99,15 +99,16 @@ env:
   GLIBC_CEILING: '2.27'
   # The engine staleness gate (.github/denext-runtime/engine_staleness.py):
   # a V8 (Cargo.lock's v8 crate) or CEF (laufey's CEF_FULL_VERSION) pin more
-  # than one Chrome stable major behind warns on every run and, with `tag`,
-  # fails a release tag; `warn` keeps a tag at a warning. A failed Chrome
-  # stable lookup only warns. `warn` for 3.0.0-denext.3: V8 15.2.124.45
-  # (DENEXT.md item 162) carries the 15.2 branch's security merges for the
-  # Extended Stable milestone 152, but the gate counts milestones, not patch
-  # level, and CEF 150 is behind too, so `tag` would refuse every tag
-  # (items 150, 162). It stays `warn` until the fork builds its own current
-  # V8 line and the rule is reworked (stable - 1 or Extended Stable, plus a
-  # patch-age limit).
+  # than one Chrome stable major behind, and not on Chrome's Extended Stable
+  # milestone, warns on every run and, with `tag`, fails a release tag;
+  # `warn` keeps a tag at a warning. A pin on the Extended Stable milestone
+  # only warns, and says it is still patched (DENEXT.md item 179). A failed
+  # Chrome stable lookup only warns. `warn` since 3.0.0-denext.3: V8
+  # 15.2.124.45 (DENEXT.md item 162) carries the 15.2 branch's security
+  # merges, but the gate counts milestones, not patch level, and CEF 150 is
+  # behind too, so `tag` would refuse every tag (items 150, 162). It stays
+  # `warn` until the fork builds its own current V8 line and the rule gains
+  # a patch-age limit.
   ENGINE_STALENESS_ENFORCE: warn
 
 jobs:

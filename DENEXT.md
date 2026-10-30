@@ -7122,6 +7122,41 @@ where the changes are discussed.
      whole, with their codes); the Windows legs of `denext tests` run it and
      the rest of the spec, unit and integration suites through the new exit.
 
+179. **`ci`: two more lib crates, a guard on a conditional audit ignore, and
+     an Extended-Stable-aware engine staleness gate** (CI only;
+     `.github/workflows/denext_tests.yml`, `denext_tests_os.yml`,
+     `denext_runtime.yml`, `.github/denext-runtime/audit_ignores.py`,
+     `engine_staleness.py`). Three changes:
+     - The `Test libs` steps (and the one-thread rerun and the macOS
+       LaunchServices step, which share the crate list) add
+       `deno_html_rewriter` and `deno_tls`, two crates the fork changes whose
+       unit tests ran nowhere.
+     - `audit_ignores.py` runs in the cargo-audit job before `cargo audit`
+       and fails when an advisory `.cargo/audit.toml` ignores only because
+       Cargo.lock stays below a version has become reachable: today
+       RUSTSEC-2026-0418 (item 42's audit list; unreachable while cc is below
+       1.6.0), so a `cargo update` that brings cc 1.6 in fails the job instead
+       of leaving `cargo audit` green under the ignore. Test:
+       `audit_ignores_test.py` (lint job): cc 1.2.56 and 1.5.99 pass, cc 1.6.0
+       / 1.6.2 / 1.10.0 / 2.0.0 fail, no ignore means no failure, and the
+       repository's own files pass.
+     - The engine staleness gate (item 150) also reads Chrome's Extended
+       Stable milestone (versionhistory's `win/extended` channel; Linux has
+       none) when a pin is behind stable. Its wording said any pin more than
+       one major behind stable "no longer receives upstream security fixes",
+       which is wrong for a pin on the Extended Stable milestone: such a pin
+       is now a warning that says it is still patched, on Extended Stable's
+       schedule, and never fails a tag; a pin behind both is stale as before,
+       and its line names the Extended Stable milestone too. A failed
+       Extended Stable lookup is a notice, and the pins are judged against
+       stable alone. `--extended <milestone>` skips the lookup; tests point
+       `CHROME_EXTENDED_URL` at a file or a closed port. On 2026-10-30 Chrome
+       stable and Extended Stable are both 156, so V8 152 and CEF 150 are
+       still reported stale (`ENGINE_STALENESS_ENFORCE` stays `warn`). Tests:
+       `engine_staleness_test.py` (on Extended Stable: a warning that passes
+       a tag; behind it: stale; unknown: judged by stable; the script with a
+       canned Extended Stable answer, `--extended`, and a failed lookup).
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,

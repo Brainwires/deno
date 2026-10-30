@@ -25,6 +25,8 @@ ignore = [
   # __imp__wassert" from zlib-ng's SIMD objects, LNK1120), and node:zlib
   # (ext/node/ops/zlib) uses the raw zlib C API through libz-sys, so a
   # flate2 backend switch cannot replace it. Remove this entry when libz-sys
-  # links on Windows, and before cc 1.6 enters Cargo.lock.
+  # links on Windows, and before cc 1.6 enters Cargo.lock
+  # (.github/denext-runtime/audit_ignores.py fails the cargo-audit job when
+  # it does).
   "RUSTSEC-2026-0418",
 ]

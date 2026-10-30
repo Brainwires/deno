@@ -10,13 +10,16 @@
 # - lint:  tools/lint.js (clippy over the whole workspace with upstream's deny
 #          flags, dlint, the copyright and repo-hygiene checks), plus
 #          tools/format.js --check, tools/jsdoc_checker.js, cargo fmt and the
-#          release manifest writer's, tag gate's, engine staleness gate's and
-#          glibc ceiling check's tests (.github/denext-runtime/manifest_test.py,
-#          tag_gate_test.py, engine_staleness_test.py, glibc_ceiling_test.py)
+#          release manifest writer's, tag gate's, engine staleness gate's,
+#          audit-ignore check's and glibc ceiling check's tests
+#          (.github/denext-runtime/manifest_test.py, tag_gate_test.py,
+#          engine_staleness_test.py, audit_ignores_test.py,
+#          glibc_ceiling_test.py)
 #          and the bare-assertion guard over the release scripts
 #          (assert_guard.py and its test).
 # - cargo-audit: RustSec advisories against Cargo.lock; .cargo/audit.toml
-#          lists the reviewed exceptions.
+#          lists the reviewed exceptions, and audit_ignores.py fails when one
+#          that holds only below a crate version (cc < 1.6) stops holding.
 # - per OS (denext_tests_os.yml), each OS on its own so one slow OS does not
 #   hold up the others' tests:
 #   - build: target/debug/{deno,denort,test_server}, as upstream's build job.
@@ -159,6 +162,10 @@ jobs:
       - name: engine_staleness_test.py
         if: runner.os == 'Linux'
         run: python3 -I .github/denext-runtime/engine_staleness_test.py
+      # The conditional cargo audit ignores (the cargo-audit job).
+      - name: audit_ignores_test.py
+        if: runner.os == 'Linux'
+        run: python3 -I .github/denext-runtime/audit_ignores_test.py
       # The glibc ceiling check (denext_runtime.yml's cli job).
       - name: glibc_ceiling_test.py
         if: runner.os == 'Linux'
@@ -184,6 +191,11 @@ jobs:
         with:
           persist-credentials: false
           submodules: false
+      # An ignore that holds only while Cargo.lock stays below a version
+      # (RUSTSEC-2026-0418: cc < 1.6) fails here once that version comes in;
+      # cargo audit itself would stay green.
+      - name: Conditional audit ignores still hold
+        run: python3 -I .github/denext-runtime/audit_ignores.py
       - name: Install cargo-audit
         run: cargo install cargo-audit --locked --version 0.22.1
       - name: cargo audit
