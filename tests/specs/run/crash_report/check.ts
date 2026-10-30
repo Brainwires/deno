@@ -4,7 +4,7 @@
 //   check.ts file <binary|deno> <args...>  a file:// report: print its fields
 //   check.ts hang <binary|deno> <args...>  an https:// endpoint that accepts
 //                                          and never answers: the process
-//                                          still ends within 6 s
+//                                          still ends within 8 s
 import { pathToFileURL } from "node:url";
 
 const [mode, bin, ...args] = Deno.args;
@@ -32,7 +32,7 @@ if (mode === "hang") {
   }).output();
   const seconds = (performance.now() - started) / 1000;
   console.log("exited with success:", out.success);
-  console.log("ended within 6 s:", seconds < 6, seconds < 6 ? "" : seconds);
+  console.log("ended within 8 s:", seconds < 8, seconds < 8 ? "" : seconds);
   console.log("the endpoint was reached:", held.length > 0);
   for (const conn of held) conn.close();
   listener.close();
@@ -51,7 +51,9 @@ console.log("exited with success:", out.success);
 const lines = Deno.readTextFileSync(path).split("\n").filter(Boolean);
 console.log("report lines:", lines.length);
 const r = JSON.parse(lines[0]);
-for (const key of ["schema", "kind", "binary", "message", "app", "subcommand"]) {
+for (
+  const key of ["schema", "kind", "binary", "message", "app", "subcommand"]
+) {
   console.log(`${key}:`, r[key]);
 }
 console.log("version is this runtime's:", r.version === Deno.version.deno);

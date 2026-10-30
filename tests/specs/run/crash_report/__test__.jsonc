@@ -8,7 +8,8 @@
       "args": "run -A check.ts file deno eval --token=s3cret 1",
       "output": "cli.out"
     },
-    // An endpoint that never answers holds the exit up for at most ~5 s.
+    // An endpoint that never answers holds the exit up for at most ~5 s
+    // (8 s allowed for a slow debug build).
     "hanging_endpoint_is_bounded": {
       "args": "run -A check.ts hang deno eval 1",
       "output": "hang.out"

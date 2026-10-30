@@ -228,9 +228,9 @@ pub fn parse_report_url(value: &str) -> Result<Url, String> {
   let url = Url::parse(value).map_err(|_| "not a URL".to_string())?;
   match url.scheme() {
     "https" => Ok(url),
-    "file" => match deno_path_util::url_to_file_path(&url) {
-      Ok(_) => Ok(url),
-      Err(_) => Err("a file:// URL must name a local path".to_string()),
+    "file" => match local_file_path(&url) {
+      Some(_) => Ok(url),
+      None => Err("a file:// URL must name a local path".to_string()),
     },
     "http" => Err("http:// is not allowed, use https://".to_string()),
     other => Err(format!("{other}: is not allowed, use https:// or file://")),
@@ -264,6 +264,19 @@ pub fn report_panic_to(
   }
   let body = panic_report_body(info, Some(app_version));
   send_error_report(url, &body);
+}
+
+/// The local path of a `file:` URL; `None` for a URL with a host other
+/// than `localhost` (which Windows would turn into a UNC path, a network
+/// share) or one that is not a path.
+fn local_file_path(url: &Url) -> Option<std::path::PathBuf> {
+  if url
+    .host_str()
+    .is_some_and(|h| !h.is_empty() && !h.eq_ignore_ascii_case("localhost"))
+  {
+    return None;
+  }
+  deno_path_util::url_to_file_path(url).ok()
 }
 
 /// The panic's message, whatever its payload type.
@@ -627,9 +640,9 @@ pub fn send_error_report(url: &str, body: &str) {
 
   match parsed.scheme() {
     "file" => {
-      // `url_to_file_path` rejects `file://host/...` URLs (non-local),
-      // so a local path is the only way to reach `append_to_file`.
-      let Ok(path) = deno_path_util::url_to_file_path(&parsed) else {
+      // A `file://host/...` URL (a UNC path on Windows) is refused, so a
+      // local path is the only way to reach `append_to_file`.
+      let Some(path) = local_file_path(&parsed) else {
         log::warn!(
           "crash report: the file:// report URL is not a local path; dropping it"
         );
@@ -647,6 +660,10 @@ pub fn send_error_report(url: &str, body: &str) {
 }
 
 #[cfg(test)]
+#[allow(
+  clippy::disallowed_methods,
+  reason = "tests read fixtures and the reports they write straight from disk"
+)]
 mod tests {
   use super::*;
 
@@ -719,7 +736,10 @@ mod tests {
     assert!(parse_report_url("file:///C:/crash.jsonl").is_ok());
     let http = parse_report_url("http://ingest.example/r").unwrap_err();
     assert!(http.contains("http://"), "{http}");
+    // A remote host (on Windows a UNC path: a network share) is refused.
     assert!(parse_report_url("file://server/share/crash.jsonl").is_err());
+    #[cfg(unix)]
+    assert!(parse_report_url("file://localhost/tmp/crash.jsonl").is_ok());
     assert!(parse_report_url("ftp://x.example/").is_err());
     assert!(parse_report_url("/tmp/crash.jsonl").is_err());
     assert!(parse_report_url("").is_err());
