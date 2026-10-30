@@ -2918,6 +2918,7 @@ fn desktop_parse(
     identifier: None,
     deep_links: Vec::new(),
     single_instance: false,
+    activation_policy: None,
     codesign_identity: None,
     inspect_renderer,
     compress,

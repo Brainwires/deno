@@ -58,10 +58,13 @@ denort = { path = "../rt", default-features = false }
 # own scheme saved on every backend; runtime 3.0.0-denext.1: the fail-closed
 # `strictPolicy` launch key and the per-app Linux secure store, laufey branch
 # `release/denext-1`; runtime 3.0.0-denext.2: legacy Linux secure-store items
-# read over an encrypted session, tokio 1.53.3), pinned to a commit of the Brainwires/laufey fork.
+# read over an encrypted session, tokio 1.53.3; runtime 3.0.0-denext.6, API 50:
+# overlay windows, tray events, the launch activation policy and speech,
+# branch `feat/overlay-tray-native` until it lands), pinned to a commit of the
+# Brainwires/laufey fork.
 # The host built from the same commit must be used with it (the API version
 # check is exact).
-laufey = { git = "https://github.com/Brainwires/laufey", rev = "253e75b6f4c4a04adb70491b98e8ec826ffd3229" }
+laufey = { git = "https://github.com/Brainwires/laufey", rev = "d73904b4dc29d0d024d80c5d83e59ddffcb0d521" }
 libsui.workspace = true
 
 bytes.workspace = true

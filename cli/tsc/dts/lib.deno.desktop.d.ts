@@ -480,11 +480,30 @@ declare namespace Deno {
      * from {@linkcode opacity}, which uniformly fades the whole window. Set at
      * creation time only.
      *
-     * Supported on macOS and Linux with the system WebView; ignored on Windows
-     * and with the CEF backend, which paint an opaque window background.
+     * Supported with the system WebView on macOS, Linux (on a compositing
+     * window manager) and, from runtime 3.0.0-denext.6, Windows (WebView2);
+     * ignored by the CEF backend, which paints an opaque window background
+     * (`Deno.desktop.windowCapabilities().transparent`).
      *
      * @default {false} */
     transparent?: boolean;
+    /** `false` creates the window hidden: nothing is on screen until
+     * {@linkcode BrowserWindow.show} (no flash of an empty window). The
+     * adopted bootstrap window stays hidden too (no reveal on first load).
+     *
+     * @default {true} */
+    show?: boolean;
+    /** A desktop overlay surface: on a Wayland compositor with
+     * wlr-layer-shell (wlroots compositors, KDE Plasma, COSMIC) a layer
+     * surface above every window, on every workspace, out of the task list
+     * and placeable with {@linkcode BrowserWindow.setPosition}; an ordinary
+     * window elsewhere (`windowCapabilities().layerShell`). Creation time
+     * only.
+     *
+     * @default {false} */
+    overlay?: boolean;
+    /** See {@linkcode BrowserWindow.setSkipTaskbar}. */
+    skipTaskbar?: boolean;
     /** Minimum size, applied with {@linkcode BrowserWindow.setMinimumSize}.
      * `0` (the default) is no limit. */
     minWidth?: number;
@@ -950,7 +969,47 @@ declare namespace Deno {
     setResizable(resizable: boolean): void;
 
     isAlwaysOnTop(): boolean;
-    setAlwaysOnTop(alwaysOnTop: boolean): void;
+    /** Keep the window above others. `level` (Electron's names) picks how
+     * high: `"floating"` (the default), `"status"`, `"pop-up-menu"` or
+     * `"screen-saver"`; `"normal"` is not on top. macOS has every level
+     * (`windowCapabilities().alwaysOnTopLevels`); Windows and Linux one
+     * floating level for all of them. */
+    setAlwaysOnTop(alwaysOnTop: boolean, level?: WindowLevel): void;
+
+    /** Let mouse input through the window to whatever is beneath it
+     * (Electron's `setIgnoreMouseEvents`). With `forward`, mouse moves still
+     * reach the window's `mousemove` listeners (macOS;
+     * `windowCapabilities().clickThroughForward`). Keyboard input is
+     * unaffected. A window that ignores the mouse can't be clicked back:
+     * keep a tray, a shortcut or a hit region as the way back. */
+    setIgnoreMouseEvents(
+      ignore: boolean,
+      options?: { forward?: boolean },
+    ): void;
+
+    /** Only these rectangles (window content coordinates, CSS pixels) take
+     * the mouse; a click anywhere else reaches the window beneath. `null`
+     * removes the region (the whole window takes input). Pass the page's
+     * `getBoundingClientRect()`s and update them when they move.
+     * {@linkcode setIgnoreMouseEvents} wins while on.
+     * `windowCapabilities().hitRegion`. */
+    setHitRegion(
+      rects: { x: number; y: number; width: number; height: number }[] | null,
+    ): void;
+
+    /** Show the window on every Space / virtual desktop, and with
+     * `visibleOnFullScreen` over other apps' full-screen windows (macOS; at a
+     * `"status"` level or above). Returns whether it applied
+     * (`windowCapabilities().visibleOnAllWorkspaces`). */
+    setVisibleOnAllWorkspaces(
+      visible: boolean,
+      options?: { visibleOnFullScreen?: boolean },
+    ): boolean;
+
+    /** Keep the window off the taskbar (Windows) / task list (Linux X11).
+     * Returns whether it applied (`windowCapabilities().skipTaskbar`); macOS
+     * has no per-window entry: see {@linkcode Dock.setActivationPolicy}. */
+    setSkipTaskbar(skip: boolean): boolean;
 
     /** Get the window's overall opacity, a uniform factor in the range `0`–`1`
      * where `1` is fully opaque. */
@@ -1237,6 +1296,17 @@ declare namespace Deno {
      * Windows and Linux. */
     setVisible(visible: boolean): void;
 
+    /** The app's activation policy (macOS): `"regular"` (a Dock icon and a
+     * menu bar), `"accessory"` (neither: a tray / menu-bar app) or
+     * `"prohibited"`. Switching to regular also brings the app to the front.
+     * Returns `false` where there is no policy (Windows, Linux). To start
+     * without a Dock icon, set `desktop.app.activationPolicy: "accessory"` in
+     * deno.json (written to the launch file), or `LSUIElement` in the
+     * bundle. */
+    setActivationPolicy(policy: ActivationPolicy): boolean;
+    /** The current activation policy, or `null` where there is none. */
+    getActivationPolicy(): ActivationPolicy | null;
+
     addEventListener<K extends keyof DockEventMap>(
       type: K,
       listener: (this: Dock, ev: DockEventMap[K]) => any,
@@ -1312,9 +1382,66 @@ declare namespace Deno {
     destroy(): void;
   }
 
+  /** Electron's window level names (see
+   * {@linkcode BrowserWindow.setAlwaysOnTop}). */
+  export type WindowLevel =
+    | "normal"
+    | "floating"
+    | "torn-off-menu"
+    | "modal-panel"
+    | "main-menu"
+    | "status"
+    | "pop-up-menu"
+    | "screen-saver";
+
+  /** See {@linkcode Dock.setActivationPolicy}. */
+  export type ActivationPolicy = "regular" | "accessory" | "prohibited";
+
+  /** A tray icon's mouse event. Every button's click is a `"click"` (its
+   * `button` says which); a right click is also `"contextmenu"`, a middle
+   * click `"auxclick"`, a double click (`double: true`) also `"dblclick"`. */
+  export interface TrayMouseEvent extends Event {
+    readonly button: "left" | "right" | "middle";
+    readonly modifiers: {
+      readonly shift: boolean;
+      readonly ctrl: boolean;
+      readonly alt: boolean;
+      readonly meta: boolean;
+    };
+    /** The cursor in screen coordinates, `null` where the OS doesn't say
+     * (some Linux tray hosts). */
+    readonly x: number | null;
+    readonly y: number | null;
+    readonly double: boolean;
+    readonly altKey: boolean;
+    readonly ctrlKey: boolean;
+    readonly shiftKey: boolean;
+    readonly metaKey: boolean;
+    readonly screenX: number;
+    readonly screenY: number;
+  }
+
+  /** What {@linkcode Tray.capabilities} reports. */
+  export interface TrayCapabilities {
+    click: boolean;
+    doubleClick: boolean;
+    rightClick: boolean;
+    middleClick: boolean;
+    /** `"mouseenter"` / `"mouseleave"` (macOS, Windows). */
+    hover: boolean;
+    modifiers: boolean;
+    position: boolean;
+    /** {@linkcode Tray.popUpMenu}. */
+    popUpMenu: boolean;
+  }
+
   interface TrayEventMap {
-    click: MouseEvent;
-    dblclick: MouseEvent;
+    click: TrayMouseEvent;
+    dblclick: TrayMouseEvent;
+    contextmenu: TrayMouseEvent;
+    auxclick: TrayMouseEvent;
+    mouseenter: TrayMouseEvent;
+    mouseleave: TrayMouseEvent;
     menuclick: CustomEvent<MenuClickDetail>;
   }
 
@@ -1372,6 +1499,16 @@ declare namespace Deno {
      * {@linkcode BrowserWindow} (created with `frameless` + `noActivate`)
      * under the icon. */
     getBounds(): TrayBounds | null;
+
+    /** Open the tray's menu at the icon now (Electron's
+     * `popUpContextMenu`). Returns `false` without a menu or where the OS
+     * can't (Linux: the tray host opens the menu itself). */
+    popUpMenu(): boolean;
+
+    /** Which tray events and data this backend delivers here. On Linux,
+     * clicks need a StatusNotifier host (the AppIndicator fallback reports
+     * none). */
+    static capabilities(): TrayCapabilities;
 
     /** Attach a frameless, non-activating popover window to this tray icon
      * (the classic menu-bar-app pattern). The returned panel toggles on tray
@@ -1770,7 +1907,69 @@ declare namespace Deno {
        * the window (KWin's blur on KDE Plasma, Wayland and X11; the WebView
        * backend only). */
       blur: boolean;
+      /** {@linkcode BrowserWindow.setIgnoreMouseEvents} works. */
+      clickThrough: boolean;
+      /** ... and its `forward` option (macOS). */
+      clickThroughForward: boolean;
+      /** {@linkcode BrowserWindow.setHitRegion} works. */
+      hitRegion: boolean;
+      /** {@linkcode BrowserWindow.setVisibleOnAllWorkspaces} works. */
+      visibleOnAllWorkspaces: boolean;
+      /** ... and its `visibleOnFullScreen` option (macOS). */
+      visibleOnFullScreen: boolean;
+      /** {@linkcode BrowserWindow.setSkipTaskbar} works. */
+      skipTaskbar: boolean;
+      /** `setAlwaysOnTop(true, level)` tells the levels apart (macOS). */
+      alwaysOnTopLevels: boolean;
+      /** A `transparent: true` window shows what is behind it. */
+      transparent: boolean;
+      /** An `overlay: true` window is a wlr-layer-shell surface. */
+      layerShell: boolean;
+      /** {@linkcode Dock.setActivationPolicy} works (macOS). */
+      activationPolicy: boolean;
+      /** `noActivate: true` makes a real non-activating panel. */
+      nonActivating: boolean;
+      /** {@linkcode Deno.desktop.speech} speaks through the OS engine (the
+       * engine may still be missing: Linux without speech-dispatcher). */
+      textToSpeech: boolean;
     }
+
+    /** A voice of {@linkcode speech.voices}. */
+    export interface SpeechVoice {
+      id: string;
+      name: string;
+      /** BCP 47, e.g. `"en-US"`. */
+      lang: string;
+      default: boolean;
+    }
+
+    /** Text to speech through the OS engine: AVSpeechSynthesizer (macOS),
+     * SAPI (Windows), speech-dispatcher (Linux). One utterance at a time. */
+    export const speech: {
+      /** Speak `text`. Resolves when it ends, also when {@linkcode stop} or a
+       * later `speak()` cut it off. Rejects with
+       * {@linkcode Deno.errors.NotSupported} where there is no engine
+       * (Linux without speech-dispatcher), and with a `TypeError` for an
+       * empty text or one over 32 KiB. */
+      speak(
+        text: string,
+        options?: {
+          /** An `id` from {@linkcode voices}. */
+          voice?: string;
+          lang?: string;
+          /** 0.1–10, 1 is normal. */
+          rate?: number;
+          /** 0–2, 1 is normal. */
+          pitch?: number;
+          /** 0–1. */
+          volume?: number;
+        },
+      ): Promise<void>;
+      /** Stop speaking. */
+      stop(): void;
+      /** The installed voices. */
+      voices(): Promise<SpeechVoice[]>;
+    };
 
     /** A file-type filter of a file dialog: a label and extensions without
      * the dot (`"*"` matches any file). */

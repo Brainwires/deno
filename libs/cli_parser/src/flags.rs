@@ -266,6 +266,11 @@ pub struct DesktopFlags {
   /// lock). Sourced from `desktop.app.singleInstance` in `deno.json`; the
   /// packaged app's launch configuration carries it to the backend.
   pub single_instance: bool,
+  /// The macOS activation policy the app starts in (`"regular"` or
+  /// `"accessory"`: no Dock icon from the first frame). Sourced from
+  /// `desktop.app.activationPolicy` in `deno.json`; the launch configuration
+  /// carries it to the backend (laufey API 50).
+  pub activation_policy: Option<String>,
   /// macOS codesigning identity (e.g. `Developer ID Application: Acme,
   /// Inc. (TEAMID)`, or `-` for ad-hoc). When unset the bundle is left
   /// unsigned; the system will quarantine it on download.

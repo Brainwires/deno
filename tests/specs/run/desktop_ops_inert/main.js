@@ -196,6 +196,13 @@ const cases = {
     ops.op_desktop_query_notification_permission(),
   op_desktop_screens: () => ops.op_desktop_screens(),
   op_desktop_window_capabilities: () => ops.op_desktop_window_capabilities(),
+  // laufey API 50 (DENEXT.md item 183).
+  op_desktop_tray_capabilities: () => ops.op_desktop_tray_capabilities(),
+  op_desktop_window_level_code: () =>
+    ops.op_desktop_window_level_code("status"),
+  op_desktop_speak: () => ops.op_desktop_speak({ text: "hello" }),
+  op_desktop_stop_speaking: () => ops.op_desktop_stop_speaking(),
+  op_desktop_speech_voices: () => ops.op_desktop_speech_voices(),
   op_desktop_quit: () => ops.op_desktop_quit(),
   op_desktop_set_quit_on_last_window_closed: () =>
     ops.op_desktop_set_quit_on_last_window_closed(false),

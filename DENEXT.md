@@ -7342,10 +7342,95 @@ where the changes are discussed.
        re-run does not clear a red one. It has no release. 3.0.0-denext.5
        supersedes it and carries everything denext.4 would have (items 176-182).
 
+183. **`feat(desktop)`: overlay windows, tray events with detail, the activation
+     policy and text to speech** (laufey API 50, branch
+     `feat/overlay-tray-native` of Brainwires/laufey; `runtime/ops/desktop.rs`,
+     `cli/rt_desktop/lib.rs`, `cli/rt/desktop.rs`, `lib.deno.desktop.d.ts`,
+     `cli/tools/desktop.rs`; runtime 3.0.0-denext.6). What a transparent
+     click-through desktop companion and a tray-first app need, in Electron's
+     names so denext binds them as they are:
+     - `BrowserWindow`:
+       - `setIgnoreMouseEvents(ignore, { forward? })` — click passthrough
+         (laufey `set_click_passthrough` + `_forward`, API 33/34).
+       - `setHitRegion(rects | null)` — only these rectangles (content CSS
+         pixels) take the mouse; `null` removes the region; at most 256 (laufey
+         `set_input_region`: macOS `ignoresMouseEvents` following the cursor,
+         Windows `WS_EX_TRANSPARENT` on a cursor timer, Linux the input shape).
+       - `setVisibleOnAllWorkspaces(visible, { visibleOnFullScreen? })` →
+         boolean.
+       - `setSkipTaskbar(skip)` → boolean (Windows `ITaskbarList`, X11 hints).
+       - `setAlwaysOnTop(flag, level?)` — `level` is Electron's name
+         (`"normal"`, `"floating"`, `"status"`, `"pop-up-menu"`,
+         `"screen-saver"`, also `"torn-off-menu"`, `"modal-panel"`,
+         `"main-menu"`); without one it is the floating level as before. An
+         unknown level throws a `TypeError`.
+       - Options `show: false` (created hidden, laufey
+         `LAUFEY_WINDOW_FLAG_HIDDEN`; the adopted bootstrap window stays hidden,
+         no first-load reveal), `overlay: true` (a wlr-layer-shell overlay
+         surface on wlroots / KDE Wayland, an ordinary window elsewhere),
+         `skipTaskbar`. `transparent` now works on Windows (WebView2).
+     - `Deno.desktop.windowCapabilities()` keys: `clickThrough`,
+       `clickThroughForward`, `hitRegion`, `visibleOnAllWorkspaces`,
+       `visibleOnFullScreen`, `skipTaskbar`, `alwaysOnTopLevels` (macOS),
+       `transparent`, `layerShell`, `activationPolicy`, `nonActivating`,
+       `textToSpeech`.
+     - `Deno.Tray`: every click is a `"click"` `TrayMouseEvent` with `button`
+       (`"left"` / `"right"` / `"middle"`), `modifiers`
+       (`{ shift,
+       ctrl, alt, meta }`), `x` / `y` (screen coordinates,
+       `null` where the OS doesn't say) and `double`; a right click is also
+       `"contextmenu"`, a middle click `"auxclick"`, a double click
+       `"dblclick"`; hover is `"mouseenter"` / `"mouseleave"` (macOS, Windows).
+       The DOM-style `altKey` / `ctrlKey` / `shiftKey` / `metaKey` / `screenX` /
+       `screenY` say the same. `tray.popUpMenu()` → boolean;
+       `Deno.Tray.capabilities()` →
+       `{ click, doubleClick, rightClick, middleClick, hover, modifiers,
+       position, popUpMenu }`.
+       On Linux a session with a StatusNotifierWatcher gets laufey's own
+       StatusNotifierItem, so clicks arrive there too (AppIndicator reported
+       none). The events come from the runtime's new `trayEvent`
+       (`DesktopEvent::TrayEvent`, its kind in `event`, the enum's tag being
+       `kind`); a backend without them keeps the old `trayClick` /
+       `trayDoubleClick`.
+     - `Tray.attachPanel` creates its window hidden (`show: false`) and off the
+       taskbar, toggles on a plain left click only, and places the panel from
+       the icon and the display's work area: below an icon in the upper half of
+       its screen, above one in the lower half (a bottom taskbar; it used to
+       open off-screen), beside a side taskbar, kept inside the work area.
+     - `Deno.dock.setActivationPolicy("regular" | "accessory" |
+       "prohibited")`
+       → boolean and `getActivationPolicy()`; deno.json
+       `desktop.app.activationPolicy` (`"regular"` / `"accessory"`) goes into
+       the packaged app's `laufey-launch.json` (`activationPolicy`) and into
+       `LAUFEY_ACTIVATION_POLICY` for `deno desktop` dev runs, so an accessory
+       app shows no Dock icon from its first frame (laufey's hosts used to force
+       regular at launch, undoing `LSUIElement` too).
+     - `Deno.desktop.speech`:
+       `speak(text, { voice?, lang?, rate?, pitch?,
+       volume? })` → Promise
+       resolving when the utterance ends (also when cut off) and rejecting with
+       `Deno.errors.NotSupported` where the OS has no engine; `stop()`;
+       `voices()` → `[{ id, name, lang, default }]` (macOS AVSpeechSynthesizer,
+       Windows SAPI, Linux speech-dispatcher).
+     - laufey's other API 50 finding: the "WebKit runs no animation frames in a
+       never-focused non-activating panel" limitation was the e2e check's own
+       race (the frame was asked of the initial `about:blank`); panels draw on
+       WKWebView and WebKitGTK as they are.
+     - Tests: `runtime::ops::desktop` unit tests for the level and policy names
+       and the `trayEvent` shape (and its kind pinned with the others); the
+       launch-config test with `activationPolicy`; the config parser test for
+       `desktop.app.activationPolicy`; the five new ops
+       (`op_desktop_tray_capabilities`, `op_desktop_window_level_code`,
+       `op_desktop_speak`, `op_desktop_stop_speaking`,
+       `op_desktop_speech_voices`) are kept by `NOT_IMPORTED_OPS` and inert
+       outside a desktop app (`specs::run::desktop_ops_inert`). laufey's own e2e
+       (`--window-api` overlay checks, `--layer1` StatusNotifierItem clicks)
+       covers the native side.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
-169-174, 176, 178, 180, 182) are what the prebuilt `libdenort` carries. The
+169-174, 176, 178, 180, 182, 183) are what the prebuilt `libdenort` carries. The
 CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID`
 into a packaged app's launchers) are in the branch too, but a stock CLI does not
 run them; denext's own launcher provides that environment.
@@ -7372,10 +7457,11 @@ the navigation guard; then, for runtime 3.0.0-rc.1, the CEF custom-scheme
 localStorage commit gate, KWin's blur, the XCB clipboard and Linux passkeys
 through libwebauthn (item 88); and, for runtime 3.0.0-denext.2, legacy Linux
 secure-store items read over an encrypted Secret Service session (laufey
-879ee0e) and tokio 1.53.3 with laufey's own `.cargo/audit.toml`), at the commit
-pinned by `LAUFEY_SHA` in the workflow (or the `laufey_ref` input). The same
-commit is the `laufey` git dependency of `cli/rt_desktop/Cargo.toml` (crate
-0.8.0, API 49, CEF 150.0.21).
+879ee0e) and tokio 1.53.3 with laufey's own `.cargo/audit.toml`; and, for
+runtime 3.0.0-denext.6, API 50: overlay windows, tray events, the launch
+activation policy and speech, item 183), at the commit pinned by `LAUFEY_SHA` in
+the workflow (or the `laufey_ref` input). The same commit is the `laufey` git
+dependency of `cli/rt_desktop/Cargo.toml` (crate 0.8.0, API 50, CEF 150.0.21).
 
 laufey's `init_api` rejects any C ABI version mismatch between the runtime and
 the host, so the `laufey` crate libdenort links and the hosts are built from the

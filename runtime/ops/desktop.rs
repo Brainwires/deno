@@ -502,6 +502,22 @@ pub enum DesktopEvent {
   TrayClick { tray_id: u32 },
   #[serde(rename_all = "camelCase")]
   TrayDoubleClick { tray_id: u32 },
+  /// A tray event with its detail (laufey API 50): `event` is "click",
+  /// "dblclick", "contextmenu" (right), "auxclick" (middle), "mouseenter" or
+  /// "mouseleave"; `button` "left", "right" or "middle"; `x` / `y` the cursor
+  /// in screen coordinates where the OS says.
+  #[serde(rename_all = "camelCase")]
+  TrayEvent {
+    tray_id: u32,
+    event: &'static str,
+    button: &'static str,
+    shift: bool,
+    ctrl: bool,
+    alt: bool,
+    meta: bool,
+    x: Option<i32>,
+    y: Option<i32>,
+  },
   #[serde(rename_all = "camelCase")]
   TrayMenuClick { tray_id: u32, id: String },
   #[serde(rename_all = "camelCase")]
@@ -1530,7 +1546,16 @@ pub enum WindowAction {
 }
 
 /// A rectangle in the backend's screen space (the `getPosition` space).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+#[derive(
+  Debug,
+  Clone,
+  Copy,
+  Default,
+  PartialEq,
+  Eq,
+  serde::Serialize,
+  serde::Deserialize,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct DesktopRect {
   pub x: i32,
@@ -1588,6 +1613,75 @@ pub struct WindowCapabilitiesInfo {
   /// `setBackgroundMaterial("blur")` works: the compositor blurs behind the
   /// window (KWin's blur on KDE Plasma; laufey `BACKDROP_BLUR`).
   pub blur: bool,
+  // --- Overlay windows (laufey API 50) ---
+  /// `setIgnoreMouseEvents(true)` lets clicks through the window.
+  pub click_through: bool,
+  /// `setIgnoreMouseEvents(true, { forward: true })` still reports mouse
+  /// moves to the window (macOS).
+  pub click_through_forward: bool,
+  /// `setHitRegion(rects)` works.
+  pub hit_region: bool,
+  /// `setVisibleOnAllWorkspaces(true)` works.
+  pub visible_on_all_workspaces: bool,
+  /// ... and `{ visibleOnFullScreen: true }` too (macOS).
+  pub visible_on_full_screen: bool,
+  /// `setSkipTaskbar()` works.
+  pub skip_taskbar: bool,
+  /// `setAlwaysOnTop(true, level)` distinguishes the levels (macOS; one
+  /// floating level elsewhere).
+  pub always_on_top_levels: bool,
+  /// A `transparent: true` window shows what is behind it.
+  pub transparent: bool,
+  /// An `overlay: true` window is a wlr-layer-shell surface (Linux Wayland).
+  pub layer_shell: bool,
+  /// `Deno.dock.setActivationPolicy()` works (macOS).
+  pub activation_policy: bool,
+  /// `noActivate: true` makes a real non-activating panel.
+  pub non_activating: bool,
+  /// `Deno.desktop.speech` speaks through the OS engine (laufey API 50); the
+  /// engine itself may still be missing (Linux without speech-dispatcher).
+  pub text_to_speech: bool,
+}
+
+/// `Deno.Tray.capabilities()` (laufey API 50): which tray events and data
+/// this backend delivers on this OS / session.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrayCapabilitiesInfo {
+  pub click: bool,
+  pub double_click: bool,
+  pub right_click: bool,
+  pub middle_click: bool,
+  /// `mouseenter` / `mouseleave`.
+  pub hover: bool,
+  pub modifiers: bool,
+  pub position: bool,
+  /// `tray.popUpMenu()`.
+  pub pop_up_menu: bool,
+}
+
+/// `Deno.desktop.speech.speak(text, options)`.
+#[derive(Debug, Clone, Default, PartialEq, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SpeechRequestInfo {
+  pub text: String,
+  pub voice: Option<String>,
+  pub lang: Option<String>,
+  /// 0.1..10, 1 normal.
+  pub rate: Option<f64>,
+  /// 0..2, 1 normal.
+  pub pitch: Option<f64>,
+  /// 0..1.
+  pub volume: Option<f64>,
+}
+
+/// How an utterance of `Deno.desktop.speech.speak()` ended.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SpeechOutcomeInfo {
+  /// "done", "cancelled", "failed" or "unsupported".
+  pub outcome: &'static str,
+  pub message: Option<String>,
 }
 
 /// `Deno.desktop.clipboard.capabilities()`.
@@ -2336,7 +2430,11 @@ pub trait DesktopApi: Send + Sync + 'static {
   /// does not steal key focus from the foreground app when shown.
   /// `transparent` gives the window a transparent background so the page's own
   /// alpha composites against whatever is behind the window. These are all
-  /// creation-time properties and cannot be changed afterwards.
+  /// creation-time properties and cannot be changed afterwards. `hidden`
+  /// creates the window without showing it (`show: false`); `overlay` asks
+  /// for a wlr-layer-shell overlay surface where the compositor has one
+  /// (laufey API 50).
+  #[allow(clippy::too_many_arguments)]
   fn create_window(
     &self,
     width: i32,
@@ -2345,6 +2443,8 @@ pub trait DesktopApi: Send + Sync + 'static {
     no_activate: bool,
     transparent_titlebar: bool,
     transparent: bool,
+    hidden: bool,
+    overlay: bool,
   ) -> u32;
   /// Close a specific window.
   fn close_window(&self, window_id: u32);
@@ -2440,6 +2540,68 @@ pub trait DesktopApi: Send + Sync + 'static {
     None
   }
   fn set_quit_on_last_window_closed(&self, _quit: bool) {}
+
+  // --- Overlay windows, the activation policy, tray events and speech
+  // (laufey API 50). The defaults are a backend that can do none of it.
+
+  /// Click passthrough (`setIgnoreMouseEvents`), with forwarding of mouse
+  /// moves while it is on.
+  fn set_ignore_mouse_events(
+    &self,
+    _window_id: u32,
+    _ignore: bool,
+    _forward: bool,
+  ) {
+  }
+  /// The input region (`setHitRegion`): content-DIP rectangles that take the
+  /// mouse; `None` removes it.
+  fn set_hit_region(&self, _window_id: u32, _rects: Option<&[DesktopRect]>) {}
+  fn set_skip_taskbar(&self, _window_id: u32, _skip: bool) -> bool {
+    false
+  }
+  fn set_visible_on_all_workspaces(
+    &self,
+    _window_id: u32,
+    _visible: bool,
+    _visible_on_full_screen: bool,
+  ) -> bool {
+    false
+  }
+  /// `level` is laufey's `LAUFEY_WINDOW_LEVEL_*` (0 normal .. 4 screen saver).
+  fn set_window_level(&self, _window_id: u32, _level: i32) -> bool {
+    false
+  }
+  /// laufey `LAUFEY_ACTIVATION_POLICY_*` (0 regular, 1 accessory, 2
+  /// prohibited); `false` where there is none.
+  fn set_activation_policy(&self, _policy: i32) -> bool {
+    false
+  }
+  fn activation_policy(&self) -> Option<i32> {
+    None
+  }
+  fn tray_capabilities(&self) -> TrayCapabilitiesInfo {
+    TrayCapabilitiesInfo::default()
+  }
+  fn pop_up_tray_menu(&self, _tray_id: u32) -> bool {
+    false
+  }
+  /// Speaks the request; the future resolves when the utterance ends.
+  fn speak(
+    &self,
+    _request: SpeechRequestInfo,
+  ) -> DesktopFuture<SpeechOutcomeInfo> {
+    Box::pin(async {
+      SpeechOutcomeInfo {
+        outcome: "unsupported",
+        message: None,
+      }
+    })
+  }
+  fn stop_speaking(&self) {}
+  /// The installed voices, laufey's JSON array.
+  fn speech_voices(&self) -> DesktopFuture<String> {
+    Box::pin(async { "[]".to_string() })
+  }
   /// The app answered a close request (see [`PendingCloses`]).
   fn close_reply(&self, _window_id: u32, _prevented: bool) {}
 
@@ -2994,6 +3156,8 @@ impl BrowserWindow {
           .as_ref()
           .and_then(|o| o.transparent)
           .unwrap_or(false);
+        let hidden = options.as_ref().and_then(|o| o.show) == Some(false);
+        let overlay = options.as_ref().and_then(|o| o.overlay).unwrap_or(false);
         api.create_window(
           width,
           height,
@@ -3001,8 +3165,15 @@ impl BrowserWindow {
           no_activate,
           transparent_titlebar,
           transparent,
+          hidden,
+          overlay,
         )
       });
+    // The adopted bootstrap window is created hidden: `show: false` keeps it
+    // so (the app owns its visibility from here, no reveal on first load).
+    if options.as_ref().and_then(|o| o.show) == Some(false) {
+      api.hide(window_id);
+    }
 
     // Default the window title to the app name when the app doesn't set one,
     // so the window shows e.g. "MyApp" instead of the backend's internal
@@ -3053,6 +3224,9 @@ impl BrowserWindow {
       }
       if let Some(opacity) = options.opacity {
         api.set_window_opacity(window_id, opacity);
+      }
+      if let Some(skip) = options.skip_taskbar {
+        api.set_skip_taskbar(window_id, skip);
       }
     }
 
@@ -3419,6 +3593,54 @@ impl BrowserWindow {
     self.api.set_always_on_top(self.window_id, always_on_top);
   }
 
+  // --- Overlay windows (laufey API 50). DESKTOP_JS wraps the private ones
+  // in Electron's shapes (`setIgnoreMouseEvents`, `setHitRegion`,
+  // `setVisibleOnAllWorkspaces`, `setAlwaysOnTop(flag, level)`).
+
+  #[fast]
+  #[symbol("Deno_privateDesktopIgnoreMouseEvents")]
+  fn ignore_mouse_events(&self, ignore: bool, forward: bool) {
+    self
+      .api
+      .set_ignore_mouse_events(self.window_id, ignore, forward);
+  }
+
+  #[symbol("Deno_privateDesktopHitRegion")]
+  fn hit_region(
+    &self,
+    #[serde] rects: Option<Vec<DesktopRect>>,
+  ) -> Result<(), JsErrorBox> {
+    if rects
+      .as_ref()
+      .is_some_and(|r| r.len() > MAX_HIT_REGION_RECTS)
+    {
+      return Err(JsErrorBox::range_error(format!(
+        "setHitRegion() takes at most {MAX_HIT_REGION_RECTS} rectangles"
+      )));
+    }
+    self.api.set_hit_region(self.window_id, rects.as_deref());
+    Ok(())
+  }
+
+  #[fast]
+  fn set_skip_taskbar(&self, skip: bool) -> bool {
+    self.api.set_skip_taskbar(self.window_id, skip)
+  }
+
+  #[fast]
+  #[symbol("Deno_privateDesktopAllWorkspaces")]
+  fn all_workspaces(&self, visible: bool, full_screen: bool) -> bool {
+    self
+      .api
+      .set_visible_on_all_workspaces(self.window_id, visible, full_screen)
+  }
+
+  #[fast]
+  #[symbol("Deno_privateDesktopWindowLevel")]
+  fn window_level(&self, #[smi] level: i32) -> bool {
+    self.api.set_window_level(self.window_id, level)
+  }
+
   #[fast]
   fn get_opacity(&self) -> f64 {
     self.api.get_window_opacity(self.window_id)
@@ -3692,7 +3914,16 @@ struct BrowserWindowOptions {
   no_activate: Option<bool>,
   transparent_titlebar: Option<bool>,
   transparent: Option<bool>,
+  /// `false`: created hidden (no first frame on screen until `show()`).
+  show: Option<bool>,
+  /// A wlr-layer-shell overlay surface where the compositor has one (laufey
+  /// API 50); an ordinary window elsewhere.
+  overlay: Option<bool>,
+  skip_taskbar: Option<bool>,
 }
+
+/// The most rectangles `setHitRegion()` takes.
+const MAX_HIT_REGION_RECTS: usize = 256;
 
 #[derive(Clone, Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -4240,6 +4471,77 @@ fn op_desktop_window_capabilities(
     .try_borrow::<Arc<dyn DesktopApi>>()
     .map(|api| api.window_capabilities())
     .unwrap_or_default()
+}
+
+/// `Deno.Tray.capabilities()` (laufey API 50).
+#[op2]
+#[serde]
+fn op_desktop_tray_capabilities(state: &mut OpState) -> TrayCapabilitiesInfo {
+  state
+    .try_borrow::<Arc<dyn DesktopApi>>()
+    .map(|api| api.tray_capabilities())
+    .unwrap_or_default()
+}
+
+/// laufey's level code for `setAlwaysOnTop(flag, level)`'s Electron level
+/// name, or -1 for an unknown one.
+#[op2]
+#[smi]
+fn op_desktop_window_level_code(#[string] level: Option<String>) -> i32 {
+  window_level_code(level.as_deref()).unwrap_or(-1)
+}
+
+/// The most text `Deno.desktop.speech.speak()` takes (laufey's limit).
+const MAX_SPEECH_TEXT_BYTES: usize = 32 * 1024;
+
+/// `Deno.desktop.speech.speak()` (laufey API 50): resolves with the outcome
+/// when the utterance ends.
+#[op2]
+#[serde]
+async fn op_desktop_speak(
+  state: std::rc::Rc<std::cell::RefCell<OpState>>,
+  #[serde] request: SpeechRequestInfo,
+) -> Result<SpeechOutcomeInfo, JsErrorBox> {
+  if request.text.is_empty() || request.text.len() > MAX_SPEECH_TEXT_BYTES {
+    return Err(JsErrorBox::type_error(format!(
+      "speak(): the text must be 1 to {MAX_SPEECH_TEXT_BYTES} bytes"
+    )));
+  }
+  let strings = [&Some(request.text.clone()), &request.voice, &request.lang];
+  if strings
+    .iter()
+    .any(|s| s.as_deref().is_some_and(|s| s.contains('\0')))
+  {
+    return Err(JsErrorBox::type_error(
+      "speak(): a string contains a NUL character",
+    ));
+  }
+  let Some(api) = desktop_api(&state) else {
+    return Ok(SpeechOutcomeInfo {
+      outcome: "unsupported",
+      message: None,
+    });
+  };
+  Ok(api.speak(request).await)
+}
+
+#[op2(fast)]
+fn op_desktop_stop_speaking(state: &mut OpState) {
+  if let Some(api) = state.try_borrow::<Arc<dyn DesktopApi>>() {
+    api.stop_speaking();
+  }
+}
+
+/// The installed voices, laufey's JSON (parsed by DESKTOP_JS).
+#[op2]
+#[string]
+async fn op_desktop_speech_voices(
+  state: std::rc::Rc<std::cell::RefCell<OpState>>,
+) -> String {
+  match desktop_api(&state) {
+    Some(api) => api.speech_voices().await,
+    None => "[]".to_string(),
+  }
 }
 
 /// `Deno.desktop.quit()`, once no listener canceled it.
@@ -5688,6 +5990,65 @@ impl Dock {
   fn set_visible(&self, visible: bool) {
     self.api.set_dock_visible(visible);
   }
+
+  /// `"regular"`, `"accessory"` or `"prohibited"` (macOS, laufey API 50);
+  /// `false` where there is no activation policy. Switching to regular also
+  /// activates the app.
+  #[fast]
+  fn set_activation_policy(
+    &self,
+    #[string] policy: &str,
+  ) -> Result<bool, JsErrorBox> {
+    let Some(code) = activation_policy_code(policy) else {
+      return Err(JsErrorBox::type_error(format!(
+        "unknown activation policy {policy:?}: \"regular\", \"accessory\" \
+         or \"prohibited\""
+      )));
+    };
+    Ok(self.api.set_activation_policy(code))
+  }
+
+  /// The app's activation policy, or `null` where there is none.
+  #[string]
+  fn get_activation_policy(&self) -> Option<String> {
+    self
+      .api
+      .activation_policy()
+      .and_then(activation_policy_name)
+      .map(str::to_string)
+  }
+}
+
+/// laufey's `LAUFEY_ACTIVATION_POLICY_*` for a policy name.
+fn activation_policy_code(name: &str) -> Option<i32> {
+  match name {
+    "regular" => Some(0),
+    "accessory" => Some(1),
+    "prohibited" => Some(2),
+    _ => None,
+  }
+}
+
+fn activation_policy_name(code: i32) -> Option<&'static str> {
+  match code {
+    0 => Some("regular"),
+    1 => Some("accessory"),
+    2 => Some("prohibited"),
+    _ => None,
+  }
+}
+
+/// laufey's `LAUFEY_WINDOW_LEVEL_*` for an Electron level name (`null` /
+/// `undefined` is "floating", Electron's default).
+fn window_level_code(name: Option<&str>) -> Option<i32> {
+  match name.unwrap_or("floating") {
+    "normal" => Some(0),
+    "floating" | "torn-off-menu" | "modal-panel" => Some(1),
+    "status" | "main-menu" => Some(2),
+    "pop-up-menu" => Some(3),
+    "screen-saver" => Some(4),
+    _ => None,
+  }
 }
 
 /// What `Dock.setBadge(text)` hands `DesktopApi::set_dock_badge`: the text,
@@ -5778,6 +6139,13 @@ impl Tray {
     reject_nul_in_menu(menu.as_deref().unwrap_or_default())?;
     self.api.set_tray_menu(self.tray_id, menu);
     Ok(())
+  }
+
+  /// Open the tray's menu at the icon now (laufey API 50); `false` without
+  /// a menu or where the OS can't (Linux: the host opens the menu).
+  #[fast]
+  fn pop_up_menu(&self) -> bool {
+    self.api.pop_up_tray_menu(self.tray_id)
   }
 
   #[serde]
@@ -6084,6 +6452,11 @@ deno_core::extension!(
     op_desktop_query_notification_permission,
     op_desktop_screens,
     op_desktop_window_capabilities,
+    op_desktop_tray_capabilities,
+    op_desktop_window_level_code,
+    op_desktop_speak,
+    op_desktop_stop_speaking,
+    op_desktop_speech_voices,
     op_desktop_quit,
     op_desktop_set_quit_on_last_window_closed,
     op_desktop_close_reply,
@@ -6839,6 +7212,52 @@ mod tests {
 
   // --- Every remaining DesktopEvent variant gets a kind pin ---
 
+  #[test]
+  fn tray_event_carries_its_detail_in_camel_case() {
+    // DESKTOP_JS reads these names for the TrayMouseEvent (laufey API 50).
+    let v = serde_json::to_value(DesktopEvent::TrayEvent {
+      tray_id: 3,
+      event: "contextmenu",
+      button: "right",
+      shift: true,
+      ctrl: false,
+      alt: true,
+      meta: false,
+      x: Some(10),
+      y: None,
+    })
+    .unwrap();
+    assert_eq!(v["kind"], "trayEvent");
+    assert_eq!(v["event"], "contextmenu");
+    assert_eq!(v["trayId"], 3);
+    assert_eq!(v["button"], "right");
+    assert_eq!(v["shift"], true);
+    assert_eq!(v["alt"], true);
+    assert_eq!(v["x"], 10);
+    assert!(v["y"].is_null());
+  }
+
+  #[test]
+  fn window_levels_and_activation_policies_map_to_laufey() {
+    use super::activation_policy_code;
+    use super::activation_policy_name;
+    use super::window_level_code;
+    // Electron's names -> LAUFEY_WINDOW_LEVEL_*; no name is "floating".
+    assert_eq!(window_level_code(None), Some(1));
+    assert_eq!(window_level_code(Some("normal")), Some(0));
+    assert_eq!(window_level_code(Some("floating")), Some(1));
+    assert_eq!(window_level_code(Some("status")), Some(2));
+    assert_eq!(window_level_code(Some("pop-up-menu")), Some(3));
+    assert_eq!(window_level_code(Some("screen-saver")), Some(4));
+    assert_eq!(window_level_code(Some("dock")), None);
+    for name in ["regular", "accessory", "prohibited"] {
+      let code = activation_policy_code(name).unwrap();
+      assert_eq!(activation_policy_name(code), Some(name));
+    }
+    assert_eq!(activation_policy_code("Accessory"), None);
+    assert_eq!(activation_policy_name(7), None);
+  }
+
   fn kind_of(ev: DesktopEvent) -> String {
     serde_json::to_value(ev).unwrap()["kind"]
       .as_str()
@@ -6990,6 +7409,20 @@ mod tests {
       "dockReopen"
     );
     assert_eq!(kind_of(DesktopEvent::TrayClick { tray_id: 0 }), "trayClick");
+    assert_eq!(
+      kind_of(DesktopEvent::TrayEvent {
+        tray_id: 0,
+        event: "click",
+        button: "left",
+        shift: false,
+        ctrl: false,
+        alt: false,
+        meta: false,
+        x: None,
+        y: None,
+      }),
+      "trayEvent"
+    );
     assert_eq!(
       kind_of(DesktopEvent::TrayDoubleClick { tray_id: 0 }),
       "trayDoubleClick"

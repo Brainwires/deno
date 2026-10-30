@@ -317,6 +317,11 @@
               "description": "The stable origin the app's renderer runs at, as \"<scheme>://<host>\" (e.g. \"acme://app\"). The runtime registers <scheme> as a custom URL scheme with the webview and bridges its requests into the app's in-process Deno.serve, so the page origin never changes between launches and can be allow-listed by servers that validate the browser Origin header. The scheme must not be a web or browser-reserved scheme (http, https, ws, wss, file, ftp, blob, data, javascript, about, ...) and the host carries no port, path, query, fragment or userinfo. Defaults to \"app://localhost\". Exposed to the app's Deno code as DENO_DESKTOP_APP_ORIGIN; the WebSocket relay's address is DENO_DESKTOP_WS_ORIGIN.",
               "pattern": "^[A-Za-z][A-Za-z0-9+.-]*://[A-Za-z0-9-]+(\\.[A-Za-z0-9-]+)*/?$"
             },
+            "activationPolicy": {
+              "type": "string",
+              "description": "The macOS activation policy the app starts in: \"regular\" (a Dock icon and a menu bar, the default) or \"accessory\" (neither, from the first frame: a tray / menu-bar app). Written to the packaged app's laufey-launch.json; Deno.dock.setActivationPolicy() switches it at runtime. Ignored on Windows and Linux.",
+              "enum": ["regular", "accessory"]
+            },
             "singleInstance": {
               "type": "boolean",
               "description": "Run at most one instance of the app per user. A second launch hands its arguments (a deep link or a file on Windows and Linux) and working directory to the running instance, which receives them as a Deno.desktop \"secondinstance\" event, and exits. The lock is keyed on the app identifier (desktop.app.identifier, or the one the CLI synthesizes). Defaults to false.",
