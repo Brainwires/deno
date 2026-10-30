@@ -2369,7 +2369,8 @@ where the changes are discussed.
       rejecting a `free()` (`find_zone_and_free`, an invalid or double free)
       from `~BackingStore` under `ArrayBufferSweeper` while `JsRuntime`'s drop
       disposes an isolate restored from a snapshot. Linux and Windows do not
-      show it. Not yet root-caused.
+      show it. Item 182 has the freed-memory access found on this path and its
+      fix.
 
 75. **Upstream batch: security pull requests** (`fix/security-23`, for runtime
     `denext.23`). Carried from open denoland/deno pull requests, one commit each
@@ -7281,13 +7282,73 @@ where the changes are discussed.
        archive and the checksum file, and on a directory, and a checksum
        mismatch stops `--from`.
 
+182. **`fix(core)`: the memory behind `tickInfo`, `immediateInfo` and
+     `timerInfo` belongs to its V8 backing store** (`jsrealm.rs`, `jsruntime.rs`
+     and `bindings.rs` in `libs/core/runtime/`; runtime 3.0.0-denext.5). The
+     open macOS crash of item 74:
+     - `ContextState` owned the three arrays Rust and JS share (`Box<[u8; 2]>`,
+       `Box<[u32; 3]>`, `Box<[i32; 1]>`), and the typed arrays over them were
+       backing stores with a no-op deleter. The typed arrays live on the V8
+       heap, which outlives the context state: `JsRealmInner::destroy` drops the
+       `ContextState` in `cleanup()`, before the isolate is disposed and, in
+       `JsRuntimeForSnapshot::snapshot`, before `create_blob` serializes the
+       heap. So every snapshot copied freed memory into the blob
+       (`SerializeJSTypedArray` -> `SerializeBackingStore`), and every runtime
+       kept typed arrays over freed memory from `cleanup()` until its isolate
+       was gone. Under Guard Malloc
+       (`DYLD_INSERT_LIBRARIES=/usr/lib/libgmalloc.dylib`, which unmaps freed
+       memory) the snapshot tests crashed on every run, reading the freed 4-byte
+       `timer_info` in `SerializeBackingStore` while serializing
+       `modules::tests::dynamic_imports_snapshot`. The three values in a
+       snapshot were whatever the freed memory held, so the CLI snapshot was not
+       byte-for-byte reproducible either.
+     - `SharedInfoBuffer<T, N>` allocates the array, wraps it in a backing store
+       whose deleter frees it, and keeps a `SharedRef` to that store; the typed
+       arrays are created over the same store, so the memory lives until the
+       context state and every `ArrayBuffer` over it are gone, in whichever
+       order, and the snapshot serializer reads live memory. Rust reads and
+       writes through `get` / `set` instead of indexing the boxes.
+     - Test:
+       `runtime::tests::misc::shared_info_memory_belongs_to_the_backing_store`
+       (JS's write through `immediateInfo` is what Rust reads, and the memory
+       still holds it after the runtime, its context state and its isolate are
+       dropped). Reproducer, from `libs/core`, on the unfixed tree (crashes in
+       `SerializeBackingStore` every time) and the fixed one (passes):
+       `cargo test --lib -p deno_core --no-run`, then
+       `DYLD_INSERT_LIBRARIES=/usr/lib/libgmalloc.dylib <test binary>
+       --test-threads=1 runtime::tests::snapshot::
+       runtime::tests::jsrealm::es_snapshot
+       modules::tests::dynamic_imports_snapshot
+       modules::tests::import_meta_snapshot`.
+     - Evidence, and what is not proven: item 74's abort (an earlier local
+       backtrace: `find_zone_and_free` from `~BackingStore`, from
+       `~ArrayBufferSweeper` in `Heap::TearDown`, from `Isolate::Delete` in
+       `InnerIsolateState::drop`) did not reproduce on the Mac mini, now on
+       macOS 27.2, with the unfixed tree built as CI builds it (lld,
+       `CARGO_PROFILE_DEV_DEBUG=0`, the same test binary hash): 0 of 60 runs of
+       the five snapshot filters on one thread, 0 of 480 of
+       `dynamic_imports_snapshot` alone (8 in parallel), 0 of 100 with
+       `MallocNanoZone=0`. Guard Malloc is what finds a memory error on this
+       path, deterministically, and with the fix it finds none: 60 runs of the
+       snapshot tests (with `MallocScribble=1`) and the rest of the deno_core
+       lib suite pass under it, and it rejects an invalid or double `free()` as
+       well as an access to freed memory. This change removes the only
+       freed-memory access Guard Malloc shows on the path; a read cannot free
+       anything by itself, so that it was the cause of the macOS abort is
+       inferred, not shown. If the abort recurs, this item did not explain it.
+     - `denext-runtime-v3.0.0-denext.4` was tagged (on `9252ffa6c5`) and refused
+       by the tag gate: the first attempt of that commit's `denext tests` run
+       (41038772858, macOS `test libs`) failed with this abort, and a green
+       re-run does not clear a red one. It has no release. 3.0.0-denext.5
+       supersedes it and carries everything denext.4 would have (items 176-182).
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
-169-174, 176, 178, 180) are what the prebuilt `libdenort` carries. The CLI-side
-parts (for example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a
-packaged app's launchers) are in the branch too, but a stock CLI does not run
-them; denext's own launcher provides that environment.
+169-174, 176, 178, 180, 182) are what the prebuilt `libdenort` carries. The
+CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID`
+into a packaged app's launchers) are in the branch too, but a stock CLI does not
+run them; denext's own launcher provides that environment.
 
 The laufey backend hosts are built from
 [Brainwires/laufey](https://github.com/Brainwires/laufey) branch

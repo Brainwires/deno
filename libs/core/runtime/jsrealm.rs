@@ -71,6 +71,70 @@ pub(crate) const IMM_IDX_COUNT: usize = 0;
 pub(crate) const IMM_IDX_REF_COUNT: usize = 1;
 pub(crate) const IMM_IDX_HAS_OUTSTANDING: usize = 2;
 
+/// A small array that Rust and JS share through a typed array (`tickInfo`,
+/// `immediateInfo` and `timerInfo` in 01_core.js).
+///
+/// The V8 backing store owns the memory, not `ContextState`: the typed arrays
+/// over it live on the V8 heap, which outlives the context state.
+/// `JsRealmInner::destroy` drops the `ContextState` before the isolate is
+/// disposed, and before `JsRuntimeForSnapshot::snapshot` serializes the heap,
+/// so memory the context state owned was freed while the heap still pointed
+/// at it, and the snapshot serializer copied freed bytes (DENEXT.md item 182).
+/// With the `SharedRef` here the memory lives until this state and every
+/// `ArrayBuffer` over it are gone.
+pub(crate) struct SharedInfoBuffer<T: Copy + Default, const N: usize> {
+  backing_store: v8::SharedRef<v8::BackingStore>,
+  ptr: *mut T,
+}
+
+impl<T: Copy + Default, const N: usize> SharedInfoBuffer<T, N> {
+  pub(crate) fn new() -> Self {
+    unsafe extern "C" fn drop_array<T, const N: usize>(
+      _data: *mut std::ffi::c_void,
+      _len: usize,
+      deleter_data: *mut std::ffi::c_void,
+    ) {
+      // SAFETY: `deleter_data` is the `Box<[T; N]>` leaked in `new`; V8 calls
+      // the deleter once, when the last reference to the backing store goes.
+      drop(unsafe { Box::from_raw(deleter_data as *mut [T; N]) });
+    }
+
+    let ptr = Box::into_raw(Box::new([T::default(); N])) as *mut T;
+    // SAFETY: `ptr` points to `size_of::<[T; N]>()` initialized bytes that
+    // stay valid until `drop_array` frees them.
+    let backing_store = unsafe {
+      v8::ArrayBuffer::new_backing_store_from_ptr(
+        ptr as *mut std::ffi::c_void,
+        std::mem::size_of::<[T; N]>(),
+        drop_array::<T, N>,
+        ptr as *mut std::ffi::c_void,
+      )
+    }
+    .make_shared();
+    Self { backing_store, ptr }
+  }
+
+  /// The backing store to create the JS `ArrayBuffer` over.
+  pub(crate) fn backing_store(&self) -> &v8::SharedRef<v8::BackingStore> {
+    &self.backing_store
+  }
+
+  #[inline(always)]
+  pub(crate) fn get(&self, index: usize) -> T {
+    assert!(index < N);
+    // SAFETY: in bounds, and `backing_store` keeps the memory alive. JS
+    // writes it on this thread only, never during this read.
+    unsafe { self.ptr.add(index).read() }
+  }
+
+  #[inline(always)]
+  pub(crate) fn set(&self, index: usize, value: T) {
+    assert!(index < N);
+    // SAFETY: as in `get`.
+    unsafe { self.ptr.add(index).write(value) }
+  }
+}
+
 pub struct ContextState {
   pub(crate) task_spawner_factory: Arc<V8TaskSpawnerFactory>,
   pub(crate) user_timer: UserTimer<DefaultReactor>,
@@ -127,13 +191,13 @@ pub struct ContextState {
   /// Shared tick info buffer exposed to JS as a Uint8Array.
   /// Index 0: hasTickScheduled (1 = true, 0 = false)
   /// Index 1: hasRejectionToWarn (set by Rust in promise_reject_callback)
-  pub(crate) tick_info: Box<[u8; 2]>,
+  pub(crate) tick_info: SharedInfoBuffer<u8, 2>,
   /// Shared immediate info buffer exposed to JS as a Uint32Array.
   /// Indices: IMM_IDX_COUNT, IMM_IDX_REF_COUNT, IMM_IDX_HAS_OUTSTANDING
-  pub(crate) immediate_info: Box<[u32; 3]>,
+  pub(crate) immediate_info: SharedInfoBuffer<u32, 3>,
   /// Shared timer info buffer exposed to JS as an Int32Array.
   /// Index 0: refed timer count (managed by JS)
-  pub(crate) timer_info: Box<[i32; 1]>,
+  pub(crate) timer_info: SharedInfoBuffer<i32, 1>,
   /// Active JS-managed timers tracked for the leak sanitizer.
   /// Maps timer ID → (is_repeat, is_system). System timers (e.g.
   /// AbortSignal.timeout) are excluded from sanitizer stats.
@@ -187,7 +251,7 @@ pub struct ContextState {
 
 impl ContextState {
   pub(crate) fn has_tick_scheduled(&self) -> bool {
-    self.tick_info[0] != 0
+    self.tick_info.get(0) != 0
   }
 
   /// Mirrors JS `hasRejectionToWarn()`. `tick_info[1]` is written from Rust in
@@ -195,7 +259,7 @@ impl ContextState {
   /// `processTicksAndRejections`; both run on the event loop thread so no
   /// synchronization is needed for this read.
   pub(crate) fn has_rejection_to_warn(&self) -> bool {
-    self.tick_info[1] != 0
+    self.tick_info.get(1) != 0
   }
 
   pub(crate) fn new(
@@ -210,8 +274,8 @@ impl ContextState {
     Self {
       isolate: Some(isolate_ptr),
       exception_state: Default::default(),
-      tick_info: Box::new([0u8; 2]),
-      immediate_info: Box::new([0u32; 3]),
+      tick_info: SharedInfoBuffer::new(),
+      immediate_info: SharedInfoBuffer::new(),
       js_event_loop_tick_cb: Default::default(),
       js_process_timers_cb: Default::default(),
       js_drain_next_tick_and_macrotasks_cb: Default::default(),
@@ -229,7 +293,7 @@ impl ContextState {
       pending_ops: op_driver,
       task_spawner_factory: Default::default(),
       user_timer: Default::default(),
-      timer_info: Box::new([0i32; 1]),
+      timer_info: SharedInfoBuffer::new(),
       active_timers: Default::default(),
       unrefed_ops,
       external_ops_tracker,

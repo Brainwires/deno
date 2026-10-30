@@ -2312,3 +2312,33 @@ fn op_ctxs_outlive_isolate() {
   );
   assert_eq!(op_ctxs.strong_count(), 0, "op contexts were leaked");
 }
+
+/// The memory behind `immediateInfo` (and `tickInfo`, `timerInfo`) belongs
+/// to its V8 backing store, not to the `ContextState`: the runtime drops the
+/// context state before it disposes the isolate, and before a snapshot
+/// serializes the heap, while the typed arrays over that memory are still on
+/// the heap. Owned by the context state, it was freed first, and the snapshot
+/// serializer read the freed bytes (DENEXT.md item 182; under Guard Malloc,
+/// `DYLD_INSERT_LIBRARIES=/usr/lib/libgmalloc.dylib`, every snapshot test
+/// crashed in `SerializeBackingStore`).
+#[test]
+fn shared_info_memory_belongs_to_the_backing_store() {
+  use crate::runtime::jsrealm::IMM_IDX_REF_COUNT;
+
+  let mut runtime = JsRuntime::new(Default::default());
+  runtime
+    .execute_script("a.js", "Deno.core.immediateRefCount(true);")
+    .unwrap();
+  let state = runtime.main_realm().0.state();
+  // JS wrote through the typed array; Rust reads the same memory.
+  assert_eq!(state.immediate_info.get(IMM_IDX_REF_COUNT), 1);
+  let store = state.immediate_info.backing_store().clone();
+  drop(state);
+  drop(runtime);
+
+  // The context state and the isolate are gone; the memory is still the
+  // backing store's, with what JS wrote in it.
+  let data = store.data().unwrap().as_ptr() as *const u32;
+  // SAFETY: `store` keeps the 3 x u32 alive.
+  assert_eq!(unsafe { data.add(IMM_IDX_REF_COUNT).read() }, 1);
+}
