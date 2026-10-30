@@ -6643,10 +6643,14 @@ where the changes are discussed.
      does not match Cargo.lock's `v8` version, or a `RUSTY_V8_MIRROR` in the
      environment stops the job, and nothing is ever taken from denoland's
      releases (their 152.2.1+denext.1 does not exist, so the build script's own
-     default fails too). Locally,
-     `fetch_rusty_v8.py --from <dir>
-     --print-env` verifies files already on
-     disk the same way.
+     default fails too). Locally, `fetch_rusty_v8.py --from <dir> --print-env`
+     verifies files already on disk the same way. The CI steps also pass
+     `--seed-dir target/<profile>`, which unpacks the verified library to
+     `gn_out/obj/`, where the build script puts it: Swatinem/rust-cache keeps
+     the `v8` build-script fingerprint but drops `gn_out`, so a warm cache with
+     the same `v8` skipped the script and failed to link ("could not find native
+     static library `rusty_v8`", every `cli` job of 3.0.0-denext.3's second
+     runtime run).
 
      Verified on biscuits (Linux x86_64): rusty_v8 from source with
      `V8_FROM_SOURCE=1` in 34 min (`librusty_v8.a` 198 MB), its own

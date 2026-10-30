@@ -569,7 +569,9 @@ jobs:
       # checked against .github/denext-runtime/rusty_v8.sha256, never from
       # denoland's (DENEXT.md item 162). Fails closed.
       - name: Prebuilt V8
-        run: python3 -I .github/denext-runtime/fetch_rusty_v8.py --target "${{ matrix.target }}" --dest "$RUNNER_TEMP/rusty_v8" --github-env
+        # --seed-dir: the cache restores the v8 build-script fingerprint but
+        # not target/release/gn_out, where the script puts the library.
+        run: python3 -I .github/denext-runtime/fetch_rusty_v8.py --target "${{ matrix.target }}" --dest "$RUNNER_TEMP/rusty_v8" --seed-dir target/release --github-env
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
@@ -810,7 +812,9 @@ jobs:
       # checked against .github/denext-runtime/rusty_v8.sha256, never from
       # denoland's (DENEXT.md item 162). Fails closed.
       - name: Prebuilt V8
-        run: python3 -I .github/denext-runtime/fetch_rusty_v8.py --target "${{ matrix.target }}" --dest "$RUNNER_TEMP/rusty_v8" --github-env
+        # --seed-dir: the cache restores the v8 build-script fingerprint but
+        # not target/release/gn_out, where the script puts the library.
+        run: python3 -I .github/denext-runtime/fetch_rusty_v8.py --target "${{ matrix.target }}" --dest "$RUNNER_TEMP/rusty_v8" --seed-dir target/release --github-env
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:

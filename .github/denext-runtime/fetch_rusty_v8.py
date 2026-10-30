@@ -20,17 +20,27 @@ written. The manifest is reviewed in the change that bumps V8.
 
 Usage:
   fetch_rusty_v8.py --target <triple> --dest <dir> [--from <dir>]
-                    [--github-env | --print-env]
+                    [--seed-dir <dir>] [--github-env | --print-env]
 
   --from <dir>    take the files from a local directory (a build's output, an
                   offline mirror) instead of the release; they are verified
                   the same way.
+  --seed-dir <dir>
+                  also unpack the verified library to
+                  <dir>/gn_out/obj/librusty_v8.a (rusty_v8.lib on Windows),
+                  where the build script puts it; <dir> is the cargo profile
+                  directory (target/release, target/debug). A build cache
+                  (Swatinem/rust-cache) keeps the `v8` crate's build-script
+                  fingerprint but drops gn_out, so a restored build would not
+                  rerun the script and would find no library to link. When the
+                  script does run, it copies the archive over this file again.
   --github-env    append the three variables to $GITHUB_ENV.
   --print-env     print `export` lines for a POSIX shell.
 Exits 0 on success, 1 on any failed check, 2 on a usage error.
 """
 
 import argparse
+import gzip
 import hashlib
 import os
 import re
@@ -130,8 +140,28 @@ def download(url, dest, attempts=4):
   raise Failure(f"download failed: {url}: {last}")
 
 
+def seed_static_lib(target, archive, seed_dir):
+  """Unpack the verified `archive` (.a.gz / .lib.gz) to where the `v8`
+  crate's build script links it from: <seed_dir>/gn_out/obj/<lib>. Written
+  to a temporary name first, so a failure leaves no partial library."""
+  name = "rusty_v8.lib" if "windows" in target else "librusty_v8.a"
+  obj = os.path.join(seed_dir, "gn_out", "obj")
+  os.makedirs(obj, exist_ok=True)
+  path = os.path.join(obj, name)
+  part = path + ".part"
+  try:
+    with gzip.open(archive, "rb") as src, open(part, "wb") as out:
+      shutil.copyfileobj(src, out)
+  except (OSError, EOFError) as error:
+    if os.path.exists(part):
+      os.remove(part)
+    raise Failure(f"cannot unpack {archive} into {obj}: {error}")
+  os.replace(part, path)
+  return path
+
+
 def fetch(target, dest, source_dir=None, manifest_text=None, lock_text=None,
-          fetcher=download):
+          fetcher=download, seed_dir=None):
   """Place and verify both files for `target` in `dest`; returns the
   environment for the build script."""
   if os.environ.get("RUSTY_V8_MIRROR"):
@@ -166,6 +196,9 @@ def fetch(target, dest, source_dir=None, manifest_text=None, lock_text=None,
     print(f"{name}: SHA-256 OK ({got})", file=sys.stderr)
     paths.append((os.path.abspath(path), got))
   (lib, lib_sha), (binding, _) = paths
+  if seed_dir:
+    seeded = seed_static_lib(target, lib, seed_dir)
+    print(f"seeded {seeded}", file=sys.stderr)
   return {
     "RUSTY_V8_ARCHIVE": lib,
     "RUSTY_V8_ARCHIVE_SHA256": lib_sha,
@@ -178,12 +211,13 @@ def main(argv):
   parser.add_argument("--target", required=True)
   parser.add_argument("--dest", required=True)
   parser.add_argument("--from", dest="source_dir")
+  parser.add_argument("--seed-dir")
   mode = parser.add_mutually_exclusive_group()
   mode.add_argument("--github-env", action="store_true")
   mode.add_argument("--print-env", action="store_true")
   args = parser.parse_args(argv)
   try:
-    env = fetch(args.target, args.dest, args.source_dir)
+    env = fetch(args.target, args.dest, args.source_dir, seed_dir=args.seed_dir)
   except (Failure, OSError) as error:
     print(f"::error::fetch_rusty_v8: {error}", file=sys.stderr)
     return 1

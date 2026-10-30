@@ -80,7 +80,9 @@ runs:
       run: |
         set -euo pipefail
         target=$(rustc -vV | sed -n 's/^host: //p')
-        python3 -I .github/denext-runtime/fetch_rusty_v8.py --target "$target" --dest "$RUNNER_TEMP/rusty_v8" --github-env
+        # --seed-dir: the cache restores the v8 build-script fingerprint but
+        # not target/debug/gn_out, where the script puts the library.
+        python3 -I .github/denext-runtime/fetch_rusty_v8.py --target "$target" --dest "$RUNNER_TEMP/rusty_v8" --seed-dir target/debug --github-env
 
     - uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
       with:

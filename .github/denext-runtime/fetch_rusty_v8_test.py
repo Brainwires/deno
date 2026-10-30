@@ -9,6 +9,7 @@ repository's own manifest against its Cargo.lock.
 Usage: python3 -I .github/denext-runtime/fetch_rusty_v8_test.py
 """
 
+import gzip
 import hashlib
 import importlib.util
 import os
@@ -177,6 +178,39 @@ class Fetch(unittest.TestCase):
       f.write(b"edited")
     with self.assertRaisesRegex(fr.Failure, "SHA-256"):
       self.run_fetch(source_dir=src)
+
+  def test_seed_dir_unpacks_the_library_where_the_build_script_links_it(self):
+    # A restored build cache keeps the `v8` build-script fingerprint but not
+    # target/<profile>/gn_out, so the library must be put back there.
+    real = b"!<arch>\n" + b"x" * 4096
+    gz = gzip.compress(real)
+    seed = os.path.join(self.tmp.name, "target", "release")
+    fetcher = FakeRelease({
+      f"librusty_v8_release_{TARGET}.a.gz": gz,
+      f"src_binding_release_{TARGET}.rs": BINDING,
+    })
+    self.run_fetch(text=manifest(lib=gz), fetcher=fetcher, seed_dir=seed)
+    with open(os.path.join(seed, "gn_out", "obj", "librusty_v8.a"), "rb") as f:
+      self.assertEqual(f.read(), real)
+
+  def test_seed_dir_names_the_windows_library(self):
+    gz = gzip.compress(b"lib")
+    archive = os.path.join(self.tmp.name, "a.lib.gz")
+    with open(archive, "wb") as f:
+      f.write(gz)
+    seed = os.path.join(self.tmp.name, "debug")
+    path = fr.seed_static_lib("x86_64-pc-windows-msvc", archive, seed)
+    self.assertEqual(path, os.path.join(seed, "gn_out", "obj", "rusty_v8.lib"))
+
+  def test_a_corrupt_archive_seeds_nothing(self):
+    seed = os.path.join(self.tmp.name, "target", "release")
+    with self.assertRaisesRegex(fr.Failure, "cannot unpack"):
+      self.run_fetch(seed_dir=seed)  # LIB is not gzip data
+    self.assertEqual(os.listdir(os.path.join(seed, "gn_out", "obj")), [])
+
+  def test_without_seed_dir_nothing_is_unpacked(self):
+    self.run_fetch()
+    self.assertFalse(os.path.exists(os.path.join(self.dest, "gn_out")))
 
 
 class Repository(unittest.TestCase):
