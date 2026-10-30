@@ -1,0 +1,54 @@
+{
+  // A bring-your-own-node_modules project (nodeModulesDir "manual") lets
+  // require() read inside node_modules without --allow-read, but a link in
+  // node_modules that leads out of it (node_modules/evil -> ../outside) must
+  // not carry that exemption to the files it reaches: require(),
+  // createRequire, require.resolve and a chain of links are refused there as
+  // an ES module import is. A pnpm-style link into node_modules/.pnpm stays
+  // readable. Each script is the main module, so it needs no grant itself.
+  "tempDir": true,
+  "steps": [
+    {
+      "args": "run -A setup.js",
+      "output": ""
+    },
+    {
+      "args": "run require.cjs",
+      "output": "relative: NotCapable\nabsolute: NotCapable\n"
+    },
+    {
+      "args": "run create_require.mjs",
+      "output": "createRequire: NotCapable\n"
+    },
+    {
+      "args": "run resolve.cjs",
+      "output": "require.resolve: NotCapable\n"
+    },
+    {
+      "args": "run chain.cjs",
+      "output": "chain: NotCapable\n"
+    },
+    {
+      "args": "run pnpm.cjs",
+      "output": "pnpm: pkg\n"
+    },
+    {
+      // --deny-read applies to what the link reaches. Unix only: a relative
+      // --deny-read resolves against the cwd as spelled, which on the Windows
+      // runner is an 8.3 short name (RUNNER~1), while the link target is
+      // checked by its canonical path.
+      "if": "unix",
+      "args": "run --allow-read --deny-read=outside require.cjs",
+      "output": "relative: NotCapable\nabsolute: NotCapable\n"
+    },
+    {
+      // The main module through a link (lib -> outside) is in the module
+      // graph under its spelling, but that does not carry it past
+      // --deny-read on its real path (as on stock Deno).
+      "if": "unix",
+      "args": "run --deny-read=outside lib/mod.cjs",
+      "output": "[WILDCARD]Requires read access to \"[WILDCARD]mod.cjs\"[WILDCARD]",
+      "exitCode": 1
+    }
+  ]
+}

@@ -67,6 +67,13 @@ pub trait NodeRequireLoader {
     path: Cow<'a, Path>,
   ) -> Result<Cow<'a, Path>, JsErrorBox>;
 
+  /// Whether `path` is a module the loader loaded itself (the main module and
+  /// the rest of the module graph), which `ensure_read_permission` lets
+  /// `require()` read under that spelling whatever the read grant says.
+  fn is_loaded_module_path(&self, _path: &Path) -> bool {
+    false
+  }
+
   fn load_text_file_lossy(&self, path: &Path)
   -> Result<FastString, JsErrorBox>;
 

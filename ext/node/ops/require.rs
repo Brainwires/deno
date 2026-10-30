@@ -41,9 +41,62 @@ use crate::PackageJsonResolverRc;
 /// goes through a symlink or, on Windows, an 8.3 short name (a working
 /// directory under `C:\Users\RUNNER~1` canonicalizes to the long name).
 /// Reading the real path of an allowed path reads the same file, so these
-/// count as allowed too.
+/// count as allowed too, but only when the spelling was allowed by the read
+/// grant itself or is a module the loader loaded (see `allow_real_path`):
+/// a spelling that passed only through the loader's own exemptions (a
+/// `node_modules` component) must not carry its real path past the grant.
 #[derive(Default)]
 struct AllowedRealPaths(std::collections::HashSet<PathBuf>);
+
+/// Lets the require ops read `real_path`, the real path of `allowed_path`,
+/// which the caller was already allowed to read. When the real path is not
+/// readable on its own, it is recorded in `AllowedRealPaths` only if the
+/// spelling is granted by the read permission (not merely by the loader's
+/// `node_modules` exemption) or is a module the loader loaded, and the real
+/// path is not explicitly denied (`--deny-read`, `--ignore-read`). Anything
+/// else is refused with the permission error for the real path, as an ES
+/// module import is.
+fn allow_real_path(
+  state: &mut OpState,
+  allowed_path: &Path,
+  real_path: &Path,
+) -> Result<(), JsErrorBox> {
+  use deno_permissions::PermissionState;
+
+  let loader = state.borrow::<NodeRequireLoaderRc>().clone();
+  let permissions = state.borrow::<PermissionsContainer>();
+  // Queries, not checks: nothing here may prompt. The only prompt is the
+  // real path's own check below.
+  let query = |path: &Path| {
+    path
+      .to_str()
+      .and_then(|path| permissions.query_read(Some(path)).ok())
+  };
+  let spelling_granted = query(allowed_path) == Some(PermissionState::Granted)
+    || loader.is_loaded_module_path(allowed_path);
+  let real_path_refused = !matches!(
+    query(real_path),
+    Some(
+      PermissionState::Granted
+        | PermissionState::GrantedPartial
+        | PermissionState::Prompt
+    )
+  );
+  if spelling_granted && !real_path_refused {
+    if !state.has::<AllowedRealPaths>() {
+      state.put(AllowedRealPaths::default());
+    }
+    state
+      .borrow_mut::<AllowedRealPaths>()
+      .0
+      .insert(real_path.to_path_buf());
+    return Ok(());
+  }
+  let permissions = state.borrow_mut::<PermissionsContainer>();
+  loader
+    .ensure_read_permission(permissions, Cow::Borrowed(real_path))
+    .map(|_| ())
+}
 
 #[must_use = "the resolved return value to mitigate time-of-check to time-of-use issues"]
 fn ensure_read_permission<'a>(
@@ -468,13 +521,8 @@ pub fn op_require_real_path<TSys: ExtNodeSys + 'static>(
   if canonicalized_path != path.as_ref()
     && !state.borrow::<PermissionsContainer>().query_read_all()
   {
-    if !state.has::<AllowedRealPaths>() {
-      state.put(AllowedRealPaths::default());
-    }
-    state
-      .borrow_mut::<AllowedRealPaths>()
-      .0
-      .insert(canonicalized_path.clone());
+    allow_real_path(state, &path, &canonicalized_path)
+      .map_err(RequireErrorKind::Permission)?;
   }
   Ok(canonicalized_path.to_string_lossy().into_owned())
 }

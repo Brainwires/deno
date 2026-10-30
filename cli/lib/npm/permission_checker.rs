@@ -121,6 +121,10 @@ where
   }
 }
 
+fn path_has_node_modules_component(path: &Path) -> bool {
+  path.components().any(|c| c.as_os_str() == "node_modules")
+}
+
 /// Returns whether the prefix of `path` at the configured registry depth
 /// resolves to the canonical registry root. Windows may spell an existing
 /// ancestor using an 8.3 short name or different casing, so a component-wise
@@ -176,13 +180,34 @@ impl<TSys: DenoLibSys> NpmRegistryReadPermissionChecker<TSys> {
         // such as `./node_modules/../../../etc/passwd` would slip through the
         // check and be read without `--allow-read`.
         let path = deno_path_util::normalize_path(path);
-        if path.components().any(|c| c.as_os_str() == "node_modules") {
-          Ok(path)
-        } else {
-          permissions
+        if !path_has_node_modules_component(&path) {
+          return permissions
             .check_open(path, OpenAccessKind::Read, None)
             .map(|p| p.into_path())
-            .map_err(JsErrorBox::from_err)
+            .map_err(JsErrorBox::from_err);
+        }
+        // A `node_modules` component in the spelling is not enough: a link
+        // inside `node_modules` (`node_modules/pkg -> ../../outside`) would
+        // otherwise make any file it reaches readable without `--allow-read`
+        // and past `--deny-read`. Keep the exemption only when the real path
+        // is still inside a `node_modules` directory (a pnpm `.pnpm` store
+        // link is); check anything else like an ordinary read.
+        match canonicalize_path_maybe_not_exists_following_dangling_links(
+          &self.sys, &path,
+        ) {
+          Ok(path_canon) if path_has_node_modules_component(&path_canon) => {
+            Ok(path)
+          }
+          Ok(path_canon) => permissions
+            .check_open(Cow::Owned(path_canon), OpenAccessKind::Read, None)
+            .map(|p| p.into_path())
+            .map_err(JsErrorBox::from_err),
+          // The real path is unknown (an unreadable ancestor, a link loop):
+          // the spelling has to be granted itself.
+          Err(_) => permissions
+            .check_open(path, OpenAccessKind::Read, None)
+            .map(|p| p.into_path())
+            .map_err(JsErrorBox::from_err),
         }
       }
       NpmRegistryReadPermissionCheckerMode::Global(registry_path)
