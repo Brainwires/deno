@@ -7419,8 +7419,13 @@ where the changes are discussed.
      - Tests: `runtime::ops::desktop` unit tests for the level and policy names
        and the `trayEvent` shape (and its kind pinned with the others); the
        launch-config test with `activationPolicy`; the config parser test for
-       `desktop.app.activationPolicy`. laufey's own e2e (`--window-api` overlay
-       checks, `--layer1` StatusNotifierItem clicks) covers the native side.
+       `desktop.app.activationPolicy`; the five new ops
+       (`op_desktop_tray_capabilities`, `op_desktop_window_level_code`,
+       `op_desktop_speak`, `op_desktop_stop_speaking`,
+       `op_desktop_speech_voices`) are kept by `NOT_IMPORTED_OPS` and inert
+       outside a desktop app (`specs::run::desktop_ops_inert`). laufey's own e2e
+       (`--window-api` overlay checks, `--layer1` StatusNotifierItem clicks)
+       covers the native side.
 
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
