@@ -2690,37 +2690,29 @@ laufey::main!(|| {
   // Set up panic hook for desktop error reporting.  The error reporting
   // URL is only known after binary metadata is parsed (in run_desktop),
   // so the hook reads from a global that gets set later.
+  // The report is crash_report's schema 2 (DENEXT.md item 180): the runtime
+  // version, the build's commit, the thread and the stack trace too, the
+  // message scrubbed, and over HTTPS even before any JavaScript ran.
+  deno_runtime::crash_report::init_binary(
+    deno_runtime::crash_report::BinaryInfo {
+      binary: "desktop",
+      version: deno_lib::version::DENO_VERSION_INFO.deno,
+      git_hash: deno_lib::version::DENO_VERSION_INFO.git_hash,
+      root_cert_store: None,
+    },
+  );
   {
     let orig_hook = std::panic::take_hook();
     #[allow(clippy::print_stderr, reason = "panic hook")]
     std::panic::set_hook(Box::new(move |panic_info| {
       use deno_runtime::ops::desktop::error_report_config;
-      use deno_runtime::ops::desktop::send_error_report;
 
       if let Some((url, app_version)) = error_report_config() {
-        let message = if let Some(s) =
-          panic_info.payload().downcast_ref::<&str>()
-        {
-          (*s).to_string()
-        } else if let Some(s) = panic_info.payload().downcast_ref::<String>() {
-          s.clone()
-        } else {
-          "Deno runtime panicked".to_string()
-        };
-
-        let location = panic_info
-          .location()
-          .map(|l| format!("at {}:{}:{}", l.file(), l.line(), l.column()));
-
-        let body = deno_core::serde_json::json!({
-          "version": 1,
-          "message": message,
-          "stack": location,
-          "appVersion": app_version,
-          "platform": env::consts::OS,
-          "arch": env::consts::ARCH,
-        });
-        send_error_report(url, &body.to_string());
+        deno_runtime::crash_report::report_panic_to(
+          url,
+          panic_info,
+          app_version,
+        );
       }
 
       eprintln!(

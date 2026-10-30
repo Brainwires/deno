@@ -45,10 +45,11 @@ hmr = ["deno_runtime/hmr", "deno_snapshots/disable"]
 # Vendor zlib as zlib-ng
 __vendored_zlib_ng = ["flate2/zlib-ng-compat", "libz-sys/zlib-ng"]
 lsp-tracing = ["dep:tracing", "dep:tracing-subscriber", "dep:tracing-opentelemetry", "opentelemetry-otlp/grpc-tonic"]
-# Custom panic trace with `deno_panic`
-panic-trace = ["deno_panic"]
+# Custom panic trace with `deno_panic` (denext: through deno_runtime's
+# crash_report, which the panic banner and crash reports share)
+panic-trace = ["deno_runtime/panic-trace"]
 # Linux release builds remove DWARF unwind tables and trace with frame pointers.
-panic-trace-frame-pointer = ["panic-trace", "deno_panic/frame-pointer"]
+panic-trace-frame-pointer = ["panic-trace", "deno_runtime/panic-trace-frame-pointer"]
 
 [build-dependencies]
 deno_runtime = { workspace = true }
@@ -85,7 +86,6 @@ deno_npm_installer = { workspace = true }
 deno_npmrc.workspace = true
 deno_os.workspace = true
 deno_package_json = { workspace = true, features = ["sync"] }
-deno_panic = { version = "0.2.1", optional = true }
 deno_path_util.workspace = true
 deno_print.workspace = true
 deno_resolver = { workspace = true, features = ["deno_ast", "graph", "sync"] }

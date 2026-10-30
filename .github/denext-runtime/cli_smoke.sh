@@ -6,7 +6,8 @@
 # (smoke/cli/vitest_test.ts); that the bundled esbuild is ESBUILD_VERSION and
 # `deno bundle` uses it with an empty DENO_DIR and no reachable npm registry;
 # that `deno lsp` defaults to the shipped tsgo build; and that `deno lint
-# --type-aware` runs the shipped tsgolint offline.
+# --type-aware` runs the shipped tsgolint offline; and that the crash report
+# self-test writes its report, with a stack trace.
 #
 # Env: TARGET VERSION ESBUILD_VERSION ARCHIVE WORK_DIR (a directory that does
 # not exist yet)
@@ -56,6 +57,29 @@ test "$last" = "denext $VERSION (Brainwires)" ||
 build_denext=$("$deno" eval 'console.log(Deno.build.denext)' | tr -d '\r')
 test "$build_denext" = "$VERSION" || { echo "::error::Deno.build.denext is '$build_denext', want '$VERSION'" >&2; exit 1; }
 echo "Deno.build.denext: $build_denext"
+# The opt-in crash report (DENEXT.md item 180): the self-test panic writes
+# exactly one schema-2 report naming this build, with a stack trace (release
+# builds have the panic-trace feature), and the banner prints the trace.
+echo "::group::crash report self-test"
+report="$work/crash-report.jsonl"
+report_url=$("$deno" eval 'console.log((await import("node:url")).pathToFileURL(Deno.args[0]).href)' "$report" | tr -d '\r')
+if DENEXT_CRASH_REPORT_URL="$report_url" DENEXT_CRASH_REPORT_SELFTEST=1 "$deno" -V >/dev/null 2>"$work/crash-stderr.txt"; then
+  echo "::error::DENEXT_CRASH_REPORT_SELFTEST=1 did not panic" >&2; exit 1
+fi
+grep -q '^Stack trace: [A-Za-z0-9_-]\{4,\} ' "$work/crash-stderr.txt" ||
+  { cat "$work/crash-stderr.txt"; echo "::error::the panic banner has no stack trace line" >&2; exit 1; }
+"$deno" eval '
+  const lines = Deno.readTextFileSync(Deno.args[0]).split("\n").filter(Boolean);
+  const r = lines.length === 1 ? JSON.parse(lines[0]) : {};
+  const ok = r.schema === 2 && r.kind === "selftest" && r.binary === "deno" &&
+    r.version === Deno.args[1] && r.target === Deno.args[2] &&
+    typeof r.trace === "string" && r.trace.length > 0 && !("argv" in r);
+  console.log(JSON.stringify(r));
+  if (!ok) Deno.exit(1);
+' "$report" "$VERSION" "$TARGET" ||
+  { echo "::error::the crash report self-test did not write one schema-2 report for $VERSION / $TARGET with a trace" >&2; exit 1; }
+echo "::endgroup::"
+
 # `deno upgrade` must not replace a denext build with upstream Deno.
 if "$deno" upgrade --dry-run >"$work/upgrade.txt" 2>&1; then
   echo "::error::deno upgrade ran in a denext build" >&2; cat "$work/upgrade.txt" >&2; exit 1

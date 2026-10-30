@@ -4436,130 +4436,14 @@ pub fn error_report_config() -> Option<(&'static str, Option<&'static str>)> {
     .map(|c| (c.url.as_str(), c.app_version.as_deref()))
 }
 
-/// Stash of the `OpState` HTTP client for the panic-hook path. The panic
-/// hook can't reach `OpState`, so we capture a client when the runtime
-/// initializes error reporting and reuse it from both code paths. This
-/// keeps a single TLS configuration (the user's roots) — earlier the panic
-/// path constructed an ad-hoc `reqwest`/`fetch` client that bypassed it.
-static ERROR_REPORT_CLIENT: OnceLock<deno_fetch::Client> = OnceLock::new();
-
-/// Capture the OpState HTTP client for use by the panic hook.
-pub fn set_error_report_client(client: deno_fetch::Client) {
-  let _ = ERROR_REPORT_CLIENT.set(client);
-}
-
-#[allow(
-  clippy::disallowed_methods,
-  reason = "best-effort panic-hook error-report append; path is operator-configured via `error_reporting_url` and FileSystem trait isn't reachable from a panic hook"
-)]
-fn append_to_file(path: &Path, body: &str) {
-  let mut line = body.to_string();
-  line.push('\n');
-  let _ = std::fs::OpenOptions::new()
-    .create(true)
-    .append(true)
-    .open(path)
-    .and_then(|mut f| std::io::Write::write_all(&mut f, line.as_bytes()));
-}
-
-/// How long an HTTPS error report may take (connect, TLS, request and
-/// response) before it is given up. The report is posted on its own thread
-/// and joined, so the panic hook's report is out before the process exits;
-/// without a bound, an endpoint that accepts and never answers (or a
-/// black-holed network) hung the exiting app, or the error path, forever.
-const ERROR_REPORT_TIMEOUT: std::time::Duration =
-  std::time::Duration::from_secs(5);
-
-fn post_error_report(client: deno_fetch::Client, url: String, body: String) {
-  post_error_report_within(client, url, body, ERROR_REPORT_TIMEOUT);
-}
-
-fn post_error_report_within(
-  client: deno_fetch::Client,
-  url: String,
-  body: String,
-  timeout: std::time::Duration,
-) {
-  let _ =
-    std::thread::spawn(move || {
-      let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
-        .enable_io()
-        .enable_time()
-        .build()
-      else {
-        return;
-      };
-      runtime.block_on(async move {
-      let Ok(uri) = url.parse::<http::Uri>() else {
-        return;
-      };
-      let mut req = http::Request::new(deno_fetch::ReqBody::full(body.into()));
-      *req.method_mut() = http::Method::POST;
-      *req.uri_mut() = uri;
-      req.headers_mut().insert(
-        http::header::CONTENT_TYPE,
-        http::HeaderValue::from_static("application/json"),
-      );
-      if tokio::time::timeout(timeout, client.send(req)).await.is_err() {
-        log::warn!(
-          "desktop: error report not delivered within {timeout:?}; dropping it"
-        );
-      }
-    });
-      // Don't wait on a resolver thread still stuck in the dropped request.
-      runtime.shutdown_timeout(std::time::Duration::from_millis(100));
-    })
-    .join();
-}
-
-/// Send a JSON error report to the given URL. Best-effort — never panics.
-/// Accepts only `file://` and `https://`. Plain `http://` is rejected:
-/// error reports usually carry stack traces and runtime context, so
-/// anyone on-path could read them. A bare path (or any unparseable
-/// string) is also rejected — previously such inputs were silently
-/// treated as a local file path, which let a malformed metadata field
-/// land error reports at an attacker-chosen location on disk.
-pub fn send_error_report(url: &str, body: &str) {
-  let Ok(parsed) = deno_core::url::Url::parse(url) else {
-    log::warn!(
-      "desktop: error_reporting_url is not a valid URL ({:?}); dropping report",
-      url,
-    );
-    return;
-  };
-
-  match parsed.scheme() {
-    "file" => {
-      // `url_to_file_path` rejects `file://host/...` URLs (non-local),
-      // so a local path is the only way to reach `append_to_file`.
-      let Ok(path) = deno_path_util::url_to_file_path(&parsed) else {
-        log::warn!(
-          "desktop: error_reporting_url file:// URL is not a local path ({:?}); dropping report",
-          url,
-        );
-        return;
-      };
-      append_to_file(&path, body);
-    }
-    "https" => {
-      let Some(client) = ERROR_REPORT_CLIENT.get().cloned() else {
-        log::warn!(
-          "desktop: error-report HTTP client not initialized; dropping report"
-        );
-        return;
-      };
-      post_error_report(client, parsed.to_string(), body.to_string());
-    }
-    other => {
-      log::warn!(
-        "desktop: refusing to send error report over '{other}' (file:// or https:// only); dropping report",
-      );
-    }
-  }
-}
+// The sender moved to `crate::crash_report` (DENEXT.md item 180), shared
+// with the CLI's and denort's crash reports; re-exported for the desktop
+// runtime.
+pub use crate::crash_report::send_error_report;
+pub use crate::crash_report::set_error_report_client;
 
 /// Sends the report off the JavaScript thread (an HTTPS report may take up
-/// to [`ERROR_REPORT_TIMEOUT`], and the JavaScript thread used to wait for
+/// to 5 s, and the JavaScript thread used to wait for
 /// it, its timers and servers stalled); the error handler awaits the promise
 /// before it exits.
 #[op2]
@@ -4595,7 +4479,7 @@ fn prepare_error_report(state: &mut OpState) -> Option<&'static str> {
   // Make sure the panic-hook path has a client too. The OpState client is
   // the one configured with the user's TLS roots/permissions, so we share
   // it across both code paths instead of creating an ad-hoc client.
-  if ERROR_REPORT_CLIENT.get().is_none()
+  if !crate::crash_report::has_error_report_client()
     && let Ok(client) = deno_fetch::get_or_create_client_from_state(state)
   {
     set_error_report_client(client);
@@ -8829,39 +8713,5 @@ mod tests {
       .expect("woken")
       .unwrap();
     assert!(matches!(got, Some(DesktopEvent::PageLoad { window_id: 7 })));
-  }
-
-  #[test]
-  fn error_report_post_gives_up_on_a_silent_endpoint() {
-    // An HTTPS endpoint that accepts the connection and never answers (not
-    // even the TLS handshake). The post used to wait on it forever.
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let addr = listener.local_addr().unwrap();
-    let held = std::thread::spawn(move || {
-      let conn = listener.accept();
-      std::thread::sleep(std::time::Duration::from_secs(10));
-      drop(conn);
-    });
-    // As the runtime binaries do at startup (cli/rt/lib.rs).
-    let _ =
-      deno_tls::rustls::crypto::aws_lc_rs::default_provider().install_default();
-    let client = deno_fetch::create_http_client(
-      "deno-test",
-      deno_fetch::CreateHttpClientOptions::default(),
-    )
-    .unwrap();
-    let started = std::time::Instant::now();
-    super::post_error_report_within(
-      client,
-      format!("https://{addr}/report"),
-      "{}".into(),
-      std::time::Duration::from_millis(500),
-    );
-    assert!(
-      started.elapsed() < std::time::Duration::from_secs(5),
-      "took {:?}",
-      started.elapsed()
-    );
-    drop(held);
   }
 }

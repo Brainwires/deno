@@ -67,8 +67,39 @@ pub fn load_env_vars(env_vars: &IndexMap<String, String>) {
   })
 }
 
+/// denext: the opt-in crash report (`DENEXT_CRASH_REPORT_URL`, DENEXT.md
+/// item 180). Upstream's denort installs no panic hook; this one sends the
+/// report, then runs the default hook (and, in a release build, aborts).
+fn setup_panic_hook() {
+  deno_runtime::crash_report::install(deno_runtime::crash_report::BinaryInfo {
+    binary: "denort",
+    version: deno_lib::version::DENO_VERSION_INFO.deno,
+    git_hash: deno_lib::version::DENO_VERSION_INFO.git_hash,
+    root_cert_store: Some(crash_report_root_cert_store),
+  });
+  let orig_hook = std::panic::take_hook();
+  std::panic::set_hook(Box::new(move |panic_info| {
+    deno_runtime::crash_report::report_panic(panic_info);
+    orig_hook(panic_info);
+  }));
+}
+
+/// The root certificates a crash report trusts: `DENO_TLS_CA_STORE`,
+/// `DENO_CERT` and `NODE_EXTRA_CA_CERTS`, as the CLI's.
+fn crash_report_root_cert_store()
+-> Option<deno_runtime::deno_tls::rustls::RootCertStore> {
+  deno_lib::args::get_root_cert_store(
+    &sys_traits::impls::RealSys,
+    None,
+    None,
+    None,
+  )
+  .ok()
+}
+
 #[inline(always)]
 pub fn main() {
+  setup_panic_hook();
   init_logging(None, None);
 
   // Enable ANSI virtual terminal processing on Windows consoles that don't
@@ -83,6 +114,7 @@ pub fn main() {
   rustls::crypto::aws_lc_rs::default_provider()
     .install_default()
     .unwrap();
+  deno_runtime::crash_report::maybe_selftest();
 
   let args: Vec<_> = env::args_os().collect();
   let standalone = extract_standalone(Cow::Owned(args));

@@ -1,0 +1,19 @@
+exited with success: false
+report lines: 1
+schema: 2
+kind: selftest
+binary: deno
+message: denext crash-report self-test
+app: denext@0.0.0-test
+subcommand: eval
+version is this runtime's: true
+gitHash is a string: true
+target is a release triple: true
+arch: true
+stack is a source location: true
+thread: main
+trace is a VLQ string or null: true
+uptimeMs is a number: true
+id is a UUID: true
+time is RFC 3339 UTC: true
+nothing private: true

@@ -1,0 +1,31 @@
+{
+  // denext: a `deno compile` binary (denort) installs a panic hook that sends
+  // the opt-in crash report (DENEXT.md item 180); upstream's had none.
+  "tempDir": true,
+  "tests": {
+    "selftest_writes_one_report": {
+      "steps": [
+        {
+          "if": "unix",
+          "args": "compile --output main main.ts",
+          "output": "[WILDCARD]"
+        },
+        {
+          "if": "unix",
+          "args": "run -A check.ts file ./main --token=s3cret",
+          "output": "denort.out"
+        },
+        {
+          "if": "windows",
+          "args": "compile --output main.exe main.ts",
+          "output": "[WILDCARD]"
+        },
+        {
+          "if": "windows",
+          "args": "run -A check.ts file ./main.exe --token=s3cret",
+          "output": "denort.out"
+        }
+      ]
+    }
+  }
+}

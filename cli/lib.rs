@@ -647,23 +647,14 @@ fn setup_panic_hook() {
     eprintln!("Deno has panicked. This is a bug in Deno. Please report this");
     eprintln!("at https://github.com/Brainwires/deno/issues/new.");
     eprintln!("If you can reliably reproduce this panic, include the");
-    #[cfg(not(all(
-      feature = "panic-trace-frame-pointer",
-      target_os = "linux",
-      any(target_arch = "x86_64", target_arch = "aarch64")
-    )))]
-    {
+    // Panic traces are not supported for custom/development builds.
+    let trace = deno_runtime::crash_report::trace();
+    if trace.is_some() {
+      eprintln!("reproduction steps and the stack trace below in your report.");
+    } else {
       eprintln!("reproduction steps and re-run with the RUST_BACKTRACE=1 env");
       eprintln!("var set and include the backtrace in your report.");
     }
-    #[cfg(all(
-      feature = "panic-trace-frame-pointer",
-      target_os = "linux",
-      any(target_arch = "x86_64", target_arch = "aarch64")
-    ))]
-    eprintln!(
-      "reproduction steps and the stack trace URL below in your report."
-    );
     eprintln!();
     eprintln!("Platform: {} {}", env::consts::OS, env::consts::ARCH);
     eprintln!("Version: {}", deno_lib::version::DENO_VERSION_INFO.deno);
@@ -677,37 +668,19 @@ fn setup_panic_hook() {
     );
     eprintln!();
 
-    // Panic traces are not supported for custom/development builds.
-    #[cfg(feature = "panic-trace")]
-    {
-      let info = &deno_lib::version::DENO_VERSION_INFO;
-      let version =
-        if info.release_channel == deno_lib::shared::ReleaseChannel::Canary {
-          format!("{}+{}", deno_lib::version::DENO_VERSION, info.git_hash)
-        } else {
-          info.deno.to_string()
-        };
-
-      #[cfg(all(
-        feature = "panic-trace-frame-pointer",
-        target_os = "linux",
-        any(target_arch = "x86_64", target_arch = "aarch64")
-      ))]
-      let trace = deno_panic::trace_frame_pointer();
-      #[cfg(not(all(
-        feature = "panic-trace-frame-pointer",
-        target_os = "linux",
-        any(target_arch = "x86_64", target_arch = "aarch64")
-      )))]
-      let trace = deno_panic::trace();
-      eprintln!("View stack trace at:");
+    // denext: upstream linked the trace to panic.deno.com, which sends it to
+    // deno.com and cannot symbolicate this fork's builds. The fork's release
+    // symbol archives can (DENEXT.md item 180).
+    if let Some(trace) = &trace {
       eprintln!(
-        "https://panic.deno.com/v{}/{}/{}",
-        version,
-        env!("TARGET"),
-        trace
+        "Stack trace: {trace} (symbolicate: Brainwires/deno .github/denext-runtime/symbolicate.py)"
       );
+      eprintln!();
     }
+
+    // denext: the opt-in crash report (DENEXT_CRASH_REPORT_URL), at most
+    // about 5 s.
+    deno_runtime::crash_report::report_panic(panic_info);
 
     orig_hook(panic_info);
     deno_runtime::exit(1);
@@ -731,6 +704,14 @@ fn setup_panic_hook() {
   }
 
   deno_core::v8::V8::set_fatal_error_handler(error_handler);
+}
+
+/// The root certificates a crash report trusts: the CLI's own
+/// (`DENO_TLS_CA_STORE`, `DENO_CERT`, `NODE_EXTRA_CA_CERTS`).
+fn crash_report_root_cert_store()
+-> Option<deno_runtime::deno_tls::rustls::RootCertStore> {
+  deno_lib::args::get_root_cert_store(&sys::CliSys::default(), None, None, None)
+    .ok()
 }
 
 /// Returns `true` if `panic_info` is a panic from `std`'s print macros caused
@@ -890,6 +871,12 @@ pub fn main() {
   let profiler = dhat::Profiler::new_heap();
 
   setup_panic_hook();
+  deno_runtime::crash_report::install(deno_runtime::crash_report::BinaryInfo {
+    binary: "deno",
+    version: deno_lib::version::DENO_VERSION_INFO.deno,
+    git_hash: deno_lib::version::DENO_VERSION_INFO.git_hash,
+    root_cert_store: Some(crash_report_root_cert_store),
+  });
 
   init_logging(None, None);
   boot_phase("after panic+logging");
@@ -913,6 +900,7 @@ pub fn main() {
     .install_default()
     .unwrap();
   boot_phase("after aws_lc install");
+  deno_runtime::crash_report::maybe_selftest();
 
   let args: Vec<_> = env::args_os().collect();
   // denext: a jailed npm lifecycle script's process (`jail-scripts`)

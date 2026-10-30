@@ -624,7 +624,8 @@ jobs:
           cargo metadata --format-version 1 --config "$patch" >/dev/null
           git diff --stat -- Cargo.lock
           python3 .github/denext-runtime/lock_drift.py target/Cargo.lock.orig Cargo.lock
-          cargo build --release --locked --config "$patch" -p denort_desktop
+          # panic-trace: crash reports carry a stack trace (DENEXT.md item 180).
+          cargo build --release --locked --config "$patch" -p denort_desktop --features panic-trace
           df -h . || true
           # Record what libdenort was compiled against.
           manifest=$(cargo metadata --format-version 1 --config "$patch" |
@@ -863,7 +864,9 @@ jobs:
         run: |
           set -euo pipefail
           df -h . || true
-          cargo build --release --locked --bin deno --bin denort
+          # panic-trace: the panic banner and crash reports carry a stack
+          # trace for symbolicate.py (DENEXT.md item 180).
+          cargo build --release --locked --bin deno --bin denort --features deno/panic-trace,denort/panic-trace
           df -h . || true
           git diff --exit-code -- Cargo.lock
 

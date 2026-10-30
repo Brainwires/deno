@@ -7157,6 +7157,89 @@ where the changes are discussed.
        a tag; behind it: stale; unknown: judged by stable; the script with a
        canned Extended Stable answer, `--extended`, and a failed lookup).
 
+180. **`feat`: opt-in crash reports from the CLI and `denort`, and the
+     desktop runtime's on the same schema** (runtime and CLI;
+     `runtime/crash_report.rs`, `cli/lib.rs`, `cli/rt/lib.rs`,
+     `cli/rt_desktop/lib.rs`, `runtime/ops/desktop.rs`, the crates'
+     `panic-trace` features, `denext_runtime.yml`, `cli_smoke.sh`). Phase F1
+     of denext's crash-report design (`plans/design-crash-report-rollback.md`,
+     the production audit's O2).
+     - **Switch:** `DENEXT_CRASH_REPORT_URL=https://…` or
+       `file:///abs/path.jsonl`, read once at start-up by the CLI and by
+       `denort` (`deno compile` binaries), whose new panic hook is the first
+       it has (upstream's denort installs none). Off when unset. `http:`, a
+       remote `file://` host or anything that is not a URL prints one
+       warning (without the value, which may hold a token) and turns
+       reporting off; start-up never fails because of it. The URL comes from
+       the environment only and is never baked into an artifact (no compile
+       flag, no config key): it often carries an ingest token. The report
+       bypasses Deno's permissions, as the desktop one does: the destination
+       is operator configuration. `DENEXT_CRASH_REPORT_SELFTEST=1` (with a
+       valid URL) panics on purpose with `denext crash-report self-test` just
+       after start-up, to check a pipeline end to end.
+       `DENEXT_CRASH_REPORT_APP` (`denext@4.10.3`, `[A-Za-z0-9@._+/-]{1,64}`)
+       names the application.
+     - **Report** (JSON, `schema: 2`, a superset of the desktop runtime's
+       schema 1 field names): `kind` (`panic` / `selftest`), `id` (UUID v4),
+       `time` (RFC 3339 UTC), `binary` (`deno` / `denort` / `desktop`),
+       `version` and `gitHash` (`DENO_VERSION_INFO`), `target` (one of the six
+       release triples), `platform`, `arch`, `message`, `stack` (the panic's
+       compile-time source location), `thread`, `trace` (below, or null),
+       `subcommand` (the CLI's, only when it is one of Deno's own; item 177's
+       list), `uptimeMs`, `app`, and `appVersion` for a desktop app. Never
+       sent: the environment, the command line, the working directory, the
+       host or user name, addresses, JavaScript source or stacks. The message
+       has the working and home directories replaced (`<cwd>`, `~`), control
+       characters removed, and is cut at 2048 characters; the body is at
+       most 16 KiB (an over-long trace is cut). One report per process: an
+       atomic flag lets the first panicking thread send it.
+     - **Sender** (moved from `runtime/ops/desktop.rs`, re-exported there):
+       a local file gets one line appended; HTTPS is posted on its own thread
+       with a 2 s connect and a 5 s overall bound (the hook waits, so a
+       panicking process ends at most ~5.1 s later), the response ignored, no
+       retries. Without a client an embedder stashed, the first report
+       creates one with the binary's TLS roots (the CLI's and denort's:
+       `DENO_TLS_CA_STORE`, `DENO_CERT`, `NODE_EXTRA_CA_CERTS`; desktop:
+       Mozilla's) and the environment's proxy settings. That fixes a desktop
+       bug: the HTTPS client was stashed only by the JavaScript error op, so
+       a Rust panic before any JavaScript error report was dropped ("client
+       not initialized").
+     - **Desktop:** the panic hook sends the same schema-2 report to the app's
+       baked `error_reporting_url` (unchanged: desktop apps run on end-user
+       machines), with `appVersion`; the JavaScript error op's own report is
+       unchanged.
+     - **Stack traces:** `deno_runtime` gains `panic-trace` /
+       `panic-trace-frame-pointer` features (`deno_panic` 0.2.1, moved from
+       the CLI crate), which the CLI's, denort's and `denort_desktop`'s
+       `panic-trace` features turn on; the release builds now enable them
+       (`--features deno/panic-trace,denort/panic-trace` and `-p denort_desktop
+       --features panic-trace`). The CLI's banner no longer links to
+       panic.deno.com (it sent the trace to deno.com, whose service cannot
+       symbolicate this fork's builds): it prints `Stack trace: <trace>
+       (symbolicate: Brainwires/deno .github/denext-runtime/symbolicate.py)`,
+       which item 181's tool symbolicates. `cargo audit` covers `deno_panic`
+       (no advisories; it pulls in only `libc` without its `symbolicate`
+       feature). macOS traces are relative to the main executable's image, so
+       a desktop app's `libdenort.dylib` frames are not symbolicatable from
+       them; Linux and Windows traces are relative to each module.
+     - Not covered: deaths that are not panics (the `--max-memory` exit 137,
+       SIGKILL, a native crash outside Rust; V8's fatal errors already become
+       panics).
+     Tests: unit `crash_report::tests` (report URLs: `http:` and a remote
+     `file://` refused; scrubbing; the payload's keys and that nothing private
+     is among them; the desktop `appVersion`; the 16 KiB cap; app names;
+     RFC 3339; the single shot under four threads; a file report appends a
+     line; an HTTPS endpoint that never answers is given up within the bound;
+     an HTTPS report with no stashed client reaches a local TLS server, which
+     failed before: the client was never created); spec
+     `run/crash_report` (the CLI self-test writes exactly one schema-2
+     report; a hanging endpoint ends the process within 6 s; `http:` is
+     refused with the warning and the program runs) and
+     `compile/crash_report` (a compiled binary's report, `binary: "denort"`);
+     both failed before (nothing read the variable, denort had no hook).
+     `cli_smoke.sh` runs the self-test against each release CLI and checks
+     the report and the banner's trace.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,

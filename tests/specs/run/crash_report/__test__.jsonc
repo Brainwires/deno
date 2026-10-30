@@ -1,0 +1,27 @@
+{
+  // denext: opt-in crash reports from the CLI (DENEXT.md item 180).
+  "tempDir": true,
+  "tests": {
+    // DENEXT_CRASH_REPORT_SELFTEST=1 panics on purpose; the report goes to the
+    // file:// URL, once, in schema 2, with nothing private in it.
+    "selftest_writes_one_report": {
+      "args": "run -A check.ts file deno eval --token=s3cret 1",
+      "output": "cli.out"
+    },
+    // An endpoint that never answers holds the exit up for at most ~5 s.
+    "hanging_endpoint_is_bounded": {
+      "args": "run -A check.ts hang deno eval 1",
+      "output": "hang.out"
+    },
+    // http:// is refused with a warning (without the URL), the self-test
+    // does not run, and the program runs as usual.
+    "http_is_refused": {
+      "args": "eval console.log(1)",
+      "envs": {
+        "DENEXT_CRASH_REPORT_URL": "http://ingest.example/r?token=s3cret",
+        "DENEXT_CRASH_REPORT_SELFTEST": "1"
+      },
+      "output": "http_refused.out"
+    }
+  }
+}
