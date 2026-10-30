@@ -2371,19 +2371,22 @@ impl<TGraphContainer: ModuleGraphContainer> NodeRequireLoader
     permissions: &mut PermissionsContainer,
     path: Cow<'a, Path>,
   ) -> Result<Cow<'a, Path>, JsErrorBox> {
-    if let Ok(url) = deno_path_util::url_from_file_path(&path) {
-      // allow reading if it's in the module graph, or a module `deno test`'s
-      // Vitest runner loads itself (cli/tools/test/vitest/runner_reads.rs)
-      if self.graph_container.graph().get(&url).is_some()
-        || self.vitest_mocks.is_runner_import(&url)
-      {
-        return Ok(path);
-      }
+    if self.is_loaded_module_path(&path) {
+      return Ok(path);
     }
     self
       .npm_registry_permission_checker
       .ensure_read_permission(permissions, path)
       .map_err(JsErrorBox::from_err)
+  }
+
+  fn is_loaded_module_path(&self, path: &Path) -> bool {
+    // allow reading if it's in the module graph, or a module `deno test`'s
+    // Vitest runner loads itself (cli/tools/test/vitest/runner_reads.rs)
+    deno_path_util::url_from_file_path(path).is_ok_and(|url| {
+      self.graph_container.graph().get(&url).is_some()
+        || self.vitest_mocks.is_runner_import(&url)
+    })
   }
 
   fn load_text_file_lossy(
