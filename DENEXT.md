@@ -7029,10 +7029,51 @@ where the changes are discussed.
      `-non-tty-forced-color-output.mjs`, `-skip-each-hooks.mjs`,
      `-spec-reporter-successful.mjs`, `-suite-skip-hooks.mjs`.
 
+176. **`fix(npm, ext/node)`: `require()` in a bring-your-own-`node_modules`
+     project reads only what the read grant allows through a link** (security,
+     `fix/cjs-require-read-denext4`, runtime;
+     `cli/lib/npm/permission_checker.rs`, `ext/node/ops/require.rs`,
+     `ext/node/lib.rs`, `cli/module_loader.rs`). Fixes a regression from item 67
+     (commit 623990ef4c, first released in `v2.9.7-denext.22`). In BYONM mode (a
+     package.json-only project, `nodeModulesDir: "manual"`) upstream exempts any
+     path with a `node_modules` component from the read check, by spelling
+     alone. Item 67 made `op_require_real_path` record the real path of every
+     path it was allowed to read, so a link in `node_modules` that leads out of
+     it (`node_modules/evil -> ../../outside`) made the files it reaches
+     readable to `require()`, `createRequire`, `require.resolve` and an absolute
+     `require()` with no `--allow-read` and past `--deny-read`; stock Deno
+     refuses them, as do `import()` and `fs`. Two changes: the BYONM exemption
+     now canonicalizes the path (following dangling links) and holds only while
+     the real path is still inside a `node_modules` directory (a pnpm `.pnpm`
+     link is), checking anything else as an ordinary read; and
+     `op_require_real_path` records a real path only when its spelling is
+     granted by the read permission itself or is a module the loader loaded (the
+     new `NodeRequireLoader::is_loaded_module_path`), and the real path is not
+     denied or ignored. Otherwise the real path is checked on its own and its
+     permission error names it, as an ES module import's does. Item 67's
+     symlinked and 8.3 main modules still load: they are in the module graph.
+     The exemption is not limited to the project's own `node_modules`
+     directories, as BYONM resolves through every ancestor's `node_modules`, as
+     Node does. Behaviour change: a BYONM workspace whose `node_modules` links
+     to a member outside any `node_modules` directory
+     (`node_modules/@scope/pkg -> ../../packages/pkg`, as npm, Yarn and Bun
+     workspaces lay out) now needs read access to that member when read is not
+     fully granted: for `require()` again (as on stock Deno, before item 67
+     lifted it), and now also for the CommonJS export analysis of an `import` of
+     it, which reads through the same checker; an ES module `import()` of it
+     already needed it. Upstream's related fixes: denoland/deno#35882
+     (GHSA-968w-xfqw-vp9q, CVE-2026-49406, the `..` normalization) and #36479
+     (registry links in managed mode). Spec: `npm/byonm_require_link_escape`
+     (relative, absolute, `createRequire`, `require.resolve`, a chain of links,
+     `--deny-read`, a main module through a link with `--deny-read` on its
+     target, and a pnpm-style link that still loads);
+     `node/cjs_main_symlinked_dir` and
+     `npm/require_missing_paths_across_symlinks` still pass.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
-169-174) are what the prebuilt `libdenort` carries. The CLI-side parts (for
+169-174, 176) are what the prebuilt `libdenort` carries. The CLI-side parts (for
 example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's
 launchers) are in the branch too, but a stock CLI does not run them; denext's
 own launcher provides that environment.
