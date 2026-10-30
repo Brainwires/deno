@@ -64,7 +64,7 @@ denort = { path = "../rt", default-features = false }
 # Brainwires/laufey fork.
 # The host built from the same commit must be used with it (the API version
 # check is exact).
-laufey = { git = "https://github.com/Brainwires/laufey", rev = "d73904b4dc29d0d024d80c5d83e59ddffcb0d521" }
+laufey = { git = "https://github.com/Brainwires/laufey", rev = "209306cccdde02d1196e99886b6807aefa692a2d" }
 libsui.workspace = true
 
 bytes.workspace = true
