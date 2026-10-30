@@ -2434,7 +2434,10 @@ pub trait DesktopApi: Send + Sync + 'static {
   /// creates the window without showing it (`show: false`); `overlay` asks
   /// for a wlr-layer-shell overlay surface where the compositor has one
   /// (laufey API 50).
-  #[allow(clippy::too_many_arguments)]
+  #[allow(
+    clippy::too_many_arguments,
+    reason = "one argument per creation-time window property"
+  )]
   fn create_window(
     &self,
     width: i32,

@@ -852,7 +852,9 @@ const NOT_IMPORTED_OPS = [
 // the worker and their clicks reach the main scope's Deno.desktop).
 // The native classes (windows, the dock, trays, notifications) need the
 // desktop backend, which only the main scope has: constructing one in a
-// worker would only throw.
+// worker would only throw. The tray capabilities and window level ops serve
+// those classes alone, and speech is the main scope's Deno.desktop.speech: a
+// worker must not talk over the app.
 const WORKER_EXCLUDED_OPS = [
   "BrowserWindow",
   "Dock",
@@ -916,6 +918,11 @@ const WORKER_EXCLUDED_OPS = [
   "op_desktop_share",
   "op_desktop_set_user_activity",
   "op_desktop_next_user_activity",
+  "op_desktop_tray_capabilities",
+  "op_desktop_window_level_code",
+  "op_desktop_speak",
+  "op_desktop_stop_speaking",
+  "op_desktop_speech_voices",
 ];
 
 function removeImportedOps(isWorker = false) {
