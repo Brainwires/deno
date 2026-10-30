@@ -1,0 +1,5 @@
+console.log: exit code 42, 1048577 bytes
+writeSync: exit code 0, 65536 bytes
+end of program: exit code 7, 4097 bytes
+version: exit code 0, ends with a newline
+info: exit code 0, ends with a newline

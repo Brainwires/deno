@@ -7090,6 +7090,38 @@ where the changes are discussed.
      `test/recursive_permissions_pledge` (`Command: test (2 arguments)`, and
      a `--token=s3cret` script argument that the banner does not print).
 
+178. **`fix(ext/os)`: on Windows a finished process ends with
+     `TerminateProcess`** (runtime; `ext/os/lib.rs`). Windows CI caught
+     `deno info`, `deno doc --json` and `denext job` children that had
+     written their complete output within a second and then spun one thread
+     at 100% CPU until the parent's deadline (denext's queue item 9d; not
+     reproducible in 601 local runs). `deno_os::exit` (every
+     `deno_runtime::exit`) ended the process with `std::process::exit`, that
+     is `ExitProcess`, which first kills every other thread wherever it is
+     and then runs the thread-local destructors and every DLL's
+     `DLL_PROCESS_DETACH` code on the exiting thread; when a killed thread
+     held a lock that code takes (a spin lock spins), the process never ends.
+     At that point the tokio runtime has only been shut down in the
+     background (`create_and_run_current_thread`), so its blocking pool, V8's
+     platform threads and the resolver threads can be anywhere. Microsoft's
+     `ExitProcess` documentation recommends `TerminateProcess` for a process
+     that does not know the state of all its threads, and the desktop runtime
+     already ends its process that way for the same kind of hang
+     (`cli/rt_desktop`'s `terminate_now` / `end_process_now`). `exit` now runs
+     the before-exit callbacks and the embedder's hook as before, then flushes
+     Rust's stdout / stderr and the C runtime's stdio buffers (what
+     `std::process::exit` would have flushed) on a helper thread bounded to
+     500 ms, so a stream lock held elsewhere can't hold the exit, and calls
+     `TerminateProcess(GetCurrentProcess(), code)`; the exit code is the
+     same. Nothing else that `ExitProcess` ran is relied on: the before-exit
+     callbacks (OpenTelemetry, the tunnel) and `Deno.exit`'s exit callbacks
+     (coverage, CPU profiles) run before. macOS and Linux are unchanged.
+     Test: spec `run/exit_output_complete` (piped output of 1 MiB through
+     `console.log` before `Deno.exit(42)`, a 64 KiB `Deno.stdout.writeSync`,
+     an exit code from `Deno.exitCode`, and `-V` / `info` from the CLI arrive
+     whole, with their codes); the Windows legs of `denext tests` run it and
+     the rest of the spec, unit and integration suites through the new exit.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,

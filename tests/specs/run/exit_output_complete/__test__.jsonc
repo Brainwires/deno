@@ -1,0 +1,8 @@
+{
+  // denext: a process that ends (Deno.exit(), the end of the program, a CLI
+  // subcommand) has written all of its output, and exits with its code. On
+  // Windows the process ends with TerminateProcess after flushing the
+  // standard streams (DENEXT.md item 178).
+  "args": "run -A driver.ts",
+  "output": "driver.out"
+}

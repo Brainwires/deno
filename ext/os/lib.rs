@@ -62,11 +62,76 @@ pub fn exit(code: i32) -> ! {
   if let Some(hook) = EXIT_HOOK.get() {
     hook(code);
   }
+  #[cfg(windows)]
+  terminate_current_process(code);
   #[allow(
     clippy::disallowed_methods,
     reason = "exit is the intended behavior"
   )]
   std::process::exit(code);
+}
+
+/// How long [`terminate_current_process`] waits for the buffered standard
+/// streams to flush before it ends the process anyway.
+#[cfg(windows)]
+const EXIT_FLUSH_TIMEOUT: std::time::Duration =
+  std::time::Duration::from_millis(500);
+
+/// denext: on Windows the process ends with `TerminateProcess`, not
+/// `ExitProcess` (`std::process::exit`).
+///
+/// `ExitProcess` first kills every other thread wherever it is, then runs the
+/// thread-local destructors and every loaded DLL's `DLL_PROCESS_DETACH` code
+/// on the exiting thread. When a killed thread held a lock (a spin lock, the
+/// heap's, a CRT one) that the detach or destructor code then takes, the
+/// process never ends: a finished `deno info` / `deno doc` / `deno run` child
+/// wrote its whole output and then spun one thread at 100% CPU until its
+/// parent's deadline (the tokio runtime is shut down in the background and
+/// its blocking pool, V8's platform threads and the resolver threads may all
+/// be mid-call). Microsoft's guidance for a process that does not know the
+/// state of all its threads is `TerminateProcess` (the `ExitProcess`
+/// documentation), as the desktop runtime already does for the same reason
+/// (`cli/rt_desktop`'s `terminate_now`).
+///
+/// What `TerminateProcess` skips is what `std::process::exit` would have
+/// done after the before-exit callbacks (already run): flushing Rust's
+/// buffered stdout and the C runtime's stdio buffers, which happens here
+/// first, on a helper thread so a stream lock held by another thread cannot
+/// hold the exit up for more than [`EXIT_FLUSH_TIMEOUT`]. The exit code is
+/// the one `ExitProcess` would have set.
+#[cfg(windows)]
+fn terminate_current_process(code: i32) {
+  use windows_sys::Win32::System::Threading::GetCurrentProcess;
+  use windows_sys::Win32::System::Threading::TerminateProcess;
+
+  fn flush_std_streams() {
+    use std::io::Write;
+    let _ = std::io::stdout().flush();
+    let _ = std::io::stderr().flush();
+    // SAFETY: fflush(NULL) flushes every open C stdio stream.
+    unsafe {
+      libc::fflush(std::ptr::null_mut());
+    }
+  }
+
+  let (tx, rx) = std::sync::mpsc::channel::<()>();
+  match std::thread::Builder::new()
+    .name("exit-flush".into())
+    .spawn(move || {
+      flush_std_streams();
+      let _ = tx.send(());
+    }) {
+    Ok(_) => {
+      let _ = rx.recv_timeout(EXIT_FLUSH_TIMEOUT);
+    }
+    // No thread to spare (a process at its thread limit): flush here.
+    Err(_) => flush_std_streams(),
+  }
+  // SAFETY: ends the current process; nothing after this call runs. Should
+  // it ever return, the caller falls back to `std::process::exit`.
+  unsafe {
+    TerminateProcess(GetCurrentProcess(), code as u32);
+  }
 }
 
 /// Callbacks to run before the process exits via `Deno.exit()`.
