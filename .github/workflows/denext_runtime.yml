@@ -488,6 +488,11 @@ jobs:
     if: ${{ !inputs.reuse_denort_run_id && !inputs.cli_only }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 355
+    # Attests its debug symbol archive (DENEXT.md item 181).
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     strategy:
       fail-fast: false
       matrix:
@@ -701,6 +706,13 @@ jobs:
         env:
           VERSION: ${{ needs.setup.outputs.version }}
         run: bash .github/denext-runtime/collect_symbols.sh "deno-desktop-runtime-symbols-$VERSION-${{ matrix.target }}" symbols ${{ runner.os == 'Windows' && 'denort.dll' || runner.os == 'macOS' && 'libdenort.dylib' || 'libdenort.so' }}
+
+      # Maintainers symbolicate crash traces with these
+      # (symbolicate.py): attested like the archives they describe.
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
+        with:
+          subject-path: symbols/*.tar.gz
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
@@ -942,6 +954,11 @@ jobs:
       - name: Debug symbols
         if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
         run: bash .github/denext-runtime/collect_symbols.sh "deno-symbols-$VERSION-$TARGET" symbols ${{ runner.os == 'Windows' && 'deno.exe denort.exe' || 'deno denort' }}
+
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
+        with:
+          subject-path: symbols/*.tar.gz
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
@@ -1464,13 +1481,14 @@ jobs:
           # shellcheck disable=SC2086 # one version per word
           latest=$(python3 -I .github/denext-runtime/tag_gate.py --latest "$version" $others)
           echo "latest: $latest"
-          symbols=()
-          if compgen -G 'symbols/*.tar.gz' >/dev/null; then
-            (cd symbols && cat ./*.sha256 >SYMBOLS.SHA256SUMS && sha256sum -c SYMBOLS.SHA256SUMS && rm -f ./*.tar.gz.sha256)
-            symbols=(symbols/*.tar.gz symbols/SYMBOLS.SHA256SUMS)
-          else
-            echo "::warning::no debug symbols to attach"
-          fi
+          # Every target's symbol archives, none empty (DENEXT.md item 181:
+          # denext.2 and .3 shipped macOS archives of dangling symlinks).
+          compgen -G 'symbols/*.tar.gz' >/dev/null ||
+            { echo "::error::no debug symbols to attach"; exit 1; }
+          (cd symbols && cat ./*.sha256 >SYMBOLS.SHA256SUMS && sha256sum -c SYMBOLS.SHA256SUMS && rm -f ./*.tar.gz.sha256)
+          python3 -I .github/denext-runtime/symbolicate.py check-release "$version" --dir symbols ||
+            { echo "::error::the release's symbol archives are incomplete (see above)"; exit 1; }
+          symbols=(symbols/*.tar.gz symbols/SYMBOLS.SHA256SUMS)
           cat >notes.md <<EOF
           denext's Deno fork ${TAG#denext-runtime-v}: the patched Deno Desktop runtime and CLI, built from upstream Deno ${DENO_VERSION} plus denext's patches ([DENEXT.md](https://github.com/${REPO}/blob/${SHA}/DENEXT.md), "Versioning").
 

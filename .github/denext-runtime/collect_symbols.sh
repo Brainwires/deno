@@ -11,8 +11,12 @@
 #
 #   collect_symbols.sh <name> <out dir> <file in target/release>...
 #
-# Best effort: a binary with no debug file is named in a warning, never an
-# error (the release does not depend on it).
+# Every binary named must have its debug file: one without is an error
+# (DENEXT.md item 181; a release whose crash traces can't be symbolicated is
+# not one to publish). Cargo leaves macOS's `<bin>.dSYM` in target/release as
+# a symlink into deps/, so the archive follows links (`tar -h`): denext.2 and
+# denext.3 shipped macOS archives holding only the dangling symlinks. A
+# `.dSYM` must hold its DWARF file.
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 . "$here/lib.sh"
@@ -34,13 +38,18 @@ for b in "$@"; do
       break
     fi
   done
-  [ -n "$hit" ] || echo "::warning::no debug info for $b in $rel (looked for $b.dSYM, $b.dwp, ${b%.so}.dwp, $stem.pdb)"
+  [ -n "$hit" ] || { echo "::error::no debug info for $b in $rel (looked for $b.dSYM, $b.dwp, ${b%.so}.dwp, $stem.pdb)" >&2; exit 1; }
+  last=${found[${#found[@]}-1]}
+  case "$last" in
+    *.dSYM)
+      # Named after the binary Cargo linked (deps/deno-<hash>), not <bin>.
+      dwarf=$(find -L "$rel/$last/Contents/Resources/DWARF" -type f -size +0 2>/dev/null | head -1)
+      [ -n "$dwarf" ] || { echo "::error::$last has no DWARF file (in $rel/$last/Contents/Resources/DWARF)" >&2; exit 1; }
+      ;;
+  esac
 done
-if [ ${#found[@]} -eq 0 ]; then
-  echo "::warning::no debug info found for $*: no $name.tar.gz"
-  exit 0
-fi
 mkdir -p "$out"
-tar -czf "$out/$name.tar.gz" -C "$rel" "${found[@]}"
+# -h: follow the .dSYM symlinks into deps/.
+tar -czhf "$out/$name.tar.gz" -C "$rel" "${found[@]}"
 echo "$(sha256_of "$out/$name.tar.gz")  $name.tar.gz" >"$out/$name.tar.gz.sha256"
 echo "$name.tar.gz ($(size_of "$out/$name.tar.gz") bytes): ${found[*]}"

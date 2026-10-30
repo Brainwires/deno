@@ -7240,10 +7240,49 @@ where the changes are discussed.
      `cli_smoke.sh` runs the self-test against each release CLI and checks
      the report and the banner's trace.
 
+181. **`ci`: complete debug symbols, `symbolicate.py`, and attested symbol
+     archives** (CI only; `.github/denext-runtime/collect_symbols.sh`,
+     `symbolicate.py`, `denext_runtime.yml`). Phase F2 of the crash-report
+     design, and a fix to the symbol archives the releases carry since
+     denext.2 (O1):
+     - The macOS archives of denext.2 and denext.3 (`deno-symbols-*-apple-darwin`,
+       `deno-desktop-runtime-symbols-*-apple-darwin`, 125 to 173 bytes) hold
+       only symlinks: Cargo leaves `target/release/<bin>.dSYM` as a link into
+       `deps/`, and `tar` archived the link. `collect_symbols.sh` follows
+       links (`tar -h`), checks that a `.dSYM` holds its DWARF file (named
+       after Cargo's `deps/<bin>-<hash>`), and fails, instead of warning,
+       when a binary it is given has no debug file. (The Linux x86_64 CLI
+       archive the design names as missing from denext.2 is there, with
+       `deno.dwp` and `denort.dwp`.)
+     - `symbolicate.py <version> <target> <trace> [--binary deno|denort|
+       libdenort]`: decodes `deno_panic`'s base64url VLQ trace, downloads the
+       release's binary and symbol archives (or takes them from `--from
+       <dir>`), checks them against `SHA256SUMS` / `SYMBOLS.SHA256SUMS`, and
+       runs `llvm-symbolizer` with each platform's address space (Linux: the
+       binary and its `.dwp`; macOS: the dSYM's DWARF file, `__TEXT`'s
+       0x100000000 added back; Windows: `--relative-address`, the `.pdb`
+       beside the binary). A maintainer tool for biscuits; denext ships no
+       symbolication. `symbolicate.py check-release <version> [--assets
+       <json> | --dir <dir>]` lists missing or empty (under 64 KiB) symbol
+       archives and a missing `SYMBOLS.SHA256SUMS`; on denext.2's asset list
+       it names the four macOS archives.
+     - The publish job runs `check-release --dir symbols` before it creates a
+       release, and refuses a release with no symbols (it used to warn).
+     - The `denort` and `cli` jobs attest their symbol archives
+       (`actions/attest-build-provenance`), as they do the binaries; the
+       `denort` job gains the `id-token` / `attestations` permissions for it.
+     Tests: `symbolicate_test.py` (lint job): a hand-encoded fixture trace
+     decodes, addresses round-trip through deno_panic's encoding, the archive
+     and debug file names per target, a dSYM's hashed DWARF file is found,
+     the llvm-symbolizer command per platform, `check-release` on denext.2's
+     list (the four empty macOS archives), on a list missing the Linux x64
+     CLI archive and the checksum file, and on a directory, and a checksum
+     mismatch stops `--from`.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
-169-174, 176) are what the prebuilt `libdenort` carries. The CLI-side parts (for
+169-174, 176, 178, 180) are what the prebuilt `libdenort` carries. The CLI-side parts (for
 example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's
 launchers) are in the branch too, but a stock CLI does not run them; denext's
 own launcher provides that environment.

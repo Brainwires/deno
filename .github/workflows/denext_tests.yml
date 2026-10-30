@@ -162,6 +162,11 @@ jobs:
       - name: engine_staleness_test.py
         if: runner.os == 'Linux'
         run: python3 -I .github/denext-runtime/engine_staleness_test.py
+      # The crash trace symbolicator and release symbol check
+      # (denext_runtime.yml's publish job).
+      - name: symbolicate_test.py
+        if: runner.os == 'Linux'
+        run: python3 -I .github/denext-runtime/symbolicate_test.py
       # The conditional cargo audit ignores (the cargo-audit job).
       - name: audit_ignores_test.py
         if: runner.os == 'Linux'
