@@ -7343,13 +7343,13 @@ where the changes are discussed.
        supersedes it and carries everything denext.4 would have (items 176-182).
 
 183. **`feat(desktop)`: overlay windows, tray events with detail, the activation
-     policy and text to speech** (laufey API 50, from
-     `feat/overlay-tray-native` of Brainwires/laufey, merged into its
-     `development-denext` and pinned there at 209306c; `runtime/ops/desktop.rs`,
-     `cli/rt_desktop/lib.rs`, `cli/rt/desktop.rs`, `lib.deno.desktop.d.ts`,
-     `cli/tools/desktop.rs`; runtime 3.0.0-denext.6). What a transparent
-     click-through desktop companion and a tray-first app need, in Electron's
-     names so denext binds them as they are:
+     policy and text to speech** (laufey API 50, from `feat/overlay-tray-native`
+     of Brainwires/laufey, merged into its `development-denext` and pinned there
+     at 209306c; `runtime/ops/desktop.rs`, `cli/rt_desktop/lib.rs`,
+     `cli/rt/desktop.rs`, `lib.deno.desktop.d.ts`, `cli/tools/desktop.rs`;
+     runtime 3.0.0-denext.6). What a transparent click-through desktop companion
+     and a tray-first app need, in Electron's names so denext binds them as they
+     are:
      - `BrowserWindow`:
        - `setIgnoreMouseEvents(ignore, { forward? })` — click passthrough
          (laufey `set_click_passthrough` + `_forward`, API 33/34).
