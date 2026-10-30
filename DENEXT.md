@@ -7074,6 +7074,22 @@ where the changes are discussed.
      `node/cjs_main_symlinked_dir` and
      `npm/require_missing_paths_across_symlinks` still pass.
 
+177. **`fix(cli)`: the panic banner leaves out the command line's
+     arguments** (security hardening, CLI; `cli/lib.rs`,
+     `runtime/crash_report.rs`). Upstream's banner printed the whole command
+     line (`Args: ["deno", "run", "--env-file=.env", "main.ts",
+     "--token=..."]`), in both the bug banner and the "could not start worker
+     threads" one, and a command line can carry secrets (tokens in flags or
+     URLs, script arguments) that then land in container and CI logs. Both
+     now print `Command: <subcommand> (<n> arguments)`: the first word that
+     is not a flag when it is one of Deno's own subcommands (a fixed list in
+     `deno_runtime::crash_report`, which item 179's crash reports use too),
+     `unknown` otherwise (a script path, a typo, a flag's value), and the
+     argument count. Tests: unit `crash_report::tests` (the subcommand rule;
+     no argument reaches the line), spec
+     `test/recursive_permissions_pledge` (`Command: test (2 arguments)`, and
+     a `--token=s3cret` script argument that the banner does not print).
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,

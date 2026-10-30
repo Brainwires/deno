@@ -633,7 +633,12 @@ fn setup_panic_hook() {
       eprintln!();
       eprintln!("Platform: {} {}", env::consts::OS, env::consts::ARCH);
       eprintln!("Version: {}", deno_lib::version::DENO_VERSION_INFO.deno);
-      eprintln!("Args: {:?}", env::args().collect::<Vec<_>>());
+      eprintln!(
+        "Command: {}",
+        deno_runtime::crash_report::command_line_summary(
+          &env::args_os().collect::<Vec<_>>()
+        )
+      );
       eprintln!();
       deno_runtime::exit(1);
     }
@@ -662,7 +667,14 @@ fn setup_panic_hook() {
     eprintln!();
     eprintln!("Platform: {} {}", env::consts::OS, env::consts::ARCH);
     eprintln!("Version: {}", deno_lib::version::DENO_VERSION_INFO.deno);
-    eprintln!("Args: {:?}", env::args().collect::<Vec<_>>());
+    // Never the arguments themselves: they can carry secrets, and this
+    // banner ends up in container and CI logs.
+    eprintln!(
+      "Command: {}",
+      deno_runtime::crash_report::command_line_summary(
+        &env::args_os().collect::<Vec<_>>()
+      )
+    );
     eprintln!();
 
     // Panic traces are not supported for custom/development builds.

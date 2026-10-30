@@ -7,7 +7,7 @@ reproduction steps and[WILDCARD]
 
 Platform: [WILDLINE]
 Version: [WILDLINE]
-Args: [[WILDLINE], "test", "main.js"]
+Command: test (2 arguments)
 [WILDCARD]
 thread 'tokio-rt-worker' ([WILDCARD]) panicked at [WILDLINE]
 pledge test permissions called before restoring previous pledge

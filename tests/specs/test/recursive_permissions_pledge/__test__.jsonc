@@ -1,8 +1,22 @@
 {
-  "args": "test main.js",
-  "exitCode": 1,
-  "envs": {
-    "RUST_BACKTRACE": "0"
-  },
-  "output": "err.out"
+  "tests": {
+    "panics": {
+      "args": "test main.js",
+      "exitCode": 1,
+      "envs": {
+        "RUST_BACKTRACE": "0"
+      },
+      "output": "err.out"
+    },
+    // denext: the panic banner names the subcommand and the argument count,
+    // never an argument (they can carry secrets).
+    "banner_leaves_out_the_arguments": {
+      "args": "test main.js -- --token=s3cret",
+      "exitCode": 1,
+      "envs": {
+        "RUST_BACKTRACE": "0"
+      },
+      "output": "err_secret_arg.out"
+    }
+  }
 }

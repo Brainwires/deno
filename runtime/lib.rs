@@ -31,6 +31,7 @@ pub use deno_webstorage;
 
 pub mod code_cache;
 pub mod coverage;
+pub mod crash_report;
 pub mod cpu_profiler;
 pub use cpu_profiler::CpuProfiler;
 pub use cpu_profiler::CpuProfilerConfig;
