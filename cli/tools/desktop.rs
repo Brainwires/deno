@@ -171,6 +171,16 @@ fn apply_desktop_config_to_flags(
     if let Some(single_instance) = app_config.single_instance {
       desktop_flags.single_instance = single_instance;
     }
+    if let Some(policy) = app_config.activation_policy {
+      if matches!(policy.as_str(), "regular" | "accessory") {
+        desktop_flags.activation_policy = Some(policy);
+      } else {
+        log::warn!(
+          "ignoring desktop.app.activationPolicy {policy:?}: it is \"regular\" \
+           or \"accessory\""
+        );
+      }
+    }
   }
 
   if let Some(backend) = desktop_config.backend
@@ -1381,6 +1391,11 @@ async fn run_desktop_hmr(
   if cfg!(windows) && backend == "cef" {
     cmd.env("LAUFEY_CWD", &source_abs);
   }
+  // The macOS activation policy the host starts in (laufey API 50), as the
+  // packaged app's launch file says it.
+  if let Some(policy) = desktop_flags.activation_policy.as_deref() {
+    cmd.env("LAUFEY_ACTIVATION_POLICY", policy);
+  }
   #[cfg(any(target_os = "macos", target_os = "linux"))]
   if let Some(icon_path) = laufey_app_icon.as_ref() {
     cmd.env("LAUFEY_APP_ICON", icon_path);
@@ -1894,6 +1909,7 @@ async fn package_windows_app_dir(
     .as_deref(),
     &desktop_bridge_origin(cli_options)?,
     desktop_flags.single_instance,
+    desktop_flags.activation_policy.as_deref(),
   )?;
 
   // Validate the deep-link schemes. Windows has nothing to write into the
@@ -2092,6 +2108,7 @@ async fn package_linux_app_dir(
     .as_deref(),
     &desktop_bridge_origin(cli_options)?,
     desktop_flags.single_instance,
+    desktop_flags.activation_policy.as_deref(),
   )?;
 
   // Merge any deep-link schemes into the `.desktop` entry written above.
@@ -3989,6 +4006,7 @@ async fn package_macos_app_bundle(
     .as_deref(),
     &desktop_bridge_origin(cli_options)?,
     desktop_flags.single_instance,
+    desktop_flags.activation_policy.as_deref(),
   )?;
 
   // Rewrite each CEF helper's CFBundleIdentifier to be a strict suffix
@@ -4117,8 +4135,17 @@ fn laufey_launch_config_json(
   custom_schemes: &[&str],
   bridge_origins: &[&str],
   single_instance: bool,
+  activation_policy: Option<&str>,
 ) -> String {
   let mut config = serde_json::Map::new();
+  // laufey API 50: the macOS host starts in this policy (no Dock icon from
+  // the first frame for "accessory").
+  if let Some(policy) = activation_policy {
+    config.insert(
+      "activationPolicy".to_string(),
+      serde_json::Value::from(policy),
+    );
+  }
   if let Some(id) = app_id {
     config.insert("appId".to_string(), serde_json::Value::from(id));
   }
@@ -4155,6 +4182,7 @@ fn write_laufey_launch_config(
   cef_scheme: Option<&str>,
   bridge_origin: &str,
   single_instance: bool,
+  activation_policy: Option<&str>,
 ) -> Result<(), AnyError> {
   if let Some(id) = app_id {
     ensure_laufey_app_id(id)?;
@@ -4174,6 +4202,7 @@ fn write_laufey_launch_config(
       &schemes,
       &[bridge_origin],
       single_instance,
+      activation_policy,
     ),
   )
   .with_context(|| {
@@ -9810,6 +9839,7 @@ def456  other.zip
       identifier: None,
       deep_links: Vec::new(),
       single_instance: false,
+      activation_policy: None,
       codesign_identity: None,
       inspect_renderer: None,
       compress: None,
@@ -11007,6 +11037,7 @@ def456  other.zip
       &["acme"],
       &["acme://app"],
       true,
+      Some("accessory"),
     );
     assert!(json.ends_with('\n'));
     let value: serde_json::Value = serde_json::from_str(&json).unwrap();
@@ -11017,12 +11048,13 @@ def456  other.zip
         "customSchemes": ["acme"],
         "bridgeOrigins": ["acme://app"],
         "singleInstance": true,
+        "activationPolicy": "accessory",
       })
     );
     // Absent values are omitted; singleInstance and the bridge's origins
     // (DENEXT.md item 129) are always recorded.
     let value: serde_json::Value = serde_json::from_str(
-      &laufey_launch_config_json(None, &[], &["app://localhost"], false),
+      &laufey_launch_config_json(None, &[], &["app://localhost"], false, None),
     )
     .unwrap();
     assert_eq!(
@@ -11040,6 +11072,7 @@ def456  other.zip
       Some("acme"),
       "acme://app",
       true,
+      Some("accessory"),
     )
     .unwrap();
     let written: serde_json::Value = serde_json::from_str(
@@ -11051,6 +11084,7 @@ def456  other.zip
     assert_eq!(written["customSchemes"], serde_json::json!(["acme"]));
     assert_eq!(written["bridgeOrigins"], serde_json::json!(["acme://app"]));
     assert_eq!(written["singleInstance"], true);
+    assert_eq!(written["activationPolicy"], "accessory");
     // An id laufey would ignore fails packaging instead.
     assert!(
       write_laufey_launch_config(
@@ -11058,14 +11092,22 @@ def456  other.zip
         Some("a/b"),
         None,
         "app://localhost",
-        false
+        false,
+        None
       )
       .is_err()
     );
     // Single instance without an id still writes the file (laufey warns and
     // runs unlocked).
-    write_laufey_launch_config(tmp.path(), None, None, "app://localhost", true)
-      .unwrap();
+    write_laufey_launch_config(
+      tmp.path(),
+      None,
+      None,
+      "app://localhost",
+      true,
+      None,
+    )
+    .unwrap();
   }
 
   #[test]

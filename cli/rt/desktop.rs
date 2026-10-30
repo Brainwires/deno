@@ -80,6 +80,11 @@ pub const DESKTOP_JS: &str = r#"
     op_desktop_query_notification_permission,
     op_desktop_screens,
     op_desktop_window_capabilities,
+    op_desktop_tray_capabilities,
+    op_desktop_window_level_code,
+    op_desktop_speak,
+    op_desktop_stop_speaking,
+    op_desktop_speech_voices,
     op_desktop_quit,
     op_desktop_set_quit_on_last_window_closed,
     op_desktop_close_reply,
@@ -111,6 +116,45 @@ pub const DESKTOP_JS: &str = r#"
     constructor(type, init = {}) {
       super(type, init);
       this.#relatedTarget = init.relatedTarget ?? null;
+    }
+  }
+
+  // A tray icon's mouse event (laufey API 50): `button` is "left", "right"
+  // or "middle", `modifiers` the keys held, `x` / `y` the cursor in screen
+  // coordinates (null where the OS doesn't say), `double` a double click.
+  // The DOM-style altKey / ctrlKey / shiftKey / metaKey / screenX / screenY
+  // say the same.
+  class TrayMouseEvent extends Event {
+    #button;
+    #modifiers;
+    #x;
+    #y;
+    #double;
+
+    get button() { return this.#button; }
+    get modifiers() { return this.#modifiers; }
+    get x() { return this.#x; }
+    get y() { return this.#y; }
+    get double() { return this.#double; }
+    get altKey() { return this.#modifiers.alt; }
+    get ctrlKey() { return this.#modifiers.ctrl; }
+    get shiftKey() { return this.#modifiers.shift; }
+    get metaKey() { return this.#modifiers.meta; }
+    get screenX() { return this.#x ?? 0; }
+    get screenY() { return this.#y ?? 0; }
+
+    constructor(type, init = {}) {
+      super(type, init);
+      this.#button = init.button ?? "left";
+      this.#modifiers = Object.freeze({
+        shift: !!init.shift,
+        ctrl: !!init.ctrl,
+        alt: !!init.alt,
+        meta: !!init.meta,
+      });
+      this.#x = init.x ?? null;
+      this.#y = init.y ?? null;
+      this.#double = !!init.double;
     }
   }
 
@@ -780,6 +824,61 @@ pub const DESKTOP_JS: &str = r#"
       throw new TypeError(`Unknown vibrancy material: ${material}`);
     }
     return this[privateBackdrop](BACKDROP_VIBRANCY, raw);
+  };
+  // Overlay windows (laufey API 50), in Electron's shapes. Each is a no-op
+  // (or returns false) where windowCapabilities() reports it missing.
+  const privateIgnoreMouseEvents = Symbol.for(
+    "Deno_privateDesktopIgnoreMouseEvents",
+  );
+  const privateHitRegion = Symbol.for("Deno_privateDesktopHitRegion");
+  const privateAllWorkspaces = Symbol.for("Deno_privateDesktopAllWorkspaces");
+  const privateWindowLevel = Symbol.for("Deno_privateDesktopWindowLevel");
+  BrowserWindowPrototype.setIgnoreMouseEvents = function(ignore, options) {
+    this[privateIgnoreMouseEvents](!!ignore, !!options?.forward);
+  };
+  BrowserWindowPrototype.setHitRegion = function(rects) {
+    if (rects == null) return this[privateHitRegion](null);
+    if (!Array.isArray(rects)) {
+      throw new TypeError(
+        "setHitRegion takes an array of { x, y, width, height }, or null",
+      );
+    }
+    const out = [];
+    for (const r of rects) {
+      const x = Math.floor(Number(r?.x));
+      const y = Math.floor(Number(r?.y));
+      const width = Math.ceil(Number(r?.x) + Number(r?.width)) - x;
+      const height = Math.ceil(Number(r?.y) + Number(r?.height)) - y;
+      if (![x, y, width, height].every(Number.isFinite)) {
+        throw new TypeError(
+          "setHitRegion: every rectangle needs finite x, y, width, height",
+        );
+      }
+      if (width > 0 && height > 0) out.push({ x, y, width, height });
+    }
+    return this[privateHitRegion](out);
+  };
+  BrowserWindowPrototype.setVisibleOnAllWorkspaces = function(
+    visible,
+    options,
+  ) {
+    return this[privateAllWorkspaces](
+      !!visible,
+      !!visible && !!options?.visibleOnFullScreen,
+    );
+  };
+  // setAlwaysOnTop(flag, level?): Electron's level names ("normal",
+  // "floating", "status", "pop-up-menu", "screen-saver", ...); without a
+  // level it is the plain floating level, as before.
+  const nativeSetAlwaysOnTop = BrowserWindowPrototype.setAlwaysOnTop;
+  BrowserWindowPrototype.setAlwaysOnTop = function(flag, level) {
+    if (level === undefined || !flag) {
+      return nativeSetAlwaysOnTop.call(this, !!flag);
+    }
+    const code = op_desktop_window_level_code(String(level));
+    if (code < 0) throw new TypeError(`Unknown window level: ${level}`);
+    nativeSetAlwaysOnTop.call(this, code !== 0);
+    if (code > 1) this[privateWindowLevel](code);
   };
   // Drag files out of the window to another app or the desktop (laufey API
   // 39), as a copy. Call it while the left mouse button is held (from the
@@ -2034,6 +2133,41 @@ pub const DESKTOP_JS: &str = r#"
       configurable: true,
       enumerable: true,
     },
+    // Text to speech through the OS engine (laufey API 50):
+    // AVSpeechSynthesizer, SAPI, speech-dispatcher. speak() resolves when
+    // the utterance ends (also when stop() or a later speak() cut it off)
+    // and rejects with Deno.errors.NotSupported where there is no engine.
+    speech: {
+      value: Object.freeze({
+        async speak(text, options = {}) {
+          const { outcome, message } = await op_desktop_speak({
+            text: String(text ?? ""),
+            voice: options?.voice ?? null,
+            lang: options?.lang ?? null,
+            rate: options?.rate ?? null,
+            pitch: options?.pitch ?? null,
+            volume: options?.volume ?? null,
+          });
+          if (outcome === "unsupported") {
+            throw new Deno.errors.NotSupported(
+              "no text-to-speech engine here",
+            );
+          }
+          if (outcome === "failed") {
+            throw new Error(message ?? "speech failed");
+          }
+        },
+        stop() {
+          op_desktop_stop_speaking();
+        },
+        async voices() {
+          return JSON.parse(await op_desktop_speech_voices());
+        },
+      }),
+      writable: true,
+      configurable: true,
+      enumerable: true,
+    },
     quitOnLastWindowClosed: {
       get() { return quitOnLastWindowClosed; },
       set(value) {
@@ -2101,6 +2235,58 @@ pub const DESKTOP_JS: &str = r#"
   internals.defineEventHandler(TrayPrototype, "click");
   internals.defineEventHandler(TrayPrototype, "dblclick");
   internals.defineEventHandler(TrayPrototype, "menuclick");
+  internals.defineEventHandler(TrayPrototype, "contextmenu");
+  internals.defineEventHandler(TrayPrototype, "auxclick");
+  internals.defineEventHandler(TrayPrototype, "mouseenter");
+  internals.defineEventHandler(TrayPrototype, "mouseleave");
+  // Which tray events and data this backend delivers (laufey API 50).
+  Object.defineProperty(Tray, "capabilities", {
+    value: function capabilities() {
+      return op_desktop_tray_capabilities();
+    },
+    writable: true,
+    configurable: true,
+  });
+
+  // Where a tray panel opens: centred on the icon, below it when the icon
+  // is in the upper half of its screen (a menu bar, a top panel), above it
+  // when in the lower half (a bottom taskbar), and beside it for a side
+  // taskbar; kept inside the work area. Without screens, under the icon.
+  function panelPosition(icon, size, screens) {
+    const cx = icon.x + icon.width / 2;
+    const cy = icon.y + icon.height / 2;
+    const screen = (screens ?? []).find((s) =>
+      cx >= s.bounds.x && cx < s.bounds.x + s.bounds.width &&
+      cy >= s.bounds.y && cy < s.bounds.y + s.bounds.height
+    ) ?? (screens ?? []).find((s) => s.isPrimary);
+    if (!screen) {
+      return {
+        x: Math.round(cx - size.width / 2),
+        y: Math.round(icon.y + icon.height),
+      };
+    }
+    const b = screen.bounds;
+    const wa = screen.workArea;
+    let x;
+    let y;
+    // A side taskbar: the work area starts right of (or ends left of) the
+    // icon.
+    if (wa.x > icon.x) {
+      x = wa.x;
+      y = Math.round(cy - size.height / 2);
+    } else if (wa.x + wa.width < icon.x + icon.width) {
+      x = wa.x + wa.width - size.width;
+      y = Math.round(cy - size.height / 2);
+    } else {
+      x = Math.round(cx - size.width / 2);
+      y = cy < b.y + b.height / 2
+        ? Math.max(icon.y + icon.height, wa.y)
+        : Math.min(icon.y, wa.y + wa.height) - size.height;
+    }
+    x = Math.max(wa.x, Math.min(x, wa.x + wa.width - size.width));
+    y = Math.max(wa.y, Math.min(y, wa.y + wa.height - size.height));
+    return { x, y };
+  }
 
   // High-level convenience: wire a frameless, non-activating popover window
   // to this tray icon (the classic menu-bar-app pattern). Built entirely on
@@ -2121,8 +2307,11 @@ pub const DESKTOP_JS: &str = r#"
       frameless: true,
       noActivate: true,
       resizable: false,
+      // Created hidden (laufey API 50): no frame on screen before the
+      // first toggle.
+      show: false,
+      skipTaskbar: true,
     });
-    window.hide();
     if (options.url != null) window.navigate(options.url);
 
     let visible = false;
@@ -2138,10 +2327,7 @@ pub const DESKTOP_JS: &str = r#"
       if (!bounds) return;
       const pos = positionFn
         ? positionFn(bounds, { width, height })
-        : {
-          x: Math.round(bounds.x + bounds.width / 2 - width / 2),
-          y: Math.round(bounds.y + bounds.height),
-        };
+        : panelPosition(bounds, { width, height }, Deno.desktop.screens());
       window.setPosition(pos.x, pos.y);
     };
 
@@ -2162,7 +2348,11 @@ pub const DESKTOP_JS: &str = r#"
       else show();
     };
 
-    const onTrayClick = () => {
+    const onTrayClick = (e) => {
+      // A plain left click toggles; a right click is the menu's, a double
+      // click's second half is not another toggle.
+      if (e?.button && e.button !== "left") return;
+      if (e?.double) return;
       if (suppressNextShow) {
         suppressNextShow = false;
         return;
@@ -3025,13 +3215,42 @@ pub const DESKTOP_JS: &str = r#"
           case "trayClick": {
             const target = trays.get(ev.trayId);
             if (!target) break;
-            target.dispatchEvent(new MouseEvent("click"));
+            target.dispatchEvent(new TrayMouseEvent("click", {}));
             break;
           }
           case "trayDoubleClick": {
             const target = trays.get(ev.trayId);
             if (!target) break;
-            target.dispatchEvent(new MouseEvent("dblclick"));
+            const init = { double: true };
+            target.dispatchEvent(new TrayMouseEvent("click", init));
+            target.dispatchEvent(new TrayMouseEvent("dblclick", init));
+            break;
+          }
+          case "trayEvent": {
+            // laufey API 50: every event with its detail. Every button's
+            // click is a "click" (its `button` says which, `double` a
+            // second click); a right click is also "contextmenu", a middle
+            // one "auxclick", a double click also "dblclick".
+            const target = trays.get(ev.trayId);
+            if (!target) break;
+            const init = {
+              button: ev.button,
+              double: ev.event === "dblclick",
+              shift: ev.shift,
+              ctrl: ev.ctrl,
+              alt: ev.alt,
+              meta: ev.meta,
+              x: ev.x ?? null,
+              y: ev.y ?? null,
+            };
+            if (ev.event === "mouseenter" || ev.event === "mouseleave") {
+              target.dispatchEvent(new TrayMouseEvent(ev.event, init));
+              break;
+            }
+            target.dispatchEvent(new TrayMouseEvent("click", init));
+            if (ev.event !== "click") {
+              target.dispatchEvent(new TrayMouseEvent(ev.event, init));
+            }
             break;
           }
           case "trayMenuClick": {
@@ -3492,6 +3711,16 @@ mod tests {
       "BrowserWindowPrototype.setVibrancy",
       "BrowserWindowPrototype.getScreen",
       "applyWindowOptions(instance, args[0]);",
+      // laufey API 50 (DENEXT.md item 183).
+      "BrowserWindowPrototype.setIgnoreMouseEvents",
+      "BrowserWindowPrototype.setHitRegion",
+      "BrowserWindowPrototype.setVisibleOnAllWorkspaces",
+      "BrowserWindowPrototype.setAlwaysOnTop = function(flag, level)",
+      "speech:",
+      "case \"trayEvent\":",
+      "class TrayMouseEvent extends Event",
+      "Object.defineProperty(Tray, \"capabilities\"",
+      "function panelPosition(icon, size, screens)",
     ] {
       assert!(DESKTOP_JS.contains(api), "{api}");
     }

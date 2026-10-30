@@ -59,7 +59,12 @@ op_desktop_send_error_report -> null
 op_desktop_request_notification_permission -> "unsupported"
 op_desktop_query_notification_permission -> "unsupported"
 op_desktop_screens -> []
-op_desktop_window_capabilities -> {"state":false,"stateEvents":false,"sizeConstraints":false,"screens":false,"displayEvents":false,"titleBarHidden":false,"titleBarHiddenInset":false,"windowButtonPosition":false,"mica":false,"acrylic":false,"tabbed":false,"vibrancy":false,"normalBounds":false,"keepAlive":false,"setPosition":false,"fileDrop":false,"fileDropEnterPaths":false,"fileDragOut":false,"fileDialogs":false,"fileDialogFilesAndDirectories":false,"fileDialogModal":false,"blur":false}
+op_desktop_window_capabilities -> {"state":false,"stateEvents":false,"sizeConstraints":false,"screens":false,"displayEvents":false,"titleBarHidden":false,"titleBarHiddenInset":false,"windowButtonPosition":false,"mica":false,"acrylic":false,"tabbed":false,"vibrancy":false,"normalBounds":false,"keepAlive":false,"setPosition":false,"fileDrop":false,"fileDropEnterPaths":false,"fileDragOut":false,"fileDialogs":false,"fileDialogFilesAndDirectories":false,"fileDialogModal":false,"blur":false,"clickThrough":false,"clickThroughForward":false,"hitRegion":false,"visibleOnAllWorkspaces":false,"visibleOnFullScreen":false,"skipTaskbar":false,"alwaysOnTopLevels":false,"transparent":false,"layerShell":false,"activationPolicy":false,"nonActivating":false,"textToSpeech":false}
+op_desktop_tray_capabilities -> {"click":false,"doubleClick":false,"rightClick":false,"middleClick":false,"hover":false,"modifiers":false,"position":false,"popUpMenu":false}
+op_desktop_window_level_code -> 2
+op_desktop_speak -> {"outcome":"unsupported","message":null}
+op_desktop_stop_speaking -> null
+op_desktop_speech_voices -> "[]"
 op_desktop_quit -> null
 op_desktop_set_quit_on_last_window_closed -> null
 op_desktop_close_reply -> null
@@ -76,4 +81,4 @@ BrowserWindow throws NotSupported: BrowserWindow is only available in the main s
 Dock throws NotSupported: Dock is only available in the main scope of a desktop app
 Tray throws NotSupported: Tray is only available in the main scope of a desktop app
 Notification throws NotSupported: Notification is only available in the main scope of a desktop app
-78 exposed, 0 uncovered
+83 exposed, 0 uncovered

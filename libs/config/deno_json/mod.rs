@@ -1101,6 +1101,11 @@ struct SerializedDesktopAppConfig {
   /// identifier. Defaults to `false`.
   #[serde(rename = "singleInstance")]
   pub single_instance: Option<bool>,
+  /// The macOS activation policy the app starts in: `"regular"` (a Dock
+  /// icon, the default) or `"accessory"` (no Dock icon or menu bar from the
+  /// first frame: a tray / menu-bar app).
+  #[serde(rename = "activationPolicy")]
+  pub activation_policy: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
@@ -1178,6 +1183,7 @@ impl SerializedDesktopConfig {
         deep_links: a.deep_links,
         origin: a.origin,
         single_instance: a.single_instance,
+        activation_policy: a.activation_policy,
         icons: a.icons.map(|i| {
           fn resolve_icon_value(
             v: SerializedDesktopIconValue,
@@ -1269,6 +1275,8 @@ pub struct DesktopAppConfig {
   pub origin: Option<String>,
   /// `desktop.app.singleInstance`.
   pub single_instance: Option<bool>,
+  /// `desktop.app.activationPolicy` as written; validated by the CLI.
+  pub activation_policy: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -3837,6 +3845,17 @@ mod tests {
     // The origin is carried through as written; the CLI validates it.
     assert_eq!(app.origin.as_deref(), Some("acme://app"));
     assert_eq!(app.single_instance, Some(true));
+  }
+
+  #[test]
+  fn test_parse_desktop_app_config_activation_policy() {
+    let config_text =
+      r#"{ "desktop": { "app": { "activationPolicy": "accessory" } } }"#;
+    let config_specifier = Url::parse("file:///deno/deno.json").unwrap();
+    let config_file = ConfigFile::new(config_text, config_specifier).unwrap();
+    let desktop = unpack_object(config_file.to_desktop_config(), "desktop");
+    let app = desktop.app.expect("desktop.app must be parsed");
+    assert_eq!(app.activation_policy.as_deref(), Some("accessory"));
   }
 
   #[test]

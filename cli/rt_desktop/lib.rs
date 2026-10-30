@@ -57,7 +57,7 @@ use denort::run::RunOptions;
 /// makes the failure mode obvious instead of "the desktop app silently won't
 /// launch".
 const _: () = assert!(
-  laufey::LAUFEY_API_VERSION == 49,
+  laufey::LAUFEY_API_VERSION == 50,
   "LAUFEY_API_VERSION mismatch: update this assert and the prebuilt backend release pin in cli/tools/desktop.rs when laufey bumps its API version",
 );
 
@@ -792,6 +792,7 @@ impl WefDesktopApi {
         transparent_titlebar: options.transparent_titlebar,
         hidden: true,
         transparent: options.transparent,
+        overlay: false,
       },
     );
     let window =
@@ -804,6 +805,37 @@ impl WefDesktopApi {
   }
 }
 
+/// A laufey tray event as the runtime's `trayEvent` (laufey API 50).
+fn tray_event(
+  e: laufey::TrayEvent,
+) -> deno_runtime::ops::desktop::DesktopEvent {
+  use laufey::TrayEventKind as K;
+  let event = match e.kind {
+    K::Click => "click",
+    K::DoubleClick => "dblclick",
+    K::RightClick => "contextmenu",
+    K::MiddleClick => "auxclick",
+    K::MouseEnter => "mouseenter",
+    K::MouseLeave => "mouseleave",
+  };
+  let button = match e.button {
+    laufey::TrayButton::Left => "left",
+    laufey::TrayButton::Right => "right",
+    laufey::TrayButton::Middle => "middle",
+  };
+  deno_runtime::ops::desktop::DesktopEvent::TrayEvent {
+    tray_id: e.tray_id,
+    event,
+    button,
+    shift: e.modifiers & laufey::LAUFEY_MOD_SHIFT != 0,
+    ctrl: e.modifiers & laufey::LAUFEY_MOD_CONTROL != 0,
+    alt: e.modifiers & laufey::LAUFEY_MOD_ALT != 0,
+    meta: e.modifiers & laufey::LAUFEY_MOD_META != 0,
+    x: e.position.map(|p| p.0),
+    y: e.position.map(|p| p.1),
+  }
+}
+
 impl denort::desktop::DesktopApi for WefDesktopApi {
   fn create_window(
     &self,
@@ -813,6 +845,8 @@ impl denort::desktop::DesktopApi for WefDesktopApi {
     no_activate: bool,
     transparent_titlebar: bool,
     transparent: bool,
+    hidden: bool,
+    overlay: bool,
   ) -> u32 {
     let window = laufey::Window::new_with_options(
       width,
@@ -821,8 +855,9 @@ impl denort::desktop::DesktopApi for WefDesktopApi {
         frameless,
         no_activate,
         transparent_titlebar,
-        hidden: false,
+        hidden,
         transparent,
+        overlay,
       },
     );
     let window = self.setup_window_events(window, None);
@@ -1119,6 +1154,7 @@ impl denort::desktop::DesktopApi for WefDesktopApi {
     &self,
   ) -> deno_runtime::ops::desktop::WindowCapabilitiesInfo {
     let c = laufey::window_capabilities();
+    let o = laufey::overlay_capabilities();
     deno_runtime::ops::desktop::WindowCapabilitiesInfo {
       state: c.state(),
       state_events: c.state_events(),
@@ -1142,7 +1178,154 @@ impl denort::desktop::DesktopApi for WefDesktopApi {
       file_dialog_files_and_directories: c.file_dialog_files_and_directories(),
       file_dialog_modal: c.file_dialog_modal(),
       blur: c.blur(),
+      // Overlay windows (laufey API 50).
+      click_through: o.click_passthrough(),
+      click_through_forward: o.passthrough_forward(),
+      hit_region: o.input_region(),
+      visible_on_all_workspaces: o.all_workspaces(),
+      visible_on_full_screen: o.visible_on_full_screen(),
+      skip_taskbar: o.skip_taskbar(),
+      always_on_top_levels: o.window_levels() && cfg!(target_os = "macos"),
+      transparent: o.transparent(),
+      layer_shell: o.layer_shell(),
+      activation_policy: o.activation_policy(),
+      non_activating: o.non_activating(),
+      // Every backend but Winit has the speech entry points; whether the
+      // OS has an engine shows on the first utterance.
+      text_to_speech: o.bits() != 0,
     }
+  }
+
+  // --- Overlay windows, activation policy, tray, speech (laufey API 50) ---
+
+  fn set_ignore_mouse_events(
+    &self,
+    window_id: u32,
+    ignore: bool,
+    forward: bool,
+  ) {
+    let w = laufey::Window::from_id(window_id);
+    w.set_click_passthrough(ignore);
+    w.set_click_passthrough_forward(ignore && forward);
+  }
+
+  fn set_hit_region(
+    &self,
+    window_id: u32,
+    rects: Option<&[deno_runtime::ops::desktop::DesktopRect]>,
+  ) {
+    let rects: Option<Vec<laufey::InputRect>> = rects.map(|r| {
+      r.iter()
+        .map(|r| laufey::InputRect {
+          x: r.x,
+          y: r.y,
+          width: r.width,
+          height: r.height,
+        })
+        .collect()
+    });
+    laufey::Window::from_id(window_id).set_input_region(rects.as_deref());
+  }
+
+  fn set_skip_taskbar(&self, window_id: u32, skip: bool) -> bool {
+    laufey::Window::from_id(window_id).set_skip_taskbar(skip)
+  }
+
+  fn set_visible_on_all_workspaces(
+    &self,
+    window_id: u32,
+    visible: bool,
+    visible_on_full_screen: bool,
+  ) -> bool {
+    laufey::Window::from_id(window_id)
+      .set_visible_on_all_workspaces(visible, visible_on_full_screen)
+  }
+
+  fn set_window_level(&self, window_id: u32, level: i32) -> bool {
+    laufey::Window::from_id(window_id).set_level(level)
+  }
+
+  fn set_activation_policy(&self, policy: i32) -> bool {
+    laufey::set_activation_policy(policy)
+  }
+
+  fn activation_policy(&self) -> Option<i32> {
+    laufey::activation_policy()
+  }
+
+  fn tray_capabilities(
+    &self,
+  ) -> deno_runtime::ops::desktop::TrayCapabilitiesInfo {
+    let c = laufey::tray_capabilities();
+    deno_runtime::ops::desktop::TrayCapabilitiesInfo {
+      click: c & laufey::LAUFEY_TRAY_CAP_CLICK != 0,
+      double_click: c & laufey::LAUFEY_TRAY_CAP_DOUBLE_CLICK != 0,
+      right_click: c & laufey::LAUFEY_TRAY_CAP_RIGHT_CLICK != 0,
+      middle_click: c & laufey::LAUFEY_TRAY_CAP_MIDDLE_CLICK != 0,
+      hover: c & laufey::LAUFEY_TRAY_CAP_HOVER != 0,
+      modifiers: c & laufey::LAUFEY_TRAY_CAP_MODIFIERS != 0,
+      position: c & laufey::LAUFEY_TRAY_CAP_POSITION != 0,
+      pop_up_menu: c & laufey::LAUFEY_TRAY_CAP_POP_UP_MENU != 0,
+    }
+  }
+
+  fn pop_up_tray_menu(&self, tray_id: u32) -> bool {
+    laufey::pop_up_tray_menu(tray_id)
+  }
+
+  fn speak(
+    &self,
+    request: deno_runtime::ops::desktop::SpeechRequestInfo,
+  ) -> deno_runtime::ops::desktop::DesktopFuture<
+    deno_runtime::ops::desktop::SpeechOutcomeInfo,
+  > {
+    use deno_runtime::ops::desktop::SpeechOutcomeInfo;
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let id = laufey::speak(
+      &laufey::SpeechRequest {
+        text: request.text,
+        voice: request.voice,
+        lang: request.lang,
+        rate: request.rate,
+        pitch: request.pitch,
+        volume: request.volume,
+      },
+      move |outcome| {
+        let _ = tx.send(outcome);
+      },
+    );
+    Box::pin(async move {
+      let outcome = match rx.await {
+        Ok(laufey::SpeechOutcome::Done) => ("done", None),
+        Ok(laufey::SpeechOutcome::Cancelled) => ("cancelled", None),
+        Ok(laufey::SpeechOutcome::Unsupported) => ("unsupported", None),
+        Ok(laufey::SpeechOutcome::Failed(m)) => ("failed", Some(m)),
+        // Refused before it began (an empty or over-long text): the
+        // callback was dropped with the request.
+        Err(_) if id == 0 => (
+          "failed",
+          Some("the text is empty or longer than 32 KiB".to_string()),
+        ),
+        Err(_) => ("failed", Some("the backend dropped the utterance".into())),
+      };
+      SpeechOutcomeInfo {
+        outcome: outcome.0,
+        message: outcome.1,
+      }
+    })
+  }
+
+  fn stop_speaking(&self) {
+    laufey::stop_speaking();
+  }
+
+  fn speech_voices(&self) -> deno_runtime::ops::desktop::DesktopFuture<String> {
+    // May block briefly (SAPI, speech-dispatcher): off the JS thread.
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    std::thread::spawn(move || {
+      let _ = tx.send(laufey::speech_voices_json());
+    });
+    Box::pin(async move { rx.await.unwrap_or_else(|_| "[]".to_string()) })
   }
 
   // --- Drag and drop, file dialogs, rich clipboard (laufey API 39) ---
@@ -1725,23 +1908,43 @@ impl denort::desktop::DesktopApi for WefDesktopApi {
     if tray_id == 0 {
       return 0;
     }
-    let click_tx = self.event_tx.clone();
-    let tray = tray.on_click(move || {
-      let _ = click_tx.try_send(
-        deno_runtime::ops::desktop::DesktopEvent::TrayClick { tray_id },
+    // laufey API 50: every event with its detail where the backend has
+    // them; the plain click / double-click handlers otherwise (an
+    // AppIndicator tray on Linux reports neither).
+    let event_tx = self.event_tx.clone();
+    let detailed = laufey::tray_capabilities() != 0
+      && laufey::set_tray_event_handler(
+        tray_id,
+        Some(Box::new(move |e: laufey::TrayEvent| {
+          let _ = event_tx.try_send(tray_event(e));
+        })),
       );
-    });
-    let dblclick_tx = self.event_tx.clone();
-    tray.set_double_click_handler(move || {
-      let _ = dblclick_tx.try_send(
-        deno_runtime::ops::desktop::DesktopEvent::TrayDoubleClick { tray_id },
-      );
-    });
+    let tray = if detailed {
+      tray
+    } else {
+      let click_tx = self.event_tx.clone();
+      let tray = tray.on_click(move || {
+        let _ = click_tx.try_send(
+          deno_runtime::ops::desktop::DesktopEvent::TrayClick { tray_id },
+        );
+      });
+      let dblclick_tx = self.event_tx.clone();
+      tray.set_double_click_handler(move || {
+        let _ = dblclick_tx.try_send(
+          deno_runtime::ops::desktop::DesktopEvent::TrayDoubleClick { tray_id },
+        );
+      });
+      tray
+    };
     self.trays.lock().unwrap().insert(tray_id, tray);
     tray_id
   }
 
   fn destroy_tray(&self, tray_id: u32) {
+    if laufey::tray_capabilities() != 0 {
+      // Drops the handler laufey keeps for the id (laufey API 50).
+      laufey::set_tray_event_handler(tray_id, None);
+    }
     self.trays.lock().unwrap().remove(&tray_id);
   }
 
