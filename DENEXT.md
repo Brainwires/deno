@@ -7430,6 +7430,28 @@ where the changes are discussed.
        overlay checks, `--layer1` StatusNotifierItem clicks) covers the native
        side.
 
+184. **`fix(doc)`: `deno doc --json` and `--html` carry no ANSI color escapes**
+     (`cli/tools/doc.rs`; found in runtime 3.0.0-denext.5):
+     - deno_doc builds a template literal type's `repr` with `format!` over
+       `TsTypeDef`'s terminal `Display` impl, which colors its output whenever
+       `deno_terminal`'s colors are on, and they are on unless `NO_COLOR` is
+       set, whether stdout is a terminal or not. So
+       `` export type ContactType = `contact:${string}` `` came out of
+       `deno doc --json` (stdout piped) with
+       `"repr": "contact:${\u001b[0m\u001b[36mstring\u001b[0m}"`. denext's
+       generated API reference showed the escapes in `ContactType` and
+       `CalendarFormatType`. `--html` writes the same `repr` strings into its
+       pages.
+     - `deno doc` now turns colors off (restoring the previous setting when it
+       returns) for `--json` and `--html`, before any node is generated; the
+       terminal output of a plain `deno doc` keeps its colors.
+     - Upstream: the same bug in `denoland/deno` main (deno_doc 0.207.0, the
+       same `doc.rs`) and stock Deno 2.9.8; deno_doc's own `tpl_literal` still
+       builds the `repr` through `Display`. Not reported yet.
+     - Test: `specs::doc::json_template_literal`: `deno doc --json` with
+       `FORCE_COLOR=1` prints the plain `repr` strings, and a script that runs
+       it checks that no string in the parsed JSON holds an ESC byte.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
