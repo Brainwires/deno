@@ -61,11 +61,11 @@ denort = { path = "../rt", default-features = false }
 # read over an encrypted session, tokio 1.53.3; runtime 3.0.0-denext.6, API 50:
 # overlay windows, tray events, the launch activation policy and speech,
 # branch `feat/overlay-tray-native` until it lands; runtime 3.0.0-denext.7:
-# CEF 156.0.14 / Chromium 156, branch `chore/cef-stable-bump`), pinned to a
-# commit of the Brainwires/laufey fork.
+# CEF 156.0.14 / Chromium 156 and the Linux Wayland overlay fixes), pinned to
+# a commit of the Brainwires/laufey fork.
 # The host built from the same commit must be used with it (the API version
 # check is exact).
-laufey = { git = "https://github.com/Brainwires/laufey", rev = "dd68c1a2292dd5a749448ad05ff85f36d1f097c4" }
+laufey = { git = "https://github.com/Brainwires/laufey", rev = "7d24199a19806efffc46be43a50476e96c7eef56" }
 libsui.workspace = true
 
 bytes.workspace = true

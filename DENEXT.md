@@ -7503,15 +7503,7 @@ where the changes are discussed.
        `FORCE_COLOR=1` prints the plain `repr` strings, and a script that runs
        it checks that no string in the parsed JSON holds an ESC byte.
 
-The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
-64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
-118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
-169-174, 176, 178, 180, 182-184) are what the prebuilt `libdenort` carries. The
-CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID`
-into a packaged app's launchers) are in the branch too, but a stock CLI does not
-run them; denext's own launcher provides that environment.
-
-184. **`fix(desktop)`: the overlay on Linux Wayland** (`cli/rt/desktop.rs`,
+186. **`fix(desktop)`: the overlay on Linux Wayland** (`cli/rt/desktop.rs`,
      `runtime/ops/desktop.rs`, `cli/rt_desktop/{lib,app_origin}.rs`,
      `cli/lib/standalone/{app_origin,binary}.rs`, `libs/config`,
      `cli/schemas/config-file.v1.json`, `lib.deno.desktop.d.ts`; with
@@ -7534,6 +7526,14 @@ run them; denext's own launcher provides that environment.
      The laufey side: window sizes (non-resizable windows held at 800x600),
      frameless windows on KWin, `nonActivating` reported on Wayland only with
      layer-shell, appmenu-gtk-module's Gdk-CRITICALs.
+
+The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
+64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
+118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
+169-174, 176, 178, 180, 182-184, 186) are what the prebuilt `libdenort` carries.
+The CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` /
+`LAUFEY_APP_ID` into a packaged app's launchers) are in the branch too, but a
+stock CLI does not run them; denext's own launcher provides that environment.
 
 The laufey backend hosts are built from
 [Brainwires/laufey](https://github.com/Brainwires/laufey) branch
@@ -7560,8 +7560,8 @@ secure-store items read over an encrypted Secret Service session (laufey
 879ee0e) and tokio 1.53.3 with laufey's own `.cargo/audit.toml`; and, for
 runtime 3.0.0-denext.6, API 50: overlay windows, tray events, the launch
 activation policy and speech, item 183; and, for runtime 3.0.0-denext.7, CEF
-156, item 184), at the commit pinned by `LAUFEY_SHA` in the workflow (or the
-`laufey_ref` input). The same commit is the `laufey` git dependency of
+156, item 184, and the Linux Wayland overlay fixes, item 186), at the commit
+pinned by `LAUFEY_SHA` in the workflow (or the `laufey_ref` input). The same commit is the `laufey` git dependency of
 `cli/rt_desktop/Cargo.toml` (crate 0.8.0, API 50, CEF 156.0.14).
 
 laufey's `init_api` rejects any C ABI version mismatch between the runtime and
