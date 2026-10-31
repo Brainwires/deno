@@ -98,7 +98,7 @@ fn legacy_npm_compat_dir(project_root: &Path) -> PathBuf {
 /// (the path as given when it cannot be canonicalized).
 fn npm_compat_project_key(project_root: &Path) -> String {
   use sha2::Digest;
-  let canonical = std::fs::canonicalize(project_root)
+  let canonical = crate::util::fs::canonicalize_path(project_root)
     .unwrap_or_else(|_| project_root.to_path_buf());
   let hash = sha2::Sha256::digest(canonical.to_string_lossy().as_bytes());
   let hash = faster_hex::hex_string(&hash[..8]);
