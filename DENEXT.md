@@ -7572,13 +7572,105 @@ where the changes are discussed.
        `node:zlib` Brotli round trip once its page has loaded, under both
        backends on every target.
 
+193. **`fix(desktop)`: the full-app updater swaps only the staged app it
+     verified** (5.0-gate review A, L1; `runtime/ops/desktop_update/staging.rs`,
+     `swap.rs`, `mod.rs`; in every runtime with the updater, 2.9.7-denext.4
+     through 3.0.0-denext.6). The staging directory (`.<name>.denext-update/`)
+     has to sit next to the install, on its file system, and that parent may be
+     writable by other users (`/Applications` by the whole `admin` group, a
+     shared `/opt`). The staging directory was created with the default mode,
+     and the helper checked the staged app by path, then compared its digest
+     with the one in the state file and renamed it by path: anyone who could
+     write the parent could rename the staging directory away between the check
+     and the rename and have another app tree swapped in, and the reference
+     digest came from a file anything running as the user can write.
+     - `begin()` creates the staging directory fresh with mode 0700
+       (`PrivateDir::create`; whatever was at the name is discarded first, never
+       adopted), and `stage()` and the helper only use one that is not a
+       symlink, is owned by this user and has no group / other mode bits
+       (`PrivateDir::open`), held open from then on.
+     - The helper's apply (`apply_swap_verified`) takes the staged app's digest
+       through the held directory (`openat` / `fstatat` / `readlinkat`, never
+       following a symlink; a device, FIFO or socket in the tree is refused)
+       BEFORE the OS signature re-check, requires it to equal the digest
+       recorded at `stage()` (a cross-check only), checks that the path still
+       names the held directory before and after `codesign` / `WinVerifyTrust`
+       (which take a path), takes the digest again right before the swap and
+       requires it unchanged, and renames from the held directory
+       (`renameatx_np(RENAME_SWAP)` / `renameat2(RENAME_EXCHANGE)` /
+       `renameat`). A staging directory renamed away and replaced is then never
+       what moves, and what is put at its path instead is left alone (not
+       deleted).
+     - `stage()` refuses a staging directory replaced while it extracted and
+       checked the archive, and records the digest read through the held
+       directory.
+     - Left as it is: something running as this user can still change the staged
+       tree between the last digest and the rename (it can write the user's
+       files anyway; on macOS the installed bundle itself is protected by App
+       Management, the staging directory is not), and Windows has no
+       descriptor-relative calls in std, so there the staging directory is
+       refused only when it is a reparse point and who may write it is left to
+       the install directory's ACL (a per-user install under `%LOCALAPPDATA%` is
+       private; `Program Files` is not writable by users).
+     - Tests (`swap.rs`, `staging.rs`, `mod.rs`; the first four failed before
+       the fix): `a_staging_directory_others_can_reach_is_refused`
+       (group-writable, world-readable, a symlink),
+       `a_staging_directory_replaced_after_verification_is_not_swapped_in` (the
+       race, through the swap's fault hook, on the exchange and the two-rename
+       paths), `the_helper_swaps_only_the_tree_it_verified` (a tree changed
+       during the OS check, with and without a forged state digest),
+       `begin_makes_a_fresh_private_staging_directory`,
+       `the_held_digest_is_tree_digest`,
+       `only_a_private_directory_of_this_user_is_held`,
+       `the_digest_follows_the_held_directory_not_the_path`.
+194. **`fix(desktop)`: a Windows update whose certificate revocation can't be
+     checked is refused** (5.0-gate review A, L6;
+     `runtime/ops/desktop_update/oscheck.rs`; 2.9.7-denext.7 through
+     3.0.0-denext.6). Each staged PE image is verified with `WinVerifyTrust` and
+     online revocation for the whole chain but the root. When the revocation
+     status could not be determined (`CRYPT_E_REVOCATION_OFFLINE`,
+     `CERT_E_REVOCATION_FAILURE`) it was verified again without revocation and
+     accepted, so an offline machine could update. To a machine whose CRL / OCSP
+     lookups an attacker blocks, a revoked certificate looks exactly like that,
+     and the revocation of a stolen signing certificate is the moment the check
+     exists for. Now every status but success is a refusal (the
+     `revocation_status_verdict` table), with no opt-out (there was no setting
+     to keep): an update waits until the revocation servers can be reached, and
+     the error says so. The running executable's own signer, the identity the
+     staged images must match, is read without the online lookup
+     (`authenticode_identity`): with it, an offline machine would read a signed
+     app as unsigned, which the update helper (it passes the unsigned-dev
+     opt-out, which only relaxes an unsigned running app) would have taken as
+     leave to accept an unsigned update. Tests:
+     `authenticode_revocation_verdicts` (failed before),
+     `windows_signer_subject_must_match` (an offline staged check is refused
+     with and without the opt-out).
+195. **`fix(desktop)`: the macOS update requires a notarized Developer ID
+     Application signature** (5.0-gate review A, L7;
+     `runtime/ops/desktop_update/oscheck.rs`; 2.9.7-denext.4 through
+     3.0.0-denext.6). The staged bundle's explicit requirement (item 127's E-L4)
+     was `anchor apple generic and certificate leaf[subject.OU] = "<team>"`,
+     which any Apple-issued certificate of the team satisfies (an Apple
+     Development or a Mac App Store certificate too), and nothing asked for a
+     notarization ticket. It is now Apple's Developer ID requirement plus
+     `notarized`:
+     `anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = "<team>" and notarized`
+     (the Developer ID CA intermediate, the Developer ID Application leaf, the
+     team, a stapled or online notarization ticket). A release signed with a
+     Developer ID but not notarized no longer installs as an update; denext's
+     `--sign` notarizes. Checked by hand with `codesign --verify -R=` against a
+     notarized Developer ID app (passes), the same with another team, and a Mac
+     App Store app (both refused). Test: `team_requirement_names_the_team`
+     (failed before), `team_must_be_apple_anchored`.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
-169-174, 176, 178, 180, 182-184, 186, 187) are what the prebuilt `libdenort`
-carries. The CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` /
-`LAUFEY_APP_ID` into a packaged app's launchers) are in the branch too, but a
-stock CLI does not run them; denext's own launcher provides that environment.
+169-174, 176, 178, 180, 182-184, 186, 187, 193-195) are what the prebuilt
+`libdenort` carries. The CLI-side parts (for example writing
+`LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
+in the branch too, but a stock CLI does not run them; denext's own launcher
+provides that environment.
 
 The laufey backend hosts are built from
 [Brainwires/laufey](https://github.com/Brainwires/laufey) branch
@@ -7847,7 +7939,11 @@ other app tree placed in the staging directory, is checked again right before
 the swap as `stage()` checked it: the OS code signature against the running
 app's signer, the staged app's own version equal to the state's and newer than
 the installed one, and not a rejected version. So it can't be used to put an app
-the updater would refuse in place of a signed one.
+the updater would refuse in place of a signed one. The staging directory is
+private to the user (0700) and held open from that check to the swap, which
+renames from it; the staged app's digest is taken through it before the check
+and again right before the swap, so the tree that moves is the tree that was
+checked (item 193).
 
 ## Development switches
 
