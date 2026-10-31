@@ -655,6 +655,85 @@ function readFileMaybeDecode(
   return buffer;
 }
 
+// Node 26's `options.buffer` (`lib/internal/fs/utils.js`,
+// `validateReadFileBufferOptions`): a `Buffer`, `TypedArray` or `DataView` to
+// read the file into, or a function that takes the file size and returns one.
+function validateReadFileBufferOption(options: unknown) {
+  // deno-lint-ignore deno-internal/prefer-primordials
+  const buffer = (options as { buffer?: unknown } | null)?.buffer;
+  if (
+    buffer !== undefined && typeof buffer !== "function" &&
+    !isArrayBufferView(buffer)
+  ) {
+    throw new ERR_INVALID_ARG_TYPE(
+      "options.buffer",
+      ["Buffer", "TypedArray", "DataView", "Function"],
+      buffer,
+    );
+  }
+}
+
+// The file's bytes copied into the caller's `options.buffer`, returned as the
+// `Buffer` view of the part that holds them (Node's `getReadFileBuffer()`). A
+// buffer smaller than the file is `ERR_INVALID_ARG_VALUE`. The size passed to
+// a `buffer()` function is the length read, which is the file's size for a
+// regular file (Node passes `fstat`'s size, 0 for other files).
+function readFileIntoUserBuffer(
+  data: Uint8Array,
+  options: { buffer?: unknown },
+): Buffer {
+  const size = TypedArrayPrototypeGetByteLength(data);
+  // deno-lint-ignore deno-internal/prefer-primordials
+  let buffer = options.buffer;
+  const name = typeof buffer === "function"
+    ? "options.buffer().byteLength"
+    : "options.buffer.byteLength";
+  if (typeof buffer === "function") {
+    buffer = buffer(size);
+    if (!isArrayBufferView(buffer)) {
+      throw new ERR_INVALID_ARG_TYPE(
+        "options.buffer()",
+        ["Buffer", "TypedArray", "DataView"],
+        buffer,
+      );
+    }
+  }
+  const view = buffer as ArrayBufferView;
+  // deno-lint-ignore deno-internal/prefer-primordials
+  const target = Buffer.from(view.buffer, view.byteOffset, view.byteLength);
+  // deno-lint-ignore deno-internal/prefer-primordials
+  if (size > view.byteLength) {
+    throw new ERR_INVALID_ARG_VALUE(
+      name,
+      // deno-lint-ignore deno-internal/prefer-primordials
+      view.byteLength,
+      `is smaller than the file size of ${size} bytes`,
+    );
+  }
+  TypedArrayPrototypeSet(target, data);
+  return TypedArrayPrototypeSubarray(target, 0, size) as Buffer;
+}
+
+function readFileResult(
+  data: Uint8Array,
+  options: { buffer?: unknown; encoding?: Encodings | null } | undefined,
+): string | Buffer {
+  // Node refuses a file larger than `kIoMaxLength` (2 GiB - 1) before reading
+  // it (`lib/fs.js`, `tryCreateBuffer` / `readFileAfterStat`); the whole file
+  // is read here, so the check runs on its length.
+  const length = TypedArrayPrototypeGetByteLength(data);
+  if (length > kIoMaxLength) {
+    throw new ERR_FS_FILE_TOO_LARGE(length);
+  }
+  // deno-lint-ignore deno-internal/prefer-primordials
+  if (options?.buffer !== undefined) {
+    const buffer = readFileIntoUserBuffer(data, options);
+    // deno-lint-ignore deno-internal/prefer-primordials
+    return options.encoding ? buffer.toString(options.encoding) : buffer;
+  }
+  return readFileMaybeDecode(data, options?.encoding);
+}
+
 type ReadFileTextCallback = (err: Error | null, data?: string) => void;
 type ReadFileBinaryCallback = (err: Error | null, data?: Buffer) => void;
 type ReadFileGenericCallback = (
@@ -825,6 +904,7 @@ function readFile(
     optOrCallback,
     readFileDefaultOptions,
   );
+  validateReadFileBufferOption(options);
 
   let p: Promise<Uint8Array>;
   if (typeof pathOrRid === "string") {
@@ -837,8 +917,14 @@ function readFile(
     PromisePrototypeThen(
       p,
       (data: Uint8Array) => {
-        const textOrBuffer = readFileMaybeDecode(data, options?.encoding);
-        (cb as ReadFileBinaryCallback)(null, textOrBuffer);
+        let textOrBuffer;
+        try {
+          textOrBuffer = readFileResult(data, options);
+        } catch (err) {
+          (cb as ReadFileBinaryCallback)(err as Error);
+          return;
+        }
+        (cb as ReadFileBinaryCallback)(null, textOrBuffer as Buffer);
       },
       (err) =>
         cb &&
@@ -877,6 +963,7 @@ function readFileSync(
   opt?: FileOptionsArgument,
 ): string | Buffer {
   const options = getOptions<FileOptions>(opt, readFileDefaultOptions);
+  validateReadFileBufferOption(options);
 
   let data;
   if (typeof path === "number") {
@@ -892,8 +979,7 @@ function readFileSync(
       throw denoErrorToNodeError(err, { path, syscall: "open" });
     }
   }
-  const textOrBuffer = readFileMaybeDecode(data, options?.encoding);
-  return textOrBuffer;
+  return readFileResult(data, options);
 }
 
 // -- readlink --
@@ -1328,6 +1414,27 @@ function chmodSync(path: string | Buffer | URL, mode: string | number) {
   }
 }
 
+// A failed fs call's error as Node reports it: `CODE: description, syscall
+// 'path' -> 'dest'` with `errno`, `code`, `syscall`, `path` and `dest`
+// (`uvException`). An error that isn't an OS error is left as it is.
+function fsCallError(
+  err: unknown,
+  syscall: string,
+  path?: string,
+  dest?: string,
+): Error {
+  if (!ObjectPrototypeIsPrototypeOf(ErrorPrototype, err)) return err as Error;
+  return denoErrorToNodeError(err as Error, { syscall, path, dest });
+}
+
+function fsCallErrorCallback(
+  callback: CallbackWithError,
+  syscall: string,
+  path?: string,
+) {
+  return (err: unknown) => callback(fsCallError(err, syscall, path));
+}
+
 function chown(
   path: string | Buffer | URL,
   uid: number,
@@ -1343,7 +1450,7 @@ function chown(
   // deno-lint-ignore deno-internal/prefer-primordials
   Deno.chown(path, uid, gid).then(
     () => callback(null),
-    callback,
+    fsCallErrorCallback(callback, "chown", path as string),
   );
 }
 
@@ -1357,7 +1464,11 @@ function chownSync(
   validateInteger(uid, "uid", -1, kMaxUserId);
   validateInteger(gid, "gid", -1, kMaxUserId);
 
-  Deno.chownSync(path, uid, gid);
+  try {
+    Deno.chownSync(path, uid, gid);
+  } catch (err) {
+    throw fsCallError(err, "chown", path as string);
+  }
 }
 
 function defaultCloseCallback(err: Error | null) {
@@ -1384,7 +1495,7 @@ function close(
       op_node_fs_close(fd);
     } catch (err) {
       error = ObjectPrototypeIsPrototypeOf(ErrorPrototype, err)
-        ? err as Error
+        ? denoErrorToNodeError(err as Error, { syscall: "close" })
         : new Error("[non-error thrown]");
     }
     callback(error);
@@ -1393,7 +1504,16 @@ function close(
 
 function closeSync(fd: number) {
   fd = getValidatedFd(fd);
-  op_node_fs_close(fd);
+  try {
+    op_node_fs_close(fd);
+  } catch (err) {
+    // Node's `EBADF: bad file descriptor, close` with `errno`, `code` and
+    // `syscall`.
+    if (ObjectPrototypeIsPrototypeOf(ErrorPrototype, err)) {
+      throw denoErrorToNodeError(err as Error, { syscall: "close" });
+    }
+    throw err;
+  }
 }
 
 function fchown(
@@ -1410,7 +1530,7 @@ function fchown(
   PromisePrototypeThen(
     op_node_fs_fchown(fd, uid, gid),
     () => callback(null),
-    callback,
+    fsCallErrorCallback(callback, "fchown"),
   );
 }
 
@@ -1426,7 +1546,7 @@ function fchmod(
   PromisePrototypeThen(
     op_node_fs_fchmod(fd, mode),
     () => callback(null),
-    callback,
+    fsCallErrorCallback(callback, "fchmod"),
   );
 }
 
@@ -1439,7 +1559,11 @@ function fchownSync(
   validateInteger(uid, "uid", -1, kMaxUserId);
   validateInteger(gid, "gid", -1, kMaxUserId);
 
-  op_node_fs_fchown_sync(fd, uid, gid);
+  try {
+    op_node_fs_fchown_sync(fd, uid, gid);
+  } catch (err) {
+    throw fsCallError(err, "fchown");
+  }
 }
 
 function ftruncate(
@@ -1468,7 +1592,7 @@ function ftruncate(
   PromisePrototypeThen(
     op_node_fs_ftruncate(fd, len),
     () => callback(null),
-    callback,
+    fsCallErrorCallback(callback, "ftruncate"),
   );
 }
 
@@ -1477,7 +1601,11 @@ function ftruncateSync(fd: number, len: number = 0) {
     throw new ERR_INVALID_ARG_TYPE("fd", "number", fd);
   }
   validateInteger(len, "len");
-  op_node_fs_ftruncate_sync(fd, MathMax(0, len));
+  try {
+    op_node_fs_ftruncate_sync(fd, MathMax(0, len));
+  } catch (err) {
+    throw fsCallError(err, "ftruncate");
+  }
 }
 
 function _getValidTime(
@@ -1529,14 +1657,18 @@ function futimes(
   PromisePrototypeThen(
     op_node_fs_futimes(fd, atimeSecs, atimeNanos, mtimeSecs, mtimeNanos),
     () => callback(null),
-    callback,
+    fsCallErrorCallback(callback, "futime"),
   );
 }
 
 function fchmodSync(fd: number, mode: string | number) {
   validateInteger(fd, "fd", 0, 2147483647);
 
-  op_node_fs_fchmod_sync(fd, parseFileMode(mode, "mode"));
+  try {
+    op_node_fs_fchmod_sync(fd, parseFileMode(mode, "mode"));
+  } catch (err) {
+    throw fsCallError(err, "fchmod");
+  }
 }
 
 function fdatasync(
@@ -1547,7 +1679,7 @@ function fdatasync(
   PromisePrototypeThen(
     op_node_fs_fdatasync(fd),
     () => callback(null),
-    callback,
+    fsCallErrorCallback(callback, "fdatasync"),
   );
 }
 
@@ -1573,7 +1705,11 @@ function futimesSync(
   const mtimeNanos = MathTrunc(
     ((mtime as number) - mtimeSecs) * 1e9,
   );
-  op_node_fs_futimes_sync(fd, atimeSecs, atimeNanos, mtimeSecs, mtimeNanos);
+  try {
+    op_node_fs_futimes_sync(fd, atimeSecs, atimeNanos, mtimeSecs, mtimeNanos);
+  } catch (err) {
+    throw fsCallError(err, "futime");
+  }
 }
 
 const lchmod:
@@ -1631,7 +1767,11 @@ function lchown(
 
 function fdatasyncSync(fd: number) {
   validateInt32(fd, "fd", 0);
-  op_node_fs_fdatasync_sync(fd);
+  try {
+    op_node_fs_fdatasync_sync(fd);
+  } catch (err) {
+    throw fsCallError(err, "fdatasync");
+  }
 }
 
 function fsync(
@@ -1642,7 +1782,7 @@ function fsync(
   PromisePrototypeThen(
     op_node_fs_fsync(fd),
     () => callback(null),
-    callback,
+    fsCallErrorCallback(callback, "fsync"),
   );
 }
 
@@ -1660,7 +1800,11 @@ function lchownSync(
 
 function fsyncSync(fd: number) {
   validateInt32(fd, "fd", 0);
-  op_node_fs_fsync_sync(fd);
+  try {
+    op_node_fs_fsync_sync(fd);
+  } catch (err) {
+    throw fsCallError(err, "fsync");
+  }
 }
 
 function link(
@@ -2428,11 +2572,15 @@ function writeSync(
   ) => {
     buffer = arrayBufferViewToUint8Array(buffer);
     const pos = typeof position === "number" && position >= 0 ? position : -1;
-    return op_node_fs_write_sync(
-      fd,
-      (buffer as Uint8Array).subarray(offset, offset + length),
-      pos,
-    );
+    try {
+      return op_node_fs_write_sync(
+        fd,
+        (buffer as Uint8Array).subarray(offset, offset + length),
+        pos,
+      );
+    } catch (err) {
+      throw fsCallError(err, "write");
+    }
   };
 
   let offset = offsetOrOptions;
@@ -2528,7 +2676,7 @@ function write(
       (nwritten) => {
         callback!(null, nwritten, buffer);
       },
-      (err) => callback!(err),
+      (err) => callback!(fsCallError(err, "write")),
     );
     return;
   }
@@ -2558,7 +2706,7 @@ function write(
     (nwritten) => {
       callback(null, nwritten, buffer);
     },
-    (err) => callback(err),
+    (err) => callback(fsCallError(err, "write")),
   );
 }
 
@@ -3124,7 +3272,7 @@ function utimes(
   PromisePrototypeThen(
     Deno.utime(path, atime, mtime),
     () => callback(null),
-    callback,
+    fsCallErrorCallback(callback, "utime", path as string),
   );
 }
 
@@ -3138,7 +3286,11 @@ function utimesSync(
   atime = getValidTime(atime, "atime");
   mtime = getValidTime(mtime, "mtime");
 
-  Deno.utimeSync(path, atime, mtime);
+  try {
+    Deno.utimeSync(path, atime, mtime);
+  } catch (err) {
+    throw fsCallError(err, "utime", path as string);
+  }
 }
 
 // -- symlink --
@@ -3191,7 +3343,8 @@ function symlink(
             { type: resolvedType },
           ),
           () => callback(null),
-          callback,
+          (err) =>
+            callback(symlinkError(err, target as string, path as string)),
         );
       });
       return;
@@ -3205,8 +3358,15 @@ function symlink(
       { type: linkType ?? "file" },
     ),
     () => callback(null),
-    callback,
+    (err) => callback(symlinkError(err, target as string, path as string)),
   );
+}
+
+// Node's symlink errors carry the target as `path` and the link as `dest`
+// (`lib/fs.js` symlink, `src/node_file.cc` Symlink: `EEXIST: file already
+// exists, symlink '<target>' -> '<path>'`).
+function symlinkError(err: unknown, target: string, path: string): Error {
+  return fsCallError(err, "symlink", target, path);
 }
 
 function symlinkSync(
@@ -3228,7 +3388,11 @@ function symlinkSync(
     }
   }
 
-  Deno.symlinkSync(target, path, { type: type ?? "file" });
+  try {
+    Deno.symlinkSync(target, path, { type: type ?? "file" });
+  } catch (err) {
+    throw symlinkError(err, target as string, path as string);
+  }
 }
 
 // -- watch --

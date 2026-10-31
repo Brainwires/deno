@@ -1666,12 +1666,17 @@ fn catch_dynamic_import_promise_error<'s, 'i>(
       };
       // V8 module linking errors (e.g. a missing named export) are
       // spec-defined `SyntaxError`s and must not carry a host-defined `code`.
-      // Only genuine resolution/loading failures get `ERR_MODULE_NOT_FOUND`.
+      // Only genuine resolution/loading failures get `ERR_MODULE_NOT_FOUND`;
+      // a failure that already has a Node error code (a module resolve hook's
+      // `ERR_PACKAGE_PATH_NOT_EXPORTED`, `ERR_INVALID_ARG_VALUE`, ...) keeps it.
       if name.as_str() != deno_error::builtin_classes::SYNTAX_ERROR {
         let code_key = CODE.v8_string(scope).unwrap();
-        let code_value = ERR_MODULE_NOT_FOUND.v8_string(scope).unwrap();
+        let code_value = match arg.get(scope, code_key.into()) {
+          Some(code) if code.is_string() => code,
+          _ => ERR_MODULE_NOT_FOUND.v8_string(scope).unwrap().into(),
+        };
         let exception_obj = exception.to_object(scope).unwrap();
-        exception_obj.set(scope, code_key.into(), code_value.into());
+        exception_obj.set(scope, code_key.into(), code_value);
       }
       scope.throw_exception(exception);
       return;

@@ -258,6 +258,21 @@
     },
     "module-hooks/test-module-hooks-builtin-require.js": {},
     "module-hooks/test-module-hooks-create-require-with-url.mjs": {},
+    "module-hooks/test-module-hooks-custom-conditions.mjs": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build) with the fork's node_compat round 4 changes; not verified on macOS or Windows"
+    },
+    "module-hooks/test-module-hooks-custom-conditions-cjs.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build) with the fork's node_compat round 4 changes; not verified on macOS or Windows"
+    },
+    "module-hooks/test-module-hooks-custom-conditions-special-values.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build) with the fork's node_compat round 4 changes; not verified on macOS or Windows"
+    },
     "module-hooks/test-module-hooks-load-context-merged-esm.mjs": {},
     "module-hooks/test-module-hooks-load-chained.js": {},
     "module-hooks/test-module-hooks-load-builtin-require.js": {},
@@ -1554,6 +1569,11 @@
     "parallel/test-fs-empty-readStream.js": {},
     "parallel/test-fs-exists.js": {},
     "parallel/test-fs-existssync-false.js": {},
+    "parallel/test-fs-error-messages.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build) with the fork's node_compat round 4 changes; not verified on macOS or Windows"
+    },
     "parallel/test-fs-fchmod.js": {},
     "parallel/test-fs-fchown-negative-one.js": {
       "windows": false,
@@ -1630,6 +1650,11 @@
     "parallel/test-fs-promises-mkdtempDisposable.js": {},
     "parallel/test-fs-promises-readfile-empty.js": {},
     "parallel/test-fs-promises-readfile-with-fd.js": {},
+    "parallel/test-fs-promises-readfile-buffer-option.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build) with the fork's node_compat round 4 changes; not verified on macOS or Windows"
+    },
     "parallel/test-fs-promises-statfs-validate-path.js": {},
     "parallel/test-fs-promises-watch-ignore-function.mjs": {},
     "parallel/test-fs-promises-watch-ignore-glob.mjs": {},
@@ -1736,6 +1761,11 @@
       "reason": "Unix-specific test (chown/symlink/mode)"
     },
     "parallel/test-fs-symlink.js": {},
+    "parallel/test-fs-syncwritestream.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build) with the fork's node_compat round 4 changes; not verified on macOS or Windows"
+    },
     "parallel/test-fs-timestamp-parsing-error.js": {},
     "parallel/test-fs-truncate-clear-file-zero.js": {},
     "parallel/test-fs-truncate-sync.js": {},
@@ -1796,10 +1826,20 @@
     "parallel/test-fs-write-stream-fs.js": {},
     "parallel/test-fs-write-stream-patch-open.js": {},
     "parallel/test-fs-write-stream-throw-type-error.js": {},
+    "parallel/test-fs-write-stream-autoclose-option.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build) with the fork's node_compat round 4 changes; not verified on macOS or Windows"
+    },
     "parallel/test-fs-write-stream.js": {},
     "parallel/test-fs-write-sync-optional-params.js": {},
     "parallel/test-fs-write-sync.js": {},
     "parallel/test-fs-writestream-open-write.js": {},
+    "parallel/test-fs-writesync-crash.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build) with the fork's node_compat round 4 changes; not verified on macOS or Windows"
+    },
     "parallel/test-fs-writev.js": {},
     "parallel/test-fs-writev-promises.js": {},
     "parallel/test-fs-writev-sync.js": {},
@@ -4148,6 +4188,11 @@
     },
     "parallel/test-util.js": {},
     "parallel/test-uv-binding-constant.js": {},
+    "parallel/test-uv-errmap.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build) with the fork's node_compat round 4 changes; not verified on macOS or Windows"
+    },
     "parallel/test-v8-collect-gc-profile.js": {},
     "parallel/test-v8-collect-gc-profile-exit-before-stop.js": {},
     "parallel/test-v8-collect-gc-profile-in-worker.js": {},
@@ -5293,6 +5338,11 @@
       "linux": false,
       "darwin": false,
       "reason": "Command failed"
+    },
+    "parallel/test-fs-readfile-buffer-option.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build) with the fork's node_compat round 4 changes; not verified on macOS or Windows"
     },
     "parallel/test-fs-realpath-on-substed-drive.js": {
       "windows": false,

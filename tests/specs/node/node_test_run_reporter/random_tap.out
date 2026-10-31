@@ -1,0 +1,90 @@
+TAP version 13
+# Subtest: parent
+    # Subtest: z
+    ok 3 - z
+      ---
+      duration_ms: [WILDLINE]
+      type: 'test'
+      ...
+    # Subtest: x
+    ok 1 - x
+      ---
+      duration_ms: [WILDLINE]
+      type: 'test'
+      ...
+    # Subtest: y
+    ok 2 - y
+      ---
+      duration_ms: [WILDLINE]
+      type: 'test'
+      ...
+    1..3
+ok 7 - parent
+  ---
+  duration_ms: [WILDLINE]
+  type: 'test'
+  ...
+# Subtest: b
+ok 2 - b
+  ---
+  duration_ms: [WILDLINE]
+  type: 'test'
+  ...
+# Subtest: d
+ok 4 - d
+  ---
+  duration_ms: [WILDLINE]
+  type: 'test'
+  ...
+# Subtest: suite
+    # Subtest: 3
+    ok 3 - 3
+      ---
+      duration_ms: [WILDLINE]
+      type: 'test'
+      ...
+    # Subtest: 1
+    ok 1 - 1
+      ---
+      duration_ms: [WILDLINE]
+      type: 'test'
+      ...
+    # Subtest: 2
+    ok 2 - 2
+      ---
+      duration_ms: [WILDLINE]
+      type: 'test'
+      ...
+    1..3
+ok 6 - suite
+  ---
+  duration_ms: [WILDLINE]
+  type: 'suite'
+  ...
+# Subtest: c
+ok 3 - c
+  ---
+  duration_ms: [WILDLINE]
+  type: 'test'
+  ...
+# Subtest: a
+ok 1 - a
+  ---
+  duration_ms: [WILDLINE]
+  type: 'test'
+  ...
+# Subtest: e
+ok 5 - e
+  ---
+  duration_ms: [WILDLINE]
+  type: 'test'
+  ...
+1..7
+# tests 12
+# suites 1
+# pass 12
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms [WILDLINE]

@@ -75,7 +75,12 @@ const { MIMEParams, MIMEType } = core.loadExtScript(
   "ext:deno_node/internal/mime.ts",
 );
 const abortSignal = core.loadExtScript("ext:deno_web/03_abort_signal.js");
-const { ERR_INVALID_ARG_TYPE, ERR_WORKER_UNSUPPORTED_OPERATION } = core
+const {
+  ERR_INVALID_ARG_TYPE,
+  ERR_WORKER_UNSUPPORTED_OPERATION,
+  errnoException,
+  exceptionWithHostPort,
+} = core
   .loadExtScript(
     "ext:deno_node/internal/errors.ts",
   );
@@ -463,5 +468,9 @@ return {
   getSystemErrorMessage,
   getSystemErrorName,
   isDeepStrictEqual,
+  // Node's undocumented `util._errnoException()` /
+  // `util._exceptionWithHostPort()` (`lib/util.js`).
+  _errnoException: errnoException,
+  _exceptionWithHostPort: exceptionWithHostPort,
 };
 })();

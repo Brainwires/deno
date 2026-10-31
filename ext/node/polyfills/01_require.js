@@ -544,6 +544,37 @@ let utf8Decoder;
 let esmLoadLoopRunning = false;
 const requireResolveOptionsMarker = Symbol("require.resolve");
 const kSourceURL = Symbol("kSourceURL");
+// The conditions a resolve hook set on `context.conditions`, carried from the
+// terminal `nextResolve` into `Module._resolveFilename()`'s options.
+const kHookConditions = Symbol("kHookConditions");
+const kHookConditionsImport = Symbol("kHookConditionsImport");
+
+// The conditions a resolve hook left on its context, for the default resolve:
+// `undefined` (or the untouched defaults) keeps the defaults, an array
+// replaces them (Node's `defaultResolve` in `lib/internal/modules/cjs/loader.js`
+// and `lib/internal/modules/esm/hooks.js`), anything else is an error.
+function hookConditions(conditions, defaultConditions) {
+  if (conditions === undefined || conditions === defaultConditions) {
+    return undefined;
+  }
+  if (!ArrayIsArray(conditions)) {
+    throw new internalErrors.ERR_INVALID_ARG_VALUE(
+      "context.conditions",
+      conditions,
+      "expected an array",
+    );
+  }
+  const result = [];
+  let same = conditions.length === defaultConditions?.length;
+  for (let i = 0; i < conditions.length; i++) {
+    const condition = String(conditions[i]);
+    if (same && condition !== defaultConditions[i]) same = false;
+    ArrayPrototypePush(result, condition);
+  }
+  // A copy of the defaults (a hook's `{ ...context }`, or an off-thread
+  // `module.register()` hook's cloned context) keeps the default resolver.
+  return same ? undefined : result;
+}
 
 function executeResolveHookChain(specifier, context, parent, isMain, options) {
   // Collect resolve hooks from hookEntries in LIFO order
@@ -558,6 +589,7 @@ function executeResolveHookChain(specifier, context, parent, isMain, options) {
   let index = 0;
   // Running context accumulates changes across the chain
   let currentContext = context;
+  const defaultConditions = context.conditions;
 
   function nextResolve(spec, ctx) {
     // If ctx provided, merge into running context
@@ -566,6 +598,10 @@ function executeResolveHookChain(specifier, context, parent, isMain, options) {
     }
 
     if (index >= resolveHooks.length) {
+      const conditions = hookConditions(
+        currentContext.conditions,
+        defaultConditions,
+      );
       // Default resolve: use Module._resolveFilename
       insideResolveHook = true;
       try {
@@ -580,7 +616,9 @@ function executeResolveHookChain(specifier, context, parent, isMain, options) {
           spec,
           parent,
           isMain,
-          options,
+          conditions === undefined
+            ? options
+            : { ...options, [kHookConditions]: conditions },
         );
         let resolvedUrl;
         if (StringPrototypeStartsWith(resolved, "node:")) {
@@ -723,6 +761,7 @@ function executeEsmResolveHookChain(specifier, context) {
 
   let index = 0;
   let currentContext = context;
+  const defaultConditions = context.conditions;
 
   function nextResolve(spec, ctx) {
     if (ctx !== undefined && ctx !== null) {
@@ -731,6 +770,20 @@ function executeEsmResolveHookChain(specifier, context) {
     if (index >= resolveHooks.length) {
       if (StringPrototypeStartsWith(spec, "node:")) {
         return { url: spec, shortCircuit: true };
+      }
+      const conditions = hookConditions(
+        currentContext.conditions,
+        defaultConditions,
+      );
+      if (conditions !== undefined) {
+        const resolved = esmResolveWithConditions(
+          spec,
+          currentContext.parentURL,
+          conditions,
+        );
+        if (resolved !== undefined) {
+          return { url: resolved, shortCircuit: true };
+        }
       }
       insideResolveHook = true;
       try {
@@ -771,6 +824,46 @@ function executeEsmResolveHookChain(specifier, context) {
   return nextResolve(specifier, context);
 }
 
+// A bare package specifier imported from a file, resolved through the
+// package's `exports` with a resolve hook's conditions. Deno's ESM resolver
+// takes its conditions from the process, so the package lookup runs on the
+// CommonJS resolver in import mode, which walks the same `node_modules` and
+// `exports`. Anything else (relative, absolute, a URL, `#imports`) has no
+// conditions to apply and returns `undefined` for the default resolver.
+function esmResolveWithConditions(specifier, parentURL, conditions) {
+  if (
+    typeof parentURL !== "string" ||
+    !StringPrototypeStartsWith(parentURL, "file:") ||
+    specifier[0] === "#" ||
+    nativeModuleCanBeRequiredByUsers(specifier) ||
+    !RegExpPrototypeTest(EXPORTS_PATTERN, specifier) ||
+    RegExpPrototypeTest(RE_URL_SCHEME, specifier)
+  ) {
+    return undefined;
+  }
+  const parentPath = url.fileURLToPath(parentURL);
+  const fakeParent = new Module(parentPath, null);
+  fakeParent.filename = parentPath;
+  fakeParent.paths = Module._nodeModulePaths(pathDirname(parentPath));
+  const wasInsideResolveHook = insideResolveHook;
+  insideResolveHook = true;
+  try {
+    const resolved = Module._resolveFilename(specifier, fakeParent, false, {
+      [kHookConditions]: conditions,
+      [kHookConditionsImport]: true,
+    });
+    if (!isAbsolute(resolved)) return undefined;
+    return url.pathToFileURL(resolved).href;
+  } catch (e) {
+    // Not in a `node_modules` directory (an import map entry, an `npm:`
+    // package in the global cache): the default resolver has it.
+    if (e?.code === "MODULE_NOT_FOUND") return undefined;
+    throw e;
+  } finally {
+    insideResolveHook = wasInsideResolveHook;
+  }
+}
+
 function esmResolveHookCallback(specifier, referrer, importAttributes) {
   const attrs = { __proto__: null };
   if (importAttributes !== null && typeof importAttributes === "object") {
@@ -787,6 +880,16 @@ function esmResolveHookCallback(specifier, referrer, importAttributes) {
     const result = executeEsmResolveHookChain(specifier, context);
     return result?.url ?? null;
   } catch (e) {
+    // A Node error keeps its class and `code` through the import's rejection
+    // (`ERR_PACKAGE_PATH_NOT_EXPORTED`, `ERR_INVALID_ARG_VALUE`, ...).
+    if (typeof e?.code === "string" && typeof e?.message === "string") {
+      return {
+        error: String(e),
+        code: e.code,
+        name: e.name,
+        message: e.message,
+      };
+    }
     return { error: String(e) };
   }
 }
@@ -1255,6 +1358,8 @@ function resolveExports(
   request,
   parentPath,
   usesLocalNodeModulesDir,
+  conditions,
+  isImport,
 ) {
   // The implementation's behavior is meant to mirror resolution in ESM.
   const [, name, expansion = ""] =
@@ -1270,10 +1375,23 @@ function resolveExports(
     name,
     expansion,
     parentPath ?? "",
+    conditions ?? null,
+    !!isImport,
   ) ?? false;
 }
 
-Module._findPath = function (request, paths, isMain, parentPath) {
+// `conditions` (an array) replaces the default `require` conditions for
+// package `exports`, as a resolve hook's `context.conditions` does in Node;
+// `isImport` resolves them in import mode (an `import` reaching the terminal
+// `nextResolve` with custom conditions).
+Module._findPath = function (
+  request,
+  paths,
+  isMain,
+  parentPath,
+  conditions,
+  isImport,
+) {
   const absoluteRequest = op_require_path_is_absolute(request);
   if (absoluteRequest) {
     paths = [""];
@@ -1281,7 +1399,11 @@ Module._findPath = function (request, paths, isMain, parentPath) {
     return false;
   }
 
-  const cacheKey = request + "\x00" + ArrayPrototypeJoin(paths, "\x00");
+  let cacheKey = request + "\x00" + ArrayPrototypeJoin(paths, "\x00");
+  if (conditions != null) {
+    cacheKey += "\x00" + (isImport ? "import" : "require") + "\x00" +
+      ArrayPrototypeJoin(conditions, "\x00");
+  }
   const entry = Module._pathCache[cacheKey];
   if (entry) {
     return entry;
@@ -1307,6 +1429,8 @@ Module._findPath = function (request, paths, isMain, parentPath) {
         request,
         parentPath,
         usesLocalNodeModulesDir,
+        conditions,
+        isImport,
       );
       if (exportsResolved) {
         return exportsResolved;
@@ -1871,6 +1995,8 @@ Module._resolveFilename = function (
     paths,
     isMain,
     parentPath,
+    options?.[kHookConditions],
+    options?.[kHookConditionsImport],
   );
   if (filename) {
     return op_require_real_path(filename);

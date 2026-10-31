@@ -245,6 +245,23 @@ impl CoreErrorKind {
 
     let exception =
       js_class_and_message_to_exception(scope, &self.get_class(), &message);
+    // Keep a Node error `code` the error carries (a module resolve hook's
+    // `ERR_PACKAGE_PATH_NOT_EXPORTED`, say) on the exception, so a rejected
+    // dynamic import reports it rather than a generic one.
+    if let Ok(exception_obj) =
+      TryInto::<v8::Local<v8::Object>>::try_into(exception)
+    {
+      for (key, value) in self.get_additional_properties() {
+        if key != "code" {
+          continue;
+        }
+        if let PropertyValue::String(value) = value {
+          let key = v8::String::new(scope, &key).unwrap();
+          let value = v8::String::new(scope, &value).unwrap();
+          exception_obj.set(scope, key.into(), value.into());
+        }
+      }
+    }
     v8::Global::new(scope, exception)
   }
 }

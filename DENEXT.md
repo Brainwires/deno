@@ -7740,13 +7740,160 @@ where the changes are discussed.
      `check::npm_compat_outside_project`, and
      `check::check_node_builtin_modules`'s expected `@types/node` path.
 
+188. **`fix(core)`: a safe collection built from another collection copies it
+     instead of hanging** (`feat/node-compat-round4`, runtime;
+     `libs/core/00_primordials.js`). `SafeSet`, `SafeMap`, `SafeWeakSet` and
+     `SafeWeakMap` read their constructor's argument through
+     `SafeArrayIterator`, by index up to `length`. A `Set` or `Map` has no
+     `length`, so the loop never ended: `new SafeSet(otherSet)` added
+     `undefined` forever (the hang round 3 noted), and `new SafeMap(otherMap)`
+     threw `Iterator value undefined is not an entry object` (the telemetry
+     `TraceState` copy, `ext/telemetry/telemetry.ts`). An array-like (an array,
+     a typed array, `arguments`, a string) is still read by index, so a
+     user-patched `%ArrayIteratorPrototype%.next` is never called; any other
+     iterable is passed to `super()` and read by its own iterator, as Node's
+     primordials do (`lib/internal/per_context/primordials.js`). Test:
+     `libs/core_testing/unit/primordials_test.ts` (copies of a `Set`, a `Map`, a
+     safe collection, typed arrays, strings and generators; the patched array
+     iterator; a non-iterable throws).
+
+189. **`fix(ext/node, core)`: a module resolve hook's `context.conditions`
+     reaches the default resolver** (`feat/node-compat-round4`, runtime;
+     `ext/node/polyfills/01_require.js`, `ext/node/ops/require.rs`,
+     `ext/node/ops/module_hooks.rs`, `libs/core/error.rs`,
+     `libs/core/runtime/bindings.rs`). A `module.registerHooks()` resolve hook
+     that changed `context.conditions` and called `nextResolve()` resolved with
+     the default conditions all the same, for `require()` and for `import`. As
+     Node 26.5.1's `defaultResolve` (`lib/internal/modules/cjs/loader.js`,
+     `lib/internal/modules/esm/hooks.js`): an array replaces the default
+     conditions (`default` still matches), `undefined` or a copy of the defaults
+     keeps them, anything else is `ERR_INVALID_ARG_VALUE` ("The property
+     'context.conditions' expected an array"). For `require()` the conditions
+     ride in `Module._resolveFilename()`'s options to `Module._findPath()` (its
+     cache key includes them) and `op_require_resolve_exports`, which takes an
+     optional condition list and the resolution mode. For `import`, a bare
+     package specifier from a `file:` module is resolved through the CommonJS
+     resolver in import mode, which walks the same `node_modules` and package
+     `exports`; Deno's ESM resolver takes its conditions from the process, and a
+     package it alone can find (an import map entry, an `npm:` package in the
+     global cache, a builtin) still goes to it. A hook's coded error now keeps
+     its class and `code` through the `import()` rejection: the ESM hook
+     callback passes `code` / `name` / `message` to Rust, which throws a
+     `HookResolveError` carrying the `code` property, `CoreErrorKind`'s
+     exception keeps a string `code` its error carries, and the dynamic import
+     catch keeps an existing `code` instead of always setting
+     `ERR_MODULE_NOT_FOUND` (the errors of Deno's own resolver carry none, so an
+     unhooked failed `import()` still reports `ERR_MODULE_NOT_FOUND`, as the
+     `run/error_014_catch_dynamic_import_error` and
+     `run/dynamic_import_linking_error_code` specs check). Left open:
+     `--experimental-loader` in `NODE_OPTIONS` registers no hook
+     (`es-module/test-esm-loader-custom-condition.mjs`), and the node_compat
+     runner does not pass the flag. Tests: node_compat
+     `module-hooks/test-module-hooks-custom-conditions.mjs`, `-cjs.js` and
+     `-special-values.js` enabled.
+
+190. **`fix(ext/node)`: the `node:fs` long tail, round 4**
+     (`feat/node-compat-round4`, runtime; `ext/node/polyfills/fs.ts`,
+     `_fs/_fs_copy.ts`, `internal/fs/streams.mjs`, `_process/streams.mjs`,
+     `internal_binding/uv.ts`, `util.ts`):
+     - `readFile()`, `readFileSync()`, `fs.promises.readFile()` and
+       `FileHandle#readFile()` take Node 26's `options.buffer`: a `Buffer`,
+       `TypedArray` or `DataView` to read into, or a function of the file size
+       that returns one (`lib/internal/fs/utils.js`, `getReadFileBuffer`). The
+       result is the part of that buffer holding the file (decoded with
+       `encoding` if given); a buffer smaller than the file is
+       `ERR_INVALID_ARG_VALUE`, another type `ERR_INVALID_ARG_TYPE`. The file is
+       read whole and copied in, so the size given to the function is the length
+       read (Node passes `fstat`'s, 0 for a non-regular file).
+     - A file longer than `kIoMaxLength` (2 GiB - 1) is `ERR_FS_FILE_TOO_LARGE`
+       (a `RangeError`) from `readFile` / `readFileSync`, as in Node; the check
+       runs on the length read, so such a file is still read first.
+     - Errors are Node's (`CODE: description, syscall 'path' -> 'dest'` with
+       `errno`, `code`, `syscall`, `path`, `dest`) from `close` / `closeSync`,
+       `fchmod`, `fchown`, `ftruncate`, `fdatasync`, `fsync`, `futimes`
+       (`futime`), `write` / `writeSync` (buffer and string), `chown`, `utimes`
+       (`utime`), `symlink` (the target as `path`, the link as `dest`) and
+       `copyFile` (`copyfile`, the source as `path`; with `COPYFILE_EXCL` a
+       missing source is `ENOENT` before an existing destination is `EEXIST`),
+       sync and callback forms. They were Deno's
+       `Bad file descriptor (os error 9)` with no `errno` or `syscall`. Setting
+       `errno` now goes through `uvException`, so a throwing
+       `Object.prototype.errno` setter reaches the caller as in Node
+       (`test-fs-writesync-crash.js`).
+     - `fs.ReadStream.prototype.autoClose` /
+       `fs.WriteStream.prototype.autoClose` read off anything but a stream are
+       `ERR_INVALID_THIS` (`validateThisInternalField`), not a `TypeError` on
+       `_writableState`.
+     - `process.stdout` / `process.stderr` on a file or a pipe have `readable`
+       `false`, as Node's `SyncWriteStream` and its `readable: false`
+       `net.Socket`.
+     - `internalBinding('uv')` has a `UV_<code>` constant for every libuv error
+       (`src/uv.cc`), not only the eleven the polyfills used, and `node:util`
+       exports Node's undocumented `_errnoException` and
+       `_exceptionWithHostPort`. Tests: node_compat
+       `parallel/test-fs-readfile-buffer-option.js`,
+       `-fs-promises-readfile-buffer-option.js`, `-fs-error-messages.js`,
+       `-fs-writesync-crash.js`, `-fs-write-stream-autoclose-option.js`,
+       `-fs-syncwritestream.js` and `-uv-errmap.js` enabled; unit
+       `tests/unit_node/fs_test.ts` ("readFile reads into options.buffer",
+       "symlink errors carry path and dest", "WriteStream.prototype.autoClose
+       needs an instance") and `process_test.ts` ("process.stdout and
+       process.stderr are not readable", off a terminal).
+
+191. **`feat(ext/node)`: `node:test`'s `junit` reporter and `--test-randomize` /
+     `--test-random-seed`** (`feat/node-compat-round4`, runtime;
+     `ext/node/polyfills/testing.ts`, `libs/node_shim/lib.rs`). Outside
+     `deno test` (item 170's runner):
+     - `--test-reporter=junit` writes Node 26.5.1's document
+       (`lib/internal/test_runner/reporter/junit.js`) once the run is done: a
+       test with subtests is a `<testsuite>` (`tests`, `failures`, `skipped`,
+       `timestamp`, `hostname`), any other a `<testcase>` with `classname`
+       `test` and its `file`, `<skipped>` for skip / todo, `<failure>` with the
+       failure type, message and the inspected error; diagnostics and the
+       summary are XML comments; Node's escaping.
+     - `--test-random-seed=<uint32>` (or `--test-randomize`, which draws a seed)
+       runs the root's, every suite's and every test's subtests in Node's random
+       order: each parent dequeues with its own Mulberry32 generator seeded with
+       the run's seed (`createSeededGenerator`, `Test#dequeuePendingSubtest`),
+       and a test's `t.test()` subtests wait a microtask so the siblings created
+       in one synchronous turn are all eligible for the first pick. TAP numbers
+       stay the declaration order (Node's `childNumber`). The node shim takes
+       both flags and forwards them in `NODE_OPTIONS`. Left open (no node_compat
+       test passes with these alone): `node --test` still runs `deno test`, so
+       the multi-file orchestration Node's `randomize_*` /
+       `test-runner-cli-randomize.js` fixtures and
+       `run({
+     files, randomSeed })` use is missing, as is the run's
+       `Randomized test
+     order seed: N` diagnostic that only that
+       orchestration prints; coverage (`--experimental-test-coverage`, the
+       `lcov` reporter and the coverage table) needs V8 coverage collected
+       in-process and Node's line accounting; the junit fixture
+       (`test-output-junit-reporter.mjs`) also needs item 170's open stack-frame
+       folding. Tests: the spec `node/node_test_run_reporter` gains `junit` and
+       `random_seed` (Node 26.13's output for seed 12345, which orders as
+       26.5.1); the shim unit test
+       `test_randomize_and_seed_ride_along_in_node_options`.
+
+192. **`test(node_compat)`: 10 tests the node_compat round 4 fixes pass**
+     (`feat/node-compat-round4`, test config only;
+     `tests/node_compat/config.jsonc`). Each passed three isolated runs on a
+     Linux x86_64 debug build and is on for Linux only, with that reason, until
+     checked on macOS and Windows:
+     `module-hooks/test-module-hooks-custom-conditions.mjs`, `-cjs.js`,
+     `-special-values.js`; `parallel/test-fs-error-messages.js`,
+     `-fs-promises-readfile-buffer-option.js`, `-fs-readfile-buffer-option.js`,
+     `-fs-syncwritestream.js`, `-fs-write-stream-autoclose-option.js`,
+     `-fs-writesync-crash.js`, `-uv-errmap.js`.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
-169-174, 176, 178, 180, 182-184, 186, 187) are what the prebuilt `libdenort`
-carries. The CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` /
-`LAUFEY_APP_ID` into a packaged app's launchers) are in the branch too, but a
-stock CLI does not run them; denext's own launcher provides that environment.
+169-174, 176, 178, 180, 182-184, 186, 187, 191-194) are what the prebuilt
+`libdenort` carries. The CLI-side parts (for example writing
+`LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
+in the branch too, but a stock CLI does not run them; denext's own launcher
+provides that environment.
 
 The laufey backend hosts are built from
 [Brainwires/laufey](https://github.com/Brainwires/laufey) branch

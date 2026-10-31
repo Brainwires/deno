@@ -435,6 +435,15 @@
   };
   primordials.makeSafe = makeSafe;
 
+  // What a safe collection's constructor iterates. An array-like (an array, a
+  // typed array, `arguments`) is read by index, so a user-patched
+  // `%ArrayIteratorPrototype%.next` is never called. Any other iterable (a
+  // `Set`, a `Map`, another safe collection, a generator) is iterated by its own
+  // iterator, as Node's primordials pass it to `super()`: read by index, its
+  // missing `length` never ended the loop, and `new SafeSet(otherSet)` hung.
+  const safeCollectionSource = (i) =>
+    typeof i.length === "number" ? new SafeArrayIterator(i) : i;
+
   // Subclass the constructors because we need to use their prototype
   // methods later.
   // Defining the `constructor` is necessary here to avoid the default
@@ -447,7 +456,7 @@
           super();
           return;
         }
-        super(new SafeArrayIterator(i));
+        super(safeCollectionSource(i));
       }
     },
   );
@@ -459,7 +468,7 @@
           super();
           return;
         }
-        super(new SafeArrayIterator(i));
+        super(safeCollectionSource(i));
       }
     },
   );
@@ -472,7 +481,7 @@
           super();
           return;
         }
-        super(new SafeArrayIterator(i));
+        super(safeCollectionSource(i));
       }
     },
   );
@@ -484,7 +493,7 @@
           super();
           return;
         }
-        super(new SafeArrayIterator(i));
+        super(safeCollectionSource(i));
       }
     },
   );

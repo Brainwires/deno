@@ -13,6 +13,7 @@ import {
 
 const {
   Error,
+  ErrorPrototype,
   ObjectPrototypeIsPrototypeOf,
   PromisePrototypeThen,
 } = primordials;
@@ -21,6 +22,43 @@ const { fs } = core.loadExtScript(
 );
 const { codeMap } = core.loadExtScript("ext:deno_node/internal_binding/uv.ts");
 const { promisify } = core.loadExtScript("ext:deno_node/internal/util.mjs");
+const { denoErrorToNodeError, uvException } = core.loadExtScript(
+  "ext:deno_node/internal/errors.ts",
+);
+const lazyFs = () => core.loadExtScript("ext:deno_node/fs.ts");
+
+function copyFileSourceMissingError(src: string, dest: string) {
+  return uvException({
+    errno: codeMap.get("ENOENT"),
+    syscall: "copyfile",
+    path: src,
+    dest,
+  });
+}
+
+// Node's copyfile errors name the source as `path` and the destination as
+// `dest` (`ENOENT: no such file or directory, copyfile '<src>' -> '<dest>'`).
+function copyFileError(err: unknown, src: string, dest: string) {
+  if (!ObjectPrototypeIsPrototypeOf(ErrorPrototype, err)) return err;
+  return denoErrorToNodeError(err as Error, {
+    syscall: "copyfile",
+    path: src,
+    dest,
+  });
+}
+
+function copyFileExistsError(src: string, dest: string) {
+  // deno-lint-ignore no-explicit-any
+  const e: any = new Error(
+    `EEXIST: file already exists, copyfile '${src}' -> '${dest}'`,
+  );
+  e.errno = codeMap.get("EEXIST");
+  e.code = "EEXIST";
+  e.syscall = "copyfile";
+  e.path = src;
+  e.dest = dest;
+  return e;
+}
 
 export function copyFile(
   src: string | Buffer | URL,
@@ -48,29 +86,33 @@ export function copyFile(
   const modeNum = getValidMode(mode, "copyFile");
   const cb = makeCallback(callback);
 
+  const failed = (e: unknown) => cb(copyFileError(e, srcStr, destStr));
   if ((modeNum & fs.COPYFILE_EXCL) === fs.COPYFILE_EXCL) {
     PromisePrototypeThen(Deno.lstat(destStr), () => {
-      // deno-lint-ignore no-explicit-any
-      const e: any = new Error(
-        `EEXIST: file already exists, copyfile '${srcStr}' -> '${destStr}'`,
-      );
-      e.syscall = "copyfile";
-      e.errno = codeMap.get("EEXIST");
-      e.code = "EEXIST";
-      cb(e);
+      // copyfile(2) reports a missing source before an existing destination.
+      lazyFs().stat(srcStr, { throwIfNoEntry: false }, (err, stats) => {
+        if (err) failed(err);
+        else if (stats === undefined) {
+          cb(copyFileSourceMissingError(srcStr, destStr));
+        } else cb(copyFileExistsError(srcStr, destStr));
+      });
     }, (e) => {
       if (ObjectPrototypeIsPrototypeOf(Deno.errors.NotFound.prototype, e)) {
         PromisePrototypeThen(
           Deno.copyFile(srcStr, destStr),
           () => cb(null),
-          cb,
+          failed,
         );
       } else {
-        cb(e);
+        failed(e);
       }
     });
   } else {
-    PromisePrototypeThen(Deno.copyFile(srcStr, destStr), () => cb(null), cb);
+    PromisePrototypeThen(
+      Deno.copyFile(srcStr, destStr),
+      () => cb(null),
+      failed,
+    );
   }
 }
 
@@ -89,18 +131,27 @@ export function copyFileSync(
   const destStr = getValidatedPathToString(dest, "dest");
   const modeNum = getValidMode(mode, "copyFile");
 
+  let destExists = false;
   if ((modeNum & fs.COPYFILE_EXCL) === fs.COPYFILE_EXCL) {
     try {
       Deno.lstatSync(destStr);
-      throw new Error(`A file exists at the destination: ${destStr}`);
+      destExists = true;
     } catch (e) {
-      if (ObjectPrototypeIsPrototypeOf(Deno.errors.NotFound.prototype, e)) {
-        Deno.copyFileSync(srcStr, destStr);
-      } else {
-        throw e;
+      if (!ObjectPrototypeIsPrototypeOf(Deno.errors.NotFound.prototype, e)) {
+        throw copyFileError(e, srcStr, destStr);
       }
     }
-  } else {
+  }
+  if (destExists) {
+    // copyfile(2) reports a missing source before an existing destination.
+    if (lazyFs().statSync(srcStr, { throwIfNoEntry: false }) === undefined) {
+      throw copyFileSourceMissingError(srcStr, destStr);
+    }
+    throw copyFileExistsError(srcStr, destStr);
+  }
+  try {
     Deno.copyFileSync(srcStr, destStr);
+  } catch (e) {
+    throw copyFileError(e, srcStr, destStr);
   }
 }
