@@ -318,11 +318,17 @@ Deno.test({
     const nobodyUid = 65534;
     const nobodyGid = 65534;
 
-    await assertRejects(
+    // Node rejects with a uv error (`EPERM: operation not permitted, fchown`),
+    // not a Deno error class.
+    const err = await assertRejects(
       async () => await fileHandle.chown(nobodyUid, nobodyGid),
-      Deno.errors.PermissionDenied,
-      "Operation not permitted",
+      Error,
+      "EPERM: operation not permitted, fchown",
     );
+    // deno-lint-ignore no-explicit-any
+    assertEquals((err as any).code, "EPERM");
+    // deno-lint-ignore no-explicit-any
+    assertEquals((err as any).syscall, "fchown");
 
     const realUid = Deno.uid() || 1000;
     const realGid = Deno.gid() || 1000;
