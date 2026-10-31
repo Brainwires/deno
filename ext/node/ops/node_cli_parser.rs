@@ -109,6 +109,15 @@ pub fn op_node_translate_cli_args(
   script_in_npm_package: bool,
   wrap_eval: bool,
 ) -> Result<TranslatedArgs, CliParserError> {
+  translate_cli_args(args, script_in_npm_package, wrap_eval)
+}
+
+/// [`op_node_translate_cli_args`]'s body, callable outside the op.
+fn translate_cli_args(
+  args: Vec<String>,
+  script_in_npm_package: bool,
+  wrap_eval: bool,
+) -> Result<TranslatedArgs, CliParserError> {
   // If no args, return early with run -A --ext=cjs -
   // `-` tells Deno to read from stdin, matching Node.js behavior where
   // `node` with no args reads and executes piped stdin as CommonJS.
@@ -138,7 +147,7 @@ pub fn op_node_translate_cli_args(
   if args.is_empty() && !deno_flags.is_empty() {
     // Only Deno flags: Node reads a script from stdin.
     let mut translated =
-      op_node_translate_cli_args(vec![], script_in_npm_package, wrap_eval)?;
+      translate_cli_args(vec![], script_in_npm_package, wrap_eval)?;
     insert_child_deno_flags(&mut translated.deno_args, &[], deno_flags);
     return Ok(translated);
   }
@@ -353,7 +362,7 @@ mod tests {
 
   #[test]
   fn child_deno_flags_reach_the_translated_run() {
-    let translated = op_node_translate_cli_args(
+    let translated = translate_cli_args(
       svec!["--allow-read=/data", "--unstable-kv", "child.js", "a"],
       false,
       true,
@@ -369,7 +378,7 @@ mod tests {
 
     // Without a permission flag the child keeps `-A`, as before; Node flags
     // around the Deno ones are still translated.
-    let translated = op_node_translate_cli_args(
+    let translated = translate_cli_args(
       svec!["--unstable-kv", "--max-old-space-size=100", "child.js"],
       false,
       true,
@@ -385,7 +394,7 @@ mod tests {
     );
 
     // A Deno flag the translation already adds is not repeated.
-    let translated = op_node_translate_cli_args(
+    let translated = translate_cli_args(
       svec!["--unstable-detect-cjs", "child.js"],
       false,
       true,
@@ -402,7 +411,7 @@ mod tests {
     );
 
     // An explicit Deno invocation keeps the caller's own `-A`.
-    let translated = op_node_translate_cli_args(
+    let translated = translate_cli_args(
       svec!["--deny-env", "run", "-A", "child.js"],
       false,
       true,
@@ -415,7 +424,7 @@ mod tests {
 
     // No Deno flags: unchanged.
     let translated =
-      op_node_translate_cli_args(svec!["child.js"], false, true).unwrap();
+      translate_cli_args(svec!["child.js"], false, true).unwrap();
     assert_eq!(&translated.deno_args[..2], &svec!["run", "-A"]);
   }
 
