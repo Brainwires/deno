@@ -2992,7 +2992,8 @@ pub struct InitialWindowAttributes {
   /// A layer-shell overlay surface (`initialWindow.overlay`).
   pub overlay: bool,
   /// Its page keeps its timers' rate while the window is not on screen
-  /// (`backgroundThrottling: false`). The bootstrap window is throttled.
+  /// (`backgroundThrottling: false`). The bootstrap window is throttled
+  /// unless `initialWindow.backgroundThrottling` is false.
   pub unthrottled: bool,
 }
 
@@ -8952,6 +8953,32 @@ mod tests {
       &overlay,
       Some(&BrowserWindowOptions {
         overlay: Some(false),
+        ..Default::default()
+      })
+    ));
+    // An unthrottled `initialWindow` (`backgroundThrottling: false`) is
+    // adopted by a request that leaves the option unset or asks for the same,
+    // and not by one asking to be throttled.
+    let unthrottled = InitialWindowAttributes {
+      unthrottled: true,
+      ..Default::default()
+    };
+    assert!(adopts_initial_window(&unthrottled, None));
+    assert!(adopts_initial_window(
+      &unthrottled,
+      Some(&BrowserWindowOptions::default())
+    ));
+    assert!(adopts_initial_window(
+      &unthrottled,
+      Some(&BrowserWindowOptions {
+        background_throttling: Some(false),
+        ..Default::default()
+      })
+    ));
+    assert!(!adopts_initial_window(
+      &unthrottled,
+      Some(&BrowserWindowOptions {
+        background_throttling: Some(true),
         ..Default::default()
       })
     ));

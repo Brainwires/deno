@@ -510,7 +510,11 @@ declare namespace Deno {
      * running with its timers slowed down (about once a second on macOS),
      * and its events, messages and sockets are handled. `false`: its timers
      * keep their rate, for a hidden window that does the app's background
-     * work. Creation time only.
+     * work. Creation time only: the first window takes over the window the
+     * app started with only when this agrees with that window's
+     * (`desktop.initialWindow.backgroundThrottling`, `true` by default), so
+     * an app whose main window must stay unthrottled sets that key to
+     * `false` too.
      *
      * macOS (the system WebView, macOS 14+, from runtime 3.0.0-denext.8):
      * WebKit used to freeze the page of a window created hidden about a
@@ -879,7 +883,8 @@ declare namespace Deno {
      * with (the one `desktop.initialWindow` configures and the runtime loads
      * the app into) when the creation-time options it asks for
      * (`frameless`, `noActivate`, `transparent`, `transparentTitlebar`,
-     * `overlay`) agree with that window's; options left unset keep the
+     * `overlay`, `backgroundThrottling`) agree with that window's; options
+     * left unset keep the
      * `initialWindow` values, and only the `width` / `height` given resize
      * it. Any other window, a tray panel created first included, is a new
      * window with the option defaults (800x600, framed). Only in the main

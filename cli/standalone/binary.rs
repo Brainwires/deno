@@ -1457,6 +1457,7 @@ impl<'a> DenoCompileBinaryWriter<'a> {
           transparent: w.transparent,
           show_on_first_load: w.show_on_first_load,
           overlay: w.overlay,
+          background_throttling: w.background_throttling,
         }),
     };
 

@@ -188,6 +188,17 @@ pub struct InitialWindowConfig {
   /// focused); an ordinary window elsewhere.
   #[serde(default)]
   pub overlay: bool,
+  /// `backgroundThrottling`: `true` (the default) throttles the page's timers
+  /// while the window is not on screen; `false` keeps them at their rate
+  /// (macOS; read when the page is set up, so it applies to the bootstrap
+  /// window only through this config). Absent in metadata written before the
+  /// key existed, which is the throttled default.
+  #[serde(default = "default_background_throttling")]
+  pub background_throttling: bool,
+}
+
+fn default_background_throttling() -> bool {
+  true
 }
 
 impl Default for InitialWindowConfig {
@@ -201,6 +212,7 @@ impl Default for InitialWindowConfig {
       transparent: false,
       show_on_first_load: true,
       overlay: false,
+      background_throttling: true,
     }
   }
 }
@@ -515,5 +527,31 @@ fn check_has_len(input: &[u8], len: usize) -> std::io::Result<()> {
     ))
   } else {
     Ok(())
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::InitialWindowConfig;
+
+  #[test]
+  fn initial_window_metadata_without_background_throttling_is_throttled() {
+    // Metadata written before the key existed (and before `overlay`).
+    let old: InitialWindowConfig = serde_json::from_str(
+      r#"{"width":320,"height":220,"frameless":false,"no_activate":false,
+          "transparent_titlebar":false,"transparent":false,
+          "show_on_first_load":false}"#,
+    )
+    .unwrap();
+    assert!(old.background_throttling);
+    assert!(!old.overlay);
+    let unthrottled = InitialWindowConfig {
+      background_throttling: false,
+      ..Default::default()
+    };
+    let round_trip: InitialWindowConfig =
+      serde_json::from_str(&serde_json::to_string(&unthrottled).unwrap())
+        .unwrap();
+    assert_eq!(round_trip, unthrottled);
   }
 }
