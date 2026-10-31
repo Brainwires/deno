@@ -7671,12 +7671,13 @@ where the changes are discussed.
      `strictPolicy`, CEF's `.pak` / `icudtl.dat` / `v8_context_snapshot.bin`,
      sidecar JavaScript, `.deno-desktop-app`) carry no signature of their own,
      so the update key alone protected them: a stolen update key could change
-     the window's bridge origins of a signed app. denext's
-     `scripts/package-windows.ts` now writes a tree manifest,
+     the window's bridge origins of a signed app. denext's Windows package
+     build (`buildDesktopBundle`, which `scripts/package-windows.ts` calls,
+     last, before it signs) now writes a tree manifest,
      `{ "v": 1, "files": [{ "path", "size", "sha256" }] }` over every regular
      file that is not a PE image, into the main executable as the `RT_RCDATA`
-     resource `DENEXT_TREE` before it signs it (pure TypeScript, any host), so
-     the executable's signature covers it. After the OS check, `stage()` and
+     resource `DENEXT_TREE` (pure TypeScript, any host), so the executable's
+     signature covers it. After the OS check, `stage()` and
      the update helper read the staged tree in the walk that records the
      digest the helper pins (`Staged::listing`, the same reads as
      `tree_digest`, with a streaming PE-header probe that applies
