@@ -1020,7 +1020,7 @@ function dequeueSubtest(list, start, random) {
   if (random === null || pending < 2) return;
   const index = start + MathFloor(random() * pending);
   if (index === start) return;
-  const [entry] = ArrayPrototypeSplice(list, index, 1);
+  const entry = ArrayPrototypeSplice(list, index, 1)[0];
   ArrayPrototypeSplice(list, start, 0, entry);
 }
 
@@ -1642,7 +1642,7 @@ function junitIsSkipped(node) {
 
 function junitHostname() {
   try {
-    return Deno.hostname();
+    return core.loadExtScript("ext:deno_node/os.ts").hostname();
   } catch {
     return "";
   }
@@ -1971,11 +1971,11 @@ class TestContext {
           const index = pending.length < 2
             ? 0
             : MathFloor(this.#random() * pending.length);
-          const [{ entry, deferred }] = ArrayPrototypeSplice(
+          const { entry, deferred } = ArrayPrototypeSplice(
             pending,
             index,
             1,
-          );
+          )[0];
           this.#reportOrder++;
           const p = this.#runSubtest(entry, this.#reportOrder);
           this.#subtestTail = PromisePrototypeThen(p, () => {}, () => {});

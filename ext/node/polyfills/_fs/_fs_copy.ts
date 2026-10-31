@@ -13,6 +13,7 @@ import {
 
 const {
   Error,
+  ErrorPrototype,
   ObjectPrototypeIsPrototypeOf,
   PromisePrototypeThen,
 } = primordials;
@@ -21,14 +22,24 @@ const { fs } = core.loadExtScript(
 );
 const { codeMap } = core.loadExtScript("ext:deno_node/internal_binding/uv.ts");
 const { promisify } = core.loadExtScript("ext:deno_node/internal/util.mjs");
-const { denoErrorToNodeError } = core.loadExtScript(
+const { denoErrorToNodeError, uvException } = core.loadExtScript(
   "ext:deno_node/internal/errors.ts",
 );
+const lazyFs = () => core.loadExtScript("ext:deno_node/fs.ts");
+
+function copyFileSourceMissingError(src: string, dest: string) {
+  return uvException({
+    errno: codeMap.get("ENOENT"),
+    syscall: "copyfile",
+    path: src,
+    dest,
+  });
+}
 
 // Node's copyfile errors name the source as `path` and the destination as
 // `dest` (`ENOENT: no such file or directory, copyfile '<src>' -> '<dest>'`).
 function copyFileError(err: unknown, src: string, dest: string) {
-  if (!ObjectPrototypeIsPrototypeOf(Error.prototype, err)) return err;
+  if (!ObjectPrototypeIsPrototypeOf(ErrorPrototype, err)) return err;
   return denoErrorToNodeError(err as Error, {
     syscall: "copyfile",
     path: src,
@@ -79,11 +90,12 @@ export function copyFile(
   if ((modeNum & fs.COPYFILE_EXCL) === fs.COPYFILE_EXCL) {
     PromisePrototypeThen(Deno.lstat(destStr), () => {
       // copyfile(2) reports a missing source before an existing destination.
-      PromisePrototypeThen(
-        Deno.stat(srcStr),
-        () => cb(copyFileExistsError(srcStr, destStr)),
-        failed,
-      );
+      lazyFs().stat(srcStr, { throwIfNoEntry: false }, (err, stats) => {
+        if (err) failed(err);
+        else if (stats === undefined) {
+          cb(copyFileSourceMissingError(srcStr, destStr));
+        } else cb(copyFileExistsError(srcStr, destStr));
+      });
     }, (e) => {
       if (ObjectPrototypeIsPrototypeOf(Deno.errors.NotFound.prototype, e)) {
         PromisePrototypeThen(
@@ -132,10 +144,8 @@ export function copyFileSync(
   }
   if (destExists) {
     // copyfile(2) reports a missing source before an existing destination.
-    try {
-      Deno.statSync(srcStr);
-    } catch (e) {
-      throw copyFileError(e, srcStr, destStr);
+    if (lazyFs().statSync(srcStr, { throwIfNoEntry: false }) === undefined) {
+      throw copyFileSourceMissingError(srcStr, destStr);
     }
     throw copyFileExistsError(srcStr, destStr);
   }

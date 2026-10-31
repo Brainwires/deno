@@ -659,6 +659,7 @@ function readFileMaybeDecode(
 // `validateReadFileBufferOptions`): a `Buffer`, `TypedArray` or `DataView` to
 // read the file into, or a function that takes the file size and returns one.
 function validateReadFileBufferOption(options: unknown) {
+  // deno-lint-ignore deno-internal/prefer-primordials
   const buffer = (options as { buffer?: unknown } | null)?.buffer;
   if (
     buffer !== undefined && typeof buffer !== "function" &&
@@ -682,6 +683,7 @@ function readFileIntoUserBuffer(
   options: { buffer?: unknown },
 ): Buffer {
   const size = TypedArrayPrototypeGetByteLength(data);
+  // deno-lint-ignore deno-internal/prefer-primordials
   let buffer = options.buffer;
   const name = typeof buffer === "function"
     ? "options.buffer().byteLength"
@@ -699,9 +701,11 @@ function readFileIntoUserBuffer(
   const view = buffer as ArrayBufferView;
   // deno-lint-ignore deno-internal/prefer-primordials
   const target = Buffer.from(view.buffer, view.byteOffset, view.byteLength);
+  // deno-lint-ignore deno-internal/prefer-primordials
   if (size > view.byteLength) {
     throw new ERR_INVALID_ARG_VALUE(
       name,
+      // deno-lint-ignore deno-internal/prefer-primordials
       view.byteLength,
       `is smaller than the file size of ${size} bytes`,
     );
@@ -721,6 +725,7 @@ function readFileResult(
   if (length > kIoMaxLength) {
     throw new ERR_FS_FILE_TOO_LARGE(length);
   }
+  // deno-lint-ignore deno-internal/prefer-primordials
   if (options?.buffer !== undefined) {
     const buffer = readFileIntoUserBuffer(data, options);
     // deno-lint-ignore deno-internal/prefer-primordials
