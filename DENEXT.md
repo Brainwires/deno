@@ -7459,10 +7459,50 @@ where the changes are discussed.
      `desktop_cache_token_expands_to_the_app_cache` and
      `desktop_cache_token_never_widens_a_grant`.
 
+200. **`feat(desktop)`: `$DENO_DESKTOP_DATA` in a baked permission is the app's
+     data folder** (`feat/desktop-data-token`, built on item 189's
+     `fix/exec-sidecar-run-scope`; `cli/rt/run.rs`). A packaged desktop app
+     keeps its state in a per-user folder (denext's `fs` / `sqlite`
+     capabilities, its UI updates in `<data>/ui-updates`, sidecar log files in
+     `<data>/logs`), which is as unknown at packaging as the cache folder, so
+     denext baked an unscoped `--allow-read` (and `--allow-write`) for it. A
+     baked `--allow-read` / `--allow-write` / `--allow-run` value (or the
+     matching `--deny-*`) may now also start with `$DENO_DESKTOP_DATA`, expanded
+     at the same point and under the same rules as item 189's token to the app's
+     own data folder: `~/Library/Application Support/<id>` on macOS,
+     `%APPDATA%\<id>` on Windows (`~\AppData\Roaming` without `%APPDATA%`),
+     `$XDG_DATA_HOME|~/.local/share` `/<id>` on Linux and other systems
+     (denext's `osDataDir(id)`, `desktopAppDirs(id).data`), `<id>` being the
+     baked `desktop.app.identifier`. An empty or blank `%APPDATA%` /
+     `$XDG_DATA_HOME` (and, from this item, `%LOCALAPPDATA%` / `$XDG_CACHE_HOME`
+     for item 189's token) counts as unset. After either token, `/` and `\` both
+     separate the rest, which is rebuilt with the OS's own separator, so a value
+     denext bakes as `$DENO_DESKTOP_DATA/logs` (or
+     `$DENO_DESKTOP_CACHE/sidecars/<name>/<file>`) is
+     `C:\Users\<u>\AppData\Roaming\<id>\logs` on Windows, with no `/` left for
+     the permission check to compare. A value whose token is followed by
+     anything else (`$DENO_DESKTOP_DATAX`), has a `..` component, or has no
+     folder to expand to (no identifier, no home folder) is dropped from an
+     allow list, and a list left empty grants nothing; a token anywhere but the
+     start of a value is not one. The embedded files stay readable either way
+     (`grant_vfs_read_access` adds their root first). denext keeps no config or
+     log folder of its own at run time (its log files are in the data folder),
+     so no other token is added.
+
+     Then denext bakes `--allow-read=$DENO_DESKTOP_DATA` (and
+     `--allow-write=$DENO_DESKTOP_DATA`) for its `$APPDATA` grants from the
+     release that has this, keeping the unscoped grants for older runtimes.
+
+     Tests (`cli/rt/run.rs`): `desktop_app_data_dir_per_os`,
+     `desktop_data_token_expands_to_the_app_data`,
+     `desktop_data_token_never_widens_a_grant`,
+     `desktop_path_tokens_take_either_separator` and, on Windows,
+     `desktop_path_tokens_use_backslashes_on_windows`.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
-169-174, 176, 178, 180, 182, 183, 189) are what the prebuilt `libdenort`
+169-174, 176, 178, 180, 182, 183, 189, 200) are what the prebuilt `libdenort`
 carries. The CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` /
 `LAUFEY_APP_ID` into a packaged app's launchers) are in the branch too, but a
 stock CLI does not run them; denext's own launcher provides that environment.
