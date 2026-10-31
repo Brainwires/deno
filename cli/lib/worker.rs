@@ -296,6 +296,9 @@ pub struct LibMainWorkerOptions {
   pub auto_serve: bool,
   pub location: Option<Url>,
   pub argv0: Option<String>,
+  /// denext (DENEXT.md item 188): `process.execArgv` (see
+  /// `BootstrapOptions::exec_argv`); a worker gets its parent's, as in Node.
+  pub exec_argv: Vec<String>,
   pub node_debug: Option<String>,
   pub node_cluster_unique_id: Option<String>,
   pub node_cluster_sched_policy: Option<String>,
@@ -517,6 +520,7 @@ impl<TSys: DenoLibSys> LibWorkerFactorySharedState<TSys> {
           auto_serve: shared.options.auto_serve,
           has_node_modules_dir: shared.options.has_node_modules_dir,
           argv0: shared.options.argv0.clone(),
+          exec_argv: shared.options.exec_argv.clone(),
           node_debug: shared.options.node_debug.clone(),
           node_cluster_unique_id: shared.options.node_cluster_unique_id.clone(),
           node_cluster_sched_policy: shared
@@ -776,6 +780,7 @@ impl<TSys: DenoLibSys> LibMainWorkerFactory<TSys> {
         auto_serve: shared.options.auto_serve,
         has_node_modules_dir: shared.options.has_node_modules_dir,
         argv0: shared.options.argv0.clone(),
+        exec_argv: shared.options.exec_argv.clone(),
         node_debug: shared.options.node_debug.clone(),
         node_cluster_unique_id: shared.options.node_cluster_unique_id.clone(),
         node_cluster_sched_policy: shared

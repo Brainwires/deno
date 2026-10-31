@@ -13,6 +13,7 @@ const { format } = core.loadExtScript(
   "ext:deno_node/internal/util/inspect.mjs",
 );
 import {
+  op_bootstrap_exec_argv,
   op_current_thread_cpu_usage,
   op_fs_umask,
   op_getegid,
@@ -151,6 +152,7 @@ const {
   ArrayPrototypeConcat,
   ArrayPrototypeFind,
   ArrayPrototypePush,
+  ArrayPrototypeSplice,
   BigInt,
   Error,
   ErrorCaptureStackTrace,
@@ -194,6 +196,10 @@ export const argv: string[] = ["", ""];
 // And retains any value as long as it's nullish or number-ish.
 let ProcessExitCode: undefined | null | string | number;
 
+// denext (DENEXT.md item 188): filled at bootstrap with the Deno flags of
+// a `deno run` / `deno serve` that shape a child process (permissions,
+// `--unstable*`, `--config`, ...), as Node's holds the node flags before the
+// script. Empty in a compiled program and under every other subcommand.
 export const execArgv: string[] = [];
 
 /** https://nodejs.org/api/process.html#process_process_exit_code */
@@ -1878,6 +1884,14 @@ internals.__bootstrapNodeProcess = function (
     );
     op_stream_base_register_state(streamBaseState);
     argv0 = argv0Val || "";
+    // Ahead of anything already added (01_require.js's
+    // `--trace-event-categories`).
+    ArrayPrototypeSplice(
+      execArgv,
+      0,
+      0,
+      ...new SafeArrayIterator(op_bootstrap_exec_argv()),
+    );
     argv[0] = Deno.execPath();
     argv[1] = mainModuleArgv();
     // Manually concatenate these arrays to avoid triggering the getter

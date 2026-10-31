@@ -1,0 +1,19 @@
+// denext (DENEXT.md item 188): `process.execArgv` holds the Deno flags of a
+// `deno run` that shape a child, and `fork()` (whose default execArgv it is)
+// gives the child the parent's grants instead of `-A`.
+{
+  "tests": {
+    "flags": {
+      "args": "run --allow-read --allow-run --allow-env --unstable-kv --v8-flags=--expose-gc main.mjs",
+      "output": "flags.out"
+    },
+    "no_flags": {
+      "args": "run print.mjs",
+      "output": "[]\n"
+    },
+    "test_subcommand": {
+      "args": "test -A --unstable-kv print_test.mjs",
+      "output": "[WILDCARD][]\n[WILDCARD]ok | 1 passed[WILDCARD]"
+    }
+  }
+}

@@ -20,6 +20,7 @@ deno_core::extension!(
     op_bootstrap_stdout_no_color,
     op_bootstrap_stderr_no_color,
     op_bootstrap_unstable_args,
+    op_bootstrap_exec_argv,
     op_bootstrap_is_from_unconfigured_runtime,
     op_proto_set_attempted,
     op_proto_get_attempted,
@@ -112,6 +113,12 @@ pub fn op_bootstrap_unstable_args(state: &mut OpState) -> Vec<String> {
     }
   }
   flags
+}
+
+/// denext (DENEXT.md item 188): `process.execArgv`.
+#[op2]
+pub fn op_bootstrap_exec_argv(state: &mut OpState) -> Vec<String> {
+  state.borrow::<BootstrapOptions>().exec_argv.clone()
 }
 
 #[op2]

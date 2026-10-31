@@ -129,15 +129,168 @@ pub fn op_node_translate_cli_args(
   }
 
   // Parse the args
+  // denext (DENEXT.md item 188): `process.execArgv` holds the parent's Deno
+  // flags, so `fork()` (whose default execArgv it is) and
+  // `spawn(process.execPath, [...process.execArgv, script])` hand them back
+  // here in Node's position. They are not Node flags: take them out before
+  // Node's parser sees them and give them to the translated subcommand.
+  let (deno_flags, args) = split_child_deno_flags(args);
+  if args.is_empty() && !deno_flags.is_empty() {
+    // Only Deno flags: Node reads a script from stdin.
+    let mut translated =
+      op_node_translate_cli_args(vec![], script_in_npm_package, wrap_eval)?;
+    insert_child_deno_flags(&mut translated.deno_args, &[], deno_flags);
+    return Ok(translated);
+  }
   match parse_args(args.clone()) {
-    Ok(parsed) => Ok(translate_to_deno_args(
-      parsed,
-      script_in_npm_package,
-      wrap_eval,
-    )),
+    Ok(parsed) => {
+      let mut translated =
+        translate_to_deno_args(parsed, script_in_npm_package, wrap_eval);
+      insert_child_deno_flags(&mut translated.deno_args, &args, deno_flags);
+      Ok(translated)
+    }
     Err(unknown_flags) => Err(CliParserError::ParseError {
       message: unknown_flags.join(", "),
     }),
+  }
+}
+
+/// The long Deno flags (without `--`) `process.execArgv` may carry (cli's
+/// `FlagsExt::to_exec_argv`) that take no value or an optional one.
+const CHILD_DENO_FLAGS: &[&str] = &[
+  "allow-all",
+  "allow-read",
+  "allow-write",
+  "allow-net",
+  "allow-net-connect",
+  "allow-net-listen",
+  "allow-env",
+  "allow-run",
+  "allow-sys",
+  "allow-ffi",
+  "allow-import",
+  "deny-read",
+  "deny-write",
+  "deny-net",
+  "deny-net-connect",
+  "deny-net-listen",
+  "deny-env",
+  "deny-run",
+  "deny-sys",
+  "deny-ffi",
+  "deny-import",
+  "ignore-env",
+  "ignore-read",
+  "permission-set",
+  "unsafely-ignore-certificate-errors",
+  "unstable",
+  "no-detect-cjs",
+  "no-config",
+  "node-modules-dir",
+  "no-lock",
+  "frozen",
+  "frozen-lockfile",
+  "cached-only",
+  "no-remote",
+  "no-npm",
+];
+
+/// The long Deno flags `process.execArgv` carries only as `--flag=value`.
+const CHILD_DENO_VALUE_FLAGS: &[&str] = &[
+  "config",
+  "import-map",
+  "lock",
+  "cert",
+  "location",
+  "seed",
+  "v8-flags",
+];
+
+/// The permission flags among [`CHILD_DENO_FLAGS`].
+fn is_child_permission_flag(arg: &str) -> bool {
+  let name = arg.split('=').next().unwrap_or(arg);
+  name == "-A"
+    || name.starts_with("--allow-")
+    || name.starts_with("--deny-")
+    || name.starts_with("--ignore-")
+    || name == "--permission-set"
+}
+
+/// Whether `arg` is a Deno flag of a parent's `process.execArgv` (none of
+/// them is a Node flag: Node's permission flags are `--allow-fs-read` and
+/// the like, and `--conditions` stays with Node's parser, which knows it).
+fn is_child_deno_flag(arg: &str) -> bool {
+  if arg == "-A" {
+    return true;
+  }
+  let Some(long) = arg.strip_prefix("--") else {
+    return false;
+  };
+  let (name, value) = match long.split_once('=') {
+    Some((name, value)) => (name, Some(value)),
+    None => (long, None),
+  };
+  if name.starts_with("unstable-") {
+    return value.is_none();
+  }
+  CHILD_DENO_FLAGS.contains(&name)
+    || (value.is_some() && CHILD_DENO_VALUE_FLAGS.contains(&name))
+}
+
+/// Splits the Deno flags of [`is_child_deno_flag`] off the flags before the
+/// script (the first argument that is not a flag, or `--`); the script and
+/// its arguments are never looked at. Returns `(deno flags, the rest)`.
+fn split_child_deno_flags(args: Vec<String>) -> (Vec<String>, Vec<String>) {
+  let mut deno_flags = Vec::new();
+  let mut rest = Vec::with_capacity(args.len());
+  let mut in_flags = true;
+  for arg in args {
+    if in_flags && (arg == "--" || !arg.starts_with('-')) {
+      in_flags = false;
+    }
+    if in_flags && is_child_deno_flag(&arg) {
+      deno_flags.push(arg);
+    } else {
+      rest.push(arg);
+    }
+  }
+  (deno_flags, rest)
+}
+
+/// Puts a parent's Deno flags right after the translated subcommand (`run`,
+/// `serve`, `test` or `bench`), skipping any it already has. When they
+/// include a permission flag, the `-A` the translation adds for a Node
+/// child is dropped (a Node child has no permission model; this one gets the
+/// parent's grants, as Node's children get its flags), unless the caller
+/// asked for `-A` itself (`node_args`). Any other translation (`eval`,
+/// `--version`, ...) takes none of them.
+fn insert_child_deno_flags(
+  deno_args: &mut Vec<String>,
+  node_args: &[String],
+  deno_flags: Vec<String>,
+) {
+  if deno_flags.is_empty() {
+    return;
+  }
+  let Some(at) = deno_args
+    .iter()
+    .take(2)
+    .position(|a| matches!(a.as_str(), "run" | "serve" | "test" | "bench"))
+  else {
+    return;
+  };
+  let mut at = at + 1;
+  if deno_flags.iter().any(|f| is_child_permission_flag(f))
+    && deno_args.get(at).is_some_and(|a| a == "-A")
+    && !node_args.iter().any(|a| a == "-A")
+  {
+    deno_args.remove(at);
+  }
+  for flag in deno_flags {
+    if !deno_args.contains(&flag) {
+      deno_args.insert(at, flag);
+      at += 1;
+    }
   }
 }
 
@@ -151,6 +304,120 @@ mod tests {
             vec![$($x.to_string()),*]
         };
     }
+
+  #[test]
+  fn child_deno_flags_are_split_off_before_the_script() {
+    let (deno, rest) = split_child_deno_flags(svec![
+      "--allow-read=/data",
+      "--unstable-kv",
+      "--max-old-space-size=100",
+      "--config=/app/deno.json",
+      "--seed",
+      "--cert=/c.pem",
+      "--allow-fs-read=/x",
+      "--v8-flags=--expose-gc",
+      "-A",
+      "child.js",
+      "--allow-net",
+      "--unstable-cron"
+    ]);
+    assert_eq!(
+      deno,
+      svec![
+        "--allow-read=/data",
+        "--unstable-kv",
+        "--config=/app/deno.json",
+        "--cert=/c.pem",
+        "--v8-flags=--expose-gc",
+        "-A"
+      ]
+    );
+    // Node's own flags (Node's `--allow-fs-read` included), a value flag
+    // without `=`, the script and its arguments stay.
+    assert_eq!(
+      rest,
+      svec![
+        "--max-old-space-size=100",
+        "--seed",
+        "--allow-fs-read=/x",
+        "child.js",
+        "--allow-net",
+        "--unstable-cron"
+      ]
+    );
+    let (deno, rest) =
+      split_child_deno_flags(svec!["--", "--allow-read", "child.js"]);
+    assert!(deno.is_empty());
+    assert_eq!(rest, svec!["--", "--allow-read", "child.js"]);
+  }
+
+  #[test]
+  fn child_deno_flags_reach_the_translated_run() {
+    let translated = op_node_translate_cli_args(
+      svec!["--allow-read=/data", "--unstable-kv", "child.js", "a"],
+      false,
+      true,
+    )
+    .unwrap();
+    let args = translated.deno_args;
+    assert_eq!(args[0], "run");
+    // The parent's grants, not `-A`.
+    assert!(!args.contains(&"-A".to_string()), "{args:?}");
+    assert_eq!(args[1], "--allow-read=/data", "{args:?}");
+    assert_eq!(args[2], "--unstable-kv", "{args:?}");
+    assert_eq!(&args[args.len() - 2..], &svec!["child.js", "a"]);
+
+    // Without a permission flag the child keeps `-A`, as before; Node flags
+    // around the Deno ones are still translated.
+    let translated = op_node_translate_cli_args(
+      svec!["--unstable-kv", "--max-old-space-size=100", "child.js"],
+      false,
+      true,
+    )
+    .unwrap();
+    let args = translated.deno_args;
+    assert_eq!(&args[..2], &svec!["run", "-A"], "{args:?}");
+    assert!(args.contains(&"--unstable-kv".to_string()), "{args:?}");
+    assert!(
+      args.iter().any(|a| a.starts_with("--v8-flags=")
+        && a.contains("--max-old-space-size=100")),
+      "{args:?}"
+    );
+
+    // A Deno flag the translation already adds is not repeated.
+    let translated = op_node_translate_cli_args(
+      svec!["--unstable-detect-cjs", "child.js"],
+      false,
+      true,
+    )
+    .unwrap();
+    let args = translated.deno_args;
+    assert_eq!(
+      args
+        .iter()
+        .filter(|a| *a == "--unstable-detect-cjs")
+        .count(),
+      1,
+      "{args:?}"
+    );
+
+    // An explicit Deno invocation keeps the caller's own `-A`.
+    let translated = op_node_translate_cli_args(
+      svec!["--deny-env", "run", "-A", "child.js"],
+      false,
+      true,
+    )
+    .unwrap();
+    assert_eq!(
+      translated.deno_args,
+      svec!["run", "--deny-env", "-A", "child.js"]
+    );
+
+    // No Deno flags: unchanged.
+    let translated =
+      op_node_translate_cli_args(svec!["child.js"], false, true).unwrap();
+    assert_eq!(&translated.deno_args[..2], &svec!["run", "-A"]);
+  }
 
   #[test]
   fn test_basic_parsing() {

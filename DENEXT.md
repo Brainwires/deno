@@ -7430,6 +7430,45 @@ where the changes are discussed.
        overlay checks, `--layer1` StatusNotifierItem clicks) covers the native
        side.
 
+188. **`fix(node)`: `process.execArgv` holds the Deno flags a child needs**
+     (`fix/process-execargv`; `cli/args/flags.rs`, `cli/factory.rs`,
+     `runtime/worker_bootstrap.rs`, `runtime/ops/bootstrap.rs`,
+     `ext/node/polyfills/process.ts`, `ext/node/ops/node_cli_parser.rs`).
+     Upstream's `process.execArgv` is always `[]`, so a program could not
+     start a child Deno with its own command-line flags: denext's desktop
+     sidecar `spawnSelf()` under `deno run` rebuilt the child's argv from
+     `Deno.permissions` alone and lost `--unstable-*`, `--v8-flags`,
+     `--config`, `--node-modules-dir` and scoped grants. Under `deno run` and
+     `deno serve` it now holds those flags, as Node's holds the node flags
+     before the script (`FlagsExt::to_exec_argv`, through
+     `BootstrapOptions::exec_argv` and `op_bootstrap_exec_argv`): the
+     permission flags with their scopes, `--permission-set`, `--unstable` /
+     `--unstable-<feature>` / `--no-detect-cjs`, `--config` / `--no-config`,
+     `--node-modules-dir`, `--import-map`, `--lock` / `--no-lock` /
+     `--frozen`, `--cached-only`, `--no-remote`, `--no-npm`, `--cert`,
+     `--location`, `--seed`, `--v8-flags` and `--conditions`, each one
+     `--flag[=value]` token, files made absolute. Workers get their parent's.
+     A compiled program, and every other subcommand (`deno test` included),
+     keep `[]`.
+
+     Those flags are not Node flags, and `fork()` uses `process.execArgv` by
+     default (as does `spawn(process.execPath, [...process.execArgv,
+     script])`): `op_node_translate_cli_args` now takes them off the flags
+     before the script and puts them right after the translated `run` (or
+     `serve` / `test` / `bench`), skipping any already there. When they carry
+     a permission flag, the child no longer gets the translation's `-A`: it
+     gets the parent's grants, as a Node child gets the parent's flags (a
+     caller's own explicit `-A` stays). With no Deno flags (a `deno run`
+     without any, a compiled program) the translation is unchanged.
+
+     Tests: `exec_argv_carries_the_flags_a_child_needs`
+     (`cli/args/flags.rs`), `child_deno_flags_are_split_off_before_the_script`
+     and `child_deno_flags_reach_the_translated_run`
+     (`ext/node/ops/node_cli_parser.rs`), and the spec test
+     `node::process_exec_argv` (the flags, a `fork()` child with the parent's
+     grants and unstable features and without `--allow-net`, `[]` for a bare
+     `deno run` and under `deno test`).
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
