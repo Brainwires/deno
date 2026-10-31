@@ -2448,6 +2448,7 @@ pub trait DesktopApi: Send + Sync + 'static {
     transparent: bool,
     hidden: bool,
     overlay: bool,
+    background_throttling: bool,
   ) -> u32;
   /// Close a specific window.
   fn close_window(&self, window_id: u32);
@@ -2990,15 +2991,19 @@ pub struct InitialWindowAttributes {
   pub transparent: bool,
   /// A layer-shell overlay surface (`initialWindow.overlay`).
   pub overlay: bool,
+  /// Its page keeps its timers' rate while the window is not on screen
+  /// (`backgroundThrottling: false`). The bootstrap window is throttled.
+  pub unthrottled: bool,
 }
 
 /// Whether a `new BrowserWindow(options)` may adopt the bootstrap window
 /// instead of creating one. It may only when every creation-time attribute
 /// the options ask for is what the bootstrap window already has: adopting it
 /// regardless silently dropped `frameless` / `noActivate` / `transparent` /
-/// `transparentTitlebar` / `overlay`, so a tray panel (`attachPanel`) came out as an
-/// ordinary framed, focus-stealing window. An attribute the options leave
-/// unset keeps the configured `initialWindow` value.
+/// `transparentTitlebar` / `overlay` / `backgroundThrottling`, so a tray
+/// panel (`attachPanel`) came out as an ordinary framed, focus-stealing
+/// window. An attribute the options leave unset keeps the configured
+/// `initialWindow` value.
 fn adopts_initial_window(
   initial: &InitialWindowAttributes,
   options: Option<&BrowserWindowOptions>,
@@ -3012,6 +3017,7 @@ fn adopts_initial_window(
     && agrees(o.transparent_titlebar, initial.transparent_titlebar)
     && agrees(o.transparent, initial.transparent)
     && agrees(o.overlay, initial.overlay)
+    && agrees(o.background_throttling.map(|t| !t), initial.unthrottled)
 }
 
 /// The native API for a `Deno.desktop` constructor. Workers have no desktop
@@ -3164,6 +3170,10 @@ impl BrowserWindow {
           .unwrap_or(false);
         let hidden = options.as_ref().and_then(|o| o.show) == Some(false);
         let overlay = options.as_ref().and_then(|o| o.overlay).unwrap_or(false);
+        let background_throttling = options
+          .as_ref()
+          .and_then(|o| o.background_throttling)
+          .unwrap_or(true);
         api.create_window(
           width,
           height,
@@ -3173,6 +3183,7 @@ impl BrowserWindow {
           transparent,
           hidden,
           overlay,
+          background_throttling,
         )
       });
     // The adopted bootstrap window is created hidden: `show: false` keeps it
@@ -3926,6 +3937,10 @@ struct BrowserWindowOptions {
   /// API 50); an ordinary window elsewhere.
   overlay: Option<bool>,
   skip_taskbar: Option<bool>,
+  /// `false`: the page keeps its timers' rate while the window is not on
+  /// screen (Electron's `backgroundThrottling`; laufey API 51). Throttled,
+  /// never frozen, by default. Creation time only.
+  background_throttling: Option<bool>,
 }
 
 /// The most rectangles `setHitRegion()` takes.
@@ -8903,9 +8918,21 @@ mod tests {
         overlay: Some(true),
         ..Default::default()
       },
+      // The bootstrap window's page is throttled while hidden.
+      BrowserWindowOptions {
+        background_throttling: Some(false),
+        ..Default::default()
+      },
     ] {
       assert!(!adopts_initial_window(&plain, Some(&options)));
     }
+    assert!(adopts_initial_window(
+      &plain,
+      Some(&BrowserWindowOptions {
+        background_throttling: Some(true),
+        ..Default::default()
+      })
+    ));
     // An `overlay` initialWindow (a layer surface) is adopted by a request
     // that leaves `overlay` unset or asks for it, not by one refusing it.
     let overlay = InitialWindowAttributes {

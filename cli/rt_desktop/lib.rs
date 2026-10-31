@@ -57,7 +57,7 @@ use denort::run::RunOptions;
 /// makes the failure mode obvious instead of "the desktop app silently won't
 /// launch".
 const _: () = assert!(
-  laufey::LAUFEY_API_VERSION == 50,
+  laufey::LAUFEY_API_VERSION == 51,
   "LAUFEY_API_VERSION mismatch: update this assert and the prebuilt backend release pin in cli/tools/desktop.rs when laufey bumps its API version",
 );
 
@@ -793,6 +793,8 @@ impl WefDesktopApi {
         hidden: true,
         transparent: options.transparent,
         overlay: options.overlay,
+        // Throttled while hidden, never frozen (laufey API 51).
+        background_throttling: laufey::BackgroundThrottling::Throttle,
       },
     );
     let window =
@@ -847,6 +849,7 @@ impl denort::desktop::DesktopApi for WefDesktopApi {
     transparent: bool,
     hidden: bool,
     overlay: bool,
+    background_throttling: bool,
   ) -> u32 {
     let window = laufey::Window::new_with_options(
       width,
@@ -858,6 +861,11 @@ impl denort::desktop::DesktopApi for WefDesktopApi {
         hidden,
         transparent,
         overlay,
+        background_throttling: if background_throttling {
+          laufey::BackgroundThrottling::Throttle
+        } else {
+          laufey::BackgroundThrottling::None
+        },
       },
     );
     let window = self.setup_window_events(window, None);
@@ -4043,6 +4051,7 @@ async fn run_desktop(
           transparent_titlebar: initial_window.transparent_titlebar,
           transparent: initial_window.transparent,
           overlay: initial_window.overlay,
+          unthrottled: false,
         },
       ));
       if let Some(name) = title_name {
