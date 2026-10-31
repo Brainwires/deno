@@ -12,8 +12,8 @@ OS spellchecker and get none.
 
 The files are Chromium's prebuilt `.bdic` files from
 chromium/deps/hunspell_dictionaries at the commit the CEF's Chromium pins in
-its DEPS (CEF 150.0.21 = Chromium 150.0.7871.255; Chromium 149's DEPS pinned the
-same commit), so each name carries the
+its DEPS (CEF 156.0.14 = Chromium 156.0.8078.48, whose en-* dictionaries are
+-10-2; Chromium 149 and 150 pinned cccf64a8 with -10-1), so each name carries the
 version that Chromium asks for (`spellcheck_common.cc`,
 `GetVersionedFileName`). Each is pinned by SHA-256 here; a download that does
 not match fails. The license README of each dictionary and the repository's
@@ -32,13 +32,13 @@ import time
 import urllib.request
 
 REPO = "https://chromium.googlesource.com/chromium/deps/hunspell_dictionaries"
-# src/third_party/hunspell_dictionaries in Chromium 150.0.7871.255's DEPS.
-COMMIT = "cccf64a8acc951afe3f47fee023908e55699bc58"
+# src/third_party/hunspell_dictionaries in Chromium 156.0.8078.48's DEPS.
+COMMIT = "cee14e319bb7603a1157bb4d1e216be64ee82b77"
 
 # The common languages: file -> SHA-256.
 DICTIONARIES = {
-    "en-US-10-1.bdic": "a075b01d9b015c616511a9e87da77da3d9881621db32f584e4606ddabf1c1100",
-    "en-GB-10-1.bdic": "eaed4a709abdbd2f14aa143f25fe9c4c1b44591c7cb1942f75f968fb2fcd3cf8",
+    "en-US-10-2.bdic": "b0d80e6b6c5491879365e176ecbd98074602a663429bcfcfb0a5a8375c051f13",
+    "en-GB-10-2.bdic": "e014c23d2215f093205343b9b8805e17c8d8e115d314d93fd5ba51eadf05cff2",
     "de-DE-3-0.bdic": "076a470700dbd0aa62bb8b3d24c34e1340bdfe83cbbcfc035ce972f23c140400",
     "fr-FR-3-0.bdic": "6cffc13b549c33d44180a3a7b13943fe0eadfbe80bcdbccc76f67c55c2012968",
     "es-ES-3-0.bdic": "e6334dcf080aaeca679db70565762a2c296ff5780c1af263530ac7345736bfa9",

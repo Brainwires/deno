@@ -1131,7 +1131,7 @@ where the changes are discussed.
     en-GB, de-DE, fr-FR, es-ES, pt-BR, it-IT; about 14 MB) in
     `laufey/cef/build/Release/dictionaries/`, fetched by
     `.github/denext-runtime/fetch_dictionaries.py` from
-    chromium/deps/hunspell_dictionaries at the commit CEF 150's Chromium pins
+    chromium/deps/hunspell_dictionaries at the commit the CEF's Chromium pins
     (so the versioned names are the ones it asks for) and pinned by SHA-256;
     each dictionary's license is in `licenses/hunspell/`. Before the first
     browser the host copies the dictionaries of the languages in use (the
@@ -7430,10 +7430,61 @@ where the changes are discussed.
        overlay checks, `--layer1` StatusNotifierItem clicks) covers the native
        side.
 
+184. **laufey on CEF 156** (laufey `chore/cef-stable-bump` dd68c1a, from
+     `development-denext` 209306c; no runtime API change, laufey API 50; runtime
+     3.0.0-denext.7). The CEF hosts move from CEF 150.0.21+ga61e9a5 (Chromium
+     150.0.7871.255, six Chrome majors behind stable) to CEF 156.0.14+g4fa4ab5
+     (Chromium 156.0.8078.48, CEF branch 8078, API 15600), the newest CEF stable
+     build for every platform and Chrome stable's milestone when it was pinned.
+     laufey's Makefile and `cef/flake.nix` pin each platform's archive by
+     SHA-256, checked against the `.sha1` and `.sha256` CEF publishes. What it
+     changed for the hosts:
+     - Chromium 156 checks for auto de-elevation in
+       `ChromeMainDelegate::BasicStartupComplete`, before CEF calls the host's
+       command-line hook, so item 73's `--do-not-de-elevate` came too late. The
+       Windows CEF host now starts an elevated launch (a full token with UAC on,
+       without Chromium's skip switches) again with the switch after the program
+       name, the rest of its command line, its environment, working directory
+       and standard handles unchanged, waits for it and exits with its code; the
+       relaunch hides the switch from the app's arguments and from a forwarded
+       second launch. laufey's de-elevation tripwire now requires that relaunch
+       for a Chromium 156+ pin.
+     - `IDC_CONTENT_CONTEXT_INSPECTELEMENT_WITH_GEMINI` left CEF's command ids
+       (the DevTools command filter names it only where it exists); `RunWinMain`
+       takes `LPWSTR`.
+     - CEF 156's Windows `bootstrap.exe` carries CEF's installer, which can
+       download CEF from a CDN; it runs only with a `CEF_INSTALLER_CONFIG`
+       resource, which laufey's host DLL doesn't have, so the archives make no
+       such request.
+     - CEF's own `--disable-features` defaults and the network-quiet features
+       are unchanged from 150. New in Chromium 156: the on-device model manifest
+       broker is always built and installs its manifest component
+       (`ceofaddefefcbblgcgnibnonglccbfja`) at every launch past
+       `--disable-component-update` (update.googleapis.com, edgedl.me.gvt1.com);
+       the hosts add an empty `--optimization-guide-manifest-override` wherever
+       they turn the component updater off, so the archives still make no
+       request of their own (laufey's `--network-quiet` leg).
+     - macOS: a window's page lost the title bar's 28 px when its size was set
+       while CEF 156 was still creating it; the host takes the frame from AppKit
+       when Views reports none.
+     - Chromium 156's English Hunspell dictionaries are `-10-2`
+       (hunspell_dictionaries `cee14e31`, was `cccf64a8`):
+       `fetch_dictionaries.py` ships `en-US-10-2.bdic` / `en-GB-10-2.bdic` (the
+       other languages and every license file are byte-identical), so a fresh
+       Linux profile still gets English spellcheck (item 37).
+     - laufey CI warns (`scripts/check-cef-staleness.sh`) when its CEF is more
+       than 2 Chrome majors behind stable, beside this workflow's
+       `engine_staleness.py` gate.
+
+     Tests: laufey's `launch_args_test` (the relaunch decision, the command-line
+     splice, the hidden switch); laufey's full CI on the commit and its Linux
+     x64 and macOS arm64 builds and suites run locally; this fork's desktop
+     runtime build and e2e on every target.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
-169-174, 176, 178, 180, 182, 183) are what the prebuilt `libdenort` carries. The
+169-174, 176, 178, 180, 182-184) are what the prebuilt `libdenort` carries. The
 CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID`
 into a packaged app's launchers) are in the branch too, but a stock CLI does not
 run them; denext's own launcher provides that environment.
@@ -7462,9 +7513,10 @@ through libwebauthn (item 88); and, for runtime 3.0.0-denext.2, legacy Linux
 secure-store items read over an encrypted Secret Service session (laufey
 879ee0e) and tokio 1.53.3 with laufey's own `.cargo/audit.toml`; and, for
 runtime 3.0.0-denext.6, API 50: overlay windows, tray events, the launch
-activation policy and speech, item 183), at the commit pinned by `LAUFEY_SHA` in
-the workflow (or the `laufey_ref` input). The same commit is the `laufey` git
-dependency of `cli/rt_desktop/Cargo.toml` (crate 0.8.0, API 50, CEF 150.0.21).
+activation policy and speech, item 183; and, for runtime 3.0.0-denext.7, CEF
+156, item 184), at the commit pinned by `LAUFEY_SHA` in the workflow (or the
+`laufey_ref` input). The same commit is the `laufey` git dependency of
+`cli/rt_desktop/Cargo.toml` (crate 0.8.0, API 50, CEF 156.0.14).
 
 laufey's `init_api` rejects any C ABI version mismatch between the runtime and
 the host, so the `laufey` crate libdenort links and the hosts are built from the
