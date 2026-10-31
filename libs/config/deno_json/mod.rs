@@ -1158,6 +1158,7 @@ struct SerializedDesktopInitialWindowConfig {
   pub transparent: Option<bool>,
   pub show_on_first_load: Option<bool>,
   pub overlay: Option<bool>,
+  pub background_throttling: Option<bool>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
@@ -1240,6 +1241,7 @@ impl SerializedDesktopConfig {
         transparent: w.transparent.unwrap_or(false),
         show_on_first_load: w.show_on_first_load.unwrap_or(true),
         overlay: w.overlay.unwrap_or(false),
+        background_throttling: w.background_throttling.unwrap_or(true),
       }),
     }
   }
@@ -1323,6 +1325,9 @@ pub struct DesktopInitialWindowConfig {
   pub show_on_first_load: bool,
   /// A wlr-layer-shell overlay surface where the compositor has one.
   pub overlay: bool,
+  /// `false` keeps the page's timers at their rate while the window is not
+  /// on screen (macOS); `true`, the default, throttles them.
+  pub background_throttling: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -4643,7 +4648,8 @@ mod tests {
             "transparentTitlebar": true,
             "transparent": true,
             "showOnFirstLoad": false,
-            "overlay": true
+            "overlay": true,
+            "backgroundThrottling": false
           }
         }
       }"#,
@@ -4662,6 +4668,7 @@ mod tests {
         transparent: true,
         show_on_first_load: false,
         overlay: true,
+        background_throttling: false,
       }),
     );
   }
@@ -4700,7 +4707,8 @@ mod tests {
           "transparentTitlebar": true,
           "transparent": true,
           "showOnFirstLoad": false,
-          "overlay": true
+          "overlay": true,
+          "backgroundThrottling": false
         }
       }
     }"#;

@@ -517,6 +517,38 @@ mod tests {
   }
 
   #[test]
+  fn unthrottled_initial_window_from_the_file() {
+    let read = reader(&[(
+      ".deno-desktop/app.json",
+      r#"{"initialWindow":{"backgroundThrottling":false,"showOnFirstLoad":false}}"#,
+    )]);
+    let config = resolve_app_config(
+      None,
+      None,
+      Some(&[]),
+      None,
+      Path::new("/vfs"),
+      "main.ts",
+      &read,
+    )
+    .unwrap();
+    assert!(!config.initial_window.background_throttling);
+    assert!(!config.initial_window.show_on_first_load);
+    // No file: the bootstrap window is throttled.
+    let config = resolve_app_config(
+      None,
+      None,
+      Some(&[]),
+      None,
+      Path::new("/vfs"),
+      "main.ts",
+      |_| None,
+    )
+    .unwrap();
+    assert!(config.initial_window.background_throttling);
+  }
+
+  #[test]
   fn single_instance_requires_an_identifier() {
     let read =
       reader(&[(".deno-desktop/app.json", r#"{"singleInstance":true}"#)]);

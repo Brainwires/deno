@@ -8141,11 +8141,38 @@ where the changes are discussed.
      (it isn't tunable at run time). The audit's "4 × CPUs" is the Windows value
      only. No behaviour changes.
 
+206. **`feat(desktop)`: `initialWindow.backgroundThrottling`, an unthrottled
+     main window** (follows item 198; `cli/lib/standalone/app_origin.rs`,
+     `cli/lib/standalone/binary.rs`, `cli/rt_desktop/lib.rs`,
+     `cli/standalone/binary.rs`, `libs/config/deno_json/mod.rs`,
+     `cli/schemas/config-file.v1.json`, `lib.deno.desktop.d.ts`; for runtime
+     3.0.0-denext.8). Item 198 created the bootstrap window always throttled
+     (`InitialWindowAttributes.unthrottled: false`), and WebKit reads the policy
+     only when it sets the page up, so an app whose main window must keep its
+     timers while hidden could not have one: the main window adopts the
+     bootstrap window, and a `backgroundThrottling: false` passed to
+     `new Deno.BrowserWindow()` made adoption refuse and opened a second window
+     beside it.
+     - `initialWindow.backgroundThrottling` (app.json, and deno.json
+       `desktop.initialWindow` / the compile metadata, like `overlay` and
+       `showOnFirstLoad`; the metadata's value wins over the file's): `true`,
+       the default, is item 198's throttled bootstrap window; `false` creates it
+       with laufey `BackgroundThrottling::None` and records it as `unthrottled`,
+       so the first `new BrowserWindow()` that leaves `backgroundThrottling`
+       unset or passes `false` adopts it, and one passing `true` gets a new
+       window. Metadata written before the key existed reads as `true`. macOS
+       only, as item 198; Windows, Linux and CEF ignore it.
+     - Tests: `runtime::ops::desktop`'s adoption test (an unthrottled bootstrap
+       window is adopted by unset / `false`, not by `true`), `cli/lib`'s
+       app.json parsing (`false`, `true`, a non-boolean and a misspelled key)
+       and the metadata without the key, `rt_desktop`'s resolution from
+       app.json, and the deno.json config and schema tests.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
-169-174, 176, 178, 180, 182-184, 186, 187, 189-191, 193-196, 198-203) are what
-the prebuilt `libdenort` carries. The CLI-side parts (for example writing
+169-174, 176, 178, 180, 182-184, 186, 187, 189-191, 193-196, 198-203, 206) are
+what the prebuilt `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
 in the branch too, but a stock CLI does not run them; denext's own launcher
 provides that environment.

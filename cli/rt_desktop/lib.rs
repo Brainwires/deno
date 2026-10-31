@@ -793,8 +793,13 @@ impl WefDesktopApi {
         hidden: true,
         transparent: options.transparent,
         overlay: options.overlay,
-        // Throttled while hidden, never frozen (laufey API 51).
-        background_throttling: laufey::BackgroundThrottling::Throttle,
+        // Throttled while hidden, never frozen (laufey API 51), unless
+        // `initialWindow.backgroundThrottling` is false.
+        background_throttling: if options.background_throttling {
+          laufey::BackgroundThrottling::Throttle
+        } else {
+          laufey::BackgroundThrottling::None
+        },
       },
     );
     let window =
@@ -4051,7 +4056,7 @@ async fn run_desktop(
           transparent_titlebar: initial_window.transparent_titlebar,
           transparent: initial_window.transparent,
           overlay: initial_window.overlay,
-          unthrottled: false,
+          unthrottled: !initial_window.background_throttling,
         },
       ));
       if let Some(name) = title_name {

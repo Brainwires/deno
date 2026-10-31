@@ -127,7 +127,8 @@ pub enum AppOriginError {
 /// lock itself, requires an `identifier`).
 ///
 /// `initialWindow` mirrors `desktop.initialWindow` (width, height, frameless,
-/// noActivate, transparentTitlebar, transparent, showOnFirstLoad, overlay), so a
+/// noActivate, transparentTitlebar, transparent, showOnFirstLoad, overlay,
+/// backgroundThrottling), so a
 /// stock CLI that rejects the key in deno.json can still configure the
 /// bootstrap window (a tray-only app sets `"showOnFirstLoad": false`). The
 /// metadata's value, written by a CLI that knows the key, takes precedence.
@@ -176,6 +177,7 @@ struct SerializedInitialWindow {
   transparent: Option<bool>,
   show_on_first_load: Option<bool>,
   overlay: Option<bool>,
+  background_throttling: Option<bool>,
 }
 
 /// The validated contents of an [`APP_CONFIG_FILE`].
@@ -315,6 +317,9 @@ pub fn parse_app_config_file(bytes: &[u8]) -> Result<AppConfigFile, String> {
           .show_on_first_load
           .unwrap_or(defaults.show_on_first_load),
         overlay: w.overlay.unwrap_or(defaults.overlay),
+        background_throttling: w
+          .background_throttling
+          .unwrap_or(defaults.background_throttling),
       }
     }),
   })
@@ -696,7 +701,30 @@ mod tests {
         ..Default::default()
       })
     );
+    // An unthrottled bootstrap window (an unset key is throttled).
+    assert_eq!(
+      parse_app_config_file(
+        br#"{ "initialWindow": { "backgroundThrottling": false } }"#
+      )
+      .unwrap()
+      .initial_window,
+      Some(super::super::binary::InitialWindowConfig {
+        background_throttling: false,
+        ..Default::default()
+      })
+    );
+    assert!(
+      parse_app_config_file(
+        br#"{ "initialWindow": { "backgroundThrottling": true } }"#
+      )
+      .unwrap()
+      .initial_window
+      .unwrap()
+      .background_throttling
+    );
     for bad in [
+      r#"{ "initialWindow": { "backgroundThrottling": "no" } }"#,
+      r#"{ "initialWindow": { "backgroundThrotling": false } }"#,
       r#"{ "initialWindow": { "overlay": "yes" } }"#,
       r#"{ "initialWindow": { "width": 0 } }"#,
       r#"{ "initialWindow": { "showOnFirstLod": false } }"#,
