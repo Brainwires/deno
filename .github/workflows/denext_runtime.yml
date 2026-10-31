@@ -103,13 +103,12 @@ env:
   # milestone, warns on every run and, with `tag`, fails a release tag;
   # `warn` keeps a tag at a warning. A pin on the Extended Stable milestone
   # only warns, and says it is still patched (DENEXT.md item 179). A failed
-  # Chrome stable lookup only warns. `warn` since 3.0.0-denext.3: V8
-  # 15.2.124.45 (DENEXT.md item 162) carries the 15.2 branch's security
-  # merges, but the gate counts milestones, not patch level, and CEF 150 is
-  # behind too, so `tag` would refuse every tag (items 150, 162). It stays
-  # `warn` until the fork builds its own current V8 line and the rule gains
-  # a patch-age limit.
-  ENGINE_STALENESS_ENFORCE: warn
+  # Chrome stable lookup only warns. V8 is `tag` again since the fork builds
+  # its own V8 line on Chrome's Extended Stable branch (V8 15.6, DENEXT.md
+  # item 184). CEF stays `warn` until laufey's CEF tracks Chrome's release
+  # cadence the same way (items 150, 162).
+  ENGINE_STALENESS_ENFORCE: tag
+  ENGINE_STALENESS_ENFORCE_CEF: warn
 
 jobs:
   setup:
@@ -182,7 +181,8 @@ jobs:
 
           # Engine staleness: V8 and CEF more than one Chrome stable major
           # behind get no upstream security fixes. Warns on branches, fails a
-          # tag (ENGINE_STALENESS_ENFORCE); offline it warns and passes.
+          # tag (ENGINE_STALENESS_ENFORCE[_V8|_CEF]); offline it warns and
+          # passes.
           tag_flag=()
           if [ "$REF_TYPE" = tag ]; then tag_flag=(--tag); fi
           python3 -I .github/denext-runtime/engine_staleness.py "${tag_flag[@]}" --cef "$cef_version" ||

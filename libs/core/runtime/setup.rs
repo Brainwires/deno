@@ -166,8 +166,8 @@ fn v8_init(
   let base_flags = concat!(
     " --turbo_fast_api_calls",
     " --harmony-temporal",
-    " --js-float16array",
-    " --js-explicit-resource-management",
+    // `--js-float16array` and `--js-explicit-resource-management` are gone
+    // from V8 15.6: both features ship unflagged (DENEXT.md item 184).
     " --js-source-phase-imports",
     " --js-defer-import-eval",
     // Installs a native `queueMicrotask` on the global object, letting us

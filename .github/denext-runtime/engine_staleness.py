@@ -19,8 +19,11 @@ reach. So a pin is STALE when its milestone is below `stable - 1` and below
 Extended Stable.
 
 A stale pin is a `::warning::` on every run, and an `::error::` that fails
-the run at a release tag (`--tag`) when ENGINE_STALENESS_ENFORCE is `tag`
-(the default); `warn` keeps a tag at a warning too. A pin behind stable but
+the run at a release tag (`--tag`) when its engine's mode is `tag` (the
+default); `warn` keeps a tag at a warning too. ENGINE_STALENESS_ENFORCE sets
+the mode of both engines; ENGINE_STALENESS_ENFORCE_V8 and
+ENGINE_STALENESS_ENFORCE_CEF override it for one (DENEXT.md item 184: V8,
+which the fork now builds itself, is enforced while CEF is not). A pin behind stable but
 on the Extended Stable milestone is not stale: it is a `::warning::` that
 says it still gets fixes, on Extended Stable's schedule, and never fails a
 tag. When Extended Stable cannot be learned, a pin is judged against stable
@@ -34,6 +37,8 @@ Usage: engine_staleness.py [--tag] [--cef <CEF_FULL_VERSION>]
                            [--lock <Cargo.lock>] [--stable <milestone>]
                            [--extended <milestone>]
 Env:   ENGINE_STALENESS_ENFORCE  `tag` (default) or `warn`
+       ENGINE_STALENESS_ENFORCE_V8, ENGINE_STALENESS_ENFORCE_CEF
+                                 the same, for one engine (default: the above)
        CHROME_STABLE_URL         the versionhistory endpoints (tests point
        CHROME_EXTENDED_URL       them at a file:// answer or a closed port)
 Prints one line per engine and exits 0, or 1 when a tag is refused.
@@ -139,16 +144,20 @@ def verdict(name, milestone, stable, extended=None):
 
 def evaluate(engines, stable, tag, enforce, extended=None):
     """(exit code, lines) for `engines` [(name, milestone)] against Chrome
-    stable `stable` and Extended Stable `extended` (None: not known)."""
+    stable `stable` and Extended Stable `extended` (None: not known). An
+    engine given as (name, milestone, mode) uses that mode instead of
+    `enforce`."""
     lines = []
     refused = False
-    for name, milestone in engines:
+    for engine in engines:
+        name, milestone = engine[0], engine[1]
+        mode = engine[2] if len(engine) > 2 else enforce
         state, line = verdict(name, milestone, stable, extended)
         if state == "current":
             lines.append(line)
         elif state == "extended":
             lines.append(f"::warning::{line}")
-        elif tag and enforce == "tag":
+        elif tag and mode == "tag":
             lines.append(f"::error::{line}")
             refused = True
         else:
@@ -168,9 +177,16 @@ def main(argv):
     args = p.parse_args(argv)
 
     enforce = os.environ.get("ENGINE_STALENESS_ENFORCE", "tag") or "tag"
-    if enforce not in ("tag", "warn"):
-        print(f"::error::ENGINE_STALENESS_ENFORCE is '{enforce}', want 'tag' or 'warn'")
-        return 1
+    modes = {}
+    for var, value in (
+        ("ENGINE_STALENESS_ENFORCE", enforce),
+        ("ENGINE_STALENESS_ENFORCE_V8", os.environ.get("ENGINE_STALENESS_ENFORCE_V8") or enforce),
+        ("ENGINE_STALENESS_ENFORCE_CEF", os.environ.get("ENGINE_STALENESS_ENFORCE_CEF") or enforce),
+    ):
+        if value not in ("tag", "warn"):
+            print(f"::error::{var} is '{value}', want 'tag' or 'warn'")
+            return 1
+        modes[var] = value
 
     with open(args.lock, encoding="utf-8") as f:
         crate = v8_crate_version(f.read())
@@ -178,13 +194,13 @@ def main(argv):
     if v8 is None:
         print(f"::error::no readable v8 package version in {args.lock} (got {crate!r})")
         return 1
-    engines = [(f"V8 {v8[1]} (v8 crate {crate})", v8[0])]
+    engines = [(f"V8 {v8[1]} (v8 crate {crate})", v8[0], modes["ENGINE_STALENESS_ENFORCE_V8"])]
     if args.cef is not None:
         cef = cef_milestone(args.cef)
         if cef is None:
             print(f"::error::cannot read a Chrome milestone from CEF_FULL_VERSION '{args.cef}'")
             return 1
-        engines.append((f"CEF {args.cef}", cef))
+        engines.append((f"CEF {args.cef}", cef, modes["ENGINE_STALENESS_ENFORCE_CEF"]))
 
     stable = args.stable
     if stable is None:
@@ -192,13 +208,13 @@ def main(argv):
         if stable is None:
             print(
                 f"::warning::could not learn the Chrome stable milestone ({reason}); "
-                f"engine staleness not checked: {', '.join(n for n, _ in engines)}"
+                f"engine staleness not checked: {', '.join(e[0] for e in engines)}"
             )
             return 0
 
     extended = args.extended
     # Only a pin behind stable needs Extended Stable.
-    if extended is None and any(stable - m > ALLOWED_LAG for _, m in engines):
+    if extended is None and any(stable - e[1] > ALLOWED_LAG for e in engines):
         extended, reason = fetch_stable(
             os.environ.get("CHROME_EXTENDED_URL") or CHROME_EXTENDED_URL
         )

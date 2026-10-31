@@ -2025,7 +2025,8 @@ pub fn config_to_deno_graph_workspace_member(
 pub fn get_default_v8_flags() -> Vec<String> {
   vec![
     "--stack-size=1024".to_string(),
-    "--inspector-live-edit".to_string(),
+    // `--inspector-live-edit` is gone: V8 15.6 removed live edit
+    // (DENEXT.md item 184).
     "--external-memory-max-reasonable-size=0".to_string(),
   ]
 }

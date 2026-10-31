@@ -114,6 +114,14 @@ class Evaluate(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertTrue(lines[0].startswith("::warning::"))
 
+    def test_an_engines_own_mode_overrides_enforce(self):
+        code, lines = gate.evaluate(
+            [("V8", 150, "tag"), ("CEF", 150, "warn")], 156, tag=True, enforce="warn"
+        )
+        self.assertEqual(code, 1)
+        self.assertTrue(lines[0].startswith("::error::V8"))
+        self.assertTrue(lines[1].startswith("::warning::CEF"))
+
 
 class Script(unittest.TestCase):
     def setUp(self):
@@ -129,15 +137,20 @@ class Script(unittest.TestCase):
         )
         return pathlib.Path(path).as_uri()
 
-    def gate(self, *args, url=None, enforce=None, extended_url="http://127.0.0.1:9/versions"):
+    def gate(
+        self, *args, url=None, enforce=None, extended_url="http://127.0.0.1:9/versions", **modes
+    ):
         env = dict(os.environ)
-        env.pop("ENGINE_STALENESS_ENFORCE", None)
+        for var in ("ENGINE_STALENESS_ENFORCE", "ENGINE_STALENESS_ENFORCE_V8", "ENGINE_STALENESS_ENFORCE_CEF"):
+            env.pop(var, None)
         if url is not None:
             env["CHROME_STABLE_URL"] = url
         # A closed port unless a case gives an answer: never the network.
         env["CHROME_EXTENDED_URL"] = extended_url
         if enforce is not None:
             env["ENGINE_STALENESS_ENFORCE"] = enforce
+        for engine, mode in modes.items():
+            env[f"ENGINE_STALENESS_ENFORCE_{engine.upper()}"] = mode
         return subprocess.run(
             [sys.executable, "-I", GATE, "--lock", self.lock, *args],
             env=env,
@@ -166,6 +179,25 @@ class Script(unittest.TestCase):
         r = self.gate("--tag", "--cef", CEF, url=self.answer("156.0.8078.73"), enforce="warn")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertEqual(r.stdout.count("::warning::"), 2)
+
+    def test_cef_warn_keeps_a_stale_cef_at_a_warning_while_v8_is_enforced(self):
+        # denext_runtime.yml: V8 is `tag`, CEF `warn` (DENEXT.md item 184).
+        r = self.gate("--tag", "--cef", CEF, url=self.answer("156.0.8078.73"), enforce="tag", cef="warn")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("::error::V8 15.2", r.stdout)
+        self.assertIn(f"::warning::CEF {CEF}", r.stdout)
+
+    def test_a_current_v8_and_a_stale_cef_at_warn_pass_a_tag(self):
+        pathlib.Path(self.lock).write_text(LOCK.replace('"152.2.0"', '"156.0.0+denext.1"'))
+        r = self.gate("--tag", "--cef", CEF, url=self.answer("156.0.8078.73"), enforce="tag", cef="warn")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("V8 15.6 (v8 crate 156.0.0+denext.1) is current enough", r.stdout)
+        self.assertIn(f"::warning::CEF {CEF}", r.stdout)
+
+    def test_an_unknown_engine_mode_fails(self):
+        r = self.gate("--stable", "152", v8="sometimes")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("::error::ENGINE_STALENESS_ENFORCE_V8 is 'sometimes'", r.stdout)
 
     def test_a_pin_on_extended_stable_passes_a_tag(self):
         r = self.gate(

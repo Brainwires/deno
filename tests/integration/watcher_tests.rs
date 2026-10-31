@@ -3544,10 +3544,12 @@ console.log("Listening...")
     "#,
   );
 
-  wait_contains("Replaced changed module", &mut stderr_lines).await;
-  // Re-evaluating the module calls `Deno.serve` again, so there is a window
-  // right after the module is replaced where the listener has been closed and
-  // not yet rebound and a connection is refused. Retry until it is accepting.
+  // V8 15.6 has no live edit, so HMR restarts the program instead of
+  // replacing the module (DENEXT.md item 184).
+  wait_contains("no live edit", &mut stderr_lines).await;
+  // Restarting runs `Deno.serve` again, so there is a window right after the
+  // restart where the listener has been closed and not yet rebound and a
+  // connection is refused. Retry until it is accepting.
   //
   // This used to spawn a fire-and-forget `deno eval` child that fetched once
   // and was never awaited: a refused connection there silently dropped the
@@ -3622,7 +3624,9 @@ export function foo() {
     "#,
   );
 
-  wait_contains("Replaced changed module", &mut stderr_lines).await;
+  // V8 15.6 has no live edit, so HMR restarts the program instead of
+  // replacing the module (DENEXT.md item 184).
+  wait_contains("no live edit", &mut stderr_lines).await;
   wait_contains("<h1>Hello world</h1>", &mut stdout_lines).await;
 
   check_alive_then_kill(child);
@@ -3805,7 +3809,11 @@ setInterval(() => {
 "#,
   );
 
-  wait_contains("compile error: Uncaught SyntaxError", &mut stderr_lines).await;
+  // V8 15.6 has no live edit, so the change restarts the program, which then
+  // fails to parse (DENEXT.md item 184).
+  wait_contains("no live edit", &mut stderr_lines).await;
+  wait_contains("SyntaxError", &mut stderr_lines).await;
+  wait_contains("Process failed", &mut stderr_lines).await;
   check_alive_then_kill(child);
 }
 

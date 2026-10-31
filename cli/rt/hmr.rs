@@ -558,6 +558,15 @@ impl DesktopHmrRunner {
           return ChangeOutcome::Skipped;
         }
       };
+      // V8 15.6 removed live edit: `Debugger.setScriptSource` answers with a
+      // protocol error and no result (DENEXT.md item 184). Reload the page so
+      // the edit still lands.
+      if value.is_null() {
+        return ChangeOutcome::NeedsReload(format!(
+          "{} cannot be replaced in place (no live edit in this V8)",
+          module_url
+        ));
+      }
       let result: cdp::SetScriptSourceResponse =
         match serde_json::from_value(value) {
           Ok(r) => r,

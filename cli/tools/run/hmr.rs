@@ -25,6 +25,11 @@ use crate::util::file_watcher::WatcherCommunicator;
 use crate::util::file_watcher::WatcherRestartMode;
 use crate::util::fs::canonicalize_path;
 
+/// Why `--watch-hmr` restarts instead of replacing a module: V8 15.6 removed
+/// live edit, so `Debugger.setScriptSource` always fails (DENEXT.md item 184).
+pub(crate) const LIVE_EDIT_UNAVAILABLE: &str =
+  "this V8 cannot replace a running module (no live edit); restarting";
+
 static NEXT_MSG_ID: AtomicI32 = AtomicI32::new(0);
 fn next_id() -> i32 {
   NEXT_MSG_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
@@ -271,6 +276,14 @@ impl HmrRunner {
             loop {
               let msg_id = self.set_script_source(&id, source_code.as_str());
               let value = self.wait_for_response(msg_id).await;
+              // V8 15.6 removed live edit: `Debugger.setScriptSource` answers
+              // with a protocol error and no result. Restart the program, as
+              // for any module that cannot be replaced in place.
+              if value.is_null() {
+                self.watcher().print(format!("Failed to reload module {}: {}.", module_url, colors::gray(LIVE_EDIT_UNAVAILABLE)));
+                let _ = self.watcher().force_restart();
+                break;
+              }
               let result: cdp::SetScriptSourceResponse = serde_json::from_value(value).map_err(|e| {
                 JsErrorBox::from_err(e)
               })?;
@@ -321,7 +334,8 @@ impl HmrRunner {
   #[allow(clippy::print_stderr, reason = "diagnostic for flaky CDP responses")]
   fn extract_result(mut value: serde_json::Value) -> serde_json::Value {
     let result = value["result"].take();
-    if result.is_null() {
+    // A protocol error (no live edit in this V8) is handled by the caller.
+    if result.is_null() && value.get("error").is_none() {
       eprintln!(
         "CDP response has null result. Full response: {}",
         serde_json::to_string(&value).unwrap_or_default()
