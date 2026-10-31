@@ -196,7 +196,7 @@ export const argv: string[] = ["", ""];
 // And retains any value as long as it's nullish or number-ish.
 let ProcessExitCode: undefined | null | string | number;
 
-// denext (DENEXT.md item 188): filled at bootstrap with the Deno flags of
+// denext (DENEXT.md item 189): filled at bootstrap with the Deno flags of
 // a `deno run` / `deno serve` that shape a child process (permissions,
 // `--unstable*`, `--config`, ...), as Node's holds the node flags before the
 // script. Empty in a compiled program and under every other subcommand.

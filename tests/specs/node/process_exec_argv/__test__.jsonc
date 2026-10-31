@@ -1,4 +1,4 @@
-// denext (DENEXT.md item 188): `process.execArgv` holds the Deno flags of a
+// denext (DENEXT.md item 189): `process.execArgv` holds the Deno flags of a
 // `deno run` that shape a child, and `fork()` (whose default execArgv it is)
 // gives the child the parent's grants instead of `-A`.
 {

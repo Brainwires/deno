@@ -5527,7 +5527,7 @@ where the changes are discussed.
      `\\.\pipe\` path and `Deno.stdin` read through the file system's
      `spawn_blocking`, one pending read per handle; the cap they count against,
      and what happens at it, is documented in
-     [The blocking thread pool](#the-blocking-thread-pool) (item 199).
+     [The blocking thread pool](#the-blocking-thread-pool) (item 205).
 
      Tests: `commandManyPipedStdinsDoNotExhaustBlockingPool`
      (`tests/unit/command_test.ts`, Windows only:
@@ -7574,36 +7574,35 @@ where the changes are discussed.
        `node:zlib` Brotli round trip once its page has loaded, under both
        backends on every target.
 
-187. **`feat(compile)`: the CLI carries the SHA-256 of every `denort` archive
-     of its release** (`feat/embed-denort-sha`; `cli/standalone/binary.rs`,
-     `cli/build.rs`, `denext_runtime.yml`, `.github/denext-runtime/`; CLI
-     only). Item 130 checks the release's `denort` against the `SHA256SUMS`
-     fetched from the same release, so a release whose archive and
-     `SHA256SUMS` were both replaced (before immutable releases, or a
-     `DENEXT_DENORT_BASE_URL` mirror serving other bytes) still passed. A
-     release CLI now has the expected hashes compiled in:
-     `DENEXT_DENORT_SHA256S` (`<target>=<sha256>,...`) at build time becomes
-     `EMBEDDED_DENORT_SHA256S`, and `deno compile` takes that target's
-     archive only when its SHA-256 is the embedded one (`SHA256SUMS` is not
-     fetched; a cached archive with other bytes is downloaded again, a
-     download with other bytes is refused naming both hashes, whatever the
-     release lists). A build without the variable (a local or test build),
-     or a target the list does not name, keeps item 130's `SHA256SUMS`
-     check. `cli/build.rs` fails the build on a malformed list or two
-     entries for a target that disagree.
+188. **`feat(compile)`: the CLI carries the SHA-256 of every `denort` archive of
+     its release** (`feat/embed-denort-sha`; `cli/standalone/binary.rs`,
+     `cli/build.rs`, `denext_runtime.yml`, `.github/denext-runtime/`; CLI only).
+     Item 130 checks the release's `denort` against the `SHA256SUMS` fetched
+     from the same release, so a release whose archive and `SHA256SUMS` were
+     both replaced (before immutable releases, or a `DENEXT_DENORT_BASE_URL`
+     mirror serving other bytes) still passed. A release CLI now has the
+     expected hashes compiled in: `DENEXT_DENORT_SHA256S`
+     (`<target>=<sha256>,...`) at build time becomes `EMBEDDED_DENORT_SHA256S`,
+     and `deno compile` takes that target's archive only when its SHA-256 is the
+     embedded one (`SHA256SUMS` is not fetched; a cached archive with other
+     bytes is downloaded again, a download with other bytes is refused naming
+     both hashes, whatever the release lists). A build without the variable (a
+     local or test build), or a target the list does not name, keeps item 130's
+     `SHA256SUMS` check. `cli/build.rs` fails the build on a malformed list or
+     two entries for a target that disagree.
 
-     The release workflow builds `denort` first, in a new `denort_bin` job
-     per target (built, checked, signed, its symbols collected as
+     The release workflow builds `denort` first, in a new `denort_bin` job per
+     target (built, checked, signed, its symbols collected as
      `denort-symbols-<version>-<target>.tar.gz`, assembled by
      `assemble_denort.sh`, attested); the `cli` job needs all of them, sets
      `DENEXT_DENORT_SHA256S` from the six archives (a tag build refuses fewer
-     than six), builds `deno` alone, checks the list is in the binary, and
-     ships the `denort_bin` archive unchanged. The denort smoke also compiles
-     onto the archive served from a loopback release with no `SHA256SUMS`
-     (only the embedded hash can verify it) and checks that the archive with
-     one byte appended is refused. `symbolicate.py` takes denort's debug info
-     from `denort-symbols-*` from 3.0.0-denext.8 on, and `check-release`
-     requires those archives from then.
+     than six), builds `deno` alone, checks the list is in the binary, and ships
+     the `denort_bin` archive unchanged. The denort smoke also compiles onto the
+     archive served from a loopback release with no `SHA256SUMS` (only the
+     embedded hash can verify it) and checks that the archive with one byte
+     appended is refused. `symbolicate.py` takes denort's debug info from
+     `denort-symbols-*` from 3.0.0-denext.8 on, and `check-release` requires
+     those archives from then.
 
      Tests (`cli/standalone/binary.rs`):
      `embedded_denort_sha256_reads_the_build_list`,
@@ -7613,76 +7612,76 @@ where the changes are discussed.
      130's unchanged; `symbolicate_test.py`
      `test_denort_symbols_have_their_own_archive_from_denext8`.
 
-188. **`fix(node)`: `process.execArgv` holds the Deno flags a child needs**
+189. **`fix(node)`: `process.execArgv` holds the Deno flags a child needs**
      (`fix/process-execargv`; `cli/args/flags.rs`, `cli/factory.rs`,
      `runtime/worker_bootstrap.rs`, `runtime/ops/bootstrap.rs`,
      `ext/node/polyfills/process.ts`, `ext/node/ops/node_cli_parser.rs`).
-     Upstream's `process.execArgv` is always `[]`, so a program could not
-     start a child Deno with its own command-line flags: denext's desktop
-     sidecar `spawnSelf()` under `deno run` rebuilt the child's argv from
-     `Deno.permissions` alone and lost `--unstable-*`, `--v8-flags`,
-     `--config`, `--node-modules-dir` and scoped grants. Under `deno run` and
-     `deno serve` it now holds those flags, as Node's holds the node flags
-     before the script (`FlagsExt::to_exec_argv`, through
-     `BootstrapOptions::exec_argv` and `op_bootstrap_exec_argv`): the
-     permission flags with their scopes, `--permission-set`, `--unstable` /
-     `--unstable-<feature>` / `--no-detect-cjs`, `--config` / `--no-config`,
-     `--node-modules-dir`, `--import-map`, `--lock` / `--no-lock` /
-     `--frozen`, `--cached-only`, `--no-remote`, `--no-npm`, `--cert`,
-     `--location`, `--seed`, `--v8-flags` and `--conditions`, each one
-     `--flag[=value]` token, files made absolute. Workers get their parent's.
-     A compiled program, and every other subcommand (`deno test` included),
-     keep `[]`.
+     Upstream's `process.execArgv` is always `[]`, so a program could not start
+     a child Deno with its own command-line flags: denext's desktop sidecar
+     `spawnSelf()` under `deno run` rebuilt the child's argv from
+     `Deno.permissions` alone and lost `--unstable-*`, `--v8-flags`, `--config`,
+     `--node-modules-dir` and scoped grants. Under `deno run` and `deno serve`
+     it now holds those flags, as Node's holds the node flags before the script
+     (`FlagsExt::to_exec_argv`, through `BootstrapOptions::exec_argv` and
+     `op_bootstrap_exec_argv`): the permission flags with their scopes,
+     `--permission-set`, `--unstable` / `--unstable-<feature>` /
+     `--no-detect-cjs`, `--config` / `--no-config`, `--node-modules-dir`,
+     `--import-map`, `--lock` / `--no-lock` / `--frozen`, `--cached-only`,
+     `--no-remote`, `--no-npm`, `--cert`, `--location`, `--seed`, `--v8-flags`
+     and `--conditions`, each one `--flag[=value]` token, files made absolute.
+     Workers get their parent's. A compiled program, and every other subcommand
+     (`deno test` included), keep `[]`.
 
      Those flags are not Node flags, and `fork()` uses `process.execArgv` by
-     default (as does `spawn(process.execPath, [...process.execArgv,
-     script])`): `op_node_translate_cli_args` now takes them off the flags
-     before the script and puts them right after the translated `run` (or
-     `serve` / `test` / `bench`), skipping any already there. When they carry
-     a permission flag, the child no longer gets the translation's `-A`: it
-     gets the parent's grants, as a Node child gets the parent's flags (a
-     caller's own explicit `-A` stays). With no Deno flags (a `deno run`
-     without any, a compiled program) the translation is unchanged.
+     default (as does
+     `spawn(process.execPath, [...process.execArgv,
+     script])`):
+     `op_node_translate_cli_args` now takes them off the flags before the script
+     and puts them right after the translated `run` (or `serve` / `test` /
+     `bench`), skipping any already there. When they carry a permission flag,
+     the child no longer gets the translation's `-A`: it gets the parent's
+     grants, as a Node child gets the parent's flags (a caller's own explicit
+     `-A` stays). With no Deno flags (a `deno run` without any, a compiled
+     program) the translation is unchanged.
 
-     Tests: `exec_argv_carries_the_flags_a_child_needs`
-     (`cli/args/flags.rs`), `child_deno_flags_are_split_off_before_the_script`
-     and `child_deno_flags_reach_the_translated_run`
+     Tests: `exec_argv_carries_the_flags_a_child_needs` (`cli/args/flags.rs`),
+     `child_deno_flags_are_split_off_before_the_script` and
+     `child_deno_flags_reach_the_translated_run`
      (`ext/node/ops/node_cli_parser.rs`), and the spec test
      `node::process_exec_argv` (the flags, a `fork()` child with the parent's
      grants and unstable features and without `--allow-net`, `[]` for a bare
      `deno run` and under `deno test`).
 
-189. **`fix(desktop)`: `$DENO_DESKTOP_CACHE` in a baked permission is the
-     app's cache folder** (`fix/exec-sidecar-run-scope`; `cli/rt/run.rs`).
-     A packaged desktop app cannot run a program from its embedded files, so
-     denext copies a project-file sidecar program (`run.exec`) into the
-     app's cache folder at launch, and that path (under the user's home) is
-     unknown when `deno desktop` bakes the flags: denext baked an unscoped
-     `--allow-run`, letting any code in the app run any program. A baked
-     `--allow-read` / `--allow-write` / `--allow-run` value (or the matching
-     `--deny-*`) may now start with `$DENO_DESKTOP_CACHE`, which a desktop
-     app's runtime expands at launch, right after
-     `apply_desktop_permission_defaults`, to the app's own cache folder:
-     `~/Library/Caches/<id>/denext` on macOS, `%LOCALAPPDATA%\<id>\Cache` on
-     Windows, `$XDG_CACHE_HOME|~/.cache` `/<id>/denext` elsewhere (denext's
-     `desktopAppDirs(id).cache`), `<id>` being the baked
-     `desktop.app.identifier`. Only the token at the start of a value is
-     expanded, followed by a separator; a value that cannot be expanded (no
-     identifier, no home folder, a `..` component) is dropped from an allow
-     list, and a list left empty grants nothing rather than everything; a
-     deny entry that cannot be expanded is kept as written. Programs that
-     are not desktop apps are unchanged.
+190. **`fix(desktop)`: `$DENO_DESKTOP_CACHE` in a baked permission is the app's
+     cache folder** (`fix/exec-sidecar-run-scope`; `cli/rt/run.rs`). A packaged
+     desktop app cannot run a program from its embedded files, so denext copies
+     a project-file sidecar program (`run.exec`) into the app's cache folder at
+     launch, and that path (under the user's home) is unknown when
+     `deno desktop` bakes the flags: denext baked an unscoped `--allow-run`,
+     letting any code in the app run any program. A baked `--allow-read` /
+     `--allow-write` / `--allow-run` value (or the matching `--deny-*`) may now
+     start with `$DENO_DESKTOP_CACHE`, which a desktop app's runtime expands at
+     launch, right after `apply_desktop_permission_defaults`, to the app's own
+     cache folder: `~/Library/Caches/<id>/denext` on macOS,
+     `%LOCALAPPDATA%\<id>\Cache` on Windows, `$XDG_CACHE_HOME|~/.cache`
+     `/<id>/denext` elsewhere (denext's `desktopAppDirs(id).cache`), `<id>`
+     being the baked `desktop.app.identifier`. Only the token at the start of a
+     value is expanded, followed by a separator; a value that cannot be expanded
+     (no identifier, no home folder, a `..` component) is dropped from an allow
+     list, and a list left empty grants nothing rather than everything; a deny
+     entry that cannot be expanded is kept as written. Programs that are not
+     desktop apps are unchanged.
 
      Then denext bakes `--allow-run=$DENO_DESKTOP_CACHE/sidecars/<name>/<file>`
-     (and the matching `--allow-write`) from the release that has this,
-     keeping the unscoped grant for older runtimes.
+     (and the matching `--allow-write`) from the release that has this, keeping
+     the unscoped grant for older runtimes.
 
      Tests (`cli/rt/run.rs`): `desktop_app_cache_dir_per_os`,
      `desktop_cache_token_expands_to_the_app_cache` and
      `desktop_cache_token_never_widens_a_grant`.
 
-200. **`feat(desktop)`: `$DENO_DESKTOP_DATA` in a baked permission is the app's
-     data folder** (`feat/desktop-data-token`, built on item 189's
+191. **`feat(desktop)`: `$DENO_DESKTOP_DATA` in a baked permission is the app's
+     data folder** (`feat/desktop-data-token`, built on item 190's
      `fix/exec-sidecar-run-scope`; `cli/rt/run.rs`). A packaged desktop app
      keeps its state in a per-user folder (denext's `fs` / `sqlite`
      capabilities, its UI updates in `<data>/ui-updates`, sidecar log files in
@@ -7690,14 +7689,14 @@ where the changes are discussed.
      denext baked an unscoped `--allow-read` (and `--allow-write`) for it. A
      baked `--allow-read` / `--allow-write` / `--allow-run` value (or the
      matching `--deny-*`) may now also start with `$DENO_DESKTOP_DATA`, expanded
-     at the same point and under the same rules as item 189's token to the app's
+     at the same point and under the same rules as item 190's token to the app's
      own data folder: `~/Library/Application Support/<id>` on macOS,
      `%APPDATA%\<id>` on Windows (`~\AppData\Roaming` without `%APPDATA%`),
      `$XDG_DATA_HOME|~/.local/share` `/<id>` on Linux and other systems
      (denext's `osDataDir(id)`, `desktopAppDirs(id).data`), `<id>` being the
      baked `desktop.app.identifier`. An empty or blank `%APPDATA%` /
      `$XDG_DATA_HOME` (and, from this item, `%LOCALAPPDATA%` / `$XDG_CACHE_HOME`
-     for item 189's token) counts as unset. After either token, `/` and `\` both
+     for item 190's token) counts as unset. After either token, `/` and `\` both
      separate the rest, which is rebuilt with the OS's own separator, so a value
      denext bakes as `$DENO_DESKTOP_DATA/logs` (or
      `$DENO_DESKTOP_CACHE/sidecars/<name>/<file>`) is
@@ -7721,28 +7720,27 @@ where the changes are discussed.
      `desktop_path_tokens_take_either_separator` and, on Windows,
      `desktop_path_tokens_use_backslashes_on_windows`.
 
-190. **`fix(check)`: the type check's npm-shaped copies stay out of the
+192. **`fix(check)`: the type check's npm-shaped copies stay out of the
      project** (`fix/npm-compat-out-of-root`; `cli/tools/installer/`,
      `cli/tools/check.rs`; CLI only). The native type check (and
      `deno sync-types`) wrote `.deno/npm-compat` into the project root: the
      `@jsr/*` packages in their npm form (global-cache mode) and the built-in
      `@types/node` (item 47's). The JSR packages ship their `_test.ts` files,
-     and a later `deno test` with default discovery ran them. They now live
-     in `<DENO_DIR>/npm_compat/<folder name>-<hash>`, one folder per project
-     root (the first 16 hex digits of the SHA-256 of its canonical path),
-     reached from `.deno/tsconfig.json` by absolute `paths` and `typeRoots`
-     as the npm cache already is. An earlier check's `.deno/npm-compat` is
-     removed. Without a resolvable `DENO_DIR` the old place is used.
+     and a later `deno test` with default discovery ran them. They now live in
+     `<DENO_DIR>/npm_compat/<folder name>-<hash>`, one folder per project root
+     (the first 16 hex digits of the SHA-256 of its canonical path), reached
+     from `.deno/tsconfig.json` by absolute `paths` and `typeRoots` as the npm
+     cache already is. An earlier check's `.deno/npm-compat` is removed. Without
+     a resolvable `DENO_DIR` the old place is used.
 
      Tests: `npm_compat_dir_is_outside_the_project` and
      `test_ensure_types_node_uses_the_built_in_copy_offline`
      (`cli/tools/installer/npm_compat.rs`),
      `types_entries_the_generated_project_provides_resolve`
-     (`cli/tools/check.rs`), the spec test
-     `check::npm_compat_outside_project`, and
-     `check::check_node_builtin_modules`'s expected `@types/node` path.
+     (`cli/tools/check.rs`), the spec test `check::npm_compat_outside_project`,
+     and `check::check_node_builtin_modules`'s expected `@types/node` path.
 
-188. **`fix(core)`: a safe collection built from another collection copies it
+193. **`fix(core)`: a safe collection built from another collection copies it
      instead of hanging** (`feat/node-compat-round4`, runtime;
      `libs/core/00_primordials.js`). `SafeSet`, `SafeMap`, `SafeWeakSet` and
      `SafeWeakMap` read their constructor's argument through
@@ -7759,7 +7757,7 @@ where the changes are discussed.
      safe collection, typed arrays, strings and generators; the patched array
      iterator; a non-iterable throws).
 
-189. **`fix(ext/node, core)`: a module resolve hook's `context.conditions`
+194. **`fix(ext/node, core)`: a module resolve hook's `context.conditions`
      reaches the default resolver** (`feat/node-compat-round4`, runtime;
      `ext/node/polyfills/01_require.js`, `ext/node/ops/require.rs`,
      `ext/node/ops/module_hooks.rs`, `libs/core/error.rs`,
@@ -7794,7 +7792,7 @@ where the changes are discussed.
      `module-hooks/test-module-hooks-custom-conditions.mjs`, `-cjs.js` and
      `-special-values.js` enabled.
 
-190. **`fix(ext/node)`: the `node:fs` long tail, round 4**
+195. **`fix(ext/node)`: the `node:fs` long tail, round 4**
      (`feat/node-compat-round4`, runtime; `ext/node/polyfills/fs.ts`,
      `_fs/_fs_copy.ts`, `internal/fs/streams.mjs`, `_process/streams.mjs`,
      `internal_binding/uv.ts`, `util.ts`):
@@ -7842,7 +7840,7 @@ where the changes are discussed.
        needs an instance") and `process_test.ts` ("process.stdout and
        process.stderr are not readable", off a terminal).
 
-191. **`feat(ext/node)`: `node:test`'s `junit` reporter and `--test-randomize` /
+196. **`feat(ext/node)`: `node:test`'s `junit` reporter and `--test-randomize` /
      `--test-random-seed`** (`feat/node-compat-round4`, runtime;
      `ext/node/polyfills/testing.ts`, `libs/node_shim/lib.rs`). Outside
      `deno test` (item 170's runner):
@@ -7877,7 +7875,7 @@ where the changes are discussed.
        26.5.1); the shim unit test
        `test_randomize_and_seed_ride_along_in_node_options`.
 
-192. **`test(node_compat)`: 10 tests the node_compat round 4 fixes pass**
+197. **`test(node_compat)`: 10 tests the node_compat round 4 fixes pass**
      (`feat/node-compat-round4`, test config only;
      `tests/node_compat/config.jsonc`). Each passed three isolated runs on a
      Linux x86_64 debug build and is on for Linux only, with that reason, until
@@ -7888,11 +7886,11 @@ where the changes are discussed.
      `-fs-syncwritestream.js`, `-fs-write-stream-autoclose-option.js`,
      `-fs-writesync-crash.js`, `-uv-errmap.js`.
 
-188. **`feat(desktop)`: `backgroundThrottling`, and hidden pages no longer
+198. **`feat(desktop)`: `backgroundThrottling`, and hidden pages no longer
      frozen on macOS** (laufey API 51, from
      `fix/macos-hidden-page-and-hit-region` of Brainwires/laufey at e7b06a3,
      until it lands; `runtime/ops/desktop.rs`, `cli/rt_desktop/lib.rs`,
-     `lib.deno.desktop.d.ts`; for runtime 3.0.0-denext.7). Two macOS findings
+     `lib.deno.desktop.d.ts`; for runtime 3.0.0-denext.8). Two macOS findings
      from a live run of a desktop companion and a tray app:
      - laufey's WebView backend never set
        `WKPreferences.inactiveSchedulingPolicy`, and WebKit's default on macOS
@@ -7927,10 +7925,10 @@ where the changes are discussed.
        interval ticked 5 times in 5 s throttled and 47 times unthrottled (a bare
        WKWebView on WebKit's default stopped after ~1.4 s and ticked 0 times).
 
-193. **`fix(desktop)`: the full-app updater swaps only the staged app it
+199. **`fix(desktop)`: the full-app updater swaps only the staged app it
      verified** (5.0-gate review A, L1; `runtime/ops/desktop_update/staging.rs`,
      `swap.rs`, `mod.rs`; in every runtime with the updater, 2.9.7-denext.4
-     through 3.0.0-denext.6). The staging directory (`.<name>.denext-update/`)
+     through 3.0.0-denext.7). The staging directory (`.<name>.denext-update/`)
      has to sit next to the install, on its file system, and that parent may be
      writable by other users (`/Applications` by the whole `admin` group, a
      shared `/opt`). The staging directory was created with the default mode,
@@ -7978,10 +7976,10 @@ where the changes are discussed.
        `the_held_digest_is_tree_digest`,
        `only_a_private_directory_of_this_user_is_held`,
        `the_digest_follows_the_held_directory_not_the_path`.
-194. **`fix(desktop)`: a Windows update whose certificate revocation can't be
+200. **`fix(desktop)`: a Windows update whose certificate revocation can't be
      checked is refused** (5.0-gate review A, L6;
      `runtime/ops/desktop_update/oscheck.rs`; 2.9.7-denext.7 through
-     3.0.0-denext.6). Each staged PE image is verified with `WinVerifyTrust` and
+     3.0.0-denext.7). Each staged PE image is verified with `WinVerifyTrust` and
      online revocation for the whole chain but the root. When the revocation
      status could not be determined (`CRYPT_E_REVOCATION_OFFLINE`,
      `CERT_E_REVOCATION_FAILURE`) it was verified again without revocation and
@@ -8000,10 +7998,10 @@ where the changes are discussed.
      `authenticode_revocation_verdicts` (failed before),
      `windows_signer_subject_must_match` (an offline staged check is refused
      with and without the opt-out).
-195. **`fix(desktop)`: the macOS update requires a notarized Developer ID
+201. **`fix(desktop)`: the macOS update requires a notarized Developer ID
      Application signature** (5.0-gate review A, L7;
      `runtime/ops/desktop_update/oscheck.rs`; 2.9.7-denext.4 through
-     3.0.0-denext.6). The staged bundle's explicit requirement (item 127's E-L4)
+     3.0.0-denext.7). The staged bundle's explicit requirement (item 127's E-L4)
      was `anchor apple generic and certificate leaf[subject.OU] = "<team>"`,
      which any Apple-issued certificate of the team satisfies (an Apple
      Development or a Mac App Store certificate too), and nothing asked for a
@@ -8017,7 +8015,7 @@ where the changes are discussed.
      notarized Developer ID app (passes), the same with another team, and a Mac
      App Store app (both refused). Test: `team_requirement_names_the_team`
      (failed before), `team_must_be_apple_anchored`.
-196. **`fix(desktop)`: a Windows update's files that are not PE images are
+202. **`fix(desktop)`: a Windows update's files that are not PE images are
      covered by the executable's Authenticode signature** (5.0-gate review A,
      M2; `runtime/ops/desktop_update/treecheck.rs`, `staging.rs`, `swap.rs`,
      `mod.rs`; 2.9.7-denext.4 through 3.0.0-denext.7). The Windows OS check
@@ -8026,43 +8024,41 @@ where the changes are discussed.
      `strictPolicy`, CEF's `.pak` / `icudtl.dat` / `v8_context_snapshot.bin`,
      sidecar JavaScript, `.deno-desktop-app`) carry no signature of their own,
      so the update key alone protected them: a stolen update key could change
-     the window's bridge origins of a signed app. denext's Windows package
-     build (`buildDesktopBundle`, which `scripts/package-windows.ts` calls,
-     last, before it signs) now writes a tree manifest,
+     the window's bridge origins of a signed app. denext's Windows package build
+     (`buildDesktopBundle`, which `scripts/package-windows.ts` calls, last,
+     before it signs) now writes a tree manifest,
      `{ "v": 1, "files": [{ "path", "size", "sha256" }] }` over every regular
      file that is not a PE image, into the main executable as the `RT_RCDATA`
      resource `DENEXT_TREE` (pure TypeScript, any host), so the executable's
-     signature covers it. After the OS check, `stage()` and
-     the update helper read the staged tree in the walk that records the
-     digest the helper pins (`Staged::listing`, the same reads as
-     `tree_digest`, with a streaming PE-header probe that applies
-     `pe_files`' test), read the manifest from the staged executable's bytes
-     (their SHA-256 must be the walk's), and require the listed files exactly:
-     each with the same size and SHA-256, none missing, none unlisted, no
-     symlink or reparse point. When the running executable carries a
-     manifest, a staged app without one is refused (`os_signature`): the
-     protection can't be dropped by an update. A running app without one
-     accepts its first update without it, so it rolls out in one release.
-     macOS seals every bundle file in its code signature, and Linux has no OS
-     signature (item 143), so the check is Windows-only. Rejected: a catalog
-     file (MakeCat is Windows-only, and Windows packaging works from any
+     signature covers it. After the OS check, `stage()` and the update helper
+     read the staged tree in the walk that records the digest the helper pins
+     (`Staged::listing`, the same reads as `tree_digest`, with a streaming
+     PE-header probe that applies `pe_files`' test), read the manifest from the
+     staged executable's bytes (their SHA-256 must be the walk's), and require
+     the listed files exactly: each with the same size and SHA-256, none
+     missing, none unlisted, no symlink or reparse point. When the running
+     executable carries a manifest, a staged app without one is refused
+     (`os_signature`): the protection can't be dropped by an update. A running
+     app without one accepts its first update without it, so it rolls out in one
+     release. macOS seals every bundle file in its code signature, and Linux has
+     no OS signature (item 143), so the check is Windows-only. Rejected: a
+     catalog file (MakeCat is Windows-only, and Windows packaging works from any
      host); a resource with the launch policy alone (CEF blobs and sidecar JS
      stay uncovered). Install-time tampering by a local writer of the install
      directory is out of scope (the install directory's ACL). Tests:
      `the_probe_matches_the_pe_header_test`, `manifests_are_parsed_strictly`,
-     `the_tree_must_match_the_manifest_exactly` (changed, flipped byte,
-     missing, extra, a listed file turned PE, symlink, a name read twice),
+     `the_tree_must_match_the_manifest_exactly` (changed, flipped byte, missing,
+     extra, a listed file turned PE, symlink, a name read twice),
      `the_manifest_resource_round_trips`, `reads_a_manifest_the_packager_wrote`
      (`testdata/tree_manifest_packaged.exe`, written by denext's
-     `embedDesktopTreeManifest`), `verify_staged_tree_end_to_end` (tamper,
-     extra sidecar, executable changed after the walk, downgrade of
-     protection, the first update without one, an unreadable running
-     executable), `a_symlink_in_the_staged_tree_is_refused`,
-     `the_held_digest_is_tree_digest` (the held listing is the path listing).
-     The stage / helper wiring runs only on Windows; the fork's Windows CI is
-     its test.
+     `embedDesktopTreeManifest`), `verify_staged_tree_end_to_end` (tamper, extra
+     sidecar, executable changed after the walk, downgrade of protection, the
+     first update without one, an unreadable running executable),
+     `a_symlink_in_the_staged_tree_is_refused`, `the_held_digest_is_tree_digest`
+     (the held listing is the path listing). The stage / helper wiring runs only
+     on Windows; the fork's Windows CI is its test.
 
-197. **`feat(compile)`: a compiled program's main module can disarm its baked
+203. **`feat(compile)`: a compiled program's main module can disarm its baked
      resource limits** (`Deno.disarmResourceLimits()`;
      `cli/lib/resource_limits.rs`, `cli/lib/worker.rs`,
      `runtime/ops/runtime.rs`, `runtime/js/90_deno_ns.js`,
@@ -8117,7 +8113,7 @@ where the changes are discussed.
        `disarmed_heap_grows_to_the_default_limit`
        (`cli/lib/resource_limits.rs`).
 
-198. **`test(run)`: `inspector_ws_events` leaves no process running**
+204. **`test(run)`: `inspector_ws_events` leaves no process running**
      (`tests/specs/run/inspector_ws_events/main.ts`; a test-only fix, the same
      test as upstream's):
      - The test's program spawned `deno run --inspect=… --watch a.ts`, a process
@@ -8136,7 +8132,7 @@ where the changes are discussed.
        3.0.0-denext.6 `deno` leaves 2 after one run of each case before, 0 after
        three runs of each with the fix.
 
-199. **`docs`: the blocking thread pool's cap** (`DENEXT.md` only; the
+205. **`docs`: the blocking thread pool's cap** (`DENEXT.md` only; the
      production audit's R2):
      [The blocking thread pool](#the-blocking-thread-pool) documents where the
      cap is set (`runtime/tokio_util.rs`), its value (32, or 4 × CPUs on
@@ -8148,8 +8144,8 @@ where the changes are discussed.
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
-169-174, 176, 178, 180, 182-184, 186, 187, 191-194) are what the prebuilt
-`libdenort` carries. The CLI-side parts (for example writing
+169-174, 176, 178, 180, 182-184, 186, 187, 189-191, 193-196, 198-203) are what
+the prebuilt `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
 in the branch too, but a stock CLI does not run them; denext's own launcher
 provides that environment.
@@ -8179,11 +8175,11 @@ secure-store items read over an encrypted Secret Service session (laufey
 879ee0e) and tokio 1.53.3 with laufey's own `.cargo/audit.toml`; and, for
 runtime 3.0.0-denext.6, API 50: overlay windows, tray events, the launch
 activation policy and speech, item 183; and, for runtime 3.0.0-denext.7, CEF
-156, item 184, the Linux Wayland overlay fixes, item 186, and API 51, hidden
-pages throttled instead of frozen on macOS and `backgroundThrottling`, item
-188), at the commit pinned by `LAUFEY_SHA` in the workflow (or the `laufey_ref`
-input). The same commit is the `laufey` git dependency of
-`cli/rt_desktop/Cargo.toml` (crate 0.8.0, API 51, CEF 156.0.14).
+156, item 184, and the Linux Wayland overlay fixes, item 186; and, for runtime
+3.0.0-denext.8, API 51, hidden pages throttled instead of frozen on macOS and
+`backgroundThrottling`, item 198), at the commit pinned by `LAUFEY_SHA` in the
+workflow (or the `laufey_ref` input). The same commit is the `laufey` git
+dependency of `cli/rt_desktop/Cargo.toml` (crate 0.8.0, API 51, CEF 156.0.14).
 
 laufey's `init_api` rejects any C ABI version mismatch between the runtime and
 the host, so the `laufey` crate libdenort links and the hosts are built from the
@@ -8426,7 +8422,7 @@ the updater would refuse in place of a signed one. The staging directory is
 private to the user (0700) and held open from that check to the swap, which
 renames from it; the staged app's digest is taken through it before the check
 and again right before the swap, so the tree that moves is the tree that was
-checked (item 193).
+checked (item 199).
 
 ## Development switches
 

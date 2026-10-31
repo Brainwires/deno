@@ -5,7 +5,7 @@
 # cli/standalone/binary.rs, denext_denort). Built with `cargo build --release
 # --locked --bin denort` in the workflow's `denort_bin` job, before the CLI:
 # the CLI is compiled with every target's archive SHA-256
-# (DENEXT_DENORT_SHA256S, DENEXT.md item 187), so the archive made here is the
+# (DENEXT_DENORT_SHA256S, DENEXT.md item 188), so the archive made here is the
 # one released (the `cli` job copies it into its artifact unchanged).
 #
 # Env: TARGET VERSION DENORT_BIN OUT_DIR

@@ -512,7 +512,7 @@ declare namespace Deno {
      * keep their rate, for a hidden window that does the app's background
      * work. Creation time only.
      *
-     * macOS (the system WebView, macOS 14+, from runtime 3.0.0-denext.7):
+     * macOS (the system WebView, macOS 14+, from runtime 3.0.0-denext.8):
      * WebKit used to freeze the page of a window created hidden about a
      * second after it loaded, until the window showed; it is now throttled
      * instead. Windows (WebView2), Linux (WebKitGTK) and the CEF backend

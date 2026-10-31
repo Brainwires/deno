@@ -22,7 +22,7 @@
 #   licenses/              the deno license
 #
 # The `denort` archive is assemble_denort.sh's: it is built first, in its own
-# job, so this CLI is compiled with its SHA-256 (DENEXT.md item 187).
+# job, so this CLI is compiled with its SHA-256 (DENEXT.md item 188).
 #
 # Env: TARGET VERSION DENO_BIN ESBUILD_DIR TYPESCRIPT_LSP_DIR
 # TYPESCRIPT_CHECK_DIR TSGOLINT_DIR OUT_DIR DENO_VERSION DENO_SHA RUN_URL

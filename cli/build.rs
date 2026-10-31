@@ -546,7 +546,7 @@ fn emit_startup_order_link_args(out_dir: &Path) {
   }
 }
 
-/// denext (DENEXT.md item 187): `DENEXT_DENORT_SHA256S`, the SHA-256 of each
+/// denext (DENEXT.md item 188): `DENEXT_DENORT_SHA256S`, the SHA-256 of each
 /// target's `deno-denort-<version>-<target>.zip` that `deno compile` accepts
 /// (cli/standalone/binary.rs, `EMBEDDED_DENORT_SHA256S`). The release
 /// workflow sets it; a malformed list fails the build here rather than every

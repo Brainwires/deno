@@ -422,7 +422,7 @@ impl FlagsExt for Flags {
     args
   }
 
-  /// denext (DENEXT.md item 188): `process.execArgv` of a `deno run` /
+  /// denext (DENEXT.md item 189): `process.execArgv` of a `deno run` /
   /// `deno serve` program, the command-line flags that shape a child Deno
   /// process: the permission flags ([`Self::to_permission_args`], scoped
   /// values kept), `--permission-set`, the `--unstable*` flags, the config,
@@ -1037,7 +1037,7 @@ mod tests {
     flags_from_vec_with_initial_cwd(args, None)
   }
 
-  // denext (DENEXT.md item 188): `process.execArgv`.
+  // denext (DENEXT.md item 189): `process.execArgv`.
   #[test]
   fn exec_argv_carries_the_flags_a_child_needs() {
     let cwd = if cfg!(windows) {

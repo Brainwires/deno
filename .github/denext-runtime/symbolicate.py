@@ -105,7 +105,7 @@ def tag(version):
 
 
 # The first release whose `denort` is built in its own job (DENEXT.md item
-# 187: the CLI is compiled with the denort archives' SHA-256s), so its debug
+# 188: the CLI is compiled with the denort archives' SHA-256s), so its debug
 # info is in `denort-symbols-*`; earlier releases put it in `deno-symbols-*`
 # beside the CLI's.
 DENORT_SYMBOLS_SINCE = (3, 0, 0, 8)

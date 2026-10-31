@@ -8,7 +8,7 @@
 # stock denort.
 #
 # With DENORT_PINNED=1 (a CLI built with DENEXT_DENORT_SHA256S, DENEXT.md item
-# 187) also: the CLI compiles onto that archive served from a loopback release
+# 188) also: the CLI compiles onto that archive served from a loopback release
 # that has no SHA256SUMS (only the hash it was built with can verify it), and
 # refuses the same archive with one byte appended.
 #

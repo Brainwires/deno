@@ -108,7 +108,7 @@ pub struct BootstrapOptions {
   pub is_standalone: bool,
   pub has_node_modules_dir: bool,
   pub argv0: Option<String>,
-  /// denext (DENEXT.md item 188): Node's `process.execArgv`, the Deno flags
+  /// denext (DENEXT.md item 189): Node's `process.execArgv`, the Deno flags
   /// a child process of this program should get (`deno run` / `deno serve`
   /// only; empty in a compiled program, as upstream's always is).
   pub exec_argv: Vec<String>,

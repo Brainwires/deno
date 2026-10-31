@@ -742,7 +742,7 @@ jobs:
   # app (deno-denort-<version>-<target>.zip; cli/standalone/binary.rs,
   # denext_denort), built and signed before the CLI: the `cli` job compiles
   # every target's archive SHA-256 into `deno` (DENEXT_DENORT_SHA256S,
-  # DENEXT.md item 187), so `deno compile` refuses any other bytes. The
+  # DENEXT.md item 188), so `deno compile` refuses any other bytes. The
   # archive made here is the one released, unchanged.
   denort_bin:
     name: denort bin / ${{ matrix.target }}
@@ -1106,7 +1106,7 @@ jobs:
 
       # Every target's denort archive from the `denort_bin` job: their
       # SHA-256s are compiled into `deno` (DENEXT_DENORT_SHA256S; DENEXT.md
-      # item 187), and `deno compile` refuses a release denort with other
+      # item 188), and `deno compile` refuses a release denort with other
       # bytes even when the release's SHA256SUMS lists them.
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:

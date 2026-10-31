@@ -115,7 +115,7 @@ pub fn op_bootstrap_unstable_args(state: &mut OpState) -> Vec<String> {
   flags
 }
 
-/// denext (DENEXT.md item 188): `process.execArgv`.
+/// denext (DENEXT.md item 189): `process.execArgv`.
 #[op2]
 pub fn op_bootstrap_exec_argv(state: &mut OpState) -> Vec<String> {
   state.borrow::<BootstrapOptions>().exec_argv.clone()

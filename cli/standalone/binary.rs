@@ -622,7 +622,7 @@ impl<'a> DenoCompileBinaryWriter<'a> {
       log::debug!("Resolved denort: {}", binary_path.display());
       let asset = denext_denort_asset_name(version, &target);
       let sums_url = denext_release_sums_url(&download_url);
-      // denext (DENEXT.md item 187): a release build carries the SHA-256
+      // denext (DENEXT.md item 188): a release build carries the SHA-256
       // of each target's denort archive and needs no SHA256SUMS for it.
       let pinned = embedded_denort_sha256(EMBEDDED_DENORT_SHA256S, &target)
         .context("Reading the denort SHA-256 this CLI was built with.")?;
@@ -2045,7 +2045,7 @@ fn deno_land_suffix(
   }
 }
 
-/// denext (DENEXT.md item 187): the SHA-256 of every `denort` archive of
+/// denext (DENEXT.md item 188): the SHA-256 of every `denort` archive of
 /// this CLI's release, as `<target>=<sha256>` entries separated by commas
 /// (`DENEXT_DENORT_SHA256S` at compile time; the release workflow builds the
 /// archives first and passes their hashes to the CLI build, and
@@ -2188,7 +2188,7 @@ fn read_verified_cache(archive_path: &Path) -> Option<Vec<u8>> {
 /// verified; otherwise it is checked against `SHA256SUMS` again (and
 /// downloaded again if it does not match).
 ///
-/// With `pinned` (item 187: the SHA-256 this CLI was built with, see
+/// With `pinned` (item 188: the SHA-256 this CLI was built with, see
 /// [`EMBEDDED_DENORT_SHA256S`]) that hash is the only one accepted:
 /// `SHA256SUMS` is not fetched, and a cached or downloaded archive with
 /// other bytes is refused whatever the release lists.

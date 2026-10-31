@@ -67,7 +67,7 @@ fn path_for_typescript(path: &Path) -> String {
   path.to_string_lossy().replace('\\', "/")
 }
 
-/// denext (DENEXT.md item 190): where the npm-shaped copies stock TypeScript
+/// denext (DENEXT.md item 192): where the npm-shaped copies stock TypeScript
 /// reads for a project live (the `@jsr/*` packages in global-cache mode and
 /// the built-in `@types/node`): `<DENO_DIR>/npm_compat/<name>-<hash>`, one
 /// folder per project root, outside the project. Inside it they were picked
@@ -87,7 +87,7 @@ pub fn npm_compat_dir(
 }
 
 /// The `.deno/npm-compat` a type check wrote into the project before item
-/// 190.
+/// 192.
 fn legacy_npm_compat_dir(project_root: &Path) -> PathBuf {
   project_root.join(".deno").join("npm-compat")
 }
@@ -479,7 +479,7 @@ pub async fn setup_npm_compat(
     generate_npm_cache_projects(project_root, deno_imports, npm_resolver)?;
   let use_global_cache_layout = global_cache_layout;
 
-  // denext (DENEXT.md item 190): an earlier type check's copy inside the
+  // denext (DENEXT.md item 192): an earlier type check's copy inside the
   // project is removed (it is generated, and a default `deno test` ran the
   // packages' tests from it).
   let legacy_dir = legacy_npm_compat_dir(project_root);
@@ -2050,7 +2050,7 @@ mod tests {
     let node_dir = compat.path().join("@types/node");
     assert!(is_embedded_types_node(&node_dir));
     assert_eq!(setup.undici_types_dir, Some(node_dir.join("undici")));
-    // Nothing is written into the project (DENEXT.md item 190).
+    // Nothing is written into the project (DENEXT.md item 192).
     assert!(!dir.path().join(".deno").exists());
 
     // A project's own `@types/node` under `node_modules` wins.

@@ -138,7 +138,7 @@ fn translate_cli_args(
   }
 
   // Parse the args
-  // denext (DENEXT.md item 188): `process.execArgv` holds the parent's Deno
+  // denext (DENEXT.md item 189): `process.execArgv` holds the parent's Deno
   // flags, so `fork()` (whose default execArgv it is) and
   // `spawn(process.execPath, [...process.execArgv, script])` hand them back
   // here in Node's position. They are not Node flags: take them out before

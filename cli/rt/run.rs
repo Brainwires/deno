@@ -1758,7 +1758,7 @@ pub async fn run_with_options(
 
     if has_desktop {
       apply_desktop_permission_defaults(&mut permissions);
-      // denext (DENEXT.md items 189, 200): a grant baked as
+      // denext (DENEXT.md items 190, 191): a grant baked as
       // `$DENO_DESKTOP_CACHE/...` or `$DENO_DESKTOP_DATA/...` names a file in
       // this app's cache or data folder, known only now (the user's home, the
       // app's identifier).
@@ -1864,7 +1864,7 @@ pub async fn run_with_options(
       .ok()
       .map(|req_ref| npm_pkg_req_ref_to_binary_command(&req_ref).to_string())
       .or(std::env::args().next()),
-    // denext (DENEXT.md item 188): a compiled program's flags are baked in;
+    // denext (DENEXT.md item 189): a compiled program's flags are baked in;
     // `process.execArgv` stays empty, as upstream's.
     exec_argv: Vec::new(),
     node_debug: std::env::var("NODE_DEBUG").ok(),
@@ -2349,7 +2349,7 @@ pub(crate) fn apply_desktop_permission_defaults(
   extend(&mut permissions.allow_env, DESKTOP_ENV_KEYS);
 }
 
-/// denext (DENEXT.md item 189): the token a baked `--allow-read` /
+/// denext (DENEXT.md item 190): the token a baked `--allow-read` /
 /// `--allow-write` / `--allow-run` (or deny) value of a desktop app may start
 /// with: the app's own cache folder ([`desktop_app_cache_dir`]), which the
 /// packager cannot know (it is under the user's home). denext bakes
@@ -2357,7 +2357,7 @@ pub(crate) fn apply_desktop_permission_defaults(
 /// program it copies there at launch, instead of an unscoped `--allow-run`.
 const DESKTOP_CACHE_TOKEN: &str = "$DENO_DESKTOP_CACHE";
 
-/// denext (DENEXT.md item 200): the token a baked `--allow-read` /
+/// denext (DENEXT.md item 191): the token a baked `--allow-read` /
 /// `--allow-write` / `--allow-run` (or deny) value of a desktop app may start
 /// with for the app's own per-user data folder ([`desktop_app_data_dir`]),
 /// so denext can bake `--allow-read=$DENO_DESKTOP_DATA` (and the matching
@@ -2469,7 +2469,7 @@ fn desktop_app_cache_dir_for(
   }
 }
 
-/// denext (DENEXT.md item 200): the per-user folder a desktop app with the
+/// denext (DENEXT.md item 191): the per-user folder a desktop app with the
 /// identifier `app_id` keeps its data in (state that survives relaunch, the
 /// UI updates, the sidecar logs):
 ///
@@ -2546,7 +2546,7 @@ fn has_desktop_path_token(entry: &str) -> bool {
     || entry.starts_with(DESKTOP_DATA_TOKEN)
 }
 
-/// denext (DENEXT.md items 189, 200): expands the desktop path tokens
+/// denext (DENEXT.md items 190, 191): expands the desktop path tokens
 /// ([`DESKTOP_CACHE_TOKEN`], [`DESKTOP_DATA_TOKEN`]) in the read, write and
 /// run grants and denials of a desktop app. An allow entry that cannot be
 /// expanded is dropped (never widened): a list left empty becomes no grant
@@ -2612,7 +2612,7 @@ mod tests {
     v.iter().map(|s| (*s).to_string()).collect()
   }
 
-  /// Item 189's expansion: the cache folder only.
+  /// Item 190's expansion: the cache folder only.
   fn expand_desktop_cache_token(
     p: &mut PermissionsOptions,
     cache: Option<&std::path::Path>,
@@ -2624,7 +2624,7 @@ mod tests {
     expand_desktop_path_tokens(p, &dirs);
   }
 
-  // --- $DENO_DESKTOP_CACHE (DENEXT.md item 189) ---
+  // --- $DENO_DESKTOP_CACHE (DENEXT.md item 190) ---
 
   #[test]
   fn desktop_app_cache_dir_per_os() {
@@ -2764,7 +2764,7 @@ mod tests {
     assert_eq!(p.allow_read, Some(strs(&["/a"])));
   }
 
-  // --- $DENO_DESKTOP_DATA (DENEXT.md item 200) ---
+  // --- $DENO_DESKTOP_DATA (DENEXT.md item 191) ---
 
   #[test]
   fn desktop_app_data_dir_per_os() {

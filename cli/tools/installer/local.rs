@@ -535,7 +535,7 @@ pub async fn sync_types_command(
   if vitest_compat {
     crate::tools::test::vitest::write_native_check_types(&project_root)?;
   }
-  // denext (DENEXT.md item 190): the npm-shaped copies live in DENO_DIR,
+  // denext (DENEXT.md item 192): the npm-shaped copies live in DENO_DIR,
   // outside the project.
   let npm_compat_dir = super::npm_compat::npm_compat_dir(
     factory.deno_dir().ok().map(|d| d.root.as_path()),

@@ -296,7 +296,7 @@ pub struct LibMainWorkerOptions {
   pub auto_serve: bool,
   pub location: Option<Url>,
   pub argv0: Option<String>,
-  /// denext (DENEXT.md item 188): `process.execArgv` (see
+  /// denext (DENEXT.md item 189): `process.execArgv` (see
   /// `BootstrapOptions::exec_argv`); a worker gets its parent's, as in Node.
   pub exec_argv: Vec<String>,
   pub node_debug: Option<String>,
