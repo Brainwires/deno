@@ -2397,10 +2397,10 @@ fn is_desktop_app_id(app_id: &str) -> bool {
     || app_id == "..")
 }
 
-/// The real environment and home folder, for [`desktop_app_cache_dir`] and
+/// The user's home folder, for [`desktop_app_cache_dir`] and
 /// [`desktop_app_data_dir`].
+#[allow(clippy::disallowed_types, reason = "setup code")]
 fn desktop_real_home() -> Option<PathBuf> {
-  #[allow(clippy::disallowed_types, reason = "setup code")]
   sys_traits::EnvHomeDir::env_home_dir(&sys_traits::impls::RealSys)
 }
 
