@@ -1758,6 +1758,14 @@ pub async fn run_with_options(
 
     if has_desktop {
       apply_desktop_permission_defaults(&mut permissions);
+      // denext (DENEXT.md item 189): a grant baked as
+      // `$DENO_DESKTOP_CACHE/...` names a file in this app's cache folder,
+      // known only now (the user's home, the app's identifier).
+      let cache_dir = metadata
+        .app_identifier
+        .as_deref()
+        .and_then(desktop_app_cache_dir);
+      expand_desktop_cache_token(&mut permissions, cache_dir.as_deref());
     }
 
     let desc_parser =
@@ -2340,6 +2348,146 @@ pub(crate) fn apply_desktop_permission_defaults(
   extend(&mut permissions.allow_env, DESKTOP_ENV_KEYS);
 }
 
+/// denext (DENEXT.md item 189): the token a baked `--allow-read` /
+/// `--allow-write` / `--allow-run` (or deny) value of a desktop app may start
+/// with: the app's own cache folder ([`desktop_app_cache_dir`]), which the
+/// packager cannot know (it is under the user's home). denext bakes
+/// `--allow-run=$DENO_DESKTOP_CACHE/sidecars/<name>/<file>` for a sidecar
+/// program it copies there at launch, instead of an unscoped `--allow-run`.
+const DESKTOP_CACHE_TOKEN: &str = "$DENO_DESKTOP_CACHE";
+
+/// The folder a desktop app with the identifier `app_id` keeps its own
+/// cached files in, inside the OS cache folder for the app (the web engine
+/// keeps its caches beside it, so never that folder itself):
+///
+/// - macOS: `~/Library/Caches/<id>/denext`
+/// - Windows: `%LOCALAPPDATA%\<id>\Cache` (`~\AppData\Local` without it)
+/// - Linux and others: `$XDG_CACHE_HOME/<id>/denext` (`~/.cache` without it)
+///
+/// The same folder as denext's `desktopAppDirs(id).cache`. `None` when the
+/// home folder (or `%LOCALAPPDATA%`) is unknown.
+fn desktop_app_cache_dir(app_id: &str) -> Option<PathBuf> {
+  #[allow(clippy::disallowed_types, reason = "setup code")]
+  let home = sys_traits::EnvHomeDir::env_home_dir(&sys_traits::impls::RealSys);
+  desktop_app_cache_dir_for(
+    std::env::consts::OS,
+    app_id,
+    |name| std::env::var_os(name),
+    home,
+  )
+}
+
+/// [`desktop_app_cache_dir`] for `os` (`std::env::consts::OS` spelling),
+/// reading the environment through `env`.
+fn desktop_app_cache_dir_for(
+  os: &str,
+  app_id: &str,
+  env: impl Fn(&str) -> Option<std::ffi::OsString>,
+  home: Option<PathBuf>,
+) -> Option<PathBuf> {
+  if app_id.is_empty()
+    || app_id.contains(['/', '\\'])
+    || app_id == "."
+    || app_id == ".."
+  {
+    return None;
+  }
+  let non_empty = |name: &str| env(name).filter(|v| !v.is_empty());
+  match os {
+    "macos" => Some(
+      home?
+        .join("Library")
+        .join("Caches")
+        .join(app_id)
+        .join("denext"),
+    ),
+    "windows" => {
+      let base = non_empty("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .or_else(|| home.map(|h| h.join("AppData").join("Local")))?;
+      Some(base.join(app_id).join("Cache"))
+    }
+    _ => {
+      let base = non_empty("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| home.map(|h| h.join(".cache")))?;
+      Some(base.join(app_id).join("denext"))
+    }
+  }
+}
+
+/// `entry` with a leading [`DESKTOP_CACHE_TOKEN`] replaced by `cache_dir`:
+/// `Some(entry)` unchanged when it has no token, `None` when it has one that
+/// cannot be expanded (no cache folder, a `..` component, or the token
+/// followed by anything but a separator).
+fn expand_desktop_cache_entry(
+  entry: &str,
+  cache_dir: Option<&Path>,
+) -> Option<String> {
+  let Some(rest) = entry.strip_prefix(DESKTOP_CACHE_TOKEN) else {
+    return Some(entry.to_string());
+  };
+  if !(rest.is_empty() || rest.starts_with(['/', '\\'])) {
+    return None;
+  }
+  let mut path = cache_dir?.to_path_buf();
+  for component in rest.split(['/', '\\']) {
+    match component {
+      "" | "." => {}
+      ".." => return None,
+      name => path.push(name),
+    }
+  }
+  Some(path.to_string_lossy().into_owned())
+}
+
+/// denext (DENEXT.md item 189): expands [`DESKTOP_CACHE_TOKEN`] in the
+/// read, write and run grants and denials of a desktop app. An allow entry
+/// that cannot be expanded is dropped (never widened): a list left empty
+/// becomes no grant at all, not `Some(vec![])`, which would allow
+/// everything. A deny entry that cannot be expanded stays as it is (a
+/// relative path that names nothing the app uses).
+pub(crate) fn expand_desktop_cache_token(
+  permissions: &mut deno_runtime::deno_permissions::PermissionsOptions,
+  cache_dir: Option<&Path>,
+) {
+  for slot in [
+    &mut permissions.allow_read,
+    &mut permissions.allow_write,
+    &mut permissions.allow_run,
+  ] {
+    let Some(entries) = slot else { continue };
+    if entries.is_empty()
+      || !entries.iter().any(|e| e.starts_with(DESKTOP_CACHE_TOKEN))
+    {
+      continue;
+    }
+    let expanded: Vec<String> = entries
+      .iter()
+      .filter_map(|e| expand_desktop_cache_entry(e, cache_dir))
+      .collect();
+    *slot = if expanded.is_empty() {
+      None
+    } else {
+      Some(expanded)
+    };
+  }
+  for entries in [
+    &mut permissions.deny_read,
+    &mut permissions.deny_write,
+    &mut permissions.deny_run,
+  ]
+  .into_iter()
+  .flatten()
+  {
+    for entry in entries.iter_mut() {
+      if let Some(expanded) = expand_desktop_cache_entry(entry, cache_dir) {
+        *entry = expanded;
+      }
+    }
+  }
+}
+
 #[cfg(test)]
 mod tests {
   use deno_runtime::deno_permissions::PermissionsOptions;
@@ -2348,11 +2496,153 @@ mod tests {
   use super::DESKTOP_LOOPBACK_HOSTS;
   use super::DesktopStartupError;
   use super::apply_desktop_permission_defaults;
+  use super::desktop_app_cache_dir_for;
   use super::desktop_startup_error;
+  use super::expand_desktop_cache_token;
   use super::grant_vfs_read_access;
 
   fn strs(v: &[&str]) -> Vec<String> {
     v.iter().map(|s| (*s).to_string()).collect()
+  }
+
+  // --- $DENO_DESKTOP_CACHE (DENEXT.md item 189) ---
+
+  #[test]
+  fn desktop_app_cache_dir_per_os() {
+    use std::ffi::OsString;
+    use std::path::PathBuf;
+    let home = || Some(PathBuf::from("/home/u"));
+    let no_env = |_: &str| None::<OsString>;
+    assert_eq!(
+      desktop_app_cache_dir_for("macos", "com.acme.notes", no_env, home()),
+      Some(PathBuf::from(
+        "/home/u/Library/Caches/com.acme.notes/denext"
+      ))
+    );
+    assert_eq!(
+      desktop_app_cache_dir_for("linux", "com.acme.notes", no_env, home()),
+      Some(PathBuf::from("/home/u/.cache/com.acme.notes/denext"))
+    );
+    let xdg = |name: &str| {
+      (name == "XDG_CACHE_HOME").then(|| OsString::from("/xdg/cache"))
+    };
+    assert_eq!(
+      desktop_app_cache_dir_for("linux", "com.acme.notes", xdg, home()),
+      Some(PathBuf::from("/xdg/cache/com.acme.notes/denext"))
+    );
+    // An empty XDG_CACHE_HOME is unset.
+    let empty = |_: &str| Some(OsString::new());
+    assert_eq!(
+      desktop_app_cache_dir_for("linux", "com.acme.notes", empty, home()),
+      Some(PathBuf::from("/home/u/.cache/com.acme.notes/denext"))
+    );
+    let local =
+      |name: &str| (name == "LOCALAPPDATA").then(|| OsString::from("/local"));
+    assert_eq!(
+      desktop_app_cache_dir_for("windows", "com.acme.notes", local, home()),
+      Some(PathBuf::from("/local").join("com.acme.notes").join("Cache"))
+    );
+    assert_eq!(
+      desktop_app_cache_dir_for("windows", "com.acme.notes", no_env, home()),
+      Some(
+        PathBuf::from("/home/u/AppData/Local")
+          .join("com.acme.notes")
+          .join("Cache")
+      )
+    );
+    // No home folder, or an id that is not one folder name: nothing.
+    assert_eq!(
+      desktop_app_cache_dir_for("macos", "com.acme.notes", no_env, None),
+      None
+    );
+    for id in ["", "..", "a/b", "a\\b"] {
+      assert_eq!(desktop_app_cache_dir_for("linux", id, no_env, home()), None);
+    }
+  }
+
+  #[test]
+  fn desktop_cache_token_expands_to_the_app_cache() {
+    use std::path::Path;
+    let cache = Path::new("/home/u/.cache/com.acme.notes/denext");
+    let program = cache.join("sidecars").join("srv").join("server");
+    let mut p = PermissionsOptions {
+      allow_run: Some(strs(&[
+        "$DENO_DESKTOP_CACHE/sidecars/srv/server",
+        "/usr/bin/git",
+      ])),
+      allow_write: Some(strs(&["$DENO_DESKTOP_CACHE/sidecars/srv"])),
+      allow_read: Some(strs(&["/data"])),
+      deny_write: Some(strs(&["$DENO_DESKTOP_CACHE/secret"])),
+      ..Default::default()
+    };
+    expand_desktop_cache_token(&mut p, Some(cache));
+    assert_eq!(
+      p.allow_run,
+      Some(vec![
+        program.to_string_lossy().into_owned(),
+        "/usr/bin/git".to_string()
+      ])
+    );
+    assert_eq!(
+      p.allow_write,
+      Some(vec![
+        cache
+          .join("sidecars")
+          .join("srv")
+          .to_string_lossy()
+          .into_owned()
+      ])
+    );
+    assert_eq!(p.allow_read, Some(strs(&["/data"])));
+    assert_eq!(
+      p.deny_write,
+      Some(vec![cache.join("secret").to_string_lossy().into_owned()])
+    );
+  }
+
+  #[test]
+  fn desktop_cache_token_never_widens_a_grant() {
+    use std::path::Path;
+    // No cache folder (no identifier, no home): a token-only grant becomes
+    // no grant, never `Some(vec![])` (allow-all).
+    let mut p = PermissionsOptions {
+      allow_run: Some(strs(&["$DENO_DESKTOP_CACHE/sidecars/srv/server"])),
+      allow_write: Some(strs(&["$DENO_DESKTOP_CACHE/x", "/tmp/out"])),
+      deny_run: Some(strs(&["$DENO_DESKTOP_CACHE/y"])),
+      ..Default::default()
+    };
+    expand_desktop_cache_token(&mut p, None);
+    assert_eq!(p.allow_run, None);
+    assert_eq!(p.allow_write, Some(strs(&["/tmp/out"])));
+    // A deny entry is kept as it is.
+    assert_eq!(p.deny_run, Some(strs(&["$DENO_DESKTOP_CACHE/y"])));
+
+    // An entry that would leave the folder, or a token that is only a
+    // prefix of a longer name, is dropped.
+    let cache = Path::new("/c");
+    let mut p = PermissionsOptions {
+      allow_run: Some(strs(&[
+        "$DENO_DESKTOP_CACHE/../../bin/sh",
+        "$DENO_DESKTOP_CACHEX/a",
+        "$DENO_DESKTOP_CACHE/ok",
+      ])),
+      ..Default::default()
+    };
+    expand_desktop_cache_token(&mut p, Some(cache));
+    assert_eq!(
+      p.allow_run,
+      Some(vec![cache.join("ok").to_string_lossy().into_owned()])
+    );
+
+    // Allow-all and lists without the token are untouched.
+    let mut p = PermissionsOptions {
+      allow_run: Some(vec![]),
+      allow_read: Some(strs(&["/a"])),
+      ..Default::default()
+    };
+    expand_desktop_cache_token(&mut p, Some(cache));
+    assert_eq!(p.allow_run, Some(vec![]));
+    assert_eq!(p.allow_read, Some(strs(&["/a"])));
   }
 
   #[test]

@@ -7430,13 +7430,42 @@ where the changes are discussed.
        overlay checks, `--layer1` StatusNotifierItem clicks) covers the native
        side.
 
+189. **`fix(desktop)`: `$DENO_DESKTOP_CACHE` in a baked permission is the
+     app's cache folder** (`fix/exec-sidecar-run-scope`; `cli/rt/run.rs`).
+     A packaged desktop app cannot run a program from its embedded files, so
+     denext copies a project-file sidecar program (`run.exec`) into the
+     app's cache folder at launch, and that path (under the user's home) is
+     unknown when `deno desktop` bakes the flags: denext baked an unscoped
+     `--allow-run`, letting any code in the app run any program. A baked
+     `--allow-read` / `--allow-write` / `--allow-run` value (or the matching
+     `--deny-*`) may now start with `$DENO_DESKTOP_CACHE`, which a desktop
+     app's runtime expands at launch, right after
+     `apply_desktop_permission_defaults`, to the app's own cache folder:
+     `~/Library/Caches/<id>/denext` on macOS, `%LOCALAPPDATA%\<id>\Cache` on
+     Windows, `$XDG_CACHE_HOME|~/.cache` `/<id>/denext` elsewhere (denext's
+     `desktopAppDirs(id).cache`), `<id>` being the baked
+     `desktop.app.identifier`. Only the token at the start of a value is
+     expanded, followed by a separator; a value that cannot be expanded (no
+     identifier, no home folder, a `..` component) is dropped from an allow
+     list, and a list left empty grants nothing rather than everything; a
+     deny entry that cannot be expanded is kept as written. Programs that
+     are not desktop apps are unchanged.
+
+     Then denext bakes `--allow-run=$DENO_DESKTOP_CACHE/sidecars/<name>/<file>`
+     (and the matching `--allow-write`) from the release that has this,
+     keeping the unscoped grant for older runtimes.
+
+     Tests (`cli/rt/run.rs`): `desktop_app_cache_dir_per_os`,
+     `desktop_cache_token_expands_to_the_app_cache` and
+     `desktop_cache_token_never_widens_a_grant`.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
-169-174, 176, 178, 180, 182, 183) are what the prebuilt `libdenort` carries. The
-CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID`
-into a packaged app's launchers) are in the branch too, but a stock CLI does not
-run them; denext's own launcher provides that environment.
+169-174, 176, 178, 180, 182, 183, 189) are what the prebuilt `libdenort`
+carries. The CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` /
+`LAUFEY_APP_ID` into a packaged app's launchers) are in the branch too, but a
+stock CLI does not run them; denext's own launcher provides that environment.
 
 The laufey backend hosts are built from
 [Brainwires/laufey](https://github.com/Brainwires/laufey) branch
