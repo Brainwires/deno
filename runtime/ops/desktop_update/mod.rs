@@ -802,6 +802,24 @@ fn verify_os_signature(
     let files = oscheck::pe_files(staged)
       .map_err(|e| UpdateError::io(staged.display(), e))?;
     if !files.contains(&exe) {
+      // The executable packed under a name that differs only in case: the
+      // file system finds it, the walk spells it as packed.
+      let rel = |f: &std::path::PathBuf| {
+        f.strip_prefix(staged)
+          .ok()
+          .map(treecheck::walk_rel)
+          .unwrap_or_default()
+      };
+      let names: Vec<String> = files.iter().map(rel).collect();
+      let exe_rel = treecheck::walk_rel(&layout.exe_rel);
+      if let Some(found) =
+        treecheck::case_only_rename(&exe_rel, names.iter().map(String::as_str))
+      {
+        return error::err(
+          Code::BundleMismatch,
+          treecheck::case_only_rename_message(&exe_rel, found),
+        );
+      }
       return error::err(
         Code::BundleMismatch,
         format!(

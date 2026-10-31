@@ -827,10 +827,25 @@ fn refuse_staged(
   state: &mut UpdateState,
   why: &str,
 ) -> Result<(), UpdateError> {
+  refuse_staged_with(layout, state, UpdateError::new(Code::BundleMismatch, why))
+}
+
+/// [`refuse_staged`] for a refusal with its own code (the OS signature
+/// re-check, the Windows tree check). The state goes back to `staged` with
+/// `last_error` set to `"<code>: <message>"`, the form the error takes
+/// across the op boundary, so the app can tell why the apply failed after
+/// it is relaunched. The staged app is left where it is, as for every
+/// refusal here: the next download replaces it (`begin()` makes the staging
+/// directory fresh), and an apply retried re-checks it in full.
+fn refuse_staged_with(
+  layout: &InstallLayout,
+  state: &mut UpdateState,
+  e: UpdateError,
+) -> Result<(), UpdateError> {
   state.phase = Phase::Staged;
-  state.last_error = Some(why.to_string());
+  state.last_error = Some(e.to_string());
   let _ = write_state(layout, state);
-  err(Code::BundleMismatch, format!("{why}; nothing was swapped"))
+  err(e.code, format!("{}; nothing was swapped", e.message))
 }
 
 /// The helper's `apply`: check the staged app and swap it into place. On
@@ -910,10 +925,14 @@ pub fn apply_swap_verified(
   if !staging.still_at_path() {
     return refuse_staged(layout, state, "the staging directory was replaced");
   }
-  verify(layout, state)?;
-  // Windows: the staged app's loose files against the signed executable's
-  // tree manifest, as the pinning walk read them.
-  super::treecheck::verify_for_platform(layout, &staged_path, &entries)?;
+  // The OS signature re-check, then (Windows) the staged app's loose files
+  // against the signed executable's tree manifest, as the pinning walk read
+  // them. A refusal is recorded like every other one here.
+  if let Err(e) = verify(layout, state).and_then(|()| {
+    super::treecheck::verify_for_platform(layout, &staged_path, &entries)
+  }) {
+    return refuse_staged_with(layout, state, e);
+  }
   if !staging.still_at_path() {
     return refuse_staged(layout, state, "the staging directory was replaced");
   }
@@ -3197,6 +3216,64 @@ mod tests {
     assert_eq!(s.rejected.as_deref(), Some("2.0.0"));
     assert_eq!(s.all_rejected(), vec!["2.0.0"]);
     assert_eq!(startup_action(l), StartupAction::Continue { trial: false });
+  }
+
+  /// A refusal by the OS signature re-check or the Windows tree check at
+  /// apply time is recorded in the state as `"<code>: <message>"`, like the
+  /// helper's other refusals, so the relaunched app can tell why. The staged
+  /// app stays (nothing swapped) for a retry.
+  #[test]
+  fn an_apply_time_refusal_is_recorded() {
+    let check =
+      |l: &InstallLayout, e: UpdateError, code: Code, needle: &str| {
+        assert_eq!(e.code, code, "{}", e.message);
+        assert!(e.message.contains("nothing was swapped"), "{}", e.message);
+        assert_eq!(installed(l), "1.0.0");
+        let s = read_state(l).unwrap();
+        assert_eq!(s.phase, Phase::Staged);
+        let last = s.last_error.unwrap_or_default();
+        assert!(
+          last.starts_with(&format!("{}: ", code.as_str()))
+            && last.contains(needle),
+          "{last}"
+        );
+        assert_eq!(
+          std::fs::read_to_string(l.extract_dir().join("App/version")).unwrap(),
+          "2.0.0"
+        );
+      };
+
+    // The OS signature re-check refuses.
+    let f = fixture(Some("2.0.0"));
+    let l = &f.layout;
+    let mut s = read_state(l).unwrap();
+    let verify = |_: &InstallLayout, _: &UpdateState| {
+      err(
+        Code::OsSignature,
+        "the staged app is signed by someone else",
+      )
+    };
+    let e = apply_swap_verified(l, &mut s, &verify, &no_fault).unwrap_err();
+    check(l, e, Code::OsSignature, "signed by someone else");
+
+    // Windows: the tree check refuses (the running app carries a tree
+    // manifest, the staged one none).
+    if cfg!(windows) {
+      let f = fixture(Some("2.0.0"));
+      let l = &f.layout;
+      std::fs::write(
+        l.install.join(FIXTURE_EXE),
+        treecheck_tests::pe_with_resource(
+          super::super::treecheck::RESOURCE_NAME,
+          &treecheck_tests::manifest_json(&[]),
+          &[1033],
+        ),
+      )
+      .unwrap();
+      let mut s = read_state(l).unwrap();
+      let e = apply_swap(l, &mut s).unwrap_err();
+      check(l, e, Code::OsSignature, "no signed tree manifest");
+    }
   }
 
   #[test]
