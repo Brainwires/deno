@@ -7572,10 +7572,49 @@ where the changes are discussed.
        `node:zlib` Brotli round trip once its page has loaded, under both
        backends on every target.
 
+188. **`feat(desktop)`: `backgroundThrottling`, and hidden pages no longer
+     frozen on macOS** (laufey API 51, from
+     `fix/macos-hidden-page-and-hit-region` of Brainwires/laufey at e7b06a3,
+     until it lands; `runtime/ops/desktop.rs`, `cli/rt_desktop/lib.rs`,
+     `lib.deno.desktop.d.ts`; for runtime 3.0.0-denext.7). Two macOS findings
+     from a live run of a desktop companion and a tray app:
+     - laufey's WebView backend never set
+       `WKPreferences.inactiveSchedulingPolicy`, and WebKit's default on macOS
+       14+ (Suspend) freezes the page of a window that is not on screen: a
+       `BrowserWindow({ show: false })` ran its timers for about a second after
+       it loaded and then nothing (no timers, no `Deno.desktop` events, no
+       sockets) until it showed, so a tray menu handled by a hidden window's
+       page did nothing. laufey now starts every window throttled (the page
+       keeps running, its timers about once a second), as Electron does.
+     - `BrowserWindowOptions.backgroundThrottling` (Electron's
+       `webPreferences.backgroundThrottling`): `true` (the default) is
+       throttled; `false` keeps the page's timers at their rate while the window
+       is not on screen (laufey `BackgroundThrottling::None`:
+       `inactiveSchedulingPolicy` None plus WebKit's hidden-page timer
+       throttling off). Creation time only (WebKit reads it when it sets the
+       page up), so a `backgroundThrottling: false` window never adopts the
+       throttled bootstrap window (`InitialWindowAttributes.unthrottled`).
+       Windows (WebView2), Linux (WebKitGTK) and CEF throttle a hidden page
+       without freezing it and ignore it.
+     - laufey's macOS hit region (`setHitRegion`) is recomputed when the window
+       moves, resizes, shows, hides or changes screen instead of on a 30 Hz
+       timer, so a click right after a window move meets the current region. A
+       click the window server receives within ~2 ms of the cursor move that
+       brought the pointer over a rectangle can still pass through (the move
+       reaches the app after the window server has routed the click).
+     - Tests: `runtime::ops::desktop`'s adoption test
+       (`backgroundThrottling:
+       false` doesn't adopt the bootstrap window,
+       `true` does). laufey's `--window-api` e2e (hidden pages' timers per
+       policy, the region after a window move, real clicks 10 ms after a move)
+       covers the native side; in a macOS 26.6 VM a hidden page's 100 ms
+       interval ticked 5 times in 5 s throttled and 47 times unthrottled (a bare
+       WKWebView on WebKit's default stopped after ~1.4 s and ticked 0 times).
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
-169-174, 176, 178, 180, 182-184, 186, 187) are what the prebuilt `libdenort`
+169-174, 176, 178, 180, 182-184, 186-188) are what the prebuilt `libdenort`
 carries. The CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` /
 `LAUFEY_APP_ID` into a packaged app's launchers) are in the branch too, but a
 stock CLI does not run them; denext's own launcher provides that environment.
@@ -7605,10 +7644,11 @@ secure-store items read over an encrypted Secret Service session (laufey
 879ee0e) and tokio 1.53.3 with laufey's own `.cargo/audit.toml`; and, for
 runtime 3.0.0-denext.6, API 50: overlay windows, tray events, the launch
 activation policy and speech, item 183; and, for runtime 3.0.0-denext.7, CEF
-156, item 184, and the Linux Wayland overlay fixes, item 186), at the commit
-pinned by `LAUFEY_SHA` in the workflow (or the `laufey_ref` input). The same
-commit is the `laufey` git dependency of `cli/rt_desktop/Cargo.toml` (crate
-0.8.0, API 50, CEF 156.0.14).
+156, item 184, the Linux Wayland overlay fixes, item 186, and API 51, hidden
+pages throttled instead of frozen on macOS and `backgroundThrottling`, item
+188), at the commit pinned by `LAUFEY_SHA` in the workflow (or the `laufey_ref`
+input). The same commit is the `laufey` git dependency of
+`cli/rt_desktop/Cargo.toml` (crate 0.8.0, API 51, CEF 156.0.14).
 
 laufey's `init_api` rejects any C ABI version mismatch between the runtime and
 the host, so the `laufey` crate libdenort links and the hosts are built from the

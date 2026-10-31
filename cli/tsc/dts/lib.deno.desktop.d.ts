@@ -504,6 +504,22 @@ declare namespace Deno {
     overlay?: boolean;
     /** See {@linkcode BrowserWindow.setSkipTaskbar}. */
     skipTaskbar?: boolean;
+    /** What the page does while the window is not on screen (created with
+     * `show: false`, hidden, minimized or covered), like Electron's
+     * `webPreferences.backgroundThrottling`. `true` (the default): it keeps
+     * running with its timers slowed down (about once a second on macOS),
+     * and its events, messages and sockets are handled. `false`: its timers
+     * keep their rate, for a hidden window that does the app's background
+     * work. Creation time only.
+     *
+     * macOS (the system WebView, macOS 14+, from runtime 3.0.0-denext.7):
+     * WebKit used to freeze the page of a window created hidden about a
+     * second after it loaded, until the window showed; it is now throttled
+     * instead. Windows (WebView2), Linux (WebKitGTK) and the CEF backend
+     * throttle a hidden page without freezing it and ignore the option.
+     *
+     * @default {true} */
+    backgroundThrottling?: boolean;
     /** Minimum size, applied with {@linkcode BrowserWindow.setMinimumSize}.
      * `0` (the default) is no limit. */
     minWidth?: number;
