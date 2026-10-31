@@ -50,10 +50,14 @@
 //! **What is touched.** Only paths proven to be copies of this app's install
 //! ([`super::layout::is_install_copy`]: the packager's marker) are swapped or
 //! deleted as the install, `.old` or a failed install; anything else at those
-//! names is left alone and the step is refused. Before swapping, the helper
-//! re-hashes the staged tree and compares it with the digest recorded when
-//! it was verified and staged ([`tree_digest`]), so a staged app changed
-//! after verification is never swapped in.
+//! names is left alone and the step is refused. The staged app is held
+//! through its private staging directory ([`super::staging`]) from the
+//! helper's check to the rename: its digest ([`tree_digest`]) is taken
+//! through that directory before the OS re-check, must equal the one
+//! recorded when it was staged, and is taken again right before the swap,
+//! which renames from the held directory ([`apply_swap_verified`]). So a
+//! staged app changed, or a staging directory replaced, after verification
+//! is never swapped in.
 
 #![allow(
   clippy::disallowed_methods,
