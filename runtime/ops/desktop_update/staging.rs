@@ -38,6 +38,7 @@
 )]
 
 use std::ffi::OsStr;
+#[cfg(unix)]
 use std::ffi::OsString;
 use std::path::Path;
 use std::path::PathBuf;
@@ -168,7 +169,6 @@ impl PrivateDir {
     #[cfg(not(unix))]
     Ok(Staged {
       path: self.path.join(sub).join(entry),
-      entry: entry.to_os_string(),
     })
   }
 }
@@ -180,6 +180,7 @@ pub struct Staged {
   pub path: PathBuf,
   #[cfg(unix)]
   dir: std::os::fd::OwnedFd,
+  #[cfg(unix)]
   entry: OsString,
 }
 
