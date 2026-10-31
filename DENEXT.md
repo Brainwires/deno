@@ -7507,14 +7507,14 @@ where the changes are discussed.
      `runtime/ops/desktop.rs`, `cli/rt_desktop/{lib,app_origin}.rs`,
      `cli/lib/standalone/{app_origin,binary}.rs`, `libs/config`,
      `cli/schemas/config-file.v1.json`, `lib.deno.desktop.d.ts`; with
-     Brainwires/laufey `fix/wayland-overlay-panel`; for runtime
-     3.0.0-denext.7). A live run of a desktop companion and a tray app on KDE
-     Plasma 6 and GNOME 51 (Wayland):
+     Brainwires/laufey `fix/wayland-overlay-panel`; for runtime 3.0.0-denext.7).
+     A live run of a desktop companion and a tray app on KDE Plasma 6 and GNOME
+     51 (Wayland):
      - `initialWindow.overlay` (deno.json `desktop.initialWindow` and
        `.deno-desktop/app.json`): the window the app starts with can be a
        layer-shell overlay, the only way on Wayland to be on top, on every
-       workspace, off the taskbar and unfocused; `create_initial_window`
-       passed `overlay: false`. The bootstrap window is adopted only by a
+       workspace, off the taskbar and unfocused; `create_initial_window` passed
+       `overlay: false`. The bootstrap window is adopted only by a
        `BrowserWindow` whose `overlay` agrees.
      - `Tray.attachPanel` makes its panel an `overlay` window where
        `windowCapabilities().layerShell` (keyboard on demand, so it still
@@ -7523,6 +7523,7 @@ where the changes are discussed.
        (`panelClickToggles`; a Linux tray host reports none).
      - app.json `name` (`desktop.app.name`): the title of an untitled window;
        the baked app name is the output file's (`--output dist/MyApp-arm64`).
+
      The laufey side: window sizes (non-resizable windows held at 800x600),
      frameless windows on KWin, `nonActivating` reported on Wayland only with
      layer-shell, appmenu-gtk-module's Gdk-CRITICALs.
@@ -7561,8 +7562,9 @@ secure-store items read over an encrypted Secret Service session (laufey
 runtime 3.0.0-denext.6, API 50: overlay windows, tray events, the launch
 activation policy and speech, item 183; and, for runtime 3.0.0-denext.7, CEF
 156, item 184, and the Linux Wayland overlay fixes, item 186), at the commit
-pinned by `LAUFEY_SHA` in the workflow (or the `laufey_ref` input). The same commit is the `laufey` git dependency of
-`cli/rt_desktop/Cargo.toml` (crate 0.8.0, API 50, CEF 156.0.14).
+pinned by `LAUFEY_SHA` in the workflow (or the `laufey_ref` input). The same
+commit is the `laufey` git dependency of `cli/rt_desktop/Cargo.toml` (crate
+0.8.0, API 50, CEF 156.0.14).
 
 laufey's `init_api` rejects any C ABI version mismatch between the runtime and
 the host, so the `laufey` crate libdenort links and the hosts are built from the
