@@ -422,7 +422,7 @@ pub fn verify_for_platform(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
   use super::*;
 
   fn sha(b: &[u8]) -> String {
@@ -720,7 +720,7 @@ mod tests {
     std::fs::write(p, body).unwrap();
   }
 
-  fn manifest_json(files: &[(&str, &[u8])]) -> Vec<u8> {
+  pub(crate) fn manifest_json(files: &[(&str, &[u8])]) -> Vec<u8> {
     serde_json::to_vec(&serde_json::json!({
       "v": 1,
       "files": files.iter().map(|(p, b)| serde_json::json!({
