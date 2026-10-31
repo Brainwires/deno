@@ -7572,6 +7572,45 @@ where the changes are discussed.
        `node:zlib` Brotli round trip once its page has loaded, under both
        backends on every target.
 
+187. **`feat(compile)`: the CLI carries the SHA-256 of every `denort` archive
+     of its release** (`feat/embed-denort-sha`; `cli/standalone/binary.rs`,
+     `cli/build.rs`, `denext_runtime.yml`, `.github/denext-runtime/`; CLI
+     only). Item 130 checks the release's `denort` against the `SHA256SUMS`
+     fetched from the same release, so a release whose archive and
+     `SHA256SUMS` were both replaced (before immutable releases, or a
+     `DENEXT_DENORT_BASE_URL` mirror serving other bytes) still passed. A
+     release CLI now has the expected hashes compiled in:
+     `DENEXT_DENORT_SHA256S` (`<target>=<sha256>,...`) at build time becomes
+     `EMBEDDED_DENORT_SHA256S`, and `deno compile` takes that target's
+     archive only when its SHA-256 is the embedded one (`SHA256SUMS` is not
+     fetched; a cached archive with other bytes is downloaded again, a
+     download with other bytes is refused naming both hashes, whatever the
+     release lists). A build without the variable (a local or test build),
+     or a target the list does not name, keeps item 130's `SHA256SUMS`
+     check. `cli/build.rs` fails the build on a malformed list or two
+     entries for a target that disagree.
+
+     The release workflow builds `denort` first, in a new `denort_bin` job
+     per target (built, checked, signed, its symbols collected as
+     `denort-symbols-<version>-<target>.tar.gz`, assembled by
+     `assemble_denort.sh`, attested); the `cli` job needs all of them, sets
+     `DENEXT_DENORT_SHA256S` from the six archives (a tag build refuses fewer
+     than six), builds `deno` alone, checks the list is in the binary, and
+     ships the `denort_bin` archive unchanged. The denort smoke also compiles
+     onto the archive served from a loopback release with no `SHA256SUMS`
+     (only the embedded hash can verify it) and checks that the archive with
+     one byte appended is refused. `symbolicate.py` takes denort's debug info
+     from `denort-symbols-*` from 3.0.0-denext.8 on, and `check-release`
+     requires those archives from then.
+
+     Tests (`cli/standalone/binary.rs`):
+     `embedded_denort_sha256_reads_the_build_list`,
+     `denext_denort_pinned_hash_needs_no_sums`,
+     `denext_denort_pinned_hash_refuses_other_bytes`,
+     `denext_denort_pinned_hash_does_not_trust_the_cache_record`, with item
+     130's unchanged; `symbolicate_test.py`
+     `test_denort_symbols_have_their_own_archive_from_denext8`.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,

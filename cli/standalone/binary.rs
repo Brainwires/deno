@@ -622,6 +622,10 @@ impl<'a> DenoCompileBinaryWriter<'a> {
       log::debug!("Resolved denort: {}", binary_path.display());
       let asset = denext_denort_asset_name(version, &target);
       let sums_url = denext_release_sums_url(&download_url);
+      // denext (DENEXT.md item 187): a release build carries the SHA-256
+      // of each target's denort archive and needs no SHA256SUMS for it.
+      let pinned = embedded_denort_sha256(EMBEDDED_DENORT_SHA256S, &target)
+        .context("Reading the denort SHA-256 this CLI was built with.")?;
       let client = self.http_client_provider.get_or_create()?;
       let fetch =
         async |what: DenortFetch| -> Result<Option<Vec<u8>>, AnyError> {
@@ -650,6 +654,7 @@ impl<'a> DenoCompileBinaryWriter<'a> {
           archive_url: &download_url,
           sums_url: &sums_url,
         },
+        pinned.as_deref(),
         fetch,
       )
       .await
@@ -2040,6 +2045,53 @@ fn deno_land_suffix(
   }
 }
 
+/// denext (DENEXT.md item 187): the SHA-256 of every `denort` archive of
+/// this CLI's release, as `<target>=<sha256>` entries separated by commas
+/// (`DENEXT_DENORT_SHA256S` at compile time; the release workflow builds the
+/// archives first and passes their hashes to the CLI build, and
+/// `cli/build.rs` refuses a malformed list). `None` in a build without it (a
+/// local or test build), which verifies against the release's `SHA256SUMS`
+/// as before.
+const EMBEDDED_DENORT_SHA256S: Option<&str> =
+  option_env!("DENEXT_DENORT_SHA256S");
+
+/// `target`'s SHA-256 in an embedded `<target>=<sha256>,...` list (see
+/// [`EMBEDDED_DENORT_SHA256S`]), lowercase. `None` when there is no list or
+/// it has no entry for `target` (a target that release does not ship, or a
+/// dispatch build of some targets only); an error for a malformed list or
+/// two entries for `target` that disagree.
+fn embedded_denort_sha256(
+  list: Option<&str>,
+  target: &str,
+) -> Result<Option<String>, AnyError> {
+  let Some(list) = list else {
+    return Ok(None);
+  };
+  let mut found: Option<String> = None;
+  for entry in list.split(',').map(str::trim).filter(|e| !e.is_empty()) {
+    let Some((name, hash)) = entry.split_once('=') else {
+      bail!(
+        "malformed denort SHA-256 entry '{entry}' (want <target>=<sha256>)"
+      );
+    };
+    let (name, hash) = (name.trim(), hash.trim());
+    if hash.len() != 64 || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
+      bail!("malformed denort SHA-256 for {name}: '{hash}'");
+    }
+    if name != target {
+      continue;
+    }
+    let hash = hash.to_ascii_lowercase();
+    match &found {
+      Some(previous) if *previous != hash => bail!(
+        "two denort SHA-256 entries for {target} disagree ({previous} and {hash})"
+      ),
+      _ => found = Some(hash),
+    }
+  }
+  Ok(found)
+}
+
 fn denext_denort_asset_name(version: &str, target: &str) -> String {
   format!("deno-denort-{version}-{target}.zip")
 }
@@ -2135,9 +2187,15 @@ fn read_verified_cache(archive_path: &Path) -> Option<Vec<u8>> {
 /// while its bytes still hash to the SHA-256 recorded beside it when it was
 /// verified; otherwise it is checked against `SHA256SUMS` again (and
 /// downloaded again if it does not match).
+///
+/// With `pinned` (item 187: the SHA-256 this CLI was built with, see
+/// [`EMBEDDED_DENORT_SHA256S`]) that hash is the only one accepted:
+/// `SHA256SUMS` is not fetched, and a cached or downloaded archive with
+/// other bytes is refused whatever the release lists.
 async fn load_verified_denext_denort(
   cache_path: &Path,
   source: &DenextDenortSource<'_>,
+  pinned: Option<&str>,
   fetch: impl AsyncFn(DenortFetch) -> Result<Option<Vec<u8>>, AnyError>,
 ) -> Result<Vec<u8>, AnyError> {
   let DenextDenortSource {
@@ -2145,6 +2203,27 @@ async fn load_verified_denext_denort(
     archive_url,
     sums_url,
   } = *source;
+  if let Some(expected) = pinned {
+    let expected = expected.to_ascii_lowercase();
+    if let Some(bytes) = std::fs::read(cache_path)
+      .ok()
+      .filter(|bytes| sha256_hex(bytes) == expected)
+    {
+      return Ok(bytes);
+    }
+    let Some(archive) = fetch(DenortFetch::Archive).await? else {
+      bail!("{archive_url} was not found");
+    };
+    let actual = sha256_hex(&archive);
+    if actual != expected {
+      bail!(
+        "{asset} from {archive_url} does not match the SHA-256 this CLI was \
+         built with: expected {expected}, got {actual}. Refusing to use it."
+      );
+    }
+    write_verified_cache(cache_path, &archive, &actual, asset)?;
+    return Ok(archive);
+  }
   if let Some(bytes) = read_verified_cache(cache_path) {
     return Ok(bytes);
   }
@@ -2182,22 +2261,34 @@ async fn load_verified_denext_denort(
     );
   }
 
+  write_verified_cache(cache_path, &archive, &actual, asset)?;
+  Ok(archive)
+}
+
+/// Caches a verified archive and records its SHA-256 beside it (see
+/// [`verified_hash_path`]).
+fn write_verified_cache(
+  cache_path: &Path,
+  archive: &[u8],
+  sha256: &str,
+  asset: &str,
+) -> Result<(), AnyError> {
   let sys = CliSys::default();
   if let Some(dir) = cache_path.parent() {
     std::fs::create_dir_all(dir)
       .with_context(|| format!("Creating {}", dir.display()))?;
   }
-  atomic_write_file_with_retries(&sys, cache_path, &archive, CACHE_PERM)
+  atomic_write_file_with_retries(&sys, cache_path, archive, CACHE_PERM)
     .with_context(|| format!("Writing {}", cache_path.display()))?;
   let hash_path = verified_hash_path(cache_path);
   atomic_write_file_with_retries(
     &sys,
     &hash_path,
-    format!("{actual}  {asset}\n").as_bytes(),
+    format!("{sha256}  {asset}\n").as_bytes(),
     CACHE_PERM,
   )
   .with_context(|| format!("Writing {}", hash_path.display()))?;
-  Ok(archive)
+  Ok(())
 }
 
 fn runtime_archive_name(
@@ -2350,6 +2441,7 @@ mod tests {
   use super::denext_denort_asset_name;
   use super::denext_release_sums_url;
   use super::deno_land_suffix;
+  use super::embedded_denort_sha256;
   use super::load_verified_denext_denort;
   use super::runtime_archive_name;
   use super::sha256_hex;
@@ -2449,8 +2541,19 @@ mod tests {
     }
 
     async fn load(&self, cache: &Path) -> Result<Vec<u8>, AnyError> {
-      load_verified_denext_denort(cache, &denort_source(), async |what| {
-        match what {
+      self.load_pinned(cache, None).await
+    }
+
+    async fn load_pinned(
+      &self,
+      cache: &Path,
+      pinned: Option<&str>,
+    ) -> Result<Vec<u8>, AnyError> {
+      load_verified_denext_denort(
+        cache,
+        &denort_source(),
+        pinned,
+        async |what| match what {
           DenortFetch::Archive => {
             self.archive_fetches.set(self.archive_fetches.get() + 1);
             Ok(Some(self.archive.clone()))
@@ -2459,8 +2562,8 @@ mod tests {
             self.sums_fetches.set(self.sums_fetches.get() + 1);
             Ok(self.sums.clone().map(String::into_bytes))
           }
-        }
-      })
+        },
+      )
       .await
     }
   }
@@ -2504,6 +2607,131 @@ mod tests {
     assert!(err.contains("twice"), "{err}");
     let malformed = format!("xyz  {DENORT_ASSET}\n");
     assert!(sha256sums_entry(&malformed, DENORT_ASSET).is_err());
+  }
+
+  #[test]
+  fn embedded_denort_sha256_reads_the_build_list() {
+    let linux = "AB".repeat(32);
+    let mac = "cd".repeat(32);
+    let list =
+      format!("x86_64-unknown-linux-gnu={linux}, aarch64-apple-darwin={mac},");
+    assert_eq!(
+      embedded_denort_sha256(Some(&list), "x86_64-unknown-linux-gnu").unwrap(),
+      Some("ab".repeat(32))
+    );
+    assert_eq!(
+      embedded_denort_sha256(Some(&list), "aarch64-apple-darwin").unwrap(),
+      Some(mac.clone())
+    );
+    // A target the list does not name, or no list at all (a local build):
+    // no pin, so SHA256SUMS decides as before.
+    assert_eq!(
+      embedded_denort_sha256(Some(&list), "x86_64-pc-windows-msvc").unwrap(),
+      None
+    );
+    assert_eq!(
+      embedded_denort_sha256(None, "x86_64-unknown-linux-gnu").unwrap(),
+      None
+    );
+    // A target name that only starts like a listed one is not an entry.
+    assert_eq!(
+      embedded_denort_sha256(Some(&list), "x86_64-unknown-linux").unwrap(),
+      None
+    );
+    let conflicting = format!(
+      "x86_64-unknown-linux-gnu={linux},x86_64-unknown-linux-gnu={mac}"
+    );
+    let err =
+      embedded_denort_sha256(Some(&conflicting), "x86_64-unknown-linux-gnu")
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("disagree"), "{err}");
+    for malformed in [
+      "x86_64-unknown-linux-gnu",
+      "x86_64-unknown-linux-gnu=xyz",
+      &format!("aarch64-apple-darwin={}", "a".repeat(63)),
+    ] {
+      assert!(
+        embedded_denort_sha256(Some(malformed), "x86_64-unknown-linux-gnu")
+          .is_err(),
+        "{malformed}"
+      );
+    }
+  }
+
+  #[tokio::test]
+  async fn denext_denort_pinned_hash_needs_no_sums() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let cache = dir.path().join("denext/v3.0.0-rc.7").join(DENORT_ASSET);
+    let archive = b"the real denort zip";
+    // No SHA256SUMS in the release at all: the embedded hash is enough.
+    let release = FakeRelease::new(archive, None);
+    let pinned = sha256_hex(archive);
+    assert_eq!(
+      release.load_pinned(&cache, Some(&pinned)).await.unwrap(),
+      archive
+    );
+    assert_eq!(std::fs::read(&cache).unwrap(), archive);
+    // Used again from the cache, with no download.
+    assert_eq!(
+      release.load_pinned(&cache, Some(&pinned)).await.unwrap(),
+      archive
+    );
+    assert_eq!(release.archive_fetches.get(), 1);
+    assert_eq!(release.sums_fetches.get(), 0);
+  }
+
+  #[tokio::test]
+  async fn denext_denort_pinned_hash_refuses_other_bytes() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let cache = dir.path().join(DENORT_ASSET);
+    let swapped = b"a swapped denort zip";
+    // The release's SHA256SUMS was swapped with the archive: it lists the
+    // swapped bytes, and the embedded hash still refuses them.
+    let release =
+      FakeRelease::new(swapped, Some(sums_listing(&[(DENORT_ASSET, swapped)])));
+    let pinned = sha256_hex(b"the real denort zip");
+    let err = format!(
+      "{:#}",
+      release
+        .load_pinned(&cache, Some(&pinned.to_ascii_uppercase()))
+        .await
+        .unwrap_err()
+    );
+    assert!(err.contains("this CLI was built with"), "{err}");
+    assert!(err.contains(&pinned), "{err}");
+    assert!(err.contains(&sha256_hex(swapped)), "{err}");
+    assert!(err.contains(DENORT_ASSET), "{err}");
+    assert_eq!(release.sums_fetches.get(), 0);
+    assert!(!cache.exists());
+    assert!(!super::verified_hash_path(&cache).exists());
+  }
+
+  #[tokio::test]
+  async fn denext_denort_pinned_hash_does_not_trust_the_cache_record() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let cache = dir.path().join(DENORT_ASSET);
+    let archive = b"the real denort zip";
+    let swapped = b"a swapped denort zip";
+    // A cache verified (by an older CLI, against a swapped SHA256SUMS) with
+    // other bytes: its record matches, the embedded hash does not.
+    std::fs::write(&cache, swapped).unwrap();
+    std::fs::write(
+      super::verified_hash_path(&cache),
+      format!("{}  {DENORT_ASSET}\n", sha256_hex(swapped)),
+    )
+    .unwrap();
+    let release = FakeRelease::new(archive, None);
+    let pinned = sha256_hex(archive);
+    assert_eq!(
+      release.load_pinned(&cache, Some(&pinned)).await.unwrap(),
+      archive
+    );
+    assert_eq!(release.archive_fetches.get(), 1);
+    assert_eq!(std::fs::read(&cache).unwrap(), archive);
+    let recorded =
+      std::fs::read_to_string(super::verified_hash_path(&cache)).unwrap();
+    assert!(recorded.starts_with(&pinned), "{recorded}");
   }
 
   #[tokio::test]

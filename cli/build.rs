@@ -546,8 +546,43 @@ fn emit_startup_order_link_args(out_dir: &Path) {
   }
 }
 
+/// denext (DENEXT.md item 187): `DENEXT_DENORT_SHA256S`, the SHA-256 of each
+/// target's `deno-denort-<version>-<target>.zip` that `deno compile` accepts
+/// (cli/standalone/binary.rs, `EMBEDDED_DENORT_SHA256S`). The release
+/// workflow sets it; a malformed list fails the build here rather than every
+/// `deno compile` of the shipped CLI.
+fn check_denext_denort_sha256s() {
+  println!("cargo:rerun-if-env-changed=DENEXT_DENORT_SHA256S");
+  let Ok(list) = env::var("DENEXT_DENORT_SHA256S") else {
+    return;
+  };
+  let mut seen = std::collections::HashMap::new();
+  for entry in list.split(',').map(str::trim).filter(|e| !e.is_empty()) {
+    let Some((target, hash)) = entry.split_once('=') else {
+      panic!(
+        "DENEXT_DENORT_SHA256S: malformed entry '{entry}' (want <target>=<sha256>)"
+      );
+    };
+    let (target, hash) = (target.trim(), hash.trim().to_ascii_lowercase());
+    assert!(
+      !target.is_empty()
+        && hash.len() == 64
+        && hash.bytes().all(|b| b.is_ascii_hexdigit()),
+      "DENEXT_DENORT_SHA256S: malformed entry '{entry}' (want <target>=<sha256>)"
+    );
+    if let Some(previous) = seen.insert(target.to_string(), hash.clone()) {
+      assert_eq!(
+        previous, hash,
+        "DENEXT_DENORT_SHA256S: two entries for {target} disagree"
+      );
+    }
+  }
+}
+
 fn main() {
   let out_dir = std::path::PathBuf::from(std::env::var_os("OUT_DIR").unwrap());
+
+  check_denext_denort_sha256s();
 
   check_appimage_runtime_hashes();
   compress_appimage_runtimes(&out_dir);

@@ -7,7 +7,7 @@ reports (`"trace"`, DENEXT.md item 180) carry `deno_panic`'s trace: base64url
 VLQ numbers, one per frame, each an address relative to the binary's image
 (Linux: the load bias; macOS: `__TEXT` vmaddr + slide; Windows: the module
 base). This tool decodes it, downloads the release's binary and symbol
-archives (`deno-symbols-*` / `deno-desktop-runtime-symbols-*`), checks them
+archives (`deno-symbols-*`, `denort-symbols-*` / `deno-desktop-runtime-symbols-*`), checks them
 against the release's SHA256SUMS / SYMBOLS.SHA256SUMS, and runs
 `llvm-symbolizer` on the addresses:
 
@@ -37,6 +37,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -103,11 +104,35 @@ def tag(version):
     return f"denext-runtime-v{version}"
 
 
+# The first release whose `denort` is built in its own job (DENEXT.md item
+# 187: the CLI is compiled with the denort archives' SHA-256s), so its debug
+# info is in `denort-symbols-*`; earlier releases put it in `deno-symbols-*`
+# beside the CLI's.
+DENORT_SYMBOLS_SINCE = (3, 0, 0, 8)
+
+
+def separate_denort_symbols(version):
+    """Whether a release of `version` keeps denort's debug info in its own
+    `denort-symbols-*` archive. `3.0.0-denext.N` from N = 8, and any later
+    `x.y.z`; anything older or unparsable (`2.9.7-denext.22`, `3.0.0-rc.7`)
+    does not."""
+    m = re.match(r"^(\d+)\.(\d+)\.(\d+)(?:-denext\.(\d+))?", version)
+    if not m:
+        return False
+    core = tuple(int(g) for g in m.groups()[:3])
+    since = DENORT_SYMBOLS_SINCE
+    if core != since[:3]:
+        return core > since[:3]
+    return m[4] is not None and int(m[4]) >= since[3]
+
+
 def symbol_assets(version):
     """The symbol archives a release of `version` should carry."""
     names = []
     for target in TARGETS:
         names.append(f"deno-symbols-{version}-{target}.tar.gz")
+        if separate_denort_symbols(version):
+            names.append(f"denort-symbols-{version}-{target}.tar.gz")
         names.append(f"deno-desktop-runtime-symbols-{version}-{target}.tar.gz")
     return names
 
@@ -166,9 +191,12 @@ def archives(version, binary, target):
             f"deno-desktop-runtime-symbols-{version}-{target}.tar.gz",
         )
     kind = "cli" if binary == "deno" else "denort"
+    symbols = "deno"
+    if binary == "denort" and separate_denort_symbols(version):
+        symbols = "denort"
     return (
         f"deno-{kind}-{version}-{target}.zip",
-        f"deno-symbols-{version}-{target}.tar.gz",
+        f"{symbols}-symbols-{version}-{target}.tar.gz",
     )
 
 
