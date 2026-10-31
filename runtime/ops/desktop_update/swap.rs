@@ -800,8 +800,9 @@ fn undo_rename(hook: FaultHook, from: &Path, to: &Path) -> std::io::Result<()> {
   Err(last.unwrap_or_else(|| std::io::Error::other("undo failed")))
 }
 
-/// [`apply_swap_verified`] with no OS re-check (the tests of the swap
-/// mechanics).
+/// [`apply_swap_verified`] with no OS signature re-check (the tests of the
+/// swap mechanics). The Windows tree check still runs: it is not part of the
+/// verifier.
 #[cfg(test)]
 pub fn apply_swap(
   layout: &InstallLayout,
@@ -2249,6 +2250,7 @@ pub fn is_update_marker(arg: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+  use super::super::treecheck::tests as treecheck_tests;
   use super::*;
 
   /// Only a Windows executable with CEF's files next to it (CEF's bootstrap)
@@ -2496,7 +2498,13 @@ mod tests {
     layout: InstallLayout,
   }
 
+  /// The fixture's executable, as the platform's packager names it.
+  const FIXTURE_EXE: &str = if cfg!(windows) { "App.exe" } else { "app" };
+
   /// An install `App` holding `version`, and a staged `App` holding `new`.
+  /// Each holds the main executable as a PE image without a tree manifest
+  /// (a Windows app from before the manifest): the apply path's Windows tree
+  /// check reads both the installed and the staged one.
   fn fixture(staged: Option<&str>) -> Fixture {
     let tmp = tempfile::tempdir().unwrap();
     let parent = std::fs::canonicalize(tmp.path()).unwrap();
@@ -2505,12 +2513,14 @@ mod tests {
     std::fs::write(install.join("version"), "1.0.0").unwrap();
     std::fs::write(install.join(super::super::layout::INSTALL_MARKER), "{}")
       .unwrap();
+    std::fs::write(install.join(FIXTURE_EXE), treecheck_tests::minimal_pe())
+      .unwrap();
     let layout = InstallLayout {
       kind: InstallKind::AppDir,
       install,
       parent,
       name: "App".into(),
-      exe_rel: PathBuf::from("app"),
+      exe_rel: PathBuf::from(FIXTURE_EXE),
     };
     let mut state = UpdateState::new(&layout);
     if let Some(v) = staged {
@@ -2519,6 +2529,8 @@ mod tests {
       std::fs::create_dir_all(&dir).unwrap();
       std::fs::write(dir.join("version"), v).unwrap();
       std::fs::write(dir.join(super::super::layout::INSTALL_MARKER), "{}")
+        .unwrap();
+      std::fs::write(dir.join(FIXTURE_EXE), treecheck_tests::minimal_pe())
         .unwrap();
       state.staged_digest = Some(tree_digest(&dir).unwrap());
       state.phase = Phase::Staged;
@@ -3218,6 +3230,129 @@ mod tests {
         "{failing}"
       );
       assert!(!l.old_path().exists(), "{failing}");
+    }
+  }
+
+  /// Give the installed app the executable `running` and the staged app
+  /// `staged`, and record the staged tree's digest again (as `stage()` would
+  /// have recorded it).
+  fn set_executables(l: &InstallLayout, running: &[u8], staged: &[u8]) {
+    std::fs::write(l.exe(), running).unwrap();
+    let mut s = read_state(l).unwrap();
+    let dir = s.staged_path(l).unwrap();
+    std::fs::write(l.exe_in(&dir), staged).unwrap();
+    s.staged_digest = Some(tree_digest(&dir).unwrap());
+    write_state(l, &s).unwrap();
+  }
+
+  /// An executable whose signed tree manifest lists `files`.
+  fn exe_listing(files: &[(&str, &[u8])]) -> Vec<u8> {
+    treecheck_tests::pe_with_resource(
+      super::super::treecheck::RESOURCE_NAME,
+      &treecheck_tests::manifest_json(files),
+      &[1033],
+    )
+  }
+
+  /// The apply's Windows tree check (5.0-gate review A, M2) over a staged
+  /// app on disk: its loose files must be the ones its executable's signed
+  /// manifest lists, and a running app with a manifest refuses a staged app
+  /// without one. Elsewhere the OS signature seals every file (macOS) or
+  /// there is none (Linux), and each of these applies.
+  #[test]
+  fn the_apply_holds_the_staged_tree_to_its_signed_manifest() {
+    use super::super::layout::INSTALL_MARKER;
+    let plain = treecheck_tests::minimal_pe;
+    let listing = |version: &[u8]| {
+      exe_listing(&[("version", version), (INSTALL_MARKER, b"{}")])
+    };
+    // (case, the running executable, the staged one, applies on Windows)
+    let cases = [
+      (
+        "both list the tree",
+        listing(b"2.0.0"),
+        listing(b"2.0.0"),
+        true,
+      ),
+      ("neither has a manifest", plain(), plain(), true),
+      (
+        "the first update with one",
+        plain(),
+        listing(b"2.0.0"),
+        true,
+      ),
+      ("a downgrade to none", listing(b"2.0.0"), plain(), false),
+      (
+        "a loose file changed",
+        listing(b"2.0.0"),
+        listing(b"9.9.9"),
+        false,
+      ),
+      (
+        "an unlisted loose file",
+        plain(),
+        exe_listing(&[("version", b"2.0.0")]),
+        false,
+      ),
+    ];
+    for (case, running, staged, on_windows) in cases {
+      let f = fixture(Some("2.0.0"));
+      let l = &f.layout;
+      set_executables(l, &running, &staged);
+      let mut s = read_state(l).unwrap();
+      let result = apply_swap(l, &mut s);
+      if on_windows || !cfg!(windows) {
+        result.unwrap_or_else(|e| panic!("{case}: {e}"));
+        assert_eq!(installed(l), "2.0.0", "{case}");
+        assert_eq!(read_state(l).unwrap().phase, Phase::Swapped, "{case}");
+        continue;
+      }
+      let e = result.unwrap_err();
+      assert_eq!(e.code, Code::OsSignature, "{case}: {}", e.message);
+      assert!(e.message.contains("the staged app's files"), "{case}");
+      assert_eq!(installed(l), "1.0.0", "{case}");
+      assert_eq!(read_state(l).unwrap().phase, Phase::Staged, "{case}");
+      assert!(!l.old_path().exists(), "{case}");
+      // Left staged, untouched, for the next attempt to refuse again.
+      assert_eq!(
+        std::fs::read(l.extract_dir().join("App").join(FIXTURE_EXE)).unwrap(),
+        staged,
+        "{case}"
+      );
+    }
+  }
+
+  /// Whether the running app carries a manifest decides whether a staged
+  /// app without one may be swapped in, so an install whose executable
+  /// can't be read is never swapped on Windows: the check fails closed
+  /// rather than read it as an app from before the manifest.
+  #[test]
+  fn an_unreadable_installed_executable_fails_closed_on_windows() {
+    let f = fixture(Some("2.0.0"));
+    let l = &f.layout;
+    std::fs::remove_file(l.exe()).unwrap();
+    let mut s = read_state(l).unwrap();
+    let result = apply_swap(l, &mut s);
+    if cfg!(windows) {
+      let e = result.unwrap_err();
+      assert_eq!(e.code, Code::Io, "{}", e.message);
+      assert_eq!(installed(l), "1.0.0");
+      assert_eq!(read_state(l).unwrap().phase, Phase::Staged);
+    } else {
+      result.unwrap();
+      assert_eq!(installed(l), "2.0.0");
+    }
+    // An installed executable that is not a PE image is refused too.
+    let f = fixture(Some("2.0.0"));
+    let l = &f.layout;
+    set_executables(l, b"#!/bin/sh\n", &treecheck_tests::minimal_pe());
+    let mut s = read_state(l).unwrap();
+    let result = apply_swap(l, &mut s);
+    if cfg!(windows) {
+      assert_eq!(result.unwrap_err().code, Code::OsSignature);
+      assert_eq!(installed(l), "1.0.0");
+    } else {
+      result.unwrap();
     }
   }
 
