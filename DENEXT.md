@@ -7572,6 +7572,25 @@ where the changes are discussed.
        `node:zlib` Brotli round trip once its page has loaded, under both
        backends on every target.
 
+198. **`test(run)`: `inspector_ws_events` leaves no process running**
+     (`tests/specs/run/inspector_ws_events/main.ts`; a test-only fix, the same
+     test as upstream's):
+     - The test's program spawned `deno run --inspect=… --watch a.ts`, a process
+       that never exits by itself, and then ended with `Deno.exit()` without
+       killing it, so each of the spec's two cases left one `--watch` process
+       (and its inspector port) behind after the test; on a developer machine or
+       a long-lived runner they piled up, two per run of the spec. The program
+       now keeps the child, kills it and waits for its status before it exits,
+       from whichever event comes first (the socket's message, or its error when
+       the inspector endpoint is off); the error the socket reports once the
+       killed child's server goes away is ignored, so the output is unchanged.
+     - Proof, counting `--inspect=… --watch a.ts` processes with `pgrep` after
+       each run: the spec harness (`specs inspector_ws_events`, a macOS arm64
+       debug build) leaves 2 behind on the unfixed tree and 0 with the fix, both
+       cases passing; the test's program run directly with the runtime
+       3.0.0-denext.6 `deno` leaves 2 after one run of each case before, 0 after
+       three runs of each with the fix.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
