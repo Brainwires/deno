@@ -80,6 +80,8 @@ use super::error::err;
 use super::layout::InstallKind;
 use super::layout::InstallLayout;
 use super::layout::is_install_copy;
+use super::treecheck::FileSink;
+use super::treecheck::TreeEntry;
 
 /// The helper's argv marker: `<exe> run denext-update-helper <mode> <pid>`.
 pub const HELPER_ARG: &str = "denext-update-helper";
@@ -498,17 +500,18 @@ pub fn rename_retry(from: &Path, to: &Path) -> std::io::Result<()> {
 /// SHA-256, for a symlink its target, in a fixed (sorted) order. Two trees
 /// have the same digest only if they have the same entries and contents.
 pub fn tree_digest(root: &Path) -> std::io::Result<String> {
+  tree_listing(root).map(|(digest, _)| digest)
+}
+
+/// [`tree_digest`] and, from the same reads, every file and symlink of the
+/// tree ([`TreeEntry`]: the Windows tree manifest check compares it).
+pub fn tree_listing(root: &Path) -> std::io::Result<(String, Vec<TreeEntry>)> {
   use sha2::Digest;
-  fn file_sha(path: &Path) -> std::io::Result<String> {
-    let mut f = std::fs::File::open(path)?;
-    let mut h = sha2::Sha256::new();
-    std::io::copy(&mut f, &mut h)?;
-    Ok(faster_hex::hex_string(&h.finalize()))
-  }
   fn walk(
     dir: &Path,
     rel: &str,
     out: &mut sha2::Sha256,
+    files: &mut Vec<TreeEntry>,
   ) -> std::io::Result<()> {
     let mut names: Vec<std::ffi::OsString> = std::fs::read_dir(dir)?
       .map(|e| e.map(|e| e.file_name()))
@@ -522,7 +525,7 @@ pub fn tree_digest(root: &Path) -> std::io::Result<String> {
       } else {
         format!("{rel}/{name}")
       };
-      entry(&path, &rel, out)?;
+      entry(&path, &rel, out, files)?;
     }
     Ok(())
   }
@@ -530,6 +533,7 @@ pub fn tree_digest(root: &Path) -> std::io::Result<String> {
     path: &Path,
     rel: &str,
     out: &mut sha2::Sha256,
+    files: &mut Vec<TreeEntry>,
   ) -> std::io::Result<()> {
     let meta = std::fs::symlink_metadata(path)?;
     let ft = meta.file_type();
@@ -541,19 +545,32 @@ pub fn tree_digest(root: &Path) -> std::io::Result<String> {
       let target = std::fs::read_link(path)?;
       field("l", rel);
       field("t", &target.to_string_lossy());
+      files.push(TreeEntry::Symlink {
+        rel: rel.to_string(),
+      });
     } else if ft.is_dir() {
       field("d", rel);
-      walk(path, rel, out)?;
+      walk(path, rel, out, files)?;
     } else {
+      let mut sink = FileSink::default();
+      std::io::copy(&mut std::fs::File::open(path)?, &mut sink)?;
+      let (sha, pe) = sink.finish();
       field("f", rel);
       field("s", &meta.len().to_string());
-      field("h", &file_sha(path)?);
+      field("h", &sha);
+      files.push(TreeEntry::File {
+        rel: rel.to_string(),
+        size: meta.len(),
+        sha256: sha,
+        pe,
+      });
     }
     Ok(())
   }
   let mut out = sha2::Sha256::new();
-  entry(root, "", &mut out)?;
-  Ok(faster_hex::hex_string(&out.finalize()))
+  let mut files = Vec::new();
+  entry(root, "", &mut out, &mut files)?;
+  Ok((faster_hex::hex_string(&out.finalize()), files))
 }
 
 /// Remove `path` only if it is a copy of this app's install (see
@@ -875,7 +892,11 @@ pub fn apply_swap_verified(
   }
   // What this helper will swap, pinned before anything checks it. It must
   // be what was verified and staged.
-  let pinned = staged.digest().ok();
+  let pinned = staged.listing().ok();
+  let (pinned, entries) = match pinned {
+    Some((digest, entries)) => (Some(digest), entries),
+    None => (None, Vec::new()),
+  };
   if pinned.is_none() || pinned != state.staged_digest {
     return refuse_staged(
       layout,
@@ -889,6 +910,9 @@ pub fn apply_swap_verified(
     return refuse_staged(layout, state, "the staging directory was replaced");
   }
   verify(layout, state)?;
+  // Windows: the staged app's loose files against the signed executable's
+  // tree manifest, as the pinning walk read them.
+  super::treecheck::verify_for_platform(layout, &staged_path, &entries)?;
   if !staging.still_at_path() {
     return refuse_staged(layout, state, "the staging directory was replaced");
   }

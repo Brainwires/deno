@@ -27,6 +27,8 @@
 //!   through. Checking only the executable and its runtime DLL left
 //!   every other DLL the app loads (CEF's, an addon's) unchecked: a
 //!   same-named DLL is all a DLL-planting attack needs.
+//!   The app's files that are not PE images are covered by the tree manifest
+//!   in the signed executable ([`super::treecheck`]).
 //! - **Linux:** the OS has no code signature; the manifest signature and the
 //!   archive's SHA-256 are the whole check. A detached signature from the
 //!   same key would add nothing, and there is no OS trust root to stand in
