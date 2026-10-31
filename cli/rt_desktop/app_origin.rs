@@ -70,6 +70,8 @@ pub struct ResolvedAppConfig {
   pub single_instance: Option<bool>,
   /// The bootstrap window's options.
   pub initial_window: InitialWindowConfig,
+  /// The display name from the config file (`name`), if it sets one.
+  pub name: Option<String>,
 }
 
 /// Resolve the app origin and identifier. `read_file` reads a file from the
@@ -102,7 +104,8 @@ pub fn resolve_app_config(
         .map_err(|e| format!("invalid deep links in metadata: {e}"))
     })
     .transpose()?;
-  // The file is only consulted for what the metadata leaves unset.
+  // The file is only consulted for what the metadata leaves unset (the
+  // display name, `name`, comes from it only then).
   let file = if metadata_origin.is_none()
     || metadata_identifier.is_none()
     || metadata_deep_links.is_none()
@@ -136,6 +139,7 @@ pub fn resolve_app_config(
   let initial_window = metadata_initial_window
     .or_else(|| file.as_ref().and_then(|(_, config)| config.initial_window))
     .unwrap_or_default();
+  let name = file.as_ref().and_then(|(_, config)| config.name.clone());
   let file_path = file.as_ref().map(|(path, _)| path.clone());
   let identifier = metadata_identifier
     .map(|id| id.to_string())
@@ -169,6 +173,7 @@ pub fn resolve_app_config(
     deep_links,
     single_instance,
     initial_window,
+    name,
   })
 }
 
@@ -483,6 +488,32 @@ mod tests {
     )
     .unwrap();
     assert_eq!(config.initial_window, InitialWindowConfig::default());
+    assert_eq!(config.name, None);
+  }
+
+  #[test]
+  fn overlay_initial_window_and_name_from_the_file() {
+    let read = reader(&[(
+      ".deno-desktop/app.json",
+      r#"{"name":"Loopy","initialWindow":{"overlay":true,"noActivate":true,"width":260,"height":300}}"#,
+    )]);
+    let config = resolve_app_config(
+      None,
+      None,
+      Some(&[]),
+      None,
+      Path::new("/vfs"),
+      "main.ts",
+      &read,
+    )
+    .unwrap();
+    assert!(config.initial_window.overlay);
+    assert!(config.initial_window.no_activate);
+    assert_eq!(
+      (config.initial_window.width, config.initial_window.height),
+      (260, 300)
+    );
+    assert_eq!(config.name.as_deref(), Some("Loopy"));
   }
 
   #[test]

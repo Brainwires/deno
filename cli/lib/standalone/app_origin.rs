@@ -127,10 +127,16 @@ pub enum AppOriginError {
 /// lock itself, requires an `identifier`).
 ///
 /// `initialWindow` mirrors `desktop.initialWindow` (width, height, frameless,
-/// noActivate, transparentTitlebar, transparent, showOnFirstLoad), so a
+/// noActivate, transparentTitlebar, transparent, showOnFirstLoad, overlay), so a
 /// stock CLI that rejects the key in deno.json can still configure the
 /// bootstrap window (a tray-only app sets `"showOnFirstLoad": false`). The
 /// metadata's value, written by a CLI that knows the key, takes precedence.
+///
+/// `name` mirrors `desktop.app.name`: the app's display name, the title of a
+/// window the app leaves untitled. Without it the runtime falls back to the
+/// app name baked into the binary, which is the output file's name (a
+/// packager's `--output dist/MyApp-arm64` made every untitled window
+/// "MyApp-arm64").
 ///
 /// `update.publicKey` mirrors `desktop.update.publicKey`: the public half of
 /// the full-app update signing key (`Deno.desktop.updater`). The metadata's
@@ -140,6 +146,7 @@ pub const APP_CONFIG_FILE: &str = ".deno-desktop/app.json";
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct SerializedAppConfigFile {
+  name: Option<String>,
   origin: Option<String>,
   identifier: Option<String>,
   deep_links: Option<Vec<String>>,
@@ -168,11 +175,14 @@ struct SerializedInitialWindow {
   transparent_titlebar: Option<bool>,
   transparent: Option<bool>,
   show_on_first_load: Option<bool>,
+  overlay: Option<bool>,
 }
 
 /// The validated contents of an [`APP_CONFIG_FILE`].
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AppConfigFile {
+  /// `name`: the display name (trimmed; an empty one is none).
+  pub name: Option<String>,
   pub origin: Option<AppOrigin>,
   pub identifier: Option<String>,
   /// Normalized with [`super::launch_args::normalize_deep_link_schemes`].
@@ -271,7 +281,19 @@ pub fn parse_app_config_file(bytes: &[u8]) -> Result<AppConfigFile, String> {
       Ok::<_, String>(out)
     })
     .transpose()?;
+  let name = config
+    .name
+    .map(|n| n.trim().to_string())
+    .filter(|n| !n.is_empty());
+  if let Some(name) = &name
+    && (name.chars().count() > 256 || name.chars().any(char::is_control))
+  {
+    return Err(format!(
+      "invalid name {name:?}: at most 256 characters, no control characters"
+    ));
+  }
   Ok(AppConfigFile {
+    name,
     update_public_key,
     allowed_navigation_origins,
     origin,
@@ -292,6 +314,7 @@ pub fn parse_app_config_file(bytes: &[u8]) -> Result<AppConfigFile, String> {
         show_on_first_load: w
           .show_on_first_load
           .unwrap_or(defaults.show_on_first_load),
+        overlay: w.overlay.unwrap_or(defaults.overlay),
       }
     }),
   })
@@ -660,7 +683,21 @@ mod tests {
       Some(Default::default())
     );
     assert_eq!(parse_app_config_file(b"{}").unwrap().initial_window, None);
+    // A layer-shell overlay (an unset key is an ordinary window).
+    assert_eq!(
+      parse_app_config_file(
+        br#"{ "initialWindow": { "overlay": true, "noActivate": true } }"#
+      )
+      .unwrap()
+      .initial_window,
+      Some(super::super::binary::InitialWindowConfig {
+        overlay: true,
+        no_activate: true,
+        ..Default::default()
+      })
+    );
     for bad in [
+      r#"{ "initialWindow": { "overlay": "yes" } }"#,
       r#"{ "initialWindow": { "width": 0 } }"#,
       r#"{ "initialWindow": { "showOnFirstLod": false } }"#,
       r#"{ "initialWindow": { "frameless": "yes" } }"#,
@@ -668,6 +705,25 @@ mod tests {
     ] {
       assert!(parse_app_config_file(bad.as_bytes()).is_err(), "{bad}");
     }
+  }
+
+  #[test]
+  fn app_config_file_name() {
+    let name =
+      |json: &str| parse_app_config_file(json.as_bytes()).map(|c| c.name);
+    assert_eq!(name("{}").unwrap(), None);
+    assert_eq!(
+      name(r#"{ "name": "Hangar" }"#).unwrap().as_deref(),
+      Some("Hangar")
+    );
+    assert_eq!(
+      name(r#"{ "name": "  My App " }"#).unwrap().as_deref(),
+      Some("My App")
+    );
+    assert_eq!(name(r#"{ "name": "   " }"#).unwrap(), None);
+    assert!(name(r#"{ "name": "a\nb" }"#).is_err());
+    assert!(name(r#"{ "name": 3 }"#).is_err());
+    assert!(name(&format!(r#"{{ "name": "{}" }}"#, "x".repeat(257))).is_err());
   }
 
   #[test]

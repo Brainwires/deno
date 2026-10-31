@@ -2988,13 +2988,15 @@ pub struct InitialWindowAttributes {
   pub no_activate: bool,
   pub transparent_titlebar: bool,
   pub transparent: bool,
+  /// A layer-shell overlay surface (`initialWindow.overlay`).
+  pub overlay: bool,
 }
 
 /// Whether a `new BrowserWindow(options)` may adopt the bootstrap window
 /// instead of creating one. It may only when every creation-time attribute
 /// the options ask for is what the bootstrap window already has: adopting it
 /// regardless silently dropped `frameless` / `noActivate` / `transparent` /
-/// `transparentTitlebar`, so a tray panel (`attachPanel`) came out as an
+/// `transparentTitlebar` / `overlay`, so a tray panel (`attachPanel`) came out as an
 /// ordinary framed, focus-stealing window. An attribute the options leave
 /// unset keeps the configured `initialWindow` value.
 fn adopts_initial_window(
@@ -3009,6 +3011,7 @@ fn adopts_initial_window(
     && agrees(o.no_activate, initial.no_activate)
     && agrees(o.transparent_titlebar, initial.transparent_titlebar)
     && agrees(o.transparent, initial.transparent)
+    && agrees(o.overlay, initial.overlay)
 }
 
 /// The native API for a `Deno.desktop` constructor. Workers have no desktop
@@ -8896,9 +8899,35 @@ mod tests {
         transparent_titlebar: Some(true),
         ..Default::default()
       },
+      BrowserWindowOptions {
+        overlay: Some(true),
+        ..Default::default()
+      },
     ] {
       assert!(!adopts_initial_window(&plain, Some(&options)));
     }
+    // An `overlay` initialWindow (a layer surface) is adopted by a request
+    // that leaves `overlay` unset or asks for it, not by one refusing it.
+    let overlay = InitialWindowAttributes {
+      overlay: true,
+      no_activate: true,
+      ..Default::default()
+    };
+    assert!(adopts_initial_window(&overlay, None));
+    assert!(adopts_initial_window(
+      &overlay,
+      Some(&BrowserWindowOptions {
+        overlay: Some(true),
+        ..Default::default()
+      })
+    ));
+    assert!(!adopts_initial_window(
+      &overlay,
+      Some(&BrowserWindowOptions {
+        overlay: Some(false),
+        ..Default::default()
+      })
+    ));
     // A frameless `initialWindow` is adopted by a frameless request, and
     // not by one asking for a frame.
     let frameless = InitialWindowAttributes {

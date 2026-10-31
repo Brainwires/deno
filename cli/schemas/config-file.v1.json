@@ -434,6 +434,11 @@
               "description": "The window background is transparent. Defaults to false.",
               "default": false
             },
+            "overlay": {
+              "type": "boolean",
+              "description": "A Wayland layer-shell overlay surface where the compositor has one (KDE Plasma, wlroots compositors; not GNOME): on top of other windows, on every workspace, with no taskbar entry and, with noActivate, never focused. An ordinary window elsewhere. Defaults to false.",
+              "default": false
+            },
             "showOnFirstLoad": {
               "type": "boolean",
               "description": "Reveal the window once its first page has loaded. Set to false for an app that shows it itself, or a tray-only app. Defaults to true.",
