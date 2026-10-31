@@ -5525,7 +5525,9 @@ where the changes are discussed.
 
      Not changed (the audit's R2, upstream behaviour): `Deno.open` on a
      `\\.\pipe\` path and `Deno.stdin` read through the file system's
-     `spawn_blocking`, one pending read per handle.
+     `spawn_blocking`, one pending read per handle; the cap they count against,
+     and what happens at it, is documented in
+     [The blocking thread pool](#the-blocking-thread-pool) (item 199).
 
      Tests: `commandManyPipedStdinsDoNotExhaustBlockingPool`
      (`tests/unit/command_test.ts`, Windows only:
@@ -7572,6 +7574,15 @@ where the changes are discussed.
        `node:zlib` Brotli round trip once its page has loaded, under both
        backends on every target.
 
+199. **`docs`: the blocking thread pool's cap** (`DENEXT.md` only; the
+     production audit's R2):
+     [The blocking thread pool](#the-blocking-thread-pool) documents where the
+     cap is set (`runtime/tokio_util.rs`), its value (32, or 4 × CPUs on
+     Windows), that it is per JavaScript thread, what queues at saturation and
+     how a long-held read stalls everything behind it, and how to work within it
+     (it isn't tunable at run time). The audit's "4 × CPUs" is the Windows value
+     only. No behaviour changes.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
@@ -7860,6 +7871,72 @@ binary whose compiled metadata says it is a development build
 binary, a packaged app included, ignores them with a note on stderr. A stock CLI
 never writes the mark, so its own `--hmr` run against this runtime runs without
 hot reload.
+
+## The blocking thread pool
+
+Blocking work runs on tokio's blocking thread pool (`spawn_blocking`): every
+async file system op (`Deno.readFile`, `Deno.open`, `Deno.stat`, ... and the
+`node:fs` callbacks and promises on them), `node:dns` `lookup` (`getaddrinfo`),
+the host name lookup of `Deno.connect` / `fetch` (`tokio::net::lookup_host`), a
+pending read of `Deno.stdin` or of a file opened on a pipe or a device
+(`Deno.open("\\\\.\\pipe\\…")`, `/dev/…`), and, on Windows, tokio's own process
+stdio where it still reads or writes with a blocking call. This pool is capped,
+and what happens at the cap matters for a long-running server.
+
+**Where and what.** `create_basic_runtime` in `runtime/tokio_util.rs` builds the
+current-thread tokio runtime every JavaScript thread runs on, with
+`max_blocking_threads`:
+
+| Platform    | Cap                                                                                                                       |
+| ----------- | ------------------------------------------------------------------------------------------------------------------------- |
+| macOS/Linux | 32                                                                                                                        |
+| Windows     | 4 × `std::thread::available_parallelism()` (32 if it can't be read), since tokio does child process I/O there on the pool |
+
+The pool belongs to the runtime, so the cap is per JavaScript thread: the main
+worker has one, and each Web Worker (and `node:worker_threads` worker) runs its
+own runtime with its own pool of the same size (`runtime/ops/worker_host.rs`).
+The OpenTelemetry exporter's runtime (`ext/telemetry/lib.rs`) has the same cap,
+the inspector server's (`libs/inspector_server/lib.rs`) 4. Pool threads are
+started on demand, use a 2 MiB stack (8 MiB in debug builds) and exit after 10
+seconds idle (tokio's default keep-alive). The upstream comment's reason: the
+tokio default of 512 is far more threads than Deno ever wants.
+
+**At saturation.** Nothing fails: once the cap is reached, tokio queues every
+further blocking task, first in first out, and starts it when a pool thread
+finishes one. So a burst of async file ops is throttled to the cap (each waits
+its turn), which is the intended behaviour. The failure mode is a task that
+holds its thread for a long time: a pending read of a quiet pipe, a console or a
+device is one held thread per handle until data or EOF arrives (on Windows,
+`Deno.stdin` on a console or a pipe, and `Deno.open` on a `\\.\pipe\` path; the
+reads this fork moved off the pool are items 118, 119 and 137), and a
+`getaddrinfo` against an unresponsive resolver holds one until the resolver's
+timeout. With the cap's worth of such holders, every later file op, DNS lookup
+or other blocking task of that thread queues behind them, so the program looks
+hung on an `await` that has nothing wrong with it, and if the holders are
+themselves waiting for one of the queued tasks (a child process that waits for a
+file the parent writes before it reads its stdin, the case item 137 fixed) they
+never finish. Other JavaScript threads (each Worker's pool) are not affected. A
+contended `FsFile.lock()` (`flock` / `LockFileEx`) waits on a thread of its own,
+not the pool, for this reason (upstream #22504; it falls back to the pool only
+if no thread can be spawned).
+
+**Tuning.** There is no flag or environment variable for the cap (the
+`DENO_TOKIO_*` variables tune the event loop's polling, not the pool): it is a
+build-time value, changed in `create_basic_runtime` and rebuilt. Within a
+program:
+
+- bound the number of concurrent async file ops and DNS lookups, so a burst
+  doesn't sit in the pool's queue in front of latency-sensitive work;
+- keep long-lived reads of pipes, consoles and devices few, or on a Worker of
+  their own (its own pool), on Windows in particular; a child process's piped
+  stdio (`Deno.Command`, `node:child_process`) holds no pool thread (items 118,
+  119, 137);
+- the synchronous ops (`Deno.readFileSync`, ...) don't use the pool: they block
+  the calling JavaScript thread instead, which in a Worker can be the better
+  trade.
+
+A separate small pool for long-lived pipe reads, so they can't take threads from
+file ops, is the fix the production audit (R2) suggests; it isn't done.
 
 ## Test coverage
 
