@@ -385,8 +385,7 @@ mod tests {
     )
     .unwrap();
     let args = translated.deno_args;
-    assert_eq!(&args[..2], &svec!["run", "-A"], "{args:?}");
-    assert!(args.contains(&"--unstable-kv".to_string()), "{args:?}");
+    assert_eq!(&args[..3], &svec!["run", "--unstable-kv", "-A"], "{args:?}");
     assert!(
       args.iter().any(|a| a.starts_with("--v8-flags=")
         && a.contains("--max-old-space-size=100")),
