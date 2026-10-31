@@ -514,8 +514,16 @@ impl FlagsExt for Flags {
     if let Some(seed) = self.seed {
       args.push(format!("--seed={seed}"));
     }
-    if !self.v8_flags.is_empty() {
-      args.push(format!("--v8-flags={}", self.v8_flags.join(",")));
+    // `--seed` adds `--random-seed=<seed>` to the V8 flags at parse time; the
+    // child's own `--seed` adds it again.
+    let v8_flags: Vec<&str> = self
+      .v8_flags
+      .iter()
+      .map(String::as_str)
+      .filter(|f| self.seed.is_none() || !f.starts_with("--random-seed="))
+      .collect();
+    if !v8_flags.is_empty() {
+      args.push(format!("--v8-flags={}", v8_flags.join(",")));
     }
     for condition in &self.node_conditions {
       args.push(format!("--conditions={condition}"));
