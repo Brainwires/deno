@@ -40,6 +40,7 @@ pub mod error;
 pub mod layout;
 pub mod manifest;
 pub mod oscheck;
+pub mod staging;
 pub mod swap;
 
 use std::cell::RefCell;
@@ -417,7 +418,9 @@ fn update_begin(state: &mut OpState) -> Result<BeginOut, JsErrorBox> {
   if !swap::discard_path(layout, &staging) {
     return Err(js(UpdateError::io(staging.display(), "cannot clear")));
   }
-  std::fs::create_dir(&staging).map_err(|e| {
+  // Fresh and private to this user: the install's parent may be writable
+  // by others (see `staging`).
+  staging::PrivateDir::create(&staging).map_err(|e| {
     js(UpdateError::new(
       Code::InstallNotWritable,
       format!("{}: {e}", staging.display()),
@@ -606,6 +609,17 @@ fn stage_blocking(
   sequence: Option<u64>,
   allow_unsigned_dev: bool,
 ) -> Result<SignatureReport, UpdateError> {
+  // The directory begin() created, private to this user, held from here to
+  // the digest recorded below.
+  let staging =
+    staging::PrivateDir::open(&layout.staging_dir()).map_err(|e| {
+      UpdateError::new(
+        Code::BundleMismatch,
+        format!("the staging directory is not private to this user ({e})"),
+      )
+    })?;
+  const REPLACED: &str =
+    "the staging directory was replaced while the update was staged";
   let extract = layout.extract_dir();
   swap::remove_path(&extract);
   let max = size
@@ -613,6 +627,9 @@ fn stage_blocking(
     .saturating_add(64 * 1024 * 1024)
     .min(archive::MAX_EXTRACTED_BYTES);
   let x = archive::extract_tar_gz(archive, &extract, max)?;
+  if !staging.still_at_path() {
+    return error::err(Code::BundleMismatch, REPLACED);
+  }
   let staged = extract.join(&x.top);
   let exe = layout.exe_in(&staged);
   let shape_ok = match layout.kind {
@@ -668,8 +685,14 @@ fn stage_blocking(
   // signed by the same identity, served as a newer version, is refused).
   embedded::check_embedded_version(layout, &staged, to)?;
   let signature = verify_os_signature(layout, &staged, allow_unsigned_dev)?;
-  // What the helper re-checks before it swaps (the tree verified above).
-  let staged_digest = swap::tree_digest(&staged)
+  // What the helper re-checks before it swaps (the tree verified above),
+  // read through the held directory.
+  if !staging.still_at_path() {
+    return error::err(Code::BundleMismatch, REPLACED);
+  }
+  let staged_digest = staging
+    .staged("extract", std::ffi::OsStr::new(&x.top))
+    .and_then(|s| s.digest())
     .map_err(|e| UpdateError::io(staged.display(), e))?;
   let _ = std::fs::remove_file(archive);
   let previous = swap::read_state(layout);
@@ -782,6 +805,7 @@ fn verify_os_signature(
       );
     }
     oscheck::verify_windows(
+      &oscheck::authenticode_identity,
       &oscheck::authenticode_signer,
       &layout.exe(),
       &files,
@@ -1126,7 +1150,7 @@ mod tests {
       (archive, size)
     };
     // download() made the staging directory the extraction goes into.
-    std::fs::create_dir_all(layout.staging_dir()).unwrap();
+    staging::PrivateDir::create(&layout.staging_dir()).unwrap();
     let (archive, size) = pack(0o644);
     let e =
       stage_blocking(&layout, &archive, size, "1.0.0", "2.0.0", None, true)
@@ -1342,6 +1366,31 @@ mod tests {
       // The awaiting install is left as it was.
       assert_eq!(swap::read_state(&layout).unwrap().phase, phase);
     }
+  }
+
+  // begin() makes the staging directory fresh and private to this user: it
+  // sits next to the install, whose parent other users may write.
+  #[cfg(unix)]
+  #[test]
+  fn begin_makes_a_fresh_private_staging_directory() {
+    use std::os::unix::fs::MetadataExt;
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut state, layout) = configured(&tmp);
+    // Something left (or planted) at the name, readable by everyone.
+    let staging = layout.staging_dir();
+    std::fs::create_dir_all(staging.join("extract/App")).unwrap();
+    std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0o777))
+      .unwrap();
+    session(&mut state).0.borrow_mut().verified = Some(verified(4));
+    update_begin(&mut state).unwrap();
+    let meta = std::fs::symlink_metadata(&staging).unwrap();
+    assert!(meta.is_dir());
+    assert_eq!(meta.mode() & 0o777, 0o700);
+    // SAFETY: geteuid has no preconditions.
+    assert_eq!(meta.uid(), unsafe { libc::geteuid() });
+    // Nothing that was there before is in it.
+    assert!(!staging.join("extract").exists());
   }
 
   // A stage left by an earlier run is never applied blind: begin() starts
