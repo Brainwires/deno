@@ -46,11 +46,14 @@ fn print_cdylib_napi_linker_flags() {
     target_os = "openbsd"
   ))]
   {
-    println!(
-      "cargo:rustc-cdylib-link-arg=-Wl,--export-dynamic-symbol-list={}",
-      symbols_path.display(),
-    );
-
+    // No `--export-dynamic-symbol-list` here (denort's executable needs one;
+    // this cdylib doesn't): every NAPI/uv function in the list is a Rust
+    // `#[no_mangle]` / `#[export_name]` function, which rustc's cdylib version
+    // script exports anyway, and lld keeps a symbol the list names
+    // preemptible even under `-Bsymbolic` (below), so the runtime's own napi_*
+    // calls would still bind in the global scope first. self_binding.py checks
+    // that every name in the list stays exported.
+    //
     // V8 (via rusty_v8's `use_custom_libcxx`) statically links its own
     // libc++/libc++abi into this cdylib. A desktop backend (laufey) `dlopen`s
     // us into a process that already uses the system libstdc++. Without hiding
@@ -62,9 +65,8 @@ fn print_cdylib_napi_linker_flags() {
     //
     // `--exclude-libs,ALL` localizes every static-archive symbol (including the
     // bundled libc++abi) so our calls resolve to our own copy. The NAPI/uv
-    // exports above are re-added explicitly, and the `laufey_runtime_*` entry
-    // points live in this crate's own objects (not an archive), so both stay
-    // visible.
+    // exports and the `laufey_runtime_*` entry points are Rust `#[no_mangle]`
+    // functions, which rustc's version script exports, so both stay visible.
     println!("cargo:rustc-cdylib-link-arg=-Wl,--exclude-libs,ALL");
 
     // `--exclude-libs` hides C/C++ archive symbols, but rustc's own cdylib
@@ -78,8 +80,8 @@ fn print_cdylib_napi_linker_flags() {
     // the system `BrotliDecoderDecompressStream` with the Rust decoder's
     // state and spun at 100% CPU. `-Bsymbolic` binds every reference to a
     // symbol defined here inside the library at link time (it covers
-    // `-Bsymbolic-functions` and data too); the exports stay for dlsym and
-    // N-API addons. The hosts dlopen() us RTLD_LOCAL, so our exports never
+    // `-Bsymbolic-functions` and data too; lld sets no `DF_SYMBOLIC` for it);
+    // the exports stay for dlsym and N-API addons. The hosts dlopen() us RTLD_LOCAL, so our exports never
     // take another library's calls either. denext_runtime.yml checks the
     // result (.github/denext-runtime/self_binding.py, DENEXT.md item 187).
     println!("cargo:rustc-cdylib-link-arg=-Wl,-Bsymbolic");

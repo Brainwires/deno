@@ -14,12 +14,15 @@ relocation that the loader resolves in the global scope first. So
 100% CPU. Linked with `-Bsymbolic` (cli/rt_desktop/build.rs), every such
 reference binds inside the library at link time.
 
-The check: the dynamic section carries the SYMBOLIC flag (`DT_SYMBOLIC`, or
-`SYMBOLIC` in `DT_FLAGS`), and no dynamic relocation names a symbol the
-library itself defines (`readelf -r` against `readelf --dyn-syms`). On a
-failure it lists those symbols.
+The check: no dynamic relocation names a symbol the library itself defines
+(`readelf -r` against `readelf --dyn-syms`); on a failure it lists those
+symbols. Whether the dynamic section carries the SYMBOLIC flag is printed
+only: GNU ld sets `DF_SYMBOLIC` for `-Bsymbolic`, lld doesn't. With
+`--exports <file>` (the NAPI `.def` list, `{ "name"; ... };`) every name in it
+must also be a symbol the library defines and exports, so N-API addons still
+find them.
 
-Usage: self_binding.py <file.so>...
+Usage: self_binding.py [--exports <list.def>] <file.so>...
 Exits 0 when every file passes, 1 when one doesn't, 2 on a usage error.
 READELF names the readelf to run (default: readelf). denext_runtime.yml's
 libdenort job runs it for the Linux targets (DENEXT.md item 187).
@@ -90,6 +93,11 @@ def self_bound(dynamic_text, dynsyms_text, relocs_text):
   )
 
 
+def export_list(text):
+  """The quoted names of a `{ "a"; "b"; };` export list."""
+  return set(re.findall(r'"([^"]+)"', text))
+
+
 def _readelf(*args):
   readelf = os.environ.get("READELF", "readelf")
   return subprocess.run(
@@ -98,19 +106,37 @@ def _readelf(*args):
 
 
 def main(argv):
-  if len(argv) < 2:
+  args = argv[1:]
+  wanted = set()
+  if args[:1] == ["--exports"]:
+    if len(args) < 2:
+      args = []
+    else:
+      with open(args[1]) as f:
+        wanted = export_list(f.read())
+      args = args[2:]
+  if not args:
     print(__doc__.strip().splitlines()[0], file=sys.stderr)
-    print("usage: self_binding.py <file.so>...", file=sys.stderr)
+    print(
+      "usage: self_binding.py [--exports <list.def>] <file.so>...",
+      file=sys.stderr,
+    )
     return 2
   failed = False
-  for path in argv[1:]:
+  for path in args:
+    dynsyms = _readelf("--dyn-syms", "-W", path)
     symbolic, leaks = self_bound(
-      _readelf("-d", "-W", path),
-      _readelf("--dyn-syms", "-W", path),
-      _readelf("-r", "-W", path),
+      _readelf("-d", "-W", path), dynsyms, _readelf("-r", "-W", path)
     )
-    if not symbolic:
-      print(f"{path}: not linked with -Bsymbolic (no SYMBOLIC flag)")
+    print(
+      f"{path}: SYMBOLIC flag {'set' if symbolic else 'not set'} "
+      "(GNU ld sets it for -Bsymbolic, lld doesn't)"
+    )
+    missing = sorted(wanted - defined_symbols(dynsyms))
+    if missing:
+      print(f"{path}: {len(missing)} listed export(s) missing:")
+      for name in missing[:50]:
+        print(f"  {name}")
       failed = True
     if leaks:
       print(
@@ -122,7 +148,7 @@ def main(argv):
       if len(leaks) > 50:
         print(f"  ... and {len(leaks) - 50} more")
       failed = True
-    if symbolic and not leaks:
+    if not leaks and not missing:
       print(f"{path}: binds its own symbols to itself: ok")
   return 1 if failed else 0
 

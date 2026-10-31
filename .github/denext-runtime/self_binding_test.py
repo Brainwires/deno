@@ -2,10 +2,11 @@
 # Copyright 2018-2026 the Deno authors. MIT license.
 """Tests for self_binding.py, denext_runtime.yml's check that the Linux
 libdenort binds its own symbols to itself (-Bsymbolic, DENEXT.md item 187):
-the SYMBOLIC flag is read from `readelf -d`, the defined symbols from
-`readelf --dyn-syms` and the relocated ones from `readelf -r`, and a library
-whose relocations still name its own symbols fails with their names. The last
-cases run the script against a stand-in `readelf`.
+the SYMBOLIC flag is read from `readelf -d` (reported, not required: lld sets
+none), the defined symbols from `readelf --dyn-syms` and the relocated ones
+from `readelf -r`; a library whose relocations still name its own symbols, or
+that no longer exports a name the `--exports` list holds, fails with the
+names. The last cases run the script against a stand-in `readelf`.
 
 Usage: python3 -I .github/denext-runtime/self_binding_test.py
 """
@@ -111,7 +112,7 @@ class ParseTest(unittest.TestCase):
 class ScriptTest(unittest.TestCase):
   """The script end to end, against a stand-in readelf."""
 
-  def run_script(self, dynamic, relocs):
+  def run_script(self, dynamic, relocs, exports=None):
     with tempfile.TemporaryDirectory() as d:
       files = {"-d": dynamic, "--dyn-syms": DYNSYMS, "-r": relocs}
       for flag, text in files.items():
@@ -129,31 +130,61 @@ class ScriptTest(unittest.TestCase):
         )
       os.chmod(fake, 0o755)
       env = dict(os.environ, READELF=fake)
+      extra = []
+      if exports is not None:
+        listing = os.path.join(d, "exports.def")
+        with open(listing, "w") as f:
+          f.write("{ " + " ".join(f'"{n}";' for n in exports) + " };")
+        extra = ["--exports", listing]
       return subprocess.run(
-        [sys.executable, "-I", SCRIPT, "libdenort.so"],
+        [sys.executable, "-I", SCRIPT, *extra, "libdenort.so"],
         capture_output=True,
         text=True,
         env=env,
       )
 
-  def test_passes_when_symbolic_and_self_bound(self):
+  def test_passes_when_self_bound(self):
     r = self.run_script(DYNAMIC_SYMBOLIC_FLAGS, RELOCS_CLEAN)
     self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
     self.assertIn("ok", r.stdout)
+    self.assertIn("SYMBOLIC flag set", r.stdout)
+
+  def test_lld_sets_no_flag_and_still_passes(self):
+    r = self.run_script(DYNAMIC_PLAIN, RELOCS_CLEAN)
+    self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+    self.assertIn("SYMBOLIC flag not set", r.stdout)
+
+  def test_listed_exports(self):
+    r = self.run_script(
+      DYNAMIC_PLAIN, RELOCS_CLEAN, ["napi_create_object", "laufey_runtime_init"]
+    )
+    self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+    r = self.run_script(
+      DYNAMIC_PLAIN, RELOCS_CLEAN, ["napi_create_object", "uv_async_init"]
+    )
+    self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+    self.assertIn("1 listed export(s) missing", r.stdout)
+    self.assertIn("uv_async_init", r.stdout)
+
+  def test_export_list_parses_the_def_format(self):
+    self.assertEqual(
+      sb.export_list('{ "napi_wrap"; "uv_hrtime"; };'),
+      {"napi_wrap", "uv_hrtime"},
+    )
 
   def test_fails_and_names_the_symbols(self):
     r = self.run_script(DYNAMIC_PLAIN, RELOCS_SELF)
     self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
-    self.assertIn("not linked with -Bsymbolic", r.stdout)
     self.assertIn("BrotliDecoderDecompressStream", r.stdout)
     self.assertIn("napi_create_object", r.stdout)
     self.assertNotIn("  malloc", r.stdout)
 
   def test_usage(self):
-    r = subprocess.run(
-      [sys.executable, "-I", SCRIPT], capture_output=True, text=True
-    )
-    self.assertEqual(r.returncode, 2)
+    for args in ([], ["--exports"]):
+      r = subprocess.run(
+        [sys.executable, "-I", SCRIPT, *args], capture_output=True, text=True
+      )
+      self.assertEqual(r.returncode, 2)
 
 
 if __name__ == "__main__":
