@@ -108,6 +108,10 @@ pub struct BootstrapOptions {
   pub is_standalone: bool,
   pub has_node_modules_dir: bool,
   pub argv0: Option<String>,
+  /// denext (DENEXT.md item 188): Node's `process.execArgv`, the Deno flags
+  /// a child process of this program should get (`deno run` / `deno serve`
+  /// only; empty in a compiled program, as upstream's always is).
+  pub exec_argv: Vec<String>,
   pub node_debug: Option<String>,
   pub node_cluster_unique_id: Option<String>,
   pub node_cluster_sched_policy: Option<String>,
@@ -155,6 +159,7 @@ impl Default for BootstrapOptions {
       auto_serve: false,
       has_node_modules_dir: false,
       argv0: None,
+      exec_argv: Vec::new(),
       node_debug: None,
       node_cluster_unique_id: None,
       node_cluster_sched_policy: None,

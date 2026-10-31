@@ -1431,6 +1431,8 @@ impl CliFactory {
       argv0: cli_options
         .take_binary_npm_command_name()
         .or(std::env::args().next()),
+      // denext (DENEXT.md item 188): `process.execArgv`.
+      exec_argv: cli_options.flags().to_exec_argv(cli_options.initial_cwd()),
       node_debug: std::env::var("NODE_DEBUG").ok(),
       node_cluster_unique_id: std::env::var("NODE_UNIQUE_ID").ok(),
       node_cluster_sched_policy: std::env::var("NODE_CLUSTER_SCHED_POLICY")

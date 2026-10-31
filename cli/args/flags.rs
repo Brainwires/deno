@@ -176,6 +176,7 @@ pub fn graph_kind(mode: TypeCheckMode) -> GraphKind {
 
 pub trait FlagsExt {
   fn to_permission_args(&self) -> Vec<String>;
+  fn to_exec_argv(&self, cwd: &Path) -> Vec<String>;
   fn no_legacy_abort(&self) -> bool;
   fn otel_config(&self) -> OtelConfig;
   fn config_path_args(&self, current_dir: &Path) -> Option<Vec<PathBuf>>;
@@ -418,6 +419,115 @@ impl FlagsExt for Flags {
       _ => {}
     }
 
+    args
+  }
+
+  /// denext (DENEXT.md item 188): `process.execArgv` of a `deno run` /
+  /// `deno serve` program, the command-line flags that shape a child Deno
+  /// process: the permission flags ([`Self::to_permission_args`], scoped
+  /// values kept), `--permission-set`, the `--unstable*` flags, the config,
+  /// `node_modules` and import-map choices, the lockfile and module-loading
+  /// switches, `--cert`, `--location`, `--seed`, `--v8-flags` and
+  /// `--conditions`. Each is one `--flag` or `--flag=value` token (paths of
+  /// files made absolute against `cwd`, so a child started in another
+  /// directory reads the same file), in a fixed order. Every other
+  /// subcommand, and a flag not listed, gives nothing: upstream's
+  /// `process.execArgv` is always empty.
+  fn to_exec_argv(&self, cwd: &Path) -> Vec<String> {
+    if !matches!(
+      self.subcommand,
+      DenoSubcommand::Run(_) | DenoSubcommand::Serve(_)
+    ) {
+      return vec![];
+    }
+    let absolute = |path: &str| -> String {
+      let path = Path::new(path);
+      if path.is_absolute() {
+        path.display().to_string()
+      } else {
+        normalize_path(Cow::Owned(cwd.join(path)))
+          .display()
+          .to_string()
+      }
+    };
+    let mut args = self.to_permission_args();
+    match &self.permission_set {
+      Some(set) if set.is_empty() => args.push("--permission-set".to_string()),
+      Some(set) => args.push(format!("--permission-set={set}")),
+      None => {}
+    }
+    if self.unstable_config.legacy_flag_enabled {
+      args.push("--unstable".to_string());
+    }
+    for feature in &self.unstable_config.features {
+      args.push(format!("--unstable-{feature}"));
+    }
+    if self.no_detect_cjs {
+      args.push("--no-detect-cjs".to_string());
+    }
+    match &self.config_flag {
+      ConfigFlag::Path(path) => {
+        args.push(format!("--config={}", absolute(path)));
+      }
+      ConfigFlag::Disabled => args.push("--no-config".to_string()),
+      ConfigFlag::Discover => {}
+    }
+    if let Some(mode) = self.node_modules_dir {
+      args.push(format!("--node-modules-dir={}", mode.as_str()));
+    }
+    if let Some(import_map) = &self.import_map_path {
+      // A URL stays as it is.
+      if deno_core::url::Url::parse(import_map).is_ok_and(|u| {
+        u.scheme().len() > 1 && !u.scheme().eq_ignore_ascii_case("file")
+      }) {
+        args.push(format!("--import-map={import_map}"));
+      } else {
+        args.push(format!("--import-map={}", absolute(import_map)));
+      }
+    }
+    if let Some(lock) = &self.lock {
+      args.push(format!("--lock={}", absolute(lock)));
+    }
+    if self.no_lock {
+      args.push("--no-lock".to_string());
+    }
+    match self.frozen_lockfile {
+      Some(true) => args.push("--frozen".to_string()),
+      Some(false) => args.push("--frozen=false".to_string()),
+      None => {}
+    }
+    if self.cached_only {
+      args.push("--cached-only".to_string());
+    }
+    if self.no_remote {
+      args.push("--no-remote".to_string());
+    }
+    if self.no_npm {
+      args.push("--no-npm".to_string());
+    }
+    if let Some(CaData::File(cert)) = &self.ca_data {
+      args.push(format!("--cert={}", absolute(cert)));
+    }
+    if let Some(location) = &self.location {
+      args.push(format!("--location={location}"));
+    }
+    if let Some(seed) = self.seed {
+      args.push(format!("--seed={seed}"));
+    }
+    // `--seed` adds `--random-seed=<seed>` to the V8 flags at parse time; the
+    // child's own `--seed` adds it again.
+    let v8_flags: Vec<&str> = self
+      .v8_flags
+      .iter()
+      .map(String::as_str)
+      .filter(|f| self.seed.is_none() || !f.starts_with("--random-seed="))
+      .collect();
+    if !v8_flags.is_empty() {
+      args.push(format!("--v8-flags={}", v8_flags.join(",")));
+    }
+    for condition in &self.node_conditions {
+      args.push(format!("--conditions={condition}"));
+    }
     args
   }
 
@@ -925,6 +1035,66 @@ mod tests {
 
   fn flags_from_vec(args: Vec<OsString>) -> Result<Flags, CliError> {
     flags_from_vec_with_initial_cwd(args, None)
+  }
+
+  // denext (DENEXT.md item 188): `process.execArgv`.
+  #[test]
+  fn exec_argv_carries_the_flags_a_child_needs() {
+    let cwd = if cfg!(windows) {
+      PathBuf::from("C:\\app")
+    } else {
+      PathBuf::from("/app")
+    };
+    let flags = flags_from_vec(svec![
+      "deno",
+      "run",
+      "--allow-read=data",
+      "--allow-env",
+      "--deny-net=example.com",
+      "--unstable-kv",
+      "--unstable-cron",
+      "--config",
+      "deno.json",
+      "--node-modules-dir=manual",
+      "--v8-flags=--expose-gc,--max-old-space-size=200",
+      "--conditions=worker",
+      "--cached-only",
+      "--seed",
+      "7",
+      "--inspect",
+      "--quiet",
+      "main.ts",
+      "--allow-net",
+    ])
+    .unwrap();
+    let config = cwd.join("deno.json").display().to_string();
+    assert_eq!(
+      flags.to_exec_argv(&cwd),
+      vec![
+        "--allow-read=data".to_string(),
+        "--deny-net=example.com".to_string(),
+        "--allow-env".to_string(),
+        "--unstable-cron".to_string(),
+        "--unstable-kv".to_string(),
+        format!("--config={config}"),
+        "--node-modules-dir=manual".to_string(),
+        "--cached-only".to_string(),
+        "--seed=7".to_string(),
+        "--v8-flags=--expose-gc,--max-old-space-size=200".to_string(),
+        "--conditions=worker".to_string(),
+      ]
+    );
+
+    let flags =
+      flags_from_vec(svec!["deno", "serve", "-A", "main.ts"]).unwrap();
+    assert_eq!(flags.to_exec_argv(&cwd), vec!["--allow-all".to_string()]);
+
+    // Nothing for a bare `deno run`, and nothing for another subcommand.
+    let flags = flags_from_vec(svec!["deno", "run", "main.ts"]).unwrap();
+    assert!(flags.to_exec_argv(&cwd).is_empty());
+    let flags =
+      flags_from_vec(svec!["deno", "test", "-A", "--unstable-kv"]).unwrap();
+    assert!(flags.to_exec_argv(&cwd).is_empty());
   }
 
   // denext (DENEXT.md item 102): no legacy request.signal abort by default;
