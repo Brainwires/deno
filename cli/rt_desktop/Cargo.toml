@@ -64,10 +64,12 @@ denort = { path = "../rt", default-features = false }
 # CEF 156.0.14 / Chromium 156 and the Linux Wayland overlay fixes; runtime
 # 3.0.0-denext.8, API 51: hidden pages throttled instead of frozen on macOS and
 # the per-window background policy, branch
-# `fix/macos-hidden-page-and-hit-region` until it lands), pinned to a commit of the Brainwires/laufey fork.
+# `fix/macos-hidden-page-and-hit-region`, and the Windows focus, tray role and
+# window icon fixes, branch `fix/windows-focus-tray-roles`, until they land),
+# pinned to a commit of the Brainwires/laufey fork.
 # The host built from the same commit must be used with it (the API version
 # check is exact).
-laufey = { git = "https://github.com/Brainwires/laufey", rev = "e7b06a3da532c85db439cd8953a14b45e98313cd" }
+laufey = { git = "https://github.com/Brainwires/laufey", rev = "e8814f2f9bf40428c165561b954864a3bec24671" }
 libsui.workspace = true
 
 bytes.workspace = true

@@ -7978,16 +7978,16 @@ where the changes are discussed.
        `the_digest_follows_the_held_directory_not_the_path`.
      - A refusal by the OS signature re-check or the Windows tree check (item
        202) at apply time is recorded like the helper's other refusals
-       (`refuse_staged_with`): the state goes back to `staged` with
-       `last_error` set to `"<code>: <message>"` (the form the error takes
-       across the op boundary; the helper's other refusals now record their
-       `bundle_mismatch` code the same way), so `Deno.desktop.updater`'s info
-       (`lastError`) tells the relaunched app why the apply failed. Before, it
-       went back to `staged` with no `last_error` (the op clears it when it
-       hands the apply to the helper). The staged app is kept, as for every
-       refusal there: the next download replaces it, and a retried apply
-       re-checks it in full. Test: `an_apply_time_refusal_is_recorded` (failed
-       before; its tree-check half runs on Windows).
+       (`refuse_staged_with`): the state goes back to `staged` with `last_error`
+       set to `"<code>: <message>"` (the form the error takes across the op
+       boundary; the helper's other refusals now record their `bundle_mismatch`
+       code the same way), so `Deno.desktop.updater`'s info (`lastError`) tells
+       the relaunched app why the apply failed. Before, it went back to `staged`
+       with no `last_error` (the op clears it when it hands the apply to the
+       helper). The staged app is kept, as for every refusal there: the next
+       download replaces it, and a retried apply re-checks it in full. Test:
+       `an_apply_time_refusal_is_recorded` (failed before; its tree-check half
+       runs on Windows).
 200. **`fix(desktop)`: a Windows update whose certificate revocation can't be
      checked is refused** (5.0-gate review A, L6;
      `runtime/ops/desktop_update/oscheck.rs`; 2.9.7-denext.7 through
@@ -8068,17 +8068,17 @@ where the changes are discussed.
      first update without one, an unreadable running executable),
      `a_symlink_in_the_staged_tree_is_refused`, `the_held_digest_is_tree_digest`
      (the held listing is the path listing). The stage / helper wiring runs only
-     on Windows; the fork's Windows CI is its test.
-     A new version whose executable's name differs from the installed one only
-     in case (`App.exe` → `app.exe`) was refused with "App.exe changed while
-     the update was checked" (the case-insensitive file system read the file,
-     the walk spelled it as packed); `stage()`'s PE check called it "not a PE
-     image". Both now refuse it as `bundle_mismatch` naming the rename. It is
-     refused, not accepted as the same file: the install is launched by the
-     name it was installed under (shortcuts, its registration, the helper's
-     relaunch), a directory with per-directory case sensitivity (WSL's
-     `setCaseSensitiveInfo`) would hold no executable of that name, and an app
-     that can't start never runs its trial, so it would not roll back. Tests:
+     on Windows; the fork's Windows CI is its test. A new version whose
+     executable's name differs from the installed one only in case (`App.exe` →
+     `app.exe`) was refused with "App.exe changed while the update was checked"
+     (the case-insensitive file system read the file, the walk spelled it as
+     packed); `stage()`'s PE check called it "not a PE image". Both now refuse
+     it as `bundle_mismatch` naming the rename. It is refused, not accepted as
+     the same file: the install is launched by the name it was installed under
+     (shortcuts, its registration, the helper's relaunch), a directory with
+     per-directory case sensitivity (WSL's `setCaseSensitiveInfo`) would hold no
+     executable of that name, and an app that can't start never runs its trial,
+     so it would not roll back. Tests:
      `a_case_only_rename_of_the_executable_is_refused_clearly` (failed before),
      `case_only_renames_are_found_once`.
 
@@ -8192,14 +8192,54 @@ where the changes are discussed.
        and the metadata without the key, `rt_desktop`'s resolution from
        app.json, and the deno.json config and schema tests.
 
+207. **`fix(desktop)`: Windows focus and blur, tray menu roles, the window
+     icon** (the laufey pin: Brainwires/laufey `fix/windows-focus-tray-roles`
+     e8814f2, from `fix/macos-hidden-page-and-hit-region`; no API change; for
+     runtime 3.0.0-denext.8).
+     - WebView2's focus and blur come from the window's activation
+       (`WM_ACTIVATE`), not the top-level's keyboard focus. A click in the page
+       gave the focus to WebView2's child window, which fired `blur` on a window
+       that was still active: `Tray.attachPanel` hid the panel before the click
+       reached the page. With the focus in that child, another window taking the
+       foreground fired no `blur` at all; it does now.
+     - A Windows tray menu draws a role item with its label instead of an empty
+       row that did nothing. The quit role quits the app as `laufey::quit()`
+       does: it reaches no click handler and asks no window, so neither
+       `beforequit` nor `close` fires, as with macOS's `terminate:`. The other
+       roles Linux draws report their name as a `menuclick`; the roles only
+       macOS has are left out.
+     - The WebView2 window class takes the executable's first icon group, for
+       the title bar and taskbar (item 208 stamps it).
+     - Tests, in laufey, run on Windows 11 Arm64: `focus_checks` under
+       `--window-api` (a real click in a page and in a non-activating panel,
+       then another window; fails on the old messages), `--tray-roles` (the rows
+       the menu draws, a real click on Quit) and `menu_notifications_test`.
+
+208. **`fix(desktop)`: a WebView2 app's launcher carries the app's icon**
+     (`cli/tools/desktop.rs`; follows item 207). `deno desktop` copied the icon
+     to `AppIcon.ico` beside the executable but embedded it only for CEF, so
+     Explorer, title bars and taskbar buttons showed the generic icon. Both
+     backends' launchers now go through `stamp_windows_launcher`, which also
+     gives a WebView2 launcher the app's name and version resources (Task
+     Manager, the file's properties). Test:
+     `stamp_windows_launcher_gives_a_webview_host_the_app_icon`.
+
+209. **`fix(desktop)`: `Deno.args` of an elevated Windows CEF launch**
+     (`cli/rt_desktop/lib.rs`). laufey's CEF host starts an elevated launch
+     again with `--do-not-de-elevate` right after the program name (Chromium 156
+     reads it before the host's command line hook), and the runtime read that
+     command line as the app's arguments. `without_host_args` drops the switch
+     in that position on Windows; anywhere else it is the app's own. Test:
+     `the_app_args_leave_out_the_de_elevation_relaunch_argument`.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
-169-174, 176, 178, 180, 182-184, 186, 187, 189-191, 193-196, 198-203, 206) are
-what the prebuilt `libdenort` carries. The CLI-side parts (for example writing
-`LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
-in the branch too, but a stock CLI does not run them; denext's own launcher
-provides that environment.
+169-174, 176, 178, 180, 182-184, 186, 187, 189-191, 193-196, 198-203, 206,
+207, 209) are what the prebuilt `libdenort` carries. The CLI-side parts (for
+example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's
+launchers) are in the branch too, but a stock CLI does not run them; denext's
+own launcher provides that environment.
 
 The laufey backend hosts are built from
 [Brainwires/laufey](https://github.com/Brainwires/laufey) branch
@@ -8228,9 +8268,10 @@ runtime 3.0.0-denext.6, API 50: overlay windows, tray events, the launch
 activation policy and speech, item 183; and, for runtime 3.0.0-denext.7, CEF
 156, item 184, and the Linux Wayland overlay fixes, item 186; and, for runtime
 3.0.0-denext.8, API 51, hidden pages throttled instead of frozen on macOS and
-`backgroundThrottling`, item 198), at the commit pinned by `LAUFEY_SHA` in the
-workflow (or the `laufey_ref` input). The same commit is the `laufey` git
-dependency of `cli/rt_desktop/Cargo.toml` (crate 0.8.0, API 51, CEF 156.0.14).
+`backgroundThrottling`, item 198; and the Windows focus, tray role and window
+icon fixes, item 207), at the commit pinned by `LAUFEY_SHA` in the workflow (or
+the `laufey_ref` input). The same commit is the `laufey` git dependency of
+`cli/rt_desktop/Cargo.toml` (crate 0.8.0, API 51, CEF 156.0.14).
 
 laufey's `init_api` rejects any C ABI version mismatch between the runtime and
 the host, so the `laufey` crate libdenort links and the hosts are built from the

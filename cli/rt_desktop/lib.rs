@@ -2638,12 +2638,21 @@ fn apply_pending_update_on_launch(dylib_path: &Path, is_worker: bool) -> bool {
 /// the app isn't running). Only the host reads it.
 const LAUFEY_DBUS_ACTIVATION_ARG: &str = "--laufey-dbus-activated";
 
-/// This process's arguments without the one only the laufey host reads: on
+/// The argument laufey's Windows CEF host puts right after the program name
+/// when an elevated launch starts itself again (Chromium 156 would otherwise
+/// de-elevate it; laufey `kDoNotDeElevateArgument`). The relaunched process's
+/// command line, which the runtime reads, carries it.
+const LAUFEY_DO_NOT_DE_ELEVATE_ARG: &str = "--do-not-de-elevate";
+
+/// This process's arguments without the ones only the laufey host reads: on
 /// Linux, the first `--laufey-dbus-activated` before any `--` (the host's
-/// rule, `laufey::args_os`). The host never changes the process's argv (the C
-/// runtime passes it to this library's `.init_array` functions as it loads),
-/// so every reader of the app's arguments here uses this, never
-/// `env::args_os` itself: the app's `Deno.args` don't carry the argument.
+/// rule, `laufey::args_os`); on Windows, a `--do-not-de-elevate` right after
+/// the program name (the CEF host's elevated relaunch, which laufey drops from
+/// its own copy of the arguments too). The host never changes the process's
+/// argv (the C runtime passes it to this library's `.init_array` functions as
+/// it loads; Windows keeps the relaunch's command line), so every reader of
+/// the app's arguments here uses this, never `env::args_os` itself: the app's
+/// `Deno.args` don't carry the argument.
 fn process_args_os() -> Vec<std::ffi::OsString> {
   without_host_args(env::args_os())
 }
@@ -2652,6 +2661,13 @@ fn without_host_args(
   args: impl IntoIterator<Item = std::ffi::OsString>,
 ) -> Vec<std::ffi::OsString> {
   let mut args: Vec<_> = args.into_iter().collect();
+  if cfg!(windows)
+    && args
+      .get(1)
+      .is_some_and(|a| a == LAUFEY_DO_NOT_DE_ELEVATE_ARG)
+  {
+    args.remove(1);
+  }
   if cfg!(target_os = "linux") {
     let at = args
       .iter()
@@ -4238,6 +4254,37 @@ mod tests {
       &["--laufey-dbus-activated"],
       &["app", "--laufey-notify", "0123456789abcdef"],
       &[],
+    ] {
+      assert_eq!(without_host_args(os(kept)), os(kept));
+    }
+  }
+
+  #[test]
+  fn the_app_args_leave_out_the_de_elevation_relaunch_argument() {
+    let os =
+      |v: &[&str]| -> Vec<OsString> { v.iter().map(OsString::from).collect() };
+    let windows = cfg!(windows);
+    // An elevated Windows CEF launch starts itself again with the switch
+    // right after the program name; the app sees its own arguments only.
+    let args = os(&["app", "--do-not-de-elevate", "--x", "acme://y"]);
+    let want = if windows {
+      os(&["app", "--x", "acme://y"])
+    } else {
+      args.clone()
+    };
+    assert_eq!(without_host_args(args), want);
+    // Only there: anywhere else (or a second one) it is the app's.
+    let args = os(&["app", "--do-not-de-elevate", "--do-not-de-elevate"]);
+    let want = if windows {
+      os(&["app", "--do-not-de-elevate"])
+    } else {
+      args.clone()
+    };
+    assert_eq!(without_host_args(args), want);
+    for kept in [
+      &["app", "--x", "--do-not-de-elevate"][..],
+      &["app", "--", "--do-not-de-elevate"],
+      &["--do-not-de-elevate"],
     ] {
       assert_eq!(without_host_args(os(kept)), os(kept));
     }
