@@ -14,10 +14,11 @@ relocation that the loader resolves in the global scope first. So
 100% CPU. Linked with `-Bsymbolic` (cli/rt_desktop/build.rs), every such
 reference binds inside the library at link time.
 
-The check: no dynamic relocation names a symbol the library itself defines
-(`readelf -r` against `readelf --dyn-syms`); on a failure it lists those
-symbols. Whether the dynamic section carries the SYMBOLIC flag is printed
-only: GNU ld sets `DF_SYMBOLIC` for `-Bsymbolic`, lld doesn't. With
+The check: the dynamic section carries the SYMBOLIC flag (`DT_SYMBOLIC`, or
+`SYMBOLIC` in `DT_FLAGS`; lld leaves it off while any exported symbol stays
+preemptible, as one named by `--export-dynamic-symbol-list` does), and no
+dynamic relocation names a symbol the library itself defines (`readelf -r`
+against `readelf --dyn-syms`); on a failure it lists those symbols. With
 `--exports <file>` (the NAPI `.def` list, `{ "name"; ... };`) every name in it
 must also be a symbol the library defines and exports, so N-API addons still
 find them.
@@ -128,10 +129,10 @@ def main(argv):
     symbolic, leaks = self_bound(
       _readelf("-d", "-W", path), dynsyms, _readelf("-r", "-W", path)
     )
-    print(
-      f"{path}: SYMBOLIC flag {'set' if symbolic else 'not set'} "
-      "(GNU ld sets it for -Bsymbolic, lld doesn't)"
-    )
+    if not symbolic:
+      print(f"{path}: no SYMBOLIC flag (not linked with -Bsymbolic, or a "
+            "symbol it exports stays preemptible)")
+      failed = True
     missing = sorted(wanted - defined_symbols(dynsyms))
     if missing:
       print(f"{path}: {len(missing)} listed export(s) missing:")
@@ -148,7 +149,7 @@ def main(argv):
       if len(leaks) > 50:
         print(f"  ... and {len(leaks) - 50} more")
       failed = True
-    if not leaks and not missing:
+    if symbolic and not leaks and not missing:
       print(f"{path}: binds its own symbols to itself: ok")
   return 1 if failed else 0
 

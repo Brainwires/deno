@@ -2,8 +2,7 @@
 # Copyright 2018-2026 the Deno authors. MIT license.
 """Tests for self_binding.py, denext_runtime.yml's check that the Linux
 libdenort binds its own symbols to itself (-Bsymbolic, DENEXT.md item 187):
-the SYMBOLIC flag is read from `readelf -d` (reported, not required: lld sets
-none), the defined symbols from `readelf --dyn-syms` and the relocated ones
+the SYMBOLIC flag is read from `readelf -d`, the defined symbols from `readelf --dyn-syms` and the relocated ones
 from `readelf -r`; a library whose relocations still name its own symbols, or
 that no longer exports a name the `--exports` list holds, fails with the
 names. The last cases run the script against a stand-in `readelf`.
@@ -147,20 +146,21 @@ class ScriptTest(unittest.TestCase):
     r = self.run_script(DYNAMIC_SYMBOLIC_FLAGS, RELOCS_CLEAN)
     self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
     self.assertIn("ok", r.stdout)
-    self.assertIn("SYMBOLIC flag set", r.stdout)
 
-  def test_lld_sets_no_flag_and_still_passes(self):
+  def test_fails_without_the_flag(self):
     r = self.run_script(DYNAMIC_PLAIN, RELOCS_CLEAN)
-    self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-    self.assertIn("SYMBOLIC flag not set", r.stdout)
+    self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+    self.assertIn("no SYMBOLIC flag", r.stdout)
 
   def test_listed_exports(self):
     r = self.run_script(
-      DYNAMIC_PLAIN, RELOCS_CLEAN, ["napi_create_object", "laufey_runtime_init"]
+      DYNAMIC_DT_SYMBOLIC,
+      RELOCS_CLEAN,
+      ["napi_create_object", "laufey_runtime_init"],
     )
     self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
     r = self.run_script(
-      DYNAMIC_PLAIN, RELOCS_CLEAN, ["napi_create_object", "uv_async_init"]
+      DYNAMIC_DT_SYMBOLIC, RELOCS_CLEAN, ["napi_create_object", "uv_async_init"]
     )
     self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
     self.assertIn("1 listed export(s) missing", r.stdout)
@@ -175,6 +175,7 @@ class ScriptTest(unittest.TestCase):
   def test_fails_and_names_the_symbols(self):
     r = self.run_script(DYNAMIC_PLAIN, RELOCS_SELF)
     self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+    self.assertIn("no SYMBOLIC flag", r.stdout)
     self.assertIn("BrotliDecoderDecompressStream", r.stdout)
     self.assertIn("napi_create_object", r.stdout)
     self.assertNotIn("  malloc", r.stdout)

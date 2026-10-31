@@ -7549,26 +7549,28 @@ where the changes are discussed.
        Brotli through `node:zlib` hung.
      - `libdenort.so` is now linked with `-Wl,-Bsymbolic`, which binds every
        reference to a symbol it defines inside it at link time (functions and
-       data; it covers `-Bsymbolic-functions`; lld sets no `DF_SYMBOLIC` for
-       it). It is no longer linked with the NAPI `--export-dynamic-symbol-list`
-       the `denort` executable uses: lld keeps a symbol that list names
-       preemptible even under `-Bsymbolic` (9 `napi_*` relocations stayed), and
-       every name in it is a Rust `#[no_mangle]` / `#[export_name]` function
-       rustc's version script exports anyway. The exports stay, for `dlsym` and
-       N-API addons; the laufey hosts `dlopen()` the runtime with `RTLD_LOCAL`,
-       so they never take another library's calls. The bundled C and C++
-       libraries (SQLite, V8 and its libc++) were already local
-       (`--exclude-libs,ALL`) and export nothing; zlib is the system's
+       data; it covers `-Bsymbolic-functions`), and lld sets `DF_SYMBOLIC`. It
+       is no longer linked with the NAPI `--export-dynamic-symbol-list` the
+       `denort` executable uses: lld keeps a symbol that list names preemptible
+       even under `-Bsymbolic` (9 `napi_*` relocations stayed, and no
+       `DF_SYMBOLIC`), and every name in it is a Rust `#[no_mangle]` /
+       `#[export_name]` function rustc's version script exports anyway (the 626
+       dynamic symbols are the same names before and after). The exports stay,
+       for `dlsym` and N-API addons; the laufey hosts `dlopen()` the runtime
+       with `RTLD_LOCAL`, so they never take another library's calls. The
+       bundled C and C++ libraries (SQLite, V8 and its libc++) were already
+       local (`--exclude-libs,ALL`) and export nothing; zlib is the system's
        `libz.so.1`, a real dependency. macOS (two-level namespace, an
        `-exported_symbols_list`) and Windows (DLL imports) bind a library's
        calls to itself already.
      - Tests: `.github/denext-runtime/self_binding.py`, run on each Linux
-       `libdenort.so` in this workflow's denort job, fails when a dynamic
-       relocation names a symbol the library defines (it listed the 305 on the
-       3.0.0-denext.6 build) or when a name in the NAPI export list is no longer
-       exported, with `self_binding_test.py` in `denext tests`; the `origin` e2e
-       area's `node:http` app does a `node:zlib` Brotli round trip once its page
-       has loaded, under both backends on every target.
+       `libdenort.so` in this workflow's denort job, fails without the
+       `SYMBOLIC` flag, when a dynamic relocation names a symbol the library
+       defines (it listed the 305 on the 3.0.0-denext.6 build) or when a name in
+       the NAPI export list is no longer exported, with `self_binding_test.py`
+       in `denext tests`; the `origin` e2e area's `node:http` app does a
+       `node:zlib` Brotli round trip once its page has loaded, under both
+       backends on every target.
 
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
