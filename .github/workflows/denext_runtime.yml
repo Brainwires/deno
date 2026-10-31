@@ -669,6 +669,10 @@ jobs:
               file out/libdenort.so
               ldd out/libdenort.so || true
               objdump -T out/libdenort.so | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -3
+              # Its calls to its own exported functions (the brotli C API
+              # node:zlib uses, temporal_rs, napi_*) bind inside it, never to
+              # a same-named library the host loaded (DENEXT.md item 187).
+              python3 -I .github/denext-runtime/self_binding.py out/libdenort.so
               ;;
             *-windows-msvc)
               cp target/release/denort.dll out/

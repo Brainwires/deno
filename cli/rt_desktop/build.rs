@@ -66,5 +66,22 @@ fn print_cdylib_napi_linker_flags() {
     // points live in this crate's own objects (not an archive), so both stay
     // visible.
     println!("cargo:rustc-cdylib-link-arg=-Wl,--exclude-libs,ALL");
+
+    // `--exclude-libs` hides C/C++ archive symbols, but rustc's own cdylib
+    // version script still exports every `#[no_mangle]` function of every
+    // Rust crate linked in: the brotli crate's C API (`ffi-api`, which
+    // deno_node's `node:zlib` calls), temporal_rs, the napi_* functions,
+    // rusty_v8's callbacks. A call from this library to one of those went
+    // through a dynamic relocation the loader resolves in the global scope
+    // first, so in a webview app (WebKitGTK and libsoup load the system
+    // libbrotlidec before the host dlopen()s us) `node:zlib`'s Brotli called
+    // the system `BrotliDecoderDecompressStream` with the Rust decoder's
+    // state and spun at 100% CPU. `-Bsymbolic` binds every reference to a
+    // symbol defined here inside the library at link time (it covers
+    // `-Bsymbolic-functions` and data too); the exports stay for dlsym and
+    // N-API addons. The hosts dlopen() us RTLD_LOCAL, so our exports never
+    // take another library's calls either. denext_runtime.yml checks the
+    // result (.github/denext-runtime/self_binding.py, DENEXT.md item 187).
+    println!("cargo:rustc-cdylib-link-arg=-Wl,-Bsymbolic");
   }
 }

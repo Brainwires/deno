@@ -4,10 +4,17 @@
 // built on it: Express, Next's standalone server, ...), not only Deno.serve:
 // node:http used to fail with "unknown override kind: 5" and never serve, so
 // the window stayed blank. Results go to the "origin" area.
+//
+// Also node:zlib's Brotli, once the page has loaded (the backend's web engine
+// and its libraries are in the process): on Linux the runtime library's calls
+// to the brotli crate's exported C API bound to the system libbrotlidec that
+// WebKitGTK's libsoup loads, and `brotliDecompressSync` spun at 100% CPU
+// (DENEXT.md item 187). A hang leaves the "brotli" mark without its check.
 
 // deno-lint-ignore-file no-explicit-any
 
 import * as http from "node:http";
+import * as zlib from "node:zlib";
 import { describeError, page, Report } from "../_shared/e2e.ts";
 
 const r = new Report("origin");
@@ -103,6 +110,27 @@ function check(out: any) {
       echo.remoteAddress.startsWith("memory:"),
     echo.remoteAddress,
   );
+  r.mark("brotli");
+  try {
+    const text = "e2e brotli ".repeat(64);
+    const packed = zlib.brotliCompressSync(new TextEncoder().encode(text));
+    const back = new TextDecoder().decode(zlib.brotliDecompressSync(packed));
+    const stream = new TextDecoder().decode(zlib.brotliDecompressSync(
+      zlib.brotliCompressSync(new TextEncoder().encode(text), {
+        params: { [zlib.constants.BROTLI_PARAM_QUALITY]: 11 },
+      }),
+    ));
+    r.check(
+      "node:zlib: a Brotli round trip in the running app",
+      back === text && stream === text,
+      { packed: packed.length, back: back.length, stream: stream.length },
+    );
+  } catch (e) {
+    r.fail(
+      "node:zlib: a Brotli round trip in the running app",
+      describeError(e),
+    );
+  }
   server.close();
   r.finish();
 }

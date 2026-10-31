@@ -14,7 +14,7 @@
 #          audit-ignore check's and glibc ceiling check's tests
 #          (.github/denext-runtime/manifest_test.py, tag_gate_test.py,
 #          engine_staleness_test.py, audit_ignores_test.py,
-#          glibc_ceiling_test.py)
+#          glibc_ceiling_test.py, self_binding_test.py)
 #          and the bare-assertion guard over the release scripts
 #          (assert_guard.py and its test).
 # - cargo-audit: RustSec advisories against Cargo.lock; .cargo/audit.toml
@@ -175,6 +175,10 @@ jobs:
       - name: glibc_ceiling_test.py
         if: runner.os == 'Linux'
         run: python3 -I .github/denext-runtime/glibc_ceiling_test.py
+      # The Linux libdenort's -Bsymbolic check (denext_runtime.yml's denort job).
+      - name: self_binding_test.py
+        if: runner.os == 'Linux'
+        run: python3 -I .github/denext-runtime/self_binding_test.py
       # The prebuilt-V8 fetch (the setup action and denext_runtime.yml).
       - name: fetch_rusty_v8_test.py
         if: runner.os == 'Linux'

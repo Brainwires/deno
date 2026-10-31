@@ -7528,11 +7528,46 @@ where the changes are discussed.
      frameless windows on KWin, `nonActivating` reported on Wayland only with
      layer-shell, appmenu-gtk-module's Gdk-CRITICALs.
 
+187. **`fix(desktop)`: the Linux runtime library binds its own symbols to
+     itself** (`cli/rt_desktop/build.rs`; found in runtime 3.0.0-denext.6, fixed
+     for 3.0.0-denext.7):
+     - rustc's cdylib version script exports every `#[no_mangle]` function of
+       every Rust crate linked into `libdenort.so`, which `--exclude-libs,ALL`
+       (C and C++ archives only) leaves alone: the brotli crate's C API (its
+       `ffi-api` feature, which `node:zlib` calls: `BrotliDecoder*`,
+       `BrotliEncoder*`, `Broccoli*`), temporal_rs's (`temporal_rs_*`,
+       `diplomat_*`, which V8's Temporal calls), the `napi_*` / `uv_*` functions
+       and rusty_v8's callbacks (`v8__*`, `v8_inspector__*`, `crdtp__*`,
+       `rusty_v8_*`): 626 dynamic symbols on x86_64, and 305 dynamic relocations
+       named one of them. The loader resolves such a relocation in the global
+       scope first, so a library the host loaded before it `dlopen()`s the
+       runtime wins. In a webview app WebKitGTK's libsoup loads the system
+       `libbrotlidec.so.1`, and `node:zlib`'s `brotliDecompressSync` called its
+       `BrotliDecoderDecompressStream` with the Rust decoder's state and spun at
+       100% CPU (eu-stack and `/proc/<pid>/maps` on Ubuntu arm64; the x86_64
+       Linux window leg hung the same way). Any packaged Linux webview app using
+       Brotli through `node:zlib` hung.
+     - `libdenort.so` is now linked with `-Wl,-Bsymbolic`, which binds every
+       reference to a symbol it defines inside it at link time (functions and
+       data; it covers `-Bsymbolic-functions`). The exports stay, for `dlsym`
+       and N-API addons; the laufey hosts `dlopen()` the runtime with
+       `RTLD_LOCAL`, so they never take another library's calls. The bundled C
+       libraries (zlib-ng, SQLite, V8 and its libc++) were already local
+       (`--exclude-libs,ALL`) and export nothing. macOS (two-level namespace)
+       and Windows (DLL imports) bind a library's calls to itself already.
+     - Tests: `.github/denext-runtime/self_binding.py`, run on each Linux
+       `libdenort.so` in this workflow's denort job, fails unless the library
+       carries the `SYMBOLIC` flag and no dynamic relocation names a symbol it
+       defines (it listed the 305 on the 3.0.0-denext.6 build), with
+       `self_binding_test.py` in `denext tests`; the `origin` e2e area's
+       `node:http` app does a `node:zlib` Brotli round trip once its page has
+       loaded, under both backends on every target.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
-169-174, 176, 178, 180, 182-184, 186) are what the prebuilt `libdenort` carries.
-The CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` /
+169-174, 176, 178, 180, 182-184, 186, 187) are what the prebuilt `libdenort`
+carries. The CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` /
 `LAUFEY_APP_ID` into a packaged app's launchers) are in the branch too, but a
 stock CLI does not run them; denext's own launcher provides that environment.
 
