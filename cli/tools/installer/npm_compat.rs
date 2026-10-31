@@ -67,6 +67,63 @@ fn path_for_typescript(path: &Path) -> String {
   path.to_string_lossy().replace('\\', "/")
 }
 
+/// denext (DENEXT.md item 190): where the npm-shaped copies stock TypeScript
+/// reads for a project live (the `@jsr/*` packages in global-cache mode and
+/// the built-in `@types/node`): `<DENO_DIR>/npm_compat/<name>-<hash>`, one
+/// folder per project root, outside the project. Inside it they were picked
+/// up by the project's own tools: a default `deno test` ran the `_test.ts`
+/// files the JSR packages ship. Without a `DENO_DIR` (it could not be
+/// resolved) it is the old `.deno/npm-compat`.
+pub fn npm_compat_dir(
+  deno_dir_root: Option<&Path>,
+  project_root: &Path,
+) -> PathBuf {
+  let Some(deno_dir_root) = deno_dir_root else {
+    return legacy_npm_compat_dir(project_root);
+  };
+  deno_dir_root
+    .join("npm_compat")
+    .join(npm_compat_project_key(project_root))
+}
+
+/// The `.deno/npm-compat` a type check wrote into the project before item
+/// 190.
+fn legacy_npm_compat_dir(project_root: &Path) -> PathBuf {
+  project_root.join(".deno").join("npm-compat")
+}
+
+/// `<name>-<hash>` for a project root: its folder name (kept to
+/// `[A-Za-z0-9._-]`, at most 32 characters, for a person looking in the
+/// cache) and the first 16 hex digits of the SHA-256 of its canonical path
+/// (the path as given when it cannot be canonicalized).
+fn npm_compat_project_key(project_root: &Path) -> String {
+  use sha2::Digest;
+  let canonical = crate::util::fs::canonicalize_path(project_root)
+    .unwrap_or_else(|_| project_root.to_path_buf());
+  let hash = sha2::Sha256::digest(canonical.to_string_lossy().as_bytes());
+  let hash = faster_hex::hex_string(&hash[..8]);
+  let name: String = canonical
+    .file_name()
+    .map(|n| n.to_string_lossy().into_owned())
+    .unwrap_or_default()
+    .chars()
+    .map(|c| {
+      if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+        c
+      } else {
+        '_'
+      }
+    })
+    .take(32)
+    .collect();
+  let name = name.trim_start_matches('.');
+  if name.is_empty() {
+    hash
+  } else {
+    format!("{name}-{hash}")
+  }
+}
+
 fn collect_typescript_project_files(package_folder: &Path) -> Vec<String> {
   fn collect(dir: &Path, files: &mut Vec<String>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
@@ -288,6 +345,7 @@ fn is_special_specifier(s: &str) -> bool {
 )]
 pub async fn setup_npm_compat(
   project_root: &Path,
+  npm_compat_dir: &Path,
   root_config: Option<&Path>,
   import_map_flag: Option<&Path>,
   file_fetcher: &CliFileFetcher,
@@ -421,8 +479,17 @@ pub async fn setup_npm_compat(
     generate_npm_cache_projects(project_root, deno_imports, npm_resolver)?;
   let use_global_cache_layout = global_cache_layout;
 
+  // denext (DENEXT.md item 190): an earlier type check's copy inside the
+  // project is removed (it is generated, and a default `deno test` ran the
+  // packages' tests from it).
+  let legacy_dir = legacy_npm_compat_dir(project_root);
+  if npm_compat_dir != legacy_dir && legacy_dir.is_dir() {
+    if let Err(e) = std::fs::remove_dir_all(&legacy_dir) {
+      log::debug!("Failed to remove {}: {e}", legacy_dir.display());
+    }
+  }
   let jsr_packages_dir = if use_global_cache_layout {
-    project_root.join(".deno/npm-compat/@jsr")
+    npm_compat_dir.join("@jsr")
   } else {
     project_root.join("node_modules/@jsr")
   };
@@ -497,7 +564,8 @@ pub async fn setup_npm_compat(
 
   // Ensure @types/node is available so Node globals (timers, node: builtins,
   // Buffer, URLPattern, ...) resolve under stock tooling.
-  let node_types = ensure_types_node(project_root, use_global_cache_layout);
+  let node_types =
+    ensure_types_node(project_root, npm_compat_dir, use_global_cache_layout);
   if let Some(undici_types_dir) = &node_types.undici_types_dir {
     member_paths.insert(
       "undici-types".to_string(),
@@ -602,11 +670,12 @@ fn resolve_bare_against_import_map(
 /// reuse that in place. Otherwise the copy built into the binary - the one the
 /// in-process checker uses (`cli/tsc/dts/node`, generated from
 /// `TYPES_NODE_VERSION`, `undici-types` included) - is written under
-/// `.deno/npm-compat` (gitignored): type checking never needs the network for
-/// these globals (denext), and never writes into the project's real
-/// `node_modules`.
+/// `npm_compat_dir` ([`npm_compat_dir`], outside the project): type checking
+/// never needs the network for these globals (denext), and never writes into
+/// the project's real `node_modules`.
 fn ensure_types_node(
   project_root: &Path,
+  npm_compat_dir: &Path,
   use_global_cache_layout: bool,
 ) -> NodeTypesSetup {
   // Reuse an @types/node the project already installed under node_modules.
@@ -623,7 +692,8 @@ fn ensure_types_node(
       };
     }
   }
-  let node_dir = project_root.join(".deno/npm-compat/@types/node");
+  let types_dir = npm_compat_dir.join("@types");
+  let node_dir = types_dir.join("node");
   if let Err(e) = write_embedded_types_node(&node_dir) {
     log::debug!("Failed to write the built-in @types/node: {e}");
     return NodeTypesSetup {
@@ -632,7 +702,7 @@ fn ensure_types_node(
     };
   }
   NodeTypesSetup {
-    type_root: Some("./npm-compat/@types".to_string()),
+    type_root: Some(path_for_typescript(&types_dir)),
     undici_types_dir: Some(node_dir.join("undici")),
   }
 }
@@ -1947,19 +2017,47 @@ mod tests {
   }
 
   #[test]
+  fn npm_compat_dir_is_outside_the_project() {
+    let deno_dir = tempfile::tempdir().unwrap();
+    let parent = tempfile::tempdir().unwrap();
+    let a = parent.path().join("my app");
+    let b = parent.path().join("other");
+    std::fs::create_dir_all(&a).unwrap();
+    std::fs::create_dir_all(&b).unwrap();
+    let dir_a = npm_compat_dir(Some(deno_dir.path()), &a);
+    let dir_b = npm_compat_dir(Some(deno_dir.path()), &b);
+    assert!(dir_a.starts_with(deno_dir.path().join("npm_compat")));
+    assert!(!dir_a.starts_with(&a));
+    let name = dir_a.file_name().unwrap().to_string_lossy().into_owned();
+    assert!(name.starts_with("my_app-"), "{name}");
+    assert_eq!(name.len(), "my_app-".len() + 16, "{name}");
+    // One folder per project, the same one every time.
+    assert_ne!(dir_a, dir_b);
+    assert_eq!(dir_a, npm_compat_dir(Some(deno_dir.path()), &a));
+    // No DENO_DIR: the old place.
+    assert_eq!(npm_compat_dir(None, &a), a.join(".deno").join("npm-compat"));
+  }
+
+  #[test]
   fn test_ensure_types_node_uses_the_built_in_copy_offline() {
     let dir = tempfile::tempdir().unwrap();
-    let setup = ensure_types_node(dir.path(), true);
-    assert_eq!(setup.type_root.as_deref(), Some("./npm-compat/@types"));
-    let node_dir = dir.path().join(".deno/npm-compat/@types/node");
+    let compat = tempfile::tempdir().unwrap();
+    let setup = ensure_types_node(dir.path(), compat.path(), true);
+    assert_eq!(
+      setup.type_root,
+      Some(path_for_typescript(&compat.path().join("@types")))
+    );
+    let node_dir = compat.path().join("@types/node");
     assert!(is_embedded_types_node(&node_dir));
     assert_eq!(setup.undici_types_dir, Some(node_dir.join("undici")));
+    // Nothing is written into the project (DENEXT.md item 190).
+    assert!(!dir.path().join(".deno").exists());
 
     // A project's own `@types/node` under `node_modules` wins.
     let project = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(project.path().join("node_modules/@types/node"))
       .unwrap();
-    let setup = ensure_types_node(project.path(), false);
+    let setup = ensure_types_node(project.path(), compat.path(), false);
     assert_eq!(setup.type_root.as_deref(), Some("../node_modules/@types"));
     assert!(!project.path().join(".deno").exists());
   }

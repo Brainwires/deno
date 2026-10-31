@@ -7719,6 +7719,27 @@ where the changes are discussed.
      `desktop_path_tokens_take_either_separator` and, on Windows,
      `desktop_path_tokens_use_backslashes_on_windows`.
 
+190. **`fix(check)`: the type check's npm-shaped copies stay out of the
+     project** (`fix/npm-compat-out-of-root`; `cli/tools/installer/`,
+     `cli/tools/check.rs`; CLI only). The native type check (and
+     `deno sync-types`) wrote `.deno/npm-compat` into the project root: the
+     `@jsr/*` packages in their npm form (global-cache mode) and the built-in
+     `@types/node` (item 47's). The JSR packages ship their `_test.ts` files,
+     and a later `deno test` with default discovery ran them. They now live
+     in `<DENO_DIR>/npm_compat/<folder name>-<hash>`, one folder per project
+     root (the first 16 hex digits of the SHA-256 of its canonical path),
+     reached from `.deno/tsconfig.json` by absolute `paths` and `typeRoots`
+     as the npm cache already is. An earlier check's `.deno/npm-compat` is
+     removed. Without a resolvable `DENO_DIR` the old place is used.
+
+     Tests: `npm_compat_dir_is_outside_the_project` and
+     `test_ensure_types_node_uses_the_built_in_copy_offline`
+     (`cli/tools/installer/npm_compat.rs`),
+     `types_entries_the_generated_project_provides_resolve`
+     (`cli/tools/check.rs`), the spec test
+     `check::npm_compat_outside_project`, and
+     `check::check_node_builtin_modules`'s expected `@types/node` path.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
