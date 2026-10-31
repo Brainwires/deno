@@ -695,6 +695,8 @@ pub fn op_require_resolve_exports<
   #[string] name: &str,
   #[string] expansion: &str,
   #[string] parent_path: &str,
+  #[serde] conditions: Option<Vec<String>>,
+  is_import: bool,
 ) -> Result<Option<String>, RequireError> {
   let sys = state.borrow::<TSys>();
   let node_resolver = state.borrow::<NodeResolverRc<
@@ -732,6 +734,20 @@ pub fn op_require_resolve_exports<
   } else {
     Some(PathBuf::from(parent_path))
   };
+  // A module resolve hook's `context.conditions` (`module.registerHooks()`)
+  // replaces the default conditions, as Node's `defaultResolve` does; `default`
+  // still matches.
+  let custom_conditions = conditions.map(|conditions| {
+    conditions
+      .into_iter()
+      .map(Cow::Owned)
+      .collect::<Vec<Cow<'static, str>>>()
+  });
+  let resolution_mode = if is_import {
+    ResolutionMode::Import
+  } else {
+    ResolutionMode::Require
+  };
   NodeResolutionThreadLocalCache::clear();
   let r = node_resolver.package_exports_resolve(
     &pkg.path,
@@ -741,8 +757,10 @@ pub fn op_require_resolve_exports<
       .as_ref()
       .map(|r| UrlOrPathRef::from_path(r))
       .as_ref(),
-    ResolutionMode::Require,
-    node_resolver.require_conditions(),
+    resolution_mode,
+    custom_conditions
+      .as_deref()
+      .unwrap_or_else(|| node_resolver.require_conditions()),
     NodeResolutionKind::Execution,
   )?;
   Ok(Some(url_or_path_to_string(r)?))
