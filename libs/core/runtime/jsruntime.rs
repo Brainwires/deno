@@ -2138,6 +2138,15 @@ impl JsRuntime {
       .get_module_namespace(isolate, module_id)
   }
 
+  /// The V8 script id of a module's source, the id its frames report
+  /// (`v8::StackFrame::get_script_id`), so an op can tell whether the code
+  /// calling it is that module's own. `None` for a module that isn't a source
+  /// text module, one that failed, or an unknown id.
+  pub fn module_script_id(&mut self, module_id: ModuleId) -> Option<i32> {
+    let isolate = &mut self.inner.v8_isolate;
+    self.inner.main_realm.module_script_id(isolate, module_id)
+  }
+
   /// Registers a callback on the isolate when the memory limits are approached.
   /// Use this to prevent V8 from crashing the process when reaching the limit.
   ///

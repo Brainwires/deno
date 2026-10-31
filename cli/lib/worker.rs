@@ -840,9 +840,25 @@ impl<TSys: DenoLibSys> LibMainWorkerFactory<TSys> {
     }
     // `--max-memory` / `--max-cpu-time` / `--max-time`: the CPU budget and
     // the deadline count from here.
+    let resource_limits = shared.options.resource_limits;
     crate::resource_limits::arm(
-      shared.options.resource_limits,
+      resource_limits,
       &mut worker.js_runtime,
+      resource_limits
+        .max_memory_bytes
+        .and_then(|_| create_isolate_create_params(&shared.sys))
+        .map(|params| params.max_old_generation_size_in_bytes()),
+    );
+    // `Deno.disarmResourceLimits()`: only this (the main) worker has it, and
+    // only a compiled program's limits can be disarmed. The main module's
+    // script id is set while it evaluates (`execute_main_module`).
+    worker.js_runtime.op_state().borrow_mut().put(
+      deno_runtime::ops::runtime::ResourceLimitsDisarm {
+        armed: resource_limits.any(),
+        baked: shared.options.is_standalone,
+        main_module_script_id: None,
+        disarm: crate::resource_limits::disarm,
+      },
     );
 
     // Wire module hook registry into OpState so JS ops share it with the loader
@@ -1011,7 +1027,13 @@ impl LibMainWorker {
 
   pub async fn execute_main_module(&mut self) -> Result<(), CoreError> {
     let id = self.worker.preload_main_module(&self.main_module).await?;
-    self.worker.evaluate_module(id).await?;
+    // While the main module evaluates, and only then, its own code may call
+    // `Deno.disarmResourceLimits()`.
+    let script_id = self.worker.js_runtime.module_script_id(id);
+    self.set_disarm_caller(script_id);
+    let result = self.worker.evaluate_module(id).await;
+    self.set_disarm_caller(None);
+    result?;
 
     // After loading and evaluating all modules, trim the glibc malloc arena.
     // Module loading/TypeScript compilation creates heavy allocation churn
@@ -1026,6 +1048,19 @@ impl LibMainWorker {
     }
 
     Ok(())
+  }
+
+  /// Sets the script whose code may call `Deno.disarmResourceLimits()`.
+  fn set_disarm_caller(&mut self, script_id: Option<i32>) {
+    if let Some(disarm) = self
+      .worker
+      .js_runtime
+      .op_state()
+      .borrow_mut()
+      .try_borrow_mut::<deno_runtime::ops::runtime::ResourceLimitsDisarm>(
+    ) {
+      disarm.main_module_script_id = script_id;
+    }
   }
 
   pub async fn execute_side_module(&mut self) -> Result<(), CoreError> {

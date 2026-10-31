@@ -42,6 +42,13 @@
 //! prints the message ([`REPORTED`]). Once a limit is recorded, it decides the
 //! exit code even if the program then ends on its own.
 //!
+//! A compiled program's own main module can lift the limits it was compiled
+//! with, for a subcommand that is not the long-running program they are meant
+//! for (a job, a migration): `Deno.disarmResourceLimits()`, refused to any
+//! other code, after the main module's evaluation, and for limits given on the
+//! command line (`deno_runtime::ops::runtime::ResourceLimitsDisarm`). See
+//! [`disarm`].
+//!
 //! These are guardrails against runaway programs, not a sandbox: subprocesses
 //! are neither counted nor stopped, the sampling can overshoot by up to a
 //! tick, and native code can allocate outside the heap. The limits are
@@ -142,9 +149,18 @@ impl LimitKind {
   }
 }
 
-/// The first limit reached (a [`LimitKind`] as `u8`, 0 for none). Set once
-/// and never cleared: one run per process.
+/// The first limit reached (a [`LimitKind`] as `u8`, 0 for none), or
+/// [`DISARMED`]. Set once and never cleared: one run per process. A limit
+/// reached and a disarm race for it, so exactly one of them wins.
 static EXCEEDED: AtomicU8 = AtomicU8::new(0);
+
+/// [`EXCEEDED`]'s value once the limits are disarmed: no limit is recorded
+/// after it.
+const DISARMED: u8 = u8::MAX;
+
+/// The heap limit (old generation, in bytes) the main isolate would have had
+/// without `--max-memory`: how far a disarmed program's heap may grow.
+static DEFAULT_HEAP_LIMIT: OnceLock<Option<usize>> = OnceLock::new();
 
 /// Set by whichever of the exit path and the watchdog prints the message.
 static REPORTED: AtomicBool = AtomicBool::new(false);
@@ -161,12 +177,32 @@ pub fn exceeded() -> Option<LimitKind> {
   LimitKind::from_u8(EXCEEDED.load(Ordering::SeqCst))
 }
 
-/// Records `kind` unless a limit is already recorded, and terminates the main
-/// isolate. Returns whether this call recorded it.
-fn trip(kind: LimitKind) -> bool {
-  let recorded = EXCEEDED
+/// Records `kind` in `cell` unless a limit is already recorded or the limits
+/// are disarmed. Returns whether this call recorded it.
+fn record(cell: &AtomicU8, kind: LimitKind) -> bool {
+  cell
     .compare_exchange(0, kind as u8, Ordering::SeqCst, Ordering::SeqCst)
-    .is_ok();
+    .is_ok()
+}
+
+/// Marks the limits in `cell` disarmed unless a limit was already reached.
+/// Returns whether they are disarmed (also when they already were).
+fn record_disarm(cell: &AtomicU8) -> bool {
+  match cell.compare_exchange(0, DISARMED, Ordering::SeqCst, Ordering::SeqCst) {
+    Ok(_) => true,
+    Err(current) => current == DISARMED,
+  }
+}
+
+fn disarmed() -> bool {
+  EXCEEDED.load(Ordering::SeqCst) == DISARMED
+}
+
+/// Records `kind` unless a limit is already recorded (or the limits are
+/// disarmed), and terminates the main isolate. Returns whether this call
+/// recorded it.
+fn trip(kind: LimitKind) -> bool {
+  let recorded = record(&EXCEEDED, kind);
   if recorded && let Some(handle) = ACTIVE_ISOLATE.lock().as_ref() {
     handle.terminate_execution();
   }
@@ -202,11 +238,52 @@ pub fn exit_if_exceeded() {
   }
 }
 
+/// Lifts the limits armed by [`arm`]: the watchdog thread stops without
+/// ending anything, and the main isolate's heap may grow to
+/// `default_heap_limit` (what it would have had without `--max-memory`, the
+/// cap set at creation can only be raised from the near-heap-limit callback).
+/// Returns `false`, and changes nothing, when a limit was already reached.
+///
+/// This is what `Deno.disarmResourceLimits()` calls, after
+/// `deno_runtime::ops::runtime` has checked that the caller is the main
+/// module of a compiled program, evaluating; nothing else calls it.
+pub fn disarm() -> bool {
+  record_disarm(&EXCEEDED)
+}
+
+/// The near-heap-limit callback's new limit. Armed, reaching the limit
+/// records it (and the program unwinds); disarmed, the heap grows as it would
+/// have without `--max-memory`, up to `default_heap_limit`, past which V8
+/// ends the process as it ends any program out of heap.
+fn next_heap_limit(
+  current_limit: usize,
+  default_heap_limit: Option<usize>,
+  disarmed: bool,
+) -> usize {
+  if !disarmed {
+    // Room to unwind: without it V8 aborts the process once the callback
+    // returns the same limit.
+    return current_limit.saturating_mul(2);
+  }
+  match default_heap_limit {
+    Some(ceiling) if current_limit < ceiling => {
+      current_limit.saturating_mul(2).min(ceiling)
+    }
+    _ => current_limit,
+  }
+}
+
 /// Arms the limits for the main worker `runtime`: the near-heap-limit
 /// callback for `--max-memory` (the heap cap itself is set at isolate creation
 /// by [`ResourceLimits::apply_heap_limit`]) and the watchdog thread. A no-op
-/// when no limit is set.
-pub fn arm(limits: ResourceLimits, runtime: &mut JsRuntime) {
+/// when no limit is set. `default_heap_limit` is the heap limit (old
+/// generation, bytes) the isolate would have had without `--max-memory`, for
+/// [`disarm`].
+pub fn arm(
+  limits: ResourceLimits,
+  runtime: &mut JsRuntime,
+  default_heap_limit: Option<usize>,
+) {
   if !limits.any() {
     return;
   }
@@ -224,11 +301,14 @@ pub fn arm(limits: ResourceLimits, runtime: &mut JsRuntime) {
   *ACTIVE_ISOLATE.lock() = Some(handle);
 
   if limits.max_memory_bytes.is_some() {
+    let _ = DEFAULT_HEAP_LIMIT.set(default_heap_limit);
     runtime.add_near_heap_limit_callback(|current_limit, _initial_limit| {
       trip(LimitKind::Memory);
-      // Room to unwind: without it V8 aborts the process once the callback
-      // returns the same limit.
-      current_limit.saturating_mul(2)
+      next_heap_limit(
+        current_limit,
+        DEFAULT_HEAP_LIMIT.get().copied().flatten(),
+        disarmed(),
+      )
     });
   }
 
@@ -266,6 +346,10 @@ fn watchdog(
   let mut reached_at: Option<Instant> = None;
   loop {
     std::thread::sleep(WATCHDOG_TICK);
+    if disarmed() {
+      // `Deno.disarmResourceLimits()`: nothing is ended from here on.
+      return;
+    }
     let now = Instant::now();
     if let Some(reached_at) = reached_at {
       if now.duration_since(reached_at) >= WATCHDOG_GRACE {
@@ -314,6 +398,39 @@ mod tests {
       LimitKind::CpuTime.message(),
       "CPU time limit exceeded (--max-cpu-time)"
     );
+  }
+
+  #[test]
+  fn a_limit_and_a_disarm_race_once() {
+    // Disarmed first: no limit is recorded afterwards.
+    let cell = AtomicU8::new(0);
+    assert!(record_disarm(&cell));
+    assert!(!record(&cell, LimitKind::Time));
+    assert!(record_disarm(&cell));
+    assert_eq!(LimitKind::from_u8(cell.load(Ordering::SeqCst)), None);
+    // A limit reached first: too late to disarm.
+    let cell = AtomicU8::new(0);
+    assert!(record(&cell, LimitKind::CpuTime));
+    assert!(!record_disarm(&cell));
+    assert!(!record(&cell, LimitKind::Memory));
+    assert_eq!(
+      LimitKind::from_u8(cell.load(Ordering::SeqCst)),
+      Some(LimitKind::CpuTime)
+    );
+  }
+
+  #[test]
+  fn disarmed_heap_grows_to_the_default_limit() {
+    const MB: usize = 1024 * 1024;
+    // Armed: room to unwind.
+    assert_eq!(next_heap_limit(64 * MB, Some(4096 * MB), false), 128 * MB);
+    // Disarmed: doubling up to the limit the isolate would have had.
+    assert_eq!(next_heap_limit(64 * MB, Some(4096 * MB), true), 128 * MB);
+    assert_eq!(next_heap_limit(3000 * MB, Some(4096 * MB), true), 4096 * MB);
+    // At it (or with none known), no more: V8 ends the program as it ends
+    // any program out of heap.
+    assert_eq!(next_heap_limit(4096 * MB, Some(4096 * MB), true), 4096 * MB);
+    assert_eq!(next_heap_limit(64 * MB, None, true), 64 * MB);
   }
 
   #[test]

@@ -8060,6 +8060,61 @@ where the changes are discussed.
      The stage / helper wiring runs only on Windows; the fork's Windows CI is
      its test.
 
+197. **`feat(compile)`: a compiled program's main module can disarm its baked
+     resource limits** (`Deno.disarmResourceLimits()`;
+     `cli/lib/resource_limits.rs`, `cli/lib/worker.rs`,
+     `runtime/ops/runtime.rs`, `runtime/js/90_deno_ns.js`,
+     `libs/core/runtime/{jsruntime,jsrealm}.rs`, `lib.deno.ns.d.ts`; the queue's
+     item 18b, for denext):
+     - Item 92's limits, given to `deno compile`, are enforced by the compiled
+       program however it is started, so the same executable's subcommands
+       (denext's `./app job <name>` and `./app db migrate` beside `./app`, the
+       server) ran under the server's `--max-memory` / `--max-cpu-time` /
+       `--max-time`, and a long job or migration was ended with 124 or 152.
+     - `Deno.disarmResourceLimits()` lifts them: the watchdog thread stops
+       without ending anything, and the near-heap-limit callback raises the heap
+       to the limit the isolate would have had without `--max-memory`
+       (`create_isolate_create_params`; V8 can only lower a heap limit after
+       creation, so the raise goes through the callback). It returns `true`, or
+       `false` when there are no limits (the same entry point under `deno run`
+       without flags). A limit already reached and a disarm race on one atomic,
+       so exactly one wins.
+     - Not an environment variable or a flag: those would let whoever starts the
+       program (or anything it spawns) turn the guardrail off. Only the
+       program's own entry point decides, and only then. The op throws
+       `NotCapable`, changing nothing, unless all of these hold:
+       - the innermost JavaScript frame is the main module's own source,
+         compared by V8 script id (`JsRuntime::module_script_id`, new), not by
+         name: a dependency, `eval`, `new Function` and a `node:vm` script given
+         the main module's file name are other scripts. The op is installed on
+         `Deno` as is (no JavaScript wrapper frame), and is never a fast call;
+       - the main module is still evaluating (its top level, top-level `await`s
+         included): the script id is set in `LibMainWorker::execute_main_module`
+         just before evaluation and cleared once it settles, so a request
+         handler, a timer or a module imported later can't disarm anything;
+       - it runs on the main worker: only that worker's `OpState` carries the
+         `ResourceLimitsDisarm` state, so a Web Worker is refused;
+       - the limits are baked (`is_standalone`): limits given to `deno run` on
+         the command line are the operator's, never the program's to lift.
+
+       The limits arm when the main worker is created, as before (the heap cap
+       at isolate creation, the CPU budget and deadline from that moment), so a
+       program that doesn't call it, or calls it too late, is limited exactly as
+       before. A CommonJS entry point runs its code in a separate script and
+       can't disarm.
+     - Tests: `compile/resource_limits` `disarm` (compiled with
+       `--max-memory=64m --max-cpu-time=1 --max-time=2`, `./out job` disarms and
+       then keeps a 160 MB heap, burns 1.5 s of CPU and runs past 2 s to its
+       end; `./out` alone still ends with 137) and `disarm_refused` (a
+       dependency, `eval`, `new Function`, `node:vm` with the main module's file
+       name, a Worker and the main module after its evaluation all get
+       `NotCapable`, and `--max-time` still ends the program with 124);
+       `run/resource_limits` `disarm_command_line` (`deno run --max-time`:
+       `NotCapable`) and `disarm_without_limits` (`false`); `disarm_policy`
+       (`runtime/ops/runtime.rs`), `a_limit_and_a_disarm_race_once` and
+       `disarmed_heap_grows_to_the_default_limit`
+       (`cli/lib/resource_limits.rs`).
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,

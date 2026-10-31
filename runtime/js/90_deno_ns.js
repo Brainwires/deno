@@ -2,6 +2,7 @@
 
 import { core, internals, primordials } from "ext:core/mod.js";
 import {
+  op_disarm_resource_limits,
   op_net_listen_udp,
   op_net_listen_unixpacket,
   op_runtime_cpu_usage,
@@ -200,6 +201,9 @@ const denoNs = {
       external,
     };
   },
+  // denext: the op itself, not a wrapper, so the frame calling it is the
+  // caller's own (the op checks it is the main module's).
+  disarmResourceLimits: op_disarm_resource_limits,
   mkdirSync: fs.mkdirSync,
   mkdir: fs.mkdir,
   chdir: fs.chdir,
