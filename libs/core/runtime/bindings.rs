@@ -1671,8 +1671,7 @@ fn catch_dynamic_import_promise_error<'s, 'i>(
       // `ERR_PACKAGE_PATH_NOT_EXPORTED`, `ERR_INVALID_ARG_VALUE`, ...) keeps it.
       if name.as_str() != deno_error::builtin_classes::SYNTAX_ERROR {
         let code_key = CODE.v8_string(scope).unwrap();
-        let arg_obj: v8::Local<v8::Object> = arg.try_into().unwrap();
-        let code_value = match arg_obj.get(scope, code_key.into()) {
+        let code_value = match arg.get(scope, code_key.into()) {
           Some(code) if code.is_string() => code,
           _ => ERR_MODULE_NOT_FOUND.v8_string(scope).unwrap().into(),
         };

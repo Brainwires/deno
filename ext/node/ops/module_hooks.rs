@@ -59,7 +59,7 @@ impl HookResolveError {
     scope: &mut v8::PinScope,
     result: v8::Local<v8::Object>,
   ) -> Option<Self> {
-    let mut get = |key: &str| -> Option<String> {
+    let get = |key: &str| -> Option<String> {
       let key = v8::String::new(scope, key)?;
       let value = result.get(scope, key.into())?;
       if !value.is_string() {
