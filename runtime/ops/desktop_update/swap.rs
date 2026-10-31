@@ -444,23 +444,28 @@ pub fn exchange(a: &Path, b: &Path) -> std::io::Result<bool> {
         libc::RENAME_EXCHANGE,
       ) as libc::c_int
     };
-    if rc == 0 {
-      return Ok(true);
-    }
-    let e = std::io::Error::last_os_error();
-    match e.raw_os_error() {
-      Some(libc::ENOTSUP) | Some(libc::EINVAL) | Some(libc::ENOSYS) => {
-        Ok(false)
-      }
-      #[allow(unreachable_patterns, reason = "EOPNOTSUPP == ENOTSUP on Linux")]
-      Some(libc::EOPNOTSUPP) => Ok(false),
-      _ => Err(e),
-    }
+    exchange_result(rc)
   }
   #[cfg(not(any(target_os = "macos", target_os = "linux")))]
   {
     let _ = (a, b);
     Ok(false)
+  }
+}
+
+/// An exchange call's return code as [`exchange`]'s result: `Ok(false)` for
+/// the errors that mean the OS or file system cannot exchange.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub(super) fn exchange_result(rc: libc::c_int) -> std::io::Result<bool> {
+  if rc == 0 {
+    return Ok(true);
+  }
+  let e = std::io::Error::last_os_error();
+  match e.raw_os_error() {
+    Some(libc::ENOTSUP) | Some(libc::EINVAL) | Some(libc::ENOSYS) => Ok(false),
+    #[allow(unreachable_patterns, reason = "EOPNOTSUPP == ENOTSUP on Linux")]
+    Some(libc::EOPNOTSUPP) => Ok(false),
+    _ => Err(e),
   }
 }
 
@@ -526,9 +531,7 @@ pub fn tree_digest(root: &Path) -> std::io::Result<String> {
     let ft = meta.file_type();
     // Length-prefixed fields: no name can be confused with a separator.
     let mut field = |tag: &str, value: &str| {
-      out.update(tag.as_bytes());
-      out.update((value.len() as u64).to_le_bytes());
-      out.update(value.as_bytes());
+      super::staging::digest_field(out, tag, value);
     };
     if ft.is_symlink() {
       let target = std::fs::read_link(path)?;
@@ -776,10 +779,9 @@ fn undo_rename(hook: FaultHook, from: &Path, to: &Path) -> std::io::Result<()> {
   Err(last.unwrap_or_else(|| std::io::Error::other("undo failed")))
 }
 
-/// The helper's `apply`: swap the staged app into place. On failure the
-/// install is left as it was (the previous app) and the state goes back to
-/// `staged` with `last_error`. On success the state is `swapped` (trial
-/// pending) and the staging directory is removed.
+/// [`apply_swap_verified`] with no OS re-check (the tests of the swap
+/// mechanics).
+#[cfg(test)]
 pub fn apply_swap(
   layout: &InstallLayout,
   state: &mut UpdateState,
@@ -787,22 +789,79 @@ pub fn apply_swap(
   apply_swap_with(layout, state, &no_fault)
 }
 
+/// [`apply_swap`] with a fault hook.
+#[cfg(test)]
 pub fn apply_swap_with(
   layout: &InstallLayout,
   state: &mut UpdateState,
   hook: FaultHook,
 ) -> Result<(), UpdateError> {
+  apply_swap_verified(layout, state, &accept_staged, hook)
+}
+
+/// Record why the staged app is refused and refuse it (nothing swapped).
+fn refuse_staged(
+  layout: &InstallLayout,
+  state: &mut UpdateState,
+  why: &str,
+) -> Result<(), UpdateError> {
+  state.phase = Phase::Staged;
+  state.last_error = Some(why.to_string());
+  let _ = write_state(layout, state);
+  err(Code::BundleMismatch, format!("{why}; nothing was swapped"))
+}
+
+/// The helper's `apply`: check the staged app and swap it into place. On
+/// failure the install is left as it was (the previous app) and the state
+/// goes back to `staged` with `last_error`. On success the state is
+/// `swapped` (trial pending) and the staging directory is removed.
+///
+/// The staged app is held through its private staging directory
+/// ([`super::staging`]) from the first check to the rename, so a staging
+/// directory renamed away and replaced after the check is not what moves.
+/// Its digest is taken through that directory BEFORE `verify` runs, must
+/// match the one recorded when it was staged, and is taken again right
+/// before the swap: the tree swapped in is the tree that was verified, with
+/// the state file (which anything running as the user can write) only a
+/// cross-check, never the reference.
+pub fn apply_swap_verified(
+  layout: &InstallLayout,
+  state: &mut UpdateState,
+  verify: StagedVerifier<'_>,
+  hook: FaultHook,
+) -> Result<(), UpdateError> {
   if state.phase != Phase::Staged {
     return err(Code::NotStaged, "nothing is staged");
   }
-  let Some(staged) = state.staged_path(layout) else {
+  let (Some(staged_path), Some(entry)) =
+    (state.staged_path(layout), state.entry.clone())
+  else {
     return err(Code::NotStaged, "the state names no staged app");
   };
-  if !exists(&staged) || !exists(&layout.install) {
+  let staging = match super::staging::PrivateDir::open(&layout.staging_dir()) {
+    Ok(dir) => dir,
+    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+      return err(Code::NotStaged, "the staged app or the install is missing");
+    }
+    Err(e) => {
+      return refuse_staged(
+        layout,
+        state,
+        &format!("the staging directory is not private to this user ({e})"),
+      );
+    }
+  };
+  let staged = match staging.staged("extract", entry.as_ref()) {
+    Ok(s) => s,
+    Err(_) => {
+      return err(Code::NotStaged, "the staged app or the install is missing");
+    }
+  };
+  if !exists(&staged_path) || !exists(&layout.install) {
     return err(Code::NotStaged, "the staged app or the install is missing");
   }
   if !is_install_copy(layout.kind, &layout.install)
-    || !is_install_copy(layout.kind, &staged)
+    || !is_install_copy(layout.kind, &staged_path)
   {
     return err(
       Code::UnsupportedLayout,
@@ -810,17 +869,24 @@ pub fn apply_swap_with(
        marker); nothing was swapped",
     );
   }
-  // The staged tree must still be exactly what was verified and staged.
-  let digest = tree_digest(&staged).ok();
-  if digest.is_none() || digest != state.staged_digest {
-    state.last_error =
-      Some("the staged app changed after it was verified".into());
-    let _ = write_state(layout, state);
-    return err(
-      Code::BundleMismatch,
-      "the staged app no longer matches what was verified and staged; \
-       nothing was swapped",
+  // What this helper will swap, pinned before anything checks it. It must
+  // be what was verified and staged.
+  let pinned = staged.digest().ok();
+  if pinned.is_none() || pinned != state.staged_digest {
+    return refuse_staged(
+      layout,
+      state,
+      "the staged app changed after it was verified",
     );
+  }
+  // The OS check reads the staged app by path: the path must name the held
+  // directory before and after it.
+  if !staging.still_at_path() {
+    return refuse_staged(layout, state, "the staging directory was replaced");
+  }
+  verify(layout, state)?;
+  if !staging.still_at_path() {
+    return refuse_staged(layout, state, "the staging directory was replaced");
   }
   let old = layout.old_path();
   if exists(&old) && !remove_install_copy(layout, &old) {
@@ -833,6 +899,15 @@ pub fn apply_swap_with(
       ),
     );
   }
+  // Again right before the swap: unchanged since it was pinned (and so
+  // since it was verified).
+  if staged.digest().ok() != pinned {
+    return refuse_staged(
+      layout,
+      state,
+      "the staged app changed while it was verified",
+    );
+  }
   state.phase = Phase::Swapping;
   state.install_id = file_id(&layout.install);
   state.last_error = None;
@@ -843,30 +918,33 @@ pub fn apply_swap_with(
   // for a recovery ([`rollback`]).
   let result = (|| -> Result<(), (std::io::Error, bool)> {
     let exchanged = if hook("exchange").is_ok() {
-      exchange(&staged, &layout.install).map_err(|e| (e, true))?
+      staged
+        .exchange_with(&layout.install)
+        .map_err(|e| (e, true))?
     } else {
       false
     };
     if exchanged {
       // The install is the new app; `staged` holds the previous one.
-      if let Err(e) = step(hook, "old", || rename_retry(&staged, &old)) {
+      if let Err(e) = step(hook, "old", || staged.move_to(&old)) {
         // Put the previous app back (exchange again) before failing.
-        let undone =
-          step(hook, "undo", || match exchange(&staged, &layout.install) {
+        let undone = step(hook, "undo", || {
+          match staged.exchange_with(&layout.install) {
             Ok(true) => Ok(()),
             Ok(false) => Err(std::io::Error::other("cannot exchange back")),
             Err(e) => Err(e),
-          })
-          .is_ok();
+          }
+        })
+        .is_ok();
         return Err((e, undone));
       }
       return Ok(());
     }
     step(hook, "install->old", || rename_retry(&layout.install, &old))
       .map_err(|e| (e, true))?;
-    if let Err(e) = step(hook, "staged->install", || {
-      rename_retry(&staged, &layout.install)
-    }) {
+    if let Err(e) =
+      step(hook, "staged->install", || staged.move_to(&layout.install))
+    {
       // Undo: the previous app back at the install path.
       let undone = undo_rename(hook, &old, &layout.install).is_ok();
       return Err((e, undone));
@@ -883,7 +961,11 @@ pub fn apply_swap_with(
       state.staged_digest = None;
       state.apply_pid = None;
       write_state(layout, state)?;
-      remove_path(&layout.staging_dir());
+      // Only this helper's own staging directory: whatever was put at its
+      // path instead is not ours to delete.
+      if staging.still_at_path() {
+        remove_path(staging.path());
+      }
       Ok(())
     }
     Err((e, true)) => {
@@ -1468,21 +1550,21 @@ pub fn run_helper(
     return 1;
   };
   match mode {
-    HelperMode::Apply => match verify(layout, &state)
-      .and_then(|()| apply_swap(layout, &mut state))
-    {
-      Ok(()) => {
-        let from = state.from.clone().unwrap_or_default();
-        log_line(layout, &format!("swapped {from} -> {:?}", state.to));
-        relaunch(layout, &state, Some(format!("{UPDATED_FROM_ARG}{from}")))
+    HelperMode::Apply => {
+      match apply_swap_verified(layout, &mut state, verify, &no_fault) {
+        Ok(()) => {
+          let from = state.from.clone().unwrap_or_default();
+          log_line(layout, &format!("swapped {from} -> {:?}", state.to));
+          relaunch(layout, &state, Some(format!("{UPDATED_FROM_ARG}{from}")))
+        }
+        Err(e) => {
+          log_line(layout, &format!("apply failed: {e}"));
+          helper_after_failed_apply(layout, &mut |state, marker| {
+            relaunch(layout, state, marker)
+          })
+        }
       }
-      Err(e) => {
-        log_line(layout, &format!("apply failed: {e}"));
-        helper_after_failed_apply(layout, &mut |state, marker| {
-          relaunch(layout, state, marker)
-        })
-      }
-    },
+    }
     HelperMode::Rollback => {
       helper_rollback(layout, &mut state, &mut |state, marker| {
         relaunch(layout, state, marker)
@@ -2404,6 +2486,7 @@ mod tests {
     };
     let mut state = UpdateState::new(&layout);
     if let Some(v) = staged {
+      make_private_staging(&layout);
       let dir = layout.extract_dir().join("App");
       std::fs::create_dir_all(&dir).unwrap();
       std::fs::write(dir.join("version"), v).unwrap();
@@ -2417,6 +2500,30 @@ mod tests {
     }
     write_state(&layout, &state).unwrap();
     Fixture { _tmp: tmp, layout }
+  }
+
+  /// The staging directory as `begin()` creates it: owned by this user,
+  /// private to it (0700).
+  fn make_private_staging(l: &InstallLayout) {
+    std::fs::create_dir_all(l.staging_dir()).unwrap();
+    #[cfg(unix)]
+    {
+      use std::os::unix::fs::PermissionsExt;
+      std::fs::set_permissions(
+        l.staging_dir(),
+        std::fs::Permissions::from_mode(0o700),
+      )
+      .unwrap();
+    }
+  }
+
+  /// Plant `version` as a marked app tree at `dir` (what another user with
+  /// write access to the install's parent could put there).
+  fn plant_app(dir: &Path, version: &str) {
+    std::fs::create_dir_all(dir).unwrap();
+    std::fs::write(dir.join("version"), version).unwrap();
+    std::fs::write(dir.join(super::super::layout::INSTALL_MARKER), "{}")
+      .unwrap();
   }
 
   /// Point the recorded trial at a process that has exited.
@@ -2730,6 +2837,134 @@ mod tests {
       assert_eq!(e.code, Code::BundleMismatch, "{change}");
       assert_eq!(installed(l), "1.0.0", "{change}");
       assert_eq!(read_state(l).unwrap().phase, Phase::Staged, "{change}");
+    }
+  }
+
+  /// The staging directory sits in the install's parent, which other users
+  /// may be able to write (`/Applications` is writable by the admin group):
+  /// one that is not private to this user, or a symlink in its place, is
+  /// never swapped from.
+  #[cfg(unix)]
+  #[test]
+  fn a_staging_directory_others_can_reach_is_refused() {
+    use std::os::unix::fs::PermissionsExt;
+    for how in ["group-writable", "world-readable", "symlink"] {
+      let f = fixture(Some("2.0.0"));
+      let l = &f.layout;
+      let staging = l.staging_dir();
+      match how {
+        "group-writable" => std::fs::set_permissions(
+          &staging,
+          std::fs::Permissions::from_mode(0o770),
+        )
+        .unwrap(),
+        "world-readable" => std::fs::set_permissions(
+          &staging,
+          std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap(),
+        _ => {
+          let elsewhere = l.parent.join("elsewhere");
+          std::fs::rename(&staging, &elsewhere).unwrap();
+          std::os::unix::fs::symlink(&elsewhere, &staging).unwrap();
+        }
+      }
+      let mut s = read_state(l).unwrap();
+      let e = apply_swap(l, &mut s).unwrap_err();
+      assert_eq!(e.code, Code::BundleMismatch, "{how}: {}", e.message);
+      assert_eq!(installed(l), "1.0.0", "{how}");
+      assert_eq!(read_state(l).unwrap().phase, Phase::Staged, "{how}");
+    }
+  }
+
+  /// The verify-then-swap race (5.0-gate review A, L1): after the staged
+  /// app was verified, something with write access to the install's parent
+  /// renames the staging directory away and puts another app tree at the
+  /// same path. The swap moves what was verified (through the directory it
+  /// holds open), never the tree now at the path.
+  #[cfg(unix)]
+  #[test]
+  fn a_staging_directory_replaced_after_verification_is_not_swapped_in() {
+    for exchanged in [true, false] {
+      let f = fixture(Some("2.0.0"));
+      let l = &f.layout;
+      if exchanged && !exchange_supported(&l.parent) {
+        continue;
+      }
+      let mut s = read_state(l).unwrap();
+      let hook = |name: &str| -> std::io::Result<()> {
+        if name == "exchange" {
+          std::fs::rename(l.staging_dir(), l.parent.join(".moved-away"))?;
+          make_private_staging(l);
+          plant_app(&l.extract_dir().join("App"), "6.6.6");
+          if !exchanged {
+            return Err(std::io::Error::other("no exchange here"));
+          }
+        }
+        Ok(())
+      };
+      apply_swap_with(l, &mut s, &hook).unwrap();
+      assert_eq!(installed(l), "2.0.0", "exchanged={exchanged}");
+      assert_eq!(
+        std::fs::read_to_string(l.old_path().join("version")).unwrap(),
+        "1.0.0",
+        "exchanged={exchanged}"
+      );
+      // The planted tree is left where it was put, not swapped or deleted.
+      assert_eq!(
+        std::fs::read_to_string(l.extract_dir().join("App/version")).unwrap(),
+        "6.6.6",
+        "exchanged={exchanged}"
+      );
+      assert_eq!(read_state(l).unwrap().phase, Phase::Swapped);
+    }
+  }
+
+  /// The digest the helper swaps against is the one it computed itself
+  /// before verifying, not the state file's (which anything running as the
+  /// user can write): a staged app changed while it was being verified is
+  /// refused, even when the state names the changed tree's digest.
+  #[test]
+  fn the_helper_swaps_only_the_tree_it_verified() {
+    if run_alone("the_helper_swaps_only_the_tree_it_verified") {
+      return;
+    }
+    for forge in [true, false] {
+      let f = fixture(Some("2.0.0"));
+      let l = &f.layout;
+      let staged = read_state(l).unwrap().staged_path(l).unwrap();
+      // The state is forged to name the tree as it will be after the change
+      // (or names the tree as staged: the change is still caught).
+      let forged = {
+        let t = tempfile::tempdir().unwrap();
+        let copy = t.path().join("App");
+        plant_app(&copy, "6.6.6");
+        tree_digest(&copy).unwrap()
+      };
+      let mut exited = if cfg!(windows) {
+        std::process::Command::new("cmd")
+          .args(["/C", "exit 0"])
+          .spawn()
+      } else {
+        std::process::Command::new("true").spawn()
+      }
+      .unwrap();
+      let pid = exited.id();
+      exited.wait().unwrap();
+      let mut s = read_state(l).unwrap();
+      if forge {
+        s.staged_digest = Some(forged);
+      }
+      s.apply_pid = Some(pid);
+      write_state(l, &s).unwrap();
+      // The change lands while the staged app is being verified.
+      let verify = |_: &InstallLayout, _: &UpdateState| {
+        std::fs::write(staged.join("version"), "6.6.6").unwrap();
+        Ok(())
+      };
+      run_helper(l, HelperMode::Apply, pid, &verify);
+      assert_eq!(installed(l), "1.0.0", "forge={forge}");
+      assert_eq!(read_state(l).unwrap().phase, Phase::Staged, "forge={forge}");
     }
   }
 

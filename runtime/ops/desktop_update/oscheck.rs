@@ -4,18 +4,27 @@
 //!
 //! - **macOS:** `codesign --verify --deep --strict` must pass on the staged
 //!   bundle. When the running app is signed with a Developer ID (it has a
-//!   Team ID), the staged bundle must carry the SAME Team ID, satisfy the
-//!   requirement `anchor apple generic and certificate leaf[subject.OU] =
-//!   "<team>"` (a Team ID is only the leaf's OU, and `spctl` accepts
-//!   everything with Gatekeeper off), pass Gatekeeper (`spctl --assess
-//!   --type execute`), and its signing identifier must match the running
-//!   app's (the same app).
+//!   Team ID), the staged bundle must carry the SAME Team ID, satisfy
+//!   Apple's Developer ID requirement for that team, notarized
+//!   ([`team_requirement`]: an Apple-anchored chain through the Developer ID
+//!   intermediate, a Developer ID Application leaf whose OU is the team, and
+//!   a notarization ticket; a Team ID is only the leaf's OU, and `spctl`
+//!   accepts everything with Gatekeeper off), pass Gatekeeper (`spctl
+//!   --assess --type execute`), and its signing identifier must match the
+//!   running app's (the same app).
 //! - **Windows:** when the running executable has a trusted Authenticode
 //!   signature (`WinVerifyTrust`), EVERY PE image in the staged app must
 //!   verify too (see [`pe_files`]: any file with a PE header, whatever its
 //!   extension: `.exe`, `.dll`, a native addon's `.node`, ...), each with a
 //!   leaf signer certificate whose issuer AND subject equal the running
-//!   executable's. Checking only the executable and its runtime DLL left
+//!   executable's, and a revocation check that succeeded: a certificate
+//!   whose revocation status can't be determined (offline, the CRL / OCSP
+//!   server unreachable) is refused like a revoked one (see
+//!   [`revocation_status_verdict`]). The running executable's own signer is
+//!   read without the online lookup ([`authenticode_identity`]): it is the
+//!   identity to compare with, and an offline machine must not turn a signed
+//!   app into an "unsigned" one that the helper's dev opt-out would wave
+//!   through. Checking only the executable and its runtime DLL left
 //!   every other DLL the app loads (CEF's, an addon's) unchecked: a
 //!   same-named DLL is all a DLL-planting attack needs.
 //! - **Linux:** the OS has no code signature; the manifest signature and the
@@ -144,10 +153,25 @@ fn is_team_id(team: &str) -> bool {
       .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
 }
 
-/// `codesign -R=` for "signed through Apple's CA by this team".
+/// Apple's Developer ID intermediate CA marker (`certificate 1`).
+const DEVELOPER_ID_CA_OID: &str = "1.2.840.113635.100.6.2.6";
+/// The Developer ID Application leaf marker: only Apple issues it, and only
+/// for distribution outside the App Store (not to an Apple Development or a
+/// Mac App Store certificate of the same team).
+const DEVELOPER_ID_APPLICATION_OID: &str = "1.2.840.113635.100.6.1.13";
+
+/// `codesign -R=` for "a Developer ID Application certificate Apple issued
+/// to this team, through the Developer ID CA, and notarized": Apple's own
+/// designated requirement for Developer ID code, plus `notarized` (a
+/// notarization ticket, stapled or looked up). `anchor apple generic` alone
+/// also takes any other Apple-issued certificate whose OU is the team.
 fn team_requirement(team: &str) -> String {
   format!(
-    "-R=anchor apple generic and certificate leaf[subject.OU] = \"{team}\""
+    "-R=anchor apple generic \
+     and certificate 1[field.{DEVELOPER_ID_CA_OID}] exists \
+     and certificate leaf[field.{DEVELOPER_ID_APPLICATION_OID}] exists \
+     and certificate leaf[subject.OU] = \"{team}\" \
+     and notarized"
   )
 }
 
@@ -202,8 +226,8 @@ pub fn verify_macos(
     // put in a self-signed certificate, and `codesign --verify` does not ask
     // for an Apple anchor; `spctl --assess` does, but says "accepted" for
     // everything once the user has turned Gatekeeper off. So verify again
-    // against an explicit designated requirement: an Apple-issued chain
-    // whose leaf names the running app's team.
+    // against an explicit requirement: a Developer ID Application
+    // certificate Apple issued to the running app's team, and notarized.
     if !is_team_id(team) {
       return err(
         Code::OsSignature,
@@ -225,8 +249,9 @@ pub fn verify_macos(
       return err(
         Code::OsSignature,
         format!(
-          "the staged app is not signed by an Apple-issued certificate for \
-           Team ID {team}: {}",
+          "the staged app is not signed with a Developer ID Application \
+           certificate Apple issued to Team ID {team}, or is not notarized: \
+           {}",
           anchored.stderr.trim()
         ),
       );
@@ -356,16 +381,19 @@ fn is_pe_image(path: &Path) -> std::io::Result<bool> {
   )
 }
 
-/// The Windows check over a signer lookup (`None`: no trusted signature).
-/// `staged_files` is every PE image of the staged app ([`pe_files`]). See
-/// the module docs.
+/// The Windows check over two signer lookups (`None`: no trusted
+/// signature): `identity` for the running executable
+/// ([`authenticode_identity`]), `lookup` for each staged image
+/// ([`authenticode_signer`], revocation required). `staged_files` is every
+/// PE image of the staged app ([`pe_files`]). See the module docs.
 pub fn verify_windows(
+  identity: &dyn Fn(&Path) -> Option<Signer>,
   lookup: &dyn Fn(&Path) -> Option<Signer>,
   running_exe: &Path,
   staged_files: &[PathBuf],
   allow_unsigned_dev: bool,
 ) -> Result<SignatureReport, UpdateError> {
-  let Some(running) = lookup(running_exe) else {
+  let Some(running) = identity(running_exe) else {
     if !allow_unsigned_dev {
       return err(
         Code::OsSignature,
@@ -401,7 +429,13 @@ pub fn verify_windows(
       None => {
         return err(
           Code::OsSignature,
-          format!("{} has no trusted Authenticode signature", file.display()),
+          format!(
+            "{} has no trusted Authenticode signature, or its \
+             certificate's revocation status could not be checked (the \
+             update needs the certificate authority's CRL / OCSP servers \
+             to be reachable)",
+            file.display()
+          ),
         );
       }
     }
@@ -412,36 +446,36 @@ pub fn verify_windows(
   })
 }
 
-/// `CRYPT_E_REVOCATION_OFFLINE`: the revocation server could not be reached.
-const CRYPT_E_REVOCATION_OFFLINE: i32 = 0x80092013_u32 as i32;
-/// `CERT_E_REVOCATION_FAILURE`: revocation could not be checked.
-const CERT_E_REVOCATION_FAILURE: i32 = 0x800B010E_u32 as i32;
-
 /// How [`authenticode_signer`] treats a `WinVerifyTrust` status from the
-/// check WITH revocation: `Some(true)` trusted, `Some(false)` refused, `None`
-/// revocation could not be determined (offline) and the offline fallback
-/// decides.
+/// check WITH revocation: `Some(true)` trusted, `Some(false)` refused (an
+/// `Option`, from when `None` meant "retry without revocation"; it is never
+/// `None` now).
 ///
 /// The whole table:
 ///
-/// | status                                   | verdict                     |
-/// | ---------------------------------------- | --------------------------- |
-/// | `0` (trusted, revocation checked)        | accepted                    |
-/// | `CRYPT_E_REVOCATION_OFFLINE` 0x80092013  | fallback without revocation |
-/// | `CERT_E_REVOCATION_FAILURE` 0x800B010E   | fallback without revocation |
-/// | `CRYPT_E_REVOKED` / `CERT_E_REVOKED`     | refused                     |
+/// | status                                   | verdict  |
+/// | ---------------------------------------- | -------- |
+/// | `0` (trusted, revocation checked)        | accepted |
+/// | `CRYPT_E_REVOCATION_OFFLINE` 0x80092013  | refused  |
+/// | `CERT_E_REVOCATION_FAILURE` 0x800B010E   | refused  |
+/// | `CRYPT_E_REVOKED` / `CERT_E_REVOKED`     | refused  |
 /// | `CRYPT_E_NO_REVOCATION_CHECK` 0x80092012 | refused (the CA publishes no revocation info for a cert that should have it) |
 /// | anything else (unsigned, bad digest, untrusted root, expired without a timestamp, ...) | refused |
 ///
-/// The fallback re-verifies the whole chain WITHOUT revocation and accepts
-/// only a trusted result: it is taken when the revocation servers can't be
-/// reached (an offline machine, a captive portal, a CRL/OCSP outage), never
-/// when a certificate is positively known revoked.
+/// Revocation that could not be determined fails closed (5.0-gate review
+/// A, L6). It used to fall back to a check without revocation, so that an
+/// offline machine could still update; but to a machine whose CRL / OCSP
+/// lookups an attacker blocks (a hostile network, a captive portal), a
+/// revoked certificate looks exactly like that, and the revocation of a
+/// stolen signing certificate is the one moment this check matters. An
+/// update waits until the revocation servers can be reached; there is no
+/// opt-out.
 pub fn revocation_status_verdict(status: i32) -> Option<bool> {
   match status {
     0 => Some(true),
-    CRYPT_E_REVOCATION_OFFLINE | CERT_E_REVOCATION_FAILURE => None,
-    // Anything else, CRYPT_E_REVOKED / CERT_E_REVOKED included: refused.
+    // Anything else, CRYPT_E_REVOKED / CERT_E_REVOKED and an undetermined
+    // revocation status (CRYPT_E_REVOCATION_OFFLINE /
+    // CERT_E_REVOCATION_FAILURE) included: refused.
     _ => Some(false),
   }
 }
@@ -452,23 +486,23 @@ pub fn revocation_status_verdict(status: i32) -> Option<bool> {
 ///
 /// Revocation is checked online for the whole chain except the root
 /// (`WTD_REVOKE_WHOLECHAIN` + `WTD_REVOCATION_CHECK_CHAIN_EXCLUDE_ROOT`): a
-/// revoked signing certificate is refused. Offline-tolerant fallback: when
-/// the revocation status cannot be determined (no network, the CRL/OCSP
-/// server unreachable: `CRYPT_E_REVOCATION_OFFLINE` /
-/// `CERT_E_REVOCATION_FAILURE`), the signature is verified again without
-/// the revocation lookup and accepted if valid, so an offline machine can
-/// still update; a certificate positively reported revoked never is. The
-/// update manifest is separately signed with the app's own key, so the
-/// fallback only weakens the second, OS-level check while offline.
+/// revoked signing certificate is refused, and so is one whose revocation
+/// status cannot be determined ([`revocation_status_verdict`]).
 #[cfg(windows)]
 pub fn authenticode_signer(path: &Path) -> Option<Signer> {
-  match authenticode_signer_with(path, true) {
-    Ok(signer) => Some(signer),
-    Err(status) => match revocation_status_verdict(status) {
-      None => authenticode_signer_with(path, false).ok(),
-      Some(_) => None,
-    },
-  }
+  // Every failing status is a refusal ([`revocation_status_verdict`]'s
+  // table): there is no second pass without revocation.
+  authenticode_signer_with(path, true).ok()
+}
+
+/// The running executable's Authenticode signer, verified WITHOUT the
+/// online revocation lookup: the identity the staged images must match.
+/// Whether it was revoked since it was installed is not what is asked here
+/// (each staged image's own check is), and with the lookup an offline
+/// machine would read a signed app as unsigned.
+#[cfg(windows)]
+pub fn authenticode_identity(path: &Path) -> Option<Signer> {
+  authenticode_signer_with(path, false).ok()
 }
 
 /// One `WinVerifyTrust` pass (`revocation`: online revocation checks), then
@@ -581,12 +615,23 @@ pub fn authenticode_signer(_path: &Path) -> Option<Signer> {
   None
 }
 
+#[cfg(not(windows))]
+pub fn authenticode_identity(_path: &Path) -> Option<Signer> {
+  None
+}
+
 #[cfg(test)]
 mod tests {
   use std::cell::RefCell;
   use std::collections::HashMap;
 
   use super::*;
+
+  /// `CRYPT_E_REVOCATION_OFFLINE`: the revocation server could not be
+  /// reached.
+  const CRYPT_E_REVOCATION_OFFLINE: i32 = 0x80092013_u32 as i32;
+  /// `CERT_E_REVOCATION_FAILURE`: revocation could not be checked.
+  const CERT_E_REVOCATION_FAILURE: i32 = 0x800B010E_u32 as i32;
 
   /// Answers by (program, last argument); records every call.
   #[derive(Default)]
@@ -685,9 +730,17 @@ mod tests {
     for revoked in [0x80092010_u32 as i32, 0x800B010C_u32 as i32] {
       assert_eq!(revocation_status_verdict(revoked), Some(false));
     }
-    // Offline: the fallback (no revocation lookup) decides.
-    assert_eq!(revocation_status_verdict(CRYPT_E_REVOCATION_OFFLINE), None);
-    assert_eq!(revocation_status_verdict(CERT_E_REVOCATION_FAILURE), None);
+    // Revocation not determined (offline, the CRL / OCSP server down):
+    // refused too. A revoked certificate looks exactly like this to a
+    // machine whose revocation lookups are blocked (5.0-gate review A, L6).
+    assert_eq!(
+      revocation_status_verdict(CRYPT_E_REVOCATION_OFFLINE),
+      Some(false)
+    );
+    assert_eq!(
+      revocation_status_verdict(CERT_E_REVOCATION_FAILURE),
+      Some(false)
+    );
     // No revocation information at all (CRYPT_E_NO_REVOCATION_CHECK), an
     // untrusted root (CERT_E_UNTRUSTEDROOT), an expired certificate
     // (CERT_E_EXPIRED): refused, no fallback.
@@ -797,7 +850,7 @@ mod tests {
   // A leaf certificate's OU is whatever its maker wrote: with Gatekeeper
   // off (`spctl --assess` then accepts everything), a self-signed bundle
   // naming the running app's team must still be refused, by the explicit
-  // Apple-anchor requirement.
+  // requirement (Apple-anchored Developer ID Application, notarized).
   #[test]
   fn team_must_be_apple_anchored() {
     let f = Fake::default()
@@ -815,7 +868,11 @@ mod tests {
       let e = verify_macos(&f, "/run".as_ref(), "/new".as_ref(), opt_out)
         .unwrap_err();
       assert_eq!(e.code, Code::OsSignature);
-      assert!(e.message.contains("Apple-issued"), "{}", e.message);
+      assert!(
+        e.message.contains("Developer ID Application"),
+        "{}",
+        e.message
+      );
     }
     assert!(f.calls.borrow().iter().any(|c| c == "anchor /new"));
   }
@@ -824,7 +881,11 @@ mod tests {
   fn team_requirement_names_the_team() {
     assert_eq!(
       team_requirement("ABCDE12345"),
-      "-R=anchor apple generic and certificate leaf[subject.OU] = \"ABCDE12345\""
+      "-R=anchor apple generic \
+       and certificate 1[field.1.2.840.113635.100.6.2.6] exists \
+       and certificate leaf[field.1.2.840.113635.100.6.1.13] exists \
+       and certificate leaf[subject.OU] = \"ABCDE12345\" \
+       and notarized"
     );
     assert!(is_team_id("ABCDE12345"));
     // A quote (or anything but A-Z 0-9), or another length, never reaches a
@@ -867,6 +928,7 @@ mod tests {
     };
     let ok = verify_windows(
       &lookup,
+      &lookup,
       "run.exe".as_ref(),
       &files(&["new.exe", "new.dll", "addon.node"]),
       false,
@@ -880,30 +942,42 @@ mod tests {
       &["new.exe", "unsigned.dll"],
       &["new.exe", "otherca.dll"],
     ] {
-      let e = verify_windows(&lookup, "run.exe".as_ref(), &files(bad), true)
-        .unwrap_err();
+      let e =
+        verify_windows(&lookup, &lookup, "run.exe".as_ref(), &files(bad), true)
+          .unwrap_err();
       assert_eq!(e.code, Code::OsSignature, "{bad:?}");
     }
     assert_eq!(
-      verify_windows(&lookup, "run.exe".as_ref(), &[], false)
+      verify_windows(&lookup, &lookup, "run.exe".as_ref(), &[], false)
         .unwrap_err()
         .code,
       Code::OsSignature
     );
     for bad in [["evil.exe"], ["unsigned.exe"]] {
       for opt_out in [false, true] {
-        let e =
-          verify_windows(&lookup, "run.exe".as_ref(), &files(&bad), opt_out)
-            .unwrap_err();
+        let e = verify_windows(
+          &lookup,
+          &lookup,
+          "run.exe".as_ref(),
+          &files(&bad),
+          opt_out,
+        )
+        .unwrap_err();
         assert_eq!(e.code, Code::OsSignature);
       }
     }
     // An unsigned running app: refused without the opt-out.
-    let e =
-      verify_windows(&lookup, "dev.exe".as_ref(), &files(&["new.exe"]), false)
-        .unwrap_err();
+    let e = verify_windows(
+      &lookup,
+      &lookup,
+      "dev.exe".as_ref(),
+      &files(&["new.exe"]),
+      false,
+    )
+    .unwrap_err();
     assert_eq!(e.code, Code::OsSignature);
     let r = verify_windows(
+      &lookup,
       &lookup,
       "dev.exe".as_ref(),
       &files(&["unsigned.exe"]),
@@ -911,6 +985,23 @@ mod tests {
     )
     .unwrap();
     assert_eq!(r.mode, "dev-unsigned");
+    // Offline: the staged images' revocation can't be checked, so none has
+    // a trusted signer; the running app's identity (read without the
+    // lookup) is still known, so the helper's dev opt-out can't turn this
+    // into an "unsigned running app" and wave the update through.
+    let offline = |_: &Path| -> Option<Signer> { None };
+    for opt_out in [false, true] {
+      let e = verify_windows(
+        &lookup,
+        &offline,
+        "run.exe".as_ref(),
+        &files(&["new.exe"]),
+        opt_out,
+      )
+      .unwrap_err();
+      assert_eq!(e.code, Code::OsSignature);
+      assert!(e.message.contains("revocation"), "{}", e.message);
+    }
   }
 
   #[cfg(windows)]
