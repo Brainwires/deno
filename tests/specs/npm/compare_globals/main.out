@@ -11,7 +11,7 @@ Download http://localhost:4260/undici-types/undici-types-[WILDLINE].tgz
 Check [WILDCARD]main.ts
 true
 true
-[]
+[ "--allow-read" ]
 process equals process true
 setTimeout 1 true
 setTimeout 2 function
