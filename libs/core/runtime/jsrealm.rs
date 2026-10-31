@@ -688,6 +688,21 @@ impl JsRealm {
     self.0.module_map().get_module_namespace(scope, module_id)
   }
 
+  /// The V8 script id of a module's source, the id its frames report
+  /// (`v8::StackFrame::get_script_id`). `None` for a module that isn't a
+  /// source text module (JSON, Wasm, synthetic), one that failed, or an
+  /// unknown id.
+  pub fn module_script_id(
+    &self,
+    isolate: &mut v8::Isolate,
+    module_id: ModuleId,
+  ) -> Option<i32> {
+    context_scope!(scope, self, isolate);
+    let handle = self.0.module_map().get_handle(module_id)?;
+    let module = v8::Local::new(scope, &handle);
+    module.script_id()
+  }
+
   pub(crate) fn instantiate_module(
     &self,
     scope: &mut v8::PinScope,

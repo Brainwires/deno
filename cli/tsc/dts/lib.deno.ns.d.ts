@@ -378,6 +378,41 @@ declare namespace Deno {
   export function memoryUsage(): MemoryUsage;
 
   /**
+   * **denext extension** (Brainwires/deno, not upstream Deno): lifts the
+   * resource limits (`--max-memory`, `--max-cpu-time`, `--max-time`) that
+   * `deno compile` baked into this program, for a run that isn't the
+   * long-running program they guard, such as a job or a database migration
+   * the same executable runs as a subcommand:
+   *
+   * ```ts
+   * // main.ts, compiled with `deno compile --max-memory=384m --max-time=3600`
+   * if (Deno.args[0] === "migrate") {
+   *   Deno.disarmResourceLimits();
+   *   await migrate();
+   * } else {
+   *   Deno.serve(handler);
+   * }
+   * ```
+   *
+   * Once disarmed, no limit ends the program, and its heap may grow as it
+   * would have without `--max-memory`. Returns `true` when the limits are
+   * disarmed and `false` when the program has none (so the same code runs
+   * under `deno run` without limits).
+   *
+   * Throws `Deno.errors.NotCapable`, changing nothing, when:
+   * - the caller is not the main module's own code (a module it imports,
+   *   `eval`, `new Function`, `node:vm`, a worker): only the program's entry
+   *   point decides;
+   * - the main module has finished evaluating: call it at the top level
+   *   (top-level `await` included), before the program starts its work;
+   * - the limits were given on the command line (`deno run --max-time=60 …`):
+   *   those are the operator's, never the program's to lift.
+   *
+   * @category Runtime
+   */
+  export function disarmResourceLimits(): boolean;
+
+  /**
    * Get the `hostname` of the machine the Deno process is running on.
    *
    * ```ts

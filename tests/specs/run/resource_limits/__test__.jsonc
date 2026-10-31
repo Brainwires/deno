@@ -90,6 +90,18 @@
       "output": "not_with_watch.out",
       "exitCode": 1
     },
+    // Limits given on the command line are the operator's: the program can't
+    // disarm them (only a compiled program's own can, see
+    // compile/resource_limits).
+    "disarm_command_line": {
+      "args": "run --max-time=30 disarm.js",
+      "output": "disarm_command_line.out"
+    },
+    // Without limits there is nothing to disarm.
+    "disarm_without_limits": {
+      "args": "run disarm.js",
+      "output": "disarm_without_limits.out"
+    },
     // A missing script is not retried as a task under the limits.
     "no_task_fallback": {
       "args": "run --max-time=5 limited",

@@ -47,6 +47,45 @@
         }
       ]
     },
+    // The entry point disarms the baked limits for a subcommand
+    // (Deno.disarmResourceLimits) and goes past all three; without the
+    // subcommand the same program is still limited.
+    "disarm": {
+      "steps": [
+        {
+          "args": "compile --max-memory=64m --max-cpu-time=1 --max-time=2 --output out disarm.js",
+          "output": "[WILDCARD]"
+        },
+        {
+          "commandName": "./out",
+          "args": ["job"],
+          "output": "disarm.out"
+        },
+        {
+          "commandName": "./out",
+          "args": [],
+          "output": "disarm_not_called.out",
+          "exitCode": 137
+        }
+      ]
+    },
+    // Code other than the main module's own (a dependency, eval, new
+    // Function, node:vm, a worker), or the main module once it has finished
+    // evaluating, can't disarm them.
+    "disarm_refused": {
+      "steps": [
+        {
+          "args": "compile --max-time=8 --include disarm_worker.js --output out disarm_refused.js",
+          "output": "[WILDCARD]"
+        },
+        {
+          "commandName": "./out",
+          "args": [],
+          "output": "disarm_refused.out",
+          "exitCode": 124
+        }
+      ]
+    },
     // Without limits the same program runs to its end.
     "without_limits": {
       "steps": [
