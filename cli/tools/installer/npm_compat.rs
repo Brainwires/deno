@@ -483,10 +483,11 @@ pub async fn setup_npm_compat(
   // project is removed (it is generated, and a default `deno test` ran the
   // packages' tests from it).
   let legacy_dir = legacy_npm_compat_dir(project_root);
-  if npm_compat_dir != legacy_dir && legacy_dir.is_dir() {
-    if let Err(e) = std::fs::remove_dir_all(&legacy_dir) {
-      log::debug!("Failed to remove {}: {e}", legacy_dir.display());
-    }
+  if npm_compat_dir != legacy_dir
+    && legacy_dir.is_dir()
+    && let Err(e) = std::fs::remove_dir_all(&legacy_dir)
+  {
+    log::debug!("Failed to remove {}: {e}", legacy_dir.display());
   }
   let jsr_packages_dir = if use_global_cache_layout {
     npm_compat_dir.join("@jsr")
