@@ -42,6 +42,8 @@ use std::ffi::OsString;
 use std::path::Path;
 use std::path::PathBuf;
 
+use super::treecheck::TreeEntry;
+
 /// A digest field: a tag, then the value's length and bytes, so no value can
 /// be confused with a separator. The encoding of [`super::swap::tree_digest`].
 pub(super) fn digest_field(out: &mut sha2::Sha256, tag: &str, value: &str) {
@@ -186,21 +188,29 @@ impl Staged {
   /// directory (Unix: never through the path, never following a symlink).
   /// A device, FIFO or socket in the tree is an error.
   pub fn digest(&self) -> std::io::Result<String> {
+    self.listing().map(|(digest, _)| digest)
+  }
+
+  /// [`Self::digest`] and, from the same reads, every file and symlink of
+  /// the staged app (see [`super::swap::tree_listing`]).
+  pub fn listing(&self) -> std::io::Result<(String, Vec<TreeEntry>)> {
     #[cfg(unix)]
     {
       use sha2::Digest;
       let mut out = sha2::Sha256::new();
+      let mut files = Vec::new();
       let name = cstr(&self.entry)?;
       fd_walk::entry(
         std::os::fd::AsRawFd::as_raw_fd(&self.dir),
         &name,
         "",
         &mut out,
+        &mut files,
       )?;
-      Ok(faster_hex::hex_string(&out.finalize()))
+      Ok((faster_hex::hex_string(&out.finalize()), files))
     }
     #[cfg(not(unix))]
-    super::swap::tree_digest(&self.path)
+    super::swap::tree_listing(&self.path)
   }
 
   /// Atomically exchange the staged app with `target`. `Ok(false)` when the
@@ -351,6 +361,8 @@ mod fd_walk {
   use std::os::unix::ffi::OsStrExt;
   use std::os::unix::ffi::OsStringExt;
 
+  use super::super::treecheck::FileSink;
+  use super::TreeEntry;
   use super::digest_field;
   use super::fstat;
   use super::openat_dir;
@@ -483,6 +495,7 @@ mod fd_walk {
     name: &CStr,
     rel: &str,
     out: &mut sha2::Sha256,
+    files: &mut Vec<TreeEntry>,
   ) -> std::io::Result<()> {
     let st = fstatat(dir, name)?;
     match st.st_mode & libc::S_IFMT {
@@ -490,6 +503,9 @@ mod fd_walk {
         let target = readlinkat(dir, name)?;
         digest_field(out, "l", rel);
         digest_field(out, "t", &target.to_string_lossy());
+        files.push(TreeEntry::Symlink {
+          rel: rel.to_string(),
+        });
       }
       libc::S_IFDIR => {
         let fd = openat_dir(dir, name)?;
@@ -506,7 +522,7 @@ mod fd_walk {
             format!("{rel}/{}", child.to_string_lossy())
           };
           let c = CString::new(child.as_bytes())?;
-          entry(fd.as_raw_fd(), &c, &child_rel, out)?;
+          entry(fd.as_raw_fd(), &c, &child_rel, out, files)?;
         }
       }
       libc::S_IFREG => {
@@ -533,18 +549,21 @@ mod fd_walk {
           return Err(changed(rel));
         }
         let mut file = std::fs::File::from(fd);
-        let mut h = <sha2::Sha256 as sha2::Digest>::new();
-        let len = std::io::copy(&mut file, &mut h)?;
+        let mut sink = FileSink::default();
+        let len = std::io::copy(&mut file, &mut sink)?;
         if len != opened.st_size as u64 {
           return Err(changed(rel));
         }
+        let (sha, pe) = sink.finish();
         digest_field(out, "f", rel);
         digest_field(out, "s", &len.to_string());
-        digest_field(
-          out,
-          "h",
-          &faster_hex::hex_string(&sha2::Digest::finalize(h)),
-        );
+        digest_field(out, "h", &sha);
+        files.push(TreeEntry::File {
+          rel: rel.to_string(),
+          size: len,
+          sha256: sha,
+          pe,
+        });
       }
       _ => {
         return Err(std::io::Error::new(
@@ -579,6 +598,11 @@ mod tests {
     assert_eq!(
       staged.digest().unwrap(),
       super::super::swap::tree_digest(&staged.path).unwrap()
+    );
+    // The listing the same walk records, entry for entry.
+    assert_eq!(
+      staged.listing().unwrap(),
+      super::super::swap::tree_listing(&staged.path).unwrap()
     );
     // A single file as the staged app (an AppImage).
     std::fs::write(dir.path().join("extract/App.AppImage"), "img").unwrap();

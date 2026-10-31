@@ -3539,6 +3539,7 @@ dependencies = [
  "deno_websocket",
  "deno_webstorage",
  "ed25519-dalek",
+ "editpe",
  "encoding_rs",
  "faster-hex",
  "fastwebsockets",

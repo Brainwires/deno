@@ -19,7 +19,9 @@
 //! 3. `stage()` extracts it with the safe extractor ([`archive`]), checks it
 //!    is the same app shape and the version the manifest offers
 //!    ([`embedded`]), and runs the OS code-signature check against the
-//!    running app ([`oscheck`]). Only then is the update `staged`.
+//!    running app ([`oscheck`]; on Windows also the signed tree manifest of
+//!    the files that are not PE images, [`treecheck`]). Only then is the
+//!    update `staged`.
 //! 4. `applyAndRelaunch()` starts the helper, which waits for the app to
 //!    exit, swaps the install atomically and relaunches ([`swap`]).
 //! 5. The new version calls `confirm()`; an update that is not confirmed by
@@ -42,6 +44,7 @@ pub mod manifest;
 pub mod oscheck;
 pub mod staging;
 pub mod swap;
+pub mod treecheck;
 
 use std::cell::RefCell;
 use std::path::PathBuf;
@@ -690,10 +693,13 @@ fn stage_blocking(
   if !staging.still_at_path() {
     return error::err(Code::BundleMismatch, REPLACED);
   }
-  let staged_digest = staging
+  let (staged_digest, entries) = staging
     .staged("extract", std::ffi::OsStr::new(&x.top))
-    .and_then(|s| s.digest())
+    .and_then(|s| s.listing())
     .map_err(|e| UpdateError::io(staged.display(), e))?;
+  // Windows: the files that are not PE images must be the ones the signed
+  // executable's tree manifest lists, as that same walk read them.
+  treecheck::verify_for_platform(layout, &staged, &entries)?;
   let _ = std::fs::remove_file(archive);
   let previous = swap::read_state(layout);
   let mut st = UpdateState::carried_from(layout, previous);

@@ -8015,6 +8015,50 @@ where the changes are discussed.
      notarized Developer ID app (passes), the same with another team, and a Mac
      App Store app (both refused). Test: `team_requirement_names_the_team`
      (failed before), `team_must_be_apple_anchored`.
+196. **`fix(desktop)`: a Windows update's files that are not PE images are
+     covered by the executable's Authenticode signature** (5.0-gate review A,
+     M2; `runtime/ops/desktop_update/treecheck.rs`, `staging.rs`, `swap.rs`,
+     `mod.rs`; 2.9.7-denext.4 through 3.0.0-denext.7). The Windows OS check
+     verifies every PE image of a staged app, but the app's other files
+     (`laufey-launch.json` with `bridgeOrigins` / `inspectable` /
+     `strictPolicy`, CEF's `.pak` / `icudtl.dat` / `v8_context_snapshot.bin`,
+     sidecar JavaScript, `.deno-desktop-app`) carry no signature of their own,
+     so the update key alone protected them: a stolen update key could change
+     the window's bridge origins of a signed app. denext's Windows package
+     build (`buildDesktopBundle`, which `scripts/package-windows.ts` calls,
+     last, before it signs) now writes a tree manifest,
+     `{ "v": 1, "files": [{ "path", "size", "sha256" }] }` over every regular
+     file that is not a PE image, into the main executable as the `RT_RCDATA`
+     resource `DENEXT_TREE` (pure TypeScript, any host), so the executable's
+     signature covers it. After the OS check, `stage()` and
+     the update helper read the staged tree in the walk that records the
+     digest the helper pins (`Staged::listing`, the same reads as
+     `tree_digest`, with a streaming PE-header probe that applies
+     `pe_files`' test), read the manifest from the staged executable's bytes
+     (their SHA-256 must be the walk's), and require the listed files exactly:
+     each with the same size and SHA-256, none missing, none unlisted, no
+     symlink or reparse point. When the running executable carries a
+     manifest, a staged app without one is refused (`os_signature`): the
+     protection can't be dropped by an update. A running app without one
+     accepts its first update without it, so it rolls out in one release.
+     macOS seals every bundle file in its code signature, and Linux has no OS
+     signature (item 143), so the check is Windows-only. Rejected: a catalog
+     file (MakeCat is Windows-only, and Windows packaging works from any
+     host); a resource with the launch policy alone (CEF blobs and sidecar JS
+     stay uncovered). Install-time tampering by a local writer of the install
+     directory is out of scope (the install directory's ACL). Tests:
+     `the_probe_matches_the_pe_header_test`, `manifests_are_parsed_strictly`,
+     `the_tree_must_match_the_manifest_exactly` (changed, flipped byte,
+     missing, extra, a listed file turned PE, symlink, a name read twice),
+     `the_manifest_resource_round_trips`, `reads_a_manifest_the_packager_wrote`
+     (`testdata/tree_manifest_packaged.exe`, written by denext's
+     `embedDesktopTreeManifest`), `verify_staged_tree_end_to_end` (tamper,
+     extra sidecar, executable changed after the walk, downgrade of
+     protection, the first update without one, an unreadable running
+     executable), `a_symlink_in_the_staged_tree_is_refused`,
+     `the_held_digest_is_tree_digest` (the held listing is the path listing).
+     The stage / helper wiring runs only on Windows; the fork's Windows CI is
+     its test.
 
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
