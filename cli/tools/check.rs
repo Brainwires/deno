@@ -609,8 +609,15 @@ async fn run_native_check_once(
   // nothing resolves, in place of the compiler's TS2688 (or its silence: the
   // generated project leaves a subpath entry out), as the in-process checker
   // reports them (denoland/deno#32764).
-  let types_entry_diagnostics =
-    unresolved_types_entries(&project_root, types_entry_diagnostics);
+  let npm_compat_dir = crate::tools::installer::npm_compat_dir(
+    deno_dir_root.as_deref(),
+    &project_root,
+  );
+  let types_entry_diagnostics = unresolved_types_entries(
+    &project_root,
+    &npm_compat_dir,
+    types_entry_diagnostics,
+  );
   parsed.retain(|d| {
     d.code != 2688
       || !types_entry_diagnostics
@@ -667,10 +674,11 @@ async fn run_native_check_once(
 
 /// The `compilerOptions.types` entries Deno's graph could not resolve that
 /// the generated project does not provide either: an entry that names one of
-/// its type roots (`.deno/types/<entry>`, `.deno/npm-compat/@types/<entry>`)
-/// resolves for the compiler.
+/// its type roots (`.deno/types/<entry>`, `<npm compat dir>/@types/<entry>`,
+/// see `npm_compat_dir`) resolves for the compiler.
 fn unresolved_types_entries(
   project_root: &Path,
+  npm_compat_dir: &Path,
   entries: Vec<(String, crate::tsc::Diagnostic)>,
 ) -> Vec<(String, crate::tsc::Diagnostic)> {
   let generated = project_root.join(".deno");
@@ -678,11 +686,7 @@ fn unresolved_types_entries(
     .into_iter()
     .filter(|(entry, _)| {
       !generated.join("types").join(entry).exists()
-        && !generated
-          .join("npm-compat")
-          .join("@types")
-          .join(entry)
-          .exists()
+        && !npm_compat_dir.join("@types").join(entry).exists()
     })
     .collect()
 }
@@ -1384,9 +1388,9 @@ mod tests {
   #[test]
   fn types_entries_the_generated_project_provides_resolve() {
     let project = tempfile::tempdir().unwrap();
+    let npm_compat = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(project.path().join(".deno/types/vitest")).unwrap();
-    std::fs::create_dir_all(project.path().join(".deno/npm-compat/@types/bun"))
-      .unwrap();
+    std::fs::create_dir_all(npm_compat.path().join("@types/bun")).unwrap();
     let config = ModuleSpecifier::parse("file:///p/deno.json").unwrap();
     let entries = ["vitest", "bun", "asdfasdf"]
       .into_iter()
@@ -1400,10 +1404,11 @@ mod tests {
         )
       })
       .collect();
-    let left: Vec<String> = unresolved_types_entries(project.path(), entries)
-      .into_iter()
-      .map(|(entry, _)| entry)
-      .collect();
+    let left: Vec<String> =
+      unresolved_types_entries(project.path(), npm_compat.path(), entries)
+        .into_iter()
+        .map(|(entry, _)| entry)
+        .collect();
     assert_eq!(left, vec!["asdfasdf".to_string()]);
   }
 

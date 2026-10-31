@@ -1,0 +1,20 @@
+// denext (DENEXT.md item 190): the type check's npm-shaped copies (the
+// built-in `@types/node` here) live in DENO_DIR, not in the project's
+// `.deno/`, and an earlier check's `.deno/npm-compat` is removed.
+{
+  "tempDir": true,
+  "steps": [
+    {
+      "args": ["eval", "Deno.mkdirSync('.deno/npm-compat/@jsr/denotest__add', { recursive: true }); Deno.writeTextFileSync('.deno/npm-compat/@jsr/denotest__add/mod_test.ts', '')"],
+      "output": ""
+    },
+    {
+      "args": "check mod.ts",
+      "output": "[WILDCARD]"
+    },
+    {
+      "args": ["eval", "for (const p of ['.deno/npm-compat', '.deno/tsconfig.json']) { let s = 'absent'; try { Deno.statSync(p); s = 'present'; } catch {} console.log(p, s); }"],
+      "output": ".deno/npm-compat absent\n.deno/tsconfig.json present\n"
+    }
+  ]
+}
