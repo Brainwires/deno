@@ -183,6 +183,11 @@ pub struct InitialWindowConfig {
   pub transparent_titlebar: bool,
   pub transparent: bool,
   pub show_on_first_load: bool,
+  /// A wlr-layer-shell overlay surface where the compositor has one (on top,
+  /// on every workspace, no taskbar entry; with `no_activate`, never
+  /// focused); an ordinary window elsewhere.
+  #[serde(default)]
+  pub overlay: bool,
 }
 
 impl Default for InitialWindowConfig {
@@ -195,6 +200,7 @@ impl Default for InitialWindowConfig {
       transparent_titlebar: false,
       transparent: false,
       show_on_first_load: true,
+      overlay: false,
     }
   }
 }

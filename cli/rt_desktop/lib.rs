@@ -792,7 +792,7 @@ impl WefDesktopApi {
         transparent_titlebar: options.transparent_titlebar,
         hidden: true,
         transparent: options.transparent,
-        overlay: false,
+        overlay: options.overlay,
       },
     );
     let window =
@@ -3150,6 +3150,7 @@ laufey::main!(|| {
           identifier: app_config.identifier,
           targets: launch_targets,
           initial_window: app_config.initial_window,
+          display_name: app_config.name,
           app_update,
           allowed_navigation_origins,
         },
@@ -3246,6 +3247,9 @@ struct LaunchConfig {
   targets: deno_lib::standalone::launch_args::LaunchTargets,
   /// `desktop.initialWindow` (metadata, else the embedded app.json).
   initial_window: deno_lib::standalone::binary::InitialWindowConfig,
+  /// `name` from the embedded app.json (`desktop.app.name`): the title of
+  /// an untitled window, before the baked app name.
+  display_name: Option<String>,
   /// Full-app self-update configuration (`Deno.desktop.updater`).
   app_update: deno_runtime::ops::desktop_update::AppUpdateConfig,
   /// `allowedNavigationOrigins` from the embedded app.json (normalized).
@@ -3803,9 +3807,18 @@ async fn run_desktop(
   let auto_update_rolled_back =
     auto_update_state.as_ref().is_some_and(|s| s.rolled_back);
 
-  // App name (deno.json `desktop.app.name`, baked in at compile time) used as
-  // the default window title. Moved into the op_state_init closure below.
+  // The app's identity (deno.json `desktop.app.name`, else the output file's
+  // name, baked in at compile time): scheme registration below.
   let app_name = data.metadata.app_name.clone();
+  // The default window title: app.json's `name` (`desktop.app.name`), else
+  // the baked name. A packager that passes `--output dist/MyApp-arm64` bakes
+  // "MyApp-arm64", which untitled windows (a tray panel) showed. Moved into
+  // the op_state_init closure below.
+  let title_name = launch
+    .display_name
+    .clone()
+    .or_else(|| app_name.clone())
+    .filter(|n| !n.is_empty());
   // `desktop.initialWindow` from the metadata, else the embedded app.json.
   let initial_window = launch.initial_window;
   // Shared by the bootstrap window's first-load reveal and the 10 s
@@ -4007,7 +4020,7 @@ async fn run_desktop(
       // than the backend's internal default (`laufey_webview`). The
       // `BrowserWindow` constructor applies the same default to any further
       // untitled windows via `DesktopAppName` in op state.
-      if let Some(name) = app_name.as_deref().filter(|n| !n.is_empty()) {
+      if let Some(name) = title_name.as_deref() {
         api.set_title(window_id, name);
       }
 
@@ -4029,9 +4042,10 @@ async fn run_desktop(
           no_activate: initial_window.no_activate,
           transparent_titlebar: initial_window.transparent_titlebar,
           transparent: initial_window.transparent,
+          overlay: initial_window.overlay,
         },
       ));
-      if let Some(name) = app_name.filter(|n| !n.is_empty()) {
+      if let Some(name) = title_name {
         state.put(deno_runtime::ops::desktop::DesktopAppName(name));
       }
     })),

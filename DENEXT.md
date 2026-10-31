@@ -7438,6 +7438,30 @@ CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID`
 into a packaged app's launchers) are in the branch too, but a stock CLI does not
 run them; denext's own launcher provides that environment.
 
+184. **`fix(desktop)`: the overlay on Linux Wayland** (`cli/rt/desktop.rs`,
+     `runtime/ops/desktop.rs`, `cli/rt_desktop/{lib,app_origin}.rs`,
+     `cli/lib/standalone/{app_origin,binary}.rs`, `libs/config`,
+     `cli/schemas/config-file.v1.json`, `lib.deno.desktop.d.ts`; with
+     Brainwires/laufey `fix/wayland-overlay-panel`; for runtime
+     3.0.0-denext.7). A live run of a desktop companion and a tray app on KDE
+     Plasma 6 and GNOME 51 (Wayland):
+     - `initialWindow.overlay` (deno.json `desktop.initialWindow` and
+       `.deno-desktop/app.json`): the window the app starts with can be a
+       layer-shell overlay, the only way on Wayland to be on top, on every
+       workspace, off the taskbar and unfocused; `create_initial_window`
+       passed `overlay: false`. The bootstrap window is adopted only by a
+       `BrowserWindow` whose `overlay` agrees.
+     - `Tray.attachPanel` makes its panel an `overlay` window where
+       `windowCapabilities().layerShell` (keyboard on demand, so it still
+       blurs), opens it at the click when the tray has no icon bounds
+       (`panelAnchor`), and ignores a click with a modifier
+       (`panelClickToggles`; a Linux tray host reports none).
+     - app.json `name` (`desktop.app.name`): the title of an untitled window;
+       the baked app name is the output file's (`--output dist/MyApp-arm64`).
+     The laufey side: window sizes (non-resizable windows held at 800x600),
+     frameless windows on KWin, `nonActivating` reported on Wayland only with
+     layer-shell, appmenu-gtk-module's Gdk-CRITICALs.
+
 The laufey backend hosts are built from
 [Brainwires/laufey](https://github.com/Brainwires/laufey) branch
 `development-denext` (formerly `denext/integration`; registered schemes, app
