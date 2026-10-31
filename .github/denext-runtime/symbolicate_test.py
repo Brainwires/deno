@@ -82,6 +82,34 @@ class Names(unittest.TestCase):
              "deno-desktop-runtime-symbols-3.0.0-denext.4-x86_64-pc-windows-msvc.tar.gz"),
         )
 
+    def test_denort_symbols_have_their_own_archive_from_denext8(self):
+        self.assertEqual(
+            sym.archives("3.0.0-denext.7", "denort", "x86_64-unknown-linux-gnu")[1],
+            "deno-symbols-3.0.0-denext.7-x86_64-unknown-linux-gnu.tar.gz",
+        )
+        for version in ("3.0.0-denext.8", "3.0.0-denext.12", "3.0.1-denext.1", "3.1.0"):
+            self.assertEqual(
+                sym.archives(version, "denort", "x86_64-unknown-linux-gnu")[1],
+                f"denort-symbols-{version}-x86_64-unknown-linux-gnu.tar.gz",
+                version,
+            )
+            self.assertEqual(
+                sym.archives(version, "deno", "x86_64-unknown-linux-gnu")[1],
+                f"deno-symbols-{version}-x86_64-unknown-linux-gnu.tar.gz",
+            )
+        for version in ("2.9.7-denext.22", "3.0.0-rc.7", "3.0.0-denext.1", "9.9"):
+            self.assertFalse(sym.separate_denort_symbols(version), version)
+        self.assertIn(
+            "denort-symbols-3.0.0-denext.8-aarch64-apple-darwin.tar.gz",
+            sym.symbol_assets("3.0.0-denext.8"),
+        )
+        self.assertNotIn(
+            "denort-symbols-3.0.0-denext.7-aarch64-apple-darwin.tar.gz",
+            sym.symbol_assets("3.0.0-denext.7"),
+        )
+        self.assertEqual(len(sym.symbol_assets("3.0.0-denext.8")), 18)
+        self.assertEqual(len(sym.symbol_assets("3.0.0-denext.7")), 12)
+
     def test_debug_files(self):
         self.assertEqual(sym.debug_file("deno", "x86_64-unknown-linux-gnu"), "deno.dwp")
         self.assertEqual(sym.debug_file("libdenort", "aarch64-unknown-linux-gnu"), "libdenort.dwp")

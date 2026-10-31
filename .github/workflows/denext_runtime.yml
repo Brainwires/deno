@@ -733,9 +733,245 @@ jobs:
   # in so `deno --version` names the build. It needs no laufey patch: the CLI
   # does not link the laufey crate. Smoke-tested from its archive on the
   # target's own runner, then attested.
+  # `denort`, the standalone runtime `deno compile` puts under a compiled
+  # app (deno-denort-<version>-<target>.zip; cli/standalone/binary.rs,
+  # denext_denort), built and signed before the CLI: the `cli` job compiles
+  # every target's archive SHA-256 into `deno` (DENEXT_DENORT_SHA256S,
+  # DENEXT.md item 187), so `deno compile` refuses any other bytes. The
+  # archive made here is the one released, unchanged.
+  denort_bin:
+    name: denort bin / ${{ matrix.target }}
+    needs: setup
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 355
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: '0'
+      TARGET: ${{ matrix.target }}
+      VERSION: ${{ needs.setup.outputs.version }}
+    steps:
+      - name: Configure git
+        run: |
+          git config --global core.symlinks true
+          git config --global core.longpaths true
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          submodules: false
+
+      - name: Free disk space (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup \
+            /opt/hostedtoolcache/CodeQL /usr/local/share/boost /usr/share/swift \
+            /usr/local/share/powershell /usr/local/share/chromium /opt/microsoft || true
+          sudo docker image prune --all --force >/dev/null 2>&1 || true
+          df -h /
+
+      # As the `cli` job's (the arm64 runner ran out of memory linking).
+      - name: Swap (Linux aarch64)
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          set -euo pipefail
+          free -h
+          sudo fallocate -l 16G /denext-swapfile
+          sudo chmod 600 /denext-swapfile
+          sudo mkswap /denext-swapfile >/dev/null
+          sudo swapon /denext-swapfile
+          free -h
+
+      - name: Install dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          # man-db triggers can take minutes on hosted runners.
+          sudo apt-get -qq remove --purge -y man-db >/dev/null 2>&1 || true
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libclang-dev cmake
+
+      - name: libclang (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          set -euo pipefail
+          vs=$("/c/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe" -latest -property installationPath)
+          # VS's own LLVM (x64, or ARM64 on windows-11-arm), else a system one.
+          for d in "$(cygpath -u "$vs")/VC/Tools/Llvm/${{ runner.arch == 'ARM64' && 'ARM64' || 'x64' }}/bin" "$(cygpath -u "$vs")/VC/Tools/Llvm/x64/bin" "/c/Program Files/LLVM/bin"; do
+            if [ -f "$d/libclang.dll" ]; then
+              echo "LIBCLANG_PATH=$(cygpath -w "$d")" >>"$GITHUB_ENV"
+              echo "LIBCLANG_PATH=$(cygpath -w "$d")"
+              exit 0
+            fi
+          done
+          echo "::error::libclang.dll not found"; exit 1
+
+      # ld64.lld: the aarch64-apple-darwin rustflags in .cargo/config.toml link
+      # with -fuse-ld=lld, as deno's release does. The Deno that fetches it is
+      # pinned and the linker is checked against a pinned SHA-256: this job
+      # attests what it builds.
+      - uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
+        if: matrix.target == 'aarch64-apple-darwin'
+        with:
+          deno-version: ${{ env.STOCK_DENO_VERSION }}
+      - name: Install ld64.lld (macOS aarch64)
+        if: matrix.target == 'aarch64-apple-darwin'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: bash .github/denext-runtime/install_ld64.sh
+
+      - name: Rust toolchain
+        run: |
+          tc=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)
+          # Name the host on Windows on Arm: an emulated x64 rustup would
+          # otherwise install (and build with) an x86_64 toolchain.
+          if [ "${{ matrix.target }}" = aarch64-pc-windows-msvc ]; then tc="$tc-${{ matrix.target }}"; fi
+          rustup toolchain install "$tc" --profile minimal --no-self-update
+          echo "RUSTUP_TOOLCHAIN=$tc" >>"$GITHUB_ENV"
+
+      # The `v8` crate is Brainwires/rusty_v8 (Cargo.toml's [patch.crates-io]):
+      # its prebuilt library and binding come from that repository's release,
+      # checked against .github/denext-runtime/rusty_v8.sha256, never from
+      # denoland's (DENEXT.md item 162). Fails closed.
+      - name: Prebuilt V8
+        # --seed-dir: the cache restores the v8 build-script fingerprint but
+        # not target/release/gn_out, where the script puts the library.
+        run: python3 -I .github/denext-runtime/fetch_rusty_v8.py --target "${{ matrix.target }}" --dest "$RUNNER_TEMP/rusty_v8" --seed-dir target/release --github-env
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          prefix-key: denext-denort-bin-v1
+          key: ${{ matrix.target }}-${{ matrix.os }}
+          cache-on-failure: false
+
+      # Linux: link against upstream Deno's glibc 2.27 sysroot (clang + lld,
+      # the sysroot's flags and tools/'s shims) instead of the runner's glibc
+      # 2.35, so the binaries run on RHEL 8 / 9, Amazon Linux 2023, Debian 10+
+      # and Ubuntu 18.04+. Writes CC, CFLAGS and the target's cargo linker and
+      # rustflags to $GITHUB_ENV, and mounts the sysroot for "Check binary".
+      - name: glibc 2.27 sysroot (Linux)
+        if: runner.os == 'Linux'
+        timeout-minutes: 15
+        run: bash .github/denext-runtime/linux_sysroot.sh "$TARGET"
+
+      - name: Build denort
+        env:
+          # Deno.version.deno in a compiled app (cli/lib/version.rs).
+          DENEXT_VERSION: ${{ needs.setup.outputs.version }}
+        run: |
+          set -euo pipefail
+          df -h . || true
+          # panic-trace: as the `cli` job's (DENEXT.md item 180).
+          cargo build --release --locked --bin denort --features denort/panic-trace
+          df -h . || true
+          git diff --exit-code -- Cargo.lock
+
+      - name: Check binary
+        run: |
+          set -euo pipefail
+          case "$TARGET" in
+            *-apple-darwin)
+              b=target/release/denort
+              file "$b"
+              lipo -info "$b"
+              otool -L "$b"
+              # arm64 macOS refuses to run unsigned code. The arm64 linker
+              # signs ad hoc; sign the x86_64 binary the same way.
+              if ! codesign --verify "$b" 2>/dev/null; then
+                codesign --force --sign - "$b"
+              fi
+              codesign --verify --verbose "$b"
+              ;;
+            *-linux-gnu)
+              file target/release/denort
+              ldd target/release/denort || true
+              # The newest glibc it requires, at most GLIBC_CEILING (see the
+              # `cli` job's "Check binary").
+              python3 -I .github/denext-runtime/glibc_ceiling.py "$GLIBC_CEILING" target/release/denort
+              # It runs inside the glibc 2.27 sysroot linux_sysroot.sh
+              # mounted: with no app embedded, it gets as far as looking for
+              # one.
+              out=$(sudo chroot /sysroot "$PWD/target/release/denort" 2>&1 || true)
+              if ! grep -q 'Could not find standalone binary section' <<<"$out"; then
+                echo "::error::denort did not start in the glibc 2.27 sysroot: $out"
+                exit 1
+              fi
+              ;;
+            *-windows-msvc)
+              ls -la target/release/denort.exe
+              case "$TARGET" in aarch64-*) machine=arm64 ;; *) machine=x64 ;; esac
+              python .github/denext-runtime/pe_deps.py "$machine" target/release/denort.exe
+              ;;
+          esac
+
+      # Signed before Assemble: the archive and its SHA-256 (the one the CLI
+      # is built with) are made from the signed binary.
+      - name: Sign (macOS)
+        if: runner.os == 'macOS'
+        env:
+          APPLE_DEVELOPER_ID_CERT: ${{ secrets.APPLE_DEVELOPER_ID_CERT }}
+          APPLE_DEVELOPER_ID_CERT_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_CERT_PASSWORD }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+        run: bash .github/denext-runtime/sign_macos.sh --entitlements cli/entitlements.plist target/release/denort
+
+      - name: Sign (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          WINDOWS_CODESIGN_PFX: ${{ secrets.WINDOWS_CODESIGN_PFX }}
+          WINDOWS_CODESIGN_PFX_PASSWORD: ${{ secrets.WINDOWS_CODESIGN_PFX_PASSWORD }}
+        run: '& ./.github/denext-runtime/sign_windows.ps1 target/release/denort.exe'
+
+      # The split debug info of denort (see the denort job's "Debug
+      # symbols"). Tags (release assets) and dispatches only.
+      - name: Debug symbols
+        if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
+        run: bash .github/denext-runtime/collect_symbols.sh "denort-symbols-$VERSION-$TARGET" symbols ${{ runner.os == 'Windows' && 'denort.exe' || 'denort' }}
+
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
+        with:
+          subject-path: symbols/*.tar.gz
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
+        with:
+          name: symbols-denort-bin-${{ matrix.target }}
+          path: symbols/
+          retention-days: 14
+          if-no-files-found: warn
+
+      - name: Assemble
+        env:
+          DENORT_BIN: target/release/${{ runner.os == 'Windows' && 'denort.exe' || 'denort' }}
+          OUT_DIR: dist
+        run: bash .github/denext-runtime/assemble_denort.sh
+
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/*.zip
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: denort-bin-${{ matrix.target }}
+          path: dist/
+          retention-days: 30
+
   cli:
     name: cli / ${{ matrix.target }}
-    needs: setup
+    needs: [setup, denort_bin]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 355
     permissions:
@@ -863,36 +1099,74 @@ jobs:
         timeout-minutes: 15
         run: bash .github/denext-runtime/linux_sysroot.sh "$TARGET"
 
-      # And `denort`, the standalone runtime `deno compile` puts under a
-      # compiled app: this CLI downloads the release's own
-      # (deno-denort-<version>-<target>.zip; cli/standalone/binary.rs,
-      # denext_denort), never Deno's stock one.
-      - name: Build deno + denort
+      # Every target's denort archive from the `denort_bin` job: their
+      # SHA-256s are compiled into `deno` (DENEXT_DENORT_SHA256S; DENEXT.md
+      # item 187), and `deno compile` refuses a release denort with other
+      # bytes even when the release's SHA256SUMS lists them.
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: denort-bin-*
+          path: denort-dist
+          merge-multiple: true
+
+      - name: denort SHA-256s
+        env:
+          RELEASE_TAG: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/denext-runtime-v') }}
+        run: |
+          set -euo pipefail
+          list=""
+          n=0
+          for zip in denort-dist/deno-denort-"$VERSION"-*.zip; do
+            name=$(basename "$zip" .zip)
+            target=${name#deno-denort-"$VERSION"-}
+            sum=$(sha256sum "$zip" 2>/dev/null || shasum -a 256 "$zip")
+            # The archive is the one its job hashed.
+            grep -qF "${sum%% *}" "$zip.sha256" ||
+              { echo "::error::$zip does not match $zip.sha256"; exit 1; }
+            list="$list${list:+,}$target=${sum%% *}"
+            n=$((n + 1))
+          done
+          echo "denort archives: $n"
+          echo "DENEXT_DENORT_SHA256S=$list"
+          case ",$list" in
+            *",$TARGET="*) ;;
+            *) echo "::error::no denort archive for $TARGET from the denort_bin job"; exit 1 ;;
+          esac
+          if [ "$RELEASE_TAG" = true ] && [ "$n" != 6 ]; then
+            echo "::error::a release CLI must carry all 6 denort SHA-256s, got $n"; exit 1
+          fi
+          echo "DENEXT_DENORT_SHA256S=$list" >>"$GITHUB_ENV"
+
+      - name: Build deno
         env:
           # Deno.version.deno, `deno --version` and the user agent
-          # (cli/lib/version.rs, denext_version), in a compiled app too;
-          # libdenort downloads keep the plain Deno version.
+          # (cli/lib/version.rs, denext_version); libdenort downloads keep
+          # the plain Deno version.
           DENEXT_VERSION: ${{ needs.setup.outputs.version }}
         run: |
           set -euo pipefail
           df -h . || true
           # panic-trace: the panic banner and crash reports carry a stack
           # trace for symbolicate.py (DENEXT.md item 180).
-          cargo build --release --locked --bin deno --bin denort --features deno/panic-trace,denort/panic-trace
+          cargo build --release --locked --bin deno --features deno/panic-trace
           df -h . || true
           git diff --exit-code -- Cargo.lock
+          # The list is in the binary (cli/standalone/binary.rs,
+          # EMBEDDED_DENORT_SHA256S).
+          grep -aqF "$DENEXT_DENORT_SHA256S" target/release/deno${{ runner.os == 'Windows' && '.exe' || '' }} ||
+            { echo "::error::target/release/deno does not carry DENEXT_DENORT_SHA256S"; exit 1; }
 
       - name: Check binary
         run: |
           set -euo pipefail
           case "$TARGET" in
             *-apple-darwin)
-              for b in target/release/deno target/release/denort; do
+              for b in target/release/deno; do
                 file "$b"
                 lipo -info "$b"
                 otool -L "$b"
                 # arm64 macOS refuses to run unsigned code. The arm64 linker
-                # signs ad hoc; sign the x86_64 binaries the same way.
+                # signs ad hoc; sign the x86_64 binary the same way.
                 if ! codesign --verify "$b" 2>/dev/null; then
                   codesign --force --sign - "$b"
                 fi
@@ -900,37 +1174,33 @@ jobs:
               done
               ;;
             *-linux-gnu)
-              for b in target/release/deno target/release/denort; do
+              for b in target/release/deno; do
                 file "$b"
                 ldd "$b" || true
               done
               # The newest glibc each binary requires (its version
               # references), at most GLIBC_CEILING: an older distro fails to
               # exec a binary that needs a newer one.
-              python3 -I .github/denext-runtime/glibc_ceiling.py "$GLIBC_CEILING" target/release/deno target/release/denort
-              # And they run on that glibc: inside the sysroot (Ubuntu 18.04,
-              # glibc 2.27) that linux_sysroot.sh mounted. denort has no app
-              # embedded, so it gets as far as looking for one.
+              python3 -I .github/denext-runtime/glibc_ceiling.py "$GLIBC_CEILING" target/release/deno
+              # And it runs on that glibc: inside the sysroot (Ubuntu 18.04,
+              # glibc 2.27) that linux_sysroot.sh mounted (denort: the
+              # denort_bin job's check).
               sudo chroot /sysroot "$PWD/target/release/deno" --version
               sudo chroot /sysroot "$PWD/target/release/deno" eval 'console.log(`eval ok on ${Deno.build.target}`)'
-              out=$(sudo chroot /sysroot "$PWD/target/release/denort" 2>&1 || true)
-              if ! grep -q 'Could not find standalone binary section' <<<"$out"; then
-                echo "::error::denort did not start in the glibc 2.27 sysroot: $out"
-                exit 1
-              fi
               ;;
             *-windows-msvc)
-              ls -la target/release/deno.exe target/release/denort.exe
+              ls -la target/release/deno.exe
               # The machine type is the target's (an x64 toolchain on
               # windows-11-arm would build x64 binaries).
               case "$TARGET" in aarch64-*) machine=arm64 ;; *) machine=x64 ;; esac
-              python .github/denext-runtime/pe_deps.py "$machine" target/release/deno.exe target/release/denort.exe
+              python .github/denext-runtime/pe_deps.py "$machine" target/release/deno.exe
               ;;
           esac
 
       # Developer ID + notarization (macOS) / Authenticode (Windows), before
-      # Assemble: the archives and their SHA-256 pins are made from the
-      # signed binaries, and the smoke tests below run them.
+      # Assemble: the archive and its SHA-256 pin are made from the signed
+      # binary, and the smoke tests below run it (denort is signed in the
+      # denort_bin job).
       - name: Sign (macOS)
         if: runner.os == 'macOS'
         env:
@@ -939,7 +1209,7 @@ jobs:
           APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
           APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
-        run: bash .github/denext-runtime/sign_macos.sh --entitlements cli/entitlements.plist target/release/deno target/release/denort
+        run: bash .github/denext-runtime/sign_macos.sh --entitlements cli/entitlements.plist target/release/deno
 
       - name: Sign (Windows)
         if: runner.os == 'Windows'
@@ -947,13 +1217,14 @@ jobs:
         env:
           WINDOWS_CODESIGN_PFX: ${{ secrets.WINDOWS_CODESIGN_PFX }}
           WINDOWS_CODESIGN_PFX_PASSWORD: ${{ secrets.WINDOWS_CODESIGN_PFX_PASSWORD }}
-        run: '& ./.github/denext-runtime/sign_windows.ps1 target/release/deno.exe target/release/denort.exe'
+        run: '& ./.github/denext-runtime/sign_windows.ps1 target/release/deno.exe'
 
-      # The split debug info of deno and denort (see the denort job's
-      # "Debug symbols"). Tags (release assets) and dispatches only.
+      # The split debug info of deno (see the denort job's "Debug
+      # symbols"; denort's is the denort_bin job's). Tags (release assets)
+      # and dispatches only.
       - name: Debug symbols
         if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
-        run: bash .github/denext-runtime/collect_symbols.sh "deno-symbols-$VERSION-$TARGET" symbols ${{ runner.os == 'Windows' && 'deno.exe denort.exe' || 'deno denort' }}
+        run: bash .github/denext-runtime/collect_symbols.sh "deno-symbols-$VERSION-$TARGET" symbols ${{ runner.os == 'Windows' && 'deno.exe' || 'deno' }}
 
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
@@ -1012,7 +1283,6 @@ jobs:
       - name: Assemble
         env:
           DENO_BIN: target/release/${{ runner.os == 'Windows' && 'deno.exe' || 'deno' }}
-          DENORT_BIN: target/release/${{ runner.os == 'Windows' && 'denort.exe' || 'denort' }}
           ESBUILD_DIR: ${{ runner.temp }}/esbuild
           TYPESCRIPT_LSP_DIR: ${{ runner.temp }}/typescript-lsp
           TYPESCRIPT_CHECK_DIR: ${{ runner.temp }}/typescript-check
@@ -1023,7 +1293,11 @@ jobs:
           DENO_VERSION: ${{ needs.setup.outputs.upstream_version }}
           DENO_SHA: ${{ github.sha }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: bash .github/denext-runtime/assemble_cli.sh
+        run: |
+          set -euo pipefail
+          bash .github/denext-runtime/assemble_cli.sh
+          # The denort archive the CLI was built with, released unchanged.
+          cp "denort-dist/deno-denort-$VERSION-$TARGET.zip" "denort-dist/deno-denort-$VERSION-$TARGET.zip.sha256" dist/
 
       # `deno --version` and Deno.version.deno name the build,
       # `typeof Deno.SQL` is "function", a Vitest suite passes under
@@ -1037,12 +1311,15 @@ jobs:
 
       # `deno compile` from the unpacked CLI onto the unpacked denort archive
       # (DENORT_BIN: the release URL only exists once it is published): the
-      # compiled app has Deno.SQL and names this release.
+      # compiled app has Deno.SQL and names this release. DENORT_PINNED: and
+      # onto the archive served from a loopback release with no SHA256SUMS,
+      # which only the embedded SHA-256 verifies; one byte more is refused.
       - name: Smoke (denort)
         env:
           ARCHIVE: dist/deno-cli-${{ needs.setup.outputs.version }}-${{ matrix.target }}.zip
           DENORT_ARCHIVE: dist/deno-denort-${{ needs.setup.outputs.version }}-${{ matrix.target }}.zip
           WORK_DIR: ${{ runner.temp }}/denort-smoke
+          DENORT_PINNED: '1'
         run: bash .github/denext-runtime/denort_smoke.sh
 
       - name: Summary

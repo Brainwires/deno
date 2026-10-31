@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Smoke-test the `denort` archive from assemble_cli.sh with the CLI archive
+# Smoke-test the `denort` archive from assemble_denort.sh with the CLI archive
 # beside it: `deno compile` onto the unpacked denort (DENORT_BIN) makes an app
 # that has Deno.SQL and names this release in Deno.version.deno; and with no
 # DENORT_BIN the CLI asks the release for deno-denort-<version>-<target>.zip
@@ -7,8 +7,13 @@
 # loopback port, so the request fails and the error names the URL), not Deno's
 # stock denort.
 #
+# With DENORT_PINNED=1 (a CLI built with DENEXT_DENORT_SHA256S, DENEXT.md item
+# 187) also: the CLI compiles onto that archive served from a loopback release
+# that has no SHA256SUMS (only the hash it was built with can verify it), and
+# refuses the same archive with one byte appended.
+#
 # Env: TARGET VERSION ARCHIVE DENORT_ARCHIVE WORK_DIR (a directory that does
-# not exist yet)
+# not exist yet) [DENORT_PINNED]
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 . "$here/lib.sh"
@@ -72,3 +77,48 @@ case "$err" in
   *"$sums"*) echo "deno compile asks for $sums (to verify $url)" ;;
   *) echo "::error::deno compile asked for neither $sums nor $url" >&2; exit 1 ;;
 esac
+
+if [ "${DENORT_PINNED:-}" = 1 ]; then
+  echo "::group::deno compile (the SHA-256 the CLI was built with)"
+  py=python3; command -v python3 >/dev/null 2>&1 || py=python
+  asset="deno-denort-$VERSION-$TARGET.zip"
+  rel="$work/release/denext-runtime-v$VERSION"
+  mkdir -p "$rel"
+  cp "$(unix_path "$DENORT_ARCHIVE")" "$rel/$asset"
+  "$py" -I - "$(native_path "$work/release")" "$(native_path "$work/port")" <<'PY' &
+import functools, http.server, os, sys
+root, port_file = sys.argv[1], sys.argv[2]
+handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=root)
+server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+with open(port_file + ".tmp", "w") as f:
+    f.write(str(server.server_address[1]))
+os.replace(port_file + ".tmp", port_file)
+server.serve_forever()
+PY
+  server=$!
+  trap 'kill "$server" 2>/dev/null || true' EXIT
+  for _ in $(seq 100); do test -s "$work/port" && break; sleep 0.1; done
+  test -s "$work/port" || { echo "::error::the loopback release server did not start" >&2; exit 1; }
+  base="http://127.0.0.1:$(cat "$work/port")"
+  case "$TARGET" in
+    *-windows-msvc) app3=app3.exe ;;
+    *) app3=app3 ;;
+  esac
+  (cd "$work/app" && DENO_DIR="$work/deno-dir-pinned" DENEXT_DENORT_BASE_URL="$base" "$deno" compile --no-config -o app3 main.ts)
+  out=$("$work/app/$app3" | tr -d '\r')
+  test "$out" = "$want" || { echo "::error::the app compiled onto the served denort printed '$out', want '$want'" >&2; exit 1; }
+  echo "compiled onto $base/denext-runtime-v$VERSION/$asset with no SHA256SUMS"
+  printf 'x' >>"$rel/$asset"
+  set +e
+  err=$(cd "$work/app" && DENO_DIR="$work/deno-dir-tampered" DENEXT_DENORT_BASE_URL="$base" "$deno" compile --no-config -o app4 main.ts 2>&1)
+  rc=$?
+  set -e
+  echo "$err"
+  test "$rc" != 0 || { echo "::error::deno compile took a denort archive whose SHA-256 is not the embedded one" >&2; exit 1; }
+  case "$err" in
+    *"this CLI was built with"*) echo "a changed $asset is refused" ;;
+    *) echo "::error::deno compile failed on the changed archive, but not on its SHA-256" >&2; exit 1 ;;
+  esac
+  kill "$server" 2>/dev/null || true
+  echo "::endgroup::"
+fi
