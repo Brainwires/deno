@@ -371,6 +371,27 @@ pub fn verify_staged_tree(
       ));
     }
   };
+  let walked = entries.iter().find_map(|e| match e {
+    TreeEntry::File { rel, sha256, .. } if rel == exe_rel => Some(sha256),
+    _ => None,
+  });
+  if walked.is_none() {
+    // Not in the walk under its exact name. A new version that changes only
+    // the case of the executable's name is found by the case-insensitive
+    // file system (reading `exe_rel` below would read it), but the walk
+    // spells it as packed: say so, rather than that it changed.
+    let names = entries.iter().filter_map(|e| match e {
+      TreeEntry::File { rel, .. } => Some(rel.as_str()),
+      TreeEntry::Symlink { .. } => None,
+    });
+    if let Some(found) = case_only_rename(exe_rel, names) {
+      return err(
+        Code::BundleMismatch,
+        case_only_rename_message(exe_rel, found),
+      );
+    }
+    return refuse(format!("{exe_rel} is not in the staged app"));
+  }
   // The manifest is read from bytes whose SHA-256 must be the one the walk
   // recorded: the executable checked is the one the digest pins.
   let exe_path = staged.join(exe_rel);
@@ -379,10 +400,6 @@ pub fn verify_staged_tree(
     use sha2::Digest;
     faster_hex::hex_string(&sha2::Sha256::digest(&bytes))
   };
-  let walked = entries.iter().find_map(|e| match e {
-    TreeEntry::File { rel, sha256, .. } if rel == exe_rel => Some(sha256),
-    _ => None,
-  });
   if walked != Some(&sha) {
     return refuse(format!("{exe_rel} changed while the update was checked"));
   }
@@ -405,6 +422,38 @@ pub fn verify_staged_tree(
     Err(e) => return refuse(format!("the signed tree manifest: {e}")),
   };
   compare(&manifest, entries).or_else(refuse)
+}
+
+/// The name in `names` that is `want` with only its case changed, if there is
+/// exactly one (`/`-separated paths relative to the app directory).
+pub fn case_only_rename<'a>(
+  want: &str,
+  names: impl IntoIterator<Item = &'a str>,
+) -> Option<&'a str> {
+  let folded = want.to_lowercase();
+  let mut found = names
+    .into_iter()
+    .filter(|n| *n != want && n.to_lowercase() == folded);
+  let first = found.next()?;
+  found.next().is_none().then_some(first)
+}
+
+/// Why an update whose executable's name changed only in case is refused.
+///
+/// It is refused rather than accepted as the same file (which Windows'
+/// case-insensitive file system would open): the install is launched by the
+/// name it was installed under (its shortcuts, its registration, the
+/// helper's relaunch), a directory with per-directory case sensitivity on
+/// (`fsutil file setCaseSensitiveInfo`, which WSL turns on) would then hold
+/// no executable of that name, and an app that can't start never runs its
+/// trial, so it would not roll back either. An update keeps the name.
+pub fn case_only_rename_message(exe_rel: &str, found: &str) -> String {
+  format!(
+    "the update renames the app's executable {exe_rel} to {found} (only the \
+     case differs); an update must keep the executable's name exactly, as \
+     the install is launched by it (package the new version with the name \
+     {exe_rel})"
+  )
 }
 
 /// [`verify_staged_tree`] for this platform: on Windows, against the
@@ -804,6 +853,62 @@ pub(crate) mod tests {
       verify_staged_tree(&running, &staged, "App.exe", &listing(&staged))
         .is_err()
     );
+  }
+
+  /// A new version whose executable differs from the installed one only in
+  /// the case of its name is refused with that reason (it used to read "changed
+  /// while the update was checked", which it hadn't).
+  #[test]
+  fn a_case_only_rename_of_the_executable_is_refused_clearly() {
+    let launch: &[u8] = b"{}";
+    let t = tempfile::tempdir().unwrap();
+    let staged = t.path().join("App");
+    let signed = pe_with_resource(
+      RESOURCE_NAME,
+      &manifest_json(&[("laufey-launch.json", launch)]),
+      &[1033],
+    );
+    write(&staged, "app.exe", &signed);
+    write(&staged, "laufey-launch.json", launch);
+    let running = t.path().join("running.exe");
+    std::fs::write(&running, &signed).unwrap();
+    let entries = super::super::swap::tree_listing(&staged).unwrap().1;
+    let e =
+      verify_staged_tree(&running, &staged, "App.exe", &entries).unwrap_err();
+    assert_eq!(e.code, Code::BundleMismatch, "{}", e.message);
+    assert!(
+      e.message
+        .contains("renames the app's executable App.exe to app.exe")
+        && e.message.contains("only the case differs"),
+      "{}",
+      e.message
+    );
+    assert!(!e.message.contains("changed while"), "{}", e.message);
+
+    // No executable at all, under any case: refused as missing.
+    std::fs::remove_file(staged.join("app.exe")).unwrap();
+    let entries = super::super::swap::tree_listing(&staged).unwrap().1;
+    let e =
+      verify_staged_tree(&running, &staged, "App.exe", &entries).unwrap_err();
+    assert_eq!(e.code, Code::OsSignature);
+    assert!(
+      e.message.contains("App.exe is not in the staged app"),
+      "{}",
+      e.message
+    );
+  }
+
+  #[test]
+  fn case_only_renames_are_found_once() {
+    let names = ["a/App.exe", "a/x.json"];
+    assert_eq!(case_only_rename("a/app.exe", names), Some("a/App.exe"));
+    assert_eq!(case_only_rename("A/APP.EXE", names), Some("a/App.exe"));
+    // The exact name is not a rename; another name is not either.
+    assert_eq!(case_only_rename("a/App.exe", names), None);
+    assert_eq!(case_only_rename("a/b.exe", names), None);
+    // Two names that differ only in case (a case-sensitive directory): no
+    // single answer.
+    assert_eq!(case_only_rename("app.exe", ["APP.exe", "App.exe"]), None);
   }
 
   #[cfg(unix)]

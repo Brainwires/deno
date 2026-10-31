@@ -7976,6 +7976,18 @@ where the changes are discussed.
        `the_held_digest_is_tree_digest`,
        `only_a_private_directory_of_this_user_is_held`,
        `the_digest_follows_the_held_directory_not_the_path`.
+     - A refusal by the OS signature re-check or the Windows tree check (item
+       202) at apply time is recorded like the helper's other refusals
+       (`refuse_staged_with`): the state goes back to `staged` with
+       `last_error` set to `"<code>: <message>"` (the form the error takes
+       across the op boundary; the helper's other refusals now record their
+       `bundle_mismatch` code the same way), so `Deno.desktop.updater`'s info
+       (`lastError`) tells the relaunched app why the apply failed. Before, it
+       went back to `staged` with no `last_error` (the op clears it when it
+       hands the apply to the helper). The staged app is kept, as for every
+       refusal there: the next download replaces it, and a retried apply
+       re-checks it in full. Test: `an_apply_time_refusal_is_recorded` (failed
+       before; its tree-check half runs on Windows).
 200. **`fix(desktop)`: a Windows update whose certificate revocation can't be
      checked is refused** (5.0-gate review A, L6;
      `runtime/ops/desktop_update/oscheck.rs`; 2.9.7-denext.7 through
@@ -8057,6 +8069,18 @@ where the changes are discussed.
      `a_symlink_in_the_staged_tree_is_refused`, `the_held_digest_is_tree_digest`
      (the held listing is the path listing). The stage / helper wiring runs only
      on Windows; the fork's Windows CI is its test.
+     A new version whose executable's name differs from the installed one only
+     in case (`App.exe` → `app.exe`) was refused with "App.exe changed while
+     the update was checked" (the case-insensitive file system read the file,
+     the walk spelled it as packed); `stage()`'s PE check called it "not a PE
+     image". Both now refuse it as `bundle_mismatch` naming the rename. It is
+     refused, not accepted as the same file: the install is launched by the
+     name it was installed under (shortcuts, its registration, the helper's
+     relaunch), a directory with per-directory case sensitivity (WSL's
+     `setCaseSensitiveInfo`) would hold no executable of that name, and an app
+     that can't start never runs its trial, so it would not roll back. Tests:
+     `a_case_only_rename_of_the_executable_is_refused_clearly` (failed before),
+     `case_only_renames_are_found_once`.
 
 203. **`feat(compile)`: a compiled program's main module can disarm its baked
      resource limits** (`Deno.disarmResourceLimits()`;
