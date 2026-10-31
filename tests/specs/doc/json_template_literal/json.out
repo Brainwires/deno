@@ -1,0 +1,135 @@
+{
+  "version": 2,
+  "nodes": {
+    "file:///[WILDCARD]/mod.ts": {
+      "symbols": [
+        {
+          "name": "ContactType",
+          "declarations": [
+            {
+              "location": {
+                "filename": "file:///[WILDCARD]/mod.ts",
+                "line": 1,
+                "col": 0,
+                "byteIndex": 23
+              },
+              "declarationKind": "export",
+              "jsDoc": {
+                "doc": "A contact kind."
+              },
+              "kind": "typeAlias",
+              "def": {
+                "tsType": {
+                  "repr": "contact:${string}",
+                  "kind": "literal",
+                  "value": {
+                    "kind": "template",
+                    "tsTypes": [
+                      {
+                        "repr": "contact:",
+                        "kind": "literal",
+                        "value": {
+                          "kind": "string",
+                          "string": "contact:"
+                        }
+                      },
+                      {
+                        "repr": "string",
+                        "kind": "keyword",
+                        "value": "string"
+                      },
+                      {
+                        "kind": "literal",
+                        "value": {
+                          "kind": "string",
+                          "string": ""
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "CalendarFormatType",
+          "declarations": [
+            {
+              "location": {
+                "filename": "file:///[WILDCARD]/mod.ts",
+                "line": 4,
+                "col": 0,
+                "byteIndex": 95
+              },
+              "declarationKind": "export",
+              "jsDoc": {
+                "doc": "A calendar view."
+              },
+              "kind": "typeAlias",
+              "def": {
+                "tsType": {
+                  "repr": "${\"day\" | \"week\"}-${number}",
+                  "kind": "literal",
+                  "value": {
+                    "kind": "template",
+                    "tsTypes": [
+                      {
+                        "kind": "literal",
+                        "value": {
+                          "kind": "string",
+                          "string": ""
+                        }
+                      },
+                      {
+                        "kind": "union",
+                        "value": [
+                          {
+                            "repr": "day",
+                            "kind": "literal",
+                            "value": {
+                              "kind": "string",
+                              "string": "day"
+                            }
+                          },
+                          {
+                            "repr": "week",
+                            "kind": "literal",
+                            "value": {
+                              "kind": "string",
+                              "string": "week"
+                            }
+                          }
+                        ]
+                      },
+                      {
+                        "repr": "-",
+                        "kind": "literal",
+                        "value": {
+                          "kind": "string",
+                          "string": "-"
+                        }
+                      },
+                      {
+                        "repr": "number",
+                        "kind": "keyword",
+                        "value": "number"
+                      },
+                      {
+                        "kind": "literal",
+                        "value": {
+                          "kind": "string",
+                          "string": ""
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

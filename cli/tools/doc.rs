@@ -209,10 +209,34 @@ async fn generate_doc_nodes_for_builtin_types(
   Ok(doc_parser.parse()?)
 }
 
+/// Turns terminal colors off until dropped, then restores the previous setting.
+struct NoColorGuard(bool);
+
+impl NoColorGuard {
+  fn new() -> Self {
+    let prev = colors::use_color();
+    colors::set_use_color(false);
+    Self(prev)
+  }
+}
+
+impl Drop for NoColorGuard {
+  fn drop(&mut self) {
+    colors::set_use_color(self.0);
+  }
+}
+
 pub async fn doc(
   flags: Arc<Flags>,
   doc_flags: DocFlags,
 ) -> Result<(), AnyError> {
+  // deno_doc builds some `repr` strings through its terminal `Display` impls
+  // (a template literal type's `${...}` parts), which color them whenever
+  // colors are on, and colors are on unless `NO_COLOR` is set, whether or not
+  // stdout is a terminal. `--json` and `--html` write those strings out as
+  // data, so their nodes are generated with colors off.
+  let _no_color =
+    (doc_flags.json || doc_flags.html.is_some()).then(NoColorGuard::new);
   let factory = CliFactory::from_flags(flags);
   let cli_options = factory.cli_options()?;
   let module_info_cache = factory.module_info_cache()?;

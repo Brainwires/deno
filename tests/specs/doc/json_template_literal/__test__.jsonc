@@ -1,0 +1,15 @@
+{
+  "tests": {
+    // A template literal type's `${...}` parts are rendered through deno_doc's
+    // terminal Display impl; with colors on they used to carry ANSI escapes.
+    "json_output": {
+      "args": "doc --json mod.ts",
+      "envs": { "FORCE_COLOR": "1" },
+      "output": "json.out"
+    },
+    "no_escape_byte": {
+      "args": "run --allow-run --allow-read check.ts",
+      "output": "check.out"
+    }
+  }
+}
