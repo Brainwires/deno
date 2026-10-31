@@ -36,6 +36,7 @@ const {
   ArrayPrototypeMap,
   Error,
   MapPrototypeGet,
+  SafeMapIterator,
 } = primordials;
 
 // In Node these values are coming from libuv:
@@ -587,7 +588,7 @@ function getCodeMap(): Map<string, number> {
   return codeMap;
 }
 
-return {
+const binding = {
   errorMap,
   codeMap,
   mapSysErrnoToUvErrno,
@@ -608,4 +609,14 @@ return {
   getErrorMap,
   getCodeMap,
 };
+
+// Node's `uv` binding has a `UV_<code>` constant for every libuv error
+// (`UV_ENOTEMPTY`, `UV_EPERM`, ...), as `src/uv.cc` defines them.
+for (const { 0: code, 1: errno } of new SafeMapIterator(codeMap)) {
+  const key = `UV_${code}`;
+  const target = binding as Record<string, unknown>;
+  if (target[key] === undefined) target[key] = errno;
+}
+
+return binding;
 })();
