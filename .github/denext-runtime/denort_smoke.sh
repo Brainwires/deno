@@ -10,11 +10,12 @@
 # With DENORT_PINNED=1 (a CLI built with DENEXT_DENORT_SHA256S, DENEXT.md item
 # 188) also: the CLI compiles onto that archive served from a loopback release
 # that has no SHA256SUMS (only the hash it was built with can verify it), and
-# refuses the same archive with one byte appended; and refuses swapped upstream
-# runtimes (item 215; UPSTREAM_VERSION names their release path).
+# refuses the same archive with one byte appended.
+#
+# Always, last: the refusals of runtime_refusal_smoke.sh (DENEXT.md item 215).
 #
 # Env: TARGET VERSION ARCHIVE DENORT_ARCHIVE WORK_DIR (a directory that does
-# not exist yet) [DENORT_PINNED UPSTREAM_VERSION]
+# not exist yet) [DENORT_PINNED]
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 . "$here/lib.sh"
@@ -120,43 +121,9 @@ PY
     *"this CLI was built with"*) echo "a changed $asset is refused" ;;
     *) echo "::error::deno compile failed on the changed archive, but not on its SHA-256" >&2; exit 1 ;;
   esac
-  echo "::endgroup::"
-
-  # DENEXT.md item 215: what the CLI takes from dl.deno.land, served swapped
-  # with a checksum file and a SHA256SUMS that vouch for the swap. Refused
-  # against the pin, and not cached; UPSTREAM_VERSION is the release path.
-  : "${UPSTREAM_VERSION:?}"
-  echo "::group::upstream runtimes (the SHA-256s in the CLI)"
-  up="release/v$UPSTREAM_VERSION"
-  mkdir -p "$work/release/upstream/$up"
-  for asset in "denort-quickjs-$TARGET.zip" "libdenort-$TARGET.zip" "libdenort-quickjs-$TARGET.zip"; do
-    printf 'swapped %s' "$asset" >"$work/release/upstream/$up/$asset"
-    sum=$(sha256_of "$work/release/upstream/$up/$asset")
-    echo "$sum  $asset" >"$work/release/upstream/$up/$asset.sha256sum"
-    echo "$sum  $asset" >>"$work/release/upstream/$up/SHA256SUMS"
-  done
-  expect_refused() { # <asset> <command...>
-    local asset=$1 err rc
-    shift
-    set +e
-    err=$(cd "$work/app" && DENO_DIR="$work/deno-dir-upstream" DENEXT_UPSTREAM_RUNTIME_BASE_URL="$base/upstream" "$deno" "$@" 2>&1)
-    rc=$?
-    set -e
-    echo "$err"
-    test "$rc" != 0 || { echo "::error::the CLI took a swapped $asset" >&2; exit 1; }
-    case "$err" in
-      *"$asset"*"this CLI was built with"*) echo "a swapped $asset is refused" ;;
-      *) echo "::error::the CLI failed on the swapped $asset, but not on its SHA-256" >&2; exit 1 ;;
-    esac
-    test ! -e "$work/deno-dir-upstream/dl/$up/$asset" ||
-      { echo "::error::the swapped $asset was cached" >&2; exit 1; }
-  }
-  expect_refused "denort-quickjs-$TARGET.zip" compile --no-config --engine quickjs -o app5 main.ts
-  # LAUFEY_DEV_DIR: the base binary is fetched before the hosts are needed.
-  export LAUFEY_DEV_DIR="$work/rt"
-  expect_refused "libdenort-$TARGET.zip" desktop --no-config --backend webview -o app6 main.ts
-  expect_refused "libdenort-quickjs-$TARGET.zip" desktop --no-config --backend webview --engine quickjs -o app7 main.ts
-  unset LAUFEY_DEV_DIR
   kill "$server" 2>/dev/null || true
   echo "::endgroup::"
 fi
+
+# DENEXT.md item 215: no upstream runtime is downloaded.
+bash "$here/runtime_refusal_smoke.sh" "$deno" "$work/refusal"

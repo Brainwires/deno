@@ -1327,7 +1327,6 @@ jobs:
           DENORT_ARCHIVE: dist/deno-denort-${{ needs.setup.outputs.version }}-${{ matrix.target }}.zip
           WORK_DIR: ${{ runner.temp }}/denort-smoke
           DENORT_PINNED: '1'
-          UPSTREAM_VERSION: ${{ needs.setup.outputs.upstream_version }}
         run: bash .github/denext-runtime/denort_smoke.sh
 
       - name: Summary

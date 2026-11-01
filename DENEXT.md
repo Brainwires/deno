@@ -113,12 +113,11 @@ compares none of its own versions: `deno upgrade` refuses in a release build
   `cli/lib/version.rs`). Everything that means upstream Deno uses it, never the
   fork's own version, which names no upstream release: the release channel
   (`deno --version` says `stable`, upstream's channel for 2.9.8, not
-  `release candidate`), the `denort` / `libdenort` downloads from dl.deno.land,
-  the `engines.deno` check of `deno install` (npm ranges never match a
-  prerelease, so `>=1.0.0` would reject `3.0.0-denext.1`), and `deno.version` in
-  each archive's `BUILD_INFO.json` and in the release's `manifest.json`
-  (denext's pins read it as `deno`: the stock Deno whose `deno desktop` packages
-  with the runtime).
+  `release candidate`), the `engines.deno` check of `deno install` (npm ranges
+  never match a prerelease, so `>=1.0.0` would reject `3.0.0-denext.1`), and
+  `deno.version` in each archive's `BUILD_INFO.json` and in the release's
+  `manifest.json` (denext's pins read it as `deno`: the stock Deno whose
+  `deno desktop` packages with the runtime).
 - **A release** is tagged `denext-runtime-v<version>`
   (`denext-runtime-v3.0.0-denext.1`); the release workflow refuses a tag that is
   not exactly the version in `cli/Cargo.toml` (and `cli/lib/version.txt`), so
@@ -5296,11 +5295,11 @@ where the changes are discussed.
      the cached zip (`<zip>.sha256`) and the zip is re-hashed on every use: one
      that no longer matches its record (or has none, as an older CLI's cache) is
      checked against `SHA256SUMS` again, and downloaded again when it doesn't
-     match. Upstream's `dl.deno.land` downloads (a build that is not denext's,
-     `--engine quickjs`, `deno desktop`'s `libdenort`) are unchanged here; item
-     215 pins them. Release assets are immutable since 2026-10-27 (GitHub
-     immutable releases), so a published `SHA256SUMS` can't be replaced
-     afterwards either.
+     match. Upstream's runtimes (a build that is not denext's,
+     `--engine quickjs`, `deno desktop`'s `libdenort`) were outside this item;
+     item 215 stops downloading them. Release assets are immutable since
+     2026-10-27 (GitHub immutable releases), so a published `SHA256SUMS` can't
+     be replaced afterwards either.
 
      Tests (`cli/standalone/binary.rs`):
      `denext_denort_with_a_good_hash_is_used_and_cached`,
@@ -8454,37 +8453,40 @@ names for `laufey` (crates.io, or a git rev of Brainwires/laufey) with a path to
 that revision's `capi/`, records the `LAUFEY_API_VERSION` it compiled, and the
 package job fails if it differs from the hosts' `capi/include/laufey.h`.
 
-215. **`fix(compile)`: every runtime the CLI downloads is pinned**
-     (`fix/runtime-pin-coverage`; `cli/standalone/binary.rs`, `cli/build.rs`,
-     `cli/upstream_runtime_sums.lock`, `denext_runtime.yml`,
-     `.github/denext-runtime/`; CLI and CI only). Items 130 and 188 cover the
-     release's own `denort` only. `deno desktop`'s `libdenort`, every
-     `--engine quickjs` archive, and `denort` in a build that is not denext's
-     came from `dl.deno.land` with no check and were trusted from the download
-     cache forever, so a swapped download or cache file was packaged into the
-     app. The fork builds none of these: they are upstream's. Its release
-     workflow cannot supply their hashes (the `denort` and `package` jobs make
-     other files, the fork's `libdenort` inside the runtime archives, which the
-     CLI never downloads), though it would create no cycle: neither job needs
-     `cli`, and the smoke packaging runs on stock Deno. So the digests are
-     checked in, as `cli/laufey_sums.lock` is: `cli/upstream_runtime_sums.lock`
-     pins all 24 archives (`denort`, `denort-quickjs`, `libdenort`,
-     `libdenort-quickjs` per target) for the upstream version, stronger than
-     upstream's `<archive>.sha256sum`, which comes from the same host. The
-     digests are of `dl.deno.land`'s bytes, the host the CLI downloads from. For
-     2.9.8, `libdenort` matches upstream's GitHub release on every target;
-     `denort` differs on all six (separate builds of the release, 85 minutes
-     apart by the zip timestamps checked on one target), and the `quickjs`
-     archives are on `dl.deno.land` alone, so those rest on that host at the
-     time of pinning. `refresh_upstream_runtime_sums.py` regenerates the file
-     from the bytes and prints the comparison, and `cli/build.rs` fails the
-     build when its version is not `cli/lib/upstream_version.txt`. Each download
-     now goes through the pinned path of item 188: other bytes are refused
-     naming both hashes and not cached, a cached archive with other bytes is
-     downloaded again, and no checksum file is consulted. A target the lock does
-     not name, or a canary build (its URL names a commit), is an error.
-     `DENEXT_UPSTREAM_RUNTIME_BASE_URL` serves the archives from elsewhere (a
-     mirror, the smoke test); the pin decides what is accepted.
+215. **`fix(compile)`: no upstream runtime is downloaded**
+     (`fix/runtime-pin-coverage`; `cli/standalone/binary.rs`,
+     `denext_runtime.yml`, `.github/denext-runtime/`; CLI and CI only). Items
+     130 and 188 cover the release's own `denort` only. `deno desktop`'s
+     `libdenort`, every `--engine quickjs` archive, and `denort` in a build that
+     is not denext's came from `dl.deno.land` with no check and were trusted
+     from the download cache forever, so a swapped download or cache file was
+     packaged into the app.
+
+     This fork cannot run those archives at all. Run on Linux x64 with 2.9.8's:
+     `denort` and `denort-quickjs`, and `libdenort` and `libdenort-quickjs`
+     under the laufey 0.7.0 host, each exit at startup with
+     `deserializing
+     metadata: missing field tsgo` (upstream's runtime
+     requires a field this CLI's metadata does not have, and the writer is the
+     same in a build without `DENEXT_VERSION`). Under the fork's own laufey
+     host, `libdenort` stops earlier
+     (`API version mismatch: expected 34, got 50`), and the CLI already refuses
+     the released hosts (`RELEASED_LAUFEY_INCOMPATIBLE`). Pinning their hashes
+     only verified an app that could not start, and `denort`'s bytes differ
+     between `dl.deno.land` and upstream's GitHub release on all six targets for
+     2.9.8, so the pin would have vouched for bytes nobody can explain.
+
+     So the CLI downloads none of them, in any build. With no override,
+     `--engine quickjs`, `deno desktop` and a compile in a build without
+     `DENEXT_VERSION` fail before any download, naming the archive and the fix
+     (`DENORT_BIN`, `DENORT_DESKTOP_BIN` + `LAUFEY_DEV_DIR`, or denext's desktop
+     commands); no app is written and nothing is cached. What still works:
+     `deno compile`, with or without `--target`, in a denext build (items 130
+     and 188), and every override below. denext's `build --compile` sets
+     `DENORT_BIN` or takes the release's denort, its desktop commands set
+     `DENORT_DESKTOP_BIN`, and it never passes `--engine`. Tests use
+     `DENORT_BIN` or the runtimes beside `target/`, so they download nothing
+     either.
 
      `denext_runtime.yml`: the tag checks compare target names, not counts
      (`denort_pins.py`: `check-list` before the CLI build, `check-manifest` at
@@ -8493,23 +8495,22 @@ package job fails if it differs from the hosts' `capi/include/laufey.h`.
      item 130's check), so what stops a tag shipping such a CLI is `check-cli`,
      in the publish job of every run: it opens each CLI archive and requires
      `<target>=<sha256>` in the binary for every `denort` archive beside it,
-     hashed from the archive's bytes. The denort smoke (`DENORT_PINNED`) serves
-     swapped upstream archives with a `.sha256sum` and a `SHA256SUMS` that match
-     them and requires each to be refused and not cached.
+     hashed from the archive's bytes. The denort smoke still refuses a changed
+     release archive, and `runtime_refusal_smoke.sh` requires each refusal with
+     no output, no cache entry and no connection (a loopback proxy records any).
 
      Local overrides stay as they are: `DENORT_BIN`, `DENORT_DESKTOP_BIN`,
      `LAUFEY_DEV_DIR`, and a `denort` / `libdenort` beside an executable under a
      `target/` directory run with no check. They take effect only for whoever
      controls the environment or the file system of that run, who can already
      run code as that user; a build that sets one from untrusted input is not
-     protected by any of these pins. `denext` itself sets `DENORT_DESKTOP_BIN`
+     protected by any of these checks. `denext` itself sets `DENORT_DESKTOP_BIN`
      and `LAUFEY_DEV_DIR` from a runtime archive it verified.
 
      Tests (`cli/standalone/binary.rs`):
-     `upstream_runtime_lock_pins_every_archive`,
-     `upstream_runtime_sha256_refuses_what_it_cannot_verify`,
-     `upstream_runtime_refuses_tampered_bytes_with_matching_sums`;
-     `denort_pins_test.py`.
+     `compile_takes_only_the_release_denort`,
+     `desktop_runtime_refusal_names_the_fixes`; `denort_pins_test.py`;
+     `runtime_refusal_smoke.sh`.
 
 ## npm supply-chain settings
 
