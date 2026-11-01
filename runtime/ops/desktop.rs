@@ -2505,7 +2505,7 @@ pub trait DesktopApi: Send + Sync + 'static {
   /// remaining windows close without a `close` event.
   fn quit(&self);
   /// Answer the OS's quit request in progress (laufey API 52); `false` keeps
-  /// the app running and stops a session end.
+  /// the app running and asks the OS to stop a session end.
   fn answer_quit_request(&self, _allow: bool) {}
   /// Whether the OS is still waiting on that answer: false once it was given
   /// or laufey's deadline passed.

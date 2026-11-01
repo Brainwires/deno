@@ -3245,21 +3245,25 @@ declare namespace Deno {
      *
      * The OS's own quits run this too: on macOS Cmd+Q, the `quit` role, the
      * Dock's Quit and a logout, on Windows the session ending
-     * (WM_QUERYENDSESSION), so listeners can cancel them. The OS isn't held
-     * for long: an app that doesn't answer quits anyway after 5 s. A session
+     * (WM_QUERYENDSESSION), so listeners can refuse them, though a session end
+     * may go on anyway ({@linkcode cancelQuit}). The OS isn't held for long: an app that doesn't answer quits anyway after 5 s. A session
      * end (`reason: "session-end"`) stays held after a listener's
      * `preventDefault()`, so a page across a bridge can still decide: call
-     * {@linkcode quit} again to let it go or {@linkcode cancelQuit} to refuse
-     * it, within 10 s on macOS and 4 s on Windows, when the session goes on
+     * {@linkcode quit} again to let it go or {@linkcode cancelQuit} to ask the OS
+     * to stop it, within 10 s on macOS and 4 s on Windows, when the session goes on
      * ending and the app quits. A Windows tray menu's `quit` role quits at
      * once and asks nobody. */
     export function quit(): boolean;
 
-    /** Refuse the session end the OS is waiting on, held by a `"beforequit"`
-     * or `close` listener: macOS cancels the logout, and Windows stops it (the
-     * user can still force it). `false` when no session end is held, which
-     * includes one past its deadline: this can only refuse in time, never hold
-     * the OS longer. */
+    /** Ask the OS to stop the session end it is waiting on, held by a
+     * `"beforequit"` or `close` listener. This is a request the OS may not
+     * honour, and `true` says only that it was made. On macOS 26 a refused
+     * logout stopped for an app with a Dock icon, with an alert that offers to
+     * try again, and went on anyway for an accessory app (no Dock icon). Windows
+     * gets `FALSE` from `WM_QUERYENDSESSION`, and the user can still force it; a
+     * real Windows logoff hasn't been tested. `false` when no session end is
+     * held, which includes one past its deadline: this can only refuse in time,
+     * never hold the OS longer. */
     export function cancelQuit(): boolean;
 
     /** Whether the app quits when its last window closes (default `true`).

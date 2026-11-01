@@ -8238,15 +8238,25 @@ where the changes are discussed.
      `cli/rt/desktop.rs`, `cli/rt_desktop/lib.rs`, `runtime/ops/desktop.rs`).
      Cmd+Q, the `quit` role, the Dock's Quit and a logout on macOS, and
      `WM_QUERYENDSESSION` on Windows, now run `Deno.desktop.quit()`, so a
-     `beforequit` or `close` listener can refuse them. `beforequit` carries
-     `reason` (`"quit"` or `"session-end"`). A held session end waits for
-     `quit()` or the new `Deno.desktop.cancelQuit()`, bounded in laufey: 5 s for
-     a quit nobody answers, 10 s for a macOS session end, 4 s on Windows, under
-     the 5 s before its "preventing shutdown" screen. `cancelQuit()` can only
-     refuse in time: past the deadline it returns `false` and does nothing. A
-     Windows tray menu's raw `quit` role quits at once with no reason, as
-     macOS's used to. Tests: `desktop_ops_inert`, the `quitRequested` assertions
-     in `cli/rt/desktop.rs`, laufey's `--quit-request`.
+     `beforequit` or `close` listener can refuse them (a session end only by
+     request, below). `beforequit` carries `reason` (`"quit"` or
+     `"session-end"`). A held session end waits for `quit()` or the new
+     `Deno.desktop.cancelQuit()`, bounded in laufey: 5 s for a quit nobody
+     answers, 10 s for a macOS session end, 4 s on Windows, under the 5 s before
+     its "preventing shutdown" screen. `cancelQuit()` can only refuse in time:
+     past the deadline it returns `false` and does nothing. A refused session
+     end is a request the OS may not honour, and `true` says only that it was
+     made. Driven on a macOS 26.6.2 VM with a real logout, the dialog's Log Out
+     button on both backends: a regular app's refusal 300 ms or 8 s later
+     stopped it (CEF's 8 s run was only watched for 20 s); an accessory app's
+     did not, at once (webview) or after 300 ms (both), because loginwindow's
+     `quitUIElementApps` phase sends those apps the quit event and moves on. On
+     webview the alert says the app interrupted the logout; on CEF, whose quit
+     event handler returns before the answer, macOS says the app failed to quit,
+     about 45 s later. A real Windows logoff, restart and shutdown were not
+     driven. A Windows tray menu's raw `quit` role quits at once with no reason,
+     as macOS's used to. Tests: `desktop_ops_inert`, the `quitRequested`
+     assertions in `cli/rt/desktop.rs`, laufey's `--quit-request`.
 
 211. **`feat(desktop)`: `windowCapabilities().layerShellEdgeAnchor`** (laufey
      API 52). `setPosition` on a Wayland layer surface takes screen coordinates:
