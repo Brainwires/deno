@@ -626,26 +626,14 @@ impl<'a> DenoCompileBinaryWriter<'a> {
       // of each target's denort archive and needs no SHA256SUMS for it.
       let pinned = embedded_denort_sha256(EMBEDDED_DENORT_SHA256S, &target)
         .context("Reading the denort SHA-256 this CLI was built with.")?;
-      let client = self.http_client_provider.get_or_create()?;
       let fetch =
         async |what: DenortFetch| -> Result<Option<Vec<u8>>, AnyError> {
-          let url = match what {
-            DenortFetch::Archive => download_url.as_str(),
-            DenortFetch::Sums => sums_url.as_str(),
-          };
-          let progress_bars = ProgressBar::new(ProgressBarStyle::DownloadBars);
-          let progress = progress_bars.update(url);
-          let response = client
-            .download_with_progress_and_retries(
-              url.parse()?,
-              &Default::default(),
-              &progress,
-            )
+          self
+            .fetch_runtime_file(match what {
+              DenortFetch::Archive => download_url.as_str(),
+              DenortFetch::Sums => sums_url.as_str(),
+            })
             .await
-            .with_context(|| format!("Failed downloading '{url}'"))?;
-          response
-            .into_maybe_bytes()
-            .with_context(|| format!("Failed downloading '{url}'"))
         };
       load_verified_denext_denort(
         &binary_path,
@@ -665,17 +653,12 @@ impl<'a> DenoCompileBinaryWriter<'a> {
         DENO_VERSION_INFO.git_hash,
         &binary_name,
       );
-      let download_url = format!("https://dl.deno.land/{binary_path_suffix}");
       let binary_path = download_directory.join(&binary_path_suffix);
       log::debug!("Resolved denort: {}", binary_path.display());
-      if binary_path.exists() {
-        read_file(&binary_path)?
-      } else {
-        self
-          .download_base_binary(&binary_path, &download_url)
-          .await
-          .context("Setting up base binary.")?
-      }
+      self
+        .load_upstream_runtime(&binary_path, &binary_name, &binary_path_suffix)
+        .await
+        .context("Setting up base binary.")?
     };
     let temp_dir = tempfile::TempDir::new()?;
     let base_binary_path = archive::unpack_into_dir(archive::UnpackArgs {
@@ -741,17 +724,10 @@ impl<'a> DenoCompileBinaryWriter<'a> {
     let read_file = |path: &Path| -> Result<Vec<u8>, AnyError> {
       std::fs::read(path).with_context(|| format!("Reading {}", path.display()))
     };
-    let archive_data = if binary_path.exists() {
-      read_file(&binary_path)?
-    } else {
-      self
-        .download_base_binary(
-          &binary_path,
-          &format!("https://dl.deno.land/{binary_path_suffix}"),
-        )
-        .await
-        .context("Setting up desktop base binary.")?
-    };
+    let archive_data = self
+      .load_upstream_runtime(&binary_path, &binary_name, &binary_path_suffix)
+      .await
+      .context("Setting up desktop base binary.")?;
     let temp_dir = tempfile::TempDir::new()?;
     let base_binary_path = archive::unpack_into_dir(archive::UnpackArgs {
       exe_name: &lib_name,
@@ -764,42 +740,47 @@ impl<'a> DenoCompileBinaryWriter<'a> {
     Ok(base_binary)
   }
 
-  async fn download_base_binary(
+  /// denext (DENEXT.md item 215): an upstream runtime archive from
+  /// dl.deno.land, accepted only with the SHA-256 in
+  /// `cli/upstream_runtime_sums.lock`.
+  async fn load_upstream_runtime(
     &self,
-    output_path: &Path,
-    download_url: &str,
+    cache_path: &Path,
+    asset: &str,
+    url_suffix: &str,
   ) -> Result<Vec<u8>, AnyError> {
-    let response = {
-      let progress_bars = ProgressBar::new(ProgressBarStyle::DownloadBars);
-      let progress = progress_bars.update(download_url);
+    let pinned = upstream_runtime_sha256(
+      UPSTREAM_RUNTIME_PINNED_SUMS,
+      DENO_VERSION_INFO.release_channel,
+      asset,
+    )?;
+    let url = upstream_runtime_url(url_suffix);
+    load_pinned_upstream_runtime(cache_path, asset, &url, &pinned, async |_| {
+      self.fetch_runtime_file(&url).await
+    })
+    .await
+  }
 
-      self
-        .http_client_provider
-        .get_or_create()?
-        .download_with_progress_and_retries(
-          download_url.parse()?,
-          &Default::default(),
-          &progress,
-        )
-        .await?
-    };
-    let bytes = response
-      .into_bytes()
-      .with_context(|| format!("Failed downloading '{}'", download_url))?;
-
-    let create_dir_all = |dir: &Path| {
-      std::fs::create_dir_all(dir)
-        .with_context(|| format!("Creating {}", dir.display()))
-    };
-    create_dir_all(output_path.parent().unwrap())?;
-    atomic_write_file_with_retries(
-      &CliSys::default(),
-      output_path,
-      &bytes,
-      CACHE_PERM,
-    )
-    .with_context(|| format!("Writing {}", output_path.display()))?;
-    Ok(bytes)
+  /// A runtime file's bytes, `None` when the server has no such file.
+  async fn fetch_runtime_file(
+    &self,
+    url: &str,
+  ) -> Result<Option<Vec<u8>>, AnyError> {
+    let progress_bars = ProgressBar::new(ProgressBarStyle::DownloadBars);
+    let progress = progress_bars.update(url);
+    let response = self
+      .http_client_provider
+      .get_or_create()?
+      .download_with_progress_and_retries(
+        url.parse()?,
+        &Default::default(),
+        &progress,
+      )
+      .await
+      .with_context(|| format!("Failed downloading '{url}'"))?;
+    response
+      .into_maybe_bytes()
+      .with_context(|| format!("Failed downloading '{url}'"))
   }
 
   /// This functions creates a standalone deno binary by appending a bundle
@@ -2046,6 +2027,69 @@ fn deno_land_suffix(
   }
 }
 
+/// denext (DENEXT.md item 215): the SHA-256 of every upstream runtime archive
+/// this CLI can download. Checked into the repo, so nothing the download host
+/// serves can vouch for its own bytes; `cli/build.rs` fails the build when it
+/// is for another upstream version.
+const UPSTREAM_RUNTIME_PINNED_SUMS: &str =
+  include_str!("../upstream_runtime_sums.lock");
+
+/// Where an upstream runtime archive is downloaded from
+/// (`DENEXT_UPSTREAM_RUNTIME_BASE_URL`: a mirror, or the smoke test's loopback
+/// server; the pin decides what is accepted from it).
+fn upstream_runtime_url(url_suffix: &str) -> String {
+  let base = env::var("DENEXT_UPSTREAM_RUNTIME_BASE_URL")
+    .ok()
+    .filter(|b| !b.is_empty())
+    .unwrap_or_else(|| "https://dl.deno.land".to_string());
+  format!("{}/{url_suffix}", base.trim_end_matches('/'))
+}
+
+/// `asset`'s pinned SHA-256 in the listing `sums`, or an error when this
+/// build has none: the archive would be unverified, so it is not used.
+fn upstream_runtime_sha256(
+  sums: &str,
+  release_channel: ReleaseChannel,
+  asset: &str,
+) -> Result<String, AnyError> {
+  if release_channel == ReleaseChannel::Canary {
+    bail!(
+      "A canary build has no pinned SHA-256 for {asset}, so it cannot be \
+       verified. Refusing to download it; set DENORT_BIN or \
+       DENORT_DESKTOP_BIN to a runtime you built."
+    );
+  }
+  sha256sums_entry(sums, asset)?.ok_or_else(|| {
+    deno_core::anyhow::anyhow!(
+      "cli/upstream_runtime_sums.lock has no SHA-256 for {asset}, so it \
+       cannot be verified. Refusing to download it."
+    )
+  })
+}
+
+/// An upstream runtime archive checked against `pinned`: a cached copy with
+/// other bytes is downloaded again, and a download with other bytes is
+/// refused and not cached.
+async fn load_pinned_upstream_runtime(
+  cache_path: &Path,
+  asset: &str,
+  archive_url: &str,
+  pinned: &str,
+  fetch: impl AsyncFn(DenortFetch) -> Result<Option<Vec<u8>>, AnyError>,
+) -> Result<Vec<u8>, AnyError> {
+  load_verified_denext_denort(
+    cache_path,
+    &DenextDenortSource {
+      asset,
+      archive_url,
+      sums_url: "",
+    },
+    Some(pinned),
+    fetch,
+  )
+  .await
+}
+
 /// denext (DENEXT.md item 188): the SHA-256 of every `denort` archive of
 /// this CLI's release, as `<target>=<sha256>` entries separated by commas
 /// (`DENEXT_DENORT_SHA256S` at compile time; the release workflow builds the
@@ -2554,18 +2598,22 @@ mod tests {
         cache,
         &denort_source(),
         pinned,
-        async |what| match what {
-          DenortFetch::Archive => {
-            self.archive_fetches.set(self.archive_fetches.get() + 1);
-            Ok(Some(self.archive.clone()))
-          }
-          DenortFetch::Sums => {
-            self.sums_fetches.set(self.sums_fetches.get() + 1);
-            Ok(self.sums.clone().map(String::into_bytes))
-          }
-        },
+        async |what| self.fetch(what),
       )
       .await
+    }
+
+    fn fetch(&self, what: DenortFetch) -> Result<Option<Vec<u8>>, AnyError> {
+      match what {
+        DenortFetch::Archive => {
+          self.archive_fetches.set(self.archive_fetches.get() + 1);
+          Ok(Some(self.archive.clone()))
+        }
+        DenortFetch::Sums => {
+          self.sums_fetches.set(self.sums_fetches.get() + 1);
+          Ok(self.sums.clone().map(String::into_bytes))
+        }
+      }
     }
   }
 
@@ -2657,6 +2705,119 @@ mod tests {
           .is_err(),
         "{malformed}"
       );
+    }
+  }
+
+  /// Each upstream archive `deno compile` and `deno desktop` can download.
+  fn upstream_assets() -> Vec<String> {
+    let mut assets = Vec::new();
+    for prefix in ["denort", "denort-quickjs", "libdenort", "libdenort-quickjs"]
+    {
+      for target in [
+        "aarch64-apple-darwin",
+        "aarch64-pc-windows-msvc",
+        "aarch64-unknown-linux-gnu",
+        "x86_64-apple-darwin",
+        "x86_64-pc-windows-msvc",
+        "x86_64-unknown-linux-gnu",
+      ] {
+        assets.push(format!("{prefix}-{target}.zip"));
+      }
+    }
+    assets
+  }
+
+  #[test]
+  fn upstream_runtime_lock_pins_every_archive() {
+    let version = super::UPSTREAM_RUNTIME_PINNED_SUMS
+      .lines()
+      .find_map(|line| line.strip_prefix("# version: v"));
+    assert_eq!(version, Some(deno_lib::version::UPSTREAM_DENO_VERSION));
+    let listed = super::UPSTREAM_RUNTIME_PINNED_SUMS
+      .lines()
+      .filter(|line| !line.starts_with('#') && !line.is_empty())
+      .count();
+    assert_eq!(listed, upstream_assets().len());
+    for asset in upstream_assets() {
+      let hash = super::upstream_runtime_sha256(
+        super::UPSTREAM_RUNTIME_PINNED_SUMS,
+        deno_lib::shared::ReleaseChannel::Stable,
+        &asset,
+      )
+      .unwrap();
+      assert_eq!(hash.len(), 64, "{asset}");
+    }
+  }
+
+  #[test]
+  fn upstream_runtime_sha256_refuses_what_it_cannot_verify() {
+    use deno_lib::shared::ReleaseChannel;
+    let sums = super::UPSTREAM_RUNTIME_PINNED_SUMS;
+    let asset = "libdenort-x86_64-unknown-linux-gnu.zip";
+    let err =
+      super::upstream_runtime_sha256(sums, ReleaseChannel::Canary, asset)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("DENORT_DESKTOP_BIN"), "{err}");
+    let err = super::upstream_runtime_sha256(
+      sums,
+      ReleaseChannel::Stable,
+      "libdenort-riscv64-unknown-linux-gnu.zip",
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("no SHA-256"), "{err}");
+    assert!(
+      super::upstream_runtime_sha256(sums, ReleaseChannel::Rc, asset).is_ok()
+    );
+  }
+
+  /// `libdenort` and `--engine quickjs` take the same path: swapped bytes
+  /// are refused and not cached, with a listing beside them that vouches for
+  /// the swap (never asked for), and a swapped cache is replaced.
+  #[tokio::test]
+  async fn upstream_runtime_refuses_tampered_bytes_with_matching_sums() {
+    for asset in [
+      "libdenort-x86_64-unknown-linux-gnu.zip",
+      "libdenort-quickjs-x86_64-pc-windows-msvc.zip",
+      "denort-quickjs-aarch64-apple-darwin.zip",
+      "denort-x86_64-apple-darwin.zip",
+    ] {
+      let dir = tempfile::TempDir::new().unwrap();
+      let cache = dir.path().join("release/v2.9.8").join(asset);
+      let real = b"the real upstream zip";
+      let swapped = b"a swapped upstream zip";
+      let pinned = sha256_hex(real);
+      let release =
+        FakeRelease::new(swapped, Some(sums_listing(&[(asset, swapped)])));
+      let load = async |release: &FakeRelease| {
+        super::load_pinned_upstream_runtime(
+          &cache,
+          asset,
+          "https://dl.deno.land/x",
+          &pinned,
+          async |what| release.fetch(what),
+        )
+        .await
+      };
+      let err = format!("{:#}", load(&release).await.unwrap_err());
+      assert!(err.contains("this CLI was built with"), "{err}");
+      assert!(err.contains(&sha256_hex(swapped)), "{err}");
+      assert_eq!(release.sums_fetches.get(), 0);
+      assert!(!cache.exists());
+
+      // A tampered archive already in the download cache is not used.
+      std::fs::create_dir_all(cache.parent().unwrap()).unwrap();
+      std::fs::write(&cache, swapped).unwrap();
+      let err = format!("{:#}", load(&release).await.unwrap_err());
+      assert!(err.contains("this CLI was built with"), "{err}");
+      let release = FakeRelease::new(real, None);
+      assert_eq!(load(&release).await.unwrap(), real);
+      assert_eq!(std::fs::read(&cache).unwrap(), real);
+      assert_eq!(release.archive_fetches.get(), 1);
+      // The verified copy is then used from the cache.
+      assert_eq!(load(&release).await.unwrap(), real);
+      assert_eq!(release.archive_fetches.get(), 1);
     }
   }
 

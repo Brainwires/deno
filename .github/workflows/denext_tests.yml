@@ -14,7 +14,7 @@
 #          audit-ignore check's and glibc ceiling check's tests
 #          (.github/denext-runtime/manifest_test.py, tag_gate_test.py,
 #          engine_staleness_test.py, audit_ignores_test.py,
-#          glibc_ceiling_test.py, self_binding_test.py)
+#          glibc_ceiling_test.py, self_binding_test.py, denort_pins_test.py)
 #          and the bare-assertion guard over the release scripts
 #          (assert_guard.py and its test).
 # - cargo-audit: RustSec advisories against Cargo.lock; .cargo/audit.toml
@@ -184,6 +184,10 @@ jobs:
       - name: fetch_rusty_v8_test.py
         if: runner.os == 'Linux'
         run: python3 -I .github/denext-runtime/fetch_rusty_v8_test.py
+      # The denort SHA-256 checks (denext_runtime.yml's cli and publish jobs).
+      - name: denort_pins_test.py
+        if: runner.os == 'Linux'
+        run: python3 -I .github/denext-runtime/denort_pins_test.py
       - name: lint.js
         env:
           GITHUB_TOKEN: ${{ github.token }}

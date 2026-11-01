@@ -1,0 +1,39 @@
+# Pinned SHA-256 digests of upstream Deno's runtime archives.
+#
+# The trust anchor for what this fork's CLI downloads from dl.deno.land:
+# `deno desktop`'s libdenort, `--engine quickjs`, and `denort` in a build
+# that is not denext's (cli/standalone/binary.rs, DENEXT.md item 215). An
+# archive with other bytes is refused. cli/build.rs fails the build when the
+# `# version:` below is not cli/lib/upstream_version.txt.
+#
+# Regenerate when the upstream version changes:
+#   python3 -I .github/denext-runtime/refresh_upstream_runtime_sums.py \
+#     <version> cli/upstream_runtime_sums.lock
+#
+# Format: GNU `sha256sum` style, one `<hex>  <filename>` per line.
+#
+# version: v2.9.8
+451539e096b086ebf14b658ca79b2f8476f466698196d36ad7f1fd0b0d39a1ce  denort-aarch64-apple-darwin.zip
+5ad962c18dfaf885af02ea46359ccb4aaabfadc961e68c7a33ebc794b4362632  denort-aarch64-pc-windows-msvc.zip
+d84fb58b9948ebf55586a70c5391403f08283023e60a54e1e2011a9c598ce93b  denort-aarch64-unknown-linux-gnu.zip
+7052b72b1910c7c8d05841f2c919eb39edd86f50b70aa9c3f8615b5a407a159b  denort-quickjs-aarch64-apple-darwin.zip
+e290da648d6666b02b209c8af46e68eaabf1d605bd393a5e3e8158d994cbe2f6  denort-quickjs-aarch64-pc-windows-msvc.zip
+2f309a2f064b346215a11e9f568290c67f72e55bc44f26580c23ceec45404c5c  denort-quickjs-aarch64-unknown-linux-gnu.zip
+10cff8ffdb5b3af5b9bca80220b78c1eb30e906e60be1b5cb25da4fd069e5f26  denort-quickjs-x86_64-apple-darwin.zip
+6d4da0e5598140e058810cd172d99d8e2475a786371a2034825ae07d8d550e9e  denort-quickjs-x86_64-pc-windows-msvc.zip
+27467fbdfe202cbed9d25d083e15c0aef06a20b89603651326061a2eca8dddb5  denort-quickjs-x86_64-unknown-linux-gnu.zip
+307c5dcced15ee1c5d8dd333b50f259a08efea44b4a71fa9e66b0b2e82052c76  denort-x86_64-apple-darwin.zip
+89a681e781c27ce825cf87e83d7ae99ce68571778c13fb891711f9d3becd1d6d  denort-x86_64-pc-windows-msvc.zip
+ba6822d0709ffe723a99db1ed45f8c80adb20eb4790613d496f8f0567b2d99f8  denort-x86_64-unknown-linux-gnu.zip
+b5edb378a0553d26018d583cd45b4250b5d35e512f96b6528c576e379eb57a1c  libdenort-aarch64-apple-darwin.zip
+a380065e4d783d6507e52f8e5df9030d21fe96baf006b14f91d0880576497ec6  libdenort-aarch64-pc-windows-msvc.zip
+2e8105380799e6b1625960771d0b993b0702eba60b7270aee96f6ca0764a8146  libdenort-aarch64-unknown-linux-gnu.zip
+f93f534dfde040470f7b31adad8db4ba83ffe2d2764d0f8c8b7c768132eb61c5  libdenort-quickjs-aarch64-apple-darwin.zip
+78af32bd94eec0ef80949e58d89ca62ea66ac6dc8f901d9e191f4534260518ff  libdenort-quickjs-aarch64-pc-windows-msvc.zip
+75f9e66518e5019875c9623401e9ee344f9e8b92a001553d1819a5b750a77797  libdenort-quickjs-aarch64-unknown-linux-gnu.zip
+aa684aeace7bc6e3304d5fae3167f03d907d46a15c48090e20a05b76209853ad  libdenort-quickjs-x86_64-apple-darwin.zip
+be86c1d90486ed701ecdde3d199d97549c8c0eef6ad95eff8857075565e66347  libdenort-quickjs-x86_64-pc-windows-msvc.zip
+885074b0772b8373fa075c0526ba095427e8039813ab112c9877989945111e61  libdenort-quickjs-x86_64-unknown-linux-gnu.zip
+4f002b9714c7914120d55c635d86f5f272644b1291bf29b6a008250e52558782  libdenort-x86_64-apple-darwin.zip
+a35ddbcc7258f701b6607ca885e61b97b3ac2774baf78f73eecd00efcc16f503  libdenort-x86_64-pc-windows-msvc.zip
+2ba29e3af198372f34874cc5e6e45eb6bece800b9eac17a731124befd49a8fb2  libdenort-x86_64-unknown-linux-gnu.zip

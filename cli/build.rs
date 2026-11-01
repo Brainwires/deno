@@ -579,10 +579,37 @@ fn check_denext_denort_sha256s() {
   }
 }
 
+/// denext (DENEXT.md item 215): `cli/upstream_runtime_sums.lock` names the
+/// upstream version it pins. A different one would make every `deno desktop`
+/// and `--engine quickjs` download fail, so the bump fails here instead.
+fn check_upstream_runtime_sums_version() {
+  println!("cargo:rerun-if-changed=upstream_runtime_sums.lock");
+  println!("cargo:rerun-if-changed=lib/upstream_version.txt");
+  let read = |path: &str| {
+    #[allow(clippy::disallowed_methods, reason = "build code")]
+    std::fs::read_to_string(path)
+      .unwrap_or_else(|err| panic!("reading cli/{path}: {err}"))
+  };
+  let upstream = read("lib/upstream_version.txt");
+  let upstream = upstream.trim();
+  let sums = read("upstream_runtime_sums.lock");
+  let pinned = sums
+    .lines()
+    .find_map(|line| line.strip_prefix("# version: v"))
+    .map(str::trim);
+  assert_eq!(
+    pinned,
+    Some(upstream),
+    "cli/upstream_runtime_sums.lock is not for upstream Deno {upstream}: run \
+     .github/denext-runtime/refresh_upstream_runtime_sums.py"
+  );
+}
+
 fn main() {
   let out_dir = std::path::PathBuf::from(std::env::var_os("OUT_DIR").unwrap());
 
   check_denext_denort_sha256s();
+  check_upstream_runtime_sums_version();
 
   check_appimage_runtime_hashes();
   compress_appimage_runtimes(&out_dir);
