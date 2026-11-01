@@ -42,10 +42,14 @@
 //! (`launches` 0 → 1); [`confirm`] marks it good and deletes `.old`. If a
 //! launch starts while the update is still unconfirmed from an earlier
 //! launch (it crashed, hung, or never confirmed), the runtime spawns the
-//! helper in `rollback` mode and exits; the helper puts `.old` back,
-//! records the version as `rejected` (it is never offered again), and
-//! relaunches the previous app with `--denext-update-rolled-back=<version>`.
-//! An interrupted swap or rollback is recovered the same way.
+//! helper in `rollback` mode and exits; the helper checks `.old` as the apply
+//! checked the staged app (it sits where anything running as the user can
+//! write, named by a state file it can write too), puts it back, records the
+//! version as `rejected` (it is never offered again), and relaunches the
+//! previous app with `--denext-update-rolled-back=<version>`. An interrupted
+//! swap or rollback is recovered the same way. A `.old` that fails the check
+//! is left where it is and the installed app keeps running
+//! ([`rollback_verified`]).
 //!
 //! **What is touched.** Only paths proven to be copies of this app's install
 //! ([`super::layout::is_install_copy`]: the packager's marker) are swapped or
@@ -950,11 +954,21 @@ pub fn apply_swap_verified(
   if !staging.still_at_path() {
     return refuse_staged(layout, state, "the staging directory was replaced");
   }
-  // The OS signature re-check, then (Windows) the staged app's loose files
-  // against the signed executable's tree manifest, as the pinning walk read
-  // them. A refusal is recorded like every other one here.
+  // The OS signature re-check, then (Windows) the staged app's files against
+  // the signed executable's tree manifest, as the pinning walk read them,
+  // for the app the installed one was built as and the version the state
+  // names (which `verify` has already matched against the staged app's own).
+  // A refusal is recorded like every other one here.
+  let app_id =
+    super::embedded::installed_metadata(layout).and_then(|m| m.app_identifier);
   if let Err(e) = verify(layout, state).and_then(|()| {
-    super::treecheck::verify_for_platform(layout, &staged_path, &entries)
+    super::treecheck::verify_for_platform(
+      layout,
+      &staged_path,
+      &entries,
+      app_id.as_deref(),
+      state.to.as_deref(),
+    )
   }) {
     return refuse_staged_with(layout, state, e);
   }
@@ -1064,10 +1078,25 @@ pub fn apply_swap_verified(
   }
 }
 
-/// The helper's `rollback`: restore `.old` after a version failed its trial
-/// (`swapped`), or recover an interrupted `swapping` / `rollingBack`.
-/// Returns the version that was rolled back (`None` when nothing was
-/// swapped in, e.g. an interrupted swap that had not happened yet).
+/// What the helper checks about the tree a rollback puts back at the
+/// install path (see [`rollback_verified`]): the layout, the state and that
+/// tree (`.old`, or the previous app still in the staging directory).
+pub type PreviousVerifier<'a> =
+  &'a dyn Fn(&InstallLayout, &UpdateState, &Path) -> Result<(), UpdateError>;
+
+/// A verifier that accepts everything (tests of the rollback mechanics).
+#[cfg(test)]
+pub fn accept_previous(
+  _: &InstallLayout,
+  _: &UpdateState,
+  _: &Path,
+) -> Result<(), UpdateError> {
+  Ok(())
+}
+
+/// [`rollback_verified`] with no check of what goes back (the tests of the
+/// rollback mechanics).
+#[cfg(test)]
 pub fn rollback(
   layout: &InstallLayout,
   state: &mut UpdateState,
@@ -1075,24 +1104,81 @@ pub fn rollback(
   rollback_with(layout, state, &no_fault)
 }
 
+/// [`rollback`] with a fault hook.
+#[cfg(test)]
 pub fn rollback_with(
   layout: &InstallLayout,
   state: &mut UpdateState,
+  hook: FaultHook,
+) -> Result<Option<String>, UpdateError> {
+  rollback_verified(layout, state, &accept_previous, hook)
+}
+
+/// Refuse a rollback: the tree that would go back to the install path is
+/// not one the updater accepts (see [`rollback_verified`]). Nothing has
+/// moved. The state goes idle with `last_error` set to `"<code>: <message>"`
+/// (as the apply's refusals record themselves), `cleanup` off: what sits at
+/// `.old` or in the staging directory is not this app's previous install,
+/// so it is not deleted as one. The next launch starts the installed app.
+fn refuse_rollback(
+  layout: &InstallLayout,
+  state: &mut UpdateState,
+  e: UpdateError,
+) -> UpdateError {
+  let e =
+    UpdateError::new(e.code, format!("{}; nothing was rolled back", e.message));
+  state.phase = Phase::Idle;
+  state.launches = 0;
+  state.helper_attempts = 0;
+  state.entry = None;
+  state.install_id = None;
+  state.cleanup = false;
+  state.last_error = Some(e.to_string());
+  let _ = write_state(layout, state);
+  e
+}
+
+/// The helper's `rollback`: restore `.old` after a version failed its trial
+/// (`swapped`), or recover an interrupted `swapping` / `rollingBack`.
+/// Returns the version that was rolled back (`None` when nothing was
+/// swapped in, e.g. an interrupted swap that had not happened yet).
+///
+/// The tree the rollback puts at the install path (`.old`, or after an
+/// interrupted exchange the previous app still in the staging directory)
+/// sits where anything running as the user can write, and is named by a
+/// state file it can write too. So before anything is recorded or moved,
+/// `verify` checks it as the apply checks a staged app (the install marker,
+/// the embedded version equal to the state's `from`, the OS code signature
+/// against the installed app: `verify_previous_for_helper`), whenever it
+/// would replace an app at the install path. A tree that fails is left where
+/// it is, nothing moves, and the refusal is recorded ([`refuse_rollback`]):
+/// the installed app, which passed the apply's checks, keeps running. With
+/// nothing at the install path there is no app for a planted tree to
+/// displace (whoever emptied it could have filled it) and no installed app
+/// to check a signature against: the previous app goes back as before.
+pub fn rollback_verified(
+  layout: &InstallLayout,
+  state: &mut UpdateState,
+  verify: PreviousVerifier<'_>,
   hook: FaultHook,
 ) -> Result<Option<String>, UpdateError> {
   let old = layout.old_path();
   let failed = layout.failed_path();
   let install = &layout.install;
   let resuming = state.phase == Phase::RollingBack;
-  // A version that failed its trial is rejected. The mark is recorded when
-  // the rollback starts, so a resumed rollback still knows.
-  let reject = match state.phase {
-    Phase::Swapped => {
-      if let Some(to) = state.to.clone() {
-        state.reject(&to);
-      }
-      true
+  // The check of what `tree` would put at the install path; a refusal
+  // records itself.
+  let check = |state: &mut UpdateState, tree: &Path| {
+    if !exists(install) {
+      return Ok(());
     }
+    verify(layout, state, tree).map_err(|e| refuse_rollback(layout, state, e))
+  };
+  // A version that failed its trial is rejected. The mark is recorded when
+  // the rollback starts (below, once what goes back has passed its check),
+  // so a resumed rollback still knows.
+  let reject = match state.phase {
+    Phase::Swapped => true,
     Phase::RollingBack => state.to.is_some() && state.rejected == state.to,
     Phase::Swapping => {
       // Was the swap interrupted after it happened?
@@ -1115,10 +1201,13 @@ pub fn rollback_with(
       }
       if swapped && !exists(&old) {
         // An atomic exchange whose follow-up rename was interrupted: the
-        // previous app is still in the staging directory.
+        // previous app is still in the staging directory. What moves next
+        // to the install, and from there back to the install path, is
+        // checked before it moves (and again as `.old`).
         if let Some(staged) = state.staged_path(layout)
           && exists(&staged)
         {
+          check(state, &staged)?;
           rename_retry(&staged, &old)
             .map_err(|e| UpdateError::io(old.display(), e))?;
         }
@@ -1129,6 +1218,22 @@ pub fn rollback_with(
       return err(Code::NotStaged, "there is no update to roll back");
     }
   };
+  // `.old` goes back to the install path, unless an earlier run of this
+  // rollback already exchanged it in (then `.old` holds the failed app and
+  // nothing goes back): checked first.
+  let exchanged_already = resuming
+    && exists(install)
+    && exists(&old)
+    && state.install_id.is_some()
+    && file_id(install) != state.install_id;
+  if exists(&old) && !exchanged_already {
+    check(state, &old)?;
+  }
+  if state.phase == Phase::Swapped
+    && let Some(to) = state.to.clone()
+  {
+    state.reject(&to);
+  }
   let to = state.to.clone();
   state.phase = Phase::RollingBack;
   // What is at the install path as the rollback starts (the failed app):
@@ -1226,8 +1331,9 @@ fn park_failed(
   }
 }
 
-/// Roll back and delete what is left ([`rollback_with`], then
+/// Roll back and delete what is left ([`rollback`], then
 /// [`remove_rollback_leftovers`]).
+#[cfg(test)]
 pub fn rollback_and_clean(
   layout: &InstallLayout,
   state: &mut UpdateState,
@@ -1565,17 +1671,22 @@ pub fn accept_staged(
 /// directory, and only paths proven to be copies of this app's install are
 /// swapped or deleted. It runs no code but the app's own executable (the
 /// relaunch). What a forged state could still ask for is a swap of some
-/// other app tree placed in the staging directory: so before an apply,
-/// `verify` checks the staged app again as `stage()` did (its OS code
-/// signature against the running app's signer, its own version newer than
-/// the installed one and not rejected), so the helper can't be used to put
-/// an app the updater would refuse in place of a signed one (on macOS the
-/// app may modify its own bundle where another program may not).
+/// other app tree placed in the staging directory, or a rollback to one
+/// placed at `.old`: so before an apply, `verify` checks the staged app
+/// again as `stage()` did (its OS code signature against the running app's
+/// signer, its own version newer than the installed one and not rejected),
+/// and before a rollback `verify_previous` checks the tree that would go
+/// back the same way (the install marker, its embedded version equal to the
+/// state's `from`, its OS code signature against the installed app), so the
+/// helper can't be used to put an app the updater would refuse in place of
+/// a signed one (on macOS the app may modify its own bundle where another
+/// program may not).
 pub fn run_helper(
   layout: &InstallLayout,
   mode: HelperMode,
   pid: u32,
   verify: StagedVerifier<'_>,
+  verify_previous: PreviousVerifier<'_>,
 ) -> i32 {
   let Some(_lock) = take_helper_lock(layout) else {
     log_line(layout, "another update helper is running; nothing to do");
@@ -1636,17 +1747,20 @@ pub fn run_helper(
         }
         Err(e) => {
           log_line(layout, &format!("apply failed: {e}"));
-          helper_after_failed_apply(layout, &mut |state, marker| {
-            relaunch(layout, state, marker)
-          })
+          helper_after_failed_apply(
+            layout,
+            verify_previous,
+            &mut |state, marker| relaunch(layout, state, marker),
+          )
         }
       }
     }
-    HelperMode::Rollback => {
-      helper_rollback(layout, &mut state, &mut |state, marker| {
-        relaunch(layout, state, marker)
-      })
-    }
+    HelperMode::Rollback => helper_rollback(
+      layout,
+      &mut state,
+      verify_previous,
+      &mut |state, marker| relaunch(layout, state, marker),
+    ),
   }
 }
 
@@ -1657,6 +1771,7 @@ pub fn run_helper(
 /// it for the next start.
 fn helper_after_failed_apply(
   layout: &InstallLayout,
+  verify_previous: PreviousVerifier<'_>,
   relaunch: &mut dyn FnMut(&UpdateState, Option<String>) -> i32,
 ) -> i32 {
   match read_state(layout) {
@@ -1666,24 +1781,27 @@ fn helper_after_failed_apply(
     }
     Some(mut state) if state.phase == Phase::Swapping => {
       log_line(layout, "the swap was not undone: recovering now");
-      helper_rollback(layout, &mut state, relaunch);
+      helper_rollback(layout, &mut state, verify_previous, relaunch);
       1
     }
     _ => 1,
   }
 }
 
-/// The helper's rollback: restore and record it, log, relaunch the previous
-/// app, and only then delete the failed install (best effort, bounded), so a
-/// file that can't be deleted never holds up the relaunch. On Windows this
-/// helper runs from the failed install's own executable, which can't be
-/// deleted while it runs: the relaunched app's startup cleanup removes it.
+/// The helper's rollback: check what goes back, restore and record it, log,
+/// relaunch the previous app, and only then delete the failed install (best
+/// effort, bounded), so a file that can't be deleted never holds up the
+/// relaunch. On Windows this helper runs from the failed install's own
+/// executable, which can't be deleted while it runs: the relaunched app's
+/// startup cleanup removes it. A refused rollback ([`refuse_rollback`])
+/// relaunches nothing: the installed app is left for the next launch.
 fn helper_rollback(
   layout: &InstallLayout,
   state: &mut UpdateState,
+  verify_previous: PreviousVerifier<'_>,
   relaunch: &mut dyn FnMut(&UpdateState, Option<String>) -> i32,
 ) -> i32 {
-  match rollback(layout, state) {
+  match rollback_verified(layout, state, verify_previous, &no_fault) {
     Ok(rolled_back) => {
       log_line(layout, &format!("rolled back {rolled_back:?}"));
       let code =
@@ -3050,7 +3168,7 @@ mod tests {
         std::fs::write(staged.join("version"), "6.6.6").unwrap();
         Ok(())
       };
-      run_helper(l, HelperMode::Apply, pid, &verify);
+      run_helper(l, HelperMode::Apply, pid, &verify, &accept_previous);
       assert_eq!(installed(l), "1.0.0", "forge={forge}");
       assert_eq!(read_state(l).unwrap().phase, Phase::Staged, "forge={forge}");
     }
@@ -3187,7 +3305,13 @@ mod tests {
     write_state(l, &s).unwrap();
     let start = Instant::now();
     assert_eq!(
-      run_helper(l, HelperMode::Apply, app.id(), &accept_staged),
+      run_helper(
+        l,
+        HelperMode::Apply,
+        app.id(),
+        &accept_staged,
+        &accept_previous
+      ),
       0
     );
     assert!(start.elapsed() < Duration::from_secs(30));
@@ -3198,7 +3322,13 @@ mod tests {
     s.apply_pid = Some(app.id().wrapping_add(1));
     write_state(l, &s).unwrap();
     assert_eq!(
-      run_helper(l, HelperMode::Apply, app.id(), &accept_staged),
+      run_helper(
+        l,
+        HelperMode::Apply,
+        app.id(),
+        &accept_staged,
+        &accept_previous
+      ),
       0
     );
     assert_eq!(installed(l), "1.0.0");
@@ -3208,7 +3338,13 @@ mod tests {
     let mut s = read_state(l).unwrap();
     s.apply_pid = Some(app.id());
     write_state(l, &s).unwrap();
-    let code = run_helper(l, HelperMode::Apply, app.id(), &accept_staged);
+    let code = run_helper(
+      l,
+      HelperMode::Apply,
+      app.id(),
+      &accept_staged,
+      &accept_previous,
+    );
     assert_eq!(installed(l), "2.0.0");
     // The relaunch started the new app (on Windows the fixture has none).
     #[cfg(unix)]
@@ -3599,7 +3735,7 @@ mod tests {
       assert_eq!(s.phase, Phase::Swapping, "exchanged={exchanged}");
       // The helper's recovery, as `run_helper` runs it after the failure.
       let mut relaunched = Vec::new();
-      helper_after_failed_apply(l, &mut |state, marker| {
+      helper_after_failed_apply(l, &accept_previous, &mut |state, marker| {
         relaunched.push((state.phase, marker));
         0
       });
@@ -3728,6 +3864,148 @@ mod tests {
     assert_eq!(read_state(l).unwrap().phase, Phase::Staged);
   }
 
+  /// What the helper checks about the tree a rollback puts back, as the
+  /// fixture can model it: the install marker, and the `version` file equal
+  /// to the state's `from` (the real helper reads the embedded version and
+  /// the OS code signature: `verify_previous_for_helper`).
+  fn fixture_previous_verifier(
+    l: &InstallLayout,
+    s: &UpdateState,
+    tree: &Path,
+  ) -> Result<(), UpdateError> {
+    if !is_install_copy(l.kind, tree) {
+      return err(
+        Code::UnsupportedLayout,
+        format!(
+          "{} is not a packaged app (no install marker)",
+          tree.display()
+        ),
+      );
+    }
+    let version =
+      std::fs::read_to_string(tree.join("version")).unwrap_or_default();
+    if Some(version.as_str()) != s.from.as_deref() {
+      return err(
+        Code::VersionMismatch,
+        format!(
+          "{} is version {version}, the state names {:?}",
+          tree.display(),
+          s.from
+        ),
+      );
+    }
+    Ok(())
+  }
+
+  /// A forged state file (anything running as the user can write it) next
+  /// to a planted tree: `.old` with the state `swapped`, as if a version
+  /// were on trial, or a tree in the staging directory with the state
+  /// `swapping` and an install id that differs, as if an exchange had been
+  /// interrupted. The rollback used to exchange the planted tree in, with no
+  /// check at all (the apply re-checks everything; the rollback checked
+  /// nothing), and relaunch it. Now the tree that would go back to the
+  /// install path passes the same checks as a staged app first; a tree that
+  /// fails them is left where it is, nothing moves, the refusal is recorded,
+  /// and the next launch starts the installed app.
+  #[test]
+  fn a_rollback_puts_back_only_a_tree_it_verified() {
+    let refused = |l: &InstallLayout, code: Code| {
+      assert_eq!(installed(l), "1.0.0");
+      let s = read_state(l).unwrap();
+      assert_eq!(s.phase, Phase::Idle, "{:?}", s.last_error);
+      let last = s.last_error.clone().unwrap_or_default();
+      assert!(last.starts_with(&format!("{}: ", code.as_str())), "{last}");
+      assert!(last.contains("nothing was rolled back"), "{last}");
+      assert!(!s.cleanup, "a refused rollback deletes nothing");
+      assert_eq!(s.rejected, None, "no version was rolled back");
+      assert_eq!(startup_action(l), StartupAction::Continue { trial: false });
+    };
+
+    // `.old` planted (another version of the app, say), the state `swapped`.
+    let f = fixture(None);
+    let l = &f.layout;
+    plant_app(&l.old_path(), "0.9.0");
+    let mut s = read_state(l).unwrap();
+    s.phase = Phase::Swapped;
+    s.from = Some("1.0.0".into());
+    s.to = Some("2.0.0".into());
+    s.launches = 1;
+    write_state(l, &s).unwrap();
+    assert_eq!(startup_action(l), StartupAction::RollBack);
+    let mut s = read_state(l).unwrap();
+    let e = rollback_verified(l, &mut s, &fixture_previous_verifier, &no_fault)
+      .unwrap_err();
+    assert_eq!(e.code, Code::VersionMismatch, "{}", e.message);
+    refused(l, Code::VersionMismatch);
+    assert_eq!(
+      std::fs::read_to_string(l.old_path().join("version")).unwrap(),
+      "0.9.0",
+      "the planted tree is left where it was"
+    );
+
+    // `.old` without the install marker (not a packaged app at all).
+    let f = fixture(None);
+    let l = &f.layout;
+    std::fs::create_dir_all(l.old_path()).unwrap();
+    std::fs::write(l.old_path().join("version"), "1.0.0").unwrap();
+    let mut s = read_state(l).unwrap();
+    s.phase = Phase::Swapped;
+    s.from = Some("1.0.0".into());
+    s.to = Some("2.0.0".into());
+    s.launches = 1;
+    write_state(l, &s).unwrap();
+    let mut s = read_state(l).unwrap();
+    let e = rollback_verified(l, &mut s, &fixture_previous_verifier, &no_fault)
+      .unwrap_err();
+    assert_eq!(e.code, Code::UnsupportedLayout, "{}", e.message);
+    refused(l, Code::UnsupportedLayout);
+    assert!(l.old_path().join("version").exists());
+
+    // The `swapping` path: no `.old`, a planted staged tree, and an install
+    // id that differs (so the swap reads as an interrupted exchange whose
+    // previous app still sits in staging). It used to be moved to `.old`
+    // and exchanged in from there. (Windows tells an interrupted exchange
+    // by `.old` alone, so there the forgery reads as a swap that never ran.)
+    #[cfg(unix)]
+    {
+      let f = fixture(Some("0.9.0"));
+      let l = &f.layout;
+      let mut s = read_state(l).unwrap();
+      s.phase = Phase::Swapping;
+      s.install_id = Some("0:0".into());
+      write_state(l, &s).unwrap();
+      let mut s = read_state(l).unwrap();
+      let e =
+        rollback_verified(l, &mut s, &fixture_previous_verifier, &no_fault)
+          .unwrap_err();
+      assert_eq!(e.code, Code::VersionMismatch, "{}", e.message);
+      refused(l, Code::VersionMismatch);
+      assert!(
+        !l.old_path().exists(),
+        "the planted tree was not moved next to the install"
+      );
+      assert!(l.extract_dir().join("App").join("version").exists());
+    }
+
+    // A real trial's `.old` passes the same check: the rollback works.
+    let f = fixture(Some("2.0.0"));
+    let l = &f.layout;
+    let mut s = read_state(l).unwrap();
+    apply_swap(l, &mut s).unwrap();
+    assert_eq!(startup_action(l), StartupAction::Continue { trial: true });
+    mark_trial_exited(l);
+    assert_eq!(startup_action(l), StartupAction::RollBack);
+    let mut s = read_state(l).unwrap();
+    assert_eq!(
+      rollback_verified(l, &mut s, &fixture_previous_verifier, &no_fault)
+        .unwrap()
+        .as_deref(),
+      Some("2.0.0")
+    );
+    assert_eq!(installed(l), "1.0.0");
+    assert_eq!(read_state(l).unwrap().phase, Phase::Idle);
+  }
+
   #[test]
   fn interrupted_rollback_resumes() {
     for failing in ["install->failed", "old->install"] {
@@ -3826,18 +4104,19 @@ mod tests {
     let mut relaunches = Vec::new();
     let mut s = read_state(l).unwrap();
     let started = Instant::now();
-    let code = helper_rollback(l, &mut s, &mut |state, marker| {
-      // At the relaunch the rollback is recorded and logged, and nothing
-      // has been deleted yet.
-      assert_eq!(state.phase, Phase::Idle);
-      relaunches.push((
-        read_state(l).map(|s| (s.phase, s.cleanup)),
-        marker,
-        log().contains("rolled back Some(\"2.0.0\")"),
-        l.failed_path().join("locked").exists(),
-      ));
-      0
-    });
+    let code =
+      helper_rollback(l, &mut s, &accept_previous, &mut |state, marker| {
+        // At the relaunch the rollback is recorded and logged, and nothing
+        // has been deleted yet.
+        assert_eq!(state.phase, Phase::Idle);
+        relaunches.push((
+          read_state(l).map(|s| (s.phase, s.cleanup)),
+          marker,
+          log().contains("rolled back Some(\"2.0.0\")"),
+          l.failed_path().join("locked").exists(),
+        ));
+        0
+      });
     assert_eq!(code, 0);
     assert!(
       started.elapsed() < Duration::from_secs(5),

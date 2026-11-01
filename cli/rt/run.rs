@@ -2355,6 +2355,11 @@ pub(crate) fn apply_desktop_permission_defaults(
 /// packager cannot know (it is under the user's home). denext bakes
 /// `--allow-run=$DENO_DESKTOP_CACHE/sidecars/<name>/<file>` for a sidecar
 /// program it copies there at launch, instead of an unscoped `--allow-run`.
+/// That scope limits what the app's code may run BY NAME; it is not
+/// containment: the copy takes a `--allow-write` on the same folder, under
+/// which the app's own code can write that file and then run it, and the
+/// copy sits in a user-writable folder another process of the user can
+/// replace between the app's check of it and the spawn.
 const DESKTOP_CACHE_TOKEN: &str = "$DENO_DESKTOP_CACHE";
 
 /// denext (DENEXT.md item 191): the token a baked `--allow-read` /
