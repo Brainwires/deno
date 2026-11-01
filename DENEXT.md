@@ -8410,12 +8410,12 @@ where the changes are discussed.
      `cli/rt/run.rs`; item 190's scoped grant was a limit by name, F4 of the
      denext.8 audit, since the app could write the file it may run):
      - A baked `--allow-run` value may read
-       `$DENO_DESKTOP_CACHE/.../prog#sha256=<64 hex>#embedded=<path>`; the path is
-       the program's in the embedded file system, relative to the entrypoint.
+       `$DENO_DESKTOP_CACHE/.../prog#sha256=<64 hex>#embedded=<path>`; the path
+       is the program's in the embedded file system, relative to the entrypoint.
        The recorded hash travels with the grant, in the binary's metadata, so
        the app's write grants cannot reach it (the binary is outside them, and
-       signed on macOS and Windows). A value with the marker that does not
-       parse grants nothing.
+       signed on macOS and Windows). A value with the marker that does not parse
+       grants nothing.
      - At launch the value's plain path becomes the grant, the program's folder
        goes on `deny_write` (a denial wins over a broad grant, so the app needs
        no write grant there and its code can't get one), and the program is
@@ -8432,18 +8432,19 @@ where the changes are discussed.
        asynchronous spawn the path and the handle are compared with the device,
        inode, mode, size, mtime and ctime from before the hash, and the child is
        killed on a difference. What is left there: a program of the same user
-       that wins a microseconds race may get a moment of a child before the kill,
-       and `outputSync()` has no such kill. Deno code cannot try it, since writes
-       to the folder are denied; a hard link made beforehand through a broad write
-       grant and written through in the window is the same race.
+       that wins a microseconds race may get a moment of a child before the
+       kill, and `outputSync()` has no such kill. Deno code cannot try it, since
+       writes to the folder are denied; a hard link made beforehand through a
+       broad write grant and written through in the window is the same race.
      - denext bakes the value from `FIRST_SIDECAR_INTEGRITY_RUNTIME` and the
-       folder name carries the hash, so an update's new bytes do not meet the old
-       copy.
+       folder name carries the hash, so an update's new bytes do not meet the
+       old copy.
      - Tests: `ext/process` `embedded_program` (written when missing, a swap
        refused then healed, a symlink refused even to the right bytes, embedded
        bytes off the hash not written, a change after the hash seen, the Windows
-       lock), `self_fork_tests::a_registered_program_is_checked_at_spawn`, and `cli/rt/run.rs` (the value
-       taken out of the grant, the denial, malformed values granting nothing).
+       lock), `self_fork_tests::a_registered_program_is_checked_at_spawn`, and
+       `cli/rt/run.rs` (the value taken out of the grant, the denial, malformed
+       values granting nothing).
 
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,

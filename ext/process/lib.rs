@@ -2803,6 +2803,10 @@ mod self_fork_tests {
   // denext (DENEXT.md item 215): through the op's own check, with the grant's
   // permission check already passed by allow-all.
   #[test]
+  #[allow(
+    clippy::disallowed_methods,
+    reason = "the file the spawn checks is on the real file system"
+  )]
   fn a_registered_program_is_checked_at_spawn() {
     use sha2::Digest;
     let dir = tempfile::tempdir().unwrap();
