@@ -44,7 +44,7 @@ async function quitEvent(pid: number, logout: boolean) {
 
 export async function run(env: Env, rep: AreaReport) {
   if (OS !== "darwin") {
-    rep.na("the OS's quits (macOS here; laufey --quit-request on Windows)");
+    rep.na("the OS's quits", "macOS here; laufey --quit-request on Windows");
     return;
   }
   const scheme = `dnxquit${env.nonce}`;
