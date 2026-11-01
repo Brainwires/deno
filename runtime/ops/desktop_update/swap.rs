@@ -843,6 +843,15 @@ fn refuse_staged_with(
   e: UpdateError,
 ) -> Result<(), UpdateError> {
   state.phase = Phase::Staged;
+  record_refusal(layout, state, e)
+}
+
+/// Record a refusal in the state, whatever its phase, and refuse.
+fn record_refusal(
+  layout: &InstallLayout,
+  state: &mut UpdateState,
+  e: UpdateError,
+) -> Result<(), UpdateError> {
   state.last_error = Some(e.to_string());
   let _ = write_state(layout, state);
   err(e.code, format!("{}; nothing was swapped", e.message))
@@ -868,17 +877,31 @@ pub fn apply_swap_verified(
   hook: FaultHook,
 ) -> Result<(), UpdateError> {
   if state.phase != Phase::Staged {
-    return err(Code::NotStaged, "nothing is staged");
+    // Not `refuse_staged_with`: there is no staged app to go back to, and
+    // the phase may be a trial or a swap the recovery still has to see.
+    return record_refusal(
+      layout,
+      state,
+      UpdateError::new(Code::NotStaged, "nothing is staged"),
+    );
   }
+  let missing = UpdateError::new(
+    Code::NotStaged,
+    "the staged app or the install is missing",
+  );
   let (Some(staged_path), Some(entry)) =
     (state.staged_path(layout), state.entry.clone())
   else {
-    return err(Code::NotStaged, "the state names no staged app");
+    return refuse_staged_with(
+      layout,
+      state,
+      UpdateError::new(Code::NotStaged, "the state names no staged app"),
+    );
   };
   let staging = match super::staging::PrivateDir::open(&layout.staging_dir()) {
     Ok(dir) => dir,
     Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-      return err(Code::NotStaged, "the staged app or the install is missing");
+      return refuse_staged_with(layout, state, missing);
     }
     Err(e) => {
       return refuse_staged(
@@ -890,20 +913,22 @@ pub fn apply_swap_verified(
   };
   let staged = match staging.staged("extract", entry.as_ref()) {
     Ok(s) => s,
-    Err(_) => {
-      return err(Code::NotStaged, "the staged app or the install is missing");
-    }
+    Err(_) => return refuse_staged_with(layout, state, missing),
   };
   if !exists(&staged_path) || !exists(&layout.install) {
-    return err(Code::NotStaged, "the staged app or the install is missing");
+    return refuse_staged_with(layout, state, missing);
   }
   if !is_install_copy(layout.kind, &layout.install)
     || !is_install_copy(layout.kind, &staged_path)
   {
-    return err(
-      Code::UnsupportedLayout,
-      "the install or the staged app is not a packaged app (no install \
-       marker); nothing was swapped",
+    return refuse_staged_with(
+      layout,
+      state,
+      UpdateError::new(
+        Code::UnsupportedLayout,
+        "the install or the staged app is not a packaged app (no install \
+         marker)",
+      ),
     );
   }
   // What this helper will swap, pinned before anything checks it. It must
@@ -938,12 +963,16 @@ pub fn apply_swap_verified(
   }
   let old = layout.old_path();
   if exists(&old) && !remove_install_copy(layout, &old) {
-    return err(
-      Code::Io,
-      format!(
-        "cannot remove a leftover {} (it is not a previous install of this \
-         app, or is in use); move it away to update",
-        old.display()
+    return refuse_staged_with(
+      layout,
+      state,
+      UpdateError::new(
+        Code::Io,
+        format!(
+          "cannot remove a leftover {} (it is not a previous install of this \
+           app, or is in use); move it away to update",
+          old.display()
+        ),
       ),
     );
   }
@@ -3274,6 +3303,112 @@ mod tests {
       let e = apply_swap(l, &mut s).unwrap_err();
       check(l, e, Code::OsSignature, "no signed tree manifest");
     }
+  }
+
+  /// The checks before the staged app is pinned refuse with their own code,
+  /// and the relaunched app reads why from the state like any other refusal.
+  /// The phase is left as it was: `nothing is staged` must not turn a state
+  /// that has no staged app into one that claims it has.
+  #[test]
+  fn an_early_refusal_is_recorded() {
+    let check = |l: &InstallLayout,
+                 s: &mut UpdateState,
+                 code: Code,
+                 needle: &str,
+                 phase: Phase| {
+      let e = apply_swap(l, s).unwrap_err();
+      assert_eq!(e.code, code, "{}", e.message);
+      assert!(e.message.contains(needle), "{}", e.message);
+      assert_eq!(
+        e.message.matches("nothing was swapped").count(),
+        1,
+        "{}",
+        e.message
+      );
+      let read = read_state(l).unwrap();
+      assert_eq!(read.phase, phase, "{needle}");
+      let last = read.last_error.unwrap_or_default();
+      assert!(
+        last.starts_with(&format!("{}: ", code.as_str()))
+          && last.contains(needle),
+        "{needle}: {last:?}"
+      );
+    };
+
+    // The state has nothing staged.
+    let f = fixture(None);
+    let l = &f.layout;
+    let mut s = read_state(l).unwrap();
+    check(l, &mut s, Code::NotStaged, "nothing is staged", Phase::Idle);
+    assert_eq!(installed(l), "1.0.0");
+
+    // The state names no staged app.
+    let f = fixture(Some("2.0.0"));
+    let l = &f.layout;
+    let mut s = read_state(l).unwrap();
+    s.entry = None;
+    check(
+      l,
+      &mut s,
+      Code::NotStaged,
+      "names no staged app",
+      Phase::Staged,
+    );
+
+    // The staging directory is gone.
+    let f = fixture(Some("2.0.0"));
+    let l = &f.layout;
+    std::fs::remove_dir_all(l.staging_dir()).unwrap();
+    let mut s = read_state(l).unwrap();
+    check(l, &mut s, Code::NotStaged, "is missing", Phase::Staged);
+    assert_eq!(installed(l), "1.0.0");
+
+    // The staged app is gone from it.
+    let f = fixture(Some("2.0.0"));
+    let l = &f.layout;
+    std::fs::remove_dir_all(l.extract_dir().join("App")).unwrap();
+    let mut s = read_state(l).unwrap();
+    check(l, &mut s, Code::NotStaged, "is missing", Phase::Staged);
+    assert_eq!(installed(l), "1.0.0");
+
+    // The install is gone.
+    let f = fixture(Some("2.0.0"));
+    let l = &f.layout;
+    std::fs::remove_dir_all(&l.install).unwrap();
+    let mut s = read_state(l).unwrap();
+    check(l, &mut s, Code::NotStaged, "is missing", Phase::Staged);
+
+    // No install marker: not a packaged app.
+    let f = fixture(Some("2.0.0"));
+    let l = &f.layout;
+    std::fs::remove_file(l.install.join(super::super::layout::INSTALL_MARKER))
+      .unwrap();
+    let mut s = read_state(l).unwrap();
+    check(
+      l,
+      &mut s,
+      Code::UnsupportedLayout,
+      "not a packaged app",
+      Phase::Staged,
+    );
+    assert_eq!(installed(l), "1.0.0");
+
+    // A leftover `.old` that is not a previous install of this app.
+    let f = fixture(Some("2.0.0"));
+    let l = &f.layout;
+    std::fs::create_dir_all(l.old_path()).unwrap();
+    std::fs::write(l.old_path().join("user-file"), "keep me").unwrap();
+    let mut s = read_state(l).unwrap();
+    check(
+      l,
+      &mut s,
+      Code::Io,
+      "cannot remove a leftover",
+      Phase::Staged,
+    );
+    assert_eq!(installed(l), "1.0.0");
+    assert!(l.old_path().join("user-file").exists());
+    assert!(l.extract_dir().join("App/version").exists());
   }
 
   #[test]

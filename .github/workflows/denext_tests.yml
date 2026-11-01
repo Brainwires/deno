@@ -66,6 +66,7 @@ on:
       - 'development-denext'
       - 'feat/**'
       - 'fix/**'
+      - 'integrate/**'
   pull_request:
     branches:
       - 'denext/**'
