@@ -7,7 +7,7 @@ import { desktop, html, page, Report } from "../_shared/e2e.ts";
 
 const r = new Report("quit");
 const seen: string[] = [];
-desktop.addEventListener("beforequit", (ev) => {
+desktop.addEventListener("beforequit", (ev: Event) => {
   const reason = (ev as Event & { reason: string }).reason;
   seen.push(reason);
   r.set("reasons", seen);
