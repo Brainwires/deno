@@ -387,7 +387,7 @@ declare namespace Deno {
    * ```ts
    * // main.ts, compiled with `deno compile --max-memory=384m --max-time=3600`
    * if (Deno.args[0] === "migrate") {
-   *   Deno.disarmResourceLimits();
+   *   Deno.disarmResourceLimits(import.meta);
    *   await migrate();
    * } else {
    *   Deno.serve(handler);
@@ -400,15 +400,15 @@ declare namespace Deno {
    * under `deno run` without limits).
    *
    * Throws `Deno.errors.NotCapable`, changing nothing, when:
-   * - the innermost JavaScript frame on the stack is not the main module's
-   *   own source: a module it imports, `eval`, `new Function`, `node:vm` or a
-   *   worker calling it is refused. The main module decides by calling it,
-   *   and it is the main module's call that counts: a function value, bound
-   *   function or getter a dependency hands the main module, which the main
-   *   module then invokes, runs with the main module's frame innermost (a
-   *   native function adds no JavaScript frame) and is accepted. Call it
-   *   yourself, as `Deno.disarmResourceLimits()`, and don't invoke what a
-   *   dependency hands you at the top level unless you trust it to;
+   * - the argument is not the main module's own `import.meta` object. A module
+   *   it imports, `eval`, `new Function`, `node:vm` or a worker has no way to
+   *   that object, and a copy, a wrapper, an object inheriting from it or
+   *   another module's `import.meta` is refused. It is a capability: holding it
+   *   is what counts, not where the call is made from, so a main module that
+   *   hands its `import.meta` to other code (an argument, an export) has given
+   *   that code the decision while the main module evaluates. Don't, unless you
+   *   mean to. An entry point that is CommonJS has no `import.meta` and can't
+   *   disarm;
    * - the main module has finished evaluating: call it at the top level
    *   (top-level `await` included), before the program starts its work;
    * - the limits were given on the command line (`deno run --max-time=60 …`):
@@ -416,7 +416,7 @@ declare namespace Deno {
    *
    * @category Runtime
    */
-  export function disarmResourceLimits(): boolean;
+  export function disarmResourceLimits(importMeta: ImportMeta): boolean;
 
   /**
    * Get the `hostname` of the machine the Deno process is running on.

@@ -850,13 +850,13 @@ impl<TSys: DenoLibSys> LibMainWorkerFactory<TSys> {
         .map(|params| params.max_old_generation_size_in_bytes()),
     );
     // `Deno.disarmResourceLimits()`: only this (the main) worker has it, and
-    // only a compiled program's limits can be disarmed. The main module's
-    // script id is set while it evaluates (`execute_main_module`).
+    // only a compiled program's limits can be disarmed, while the main module
+    // evaluates (`execute_main_module`).
     worker.js_runtime.op_state().borrow_mut().put(
       deno_runtime::ops::runtime::ResourceLimitsDisarm {
         armed: resource_limits.any(),
         baked: shared.options.is_standalone,
-        main_module_script_id: None,
+        main_module_evaluating: false,
         disarm: crate::resource_limits::disarm,
       },
     );
@@ -1027,12 +1027,11 @@ impl LibMainWorker {
 
   pub async fn execute_main_module(&mut self) -> Result<(), CoreError> {
     let id = self.worker.preload_main_module(&self.main_module).await?;
-    // While the main module evaluates, and only then, its own code may call
-    // `Deno.disarmResourceLimits()`.
-    let script_id = self.worker.js_runtime.module_script_id(id);
-    self.set_disarm_caller(script_id);
+    // While the main module evaluates, and only then, its `import.meta` can
+    // call `Deno.disarmResourceLimits()`.
+    self.set_main_module_evaluating(true);
     let result = self.worker.evaluate_module(id).await;
-    self.set_disarm_caller(None);
+    self.set_main_module_evaluating(false);
     result?;
 
     // After loading and evaluating all modules, trim the glibc malloc arena.
@@ -1050,8 +1049,8 @@ impl LibMainWorker {
     Ok(())
   }
 
-  /// Sets the script whose code may call `Deno.disarmResourceLimits()`.
-  fn set_disarm_caller(&mut self, script_id: Option<i32>) {
+  /// Whether `Deno.disarmResourceLimits()` can currently be called.
+  fn set_main_module_evaluating(&mut self, evaluating: bool) {
     if let Some(disarm) = self
       .worker
       .js_runtime
@@ -1059,7 +1058,7 @@ impl LibMainWorker {
       .borrow_mut()
       .try_borrow_mut::<deno_runtime::ops::runtime::ResourceLimitsDisarm>(
     ) {
-      disarm.main_module_script_id = script_id;
+      disarm.main_module_evaluating = evaluating;
     }
   }
 

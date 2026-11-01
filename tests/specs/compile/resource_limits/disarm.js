@@ -2,7 +2,7 @@
 // subcommand (`./out job`), then goes past every one of them: a heap well over
 // --max-memory, more CPU than --max-cpu-time and more time than --max-time.
 if (Deno.args[0] === "job") {
-  console.log("disarmed", Deno.disarmResourceLimits());
+  console.log("disarmed", Deno.disarmResourceLimits(import.meta));
 }
 console.log("start");
 const kept = [];

@@ -48,7 +48,7 @@
       ]
     },
     // The entry point disarms the baked limits for a subcommand
-    // (Deno.disarmResourceLimits) and goes past all three; without the
+    // (Deno.disarmResourceLimits(import.meta)) and goes past all three; without the
     // subcommand the same program is still limited.
     "disarm": {
       "steps": [
@@ -69,9 +69,9 @@
         }
       ]
     },
-    // Code other than the main module's own (a dependency, eval, new
-    // Function, node:vm, a worker), or the main module once it has finished
-    // evaluating, can't disarm them.
+    // Anything but the main module's own import.meta (a dependency's, a copy,
+    // nothing), or the main module's once it has finished evaluating, can't
+    // disarm them.
     "disarm_refused": {
       "steps": [
         {
@@ -86,10 +86,8 @@
         }
       ]
     },
-    // The frame check sees who called, not where the function came from: the
-    // op handed to the main module by a dependency, and invoked by the main
-    // module at its top level, is the main module's call. Documents the
-    // limit of the check (the TS docs and DENEXT.md item 203 state it).
+    // A dependency with its own import.meta or with nothing is refused, even
+    // calling the op from the main module's frame; the main module's works.
     "disarm_handed": {
       "steps": [
         {
@@ -100,6 +98,21 @@
           "commandName": "./out",
           "args": [],
           "output": "disarm_handed.out"
+        }
+      ]
+    },
+    // A main module handing out its import.meta has decided (the TS docs and
+    // DENEXT.md item 203 state it).
+    "disarm_given": {
+      "steps": [
+        {
+          "args": "compile --max-time=1 --output out disarm_given.js",
+          "output": "[WILDCARD]"
+        },
+        {
+          "commandName": "./out",
+          "args": [],
+          "output": "disarm_given.out"
         }
       ]
     },

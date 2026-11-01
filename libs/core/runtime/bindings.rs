@@ -1416,6 +1416,31 @@ fn vm_dynamic_import_callback_missing_exception<'s>(
   exception
 }
 
+/// The private key that marks the main module's `import.meta`. A private
+/// symbol: script can't read it, write it or copy it, and an object that
+/// inherits from or wraps a marked one is not marked.
+fn main_import_meta_key<'s>(
+  scope: &v8::PinScope<'s, '_>,
+) -> v8::Local<'s, v8::Private> {
+  let name = v8::String::new(scope, "deno_core#mainImportMeta").unwrap();
+  v8::Private::for_api(scope, Some(name))
+}
+
+/// Whether `value` is the `import.meta` object of this realm's main module
+/// itself. Only that object answers `true`, so script holding it is the main
+/// module or was handed it by the main module: a capability the embedder's ops
+/// can ask for.
+pub fn is_main_module_import_meta(
+  scope: &v8::PinScope<'_, '_>,
+  value: v8::Local<v8::Value>,
+) -> bool {
+  let Ok(object) = v8::Local::<v8::Object>::try_from(value) else {
+    return false;
+  };
+  let key = main_import_meta_key(scope);
+  object.has_private(scope, key) == Some(true)
+}
+
 pub extern "C" fn host_initialize_import_meta_object_callback(
   context: v8::Local<v8::Context>,
   module: v8::Local<v8::Module>,
@@ -1452,6 +1477,10 @@ pub extern "C" fn host_initialize_import_meta_object_callback(
   let main = module_map.is_main_module(&module_global);
   let main_val = v8::Boolean::new(scope, main);
   meta.create_data_property(scope, main_key.into(), main_val.into());
+  if main {
+    let key = main_import_meta_key(scope);
+    meta.set_private(scope, key, main_val.into());
+  }
 
   // Add special method that allows Wasm module to instantiate themselves.
   if module_type == ModuleType::Wasm {

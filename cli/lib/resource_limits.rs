@@ -44,9 +44,9 @@
 //!
 //! A compiled program's own main module can lift the limits it was compiled
 //! with, for a subcommand that is not the long-running program they are meant
-//! for (a job, a migration): `Deno.disarmResourceLimits()`, refused to any
-//! other code, after the main module's evaluation, and for limits given on the
-//! command line (`deno_runtime::ops::runtime::ResourceLimitsDisarm`). See
+//! for (a job, a migration): `Deno.disarmResourceLimits(import.meta)`,
+//! refused without the main module's own `import.meta`, after the main module's
+//! evaluation, and for limits given on the command line (`deno_runtime::ops::runtime::ResourceLimitsDisarm`). See
 //! [`disarm`].
 //!
 //! These are guardrails against runaway programs, not a sandbox: subprocesses
@@ -244,7 +244,7 @@ pub fn exit_if_exceeded() {
 /// cap set at creation can only be raised from the near-heap-limit callback).
 /// Returns `false`, and changes nothing, when a limit was already reached.
 ///
-/// This is what `Deno.disarmResourceLimits()` calls, after
+/// This is what `Deno.disarmResourceLimits(import.meta)` calls, after
 /// `deno_runtime::ops::runtime` has checked that the caller is the main
 /// module of a compiled program, evaluating; nothing else calls it.
 pub fn disarm() -> bool {

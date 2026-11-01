@@ -1,7 +1,7 @@
-// Only the main module's own code may disarm the limits, and only while it
-// evaluates: every other caller gets NotCapable and the limits stay.
+// Only the main module's own import.meta disarms the limits, and only while it
+// evaluates: everything else gets NotCapable and the limits stay.
 import vm from "node:vm";
-import { fromDependency } from "./disarm_dep.js";
+import { withItsOwnImportMeta, withNothing } from "./disarm_dep.js";
 
 function attempt(name, fn) {
   try {
@@ -11,10 +11,24 @@ function attempt(name, fn) {
   }
 }
 
-attempt("dependency", () => fromDependency());
+attempt("nothing", () => Deno.disarmResourceLimits());
+attempt("undefined", () => Deno.disarmResourceLimits(undefined));
+attempt("string", () => Deno.disarmResourceLimits(import.meta.url));
+attempt("dependency, nothing", () => withNothing());
+attempt("dependency, its own", () => withItsOwnImportMeta());
+// Nothing made from the main module's object is that object.
+attempt(
+  "look-alike",
+  () => Deno.disarmResourceLimits({ url: import.meta.url, main: true }),
+);
+attempt("spread", () => Deno.disarmResourceLimits({ ...import.meta }));
+attempt(
+  "inheriting",
+  () => Deno.disarmResourceLimits(Object.create(import.meta)),
+);
+attempt("proxy", () => Deno.disarmResourceLimits(new Proxy(import.meta, {})));
 attempt("eval", () => eval("Deno.disarmResourceLimits()"));
 attempt("function", () => new Function("return Deno.disarmResourceLimits()")());
-// A script named after the main module is still another script.
 attempt(
   "vm",
   () =>
@@ -34,7 +48,7 @@ await new Promise((resolve) => {
 });
 setTimeout(() => {
   // The main module has finished evaluating.
-  attempt("after evaluation", () => Deno.disarmResourceLimits());
+  attempt("after evaluation", () => Deno.disarmResourceLimits(import.meta));
   // Still armed: --max-time ends the program.
   setTimeout(() => console.log("not reached"), 60_000);
 }, 0);

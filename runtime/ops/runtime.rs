@@ -123,7 +123,7 @@ fn op_internal_log(
   }
 }
 
-/// What `Deno.disarmResourceLimits()` may do in this worker (denext: a
+/// What `Deno.disarmResourceLimits(import.meta)` may do in this worker (denext: a
 /// compiled program's own main module lifting the `--max-memory` /
 /// `--max-cpu-time` / `--max-time` it was compiled with, for a subcommand such
 /// as a job or a migration). The embedder puts it in the main worker's
@@ -135,11 +135,11 @@ pub struct ResourceLimitsDisarm {
   /// given on the command line (`deno run --max-time=…`) are the operator's
   /// and are never disarmed by the program they limit.
   pub baked: bool,
-  /// The V8 script id of the main module's source while the main module
-  /// evaluates (top-level `await`s included); `None` before and after, so
-  /// nothing that runs once the program is up (a request handler, a timer, a
-  /// module imported later) can disarm the limits.
-  pub main_module_script_id: Option<i32>,
+  /// Whether the main module is evaluating (top-level `await`s included):
+  /// false before and after, so nothing that runs once the program is up (a
+  /// request handler, a timer, a module imported later) can disarm the limits,
+  /// whatever it holds.
+  pub main_module_evaluating: bool,
   /// Lifts the limits. Returns `false` when a limit was already reached (the
   /// program is ending).
   pub disarm: fn() -> bool,
@@ -154,41 +154,32 @@ enum DisarmCheck {
   Allowed,
 }
 
-/// The policy of `Deno.disarmResourceLimits()`. `caller_script_id` is the
-/// script id of the innermost JavaScript frame, the code that called the op
-/// (the op is installed on `Deno` as is, so no wrapper frame sits between).
+/// The policy of `Deno.disarmResourceLimits(import.meta)`.
+/// `holds_main_import_meta` is whether the argument is the main module's own
+/// `import.meta` object (`deno_core::is_main_module_import_meta`).
 ///
-/// What the frame check establishes is that the main module's own code made
-/// the call, not where the function it called came from: a dependency that
-/// hands the op to the main module (`export const init =
-/// Deno.disarmResourceLimits`, a bound function, a getter on an object the
-/// main module reads) adds no JavaScript frame of its own, so the main
-/// module invoking it passes. V8 gives an API callback no frame and no
-/// callee identity to compare, so there is no stricter check at this
-/// boundary; a stricter design would take an explicit capability (the main
-/// module's `import.meta`, which a dependency does not hold).
+/// The capability, not who is on the stack, is what's checked: a dependency has
+/// its own `import.meta`, never the main module's, unless the main module gives
+/// it away, which is the main module's own decision.
 fn check_disarm(
   state: Option<&ResourceLimitsDisarm>,
-  caller_script_id: Option<usize>,
+  holds_main_import_meta: bool,
 ) -> Result<DisarmCheck, &'static str> {
   let Some(state) = state else {
     return Err(
       "Deno.disarmResourceLimits() can only be called on the main thread, not in a worker",
     );
   };
-  // The caller is checked before anything else, so code that isn't the main
-  // module is refused the same way whether or not limits are in force.
-  if let Some(main) = state.main_module_script_id {
-    let is_main = caller_script_id
-      .is_some_and(|id| i64::try_from(id).ok() == Some(i64::from(main)));
-    if !is_main {
-      return Err(
-        "Deno.disarmResourceLimits() can only be called by the program's main module itself, not by a module it imports or by evaluated code",
-      );
-    }
-  } else {
+  if !state.main_module_evaluating {
     return Err(
       "Deno.disarmResourceLimits() can only be called while the main module evaluates (at its top level), not once the program is running",
+    );
+  }
+  // Checked before the limits' state, so code without the capability is
+  // refused the same way whether or not limits are in force.
+  if !holds_main_import_meta {
+    return Err(
+      "Deno.disarmResourceLimits() needs the main module's own import.meta: call Deno.disarmResourceLimits(import.meta) from the program's main module",
     );
   }
   if !state.armed {
@@ -202,20 +193,18 @@ fn check_disarm(
   Ok(DisarmCheck::Allowed)
 }
 
-/// `Deno.disarmResourceLimits()`. Installed on `Deno` directly, not behind a
-/// JavaScript wrapper, so the innermost frame of the current stack is the
-/// caller's. Never a fast call: it walks the stack, which allocates handles.
+/// `Deno.disarmResourceLimits(import.meta)`.
 #[op2(nofast)]
 fn op_disarm_resource_limits(
   state: &mut OpState,
   scope: &mut v8::PinScope<'_, '_>,
+  import_meta: v8::Local<v8::Value>,
 ) -> Result<bool, JsErrorBox> {
-  let caller_script_id = v8::StackTrace::current_stack_trace(scope, 1)
-    .and_then(|trace| trace.get_frame(scope, 0))
-    .map(|frame| frame.get_script_id());
+  let holds_main_import_meta =
+    deno_core::is_main_module_import_meta(scope, import_meta);
   match check_disarm(
     state.try_borrow::<ResourceLimitsDisarm>(),
-    caller_script_id,
+    holds_main_import_meta,
   ) {
     Err(message) => Err(JsErrorBox::new("NotCapable", message)),
     Ok(DisarmCheck::NothingArmed) => Ok(false),
@@ -237,12 +226,12 @@ mod tests {
   fn state(
     armed: bool,
     baked: bool,
-    main_module_script_id: Option<i32>,
+    main_module_evaluating: bool,
   ) -> ResourceLimitsDisarm {
     ResourceLimitsDisarm {
       armed,
       baked,
-      main_module_script_id,
+      main_module_evaluating,
       disarm: || true,
     }
   }
@@ -251,24 +240,22 @@ mod tests {
   fn disarm_policy() {
     // The main module of a compiled program while it evaluates.
     assert_eq!(
-      check_disarm(Some(&state(true, true, Some(7))), Some(7)),
+      check_disarm(Some(&state(true, true, true)), true),
       Ok(DisarmCheck::Allowed)
     );
     // Nothing armed: no error, nothing to do.
     assert_eq!(
-      check_disarm(Some(&state(false, false, Some(7))), Some(7)),
+      check_disarm(Some(&state(false, false, true)), true),
       Ok(DisarmCheck::NothingArmed)
     );
-    // A web worker (no state), whatever the caller.
-    assert!(check_disarm(None, Some(7)).is_err());
-    // Another script: a dependency, eval, node:vm, a later import.
-    assert!(check_disarm(Some(&state(true, true, Some(7))), Some(8)).is_err());
-    assert!(check_disarm(Some(&state(false, true, Some(7))), Some(8)).is_err());
-    // No JavaScript frame at all.
-    assert!(check_disarm(Some(&state(true, true, Some(7))), None).is_err());
-    // Before or after the main module's evaluation.
-    assert!(check_disarm(Some(&state(true, true, None)), Some(7)).is_err());
+    // A web worker (no state), whatever it holds.
+    assert!(check_disarm(None, true).is_err());
+    // Without the main module's import.meta, limits in force or not.
+    assert!(check_disarm(Some(&state(true, true, true)), false).is_err());
+    assert!(check_disarm(Some(&state(false, true, true)), false).is_err());
+    // Before or after the main module's evaluation, even with it.
+    assert!(check_disarm(Some(&state(true, true, false)), true).is_err());
     // Limits from the command line.
-    assert!(check_disarm(Some(&state(true, false, Some(7))), Some(7)).is_err());
+    assert!(check_disarm(Some(&state(true, false, true)), true).is_err());
   }
 }

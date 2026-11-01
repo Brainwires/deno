@@ -8099,19 +8099,19 @@ where the changes are discussed.
      `case_only_renames_are_found_once`.
 
 203. **`feat(compile)`: a compiled program's main module can disarm its baked
-     resource limits** (`Deno.disarmResourceLimits()`;
+     resource limits** (`Deno.disarmResourceLimits(import.meta)`;
      `cli/lib/resource_limits.rs`, `cli/lib/worker.rs`,
      `runtime/ops/runtime.rs`, `runtime/js/90_deno_ns.js`,
-     `libs/core/runtime/{jsruntime,jsrealm}.rs`, `lib.deno.ns.d.ts`; the queue's
-     item 18b, for denext):
+     `libs/core/runtime/bindings.rs`, `lib.deno.ns.d.ts`; the queue's item 18b,
+     for denext):
      - Item 92's limits, given to `deno compile`, are enforced by the compiled
        program however it is started, so the same executable's subcommands
        (denext's `./app job <name>` and `./app db migrate` beside `./app`, the
        server) ran under the server's `--max-memory` / `--max-cpu-time` /
        `--max-time`, and a long job or migration was ended with 124 or 152.
-     - `Deno.disarmResourceLimits()` lifts them: the watchdog thread stops
-       without ending anything, and the near-heap-limit callback raises the heap
-       to the limit the isolate would have had without `--max-memory`
+     - `Deno.disarmResourceLimits(import.meta)` lifts them: the watchdog thread
+       stops without ending anything, and the near-heap-limit callback raises
+       the heap to the limit the isolate would have had without `--max-memory`
        (`create_isolate_create_params`; V8 can only lower a heap limit after
        creation, so the raise goes through the callback). It returns `true`, or
        `false` when there are no limits (the same entry point under `deno run`
@@ -8121,25 +8121,19 @@ where the changes are discussed.
        program (or anything it spawns) turn the guardrail off. Only the
        program's own entry point decides, and only then. The op throws
        `NotCapable`, changing nothing, unless all of these hold:
-       - the innermost JavaScript frame is the main module's own source,
-         compared by V8 script id (`JsRuntime::module_script_id`, new), not by
-         name: a dependency, `eval`, `new Function` and a `node:vm` script given
-         the main module's file name are other scripts. The op is installed on
-         `Deno` as is (no JavaScript wrapper frame), and is never a fast call.
-         What this establishes is that the main module's own code made the call,
-         not where the function it called came from (the denext.8 audit, F3): a
-         dependency that hands the op to the main module
-         (`export const
-         init = Deno.disarmResourceLimits`, a bound
-         function, a getter on an object the main module reads) adds no
-         JavaScript frame, so the main module invoking it at its top level is
-         accepted like a direct call (test: `disarm_handed`). V8 gives an API
-         callback no frame and no callee identity, so no stricter check exists
-         at the op boundary; a stricter design would take an explicit
-         capability, the main module's `import.meta`, which a dependency does
-         not hold. The TS docs say the same;
+       - the argument is the main module's own `import.meta` object, a
+         capability: core's import-meta callback marks that one object with a
+         private symbol (`deno_core::is_main_module_import_meta`), which script
+         can't read, write or copy, and which a `Proxy`, `Object.create` or a
+         spread doesn't carry. A dependency holds its own `import.meta`, not
+         this one, so it can't pass it, and neither can `eval`, `new Function`,
+         `node:vm` or a worker. A main module that hands its `import.meta` to
+         other code has given that code the decision: that is its own choice,
+         and the TS docs say so. (Until the denext.8 audit, F3, this was a check
+         that the innermost frame was the main module's, which a dependency
+         passed by handing the op itself to the main module; item 214.);
        - the main module is still evaluating (its top level, top-level `await`s
-         included): the script id is set in `LibMainWorker::execute_main_module`
+         included): the state is set in `LibMainWorker::execute_main_module`
          just before evaluation and cleared once it settles, so a request
          handler, a timer or a module imported later can't disarm anything;
        - it runs on the main worker: only that worker's `OpState` carries the
@@ -8150,15 +8144,17 @@ where the changes are discussed.
        The limits arm when the main worker is created, as before (the heap cap
        at isolate creation, the CPU budget and deadline from that moment), so a
        program that doesn't call it, or calls it too late, is limited exactly as
-       before. A CommonJS entry point runs its code in a separate script and
-       can't disarm.
+       before. A CommonJS entry point has no `import.meta` and can't disarm.
      - Tests: `compile/resource_limits` `disarm` (compiled with
        `--max-memory=64m --max-cpu-time=1 --max-time=2`, `./out job` disarms and
        then keeps a 160 MB heap, burns 1.5 s of CPU and runs past 2 s to its
-       end; `./out` alone still ends with 137) and `disarm_refused` (a
-       dependency, `eval`, `new Function`, `node:vm` with the main module's file
-       name, a Worker and the main module after its evaluation all get
-       `NotCapable`, and `--max-time` still ends the program with 124);
+       end; `./out` alone still ends with 137), `disarm_refused` (no argument, a
+       dependency's own `import.meta`, a look-alike, spread, `Object.create` or
+       `Proxy` of the main module's, `eval`, `new Function`, `node:vm`, a
+       Worker, and the main module's after its evaluation all get `NotCapable`,
+       and `--max-time` still ends the program with 124), `disarm_handed` (a
+       dependency without the object is refused, the main module's call works)
+       and `disarm_given` (what the main module gives away works);
        `run/resource_limits` `disarm_command_line` (`deno run --max-time`:
        `NotCapable`) and `disarm_without_limits` (`false`); `disarm_policy`
        (`runtime/ops/runtime.rs`), `a_limit_and_a_disarm_race_once` and
@@ -8390,18 +8386,30 @@ where the changes are discussed.
      the download's check was extracted and checked as the update),
      `the_extraction_digest_is_the_archives` (`archive.rs`).
 
-214. **`docs`: what the disarm frame check and the scoped sidecar run grant
-     establish** (the denext.8 audit, F3 and F4; `lib.deno.ns.d.ts`,
-     `runtime/ops/runtime.rs`, `cli/rt/run.rs`, items 190 and 203, the spec
-     `compile/resource_limits` `disarm_handed`). Neither claim was true as
-     written and neither has an honest fix at its boundary (item 203 and 190 say
-     why and what would); the docs now say what holds.
+214. **`feat(compile)!`: `Deno.disarmResourceLimits` takes the main module's
+     `import.meta`; what the scoped sidecar run grant establishes** (the
+     denext.8 audit, F3 and F4; `runtime/ops/runtime.rs`,
+     `libs/core/runtime/bindings.rs`, `cli/lib/worker.rs`, `lib.deno.ns.d.ts`,
+     `cli/rt/run.rs`, items 190 and 203):
+     - F3: the frame check established who called, not where the function came
+       from, so a dependency handing the op to the main module passed. V8 gives
+       an API callback no frame or callee identity to do better with, so before
+       the API ships, `Deno.disarmResourceLimits()` became
+       `Deno.disarmResourceLimits(import.meta)`, refused for anything but the
+       main module's own object (item 203). A main module handing its
+       `import.meta` out remains its own decision. Tests: the
+       `compile/resource_limits` specs `disarm_refused`, `disarm_handed` (now a
+       dependency, with its own `import.meta` or nothing, is refused and the
+       main module's works) and `disarm_given`; `disarm_policy`.
+     - F4: the scoped sidecar run grant is documented as a limit by name, not
+       containment (item 190); denext warns at packaging. Hashing the extracted
+       program at packaging and verifying it at spawn is the fix, for denext.9.
 
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
 169-174, 176, 178, 180, 182-184, 186, 187, 189-191, 193-196, 198-203, 206, 207,
-209-213) are what the prebuilt `libdenort` carries. The CLI-side parts (for
+209-214) are what the prebuilt `libdenort` carries. The CLI-side parts (for
 example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's
 launchers) are in the branch too, but a stock CLI does not run them; denext's
 own launcher provides that environment.

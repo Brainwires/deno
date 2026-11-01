@@ -201,8 +201,7 @@ const denoNs = {
       external,
     };
   },
-  // denext: the op itself, not a wrapper, so the frame calling it is the
-  // caller's own (the op checks it is the main module's).
+  // denext: takes the main module's import.meta (the op checks it).
   disarmResourceLimits: op_disarm_resource_limits,
   mkdirSync: fs.mkdirSync,
   mkdir: fs.mkdir,

@@ -1,2 +1,5 @@
-handed true
+dependency, nothing NotCapable
+dependency, its own NotCapable
+handed, nothing NotCapable
+main module true
 done
