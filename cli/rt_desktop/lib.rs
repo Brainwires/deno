@@ -57,7 +57,7 @@ use denort::run::RunOptions;
 /// makes the failure mode obvious instead of "the desktop app silently won't
 /// launch".
 const _: () = assert!(
-  laufey::LAUFEY_API_VERSION == 51,
+  laufey::LAUFEY_API_VERSION == 52,
   "LAUFEY_API_VERSION mismatch: update this assert and the prebuilt backend release pin in cli/tools/desktop.rs when laufey bumps its API version",
 );
 
@@ -1163,6 +1163,10 @@ impl denort::desktop::DesktopApi for WefDesktopApi {
     laufey::quit();
   }
 
+  fn answer_quit_request(&self, allow: bool) {
+    laufey::answer_quit_request(allow);
+  }
+
   fn window_capabilities(
     &self,
   ) -> deno_runtime::ops::desktop::WindowCapabilitiesInfo {
@@ -1201,6 +1205,7 @@ impl denort::desktop::DesktopApi for WefDesktopApi {
       always_on_top_levels: o.window_levels() && cfg!(target_os = "macos"),
       transparent: o.transparent(),
       layer_shell: o.layer_shell(),
+      layer_shell_edge_anchor: o.layer_edge_anchor(),
       activation_policy: o.activation_policy(),
       non_activating: o.non_activating(),
       // Every backend but Winit has the speech entry points; whether the
@@ -3933,6 +3938,19 @@ async fn run_desktop(
         laufey::on_platform_features_changed(move || {
           let _ = features_tx.try_send(
             deno_runtime::ops::desktop::DesktopEvent::PlatformFeaturesChanged,
+          );
+        });
+      }
+
+      // The OS asks the app to quit (laufey API 52). An event the app never
+      // gets (a full queue, a stuck page) is laufey's deadline to deal with.
+      {
+        let quit_tx = event_tx.0.clone();
+        laufey::on_quit_requested(move |kind| {
+          let _ = quit_tx.try_send(
+            deno_runtime::ops::desktop::DesktopEvent::QuitRequested {
+              session_end: kind == laufey::QuitRequestKind::SessionEnd,
+            },
           );
         });
       }

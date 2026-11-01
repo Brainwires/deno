@@ -802,6 +802,7 @@ const NOT_IMPORTED_OPS = [
   "op_desktop_stop_speaking",
   "op_desktop_speech_voices",
   "op_desktop_quit",
+  "op_desktop_answer_quit_request",
   "op_desktop_set_quit_on_last_window_closed",
   "op_desktop_close_reply",
   // Deno.desktop.updater (full-app self-update)
@@ -873,6 +874,7 @@ const WORKER_EXCLUDED_OPS = [
   "op_desktop_auth_session_cancel",
   "op_desktop_run_on_main_thread",
   "op_desktop_quit",
+  "op_desktop_answer_quit_request",
   "op_desktop_set_quit_on_last_window_closed",
   "op_desktop_close_reply",
   "op_desktop_clipboard_capabilities",

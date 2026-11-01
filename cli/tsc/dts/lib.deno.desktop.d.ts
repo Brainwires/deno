@@ -1954,6 +1954,10 @@ declare namespace Deno {
       transparent: boolean;
       /** An `overlay: true` window is a wlr-layer-shell surface. */
       layerShell: boolean;
+      /** `setPosition` on an `overlay: true` window takes screen coordinates
+       * and anchors it to the nearest edges of its display, clear of the
+       * panels. */
+      layerShellEdgeAnchor: boolean;
       /** {@linkcode Dock.setActivationPolicy} works (macOS). */
       activationPolicy: boolean;
       /** `noActivate: true` makes a real non-activating panel. On Linux
@@ -2429,8 +2433,10 @@ declare namespace Deno {
        * moved the window buttons, or changed the double-click action, the
        * colour scheme or the accent colour. Read it again. */
       titlebarpreferenceschanged: Event;
-      /** Cancelable: {@linkcode quit} was called. */
-      beforequit: Event;
+      /** Cancelable: {@linkcode quit} was called, or the OS asks the app to
+       * quit. Its `reason` is `"session-end"` when the user's session is
+       * ending (see {@linkcode quit}), else `"quit"`. */
+      beforequit: Event & { readonly reason: "quit" | "session-end" };
       /** A URL routed to the running app (macOS). */
       openurl: CustomEvent<OpenUrlDetail>;
       /** A file opened with the running app (macOS). */
@@ -3237,9 +3243,22 @@ declare namespace Deno {
      * closes (the remaining windows close without another event) and this
      * returns `true`.
      *
-     * Quitting from the macOS app menu's Quit item (Cmd+Q, the `quit` role)
-     * does not go through this and can't be canceled. */
+     * The OS's own quits run this too: on macOS Cmd+Q, the `quit` role, the
+     * Dock's Quit and a logout, on Windows the session ending
+     * (WM_QUERYENDSESSION), so listeners can cancel them. The OS isn't held
+     * for long: an app that doesn't answer quits anyway after 5 s. A session
+     * end (`reason: "session-end"`) stays held after a listener's
+     * `preventDefault()`, so a page across a bridge can still decide: call
+     * {@linkcode quit} again to let it go or {@linkcode cancelQuit} to refuse
+     * it, within 10 s on macOS and 4 s on Windows, when the session goes on
+     * ending and the app quits. A Windows tray menu's `quit` role quits at
+     * once and asks nobody. */
     export function quit(): boolean;
+
+    /** Refuse the session end the OS is waiting on, held by a `"beforequit"`
+     * or `close` listener: macOS cancels the logout, and Windows stops it (the
+     * user can still force it). `false` when no session end is held. */
+    export function cancelQuit(): boolean;
 
     /** Whether the app quits when its last window closes (default `true`).
      * Creating a {@linkcode Deno.Tray} sets it to `false` unless the app set

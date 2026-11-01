@@ -86,6 +86,7 @@ pub const DESKTOP_JS: &str = r#"
     op_desktop_stop_speaking,
     op_desktop_speech_voices,
     op_desktop_quit,
+    op_desktop_answer_quit_request,
     op_desktop_set_quit_on_last_window_closed,
     op_desktop_close_reply,
   } = internals.core.ops;
@@ -2080,6 +2081,9 @@ pub const DESKTOP_JS: &str = r#"
   internals.defineEventHandler(desktop, "beforequit");
   let quitOnLastWindowClosed = true;
   let quitOnLastWindowClosedSet = false;
+  // The OS is waiting on a session end that a listener held: its quit() can
+  // come later (a page asked across the bridge), until laufey's deadline.
+  let sessionEndHeld = false;
   function setQuitOnLastWindowClosed(value) {
     quitOnLastWindowClosed = !!value;
     op_desktop_set_quit_on_last_window_closed(quitOnLastWindowClosed);
@@ -2177,6 +2181,19 @@ pub const DESKTOP_JS: &str = r#"
       configurable: true,
       enumerable: true,
     },
+    // A session end the OS is waiting on is refused (laufey API 52). False
+    // when none is.
+    cancelQuit: {
+      value: function cancelQuit() {
+        if (!sessionEndHeld) return false;
+        sessionEndHeld = false;
+        op_desktop_answer_quit_request(false);
+        return true;
+      },
+      writable: true,
+      configurable: true,
+      enumerable: true,
+    },
     // Electron's app.quit(): a cancelable "beforequit" on Deno.desktop, then
     // a cancelable "close" on every open window; any preventDefault() aborts
     // (returns false). Otherwise the app shuts down as when its last window
@@ -2184,6 +2201,7 @@ pub const DESKTOP_JS: &str = r#"
     quit: {
       value: function quit() {
         const beforeQuit = new Event("beforequit", { cancelable: true });
+        beforeQuit.reason = sessionEndHeld ? "session-end" : "quit";
         desktop.dispatchEvent(beforeQuit);
         if (beforeQuit.defaultPrevented) return false;
         for (const win of windows.values()) {
@@ -3194,6 +3212,17 @@ pub const DESKTOP_JS: &str = r#"
             desktop.dispatchEvent(new Event("platformfeatureschanged"));
             break;
           }
+          case "quitRequested": {
+            // laufey API 52: Cmd+Q, the Dock, a logout. quit() answers yes by
+            // quitting. A refused plain quit is over (a listener that decides
+            // later quits by itself); a refused session end stays held, since
+            // only laufey's deadline or cancelQuit() may end the OS's wait.
+            sessionEndHeld = ev.sessionEnd;
+            if (!desktop.quit() && !ev.sessionEnd) {
+              op_desktop_answer_quit_request(false);
+            }
+            break;
+          }
           case "fileDrop": {
             const target = windows.get(ev.windowId);
             if (!target) break;
@@ -3728,6 +3757,15 @@ mod tests {
       DESKTOP_JS.contains("if (closeEvent.defaultPrevented) return false;")
     );
     assert!(DESKTOP_JS.contains("op_desktop_quit();"));
+    // The OS's quit request runs quit(); a plain refusal is answered at once,
+    // a session end stays held for laufey's deadline.
+    assert!(DESKTOP_JS.contains("case \"quitRequested\":"));
+    assert!(DESKTOP_JS.contains(
+      "if (!desktop.quit() && !ev.sessionEnd) {\n              op_desktop_answer_quit_request(false);"
+    ));
+    assert!(DESKTOP_JS.contains(
+      "beforeQuit.reason = sessionEndHeld ? \"session-end\" : \"quit\";"
+    ));
     // The tray-only rule: a Tray keeps the app alive unless the app chose.
     assert!(
       DESKTOP_JS.contains(
@@ -3740,6 +3778,7 @@ mod tests {
       "windowCapabilities:",
       "quitOnLastWindowClosed:",
       "quit:",
+      "cancelQuit:",
       "BrowserWindowPrototype.setTitleBarStyle",
       "BrowserWindowPrototype.setWindowButtonPosition",
       "BrowserWindowPrototype.setBackgroundMaterial",

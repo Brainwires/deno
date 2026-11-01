@@ -8232,11 +8232,30 @@ where the changes are discussed.
      in that position on Windows; anywhere else it is the app's own. Test:
      `the_app_args_leave_out_the_de_elevation_relaunch_argument`.
 
+210. **`feat(desktop)`: the OS's quits reach the app's guards** (laufey API 52;
+     `cli/rt/desktop.rs`, `cli/rt_desktop/lib.rs`, `runtime/ops/desktop.rs`).
+     Cmd+Q, the `quit` role, the Dock's Quit and a logout on macOS, and
+     `WM_QUERYENDSESSION` on Windows, now run `Deno.desktop.quit()`, so a
+     `beforequit` or `close` listener can refuse them. `beforequit` carries
+     `reason` (`"quit"` or `"session-end"`). A held session end waits for
+     `quit()` or the new `Deno.desktop.cancelQuit()`, bounded in laufey: 5 s for
+     a quit nobody answers, 10 s for a macOS session end, 4 s on Windows, under
+     the 5 s before its "preventing shutdown" screen. A Windows tray menu's raw
+     `quit` role quits at once with no reason, as macOS's used to. Tests:
+     `desktop_ops_inert`, the `quitRequested` assertions in `cli/rt/desktop.rs`,
+     laufey's `--quit-request`.
+
+211. **`feat(desktop)`: `windowCapabilities().layerShellEdgeAnchor`** (laufey
+     API 52). `setPosition` on a Wayland layer surface takes screen coordinates:
+     it picks the output there and anchors to the nearest edges, so a position
+     at the bottom or right edge stays clear of that edge's panels. The key
+     reports it. Tests: `desktop_ops_inert`, laufey's `--overlay-edge`.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
 169-174, 176, 178, 180, 182-184, 186, 187, 189-191, 193-196, 198-203, 206,
-207, 209) are what the prebuilt `libdenort` carries. The CLI-side parts (for
+207, 209-211) are what the prebuilt `libdenort` carries. The CLI-side parts (for
 example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's
 launchers) are in the branch too, but a stock CLI does not run them; denext's
 own launcher provides that environment.
