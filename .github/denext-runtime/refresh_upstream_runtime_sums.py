@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Copyright 2018-2026 the Deno authors. MIT license.
 """Regenerate cli/upstream_runtime_sums.lock: the SHA-256 of every runtime
 archive this fork's CLI can download from dl.deno.land (DENEXT.md item 215).
 

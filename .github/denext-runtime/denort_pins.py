@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Copyright 2018-2026 the Deno authors. MIT license.
 """The release's checks of the denort SHA-256s compiled into the CLI
 (DENEXT_DENORT_SHA256S, DENEXT.md items 188 and 215).
 

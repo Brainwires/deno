@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Copyright 2018-2026 the Deno authors. MIT license.
 """Tests of denort_pins.py. Run: python3 -I .github/denext-runtime/denort_pins_test.py"""
 import hashlib
 import os
