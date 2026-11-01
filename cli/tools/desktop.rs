@@ -1754,8 +1754,8 @@ async fn package_desktop_app(
 /// The backend binary is renamed to `AppName.exe` so it auto-loads the
 /// co-located runtime — no `.bat` launcher is needed. See
 /// [`windows_runtime_name`] for why the two backends name it differently.
-/// With `cef`, `AppName.exe` carries the app's icon and version resources
-/// instead of the bootstrap's ([`stamp_windows_exe_resources`]).
+/// `AppName.exe` carries the app's icon and version resources instead of the
+/// backend's ([`stamp_windows_exe_resources`]).
 async fn package_windows_app_dir(
   dylib_path: &Path,
   desktop_flags: &DesktopFlags,
@@ -1875,25 +1875,18 @@ async fn package_windows_app_dir(
     }
   }
 
-  // With `cef` the launcher is CEF's bootstrap.exe, which carries CEF's own
-  // icon and version resources ("CEF bootstrap" in Task Manager): it shows
-  // as the app instead, with the app's icon in Explorer, the taskbar and the
-  // Start menu, and its name and version in Task Manager and the file's
-  // properties. The webview launcher ships as laufey builds it.
-  if backend == "cef" {
-    let icon_path = app_dir.join("AppIcon.ico");
-    let icon_bytes = if icon_path.is_file() {
-      Some(std::fs::read(&icon_path)?)
-    } else {
-      None
-    };
-    stamp_windows_exe_resources(
-      &launcher_path,
-      &app_name,
-      icon_bytes.as_deref(),
-      config_package_version(cli_options).as_deref(),
-    )?;
-  }
+  // The launcher (CEF's bootstrap.exe, or laufey's WebView2 host) carries
+  // its builder's icon and version resources (CEF's "CEF bootstrap" in Task
+  // Manager; the WebView2 host the generic icon): it shows as the app
+  // instead, with the app's icon in Explorer, the taskbar, the title bar
+  // (laufey's windows take the executable's own icon) and the Start menu,
+  // and its name and version in Task Manager and the file's properties.
+  stamp_windows_launcher(
+    &app_dir,
+    &launcher_path,
+    &app_name,
+    config_package_version(cli_options).as_deref(),
+  )?;
 
   // `<app>.exe` has no launcher to set the backend's launch environment, so
   // the app id (per-app web storage, the single-instance lock's key), the CEF
@@ -3621,6 +3614,30 @@ fn windows_version_words(config_version: Option<&str>) -> [u16; 4] {
     *word = field.min(u16::MAX as u64) as u16;
   }
   words
+}
+
+/// Stamp the app's launcher, `launcher` in `app_dir`, with the app's name and
+/// version and the `AppIcon.ico` beside it (when there is one), whichever
+/// backend built it: CEF's bootstrap.exe and laufey's WebView2 host both ship
+/// their builder's resources.
+fn stamp_windows_launcher(
+  app_dir: &Path,
+  launcher: &Path,
+  app_name: &str,
+  config_version: Option<&str>,
+) -> Result<(), AnyError> {
+  let icon_path = app_dir.join("AppIcon.ico");
+  let icon_bytes = if icon_path.is_file() {
+    Some(std::fs::read(&icon_path)?)
+  } else {
+    None
+  };
+  stamp_windows_exe_resources(
+    launcher,
+    app_name,
+    icon_bytes.as_deref(),
+    config_version,
+  )
 }
 
 /// Replace the icon and version resources of the app's executable, `exe`,
@@ -8541,6 +8558,42 @@ def456  other.zip
     let file_version = info.info.file_version;
     assert_eq!(file_version.major, (2 << 16) | 5);
     assert_eq!(file_version.minor, 1 << 16);
+  }
+
+  #[test]
+  fn stamp_windows_launcher_gives_a_webview_host_the_app_icon() {
+    // laufey's WebView2 host ships with no icon of its own; the packaged
+    // launcher used to keep it that way (only CEF's was stamped), so
+    // Explorer, the title bars and the taskbar showed the generic icon.
+    let tmp = tempfile::tempdir().unwrap();
+    let launcher = tmp.path().join("MyApp.exe");
+    std::fs::write(&launcher, minimal_pe()).unwrap();
+    std::fs::write(tmp.path().join("AppIcon.ico"), fake_ico(b"THE APP'S ICON"))
+      .unwrap();
+    stamp_windows_launcher(tmp.path(), &launcher, "MyApp", Some("1.2.3"))
+      .unwrap();
+    let bytes = std::fs::read(&launcher).unwrap();
+    let image = editpe::Image::parse(bytes.as_slice()).unwrap();
+    let rd = image.resource_directory().unwrap();
+    assert!(
+      rd.get_main_icon()
+        .unwrap()
+        .unwrap()
+        .ends_with(b"THE APP'S ICON")
+    );
+    let info = rd.get_version_info().unwrap().unwrap();
+    assert_eq!(info.strings[0].strings["ProductName"], "MyApp");
+    assert_eq!(info.strings[0].strings["ProductVersion"], "1.2.3");
+
+    // Without an AppIcon.ico: named and versioned, no icon added.
+    std::fs::write(&launcher, minimal_pe()).unwrap();
+    std::fs::remove_file(tmp.path().join("AppIcon.ico")).unwrap();
+    stamp_windows_launcher(tmp.path(), &launcher, "MyApp", None).unwrap();
+    let bytes = std::fs::read(&launcher).unwrap();
+    let image = editpe::Image::parse(bytes.as_slice()).unwrap();
+    let rd = image.resource_directory().unwrap();
+    assert!(rd.get_main_icon().unwrap().is_none());
+    assert!(rd.get_version_info().unwrap().is_some());
   }
 
   #[test]
