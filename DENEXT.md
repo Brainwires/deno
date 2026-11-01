@@ -8405,11 +8405,26 @@ where the changes are discussed.
        containment (item 190); denext warns at packaging. Hashing the extracted
        program at packaging and verifying it at spawn is the fix, for denext.9.
 
+215. **`fix(desktop)`: a case-only rename of the executable is refused on every
+     platform** (`runtime/ops/desktop_update/treecheck.rs`, `mod.rs`,
+     `swap.rs`). Only Windows named it (item 202's follow-up): on macOS's
+     default case-insensitive APFS, `stage()` found `Contents/MacOS/App` under
+     the new name `app` and took it, and the helper swapped it in, leaving an
+     install that a case-sensitive volume could not start by the name it was
+     installed under; on a case-sensitive file system it read "the archive does
+     not hold this app". `stage()` and the apply now compare the installed and
+     staged names as the two directories spell them (a launch may spell the path
+     differently from the file) and refuse the rename as `bundle_mismatch`,
+     recorded in `last_error` at apply time. Tests:
+     `a_case_only_rename_is_refused_as_the_directories_spell_it`,
+     `stage_refuses_a_case_only_rename_of_the_executable`,
+     `apply_refuses_a_case_only_rename_of_the_executable` (each failed before).
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
 169-174, 176, 178, 180, 182-184, 186, 187, 189-191, 193-196, 198-203, 206, 207,
-209-214) are what the prebuilt `libdenort` carries. The CLI-side parts (for
+209-215) are what the prebuilt `libdenort` carries. The CLI-side parts (for
 example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's
 launchers) are in the branch too, but a stock CLI does not run them; denext's
 own launcher provides that environment.

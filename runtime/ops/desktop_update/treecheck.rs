@@ -48,6 +48,7 @@
 
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::path::PathBuf;
 
 use super::error::UpdateError;
 use super::error::UpdateErrorCode as Code;
@@ -538,13 +539,14 @@ pub fn case_only_rename<'a>(
 
 /// Why an update whose executable's name changed only in case is refused.
 ///
-/// It is refused rather than accepted as the same file (which Windows'
-/// case-insensitive file system would open): the install is launched by the
-/// name it was installed under (its shortcuts, its registration, the
-/// helper's relaunch), a directory with per-directory case sensitivity on
-/// (`fsutil file setCaseSensitiveInfo`, which WSL turns on) would then hold
-/// no executable of that name, and an app that can't start never runs its
-/// trial, so it would not roll back either. An update keeps the name.
+/// It is refused rather than accepted as the same file (which a
+/// case-insensitive file system, Windows' or macOS's default, would open): the
+/// install is launched by the name it was installed under (its shortcuts, its
+/// registration, the helper's relaunch), a directory or volume that is case
+/// sensitive (`fsutil file setCaseSensitiveInfo`, which WSL turns on; a
+/// case-sensitive APFS volume) would then hold no executable of that name, and
+/// an app that can't start never runs its trial, so it would not roll back
+/// either. An update keeps the name.
 pub fn case_only_rename_message(exe_rel: &str, found: &str) -> String {
   format!(
     "the update renames the app's executable {exe_rel} to {found} (only the \
@@ -552,6 +554,49 @@ pub fn case_only_rename_message(exe_rel: &str, found: &str) -> String {
      the install is launched by it (package the new version with the name \
      {exe_rel})"
   )
+}
+
+/// `rel` under `root` as the directory entries spell it: at each step the exact
+/// name, else the one name differing only in case. `None` when it isn't there
+/// (or isn't readable).
+fn spelled_on_disk(root: &Path, rel: &Path) -> Option<PathBuf> {
+  let mut spelled = PathBuf::new();
+  for part in rel.components() {
+    let part = part.as_os_str().to_string_lossy();
+    let names = std::fs::read_dir(root.join(&spelled))
+      .ok()?
+      .map(|e| e.map(|e| e.file_name().to_string_lossy().into_owned()))
+      .collect::<Result<Vec<_>, _>>()
+      .ok()?;
+    if names.iter().any(|n| *n == part) {
+      spelled.push(part.as_ref());
+    } else {
+      spelled.push(case_only_rename(&part, names.iter().map(String::as_str))?);
+    }
+  }
+  Some(spelled)
+}
+
+/// Refuse a staged app whose executable's name differs from the installed
+/// one's only in case, on every platform (see [`case_only_rename_message`]).
+/// The names are compared as the two directories spell them: `exe_rel` comes
+/// from the running executable's path, which a case-insensitive file system
+/// lets a launch spell differently from the file. An executable that isn't
+/// there at all, under any case, is for the caller's own check to refuse.
+pub fn refuse_case_only_exe_rename(
+  install: &Path,
+  staged: &Path,
+  exe_rel: &Path,
+) -> Result<(), UpdateError> {
+  let want =
+    spelled_on_disk(install, exe_rel).unwrap_or_else(|| exe_rel.to_path_buf());
+  match spelled_on_disk(staged, &want) {
+    Some(found) if found != want => err(
+      Code::BundleMismatch,
+      case_only_rename_message(&walk_rel(&want), &walk_rel(&found)),
+    ),
+    _ => Ok(()),
+  }
 }
 
 /// [`verify_staged_tree`] for this platform: on Windows, against the
@@ -1216,6 +1261,46 @@ pub(crate) mod tests {
       "{}",
       e.message
     );
+  }
+
+  /// The rule on every platform, compared as the directories spell the names.
+  #[test]
+  fn a_case_only_rename_is_refused_as_the_directories_spell_it() {
+    let t = tempfile::tempdir().unwrap();
+    let tree = |name: &str, exe: &str| {
+      let root = t.path().join(name);
+      write(&root, exe, b"x");
+      root
+    };
+    let rel = Path::new("Contents").join("MacOS").join("App");
+    let install = tree("install", "Contents/MacOS/App");
+
+    // The same name, however this launch spelled it.
+    let same = tree("same", "Contents/MacOS/App");
+    refuse_case_only_exe_rename(&install, &same, &rel).unwrap();
+    let launched = Path::new("Contents").join("MacOS").join("APP");
+    refuse_case_only_exe_rename(&install, &same, &launched).unwrap();
+
+    // The executable's name, or a directory on its way, in another case.
+    let renamed = tree("renamed", "Contents/MacOS/app");
+    let e = refuse_case_only_exe_rename(&install, &renamed, &rel).unwrap_err();
+    assert_eq!(e.code, Code::BundleMismatch, "{}", e.message);
+    assert!(
+      e.message.contains(
+        "renames the app's executable Contents/MacOS/App to Contents/MacOS/app"
+      ),
+      "{}",
+      e.message
+    );
+    let dir = tree("dir", "Contents/macos/App");
+    let e = refuse_case_only_exe_rename(&install, &dir, &launched).unwrap_err();
+    assert!(e.message.contains("Contents/macos/App"), "{}", e.message);
+
+    // Not there under any case: the caller's shape check refuses it.
+    let missing = tree("missing", "Contents/MacOS/Other");
+    refuse_case_only_exe_rename(&install, &missing, &rel).unwrap();
+    // No executable path at all (an AppImage is the file itself).
+    refuse_case_only_exe_rename(&install, &same, Path::new("")).unwrap();
   }
 
   #[test]

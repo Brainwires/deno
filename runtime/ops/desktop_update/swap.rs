@@ -935,6 +935,13 @@ pub fn apply_swap_verified(
       ),
     );
   }
+  if let Err(e) = super::treecheck::refuse_case_only_exe_rename(
+    &layout.install,
+    &staged_path,
+    &layout.exe_rel,
+  ) {
+    return refuse_staged_with(layout, state, e);
+  }
   // What this helper will swap, pinned before anything checks it. It must
   // be what was verified and staged.
   let pinned = staged.listing().ok();
@@ -3381,6 +3388,34 @@ mod tests {
     assert_eq!(s.rejected.as_deref(), Some("2.0.0"));
     assert_eq!(s.all_rejected(), vec!["2.0.0"]);
     assert_eq!(startup_action(l), StartupAction::Continue { trial: false });
+  }
+
+  /// The apply refuses a staged app whose executable differs from the
+  /// installed one only in case, whatever put it in the staging directory:
+  /// the digest in the state matches it, and outside Windows no tree check
+  /// reads the name.
+  #[test]
+  fn apply_refuses_a_case_only_rename_of_the_executable() {
+    let f = fixture(Some("2.0.0"));
+    let l = &f.layout;
+    let dir = l.extract_dir().join("App");
+    let renamed = FIXTURE_EXE.to_uppercase();
+    assert_ne!(renamed, FIXTURE_EXE);
+    std::fs::rename(dir.join(FIXTURE_EXE), dir.join(&renamed)).unwrap();
+    let mut s = read_state(l).unwrap();
+    s.staged_digest = Some(tree_digest(&dir).unwrap());
+    write_state(l, &s).unwrap();
+    let e = apply_swap(l, &mut s).unwrap_err();
+    assert_eq!(e.code, Code::BundleMismatch, "{}", e.message);
+    assert!(e.message.contains("only the case differs"), "{}", e.message);
+    assert_eq!(installed(l), "1.0.0");
+    let s = read_state(l).unwrap();
+    assert_eq!(s.phase, Phase::Staged);
+    assert!(
+      s.last_error
+        .unwrap_or_default()
+        .contains("only the case differs")
+    );
   }
 
   /// A refusal by the OS signature re-check or the Windows tree check at
