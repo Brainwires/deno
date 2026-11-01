@@ -150,6 +150,9 @@
     "passkeys": [
       "launch: a completed registration / authentication ceremony"
     ],
+    "quit": [
+      "the OS's quits"
+    ],
     "update": [
       "a staged update signed by the same Developer ID / Authenticode signer is accepted"
     ],
@@ -181,6 +184,9 @@
     "passkeys": [
       "launch: a completed registration / authentication ceremony"
     ],
+    "quit": [
+      "the OS's quits"
+    ],
     "update": [
       "a staged update signed by the same Developer ID / Authenticode signer is accepted"
     ],
@@ -189,9 +195,21 @@
       "launch: the tray rule"
     ]
   },
-  "x86_64-unknown-linux-gnu/cef/keyring-locked": {},
-  "x86_64-unknown-linux-gnu/cef/keyring-kwallet": {},
-  "x86_64-unknown-linux-gnu/cef/keyring-persist": {},
+  "x86_64-unknown-linux-gnu/cef/keyring-locked": {
+    "quit": [
+      "the OS's quits"
+    ]
+  },
+  "x86_64-unknown-linux-gnu/cef/keyring-kwallet": {
+    "quit": [
+      "the OS's quits"
+    ]
+  },
+  "x86_64-unknown-linux-gnu/cef/keyring-persist": {
+    "quit": [
+      "the OS's quits"
+    ]
+  },
   "aarch64-unknown-linux-gnu/webview/default": {
     "asmt": [
       "launch: a real OS auth session"
@@ -215,6 +233,9 @@
     ],
     "passkeys": [
       "launch: a completed registration / authentication ceremony"
+    ],
+    "quit": [
+      "the OS's quits"
     ],
     "update": [
       "a staged update signed by the same Developer ID / Authenticode signer is accepted"
@@ -247,6 +268,9 @@
     "passkeys": [
       "launch: a completed registration / authentication ceremony"
     ],
+    "quit": [
+      "the OS's quits"
+    ],
     "update": [
       "a staged update signed by the same Developer ID / Authenticode signer is accepted"
     ],
@@ -255,9 +279,21 @@
       "launch: the tray rule"
     ]
   },
-  "aarch64-unknown-linux-gnu/cef/keyring-locked": {},
-  "aarch64-unknown-linux-gnu/cef/keyring-kwallet": {},
-  "aarch64-unknown-linux-gnu/cef/keyring-persist": {},
+  "aarch64-unknown-linux-gnu/cef/keyring-locked": {
+    "quit": [
+      "the OS's quits"
+    ]
+  },
+  "aarch64-unknown-linux-gnu/cef/keyring-kwallet": {
+    "quit": [
+      "the OS's quits"
+    ]
+  },
+  "aarch64-unknown-linux-gnu/cef/keyring-persist": {
+    "quit": [
+      "the OS's quits"
+    ]
+  },
   "x86_64-pc-windows-msvc/webview/default": {
     "asmt": [
       "launch: a real OS auth session"
@@ -282,6 +318,9 @@
     ],
     "passkeys": [
       "launch: a completed registration / authentication ceremony"
+    ],
+    "quit": [
+      "the OS's quits"
     ],
     "update": [
       "a staged update signed by the same Developer ID / Authenticode signer is accepted",
@@ -336,6 +375,9 @@
     "passkeys": [
       "launch: a completed registration / authentication ceremony"
     ],
+    "quit": [
+      "the OS's quits"
+    ],
     "update": [
       "a staged update signed by the same Developer ID / Authenticode signer is accepted",
       "an install the user can't write -> install_not_writable"
@@ -372,6 +414,9 @@
     ],
     "passkeys": [
       "launch: a completed registration / authentication ceremony"
+    ],
+    "quit": [
+      "the OS's quits"
     ],
     "update": [
       "a staged update signed by the same Developer ID / Authenticode signer is accepted",
@@ -427,6 +472,9 @@
     ],
     "passkeys": [
       "launch: a completed registration / authentication ceremony"
+    ],
+    "quit": [
+      "the OS's quits"
     ],
     "update": [
       "a staged update signed by the same Developer ID / Authenticode signer is accepted",
