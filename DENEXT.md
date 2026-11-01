@@ -8405,6 +8405,27 @@ where the changes are discussed.
        containment (item 190); denext warns at packaging. Hashing the extracted
        program at packaging and verifying it at spawn is the fix, for denext.9.
 
+215. **laufey on CEF 156.0.15** (laufey `chore/cef-156-rebump` 1aa48ac, now
+     `development-denext`; no runtime API change, laufey API 51; runtime
+     3.0.0-denext.8). The CEF hosts move from CEF 156.0.14+g4fa4ab5 (Chromium
+     156.0.8078.48) to CEF 156.0.15+gcf671c0 (Chromium 156.0.8078.80), the
+     newest CEF stable build for all six platforms, for Chrome's security fixes
+     from 156.0.8078.73 on. laufey's Makefile and `cef/flake.nix` pin each
+     platform's archive by SHA-256, checked against the `.sha1` and `.sha256`
+     CEF publishes.
+     - Same CEF branch (8078) and API version (15600).
+       `chrome_main_delegate.cc`, `spellcheck_common.cc` and
+       `hunspell_dictionaries` are unchanged between the two Chromium tags, so
+       item 184's de-elevation relaunch and the bundled dictionaries stand:
+       `fetch_dictionaries.py` keeps its `COMMIT` and `.bdic` hashes, and only
+       its version comments move.
+     - The rest of the laufey range is CI and e2e: the arm64 macOS jobs on
+       macos-15, and launch checks that fit a 1024x768 display and report the
+       second window as uncovered on macOS 15.
+
+     Tests: laufey's full CI on the commit; this fork's desktop runtime build
+     and e2e on every target.
+
 216. **`fix(compile)`: no upstream runtime is downloaded**
      (`fix/runtime-pin-coverage`; `cli/standalone/binary.rs`,
      `denext_runtime.yml`, `.github/denext-runtime/`; CLI and CI only). Items
@@ -8518,7 +8539,7 @@ activation policy and speech, item 183; and, for runtime 3.0.0-denext.7, CEF
 `backgroundThrottling`, item 198; and the Windows focus, tray role and window
 icon fixes, item 207), at the commit pinned by `LAUFEY_SHA` in the workflow (or
 the `laufey_ref` input). The same commit is the `laufey` git dependency of
-`cli/rt_desktop/Cargo.toml` (crate 0.8.0, API 51, CEF 156.0.14).
+`cli/rt_desktop/Cargo.toml` (crate 0.8.0, API 51, CEF 156.0.15).
 
 laufey's `init_api` rejects any C ABI version mismatch between the runtime and
 the host, so the `laufey` crate libdenort links and the hosts are built from the
