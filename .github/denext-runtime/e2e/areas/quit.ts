@@ -70,7 +70,9 @@ export async function run(env: Env, rep: AreaReport) {
   }
   const data = async () =>
     (await results("quit")).find((x) => x.pid === first.pid)?.data ?? {};
-  const until = async (f: (d: Record<string, any>) => boolean) => {
+  const until = async (
+    f: (d: { reasons?: string[]; cancelQuit?: boolean }) => boolean,
+  ) => {
     for (let i = 0; i < 100; i++) {
       if (f(await data())) return true;
       await sleep(100);

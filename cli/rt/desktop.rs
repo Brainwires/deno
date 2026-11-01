@@ -3777,9 +3777,11 @@ mod tests {
     ));
     // A held session end ends with laufey's deadline: cancelQuit() can't reach
     // past it.
-    assert!(DESKTOP_JS.contains(
-      "if (sessionEndHeld && !op_desktop_quit_request_pending()) {"
-    ));
+    assert!(
+      DESKTOP_JS.contains(
+        "if (sessionEndHeld && !op_desktop_quit_request_pending()) {"
+      )
+    );
     assert!(DESKTOP_JS.contains("if (!isSessionEndHeld()) return false;"));
     // The tray-only rule: a Tray keeps the app alive unless the app chose.
     assert!(
