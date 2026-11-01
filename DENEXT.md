@@ -8405,6 +8405,28 @@ where the changes are discussed.
        containment (item 190); denext warns at packaging. Hashing the extracted
        program at packaging and verifying it at spawn is the fix, for denext.9.
 
+215. **`test(ci)`: the shipped Linux files' `NEEDED` lists, and a real `.rpm` on
+     Fedora** (the production audit's M1;
+     `.github/denext-runtime/linux_needed.py`, `verify.sh`, `rpm_smoke.sh`,
+     `rpm_smoke_inner.sh`, `rpm_smoke_build.ts`, `denext_runtime.yml`). The
+     `.deb` / `.rpm` dependency lists were the only guard on distros without a
+     library the hosts link, and nothing checked them outside Ubuntu 22.04:
+     - `linux_needed.py` lists what every ELF file in the runtime, CLI and
+       denort archives may declare, from the 3.0.0-denext.7 archives of both
+       architectures. `verify.sh` and the `denort_bin` and `cli` jobs fail on
+       any other library or on an unlisted ELF file. Each library is classed as
+       named by denext's package lists, pulled in by them, or bundled, so a new
+       one needs a decision on how packages get it. Tests:
+       `linux_needed_test.py`.
+     - The `rpm-smoke` job, which `publish` requires, packages the smoke app for
+       both backends with denext's own `buildDesktopRpm`
+       (`DENEXT_PACKAGING_VERSION`) and, in a Fedora container, installs it
+       without weak dependencies, checks that every library resolves before any
+       test tool is installed, starts `/usr/bin/smoke` under Xvfb as a normal
+       user with the sandbox on, waits for the page's report and removes the
+       package. It runs apart from `package` because it runs a JSR package and
+       needs no attestation permissions.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
@@ -8608,7 +8630,8 @@ version is the newest. Per target it:
    `make cef` (the CEF minimal distribution is downloaded by the Makefile);
 3. assembles the archives, checks architectures and dynamic dependencies (`file`
    / `lipo` / `otool -L` / `ldd`, and the import table of every Windows `.exe` /
-   `.dll` with `pe_deps.py`; any dependency that resolves nowhere fails it),
+   `.dll` with `pe_deps.py`; any dependency that resolves nowhere fails it; on
+   Linux, a library `linux_needed.py` doesn't list fails it too, item 215),
    packages a small `Deno.serve` app with the stock `deno desktop` 2.9.8 for
    both backends, and launches it (Linux under Xvfb): the page, served from
    `t3code://app`, POSTs back to `Deno.serve` and the app exits. A launch
