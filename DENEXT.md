@@ -7676,6 +7676,18 @@ where the changes are discussed.
      (and the matching `--allow-write`) from the release that has this, keeping
      the unscoped grant for older runtimes.
 
+     What the scope is and is not (the denext.8 audit, F4): it limits what the
+     app's code may run BY NAME (no `new Deno.Command("curl")`), which is
+     narrower than before. It is not containment of what runs: the copy takes a
+     `--allow-write` on the same folder, under which the app's own code can
+     write that file and then run it, and the copy sits in a user-writable cache
+     another process of the user can replace between the app's check of its
+     bytes and the spawn. Containment would need the runtime to materialize and
+     spawn the embedded program itself (a run grant by embedded path, no write
+     grant, the hash checked at spawn), which no release has. denext's package
+     run says so for each such sidecar (`sidecarRunWriteWarnings`); it does not
+     refuse the combination, which every project-file program sidecar is.
+
      Tests (`cli/rt/run.rs`): `desktop_app_cache_dir_per_os`,
      `desktop_cache_token_expands_to_the_app_cache` and
      `desktop_cache_token_never_widens_a_grant`.
@@ -7889,9 +7901,10 @@ where the changes are discussed.
 198. **`feat(desktop)`: `backgroundThrottling`, and hidden pages no longer
      frozen on macOS** (laufey API 51, from
      `fix/macos-hidden-page-and-hit-region` of Brainwires/laufey, landed on
-     `development-denext` at 359bde6; `runtime/ops/desktop.rs`, `cli/rt_desktop/lib.rs`,
-     `lib.deno.desktop.d.ts`; for runtime 3.0.0-denext.8). Two macOS findings
-     from a live run of a desktop companion and a tray app:
+     `development-denext` at 359bde6; `runtime/ops/desktop.rs`,
+     `cli/rt_desktop/lib.rs`, `lib.deno.desktop.d.ts`; for runtime
+     3.0.0-denext.8). Two macOS findings from a live run of a desktop companion
+     and a tray app:
      - laufey's WebView backend never set
        `WKPreferences.inactiveSchedulingPolicy`, and WebKit's default on macOS
        14+ (Suspend) freezes the page of a window that is not on screen: a
@@ -7964,7 +7977,8 @@ where the changes are discussed.
        descriptor-relative calls in std, so there the staging directory is
        refused only when it is a reparse point and who may write it is left to
        the install directory's ACL (a per-user install under `%LOCALAPPDATA%` is
-       private; `Program Files` is not writable by users).
+       private; `Program Files` is not writable by users). The helper's ROLLBACK
+       path checked nothing of what it put back until item 210.
      - Tests (`swap.rs`, `staging.rs`, `mod.rs`; the first four failed before
        the fix): `a_staging_directory_others_can_reach_is_refused`
        (group-writable, world-readable, a symlink),
@@ -8039,25 +8053,27 @@ where the changes are discussed.
      the window's bridge origins of a signed app. denext's Windows package build
      (`buildDesktopBundle`, which `scripts/package-windows.ts` calls, last,
      before it signs) now writes a tree manifest,
-     `{ "v": 1, "files": [{ "path", "size", "sha256" }] }` over every regular
-     file that is not a PE image, into the main executable as the `RT_RCDATA`
-     resource `DENEXT_TREE` (pure TypeScript, any host), so the executable's
-     signature covers it. After the OS check, `stage()` and the update helper
-     read the staged tree in the walk that records the digest the helper pins
-     (`Staged::listing`, the same reads as `tree_digest`, with a streaming
-     PE-header probe that applies `pe_files`' test), read the manifest from the
-     staged executable's bytes (their SHA-256 must be the walk's), and require
-     the listed files exactly: each with the same size and SHA-256, none
-     missing, none unlisted, no symlink or reparse point. When the running
-     executable carries a manifest, a staged app without one is refused
-     (`os_signature`): the protection can't be dropped by an update. A running
-     app without one accepts its first update without it, so it rolls out in one
-     release. macOS seals every bundle file in its code signature, and Linux has
-     no OS signature (item 143), so the check is Windows-only. Rejected: a
-     catalog file (MakeCat is Windows-only, and Windows packaging works from any
-     host); a resource with the launch policy alone (CEF blobs and sidecar JS
-     stay uncovered). Install-time tampering by a local writer of the install
-     directory is out of scope (the install directory's ACL). Tests:
+     `{ "v": 1, "appId", "version", "files": [{ "path", "size", "sha256" }] }`
+     over every regular file but the executable itself (PE images included; item
+     211 says why, and how the DLLs are signed first), into the main executable
+     as the `RT_RCDATA` resource `DENEXT_TREE` (pure TypeScript, any host), so
+     the executable's signature covers it. After the OS check, `stage()` and the
+     update helper read the staged tree in the walk that records the digest the
+     helper pins (`Staged::listing`, the same reads as `tree_digest`, with a
+     streaming PE-header probe that applies `pe_files`' test), read the manifest
+     from the staged executable's bytes (their SHA-256 must be the walk's),
+     require it to name this app and the version offered, and require the listed
+     files exactly: each with the same size and SHA-256, none missing, none
+     unlisted, no symlink or reparse point. When the running executable carries
+     a manifest, a staged app without one is refused (`os_signature`): the
+     protection can't be dropped by an update. A running app without one accepts
+     its first update without it, so it rolls out in one release. macOS seals
+     every bundle file in its code signature, and Linux has no OS signature
+     (item 143), so the check is Windows-only. Rejected: a catalog file (MakeCat
+     is Windows-only, and Windows packaging works from any host); a resource
+     with the launch policy alone (CEF blobs and sidecar JS stay uncovered).
+     Install-time tampering by a local writer of the install directory is out of
+     scope (the install directory's ACL). Tests:
      `the_probe_matches_the_pe_header_test`, `manifests_are_parsed_strictly`,
      `the_tree_must_match_the_manifest_exactly` (changed, flipped byte, missing,
      extra, a listed file turned PE, symlink, a name read twice),
@@ -8109,7 +8125,19 @@ where the changes are discussed.
          compared by V8 script id (`JsRuntime::module_script_id`, new), not by
          name: a dependency, `eval`, `new Function` and a `node:vm` script given
          the main module's file name are other scripts. The op is installed on
-         `Deno` as is (no JavaScript wrapper frame), and is never a fast call;
+         `Deno` as is (no JavaScript wrapper frame), and is never a fast call.
+         What this establishes is that the main module's own code made the call,
+         not where the function it called came from (the denext.8 audit, F3): a
+         dependency that hands the op to the main module
+         (`export const
+         init = Deno.disarmResourceLimits`, a bound
+         function, a getter on an object the main module reads) adds no
+         JavaScript frame, so the main module invoking it at its top level is
+         accepted like a direct call (test: `disarm_handed`). V8 gives an API
+         callback no frame and no callee identity, so no stricter check exists
+         at the op boundary; a stricter design would take an explicit
+         capability, the main module's `import.meta`, which a dependency does
+         not hold. The TS docs say the same;
        - the main module is still evaluating (its top level, top-level `await`s
          included): the script id is set in `LibMainWorker::execute_main_module`
          just before evaluation and cleared once it settles, so a request
@@ -8233,11 +8261,138 @@ where the changes are discussed.
      in that position on Windows; anywhere else it is the app's own. Test:
      `the_app_args_leave_out_the_de_elevation_relaunch_argument`.
 
+210. **`fix(desktop)`: the update helper's rollback puts back only a tree it
+     verified** (the denext.8 audit, F1; `runtime/ops/desktop_update/swap.rs`,
+     `mod.rs`; in every runtime with the rollback, 2.9.7-denext.9 through
+     3.0.0-denext.7). The apply re-checks the staged app because the state file
+     is writable by anything running as the user (item 199, the helper section);
+     the rollback took the same state file and checked nothing: it exchanged
+     whatever sat at `.old` into the install path and relaunched it, and with
+     the state `swapping` and a differing install id it first moved whatever sat
+     in the staging directory to `.old`. On macOS that let a program with no App
+     Management grant (which cannot modify the installed bundle) plant
+     `/Applications/App.app.old`, write the state file next to it
+     (`phase: "swapped"`, which `read_state` accepts from the owner with the
+     right schema and install path), and have the app's own signed helper
+     install it at the next launch (`startup_action` rolls a `swapped` state
+     with a launch recorded back) or at once
+     (`<exe> run denext-update-helper
+     rollback <pid>`). Elsewhere the same
+     user could already write the install, so it added little.
+     - `rollback_verified` (what `run_helper` and the in-helper recovery after a
+       failed apply call; the test wrappers `rollback` / `rollback_with` accept
+       everything) checks the tree that would go back to the install path before
+       anything is recorded or moved, through `verify_previous_for_helper`: the
+       install marker (`is_install_copy`), the embedded version equal to the
+       state's `from` (`check_embedded_version`), and the OS code signature
+       against the installed app (`verify_os_signature` with the
+       unsigned-development opt-out, as the apply's re-check; on Windows with
+       `authenticode_identity` for the candidate's images too, so a rollback
+       works offline, the identity match being what keeps a planted tree out).
+       The check runs on the staged tree before the `swapping` recovery moves it
+       to `.old`, and on `.old` before the exchange, whenever it would replace
+       an app at the install path (with nothing there, nothing is displaced and
+       there is no installed app to compare a signature with: the previous app
+       goes back as before). A `rollingBack` run resumed after its exchange
+       already ran checks nothing (`.old` then holds the failed app, and nothing
+       goes back).
+     - On failure (`refuse_rollback`): nothing moves, the version on trial is
+       not marked rejected, the state goes idle with `last_error` set to
+       `"<code>: <message>; nothing was rolled back"` and `cleanup` off (what
+       sits at `.old` or in staging is not this app's previous install, so it is
+       not deleted as one), the helper relaunches nothing and exits 1, and the
+       next launch starts the installed app, which passed the apply's checks.
+     - Tests: `a_rollback_puts_back_only_a_tree_it_verified` (`swap.rs`; failed
+       before: a planted `.old` under a forged `swapped` state, one without the
+       marker, a planted staged tree under a forged `swapping` state with a
+       differing install id, and a real trial's `.old` passing),
+       `the_rollback_check_runs_the_apply_checks_on_what_goes_back` (`mod.rs`:
+       the order marker → version → signature, on the fake app). The OS
+       signature leg on a real signed bundle is the macOS and Windows CI's.
+
+211. **`fix(desktop)`: the Windows tree manifest binds the app, the version and
+     every file but the executable** (the denext.8 audit, F2;
+     `runtime/ops/desktop_update/treecheck.rs`, `embedded.rs`, `mod.rs`,
+     `swap.rs`; the format of item 202, which no release has written). The
+     manifest listed only the files that are not PE images, and the OS check
+     says who signed a PE image, not which release or product it came from:
+     whoever held the update key could serve any mix of the publisher's signed
+     files (one release's runtime DLL, which carries the version that
+     `check_embedded_version` and the newer-than-installed check read, under
+     another release's executable and loose files, so an old
+     `laufey-launch.json` or sidecar JS ran under a new version label; or
+     another product's, since Windows has no signing-identifier check). Changed
+     now, before the first release that writes it (`deny_unknown_fields` stays:
+     a v1 reader refuses a field it does not know):
+     - The manifest is `{ "v": 1, "appId", "version", "files" }` over every
+       regular file but the executable that carries it, PE images included.
+       `parse_manifest` requires a non-blank identifier and a semantic version;
+       `compare` takes the executable's relative path and refuses a manifest
+       that lists it (it cannot hold its own hash; its signature is its check),
+       and every other file must be listed with its size and SHA-256 (an
+       unlisted PE image, another product's DLL or an addon, is now refused).
+     - `verify_staged_tree` takes the app identifier the caller knows and the
+       version offered: the manifest's `appId` must equal it (`stage()` passes
+       the updater's configured identifier; the helper reads the installed app's
+       from its compiled metadata, `EmbeddedMetadata::app_identifier` from the
+       standalone `app_identifier`, `installed_metadata`) and the one the
+       running executable's own manifest names (parsed in full now, so a running
+       manifest that can't be read fails closed), and its `version` must equal
+       the version offered (`compare_versions`), which the embedded version
+       check already bound to the staged runtime library.
+     - denext's writer (`src/build/desktop-tree-manifest.ts`, branch
+       `fix/updater-m2-manifest-2`) writes the new fields from
+       `desktop.app.identifier` and the package version, lists every file but
+       the `.exe`, and `desktopSignWindows` signs the other PE images first,
+       writes the manifest again with their signed bytes, then signs the
+       executable, whatever order its caller listed the files in (a DLL signed
+       after the manifest was written would be refused). The fixture
+       `testdata/tree_manifest_packaged.exe` is written by that writer; the fork
+       reads it (`reads_a_manifest_the_packager_wrote`).
+     - Tests:
+       `the_manifest_binds_the_app_version_and_every_file_but_the_executable`
+       (failed before: the draft without the fields parsed, another release's
+       DLL and an unlisted PE image passed; now also the app, version and
+       running-manifest checks over real files, and a running draft manifest
+       failing closed), `manifests_are_parsed_strictly` (the new fields),
+       `the_tree_must_match_the_manifest_exactly` (the executable never listed),
+       `reads_a_manifest_the_packager_wrote`.
+
+212. **`fix(desktop)`: `stage()` extracts the bytes the download verified** (the
+     denext.8 audit, F5; `runtime/ops/desktop_update/archive.rs`, `mod.rs`). The
+     download's SHA-256 was checked when it finished, and `stage()` then opened
+     the archive by path: a different user who can write the install's parent
+     could rename the held staging directory away just after the extraction
+     directory was created, put a directory of their own at its name holding
+     another `download.tar.gz`, and put the real one back before the first
+     write, so the extraction (in the held directory, with `still_at_path` true)
+     came from their archive. On macOS and Windows the OS check refuses the
+     result, and on Linux that user can rename the install itself, so it added
+     no power; but item 199's claim that the tree that moves is the tree checked
+     from the verified download had a gap. `extract_tar_gz_from` extracts from
+     an open handle through a hashing reader and returns the SHA-256 of every
+     byte of it (what the extraction consumed, then the rest of the file to its
+     end: the gzip trailer, anything appended), and `stage_blocking` opens the
+     archive once, extracts through it, and refuses (`integrity`, the extraction
+     removed) unless that digest is the manifest's, which `download()` matched
+     (`StageRequest` carries it, with the identifier item 211's check wants).
+     Tests: `stage_extracts_only_the_bytes_the_download_verified` (`mod.rs`;
+     failed before: the archive at the path replaced by another valid one after
+     the download's check was extracted and checked as the update),
+     `the_extraction_digest_is_the_archives` (`archive.rs`).
+
+213. **`docs`: what the disarm frame check and the scoped sidecar run grant
+     establish** (the denext.8 audit, F3 and F4; `lib.deno.ns.d.ts`,
+     `runtime/ops/runtime.rs`, `cli/rt/run.rs`, items 190 and 203, the spec
+     `compile/resource_limits` `disarm_handed`). Neither claim was true as
+     written and neither has an honest fix at its boundary (item 203 and 190 say
+     why and what would); the docs now say what holds.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
-169-174, 176, 178, 180, 182-184, 186, 187, 189-191, 193-196, 198-203, 206,
-207, 209) are what the prebuilt `libdenort` carries. The CLI-side parts (for
+169-174, 176, 178, 180, 182-184, 186, 187, 189-191, 193-196, 198-203, 206, 207,
+209-212) are what the prebuilt `libdenort` carries. The CLI-side parts (for
 example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's
 launchers) are in the branch too, but a stock CLI does not run them; denext's
 own launcher provides that environment.
@@ -8510,12 +8665,17 @@ install's executable. What a forged state could still ask for, a swap of some
 other app tree placed in the staging directory, is checked again right before
 the swap as `stage()` checked it: the OS code signature against the running
 app's signer, the staged app's own version equal to the state's and newer than
-the installed one, and not a rejected version. So it can't be used to put an app
-the updater would refuse in place of a signed one. The staging directory is
-private to the user (0700) and held open from that check to the swap, which
-renames from it; the staged app's digest is taken through it before the check
-and again right before the swap, so the tree that moves is the tree that was
-checked (item 199).
+the installed one, and not a rejected version. A rollback to some other tree
+placed at `.old` (or left in the staging directory as "the previous app" of an
+interrupted exchange) is checked the same way before anything moves: the install
+marker, its embedded version equal to the state's `from`, its OS code signature
+against the installed app (item 210). So it can't be used to put an app the
+updater would refuse in place of a signed one. The staging directory is private
+to the user (0700) and held open from that check to the swap, which renames from
+it; the staged app's digest is taken through it before the check and again right
+before the swap, so the tree that moves is the tree that was checked (item 199);
+the archive `stage()` extracts is hashed as it is extracted, from one open
+handle, and must be the one `download()` verified (item 212).
 
 ## Development switches
 

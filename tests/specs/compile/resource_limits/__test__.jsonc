@@ -86,6 +86,23 @@
         }
       ]
     },
+    // The frame check sees who called, not where the function came from: the
+    // op handed to the main module by a dependency, and invoked by the main
+    // module at its top level, is the main module's call. Documents the
+    // limit of the check (the TS docs and DENEXT.md item 203 state it).
+    "disarm_handed": {
+      "steps": [
+        {
+          "args": "compile --max-time=1 --output out disarm_handed.js",
+          "output": "[WILDCARD]"
+        },
+        {
+          "commandName": "./out",
+          "args": [],
+          "output": "disarm_handed.out"
+        }
+      ]
+    },
     // Without limits the same program runs to its end.
     "without_limits": {
       "steps": [

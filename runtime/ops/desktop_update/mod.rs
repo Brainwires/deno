@@ -16,12 +16,13 @@
 //! 2. `download()` streams the archive into a staging directory next to the
 //!    install, refusing a byte past the manifest's size, then matches size
 //!    and SHA-256 ([`archive::DownloadSink`]).
-//! 3. `stage()` extracts it with the safe extractor ([`archive`]), checks it
-//!    is the same app shape and the version the manifest offers
-//!    ([`embedded`]), and runs the OS code-signature check against the
-//!    running app ([`oscheck`]; on Windows also the signed tree manifest of
-//!    the files that are not PE images, [`treecheck`]). Only then is the
-//!    update `staged`.
+//! 3. `stage()` extracts it with the safe extractor ([`archive`]) from one
+//!    open handle, hashing the bytes as they are extracted and requiring the
+//!    download's SHA-256 of them, checks it is the same app shape and the
+//!    version the manifest offers ([`embedded`]), and runs the OS
+//!    code-signature check against the running app ([`oscheck`]; on Windows
+//!    also the signed tree manifest of the app's files, [`treecheck`]). Only
+//!    then is the update `staged`.
 //! 4. `applyAndRelaunch()` starts the helper, which waits for the app to
 //!    exit, swaps the install atomically and relaunches ([`swap`]).
 //! 5. The new version calls `confirm()`; an update that is not confirmed by
@@ -539,20 +540,24 @@ pub async fn op_desktop_app_update_stage(
   let (ready, update, archive) =
     stage_start(&mut state.borrow_mut()).map_err(js)?;
   let layout = ready.layout.clone();
+  let app_id = ready.app_id.clone();
   let from = ready.version.clone();
   let to = update.version.clone();
   let size = update.size;
+  let sha256 = update.sha256.clone();
   let sequence = update.sequence;
   let result = deno_core::unsync::spawn_blocking(move || {
-    stage_blocking(
-      &layout,
-      &archive,
+    stage_blocking(&StageRequest {
+      layout: &layout,
+      archive: &archive,
       size,
-      &from,
-      &to,
+      sha256: &sha256,
+      app_id: &app_id,
+      from: &from,
+      to: &to,
       sequence,
       allow_unsigned_dev,
-    )
+    })
   })
   .await
   .map_err(|e| UpdateError::io("stage", e))
@@ -603,15 +608,33 @@ fn stage_start(
   Ok((ready, update, archive))
 }
 
-fn stage_blocking(
-  layout: &InstallLayout,
-  archive: &std::path::Path,
+/// What [`stage_blocking`] stages: the downloaded archive, what `download()`
+/// verified it against, and what the staged app must be.
+struct StageRequest<'a> {
+  layout: &'a InstallLayout,
+  /// The downloaded archive (`download.part` in the staging directory).
+  archive: &'a std::path::Path,
+  /// Its size, as the signed manifest declares it.
   size: u64,
-  from: &str,
-  to: &str,
+  /// Its SHA-256 (lowercase hex), as the signed manifest declares it and
+  /// `download()` matched it.
+  sha256: &'a str,
+  /// This app's identifier.
+  app_id: &'a str,
+  /// The running version.
+  from: &'a str,
+  /// The version offered.
+  to: &'a str,
+  /// The manifest's sequence.
   sequence: Option<u64>,
   allow_unsigned_dev: bool,
+}
+
+fn stage_blocking(
+  r: &StageRequest<'_>,
 ) -> Result<SignatureReport, UpdateError> {
+  let layout = r.layout;
+  let (from, to) = (r.from, r.to);
   // The directory begin() created, private to this user, held from here to
   // the digest recorded below.
   let staging =
@@ -625,11 +648,28 @@ fn stage_blocking(
     "the staging directory was replaced while the update was staged";
   let extract = layout.extract_dir();
   swap::remove_path(&extract);
-  let max = size
+  let max = r
+    .size
     .saturating_mul(32)
     .saturating_add(64 * 1024 * 1024)
     .min(archive::MAX_EXTRACTED_BYTES);
-  let x = archive::extract_tar_gz(archive, &extract, max)?;
+  // One open handle: the bytes extracted are hashed as they are read, and
+  // must be the bytes `download()` matched against the manifest's SHA-256.
+  // The path is opened once; what it names afterwards does not matter.
+  let file = std::fs::File::open(r.archive)
+    .map_err(|e| UpdateError::io(r.archive.display(), e))?;
+  let (x, digest) = archive::extract_tar_gz_from(file, &extract, max)?;
+  if digest != r.sha256 {
+    swap::remove_path(&extract);
+    return error::err(
+      Code::Integrity,
+      format!(
+        "the archive extracted is not the one the download verified: its \
+         SHA-256 is {digest}, the manifest declares {}",
+        r.sha256
+      ),
+    );
+  }
   if !staging.still_at_path() {
     return error::err(Code::BundleMismatch, REPLACED);
   }
@@ -687,7 +727,8 @@ fn stage_blocking(
   // The app's own version is the one the manifest offers (an older build
   // signed by the same identity, served as a newer version, is refused).
   embedded::check_embedded_version(layout, &staged, to)?;
-  let signature = verify_os_signature(layout, &staged, allow_unsigned_dev)?;
+  let signature =
+    verify_os_signature(layout, &staged, r.allow_unsigned_dev, true)?;
   // What the helper re-checks before it swaps (the tree verified above),
   // read through the held directory.
   if !staging.still_at_path() {
@@ -697,10 +738,16 @@ fn stage_blocking(
     .staged("extract", std::ffi::OsStr::new(&x.top))
     .and_then(|s| s.listing())
     .map_err(|e| UpdateError::io(staged.display(), e))?;
-  // Windows: the files that are not PE images must be the ones the signed
-  // executable's tree manifest lists, as that same walk read them.
-  treecheck::verify_for_platform(layout, &staged, &entries)?;
-  let _ = std::fs::remove_file(archive);
+  // Windows: the app's files must be the ones the signed executable's tree
+  // manifest lists, as that same walk read them, for this app and version.
+  treecheck::verify_for_platform(
+    layout,
+    &staged,
+    &entries,
+    Some(r.app_id),
+    Some(to),
+  )?;
+  let _ = std::fs::remove_file(r.archive);
   let previous = swap::read_state(layout);
   let mut st = UpdateState::carried_from(layout, previous);
   st.phase = Phase::Staged;
@@ -708,7 +755,7 @@ fn stage_blocking(
   st.to = Some(to.to_string());
   st.entry = Some(x.top);
   st.staged_digest = Some(staged_digest);
-  st.record_sequence(sequence);
+  st.record_sequence(r.sequence);
   swap::write_state(layout, &st)?;
   Ok(signature)
 }
@@ -741,7 +788,43 @@ fn verify_staged_for_helper(
   }
   verify_newer_than_installed(layout, &to_v)?;
   embedded::check_embedded_version(layout, &staged, to)?;
-  verify_os_signature(layout, &staged, true)?;
+  verify_os_signature(layout, &staged, true, true)?;
+  Ok(())
+}
+
+/// The helper's check of the tree a rollback would put back at the install
+/// path (see `swap::rollback_verified`): `.old`, or the previous app still
+/// in the staging directory, both where anything running as the user can
+/// write, named by a state file it can write too. The checks the apply runs
+/// on a staged app, for what the rollback claims that tree is: the install
+/// marker; its embedded version equal to the state's `from` (the version
+/// the rollback goes back to); its OS code signature against the installed
+/// app (the version on trial, which passed the same check against the app
+/// before it), with the unsigned-development opt-out as for the apply, and
+/// on Windows without the online revocation lookup: a rollback must work
+/// offline, and the identity match is what keeps a planted tree out.
+fn verify_previous_for_helper(
+  layout: &InstallLayout,
+  state: &UpdateState,
+  tree: &std::path::Path,
+) -> Result<(), UpdateError> {
+  if !layout::is_install_copy(layout.kind, tree) {
+    return error::err(
+      Code::UnsupportedLayout,
+      format!(
+        "{} is not a packaged app (no install marker)",
+        tree.display()
+      ),
+    );
+  }
+  let Some(from) = state.from.as_deref() else {
+    return error::err(
+      Code::NotStaged,
+      "the state names no version to roll back to",
+    );
+  };
+  embedded::check_embedded_version(layout, tree, from)?;
+  verify_os_signature(layout, tree, true, false)?;
   Ok(())
 }
 
@@ -783,10 +866,15 @@ fn is_executable(path: &std::path::Path) -> bool {
     .unwrap_or(false)
 }
 
+/// The OS code-signature check of `staged` against the installed app (see
+/// [`oscheck`]). `revocation`: on Windows, look each staged image's
+/// certificate up online (a stage and an apply); without it the images are
+/// checked by identity alone, as the running app is (a rollback).
 fn verify_os_signature(
   layout: &InstallLayout,
   staged: &std::path::Path,
   allow_unsigned_dev: bool,
+  revocation: bool,
 ) -> Result<SignatureReport, UpdateError> {
   if cfg!(target_os = "macos") {
     oscheck::verify_macos(
@@ -828,9 +916,15 @@ fn verify_os_signature(
         ),
       );
     }
+    let lookup: &dyn Fn(&std::path::Path) -> Option<oscheck::Signer> =
+      if revocation {
+        &oscheck::authenticode_signer
+      } else {
+        &oscheck::authenticode_identity
+      };
     oscheck::verify_windows(
       &oscheck::authenticode_identity,
-      &oscheck::authenticode_signer,
+      lookup,
       &layout.exe(),
       &files,
       allow_unsigned_dev,
@@ -957,9 +1051,13 @@ pub fn early_startup(args: &[String], trial: &mut bool) -> Option<i32> {
   if let Some((mode, pid)) = swap::parse_helper_args(args) {
     return Some(
       match layout::detect_install(&exe, &AppImageEnv::from_env()) {
-        Ok(layout) => {
-          swap::run_helper(&layout, mode, pid, &verify_staged_for_helper)
-        }
+        Ok(layout) => swap::run_helper(
+          &layout,
+          mode,
+          pid,
+          &verify_staged_for_helper,
+          &verify_previous_for_helper,
+        ),
         Err(_) => 1,
       },
     );
@@ -1118,14 +1216,21 @@ mod tests {
     (exe, layout)
   }
 
+  /// Pack a copy of the fake app (`layout`) as an update archive: its
+  /// executable with `mode` holding `body`, and its install marker. Returns
+  /// the archive's path and size.
   #[cfg(unix)]
-  #[test]
-  fn stage_refuses_an_executable_without_its_mode_bits() {
-    let tmp = tempfile::tempdir().unwrap();
-    let (_exe, layout) = fake_app(&tmp);
+  fn pack_fake_app(
+    tmp: &tempfile::TempDir,
+    layout: &InstallLayout,
+    mode: u32,
+    body: &[u8],
+  ) -> (PathBuf, u64) {
     let top = layout.install.file_name().unwrap().to_owned();
-    let pack = |mode: u32| {
-      let archive = tmp.path().join(format!("app-{mode:o}.tar.gz"));
+    {
+      let archive = tmp
+        .path()
+        .join(format!("app-{mode:o}-{}.tar.gz", body.len()));
       let gz = flate2::write::GzEncoder::new(
         std::fs::File::create(&archive).unwrap(),
         flate2::Compression::fast(),
@@ -1151,9 +1256,9 @@ mod tests {
       add_dirs(&mut tar, &exe_rel);
       let mut h = tar::Header::new_gnu();
       h.set_mode(mode);
-      h.set_size(4);
+      h.set_size(body.len() as u64);
       h.set_cksum();
-      tar.append_data(&mut h, &exe_rel, &b"#!/x"[..]).unwrap();
+      tar.append_data(&mut h, &exe_rel, body).unwrap();
       // A packaged app carries its install marker (the shape check wants it).
       let marker = layout::marker_path(layout.kind);
       if !marker.is_empty() {
@@ -1172,22 +1277,150 @@ mod tests {
       tar.into_inner().unwrap().finish().unwrap();
       let size = std::fs::metadata(&archive).unwrap().len();
       (archive, size)
-    };
+    }
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn stage_refuses_an_executable_without_its_mode_bits() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (_exe, layout) = fake_app(&tmp);
+    let pack = |mode: u32| pack_fake_app(&tmp, &layout, mode, b"#!/x");
     // download() made the staging directory the extraction goes into.
     staging::PrivateDir::create(&layout.staging_dir()).unwrap();
     let (archive, size) = pack(0o644);
-    let e =
-      stage_blocking(&layout, &archive, size, "1.0.0", "2.0.0", None, true)
-        .unwrap_err();
+    let sha = sha256_of_file(&archive);
+    let e = stage_blocking(&stage_request(&layout, &archive, size, &sha))
+      .unwrap_err();
     assert_eq!(e.code, Code::BundleMismatch, "{}", e.message);
     assert!(e.message.contains("not executable"), "{}", e.message);
     // The same app with its execute bit passes that check (whatever the
     // OS signature check then says about a fake app).
     let (archive, size) = pack(0o755);
+    let sha = sha256_of_file(&archive);
     if let Err(e) =
-      stage_blocking(&layout, &archive, size, "1.0.0", "2.0.0", None, true)
+      stage_blocking(&stage_request(&layout, &archive, size, &sha))
     {
       assert!(!e.message.contains("not executable"), "{}", e.message);
+    }
+  }
+
+  /// The helper's check of the tree a rollback would put back
+  /// (`verify_previous_for_helper`), in order: the install marker first, then
+  /// the embedded version against the state's `from`, then the OS signature.
+  /// The fake app has no compiled metadata, so a marked tree stops at the
+  /// version (the real helper reads the runtime library's), and an unmarked
+  /// one before it; a state without `from` names nothing to compare with.
+  #[cfg(unix)]
+  #[test]
+  fn the_rollback_check_runs_the_apply_checks_on_what_goes_back() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (_exe, layout) = fake_app(&tmp);
+    let old = layout.old_path();
+    let mut state = UpdateState::new(&layout);
+    state.from = Some("1.0.0".into());
+    // Nothing at `.old` at all, then a tree without the marker.
+    let e = verify_previous_for_helper(&layout, &state, &old).unwrap_err();
+    assert_eq!(e.code, Code::UnsupportedLayout, "{}", e.message);
+    std::fs::create_dir_all(&old).unwrap();
+    std::fs::write(old.join("version"), "1.0.0").unwrap();
+    let e = verify_previous_for_helper(&layout, &state, &old).unwrap_err();
+    assert_eq!(e.code, Code::UnsupportedLayout, "{}", e.message);
+    assert!(e.message.contains("no install marker"), "{}", e.message);
+    // A marked copy of the fake app: the version check reads its (absent)
+    // compiled metadata.
+    std::fs::remove_dir_all(&old).unwrap();
+    copy_tree(&layout.install, &old);
+    assert!(layout::is_install_copy(layout.kind, &old));
+    let e = verify_previous_for_helper(&layout, &state, &old).unwrap_err();
+    assert_eq!(e.code, Code::VersionMismatch, "{}", e.message);
+    assert!(e.message.contains("compiled app metadata"), "{}", e.message);
+    // No `from`: nothing to compare the version with.
+    state.from = None;
+    let e = verify_previous_for_helper(&layout, &state, &old).unwrap_err();
+    assert_eq!(e.code, Code::NotStaged, "{}", e.message);
+  }
+
+  /// Copy a directory tree (the fake app, a few files).
+  #[cfg(unix)]
+  fn copy_tree(from: &std::path::Path, to: &std::path::Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for entry in std::fs::read_dir(from).unwrap() {
+      let entry = entry.unwrap();
+      let target = to.join(entry.file_name());
+      if entry.file_type().unwrap().is_dir() {
+        copy_tree(&entry.path(), &target);
+      } else {
+        std::fs::copy(entry.path(), target).unwrap();
+      }
+    }
+  }
+
+  /// The SHA-256 (lowercase hex) of the file at `path`.
+  #[cfg(unix)]
+  fn sha256_of_file(path: &std::path::Path) -> String {
+    use sha2::Digest;
+    faster_hex::hex_string(&sha2::Sha256::digest(std::fs::read(path).unwrap()))
+  }
+
+  /// A stage of `archive` (1.0.0 → 2.0.0, unsigned development allowed)
+  /// whose download verified bytes hashing to `sha256`.
+  #[cfg(unix)]
+  fn stage_request<'a>(
+    layout: &'a InstallLayout,
+    archive: &'a std::path::Path,
+    size: u64,
+    sha256: &'a str,
+  ) -> StageRequest<'a> {
+    StageRequest {
+      layout,
+      archive,
+      size,
+      sha256,
+      app_id: "com.example.fake",
+      from: "1.0.0",
+      to: "2.0.0",
+      sequence: None,
+      allow_unsigned_dev: true,
+    }
+  }
+
+  /// The archive `stage()` extracts is the one `download()` matched against
+  /// the manifest's SHA-256, byte for byte: the staged tree comes from the
+  /// bytes read through one open handle, hashed as they are extracted, and
+  /// the digest must be the download's. An archive replaced between the
+  /// download's check and the extraction (the staging directory renamed
+  /// away and back around `stage()`'s open, by someone who can write the
+  /// install's parent) is refused, and nothing of it is staged.
+  #[cfg(unix)]
+  #[test]
+  fn stage_extracts_only_the_bytes_the_download_verified() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (_exe, layout) = fake_app(&tmp);
+    staging::PrivateDir::create(&layout.staging_dir()).unwrap();
+    let (verified, _) = pack_fake_app(&tmp, &layout, 0o755, b"#!/verified");
+    let (other, size) = pack_fake_app(&tmp, &layout, 0o755, b"#!/other!!");
+    let verified_sha = sha256_of_file(&verified);
+    assert_ne!(verified_sha, sha256_of_file(&other));
+    // What the download verified was `verified`; what is at the path when
+    // the stage opens it is `other`.
+    let archive = layout.staging_dir().join("download.part");
+    std::fs::copy(&other, &archive).unwrap();
+    let e =
+      stage_blocking(&stage_request(&layout, &archive, size, &verified_sha))
+        .unwrap_err();
+    assert_eq!(e.code, Code::Integrity, "{}", e.message);
+    assert!(
+      !layout.extract_dir().exists(),
+      "nothing of the replaced archive stays staged"
+    );
+    // The verified bytes pass that check (whatever the OS signature check
+    // then says about a fake app).
+    std::fs::copy(&verified, &archive).unwrap();
+    if let Err(e) =
+      stage_blocking(&stage_request(&layout, &archive, size, &verified_sha))
+    {
+      assert_ne!(e.code, Code::Integrity, "{}", e.message);
     }
   }
 

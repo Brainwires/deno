@@ -400,9 +400,15 @@ declare namespace Deno {
    * under `deno run` without limits).
    *
    * Throws `Deno.errors.NotCapable`, changing nothing, when:
-   * - the caller is not the main module's own code (a module it imports,
-   *   `eval`, `new Function`, `node:vm`, a worker): only the program's entry
-   *   point decides;
+   * - the innermost JavaScript frame on the stack is not the main module's
+   *   own source: a module it imports, `eval`, `new Function`, `node:vm` or a
+   *   worker calling it is refused. The main module decides by calling it,
+   *   and it is the main module's call that counts: a function value, bound
+   *   function or getter a dependency hands the main module, which the main
+   *   module then invokes, runs with the main module's frame innermost (a
+   *   native function adds no JavaScript frame) and is accepted. Call it
+   *   yourself, as `Deno.disarmResourceLimits()`, and don't invoke what a
+   *   dependency hands you at the top level unless you trust it to;
    * - the main module has finished evaluating: call it at the top level
    *   (top-level `await` included), before the program starts its work;
    * - the limits were given on the command line (`deno run --max-time=60 …`):

@@ -157,6 +157,16 @@ enum DisarmCheck {
 /// The policy of `Deno.disarmResourceLimits()`. `caller_script_id` is the
 /// script id of the innermost JavaScript frame, the code that called the op
 /// (the op is installed on `Deno` as is, so no wrapper frame sits between).
+///
+/// What the frame check establishes is that the main module's own code made
+/// the call, not where the function it called came from: a dependency that
+/// hands the op to the main module (`export const init =
+/// Deno.disarmResourceLimits`, a bound function, a getter on an object the
+/// main module reads) adds no JavaScript frame of its own, so the main
+/// module invoking it passes. V8 gives an API callback no frame and no
+/// callee identity to compare, so there is no stricter check at this
+/// boundary; a stricter design would take an explicit capability (the main
+/// module's `import.meta`, which a dependency does not hold).
 fn check_disarm(
   state: Option<&ResourceLimitsDisarm>,
   caller_script_id: Option<usize>,

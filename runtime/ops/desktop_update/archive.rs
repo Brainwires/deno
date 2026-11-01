@@ -272,6 +272,21 @@ pub struct Extracted {
   pub files: usize,
 }
 
+/// A reader that hashes every byte read through it, so what an extraction
+/// consumed is what its digest covers ([`extract_tar_gz_from`]).
+struct Hashing<R> {
+  inner: R,
+  hasher: sha2::Sha256,
+}
+
+impl<R: Read> Read for Hashing<R> {
+  fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+    let n = self.inner.read(buf)?;
+    self.hasher.update(&buf[..n]);
+    Ok(n)
+  }
+}
+
 /// Extract the `.tar.gz` at `archive` into `dest` (which must NOT exist; it
 /// is created). See the module docs for the rules. `max_bytes` caps the
 /// total uncompressed size.
@@ -280,10 +295,45 @@ pub fn extract_tar_gz(
   dest: &Path,
   max_bytes: u64,
 ) -> Result<Extracted, UpdateError> {
-  std::fs::create_dir(dest).map_err(|e| UpdateError::io(dest.display(), e))?;
   let file =
     File::open(archive).map_err(|e| UpdateError::io(archive.display(), e))?;
-  let gz = flate2::read::GzDecoder::new(std::io::BufReader::new(file));
+  extract_tar_gz_from(file, dest, max_bytes).map(|(x, _)| x)
+}
+
+/// [`extract_tar_gz`] from an archive already open, returning with the
+/// result the SHA-256 (lowercase hex) of every byte of it: the bytes the
+/// extraction consumed, read through one hashing reader, and whatever
+/// follows the archive's end (the gzip trailer, anything appended), read to
+/// the end. A caller that verified the archive by its digest compares this
+/// one with it, so the tree extracted is the tree verified even if the path
+/// the archive was opened by names something else by then.
+pub fn extract_tar_gz_from(
+  archive: impl Read,
+  dest: &Path,
+  max_bytes: u64,
+) -> Result<(Extracted, String), UpdateError> {
+  let mut hashing = Hashing {
+    inner: archive,
+    hasher: sha2::Sha256::new(),
+  };
+  let extracted = extract_entries(&mut hashing, dest, max_bytes)?;
+  std::io::copy(&mut hashing, &mut std::io::sink()).map_err(|e| {
+    UpdateError::new(Code::Io, format!("reading the archive: {e}"))
+  })?;
+  Ok((
+    extracted,
+    faster_hex::hex_string(&hashing.hasher.finalize()),
+  ))
+}
+
+/// The extraction itself (see [`extract_tar_gz`]).
+fn extract_entries(
+  archive: &mut dyn Read,
+  dest: &Path,
+  max_bytes: u64,
+) -> Result<Extracted, UpdateError> {
+  std::fs::create_dir(dest).map_err(|e| UpdateError::io(dest.display(), e))?;
+  let gz = flate2::read::GzDecoder::new(std::io::BufReader::new(archive));
   let mut tar = tar::Archive::new(gz);
   let entries = tar
     .entries()
@@ -582,6 +632,35 @@ mod tests {
       std::fs::read(out.join("App.app/Contents/MacOS/app")).unwrap(),
       b"#!/bin/sh\n"
     );
+  }
+
+  /// The digest `extract_tar_gz_from` reports is the whole archive's: the
+  /// bytes the extraction consumed and what follows the archive's end,
+  /// read through the same handle.
+  #[test]
+  fn the_extraction_digest_is_the_archives() {
+    let t = tmp();
+    let entries: &[(&str, u8, &[u8], &str)] =
+      &[("App/", b'5', b"", ""), ("App/x", b'0', b"hello", "")];
+    let a = tgz(t.path(), entries);
+    // Trailing bytes after the gzip member (a second member, junk): part of
+    // the file, so part of the digest.
+    std::fs::OpenOptions::new()
+      .append(true)
+      .open(&a)
+      .unwrap()
+      .write_all(b"trailing junk the extraction never needs")
+      .unwrap();
+    let whole =
+      faster_hex::hex_string(&sha2::Sha256::digest(std::fs::read(&a).unwrap()));
+    let (x, digest) = extract_tar_gz_from(
+      File::open(&a).unwrap(),
+      &t.path().join("out"),
+      1 << 30,
+    )
+    .unwrap();
+    assert_eq!(x.files, 1);
+    assert_eq!(digest, whole);
   }
 
   #[test]
