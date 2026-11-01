@@ -26,7 +26,7 @@ use crate::util::file_watcher::WatcherRestartMode;
 use crate::util::fs::canonicalize_path;
 
 /// Why `--watch-hmr` restarts instead of replacing a module: V8 15.6 removed
-/// live edit, so `Debugger.setScriptSource` always fails (DENEXT.md item 184).
+/// live edit, so `Debugger.setScriptSource` always fails (DENEXT.md item 218).
 pub(crate) const LIVE_EDIT_UNAVAILABLE: &str =
   "this V8 cannot replace a running module (no live edit); restarting";
 

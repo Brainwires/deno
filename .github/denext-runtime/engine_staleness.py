@@ -22,7 +22,7 @@ A stale pin is a `::warning::` on every run, and an `::error::` that fails
 the run at a release tag (`--tag`) when its engine's mode is `tag` (the
 default); `warn` keeps a tag at a warning too. ENGINE_STALENESS_ENFORCE sets
 the mode of both engines; ENGINE_STALENESS_ENFORCE_V8 and
-ENGINE_STALENESS_ENFORCE_CEF override it for one (DENEXT.md item 184: V8,
+ENGINE_STALENESS_ENFORCE_CEF override it for one (DENEXT.md item 218: V8,
 which the fork now builds itself, is enforced while CEF is not). A pin behind stable but
 on the Extended Stable milestone is not stale: it is a `::warning::` that
 says it still gets fixes, on Extended Stable's schedule, and never fails a

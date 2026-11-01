@@ -105,7 +105,7 @@ env:
   # only warns, and says it is still patched (DENEXT.md item 179). A failed
   # Chrome stable lookup only warns. V8 is `tag` again since the fork builds
   # its own V8 line on Chrome's Extended Stable branch (V8 15.6, DENEXT.md
-  # item 184). CEF stays `warn` until laufey's CEF tracks Chrome's release
+  # item 218). CEF stays `warn` until laufey's CEF tracks Chrome's release
   # cadence the same way (items 150, 162).
   ENGINE_STALENESS_ENFORCE: tag
   ENGINE_STALENESS_ENFORCE_CEF: warn

@@ -559,7 +559,7 @@ impl DesktopHmrRunner {
         }
       };
       // V8 15.6 removed live edit: `Debugger.setScriptSource` answers with a
-      // protocol error and no result (DENEXT.md item 184). Reload the page so
+      // protocol error and no result (DENEXT.md item 218). Reload the page so
       // the edit still lands.
       if value.is_null() {
         return ChangeOutcome::NeedsReload(format!(

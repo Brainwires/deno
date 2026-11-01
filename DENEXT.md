@@ -8502,7 +8502,7 @@ where the changes are discussed.
 
 218. **`chore(deps)`: V8 15.6.75.32, Chrome Extended Stable 156, from
      Brainwires/rusty_v8** (`v8` crate `156.0.0+denext.1`; `chore/v8-15.6`;
-     runtime and CI; `Cargo.toml`, `libs/deno_v8/Cargo.toml`,
+     runtime and CI; `Cargo.toml`, `Cargo.lock`, `libs/deno_v8/Cargo.toml`,
      `libs/core/runtime/setup.rs`, `cli/args/mod.rs`, `cli/tools/run/hmr.rs`,
      `cli/rt/hmr.rs`, `.github/denext-runtime/rusty_v8.sha256`,
      `.github/denext-runtime/engine_staleness.py`,
@@ -8558,21 +8558,28 @@ where the changes are discussed.
        satisfies through `[patch.crates-io]`.
      - **The engine staleness gate** (item 179) is enforced for V8 again:
        `ENGINE_STALENESS_ENFORCE` is `tag`, and the new
-       `ENGINE_STALENESS_ENFORCE_CEF: warn` keeps CEF (150, being bumped
-       separately) at a warning. `ENGINE_STALENESS_ENFORCE_V8` / `_CEF` override
-       the mode per engine. A V8 on the Extended Stable milestone passes a tag
+       `ENGINE_STALENESS_ENFORCE_CEF: warn` keeps CEF at a warning.
+       `ENGINE_STALENESS_ENFORCE_V8` / `_CEF` override the mode per engine. A V8 on the Extended Stable milestone passes a tag
        as before; the plan's patch-age limit (no more than 14 days behind the
        branch head) is not part of this change.
 
-     Not yet in this branch: Cargo.toml's `[patch.crates-io]` rev and
-     `rusty_v8.sha256` still name `v152.2.1-denext.1`, because release
-     `v156.0.0-denext.1` of Brainwires/rusty_v8 (its `release-denext.yml` on
-     branch `v8-15.6-denext`) has not been built yet; the pin commit moves both
-     to it, as item 162 did, and until then this branch does not resolve the
-     `v8` `156.0.0` requirement.
+     The pin: release `v156.0.0-denext.1` of Brainwires/rusty_v8 (immutable,
+     built from source at `b8bad942` by its `release-denext.yml`, every file
+     with a build-provenance attestation). `Cargo.toml`'s `[patch.crates-io]`
+     rev is `57777d42`, the `crate` branch commit that release names, and
+     `rusty_v8.sha256` holds its `SHA256SUMS`. That commit also carries
+     rusty_v8's `snapshot::read_only_heap_guard`: while the process's first
+     isolate is a snapshot creator that has not created its blob, other isolates
+     wait for it, since V8 frees the read-only space such an isolate attached to.
+     The fork makes its snapshots in `build.rs` processes, so programs can't
+     reach that window. The release's build tools now include the Windows SDK
+     10.0.28000 V8 15.6's `build` pins (a bootstrapper fixed by the SHA-256 in
+     `microsoft/winget-pkgs`, Authenticode checked) and, on Intel macOS,
+     conda-forge's libclang 23.1.4 packages (each SHA-256 pinned), since LLVM's
+     releases and Homebrew have no such build.
 
-     Verified on biscuits (Linux x86_64) against a local `V8_FROM_SOURCE=1`
-     build of rusty_v8 `v8-15.6-denext` (`d8fb309b`), through
+     Verified before the pin on biscuits (Linux x86_64) against a local
+     `V8_FROM_SOURCE=1` build of rusty_v8 `v8-15.6-denext` (`d8fb309b`), through
      `[patch.crates-io] v8 = { path }` and `RUSTY_V8_ARCHIVE` /
      `RUSTY_V8_SRC_BINDING_PATH` (local only): `deno --version` reports
      `v8 15.6.75.32-rusty`, and `Float16Array`, `Temporal`, `using` /

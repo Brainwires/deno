@@ -181,7 +181,7 @@ class Script(unittest.TestCase):
         self.assertEqual(r.stdout.count("::warning::"), 2)
 
     def test_cef_warn_keeps_a_stale_cef_at_a_warning_while_v8_is_enforced(self):
-        # denext_runtime.yml: V8 is `tag`, CEF `warn` (DENEXT.md item 184).
+        # denext_runtime.yml: V8 is `tag`, CEF `warn` (DENEXT.md item 218).
         r = self.gate("--tag", "--cef", CEF, url=self.answer("156.0.8078.73"), enforce="tag", cef="warn")
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
         self.assertIn("::error::V8 15.2", r.stdout)

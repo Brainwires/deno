@@ -2026,7 +2026,7 @@ pub fn get_default_v8_flags() -> Vec<String> {
   vec![
     "--stack-size=1024".to_string(),
     // `--inspector-live-edit` is gone: V8 15.6 removed live edit
-    // (DENEXT.md item 184).
+    // (DENEXT.md item 218).
     "--external-memory-max-reasonable-size=0".to_string(),
   ]
 }

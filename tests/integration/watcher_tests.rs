@@ -3545,7 +3545,7 @@ console.log("Listening...")
   );
 
   // V8 15.6 has no live edit, so HMR restarts the program instead of
-  // replacing the module (DENEXT.md item 184).
+  // replacing the module (DENEXT.md item 218).
   wait_contains("no live edit", &mut stderr_lines).await;
   // Restarting runs `Deno.serve` again, so there is a window right after the
   // restart where the listener has been closed and not yet rebound and a
@@ -3625,7 +3625,7 @@ export function foo() {
   );
 
   // V8 15.6 has no live edit, so HMR restarts the program instead of
-  // replacing the module (DENEXT.md item 184).
+  // replacing the module (DENEXT.md item 218).
   wait_contains("no live edit", &mut stderr_lines).await;
   wait_contains("<h1>Hello world</h1>", &mut stdout_lines).await;
 
@@ -3810,7 +3810,7 @@ setInterval(() => {
   );
 
   // V8 15.6 has no live edit, so the change restarts the program, which then
-  // fails to parse (DENEXT.md item 184).
+  // fails to parse (DENEXT.md item 218).
   wait_contains("no live edit", &mut stderr_lines).await;
   wait_contains("SyntaxError", &mut stderr_lines).await;
   wait_contains("Process failed", &mut stderr_lines).await;
