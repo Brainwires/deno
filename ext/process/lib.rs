@@ -69,6 +69,10 @@ use serde::Deserialize;
 use tokio::process::Child as AsyncChild;
 
 pub mod ipc;
+mod embedded_program;
+pub use embedded_program::EmbeddedProgram;
+pub use embedded_program::EmbeddedProgramReader;
+pub use embedded_program::set_embedded_programs;
 use ipc::IpcAdvancedStreamResource;
 use ipc::IpcJsonStreamResource;
 use ipc::IpcRefTracker;
@@ -1294,6 +1298,28 @@ fn spawn_command(command: Command) -> Result<(AsyncChild, u32), ProcessError> {
 }
 
 /// Spawn for the Deno API: wraps child stdio in resource table entries.
+/// denext (DENEXT.md item 215): ends a child whose program changed between the
+/// check and the exec.
+fn refuse_if_changed_since_check(
+  verified: Option<embedded_program::VerifiedProgram>,
+  child: &mut AsyncChild,
+) -> Result<(), ProcessError> {
+  let Some(verified) = verified else {
+    return Ok(());
+  };
+  if verified.unchanged() {
+    return Ok(());
+  }
+  let _ = child.start_kill();
+  Err(
+    CheckRunPermissionError::Other(JsErrorBox::new(
+      "NotCapable",
+      "Refusing to run a program the app carries: it changed while it was being started",
+    ))
+    .into(),
+  )
+}
+
 fn spawn_child(
   state: &mut OpState,
   command: Command,
@@ -1301,7 +1327,9 @@ fn spawn_child(
   extra_pipe_fds: Vec<Option<i64>>,
   detached: bool,
 ) -> Result<Child, ProcessError> {
+  let verified = state.try_take::<embedded_program::VerifiedProgram>();
   let (mut child, pid) = spawn_command(command)?;
+  refuse_if_changed_since_check(verified, &mut child)?;
 
   #[cfg(not(windows))]
   let stdin_rid = child
@@ -1425,7 +1453,9 @@ fn spawn_child_node(
   extra_pipe_fds: Vec<Option<i64>>,
   detached: bool,
 ) -> Result<NodeChild, ProcessError> {
+  let verified = state.try_take::<embedded_program::VerifiedProgram>();
   let (mut child, pid) = spawn_command(command)?;
+  refuse_if_changed_since_check(verified, &mut child)?;
 
   let stdin_fd = child_stdio_to_fd!(child, stdin);
   let stdout_fd = child_stdio_to_fd!(child, stdout);
@@ -1494,6 +1524,18 @@ fn compute_run_cmd_and_check_permissions(
     api_name,
     is_authorized_self_fork(&cmd, ipc),
   )?;
+  // denext (DENEXT.md item 215): a program the app carries runs only as it
+  // was packaged, whoever spawns it.
+  match embedded_program::check(&cmd) {
+    Ok(Some(verified)) => state.put(verified),
+    Ok(None) => {}
+    Err(message) => {
+      return Err(
+        CheckRunPermissionError::Other(JsErrorBox::new("NotCapable", message))
+          .into(),
+      );
+    }
+  }
   Ok((cmd, run_env))
 }
 
@@ -1870,6 +1912,8 @@ fn op_spawn_sync(
     /* allow_cwd_inherit */ false,
     /* wrap_in_shell */ false,
   )?;
+  // Held for the spawn (DENEXT.md item 215).
+  let _verified = state.try_take::<embedded_program::VerifiedProgram>();
 
   // When a timeout is specified on Unix, create a new process group so the
   // watchdog can kill the entire tree (shell + children), not just the shell.
@@ -1901,6 +1945,7 @@ fn op_spawn_sync(
         /* allow_cwd_inherit */ false,
         /* wrap_in_shell */ true,
       )?;
+      let _verified = state.try_take::<embedded_program::VerifiedProgram>();
       if timeout.is_some_and(|t| t > 0) {
         command.process_group(0);
       }
@@ -2279,6 +2324,8 @@ mod deprecated {
       /* allow_cwd_inherit */ false,
       /* ipc */ false,
     )?;
+    // Held for the spawn (DENEXT.md item 215).
+    let _verified = state.try_take::<super::embedded_program::VerifiedProgram>();
 
     #[cfg(windows)]
     let mut c = Command::new(cmd);
@@ -2751,6 +2798,54 @@ mod self_fork_tests {
       ipc,
     )
     .is_ok()
+  }
+
+  // denext (DENEXT.md item 215): through the op's own check, with the grant's
+  // permission check already passed by allow-all.
+  #[test]
+  fn a_registered_program_is_checked_at_spawn() {
+    use sha2::Digest;
+    let dir = tempfile::tempdir().unwrap();
+    let program = dir.path().join("prog");
+    let bytes: &'static [u8] = b"packaged";
+    super::set_embedded_programs(vec![super::EmbeddedProgram {
+      path: program.clone(),
+      sha256: sha2::Sha256::digest(bytes).into(),
+      read: Arc::new(move || Ok(bytes.to_vec())),
+    }]);
+    let spawn = || {
+      let mut state = OpState::new(None);
+      let parser =
+        RuntimePermissionDescriptorParser::new(sys_traits::impls::RealSys);
+      state.put(PermissionsContainer::new(
+        Arc::new(parser),
+        Permissions::allow_all(),
+      ));
+      super::compute_run_cmd_and_check_permissions(
+        program.to_str().unwrap(),
+        None,
+        &[],
+        true,
+        &mut state,
+        "Deno.Command().spawn()",
+        true,
+        false,
+      )
+      .map(|_| state.try_take::<super::embedded_program::VerifiedProgram>())
+    };
+    // Written from the app on the first spawn, held for it.
+    assert!(spawn().ok().flatten().is_some());
+    assert_eq!(std::fs::read(&program).unwrap(), bytes);
+    // Swapped: refused, and the bytes are gone.
+    let swap = dir.path().join("swap");
+    std::fs::write(&swap, b"something else").unwrap();
+    std::fs::rename(&swap, &program).unwrap();
+    let err = spawn().err().expect("a swapped program is refused");
+    assert!(err.to_string().contains("Refusing to run"), "{err}");
+    assert!(!program.exists());
+    // The next start runs the packaged bytes again.
+    assert!(spawn().ok().flatten().is_some());
+    super::set_embedded_programs(Vec::new());
   }
 
   // One test: the registrations are process-wide, and the checks before

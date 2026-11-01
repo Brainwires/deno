@@ -8403,13 +8403,53 @@ where the changes are discussed.
        main module's works) and `disarm_given`; `disarm_policy`.
      - F4: the scoped sidecar run grant is documented as a limit by name, not
        containment (item 190); denext warns at packaging. Hashing the extracted
-       program at packaging and verifying it at spawn is the fix, for denext.9.
+       program at packaging and verifying it at spawn is the fix: item 215.
+
+215. **`feat(desktop)`: a run grant can record its program's hash, and the
+     runtime keeps the program to it** (`feat/sidecar-integrity`, ext/process,
+     `cli/rt/run.rs`; item 190's scoped grant was a limit by name, F4 of the
+     denext.8 audit, since the app could write the file it may run):
+     - A baked `--allow-run` value may read
+       `$DENO_DESKTOP_CACHE/.../prog#sha256=<64 hex>#embedded=<path>`; the path is
+       the program's in the embedded file system, relative to the entrypoint.
+       The recorded hash travels with the grant, in the binary's metadata, so
+       the app's write grants cannot reach it (the binary is outside them, and
+       signed on macOS and Windows). A value with the marker that does not
+       parse grants nothing.
+     - At launch the value's plain path becomes the grant, the program's folder
+       goes on `deny_write` (a denial wins over a broad grant, so the app needs
+       no write grant there and its code can't get one), and the program is
+       registered with `deno_process::set_embedded_programs`.
+     - Every spawn path (`Deno.Command`, `node:child_process`, the deprecated
+       `Deno.run`) checks a registered path after the permission check, in the
+       op, so it does not depend on any JS: missing, the file is written from
+       the embedded bytes (checked against the hash first, new file renamed into
+       place, mode 0500 in a 0700 folder); anything else is refused with
+       `NotCapable` and removed, so the next spawn writes it again.
+     - Check, then exec: the file is hashed through one no-follow handle, held
+       past the spawn. On Windows it shares read only, so nothing can write,
+       rename or delete the file until the spawn returns. On Unix, after an
+       asynchronous spawn the path and the handle are compared with the device,
+       inode, size, mtime and ctime from before the hash, and the child is
+       killed on a difference. What is left there: a program of the same user
+       that wins a microseconds race may get a moment of a child before the kill,
+       and `outputSync()` has no such kill. Deno code cannot try it, since writes
+       to the folder are denied; a hard link made beforehand through a broad write
+       grant and written through in the window is the same race.
+     - denext bakes the value from `FIRST_SIDECAR_INTEGRITY_RUNTIME` and the
+       folder name carries the hash, so an update's new bytes do not meet the old
+       copy.
+     - Tests: `ext/process` `embedded_program` (written when missing, a swap
+       refused then healed, a symlink refused even to the right bytes, embedded
+       bytes off the hash not written, a change after the hash seen, the Windows
+       lock), `self_fork_tests::a_registered_program_is_checked_at_spawn`, and `cli/rt/run.rs` (the value
+       taken out of the grant, the denial, malformed values granting nothing).
 
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
 169-174, 176, 178, 180, 182-184, 186, 187, 189-191, 193-196, 198-203, 206, 207,
-209-214) are what the prebuilt `libdenort` carries. The CLI-side parts (for
+209-215) are what the prebuilt `libdenort` carries. The CLI-side parts (for
 example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's
 launchers) are in the branch too, but a stock CLI does not run them; denext's
 own launcher provides that environment.

@@ -1763,7 +1763,15 @@ pub async fn run_with_options(
       // this app's cache or data folder, known only now (the user's home, the
       // app's identifier).
       let dirs = DesktopTokenDirs::for_app(metadata.app_identifier.as_deref());
+      // denext (DENEXT.md item 215): a run grant that records its program's
+      // SHA-256 runs only those bytes, from the copy embedded in this binary.
+      let embedded = take_desktop_embedded_programs(&mut permissions, &dirs);
       expand_desktop_path_tokens(&mut permissions, &dirs);
+      register_desktop_embedded_programs(
+        embedded,
+        &vfs,
+        &entrypoint_dir(&root_path, &metadata.entrypoint_key),
+      );
     }
 
     let desc_parser =
@@ -2551,6 +2559,139 @@ fn has_desktop_path_token(entry: &str) -> bool {
     || entry.starts_with(DESKTOP_DATA_TOKEN)
 }
 
+/// The folder of the entrypoint in the embedded file system: what a program
+/// sidecar's project-relative path is relative to (its `new URL(exec, base)`).
+fn entrypoint_dir(root: &std::path::Path, entrypoint_key: &str) -> PathBuf {
+  let mut dir = root.to_path_buf();
+  dir.extend(entrypoint_key.split('/').filter(|s| !s.is_empty()));
+  dir.pop();
+  dir
+}
+
+/// What separates the path of a `--allow-run` value from the program's recorded
+/// hash, then that from its path in the embedded file system:
+/// `$DENO_DESKTOP_CACHE/sidecars/x/<hash>/prog#sha256=<64 hex>#embedded=bin/prog`.
+const EMBEDDED_PROGRAM_HASH: &str = "#sha256=";
+const EMBEDDED_PROGRAM_SOURCE: &str = "#embedded=";
+
+/// A run grant's program, from its baked value.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct DesktopEmbeddedProgram {
+  /// Where it runs from.
+  path: PathBuf,
+  sha256: [u8; 32],
+  /// `/`-separated, relative to the entrypoint's folder.
+  source: String,
+}
+
+/// `<token path>`, the hash and the source of a baked value, or `None` when it
+/// is not exactly that shape (a source outside the embedded file system is left
+/// to the lookup, which finds nothing).
+fn parse_embedded_program(value: &str) -> Option<(&str, [u8; 32], &str)> {
+  let (path, rest) = value.split_once(EMBEDDED_PROGRAM_HASH)?;
+  let (hex, source) = rest.split_once(EMBEDDED_PROGRAM_SOURCE)?;
+  if source.is_empty()
+    || hex.len() != 64
+    || !hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+    || !has_desktop_path_token(path)
+  {
+    return None;
+  }
+  let mut sha256 = [0u8; 32];
+  for (byte, pair) in sha256.iter_mut().zip(hex.as_bytes().chunks(2)) {
+    *byte = u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok()?;
+  }
+  Some((path, sha256, source))
+}
+
+/// denext (DENEXT.md item 215): takes the programs out of the baked
+/// `--allow-run` values, leaving their plain paths as the grant, and denies
+/// writes to each one's folder (a denial wins over any grant, so the app's own
+/// code cannot change the file through the Deno APIs between a check and a
+/// spawn). A value with the marker that does not parse, or whose path cannot be
+/// expanded, grants nothing: never a wider grant, never one without its check.
+pub(crate) fn take_desktop_embedded_programs(
+  permissions: &mut deno_runtime::deno_permissions::PermissionsOptions,
+  dirs: &DesktopTokenDirs,
+) -> Vec<DesktopEmbeddedProgram> {
+  let Some(entries) = &mut permissions.allow_run else {
+    return Vec::new();
+  };
+  if !entries.iter().any(|e| e.contains(EMBEDDED_PROGRAM_HASH)) {
+    return Vec::new();
+  }
+  let mut programs = Vec::new();
+  let mut grants = Vec::with_capacity(entries.len());
+  let mut denied = Vec::new();
+  for entry in entries.drain(..) {
+    if !entry.contains(EMBEDDED_PROGRAM_HASH) {
+      grants.push(entry);
+      continue;
+    }
+    let Some((token_path, sha256, source)) = parse_embedded_program(&entry)
+    else {
+      continue;
+    };
+    let Some(expanded) = expand_desktop_path_entry(token_path, dirs) else {
+      continue;
+    };
+    let path = PathBuf::from(&expanded);
+    let Some(folder) = path.parent() else {
+      continue;
+    };
+    denied.push(folder.to_string_lossy().into_owned());
+    programs.push(DesktopEmbeddedProgram {
+      path,
+      sha256,
+      source: source.to_string(),
+    });
+    grants.push(expanded);
+  }
+  permissions.allow_run = if grants.is_empty() {
+    None
+  } else {
+    Some(grants)
+  };
+  if !denied.is_empty() {
+    permissions
+      .deny_write
+      .get_or_insert_with(Vec::new)
+      .extend(denied);
+  }
+  programs
+}
+
+/// Hands the programs to the spawn path, each reading its bytes from `vfs`.
+fn register_desktop_embedded_programs(
+  programs: Vec<DesktopEmbeddedProgram>,
+  vfs: &Arc<FileBackedVfs>,
+  base: &std::path::Path,
+) {
+  if programs.is_empty() {
+    return;
+  }
+  let programs = programs
+    .into_iter()
+    .map(|program| {
+      let mut source = base.to_path_buf();
+      source.extend(program.source.split('/').filter(|s| !s.is_empty()));
+      let source =
+        deno_path_util::normalize_path(std::borrow::Cow::Owned(source))
+          .into_owned();
+      let vfs = vfs.clone();
+      deno_runtime::deno_process::EmbeddedProgram {
+        path: program.path,
+        sha256: program.sha256,
+        read: Arc::new(move || {
+          let file = vfs.file_entry(&source)?;
+          Ok(vfs.read_file_all(file)?.into_owned())
+        }),
+      }
+    })
+    .collect();
+  deno_runtime::deno_process::set_embedded_programs(programs);
+}
+
 /// denext (DENEXT.md items 190, 191): expands the desktop path tokens
 /// ([`DESKTOP_CACHE_TOKEN`], [`DESKTOP_DATA_TOKEN`]) in the read, write and
 /// run grants and denials of a desktop app. An allow entry that cannot be
@@ -2627,6 +2768,118 @@ mod tests {
       data: None,
     };
     expand_desktop_path_tokens(p, &dirs);
+  }
+
+  // --- a program the app carries (DENEXT.md item 215) ---
+
+  const PROGRAM_HEX: &str =
+    "ab00000000000000000000000000000000000000000000000000000000000001";
+
+  #[test]
+  fn a_recorded_program_is_taken_out_of_the_run_grant_and_its_folder_denied() {
+    let mut p = PermissionsOptions {
+      allow_run: Some(vec![
+        "git".to_string(),
+        format!(
+          "$DENO_DESKTOP_CACHE/sidecars/x/h/prog#sha256={PROGRAM_HEX}#embedded=bin/prog"
+        ),
+      ]),
+      allow_write: Some(vec!["$DENO_DESKTOP_CACHE".to_string()]),
+      ..Default::default()
+    };
+    let dirs = DesktopTokenDirs {
+      cache: Some(std::path::PathBuf::from("/c")),
+      data: None,
+    };
+    let programs = super::take_desktop_embedded_programs(&mut p, &dirs);
+    let path = std::path::Path::new("/c")
+      .join("sidecars")
+      .join("x")
+      .join("h");
+    let program = path.join("prog");
+    assert_eq!(
+      p.allow_run,
+      Some(vec![
+        "git".to_string(),
+        program.to_string_lossy().into_owned()
+      ])
+    );
+    assert_eq!(
+      p.deny_write,
+      Some(vec![path.to_string_lossy().into_owned()])
+    );
+    assert_eq!(programs.len(), 1);
+    assert_eq!(programs[0].path, program);
+    assert_eq!(programs[0].sha256[0], 0xab);
+    assert_eq!(programs[0].sha256[31], 0x01);
+    assert_eq!(programs[0].source, "bin/prog");
+  }
+
+  #[test]
+  fn a_malformed_recorded_program_grants_nothing() {
+    let dirs = DesktopTokenDirs {
+      cache: Some(std::path::PathBuf::from("/c")),
+      data: None,
+    };
+    for value in [
+      // A hash too short, in capitals, no source, an empty source, no token.
+      "$DENO_DESKTOP_CACHE/x/p#sha256=ab#embedded=p".to_string(),
+      format!(
+        "$DENO_DESKTOP_CACHE/x/p#sha256={}#embedded=p",
+        PROGRAM_HEX.to_uppercase()
+      ),
+      format!("$DENO_DESKTOP_CACHE/x/p#sha256={PROGRAM_HEX}"),
+      format!("$DENO_DESKTOP_CACHE/x/p#sha256={PROGRAM_HEX}#embedded="),
+      format!("/x/p#sha256={PROGRAM_HEX}#embedded=p"),
+      // A `..` in the path.
+      format!("$DENO_DESKTOP_CACHE/../p#sha256={PROGRAM_HEX}#embedded=p"),
+    ] {
+      let mut p = PermissionsOptions {
+        allow_run: Some(vec![value.clone()]),
+        ..Default::default()
+      };
+      assert!(
+        super::take_desktop_embedded_programs(&mut p, &dirs).is_empty(),
+        "{value}"
+      );
+      // None, never Some(vec![]), which would allow everything.
+      assert_eq!(p.allow_run, None, "{value}");
+      assert_eq!(p.deny_write, None, "{value}");
+    }
+    // A folder that cannot be known takes the grant with it, too.
+    let mut p = PermissionsOptions {
+      allow_run: Some(vec![format!(
+        "$DENO_DESKTOP_CACHE/x/p#sha256={PROGRAM_HEX}#embedded=p"
+      )]),
+      ..Default::default()
+    };
+    let none = DesktopTokenDirs {
+      cache: None,
+      data: None,
+    };
+    assert!(super::take_desktop_embedded_programs(&mut p, &none).is_empty());
+    assert_eq!(p.allow_run, None);
+    // An unscoped grant and plain values are left as they are.
+    for run in [Some(vec![]), Some(vec!["git".to_string()]), None] {
+      let mut p = PermissionsOptions {
+        allow_run: run.clone(),
+        ..Default::default()
+      };
+      assert!(super::take_desktop_embedded_programs(&mut p, &dirs).is_empty());
+      assert_eq!(p.allow_run, run);
+    }
+  }
+
+  #[test]
+  fn a_programs_source_is_relative_to_the_entrypoint() {
+    assert_eq!(
+      super::entrypoint_dir(std::path::Path::new("/vfs"), "app/desktop.ts"),
+      std::path::Path::new("/vfs").join("app")
+    );
+    assert_eq!(
+      super::entrypoint_dir(std::path::Path::new("/vfs"), "desktop.ts"),
+      std::path::Path::new("/vfs")
+    );
   }
 
   // --- $DENO_DESKTOP_CACHE (DENEXT.md item 190) ---
