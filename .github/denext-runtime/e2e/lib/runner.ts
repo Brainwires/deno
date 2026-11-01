@@ -142,6 +142,10 @@ export interface AppSpec {
   tag?: string;
   /** More `compile.include` entries (worker modules). */
   include?: string[];
+  /** Files to add to the app directory before it is packaged. */
+  files?: Record<string, Uint8Array>;
+  /** The baked permission flags (default `-A`). */
+  permissions?: string[];
 }
 
 export interface Packaged {
@@ -247,11 +251,16 @@ export async function packageApp(env: Env, spec: AppSpec): Promise<Packaged> {
     path(appDir, ".deno-desktop", "app.json"),
     JSON.stringify({ identifier: spec.identifier, ...spec.appJson }, null, 2),
   );
+  for (const [rel, bytes] of Object.entries(spec.files ?? {})) {
+    const parts = rel.split("/");
+    await Deno.mkdir(path(appDir, ...parts.slice(0, -1)), { recursive: true });
+    await Deno.writeFile(path(appDir, ...parts), bytes);
+  }
   const output = spec.output ?? path("out", spec.name);
   const t0 = Date.now();
   await must(Deno.execPath(), [
     "desktop",
-    "-A",
+    ...spec.permissions ?? ["-A"],
     "--no-check",
     "--backend",
     env.backend,

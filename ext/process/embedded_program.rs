@@ -22,8 +22,8 @@
 //! - Windows: the handle shares read only, so until the child's image is
 //!   mapped the file can be neither written, nor renamed, nor deleted.
 //! - Unix: nothing can lock a file against its owner. After an asynchronous
-//!   spawn the path is compared with the handle's device, inode, size, mtime
-//!   and ctime as they were before the hash; on a difference the child is
+//!   spawn the path is compared with the handle's device, inode, mode, size,
+//!   mtime and ctime as they were before the hash; on a difference the child is
 //!   killed and the spawn refused. So a same-user program that wins the race
 //!   (microseconds) gets at most a moment of a child, and app code holding only
 //!   the Deno APIs cannot try: the embedder denies writes to the folder.
@@ -108,6 +108,7 @@ pub(crate) struct VerifiedProgram {
 struct FileStamp {
   dev: u64,
   ino: u64,
+  mode: u32,
   size: u64,
   mtime: (i64, i64),
   ctime: (i64, i64),
@@ -119,6 +120,7 @@ fn stamp_of(meta: &std::fs::Metadata) -> FileStamp {
   FileStamp {
     dev: meta.dev(),
     ino: meta.ino(),
+    mode: meta.mode(),
     size: meta.size(),
     mtime: (meta.mtime(), meta.mtime_nsec()),
     ctime: (meta.ctime(), meta.ctime_nsec()),
@@ -404,12 +406,18 @@ mod tests {
     assert!(!held.unchanged());
     drop(held);
 
-    // ... and written in place, under the same inode.
+    // ... and made writable, the step before a write in place; then the write,
+    // past the file system's timestamp tick, seen on its own.
     std::fs::remove_file(&path).unwrap();
     let held = verify(&p).unwrap();
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))
       .unwrap();
+    assert!(!held.unchanged());
+    drop(held);
+    let held = verify(&p).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    std::fs::write(&path, b"PACKAGED").unwrap();
     assert!(!held.unchanged());
   }
 

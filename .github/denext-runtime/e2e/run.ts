@@ -40,6 +40,7 @@ const AREAS: Record<
   sld: () => import("./areas/sld.ts"),
   menus: () => import("./areas/menus.ts"),
   asmt: () => import("./areas/asmt.ts"),
+  sidecarint: () => import("./areas/sidecarint.ts"),
   update: () => import("./areas/update.ts"),
   keyring: () => import("./areas/keyring.ts"),
   keyringpersist: () => import("./areas/keyringpersist.ts"),

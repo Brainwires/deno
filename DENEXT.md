@@ -8430,7 +8430,7 @@ where the changes are discussed.
        past the spawn. On Windows it shares read only, so nothing can write,
        rename or delete the file until the spawn returns. On Unix, after an
        asynchronous spawn the path and the handle are compared with the device,
-       inode, size, mtime and ctime from before the hash, and the child is
+       inode, mode, size, mtime and ctime from before the hash, and the child is
        killed on a difference. What is left there: a program of the same user
        that wins a microseconds race may get a moment of a child before the kill,
        and `outputSync()` has no such kill. Deno code cannot try it, since writes
