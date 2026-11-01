@@ -195,21 +195,9 @@
       "launch: the tray rule"
     ]
   },
-  "x86_64-unknown-linux-gnu/cef/keyring-locked": {
-    "quit": [
-      "the OS's quits"
-    ]
-  },
-  "x86_64-unknown-linux-gnu/cef/keyring-kwallet": {
-    "quit": [
-      "the OS's quits"
-    ]
-  },
-  "x86_64-unknown-linux-gnu/cef/keyring-persist": {
-    "quit": [
-      "the OS's quits"
-    ]
-  },
+  "x86_64-unknown-linux-gnu/cef/keyring-locked": {},
+  "x86_64-unknown-linux-gnu/cef/keyring-kwallet": {},
+  "x86_64-unknown-linux-gnu/cef/keyring-persist": {},
   "aarch64-unknown-linux-gnu/webview/default": {
     "asmt": [
       "launch: a real OS auth session"
@@ -279,21 +267,9 @@
       "launch: the tray rule"
     ]
   },
-  "aarch64-unknown-linux-gnu/cef/keyring-locked": {
-    "quit": [
-      "the OS's quits"
-    ]
-  },
-  "aarch64-unknown-linux-gnu/cef/keyring-kwallet": {
-    "quit": [
-      "the OS's quits"
-    ]
-  },
-  "aarch64-unknown-linux-gnu/cef/keyring-persist": {
-    "quit": [
-      "the OS's quits"
-    ]
-  },
+  "aarch64-unknown-linux-gnu/cef/keyring-locked": {},
+  "aarch64-unknown-linux-gnu/cef/keyring-kwallet": {},
+  "aarch64-unknown-linux-gnu/cef/keyring-persist": {},
   "x86_64-pc-windows-msvc/webview/default": {
     "asmt": [
       "launch: a real OS auth session"
