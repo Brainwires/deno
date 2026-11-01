@@ -8431,12 +8431,14 @@ where the changes are discussed.
      - n/a here, with the reason in the run: maximize and minimize (xdg-shell
        tells a client nothing of minimized on any compositor, and sway ignores
        set_maximized), placing a window (`setPosition` is false on Wayland), and
-       under CEF the clipboard's change events (they need ext-data-control-v1,
-       which this sway's wlroots 0.15 lacks) and overlays (`layerShell` is
-       false).
-     - The drag without a held button ends `"cancelled"` on Wayland, not
-       `"failed"`: the host can't read the pointer's state outside an event, so
-       it asks and the compositor turns it down.
+       under CEF the clipboard's change events (the host reports
+       `changeEvents: false` without ext-data-control-v1, which this sway's
+       wlroots 0.15 lacks) and overlays (`layerShell` is false).
+     - A drag with the pointer off the window fails on Wayland, and so does every
+       drag under CEF (`fileDragOut` is false): GTK has no surface to start from.
+       With the pointer on a WebKitGTK window and no held button it ends
+       `"cancelled"`, not `"failed"`: the host can't read the pointer's state
+       outside an event, so it asks and the compositor turns it down.
 
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,

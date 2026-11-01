@@ -22,7 +22,7 @@ import {
   titledWindow,
   within,
 } from "../_shared/e2e.ts";
-import { topLevelExists } from "../_shared/input.ts";
+import { swayCursor, swayWindow, topLevelExists } from "../_shared/input.ts";
 
 const r = new Report("dnd");
 const isA = (e: unknown, name: string) =>
@@ -115,9 +115,7 @@ await r.step("clipboard", async () => {
     "writeText('') clears: readText() is empty",
     (await cb.readText()) === "",
   );
-  if (r.params.clipboardChangeRefused) {
-    r.na("clipboard change events", r.params.clipboardChangeRefused);
-  } else if (caps.changeEvents) {
+  if (caps.changeEvents) {
     let changes = 0;
     cb.onchange = () => changes++;
     await sleep(600);
@@ -262,20 +260,41 @@ await r.step("drag and drop", async () => {
     "a relative path fails",
     (await win.startDrag({ files: ["relative.txt"] })) === "failed",
   );
-  // Wayland reports no pointer state outside an event, so the host can't refuse
-  // first: it asks, the compositor turns the drag down, and it ends cancelled.
+  const wayland = !!Deno.env.get("WAYLAND_DISPLAY");
+  // A drag settles or it is this check's failure, not the app's.
+  const drag = async () => {
+    const settled = await within(
+      win.startDrag({ files: [Deno.execPath()] }),
+      10000,
+    );
+    return "value" in settled ? settled.value : "never settled";
+  };
+  if (Deno.env.get("SWAYSOCK")) {
+    // A Wayland drag starts from the surface under the pointer. With none it
+    // used to end the process, so this is refused before GTK sees it.
+    const rect = (await swayWindow("E2E DnD"))?.rect;
+    r.check("the compositor lists the window", !!rect, rect);
+    r.mark("startDrag with the pointer off the window");
+    await swayCursor(rect.x + rect.width + 20, rect.y + rect.height + 20);
+    await sleep(300);
+    const off = await drag();
+    r.check(
+      "the pointer off the window: the drag fails",
+      off === "failed",
+      off,
+    );
+    await swayCursor(rect.x + 20, rect.y + 20);
+    await sleep(300);
+  }
+  // Wayland reports no pointer state outside an event, so with the pointer on
+  // its window a host that can drag asks, and the compositor turns it down.
   r.mark("startDrag with no held button");
-  // Bounded: a drag that never settles is this check's failure, not the app's.
-  const settled = await within(
-    win.startDrag({ files: [Deno.execPath()] }),
-    10000,
-  );
-  const noButton = "value" in settled ? settled.value : "never settled";
+  const noButton = await drag();
+  const canDrag = desktop.windowCapabilities().fileDragOut;
   r.check(
     "no held mouse button: the drag fails",
-    noButton === "failed" ||
-      (noButton === "cancelled" && !!Deno.env.get("WAYLAND_DISPLAY")),
-    noButton,
+    noButton === (wayland && canDrag ? "cancelled" : "failed"),
+    { noButton, canDrag },
   );
   for (const t of ["ondragenter", "ondragover", "ondragleave", "ondrop"]) {
     win[t] = () => {};

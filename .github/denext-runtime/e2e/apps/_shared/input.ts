@@ -332,6 +332,11 @@ export async function swayWindow(title: string): Promise<any> {
   return walk(JSON.parse(await run("swaymsg", ["-r", "-t", "get_tree"])));
 }
 
+/** Move the seat's pointer, in the layout's coordinates. */
+export async function swayCursor(x: number, y: number): Promise<void> {
+  await run("swaymsg", [`seat - cursor set ${x} ${y}`]);
+}
+
 const WAYLAND_MODS: Partial<Record<Key, string>> = {
   Primary: "ctrl",
   Control: "ctrl",
