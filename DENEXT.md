@@ -8248,12 +8248,10 @@ where the changes are discussed.
      end is a request the OS may not honour, and `true` says only that it was
      made. Driven on a macOS 26.6.2 VM with a real logout, the dialog's Log Out
      button on both backends: a regular app's refusal 300 ms or 8 s later
-     stopped it (CEF's 8 s run was only watched for 20 s); an accessory app's
-     did not, at once (webview) or after 300 ms (both), because loginwindow's
-     `quitUIElementApps` phase sends those apps the quit event and moves on. On
-     webview the alert says the app interrupted the logout; on CEF, whose quit
-     event handler returns before the answer, macOS says the app failed to quit,
-     about 45 s later. A real Windows logoff, restart and shutdown were not
+     stopped it, and the alert says at once that the app interrupted the logout;
+     an accessory app's did not, at once (webview) or after 300 ms (both),
+     because loginwindow's `quitUIElementApps` phase sends those apps the quit
+     event and moves on. A real Windows logoff, restart and shutdown were not
      driven. A Windows tray menu's raw `quit` role quits at once with no reason,
      as macOS's used to. Tests: `desktop_ops_inert`, the `quitRequested`
      assertions in `cli/rt/desktop.rs`, laufey's `--quit-request`.
