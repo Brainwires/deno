@@ -1,0 +1,30 @@
+beforeEach passes
+beforeEach fails
+<?xml version="1.0" encoding="utf-8"?>
+<testsuites>
+	<testsuite name="suite" time="[WILDLINE]" disabled="0" errors="0" tests="2" failures="0" skipped="1" timestamp="[WILDLINE]" hostname="[WILDLINE]">
+		<testcase name="passes" time="[WILDLINE]" classname="test" file="[WILDLINE]main.cjs"/>
+		<testcase name="is skipped" time="[WILDLINE]" classname="test" file="[WILDLINE]main.cjs">
+			<skipped type="skipped" message="true"/>
+		</testcase>
+	</testsuite>
+	<testcase name="fails" time="[WILDLINE]" classname="test" file="[WILDLINE]main.cjs" failure="Expected values to be strictly equal:&#10;&#10;1 !== 2&#10;">
+		<failure type="testCodeFailure" message="Expected values to be strictly equal:&#10;&#10;1 !== 2">
+[WILDCARD]  code: 'ERR_TEST_FAILURE',
+  failureType: 'testCodeFailure',
+  cause: AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+[WILDCARD]
+		</failure>
+	</testcase>
+	<testcase name="is todo" time="[WILDLINE]" classname="test" file="[WILDLINE]main.cjs">
+		<skipped type="todo" message="true"/>
+	</testcase>
+	<!-- tests 4 -->
+	<!-- suites 1 -->
+	<!-- pass 1 -->
+	<!-- fail 1 -->
+	<!-- cancelled 0 -->
+	<!-- skipped 1 -->
+	<!-- todo 1 -->
+	<!-- duration_ms [WILDLINE] -->
+</testsuites>

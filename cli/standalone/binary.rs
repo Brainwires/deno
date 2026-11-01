@@ -26,7 +26,6 @@ use deno_core::url::Url;
 use deno_graph::ModuleGraph;
 use deno_lib::args::CaData;
 use deno_lib::args::UnstableConfig;
-use deno_lib::shared::ReleaseChannel;
 use deno_lib::standalone::binary::CjsExportAnalysisEntry;
 use deno_lib::standalone::binary::InitialWindowConfig;
 use deno_lib::standalone::binary::MAGIC_BYTES;
@@ -50,7 +49,6 @@ use deno_lib::util::hash::FastInsecureHasher;
 use deno_lib::util::text_encoding::is_valid_utf8;
 use deno_lib::util::v8::construct_v8_flags;
 use deno_lib::version::DENO_VERSION_INFO;
-use deno_lib::version::UPSTREAM_DENO_VERSION;
 use deno_npm::NpmSystemInfo;
 use deno_npm::resolution::SerializedNpmResolutionSnapshot;
 use deno_npm::resolution::ValidSerializedNpmResolutionSnapshot;
@@ -581,7 +579,7 @@ impl<'a> DenoCompileBinaryWriter<'a> {
     compile_flags: &CompileFlags,
   ) -> Result<Vec<u8>, AnyError> {
     if self.is_desktop {
-      return self.get_desktop_base_binary(compile_flags).await;
+      return get_desktop_base_binary(compile_flags);
     }
 
     // Used for testing.
@@ -606,15 +604,17 @@ impl<'a> DenoCompileBinaryWriter<'a> {
       runtime_archive_name("denort", &compile_flags.engine, &target);
 
     // A denext build compiles onto its own release's denort (the runtime
-    // patches, Deno.SQL, ...), never Deno's stock one of the same version.
-    let denext_version = (compile_flags.engine == JavaScriptEngine::V8)
-      .then(|| DENO_VERSION_INFO.denext())
-      .flatten();
+    // patches, Deno.SQL, ...). There is no other runtime to fall back on.
+    let version = denext_denort_version(
+      &compile_flags.engine,
+      DENO_VERSION_INFO.denext(),
+      &binary_name,
+    )?;
     let read_file = |path: &Path| -> Result<Vec<u8>, AnyError> {
       std::fs::read(path).with_context(|| format!("Reading {}", path.display()))
     };
     let download_directory = self.deno_dir.dl_folder_path();
-    let archive_data = if let Some(version) = denext_version {
+    let archive_data = {
       // denext (DENEXT.md item 130): the release's own denort, checked
       // against the same release's SHA256SUMS before it is used or cached.
       let (binary_path_suffix, download_url) = denext_denort(version, &target);
@@ -622,26 +622,18 @@ impl<'a> DenoCompileBinaryWriter<'a> {
       log::debug!("Resolved denort: {}", binary_path.display());
       let asset = denext_denort_asset_name(version, &target);
       let sums_url = denext_release_sums_url(&download_url);
-      let client = self.http_client_provider.get_or_create()?;
+      // denext (DENEXT.md item 188): a release build carries the SHA-256
+      // of each target's denort archive and needs no SHA256SUMS for it.
+      let pinned = embedded_denort_sha256(EMBEDDED_DENORT_SHA256S, &target)
+        .context("Reading the denort SHA-256 this CLI was built with.")?;
       let fetch =
         async |what: DenortFetch| -> Result<Option<Vec<u8>>, AnyError> {
-          let url = match what {
-            DenortFetch::Archive => download_url.as_str(),
-            DenortFetch::Sums => sums_url.as_str(),
-          };
-          let progress_bars = ProgressBar::new(ProgressBarStyle::DownloadBars);
-          let progress = progress_bars.update(url);
-          let response = client
-            .download_with_progress_and_retries(
-              url.parse()?,
-              &Default::default(),
-              &progress,
-            )
+          self
+            .fetch_runtime_file(match what {
+              DenortFetch::Archive => download_url.as_str(),
+              DenortFetch::Sums => sums_url.as_str(),
+            })
             .await
-            .with_context(|| format!("Failed downloading '{url}'"))?;
-          response
-            .into_maybe_bytes()
-            .with_context(|| format!("Failed downloading '{url}'"))
         };
       load_verified_denext_denort(
         &binary_path,
@@ -650,27 +642,11 @@ impl<'a> DenoCompileBinaryWriter<'a> {
           archive_url: &download_url,
           sums_url: &sums_url,
         },
+        pinned.as_deref(),
         fetch,
       )
       .await
       .context("Setting up base binary.")?
-    } else {
-      let binary_path_suffix = deno_land_suffix(
-        DENO_VERSION_INFO.release_channel,
-        DENO_VERSION_INFO.git_hash,
-        &binary_name,
-      );
-      let download_url = format!("https://dl.deno.land/{binary_path_suffix}");
-      let binary_path = download_directory.join(&binary_path_suffix);
-      log::debug!("Resolved denort: {}", binary_path.display());
-      if binary_path.exists() {
-        read_file(&binary_path)?
-      } else {
-        self
-          .download_base_binary(&binary_path, &download_url)
-          .await
-          .context("Setting up base binary.")?
-      }
     };
     let temp_dir = tempfile::TempDir::new()?;
     let base_binary_path = archive::unpack_into_dir(archive::UnpackArgs {
@@ -688,113 +664,26 @@ impl<'a> DenoCompileBinaryWriter<'a> {
     Ok(base_binary)
   }
 
-  async fn get_desktop_base_binary(
+  /// A runtime file's bytes, `None` when the server has no such file.
+  async fn fetch_runtime_file(
     &self,
-    compile_flags: &CompileFlags,
-  ) -> Result<Vec<u8>, AnyError> {
-    // For development: check DENORT_DESKTOP_BIN env var or look
-    // for libdenort next to the deno executable.
-    if let Some(path) = get_dev_desktop_binary_path() {
-      if compile_flags.engine == JavaScriptEngine::QuickJs {
-        log::warn!(
-          "--engine quickjs is ignored when using the development libdenort at {}",
-          path.to_string_lossy()
-        );
-      }
-      log::debug!("Resolved libdenort: {}", path.to_string_lossy());
-      return std::fs::read(&path).with_context(|| {
-        format!("Could not find libdenort at '{}'", path.to_string_lossy())
-      });
-    }
-
-    let target = resolve_compile_target(compile_flags);
-    let lib_ext = if target.contains("darwin") {
-      "dylib"
-    } else if target.contains("windows") {
-      "dll"
-    } else {
-      "so"
-    };
-    let lib_name = if target.contains("windows") {
-      format!("denort.{lib_ext}")
-    } else {
-      format!("libdenort.{lib_ext}")
-    };
-    let binary_name =
-      runtime_archive_name("libdenort", &compile_flags.engine, &target);
-
-    let binary_path_suffix = deno_land_suffix(
-      DENO_VERSION_INFO.release_channel,
-      DENO_VERSION_INFO.git_hash,
-      &binary_name,
-    );
-
-    let download_directory = self.deno_dir.dl_folder_path();
-    let binary_path = download_directory.join(&binary_path_suffix);
-    log::debug!("Resolved libdenort: {}", binary_path.display());
-
-    let read_file = |path: &Path| -> Result<Vec<u8>, AnyError> {
-      std::fs::read(path).with_context(|| format!("Reading {}", path.display()))
-    };
-    let archive_data = if binary_path.exists() {
-      read_file(&binary_path)?
-    } else {
-      self
-        .download_base_binary(
-          &binary_path,
-          &format!("https://dl.deno.land/{binary_path_suffix}"),
-        )
-        .await
-        .context("Setting up desktop base binary.")?
-    };
-    let temp_dir = tempfile::TempDir::new()?;
-    let base_binary_path = archive::unpack_into_dir(archive::UnpackArgs {
-      exe_name: &lib_name,
-      archive_name: &binary_name,
-      archive_data: &archive_data,
-      dest_path: temp_dir.path(),
-    })?;
-    let base_binary = read_file(&base_binary_path)?;
-    drop(temp_dir);
-    Ok(base_binary)
-  }
-
-  async fn download_base_binary(
-    &self,
-    output_path: &Path,
-    download_url: &str,
-  ) -> Result<Vec<u8>, AnyError> {
-    let response = {
-      let progress_bars = ProgressBar::new(ProgressBarStyle::DownloadBars);
-      let progress = progress_bars.update(download_url);
-
-      self
-        .http_client_provider
-        .get_or_create()?
-        .download_with_progress_and_retries(
-          download_url.parse()?,
-          &Default::default(),
-          &progress,
-        )
-        .await?
-    };
-    let bytes = response
-      .into_bytes()
-      .with_context(|| format!("Failed downloading '{}'", download_url))?;
-
-    let create_dir_all = |dir: &Path| {
-      std::fs::create_dir_all(dir)
-        .with_context(|| format!("Creating {}", dir.display()))
-    };
-    create_dir_all(output_path.parent().unwrap())?;
-    atomic_write_file_with_retries(
-      &CliSys::default(),
-      output_path,
-      &bytes,
-      CACHE_PERM,
-    )
-    .with_context(|| format!("Writing {}", output_path.display()))?;
-    Ok(bytes)
+    url: &str,
+  ) -> Result<Option<Vec<u8>>, AnyError> {
+    let progress_bars = ProgressBar::new(ProgressBarStyle::DownloadBars);
+    let progress = progress_bars.update(url);
+    let response = self
+      .http_client_provider
+      .get_or_create()?
+      .download_with_progress_and_retries(
+        url.parse()?,
+        &Default::default(),
+        &progress,
+      )
+      .await
+      .with_context(|| format!("Failed downloading '{url}'"))?;
+    response
+      .into_maybe_bytes()
+      .with_context(|| format!("Failed downloading '{url}'"))
   }
 
   /// This functions creates a standalone deno binary by appending a bundle
@@ -1451,6 +1340,8 @@ impl<'a> DenoCompileBinaryWriter<'a> {
           transparent_titlebar: w.transparent_titlebar,
           transparent: w.transparent,
           show_on_first_load: w.show_on_first_load,
+          overlay: w.overlay,
+          background_throttling: w.background_throttling,
         }),
     };
 
@@ -2023,20 +1914,119 @@ fn denext_denort(version: &str, target: &str) -> (String, String) {
 const DENEXT_DENORT_BASE_URL: &str =
   "https://github.com/Brainwires/deno/releases/download";
 
-/// An upstream runtime archive's path on dl.deno.land (and below the
-/// download cache). A release names the upstream Deno version this fork is
-/// built from ([`UPSTREAM_DENO_VERSION`]), never the fork's own `3.0.0-rc.N`:
-/// that is no upstream release, and an upstream release of the same number
-/// would be a different runtime.
-fn deno_land_suffix(
-  release_channel: ReleaseChannel,
-  git_hash: &str,
-  binary_name: &str,
-) -> String {
-  match release_channel {
-    ReleaseChannel::Canary => format!("canary/{git_hash}/{binary_name}"),
-    _ => format!("release/v{UPSTREAM_DENO_VERSION}/{binary_name}"),
+fn get_desktop_base_binary(
+  compile_flags: &CompileFlags,
+) -> Result<Vec<u8>, AnyError> {
+  // For development: check DENORT_DESKTOP_BIN env var or look
+  // for libdenort next to the deno executable.
+  if let Some(path) = get_dev_desktop_binary_path() {
+    if compile_flags.engine == JavaScriptEngine::QuickJs {
+      log::warn!(
+        "--engine quickjs is ignored when using the development libdenort at {}",
+        path.to_string_lossy()
+      );
+    }
+    log::debug!("Resolved libdenort: {}", path.to_string_lossy());
+    return std::fs::read(&path).with_context(|| {
+      format!("Could not find libdenort at '{}'", path.to_string_lossy())
+    });
   }
+
+  let target = resolve_compile_target(compile_flags);
+  let binary_name =
+    runtime_archive_name("libdenort", &compile_flags.engine, &target);
+  Err(desktop_runtime_refusal(&binary_name))
+}
+
+/// denext (DENEXT.md item 216): why upstream's runtime archives are not
+/// downloaded. This CLI's metadata has no `tsgo` field, which upstream's
+/// runtime requires, so an app built on one exits at startup.
+const UPSTREAM_RUNTIME_UNUSABLE: &str = "upstream Deno's runtime, which cannot \
+   read the metadata this CLI writes, so an app built on it would not start. \
+   Nothing was downloaded.";
+
+/// The denext release whose `denort` a compile takes (DENEXT.md item 130).
+/// Without a release runtime to take, the compile is refused
+/// (`asset` is the upstream archive it would have needed).
+fn denext_denort_version<'a>(
+  engine: &JavaScriptEngine,
+  denext: Option<&'a str>,
+  asset: &str,
+) -> Result<&'a str, AnyError> {
+  if *engine == JavaScriptEngine::QuickJs {
+    bail!(
+      "--engine quickjs needs {asset}, {UPSTREAM_RUNTIME_UNUSABLE} This fork \
+       releases no QuickJS runtime. Remove --engine quickjs to compile onto \
+       this build's own denort, or set DENORT_BIN to a denort built from \
+       this source (--engine is then ignored)."
+    );
+  }
+  denext.ok_or_else(|| {
+    deno_core::anyhow::anyhow!(
+      "This build is not a denext release, so it has no release denort to \
+       download, and {asset} is {UPSTREAM_RUNTIME_UNUSABLE} Set DENORT_BIN \
+       to a denort built from this source."
+    )
+  })
+}
+
+/// `deno desktop` with no runtime given: the only downloadable one is
+/// upstream's. The fork's `libdenort` is in its runtime archives.
+fn desktop_runtime_refusal(asset: &str) -> AnyError {
+  deno_core::anyhow::anyhow!(
+    "deno desktop needs a libdenort, and {asset} is \
+     {UPSTREAM_RUNTIME_UNUSABLE} Package with denext's desktop commands \
+     (denext desktop run, build or package), which supply a verified runtime, \
+     or set DENORT_DESKTOP_BIN and LAUFEY_DEV_DIR to the libdenort and laufey \
+     directory of a denext desktop runtime archive."
+  )
+}
+
+/// denext (DENEXT.md item 188): the SHA-256 of every `denort` archive of
+/// this CLI's release, as `<target>=<sha256>` entries separated by commas
+/// (`DENEXT_DENORT_SHA256S` at compile time; the release workflow builds the
+/// archives first and passes their hashes to the CLI build, and
+/// `cli/build.rs` refuses a malformed list). `None` in a build without it (a
+/// local or test build), which verifies against the release's `SHA256SUMS`
+/// as before.
+const EMBEDDED_DENORT_SHA256S: Option<&str> =
+  option_env!("DENEXT_DENORT_SHA256S");
+
+/// `target`'s SHA-256 in an embedded `<target>=<sha256>,...` list (see
+/// [`EMBEDDED_DENORT_SHA256S`]), lowercase. `None` when there is no list or
+/// it has no entry for `target` (a target that release does not ship, or a
+/// dispatch build of some targets only); an error for a malformed list or
+/// two entries for `target` that disagree.
+fn embedded_denort_sha256(
+  list: Option<&str>,
+  target: &str,
+) -> Result<Option<String>, AnyError> {
+  let Some(list) = list else {
+    return Ok(None);
+  };
+  let mut found: Option<String> = None;
+  for entry in list.split(',').map(str::trim).filter(|e| !e.is_empty()) {
+    let Some((name, hash)) = entry.split_once('=') else {
+      bail!(
+        "malformed denort SHA-256 entry '{entry}' (want <target>=<sha256>)"
+      );
+    };
+    let (name, hash) = (name.trim(), hash.trim());
+    if hash.len() != 64 || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
+      bail!("malformed denort SHA-256 for {name}: '{hash}'");
+    }
+    if name != target {
+      continue;
+    }
+    let hash = hash.to_ascii_lowercase();
+    match &found {
+      Some(previous) if *previous != hash => bail!(
+        "two denort SHA-256 entries for {target} disagree ({previous} and {hash})"
+      ),
+      _ => found = Some(hash),
+    }
+  }
+  Ok(found)
 }
 
 fn denext_denort_asset_name(version: &str, target: &str) -> String {
@@ -2134,9 +2124,15 @@ fn read_verified_cache(archive_path: &Path) -> Option<Vec<u8>> {
 /// while its bytes still hash to the SHA-256 recorded beside it when it was
 /// verified; otherwise it is checked against `SHA256SUMS` again (and
 /// downloaded again if it does not match).
+///
+/// With `pinned` (item 188: the SHA-256 this CLI was built with, see
+/// [`EMBEDDED_DENORT_SHA256S`]) that hash is the only one accepted:
+/// `SHA256SUMS` is not fetched, and a cached or downloaded archive with
+/// other bytes is refused whatever the release lists.
 async fn load_verified_denext_denort(
   cache_path: &Path,
   source: &DenextDenortSource<'_>,
+  pinned: Option<&str>,
   fetch: impl AsyncFn(DenortFetch) -> Result<Option<Vec<u8>>, AnyError>,
 ) -> Result<Vec<u8>, AnyError> {
   let DenextDenortSource {
@@ -2144,6 +2140,27 @@ async fn load_verified_denext_denort(
     archive_url,
     sums_url,
   } = *source;
+  if let Some(expected) = pinned {
+    let expected = expected.to_ascii_lowercase();
+    if let Some(bytes) = std::fs::read(cache_path)
+      .ok()
+      .filter(|bytes| sha256_hex(bytes) == expected)
+    {
+      return Ok(bytes);
+    }
+    let Some(archive) = fetch(DenortFetch::Archive).await? else {
+      bail!("{archive_url} was not found");
+    };
+    let actual = sha256_hex(&archive);
+    if actual != expected {
+      bail!(
+        "{asset} from {archive_url} does not match the SHA-256 this CLI was \
+         built with: expected {expected}, got {actual}. Refusing to use it."
+      );
+    }
+    write_verified_cache(cache_path, &archive, &actual, asset)?;
+    return Ok(archive);
+  }
   if let Some(bytes) = read_verified_cache(cache_path) {
     return Ok(bytes);
   }
@@ -2181,22 +2198,34 @@ async fn load_verified_denext_denort(
     );
   }
 
+  write_verified_cache(cache_path, &archive, &actual, asset)?;
+  Ok(archive)
+}
+
+/// Caches a verified archive and records its SHA-256 beside it (see
+/// [`verified_hash_path`]).
+fn write_verified_cache(
+  cache_path: &Path,
+  archive: &[u8],
+  sha256: &str,
+  asset: &str,
+) -> Result<(), AnyError> {
   let sys = CliSys::default();
   if let Some(dir) = cache_path.parent() {
     std::fs::create_dir_all(dir)
       .with_context(|| format!("Creating {}", dir.display()))?;
   }
-  atomic_write_file_with_retries(&sys, cache_path, &archive, CACHE_PERM)
+  atomic_write_file_with_retries(&sys, cache_path, archive, CACHE_PERM)
     .with_context(|| format!("Writing {}", cache_path.display()))?;
   let hash_path = verified_hash_path(cache_path);
   atomic_write_file_with_retries(
     &sys,
     &hash_path,
-    format!("{actual}  {asset}\n").as_bytes(),
+    format!("{sha256}  {asset}\n").as_bytes(),
     CACHE_PERM,
   )
   .with_context(|| format!("Writing {}", hash_path.display()))?;
-  Ok(archive)
+  Ok(())
 }
 
 fn runtime_archive_name(
@@ -2348,37 +2377,13 @@ mod tests {
   use super::denext_denort;
   use super::denext_denort_asset_name;
   use super::denext_release_sums_url;
-  use super::deno_land_suffix;
+  use super::embedded_denort_sha256;
   use super::load_verified_denext_denort;
   use super::runtime_archive_name;
   use super::sha256_hex;
   use super::sha256sums_entry;
   use super::update_public_key_from_config;
   use crate::args::JavaScriptEngine;
-
-  #[test]
-  fn deno_land_downloads_name_the_upstream_release() {
-    use deno_lib::shared::ReleaseChannel;
-    use deno_lib::version::DENO_VERSION;
-    use deno_lib::version::UPSTREAM_DENO_VERSION;
-    let suffix =
-      deno_land_suffix(ReleaseChannel::Stable, "abc1234", "denort-x.zip");
-    assert_eq!(
-      suffix,
-      format!("release/v{UPSTREAM_DENO_VERSION}/denort-x.zip")
-    );
-    if DENO_VERSION != UPSTREAM_DENO_VERSION {
-      assert!(!suffix.contains(DENO_VERSION), "{suffix}");
-    }
-    assert_eq!(
-      deno_land_suffix(ReleaseChannel::Rc, "abc1234", "denort-x.zip"),
-      suffix
-    );
-    assert_eq!(
-      deno_land_suffix(ReleaseChannel::Canary, "abc1234", "denort-x.zip"),
-      "canary/abc1234/denort-x.zip"
-    );
-  }
 
   #[test]
   fn denext_denort_is_the_release_asset() {
@@ -2448,19 +2453,34 @@ mod tests {
     }
 
     async fn load(&self, cache: &Path) -> Result<Vec<u8>, AnyError> {
-      load_verified_denext_denort(cache, &denort_source(), async |what| {
-        match what {
-          DenortFetch::Archive => {
-            self.archive_fetches.set(self.archive_fetches.get() + 1);
-            Ok(Some(self.archive.clone()))
-          }
-          DenortFetch::Sums => {
-            self.sums_fetches.set(self.sums_fetches.get() + 1);
-            Ok(self.sums.clone().map(String::into_bytes))
-          }
-        }
-      })
+      self.load_pinned(cache, None).await
+    }
+
+    async fn load_pinned(
+      &self,
+      cache: &Path,
+      pinned: Option<&str>,
+    ) -> Result<Vec<u8>, AnyError> {
+      load_verified_denext_denort(
+        cache,
+        &denort_source(),
+        pinned,
+        async |what| self.fetch(what),
+      )
       .await
+    }
+
+    fn fetch(&self, what: DenortFetch) -> Result<Option<Vec<u8>>, AnyError> {
+      match what {
+        DenortFetch::Archive => {
+          self.archive_fetches.set(self.archive_fetches.get() + 1);
+          Ok(Some(self.archive.clone()))
+        }
+        DenortFetch::Sums => {
+          self.sums_fetches.set(self.sums_fetches.get() + 1);
+          Ok(self.sums.clone().map(String::into_bytes))
+        }
+      }
     }
   }
 
@@ -2503,6 +2523,173 @@ mod tests {
     assert!(err.contains("twice"), "{err}");
     let malformed = format!("xyz  {DENORT_ASSET}\n");
     assert!(sha256sums_entry(&malformed, DENORT_ASSET).is_err());
+  }
+
+  #[test]
+  fn embedded_denort_sha256_reads_the_build_list() {
+    let linux = "AB".repeat(32);
+    let mac = "cd".repeat(32);
+    let list =
+      format!("x86_64-unknown-linux-gnu={linux}, aarch64-apple-darwin={mac},");
+    assert_eq!(
+      embedded_denort_sha256(Some(&list), "x86_64-unknown-linux-gnu").unwrap(),
+      Some("ab".repeat(32))
+    );
+    assert_eq!(
+      embedded_denort_sha256(Some(&list), "aarch64-apple-darwin").unwrap(),
+      Some(mac.clone())
+    );
+    // A target the list does not name, or no list at all (a local build):
+    // no pin, so SHA256SUMS decides as before.
+    assert_eq!(
+      embedded_denort_sha256(Some(&list), "x86_64-pc-windows-msvc").unwrap(),
+      None
+    );
+    assert_eq!(
+      embedded_denort_sha256(None, "x86_64-unknown-linux-gnu").unwrap(),
+      None
+    );
+    // A target name that only starts like a listed one is not an entry.
+    assert_eq!(
+      embedded_denort_sha256(Some(&list), "x86_64-unknown-linux").unwrap(),
+      None
+    );
+    let conflicting = format!(
+      "x86_64-unknown-linux-gnu={linux},x86_64-unknown-linux-gnu={mac}"
+    );
+    let err =
+      embedded_denort_sha256(Some(&conflicting), "x86_64-unknown-linux-gnu")
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("disagree"), "{err}");
+    for malformed in [
+      "x86_64-unknown-linux-gnu",
+      "x86_64-unknown-linux-gnu=xyz",
+      &format!("aarch64-apple-darwin={}", "a".repeat(63)),
+    ] {
+      assert!(
+        embedded_denort_sha256(Some(malformed), "x86_64-unknown-linux-gnu")
+          .is_err(),
+        "{malformed}"
+      );
+    }
+  }
+
+  /// DENEXT.md item 216: the release's denort is the only runtime a compile
+  /// resolves to; each upstream archive is refused, naming the fix.
+  #[test]
+  fn compile_takes_only_the_release_denort() {
+    let asset = "denort-x86_64-unknown-linux-gnu.zip";
+    assert_eq!(
+      super::denext_denort_version(
+        &JavaScriptEngine::V8,
+        Some("3.0.0-denext.8"),
+        asset
+      )
+      .unwrap(),
+      "3.0.0-denext.8"
+    );
+    let err = super::denext_denort_version(&JavaScriptEngine::V8, None, asset)
+      .unwrap_err()
+      .to_string();
+    assert!(err.contains(asset), "{err}");
+    assert!(err.contains("DENORT_BIN"), "{err}");
+    assert!(err.contains("Nothing was downloaded"), "{err}");
+    let asset = "denort-quickjs-x86_64-unknown-linux-gnu.zip";
+    for denext in [Some("3.0.0-denext.8"), None] {
+      let err =
+        super::denext_denort_version(&JavaScriptEngine::QuickJs, denext, asset)
+          .unwrap_err()
+          .to_string();
+      assert!(err.contains(asset), "{err}");
+      assert!(err.contains("--engine quickjs"), "{err}");
+      assert!(err.contains("DENORT_BIN"), "{err}");
+    }
+  }
+
+  #[test]
+  fn desktop_runtime_refusal_names_the_fixes() {
+    let asset = "libdenort-quickjs-aarch64-apple-darwin.zip";
+    let err = super::desktop_runtime_refusal(asset).to_string();
+    assert!(err.contains(asset), "{err}");
+    assert!(err.contains("DENORT_DESKTOP_BIN"), "{err}");
+    assert!(err.contains("denext desktop"), "{err}");
+    assert!(err.contains("Nothing was downloaded"), "{err}");
+  }
+
+  #[tokio::test]
+  async fn denext_denort_pinned_hash_needs_no_sums() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let cache = dir.path().join("denext/v3.0.0-rc.7").join(DENORT_ASSET);
+    let archive = b"the real denort zip";
+    // No SHA256SUMS in the release at all: the embedded hash is enough.
+    let release = FakeRelease::new(archive, None);
+    let pinned = sha256_hex(archive);
+    assert_eq!(
+      release.load_pinned(&cache, Some(&pinned)).await.unwrap(),
+      archive
+    );
+    assert_eq!(std::fs::read(&cache).unwrap(), archive);
+    // Used again from the cache, with no download.
+    assert_eq!(
+      release.load_pinned(&cache, Some(&pinned)).await.unwrap(),
+      archive
+    );
+    assert_eq!(release.archive_fetches.get(), 1);
+    assert_eq!(release.sums_fetches.get(), 0);
+  }
+
+  #[tokio::test]
+  async fn denext_denort_pinned_hash_refuses_other_bytes() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let cache = dir.path().join(DENORT_ASSET);
+    let swapped = b"a swapped denort zip";
+    // The release's SHA256SUMS was swapped with the archive: it lists the
+    // swapped bytes, and the embedded hash still refuses them.
+    let release =
+      FakeRelease::new(swapped, Some(sums_listing(&[(DENORT_ASSET, swapped)])));
+    let pinned = sha256_hex(b"the real denort zip");
+    let err = format!(
+      "{:#}",
+      release
+        .load_pinned(&cache, Some(&pinned.to_ascii_uppercase()))
+        .await
+        .unwrap_err()
+    );
+    assert!(err.contains("this CLI was built with"), "{err}");
+    assert!(err.contains(&pinned), "{err}");
+    assert!(err.contains(&sha256_hex(swapped)), "{err}");
+    assert!(err.contains(DENORT_ASSET), "{err}");
+    assert_eq!(release.sums_fetches.get(), 0);
+    assert!(!cache.exists());
+    assert!(!super::verified_hash_path(&cache).exists());
+  }
+
+  #[tokio::test]
+  async fn denext_denort_pinned_hash_does_not_trust_the_cache_record() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let cache = dir.path().join(DENORT_ASSET);
+    let archive = b"the real denort zip";
+    let swapped = b"a swapped denort zip";
+    // A cache verified (by an older CLI, against a swapped SHA256SUMS) with
+    // other bytes: its record matches, the embedded hash does not.
+    std::fs::write(&cache, swapped).unwrap();
+    std::fs::write(
+      super::verified_hash_path(&cache),
+      format!("{}  {DENORT_ASSET}\n", sha256_hex(swapped)),
+    )
+    .unwrap();
+    let release = FakeRelease::new(archive, None);
+    let pinned = sha256_hex(archive);
+    assert_eq!(
+      release.load_pinned(&cache, Some(&pinned)).await.unwrap(),
+      archive
+    );
+    assert_eq!(release.archive_fetches.get(), 1);
+    assert_eq!(std::fs::read(&cache).unwrap(), archive);
+    let recorded =
+      std::fs::read_to_string(super::verified_hash_path(&cache)).unwrap();
+    assert!(recorded.starts_with(&pinned), "{recorded}");
   }
 
   #[tokio::test]

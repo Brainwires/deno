@@ -114,6 +114,10 @@ export function createWritableStdioStream(writer, name, warmup = false) {
   stream.fd = fd;
   stream.destroySoon = stream.destroy;
   stream._isStdio = true;
+  // Node's stdout / stderr for a file or a pipe are write-only: a
+  // `SyncWriteStream` (`this.readable = false`) or a `net.Socket` made with
+  // `readable: false`. A TTY gets a `tty.WriteStream` at boot instead.
+  stream.readable = false;
 
   // We cannot call `writer?.isTerminal()` eagerly here
   let getIsTTY = () => writer?.isTerminal();

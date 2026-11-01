@@ -56,12 +56,16 @@ import {
   rmSync,
   Stats,
   statSync,
+  symlink,
+  symlinkSync,
   unlink,
   unlinkSync,
   watch,
   writeFileSync,
+  WriteStream,
 } from "node:fs";
 import { readFile } from "node:fs/promises";
+import { readFile as readFileCallback } from "node:fs";
 import {
   constants as fsPromiseConstants,
   copyFile,
@@ -2263,3 +2267,112 @@ Deno.test(
     }
   },
 );
+
+// Node 26's `options.buffer`: the file is read into the caller's buffer, and
+// the result is the part of it that holds the file.
+Deno.test("[node/fs] readFile reads into options.buffer", async () => {
+  const tmp = mkdtempSync(join(tmpdir(), "fs-readfile-buffer-"));
+  try {
+    const file = join(tmp, "data.txt");
+    const content = Buffer.from("hello buffer\n".repeat(16));
+    writeFileSync(file, content);
+
+    const buffer = Buffer.alloc(content.length + 4, 0x78);
+    const data = readFileSync(file, { buffer } as never) as Buffer;
+    assertEquals(data.buffer, buffer.buffer);
+    assertEquals(Buffer.compare(data, content), 0);
+    assertEquals(buffer.subarray(content.length).toString(), "xxxx");
+
+    let size;
+    const fromFunction = readFileSync(file, {
+      buffer(fileSize: number) {
+        size = fileSize;
+        return new Uint8Array(fileSize);
+      },
+    } as never) as Buffer;
+    assertEquals(size, content.length);
+    assertEquals(Buffer.compare(fromFunction, content), 0);
+
+    assertEquals(
+      readFileSync(
+        file,
+        { buffer: Buffer.alloc(content.length), encoding: "utf8" } as never,
+      ) as unknown as string,
+      content.toString(),
+    );
+    assertEquals(
+      Buffer.compare(
+        await readFile(
+          file,
+          { buffer: Buffer.alloc(content.length) } as never,
+        ) as Buffer,
+        content,
+      ),
+      0,
+    );
+
+    assertThrows(
+      () =>
+        readFileSync(
+          file,
+          { buffer: Buffer.alloc(content.length - 1) } as never,
+        ),
+      TypeError,
+      "is smaller than the file size",
+    );
+    await assertRejects(
+      () => readFile(file, { buffer: () => Buffer.alloc(1) } as never),
+      TypeError,
+      "options.buffer().byteLength",
+    );
+    assertThrows(
+      () => readFileCallback(file, { buffer: "nope" } as never, () => {}),
+      TypeError,
+      "options.buffer",
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+// Node's symlink errors name the target as `path` and the link as `dest`.
+Deno.test("[node/fs] symlink errors carry path and dest", async () => {
+  const tmp = mkdtempSync(join(tmpdir(), "fs-symlink-error-"));
+  try {
+    const target = join(tmp, "target");
+    const link = join(tmp, "link");
+    writeFileSync(target, "");
+    writeFileSync(link, "");
+    const check = (err: NodeJS.ErrnoException & { dest?: string }) => {
+      assertEquals(err.code, "EEXIST");
+      assertEquals(err.syscall, "symlink");
+      assertEquals(err.path, target);
+      assertEquals(err.dest, link);
+      assertEquals(
+        err.message,
+        `EEXIST: file already exists, symlink '${target}' -> '${link}'`,
+      );
+    };
+    try {
+      symlinkSync(target, link);
+      fail("symlinkSync should throw");
+    } catch (err) {
+      check(err as NodeJS.ErrnoException);
+    }
+    const err = await new Promise<NodeJS.ErrnoException | null>((resolve) =>
+      symlink(target, link, resolve)
+    );
+    check(err!);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+// `autoClose` read off the prototype, not a stream, is ERR_INVALID_THIS.
+Deno.test("[node/fs] WriteStream.prototype.autoClose needs an instance", () => {
+  assertThrows(
+    () => (WriteStream.prototype as { autoClose?: boolean }).autoClose,
+    TypeError,
+    'Value of "this" must be of type WriteStream',
+  );
+});

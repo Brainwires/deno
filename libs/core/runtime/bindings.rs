@@ -1416,6 +1416,31 @@ fn vm_dynamic_import_callback_missing_exception<'s>(
   exception
 }
 
+/// The private key that marks the main module's `import.meta`. A private
+/// symbol: script can't read it, write it or copy it, and an object that
+/// inherits from or wraps a marked one is not marked.
+fn main_import_meta_key<'s>(
+  scope: &v8::PinScope<'s, '_>,
+) -> v8::Local<'s, v8::Private> {
+  let name = v8::String::new(scope, "deno_core#mainImportMeta").unwrap();
+  v8::Private::for_api(scope, Some(name))
+}
+
+/// Whether `value` is the `import.meta` object of this realm's main module
+/// itself. Only that object answers `true`, so script holding it is the main
+/// module or was handed it by the main module: a capability the embedder's ops
+/// can ask for.
+pub fn is_main_module_import_meta(
+  scope: &v8::PinScope<'_, '_>,
+  value: v8::Local<v8::Value>,
+) -> bool {
+  let Ok(object) = v8::Local::<v8::Object>::try_from(value) else {
+    return false;
+  };
+  let key = main_import_meta_key(scope);
+  object.has_private(scope, key) == Some(true)
+}
+
 pub extern "C" fn host_initialize_import_meta_object_callback(
   context: v8::Local<v8::Context>,
   module: v8::Local<v8::Module>,
@@ -1452,6 +1477,10 @@ pub extern "C" fn host_initialize_import_meta_object_callback(
   let main = module_map.is_main_module(&module_global);
   let main_val = v8::Boolean::new(scope, main);
   meta.create_data_property(scope, main_key.into(), main_val.into());
+  if main {
+    let key = main_import_meta_key(scope);
+    meta.set_private(scope, key, main_val.into());
+  }
 
   // Add special method that allows Wasm module to instantiate themselves.
   if module_type == ModuleType::Wasm {
@@ -1666,12 +1695,17 @@ fn catch_dynamic_import_promise_error<'s, 'i>(
       };
       // V8 module linking errors (e.g. a missing named export) are
       // spec-defined `SyntaxError`s and must not carry a host-defined `code`.
-      // Only genuine resolution/loading failures get `ERR_MODULE_NOT_FOUND`.
+      // Only genuine resolution/loading failures get `ERR_MODULE_NOT_FOUND`;
+      // a failure that already has a Node error code (a module resolve hook's
+      // `ERR_PACKAGE_PATH_NOT_EXPORTED`, `ERR_INVALID_ARG_VALUE`, ...) keeps it.
       if name.as_str() != deno_error::builtin_classes::SYNTAX_ERROR {
         let code_key = CODE.v8_string(scope).unwrap();
-        let code_value = ERR_MODULE_NOT_FOUND.v8_string(scope).unwrap();
+        let code_value = match arg.get(scope, code_key.into()) {
+          Some(code) if code.is_string() => code,
+          _ => ERR_MODULE_NOT_FOUND.v8_string(scope).unwrap().into(),
+        };
         let exception_obj = exception.to_object(scope).unwrap();
-        exception_obj.set(scope, code_key.into(), code_value.into());
+        exception_obj.set(scope, code_key.into(), code_value);
       }
       scope.throw_exception(exception);
       return;

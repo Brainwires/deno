@@ -227,6 +227,10 @@ pub struct EnvironmentOptions {
   pub test_reporter_destination: Vec<String>,
   pub test_global_setup_path: String,
   pub test_only: bool,
+  /// `--test-randomize` (denext).
+  pub test_randomize: bool,
+  /// `--test-random-seed`, when given (denext; 0 is a seed).
+  pub test_random_seed: Option<u64>,
   pub test_udp_no_try_send: bool,
   pub test_isolation: String,
   pub test_shard: String,
@@ -364,6 +368,8 @@ impl Default for EnvironmentOptions {
       test_reporter_destination: Vec::new(),
       test_global_setup_path: String::new(),
       test_only: false,
+      test_randomize: false,
+      test_random_seed: None,
       test_udp_no_try_send: false,
       test_isolation: "process".to_string(),
       test_shard: String::new(),
@@ -1513,6 +1519,20 @@ impl OptionsParser {
       false,
     );
     self.add_option(
+      "--test-randomize",
+      "run tests in a random order",
+      OptionType::Boolean,
+      OptionEnvvarSettings::AllowedInEnvvar,
+      false,
+    );
+    self.add_option(
+      "--test-random-seed",
+      "the seed of the randomized test order",
+      OptionType::UInteger,
+      OptionEnvvarSettings::AllowedInEnvvar,
+      false,
+    );
+    self.add_option(
       "--test-shard",
       "run test at specific shard",
       OptionType::String,
@@ -2464,6 +2484,7 @@ impl OptionsParser {
         options.per_isolate.per_env.test_runner_module_mocks = value
       }
       "--test-only" => options.per_isolate.per_env.test_only = value,
+      "--test-randomize" => options.per_isolate.per_env.test_randomize = value,
       "--test-udp-no-try-send" => {
         options.per_isolate.per_env.test_udp_no_try_send = value
       }
@@ -2620,6 +2641,9 @@ impl OptionsParser {
       }
       "--test-coverage-lines" => {
         options.per_isolate.per_env.test_coverage_lines = value
+      }
+      "--test-random-seed" => {
+        options.per_isolate.per_env.test_random_seed = Some(value)
       }
       _ => {
         // Unknown unsigned integer option
@@ -3783,6 +3807,13 @@ pub fn translate_to_deno_args(
   }
   if env_opts.test_runner_force_exit {
     node_options.push("--test-force-exit".to_string());
+  }
+  // denext: `--test-randomize` / `--test-random-seed` for node:test's order.
+  if env_opts.test_randomize {
+    node_options.push("--test-randomize".to_string());
+  }
+  if let Some(seed) = env_opts.test_random_seed {
+    node_options.push(format!("--test-random-seed={}", seed));
   }
 
   // Add the script and remaining args
@@ -5754,6 +5785,19 @@ mod tests {
     assert_eq!(
       result.node_options,
       svec!["--test-reporter=spec", "--test-only", "--test-force-exit"]
+    );
+  }
+
+  #[test]
+  fn test_randomize_and_seed_ride_along_in_node_options() {
+    let parsed_args =
+      parse_args(svec!["--test-randomize", "--test-random-seed=0", "main.js"])
+        .unwrap();
+    let options = TranslateOptions::for_child_process();
+    let result = translate_to_deno_args(parsed_args, &options);
+    assert_eq!(
+      result.node_options,
+      svec!["--test-randomize", "--test-random-seed=0"]
     );
   }
 

@@ -42,18 +42,26 @@
 //! (`launches` 0 → 1); [`confirm`] marks it good and deletes `.old`. If a
 //! launch starts while the update is still unconfirmed from an earlier
 //! launch (it crashed, hung, or never confirmed), the runtime spawns the
-//! helper in `rollback` mode and exits; the helper puts `.old` back,
-//! records the version as `rejected` (it is never offered again), and
-//! relaunches the previous app with `--denext-update-rolled-back=<version>`.
-//! An interrupted swap or rollback is recovered the same way.
+//! helper in `rollback` mode and exits; the helper checks `.old` as the apply
+//! checked the staged app (it sits where anything running as the user can
+//! write, named by a state file it can write too), puts it back, records the
+//! version as `rejected` (it is never offered again), and relaunches the
+//! previous app with `--denext-update-rolled-back=<version>`. An interrupted
+//! swap or rollback is recovered the same way. A `.old` that fails the check
+//! is left where it is and the installed app keeps running
+//! ([`rollback_verified`]).
 //!
 //! **What is touched.** Only paths proven to be copies of this app's install
 //! ([`super::layout::is_install_copy`]: the packager's marker) are swapped or
 //! deleted as the install, `.old` or a failed install; anything else at those
-//! names is left alone and the step is refused. Before swapping, the helper
-//! re-hashes the staged tree and compares it with the digest recorded when
-//! it was verified and staged ([`tree_digest`]), so a staged app changed
-//! after verification is never swapped in.
+//! names is left alone and the step is refused. The staged app is held
+//! through its private staging directory ([`super::staging`]) from the
+//! helper's check to the rename: its digest ([`tree_digest`]) is taken
+//! through that directory before the OS re-check, must equal the one
+//! recorded when it was staged, and is taken again right before the swap,
+//! which renames from the held directory ([`apply_swap_verified`]). So a
+//! staged app changed, or a staging directory replaced, after verification
+//! is never swapped in.
 
 #![allow(
   clippy::disallowed_methods,
@@ -76,6 +84,8 @@ use super::error::err;
 use super::layout::InstallKind;
 use super::layout::InstallLayout;
 use super::layout::is_install_copy;
+use super::treecheck::FileSink;
+use super::treecheck::TreeEntry;
 
 /// The helper's argv marker: `<exe> run denext-update-helper <mode> <pid>`.
 pub const HELPER_ARG: &str = "denext-update-helper";
@@ -444,23 +454,28 @@ pub fn exchange(a: &Path, b: &Path) -> std::io::Result<bool> {
         libc::RENAME_EXCHANGE,
       ) as libc::c_int
     };
-    if rc == 0 {
-      return Ok(true);
-    }
-    let e = std::io::Error::last_os_error();
-    match e.raw_os_error() {
-      Some(libc::ENOTSUP) | Some(libc::EINVAL) | Some(libc::ENOSYS) => {
-        Ok(false)
-      }
-      #[allow(unreachable_patterns, reason = "EOPNOTSUPP == ENOTSUP on Linux")]
-      Some(libc::EOPNOTSUPP) => Ok(false),
-      _ => Err(e),
-    }
+    exchange_result(rc)
   }
   #[cfg(not(any(target_os = "macos", target_os = "linux")))]
   {
     let _ = (a, b);
     Ok(false)
+  }
+}
+
+/// An exchange call's return code as [`exchange`]'s result: `Ok(false)` for
+/// the errors that mean the OS or file system cannot exchange.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub(super) fn exchange_result(rc: libc::c_int) -> std::io::Result<bool> {
+  if rc == 0 {
+    return Ok(true);
+  }
+  let e = std::io::Error::last_os_error();
+  match e.raw_os_error() {
+    Some(libc::ENOTSUP) | Some(libc::EINVAL) | Some(libc::ENOSYS) => Ok(false),
+    #[allow(unreachable_patterns, reason = "EOPNOTSUPP == ENOTSUP on Linux")]
+    Some(libc::EOPNOTSUPP) => Ok(false),
+    _ => Err(e),
   }
 }
 
@@ -489,17 +504,18 @@ pub fn rename_retry(from: &Path, to: &Path) -> std::io::Result<()> {
 /// SHA-256, for a symlink its target, in a fixed (sorted) order. Two trees
 /// have the same digest only if they have the same entries and contents.
 pub fn tree_digest(root: &Path) -> std::io::Result<String> {
+  tree_listing(root).map(|(digest, _)| digest)
+}
+
+/// [`tree_digest`] and, from the same reads, every file and symlink of the
+/// tree ([`TreeEntry`]: the Windows tree manifest check compares it).
+pub fn tree_listing(root: &Path) -> std::io::Result<(String, Vec<TreeEntry>)> {
   use sha2::Digest;
-  fn file_sha(path: &Path) -> std::io::Result<String> {
-    let mut f = std::fs::File::open(path)?;
-    let mut h = sha2::Sha256::new();
-    std::io::copy(&mut f, &mut h)?;
-    Ok(faster_hex::hex_string(&h.finalize()))
-  }
   fn walk(
     dir: &Path,
     rel: &str,
     out: &mut sha2::Sha256,
+    files: &mut Vec<TreeEntry>,
   ) -> std::io::Result<()> {
     let mut names: Vec<std::ffi::OsString> = std::fs::read_dir(dir)?
       .map(|e| e.map(|e| e.file_name()))
@@ -513,7 +529,7 @@ pub fn tree_digest(root: &Path) -> std::io::Result<String> {
       } else {
         format!("{rel}/{name}")
       };
-      entry(&path, &rel, out)?;
+      entry(&path, &rel, out, files)?;
     }
     Ok(())
   }
@@ -521,32 +537,44 @@ pub fn tree_digest(root: &Path) -> std::io::Result<String> {
     path: &Path,
     rel: &str,
     out: &mut sha2::Sha256,
+    files: &mut Vec<TreeEntry>,
   ) -> std::io::Result<()> {
     let meta = std::fs::symlink_metadata(path)?;
     let ft = meta.file_type();
     // Length-prefixed fields: no name can be confused with a separator.
     let mut field = |tag: &str, value: &str| {
-      out.update(tag.as_bytes());
-      out.update((value.len() as u64).to_le_bytes());
-      out.update(value.as_bytes());
+      super::staging::digest_field(out, tag, value);
     };
     if ft.is_symlink() {
       let target = std::fs::read_link(path)?;
       field("l", rel);
       field("t", &target.to_string_lossy());
+      files.push(TreeEntry::Symlink {
+        rel: rel.to_string(),
+      });
     } else if ft.is_dir() {
       field("d", rel);
-      walk(path, rel, out)?;
+      walk(path, rel, out, files)?;
     } else {
+      let mut sink = FileSink::default();
+      std::io::copy(&mut std::fs::File::open(path)?, &mut sink)?;
+      let (sha, pe) = sink.finish();
       field("f", rel);
       field("s", &meta.len().to_string());
-      field("h", &file_sha(path)?);
+      field("h", &sha);
+      files.push(TreeEntry::File {
+        rel: rel.to_string(),
+        size: meta.len(),
+        sha256: sha,
+        pe,
+      });
     }
     Ok(())
   }
   let mut out = sha2::Sha256::new();
-  entry(root, "", &mut out)?;
-  Ok(faster_hex::hex_string(&out.finalize()))
+  let mut files = Vec::new();
+  entry(root, "", &mut out, &mut files)?;
+  Ok((faster_hex::hex_string(&out.finalize()), files))
 }
 
 /// Remove `path` only if it is a copy of this app's install (see
@@ -776,10 +804,10 @@ fn undo_rename(hook: FaultHook, from: &Path, to: &Path) -> std::io::Result<()> {
   Err(last.unwrap_or_else(|| std::io::Error::other("undo failed")))
 }
 
-/// The helper's `apply`: swap the staged app into place. On failure the
-/// install is left as it was (the previous app) and the state goes back to
-/// `staged` with `last_error`. On success the state is `swapped` (trial
-/// pending) and the staging directory is removed.
+/// [`apply_swap_verified`] with no OS signature re-check (the tests of the
+/// swap mechanics). The Windows tree check still runs: it is not part of the
+/// verifier.
+#[cfg(test)]
 pub fn apply_swap(
   layout: &InstallLayout,
   state: &mut UpdateState,
@@ -787,50 +815,195 @@ pub fn apply_swap(
   apply_swap_with(layout, state, &no_fault)
 }
 
+/// [`apply_swap`] with a fault hook.
+#[cfg(test)]
 pub fn apply_swap_with(
   layout: &InstallLayout,
   state: &mut UpdateState,
   hook: FaultHook,
 ) -> Result<(), UpdateError> {
+  apply_swap_verified(layout, state, &accept_staged, hook)
+}
+
+/// Record why the staged app is refused and refuse it (nothing swapped).
+fn refuse_staged(
+  layout: &InstallLayout,
+  state: &mut UpdateState,
+  why: &str,
+) -> Result<(), UpdateError> {
+  refuse_staged_with(layout, state, UpdateError::new(Code::BundleMismatch, why))
+}
+
+/// [`refuse_staged`] for a refusal with its own code (the OS signature
+/// re-check, the Windows tree check). The state goes back to `staged` with
+/// `last_error` set to `"<code>: <message>"`, the form the error takes
+/// across the op boundary, so the app can tell why the apply failed after
+/// it is relaunched. The staged app is left where it is, as for every
+/// refusal here: the next download replaces it (`begin()` makes the staging
+/// directory fresh), and an apply retried re-checks it in full.
+fn refuse_staged_with(
+  layout: &InstallLayout,
+  state: &mut UpdateState,
+  e: UpdateError,
+) -> Result<(), UpdateError> {
+  state.phase = Phase::Staged;
+  record_refusal(layout, state, e)
+}
+
+/// Record a refusal in the state, whatever its phase, and refuse.
+fn record_refusal(
+  layout: &InstallLayout,
+  state: &mut UpdateState,
+  e: UpdateError,
+) -> Result<(), UpdateError> {
+  state.last_error = Some(e.to_string());
+  let _ = write_state(layout, state);
+  err(e.code, format!("{}; nothing was swapped", e.message))
+}
+
+/// The helper's `apply`: check the staged app and swap it into place. On
+/// failure the install is left as it was (the previous app) and the state
+/// goes back to `staged` with `last_error`. On success the state is
+/// `swapped` (trial pending) and the staging directory is removed.
+///
+/// The staged app is held through its private staging directory
+/// ([`super::staging`]) from the first check to the rename, so a staging
+/// directory renamed away and replaced after the check is not what moves.
+/// Its digest is taken through that directory BEFORE `verify` runs, must
+/// match the one recorded when it was staged, and is taken again right
+/// before the swap: the tree swapped in is the tree that was verified, with
+/// the state file (which anything running as the user can write) only a
+/// cross-check, never the reference.
+pub fn apply_swap_verified(
+  layout: &InstallLayout,
+  state: &mut UpdateState,
+  verify: StagedVerifier<'_>,
+  hook: FaultHook,
+) -> Result<(), UpdateError> {
   if state.phase != Phase::Staged {
-    return err(Code::NotStaged, "nothing is staged");
+    // Not `refuse_staged_with`: there is no staged app to go back to, and
+    // the phase may be a trial or a swap the recovery still has to see.
+    return record_refusal(
+      layout,
+      state,
+      UpdateError::new(Code::NotStaged, "nothing is staged"),
+    );
   }
-  let Some(staged) = state.staged_path(layout) else {
-    return err(Code::NotStaged, "the state names no staged app");
+  let missing = UpdateError::new(
+    Code::NotStaged,
+    "the staged app or the install is missing",
+  );
+  let (Some(staged_path), Some(entry)) =
+    (state.staged_path(layout), state.entry.clone())
+  else {
+    return refuse_staged_with(
+      layout,
+      state,
+      UpdateError::new(Code::NotStaged, "the state names no staged app"),
+    );
   };
-  if !exists(&staged) || !exists(&layout.install) {
-    return err(Code::NotStaged, "the staged app or the install is missing");
+  let staging = match super::staging::PrivateDir::open(&layout.staging_dir()) {
+    Ok(dir) => dir,
+    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+      return refuse_staged_with(layout, state, missing);
+    }
+    Err(e) => {
+      return refuse_staged(
+        layout,
+        state,
+        &format!("the staging directory is not private to this user ({e})"),
+      );
+    }
+  };
+  let staged = match staging.staged("extract", entry.as_ref()) {
+    Ok(s) => s,
+    Err(_) => return refuse_staged_with(layout, state, missing),
+  };
+  if !exists(&staged_path) || !exists(&layout.install) {
+    return refuse_staged_with(layout, state, missing);
   }
   if !is_install_copy(layout.kind, &layout.install)
-    || !is_install_copy(layout.kind, &staged)
+    || !is_install_copy(layout.kind, &staged_path)
   {
-    return err(
-      Code::UnsupportedLayout,
-      "the install or the staged app is not a packaged app (no install \
-       marker); nothing was swapped",
+    return refuse_staged_with(
+      layout,
+      state,
+      UpdateError::new(
+        Code::UnsupportedLayout,
+        "the install or the staged app is not a packaged app (no install \
+         marker)",
+      ),
     );
   }
-  // The staged tree must still be exactly what was verified and staged.
-  let digest = tree_digest(&staged).ok();
-  if digest.is_none() || digest != state.staged_digest {
-    state.last_error =
-      Some("the staged app changed after it was verified".into());
-    let _ = write_state(layout, state);
-    return err(
-      Code::BundleMismatch,
-      "the staged app no longer matches what was verified and staged; \
-       nothing was swapped",
+  if let Err(e) = super::treecheck::refuse_case_only_exe_rename(
+    &layout.install,
+    &staged_path,
+    &layout.exe_rel,
+  ) {
+    return refuse_staged_with(layout, state, e);
+  }
+  // What this helper will swap, pinned before anything checks it. It must
+  // be what was verified and staged.
+  let pinned = staged.listing().ok();
+  let (pinned, entries) = match pinned {
+    Some((digest, entries)) => (Some(digest), entries),
+    None => (None, Vec::new()),
+  };
+  if pinned.is_none() || pinned != state.staged_digest {
+    return refuse_staged(
+      layout,
+      state,
+      "the staged app changed after it was verified",
     );
+  }
+  // The OS check reads the staged app by path: the path must name the held
+  // directory before and after it.
+  if !staging.still_at_path() {
+    return refuse_staged(layout, state, "the staging directory was replaced");
+  }
+  // The OS signature re-check, then (Windows) the staged app's files against
+  // the signed executable's tree manifest, as the pinning walk read them,
+  // for the app the installed one was built as and the version the state
+  // names (which `verify` has already matched against the staged app's own).
+  // A refusal is recorded like every other one here.
+  let app_id =
+    super::embedded::installed_metadata(layout).and_then(|m| m.app_identifier);
+  if let Err(e) = verify(layout, state).and_then(|()| {
+    super::treecheck::verify_for_platform(
+      layout,
+      &staged_path,
+      &entries,
+      app_id.as_deref(),
+      state.to.as_deref(),
+    )
+  }) {
+    return refuse_staged_with(layout, state, e);
+  }
+  if !staging.still_at_path() {
+    return refuse_staged(layout, state, "the staging directory was replaced");
   }
   let old = layout.old_path();
   if exists(&old) && !remove_install_copy(layout, &old) {
-    return err(
-      Code::Io,
-      format!(
-        "cannot remove a leftover {} (it is not a previous install of this \
-         app, or is in use); move it away to update",
-        old.display()
+    return refuse_staged_with(
+      layout,
+      state,
+      UpdateError::new(
+        Code::Io,
+        format!(
+          "cannot remove a leftover {} (it is not a previous install of this \
+           app, or is in use); move it away to update",
+          old.display()
+        ),
       ),
+    );
+  }
+  // Again right before the swap: unchanged since it was pinned (and so
+  // since it was verified).
+  if staged.digest().ok() != pinned {
+    return refuse_staged(
+      layout,
+      state,
+      "the staged app changed while it was verified",
     );
   }
   state.phase = Phase::Swapping;
@@ -843,30 +1016,33 @@ pub fn apply_swap_with(
   // for a recovery ([`rollback`]).
   let result = (|| -> Result<(), (std::io::Error, bool)> {
     let exchanged = if hook("exchange").is_ok() {
-      exchange(&staged, &layout.install).map_err(|e| (e, true))?
+      staged
+        .exchange_with(&layout.install)
+        .map_err(|e| (e, true))?
     } else {
       false
     };
     if exchanged {
       // The install is the new app; `staged` holds the previous one.
-      if let Err(e) = step(hook, "old", || rename_retry(&staged, &old)) {
+      if let Err(e) = step(hook, "old", || staged.move_to(&old)) {
         // Put the previous app back (exchange again) before failing.
-        let undone =
-          step(hook, "undo", || match exchange(&staged, &layout.install) {
+        let undone = step(hook, "undo", || {
+          match staged.exchange_with(&layout.install) {
             Ok(true) => Ok(()),
             Ok(false) => Err(std::io::Error::other("cannot exchange back")),
             Err(e) => Err(e),
-          })
-          .is_ok();
+          }
+        })
+        .is_ok();
         return Err((e, undone));
       }
       return Ok(());
     }
     step(hook, "install->old", || rename_retry(&layout.install, &old))
       .map_err(|e| (e, true))?;
-    if let Err(e) = step(hook, "staged->install", || {
-      rename_retry(&staged, &layout.install)
-    }) {
+    if let Err(e) =
+      step(hook, "staged->install", || staged.move_to(&layout.install))
+    {
       // Undo: the previous app back at the install path.
       let undone = undo_rename(hook, &old, &layout.install).is_ok();
       return Err((e, undone));
@@ -883,7 +1059,11 @@ pub fn apply_swap_with(
       state.staged_digest = None;
       state.apply_pid = None;
       write_state(layout, state)?;
-      remove_path(&layout.staging_dir());
+      // Only this helper's own staging directory: whatever was put at its
+      // path instead is not ours to delete.
+      if staging.still_at_path() {
+        remove_path(staging.path());
+      }
       Ok(())
     }
     Err((e, true)) => {
@@ -905,10 +1085,25 @@ pub fn apply_swap_with(
   }
 }
 
-/// The helper's `rollback`: restore `.old` after a version failed its trial
-/// (`swapped`), or recover an interrupted `swapping` / `rollingBack`.
-/// Returns the version that was rolled back (`None` when nothing was
-/// swapped in, e.g. an interrupted swap that had not happened yet).
+/// What the helper checks about the tree a rollback puts back at the
+/// install path (see [`rollback_verified`]): the layout, the state and that
+/// tree (`.old`, or the previous app still in the staging directory).
+pub type PreviousVerifier<'a> =
+  &'a dyn Fn(&InstallLayout, &UpdateState, &Path) -> Result<(), UpdateError>;
+
+/// A verifier that accepts everything (tests of the rollback mechanics).
+#[cfg(test)]
+pub fn accept_previous(
+  _: &InstallLayout,
+  _: &UpdateState,
+  _: &Path,
+) -> Result<(), UpdateError> {
+  Ok(())
+}
+
+/// [`rollback_verified`] with no check of what goes back (the tests of the
+/// rollback mechanics).
+#[cfg(test)]
 pub fn rollback(
   layout: &InstallLayout,
   state: &mut UpdateState,
@@ -916,24 +1111,81 @@ pub fn rollback(
   rollback_with(layout, state, &no_fault)
 }
 
+/// [`rollback`] with a fault hook.
+#[cfg(test)]
 pub fn rollback_with(
   layout: &InstallLayout,
   state: &mut UpdateState,
+  hook: FaultHook,
+) -> Result<Option<String>, UpdateError> {
+  rollback_verified(layout, state, &accept_previous, hook)
+}
+
+/// Refuse a rollback: the tree that would go back to the install path is
+/// not one the updater accepts (see [`rollback_verified`]). Nothing has
+/// moved. The state goes idle with `last_error` set to `"<code>: <message>"`
+/// (as the apply's refusals record themselves), `cleanup` off: what sits at
+/// `.old` or in the staging directory is not this app's previous install,
+/// so it is not deleted as one. The next launch starts the installed app.
+fn refuse_rollback(
+  layout: &InstallLayout,
+  state: &mut UpdateState,
+  e: UpdateError,
+) -> UpdateError {
+  let e =
+    UpdateError::new(e.code, format!("{}; nothing was rolled back", e.message));
+  state.phase = Phase::Idle;
+  state.launches = 0;
+  state.helper_attempts = 0;
+  state.entry = None;
+  state.install_id = None;
+  state.cleanup = false;
+  state.last_error = Some(e.to_string());
+  let _ = write_state(layout, state);
+  e
+}
+
+/// The helper's `rollback`: restore `.old` after a version failed its trial
+/// (`swapped`), or recover an interrupted `swapping` / `rollingBack`.
+/// Returns the version that was rolled back (`None` when nothing was
+/// swapped in, e.g. an interrupted swap that had not happened yet).
+///
+/// The tree the rollback puts at the install path (`.old`, or after an
+/// interrupted exchange the previous app still in the staging directory)
+/// sits where anything running as the user can write, and is named by a
+/// state file it can write too. So before anything is recorded or moved,
+/// `verify` checks it as the apply checks a staged app (the install marker,
+/// the embedded version equal to the state's `from`, the OS code signature
+/// against the installed app: `verify_previous_for_helper`), whenever it
+/// would replace an app at the install path. A tree that fails is left where
+/// it is, nothing moves, and the refusal is recorded ([`refuse_rollback`]):
+/// the installed app, which passed the apply's checks, keeps running. With
+/// nothing at the install path there is no app for a planted tree to
+/// displace (whoever emptied it could have filled it) and no installed app
+/// to check a signature against: the previous app goes back as before.
+pub fn rollback_verified(
+  layout: &InstallLayout,
+  state: &mut UpdateState,
+  verify: PreviousVerifier<'_>,
   hook: FaultHook,
 ) -> Result<Option<String>, UpdateError> {
   let old = layout.old_path();
   let failed = layout.failed_path();
   let install = &layout.install;
   let resuming = state.phase == Phase::RollingBack;
-  // A version that failed its trial is rejected. The mark is recorded when
-  // the rollback starts, so a resumed rollback still knows.
-  let reject = match state.phase {
-    Phase::Swapped => {
-      if let Some(to) = state.to.clone() {
-        state.reject(&to);
-      }
-      true
+  // The check of what `tree` would put at the install path; a refusal
+  // records itself.
+  let check = |state: &mut UpdateState, tree: &Path| {
+    if !exists(install) {
+      return Ok(());
     }
+    verify(layout, state, tree).map_err(|e| refuse_rollback(layout, state, e))
+  };
+  // A version that failed its trial is rejected. The mark is recorded when
+  // the rollback starts (below, once what goes back has passed its check),
+  // so a resumed rollback still knows.
+  let reject = match state.phase {
+    Phase::Swapped => true,
     Phase::RollingBack => state.to.is_some() && state.rejected == state.to,
     Phase::Swapping => {
       // Was the swap interrupted after it happened?
@@ -956,10 +1208,13 @@ pub fn rollback_with(
       }
       if swapped && !exists(&old) {
         // An atomic exchange whose follow-up rename was interrupted: the
-        // previous app is still in the staging directory.
+        // previous app is still in the staging directory. What moves next
+        // to the install, and from there back to the install path, is
+        // checked before it moves (and again as `.old`).
         if let Some(staged) = state.staged_path(layout)
           && exists(&staged)
         {
+          check(state, &staged)?;
           rename_retry(&staged, &old)
             .map_err(|e| UpdateError::io(old.display(), e))?;
         }
@@ -970,6 +1225,22 @@ pub fn rollback_with(
       return err(Code::NotStaged, "there is no update to roll back");
     }
   };
+  // `.old` goes back to the install path, unless an earlier run of this
+  // rollback already exchanged it in (then `.old` holds the failed app and
+  // nothing goes back): checked first.
+  let exchanged_already = resuming
+    && exists(install)
+    && exists(&old)
+    && state.install_id.is_some()
+    && file_id(install) != state.install_id;
+  if exists(&old) && !exchanged_already {
+    check(state, &old)?;
+  }
+  if state.phase == Phase::Swapped
+    && let Some(to) = state.to.clone()
+  {
+    state.reject(&to);
+  }
   let to = state.to.clone();
   state.phase = Phase::RollingBack;
   // What is at the install path as the rollback starts (the failed app):
@@ -1067,8 +1338,9 @@ fn park_failed(
   }
 }
 
-/// Roll back and delete what is left ([`rollback_with`], then
+/// Roll back and delete what is left ([`rollback`], then
 /// [`remove_rollback_leftovers`]).
+#[cfg(test)]
 pub fn rollback_and_clean(
   layout: &InstallLayout,
   state: &mut UpdateState,
@@ -1406,17 +1678,22 @@ pub fn accept_staged(
 /// directory, and only paths proven to be copies of this app's install are
 /// swapped or deleted. It runs no code but the app's own executable (the
 /// relaunch). What a forged state could still ask for is a swap of some
-/// other app tree placed in the staging directory: so before an apply,
-/// `verify` checks the staged app again as `stage()` did (its OS code
-/// signature against the running app's signer, its own version newer than
-/// the installed one and not rejected), so the helper can't be used to put
-/// an app the updater would refuse in place of a signed one (on macOS the
-/// app may modify its own bundle where another program may not).
+/// other app tree placed in the staging directory, or a rollback to one
+/// placed at `.old`: so before an apply, `verify` checks the staged app
+/// again as `stage()` did (its OS code signature against the running app's
+/// signer, its own version newer than the installed one and not rejected),
+/// and before a rollback `verify_previous` checks the tree that would go
+/// back the same way (the install marker, its embedded version equal to the
+/// state's `from`, its OS code signature against the installed app), so the
+/// helper can't be used to put an app the updater would refuse in place of
+/// a signed one (on macOS the app may modify its own bundle where another
+/// program may not).
 pub fn run_helper(
   layout: &InstallLayout,
   mode: HelperMode,
   pid: u32,
   verify: StagedVerifier<'_>,
+  verify_previous: PreviousVerifier<'_>,
 ) -> i32 {
   let Some(_lock) = take_helper_lock(layout) else {
     log_line(layout, "another update helper is running; nothing to do");
@@ -1468,26 +1745,29 @@ pub fn run_helper(
     return 1;
   };
   match mode {
-    HelperMode::Apply => match verify(layout, &state)
-      .and_then(|()| apply_swap(layout, &mut state))
-    {
-      Ok(()) => {
-        let from = state.from.clone().unwrap_or_default();
-        log_line(layout, &format!("swapped {from} -> {:?}", state.to));
-        relaunch(layout, &state, Some(format!("{UPDATED_FROM_ARG}{from}")))
+    HelperMode::Apply => {
+      match apply_swap_verified(layout, &mut state, verify, &no_fault) {
+        Ok(()) => {
+          let from = state.from.clone().unwrap_or_default();
+          log_line(layout, &format!("swapped {from} -> {:?}", state.to));
+          relaunch(layout, &state, Some(format!("{UPDATED_FROM_ARG}{from}")))
+        }
+        Err(e) => {
+          log_line(layout, &format!("apply failed: {e}"));
+          helper_after_failed_apply(
+            layout,
+            verify_previous,
+            &mut |state, marker| relaunch(layout, state, marker),
+          )
+        }
       }
-      Err(e) => {
-        log_line(layout, &format!("apply failed: {e}"));
-        helper_after_failed_apply(layout, &mut |state, marker| {
-          relaunch(layout, state, marker)
-        })
-      }
-    },
-    HelperMode::Rollback => {
-      helper_rollback(layout, &mut state, &mut |state, marker| {
-        relaunch(layout, state, marker)
-      })
     }
+    HelperMode::Rollback => helper_rollback(
+      layout,
+      &mut state,
+      verify_previous,
+      &mut |state, marker| relaunch(layout, state, marker),
+    ),
   }
 }
 
@@ -1498,6 +1778,7 @@ pub fn run_helper(
 /// it for the next start.
 fn helper_after_failed_apply(
   layout: &InstallLayout,
+  verify_previous: PreviousVerifier<'_>,
   relaunch: &mut dyn FnMut(&UpdateState, Option<String>) -> i32,
 ) -> i32 {
   match read_state(layout) {
@@ -1507,24 +1788,27 @@ fn helper_after_failed_apply(
     }
     Some(mut state) if state.phase == Phase::Swapping => {
       log_line(layout, "the swap was not undone: recovering now");
-      helper_rollback(layout, &mut state, relaunch);
+      helper_rollback(layout, &mut state, verify_previous, relaunch);
       1
     }
     _ => 1,
   }
 }
 
-/// The helper's rollback: restore and record it, log, relaunch the previous
-/// app, and only then delete the failed install (best effort, bounded), so a
-/// file that can't be deleted never holds up the relaunch. On Windows this
-/// helper runs from the failed install's own executable, which can't be
-/// deleted while it runs: the relaunched app's startup cleanup removes it.
+/// The helper's rollback: check what goes back, restore and record it, log,
+/// relaunch the previous app, and only then delete the failed install (best
+/// effort, bounded), so a file that can't be deleted never holds up the
+/// relaunch. On Windows this helper runs from the failed install's own
+/// executable, which can't be deleted while it runs: the relaunched app's
+/// startup cleanup removes it. A refused rollback ([`refuse_rollback`])
+/// relaunches nothing: the installed app is left for the next launch.
 fn helper_rollback(
   layout: &InstallLayout,
   state: &mut UpdateState,
+  verify_previous: PreviousVerifier<'_>,
   relaunch: &mut dyn FnMut(&UpdateState, Option<String>) -> i32,
 ) -> i32 {
-  match rollback(layout, state) {
+  match rollback_verified(layout, state, verify_previous, &no_fault) {
     Ok(rolled_back) => {
       log_line(layout, &format!("rolled back {rolled_back:?}"));
       let code =
@@ -2139,6 +2423,7 @@ pub fn is_update_marker(arg: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+  use super::super::treecheck::tests as treecheck_tests;
   use super::*;
 
   /// Only a Windows executable with CEF's files next to it (CEF's bootstrap)
@@ -2386,7 +2671,13 @@ mod tests {
     layout: InstallLayout,
   }
 
+  /// The fixture's executable, as the platform's packager names it.
+  const FIXTURE_EXE: &str = if cfg!(windows) { "App.exe" } else { "app" };
+
   /// An install `App` holding `version`, and a staged `App` holding `new`.
+  /// Each holds the main executable as a PE image without a tree manifest
+  /// (a Windows app from before the manifest): the apply path's Windows tree
+  /// check reads both the installed and the staged one.
   fn fixture(staged: Option<&str>) -> Fixture {
     let tmp = tempfile::tempdir().unwrap();
     let parent = std::fs::canonicalize(tmp.path()).unwrap();
@@ -2395,19 +2686,24 @@ mod tests {
     std::fs::write(install.join("version"), "1.0.0").unwrap();
     std::fs::write(install.join(super::super::layout::INSTALL_MARKER), "{}")
       .unwrap();
+    std::fs::write(install.join(FIXTURE_EXE), treecheck_tests::minimal_pe())
+      .unwrap();
     let layout = InstallLayout {
       kind: InstallKind::AppDir,
       install,
       parent,
       name: "App".into(),
-      exe_rel: PathBuf::from("app"),
+      exe_rel: PathBuf::from(FIXTURE_EXE),
     };
     let mut state = UpdateState::new(&layout);
     if let Some(v) = staged {
+      make_private_staging(&layout);
       let dir = layout.extract_dir().join("App");
       std::fs::create_dir_all(&dir).unwrap();
       std::fs::write(dir.join("version"), v).unwrap();
       std::fs::write(dir.join(super::super::layout::INSTALL_MARKER), "{}")
+        .unwrap();
+      std::fs::write(dir.join(FIXTURE_EXE), treecheck_tests::minimal_pe())
         .unwrap();
       state.staged_digest = Some(tree_digest(&dir).unwrap());
       state.phase = Phase::Staged;
@@ -2417,6 +2713,30 @@ mod tests {
     }
     write_state(&layout, &state).unwrap();
     Fixture { _tmp: tmp, layout }
+  }
+
+  /// The staging directory as `begin()` creates it: owned by this user,
+  /// private to it (0700).
+  fn make_private_staging(l: &InstallLayout) {
+    std::fs::create_dir_all(l.staging_dir()).unwrap();
+    #[cfg(unix)]
+    {
+      use std::os::unix::fs::PermissionsExt;
+      std::fs::set_permissions(
+        l.staging_dir(),
+        std::fs::Permissions::from_mode(0o700),
+      )
+      .unwrap();
+    }
+  }
+
+  /// Plant `version` as a marked app tree at `dir` (what another user with
+  /// write access to the install's parent could put there).
+  fn plant_app(dir: &Path, version: &str) {
+    std::fs::create_dir_all(dir).unwrap();
+    std::fs::write(dir.join("version"), version).unwrap();
+    std::fs::write(dir.join(super::super::layout::INSTALL_MARKER), "{}")
+      .unwrap();
   }
 
   /// Point the recorded trial at a process that has exited.
@@ -2733,6 +3053,134 @@ mod tests {
     }
   }
 
+  /// The staging directory sits in the install's parent, which other users
+  /// may be able to write (`/Applications` is writable by the admin group):
+  /// one that is not private to this user, or a symlink in its place, is
+  /// never swapped from.
+  #[cfg(unix)]
+  #[test]
+  fn a_staging_directory_others_can_reach_is_refused() {
+    use std::os::unix::fs::PermissionsExt;
+    for how in ["group-writable", "world-readable", "symlink"] {
+      let f = fixture(Some("2.0.0"));
+      let l = &f.layout;
+      let staging = l.staging_dir();
+      match how {
+        "group-writable" => std::fs::set_permissions(
+          &staging,
+          std::fs::Permissions::from_mode(0o770),
+        )
+        .unwrap(),
+        "world-readable" => std::fs::set_permissions(
+          &staging,
+          std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap(),
+        _ => {
+          let elsewhere = l.parent.join("elsewhere");
+          std::fs::rename(&staging, &elsewhere).unwrap();
+          std::os::unix::fs::symlink(&elsewhere, &staging).unwrap();
+        }
+      }
+      let mut s = read_state(l).unwrap();
+      let e = apply_swap(l, &mut s).unwrap_err();
+      assert_eq!(e.code, Code::BundleMismatch, "{how}: {}", e.message);
+      assert_eq!(installed(l), "1.0.0", "{how}");
+      assert_eq!(read_state(l).unwrap().phase, Phase::Staged, "{how}");
+    }
+  }
+
+  /// The verify-then-swap race (5.0-gate review A, L1): after the staged
+  /// app was verified, something with write access to the install's parent
+  /// renames the staging directory away and puts another app tree at the
+  /// same path. The swap moves what was verified (through the directory it
+  /// holds open), never the tree now at the path.
+  #[cfg(unix)]
+  #[test]
+  fn a_staging_directory_replaced_after_verification_is_not_swapped_in() {
+    for exchanged in [true, false] {
+      let f = fixture(Some("2.0.0"));
+      let l = &f.layout;
+      if exchanged && !exchange_supported(&l.parent) {
+        continue;
+      }
+      let mut s = read_state(l).unwrap();
+      let hook = |name: &str| -> std::io::Result<()> {
+        if name == "exchange" {
+          std::fs::rename(l.staging_dir(), l.parent.join(".moved-away"))?;
+          make_private_staging(l);
+          plant_app(&l.extract_dir().join("App"), "6.6.6");
+          if !exchanged {
+            return Err(std::io::Error::other("no exchange here"));
+          }
+        }
+        Ok(())
+      };
+      apply_swap_with(l, &mut s, &hook).unwrap();
+      assert_eq!(installed(l), "2.0.0", "exchanged={exchanged}");
+      assert_eq!(
+        std::fs::read_to_string(l.old_path().join("version")).unwrap(),
+        "1.0.0",
+        "exchanged={exchanged}"
+      );
+      // The planted tree is left where it was put, not swapped or deleted.
+      assert_eq!(
+        std::fs::read_to_string(l.extract_dir().join("App/version")).unwrap(),
+        "6.6.6",
+        "exchanged={exchanged}"
+      );
+      assert_eq!(read_state(l).unwrap().phase, Phase::Swapped);
+    }
+  }
+
+  /// The digest the helper swaps against is the one it computed itself
+  /// before verifying, not the state file's (which anything running as the
+  /// user can write): a staged app changed while it was being verified is
+  /// refused, even when the state names the changed tree's digest.
+  #[test]
+  fn the_helper_swaps_only_the_tree_it_verified() {
+    if run_alone("the_helper_swaps_only_the_tree_it_verified") {
+      return;
+    }
+    for forge in [true, false] {
+      let f = fixture(Some("2.0.0"));
+      let l = &f.layout;
+      let staged = read_state(l).unwrap().staged_path(l).unwrap();
+      // The state is forged to name the tree as it will be after the change
+      // (or names the tree as staged: the change is still caught).
+      let forged = {
+        let t = tempfile::tempdir().unwrap();
+        let copy = t.path().join("App");
+        plant_app(&copy, "6.6.6");
+        tree_digest(&copy).unwrap()
+      };
+      let mut exited = if cfg!(windows) {
+        std::process::Command::new("cmd")
+          .args(["/C", "exit 0"])
+          .spawn()
+      } else {
+        std::process::Command::new("true").spawn()
+      }
+      .unwrap();
+      let pid = exited.id();
+      exited.wait().unwrap();
+      let mut s = read_state(l).unwrap();
+      if forge {
+        s.staged_digest = Some(forged);
+      }
+      s.apply_pid = Some(pid);
+      write_state(l, &s).unwrap();
+      // The change lands while the staged app is being verified.
+      let verify = |_: &InstallLayout, _: &UpdateState| {
+        std::fs::write(staged.join("version"), "6.6.6").unwrap();
+        Ok(())
+      };
+      run_helper(l, HelperMode::Apply, pid, &verify, &accept_previous);
+      assert_eq!(installed(l), "1.0.0", "forge={forge}");
+      assert_eq!(read_state(l).unwrap().phase, Phase::Staged, "forge={forge}");
+    }
+  }
+
   #[test]
   fn tree_digest_covers_names_contents_and_shape() {
     let t = tempfile::tempdir().unwrap();
@@ -2864,7 +3312,13 @@ mod tests {
     write_state(l, &s).unwrap();
     let start = Instant::now();
     assert_eq!(
-      run_helper(l, HelperMode::Apply, app.id(), &accept_staged),
+      run_helper(
+        l,
+        HelperMode::Apply,
+        app.id(),
+        &accept_staged,
+        &accept_previous
+      ),
       0
     );
     assert!(start.elapsed() < Duration::from_secs(30));
@@ -2875,7 +3329,13 @@ mod tests {
     s.apply_pid = Some(app.id().wrapping_add(1));
     write_state(l, &s).unwrap();
     assert_eq!(
-      run_helper(l, HelperMode::Apply, app.id(), &accept_staged),
+      run_helper(
+        l,
+        HelperMode::Apply,
+        app.id(),
+        &accept_staged,
+        &accept_previous
+      ),
       0
     );
     assert_eq!(installed(l), "1.0.0");
@@ -2885,7 +3345,13 @@ mod tests {
     let mut s = read_state(l).unwrap();
     s.apply_pid = Some(app.id());
     write_state(l, &s).unwrap();
-    let code = run_helper(l, HelperMode::Apply, app.id(), &accept_staged);
+    let code = run_helper(
+      l,
+      HelperMode::Apply,
+      app.id(),
+      &accept_staged,
+      &accept_previous,
+    );
     assert_eq!(installed(l), "2.0.0");
     // The relaunch started the new app (on Windows the fixture has none).
     #[cfg(unix)]
@@ -2924,6 +3390,198 @@ mod tests {
     assert_eq!(startup_action(l), StartupAction::Continue { trial: false });
   }
 
+  /// The apply refuses a staged app whose executable differs from the
+  /// installed one only in case, whatever put it in the staging directory:
+  /// the digest in the state matches it, and outside Windows no tree check
+  /// reads the name.
+  #[test]
+  fn apply_refuses_a_case_only_rename_of_the_executable() {
+    let f = fixture(Some("2.0.0"));
+    let l = &f.layout;
+    let dir = l.extract_dir().join("App");
+    let renamed = FIXTURE_EXE.to_uppercase();
+    assert_ne!(renamed, FIXTURE_EXE);
+    std::fs::rename(dir.join(FIXTURE_EXE), dir.join(&renamed)).unwrap();
+    let mut s = read_state(l).unwrap();
+    s.staged_digest = Some(tree_digest(&dir).unwrap());
+    write_state(l, &s).unwrap();
+    let e = apply_swap(l, &mut s).unwrap_err();
+    assert_eq!(e.code, Code::BundleMismatch, "{}", e.message);
+    assert!(e.message.contains("only the case differs"), "{}", e.message);
+    assert_eq!(installed(l), "1.0.0");
+    let s = read_state(l).unwrap();
+    assert_eq!(s.phase, Phase::Staged);
+    assert!(
+      s.last_error
+        .unwrap_or_default()
+        .contains("only the case differs")
+    );
+  }
+
+  /// A refusal by the OS signature re-check or the Windows tree check at
+  /// apply time is recorded in the state as `"<code>: <message>"`, like the
+  /// helper's other refusals, so the relaunched app can tell why. The staged
+  /// app stays (nothing swapped) for a retry.
+  #[test]
+  fn an_apply_time_refusal_is_recorded() {
+    let check =
+      |l: &InstallLayout, e: UpdateError, code: Code, needle: &str| {
+        assert_eq!(e.code, code, "{}", e.message);
+        assert!(e.message.contains("nothing was swapped"), "{}", e.message);
+        assert_eq!(installed(l), "1.0.0");
+        let s = read_state(l).unwrap();
+        assert_eq!(s.phase, Phase::Staged);
+        let last = s.last_error.unwrap_or_default();
+        assert!(
+          last.starts_with(&format!("{}: ", code.as_str()))
+            && last.contains(needle),
+          "{last}"
+        );
+        assert_eq!(
+          std::fs::read_to_string(l.extract_dir().join("App/version")).unwrap(),
+          "2.0.0"
+        );
+      };
+
+    // The OS signature re-check refuses.
+    let f = fixture(Some("2.0.0"));
+    let l = &f.layout;
+    let mut s = read_state(l).unwrap();
+    let verify = |_: &InstallLayout, _: &UpdateState| {
+      err(
+        Code::OsSignature,
+        "the staged app is signed by someone else",
+      )
+    };
+    let e = apply_swap_verified(l, &mut s, &verify, &no_fault).unwrap_err();
+    check(l, e, Code::OsSignature, "signed by someone else");
+
+    // Windows: the tree check refuses (the running app carries a tree
+    // manifest, the staged one none).
+    if cfg!(windows) {
+      let f = fixture(Some("2.0.0"));
+      let l = &f.layout;
+      std::fs::write(
+        l.install.join(FIXTURE_EXE),
+        treecheck_tests::pe_with_resource(
+          super::super::treecheck::RESOURCE_NAME,
+          &treecheck_tests::manifest_json(&[]),
+          &[1033],
+        ),
+      )
+      .unwrap();
+      let mut s = read_state(l).unwrap();
+      let e = apply_swap(l, &mut s).unwrap_err();
+      check(l, e, Code::OsSignature, "no signed tree manifest");
+    }
+  }
+
+  /// The checks before the staged app is pinned refuse with their own code,
+  /// and the relaunched app reads why from the state like any other refusal.
+  /// The phase is left as it was: `nothing is staged` must not turn a state
+  /// that has no staged app into one that claims it has.
+  #[test]
+  fn an_early_refusal_is_recorded() {
+    let check = |l: &InstallLayout,
+                 s: &mut UpdateState,
+                 code: Code,
+                 needle: &str,
+                 phase: Phase| {
+      let e = apply_swap(l, s).unwrap_err();
+      assert_eq!(e.code, code, "{}", e.message);
+      assert!(e.message.contains(needle), "{}", e.message);
+      assert_eq!(
+        e.message.matches("nothing was swapped").count(),
+        1,
+        "{}",
+        e.message
+      );
+      let read = read_state(l).unwrap();
+      assert_eq!(read.phase, phase, "{needle}");
+      let last = read.last_error.unwrap_or_default();
+      assert!(
+        last.starts_with(&format!("{}: ", code.as_str()))
+          && last.contains(needle),
+        "{needle}: {last:?}"
+      );
+    };
+
+    // The state has nothing staged.
+    let f = fixture(None);
+    let l = &f.layout;
+    let mut s = read_state(l).unwrap();
+    check(l, &mut s, Code::NotStaged, "nothing is staged", Phase::Idle);
+    assert_eq!(installed(l), "1.0.0");
+
+    // The state names no staged app.
+    let f = fixture(Some("2.0.0"));
+    let l = &f.layout;
+    let mut s = read_state(l).unwrap();
+    s.entry = None;
+    check(
+      l,
+      &mut s,
+      Code::NotStaged,
+      "names no staged app",
+      Phase::Staged,
+    );
+
+    // The staging directory is gone.
+    let f = fixture(Some("2.0.0"));
+    let l = &f.layout;
+    std::fs::remove_dir_all(l.staging_dir()).unwrap();
+    let mut s = read_state(l).unwrap();
+    check(l, &mut s, Code::NotStaged, "is missing", Phase::Staged);
+    assert_eq!(installed(l), "1.0.0");
+
+    // The staged app is gone from it.
+    let f = fixture(Some("2.0.0"));
+    let l = &f.layout;
+    std::fs::remove_dir_all(l.extract_dir().join("App")).unwrap();
+    let mut s = read_state(l).unwrap();
+    check(l, &mut s, Code::NotStaged, "is missing", Phase::Staged);
+    assert_eq!(installed(l), "1.0.0");
+
+    // The install is gone.
+    let f = fixture(Some("2.0.0"));
+    let l = &f.layout;
+    std::fs::remove_dir_all(&l.install).unwrap();
+    let mut s = read_state(l).unwrap();
+    check(l, &mut s, Code::NotStaged, "is missing", Phase::Staged);
+
+    // No install marker: not a packaged app.
+    let f = fixture(Some("2.0.0"));
+    let l = &f.layout;
+    std::fs::remove_file(l.install.join(super::super::layout::INSTALL_MARKER))
+      .unwrap();
+    let mut s = read_state(l).unwrap();
+    check(
+      l,
+      &mut s,
+      Code::UnsupportedLayout,
+      "not a packaged app",
+      Phase::Staged,
+    );
+    assert_eq!(installed(l), "1.0.0");
+
+    // A leftover `.old` that is not a previous install of this app.
+    let f = fixture(Some("2.0.0"));
+    let l = &f.layout;
+    std::fs::create_dir_all(l.old_path()).unwrap();
+    std::fs::write(l.old_path().join("user-file"), "keep me").unwrap();
+    let mut s = read_state(l).unwrap();
+    check(
+      l,
+      &mut s,
+      Code::Io,
+      "cannot remove a leftover",
+      Phase::Staged,
+    );
+    assert_eq!(installed(l), "1.0.0");
+    assert!(l.old_path().join("user-file").exists());
+    assert!(l.extract_dir().join("App/version").exists());
+  }
+
   #[test]
   fn interrupted_swap_is_undone() {
     // Every rename step of the swap fails in turn: the previous app stays
@@ -2958,6 +3616,129 @@ mod tests {
     }
   }
 
+  /// Give the installed app the executable `running` and the staged app
+  /// `staged`, and record the staged tree's digest again (as `stage()` would
+  /// have recorded it).
+  fn set_executables(l: &InstallLayout, running: &[u8], staged: &[u8]) {
+    std::fs::write(l.exe(), running).unwrap();
+    let mut s = read_state(l).unwrap();
+    let dir = s.staged_path(l).unwrap();
+    std::fs::write(l.exe_in(&dir), staged).unwrap();
+    s.staged_digest = Some(tree_digest(&dir).unwrap());
+    write_state(l, &s).unwrap();
+  }
+
+  /// An executable whose signed tree manifest lists `files`.
+  fn exe_listing(files: &[(&str, &[u8])]) -> Vec<u8> {
+    treecheck_tests::pe_with_resource(
+      super::super::treecheck::RESOURCE_NAME,
+      &treecheck_tests::manifest_json(files),
+      &[1033],
+    )
+  }
+
+  /// The apply's Windows tree check (5.0-gate review A, M2) over a staged
+  /// app on disk: its loose files must be the ones its executable's signed
+  /// manifest lists, and a running app with a manifest refuses a staged app
+  /// without one. Elsewhere the OS signature seals every file (macOS) or
+  /// there is none (Linux), and each of these applies.
+  #[test]
+  fn the_apply_holds_the_staged_tree_to_its_signed_manifest() {
+    use super::super::layout::INSTALL_MARKER;
+    let plain = treecheck_tests::minimal_pe;
+    let listing = |version: &[u8]| {
+      exe_listing(&[("version", version), (INSTALL_MARKER, b"{}")])
+    };
+    // (case, the running executable, the staged one, applies on Windows)
+    let cases = [
+      (
+        "both list the tree",
+        listing(b"2.0.0"),
+        listing(b"2.0.0"),
+        true,
+      ),
+      ("neither has a manifest", plain(), plain(), true),
+      (
+        "the first update with one",
+        plain(),
+        listing(b"2.0.0"),
+        true,
+      ),
+      ("a downgrade to none", listing(b"2.0.0"), plain(), false),
+      (
+        "a loose file changed",
+        listing(b"2.0.0"),
+        listing(b"9.9.9"),
+        false,
+      ),
+      (
+        "an unlisted loose file",
+        plain(),
+        exe_listing(&[("version", b"2.0.0")]),
+        false,
+      ),
+    ];
+    for (case, running, staged, on_windows) in cases {
+      let f = fixture(Some("2.0.0"));
+      let l = &f.layout;
+      set_executables(l, &running, &staged);
+      let mut s = read_state(l).unwrap();
+      let result = apply_swap(l, &mut s);
+      if on_windows || !cfg!(windows) {
+        result.unwrap_or_else(|e| panic!("{case}: {e}"));
+        assert_eq!(installed(l), "2.0.0", "{case}");
+        assert_eq!(read_state(l).unwrap().phase, Phase::Swapped, "{case}");
+        continue;
+      }
+      let e = result.unwrap_err();
+      assert_eq!(e.code, Code::OsSignature, "{case}: {}", e.message);
+      assert!(e.message.contains("the staged app's files"), "{case}");
+      assert_eq!(installed(l), "1.0.0", "{case}");
+      assert_eq!(read_state(l).unwrap().phase, Phase::Staged, "{case}");
+      assert!(!l.old_path().exists(), "{case}");
+      // Left staged, untouched, for the next attempt to refuse again.
+      assert_eq!(
+        std::fs::read(l.extract_dir().join("App").join(FIXTURE_EXE)).unwrap(),
+        staged,
+        "{case}"
+      );
+    }
+  }
+
+  /// Whether the running app carries a manifest decides whether a staged
+  /// app without one may be swapped in, so an install whose executable
+  /// can't be read is never swapped on Windows: the check fails closed
+  /// rather than read it as an app from before the manifest.
+  #[test]
+  fn an_unreadable_installed_executable_fails_closed_on_windows() {
+    let f = fixture(Some("2.0.0"));
+    let l = &f.layout;
+    std::fs::remove_file(l.exe()).unwrap();
+    let mut s = read_state(l).unwrap();
+    let result = apply_swap(l, &mut s);
+    if cfg!(windows) {
+      let e = result.unwrap_err();
+      assert_eq!(e.code, Code::Io, "{}", e.message);
+      assert_eq!(installed(l), "1.0.0");
+      assert_eq!(read_state(l).unwrap().phase, Phase::Staged);
+    } else {
+      result.unwrap();
+      assert_eq!(installed(l), "2.0.0");
+    }
+    // An installed executable that is not a PE image is refused too.
+    let f = fixture(Some("2.0.0"));
+    let l = &f.layout;
+    set_executables(l, b"#!/bin/sh\n", &treecheck_tests::minimal_pe());
+    let mut s = read_state(l).unwrap();
+    let result = apply_swap(l, &mut s);
+    if cfg!(windows) {
+      assert_eq!(result.unwrap_err().code, Code::OsSignature);
+      assert_eq!(installed(l), "1.0.0");
+    } else {
+      result.unwrap();
+    }
+  }
+
   /// A swap whose second rename fails AND whose undo fails: never reported
   /// as undone; the state stays `swapping`, and the recovery the helper then
   /// runs (the rollback) puts the previous app back, also on the atomic
@@ -2989,7 +3770,7 @@ mod tests {
       assert_eq!(s.phase, Phase::Swapping, "exchanged={exchanged}");
       // The helper's recovery, as `run_helper` runs it after the failure.
       let mut relaunched = Vec::new();
-      helper_after_failed_apply(l, &mut |state, marker| {
+      helper_after_failed_apply(l, &accept_previous, &mut |state, marker| {
         relaunched.push((state.phase, marker));
         0
       });
@@ -3118,6 +3899,148 @@ mod tests {
     assert_eq!(read_state(l).unwrap().phase, Phase::Staged);
   }
 
+  /// What the helper checks about the tree a rollback puts back, as the
+  /// fixture can model it: the install marker, and the `version` file equal
+  /// to the state's `from` (the real helper reads the embedded version and
+  /// the OS code signature: `verify_previous_for_helper`).
+  fn fixture_previous_verifier(
+    l: &InstallLayout,
+    s: &UpdateState,
+    tree: &Path,
+  ) -> Result<(), UpdateError> {
+    if !is_install_copy(l.kind, tree) {
+      return err(
+        Code::UnsupportedLayout,
+        format!(
+          "{} is not a packaged app (no install marker)",
+          tree.display()
+        ),
+      );
+    }
+    let version =
+      std::fs::read_to_string(tree.join("version")).unwrap_or_default();
+    if Some(version.as_str()) != s.from.as_deref() {
+      return err(
+        Code::VersionMismatch,
+        format!(
+          "{} is version {version}, the state names {:?}",
+          tree.display(),
+          s.from
+        ),
+      );
+    }
+    Ok(())
+  }
+
+  /// A forged state file (anything running as the user can write it) next
+  /// to a planted tree: `.old` with the state `swapped`, as if a version
+  /// were on trial, or a tree in the staging directory with the state
+  /// `swapping` and an install id that differs, as if an exchange had been
+  /// interrupted. The rollback used to exchange the planted tree in, with no
+  /// check at all (the apply re-checks everything; the rollback checked
+  /// nothing), and relaunch it. Now the tree that would go back to the
+  /// install path passes the same checks as a staged app first; a tree that
+  /// fails them is left where it is, nothing moves, the refusal is recorded,
+  /// and the next launch starts the installed app.
+  #[test]
+  fn a_rollback_puts_back_only_a_tree_it_verified() {
+    let refused = |l: &InstallLayout, code: Code| {
+      assert_eq!(installed(l), "1.0.0");
+      let s = read_state(l).unwrap();
+      assert_eq!(s.phase, Phase::Idle, "{:?}", s.last_error);
+      let last = s.last_error.clone().unwrap_or_default();
+      assert!(last.starts_with(&format!("{}: ", code.as_str())), "{last}");
+      assert!(last.contains("nothing was rolled back"), "{last}");
+      assert!(!s.cleanup, "a refused rollback deletes nothing");
+      assert_eq!(s.rejected, None, "no version was rolled back");
+      assert_eq!(startup_action(l), StartupAction::Continue { trial: false });
+    };
+
+    // `.old` planted (another version of the app, say), the state `swapped`.
+    let f = fixture(None);
+    let l = &f.layout;
+    plant_app(&l.old_path(), "0.9.0");
+    let mut s = read_state(l).unwrap();
+    s.phase = Phase::Swapped;
+    s.from = Some("1.0.0".into());
+    s.to = Some("2.0.0".into());
+    s.launches = 1;
+    write_state(l, &s).unwrap();
+    assert_eq!(startup_action(l), StartupAction::RollBack);
+    let mut s = read_state(l).unwrap();
+    let e = rollback_verified(l, &mut s, &fixture_previous_verifier, &no_fault)
+      .unwrap_err();
+    assert_eq!(e.code, Code::VersionMismatch, "{}", e.message);
+    refused(l, Code::VersionMismatch);
+    assert_eq!(
+      std::fs::read_to_string(l.old_path().join("version")).unwrap(),
+      "0.9.0",
+      "the planted tree is left where it was"
+    );
+
+    // `.old` without the install marker (not a packaged app at all).
+    let f = fixture(None);
+    let l = &f.layout;
+    std::fs::create_dir_all(l.old_path()).unwrap();
+    std::fs::write(l.old_path().join("version"), "1.0.0").unwrap();
+    let mut s = read_state(l).unwrap();
+    s.phase = Phase::Swapped;
+    s.from = Some("1.0.0".into());
+    s.to = Some("2.0.0".into());
+    s.launches = 1;
+    write_state(l, &s).unwrap();
+    let mut s = read_state(l).unwrap();
+    let e = rollback_verified(l, &mut s, &fixture_previous_verifier, &no_fault)
+      .unwrap_err();
+    assert_eq!(e.code, Code::UnsupportedLayout, "{}", e.message);
+    refused(l, Code::UnsupportedLayout);
+    assert!(l.old_path().join("version").exists());
+
+    // The `swapping` path: no `.old`, a planted staged tree, and an install
+    // id that differs (so the swap reads as an interrupted exchange whose
+    // previous app still sits in staging). It used to be moved to `.old`
+    // and exchanged in from there. (Windows tells an interrupted exchange
+    // by `.old` alone, so there the forgery reads as a swap that never ran.)
+    #[cfg(unix)]
+    {
+      let f = fixture(Some("0.9.0"));
+      let l = &f.layout;
+      let mut s = read_state(l).unwrap();
+      s.phase = Phase::Swapping;
+      s.install_id = Some("0:0".into());
+      write_state(l, &s).unwrap();
+      let mut s = read_state(l).unwrap();
+      let e =
+        rollback_verified(l, &mut s, &fixture_previous_verifier, &no_fault)
+          .unwrap_err();
+      assert_eq!(e.code, Code::VersionMismatch, "{}", e.message);
+      refused(l, Code::VersionMismatch);
+      assert!(
+        !l.old_path().exists(),
+        "the planted tree was not moved next to the install"
+      );
+      assert!(l.extract_dir().join("App").join("version").exists());
+    }
+
+    // A real trial's `.old` passes the same check: the rollback works.
+    let f = fixture(Some("2.0.0"));
+    let l = &f.layout;
+    let mut s = read_state(l).unwrap();
+    apply_swap(l, &mut s).unwrap();
+    assert_eq!(startup_action(l), StartupAction::Continue { trial: true });
+    mark_trial_exited(l);
+    assert_eq!(startup_action(l), StartupAction::RollBack);
+    let mut s = read_state(l).unwrap();
+    assert_eq!(
+      rollback_verified(l, &mut s, &fixture_previous_verifier, &no_fault)
+        .unwrap()
+        .as_deref(),
+      Some("2.0.0")
+    );
+    assert_eq!(installed(l), "1.0.0");
+    assert_eq!(read_state(l).unwrap().phase, Phase::Idle);
+  }
+
   #[test]
   fn interrupted_rollback_resumes() {
     for failing in ["install->failed", "old->install"] {
@@ -3216,18 +4139,19 @@ mod tests {
     let mut relaunches = Vec::new();
     let mut s = read_state(l).unwrap();
     let started = Instant::now();
-    let code = helper_rollback(l, &mut s, &mut |state, marker| {
-      // At the relaunch the rollback is recorded and logged, and nothing
-      // has been deleted yet.
-      assert_eq!(state.phase, Phase::Idle);
-      relaunches.push((
-        read_state(l).map(|s| (s.phase, s.cleanup)),
-        marker,
-        log().contains("rolled back Some(\"2.0.0\")"),
-        l.failed_path().join("locked").exists(),
-      ));
-      0
-    });
+    let code =
+      helper_rollback(l, &mut s, &accept_previous, &mut |state, marker| {
+        // At the relaunch the rollback is recorded and logged, and nothing
+        // has been deleted yet.
+        assert_eq!(state.phase, Phase::Idle);
+        relaunches.push((
+          read_state(l).map(|s| (s.phase, s.cleanup)),
+          marker,
+          log().contains("rolled back Some(\"2.0.0\")"),
+          l.failed_path().join("locked").exists(),
+        ));
+        0
+      });
     assert_eq!(code, 0);
     assert!(
       started.elapsed() < Duration::from_secs(5),

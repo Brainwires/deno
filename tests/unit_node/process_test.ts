@@ -2091,3 +2091,14 @@ Deno.test({
     assertEquals(received, ["SIGUSR1"]);
   },
 });
+
+// Node's stdout and stderr are write-only streams when they are a file or a
+// pipe (a `SyncWriteStream`, a `net.Socket` made with `readable: false`).
+Deno.test({
+  name: "process.stdout and process.stderr are not readable",
+  ignore: Deno.stdout.isTerminal() || Deno.stderr.isTerminal(),
+}, () => {
+  assertEquals(process.stdout.readable, false);
+  assertEquals(process.stderr.readable, false);
+  assertEquals(process.stdout.writable, true);
+});

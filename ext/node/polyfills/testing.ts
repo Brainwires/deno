@@ -14,7 +14,10 @@ const {
   ArrayPrototypeSlice,
   ArrayPrototypeSort,
   ArrayPrototypeSplice,
+  Date,
+  DateNow,
   DatePrototypeGetTime,
+  DatePrototypeToISOString,
   DatePrototypeToString,
   Error,
   ErrorPrototype,
@@ -25,10 +28,15 @@ const {
   MapPrototypeGet,
   MapPrototypeHas,
   MapPrototypeSet,
+  MathFloor,
+  MathImul,
   MathMax,
+  MathRandom,
   NumberIsFinite,
   NumberIsInteger,
+  NumberPrototypeToFixed,
   ObjectDefineProperty,
+  ObjectEntries,
   ObjectKeys,
   ObjectPrototypeHasOwnProperty,
   ObjectGetOwnPropertyDescriptor,
@@ -67,6 +75,7 @@ const {
   StringPrototypeSlice,
   StringPrototypeSplit,
   StringPrototypeToLowerCase,
+  StringPrototypeTrim,
   StringPrototypeStartsWith,
   Symbol,
   SymbolDispose,
@@ -864,7 +873,7 @@ function getReporterKind() {
   const reporter = getNodeTestReporter();
   if (reporter === "tap") return "tap";
   if (isDenoTestRun()) return null;
-  return reporter === "dot" ? "dot" : "spec";
+  return reporter === "dot" || reporter === "junit" ? reporter : "spec";
 }
 
 function isReporterMode() {
@@ -950,6 +959,69 @@ function isTestOnlyFlagSet() {
     nodeOptions,
   );
   return testOnlyFlagCache;
+}
+
+// `--test-randomize` / `--test-random-seed=<uint32>` (Node 26,
+// `lib/internal/test_runner/utils.js` parseCommandLine): a seed turns
+// randomization on; `--test-randomize` alone draws one. Null when off. Read
+// from NODE_OPTIONS, where the node shim forwards both flags.
+let testRandomSeedCache;
+function getTestRandomSeed() {
+  if (testRandomSeedCache !== undefined) return testRandomSeedCache;
+  let nodeOptions = "";
+  try {
+    nodeOptions = globalThis.Deno?.env?.get("NODE_OPTIONS") || "";
+  } catch { /* permission denied */ }
+  const seed = RegExpPrototypeExec(
+    new SafeRegExp(/(?:^|\s)--test-random-seed(?:=|\s+)(\d+)(?:\s|$)/),
+    nodeOptions,
+  );
+  if (seed !== null && NumberIsInteger(+seed[1]) && +seed[1] <= 0xFFFF_FFFF) {
+    testRandomSeedCache = +seed[1];
+  } else if (
+    RegExpPrototypeTest(
+      new SafeRegExp(/(?:^|\s)--test-randomize(?:\s|=true|$)/),
+      nodeOptions,
+    )
+  ) {
+    // Node's `createRandomSeed()`.
+    testRandomSeedCache = MathFloor(MathRandom() * (0xFFFF_FFFF + 1));
+  } else {
+    testRandomSeedCache = null;
+  }
+  return testRandomSeedCache;
+}
+
+// Node's `createSeededGenerator()`: Mulberry32 from a uint32 seed. Every test,
+// suite and the root draw from their own generator with the run's seed, so a
+// seed gives the same order as in Node.
+function createSeededGenerator(seed) {
+  let state = seed >>> 0;
+  return () => {
+    state = (state + 0x6D2B79F5) | 0;
+    let value = MathImul(state ^ state >>> 15, 1 | state);
+    value ^= value + MathImul(value ^ value >>> 7, 61 | value);
+    return ((value ^ value >>> 14) >>> 0) / 4_294_967_296;
+  };
+}
+
+// The generator a parent dequeues its subtests with, or null when the run is
+// not randomized.
+function createSubtestQueueRandom() {
+  const seed = getTestRandomSeed();
+  return seed === null ? null : createSeededGenerator(seed);
+}
+
+// Node's `dequeuePendingSubtest()` over `list[start..]`: with a generator and
+// two or more pending, a uniformly random one is moved to `start` (the one to
+// run next); otherwise the next in declaration order stays there.
+function dequeueSubtest(list, start, random) {
+  const pending = list.length - start;
+  if (random === null || pending < 2) return;
+  const index = start + MathFloor(random() * pending);
+  if (index === start) return;
+  const entry = ArrayPrototypeSplice(list, index, 1)[0];
+  ArrayPrototypeSplice(list, start, 0, entry);
 }
 
 const TEST_ONLY_WARNING =
@@ -1497,6 +1569,199 @@ class DotReporter extends BufferedReporter {
   }
 }
 
+// Node's `junit` reporter (`lib/internal/test_runner/reporter/junit.js`): the
+// run as one `<testsuites>` document, written once the run is done. A test
+// with subtests is a `<testsuite>`, any other a `<testcase>`; diagnostics,
+// the summary's included, are XML comments.
+function junitEscapeContent(s = "") {
+  return StringPrototypeReplace(
+    StringPrototypeReplace(s, new SafeRegExp(/(&)(?!#\d{1,7};)/g), "&amp;"),
+    new SafeRegExp(/</g),
+    "&lt;",
+  );
+}
+
+function junitEscapeAttribute(s = "") {
+  return junitEscapeContent(
+    StringPrototypeReplace(
+      StringPrototypeReplace(s, new SafeRegExp(/\n/g), "&#10;"),
+      new SafeRegExp(/"/g),
+      "&quot;",
+    ),
+  );
+}
+
+function junitEscapeComment(s = "") {
+  return StringPrototypeReplace(s, new SafeRegExp(/--/g), "&#45;&#45;");
+}
+
+function junitTreeToXML(tree) {
+  if (typeof tree === "string") {
+    return `${junitEscapeContent(tree)}\n`;
+  }
+  const { tag, attrs, nesting, children, comment } = tree;
+  const indent = StringPrototypeRepeat("\t", nesting + 1);
+  if (comment != null) {
+    return `${indent}<!-- ${junitEscapeComment(comment)} -->\n`;
+  }
+  const attrsString = ArrayPrototypeJoin(
+    ArrayPrototypeMap(
+      ObjectEntries(attrs),
+      ({ 0: key, 1: value }) =>
+        `${key}="${junitEscapeAttribute(String(value))}"`,
+    ),
+    " ",
+  );
+  if (!children?.length) {
+    return `${indent}<${tag} ${attrsString}/>\n`;
+  }
+  let childrenString = "";
+  for (const child of new SafeArrayIterator(children)) {
+    childrenString += junitTreeToXML(child);
+  }
+  return `${indent}<${tag} ${attrsString}>\n${childrenString}${indent}</${tag}>\n`;
+}
+
+function junitIsFailure(node) {
+  if (node?.attrs?.failures) return true;
+  if (!node?.children) return false;
+  for (const child of new SafeArrayIterator(node.children)) {
+    if (child.tag === "failure") return true;
+  }
+  return false;
+}
+
+function junitIsSkipped(node) {
+  if (node?.attrs?.skipped) return true;
+  if (!node?.children) return false;
+  for (const child of new SafeArrayIterator(node.children)) {
+    if (child.tag === "skipped") return true;
+  }
+  return false;
+}
+
+function junitHostname() {
+  try {
+    return core.loadExtScript("ext:deno_node/os.ts").hostname();
+  } catch {
+    return "";
+  }
+}
+
+class JunitReporter {
+  #roots = [];
+  #current = null;
+
+  header() {}
+  plan() {}
+
+  start(entry, depth) {
+    const node = {
+      __proto__: null,
+      attrs: { __proto__: null, name: entry.name },
+      nesting: depth,
+      parent: this.#current,
+      children: [],
+    };
+    ArrayPrototypePush(this.#current?.children ?? this.#roots, node);
+    this.#current = node;
+  }
+
+  end(entry, depth, _n, result) {
+    const node = this.#current;
+    this.#current = node.parent;
+    node.attrs.time = NumberPrototypeToFixed(result.durationMs / 1000, 6);
+    let tests = 0;
+    let failures = 0;
+    let skipped = 0;
+    for (const child of new SafeArrayIterator(node.children)) {
+      if (child.comment != null) continue;
+      tests++;
+      if (junitIsFailure(child)) failures++;
+      if (junitIsSkipped(child)) skipped++;
+    }
+    if (tests > 0) {
+      node.tag = "testsuite";
+      node.attrs.disabled = 0;
+      node.attrs.errors = 0;
+      node.attrs.tests = tests;
+      node.attrs.failures = failures;
+      node.attrs.skipped = skipped;
+      node.attrs.timestamp = DatePrototypeToISOString(
+        new Date(DateNow() - result.durationMs),
+      );
+      node.attrs.hostname = junitHostname();
+      return;
+    }
+    node.tag = "testcase";
+    node.attrs.classname = "test";
+    if (entry.loc?.file) node.attrs.file = entry.loc.file;
+    const { skip, todo } = entry.options;
+    if (skip) {
+      ArrayPrototypePush(node.children, {
+        __proto__: null,
+        nesting: depth + 1,
+        tag: "skipped",
+        attrs: {
+          __proto__: null,
+          type: "skipped",
+          message: typeof skip === "string" && skip.length ? skip : true,
+        },
+      });
+    }
+    if (todo) {
+      ArrayPrototypePush(node.children, {
+        __proto__: null,
+        nesting: depth + 1,
+        tag: "skipped",
+        attrs: {
+          __proto__: null,
+          type: "todo",
+          message: typeof todo === "string" && todo.length ? todo : true,
+        },
+      });
+    }
+    if (result.failed) {
+      const error = result.error;
+      const message = typeof error?.message === "string" ? error.message : "";
+      ArrayPrototypePush(node.children, {
+        __proto__: null,
+        nesting: depth + 1,
+        tag: "failure",
+        attrs: {
+          __proto__: null,
+          type: error?.failureType || error?.code,
+          message: StringPrototypeTrim(message),
+        },
+        children: [
+          lazyInspect()(error, { colors: false, breakLength: Infinity }),
+        ],
+      });
+      node.attrs.failure = message;
+    }
+  }
+
+  diagnostic(depth, message) {
+    ArrayPrototypePush(this.#current?.children ?? this.#roots, {
+      __proto__: null,
+      nesting: depth,
+      comment: message,
+    });
+  }
+
+  summary(_n, stats, durationMs) {
+    for (const line of new SafeArrayIterator(summaryLines(stats, durationMs))) {
+      this.diagnostic(0, line);
+    }
+    let out = '<?xml version="1.0" encoding="utf-8"?>\n<testsuites>\n';
+    for (const root of new SafeArrayIterator(this.#roots)) {
+      out += junitTreeToXML(root);
+    }
+    out += "</testsuites>\n";
+    lazyProcess().default.stdout.write(out);
+  }
+}
+
 function dotLineLength() {
   let columns;
   try {
@@ -1513,6 +1778,8 @@ function getRunReporter() {
       ? new TapReporter()
       : kind === "dot"
       ? new DotReporter()
+      : kind === "junit"
+      ? new JunitReporter()
       : new SpecReporter();
   }
   return runReporter;
@@ -1543,6 +1810,12 @@ class TestContext {
   beforeEachHooks = [];
   afterEachHooks = [];
   #beforeRan = false;
+  // Randomized runs: subtests wait here until the parent picks them.
+  #random = createSubtestQueueRandom();
+  #pending = [];
+  #pendingScheduled = false;
+  #dequeuing = null;
+  #reportOrder = 0;
 
   constructor(name, depth, parentChildren, ancestors) {
     this.#name = name;
@@ -1634,17 +1907,39 @@ class TestContext {
       return PromiseResolve();
     }
     this.#subtestCount++;
-    const n = this.#subtestCount;
-    const childDepth = this.#depth + 1;
     const entry = newRunEntry(prepared, "test");
+    entry.childNumber = this.#subtestCount;
     if (this.#parentChildren) {
       ArrayPrototypePush(this.#parentChildren, entry);
     }
+    if (this.#random !== null) {
+      // Node's randomized queue (`Test#start`): the first start waits a
+      // microtask, so the siblings created in the same synchronous turn are
+      // all eligible for the first pick.
+      const deferred = PromiseWithResolvers();
+      ArrayPrototypePush(this.#pending, { entry, deferred });
+      if (!this.#pendingScheduled) {
+        this.#pendingScheduled = true;
+        queueMicrotask(() => {
+          this.#pendingScheduled = false;
+          this.#processPending();
+        });
+      }
+      return deferred.promise;
+    }
+    this.#reportOrder++;
+    const p = this.#runSubtest(entry, this.#reportOrder);
+    this.#subtestTail = PromisePrototypeThen(p, () => {}, () => {});
+    return p;
+  }
+
+  #runSubtest(entry, n) {
     // deno-lint-ignore no-this-alias
     const parentState = this;
     const ancestors = ArrayPrototypeSlice(this.#ancestors);
     ArrayPrototypePush(ancestors, this);
-    const p = PromisePrototypeThen(
+    const childDepth = this.#depth + 1;
+    return PromisePrototypeThen(
       this.#subtestTail,
       async () => {
         if (!parentState.#beforeRan) {
@@ -1661,11 +1956,55 @@ class TestContext {
         if (failed) parentState.#failedSubtests++;
       },
     );
-    this.#subtestTail = PromisePrototypeThen(p, () => {}, () => {});
-    return p;
   }
 
-  _drainSubtests() {
+  // Node's `processPendingSubtests()` with one subtest at a time: pick a
+  // pending sibling at random, run it, and pick again among what is pending
+  // then (subtests it registered on this context included). The report
+  // number is the pick's position, as Node assigns it at dequeue time.
+  #processPending() {
+    if (this.#dequeuing !== null) return;
+    this.#dequeuing = (async () => {
+      try {
+        while (this.#pending.length > 0) {
+          const pending = this.#pending;
+          const index = pending.length < 2
+            ? 0
+            : MathFloor(this.#random() * pending.length);
+          const { entry, deferred } = ArrayPrototypeSplice(
+            pending,
+            index,
+            1,
+          )[0];
+          this.#reportOrder++;
+          const p = this.#runSubtest(entry, this.#reportOrder);
+          this.#subtestTail = PromisePrototypeThen(p, () => {}, () => {});
+          try {
+            await p;
+            deferred.resolve();
+          } catch (err) {
+            deferred.reject(err);
+          }
+        }
+      } finally {
+        this.#dequeuing = null;
+      }
+    })();
+  }
+
+  async _drainSubtests() {
+    // A randomized parent's queue may still hold subtests (or be waiting for
+    // the microtask that starts it).
+    while (
+      this.#pending.length > 0 || this.#pendingScheduled ||
+      this.#dequeuing !== null
+    ) {
+      if (this.#dequeuing !== null) await this.#dequeuing;
+      else await PromiseResolve();
+      if (this.#pending.length > 0 && this.#dequeuing === null) {
+        this.#processPending();
+      }
+    }
     return this.#subtestTail;
   }
 
@@ -1716,6 +2055,7 @@ async function runTapTop() {
   const reporter = getRunReporter();
   const started = nowMs();
   const topState = { onlyWarningEmitted: false };
+  const rootRandom = createSubtestQueueRandom();
   let n = 0;
   // By index: a test registered while the run is going (after a top-level
   // `await`) runs too, as in Node.
@@ -1726,6 +2066,7 @@ async function runTapTop() {
     const keepAlive = setInterval(() => {}, 1 << 30);
     try {
       while (n < tapTopEntries.length) {
+        dequeueSubtest(tapTopEntries, n, rootRandom);
         n++;
         await runTapEntry(tapTopEntries[n - 1], 0, n, topState, []);
       }
@@ -1878,7 +2219,9 @@ async function runTapEntry(
         const childAncestors = ArrayPrototypeSlice(ancestors);
         ArrayPrototypePush(childAncestors, entry);
         let childN = 0;
+        const childRandom = createSubtestQueueRandom();
         for (let i = 0; i < entry.children.length; i++) {
+          dequeueSubtest(entry.children, i, childRandom);
           const child = entry.children[i];
           childN++;
           if (
@@ -1979,7 +2322,9 @@ async function runTapEntry(
   }
 
   const failed = error !== undefined;
-  reporter.end(entry, depth, n, {
+  // A test's number is its place among its siblings as declared (Node's
+  // `childNumber`), which a randomized run reports out of order.
+  reporter.end(entry, depth, entry.childNumber ?? n, {
     failed,
     error,
     isSuite,
@@ -2017,9 +2362,9 @@ function queueTapTest(name, options, fn, overrides) {
   const entry = newRunEntry(prepared, "test");
   const parentSuite = getTapCurrentSuite();
   if (parentSuite !== null) {
-    ArrayPrototypePush(parentSuite.children, entry);
+    entry.childNumber = ArrayPrototypePush(parentSuite.children, entry);
   } else {
-    ArrayPrototypePush(tapTopEntries, entry);
+    entry.childNumber = ArrayPrototypePush(tapTopEntries, entry);
     scheduleTapRun();
   }
   return PromiseResolve();
@@ -2036,9 +2381,9 @@ function queueTapSuite(name, options, fn, overrides) {
   const entry = newRunEntry(prepared, "suite");
   const parentSuite = getTapCurrentSuite();
   if (parentSuite !== null) {
-    ArrayPrototypePush(parentSuite.children, entry);
+    entry.childNumber = ArrayPrototypePush(parentSuite.children, entry);
   } else {
-    ArrayPrototypePush(tapTopEntries, entry);
+    entry.childNumber = ArrayPrototypePush(tapTopEntries, entry);
     scheduleTapRun();
   }
   // Evaluate the suite body inside an AsyncLocalStorage scope so any nested

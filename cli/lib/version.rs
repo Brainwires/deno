@@ -20,9 +20,8 @@ pub const DENO_VERSION: &str = env!("DENO_VERSION");
 /// denext: the upstream Deno release this fork is built from
 /// (`cli/lib/upstream_version.txt`; DENEXT.md "Versioning"). The fork's own
 /// version ([`DENO_VERSION`], `3.0.0-denext.N`) names no upstream release, so
-/// everything that means upstream Deno uses this instead: the release channel,
-/// the `denort` / `libdenort` downloads from dl.deno.land and the
-/// `engines.deno` check.
+/// everything that means upstream Deno uses this instead: the release channel
+/// and the `engines.deno` check.
 pub const UPSTREAM_DENO_VERSION: &str = env!("UPSTREAM_DENO_VERSION");
 
 /// The Node.js version that Deno reports through `process.version` /
@@ -164,8 +163,7 @@ impl DenoVersionInfo {
 /// the user agent, so the binary says which build it is; it marks the build
 /// as denext's, so `deno compile` takes the release's own `denort`
 /// (cli/standalone/binary.rs, `denext_denort`) and `deno upgrade` refuses to
-/// replace it with upstream Deno (cli/tools/upgrade.rs). Downloads of
-/// `libdenort` use the upstream version ([`UPSTREAM_DENO_VERSION`]).
+/// replace it with upstream Deno (cli/tools/upgrade.rs).
 fn denext_version(
   denext: Option<&'static str>,
   deno: &str,

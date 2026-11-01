@@ -504,6 +504,26 @@ declare namespace Deno {
     overlay?: boolean;
     /** See {@linkcode BrowserWindow.setSkipTaskbar}. */
     skipTaskbar?: boolean;
+    /** What the page does while the window is not on screen (created with
+     * `show: false`, hidden, minimized or covered), like Electron's
+     * `webPreferences.backgroundThrottling`. `true` (the default): it keeps
+     * running with its timers slowed down (about once a second on macOS),
+     * and its events, messages and sockets are handled. `false`: its timers
+     * keep their rate, for a hidden window that does the app's background
+     * work. Creation time only: the first window takes over the window the
+     * app started with only when this agrees with that window's
+     * (`desktop.initialWindow.backgroundThrottling`, `true` by default), so
+     * an app whose main window must stay unthrottled sets that key to
+     * `false` too.
+     *
+     * macOS (the system WebView, macOS 14+, from runtime 3.0.0-denext.8):
+     * WebKit used to freeze the page of a window created hidden about a
+     * second after it loaded, until the window showed; it is now throttled
+     * instead. Windows (WebView2), Linux (WebKitGTK) and the CEF backend
+     * throttle a hidden page without freezing it and ignore the option.
+     *
+     * @default {true} */
+    backgroundThrottling?: boolean;
     /** Minimum size, applied with {@linkcode BrowserWindow.setMinimumSize}.
      * `0` (the default) is no limit. */
     minWidth?: number;
@@ -862,8 +882,9 @@ declare namespace Deno {
     /** The first `new BrowserWindow()` takes over the window the app started
      * with (the one `desktop.initialWindow` configures and the runtime loads
      * the app into) when the creation-time options it asks for
-     * (`frameless`, `noActivate`, `transparent`, `transparentTitlebar`)
-     * agree with that window's; options left unset keep the
+     * (`frameless`, `noActivate`, `transparent`, `transparentTitlebar`,
+     * `overlay`, `backgroundThrottling`) agree with that window's; options
+     * left unset keep the
      * `initialWindow` values, and only the `width` / `height` given resize
      * it. Any other window, a tray panel created first included, is a new
      * window with the option defaults (800x600, framed). Only in the main
@@ -1525,9 +1546,17 @@ declare namespace Deno {
      * panel.window.bind("doThing", async () => { ... });
      * ```
      *
-     * Pass a string as shorthand for `{ url }`. On Linux the icon position
-     * can't be queried, so the panel shows at its last position rather than
-     * anchored to the icon. */
+     * Pass a string as shorthand for `{ url }`. A click with a modifier
+     * held (Ctrl-click, say) doesn't toggle it: it is the app's own (where
+     * the OS reports the keys, `Tray.capabilities().trayModifiers`: not a
+     * Linux tray host). On
+     * Linux the icon position can't be queried: the panel opens at the
+     * click that opened it where the tray host says where (a
+     * StatusNotifier host), else at its last position. On Wayland the panel
+     * is a layer-shell `overlay` window where the compositor has
+     * layer-shell (`windowCapabilities().layerShell`: KDE Plasma, wlroots),
+     * the only way it stays on top, out of the taskbar and where it is put;
+     * elsewhere (GNOME) the compositor places it. */
     attachPanel(options: TrayPanelOptions | string): TrayPanel;
 
     /** Remove the tray icon from the OS status area. The instance must
@@ -1927,7 +1956,9 @@ declare namespace Deno {
       layerShell: boolean;
       /** {@linkcode Dock.setActivationPolicy} works (macOS). */
       activationPolicy: boolean;
-      /** `noActivate: true` makes a real non-activating panel. */
+      /** `noActivate: true` makes a real non-activating panel. On Linux
+       * Wayland only an `overlay: true` window (a layer surface) is one, so
+       * it is reported only where `layerShell` is. */
       nonActivating: boolean;
       /** {@linkcode Deno.desktop.speech} speaks through the OS engine (the
        * engine may still be missing: Linux without speech-dispatcher). */

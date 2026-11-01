@@ -47,6 +47,75 @@
         }
       ]
     },
+    // The entry point disarms the baked limits for a subcommand
+    // (Deno.disarmResourceLimits(import.meta)) and goes past all three; without the
+    // subcommand the same program is still limited.
+    "disarm": {
+      "steps": [
+        {
+          "args": "compile --max-memory=64m --max-cpu-time=1 --max-time=2 --output out disarm.js",
+          "output": "[WILDCARD]"
+        },
+        {
+          "commandName": "./out",
+          "args": ["job"],
+          "output": "disarm.out"
+        },
+        {
+          "commandName": "./out",
+          "args": [],
+          "output": "disarm_not_called.out",
+          "exitCode": 137
+        }
+      ]
+    },
+    // Anything but the main module's own import.meta (a dependency's, a copy,
+    // nothing), or the main module's once it has finished evaluating, can't
+    // disarm them.
+    "disarm_refused": {
+      "steps": [
+        {
+          "args": "compile --max-time=8 --include disarm_worker.js --output out disarm_refused.js",
+          "output": "[WILDCARD]"
+        },
+        {
+          "commandName": "./out",
+          "args": [],
+          "output": "disarm_refused.out",
+          "exitCode": 124
+        }
+      ]
+    },
+    // A dependency with its own import.meta or with nothing is refused, even
+    // calling the op from the main module's frame; the main module's works.
+    "disarm_handed": {
+      "steps": [
+        {
+          "args": "compile --max-time=1 --output out disarm_handed.js",
+          "output": "[WILDCARD]"
+        },
+        {
+          "commandName": "./out",
+          "args": [],
+          "output": "disarm_handed.out"
+        }
+      ]
+    },
+    // A main module handing out its import.meta has decided (the TS docs and
+    // DENEXT.md item 203 state it).
+    "disarm_given": {
+      "steps": [
+        {
+          "args": "compile --max-time=1 --output out disarm_given.js",
+          "output": "[WILDCARD]"
+        },
+        {
+          "commandName": "./out",
+          "args": [],
+          "output": "disarm_given.out"
+        }
+      ]
+    },
     // Without limits the same program runs to its end.
     "without_limits": {
       "steps": [

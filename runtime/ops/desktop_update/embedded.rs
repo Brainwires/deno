@@ -96,6 +96,8 @@ pub fn runtime_libraries(kind: InstallKind, exe: &Path) -> Vec<PathBuf> {
 pub struct EmbeddedMetadata {
   /// deno.json `version`, when the app was built with one.
   pub app_version: Option<String>,
+  /// `desktop.app.identifier`, when the app was built with one.
+  pub app_identifier: Option<String>,
 }
 
 /// Find the standalone metadata in the file at `path`: the first `MAGIC`
@@ -167,12 +169,22 @@ fn metadata_at(
   if !(map.contains_key("argv") && map.contains_key("entrypoint_key")) {
     return Ok(None);
   }
+  let string =
+    |key: &str| map.get(key).and_then(|v| v.as_str()).map(str::to_string);
   Ok(Some(EmbeddedMetadata {
-    app_version: map
-      .get("app_version")
-      .and_then(|v| v.as_str())
-      .map(str::to_string),
+    app_version: string("app_version"),
+    app_identifier: string("app_identifier"),
   }))
+}
+
+/// The compiled metadata of the installed app (`layout`'s install): the
+/// first of its runtime libraries that carries any. `None` for an AppImage
+/// (its runtime sits inside a compressed squashfs) and when none can be
+/// read.
+pub fn installed_metadata(layout: &InstallLayout) -> Option<EmbeddedMetadata> {
+  runtime_libraries(layout.kind, &layout.exe())
+    .iter()
+    .find_map(|lib| read_metadata(lib).ok().flatten())
 }
 
 /// `read`, repeated until `buf` is full or the file ends; the bytes read.
@@ -332,7 +344,8 @@ pub(crate) mod tests {
         assert_eq!(
           read_metadata_with(&path, chunk).unwrap(),
           Some(EmbeddedMetadata {
-            app_version: Some("2.0.0".into())
+            app_version: Some("2.0.0".into()),
+            app_identifier: None,
           }),
           "noise {noise} chunk {chunk}"
         );
@@ -341,7 +354,10 @@ pub(crate) mod tests {
     std::fs::write(&path, library(&metadata(None), 10)).unwrap();
     assert_eq!(
       read_metadata(&path).unwrap(),
-      Some(EmbeddedMetadata { app_version: None })
+      Some(EmbeddedMetadata {
+        app_version: None,
+        app_identifier: None,
+      })
     );
     // Only the bare magic, or a section whose JSON is not the metadata.
     std::fs::write(&path, b"xx d3n0l4nd yy d3n0l4nd\x05\0\0\0\0\0\0\0{}{}{}")

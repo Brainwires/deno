@@ -41,6 +41,7 @@ pub use local::ci_command;
 pub use local::sync_types_command;
 pub use local::sync_types_extra_specifiers_from_env;
 pub use local::sync_types_root_tsconfig_mode;
+pub use npm_compat::npm_compat_dir;
 
 #[derive(Default)]
 pub struct InstallStats {

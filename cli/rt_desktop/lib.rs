@@ -57,7 +57,7 @@ use denort::run::RunOptions;
 /// makes the failure mode obvious instead of "the desktop app silently won't
 /// launch".
 const _: () = assert!(
-  laufey::LAUFEY_API_VERSION == 50,
+  laufey::LAUFEY_API_VERSION == 51,
   "LAUFEY_API_VERSION mismatch: update this assert and the prebuilt backend release pin in cli/tools/desktop.rs when laufey bumps its API version",
 );
 
@@ -792,7 +792,14 @@ impl WefDesktopApi {
         transparent_titlebar: options.transparent_titlebar,
         hidden: true,
         transparent: options.transparent,
-        overlay: false,
+        overlay: options.overlay,
+        // Throttled while hidden, never frozen (laufey API 51), unless
+        // `initialWindow.backgroundThrottling` is false.
+        background_throttling: if options.background_throttling {
+          laufey::BackgroundThrottling::Throttle
+        } else {
+          laufey::BackgroundThrottling::None
+        },
       },
     );
     let window =
@@ -847,6 +854,7 @@ impl denort::desktop::DesktopApi for WefDesktopApi {
     transparent: bool,
     hidden: bool,
     overlay: bool,
+    background_throttling: bool,
   ) -> u32 {
     let window = laufey::Window::new_with_options(
       width,
@@ -858,6 +866,11 @@ impl denort::desktop::DesktopApi for WefDesktopApi {
         hidden,
         transparent,
         overlay,
+        background_throttling: if background_throttling {
+          laufey::BackgroundThrottling::Throttle
+        } else {
+          laufey::BackgroundThrottling::None
+        },
       },
     );
     let window = self.setup_window_events(window, None);
@@ -2625,12 +2638,21 @@ fn apply_pending_update_on_launch(dylib_path: &Path, is_worker: bool) -> bool {
 /// the app isn't running). Only the host reads it.
 const LAUFEY_DBUS_ACTIVATION_ARG: &str = "--laufey-dbus-activated";
 
-/// This process's arguments without the one only the laufey host reads: on
+/// The argument laufey's Windows CEF host puts right after the program name
+/// when an elevated launch starts itself again (Chromium 156 would otherwise
+/// de-elevate it; laufey `kDoNotDeElevateArgument`). The relaunched process's
+/// command line, which the runtime reads, carries it.
+const LAUFEY_DO_NOT_DE_ELEVATE_ARG: &str = "--do-not-de-elevate";
+
+/// This process's arguments without the ones only the laufey host reads: on
 /// Linux, the first `--laufey-dbus-activated` before any `--` (the host's
-/// rule, `laufey::args_os`). The host never changes the process's argv (the C
-/// runtime passes it to this library's `.init_array` functions as it loads),
-/// so every reader of the app's arguments here uses this, never
-/// `env::args_os` itself: the app's `Deno.args` don't carry the argument.
+/// rule, `laufey::args_os`); on Windows, a `--do-not-de-elevate` right after
+/// the program name (the CEF host's elevated relaunch, which laufey drops from
+/// its own copy of the arguments too). The host never changes the process's
+/// argv (the C runtime passes it to this library's `.init_array` functions as
+/// it loads; Windows keeps the relaunch's command line), so every reader of
+/// the app's arguments here uses this, never `env::args_os` itself: the app's
+/// `Deno.args` don't carry the argument.
 fn process_args_os() -> Vec<std::ffi::OsString> {
   without_host_args(env::args_os())
 }
@@ -2639,6 +2661,13 @@ fn without_host_args(
   args: impl IntoIterator<Item = std::ffi::OsString>,
 ) -> Vec<std::ffi::OsString> {
   let mut args: Vec<_> = args.into_iter().collect();
+  if cfg!(windows)
+    && args
+      .get(1)
+      .is_some_and(|a| a == LAUFEY_DO_NOT_DE_ELEVATE_ARG)
+  {
+    args.remove(1);
+  }
   if cfg!(target_os = "linux") {
     let at = args
       .iter()
@@ -3150,6 +3179,7 @@ laufey::main!(|| {
           identifier: app_config.identifier,
           targets: launch_targets,
           initial_window: app_config.initial_window,
+          display_name: app_config.name,
           app_update,
           allowed_navigation_origins,
         },
@@ -3246,6 +3276,9 @@ struct LaunchConfig {
   targets: deno_lib::standalone::launch_args::LaunchTargets,
   /// `desktop.initialWindow` (metadata, else the embedded app.json).
   initial_window: deno_lib::standalone::binary::InitialWindowConfig,
+  /// `name` from the embedded app.json (`desktop.app.name`): the title of
+  /// an untitled window, before the baked app name.
+  display_name: Option<String>,
   /// Full-app self-update configuration (`Deno.desktop.updater`).
   app_update: deno_runtime::ops::desktop_update::AppUpdateConfig,
   /// `allowedNavigationOrigins` from the embedded app.json (normalized).
@@ -3803,9 +3836,18 @@ async fn run_desktop(
   let auto_update_rolled_back =
     auto_update_state.as_ref().is_some_and(|s| s.rolled_back);
 
-  // App name (deno.json `desktop.app.name`, baked in at compile time) used as
-  // the default window title. Moved into the op_state_init closure below.
+  // The app's identity (deno.json `desktop.app.name`, else the output file's
+  // name, baked in at compile time): scheme registration below.
   let app_name = data.metadata.app_name.clone();
+  // The default window title: app.json's `name` (`desktop.app.name`), else
+  // the baked name. A packager that passes `--output dist/MyApp-arm64` bakes
+  // "MyApp-arm64", which untitled windows (a tray panel) showed. Moved into
+  // the op_state_init closure below.
+  let title_name = launch
+    .display_name
+    .clone()
+    .or_else(|| app_name.clone())
+    .filter(|n| !n.is_empty());
   // `desktop.initialWindow` from the metadata, else the embedded app.json.
   let initial_window = launch.initial_window;
   // Shared by the bootstrap window's first-load reveal and the 10 s
@@ -4007,7 +4049,7 @@ async fn run_desktop(
       // than the backend's internal default (`laufey_webview`). The
       // `BrowserWindow` constructor applies the same default to any further
       // untitled windows via `DesktopAppName` in op state.
-      if let Some(name) = app_name.as_deref().filter(|n| !n.is_empty()) {
+      if let Some(name) = title_name.as_deref() {
         api.set_title(window_id, name);
       }
 
@@ -4029,9 +4071,11 @@ async fn run_desktop(
           no_activate: initial_window.no_activate,
           transparent_titlebar: initial_window.transparent_titlebar,
           transparent: initial_window.transparent,
+          overlay: initial_window.overlay,
+          unthrottled: !initial_window.background_throttling,
         },
       ));
-      if let Some(name) = app_name.filter(|n| !n.is_empty()) {
+      if let Some(name) = title_name {
         state.put(deno_runtime::ops::desktop::DesktopAppName(name));
       }
     })),
@@ -4210,6 +4254,37 @@ mod tests {
       &["--laufey-dbus-activated"],
       &["app", "--laufey-notify", "0123456789abcdef"],
       &[],
+    ] {
+      assert_eq!(without_host_args(os(kept)), os(kept));
+    }
+  }
+
+  #[test]
+  fn the_app_args_leave_out_the_de_elevation_relaunch_argument() {
+    let os =
+      |v: &[&str]| -> Vec<OsString> { v.iter().map(OsString::from).collect() };
+    let windows = cfg!(windows);
+    // An elevated Windows CEF launch starts itself again with the switch
+    // right after the program name; the app sees its own arguments only.
+    let args = os(&["app", "--do-not-de-elevate", "--x", "acme://y"]);
+    let want = if windows {
+      os(&["app", "--x", "acme://y"])
+    } else {
+      args.clone()
+    };
+    assert_eq!(without_host_args(args), want);
+    // Only there: anywhere else (or a second one) it is the app's.
+    let args = os(&["app", "--do-not-de-elevate", "--do-not-de-elevate"]);
+    let want = if windows {
+      os(&["app", "--do-not-de-elevate"])
+    } else {
+      args.clone()
+    };
+    assert_eq!(without_host_args(args), want);
+    for kept in [
+      &["app", "--x", "--do-not-de-elevate"][..],
+      &["app", "--", "--do-not-de-elevate"],
+      &["--do-not-de-elevate"],
     ] {
       assert_eq!(without_host_args(os(kept)), os(kept));
     }

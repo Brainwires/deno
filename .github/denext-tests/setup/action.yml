@@ -80,9 +80,7 @@ runs:
       run: |
         set -euo pipefail
         target=$(rustc -vV | sed -n 's/^host: //p')
-        # --seed-dir: the cache restores the v8 build-script fingerprint but
-        # not target/debug/gn_out, where the script puts the library.
-        python3 -I .github/denext-runtime/fetch_rusty_v8.py --target "$target" --dest "$RUNNER_TEMP/rusty_v8" --seed-dir target/debug --github-env
+        python3 -I .github/denext-runtime/fetch_rusty_v8.py --target "$target" --dest "$RUNNER_TEMP/rusty_v8" --github-env
 
     - uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
       with:
@@ -102,3 +100,15 @@ runs:
         prefix-key: denext-tests-v1
         key: ${{ inputs.cache-key }}
         cache-on-failure: true
+
+    # The cache restores the v8 build-script fingerprint but not
+    # target/debug/gn_out, where the script puts the library, so the verified
+    # library goes there. After the restore: on a partial match the cache action
+    # empties target/ of what it doesn't keep first, which took a library seeded
+    # earlier with it (an unresolved `rusty_v8` link on any run with a cache).
+    - name: Seed the prebuilt V8 for a restored build
+      shell: bash
+      run: |
+        set -euo pipefail
+        target=$(rustc -vV | sed -n 's/^host: //p')
+        python3 -I .github/denext-runtime/fetch_rusty_v8.py --target "$target" --dest "$RUNNER_TEMP/rusty_v8_seed" --seed-dir target/debug

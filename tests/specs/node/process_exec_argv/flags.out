@@ -1,0 +1,2 @@
+["--allow-read","--allow-env","--allow-run","--unstable-kv","--v8-flags=--expose-gc"]
+{"read":"granted","env":"granted","net":"prompt","kv":"function","inherited":true}

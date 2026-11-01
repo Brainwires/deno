@@ -1,0 +1,15 @@
+nothing NotCapable
+undefined NotCapable
+string NotCapable
+dependency, nothing NotCapable
+dependency, its own NotCapable
+look-alike NotCapable
+spread NotCapable
+inheriting NotCapable
+proxy NotCapable
+eval NotCapable
+function NotCapable
+vm NotCapable
+worker NotCapable
+after evaluation NotCapable
+[WILDCARD]error: Time limit exceeded (--max-time)

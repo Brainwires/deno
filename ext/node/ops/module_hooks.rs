@@ -44,6 +44,76 @@ type LoadSender =
 pub type DefaultResolveCb =
   Rc<dyn Fn(&str, &str) -> Result<String, JsErrorBox>>;
 
+/// An error thrown by the resolve hook chain that carries a Node error code
+/// (`ERR_PACKAGE_PATH_NOT_EXPORTED`, `ERR_INVALID_ARG_VALUE`, ...), so the
+/// import's rejection has the same class and `code` as in Node.
+#[derive(Debug)]
+struct HookResolveError {
+  class: &'static str,
+  message: String,
+  code: String,
+}
+
+impl HookResolveError {
+  fn from_result(
+    scope: &mut v8::PinScope,
+    result: v8::Local<v8::Object>,
+  ) -> Option<Self> {
+    let get = |key: &str| -> Option<String> {
+      let key = v8::String::new(scope, key)?;
+      let value = result.get(scope, key.into())?;
+      if !value.is_string() {
+        return None;
+      }
+      Some(value.to_rust_string_lossy(scope))
+    };
+    let code = get("code")?;
+    let message = get("message")?;
+    let class = match get("name").as_deref() {
+      Some("TypeError") => deno_error::builtin_classes::TYPE_ERROR,
+      Some("RangeError") => deno_error::builtin_classes::RANGE_ERROR,
+      Some("SyntaxError") => deno_error::builtin_classes::SYNTAX_ERROR,
+      _ => deno_error::builtin_classes::GENERIC_ERROR,
+    };
+    Some(Self {
+      class,
+      message,
+      code,
+    })
+  }
+}
+
+impl std::fmt::Display for HookResolveError {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    f.write_str(&self.message)
+  }
+}
+
+impl std::error::Error for HookResolveError {}
+
+impl deno_error::JsErrorClass for HookResolveError {
+  fn get_class(&self) -> std::borrow::Cow<'static, str> {
+    std::borrow::Cow::Borrowed(self.class)
+  }
+
+  fn get_message(&self) -> std::borrow::Cow<'static, str> {
+    std::borrow::Cow::Owned(self.message.clone())
+  }
+
+  fn get_additional_properties(&self) -> deno_error::AdditionalProperties {
+    Box::new(std::iter::once((
+      std::borrow::Cow::Borrowed("code"),
+      deno_error::PropertyValue::String(std::borrow::Cow::Owned(
+        self.code.clone(),
+      )),
+    )))
+  }
+
+  fn get_ref(&self) -> &(dyn std::error::Error + Send + Sync + 'static) {
+    self
+  }
+}
+
 /// Shared hook registry between ops and the module loader.
 ///
 /// When load hooks are active, the Rust module loader pushes requests into
@@ -161,6 +231,9 @@ impl LoaderHookRegistry {
       if let Some(error) = result.get(scope, error_key.into())
         && !error.is_null_or_undefined()
       {
+        if let Some(coded) = HookResolveError::from_result(scope, result) {
+          return Err(JsErrorBox::from_err(coded));
+        }
         let error = error
           .to_string(scope)
           .ok_or_else(|| JsErrorBox::generic("module resolve hook failed"))?;

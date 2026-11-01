@@ -8,6 +8,7 @@ const {
   MathMin,
   NumberPOSITIVE_INFINITY,
   ObjectDefineProperty,
+  ObjectPrototypeHasOwnProperty,
   ObjectPrototypeIsPrototypeOf,
   ObjectSetPrototypeOf,
   PromisePrototypeThen,
@@ -18,6 +19,7 @@ const {
 } = primordials;
 const {
   ERR_INVALID_ARG_TYPE,
+  ERR_INVALID_THIS,
   ERR_METHOD_NOT_IMPLEMENTED,
   ERR_OUT_OF_RANGE,
 } = core.loadExtScript("ext:deno_node/internal/errors.ts");
@@ -265,12 +267,25 @@ export function ReadStream(path, options) {
 ObjectSetPrototypeOf(ReadStream.prototype, lazyStream().Readable.prototype);
 ObjectSetPrototypeOf(ReadStream, lazyStream().Readable);
 
+// Node's `validateThisInternalField()`: `autoClose` read off anything but a
+// stream instance (`fs.WriteStream.prototype.autoClose`) is ERR_INVALID_THIS.
+function validateThisInternalField(object, fieldKey, className) {
+  if (
+    typeof object !== "object" || object === null ||
+    !ObjectPrototypeHasOwnProperty(object, fieldKey)
+  ) {
+    throw new ERR_INVALID_THIS(className);
+  }
+}
+
 ObjectDefineProperty(ReadStream.prototype, "autoClose", {
   __proto__: null,
   get() {
+    validateThisInternalField(this, kFs, "ReadStream");
     return this._readableState.autoDestroy;
   },
   set(val) {
+    validateThisInternalField(this, kFs, "ReadStream");
     this._readableState.autoDestroy = val;
   },
 });
@@ -478,9 +493,11 @@ ObjectSetPrototypeOf(WriteStream, lazyStream().Writable);
 ObjectDefineProperty(WriteStream.prototype, "autoClose", {
   __proto__: null,
   get() {
+    validateThisInternalField(this, kFs, "WriteStream");
     return this._writableState.autoDestroy;
   },
   set(val) {
+    validateThisInternalField(this, kFs, "WriteStream");
     this._writableState.autoDestroy = val;
   },
 });

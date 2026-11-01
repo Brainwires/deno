@@ -296,6 +296,9 @@ pub struct LibMainWorkerOptions {
   pub auto_serve: bool,
   pub location: Option<Url>,
   pub argv0: Option<String>,
+  /// denext (DENEXT.md item 189): `process.execArgv` (see
+  /// `BootstrapOptions::exec_argv`); a worker gets its parent's, as in Node.
+  pub exec_argv: Vec<String>,
   pub node_debug: Option<String>,
   pub node_cluster_unique_id: Option<String>,
   pub node_cluster_sched_policy: Option<String>,
@@ -517,6 +520,7 @@ impl<TSys: DenoLibSys> LibWorkerFactorySharedState<TSys> {
           auto_serve: shared.options.auto_serve,
           has_node_modules_dir: shared.options.has_node_modules_dir,
           argv0: shared.options.argv0.clone(),
+          exec_argv: shared.options.exec_argv.clone(),
           node_debug: shared.options.node_debug.clone(),
           node_cluster_unique_id: shared.options.node_cluster_unique_id.clone(),
           node_cluster_sched_policy: shared
@@ -776,6 +780,7 @@ impl<TSys: DenoLibSys> LibMainWorkerFactory<TSys> {
         auto_serve: shared.options.auto_serve,
         has_node_modules_dir: shared.options.has_node_modules_dir,
         argv0: shared.options.argv0.clone(),
+        exec_argv: shared.options.exec_argv.clone(),
         node_debug: shared.options.node_debug.clone(),
         node_cluster_unique_id: shared.options.node_cluster_unique_id.clone(),
         node_cluster_sched_policy: shared
@@ -835,9 +840,25 @@ impl<TSys: DenoLibSys> LibMainWorkerFactory<TSys> {
     }
     // `--max-memory` / `--max-cpu-time` / `--max-time`: the CPU budget and
     // the deadline count from here.
+    let resource_limits = shared.options.resource_limits;
     crate::resource_limits::arm(
-      shared.options.resource_limits,
+      resource_limits,
       &mut worker.js_runtime,
+      resource_limits
+        .max_memory_bytes
+        .and_then(|_| create_isolate_create_params(&shared.sys))
+        .map(|params| params.max_old_generation_size_in_bytes()),
+    );
+    // `Deno.disarmResourceLimits()`: only this (the main) worker has it, and
+    // only a compiled program's limits can be disarmed, while the main module
+    // evaluates (`execute_main_module`).
+    worker.js_runtime.op_state().borrow_mut().put(
+      deno_runtime::ops::runtime::ResourceLimitsDisarm {
+        armed: resource_limits.any(),
+        baked: shared.options.is_standalone,
+        main_module_evaluating: false,
+        disarm: crate::resource_limits::disarm,
+      },
     );
 
     // Wire module hook registry into OpState so JS ops share it with the loader
@@ -1006,7 +1027,12 @@ impl LibMainWorker {
 
   pub async fn execute_main_module(&mut self) -> Result<(), CoreError> {
     let id = self.worker.preload_main_module(&self.main_module).await?;
-    self.worker.evaluate_module(id).await?;
+    // While the main module evaluates, and only then, its `import.meta` can
+    // call `Deno.disarmResourceLimits()`.
+    self.set_main_module_evaluating(true);
+    let result = self.worker.evaluate_module(id).await;
+    self.set_main_module_evaluating(false);
+    result?;
 
     // After loading and evaluating all modules, trim the glibc malloc arena.
     // Module loading/TypeScript compilation creates heavy allocation churn
@@ -1021,6 +1047,19 @@ impl LibMainWorker {
     }
 
     Ok(())
+  }
+
+  /// Whether `Deno.disarmResourceLimits()` can currently be called.
+  fn set_main_module_evaluating(&mut self, evaluating: bool) {
+    if let Some(disarm) = self
+      .worker
+      .js_runtime
+      .op_state()
+      .borrow_mut()
+      .try_borrow_mut::<deno_runtime::ops::runtime::ResourceLimitsDisarm>(
+    ) {
+      disarm.main_module_evaluating = evaluating;
+    }
   }
 
   pub async fn execute_side_module(&mut self) -> Result<(), CoreError> {

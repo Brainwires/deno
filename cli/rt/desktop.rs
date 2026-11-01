@@ -2248,6 +2248,31 @@ pub const DESKTOP_JS: &str = r#"
     configurable: true,
   });
 
+  // Whether a tray "click" toggles an attached panel: a plain left click.
+  // A right click is the menu's, a double click's second half is not another
+  // toggle, and a click with a modifier held is the app's own (Ctrl-click for
+  // the menu through `popUpMenu()`, say).
+  function panelClickToggles(e) {
+    if (e?.button && e.button !== "left") return false;
+    if (e?.double) return false;
+    const m = e?.modifiers;
+    if (m && (m.ctrl || m.alt || m.shift || m.meta)) return false;
+    return true;
+  }
+
+  // The rectangle a tray panel opens at: the icon's bounds, else (Linux,
+  // where the tray protocol has no geometry) the point of the click that
+  // opened it, else none.
+  function panelAnchor(bounds, click) {
+    if (bounds) return bounds;
+    if (
+      click && Number.isFinite(click.x) && Number.isFinite(click.y)
+    ) {
+      return { x: click.x, y: click.y, width: 1, height: 1 };
+    }
+    return null;
+  }
+
   // Where a tray panel opens: centred on the icon, below it when the icon
   // is in the upper half of its screen (a menu bar, a top panel), above it
   // when in the lower half (a bottom taskbar), and beside it for a side
@@ -2300,17 +2325,26 @@ pub const DESKTOP_JS: &str = r#"
     const hideOnBlur = options.hideOnBlur ?? true;
     const positionFn = options.position;
     const tray = this;
+    // On Wayland only a layer-shell surface stays on top, out of the
+    // taskbar and where it is put (an ordinary window can't be placed and
+    // takes focus as it maps): a panel is one wherever the compositor has
+    // layer-shell (KDE Plasma, wlroots). It takes the keyboard on demand
+    // (a click in it), not never, so its fields work and a click elsewhere
+    // blurs it.
+    const layerShell =
+      Deno.desktop.windowCapabilities?.()?.layerShell === true;
 
     const window = new Deno.BrowserWindow({
       width,
       height,
       frameless: true,
-      noActivate: true,
+      noActivate: !layerShell,
       resizable: false,
       // Created hidden (laufey API 50): no frame on screen before the
       // first toggle.
       show: false,
       skipTaskbar: true,
+      overlay: layerShell,
     });
     if (options.url != null) window.navigate(options.url);
 
@@ -2319,11 +2353,13 @@ pub const DESKTOP_JS: &str = r#"
     // focused panel blurs it (hiding via the blur handler) *before* the
     // tray "click" fires, which would otherwise immediately re-show it.
     let suppressNextShow = false;
+    // Where the click that opens the panel was (screen coordinates).
+    let lastClick = null;
 
     const place = () => {
-      const bounds = tray.getBounds();
-      // No bounds (e.g. Linux, where the tray protocol has no geometry):
-      // leave the window at its current position.
+      const bounds = panelAnchor(tray.getBounds(), lastClick);
+      // No bounds and no click position: leave the window at its current
+      // position.
       if (!bounds) return;
       const pos = positionFn
         ? positionFn(bounds, { width, height })
@@ -2349,10 +2385,9 @@ pub const DESKTOP_JS: &str = r#"
     };
 
     const onTrayClick = (e) => {
-      // A plain left click toggles; a right click is the menu's, a double
-      // click's second half is not another toggle.
-      if (e?.button && e.button !== "left") return;
-      if (e?.double) return;
+      if (!panelClickToggles(e)) return;
+      // `x` / `y` are null where the OS doesn't say (screenX is 0 then).
+      lastClick = e && e.x != null && e.y != null ? { x: e.x, y: e.y } : null;
       if (suppressNextShow) {
         suppressNextShow = false;
         return;
@@ -3724,6 +3759,88 @@ mod tests {
     ] {
       assert!(DESKTOP_JS.contains(api), "{api}");
     }
+  }
+
+  /// The source of the top-level `function <name>(` in DESKTOP_JS (up to
+  /// its closing brace at two spaces of indentation).
+  fn js_function(name: &str) -> &'static str {
+    let start = DESKTOP_JS
+      .find(&format!("  function {name}("))
+      .unwrap_or_else(|| panic!("no function {name}"));
+    let end = start
+      + DESKTOP_JS[start..]
+        .find("\n  }\n")
+        .unwrap_or_else(|| panic!("no end of {name}"))
+      + "\n  }".len();
+    &DESKTOP_JS[start..end]
+  }
+
+  /// Runs `checks` (statements that throw on a failure) after the named
+  /// DESKTOP_JS functions, in a bare V8.
+  fn run_js_checks(functions: &[&str], checks: &str) {
+    let tokio = tokio::runtime::Builder::new_current_thread()
+      .enable_all()
+      .build()
+      .unwrap();
+    let _guard = tokio.enter();
+    let mut runtime = deno_core::JsRuntime::new(Default::default());
+    let mut source = String::from("(() => {\n");
+    for name in functions {
+      source.push_str(js_function(name));
+      source.push('\n');
+    }
+    source.push_str(
+      "const eq = (a, b, what) => { const x = JSON.stringify(a), y = \
+       JSON.stringify(b); if (x !== y) throw new Error(`${what}: ${x} !== \
+       ${y}`); };\n",
+    );
+    source.push_str(checks);
+    source.push_str("\n})();");
+    runtime
+      .execute_script("desktop_js_checks", source)
+      .unwrap_or_else(|e| panic!("{e}"));
+  }
+
+  #[test]
+  fn tray_panel_toggles_on_a_plain_left_click_only() {
+    run_js_checks(
+      &["panelClickToggles"],
+      r#"
+      const mods = (m) => ({ shift: false, ctrl: false, alt: false, meta: false, ...m });
+      eq(panelClickToggles({ button: "left", modifiers: mods({}) }), true, "plain left");
+      eq(panelClickToggles(undefined), true, "no detail (an older backend)");
+      eq(panelClickToggles({ button: "right", modifiers: mods({}) }), false, "right");
+      eq(panelClickToggles({ button: "left", double: true, modifiers: mods({}) }), false, "double");
+      for (const key of ["ctrl", "alt", "shift", "meta"]) {
+        eq(panelClickToggles({ button: "left", modifiers: mods({ [key]: true }) }), false, key);
+      }
+      "#,
+    );
+  }
+
+  #[test]
+  fn tray_panel_anchors_at_the_icon_else_the_click() {
+    run_js_checks(
+      &["panelAnchor"],
+      r#"
+      const icon = { x: 10, y: 20, width: 22, height: 22 };
+      eq(panelAnchor(icon, { x: 500, y: 700 }), icon, "the icon wins");
+      eq(panelAnchor(null, { x: 500, y: 700 }), { x: 500, y: 700, width: 1, height: 1 }, "the click");
+      eq(panelAnchor(null, null), null, "neither");
+      eq(panelAnchor(null, { x: null, y: 700 }), null, "no click position");
+      "#,
+    );
+  }
+
+  #[test]
+  fn tray_panel_is_a_layer_surface_where_there_is_layer_shell() {
+    assert!(
+      DESKTOP_JS
+        .contains("Deno.desktop.windowCapabilities?.()?.layerShell === true")
+    );
+    assert!(DESKTOP_JS.contains("      noActivate: !layerShell,\n"));
+    assert!(DESKTOP_JS.contains("      overlay: layerShell,\n"));
+    assert!(DESKTOP_JS.contains("if (!panelClickToggles(e)) return;"));
   }
 
   #[test]
