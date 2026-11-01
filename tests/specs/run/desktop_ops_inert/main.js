@@ -206,6 +206,7 @@ const cases = {
   op_desktop_quit: () => ops.op_desktop_quit(),
   op_desktop_answer_quit_request: () =>
     ops.op_desktop_answer_quit_request(false),
+  op_desktop_quit_request_pending: () => ops.op_desktop_quit_request_pending(),
   op_desktop_set_quit_on_last_window_closed: () =>
     ops.op_desktop_set_quit_on_last_window_closed(false),
   op_desktop_close_reply: () => ops.op_desktop_close_reply(1, true),

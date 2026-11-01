@@ -67,6 +67,7 @@ op_desktop_stop_speaking -> null
 op_desktop_speech_voices -> "[]"
 op_desktop_quit -> null
 op_desktop_answer_quit_request -> null
+op_desktop_quit_request_pending -> false
 op_desktop_set_quit_on_last_window_closed -> null
 op_desktop_close_reply -> null
 op_desktop_app_update_info -> false
@@ -82,4 +83,4 @@ BrowserWindow throws NotSupported: BrowserWindow is only available in the main s
 Dock throws NotSupported: Dock is only available in the main scope of a desktop app
 Tray throws NotSupported: Tray is only available in the main scope of a desktop app
 Notification throws NotSupported: Notification is only available in the main scope of a desktop app
-83 exposed, 0 uncovered
+84 exposed, 0 uncovered

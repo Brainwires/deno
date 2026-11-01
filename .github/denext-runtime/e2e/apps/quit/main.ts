@@ -17,6 +17,10 @@ desktop.addEventListener("beforequit", (ev) => {
     // Held, as a page across the bridge would hold it, then refused.
     ev.preventDefault();
     setTimeout(() => r.set("cancelQuit", desktop.cancelQuit()), 200);
+  } else if (seen.length === 3) {
+    // Held and never answered: laufey's deadline lets the logout go, and a
+    // page trying to refuse it just before can't stop that or come later.
+    ev.preventDefault();
   }
 });
 r.set("ready", true);

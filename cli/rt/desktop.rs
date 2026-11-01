@@ -87,6 +87,7 @@ pub const DESKTOP_JS: &str = r#"
     op_desktop_speech_voices,
     op_desktop_quit,
     op_desktop_answer_quit_request,
+    op_desktop_quit_request_pending,
     op_desktop_set_quit_on_last_window_closed,
     op_desktop_close_reply,
   } = internals.core.ops;
@@ -2084,6 +2085,14 @@ pub const DESKTOP_JS: &str = r#"
   // The OS is waiting on a session end that a listener held: its quit() can
   // come later (a page asked across the bridge), until laufey's deadline.
   let sessionEndHeld = false;
+  // Past laufey's deadline the OS is no longer waiting: an answer would do
+  // nothing, and the session end is no reason to report any more.
+  function isSessionEndHeld() {
+    if (sessionEndHeld && !op_desktop_quit_request_pending()) {
+      sessionEndHeld = false;
+    }
+    return sessionEndHeld;
+  }
   function setQuitOnLastWindowClosed(value) {
     quitOnLastWindowClosed = !!value;
     op_desktop_set_quit_on_last_window_closed(quitOnLastWindowClosed);
@@ -2185,7 +2194,7 @@ pub const DESKTOP_JS: &str = r#"
     // when none is.
     cancelQuit: {
       value: function cancelQuit() {
-        if (!sessionEndHeld) return false;
+        if (!isSessionEndHeld()) return false;
         sessionEndHeld = false;
         op_desktop_answer_quit_request(false);
         return true;
@@ -2201,7 +2210,7 @@ pub const DESKTOP_JS: &str = r#"
     quit: {
       value: function quit() {
         const beforeQuit = new Event("beforequit", { cancelable: true });
-        beforeQuit.reason = sessionEndHeld ? "session-end" : "quit";
+        beforeQuit.reason = isSessionEndHeld() ? "session-end" : "quit";
         desktop.dispatchEvent(beforeQuit);
         if (beforeQuit.defaultPrevented) return false;
         for (const win of windows.values()) {
@@ -3764,8 +3773,14 @@ mod tests {
       "if (!desktop.quit() && !ev.sessionEnd) {\n              op_desktop_answer_quit_request(false);"
     ));
     assert!(DESKTOP_JS.contains(
-      "beforeQuit.reason = sessionEndHeld ? \"session-end\" : \"quit\";"
+      "beforeQuit.reason = isSessionEndHeld() ? \"session-end\" : \"quit\";"
     ));
+    // A held session end ends with laufey's deadline: cancelQuit() can't reach
+    // past it.
+    assert!(DESKTOP_JS.contains(
+      "if (sessionEndHeld && !op_desktop_quit_request_pending()) {"
+    ));
+    assert!(DESKTOP_JS.contains("if (!isSessionEndHeld()) return false;"));
     // The tray-only rule: a Tray keeps the app alive unless the app chose.
     assert!(
       DESKTOP_JS.contains(

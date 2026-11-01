@@ -2507,6 +2507,11 @@ pub trait DesktopApi: Send + Sync + 'static {
   /// Answer the OS's quit request in progress (laufey API 52); `false` keeps
   /// the app running and stops a session end.
   fn answer_quit_request(&self, _allow: bool) {}
+  /// Whether the OS is still waiting on that answer: false once it was given
+  /// or laufey's deadline passed.
+  fn quit_request_pending(&self) -> bool {
+    false
+  }
 
   // --- Window state, constraints, screens and chrome (laufey API 38). The
   // defaults are a backend that can do none of it.
@@ -4593,6 +4598,15 @@ fn op_desktop_answer_quit_request(state: &mut OpState, allow: bool) {
   }
 }
 
+/// Whether the OS's quit request is still waiting: false once it was answered
+/// or its deadline passed.
+#[op2(fast)]
+fn op_desktop_quit_request_pending(state: &mut OpState) -> bool {
+  state
+    .try_borrow::<Arc<dyn DesktopApi>>()
+    .is_some_and(|api| api.quit_request_pending())
+}
+
 /// `Deno.desktop.quitOnLastWindowClosed = …`.
 #[op2(fast)]
 fn op_desktop_set_quit_on_last_window_closed(state: &mut OpState, quit: bool) {
@@ -6500,6 +6514,7 @@ deno_core::extension!(
     op_desktop_speech_voices,
     op_desktop_quit,
     op_desktop_answer_quit_request,
+    op_desktop_quit_request_pending,
     op_desktop_set_quit_on_last_window_closed,
     op_desktop_close_reply,
   ],

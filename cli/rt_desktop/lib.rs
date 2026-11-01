@@ -1167,6 +1167,10 @@ impl denort::desktop::DesktopApi for WefDesktopApi {
     laufey::answer_quit_request(allow);
   }
 
+  fn quit_request_pending(&self) -> bool {
+    laufey::quit_request_pending()
+  }
+
   fn window_capabilities(
     &self,
   ) -> deno_runtime::ops::desktop::WindowCapabilitiesInfo {

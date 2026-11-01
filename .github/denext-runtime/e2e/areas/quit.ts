@@ -27,14 +27,19 @@ async function quitEvent(pid: number, logout: boolean) {
     ? `ev.setAttributeDescriptorForKeyword(
          $.NSAppleEventDescriptor.descriptorWithEnumCode(0x6c6f676f), 0x7768793f);`
     : "";
-  await sh("osascript", ["-l", "JavaScript", "-e", `
+  await sh("osascript", [
+    "-l",
+    "JavaScript",
+    "-e",
+    `
     ObjC.import('Foundation');
     const target = $.NSAppleEventDescriptor.descriptorWithProcessIdentifier(${pid});
     const ev = $.NSAppleEventDescriptor
       .appleEventWithEventClassEventIDTargetDescriptorReturnIDTransactionID(
         0x61657674, 0x71756974, target, -1, 0);
     ${reason}
-    ev.sendEventWithOptionsTimeoutError(0x1, 5, null);`]);
+    ev.sendEventWithOptionsTimeoutError(0x1, 5, null);`,
+  ]);
 }
 
 export async function run(env: Env, rep: AreaReport) {
@@ -81,7 +86,10 @@ export async function run(env: Env, rep: AreaReport) {
     await data(),
   );
   await sleep(500);
-  rep.check("a refusal keeps the app running", (await waitExit(l, 500)) === null);
+  rep.check(
+    "a refusal keeps the app running",
+    (await waitExit(l, 500)) === null,
+  );
 
   await quitEvent(first.pid, true);
   rep.check(
@@ -96,9 +104,21 @@ export async function run(env: Env, rep: AreaReport) {
   );
   rep.check("the app is still running", (await waitExit(l, 500)) === null);
 
-  await quitEvent(first.pid, false);
-  const st = await waitExit(l, 30_000);
-  rep.check("a quit nobody refuses ends the app", st !== null, await data());
+  // Held and never answered: laufey's 10 s deadline ends it, whatever the app
+  // does. (5 s of grace for the runner.)
+  const held = Date.now();
+  await quitEvent(first.pid, true);
+  rep.check(
+    "a third session end reaches beforequit",
+    await until((d) => d.reasons?.[2] === "session-end"),
+    await data(),
+  );
+  const st = await waitExit(l, 15_000);
+  rep.check(
+    "a held session end ends the app at the deadline",
+    st !== null && Date.now() - held >= 9_000,
+    { ms: Date.now() - held, st },
+  );
   if (st === null) await kill(l, app.artifact);
   else rep.check("with exit code 0", st.code === 0, st);
 }

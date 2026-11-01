@@ -3257,7 +3257,9 @@ declare namespace Deno {
 
     /** Refuse the session end the OS is waiting on, held by a `"beforequit"`
      * or `close` listener: macOS cancels the logout, and Windows stops it (the
-     * user can still force it). `false` when no session end is held. */
+     * user can still force it). `false` when no session end is held, which
+     * includes one past its deadline: this can only refuse in time, never hold
+     * the OS longer. */
     export function cancelQuit(): boolean;
 
     /** Whether the app quits when its last window closes (default `true`).
