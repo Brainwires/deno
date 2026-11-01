@@ -7888,8 +7888,8 @@ where the changes are discussed.
 
 198. **`feat(desktop)`: `backgroundThrottling`, and hidden pages no longer
      frozen on macOS** (laufey API 51, from
-     `fix/macos-hidden-page-and-hit-region` of Brainwires/laufey at e7b06a3,
-     until it lands; `runtime/ops/desktop.rs`, `cli/rt_desktop/lib.rs`,
+     `fix/macos-hidden-page-and-hit-region` of Brainwires/laufey, landed on
+     `development-denext` at 359bde6; `runtime/ops/desktop.rs`, `cli/rt_desktop/lib.rs`,
      `lib.deno.desktop.d.ts`; for runtime 3.0.0-denext.8). Two macOS findings
      from a live run of a desktop companion and a tray app:
      - laufey's WebView backend never set
@@ -8193,9 +8193,10 @@ where the changes are discussed.
        app.json, and the deno.json config and schema tests.
 
 207. **`fix(desktop)`: Windows focus and blur, tray menu roles, the window
-     icon** (the laufey pin: Brainwires/laufey `fix/windows-focus-tray-roles`
-     e8814f2, from `fix/macos-hidden-page-and-hit-region`; no API change; for
-     runtime 3.0.0-denext.8).
+     icon** (the laufey pin: Brainwires/laufey `development-denext` 359bde6,
+     merging `fix/windows-focus-tray-roles`, which sits on
+     `fix/macos-hidden-page-and-hit-region`; no API change; for runtime
+     3.0.0-denext.8).
      - WebView2's focus and blur come from the window's activation
        (`WM_ACTIVATE`), not the top-level's keyboard focus. A click in the page
        gave the focus to WebView2's child window, which fired `blur` on a window
