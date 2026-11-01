@@ -5297,7 +5297,7 @@ where the changes are discussed.
      checked against `SHA256SUMS` again, and downloaded again when it doesn't
      match. Upstream's runtimes (a build that is not denext's,
      `--engine quickjs`, `deno desktop`'s `libdenort`) were outside this item;
-     item 215 stops downloading them. Release assets are immutable since
+     item 216 stops downloading them. Release assets are immutable since
      2026-10-27 (GitHub immutable releases), so a published `SHA256SUMS` can't
      be replaced afterwards either.
 
@@ -8405,70 +8405,7 @@ where the changes are discussed.
        containment (item 190); denext warns at packaging. Hashing the extracted
        program at packaging and verifying it at spawn is the fix, for denext.9.
 
-215. **`fix(desktop)`: a case-only rename of the executable is refused on every
-     platform** (`runtime/ops/desktop_update/treecheck.rs`, `mod.rs`,
-     `swap.rs`). Only Windows named it (item 202's follow-up): on macOS's
-     default case-insensitive APFS, `stage()` found `Contents/MacOS/App` under
-     the new name `app` and took it, and the helper swapped it in, leaving an
-     install that a case-sensitive volume could not start by the name it was
-     installed under; on a case-sensitive file system it read "the archive does
-     not hold this app". `stage()` and the apply now compare the installed and
-     staged names as the two directories spell them (a launch may spell the path
-     differently from the file) and refuse the rename as `bundle_mismatch`,
-     recorded in `last_error` at apply time. Tests:
-     `a_case_only_rename_is_refused_as_the_directories_spell_it`,
-     `stage_refuses_a_case_only_rename_of_the_executable`,
-     `apply_refuses_a_case_only_rename_of_the_executable` (each failed before).
-
-The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
-64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
-118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
-169-174, 176, 178, 180, 182-184, 186, 187, 189-191, 193-196, 198-203, 206, 207,
-209-215) are what the prebuilt `libdenort` carries. The CLI-side parts (for
-example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's
-launchers) are in the branch too, but a stock CLI does not run them; denext's
-own launcher provides that environment.
-
-The laufey backend hosts are built from
-[Brainwires/laufey](https://github.com/Brainwires/laufey) branch
-`development-denext` (formerly `denext/integration`; registered schemes, app
-data dir, WebKitGTK scheme request bodies, launch config, open-url / single
-instance, passkeys, the window API with littledivy/laufey#80 and #81, drag and
-drop / file dialogs / rich clipboard, global shortcuts / launch at login /
-DevTools control, menu accelerators / notifications, UI-thread tasks / auth
-sessions / non-blocking WebKitGTK scheme bodies, Windows bindgen fix, and API
-43: auth session cancel, Local Network Access for the registered custom-scheme
-origins on CEF, Windows menu and file-dialog fixes, CEF file drops; then the
-3.1.0 audits: scheme request cancellation (`on_cancel` on every backend), no
-aborts on a NUL in a string, the Linux window-destroy use-after-free, sync UI
-hops that can't hang exit; and API 44, the 3.1.1 audit: each JS call's document
-origin, the launch file's `bridgeOrigins`, scheme response write backpressure, a
-packaged app loading only its own runtime and pinned launch keys, WebKitGTK
-sub-frames kept off the bridge, a strict bridge JSON parser; and every host runs
-the runtime's own helper and worker launches (`run …`, `NODE_CHANNEL_FD`,
-`NEXT_PRIVATE_WORKER`) headless before its single-instance check; and API 48,
-the navigation guard; then, for runtime 3.0.0-rc.1, the CEF custom-scheme
-localStorage commit gate, KWin's blur, the XCB clipboard and Linux passkeys
-through libwebauthn (item 88); and, for runtime 3.0.0-denext.2, legacy Linux
-secure-store items read over an encrypted Secret Service session (laufey
-879ee0e) and tokio 1.53.3 with laufey's own `.cargo/audit.toml`; and, for
-runtime 3.0.0-denext.6, API 50: overlay windows, tray events, the launch
-activation policy and speech, item 183; and, for runtime 3.0.0-denext.7, CEF
-156, item 184, and the Linux Wayland overlay fixes, item 186; and, for runtime
-3.0.0-denext.8, API 51, hidden pages throttled instead of frozen on macOS and
-`backgroundThrottling`, item 198; and the Windows focus, tray role and window
-icon fixes, item 207), at the commit pinned by `LAUFEY_SHA` in the workflow (or
-the `laufey_ref` input). The same commit is the `laufey` git dependency of
-`cli/rt_desktop/Cargo.toml` (crate 0.8.0, API 51, CEF 156.0.14).
-
-laufey's `init_api` rejects any C ABI version mismatch between the runtime and
-the host, so the `laufey` crate libdenort links and the hosts are built from the
-**same** laufey revision: the workflow patches whatever source `Cargo.lock`
-names for `laufey` (crates.io, or a git rev of Brainwires/laufey) with a path to
-that revision's `capi/`, records the `LAUFEY_API_VERSION` it compiled, and the
-package job fails if it differs from the hosts' `capi/include/laufey.h`.
-
-215. **`fix(compile)`: no upstream runtime is downloaded**
+216. **`fix(compile)`: no upstream runtime is downloaded**
      (`fix/runtime-pin-coverage`; `cli/standalone/binary.rs`,
      `denext_runtime.yml`, `.github/denext-runtime/`; CLI and CI only). Items
      130 and 188 cover the release's own `denort` only. `deno desktop`'s
@@ -8526,6 +8463,69 @@ package job fails if it differs from the hosts' `capi/include/laufey.h`.
      `compile_takes_only_the_release_denort`,
      `desktop_runtime_refusal_names_the_fixes`; `denort_pins_test.py`;
      `runtime_refusal_smoke.sh`.
+
+217. **`fix(desktop)`: a case-only rename of the executable is refused on every
+     platform** (`runtime/ops/desktop_update/treecheck.rs`, `mod.rs`,
+     `swap.rs`). Only Windows named it (item 202's follow-up): on macOS's
+     default case-insensitive APFS, `stage()` found `Contents/MacOS/App` under
+     the new name `app` and took it, and the helper swapped it in, leaving an
+     install that a case-sensitive volume could not start by the name it was
+     installed under; on a case-sensitive file system it read "the archive does
+     not hold this app". `stage()` and the apply now compare the installed and
+     staged names as the two directories spell them (a launch may spell the path
+     differently from the file) and refuse the rename as `bundle_mismatch`,
+     recorded in `last_error` at apply time. Tests:
+     `a_case_only_rename_is_refused_as_the_directories_spell_it`,
+     `stage_refuses_a_case_only_rename_of_the_executable`,
+     `apply_refuses_a_case_only_rename_of_the_executable` (each failed before).
+
+The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
+64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
+118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
+169-174, 176, 178, 180, 182-184, 186, 187, 189-191, 193-196, 198-203, 206, 207,
+209-215, 217) are what the prebuilt `libdenort` carries. The CLI-side parts (for
+example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's
+launchers) are in the branch too, but a stock CLI does not run them; denext's
+own launcher provides that environment.
+
+The laufey backend hosts are built from
+[Brainwires/laufey](https://github.com/Brainwires/laufey) branch
+`development-denext` (formerly `denext/integration`; registered schemes, app
+data dir, WebKitGTK scheme request bodies, launch config, open-url / single
+instance, passkeys, the window API with littledivy/laufey#80 and #81, drag and
+drop / file dialogs / rich clipboard, global shortcuts / launch at login /
+DevTools control, menu accelerators / notifications, UI-thread tasks / auth
+sessions / non-blocking WebKitGTK scheme bodies, Windows bindgen fix, and API
+43: auth session cancel, Local Network Access for the registered custom-scheme
+origins on CEF, Windows menu and file-dialog fixes, CEF file drops; then the
+3.1.0 audits: scheme request cancellation (`on_cancel` on every backend), no
+aborts on a NUL in a string, the Linux window-destroy use-after-free, sync UI
+hops that can't hang exit; and API 44, the 3.1.1 audit: each JS call's document
+origin, the launch file's `bridgeOrigins`, scheme response write backpressure, a
+packaged app loading only its own runtime and pinned launch keys, WebKitGTK
+sub-frames kept off the bridge, a strict bridge JSON parser; and every host runs
+the runtime's own helper and worker launches (`run …`, `NODE_CHANNEL_FD`,
+`NEXT_PRIVATE_WORKER`) headless before its single-instance check; and API 48,
+the navigation guard; then, for runtime 3.0.0-rc.1, the CEF custom-scheme
+localStorage commit gate, KWin's blur, the XCB clipboard and Linux passkeys
+through libwebauthn (item 88); and, for runtime 3.0.0-denext.2, legacy Linux
+secure-store items read over an encrypted Secret Service session (laufey
+879ee0e) and tokio 1.53.3 with laufey's own `.cargo/audit.toml`; and, for
+runtime 3.0.0-denext.6, API 50: overlay windows, tray events, the launch
+activation policy and speech, item 183; and, for runtime 3.0.0-denext.7, CEF
+156, item 184, and the Linux Wayland overlay fixes, item 186; and, for runtime
+3.0.0-denext.8, API 51, hidden pages throttled instead of frozen on macOS and
+`backgroundThrottling`, item 198; and the Windows focus, tray role and window
+icon fixes, item 207), at the commit pinned by `LAUFEY_SHA` in the workflow (or
+the `laufey_ref` input). The same commit is the `laufey` git dependency of
+`cli/rt_desktop/Cargo.toml` (crate 0.8.0, API 51, CEF 156.0.14).
+
+laufey's `init_api` rejects any C ABI version mismatch between the runtime and
+the host, so the `laufey` crate libdenort links and the hosts are built from the
+**same** laufey revision: the workflow patches whatever source `Cargo.lock`
+names for `laufey` (crates.io, or a git rev of Brainwires/laufey) with a path to
+that revision's `capi/`, records the `LAUFEY_API_VERSION` it compiled, and the
+package job fails if it differs from the hosts' `capi/include/laufey.h`.
 
 ## npm supply-chain settings
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Copyright 2018-2026 the Deno authors. MIT license.
 # A denext CLI builds no app on an upstream runtime it cannot run (DENEXT.md
-# item 215): `deno compile --engine quickjs` and `deno desktop` (with and
+# item 216): `deno compile --engine quickjs` and `deno desktop` (with and
 # without it), given no DENORT_BIN / DENORT_DESKTOP_BIN, each exit non-zero
 # naming the archive and the fix, write no app, cache nothing and open no
 # connection (a loopback proxy records any).

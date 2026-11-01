@@ -12,7 +12,7 @@
 # that has no SHA256SUMS (only the hash it was built with can verify it), and
 # refuses the same archive with one byte appended.
 #
-# Always, last: the refusals of runtime_refusal_smoke.sh (DENEXT.md item 215).
+# Always, last: the refusals of runtime_refusal_smoke.sh (DENEXT.md item 216).
 #
 # Env: TARGET VERSION ARCHIVE DENORT_ARCHIVE WORK_DIR (a directory that does
 # not exist yet) [DENORT_PINNED]
@@ -125,5 +125,5 @@ PY
   echo "::endgroup::"
 fi
 
-# DENEXT.md item 215: no upstream runtime is downloaded.
+# DENEXT.md item 216: no upstream runtime is downloaded.
 bash "$here/runtime_refusal_smoke.sh" "$deno" "$work/refusal"

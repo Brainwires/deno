@@ -1717,7 +1717,7 @@ jobs:
           python3 -I .github/denext-runtime/denort_pins.py check-manifest dist/manifest.json
 
       # Every CLI binary about to ship carries the SHA-256 of every denort
-      # archive beside it (DENEXT.md items 188 and 215). A dispatch checks the
+      # archive beside it (DENEXT.md items 188 and 216). A dispatch checks the
       # targets it built, so the run a tag's gate accepts proved this too.
       - name: Check the CLIs carry the denort SHA-256s
         env:

@@ -1938,7 +1938,7 @@ fn get_desktop_base_binary(
   Err(desktop_runtime_refusal(&binary_name))
 }
 
-/// denext (DENEXT.md item 215): why upstream's runtime archives are not
+/// denext (DENEXT.md item 216): why upstream's runtime archives are not
 /// downloaded. This CLI's metadata has no `tsgo` field, which upstream's
 /// runtime requires, so an app built on one exits at startup.
 const UPSTREAM_RUNTIME_UNUSABLE: &str = "upstream Deno's runtime, which cannot \
@@ -2575,7 +2575,7 @@ mod tests {
     }
   }
 
-  /// DENEXT.md item 215: the release's denort is the only runtime a compile
+  /// DENEXT.md item 216: the release's denort is the only runtime a compile
   /// resolves to; each upstream archive is refused, naming the fix.
   #[test]
   fn compile_takes_only_the_release_denort() {
