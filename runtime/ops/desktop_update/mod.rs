@@ -675,6 +675,15 @@ fn stage_blocking(
   }
   let staged = extract.join(&x.top);
   let exe = layout.exe_in(&staged);
+  // Before the shape check: a case-insensitive file system would find the
+  // executable under its new name, a case-sensitive one would call it missing.
+  if x.top_is_dir {
+    treecheck::refuse_case_only_exe_rename(
+      &layout.install,
+      &staged,
+      &layout.exe_rel,
+    )?;
+  }
   let shape_ok = match layout.kind {
     InstallKind::MacBundle => {
       x.top_is_dir
@@ -1302,6 +1311,39 @@ mod tests {
       stage_blocking(&stage_request(&layout, &archive, size, &sha))
     {
       assert!(!e.message.contains("not executable"), "{}", e.message);
+    }
+  }
+
+  /// A new version whose executable differs only in the case of its name is
+  /// refused for that reason, on a case-insensitive file system (where the
+  /// file is found under either name) and a case-sensitive one alike.
+  #[cfg(unix)]
+  #[test]
+  fn stage_refuses_a_case_only_rename_of_the_executable() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (_exe, layout) = fake_app(&tmp);
+    staging::PrivateDir::create(&layout.staging_dir()).unwrap();
+    let mut packed = layout.clone();
+    packed.exe_rel = layout.exe_rel.with_file_name("FAKE");
+    let (archive, size) = pack_fake_app(&tmp, &packed, 0o755, b"#!/x");
+    let sha = sha256_of_file(&archive);
+    let e = stage_blocking(&stage_request(&layout, &archive, size, &sha))
+      .unwrap_err();
+    assert_eq!(e.code, Code::BundleMismatch, "{}", e.message);
+    assert!(
+      e.message.contains("renames the app's executable")
+        && e.message.contains("only the case differs"),
+      "{}",
+      e.message
+    );
+    // The same name passes this check (whatever the later ones say about a
+    // fake app).
+    let (archive, size) = pack_fake_app(&tmp, &layout, 0o755, b"#!/xy");
+    let sha = sha256_of_file(&archive);
+    if let Err(e) =
+      stage_blocking(&stage_request(&layout, &archive, size, &sha))
+    {
+      assert!(!e.message.contains("renames"), "{}", e.message);
     }
   }
 
