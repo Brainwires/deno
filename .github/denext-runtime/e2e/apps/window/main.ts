@@ -290,51 +290,82 @@ await r.step("window API", async () => {
 
   // --- state round trips ---
   if (caps.state) {
-    const before = win.getBounds();
-    r.set("boundsBefore", before);
-    win.maximize();
-    const maxEv = await once(win, "maximize", 8000);
-    r.check(
-      "maximize() maximizes",
-      await waitFor(() => win.isMaximized(), 5000),
-    );
-    if (caps.stateEvents) r.check("a maximize event fires", maxEv !== null);
-    if (caps.normalBounds) {
-      const normal = win.getNormalBounds();
+    const refused: string | undefined = r.params.stateRefused;
+    if (refused) {
+      for (
+        const name of [
+          "maximize() maximizes",
+          "a maximize event fires",
+          "getNormalBounds() while maximized is the bounds before",
+          "unmaximize() restores",
+          "an unmaximize event fires",
+          "minimize() minimizes",
+          "a minimize event fires",
+          "restore() un-minimizes",
+          "a restore event fires",
+        ]
+      ) r.na(name, refused);
+      // What's left to check: asking is harmless. Not the size: a compositor
+      // that ignores them can still answer with a configure that leaves the
+      // size to the client, which GTK takes as its default size.
+      win.maximize();
+      win.unmaximize();
+      win.minimize();
+      win.restore();
+      await sleep(1000);
       r.check(
-        "getNormalBounds() while maximized is the bounds before",
-        JSON.stringify(normal) === JSON.stringify(before),
-        { normal, before },
+        "maximize and minimize requests the compositor ignores don't take the window down",
+        !win.isClosed() && !win.isMaximized(),
       );
+      win.setSize(640, 420);
+      await sleep(500);
+    } else {
+      const before = win.getBounds();
+      r.set("boundsBefore", before);
+      win.maximize();
+      const maxEv = await once(win, "maximize", 8000);
+      r.check(
+        "maximize() maximizes",
+        await waitFor(() => win.isMaximized(), 5000),
+      );
+      if (caps.stateEvents) r.check("a maximize event fires", maxEv !== null);
+      if (caps.normalBounds) {
+        const normal = win.getNormalBounds();
+        r.check(
+          "getNormalBounds() while maximized is the bounds before",
+          JSON.stringify(normal) === JSON.stringify(before),
+          { normal, before },
+        );
+      }
+      win.unmaximize();
+      const unmaxEv = await once(win, "unmaximize", 8000);
+      r.check(
+        "unmaximize() restores",
+        await waitFor(() => !win.isMaximized(), 5000),
+      );
+      if (caps.stateEvents) {
+        r.check("an unmaximize event fires", unmaxEv !== null);
+      }
+      // Let unmaximize's animation finish: AppKit drops a miniaturize asked
+      // for during a zoom animation (as it does a fullscreen toggle).
+      await sleep(1000);
+      win.minimize();
+      const minEv = await once(win, "minimize", 8000);
+      const minimized = await waitFor(() => win.isMinimized(), 5000);
+      r.check(
+        "minimize() minimizes",
+        minimized,
+        minimized ? undefined : macWindowState(TITLE_A),
+      );
+      if (caps.stateEvents) r.check("a minimize event fires", minEv !== null);
+      win.restore();
+      const restEv = await once(win, "restore", 8000);
+      r.check(
+        "restore() un-minimizes",
+        await waitFor(() => !win.isMinimized(), 5000),
+      );
+      if (caps.stateEvents) r.check("a restore event fires", restEv !== null);
     }
-    win.unmaximize();
-    const unmaxEv = await once(win, "unmaximize", 8000);
-    r.check(
-      "unmaximize() restores",
-      await waitFor(() => !win.isMaximized(), 5000),
-    );
-    if (caps.stateEvents) {
-      r.check("an unmaximize event fires", unmaxEv !== null);
-    }
-    // Let unmaximize's animation finish: AppKit drops a miniaturize asked
-    // for during a zoom animation (as it does a fullscreen toggle).
-    await sleep(1000);
-    win.minimize();
-    const minEv = await once(win, "minimize", 8000);
-    const minimized = await waitFor(() => win.isMinimized(), 5000);
-    r.check(
-      "minimize() minimizes",
-      minimized,
-      minimized ? undefined : macWindowState(TITLE_A),
-    );
-    if (caps.stateEvents) r.check("a minimize event fires", minEv !== null);
-    win.restore();
-    const restEv = await once(win, "restore", 8000);
-    r.check(
-      "restore() un-minimizes",
-      await waitFor(() => !win.isMinimized(), 5000),
-    );
-    if (caps.stateEvents) r.check("a restore event fires", restEv !== null);
     await sleep(1000);
     win.setFullScreen(true);
     const fsEv = await once(win, "enterfullscreen", 10000);
@@ -411,6 +442,18 @@ await r.step("window API", async () => {
         Math.abs(moved.y - (wa.y + 40)) <= 2,
       moved,
     );
+  } else if (!caps.setPosition) {
+    for (
+      const name of [
+        "setBounds onto a missing display lands on the primary work area",
+        "setBounds moves the window",
+      ]
+    ) {
+      r.na(
+        name,
+        "windowCapabilities().setPosition is false: an xdg_toplevel can't place itself on Wayland",
+      );
+    }
   }
   const cb = win.getContentBounds();
   const [iw, ih] = win.getSize();

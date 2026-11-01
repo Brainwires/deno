@@ -2,11 +2,14 @@
 // What a person at the machine would do, done from inside the test app:
 // press a key combination and click a window's close button.
 //
-// - Key presses: XTEST through `xdotool` on Linux, `keybd_event` on Windows,
+// - Key presses: XTEST through `xdotool` on Linux, or the session's virtual
+//   keyboard on the headless sway of E2E_DISPLAY=wayland
+//   (linux/wayland-input.py),
+//   `keybd_event` on Windows,
 //   CoreGraphics events on macOS (which needs the Accessibility grant of the
 //   process that started the app; `canPressKeys()` says whether it is there).
 // - A user close: `wmctrl -c` (the window manager's close, WM_DELETE_WINDOW)
-//   on Linux, WM_CLOSE posted to the top-level window on Windows,
+//   on Linux, sway's `kill` (xdg_toplevel.close) on Wayland, WM_CLOSE posted to the top-level window on Windows,
 //   `-[NSWindow performClose:]` (what the close button calls) scheduled on
 //   the main thread on macOS.
 
@@ -299,6 +302,62 @@ const XDO: Record<string, string> = {
   Return: "Return",
 };
 
+// --- the compositor of E2E_DISPLAY=wayland ------------------------------
+
+/** On the e2e's headless sway (linux/session.sh sets $SWAYSOCK). */
+function onSway(): boolean {
+  return !!Deno.env.get("SWAYSOCK");
+}
+
+/** A sway criterion: the title, whole, as a PCRE. */
+function swayTitle(title: string): string {
+  return `[title="^${title.replace(/[\\^$.|?*+()[\]{}"]/g, "\\$&")}$"]`;
+}
+
+/** Run a sway command on the window titled `title`. */
+export async function swayMsg(title: string, command: string): Promise<void> {
+  await run("swaymsg", [`${swayTitle(title)} ${command}`]);
+}
+
+/** The window titled `title` in sway's tree, or null. */
+export async function swayWindow(title: string): Promise<any> {
+  const walk = (n: any): any => {
+    if (n.name === title && (n.app_id !== undefined || n.shell)) return n;
+    for (const c of [...(n.nodes ?? []), ...(n.floating_nodes ?? [])]) {
+      const found = walk(c);
+      if (found) return found;
+    }
+    return null;
+  };
+  return walk(JSON.parse(await run("swaymsg", ["-r", "-t", "get_tree"])));
+}
+
+const WAYLAND_MODS: Partial<Record<Key, string>> = {
+  Primary: "ctrl",
+  Control: "ctrl",
+  Alt: "alt",
+  Shift: "shift",
+  Super: "super",
+};
+
+/** Press and release through the session's keyboard. */
+async function waylandPress(keys: Key[]): Promise<void> {
+  const spec = keys.map((k) => WAYLAND_MODS[k] ?? XDO[k]).join("+");
+  const conn = await Deno.connect({
+    transport: "unix",
+    path: Deno.env.get("E2E_WAYLAND_KEYBOARD")!,
+  });
+  try {
+    await conn.write(new TextEncoder().encode(spec + "\n"));
+    const buf = new Uint8Array(256);
+    const n = await conn.read(buf);
+    const got = new TextDecoder().decode(buf.subarray(0, n ?? 0)).trim();
+    if (got !== "ok") throw new Error(`pressing ${spec}: ${got}`);
+  } finally {
+    conn.close();
+  }
+}
+
 // --- the API -------------------------------------------------------------
 
 /** Whether this process may synthesize key presses (null = yes; else the
@@ -312,6 +371,11 @@ export async function canPressKeys(): Promise<string | null> {
     } catch (e) {
       return `no CoreGraphics / ApplicationServices: ${e}`;
     }
+  }
+  if (OS === "linux" && onSway()) {
+    return Deno.env.get("E2E_WAYLAND_KEYBOARD")
+      ? null
+      : "the session has no virtual keyboard";
   }
   if (OS === "linux") {
     try {
@@ -328,6 +392,7 @@ export async function canPressKeys(): Promise<string | null> {
 export async function pressKeys(keys: Key[]): Promise<void> {
   if (OS === "darwin") return macPress(keys);
   if (OS === "windows") return winPress(keys);
+  if (onSway()) return waylandPress(keys);
   await run("xdotool", [
     "key",
     "--clearmodifiers",
@@ -340,7 +405,9 @@ export async function pressKeys(keys: Key[]): Promise<void> {
  * (synthesized keys go to the foreground window, so a press made while
  * another window has it is lost); elsewhere true after the attempt. */
 export async function activate(title: string): Promise<boolean> {
-  if (OS === "linux") {
+  if (OS === "linux" && onSway()) {
+    await run("swaymsg", [`${swayTitle(title)} focus`]).catch(() => {});
+  } else if (OS === "linux") {
     await run("xdotool", [
       "search",
       "--name",
@@ -508,6 +575,14 @@ export async function userClose(title: string): Promise<string | null> {
     if (!h) return `no top-level window titled ${title}`;
     w.PostMessageW(h, 0x0010, /* WM_CLOSE */ 0n, 0n);
     return null;
+  }
+  if (OS === "linux" && onSway()) {
+    try {
+      await run("swaymsg", [`${swayTitle(title)} kill`]);
+      return null;
+    } catch (e) {
+      return String(e);
+    }
   }
   if (OS === "linux") {
     try {

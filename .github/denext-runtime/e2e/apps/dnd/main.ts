@@ -115,7 +115,9 @@ await r.step("clipboard", async () => {
     "writeText('') clears: readText() is empty",
     (await cb.readText()) === "",
   );
-  if (caps.changeEvents) {
+  if (r.params.clipboardChangeRefused) {
+    r.na("clipboard change events", r.params.clipboardChangeRefused);
+  } else if (caps.changeEvents) {
     let changes = 0;
     cb.onchange = () => changes++;
     await sleep(600);
@@ -260,9 +262,20 @@ await r.step("drag and drop", async () => {
     "a relative path fails",
     (await win.startDrag({ files: ["relative.txt"] })) === "failed",
   );
+  // Wayland reports no pointer state outside an event, so the host can't refuse
+  // first: it asks, the compositor turns the drag down, and it ends cancelled.
+  r.mark("startDrag with no held button");
+  // Bounded: a drag that never settles is this check's failure, not the app's.
+  const settled = await within(
+    win.startDrag({ files: [Deno.execPath()] }),
+    10000,
+  );
+  const noButton = "value" in settled ? settled.value : "never settled";
   r.check(
     "no held mouse button: the drag fails",
-    (await win.startDrag({ files: [Deno.execPath()] })) === "failed",
+    noButton === "failed" ||
+      (noButton === "cancelled" && !!Deno.env.get("WAYLAND_DISPLAY")),
+    noButton,
   );
   for (const t of ["ondragenter", "ondragover", "ondragleave", "ondrop"]) {
     win[t] = () => {};

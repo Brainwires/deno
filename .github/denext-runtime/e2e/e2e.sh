@@ -1,14 +1,16 @@
 #!/usr/bin/env bash
 # Run the denext runtime e2e suite (run.ts) against one runtime archive and
 # backend, with the STOCK `deno` on PATH as the packaging CLI (CI pins
-# 2.9.8). On Linux it runs inside Xvfb + a private D-Bus session with a
-# window manager and a stand-in notification server (linux/session.sh).
+# 2.9.8). On Linux it runs inside a private D-Bus session with a window manager
+# and a stand-in notification server (linux/session.sh), under Xvfb or, with
+# E2E_DISPLAY=wayland, on a headless sway with no X server at all.
 #
 # Env: TARGET ARCHIVE BACKEND WORK_DIR [E2E_OUT] [E2E_AREAS=a,b,...]
 #      [E2E_SECRET_SERVICE=masked|locked] (Linux; masked by default)
 #      [E2E_SESSION_TYPE=unset|<value>] (Linux; XDG_SESSION_TYPE for the run,
 #      unset by default)
 #      [E2E_KWALLET=none|activatable] (Linux; none by default)
+#      [E2E_DISPLAY=x11|wayland] (Linux; x11 by default)
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 . "$here/../lib.sh"
@@ -102,8 +104,24 @@ case "$TARGET" in
         exit 1
         ;;
     esac
-    xvfb-run --auto-servernum --server-args="-screen 0 1600x1000x24" \
-      dbus-run-session -- bash "$here/linux/session.sh" "${run[@]}"
+    export E2E_DISPLAY="${E2E_DISPLAY:-x11}"
+    case "$E2E_DISPLAY" in
+      x11)
+        xvfb-run --auto-servernum --server-args="-screen 0 1600x1000x24" \
+          dbus-run-session -- bash "$here/linux/session.sh" "${run[@]}"
+        ;;
+      wayland)
+        command -v sway >/dev/null || {
+          echo "E2E_DISPLAY=wayland needs sway" >&2
+          exit 1
+        }
+        dbus-run-session -- bash "$here/linux/session.sh" "${run[@]}"
+        ;;
+      *)
+        echo "E2E_DISPLAY: x11 or wayland, not $E2E_DISPLAY" >&2
+        exit 1
+        ;;
+    esac
     ;;
   *)
     "${run[@]}"

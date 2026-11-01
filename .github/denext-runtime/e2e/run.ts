@@ -44,7 +44,10 @@ const AREAS: Record<
   keyring: () => import("./areas/keyring.ts"),
   keyringpersist: () => import("./areas/keyringpersist.ts"),
   exit: () => import("./areas/exit.ts"),
+  wayland: () => import("./areas/wayland.ts"),
 };
+// Asks the compositor of E2E_DISPLAY=wayland, so it runs only there.
+const WAYLAND_ONLY = new Set(["wayland"]);
 const AREA_TIMEOUT_MS = 20 * 60_000;
 
 const need = (k: string) => {
@@ -70,7 +73,10 @@ const env: Env = {
 const out = Deno.env.get("E2E_OUT") ?? path(env.workDir, "results");
 const only = (Deno.env.get("E2E_AREAS") ?? "").split(",").map((s) => s.trim())
   .filter(Boolean);
-const areas = only.length ? only : Object.keys(AREAS);
+const onWayland = Deno.env.get("E2E_DISPLAY") === "wayland";
+const areas = only.length
+  ? only
+  : Object.keys(AREAS).filter((a) => onWayland || !WAYLAND_ONLY.has(a));
 for (const a of areas) if (!AREAS[a]) throw new Error(`unknown area ${a}`);
 
 await rm(path(env.workDir, "build"));
