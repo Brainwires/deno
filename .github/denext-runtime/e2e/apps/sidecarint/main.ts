@@ -77,4 +77,4 @@ if (r.params.phase === "first") {
     r.data.healed,
   );
 }
-r.done();
+r.finish();
