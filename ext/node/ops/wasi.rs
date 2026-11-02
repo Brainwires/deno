@@ -228,6 +228,17 @@ impl WasiInner {
     fd
   }
 
+  /// The canonical root of the preopen `dirfd` is in.
+  fn preopen_root(&self, dirfd: i32) -> Result<std::path::PathBuf, i32> {
+    match self.get_fd(dirfd) {
+      Some(FdEntry::PreopenDir { real_path, .. }) => canonicalize_io(real_path),
+      Some(FdEntry::Dir {
+        preopen_root_path, ..
+      }) => canonicalize_io(preopen_root_path),
+      _ => Err(ERRNO_BADF),
+    }
+  }
+
   fn resolve_preopen_path(
     &self,
     dirfd: i32,
@@ -363,6 +374,68 @@ fn canonicalize_lookup(
       Ok(joined)
     }
     None => Err(ERRNO_NOENT),
+  }
+}
+
+/// The most symlinks followed while resolving a link target (Linux's
+/// MAXSYMLINKS).
+const MAX_SYMLINK_HOPS: usize = 40;
+
+/// Where a symlink made in `link_parent` with `target` lands when it is
+/// followed, resolved the way the kernel will: through existing links (a
+/// dangling one followed to its target), a missing tail kept as named.
+/// `None` when that place can't be known: a `..` after a name (the name may
+/// be a link the kernel follows first, so folding it away would name a
+/// different place), a chain of links that is too long, or an error.
+fn resolve_symlink_target(
+  link_parent: &Path,
+  target: &Path,
+) -> Option<std::path::PathBuf> {
+  use std::path::Component;
+  let mut seen_name = false;
+  for component in target.components() {
+    match component {
+      Component::ParentDir if seen_name => return None,
+      Component::Normal(_) => seen_name = true,
+      _ => {}
+    }
+  }
+  let mut path = link_parent.join(target);
+  let mut hops = 0;
+  'resolve: loop {
+    let mut names = Vec::new();
+    let mut current = path.clone();
+    loop {
+      match std::fs::canonicalize(&current) {
+        Ok(mut resolved) => {
+          for name in names.into_iter().rev() {
+            resolved.push(name);
+          }
+          return Some(resolved);
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+          if let Ok(next_target) = std::fs::read_link(&current) {
+            hops += 1;
+            if hops > MAX_SYMLINK_HOPS {
+              return None;
+            }
+            let mut next = if next_target.is_absolute() {
+              next_target
+            } else {
+              current.parent()?.join(next_target)
+            };
+            for name in names.into_iter().rev() {
+              next.push(name);
+            }
+            path = next;
+            continue 'resolve;
+          }
+          names.push(current.file_name()?.to_owned());
+          current = current.parent()?.to_path_buf();
+        }
+        Err(_) => return None,
+      }
+    }
   }
 }
 
@@ -1776,6 +1849,44 @@ impl WasiContext {
     {
       return ERRNO_ACCES;
     }
+    // The target is only a string stored in the link, resolved when the link
+    // is followed: Deno.symlink() takes unscoped read and write for that
+    // reason. Under a preopen's scoped grant the target, resolved from the
+    // link's folder as the kernel will, must stay in the preopen (the WASI
+    // sandbox: ENOTCAPABLE, as every path_* op answers an escape) and be
+    // readable and writable (EACCES), the rule Deno.symlink() applies to a
+    // scoped grant inside a confined lifecycle-script jail. Otherwise a link
+    // out of the preopen, or to a denied path, would let host code that
+    // writes under the preopen reach it (denext, DENEXT.md 224).
+    let target_str = if cfg!(windows) {
+      // Windows stores the target verbatim and can't resolve forward
+      // slashes (see below).
+      old_path.replace('/', "\\")
+    } else {
+      old_path.clone()
+    };
+    let Ok(preopen_root) = inner.preopen_root(dirfd) else {
+      return ERRNO_BADF;
+    };
+    let Some(target_resolved) = new_resolved.parent().and_then(|parent| {
+      resolve_symlink_target(parent, Path::new(&target_str))
+    }) else {
+      return ERRNO_NOTCAPABLE;
+    };
+    if !target_resolved.starts_with(&preopen_root) {
+      return ERRNO_NOTCAPABLE;
+    }
+    if self
+      .permissions
+      .check_open(
+        Cow::Owned(target_resolved),
+        OpenAccessKind::ReadWrite,
+        Some("node:wasi"),
+      )
+      .is_err()
+    {
+      return ERRNO_ACCES;
+    }
     #[cfg(unix)]
     {
       match std::os::unix::fs::symlink(&old_path, &new_resolved) {
@@ -1792,7 +1903,7 @@ impl WasiContext {
       // Normalize to backslashes here so subsequent path_open succeeds.
       // If the existing target is a directory, fall back to symlink_dir so
       // resolution doesn't break on directory targets.
-      let target = old_path.replace('/', "\\");
+      let target = target_str;
       let target_path = std::path::PathBuf::from(&target);
       let abs_target = if target_path.is_absolute() {
         target_path.clone()

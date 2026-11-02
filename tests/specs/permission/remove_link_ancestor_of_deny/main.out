@@ -1,0 +1,8 @@
+Deno.removeSync link: denied
+Deno.remove link: denied
+node unlinkSync link: denied
+node unlink link: denied
+node rmSync link: denied
+node rmdirSync link: denied
+still packaged: true
+other link removed: true

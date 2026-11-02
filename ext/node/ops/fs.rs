@@ -156,17 +156,26 @@ fn file_for_fd(
     .ok_or_else(ebadf)
 }
 
+/// `owner_or_mode`: a `fchmod` / `fchown` on a folder that holds a
+/// `--deny-write` path decides who can reach or replace the denied path, so a
+/// deny scope inside the folder refuses it, as for `chmod` / `chown` by path
+/// (see `deno_fs::check_metadata_write`; denext, DENEXT.md 224).
 fn check_fd_metadata_write(
   state: &OpState,
   file: &Rc<dyn deno_io::fs::File>,
+  owner_or_mode: bool,
   api_name: &'static str,
 ) -> Result<(), FsError> {
   if let Some(path) = file.maybe_path() {
-    state.borrow::<PermissionsContainer>().check_open(
+    let permissions = state.borrow::<PermissionsContainer>();
+    permissions.check_open(
       Cow::Borrowed(path),
       OpenAccessKind::WriteNoFollow,
       Some(api_name),
     )?;
+    if owner_or_mode {
+      permissions.check_write_resolved_not_denied(path, api_name)?;
+    }
   }
   Ok(())
 }
@@ -617,6 +626,12 @@ pub fn op_node_lchown_sync(
     OpenAccessKind::WriteNoFollow,
     Some("node:fs.lchownSync"),
   )?;
+  deno_fs::check_metadata_write(
+    state.borrow::<PermissionsContainer>(),
+    &path,
+    &path,
+    "node:fs.lchownSync",
+  )?;
   let fs = state.borrow::<FileSystemRc>();
   fs.lchown_sync(&path, uid, gid)?;
   Ok(())
@@ -636,6 +651,12 @@ pub async fn op_node_lchown(
       OpenAccessKind::WriteNoFollow,
       Some("node:fs.lchown"),
     )?;
+    deno_fs::check_metadata_write(
+      state.borrow::<PermissionsContainer>(),
+      &path,
+      &path,
+      "node:fs.lchown",
+    )?;
     (state.borrow::<FileSystemRc>().clone(), path)
   };
   fs.lchown_async(path.into_owned(), uid, gid).await?;
@@ -652,6 +673,12 @@ pub fn op_node_lchmod_sync(
     Cow::Borrowed(Path::new(path)),
     OpenAccessKind::WriteNoFollow,
     Some("node:fs.lchmodSync"),
+  )?;
+  deno_fs::check_metadata_write(
+    state.borrow::<PermissionsContainer>(),
+    &path,
+    &path,
+    "node:fs.lchmodSync",
   )?;
   let fs = state.borrow::<FileSystemRc>();
   fs.lchmod_sync(&path, mode)?;
@@ -670,6 +697,12 @@ pub async fn op_node_lchmod(
       Cow::Owned(PathBuf::from(path)),
       OpenAccessKind::WriteNoFollow,
       Some("node:fs.lchmod"),
+    )?;
+    deno_fs::check_metadata_write(
+      state.borrow::<PermissionsContainer>(),
+      &path,
+      &path,
+      "node:fs.lchmod",
     )?;
     (state.borrow::<FileSystemRc>().clone(), path)
   };
@@ -767,6 +800,14 @@ pub fn op_node_rmdir_sync(
     Some("node:fs.rmdirSync"),
   )?;
   let fs = state.borrow::<FileSystemRc>();
+  // A directory symlink or a junction removed by rmdir on Windows takes away
+  // every path under it (denext, DENEXT.md 224).
+  deno_fs::check_remove_link(
+    state.borrow::<PermissionsContainer>(),
+    fs,
+    &path,
+    "node:fs.rmdirSync",
+  )?;
   fs.rmdir_sync(&path)?;
   Ok(())
 }
@@ -783,7 +824,16 @@ pub async fn op_node_rmdir(
       OpenAccessKind::WriteNoFollow,
       Some("node:fs.rmdir"),
     )?;
-    (state.borrow::<FileSystemRc>().clone(), path)
+    let fs = state.borrow::<FileSystemRc>().clone();
+    // A directory symlink or a junction removed by rmdir on Windows takes
+    // away every path under it (denext, DENEXT.md 224).
+    deno_fs::check_remove_link(
+      state.borrow::<PermissionsContainer>(),
+      &fs,
+      &path,
+      "node:fs.rmdir",
+    )?;
+    (fs, path)
   };
   fs.rmdir_async(path.into_owned()).await?;
   Ok(())
@@ -1275,7 +1325,7 @@ pub fn op_node_fs_futimes_sync(
   #[smi] mtime_nanos: u32,
 ) -> Result<(), FsError> {
   let file = file_for_fd(state, fd)?;
-  check_fd_metadata_write(state, &file, "node:fs.futimesSync()")?;
+  check_fd_metadata_write(state, &file, false, "node:fs.futimesSync()")?;
   file.utime_sync(atime_secs, atime_nanos, mtime_secs, mtime_nanos)?;
   Ok(())
 }
@@ -1292,7 +1342,7 @@ pub async fn op_node_fs_futimes(
   let file = {
     let state = state.borrow();
     let file = file_for_fd(&state, fd)?;
-    check_fd_metadata_write(&state, &file, "node:fs.futimes()")?;
+    check_fd_metadata_write(&state, &file, false, "node:fs.futimes()")?;
     file
   };
   file
@@ -1308,7 +1358,7 @@ pub fn op_node_fs_fchmod_sync(
   #[smi] mode: u32,
 ) -> Result<(), FsError> {
   let file = file_for_fd(state, fd)?;
-  check_fd_metadata_write(state, &file, "node:fs.fchmodSync()")?;
+  check_fd_metadata_write(state, &file, true, "node:fs.fchmodSync()")?;
   file.chmod_sync(mode)?;
   Ok(())
 }
@@ -1322,7 +1372,7 @@ pub async fn op_node_fs_fchmod(
   let file = {
     let state = state.borrow();
     let file = file_for_fd(&state, fd)?;
-    check_fd_metadata_write(&state, &file, "node:fs.fchmod()")?;
+    check_fd_metadata_write(&state, &file, true, "node:fs.fchmod()")?;
     file
   };
   file.chmod_async(mode).await?;
@@ -1337,7 +1387,7 @@ pub fn op_node_fs_fchown_sync(
   #[smi] gid: u32,
 ) -> Result<(), FsError> {
   let file = file_for_fd(state, fd)?;
-  check_fd_metadata_write(state, &file, "node:fs.fchownSync()")?;
+  check_fd_metadata_write(state, &file, true, "node:fs.fchownSync()")?;
   file.chown_sync(Some(uid), Some(gid))?;
   Ok(())
 }
@@ -1352,7 +1402,7 @@ pub async fn op_node_fs_fchown(
   let file = {
     let state = state.borrow();
     let file = file_for_fd(&state, fd)?;
-    check_fd_metadata_write(&state, &file, "node:fs.fchown()")?;
+    check_fd_metadata_write(&state, &file, true, "node:fs.fchown()")?;
     file
   };
   file.chown_async(Some(uid), Some(gid)).await?;
@@ -1820,6 +1870,16 @@ fn try_clone_dir_no_filter(
     return Ok(false);
   }
 
+  // A failed clone is cleaned up with a recursive remove of `dest`, which
+  // needs the strict check a recursive remove has: with a deny scope inside
+  // `dest`, skip the clone and copy entry by entry, each entry checked
+  // (denext, DENEXT.md 224).
+  if permissions
+    .check_write(Cow::Borrowed(Path::new(dest)), "node:fs.cp")
+    .is_err()
+  {
+    return Ok(false);
+  }
   let src_path =
     check_cp_path_with_permissions(permissions, src, OpenAccessKind::Read)?;
   let dest_path =
@@ -1832,6 +1892,12 @@ fn try_clone_dir_no_filter(
     Ok(()) => Ok(true),
     Err(_) => {
       if fs.exists_sync(&dest_path.as_checked_path()) {
+        permissions
+          .check_write(Cow::Borrowed(Path::new(dest)), "node:fs.cp")?;
+        permissions.check_write_resolved_not_denied(
+          &dest_path.as_checked_path(),
+          "node:fs.cp",
+        )?;
         fs.remove_sync(&dest_path.as_checked_path(), true)
           .map_err(|err| {
             map_fs_error_to_node_fs_error(
@@ -2085,6 +2151,28 @@ fn cp_symlink_type(
 }
 
 #[allow(clippy::unused_async, reason = "sometimes it's async")]
+/// `cp` recreates a source symlink at `link_path` with the checks of
+/// `fs.symlink` (unscoped read and write), and like `Deno.symlink()` the link
+/// path also gets the strict write check a recursive remove has: unscoped
+/// `--allow-write` still leaves its `--deny-write` scopes, and a link at a
+/// denied path or at a parent of one would put another tree in its place.
+/// `resolved` is where the link lands when it differs from `link_path`
+/// (denext, DENEXT.md 224).
+fn check_cp_symlink(
+  permissions: &PermissionsContainer,
+  link_path: &Path,
+  resolved: Option<&Path>,
+  api_name: &str,
+) -> Result<(), FsError> {
+  permissions.check_write_all(api_name)?;
+  permissions.check_read_all(api_name)?;
+  permissions.check_write(Cow::Borrowed(link_path), api_name)?;
+  if let Some(resolved) = resolved {
+    permissions.check_write_resolved_not_denied(resolved, api_name)?;
+  }
+  Ok(())
+}
+
 async fn cp_create_symlink(
   state: &Rc<RefCell<OpState>>,
   fs: &FileSystemRc,
@@ -2094,8 +2182,12 @@ async fn cp_create_symlink(
   {
     let mut state = state.borrow_mut();
     let permissions = state.borrow_mut::<PermissionsContainer>();
-    permissions.check_write_all("node:fs.symlink")?;
-    permissions.check_read_all("node:fs.symlink")?;
+    check_cp_symlink(
+      permissions,
+      Path::new(&link_path),
+      None,
+      "node:fs.symlink",
+    )?;
   }
   let fs = fs.clone();
   maybe_spawn_blocking!(move || -> Result<(), FsError> {
@@ -3337,8 +3429,7 @@ pub async fn op_node_cp_on_link(
   {
     let mut state = state.borrow_mut();
     let permissions = state.borrow_mut::<PermissionsContainer>();
-    permissions.check_write_all("node:fs.cp")?;
-    permissions.check_read_all("node:fs.cp")?;
+    check_cp_symlink(permissions, Path::new(&dest), None, "node:fs.cp")?;
   }
 
   // Unlink dest and create new symlink
@@ -3411,8 +3502,7 @@ fn op_node_cp_on_link_sync(
   }
 
   if !dest_exists {
-    permissions.check_write_all("node:fs.symlink")?;
-    permissions.check_read_all("node:fs.symlink")?;
+    check_cp_symlink(permissions, Path::new(dest), None, "node:fs.symlink")?;
 
     let oldpath = CheckedPathBuf::unsafe_new(PathBuf::from(&resolved_src));
     let newpath = CheckedPathBuf::unsafe_new(PathBuf::from(dest));
@@ -3463,8 +3553,12 @@ fn op_node_cp_on_link_sync(
       if kind == std::io::ErrorKind::InvalidInput
         || kind == std::io::ErrorKind::Other
       {
-        permissions.check_write_all("node:fs.symlink")?;
-        permissions.check_read_all("node:fs.symlink")?;
+        check_cp_symlink(
+          permissions,
+          Path::new(dest),
+          None,
+          "node:fs.symlink",
+        )?;
 
         let oldpath = CheckedPathBuf::unsafe_new(PathBuf::from(&resolved_src));
         let newpath = CheckedPathBuf::unsafe_new(PathBuf::from(dest));
@@ -3513,8 +3607,12 @@ fn op_node_cp_on_link_sync(
           );
         }
 
-        permissions.check_write_all("node:fs.symlink")?;
-        permissions.check_read_all("node:fs.symlink")?;
+        check_cp_symlink(
+          permissions,
+          Path::new(dest),
+          None,
+          "node:fs.symlink",
+        )?;
 
         let oldpath = CheckedPathBuf::unsafe_new(PathBuf::from(&resolved_src));
         let newpath = CheckedPathBuf::unsafe_new(PathBuf::from(dest));
@@ -3602,6 +3700,13 @@ fn op_node_cp_on_link_sync(
       Some("node:fs.rm"),
     )?
   };
+  // The link is made where `dest` resolves to, after that entry is removed.
+  check_cp_symlink(
+    permissions,
+    Path::new(dest),
+    Some(&dest_path),
+    "node:fs.symlink",
+  )?;
 
   fs.remove_sync(&dest_path, false).map_err(|err| {
     map_fs_error_to_node_fs_error(
@@ -3613,9 +3718,6 @@ fn op_node_cp_on_link_sync(
       },
     )
   })?;
-
-  permissions.check_write_all("node:fs.symlink")?;
-  permissions.check_read_all("node:fs.symlink")?;
 
   let src_path_buf = CheckedPathBuf::unsafe_new(PathBuf::from(&resolved_src));
   let dest_path_buf = CheckedPathBuf::unsafe_new(dest_path.to_path_buf());

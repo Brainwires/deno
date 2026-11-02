@@ -1,5 +1,6 @@
 Deno.renameSync parent: denied
 Deno.rename parent: denied
+Deno.renameSync parent, other case: denied
 Deno.renameSync denied: denied
 node renameSync parent: denied
 node rename parent: denied

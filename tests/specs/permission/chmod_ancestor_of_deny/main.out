@@ -1,0 +1,12 @@
+Deno.chmodSync parent: denied
+Deno.chmod parent: denied
+Deno.chmodSync link to parent: denied
+Deno.chownSync parent: denied
+Deno.chown parent: denied
+node chmodSync parent: denied
+node lchownSync parent: denied
+node fchmodSync parent: denied
+node fchownSync parent: denied
+mode kept: true
+utime parent: true
+other modes changed: true

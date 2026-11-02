@@ -42,6 +42,16 @@ await attemptAsync(
   "Deno.rename parent",
   () => Deno.rename("base/a", "base/moved"),
 );
+// Deny scopes compare paths case-insensitively where the file system does
+// (Windows, macOS), so another spelling of the parent is refused too.
+if (Deno.build.os === "linux") {
+  console.log("Deno.renameSync parent, other case: denied");
+} else {
+  attempt(
+    "Deno.renameSync parent, other case",
+    () => Deno.renameSync("base/A", "base/moved"),
+  );
+}
 attempt(
   "Deno.renameSync denied",
   () => Deno.renameSync("base/a/b", "base/moved"),

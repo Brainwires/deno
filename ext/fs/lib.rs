@@ -19,6 +19,8 @@ pub use crate::interface::OpenOptions;
 pub use crate::ops::FsOpsError;
 pub use crate::ops::FsOpsErrorKind;
 pub use crate::ops::OperationError;
+pub use crate::ops::check_metadata_write;
+pub use crate::ops::check_remove_link;
 use crate::ops::*;
 pub use crate::std_fs::RealFs;
 pub use crate::std_fs::open_options_for_checked_path;

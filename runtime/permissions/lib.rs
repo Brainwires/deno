@@ -5128,6 +5128,32 @@ impl PermissionsContainer {
     Ok(())
   }
 
+  /// The strict deny check for a path the kernel resolved (a symlink
+  /// followed to the place a change lands): refuses it when a `--deny-write`
+  /// scope covers it or lies inside it, as [`Self::check_write`] does for the
+  /// path as given. The allow scopes are checked on the path as given, so
+  /// they are not checked again here (denext, DENEXT.md 224).
+  pub fn check_write_resolved_not_denied(
+    &self,
+    resolved: &Path,
+    api_name: &str,
+  ) -> Result<(), PermissionCheckError> {
+    if !self.has_denied_descriptors(OpenAccessKind::Write) {
+      return Ok(());
+    }
+    let resolved = self
+      .descriptor_parser
+      .parse_path_query(Cow::Borrowed(resolved))?
+      .into_write();
+    let mut inner = self.inner.lock();
+    if inner.write.query(Some(&resolved)) == PermissionState::Denied
+      || inner.write.is_partial_flag_denied(Some(&resolved))
+    {
+      inner.write.check(&resolved, Some(api_name))?;
+    }
+    Ok(())
+  }
+
   /// Whether any deny (or ignore) rule exists for the kinds of access
   /// `access_kind` performs; without one, a resolved path cannot be denied.
   fn has_denied_descriptors(&self, access_kind: OpenAccessKind) -> bool {

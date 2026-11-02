@@ -8595,35 +8595,77 @@ where the changes are discussed.
      KWin. Still CEF 156.0.15. Tests: laufey's CI on the commit; item 220's leg
      is what checks the first two on a real compositor here.
 
-224. **`fix(security)`: a rename or a symlink can't move or replace a parent of
-     a `--deny-write` path** (`ext/fs/ops.rs`, `ext/node/ops/wasi.rs`). The
-     write checks on single paths use partial-deny semantics: a deny scope under
-     the path doesn't refuse it. That is right for an open or a stat, but a
-     rename moves the whole tree under its old path and puts a tree in place of
-     its new one. With `--allow-write=base --deny-write=base/a/b`,
-     `Deno.rename("base/a", …)` moved the denied folder away, and a rename onto
-     `base/c` (absent, or an empty folder) created a denied `base/c/b` from
-     another tree; both work on stock Deno 2.9.8 and on every `3.0.0-denext.N`
-     through `denext.7`. A symlink needs unscoped `--allow-write`, which still
-     leaves its `--deny-write` scopes, and its link path wasn't checked against
-     them at all: a link made at a denied path that didn't exist yet, or at a
-     parent of one, put another tree there. `node:wasi`'s `path_rename` and
-     `path_symlink` had the same gaps under a scoped grant. Both paths of a
-     rename, `Deno.symlink`'s link path and `path_symlink`'s now also get the
-     strict check a recursive remove has (a deny scope inside refuses it; the
-     parent is resolved as for the other no-follow checks). `node:fs` `rename` /
-     `symlink` go through the same ops. Checked and left as they were: `link` (a
-     hard link is a file, never a parent), `copyFile` / `truncate` / `Deno.open`
-     with `create` (a parent is a folder, so they fail), `mkdir` (a recursive
-     one checks the path it creates, so it can't create a denied one),
-     `makeTempDir` (a fresh name in a checked folder), a non-recursive remove (a
-     parent with a denied path in it isn't empty; removing an empty one or a
-     symlink to one leaves nothing that can be put back past the checks above),
-     `node:fs` `cp` (checks every destination entry) and `rm` (a recursive
-     remove). `chmod` / `chown` / `utime` on a parent change only that folder's
-     own metadata, as before. Tests: specs `permission/rename_ancestor_of_deny`,
-     `permission/symlink_ancestor_of_deny`,
-     `permission/wasi_rename_ancestor_of_deny`.
+224. **`fix(security)`: a rename, a symlink, a link removal or a mode change
+     can't move, replace or lock away a parent of a `--deny-write` path**
+     (`ext/fs/ops.rs`, `ext/node/ops/fs.rs`, `ext/node/ops/wasi.rs`,
+     `runtime/permissions/lib.rs`). The write checks on single paths use
+     partial-deny semantics: a deny scope under the path doesn't refuse it. That
+     is right for an open or a stat, but a rename moves the whole tree under its
+     old path and puts a tree in place of its new one. With
+     `--allow-write=base --deny-write=base/a/b`, `Deno.rename("base/a", …)`
+     moved the denied folder away, and a rename onto `base/c` (absent, or an
+     empty folder) created a denied `base/c/b` from another tree; both work on
+     stock Deno 2.9.8 and on every `3.0.0-denext.N` through `denext.7`. A
+     symlink needs unscoped `--allow-write`, which still leaves its
+     `--deny-write` scopes, and its link path wasn't checked against them at
+     all: a link made at a denied path that didn't exist yet, or at a parent of
+     one, put another tree there. `node:fs` `cp` recreates a source symlink with
+     the same unscoped check and had the same gap, and when the destination was
+     already a link it removed it unchecked first. `node:wasi`'s `path_rename`
+     and `path_symlink` had the rename and link-path gaps under a scoped grant.
+     Both paths of a rename, the link path of `Deno.symlink`, of `cp`'s
+     recreated links and of `path_symlink` now also get the strict check a
+     recursive remove has (a deny scope inside refuses it; the parent is
+     resolved as for the other no-follow checks). `node:fs` `rename` / `symlink`
+     go through the same ops. Three neighbours, also open on 2.9.8 and through
+     `denext.7`:
+     - **`path_symlink`'s target.** `Deno.symlink` takes unscoped read and write
+       because a target is only resolved when the link is followed;
+       `path_symlink` works under a preopen's scoped grant and stored any
+       target, so host code writing under the preopen could be led out of it
+       (Deno's allow scopes check the path as given) or a link pointed into a
+       denied path. The target, resolved from the link's folder as the kernel
+       will (through existing links, a missing tail kept as named, a `..` after
+       a name refused), must now stay in the preopen (`ENOTCAPABLE`, as every
+       `path_*` op answers an escape) and be readable and writable (`EACCES`),
+       the rule `Deno.symlink` applies to a scoped grant in a confined
+       lifecycle-script jail. A relative target with leading `..` is checked
+       where the link is made; moving its folder shallower later can point it
+       elsewhere, as for the jail.
+     - **A non-recursive remove of a link.** Removing a symlink (or a Windows
+       junction) takes away every path reached through it, so `Deno.remove`,
+       `node:fs` `unlink` / `rm` and `rmdir` (which removes a directory link or
+       a junction on Windows) give a link the strict check; a file or a folder
+       keeps the partial one (a folder with a denied path in it isn't empty).
+     - **`chmod` / `chown` on a parent.** They don't modify the denied path, but
+       mode 000 on its folder locks it away as mode 000 on the path itself
+       (refused) would, and a group- or world-writable folder lets another user
+       swap it. `Deno.chmod` / `chown`, `node:fs` `chmod` / `lchmod` / `chown` /
+       `lchown` / `fchmod` / `fchown` now refuse a folder with a deny scope
+       inside, on the path as given and on where it resolves
+       (`PermissionsContainer::check_write_resolved_not_denied`, the deny half
+       of the strict check, for a path reached through a symlink or an open
+       handle). Ordinary uses are untouched: a file, or a folder with nothing
+       denied in it. `utime` / `futimes` keep the partial check: times touch
+       only the folder's own entry.
+
+     `node:fs` `cp`'s macOS `clonefile` path cleans a failed clone up with a
+     recursive remove of the destination: with a deny scope inside the
+     destination it now skips the clone and copies entry by entry, and the
+     cleanup has the strict check too (reaching it needed another process to
+     create the denied path mid-copy, so there is no failing test for it).
+     Checked and left as they were: `link` (a hard link is a file, never a
+     parent), `copyFile` / `truncate` / `Deno.open` with `create` (a parent is a
+     folder, so they fail), `mkdir` (a recursive one checks the path it creates,
+     so it can't create a denied one), `makeTempDir` (a fresh name in a checked
+     folder), `node:fs` `cp`'s other destination entries (each checked; a
+     removed destination link is resolved to its target first) and `rm` with
+     `recursive`. Deny scopes compare case-insensitively on Windows and macOS,
+     so another spelling of a parent is refused too. Tests: specs
+     `permission/rename_ancestor_of_deny`, `symlink_ancestor_of_deny`,
+     `wasi_rename_ancestor_of_deny`, `remove_link_ancestor_of_deny` (a junction
+     on Windows), `chmod_ancestor_of_deny`, `cp_symlink_ancestor_of_deny`,
+     `wasi_symlink_target`.
 
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
