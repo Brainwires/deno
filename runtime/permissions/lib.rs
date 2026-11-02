@@ -1700,13 +1700,13 @@ impl<'a> PathQueryDescriptor<'a> {
       // paths. We pass these through.
       (path, None)
     } else if path.is_absolute() {
-      ((normalize_path(path)), None)
+      (normalize_path(path), None)
     } else {
       let cwd = sys
         .env_current_dir()
         .map_err(PathResolveError::CwdResolve)?;
       (
-        (normalize_path(Cow::Owned(cwd.join(path.as_ref())))),
+        normalize_path(Cow::Owned(cwd.join(path.as_ref()))),
         Some(path.to_string_lossy().into_owned()),
       )
     };
@@ -1730,7 +1730,7 @@ impl<'a> PathQueryDescriptor<'a> {
       // paths. We pass these through.
       path
     } else {
-      (normalize_path(path))
+      normalize_path(path)
     };
     let cmp_path = comparison_key(&path);
     Self {
@@ -1896,10 +1896,10 @@ impl PathDescriptor {
       // paths. We pass these through.
       (path, None)
     } else if path.is_absolute() {
-      ((normalize_path(path)), None)
+      (normalize_path(path), None)
     } else {
       (
-        (normalize_path(Cow::Owned(cwd.join(path.as_ref())))),
+        normalize_path(Cow::Owned(cwd.join(path.as_ref()))),
         Some(path.to_string_lossy().into_owned()),
       )
     };
