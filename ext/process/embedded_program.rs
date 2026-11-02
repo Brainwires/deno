@@ -43,7 +43,7 @@ use std::sync::Arc;
 use std::sync::LazyLock;
 use std::sync::Mutex;
 
-use deno_permissions::PathQueryDescriptor;
+use deno_permissions::PathDescriptor;
 use sha2::Digest;
 use sha2::Sha256;
 
@@ -78,9 +78,8 @@ pub fn set_embedded_programs(programs: Vec<EmbeddedProgram>) {
 /// spelling that passes the run grant as the registered program's path must
 /// find it here, or the spawn would skip the check.
 fn same_path(a: &Path, b: &Path) -> bool {
-  let a = PathQueryDescriptor::new_known_absolute(Cow::Borrowed(a));
-  let b = PathQueryDescriptor::new_known_absolute(Cow::Borrowed(b));
-  a.starts_with(&b) && b.starts_with(&a)
+  PathDescriptor::new_known_absolute(Cow::Borrowed(a))
+    == PathDescriptor::new_known_absolute(Cow::Borrowed(b))
 }
 
 /// The registered program `cmd` names, if any.
