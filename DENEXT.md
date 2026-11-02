@@ -8551,11 +8551,39 @@ where the changes are discussed.
        `"cancelled"`, not `"failed"`: the host can't read the pointer's state
        outside an event, so it asks and the compositor turns it down.
 
+221. **`feat(desktop)`: the OS's quits reach the app's guards** (laufey API 52;
+     `cli/rt/desktop.rs`, `cli/rt_desktop/lib.rs`, `runtime/ops/desktop.rs`).
+     Cmd+Q, the `quit` role, the Dock's Quit and a logout on macOS, and
+     `WM_QUERYENDSESSION` on Windows, now run `Deno.desktop.quit()`, so a
+     `beforequit` or `close` listener can refuse them (a session end only by
+     request, below). `beforequit` carries `reason` (`"quit"` or
+     `"session-end"`). A held session end waits for `quit()` or the new
+     `Deno.desktop.cancelQuit()`, bounded in laufey: 5 s for a quit nobody
+     answers, 10 s for a macOS session end, 4 s on Windows, under the 5 s before
+     its "preventing shutdown" screen. `cancelQuit()` can only refuse in time:
+     past the deadline it returns `false` and does nothing. A refused session
+     end is a request the OS may not honour, and `true` says only that it was
+     made. Driven on a macOS 26.6.2 VM with a real logout, the dialog's Log Out
+     button on both backends: a regular app's refusal 300 ms or 8 s later
+     stopped it, and the alert says at once that the app interrupted the logout;
+     an accessory app's did not, at once (webview) or after 300 ms (both),
+     because loginwindow's `quitUIElementApps` phase sends those apps the quit
+     event and moves on. A real Windows logoff, restart and shutdown were not
+     driven. A Windows tray menu's raw `quit` role quits at once with no reason,
+     as macOS's used to. Tests: `desktop_ops_inert`, the `quitRequested`
+     assertions in `cli/rt/desktop.rs`, laufey's `--quit-request`.
+
+222. **`feat(desktop)`: `windowCapabilities().layerShellEdgeAnchor`** (laufey
+     API 52). `setPosition` on a Wayland layer surface takes screen coordinates:
+     it picks the output there and anchors to the nearest edges, so a position
+     at the bottom or right edge stays clear of that edge's panels. The key
+     reports it. Tests: `desktop_ops_inert`, laufey's `--overlay-edge`.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
 169-174, 176, 178, 180, 182-184, 186, 187, 189-191, 193-196, 198-203, 206, 207,
-209-215, 217) are what the prebuilt `libdenort` carries. The CLI-side parts (for
+209-215, 217, 221, 222) are what the prebuilt `libdenort` carries. The CLI-side parts (for
 example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's
 launchers) are in the branch too, but a stock CLI does not run them; denext's
 own launcher provides that environment.

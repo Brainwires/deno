@@ -89,6 +89,7 @@ Deno.test("the committed expected-na.json is well formed", async () => {
     "keyringpersist",
     "exit",
     "wayland",
+    "quit",
   ]);
   for (const [k, v] of Object.entries(data)) {
     if (k === "$comment") continue;

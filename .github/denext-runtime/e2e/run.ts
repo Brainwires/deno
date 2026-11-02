@@ -45,6 +45,7 @@ const AREAS: Record<
   keyringpersist: () => import("./areas/keyringpersist.ts"),
   exit: () => import("./areas/exit.ts"),
   wayland: () => import("./areas/wayland.ts"),
+  quit: () => import("./areas/quit.ts"),
 };
 // Asks the compositor of E2E_DISPLAY=wayland, so it runs only there.
 const WAYLAND_ONLY = new Set(["wayland"]);

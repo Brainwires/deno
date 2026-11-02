@@ -150,6 +150,9 @@
     "passkeys": [
       "launch: a completed registration / authentication ceremony"
     ],
+    "quit": [
+      "the OS's quits"
+    ],
     "update": [
       "a staged update signed by the same Developer ID / Authenticode signer is accepted"
     ],
@@ -180,6 +183,9 @@
     ],
     "passkeys": [
       "launch: a completed registration / authentication ceremony"
+    ],
+    "quit": [
+      "the OS's quits"
     ],
     "update": [
       "a staged update signed by the same Developer ID / Authenticode signer is accepted"
@@ -216,6 +222,9 @@
     "passkeys": [
       "launch: a completed registration / authentication ceremony"
     ],
+    "quit": [
+      "the OS's quits"
+    ],
     "update": [
       "a staged update signed by the same Developer ID / Authenticode signer is accepted"
     ],
@@ -246,6 +255,9 @@
     ],
     "passkeys": [
       "launch: a completed registration / authentication ceremony"
+    ],
+    "quit": [
+      "the OS's quits"
     ],
     "update": [
       "a staged update signed by the same Developer ID / Authenticode signer is accepted"
@@ -282,6 +294,9 @@
     ],
     "passkeys": [
       "launch: a completed registration / authentication ceremony"
+    ],
+    "quit": [
+      "the OS's quits"
     ],
     "update": [
       "a staged update signed by the same Developer ID / Authenticode signer is accepted",
@@ -336,6 +351,9 @@
     "passkeys": [
       "launch: a completed registration / authentication ceremony"
     ],
+    "quit": [
+      "the OS's quits"
+    ],
     "update": [
       "a staged update signed by the same Developer ID / Authenticode signer is accepted",
       "an install the user can't write -> install_not_writable"
@@ -372,6 +390,9 @@
     ],
     "passkeys": [
       "launch: a completed registration / authentication ceremony"
+    ],
+    "quit": [
+      "the OS's quits"
     ],
     "update": [
       "a staged update signed by the same Developer ID / Authenticode signer is accepted",
@@ -427,6 +448,9 @@
     ],
     "passkeys": [
       "launch: a completed registration / authentication ceremony"
+    ],
+    "quit": [
+      "the OS's quits"
     ],
     "update": [
       "a staged update signed by the same Developer ID / Authenticode signer is accepted",

@@ -439,6 +439,10 @@ pub enum DesktopEvent {
   /// (laufey API 45: on Linux a tray host appeared or went away):
   /// `Deno.desktop` "platformfeatureschanged".
   PlatformFeaturesChanged,
+  /// The OS asks the app to quit (laufey API 52): macOS's `terminate:`, or
+  /// the session ending. `Deno.desktop` runs its `quit()` for it.
+  #[serde(rename_all = "camelCase")]
+  QuitRequested { session_end: bool },
   /// What `Deno.desktop.titleBarPreferences()` reports changed (laufey API
   /// 47: the user moved the window buttons, or changed the double-click
   /// action, colour scheme or accent colour): `Deno.desktop`
@@ -1634,6 +1638,9 @@ pub struct WindowCapabilitiesInfo {
   pub transparent: bool,
   /// An `overlay: true` window is a wlr-layer-shell surface (Linux Wayland).
   pub layer_shell: bool,
+  /// `setPosition` on an `overlay` window takes screen coordinates and
+  /// anchors it to the nearest edges of its display, clear of the panels.
+  pub layer_shell_edge_anchor: bool,
   /// `Deno.dock.setActivationPolicy()` works (macOS).
   pub activation_policy: bool,
   /// `noActivate: true` makes a real non-activating panel.
@@ -2497,6 +2504,14 @@ pub trait DesktopApi: Send + Sync + 'static {
   /// End the app the way closing the last window does (laufey `quit`):
   /// remaining windows close without a `close` event.
   fn quit(&self);
+  /// Answer the OS's quit request in progress (laufey API 52); `false` keeps
+  /// the app running and asks the OS to stop a session end.
+  fn answer_quit_request(&self, _allow: bool) {}
+  /// Whether the OS is still waiting on that answer: false once it was given
+  /// or laufey's deadline passed.
+  fn quit_request_pending(&self) -> bool {
+    false
+  }
 
   // --- Window state, constraints, screens and chrome (laufey API 38). The
   // defaults are a backend that can do none of it.
@@ -4574,6 +4589,24 @@ fn op_desktop_quit(state: &mut OpState) {
   }
 }
 
+/// The answer to the OS's quit request in progress, `Deno.desktop.quit()`
+/// refused it.
+#[op2(fast)]
+fn op_desktop_answer_quit_request(state: &mut OpState, allow: bool) {
+  if let Some(api) = state.try_borrow::<Arc<dyn DesktopApi>>() {
+    api.answer_quit_request(allow);
+  }
+}
+
+/// Whether the OS's quit request is still waiting: false once it was answered
+/// or its deadline passed.
+#[op2(fast)]
+fn op_desktop_quit_request_pending(state: &mut OpState) -> bool {
+  state
+    .try_borrow::<Arc<dyn DesktopApi>>()
+    .is_some_and(|api| api.quit_request_pending())
+}
+
 /// `Deno.desktop.quitOnLastWindowClosed = …`.
 #[op2(fast)]
 fn op_desktop_set_quit_on_last_window_closed(state: &mut OpState, quit: bool) {
@@ -6480,6 +6513,8 @@ deno_core::extension!(
     op_desktop_stop_speaking,
     op_desktop_speech_voices,
     op_desktop_quit,
+    op_desktop_answer_quit_request,
+    op_desktop_quit_request_pending,
     op_desktop_set_quit_on_last_window_closed,
     op_desktop_close_reply,
   ],
@@ -6872,6 +6907,11 @@ mod tests {
     assert_eq!(
       serde_json::to_value(DesktopEvent::PlatformFeaturesChanged).unwrap(),
       json!({ "kind": "platformFeaturesChanged" })
+    );
+    assert_eq!(
+      serde_json::to_value(DesktopEvent::QuitRequested { session_end: true })
+        .unwrap(),
+      json!({ "kind": "quitRequested", "sessionEnd": true })
     );
     assert_eq!(
       serde_json::to_value(DesktopEvent::TitleBarPreferencesChanged).unwrap(),
