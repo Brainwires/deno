@@ -404,7 +404,8 @@ Deno.test("[node/dns] lookup passes AI_ADDRCONFIG to getaddrinfo", async () => {
 });
 
 // net.connect() asks for AI_ADDRCONFIG by default outside Windows, so a machine
-// with no IPv6 never spends a family-autoselection attempt on an AAAA record.
+// with no IPv6 never spends a family-autoselection attempt on an AAAA record,
+// even when IPv6 results come first.
 Deno.test({
   name: "[node/net] connect does not attempt IPv6 on a host without it",
   ignore: !hasNoIpv6(),
@@ -414,25 +415,30 @@ Deno.test({
       server.listen(0, "127.0.0.1", resolve)
     );
     const { port } = server.address() as net.AddressInfo;
-    const attempts: number[] = [];
-    await new Promise<void>((resolve, reject) => {
-      const socket = net.connect({
-        host: "localhost",
-        port,
-        autoSelectFamily: true,
+    const order = dns.getDefaultResultOrder();
+    dns.setDefaultResultOrder("ipv6first");
+    const families: number[] = [];
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const socket = net.connect({
+          host: "localhost",
+          port,
+          autoSelectFamily: true,
+        });
+        socket.on(
+          "connectionAttempt",
+          (_ip: string, _port: number, family: number) => families.push(family),
+        );
+        socket.on("connect", () => {
+          socket.destroy();
+          resolve();
+        });
+        socket.on("error", reject);
       });
-      socket.on(
-        "connectionAttempt",
-        (_ip: string, _port: number, family: number) => attempts.push(family),
-      );
-      socket.on("connect", () => {
-        socket.destroy();
-        resolve();
-      });
-      socket.on("error", reject);
-    });
-    await new Promise((resolve) => server.close(resolve));
-    assert(attempts.length > 0);
-    assert(attempts.every((family) => family === 4), `${attempts}`);
+    } finally {
+      dns.setDefaultResultOrder(order);
+      await new Promise((resolve) => server.close(resolve));
+    }
+    assert(!families.includes(6), `attempted families: ${families}`);
   },
 });
