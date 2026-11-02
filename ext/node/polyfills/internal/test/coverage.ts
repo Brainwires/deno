@@ -1,4 +1,4 @@
-// Copyright 2018-2026 the Brainwires authors. MIT license.
+// Copyright 2018-2026 the Deno authors. MIT license.
 // Copyright Joyent and Node contributors. All rights reserved. MIT license.
 
 // `--experimental-test-coverage`, Node 26.5.1's line, branch and function

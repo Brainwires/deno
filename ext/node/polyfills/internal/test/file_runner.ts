@@ -1,4 +1,4 @@
-// Copyright 2018-2026 the Brainwires authors. MIT license.
+// Copyright 2018-2026 the Deno authors. MIT license.
 
 // `node --test` and `run()`: each test file in its own process, as Node's
 // `lib/internal/test_runner/runner.js`. A child started with
