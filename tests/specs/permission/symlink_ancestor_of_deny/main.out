@@ -1,0 +1,7 @@
+Deno.symlinkSync parent: denied
+Deno.symlink parent: denied
+Deno.symlinkSync denied: denied
+node symlinkSync parent: denied
+node symlink parent: denied
+denied paths absent: true
+other link made: true

@@ -1617,6 +1617,21 @@ impl WasiContext {
       Ok(p) => p,
       Err(e) => return e,
     };
+    // A rename moves the tree under the old path and puts one in place of the
+    // new path: like a recursive remove, a deny scope inside either refuses
+    // it, so a denied path's parent can't be moved away or replaced (denext,
+    // DENEXT.md 224).
+    if self
+      .permissions
+      .check_write(Cow::Borrowed(old_resolved.as_path()), "node:wasi")
+      .is_err()
+      || self
+        .permissions
+        .check_write(Cow::Borrowed(new_resolved.as_path()), "node:wasi")
+        .is_err()
+    {
+      return ERRNO_ACCES;
+    }
     match std::fs::rename(&old_resolved, &new_resolved) {
       Ok(()) => ERRNO_SUCCESS,
       Err(e) => io_err_to_errno(&e),
@@ -1752,6 +1767,15 @@ impl WasiContext {
       Ok(p) => p,
       Err(e) => return e,
     };
+    // A link at a parent of a denied path would put another tree in the
+    // denied path's place (denext, DENEXT.md 224).
+    if self
+      .permissions
+      .check_write(Cow::Borrowed(new_resolved.as_path()), "node:wasi")
+      .is_err()
+    {
+      return ERRNO_ACCES;
+    }
     #[cfg(unix)]
     {
       match std::os::unix::fs::symlink(&old_path, &new_resolved) {

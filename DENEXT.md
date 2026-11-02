@@ -8595,11 +8595,42 @@ where the changes are discussed.
      KWin. Still CEF 156.0.15. Tests: laufey's CI on the commit; item 220's leg
      is what checks the first two on a real compositor here.
 
+224. **`fix(security)`: a rename or a symlink can't move or replace a parent of
+     a `--deny-write` path** (`ext/fs/ops.rs`, `ext/node/ops/wasi.rs`). The
+     write checks on single paths use partial-deny semantics: a deny scope
+     under the path doesn't refuse it. That is right for an open or a stat, but
+     a rename moves the whole tree under its old path and puts a tree in place
+     of its new one. With `--allow-write=base --deny-write=base/a/b`,
+     `Deno.rename("base/a", …)` moved the denied folder away, and a rename onto
+     `base/c` (absent, or an empty folder) created a denied `base/c/b` from
+     another tree; both work on stock Deno 2.9.8 and on every
+     `3.0.0-denext.N` through `denext.7`. A symlink needs unscoped
+     `--allow-write`, which still leaves its `--deny-write` scopes, and its
+     link path wasn't checked against them at all: a link made at a denied path
+     that didn't exist yet, or at a parent of one, put another tree there.
+     `node:wasi`'s `path_rename` and `path_symlink` had the same gaps under a
+     scoped grant. Both paths of a rename, `Deno.symlink`'s link path and
+     `path_symlink`'s now also get the strict check a recursive remove has (a
+     deny scope inside refuses it; the parent is resolved as for the other
+     no-follow checks). `node:fs` `rename` / `symlink` go through the same ops.
+     Checked and left as they were: `link` (a hard link is a file, never a
+     parent), `copyFile` / `truncate` / `Deno.open` with `create` (a parent is
+     a folder, so they fail), `mkdir` (a recursive one checks the path it
+     creates, so it can't create a denied one), `makeTempDir` (a fresh name in
+     a checked folder), a non-recursive remove (a parent with a denied path in
+     it isn't empty; removing an empty one or a symlink to one leaves nothing
+     that can be put back past the checks above), `node:fs` `cp` (checks every
+     destination entry) and `rm` (a recursive remove). `chmod` / `chown` /
+     `utime` on a parent change only that folder's own metadata, as before.
+     Tests: specs `permission/rename_ancestor_of_deny`,
+     `permission/symlink_ancestor_of_deny`,
+     `permission/wasi_rename_ancestor_of_deny`.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
 169-174, 176, 178, 180, 182-184, 186, 187, 189-191, 193-196, 198-203, 206, 207,
-209-215, 217, 221, 222) are what the prebuilt `libdenort` carries. The CLI-side
+209-215, 217, 221, 222, 224) are what the prebuilt `libdenort` carries. The CLI-side
 parts (for example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a
 packaged app's launchers) are in the branch too, but a stock CLI does not run
 them; denext's own launcher provides that environment.

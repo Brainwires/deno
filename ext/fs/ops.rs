@@ -821,6 +821,13 @@ pub fn op_fs_rename_sync(
     OpenAccessKind::WriteNoFollow,
     Some("Deno.renameSync()"),
   )?;
+  // A rename moves the whole tree under the old path and puts a tree in
+  // place of the new one, so like a recursive remove both paths also get
+  // the strict write check: a deny scope inside either blocks it. Otherwise a
+  // denied folder's parent could be moved away, or another tree moved into
+  // the place of a parent of a denied path (denext, DENEXT.md 224).
+  permissions.check_write(Cow::Borrowed(&*oldpath), "Deno.renameSync()")?;
+  permissions.check_write(Cow::Borrowed(&*newpath), "Deno.renameSync()")?;
 
   let fs = state.borrow::<FileSystemRc>();
   fs.rename_sync(&oldpath, &newpath)
@@ -849,6 +856,13 @@ pub async fn op_fs_rename_async(
       OpenAccessKind::WriteNoFollow,
       Some("Deno.rename()"),
     )?;
+    // A rename moves the whole tree under the old path and puts a tree in
+    // place of the new one, so like a recursive remove both paths also get
+    // the strict write check: a deny scope inside either blocks it. Otherwise a
+    // denied folder's parent could be moved away, or another tree moved into
+    // the place of a parent of a denied path (denext, DENEXT.md 224).
+    permissions.check_write(Cow::Borrowed(&*oldpath), "Deno.rename()")?;
+    permissions.check_write(Cow::Borrowed(&*newpath), "Deno.rename()")?;
     (state.borrow::<FileSystemRc>().clone(), oldpath, newpath)
   };
 
@@ -943,7 +957,13 @@ fn check_symlink_permissions(
         other => other,
       };
       FsOpsErrorKind::Permission(err).into_box()
-    })
+    })?;
+  // Unscoped --allow-write still leaves its --deny-write scopes: a link made
+  // at a denied path, or at a parent of one, would put another tree in the
+  // denied path's place, so the link path gets the strict write check a
+  // recursive remove has (denext, DENEXT.md 224).
+  permissions.check_write(Cow::Borrowed(Path::new(newpath)), api_name)?;
+  Ok(())
 }
 
 #[op2(stack_trace)]

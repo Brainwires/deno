@@ -1,0 +1,13 @@
+Deno.renameSync parent: denied
+Deno.rename parent: denied
+Deno.renameSync denied: denied
+node renameSync parent: denied
+node rename parent: denied
+Deno.renameSync onto absent parent: denied
+Deno.rename onto absent parent: denied
+Deno.renameSync onto empty parent: denied
+node renameSync onto absent parent: denied
+node rename onto empty parent: denied
+denied paths absent: true
+still packaged: true
+other tree moved: true
