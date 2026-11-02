@@ -1485,6 +1485,7 @@ fn windows_long_path(path: Cow<'_, Path>) -> Cow<'_, Path> {
 fn windows_long_path_lookup(path: &Path) -> Option<PathBuf> {
   use std::os::windows::ffi::OsStrExt;
   use std::os::windows::ffi::OsStringExt;
+
   use windows_sys::Win32::Storage::FileSystem::GetLongPathNameW;
 
   let mut tail = Vec::new();
