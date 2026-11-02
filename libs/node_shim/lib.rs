@@ -3715,12 +3715,18 @@ pub fn translate_to_deno_args(
   // `--test`: Node's runner, each test file in its own process (denext); with
   // `--watch`, `deno test --watch` as before. A script started with
   // `--experimental-test-coverage` takes the same route: a process's V8
-  // coverage is written as it exits, so a parent has to read it.
+  // coverage is written as it exits, so a parent has to read it. A test file
+  // the runner started (NODE_TEST_CONTEXT set) reports to that parent instead.
+  #[allow(
+    clippy::disallowed_methods,
+    reason = "the node shim reads the process's own environment, as Node does"
+  )]
+  let in_test_child = std::env::var_os("NODE_TEST_CONTEXT").is_some();
   let single_file_coverage = !env_opts.test_runner
     && env_opts.test_runner_coverage
     && !env_opts.watch_mode
     && !parsed_args.remaining_args.is_empty()
-    && std::env::var_os("NODE_TEST_CONTEXT").is_none();
+    && !in_test_child;
   if (env_opts.test_runner && !env_opts.watch_mode) || single_file_coverage {
     if options.use_node_subcommand {
       deno_args.push("node".to_string());

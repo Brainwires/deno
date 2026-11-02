@@ -8548,7 +8548,11 @@ names for `laufey` (crates.io, or a git rev of Brainwires/laufey) with a path to
 that revision's `capi/`, records the `LAUFEY_API_VERSION` it compiled, and the
 package job fails if it differs from the hosts' `capi/include/laufey.h`.
 
-218. **`feat(ext/node)`: `node --test` is Node's runner, with coverage**
+Items 901-903 carry placeholder numbers: `feat/node-compat-round5` wrote them as
+218-220, which `integrate/denext-8-pre` gives to other items. They take the next
+free numbers when the branch is merged.
+
+901. **`feat(ext/node)`: `node --test` is Node's runner, with coverage**
      (`feat/node-compat-round5`, runtime; `libs/node_shim/lib.rs`,
      `ext/node/polyfills/testing.ts`,
      `ext/node/polyfills/internal/test/file_runner.ts`,
@@ -8606,7 +8610,7 @@ package job fails if it differs from the hosts' `capi/include/laufey.h`.
        are not implemented in the runner. Tests: spec `node/node_test_cli`; shim
        unit test `test_translate_test_runner` updated.
 
-219. **`fix(cli)`: `--experimental-loader` and `--import` in `NODE_OPTIONS`**
+902. **`fix(cli)`: `--experimental-loader` and `--import` in `NODE_OPTIONS`**
      (`feat/node-compat-round5`, CLI; `libs/cli_parser/src/convert.rs`,
      `tests/node_compat/mod.rs`). On a command line the shim registers a loader
      (`module.register()` in a `--preload` module), but in `NODE_OPTIONS`
@@ -8620,7 +8624,7 @@ package job fails if it differs from the hosts' `capi/include/laufey.h`.
      `node_options_loader_and_import_preload`; spec `node/node_test_cli`
      (`loader_in_node_options`).
 
-220. **`test(node_compat)`: 27 tests the node_compat round 5 fixes pass**
+903. **`test(node_compat)`: 27 tests the node_compat round 5 fixes pass**
      (`feat/node-compat-round5`, test config only;
      `tests/node_compat/config.jsonc`). Each passed three isolated runs on a
      Linux x86_64 debug build and is on for Linux only, with that reason, until
