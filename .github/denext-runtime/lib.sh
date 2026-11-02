@@ -74,3 +74,15 @@ unpack_archive() {
     *) echo "unknown archive type: $archive" >&2; return 1 ;;
   esac
 }
+
+# Wait for a background process to write a non-empty file: up to 60 s (a CI
+# macOS runner can take many seconds to start Python), and not past its exit.
+wait_for_file() { # <file> <pid>
+  local deadline=$((SECONDS + 60))
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    test -s "$1" && return 0
+    kill -0 "$2" 2>/dev/null || { test -s "$1"; return; }
+    sleep 0.1
+  done
+  return 1
+}

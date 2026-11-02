@@ -5027,7 +5027,14 @@
     "internet/test-http-dns-fail.js": {},
     "internet/test-http-https-default-ports.js": {},
     "internet/test-http2-issue-32922.js": {},
-    "internet/test-https-autoselectfamily-slow-timeout.js": {},
+    // Passes only if a TCP handshake to nodejs.org finishes inside the test's
+    // 10 ms attempt timeout, or the last address tried is reachable. A runner
+    // with no IPv6 route tries an IPv6 address last. Node itself fails the same
+    // way there (DENEXT.md item 218).
+    "internet/test-https-autoselectfamily-slow-timeout.js": {
+      "linux": false,
+      "reason": "Depends on the round-trip time to nodejs.org being under 10 ms; Node fails the same way when it is not"
+    },
     "internet/test-net-autoselectfamily-events-failure.js": {},
     "internet/test-net-autoselectfamily-events-timeout.js": {},
     "internet/test-net-autoselectfamily-timeout-close.js": {

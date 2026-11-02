@@ -8500,6 +8500,22 @@ where the changes are discussed.
      `stage_refuses_a_case_only_rename_of_the_executable`,
      `apply_refuses_a_case_only_rename_of_the_executable` (each failed before).
 
+218. **`test(node_compat)`, `ci(denext)`: two checks that failed on the runner,
+     not on the code** (`tests/node_compat/config.jsonc`,
+     `.github/denext-runtime/denort_smoke.sh`, `runtime_refusal_smoke.sh`,
+     `lib.sh`). `internet/test-https-autoselectfamily-slow-timeout.js` is off on
+     Linux again, as upstream had it (item 152 turned it on). It passes only if
+     a TCP handshake to `nodejs.org` finishes inside its 10 ms attempt timeout:
+     the address list is IPv4, IPv6, IPv4, IPv6, and a runner has no IPv6 route,
+     so the last address, the one without a timer, fails at once. A runner has a
+     link-local IPv6 address, so `AI_ADDRCONFIG` keeps the AAAA records. Stock
+     Node 24 fails the same way in a container with a link-local address and 30
+     ms of added delay. On the smoke side, `denort_smoke.sh`'s loopback release
+     server gave Python 10 s, but `HTTPServer.server_bind` calls
+     `socket.getfqdn`, which took 35 s on a `macos-15-intel` runner. The server
+     now skips that lookup, and both smokes wait up to 60 s for the port file
+     and stop waiting if the process exits.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
