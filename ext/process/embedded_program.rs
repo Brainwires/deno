@@ -471,6 +471,11 @@ mod tests {
     assert!(std::fs::write(&path, b"something else").is_err());
     assert!(std::fs::rename(&path, path.with_file_name("moved")).is_err());
     assert!(std::fs::remove_file(&path).is_err());
+    // Nor can its folder, or the one above, be moved with the file in it.
+    let folder = path.parent().unwrap();
+    assert!(std::fs::rename(folder, folder.with_file_name("moved")).is_err());
+    let above = folder.parent().unwrap();
+    assert!(std::fs::rename(above, above.with_file_name("moved")).is_err());
     drop(held);
     assert!(std::fs::write(&path, b"packaged").is_ok());
   }

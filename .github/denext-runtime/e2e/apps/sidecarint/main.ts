@@ -11,9 +11,11 @@ const r = new Report("sidecarint");
 Deno.serve((req) => shared(req) ?? html(page("e2e sidecar integrity")));
 
 const program: string = r.params.program;
-const run = async () => {
+const parent = (p: string) =>
+  p.slice(0, Math.max(p.lastIndexOf("/"), p.lastIndexOf("\\")));
+const run = async (cmd = program) => {
   try {
-    const o = await new Deno.Command(program, {
+    const o = await new Deno.Command(cmd, {
       stdout: "piped",
       stderr: "null",
     }).output();
@@ -63,6 +65,40 @@ if (r.params.phase === "first") {
     /NotCapable/.test(beside),
     beside,
   );
+  // The folders above the program's are the app's to write, but moving one
+  // would take the program's folder with it.
+  const hashDir = parent(program);
+  for (
+    const [name, dir] of [["parent", parent(hashDir)], [
+      "sidecars",
+      parent(parent(hashDir)),
+    ]]
+  ) {
+    const moved = await attempt(() => Deno.rename(dir, `${dir}.moved`));
+    r.check(
+      `the app cannot move the program's ${name} folder`,
+      /NotCapable/.test(moved),
+      moved,
+    );
+  }
+  const linked = await attempt(() =>
+    Deno.link(program, `${parent(parent(hashDir))}.link`)
+  );
+  r.check(
+    "the app cannot link to the program",
+    /NotCapable/.test(linked),
+    linked,
+  );
+  if (Deno.build.os !== "linux") {
+    // The grant takes another case of the path there; so does the check.
+    const cased = `${hashDir}${program.slice(hashDir.length).toUpperCase()}`;
+    r.data.cased = await run(cased);
+    r.check(
+      "another case of the path runs what was packaged",
+      r.data.cased === "ran",
+      r.data.cased,
+    );
+  }
 } else {
   r.data.swapped = await run();
   r.check(
