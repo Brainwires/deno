@@ -8720,7 +8720,16 @@ where the changes are discussed.
        are normalised at every check, so a scope written long matches whenever
        its entry comes to exist; a scope written as the alias of an entry that
        doesn't exist yet matches that spelling only — write deny scopes with
-       long names.
+       long names. The long names feed the comparison key only
+       (`comparison_key`): the path handed to the operation keeps its names as
+       given. The first version of this item replaced them in the operation's
+       path too, which broke every read inside a compiled binary whose own path
+       holds an alias (the Windows CI runner's temp dir is under `RUNNER~1`):
+       the binary's virtual file system is keyed on the executable's path as
+       spelled, so `…\runneradmin\…\main.exe\file.txt` missed it and went to the
+       real disk (os error 3; eleven `compile`, `npm` and `run` specs on the
+       gaps-2 Windows dispatch). `permission/windows_short_name_deny` now also
+       checks that an operation's error names the alias it was given.
      - **Windows compared names case-insensitively for ASCII letters only.**
        NTFS folds every letter through its `$UpCase` table, so `base/Ärger` and
        `base/ärger` are one folder; the ASCII fold saw two, and the no-follow
@@ -8772,21 +8781,20 @@ where the changes are discussed.
        `prog:evil` compared as other names than the denied `prog`, so a write to
        a denied file's default or named stream, and a stream of a denied folder,
        got past `--deny-write` (and a read of a denied file's `::$DATA` past
-       `--deny-read`). Now every path the permission layer builds
-       (`windows_normalize`, after `normalize_path`, before the long-name
-       lookup) has the trailing dots and spaces of every name removed (a name of
-       only dots and spaces is dropped, as `normalize_path` does), and the
-       comparison form (`comparison_path`) of every name ends at its first `:`,
-       so a stream is checked as its file; the path handed to the operation
-       keeps the stream on the final name (a write to `x:meta` still writes the
-       stream, not `x`), and keeps a stream on a parent as given (Win32 can't
-       open through one). A verbatim `\\?\` path is left as it is: Win32 hands
-       it to the file system unchanged, so it names the literal entry (`a.`),
-       and `strip_verbatim_prefix` keeps the prefix on exactly those paths, so
-       they match no scope written without one. The operation is handed the
-       normalized path, so the check and the operation name one entry on every
-       path (an operation that used the path as given would still open the same
-       entry: Win32 removes the same dots and spaces).
+       `--deny-read`). Now the comparison key of every path the permission layer
+       builds (`comparison_key`, after `normalize_path`) has the trailing dots
+       and spaces of every name removed (a name of only dots and spaces is
+       dropped, as `normalize_path` does) and every name cut at its first `:`,
+       before the long-name lookup and the fold, so a stream is checked as its
+       file and an alias with a stream as the long name. The path handed to the
+       operation is never changed: it keeps the stream (a write to `x:meta`
+       still writes the stream, not `x`) and its names as given, and Win32 opens
+       the same entry for the trimmed spelling (a parent spelled with a trailing
+       space, which Win32 keeps, does not exist unless made through `\\?\`, so
+       the operation fails on it). A verbatim `\\?\` path is only folded: Win32
+       hands it to the file system unchanged, so it names the literal entry
+       (`a.`), and `strip_verbatim_prefix` keeps the prefix on exactly those
+       paths, so they match no scope written without one.
      - **`Deno.FsFile.prototype.utime` on a file opened read-only** was reported
        as unchecked. It isn't: upstream's #30872 (Deno 2.5) checks write
        permission on the file's path (no-follow, the partial check `Deno.utime`

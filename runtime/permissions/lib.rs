@@ -1372,8 +1372,9 @@ impl PartialEq<PathDescriptor> for PathQueryDescriptor<'_> {
 ///   through its `$UpCase` table (ASCII only before DENEXT.md 225, which let
 ///   `Ärger` and `ärger`, one name on NTFS, compare as two), and a named
 ///   stream compared as its file: `b::$DATA` and `b:evil` are `b` (every
-///   component, so `a:x\b` compares as `a\b`; the path handed to the
-///   operation keeps the stream, see `windows_normalize`).
+///   component, so `a:x\b` compares as `a\b`). `comparison_key` applies the
+///   rest of the Windows normalization before this; the path handed to the
+///   operation is never changed.
 /// - macOS (APFS/HFS+): NFKD-normalized and Unicode-case-folded, because
 ///   APFS resolves Unicode-equivalent and case-differing paths to the same
 ///   inode (e.g. `ß`/`ss`, `ﬁ`/`fi`, NFC/NFD forms, upper/lower).
@@ -1511,8 +1512,9 @@ fn strip_verbatim_prefix(path: Cow<'_, Path>) -> Cow<'_, Path> {
 /// be created later) is its own name and aliases nothing at that moment; the
 /// queries are normalised again at every check, so a scope written as a long
 /// name matches whenever the entry comes to exist, and a scope written as a
-/// short name for an entry that doesn't exist yet matches that spelling only
-/// (denext, DENEXT.md 225).
+/// short name for an entry that doesn't exist yet matches that spelling only.
+/// Used for the comparison key only (`comparison_key`): the path the
+/// operation is handed keeps its names as given (denext, DENEXT.md 225).
 #[cfg(windows)]
 fn windows_long_path(path: Cow<'_, Path>) -> Cow<'_, Path> {
   if !path.as_os_str().as_encoded_bytes().contains(&b'~') {
@@ -1568,99 +1570,87 @@ fn windows_long_path_lookup(path: &Path) -> Option<PathBuf> {
   }
 }
 
-/// On Windows, a non-verbatim path's names as the file system will see them,
-/// applied after `normalize_path` to every path the permission layer compares
-/// (a query, a flag's scope, the no-follow resolution), so that the check and
-/// the operation, which is handed this path, name one entry (denext,
+/// The comparison form of a path (`cmp_path`). Only the key: the path
+/// itself, which the operation is handed, stays as `normalize_path` left it
+/// (replacing names in the operation's path broke every read inside a
+/// compiled binary whose own path holds an 8.3 alias: its virtual file
+/// system is keyed on the executable's path as spelled). On Windows, for a
+/// non-verbatim path, the names as the file system will see them (denext,
 /// DENEXT.md 225):
-/// - the trailing dots and spaces of every name are removed, as Win32 removes
-///   them before the file system sees the name (`base\a.` and `base\a ` open
-///   `base\a`; `normalize_path` removes them too, but only from a path that
-///   also needs another normalization, so `base\a.\b` and a deny scope
-///   written that way were compared as written and matched nothing; a name
-///   of only dots and spaces is dropped);
-/// - a named stream on the final name (`b:evil`, `b::$DATA`) is taken off
-///   for the long-name lookup and put back, so the operation still reaches
-///   the stream (and `comparison_path` compares the name without it: a write
-///   to `b::$DATA` is a write to `b`);
-/// - every existing name is replaced by its long name (`windows_long_path`).
+/// - a named stream is cut off every name (`b:evil`, `b::$DATA` are `b`,
+///   and `a:x\b` is `a\b`): NTFS opens a stream on the file named before
+///   the colon, so a write to `b::$DATA` is a write to `b`;
+/// - the trailing dots and spaces of every name are removed, as Win32
+///   removes them before the file system sees the name (`base\a.` and
+///   `base\a ` open `base\a`; `normalize_path` removes them too, but only
+///   from a path that also needs another normalization, so `base\a.\b` and
+///   a deny scope written that way were compared as written and matched
+///   nothing; a name of only dots and spaces is dropped);
+/// - every existing name is replaced by its long name (`windows_long_path`,
+///   so an 8.3 alias compares as the name it opens);
+/// - then `comparison_path`'s case fold.
 ///
 /// A verbatim path (`\\?\`, which `strip_verbatim_prefix` keeps when a name
 /// ends in a dot or a space or holds a `:`, since without the prefix it would
-/// name another entry) is left as it is: Win32 hands it to the file system
+/// name another entry) is folded only: Win32 hands it to the file system
 /// unchanged, so it names the literal entry, and its prefix keeps it from
 /// matching a scope written without one.
 #[cfg(windows)]
-fn windows_normalize(path: Cow<'_, Path>) -> Cow<'_, Path> {
+fn comparison_key(path: &Path) -> PathBuf {
   use std::path::Component;
   if matches!(
     path.components().next(),
     Some(Component::Prefix(prefix)) if prefix.kind().is_verbatim()
   ) {
-    return path;
+    return comparison_path(path);
   }
-  let (path, stream) = windows_detach_stream(path);
-  let path = windows_trim_names(path);
-  let path = windows_long_path(path);
-  windows_attach_stream(path, stream)
+  let plain = windows_strip_streams(Cow::Borrowed(path));
+  let plain = windows_trim_names(plain);
+  let plain = windows_long_path(plain);
+  comparison_path(&plain)
 }
 
-/// The path without the final name's stream suffix, and that suffix (from
-/// its first `:`). A stream with nothing before the colon (`base\:evil`) is a
-/// stream of the directory: the path becomes `base`, the suffix `:evil`.
-#[cfg(windows)]
-fn windows_detach_stream(
-  path: Cow<'_, Path>,
-) -> (Cow<'_, Path>, Option<std::ffi::OsString>) {
-  let Some(name) = path.file_name() else {
-    return (path, None);
-  };
-  let bytes = name.as_encoded_bytes();
-  let Some(colon) = bytes.iter().position(|b| *b == b':') else {
-    return (path, None);
-  };
-  // SAFETY: both halves of a valid encoded `OsStr` split at an ASCII byte.
-  let (plain, stream) = unsafe {
-    (
-      OsStr::from_encoded_bytes_unchecked(&bytes[..colon]),
-      OsStr::from_encoded_bytes_unchecked(&bytes[colon..]),
-    )
-  };
-  let stream = stream.to_os_string();
-  let plain = plain.to_os_string();
-  let mut path = path.into_owned();
-  path.pop();
-  if !plain.is_empty() {
-    path.push(plain);
-  }
-  (Cow::Owned(path), Some(stream))
+#[cfg(not(windows))]
+#[inline]
+fn comparison_key(path: &Path) -> PathBuf {
+  comparison_path(path)
 }
 
-/// Put a stream suffix back on the path's final name (see
-/// [`windows_detach_stream`]).
+/// Every name of the path cut at its first `:` (see [`comparison_key`]); a
+/// name that is only a stream (`base\:evil`, a stream of the directory) is
+/// dropped. The path itself when no name holds a colon.
 #[cfg(windows)]
-fn windows_attach_stream(
-  path: Cow<'_, Path>,
-  stream: Option<std::ffi::OsString>,
-) -> Cow<'_, Path> {
-  let Some(stream) = stream else {
+fn windows_strip_streams(path: Cow<'_, Path>) -> Cow<'_, Path> {
+  use std::path::Component;
+  let has_colon = |name: &OsStr| name.as_encoded_bytes().contains(&b':');
+  if !path
+    .components()
+    .any(|c| matches!(c, Component::Normal(name) if has_colon(name)))
+  {
     return path;
-  };
-  let mut path = path.into_owned();
-  match path.file_name() {
-    Some(name) => {
-      let mut name = name.to_os_string();
-      name.push(&stream);
-      path.set_file_name(name);
+  }
+  let mut out = PathBuf::new();
+  for component in path.components() {
+    match component {
+      Component::Normal(name) if has_colon(name) => {
+        let bytes = name.as_encoded_bytes();
+        let colon = bytes.iter().position(|b| *b == b':').unwrap_or(0);
+        if colon > 0 {
+          // SAFETY: a prefix of a valid encoded `OsStr` cut before an ASCII
+          // byte.
+          out.push(unsafe {
+            OsStr::from_encoded_bytes_unchecked(&bytes[..colon])
+          });
+        }
+      }
+      other => out.push(other.as_os_str()),
     }
-    // A stream of the root directory.
-    None => path.push(stream),
   }
-  Cow::Owned(path)
+  Cow::Owned(out)
 }
 
 /// Every name of the path without its trailing dots and spaces (see
-/// [`windows_normalize`]); the path itself when no name has any.
+/// [`comparison_key`]); the path itself when no name has any.
 #[cfg(windows)]
 fn windows_trim_names(path: Cow<'_, Path>) -> Cow<'_, Path> {
   use std::path::Component;
@@ -1691,12 +1681,6 @@ fn windows_trim_names(path: Cow<'_, Path>) -> Cow<'_, Path> {
   Cow::Owned(out)
 }
 
-#[cfg(not(windows))]
-#[inline]
-fn windows_normalize(path: Cow<'_, Path>) -> Cow<'_, Path> {
-  path
-}
-
 impl<'a> PathQueryDescriptor<'a> {
   pub fn new(
     sys: &impl sys_traits::EnvCurrentDir,
@@ -1716,17 +1700,17 @@ impl<'a> PathQueryDescriptor<'a> {
       // paths. We pass these through.
       (path, None)
     } else if path.is_absolute() {
-      (windows_normalize(normalize_path(path)), None)
+      ((normalize_path(path)), None)
     } else {
       let cwd = sys
         .env_current_dir()
         .map_err(PathResolveError::CwdResolve)?;
       (
-        windows_normalize(normalize_path(Cow::Owned(cwd.join(path.as_ref())))),
+        (normalize_path(Cow::Owned(cwd.join(path.as_ref())))),
         Some(path.to_string_lossy().into_owned()),
       )
     };
-    let cmp_path = comparison_path(&path);
+    let cmp_path = comparison_key(&path);
     Ok(Self {
       path,
       cmp_path,
@@ -1746,9 +1730,9 @@ impl<'a> PathQueryDescriptor<'a> {
       // paths. We pass these through.
       path
     } else {
-      windows_normalize(normalize_path(path))
+      (normalize_path(path))
     };
-    let cmp_path = comparison_path(&path);
+    let cmp_path = comparison_key(&path);
     Self {
       path,
       cmp_path,
@@ -1912,14 +1896,14 @@ impl PathDescriptor {
       // paths. We pass these through.
       (path, None)
     } else if path.is_absolute() {
-      (windows_normalize(normalize_path(path)), None)
+      ((normalize_path(path)), None)
     } else {
       (
-        windows_normalize(normalize_path(Cow::Owned(cwd.join(path.as_ref())))),
+        (normalize_path(Cow::Owned(cwd.join(path.as_ref())))),
         Some(path.to_string_lossy().into_owned()),
       )
     };
-    let cmp_path = comparison_path(&path);
+    let cmp_path = comparison_key(&path);
     Self {
       path: path.into_owned(),
       cmp_path,
@@ -3544,12 +3528,10 @@ impl<'a> SpecialFilePathQueryDescriptor<'a> {
     let parent =
       canonicalize_path_maybe_not_exists_following_links(sys, parent)
         .map_err(PathResolveError::Canonicalize)?;
-    // The final name is kept as given, so on Windows an 8.3 alias of a long
-    // name is read as the long name here, and a stream suffix stays on it
-    // (denext, DENEXT.md 225).
-    Ok(Some(
-      windows_normalize(Cow::Owned(parent.join(name))).into_owned(),
-    ))
+    // The final name is kept as given; the comparison of the result reads an
+    // 8.3 alias as its long name and a stream as its file (`comparison_key`,
+    // DENEXT.md 225).
+    Ok(Some(parent.join(name)))
   }
 }
 
@@ -7407,7 +7389,7 @@ mod tests {
       } else {
         PathBuf::from("/").join(path)
       };
-      let cmp_path = comparison_path(&path);
+      let cmp_path = comparison_key(&path);
       PathDescriptor {
         path,
         cmp_path,
@@ -7491,7 +7473,7 @@ mod tests {
       &self,
       path: Cow<'a, Path>,
     ) -> Result<PathQueryDescriptor<'a>, PathResolveError> {
-      let cmp_path = comparison_path(&path);
+      let cmp_path = comparison_key(&path);
       Ok(PathQueryDescriptor {
         path,
         cmp_path,
@@ -12406,18 +12388,23 @@ mod tests {
     ] {
       let d = desc(spelled);
       assert_eq!(d, plain, "{spelled:?}");
-      assert_eq!(d.path, plain.path, "{spelled:?}: the operation's path");
     }
-    // A stream is compared as its file; the operation keeps the stream.
-    for (spelled, op_path) in [
-      ("C:\\w\\base\\a\\b::$DATA", "C:\\w\\base\\a\\b::$DATA"),
-      ("C:\\w\\base\\a\\b:evil", "C:\\w\\base\\a\\b:evil"),
-      ("C:\\w\\base\\a\\b.:evil", "C:\\w\\base\\a\\b:evil"),
-      ("C:\\w\\base\\a\\b\\:evil", "C:\\w\\base\\a\\b:evil"),
+    // The operation's path is as given (Win32 removes the same dots).
+    assert_eq!(
+      desc("C:\\w\\base\\a.\\b").path,
+      Path::new("C:\\w\\base\\a.\\b")
+    );
+    // A stream is compared as its file; the operation keeps the path as
+    // given, stream included.
+    for spelled in [
+      "C:\\w\\base\\a\\b::$DATA",
+      "C:\\w\\base\\a\\b:evil",
+      "C:\\w\\base\\a\\b.:evil",
+      "C:\\w\\base\\a\\b\\:evil",
     ] {
       let d = desc(spelled);
       assert_eq!(d, plain, "{spelled:?}");
-      assert_eq!(d.path, Path::new(op_path), "{spelled:?}");
+      assert_eq!(d.path, Path::new(spelled), "{spelled:?}");
       let deny = PathDescriptor::new_known_absolute(Cow::Borrowed(Path::new(
         "C:\\w\\base\\a\\b",
       )));
@@ -12427,6 +12414,13 @@ mod tests {
     let d = desc("C:\\w\\base\\a:evil\\b");
     assert_eq!(d, plain);
     assert_eq!(d.path, Path::new("C:\\w\\base\\a:evil\\b"));
+    // An alias with a stream compares as the alias's long name would (the
+    // lookup sees the name without the stream); here nothing exists, so
+    // the key is the spelling itself.
+    assert_eq!(
+      desc("C:\\no-such-dir-7f3a\\x~1:evil"),
+      desc("C:\\no-such-dir-7f3a\\x~1")
+    );
     // A verbatim path names the literal entry and matches no plain scope.
     let verbatim = desc("\\\\?\\C:\\w\\base\\a.");
     assert_ne!(verbatim, desc("C:\\w\\base\\a"));

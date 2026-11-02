@@ -67,3 +67,16 @@ console.log(
     "child_allow.ts",
   ),
 );
+
+// The alias feeds the comparison only: the operation keeps the path as
+// given (a compiled binary's virtual file system is keyed on the
+// executable's path as spelled, so a read through its long name missed it).
+try {
+  Deno.readTextFileSync(`base/${short}/other/missing.txt`);
+  console.log("the operation keeps the alias in its path: (no error)");
+} catch (e) {
+  console.log(
+    "the operation keeps the alias in its path:",
+    e instanceof Deno.errors.NotFound && String(e).includes(short),
+  );
+}
