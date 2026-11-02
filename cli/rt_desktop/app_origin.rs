@@ -392,7 +392,7 @@ mod tests {
     assert_eq!(config.deep_links, vec!["acme".to_string()]);
     assert_eq!(config.single_instance, Some(true));
     // The metadata's list wins, even when empty.
-    let schemes = vec!["T3Code".to_string()];
+    let schemes = vec!["MyApp".to_string()];
     let config = resolve_app_config(
       None,
       None,
@@ -403,7 +403,7 @@ mod tests {
       &read,
     )
     .unwrap();
-    assert_eq!(config.deep_links, vec!["t3code".to_string()]);
+    assert_eq!(config.deep_links, vec!["myapp".to_string()]);
     // Everything in the metadata: the file is not read.
     let config = resolve_app_config(
       Some("a://a"),
@@ -601,16 +601,16 @@ mod tests {
       ),
       (
         "src/.deno-desktop/app.json",
-        r#"{"origin":"T3Code://App","identifier":"com.t3.code"}"#,
+        r#"{"origin":"MyApp://App","identifier":"com.example.myapp"}"#,
       ),
     ]);
     let config = resolve(None, None, "src/main.ts", &read).unwrap();
-    assert_eq!(config.origin.as_origin_string(), "t3code://app");
+    assert_eq!(config.origin.as_origin_string(), "myapp://app");
     assert_eq!(
       config.origin_source,
       AppOriginSource::ConfigFile(vfs("src/.deno-desktop/app.json"))
     );
-    assert_eq!(config.identifier.as_deref(), Some("com.t3.code"));
+    assert_eq!(config.identifier.as_deref(), Some("com.example.myapp"));
     let config = resolve(None, None, "lib/main.ts", &read).unwrap();
     assert_eq!(config.origin.as_origin_string(), "root://app");
     assert_eq!(config.identifier.as_deref(), Some("com.root.app"));
@@ -637,13 +637,13 @@ mod tests {
   #[test]
   fn a_configured_origin_requires_an_identifier() {
     let read =
-      reader(&[(".deno-desktop/app.json", r#"{"origin":"t3code://app"}"#)]);
+      reader(&[(".deno-desktop/app.json", r#"{"origin":"myapp://app"}"#)]);
     let err = resolve(None, None, "main.ts", &read).unwrap_err();
     assert!(err.contains("requires an app identifier"), "{err}");
     assert!(err.contains("app.json"), "{err}");
     assert!(err.contains("desktop.app.identifier"), "{err}");
     // The metadata's identifier satisfies it.
-    resolve(None, Some("com.t3.code"), "main.ts", &read).unwrap();
+    resolve(None, Some("com.example.myapp"), "main.ts", &read).unwrap();
     // So does one in the file (the other tests).
     let err = resolve(Some("a://a"), None, "main.ts", reader(&[])).unwrap_err();
     assert!(err.contains("the binary metadata"), "{err}");
@@ -662,14 +662,14 @@ mod tests {
     assert!(err.contains("reverse-DNS"), "{err}");
     let read = reader(&[(
       ".deno-desktop/app.json",
-      r#"{"origin":"t3code://app:1","identifier":"com.t3.code"}"#,
+      r#"{"origin":"myapp://app:1","identifier":"com.example.myapp"}"#,
     )]);
     let err = resolve(None, None, "main.ts", read).unwrap_err();
     assert!(err.contains("app.json"), "{err}");
     assert!(err.contains("port"), "{err}");
     let read = reader(&[(
       ".deno-desktop/app.json",
-      r#"{"origin":"t3code://app","identifier":"../evil"}"#,
+      r#"{"origin":"myapp://app","identifier":"../evil"}"#,
     )]);
     let err = resolve(None, None, "main.ts", read).unwrap_err();
     assert!(err.contains("app.json"), "{err}");

@@ -1138,7 +1138,7 @@ mod tests {
 
   #[test]
   fn only_declared_schemes_resolve() {
-    let declared = vec!["acme".to_string(), "t3code".to_string()];
+    let declared = vec!["acme".to_string(), "myapp".to_string()];
     assert_eq!(resolve_declared_scheme("ACME", &declared).unwrap(), "acme");
     assert!(
       resolve_declared_scheme("other", &declared)
@@ -1577,36 +1577,36 @@ mod tests {
       let files = Files::new(&[
         (
           "/home/me/.config/gnome-mimeapps.list",
-          "[Default Applications]\nx-scheme-handler/acme=electron-t3.desktop\n",
+          "[Default Applications]\nx-scheme-handler/acme=electron-myapp.desktop\n",
         ),
         (
           "/home/me/.config/mimeapps.list",
           "[Default Applications]\nx-scheme-handler/acme=com.acme.app.desktop\n",
         ),
         (
-          "/usr/share/applications/electron-t3.desktop",
-          "[Desktop Entry]\nExec=/opt/T3/t3 %U\n",
+          "/usr/share/applications/electron-myapp.desktop",
+          "[Desktop Entry]\nExec=/opt/MyApp/myapp %U\n",
         ),
         (OURS, &our_entry("/opt/Acme/Acme")),
       ]);
       // The desktop-specific list comes first.
       assert_eq!(
         owner_of(&files),
-        OwnerStatus::other(Some("electron-t3.desktop".into()))
+        OwnerStatus::other(Some("electron-myapp.desktop".into()))
       );
       // Added Associations and mimeinfo.cache only count without a default.
       let files = Files::new(&[
         (
           "/home/me/.config/mimeapps.list",
-          "[Added Associations]\nx-scheme-handler/acme=electron-t3.desktop;\n",
+          "[Added Associations]\nx-scheme-handler/acme=electron-myapp.desktop;\n",
         ),
         (
           "/usr/share/applications/mimeinfo.cache",
           "[MIME Cache]\nx-scheme-handler/acme=com.acme.app.desktop;\n",
         ),
         (
-          "/usr/share/applications/electron-t3.desktop",
-          "[Desktop Entry]\nExec=/opt/T3/t3 %U\n",
+          "/usr/share/applications/electron-myapp.desktop",
+          "[Desktop Entry]\nExec=/opt/MyApp/myapp %U\n",
         ),
         (
           "/usr/share/applications/com.acme.app.desktop",

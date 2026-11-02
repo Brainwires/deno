@@ -8151,12 +8151,12 @@ def456  other.zip
     let entry = appimage_desktop_entry(
       "MyApp",
       Some("com.deno.desktop.myapp"),
-      &["acme".to_string(), "t3code".to_string()],
+      &["acme".to_string(), "myapp".to_string()],
     );
     assert!(entry.contains("Exec=MyApp %u\n"), "{entry}");
     assert!(
       entry
-        .contains("MimeType=x-scheme-handler/acme;x-scheme-handler/t3code;\n"),
+        .contains("MimeType=x-scheme-handler/acme;x-scheme-handler/myapp;\n"),
       "{entry}"
     );
   }
@@ -11010,8 +11010,8 @@ def456  other.zip
     assert_eq!(cef_custom_scheme(Some("app://localhost")), None);
     assert_eq!(cef_custom_scheme(Some("app://other")), None);
     assert_eq!(
-      cef_custom_scheme(Some("t3code://app")).as_deref(),
-      Some("t3code")
+      cef_custom_scheme(Some("myapp://app")).as_deref(),
+      Some("myapp")
     );
     // Values are normalized before they get here, but an unparsable one
     // must not turn into a launch flag.
@@ -11282,7 +11282,7 @@ def456  other.zip
       &plist,
       &[
         (LAUFEY_APP_ID_ENV, "com.a"),
-        (LAUFEY_CUSTOM_SCHEMES_ENV, "t3code"),
+        (LAUFEY_CUSTOM_SCHEMES_ENV, "myapp"),
       ],
     );
     assert_eq!(plist.matches("<key>LSEnvironment</key>").count(), 1);
@@ -11301,7 +11301,7 @@ def456  other.zip
       env
         .get(LAUFEY_CUSTOM_SCHEMES_ENV)
         .and_then(|v| v.as_string()),
-      Some("t3code")
+      Some("myapp")
     );
     // The rest of the plist is untouched.
     assert_eq!(

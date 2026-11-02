@@ -483,33 +483,33 @@ mod tests {
 
   #[test]
   fn parses_scheme_and_host() {
-    let origin = AppOrigin::parse("t3code://app").unwrap();
-    assert_eq!(origin.scheme(), "t3code");
+    let origin = AppOrigin::parse("myapp://app").unwrap();
+    assert_eq!(origin.scheme(), "myapp");
     assert_eq!(origin.host(), "app");
-    assert_eq!(origin.as_origin_string(), "t3code://app");
-    assert_eq!(origin.root_url(), "t3code://app/");
+    assert_eq!(origin.as_origin_string(), "myapp://app");
+    assert_eq!(origin.root_url(), "myapp://app/");
   }
 
   #[test]
   fn accepts_the_url_serializer_form() {
-    // `new URL("t3code://app").href` is "t3code://app/" — a lone trailing
+    // `new URL("myapp://app").href` is "myapp://app/" — a lone trailing
     // slash is not a path.
     assert_eq!(
-      AppOrigin::parse("t3code://app/").unwrap(),
-      AppOrigin::parse("t3code://app").unwrap()
+      AppOrigin::parse("myapp://app/").unwrap(),
+      AppOrigin::parse("myapp://app").unwrap()
     );
     // Surrounding whitespace is tolerated (a deno.json value), interior is not.
-    assert!(AppOrigin::parse("  t3code://app \n").is_ok());
+    assert!(AppOrigin::parse("  myapp://app \n").is_ok());
     assert_eq!(
-      AppOrigin::parse("t3code://my app"),
+      AppOrigin::parse("myapp://my app"),
       Err(AppOriginError::HostChars)
     );
   }
 
   #[test]
   fn normalizes_to_lowercase() {
-    let origin = AppOrigin::parse("T3Code://App.Local").unwrap();
-    assert_eq!(origin.as_origin_string(), "t3code://app.local");
+    let origin = AppOrigin::parse("MyApp://App.Local").unwrap();
+    assert_eq!(origin.as_origin_string(), "myapp://app.local");
   }
 
   #[test]
@@ -559,19 +559,16 @@ mod tests {
     assert_eq!(AppOrigin::parse(""), Err(AppOriginError::Empty));
     assert_eq!(AppOrigin::parse("   "), Err(AppOriginError::Empty));
     assert_eq!(
-      AppOrigin::parse("t3code"),
+      AppOrigin::parse("myapp"),
       Err(AppOriginError::MissingSeparator)
     );
     assert_eq!(
-      AppOrigin::parse("t3code:app"),
+      AppOrigin::parse("myapp:app"),
       Err(AppOriginError::MissingSeparator)
     );
+    assert_eq!(AppOrigin::parse("myapp://"), Err(AppOriginError::EmptyHost));
     assert_eq!(
-      AppOrigin::parse("t3code://"),
-      Err(AppOriginError::EmptyHost)
-    );
-    assert_eq!(
-      AppOrigin::parse("t3code:///"),
+      AppOrigin::parse("myapp:///"),
       Err(AppOriginError::EmptyHost)
     );
   }
@@ -579,74 +576,74 @@ mod tests {
   #[test]
   fn rejects_authority_and_path_extras() {
     assert_eq!(
-      AppOrigin::parse("t3code://app:8080"),
+      AppOrigin::parse("myapp://app:8080"),
       Err(AppOriginError::HasPort)
     );
     assert_eq!(
-      AppOrigin::parse("t3code://user@app"),
+      AppOrigin::parse("myapp://user@app"),
       Err(AppOriginError::HasUserinfo)
     );
     assert_eq!(
-      AppOrigin::parse("t3code://app/index.html"),
+      AppOrigin::parse("myapp://app/index.html"),
       Err(AppOriginError::HasPath)
     );
     assert_eq!(
-      AppOrigin::parse("t3code://app//"),
+      AppOrigin::parse("myapp://app//"),
       Err(AppOriginError::HasPath)
     );
     assert_eq!(
-      AppOrigin::parse("t3code://app?x=1"),
+      AppOrigin::parse("myapp://app?x=1"),
       Err(AppOriginError::HasPath)
     );
     assert_eq!(
-      AppOrigin::parse("t3code://app#top"),
+      AppOrigin::parse("myapp://app#top"),
       Err(AppOriginError::HasPath)
     );
     // IPv6 literals carry ':' and brackets — not a valid origin host here.
     assert_eq!(
-      AppOrigin::parse("t3code://[::1]"),
+      AppOrigin::parse("myapp://[::1]"),
       Err(AppOriginError::HasPort)
     );
   }
 
   #[test]
   fn host_labels_are_dns_like() {
-    assert!(AppOrigin::parse("t3code://app.example-1.local").is_ok());
+    assert!(AppOrigin::parse("myapp://app.example-1.local").is_ok());
     assert_eq!(
-      AppOrigin::parse("t3code://.app"),
+      AppOrigin::parse("myapp://.app"),
       Err(AppOriginError::HostChars)
     );
     assert_eq!(
-      AppOrigin::parse("t3code://app."),
+      AppOrigin::parse("myapp://app."),
       Err(AppOriginError::HostChars)
     );
     assert_eq!(
-      AppOrigin::parse("t3code://a..b"),
+      AppOrigin::parse("myapp://a..b"),
       Err(AppOriginError::HostChars)
     );
     assert_eq!(
-      AppOrigin::parse("t3code://app_1"),
+      AppOrigin::parse("myapp://app_1"),
       Err(AppOriginError::HostChars)
     );
     assert_eq!(
-      AppOrigin::parse("t3code://äpp"),
+      AppOrigin::parse("myapp://äpp"),
       Err(AppOriginError::HostChars)
     );
   }
 
   #[test]
   fn rejects_overlong_values() {
-    let long = format!("t3code://{}", "a".repeat(MAX_LEN));
+    let long = format!("myapp://{}", "a".repeat(MAX_LEN));
     assert_eq!(AppOrigin::parse(&long), Err(AppOriginError::TooLong));
   }
 
   #[test]
   fn app_config_file() {
     assert_eq!(
-      parse_app_config_file(br#"{ "origin": "T3Code://App/" }"#)
+      parse_app_config_file(br#"{ "origin": "MyApp://App/" }"#)
         .unwrap()
         .origin,
-      Some(AppOrigin::parse("t3code://app").unwrap())
+      Some(AppOrigin::parse("myapp://app").unwrap())
     );
     assert_eq!(
       parse_app_config_file(b"{}").unwrap(),
@@ -659,7 +656,7 @@ mod tests {
     );
     // A typo is an error, not a silent fallback to the default origin.
     assert!(
-      parse_app_config_file(br#"{ "orgin": "t3code://app" }"#)
+      parse_app_config_file(br#"{ "orgin": "myapp://app" }"#)
         .unwrap_err()
         .contains("orgin")
     );
@@ -758,23 +755,23 @@ mod tests {
   fn app_config_file_identifier() {
     assert_eq!(
       parse_app_config_file(
-        br#"{ "origin": "t3code://app", "identifier": "com.t3.code" }"#
+        br#"{ "origin": "myapp://app", "identifier": "com.example.myapp" }"#
       )
       .unwrap(),
       AppConfigFile {
-        origin: Some(AppOrigin::parse("t3code://app").unwrap()),
-        identifier: Some("com.t3.code".to_string()),
+        origin: Some(AppOrigin::parse("myapp://app").unwrap()),
+        identifier: Some("com.example.myapp".to_string()),
         ..Default::default()
       }
     );
     // Either key may appear alone; the runtime decides whether the
     // combination is acceptable.
     assert_eq!(
-      parse_app_config_file(br#"{ "identifier": "com.t3.code" }"#)
+      parse_app_config_file(br#"{ "identifier": "com.example.myapp" }"#)
         .unwrap()
         .identifier
         .as_deref(),
-      Some("com.t3.code")
+      Some("com.example.myapp")
     );
     // Strictly validated: the id becomes a directory name.
     for bad in [
@@ -787,7 +784,7 @@ mod tests {
       assert!(parse_app_config_file(bad.as_bytes()).is_err(), "{bad}");
     }
     assert!(
-      parse_app_config_file(br#"{ "identifer": "com.t3.code" }"#)
+      parse_app_config_file(br#"{ "identifer": "com.example.myapp" }"#)
         .unwrap_err()
         .contains("identifer")
     );
@@ -796,12 +793,12 @@ mod tests {
   #[test]
   fn app_config_file_deep_links_and_single_instance() {
     let config = parse_app_config_file(
-      br#"{ "identifier": "com.t3.code", "deepLinks": [" T3Code ", "acme", "acme"], "singleInstance": true }"#,
+      br#"{ "identifier": "com.example.myapp", "deepLinks": [" MyApp ", "acme", "acme"], "singleInstance": true }"#,
     )
     .unwrap();
     assert_eq!(
       config.deep_links,
-      Some(vec!["t3code".to_string(), "acme".to_string()])
+      Some(vec!["myapp".to_string(), "acme".to_string()])
     );
     assert_eq!(config.single_instance, Some(true));
     let config =
@@ -879,21 +876,21 @@ mod tests {
 
   #[test]
   fn origin_header_match_is_exact() {
-    let origin = AppOrigin::parse("t3code://app").unwrap();
-    assert!(origin.matches_origin_header("t3code://app"));
+    let origin = AppOrigin::parse("myapp://app").unwrap();
+    assert!(origin.matches_origin_header("myapp://app"));
     // Header values may carry surrounding whitespace after a lenient split.
-    assert!(origin.matches_origin_header(" t3code://app\t"));
+    assert!(origin.matches_origin_header(" myapp://app\t"));
 
     assert!(!origin.matches_origin_header("null"));
     assert!(!origin.matches_origin_header(""));
     assert!(!origin.matches_origin_header("https://app"));
-    assert!(!origin.matches_origin_header("t3code://evil"));
-    assert!(!origin.matches_origin_header("t3code://app.evil"));
-    assert!(!origin.matches_origin_header("t3code://appx"));
-    assert!(!origin.matches_origin_header("t3code://app/"));
-    assert!(!origin.matches_origin_header("t3code://app:80"));
-    assert!(!origin.matches_origin_header("xt3code://app"));
+    assert!(!origin.matches_origin_header("myapp://evil"));
+    assert!(!origin.matches_origin_header("myapp://app.evil"));
+    assert!(!origin.matches_origin_header("myapp://appx"));
+    assert!(!origin.matches_origin_header("myapp://app/"));
+    assert!(!origin.matches_origin_header("myapp://app:80"));
+    assert!(!origin.matches_origin_header("xmyapp://app"));
     // A browser never upper-cases what it navigated to; a spoofer might.
-    assert!(!origin.matches_origin_header("T3CODE://APP"));
+    assert!(!origin.matches_origin_header("MYAPP://APP"));
   }
 }

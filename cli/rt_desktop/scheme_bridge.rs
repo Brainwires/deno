@@ -1181,7 +1181,7 @@ mod tests {
   use super::*;
 
   fn origin() -> AppOrigin {
-    AppOrigin::parse("t3code://app").unwrap()
+    AppOrigin::parse("myapp://app").unwrap()
   }
 
   /// A connected (client, relay-side) TCP pair on loopback.
@@ -1219,19 +1219,19 @@ mod tests {
     // A redirect built from request.url lands on the app origin.
     assert_eq!(
       response_header_value("Location", b"http+memory://app/login?x=1", &o),
-      "t3code://app/login?x=1"
+      "myapp://app/login?x=1"
     );
     assert_eq!(
       response_header_value("content-location", b"HTTP+MEMORY://app/a", &o),
-      "t3code://app/a"
+      "myapp://app/a"
     );
     assert_eq!(
       response_header_value("refresh", b"5; url=http+memory://app/next", &o),
-      "5; url=t3code://app/next"
+      "5; url=myapp://app/next"
     );
     assert_eq!(
       response_header_value("refresh", b"0;URL='http+memory://app/q'", &o),
-      "0;URL='t3code://app/q'"
+      "0;URL='myapp://app/q'"
     );
     // Anything else is left alone.
     for (name, value) in [
@@ -1275,7 +1275,7 @@ mod tests {
         "http+memory://app/données?q=日本".as_bytes(),
         &o
       ),
-      "t3code://app/données?q=日本"
+      "myapp://app/données?q=日本"
     );
     assert_eq!(
       response_header_value(
@@ -1283,7 +1283,7 @@ mod tests {
         "1; url=\"http+memory://app/é\"".as_bytes(),
         &o
       ),
-      "1; url=\"t3code://app/é\""
+      "1; url=\"myapp://app/é\""
     );
   }
 
@@ -1538,44 +1538,41 @@ mod tests {
 
   #[test]
   fn path_and_query_extraction() {
-    assert_eq!(path_and_query("t3code://app/foo?bar=baz"), "/foo?bar=baz");
-    assert_eq!(path_and_query("t3code://app"), "/");
-    assert_eq!(path_and_query("t3code://app/"), "/");
+    assert_eq!(path_and_query("myapp://app/foo?bar=baz"), "/foo?bar=baz");
+    assert_eq!(path_and_query("myapp://app"), "/");
+    assert_eq!(path_and_query("myapp://app/"), "/");
     // Authority carrying a port shouldn't leak into the request line.
-    assert_eq!(path_and_query("t3code://127.0.0.1:5173/foo"), "/foo");
-    assert_eq!(path_and_query("t3code://other.host/x/y"), "/x/y");
+    assert_eq!(path_and_query("myapp://127.0.0.1:5173/foo"), "/foo");
+    assert_eq!(path_and_query("myapp://other.host/x/y"), "/x/y");
     // Query with no path, and fragments, are normalised.
-    assert_eq!(path_and_query("t3code://app?x=1"), "/?x=1");
-    assert_eq!(path_and_query("t3code://app/p?x=1#frag"), "/p?x=1");
+    assert_eq!(path_and_query("myapp://app?x=1"), "/?x=1");
+    assert_eq!(path_and_query("myapp://app/p?x=1#frag"), "/p?x=1");
     // Non-URL input is passed through untouched.
     assert_eq!(path_and_query("/relative"), "/relative");
   }
 
   #[test]
   fn authority_extraction() {
-    assert_eq!(authority("t3code://app/foo"), Some("app"));
-    assert_eq!(
-      authority("t3code://127.0.0.1:5173/"),
-      Some("127.0.0.1:5173")
-    );
-    assert_eq!(authority("t3code://app"), Some("app"));
-    assert_eq!(authority("t3code:///nohost"), None);
+    assert_eq!(authority("myapp://app/foo"), Some("app"));
+    assert_eq!(authority("myapp://127.0.0.1:5173/"), Some("127.0.0.1:5173"));
+    assert_eq!(authority("myapp://app"), Some("app"));
+    assert_eq!(authority("myapp:///nohost"), None);
     assert_eq!(authority("/relative"), None);
   }
 
   #[test]
   fn bridge_serves_exactly_the_configured_host() {
     let origin = origin();
-    assert!(authority_matches("t3code://app/", &origin));
-    assert!(authority_matches("t3code://app", &origin));
-    assert!(authority_matches("t3code://app/x/y?z=1#f", &origin));
+    assert!(authority_matches("myapp://app/", &origin));
+    assert!(authority_matches("myapp://app", &origin));
+    assert!(authority_matches("myapp://app/x/y?z=1#f", &origin));
     // Another host on the same scheme is another origin: refused (421).
-    assert!(!authority_matches("t3code://evil/", &origin));
-    assert!(!authority_matches("t3code://app.evil/", &origin));
-    assert!(!authority_matches("t3code://app:8080/", &origin));
+    assert!(!authority_matches("myapp://evil/", &origin));
+    assert!(!authority_matches("myapp://app.evil/", &origin));
+    assert!(!authority_matches("myapp://app:8080/", &origin));
     // An opaque host is compared byte-for-byte by the browser too.
-    assert!(!authority_matches("t3code://APP/", &origin));
-    assert!(!authority_matches("t3code:///", &origin));
+    assert!(!authority_matches("myapp://APP/", &origin));
+    assert!(!authority_matches("myapp:///", &origin));
     assert!(!authority_matches("/relative", &origin));
   }
 
@@ -1616,7 +1613,7 @@ mod tests {
 
   #[test]
   fn recognises_websocket_upgrade() {
-    let ok = b"GET /chat HTTP/1.1\r\n\
+    let ok = b"GET /ws HTTP/1.1\r\n\
       Host: 127.0.0.1:1234\r\n\
       Upgrade: websocket\r\n\
       Connection: Upgrade\r\n\
@@ -1669,7 +1666,7 @@ mod tests {
     let origin = origin();
     assert_eq!(
       classify_upgrade(
-        &upgrade_head("Origin: t3code://app\r\n"),
+        &upgrade_head("Origin: myapp://app\r\n"),
         &origin,
         relay_token()
       ),
@@ -1678,7 +1675,7 @@ mod tests {
     // Header name case and surrounding whitespace are not significant …
     assert_eq!(
       classify_upgrade(
-        &upgrade_head("ORIGIN:   t3code://app \r\n"),
+        &upgrade_head("ORIGIN:   myapp://app \r\n"),
         &origin,
         relay_token()
       ),
@@ -1688,10 +1685,10 @@ mod tests {
     for foreign in [
       "https://evil.example",
       "http://127.0.0.1:1234",
-      "t3code://evil",
-      "t3code://app.evil",
-      "t3code://app/",
-      "T3CODE://APP",
+      "myapp://evil",
+      "myapp://app.evil",
+      "myapp://app/",
+      "MYAPP://APP",
       "null",
       "",
     ] {
@@ -1721,7 +1718,7 @@ mod tests {
     assert_eq!(
       classify_upgrade(
         &upgrade_head(
-          "Origin: t3code://app\r\nOrigin: https://evil.example\r\n"
+          "Origin: myapp://app\r\nOrigin: https://evil.example\r\n"
         ),
         &origin,
         relay_token()
@@ -1731,7 +1728,7 @@ mod tests {
     assert_eq!(
       classify_upgrade(
         &upgrade_head(
-          "Origin: https://evil.example\r\nOrigin: t3code://app\r\n"
+          "Origin: https://evil.example\r\nOrigin: myapp://app\r\n"
         ),
         &origin,
         relay_token()
@@ -1741,7 +1738,7 @@ mod tests {
     // Non-UTF-8 header bytes are a mismatch, not a panic.
     let mut head = upgrade_head("");
     head.truncate(head.len() - 2);
-    head.extend_from_slice(b"Origin: t3code://\xff\r\n\r\n");
+    head.extend_from_slice(b"Origin: myapp://\xff\r\n\r\n");
     assert_eq!(
       classify_upgrade(&head, &origin, relay_token()),
       RelayDecision::ForbiddenOrigin
@@ -1753,20 +1750,20 @@ mod tests {
     let origin = origin();
     // Plain HTTP with the right Origin is still not a WebSocket handshake.
     let plain =
-      b"GET / HTTP/1.1\r\nHost: 127.0.0.1:1\r\nOrigin: t3code://app\r\n\r\n";
+      b"GET / HTTP/1.1\r\nHost: 127.0.0.1:1\r\nOrigin: myapp://app\r\n\r\n";
     assert_eq!(
       classify_upgrade(plain, &origin, relay_token()),
       RelayDecision::NotWebSocket
     );
     // Only GET can open a WebSocket (RFC 6455 §4.1).
     let post = b"POST /ws HTTP/1.1\r\nHost: 127.0.0.1:1\r\n\
-      Upgrade: websocket\r\nOrigin: t3code://app\r\n\r\n";
+      Upgrade: websocket\r\nOrigin: myapp://app\r\n\r\n";
     assert_eq!(
       classify_upgrade(post, &origin, relay_token()),
       RelayDecision::NotWebSocket
     );
     let other_upgrade = b"GET / HTTP/1.1\r\nUpgrade: h2c\r\n\
-      Origin: t3code://app\r\n\r\n";
+      Origin: myapp://app\r\n\r\n";
     assert_eq!(
       classify_upgrade(other_upgrade, &origin, relay_token()),
       RelayDecision::NotWebSocket
@@ -1778,7 +1775,7 @@ mod tests {
     // Client copies of the marker, in any case and with any value, are
     // dropped; the relay's own is the only one upstream sees.
     let head = upgrade_head(
-      "Origin: t3code://app\r\nX-Deno-Desktop-Relay: 0\r\n\
+      "Origin: myapp://app\r\nX-Deno-Desktop-Relay: 0\r\n\
        x-deno-desktop-relay : spoof\r\n",
     );
     let out = relay_request_head(&head, b"/ws");
@@ -1794,7 +1791,7 @@ mod tests {
     assert_eq!(header_values(&out, b"sec-websocket-key").count(), 1);
     // And a head without any marker gets one too.
     let out =
-      relay_request_head(&upgrade_head("Origin: t3code://app\r\n"), b"/ws");
+      relay_request_head(&upgrade_head("Origin: myapp://app\r\n"), b"/ws");
     assert_eq!(
       header_values(&out, RELAY_MARKER_HEADER.as_bytes()).count(),
       1
@@ -1899,7 +1896,7 @@ mod tests {
 
   #[tokio::test]
   async fn relay_never_carries_a_non_101_response() {
-    let mut sends = upgrade_head("Origin: t3code://app\r\n");
+    let mut sends = upgrade_head("Origin: myapp://app\r\n");
     // A second request pipelined behind the upgrade.
     sends.extend_from_slice(b"GET /second HTTP/1.1\r\nHost: x\r\n\r\n");
     let (client_got, upstream_got) = run_relay(
@@ -1925,7 +1922,7 @@ mod tests {
 
   #[tokio::test]
   async fn relay_passes_a_101_and_what_follows() {
-    let sends = upgrade_head("Origin: t3code://app\r\n");
+    let sends = upgrade_head("Origin: myapp://app\r\n");
     let (client_got, upstream_got) = run_relay(
       &sends,
       b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n\r\n\x81\x02hi",
@@ -2047,7 +2044,7 @@ mod tests {
       // The app origin without this launch's token (another app at the same
       // origin, any local process): refused, never proxied.
       let resp =
-        exchange(addr, &upgrade_head_to("/ws", "Origin: t3code://app\r\n"))
+        exchange(addr, &upgrade_head_to("/ws", "Origin: myapp://app\r\n"))
           .await;
       assert!(resp.starts_with("HTTP/1.1 403 "), "{resp}");
       assert!(resp.contains("relay token"), "{resp}");
@@ -2060,8 +2057,7 @@ mod tests {
       assert_eq!(accepted.load(Ordering::SeqCst), 0);
 
       // The app's own page: proxied through to the server's 101.
-      let resp =
-        exchange(addr, &upgrade_head("Origin: t3code://app\r\n")).await;
+      let resp = exchange(addr, &upgrade_head("Origin: myapp://app\r\n")).await;
       assert!(resp.starts_with("HTTP/1.1 101 "), "{resp}");
       assert_eq!(accepted.load(Ordering::SeqCst), 1);
     });
@@ -2073,7 +2069,7 @@ mod tests {
     let token = relay_token().unwrap();
     assert_eq!(token.len(), 64);
     assert!(token.bytes().all(|b| b.is_ascii_hexdigit()));
-    let ok = "Origin: t3code://app\r\n";
+    let ok = "Origin: myapp://app\r\n";
     // The right token, the right Origin: proxied, with the prefix removed.
     for (target, upstream) in [
       (token_path("/ws"), "/ws"),
@@ -2175,14 +2171,11 @@ mod tests {
     };
     for same in [
       h(&[]),
-      h(&[("Origin", "t3code://app")]),
-      h(&[("origin", " t3code://app ")]),
+      h(&[("Origin", "myapp://app")]),
+      h(&[("origin", " myapp://app ")]),
       h(&[("Sec-Fetch-Site", "same-origin")]),
       h(&[("sec-fetch-site", "none")]),
-      h(&[
-        ("Origin", "t3code://app"),
-        ("Sec-Fetch-Site", "SAME-ORIGIN"),
-      ]),
+      h(&[("Origin", "myapp://app"), ("Sec-Fetch-Site", "SAME-ORIGIN")]),
       h(&[("Accept", "*/*")]),
     ] {
       assert!(!is_cross_origin_request(&same, &o), "{same:?}");
@@ -2190,15 +2183,15 @@ mod tests {
     for cross in [
       h(&[("Origin", "https://evil.example")]),
       h(&[("Origin", "null")]),
-      h(&[("Origin", "t3code://other")]),
-      h(&[("Origin", "T3CODE://APP")]),
+      h(&[("Origin", "myapp://other")]),
+      h(&[("Origin", "MYAPP://APP")]),
       h(&[("Origin", "")]),
       h(&[("Sec-Fetch-Site", "cross-site")]),
       h(&[("Sec-Fetch-Site", "same-site")]),
       // Either header names another origin.
-      h(&[("Origin", "t3code://app"), ("Sec-Fetch-Site", "cross-site")]),
+      h(&[("Origin", "myapp://app"), ("Sec-Fetch-Site", "cross-site")]),
       h(&[
-        ("Origin", "t3code://app"),
+        ("Origin", "myapp://app"),
         ("Origin", "https://evil.example"),
       ]),
     ] {
