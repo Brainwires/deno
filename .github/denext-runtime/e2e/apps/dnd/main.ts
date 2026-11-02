@@ -5,7 +5,8 @@
 // file dialog is opened and closed by an AbortSignal (no person needed), with
 // the busy and argument checks around it. Drags need a pointer the runner
 // cannot drive (an OS drag session), so the drag checks are the refusal
-// paths plus the event surface; the drops themselves are n/a.
+// paths plus the event surface; the drops themselves are n/a, except on
+// E2E_DISPLAY=wayland, where sway's seat is a pointer a test can hold.
 
 // deno-lint-ignore-file no-explicit-any
 
@@ -13,6 +14,7 @@ import {
   desktop,
   errorOf,
   html,
+  once,
   OS,
   page,
   PNG,
@@ -22,7 +24,13 @@ import {
   titledWindow,
   within,
 } from "../_shared/e2e.ts";
-import { swayCursor, swayWindow, topLevelExists } from "../_shared/input.ts";
+import {
+  swayButton,
+  swayCursor,
+  swayMsg,
+  swayWindow,
+  topLevelExists,
+} from "../_shared/input.ts";
 
 const r = new Report("dnd");
 const isA = (e: unknown, name: string) =>
@@ -305,10 +313,62 @@ await r.step("drag and drop", async () => {
       typeof win[k] === "function"
     ),
   );
-  r.na(
-    "a real file drop and a completed drag-out",
-    "they need an OS drag session driven by a pointer, which no hosted runner can synthesize",
-  );
+  if (Deno.env.get("SWAYSOCK") && canDrag) {
+    // sway's seat commands are a real pointer: the press reaches the window
+    // with the serial wl_data_device.start_drag wants, and the compositor runs
+    // the drag across to the other window.
+    const TARGET = "E2E DnD Target";
+    const target = titledWindow(TARGET, { width: 320, height: 240 });
+    await sleep(2000);
+    await swayMsg("E2E DnD", "move position 40 40");
+    await swayMsg(TARGET, "move position 1000 40");
+    await sleep(500);
+    const from = (await swayWindow("E2E DnD"))?.rect;
+    const to = (await swayWindow(TARGET))?.rect;
+    r.check("the compositor lists both windows", !!from && !!to, { from, to });
+    const entered = once(target, "dragenter", 30000);
+    const dropped = once(target, "drop", 30000);
+    r.mark("a real drag");
+    const x0 = from.x + Math.floor(from.width / 2);
+    const y0 = from.y + Math.floor(from.height / 2);
+    const x1 = to.x + Math.floor(to.width / 2);
+    const y1 = to.y + Math.floor(to.height / 2);
+    await swayCursor(x0, y0);
+    await sleep(300);
+    await swayButton("press");
+    await sleep(300);
+    const started = within(win.startDrag({ files: [Deno.execPath()] }), 20000);
+    await sleep(800);
+    for (let i = 1; i <= 8; i++) {
+      await swayCursor(
+        x0 + Math.floor((x1 - x0) * i / 8),
+        y0 + Math.floor((y1 - y0) * i / 8),
+      );
+      await sleep(150);
+    }
+    await sleep(800);
+    await swayButton("release");
+    const settled = await started;
+    const result = "value" in settled ? settled.value : "never settled";
+    r.check("a real drag to another window: dropped", result === "dropped", {
+      result,
+    });
+    const enter = await entered;
+    r.check("the window under the pointer sees the drag", enter !== null);
+    const drop = (await dropped) as any;
+    r.check(
+      "...and gets the file's path",
+      drop?.detail?.paths?.includes(Deno.execPath()) === true,
+      { paths: drop?.detail?.paths, want: Deno.execPath() },
+    );
+    target.close();
+    await sleep(500);
+  } else {
+    r.na(
+      "a real file drop and a completed drag-out",
+      "they need an OS drag session driven by a pointer, which no hosted runner can synthesize outside the Wayland leg's WebKitGTK",
+    );
+  }
 });
 
 r.finish();

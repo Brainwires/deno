@@ -469,9 +469,6 @@
       "a file opened with the running app (openfile)",
       "install from the .msi"
     ],
-    "dnd": [
-      "launch: a real file drop and a completed drag-out"
-    ],
     "keyringpersist": [
       "OS-key cookies survive a launch that can't reach the key"
     ],
@@ -502,6 +499,9 @@
       "launch: setBounds onto a missing display lands on the primary work area",
       "launch: the tray rule",
       "launch: unmaximize() restores"
+    ],
+    "quit": [
+      "the OS's quits"
     ]
   },
   "x86_64-unknown-linux-gnu/cef/wayland-sway": {
@@ -548,6 +548,9 @@
       "launch: setBounds onto a missing display lands on the primary work area",
       "launch: the tray rule",
       "launch: unmaximize() restores"
+    ],
+    "quit": [
+      "the OS's quits"
     ]
   }
 }

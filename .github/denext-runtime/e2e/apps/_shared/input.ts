@@ -337,6 +337,11 @@ export async function swayCursor(x: number, y: number): Promise<void> {
   await run("swaymsg", [`seat - cursor set ${x} ${y}`]);
 }
 
+/** Press or release the seat's left button where the pointer is. */
+export async function swayButton(state: "press" | "release"): Promise<void> {
+  await run("swaymsg", [`seat - cursor ${state} button1`]);
+}
+
 const WAYLAND_MODS: Partial<Record<Key, string>> = {
   Primary: "ctrl",
   Control: "ctrl",
