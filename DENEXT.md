@@ -8500,7 +8500,7 @@ where the changes are discussed.
      `stage_refuses_a_case_only_rename_of_the_executable`,
      `apply_refuses_a_case_only_rename_of_the_executable` (each failed before).
 
-218. **`test(node_compat)`, `ci(denext)`: two checks that failed on the runner,
+219. **`test(node_compat)`, `ci(denext)`: two checks that failed on the runner,
      not on the code** (`tests/node_compat/config.jsonc`,
      `.github/denext-runtime/denort_smoke.sh`, `runtime_refusal_smoke.sh`,
      `lib.sh`). `internet/test-https-autoselectfamily-slow-timeout.js` is off on
@@ -8515,6 +8515,41 @@ where the changes are discussed.
      `socket.getfqdn`, which took 35 s on a `macos-15-intel` runner. The server
      now skips that lookup, and both smokes wait up to 60 s for the port file
      and stop waiting if the process exits.
+
+220. **`test(desktop-e2e)`: a Wayland leg: real packaged windows with no X
+     server** (`.github/denext-runtime/e2e/`, `denext_runtime.yml`). The suite
+     ran only under Xvfb + xfwm4, so a Wayland session was exercised only by
+     hand.
+     - `E2E_DISPLAY=wayland` runs every area on sway's headless wlroots backend
+       with the pixman renderer (no GPU), XWayland off and `$DISPLAY` unset, on
+       both hosts, as the `wayland-sway` n/a baseline. x86_64 only for now.
+     - Why sway over weston: it can be driven. `swaymsg` focuses, closes,
+       resizes and fullscreens a window and reads back its tree, and wlroots has
+       the virtual keyboard, virtual pointer and layer-shell protocols, so
+       menus, key presses and overlays really run. Weston's headless backend has
+       no way to inject input or close a window from outside; what sway can't do
+       is below.
+     - `linux/wayland-input.py` holds one virtual keyboard (with the plain `us`
+       keymap) and one virtual pointer for the session. The headless backend has
+       no input device, and a seat with none is nothing like a real one: the
+       clipboard's selection events never come, and a drag crashes GTK. `wtype`
+       is not enough: its per-press device and keymap keep GTK's accelerators
+       from matching.
+     - The `wayland` area asks the other end: sway's tree says the window is an
+       `xdg_shell` toplevel with the app's id; a resize, fullscreen or close
+       from the compositor reaches the app; an `overlay: true` window has no
+       toplevel (it is a layer surface).
+     - n/a here, with the reason in the run: maximize and minimize (xdg-shell
+       tells a client nothing of minimized on any compositor, and sway ignores
+       set_maximized), placing a window (`setPosition` is false on Wayland), and
+       under CEF the clipboard's change events (the host reports
+       `changeEvents: false` without ext-data-control-v1, which this sway's
+       wlroots 0.15 lacks) and overlays (`layerShell` is false).
+     - A drag with the pointer off the window fails on Wayland, and so does every
+       drag under CEF (`fileDragOut` is false): GTK has no surface to start from.
+       With the pointer on a WebKitGTK window and no held button it ends
+       `"cancelled"`, not `"failed"`: the host can't read the pointer's state
+       outside an event, so it asks and the compositor turns it down.
 
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
@@ -8927,7 +8962,8 @@ stop at unit tests and `tests/specs` of the CLI), so this fork carries its own,
 the equivalent of laufey's `native_e2e`: `.github/denext-runtime/e2e/`. The
 runtime workflow runs it after the launch smoke on every target with both
 backends (Linux under Xvfb with the xfwm4 window manager, a private D-Bus
-session and a stand-in notification server, `linux/`).
+session and a stand-in notification server, `linux/`), and on x86_64 Linux again
+on a headless sway with no X server (`E2E_DISPLAY=wayland`, item 215).
 
 Layout:
 
@@ -8936,7 +8972,7 @@ Layout:
 | `e2e.sh`              | Unpacks the archive under test, sets up the Linux session, runs `run.ts` with the stock `deno` (2.9.8).                                                                                                       |
 | `run.ts`              | Runs every area (`E2E_AREAS` / the workflow's `e2e_areas` input narrows it), writes `e2e-<target>-<backend>.json` and the step summary, exits 1 on any failure.                                               |
 | `lib/runner.ts`       | Packages an app with the stock `deno desktop` against `DENORT_DESKTOP_BIN` / `LAUFEY_DEV_DIR`, writes `.deno-desktop/app.json` and `laufey-launch.json` as denext's packager does, launches, collects, kills. |
-| `apps/<area>/main.ts` | One small app per area; `apps/_shared` has the reporting (`e2e.ts`) and real input (`input.ts`: XTEST / `keybd_event` / CoreGraphics key presses, the window manager's close).                                |
+| `apps/<area>/main.ts` | One small app per area; `apps/_shared` has the reporting (`e2e.ts`) and real input (`input.ts`: XTEST / a Wayland virtual keyboard / `keybd_event` / CoreGraphics key presses, the window manager's close).   |
 | `areas/<area>.ts`     | The runner side of each area: launches the OS would make, and checks only the outside can make (state across launches, the registry / XDG / LaunchServices, processes that must not start).                   |
 
 Each check is `pass`, `fail` or `n/a`; an `n/a` carries the reason and is listed

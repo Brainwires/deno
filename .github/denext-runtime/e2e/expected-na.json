@@ -436,5 +436,94 @@
       "launch: close() of a WebGPU window closes it (isClosed)",
       "launch: share() shows the OS share sheet"
     ]
+  },
+  "x86_64-unknown-linux-gnu/webview/wayland-sway": {
+    "asmt": [
+      "launch: a real OS auth session"
+    ],
+    "deeplink": [
+      "a file opened with the running app (openfile)",
+      "install from the .msi"
+    ],
+    "dnd": [
+      "launch: a real file drop and a completed drag-out"
+    ],
+    "keyringpersist": [
+      "OS-key cookies survive a launch that can't reach the key"
+    ],
+    "menus": [
+      "a click on a notification while the app is not running launches it"
+    ],
+    "origin": [
+      "launch: a POST from an opaque-origin frame is marked x-deno-desktop-cross-origin: 1",
+      "launch: a stream the page stops reading is held back (backpressure), not drained"
+    ],
+    "passkeys": [
+      "launch: a completed registration / authentication ceremony"
+    ],
+    "update": [
+      "a staged update signed by the same Developer ID / Authenticode signer is accepted"
+    ],
+    "window": [
+      "launch: a maximize event fires",
+      "launch: a minimize event fires",
+      "launch: a restore event fires",
+      "launch: an unmaximize event fires",
+      "launch: close() of a WebGPU window closes it (isClosed)",
+      "launch: getNormalBounds() while maximized is the bounds before",
+      "launch: maximize() maximizes",
+      "launch: minimize() minimizes",
+      "launch: restore() un-minimizes",
+      "launch: setBounds moves the window",
+      "launch: setBounds onto a missing display lands on the primary work area",
+      "launch: the tray rule",
+      "launch: unmaximize() restores"
+    ]
+  },
+  "x86_64-unknown-linux-gnu/cef/wayland-sway": {
+    "asmt": [
+      "launch: a real OS auth session"
+    ],
+    "deeplink": [
+      "a file opened with the running app (openfile)",
+      "install from the .msi"
+    ],
+    "dnd": [
+      "launch: a real file drop and a completed drag-out",
+      "launch: clipboard change events"
+    ],
+    "keyringpersist": [
+      "OS-key cookies survive a launch that can't reach the key"
+    ],
+    "menus": [
+      "a click on a notification while the app is not running launches it"
+    ],
+    "origin": [
+      "launch: a POST from an opaque-origin frame is marked x-deno-desktop-cross-origin: 1"
+    ],
+    "passkeys": [
+      "launch: a completed registration / authentication ceremony"
+    ],
+    "update": [
+      "a staged update signed by the same Developer ID / Authenticode signer is accepted"
+    ],
+    "wayland": [
+      "launch: an overlay window is a layer surface"
+    ],
+    "window": [
+      "launch: a maximize event fires",
+      "launch: a minimize event fires",
+      "launch: a restore event fires",
+      "launch: an unmaximize event fires",
+      "launch: close() of a WebGPU window closes it (isClosed)",
+      "launch: getNormalBounds() while maximized is the bounds before",
+      "launch: maximize() maximizes",
+      "launch: minimize() minimizes",
+      "launch: restore() un-minimizes",
+      "launch: setBounds moves the window",
+      "launch: setBounds onto a missing display lands on the primary work area",
+      "launch: the tray rule",
+      "launch: unmaximize() restores"
+    ]
   }
 }

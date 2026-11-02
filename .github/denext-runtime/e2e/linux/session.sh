@@ -1,24 +1,79 @@
 #!/usr/bin/env bash
-# The desktop session the Linux e2e runs in, inside `xvfb-run` +
-# `dbus-run-session` (e2e.sh): a window manager (xfwm4: maximize, minimize,
-# fullscreen and close requests need one) and a stand-in notification
-# server on the private session bus. Then runs "$@".
+# The desktop session the Linux e2e runs in, inside `dbus-run-session`
+# (e2e.sh): a window manager and a stand-in notification server on the private
+# session bus. Then runs "$@".
+#
+# E2E_DISPLAY=x11 (the default, inside `xvfb-run`): xfwm4, since maximize,
+# minimize, fullscreen and close requests need a window manager.
+# E2E_DISPLAY=wayland: sway on wlroots' headless backend, nothing else. It has
+# no X server: XWayland is off and $DISPLAY unset, so a window can only be a
+# native Wayland one (see linux/sway.conf for the rest).
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 
-xfwm4 --compositor=off --sm-client-disable >"${E2E_LOG_DIR:-/tmp}/xfwm4.log" 2>&1 &
-wm=$!
+if [ "${E2E_DISPLAY:-x11}" = wayland ]; then
+  # The socket and sway's IPC socket live here. A short path: a Unix socket's
+  # is limited to 107 bytes, and a runner's temp directory is deep.
+  XDG_RUNTIME_DIR=$(mktemp -d /tmp/e2e-wl.XXXXXX)
+  chmod 700 "$XDG_RUNTIME_DIR"
+  export XDG_RUNTIME_DIR
+  unset DISPLAY WAYLAND_DISPLAY SWAYSOCK I3SOCK
+  # headless: no DRM or input device; pixman: no GPU (a hosted runner has
+  # none, and llvmpipe's GLES would only be slower).
+  WLR_BACKENDS=headless WLR_RENDERER=pixman WLR_LIBINPUT_NO_DEVICES=1 \
+    sway --unsupported-gpu --config "$here/sway.conf" \
+    >"${E2E_LOG_DIR:-/tmp}/sway.log" 2>&1 &
+  wm=$!
+  for _ in $(seq 1 100); do
+    sock=$(find "$XDG_RUNTIME_DIR" -maxdepth 1 -type s -name 'wayland-*' | head -1)
+    ipc=$(find "$XDG_RUNTIME_DIR" -maxdepth 1 -type s -name 'sway-ipc.*' | head -1)
+    if [ -n "$sock" ] && [ -n "$ipc" ] && SWAYSOCK=$ipc swaymsg -t get_version >/dev/null 2>&1; then
+      break
+    fi
+    sleep 0.2
+  done
+  [ -n "${sock:-}" ] && [ -n "${ipc:-}" ] || {
+    echo "::error::sway did not start; sway.log:" >&2
+    tail -40 "${E2E_LOG_DIR:-/tmp}/sway.log" >&2 || true
+    kill "$wm" 2>/dev/null
+    exit 1
+  }
+  export WAYLAND_DISPLAY SWAYSOCK=$ipc
+  WAYLAND_DISPLAY=$(basename "$sock")
+  # The seat's keyboard, and how the suite presses keys (input.ts).
+  export E2E_WAYLAND_KEYBOARD="$XDG_RUNTIME_DIR/e2e-keyboard.sock"
+  python3 "$here/wayland-input.py" "$E2E_WAYLAND_KEYBOARD" \
+    >"${E2E_LOG_DIR:-/tmp}/wayland-input.log" 2>&1 &
+  kbd=$!
+  for _ in $(seq 1 50); do
+    grep -q ready "${E2E_LOG_DIR:-/tmp}/wayland-input.log" && break
+    sleep 0.2
+  done
+  grep -q ready "${E2E_LOG_DIR:-/tmp}/wayland-input.log" || {
+    echo "::error::the session's keyboard did not start:" >&2
+    cat "${E2E_LOG_DIR:-/tmp}/wayland-input.log" >&2
+    kill "$kbd" "$wm" 2>/dev/null
+    exit 1
+  }
+  wm_ready() { swaymsg -t get_version >/dev/null 2>&1; }
+  wm_name() { swaymsg -t get_version 2>&1 | head -1; }
+else
+  xfwm4 --compositor=off --sm-client-disable >"${E2E_LOG_DIR:-/tmp}/xfwm4.log" 2>&1 &
+  wm=$!
+  wm_ready() { wmctrl -m >/dev/null 2>&1; }
+  wm_name() { wmctrl -m 2>&1 | head -1; }
+fi
 export E2E_NOTIFY_LOG=${E2E_NOTIFY_LOG:-${E2E_LOG_DIR:-/tmp}/notify.log}
 : >"$E2E_NOTIFY_LOG"
 python3 "$here/notification-server.py" >"${E2E_LOG_DIR:-/tmp}/notification-server.log" 2>&1 &
 ns=$!
 for _ in $(seq 1 50); do
-  if wmctrl -m >/dev/null 2>&1 && grep -q ready "${E2E_LOG_DIR:-/tmp}/notification-server.log"; then
+  if wm_ready && grep -q ready "${E2E_LOG_DIR:-/tmp}/notification-server.log"; then
     break
   fi
   sleep 0.2
 done
-echo "window manager: $(wmctrl -m 2>&1 | head -1)"
+echo "window manager: $(wm_name)"
 echo "notification server: $(cat "${E2E_LOG_DIR:-/tmp}/notification-server.log")"
 
 # E2E_SECRET_SERVICE=locked (e2e.sh): gnome-keyring on this bus with a
@@ -66,7 +121,7 @@ if [ "${E2E_SECRET_SERVICE:-}" = locked ]; then
   echo "secret service: gnome-keyring, default collection Locked: ${locked:-unknown}"
   [ "$locked" = "b true" ] || {
     echo "::error::the locked-keyring session did not start (name owned: ${owned:-no}, Locked: ${locked:-unknown}); see keyring.log" >&2
-    kill "$keyring" "$ns" "$wm" 2>/dev/null
+    kill "$keyring" ${kbd:-} "$ns" "$wm" 2>/dev/null
     exit 1
   }
 fi
@@ -74,5 +129,5 @@ fi
 status=0
 "$@" || status=$?
 [ -z "$keyring" ] || kill "$keyring" 2>/dev/null || true
-kill "$ns" "$wm" 2>/dev/null || true
+kill ${kbd:-} "$ns" "$wm" 2>/dev/null || true
 exit "$status"

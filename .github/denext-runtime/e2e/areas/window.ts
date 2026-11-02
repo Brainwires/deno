@@ -21,6 +21,14 @@ export async function run(env: Env, rep: AreaReport) {
     include: ["worker.ts"],
   });
   await clearResults("window");
-  await writeParams("window", { initialWindow });
+  await writeParams("window", {
+    initialWindow,
+    // xdg-shell has no minimized state for a client to read, on any compositor
+    // (GTK can't see it, so isMinimized() and its events never move), and a
+    // compositor may ignore set_maximized with no way to say so, as sway does.
+    stateRefused: Deno.env.get("E2E_DISPLAY") === "wayland"
+      ? "xdg-shell tells a client nothing of minimized, and sway ignores set_maximized; the Xvfb legs cover both"
+      : undefined,
+  });
   await launchAndCollect(env, rep, "launch", p, { ms: 240_000 });
 }
