@@ -1117,6 +1117,8 @@ jobs:
       - name: denort SHA-256s
         env:
           RELEASE_TAG: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/denext-runtime-v') }}
+          # A dispatch of every target proves the check on each OS before a tag.
+          ALL_TARGETS: ${{ inputs.targets == 'all' }}
         run: |
           set -euo pipefail
           list=""
@@ -1137,7 +1139,7 @@ jobs:
             *",$TARGET="*) ;;
             *) echo "::error::no denort archive for $TARGET from the denort_bin job"; exit 1 ;;
           esac
-          if [ "$RELEASE_TAG" = true ]; then
+          if [ "$RELEASE_TAG" = true ] || [ "$ALL_TARGETS" = true ]; then
             # Exactly the release's targets, not just six archives.
             py=python3; command -v python3 >/dev/null 2>&1 || py=python
             "$py" -I .github/denext-runtime/denort_pins.py check-list "$list"
@@ -1751,8 +1753,10 @@ jobs:
 
       # Only a tag PUSH publishes: a manual dispatch run on a tag ref (with a
       # `targets` filter or reused artifacts) must never become a release.
-      - name: Check every target is present (tag)
-        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/denext-runtime-v')
+      # A dispatch of every target runs it too, so it is proven before a tag. A
+      # cli_only dry run's manifest holds no runtime archives.
+      - name: Check every target is present
+        if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/denext-runtime-v')) || (inputs.targets == 'all' && !inputs.cli_only)
         run: |
           python3 -I .github/denext-runtime/denort_pins.py check-manifest dist/manifest.json
 

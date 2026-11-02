@@ -8463,14 +8463,16 @@ where the changes are discussed.
 
      `denext_runtime.yml`: the tag checks compare target names, not counts
      (`denort_pins.py`: `check-list` before the CLI build, `check-manifest` at
-     publish, each against the workflow's matrix by `denort_pins_test.py`). The
-     build keeps working without `DENEXT_DENORT_SHA256S` (a local build uses
-     item 130's check), so what stops a tag shipping such a CLI is `check-cli`,
-     in the publish job of every run: it opens each CLI archive and requires
-     `<target>=<sha256>` in the binary for every `denort` archive beside it,
-     hashed from the archive's bytes. The denort smoke still refuses a changed
-     release archive, and `runtime_refusal_smoke.sh` requires each refusal with
-     no output, no cache entry and no connection (a loopback proxy records any).
+     publish, each against the workflow's matrix by `denort_pins_test.py`; a
+     dispatch of every target runs them too, the full manifest check only
+     outside a `cli_only` run). The build keeps working without
+     `DENEXT_DENORT_SHA256S` (a local build uses item 130's check), so what
+     stops a tag shipping such a CLI is `check-cli`, in the publish job of every
+     run: it opens each CLI archive and requires `<target>=<sha256>` in the
+     binary for every `denort` archive beside it, hashed from the archive's
+     bytes. The denort smoke still refuses a changed release archive, and
+     `runtime_refusal_smoke.sh` requires each refusal with no output, no cache
+     entry and no connection (a loopback proxy records any).
 
      Local overrides stay as they are: `DENORT_BIN`, `DENORT_DESKTOP_BIN`,
      `LAUFEY_DEV_DIR`, and a `denort` / `libdenort` beside an executable under a
