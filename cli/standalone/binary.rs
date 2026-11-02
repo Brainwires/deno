@@ -2116,14 +2116,7 @@ fn sha256sums_entry(
       _ => found = Some(hash),
     }
   }
-  match found {
-    Some(hash) => Ok(Some(hash)),
-    None => bail!(
-      "this deno was built with the SHA-256 of its release's denort archives, \
-       and {target} is not among them, so there is no pinned denort to \
-       compile onto. Pick a target the release ships with --target."
-    ),
-  }
+  Ok(found)
 }
 
 /// A cached archive whose recorded hash (see [`verified_hash_path`]) still
