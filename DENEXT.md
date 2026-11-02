@@ -8447,7 +8447,12 @@ where the changes are discussed.
        inode, mode, size, mtime and ctime from before the hash, and the child is
        killed on a difference. What is left there, for a program of the same
        user (Deno code cannot write the file, its folder or a folder above it
-       holding it, nor link to it):
+       holding it, nor link to it; with unscoped `--allow-read` and
+       `--allow-write`, which `Deno.symlink` needs, it could put a symlink where
+       a folder above the program's will be before the runtime first writes it,
+       and race a spawn by writing the copy through it (a change that stays is
+       refused at the next spawn), but such an app can change files the user's
+       own programs run anyway):
        - one that changes the path in the window (microseconds) may get a moment
          of a child before the kill, and `outputSync()` has no such kill;
        - a write in place of the same length, with the mode put back, inside one
