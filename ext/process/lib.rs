@@ -2330,8 +2330,7 @@ mod deprecated {
       /* ipc */ false,
     )?;
     // Held for the spawn (DENEXT.md item 215).
-    let _verified =
-      state.try_take::<super::embedded_program::VerifiedProgram>();
+    let verified = state.try_take::<super::embedded_program::VerifiedProgram>();
 
     #[cfg(windows)]
     let mut c = Command::new(cmd);
@@ -2371,6 +2370,11 @@ mod deprecated {
 
     // Spawn the command.
     let mut child = c.spawn()?;
+    // As Deno.Command's spawn does (DENEXT.md item 215).
+    #[cfg(not(windows))]
+    super::refuse_if_changed_since_check(verified, &mut child)?;
+    #[cfg(windows)]
+    drop(verified);
     let pid = child.id();
 
     let stdin_rid = match child.stdin.take() {
