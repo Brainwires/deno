@@ -8500,6 +8500,9 @@ where the changes are discussed.
      `stage_refuses_a_case_only_rename_of_the_executable`,
      `apply_refuses_a_case_only_rename_of_the_executable` (each failed before).
 
+218. **Reserved for the V8 15.6 pin** (`chore/v8-15.6`, not merged yet). The
+     formatter renumbers this list by position, so the number needs an entry.
+
 219. **`test(node_compat)`, `ci(denext)`: two checks that failed on the runner,
      not on the code** (`tests/node_compat/config.jsonc`,
      `.github/denext-runtime/denort_smoke.sh`, `runtime_refusal_smoke.sh`,
@@ -8545,11 +8548,15 @@ where the changes are discussed.
        under CEF the clipboard's change events (the host reports
        `changeEvents: false` without ext-data-control-v1, which this sway's
        wlroots 0.15 lacks) and overlays (`layerShell` is false).
-     - A drag with the pointer off the window fails on Wayland, and so does every
-       drag under CEF (`fileDragOut` is false): GTK has no surface to start from.
-       With the pointer on a WebKitGTK window and no held button it ends
-       `"cancelled"`, not `"failed"`: the host can't read the pointer's state
-       outside an event, so it asks and the compositor turns it down.
+     - A drag with the pointer off the window fails on Wayland, and so does
+       every drag under CEF (`fileDragOut` is false): GTK has no surface to
+       start from. With the pointer on a WebKitGTK window and no held button it
+       ends `"cancelled"`, not `"failed"`: the host can't read the pointer's
+       state outside an event, so it asks and the compositor turns it down.
+     - A real drag runs on WebKitGTK: sway's seat commands hold the left button
+       on one window, `startDrag` starts, the pointer crosses to a second window
+       and lets go. It must end `"dropped"`, and the second window gets
+       `dragenter` and a `drop` with the file's path. Under CEF it stays n/a.
 
 221. **`feat(desktop)`: the OS's quits reach the app's guards** (laufey API 52;
      `cli/rt/desktop.rs`, `cli/rt_desktop/lib.rs`, `runtime/ops/desktop.rs`).
@@ -8579,14 +8586,23 @@ where the changes are discussed.
      at the bottom or right edge stays clear of that edge's panels. The key
      reports it. Tests: `desktop_ops_inert`, laufey's `--overlay-edge`.
 
+223. **laufey at `117374f`** (`development-denext`; laufey API 52; runtime
+     3.0.0-denext.8). Items 221 and 222, and from the same range: a Wayland drag
+     with no origin surface reports `FAILED` where GTK used to end the process,
+     CEF notices a fullscreen change the compositor made, CEF stops reporting
+     `changeEvents` where it can't deliver them, and layer surfaces get their
+     first frame, keep their place through a resize and follow their moves on
+     KWin. Still CEF 156.0.15. Tests: laufey's CI on the commit; item 220's leg
+     is what checks the first two on a real compositor here.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
 169-174, 176, 178, 180, 182-184, 186, 187, 189-191, 193-196, 198-203, 206, 207,
-209-215, 217, 221, 222) are what the prebuilt `libdenort` carries. The CLI-side parts (for
-example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's
-launchers) are in the branch too, but a stock CLI does not run them; denext's
-own launcher provides that environment.
+209-215, 217, 221, 222) are what the prebuilt `libdenort` carries. The CLI-side
+parts (for example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a
+packaged app's launchers) are in the branch too, but a stock CLI does not run
+them; denext's own launcher provides that environment.
 
 The laufey backend hosts are built from
 [Brainwires/laufey](https://github.com/Brainwires/laufey) branch

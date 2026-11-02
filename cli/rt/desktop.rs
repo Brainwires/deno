@@ -2190,8 +2190,9 @@ pub const DESKTOP_JS: &str = r#"
       configurable: true,
       enumerable: true,
     },
-    // A session end the OS is waiting on is refused (laufey API 52). False
-    // when none is.
+    // Asks the OS to stop a session end it is waiting on, which it may not
+    // honour (laufey API 52). False when none is held, which includes one past
+    // laufey's deadline.
     cancelQuit: {
       value: function cancelQuit() {
         if (!isSessionEndHeld()) return false;

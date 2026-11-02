@@ -65,9 +65,8 @@ denort = { path = "../rt", default-features = false }
 # 3.0.0-denext.8, API 51: hidden pages throttled instead of frozen on macOS and
 # the per-window background policy, branch
 # `fix/macos-hidden-page-and-hit-region`, and the Windows focus, tray role and
-# window icon fixes, branch `fix/windows-focus-tray-roles`, until they land;
-# API 52: quit requests and layer-surface edge anchoring, branch
-# `feat/quit-guards-overlay-anchor` until it lands),
+# window icon fixes, branch `fix/windows-focus-tray-roles`; API 52: quit
+# requests and layer-surface edge anchoring, all on `development-denext`),
 # pinned to a commit of the Brainwires/laufey fork.
 # The host built from the same commit must be used with it (the API version
 # check is exact).
