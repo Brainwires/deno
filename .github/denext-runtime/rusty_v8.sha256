@@ -5,13 +5,13 @@
 # again with `gh attestation verify <file> -R Brainwires/rusty_v8`; a V8 bump
 # changes the tag and every line in the same commit as Cargo.toml's rev.
 # repo: Brainwires/rusty_v8
-# tag: v156.0.0-denext.2
-6bbad25d697ee58697af17d67fcf662d47e4c00d46b0c557d4432576b57e6051  librusty_v8_release_aarch64-apple-darwin.a.gz
-36eada8f7815740ae1d8cfa051682019104e41d9a0aa1e6525a41e322537aaa3  librusty_v8_release_aarch64-unknown-linux-gnu.a.gz
-cffff29d0a8cebe4a70e63065194a794d48c2b0683bcc8c258234514c9705fca  librusty_v8_release_x86_64-apple-darwin.a.gz
-dd37c894ef2309b3f61644de5fb74d1eb4058cabee6258a3cdd42b496bf8a14f  librusty_v8_release_x86_64-unknown-linux-gnu.a.gz
-037f0b4900d07cdec630919e4a0c8f356680a516740ef0b2187d1ced3c14be96  rusty_v8_release_aarch64-pc-windows-msvc.lib.gz
-8de6e97a95c011e39413ca83273c99c1e07e587bfdd9947aada0935571fca8b1  rusty_v8_release_x86_64-pc-windows-msvc.lib.gz
+# tag: v156.0.0-denext.3
+e043e8ee076a9cd64678bdaf146458421136b1f45bc9d2352feca9ae566b38e9  librusty_v8_release_aarch64-apple-darwin.a.gz
+910c405fd420048c0f6f4d28f74c2e7a82a3b08022583177273d27a6a5df58e5  librusty_v8_release_aarch64-unknown-linux-gnu.a.gz
+eec386e14fcb289272ed28506d009cc04607bb39564c7b2ad1083d6a1b7e48d5  librusty_v8_release_x86_64-apple-darwin.a.gz
+c10fcc8ee5ec2d228dd8c0ceaaeeaf9ce39915985ef9dce4acf9caf5061a62e7  librusty_v8_release_x86_64-unknown-linux-gnu.a.gz
+f27f3cca024ef1c54faa557cae8c4c11f97d5302f6f514ac932a0d7af300b819  rusty_v8_release_aarch64-pc-windows-msvc.lib.gz
+22a5b3f6139963e20f2ac2c17e9a344ca452f54d078ea62655def136f0e25695  rusty_v8_release_x86_64-pc-windows-msvc.lib.gz
 2371c34160eeef64268fbfa7d15c6f1e019e55482ab3ec7d58944203072f2932  src_binding_release_aarch64-apple-darwin.rs
 71b64524f23cbe17a519fccf82c65e7441b033c7c8af2f05420cd87a0087c33c  src_binding_release_aarch64-pc-windows-msvc.rs
 2f9a52d4d2ba5e3a4aa5e64ac72efbda73e61a879a1b7edf528e047b77d3604c  src_binding_release_aarch64-unknown-linux-gnu.rs

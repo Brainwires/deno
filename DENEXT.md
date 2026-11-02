@@ -8501,7 +8501,7 @@ where the changes are discussed.
      `apply_refuses_a_case_only_rename_of_the_executable` (each failed before).
 
 218. **`chore(deps)`: V8 15.6.75.33, Chrome Extended Stable 156, from
-     Brainwires/rusty_v8** (`v8` crate `156.0.0+denext.2`; `chore/v8-15.6`;
+     Brainwires/rusty_v8** (`v8` crate `156.0.0+denext.3`; `chore/v8-15.6`;
      runtime and CI; `Cargo.toml`, `Cargo.lock`, `libs/deno_v8/Cargo.toml`,
      `libs/core/runtime/setup.rs`, `cli/args/mod.rs`, `cli/tools/run/hmr.rs`,
      `cli/rt/hmr.rs`, `.github/denext-runtime/rusty_v8.sha256`,
@@ -8555,7 +8555,7 @@ where the changes are discussed.
        message dispatch and `--trace-sigint`'s stack capture do
        (`specs::node::trace_sigint::*_busy`), so rusty_v8 builds V8 with
        `v8_disallow_js_in_api_interrupts_is_checked=false`, as V8 does for Node.
-     - **`libs/deno_v8`** asks for `v8` `156.0.0`, which the `+denext.2` build
+     - **`libs/deno_v8`** asks for `v8` `156.0.0`, which the `+denext.3` build
        satisfies through `[patch.crates-io]`.
      - **The engine staleness gate** (item 179) is enforced for V8 again:
        `ENGINE_STALENESS_ENFORCE` is `tag`, and the new
@@ -8602,6 +8602,32 @@ where the changes are discussed.
      covers it, but 40 parallel runs with that branch still had 1 such abort and
      2 undiagnosed hangs, so it is not in this pin and the cause of the aborts
      stays open.
+
+     **Pin `v156.0.0-denext.3`** (branch `chore/v8-snapshot-guard`, made on
+     `chore/v8-15.6` because that branch's `d7dadd7db0` is not yet in
+     `integrate/denext-8-pre`). The same V8 15.6.75.33; rusty_v8's read-only
+     heap guard now covers both gaps above. A snapshot creator that joins an
+     isolate group V8 has emptied, and so set up a new writable read-only heap,
+     holds back isolates on other threads until its blob is made. An isolate
+     whose snapshot has another read-only image than the live isolates' (told
+     apart by the read-only checksum in the blob header) waits until they are
+     disposed, then sets the heap up from its own snapshot, and panics where
+     that wait could never end. That second case is what aborted `deno_core`'s
+     lib tests on parallel threads: its snapshot tests load the snapshots they
+     make while other tests hold isolates of V8's built-in snapshot, and such an
+     isolate aborts in `Deserializer::ReadReadOnlyHeapRef` (`vector.h:419`),
+     deterministically, even on one thread. The runtime is not exposed: every
+     isolate it creates (main worker, web workers, the TypeScript and LSP
+     isolates) comes from `CLI_SNAPSHOT`, so the guard never makes it wait;
+     creating or disposing an isolate now takes the guard's mutex (about 46 ns
+     uncontended, under the noise of creating an isolate). `Cargo.toml`'s rev is
+     `2ddc1c5d`, the `crate` commit the release names; `rusty_v8.sha256` holds
+     its `SHA256SUMS`, each file checked against its build-provenance
+     attestation. Verified on biscuits (Linux x86_64, the release's prebuilt
+     library): `cargo test -p deno_core --lib` on default parallel threads with
+     the snapshot tests included, 20 of 20 runs passed (496 each; before the fix
+     3 of 33 aborted); a release `deno` reports `v8 15.6.75.33-rusty`, and
+     `specs` `worker` 90, `snapshot` 12 and `resource_limits` 32 passed.
 
      Verified before the pin on biscuits (Linux x86_64) against a local
      `V8_FROM_SOURCE=1` build of rusty_v8 `v8-15.6-denext` (`d8fb309b`), through
