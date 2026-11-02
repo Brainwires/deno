@@ -8595,6 +8595,42 @@ where the changes are discussed.
      KWin. Still CEF 156.0.15. Tests: laufey's CI on the commit; item 220's leg
      is what checks the first two on a real compositor here.
 
+2NN-pin-fail-closed. **`fix(build)`, `fix(compile)`: the V8 and denort pins fail
+closed** (`fix/pin-fail-closed`; build and CLI; `.cargo/config.toml`,
+`cli/standalone/binary.rs`). Two fallbacks from the 3.0.0-denext.8 delta audit
+(N5, N6):
+
+- **V8.** Item 162's `fetch_rusty_v8.py` pins the prebuilt V8 in CI, but a build
+  that did not run it got the `v8` build script's default: denoland's release
+  `v<crate version>`, pinned by nothing. That release does not exist today; if
+  one appeared, a local build would link upstream's library without the fork's
+  V8 patches and say nothing. `.cargo/config.toml`'s `[env]` now sets
+  `RUSTY_V8_MIRROR` to a location that does not exist and
+  `RUSTY_V8_MIRROR_FALLBACK=0`, both with `force = true` (a shell value does not
+  replace them), so the build script tries only that location and fails, naming
+  `fetch_rusty_v8.py` in the path it reports. A build that ran the script has
+  `RUSTY_V8_ARCHIVE` and `RUSTY_V8_SRC_BINDING_PATH`, which the build script
+  takes instead of any mirror, and `RUSTY_V8_ARCHIVE_SHA256`, which it checks
+  the archive against. Cargo passes `[env]` only to the processes it starts, so
+  the script (which refuses a `RUSTY_V8_MIRROR` in its own environment) is
+  unaffected, and every CI job already runs it before cargo. `V8_FROM_SOURCE=1`
+  builds V8 and downloads nothing. A local build or `cargo check` runs the
+  script first (see Reproducing a build).
+- **denort.** A CLI built with `DENEXT_DENORT_SHA256S` (item 188) checked a
+  target its list does not name against the same release's `SHA256SUMS`, the
+  file a swapped release could change along with the archive.
+  `embedded_denort_sha256` now refuses such a target, and an empty list, with an
+  error that names it; only a build without the list (a local or test build)
+  still verifies against `SHA256SUMS`. The release's tag build already embeds
+  all six targets, so a released CLI behaves the same; a dispatch CLI built from
+  some targets' archives now compiles only onto those.
+
+Tests: `embedded_denort_sha256_reads_the_build_list` (an unlisted target, a
+target that only starts like a listed one, and an empty list are errors; no list
+is still `None`); the V8 change was checked with `cargo check -p v8` on Linux,
+without the script (fails at the refused mirror path) and after
+`fetch_rusty_v8.py --print-env` (builds).
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
@@ -8819,6 +8855,11 @@ version is the newest. Per target it:
 Locally, the equivalent is:
 
 ```sh
+# The prebuilt V8, verified (item 162); without it cargo refuses to build
+# (item 2NN-pin-fail-closed). Re-run it in each new shell.
+eval "$(python3 -I .github/denext-runtime/fetch_rusty_v8.py \
+  --target "$(rustc -vV | sed -n 's/^host: //p')" \
+  --dest target/rusty_v8 --print-env)"
 cargo build --release -p denort_desktop                   # this branch
 git clone https://github.com/Brainwires/laufey && cd laufey
 git checkout <LAUFEY_SHA> && make webview && make cef
