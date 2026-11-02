@@ -35,9 +35,11 @@ function isLink(path: string) {
 
 attempt("cpSync link to absent parent", () => cpSync("src/c", "base/c"));
 await attemptAsync("cp link to absent parent", () => cp("src/c", "base/c"));
+// Absolute paths: a relative one-component destination trips an unrelated
+// empty-parent check in cp's tree walk.
 attempt(
   "cpSync tree with a link at a parent",
-  () => cpSync("src", "base", { recursive: true }),
+  () => cpSync(`${Deno.cwd()}/src`, `${Deno.cwd()}/base`, { recursive: true }),
 );
 attempt("cpSync link onto a linked parent", () => cpSync("src/c", "base/d"));
 await attemptAsync(

@@ -2150,7 +2150,6 @@ fn cp_symlink_type(
   }
 }
 
-#[allow(clippy::unused_async, reason = "sometimes it's async")]
 /// `cp` recreates a source symlink at `link_path` with the checks of
 /// `fs.symlink` (unscoped read and write), and like `Deno.symlink()` the link
 /// path also gets the strict write check a recursive remove has: unscoped
@@ -2173,6 +2172,7 @@ fn check_cp_symlink(
   Ok(())
 }
 
+#[allow(clippy::unused_async, reason = "sometimes it's async")]
 async fn cp_create_symlink(
   state: &Rc<RefCell<OpState>>,
   fs: &FileSystemRc,
