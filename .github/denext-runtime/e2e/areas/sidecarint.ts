@@ -24,7 +24,7 @@ function cacheDir(id: string): string {
     return path(
       Deno.env.get("LOCALAPPDATA") ?? path(home, "AppData", "Local"),
       id,
-      "denext",
+      "Cache",
     );
   }
   return path(
