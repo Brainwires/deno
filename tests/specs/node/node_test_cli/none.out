@@ -1,0 +1,22 @@
+TAP version 13
+# Subtest: a passes
+ok 1 - a passes
+  ---
+  duration_ms: [WILDCARD]
+  type: 'test'
+  ...
+# Subtest: [WILDCARD]empty.js
+ok 2 - [WILDCARD]empty.js
+  ---
+  duration_ms: [WILDCARD]
+  type: 'test'
+  ...
+1..2
+# tests 2
+# suites 0
+# pass 2
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms [WILDCARD]

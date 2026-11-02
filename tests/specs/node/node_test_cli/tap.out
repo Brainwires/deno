@@ -1,0 +1,46 @@
+TAP version 13
+# Subtest: suite
+    # Subtest: nested
+    ok 1 - nested
+      ---
+      duration_ms: [WILDCARD]
+      type: 'test'
+      ...
+    1..1
+ok 1 - suite
+  ---
+  duration_ms: [WILDCARD]
+  type: 'suite'
+  ...
+# Subtest: a passes
+ok 2 - a passes
+  ---
+  duration_ms: [WILDCARD]
+  type: 'test'
+  ...
+# Subtest: test/empty.js
+ok 3 - test/empty.js
+  ---
+  duration_ms: [WILDCARD]
+  type: 'test'
+  ...
+output of a test file
+# Subtest: fails
+not ok 4 - fails
+  ---
+[WILDCARD]
+# Subtest: passes
+ok 5 - passes
+  ---
+  duration_ms: [WILDCARD]
+  type: 'test'
+  ...
+1..5
+# tests 5
+# suites 1
+# pass 4
+# fail 1
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms [WILDCARD]

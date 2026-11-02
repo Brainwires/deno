@@ -9119,6 +9119,24 @@ fn node_options_require() {
 }
 
 #[test]
+fn node_options_loader_and_import_preload() {
+  // denext: loaders, then `--import`s, then the CLI's `--preload`s.
+  set_test_node_options(Some(
+    "--import=first.mjs --loader ./l.mjs --experimental-loader=./m.mjs",
+  ));
+  let flags =
+    flags_from_vec(svec!["deno", "run", "--preload", "cli.js", "script.ts",])
+      .unwrap();
+  set_test_node_options(None);
+  assert_eq!(flags.preload.len(), 4);
+  assert!(flags.preload[0].starts_with("data:text/javascript,"));
+  assert!(flags.preload[0].contains("l.mjs"));
+  assert!(flags.preload[1].contains("m.mjs"));
+  assert_eq!(flags.preload[2], "first.mjs");
+  assert_eq!(flags.preload[3], "cli.js");
+}
+
+#[test]
 fn node_options_require_prepend_to_cli() {
   // Test NODE_OPTIONS --require is prepended to CLI --require values
   set_test_node_options(Some("--require foo.js --require bar.js"));

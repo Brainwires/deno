@@ -1,0 +1,14 @@
+[WILDCARD]✖ fails ([WILDCARD]
+✔ passes ([WILDCARD]
+ℹ tests 5
+ℹ suites 1
+ℹ pass 4
+ℹ fail 1
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms [WILDCARD]
+
+✖ failing tests:
+
+[WILDCARD]

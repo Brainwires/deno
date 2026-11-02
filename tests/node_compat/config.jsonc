@@ -129,7 +129,7 @@
     "es-module/test-esm-loader-thenable.mjs": {
       "darwin": false,
       "windows": false,
-      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno's report still fails it"
+      "reason": "Passes on Linux (debug build) with DENEXT.md's node_compat round 5; not verified on macOS or Windows"
     },
     "es-module/test-esm-loader-with-syntax-error.mjs": {
       "darwin": false,
@@ -195,7 +195,7 @@
     "es-module/test-require-module-preload.js": {
       "darwin": false,
       "windows": false,
-      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno's report still fails it"
+      "reason": "Passes on Linux (debug build) with DENEXT.md's node_compat round 5; not verified on macOS or Windows"
     },
     "es-module/test-require-module-synchronous-rejection-handling.js": {},
     "es-module/test-require-module-tla-execution.js": {
@@ -3426,12 +3426,14 @@
       "reason": "Passes on Linux (3 isolated runs, debug build) with the fork's node:test / node:crypto changes; not verified on macOS or Windows, where upstream Deno's report still fails it"
     },
     "parallel/test-runner-cli-concurrency.js": {
-      "ignore": true,
-      "reason": "Tests Node.js-specific CLI flags/options that are not supported in Deno"
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (debug build) with DENEXT.md's node_compat round 5; not verified on macOS or Windows"
     },
     "parallel/test-runner-cli-timeout.js": {
-      "ignore": true,
-      "reason": "Tests Node.js-specific CLI flags/options that are not supported in Deno"
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (debug build) with DENEXT.md's node_compat round 5; not verified on macOS or Windows"
     },
     "parallel/test-runner-cli.js": {
       "ignore": true,
@@ -4867,6 +4869,61 @@
     },
     "test-runner/test-output-before-and-after-each-too-many-listeners.mjs": {},
     "test-runner/test-output-before-and-after-each-with-timeout-too-many-listeners.mjs": {},
+    "test-runner/test-output-coverage-short-filename.mjs": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (debug build) with DENEXT.md's node_compat round 5; not verified on macOS or Windows"
+    },
+    "test-runner/test-output-coverage-width-100-uncovered-lines.mjs": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (debug build) with DENEXT.md's node_compat round 5; not verified on macOS or Windows"
+    },
+    "test-runner/test-output-coverage-width-100.mjs": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (debug build) with DENEXT.md's node_compat round 5; not verified on macOS or Windows"
+    },
+    "test-runner/test-output-coverage-width-150-uncovered-lines.mjs": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (debug build) with DENEXT.md's node_compat round 5; not verified on macOS or Windows"
+    },
+    "test-runner/test-output-coverage-width-150.mjs": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (debug build) with DENEXT.md's node_compat round 5; not verified on macOS or Windows"
+    },
+    "test-runner/test-output-coverage-width-40.mjs": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (debug build) with DENEXT.md's node_compat round 5; not verified on macOS or Windows"
+    },
+    "test-runner/test-output-coverage-width-80-uncovered-lines.mjs": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (debug build) with DENEXT.md's node_compat round 5; not verified on macOS or Windows"
+    },
+    "test-runner/test-output-coverage-width-80.mjs": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (debug build) with DENEXT.md's node_compat round 5; not verified on macOS or Windows"
+    },
+    "test-runner/test-output-coverage-width-infinity-uncovered-lines.mjs": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (debug build) with DENEXT.md's node_compat round 5; not verified on macOS or Windows"
+    },
+    "test-runner/test-output-coverage-width-infinity.mjs": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (debug build) with DENEXT.md's node_compat round 5; not verified on macOS or Windows"
+    },
+    "test-runner/test-output-coverage-with-mock-cjs.mjs": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (debug build) with DENEXT.md's node_compat round 5; not verified on macOS or Windows"
+    },
     "test-runner/test-output-describe-nested.mjs": {},
     "test-runner/test-output-global-hooks-with-no-tests.mjs": {},
     "test-runner/test-output-hooks-with-no-global-test.mjs": {},
@@ -4987,6 +5044,11 @@
     "client-proxy/test-https-proxy-request-invalid-url.mjs": {},
     "es-module/test-esm-dns-promises.mjs": {},
     "es-module/test-esm-json.mjs": {},
+    "es-module/test-esm-loader-custom-condition.mjs": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (debug build) with DENEXT.md's node_compat round 5; not verified on macOS or Windows"
+    },
     "es-module/test-esm-long-path-win.js": {
       "windows": false,
       "reason": "Cannot find module"
@@ -5609,14 +5671,64 @@
     "parallel/test-repl-tab-complete-files.js": {
       "darwin": false
     },
+    "parallel/test-runner-coverage-isolation-none-api.mjs": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (debug build) with DENEXT.md's node_compat round 5; not verified on macOS or Windows"
+    },
+    "parallel/test-runner-error-reporter.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (debug build) with DENEXT.md's node_compat round 5; not verified on macOS or Windows"
+    },
+    "parallel/test-runner-exit-code.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (debug build) with DENEXT.md's node_compat round 5; not verified on macOS or Windows"
+    },
+    "parallel/test-runner-force-exit-failure.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (debug build) with DENEXT.md's node_compat round 5; not verified on macOS or Windows"
+    },
     "parallel/test-runner-get-test-context.js": {},
     "parallel/test-runner-global-setup-watch-mode.mjs": {
       "linux": false,
       "darwin": false,
       "reason": "running 1 test from ./test/parallel/test-runner-global-setup-watch-mode.mjs"
     },
+    "parallel/test-runner-misc.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (debug build) with DENEXT.md's node_compat round 5; not verified on macOS or Windows"
+    },
     "parallel/test-runner-option-validation.js": {},
     "parallel/test-runner-plan.mjs": {},
+    "parallel/test-runner-randomize-first-draw.mjs": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (debug build) with DENEXT.md's node_compat round 5; not verified on macOS or Windows"
+    },
+    "parallel/test-runner-root-duration.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (debug build) with DENEXT.md's node_compat round 5; not verified on macOS or Windows"
+    },
+    "parallel/test-runner-test-id.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (debug build) with DENEXT.md's node_compat round 5; not verified on macOS or Windows"
+    },
+    "parallel/test-runner-todo-suite-hook-failure.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (debug build) with DENEXT.md's node_compat round 5; not verified on macOS or Windows"
+    },
+    "parallel/test-runner-worker-id.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (debug build) with DENEXT.md's node_compat round 5; not verified on macOS or Windows"
+    },
     "parallel/test-signal-args.js": {
       "linux": false,
       "darwin": false,
@@ -5905,6 +6017,11 @@
       "darwin": false,
       "windows": false,
       "reason": "Passes on Linux (3 isolated runs, debug build) with the fork's node:test / node:crypto changes; not verified on macOS or Windows, where upstream Deno's report still fails it"
+    },
+    "test-runner/test-output-test-diagnostic-warning-without-test-only-flag.mjs": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (debug build) with DENEXT.md's node_compat round 5; not verified on macOS or Windows"
     },
     "wasi/test-return-on-exit.js": {},
     "wasi/test-wasi-not-started.js": {},

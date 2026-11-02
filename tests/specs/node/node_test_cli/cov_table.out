@@ -1,0 +1,25 @@
+TAP version 13
+# Subtest: adds
+ok 1 - adds
+  ---
+  duration_ms: [WILDCARD]
+  type: 'test'
+  ...
+1..1
+# tests 1
+# suites 0
+# pass 1
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms [WILDCARD]
+# start of coverage report
+# ----------------------------------------------------------
+# file      | line % | branch % | funcs % | uncovered lines
+# ----------------------------------------------------------
+# math.js   |  50.00 |   100.00 |   50.00 | 6-10
+# ----------------------------------------------------------
+# all files |  50.00 |   100.00 |   50.00 | 
+# ----------------------------------------------------------
+# end of coverage report

@@ -878,7 +878,14 @@ function esmResolveHookCallback(specifier, referrer, importAttributes) {
   };
   try {
     const result = executeEsmResolveHookChain(specifier, context);
-    return result?.url ?? null;
+    const url = result?.url ?? null;
+    // denext: a hook's `node:` URL names a builtin, or fails as Node's does.
+    if (
+      url !== null && StringPrototypeStartsWith(url, "node:") && !isBuiltin(url)
+    ) {
+      throw new internalErrors.ERR_UNKNOWN_BUILTIN_MODULE(url);
+    }
+    return url;
   } catch (e) {
     // A Node error keeps its class and `code` through the import's rejection
     // (`ERR_PACKAGE_PATH_NOT_EXPORTED`, `ERR_INVALID_ARG_VALUE`, ...).

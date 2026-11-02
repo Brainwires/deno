@@ -3235,10 +3235,35 @@ pub fn parse_node_options_env_var(
   Ok(env_argv)
 }
 
+/// A `--preload` module that registers a `--experimental-loader` module with
+/// `module.register()`, resolved from the working directory as in Node. The
+/// node shim's `--experimental-loader` on a command line does the same.
+fn node_loader_preload(loader: &str) -> String {
+  let specifier =
+    format!("\"{}\"", loader.replace('\\', "\\\\").replace('"', "\\\""));
+  let source = format!(
+    "import{{register}}from\"node:module\";\
+     import{{pathToFileURL}}from\"node:url\";\
+     register({specifier},pathToFileURL(\"./\"));"
+  );
+  let mut url = String::from("data:text/javascript,");
+  for byte in source.bytes() {
+    if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~')
+    {
+      url.push(byte as char);
+    } else {
+      url.push_str(&format!("%{byte:02X}"));
+    }
+  }
+  url
+}
+
 /// Reads some flags from NODE_OPTIONS:
 /// https://nodejs.org/api/cli.html#node_optionsoptions
 /// Currently supports:
 /// - `--require` / `-r`
+/// - `--experimental-loader` / `--loader` and `--import` (denext), as `--preload`
+///   modules before the command line's: Node's order, loaders then imports
 /// - `--inspect-publish-uid`
 ///
 /// Public because the CLI's bare-run fast path skips the full parse and has to
@@ -3305,6 +3330,33 @@ pub fn apply_node_options(flags: &mut Flags) {
   if !node_require.is_empty() {
     node_require.append(&mut flags.require);
     flags.require = node_require;
+  }
+
+  // denext: loaders and `--import` modules, before the CLI's `--preload`s.
+  let mut loaders: Vec<String> = Vec::new();
+  let mut imports: Vec<String> = Vec::new();
+  let mut words = args.iter();
+  while let Some(word) = words.next() {
+    let (name, inline) = match word.split_once('=') {
+      Some((name, value)) => (name, Some(value.to_string())),
+      None => (word.as_str(), None),
+    };
+    if !matches!(name, "--experimental-loader" | "--loader" | "--import") {
+      continue;
+    }
+    let Some(value) = inline.or_else(|| words.next().cloned()) else {
+      break;
+    };
+    if name == "--import" {
+      imports.push(value);
+    } else {
+      loaders.push(node_loader_preload(&value));
+    }
+  }
+  if !loaders.is_empty() || !imports.is_empty() {
+    loaders.append(&mut imports);
+    loaders.append(&mut flags.preload);
+    flags.preload = loaders;
   }
 
   // Parse --inspect-publish-uid (only if not already set from CLI)

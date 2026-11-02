@@ -525,7 +525,25 @@ fn parse_flags(source: &str) -> (Vec<String>, Vec<String>, Vec<String>) {
   for line in source.lines() {
     if let Some(captures) = re.captures(line) {
       let flags_str = captures.get(1).unwrap().as_str();
+      let mut loader_next = false;
       for flag in flags_str.split_whitespace() {
+        // denext: `--experimental-loader <module>` goes in NODE_OPTIONS, which
+        // the runtime reads whatever the subcommand.
+        if loader_next {
+          loader_next = false;
+          node_options.push(format!("--experimental-loader={flag}"));
+          continue;
+        }
+        if flag == "--experimental-loader" || flag == "--loader" {
+          loader_next = true;
+          continue;
+        }
+        if flag.starts_with("--experimental-loader=")
+          || flag.starts_with("--loader=")
+        {
+          node_options.push(flag.to_string());
+          continue;
+        }
         // V8 treats `--foo-bar` and `--foo_bar` as the same flag, and Node's
         // test suite uses both spellings interchangeably. Normalize underscores
         // to hyphens before matching so we don't have to enumerate both forms.
