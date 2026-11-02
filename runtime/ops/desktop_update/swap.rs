@@ -700,23 +700,28 @@ impl HeldTree {
   }
 }
 
-/// The trial marker: written by the apply helper into the new app right
-/// before the swap, next to its install marker (`Contents/Resources` in a
-/// bundle, the root of an app directory), and deleted when the version is
-/// confirmed ([`mark_confirmed`]). It binds the trial to the app it replaced:
-/// a rollback puts back only a tree whose [`tree_digest`] is
-/// `previous_digest`, and compares the tree's embedded version with `from`
-/// taken from here, never from the state file (which anything running as the
-/// user can write, and so could name any older signed release of the app as
-/// the one to go back to, a downgrade, and any version as the one to mark
-/// rejected). On macOS the installed bundle is what App Management keeps
-/// other programs out of, so a marker inside it can't be forged by a program
-/// that can't modify the bundle; elsewhere it is as writable as the state
-/// file and adds nothing, at no cost. An AppImage (a single file) has nowhere
-/// to hold one and keeps the state's `from` (denext, DENEXT.md 211).
+/// The trial record: written by the apply helper into the private staging
+/// directory ([`super::staging::PrivateDir`], this user's, 0700, held open
+/// through the apply) last before the swap, and deleted when the version is
+/// confirmed ([`mark_confirmed`]; the cleanup removes the directory). It
+/// binds a rollback to the app the swap replaced: a rollback puts back only
+/// a tree whose [`tree_digest`] is `previous_digest`, and compares the tree's
+/// embedded version with `from` taken from here, not from the state file.
+/// This is a consistency binding, not a defence against a same-user writer:
+/// a process running as the user can write the staging directory as it can
+/// the state file, so it can plant an older release of the app at `.old` and
+/// a record naming it; what binds identity is the OS signature check on
+/// `.old` against the installed app (`codesign` team requirement and
+/// notarization on macOS, Authenticode identity on Windows), and the
+/// no-downgrade rule holds for signed releases only as far as the trial
+/// record is intact. It does close what the state file left open by
+/// accident: a rollback that puts back whatever sits at `.old` because the
+/// state says so, with no tie to the app that was actually installed, and
+/// the rejected version coming from the state's `to` rather than from the
+/// app installed (denext, DENEXT.md 211).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct TrialMarker {
+pub struct TrialRecord {
   pub schema: u32,
   /// The version compiled into the app that was installed before the swap.
   pub from: String,
@@ -727,90 +732,42 @@ pub struct TrialMarker {
   pub previous_digest: String,
 }
 
-/// The trial marker's file name (see [`TrialMarker`]).
-pub const TRIAL_MARKER: &str = ".denext-update-trial";
-const TRIAL_MARKER_SCHEMA: u32 = 1;
-/// The most bytes read of a trial marker.
-const TRIAL_MARKER_MAX_BYTES: u64 = 64 * 1024;
+/// The trial record's file name inside the staging directory.
+pub const TRIAL_RECORD: &str = "trial.json";
+const TRIAL_RECORD_SCHEMA: u32 = 1;
+/// The most bytes read of a trial record.
+const TRIAL_RECORD_MAX_BYTES: u64 = 64 * 1024;
 
-/// Where the trial marker sits inside an install of `kind`, as path elements
-/// under its root (beside the install marker); `None` for an AppImage.
-pub fn trial_marker_rel(kind: InstallKind) -> Option<Vec<&'static str>> {
-  let mut rel = super::layout::marker_path(kind).to_vec();
-  rel.pop()?;
-  rel.push(TRIAL_MARKER);
-  Some(rel)
-}
-
-/// The trial marker's path inside the install of `kind` at `root`.
-pub fn trial_marker_path(kind: InstallKind, root: &Path) -> Option<PathBuf> {
-  let mut path = root.to_path_buf();
-  for e in trial_marker_rel(kind)? {
-    path.push(e);
+/// The trial record of the update being rolled back, read through the
+/// private staging directory (`None`: no staging directory of this user's,
+/// one that was replaced at its path, no record, or not one of this schema).
+pub fn read_trial_record(layout: &InstallLayout) -> Option<TrialRecord> {
+  let staging = super::staging::PrivateDir::open(&layout.staging_dir()).ok()?;
+  if !staging.still_at_path() {
+    return None;
   }
-  Some(path)
-}
-
-/// The trial marker inside the app at `root`: `None` when there is none, it
-/// is not a regular file of this user's (`open_private`), or it does not
-/// parse as one of this schema.
-pub fn read_trial_marker(
-  kind: InstallKind,
-  root: &Path,
-) -> Option<TrialMarker> {
-  use std::io::Read;
-  let path = trial_marker_path(kind, root)?;
-  let file =
-    open_private(&path, std::fs::OpenOptions::new().read(true)).ok()?;
-  let mut text = String::new();
-  file
-    .take(TRIAL_MARKER_MAX_BYTES)
-    .read_to_string(&mut text)
+  let bytes = staging
+    .read_file(TRIAL_RECORD, TRIAL_RECORD_MAX_BYTES)
     .ok()?;
-  let marker: TrialMarker = serde_json::from_str(&text).ok()?;
-  (marker.schema == TRIAL_MARKER_SCHEMA
-    && !marker.from.is_empty()
-    && !marker.previous_digest.is_empty())
-  .then_some(marker)
+  let record: TrialRecord = serde_json::from_slice(&bytes).ok()?;
+  (record.schema == TRIAL_RECORD_SCHEMA
+    && !record.from.is_empty()
+    && !record.previous_digest.is_empty())
+  .then_some(record)
 }
 
-/// Delete the installed app's trial marker (the version is confirmed); best
-/// effort, a failure is logged.
-pub fn remove_trial_marker(layout: &InstallLayout) {
-  let Some(path) = trial_marker_path(layout.kind, &layout.install) else {
-    return;
-  };
+/// Delete the trial record (the version is confirmed; the cleanup removes
+/// the staging directory itself); best effort, a failure is logged.
+pub fn remove_trial_record(layout: &InstallLayout) {
+  let path = layout.staging_dir().join(TRIAL_RECORD);
   match std::fs::remove_file(&path) {
     Ok(()) => {}
     Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
     Err(e) => log_line(
       layout,
-      &format!("the trial marker {} was not removed: {e}", path.display()),
+      &format!("the trial record {} was not removed: {e}", path.display()),
     ),
   }
-}
-
-/// The trial marker of the update a rollback undoes: inside the app at the
-/// install path (the version on trial, or after an interrupted exchange),
-/// or, with nothing at the install path (a two-rename swap interrupted
-/// between its renames), inside the staged app, through the private staging
-/// directory. `None`: nothing to roll back to.
-fn find_trial_marker(
-  layout: &InstallLayout,
-  state: &UpdateState,
-) -> Option<TrialMarker> {
-  if exists(&layout.install) {
-    if !is_install_copy(layout.kind, &layout.install) {
-      return None;
-    }
-    return read_trial_marker(layout.kind, &layout.install);
-  }
-  let staged = state.staged_path(layout)?;
-  let staging = super::staging::PrivateDir::open(&layout.staging_dir()).ok()?;
-  if !staging.still_at_path() {
-    return None;
-  }
-  read_trial_marker(layout.kind, &staged)
 }
 
 /// Remove `path` only if it is a copy of this app's install (see
@@ -1242,12 +1199,12 @@ pub fn apply_swap_verified(
       "the staged app changed while it was verified",
     );
   }
-  // The trial marker (see [`TrialMarker`]): the app installed now, by its
+  // The trial record (see [`TrialRecord`]): the app installed now, by its
   // digest and its compiled version, is the only thing a rollback may put
-  // back. Written into the staged app through the held directory, last
-  // before the swap; without it nothing is swapped (the rollback would be
-  // refused).
-  if let Some(rel) = trial_marker_rel(layout.kind) {
+  // back. Written into the staging directory through the held descriptor,
+  // last before the swap; without it nothing is swapped (the rollback would
+  // be refused).
+  {
     let previous_digest = match tree_digest(&layout.install) {
       Ok(d) => d,
       Err(e) => {
@@ -1268,28 +1225,28 @@ pub fn apply_swap_verified(
       .and_then(|m| m.app_version)
       .or_else(|| state.from.clone())
       .unwrap_or_default();
-    let marker = TrialMarker {
-      schema: TRIAL_MARKER_SCHEMA,
+    let record = TrialRecord {
+      schema: TRIAL_RECORD_SCHEMA,
       from,
       to: state.to.clone(),
       previous_digest,
     };
-    let bytes = match serde_json::to_vec(&marker) {
+    let bytes = match serde_json::to_vec(&record) {
       Ok(b) => b,
       Err(e) => {
         return refuse_staged_with(
           layout,
           state,
-          UpdateError::io("encoding the trial marker", e),
+          UpdateError::io("encoding the trial record", e),
         );
       }
     };
-    if let Err(e) = staged.write_file(&rel, &bytes) {
+    if let Err(e) = staging.write_file(TRIAL_RECORD, &bytes) {
       return refuse_staged_with(
         layout,
         state,
         UpdateError::io(
-          format!("writing the trial marker into {}", staged_path.display()),
+          format!("writing the trial record into {}", staging.path().display()),
           e,
         ),
       );
@@ -1348,10 +1305,12 @@ pub fn apply_swap_verified(
       state.staged_digest = None;
       state.apply_pid = None;
       write_state(layout, state)?;
-      // Only this helper's own staging directory: whatever was put at its
-      // path instead is not ours to delete.
+      // The emptied extraction directory goes; the staging directory stays
+      // until the confirm or the rollback, holding the trial record. Only
+      // this helper's own staging directory: whatever was put at its path
+      // instead is not ours to touch.
       if staging.still_at_path() {
-        remove_path(staging.path());
+        remove_path(&staging.path().join("extract"));
       }
       Ok(())
     }
@@ -1473,17 +1432,15 @@ fn refuse_rollback(
 /// state file it can write too. So before anything is recorded or moved it
 /// is checked, as the apply checks a staged app, and held from the check to
 /// the move ([`HeldTree`]):
-/// - the trial marker the apply wrote into the version on trial
-///   ([`TrialMarker`]; read from the install path, or from the staged app
-///   when a two-rename swap stopped between its renames) names the app that
-///   was installed before the swap by its digest and its compiled version:
-///   with no marker nothing goes back, whatever the state says, and with
-///   nothing at the install path there is no marker to read, so a tree
-///   planted beside an install path that was emptied is not put there;
+/// - the trial record the apply wrote into the private staging directory
+///   ([`TrialRecord`]) names the app that was installed before the swap by
+///   its digest and its compiled version: with no record nothing goes back,
+///   whatever the state says, and the check runs whether or not anything is
+///   at the install path (nothing is skipped for an emptied one);
 /// - the tree is opened and held (`O_NOFOLLOW`, this user's), its digest is
-///   read through the descriptor and must be the marker's, then `verify`
+///   read through the descriptor and must be the record's, then `verify`
 ///   (`verify_previous_for_helper`: the install marker, the embedded version
-///   equal to the marker's `from`, the OS code signature against the
+///   equal to the record's `from`, the OS code signature against the
 ///   installed app) runs on the path, which must name the held tree before
 ///   and after it (`codesign` reads by path);
 /// - right before it moves, the digest is read again and must be unchanged
@@ -1508,7 +1465,6 @@ pub fn rollback_verified(
   let failed = layout.failed_path();
   let install = &layout.install;
   let resuming = state.phase == Phase::RollingBack;
-  let marker_required = trial_marker_rel(layout.kind).is_some();
   let replaced = |tree: &Path| {
     UpdateError::new(
       Code::BundleMismatch,
@@ -1520,32 +1476,18 @@ pub fn rollback_verified(
   let check = |state: &mut UpdateState,
                tree: &Path|
    -> Result<(HeldTree, String), UpdateError> {
-    let (from, expected_digest) = if marker_required {
-      let Some(marker) = find_trial_marker(layout, state) else {
-        return Err(refuse_rollback(
-          layout,
-          state,
-          UpdateError::new(
-            Code::NotStaged,
-            "no trial marker: the installed app records no update to roll \
-             back",
-          ),
-        ));
-      };
-      (marker.from, Some(marker.previous_digest))
-    } else {
-      let Some(from) = state.from.clone() else {
-        return Err(refuse_rollback(
-          layout,
-          state,
-          UpdateError::new(
-            Code::NotStaged,
-            "the state names no version to roll back to",
-          ),
-        ));
-      };
-      (from, None)
+    let Some(record) = read_trial_record(layout) else {
+      return Err(refuse_rollback(
+        layout,
+        state,
+        UpdateError::new(
+          Code::NotStaged,
+          "no trial record: the staging directory records no update to \
+           roll back",
+        ),
+      ));
     };
+    let (from, expected_digest) = (record.from, record.previous_digest);
     let held = match HeldTree::open(tree) {
       Ok(h) => h,
       Err(e) => {
@@ -1572,7 +1514,7 @@ pub fn rollback_verified(
         ));
       }
     };
-    if expected_digest.is_some_and(|expected| expected != digest) {
+    if expected_digest != digest {
       return Err(refuse_rollback(
         layout,
         state,
@@ -1580,7 +1522,7 @@ pub fn rollback_verified(
           Code::BundleMismatch,
           format!(
             "{} is not the app that was installed before the trial (its \
-             digest is not the trial marker's)",
+             digest is not the trial record's)",
             tree.display()
           ),
         ),
@@ -1904,9 +1846,9 @@ pub fn mark_confirmed(
   state.cleanup = true;
   state.last_error = None;
   write_state(layout, &state)?;
-  // The version is good: its trial marker (see [`TrialMarker`]) goes, so a
+  // The version is good: its trial record (see [`TrialRecord`]) goes, so a
   // later forged `swapped` state finds nothing to roll back to.
-  remove_trial_marker(layout);
+  remove_trial_record(layout);
   Ok(Some(state))
 }
 
@@ -2180,8 +2122,8 @@ pub fn accept_staged(
 /// signer, its own version newer than the installed one and not rejected),
 /// and before a rollback `verify_previous` checks the tree that would go
 /// back the same way (the install marker, its embedded version equal to the
-/// trial marker's `from`, its OS code signature against the installed app;
-/// the tree's digest must be the trial marker's, see [`rollback_verified`]),
+/// trial record's `from`, its OS code signature against the installed app;
+/// the tree's digest must be the trial record's, see [`rollback_verified`]),
 /// so the helper can't be used to put an app the updater would refuse in
 /// place of a signed one (on macOS the app may modify its own bundle where
 /// another program may not).
@@ -3236,20 +3178,20 @@ mod tests {
       .unwrap();
   }
 
-  /// What the apply writes into the staged app last before its swap (see
-  /// `TrialMarker`), for the tests that simulate an interrupted swap by hand.
-  fn write_fixture_trial_marker(l: &InstallLayout) {
+  /// What the apply writes into the staging directory last before its swap
+  /// (see `TrialRecord`), for the tests that simulate an interrupted swap by
+  /// hand.
+  fn write_fixture_trial_record(l: &InstallLayout) {
     let s = read_state(l).unwrap();
-    let staged = s.staged_path(l).unwrap();
-    let marker = TrialMarker {
-      schema: TRIAL_MARKER_SCHEMA,
+    let record = TrialRecord {
+      schema: TRIAL_RECORD_SCHEMA,
       from: "1.0.0".into(),
       to: s.to.clone(),
       previous_digest: tree_digest(&l.install).unwrap(),
     };
     std::fs::write(
-      trial_marker_path(l.kind, &staged).unwrap(),
-      serde_json::to_vec(&marker).unwrap(),
+      l.staging_dir().join(TRIAL_RECORD),
+      serde_json::to_vec(&record).unwrap(),
     )
     .unwrap();
   }
@@ -3472,7 +3414,10 @@ mod tests {
     apply_swap(l, &mut s).unwrap();
     assert_eq!(installed(l), "2.0.0");
     assert!(l.old_path().join("version").exists());
-    assert!(!l.staging_dir().exists());
+    // The extraction directory is gone; the staging directory stays with
+    // the trial record until the confirm.
+    assert!(!l.extract_dir().exists());
+    assert!(l.staging_dir().join(TRIAL_RECORD).is_file());
     assert_eq!(read_state(l).unwrap().phase, Phase::Swapped);
     // First launch: the trial.
     assert_eq!(startup_action(l), StartupAction::Continue { trial: true });
@@ -4362,7 +4307,7 @@ mod tests {
     // restores the previous app.
     let f = fixture(Some("2.0.0"));
     let l = &f.layout;
-    write_fixture_trial_marker(l);
+    write_fixture_trial_record(l);
     let mut s = read_state(l).unwrap();
     s.phase = Phase::Swapping;
     s.install_id = file_id(&l.install);
@@ -4385,7 +4330,7 @@ mod tests {
   fn helper_killed_after_atomic_exchange_recovers() {
     let f = fixture(Some("2.0.0"));
     let l = &f.layout;
-    write_fixture_trial_marker(l);
+    write_fixture_trial_record(l);
     let mut s = read_state(l).unwrap();
     s.phase = Phase::Swapping;
     s.install_id = file_id(&l.install);
@@ -4516,12 +4461,12 @@ mod tests {
     write_state(l, &s).unwrap();
     assert_eq!(startup_action(l), StartupAction::RollBack);
     let mut s = read_state(l).unwrap();
-    // No apply ran, so the installed app holds no trial marker: there is
-    // nothing to roll back to, whatever the state names.
+    // No apply ran, so there is no trial record: there is nothing to roll
+    // back to, whatever the state names.
     let e =
       rollback_verified(l, &mut s, &FIXTURE_CHECKS, &no_fault).unwrap_err();
     assert_eq!(e.code, Code::NotStaged, "{}", e.message);
-    assert!(e.message.contains("no trial marker"), "{}", e.message);
+    assert!(e.message.contains("no trial record"), "{}", e.message);
     refused(l, Code::NotStaged);
     assert_eq!(
       std::fs::read_to_string(l.old_path().join("version")).unwrap(),
@@ -4529,8 +4474,8 @@ mod tests {
       "the planted tree is left where it was"
     );
 
-    // The same planted `.old` where a real trial's marker exists (the apply
-    // ran, then `.old` was replaced): its digest is not the marker's.
+    // The same planted `.old` where a real trial's record exists (the apply
+    // ran, then `.old` was replaced): its digest is not the record's.
     let f = fixture(Some("2.0.0"));
     let l = &f.layout;
     let mut s = read_state(l).unwrap();
@@ -4581,7 +4526,7 @@ mod tests {
     let mut s = read_state(l).unwrap();
     let e =
       rollback_verified(l, &mut s, &FIXTURE_CHECKS, &no_fault).unwrap_err();
-    // Refused before anything is opened: no trial marker.
+    // Refused before anything is opened: no trial record.
     assert_eq!(e.code, Code::NotStaged, "{}", e.message);
     refused(l, Code::NotStaged);
     assert!(l.old_path().join("version").exists());
@@ -4709,31 +4654,31 @@ mod tests {
     );
   }
 
-  /// A rollback is bound to the trial by the marker the apply wrote into the
-  /// version on trial, not by the state file (N3, N8 of the denext.8 delta
-  /// audit): without the marker nothing goes back, whatever the state's
-  /// `from` and `to` say; the version marked rejected is the one installed,
-  /// not the state's `to`; a `.old` whose digest is not the marker's is
-  /// refused; and with the install path emptied (no marker to read) a
-  /// planted `.old` is not put there.
+  /// A rollback is bound to the trial by the record the apply wrote into the
+  /// private staging directory, not by the state file (N3, N8 of the
+  /// denext.8 delta audit): without the record nothing goes back, whatever
+  /// the state's `from` and `to` say; the version marked rejected is the
+  /// one installed, not the state's `to`; a `.old` whose digest is not the
+  /// record's is refused, with the install path emptied too (the check is
+  /// never skipped).
   #[test]
-  fn a_rollback_is_bound_to_the_trial_marker() {
-    // The marker is written by the apply and removed by confirm.
+  fn a_rollback_is_bound_to_the_trial_record() {
+    // The record is written by the apply and removed by confirm.
     let f = fixture(Some("2.0.0"));
     let l = &f.layout;
     let mut s = read_state(l).unwrap();
     let previous = tree_digest(&l.install).unwrap();
     apply_swap(l, &mut s).unwrap();
-    let marker = read_trial_marker(l.kind, &l.install).unwrap();
-    assert_eq!(marker.from, "1.0.0");
-    assert_eq!(marker.to.as_deref(), Some("2.0.0"));
-    assert_eq!(marker.previous_digest, previous);
+    let record = read_trial_record(l).unwrap();
+    assert_eq!(record.from, "1.0.0");
+    assert_eq!(record.to.as_deref(), Some("2.0.0"));
+    assert_eq!(record.previous_digest, previous);
     assert_eq!(tree_digest(&l.old_path()).unwrap(), previous);
     assert!(confirm(l).unwrap());
-    assert!(read_trial_marker(l.kind, &l.install).is_none());
-    assert!(!trial_marker_path(l.kind, &l.install).unwrap().exists());
+    assert!(read_trial_record(l).is_none());
+    assert!(!l.staging_dir().join(TRIAL_RECORD).exists());
 
-    // A forged state (`from`, `to`) changes nothing: the marker's `from` is
+    // A forged state (`from`, `to`) changes nothing: the record's `from` is
     // what `.old` must be, and the installed version is what is rejected.
     let f = fixture(Some("2.0.0"));
     let l = &f.layout;
@@ -4756,14 +4701,13 @@ mod tests {
     assert_eq!(st.rejected.as_deref(), Some("2.0.0"));
     assert_eq!(st.all_rejected(), vec!["2.0.0"]);
 
-    // The marker removed from the version on trial: nothing goes back.
+    // The record removed: nothing goes back.
     let f = fixture(Some("2.0.0"));
     let l = &f.layout;
     let mut s = read_state(l).unwrap();
     apply_swap(l, &mut s).unwrap();
     mark_trial_exited(l);
-    std::fs::remove_file(trial_marker_path(l.kind, &l.install).unwrap())
-      .unwrap();
+    std::fs::remove_file(l.staging_dir().join(TRIAL_RECORD)).unwrap();
     let mut s = read_state(l).unwrap();
     let e =
       rollback_verified(l, &mut s, &FIXTURE_CHECKS, &no_fault).unwrap_err();
@@ -4771,15 +4715,17 @@ mod tests {
     assert_eq!(installed(l), "2.0.0");
     assert_eq!(read_state(l).unwrap().rejected, None);
 
-    // A marker that is a symlink is no marker.
+    // A record that is a symlink, or a staging directory others can enter,
+    // is no record.
     #[cfg(unix)]
     {
+      use std::os::unix::fs::PermissionsExt;
       let f = fixture(Some("2.0.0"));
       let l = &f.layout;
       let mut s = read_state(l).unwrap();
       apply_swap(l, &mut s).unwrap();
       mark_trial_exited(l);
-      let path = trial_marker_path(l.kind, &l.install).unwrap();
+      let path = l.staging_dir().join(TRIAL_RECORD);
       let real = l.parent.join("elsewhere.json");
       std::fs::rename(&path, &real).unwrap();
       std::os::unix::fs::symlink(&real, &path).unwrap();
@@ -4788,10 +4734,21 @@ mod tests {
         rollback_verified(l, &mut s, &FIXTURE_CHECKS, &no_fault).unwrap_err();
       assert_eq!(e.code, Code::NotStaged, "{}", e.message);
       assert_eq!(installed(l), "2.0.0");
+      std::fs::remove_file(&path).unwrap();
+      std::fs::rename(&real, &path).unwrap();
+      std::fs::set_permissions(
+        l.staging_dir(),
+        std::fs::Permissions::from_mode(0o755),
+      )
+      .unwrap();
+      let mut s = read_state(l).unwrap();
+      let e =
+        rollback_verified(l, &mut s, &FIXTURE_CHECKS, &no_fault).unwrap_err();
+      assert_eq!(e.code, Code::NotStaged, "{}", e.message);
     }
 
     // The install path emptied (the app renamed away) and `.old` planted:
-    // there is no marker to read, so nothing is put at the install path.
+    // the check runs all the same, and the planted tree is not the record's.
     let f = fixture(Some("2.0.0"));
     let l = &f.layout;
     let mut s = read_state(l).unwrap();
@@ -4803,7 +4760,7 @@ mod tests {
     let mut s = read_state(l).unwrap();
     let e =
       rollback_verified(l, &mut s, &FIXTURE_CHECKS, &no_fault).unwrap_err();
-    assert_eq!(e.code, Code::NotStaged, "{}", e.message);
+    assert_eq!(e.code, Code::BundleMismatch, "{}", e.message);
     assert!(!l.install.exists(), "nothing was put at the install path");
     assert!(l.old_path().join("version").exists());
     assert_eq!(read_state(l).unwrap().phase, Phase::Idle);

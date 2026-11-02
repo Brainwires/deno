@@ -8329,68 +8329,75 @@ where the changes are discussed.
        app's grants), and any version written as `to` was marked rejected and
        never offered again. With nothing at the install path the checks were
        skipped altogether.
-       - **The trial marker** (`TrialMarker`, `.denext-update-trial` beside the
-         install marker: `Contents/Resources` in a bundle, the root of an app
-         directory): the apply helper writes it into the staged app through the
-         held staging directory (`Staged::write_file`), last before the swap,
-         with the digest (`tree_digest`) and the compiled version of the app
-         installed at that moment (the running app, which it is about to move to
-         `.old`), and the version going in; without it nothing is swapped.
-         `confirm` (`mark_confirmed`) deletes it. On macOS the installed bundle
-         is what App Management keeps other programs out of, so a marker inside
-         it can't be forged by a program that can't modify the bundle; elsewhere
-         it is as writable as the state file and adds nothing, at no cost.
-         Between the swap and the confirm the bundle carries one unsealed file
-         (`codesign --verify
-         --strict` on the version on trial reports
-         it as added; nothing the updater runs verifies the installed app's
-         seal, and a bundle the app extracted itself carries no quarantine, so
-         Gatekeeper does not either); the confirm removes it. An AppImage (one
-         file) has nowhere to hold one: there the rollback keeps the state's
-         `from` and `to` (a per-user file the same user writes anyway).
-       - **`rollback_verified`** reads the marker from the version on trial at
-         the install path, or, when a two-rename swap stopped between its
-         renames (the install path empty, the previous app at `.old`), from the
-         staged app through the private staging directory; with no marker
-         nothing goes back (`not_staged`, `no trial marker`), whatever the state
-         says, which is also what an emptied install path with a planted `.old`
-         now gets (N8: there is no marker to read). The tree that would go back
-         (`.old`, or the previous app in staging) is opened and held
-         (`HeldTree`: `O_NOFOLLOW`, this user's; a directory or an AppImage
-         file), its digest read through the descriptor (`digest_held_dir`, the
-         `fd_walk` of the staging digest) must be the marker's
-         (`bundle_mismatch`), the path must name the held tree before and after
-         `verify_previous_for_helper` (which takes the marker's `from` now;
-         `codesign` reads by path), and right before the move the digest is read
-         again and the path checked again. After the exchange (or the two-rename
-         move) the install path must name the held tree (device and inode), else
-         the exchange is undone and the rollback fails with the state
-         `rollingBack`, so the next run checks `.old` again. The version marked
-         rejected is the one compiled into the installed app
-         (`installed_metadata`; an AppImage's is the state's `to`), not the
-         state's `to`. Windows has no descriptor-relative reads in std: there
-         the tree is read by path and the install directory's ACL is the
-         boundary, as for the staging directory.
+       - **The trial record** (`TrialRecord`, `trial.json` in the private
+         staging directory `.<name>.denext-update/`, this user's, 0700): the
+         apply helper writes it through the held staging directory
+         (`PrivateDir::write_file`), last before the swap, with the digest
+         (`tree_digest`) and the compiled version of the app installed at
+         that moment (the running app, which it is about to move to `.old`),
+         and the version going in; without it nothing is swapped. After the
+         swap only the emptied `extract/` goes: the staging directory stays,
+         holding the record, until `confirm` (`mark_confirmed` deletes the
+         record; the cleanup removes the directory) or the rollback's cleanup.
+         Nothing is written inside the app bundle (the first draft of this
+         fix put the record in `Contents/Resources`, which breaks the code
+         signature's seal until the confirm). The record is a consistency
+         binding, not a defence against a same-user writer: a process running
+         as the user can write the staging directory as it can the state
+         file, so it can still plant an older signed release of the app at
+         `.old` with a record naming it; what binds identity is the OS
+         signature check on `.old` against the installed app (`codesign`'s
+         team requirement and notarization on macOS, Authenticode identity on
+         Windows). What it closes is the accidental half: a rollback that put
+         back whatever sat at `.old` because the state said so, with no tie
+         to the app that was actually installed, and the rejected version
+         taken from the state's `to`. An AppImage gets the record like every
+         other kind.
+       - **`rollback_verified`** reads the record through the staging
+         directory (`PrivateDir::open` + `still_at_path` + `read_file`,
+         `O_NOFOLLOW`, a regular file of this user's); with no record nothing
+         goes back (`not_staged`, `no trial record`), whatever the state
+         says. The check is never skipped: with the install path emptied it
+         runs as well, and a planted `.old` fails the digest (N8). The tree
+         that would go back (`.old`, or the previous app in staging) is
+         opened and held (`HeldTree`: `O_NOFOLLOW`, this user's; a directory
+         or an AppImage file), its digest read through the descriptor
+         (`digest_held_dir`, the `fd_walk` of the staging digest) must be the
+         record's (`bundle_mismatch`), the path must name the held tree
+         before and after `verify_previous_for_helper` (which takes the
+         record's `from` now; `codesign` reads by path), and right before the
+         move the digest is read again and the path checked again. After the
+         exchange (or the two-rename move) the install path must name the
+         held tree (device and inode), else the exchange is undone and the
+         rollback fails with the state `rollingBack`, so the next run checks
+         `.old` again. The version marked rejected is the one compiled into
+         the installed app (`installed_metadata`; an AppImage's is the
+         state's `to`), not the state's `to`. Windows has no
+         descriptor-relative reads in std: there the tree and the record are
+         read by path and the install directory's ACL is the boundary, as for
+         the staging directory.
        - The rollback checks are now a `PreviousChecks` (`verify` +
          `installed_version`), injected as before; `run_helper`'s and
          `helper_rollback`'s callers pass `PREVIOUS_CHECKS`.
-       - A swap done by a runtime before this one (no marker written) that fails
-         its trial under this one is not rolled back: the refusal is recorded
-         and the installed version stays, as for any missing marker.
-       - Tests (`swap.rs`): `a_rollback_puts_back_only_the_tree_it_held` (failed
-         before: a byte-identical copy put at `.old` while the verifier runs,
-         and one put there right before the exchange, both refused with the
-         trial app still installed), `a_rollback_is_bound_to_the_trial_marker`
-         (failed before: a forged `to` is not the rejected version, a forged
-         `from` is ignored, a removed or symlinked marker refuses, an emptied
-         install path with a planted `.old` refuses; the marker's `from` / `to`
-         / digest, and its removal by `confirm`), and the planted-tree cases of
+       - A swap done by a runtime before this one (no record written) that
+         fails its trial under this one is not rolled back: the refusal is
+         recorded and the installed version stays, as for any missing record.
+       - Tests (`swap.rs`): `a_rollback_puts_back_only_the_tree_it_held`
+         (failed before: a byte-identical copy put at `.old` while the
+         verifier runs, and one put there right before the exchange, both
+         refused with the trial app still installed),
+         `a_rollback_is_bound_to_the_trial_record` (failed before: a forged
+         `to` is not the rejected version, a forged `from` is ignored, a
+         removed or symlinked record and a staging directory others can enter
+         refuse, an emptied install path with a planted `.old` refuses; the
+         record's `from` / `to` / digest, and its removal by `confirm`), and
+         the planted-tree cases of
          `a_rollback_puts_back_only_a_tree_it_verified` now refuse for the
-         missing marker, with two new cases for a planted `.old` under a real
-         trial's marker (digest mismatch). Fail-before evidence was taken by
-         running three equivalent tests against the previous tree (N2: the copy
-         was exchanged in; N3: `9.9.9` was rejected; N8: the planted `.old` was
-         put at the emptied install path).
+         missing record, with two new cases for a planted `.old` under a real
+         trial's record (digest mismatch). Fail-before evidence was taken by
+         running three equivalent tests against the previous tree (N2: the
+         copy was exchanged in; N3: `9.9.9` was rejected; N8: the planted
+         `.old` was put at the emptied install path).
 
 212. **`fix(desktop)`: the Windows tree manifest binds the app, the version and
      every file but the executable** (the denext.8 audit, F2;

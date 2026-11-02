@@ -833,7 +833,7 @@ fn verify_previous_for_helper(
 
 /// The version compiled into the installed app (the one on trial), which a
 /// rollback marks rejected; an AppImage's runtime sits inside a compressed
-/// squashfs, so there the state's `to` stands (see `swap::TrialMarker`).
+/// squashfs, so there the state's `to` stands (see `swap::TrialRecord`).
 fn installed_app_version(
   layout: &InstallLayout,
   state: &UpdateState,
