@@ -8570,13 +8570,26 @@ where the changes are discussed.
      `rusty_v8.sha256` holds its `SHA256SUMS`. That commit also carries
      rusty_v8's `snapshot::read_only_heap_guard`: while the process's first
      isolate is a snapshot creator that has not created its blob, other isolates
-     wait for it, since V8 frees the read-only space such an isolate attached to.
-     The fork makes its snapshots in `build.rs` processes, so programs can't
+     wait for it, since V8 frees the read-only space such an isolate attached
+     to. The fork makes its snapshots in `build.rs` processes, so programs can't
      reach that window. The release's build tools now include the Windows SDK
      10.0.28000 V8 15.6's `build` pins (a bootstrapper fixed by the SHA-256 in
      `microsoft/winget-pkgs`, Authenticode checked) and, on Intel macOS,
      conda-forge's libclang 23.1.4 packages (each SHA-256 pinned), since LLVM's
      releases and Homebrew have no such build.
+
+     Verified against the pin on biscuits (Linux x86_64, the release's prebuilt
+     library): `deno --version` reports `v8 15.6.75.32-rusty`; `cargo test -p
+     deno_core --lib` on one thread 496 passed, and `-p serde_v8 -p deno_ops`
+     pass; `specs` `resource_limits` 32, `trace_sigint` 5, `vm_wasm_streaming`
+     1, `worker` 90, `snapshot` 12, all passed; `integration` `watcher::` 73
+     passed. `deno_core` on parallel threads still aborts now and then with the
+     snapshot-creating tests included (3 of 33 runs, `vector.h:419` libc++
+     hardening, as item 74's runs did), and never without them (0 of 30), which
+     is how CI runs it. On macOS arm64 `cargo test -p deno_core --lib` 497
+     passed, linked with the system linker. `node_compat` with the filters
+     `test-v8-`, `test-vm-` and `test-worker-` ran debug builds: `test-v8-`
+     fails the same 13 of 23 on this V8 and on 15.2.124.45.
 
      Verified before the pin on biscuits (Linux x86_64) against a local
      `V8_FROM_SOURCE=1` build of rusty_v8 `v8-15.6-denext` (`d8fb309b`), through
