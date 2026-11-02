@@ -83,8 +83,8 @@ const AI_V4MAPPED: i32 = 0;
 /// Returns `[AI_ADDRCONFIG, AI_ALL, AI_V4MAPPED]` for `node:dns`' constants.
 #[op2]
 #[serde]
-pub fn op_node_getaddrinfo_flags() -> [i32; 3] {
-  [AI_ADDRCONFIG, AI_ALL, AI_V4MAPPED]
+pub fn op_node_getaddrinfo_flags() -> Vec<i32> {
+  vec![AI_ADDRCONFIG, AI_ALL, AI_V4MAPPED]
 }
 
 #[op2(stack_trace)]
