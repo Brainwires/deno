@@ -18,8 +18,8 @@ ok 2 - a passes
   duration_ms: [WILDCARD]
   type: 'test'
   ...
-# Subtest: test/empty.js
-ok 3 - test/empty.js
+# Subtest: test[WILDCARD]empty.js
+ok 3 - test[WILDCARD]empty.js
   ---
   duration_ms: [WILDCARD]
   type: 'test'

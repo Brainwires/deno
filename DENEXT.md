@@ -8609,6 +8609,28 @@ free numbers when the branch is merged.
        failures' exit code 7; `--test-rerun-failures` and test tags in events
        are not implemented in the runner. Tests: spec `node/node_test_cli`; shim
        unit test `test_translate_test_runner` updated.
+     - **What changes for a project that relied on `deno test`.** Without
+       `--watch`, `node --test` is no longer `deno test -A`. Checked on Linux
+       against runtime 3.0.0-denext.2 with one project of `Deno.test`,
+       `node:test`, `.jsx` / `.tsx` and helper files:
+       - Files are found by Node's default pattern,
+         `**/{test,test/**/*,test-*,*[._-]test}.{js,mjs,cjs,ts,mts,cts}`, not
+         Deno's. `*.test.jsx` and `*.test.tsx` files no longer run, every file
+         under a `test/` directory (helpers too) now runs as a test file, and
+         `deno.json`'s `test.include` / `test.exclude` are not read.
+       - Each file runs under `deno run`, where `Deno.test` registers nothing. A
+         file of failing `Deno.test` tests is reported as one passing test named
+         after the file, and the run exits 0. In Node the same file fails
+         (`Deno` is not defined).
+       - Nothing is type-checked: a type error in a `.ts` test file no longer
+         fails the run (`deno test` checked it).
+       - The output is Node's reporter (`spec` by default, its `ℹ tests 4`
+         summary), not Deno's `ok | 4 passed`; tools that parse Deno's output
+         see a different format. Exit codes are unchanged: 1 when a test fails.
+       - Each file runs in its own process (Node's process isolation), at most
+         the CPU count less one at a time.
+       - `node --test --watch` is still `deno test --watch`: Deno's patterns,
+         `Deno.test` and a type check.
 
 902. **`fix(cli)`: `--experimental-loader` and `--import` in `NODE_OPTIONS`**
      (`feat/node-compat-round5`, CLI; `libs/cli_parser/src/convert.rs`,
@@ -8622,21 +8644,30 @@ free numbers when the branch is merged.
      `// Flags: --experimental-loader <module>` through `NODE_OPTIONS`, which
      until now it dropped, so those tests ran with no hook. Tests: unit test
      `node_options_loader_and_import_preload`; spec `node/node_test_cli`
-     (`loader_in_node_options`).
+     (`loader_in_node_options`). The flags apply to every command that reads
+     `NODE_OPTIONS`, `deno run` included, not only to the node shim: a
+     `NODE_OPTIONS` left over from Node tooling (`--import tsx`,
+     `--loader ts-node/esm`) now loads that module in every such process, and
+     one that does not resolve stops it (`Module not found`), where it used to
+     be ignored.
 
 903. **`test(node_compat)`: 27 tests the node_compat round 5 fixes pass**
      (`feat/node-compat-round5`, test config only;
-     `tests/node_compat/config.jsonc`). Each passed three isolated runs on a
-     Linux x86_64 debug build and is on for Linux only, with that reason, until
-     checked on macOS and Windows: `test-runner/test-output-coverage-*` (11),
-     `test-output-test-diagnostic-warning-without-test-only-flag.mjs`, 3 under
-     `es-module/` (`test-esm-loader-custom-condition.mjs`, `-thenable.mjs`,
-     `test-require-module-preload.js`) and 12 `parallel/test-runner-*`. The Jest
-     rows item 166 lists were checked and need no change: real Node 24.11 + Jest
-     30.2.0 + the real better-sqlite3 12.11.1 fails the same five rows
-     (`toStrictEqual` on a row, `toThrow(TypeError)`, also on `node:fs`'s own
-     errors), as this runtime does, since the host's objects aren't the test
-     realm's.
+     `tests/node_compat/config.jsonc`): `test-runner/test-output-coverage-*`
+     (11), `test-output-test-diagnostic-warning-without-test-only-flag.mjs`, 3
+     under `es-module/` (`test-esm-loader-custom-condition.mjs`,
+     `-thenable.mjs`, `test-require-module-preload.js`) and 12
+     `parallel/test-runner-*`. Each passed three runs with no flaky retries on
+     Linux x86_64 (debug build), Windows x64 (`windows-2022`), Windows arm64
+     (the lab's win-arm VM) and macOS arm64 (`macos-15`), except two that failed
+     once in three on macOS and stay off there, with that reason:
+     `test-runner-worker-id.js` (a worker ID used twice, not three times) and
+     `test-runner-error-reporter.js` (two failures reported under `FAIL_FAST`).
+     The fork's CI runs node_compat on Linux only. The Jest rows item 166 lists
+     were checked and need no change: real Node 24.11 + Jest 30.2.0 + the real
+     better-sqlite3 12.11.1 fails the same five rows (`toStrictEqual` on a row,
+     `toThrow(TypeError)`, also on `node:fs`'s own errors), as this runtime
+     does, since the host's objects aren't the test realm's.
 
 ## npm supply-chain settings
 
