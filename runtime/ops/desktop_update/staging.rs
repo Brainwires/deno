@@ -233,6 +233,60 @@ impl Staged {
     super::swap::exchange(&self.path, target)
   }
 
+  /// Write `bytes` as the file at `rel` (path elements under the staged
+  /// app's root; its directories must exist), through the held directory on
+  /// Unix (never through a symlink), by path on Windows. Created or
+  /// replaced.
+  pub fn write_file(&self, rel: &[&str], bytes: &[u8]) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+      use std::io::Write;
+      use std::os::fd::AsRawFd;
+      use std::os::fd::FromRawFd;
+      let Some((name, dirs)) = rel.split_last() else {
+        return Err(std::io::Error::new(
+          std::io::ErrorKind::InvalidInput,
+          "no file name",
+        ));
+      };
+      let mut dir = openat_dir(self.dir.as_raw_fd(), &cstr(&self.entry)?)?;
+      for d in dirs {
+        dir = openat_dir(dir.as_raw_fd(), &cstr(OsStr::new(d))?)?;
+      }
+      let name = cstr(OsStr::new(name))?;
+      // SAFETY: a valid descriptor and NUL-terminated name; the mode is the
+      // fourth argument `O_CREAT` reads.
+      let raw = unsafe {
+        libc::openat(
+          dir.as_raw_fd(),
+          name.as_ptr(),
+          libc::O_WRONLY
+            | libc::O_CREAT
+            | libc::O_TRUNC
+            | libc::O_NOFOLLOW
+            | libc::O_CLOEXEC,
+          0o644 as libc::c_uint,
+        )
+      };
+      if raw < 0 {
+        return Err(std::io::Error::last_os_error());
+      }
+      // SAFETY: openat returned a new descriptor this function owns.
+      let mut file =
+        std::fs::File::from(unsafe { std::os::fd::OwnedFd::from_raw_fd(raw) });
+      file.write_all(bytes)?;
+      file.sync_all()
+    }
+    #[cfg(not(unix))]
+    {
+      let mut path = self.path.clone();
+      for e in rel {
+        path.push(e);
+      }
+      std::fs::write(&path, bytes)
+    }
+  }
+
   /// Rename the staged app (or, after an exchange, what took its place) to
   /// `target`.
   pub fn move_to(&self, target: &Path) -> std::io::Result<()> {
@@ -258,6 +312,19 @@ impl Staged {
     #[cfg(not(unix))]
     super::swap::rename_retry(&self.path, target)
   }
+}
+
+/// [`super::swap::tree_digest`] of the directory held by `fd` itself, read
+/// through it (the rollback's [`super::swap::HeldTree`]).
+#[cfg(unix)]
+pub(super) fn digest_held_dir(
+  fd: std::os::fd::RawFd,
+) -> std::io::Result<String> {
+  use sha2::Digest;
+  let mut out = sha2::Sha256::new();
+  let mut files = Vec::new();
+  fd_walk::entry(fd, c".", "", &mut out, &mut files)?;
+  Ok(faster_hex::hex_string(&out.finalize()))
 }
 
 #[cfg(unix)]

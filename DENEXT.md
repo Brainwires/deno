@@ -8314,6 +8314,83 @@ where the changes are discussed.
        `the_rollback_check_runs_the_apply_checks_on_what_goes_back` (`mod.rs`:
        the order marker → version → signature, on the fake app). The OS
        signature leg on a real signed bundle is the macOS and Windows CI's.
+     - **The tree that goes back is held, and the trial is bound to the app it
+       replaced** (the denext.8 delta audit, N2, N3, N8; `swap.rs`, `mod.rs`,
+       `staging.rs`; the first version of this item is on no released runtime).
+       The checks above ran on `.old` by path, and the exchange that followed
+       named it by path too, with nothing pinned in between: a program that can
+       write the install's parent (on macOS `/Applications`, which App
+       Management does not close) could put a genuine older release at `.old`,
+       let `codesign` finish on it, and swap an unsigned tree in at the same
+       name before `renamex_np` ran; a lost race only set `last_error`, and the
+       state could be written again. And the checks took `from` and `to` from
+       that same state file: any older signed release of the app, named as
+       `from`, passed them (a downgrade to a build with a known bug, keeping the
+       app's grants), and any version written as `to` was marked rejected and
+       never offered again. With nothing at the install path the checks were
+       skipped altogether.
+       - **The trial marker** (`TrialMarker`, `.denext-update-trial` beside the
+         install marker: `Contents/Resources` in a bundle, the root of an app
+         directory): the apply helper writes it into the staged app through the
+         held staging directory (`Staged::write_file`), last before the swap,
+         with the digest (`tree_digest`) and the compiled version of the app
+         installed at that moment (the running app, which it is about to move to
+         `.old`), and the version going in; without it nothing is swapped.
+         `confirm` (`mark_confirmed`) deletes it. On macOS the installed bundle
+         is what App Management keeps other programs out of, so a marker inside
+         it can't be forged by a program that can't modify the bundle; elsewhere
+         it is as writable as the state file and adds nothing, at no cost.
+         Between the swap and the confirm the bundle carries one unsealed file
+         (`codesign --verify
+         --strict` on the version on trial reports
+         it as added; nothing the updater runs verifies the installed app's
+         seal, and a bundle the app extracted itself carries no quarantine, so
+         Gatekeeper does not either); the confirm removes it. An AppImage (one
+         file) has nowhere to hold one: there the rollback keeps the state's
+         `from` and `to` (a per-user file the same user writes anyway).
+       - **`rollback_verified`** reads the marker from the version on trial at
+         the install path, or, when a two-rename swap stopped between its
+         renames (the install path empty, the previous app at `.old`), from the
+         staged app through the private staging directory; with no marker
+         nothing goes back (`not_staged`, `no trial marker`), whatever the state
+         says, which is also what an emptied install path with a planted `.old`
+         now gets (N8: there is no marker to read). The tree that would go back
+         (`.old`, or the previous app in staging) is opened and held
+         (`HeldTree`: `O_NOFOLLOW`, this user's; a directory or an AppImage
+         file), its digest read through the descriptor (`digest_held_dir`, the
+         `fd_walk` of the staging digest) must be the marker's
+         (`bundle_mismatch`), the path must name the held tree before and after
+         `verify_previous_for_helper` (which takes the marker's `from` now;
+         `codesign` reads by path), and right before the move the digest is read
+         again and the path checked again. After the exchange (or the two-rename
+         move) the install path must name the held tree (device and inode), else
+         the exchange is undone and the rollback fails with the state
+         `rollingBack`, so the next run checks `.old` again. The version marked
+         rejected is the one compiled into the installed app
+         (`installed_metadata`; an AppImage's is the state's `to`), not the
+         state's `to`. Windows has no descriptor-relative reads in std: there
+         the tree is read by path and the install directory's ACL is the
+         boundary, as for the staging directory.
+       - The rollback checks are now a `PreviousChecks` (`verify` +
+         `installed_version`), injected as before; `run_helper`'s and
+         `helper_rollback`'s callers pass `PREVIOUS_CHECKS`.
+       - A swap done by a runtime before this one (no marker written) that fails
+         its trial under this one is not rolled back: the refusal is recorded
+         and the installed version stays, as for any missing marker.
+       - Tests (`swap.rs`): `a_rollback_puts_back_only_the_tree_it_held` (failed
+         before: a byte-identical copy put at `.old` while the verifier runs,
+         and one put there right before the exchange, both refused with the
+         trial app still installed), `a_rollback_is_bound_to_the_trial_marker`
+         (failed before: a forged `to` is not the rejected version, a forged
+         `from` is ignored, a removed or symlinked marker refuses, an emptied
+         install path with a planted `.old` refuses; the marker's `from` / `to`
+         / digest, and its removal by `confirm`), and the planted-tree cases of
+         `a_rollback_puts_back_only_a_tree_it_verified` now refuse for the
+         missing marker, with two new cases for a planted `.old` under a real
+         trial's marker (digest mismatch). Fail-before evidence was taken by
+         running three equivalent tests against the previous tree (N2: the copy
+         was exchanged in; N3: `9.9.9` was rejected; N8: the planted `.old` was
+         put at the emptied install path).
 
 212. **`fix(desktop)`: the Windows tree manifest binds the app, the version and
      every file but the executable** (the denext.8 audit, F2;
