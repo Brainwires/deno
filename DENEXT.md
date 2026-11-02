@@ -8720,7 +8720,16 @@ where the changes are discussed.
        are normalised at every check, so a scope written long matches whenever
        its entry comes to exist; a scope written as the alias of an entry that
        doesn't exist yet matches that spelling only — write deny scopes with
-       long names.
+       long names. The long names feed the comparison key only
+       (`comparison_key`): the path handed to the operation keeps its names as
+       given. The first version of this item replaced them in the operation's
+       path too, which broke every read inside a compiled binary whose own path
+       holds an alias (the Windows CI runner's temp dir is under `RUNNER~1`):
+       the binary's virtual file system is keyed on the executable's path as
+       spelled, so `…\runneradmin\…\main.exe\file.txt` missed it and went to the
+       real disk (os error 3; eleven `compile`, `npm` and `run` specs on the
+       gaps-2 Windows dispatch). `permission/windows_short_name_deny` now also
+       checks that an operation's error names the alias it was given.
      - **Windows compared names case-insensitively for ASCII letters only.**
        NTFS folds every letter through its `$UpCase` table, so `base/Ärger` and
        `base/ärger` are one folder; the ASCII fold saw two, and the no-follow

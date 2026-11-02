@@ -1468,8 +1468,9 @@ fn strip_verbatim_prefix(path: Cow<'_, Path>) -> Cow<'_, Path> {
 /// be created later) is its own name and aliases nothing at that moment; the
 /// queries are normalised again at every check, so a scope written as a long
 /// name matches whenever the entry comes to exist, and a scope written as a
-/// short name for an entry that doesn't exist yet matches that spelling only
-/// (denext, DENEXT.md 225).
+/// short name for an entry that doesn't exist yet matches that spelling only.
+/// Used for the comparison key only (`comparison_key`): the path the
+/// operation is handed keeps its names as given (denext, DENEXT.md 225).
 #[cfg(windows)]
 fn windows_long_path(path: Cow<'_, Path>) -> Cow<'_, Path> {
   if !path.as_os_str().as_encoded_bytes().contains(&b'~') {
@@ -1525,10 +1526,24 @@ fn windows_long_path_lookup(path: &Path) -> Option<PathBuf> {
   }
 }
 
+/// The comparison form of a path (`cmp_path`): on Windows every existing
+/// name replaced by its long name (`windows_long_path`), then
+/// `comparison_path`'s fold. Only the key: the path itself, which the
+/// operation is handed, stays as `normalize_path` left it. Replacing the
+/// names in the operation's path broke every read inside a compiled binary
+/// whose own path holds an alias (the CI runner's `C:\Users\RUNNER~1\…`):
+/// the virtual file system is keyed on the executable's path as spelled, so
+/// a read of `…\runneradmin\…\main.exe\file.txt` missed it and went to the
+/// real disk (denext, DENEXT.md 225).
+#[cfg(windows)]
+fn comparison_key(path: &Path) -> PathBuf {
+  comparison_path(&windows_long_path(Cow::Borrowed(path)))
+}
+
 #[cfg(not(windows))]
 #[inline]
-fn windows_long_path(path: Cow<'_, Path>) -> Cow<'_, Path> {
-  path
+fn comparison_key(path: &Path) -> PathBuf {
+  comparison_path(path)
 }
 
 impl<'a> PathQueryDescriptor<'a> {
@@ -1550,17 +1565,17 @@ impl<'a> PathQueryDescriptor<'a> {
       // paths. We pass these through.
       (path, None)
     } else if path.is_absolute() {
-      (windows_long_path(normalize_path(path)), None)
+      (normalize_path(path), None)
     } else {
       let cwd = sys
         .env_current_dir()
         .map_err(PathResolveError::CwdResolve)?;
       (
-        windows_long_path(normalize_path(Cow::Owned(cwd.join(path.as_ref())))),
+        normalize_path(Cow::Owned(cwd.join(path.as_ref()))),
         Some(path.to_string_lossy().into_owned()),
       )
     };
-    let cmp_path = comparison_path(&path);
+    let cmp_path = comparison_key(&path);
     Ok(Self {
       path,
       cmp_path,
@@ -1580,9 +1595,9 @@ impl<'a> PathQueryDescriptor<'a> {
       // paths. We pass these through.
       path
     } else {
-      windows_long_path(normalize_path(path))
+      normalize_path(path)
     };
-    let cmp_path = comparison_path(&path);
+    let cmp_path = comparison_key(&path);
     Self {
       path,
       cmp_path,
@@ -1746,14 +1761,14 @@ impl PathDescriptor {
       // paths. We pass these through.
       (path, None)
     } else if path.is_absolute() {
-      (windows_long_path(normalize_path(path)), None)
+      (normalize_path(path), None)
     } else {
       (
-        windows_long_path(normalize_path(Cow::Owned(cwd.join(path.as_ref())))),
+        normalize_path(Cow::Owned(cwd.join(path.as_ref()))),
         Some(path.to_string_lossy().into_owned()),
       )
     };
-    let cmp_path = comparison_path(&path);
+    let cmp_path = comparison_key(&path);
     Self {
       path: path.into_owned(),
       cmp_path,
@@ -3378,11 +3393,9 @@ impl<'a> SpecialFilePathQueryDescriptor<'a> {
     let parent =
       canonicalize_path_maybe_not_exists_following_links(sys, parent)
         .map_err(PathResolveError::Canonicalize)?;
-    // The final name is kept as given, so on Windows an 8.3 alias of a long
-    // name is read as the long name here (denext, DENEXT.md 225).
-    Ok(Some(
-      windows_long_path(Cow::Owned(parent.join(name))).into_owned(),
-    ))
+    // The final name is kept as given; the comparison of the result reads an
+    // 8.3 alias as its long name (`comparison_key`, DENEXT.md 225).
+    Ok(Some(parent.join(name)))
   }
 }
 
