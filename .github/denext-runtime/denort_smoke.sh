@@ -88,10 +88,16 @@ if [ "${DENORT_PINNED:-}" = 1 ]; then
   mkdir -p "$rel"
   cp "$(unix_path "$DENORT_ARCHIVE")" "$rel/$asset"
   "$py" -I - "$(native_path "$work/release")" "$(native_path "$work/port")" <<'PY' &
-import functools, http.server, os, sys
+import functools, http.server, os, socketserver, sys
 root, port_file = sys.argv[1], sys.argv[2]
 handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=root)
-server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+class Server(http.server.ThreadingHTTPServer):
+    # HTTPServer.server_bind asks socket.getfqdn for a name nothing here reads:
+    # a reverse DNS lookup, which can stall on a CI runner.
+    def server_bind(self):
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
+server = Server(("127.0.0.1", 0), handler)
 with open(port_file + ".tmp", "w") as f:
     f.write(str(server.server_address[1]))
 os.replace(port_file + ".tmp", port_file)
@@ -99,8 +105,7 @@ server.serve_forever()
 PY
   server=$!
   trap 'kill "$server" 2>/dev/null || true' EXIT
-  for _ in $(seq 100); do test -s "$work/port" && break; sleep 0.1; done
-  test -s "$work/port" || { echo "::error::the loopback release server did not start" >&2; exit 1; }
+  wait_for_file "$work/port" "$server" || { echo "::error::the loopback release server did not start" >&2; exit 1; }
   base="http://127.0.0.1:$(cat "$work/port")"
   case "$TARGET" in
     *-windows-msvc) app3=app3.exe ;;

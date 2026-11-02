@@ -40,8 +40,7 @@ while True:
 PY
 proxy=$!
 trap 'kill "$proxy" 2>/dev/null || true' EXIT
-for _ in $(seq 100); do test -s "$work/port" && break; sleep 0.1; done
-test -s "$work/port" || { echo "::error::the loopback proxy did not start" >&2; exit 1; }
+wait_for_file "$work/port" "$proxy" || { echo "::error::the loopback proxy did not start" >&2; exit 1; }
 url="http://127.0.0.1:$(cat "$work/port")"
 export HTTP_PROXY="$url" HTTPS_PROXY="$url" http_proxy="$url" https_proxy="$url"
 unset NO_PROXY no_proxy
