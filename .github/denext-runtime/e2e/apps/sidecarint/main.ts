@@ -100,11 +100,11 @@ if (r.params.phase === "first") {
     );
   }
 } else {
-  r.data.swapped = await run();
+  const swapped = r.data.swapped = await run();
   r.check(
     "a program swapped outside the app is refused at spawn",
-    /NotCapable/.test(r.data.swapped) && /Refusing to run/.test(r.data.swapped),
-    r.data.swapped,
+    /NotCapable/.test(swapped) && /Refusing to run/.test(swapped),
+    swapped,
   );
   r.data.healed = await run();
   r.check(
