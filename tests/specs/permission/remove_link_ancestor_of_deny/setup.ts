@@ -6,11 +6,23 @@ Deno.writeTextFileSync("evil/b/prog", "packaged");
 const evil = `${Deno.cwd()}/evil`;
 function link(path: string) {
   if (Deno.build.os === "windows") {
-    const { success } = new Deno.Command("cmd", {
-      args: ["/c", "mklink", "/J", path.replaceAll("/", "\\"), evil],
-      stdout: "null",
+    const { success, stdout, stderr } = new Deno.Command("cmd", {
+      args: [
+        "/c",
+        "mklink",
+        "/J",
+        path.replaceAll("/", "\\"),
+        evil.replaceAll("/", "\\"),
+      ],
     }).outputSync();
-    if (!success) throw new Error(`mklink /J ${path} failed`);
+    if (!success) {
+      const decoder = new TextDecoder();
+      throw new Error(
+        `mklink /J ${path} failed: ${decoder.decode(stdout)}${
+          decoder.decode(stderr)
+        }`,
+      );
+    }
   } else {
     Deno.symlinkSync(evil, path);
   }

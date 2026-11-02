@@ -8665,7 +8665,10 @@ where the changes are discussed.
      `permission/rename_ancestor_of_deny`, `symlink_ancestor_of_deny`,
      `wasi_rename_ancestor_of_deny`, `remove_link_ancestor_of_deny` (a junction
      on Windows), `chmod_ancestor_of_deny`, `cp_symlink_ancestor_of_deny`,
-     `wasi_symlink_target`.
+     `wasi_symlink_target`. The `node:wasi` specs run on Unix only: on Windows a
+     path-scoped grant resolved from a working directory with an 8.3 short name
+     never matches the long canonical paths `node:wasi` checks, so every
+     `path_*` op is refused there (as before this item).
 
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
