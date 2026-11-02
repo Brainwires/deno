@@ -8477,6 +8477,9 @@ where the changes are discussed.
        another spelling runs the registered path), the spec
        `permission/rename_ancestor_of_deny`, and `cli/rt/run.rs` (the value
        taken out of the grant, the denial, malformed values granting nothing).
+       The e2e area `sidecarint` needs a binary built by this fork's CLI (the
+       stock CLI the suite packages with writes no app identifier, so the token
+       cannot expand and the grant is dropped): it reports n/a there.
 
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
