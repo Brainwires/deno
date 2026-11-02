@@ -8557,10 +8557,10 @@ free numbers when the branch is merged.
      `ext/node/polyfills/testing.ts`,
      `ext/node/polyfills/internal/test/file_runner.ts`,
      `ext/node/polyfills/internal/test/coverage.ts`,
-     `ext/node/polyfills/test/reporters.ts`, `cli/js/40_test.js`). `node --test`
-     ran `deno test`, whose patterns aren't Node's, so a project's `test/foo.js`
-     was not found, and its output, flags and `run()` were not Node's. Against
-     Node 26.5.1's `lib/internal/test_runner/`:
+     `ext/node/polyfills/test/reporters.ts`, `runtime/js/99_main.js`).
+     `node --test` ran `deno test`, whose patterns aren't Node's, so a project's
+     `test/foo.js` was not found, and its output, flags and `run()` were not
+     Node's. Against Node 26.5.1's `lib/internal/test_runner/`:
      - **Orchestration.** The shim runs `run` on a small `data:` module that
        calls the runner with the flags it parsed (`--watch` stays
        `deno test --watch`). Files are the patterns given, or Node's default
@@ -8622,7 +8622,7 @@ free numbers when the branch is merged.
          so a file of `Deno.test` tests would pass with none of them run. In
          such a child (`NODE_TEST_CONTEXT=child-v8`), `Deno.test()`, `.only` and
          `.ignore` throw an error telling the user to run the file with
-         `deno test` (`cli/js/40_test.js`): the file stops at its first
+         `deno test` (`runtime/js/99_main.js`): the file stops at its first
          `Deno.test()` call and fails as a test named after it, and the run
          exits 1, as in Node, where the file fails because `Deno` is not
          defined. Outside such a child `deno run` still ignores `Deno.test()`.
