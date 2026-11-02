@@ -400,6 +400,15 @@ function testInner(
 ) {
   // No-op if we're not running in `deno test` subcommand.
   if (typeof op_register_test !== "function") {
+    // A test file that `node --test` / `node:test`'s `run()` started (each
+    // file runs under `deno run` with `NODE_TEST_CONTEXT=child-v8`): its
+    // `Deno.test()` tests would not run, and the file would pass with none.
+    // Fail the file instead, as Node does (`Deno` is not defined there).
+    if (op_get_env_no_permission_check("NODE_TEST_CONTEXT") === "child-v8") {
+      throw new Error(
+        "Deno.test() does not run under `node --test`: run this file with `deno test`",
+      );
+    }
     return;
   }
 

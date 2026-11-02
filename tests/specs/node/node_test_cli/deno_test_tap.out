@@ -1,0 +1,16 @@
+TAP version 13
+# [WILDCARD]Error: Deno.test() does not run under `node --test`: run this file with `deno test`[WILDCARD]
+# Subtest: math.test.js
+not ok 1 - math.test.js
+  ---
+  duration_ms: [WILDCARD]
+  type: 'test'
+  location: '[WILDCARD]math.test.js:1:1'
+  failureType: 'testCodeFailure'
+  exitCode: 1
+[WILDCARD]
+# tests 1
+# suites 0
+# pass 0
+# fail 1
+[WILDCARD]
