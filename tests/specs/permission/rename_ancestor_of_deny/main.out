@@ -1,0 +1,7 @@
+Deno.renameSync parent: denied
+Deno.rename parent: denied
+Deno.renameSync denied: denied
+node renameSync parent: denied
+node rename parent: denied
+still packaged: true
+other tree moved: true

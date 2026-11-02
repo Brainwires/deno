@@ -68,8 +68,8 @@ use serde::Deserialize;
 #[cfg(unix)]
 use tokio::process::Child as AsyncChild;
 
-pub mod ipc;
 mod embedded_program;
+pub mod ipc;
 pub use embedded_program::EmbeddedProgram;
 pub use embedded_program::EmbeddedProgramReader;
 pub use embedded_program::set_embedded_programs;
@@ -1526,16 +1526,21 @@ fn compute_run_cmd_and_check_permissions(
   )?;
   // denext (DENEXT.md item 215): a program the app carries runs only as it
   // was packaged, whoever spawns it.
-  match embedded_program::check(&cmd) {
-    Ok(Some(verified)) => state.put(verified),
-    Ok(None) => {}
+  // It runs the path that was checked, not the spelling the app used.
+  let cmd = match embedded_program::check(&cmd) {
+    Ok(Some(verified)) => {
+      let checked = verified.path().to_path_buf();
+      state.put(verified);
+      checked
+    }
+    Ok(None) => cmd,
     Err(message) => {
       return Err(
         CheckRunPermissionError::Other(JsErrorBox::new("NotCapable", message))
           .into(),
       );
     }
-  }
+  };
   Ok((cmd, run_env))
 }
 
@@ -2325,7 +2330,8 @@ mod deprecated {
       /* ipc */ false,
     )?;
     // Held for the spawn (DENEXT.md item 215).
-    let _verified = state.try_take::<super::embedded_program::VerifiedProgram>();
+    let _verified =
+      state.try_take::<super::embedded_program::VerifiedProgram>();
 
     #[cfg(windows)]
     let mut c = Command::new(cmd);
@@ -2817,7 +2823,7 @@ mod self_fork_tests {
       sha256: sha2::Sha256::digest(bytes).into(),
       read: Arc::new(move || Ok(bytes.to_vec())),
     }]);
-    let spawn = || {
+    let spawn_as = |cmd: &str| {
       let mut state = OpState::new(None);
       let parser =
         RuntimePermissionDescriptorParser::new(sys_traits::impls::RealSys);
@@ -2826,7 +2832,7 @@ mod self_fork_tests {
         Permissions::allow_all(),
       ));
       super::compute_run_cmd_and_check_permissions(
-        program.to_str().unwrap(),
+        cmd,
         None,
         &[],
         true,
@@ -2835,8 +2841,13 @@ mod self_fork_tests {
         true,
         false,
       )
-      .map(|_| state.try_take::<super::embedded_program::VerifiedProgram>())
+      .map(|(cmd, _)| {
+        let verified =
+          state.try_take::<super::embedded_program::VerifiedProgram>();
+        (cmd, verified)
+      })
     };
+    let spawn = || spawn_as(program.to_str().unwrap()).map(|(_, v)| v);
     // Written from the app on the first spawn, held for it.
     assert!(spawn().ok().flatten().is_some());
     assert_eq!(std::fs::read(&program).unwrap(), bytes);
@@ -2849,6 +2860,14 @@ mod self_fork_tests {
     assert!(!program.exists());
     // The next start runs the packaged bytes again.
     assert!(spawn().ok().flatten().is_some());
+    // Where the run grant takes another spelling of the path (case on macOS
+    // and Windows), the spawn is checked too, and runs the path it checked.
+    if cfg!(any(target_os = "macos", windows)) {
+      let other = program.to_str().unwrap().replace("prog", "PROG");
+      let (cmd, verified) = spawn_as(&other).unwrap();
+      assert!(verified.is_some());
+      assert_eq!(cmd, program);
+    }
     super::set_embedded_programs(Vec::new());
   }
 

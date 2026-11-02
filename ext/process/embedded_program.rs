@@ -33,6 +33,7 @@
   reason = "these are files on the real file system, whatever the app's virtual one holds"
 )]
 
+use std::borrow::Cow;
 use std::fs::File;
 use std::io::Read;
 use std::io::Write;
@@ -42,6 +43,7 @@ use std::sync::Arc;
 use std::sync::LazyLock;
 use std::sync::Mutex;
 
+use deno_permissions::PathQueryDescriptor;
 use sha2::Digest;
 use sha2::Sha256;
 
@@ -70,17 +72,15 @@ pub fn set_embedded_programs(programs: Vec<EmbeddedProgram>) {
     .unwrap_or_else(std::sync::PoisonError::into_inner) = programs;
 }
 
-/// Whether two paths name the same entry for this OS's usual file systems: a
-/// spelling that differs only by case passes the run grant's check on a
-/// case-insensitive volume only by being the same file, and must not miss the
-/// list by being spelled differently.
+/// Whether two paths name the same entry the way the permission check
+/// compares them (`deno_permissions`' comparison path: case-folded and, on
+/// macOS, Unicode-normalized; a Windows `\\?\` prefix taken off). Any
+/// spelling that passes the run grant as the registered program's path must
+/// find it here, or the spawn would skip the check.
 fn same_path(a: &Path, b: &Path) -> bool {
-  if cfg!(any(target_os = "macos", windows)) {
-    a.to_string_lossy()
-      .eq_ignore_ascii_case(&b.to_string_lossy())
-  } else {
-    a == b
-  }
+  let a = PathQueryDescriptor::new_known_absolute(Cow::Borrowed(a));
+  let b = PathQueryDescriptor::new_known_absolute(Cow::Borrowed(b));
+  a.starts_with(&b) && b.starts_with(&a)
 }
 
 /// The registered program `cmd` names, if any.
@@ -97,7 +97,7 @@ fn find(cmd: &Path) -> Option<EmbeddedProgram> {
 pub(crate) struct VerifiedProgram {
   // The handle the file was hashed through (on Windows, also the lock).
   file: File,
-  #[cfg(unix)]
+  // The registered path: what the spawn runs, whatever spelling the app used.
   path: PathBuf,
   #[cfg(unix)]
   stamp: FileStamp,
@@ -128,6 +128,13 @@ fn stamp_of(meta: &std::fs::Metadata) -> FileStamp {
 }
 
 impl VerifiedProgram {
+  /// The path that was checked, which the spawn must run: another spelling
+  /// of it (case, Unicode form, a `\\?\` prefix) could name another file on a
+  /// case-sensitive volume, or go through a link.
+  pub(crate) fn path(&self) -> &Path {
+    &self.path
+  }
+
   /// Whether the path still is the file that was hashed, unchanged since. For
   /// the moment right after the spawn, while the handle is still held.
   pub(crate) fn unchanged(&self) -> bool {
@@ -287,7 +294,6 @@ fn verify(program: &EmbeddedProgram) -> Result<VerifiedProgram, String> {
   }
   Ok(VerifiedProgram {
     file,
-    #[cfg(unix)]
     path: program.path.clone(),
     #[cfg(unix)]
     stamp,
@@ -319,6 +325,41 @@ mod tests {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("sidecars").join("x").join("prog");
     (dir, path)
+  }
+
+  #[test]
+  fn a_spelling_the_run_grant_takes_is_the_registered_path() {
+    let base = if cfg!(windows) {
+      PathBuf::from(r"C:\Users\u\AppData\Local\app\sidecars\x\prog.exe")
+    } else {
+      PathBuf::from("/home/u/.cache/app/sidecars/x/prog")
+    };
+    assert!(same_path(&base, &base));
+    assert!(!same_path(&base, &base.with_file_name("other")));
+    let upper = PathBuf::from(base.to_string_lossy().to_uppercase());
+    assert_eq!(
+      same_path(&base, &upper),
+      cfg!(any(target_os = "macos", windows))
+    );
+    #[cfg(windows)]
+    assert!(same_path(
+      &base,
+      &PathBuf::from(format!(r"\\?\{}", base.display()))
+    ));
+    #[cfg(target_os = "macos")]
+    {
+      // The permission check takes another Unicode form and case of a name
+      // as the same, as APFS does.
+      let nfc = Path::new("/Users/j\u{fc}rgen/Library/Caches/app/prog");
+      assert!(same_path(
+        nfc,
+        Path::new("/Users/ju\u{308}rgen/Library/Caches/app/prog")
+      ));
+      assert!(same_path(
+        nfc,
+        Path::new("/Users/J\u{dc}RGEN/Library/Caches/app/prog")
+      ));
+    }
   }
 
   #[test]

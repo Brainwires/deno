@@ -8426,25 +8426,52 @@ where the changes are discussed.
        the embedded bytes (checked against the hash first, new file renamed into
        place, mode 0500 in a 0700 folder); anything else is refused with
        `NotCapable` and removed, so the next spawn writes it again.
+     - The registered program is found the way the run grant compares paths
+       (`deno_permissions`' comparison path: case-folded on macOS and Windows,
+       Unicode-normalized on macOS, a `\\?\` prefix taken off on Windows), and
+       the spawn runs the registered path, not the app's spelling of it. Before
+       that, a spelling the grant took but the list did not (`\\?\C:\…` on
+       Windows, another Unicode form on macOS) skipped the check.
+     - A rename gets the strict write check on its old path, as a recursive
+       remove does (`ext/fs` `op_fs_rename_*`, so `node:fs` too): a deny scope
+       inside the tree being moved blocks it. Before that, code holding a write
+       grant on an ancestor of the program's folder (the app's own cache folder
+       is one) could move the folder's parent away and another tree into its
+       place, past the folder's denial, and race a spawn with it. That is a
+       general Deno permission gap, not only the sidecar's: `--deny-write=a/b`
+       did not stop `Deno.rename("a", "c")`.
      - Check, then exec: the file is hashed through one no-follow handle, held
        past the spawn. On Windows it shares read only, so nothing can write,
        rename or delete the file until the spawn returns. On Unix, after an
        asynchronous spawn the path and the handle are compared with the device,
        inode, mode, size, mtime and ctime from before the hash, and the child is
-       killed on a difference. What is left there: a program of the same user
-       that wins a microseconds race may get a moment of a child before the
-       kill, and `outputSync()` has no such kill. Deno code cannot try it, since
-       writes to the folder are denied; a hard link made beforehand through a
-       broad write grant and written through in the window is the same race.
+       killed on a difference. What is left there, for a program of the same
+       user (Deno code cannot write the file, its folder or a folder above it
+       holding it, nor link to it):
+       - one that changes the path in the window (microseconds) may get a moment
+         of a child before the kill, and `outputSync()` has no such kill;
+       - a write in place of the same length, with the mode put back, inside one
+         tick of the file system's timestamp clock after the file last changed,
+         leaves the stamp as it was. ext4 on Linux takes timestamps from a
+         coarse clock (one tick per jiffy): measured on Linux 6.8 (ext4,
+         HZ=1000), 191 of 200 such rewrites kept every field, the tick 1 ms; on
+         APFS none did (ticks of about 8 µs). Kernels with multigrain timestamps
+         (6.13 and later, on ext4, XFS, Btrfs and tmpfs) give a changed file a
+         fresh fine-grained ctime once its stamp has been read; not measured
+         here. Such a writer has to hold write access to the file already, which
+         the 0500 mode and the folder's denial keep from Deno code, so this is a
+         program of the user that could run itself anyway.
      - denext bakes the value from `FIRST_SIDECAR_INTEGRITY_RUNTIME` and the
        folder name carries the hash, so an update's new bytes do not meet the
        old copy.
      - Tests: `ext/process` `embedded_program` (written when missing, a swap
        refused then healed, a symlink refused even to the right bytes, embedded
        bytes off the hash not written, a change after the hash seen, the Windows
-       lock), `self_fork_tests::a_registered_program_is_checked_at_spawn`, and
-       `cli/rt/run.rs` (the value taken out of the grant, the denial, malformed
-       values granting nothing).
+       lock, another spelling of the path),
+       `self_fork_tests::a_registered_program_is_checked_at_spawn` (also:
+       another spelling runs the registered path), the spec
+       `permission/rename_ancestor_of_deny`, and `cli/rt/run.rs` (the value
+       taken out of the grant, the denial, malformed values granting nothing).
 
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,

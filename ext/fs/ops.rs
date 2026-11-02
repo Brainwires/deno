@@ -821,6 +821,11 @@ pub fn op_fs_rename_sync(
     OpenAccessKind::WriteNoFollow,
     Some("Deno.renameSync()"),
   )?;
+  // A rename takes everything under the old path with it, so like a recursive
+  // remove it also gets the strict write check: a deny scope inside the tree
+  // blocks it. Otherwise moving a denied folder's parent away and another
+  // tree into its place would get past the denial (denext, DENEXT.md 215).
+  permissions.check_write(Cow::Borrowed(&*oldpath), "Deno.renameSync()")?;
 
   let fs = state.borrow::<FileSystemRc>();
   fs.rename_sync(&oldpath, &newpath)
@@ -849,6 +854,11 @@ pub async fn op_fs_rename_async(
       OpenAccessKind::WriteNoFollow,
       Some("Deno.rename()"),
     )?;
+    // A rename takes everything under the old path with it, so like a recursive
+    // remove it also gets the strict write check: a deny scope inside the tree
+    // blocks it. Otherwise moving a denied folder's parent away and another
+    // tree into its place would get past the denial (denext, DENEXT.md 215).
+    permissions.check_write(Cow::Borrowed(&*oldpath), "Deno.rename()")?;
     (state.borrow::<FileSystemRc>().clone(), oldpath, newpath)
   };
 
