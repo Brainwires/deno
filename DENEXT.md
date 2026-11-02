@@ -8645,9 +8645,12 @@ activation policy and speech, item 183; and, for runtime 3.0.0-denext.7, CEF
 156, item 184, and the Linux Wayland overlay fixes, item 186; and, for runtime
 3.0.0-denext.8, API 51, hidden pages throttled instead of frozen on macOS and
 `backgroundThrottling`, item 198; and the Windows focus, tray role and window
-icon fixes, item 207), at the commit pinned by `LAUFEY_SHA` in the workflow (or
-the `laufey_ref` input). The same commit is the `laufey` git dependency of
-`cli/rt_desktop/Cargo.toml` (crate 0.8.0, API 51, CEF 156.0.15).
+icon fixes, item 207; and API 52, the OS's quits and layer-surface edge
+anchoring, items 221 and 222; and, for runtime 3.0.0-denext.9, a Linux window
+first shown at its size, item 2NN-wayland-size), at the commit pinned by
+`LAUFEY_SHA` in the workflow (or the `laufey_ref` input). The same commit is the
+`laufey` git dependency of `cli/rt_desktop/Cargo.toml` (crate 0.8.0, API 52, CEF
+156.0.15).
 
 laufey's `init_api` rejects any C ABI version mismatch between the runtime and
 the host, so the `laufey` crate libdenort links and the hosts are built from the
