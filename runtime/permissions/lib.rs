@@ -1370,7 +1370,10 @@ impl PartialEq<PathDescriptor> for PathQueryDescriptor<'_> {
 ///
 /// - Windows (NTFS): case-folded per character, as NTFS compares names
 ///   through its `$UpCase` table (ASCII only before DENEXT.md 225, which let
-///   `Ärger` and `ärger`, one name on NTFS, compare as two).
+///   `Ärger` and `ärger`, one name on NTFS, compare as two), and a named
+///   stream compared as its file: `b::$DATA` and `b:evil` are `b` (every
+///   component, so `a:x\b` compares as `a\b`; the path handed to the
+///   operation keeps the stream, see `windows_normalize`).
 /// - macOS (APFS/HFS+): NFKD-normalized and Unicode-case-folded, because
 ///   APFS resolves Unicode-equivalent and case-differing paths to the same
 ///   inode (e.g. `ß`/`ss`, `ﬁ`/`fi`, NFC/NFD forms, upper/lower).
@@ -1378,33 +1381,73 @@ impl PartialEq<PathDescriptor> for PathQueryDescriptor<'_> {
 #[inline]
 #[cfg(windows)]
 fn comparison_path(path: &Path) -> PathBuf {
-  PathBuf::from(
-    path
-      .to_string_lossy()
-      .chars()
-      .map(windows_fold_char)
-      .collect::<String>(),
-  )
+  use std::path::Component;
+  let fold = |s: &str| s.chars().map(windows_fold_char).collect::<String>();
+  let mut out = PathBuf::new();
+  for component in path.components() {
+    match component {
+      Component::Normal(name) => {
+        let name = name.to_string_lossy();
+        let plain = win32_name_without_stream(&name);
+        if !plain.is_empty() {
+          out.push(fold(plain));
+        }
+      }
+      other => out.push(fold(&other.as_os_str().to_string_lossy())),
+    }
+  }
+  out
 }
 
-/// One character as NTFS compares it: its single-character uppercase mapping
-/// (NTFS's `$UpCase` table maps each UTF-16 unit to one unit, so a character
-/// outside the BMP, or one whose uppercase is more than one character, such
-/// as `ß`, stays itself). This is Unicode's simple (one-to-one) case folding
-/// taken through uppercase, which is where NTFS goes: `σ` and `ς` both map
-/// to `Σ`, while the Kelvin sign and `k`, which simple folding would merge,
-/// stay apart as they are on NTFS. No normalization: NTFS stores names as
-/// given, so `é` and `e` + U+0301 are two names (denext, DENEXT.md 225).
+/// One character as NTFS compares it: the single UTF-16 unit the Windows
+/// upcase table maps it to (`RtlUpcaseUnicodeChar`), which is the table
+/// `format` writes into a volume's `$UpCase` (so a character outside the BMP
+/// stays itself, and a character the table doesn't map, such as `ß`, stays
+/// itself too). The table is asked rather than Unicode's simple uppercase
+/// mapping, which differs from it: Unicode maps `ı` (U+0131) to `I` and `ſ`
+/// (U+017F) to `S`, which NTFS keeps apart, and the two have drifted on other
+/// letters over the years, so a fold from Unicode's table widened an allow
+/// scope onto a sibling name (`ſettings` under a grant for `settings`) or
+/// missed a deny scope. No normalization: NTFS stores names as given, so `é`
+/// and `e` + U+0301 are two names (denext, DENEXT.md 225). The ASCII range is
+/// folded inline.
 #[cfg(windows)]
 fn windows_fold_char(c: char) -> char {
-  if c as u32 > 0xFFFF {
+  if c.is_ascii() {
+    return c.to_ascii_uppercase();
+  }
+  let Ok(unit) = u16::try_from(c as u32) else {
     return c;
+  };
+  // SAFETY: `RtlUpcaseUnicodeChar` takes one UTF-16 unit by value and
+  // returns one; it has no pointer arguments and no preconditions.
+  let upper = unsafe {
+    windows_sys::Wdk::System::SystemServices::RtlUpcaseUnicodeChar(unit)
+  };
+  // A surrogate (never returned for a BMP scalar, but the table is data) is
+  // not a scalar value: keep the character.
+  char::from_u32(u32::from(upper)).unwrap_or(c)
+}
+
+/// A Windows name without a named stream and stream type (`b::$DATA`,
+/// `b:evil`, `b:evil:$DATA` are all `b`): everything from the first `:` on
+/// is the stream, which NTFS opens on the file named before it. Nothing
+/// before the colon (`:evil` alone) names the directory the name sits in.
+#[cfg(any(windows, test))]
+fn win32_name_without_stream(name: &str) -> &str {
+  name.split(':').next().unwrap_or("")
+}
+
+/// How many bytes of a Windows name remain once the trailing dots and spaces
+/// Win32 removes before the file system sees the name are removed (`a.`,
+/// `a `, `a. . .` are `a`; a name of only dots and spaces is nothing).
+#[cfg(any(windows, test))]
+fn win32_trimmed_name_len(name: &[u8]) -> usize {
+  let mut end = name.len();
+  while end > 0 && matches!(name[end - 1], b'.' | b' ') {
+    end -= 1;
   }
-  let mut upper = c.to_uppercase();
-  match (upper.next(), upper.next()) {
-    (Some(folded), None) => folded,
-    _ => c,
-  }
+  end
 }
 
 #[inline]
@@ -1525,9 +1568,132 @@ fn windows_long_path_lookup(path: &Path) -> Option<PathBuf> {
   }
 }
 
+/// On Windows, a non-verbatim path's names as the file system will see them,
+/// applied after `normalize_path` to every path the permission layer compares
+/// (a query, a flag's scope, the no-follow resolution), so that the check and
+/// the operation, which is handed this path, name one entry (denext,
+/// DENEXT.md 225):
+/// - the trailing dots and spaces of every name are removed, as Win32 removes
+///   them before the file system sees the name (`base\a.` and `base\a ` open
+///   `base\a`; `normalize_path` removes them too, but only from a path that
+///   also needs another normalization, so `base\a.\b` and a deny scope
+///   written that way were compared as written and matched nothing; a name
+///   of only dots and spaces is dropped);
+/// - a named stream on the final name (`b:evil`, `b::$DATA`) is taken off
+///   for the long-name lookup and put back, so the operation still reaches
+///   the stream (and `comparison_path` compares the name without it: a write
+///   to `b::$DATA` is a write to `b`);
+/// - every existing name is replaced by its long name (`windows_long_path`).
+///
+/// A verbatim path (`\\?\`, which `strip_verbatim_prefix` keeps when a name
+/// ends in a dot or a space or holds a `:`, since without the prefix it would
+/// name another entry) is left as it is: Win32 hands it to the file system
+/// unchanged, so it names the literal entry, and its prefix keeps it from
+/// matching a scope written without one.
+#[cfg(windows)]
+fn windows_normalize(path: Cow<'_, Path>) -> Cow<'_, Path> {
+  use std::path::Component;
+  if matches!(
+    path.components().next(),
+    Some(Component::Prefix(prefix)) if prefix.kind().is_verbatim()
+  ) {
+    return path;
+  }
+  let (path, stream) = windows_detach_stream(path);
+  let path = windows_trim_names(path);
+  let path = windows_long_path(path);
+  windows_attach_stream(path, stream)
+}
+
+/// The path without the final name's stream suffix, and that suffix (from
+/// its first `:`). A stream with nothing before the colon (`base\:evil`) is a
+/// stream of the directory: the path becomes `base`, the suffix `:evil`.
+#[cfg(windows)]
+fn windows_detach_stream(
+  path: Cow<'_, Path>,
+) -> (Cow<'_, Path>, Option<std::ffi::OsString>) {
+  let Some(name) = path.file_name() else {
+    return (path, None);
+  };
+  let bytes = name.as_encoded_bytes();
+  let Some(colon) = bytes.iter().position(|b| *b == b':') else {
+    return (path, None);
+  };
+  // SAFETY: both halves of a valid encoded `OsStr` split at an ASCII byte.
+  let (plain, stream) = unsafe {
+    (
+      OsStr::from_encoded_bytes_unchecked(&bytes[..colon]),
+      OsStr::from_encoded_bytes_unchecked(&bytes[colon..]),
+    )
+  };
+  let stream = stream.to_os_string();
+  let plain = plain.to_os_string();
+  let mut path = path.into_owned();
+  path.pop();
+  if !plain.is_empty() {
+    path.push(plain);
+  }
+  (Cow::Owned(path), Some(stream))
+}
+
+/// Put a stream suffix back on the path's final name (see
+/// [`windows_detach_stream`]).
+#[cfg(windows)]
+fn windows_attach_stream(
+  path: Cow<'_, Path>,
+  stream: Option<std::ffi::OsString>,
+) -> Cow<'_, Path> {
+  let Some(stream) = stream else {
+    return path;
+  };
+  let mut path = path.into_owned();
+  match path.file_name() {
+    Some(name) => {
+      let mut name = name.to_os_string();
+      name.push(&stream);
+      path.set_file_name(name);
+    }
+    // A stream of the root directory.
+    None => path.push(stream),
+  }
+  Cow::Owned(path)
+}
+
+/// Every name of the path without its trailing dots and spaces (see
+/// [`windows_normalize`]); the path itself when no name has any.
+#[cfg(windows)]
+fn windows_trim_names(path: Cow<'_, Path>) -> Cow<'_, Path> {
+  use std::path::Component;
+  let trimmed = |name: &OsStr| {
+    let bytes = name.as_encoded_bytes();
+    let end = win32_trimmed_name_len(bytes);
+    // SAFETY: a prefix of a valid encoded `OsStr` cut before ASCII bytes.
+    (end != bytes.len())
+      .then(|| unsafe { OsStr::from_encoded_bytes_unchecked(&bytes[..end]) })
+  };
+  if !path
+    .components()
+    .any(|c| matches!(c, Component::Normal(name) if trimmed(name).is_some()))
+  {
+    return path;
+  }
+  let mut out = PathBuf::new();
+  for component in path.components() {
+    match component {
+      Component::Normal(name) => match trimmed(name) {
+        Some(cut) if cut.is_empty() => {}
+        Some(cut) => out.push(cut),
+        None => out.push(name),
+      },
+      other => out.push(other.as_os_str()),
+    }
+  }
+  Cow::Owned(out)
+}
+
 #[cfg(not(windows))]
 #[inline]
-fn windows_long_path(path: Cow<'_, Path>) -> Cow<'_, Path> {
+fn windows_normalize(path: Cow<'_, Path>) -> Cow<'_, Path> {
   path
 }
 
@@ -1550,13 +1716,13 @@ impl<'a> PathQueryDescriptor<'a> {
       // paths. We pass these through.
       (path, None)
     } else if path.is_absolute() {
-      (windows_long_path(normalize_path(path)), None)
+      (windows_normalize(normalize_path(path)), None)
     } else {
       let cwd = sys
         .env_current_dir()
         .map_err(PathResolveError::CwdResolve)?;
       (
-        windows_long_path(normalize_path(Cow::Owned(cwd.join(path.as_ref())))),
+        windows_normalize(normalize_path(Cow::Owned(cwd.join(path.as_ref())))),
         Some(path.to_string_lossy().into_owned()),
       )
     };
@@ -1580,7 +1746,7 @@ impl<'a> PathQueryDescriptor<'a> {
       // paths. We pass these through.
       path
     } else {
-      windows_long_path(normalize_path(path))
+      windows_normalize(normalize_path(path))
     };
     let cmp_path = comparison_path(&path);
     Self {
@@ -1746,10 +1912,10 @@ impl PathDescriptor {
       // paths. We pass these through.
       (path, None)
     } else if path.is_absolute() {
-      (windows_long_path(normalize_path(path)), None)
+      (windows_normalize(normalize_path(path)), None)
     } else {
       (
-        windows_long_path(normalize_path(Cow::Owned(cwd.join(path.as_ref())))),
+        windows_normalize(normalize_path(Cow::Owned(cwd.join(path.as_ref())))),
         Some(path.to_string_lossy().into_owned()),
       )
     };
@@ -3379,9 +3545,10 @@ impl<'a> SpecialFilePathQueryDescriptor<'a> {
       canonicalize_path_maybe_not_exists_following_links(sys, parent)
         .map_err(PathResolveError::Canonicalize)?;
     // The final name is kept as given, so on Windows an 8.3 alias of a long
-    // name is read as the long name here (denext, DENEXT.md 225).
+    // name is read as the long name here, and a stream suffix stays on it
+    // (denext, DENEXT.md 225).
     Ok(Some(
-      windows_long_path(Cow::Owned(parent.join(name))).into_owned(),
+      windows_normalize(Cow::Owned(parent.join(name))).into_owned(),
     ))
   }
 }
@@ -12181,6 +12348,177 @@ mod tests {
       Path::new("\\\\?\\C:\\Other\\file.txt"),
     ));
     assert!(!query.starts_with(&regular));
+  }
+
+  /// The Win32 name rules the Windows normalisation applies (DENEXT.md 225),
+  /// on every OS: trailing dots and spaces go, a stream suffix starts at the
+  /// first colon.
+  #[test]
+  fn win32_name_trimming_and_streams() {
+    for (name, kept) in [
+      ("a.", "a"),
+      ("a ", "a"),
+      ("a. . .", "a"),
+      ("a.txt", "a.txt"),
+      ("a.txt.", "a.txt"),
+      (" a", " a"),
+      ("...", ""),
+      ("  ", ""),
+      ("ä.", "ä"),
+    ] {
+      assert_eq!(
+        &name.as_bytes()[..win32_trimmed_name_len(name.as_bytes())],
+        kept.as_bytes(),
+        "{name:?}"
+      );
+    }
+    for (name, plain) in [
+      ("b", "b"),
+      ("b:evil", "b"),
+      ("b::$DATA", "b"),
+      ("b:evil:$DATA", "b"),
+      (":evil", ""),
+      ("b.txt:Zone.Identifier", "b.txt"),
+    ] {
+      assert_eq!(win32_name_without_stream(name), plain, "{name:?}");
+    }
+  }
+
+  /// A path's names as Win32 opens them: trailing dots and spaces removed
+  /// from every name, a stream compared as its file but kept for the
+  /// operation, a verbatim path left literal (DENEXT.md 225).
+  #[test]
+  #[cfg(windows)]
+  fn path_descriptor_trailing_dots_spaces_and_streams() {
+    let desc = |p: &str| {
+      PathQueryDescriptor::new_known_absolute(Cow::Owned(PathBuf::from(p)))
+    };
+    let plain = desc("C:\\w\\base\\a\\b");
+    // Trailing dots and spaces, on the final name and on a parent.
+    for spelled in [
+      "C:\\w\\base\\a\\b.",
+      "C:\\w\\base\\a\\b ",
+      "C:\\w\\base\\a\\b. . .",
+      "C:\\w\\base\\a.\\b",
+      "C:\\w\\base\\a \\b",
+      "C:\\w\\base\\a. \\b",
+      "C:\\w\\base\\...\\a\\b",
+    ] {
+      let d = desc(spelled);
+      assert_eq!(d, plain, "{spelled:?}");
+      assert_eq!(d.path, plain.path, "{spelled:?}: the operation's path");
+    }
+    // A stream is compared as its file; the operation keeps the stream.
+    for (spelled, op_path) in [
+      ("C:\\w\\base\\a\\b::$DATA", "C:\\w\\base\\a\\b::$DATA"),
+      ("C:\\w\\base\\a\\b:evil", "C:\\w\\base\\a\\b:evil"),
+      ("C:\\w\\base\\a\\b.:evil", "C:\\w\\base\\a\\b:evil"),
+      ("C:\\w\\base\\a\\b\\:evil", "C:\\w\\base\\a\\b:evil"),
+    ] {
+      let d = desc(spelled);
+      assert_eq!(d, plain, "{spelled:?}");
+      assert_eq!(d.path, Path::new(op_path), "{spelled:?}");
+      let deny = PathDescriptor::new_known_absolute(Cow::Borrowed(Path::new(
+        "C:\\w\\base\\a\\b",
+      )));
+      assert!(d.starts_with(&deny.as_query_descriptor()), "{spelled:?}");
+    }
+    // A stream on a parent (not openable, but compared as the file).
+    let d = desc("C:\\w\\base\\a:evil\\b");
+    assert_eq!(d, plain);
+    assert_eq!(d.path, Path::new("C:\\w\\base\\a:evil\\b"));
+    // A verbatim path names the literal entry and matches no plain scope.
+    let verbatim = desc("\\\\?\\C:\\w\\base\\a.");
+    assert_ne!(verbatim, desc("C:\\w\\base\\a"));
+    assert!(
+      verbatim
+        .path
+        .as_os_str()
+        .as_encoded_bytes()
+        .starts_with(b"\\\\?\\")
+    );
+    assert!(
+      !verbatim.starts_with(
+        &PathDescriptor::new_known_absolute(Cow::Borrowed(Path::new(
+          "C:\\w\\base"
+        )))
+        .as_query_descriptor()
+      )
+    );
+  }
+
+  /// The Windows fold is the OS upcase table's (what NTFS's `$UpCase` is
+  /// generated from): case-insensitive for every letter it maps, and no
+  /// wider (DENEXT.md 225).
+  #[test]
+  #[cfg(windows)]
+  fn windows_fold_is_the_upcase_table() {
+    let desc = |p: &str| {
+      PathQueryDescriptor::new_known_absolute(Cow::Owned(PathBuf::from(p)))
+    };
+    assert_eq!(desc("C:\\x\\Ärger"), desc("c:\\X\\ÄRGER"));
+    assert_eq!(desc("C:\\x\\папка"), desc("C:\\x\\ПАПКА"));
+    assert_eq!(windows_fold_char('a'), 'A');
+    assert_eq!(windows_fold_char('ä'), 'Ä');
+    assert_eq!(windows_fold_char('я'), 'Я');
+    // Outside the BMP: unchanged.
+    assert_eq!(windows_fold_char('𐐨'), '𐐨');
+    // The Kelvin sign is not `k`: `K` is.
+    assert_ne!(windows_fold_char('k'), '\u{212A}');
+    assert_eq!(windows_fold_char('\u{212A}'), '\u{212A}');
+    // `ß` has no single-unit uppercase in the table.
+    assert_ne!(desc("C:\\x\\straße"), desc("C:\\x\\STRASSE"));
+    // Unicode's simple uppercase of `ı` and `ſ` is ASCII; the OS table (and
+    // so NTFS) keeps them apart from `I` and `S`.
+    assert_ne!(windows_fold_char('\u{131}'), 'I');
+    assert_ne!(windows_fold_char('\u{17F}'), 'S');
+  }
+
+  /// A stream name reaches the file's own scope: a denied file's default
+  /// stream (`::$DATA`) and a named stream of it are denied (DENEXT.md 225).
+  #[test]
+  #[cfg(windows)]
+  fn check_open_denies_a_streams_file() {
+    set_prompter(Box::new(TestPrompter));
+    let parser = TestPermissionDescriptorParser;
+    let perms = Permissions::from_options(
+      &parser,
+      &PermissionsOptions {
+        allow_read: Some(svec!["C:\\Users\\Admin"]),
+        deny_read: Some(svec!["C:\\Users\\Admin\\Secret"]),
+        ..Default::default()
+      },
+    )
+    .unwrap();
+    let perms = PermissionsContainer::new(Arc::new(parser), perms);
+    for denied in [
+      "C:\\Users\\Admin\\Secret\\data.txt::$DATA",
+      "C:\\Users\\Admin\\Secret\\data.txt:evil",
+      "C:\\Users\\Admin\\Secret::$INDEX_ALLOCATION\\data.txt",
+      "C:\\Users\\Admin\\Secret:evil",
+    ] {
+      assert!(
+        perms
+          .check_open(
+            Cow::Borrowed(Path::new(denied)),
+            OpenAccessKind::Read,
+            Some("api"),
+          )
+          .is_err(),
+        "{denied:?}"
+      );
+    }
+    assert!(
+      perms
+        .check_open(
+          Cow::Borrowed(Path::new(
+            "C:\\Users\\Admin\\file.txt:Zone.Identifier"
+          )),
+          OpenAccessKind::Read,
+          Some("api"),
+        )
+        .is_ok()
+    );
   }
 
   #[test]

@@ -8733,6 +8733,60 @@ where the changes are discussed.
        Unicode's simple case folding would merge them); no normalization, since
        NTFS stores names as given. macOS keeps 224's NFKD + full case mapping
        (APFS normalizes).
+     - **The fold is the OS upcase table's, not Unicode's** (the denext.8 delta
+       audit, N4). The first version of this item folded each character through
+       Rust's `char::to_uppercase`, Unicode's simple mapping, which maps `ı`
+       (U+0131) to `I` and `ſ` (U+017F) to `S`, where Windows's table does not,
+       and the two tables have drifted on other letters over the years (the .NET
+       runtime carries a separate table for the same reason). Both sides of a
+       comparison are folded, so a wider fold let an allow scope cover a sibling
+       that NTFS keeps apart (`--allow-write=C:\x\settings` covered
+       `C:\x\ſettings`, a new folder outside the grant), and a narrower one
+       would let a deny scope miss a spelling NTFS treats as the same name.
+       `windows_fold_char` now asks `RtlUpcaseUnicodeChar` (ntdll; the table
+       `format` writes into a volume's `$UpCase`) for every non-ASCII BMP
+       character, ASCII inline, so the fold is the file system's by construction
+       rather than a guess at it. A volume formatted by an older Windows than
+       the running one can differ for letters whose mapping was added in
+       between; nothing else. Spec `permission/windows_fold_ntfs` checks the
+       agreement on the CI runner's volume for 21 pairs of spellings (ASCII,
+       Latin, Cyrillic, Greek incl. final sigma, `ı`/`I`, `ſ`/`S`, the Kelvin
+       sign, `ß`, titlecase `ǅ`, Cherokee, Georgian Mtavruli, Latin Extended-D):
+       for each it asks NTFS whether the two spellings are one folder and the
+       permission layer whether an allow scope and a deny scope written with one
+       cover the other; a disagreement in either direction fails the spec, and
+       the per-pair lines record what that volume does.
+     - **Trailing dots and spaces, and named streams** (the delta audit, N1).
+       Win32 removes the trailing dots and spaces of a name before the file
+       system sees it, so `base\a.`, `base\a` and `base\a. . .` open `base\a`,
+       and `name:stream` / `name::$DATA` open a stream of `name` (the default
+       stream is the file's own data; `::$INDEX_ALLOCATION` a folder's index).
+       The permission layer's lexical normalization (`normalize_path`) already
+       removed trailing dots and spaces from every name, but only when the path
+       needed another normalization too (a `/`, a `.` or `..`, a trailing
+       separator, or a dot or space at the end of the _last_ name), so
+       `base\a.\b` was compared as written, and so was a flag scope written that
+       way (`--deny-write=base\a.\b` matched nothing; a query through an
+       existing `a.` was still caught by the parent's canonicalization, which
+       opens `a`). A stream suffix was never removed: `base\a\b\prog::$DATA` and
+       `prog:evil` compared as other names than the denied `prog`, so a write to
+       a denied file's default or named stream, and a stream of a denied folder,
+       got past `--deny-write` (and a read of a denied file's `::$DATA` past
+       `--deny-read`). Now every path the permission layer builds
+       (`windows_normalize`, after `normalize_path`, before the long-name
+       lookup) has the trailing dots and spaces of every name removed (a name of
+       only dots and spaces is dropped, as `normalize_path` does), and the
+       comparison form (`comparison_path`) of every name ends at its first `:`,
+       so a stream is checked as its file; the path handed to the operation
+       keeps the stream on the final name (a write to `x:meta` still writes the
+       stream, not `x`), and keeps a stream on a parent as given (Win32 can't
+       open through one). A verbatim `\\?\` path is left as it is: Win32 hands
+       it to the file system unchanged, so it names the literal entry (`a.`),
+       and `strip_verbatim_prefix` keeps the prefix on exactly those paths, so
+       they match no scope written without one. The operation is handed the
+       normalized path, so the check and the operation name one entry on every
+       path (an operation that used the path as given would still open the same
+       entry: Win32 removes the same dots and spaces).
      - **`Deno.FsFile.prototype.utime` on a file opened read-only** was reported
        as unchecked. It isn't: upstream's #30872 (Deno 2.5) checks write
        permission on the file's path (no-follow, the partial check `Deno.utime`
@@ -8768,8 +8822,15 @@ where the changes are discussed.
      (the alias is read with `Scripting.FileSystemObject`, set with
      `fsutil file setshortname` when the volume generates none, and when neither
      works the spec says so and checks the long name) and
-     `permission/windows_deny_unicode_case` (Windows),
-     `node/fs_cp_relative_dest`.
+     `permission/windows_deny_unicode_case`,
+     `permission/windows_trailing_dot_deny` (the trailing-dot, trailing-space
+     and stream spellings above under `--deny-write=base/a/b`, and that a stream
+     beside the denied path still writes and reads as a stream) and
+     `permission/windows_fold_ntfs` (Windows), `node/fs_cp_relative_dest`;
+     `deno_permissions` unit tests `win32_name_trimming_and_streams` (every OS),
+     `path_descriptor_trailing_dots_spaces_and_streams`,
+     `windows_fold_is_the_upcase_table`, `check_open_denies_a_streams_file`
+     (Windows).
 
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,

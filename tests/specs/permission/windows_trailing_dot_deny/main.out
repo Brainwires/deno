@@ -1,0 +1,19 @@
+rename a parent of a denied path, trailing dot: refused
+rename a parent of a denied path, trailing space: refused
+rename a parent of a denied path, dots and spaces: refused
+rename onto a parent of a denied path, trailing dot: refused
+remove a parent of a denied path, trailing dot: refused
+remove the denied path, trailing dot: refused
+remove inside the denied path through a parent with a trailing dot: refused
+write into the denied path through a parent with a trailing dot: refused
+symlink at a parent of a denied path, trailing dot: refused
+write the denied file's default stream: refused
+write a named stream of the denied file: refused
+remove the denied file by its default stream: refused
+write a stream of the denied folder: refused
+write a stream of the denied folder through the index stream: refused
+still packaged: true
+write beside the denied path, trailing dot: done
+that wrote the name without the dot: true
+write a named stream beside the denied path: done
+that stream reads back: true

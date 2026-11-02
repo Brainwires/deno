@@ -1,0 +1,14 @@
+{
+  "tempDir": true,
+  "tests": {
+    "fold_matches_ntfs": {
+      "if": "windows",
+      "steps": [
+        {
+          "args": "run --allow-read --allow-write --allow-run main.ts",
+          "output": "main.out"
+        }
+      ]
+    }
+  }
+}
