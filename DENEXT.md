@@ -8500,8 +8500,8 @@ where the changes are discussed.
      `stage_refuses_a_case_only_rename_of_the_executable`,
      `apply_refuses_a_case_only_rename_of_the_executable` (each failed before).
 
-218. **`chore(deps)`: V8 15.6.75.32, Chrome Extended Stable 156, from
-     Brainwires/rusty_v8** (`v8` crate `156.0.0+denext.1`; `chore/v8-15.6`;
+218. **`chore(deps)`: V8 15.6.75.33, Chrome Extended Stable 156, from
+     Brainwires/rusty_v8** (`v8` crate `156.0.0+denext.2`; `chore/v8-15.6`;
      runtime and CI; `Cargo.toml`, `Cargo.lock`, `libs/deno_v8/Cargo.toml`,
      `libs/core/runtime/setup.rs`, `cli/args/mod.rs`, `cli/tools/run/hmr.rs`,
      `cli/rt/hmr.rs`, `.github/denext-runtime/rusty_v8.sha256`,
@@ -8517,12 +8517,13 @@ where the changes are discussed.
      (Medium) plus five Low; none is reported exploited in the wild. The fork
      now follows Chrome Extended Stable's V8 branch (`plans/fork-own-v8.md` in
      denext): Brainwires/rusty_v8's branch `v8-15.6-denext` takes V8's
-     `branch-heads/15.6` at 15.6.75.32 (2026-10-30: Extended Stable
-     156.0.8078.80's 15.6.75.27 plus five later `[M156]` security merges). That
-     repository's DENEXT.md has the details: the submodules on Chromium's own
-     repositories with denoland's embedder patches kept as patch files, metagen
-     off (Torque's instance types, as V8's "no metagen" bots), bindgen on
-     libclang 23, and the binding changes.
+     `branch-heads/15.6` at 15.6.75.33 (2026-10-31: Extended Stable
+     156.0.8078.80's 15.6.75.27 plus six later `[M156]` security merges, the
+     last `e1c709282e`, "Track Promise.any reject closure state in the errors
+     array"). That repository's DENEXT.md has the details: the submodules on
+     Chromium's own repositories with denoland's embedder patches kept as patch
+     files, metagen off (Torque's instance types, as V8's "no metagen" bots),
+     bindgen on libclang 23, and the binding changes.
 
      What this fork follows:
      - **The `v8` crate API.** An accessor setter (`set_accessor_with_setter`,
@@ -8554,42 +8555,53 @@ where the changes are discussed.
        message dispatch and `--trace-sigint`'s stack capture do
        (`specs::node::trace_sigint::*_busy`), so rusty_v8 builds V8 with
        `v8_disallow_js_in_api_interrupts_is_checked=false`, as V8 does for Node.
-     - **`libs/deno_v8`** asks for `v8` `156.0.0`, which the `+denext.1` build
+     - **`libs/deno_v8`** asks for `v8` `156.0.0`, which the `+denext.2` build
        satisfies through `[patch.crates-io]`.
      - **The engine staleness gate** (item 179) is enforced for V8 again:
        `ENGINE_STALENESS_ENFORCE` is `tag`, and the new
        `ENGINE_STALENESS_ENFORCE_CEF: warn` keeps CEF at a warning.
-       `ENGINE_STALENESS_ENFORCE_V8` / `_CEF` override the mode per engine. A V8 on the Extended Stable milestone passes a tag
-       as before; the plan's patch-age limit (no more than 14 days behind the
-       branch head) is not part of this change.
+       `ENGINE_STALENESS_ENFORCE_V8` / `_CEF` override the mode per engine. A V8
+       on the Extended Stable milestone passes a tag as before; the plan's
+       patch-age limit (no more than 14 days behind the branch head) is not part
+       of this change.
 
-     The pin: release `v156.0.0-denext.1` of Brainwires/rusty_v8 (immutable,
-     built from source at `b8bad942` by its `release-denext.yml`, every file
+     The pin: release `v156.0.0-denext.2` of Brainwires/rusty_v8 (immutable,
+     built from source at `48f603b3` by its `release-denext.yml`, every file
      with a build-provenance attestation). `Cargo.toml`'s `[patch.crates-io]`
-     rev is `57777d42`, the `crate` branch commit that release names, and
+     rev is `f691f9a0`, the `crate` branch commit that release names, and
      `rusty_v8.sha256` holds its `SHA256SUMS`. That commit also carries
      rusty_v8's `snapshot::read_only_heap_guard`: while the process's first
      isolate is a snapshot creator that has not created its blob, other isolates
      wait for it, since V8 frees the read-only space such an isolate attached
      to. The fork makes its snapshots in `build.rs` processes, so programs can't
-     reach that window. The release's build tools now include the Windows SDK
-     10.0.28000 V8 15.6's `build` pins (a bootstrapper fixed by the SHA-256 in
-     `microsoft/winget-pkgs`, Authenticode checked) and, on Intel macOS,
-     conda-forge's libclang 23.1.4 packages (each SHA-256 pinned), since LLVM's
-     releases and Homebrew have no such build.
+     reach that window: `JsRuntimeForSnapshot` and `create_runtime_snapshot`
+     have no caller in the runtime, `deno compile` or desktop packaging, which
+     embed the prebuilt `CLI_SNAPSHOT`. The release's build tools now include
+     the Windows SDK 10.0.28000 V8 15.6's `build` pins (a bootstrapper fixed by
+     the SHA-256 in `microsoft/winget-pkgs`, Authenticode checked) and, on Intel
+     macOS, conda-forge's libclang 23.1.4 packages (each SHA-256 pinned), since
+     LLVM's releases and Homebrew have no such build; the release notes list
+     them.
 
      Verified against the pin on biscuits (Linux x86_64, the release's prebuilt
-     library): `deno --version` reports `v8 15.6.75.32-rusty`; `cargo test -p
-     deno_core --lib` on one thread 496 passed, and `-p serde_v8 -p deno_ops`
-     pass; `specs` `resource_limits` 32, `trace_sigint` 5, `vm_wasm_streaming`
-     1, `worker` 90, `snapshot` 12, all passed; `integration` `watcher::` 73
-     passed. `deno_core` on parallel threads still aborts now and then with the
-     snapshot-creating tests included (3 of 33 runs, `vector.h:419` libc++
-     hardening, as item 74's runs did), and never without them (0 of 30), which
-     is how CI runs it. On macOS arm64 `cargo test -p deno_core --lib` 497
-     passed, linked with the system linker. `node_compat` with the filters
-     `test-v8-`, `test-vm-` and `test-worker-` ran debug builds: `test-v8-`
-     fails the same 13 of 23 on this V8 and on 15.2.124.45.
+     library): `deno --version` reports `v8 15.6.75.33-rusty`;
+     `cargo test -p
+     deno_core --lib` on one thread 496 passed; `specs`
+     `resource_limits` 32, `trace_sigint` 5, `vm_wasm_streaming` 1, `worker` 90,
+     `snapshot` 12, all passed. Against the previous pin (15.6.75.32,
+     `v156.0.0-denext.1`) `-p
+     serde_v8 -p deno_ops` and `integration`
+     `watcher::` 73 also passed, on macOS arm64 `cargo test -p deno_core --lib`
+     497 passed, and `node_compat` `test-v8-` failed the same 13 of 23 as on
+     15.2.124.45. `deno_core` on parallel threads aborts now and then with the
+     snapshot-creating tests included (3 of 33 runs on 15.6.75.32,
+     `vector.h:419` libc++ hardening, as item 74's runs did), and never without
+     them (0 of 30), which is how CI runs it. The guard does not cover a
+     snapshot creator made after the process ran out of isolates, when V8 sets
+     up a new read-only heap; rusty_v8's branch `fix/snapshot-guard-reopen`
+     covers it, but 40 parallel runs with that branch still had 1 such abort and
+     2 undiagnosed hangs, so it is not in this pin and the cause of the aborts
+     stays open.
 
      Verified before the pin on biscuits (Linux x86_64) against a local
      `V8_FROM_SOURCE=1` build of rusty_v8 `v8-15.6-denext` (`d8fb309b`), through
@@ -8619,9 +8631,9 @@ The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
 169-174, 176, 178, 180, 182-184, 186, 187, 189-191, 193-196, 198-203, 206, 207,
 209-215, 217, 218) are what the prebuilt `libdenort` carries. The CLI-side parts
-(for example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's
-launchers) are in the branch too, but a stock CLI does not run them; denext's
-own launcher provides that environment.
+(for example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged
+app's launchers) are in the branch too, but a stock CLI does not run them;
+denext's own launcher provides that environment.
 
 The laufey backend hosts are built from
 [Brainwires/laufey](https://github.com/Brainwires/laufey) branch

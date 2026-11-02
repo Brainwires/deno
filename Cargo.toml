@@ -674,7 +674,7 @@ opt-level = 3
 # rows had no way to name its columns (Deno.SQL's `result.columns`;
 # DENEXT.md). Drop this once tokio-postgres exposes the stream's columns.
 #
-# v8 156.0.0+denext.1: Brainwires/rusty_v8, V8 15.6.75.32 on Chrome Extended
+# v8 156.0.0+denext.2: Brainwires/rusty_v8, V8 15.6.75.33 on Chrome Extended
 # Stable 156's branch (DENEXT.md item 218). The rev is a commit of that
 # repository's `crate` branch, which holds only the `cargo package` output, so
 # Cargo never clones the V8 submodules. Its build script takes the prebuilt
@@ -684,4 +684,4 @@ opt-level = 3
 [patch.crates-io]
 dprint-core = { path = "libs/vendor/dprint-core" }
 tokio-postgres = { path = "libs/vendor/tokio-postgres" }
-v8 = { git = "https://github.com/Brainwires/rusty_v8", rev = "57777d428b250825ddb48d2b58cee6d85f877cea" }
+v8 = { git = "https://github.com/Brainwires/rusty_v8", rev = "f691f9a061d4f9c31a7b6c272d5cdf1929f0b425" }
