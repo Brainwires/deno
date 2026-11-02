@@ -1310,7 +1310,12 @@ fn refuse_if_changed_since_check(
   if verified.unchanged() {
     return Ok(());
   }
+  // Unix only: on Windows the held handle's share mode keeps the file as it
+  // was, so `unchanged()` is always true there.
+  #[cfg(unix)]
   let _ = child.start_kill();
+  #[cfg(windows)]
+  let _ = child;
   Err(
     CheckRunPermissionError::Other(JsErrorBox::new(
       "NotCapable",
