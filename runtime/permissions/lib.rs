@@ -1343,8 +1343,9 @@ impl<
 #[derive(Clone, Debug)]
 pub struct PathQueryDescriptor<'a> {
   path: Cow<'a, Path>,
-  /// Lowercased on Windows for case-insensitive comparison; same as `path` on
-  /// other platforms. Used by PartialEq, starts_with, etc.
+  /// Case-folded on Windows (normalized on macOS) for the file system's
+  /// comparison; same as `path` on other platforms. Used by PartialEq,
+  /// starts_with, etc.
   cmp_path: PathBuf,
   /// Custom requested display name when differs from resolved.
   requested: Option<String>,
@@ -1367,7 +1368,9 @@ impl PartialEq<PathDescriptor> for PathQueryDescriptor<'_> {
 
 /// Returns a normalized copy of the path for filesystem-aware comparison.
 ///
-/// - Windows (NTFS): ASCII-lowercased for case-insensitive matching.
+/// - Windows (NTFS): case-folded per character, as NTFS compares names
+///   through its `$UpCase` table (ASCII only before DENEXT.md 225, which let
+///   `Ärger` and `ärger`, one name on NTFS, compare as two).
 /// - macOS (APFS/HFS+): NFKD-normalized and Unicode-case-folded, because
 ///   APFS resolves Unicode-equivalent and case-differing paths to the same
 ///   inode (e.g. `ß`/`ss`, `ﬁ`/`fi`, NFC/NFD forms, upper/lower).
@@ -1375,7 +1378,33 @@ impl PartialEq<PathDescriptor> for PathQueryDescriptor<'_> {
 #[inline]
 #[cfg(windows)]
 fn comparison_path(path: &Path) -> PathBuf {
-  PathBuf::from(path.to_string_lossy().to_ascii_lowercase())
+  PathBuf::from(
+    path
+      .to_string_lossy()
+      .chars()
+      .map(windows_fold_char)
+      .collect::<String>(),
+  )
+}
+
+/// One character as NTFS compares it: its single-character uppercase mapping
+/// (NTFS's `$UpCase` table maps each UTF-16 unit to one unit, so a character
+/// outside the BMP, or one whose uppercase is more than one character, such
+/// as `ß`, stays itself). This is Unicode's simple (one-to-one) case folding
+/// taken through uppercase, which is where NTFS goes: `σ` and `ς` both map
+/// to `Σ`, while the Kelvin sign and `k`, which simple folding would merge,
+/// stay apart as they are on NTFS. No normalization: NTFS stores names as
+/// given, so `é` and `e` + U+0301 are two names (denext, DENEXT.md 225).
+#[cfg(windows)]
+fn windows_fold_char(c: char) -> char {
+  if c as u32 > 0xFFFF {
+    return c;
+  }
+  let mut upper = c.to_uppercase();
+  match (upper.next(), upper.next()) {
+    (Some(folded), None) => folded,
+    _ => c,
+  }
 }
 
 #[inline]
@@ -1424,6 +1453,83 @@ fn strip_verbatim_prefix(path: Cow<'_, Path>) -> Cow<'_, Path> {
   path
 }
 
+/// On Windows, a name the file system generated as the 8.3 alias of a long
+/// name (`LONGNA~1` for `longname`) opens the same entry as the long name but
+/// compares as another string, so a grant or a deny scope written with one
+/// spelling didn't match a path written with the other: the no-follow checks
+/// (rename, remove, symlink, mkdir, lstat) keep the final name as given, and
+/// a flag such as `--deny-write=C:\Users\RUNNER~1\x` was compared as written.
+/// This replaces every component that exists with its long name
+/// (`GetLongPathNameW`, which also gives each the case it is stored with).
+/// A generated alias always holds a `~`, so a path without one is returned
+/// as it is, with no system call. The names past the last existing entry are
+/// kept as given: an alias is only generated for an entry that exists, so a
+/// `~` name that doesn't exist yet (`new~1`, or a deny scope for a path to
+/// be created later) is its own name and aliases nothing at that moment; the
+/// queries are normalised again at every check, so a scope written as a long
+/// name matches whenever the entry comes to exist, and a scope written as a
+/// short name for an entry that doesn't exist yet matches that spelling only
+/// (denext, DENEXT.md 225).
+#[cfg(windows)]
+fn windows_long_path(path: Cow<'_, Path>) -> Cow<'_, Path> {
+  if !path.as_os_str().as_encoded_bytes().contains(&b'~') {
+    return path;
+  }
+  match windows_long_path_lookup(&path) {
+    Some(long) => Cow::Owned(long),
+    None => path,
+  }
+}
+
+#[cfg(windows)]
+fn windows_long_path_lookup(path: &Path) -> Option<PathBuf> {
+  use std::os::windows::ffi::OsStrExt;
+  use std::os::windows::ffi::OsStringExt;
+  use windows_sys::Win32::Storage::FileSystem::GetLongPathNameW;
+
+  let mut tail = Vec::new();
+  let mut current = path.to_path_buf();
+  let mut buf = vec![0u16; 1024];
+  loop {
+    let wide: Vec<u16> = current
+      .as_os_str()
+      .encode_wide()
+      .chain(std::iter::once(0))
+      .collect();
+    // SAFETY: `wide` is NUL-terminated and `buf` is a writable buffer of
+    // `buf.len()` UTF-16 units; the call writes at most that many.
+    let mut len = unsafe {
+      GetLongPathNameW(wide.as_ptr(), buf.as_mut_ptr(), buf.len() as u32)
+    };
+    if len as usize > buf.len() {
+      buf.resize(len as usize, 0);
+      // SAFETY: as above, with the buffer the call asked for.
+      len = unsafe {
+        GetLongPathNameW(wide.as_ptr(), buf.as_mut_ptr(), buf.len() as u32)
+      };
+    }
+    if len == 0 || len as usize > buf.len() {
+      // Not there (or not readable): keep this name as given and look at
+      // its parent. At the root nothing resolved.
+      tail.push(current.file_name()?.to_owned());
+      current = current.parent()?.to_path_buf();
+      continue;
+    }
+    let mut long =
+      PathBuf::from(std::ffi::OsString::from_wide(&buf[..len as usize]));
+    for name in tail.into_iter().rev() {
+      long.push(name);
+    }
+    return Some(long);
+  }
+}
+
+#[cfg(not(windows))]
+#[inline]
+fn windows_long_path(path: Cow<'_, Path>) -> Cow<'_, Path> {
+  path
+}
+
 impl<'a> PathQueryDescriptor<'a> {
   pub fn new(
     sys: &impl sys_traits::EnvCurrentDir,
@@ -1443,13 +1549,13 @@ impl<'a> PathQueryDescriptor<'a> {
       // paths. We pass these through.
       (path, None)
     } else if path.is_absolute() {
-      (normalize_path(path), None)
+      (windows_long_path(normalize_path(path)), None)
     } else {
       let cwd = sys
         .env_current_dir()
         .map_err(PathResolveError::CwdResolve)?;
       (
-        normalize_path(Cow::Owned(cwd.join(path.as_ref()))),
+        windows_long_path(normalize_path(Cow::Owned(cwd.join(path.as_ref())))),
         Some(path.to_string_lossy().into_owned()),
       )
     };
@@ -1473,7 +1579,7 @@ impl<'a> PathQueryDescriptor<'a> {
       // paths. We pass these through.
       path
     } else {
-      normalize_path(path)
+      windows_long_path(normalize_path(path))
     };
     let cmp_path = comparison_path(&path);
     Self {
@@ -1597,8 +1703,9 @@ impl QueryDescriptor for ReadQueryDescriptor<'_> {
 #[derive(Clone, Debug)]
 pub struct PathDescriptor {
   path: PathBuf,
-  /// Lowercased on Windows for case-insensitive comparison; same as `path` on
-  /// other platforms. Used by PartialEq, Hash, starts_with, cmp_*.
+  /// Case-folded on Windows (normalized on macOS) for the file system's
+  /// comparison; same as `path` on other platforms. Used by PartialEq, Hash,
+  /// starts_with, cmp_*.
   cmp_path: PathBuf,
   /// Custom requested display name when differs from resolved.
   requested: Option<String>,
@@ -1638,10 +1745,10 @@ impl PathDescriptor {
       // paths. We pass these through.
       (path, None)
     } else if path.is_absolute() {
-      (normalize_path(path), None)
+      (windows_long_path(normalize_path(path)), None)
     } else {
       (
-        normalize_path(Cow::Owned(cwd.join(path.as_ref()))),
+        windows_long_path(normalize_path(Cow::Owned(cwd.join(path.as_ref())))),
         Some(path.to_string_lossy().into_owned()),
       )
     };
@@ -3270,7 +3377,11 @@ impl<'a> SpecialFilePathQueryDescriptor<'a> {
     let parent =
       canonicalize_path_maybe_not_exists_following_links(sys, parent)
         .map_err(PathResolveError::Canonicalize)?;
-    Ok(Some(parent.join(name)))
+    // The final name is kept as given, so on Windows an 8.3 alias of a long
+    // name is read as the long name here (denext, DENEXT.md 225).
+    Ok(Some(
+      windows_long_path(Cow::Owned(parent.join(name))).into_owned(),
+    ))
   }
 }
 

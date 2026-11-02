@@ -523,6 +523,35 @@ pub fn check_remove_link(
   Ok(())
 }
 
+/// The checks for a metadata change through an open descriptor (`fchmod`,
+/// `fchown`, `futime`; `node:fs` `fchmod` / `fchown` / `futimes` share them).
+/// The descriptor was opened with the permission its open needed, which may
+/// be read only, so a change through it needs write permission on the file's
+/// path (the resolved path the open recorded; no follow, as `utime` checks it
+/// upstream). `owner_or_mode`: a mode or owner change on a folder that holds
+/// a `--deny-write` path decides who can reach or replace the denied path, so
+/// it also gets the deny half of the strict check, as [`check_metadata_write`]
+/// gives `chmod` / `chown` by path; times keep the partial check (denext,
+/// DENEXT.md 224, 225).
+pub fn check_fd_metadata_write(
+  permissions: &deno_permissions::PermissionsContainer,
+  file: &Rc<dyn deno_io::fs::File>,
+  owner_or_mode: bool,
+  api_name: &str,
+) -> Result<(), PermissionCheckError> {
+  if let Some(path) = file.maybe_path() {
+    permissions.check_open(
+      Cow::Borrowed(path),
+      OpenAccessKind::WriteNoFollow,
+      Some(api_name),
+    )?;
+    if owner_or_mode {
+      permissions.check_write_resolved_not_denied(path, api_name)?;
+    }
+  }
+  Ok(())
+}
+
 #[op2(fast, stack_trace)]
 pub fn op_fs_fchmod_sync(
   state: &mut OpState,
@@ -531,6 +560,12 @@ pub fn op_fs_fchmod_sync(
 ) -> Result<(), FsOpsError> {
   let file =
     FileResource::get_file(state, rid).map_err(FsOpsErrorKind::Resource)?;
+  check_fd_metadata_write(
+    state.borrow::<deno_permissions::PermissionsContainer>(),
+    &file,
+    true,
+    "Deno.FsFile.prototype.chmodSync()",
+  )?;
   file.chmod_sync(mode)?;
   Ok(())
 }
@@ -541,8 +576,18 @@ pub async fn op_fs_fchmod_async(
   #[smi] rid: ResourceId,
   mode: u32,
 ) -> Result<(), FsOpsError> {
-  let file = FileResource::get_file(&state.borrow(), rid)
-    .map_err(FsOpsErrorKind::Resource)?;
+  let file = {
+    let state = state.borrow();
+    let file =
+      FileResource::get_file(&state, rid).map_err(FsOpsErrorKind::Resource)?;
+    check_fd_metadata_write(
+      state.borrow::<deno_permissions::PermissionsContainer>(),
+      &file,
+      true,
+      "Deno.FsFile.prototype.chmod()",
+    )?;
+    file
+  };
   file.chmod_async(mode).await?;
   Ok(())
 }
@@ -556,6 +601,12 @@ pub fn op_fs_fchown_sync(
 ) -> Result<(), FsOpsError> {
   let file =
     FileResource::get_file(state, rid).map_err(FsOpsErrorKind::Resource)?;
+  check_fd_metadata_write(
+    state.borrow::<deno_permissions::PermissionsContainer>(),
+    &file,
+    true,
+    "Deno.FsFile.prototype.chownSync()",
+  )?;
   file.chown_sync(uid, gid)?;
   Ok(())
 }
@@ -567,8 +618,18 @@ pub async fn op_fs_fchown_async(
   uid: Option<u32>,
   gid: Option<u32>,
 ) -> Result<(), FsOpsError> {
-  let file = FileResource::get_file(&state.borrow(), rid)
-    .map_err(FsOpsErrorKind::Resource)?;
+  let file = {
+    let state = state.borrow();
+    let file =
+      FileResource::get_file(&state, rid).map_err(FsOpsErrorKind::Resource)?;
+    check_fd_metadata_write(
+      state.borrow::<deno_permissions::PermissionsContainer>(),
+      &file,
+      true,
+      "Deno.FsFile.prototype.chown()",
+    )?;
+    file
+  };
   file.chown_async(uid, gid).await?;
   Ok(())
 }
@@ -2041,15 +2102,12 @@ pub fn op_fs_futime_sync(
 ) -> Result<(), FsOpsError> {
   let file =
     FileResource::get_file(state, rid).map_err(FsOpsErrorKind::Resource)?;
-  if let Some(path) = file.maybe_path() {
-    _ = state
-      .borrow::<deno_permissions::PermissionsContainer>()
-      .check_open(
-        Cow::Borrowed(path),
-        OpenAccessKind::WriteNoFollow,
-        Some("Deno.FsFile.prototype.utimeSync()"),
-      )?;
-  }
+  check_fd_metadata_write(
+    state.borrow::<deno_permissions::PermissionsContainer>(),
+    &file,
+    false,
+    "Deno.FsFile.prototype.utimeSync()",
+  )?;
   file.utime_sync(atime_secs, atime_nanos, mtime_secs, mtime_nanos)?;
   Ok(())
 }
@@ -2063,18 +2121,18 @@ pub async fn op_fs_futime_async(
   #[number] mtime_secs: i64,
   #[smi] mtime_nanos: u32,
 ) -> Result<(), FsOpsError> {
-  let file = FileResource::get_file(&state.borrow(), rid)
-    .map_err(FsOpsErrorKind::Resource)?;
-  if let Some(path) = file.maybe_path() {
-    _ = state
-      .borrow()
-      .borrow::<deno_permissions::PermissionsContainer>()
-      .check_open(
-        Cow::Borrowed(path),
-        OpenAccessKind::WriteNoFollow,
-        Some("Deno.FsFile.prototype.utime()"),
-      )?;
-  }
+  let file = {
+    let state = state.borrow();
+    let file =
+      FileResource::get_file(&state, rid).map_err(FsOpsErrorKind::Resource)?;
+    check_fd_metadata_write(
+      state.borrow::<deno_permissions::PermissionsContainer>(),
+      &file,
+      false,
+      "Deno.FsFile.prototype.utime()",
+    )?;
+    file
+  };
   file
     .utime_async(atime_secs, atime_nanos, mtime_secs, mtime_nanos)
     .await?;

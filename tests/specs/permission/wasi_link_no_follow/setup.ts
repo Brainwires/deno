@@ -1,0 +1,13 @@
+Deno.mkdirSync("base/a/b", { recursive: true });
+Deno.writeTextFileSync("base/a/b/prog", "packaged");
+Deno.writeTextFileSync("base/target", "kept");
+Deno.writeTextFileSync("base/target2", "kept");
+Deno.mkdirSync("base/emptydir");
+Deno.mkdirSync("outside");
+Deno.writeTextFileSync("outside/secret", "secret");
+Deno.symlinkSync("target", "base/link");
+Deno.symlinkSync("target2", "base/link2");
+Deno.symlinkSync("emptydir", "base/dirlink");
+Deno.symlinkSync("a", "base/alink");
+Deno.symlinkSync("../outside/secret", "base/out");
+console.log("setup done");

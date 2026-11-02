@@ -1,0 +1,31 @@
+{
+  "tempDir": true,
+  "tests": {
+    "deny_scope": {
+      "if": "unix",
+      "steps": [
+        {
+          "args": "run --allow-read --allow-write setup.ts",
+          "output": "setup done\n"
+        },
+        {
+          "args": "run --allow-read --allow-write=base --deny-write=base/a/b main.ts",
+          "output": "main.out"
+        }
+      ]
+    },
+    "read_only": {
+      "if": "unix",
+      "steps": [
+        {
+          "args": "run --allow-read --allow-write setup.ts",
+          "output": "setup done\n"
+        },
+        {
+          "args": "run --allow-read read_only.ts",
+          "output": "read_only.out"
+        }
+      ]
+    }
+  }
+}

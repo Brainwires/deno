@@ -1,0 +1,7 @@
+rename a parent of a denied path, other case (Latin): refused
+rename a parent of a denied path, other case (Cyrillic): refused
+remove a parent of a denied path, other case: refused
+write into the denied path, other case: refused
+still packaged: true
+write beside the denied path, other case: done
+grant in one case, write in the other: done

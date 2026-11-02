@@ -156,27 +156,24 @@ fn file_for_fd(
     .ok_or_else(ebadf)
 }
 
-/// `owner_or_mode`: a `fchmod` / `fchown` on a folder that holds a
-/// `--deny-write` path decides who can reach or replace the denied path, so a
-/// deny scope inside the folder refuses it, as for `chmod` / `chown` by path
-/// (see `deno_fs::check_metadata_write`; denext, DENEXT.md 224).
+/// The checks `Deno.FsFile`'s `chmod` / `chown` / `utime` make (see
+/// `deno_fs::check_fd_metadata_write`): write permission on the file's path,
+/// and with `owner_or_mode` (a `fchmod` / `fchown` on a folder that holds a
+/// `--deny-write` path decides who can reach or replace the denied path) the
+/// deny half of the strict check, as for `chmod` / `chown` by path (denext,
+/// DENEXT.md 224, 225).
 fn check_fd_metadata_write(
   state: &OpState,
   file: &Rc<dyn deno_io::fs::File>,
   owner_or_mode: bool,
   api_name: &'static str,
 ) -> Result<(), FsError> {
-  if let Some(path) = file.maybe_path() {
-    let permissions = state.borrow::<PermissionsContainer>();
-    permissions.check_open(
-      Cow::Borrowed(path),
-      OpenAccessKind::WriteNoFollow,
-      Some(api_name),
-    )?;
-    if owner_or_mode {
-      permissions.check_write_resolved_not_denied(path, api_name)?;
-    }
-  }
+  deno_fs::check_fd_metadata_write(
+    state.borrow::<PermissionsContainer>(),
+    file,
+    owner_or_mode,
+    api_name,
+  )?;
   Ok(())
 }
 
@@ -2679,6 +2676,17 @@ pub async fn op_node_cp_fast(
   })
 }
 
+/// The folder `path` is in. For a path of one component (`dest` in
+/// `cp("src", "dest")`) `Path::parent` is the empty path, which the
+/// permission check refused as "Empty path is not allowed": that is the
+/// current directory, `.` (denext, DENEXT.md 225).
+fn cp_parent_dir(path: &str) -> PathBuf {
+  match Path::new(path).parent() {
+    Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
+    _ => PathBuf::from("."),
+  }
+}
+
 /// Recursively check if dest parent is a subdirectory of src.
 /// It works for all file types including symlinks since it
 /// checks the src and dest inodes. It starts from the deepest
@@ -2691,23 +2699,17 @@ async fn check_parent_paths_impl(
   src_ino: u64,
   dest: &str,
 ) -> Result<(), FsError> {
-  let src_parent = Path::new(src)
-    .parent()
-    .map(Cow::Borrowed)
-    .unwrap_or_default();
+  let src_parent = cp_parent_dir(src);
   let src_parent = deno_path_util::strip_unc_prefix(
     fs.realpath_sync(&CheckedPath::unsafe_new(Cow::Borrowed(&src_parent)))
       .unwrap_or_else(|_| {
         fs.cwd()
           .map(|cwd| cwd.join(&src_parent))
-          .unwrap_or_else(|_| src_parent.into_owned())
+          .unwrap_or_else(|_| src_parent.clone())
       }),
   );
 
-  let mut current = Path::new(dest)
-    .parent()
-    .map(|p| p.to_path_buf())
-    .unwrap_or_default();
+  let mut current = cp_parent_dir(dest);
   current = deno_path_util::strip_unc_prefix(
     fs.realpath_sync(&CheckedPath::unsafe_new(Cow::Borrowed(&current)))
       .unwrap_or_else(|_| std::path::absolute(&current).unwrap_or(current)),
@@ -2728,12 +2730,11 @@ async fn check_parent_paths_impl(
       match check_cp_path(state, &current_str, OpenAccessKind::Read) {
         Ok(p) => p,
         // When read permission is ignored, the check returns NotFound.
-        // Treat it like a non-existent directory: stop walking.
-        Err(FsError::Permission(e))
-          if e.kind() == std::io::ErrorKind::NotFound =>
-        {
-          return Ok(());
-        }
+        // Treat it like a non-existent directory: stop walking. An ancestor
+        // outside the read grant (the folder above a `--allow-read=.` cwd,
+        // reached for any destination in it) can't be looked at either: it
+        // is not the source, which was readable (denext, DENEXT.md 225).
+        Err(FsError::Permission(_)) => return Ok(()),
         Err(e) => return Err(e),
       };
     let stat_result = fs.stat_async(checked_path).await;
@@ -2784,23 +2785,17 @@ fn check_parent_paths_impl_sync(
   src_ino: u64,
   dest: &str,
 ) -> Result<(), FsError> {
-  let src_parent = Path::new(src)
-    .parent()
-    .map(Cow::Borrowed)
-    .unwrap_or_default();
+  let src_parent = cp_parent_dir(src);
   let src_parent = deno_path_util::strip_unc_prefix(
     fs.realpath_sync(&CheckedPath::unsafe_new(Cow::Borrowed(&src_parent)))
       .unwrap_or_else(|_| {
         fs.cwd()
           .map(|cwd| cwd.join(&src_parent))
-          .unwrap_or_else(|_| src_parent.into_owned())
+          .unwrap_or_else(|_| src_parent.clone())
       }),
   );
 
-  let mut current = Path::new(dest)
-    .parent()
-    .map(|p| p.to_path_buf())
-    .unwrap_or_default();
+  let mut current = cp_parent_dir(dest);
   current = deno_path_util::strip_unc_prefix(
     fs.realpath_sync(&CheckedPath::unsafe_new(Cow::Borrowed(&current)))
       .unwrap_or_else(|_| std::path::absolute(&current).unwrap_or(current)),
@@ -2824,12 +2819,11 @@ fn check_parent_paths_impl_sync(
     ) {
       Ok(p) => p,
       // When read permission is ignored, the check returns NotFound.
-      // Treat it like a non-existent directory: stop walking.
-      Err(FsError::Permission(e))
-        if e.kind() == std::io::ErrorKind::NotFound =>
-      {
-        return Ok(());
-      }
+      // Treat it like a non-existent directory: stop walking. An ancestor
+      // outside the read grant (the folder above a `--allow-read=.` cwd,
+      // reached for any destination in it) can't be looked at either: it
+      // is not the source, which was readable (denext, DENEXT.md 225).
+      Err(FsError::Permission(_)) => return Ok(()),
       Err(e) => return Err(e),
     };
     match fs.stat_sync(&checked_path.as_checked_path()) {
@@ -2878,10 +2872,7 @@ async fn ensure_parent_dir_impl(
   fs: &FileSystemRc,
   dest: &str,
 ) -> Result<(), FsError> {
-  let dest_parent = Path::new(dest)
-    .parent()
-    .map(|p| p.to_path_buf())
-    .unwrap_or_default();
+  let dest_parent = cp_parent_dir(dest);
 
   let parent_str = dest_parent.to_string_lossy();
   let checked_parent = check_cp_path(state, &parent_str, OpenAccessKind::Read)?;
@@ -2919,10 +2910,7 @@ fn ensure_parent_dir_impl_sync(
   fs: &FileSystemRc,
   dest: &str,
 ) -> Result<(), FsError> {
-  let dest_parent = Path::new(dest)
-    .parent()
-    .map(|p| p.to_path_buf())
-    .unwrap_or_default();
+  let dest_parent = cp_parent_dir(dest);
 
   let parent_str = dest_parent.to_string_lossy();
   let checked_parent = check_cp_path_with_permissions(

@@ -8670,11 +8670,112 @@ where the changes are discussed.
      never matches the long canonical paths `node:wasi` checks, so every
      `path_*` op is refused there (as before this item).
 
+225. **`fix(security)`: the gaps left around item 224** (`ext/node/ops/wasi.rs`,
+     `runtime/permissions/lib.rs`, `ext/fs/ops.rs`, `ext/node/ops/fs.rs`), each
+     open on stock Deno 2.9.8 and on every `3.0.0-denext.N` through `denext.7`
+     unless said otherwise:
+     - **`node:wasi` followed the final symlink of `path_unlink_file`,
+       `path_remove_directory` and `path_rename`**, so they acted on the target
+       instead of the link: unlinking `link` → `target` removed `target` and
+       left the link dangling, renaming it moved the target, and a link pointing
+       out of the preopen couldn't be removed at all (`ENOTCAPABLE`). WASI (as
+       `unlink`, `rmdir` and `rename`) names the entry itself: the three now
+       resolve the parent and keep the final name, the permission check is on
+       the link's path (no-follow), and a link that is a parent of a
+       `--deny-write` path (`base/alink/b` through `base/alink` → `a`) gets the
+       strict check a link removal has since 224 (`EACCES`); `path_rename` keeps
+       its strict check on both paths.
+     - **`path_open` with `O_CREAT` through a dangling symlink wrote outside the
+       preopen.** A dangling link's path doesn't resolve, so the lookup fell
+       back to its folder plus its name, which is inside the preopen, and the
+       kernel then created the file where the link pointed: `base/dangling` →
+       `../outside/new` made `outside/new` under `--allow-write=base` (Deno's
+       allow scopes are checked on the path as given; only deny scopes see the
+       resolved place, which caught a link into a denied path). The missing tail
+       is now followed as `path_symlink`'s target is (224): the longest existing
+       prefix canonical, a dangling link at the end followed to where the kernel
+       would create the file, through a chain. Outside the preopen is
+       `ENOTCAPABLE` (a `path_filestat_get` through such a link too, where it
+       answered `ENOENT`); the permission check is on that place. A missing path
+       with no link in it resolves as before.
+     - **Windows 8.3 short names.** NTFS gives a long name an alias (`LONGNA~1`
+       for `longname`) that opens the same entry but compared as another string.
+       The no-follow checks (rename, remove, symlink, mkdir, lstat) resolve the
+       parent and keep the final name as given, so with
+       `--allow-write=base --deny-write=base/longname/b`,
+       `Deno.renameSync("base/LONGNA~1", …)` and
+       `Deno.removeSync("base/LONGNA~1", { recursive: true })` moved or deleted
+       the denied tree (a write into it by the alias was already refused: the
+       follow path canonicalizes, which gives long names). A grant or deny scope
+       written with an alias matched nothing written long, and the other way
+       round (the CI runner's temp dir is under `RUNNER~1`, which is what kept
+       the `node:wasi` specs of 224 off Windows). Every path the permission
+       layer compares (a query, a flag's scope, the no-follow resolution) now
+       has each existing component replaced by its long name
+       (`GetLongPathNameW`), done only when the path holds a `~` (a generated
+       alias always does; no system call otherwise). The names past the last
+       existing entry stay as given: an alias is only generated for an entry
+       that exists, so a `~` name that doesn't exist yet aliases nothing at that
+       moment (and a plain name holding `~` is its own long name). The queries
+       are normalised at every check, so a scope written long matches whenever
+       its entry comes to exist; a scope written as the alias of an entry that
+       doesn't exist yet matches that spelling only — write deny scopes with
+       long names.
+     - **Windows compared names case-insensitively for ASCII letters only.**
+       NTFS folds every letter through its `$UpCase` table, so `base/Ärger` and
+       `base/ärger` are one folder; the ASCII fold saw two, and the no-follow
+       checks let `Deno.renameSync("base/ärger", …)` move the parent of a denied
+       `base/Ärger/b` (and a grant written in one spelling didn't cover the
+       other). The Windows fold is now per character, each mapped to its
+       single-character uppercase as `$UpCase` does (a character outside the BMP
+       or with a multi-character uppercase, `ß`, stays itself; `σ` and `ς` both
+       go to `Σ`; the Kelvin sign stays apart from `k`, as on NTFS, where
+       Unicode's simple case folding would merge them); no normalization, since
+       NTFS stores names as given. macOS keeps 224's NFKD + full case mapping
+       (APFS normalizes).
+     - **`Deno.FsFile.prototype.utime` on a file opened read-only** was reported
+       as unchecked. It isn't: upstream's #30872 (Deno 2.5) checks write
+       permission on the file's path (no-follow, the partial check `Deno.utime`
+       has), so a denied file's times can't be set through a read-only
+       descriptor, nor any file's without `--allow-write`; a read-only open
+       isn't refused as such, as upstream (times need write permission on the
+       path, not a writable handle). The three descriptor ops now share one
+       check (`deno_fs::check_fd_metadata_write`, which `node:fs`'s `fchmod` /
+       `fchown` / `futimes` use too): `futime` keeps the partial check (224:
+       times touch only the entry's own metadata), and `op_fs_fchmod` /
+       `op_fs_fchown`, which had none, get the strict deny half `fchmod` /
+       `fchown` got in 224. Those two ops are registered but nothing in the
+       runtime's JavaScript calls them (`Deno.FsFile` has no `chmod` / `chown`),
+       so no user code reached the missing check.
+     - **`node:fs` `cp` / `cpSync` / `fs.promises.cp` with a destination of one
+       component** (`cp("src", "dst")`) threw `Empty path is not allowed` under
+       a scoped grant (`--allow-write=.`): `Path::parent` of `dst` is the empty
+       path, which the destination's parent check handed to the permission
+       parser (under `--allow-all` the check is skipped, which hid it). The
+       parent of a one-component path is the current directory now, in the
+       parent-folder check and in the copy-into-self check. That second check
+       walks the destination's ancestors up to the root and asked read
+       permission on each, so under `--allow-read=.` any destination in the
+       working directory (`cp("src/f", "sub/g")` on stock 2.9.8 too, and with
+       the first fix `cp("src/f", "g")`) failed on the folder above it with
+       `Requires read access`; an ancestor outside the read grant now ends the
+       walk, as one under an ignored permission already did (it can't be the
+       source, which was readable). A compatibility bug, not a permission one.
+
+     Tests: specs `permission/wasi_link_no_follow`,
+     `permission/wasi_open_dangling_link`, `permission/futime_deny` (passes
+     before this item too, as said above), `permission/windows_short_name_deny`
+     (the alias is read with `Scripting.FileSystemObject`, set with
+     `fsutil file setshortname` when the volume generates none, and when neither
+     works the spec says so and checks the long name) and
+     `permission/windows_deny_unicode_case` (Windows),
+     `node/fs_cp_relative_dest`.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
 169-174, 176, 178, 180, 182-184, 186, 187, 189-191, 193-196, 198-203, 206, 207,
-209-215, 217, 221, 222, 224) are what the prebuilt `libdenort` carries. The
+209-215, 217, 221, 222, 224, 225) are what the prebuilt `libdenort` carries. The
 CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID`
 into a packaged app's launchers) are in the branch too, but a stock CLI does not
 run them; denext's own launcher provides that environment.
