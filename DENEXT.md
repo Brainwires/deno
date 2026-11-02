@@ -8675,6 +8675,93 @@ free numbers when the branch is merged.
      `toThrow(TypeError)`, also on `node:fs`'s own errors), as this runtime
      does, since the host's objects aren't the test realm's.
 
+Item `2NN-node-test-r6` carries a placeholder number as well
+(`feat/node-test-round6`, on top of `feat/node-compat-round5`); it takes the
+next free number when the branch is merged.
+
+**2NN-node-test-r6. `feat(ext/node)`: `node --test` round 6: rerun failures,
+test tags in events, reporter failures, Node's stack frames**
+(`feat/node-test-round6`, runtime; `ext/node/polyfills/testing.ts`,
+`ext/node/polyfills/internal/test/file_runner.ts`, `libs/node_shim/lib.rs`).
+What item 901 left open, against Node 26.5.1 (`lib/internal/test_runner/`) and
+checked against Node 26.13 in a container:
+
+- **`--test-rerun-failures <file>`** (and `run()`'s `rerunFailuresFilePath`), as
+  `test.js` and `reporter/rerun.js`: the file holds one object per earlier
+  attempt, of the tests that passed, keyed
+  `<file relative to cwd>:<line>:<column>` (`:(N)` for the N-th after the first
+  at one location). A test found there is replayed: its body does not run, its
+  recorded subtests are created again with no body, it passes with its recorded
+  duration and the spec reporter adds `(passed on attempt N)`. `t.attempt` and
+  the suite context's `attempt` are the number of earlier attempts; events carry
+  `details.attempt` and `details.passed_on_attempt`. The process the tests run
+  in (no `--test`) or the runner (`--test`, `run()`) adds the attempt's passes
+  to the file once the run is done; a test file the runner started reads the
+  file and writes nothing. A file that holds `null` is Node's warning and exit
+  code 1. With `run()`, `randomize` / `randomSeed` are refused with it, as in
+  Node. The node shim takes the flag and passes it on in `NODE_OPTIONS` (a path
+  with spaces as one quoted token).
+- **Test tags in events**: `test:enqueue`, `test:dequeue`, `test:start`,
+  `test:pass`, `test:fail` and `test:complete` carry `tags`, the parent's tags
+  then the test's own (lowercased, deduplicated, frozen; `[]` for an untagged
+  test and for a file's own events), and the run-mode `t.tags` is the same
+  array. `--experimental-test-tag-filter` (shim flag, in `NODE_OPTIONS` for the
+  files) and `run()`'s `testTagFilters` now filter: a test runs when it has
+  every tag given (Node's `evaluateTagFilters`), a suite stays when a test in it
+  does, and the process given the flag warns once
+  (`ExperimentalWarning: Test tags`). An empty filter is refused by `run()`; on
+  the command line the shim's parser refuses it, but the `child_process`
+  polyfill throws that error from `spawnSync()` where Node's child exits with 9,
+  so `test-runner-tag-filter-cli.mjs` keeps one failing case and stays off.
+- **A reporter that fails exits 7**, as in Node, whose runner rethrows an error
+  that comes from a reporter in its `uncaughtException` handler (`harness.js`),
+  which makes Node's own handler fail. Here a custom reporter's stream `'error'`
+  (a throw in the reporter, or the `AbortError` of one that ends early) or a
+  reporter module that is not a reporter (`compose()`'s `ERR_INVALID_ARG_TYPE`)
+  printed Deno's uncaught error and exited 1. The error is now written as Node's
+  inspected error (with `Emitted 'error' event on Duplex instance at:` and the
+  frames for a stream's), and the process exits 7. A failing run still exits 1.
+- **Stack frames in failures**: the `spec`, `dot`, `tap` and `junit` reporters
+  (and a file's errors sent to the runner) show the runtime's own frames as
+  `node:internal/<path>` (`ext:deno_node/testing.ts:N:M` is
+  `node:internal/deno_node/testing.ts:N:M`), where Node shows its runner's
+  `node:internal/test_runner/...` frames, which Node's snapshots fold into
+  `<node-internal-frames>`; and a frame in a CommonJS module names its file by
+  path, as Node's do (an ES module's stays a `file:` URL). The error a test sees
+  keeps its stack: the reporters format it with the stack swapped for the call
+  and put back. A suite's body and hooks run with a `SuiteContext` (frames read
+  `SuiteContext.<anonymous>`, not `Object.<anonymous>`).
+- **`run()`** starts its files a microtask later, so a listener added once
+  `run()` returns sees the file's own `test:enqueue` / `test:dequeue` (they were
+  emitted during the call). With `--test-isolation=none` the files' one process
+  has no queue events of its own (`<root>`, with no `file`), as Node's run has
+  none; a test's queue events carry its own `file` there.
+- **An interrupted run** (`SIGINT`, or a reporter that emits it, as
+  `test-runner-error-reporter.js`'s `FAIL_FAST` does) no longer reports the
+  child it killed as a failure of that file, and starts no file after it.
+  `test-runner-error-reporter.js` failed 2 of 3 runs on Linux without this, on a
+  build without debug info: the killed child's `close` came before the exit.
+- **Left open**: coverage of a `.ts` file is still the transpiled source's
+  offsets over the file's lines. V8 runs the emitted code without a
+  `sourceMappingURL` (the module loader keeps the map), so neither the test
+  file's process nor the runner can map the ranges from JavaScript; it needs the
+  coverage collector (`runtime/coverage.rs`) to write each such script's source
+  map with its coverage, or an op over the loader's source mapper. Most
+  `test-output-*` snapshots still differ by behaviour, not frames (a suite whose
+  body throws doesn't cancel the tests it registered, an unhandled rejection in
+  a test isn't charged to it, `expectFailure` / `t.todo()`); the frames now fold
+  as Node's do.
+- Tests: node_compat `parallel/test-runner-reporters.js`,
+  `-test-rerun-failures.js`, `-tags-events.mjs`,
+  `-tags-experimental-warning.mjs` and `test-runner/test-output-eval-dot.mjs`,
+  `-eval-spec.mjs`, `-eval-tap.mjs` enabled (Linux; not run on macOS or Windows
+  yet). Spec `node/node_test_cli` (`reporter_error_exit_code`,
+  `reporter_setup_error_exit_code`, `tags_in_events`, `rerun_failures`,
+  `failure_stack_frames`; the rerun case's output is what Node 26 prints for the
+  same driver). Shim unit tests
+  `test_rerun_failures_rides_along_in_node_options` and
+  `test_tag_filters_ride_along_in_node_options`.
+
 ## npm supply-chain settings
 
 Items 83-86. Each `.npmrc` key also reads `npm_config_<key>` /

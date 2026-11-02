@@ -30,6 +30,7 @@ const {
   MathMax,
   ObjectAssign,
   ObjectDefineProperty,
+  ObjectFreeze,
   PromiseWithResolvers,
   RegExpPrototypeTest,
   SafeArrayIterator,
@@ -54,6 +55,8 @@ const kCancelledTypes = new SafeSet([
   "testTimeoutFailure",
 ]);
 const kBuiltinReporters = ["spec", "tap", "dot", "junit", "lcov"];
+// A file's own events carry no tags (Node's `FileTest`).
+const kNoTags = ObjectFreeze([]);
 
 function builtin(name) {
   return globalThis.process.getBuiltinModule(name);
@@ -66,7 +69,7 @@ function defaultPattern(stripTypes) {
 
 // A child's error, whatever its class, as JSON. `actual` / `expected` go along
 // as they are when JSON can carry them, else as their inspected text.
-function serializeError(err, seen = new SafeSet()) {
+function serializeError(err, seen = new SafeSet(), styleStack = undefined) {
   if (err === null || typeof err !== "object") return err;
   if (seen.has(err)) return undefined;
   seen.add(err);
@@ -84,6 +87,11 @@ function serializeError(err, seen = new SafeSet()) {
   ) {
     if (err[key] !== undefined) out[key] = err[key];
   }
+  // The child knows which of its modules are CommonJS (see the runner's
+  // `nodeStyleStack()`).
+  if (styleStack !== undefined && typeof out.stack === "string") {
+    out.stack = styleStack(out.stack);
+  }
   for (const key of new SafeArrayIterator(["actual", "expected"])) {
     if (err[key] === undefined) continue;
     try {
@@ -92,7 +100,9 @@ function serializeError(err, seen = new SafeSet()) {
       out[key] = builtin("node:util").inspect(err[key]);
     }
   }
-  if (err.cause !== undefined) out.cause = serializeError(err.cause, seen);
+  if (err.cause !== undefined) {
+    out.cause = serializeError(err.cause, seen, styleStack);
+  }
   return out;
 }
 
@@ -239,6 +249,9 @@ function startRun(options, report) {
   const started = DateNow();
   const running = new SafeSet();
   const children = new SafeSet();
+  // Set once the run is interrupted: a child killed then is not a failure of
+  // its file, and no file starts after it.
+  let interrupted = false;
 
   function count(type, data) {
     if (data.nesting === 0) {
@@ -318,6 +331,23 @@ function startRun(options, report) {
     for (const value of new SafeArrayIterator(options.testSkipPatterns ?? [])) {
       ArrayPrototypePush(extraOptions, `--test-skip-pattern=${value}`);
     }
+    for (const value of new SafeArrayIterator(options.testTagFilters ?? [])) {
+      ArrayPrototypePush(
+        extraOptions,
+        RegExpPrototypeTest(new SafeRegExp(/\s/), value)
+          ? `"--experimental-test-tag-filter=${value}"`
+          : `--experimental-test-tag-filter=${value}`,
+      );
+    }
+    if (options.rerunFailuresFilePath) {
+      const value = options.rerunFailuresFilePath;
+      ArrayPrototypePush(
+        extraOptions,
+        RegExpPrototypeTest(new SafeRegExp(/\s/), value)
+          ? `"--test-rerun-failures=${value}"`
+          : `--test-rerun-failures=${value}`,
+      );
+    }
     if (options.randomSeed !== undefined && options.randomSeed !== null) {
       ArrayPrototypePush(
         extraOptions,
@@ -348,7 +378,8 @@ function startRun(options, report) {
         __proto__: null,
         name: data.name,
         nesting: data.nesting,
-        file: absoluteFile,
+        tags: data.tags ?? kNoTags,
+        file: absoluteFile ?? data.file,
       });
     };
     // A test is reported as started once something in it is done (Node's
@@ -364,9 +395,13 @@ function startRun(options, report) {
       __proto__: null,
       name: isSyntheticName ? "<root>" : file,
       nesting: 0,
+      tags: kNoTags,
     };
-    pushQueue("test:enqueue", fileEntry);
-    pushQueue("test:dequeue", fileEntry);
+    // `--test-isolation=none` has no test of its own for the files' process.
+    if (!isSyntheticName) {
+      pushQueue("test:enqueue", fileEntry);
+      pushQueue("test:dequeue", fileEntry);
+    }
     const parser = createFrameParser((event) => {
       const { type, data } = event;
       if (type === "test:summary") {
@@ -431,6 +466,11 @@ function startRun(options, report) {
     child.on("close", (code, signal) => {
       children.delete(child);
       running.delete(file);
+      if (interrupted) {
+        slot.done = true;
+        resolve();
+        return;
+      }
       parser.end();
       releaseStarts();
       if (stderrTail.length > 0) {
@@ -466,11 +506,18 @@ function startRun(options, report) {
           file: absoluteFile,
         };
         const name = isSyntheticName ? "<root>" : file;
-        push("test:start", { __proto__: null, nesting: 0, name, ...loc });
+        push("test:start", {
+          __proto__: null,
+          nesting: 0,
+          name,
+          tags: kNoTags,
+          ...loc,
+        });
         push(error === undefined ? "test:pass" : "test:fail", {
           __proto__: null,
           nesting: 0,
           name,
+          tags: kNoTags,
           ...loc,
           details: {
             __proto__: null,
@@ -480,7 +527,7 @@ function startRun(options, report) {
           },
         });
       }
-      pushQueue("test:complete", fileEntry);
+      if (!isSyntheticName) pushQueue("test:complete", fileEntry);
       if (code !== 0 || signal !== null) counters.exitFailed = true;
       slot.done = true;
       drain();
@@ -504,7 +551,7 @@ function startRun(options, report) {
       ArrayPrototypePush(
         workers,
         (async () => {
-          while (next < files.length) {
+          while (next < files.length && !interrupted) {
             const index = next++;
             await runFile(files[index], index, worker);
           }
@@ -520,6 +567,7 @@ function startRun(options, report) {
   }
 
   function interrupt() {
+    interrupted = true;
     for (const child of new SafeArrayIterator(ArrayFrom(children))) {
       try {
         child.kill("SIGKILL");

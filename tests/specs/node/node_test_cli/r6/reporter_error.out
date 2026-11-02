@@ -1,0 +1,6 @@
+Going to throw an error
+Error: Reporting error
+    at reporter ([WILDCARD]throwing_reporter.mjs:3:9)
+[WILDCARD]
+Emitted 'error' event on Duplex instance at:
+[WILDCARD]

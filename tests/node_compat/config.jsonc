@@ -5624,8 +5624,28 @@
     "parallel/test-runner-option-validation.js": {},
     "parallel/test-runner-plan.mjs": {},
     "parallel/test-runner-randomize-first-draw.mjs": {},
+    "parallel/test-runner-reporters.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 runs, debug build) since node:test round 6; not run on macOS or Windows yet"
+    },
     "parallel/test-runner-root-duration.js": {},
+    "parallel/test-runner-tags-events.mjs": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 runs, debug build) since node:test round 6; not run on macOS or Windows yet"
+    },
+    "parallel/test-runner-tags-experimental-warning.mjs": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 runs, debug build) since node:test round 6; not run on macOS or Windows yet"
+    },
     "parallel/test-runner-test-id.js": {},
+    "parallel/test-runner-test-rerun-failures.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 runs, debug build) since node:test round 6; not run on macOS or Windows yet"
+    },
     "parallel/test-runner-todo-suite-hook-failure.js": {},
     "parallel/test-runner-worker-id.js": {
       "darwin": false,
@@ -5914,6 +5934,21 @@
       "linux": false,
       "darwin": false,
       "reason": "Expected values to be strictly equal"
+    },
+    "test-runner/test-output-eval-dot.mjs": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 runs, debug build) since node:test round 6; not run on macOS or Windows yet"
+    },
+    "test-runner/test-output-eval-spec.mjs": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 runs, debug build) since node:test round 6; not run on macOS or Windows yet"
+    },
+    "test-runner/test-output-eval-tap.mjs": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 runs, debug build) since node:test round 6; not run on macOS or Windows yet"
     },
     "test-runner/test-output-force-exit.mjs": {
       "darwin": false,

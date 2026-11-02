@@ -226,6 +226,10 @@ pub struct EnvironmentOptions {
   pub test_reporter: Vec<String>,
   pub test_reporter_destination: Vec<String>,
   pub test_global_setup_path: String,
+  /// `--test-rerun-failures` (denext): the file of earlier attempts.
+  pub test_rerun_failures_path: String,
+  /// `--experimental-test-tag-filter` (denext): the tags a test must have.
+  pub test_tag_filter: Vec<String>,
   pub test_only: bool,
   /// `--test-randomize` (denext).
   pub test_randomize: bool,
@@ -367,6 +371,8 @@ impl Default for EnvironmentOptions {
       test_reporter: Vec::new(),
       test_reporter_destination: Vec::new(),
       test_global_setup_path: String::new(),
+      test_rerun_failures_path: String::new(),
+      test_tag_filter: Vec::new(),
       test_only: false,
       test_randomize: false,
       test_random_seed: None,
@@ -1568,6 +1574,20 @@ impl OptionsParser {
       false,
     );
     self.add_option(
+      "--experimental-test-tag-filter",
+      "run tests that have every given tag",
+      OptionType::StringList,
+      OptionEnvvarSettings::AllowedInEnvvar,
+      false,
+    );
+    self.add_option(
+      "--test-rerun-failures",
+      "specifies the path to the rerun state file",
+      OptionType::String,
+      OptionEnvvarSettings::AllowedInEnvvar,
+      false,
+    );
+    self.add_option(
       "--test-udp-no-try-send",
       "",
       OptionType::Boolean,
@@ -2698,6 +2718,9 @@ impl OptionsParser {
         options.per_isolate.per_env.test_global_setup_path = value
       }
       "--test-shard" => options.per_isolate.per_env.test_shard = value,
+      "--test-rerun-failures" => {
+        options.per_isolate.per_env.test_rerun_failures_path = value
+      }
       "--trace-require-module" => {
         options.per_isolate.per_env.trace_require_module = value
       }
@@ -2763,6 +2786,9 @@ impl OptionsParser {
       }
       "--test-reporter" => {
         options.per_isolate.per_env.test_reporter.push(value)
+      }
+      "--experimental-test-tag-filter" => {
+        options.per_isolate.per_env.test_tag_filter.push(value)
       }
       "--test-reporter-destination" => options
         .per_isolate
@@ -3885,6 +3911,24 @@ fn add_test_node_options(
     node_options
       .push(format!("--test-timeout={}", env_opts.test_runner_timeout));
   }
+  // denext: `--experimental-test-tag-filter` and `--test-rerun-failures`,
+  // quoted as `NODE_OPTIONS` quotes a value with spaces.
+  let mut push_value = |flag: String| {
+    if flag.contains(char::is_whitespace) {
+      node_options.push(format!("\"{flag}\""));
+    } else {
+      node_options.push(flag);
+    }
+  };
+  for tag in &env_opts.test_tag_filter {
+    push_value(format!("--experimental-test-tag-filter={tag}"));
+  }
+  if !env_opts.test_rerun_failures_path.is_empty() {
+    push_value(format!(
+      "--test-rerun-failures={}",
+      env_opts.test_rerun_failures_path
+    ));
+  }
 }
 
 /// The module `node --test` runs: `node:test`'s runner, given what it can't
@@ -3926,6 +3970,7 @@ fn test_cli_source(
     "only": env_opts.test_only,
     "stripTypes": env_opts.experimental_strip_types,
     "globalSetup": env_opts.test_global_setup_path,
+    "rerunFailuresFilePath": env_opts.test_rerun_failures_path,
     "randomize": env_opts.test_randomize,
     "randomSeed": env_opts.test_random_seed,
     "coverage": env_opts.test_runner_coverage,
@@ -5914,6 +5959,54 @@ mod tests {
     assert_eq!(
       result.node_options,
       svec!["--test-randomize", "--test-random-seed=0"]
+    );
+  }
+
+  #[test]
+  fn test_tag_filters_ride_along_in_node_options() {
+    let parsed_args = parse_args(svec![
+      "--test",
+      "--experimental-test-tag-filter=db",
+      "--experimental-test-tag-filter",
+      "integration",
+      "main.js"
+    ])
+    .unwrap();
+    let options = TranslateOptions::for_child_process();
+    let result = translate_to_deno_args(parsed_args, &options);
+    assert_eq!(
+      result.node_options,
+      svec![
+        "--experimental-test-tag-filter=db",
+        "--experimental-test-tag-filter=integration"
+      ]
+    );
+  }
+
+  #[test]
+  fn test_rerun_failures_rides_along_in_node_options() {
+    let parsed_args =
+      parse_args(svec!["--test-rerun-failures", "state.json", "main.js"])
+        .unwrap();
+    let options = TranslateOptions::for_child_process();
+    let result = translate_to_deno_args(parsed_args, &options);
+    assert_eq!(
+      result.node_options,
+      svec!["--test-rerun-failures=state.json"]
+    );
+
+    // A path with a space is one quoted `NODE_OPTIONS` token.
+    let parsed_args =
+      parse_args(svec!["--test-rerun-failures=my state.json", "main.js"])
+        .unwrap();
+    let result = translate_to_deno_args(parsed_args, &options);
+    assert_eq!(
+      result.node_options,
+      svec!["\"--test-rerun-failures=my state.json\""]
+    );
+    assert_eq!(
+      parse_node_options_env_var(&result.node_options.join(" ")).unwrap(),
+      svec!["--test-rerun-failures=my state.json"]
     );
   }
 

@@ -85,6 +85,40 @@
       "args": "test -A math.test.js",
       "output": "deno_test_deno.out"
     },
+    // A reporter that fails ends the run with exit code 7, as in Node (the
+    // runner's uncaught exception handler rethrows a reporter's error).
+    "reporter_error_exit_code": {
+      "cwd": "r6",
+      "args": "run -A ../node.mjs --test --test-reporter=./throwing_reporter.mjs test/pass.js",
+      "output": "r6/reporter_error.out",
+      "exitCode": 7
+    },
+    "reporter_setup_error_exit_code": {
+      "cwd": "r6",
+      "args": "run -A ../node.mjs --test --test-reporter=./no_reporter.mjs test/pass.js",
+      "output": "r6/reporter_setup_error.out",
+      "exitCode": 7
+    },
+    // Test tags on the events of each test (its parents' then its own), and
+    // `testTagFilters` keeping the tests that have every tag given.
+    "tags_in_events": {
+      "cwd": "r6",
+      "args": "run -A tags_events.mjs",
+      "output": "r6/tags.out"
+    },
+    // `--test-rerun-failures`: what passed in an earlier attempt is replayed,
+    // and each attempt's passes are added to the file.
+    "rerun_failures": {
+      "cwd": "r6",
+      "args": "run -A rerun_driver.mjs",
+      "output": "r6/rerun.out"
+    },
+    // A failure's stack: `node:internal/` frames and a CommonJS file's path.
+    "failure_stack_frames": {
+      "cwd": "r6",
+      "args": "run -A stack_driver.mjs",
+      "output": "r6/stack.out"
+    },
     "loader_in_node_options": {
       "cwd": "project",
       "args": "run -A loader_main.mjs",

@@ -23,6 +23,7 @@ const {
   Error,
   ErrorPrototype,
   FunctionPrototypeCall,
+  JSONParse,
   JSONStringify,
   MapPrototypeClear,
   MapPrototypeDelete,
@@ -38,6 +39,7 @@ const {
   NumberPrototypeToFixed,
   ObjectDefineProperty,
   ObjectEntries,
+  ObjectFreeze,
   ObjectKeys,
   ObjectPrototypeHasOwnProperty,
   ObjectGetOwnPropertyDescriptor,
@@ -819,8 +821,27 @@ function run(options) {
 }
 
 // `run()` without `watch`: the files, each in its process, as an event stream.
-function runTestFiles(options) {
+function runTestFiles(options, testTagFilters) {
   validateRunOptions(options);
+  if (testTagFilters !== undefined) {
+    for (let i = 0; i < testTagFilters.length; i++) {
+      if (testTagFilters[i] === "") {
+        throw new ERR_INVALID_ARG_VALUE(
+          `options.testTagFilters[${i}]`,
+          testTagFilters[i],
+          "must not be empty",
+        );
+      }
+    }
+    options = {
+      __proto__: null,
+      ...options,
+      testTagFilters: ArrayPrototypeMap(
+        testTagFilters,
+        (filter) => StringPrototypeToLowerCase(filter),
+      ),
+    };
+  }
   const process = lazyProcess().default;
   const Readable = getReadable();
   const stream = new Readable({
@@ -848,8 +869,10 @@ function runTestFiles(options) {
     // deno-lint-ignore deno-internal/prefer-primordials -- a Node Readable
     stream.push(null);
   };
-  // A test's `setup` subscribes before the first event.
+  // A test's `setup` subscribes before the first event, and what subscribes
+  // once `run()` returns sees every event, as Node's run starts later.
   const start = async () => {
+    await PromiseResolve();
     if (options.setup) await options.setup(stream);
     await executeTestFiles(options, report);
   };
@@ -882,12 +905,23 @@ function validateRunOptions(options) {
     argv = [],
     execArgv = [],
     randomize,
+    rerunFailuresFilePath,
   } = options;
   if (files != null) validateArray(files, "options.files");
   if (forceExit != null) validateBoolean(forceExit, "options.forceExit");
   if (only != null) validateBoolean(only, "options.only");
   if (globPatterns != null) validateArray(globPatterns, "options.globPatterns");
   if (randomize != null) validateBoolean(randomize, "options.randomize");
+  if (rerunFailuresFilePath != null) {
+    validateString(rerunFailuresFilePath, "options.rerunFailuresFilePath");
+    if (randomize === true || options.randomSeed != null) {
+      throw new ERR_INVALID_ARG_VALUE(
+        randomize === true ? "options.randomize" : "options.randomSeed",
+        randomize === true ? randomize : options.randomSeed,
+        "is not supported with rerun failures mode",
+      );
+    }
+  }
   if (cwd !== undefined) validateString(cwd, "options.cwd");
   if (globPatterns?.length > 0 && files?.length > 0) {
     throw new ERR_INVALID_ARG_VALUE(
@@ -932,11 +966,32 @@ function patternsAsStrings(patterns) {
 
 // What `node --test` and `run()` share. `report(type, data)` takes each event;
 // resolves with the counters and whether the run passed.
-async function executeTestFiles(options, report) {
+async function executeTestFiles(options, outerReport) {
   const runner = getFileRunner();
   const process = lazyProcess().default;
   const path = process.getBuiltinModule("node:path");
   const cwd = options.cwd ?? process.cwd();
+  // `--test-rerun-failures`: the files' children replay what passed before,
+  // and this process records the attempt from their events.
+  let report = outerReport;
+  let rerunRecorder = null;
+  let rerunInvalid = false;
+  if (options.rerunFailuresFilePath) {
+    const previousRuns = readPreviousRuns(options.rerunFailuresFilePath);
+    if (previousRuns === null) {
+      rerunInvalid = true;
+    } else {
+      rerunRecorder = createRerunRecorder(
+        previousRuns,
+        options.rerunFailuresFilePath,
+        cwd,
+      );
+      report = (type, data) => {
+        rerunRecorder.event(type, data);
+        outerReport(type, data);
+      };
+    }
+  }
   const isolation = options.isolation ?? "process";
   let files = options.files ?? runner.createTestFileList(
     options.globPatterns,
@@ -1001,6 +1056,10 @@ async function executeTestFiles(options, report) {
     silentFile: options.silentFile,
     testNamePatterns: patternsAsStrings(options.testNamePatterns),
     testSkipPatterns: patternsAsStrings(options.testSkipPatterns),
+    testTagFilters: options.testTagFilters,
+    rerunFailuresFilePath: rerunRecorder === null
+      ? undefined
+      : options.rerunFailuresFilePath,
     maxConcurrency: runner.maxConcurrencyOf(options.concurrency, isolation),
   }, report);
   options.onStart?.(fileRun);
@@ -1065,6 +1124,15 @@ async function executeTestFiles(options, report) {
     } catch { /* left behind */ }
   }
   const { counters } = result;
+  if (rerunInvalid) {
+    counters.exitFailed = true;
+    report("test:diagnostic", {
+      __proto__: null,
+      nesting: 0,
+      message: rerunInvalidFileWarning(options.rerunFailuresFilePath),
+      level: "warn",
+    });
+  }
   report("test:plan", {
     __proto__: null,
     nesting: 0,
@@ -1091,6 +1159,7 @@ async function executeTestFiles(options, report) {
     });
   }
   report("test:summary", runner.summaryData(result));
+  rerunRecorder?.write();
   return result;
 }
 
@@ -1129,6 +1198,7 @@ function createBridge(kind, sink) {
           error: data.details?.error,
           isSuite: data.details?.type === "suite",
           durationMs: data.details?.duration_ms ?? 0,
+          passedAttempt: data.details?.passed_on_attempt,
         });
         break;
       case "test:diagnostic":
@@ -1179,6 +1249,7 @@ function createBridge(kind, sink) {
 async function runTestCli(config) {
   const runner = getFileRunner();
   const process = lazyProcess().default;
+  warnOfTagFilters();
   const cwd = process.cwd();
   const patterns = ArrayPrototypeSlice(process.argv, 2);
   const reporters = config.reporters ?? [];
@@ -1230,10 +1301,13 @@ async function runTestCli(config) {
       ArrayPrototypePush(sinks, createBridge(kinds[i], sink));
       continue;
     }
-    ArrayPrototypePush(
-      sinks,
-      await createStreamSink(kinds[i], destination, cwd),
-    );
+    let streamSink;
+    try {
+      streamSink = await createStreamSink(kinds[i], destination, cwd);
+    } catch (err) {
+      reporterFailed(err);
+    }
+    ArrayPrototypePush(sinks, streamSink);
   }
   const report = (type, data) => {
     for (const dispatch of new SafeArrayIterator(sinks)) dispatch(type, data);
@@ -1271,6 +1345,7 @@ async function runTestCli(config) {
     stripTypes: config.stripTypes,
     execArgv: config.execArgv,
     globalSetupPath: config.globalSetup,
+    rerunFailuresFilePath: config.rerunFailuresFilePath ?? undefined,
     randomize: config.randomize,
     randomSeed: config.randomSeed,
     coverage: config.coverage === true,
@@ -1304,6 +1379,36 @@ async function runTestCli(config) {
   if (config.forceExit === true) process.exit();
 }
 
+// A reporter that fails (its setup, or its stream's 'error') ends the run with
+// exit code 7, as in Node: the runner's uncaught exception handler rethrows an
+// error that comes from a reporter, so Node's own handler fails. With
+// `emitter` (the reporter's stream emitted it), the message ends as Node's
+// unhandled 'error' event does.
+function reporterFailed(err, emitter) {
+  let text;
+  try {
+    text = lazyInspect()(err);
+  } catch {
+    text = String(err);
+  }
+  if (emitter !== undefined) {
+    // `compose()`'s stream, a Duplex in Node (its prototype chain here names
+    // it Readable).
+    const name = "Duplex";
+    const frames = StringPrototypeSplit(new Error().stack ?? "", "\n");
+    text += `\nEmitted 'error' event on ${name} instance at:\n${
+      ArrayPrototypeJoin(ArrayPrototypeSlice(frames, 2), "\n")
+    }`;
+  }
+  const bytes = new TextEncoder().encode(`${text}\n`);
+  const stderr = globalThis.Deno.stderr;
+  let at = 0;
+  while (at < bytes.length) {
+    at += stderr.writeSync(TypedArrayPrototypeSubarray(bytes, at));
+  }
+  lazyProcess().default.exit(7);
+}
+
 // A custom reporter (a generator function or a stream, as Node's
 // `lib/internal/test_runner/utils.js` getReportersMap) or `lcov`.
 async function createStreamSink(name, destination, cwd) {
@@ -1329,6 +1434,7 @@ async function createStreamSink(name, destination, cwd) {
     read() {},
   });
   const composed = source.compose(reporter);
+  composed.on("error", (err) => reporterFailed(err, composed));
   composed.pipe(destination);
   return (type, data) => {
     if (type === "end") {
@@ -1722,6 +1828,83 @@ function lazyFileURLToPath() {
 
 const kLineBreak = new SafeRegExp(/\r?\n/);
 
+// A failure's stack as Node's runner shows it: the runtime's own frames
+// (`ext:`) are internal ones, `node:internal/...` as Node's are, and a frame
+// in a CommonJS module names its file by path, as Node's do (an ES module's
+// stays a `file:` URL). Applied to what the reporters print, not to the
+// error the test sees.
+const kExtFrameRegExp = new SafeRegExp(/\bext:([\w./-]+)/g);
+const kFileUrlFrameRegExp = new SafeRegExp(
+  /\bfile:\/\/(?:\/[A-Za-z]:)?[^\s():]+/g,
+);
+function nodeStyleStack(stack) {
+  if (typeof stack !== "string") return stack;
+  let cache;
+  try {
+    cache = lazyProcess().default.getBuiltinModule("node:module")._cache;
+  } catch { /* no CommonJS modules */ }
+  const lines = StringPrototypeSplit(stack, "\n");
+  for (let i = 1; i < lines.length; i++) {
+    let line = lines[i];
+    if (!RegExpPrototypeTest(new SafeRegExp(/^\s*at\s/), line)) continue;
+    line = StringPrototypeReplaceAll(
+      line,
+      kExtFrameRegExp,
+      (_, path) => `node:internal/${path}`,
+    );
+    if (cache !== undefined) {
+      line = StringPrototypeReplaceAll(line, kFileUrlFrameRegExp, (url) => {
+        let path;
+        try {
+          path = lazyFileURLToPath()(url);
+        } catch {
+          return url;
+        }
+        return cache[path] !== undefined ? path : url;
+      });
+    }
+    lines[i] = line;
+  }
+  return ArrayPrototypeJoin(lines, "\n");
+}
+
+// `fn()` with the error (and its causes) showing `nodeStyleStack()` stacks.
+function withNodeStyleStacks(error, fn) {
+  const restore = [];
+  let err = error;
+  for (let depth = 0; depth < 8; depth++) {
+    if (
+      err === null || typeof err !== "object" ||
+      typeof err.stack !== "string"
+    ) {
+      break;
+    }
+    const own = ObjectGetOwnPropertyDescriptor(err, "stack");
+    const styled = nodeStyleStack(err.stack);
+    if (styled !== err.stack) {
+      try {
+        ObjectDefineProperty(err, "stack", {
+          __proto__: null,
+          value: styled,
+          writable: true,
+          configurable: true,
+          enumerable: own?.enumerable ?? false,
+        });
+        ArrayPrototypePush(restore, { err, own });
+      } catch { /* a frozen error keeps its stack */ }
+    }
+    err = err.cause;
+  }
+  try {
+    return fn();
+  } finally {
+    for (const { err, own } of new SafeArrayIterator(restore)) {
+      if (own !== undefined) ObjectDefineProperty(err, "stack", own);
+      else delete err.stack;
+    }
+  }
+}
+
 // Node's `jsToYaml` (reporter/tap.js) for one test's details.
 function tapYamlValue(indent, name, value, seen) {
   if (value === undefined) return "";
@@ -1799,7 +1982,7 @@ function tapYamlValue(indent, name, value, seen) {
     }
     if (typeof errStack === "string") {
       const frames = [];
-      const lines = StringPrototypeSplit(errStack, kLineBreak);
+      const lines = StringPrototypeSplit(nodeStyleStack(errStack), kLineBreak);
       for (let i = 0; i < lines.length; i++) {
         const frame = lines[i];
         const processed = StringPrototypeReplace(
@@ -1963,7 +2146,10 @@ function formatTestReport(colors, failed, entry, result, showError, indent) {
   const duration = result.durationMs
     ? ` ${colors.gray}(${result.durationMs}ms)${colors.white}`
     : "";
-  let title = `${entry.name}${duration}`;
+  const replayed = result.passedAttempt !== undefined
+    ? ` ${colors.gray}(passed on attempt ${result.passedAttempt})${colors.white}`
+    : "";
+  let title = `${entry.name}${duration}${replayed}`;
   if (skip) {
     title += ` # ${typeof skip === "string" && skip.length ? skip : "SKIP"}`;
     color = colors.gray;
@@ -1986,7 +2172,10 @@ function formatTestReport(colors, failed, entry, result, showError, indent) {
       : error;
     const text = ArrayPrototypeJoin(
       StringPrototypeSplit(
-        lazyInspect()(shown, { breakLength: Infinity }),
+        withNodeStyleStacks(
+          shown,
+          () => lazyInspect()(shown, { breakLength: Infinity }),
+        ),
         kLineBreak,
       ),
       `\n${indent}  `,
@@ -2330,7 +2519,11 @@ class JunitReporter {
           message: StringPrototypeTrim(message),
         },
         children: [
-          lazyInspect()(error, { colors: false, breakLength: Infinity }),
+          withNodeStyleStacks(
+            error,
+            () =>
+              lazyInspect()(error, { colors: false, breakLength: Infinity }),
+          ),
         ],
       });
       node.attrs.failure = message;
@@ -2388,6 +2581,7 @@ class ChildEventReporter {
       __proto__: null,
       name: entry.name,
       nesting: depth,
+      tags: entry.tags ?? kNoTags,
       file: entry.loc?.file,
       line: entry.loc === undefined ? undefined : +entry.loc.line,
       column: entry.loc === undefined ? undefined : +entry.loc.column,
@@ -2405,6 +2599,7 @@ class ChildEventReporter {
       __proto__: null,
       name: entry.name,
       nesting: depth,
+      tags: entry.tags ?? kNoTags,
       testNumber: n,
       file: entry.loc?.file,
       line: entry.loc === undefined ? undefined : +entry.loc.line,
@@ -2417,7 +2612,9 @@ class ChildEventReporter {
         type: result.isSuite ? "suite" : "test",
         error: result.error === undefined
           ? undefined
-          : serializeError(result.error),
+          : serializeError(result.error, undefined, nodeStyleStack),
+        attempt: result.attempt,
+        passed_on_attempt: result.passedAttempt,
       },
     });
   }
@@ -2539,15 +2736,38 @@ class TestContext {
   #dequeuing = null;
   #reportOrder = 0;
 
-  constructor(name, depth, parentChildren, ancestors) {
+  #tags;
+
+  #attempt;
+
+  constructor(
+    name,
+    depth,
+    parentChildren,
+    ancestors,
+    tags = kNoTags,
+    attempt = undefined,
+  ) {
     this.#name = name;
     this.#depth = depth;
     this.#parentChildren = parentChildren;
     this.#ancestors = ancestors;
+    this.#tags = tags;
+    this.#attempt = attempt;
+  }
+
+  // Node's: the earlier attempts of `--test-rerun-failures` (0 without it).
+  get attempt() {
+    return this.#attempt ?? 0;
   }
 
   get name() {
     return this.#name;
+  }
+
+  // Node's: the enclosing tests' and suites' tags, then this test's own.
+  get tags() {
+    return this.#tags;
   }
 
   // Node's: the names of the enclosing suites and tests, then this one's.
@@ -2628,8 +2848,20 @@ class TestContext {
     if (this.#runOnly && !prepared.options.only) {
       return PromiseResolve();
     }
-    this.#subtestCount++;
+    const tags = effectiveTags(this.#tags, prepared.options.tags);
+    if (!passesTagFilters(tags)) return PromiseResolve();
     const entry = newRunEntry(prepared, "test");
+    entry.tags = tags;
+    return this.#addSubtest(entry);
+  }
+
+  // A replayed test's recorded subtest (see `applyRerunState`).
+  _replay(child) {
+    return this.#addSubtest(replayedChildEntry(child));
+  }
+
+  #addSubtest(entry) {
+    this.#subtestCount++;
     entry.childNumber = this.#subtestCount;
     if (this.#parentChildren) {
       ArrayPrototypePush(this.#parentChildren, entry);
@@ -2739,8 +2971,259 @@ class TestContext {
   }
 }
 
-function newRunEntry(prepared, kind) {
+const kNoTags = ObjectFreeze([]);
+
+// `--experimental-test-tag-filter` (Node 26, `tag_filter.js`): literal tags,
+// lowercased; a test runs when it has every one. Read from NODE_OPTIONS, where
+// the node shim and the file runner put them. Null when none is given.
+let tagFiltersCache;
+function getTagFilters() {
+  if (tagFiltersCache !== undefined) return tagFiltersCache;
+  tagFiltersCache = null;
+  let nodeOptions = "";
+  try {
+    nodeOptions = globalThis.Deno?.env?.get("NODE_OPTIONS") || "";
+  } catch { /* permission denied */ }
+  const re = new SafeRegExp(
+    /(?:^|\s)(?:"--experimental-test-tag-filter=([^"]*)"|--experimental-test-tag-filter(?:=|\s+)(\S+))/g,
+  );
+  const filters = [];
+  let m;
+  while ((m = RegExpPrototypeExec(re, nodeOptions)) !== null) {
+    const value = m[1] ?? m[2];
+    if (value.length > 0) {
+      ArrayPrototypePush(filters, StringPrototypeToLowerCase(value));
+    }
+  }
+  if (filters.length > 0) tagFiltersCache = filters;
+  return tagFiltersCache;
+}
+
+// The process given `--experimental-test-tag-filter` warns once, as Node's
+// does; a test file the runner started leaves it to the runner.
+function warnOfTagFilters() {
+  if (
+    getTagFilters() !== null && !tagsWarningEmitted && !isChildOfFileRunner()
+  ) {
+    tagsWarningEmitted = true;
+    emitExperimentalWarning("Test tags");
+  }
+}
+
+// Node's `evaluateTagFilters()`.
+function passesTagFilters(tags) {
+  const filters = getTagFilters();
+  if (filters === null) return true;
+  for (const filter of new SafeArrayIterator(filters)) {
+    if (!ArrayPrototypeIncludes(tags, filter)) return false;
+  }
+  return true;
+}
+
+// `--test-rerun-failures <path>` (Node 26, `lib/internal/test_runner/test.js`
+// and `reporter/rerun.js`): the file holds one object per earlier attempt,
+// keyed by `<file relative to cwd>:<line>:<column>` (and `:(N)` for the N-th
+// test after the first at one location), of the tests that passed. A test
+// that passed before is replayed: its body does not run, its recorded
+// subtests are created again with no body, and it passes with the recorded
+// duration. The process that ran the tests (with `--test` or `run()`, the
+// runner) adds the attempt's passes to the file once the run is done.
+let rerunPathCache;
+function getRerunFailuresPath() {
+  if (rerunPathCache !== undefined) return rerunPathCache;
+  rerunPathCache = null;
+  let nodeOptions = "";
+  try {
+    nodeOptions = globalThis.Deno?.env?.get("NODE_OPTIONS") || "";
+  } catch { /* permission denied */ }
+  const m = RegExpPrototypeExec(
+    new SafeRegExp(
+      /(?:^|\s)(?:"--test-rerun-failures=([^"]*)"|--test-rerun-failures(?:=|\s+)(\S+))/,
+    ),
+    nodeOptions,
+  );
+  if (m !== null) rerunPathCache = m[1] ?? m[2];
+  return rerunPathCache;
+}
+
+// Node's `parsePreviousRuns()`: a missing file is no earlier attempt.
+function readPreviousRuns(path) {
+  const fs = lazyProcess().default.getBuiltinModule("node:fs");
+  let data;
+  try {
+    data = fs.readFileSync(path, "utf8");
+  } catch (err) {
+    if (err?.code !== "ENOENT") throw err;
+    data = "[]";
+  }
+  return JSONParse(data);
+}
+
+let rerunState;
+function getRerunState() {
+  if (rerunState !== undefined) return rerunState;
+  rerunState = null;
+  const path = getRerunFailuresPath();
+  if (path === null) return null;
+  const previousRuns = readPreviousRuns(path);
+  rerunState = {
+    __proto__: null,
+    path,
+    previousRuns,
+    disambiguator: new SafeMap(),
+    // A test file the runner started reports to it, which records the run.
+    recorder: previousRuns === null || isChildOfFileRunner()
+      ? null
+      : createRerunRecorder(previousRuns, path, lazyProcess().default.cwd()),
+  };
+  if (previousRuns === null) {
+    rerunInvalidFile = true;
+  }
+  return rerunState;
+}
+let rerunInvalidFile = false;
+function rerunInvalidFileWarning(path) {
+  return `Warning: The rerun failures file at ${path} is not a valid rerun ` +
+    "file. The test runner will not be able to rerun failed tests.";
+}
+
+// A test's place in the earlier attempts (Node's `Test` constructor): its
+// attempt number, and, when it passed before, what replays it.
+function applyRerunState(entry) {
+  const state = getRerunState();
+  if (state === null || state.previousRuns === null || !entry.loc) return;
+  const path = lazyProcess().default.getBuiltinModule("node:path");
+  const base = `${
+    path.relative(lazyProcess().default.cwd(), entry.loc.file)
+  }:${entry.loc.line}:${entry.loc.column}`;
+  let id = base;
+  const seen = MapPrototypeGet(state.disambiguator, base);
+  if (seen !== undefined) {
+    id += `:(${seen})`;
+    MapPrototypeSet(state.disambiguator, base, seen + 1);
+  } else {
+    MapPrototypeSet(state.disambiguator, base, 1);
+  }
+  entry.attempt = state.previousRuns.length;
+  const previous = state.previousRuns[entry.attempt - 1]?.[id];
+  if (previous !== null && previous !== undefined) {
+    entry.passedAttempt = previous.passed_on_attempt;
+    entry.replayedDuration = previous.duration_ms;
+    entry.replayChildren = previous.children ?? [];
+  }
+}
+
+// Node's `reportReruns()`: the passes of this attempt, from the run's events,
+// appended to the file once the run is done.
+function createRerunRecorder(previousRuns, filePath, cwd) {
+  const path = lazyProcess().default.getBuiltinModule("node:path");
+  const obj = { __proto__: null };
+  const disambiguator = { __proto__: null };
+  let currentSuite = null;
+  function startTest(data) {
+    const originalSuite = currentSuite;
+    currentSuite = {
+      __proto__: null,
+      data,
+      parent: currentSuite,
+      children: [],
+    };
+    if (originalSuite?.children) {
+      ArrayPrototypePush(originalSuite.children, currentSuite);
+    }
+  }
   return {
+    __proto__: null,
+    event(type, data) {
+      if (type === "test:start") {
+        startTest(data);
+        return;
+      }
+      if (type !== "test:pass" && type !== "test:fail") return;
+      if (currentSuite === null) {
+        startTest({ __proto__: null, name: "root", nesting: 0 });
+      }
+      if (
+        currentSuite.data.name !== data.name ||
+        currentSuite.data.nesting !== data.nesting
+      ) {
+        startTest(data);
+      }
+      const currentTest = currentSuite;
+      if (currentSuite.data.nesting === data.nesting) {
+        currentSuite = currentSuite.parent;
+      }
+      if (data.file === undefined) return;
+      const base = `${
+        path.relative(cwd, data.file)
+      }:${data.line}:${data.column}`;
+      let id = base;
+      if (disambiguator[base] !== undefined) {
+        id += `:(${disambiguator[base]})`;
+        disambiguator[base] += 1;
+      } else {
+        disambiguator[base] = 1;
+      }
+      if (type === "test:pass") {
+        obj[id] = {
+          __proto__: null,
+          name: data.name,
+          children: ArrayPrototypeMap(
+            currentTest.children,
+            (child) => child.data,
+          ),
+          passed_on_attempt: data.details?.passed_on_attempt ??
+            data.details?.attempt,
+          duration_ms: data.details?.duration_ms,
+        };
+      }
+    },
+    write() {
+      ArrayPrototypePush(previousRuns, obj);
+      lazyProcess().default.getBuiltinModule("node:fs").writeFileSync(
+        filePath,
+        JSONStringify(previousRuns, null, 2),
+        "utf8",
+      );
+    },
+  };
+}
+
+// What the recorder takes of a test the run reports.
+function rerunEventData(entry, depth, result) {
+  const data = {
+    __proto__: null,
+    name: entry.name,
+    nesting: depth,
+    file: entry.loc?.file,
+    line: entry.loc === undefined ? undefined : +entry.loc.line,
+    column: entry.loc === undefined ? undefined : +entry.loc.column,
+  };
+  if (result !== undefined) {
+    data.details = {
+      __proto__: null,
+      duration_ms: result.durationMs,
+      attempt: entry.attempt,
+      passed_on_attempt: entry.passedAttempt,
+    };
+  }
+  return data;
+}
+
+// A test's tags: its parent's, then its own not already among them (Node's
+// `tagSet`, a union in declaration order), frozen as Node's `t.tags`.
+function effectiveTags(parentTags, ownTags) {
+  const parent = parentTags ?? kNoTags;
+  if (ownTags === undefined || ownTags.length === 0) return parent;
+  const result = ArrayPrototypeSlice(parent);
+  for (const tag of new SafeArrayIterator(ownTags)) {
+    if (!ArrayPrototypeIncludes(result, tag)) ArrayPrototypePush(result, tag);
+  }
+  return ObjectFreeze(result);
+}
+
+function newRunEntry(prepared, kind, loc = captureTestLocation()) {
+  const entry = {
     name: prepared.name,
     fn: prepared.fn,
     options: prepared.options,
@@ -2748,12 +3231,28 @@ function newRunEntry(prepared, kind) {
     children: [],
     bodyPromise: null,
     bodyError: null,
-    loc: captureTestLocation(),
+    loc,
     beforeAllHooks: [],
     afterAllHooks: [],
     beforeEachHooks: [],
     afterEachHooks: [],
   };
+  applyRerunState(entry);
+  return entry;
+}
+
+// A replayed test's recorded subtests, as tests with no body (Node creates
+// them with `loc` from the file).
+function replayedChildEntry(child) {
+  return newRunEntry(
+    { __proto__: null, name: child.name, fn: noop, options: {} },
+    "test",
+    child.file === undefined || child.file === null ? undefined : {
+      file: child.file,
+      line: child.line,
+      column: child.column,
+    },
+  );
 }
 
 async function runHooks(hooks, ctx) {
@@ -2776,6 +3275,8 @@ function scheduleTapRun() {
 async function runTapTop() {
   const reporter = getRunReporter();
   const started = nowMs();
+  const rerun = getRerunState();
+  warnOfTagFilters();
   const topState = { onlyWarningEmitted: false };
   const rootRandom = createSubtestQueueRandom();
   let n = 0;
@@ -2844,7 +3345,14 @@ async function runTapTop() {
   async function finishRun() {
     // Hooks registered by a late test's module, if any.
     await runRootAfterHooks();
+    if (rerunInvalidFile) {
+      reporter.diagnostic(0, rerunInvalidFileWarning(rerun.path));
+      try {
+        lazyProcess().default.exitCode = 1;
+      } catch { /* exit code unavailable */ }
+    }
     reporter.summary(n, tapStats, nowMs() - started);
+    rerun?.recorder?.write();
   }
 }
 
@@ -2911,8 +3419,23 @@ async function runTapEntry(
 ) {
   const reporter = getRunReporter();
   const isSuite = entry.kind === "suite";
+  entry.tags ??= effectiveTags(
+    ancestors.length > 0 ? ancestors[ancestors.length - 1].tags : undefined,
+    entry.options.tags,
+  );
   reporter.start(entry, depth);
+  getRerunState()?.recorder?.event(
+    "test:start",
+    rerunEventData(entry, depth),
+  );
   const started = nowMs();
+  if (entry.replayChildren !== undefined && !isSuite) {
+    // Passed in an earlier attempt: its recorded subtests, with no body.
+    const children = entry.replayChildren;
+    entry.fn = (t) => {
+      for (const child of new SafeArrayIterator(children)) t._replay(child);
+    };
+  }
 
   let error;
   let diagnostics = [];
@@ -2952,7 +3475,7 @@ async function runTapEntry(
       error = testFailure(err, kTestCodeFailure);
     }
     if (error === undefined) {
-      const suiteCtx = { name: entry.name, fullName: entry.name };
+      const suiteCtx = new SuiteContext(entry);
       try {
         if (entry.children.length > 0 && !todoSuite) {
           await runHooks(entry.beforeAllHooks, suiteCtx);
@@ -3004,6 +3527,8 @@ async function runTapEntry(
       depth,
       entry.children,
       ancestors,
+      entry.tags,
+      entry.attempt,
     );
     const eachHooks = (key) => {
       const hooks = key === "beforeEachHooks"
@@ -3090,14 +3615,24 @@ async function runTapEntry(
   }
 
   const failed = error !== undefined;
-  // A test's number is its place among its siblings as declared (Node's
-  // `childNumber`), which a randomized run reports out of order.
-  reporter.end(entry, depth, entry.childNumber ?? n, {
+  const result = {
     failed,
     error,
     isSuite,
-    durationMs: nowMs() - started,
-  });
+    // A replayed test passes in the time it took when it ran.
+    durationMs: entry.replayedDuration !== undefined && !isSuite
+      ? entry.replayedDuration
+      : nowMs() - started,
+    passedAttempt: entry.passedAttempt,
+    attempt: entry.attempt,
+  };
+  // A test's number is its place among its siblings as declared (Node's
+  // `childNumber`), which a randomized run reports out of order.
+  reporter.end(entry, depth, entry.childNumber ?? n, result);
+  getRerunState()?.recorder?.event(
+    failed ? "test:fail" : "test:pass",
+    rerunEventData(entry, depth, result),
+  );
   for (const d of new SafeArrayIterator(diagnostics)) {
     reporter.diagnostic(depth, d);
   }
@@ -3127,8 +3662,15 @@ function queueTapTest(name, options, fn, overrides) {
     scheduleTapRun();
     return PromiseResolve();
   }
-  const entry = newRunEntry(prepared, "test");
   const parentSuite = getTapCurrentSuite();
+  const tags = effectiveTags(parentSuite?.tags, prepared.options.tags);
+  if (!passesTagFilters(tags)) {
+    // Filtered out by its tags: not registered, as Node's isn't reported.
+    scheduleTapRun();
+    return PromiseResolve();
+  }
+  const entry = newRunEntry(prepared, "test");
+  entry.tags = tags;
   if (parentSuite !== null) {
     entry.childNumber = ArrayPrototypePush(parentSuite.children, entry);
   } else {
@@ -3148,16 +3690,37 @@ function queueTapSuite(name, options, fn, overrides) {
   }
   const entry = newRunEntry(prepared, "suite");
   const parentSuite = getTapCurrentSuite();
+  entry.tags = effectiveTags(parentSuite?.tags, prepared.options.tags);
+  const siblings = parentSuite !== null ? parentSuite.children : tapTopEntries;
   if (parentSuite !== null) {
     entry.childNumber = ArrayPrototypePush(parentSuite.children, entry);
   } else {
     entry.childNumber = ArrayPrototypePush(tapTopEntries, entry);
     scheduleTapRun();
   }
+  // A suite its tags filter out stays when one of its tests is left (Node
+  // reinstates the parents of a test that passes the filter).
+  const dropIfFilteredOut = () => {
+    if (
+      !passesTagFilters(entry.tags) && entry.children.length === 0 &&
+      siblings[siblings.length - 1] === entry
+    ) {
+      ArrayPrototypePop(siblings);
+    }
+  };
   // Evaluate the suite body inside an AsyncLocalStorage scope so any nested
   // describe()/test() calls - including those scheduled after `await` inside
   // the body - register against this suite, not the outer (or null) scope.
   // The sync fallback handles environments without ALS available.
+  if (entry.replayChildren !== undefined) {
+    // Passed in an earlier attempt: its recorded tests, with no body, in
+    // place of what its body registers.
+    for (const child of new SafeArrayIterator(entry.replayChildren)) {
+      const childEntry = replayedChildEntry(child);
+      childEntry.childNumber = ArrayPrototypePush(entry.children, childEntry);
+    }
+    return PromiseResolve();
+  }
   const als = getTapSuiteALS();
   const prev = tapCurrentSuiteSync;
   tapCurrentSuiteSync = entry;
@@ -3165,13 +3728,7 @@ function queueTapSuite(name, options, fn, overrides) {
     als.run(entry, () => {
       try {
         // Node's SuiteContext, as `this` and the argument.
-        const suiteContext = {
-          __proto__: null,
-          name: entry.name,
-          fullName: entry.name,
-          filePath: entry.loc?.file,
-          signal: entry.options.signal ?? new AbortController().signal,
-        };
+        const suiteContext = new SuiteContext(entry);
         const ret = ReflectApply(prepared.fn, suiteContext, [suiteContext]);
         if (isThenable(ret)) {
           entry.bodyPromise = ret;
@@ -3186,7 +3743,22 @@ function queueTapSuite(name, options, fn, overrides) {
   } finally {
     tapCurrentSuiteSync = prev;
   }
+  if (entry.bodyPromise === null && entry.bodyError === null) {
+    dropIfFilteredOut();
+  }
   return PromiseResolve();
+}
+
+// The context of a suite's body and hooks (stack frames read
+// `SuiteContext.<name>` as in Node).
+class SuiteContext {
+  constructor(entry) {
+    this.name = entry.name;
+    this.fullName = entry.name;
+    this.filePath = entry.loc?.file;
+    this.signal = entry.options.signal ?? new AbortController().signal;
+    this.attempt = entry.attempt ?? 0;
+  }
 }
 
 function isThenable(value) {
