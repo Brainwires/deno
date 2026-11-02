@@ -2,7 +2,7 @@
 # Package the app smoke.sh left in $WORK_DIR as a real `.rpm` with denext's
 # packager, then install and start it in a Fedora container
 # (rpm_smoke_inner.sh). Needs rpmbuild and docker on the host. See DENEXT.md
-# item 215.
+# item 2NN.
 #
 # Env: TARGET BACKEND WORK_DIR DENEXT_PACKAGING_VERSION [FEDORA_IMAGE]
 set -euo pipefail

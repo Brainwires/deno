@@ -114,7 +114,7 @@ check_linux() {
         echo 1 >"$root/.verify-failed"
       fi
     done
-  # Only the libraries we expect (DENEXT.md item 215): a new dependency that
+  # Only the libraries we expect (DENEXT.md item 2NN): a new dependency that
   # a distro lacks must fail here, not on a user's machine.
   echo "== NEEDED"
   if ! python3 -I "$here/linux_needed.py" "$root" | sed 's/^/   /'; then

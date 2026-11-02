@@ -8405,8 +8405,10 @@ where the changes are discussed.
        containment (item 190); denext warns at packaging. Hashing the extracted
        program at packaging and verifying it at spawn is the fix, for denext.9.
 
-215. **`test(ci)`: the shipped Linux files' `NEEDED` lists, and a real `.rpm` on
-     Fedora** (the production audit's M1;
+2NN. **`test(ci)`: the shipped Linux files' `NEEDED` lists, and a real `.rpm` on
+     Fedora** (a placeholder number: 215 is taken on integrate/denext-8-pre, so
+     this item and every `item 2NN` reference get their number at integration;
+     the production audit's M1;
      `.github/denext-runtime/linux_needed.py`, `verify.sh`, `rpm_smoke.sh`,
      `rpm_smoke_inner.sh`, `rpm_smoke_build.ts`, `denext_runtime.yml`). The
      `.deb` / `.rpm` dependency lists were the only guard on distros without a
@@ -8425,7 +8427,12 @@ where the changes are discussed.
        test tool is installed, starts `/usr/bin/smoke` under Xvfb as a normal
        user with the sandbox on, waits for the page's report and removes the
        package. It runs apart from `package` because it runs a JSR package and
-       needs no attestation permissions.
+       needs no attestation permissions. Its condition is `!cancelled()`, not
+       the implicit `success()`, which also looks at `package`'s own needs: a
+       dispatch reusing the `denort` / `laufey` artifacts would skip it. The
+       stock CLI's minimum dependency age refuses a denext published less
+       than a day ago, so `DENEXT_PACKAGING_VERSION` moves only to an older
+       one.
 
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
@@ -8631,7 +8638,7 @@ version is the newest. Per target it:
 3. assembles the archives, checks architectures and dynamic dependencies (`file`
    / `lipo` / `otool -L` / `ldd`, and the import table of every Windows `.exe` /
    `.dll` with `pe_deps.py`; any dependency that resolves nowhere fails it; on
-   Linux, a library `linux_needed.py` doesn't list fails it too, item 215),
+   Linux, a library `linux_needed.py` doesn't list fails it too, item 2NN),
    packages a small `Deno.serve` app with the stock `deno desktop` 2.9.8 for
    both backends, and launches it (Linux under Xvfb): the page, served from
    `t3code://app`, POSTs back to `Deno.serve` and the app exits. A launch

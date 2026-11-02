@@ -81,7 +81,10 @@ env:
   # The stock CLI the archives are smoke-tested with (and that denext runs).
   STOCK_DENO_VERSION: 2.9.8
   # The denext whose packager builds the `.rpm` the rpm-smoke job installs
-  # (DENEXT.md item 215). Move it when denext changes its dependency lists.
+  # (DENEXT.md item 2NN). Move it when denext changes its dependency lists,
+  # with linux_needed.py's PACKAGE_DEPS, and only to a version published more
+  # than a day before: the stock CLI's minimum dependency age refuses a newer
+  # one, which would fail this job (and so the release) until it ages.
   DENEXT_PACKAGING_VERSION: 4.11.4
   # The esbuild every `deno-cli-*` archive ships next to `deno`: the
   # official @esbuild/<platform> binary, pinned by npm integrity in
@@ -909,7 +912,7 @@ jobs:
               # The newest glibc it requires, at most GLIBC_CEILING (see the
               # `cli` job's "Check binary").
               python3 -I .github/denext-runtime/glibc_ceiling.py "$GLIBC_CEILING" target/release/denort
-              # Only the libraries it may link (DENEXT.md item 215).
+              # Only the libraries it may link (DENEXT.md item 2NN).
               python3 -I .github/denext-runtime/linux_needed.py target/release/denort
               # It runs inside the glibc 2.27 sysroot linux_sysroot.sh
               # mounted: with no app embedded, it gets as far as looking for
@@ -1195,7 +1198,7 @@ jobs:
               # references), at most GLIBC_CEILING: an older distro fails to
               # exec a binary that needs a newer one.
               python3 -I .github/denext-runtime/glibc_ceiling.py "$GLIBC_CEILING" target/release/deno
-              # Only the libraries it may link (DENEXT.md item 215).
+              # Only the libraries it may link (DENEXT.md item 2NN).
               python3 -I .github/denext-runtime/linux_needed.py target/release/deno
               # And it runs on that glibc: inside the sysroot (Ubuntu 18.04,
               # glibc 2.27) that linux_sysroot.sh mounted (denort: the
@@ -1654,12 +1657,15 @@ jobs:
           retention-days: 30
 
   # The `.rpm` denext's packager makes from each runtime archive, installed
-  # and started in a Fedora container (DENEXT.md item 215). Its own job: it
+  # and started in a Fedora container (DENEXT.md item 2NN). Its own job: it
   # runs a package from JSR, and needs no attestation permissions.
   rpm-smoke:
     name: rpm smoke / ${{ matrix.target }}
     needs: [setup, package]
-    if: ${{ needs.package.result == 'success' && needs.setup.outputs.linux_matrix != '[]' }}
+    # `!cancelled()`, not the implicit success(): that also looks at
+    # package's own needs, so a dispatch that reuses the denort or laufey
+    # artifacts (both jobs skipped) would skip this job too.
+    if: ${{ !cancelled() && needs.package.result == 'success' && needs.setup.outputs.linux_matrix != '[]' }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     permissions:

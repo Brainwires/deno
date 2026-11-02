@@ -20,7 +20,7 @@ A directory is walked, its files named relative to it; a file is named by its
 base name. READELF names the readelf to run (default: readelf). Exits 0 when
 everything is expected, 1 otherwise, 2 on a usage error. verify.sh runs it on
 every Linux runtime archive, and denext_runtime.yml's denort_bin and cli jobs
-on their binaries (DENEXT.md item 215).
+on their binaries (DENEXT.md item 2NN).
 """
 
 import os
