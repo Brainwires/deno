@@ -8595,18 +8595,21 @@ where the changes are discussed.
      KWin. Still CEF 156.0.15. Tests: laufey's CI on the commit; item 220's leg
      is what checks the first two on a real compositor here.
 
-2NN-wayland-size. **laufey at `8d8d524`** (`development-denext`; laufey API 52,
-     no ABI change; runtime 3.0.0-denext.9). On Linux a window is created
-     hidden, sized, then shown, so a Wayland compositor maps it at the size it
-     was asked for. Before, it was created visible at 800x600 and the size set
-     right after raced the compositor's first configure: under one loaded CPU
-     some windows stayed at 800x600. Linux CEF now honours hidden-on-create
-     (it showed every window), so the same order holds there, and the bootstrap
-     window appears only at its page-load reveal. macOS and Windows are
-     unchanged. Tests: laufey's `a_window_is_sized_before_it_is_first_shown`
-     and its `--initial-size` battery mode under headless sway; item 220's
-     `window` area here pinned to one CPU, 10 launches per backend, every
-     window at the size it asked for.
+2NN-wayland-size. **laufey at `ab2e179`** (`development-denext`; laufey API 52,
+no ABI change; runtime 3.0.0-denext.9). On Linux a window is created hidden,
+sized, then shown, so a Wayland compositor maps it at the size it was asked for.
+Before, it was created visible at 800x600 and the size set right after raced the
+compositor's first configure: under one loaded CPU some windows stayed at
+800x600. Linux CEF now honours hidden-on-create (it showed every window), so the
+same order holds there, and the bootstrap window appears only at its page-load
+reveal, which the CEF backend now reports on every platform (it never sent the
+page-load event, so on CEF the reveal waited for the 10 s fallback once the
+window stayed hidden). macOS and Windows still show CEF windows at creation.
+Tests: laufey's `a_window_is_sized_before_it_is_first_shown` and its
+`--initial-size` battery mode under headless sway; item 220's `window` area here
+pinned to one CPU, 10 launches per backend, every window at the size it asked
+for; laufey's launch check that the page load is reported; the `wayland` area on
+CEF, 8 of 8 runs.
 
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,

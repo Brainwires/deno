@@ -76,7 +76,7 @@ env:
   # laufey `development-denext` (the Brainwires/laufey fork's stable branch;
   # it replaced `denext/integration`) or a release branch cut from it
   # (`release/denext-1` for 3.0.0-denext.1), pinned to a commit.
-  LAUFEY_SHA: 8d8d524fe4d9514e24f9fe53a6bc66a4f27d1513
+  LAUFEY_SHA: ab2e179e136d5cf22479f7e67f9fe9e9c490a973
   LAUFEY_REPOSITORY: Brainwires/laufey
   # The stock CLI the archives are smoke-tested with (and that denext runs).
   STOCK_DENO_VERSION: 2.9.8
