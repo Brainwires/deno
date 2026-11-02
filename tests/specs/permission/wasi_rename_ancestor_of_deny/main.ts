@@ -18,7 +18,8 @@ const wasi = new WASI({
   version: "preview1",
   preopens: { "/sandbox": `${Deno.cwd()}/base` },
 });
-// Let the constructor's ExperimentalWarning print before the results.
+// The constructor's ExperimentalWarning goes to stderr before or after the
+// results (main.out allows both).
 await new Promise((resolve) => setTimeout(resolve, 0));
 const instance = new WebAssembly.Instance(
   new WebAssembly.Module(MEMONLY_WASM),
