@@ -1,9 +1,10 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 // The runner half of the denext runtime e2e harness: package a test app
-// with the stock `deno desktop` CLI against the runtime under test, launch
-// it the ways the OS would, collect the JSON the app writes, and add the
-// checks only the outside can make (persistence across launches, files and
-// registry entries on disk, processes that must or must not exist).
+// with the stock `deno desktop` CLI (the fork's for FORK_CLI_AREAS) against
+// the runtime under test, launch it the ways the OS would, collect the JSON
+// the app writes, and add the checks only the outside can make (persistence
+// across launches, files and registry entries on disk, processes that must
+// or must not exist).
 
 // deno-lint-ignore-file no-explicit-any
 
@@ -43,7 +44,22 @@ export interface Env {
    * unique, so OS state left by an earlier run (LaunchServices, the
    * registry, web data directories) cannot leak into this one. */
   nonce: string;
+  /** The fork's own `deno` CLI, which packages the FORK_CLI_AREAS apps
+   * (E2E_FORK_DENO, or the runner itself when it is the fork's). Unset: the
+   * stock CLI packages everything and those areas are n/a. */
+  forkDeno?: string;
 }
+
+/**
+ * The areas whose app only the fork's CLI packages as the runtime expects:
+ * sidecarint's run grant names `$DENO_DESKTOP_CACHE`, which expands from the
+ * app identifier the fork's CLI writes into the binary's metadata (the stock
+ * CLI writes none, and the runtime drops the grant). Under the stock CLI
+ * they are n/a, and that n/a is the packager's, not the runner's, so it is
+ * not compared with expected-na.json; with E2E_FORK_DENO set, run.ts runs
+ * only these.
+ */
+export const FORK_CLI_AREAS: ReadonlySet<string> = new Set(["sidecarint"]);
 
 export function runtimeLib(target: string): string {
   if (target.includes("apple-darwin")) return "libdenort.dylib";
@@ -146,6 +162,8 @@ export interface AppSpec {
   files?: Record<string, Uint8Array>;
   /** The baked permission flags (default `-A`). */
   permissions?: string[];
+  /** Package with the fork's CLI (env.forkDeno) instead of the stock one. */
+  forkCli?: boolean;
 }
 
 export interface Packaged {
@@ -257,8 +275,10 @@ export async function packageApp(env: Env, spec: AppSpec): Promise<Packaged> {
     await Deno.writeFile(path(appDir, ...parts), bytes);
   }
   const output = spec.output ?? path("out", spec.name);
+  const cli = spec.forkCli ? env.forkDeno : Deno.execPath();
+  if (!cli) throw new Error(`${spec.app}: no fork CLI (E2E_FORK_DENO)`);
   const t0 = Date.now();
-  await must(Deno.execPath(), [
+  await must(cli, [
     "desktop",
     ...spec.permissions ?? ["-A"],
     "--no-check",
@@ -276,9 +296,9 @@ export async function packageApp(env: Env, spec: AppSpec): Promise<Packaged> {
     timeoutMs: 15 * 60_000,
   });
   log(
-    `packaged ${spec.app}${spec.tag ? ` (${spec.tag})` : ""} in ${
-      Date.now() - t0
-    } ms`,
+    `packaged ${spec.app}${spec.tag ? ` (${spec.tag})` : ""}${
+      spec.forkCli ? " with the fork CLI" : ""
+    } in ${Date.now() - t0} ms`,
   );
   if (spec.output?.endsWith(".msi")) {
     return { spec, artifact: path(appDir, spec.output), exe: "", buildDir };

@@ -7,6 +7,14 @@
 //
 // Env: TARGET BACKEND RUNTIME_DIR WORK_DIR [E2E_OUT] [E2E_AREAS=a,b]
 //      [E2E_VARIANT=default] [E2E_NA_BASELINE=enforce|report]
+//      [E2E_FORK_DENO=<the fork's deno>]
+//
+// The areas in FORK_CLI_AREAS (lib/runner.ts) need the fork's own CLI to
+// package their app. With E2E_FORK_DENO set, it packages them and only they
+// run (the stock CLI's run covers the rest); without it they are n/a, which
+// is not compared with expected-na.json (it says which CLI packaged the
+// app, not what the runner can do). A runner that is itself the fork's
+// `deno` packages everything, those areas included.
 //
 // Every check is pass, fail or n/a; an n/a carries the reason the check
 // cannot run on this runner (never a silent skip). The n/a checks must be
@@ -20,6 +28,7 @@ import {
   AreaReport,
   DIR,
   type Env,
+  FORK_CLI_AREAS,
   log,
   path,
   rm,
@@ -58,7 +67,10 @@ const backend = need("BACKEND");
 if (backend !== "webview" && backend !== "cef") {
   throw new Error(`BACKEND ${backend}`);
 }
+const forkDenoEnv = Deno.env.get("E2E_FORK_DENO") || undefined;
 const env: Env = {
+  forkDeno: forkDenoEnv ??
+    ((Deno.build as { denext?: unknown }).denext ? Deno.execPath() : undefined),
   target: need("TARGET"),
   backend,
   runtimeDir: need("RUNTIME_DIR"),
@@ -71,14 +83,27 @@ const env: Env = {
 const out = Deno.env.get("E2E_OUT") ?? path(env.workDir, "results");
 const only = (Deno.env.get("E2E_AREAS") ?? "").split(",").map((s) => s.trim())
   .filter(Boolean);
-const areas = only.length ? only : Object.keys(AREAS);
-for (const a of areas) if (!AREAS[a]) throw new Error(`unknown area ${a}`);
+const selected = only.length ? only : Object.keys(AREAS);
+for (const a of selected) if (!AREAS[a]) throw new Error(`unknown area ${a}`);
+const areas = forkDenoEnv
+  ? selected.filter((a) => FORK_CLI_AREAS.has(a))
+  : selected;
+if (forkDenoEnv && areas.length === 0) {
+  log(
+    `e2e ${env.target} ${env.backend}: none of ${
+      selected.join(", ")
+    } needs the fork CLI (${[...FORK_CLI_AREAS].join(", ")}); nothing to run`,
+  );
+  Deno.exit(0);
+}
 
 await rm(path(env.workDir, "build"));
 await Deno.mkdir(env.workDir, { recursive: true });
 await Deno.mkdir(out, { recursive: true });
 log(
-  `e2e ${env.target} ${env.backend} (nonce ${env.nonce}): ${areas.join(", ")}`,
+  `e2e ${env.target} ${env.backend} (nonce ${env.nonce}${
+    env.forkDeno ? `, fork CLI ${env.forkDeno}` : ""
+  }): ${areas.join(", ")}`,
 );
 
 const reports: AreaReport[] = [];
@@ -169,11 +194,16 @@ if (naMode !== "enforce" && naMode !== "report") {
 const baseline = JSON.parse(
   await Deno.readTextFile(new URL("./expected-na.json", import.meta.url)),
 ) as NaBaseline;
+// A FORK_CLI_AREAS area is n/a under the stock CLI by design (see the
+// header): the packager's n/a, not the runner's.
+const baselined = reports.filter((r) =>
+  env.forkDeno || !FORK_CLI_AREAS.has(r.area)
+);
 const na = compareNa(
   baseline,
   baselineKey(env.target, env.backend, variant),
   areas,
-  reports.flatMap((r) =>
+  baselined.flatMap((r) =>
     r.checks.filter((c) => c.status === "n/a").map((c) => ({
       area: r.area,
       name: c.name,
@@ -186,6 +216,7 @@ const summary = {
   target: env.target,
   backend: env.backend,
   os: Deno.build.os,
+  forkCli: env.forkDeno ?? null,
   ok: failed.length === 0 && unexpectedNa.length === 0,
   naBaseline: {
     key: na.key,
@@ -197,11 +228,14 @@ const summary = {
     reports.map((r) => [r.area, { checks: r.checks, notes: r.notes }]),
   ),
 };
-const file = path(out, `e2e-${env.target}-${env.backend}.json`);
+const file = path(
+  out,
+  `e2e-${env.target}-${env.backend}${forkDenoEnv ? "-fork-cli" : ""}.json`,
+);
 await Deno.writeTextFile(file, JSON.stringify(summary, null, 2));
 
 const md: string[] = [
-  `### e2e ${env.target} / ${env.backend}: ${
+  `### e2e ${env.target} / ${env.backend}${forkDenoEnv ? " (fork CLI)" : ""}: ${
     failed.length === 0 && unexpectedNa.length === 0 ? "passed" : [
       failed.length ? `${failed.length} failed` : "",
       unexpectedNa.length ? `${unexpectedNa.length} unexpected n/a` : "",

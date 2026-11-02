@@ -36,13 +36,13 @@ function cacheDir(id: string): string {
 
 export async function run(env: Env, rep: AreaReport) {
   // The run grant's `$DENO_DESKTOP_CACHE` expands from the identifier the
-  // fork's CLI writes into the binary's metadata. The stock CLI this suite
-  // packages with writes none, so the runtime drops the grant (as it should:
-  // never widened) and nothing here could pass.
-  if (!(Deno.build as { denext?: unknown }).denext) {
+  // fork's CLI writes into the binary's metadata, so the fork's CLI packages
+  // this app (FORK_CLI_AREAS). The stock CLI writes none: the runtime would
+  // drop the grant (as it should: never widened) and nothing here could pass.
+  if (!env.forkDeno) {
     rep.na(
       "a program the app carries runs only as packaged",
-      "packaged with the stock CLI, which writes no app identifier for $DENO_DESKTOP_CACHE to expand from; needs the fork's CLI",
+      "packaged with the stock CLI, which writes no app identifier for $DENO_DESKTOP_CACHE to expand from; the fork CLI's e2e run covers it",
     );
     return;
   }
@@ -55,6 +55,7 @@ export async function run(env: Env, rep: AreaReport) {
   const identifier = `dev.denext.e2e${env.nonce}.sidecarint`;
   const p = await packageApp(env, {
     app: "sidecarint",
+    forkCli: true,
     name: "E2ESidecarInt",
     identifier,
     include: [`bin/${file}`],
