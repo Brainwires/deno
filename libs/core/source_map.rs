@@ -206,6 +206,16 @@ impl SourceMapper {
     None
   }
 
+  /// denext: the source map of `file_name` as JSON, when it has one (the
+  /// same map stack traces are mapped with). A coverage writer puts it beside
+  /// a transpiled script's coverage, whose offsets are the emitted code's.
+  pub fn source_map_json(&mut self, file_name: &str) -> Option<Vec<u8>> {
+    let source_map = self.source_map_for(file_name)?;
+    let mut json = Vec::new();
+    source_map.to_writer(&mut json).ok()?;
+    Some(json)
+  }
+
   /// Apply a source map to the passed location. If there is no source map for
   /// this location, or if the location remains unchanged after mapping, the
   /// changed values are returned.

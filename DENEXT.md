@@ -8682,9 +8682,12 @@ next free number when the branch is merged.
 **2NN-node-test-r6. `feat(ext/node)`: `node --test` round 6: rerun failures,
 test tags in events, reporter failures, Node's stack frames**
 (`feat/node-test-round6`, runtime; `ext/node/polyfills/testing.ts`,
-`ext/node/polyfills/internal/test/file_runner.ts`, `libs/node_shim/lib.rs`).
-What item 901 left open, against Node 26.5.1 (`lib/internal/test_runner/`) and
-checked against Node 26.13 in a container:
+`ext/node/polyfills/internal/test/file_runner.ts`,
+`ext/node/polyfills/internal/test/coverage.ts`,
+`ext/node/polyfills/internal/child_process.ts`, `runtime/coverage.rs`,
+`libs/core/source_map.rs`, `libs/node_shim/lib.rs`). What item 901 left open,
+against Node 26.5.1 (`lib/internal/test_runner/`) and checked against Node 26.13
+in a container:
 
 - **`--test-rerun-failures <file>`** (and `run()`'s `rerunFailuresFilePath`), as
   `test.js` and `reporter/rerun.js`: the file holds one object per earlier
@@ -8709,10 +8712,29 @@ checked against Node 26.13 in a container:
   files) and `run()`'s `testTagFilters` now filter: a test runs when it has
   every tag given (Node's `evaluateTagFilters`), a suite stays when a test in it
   does, and the process given the flag warns once
-  (`ExperimentalWarning: Test tags`). An empty filter is refused by `run()`; on
-  the command line the shim's parser refuses it, but the `child_process`
-  polyfill throws that error from `spawnSync()` where Node's child exits with 9,
-  so `test-runner-tag-filter-cli.mjs` keeps one failing case and stays off.
+  (`ExperimentalWarning: Test tags`). An empty filter is refused by `run()` and,
+  on the command line, by the shim's parser (exit 9, below).
+- **A node command line the shim can't parse exits 9**, as Node's child does:
+  `child_process`'s `spawn()` / `spawnSync()` of the runtime with Node arguments
+  the shim refuses (`--experimental-test-tag-filter=` requires an argument)
+  threw the shim's parse error. It now starts a child that prints
+  `node: <message>` and exits with 9 (Node's `kInvalidCommandLineArgument`). An
+  option the shim doesn't know is not a parse error there (Node exits 9 with
+  `bad option`; the runtime's own error and exit code stay).
+- **Coverage of a transpiled file maps back to its lines.** A test file's
+  process (`NODE_TEST_CONTEXT`) writes, beside each `.ts` / `.mts` / `.cts` /
+  `.tsx` / `.jsx` script's coverage, the emitted code's source map
+  (`<uuid>.sourcemap`: `{ url, lineLengths, data }`, the `source-map-cache`
+  entry of Node's `NODE_V8_COVERAGE` files, line lengths in UTF-16 code units).
+  The map is the one stack traces use (`SourceMapper::source_map_json`, new);
+  the emitted code is V8's own (`Debugger.getScriptSource`, enabled once at
+  exit, only when there is such a script). Not a `.json` file, so
+  `deno coverage` doesn't read it; `deno test --coverage` writes none. The
+  runner maps each range's ends through it to the file's offsets before merging
+  (Node's `mapCoverageWithSourceMap`; a range that doesn't map is left out), and
+  keeps the maps as `source-map-cache` in a `NODE_V8_COVERAGE` file. The lines,
+  functions and branches of the spec's `.ts` file are now what Node 26, which
+  strips types in place, reports for it.
 - **A reporter that fails exits 7**, as in Node, whose runner rethrows an error
   that comes from a reporter in its `uncaughtException` handler (`harness.js`),
   which makes Node's own handler fail. Here a custom reporter's stream `'error'`
@@ -8741,24 +8763,21 @@ checked against Node 26.13 in a container:
   child it killed as a failure of that file, and starts no file after it.
   `test-runner-error-reporter.js` failed 2 of 3 runs on Linux without this, on a
   build without debug info: the killed child's `close` came before the exit.
-- **Left open**: coverage of a `.ts` file is still the transpiled source's
-  offsets over the file's lines. V8 runs the emitted code without a
-  `sourceMappingURL` (the module loader keeps the map), so neither the test
-  file's process nor the runner can map the ranges from JavaScript; it needs the
-  coverage collector (`runtime/coverage.rs`) to write each such script's source
-  map with its coverage, or an op over the loader's source mapper. Most
-  `test-output-*` snapshots still differ by behaviour, not frames (a suite whose
-  body throws doesn't cancel the tests it registered, an unhandled rejection in
-  a test isn't charged to it, `expectFailure` / `t.todo()`); the frames now fold
-  as Node's do.
+- **Left open**: most `test-output-*` snapshots still differ by behaviour, not
+  frames (a suite whose body throws doesn't cancel the tests it registered, an
+  unhandled rejection in a test isn't charged to it, `expectFailure` /
+  `t.todo()`); the frames now fold as Node's do.
 - Tests: node_compat `parallel/test-runner-reporters.js`,
-  `-test-rerun-failures.js`, `-tags-events.mjs`,
+  `-test-rerun-failures.js`, `-tags-events.mjs`, `-tag-filter-cli.mjs`,
   `-tags-experimental-warning.mjs` and `test-runner/test-output-eval-dot.mjs`,
   `-eval-spec.mjs`, `-eval-tap.mjs` enabled (Linux; not run on macOS or Windows
   yet). Spec `node/node_test_cli` (`reporter_error_exit_code`,
   `reporter_setup_error_exit_code`, `tags_in_events`, `rerun_failures`,
-  `failure_stack_frames`; the rerun case's output is what Node 26 prints for the
-  same driver). Shim unit tests
+  `failure_stack_frames`, `coverage_ts_source_map`; the rerun and `.ts` coverage
+  cases' output is what Node 26 prints for the same files). unit_node
+  `[child_process] a node invocation with arguments it can't parse exits with
+  9`;
+  runtime unit test `transpiled_modules_are_told_by_extension`. Shim unit tests
   `test_rerun_failures_rides_along_in_node_options` and
   `test_tag_filters_ride_along_in_node_options`.
 

@@ -5630,6 +5630,11 @@
       "reason": "Passes on Linux (3 runs, debug build) since node:test round 6; not run on macOS or Windows yet"
     },
     "parallel/test-runner-root-duration.js": {},
+    "parallel/test-runner-tag-filter-cli.mjs": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 runs, debug build) since node:test round 6; not run on macOS or Windows yet"
+    },
     "parallel/test-runner-tags-events.mjs": {
       "darwin": false,
       "windows": false,

@@ -65,6 +65,14 @@
       "args": "run -A ../node.mjs --experimental-test-coverage --test-reporter=tap math.test.js",
       "output": "cov_table.out"
     },
+    // A `.ts` file's coverage, mapped from the emitted code back to the
+    // file's lines through the map its process writes beside it: what Node
+    // reports for the same files (which strips types in place).
+    "coverage_ts_source_map": {
+      "cwd": "cov_ts",
+      "args": "run -A ../node.mjs --test --experimental-test-coverage --test-reporter=lcov",
+      "output": "cov_ts.out"
+    },
     // A file of `Deno.test()` tests fails under `node --test` (its tests
     // would not run), as it does in Node (`Deno` is not defined there);
     // outside the runner `Deno.test()` still registers nothing, and
