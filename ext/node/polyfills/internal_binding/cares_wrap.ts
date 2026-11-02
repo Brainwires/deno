@@ -127,13 +127,10 @@ function getaddrinfo(
   req: GetAddrInfoReqWrap,
   hostname: string,
   family: number,
-  _hints: number,
+  hints: number,
   order: 0 | 1 | 2,
 ): number {
   let addresses: string[] = [];
-
-  // TODO(cmorten): use hints
-  // REF: https://nodejs.org/api/dns.html#dns_supported_getaddrinfo_flags
 
   (async () => {
     let error = 0;
@@ -143,6 +140,7 @@ function getaddrinfo(
         hostname,
         req.port || undefined,
         family,
+        hints,
       );
       ArrayPrototypePush(
         addresses,

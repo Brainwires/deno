@@ -56,6 +56,37 @@ impl DnsError {
 #[cfg(target_family = "windows")]
 static WINSOCKET_INIT: OnceLock<i32> = OnceLock::new();
 
+// `dns.ADDRCONFIG`, `dns.ALL` and `dns.V4MAPPED` are the operating system's own
+// `AI_*` values in Node.js (`NODE_DEFINE_CONSTANT` in cares_wrap.cc), and libuv
+// hands them to the system resolver unchanged, so they differ per OS.
+#[cfg(unix)]
+const AI_ADDRCONFIG: i32 = libc::AI_ADDRCONFIG;
+#[cfg(unix)]
+const AI_ALL: i32 = libc::AI_ALL;
+#[cfg(unix)]
+const AI_V4MAPPED: i32 = libc::AI_V4MAPPED;
+#[cfg(windows)]
+const AI_ADDRCONFIG: i32 =
+  windows_sys::Win32::Networking::WinSock::AI_ADDRCONFIG as i32;
+#[cfg(windows)]
+const AI_ALL: i32 = windows_sys::Win32::Networking::WinSock::AI_ALL as i32;
+#[cfg(windows)]
+const AI_V4MAPPED: i32 =
+  windows_sys::Win32::Networking::WinSock::AI_V4MAPPED as i32;
+#[cfg(not(any(unix, windows)))]
+const AI_ADDRCONFIG: i32 = 0;
+#[cfg(not(any(unix, windows)))]
+const AI_ALL: i32 = 0;
+#[cfg(not(any(unix, windows)))]
+const AI_V4MAPPED: i32 = 0;
+
+/// Returns `[AI_ADDRCONFIG, AI_ALL, AI_V4MAPPED]` for `node:dns`' constants.
+#[op2]
+#[serde]
+pub fn op_node_getaddrinfo_flags() -> [i32; 3] {
+  [AI_ADDRCONFIG, AI_ALL, AI_V4MAPPED]
+}
+
 #[op2(stack_trace)]
 #[cppgc]
 pub async fn op_node_getaddrinfo(
@@ -63,6 +94,7 @@ pub async fn op_node_getaddrinfo(
   #[string] hostname: String,
   port: Option<u16>,
   #[smi] family: i32,
+  #[smi] hints: i32,
 ) -> Result<NetPermToken, DnsError> {
   {
     let mut state_ = state.borrow_mut();
@@ -73,7 +105,7 @@ pub async fn op_node_getaddrinfo(
 
   let hostname_clone = hostname.clone();
   let resolved_ips =
-    spawn_blocking(move || getaddrinfo_inner(&hostname_clone, family))
+    spawn_blocking(move || getaddrinfo_inner(&hostname_clone, family, hints))
       .await
       .map_err(|e| DnsError::Io(e.into()))??;
 
@@ -87,7 +119,12 @@ pub async fn op_node_getaddrinfo(
 fn getaddrinfo_inner(
   hostname: &str,
   family: i32,
+  hints: i32,
 ) -> Result<Vec<String>, DnsError> {
+  // `dns.lookup()` validates its hints, the internal binding does not: only
+  // these three ever reach the resolver.
+  let ai_flags = hints & (AI_ADDRCONFIG | AI_ALL | AI_V4MAPPED);
+
   #[cfg(unix)]
   {
     let c_hostname = std::ffi::CString::new(hostname)
@@ -100,7 +137,7 @@ fn getaddrinfo_inner(
     };
 
     let hints = libc::addrinfo {
-      ai_flags: 0,
+      ai_flags,
       ai_family,
       ai_socktype: libc::SOCK_STREAM,
       ai_protocol: 0,
@@ -185,7 +222,7 @@ fn getaddrinfo_inner(
     };
 
     let hints = WinSock::ADDRINFOA {
-      ai_flags: 0,
+      ai_flags,
       ai_family,
       ai_socktype: WinSock::SOCK_STREAM as _,
       ai_protocol: 0,
@@ -377,8 +414,15 @@ fn assert_success_err(code: i32) -> DnsError {
 
   debug_assert!(code != 0, "assert_success_err called with success code");
 
+  // glibc's `EAI_ADDRFAMILY`, which the libc crate does not export: a numeric
+  // host of another family, with no `AI_V4MAPPED`. libuv reports it as itself.
+  #[cfg(all(target_os = "linux", target_env = "gnu"))]
+  const EAI_ADDRFAMILY: i32 = -9;
+
   #[cfg(unix)]
   let err = match code {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    EAI_ADDRFAMILY => DnsError::RawUvErr(constant::UV_EAI_ADDRFAMILY),
     libc::EAI_AGAIN => DnsError::RawUvErr(constant::UV_EAI_AGAIN),
     libc::EAI_BADFLAGS => DnsError::RawUvErr(constant::UV_EAI_BADFLAGS),
     libc::EAI_FAIL => DnsError::RawUvErr(constant::UV_EAI_FAIL),

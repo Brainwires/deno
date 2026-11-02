@@ -20,9 +20,10 @@ const ARES_AI_CANONNAME = 1 << 0;
 const ARES_AI_NUMERICHOST = 1 << 1;
 const ARES_AI_PASSIVE = 1 << 2;
 const ARES_AI_NUMERICSERV = 1 << 3;
-const AI_V4MAPPED = 1 << 4;
-const AI_ALL = 1 << 5;
-const AI_ADDRCONFIG = 1 << 6;
+// The operating system's own values, as in Node.js: these three go to
+// `getaddrinfo()` as they are, they are not c-ares flags.
+const [AI_ADDRCONFIG, AI_ALL, AI_V4MAPPED] = __bootstrap.core.ops
+  .op_node_getaddrinfo_flags();
 const ARES_AI_NOSORT = 1 << 7;
 const ARES_AI_ENVHOSTS = 1 << 8;
 

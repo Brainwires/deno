@@ -1,6 +1,8 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 import { assert, assertEquals, assertThrows, fail } from "@std/assert";
 import dns, { getDefaultResultOrder, lookupService } from "node:dns";
+import net from "node:net";
+import os from "node:os";
 import dnsPromises, {
   getDefaultResultOrder as getDefaultResultOrderPromise,
   lookup as lookupPromise,
@@ -323,4 +325,114 @@ Deno.test("[node/dns] lookup of a missing host reports ENOTFOUND", async () => {
   assertEquals(err.errno, -3008);
   assertEquals(err.syscall, "getaddrinfo");
   assertEquals(err.hostname, "nonexistent-host.invalid");
+});
+
+// `dns.ADDRCONFIG` and friends are the system's own `AI_*` values in Node.js.
+Deno.test("[node/dns] getaddrinfo flags are the system's values", () => {
+  const expected = Deno.build.os === "linux"
+    ? [32, 16, 8]
+    : Deno.build.os === "darwin" || Deno.build.os === "windows"
+    ? [1024, 256, 2048]
+    : undefined;
+  if (expected) {
+    assertEquals([dns.ADDRCONFIG, dns.ALL, dns.V4MAPPED], expected);
+  }
+  assertThrows(
+    () =>
+      dns.lookup(
+        "localhost",
+        { hints: (dns.ADDRCONFIG | dns.ALL | dns.V4MAPPED) + 1 },
+        () => {},
+      ),
+    TypeError,
+    "hints",
+  );
+});
+
+function lookupAll(
+  hostname: string,
+  options: { family?: number; hints?: number },
+): Promise<string[]> {
+  return new Promise((resolve, reject) => {
+    dns.lookup(hostname, { ...options, all: true }, (err, addresses) => {
+      if (err) reject(err);
+      else resolve(addresses.map(({ address }) => address));
+    });
+  });
+}
+
+// `127.1` is numeric to the system resolver but not an IP to `net.isIP()`, so
+// it reaches `getaddrinfo()` with no DNS server involved.
+Deno.test({
+  name: "[node/dns] lookup passes AI_V4MAPPED to getaddrinfo",
+  ignore: Deno.build.os === "windows",
+  async fn() {
+    assertEquals(
+      await lookupAll("127.1", { family: 6, hints: dns.V4MAPPED }),
+      ["::ffff:127.0.0.1"],
+    );
+    // macOS maps a numeric host whatever the flags say.
+    if (Deno.build.os === "linux") {
+      const err = await lookupAll("127.1", { family: 6 }).then(
+        () => fail("expected an error without V4MAPPED"),
+        (err) => err as ErrnoException,
+      );
+      assertEquals(err.code, "EAI_ADDRFAMILY");
+    }
+  },
+});
+
+// AI_ADDRCONFIG depends on the machine's interfaces. On a Linux host with IPv4
+// and no IPv6 at all these check the real filtering (`--sysctl
+// net.ipv6.conf.all.disable_ipv6=1` in a container gets there), elsewhere that
+// the flag narrows the result and nothing more.
+function hasNoIpv6(): boolean {
+  const addresses = Object.values(os.networkInterfaces()).flat();
+  return Deno.build.os === "linux" &&
+    addresses.some((a) => a?.family === "IPv4" && !a.internal) &&
+    !addresses.some((a) => a?.family === "IPv6" && !a.internal);
+}
+
+Deno.test("[node/dns] lookup passes AI_ADDRCONFIG to getaddrinfo", async () => {
+  const all = await lookupAll("localhost", {});
+  const filtered = await lookupAll("localhost", { hints: dns.ADDRCONFIG });
+  assert(filtered.length > 0);
+  assert(filtered.every((address) => all.includes(address)));
+  if (hasNoIpv6()) {
+    assert(!filtered.some((address) => address.includes(":")), `${filtered}`);
+  }
+});
+
+// net.connect() asks for AI_ADDRCONFIG by default outside Windows, so a machine
+// with no IPv6 never spends a family-autoselection attempt on an AAAA record.
+Deno.test({
+  name: "[node/net] connect does not attempt IPv6 on a host without it",
+  ignore: !hasNoIpv6(),
+  async fn() {
+    const server = net.createServer((socket) => socket.destroy());
+    await new Promise<void>((resolve) =>
+      server.listen(0, "127.0.0.1", resolve)
+    );
+    const { port } = server.address() as net.AddressInfo;
+    const attempts: number[] = [];
+    await new Promise<void>((resolve, reject) => {
+      const socket = net.connect({
+        host: "localhost",
+        port,
+        autoSelectFamily: true,
+      });
+      socket.on(
+        "connectionAttempt",
+        (_ip: string, _port: number, family: number) => attempts.push(family),
+      );
+      socket.on("connect", () => {
+        socket.destroy();
+        resolve();
+      });
+      socket.on("error", reject);
+    });
+    await new Promise((resolve) => server.close(resolve));
+    assert(attempts.length > 0);
+    assert(attempts.every((family) => family === 4), `${attempts}`);
+  },
 });
