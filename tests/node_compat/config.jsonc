@@ -3414,8 +3414,7 @@
     "parallel/test-runner-aliases.js": {},
     "parallel/test-runner-assert.js": {
       "darwin": false,
-      "windows": false,
-      "reason": "Passes on Linux (3 isolated runs, debug build) with the fork's node:test / node:crypto changes; not verified on macOS or Windows, where upstream Deno's report still fails it"
+      "reason": "Passes on Linux (3 isolated runs, debug build) and Windows on Arm (3 runs, debug build) with the fork's node:test / node:crypto changes; not verified on macOS, where upstream Deno's report still fails it"
     },
     "parallel/test-runner-cli-concurrency.js": {},
     "parallel/test-runner-cli-timeout.js": {},
@@ -3438,8 +3437,7 @@
     "parallel/test-runner-mock-timers-scheduler.js": {},
     "parallel/test-runner-mock-timers-date.js": {
       "darwin": false,
-      "windows": false,
-      "reason": "Passes on Linux (3 isolated runs, debug build) with the fork's node:test / node:crypto changes; not verified on macOS or Windows, where upstream Deno's report still fails it"
+      "reason": "Passes on Linux (3 isolated runs, debug build) and Windows on Arm (3 runs, debug build) with the fork's node:test / node:crypto changes; not verified on macOS, where upstream Deno's report still fails it"
     },
     "parallel/test-runner-mock-timers.js": {},
     "parallel/test-runner-mocking.js": {},
@@ -3461,13 +3459,11 @@
     "parallel/test-runner-typechecking.js": {},
     "parallel/test-runner-test-fullname.js": {
       "darwin": false,
-      "windows": false,
-      "reason": "Passes on Linux (3 isolated runs, debug build) with the fork's node:test / node:crypto changes; not verified on macOS or Windows, where upstream Deno's report still fails it"
+      "reason": "Passes on Linux (3 isolated runs, debug build) and Windows on Arm (3 runs, debug build) with the fork's node:test / node:crypto changes; not verified on macOS, where upstream Deno's report still fails it"
     },
     "parallel/test-runner-test-filepath.js": {
       "darwin": false,
-      "windows": false,
-      "reason": "Passes on Linux (3 isolated runs, debug build) with the fork's node:test / node:crypto changes; not verified on macOS or Windows, where upstream Deno's report still fails it"
+      "reason": "Passes on Linux (3 isolated runs, debug build) and Windows on Arm (3 runs, debug build) with the fork's node:test / node:crypto changes; not verified on macOS, where upstream Deno's report still fails it"
     },
     "parallel/test-runner-wait-for.js": {},
     "parallel/test-runner-xfail.js": {},
@@ -4838,8 +4834,7 @@
     "test-runner/test-output-assertion-color-tty.mjs": {},
     "test-runner/test-output-async-test-scheduling.mjs": {
       "darwin": false,
-      "windows": false,
-      "reason": "Passes on Linux (3 isolated runs, debug build) with the fork's node:test / node:crypto changes; not verified on macOS or Windows, where upstream Deno's report still fails it"
+      "reason": "Passes on Linux (3 isolated runs, debug build) and Windows on Arm (3 runs, debug build) with the fork's node:test / node:crypto changes; not verified on macOS, where upstream Deno's report still fails it"
     },
     "test-runner/test-output-coverage-width-80-color.mjs": {},
     "test-runner/test-output-coverage-width-80-uncovered-lines-color.mjs": {},
@@ -4872,14 +4867,12 @@
     "test-runner/test-output-no-tests.mjs": {},
     "test-runner/test-output-non-tty-forced-color-output.mjs": {
       "darwin": false,
-      "windows": false,
-      "reason": "Passes on Linux (3 isolated runs, debug build) with the fork's node:test / node:crypto changes; not verified on macOS or Windows, where upstream Deno's report still fails it"
+      "reason": "Passes on Linux (3 isolated runs, debug build) and Windows on Arm (3 runs, debug build) with the fork's node:test / node:crypto changes; not verified on macOS, where upstream Deno's report still fails it"
     },
     "test-runner/test-output-skip-pattern.mjs": {},
     "test-runner/test-output-skip-each-hooks.mjs": {
       "darwin": false,
-      "windows": false,
-      "reason": "Passes on Linux (3 isolated runs, debug build) with the fork's node:test / node:crypto changes; not verified on macOS or Windows, where upstream Deno's report still fails it"
+      "reason": "Passes on Linux (3 isolated runs, debug build) and Windows on Arm (3 runs, debug build) with the fork's node:test / node:crypto changes; not verified on macOS, where upstream Deno's report still fails it"
     },
     "test-runner/test-output-output.mjs": {
       "exitCode": 1,
@@ -4899,13 +4892,11 @@
     },
     "test-runner/test-output-spec-reporter-successful.mjs": {
       "darwin": false,
-      "windows": false,
-      "reason": "Passes on Linux (3 isolated runs, debug build) with the fork's node:test / node:crypto changes; not verified on macOS or Windows, where upstream Deno's report still fails it"
+      "reason": "Passes on Linux (3 isolated runs, debug build) and Windows on Arm (3 runs, debug build) with the fork's node:test / node:crypto changes; not verified on macOS, where upstream Deno's report still fails it"
     },
     "test-runner/test-output-suite-skip-hooks.mjs": {
       "darwin": false,
-      "windows": false,
-      "reason": "Passes on Linux (3 isolated runs, debug build) with the fork's node:test / node:crypto changes; not verified on macOS or Windows, where upstream Deno's report still fails it"
+      "reason": "Passes on Linux (3 isolated runs, debug build) and Windows on Arm (3 runs, debug build) with the fork's node:test / node:crypto changes; not verified on macOS, where upstream Deno's report still fails it"
     },
     "test-runner/test-output-tap-escape.mjs": {},
     "test-runner/test-output-typescript-coverage.mjs": {},
@@ -5626,30 +5617,25 @@
     "parallel/test-runner-randomize-first-draw.mjs": {},
     "parallel/test-runner-reporters.js": {
       "darwin": false,
-      "windows": false,
-      "reason": "Passes on Linux (3 runs, debug build) since node:test round 6; not run on macOS or Windows yet"
+      "reason": "Passes on Linux and Windows on Arm (3 runs each, debug build) since node:test round 6; not run on macOS yet"
     },
     "parallel/test-runner-root-duration.js": {},
     "parallel/test-runner-tag-filter-cli.mjs": {
       "darwin": false,
-      "windows": false,
-      "reason": "Passes on Linux (3 runs, debug build) since node:test round 6; not run on macOS or Windows yet"
+      "reason": "Passes on Linux and Windows on Arm (3 runs each, debug build) since node:test round 6; not run on macOS yet"
     },
     "parallel/test-runner-tags-events.mjs": {
       "darwin": false,
-      "windows": false,
-      "reason": "Passes on Linux (3 runs, debug build) since node:test round 6; not run on macOS or Windows yet"
+      "reason": "Passes on Linux and Windows on Arm (3 runs each, debug build) since node:test round 6; not run on macOS yet"
     },
     "parallel/test-runner-tags-experimental-warning.mjs": {
       "darwin": false,
-      "windows": false,
-      "reason": "Passes on Linux (3 runs, debug build) since node:test round 6; not run on macOS or Windows yet"
+      "reason": "Passes on Linux and Windows on Arm (3 runs each, debug build) since node:test round 6; not run on macOS yet"
     },
     "parallel/test-runner-test-id.js": {},
     "parallel/test-runner-test-rerun-failures.js": {
       "darwin": false,
-      "windows": false,
-      "reason": "Passes on Linux (3 runs, debug build) since node:test round 6; not run on macOS or Windows yet"
+      "reason": "Passes on Linux and Windows on Arm (3 runs each, debug build) since node:test round 6; not run on macOS yet"
     },
     "parallel/test-runner-todo-suite-hook-failure.js": {},
     "parallel/test-runner-worker-id.js": {
@@ -5942,23 +5928,19 @@
     },
     "test-runner/test-output-eval-dot.mjs": {
       "darwin": false,
-      "windows": false,
-      "reason": "Passes on Linux (3 runs, debug build) since node:test round 6; not run on macOS or Windows yet"
+      "reason": "Passes on Linux and Windows on Arm (3 runs each, debug build) since node:test round 6; not run on macOS yet"
     },
     "test-runner/test-output-eval-spec.mjs": {
       "darwin": false,
-      "windows": false,
-      "reason": "Passes on Linux (3 runs, debug build) since node:test round 6; not run on macOS or Windows yet"
+      "reason": "Passes on Linux and Windows on Arm (3 runs each, debug build) since node:test round 6; not run on macOS yet"
     },
     "test-runner/test-output-eval-tap.mjs": {
       "darwin": false,
-      "windows": false,
-      "reason": "Passes on Linux (3 runs, debug build) since node:test round 6; not run on macOS or Windows yet"
+      "reason": "Passes on Linux and Windows on Arm (3 runs each, debug build) since node:test round 6; not run on macOS yet"
     },
     "test-runner/test-output-force-exit.mjs": {
       "darwin": false,
-      "windows": false,
-      "reason": "Passes on Linux (3 isolated runs, debug build) with the fork's node:test / node:crypto changes; not verified on macOS or Windows, where upstream Deno's report still fails it"
+      "reason": "Passes on Linux (3 isolated runs, debug build) and Windows on Arm (3 runs, debug build) with the fork's node:test / node:crypto changes; not verified on macOS, where upstream Deno's report still fails it"
     },
     "test-runner/test-output-test-diagnostic-warning-without-test-only-flag.mjs": {},
     "wasi/test-return-on-exit.js": {},
