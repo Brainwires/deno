@@ -1730,6 +1730,7 @@ fn join_cwd(cwd: &Path, path: &Path) -> PathBuf {
 fn windows_full_path_name(path: &Path) -> Option<PathBuf> {
   use std::os::windows::ffi::OsStrExt;
   use std::os::windows::ffi::OsStringExt;
+
   use windows_sys::Win32::Storage::FileSystem::GetFullPathNameW;
 
   let wide: Vec<u16> = path
@@ -10665,6 +10666,7 @@ mod tests {
   fn windows_short_path(path: &Path) -> Option<PathBuf> {
     use std::os::windows::ffi::OsStrExt;
     use std::os::windows::ffi::OsStringExt;
+
     use windows_sys::Win32::Storage::FileSystem::GetShortPathNameW;
     let wide: Vec<u16> = path
       .as_os_str()
