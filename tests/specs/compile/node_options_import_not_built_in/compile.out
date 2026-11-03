@@ -1,0 +1,2 @@
+[WILDCARD]NODE_OPTIONS --import=./preload.js ignored: this command would build it into its output
+[WILDCARD]

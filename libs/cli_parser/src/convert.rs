@@ -3263,7 +3263,8 @@ fn node_loader_preload(loader: &str) -> String {
 /// Currently supports:
 /// - `--require` / `-r`
 /// - `--experimental-loader` / `--loader` and `--import` (denext), as `--preload`
-///   modules before the command line's: Node's order, loaders then imports
+///   modules before the command line's: Node's order, loaders then imports.
+///   Ignored, with a warning, by `compile`, `desktop` and `install`.
 /// - `--inspect-publish-uid`
 ///
 /// Public because the CLI's bare-run fast path skips the full parse and has to
@@ -3333,6 +3334,17 @@ pub fn apply_node_options(flags: &mut Flags) {
   }
 
   // denext: loaders and `--import` modules, before the CLI's `--preload`s.
+  // Not for a command that builds an artifact (`compile`, `desktop`,
+  // `install`): its preloads would be built into the program and run at every
+  // launch, so a NODE_OPTIONS left in the build machine's environment would
+  // ship with it. Those commands ignore them, with a warning.
+  let bakes_flags = matches!(
+    flags.subcommand,
+    DenoSubcommand::Compile(_)
+      | DenoSubcommand::Desktop(_)
+      | DenoSubcommand::Install(_)
+  );
+  let mut ignored: Vec<String> = Vec::new();
   let mut loaders: Vec<String> = Vec::new();
   let mut imports: Vec<String> = Vec::new();
   let mut words = args.iter();
@@ -3347,10 +3359,24 @@ pub fn apply_node_options(flags: &mut Flags) {
     let Some(value) = inline.or_else(|| words.next().cloned()) else {
       break;
     };
-    if name == "--import" {
+    if bakes_flags {
+      ignored.push(format!("{name}={value}"));
+    } else if name == "--import" {
       imports.push(value);
     } else {
       loaders.push(node_loader_preload(&value));
+    }
+  }
+  if !ignored.is_empty() {
+    // Logging isn't initialized yet.
+    #[allow(clippy::print_stderr, reason = "can't use log crate yet")]
+    {
+      eprintln!(
+        "{} NODE_OPTIONS {} ignored: this command would build {} into its output",
+        deno_runtime::colors::yellow("Warning"),
+        ignored.join(" "),
+        if ignored.len() == 1 { "it" } else { "them" },
+      );
     }
   }
   if !loaders.is_empty() || !imports.is_empty() {

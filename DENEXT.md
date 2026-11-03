@@ -8655,7 +8655,14 @@ free numbers when the branch is merged.
      `NODE_OPTIONS` left over from Node tooling (`--import tsx`,
      `--loader ts-node/esm`) now loads that module in every such process, and
      one that does not resolve stops it (`Module not found`), where it used to
-     be ignored.
+     be ignored. `deno compile`, `deno desktop` and `deno install` are the
+     exception: their preloads would be built into the program they write and
+     run at every launch, so a `NODE_OPTIONS` in the build machine's environment
+     would ship with it. They ignore `NODE_OPTIONS`' loaders and imports and
+     print one warning naming them (`--preload` on their command line still
+     applies). Tests: unit test
+     `node_options_loader_and_import_not_for_artifacts`; spec
+     `compile/node_options_import_not_built_in`.
 
 903. **`test(node_compat)`: 27 tests the node_compat round 5 fixes pass**
      (`feat/node-compat-round5`, test config only;

@@ -9137,6 +9137,29 @@ fn node_options_loader_and_import_preload() {
 }
 
 #[test]
+fn node_options_loader_and_import_not_for_artifacts() {
+  // denext: `compile`, `desktop` and `install` would build the preloads into
+  // their output, so they ignore NODE_OPTIONS' loaders and imports.
+  set_test_node_options(Some("--import=first.mjs --loader ./l.mjs"));
+  let compile = flags_from_vec(svec!["deno", "compile", "main.ts"]).unwrap();
+  let install =
+    flags_from_vec(svec!["deno", "install", "-g", "-n", "x", "main.ts"])
+      .unwrap();
+  let desktop = flags_from_vec(svec!["deno", "desktop", "main.tsx"]).unwrap();
+  let compile_cli =
+    flags_from_vec(svec!["deno", "compile", "--preload", "cli.js", "main.ts"])
+      .unwrap();
+  set_test_node_options(None);
+  assert!(matches!(compile.subcommand, DenoSubcommand::Compile(_)));
+  assert!(compile.preload.is_empty());
+  assert!(matches!(install.subcommand, DenoSubcommand::Install(_)));
+  assert!(install.preload.is_empty());
+  assert!(matches!(desktop.subcommand, DenoSubcommand::Desktop(_)));
+  assert!(desktop.preload.is_empty());
+  assert_eq!(compile_cli.preload, svec!["cli.js"]);
+}
+
+#[test]
 fn node_options_require_prepend_to_cli() {
   // Test NODE_OPTIONS --require is prepended to CLI --require values
   set_test_node_options(Some("--require foo.js --require bar.js"));
