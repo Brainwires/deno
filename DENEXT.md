@@ -9166,6 +9166,58 @@ where the changes are discussed.
      on Linux, without the script (fails at the refused mirror path) and after
      `fetch_rusty_v8.py --print-env` (builds).
 
+227. **`ci(denext)`: release hardening: no caches in a tag build, pinned
+     runners, CEF enforced, and a 14-day patch-lag rule**
+     (`ci/release-hardening`; CI; `.github/workflows/denext_runtime.yml`,
+     `.github/denext-runtime/engine_staleness.py`,
+     `.github/denext-runtime/engine_staleness_test.py`). From the production
+     audit's P9 and `plans/fork-own-v8.md` ("The engine staleness gate") in
+     denext:
+
+     - **No caches in a tag build.** The `denort`, `denort bin` and `cli` jobs'
+       `Swatinem/rust-cache` and the `laufey` job's CEF `actions/cache` restored
+       whatever a branch or pull request run had saved under the same key into
+       the build that is signed and released, unverified (a restored
+       `laufey/vendor/cef` skips the Makefile's SHA-256 check). Each now has
+       `if: github.ref_type != 'tag'`: a tag builds from a clean `target/`,
+       downloads and checks CEF afresh, and saves nothing. Branch and dispatch
+       runs keep their caches. A tag's build is slower (cold).
+     - **Pinned runners.** `ubuntu-latest` (setup, e2e harness, publish) is
+       `ubuntu-24.04`, and the x86_64 Windows target's `windows-latest` is
+       `windows-2022`, the image `denext tests` runs and the tag gate counts.
+       Every third-party action was already pinned by commit SHA; each SHA was
+       checked against its version tag.
+     - **CEF enforced at a tag.** `ENGINE_STALENESS_ENFORCE_CEF` is `tag`:
+       laufey is on CEF 156 (Chrome Extended Stable 156), so a release no longer
+       waives CEF. A branch run still only warns.
+     - **Patch lag.** A pin on a supported milestone can still miss the security
+       merges on its branch (item 162: 15.2.124.1 and .45 scored the same).
+       `engine_staleness.py` now also reads the pinned V8 version from the `v8`
+       crate's own `v8/include/v8-version.h` (the Cargo.lock git revision of
+       Brainwires/rusty_v8), V8's `branch-heads/<major>.<minor>` `Version`
+       commits (gitiles), and, for CEF, CEF's build index (every build on the
+       pin's Chromium milestone). A pin is stale when its branch's newest patch
+       is more than 14 days newer than the pin, or the oldest patch it lacks has
+       been out more than 14 days: the plan's "no more than 14 days behind that
+       branch head's newest `Version` commit", read strictly (either measure
+       alone lets a pin slip: the first passes a pin that skipped one early fix
+       forever, the second one far behind a branch that only just moved). Stale
+       is a warning on a branch and an error at a tag in `tag` mode, as for a
+       milestone. A patch level it cannot learn (offline, a registry crate, a
+       CEF build not in the index) warns and passes, and an unknown Chrome
+       stable no longer skips the patch check. `--v8-version` and `--now` set
+       the pin and the clock (tests).
+
+     The plan's patch-bump automation (a manual `workflow_dispatch` on
+     Brainwires/rusty_v8, never a scheduled workflow) belongs to that repository
+     and is not part of this change.
+
+     Tests: `engine_staleness_test.py` (54, from 31): the git source and header
+     readers, gitiles times, the branch's `Version` commits, CEF's milestone
+     builds, the lag's two measures and the 14-day edge, the patch check in
+     `tag` and `warn` mode, on a branch, unknown, and with Chrome stable
+     offline, all against canned file:// answers and a closed port.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,

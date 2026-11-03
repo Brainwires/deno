@@ -100,20 +100,23 @@ env:
   # The engine staleness gate (.github/denext-runtime/engine_staleness.py):
   # a V8 (Cargo.lock's v8 crate) or CEF (laufey's CEF_FULL_VERSION) pin more
   # than one Chrome stable major behind, and not on Chrome's Extended Stable
-  # milestone, warns on every run and, with `tag`, fails a release tag;
-  # `warn` keeps a tag at a warning. A pin on the Extended Stable milestone
-  # only warns, and says it is still patched (DENEXT.md item 179). A failed
-  # Chrome stable lookup only warns. V8 is `tag` again since the fork builds
-  # its own V8 line on Chrome's Extended Stable branch (V8 15.6, DENEXT.md
-  # item 218). CEF stays `warn` until laufey's CEF tracks Chrome's release
-  # cadence the same way (items 150, 162).
+  # milestone, or more than 14 days behind its own branch's patches (V8's
+  # `Version` commits on its branch-heads, CEF's builds on its milestone;
+  # plans/fork-own-v8.md), warns on every run and, with `tag`, fails a
+  # release tag; `warn` keeps a tag at a warning. A branch run only ever
+  # warns. A pin on the Extended Stable milestone only warns, and says it is
+  # still patched (DENEXT.md item 179). A failed lookup (Chrome stable, a
+  # patch level) only warns. V8 is `tag` since the fork builds its own V8
+  # line on Chrome's Extended Stable branch (V8 15.6, DENEXT.md item 218);
+  # CEF is `tag` too since laufey moved to CEF 156 (Chrome Extended Stable
+  # 156): a release no longer ships a browser engine that misses fixes.
   ENGINE_STALENESS_ENFORCE: tag
-  ENGINE_STALENESS_ENFORCE_CEF: warn
+  ENGINE_STALENESS_ENFORCE_CEF: tag
 
 jobs:
   setup:
     name: setup
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       matrix: ${{ steps.plan.outputs.matrix }}
       version: ${{ steps.plan.outputs.version }}
@@ -180,9 +183,10 @@ jobs:
             { echo "::error::no LAUFEY_API_VERSION in $LAUFEY_REPOSITORY's capi/include/laufey.h at $laufey_sha"; exit 1; }
 
           # Engine staleness: V8 and CEF more than one Chrome stable major
-          # behind get no upstream security fixes. Warns on branches, fails a
-          # tag (ENGINE_STALENESS_ENFORCE[_V8|_CEF]); offline it warns and
-          # passes.
+          # behind get no upstream security fixes, and a pin more than 14 days
+          # behind its branch's patches misses the fixes merged there. Warns
+          # on branches, fails a tag (ENGINE_STALENESS_ENFORCE[_V8|_CEF]);
+          # offline it warns and passes.
           tag_flag=()
           if [ "$REF_TYPE" = tag ]; then tag_flag=(--tag); fi
           python3 -I .github/denext-runtime/engine_staleness.py "${tag_flag[@]}" --cef "$cef_version" ||
@@ -243,7 +247,7 @@ jobs:
               {"target": "x86_64-apple-darwin", "os": "macos-15-intel"},
               {"target": "x86_64-unknown-linux-gnu", "os": "ubuntu-22.04"},
               {"target": "aarch64-unknown-linux-gnu", "os": "ubuntu-22.04-arm"},
-              {"target": "x86_64-pc-windows-msvc", "os": "windows-latest"},
+              {"target": "x86_64-pc-windows-msvc", "os": "windows-2022"},
               {"target": "aarch64-pc-windows-msvc", "os": "windows-11-arm"},
           ]
           want = [t.strip() for t in os.environ["TARGETS"].split(",") if t.strip()]
@@ -272,7 +276,7 @@ jobs:
   # no runtime, display or build: which result belongs to which launch.
   e2e-harness:
     name: e2e harness
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -350,7 +354,11 @@ jobs:
           powershell -NoProfile -Command "Expand-Archive -Path wv2.zip -DestinationPath packages/Microsoft.Web.WebView2.$WV2_VERSION"
           rm wv2.zip
 
+      # Never on a tag: a cache any branch or pull request run could have
+      # written must not reach a signed release (the production audit's P9).
+      # A tag's build downloads CEF afresh and writes no cache.
       - name: Cache CEF
+        if: github.ref_type != 'tag'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: laufey/vendor/cef
@@ -579,7 +587,11 @@ jobs:
         # not target/release/gn_out, where the script puts the library.
         run: python3 -I .github/denext-runtime/fetch_rusty_v8.py --target "${{ matrix.target }}" --dest "$RUNNER_TEMP/rusty_v8" --seed-dir target/release --github-env
 
+      # Never on a tag: a cache any branch or pull request run could have
+      # written must not reach a signed release (the production audit's P9).
+      # A tag builds from a clean target/ and saves no cache.
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        if: github.ref_type != 'tag'
         with:
           prefix-key: denext-denort-v1
           key: ${{ matrix.target }}-${{ matrix.os }}
@@ -853,7 +865,11 @@ jobs:
         # not target/release/gn_out, where the script puts the library.
         run: python3 -I .github/denext-runtime/fetch_rusty_v8.py --target "${{ matrix.target }}" --dest "$RUNNER_TEMP/rusty_v8" --seed-dir target/release --github-env
 
+      # Never on a tag: a cache any branch or pull request run could have
+      # written must not reach a signed release (the production audit's P9).
+      # A tag builds from a clean target/ and saves no cache.
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        if: github.ref_type != 'tag'
         with:
           prefix-key: denext-denort-bin-v1
           key: ${{ matrix.target }}-${{ matrix.os }}
@@ -1088,7 +1104,11 @@ jobs:
         # not target/release/gn_out, where the script puts the library.
         run: python3 -I .github/denext-runtime/fetch_rusty_v8.py --target "${{ matrix.target }}" --dest "$RUNNER_TEMP/rusty_v8" --seed-dir target/release --github-env
 
+      # Never on a tag: a cache any branch or pull request run could have
+      # written must not reach a signed release (the production audit's P9).
+      # A tag builds from a clean target/ and saves no cache.
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        if: github.ref_type != 'tag'
         with:
           prefix-key: denext-cli-v2
           key: ${{ matrix.target }}-${{ matrix.os }}
@@ -1693,7 +1713,7 @@ jobs:
     # A `cli_only` dry run has no package job: it still writes (and uploads)
     # the manifest, from the CLI archives alone.
     if: ${{ always() && needs.cli.result == 'success' && (needs.package.result == 'success' || (inputs.cli_only && needs.package.result == 'skipped')) }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
