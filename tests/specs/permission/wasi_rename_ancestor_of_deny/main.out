@@ -1,0 +1,8 @@
+[WILDCARD]rename parent: denied
+rename onto absent parent: denied
+symlink at absent parent: denied
+still packaged: true
+denied path absent: true
+rename other: 0
+other moved: true
+[WILDCARD]

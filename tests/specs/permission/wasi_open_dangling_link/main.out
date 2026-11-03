@@ -1,0 +1,12 @@
+[WILDCARD]create through a link out (relative): outside the preopen
+create through a link out (absolute): outside the preopen
+create through a link to such a link: outside the preopen
+stat through a link out: outside the preopen
+nothing made outside: true
+create through a link into a denied path: denied
+nothing made in the denied path: true
+create through a link inside: created
+  made at the target: true
+create a plain new file: created
+  made: true
+[WILDCARD]

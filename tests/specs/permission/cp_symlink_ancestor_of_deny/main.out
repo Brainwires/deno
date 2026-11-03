@@ -1,0 +1,9 @@
+cpSync link to absent parent: denied
+cp link to absent parent: denied
+cpSync tree with a link at a parent: denied
+cpSync link onto a linked parent: denied
+cp link onto a linked parent: denied
+no link made: true
+still packaged: true
+other link made: true
+tree copied: true

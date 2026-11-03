@@ -8597,14 +8597,308 @@ where the changes are discussed.
      KWin. Still CEF 156.0.15. Tests: laufey's CI on the commit; item 220's leg
      is what checks the first two on a real compositor here.
 
+224. **`fix(security)`: a rename, a symlink, a link removal or a mode change
+     can't move, replace or lock away a parent of a `--deny-write` path**
+     (`ext/fs/ops.rs`, `ext/node/ops/fs.rs`, `ext/node/ops/wasi.rs`,
+     `runtime/permissions/lib.rs`). The write checks on single paths use
+     partial-deny semantics: a deny scope under the path doesn't refuse it. That
+     is right for an open or a stat, but a rename moves the whole tree under its
+     old path and puts a tree in place of its new one. With
+     `--allow-write=base --deny-write=base/a/b`, `Deno.rename("base/a", …)`
+     moved the denied folder away, and a rename onto `base/c` (absent, or an
+     empty folder) created a denied `base/c/b` from another tree; both work on
+     stock Deno 2.9.8 and on every `3.0.0-denext.N` through `denext.7`. A
+     symlink needs unscoped `--allow-write`, which still leaves its
+     `--deny-write` scopes, and its link path wasn't checked against them at
+     all: a link made at a denied path that didn't exist yet, or at a parent of
+     one, put another tree there. `node:fs` `cp` recreates a source symlink with
+     the same unscoped check and had the same gap, and when the destination was
+     already a link it removed it unchecked first. `node:wasi`'s `path_rename`
+     and `path_symlink` had the rename and link-path gaps under a scoped grant.
+     Both paths of a rename, the link path of `Deno.symlink`, of `cp`'s
+     recreated links and of `path_symlink` now also get the strict check a
+     recursive remove has (a deny scope inside refuses it; the parent is
+     resolved as for the other no-follow checks). `node:fs` `rename` / `symlink`
+     go through the same ops. Three neighbours, also open on 2.9.8 and through
+     `denext.7`:
+     - **`path_symlink`'s target.** `Deno.symlink` takes unscoped read and write
+       because a target is only resolved when the link is followed;
+       `path_symlink` works under a preopen's scoped grant and stored any
+       target, so host code writing under the preopen could be led out of it
+       (Deno's allow scopes check the path as given) or a link pointed into a
+       denied path. The target, resolved from the link's folder as the kernel
+       will (through existing links, a missing tail kept as named, a `..` after
+       a name refused), must now stay in the preopen (`ENOTCAPABLE`, as every
+       `path_*` op answers an escape) and be readable and writable (`EACCES`),
+       the rule `Deno.symlink` applies to a scoped grant in a confined
+       lifecycle-script jail. A relative target with leading `..` is checked
+       where the link is made; moving its folder shallower later can point it
+       elsewhere, as for the jail.
+     - **A non-recursive remove of a link.** Removing a symlink (or a Windows
+       junction) takes away every path reached through it, so `Deno.remove`,
+       `node:fs` `unlink` / `rm` and `rmdir` (which removes a directory link or
+       a junction on Windows) give a link the strict check; a file or a folder
+       keeps the partial one (a folder with a denied path in it isn't empty).
+     - **`chmod` / `chown` on a parent.** They don't modify the denied path, but
+       mode 000 on its folder locks it away as mode 000 on the path itself
+       (refused) would, and a group- or world-writable folder lets another user
+       swap it. `Deno.chmod` / `chown`, `node:fs` `chmod` / `lchmod` / `chown` /
+       `lchown` / `fchmod` / `fchown` now refuse a folder with a deny scope
+       inside, on the path as given and on where it resolves
+       (`PermissionsContainer::check_write_resolved_not_denied`, the deny half
+       of the strict check, for a path reached through a symlink or an open
+       handle). Ordinary uses are untouched: a file, or a folder with nothing
+       denied in it. `utime` / `futimes` keep the partial check: times touch
+       only the folder's own entry.
+
+     `node:fs` `cp`'s macOS `clonefile` path cleans a failed clone up with a
+     recursive remove of the destination: with a deny scope inside the
+     destination it now skips the clone and copies entry by entry, and the
+     cleanup has the strict check too (reaching it needed another process to
+     create the denied path mid-copy, so there is no failing test for it).
+     Checked and left as they were: `link` (a hard link is a file, never a
+     parent), `copyFile` / `truncate` / `Deno.open` with `create` (a parent is a
+     folder, so they fail), `mkdir` (a recursive one checks the path it creates,
+     so it can't create a denied one), `makeTempDir` (a fresh name in a checked
+     folder), `node:fs` `cp`'s other destination entries (each checked; a
+     removed destination link is resolved to its target first) and `rm` with
+     `recursive`. Deny scopes compare case-insensitively on Windows and macOS,
+     so another spelling of a parent is refused too. Tests: specs
+     `permission/rename_ancestor_of_deny`, `symlink_ancestor_of_deny`,
+     `wasi_rename_ancestor_of_deny`, `remove_link_ancestor_of_deny` (a junction
+     on Windows), `chmod_ancestor_of_deny`, `cp_symlink_ancestor_of_deny`,
+     `wasi_symlink_target`. The `node:wasi` specs run on Unix only: on Windows a
+     path-scoped grant resolved from a working directory with an 8.3 short name
+     never matches the long canonical paths `node:wasi` checks, so every
+     `path_*` op is refused there (as before this item).
+
+225. **`fix(security)`: the gaps left around item 224** (`ext/node/ops/wasi.rs`,
+     `runtime/permissions/lib.rs`, `ext/fs/ops.rs`, `ext/node/ops/fs.rs`), each
+     open on stock Deno 2.9.8 and on every `3.0.0-denext.N` through `denext.7`
+     unless said otherwise:
+     - **`node:wasi` followed the final symlink of `path_unlink_file`,
+       `path_remove_directory` and `path_rename`**, so they acted on the target
+       instead of the link: unlinking `link` → `target` removed `target` and
+       left the link dangling, renaming it moved the target, and a link pointing
+       out of the preopen couldn't be removed at all (`ENOTCAPABLE`). WASI (as
+       `unlink`, `rmdir` and `rename`) names the entry itself: the three now
+       resolve the parent and keep the final name, the permission check is on
+       the link's path (no-follow), and a link that is a parent of a
+       `--deny-write` path (`base/alink/b` through `base/alink` → `a`) gets the
+       strict check a link removal has since 224 (`EACCES`); `path_rename` keeps
+       its strict check on both paths.
+     - **`path_open` with `O_CREAT` through a dangling symlink wrote outside the
+       preopen.** A dangling link's path doesn't resolve, so the lookup fell
+       back to its folder plus its name, which is inside the preopen, and the
+       kernel then created the file where the link pointed: `base/dangling` →
+       `../outside/new` made `outside/new` under `--allow-write=base` (Deno's
+       allow scopes are checked on the path as given; only deny scopes see the
+       resolved place, which caught a link into a denied path). The missing tail
+       is now followed as `path_symlink`'s target is (224): the longest existing
+       prefix canonical, a dangling link at the end followed to where the kernel
+       would create the file, through a chain. Outside the preopen is
+       `ENOTCAPABLE` (a `path_filestat_get` through such a link too, where it
+       answered `ENOENT`); the permission check is on that place. A missing path
+       with no link in it resolves as before.
+     - **Windows 8.3 short names.** NTFS gives a long name an alias (`LONGNA~1`
+       for `longname`) that opens the same entry but compared as another string.
+       The no-follow checks (rename, remove, symlink, mkdir, lstat) resolve the
+       parent and keep the final name as given, so with
+       `--allow-write=base --deny-write=base/longname/b`,
+       `Deno.renameSync("base/LONGNA~1", …)` and
+       `Deno.removeSync("base/LONGNA~1", { recursive: true })` moved or deleted
+       the denied tree (a write into it by the alias was already refused: the
+       follow path canonicalizes, which gives long names). A grant or deny scope
+       written with an alias matched nothing written long, and the other way
+       round (the CI runner's temp dir is under `RUNNER~1`, which is what kept
+       the `node:wasi` specs of 224 off Windows). Every path the permission
+       layer compares (a query, a flag's scope, the no-follow resolution) now
+       has each existing component replaced by its long name
+       (`GetLongPathNameW`), done only when the path holds a `~` (a generated
+       alias always does; no system call otherwise). The names past the last
+       existing entry stay as given: an alias is only generated for an entry
+       that exists, so a `~` name that doesn't exist yet aliases nothing at that
+       moment (and a plain name holding `~` is its own long name). The queries
+       are normalised at every check, so a scope written long matches whenever
+       its entry comes to exist; a scope written as the alias of an entry that
+       doesn't exist yet matches that spelling only — write deny scopes with
+       long names. The long names feed the comparison key only
+       (`comparison_key`): the path handed to the operation keeps its names as
+       given. The first version of this item replaced them in the operation's
+       path too, which broke every read inside a compiled binary whose own path
+       holds an alias (the Windows CI runner's temp dir is under `RUNNER~1`):
+       the binary's virtual file system is keyed on the executable's path as
+       spelled, so `…\runneradmin\…\main.exe\file.txt` missed it and went to the
+       real disk (os error 3; eleven `compile`, `npm` and `run` specs on the
+       gaps-2 Windows dispatch). `permission/windows_short_name_deny` now also
+       checks that an operation's error names the alias it was given. A command
+       named without a path (`Deno.Command("tool")`, a run query for `tool`) is
+       found through `PATH`, and that resolved path took the plain fold, not
+       `comparison_key`: found through a `PATH` entry spelled with an alias, it
+       missed a run grant or a run deny scope written long
+       (`run/allow_run_allowlist_resolution` on the Windows runner, whose temp
+       dir is under `RUNNER~1`). It now takes the same key;
+       `windows_short_name_deny` checks a run grant and a run deny written long
+       against a command found by the alias.
+     - **Windows compared names case-insensitively for ASCII letters only.**
+       NTFS folds every letter through its `$UpCase` table, so `base/Ärger` and
+       `base/ärger` are one folder; the ASCII fold saw two, and the no-follow
+       checks let `Deno.renameSync("base/ärger", …)` move the parent of a denied
+       `base/Ärger/b` (and a grant written in one spelling didn't cover the
+       other). The Windows fold is now per character, each mapped to its
+       single-character uppercase as `$UpCase` does (a character outside the BMP
+       or with a multi-character uppercase, `ß`, stays itself; `σ` and `ς` both
+       go to `Σ`; the Kelvin sign stays apart from `k`, as on NTFS, where
+       Unicode's simple case folding would merge them); no normalization, since
+       NTFS stores names as given. macOS keeps 224's NFKD + full case mapping
+       (APFS normalizes).
+     - **The fold is the OS upcase table's, not Unicode's** (the denext.8 delta
+       audit, N4). The first version of this item folded each character through
+       Rust's `char::to_uppercase`, Unicode's simple mapping, which maps `ı`
+       (U+0131) to `I` and `ſ` (U+017F) to `S`, where Windows's table does not,
+       and the two tables have drifted on other letters over the years (the .NET
+       runtime carries a separate table for the same reason). Both sides of a
+       comparison are folded, so a wider fold let an allow scope cover a sibling
+       that NTFS keeps apart (`--allow-write=C:\x\settings` covered
+       `C:\x\ſettings`, a new folder outside the grant), and a narrower one
+       would let a deny scope miss a spelling NTFS treats as the same name.
+       `windows_fold_char` now asks `RtlUpcaseUnicodeChar` (ntdll; the table
+       `format` writes into a volume's `$UpCase`) for every non-ASCII BMP
+       character, ASCII inline, so the fold is the file system's by construction
+       rather than a guess at it. A volume formatted by an older Windows than
+       the running one can differ for letters whose mapping was added in
+       between; nothing else. Spec `permission/windows_fold_ntfs` checks the
+       agreement on the CI runner's volume for 21 pairs of spellings (ASCII,
+       Latin, Cyrillic, Greek incl. final sigma, `ı`/`I`, `ſ`/`S`, the Kelvin
+       sign, `ß`, titlecase `ǅ`, Cherokee, Georgian Mtavruli, Latin Extended-D):
+       for each it asks NTFS whether the two spellings are one folder and the
+       permission layer whether an allow scope and a deny scope written with one
+       cover the other; a disagreement in either direction fails the spec, and
+       the per-pair lines record what that volume does.
+     - **Trailing dots and spaces, and named streams** (the delta audit, N1).
+       Win32 removes the trailing dots and spaces of a name before the file
+       system sees it, so `base\a.`, `base\a` and `base\a. . .` open `base\a`,
+       and `name:stream` / `name::$DATA` open a stream of `name` (the default
+       stream is the file's own data; `::$INDEX_ALLOCATION` a folder's index).
+       The permission layer's lexical normalization (`normalize_path`) already
+       removed trailing dots and spaces from every name, but only when the path
+       needed another normalization too (a `/`, a `.` or `..`, a trailing
+       separator, or a dot or space at the end of the _last_ name), so
+       `base\a.\b` was compared as written, and so was a flag scope written that
+       way (`--deny-write=base\a.\b` matched nothing; a query through an
+       existing `a.` was still caught by the parent's canonicalization, which
+       opens `a`). A stream suffix was never removed: `base\a\b\prog::$DATA` and
+       `prog:evil` compared as other names than the denied `prog`, so a write to
+       a denied file's default or named stream, and a stream of a denied folder,
+       got past `--deny-write` (and a read of a denied file's `::$DATA` past
+       `--deny-read`). Now the comparison key of every path the permission layer
+       builds (`comparison_key`, after `normalize_path`) has the trailing dots
+       and spaces of every name removed (a name of only dots and spaces is
+       dropped, as `normalize_path` does) and every name cut at its first `:`,
+       before the long-name lookup and the fold, so a stream is checked as its
+       file and an alias with a stream as the long name. The path handed to the
+       operation is never changed: it keeps the stream (a write to `x:meta`
+       still writes the stream, not `x`) and its names as given, and Win32 opens
+       the same entry for the trimmed spelling (a parent spelled with a trailing
+       space, which Win32 keeps, does not exist unless made through `\\?\`, so
+       the operation fails on it). A verbatim `\\?\` path is only folded: Win32
+       hands it to the file system unchanged, so it names the literal entry
+       (`a.`), and `strip_verbatim_prefix` keeps the prefix on exactly those
+       paths, so they match no scope written without one. The resolution of a
+       path that doesn't exist yet appended each missing name with
+       `PathBuf::push`, which parses its argument as a path: a single-letter
+       name with a stream (`x:meta`) parsed as the drive `X:`, and the checked
+       path handed to the operation became `x:meta` on that drive, so a write to
+       `base\other\x:meta` under a scoped grant failed with "the system cannot
+       find the path specified" (seen on the first Windows dispatch of
+       `windows_trailing_dot_deny`). Names are now appended as text after a
+       separator (`push_name`), in that resolution and in the no-follow one. The
+       same parse broke the read back: the canonicalization of an existing
+       stream (`sys_traits`' clean-up of the `\\?\` result rebuilds the path
+       name by name with `push`) returned `x:meta` on the drive `X:` too, so the
+       file is now resolved and the stream suffix put back as text
+       (`windows_split_final_stream`).
+       `canonicalize_keeps_a_single_letter_stream_name` checks a stream before
+       and after it exists, a folder's stream and the no-follow resolution.
+     - **The matches that still read a path as spelled.** A sweep of every allow
+       and deny match for the plain fold found three on Windows. A Unix-socket
+       deny scope (`--deny-net=unix:…`) compared the socket path with
+       `comparison_path`, so a path spelled with an 8.3 alias of the denied one
+       got past it (the socket checks take the path as given, with no
+       canonicalization). It now takes `comparison_key`. A run deny by name
+       (`--deny-run=longtool`) compared the command's file name as spelled and
+       ASCII-folded, so its alias (`LONGTO~1.EXE`) got past it, and so did a
+       case variant outside ASCII (`Ärger.exe` under `--deny-run=ärger`). It now
+       reads the long name and folds through NTFS's table. The comparison also
+       went byte by byte and panicked when the name's length fell inside a
+       character of the stem (`--deny-run=abc` against `éé`, on every OS); it
+       now goes character by character. And a relative path with a drive and no
+       root (`x:meta`, `D:dir\f`), which Win32 resolves against that drive's own
+       current directory, came out of `cwd.join(path)` unchanged and not
+       absolute, so it missed a deny scope on that drive. `join_cwd` now joins
+       it to the current directory when the drive is the same and otherwise
+       resolves it as the file system call will (`GetFullPathNameW`). It is not
+       read as a stream of a file in the current directory, because Win32
+       doesn't read it that way (that needs `.\x:meta`). The remaining
+       `comparison_path` calls are inside `comparison_key` itself (a verbatim
+       path is folded only). Unit tests:
+       `test_net_unix_socket_deny_reads_8dot3_aliases`,
+       `test_denies_run_name_reads_8dot3_aliases`, `test_denies_run_name`
+       (Unicode case and the panic) and
+       `test_drive_relative_path_is_resolved_on_its_drive`.
+     - **`Deno.FsFile.prototype.utime` on a file opened read-only** was reported
+       as unchecked. It isn't: upstream's #30872 (Deno 2.5) checks write
+       permission on the file's path (no-follow, the partial check `Deno.utime`
+       has), so a denied file's times can't be set through a read-only
+       descriptor, nor any file's without `--allow-write`; a read-only open
+       isn't refused as such, as upstream (times need write permission on the
+       path, not a writable handle). The three descriptor ops now share one
+       check (`deno_fs::check_fd_metadata_write`, which `node:fs`'s `fchmod` /
+       `fchown` / `futimes` use too): `futime` keeps the partial check (224:
+       times touch only the entry's own metadata), and `op_fs_fchmod` /
+       `op_fs_fchown`, which had none, get the strict deny half `fchmod` /
+       `fchown` got in 224. Those two ops are registered but nothing in the
+       runtime's JavaScript calls them (`Deno.FsFile` has no `chmod` / `chown`),
+       so no user code reached the missing check.
+     - **`node:fs` `cp` / `cpSync` / `fs.promises.cp` with a destination of one
+       component** (`cp("src", "dst")`) threw `Empty path is not allowed` under
+       a scoped grant (`--allow-write=.`): `Path::parent` of `dst` is the empty
+       path, which the destination's parent check handed to the permission
+       parser (under `--allow-all` the check is skipped, which hid it). The
+       parent of a one-component path is the current directory now, in the
+       parent-folder check and in the copy-into-self check. That second check
+       walks the destination's ancestors up to the root and asked read
+       permission on each, so under `--allow-read=.` any destination in the
+       working directory (`cp("src/f", "sub/g")` on stock 2.9.8 too, and with
+       the first fix `cp("src/f", "g")`) failed on the folder above it with
+       `Requires read access`; an ancestor outside the read grant now ends the
+       walk, as one under an ignored permission already did (it can't be the
+       source, which was readable). A compatibility bug, not a permission one.
+
+     Tests: specs `permission/wasi_link_no_follow`,
+     `permission/wasi_open_dangling_link`, `permission/futime_deny` (passes
+     before this item too, as said above), `permission/windows_short_name_deny`
+     (the alias is read with `Scripting.FileSystemObject`, set with
+     `fsutil file setshortname` when the volume generates none, and when neither
+     works the spec says so and checks the long name) and
+     `permission/windows_deny_unicode_case`,
+     `permission/windows_trailing_dot_deny` (the trailing-dot, trailing-space
+     and stream spellings above under `--deny-write=base/a/b`, and that a stream
+     beside the denied path still writes and reads as a stream) and
+     `permission/windows_fold_ntfs` (Windows), `node/fs_cp_relative_dest`;
+     `deno_permissions` unit tests `win32_name_trimming_and_streams` (every OS),
+     `path_descriptor_trailing_dots_spaces_and_streams`,
+     `windows_fold_is_the_upcase_table`, `check_open_denies_a_streams_file`
+     (Windows).
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
 169-174, 176, 178, 180, 182-184, 186, 187, 189-191, 193-196, 198-203, 206, 207,
-209-215, 217, 221, 222) are what the prebuilt `libdenort` carries. The CLI-side
-parts (for example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a
-packaged app's launchers) are in the branch too, but a stock CLI does not run
-them; denext's own launcher provides that environment.
+209-215, 217, 221, 222, 224, 225) are what the prebuilt `libdenort` carries. The
+CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID`
+into a packaged app's launchers) are in the branch too, but a stock CLI does not
+run them; denext's own launcher provides that environment.
 
 The laufey backend hosts are built from
 [Brainwires/laufey](https://github.com/Brainwires/laufey) branch

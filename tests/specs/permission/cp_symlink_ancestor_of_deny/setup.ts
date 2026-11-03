@@ -1,0 +1,12 @@
+const evil = `${Deno.cwd()}/evil`;
+Deno.mkdirSync("evil/b", { recursive: true });
+Deno.writeTextFileSync("evil/b/prog", "replaced");
+Deno.mkdirSync("src");
+Deno.symlinkSync(evil, "src/c");
+Deno.mkdirSync("base");
+Deno.mkdirSync("other/b", { recursive: true });
+Deno.writeTextFileSync("other/b/prog", "packaged");
+Deno.symlinkSync(`${Deno.cwd()}/other`, "base/d");
+Deno.mkdirSync("tree/x", { recursive: true });
+Deno.writeTextFileSync("tree/x/f", "file");
+console.log("setup done");

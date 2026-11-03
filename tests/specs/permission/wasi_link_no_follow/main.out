@@ -1,0 +1,17 @@
+[WILDCARD]unlink a link to a file: done
+  link: absent  target: file
+unlink a link out of the preopen: done
+  link: absent  secret: file
+rmdir a link to a folder: not a directory
+  link: link  folder: folder
+rename a link to a file: done
+  link: absent  renamed: link  target: file
+unlink a link that is a parent of a denied path: denied
+  link: link
+rename a link that is a parent of a denied path: denied
+  link: link  moved: absent  denied path: file
+unlink the denied file: denied
+still packaged: true
+rmdir a folder: done
+  folder: absent
+[WILDCARD]

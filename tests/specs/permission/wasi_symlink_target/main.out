@@ -1,0 +1,10 @@
+[WILDCARD]relative escape: outside the preopen
+absolute escape: outside the preopen
+escape after a name: outside the preopen
+denied target: denied
+file in a denied target: denied
+no link made: true
+inside: linked
+inside, not there yet: linked
+parent of a denied path: linked
+[WILDCARD]

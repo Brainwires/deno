@@ -1,0 +1,18 @@
+{
+  "tempDir": true,
+  "tests": {
+    "node_wasi": {
+      "if": "unix",
+      "steps": [
+        {
+          "args": "run --allow-read --allow-write setup.ts",
+          "output": "setup done\n"
+        },
+        {
+          "args": "run --allow-read --allow-write=base --deny-write=base/a/b --deny-write=base/alink/b main.ts",
+          "output": "main.out"
+        }
+      ]
+    }
+  }
+}

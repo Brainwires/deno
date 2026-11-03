@@ -318,6 +318,7 @@ pub fn op_fs_chmod_sync(
   #[string] path: &str,
   mode: u32,
 ) -> Result<(), FsOpsError> {
+  let requested = path;
   let path = state
     .borrow_mut::<deno_permissions::PermissionsContainer>()
     .check_open(
@@ -325,6 +326,12 @@ pub fn op_fs_chmod_sync(
       OpenAccessKind::Write,
       Some("Deno.chmodSync()"),
     )?;
+  check_metadata_write(
+    state.borrow::<deno_permissions::PermissionsContainer>(),
+    Path::new(requested),
+    &path,
+    "Deno.chmodSync()",
+  )?;
   let fs = state.borrow::<FileSystemRc>();
   fs.chmod_sync(&path, mode).context_path("chmod", &path)?;
   Ok(())
@@ -337,6 +344,7 @@ pub fn op_fs_chmod_sync(
   #[string] path: &str,
   mode: i32,
 ) -> Result<(), FsOpsError> {
+  let requested = path;
   let path = state
     .borrow_mut::<deno_permissions::PermissionsContainer>()
     .check_open(
@@ -344,6 +352,12 @@ pub fn op_fs_chmod_sync(
       OpenAccessKind::Write,
       Some("Deno.chmodSync()"),
     )?;
+  check_metadata_write(
+    state.borrow::<deno_permissions::PermissionsContainer>(),
+    Path::new(requested),
+    &path,
+    "Deno.chmodSync()",
+  )?;
   let fs = state.borrow::<FileSystemRc>();
   fs.chmod_sync(&path, mode).context_path("chmod", &path)?;
   Ok(())
@@ -358,6 +372,7 @@ pub async fn op_fs_chmod_async(
 ) -> Result<(), FsOpsError> {
   let (fs, path) = {
     let mut state = state.borrow_mut();
+    let requested = path.clone();
     let path = state
       .borrow_mut::<deno_permissions::PermissionsContainer>()
       .check_open(
@@ -365,6 +380,12 @@ pub async fn op_fs_chmod_async(
         OpenAccessKind::Write,
         Some("Deno.chmod()"),
       )?;
+    check_metadata_write(
+      state.borrow::<deno_permissions::PermissionsContainer>(),
+      Path::new(&requested),
+      &path,
+      "Deno.chmod()",
+    )?;
     (state.borrow::<FileSystemRc>().clone(), path)
   };
   fs.chmod_async(path.as_owned(), mode)
@@ -382,6 +403,7 @@ pub async fn op_fs_chmod_async(
 ) -> Result<(), FsOpsError> {
   let (fs, path) = {
     let mut state = state.borrow_mut();
+    let requested = path.clone();
     let path = state
       .borrow_mut::<deno_permissions::PermissionsContainer>()
       .check_open(
@@ -389,6 +411,12 @@ pub async fn op_fs_chmod_async(
         OpenAccessKind::Write,
         Some("Deno.chmod()"),
       )?;
+    check_metadata_write(
+      state.borrow::<deno_permissions::PermissionsContainer>(),
+      Path::new(&requested),
+      &path,
+      "Deno.chmod()",
+    )?;
     (state.borrow::<FileSystemRc>().clone(), path)
   };
   fs.chmod_async(path.as_owned(), mode)
@@ -404,6 +432,7 @@ pub fn op_fs_chown_sync(
   uid: Option<u32>,
   gid: Option<u32>,
 ) -> Result<(), FsOpsError> {
+  let requested = path;
   let path = state
     .borrow_mut::<deno_permissions::PermissionsContainer>()
     .check_open(
@@ -411,6 +440,12 @@ pub fn op_fs_chown_sync(
       OpenAccessKind::Write,
       Some("Deno.chownSync()"),
     )?;
+  check_metadata_write(
+    state.borrow::<deno_permissions::PermissionsContainer>(),
+    Path::new(requested),
+    &path,
+    "Deno.chownSync()",
+  )?;
   let fs = state.borrow::<FileSystemRc>();
   fs.chown_sync(&path, uid, gid)
     .context_path("chown", &path)?;
@@ -426,6 +461,7 @@ pub async fn op_fs_chown_async(
 ) -> Result<(), FsOpsError> {
   let (fs, path) = {
     let mut state = state.borrow_mut();
+    let requested = path.clone();
     let path = state
       .borrow_mut::<deno_permissions::PermissionsContainer>()
       .check_open(
@@ -433,11 +469,86 @@ pub async fn op_fs_chown_async(
         OpenAccessKind::Write,
         Some("Deno.chown()"),
       )?;
+    check_metadata_write(
+      state.borrow::<deno_permissions::PermissionsContainer>(),
+      Path::new(&requested),
+      &path,
+      "Deno.chown()",
+    )?;
     (state.borrow::<FileSystemRc>().clone(), path)
   };
   fs.chown_async(path.as_owned(), uid, gid)
     .await
     .context_path("chown", &path)?;
+  Ok(())
+}
+
+/// A mode or owner change on a folder that holds a `--deny-write` path doesn't
+/// modify the denied path, but it decides who can reach or replace it: mode
+/// 000 on its parent locks it away as mode 000 on the path itself would, and a
+/// group- or world-writable parent lets another local user move it out and put
+/// another file in its place. So `chmod` / `chown` get the strict write check a
+/// recursive remove has (a deny scope inside the path refuses it) on the path
+/// as given, and its deny half on the path the change lands on. Times
+/// (`utime`) only touch the folder's own entry and keep the partial check
+/// (denext, DENEXT.md 224).
+pub fn check_metadata_write(
+  permissions: &deno_permissions::PermissionsContainer,
+  requested: &Path,
+  resolved: &Path,
+  api_name: &str,
+) -> Result<(), PermissionCheckError> {
+  permissions.check_write(Cow::Borrowed(requested), api_name)?;
+  if resolved != requested {
+    permissions.check_write_resolved_not_denied(resolved, api_name)?;
+  }
+  Ok(())
+}
+
+/// A non-recursive remove takes away one entry, and the partial check is
+/// enough for a file or a folder: a folder with a denied path in it isn't
+/// empty. A symlink (or a Windows junction) is different: removing it takes
+/// away every path reached through it, so a link that is a parent of a
+/// `--deny-write` path gets the strict check a recursive remove has (denext,
+/// DENEXT.md 224).
+pub fn check_remove_link(
+  permissions: &deno_permissions::PermissionsContainer,
+  fs: &FileSystemRc,
+  path: &CheckedPath,
+  api_name: &str,
+) -> Result<(), PermissionCheckError> {
+  if fs.lstat_sync(path).is_ok_and(|stat| stat.is_symlink) {
+    permissions.check_write(Cow::Borrowed(&**path), api_name)?;
+  }
+  Ok(())
+}
+
+/// The checks for a metadata change through an open descriptor (`fchmod`,
+/// `fchown`, `futime`; `node:fs` `fchmod` / `fchown` / `futimes` share them).
+/// The descriptor was opened with the permission its open needed, which may
+/// be read only, so a change through it needs write permission on the file's
+/// path (the resolved path the open recorded; no follow, as `utime` checks it
+/// upstream). `owner_or_mode`: a mode or owner change on a folder that holds
+/// a `--deny-write` path decides who can reach or replace the denied path, so
+/// it also gets the deny half of the strict check, as [`check_metadata_write`]
+/// gives `chmod` / `chown` by path; times keep the partial check (denext,
+/// DENEXT.md 224, 225).
+pub fn check_fd_metadata_write(
+  permissions: &deno_permissions::PermissionsContainer,
+  file: &Rc<dyn deno_io::fs::File>,
+  owner_or_mode: bool,
+  api_name: &str,
+) -> Result<(), PermissionCheckError> {
+  if let Some(path) = file.maybe_path() {
+    permissions.check_open(
+      Cow::Borrowed(path),
+      OpenAccessKind::WriteNoFollow,
+      Some(api_name),
+    )?;
+    if owner_or_mode {
+      permissions.check_write_resolved_not_denied(path, api_name)?;
+    }
+  }
   Ok(())
 }
 
@@ -449,6 +560,12 @@ pub fn op_fs_fchmod_sync(
 ) -> Result<(), FsOpsError> {
   let file =
     FileResource::get_file(state, rid).map_err(FsOpsErrorKind::Resource)?;
+  check_fd_metadata_write(
+    state.borrow::<deno_permissions::PermissionsContainer>(),
+    &file,
+    true,
+    "Deno.FsFile.prototype.chmodSync()",
+  )?;
   file.chmod_sync(mode)?;
   Ok(())
 }
@@ -459,8 +576,18 @@ pub async fn op_fs_fchmod_async(
   #[smi] rid: ResourceId,
   mode: u32,
 ) -> Result<(), FsOpsError> {
-  let file = FileResource::get_file(&state.borrow(), rid)
-    .map_err(FsOpsErrorKind::Resource)?;
+  let file = {
+    let state = state.borrow();
+    let file =
+      FileResource::get_file(&state, rid).map_err(FsOpsErrorKind::Resource)?;
+    check_fd_metadata_write(
+      state.borrow::<deno_permissions::PermissionsContainer>(),
+      &file,
+      true,
+      "Deno.FsFile.prototype.chmod()",
+    )?;
+    file
+  };
   file.chmod_async(mode).await?;
   Ok(())
 }
@@ -474,6 +601,12 @@ pub fn op_fs_fchown_sync(
 ) -> Result<(), FsOpsError> {
   let file =
     FileResource::get_file(state, rid).map_err(FsOpsErrorKind::Resource)?;
+  check_fd_metadata_write(
+    state.borrow::<deno_permissions::PermissionsContainer>(),
+    &file,
+    true,
+    "Deno.FsFile.prototype.chownSync()",
+  )?;
   file.chown_sync(uid, gid)?;
   Ok(())
 }
@@ -485,8 +618,18 @@ pub async fn op_fs_fchown_async(
   uid: Option<u32>,
   gid: Option<u32>,
 ) -> Result<(), FsOpsError> {
-  let file = FileResource::get_file(&state.borrow(), rid)
-    .map_err(FsOpsErrorKind::Resource)?;
+  let file = {
+    let state = state.borrow();
+    let file =
+      FileResource::get_file(&state, rid).map_err(FsOpsErrorKind::Resource)?;
+    check_fd_metadata_write(
+      state.borrow::<deno_permissions::PermissionsContainer>(),
+      &file,
+      true,
+      "Deno.FsFile.prototype.chown()",
+    )?;
+    file
+  };
   file.chown_async(uid, gid).await?;
   Ok(())
 }
@@ -513,6 +656,14 @@ pub fn op_fs_remove_sync(
   };
 
   let fs = state.borrow::<FileSystemRc>();
+  if !recursive {
+    check_remove_link(
+      state.borrow::<deno_permissions::PermissionsContainer>(),
+      fs,
+      &path,
+      "Deno.removeSync()",
+    )?;
+  }
   fs.remove_sync(&path, recursive)
     .context_path("remove", &path)?;
 
@@ -541,8 +692,17 @@ pub async fn op_fs_remove_async(
         .borrow_mut::<deno_permissions::PermissionsContainer>()
         .check_write_partial(path, "Deno.remove()")?
     };
+    let fs = state.borrow::<FileSystemRc>().clone();
+    if !recursive {
+      check_remove_link(
+        state.borrow::<deno_permissions::PermissionsContainer>(),
+        &fs,
+        &path,
+        "Deno.remove()",
+      )?;
+    }
 
-    (state.borrow::<FileSystemRc>().clone(), path)
+    (fs, path)
   };
 
   fs.remove_async(path.as_owned(), recursive)
@@ -821,6 +981,13 @@ pub fn op_fs_rename_sync(
     OpenAccessKind::WriteNoFollow,
     Some("Deno.renameSync()"),
   )?;
+  // A rename moves the whole tree under the old path and puts a tree in
+  // place of the new one, so like a recursive remove both paths also get
+  // the strict write check: a deny scope inside either blocks it. Otherwise a
+  // denied folder's parent could be moved away, or another tree moved into
+  // the place of a parent of a denied path (denext, DENEXT.md 224).
+  permissions.check_write(Cow::Borrowed(&*oldpath), "Deno.renameSync()")?;
+  permissions.check_write(Cow::Borrowed(&*newpath), "Deno.renameSync()")?;
 
   let fs = state.borrow::<FileSystemRc>();
   fs.rename_sync(&oldpath, &newpath)
@@ -849,6 +1016,13 @@ pub async fn op_fs_rename_async(
       OpenAccessKind::WriteNoFollow,
       Some("Deno.rename()"),
     )?;
+    // A rename moves the whole tree under the old path and puts a tree in
+    // place of the new one, so like a recursive remove both paths also get
+    // the strict write check: a deny scope inside either blocks it. Otherwise a
+    // denied folder's parent could be moved away, or another tree moved into
+    // the place of a parent of a denied path (denext, DENEXT.md 224).
+    permissions.check_write(Cow::Borrowed(&*oldpath), "Deno.rename()")?;
+    permissions.check_write(Cow::Borrowed(&*newpath), "Deno.rename()")?;
     (state.borrow::<FileSystemRc>().clone(), oldpath, newpath)
   };
 
@@ -943,7 +1117,13 @@ fn check_symlink_permissions(
         other => other,
       };
       FsOpsErrorKind::Permission(err).into_box()
-    })
+    })?;
+  // Unscoped --allow-write still leaves its --deny-write scopes: a link made
+  // at a denied path, or at a parent of one, would put another tree in the
+  // denied path's place, so the link path gets the strict write check a
+  // recursive remove has (denext, DENEXT.md 224).
+  permissions.check_write(Cow::Borrowed(Path::new(newpath)), api_name)?;
+  Ok(())
 }
 
 #[op2(stack_trace)]
@@ -1922,15 +2102,12 @@ pub fn op_fs_futime_sync(
 ) -> Result<(), FsOpsError> {
   let file =
     FileResource::get_file(state, rid).map_err(FsOpsErrorKind::Resource)?;
-  if let Some(path) = file.maybe_path() {
-    _ = state
-      .borrow::<deno_permissions::PermissionsContainer>()
-      .check_open(
-        Cow::Borrowed(path),
-        OpenAccessKind::WriteNoFollow,
-        Some("Deno.FsFile.prototype.utimeSync()"),
-      )?;
-  }
+  check_fd_metadata_write(
+    state.borrow::<deno_permissions::PermissionsContainer>(),
+    &file,
+    false,
+    "Deno.FsFile.prototype.utimeSync()",
+  )?;
   file.utime_sync(atime_secs, atime_nanos, mtime_secs, mtime_nanos)?;
   Ok(())
 }
@@ -1944,18 +2121,18 @@ pub async fn op_fs_futime_async(
   #[number] mtime_secs: i64,
   #[smi] mtime_nanos: u32,
 ) -> Result<(), FsOpsError> {
-  let file = FileResource::get_file(&state.borrow(), rid)
-    .map_err(FsOpsErrorKind::Resource)?;
-  if let Some(path) = file.maybe_path() {
-    _ = state
-      .borrow()
-      .borrow::<deno_permissions::PermissionsContainer>()
-      .check_open(
-        Cow::Borrowed(path),
-        OpenAccessKind::WriteNoFollow,
-        Some("Deno.FsFile.prototype.utime()"),
-      )?;
-  }
+  let file = {
+    let state = state.borrow();
+    let file =
+      FileResource::get_file(&state, rid).map_err(FsOpsErrorKind::Resource)?;
+    check_fd_metadata_write(
+      state.borrow::<deno_permissions::PermissionsContainer>(),
+      &file,
+      false,
+      "Deno.FsFile.prototype.utime()",
+    )?;
+    file
+  };
   file
     .utime_async(atime_secs, atime_nanos, mtime_secs, mtime_nanos)
     .await?;

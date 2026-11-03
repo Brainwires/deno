@@ -1,0 +1,18 @@
+{
+  "tempDir": true,
+  "tests": {
+    "unicode_case": {
+      "if": "windows",
+      "steps": [
+        {
+          "args": "run --allow-read --allow-write setup.ts",
+          "output": "setup done\n"
+        },
+        {
+          "args": "run --allow-read --allow-write=base --deny-write=base/Ärger/b --deny-write=base/Папка/b --allow-run main.ts",
+          "output": "main.out"
+        }
+      ]
+    }
+  }
+}

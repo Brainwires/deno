@@ -1,0 +1,10 @@
+cpSync a folder: done
+  dst: f,sub
+cpSync a file: done
+  g: f
+cp a file: done
+  h: f
+cp a folder: done
+  dst2: f,sub
+cp (callback) a file: done
+  i: f

@@ -1,0 +1,8 @@
+{
+  // A destination of one component ("dst") has the empty path as its parent,
+  // which the permission check refused as "Empty path is not allowed" under a
+  // scoped grant (DENEXT.md 225).
+  "tempDir": true,
+  "args": "run --allow-read=. --allow-write=. main.ts",
+  "output": "main.out"
+}

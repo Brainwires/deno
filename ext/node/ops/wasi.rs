@@ -228,6 +228,17 @@ impl WasiInner {
     fd
   }
 
+  /// The canonical root of the preopen `dirfd` is in.
+  fn preopen_root(&self, dirfd: i32) -> Result<std::path::PathBuf, i32> {
+    match self.get_fd(dirfd) {
+      Some(FdEntry::PreopenDir { real_path, .. }) => canonicalize_io(real_path),
+      Some(FdEntry::Dir {
+        preopen_root_path, ..
+      }) => canonicalize_io(preopen_root_path),
+      _ => Err(ERRNO_BADF),
+    }
+  }
+
   fn resolve_preopen_path(
     &self,
     dirfd: i32,
@@ -344,17 +355,24 @@ fn canonicalize_lookup(
       }
       // When the path doesn't exist, fall back to canonicalizing the parent
       // and joining the file_name — used by path_open with O_CREAT for
-      // files that don't yet exist.
-      let parent = resolved.parent().ok_or(ERRNO_NOENT)?;
-      let parent_canonical = std::fs::canonicalize(parent).map_err(|pe| {
-        if is_loop_error(&pe) {
-          ERRNO_LOOP
-        } else {
-          io_err_to_errno(&pe)
-        }
-      })?;
-      let filename = resolved.file_name().ok_or(ERRNO_INVAL)?;
-      let joined = parent_canonical.join(filename);
+      // files that don't yet exist. When symlinks are followed, a dangling
+      // link at the end is followed to where the kernel would create the
+      // file (a link out of the preopen was the escape of DENEXT.md 225);
+      // without following, the link itself is the target.
+      let joined = if follow_symlinks {
+        follow_missing_path(resolved)?
+      } else {
+        let parent = resolved.parent().ok_or(ERRNO_NOENT)?;
+        let parent_canonical = std::fs::canonicalize(parent).map_err(|pe| {
+          if is_loop_error(&pe) {
+            ERRNO_LOOP
+          } else {
+            io_err_to_errno(&pe)
+          }
+        })?;
+        let filename = resolved.file_name().ok_or(ERRNO_INVAL)?;
+        parent_canonical.join(filename)
+      };
       // Even for a non-existent target we sanity-check the resolved parent
       // is rooted in the preopen so we never permit writes outside.
       if !joined.starts_with(canonical_base) {
@@ -364,6 +382,99 @@ fn canonicalize_lookup(
     }
     None => Err(ERRNO_NOENT),
   }
+}
+
+/// The most symlinks followed while resolving a link target (Linux's
+/// MAXSYMLINKS).
+const MAX_SYMLINK_HOPS: usize = 40;
+
+/// Where a symlink made in `link_parent` with `target` lands when it is
+/// followed, resolved the way the kernel will: through existing links (a
+/// dangling one followed to its target), a missing tail kept as named.
+/// `None` when that place can't be known: a `..` after a name (the name may
+/// be a link the kernel follows first, so folding it away would name a
+/// different place), a chain of links that is too long, or an error.
+fn resolve_symlink_target(
+  link_parent: &Path,
+  target: &Path,
+) -> Option<std::path::PathBuf> {
+  use std::path::Component;
+  let mut seen_name = false;
+  for component in target.components() {
+    match component {
+      Component::ParentDir if seen_name => return None,
+      Component::Normal(_) => seen_name = true,
+      _ => {}
+    }
+  }
+  follow_missing_path(&link_parent.join(target)).ok()
+}
+
+/// Where `path`, which does not resolve as a whole, lands when the kernel
+/// follows it: the longest existing prefix canonicalized, a dangling symlink
+/// in the tail followed to its target (and on, through a chain), the names
+/// past the last existing entry kept as named. The errno names what stopped
+/// it: `ELOOP` for a chain longer than `MAX_SYMLINK_HOPS` (or a loop the
+/// kernel reports), `ENOENT` when the tail runs out of names to keep, or the
+/// error the kernel gave (denext, DENEXT.md 224, 225).
+fn follow_missing_path(path: &Path) -> Result<std::path::PathBuf, i32> {
+  let mut path = path.to_path_buf();
+  let mut hops = 0;
+  'resolve: loop {
+    let mut names = Vec::new();
+    let mut current = path.clone();
+    loop {
+      match std::fs::canonicalize(&current) {
+        Ok(mut resolved) => {
+          for name in names.into_iter().rev() {
+            resolved.push(name);
+          }
+          return Ok(resolved);
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+          if let Ok(next_target) = std::fs::read_link(&current) {
+            hops += 1;
+            if hops > MAX_SYMLINK_HOPS {
+              return Err(ERRNO_LOOP);
+            }
+            let mut next = if next_target.is_absolute() {
+              next_target
+            } else {
+              current.parent().ok_or(ERRNO_NOENT)?.join(next_target)
+            };
+            for name in names.into_iter().rev() {
+              next.push(name);
+            }
+            path = next;
+            continue 'resolve;
+          }
+          names.push(current.file_name().ok_or(ERRNO_NOENT)?.to_owned());
+          current = current.parent().ok_or(ERRNO_NOENT)?.to_path_buf();
+        }
+        Err(err) if is_loop_error(&err) => return Err(ERRNO_LOOP),
+        Err(err) => return Err(io_err_to_errno(&err)),
+      }
+    }
+  }
+}
+
+/// Removing a symlink (or a Windows junction) takes away every path reached
+/// through it, so a link that is a parent of a `--deny-write` path gets the
+/// strict write check a recursive remove has, as `Deno.remove` gives one
+/// (`deno_fs::check_remove_link`; denext, DENEXT.md 224, 225).
+fn check_remove_link(
+  permissions: &PermissionsContainer,
+  resolved: &Path,
+) -> Result<(), i32> {
+  if std::fs::symlink_metadata(resolved)
+    .is_ok_and(|meta| meta.file_type().is_symlink())
+    && permissions
+      .check_write(Cow::Borrowed(resolved), "node:wasi")
+      .is_err()
+  {
+    return Err(ERRNO_ACCES);
+  }
+  Ok(())
 }
 
 fn is_loop_error(e: &std::io::Error) -> bool {
@@ -1539,15 +1650,21 @@ impl WasiContext {
       return ERRNO_FAULT;
     };
     let inner = self.inner.borrow();
-    let resolved = match inner.resolve_preopen_path(
+    // The entry named is removed, never what a link at it points to (WASI's
+    // path_remove_directory doesn't follow the final link, as rmdir doesn't).
+    let resolved = match inner.resolve_preopen_path_ex(
       dirfd,
       &path_str,
       &self.permissions,
-      OpenAccessKind::Write,
+      OpenAccessKind::WriteNoFollow,
+      /* follow_symlinks */ false,
     ) {
       Ok(p) => p,
       Err(e) => return e,
     };
+    if let Err(e) = check_remove_link(&self.permissions, &resolved) {
+      return e;
+    }
     match std::fs::remove_dir(&resolved) {
       Ok(()) => ERRNO_SUCCESS,
       Err(e) => io_err_to_errno(&e),
@@ -1566,15 +1683,21 @@ impl WasiContext {
       return ERRNO_FAULT;
     };
     let inner = self.inner.borrow();
-    let resolved = match inner.resolve_preopen_path(
+    // The entry named is unlinked, never what a link at it points to (WASI's
+    // path_unlink_file doesn't follow the final link, as unlink doesn't).
+    let resolved = match inner.resolve_preopen_path_ex(
       dirfd,
       &path_str,
       &self.permissions,
-      OpenAccessKind::Write,
+      OpenAccessKind::WriteNoFollow,
+      /* follow_symlinks */ false,
     ) {
       Ok(p) => p,
       Err(e) => return e,
     };
+    if let Err(e) = check_remove_link(&self.permissions, &resolved) {
+      return e;
+    }
     match std::fs::remove_file(&resolved) {
       Ok(()) => ERRNO_SUCCESS,
       Err(e) => io_err_to_errno(&e),
@@ -1599,24 +1722,43 @@ impl WasiContext {
       return ERRNO_FAULT;
     };
     let inner = self.inner.borrow();
-    let old_resolved = match inner.resolve_preopen_path(
+    // The entries named are renamed, never what a link at either points to
+    // (WASI's path_rename doesn't follow the final link, as rename doesn't).
+    let old_resolved = match inner.resolve_preopen_path_ex(
       old_dirfd,
       &old_path,
       &self.permissions,
-      OpenAccessKind::ReadWrite,
+      OpenAccessKind::ReadWriteNoFollow,
+      /* follow_symlinks */ false,
     ) {
       Ok(p) => p,
       Err(e) => return e,
     };
-    let new_resolved = match inner.resolve_preopen_path(
+    let new_resolved = match inner.resolve_preopen_path_ex(
       new_dirfd,
       &new_path,
       &self.permissions,
-      OpenAccessKind::ReadWrite,
+      OpenAccessKind::ReadWriteNoFollow,
+      /* follow_symlinks */ false,
     ) {
       Ok(p) => p,
       Err(e) => return e,
     };
+    // A rename moves the tree under the old path and puts one in place of the
+    // new path: like a recursive remove, a deny scope inside either refuses
+    // it, so a denied path's parent can't be moved away or replaced (denext,
+    // DENEXT.md 224).
+    if self
+      .permissions
+      .check_write(Cow::Borrowed(old_resolved.as_path()), "node:wasi")
+      .is_err()
+      || self
+        .permissions
+        .check_write(Cow::Borrowed(new_resolved.as_path()), "node:wasi")
+        .is_err()
+    {
+      return ERRNO_ACCES;
+    }
     match std::fs::rename(&old_resolved, &new_resolved) {
       Ok(()) => ERRNO_SUCCESS,
       Err(e) => io_err_to_errno(&e),
@@ -1752,6 +1894,53 @@ impl WasiContext {
       Ok(p) => p,
       Err(e) => return e,
     };
+    // A link at a parent of a denied path would put another tree in the
+    // denied path's place (denext, DENEXT.md 224).
+    if self
+      .permissions
+      .check_write(Cow::Borrowed(new_resolved.as_path()), "node:wasi")
+      .is_err()
+    {
+      return ERRNO_ACCES;
+    }
+    // The target is only a string stored in the link, resolved when the link
+    // is followed: Deno.symlink() takes unscoped read and write for that
+    // reason. Under a preopen's scoped grant the target, resolved from the
+    // link's folder as the kernel will, must stay in the preopen (the WASI
+    // sandbox: ENOTCAPABLE, as every path_* op answers an escape) and be
+    // readable and writable (EACCES), the rule Deno.symlink() applies to a
+    // scoped grant inside a confined lifecycle-script jail. Otherwise a link
+    // out of the preopen, or to a denied path, would let host code that
+    // writes under the preopen reach it (denext, DENEXT.md 224).
+    let target_str = if cfg!(windows) {
+      // Windows stores the target verbatim and can't resolve forward
+      // slashes (see below).
+      old_path.replace('/', "\\")
+    } else {
+      old_path.clone()
+    };
+    let Ok(preopen_root) = inner.preopen_root(dirfd) else {
+      return ERRNO_BADF;
+    };
+    let Some(target_resolved) = new_resolved.parent().and_then(|parent| {
+      resolve_symlink_target(parent, Path::new(&target_str))
+    }) else {
+      return ERRNO_NOTCAPABLE;
+    };
+    if !target_resolved.starts_with(&preopen_root) {
+      return ERRNO_NOTCAPABLE;
+    }
+    if self
+      .permissions
+      .check_open(
+        Cow::Owned(target_resolved),
+        OpenAccessKind::ReadWrite,
+        Some("node:wasi"),
+      )
+      .is_err()
+    {
+      return ERRNO_ACCES;
+    }
     #[cfg(unix)]
     {
       match std::os::unix::fs::symlink(&old_path, &new_resolved) {
@@ -1768,7 +1957,7 @@ impl WasiContext {
       // Normalize to backslashes here so subsequent path_open succeeds.
       // If the existing target is a directory, fall back to symlink_dir so
       // resolution doesn't break on directory targets.
-      let target = old_path.replace('/', "\\");
+      let target = target_str;
       let target_path = std::path::PathBuf::from(&target);
       let abs_target = if target_path.is_absolute() {
         target_path.clone()

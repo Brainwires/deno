@@ -1,0 +1,18 @@
+{
+  "tempDir": true,
+  "tests": {
+    "deno_and_node": {
+      "if": "unix",
+      "steps": [
+        {
+          "args": "run --allow-read --allow-write setup.ts",
+          "output": "setup done\n"
+        },
+        {
+          "args": "run --allow-read --allow-write --deny-write=base/c/b,base/d/b main.ts",
+          "output": "main.out"
+        }
+      ]
+    }
+  }
+}
