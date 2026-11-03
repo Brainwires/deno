@@ -8666,9 +8666,10 @@ free numbers when the branch is merged.
      be ignored. `deno compile`, `deno desktop` and `deno install` are the
      exception: their preloads would be built into the program they write and
      run at every launch, so a `NODE_OPTIONS` in the build machine's environment
-     would ship with it. They ignore `NODE_OPTIONS`' loaders and imports and
-     print one warning naming them (`--preload` on their command line still
-     applies). Tests: unit test
+     would ship with it. They ignore `NODE_OPTIONS`' loaders and imports, and
+     its `--require` modules, which they build in the same way, and print one
+     warning naming them (`--preload` / `--require` on their command line still
+     apply). Tests: unit test
      `node_options_loader_and_import_not_for_artifacts`; spec
      `compile/node_options_import_not_built_in`.
 
