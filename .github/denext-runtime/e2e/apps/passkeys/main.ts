@@ -155,16 +155,26 @@ await r.step("passkeys", async () => {
     });
     await sleep(1500);
     let firstDone = false;
-    // macOS refuses an unsigned app's request itself (invalid_rp), but not
-    // always at once: under WKWebView on an x86_64 runner the refusal has
-    // taken 0.4 to 1.9 s, and once over 2 s, which the ceremony's own
-    // 2000 ms timeout then answered first. Give the OS 30 s there, so the
-    // answer checked is the OS's; a request that really hangs still ends
-    // as `timeout` and fails the invalid_rp check. Elsewhere the request
-    // waits for a person, so it keeps the short timeout.
+    // macOS refuses an unsigned app's request itself (invalid_rp), but the
+    // first request since the OS's AuthenticationServicesAgent last ran
+    // waits for launchd to start that agent: 1.3 to 2.5 s on a fresh macOS
+    // runner, under WKWebView and CEF alike, the host's main thread idle the
+    // whole time (the agent's own log begins about 1.3 s after the request,
+    // and it refuses the moment it begins). Later requests, from any process
+    // while the agent stays up, take a few milliseconds. Once that wait went
+    // over 2 s, which the ceremony's own 2000 ms timeout then answered first,
+    // so give the OS 30 s there: the answer checked is the OS's, and a
+    // request that really hangs still ends as `timeout` and fails the
+    // invalid_rp check. Elsewhere the request waits for a person, so it keeps
+    // the short timeout.
     const osTimeout = OS === "darwin" ? 30000 : 2000;
+    // Timed from this call to its answer (not from after the busy loop below,
+    // which would leave out however long that loop ran).
+    const t0 = Date.now();
+    let firstMs = -1;
     const first = p.get(getOpts("example.com", osTimeout), { window: win })
       .finally(() => {
+        firstMs = Date.now() - t0;
         firstDone = true;
       });
     // A second request while the first runs is refused as busy. The first
@@ -191,7 +201,6 @@ await r.step("passkeys", async () => {
         "the OS ended the first ceremony before a second request could overlap it",
       );
     }
-    const t0 = Date.now();
     const firstEnv = envelope(
       await Promise.race([
         first,
@@ -200,7 +209,10 @@ await r.step("passkeys", async () => {
         ),
       ]),
     );
-    r.set("osRequest", { ...firstEnv, ms: Date.now() - t0 });
+    r.set("osRequest", {
+      ...firstEnv,
+      ms: firstMs >= 0 ? firstMs : Date.now() - t0,
+    });
     r.check(
       "the OS request ends with a refusal envelope (no person, no entitlement)",
       firstEnv.ok === false && CODES.includes(firstEnv.code),
