@@ -9191,59 +9191,7 @@ where the changes are discussed.
        `AI_ADDRCONFIG` assertions that filter real records apply on Linux with
        no IPv6 interface.
 
-The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
-64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
-118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
-169-174, 176, 178, 180, 182-184, 186, 187, 189-191, 193-196, 198-203, 206, 207,
-209-215, 217, 218, 221, 222, 224, 225) are what the prebuilt `libdenort`
-carries. The CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` /
-`LAUFEY_APP_ID` into a packaged app's launchers) are in the branch too, but a
-stock CLI does not run them; denext's own launcher provides that environment.
-
-The laufey backend hosts are built from
-[Brainwires/laufey](https://github.com/Brainwires/laufey) branch
-`development-denext` (formerly `denext/integration`; registered schemes, app
-data dir, WebKitGTK scheme request bodies, launch config, open-url / single
-instance, passkeys, the window API with littledivy/laufey#80 and #81, drag and
-drop / file dialogs / rich clipboard, global shortcuts / launch at login /
-DevTools control, menu accelerators / notifications, UI-thread tasks / auth
-sessions / non-blocking WebKitGTK scheme bodies, Windows bindgen fix, and API
-43: auth session cancel, Local Network Access for the registered custom-scheme
-origins on CEF, Windows menu and file-dialog fixes, CEF file drops; then the
-3.1.0 audits: scheme request cancellation (`on_cancel` on every backend), no
-aborts on a NUL in a string, the Linux window-destroy use-after-free, sync UI
-hops that can't hang exit; and API 44, the 3.1.1 audit: each JS call's document
-origin, the launch file's `bridgeOrigins`, scheme response write backpressure, a
-packaged app loading only its own runtime and pinned launch keys, WebKitGTK
-sub-frames kept off the bridge, a strict bridge JSON parser; and every host runs
-the runtime's own helper and worker launches (`run …`, `NODE_CHANNEL_FD`,
-`NEXT_PRIVATE_WORKER`) headless before its single-instance check; and API 48,
-the navigation guard; then, for runtime 3.0.0-rc.1, the CEF custom-scheme
-localStorage commit gate, KWin's blur, the XCB clipboard and Linux passkeys
-through libwebauthn (item 88); and, for runtime 3.0.0-denext.2, legacy Linux
-secure-store items read over an encrypted Secret Service session (laufey
-879ee0e) and tokio 1.53.3 with laufey's own `.cargo/audit.toml`; and, for
-runtime 3.0.0-denext.6, API 50: overlay windows, tray events, the launch
-activation policy and speech, item 183; and, for runtime 3.0.0-denext.7, CEF
-156, item 184, and the Linux Wayland overlay fixes, item 186; and, for runtime
-3.0.0-denext.8, API 51, hidden pages throttled instead of frozen on macOS and
-`backgroundThrottling`, item 198; and the Windows focus, tray role and window
-icon fixes, item 207), at the commit pinned by `LAUFEY_SHA` in the workflow (or
-the `laufey_ref` input). The same commit is the `laufey` git dependency of
-`cli/rt_desktop/Cargo.toml` (crate 0.8.0, API 51, CEF 156.0.15).
-
-laufey's `init_api` rejects any C ABI version mismatch between the runtime and
-the host, so the `laufey` crate libdenort links and the hosts are built from the
-**same** laufey revision: the workflow patches whatever source `Cargo.lock`
-names for `laufey` (crates.io, or a git rev of Brainwires/laufey) with a path to
-that revision's `capi/`, records the `LAUFEY_API_VERSION` it compiled, and the
-package job fails if it differs from the hosts' `capi/include/laufey.h`.
-
-Items 901-903 carry placeholder numbers: `feat/node-compat-round5` wrote them as
-218-220, which `integrate/denext-8-pre` gives to other items. They take the next
-free numbers when the branch is merged.
-
-901. **`feat(ext/node)`: `node --test` is Node's runner, with coverage**
+228. **`feat(ext/node)`: `node --test` is Node's runner, with coverage**
      (`feat/node-compat-round5`, runtime; `libs/node_shim/lib.rs`,
      `ext/node/polyfills/testing.ts`,
      `ext/node/polyfills/internal/test/file_runner.ts`,
@@ -9337,7 +9285,7 @@ free numbers when the branch is merged.
          `test_runner_values_stay_one_node_options_token`; spec
          `node/node_test_cli` (`pattern_cannot_add_flags`).
 
-902. **`fix(cli)`: `--experimental-loader` and `--import` in `NODE_OPTIONS`**
+229. **`fix(cli)`: `--experimental-loader` and `--import` in `NODE_OPTIONS`**
      (`feat/node-compat-round5`, CLI; `libs/cli_parser/src/convert.rs`,
      `tests/node_compat/mod.rs`). On a command line the shim registers a loader
      (`module.register()` in a `--preload` module), but in `NODE_OPTIONS`
@@ -9364,7 +9312,7 @@ free numbers when the branch is merged.
      `node_options_loader_and_import_not_for_artifacts`; spec
      `compile/node_options_import_not_built_in`.
 
-903. **`test(node_compat)`: 27 tests the node_compat round 5 fixes pass**
+230. **`test(node_compat)`: 27 tests the node_compat round 5 fixes pass**
      (`feat/node-compat-round5`, test config only;
      `tests/node_compat/config.jsonc`): `test-runner/test-output-coverage-*`
      (11), `test-output-test-diagnostic-warning-without-test-only-flag.mjs`, 3
@@ -9382,115 +9330,159 @@ free numbers when the branch is merged.
      `toThrow(TypeError)`, also on `node:fs`'s own errors), as this runtime
      does, since the host's objects aren't the test realm's.
 
-Item `2NN-node-test-r6` carries a placeholder number as well
-(`feat/node-test-round6`, on top of `feat/node-compat-round5`); it takes the
-next free number when the branch is merged.
+231. **`feat(ext/node)`: `node --test` round 6: rerun failures,
+     test tags in events, reporter failures, Node's stack frames**
+     (`feat/node-test-round6`, runtime; `ext/node/polyfills/testing.ts`,
+     `ext/node/polyfills/internal/test/file_runner.ts`,
+     `ext/node/polyfills/internal/test/coverage.ts`,
+     `ext/node/polyfills/internal/child_process.ts`, `runtime/coverage.rs`,
+     `libs/core/source_map.rs`, `libs/node_shim/lib.rs`). What item 228 left open,
+     against Node 26.5.1 (`lib/internal/test_runner/`) and checked against Node 26.13
+     in a container:
 
-**2NN-node-test-r6. `feat(ext/node)`: `node --test` round 6: rerun failures,
-test tags in events, reporter failures, Node's stack frames**
-(`feat/node-test-round6`, runtime; `ext/node/polyfills/testing.ts`,
-`ext/node/polyfills/internal/test/file_runner.ts`,
-`ext/node/polyfills/internal/test/coverage.ts`,
-`ext/node/polyfills/internal/child_process.ts`, `runtime/coverage.rs`,
-`libs/core/source_map.rs`, `libs/node_shim/lib.rs`). What item 901 left open,
-against Node 26.5.1 (`lib/internal/test_runner/`) and checked against Node 26.13
-in a container:
+     - **`--test-rerun-failures <file>`** (and `run()`'s `rerunFailuresFilePath`), as
+       `test.js` and `reporter/rerun.js`: the file holds one object per earlier
+       attempt, of the tests that passed, keyed
+       `<file relative to cwd>:<line>:<column>` (`:(N)` for the N-th after the first
+       at one location). A test found there is replayed: its body does not run, its
+       recorded subtests are created again with no body, it passes with its recorded
+       duration and the spec reporter adds `(passed on attempt N)`. `t.attempt` and
+       the suite context's `attempt` are the number of earlier attempts; events carry
+       `details.attempt` and `details.passed_on_attempt`. The process the tests run
+       in (no `--test`) or the runner (`--test`, `run()`) adds the attempt's passes
+       to the file once the run is done; a test file the runner started reads the
+       file and writes nothing. A file that holds `null`, isn't JSON or isn't an
+       array of attempts is Node's "not a valid rerun file" warning and exit code 1:
+       the tests still run, and the file is left as it was (Node throws on one that
+       isn't JSON). A recorded test's `children` that isn't an array replays no
+       subtests. With `run()`, `randomize` / `randomSeed` are refused with it, as in
+       Node. The node shim takes the flag and passes it on in `NODE_OPTIONS` (one
+       quoted token, item 228).
+     - **Test tags in events**: `test:enqueue`, `test:dequeue`, `test:start`,
+       `test:pass`, `test:fail` and `test:complete` carry `tags`, the parent's tags
+       then the test's own (lowercased, deduplicated, frozen; `[]` for an untagged
+       test and for a file's own events), and the run-mode `t.tags` is the same
+       array. `--experimental-test-tag-filter` (shim flag, in `NODE_OPTIONS` for the
+       files, quoted as item 228 says) and `run()`'s `testTagFilters` now filter: a
+       test runs when it has every tag given (Node's `evaluateTagFilters`), a suite
+       stays when a test in it does, and the process given the flag warns once
+       (`ExperimentalWarning: Test tags`). An empty filter is refused by `run()` and,
+       on the command line, by the shim's parser (exit 9, below).
+     - **A node command line the shim can't parse exits 9**, as Node's child does:
+       `child_process`'s `spawn()` / `spawnSync()` of the runtime with Node arguments
+       the shim refuses (`--experimental-test-tag-filter=` requires an argument)
+       threw the shim's parse error. It now starts a child that prints
+       `node: <message>` and exits with 9 (Node's `kInvalidCommandLineArgument`). An
+       option the shim doesn't know is not a parse error there (Node exits 9 with
+       `bad option`; the runtime's own error and exit code stay).
+     - **Coverage of a transpiled file maps back to its lines.** A test file's
+       process (`NODE_TEST_CONTEXT`) writes, beside each `.ts` / `.mts` / `.cts` /
+       `.tsx` / `.jsx` script's coverage, the emitted code's source map
+       (`<uuid>.sourcemap`: `{ url, lineLengths, data }`, the `source-map-cache`
+       entry of Node's `NODE_V8_COVERAGE` files, line lengths in UTF-16 code units).
+       The map is the one stack traces use (`SourceMapper::source_map_json`, new);
+       the emitted code is V8's own (`Debugger.getScriptSource`, enabled once at
+       exit, only when there is such a script). Not a `.json` file, so
+       `deno coverage` doesn't read it; `deno test --coverage` writes none. The
+       runner maps each range's ends through it to the file's offsets before merging
+       (Node's `mapCoverageWithSourceMap`; a range that doesn't map is left out), and
+       keeps the maps as `source-map-cache` in a `NODE_V8_COVERAGE` file. The lines,
+       functions and branches of the spec's `.ts` file are now what Node 26, which
+       strips types in place, reports for it.
+     - **A reporter that fails exits 7**, as in Node, whose runner rethrows an error
+       that comes from a reporter in its `uncaughtException` handler (`harness.js`),
+       which makes Node's own handler fail. Here a custom reporter's stream `'error'`
+       (a throw in the reporter, or the `AbortError` of one that ends early) or a
+       reporter module that is not a reporter (`compose()`'s `ERR_INVALID_ARG_TYPE`)
+       printed Deno's uncaught error and exited 1. The error is now written as Node's
+       inspected error (with `Emitted 'error' event on Duplex instance at:` and the
+       frames for a stream's), and the process exits 7. A failing run still exits 1.
+     - **Stack frames in failures**: the `spec`, `dot`, `tap` and `junit` reporters
+       (and a file's errors sent to the runner) show the runtime's own frames as
+       `node:internal/<path>` (`ext:deno_node/testing.ts:N:M` is
+       `node:internal/deno_node/testing.ts:N:M`), where Node shows its runner's
+       `node:internal/test_runner/...` frames, which Node's snapshots fold into
+       `<node-internal-frames>`; and a frame in a CommonJS module names its file by
+       path, as Node's do (an ES module's stays a `file:` URL). The error a test sees
+       keeps its stack: the reporters format it with the stack swapped for the call
+       and put back. A suite's body and hooks run with a `SuiteContext` (frames read
+       `SuiteContext.<anonymous>`, not `Object.<anonymous>`).
+     - **`run()`** starts its files a microtask later, so a listener added once
+       `run()` returns sees the file's own `test:enqueue` / `test:dequeue` (they were
+       emitted during the call). With `--test-isolation=none` the files' one process
+       has no queue events of its own (`<root>`, with no `file`), as Node's run has
+       none; a test's queue events carry its own `file` there.
+     - **An interrupted run** (`SIGINT`, or a reporter that emits it, as
+       `test-runner-error-reporter.js`'s `FAIL_FAST` does) no longer reports the
+       child it killed as a failure of that file, and starts no file after it.
+       `test-runner-error-reporter.js` failed 2 of 3 runs on Linux without this, on a
+       build without debug info: the killed child's `close` came before the exit.
+     - **Left open**: most `test-output-*` snapshots still differ by behaviour, not
+       frames (a suite whose body throws doesn't cancel the tests it registered, an
+       unhandled rejection in a test isn't charged to it, `expectFailure` /
+       `t.todo()`); the frames now fold as Node's do.
+     - Tests: node_compat `parallel/test-runner-reporters.js`,
+       `-test-rerun-failures.js`, `-tags-events.mjs`, `-tag-filter-cli.mjs`,
+       `-tags-experimental-warning.mjs` and `test-runner/test-output-eval-dot.mjs`,
+       `-eval-spec.mjs`, `-eval-tap.mjs` enabled (3 runs each, debug build, on Linux,
+       Windows on Arm and macOS arm64). Spec `node/node_test_cli`
+       (`reporter_error_exit_code`, `reporter_setup_error_exit_code`,
+       `tags_in_events`, `rerun_failures`, `rerun_failures_invalid_file`,
+       `failure_stack_frames`, `coverage_ts_source_map`; the rerun and `.ts` coverage
+       cases' output is what Node 26 prints for the same files). unit_node
+       `[child_process] a node invocation with arguments it can't parse exits with
+       9`;
+       runtime unit test `transpiled_modules_are_told_by_extension`. Shim unit tests
+       `test_rerun_failures_rides_along_in_node_options` and
+       `test_tag_filters_ride_along_in_node_options`.
 
-- **`--test-rerun-failures <file>`** (and `run()`'s `rerunFailuresFilePath`), as
-  `test.js` and `reporter/rerun.js`: the file holds one object per earlier
-  attempt, of the tests that passed, keyed
-  `<file relative to cwd>:<line>:<column>` (`:(N)` for the N-th after the first
-  at one location). A test found there is replayed: its body does not run, its
-  recorded subtests are created again with no body, it passes with its recorded
-  duration and the spec reporter adds `(passed on attempt N)`. `t.attempt` and
-  the suite context's `attempt` are the number of earlier attempts; events carry
-  `details.attempt` and `details.passed_on_attempt`. The process the tests run
-  in (no `--test`) or the runner (`--test`, `run()`) adds the attempt's passes
-  to the file once the run is done; a test file the runner started reads the
-  file and writes nothing. A file that holds `null`, isn't JSON or isn't an
-  array of attempts is Node's "not a valid rerun file" warning and exit code 1:
-  the tests still run, and the file is left as it was (Node throws on one that
-  isn't JSON). A recorded test's `children` that isn't an array replays no
-  subtests. With `run()`, `randomize` / `randomSeed` are refused with it, as in
-  Node. The node shim takes the flag and passes it on in `NODE_OPTIONS` (one
-  quoted token, item 901).
-- **Test tags in events**: `test:enqueue`, `test:dequeue`, `test:start`,
-  `test:pass`, `test:fail` and `test:complete` carry `tags`, the parent's tags
-  then the test's own (lowercased, deduplicated, frozen; `[]` for an untagged
-  test and for a file's own events), and the run-mode `t.tags` is the same
-  array. `--experimental-test-tag-filter` (shim flag, in `NODE_OPTIONS` for the
-  files, quoted as item 901 says) and `run()`'s `testTagFilters` now filter: a
-  test runs when it has every tag given (Node's `evaluateTagFilters`), a suite
-  stays when a test in it does, and the process given the flag warns once
-  (`ExperimentalWarning: Test tags`). An empty filter is refused by `run()` and,
-  on the command line, by the shim's parser (exit 9, below).
-- **A node command line the shim can't parse exits 9**, as Node's child does:
-  `child_process`'s `spawn()` / `spawnSync()` of the runtime with Node arguments
-  the shim refuses (`--experimental-test-tag-filter=` requires an argument)
-  threw the shim's parse error. It now starts a child that prints
-  `node: <message>` and exits with 9 (Node's `kInvalidCommandLineArgument`). An
-  option the shim doesn't know is not a parse error there (Node exits 9 with
-  `bad option`; the runtime's own error and exit code stay).
-- **Coverage of a transpiled file maps back to its lines.** A test file's
-  process (`NODE_TEST_CONTEXT`) writes, beside each `.ts` / `.mts` / `.cts` /
-  `.tsx` / `.jsx` script's coverage, the emitted code's source map
-  (`<uuid>.sourcemap`: `{ url, lineLengths, data }`, the `source-map-cache`
-  entry of Node's `NODE_V8_COVERAGE` files, line lengths in UTF-16 code units).
-  The map is the one stack traces use (`SourceMapper::source_map_json`, new);
-  the emitted code is V8's own (`Debugger.getScriptSource`, enabled once at
-  exit, only when there is such a script). Not a `.json` file, so
-  `deno coverage` doesn't read it; `deno test --coverage` writes none. The
-  runner maps each range's ends through it to the file's offsets before merging
-  (Node's `mapCoverageWithSourceMap`; a range that doesn't map is left out), and
-  keeps the maps as `source-map-cache` in a `NODE_V8_COVERAGE` file. The lines,
-  functions and branches of the spec's `.ts` file are now what Node 26, which
-  strips types in place, reports for it.
-- **A reporter that fails exits 7**, as in Node, whose runner rethrows an error
-  that comes from a reporter in its `uncaughtException` handler (`harness.js`),
-  which makes Node's own handler fail. Here a custom reporter's stream `'error'`
-  (a throw in the reporter, or the `AbortError` of one that ends early) or a
-  reporter module that is not a reporter (`compose()`'s `ERR_INVALID_ARG_TYPE`)
-  printed Deno's uncaught error and exited 1. The error is now written as Node's
-  inspected error (with `Emitted 'error' event on Duplex instance at:` and the
-  frames for a stream's), and the process exits 7. A failing run still exits 1.
-- **Stack frames in failures**: the `spec`, `dot`, `tap` and `junit` reporters
-  (and a file's errors sent to the runner) show the runtime's own frames as
-  `node:internal/<path>` (`ext:deno_node/testing.ts:N:M` is
-  `node:internal/deno_node/testing.ts:N:M`), where Node shows its runner's
-  `node:internal/test_runner/...` frames, which Node's snapshots fold into
-  `<node-internal-frames>`; and a frame in a CommonJS module names its file by
-  path, as Node's do (an ES module's stays a `file:` URL). The error a test sees
-  keeps its stack: the reporters format it with the stack swapped for the call
-  and put back. A suite's body and hooks run with a `SuiteContext` (frames read
-  `SuiteContext.<anonymous>`, not `Object.<anonymous>`).
-- **`run()`** starts its files a microtask later, so a listener added once
-  `run()` returns sees the file's own `test:enqueue` / `test:dequeue` (they were
-  emitted during the call). With `--test-isolation=none` the files' one process
-  has no queue events of its own (`<root>`, with no `file`), as Node's run has
-  none; a test's queue events carry its own `file` there.
-- **An interrupted run** (`SIGINT`, or a reporter that emits it, as
-  `test-runner-error-reporter.js`'s `FAIL_FAST` does) no longer reports the
-  child it killed as a failure of that file, and starts no file after it.
-  `test-runner-error-reporter.js` failed 2 of 3 runs on Linux without this, on a
-  build without debug info: the killed child's `close` came before the exit.
-- **Left open**: most `test-output-*` snapshots still differ by behaviour, not
-  frames (a suite whose body throws doesn't cancel the tests it registered, an
-  unhandled rejection in a test isn't charged to it, `expectFailure` /
-  `t.todo()`); the frames now fold as Node's do.
-- Tests: node_compat `parallel/test-runner-reporters.js`,
-  `-test-rerun-failures.js`, `-tags-events.mjs`, `-tag-filter-cli.mjs`,
-  `-tags-experimental-warning.mjs` and `test-runner/test-output-eval-dot.mjs`,
-  `-eval-spec.mjs`, `-eval-tap.mjs` enabled (3 runs each, debug build, on Linux,
-  Windows on Arm and macOS arm64). Spec `node/node_test_cli`
-  (`reporter_error_exit_code`, `reporter_setup_error_exit_code`,
-  `tags_in_events`, `rerun_failures`, `rerun_failures_invalid_file`,
-  `failure_stack_frames`, `coverage_ts_source_map`; the rerun and `.ts` coverage
-  cases' output is what Node 26 prints for the same files). unit_node
-  `[child_process] a node invocation with arguments it can't parse exits with
-  9`;
-  runtime unit test `transpiled_modules_are_told_by_extension`. Shim unit tests
-  `test_rerun_failures_rides_along_in_node_options` and
-  `test_tag_filters_ride_along_in_node_options`.
+The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
+64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
+118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
+169-174, 176, 178, 180, 182-184, 186, 187, 189-191, 193-196, 198-203, 206, 207,
+209-215, 217, 218, 221, 222, 224, 225) are what the prebuilt `libdenort`
+carries. The CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` /
+`LAUFEY_APP_ID` into a packaged app's launchers) are in the branch too, but a
+stock CLI does not run them; denext's own launcher provides that environment.
+
+The laufey backend hosts are built from
+[Brainwires/laufey](https://github.com/Brainwires/laufey) branch
+`development-denext` (formerly `denext/integration`; registered schemes, app
+data dir, WebKitGTK scheme request bodies, launch config, open-url / single
+instance, passkeys, the window API with littledivy/laufey#80 and #81, drag and
+drop / file dialogs / rich clipboard, global shortcuts / launch at login /
+DevTools control, menu accelerators / notifications, UI-thread tasks / auth
+sessions / non-blocking WebKitGTK scheme bodies, Windows bindgen fix, and API
+43: auth session cancel, Local Network Access for the registered custom-scheme
+origins on CEF, Windows menu and file-dialog fixes, CEF file drops; then the
+3.1.0 audits: scheme request cancellation (`on_cancel` on every backend), no
+aborts on a NUL in a string, the Linux window-destroy use-after-free, sync UI
+hops that can't hang exit; and API 44, the 3.1.1 audit: each JS call's document
+origin, the launch file's `bridgeOrigins`, scheme response write backpressure, a
+packaged app loading only its own runtime and pinned launch keys, WebKitGTK
+sub-frames kept off the bridge, a strict bridge JSON parser; and every host runs
+the runtime's own helper and worker launches (`run …`, `NODE_CHANNEL_FD`,
+`NEXT_PRIVATE_WORKER`) headless before its single-instance check; and API 48,
+the navigation guard; then, for runtime 3.0.0-rc.1, the CEF custom-scheme
+localStorage commit gate, KWin's blur, the XCB clipboard and Linux passkeys
+through libwebauthn (item 88); and, for runtime 3.0.0-denext.2, legacy Linux
+secure-store items read over an encrypted Secret Service session (laufey
+879ee0e) and tokio 1.53.3 with laufey's own `.cargo/audit.toml`; and, for
+runtime 3.0.0-denext.6, API 50: overlay windows, tray events, the launch
+activation policy and speech, item 183; and, for runtime 3.0.0-denext.7, CEF
+156, item 184, and the Linux Wayland overlay fixes, item 186; and, for runtime
+3.0.0-denext.8, API 51, hidden pages throttled instead of frozen on macOS and
+`backgroundThrottling`, item 198; and the Windows focus, tray role and window
+icon fixes, item 207), at the commit pinned by `LAUFEY_SHA` in the workflow (or
+the `laufey_ref` input). The same commit is the `laufey` git dependency of
+`cli/rt_desktop/Cargo.toml` (crate 0.8.0, API 51, CEF 156.0.15).
+
+laufey's `init_api` rejects any C ABI version mismatch between the runtime and
+the host, so the `laufey` crate libdenort links and the hosts are built from the
+**same** laufey revision: the workflow patches whatever source `Cargo.lock`
+names for `laufey` (crates.io, or a git rev of Brainwires/laufey) with a path to
+that revision's `capi/`, records the `LAUFEY_API_VERSION` it compiled, and the
+package job fails if it differs from the hosts' `capi/include/laufey.h`.
 
 ## npm supply-chain settings
 

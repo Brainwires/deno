@@ -1,6 +1,6 @@
 {
   // NODE_OPTIONS' `--import` / `--loader` are `--preload`s for `deno run`
-  // (DENEXT 902), but `deno compile` must not build them, or NODE_OPTIONS'
+  // (DENEXT 229), but `deno compile` must not build them, or NODE_OPTIONS'
   // `--require`, into the program.
   "tempDir": true,
   "steps": [{
