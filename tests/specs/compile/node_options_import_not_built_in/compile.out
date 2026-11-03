@@ -1,0 +1,2 @@
+[WILDCARD]NODE_OPTIONS --require=./require.cjs --import=./preload.js ignored: this command would build them into its output
+[WILDCARD]

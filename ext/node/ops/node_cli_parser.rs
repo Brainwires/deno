@@ -653,10 +653,17 @@ mod tests {
 
   #[test]
   fn test_translate_test_runner() {
+    // denext: Node's runner, each file in its own process.
     let parsed = parse_args(svec!["--test", "test.js"]).unwrap();
     let result = translate_to_deno_args(parsed, false, true);
-    assert!(result.deno_args.contains(&"test".to_string()));
+    assert_eq!(result.deno_args[0], "run");
     assert!(result.deno_args.contains(&"-A".to_string()));
+    assert!(
+      result
+        .deno_args
+        .iter()
+        .any(|arg| arg.starts_with("data:text/javascript,"))
+    );
     assert!(result.deno_args.contains(&"test.js".to_string()));
   }
 

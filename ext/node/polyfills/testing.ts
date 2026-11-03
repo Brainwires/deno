@@ -5,6 +5,7 @@
 const { core, internals, primordials } = __bootstrap;
 const {
   ArrayIsArray,
+  ArrayPrototypeFilter,
   ArrayPrototypeIncludes,
   ArrayPrototypeJoin,
   ArrayPrototypeLastIndexOf,
@@ -81,6 +82,7 @@ const {
   SymbolDispose,
   SymbolFor,
   SymbolToPrimitive,
+  TypedArrayPrototypeSubarray,
   TypeError,
   queueMicrotask,
 } = primordials;
@@ -333,6 +335,46 @@ function getPathForSnapshot() {
   return _pathForSnapshot;
 }
 
+// denext: NODE_OPTIONS split as Node splits it (`"..."` quotes with `\`
+// escapes), so a quoted value (a name pattern, a path) is one token and can't
+// pass for a flag. Empty when unset or not readable.
+function nodeOptionsArgs() {
+  let nodeOptions = "";
+  try {
+    nodeOptions = globalThis.Deno?.env?.get("NODE_OPTIONS") || "";
+  } catch { /* permission denied */ }
+  if (!nodeOptions) return [];
+  return core.loadExtScript("ext:deno_node/internal_binding/node_options.ts")
+    .splitNodeOptions(nodeOptions);
+}
+
+// The values `flag` has in NODE_OPTIONS, as `flag=value` or `flag value`.
+function nodeOptionValues(flag) {
+  const args = nodeOptionsArgs();
+  const prefix = flag + "=";
+  const out = [];
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === flag && i + 1 < args.length) {
+      ArrayPrototypePush(out, args[++i]);
+    } else if (StringPrototypeStartsWith(args[i], prefix)) {
+      ArrayPrototypePush(out, StringPrototypeSlice(args[i], prefix.length));
+    }
+  }
+  return out;
+}
+
+// Whether NODE_OPTIONS has `flag`, bare or as `flag=value`.
+function hasNodeOption(flag) {
+  const prefix = flag + "=";
+  const args = nodeOptionsArgs();
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === flag || StringPrototypeStartsWith(args[i], prefix)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 // Resolve update-snapshot mode lazily so the env / Rust op is read at most
 // once. We accept either Deno's own `--update-snapshots` flag (when running
 // under `deno test`) or Node's `--test-update-snapshots` propagated via
@@ -356,17 +398,7 @@ function isFileSnapshotUpdateMode() {
       }
     } catch { /* op not wired up; not running under `deno test` */ }
   }
-  let nodeOptions = "";
-  try {
-    nodeOptions = globalThis.Deno?.env?.get("NODE_OPTIONS") || "";
-  } catch { /* permission denied */ }
-  if (
-    nodeOptions &&
-    RegExpPrototypeTest(
-      new SafeRegExp(/(?:^|\s)--test-update-snapshots(?:\s|=|$)/),
-      nodeOptions,
-    )
-  ) {
+  if (hasNodeOption("--test-update-snapshots")) {
     _fileSnapshotUpdateMode = true;
     return true;
   }
@@ -676,7 +708,7 @@ const lazyProcess = core.createLazyLoader("node:process");
 // waits for filesystem changes to trigger restarts (watch:true).
 //
 // See test-runner/test-run-watch-*.mjs in the Node compat suite for the
-// behavior this implements.
+// behavior this implements. Without `watch`, `runTestFiles()` runs the files.
 function run(options) {
   options = options ?? {};
 
@@ -711,6 +743,7 @@ function run(options) {
   }
 
   const watch = options.watch === true;
+  if (!watch) return runTestFiles(options, testTagFilters);
   const signal = options.signal;
   let cwd = options.cwd;
   if (cwd === undefined) {
@@ -815,6 +848,554 @@ function run(options) {
   return stream;
 }
 
+// `run()` without `watch`: the files, each in its process, as an event stream.
+function runTestFiles(options) {
+  validateRunOptions(options);
+  const process = lazyProcess().default;
+  const Readable = getReadable();
+  const stream = new Readable({
+    __proto__: null,
+    objectMode: true,
+    read() {},
+  });
+  const report = (type, data) => {
+    // deno-lint-ignore deno-internal/prefer-primordials -- a Node Readable
+    stream.push({ __proto__: null, type, data });
+    stream.emit(type, data);
+  };
+  if (
+    process.env.NODE_TEST_CONTEXT !== undefined &&
+    (options.isolation ?? "process") === "process"
+  ) {
+    process.emitWarning(
+      "node:test run() is being called recursively within a test file. skipping running files.",
+    );
+    // deno-lint-ignore deno-internal/prefer-primordials -- a Node Readable
+    stream.push(null);
+    return stream;
+  }
+  const finish = () => {
+    // deno-lint-ignore deno-internal/prefer-primordials -- a Node Readable
+    stream.push(null);
+  };
+  // A test's `setup` subscribes before the first event.
+  const start = async () => {
+    if (options.setup) await options.setup(stream);
+    await executeTestFiles(options, report);
+  };
+  PromisePrototypeThen(start(), finish, (err) => stream.destroy(err));
+  return stream;
+}
+
+function validateRunOptions(options) {
+  const {
+    validateArray,
+    validateBoolean,
+    validateFunction,
+    validateInteger,
+    validateObject,
+    validateOneOf,
+    validateString,
+    validateStringArray,
+  } = core.loadExtScript("ext:deno_node/internal/validators.mjs");
+  validateObject(options, "options");
+  const {
+    files,
+    forceExit,
+    only,
+    globPatterns,
+    setup,
+    cwd,
+    shard,
+    isolation = "process",
+    env,
+    argv = [],
+    execArgv = [],
+    randomize,
+  } = options;
+  if (files != null) validateArray(files, "options.files");
+  if (forceExit != null) validateBoolean(forceExit, "options.forceExit");
+  if (only != null) validateBoolean(only, "options.only");
+  if (globPatterns != null) validateArray(globPatterns, "options.globPatterns");
+  if (randomize != null) validateBoolean(randomize, "options.randomize");
+  if (cwd !== undefined) validateString(cwd, "options.cwd");
+  if (globPatterns?.length > 0 && files?.length > 0) {
+    throw new ERR_INVALID_ARG_VALUE(
+      "options.globPatterns",
+      globPatterns,
+      "is not supported when specifying 'options.files'",
+    );
+  }
+  if (shard != null) {
+    validateObject(shard, "options.shard");
+    validateInteger(shard.total, "options.shard.total", 1);
+    validateInteger(shard.index, "options.shard.index", 1, shard.total);
+  }
+  if (setup != null) validateFunction(setup, "options.setup");
+  validateOneOf(isolation, "options.isolation", ["process", "none"]);
+  validateStringArray(argv, "options.argv");
+  validateStringArray(execArgv, "options.execArgv");
+  if (env != null) {
+    validateObject(env);
+    if (isolation === "none") {
+      throw new ERR_INVALID_ARG_VALUE(
+        "options.env",
+        env,
+        "is not supported with isolation='none'",
+      );
+    }
+  }
+}
+
+function patternsAsStrings(patterns) {
+  if (patterns === undefined || patterns === null) return undefined;
+  const list = ArrayIsArray(patterns) ? patterns : [patterns];
+  const out = [];
+  for (const value of new SafeArrayIterator(list)) {
+    ArrayPrototypePush(
+      out,
+      typeof value === "string" ? value : `/${value.source}/${value.flags}`,
+    );
+  }
+  return out;
+}
+
+// What `node --test` and `run()` share. `report(type, data)` takes each event;
+// resolves with the counters and whether the run passed.
+async function executeTestFiles(options, report) {
+  const runner = getFileRunner();
+  const process = lazyProcess().default;
+  const path = process.getBuiltinModule("node:path");
+  const cwd = options.cwd ?? process.cwd();
+  const isolation = options.isolation ?? "process";
+  let files = options.files ?? runner.createTestFileList(
+    options.globPatterns,
+    cwd,
+    options.stripTypes !== false,
+    (message) => {
+      // deno-lint-ignore no-console
+      console.error(message);
+      process.exit(1);
+    },
+  );
+  let randomSeed = options.randomSeed;
+  if (options.randomize === true && randomSeed == null) {
+    randomSeed = MathFloor(MathRandom() * (0xFFFF_FFFF + 1));
+  }
+  if (randomSeed != null) {
+    report("test:diagnostic", {
+      __proto__: null,
+      nesting: 0,
+      message: `Randomized test order seed: ${randomSeed}`,
+      level: "info",
+    });
+  }
+  if (options.shard) {
+    const { index, total } = options.shard;
+    files = ArrayPrototypeFilter(files, (_, i) => i % total === index - 1);
+  }
+  let globalTeardown;
+  if (options.globalSetupPath) {
+    const { pathToFileURL } = process.getBuiltinModule("node:url");
+    const module = await import(
+      pathToFileURL(path.resolve(cwd, options.globalSetupPath)).href
+    );
+    globalTeardown = module.globalTeardown;
+    if (module.globalSetup) await module.globalSetup();
+  }
+  const started = nowMs();
+  let coverageDir;
+  if (options.coverage === true) {
+    const fs = process.getBuiltinModule("node:fs");
+    const os = process.getBuiltinModule("node:os");
+    coverageDir = fs.mkdtempSync(path.resolve(os.tmpdir(), "node-coverage-"));
+  }
+  const noneFiles = isolation === "none"
+    ? ArrayPrototypeMap(files, (file) => [file, path.resolve(cwd, file)])
+    : undefined;
+  const fileRun = runner.startRun({
+    __proto__: null,
+    cwd,
+    env: options.env,
+    argv: options.argv,
+    execArgv: options.execArgv,
+    only: options.only,
+    forceExit: options.forceExit,
+    timeout: options.timeout,
+    signal: options.signal,
+    isolation,
+    noneFiles,
+    randomSeed,
+    colorChildren: options.colorChildren,
+    coverageDir,
+    silentFile: options.silentFile,
+    testNamePatterns: patternsAsStrings(options.testNamePatterns),
+    testSkipPatterns: patternsAsStrings(options.testSkipPatterns),
+    maxConcurrency: runner.maxConcurrencyOf(options.concurrency, isolation),
+  }, report);
+  options.onStart?.(fileRun);
+  const result = await fileRun.runAll(
+    isolation === "none" && files.length > 0 ? [""] : files,
+  );
+  result.durationMs = nowMs() - started;
+  if (globalTeardown) await globalTeardown();
+  if (coverageDir !== undefined) {
+    const coverage = core.loadExtScript(
+      "ext:deno_node/internal/test/coverage.ts",
+    );
+    const fs = process.getBuiltinModule("node:fs");
+    try {
+      const summary = coverage.summarize(coverageDir, {
+        __proto__: null,
+        cwd,
+        coverageExcludeGlobs: options.coverageExcludeGlobs ??
+          [runner.defaultPattern(options.stripTypes !== false)],
+        coverageIncludeGlobs: options.coverageIncludeGlobs,
+        lineCoverage: options.lineCoverage,
+        branchCoverage: options.branchCoverage,
+        functionCoverage: options.functionCoverage,
+      });
+      for (
+        const message of new SafeArrayIterator(
+          coverage.thresholdFailures(summary),
+        )
+      ) {
+        result.counters.thresholdFailed = true;
+        report("test:diagnostic", {
+          __proto__: null,
+          nesting: 0,
+          message,
+          level: "error",
+        });
+      }
+      report("test:coverage", { __proto__: null, nesting: 0, summary });
+    } catch (err) {
+      result.counters.thresholdFailed = true;
+      report("test:diagnostic", {
+        __proto__: null,
+        nesting: 0,
+        message: `Warning: Could not report code coverage. ${err}`,
+        level: "warn",
+      });
+    }
+    // Node leaves the run's coverage in a `NODE_V8_COVERAGE` directory.
+    const keepDir = process.env.NODE_V8_COVERAGE;
+    if (keepDir) {
+      try {
+        const kept = path.resolve(cwd, keepDir);
+        fs.mkdirSync(kept, { __proto__: null, recursive: true });
+        coverage.writeMerged(
+          coverageDir,
+          path.resolve(kept, `coverage-${process.pid}-${DateNow()}-0.json`),
+        );
+      } catch { /* the report is out */ }
+    }
+    try {
+      fs.rmSync(coverageDir, { __proto__: null, recursive: true });
+    } catch { /* left behind */ }
+  }
+  const { counters } = result;
+  report("test:plan", {
+    __proto__: null,
+    nesting: 0,
+    count: counters.topLevel,
+  });
+  for (
+    const { 0: name, 1: value } of new SafeArrayIterator([
+      ["tests", counters.tests],
+      ["suites", counters.suites],
+      ["pass", counters.passed],
+      ["fail", counters.failed],
+      ["cancelled", counters.cancelled],
+      ["skipped", counters.skipped],
+      ["todo", counters.todo],
+      ["duration_ms", result.durationMs],
+    ])
+  ) {
+    report("test:diagnostic", {
+      __proto__: null,
+      nesting: 0,
+      message: `${name} ${value}`,
+      level: "info",
+      summaryLine: true,
+    });
+  }
+  report("test:summary", runner.summaryData(result));
+  return result;
+}
+
+// One built-in reporter over the event stream: the run-mode reporters take the
+// same calls in a child's process and here, from the child's events.
+function createBridge(kind, sink) {
+  const previous = reporterSink;
+  reporterSink = sink;
+  const reporter = createRunReporter(kind);
+  reporterSink = previous;
+  let headerDone = false;
+  const entryOf = (data) => ({
+    __proto__: null,
+    name: data.name,
+    options: { __proto__: null, skip: data.skip, todo: data.todo },
+    loc: data.file === undefined
+      ? undefined
+      : { file: data.file, line: data.line, column: data.column },
+  });
+  const dispatch = (type, data) => {
+    if (!headerDone) {
+      headerDone = true;
+      reporter.header();
+    }
+    switch (type) {
+      case "test:start":
+        reporter.start(entryOf(data), data.nesting);
+        break;
+      case "test:plan":
+        if (data.nesting > 0) reporter.plan(data.nesting, data.count);
+        break;
+      case "test:pass":
+      case "test:fail":
+        reporter.end(entryOf(data), data.nesting, data.testNumber, {
+          failed: type === "test:fail",
+          error: data.details?.error,
+          isSuite: data.details?.type === "suite",
+          durationMs: data.details?.duration_ms ?? 0,
+        });
+        break;
+      case "test:diagnostic":
+        // The reporter's `summary()` prints the run's counts.
+        if (!data.summaryLine) {
+          reporter.diagnostic(data.nesting ?? 0, data.message);
+        }
+        break;
+      case "test:stdout":
+        reporter.output?.(data.message, false);
+        break;
+      case "test:stderr":
+        reporter.output?.(data.message, true);
+        break;
+      case "test:coverage":
+        reporter.coverageSummary = data.summary;
+        break;
+      case "test:summary": {
+        // A file's own, reported for `run()` and custom reporters.
+        if (data.file !== undefined) break;
+        const c = data.counts;
+        reporter.summary(c.topLevel, {
+          tests: c.tests,
+          suites: c.suites,
+          pass: c.passed,
+          fail: c.failed,
+          cancelled: c.cancelled,
+          skipped: c.skipped,
+          todo: c.todo,
+        }, data.duration_ms);
+        reporter.flush?.();
+        break;
+      }
+    }
+  };
+  return (type, data) => {
+    const saved = reporterSink;
+    reporterSink = sink;
+    try {
+      dispatch(type, data);
+    } finally {
+      reporterSink = saved;
+    }
+  };
+}
+
+// `node --test [patterns]`, which the node shim runs with the flags it parsed.
+async function runTestCli(config) {
+  const runner = getFileRunner();
+  const process = lazyProcess().default;
+  const cwd = process.cwd();
+  const patterns = ArrayPrototypeSlice(process.argv, 2);
+  const reporters = config.reporters ?? [];
+  const destinations = config.destinations ?? [];
+  if (
+    (reporters.length > 1 || destinations.length > 0) &&
+    reporters.length !== destinations.length
+  ) {
+    throw new ERR_INVALID_ARG_VALUE(
+      "--test-reporter",
+      reporters,
+      "must match the number of specified '--test-reporter-destination'",
+    );
+  }
+  const isolation = config.isolation ?? "process";
+  const concurrency = isolation === "none"
+    ? 1
+    : config.concurrency > 0
+    ? config.concurrency
+    : true;
+  const debug = process.getBuiltinModule("node:util").debuglog("test_runner");
+  debug("test runner configuration:", {
+    __proto__: null,
+    isTestRunner: true,
+    concurrency,
+    isolation,
+    forceExit: config.forceExit === true,
+    timeout: config.timeout > 0 ? config.timeout : Infinity,
+    randomize: config.randomSeed != null || config.randomize === true,
+    only: config.only === true,
+  });
+
+  const kinds = reporters.length === 0 ? ["spec"] : reporters;
+  const sinks = [];
+  const streams = [];
+  for (let i = 0; i < kinds.length; i++) {
+    const destination = runner.destinationStream(
+      destinations[i] ?? "stdout",
+      cwd,
+    );
+    ArrayPrototypePush(streams, destination);
+    const sink = (text) => {
+      destination.write(text);
+    };
+    if (
+      ArrayPrototypeIncludes(runner.kBuiltinReporters, kinds[i]) &&
+      kinds[i] !== "lcov"
+    ) {
+      ArrayPrototypePush(sinks, createBridge(kinds[i], sink));
+      continue;
+    }
+    ArrayPrototypePush(
+      sinks,
+      await createStreamSink(kinds[i], destination, cwd),
+    );
+  }
+  const report = (type, data) => {
+    for (const dispatch of new SafeArrayIterator(sinks)) dispatch(type, data);
+  };
+  const timeout = config.timeout > 0 ? config.timeout : undefined;
+  let fileRun = null;
+  process.on("SIGINT", () => {
+    for (
+      const name of new SafeArrayIterator(fileRun?.runningNames() ?? [])
+    ) {
+      report("test:diagnostic", {
+        __proto__: null,
+        nesting: 0,
+        message: `Interrupted while running: ${name}`,
+        level: "warn",
+      });
+    }
+    fileRun?.interrupt();
+    process.exitCode = 1;
+    // The reporters write synchronously to stdio; a file destination's data
+    // is out at exit.
+    ensureRealTimers();
+    realSetTimeout(() => process.exit(1), 0);
+  });
+  const result = await executeTestFiles({
+    __proto__: null,
+    cwd,
+    globPatterns: patterns.length > 0 ? patterns : undefined,
+    isolation,
+    concurrency,
+    timeout,
+    forceExit: config.forceExit,
+    only: config.only,
+    shard: config.shard,
+    stripTypes: config.stripTypes,
+    execArgv: config.execArgv,
+    globalSetupPath: config.globalSetup,
+    randomize: config.randomize,
+    randomSeed: config.randomSeed,
+    coverage: config.coverage === true,
+    silentFile: config.singleFile === true,
+    argv: config.singleFile === true
+      ? ArrayPrototypeSlice(patterns, 1)
+      : undefined,
+    files: config.singleFile === true
+      ? ArrayPrototypeSlice(patterns, 0, 1)
+      : undefined,
+    coverageIncludeGlobs: config.coverageInclude?.length > 0
+      ? config.coverageInclude
+      : undefined,
+    coverageExcludeGlobs: config.coverageExclude?.length > 0
+      ? config.coverageExclude
+      : undefined,
+    lineCoverage: config.coverageLines,
+    branchCoverage: config.coverageBranches,
+    functionCoverage: config.coverageFunctions,
+    colorChildren: kinds.length === 1 && destinations.length === 0 &&
+      process.stdout.isTTY === true,
+    onStart: (run) => {
+      fileRun = run;
+    },
+  }, report);
+  report("end", {});
+  const failed = result.counters.failed > 0 ||
+    result.counters.cancelled > 0 || result.counters.thresholdFailed === true ||
+    result.counters.exitFailed === true;
+  if (failed) process.exitCode = 1;
+  if (config.forceExit === true) process.exit();
+}
+
+// A custom reporter (a generator function or a stream, as Node's
+// `lib/internal/test_runner/utils.js` getReportersMap) or `lcov`.
+async function createStreamSink(name, destination, cwd) {
+  const runner = getFileRunner();
+  const process = lazyProcess().default;
+  let reporter;
+  if (ArrayPrototypeIncludes(runner.kBuiltinReporters, name)) {
+    reporter = process.getBuiltinModule("node:test/reporters")[name];
+  } else {
+    const module = await import(runner.reporterUrl(name, cwd));
+    reporter = module.default;
+  }
+  if (
+    reporter?.prototype &&
+    ObjectGetOwnPropertyDescriptor(reporter.prototype, "constructor")
+  ) {
+    reporter = new reporter();
+  }
+  const Readable = getReadable();
+  const source = new Readable({
+    __proto__: null,
+    objectMode: true,
+    read() {},
+  });
+  const composed = source.compose(reporter);
+  composed.pipe(destination);
+  return (type, data) => {
+    if (type === "end") {
+      // deno-lint-ignore deno-internal/prefer-primordials -- a Node Readable
+      source.push(null);
+      return;
+    }
+    // deno-lint-ignore deno-internal/prefer-primordials -- a Node Readable
+    source.push({ __proto__: null, type, data });
+  };
+}
+
+// `--test-isolation=none`: every file in this one process. A file that loads
+// no test, or fails to load, is reported as a test of its own, as Node's are.
+async function importFilesInOneProcess(files) {
+  const process = lazyProcess().default;
+  const { pathToFileURL } = process.getBuiltinModule("node:url");
+  for (const { 0: file, 1: absolute } of new SafeArrayIterator(files)) {
+    const before = tapTopEntries.length;
+    let failure;
+    let threw = false;
+    try {
+      await import(pathToFileURL(absolute).href);
+    } catch (err) {
+      threw = true;
+      failure = err;
+    }
+    if (threw) {
+      test(file, () => {
+        throw failure;
+      });
+    } else if (tapTopEntries.length === before) {
+      test(file, () => {});
+    }
+  }
+}
+
 function noop() {}
 
 const skippedSymbol = Symbol("skipped");
@@ -833,20 +1414,11 @@ function detectNodeTestReporter() {
     value = env.get("NODE_TEST_REPORTER");
   } catch { /* permission denied */ }
   if (value) return value;
-  let nodeOptions = "";
-  try {
-    nodeOptions = env.get("NODE_OPTIONS") || "";
-  } catch { /* permission denied */ }
-  if (!nodeOptions) return null;
-  // Match the first `--test-reporter` occurrence; support both `=value` and
-  // space-separated forms. We intentionally do not handle multiple reporters
-  // (Node lets you stack reporters with destinations); the snapshot tests use
-  // a single reporter and that is what we target.
-  const match = StringPrototypeMatch(
-    nodeOptions,
-    new SafeRegExp(/--test-reporter(?:=|\s+)(\S+)/),
-  );
-  return match ? match[1] : null;
+  // The first `--test-reporter`, as `=value` or space-separated. We
+  // intentionally do not handle multiple reporters (Node lets you stack
+  // reporters with destinations); the snapshot tests use a single reporter and
+  // that is what we target.
+  return nodeOptionValues("--test-reporter")[0] ?? null;
 }
 
 // Resolve lazily: testing.ts ships inside Deno's startup snapshot, so any env
@@ -866,11 +1438,20 @@ function isDenoTestRun() {
   return typeof ops?.op_register_test === "function";
 }
 
+function isChildOfFileRunner() {
+  try {
+    return globalThis.Deno?.env?.get("NODE_TEST_CONTEXT") === "child-v8";
+  } catch {
+    return false;
+  }
+}
+
 // The reporter of the run-mode runner, or null for `deno test`'s own: as
 // Node, `spec` unless `--test-reporter` names `tap` or `dot`. Under `deno
 // test` only `tap` takes the run-mode runner (Node's snapshot fixtures).
 function getReporterKind() {
   const reporter = getNodeTestReporter();
+  if (!isDenoTestRun() && isChildOfFileRunner()) return "child";
   if (reporter === "tap") return "tap";
   if (isDenoTestRun()) return null;
   return reporter === "dot" || reporter === "junit" ? reporter : "spec";
@@ -900,18 +1481,8 @@ function getTapCurrentSuite() {
 // filter tests Node-style. A bare string is interpreted as a regex source;
 // `/.../flags` is a regex literal.
 function parsePatternFlag(flag) {
-  const env = globalThis.Deno?.env;
-  if (!env) return null;
-  let nodeOptions = "";
-  try {
-    nodeOptions = env.get("NODE_OPTIONS") || "";
-  } catch { /* permission denied */ }
-  if (!nodeOptions) return null;
   const out = [];
-  const re = new SafeRegExp(`${flag}(?:=|\\s+)(\\S+)`, "g");
-  let m;
-  while ((m = RegExpPrototypeExec(re, nodeOptions)) !== null) {
-    const value = m[1];
+  for (const value of new SafeArrayIterator(nodeOptionValues(flag))) {
     let pattern;
     const litMatch = StringPrototypeMatch(
       value,
@@ -945,19 +1516,7 @@ function getTestSkipPatterns() {
 let testOnlyFlagCache;
 function isTestOnlyFlagSet() {
   if (testOnlyFlagCache !== undefined) return testOnlyFlagCache;
-  const env = globalThis.Deno?.env;
-  if (!env) {
-    testOnlyFlagCache = false;
-    return false;
-  }
-  let nodeOptions = "";
-  try {
-    nodeOptions = env.get("NODE_OPTIONS") || "";
-  } catch { /* permission denied */ }
-  testOnlyFlagCache = RegExpPrototypeTest(
-    new SafeRegExp(/(^|\s)--test-only(\s|=|$)/),
-    nodeOptions,
-  );
+  testOnlyFlagCache = hasNodeOption("--test-only");
   return testOnlyFlagCache;
 }
 
@@ -968,28 +1527,27 @@ function isTestOnlyFlagSet() {
 let testRandomSeedCache;
 function getTestRandomSeed() {
   if (testRandomSeedCache !== undefined) return testRandomSeedCache;
-  let nodeOptions = "";
-  try {
-    nodeOptions = globalThis.Deno?.env?.get("NODE_OPTIONS") || "";
-  } catch { /* permission denied */ }
-  const seed = RegExpPrototypeExec(
-    new SafeRegExp(/(?:^|\s)--test-random-seed(?:=|\s+)(\d+)(?:\s|$)/),
-    nodeOptions,
-  );
-  if (seed !== null && NumberIsInteger(+seed[1]) && +seed[1] <= 0xFFFF_FFFF) {
-    testRandomSeedCache = +seed[1];
-  } else if (
-    RegExpPrototypeTest(
-      new SafeRegExp(/(?:^|\s)--test-randomize(?:\s|=true|$)/),
-      nodeOptions,
-    )
-  ) {
+  const seed = firstNumericNodeOption("--test-random-seed");
+  const randomize =
+    ArrayPrototypeIncludes(nodeOptionsArgs(), "--test-randomize") ||
+    ArrayPrototypeIncludes(nodeOptionValues("--test-randomize"), "true");
+  if (seed !== null && NumberIsInteger(seed) && seed <= 0xFFFF_FFFF) {
+    testRandomSeedCache = seed;
+  } else if (randomize) {
     // Node's `createRandomSeed()`.
     testRandomSeedCache = MathFloor(MathRandom() * (0xFFFF_FFFF + 1));
   } else {
     testRandomSeedCache = null;
   }
   return testRandomSeedCache;
+}
+
+// The first value of `flag` in NODE_OPTIONS that is all digits, or null.
+function firstNumericNodeOption(flag) {
+  for (const value of new SafeArrayIterator(nodeOptionValues(flag))) {
+    if (RegExpPrototypeTest(new SafeRegExp(/^\d+$/), value)) return +value;
+  }
+  return null;
 }
 
 // Node's `createSeededGenerator()`: Mulberry32 from a uint32 seed. Every test,
@@ -1063,7 +1621,15 @@ const tapStats = {
   todo: 0,
 };
 
+// Where the reporters of `node --test` write (`--test-reporter-destination`);
+// null writes to stdout.
+let reporterSink = null;
+
 function tapWrite(line) {
+  if (reporterSink !== null) {
+    reporterSink(`${line}\n`);
+    return;
+  }
   // deno-lint-ignore no-console
   console.log(line);
 }
@@ -1317,6 +1883,13 @@ class TapReporter {
     tapWrite("TAP version 13");
   }
 
+  // A child's output, as Node's `reporter/tap.js`.
+  output(message, isStderr) {
+    if (isStderr) tapWrite(`# ${tapEscape(message)}`);
+    else if (reporterSink !== null) reporterSink(message);
+    else lazyProcess().default.stdout.write(message);
+  }
+
   start(entry, depth) {
     tapWrite(`${tapIndent(depth)}# Subtest: ${tapEscape(entry.name)}`);
   }
@@ -1357,6 +1930,12 @@ class TapReporter {
     tapWrite(`1..${n}`);
     for (const line of new SafeArrayIterator(summaryLines(stats, durationMs))) {
       tapWrite(`# ${line}`);
+    }
+    if (this.coverageSummary !== undefined) {
+      const report = core.loadExtScript(
+        "ext:deno_node/internal/test/coverage.ts",
+      ).getCoverageReport("", this.coverageSummary, "# ", "", {});
+      tapWrite(StringPrototypeSlice(report, 0, -1));
     }
   }
 }
@@ -1421,6 +2000,7 @@ function formatTestReport(colors, failed, entry, result, showError, indent) {
 class BufferedReporter {
   #chunks = [];
   #flushScheduled = false;
+  sink = reporterSink;
 
   write(text) {
     ArrayPrototypePush(this.#chunks, text);
@@ -1436,7 +2016,8 @@ class BufferedReporter {
     if (this.#chunks.length === 0) return;
     const text = ArrayPrototypeJoin(this.#chunks, "");
     this.#chunks = [];
-    lazyProcess().default.stdout.write(text);
+    if (this.sink !== null) this.sink(text);
+    else lazyProcess().default.stdout.write(text);
   }
 }
 
@@ -1447,6 +2028,11 @@ class SpecReporter extends BufferedReporter {
   #failed = [];
 
   header() {}
+
+  // A child's output, as Node's `reporter/spec.js`.
+  output(message) {
+    this.write(message);
+  }
 
   start(entry, depth) {
     ArrayPrototypePush(this.#stack, { entry, depth, printed: false });
@@ -1492,6 +2078,14 @@ class SpecReporter extends BufferedReporter {
   summary(_n, stats, durationMs) {
     for (const line of new SafeArrayIterator(summaryLines(stats, durationMs))) {
       this.diagnostic(0, line);
+    }
+    if (this.coverageSummary !== undefined) {
+      const c = this.#colors;
+      this.write(
+        core.loadExtScript(
+          "ext:deno_node/internal/test/coverage.ts",
+        ).getCoverageReport("", this.coverageSummary, kSymbols.info, c.blue, c),
+      );
     }
     this.write(formatFailedTests(this.#colors, this.#failed));
     this.flush();
@@ -1758,7 +2352,8 @@ class JunitReporter {
       out += junitTreeToXML(root);
     }
     out += "</testsuites>\n";
-    lazyProcess().default.stdout.write(out);
+    if (reporterSink !== null) reporterSink(out);
+    else lazyProcess().default.stdout.write(out);
   }
 }
 
@@ -1771,10 +2366,113 @@ function dotLineLength() {
 }
 
 let runReporter = null;
+// A test file under `node --test` / `run()` (`NODE_TEST_CONTEXT=child-v8`):
+// its events go to the parent as frames on stdout, which the parent reports.
+class ChildEventReporter {
+  #send(type, data) {
+    const { frame } = getFileRunner();
+    const stdout = globalThis.Deno.stdout;
+    const bytes = new TextEncoder().encode(frame(type, data));
+    let at = 0;
+    while (at < bytes.length) {
+      at += stdout.writeSync(TypedArrayPrototypeSubarray(bytes, at));
+    }
+  }
+
+  header() {}
+
+  start(entry, depth) {
+    this.#send("test:start", {
+      __proto__: null,
+      name: entry.name,
+      nesting: depth,
+      file: entry.loc?.file,
+      line: entry.loc === undefined ? undefined : +entry.loc.line,
+      column: entry.loc === undefined ? undefined : +entry.loc.column,
+    });
+  }
+
+  plan(depth, count) {
+    this.#send("test:plan", { __proto__: null, nesting: depth, count });
+  }
+
+  end(entry, depth, n, result) {
+    const { serializeError } = getFileRunner();
+    const { skip, todo } = entry.options;
+    this.#send(result.failed ? "test:fail" : "test:pass", {
+      __proto__: null,
+      name: entry.name,
+      nesting: depth,
+      testNumber: n,
+      file: entry.loc?.file,
+      line: entry.loc === undefined ? undefined : +entry.loc.line,
+      column: entry.loc === undefined ? undefined : +entry.loc.column,
+      skip: skip ? skip : undefined,
+      todo: todo ? todo : undefined,
+      details: {
+        __proto__: null,
+        duration_ms: result.durationMs,
+        type: result.isSuite ? "suite" : "test",
+        error: result.error === undefined
+          ? undefined
+          : serializeError(result.error),
+      },
+    });
+  }
+
+  diagnostic(depth, message) {
+    this.#send("test:diagnostic", {
+      __proto__: null,
+      nesting: depth,
+      message,
+      level: "info",
+    });
+  }
+
+  summary(_n, stats, durationMs) {
+    this.#send("test:summary", {
+      __proto__: null,
+      success: stats.fail === 0 && stats.cancelled === 0,
+      counts: {
+        __proto__: null,
+        tests: stats.tests,
+        suites: stats.suites,
+        passed: stats.pass,
+        failed: stats.fail,
+        cancelled: stats.cancelled,
+        skipped: stats.skipped,
+        todo: stats.todo,
+      },
+      duration_ms: durationMs,
+      columns: lazyProcess().default.stdout.columns,
+    });
+  }
+}
+
+let fileRunnerModule = null;
+function getFileRunner() {
+  fileRunnerModule ??= core.loadExtScript(
+    "ext:deno_node/internal/test/file_runner.ts",
+  );
+  return fileRunnerModule;
+}
+
+function createRunReporter(kind) {
+  return kind === "tap"
+    ? new TapReporter()
+    : kind === "dot"
+    ? new DotReporter()
+    : kind === "junit"
+    ? new JunitReporter()
+    : new SpecReporter();
+}
+
 function getRunReporter() {
   if (runReporter === null) {
     const kind = getReporterKind();
-    runReporter = kind === "tap"
+    runReporter = kind === "child"
+      ? new ChildEventReporter()
+      : kind === "tap"
       ? new TapReporter()
       : kind === "dot"
       ? new DotReporter()
@@ -1785,9 +2483,31 @@ function getRunReporter() {
   return runReporter;
 }
 
+// A test body that takes `done` and returns a promise, as Node refuses it.
+class ERR_TEST_CALLBACK_AND_PROMISE extends Error {
+  code = "ERR_TEST_FAILURE";
+  failureType = kTestCodeFailure;
+  constructor() {
+    super("passed a callback but also returned a Promise");
+  }
+}
+
+// `t.workerId`: the runner's `NODE_TEST_WORKER_ID`.
+function testWorkerId() {
+  let value;
+  try {
+    value = globalThis.Deno?.env?.get("NODE_TEST_WORKER_ID");
+  } catch { /* permission denied */ }
+  return value === undefined ? undefined : +value;
+}
+
 // The test context of the run-mode runner (named as Node's, which stack
 // traces through a test body show).
 class TestContext {
+  get workerId() {
+    return testWorkerId();
+  }
+
   #diagnostics = [];
   #name;
   #depth;
@@ -2081,7 +2801,7 @@ async function runTapTop() {
     const rootCtx = { name: "<root>", fullName: "<root>" };
     for (const hook of new SafeArrayIterator(rootBeforeHooks)) {
       try {
-        const r = ReflectApply(hook, null, [rootCtx]);
+        const r = ReflectApply(hook, rootCtx, [rootCtx]);
         if (isThenable(r)) await r;
       } catch {
         /* swallow to keep parity with Node's lenient hook errors */
@@ -2136,22 +2856,24 @@ async function runRootAfterHooks() {
     );
     for (const hook of new SafeArrayIterator(hooks)) {
       try {
-        const r = ReflectApply(hook, null, [rootCtx]);
+        const r = ReflectApply(hook, rootCtx, [rootCtx]);
         if (isThenable(r)) await r;
       } catch { /* swallow */ }
     }
   }
 }
 
+// `--test-timeout=<ms>`, which the node shim forwards in NODE_OPTIONS.
+let testTimeoutFlagCache;
+function getTestTimeoutFlag() {
+  if (testTimeoutFlagCache !== undefined) return testTimeoutFlagCache;
+  const timeout = firstNumericNodeOption("--test-timeout");
+  testTimeoutFlagCache = timeout !== null && timeout > 0 ? timeout : undefined;
+  return testTimeoutFlagCache;
+}
+
 function isTestForceExit() {
-  let nodeOptions = "";
-  try {
-    nodeOptions = globalThis.Deno?.env?.get("NODE_OPTIONS") || "";
-  } catch { /* permission denied */ }
-  return RegExpPrototypeTest(
-    new SafeRegExp(/(?:^|\s)--test-force-exit(?:\s|=|$)/),
-    nodeOptions,
-  );
+  return hasNodeOption("--test-force-exit");
 }
 
 // Recursively run a test or suite entry, reporting it at the given nesting
@@ -2189,7 +2911,7 @@ async function runTapEntry(
       tapStats.skipped++;
       tapStats.tests++;
     }
-  } else if (entry.options.todo) {
+  } else if (entry.options.todo && !isSuite) {
     // Per Node behavior, a TODO test that throws is not counted as a failure.
     // The runner skips invoking the body to match snapshot output.
     if (isSuite) {
@@ -2199,6 +2921,12 @@ async function runTapEntry(
       tapStats.tests++;
     }
   } else if (isSuite) {
+    // A todo suite's tests inherit it; its hooks don't run, and nothing in it
+    // fails the run.
+    const todoSuite = entry.options.todo ? true : false;
+    for (const child of new SafeArrayIterator(entry.children)) {
+      if (todoSuite) child.options.todo ??= true;
+    }
     try {
       if (entry.bodyError) throw entry.bodyError;
       if (entry.bodyPromise) await entry.bodyPromise;
@@ -2208,7 +2936,7 @@ async function runTapEntry(
     if (error === undefined) {
       const suiteCtx = { name: entry.name, fullName: entry.name };
       try {
-        if (entry.children.length > 0) {
+        if (entry.children.length > 0 && !todoSuite) {
           await runHooks(entry.beforeAllHooks, suiteCtx);
         }
       } catch (err) {
@@ -2238,7 +2966,7 @@ async function runTapEntry(
         }
         childCount = childN;
         try {
-          if (entry.children.length > 0) {
+          if (entry.children.length > 0 && !todoSuite) {
             await runHooks(entry.afterAllHooks, suiteCtx);
           }
         } catch (err) {
@@ -2249,6 +2977,7 @@ async function runTapEntry(
         error = subtestsFailedError(failedChildren);
       }
     }
+    if (todoSuite) error = undefined;
     tapStats.suites++;
   } else {
     // test/it body
@@ -2285,10 +3014,24 @@ async function runTapEntry(
       await runHooks(eachHooks("beforeEachHooks"), ctx);
       hookStage = false;
       await runWithTestGuards(async () => {
+        // `(t, done)`: a declared second parameter is the callback.
+        if (entry.fn.length >= 2) {
+          const { promise, resolve, reject } = PromiseWithResolvers();
+          const done = (err) => {
+            if (err !== undefined && err !== null) reject(err);
+            else resolve();
+          };
+          const ret = ReflectApply(entry.fn, ctx, [ctx, done]);
+          if (isThenable(ret)) {
+            throw new ERR_TEST_CALLBACK_AND_PROMISE();
+          }
+          await promise;
+          return;
+        }
         const ret = ReflectApply(entry.fn, ctx, [ctx]);
         if (isThenable(ret)) await ret;
       }, {
-        timeout: entry.options.timeout,
+        timeout: entry.options.timeout ?? getTestTimeoutFlag(),
         signal: entry.options.signal,
         abort: (reason) => ctx._abort(reason),
       });
@@ -2311,7 +3054,14 @@ async function runTapEntry(
       error = subtestsFailedError(ctx._failedSubtests());
     }
     if (error === undefined) tapStats.pass++;
-    else tapStats.fail++;
+    else if (
+      error.cause?.failureType === "testTimeoutFailure" ||
+      error.cause?.failureType === "testAborted"
+    ) {
+      // Node's cancelled tests.
+      error.failureType = error.cause.failureType;
+      tapStats.cancelled++;
+    } else tapStats.fail++;
     diagnostics = ctx._drainDiagnostics();
     tapStats.tests++;
   }
@@ -2396,7 +3146,15 @@ function queueTapSuite(name, options, fn, overrides) {
   try {
     als.run(entry, () => {
       try {
-        const ret = ReflectApply(prepared.fn, null, []);
+        // Node's SuiteContext, as `this` and the argument.
+        const suiteContext = {
+          __proto__: null,
+          name: entry.name,
+          fullName: entry.name,
+          filePath: entry.loc?.file,
+          signal: entry.options.signal ?? new AbortController().signal,
+        };
+        const ret = ReflectApply(prepared.fn, suiteContext, [suiteContext]);
         if (isThenable(ret)) {
           entry.bodyPromise = ret;
           // The runner awaits it when the suite runs; until then a rejection
@@ -2683,6 +3441,10 @@ function onEventLoopIdle() {
 internals.nodeTestOnEventLoopIdle = onEventLoopIdle;
 
 class NodeTestContext {
+  get workerId() {
+    return testWorkerId();
+  }
+
   #denoContext;
   #afterHooks = [];
   #beforeHooks = [];
@@ -3328,6 +4090,14 @@ function prepareOptions(name, options, fn, overrides) {
   }
 
   const finalOptions = { ...options, ...overrides };
+
+  if (finalOptions.signal !== undefined) {
+    core.loadExtScript("ext:deno_node/internal/validators.mjs")
+      .validateAbortSignal(finalOptions.signal, "options.signal");
+  }
+  // An empty string marks a test as well, as in Node.
+  if (finalOptions.skip === "") finalOptions.skip = true;
+  if (finalOptions.todo === "") finalOptions.todo = true;
 
   if (finalOptions.tags !== undefined) {
     finalOptions.tags = prepareTags(finalOptions.tags, "options.tags");
@@ -5189,6 +5959,16 @@ test.after = after;
 test.beforeEach = beforeEach;
 test.afterEach = afterEach;
 test.run = run;
+// The entries of the node shim's `--test` module and of the
+// `--test-isolation=none` child; not an API.
+ObjectDefineProperty(test, SymbolFor("denext.nodeTestCli"), {
+  __proto__: null,
+  value: runTestCli,
+});
+ObjectDefineProperty(test, SymbolFor("denext.nodeTestIsolationNone"), {
+  __proto__: null,
+  value: importFilesInOneProcess,
+});
 
 return {
   run,

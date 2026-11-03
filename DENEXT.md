@@ -9239,6 +9239,149 @@ names for `laufey` (crates.io, or a git rev of Brainwires/laufey) with a path to
 that revision's `capi/`, records the `LAUFEY_API_VERSION` it compiled, and the
 package job fails if it differs from the hosts' `capi/include/laufey.h`.
 
+Items 901-903 carry placeholder numbers: `feat/node-compat-round5` wrote them as
+218-220, which `integrate/denext-8-pre` gives to other items. They take the next
+free numbers when the branch is merged.
+
+901. **`feat(ext/node)`: `node --test` is Node's runner, with coverage**
+     (`feat/node-compat-round5`, runtime; `libs/node_shim/lib.rs`,
+     `ext/node/polyfills/testing.ts`,
+     `ext/node/polyfills/internal/test/file_runner.ts`,
+     `ext/node/polyfills/internal/test/coverage.ts`,
+     `ext/node/polyfills/test/reporters.ts`, `runtime/js/99_main.js`).
+     `node --test` ran `deno test`, whose patterns aren't Node's, so a project's
+     `test/foo.js` was not found, and its output, flags and `run()` were not
+     Node's. Against Node 26.5.1's `lib/internal/test_runner/`:
+     - **Orchestration.** The shim runs `run` on a small `data:` module that
+       calls the runner with the flags it parsed (`--watch` stays
+       `deno test --watch`). Files are the patterns given, or Node's default
+       pattern (`node_modules` never searched, `Could not find '...'` for a
+       literal that isn't there); each runs in its own process with
+       `NODE_TEST_CONTEXT=child-v8` and `NODE_TEST_WORKER_ID`, at most
+       `--test-concurrency` at a time (by default the CPU count less one). The
+       child reports events as JSON frames on stdout (not Node's V8 format: a
+       child is always this runtime, and nothing outside reads it), and the
+       parent reports them in file order. Enqueue, dequeue and complete go past
+       that buffer and a test's start waits until something in it is done, as
+       Node's do. The parent numbers the top-level tests across files and counts
+       the summary. A file that reports no test, or fails outside one, is a test
+       of its own named after the file. `--test-isolation=none` runs every file
+       in one child. Also `--test-shard`, `--test-timeout`,
+       `--test-global-setup`, `--test-force-exit`, and an interrupted run's
+       `Interrupted while running:` diagnostic.
+     - **Reporters.** `--test-reporter-destination` (`stdout`, `stderr`, a
+       file), several reporters, a custom reporter (a generator function or a
+       stream, from a path, a `file:` URL or a package), and `lcov`.
+     - **`run()`** without `watch` runs the files and returns the event stream
+       (with `setup`, `files`, `globPatterns`, `shard`, `isolation`, `env`,
+       `argv`, `execArgv`, `coverage`); inside a test file it warns and does
+       nothing, as Node's does.
+     - **Coverage.** `--experimental-test-coverage` is Node's accounting
+       (`coverage.js`: lines, branches, functions, ignore comments, include /
+       exclude globs, thresholds) and table over the V8 files each child writes
+       under `DENO_COVERAGE_DIR`. A script started with the flag (no `--test`)
+       takes the same route with one file and no file-level test: a process's V8
+       coverage is written as it exits, so a parent reads it, in place of Node's
+       in-process collection. An `import` of a CommonJS file leaves a second
+       script under the file's URL (the generated re-export), which is skipped.
+       Node's source map step is not ported: a `.ts` file's offsets are the
+       transpiled source's, so its lines are approximate.
+     - **In the run-mode runner**, found on the way: `(t, done)` callbacks
+       (`setTimeout(done)` threw), `t.workerId`, an empty-string `skip` /
+       `todo`, a suite's context as `this` and argument (`this` was null), root
+       hooks' `this`, a todo suite's tests inherit it and its hooks don't run, a
+       timed-out or aborted test counts as cancelled, `options.signal` is
+       validated. A hook's `node:` URL that names no builtin is
+       `ERR_UNKNOWN_BUILTIN_MODULE`. Left open:
+       `process.config.variables.node_use_amaro` stays unset, because setting it
+       turns on Node's TypeScript suites, which do not pass
+       (`test-runner-cli.js` stops on it); most of `test-output-*` compare stack
+       frames (item 170's folding); `test-runner-reporters.js` wants reporter
+       failures' exit code 7; `--test-rerun-failures` and test tags in events
+       are not implemented in the runner. Tests: spec `node/node_test_cli`; shim
+       unit test `test_translate_test_runner` updated.
+     - **What changes for a project that relied on `deno test`.** Without
+       `--watch`, `node --test` is no longer `deno test -A`. Checked on Linux
+       against runtime 3.0.0-denext.2 with one project of `Deno.test`,
+       `node:test`, `.jsx` / `.tsx` and helper files:
+       - Files are found by Node's default pattern,
+         `**/{test,test/**/*,test-*,*[._-]test}.{js,mjs,cjs,ts,mts,cts}`, not
+         Deno's. `*.test.jsx` and `*.test.tsx` files no longer run, every file
+         under a `test/` directory (helpers too) now runs as a test file, and
+         `deno.json`'s `test.include` / `test.exclude` are not read.
+       - Each file runs under `deno run`, where `Deno.test` registers nothing,
+         so a file of `Deno.test` tests would pass with none of them run. In
+         such a child (`NODE_TEST_CONTEXT=child-v8`), `Deno.test()`, `.only` and
+         `.ignore` throw an error telling the user to run the file with
+         `deno test` (`runtime/js/99_main.js`): the file stops at its first
+         `Deno.test()` call and fails as a test named after it, and the run
+         exits 1, as in Node, where the file fails because `Deno` is not
+         defined. Outside such a child `deno run` still ignores `Deno.test()`.
+         Spec `node/node_test_cli` (`deno_test_file_fails`,
+         `deno_test_outside_runner`, `deno_test_under_deno_test`).
+       - Nothing is type-checked: a type error in a `.ts` test file no longer
+         fails the run (`deno test` checked it).
+       - The output is Node's reporter (`spec` by default, its `ℹ tests 4`
+         summary), not Deno's `ok | 4 passed`; tools that parse Deno's output
+         see a different format. Exit codes are unchanged: 1 when a test fails.
+       - Each file runs in its own process (Node's process isolation), at most
+         the CPU count less one at a time.
+       - `node --test --watch` is still `deno test --watch`: Deno's patterns,
+         `Deno.test` and a type check.
+       - The values the shim and `run()` forward in `NODE_OPTIONS`
+         (`--test-reporter`, `--test-name-pattern`, `--test-skip-pattern`) are
+         quoted as Node's parser reads them (`"…"`, `\"` and `\\` escaped), and
+         node:test splits `NODE_OPTIONS` the same way, so a pattern with quotes
+         or spaces stays one token instead of adding flags such as `--import` to
+         the child's. Tests: shim unit test
+         `test_runner_values_stay_one_node_options_token`; spec
+         `node/node_test_cli` (`pattern_cannot_add_flags`).
+
+902. **`fix(cli)`: `--experimental-loader` and `--import` in `NODE_OPTIONS`**
+     (`feat/node-compat-round5`, CLI; `libs/cli_parser/src/convert.rs`,
+     `tests/node_compat/mod.rs`). On a command line the shim registers a loader
+     (`module.register()` in a `--preload` module), but in `NODE_OPTIONS`
+     neither flag did anything, so
+     `NODE_OPTIONS=--import=<module> deno run ...`, the common way of putting a
+     loader on a whole process tree, ran without it. Both now become `--preload`
+     modules: loaders, then imports, then the command line's, as in Node. The
+     node_compat runner passes a test's
+     `// Flags: --experimental-loader <module>` through `NODE_OPTIONS`, which
+     until now it dropped, so those tests ran with no hook. Tests: unit test
+     `node_options_loader_and_import_preload`; spec `node/node_test_cli`
+     (`loader_in_node_options`). The flags apply to every command that reads
+     `NODE_OPTIONS`, `deno run` included, not only to the node shim: a
+     `NODE_OPTIONS` left over from Node tooling (`--import tsx`,
+     `--loader ts-node/esm`) now loads that module in every such process, and
+     one that does not resolve stops it (`Module not found`), where it used to
+     be ignored. `deno compile`, `deno desktop` and `deno install` are the
+     exception: their preloads would be built into the program they write and
+     run at every launch, so a `NODE_OPTIONS` in the build machine's environment
+     would ship with it. They ignore `NODE_OPTIONS`' loaders and imports, and
+     its `--require` modules, which they build in the same way, and print one
+     warning naming them (`--preload` / `--require` on their command line still
+     apply). Tests: unit test
+     `node_options_loader_and_import_not_for_artifacts`; spec
+     `compile/node_options_import_not_built_in`.
+
+903. **`test(node_compat)`: 27 tests the node_compat round 5 fixes pass**
+     (`feat/node-compat-round5`, test config only;
+     `tests/node_compat/config.jsonc`): `test-runner/test-output-coverage-*`
+     (11), `test-output-test-diagnostic-warning-without-test-only-flag.mjs`, 3
+     under `es-module/` (`test-esm-loader-custom-condition.mjs`,
+     `-thenable.mjs`, `test-require-module-preload.js`) and 12
+     `parallel/test-runner-*`. Each passed three runs with no flaky retries on
+     Linux x86_64 (debug build), Windows x64 (`windows-2022`), Windows arm64
+     (the lab's win-arm VM) and macOS arm64 (`macos-15`), except two that failed
+     once in three on macOS and stay off there, with that reason:
+     `test-runner-worker-id.js` (a worker ID used twice, not three times) and
+     `test-runner-error-reporter.js` (two failures reported under `FAIL_FAST`).
+     The fork's CI runs node_compat on Linux only. The Jest rows item 166 lists
+     were checked and need no change: real Node 24.11 + Jest 30.2.0 + the real
+     better-sqlite3 12.11.1 fails the same five rows (`toStrictEqual` on a row,
+     `toThrow(TypeError)`, also on `node:fs`'s own errors), as this runtime
+     does, since the host's objects aren't the test realm's.
+
 ## npm supply-chain settings
 
 Items 83-86. Each `.npmrc` key also reads `npm_config_<key>` /

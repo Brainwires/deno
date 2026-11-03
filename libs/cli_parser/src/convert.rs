@@ -3235,10 +3235,37 @@ pub fn parse_node_options_env_var(
   Ok(env_argv)
 }
 
+/// A `--preload` module that registers a `--experimental-loader` module with
+/// `module.register()`, resolved from the working directory as in Node. The
+/// node shim's `--experimental-loader` on a command line does the same.
+fn node_loader_preload(loader: &str) -> String {
+  let specifier =
+    format!("\"{}\"", loader.replace('\\', "\\\\").replace('"', "\\\""));
+  let source = format!(
+    "import{{register}}from\"node:module\";\
+     import{{pathToFileURL}}from\"node:url\";\
+     register({specifier},pathToFileURL(\"./\"));"
+  );
+  let mut url = String::from("data:text/javascript,");
+  for byte in source.bytes() {
+    if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~')
+    {
+      url.push(byte as char);
+    } else {
+      url.push_str(&format!("%{byte:02X}"));
+    }
+  }
+  url
+}
+
 /// Reads some flags from NODE_OPTIONS:
 /// https://nodejs.org/api/cli.html#node_optionsoptions
 /// Currently supports:
-/// - `--require` / `-r`
+/// - `--require` / `-r` (`--require=<module>` too)
+/// - `--experimental-loader` / `--loader` and `--import` (denext), as `--preload`
+///   modules before the command line's: Node's order, loaders then imports.
+///   Ignored, with a warning, by `compile`, `desktop` and `install` (as is
+///   `--require`).
 /// - `--inspect-publish-uid`
 ///
 /// Public because the CLI's bare-run fast path skips the full parse and has to
@@ -3275,7 +3302,10 @@ pub fn apply_node_options(flags: &mut Flags) {
         *prev_was_require = true;
         return Some((word, true));
       }
-      if word.starts_with("--inspect-publish-uid=") || *prev_was_require {
+      if word.starts_with("--require=")
+        || word.starts_with("--inspect-publish-uid=")
+        || *prev_was_require
+      {
         *prev_was_require = false;
         return Some((word, true));
       }
@@ -3293,6 +3323,12 @@ pub fn apply_node_options(flags: &mut Flags) {
     if (word == "--require" || word == "-r") && i + 1 < filtered.len() {
       node_require.push(filtered[i + 1].to_string());
       i += 2;
+    } else if let Some(module) = word.strip_prefix("--require=") {
+      // denext: Node's `--require=<module>` form, as on its command line.
+      if !module.is_empty() {
+        node_require.push(module.to_string());
+      }
+      i += 1;
     } else if word.starts_with("--inspect-publish-uid=") {
       // Handle below
       i += 1;
@@ -3301,10 +3337,66 @@ pub fn apply_node_options(flags: &mut Flags) {
     }
   }
 
+  // denext: none of NODE_OPTIONS' modules (`--require`, loaders, `--import`)
+  // for a command that builds an artifact (`compile`, `desktop`, `install`):
+  // they would be built into the program and run at every launch, so a
+  // NODE_OPTIONS left in the build machine's environment would ship with it.
+  // Those commands ignore them, with a warning.
+  let bakes_flags = matches!(
+    flags.subcommand,
+    DenoSubcommand::Compile(_)
+      | DenoSubcommand::Desktop(_)
+      | DenoSubcommand::Install(_)
+  );
+  let mut ignored: Vec<String> = Vec::new();
+
   // Prepend NODE_OPTIONS --require values before CLI --require values
-  if !node_require.is_empty() {
+  if bakes_flags {
+    ignored.extend(node_require.drain(..).map(|m| format!("--require={m}")));
+  } else if !node_require.is_empty() {
     node_require.append(&mut flags.require);
     flags.require = node_require;
+  }
+
+  // denext: loaders and `--import` modules, before the CLI's `--preload`s.
+  let mut loaders: Vec<String> = Vec::new();
+  let mut imports: Vec<String> = Vec::new();
+  let mut words = args.iter();
+  while let Some(word) = words.next() {
+    let (name, inline) = match word.split_once('=') {
+      Some((name, value)) => (name, Some(value.to_string())),
+      None => (word.as_str(), None),
+    };
+    if !matches!(name, "--experimental-loader" | "--loader" | "--import") {
+      continue;
+    }
+    let Some(value) = inline.or_else(|| words.next().cloned()) else {
+      break;
+    };
+    if bakes_flags {
+      ignored.push(format!("{name}={value}"));
+    } else if name == "--import" {
+      imports.push(value);
+    } else {
+      loaders.push(node_loader_preload(&value));
+    }
+  }
+  if !ignored.is_empty() {
+    // Logging isn't initialized yet.
+    #[allow(clippy::print_stderr, reason = "can't use log crate yet")]
+    {
+      eprintln!(
+        "{} NODE_OPTIONS {} ignored: this command would build {} into its output",
+        deno_runtime::colors::yellow("Warning"),
+        ignored.join(" "),
+        if ignored.len() == 1 { "it" } else { "them" },
+      );
+    }
+  }
+  if !loaders.is_empty() || !imports.is_empty() {
+    loaders.append(&mut imports);
+    loaders.append(&mut flags.preload);
+    flags.preload = loaders;
   }
 
   // Parse --inspect-publish-uid (only if not already set from CLI)

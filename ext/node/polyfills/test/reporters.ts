@@ -7,6 +7,8 @@ const { core, primordials } = __bootstrap;
 const {
   ArrayPrototypeJoin,
   ArrayPrototypePush,
+  ArrayPrototypeSlice,
+  ArrayPrototypeSort,
   ObjectAssign,
   ReflectConstruct,
   SafeArrayIterator,
@@ -228,8 +230,59 @@ class LcovReporter extends getTransform() {
     super(ObjectAssign({ writableObjectMode: true }, options));
   }
 
-  _transform(_event, _encoding, callback) {
-    callback();
+  // Node's `lib/internal/test_runner/reporter/lcov.js`.
+  _transform(event, _encoding, callback) {
+    if (event.type !== "test:coverage") {
+      return callback(null);
+    }
+    let lcov = "";
+    lcov += "TN:\n";
+    const {
+      data: {
+        summary: { workingDirectory },
+      },
+    } = event;
+    try {
+      for (let i = 0; i < event.data.summary.files.length; i++) {
+        const file = event.data.summary.files[i];
+        lcov += `SF:${
+          globalThis.process.getBuiltinModule("node:path").relative(
+            workingDirectory,
+            file.path,
+          )
+        }\n`;
+        let fnda = "";
+        for (let j = 0; j < file.functions.length; j++) {
+          const func = file.functions[j];
+          const name = func.name || `anonymous_${j}`;
+          lcov += `FN:${func.line},${name}\n`;
+          fnda += `FNDA:${func.count},${name}\n`;
+        }
+        lcov += fnda;
+        lcov += `FNF:${file.totalFunctionCount}\n`;
+        lcov += `FNH:${file.coveredFunctionCount}\n`;
+        for (let j = 0; j < file.branches.length; j++) {
+          lcov += `BRDA:${file.branches[j].line},${j},0,${
+            file.branches[j].count
+          }\n`;
+        }
+        lcov += `BRF:${file.totalBranchCount}\n`;
+        lcov += `BRH:${file.coveredBranchCount}\n`;
+        const sortedLines = ArrayPrototypeSort(
+          ArrayPrototypeSlice(file.lines),
+          (a, b) => a.line - b.line,
+        );
+        for (let j = 0; j < sortedLines.length; j++) {
+          lcov += `DA:${sortedLines[j].line},${sortedLines[j].count}\n`;
+        }
+        lcov += `LH:${file.coveredLineCount}\n`;
+        lcov += `LF:${file.totalLineCount}\n`;
+        lcov += "end_of_record\n";
+      }
+    } catch (error) {
+      return callback(error);
+    }
+    return callback(null, lcov);
   }
 }
 

@@ -1,0 +1,101 @@
+{
+  // `node --test` runs each test file in its own process, as Node's runner:
+  // the default patterns find `test/**/*` and `*.test.js`, never
+  // `node_modules`; a file with no tests is a test of its own; the top-level
+  // tests are numbered across the files, in file order.
+  "tests": {
+    "default_patterns_tap": {
+      "cwd": "project",
+      "args": "run -A ../node.mjs --test --test-reporter=tap",
+      "output": "tap.out",
+      "exitCode": 1
+    },
+    "default_patterns_spec": {
+      "cwd": "project",
+      "args": "run -A ../node.mjs --test",
+      "output": "spec.out",
+      "exitCode": 1
+    },
+    "named_file_passes": {
+      "cwd": "project",
+      "args": "run -A ../node.mjs --test --test-reporter=dot test/a.js",
+      "output": "dot.out"
+    },
+    "isolation_none": {
+      "cwd": "project",
+      "args": "run -A ../node.mjs --test --test-isolation=none --test-reporter=tap test/a.js test/empty.js",
+      "output": "none.out"
+    },
+    "missing_file": {
+      "cwd": "project",
+      "args": "run -A ../node.mjs --test does-not-exist.js",
+      "output": "missing.out",
+      "exitCode": 1
+    },
+    "custom_reporter": {
+      "cwd": "project",
+      "args": "run -A ../node.mjs --test --test-reporter=./reporter.mjs test/a.js",
+      "output": "custom.out"
+    },
+    "run_api": {
+      "cwd": "project",
+      "args": "run -A run_api.mjs",
+      "output": "run_api.out"
+    },
+    // `--experimental-test-coverage`: Node's table and `lcov`, from each
+    // file's V8 coverage.
+    "coverage_table": {
+      "cwd": "cov",
+      "args": "run -A ../node.mjs --test --experimental-test-coverage --test-reporter=tap",
+      "output": "cov_table.out"
+    },
+    "coverage_lcov": {
+      "cwd": "cov",
+      "args": "run -A ../node.mjs --test --experimental-test-coverage --test-reporter=lcov",
+      "output": "cov_lcov.out"
+    },
+    "coverage_threshold": {
+      "cwd": "cov",
+      "args": "run -A ../node.mjs --test --experimental-test-coverage --test-reporter=dot --test-coverage-lines=100",
+      "output": "cov_threshold.out",
+      "exitCode": 1
+    },
+    "coverage_single_file": {
+      "cwd": "cov",
+      "args": "run -A ../node.mjs --experimental-test-coverage --test-reporter=tap math.test.js",
+      "output": "cov_table.out"
+    },
+    // A file of `Deno.test()` tests fails under `node --test` (its tests
+    // would not run), as it does in Node (`Deno` is not defined there);
+    // outside the runner `Deno.test()` still registers nothing, and
+    // `deno test` runs the file.
+    "deno_test_file_fails": {
+      "cwd": "deno_test",
+      "args": "run -A ../node.mjs --test --test-reporter=tap math.test.js",
+      "output": "deno_test_tap.out",
+      "exitCode": 1
+    },
+    "deno_test_outside_runner": {
+      "cwd": "deno_test",
+      "args": "run -A math.test.js",
+      "output": ""
+    },
+    "deno_test_under_deno_test": {
+      "cwd": "deno_test",
+      "args": "test -A math.test.js",
+      "output": "deno_test_deno.out"
+    },
+    // Quotes and spaces in a pattern stay in its NODE_OPTIONS token.
+    "pattern_cannot_add_flags": {
+      "cwd": "project",
+      "args": "run -A pattern_cannot_add_flags.mjs",
+      "output": "injected: false\n"
+    },
+    "loader_in_node_options": {
+      "cwd": "project",
+      "args": "run -A loader_main.mjs",
+      "envs": { "NODE_OPTIONS": "--experimental-loader ./loader.mjs" },
+      "output": "virtual\n"
+    }
+  }
+}

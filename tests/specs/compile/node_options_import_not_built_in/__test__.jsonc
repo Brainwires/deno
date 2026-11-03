@@ -1,0 +1,31 @@
+{
+  // NODE_OPTIONS' `--import` / `--loader` are `--preload`s for `deno run`
+  // (DENEXT 902), but `deno compile` must not build them, or NODE_OPTIONS'
+  // `--require`, into the program.
+  "tempDir": true,
+  "steps": [{
+    "args": "run main.js",
+    "envs": { "NODE_OPTIONS": "--import=./preload.js" },
+    "output": "run.out"
+  }, {
+    "if": "unix",
+    "args": "compile --output bin main.js",
+    "envs": { "NODE_OPTIONS": "--import=./preload.js --require ./require.cjs" },
+    "output": "compile.out"
+  }, {
+    "if": "unix",
+    "commandName": "./bin",
+    "args": [],
+    "output": "main.out"
+  }, {
+    "if": "windows",
+    "args": "compile --output bin.exe main.js",
+    "envs": { "NODE_OPTIONS": "--import=./preload.js --require ./require.cjs" },
+    "output": "compile.out"
+  }, {
+    "if": "windows",
+    "commandName": "./bin.exe",
+    "args": [],
+    "output": "main.out"
+  }]
+}

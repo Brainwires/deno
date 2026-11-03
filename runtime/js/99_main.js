@@ -13,6 +13,7 @@ import {
   op_bootstrap_pid,
   op_bootstrap_stderr_no_color,
   op_bootstrap_stdout_no_color,
+  op_get_env_no_permission_check,
   op_get_ext_import_meta_proto,
   op_internal_log,
   op_main_module,
@@ -958,15 +959,30 @@ const internalSymbol = Symbol("Deno.internal");
 // `Deno.test` and its sub-methods are no-ops outside of `deno test`, kept for
 // compatibility so they don't error under `deno run`. Mirrors the surface of
 // the real `Deno.test` defined in cli/js/40_test.js.
-function noopTest() {}
-noopTest.ignore = () => {};
-noopTest.only = () => {};
+//
+// One exception: a test file that `node --test` / `node:test`'s `run()`
+// started (each file runs under `deno run` with `NODE_TEST_CONTEXT=child-v8`).
+// There its `Deno.test()` tests would not run and the file would pass with
+// none, so registering one fails the file instead, as in Node (where `Deno`
+// is not defined).
+function failUnderNodeTestRunner() {
+  if (op_get_env_no_permission_check("NODE_TEST_CONTEXT") === "child-v8") {
+    throw new Error(
+      "Deno.test() does not run under `node --test`: run this file with `deno test`",
+    );
+  }
+}
+function noopTest() {
+  failUnderNodeTestRunner();
+}
+noopTest.ignore = () => failUnderNodeTestRunner();
+noopTest.only = () => failUnderNodeTestRunner();
 noopTest.beforeAll = () => {};
 noopTest.beforeEach = () => {};
 noopTest.afterEach = () => {};
 noopTest.afterAll = () => {};
 noopTest.sanitizer = () => {};
-const noopTestEach = () => () => {};
+const noopTestEach = () => () => failUnderNodeTestRunner();
 noopTest.each = noopTestEach;
 noopTest.only.each = noopTestEach;
 noopTest.ignore.each = noopTestEach;

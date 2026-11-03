@@ -3415,6 +3415,10 @@ pub fn resolve_entrypoint(
 ) -> String {
   use std::process::Stdio;
 
+  // denext: the module `--test` runs is no path.
+  if entrypoint.starts_with("data:") {
+    return entrypoint.to_string();
+  }
   let Ok(cwd) = std::env::current_dir() else {
     return entrypoint.to_string();
   };
@@ -3708,7 +3712,51 @@ pub fn translate_to_deno_args(
     return result;
   }
 
-  // Handle --test flag (run tests via deno test)
+  // `--test`: Node's runner, each test file in its own process (denext); with
+  // `--watch`, `deno test --watch` as before. A script started with
+  // `--experimental-test-coverage` takes the same route: a process's V8
+  // coverage is written as it exits, so a parent has to read it. A test file
+  // the runner started (NODE_TEST_CONTEXT set) reports to that parent instead.
+  #[allow(
+    clippy::disallowed_methods,
+    reason = "the node shim reads the process's own environment, as Node does"
+  )]
+  let in_test_child = std::env::var_os("NODE_TEST_CONTEXT").is_some();
+  let single_file_coverage = !env_opts.test_runner
+    && env_opts.test_runner_coverage
+    && !env_opts.watch_mode
+    && !parsed_args.remaining_args.is_empty()
+    && !in_test_child;
+  if (env_opts.test_runner && !env_opts.watch_mode) || single_file_coverage {
+    if options.use_node_subcommand {
+      deno_args.push("node".to_string());
+    }
+    deno_args.push("run".to_string());
+    deno_args.push("-A".to_string());
+    if options.add_unstable_flags {
+      deno_args.push("--unstable-bare-node-builtins".to_string());
+      deno_args.push("--unstable-detect-cjs".to_string());
+    }
+    if options.add_standalone_config {
+      deno_args.push("--node-modules-dir=manual".to_string());
+      deno_args.push("--no-config".to_string());
+    }
+    add_common_flags(deno_args, &parsed_args, env_opts, options);
+    if !env_opts.warnings {
+      deno_args.push("--quiet".to_string());
+      node_options.push("--no-warnings".to_string());
+    }
+    add_test_node_options(node_options, env_opts);
+    deno_args.push(data_url(&test_cli_source(env_opts, &parsed_args)));
+    append_remaining_args(
+      deno_args,
+      parsed_args.remaining_args,
+      parsed_args.had_double_dash,
+    );
+    return result;
+  }
+
+  // `--test --watch`: `deno test --watch`.
   if env_opts.test_runner {
     if options.use_node_subcommand {
       deno_args.push("node".to_string());
@@ -3788,18 +3836,60 @@ pub fn translate_to_deno_args(
     node_options.push("--pending-deprecation".to_string());
   }
 
+  add_test_node_options(node_options, env_opts);
+
+  // Add the script and remaining args
+  append_remaining_args(
+    deno_args,
+    parsed_args.remaining_args,
+    parsed_args.had_double_dash,
+  );
+
+  result
+}
+
+/// One `NODE_OPTIONS` token, quoted as Node's parser reads it: in `"…"`, with
+/// a `\` before each `"` and `\`. A value with spaces or quotes then stays one
+/// token instead of adding flags (`--import`, `--require`) to the child's
+/// `NODE_OPTIONS`. The node:test polyfill's `quoteNodeOptionsToken` does the
+/// same.
+fn node_options_token(token: &str) -> String {
+  let mut out = String::with_capacity(token.len() + 2);
+  out.push('"');
+  for c in token.chars() {
+    if c == '"' || c == '\\' {
+      out.push('\\');
+    }
+    out.push(c);
+  }
+  out.push('"');
+  out
+}
+
+/// The flags of Node's test runner that ride along in `NODE_OPTIONS`.
+fn add_test_node_options(
+  node_options: &mut Vec<String>,
+  env_opts: &EnvironmentOptions,
+) {
   // Forward Node's --test-reporter so node:test in the spawned child can
   // detect it and emit the corresponding output format. Deno's own CLI does
   // not consume the flag (its TAP/spec output differs from Node's), so the
   // value rides along through NODE_OPTIONS for the polyfill to pick up.
+  // denext: values are quoted (`node_options_token`), so a pattern or a path
+  // with spaces or quotes stays one token and can't add flags.
   for reporter in &env_opts.test_reporter {
-    node_options.push(format!("--test-reporter={}", reporter));
+    node_options
+      .push(node_options_token(&format!("--test-reporter={reporter}")));
   }
   for pattern in &env_opts.test_name_pattern {
-    node_options.push(format!("--test-name-pattern={}", pattern));
+    node_options.push(node_options_token(&format!(
+      "--test-name-pattern={pattern}"
+    )));
   }
   for pattern in &env_opts.test_skip_pattern {
-    node_options.push(format!("--test-skip-pattern={}", pattern));
+    node_options.push(node_options_token(&format!(
+      "--test-skip-pattern={pattern}"
+    )));
   }
   // denext: `--test-only` and `--test-force-exit` ride along the same way.
   if env_opts.test_only {
@@ -3815,15 +3905,66 @@ pub fn translate_to_deno_args(
   if let Some(seed) = env_opts.test_random_seed {
     node_options.push(format!("--test-random-seed={}", seed));
   }
+  // denext: `--test-timeout` for a test without its own `timeout`.
+  if env_opts.test_runner_timeout > 0 {
+    node_options
+      .push(format!("--test-timeout={}", env_opts.test_runner_timeout));
+  }
+}
 
-  // Add the script and remaining args
-  append_remaining_args(
-    deno_args,
-    parsed_args.remaining_args,
-    parsed_args.had_double_dash,
-  );
-
-  result
+/// The module `node --test` runs: `node:test`'s runner, given what it can't
+/// read from `NODE_OPTIONS` (a child must not inherit these).
+fn test_cli_source(
+  env_opts: &EnvironmentOptions,
+  parsed_args: &ParseResult,
+) -> String {
+  let mut exec_argv: Vec<String> = Vec::new();
+  for module in &env_opts.preload_cjs_modules {
+    exec_argv.push(format!("--require={module}"));
+  }
+  for loader in &env_opts.userland_loaders {
+    exec_argv.push(format!("--experimental-loader={loader}"));
+  }
+  for module in &env_opts.preload_esm_modules {
+    exec_argv.push(format!("--import={module}"));
+  }
+  for condition in &env_opts.conditions {
+    exec_argv.push(format!("--conditions={condition}"));
+  }
+  if !parsed_args.v8_args.is_empty() {
+    exec_argv.extend(parsed_args.v8_args.iter().cloned());
+  }
+  let shard = env_opts.test_shard.split_once('/').and_then(|(i, n)| {
+    Some(serde_json::json!({
+      "index": i.parse::<u64>().ok()?,
+      "total": n.parse::<u64>().ok()?,
+    }))
+  });
+  let config = serde_json::json!({
+    "reporters": env_opts.test_reporter,
+    "destinations": env_opts.test_reporter_destination,
+    "concurrency": env_opts.test_runner_concurrency,
+    "timeout": env_opts.test_runner_timeout,
+    "isolation": env_opts.test_isolation,
+    "shard": shard,
+    "forceExit": env_opts.test_runner_force_exit,
+    "only": env_opts.test_only,
+    "stripTypes": env_opts.experimental_strip_types,
+    "globalSetup": env_opts.test_global_setup_path,
+    "randomize": env_opts.test_randomize,
+    "randomSeed": env_opts.test_random_seed,
+    "coverage": env_opts.test_runner_coverage,
+    "coverageInclude": env_opts.coverage_include_pattern,
+    "coverageExclude": env_opts.coverage_exclude_pattern,
+    "coverageLines": env_opts.test_coverage_lines,
+    "coverageBranches": env_opts.test_coverage_branches,
+    "coverageFunctions": env_opts.test_coverage_functions,
+    "execArgv": exec_argv,
+    "singleFile": !env_opts.test_runner,
+  });
+  format!(
+    "import t from\"node:test\";await t[Symbol.for(\"denext.nodeTestCli\")]({config});"
+  )
 }
 
 fn add_tls_node_options(
@@ -5784,7 +5925,39 @@ mod tests {
     let result = translate_to_deno_args(parsed_args, &options);
     assert_eq!(
       result.node_options,
-      svec!["--test-reporter=spec", "--test-only", "--test-force-exit"]
+      svec![
+        "\"--test-reporter=spec\"",
+        "--test-only",
+        "--test-force-exit"
+      ]
+    );
+  }
+
+  #[test]
+  fn test_runner_values_stay_one_node_options_token() {
+    // A quote, a backslash or a space in a value must not add flags (here
+    // `--import`) to the child's NODE_OPTIONS.
+    let name = r#"x" --import=./evil.mjs ""#;
+    let skip = r"a\ --require=./z.cjs";
+    let reporter = "./my reporter.mjs";
+    let parsed_args = parse_args(svec![
+      format!("--test-name-pattern={name}"),
+      format!("--test-skip-pattern={skip}"),
+      format!("--test-reporter={reporter}"),
+      "main.js"
+    ])
+    .unwrap();
+    let options = TranslateOptions::for_child_process();
+    let result = translate_to_deno_args(parsed_args, &options);
+    let joined = result.node_options.join(" ");
+    let parsed = parse_node_options_env_var(&joined).unwrap();
+    assert_eq!(
+      parsed,
+      vec![
+        format!("--test-reporter={reporter}"),
+        format!("--test-name-pattern={name}"),
+        format!("--test-skip-pattern={skip}"),
+      ]
     );
   }
 
