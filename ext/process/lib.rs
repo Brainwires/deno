@@ -68,7 +68,11 @@ use serde::Deserialize;
 #[cfg(unix)]
 use tokio::process::Child as AsyncChild;
 
+mod embedded_program;
 pub mod ipc;
+pub use embedded_program::EmbeddedProgram;
+pub use embedded_program::EmbeddedProgramReader;
+pub use embedded_program::set_embedded_programs;
 use ipc::IpcAdvancedStreamResource;
 use ipc::IpcJsonStreamResource;
 use ipc::IpcRefTracker;
@@ -757,6 +761,10 @@ type CreateCommand = (
   Option<ResourceId>,
   Vec<Option<i64>>,
   Vec<deno_io::RawBiPipeHandle>,
+  // denext (DENEXT.md item 232): the checks that passed for a program the app
+  // carries, for the spawn to hold. Returned, not kept in the OpState, so a
+  // failure before the spawn drops it (and its handle) with the command.
+  Option<embedded_program::VerifiedProgram>,
 );
 
 pub fn npm_process_state_tempfile(
@@ -825,7 +833,11 @@ fn create_command(
 
   // A child with an IPC channel (`fork()`, or `stdio: [..., "ipc"]`).
   let ipc = args.ipc.is_some_and(|fd| fd >= 0) || args.stdio.stdin.is_ipc();
-  let (cmd, run_env) = compute_run_cmd_and_check_permissions(
+  #[cfg_attr(
+    not(target_os = "linux"),
+    allow(unused_mut, reason = "only Linux execs the verified handle")
+  )]
+  let (cmd, run_env, mut verified) = compute_run_cmd_and_check_permissions(
     &args.cmd,
     args.cwd.as_deref(),
     &args.env,
@@ -852,10 +864,28 @@ fn create_command(
     self_fork_env(&cmd, &run_env.cwd)
   };
 
+  // denext (DENEXT.md item 232): on Linux a program the app carries runs from
+  // the handle it was hashed through, numbered above every fd the child gets.
+  #[cfg(target_os = "linux")]
+  let exec_path = if wrap_in_shell {
+    None
+  } else {
+    let max_target =
+      args.ipc.unwrap_or(0).max(3 + args.extra_stdio.len() as i32);
+    verified.as_mut().and_then(|v| v.exec_path(max_target + 1))
+  };
+  #[cfg(all(unix, not(target_os = "linux")))]
+  let exec_path: Option<PathBuf> = None;
+
   #[cfg(unix)]
   let mut command = if wrap_in_shell {
     let mut command = Command::new("/bin/sh");
     command.arg(&cmd);
+    command
+  } else if let Some(exec_path) = &exec_path {
+    let mut command = Command::new(exec_path);
+    // argv[0] is the program's path, as when it runs from it.
+    command.arg0(&cmd);
     command
   } else {
     Command::new(cmd)
@@ -1088,7 +1118,7 @@ fn create_command(
       command.env_remove(DENO_EXTRA_STDIO_FDS_ENV_VAR);
     }
 
-    Ok((command, ipc_rid, extra_pipe_fds, fds_to_close))
+    Ok((command, ipc_rid, extra_pipe_fds, fds_to_close, verified))
   }
 
   #[cfg(windows)]
@@ -1202,7 +1232,7 @@ fn create_command(
       }
     }
 
-    Ok((command, ipc_rid, extra_pipe_fds, handles_to_close))
+    Ok((command, ipc_rid, extra_pipe_fds, handles_to_close, verified))
   }
 }
 
@@ -1230,7 +1260,28 @@ struct NodeChild {
 
 /// Spawn a child process, returning the raw child and its PID.
 /// Shared by both the Deno API and Node compat spawn paths.
-fn spawn_command(command: Command) -> Result<(AsyncChild, u32), ProcessError> {
+/// denext (DENEXT.md item 232): the name a spawn error gives the program. On
+/// Linux a program the app carries runs from its handle (`/proc/self/fd/N`),
+/// which names nothing the app knows: the error names the program's path.
+fn spawn_error_name(
+  program: &std::ffi::OsStr,
+  verified: Option<&embedded_program::VerifiedProgram>,
+) -> String {
+  #[cfg(target_os = "linux")]
+  if let Some(verified) = verified
+    && Path::new(program).starts_with("/proc/self/fd")
+  {
+    return verified.path().to_string_lossy().into_owned();
+  }
+  #[cfg(not(target_os = "linux"))]
+  let _ = verified;
+  program.to_string_lossy().into_owned()
+}
+
+fn spawn_command(
+  command: Command,
+  verified: Option<&embedded_program::VerifiedProgram>,
+) -> Result<(AsyncChild, u32), ProcessError> {
   #[cfg(windows)]
   let mut command = command;
   #[cfg(not(windows))]
@@ -1246,7 +1297,7 @@ fn spawn_command(command: Command) -> Result<(AsyncChild, u32), ProcessError> {
     Err(err) => {
       #[cfg(not(windows))]
       let command = command.as_std();
-      let command_name = command.get_program().to_string_lossy();
+      let command_name = spawn_error_name(command.get_program(), verified);
 
       if let Some(cwd) = command.get_current_dir() {
         // launching a sub process always depends on the real
@@ -1283,7 +1334,7 @@ fn spawn_command(command: Command) -> Result<(AsyncChild, u32), ProcessError> {
       }
 
       return Err(ProcessError::SpawnFailed {
-        command: command.get_program().to_string_lossy().into_owned(),
+        command: command_name,
         error: Box::new(err.into()),
       });
     }
@@ -1294,14 +1345,45 @@ fn spawn_command(command: Command) -> Result<(AsyncChild, u32), ProcessError> {
 }
 
 /// Spawn for the Deno API: wraps child stdio in resource table entries.
+/// denext (DENEXT.md item 232): ends a child whose program changed between the
+/// check and the exec.
+fn refuse_if_changed_since_check(
+  verified: Option<embedded_program::VerifiedProgram>,
+  child: &mut AsyncChild,
+) -> Result<(), ProcessError> {
+  let Some(verified) = verified else {
+    return Ok(());
+  };
+  if verified.unchanged() {
+    return Ok(());
+  }
+  // Unix only: on Windows the held handle's share mode keeps the file as it
+  // was, so `unchanged()` is always true there.
+  #[cfg(unix)]
+  let _ = child.start_kill();
+  #[cfg(windows)]
+  let _ = child;
+  Err(changed_since_check_error())
+}
+
+fn changed_since_check_error() -> ProcessError {
+  CheckRunPermissionError::Other(JsErrorBox::new(
+    "NotCapable",
+    "Refusing to run a program the app carries: it changed while it was being started",
+  ))
+  .into()
+}
+
 fn spawn_child(
   state: &mut OpState,
   command: Command,
+  verified: Option<embedded_program::VerifiedProgram>,
   ipc_pipe_rid: Option<ResourceId>,
   extra_pipe_fds: Vec<Option<i64>>,
   detached: bool,
 ) -> Result<Child, ProcessError> {
-  let (mut child, pid) = spawn_command(command)?;
+  let (mut child, pid) = spawn_command(command, verified.as_ref())?;
+  refuse_if_changed_since_check(verified, &mut child)?;
 
   #[cfg(not(windows))]
   let stdin_rid = child
@@ -1421,11 +1503,13 @@ macro_rules! child_stdio_to_fd {
 fn spawn_child_node(
   state: &mut OpState,
   command: Command,
+  verified: Option<embedded_program::VerifiedProgram>,
   ipc_pipe_rid: Option<ResourceId>,
   extra_pipe_fds: Vec<Option<i64>>,
   detached: bool,
 ) -> Result<NodeChild, ProcessError> {
-  let (mut child, pid) = spawn_command(command)?;
+  let (mut child, pid) = spawn_command(command, verified.as_ref())?;
+  refuse_if_changed_since_check(verified, &mut child)?;
 
   let stdin_fd = child_stdio_to_fd!(child, stdin);
   let stdout_fd = child_stdio_to_fd!(child, stdout);
@@ -1472,7 +1556,10 @@ fn compute_run_cmd_and_check_permissions(
   api_name: &str,
   allow_cwd_inherit: bool,
   ipc: bool,
-) -> Result<(PathBuf, RunEnv), ProcessError> {
+) -> Result<
+  (PathBuf, RunEnv, Option<embedded_program::VerifiedProgram>),
+  ProcessError,
+> {
   let run_env =
     compute_run_env(arg_cwd, arg_envs, arg_clear_env, allow_cwd_inherit)
       .map_err(|e| ProcessError::SpawnFailed {
@@ -1494,7 +1581,20 @@ fn compute_run_cmd_and_check_permissions(
     api_name,
     is_authorized_self_fork(&cmd, ipc),
   )?;
-  Ok((cmd, run_env))
+  // denext (DENEXT.md item 232): a program the app carries runs only as it
+  // was packaged, whoever spawns it.
+  // It runs the path that was checked, not the spelling the app used.
+  match embedded_program::check(&cmd) {
+    Ok(Some(verified)) => {
+      let checked = verified.path().to_path_buf();
+      Ok((checked, run_env, Some(verified)))
+    }
+    Ok(None) => Ok((cmd, run_env, None)),
+    Err(message) => Err(
+      CheckRunPermissionError::Other(JsErrorBox::new("NotCapable", message))
+        .into(),
+    ),
+  }
 }
 
 #[derive(Debug)]
@@ -1761,21 +1861,25 @@ fn op_spawn_child(
   let detached = args.detached;
   #[cfg(unix)]
   let retry_args = args.clone();
-  let (command, pipe_rid, extra_pipe_fds, handles_to_close) = create_command(
-    state, args, &api_name, /* allow_cwd_inherit */ false,
-    /* wrap_in_shell */ false,
-  )?;
-  let child = spawn_child(state, command, pipe_rid, extra_pipe_fds, detached);
+  let (command, pipe_rid, extra_pipe_fds, handles_to_close, verified) =
+    create_command(
+      state, args, &api_name, /* allow_cwd_inherit */ false,
+      /* wrap_in_shell */ false,
+    )?;
+  let child =
+    spawn_child(state, command, verified, pipe_rid, extra_pipe_fds, detached);
   for handle in handles_to_close {
     deno_io::close_raw_handle(handle);
   }
   #[cfg(unix)]
   if matches!(&child, Err(err) if err.is_enoexec()) {
-    let (command, pipe_rid, extra_pipe_fds, handles_to_close) = create_command(
-      state, retry_args, &api_name, /* allow_cwd_inherit */ false,
-      /* wrap_in_shell */ true,
-    )?;
-    let child = spawn_child(state, command, pipe_rid, extra_pipe_fds, detached);
+    let (command, pipe_rid, extra_pipe_fds, handles_to_close, verified) =
+      create_command(
+        state, retry_args, &api_name, /* allow_cwd_inherit */ false,
+        /* wrap_in_shell */ true,
+      )?;
+    let child =
+      spawn_child(state, command, verified, pipe_rid, extra_pipe_fds, detached);
     for handle in handles_to_close {
       deno_io::close_raw_handle(handle);
     }
@@ -1797,23 +1901,37 @@ fn op_node_spawn_child(
   let retry_args = args.clone();
   // `child_process.spawn` in Node tolerates the parent's cwd being unlinked
   // by inheriting it, so allow cwd inheritance for Node-compat spawns.
-  let (command, pipe_rid, extra_pipe_fds, handles_to_close) = create_command(
-    state, args, &api_name, /* allow_cwd_inherit */ true,
-    /* wrap_in_shell */ false,
-  )?;
-  let child =
-    spawn_child_node(state, command, pipe_rid, extra_pipe_fds, detached);
+  let (command, pipe_rid, extra_pipe_fds, handles_to_close, verified) =
+    create_command(
+      state, args, &api_name, /* allow_cwd_inherit */ true,
+      /* wrap_in_shell */ false,
+    )?;
+  let child = spawn_child_node(
+    state,
+    command,
+    verified,
+    pipe_rid,
+    extra_pipe_fds,
+    detached,
+  );
   for handle in handles_to_close {
     deno_io::close_raw_handle(handle);
   }
   #[cfg(unix)]
   if matches!(&child, Err(err) if err.is_enoexec()) {
-    let (command, pipe_rid, extra_pipe_fds, handles_to_close) = create_command(
-      state, retry_args, &api_name, /* allow_cwd_inherit */ true,
-      /* wrap_in_shell */ true,
-    )?;
-    let child =
-      spawn_child_node(state, command, pipe_rid, extra_pipe_fds, detached);
+    let (command, pipe_rid, extra_pipe_fds, handles_to_close, verified) =
+      create_command(
+        state, retry_args, &api_name, /* allow_cwd_inherit */ true,
+        /* wrap_in_shell */ true,
+      )?;
+    let child = spawn_child_node(
+      state,
+      command,
+      verified,
+      pipe_rid,
+      extra_pipe_fds,
+      detached,
+    );
     for handle in handles_to_close {
       deno_io::close_raw_handle(handle);
     }
@@ -1863,7 +1981,12 @@ fn op_spawn_sync(
   let kill_signal = args.kill_signal.clone();
   #[cfg(unix)]
   let retry_args = args.clone();
-  let (mut command, _, _, _) = create_command(
+  // `verified` is held for the spawn (DENEXT.md item 232).
+  #[cfg_attr(
+    windows,
+    allow(unused_mut, reason = "the ENOEXEC retry is Unix-only")
+  )]
+  let (mut command, _, _, _, mut verified) = create_command(
     state,
     args,
     "Deno.Command().outputSync()",
@@ -1894,13 +2017,14 @@ fn op_spawn_sync(
     // POSIX `execvp` / Node.js behavior.
     #[cfg(unix)]
     Err(err) if err.raw_os_error() == Some(libc::ENOEXEC) => {
-      let (mut command, _, _, _) = create_command(
+      let (mut command, _, _, _, retry_verified) = create_command(
         state,
         retry_args,
         "Deno.Command().outputSync()",
         /* allow_cwd_inherit */ false,
         /* wrap_in_shell */ true,
       )?;
+      verified = retry_verified;
       if timeout.is_some_and(|t| t > 0) {
         command.process_group(0);
       }
@@ -1911,11 +2035,20 @@ fn op_spawn_sync(
     }
     Err(err) => {
       return Err(ProcessError::SpawnFailed {
-        command: command.get_program().to_string_lossy().into_owned(),
+        command: spawn_error_name(command.get_program(), verified.as_ref()),
         error: Box::new(err.into()),
       });
     }
   };
+  // As the asynchronous spawns do (DENEXT.md item 232): a program that changed
+  // between the check and the exec is ended, and the spawn refused.
+  #[cfg(unix)]
+  if verified.as_ref().is_some_and(|v| !v.unchanged()) {
+    let _ = child.kill();
+    let _ = child.wait();
+    return Err(changed_since_check_error());
+  }
+  drop(verified);
   #[cfg(unix)]
   let pid = child.id();
   #[cfg(windows)]
@@ -2269,7 +2402,12 @@ mod deprecated {
   ) -> Result<RunInfo, ProcessError> {
     let args = run_args.cmd;
     let cmd = args.first().ok_or(ProcessError::MissingCmd)?;
-    let (cmd, run_env) = compute_run_cmd_and_check_permissions(
+    // `verified` is held for the spawn (DENEXT.md item 232).
+    #[cfg_attr(
+      not(target_os = "linux"),
+      allow(unused_mut, reason = "only Linux execs the verified handle")
+    )]
+    let (cmd, run_env, mut verified) = compute_run_cmd_and_check_permissions(
       cmd,
       run_args.cwd.as_deref(),
       &run_args.env,
@@ -2282,7 +2420,18 @@ mod deprecated {
 
     #[cfg(windows)]
     let mut c = Command::new(cmd);
-    #[cfg(not(windows))]
+    // On Linux from the handle the program was hashed through, as
+    // `create_command` runs it (no fd but stdio goes to this child).
+    #[cfg(target_os = "linux")]
+    let mut c = match verified.as_mut().and_then(|v| v.exec_path(3)) {
+      Some(exec_path) => {
+        let mut c = tokio::process::Command::new(exec_path);
+        c.arg0(&cmd);
+        c
+      }
+      None => tokio::process::Command::new(cmd),
+    };
+    #[cfg(all(not(windows), not(target_os = "linux")))]
     let mut c = tokio::process::Command::new(cmd);
     for arg in args.iter().skip(1) {
       c.arg(arg);
@@ -2318,6 +2467,11 @@ mod deprecated {
 
     // Spawn the command.
     let mut child = c.spawn()?;
+    // As Deno.Command's spawn does (DENEXT.md item 232).
+    #[cfg(not(windows))]
+    super::refuse_if_changed_since_check(verified, &mut child)?;
+    #[cfg(windows)]
+    drop(verified);
     let pid = child.id();
 
     let stdin_rid = match child.stdin.take() {
@@ -2751,6 +2905,122 @@ mod self_fork_tests {
       ipc,
     )
     .is_ok()
+  }
+
+  // denext (DENEXT.md item 232): through the op's own check, with the grant's
+  // permission check already passed by allow-all.
+  #[test]
+  #[allow(
+    clippy::disallowed_methods,
+    reason = "the file the spawn checks is on the real file system"
+  )]
+  fn a_registered_program_is_checked_at_spawn() {
+    use sha2::Digest;
+    let dir = tempfile::tempdir().unwrap();
+    let program = dir.path().join("prog");
+    let bytes: &'static [u8] = b"packaged";
+    super::set_embedded_programs(vec![super::EmbeddedProgram {
+      path: program.clone(),
+      sha256: sha2::Sha256::digest(bytes).into(),
+      read: Arc::new(move || Ok(bytes.to_vec())),
+    }]);
+    let spawn_as = |cmd: &str| {
+      let mut state = OpState::new(None);
+      let parser =
+        RuntimePermissionDescriptorParser::new(sys_traits::impls::RealSys);
+      state.put(PermissionsContainer::new(
+        Arc::new(parser),
+        Permissions::allow_all(),
+      ));
+      super::compute_run_cmd_and_check_permissions(
+        cmd,
+        None,
+        &[],
+        true,
+        &mut state,
+        "Deno.Command().spawn()",
+        true,
+        false,
+      )
+      .map(|(cmd, _, verified)| (cmd, verified))
+    };
+    let spawn = || spawn_as(program.to_str().unwrap()).map(|(_, v)| v);
+    // Written from the app on the first spawn, held for it.
+    assert!(spawn().ok().flatten().is_some());
+    assert_eq!(std::fs::read(&program).unwrap(), bytes);
+    // Swapped: refused, and the bytes are gone.
+    let swap = dir.path().join("swap");
+    std::fs::write(&swap, b"something else").unwrap();
+    std::fs::rename(&swap, &program).unwrap();
+    let err = spawn().err().expect("a swapped program is refused");
+    assert!(err.to_string().contains("Refusing to run"), "{err}");
+    assert!(!program.exists());
+    // The next start runs the packaged bytes again.
+    assert!(spawn().ok().flatten().is_some());
+    // Where the run grant takes another spelling of the path (case on macOS
+    // and Windows), the spawn is checked too, and runs the path it checked.
+    if cfg!(any(target_os = "macos", windows)) {
+      let other = program.to_str().unwrap().replace("prog", "PROG");
+      let (cmd, verified) = spawn_as(&other).unwrap();
+      assert!(verified.is_some());
+      assert_eq!(cmd, program);
+    }
+
+    // A spawn that fails after the check, here on a stdout fd that does not
+    // exist, keeps nothing of it: no check in the OpState for the next spawn
+    // to take, and the handle closed. (Unix: on Windows an fd that does not
+    // exist is the CRT's invalid parameter handler.)
+    #[cfg(unix)]
+    {
+      let mut state = OpState::new(None);
+      let parser =
+        RuntimePermissionDescriptorParser::new(sys_traits::impls::RealSys);
+      state.put(PermissionsContainer::new(
+        Arc::new(parser),
+        Permissions::allow_all(),
+      ));
+      let args: super::SpawnArgs =
+        deno_core::serde_json::from_value(deno_core::serde_json::json!({
+          "cmd": program.to_str().unwrap(),
+          "args": [],
+          "cwd": null,
+          "clearEnv": true,
+          "env": [],
+          "gid": null,
+          "uid": null,
+          "windowsRawArguments": false,
+          "ipc": null,
+          "serialization": null,
+          "stdin": "null",
+          "stdout": 987_654,
+          "stderr": "null",
+          "input": null,
+          "extraStdio": [],
+          "detached": false,
+          "needsNpmProcessState": false,
+          "argv0": null,
+        }))
+        .unwrap();
+      let failed = super::create_command(
+        &mut state,
+        args,
+        "Deno.Command().spawn()",
+        false,
+        false,
+      );
+      assert!(failed.is_err());
+      assert!(!state.has::<super::embedded_program::VerifiedProgram>());
+      #[cfg(target_os = "linux")]
+      assert!(
+        !std::fs::read_dir("/proc/self/fd")
+          .unwrap()
+          .flatten()
+          .any(|fd| std::fs::read_link(fd.path())
+            .is_ok_and(|to| to == program)),
+        "the checked program's handle is still open"
+      );
+    }
+    super::set_embedded_programs(Vec::new());
   }
 
   // One test: the registrations are process-wide, and the checks before

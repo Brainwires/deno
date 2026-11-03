@@ -8491,7 +8491,7 @@ where the changes are discussed.
        main module's works) and `disarm_given`; `disarm_policy`.
      - F4: the scoped sidecar run grant is documented as a limit by name, not
        containment (item 190); denext warns at packaging. Hashing the extracted
-       program at packaging and verifying it at spawn is the fix, for denext.9.
+       program at packaging and verifying it at spawn is the fix: item 232.
 
 215. **laufey on CEF 156.0.15** (laufey `chore/cef-156-rebump` 1aa48ac, now
      `development-denext`; no runtime API change, laufey API 51; runtime
@@ -9435,6 +9435,99 @@ where the changes are discussed.
        runtime unit test `transpiled_modules_are_told_by_extension`. Shim unit tests
        `test_rerun_failures_rides_along_in_node_options` and
        `test_tag_filters_ride_along_in_node_options`.
+
+232. **`feat(desktop)`: a run grant can record its program's hash, and the
+     runtime keeps the program to it** (`feat/sidecar-integrity`, ext/process,
+     `cli/rt/run.rs`; item 190's scoped grant was a limit by name, F4 of the
+     denext.8 audit, since the app could write the file it may run):
+     - A baked `--allow-run` value may read
+       `$DENO_DESKTOP_CACHE/.../prog#sha256=<64 hex>#embedded=<path>`; the path
+       is the program's in the embedded file system, relative to the entrypoint.
+       The recorded hash travels with the grant, in the binary's metadata, so
+       the app's write grants cannot reach it (the binary is outside them, and
+       signed on macOS and Windows). A value with the marker that does not parse
+       grants nothing.
+     - At launch the value's plain path becomes the grant, the program's folder
+       goes on `deny_write` (a denial wins over a broad grant, so the app needs
+       no write grant there and its code can't get one), and the program is
+       registered with `deno_process::set_embedded_programs`.
+     - Every spawn path (`Deno.Command`, `node:child_process`, the deprecated
+       `Deno.run`) checks a registered path after the permission check, in the
+       op, so it does not depend on any JS: missing, the file is written from
+       the embedded bytes (checked against the hash first, new file renamed into
+       place, mode 0500 in a 0700 folder); anything else is refused with
+       `NotCapable` and removed, so the next spawn writes it again.
+     - The registered program is found the way the run grant compares paths
+       (`deno_permissions`' comparison path: case-folded on macOS and Windows,
+       Unicode-normalized on macOS, a `\\?\` prefix taken off on Windows), and
+       the spawn runs the registered path, not the app's spelling of it. Before
+       that, a spelling the grant took but the list did not (`\\?\C:\…` on
+       Windows, another Unicode form on macOS) skipped the check.
+     - A rename gets the strict write check on its old path, as a recursive
+       remove does (`ext/fs` `op_fs_rename_*`, so `node:fs` too): a deny scope
+       inside the tree being moved blocks it. Before that, code holding a write
+       grant on an ancestor of the program's folder (the app's own cache folder
+       is one) could move the folder's parent away and another tree into its
+       place, past the folder's denial, and race a spawn with it. That is a
+       general Deno permission gap, not only the sidecar's: `--deny-write=a/b`
+       did not stop `Deno.rename("a", "c")`.
+     - Check, then exec: the file is hashed through one no-follow handle, held
+       past the spawn (returned with the command, never kept in the OpState, so
+       a spawn that fails after the check, on a stdio fd that can't be
+       duplicated say, closes it and leaves nothing for the next spawn). On
+       Windows it shares read only, so nothing can write, rename or delete the
+       file until the spawn returns. On Linux the child execs that handle
+       (`/proc/self/fd/N`, a close-on-exec copy numbered above every fd the
+       child is given; argv[0] stays the program's path, and a spawn error names
+       that path, not the handle's), so what runs is the file that was hashed
+       whatever the path names by then; a `#!` script (its interpreter opens the
+       path again) and the `/bin/sh` retry of a file the kernel can't exec run
+       the path, as everywhere without `/proc`. On Unix, after every spawn
+       (asynchronous, `outputSync()` and the deprecated `Deno.run`) the path and
+       the handle are compared with the device, inode, mode, size, mtime and
+       ctime from before the hash, and the child is killed on a difference. On
+       Linux that is what catches a write in place; on macOS (and for a script)
+       it is also the only check of a swap, and sees only a swap still there
+       after the spawn: one put back in time (A-B-A) is not seen, and a sync
+       child has run to its end before the check, which can then only refuse the
+       result. What is left there, for a program of the same user (Deno code
+       cannot write the file, its folder or a folder above it holding it, nor
+       link to it; with unscoped `--allow-read` and `--allow-write`, which
+       `Deno.symlink` needs, it could put a symlink where a folder above the
+       program's will be before the runtime first writes it, and race a spawn by
+       writing the copy through it (a change that stays is refused at the next
+       spawn), but such an app can change files the user's own programs run
+       anyway):
+       - outside Linux (or for a script), one that changes the path in the
+         window (microseconds) may get a moment of a child before the kill, all
+         of an `outputSync()` one, or, putting it back in time, a child that is
+         never seen;
+       - a write in place of the same length, with the mode put back, inside one
+         tick of the file system's timestamp clock after the file last changed,
+         leaves the stamp as it was. ext4 on Linux takes timestamps from a
+         coarse clock (one tick per jiffy): measured on Linux 6.8 (ext4,
+         HZ=1000), 191 of 200 such rewrites kept every field, the tick 1 ms; on
+         APFS none did (ticks of about 8 µs). Kernels with multigrain timestamps
+         (6.13 and later, on ext4, XFS, Btrfs and tmpfs) give a changed file a
+         fresh fine-grained ctime once its stamp has been read; not measured
+         here. Such a writer has to hold write access to the file already, which
+         the 0500 mode and the folder's denial keep from Deno code, so this is a
+         program of the user that could run itself anyway.
+     - denext bakes the value from `FIRST_SIDECAR_INTEGRITY_RUNTIME` and the
+       folder name carries the hash, so an update's new bytes do not meet the
+       old copy.
+     - Tests: `ext/process` `embedded_program` (written when missing, a swap
+       refused then healed, a symlink refused even to the right bytes, embedded
+       bytes off the hash not written, a change after the hash seen, the Windows
+       lock, another spelling of the path, Linux running the hashed file after a
+       swap), `self_fork_tests::a_registered_program_is_checked_at_spawn` (also:
+       another spelling runs the registered path; a spawn that fails after the
+       check keeps nothing of it), the spec
+       `permission/rename_ancestor_of_deny`, and `cli/rt/run.rs` (the value
+       taken out of the grant, the denial, malformed values granting nothing).
+       The e2e area `sidecarint` needs a binary built by this fork's CLI (the
+       stock CLI the suite packages with writes no app identifier, so the token
+       cannot expand and the grant is dropped): it reports n/a there.
 
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,

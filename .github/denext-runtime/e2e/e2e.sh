@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
 # Run the denext runtime e2e suite (run.ts) against one runtime archive and
 # backend, with the STOCK `deno` on PATH as the packaging CLI (CI pins
-# 2.9.8). On Linux it runs inside a private D-Bus session with a window manager
-# and a stand-in notification server (linux/session.sh), under Xvfb or, with
-# E2E_DISPLAY=wayland, on a headless sway with no X server at all.
+# 2.9.8). With CLI_ARCHIVE (a `deno-cli-*` archive from assemble_cli.sh) the
+# fork's own CLI packages the areas that need it (run.ts's FORK_CLI_AREAS),
+# and only those run. On Linux it runs inside a private D-Bus session with a
+# window manager and a stand-in notification server (linux/session.sh), under
+# Xvfb or, with E2E_DISPLAY=wayland, on a headless sway with no X server at all.
 #
 # Env: TARGET ARCHIVE BACKEND WORK_DIR [E2E_OUT] [E2E_AREAS=a,b,...]
+#      [CLI_ARCHIVE=<the fork's deno-cli-* archive>]
 #      [E2E_SECRET_SERVICE=masked|locked] (Linux; masked by default)
 #      [E2E_SESSION_TYPE=unset|<value>] (Linux; XDG_SESSION_TYPE for the run,
 #      unset by default)
@@ -29,6 +32,20 @@ WORK_DIR=$(native_path "$work/w")
 E2E_OUT=$(native_path "${E2E_OUT:-$work/out}")
 mkdir -p "$(unix_path "$E2E_OUT")"
 deno --version | head -1
+if [ -n "${CLI_ARCHIVE:-}" ]; then
+  cli_archive=$(unix_path "$CLI_ARCHIVE")
+  mkdir -p "$work/cli"
+  if command -v unzip >/dev/null 2>&1; then
+    unzip -q "$cli_archive" -d "$work/cli"
+  else
+    unpack_archive "$cli_archive" "$work/cli"
+  fi
+  fork_deno="$work/cli/$(cli_bin_name "$TARGET")"
+  need "the fork's deno in $CLI_ARCHIVE" test -f "$fork_deno"
+  echo "fork CLI: $("$fork_deno" --version | head -1)"
+  export E2E_FORK_DENO
+  E2E_FORK_DENO=$(native_path "$fork_deno")
+fi
 
 run=(deno run -A --no-config --no-lock "$here/run.ts")
 case "$TARGET" in
