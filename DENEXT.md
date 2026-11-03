@@ -9166,6 +9166,31 @@ where the changes are discussed.
      on Linux, without the script (fails at the refused mirror path) and after
      `fetch_rusty_v8.py --print-env` (builds).
 
+227. **`fix(node)`: `dns.lookup()` passes its `hints` to `getaddrinfo()`**
+     (`ext/node/ops/dns.rs`, `internal_binding/cares_wrap.ts`,
+     `internal_binding/ares.ts`; for runtime 3.0.0-denext.9):
+     - `cares_wrap.getaddrinfo` dropped `hints` and `op_node_getaddrinfo` always
+       set `ai_flags: 0`, so `net.connect()`'s default `dns.ADDRCONFIG` did
+       nothing. On a machine with no IPv6, AAAA records came back and took a
+       family-autoselection attempt; with 30 ms of added delay
+       `internet/test-https-autoselectfamily-slow-timeout.js` passed on Node.js
+       and failed on Deno with an `AggregateError`, 3 runs of 3 each.
+     - The op takes the flags, masked to `AI_ADDRCONFIG | AI_ALL | AI_V4MAPPED`
+       because the internal binding does not validate them, and gives them to
+       `getaddrinfo()` on Unix and Windows as libuv does. The permission check
+       and the `NetPermToken` are unchanged; a mapped address is simply among
+       the IPs the token resolved for that hostname.
+     - `dns.ADDRCONFIG`, `dns.ALL` and `dns.V4MAPPED` were c-ares-looking bit
+       positions (64, 32, 16). They are now the system's values, as in Node.js
+       (32, 16, 8 on Linux; 1024, 256, 2048 on macOS and Windows), read from a
+       new `op_node_getaddrinfo_flags`. `net.connect()` still sets no default
+       hint on Windows, matching Node.js's `lib/net.js`.
+     - On glibc, `EAI_ADDRFAMILY` now reaches JS as `EAI_ADDRFAMILY` as in
+       Node.js (`dns.lookup("127.1", { family: 6 })`), not `ENOTFOUND`.
+     - Tests: `tests/unit_node/dns_test.ts`, none needing the internet; the
+       `AI_ADDRCONFIG` assertions that filter real records apply on Linux with
+       no IPv6 interface.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
