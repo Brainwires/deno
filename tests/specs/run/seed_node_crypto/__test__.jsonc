@@ -1,0 +1,6 @@
+{
+  // Under `--seed`, the `node:crypto` random paths draw from the same seeded
+  // RNG as `crypto.getRandomValues`, so their output repeats run to run.
+  "args": "run --seed=100 seed_node_crypto.mjs",
+  "output": "seed_node_crypto.mjs.out"
+}

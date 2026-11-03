@@ -31,6 +31,7 @@ use p521::NistP521;
 use rand::Rng;
 use rand::distributions::Distribution;
 use rand::distributions::Uniform;
+use rand::rngs::StdRng;
 use rsa::Oaep;
 use rsa::Pkcs1v15Encrypt;
 use rsa::RsaPrivateKey;
@@ -943,20 +944,43 @@ pub async fn op_node_pbkdf2_async(
   .await?
 }
 
+// Under `--seed`, `deno_crypto` puts a seeded `StdRng` in the `OpState`
+// (the one `crypto.getRandomValues` draws from). The `node:crypto` random
+// ops draw from it too, so `randomFillSync`, `randomFill` and `randomInt`
+// repeat run to run; without a seed they use the thread RNG as before.
 #[op2(fast)]
-pub fn op_node_fill_random(#[buffer] buf: &mut [u8]) {
-  rand::thread_rng().fill(buf);
+pub fn op_node_fill_random(state: &mut OpState, #[buffer] buf: &mut [u8]) {
+  if let Some(seeded_rng) = state.try_borrow_mut::<StdRng>() {
+    seeded_rng.fill(buf);
+  } else {
+    rand::thread_rng().fill(buf);
+  }
 }
 
 #[op2]
-pub async fn op_node_fill_random_async(#[smi] len: i32) -> Uint8Array {
-  spawn_blocking(move || {
+pub fn op_node_fill_random_async(
+  state: &mut OpState,
+  #[smi] len: i32,
+) -> impl Future<Output = Uint8Array> + use<> {
+  // The seeded bytes are drawn when the call is made, not when the blocking
+  // task runs, so the sequence follows the program's call order.
+  let seeded = state.try_borrow_mut::<StdRng>().map(|seeded_rng| {
     let mut buf = vec![0u8; len as usize];
-    rand::thread_rng().fill(&mut buf[..]);
-    buf.into()
-  })
-  .await
-  .unwrap()
+    seeded_rng.fill(&mut buf[..]);
+    buf
+  });
+  async move {
+    if let Some(buf) = seeded {
+      return buf.into();
+    }
+    spawn_blocking(move || {
+      let mut buf = vec![0u8; len as usize];
+      rand::thread_rng().fill(&mut buf[..]);
+      buf.into()
+    })
+    .await
+    .unwrap()
+  }
 }
 
 #[derive(Debug, thiserror::Error, deno_error::JsError)]
@@ -1043,13 +1067,20 @@ pub fn op_node_dh_compute_secret(
 
 #[op2(fast)]
 #[number]
-pub fn op_node_random_int(#[number] min: i64, #[number] max: i64) -> i64 {
-  let mut rng = rand::thread_rng();
+pub fn op_node_random_int(
+  state: &mut OpState,
+  #[number] min: i64,
+  #[number] max: i64,
+) -> i64 {
   // Uniform distribution is required to avoid Modulo Bias
   // https://en.wikipedia.org/wiki/Fisher–Yates_shuffle#Modulo_bias
   let dist = Uniform::from(min..max);
 
-  dist.sample(&mut rng)
+  if let Some(seeded_rng) = state.try_borrow_mut::<StdRng>() {
+    dist.sample(seeded_rng)
+  } else {
+    dist.sample(&mut rand::thread_rng())
+  }
 }
 
 #[allow(clippy::too_many_arguments, reason = "all arguments are needed")]
