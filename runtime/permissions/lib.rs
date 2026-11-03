@@ -12401,9 +12401,6 @@ mod tests {
     assert!(!query.starts_with(&regular));
   }
 
-  /// The Win32 name rules the Windows normalisation applies (DENEXT.md 225),
-  /// on every OS: trailing dots and spaces go, a stream suffix starts at the
-  /// first colon.
   /// A single-letter name with a stream (`x:meta`) is appended to the
   /// resolved parent as a name: `PathBuf::push` read it as the drive `X:`,
   /// so the checked path of a write beside a deny scope pointed at another
@@ -12413,6 +12410,7 @@ mod tests {
   #[allow(clippy::disallowed_methods, reason = "a real directory tree")]
   fn canonicalize_keeps_a_single_letter_stream_name() {
     use sys_traits::EnvTempDir;
+    use sys_traits::FsCanonicalize;
     let sys = sys_traits::impls::RealSys;
     let base = sys.env_temp_dir().unwrap().join(format!(
       "deno_permissions_stream_name_{}",
@@ -12427,7 +12425,8 @@ mod tests {
     let _ = std::fs::remove_dir_all(&base);
     std::fs::create_dir_all(base.join("other")).unwrap();
     std::fs::write(base.join("x"), "x").unwrap();
-    let canonical_base = std::fs::canonicalize(&base).unwrap();
+    // The form the permission layer compares (no `\\?\` prefix).
+    let canonical_base = sys.fs_canonicalize(&base).unwrap();
     let ends_with_stream = |path: &Path, tail: &[u8]| {
       path.starts_with(&canonical_base)
         && path.as_os_str().as_encoded_bytes().ends_with(tail)
@@ -12470,6 +12469,9 @@ mod tests {
     std::fs::remove_dir_all(&base).unwrap();
   }
 
+  /// The Win32 name rules the Windows normalisation applies (DENEXT.md 225),
+  /// on every OS: trailing dots and spaces go, a stream suffix starts at the
+  /// first colon.
   #[test]
   fn win32_name_trimming_and_streams() {
     for (name, kept) in [
