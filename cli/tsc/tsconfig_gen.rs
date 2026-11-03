@@ -863,9 +863,10 @@ const BUILT_IN_NODE_OWNED_GLOBAL_TYPES: &[&str] = &[
   "URLPatternOptions",
 ];
 
-/// The `package.json` field that marks the built-in `@types/node` the native
-/// type check writes under `<DENO_DIR>/npm_compat/<name>-<hash>` (denext; see
-/// `npm_compat_dir` in `cli/tools/installer/npm_compat.rs`).
+/// The `package.json` field that marks the built-in `@types/node` that
+/// `deno sync-types` writes under `<DENO_DIR>/npm_compat/<name>-<hash>` and the
+/// native type check reads (denext; see `npm_compat_dir` and
+/// `write_embedded_types_node` in `cli/tools/installer/npm_compat.rs`).
 pub const BUILT_IN_TYPES_NODE_MARKER: &str = "denoBuiltIn";
 
 /// Whether `dir` holds the built-in `@types/node` (its `package.json` carries

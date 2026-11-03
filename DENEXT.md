@@ -8268,7 +8268,7 @@ where the changes are discussed.
 
 211. **`fix(desktop)`: the update helper's rollback puts back only a tree it
      verified** (the denext.8 audit, F1; `runtime/ops/desktop_update/swap.rs`,
-     `mod.rs`; in every runtime with the rollback, 2.9.7-denext.9 through
+     `mod.rs`; in every runtime with the rollback, 2.9.7-denext.4 through
      3.0.0-denext.7). The apply re-checks the staged app because the state file
      is writable by anything running as the user (item 199, the helper section);
      the rollback took the same state file and checked nothing: it exchanged
