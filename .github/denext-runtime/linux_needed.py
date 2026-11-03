@@ -7,7 +7,8 @@ file is not listed for, and on an ELF file with no entry here. A new link
 dependency that a distro lacks then fails the release instead of the users'
 launches, and adding it to EXPECTED makes the author decide how a package gets
 it: from denext's `.deb` / `.rpm` dependency lists (PACKAGE_DEPS, a copy of
-LINUX_RUNTIME_DEPS in denext's src/build/desktop-installers.ts) or from what
+LINUX_RUNTIME_DEPS in denext's src/build/desktop-installers.ts, as of the
+DENEXT_PACKAGING_VERSION in denext_runtime.yml; move both together) or from what
 those already pull in (TRANSITIVE, which rpm_smoke.sh checks on Fedora).
 linux_needed_test.py keeps the tables consistent with each other. The lists
 started from the 3.0.0-denext.7 archives of both architectures.
@@ -63,6 +64,12 @@ PACKAGE_DEPS = {
     "libexpat.so.1",
     "libxcb.so.1",
     "libdrm.so.2",
+    "libcups.so.2",
+    "libnspr4.so",
+    "libnssutil3.so",
+    "libsmime3.so",
+    "libatk-bridge-2.0.so.0",
+    "libXi.so.6",
   },
 }
 # Named by the packages though nothing links it directly (libgbm does).
@@ -88,15 +95,7 @@ TRANSITIVE = {
     "libjavascriptcoregtk-4.1.so.0",
     "libsoup-3.0.so.0",
   },
-  "cef": _GTK_CLOSURE | {
-    "libXi.so.6",
-    "libatk-bridge-2.0.so.0",
-    "libatspi.so.0",
-    "libcups.so.2",
-    "libnspr4.so",
-    "libnssutil3.so",
-    "libsmime3.so",
-  },
+  "cef": _GTK_CLOSURE | {"libatspi.so.0"},
 }
 # Shipped beside the file that links it.
 BUNDLED = {"libcef.so"}

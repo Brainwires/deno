@@ -85,7 +85,7 @@ env:
   # with linux_needed.py's PACKAGE_DEPS, and only to a version published more
   # than a day before: the stock CLI's minimum dependency age refuses a newer
   # one, which would fail this job (and so the release) until it ages.
-  DENEXT_PACKAGING_VERSION: 4.11.4
+  DENEXT_PACKAGING_VERSION: 4.11.12
   # The esbuild every `deno-cli-*` archive ships next to `deno`: the
   # official @esbuild/<platform> binary, pinned by npm integrity in
   # .github/denext-runtime/fetch_esbuild.py. Must equal ESBUILD_VERSION in
