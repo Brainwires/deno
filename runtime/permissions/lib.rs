@@ -1654,13 +1654,13 @@ fn windows_strip_streams(path: Cow<'_, Path>) -> Cow<'_, Path> {
 #[cfg(windows)]
 fn windows_trim_names(path: Cow<'_, Path>) -> Cow<'_, Path> {
   use std::path::Component;
-  let trimmed = |name: &OsStr| {
+  fn trimmed(name: &OsStr) -> Option<&OsStr> {
     let bytes = name.as_encoded_bytes();
     let end = win32_trimmed_name_len(bytes);
     // SAFETY: a prefix of a valid encoded `OsStr` cut before ASCII bytes.
     (end != bytes.len())
       .then(|| unsafe { OsStr::from_encoded_bytes_unchecked(&bytes[..end]) })
-  };
+  }
   if !path
     .components()
     .any(|c| matches!(c, Component::Normal(name) if trimmed(name).is_some()))
@@ -12412,7 +12412,7 @@ mod tests {
       let deny = PathDescriptor::new_known_absolute(Cow::Borrowed(Path::new(
         "C:\\w\\base\\a\\b",
       )));
-      assert!(d.starts_with(&deny.as_query_descriptor()), "{spelled:?}");
+      assert!(d.starts_with(&deny), "{spelled:?}");
     }
     // A stream on a parent (not openable, but compared as the file).
     let d = desc("C:\\w\\base\\a:evil\\b");
@@ -12435,14 +12435,9 @@ mod tests {
         .as_encoded_bytes()
         .starts_with(b"\\\\?\\")
     );
-    assert!(
-      !verbatim.starts_with(
-        &PathDescriptor::new_known_absolute(Cow::Borrowed(Path::new(
-          "C:\\w\\base"
-        )))
-        .as_query_descriptor()
-      )
-    );
+    assert!(!verbatim.starts_with(&PathDescriptor::new_known_absolute(
+      Cow::Borrowed(Path::new("C:\\w\\base"))
+    )));
   }
 
   /// The Windows fold is the OS upcase table's (what NTFS's `$UpCase` is
