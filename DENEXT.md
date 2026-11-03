@@ -8637,6 +8637,14 @@ free numbers when the branch is merged.
          the CPU count less one at a time.
        - `node --test --watch` is still `deno test --watch`: Deno's patterns,
          `Deno.test` and a type check.
+       - The values the shim and `run()` forward in `NODE_OPTIONS`
+         (`--test-reporter`, `--test-name-pattern`, `--test-skip-pattern`) are
+         quoted as Node's parser reads them (`"…"`, `\"` and `\\` escaped), and
+         node:test splits `NODE_OPTIONS` the same way, so a pattern with quotes
+         or spaces stays one token instead of adding flags such as `--import` to
+         the child's. Tests: shim unit test
+         `test_runner_values_stay_one_node_options_token`; spec
+         `node/node_test_cli` (`pattern_cannot_add_flags`).
 
 902. **`fix(cli)`: `--experimental-loader` and `--import` in `NODE_OPTIONS`**
      (`feat/node-compat-round5`, CLI; `libs/cli_parser/src/convert.rs`,
@@ -8655,7 +8663,14 @@ free numbers when the branch is merged.
      `NODE_OPTIONS` left over from Node tooling (`--import tsx`,
      `--loader ts-node/esm`) now loads that module in every such process, and
      one that does not resolve stops it (`Module not found`), where it used to
-     be ignored.
+     be ignored. `deno compile`, `deno desktop` and `deno install` are the
+     exception: their preloads would be built into the program they write and
+     run at every launch, so a `NODE_OPTIONS` in the build machine's environment
+     would ship with it. They ignore `NODE_OPTIONS`' loaders and imports and
+     print one warning naming them (`--preload` on their command line still
+     applies). Tests: unit test
+     `node_options_loader_and_import_not_for_artifacts`; spec
+     `compile/node_options_import_not_built_in`.
 
 903. **`test(node_compat)`: 27 tests the node_compat round 5 fixes pass**
      (`feat/node-compat-round5`, test config only;

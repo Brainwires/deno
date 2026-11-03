@@ -11,7 +11,7 @@
 (function () {
 "use strict";
 
-const { primordials } = __bootstrap;
+const { core, primordials } = __bootstrap;
 const {
   ArrayFrom,
   ArrayPrototypeFilter,
@@ -325,11 +325,21 @@ function startRun(options, report) {
     if (options.timeout !== undefined && options.timeout !== null) {
       ArrayPrototypePush(extraOptions, `--test-timeout=${options.timeout}`);
     }
+    // A value is quoted as NODE_OPTIONS quotes, so it stays one token.
+    const { quoteNodeOptionsToken } = core.loadExtScript(
+      "ext:deno_node/internal_binding/node_options.ts",
+    );
     for (const value of new SafeArrayIterator(options.testNamePatterns ?? [])) {
-      ArrayPrototypePush(extraOptions, `--test-name-pattern=${value}`);
+      ArrayPrototypePush(
+        extraOptions,
+        quoteNodeOptionsToken(`--test-name-pattern=${value}`),
+      );
     }
     for (const value of new SafeArrayIterator(options.testSkipPatterns ?? [])) {
-      ArrayPrototypePush(extraOptions, `--test-skip-pattern=${value}`);
+      ArrayPrototypePush(
+        extraOptions,
+        quoteNodeOptionsToken(`--test-skip-pattern=${value}`),
+      );
     }
     for (const value of new SafeArrayIterator(options.testTagFilters ?? [])) {
       ArrayPrototypePush(

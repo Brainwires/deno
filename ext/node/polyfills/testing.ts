@@ -337,6 +337,46 @@ function getPathForSnapshot() {
   return _pathForSnapshot;
 }
 
+// denext: NODE_OPTIONS split as Node splits it (`"…"` quotes with `\`
+// escapes), so a quoted value (a name pattern, a path) is one token and can't
+// pass for a flag. Empty when unset or not readable.
+function nodeOptionsArgs() {
+  let nodeOptions = "";
+  try {
+    nodeOptions = globalThis.Deno?.env?.get("NODE_OPTIONS") || "";
+  } catch { /* permission denied */ }
+  if (!nodeOptions) return [];
+  return core.loadExtScript("ext:deno_node/internal_binding/node_options.ts")
+    .splitNodeOptions(nodeOptions);
+}
+
+// The values `flag` has in NODE_OPTIONS, as `flag=value` or `flag value`.
+function nodeOptionValues(flag) {
+  const args = nodeOptionsArgs();
+  const prefix = flag + "=";
+  const out = [];
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === flag && i + 1 < args.length) {
+      ArrayPrototypePush(out, args[++i]);
+    } else if (StringPrototypeStartsWith(args[i], prefix)) {
+      ArrayPrototypePush(out, StringPrototypeSlice(args[i], prefix.length));
+    }
+  }
+  return out;
+}
+
+// Whether NODE_OPTIONS has `flag`, bare or as `flag=value`.
+function hasNodeOption(flag) {
+  const prefix = flag + "=";
+  const args = nodeOptionsArgs();
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === flag || StringPrototypeStartsWith(args[i], prefix)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 // Resolve update-snapshot mode lazily so the env / Rust op is read at most
 // once. We accept either Deno's own `--update-snapshots` flag (when running
 // under `deno test`) or Node's `--test-update-snapshots` propagated via
@@ -360,17 +400,7 @@ function isFileSnapshotUpdateMode() {
       }
     } catch { /* op not wired up; not running under `deno test` */ }
   }
-  let nodeOptions = "";
-  try {
-    nodeOptions = globalThis.Deno?.env?.get("NODE_OPTIONS") || "";
-  } catch { /* permission denied */ }
-  if (
-    nodeOptions &&
-    RegExpPrototypeTest(
-      new SafeRegExp(/(?:^|\s)--test-update-snapshots(?:\s|=|$)/),
-      nodeOptions,
-    )
-  ) {
+  if (hasNodeOption("--test-update-snapshots")) {
     _fileSnapshotUpdateMode = true;
     return true;
   }
@@ -1490,20 +1520,11 @@ function detectNodeTestReporter() {
     value = env.get("NODE_TEST_REPORTER");
   } catch { /* permission denied */ }
   if (value) return value;
-  let nodeOptions = "";
-  try {
-    nodeOptions = env.get("NODE_OPTIONS") || "";
-  } catch { /* permission denied */ }
-  if (!nodeOptions) return null;
-  // Match the first `--test-reporter` occurrence; support both `=value` and
-  // space-separated forms. We intentionally do not handle multiple reporters
-  // (Node lets you stack reporters with destinations); the snapshot tests use
-  // a single reporter and that is what we target.
-  const match = StringPrototypeMatch(
-    nodeOptions,
-    new SafeRegExp(/--test-reporter(?:=|\s+)(\S+)/),
-  );
-  return match ? match[1] : null;
+  // The first `--test-reporter`, as `=value` or space-separated. We
+  // intentionally do not handle multiple reporters (Node lets you stack
+  // reporters with destinations); the snapshot tests use a single reporter and
+  // that is what we target.
+  return nodeOptionValues("--test-reporter")[0] ?? null;
 }
 
 // Resolve lazily: testing.ts ships inside Deno's startup snapshot, so any env
@@ -1566,18 +1587,8 @@ function getTapCurrentSuite() {
 // filter tests Node-style. A bare string is interpreted as a regex source;
 // `/.../flags` is a regex literal.
 function parsePatternFlag(flag) {
-  const env = globalThis.Deno?.env;
-  if (!env) return null;
-  let nodeOptions = "";
-  try {
-    nodeOptions = env.get("NODE_OPTIONS") || "";
-  } catch { /* permission denied */ }
-  if (!nodeOptions) return null;
   const out = [];
-  const re = new SafeRegExp(`${flag}(?:=|\\s+)(\\S+)`, "g");
-  let m;
-  while ((m = RegExpPrototypeExec(re, nodeOptions)) !== null) {
-    const value = m[1];
+  for (const value of new SafeArrayIterator(nodeOptionValues(flag))) {
     let pattern;
     const litMatch = StringPrototypeMatch(
       value,
@@ -1611,19 +1622,7 @@ function getTestSkipPatterns() {
 let testOnlyFlagCache;
 function isTestOnlyFlagSet() {
   if (testOnlyFlagCache !== undefined) return testOnlyFlagCache;
-  const env = globalThis.Deno?.env;
-  if (!env) {
-    testOnlyFlagCache = false;
-    return false;
-  }
-  let nodeOptions = "";
-  try {
-    nodeOptions = env.get("NODE_OPTIONS") || "";
-  } catch { /* permission denied */ }
-  testOnlyFlagCache = RegExpPrototypeTest(
-    new SafeRegExp(/(^|\s)--test-only(\s|=|$)/),
-    nodeOptions,
-  );
+  testOnlyFlagCache = hasNodeOption("--test-only");
   return testOnlyFlagCache;
 }
 
@@ -1634,28 +1633,27 @@ function isTestOnlyFlagSet() {
 let testRandomSeedCache;
 function getTestRandomSeed() {
   if (testRandomSeedCache !== undefined) return testRandomSeedCache;
-  let nodeOptions = "";
-  try {
-    nodeOptions = globalThis.Deno?.env?.get("NODE_OPTIONS") || "";
-  } catch { /* permission denied */ }
-  const seed = RegExpPrototypeExec(
-    new SafeRegExp(/(?:^|\s)--test-random-seed(?:=|\s+)(\d+)(?:\s|$)/),
-    nodeOptions,
-  );
-  if (seed !== null && NumberIsInteger(+seed[1]) && +seed[1] <= 0xFFFF_FFFF) {
-    testRandomSeedCache = +seed[1];
-  } else if (
-    RegExpPrototypeTest(
-      new SafeRegExp(/(?:^|\s)--test-randomize(?:\s|=true|$)/),
-      nodeOptions,
-    )
-  ) {
+  const seed = firstNumericNodeOption("--test-random-seed");
+  const randomize =
+    ArrayPrototypeIncludes(nodeOptionsArgs(), "--test-randomize") ||
+    ArrayPrototypeIncludes(nodeOptionValues("--test-randomize"), "true");
+  if (seed !== null && NumberIsInteger(seed) && seed <= 0xFFFF_FFFF) {
+    testRandomSeedCache = seed;
+  } else if (randomize) {
     // Node's `createRandomSeed()`.
     testRandomSeedCache = MathFloor(MathRandom() * (0xFFFF_FFFF + 1));
   } else {
     testRandomSeedCache = null;
   }
   return testRandomSeedCache;
+}
+
+// The first value of `flag` in NODE_OPTIONS that is all digits, or null.
+function firstNumericNodeOption(flag) {
+  for (const value of new SafeArrayIterator(nodeOptionValues(flag))) {
+    if (RegExpPrototypeTest(new SafeRegExp(/^\d+$/), value)) return +value;
+  }
+  return null;
 }
 
 // Node's `createSeededGenerator()`: Mulberry32 from a uint32 seed. Every test,
@@ -3377,29 +3375,13 @@ async function runRootAfterHooks() {
 let testTimeoutFlagCache;
 function getTestTimeoutFlag() {
   if (testTimeoutFlagCache !== undefined) return testTimeoutFlagCache;
-  let nodeOptions = "";
-  try {
-    nodeOptions = globalThis.Deno?.env?.get("NODE_OPTIONS") || "";
-  } catch { /* permission denied */ }
-  const match = RegExpPrototypeExec(
-    new SafeRegExp(/(?:^|\s)--test-timeout(?:=|\s+)(\d+)(?:\s|$)/),
-    nodeOptions,
-  );
-  testTimeoutFlagCache = match !== null && +match[1] > 0
-    ? +match[1]
-    : undefined;
+  const timeout = firstNumericNodeOption("--test-timeout");
+  testTimeoutFlagCache = timeout !== null && timeout > 0 ? timeout : undefined;
   return testTimeoutFlagCache;
 }
 
 function isTestForceExit() {
-  let nodeOptions = "";
-  try {
-    nodeOptions = globalThis.Deno?.env?.get("NODE_OPTIONS") || "";
-  } catch { /* permission denied */ }
-  return RegExpPrototypeTest(
-    new SafeRegExp(/(?:^|\s)--test-force-exit(?:\s|=|$)/),
-    nodeOptions,
-  );
+  return hasNodeOption("--test-force-exit");
 }
 
 // Recursively run a test or suite entry, reporting it at the given nesting

@@ -127,6 +127,12 @@
       "args": "run -A stack_driver.mjs",
       "output": "r6/stack.out"
     },
+    // Quotes and spaces in a pattern stay in its NODE_OPTIONS token.
+    "pattern_cannot_add_flags": {
+      "cwd": "project",
+      "args": "run -A pattern_cannot_add_flags.mjs",
+      "output": "injected: false\n"
+    },
     "loader_in_node_options": {
       "cwd": "project",
       "args": "run -A loader_main.mjs",
