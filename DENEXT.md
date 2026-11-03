@@ -8818,6 +8818,32 @@ where the changes are discussed.
        (`windows_split_final_stream`).
        `canonicalize_keeps_a_single_letter_stream_name` checks a stream before
        and after it exists, a folder's stream and the no-follow resolution.
+     - **The matches that still read a path as spelled.** A sweep of every allow
+       and deny match for the plain fold found three on Windows. A Unix-socket
+       deny scope (`--deny-net=unix:…`) compared the socket path with
+       `comparison_path`, so a path spelled with an 8.3 alias of the denied one
+       got past it (the socket checks take the path as given, with no
+       canonicalization). It now takes `comparison_key`. A run deny by name
+       (`--deny-run=longtool`) compared the command's file name as spelled and
+       ASCII-folded, so its alias (`LONGTO~1.EXE`) got past it, and so did a
+       case variant outside ASCII (`Ärger.exe` under `--deny-run=ärger`). It now
+       reads the long name and folds through NTFS's table. The comparison also
+       went byte by byte and panicked when the name's length fell inside a
+       character of the stem (`--deny-run=abc` against `éé`, on every OS); it
+       now goes character by character. And a relative path with a drive and no
+       root (`x:meta`, `D:dir\f`), which Win32 resolves against that drive's own
+       current directory, came out of `cwd.join(path)` unchanged and not
+       absolute, so it missed a deny scope on that drive. `join_cwd` now joins
+       it to the current directory when the drive is the same and otherwise
+       resolves it as the file system call will (`GetFullPathNameW`). It is not
+       read as a stream of a file in the current directory, because Win32
+       doesn't read it that way (that needs `.\x:meta`). The remaining
+       `comparison_path` calls are inside `comparison_key` itself (a verbatim
+       path is folded only). Unit tests:
+       `test_net_unix_socket_deny_reads_8dot3_aliases`,
+       `test_denies_run_name_reads_8dot3_aliases`, `test_denies_run_name`
+       (Unicode case and the panic) and
+       `test_drive_relative_path_is_resolved_on_its_drive`.
      - **`Deno.FsFile.prototype.utime` on a file opened read-only** was reported
        as unchecked. It isn't: upstream's #30872 (Deno 2.5) checks write
        permission on the file's path (no-follow, the partial check `Deno.utime`
