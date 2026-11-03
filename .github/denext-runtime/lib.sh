@@ -64,6 +64,19 @@ unix_path() {
   fi
 }
 
+# The JSON a file holds (toolchain_info.py's record), for a BUILD_INFO.json
+# heredoc, or `null` when there is no such file (no path given, or artifacts
+# reused from a run that recorded none).
+json_or_null() {
+  local f=""
+  if [ -n "${1:-}" ]; then f=$(unix_path "$1"); fi
+  if [ -n "$f" ] && [ -s "$f" ]; then
+    cat "$f"
+  else
+    echo null
+  fi
+}
+
 # Unpack an archive produced by assemble.sh into an (empty) directory.
 unpack_archive() {
   local archive=$1 dest=$2

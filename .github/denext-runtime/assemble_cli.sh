@@ -19,6 +19,9 @@
 #                          (fetch_tsgolint.py; tsgolint, LICENSE,
 #                          tsgolint.json)
 #   BUILD_INFO.json        what was built from where (esbuild's source too)
+#                          and with what (toolchain: the runner image, rustc,
+#                          cargo, the C compiler; denort.toolchain: the same
+#                          for the denort build beside it)
 #   licenses/              the deno license
 #
 # The `denort` archive is assemble_denort.sh's: it is built first, in its own
@@ -29,6 +32,8 @@
 # (ESBUILD_DIR: fetch_esbuild.py's output directory; TYPESCRIPT_LSP_DIR /
 # TYPESCRIPT_CHECK_DIR: fetch_typescript.py lsp's / check's; TSGOLINT_DIR:
 # fetch_tsgolint.py's)
+# Optional: TOOLCHAIN_JSON DENORT_TOOLCHAIN_JSON (toolchain_info.py's records
+# of the deno and denort builds; null in BUILD_INFO.json when unset)
 # (VERSION: the fork's own version, e.g. 3.0.0-denext.1; DENO_VERSION: the
 # upstream Deno release it is built from, DENEXT.md "Versioning")
 set -euo pipefail
@@ -125,6 +130,8 @@ cat >"$root/BUILD_INFO.json" <<EOF
   "typescript_lsp": $(cat "$ts_lsp_dir/typescript.json"),
   "typescript_check": $(cat "$ts_check_dir/typescript.json"),
   "tsgolint": $(cat "$tsgolint_dir/tsgolint.json"),
+  "toolchain": $(json_or_null "${TOOLCHAIN_JSON:-}"),
+  "denort": { "toolchain": $(json_or_null "${DENORT_TOOLCHAIN_JSON:-}") },
   "build": { "run": "${RUN_URL:-}" }
 }
 EOF
