@@ -9119,6 +9119,17 @@ fn node_options_require() {
 }
 
 #[test]
+fn node_options_require_equals() {
+  // denext: Node's `--require=<module>` form, mixed with the spaced ones.
+  set_test_node_options(Some("--require=a.cjs -r b.cjs --require c.cjs"));
+  let flags =
+    flags_from_vec(svec!["deno", "run", "--require", "cli.js", "script.ts",])
+      .unwrap();
+  set_test_node_options(None);
+  assert_eq!(flags.require, vec!["a.cjs", "b.cjs", "c.cjs", "cli.js"]);
+}
+
+#[test]
 fn node_options_loader_and_import_preload() {
   // denext: loaders, then `--import`s, then the CLI's `--preload`s.
   set_test_node_options(Some(
@@ -9141,7 +9152,7 @@ fn node_options_loader_and_import_not_for_artifacts() {
   // denext: `compile`, `desktop` and `install` would build the preloads into
   // their output, so they ignore NODE_OPTIONS' loaders and imports.
   set_test_node_options(Some(
-    "--import=first.mjs --loader ./l.mjs --require r.cjs",
+    "--import=first.mjs --loader ./l.mjs --require r.cjs --require=s.cjs",
   ));
   let compile = flags_from_vec(svec!["deno", "compile", "main.ts"]).unwrap();
   let install =
