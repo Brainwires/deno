@@ -8770,11 +8770,12 @@ in a container:
 - Tests: node_compat `parallel/test-runner-reporters.js`,
   `-test-rerun-failures.js`, `-tags-events.mjs`, `-tag-filter-cli.mjs`,
   `-tags-experimental-warning.mjs` and `test-runner/test-output-eval-dot.mjs`,
-  `-eval-spec.mjs`, `-eval-tap.mjs` enabled (Linux; not run on macOS or Windows
-  yet). Spec `node/node_test_cli` (`reporter_error_exit_code`,
-  `reporter_setup_error_exit_code`, `tags_in_events`, `rerun_failures`,
-  `failure_stack_frames`, `coverage_ts_source_map`; the rerun and `.ts` coverage
-  cases' output is what Node 26 prints for the same files). unit_node
+  `-eval-spec.mjs`, `-eval-tap.mjs` enabled (3 runs each, debug build, on Linux,
+  Windows on Arm and macOS arm64). Spec `node/node_test_cli`
+  (`reporter_error_exit_code`, `reporter_setup_error_exit_code`,
+  `tags_in_events`, `rerun_failures`, `failure_stack_frames`,
+  `coverage_ts_source_map`; the rerun and `.ts` coverage cases' output is what
+  Node 26 prints for the same files). unit_node
   `[child_process] a node invocation with arguments it can't parse exits with
   9`;
   runtime unit test `transpiled_modules_are_told_by_extension`. Shim unit tests
