@@ -3534,8 +3534,10 @@ impl<'a> SpecialFilePathQueryDescriptor<'a> {
         .map_err(PathResolveError::Canonicalize)?;
     // The final name is kept as given; the comparison of the result reads an
     // 8.3 alias as its long name and a stream as its file (`comparison_key`,
-    // DENEXT.md 225).
-    Ok(Some(parent.join(name)))
+    // DENEXT.md 225). `push_name`: a `x:meta` name is not a drive.
+    let mut parent = parent;
+    push_name(&mut parent, name);
+    Ok(Some(parent))
   }
 }
 
@@ -3547,6 +3549,31 @@ fn is_linux_special_path(path: &Path) -> bool {
 
 /// The most symlinks followed while resolving one path (Linux's MAXSYMLINKS).
 const MAX_SYMLINK_HOPS: usize = 40;
+
+/// `path` with the single name `name` appended. `PathBuf::push` parses its
+/// argument as a path, and on Windows a name such as `x:meta` (the stream
+/// `meta` of the file `x`) parses as the drive-relative path `x:` + `meta`,
+/// which replaced the whole path: a write to `base\other\x:meta` under a
+/// scoped grant was resolved to the drive `X:` and failed with "the system
+/// cannot find the path specified" (denext, DENEXT.md 225). The name is
+/// appended as text after a separator instead.
+fn push_name(path: &mut PathBuf, name: &OsStr) {
+  #[cfg(windows)]
+  {
+    let bytes = path.as_os_str().as_encoded_bytes();
+    let needs_separator = !bytes.is_empty()
+      && !matches!(bytes.last(), Some(b'\\' | b'/'))
+      && !(bytes.len() == 2 && bytes[1] == b':');
+    let mut text = std::mem::take(path).into_os_string();
+    if needs_separator {
+      text.push("\\");
+    }
+    text.push(name);
+    *path = PathBuf::from(text);
+  }
+  #[cfg(not(windows))]
+  path.push(name);
+}
 
 /// Like `deno_path_util::fs::canonicalize_path_maybe_not_exists`, but a
 /// component that does not resolve because it is a symlink to a path that does
@@ -3562,13 +3589,13 @@ fn canonicalize_path_maybe_not_exists_following_links(
   let mut path = path.to_path_buf();
   let mut hops = 0;
   'resolve: loop {
-    let mut names_stack = Vec::new();
+    let mut names_stack: Vec<std::ffi::OsString> = Vec::new();
     let mut current: &Path = &path;
     loop {
       match sys.fs_canonicalize(current) {
         Ok(mut canonicalized_path) => {
           for name in names_stack.into_iter().rev() {
-            canonicalized_path.push(name);
+            push_name(&mut canonicalized_path, &name);
           }
           return Ok(canonicalized_path);
         }
@@ -3591,7 +3618,7 @@ fn canonicalize_path_maybe_not_exists_following_links(
               }
             };
             for name in names_stack.into_iter().rev() {
-              next.push(name);
+              push_name(&mut next, &name);
             }
             path = next;
             continue 'resolve;
@@ -12339,6 +12366,53 @@ mod tests {
   /// The Win32 name rules the Windows normalisation applies (DENEXT.md 225),
   /// on every OS: trailing dots and spaces go, a stream suffix starts at the
   /// first colon.
+  /// A single-letter name with a stream (`x:meta`) is appended to the
+  /// resolved parent as a name: `PathBuf::push` read it as the drive `X:`,
+  /// so the checked path of a write beside a deny scope pointed at another
+  /// drive and the write failed.
+  #[cfg(windows)]
+  #[test]
+  #[allow(clippy::disallowed_methods, reason = "a real directory tree")]
+  fn canonicalize_keeps_a_single_letter_stream_name() {
+    use sys_traits::EnvTempDir;
+    let sys = sys_traits::impls::RealSys;
+    let base = sys.env_temp_dir().unwrap().join(format!(
+      "deno_permissions_stream_name_{}",
+      std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&base).unwrap();
+    std::fs::write(base.join("x"), "x").unwrap();
+    let canonical_base = std::fs::canonicalize(&base).unwrap();
+    let resolved = canonicalize_path_maybe_not_exists_following_links(
+      &sys,
+      &base.join("x:meta"),
+    )
+    .unwrap();
+    assert!(resolved.starts_with(&canonical_base), "{resolved:?}");
+    assert!(
+      resolved
+        .as_os_str()
+        .as_encoded_bytes()
+        .ends_with(b"\\x:meta"),
+      "{resolved:?}"
+    );
+    let query = PathQueryDescriptor::new_known_absolute(Cow::Owned(
+      base.join("other").join("x:meta"),
+    ));
+    let no_follow =
+      SpecialFilePathQueryDescriptor::resolve_parent_for_no_follow(
+        &sys, &query,
+      )
+      .unwrap()
+      .unwrap();
+    assert!(no_follow.starts_with(&canonical_base), "{no_follow:?}");
+    let mut root = PathBuf::from("C:\\");
+    push_name(&mut root, OsStr::new("x:meta"));
+    assert_eq!(root, PathBuf::from("C:\\x:meta"));
+    std::fs::remove_dir_all(&base).unwrap();
+  }
+
   #[test]
   fn win32_name_trimming_and_streams() {
     for (name, kept) in [

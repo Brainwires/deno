@@ -8802,7 +8802,16 @@ where the changes are discussed.
        the operation fails on it). A verbatim `\\?\` path is only folded: Win32
        hands it to the file system unchanged, so it names the literal entry
        (`a.`), and `strip_verbatim_prefix` keeps the prefix on exactly those
-       paths, so they match no scope written without one.
+       paths, so they match no scope written without one. The resolution of a
+       path that doesn't exist yet appended each missing name with
+       `PathBuf::push`, which parses its argument as a path: a single-letter
+       name with a stream (`x:meta`) parsed as the drive `X:`, and the checked
+       path handed to the operation became `x:meta` on that drive, so a write to
+       `base\other\x:meta` under a scoped grant failed with "the system cannot
+       find the path specified" (seen on the first Windows dispatch of
+       `windows_trailing_dot_deny`). Names are now appended as text after a
+       separator (`push_name`), in that resolution and in the no-follow one;
+       `canonicalize_keeps_a_single_letter_stream_name` checks both.
      - **`Deno.FsFile.prototype.utime` on a file opened read-only** was reported
        as unchecked. It isn't: upstream's #30872 (Deno 2.5) checks write
        permission on the file's path (no-follow, the partial check `Deno.utime`
