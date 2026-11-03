@@ -3575,6 +3575,32 @@ fn push_name(path: &mut PathBuf, name: &OsStr) {
   path.push(name);
 }
 
+/// A path whose last name holds a stream (`x:meta`, `x::$DATA`), split into
+/// the path of the file (`x`) and the stream suffix (`:meta`); a name that
+/// is only a stream (`:evil`, a stream of the folder) splits into the folder
+/// and the suffix. `None` when the last name holds no colon.
+#[cfg(windows)]
+fn windows_split_final_stream(
+  path: &Path,
+) -> Option<(PathBuf, std::ffi::OsString)> {
+  let name = path.file_name()?;
+  let bytes = name.as_encoded_bytes();
+  let colon = bytes.iter().position(|b| *b == b':')?;
+  let parent = path.parent()?;
+  // SAFETY: both halves of a valid encoded `OsStr` split at an ASCII byte.
+  let (file_name, stream) = unsafe {
+    (
+      OsStr::from_encoded_bytes_unchecked(&bytes[..colon]),
+      OsStr::from_encoded_bytes_unchecked(&bytes[colon..]),
+    )
+  };
+  let mut file = parent.to_path_buf();
+  if !file_name.is_empty() {
+    push_name(&mut file, file_name);
+  }
+  Some((file, stream.to_owned()))
+}
+
 /// Like `deno_path_util::fs::canonicalize_path_maybe_not_exists`, but a
 /// component that does not resolve because it is a symlink to a path that does
 /// not exist yet (a dangling symlink) is followed to its target instead of
@@ -3586,6 +3612,18 @@ fn canonicalize_path_maybe_not_exists_following_links(
   sys: &(impl sys_traits::FsCanonicalize + sys_traits::FsReadLink),
   path: &Path,
 ) -> std::io::Result<PathBuf> {
+  #[cfg(windows)]
+  if let Some((file, stream)) = windows_split_final_stream(path) {
+    // The file is resolved and the stream suffix put back as text: the
+    // canonicalization's own clean-up of a `\\?\` result rebuilds the path
+    // name by name with `PathBuf::push`, so an existing `x:meta` came back
+    // as the drive `X:` (denext, DENEXT.md 225).
+    let resolved =
+      canonicalize_path_maybe_not_exists_following_links(sys, &file)?;
+    let mut text = resolved.into_os_string();
+    text.push(stream);
+    return Ok(PathBuf::from(text));
+  }
   let mut path = path.to_path_buf();
   let mut hops = 0;
   'resolve: loop {
@@ -12380,36 +12418,55 @@ mod tests {
       "deno_permissions_stream_name_{}",
       std::process::id()
     ));
+    // `Path::join("x:meta")` itself reads the name as the drive `X:`.
+    let named = |dir: &Path, name: &str| {
+      let mut path = dir.to_path_buf();
+      push_name(&mut path, OsStr::new(name));
+      path
+    };
     let _ = std::fs::remove_dir_all(&base);
-    std::fs::create_dir_all(&base).unwrap();
+    std::fs::create_dir_all(base.join("other")).unwrap();
     std::fs::write(base.join("x"), "x").unwrap();
     let canonical_base = std::fs::canonicalize(&base).unwrap();
+    let ends_with_stream = |path: &Path, tail: &[u8]| {
+      path.starts_with(&canonical_base)
+        && path.as_os_str().as_encoded_bytes().ends_with(tail)
+    };
+    // The stream doesn't exist yet (a write creates it), then it does (a
+    // read opens it).
+    let stream = named(&base, "x:meta");
+    let resolved =
+      canonicalize_path_maybe_not_exists_following_links(&sys, &stream)
+        .unwrap();
+    assert!(ends_with_stream(&resolved, b"\\x:meta"), "{resolved:?}");
+    std::fs::write(&stream, "m").unwrap();
+    let resolved =
+      canonicalize_path_maybe_not_exists_following_links(&sys, &stream)
+        .unwrap();
+    assert!(ends_with_stream(&resolved, b"\\x:meta"), "{resolved:?}");
+    assert_eq!(std::fs::read_to_string(&resolved).unwrap(), "m");
+    // A stream of a folder.
     let resolved = canonicalize_path_maybe_not_exists_following_links(
       &sys,
-      &base.join("x:meta"),
+      &named(&base.join("other"), ":evil"),
     )
     .unwrap();
-    assert!(resolved.starts_with(&canonical_base), "{resolved:?}");
-    assert!(
-      resolved
-        .as_os_str()
-        .as_encoded_bytes()
-        .ends_with(b"\\x:meta"),
-      "{resolved:?}"
-    );
-    let query = PathQueryDescriptor::new_known_absolute(Cow::Owned(
-      base.join("other").join("x:meta"),
-    ));
+    assert!(ends_with_stream(&resolved, b"other:evil"), "{resolved:?}");
+    // The no-follow resolution keeps the name as given.
+    let query = PathQueryDescriptor::new_known_absolute(Cow::Owned(named(
+      &base.join("other"),
+      "y:meta",
+    )));
     let no_follow =
       SpecialFilePathQueryDescriptor::resolve_parent_for_no_follow(
         &sys, &query,
       )
       .unwrap()
       .unwrap();
-    assert!(no_follow.starts_with(&canonical_base), "{no_follow:?}");
-    let mut root = PathBuf::from("C:\\");
-    push_name(&mut root, OsStr::new("x:meta"));
-    assert_eq!(root, PathBuf::from("C:\\x:meta"));
+    assert!(
+      ends_with_stream(&no_follow, b"\\other\\y:meta"),
+      "{no_follow:?}"
+    );
     std::fs::remove_dir_all(&base).unwrap();
   }
 

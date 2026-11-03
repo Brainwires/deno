@@ -8810,8 +8810,14 @@ where the changes are discussed.
        `base\other\x:meta` under a scoped grant failed with "the system cannot
        find the path specified" (seen on the first Windows dispatch of
        `windows_trailing_dot_deny`). Names are now appended as text after a
-       separator (`push_name`), in that resolution and in the no-follow one;
-       `canonicalize_keeps_a_single_letter_stream_name` checks both.
+       separator (`push_name`), in that resolution and in the no-follow one. The
+       same parse broke the read back: the canonicalization of an existing
+       stream (`sys_traits`' clean-up of the `\\?\` result rebuilds the path
+       name by name with `push`) returned `x:meta` on the drive `X:` too, so the
+       file is now resolved and the stream suffix put back as text
+       (`windows_split_final_stream`).
+       `canonicalize_keeps_a_single_letter_stream_name` checks a stream before
+       and after it exists, a folder's stream and the no-follow resolution.
      - **`Deno.FsFile.prototype.utime` on a file opened read-only** was reported
        as unchecked. It isn't: upstream's #30872 (Deno 2.5) checks write
        permission on the file's path (no-follow, the partial check `Deno.utime`
