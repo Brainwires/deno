@@ -7,6 +7,8 @@ Deno.mkdirSync("base/longname/b", { recursive: true });
 Deno.writeTextFileSync("base/longname/b/prog", "packaged");
 Deno.mkdirSync("base/longname/other");
 Deno.mkdirSync("base/other");
+Deno.mkdirSync("base/longname/bin");
+Deno.writeTextFileSync("base/longname/bin/tool.cmd", "@echo off\r\n");
 const abs = `${Deno.cwd()}\\base\\longname`;
 const decoder = new TextDecoder();
 

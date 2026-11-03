@@ -3045,7 +3045,11 @@ impl<'a> RunQueryDescriptor<'a> {
       match which::which_in(sys.clone(), requested, sys.env_var_os("PATH"), cwd)
       {
         Ok(resolved) => {
-          let cmp_path = comparison_path(&resolved);
+          // The same key every other path gets (`comparison_key`): a command
+          // found through a PATH entry spelled with an 8.3 alias compared as
+          // the alias, so it missed an allow or a deny scope written long,
+          // and the other way round (denext, DENEXT.md 225).
+          let cmp_path = comparison_key(&resolved);
           Ok(RunQueryDescriptor::Path(PathQueryDescriptor {
             path: Cow::Owned(resolved),
             cmp_path,

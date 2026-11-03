@@ -8729,7 +8729,15 @@ where the changes are discussed.
        spelled, so `…\runneradmin\…\main.exe\file.txt` missed it and went to the
        real disk (os error 3; eleven `compile`, `npm` and `run` specs on the
        gaps-2 Windows dispatch). `permission/windows_short_name_deny` now also
-       checks that an operation's error names the alias it was given.
+       checks that an operation's error names the alias it was given. A command
+       named without a path (`Deno.Command("tool")`, a run query for `tool`) is
+       found through `PATH`, and that resolved path took the plain fold, not
+       `comparison_key`: found through a `PATH` entry spelled with an alias, it
+       missed a run grant or a run deny scope written long
+       (`run/allow_run_allowlist_resolution` on the Windows runner, whose temp
+       dir is under `RUNNER~1`). It now takes the same key;
+       `windows_short_name_deny` checks a run grant and a run deny written long
+       against a command found by the alias.
      - **Windows compared names case-insensitively for ASCII letters only.**
        NTFS folds every letter through its `$UpCase` table, so `base/Ärger` and
        `base/ärger` are one folder; the ASCII fold saw two, and the no-follow
