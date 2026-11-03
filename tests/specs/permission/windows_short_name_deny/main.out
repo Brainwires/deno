@@ -7,4 +7,6 @@ write beside the denied path by its short name: done
 deny scope written as a short name, write into the long name: refused
 deny scope written as a short name, rename the long name: refused
 grant written as a short name, write into the long name: done
+run grant written long, command found by the alias: granted
+run deny written long, command found by the alias: denied
 the operation keeps the alias in its path: true
