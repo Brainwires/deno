@@ -9330,110 +9330,118 @@ where the changes are discussed.
      `toThrow(TypeError)`, also on `node:fs`'s own errors), as this runtime
      does, since the host's objects aren't the test realm's.
 
-231. **`feat(ext/node)`: `node --test` round 6: rerun failures,
-     test tags in events, reporter failures, Node's stack frames**
-     (`feat/node-test-round6`, runtime; `ext/node/polyfills/testing.ts`,
+231. **`feat(ext/node)`: `node --test` round 6: rerun failures, test tags in
+     events, reporter failures, Node's stack frames** (`feat/node-test-round6`,
+     runtime; `ext/node/polyfills/testing.ts`,
      `ext/node/polyfills/internal/test/file_runner.ts`,
      `ext/node/polyfills/internal/test/coverage.ts`,
      `ext/node/polyfills/internal/child_process.ts`, `runtime/coverage.rs`,
-     `libs/core/source_map.rs`, `libs/node_shim/lib.rs`). What item 228 left open,
-     against Node 26.5.1 (`lib/internal/test_runner/`) and checked against Node 26.13
-     in a container:
+     `libs/core/source_map.rs`, `libs/node_shim/lib.rs`). What item 228 left
+     open, against Node 26.5.1 (`lib/internal/test_runner/`) and checked against
+     Node 26.13 in a container:
 
-     - **`--test-rerun-failures <file>`** (and `run()`'s `rerunFailuresFilePath`), as
-       `test.js` and `reporter/rerun.js`: the file holds one object per earlier
-       attempt, of the tests that passed, keyed
-       `<file relative to cwd>:<line>:<column>` (`:(N)` for the N-th after the first
-       at one location). A test found there is replayed: its body does not run, its
-       recorded subtests are created again with no body, it passes with its recorded
-       duration and the spec reporter adds `(passed on attempt N)`. `t.attempt` and
-       the suite context's `attempt` are the number of earlier attempts; events carry
-       `details.attempt` and `details.passed_on_attempt`. The process the tests run
-       in (no `--test`) or the runner (`--test`, `run()`) adds the attempt's passes
-       to the file once the run is done; a test file the runner started reads the
-       file and writes nothing. A file that holds `null`, isn't JSON or isn't an
-       array of attempts is Node's "not a valid rerun file" warning and exit code 1:
-       the tests still run, and the file is left as it was (Node throws on one that
-       isn't JSON). A recorded test's `children` that isn't an array replays no
-       subtests. With `run()`, `randomize` / `randomSeed` are refused with it, as in
-       Node. The node shim takes the flag and passes it on in `NODE_OPTIONS` (one
-       quoted token, item 228).
+     - **`--test-rerun-failures <file>`** (and `run()`'s
+       `rerunFailuresFilePath`), as `test.js` and `reporter/rerun.js`: the file
+       holds one object per earlier attempt, of the tests that passed, keyed
+       `<file relative to cwd>:<line>:<column>` (`:(N)` for the N-th after the
+       first at one location). A test found there is replayed: its body does not
+       run, its recorded subtests are created again with no body, it passes with
+       its recorded duration and the spec reporter adds `(passed on attempt N)`.
+       `t.attempt` and the suite context's `attempt` are the number of earlier
+       attempts; events carry `details.attempt` and `details.passed_on_attempt`.
+       The process the tests run in (no `--test`) or the runner (`--test`,
+       `run()`) adds the attempt's passes to the file once the run is done; a
+       test file the runner started reads the file and writes nothing. A file
+       that holds `null`, isn't JSON or isn't an array of attempts is Node's
+       "not a valid rerun file" warning and exit code 1: the tests still run,
+       and the file is left as it was (Node throws on one that isn't JSON). A
+       recorded test's `children` that isn't an array replays no subtests. With
+       `run()`, `randomize` / `randomSeed` are refused with it, as in Node. The
+       node shim takes the flag and passes it on in `NODE_OPTIONS` (one quoted
+       token, item 228).
      - **Test tags in events**: `test:enqueue`, `test:dequeue`, `test:start`,
-       `test:pass`, `test:fail` and `test:complete` carry `tags`, the parent's tags
-       then the test's own (lowercased, deduplicated, frozen; `[]` for an untagged
-       test and for a file's own events), and the run-mode `t.tags` is the same
-       array. `--experimental-test-tag-filter` (shim flag, in `NODE_OPTIONS` for the
-       files, quoted as item 228 says) and `run()`'s `testTagFilters` now filter: a
-       test runs when it has every tag given (Node's `evaluateTagFilters`), a suite
-       stays when a test in it does, and the process given the flag warns once
-       (`ExperimentalWarning: Test tags`). An empty filter is refused by `run()` and,
-       on the command line, by the shim's parser (exit 9, below).
-     - **A node command line the shim can't parse exits 9**, as Node's child does:
-       `child_process`'s `spawn()` / `spawnSync()` of the runtime with Node arguments
-       the shim refuses (`--experimental-test-tag-filter=` requires an argument)
-       threw the shim's parse error. It now starts a child that prints
-       `node: <message>` and exits with 9 (Node's `kInvalidCommandLineArgument`). An
-       option the shim doesn't know is not a parse error there (Node exits 9 with
-       `bad option`; the runtime's own error and exit code stay).
+       `test:pass`, `test:fail` and `test:complete` carry `tags`, the parent's
+       tags then the test's own (lowercased, deduplicated, frozen; `[]` for an
+       untagged test and for a file's own events), and the run-mode `t.tags` is
+       the same array. `--experimental-test-tag-filter` (shim flag, in
+       `NODE_OPTIONS` for the files, quoted as item 228 says) and `run()`'s
+       `testTagFilters` now filter: a test runs when it has every tag given
+       (Node's `evaluateTagFilters`), a suite stays when a test in it does, and
+       the process given the flag warns once (`ExperimentalWarning: Test tags`).
+       An empty filter is refused by `run()` and, on the command line, by the
+       shim's parser (exit 9, below).
+     - **A node command line the shim can't parse exits 9**, as Node's child
+       does: `child_process`'s `spawn()` / `spawnSync()` of the runtime with
+       Node arguments the shim refuses (`--experimental-test-tag-filter=`
+       requires an argument) threw the shim's parse error. It now starts a child
+       that prints `node: <message>` and exits with 9 (Node's
+       `kInvalidCommandLineArgument`). An option the shim doesn't know is not a
+       parse error there (Node exits 9 with `bad option`; the runtime's own
+       error and exit code stay).
      - **Coverage of a transpiled file maps back to its lines.** A test file's
-       process (`NODE_TEST_CONTEXT`) writes, beside each `.ts` / `.mts` / `.cts` /
-       `.tsx` / `.jsx` script's coverage, the emitted code's source map
+       process (`NODE_TEST_CONTEXT`) writes, beside each `.ts` / `.mts` / `.cts`
+       / `.tsx` / `.jsx` script's coverage, the emitted code's source map
        (`<uuid>.sourcemap`: `{ url, lineLengths, data }`, the `source-map-cache`
-       entry of Node's `NODE_V8_COVERAGE` files, line lengths in UTF-16 code units).
-       The map is the one stack traces use (`SourceMapper::source_map_json`, new);
-       the emitted code is V8's own (`Debugger.getScriptSource`, enabled once at
-       exit, only when there is such a script). Not a `.json` file, so
-       `deno coverage` doesn't read it; `deno test --coverage` writes none. The
-       runner maps each range's ends through it to the file's offsets before merging
-       (Node's `mapCoverageWithSourceMap`; a range that doesn't map is left out), and
-       keeps the maps as `source-map-cache` in a `NODE_V8_COVERAGE` file. The lines,
-       functions and branches of the spec's `.ts` file are now what Node 26, which
-       strips types in place, reports for it.
-     - **A reporter that fails exits 7**, as in Node, whose runner rethrows an error
-       that comes from a reporter in its `uncaughtException` handler (`harness.js`),
-       which makes Node's own handler fail. Here a custom reporter's stream `'error'`
-       (a throw in the reporter, or the `AbortError` of one that ends early) or a
-       reporter module that is not a reporter (`compose()`'s `ERR_INVALID_ARG_TYPE`)
-       printed Deno's uncaught error and exited 1. The error is now written as Node's
-       inspected error (with `Emitted 'error' event on Duplex instance at:` and the
-       frames for a stream's), and the process exits 7. A failing run still exits 1.
-     - **Stack frames in failures**: the `spec`, `dot`, `tap` and `junit` reporters
-       (and a file's errors sent to the runner) show the runtime's own frames as
-       `node:internal/<path>` (`ext:deno_node/testing.ts:N:M` is
+       entry of Node's `NODE_V8_COVERAGE` files, line lengths in UTF-16 code
+       units). The map is the one stack traces use
+       (`SourceMapper::source_map_json`, new); the emitted code is V8's own
+       (`Debugger.getScriptSource`, enabled once at exit, only when there is
+       such a script). Not a `.json` file, so `deno coverage` doesn't read it;
+       `deno test --coverage` writes none. The runner maps each range's ends
+       through it to the file's offsets before merging (Node's
+       `mapCoverageWithSourceMap`; a range that doesn't map is left out), and
+       keeps the maps as `source-map-cache` in a `NODE_V8_COVERAGE` file. The
+       lines, functions and branches of the spec's `.ts` file are now what Node
+       26, which strips types in place, reports for it.
+     - **A reporter that fails exits 7**, as in Node, whose runner rethrows an
+       error that comes from a reporter in its `uncaughtException` handler
+       (`harness.js`), which makes Node's own handler fail. Here a custom
+       reporter's stream `'error'` (a throw in the reporter, or the `AbortError`
+       of one that ends early) or a reporter module that is not a reporter
+       (`compose()`'s `ERR_INVALID_ARG_TYPE`) printed Deno's uncaught error and
+       exited 1. The error is now written as Node's inspected error (with
+       `Emitted 'error' event on Duplex instance at:` and the frames for a
+       stream's), and the process exits 7. A failing run still exits 1.
+     - **Stack frames in failures**: the `spec`, `dot`, `tap` and `junit`
+       reporters (and a file's errors sent to the runner) show the runtime's own
+       frames as `node:internal/<path>` (`ext:deno_node/testing.ts:N:M` is
        `node:internal/deno_node/testing.ts:N:M`), where Node shows its runner's
        `node:internal/test_runner/...` frames, which Node's snapshots fold into
-       `<node-internal-frames>`; and a frame in a CommonJS module names its file by
-       path, as Node's do (an ES module's stays a `file:` URL). The error a test sees
-       keeps its stack: the reporters format it with the stack swapped for the call
-       and put back. A suite's body and hooks run with a `SuiteContext` (frames read
-       `SuiteContext.<anonymous>`, not `Object.<anonymous>`).
+       `<node-internal-frames>`; and a frame in a CommonJS module names its file
+       by path, as Node's do (an ES module's stays a `file:` URL). The error a
+       test sees keeps its stack: the reporters format it with the stack swapped
+       for the call and put back. A suite's body and hooks run with a
+       `SuiteContext` (frames read `SuiteContext.<anonymous>`, not
+       `Object.<anonymous>`).
      - **`run()`** starts its files a microtask later, so a listener added once
-       `run()` returns sees the file's own `test:enqueue` / `test:dequeue` (they were
-       emitted during the call). With `--test-isolation=none` the files' one process
-       has no queue events of its own (`<root>`, with no `file`), as Node's run has
-       none; a test's queue events carry its own `file` there.
+       `run()` returns sees the file's own `test:enqueue` / `test:dequeue` (they
+       were emitted during the call). With `--test-isolation=none` the files'
+       one process has no queue events of its own (`<root>`, with no `file`), as
+       Node's run has none; a test's queue events carry its own `file` there.
      - **An interrupted run** (`SIGINT`, or a reporter that emits it, as
        `test-runner-error-reporter.js`'s `FAIL_FAST` does) no longer reports the
        child it killed as a failure of that file, and starts no file after it.
-       `test-runner-error-reporter.js` failed 2 of 3 runs on Linux without this, on a
-       build without debug info: the killed child's `close` came before the exit.
-     - **Left open**: most `test-output-*` snapshots still differ by behaviour, not
-       frames (a suite whose body throws doesn't cancel the tests it registered, an
-       unhandled rejection in a test isn't charged to it, `expectFailure` /
-       `t.todo()`); the frames now fold as Node's do.
+       `test-runner-error-reporter.js` failed 2 of 3 runs on Linux without this,
+       on a build without debug info: the killed child's `close` came before the
+       exit.
+     - **Left open**: most `test-output-*` snapshots still differ by behaviour,
+       not frames (a suite whose body throws doesn't cancel the tests it
+       registered, an unhandled rejection in a test isn't charged to it,
+       `expectFailure` / `t.todo()`); the frames now fold as Node's do.
      - Tests: node_compat `parallel/test-runner-reporters.js`,
        `-test-rerun-failures.js`, `-tags-events.mjs`, `-tag-filter-cli.mjs`,
-       `-tags-experimental-warning.mjs` and `test-runner/test-output-eval-dot.mjs`,
-       `-eval-spec.mjs`, `-eval-tap.mjs` enabled (3 runs each, debug build, on Linux,
-       Windows on Arm and macOS arm64). Spec `node/node_test_cli`
-       (`reporter_error_exit_code`, `reporter_setup_error_exit_code`,
-       `tags_in_events`, `rerun_failures`, `rerun_failures_invalid_file`,
-       `failure_stack_frames`, `coverage_ts_source_map`; the rerun and `.ts` coverage
-       cases' output is what Node 26 prints for the same files). unit_node
+       `-tags-experimental-warning.mjs` and
+       `test-runner/test-output-eval-dot.mjs`, `-eval-spec.mjs`, `-eval-tap.mjs`
+       enabled (3 runs each, debug build, on Linux, Windows on Arm and macOS
+       arm64). Spec `node/node_test_cli` (`reporter_error_exit_code`,
+       `reporter_setup_error_exit_code`, `tags_in_events`, `rerun_failures`,
+       `rerun_failures_invalid_file`, `failure_stack_frames`,
+       `coverage_ts_source_map`; the rerun and `.ts` coverage cases' output is
+       what Node 26 prints for the same files). unit_node
        `[child_process] a node invocation with arguments it can't parse exits with
        9`;
-       runtime unit test `transpiled_modules_are_told_by_extension`. Shim unit tests
-       `test_rerun_failures_rides_along_in_node_options` and
+       runtime unit test `transpiled_modules_are_told_by_extension`. Shim unit
+       tests `test_rerun_failures_rides_along_in_node_options` and
        `test_tag_filters_ride_along_in_node_options`.
 
 232. **`feat(desktop)`: a run grant can record its program's hash, and the
@@ -9552,66 +9560,68 @@ where the changes are discussed.
        needs no attestation permissions. Its condition is `!cancelled()`, not
        the implicit `success()`, which also looks at `package`'s own needs: a
        dispatch reusing the `denort` / `laufey` artifacts would skip it. The
-       stock CLI's minimum dependency age refuses a denext published less
-       than a day ago, so `DENEXT_PACKAGING_VERSION` moves only to an older
-       one.
+       stock CLI's minimum dependency age refuses a denext published less than a
+       day ago, so `DENEXT_PACKAGING_VERSION` moves only to an older one.
 
-234. **laufey at `99a1c2e`** (`development-denext`; laufey API 52,
-     no ABI change; runtime 3.0.0-denext.9). On Linux a window is created hidden,
-     sized, then shown, so a Wayland compositor maps it at the size it was asked for.
-     Before, it was created visible at 800x600 and the size set right after raced the
-     compositor's first configure: under one loaded CPU some windows stayed at
-     800x600. Linux CEF now honours hidden-on-create (it showed every window), so the
-     same order holds there, and the bootstrap window appears only at its page-load
-     reveal, which the CEF backend now reports on every platform (it never sent the
-     page-load event, so on CEF the reveal waited for the 10 s fallback once the
-     window stayed hidden). From the same range, up to `99a1c2e`:
+234. **laufey at `99a1c2e`** (`development-denext`; laufey API 52, no ABI
+     change; runtime 3.0.0-denext.9). On Linux a window is created hidden,
+     sized, then shown, so a Wayland compositor maps it at the size it was asked
+     for. Before, it was created visible at 800x600 and the size set right after
+     raced the compositor's first configure: under one loaded CPU some windows
+     stayed at 800x600. Linux CEF now honours hidden-on-create (it showed every
+     window), so the same order holds there, and the bootstrap window appears
+     only at its page-load reveal, which the CEF backend now reports on every
+     platform (it never sent the page-load event, so on CEF the reveal waited
+     for the 10 s fallback once the window stayed hidden). From the same range,
+     up to `99a1c2e`:
 
-     - CEF honours hidden-on-create on macOS and Windows too: a window created hidden
-       stays hidden until it is shown, and its first show is the reveal a visible
-       creation does (a visible creation is unchanged there).
-     - On Linux CEF, `show()` and the window size reach a window whose Browser has
-       not registered yet, so a window created hidden, sized and shown after a slow
-       start is not left hidden.
-     - The CEF shutdown drain: before `CefShutdown` every host (Linux now as well as
-       macOS and Windows) waits for closed windows' Browsers to go and asks any
-       window still open to close, again when its 2 s run out; macOS then ends with
-       `_exit` after its helpers have ended, as Windows does, instead of a crash in
-       exit's destructors about 1 launch in 5,600. Window creation is refused (window
-       id 0) once the app is quitting or its loop is ending, a refused creation
-       releases its waiter at once instead of after 30 s, and laufey's window API no
-       longer sizes or shows window 0 after a refusal.
-     - The CEF localStorage commit gate holds a custom-scheme document's body up to
-       10 s (was 1 s) for its commit, which lost a launch's localStorage a few times
-       in 10,000 on a loaded machine; downloads are not held, and a body released
-       without its commit says so on stderr.
-     - macOS CEF turns off Chrome's code-signing clone, so a launch right after a
-       quit can't load from the previous launch's half-deleted clone (exit 134,
-       "Library not loaded").
-     - WebView2: `print_to_pdf`, `execute_js` and `open_devtools` called before the
-       web view is ready wait for it (up to 45 s, then "web view not ready ...")
-       instead of answering "window not found" or nothing.
+     - CEF honours hidden-on-create on macOS and Windows too: a window created
+       hidden stays hidden until it is shown, and its first show is the reveal a
+       visible creation does (a visible creation is unchanged there).
+     - On Linux CEF, `show()` and the window size reach a window whose Browser
+       has not registered yet, so a window created hidden, sized and shown after
+       a slow start is not left hidden.
+     - The CEF shutdown drain: before `CefShutdown` every host (Linux now as
+       well as macOS and Windows) waits for closed windows' Browsers to go and
+       asks any window still open to close, again when its 2 s run out; macOS
+       then ends with `_exit` after its helpers have ended, as Windows does,
+       instead of a crash in exit's destructors about 1 launch in 5,600. Window
+       creation is refused (window id 0) once the app is quitting or its loop is
+       ending, a refused creation releases its waiter at once instead of after
+       30 s, and laufey's window API no longer sizes or shows window 0 after a
+       refusal.
+     - The CEF localStorage commit gate holds a custom-scheme document's body up
+       to 10 s (was 1 s) for its commit, which lost a launch's localStorage a
+       few times in 10,000 on a loaded machine; downloads are not held, and a
+       body released without its commit says so on stderr.
+     - macOS CEF turns off Chrome's code-signing clone, so a launch right after
+       a quit can't load from the previous launch's half-deleted clone (exit
+       134, "Library not loaded").
+     - WebView2: `print_to_pdf`, `execute_js` and `open_devtools` called before
+       the web view is ready wait for it (up to 45 s, then "web view not ready
+       ...") instead of answering "window not found" or nothing.
      - WebKitGTK: `print_to_pdf` on a window that has never been asked to load
-       anything is refused ("nothing has been loaded in the window yet") instead of
-       crashing the backend inside WebKitGTK.
+       anything is refused ("nothing has been loaded in the window yet") instead
+       of crashing the backend inside WebKitGTK.
 
-     Still CEF 156.0.15. Tests: laufey's `a_window_is_sized_before_it_is_first_shown`
-     and its `--initial-size` battery mode under headless sway; item 220's `window`
-     area here pinned to one CPU, 10 launches per backend, every window at the size
-     it asked for; laufey's launch check that the page load is reported; the
-     `wayland` area on CEF, 8 of 8 runs; laufey's CI on `99a1c2e` (the
-     refused-creation test, the window-drain and commit-gate tests against fake
-     clocks, the localStorage relaunch stress, native_e2e's print checks on WebKitGTK
-     and WebView2).
+     Still CEF 156.0.15. Tests: laufey's
+     `a_window_is_sized_before_it_is_first_shown` and its `--initial-size`
+     battery mode under headless sway; item 220's `window` area here pinned to
+     one CPU, 10 launches per backend, every window at the size it asked for;
+     laufey's launch check that the page load is reported; the `wayland` area on
+     CEF, 8 of 8 runs; laufey's CI on `99a1c2e` (the refused-creation test, the
+     window-drain and commit-gate tests against fake clocks, the localStorage
+     relaunch stress, native_e2e's print checks on WebKitGTK and WebView2).
 
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
 169-174, 176, 178, 180, 182-184, 186, 187, 189-191, 193-196, 198-203, 206, 207,
-209-215, 217, 218, 221, 222, 224, 225, 227, 228, 231, 232) are what the
-prebuilt `libdenort` carries. The CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` /
-`LAUFEY_APP_ID` into a packaged app's launchers) are in the branch too, but a
-stock CLI does not run them; denext's own launcher provides that environment.
+209-215, 217, 218, 221, 222, 224, 225, 227, 228, 231, 232) are what the prebuilt
+`libdenort` carries. The CLI-side parts (for example writing
+`LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
+in the branch too, but a stock CLI does not run them; denext's own launcher
+provides that environment.
 
 The laufey backend hosts are built from
 [Brainwires/laufey](https://github.com/Brainwires/laufey) branch
@@ -9644,8 +9654,8 @@ activation policy and speech, item 183; and, for runtime 3.0.0-denext.7, CEF
 icon fixes, item 207; and API 52, the OS's quits and layer-surface edge
 anchoring, items 221 and 222; and, for runtime 3.0.0-denext.9, a Linux window
 first shown at its size and the CEF shutdown, storage and print fixes, item
-234), at the commit pinned by `LAUFEY_SHA` in the workflow (or the
-`laufey_ref` input). The same commit is the `laufey` git dependency of
+234), at the commit pinned by `LAUFEY_SHA` in the workflow (or the `laufey_ref`
+input). The same commit is the `laufey` git dependency of
 `cli/rt_desktop/Cargo.toml` (crate 0.8.0, API 52, CEF 156.0.15).
 
 laufey's `init_api` rejects any C ABI version mismatch between the runtime and
