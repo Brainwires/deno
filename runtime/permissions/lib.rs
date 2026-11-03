@@ -10703,8 +10703,8 @@ mod tests {
     let long = sys.fs_canonicalize(&dir).unwrap();
     match windows_short_path(&long) {
       Some(short) => Some((long, short)),
+      // No 8.3 names on this volume: nothing to test.
       None => {
-        eprintln!("no 8.3 alias for {long:?}; skipped");
         let _ = std::fs::remove_dir_all(&dir);
         None
       }
@@ -10758,12 +10758,10 @@ mod tests {
     };
     let tool = long.join("longtoolname.exe");
     std::fs::write(&tool, "").unwrap();
-    match windows_short_path(&tool) {
-      Some(short) => {
-        assert!(denies_run_name("longtoolname", &short), "{short:?}");
-        assert!(!denies_run_name("othertool", &short), "{short:?}");
-      }
-      None => eprintln!("no 8.3 alias for {tool:?}; skipped"),
+    // No 8.3 name for the file: nothing to test.
+    if let Some(short) = windows_short_path(&tool) {
+      assert!(denies_run_name("longtoolname", &short), "{short:?}");
+      assert!(!denies_run_name("othertool", &short), "{short:?}");
     }
     std::fs::remove_dir_all(&long).unwrap();
   }
