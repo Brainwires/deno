@@ -168,8 +168,9 @@ function getExecArgv() {
   }
 }
 
-// denext: one NODE_OPTIONS token, quoted as Node's parser reads it (`"…"`, with
-// `\` before `"` and `\`), so a value with spaces or quotes stays one token.
+// denext: one NODE_OPTIONS token, quoted as Node's parser reads it
+// (`"..."`, with `\` before `"` and `\`), so a value with spaces or quotes
+// stays one token.
 // The node shim's `node_options_token` does the same.
 function quoteNodeOptionsToken(token: string): string {
   let out = '"';

@@ -335,7 +335,7 @@ function getPathForSnapshot() {
   return _pathForSnapshot;
 }
 
-// denext: NODE_OPTIONS split as Node splits it (`"…"` quotes with `\`
+// denext: NODE_OPTIONS split as Node splits it (`"..."` quotes with `\`
 // escapes), so a quoted value (a name pattern, a path) is one token and can't
 // pass for a flag. Empty when unset or not readable.
 function nodeOptionsArgs() {
