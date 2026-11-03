@@ -8715,18 +8715,21 @@ in a container:
   `details.attempt` and `details.passed_on_attempt`. The process the tests run
   in (no `--test`) or the runner (`--test`, `run()`) adds the attempt's passes
   to the file once the run is done; a test file the runner started reads the
-  file and writes nothing. A file that holds `null` is Node's warning and exit
-  code 1. With `run()`, `randomize` / `randomSeed` are refused with it, as in
-  Node. The node shim takes the flag and passes it on in `NODE_OPTIONS` (a path
-  with spaces as one quoted token).
+  file and writes nothing. A file that holds `null`, isn't JSON or isn't an
+  array of attempts is Node's "not a valid rerun file" warning and exit code 1:
+  the tests still run, and the file is left as it was (Node throws on one that
+  isn't JSON). A recorded test's `children` that isn't an array replays no
+  subtests. With `run()`, `randomize` / `randomSeed` are refused with it, as in
+  Node. The node shim takes the flag and passes it on in `NODE_OPTIONS` (one
+  quoted token, item 901).
 - **Test tags in events**: `test:enqueue`, `test:dequeue`, `test:start`,
   `test:pass`, `test:fail` and `test:complete` carry `tags`, the parent's tags
   then the test's own (lowercased, deduplicated, frozen; `[]` for an untagged
   test and for a file's own events), and the run-mode `t.tags` is the same
   array. `--experimental-test-tag-filter` (shim flag, in `NODE_OPTIONS` for the
-  files) and `run()`'s `testTagFilters` now filter: a test runs when it has
-  every tag given (Node's `evaluateTagFilters`), a suite stays when a test in it
-  does, and the process given the flag warns once
+  files, quoted as item 901 says) and `run()`'s `testTagFilters` now filter: a
+  test runs when it has every tag given (Node's `evaluateTagFilters`), a suite
+  stays when a test in it does, and the process given the flag warns once
   (`ExperimentalWarning: Test tags`). An empty filter is refused by `run()` and,
   on the command line, by the shim's parser (exit 9, below).
 - **A node command line the shim can't parse exits 9**, as Node's child does:
@@ -8788,9 +8791,9 @@ in a container:
   `-eval-spec.mjs`, `-eval-tap.mjs` enabled (3 runs each, debug build, on Linux,
   Windows on Arm and macOS arm64). Spec `node/node_test_cli`
   (`reporter_error_exit_code`, `reporter_setup_error_exit_code`,
-  `tags_in_events`, `rerun_failures`, `failure_stack_frames`,
-  `coverage_ts_source_map`; the rerun and `.ts` coverage cases' output is what
-  Node 26 prints for the same files). unit_node
+  `tags_in_events`, `rerun_failures`, `rerun_failures_invalid_file`,
+  `failure_stack_frames`, `coverage_ts_source_map`; the rerun and `.ts` coverage
+  cases' output is what Node 26 prints for the same files). unit_node
   `[child_process] a node invocation with arguments it can't parse exits with
   9`;
   runtime unit test `transpiled_modules_are_told_by_extension`. Shim unit tests

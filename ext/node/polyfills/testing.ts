@@ -2978,17 +2978,9 @@ let tagFiltersCache;
 function getTagFilters() {
   if (tagFiltersCache !== undefined) return tagFiltersCache;
   tagFiltersCache = null;
-  let nodeOptions = "";
-  try {
-    nodeOptions = globalThis.Deno?.env?.get("NODE_OPTIONS") || "";
-  } catch { /* permission denied */ }
-  const re = new SafeRegExp(
-    /(?:^|\s)(?:"--experimental-test-tag-filter=([^"]*)"|--experimental-test-tag-filter(?:=|\s+)(\S+))/g,
-  );
   const filters = [];
-  let m;
-  while ((m = RegExpPrototypeExec(re, nodeOptions)) !== null) {
-    const value = m[1] ?? m[2];
+  const values = nodeOptionValues("--experimental-test-tag-filter");
+  for (const value of new SafeArrayIterator(values)) {
     if (value.length > 0) {
       ArrayPrototypePush(filters, StringPrototypeToLowerCase(value));
     }
@@ -3029,22 +3021,13 @@ function passesTagFilters(tags) {
 let rerunPathCache;
 function getRerunFailuresPath() {
   if (rerunPathCache !== undefined) return rerunPathCache;
-  rerunPathCache = null;
-  let nodeOptions = "";
-  try {
-    nodeOptions = globalThis.Deno?.env?.get("NODE_OPTIONS") || "";
-  } catch { /* permission denied */ }
-  const m = RegExpPrototypeExec(
-    new SafeRegExp(
-      /(?:^|\s)(?:"--test-rerun-failures=([^"]*)"|--test-rerun-failures(?:=|\s+)(\S+))/,
-    ),
-    nodeOptions,
-  );
-  if (m !== null) rerunPathCache = m[1] ?? m[2];
+  rerunPathCache = nodeOptionValues("--test-rerun-failures")[0] ?? null;
   return rerunPathCache;
 }
 
-// Node's `parsePreviousRuns()`: a missing file is no earlier attempt.
+// Node's `parsePreviousRuns()`: a missing file is no earlier attempt. A file
+// that isn't JSON, or not an array of attempts, is null: the callers' "not a
+// valid rerun file" warning, and the run goes on without it.
 function readPreviousRuns(path) {
   const fs = lazyProcess().default.getBuiltinModule("node:fs");
   let data;
@@ -3054,7 +3037,19 @@ function readPreviousRuns(path) {
     if (err?.code !== "ENOENT") throw err;
     data = "[]";
   }
-  return JSONParse(data);
+  let runs;
+  try {
+    runs = JSONParse(data);
+  } catch {
+    return null;
+  }
+  if (!ArrayIsArray(runs)) return null;
+  for (const run of new SafeArrayIterator(runs)) {
+    if (typeof run !== "object" || run === null || ArrayIsArray(run)) {
+      return null;
+    }
+  }
+  return runs;
 }
 
 let rerunState;
@@ -3104,10 +3099,16 @@ function applyRerunState(entry) {
   }
   entry.attempt = state.previousRuns.length;
   const previous = state.previousRuns[entry.attempt - 1]?.[id];
-  if (previous !== null && previous !== undefined) {
+  if (typeof previous === "object" && previous !== null) {
     entry.passedAttempt = previous.passed_on_attempt;
     entry.replayedDuration = previous.duration_ms;
-    entry.replayChildren = previous.children ?? [];
+    // Only recorded subtests that are objects; anything else isn't replayed.
+    entry.replayChildren = ArrayIsArray(previous.children)
+      ? ArrayPrototypeFilter(
+        previous.children,
+        (child) => typeof child === "object" && child !== null,
+      )
+      : [];
   }
 }
 

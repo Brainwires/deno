@@ -3937,22 +3937,17 @@ fn add_test_node_options(
       .push(format!("--test-timeout={}", env_opts.test_runner_timeout));
   }
   // denext: `--experimental-test-tag-filter` and `--test-rerun-failures`,
-  // quoted as `NODE_OPTIONS` quotes a value with spaces.
-  let mut push_value = |flag: String| {
-    if flag.contains(char::is_whitespace) {
-      node_options.push(format!("\"{flag}\""));
-    } else {
-      node_options.push(flag);
-    }
-  };
+  // quoted the same way.
   for tag in &env_opts.test_tag_filter {
-    push_value(format!("--experimental-test-tag-filter={tag}"));
+    node_options.push(node_options_token(&format!(
+      "--experimental-test-tag-filter={tag}"
+    )));
   }
   if !env_opts.test_rerun_failures_path.is_empty() {
-    push_value(format!(
+    node_options.push(node_options_token(&format!(
       "--test-rerun-failures={}",
       env_opts.test_rerun_failures_path
-    ));
+    )));
   }
 }
 
@@ -6034,8 +6029,8 @@ mod tests {
     assert_eq!(
       result.node_options,
       svec![
-        "--experimental-test-tag-filter=db",
-        "--experimental-test-tag-filter=integration"
+        "\"--experimental-test-tag-filter=db\"",
+        "\"--experimental-test-tag-filter=integration\""
       ]
     );
   }
@@ -6049,7 +6044,7 @@ mod tests {
     let result = translate_to_deno_args(parsed_args, &options);
     assert_eq!(
       result.node_options,
-      svec!["--test-rerun-failures=state.json"]
+      svec!["\"--test-rerun-failures=state.json\""]
     );
 
     // A path with a space is one quoted `NODE_OPTIONS` token.
@@ -6064,6 +6059,25 @@ mod tests {
     assert_eq!(
       parse_node_options_env_var(&result.node_options.join(" ")).unwrap(),
       svec!["--test-rerun-failures=my state.json"]
+    );
+
+    // A quote in a tag or the path can't end the token early and add flags.
+    let tag = r#"a" --import=./evil.mjs ""#;
+    let path = r#"my" --require=./z.cjs ".json"#;
+    let parsed_args = parse_args(svec![
+      "--test",
+      format!("--experimental-test-tag-filter={tag}"),
+      format!("--test-rerun-failures={path}"),
+      "main.js"
+    ])
+    .unwrap();
+    let result = translate_to_deno_args(parsed_args, &options);
+    assert_eq!(
+      parse_node_options_env_var(&result.node_options.join(" ")).unwrap(),
+      vec![
+        format!("--experimental-test-tag-filter={tag}"),
+        format!("--test-rerun-failures={path}"),
+      ]
     );
   }
 

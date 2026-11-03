@@ -121,6 +121,13 @@
       "args": "run -A rerun_driver.mjs",
       "output": "r6/rerun.out"
     },
+    // A rerun file that isn't JSON or isn't an array of attempts: the
+    // "not a valid rerun file" warning, and the run goes on.
+    "rerun_failures_invalid_file": {
+      "cwd": "r6",
+      "args": "run -A rerun_invalid_driver.mjs",
+      "output": "r6/rerun_invalid.out"
+    },
     // A failure's stack: `node:internal/` frames and a CommonJS file's path.
     "failure_stack_frames": {
       "cwd": "r6",

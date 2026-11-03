@@ -344,18 +344,15 @@ function startRun(options, report) {
     for (const value of new SafeArrayIterator(options.testTagFilters ?? [])) {
       ArrayPrototypePush(
         extraOptions,
-        RegExpPrototypeTest(new SafeRegExp(/\s/), value)
-          ? `"--experimental-test-tag-filter=${value}"`
-          : `--experimental-test-tag-filter=${value}`,
+        quoteNodeOptionsToken(`--experimental-test-tag-filter=${value}`),
       );
     }
     if (options.rerunFailuresFilePath) {
-      const value = options.rerunFailuresFilePath;
       ArrayPrototypePush(
         extraOptions,
-        RegExpPrototypeTest(new SafeRegExp(/\s/), value)
-          ? `"--test-rerun-failures=${value}"`
-          : `--test-rerun-failures=${value}`,
+        quoteNodeOptionsToken(
+          `--test-rerun-failures=${options.rerunFailuresFilePath}`,
+        ),
       );
     }
     if (options.randomSeed !== undefined && options.randomSeed !== null) {
