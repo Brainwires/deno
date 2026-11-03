@@ -36,4 +36,5 @@ const meta = {
   secureStore: true,
 };
 await buildDesktopRpm({ meta, bundleDir, exe: "smoke", arch, out });
+// deno-lint-ignore no-console
 console.log(`built ${out}`);
