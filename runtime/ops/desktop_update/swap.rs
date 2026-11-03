@@ -4401,6 +4401,7 @@ mod tests {
   };
 
   /// A byte-identical copy of the tree at `from` at `to`.
+  #[cfg(unix)]
   fn copy_tree(from: &Path, to: &Path) {
     std::fs::create_dir_all(to).unwrap();
     for entry in std::fs::read_dir(from).unwrap() {
@@ -4416,7 +4417,9 @@ mod tests {
 
   /// Replace the tree at `path` with a byte-identical copy (another inode
   /// at the same name): what a racing writer does between a check and a
-  /// move. The original is left at `<path>.moved`.
+  /// move. The original is left at `<path>.moved` (used by the Unix-only
+  /// test that races the check).
+  #[cfg(unix)]
   fn replace_with_identical_copy(path: &Path) {
     let copy = path.with_extension("copy");
     let moved = path.with_extension("moved");
