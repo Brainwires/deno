@@ -9556,12 +9556,60 @@ where the changes are discussed.
        than a day ago, so `DENEXT_PACKAGING_VERSION` moves only to an older
        one.
 
+234. **laufey at `99a1c2e`** (`development-denext`; laufey API 52,
+     no ABI change; runtime 3.0.0-denext.9). On Linux a window is created hidden,
+     sized, then shown, so a Wayland compositor maps it at the size it was asked for.
+     Before, it was created visible at 800x600 and the size set right after raced the
+     compositor's first configure: under one loaded CPU some windows stayed at
+     800x600. Linux CEF now honours hidden-on-create (it showed every window), so the
+     same order holds there, and the bootstrap window appears only at its page-load
+     reveal, which the CEF backend now reports on every platform (it never sent the
+     page-load event, so on CEF the reveal waited for the 10 s fallback once the
+     window stayed hidden). From the same range, up to `99a1c2e`:
+
+     - CEF honours hidden-on-create on macOS and Windows too: a window created hidden
+       stays hidden until it is shown, and its first show is the reveal a visible
+       creation does (a visible creation is unchanged there).
+     - On Linux CEF, `show()` and the window size reach a window whose Browser has
+       not registered yet, so a window created hidden, sized and shown after a slow
+       start is not left hidden.
+     - The CEF shutdown drain: before `CefShutdown` every host (Linux now as well as
+       macOS and Windows) waits for closed windows' Browsers to go and asks any
+       window still open to close, again when its 2 s run out; macOS then ends with
+       `_exit` after its helpers have ended, as Windows does, instead of a crash in
+       exit's destructors about 1 launch in 5,600. Window creation is refused (window
+       id 0) once the app is quitting or its loop is ending, a refused creation
+       releases its waiter at once instead of after 30 s, and laufey's window API no
+       longer sizes or shows window 0 after a refusal.
+     - The CEF localStorage commit gate holds a custom-scheme document's body up to
+       10 s (was 1 s) for its commit, which lost a launch's localStorage a few times
+       in 10,000 on a loaded machine; downloads are not held, and a body released
+       without its commit says so on stderr.
+     - macOS CEF turns off Chrome's code-signing clone, so a launch right after a
+       quit can't load from the previous launch's half-deleted clone (exit 134,
+       "Library not loaded").
+     - WebView2: `print_to_pdf`, `execute_js` and `open_devtools` called before the
+       web view is ready wait for it (up to 45 s, then "web view not ready ...")
+       instead of answering "window not found" or nothing.
+     - WebKitGTK: `print_to_pdf` on a window that has never been asked to load
+       anything is refused ("nothing has been loaded in the window yet") instead of
+       crashing the backend inside WebKitGTK.
+
+     Still CEF 156.0.15. Tests: laufey's `a_window_is_sized_before_it_is_first_shown`
+     and its `--initial-size` battery mode under headless sway; item 220's `window`
+     area here pinned to one CPU, 10 launches per backend, every window at the size
+     it asked for; laufey's launch check that the page load is reported; the
+     `wayland` area on CEF, 8 of 8 runs; laufey's CI on `99a1c2e` (the
+     refused-creation test, the window-drain and commit-gate tests against fake
+     clocks, the localStorage relaunch stress, native_e2e's print checks on WebKitGTK
+     and WebView2).
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
 169-174, 176, 178, 180, 182-184, 186, 187, 189-191, 193-196, 198-203, 206, 207,
-209-215, 217, 218, 221, 222, 224, 225) are what the prebuilt `libdenort`
-carries. The CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` /
+209-215, 217, 218, 221, 222, 224, 225, 227, 228, 231, 232) are what the
+prebuilt `libdenort` carries. The CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` /
 `LAUFEY_APP_ID` into a packaged app's launchers) are in the branch too, but a
 stock CLI does not run them; denext's own launcher provides that environment.
 
@@ -9593,9 +9641,12 @@ activation policy and speech, item 183; and, for runtime 3.0.0-denext.7, CEF
 156, item 184, and the Linux Wayland overlay fixes, item 186; and, for runtime
 3.0.0-denext.8, API 51, hidden pages throttled instead of frozen on macOS and
 `backgroundThrottling`, item 198; and the Windows focus, tray role and window
-icon fixes, item 207), at the commit pinned by `LAUFEY_SHA` in the workflow (or
-the `laufey_ref` input). The same commit is the `laufey` git dependency of
-`cli/rt_desktop/Cargo.toml` (crate 0.8.0, API 51, CEF 156.0.15).
+icon fixes, item 207; and API 52, the OS's quits and layer-surface edge
+anchoring, items 221 and 222; and, for runtime 3.0.0-denext.9, a Linux window
+first shown at its size and the CEF shutdown, storage and print fixes, item
+234), at the commit pinned by `LAUFEY_SHA` in the workflow (or the
+`laufey_ref` input). The same commit is the `laufey` git dependency of
+`cli/rt_desktop/Cargo.toml` (crate 0.8.0, API 52, CEF 156.0.15).
 
 laufey's `init_api` rejects any C ABI version mismatch between the runtime and
 the host, so the `laufey` crate libdenort links and the hosts are built from the
