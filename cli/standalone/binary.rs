@@ -623,7 +623,8 @@ impl<'a> DenoCompileBinaryWriter<'a> {
       let asset = denext_denort_asset_name(version, &target);
       let sums_url = denext_release_sums_url(&download_url);
       // denext (DENEXT.md item 188): a release build carries the SHA-256
-      // of each target's denort archive and needs no SHA256SUMS for it.
+      // of each target's denort archive and needs no SHA256SUMS for it; a
+      // target missing from that list is refused (item 226).
       let pinned = embedded_denort_sha256(EMBEDDED_DENORT_SHA256S, &target)
         .context("Reading the denort SHA-256 this CLI was built with.")?;
       let fetch =
@@ -1988,15 +1989,20 @@ fn desktop_runtime_refusal(asset: &str) -> AnyError {
 /// archives first and passes their hashes to the CLI build, and
 /// `cli/build.rs` refuses a malformed list). `None` in a build without it (a
 /// local or test build), which verifies against the release's `SHA256SUMS`
-/// as before.
+/// as before. A build with it trusts only the list: a target it does not
+/// name is refused, never checked against `SHA256SUMS` (item
+/// 226).
 const EMBEDDED_DENORT_SHA256S: Option<&str> =
   option_env!("DENEXT_DENORT_SHA256S");
 
 /// `target`'s SHA-256 in an embedded `<target>=<sha256>,...` list (see
-/// [`EMBEDDED_DENORT_SHA256S`]), lowercase. `None` when there is no list or
-/// it has no entry for `target` (a target that release does not ship, or a
-/// dispatch build of some targets only); an error for a malformed list or
-/// two entries for `target` that disagree.
+/// [`EMBEDDED_DENORT_SHA256S`]), lowercase. `None` only when there is no list
+/// (a build that falls back to the release's `SHA256SUMS`). An error for a
+/// malformed list, for two entries for `target` that disagree, and for a
+/// list with no entry for `target` (a target that release does not ship, or
+/// a dispatch build of some targets only): a release build must not fall
+/// back to the `SHA256SUMS` beside the archive it is checking (DENEXT.md item
+/// 226).
 fn embedded_denort_sha256(
   list: Option<&str>,
   target: &str,
@@ -2026,7 +2032,14 @@ fn embedded_denort_sha256(
       _ => found = Some(hash),
     }
   }
-  Ok(found)
+  match found {
+    Some(hash) => Ok(Some(hash)),
+    None => bail!(
+      "this deno was built with the SHA-256 of its release's denort archives, \
+       and {target} is not among them, so there is no pinned denort to \
+       compile onto. Pick a target the release ships with --target."
+    ),
+  }
 }
 
 fn denext_denort_asset_name(version: &str, target: &str) -> String {
@@ -2539,21 +2552,24 @@ mod tests {
       embedded_denort_sha256(Some(&list), "aarch64-apple-darwin").unwrap(),
       Some(mac.clone())
     );
-    // A target the list does not name, or no list at all (a local build):
-    // no pin, so SHA256SUMS decides as before.
-    assert_eq!(
-      embedded_denort_sha256(Some(&list), "x86_64-pc-windows-msvc").unwrap(),
-      None
-    );
+    // No list at all (a local build): no pin, so SHA256SUMS decides.
     assert_eq!(
       embedded_denort_sha256(None, "x86_64-unknown-linux-gnu").unwrap(),
       None
     );
-    // A target name that only starts like a listed one is not an entry.
-    assert_eq!(
-      embedded_denort_sha256(Some(&list), "x86_64-unknown-linux").unwrap(),
-      None
-    );
+    // DENEXT.md item 226: a release build's list that does
+    // not name the target is refused, not handed to SHA256SUMS; so is a
+    // target name that only starts like a listed one, and an empty list.
+    for (list, target) in [
+      (list.as_str(), "x86_64-pc-windows-msvc"),
+      (list.as_str(), "x86_64-unknown-linux"),
+      ("", "x86_64-unknown-linux-gnu"),
+    ] {
+      let err = embedded_denort_sha256(Some(list), target)
+        .unwrap_err()
+        .to_string();
+      assert!(err.contains(target) && err.contains("not among"), "{err}");
+    }
     let conflicting = format!(
       "x86_64-unknown-linux-gnu={linux},x86_64-unknown-linux-gnu={mac}"
     );
