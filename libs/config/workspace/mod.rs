@@ -2688,6 +2688,7 @@ impl WorkspaceDirectory {
         (Some(r), _) => Some(r),
         (None, None) => None,
       },
+      arg_separator: member_config.arg_separator.or(root_config.arg_separator),
     })
   }
 

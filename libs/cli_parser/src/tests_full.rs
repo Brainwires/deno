@@ -5710,6 +5710,40 @@ fn compile_with_flags() {
 }
 
 #[test]
+fn compile_flag_like_args() {
+  use crate::convert::compile_flag_like_args;
+  assert_eq!(
+    compile_flag_like_args(&svec![
+      "--output",
+      "out",
+      "--allow-net",
+      "--target=x86_64-unknown-linux-gnu",
+      "-o",
+      "-A",
+      "--quiet",
+      "--port",
+      "8080",
+      "-x",
+      "foo",
+      "--",
+      "-1",
+      "--help",
+      "--version",
+      "-h"
+    ]),
+    svec![
+      "--output",
+      "--allow-net",
+      "--target=x86_64-unknown-linux-gnu",
+      "-o",
+      "-A",
+      "--quiet"
+    ]
+  );
+  assert!(compile_flag_like_args(&svec!["foo", "bar", "--port=1"]).is_empty());
+}
+
+#[test]
 fn coverage() {
   let r = flags_from_vec(svec!["deno", "coverage", "foo.json"]);
   assert_eq!(

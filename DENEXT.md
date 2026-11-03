@@ -9166,6 +9166,48 @@ where the changes are discussed.
      on Linux, without the script (fails at the refused mirror path) and after
      `fetch_rusty_v8.py --print-env` (builds).
 
+<!-- Item 236: a placeholder number, renumbered at integration. -->
+
+236. **`feat(compile)`: a warning for `deno compile` flags after the script, and
+     an opt-in strict `--`** (`feat/compile-arg-separator-warning`; CLI;
+     `cli/tools/compile.rs`, `libs/cli_parser/src/convert.rs`,
+     `libs/config/deno_json/mod.rs`, `libs/config/workspace/mod.rs`,
+     `cli/schemas/config-file.v1.json`, `libs/cli_parser/src/env_vars.rs`;
+     upstream #30334; the number is a placeholder, renumbered at integration).
+     Everything after `deno compile`'s script is embedded in the executable as
+     its arguments, so `deno compile main.ts --output app
+     --allow-net`
+     builds a binary named after the script, with no permissions, that always
+     receives `--output app --allow-net`. Upstream once made `--` mandatory and
+     reverted it as too breaking. Here:
+
+     - **Default (`warn`).** When the embedded arguments have no leading `--`
+       and some of them are `deno compile` flags (its own, its argument groups'
+       such as `--allow-*` / `-A` / `--target`, and the global `--quiet` /
+       `--log-level`, but not `--help` / `--version`, which apps take
+       themselves; long names with or without `=value`, short flags alone or
+       combined), `deno compile` warns, naming them, and embeds the arguments
+       unchanged. A leading `--` silences it and is still embedded, as before.
+     - **`strict`.** `DENO_COMPILE_ARG_SEPARATOR=strict`, or deno.json
+       `"compile": { "argSeparator": "strict" }` (a member's value over the
+       root's), refuses embedded arguments without a leading `--`, and does not
+       embed that `--`: `deno compile main.ts -- --port 80` gives `Deno.args`
+       `["--port", "80"]`. The env var wins over the config file; `warn` there
+       undoes a strict config, and any other value is an error.
+
+     `deno desktop` (which goes through the same compile path) is unchanged.
+     3.0.0 final may make `strict` the default. denext's own `compile-app.ts`
+     embeds no arguments, so neither mode changes it.
+
+     Tests: unit `compile_flag_like_args` (cli_parser),
+     `compile_arg_separator_strict_requires_and_strips_separator`,
+     `compile_arg_separator_warn_keeps_args`, `compile_arg_separator_env_values`
+     (`cli/tools/compile.rs`), `compile_arg_separator` (deno_json); spec
+     `compile/arg_separator` (the warning and the embedded argv, no warning for
+     app-only arguments or after `--`, strict from the env var and from
+     deno.json, the env var over the config, an invalid value). The spec fails
+     on the base: no warning, and strict mode does not exist.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,

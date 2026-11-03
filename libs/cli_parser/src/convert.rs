@@ -2338,6 +2338,53 @@ fn compile_parse(
   Ok(())
 }
 
+/// The arguments of a `deno compile` call's embedded argv (its trailing
+/// args, given without a `--` separator) that name one of `deno compile`'s
+/// own flags, such as `--output`, `-o`, `--target` or `--allow-net`. They
+/// are embedded in the executable rather than read by `deno compile`, which
+/// is rarely what was meant (upstream #30334), so `deno compile` warns
+/// about them, or refuses them under the strict separator mode.
+pub fn compile_flag_like_args(args: &[String]) -> Vec<String> {
+  args
+    .iter()
+    .filter(|arg| is_compile_flag(arg))
+    .cloned()
+    .collect()
+}
+
+fn is_compile_flag(arg: &str) -> bool {
+  // `deno compile`'s own flags plus the global ones (`--quiet`,
+  // `--log-level`), except `--help` / `--version`, which an app commonly
+  // takes itself.
+  let compile_args = crate::defs::COMPILE_SUBCOMMAND.all_args().chain(
+    crate::defs::GLOBAL_ARGS
+      .iter()
+      .filter(|a| a.name != "help" && a.name != "version"),
+  );
+  if let Some(long) = arg.strip_prefix("--") {
+    let name = long.split_once('=').map_or(long, |(name, _)| name);
+    if name.is_empty() {
+      return false;
+    }
+    return compile_args
+      .filter(|a| !a.positional)
+      .any(|a| a.long == Some(name) || a.long_aliases.contains(&name));
+  }
+  // `-o`, `-A`, and combined shorts such as `-Ar`: every char must be one of
+  // the command's short flags.
+  match arg.strip_prefix('-') {
+    Some(shorts) if !shorts.is_empty() => {
+      let shorts_known: Vec<char> = compile_args
+        .flat_map(|a| {
+          a.short.into_iter().chain(a.short_aliases.iter().copied())
+        })
+        .collect();
+      shorts.chars().all(|c| shorts_known.contains(&c))
+    }
+    _ => false,
+  }
+}
+
 fn coverage_parse(
   result: &ParseResult,
   flags: &mut Flags,

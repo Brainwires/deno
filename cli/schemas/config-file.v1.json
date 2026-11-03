@@ -265,6 +265,11 @@
         },
         "permissions": {
           "$ref": "#/$defs/permissionNameOrSet"
+        },
+        "argSeparator": {
+          "type": "string",
+          "description": "How `deno compile` treats arguments after the script that no `--` separates from it. \"warn\" (the default) embeds them and warns about any that look like a `deno compile` flag; \"strict\" requires `--` before the embedded arguments. The DENO_COMPILE_ARG_SEPARATOR environment variable overrides it.",
+          "enum": ["warn", "strict"]
         }
       }
     },

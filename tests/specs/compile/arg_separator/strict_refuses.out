@@ -1,0 +1,3 @@
+error: `deno compile` requires `--` before the arguments to embed in the executable (DENO_COMPILE_ARG_SEPARATOR or compile.argSeparator is "strict").
+  Got: --port 8080
+  Put `deno compile`'s flags before the script: deno compile [OPTIONS] <SCRIPT> -- [ARGS]...

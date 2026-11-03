@@ -1,0 +1,83 @@
+{
+  // DENEXT.md item 236: `deno compile` and arguments after the script that
+  // no `--` separates from it (upstream #30334).
+  "tempDir": true,
+  "tests": {
+    // By default, ones that look like `deno compile` flags are embedded as
+    // before, with a warning naming them.
+    "warns": {
+      "steps": [
+        {
+          "args": "compile --output out main.ts --allow-read -o other --port 8080",
+          "output": "warns.out"
+        },
+        {
+          "commandName": "./out",
+          "args": [],
+          "output": "[\"--allow-read\",\"-o\",\"other\",\"--port\",\"8080\"]\n"
+        }
+      ]
+    },
+    // App arguments that are not `deno compile` flags draw no warning.
+    "no_warning_for_app_args": {
+      "args": "compile --output out main.ts --port 8080 serve",
+      "output": "no_warning.out"
+    },
+    // A `--` silences the warning; it stays in the embedded argv, as before.
+    "separator_silences": {
+      "steps": [
+        {
+          "args": "compile --output out main.ts -- --allow-read",
+          "output": "no_warning.out"
+        },
+        {
+          "commandName": "./out",
+          "args": [],
+          "output": "[\"--\",\"--allow-read\"]\n"
+        }
+      ]
+    },
+    // DENO_COMPILE_ARG_SEPARATOR=strict requires the `--`.
+    "strict_env_refuses": {
+      "envs": { "DENO_COMPILE_ARG_SEPARATOR": "strict" },
+      "args": "compile --output out main.ts --port 8080",
+      "exitCode": 1,
+      "output": "strict_refuses.out"
+    },
+    // ...and does not embed it.
+    "strict_env_separator": {
+      "envs": { "DENO_COMPILE_ARG_SEPARATOR": "strict" },
+      "steps": [
+        {
+          "args": "compile --output out main.ts -- --port 8080",
+          "output": "[WILDCARD]"
+        },
+        {
+          "commandName": "./out",
+          "args": [],
+          "output": "[\"--port\",\"8080\"]\n"
+        }
+      ]
+    },
+    // deno.json's `compile.argSeparator: "strict"` does the same.
+    "strict_config_refuses": {
+      "cwd": "strict_config",
+      "args": "compile --output out main.ts --port 8080",
+      "exitCode": 1,
+      "output": "strict_refuses.out"
+    },
+    // The env var overrides the config file.
+    "env_overrides_config": {
+      "cwd": "strict_config",
+      "envs": { "DENO_COMPILE_ARG_SEPARATOR": "warn" },
+      "args": "compile --output out main.ts --port 8080",
+      "output": "no_warning.out"
+    },
+    "invalid_env_value": {
+      "envs": { "DENO_COMPILE_ARG_SEPARATOR": "always" },
+      "args": "compile --output out main.ts",
+      "exitCode": 1,
+      "output": "error: Invalid DENO_COMPILE_ARG_SEPARATOR value 'always': expected \"warn\" or \"strict\"\n"
+    }
+  }
+}
