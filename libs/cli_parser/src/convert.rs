@@ -3261,7 +3261,7 @@ fn node_loader_preload(loader: &str) -> String {
 /// Reads some flags from NODE_OPTIONS:
 /// https://nodejs.org/api/cli.html#node_optionsoptions
 /// Currently supports:
-/// - `--require` / `-r`
+/// - `--require` / `-r` (`--require=<module>` too)
 /// - `--experimental-loader` / `--loader` and `--import` (denext), as `--preload`
 ///   modules before the command line's: Node's order, loaders then imports.
 ///   Ignored, with a warning, by `compile`, `desktop` and `install` (as is
@@ -3302,7 +3302,10 @@ pub fn apply_node_options(flags: &mut Flags) {
         *prev_was_require = true;
         return Some((word, true));
       }
-      if word.starts_with("--inspect-publish-uid=") || *prev_was_require {
+      if word.starts_with("--require=")
+        || word.starts_with("--inspect-publish-uid=")
+        || *prev_was_require
+      {
         *prev_was_require = false;
         return Some((word, true));
       }
@@ -3320,6 +3323,12 @@ pub fn apply_node_options(flags: &mut Flags) {
     if (word == "--require" || word == "-r") && i + 1 < filtered.len() {
       node_require.push(filtered[i + 1].to_string());
       i += 2;
+    } else if let Some(module) = word.strip_prefix("--require=") {
+      // denext: Node's `--require=<module>` form, as on its command line.
+      if !module.is_empty() {
+        node_require.push(module.to_string());
+      }
+      i += 1;
     } else if word.starts_with("--inspect-publish-uid=") {
       // Handle below
       i += 1;
