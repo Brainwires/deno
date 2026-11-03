@@ -9217,8 +9217,8 @@ version is the newest. Per target it:
    `.dll` with `pe_deps.py`; any dependency that resolves nowhere fails it),
    packages a small `Deno.serve` app with the stock `deno desktop` 2.9.8 for
    both backends, and launches it (Linux under Xvfb): the page, served from
-   `t3code://app`, POSTs back to `Deno.serve` and the app exits. A launch
-   failure fails the job;
+   `myapp://app`, POSTs back to `Deno.serve` and the app exits. A launch failure
+   fails the job;
 4. attests the archives and, on a pushed tag, publishes the release;
 5. in a parallel `cli` job, builds this fork's `deno` CLI with
    `cargo build --release --locked --bin deno` and `DENEXT_VERSION` set to the

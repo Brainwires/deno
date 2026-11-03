@@ -49,7 +49,7 @@ if [ -f "$work/app/probe.node" ]; then
 fi
 export SMOKE_NAPI=$napi
 if [ "$BACKEND" = cef ]; then
-  export LAUFEY_CUSTOM_SCHEMES=t3code
+  export LAUFEY_CUSTOM_SCHEMES=myapp
 fi
 
 limit=120

@@ -4315,11 +4315,11 @@ mod tests {
   #[test]
   fn bindings_trust_the_app_origin_and_a_dev_server() {
     let origin =
-      deno_lib::standalone::app_origin::AppOrigin::parse("t3code://app")
+      deno_lib::standalone::app_origin::AppOrigin::parse("myapp://app")
         .unwrap();
     assert_eq!(
       super::trusted_bridge_origins(&origin, None),
-      vec!["t3code://app".to_string()]
+      vec!["myapp://app".to_string()]
     );
     // The dev server's origin, serialized as the browser reports it.
     assert_eq!(
@@ -4328,16 +4328,13 @@ mod tests {
         Some("http://LOCALHOST:5173/some/path?x")
       ),
       vec![
-        "t3code://app".to_string(),
+        "myapp://app".to_string(),
         "http://localhost:5173".to_string()
       ]
     );
     assert_eq!(
       super::trusted_bridge_origins(&origin, Some("https://dev.example:443/")),
-      vec![
-        "t3code://app".to_string(),
-        "https://dev.example".to_string()
-      ]
+      vec!["myapp://app".to_string(), "https://dev.example".to_string()]
     );
     // Not a URL, or an opaque one: nothing added.
     for bad in ["not a url", "data:text/plain,x"] {
@@ -4348,17 +4345,17 @@ mod tests {
   #[test]
   fn navigation_origins_are_the_trusted_ones_then_the_allowed_ones() {
     let trusted = vec![
-      "t3code://app".to_string(),
+      "myapp://app".to_string(),
       "http://localhost:5173".to_string(),
     ];
     let allowed = vec![
       "https://auth.example.com".to_string(),
-      "t3code://app".to_string(),
+      "myapp://app".to_string(),
     ];
     assert_eq!(
       super::navigation_origins(&trusted, &allowed),
       vec![
-        "t3code://app".to_string(),
+        "myapp://app".to_string(),
         "http://localhost:5173".to_string(),
         "https://auth.example.com".to_string(),
       ]
@@ -4449,7 +4446,7 @@ mod tests {
   #[test]
   fn desktop_env_overlay_publishes_the_serve_address_and_origins() {
     let origin =
-      deno_lib::standalone::app_origin::AppOrigin::parse("t3code://app")
+      deno_lib::standalone::app_origin::AppOrigin::parse("myapp://app")
         .unwrap();
     let vars = super::desktop_env_overlay(
       &origin,
@@ -4464,7 +4461,7 @@ mod tests {
           // In-process only: a child process must not inherit it.
           false,
         ),
-        ("DENO_DESKTOP_APP_ORIGIN", "t3code://app".to_string(), true),
+        ("DENO_DESKTOP_APP_ORIGIN", "myapp://app".to_string(), true),
         (
           "DENO_DESKTOP_WS_ORIGIN",
           "ws://127.0.0.1:4321".to_string(),

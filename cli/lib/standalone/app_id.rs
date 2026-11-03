@@ -98,7 +98,11 @@ mod tests {
 
   #[test]
   fn accepts_reverse_dns_ids() {
-    for id in ["com.acme.notes", "dev.t3.code", "com.deno.desktop.my-app"] {
+    for id in [
+      "com.acme.notes",
+      "dev.example.myapp",
+      "com.deno.desktop.my-app",
+    ] {
       assert_eq!(validate_app_identifier(id), Ok(()), "{id}");
       assert!(is_laufey_app_id(id), "{id}");
     }

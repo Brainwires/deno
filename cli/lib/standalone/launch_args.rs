@@ -245,7 +245,7 @@ mod tests {
 
   #[test]
   fn scheme_validation() {
-    for ok in ["acme", "acme+x", "a-b.c", "T3Code"] {
+    for ok in ["acme", "acme+x", "a-b.c", "MyApp"] {
       assert_eq!(validate_deep_link_scheme(ok), Ok(()), "{ok}");
     }
     for bad in ["", "1abc", "ac me", "ac/me", "a:b", "é"] {
@@ -255,9 +255,9 @@ mod tests {
       assert!(validate_deep_link_scheme(reserved).is_err(), "{reserved}");
     }
     assert_eq!(
-      normalize_deep_link_schemes(&strings(&[" Acme ", "", "acme", "t3"]))
+      normalize_deep_link_schemes(&strings(&[" Acme ", "", "acme", "myapp"]))
         .unwrap(),
-      strings(&["acme", "t3"])
+      strings(&["acme", "myapp"])
     );
     let err =
       normalize_deep_link_schemes(&strings(&["acme", "HTTP"])).unwrap_err();
@@ -396,13 +396,13 @@ mod tests {
       "/tmp",
     ];
     let exists = |p: &Path| existing.iter().any(|e| Path::new(e) == p);
-    let schemes = strings(&["acme", "t3code"]);
+    let schemes = strings(&["acme", "myapp"]);
     let args = strings(&[
       "--runtime",
       "/opt/app/libruntime.so",
       "acme://open/doc/42",
       "ACME://Upper",
-      "T3Code:bare",
+      "MyApp:bare",
       "https://example.com",
       "other://x",
       "--flag",
@@ -421,7 +421,7 @@ mod tests {
       parse_launch_args(&args, Some(Path::new("/home/me")), &schemes, exists);
     assert_eq!(
       targets.urls,
-      strings(&["acme://open/doc/42", "ACME://Upper", "T3Code:bare"])
+      strings(&["acme://open/doc/42", "ACME://Upper", "MyApp:bare"])
     );
     assert_eq!(
       targets.files,
