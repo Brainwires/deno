@@ -9140,7 +9140,9 @@ fn node_options_loader_and_import_preload() {
 fn node_options_loader_and_import_not_for_artifacts() {
   // denext: `compile`, `desktop` and `install` would build the preloads into
   // their output, so they ignore NODE_OPTIONS' loaders and imports.
-  set_test_node_options(Some("--import=first.mjs --loader ./l.mjs"));
+  set_test_node_options(Some(
+    "--import=first.mjs --loader ./l.mjs --require r.cjs",
+  ));
   let compile = flags_from_vec(svec!["deno", "compile", "main.ts"]).unwrap();
   let install =
     flags_from_vec(svec!["deno", "install", "-g", "-n", "x", "main.ts"])
@@ -9152,10 +9154,13 @@ fn node_options_loader_and_import_not_for_artifacts() {
   set_test_node_options(None);
   assert!(matches!(compile.subcommand, DenoSubcommand::Compile(_)));
   assert!(compile.preload.is_empty());
+  assert!(compile.require.is_empty());
   assert!(matches!(install.subcommand, DenoSubcommand::Install(_)));
   assert!(install.preload.is_empty());
+  assert!(install.require.is_empty());
   assert!(matches!(desktop.subcommand, DenoSubcommand::Desktop(_)));
   assert!(desktop.preload.is_empty());
+  assert!(desktop.require.is_empty());
   assert_eq!(compile_cli.preload, svec!["cli.js"]);
 }
 

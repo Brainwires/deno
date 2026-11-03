@@ -3264,7 +3264,8 @@ fn node_loader_preload(loader: &str) -> String {
 /// - `--require` / `-r`
 /// - `--experimental-loader` / `--loader` and `--import` (denext), as `--preload`
 ///   modules before the command line's: Node's order, loaders then imports.
-///   Ignored, with a warning, by `compile`, `desktop` and `install`.
+///   Ignored, with a warning, by `compile`, `desktop` and `install` (as is
+///   `--require`).
 /// - `--inspect-publish-uid`
 ///
 /// Public because the CLI's bare-run fast path skips the full parse and has to
@@ -3327,17 +3328,11 @@ pub fn apply_node_options(flags: &mut Flags) {
     }
   }
 
-  // Prepend NODE_OPTIONS --require values before CLI --require values
-  if !node_require.is_empty() {
-    node_require.append(&mut flags.require);
-    flags.require = node_require;
-  }
-
-  // denext: loaders and `--import` modules, before the CLI's `--preload`s.
-  // Not for a command that builds an artifact (`compile`, `desktop`,
-  // `install`): its preloads would be built into the program and run at every
-  // launch, so a NODE_OPTIONS left in the build machine's environment would
-  // ship with it. Those commands ignore them, with a warning.
+  // denext: none of NODE_OPTIONS' modules (`--require`, loaders, `--import`)
+  // for a command that builds an artifact (`compile`, `desktop`, `install`):
+  // they would be built into the program and run at every launch, so a
+  // NODE_OPTIONS left in the build machine's environment would ship with it.
+  // Those commands ignore them, with a warning.
   let bakes_flags = matches!(
     flags.subcommand,
     DenoSubcommand::Compile(_)
@@ -3345,6 +3340,16 @@ pub fn apply_node_options(flags: &mut Flags) {
       | DenoSubcommand::Install(_)
   );
   let mut ignored: Vec<String> = Vec::new();
+
+  // Prepend NODE_OPTIONS --require values before CLI --require values
+  if bakes_flags {
+    ignored.extend(node_require.drain(..).map(|m| format!("--require={m}")));
+  } else if !node_require.is_empty() {
+    node_require.append(&mut flags.require);
+    flags.require = node_require;
+  }
+
+  // denext: loaders and `--import` modules, before the CLI's `--preload`s.
   let mut loaders: Vec<String> = Vec::new();
   let mut imports: Vec<String> = Vec::new();
   let mut words = args.iter();
