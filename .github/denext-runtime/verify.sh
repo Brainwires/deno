@@ -114,6 +114,13 @@ check_linux() {
         echo 1 >"$root/.verify-failed"
       fi
     done
+  # Only the libraries we expect (DENEXT.md item 233): a new dependency that
+  # a distro lacks must fail here, not on a user's machine.
+  echo "== NEEDED"
+  if ! python3 -I "$here/linux_needed.py" "$root" | sed 's/^/   /'; then
+    echo "   ERROR: linux_needed.py" >&2
+    echo 1 >"$root/.verify-failed"
+  fi
   # Passkeys: liblaufey_webauthn.so beside the host (webview or CEF), with
   # its entry point and none of the virtual-authenticator test hooks.
   local wa

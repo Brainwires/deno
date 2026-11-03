@@ -80,6 +80,12 @@ env:
   LAUFEY_REPOSITORY: Brainwires/laufey
   # The stock CLI the archives are smoke-tested with (and that denext runs).
   STOCK_DENO_VERSION: 2.9.8
+  # The denext whose packager builds the `.rpm` the rpm-smoke job installs
+  # (DENEXT.md item 233). Move it when denext changes its dependency lists,
+  # with linux_needed.py's PACKAGE_DEPS, and only to a version published more
+  # than a day before: the stock CLI's minimum dependency age refuses a newer
+  # one, which would fail this job (and so the release) until it ages.
+  DENEXT_PACKAGING_VERSION: 4.11.12
   # The esbuild every `deno-cli-*` archive ships next to `deno`: the
   # official @esbuild/<platform> binary, pinned by npm integrity in
   # .github/denext-runtime/fetch_esbuild.py. Must equal ESBUILD_VERSION in
@@ -116,6 +122,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.plan.outputs.matrix }}
+      linux_matrix: ${{ steps.plan.outputs.linux_matrix }}
       version: ${{ steps.plan.outputs.version }}
       deno_version: ${{ steps.plan.outputs.deno_version }}
       upstream_version: ${{ steps.plan.outputs.upstream_version }}
@@ -256,8 +263,10 @@ jobs:
           print(json.dumps(all_targets))
           PY
           )
+          linux_matrix=$(MATRIX="$matrix" python3 -c 'import json, os; print(json.dumps([t for t in json.loads(os.environ["MATRIX"]) if "-linux-" in t["target"]]))')
           {
             echo "matrix=$matrix"
+            echo "linux_matrix=$linux_matrix"
             echo "version=$version"
             echo "deno_version=$deno_version"
             echo "upstream_version=$upstream_version"
@@ -903,6 +912,8 @@ jobs:
               # The newest glibc it requires, at most GLIBC_CEILING (see the
               # `cli` job's "Check binary").
               python3 -I .github/denext-runtime/glibc_ceiling.py "$GLIBC_CEILING" target/release/denort
+              # Only the libraries it may link (DENEXT.md item 233).
+              python3 -I .github/denext-runtime/linux_needed.py target/release/denort
               # It runs inside the glibc 2.27 sysroot linux_sysroot.sh
               # mounted: with no app embedded, it gets as far as looking for
               # one.
@@ -1191,6 +1202,8 @@ jobs:
               # references), at most GLIBC_CEILING: an older distro fails to
               # exec a binary that needs a newer one.
               python3 -I .github/denext-runtime/glibc_ceiling.py "$GLIBC_CEILING" target/release/deno
+              # Only the libraries it may link (DENEXT.md item 233).
+              python3 -I .github/denext-runtime/linux_needed.py target/release/deno
               # And it runs on that glibc: inside the sysroot (Ubuntu 18.04,
               # glibc 2.27) that linux_sysroot.sh mounted (denort: the
               # denort_bin job's check).
@@ -1788,12 +1801,61 @@ jobs:
           retention-days: 14
           if-no-files-found: warn
 
+  # The `.rpm` denext's packager makes from each runtime archive, installed
+  # and started in a Fedora container (DENEXT.md item 233). Its own job: it
+  # runs a package from JSR, and needs no attestation permissions.
+  rpm-smoke:
+    name: rpm smoke / ${{ matrix.target }}
+    needs: [setup, package]
+    # `!cancelled()`, not the implicit success(): that also looks at
+    # package's own needs, so a dispatch that reuses the denort or laufey
+    # artifacts (both jobs skipped) would skip this job too.
+    if: ${{ !cancelled() && needs.package.result == 'success' && needs.setup.outputs.linux_matrix != '[]' }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.linux_matrix) }}
+    env:
+      TARGET: ${{ matrix.target }}
+      VERSION: ${{ needs.setup.outputs.version }}
+      SMOKE_NAPI: '0'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          sparse-checkout: .github/denext-runtime
+          sparse-checkout-cone-mode: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: runtime-${{ matrix.target }}
+          path: dist
+      - uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
+        with:
+          deno-version: ${{ env.STOCK_DENO_VERSION }}
+      - name: Install rpmbuild
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends rpm file
+      - name: Package and install (webview)
+        env:
+          BACKEND: webview
+          ARCHIVE: dist/deno-desktop-runtime-${{ needs.setup.outputs.version }}-${{ matrix.target }}-webview.tar.gz
+          WORK_DIR: ${{ runner.temp }}/rpm-webview
+        run: bash .github/denext-runtime/smoke.sh && bash .github/denext-runtime/rpm_smoke.sh
+      - name: Package and install (cef)
+        env:
+          BACKEND: cef
+          ARCHIVE: dist/deno-desktop-runtime-${{ needs.setup.outputs.version }}-${{ matrix.target }}-cef.tar.gz
+          WORK_DIR: ${{ runner.temp }}/rpm-cef
+        run: bash .github/denext-runtime/smoke.sh && bash .github/denext-runtime/rpm_smoke.sh
+
   publish:
     name: publish
-    needs: [setup, package, cli, e2e_fork]
+    needs: [setup, package, cli, e2e_fork, rpm-smoke]
     # A `cli_only` dry run has no package or e2e_fork job: it still writes
     # (and uploads) the manifest, from the CLI archives alone.
-    if: ${{ always() && needs.cli.result == 'success' && ((needs.package.result == 'success' && needs.e2e_fork.result == 'success') || (inputs.cli_only && needs.package.result == 'skipped' && needs.e2e_fork.result == 'skipped')) }}
+    if: ${{ always() && needs.cli.result == 'success' && ((needs.package.result == 'success' && needs.e2e_fork.result == 'success') || (inputs.cli_only && needs.package.result == 'skipped' && needs.e2e_fork.result == 'skipped')) && (needs.rpm-smoke.result == 'success' || needs.rpm-smoke.result == 'skipped') }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
