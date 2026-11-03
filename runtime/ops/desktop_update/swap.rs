@@ -577,6 +577,199 @@ pub fn tree_listing(root: &Path) -> std::io::Result<(String, Vec<TreeEntry>)> {
   Ok((faster_hex::hex_string(&out.finalize()), files))
 }
 
+/// A tree the rollback checks and then puts back at the install path (`.old`,
+/// a directory or an AppImage file; or the previous app still in the staging
+/// directory), held open from its check to its move, so that what moves is
+/// what was checked (see [`rollback_verified`]). Unix: opened with
+/// `O_NOFOLLOW`, refused unless this user owns it; its digest is read through
+/// the descriptor ([`Self::digest`]), and [`Self::is_at`] tells whether a path
+/// still names the held tree (so a tree renamed away and replaced at its name
+/// is noticed, before a move and after it). Windows has no descriptor-relative
+/// reads in std: the tree is read by path, and who may replace it is the
+/// install directory's ACL, as for the staging directory (`staging.rs`).
+pub struct HeldTree {
+  path: PathBuf,
+  #[cfg(unix)]
+  file: std::fs::File,
+  #[cfg(unix)]
+  id: (u64, u64),
+  #[cfg(unix)]
+  is_dir: bool,
+}
+
+impl HeldTree {
+  pub fn open(path: &Path) -> std::io::Result<Self> {
+    let refuse = |why: &str| {
+      std::io::Error::new(
+        std::io::ErrorKind::PermissionDenied,
+        format!("{}: {why}", path.display()),
+      )
+    };
+    #[cfg(unix)]
+    {
+      use std::os::unix::fs::MetadataExt;
+      use std::os::unix::fs::OpenOptionsExt;
+      let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(path)
+        .map_err(|e| {
+          if e.raw_os_error() == Some(libc::ELOOP) {
+            refuse("a symlink")
+          } else {
+            e
+          }
+        })?;
+      let meta = file.metadata()?;
+      // SAFETY: geteuid has no preconditions and cannot fail.
+      let me = unsafe { libc::geteuid() };
+      if meta.uid() != me {
+        return Err(refuse("owned by another user"));
+      }
+      if !meta.is_dir() && !meta.is_file() {
+        return Err(refuse("not a directory or a regular file"));
+      }
+      Ok(Self {
+        path: path.to_path_buf(),
+        id: (meta.dev(), meta.ino()),
+        is_dir: meta.is_dir(),
+        file,
+      })
+    }
+    #[cfg(not(unix))]
+    {
+      let meta = std::fs::symlink_metadata(path)?;
+      if meta.file_type().is_symlink() {
+        return Err(refuse("a symlink or junction"));
+      }
+      if !meta.is_dir() && !meta.is_file() {
+        return Err(refuse("not a directory or a regular file"));
+      }
+      Ok(Self {
+        path: path.to_path_buf(),
+      })
+    }
+  }
+
+  /// [`tree_digest`] of the held tree, read through the descriptor (Unix).
+  pub fn digest(&self) -> std::io::Result<String> {
+    #[cfg(unix)]
+    {
+      use std::io::Seek;
+      use std::os::fd::AsRawFd;
+
+      use sha2::Digest;
+      if self.is_dir {
+        return super::staging::digest_held_dir(self.file.as_raw_fd());
+      }
+      // A single file (an AppImage): `tree_digest`'s fields for a root file.
+      let mut file = self.file.try_clone()?;
+      file.seek(std::io::SeekFrom::Start(0))?;
+      let mut sink = FileSink::default();
+      let len = std::io::copy(&mut file, &mut sink)?;
+      let (sha, _) = sink.finish();
+      let mut out = sha2::Sha256::new();
+      super::staging::digest_field(&mut out, "f", "");
+      super::staging::digest_field(&mut out, "s", &len.to_string());
+      super::staging::digest_field(&mut out, "h", &sha);
+      Ok(faster_hex::hex_string(&out.finalize()))
+    }
+    #[cfg(not(unix))]
+    tree_digest(&self.path)
+  }
+
+  /// Whether `path` names the held tree (Unix: the same device and inode);
+  /// always `true` on Windows.
+  pub fn is_at(&self, path: &Path) -> bool {
+    #[cfg(unix)]
+    {
+      use std::os::unix::fs::MetadataExt;
+      std::fs::symlink_metadata(path)
+        .is_ok_and(|m| (m.dev(), m.ino()) == self.id)
+    }
+    #[cfg(not(unix))]
+    {
+      let _ = path;
+      true
+    }
+  }
+
+  /// Whether the path it was opened at still names it.
+  pub fn still_at_path(&self) -> bool {
+    self.is_at(&self.path)
+  }
+}
+
+/// The trial record: written by the apply helper into the private staging
+/// directory ([`super::staging::PrivateDir`], this user's, 0700, held open
+/// through the apply) last before the swap, and deleted when the version is
+/// confirmed ([`mark_confirmed`]; the cleanup removes the directory). It
+/// binds a rollback to the app the swap replaced: a rollback puts back only
+/// a tree whose [`tree_digest`] is `previous_digest`, and compares the tree's
+/// embedded version with `from` taken from here, not from the state file.
+/// This is a consistency binding, not a defence against a same-user writer:
+/// a process running as the user can write the staging directory as it can
+/// the state file, so it can plant an older release of the app at `.old` and
+/// a record naming it; what binds identity is the OS signature check on
+/// `.old` against the installed app (`codesign` team requirement and
+/// notarization on macOS, Authenticode identity on Windows), and the
+/// no-downgrade rule holds for signed releases only as far as the trial
+/// record is intact. It does close what the state file left open by
+/// accident: a rollback that puts back whatever sits at `.old` because the
+/// state says so, with no tie to the app that was actually installed, and
+/// the rejected version coming from the state's `to` rather than from the
+/// app installed (denext, DENEXT.md 211).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrialRecord {
+  pub schema: u32,
+  /// The version compiled into the app that was installed before the swap.
+  pub from: String,
+  /// The version swapped in (informational).
+  pub to: Option<String>,
+  /// [`tree_digest`] of the app that was installed before the swap, taken by
+  /// the helper right before it swapped.
+  pub previous_digest: String,
+}
+
+/// The trial record's file name inside the staging directory.
+pub const TRIAL_RECORD: &str = "trial.json";
+const TRIAL_RECORD_SCHEMA: u32 = 1;
+/// The most bytes read of a trial record.
+const TRIAL_RECORD_MAX_BYTES: u64 = 64 * 1024;
+
+/// The trial record of the update being rolled back, read through the
+/// private staging directory (`None`: no staging directory of this user's,
+/// one that was replaced at its path, no record, or not one of this schema).
+pub fn read_trial_record(layout: &InstallLayout) -> Option<TrialRecord> {
+  let staging = super::staging::PrivateDir::open(&layout.staging_dir()).ok()?;
+  if !staging.still_at_path() {
+    return None;
+  }
+  let bytes = staging
+    .read_file(TRIAL_RECORD, TRIAL_RECORD_MAX_BYTES)
+    .ok()?;
+  let record: TrialRecord = serde_json::from_slice(&bytes).ok()?;
+  (record.schema == TRIAL_RECORD_SCHEMA
+    && !record.from.is_empty()
+    && !record.previous_digest.is_empty())
+  .then_some(record)
+}
+
+/// Delete the trial record (the version is confirmed; the cleanup removes
+/// the staging directory itself); best effort, a failure is logged.
+pub fn remove_trial_record(layout: &InstallLayout) {
+  let path = layout.staging_dir().join(TRIAL_RECORD);
+  match std::fs::remove_file(&path) {
+    Ok(()) => {}
+    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+    Err(e) => log_line(
+      layout,
+      &format!("the trial record {} was not removed: {e}", path.display()),
+    ),
+  }
+}
+
 /// Remove `path` only if it is a copy of this app's install (see
 /// [`is_install_copy`]); `true` when nothing is left there. Anything else at
 /// that name is left in place (`false`).
@@ -1006,6 +1199,59 @@ pub fn apply_swap_verified(
       "the staged app changed while it was verified",
     );
   }
+  // The trial record (see [`TrialRecord`]): the app installed now, by its
+  // digest and its compiled version, is the only thing a rollback may put
+  // back. Written into the staging directory through the held descriptor,
+  // last before the swap; without it nothing is swapped (the rollback would
+  // be refused).
+  {
+    let previous_digest = match tree_digest(&layout.install) {
+      Ok(d) => d,
+      Err(e) => {
+        return refuse_staged_with(
+          layout,
+          state,
+          UpdateError::io(
+            format!(
+              "reading the installed app at {}",
+              layout.install.display()
+            ),
+            e,
+          ),
+        );
+      }
+    };
+    let from = super::embedded::installed_metadata(layout)
+      .and_then(|m| m.app_version)
+      .or_else(|| state.from.clone())
+      .unwrap_or_default();
+    let record = TrialRecord {
+      schema: TRIAL_RECORD_SCHEMA,
+      from,
+      to: state.to.clone(),
+      previous_digest,
+    };
+    let bytes = match serde_json::to_vec(&record) {
+      Ok(b) => b,
+      Err(e) => {
+        return refuse_staged_with(
+          layout,
+          state,
+          UpdateError::io("encoding the trial record", e),
+        );
+      }
+    };
+    if let Err(e) = staging.write_file(TRIAL_RECORD, &bytes) {
+      return refuse_staged_with(
+        layout,
+        state,
+        UpdateError::io(
+          format!("writing the trial record into {}", staging.path().display()),
+          e,
+        ),
+      );
+    }
+  }
   state.phase = Phase::Swapping;
   state.install_id = file_id(&layout.install);
   state.last_error = None;
@@ -1059,10 +1305,12 @@ pub fn apply_swap_verified(
       state.staged_digest = None;
       state.apply_pid = None;
       write_state(layout, state)?;
-      // Only this helper's own staging directory: whatever was put at its
-      // path instead is not ours to delete.
+      // The emptied extraction directory goes; the staging directory stays
+      // until the confirm or the rollback, holding the trial record. Only
+      // this helper's own staging directory: whatever was put at its path
+      // instead is not ours to touch.
       if staging.still_at_path() {
-        remove_path(staging.path());
+        remove_path(&staging.path().join("extract"));
       }
       Ok(())
     }
@@ -1085,21 +1333,49 @@ pub fn apply_swap_verified(
   }
 }
 
-/// What the helper checks about the tree a rollback puts back at the
-/// install path (see [`rollback_verified`]): the layout, the state and that
-/// tree (`.old`, or the previous app still in the staging directory).
-pub type PreviousVerifier<'a> =
-  &'a dyn Fn(&InstallLayout, &UpdateState, &Path) -> Result<(), UpdateError>;
+/// What the helper asks before a rollback puts a tree back at the install
+/// path (see [`rollback_verified`]); injected, so the tests run the
+/// mechanics on fake apps.
+pub struct PreviousChecks<'a> {
+  /// The checks of the tree that would go back (`.old`, or the previous app
+  /// still in the staging directory): the layout, the version it must carry
+  /// (the trial marker's `from`), and the tree.
+  pub verify:
+    &'a dyn Fn(&InstallLayout, &str, &Path) -> Result<(), UpdateError>,
+  /// The version compiled into the installed app (the version on trial),
+  /// which the rollback marks rejected; `None` when it can't be read.
+  pub installed_version:
+    &'a dyn Fn(&InstallLayout, &UpdateState) -> Option<String>,
+}
 
-/// A verifier that accepts everything (tests of the rollback mechanics).
+/// The rollback's checks, by reference.
+pub type PreviousVerifier<'a> = &'a PreviousChecks<'a>;
+
 #[cfg(test)]
-pub fn accept_previous(
+fn accept_verify(
   _: &InstallLayout,
-  _: &UpdateState,
+  _: &str,
   _: &Path,
 ) -> Result<(), UpdateError> {
   Ok(())
 }
+
+/// The fixture app's version: its `version` file.
+#[cfg(test)]
+fn fixture_installed_version(
+  layout: &InstallLayout,
+  _: &UpdateState,
+) -> Option<String> {
+  std::fs::read_to_string(layout.install.join("version")).ok()
+}
+
+/// Checks that accept every tree (tests of the rollback mechanics); the
+/// installed version is the fixture's.
+#[cfg(test)]
+pub const ACCEPT_PREVIOUS: PreviousChecks<'static> = PreviousChecks {
+  verify: &accept_verify,
+  installed_version: &fixture_installed_version,
+};
 
 /// [`rollback_verified`] with no check of what goes back (the tests of the
 /// rollback mechanics).
@@ -1118,7 +1394,7 @@ pub fn rollback_with(
   state: &mut UpdateState,
   hook: FaultHook,
 ) -> Result<Option<String>, UpdateError> {
-  rollback_verified(layout, state, &accept_previous, hook)
+  rollback_verified(layout, state, &ACCEPT_PREVIOUS, hook)
 }
 
 /// Refuse a rollback: the tree that would go back to the install path is
@@ -1153,40 +1429,124 @@ fn refuse_rollback(
 /// The tree the rollback puts at the install path (`.old`, or after an
 /// interrupted exchange the previous app still in the staging directory)
 /// sits where anything running as the user can write, and is named by a
-/// state file it can write too. So before anything is recorded or moved,
-/// `verify` checks it as the apply checks a staged app (the install marker,
-/// the embedded version equal to the state's `from`, the OS code signature
-/// against the installed app: `verify_previous_for_helper`), whenever it
-/// would replace an app at the install path. A tree that fails is left where
-/// it is, nothing moves, and the refusal is recorded ([`refuse_rollback`]):
-/// the installed app, which passed the apply's checks, keeps running. With
-/// nothing at the install path there is no app for a planted tree to
-/// displace (whoever emptied it could have filled it) and no installed app
-/// to check a signature against: the previous app goes back as before.
+/// state file it can write too. So before anything is recorded or moved it
+/// is checked, as the apply checks a staged app, and held from the check to
+/// the move ([`HeldTree`]):
+/// - the trial record the apply wrote into the private staging directory
+///   ([`TrialRecord`]) names the app that was installed before the swap by
+///   its digest and its compiled version: with no record nothing goes back,
+///   whatever the state says, and the check runs whether or not anything is
+///   at the install path (nothing is skipped for an emptied one);
+/// - the tree is opened and held (`O_NOFOLLOW`, this user's), its digest is
+///   read through the descriptor and must be the record's, then `verify`
+///   (`verify_previous_for_helper`: the install marker, the embedded version
+///   equal to the record's `from`, the OS code signature against the
+///   installed app) runs on the path, which must name the held tree before
+///   and after it (`codesign` reads by path);
+/// - right before it moves, the digest is read again and must be unchanged
+///   and the path must still name it; after an exchange the install path
+///   must name the held tree, else the exchange is undone (another tree was
+///   put at `.old`'s name in between) and the rollback fails;
+/// - the version marked rejected is the one compiled into the installed app
+///   (the version on trial), not the state's `to`.
+///
+/// A tree that fails is left where it is, nothing moves, and the refusal is
+/// recorded ([`refuse_rollback`]): the installed app, which passed the
+/// apply's checks, keeps running. A `rollingBack` run resumed after its
+/// exchange already ran checks nothing (`.old` then holds the failed app, and
+/// nothing goes back).
 pub fn rollback_verified(
   layout: &InstallLayout,
   state: &mut UpdateState,
-  verify: PreviousVerifier<'_>,
+  checks: PreviousVerifier<'_>,
   hook: FaultHook,
 ) -> Result<Option<String>, UpdateError> {
   let old = layout.old_path();
   let failed = layout.failed_path();
   let install = &layout.install;
   let resuming = state.phase == Phase::RollingBack;
-  // The check of what `tree` would put at the install path; a refusal
-  // records itself.
-  let check = |state: &mut UpdateState, tree: &Path| {
-    if !exists(install) {
-      return Ok(());
+  let replaced = |tree: &Path| {
+    UpdateError::new(
+      Code::BundleMismatch,
+      format!("{} was replaced while it was being checked", tree.display()),
+    )
+  };
+  // The check of what `tree` would put at the install path (see above);
+  // a refusal records itself. Returns the held tree and its digest.
+  let check = |state: &mut UpdateState,
+               tree: &Path|
+   -> Result<(HeldTree, String), UpdateError> {
+    let Some(record) = read_trial_record(layout) else {
+      return Err(refuse_rollback(
+        layout,
+        state,
+        UpdateError::new(
+          Code::NotStaged,
+          "no trial record: the staging directory records no update to \
+           roll back",
+        ),
+      ));
+    };
+    let (from, expected_digest) = (record.from, record.previous_digest);
+    let held = match HeldTree::open(tree) {
+      Ok(h) => h,
+      Err(e) => {
+        return Err(refuse_rollback(
+          layout,
+          state,
+          UpdateError::new(
+            Code::UnsupportedLayout,
+            format!(
+              "{}: not a previous install of this app: {e}",
+              tree.display()
+            ),
+          ),
+        ));
+      }
+    };
+    let digest = match held.digest() {
+      Ok(d) => d,
+      Err(e) => {
+        return Err(refuse_rollback(
+          layout,
+          state,
+          UpdateError::io(tree.display(), e),
+        ));
+      }
+    };
+    if expected_digest != digest {
+      return Err(refuse_rollback(
+        layout,
+        state,
+        UpdateError::new(
+          Code::BundleMismatch,
+          format!(
+            "{} is not the app that was installed before the trial (its \
+             digest is not the trial record's)",
+            tree.display()
+          ),
+        ),
+      ));
     }
-    verify(layout, state, tree).map_err(|e| refuse_rollback(layout, state, e))
+    if !held.still_at_path() {
+      return Err(refuse_rollback(layout, state, replaced(tree)));
+    }
+    if let Err(e) = (checks.verify)(layout, &from, tree) {
+      return Err(refuse_rollback(layout, state, e));
+    }
+    if !held.still_at_path() {
+      return Err(refuse_rollback(layout, state, replaced(tree)));
+    }
+    Ok((held, digest))
   };
   // A version that failed its trial is rejected. The mark is recorded when
   // the rollback starts (below, once what goes back has passed its check),
   // so a resumed rollback still knows.
   let reject = match state.phase {
     Phase::Swapped => true,
-    Phase::RollingBack => state.to.is_some() && state.rejected == state.to,
+    Phase::RollingBack => {
+      state.rejected.is_some() && state.rejected == state.to
+    }
     Phase::Swapping => {
       // Was the swap interrupted after it happened?
       let swapped = if !exists(install) {
@@ -1210,7 +1570,7 @@ pub fn rollback_verified(
         // An atomic exchange whose follow-up rename was interrupted: the
         // previous app is still in the staging directory. What moves next
         // to the install, and from there back to the install path, is
-        // checked before it moves (and again as `.old`).
+        // checked before it moves (and again, held, as `.old`).
         if let Some(staged) = state.staged_path(layout)
           && exists(&staged)
         {
@@ -1227,21 +1587,36 @@ pub fn rollback_verified(
   };
   // `.old` goes back to the install path, unless an earlier run of this
   // rollback already exchanged it in (then `.old` holds the failed app and
-  // nothing goes back): checked first.
+  // nothing goes back): checked first, and held from here to its move.
   let exchanged_already = resuming
     && exists(install)
     && exists(&old)
     && state.install_id.is_some()
     && file_id(install) != state.install_id;
-  if exists(&old) && !exchanged_already {
-    check(state, &old)?;
+  let held_old = if exists(&old) && !exchanged_already {
+    Some(check(state, &old)?)
+  } else {
+    None
+  };
+  // The version that failed its trial: the one compiled into the installed
+  // app. The state's `to` is writable by anything running as the user, which
+  // could so mark any version of its choosing rejected.
+  let mut rolled_back = None;
+  if state.phase == Phase::Swapped {
+    match (checks.installed_version)(layout, state) {
+      Some(version) => {
+        state.reject(&version);
+        rolled_back = Some(version);
+      }
+      None => log_line(
+        layout,
+        "the installed app's version can't be read: no version is marked \
+         rejected",
+      ),
+    }
+  } else if reject {
+    rolled_back = state.rejected.clone();
   }
-  if state.phase == Phase::Swapped
-    && let Some(to) = state.to.clone()
-  {
-    state.reject(&to);
-  }
-  let to = state.to.clone();
   state.phase = Phase::RollingBack;
   // What is at the install path as the rollback starts (the failed app):
   // a resumed rollback compares it with what is there now to tell whether
@@ -1251,6 +1626,29 @@ pub fn rollback_verified(
   }
   write_state(layout, state)?;
 
+  // Right before `.old` moves: unchanged since it was checked, and still
+  // what the path names.
+  let unchanged = |held: &HeldTree, pinned: &str| -> std::io::Result<()> {
+    if held.digest().ok().as_deref() != Some(pinned) {
+      return Err(std::io::Error::other(format!(
+        "{} changed after it was checked",
+        old.display()
+      )));
+    }
+    if !held.still_at_path() {
+      return Err(std::io::Error::other(format!(
+        "{} was replaced after it was checked",
+        old.display()
+      )));
+    }
+    Ok(())
+  };
+  let not_the_checked_tree = |undone: &str| {
+    std::io::Error::other(format!(
+      "{} was replaced during the rollback; {undone}",
+      old.display()
+    ))
+  };
   // Restore: the failed install aside, `.old` back. Each step is checked so
   // a rerun after an interruption picks up where this one stopped.
   let restore = (|| -> std::io::Result<()> {
@@ -1265,10 +1663,17 @@ pub fn rollback_verified(
       return Ok(());
     }
     if exists(&old) {
+      let Some((held, pinned)) = &held_old else {
+        return Err(std::io::Error::other(format!(
+          "{} appeared after the check",
+          old.display()
+        )));
+      };
       if exists(install) {
         if exists(&failed) {
           remove_install_copy(layout, &failed);
         }
+        unchanged(held, pinned)?;
         // The previous app back in ONE atomic step where the OS can.
         let exchanged = if hook("rollback-exchange").is_ok() {
           exchange(&old, install)?
@@ -1276,10 +1681,27 @@ pub fn rollback_verified(
           false
         };
         if exchanged {
+          if !held.is_at(install) {
+            // Another tree was put at `.old`'s name between the check and
+            // the exchange: exchange back (the failed app sits at `.old`
+            // now) and fail; the rerun checks `.old` again.
+            let undone = exchange(&old, install).is_ok_and(|x| x);
+            return Err(not_the_checked_tree(if undone {
+              "the exchange was undone"
+            } else {
+              "THE EXCHANGE COULD NOT BE UNDONE"
+            }));
+          }
           park_failed(layout, hook, &old, &failed);
           return Ok(());
         }
         step(hook, "install->failed", || rename_retry(install, &failed))?;
+      }
+      if let Err(e) = unchanged(held, pinned) {
+        if !exists(install) && exists(&failed) {
+          let _ = undo_rename(hook, &failed, install);
+        }
+        return Err(e);
       }
       if let Err(e) = step(hook, "old->install", || rename_retry(&old, install))
       {
@@ -1290,6 +1712,19 @@ pub fn rollback_verified(
           let _ = undo_rename(hook, &failed, install);
         }
         return Err(e);
+      }
+      if !held.is_at(install) {
+        // Not the checked tree (see above): back to `.old`, the failed app
+        // back to the install path, and fail.
+        let moved_back = rename_retry(install, &old).is_ok();
+        if moved_back && exists(&failed) {
+          let _ = undo_rename(hook, &failed, install);
+        }
+        return Err(not_the_checked_tree(if moved_back {
+          "the rename was undone"
+        } else {
+          "THE RENAME COULD NOT BE UNDONE"
+        }));
       }
     } else if !exists(install) && exists(&failed) {
       // Nothing to restore; at least put an app back.
@@ -1314,7 +1749,7 @@ pub fn rollback_verified(
   state.cleanup = true;
   state.last_error = None;
   write_state(layout, state)?;
-  Ok(if reject { to } else { None })
+  Ok(rolled_back)
 }
 
 /// After the rollback's exchange the failed app sits at `.old`: move it to
@@ -1411,6 +1846,9 @@ pub fn mark_confirmed(
   state.cleanup = true;
   state.last_error = None;
   write_state(layout, &state)?;
+  // The version is good: its trial record (see [`TrialRecord`]) goes, so a
+  // later forged `swapped` state finds nothing to roll back to.
+  remove_trial_record(layout);
   Ok(Some(state))
 }
 
@@ -1684,10 +2122,11 @@ pub fn accept_staged(
 /// signer, its own version newer than the installed one and not rejected),
 /// and before a rollback `verify_previous` checks the tree that would go
 /// back the same way (the install marker, its embedded version equal to the
-/// state's `from`, its OS code signature against the installed app), so the
-/// helper can't be used to put an app the updater would refuse in place of
-/// a signed one (on macOS the app may modify its own bundle where another
-/// program may not).
+/// trial record's `from`, its OS code signature against the installed app;
+/// the tree's digest must be the trial record's, see [`rollback_verified`]),
+/// so the helper can't be used to put an app the updater would refuse in
+/// place of a signed one (on macOS the app may modify its own bundle where
+/// another program may not).
 pub fn run_helper(
   layout: &InstallLayout,
   mode: HelperMode,
@@ -2739,6 +3178,24 @@ mod tests {
       .unwrap();
   }
 
+  /// What the apply writes into the staging directory last before its swap
+  /// (see `TrialRecord`), for the tests that simulate an interrupted swap by
+  /// hand.
+  fn write_fixture_trial_record(l: &InstallLayout) {
+    let s = read_state(l).unwrap();
+    let record = TrialRecord {
+      schema: TRIAL_RECORD_SCHEMA,
+      from: "1.0.0".into(),
+      to: s.to.clone(),
+      previous_digest: tree_digest(&l.install).unwrap(),
+    };
+    std::fs::write(
+      l.staging_dir().join(TRIAL_RECORD),
+      serde_json::to_vec(&record).unwrap(),
+    )
+    .unwrap();
+  }
+
   /// Point the recorded trial at a process that has exited.
   fn mark_trial_exited(l: &InstallLayout) {
     let mut child = if cfg!(windows) {
@@ -2957,7 +3414,10 @@ mod tests {
     apply_swap(l, &mut s).unwrap();
     assert_eq!(installed(l), "2.0.0");
     assert!(l.old_path().join("version").exists());
-    assert!(!l.staging_dir().exists());
+    // The extraction directory is gone; the staging directory stays with
+    // the trial record until the confirm.
+    assert!(!l.extract_dir().exists());
+    assert!(l.staging_dir().join(TRIAL_RECORD).is_file());
     assert_eq!(read_state(l).unwrap().phase, Phase::Swapped);
     // First launch: the trial.
     assert_eq!(startup_action(l), StartupAction::Continue { trial: true });
@@ -3175,7 +3635,7 @@ mod tests {
         std::fs::write(staged.join("version"), "6.6.6").unwrap();
         Ok(())
       };
-      run_helper(l, HelperMode::Apply, pid, &verify, &accept_previous);
+      run_helper(l, HelperMode::Apply, pid, &verify, &ACCEPT_PREVIOUS);
       assert_eq!(installed(l), "1.0.0", "forge={forge}");
       assert_eq!(read_state(l).unwrap().phase, Phase::Staged, "forge={forge}");
     }
@@ -3317,7 +3777,7 @@ mod tests {
         HelperMode::Apply,
         app.id(),
         &accept_staged,
-        &accept_previous
+        &ACCEPT_PREVIOUS
       ),
       0
     );
@@ -3334,7 +3794,7 @@ mod tests {
         HelperMode::Apply,
         app.id(),
         &accept_staged,
-        &accept_previous
+        &ACCEPT_PREVIOUS
       ),
       0
     );
@@ -3350,7 +3810,7 @@ mod tests {
       HelperMode::Apply,
       app.id(),
       &accept_staged,
-      &accept_previous,
+      &ACCEPT_PREVIOUS,
     );
     assert_eq!(installed(l), "2.0.0");
     // The relaunch started the new app (on Windows the fixture has none).
@@ -3770,7 +4230,7 @@ mod tests {
       assert_eq!(s.phase, Phase::Swapping, "exchanged={exchanged}");
       // The helper's recovery, as `run_helper` runs it after the failure.
       let mut relaunched = Vec::new();
-      helper_after_failed_apply(l, &accept_previous, &mut |state, marker| {
+      helper_after_failed_apply(l, &ACCEPT_PREVIOUS, &mut |state, marker| {
         relaunched.push((state.phase, marker));
         0
       });
@@ -3847,6 +4307,7 @@ mod tests {
     // restores the previous app.
     let f = fixture(Some("2.0.0"));
     let l = &f.layout;
+    write_fixture_trial_record(l);
     let mut s = read_state(l).unwrap();
     s.phase = Phase::Swapping;
     s.install_id = file_id(&l.install);
@@ -3869,6 +4330,7 @@ mod tests {
   fn helper_killed_after_atomic_exchange_recovers() {
     let f = fixture(Some("2.0.0"));
     let l = &f.layout;
+    write_fixture_trial_record(l);
     let mut s = read_state(l).unwrap();
     s.phase = Phase::Swapping;
     s.install_id = file_id(&l.install);
@@ -3905,7 +4367,7 @@ mod tests {
   /// the OS code signature: `verify_previous_for_helper`).
   fn fixture_previous_verifier(
     l: &InstallLayout,
-    s: &UpdateState,
+    from: &str,
     tree: &Path,
   ) -> Result<(), UpdateError> {
     if !is_install_copy(l.kind, tree) {
@@ -3919,17 +4381,51 @@ mod tests {
     }
     let version =
       std::fs::read_to_string(tree.join("version")).unwrap_or_default();
-    if Some(version.as_str()) != s.from.as_deref() {
+    if version != from {
       return err(
         Code::VersionMismatch,
         format!(
-          "{} is version {version}, the state names {:?}",
+          "{} is version {version}, the trial marker names {from:?}",
           tree.display(),
-          s.from
         ),
       );
     }
     Ok(())
+  }
+
+  /// The fixture's checks: `fixture_previous_verifier` and the fixture's
+  /// installed version.
+  const FIXTURE_CHECKS: PreviousChecks<'static> = PreviousChecks {
+    verify: &fixture_previous_verifier,
+    installed_version: &fixture_installed_version,
+  };
+
+  /// A byte-identical copy of the tree at `from` at `to`.
+  #[cfg(unix)]
+  fn copy_tree(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for entry in std::fs::read_dir(from).unwrap() {
+      let entry = entry.unwrap();
+      let target = to.join(entry.file_name());
+      if entry.file_type().unwrap().is_dir() {
+        copy_tree(&entry.path(), &target);
+      } else {
+        std::fs::copy(entry.path(), target).unwrap();
+      }
+    }
+  }
+
+  /// Replace the tree at `path` with a byte-identical copy (another inode
+  /// at the same name): what a racing writer does between a check and a
+  /// move. The original is left at `<path>.moved` (used by the Unix-only
+  /// test that races the check).
+  #[cfg(unix)]
+  fn replace_with_identical_copy(path: &Path) {
+    let copy = path.with_extension("copy");
+    let moved = path.with_extension("moved");
+    copy_tree(path, &copy);
+    std::fs::rename(path, &moved).unwrap();
+    std::fs::rename(&copy, path).unwrap();
   }
 
   /// A forged state file (anything running as the user can write it) next
@@ -3968,15 +4464,56 @@ mod tests {
     write_state(l, &s).unwrap();
     assert_eq!(startup_action(l), StartupAction::RollBack);
     let mut s = read_state(l).unwrap();
-    let e = rollback_verified(l, &mut s, &fixture_previous_verifier, &no_fault)
-      .unwrap_err();
-    assert_eq!(e.code, Code::VersionMismatch, "{}", e.message);
-    refused(l, Code::VersionMismatch);
+    // No apply ran, so there is no trial record: there is nothing to roll
+    // back to, whatever the state names.
+    let e =
+      rollback_verified(l, &mut s, &FIXTURE_CHECKS, &no_fault).unwrap_err();
+    assert_eq!(e.code, Code::NotStaged, "{}", e.message);
+    assert!(e.message.contains("no trial record"), "{}", e.message);
+    refused(l, Code::NotStaged);
     assert_eq!(
       std::fs::read_to_string(l.old_path().join("version")).unwrap(),
       "0.9.0",
       "the planted tree is left where it was"
     );
+
+    // The same planted `.old` where a real trial's record exists (the apply
+    // ran, then `.old` was replaced): its digest is not the record's.
+    let f = fixture(Some("2.0.0"));
+    let l = &f.layout;
+    let mut s = read_state(l).unwrap();
+    apply_swap(l, &mut s).unwrap();
+    std::fs::remove_dir_all(l.old_path()).unwrap();
+    plant_app(&l.old_path(), "0.9.0");
+    assert_eq!(startup_action(l), StartupAction::Continue { trial: true });
+    mark_trial_exited(l);
+    assert_eq!(startup_action(l), StartupAction::RollBack);
+    let mut s = read_state(l).unwrap();
+    let e =
+      rollback_verified(l, &mut s, &FIXTURE_CHECKS, &no_fault).unwrap_err();
+    assert_eq!(e.code, Code::BundleMismatch, "{}", e.message);
+    assert_eq!(installed(l), "2.0.0");
+    let st = read_state(l).unwrap();
+    assert_eq!(st.phase, Phase::Idle);
+    assert!(!st.cleanup);
+    assert_eq!(st.rejected, None);
+    assert_eq!(
+      std::fs::read_to_string(l.old_path().join("version")).unwrap(),
+      "0.9.0"
+    );
+    // A planted `.old` with the right version but other contents: the same.
+    let f = fixture(Some("2.0.0"));
+    let l = &f.layout;
+    let mut s = read_state(l).unwrap();
+    apply_swap(l, &mut s).unwrap();
+    std::fs::remove_dir_all(l.old_path()).unwrap();
+    plant_app(&l.old_path(), "1.0.0");
+    mark_trial_exited(l);
+    let mut s = read_state(l).unwrap();
+    let e =
+      rollback_verified(l, &mut s, &FIXTURE_CHECKS, &no_fault).unwrap_err();
+    assert_eq!(e.code, Code::BundleMismatch, "{}", e.message);
+    assert_eq!(installed(l), "2.0.0");
 
     // `.old` without the install marker (not a packaged app at all).
     let f = fixture(None);
@@ -3990,10 +4527,11 @@ mod tests {
     s.launches = 1;
     write_state(l, &s).unwrap();
     let mut s = read_state(l).unwrap();
-    let e = rollback_verified(l, &mut s, &fixture_previous_verifier, &no_fault)
-      .unwrap_err();
-    assert_eq!(e.code, Code::UnsupportedLayout, "{}", e.message);
-    refused(l, Code::UnsupportedLayout);
+    let e =
+      rollback_verified(l, &mut s, &FIXTURE_CHECKS, &no_fault).unwrap_err();
+    // Refused before anything is opened: no trial record.
+    assert_eq!(e.code, Code::NotStaged, "{}", e.message);
+    refused(l, Code::NotStaged);
     assert!(l.old_path().join("version").exists());
 
     // The `swapping` path: no `.old`, a planted staged tree, and an install
@@ -4011,10 +4549,9 @@ mod tests {
       write_state(l, &s).unwrap();
       let mut s = read_state(l).unwrap();
       let e =
-        rollback_verified(l, &mut s, &fixture_previous_verifier, &no_fault)
-          .unwrap_err();
-      assert_eq!(e.code, Code::VersionMismatch, "{}", e.message);
-      refused(l, Code::VersionMismatch);
+        rollback_verified(l, &mut s, &FIXTURE_CHECKS, &no_fault).unwrap_err();
+      assert_eq!(e.code, Code::NotStaged, "{}", e.message);
+      refused(l, Code::NotStaged);
       assert!(
         !l.old_path().exists(),
         "the planted tree was not moved next to the install"
@@ -4032,12 +4569,203 @@ mod tests {
     assert_eq!(startup_action(l), StartupAction::RollBack);
     let mut s = read_state(l).unwrap();
     assert_eq!(
-      rollback_verified(l, &mut s, &fixture_previous_verifier, &no_fault)
+      rollback_verified(l, &mut s, &FIXTURE_CHECKS, &no_fault)
         .unwrap()
         .as_deref(),
       Some("2.0.0")
     );
     assert_eq!(installed(l), "1.0.0");
+    assert_eq!(read_state(l).unwrap().phase, Phase::Idle);
+  }
+
+  /// The tree a rollback puts back is held from its check to its move
+  /// (N2 of the denext.8 delta audit): a byte-identical copy put at `.old`'s
+  /// name while the verifier runs (what a racing writer in the install's
+  /// parent does, timed on `codesign`'s exit) is noticed before the move,
+  /// and one put there right before the exchange is noticed after it and
+  /// exchanged back. Before: the check passed on one tree and the exchange
+  /// installed another. (Unix: identity is device and inode; on Windows the
+  /// install directory's ACL is the boundary.)
+  #[cfg(unix)]
+  #[test]
+  fn a_rollback_puts_back_only_the_tree_it_held() {
+    // Replaced during the verifier.
+    let f = fixture(Some("2.0.0"));
+    let l = &f.layout;
+    let mut s = read_state(l).unwrap();
+    apply_swap(l, &mut s).unwrap();
+    assert_eq!(startup_action(l), StartupAction::Continue { trial: true });
+    mark_trial_exited(l);
+    assert_eq!(startup_action(l), StartupAction::RollBack);
+    let old = l.old_path();
+    let swapping_verify = |layout: &InstallLayout, from: &str, tree: &Path| {
+      fixture_previous_verifier(layout, from, tree)?;
+      replace_with_identical_copy(&old);
+      Ok(())
+    };
+    let checks = PreviousChecks {
+      verify: &swapping_verify,
+      installed_version: &fixture_installed_version,
+    };
+    let mut s = read_state(l).unwrap();
+    let e = rollback_verified(l, &mut s, &checks, &no_fault).unwrap_err();
+    assert_eq!(e.code, Code::BundleMismatch, "{}", e.message);
+    assert!(e.message.contains("replaced"), "{}", e.message);
+    assert_eq!(installed(l), "2.0.0", "the trial app stays installed");
+    let st = read_state(l).unwrap();
+    assert_eq!(st.phase, Phase::Idle, "{:?}", st.last_error);
+    assert!(!st.cleanup);
+    assert_eq!(st.rejected, None);
+    assert_eq!(
+      std::fs::read_to_string(old.join("version")).unwrap(),
+      "1.0.0",
+      "the copy is left at .old"
+    );
+    assert!(old.with_extension("moved").join("version").exists());
+
+    // Replaced right before the exchange (or the two-rename move where the
+    // file system can't exchange).
+    let f = fixture(Some("2.0.0"));
+    let l = &f.layout;
+    let mut s = read_state(l).unwrap();
+    apply_swap(l, &mut s).unwrap();
+    mark_trial_exited(l);
+    let old = l.old_path();
+    let hook = |name: &str| -> std::io::Result<()> {
+      if (name == "rollback-exchange" || name == "old->install")
+        && !old.with_extension("moved").exists()
+      {
+        replace_with_identical_copy(&old);
+      }
+      Ok(())
+    };
+    let mut s = read_state(l).unwrap();
+    let e = rollback_verified(l, &mut s, &FIXTURE_CHECKS, &hook).unwrap_err();
+    assert_eq!(e.code, Code::Io, "{}", e.message);
+    assert!(e.message.contains("replaced"), "{}", e.message);
+    assert_eq!(installed(l), "2.0.0", "the move was undone");
+    assert!(std::fs::read_dir(&old).is_ok(), "the copy is back at .old");
+    let st = read_state(l).unwrap();
+    assert_eq!(st.phase, Phase::RollingBack, "{:?}", st.last_error);
+    assert!(
+      st.last_error
+        .as_deref()
+        .unwrap_or_default()
+        .contains("replaced"),
+      "{:?}",
+      st.last_error
+    );
+  }
+
+  /// A rollback is bound to the trial by the record the apply wrote into the
+  /// private staging directory, not by the state file (N3, N8 of the
+  /// denext.8 delta audit): without the record nothing goes back, whatever
+  /// the state's `from` and `to` say; the version marked rejected is the
+  /// one installed, not the state's `to`; a `.old` whose digest is not the
+  /// record's is refused, with the install path emptied too (the check is
+  /// never skipped).
+  #[test]
+  fn a_rollback_is_bound_to_the_trial_record() {
+    // The record is written by the apply and removed by confirm.
+    let f = fixture(Some("2.0.0"));
+    let l = &f.layout;
+    let mut s = read_state(l).unwrap();
+    let previous = tree_digest(&l.install).unwrap();
+    apply_swap(l, &mut s).unwrap();
+    let record = read_trial_record(l).unwrap();
+    assert_eq!(record.from, "1.0.0");
+    assert_eq!(record.to.as_deref(), Some("2.0.0"));
+    assert_eq!(record.previous_digest, previous);
+    assert_eq!(tree_digest(&l.old_path()).unwrap(), previous);
+    assert!(confirm(l).unwrap());
+    assert!(read_trial_record(l).is_none());
+    assert!(!l.staging_dir().join(TRIAL_RECORD).exists());
+
+    // A forged state (`from`, `to`) changes nothing: the record's `from` is
+    // what `.old` must be, and the installed version is what is rejected.
+    let f = fixture(Some("2.0.0"));
+    let l = &f.layout;
+    let mut s = read_state(l).unwrap();
+    apply_swap(l, &mut s).unwrap();
+    mark_trial_exited(l);
+    let mut s = read_state(l).unwrap();
+    s.from = Some("0.0.1".into());
+    s.to = Some("9.9.9".into());
+    write_state(l, &s).unwrap();
+    let mut s = read_state(l).unwrap();
+    assert_eq!(
+      rollback_verified(l, &mut s, &FIXTURE_CHECKS, &no_fault)
+        .unwrap()
+        .as_deref(),
+      Some("2.0.0")
+    );
+    assert_eq!(installed(l), "1.0.0");
+    let st = read_state(l).unwrap();
+    assert_eq!(st.rejected.as_deref(), Some("2.0.0"));
+    assert_eq!(st.all_rejected(), vec!["2.0.0"]);
+
+    // The record removed: nothing goes back.
+    let f = fixture(Some("2.0.0"));
+    let l = &f.layout;
+    let mut s = read_state(l).unwrap();
+    apply_swap(l, &mut s).unwrap();
+    mark_trial_exited(l);
+    std::fs::remove_file(l.staging_dir().join(TRIAL_RECORD)).unwrap();
+    let mut s = read_state(l).unwrap();
+    let e =
+      rollback_verified(l, &mut s, &FIXTURE_CHECKS, &no_fault).unwrap_err();
+    assert_eq!(e.code, Code::NotStaged, "{}", e.message);
+    assert_eq!(installed(l), "2.0.0");
+    assert_eq!(read_state(l).unwrap().rejected, None);
+
+    // A record that is a symlink, or a staging directory others can enter,
+    // is no record.
+    #[cfg(unix)]
+    {
+      use std::os::unix::fs::PermissionsExt;
+      let f = fixture(Some("2.0.0"));
+      let l = &f.layout;
+      let mut s = read_state(l).unwrap();
+      apply_swap(l, &mut s).unwrap();
+      mark_trial_exited(l);
+      let path = l.staging_dir().join(TRIAL_RECORD);
+      let real = l.parent.join("elsewhere.json");
+      std::fs::rename(&path, &real).unwrap();
+      std::os::unix::fs::symlink(&real, &path).unwrap();
+      let mut s = read_state(l).unwrap();
+      let e =
+        rollback_verified(l, &mut s, &FIXTURE_CHECKS, &no_fault).unwrap_err();
+      assert_eq!(e.code, Code::NotStaged, "{}", e.message);
+      assert_eq!(installed(l), "2.0.0");
+      std::fs::remove_file(&path).unwrap();
+      std::fs::rename(&real, &path).unwrap();
+      std::fs::set_permissions(
+        l.staging_dir(),
+        std::fs::Permissions::from_mode(0o755),
+      )
+      .unwrap();
+      let mut s = read_state(l).unwrap();
+      let e =
+        rollback_verified(l, &mut s, &FIXTURE_CHECKS, &no_fault).unwrap_err();
+      assert_eq!(e.code, Code::NotStaged, "{}", e.message);
+    }
+
+    // The install path emptied (the app renamed away) and `.old` planted:
+    // the check runs all the same, and the planted tree is not the record's.
+    let f = fixture(Some("2.0.0"));
+    let l = &f.layout;
+    let mut s = read_state(l).unwrap();
+    apply_swap(l, &mut s).unwrap();
+    mark_trial_exited(l);
+    std::fs::rename(&l.install, l.parent.join("renamed-away")).unwrap();
+    std::fs::remove_dir_all(l.old_path()).unwrap();
+    plant_app(&l.old_path(), "1.0.0");
+    let mut s = read_state(l).unwrap();
+    let e =
+      rollback_verified(l, &mut s, &FIXTURE_CHECKS, &no_fault).unwrap_err();
+    assert_eq!(e.code, Code::BundleMismatch, "{}", e.message);
+    assert!(!l.install.exists(), "nothing was put at the install path");
+    assert!(l.old_path().join("version").exists());
     assert_eq!(read_state(l).unwrap().phase, Phase::Idle);
   }
 
@@ -4140,7 +4868,7 @@ mod tests {
     let mut s = read_state(l).unwrap();
     let started = Instant::now();
     let code =
-      helper_rollback(l, &mut s, &accept_previous, &mut |state, marker| {
+      helper_rollback(l, &mut s, &ACCEPT_PREVIOUS, &mut |state, marker| {
         // At the relaunch the rollback is recorded and logged, and nothing
         // has been deleted yet.
         assert_eq!(state.phase, Phase::Idle);

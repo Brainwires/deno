@@ -814,7 +814,7 @@ fn verify_staged_for_helper(
 /// offline, and the identity match is what keeps a planted tree out.
 fn verify_previous_for_helper(
   layout: &InstallLayout,
-  state: &UpdateState,
+  from: &str,
   tree: &std::path::Path,
 ) -> Result<(), UpdateError> {
   if !layout::is_install_copy(layout.kind, tree) {
@@ -826,16 +826,29 @@ fn verify_previous_for_helper(
       ),
     );
   }
-  let Some(from) = state.from.as_deref() else {
-    return error::err(
-      Code::NotStaged,
-      "the state names no version to roll back to",
-    );
-  };
   embedded::check_embedded_version(layout, tree, from)?;
   verify_os_signature(layout, tree, true, false)?;
   Ok(())
 }
+
+/// The version compiled into the installed app (the one on trial), which a
+/// rollback marks rejected; an AppImage's runtime sits inside a compressed
+/// squashfs, so there the state's `to` stands (see `swap::TrialRecord`).
+fn installed_app_version(
+  layout: &InstallLayout,
+  state: &UpdateState,
+) -> Option<String> {
+  if layout.kind == InstallKind::AppImage {
+    return state.to.clone();
+  }
+  embedded::installed_metadata(layout).and_then(|m| m.app_version)
+}
+
+/// The helper's rollback checks (see `swap::rollback_verified`).
+const PREVIOUS_CHECKS: swap::PreviousChecks<'static> = swap::PreviousChecks {
+  verify: &verify_previous_for_helper,
+  installed_version: &installed_app_version,
+};
 
 /// `to` must be newer than the version compiled into the installed app.
 fn verify_newer_than_installed(
@@ -1065,7 +1078,7 @@ pub fn early_startup(args: &[String], trial: &mut bool) -> Option<i32> {
           mode,
           pid,
           &verify_staged_for_helper,
-          &verify_previous_for_helper,
+          &PREVIOUS_CHECKS,
         ),
         Err(_) => 1,
       },
@@ -1349,24 +1362,22 @@ mod tests {
 
   /// The helper's check of the tree a rollback would put back
   /// (`verify_previous_for_helper`), in order: the install marker first, then
-  /// the embedded version against the state's `from`, then the OS signature.
-  /// The fake app has no compiled metadata, so a marked tree stops at the
-  /// version (the real helper reads the runtime library's), and an unmarked
-  /// one before it; a state without `from` names nothing to compare with.
+  /// the embedded version against the trial marker's `from`, then the OS
+  /// signature. The fake app has no compiled metadata, so a marked tree stops
+  /// at the version (the real helper reads the runtime library's), and an
+  /// unmarked one before it.
   #[cfg(unix)]
   #[test]
   fn the_rollback_check_runs_the_apply_checks_on_what_goes_back() {
     let tmp = tempfile::tempdir().unwrap();
     let (_exe, layout) = fake_app(&tmp);
     let old = layout.old_path();
-    let mut state = UpdateState::new(&layout);
-    state.from = Some("1.0.0".into());
     // Nothing at `.old` at all, then a tree without the marker.
-    let e = verify_previous_for_helper(&layout, &state, &old).unwrap_err();
+    let e = verify_previous_for_helper(&layout, "1.0.0", &old).unwrap_err();
     assert_eq!(e.code, Code::UnsupportedLayout, "{}", e.message);
     std::fs::create_dir_all(&old).unwrap();
     std::fs::write(old.join("version"), "1.0.0").unwrap();
-    let e = verify_previous_for_helper(&layout, &state, &old).unwrap_err();
+    let e = verify_previous_for_helper(&layout, "1.0.0", &old).unwrap_err();
     assert_eq!(e.code, Code::UnsupportedLayout, "{}", e.message);
     assert!(e.message.contains("no install marker"), "{}", e.message);
     // A marked copy of the fake app: the version check reads its (absent)
@@ -1374,13 +1385,14 @@ mod tests {
     std::fs::remove_dir_all(&old).unwrap();
     copy_tree(&layout.install, &old);
     assert!(layout::is_install_copy(layout.kind, &old));
-    let e = verify_previous_for_helper(&layout, &state, &old).unwrap_err();
+    let e = verify_previous_for_helper(&layout, "1.0.0", &old).unwrap_err();
     assert_eq!(e.code, Code::VersionMismatch, "{}", e.message);
     assert!(e.message.contains("compiled app metadata"), "{}", e.message);
-    // No `from`: nothing to compare the version with.
-    state.from = None;
-    let e = verify_previous_for_helper(&layout, &state, &old).unwrap_err();
-    assert_eq!(e.code, Code::NotStaged, "{}", e.message);
+    // The installed version an AppImage reports is the state's `to`; an app
+    // directory's is its compiled metadata (absent on the fake app).
+    let mut state = UpdateState::new(&layout);
+    state.to = Some("2.0.0".into());
+    assert_eq!(installed_app_version(&layout, &state), None);
   }
 
   /// Copy a directory tree (the fake app, a few files).

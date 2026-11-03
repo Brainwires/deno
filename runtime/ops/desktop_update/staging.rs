@@ -153,6 +153,98 @@ impl PrivateDir {
     true
   }
 
+  /// Write `bytes` as the file `name` directly inside the held directory
+  /// (created or replaced; Unix: through the descriptor, never through a
+  /// symlink; Windows: by path).
+  pub fn write_file(&self, name: &str, bytes: &[u8]) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+      use std::io::Write;
+      use std::os::fd::AsRawFd;
+      use std::os::fd::FromRawFd;
+      let name = cstr(OsStr::new(name))?;
+      // SAFETY: a valid descriptor and NUL-terminated name; the mode is the
+      // fourth argument `O_CREAT` reads.
+      let raw = unsafe {
+        libc::openat(
+          self.fd.as_raw_fd(),
+          name.as_ptr(),
+          libc::O_WRONLY
+            | libc::O_CREAT
+            | libc::O_TRUNC
+            | libc::O_NOFOLLOW
+            | libc::O_CLOEXEC,
+          0o600 as libc::c_uint,
+        )
+      };
+      if raw < 0 {
+        return Err(std::io::Error::last_os_error());
+      }
+      // SAFETY: openat returned a new descriptor this function owns.
+      let mut file =
+        std::fs::File::from(unsafe { std::os::fd::OwnedFd::from_raw_fd(raw) });
+      file.write_all(bytes)?;
+      file.sync_all()
+    }
+    #[cfg(not(unix))]
+    std::fs::write(self.path.join(name), bytes)
+  }
+
+  /// Read the file `name` directly inside the held directory, at most `max`
+  /// bytes (Unix: through the descriptor, not through a symlink, and only a
+  /// regular file this user owns; Windows: by path, not a reparse point).
+  pub fn read_file(&self, name: &str, max: u64) -> std::io::Result<Vec<u8>> {
+    use std::io::Read;
+    #[cfg(unix)]
+    {
+      use std::os::fd::AsRawFd;
+      use std::os::fd::FromRawFd;
+      let cname = cstr(OsStr::new(name))?;
+      // SAFETY: a valid descriptor and NUL-terminated name.
+      let raw = unsafe {
+        libc::openat(
+          self.fd.as_raw_fd(),
+          cname.as_ptr(),
+          libc::O_RDONLY
+            | libc::O_NOFOLLOW
+            | libc::O_CLOEXEC
+            | libc::O_NONBLOCK,
+        )
+      };
+      if raw < 0 {
+        return Err(std::io::Error::last_os_error());
+      }
+      // SAFETY: openat returned a new descriptor this function owns.
+      let file =
+        std::fs::File::from(unsafe { std::os::fd::OwnedFd::from_raw_fd(raw) });
+      let st = fstat(file.as_raw_fd())?;
+      // SAFETY: geteuid has no preconditions and cannot fail.
+      let me = unsafe { libc::geteuid() };
+      if st.st_mode & libc::S_IFMT != libc::S_IFREG || st.st_uid != me {
+        return Err(refused(
+          &self.path.join(name),
+          "not a regular file of this user's",
+        ));
+      }
+      let mut out = Vec::new();
+      file.take(max).read_to_end(&mut out)?;
+      Ok(out)
+    }
+    #[cfg(not(unix))]
+    {
+      let path = self.path.join(name);
+      let meta = std::fs::symlink_metadata(&path)?;
+      if meta.file_type().is_symlink() || !meta.is_file() {
+        return Err(refused(&path, "not a regular file"));
+      }
+      let mut out = Vec::new();
+      std::fs::File::open(&path)?
+        .take(max)
+        .read_to_end(&mut out)?;
+      Ok(out)
+    }
+  }
+
   /// The staged app `entry` inside the subdirectory `sub`, held through
   /// this directory.
   pub fn staged(&self, sub: &str, entry: &OsStr) -> std::io::Result<Staged> {
@@ -258,6 +350,19 @@ impl Staged {
     #[cfg(not(unix))]
     super::swap::rename_retry(&self.path, target)
   }
+}
+
+/// [`super::swap::tree_digest`] of the directory held by `fd` itself, read
+/// through it (the rollback's [`super::swap::HeldTree`]).
+#[cfg(unix)]
+pub(super) fn digest_held_dir(
+  fd: std::os::fd::RawFd,
+) -> std::io::Result<String> {
+  use sha2::Digest;
+  let mut out = sha2::Sha256::new();
+  let mut files = Vec::new();
+  fd_walk::entry(fd, c".", "", &mut out, &mut files)?;
+  Ok(faster_hex::hex_string(&out.finalize()))
 }
 
 #[cfg(unix)]
