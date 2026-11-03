@@ -19,6 +19,12 @@
 // 5. 2.0.0 -> 3.0.0 whose trial exits before confirming: the next launch
 //    rolls back to 2.0.0, and 3.0.0 is refused afterwards.
 //
+// On Windows every version carries a tree manifest in its executable, as
+// denext's packaging writes it (DENEXT.md items 202 and 212), so the updates
+// above run with it, and the hostile cases include staged apps whose files
+// are not the ones their manifest lists, a manifest for another app or
+// version, and none at all under an installed app that has one.
+//
 // The manifests are served over HTTPS by this process, with a CA the app
 // trusts only through `caCerts`.
 
@@ -52,6 +58,7 @@ import {
   tail,
   waitExit,
 } from "../lib/runner.ts";
+import { readTreeManifest, stampTreeManifest } from "../lib/tree-manifest.ts";
 
 const RES = path(DIR, "update");
 
@@ -194,6 +201,18 @@ export async function run(env: Env, rep: AreaReport) {
     builds.push(p.buildDir);
   }
   const top = artifacts["1.0.0"].split(/[\\/]/).pop()!;
+  // Windows: each version's tree manifest, written into its executable as
+  // denext's packaging does before signing (2.0.0's executable without one is
+  // kept for the case that drops it).
+  const EXE = `${NAME}.exe`;
+  let unstampedExe2: Uint8Array | undefined;
+  if (OS === "windows") {
+    unstampedExe2 = await Deno.readFile(path(artifacts["2.0.0"], EXE));
+    for (const v of ["1.0.0", "2.0.0", "3.0.0"]) {
+      const m = await stampTreeManifest(artifacts[v], EXE, ID, v);
+      log(`  ${v}: tree manifest of ${m.files.length} files`);
+    }
+  }
   const installParent = path(work, "install");
   await Deno.mkdir(installParent);
   const install = path(installParent, top);
@@ -282,7 +301,6 @@ export async function run(env: Env, rep: AreaReport) {
       );
       log(`  published ${v}: ${size} bytes in ${Date.now() - t0} ms`);
     }
-    for (const b of builds.slice(1)) await rm(b);
 
     const v2 = payloads["2.0.0"];
     const v2entry = v2.platforms[platform];
@@ -414,6 +432,90 @@ export async function run(env: Env, rep: AreaReport) {
       await Deno.readTextFile(path(srv, "v2", "app-update.json")),
       { download: true, optOut: false },
     );
+    // Windows: 2.0.0 changed after its tree manifest was written. Each is a
+    // copy of the packaged 2.0.0, offered as 2.0.0 under the real key.
+    const treeCases: Record<string, string> = {};
+    if (OS === "windows") {
+      const signedFiles = readTreeManifest(
+        await Deno.readFile(path(artifacts["2.0.0"], EXE)),
+      )?.files ?? [];
+      // A listed file that is not a PE image (the OS check covers those),
+      // the window's launch policy where there is one; not the install
+      // marker, whose absence the archive's shape check refuses first.
+      const looseFiles = signedFiles.map((f) => f.path).filter((f) =>
+        !/\.(dll|exe|node)$/i.test(f) && f !== ".deno-desktop-app"
+      );
+      const loose = looseFiles.find((f) => f === "laufey-launch.json") ??
+        looseFiles[0];
+      rep.check(
+        "the 2.0.0 executable's tree manifest lists its loose files",
+        !!loose,
+        signedFiles.map((f) => f.path),
+      );
+      const variant = async (
+        n: string,
+        why: string,
+        change: (dir: string) => Promise<void>,
+      ) => {
+        const dir = path(work, "variants", n);
+        await Deno.mkdir(dir, { recursive: true });
+        await copyTree(artifacts["2.0.0"], path(dir, top));
+        await change(path(dir, top));
+        const archive = path(adv, `${n}.tar.gz`);
+        const { sha256: sum, size } = await packArtifact(
+          path(dir, top),
+          top,
+          archive,
+        );
+        await rm(dir);
+        await addCase(
+          n,
+          await sign(
+            withEntry({ url: `${base}/adv/${n}.tar.gz`, sha256: sum, size }),
+            key,
+          ),
+          { download: true },
+        );
+        treeCases[n] = why;
+      };
+      if (loose) {
+        await variant(
+          "treeChanged",
+          "differs from the signed manifest",
+          async (d) => {
+            const f = path(d, ...loose.split("/"));
+            await Deno.writeFile(f, new Uint8Array([0x20]), { append: true });
+          },
+        );
+        await variant(
+          "treeMissing",
+          "is listed but missing",
+          (d) => Deno.remove(path(d, ...loose.split("/"))),
+        );
+      }
+      await variant(
+        "treeExtra",
+        "is not in the signed manifest",
+        (d) => Deno.writeTextFile(path(d, "extra.js"), "globalThis.x = 1;\n"),
+      );
+      await variant(
+        "treeNone",
+        "carries no signed tree manifest",
+        (d) => Deno.writeFile(path(d, EXE), unstampedExe2!),
+      );
+      await variant(
+        "treeOtherApp",
+        "the signed tree manifest is for app",
+        (d) => stampTreeManifest(d, EXE, `${ID}.other`, "2.0.0").then(() => {}),
+      );
+      await variant(
+        "treeOtherVersion",
+        "the signed tree manifest is for version",
+        (d) => stampTreeManifest(d, EXE, ID, "3.0.0").then(() => {}),
+      );
+    }
+    // The packaged 2.0.0 / 3.0.0 are published (and copied above).
+    for (const b of builds.slice(1)) await rm(b);
 
     const running: Launched[] = [];
     const start = async (tag: string) => {
@@ -496,6 +598,18 @@ export async function run(env: Env, rep: AreaReport) {
           ? !!got?.ok
           : got?.code === code;
         rep.check(`adversarial: ${n} -> ${code}`, ok, got);
+      }
+      // Windows: refused by the tree check itself, not the Authenticode one
+      // (the cases stage with the unsigned-dev opt-out, as the updates do).
+      for (const [n, why] of Object.entries(treeCases)) {
+        const got = r[n];
+        rep.check(
+          `adversarial: ${n} -> os_signature (${why})`,
+          got?.code === "os_signature" &&
+            String(got?.message).includes("the staged app's files:") &&
+            String(got?.message).includes(why),
+          got,
+        );
       }
     }
     const afterAdv = await listParent();
