@@ -301,7 +301,6 @@ export async function run(env: Env, rep: AreaReport) {
       );
       log(`  published ${v}: ${size} bytes in ${Date.now() - t0} ms`);
     }
-    for (const b of builds.slice(1)) await rm(b);
 
     const v2 = payloads["2.0.0"];
     const v2entry = v2.platforms[platform];
@@ -515,6 +514,8 @@ export async function run(env: Env, rep: AreaReport) {
         (d) => stampTreeManifest(d, EXE, ID, "3.0.0").then(() => {}),
       );
     }
+    // The packaged 2.0.0 / 3.0.0 are published (and copied above).
+    for (const b of builds.slice(1)) await rm(b);
 
     const running: Launched[] = [];
     const start = async (tag: string) => {
