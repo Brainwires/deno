@@ -8362,6 +8362,13 @@ where the changes are discussed.
        failing closed), `manifests_are_parsed_strictly` (the new fields),
        `the_tree_must_match_the_manifest_exactly` (the executable never listed),
        `reads_a_manifest_the_packager_wrote`.
+     - End to end on Windows (the runtime workflow's `update` e2e area): each
+       packaged version carries a manifest written by a test-only copy of
+       denext's writer (`e2e/lib/tree-manifest.ts`, `e2e/lib/pe-resources.ts`),
+       so 1.0.0 -> 2.0.0, the 3.0.0 trial and its rollback run with it through
+       `stage()` and the update helper, and 2.0.0 is refused (`os_signature`, by
+       the tree check) with a loose file changed or removed, a file added, its
+       manifest dropped, or a manifest for another app or version.
 
 213. **`fix(desktop)`: `stage()` extracts the bytes the download verified** (the
      denext.8 audit, F5; `runtime/ops/desktop_update/archive.rs`, `mod.rs`). The
