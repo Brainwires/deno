@@ -22,8 +22,10 @@ const ARES_AI_PASSIVE = 1 << 2;
 const ARES_AI_NUMERICSERV = 1 << 3;
 // The operating system's own values, as in Node.js: these three go to
 // `getaddrinfo()` as they are, they are not c-ares flags.
-const [AI_ADDRCONFIG, AI_ALL, AI_V4MAPPED] = __bootstrap.core.ops
-  .op_node_getaddrinfo_flags();
+const getaddrinfoFlags = __bootstrap.core.ops.op_node_getaddrinfo_flags();
+const AI_ADDRCONFIG = getaddrinfoFlags[0];
+const AI_ALL = getaddrinfoFlags[1];
+const AI_V4MAPPED = getaddrinfoFlags[2];
 const ARES_AI_NOSORT = 1 << 7;
 const ARES_AI_ENVHOSTS = 1 << 8;
 
