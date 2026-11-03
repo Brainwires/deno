@@ -8441,20 +8441,36 @@ where the changes are discussed.
        general Deno permission gap, not only the sidecar's: `--deny-write=a/b`
        did not stop `Deno.rename("a", "c")`.
      - Check, then exec: the file is hashed through one no-follow handle, held
-       past the spawn. On Windows it shares read only, so nothing can write,
-       rename or delete the file until the spawn returns. On Unix, after an
-       asynchronous spawn the path and the handle are compared with the device,
-       inode, mode, size, mtime and ctime from before the hash, and the child is
-       killed on a difference. What is left there, for a program of the same
-       user (Deno code cannot write the file, its folder or a folder above it
-       holding it, nor link to it; with unscoped `--allow-read` and
-       `--allow-write`, which `Deno.symlink` needs, it could put a symlink where
-       a folder above the program's will be before the runtime first writes it,
-       and race a spawn by writing the copy through it (a change that stays is
-       refused at the next spawn), but such an app can change files the user's
-       own programs run anyway):
-       - one that changes the path in the window (microseconds) may get a moment
-         of a child before the kill, and `outputSync()` has no such kill;
+       past the spawn (returned with the command, never kept in the OpState, so
+       a spawn that fails after the check, on a stdio fd that can't be
+       duplicated say, closes it and leaves nothing for the next spawn). On
+       Windows it shares read only, so nothing can write, rename or delete the
+       file until the spawn returns. On Linux the child execs that handle
+       (`/proc/self/fd/N`, a close-on-exec copy numbered above every fd the
+       child is given; argv[0] stays the program's path, and a spawn error names
+       that path, not the handle's), so what runs is the file that was hashed
+       whatever the path names by then; a `#!` script (its interpreter opens the
+       path again) and the `/bin/sh` retry of a file the kernel can't exec run
+       the path, as everywhere without `/proc`. On Unix, after every spawn
+       (asynchronous, `outputSync()` and the deprecated `Deno.run`) the path and
+       the handle are compared with the device, inode, mode, size, mtime and
+       ctime from before the hash, and the child is killed on a difference. On
+       Linux that is what catches a write in place; on macOS (and for a script)
+       it is also the only check of a swap, and sees only a swap still there
+       after the spawn: one put back in time (A-B-A) is not seen, and a sync
+       child has run to its end before the check, which can then only refuse the
+       result. What is left there, for a program of the same user (Deno code
+       cannot write the file, its folder or a folder above it holding it, nor
+       link to it; with unscoped `--allow-read` and `--allow-write`, which
+       `Deno.symlink` needs, it could put a symlink where a folder above the
+       program's will be before the runtime first writes it, and race a spawn by
+       writing the copy through it (a change that stays is refused at the next
+       spawn), but such an app can change files the user's own programs run
+       anyway):
+       - outside Linux (or for a script), one that changes the path in the
+         window (microseconds) may get a moment of a child before the kill, all
+         of an `outputSync()` one, or, putting it back in time, a child that is
+         never seen;
        - a write in place of the same length, with the mode put back, inside one
          tick of the file system's timestamp clock after the file last changed,
          leaves the stamp as it was. ext4 on Linux takes timestamps from a
@@ -8472,9 +8488,10 @@ where the changes are discussed.
      - Tests: `ext/process` `embedded_program` (written when missing, a swap
        refused then healed, a symlink refused even to the right bytes, embedded
        bytes off the hash not written, a change after the hash seen, the Windows
-       lock, another spelling of the path),
-       `self_fork_tests::a_registered_program_is_checked_at_spawn` (also:
-       another spelling runs the registered path), the spec
+       lock, another spelling of the path, Linux running the hashed file after a
+       swap), `self_fork_tests::a_registered_program_is_checked_at_spawn` (also:
+       another spelling runs the registered path; a spawn that fails after the
+       check keeps nothing of it), the spec
        `permission/rename_ancestor_of_deny`, and `cli/rt/run.rs` (the value
        taken out of the grant, the denial, malformed values granting nothing).
        The e2e area `sidecarint` needs a binary built by this fork's CLI (the

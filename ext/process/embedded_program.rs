@@ -21,12 +21,22 @@
 //!   symlink, and that handle stays open past the spawn.
 //! - Windows: the handle shares read only, so until the child's image is
 //!   mapped the file can be neither written, nor renamed, nor deleted.
-//! - Unix: nothing can lock a file against its owner. After an asynchronous
-//!   spawn the path is compared with the handle's device, inode, mode, size,
-//!   mtime and ctime as they were before the hash; on a difference the child is
-//!   killed and the spawn refused. So a same-user program that wins the race
-//!   (microseconds) gets at most a moment of a child, and app code holding only
-//!   the Deno APIs cannot try: the embedder denies writes to the folder.
+//! - Linux: the spawn execs the handle itself (`/proc/self/fd/N`, a copy of
+//!   it numbered above every fd the child is given), not the path, so what
+//!   runs is the file that was hashed whatever the path names by then. A
+//!   `#!` script is the exception (its interpreter would open the path again,
+//!   and the copy is closed on exec), as is the `/bin/sh` retry of a file the
+//!   kernel can't exec: those run the path.
+//! - Unix: nothing can lock a file against its owner. After a spawn
+//!   (asynchronous or `outputSync()`) the path is compared with the handle's
+//!   device, inode, mode, size, mtime and ctime as they were before the hash;
+//!   on a difference the child is killed and the spawn refused. On Linux that
+//!   catches a write in place (the handle runs the same inode); elsewhere also
+//!   a swap of the path, but only one still there after the spawn: a swap put
+//!   back in time (A-B-A) is not seen. So a same-user program that wins the
+//!   race (microseconds) gets at most a moment of a child (all of a sync one,
+//!   which the check can only report), and app code holding only the Deno APIs
+//!   cannot try: the embedder denies writes to the folder.
 
 #![allow(
   clippy::disallowed_methods,
@@ -100,6 +110,17 @@ pub(crate) struct VerifiedProgram {
   path: PathBuf,
   #[cfg(unix)]
   stamp: FileStamp,
+  // Whether it starts with `#!`: then the kernel hands the path to an
+  // interpreter, which opens it again, so it can't run from the handle.
+  #[cfg(target_os = "linux")]
+  script: bool,
+  // The copy of `file` that `exec_path` names, held until the spawn returns.
+  #[cfg(target_os = "linux")]
+  #[allow(
+    dead_code,
+    reason = "held, never read: it keeps the fd open until the spawn returns"
+  )]
+  exec_fd: Option<std::os::fd::OwnedFd>,
 }
 
 #[cfg(unix)]
@@ -132,6 +153,31 @@ impl VerifiedProgram {
   /// case-sensitive volume, or go through a link.
   pub(crate) fn path(&self) -> &Path {
     &self.path
+  }
+
+  /// Linux: a path that execs the hashed file itself, whatever the program's
+  /// path names by the time of the exec: `/proc/self/fd/N`, for a copy of the
+  /// handle (close-on-exec) numbered `min_fd` or above, so no fd the child is
+  /// given lands on it before the exec. `None` for a `#!` script, or without
+  /// `/proc`; the spawn then runs the path.
+  #[cfg(target_os = "linux")]
+  pub(crate) fn exec_path(&mut self, min_fd: i32) -> Option<PathBuf> {
+    use std::os::fd::AsRawFd;
+    use std::os::fd::FromRawFd;
+    use std::os::fd::OwnedFd;
+    if self.script || !Path::new("/proc/self/fd").is_dir() {
+      return None;
+    }
+    // SAFETY: `fcntl` on an fd this handle owns; the result is a new fd.
+    let fd = unsafe {
+      libc::fcntl(self.file.as_raw_fd(), libc::F_DUPFD_CLOEXEC, min_fd.max(3))
+    };
+    if fd < 0 {
+      return None;
+    }
+    // SAFETY: `fd` was just created and nothing else owns it.
+    self.exec_fd = Some(unsafe { OwnedFd::from_raw_fd(fd) });
+    Some(PathBuf::from(format!("/proc/self/fd/{fd}")))
   }
 
   /// Whether the path still is the file that was hashed, unchanged since. For
@@ -283,6 +329,12 @@ fn verify(program: &EmbeddedProgram) -> Result<VerifiedProgram, String> {
   let stamp = stamp_of(&meta);
   let bytes_match = meta.is_file()
     && hash_file(&mut file).is_ok_and(|hash| hash == program.sha256);
+  #[cfg(target_os = "linux")]
+  let script = bytes_match && {
+    use std::os::unix::fs::FileExt;
+    let mut magic = [0u8; 2];
+    file.read_exact_at(&mut magic, 0).is_ok() && &magic == b"#!"
+  };
   if !bytes_match {
     drop(file);
     remove_any(&program.path);
@@ -296,6 +348,10 @@ fn verify(program: &EmbeddedProgram) -> Result<VerifiedProgram, String> {
     path: program.path.clone(),
     #[cfg(unix)]
     stamp,
+    #[cfg(target_os = "linux")]
+    script,
+    #[cfg(target_os = "linux")]
+    exec_fd: None,
   })
 }
 
@@ -459,6 +515,62 @@ mod tests {
     std::thread::sleep(std::time::Duration::from_millis(50));
     std::fs::write(&path, b"PACKAGED").unwrap();
     assert!(!held.unchanged());
+  }
+
+  // The spawn runs the file that was hashed, not what the path names by the
+  // time of the exec.
+  #[cfg(target_os = "linux")]
+  #[test]
+  fn linux_execs_the_hashed_file_even_after_a_swap() {
+    let real = ["/usr/bin/true", "/bin/true"]
+      .into_iter()
+      .find(|p| Path::new(p).is_file())
+      .expect("a `true` binary");
+    let bytes: &'static [u8] = std::fs::read(real).unwrap().leak();
+    let (_dir, path) = target();
+    let p = program(&path, bytes);
+    let mut held = verify(&p).unwrap();
+    // Swapped between the check and the exec, for a script that fails.
+    let other = path.with_file_name("other");
+    std::fs::write(&other, b"#!/bin/sh\nexit 3\n").unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&other, std::fs::Permissions::from_mode(0o700))
+      .unwrap();
+    std::fs::rename(&other, &path).unwrap();
+    let exec = held.exec_path(10).expect("runs from the handle");
+    let status = {
+      use std::os::unix::process::CommandExt;
+      std::process::Command::new(&exec)
+        .arg0(&path)
+        .stdin(std::process::Stdio::null())
+        .status()
+        .unwrap()
+    };
+    assert!(status.success(), "{status:?}");
+    // The path alone runs the swapped script.
+    let status = std::process::Command::new(&path)
+      .stdin(std::process::Stdio::null())
+      .status()
+      .unwrap();
+    assert_eq!(status.code(), Some(3));
+    // ... which the check sees after the spawn.
+    assert!(!held.unchanged());
+    // A spawn error names the program's path, not the handle's.
+    assert_eq!(
+      crate::spawn_error_name(exec.as_os_str(), Some(&held)),
+      path.to_string_lossy()
+    );
+    assert_eq!(
+      crate::spawn_error_name(std::ffi::OsStr::new("/bin/sh"), Some(&held)),
+      "/bin/sh"
+    );
+    drop(held);
+
+    // A `#!` script runs its path: its interpreter opens the path again.
+    let script: &'static [u8] = b"#!/bin/sh\nexit 0\n";
+    let (_dir, path) = target();
+    let mut held = verify(&program(&path, script)).unwrap();
+    assert!(held.exec_path(10).is_none());
   }
 
   #[cfg(windows)]
