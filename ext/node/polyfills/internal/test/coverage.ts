@@ -4,9 +4,11 @@
 // `--experimental-test-coverage`, Node 26.5.1's line, branch and function
 // accounting (`lib/internal/test_runner/coverage.js`) and its table
 // (`lib/internal/test_runner/utils.js` getCoverageReport), over the V8 coverage
-// files a test file's process writes under `DENO_COVERAGE_DIR`. Node's source
-// map step is left out: a `.ts` file's offsets are those of the transpiled
-// source, so its lines are approximate.
+// files a test file's process writes under `DENO_COVERAGE_DIR`. A transpiled
+// file's (`.ts`) offsets are those of the emitted code; the process writes the
+// emitted code's source map beside them (`<uuid>.sourcemap`, see
+// `runtime/coverage.rs`), and its ranges are mapped back to the file's, as
+// Node's `mapCoverageWithSourceMap` maps a source-mapped file's.
 
 (function () {
 "use strict";
@@ -33,6 +35,7 @@ const {
   RegExpPrototypeSymbolSplit,
   RegExpPrototypeTest,
   SafeMap,
+  SafeMapIterator,
   SafeArrayIterator,
   SafeRegExp,
   SafeSet,
@@ -56,6 +59,7 @@ const kStatusRegex = new SafeRegExp(
 );
 
 const kJavaScriptRegex = new SafeRegExp("\\.(?:js|cjs|mjs)$");
+const kSourceMapFileRegex = new SafeRegExp("\\.sourcemap$");
 
 function builtin(name) {
   return globalThis.process.getBuiltinModule(name);
@@ -263,13 +267,149 @@ function isFilesOwnScript(script, lengths) {
   return script.functions[0]?.ranges[0]?.endOffset === length;
 }
 
+// The source maps the processes wrote beside their transpiled scripts'
+// coverage, by script URL.
+function readSourceMaps(directory) {
+  const fs = builtin("node:fs");
+  const path = builtin("node:path");
+  const maps = new SafeMap();
+  for (const name of new SafeArrayIterator(fs.readdirSync(directory))) {
+    if (!RegExpPrototypeTest(kSourceMapFileRegex, name)) continue;
+    try {
+      const entry = JSONParse(
+        fs.readFileSync(path.resolve(directory, name), "utf8"),
+      );
+      if (typeof entry?.url === "string" && !maps.has(entry.url)) {
+        maps.set(entry.url, entry);
+      }
+    } catch { /* partial file */ }
+  }
+  return maps;
+}
+
+function lineStarts(lengths, separator) {
+  const starts = [];
+  let offset = 0;
+  for (let i = 0; i < lengths.length; i++) {
+    ArrayPrototypePush(starts, offset);
+    offset += lengths[i] + separator;
+  }
+  return starts;
+}
+
+// The line of `offset` among `starts` (sorted), by binary search.
+function lineOf(starts, offset) {
+  let low = 0;
+  let high = starts.length - 1;
+  while (low < high) {
+    const mid = MathFloor((low + high + 1) / 2);
+    if (starts[mid] <= offset) low = mid;
+    else high = mid - 1;
+  }
+  return low;
+}
+
+// A transpiled script's coverage in its file's offsets: each range's ends
+// through the emitted code's source map (Node's `mapCoverageWithSourceMap`).
+// A range that does not map is left out, as in Node; the script's own range
+// spans the file.
+function mapScriptWithSourceMap(script, entry) {
+  let source;
+  try {
+    source = builtin("node:fs").readFileSync(
+      builtin("node:url").fileURLToPath(script.url),
+      "utf8",
+    );
+  } catch {
+    return script;
+  }
+  let sourceMap;
+  try {
+    const { SourceMap } = builtin("node:module");
+    sourceMap = new SourceMap(entry.data, {
+      __proto__: null,
+      lineLengths: entry.lineLengths,
+    });
+  } catch {
+    return script;
+  }
+  const generatedStarts = lineStarts(entry.lineLengths, 1);
+  const lastLine = entry.lineLengths.length - 1;
+  const generatedLength = generatedStarts[lastLine] +
+    entry.lineLengths[lastLine];
+  const sourceLines = RegExpPrototypeSymbolSplit(kLineSplitRegex, source);
+  const sourceStarts = lineStarts(
+    ArrayPrototypeMap(sourceLines, (line) => line.length),
+    0,
+  );
+  const toSource = (offset, isEnd) => {
+    const at = MathMax(0, isEnd ? offset - 1 : offset);
+    const line = lineOf(generatedStarts, at);
+    const found = sourceMap.findEntry(line, at - generatedStarts[line]);
+    if (
+      found?.originalSource === undefined ||
+      found.originalLine >= sourceLines.length
+    ) {
+      return -1;
+    }
+    const lineText = sourceLines[found.originalLine];
+    const column = MathMin(found.originalColumn, lineText.length);
+    return sourceStarts[found.originalLine] + column + (isEnd ? 1 : 0);
+  };
+  const functions = [];
+  for (let j = 0; j < script.functions.length; j++) {
+    const fn = script.functions[j];
+    const ranges = [];
+    let ownRangeMapped = false;
+    for (let k = 0; k < fn.ranges.length; k++) {
+      const range = fn.ranges[k];
+      if (range.startOffset === 0 && range.endOffset >= generatedLength) {
+        if (k === 0) ownRangeMapped = true;
+        ArrayPrototypePush(ranges, {
+          __proto__: null,
+          startOffset: 0,
+          endOffset: source.length,
+          count: range.count,
+        });
+        continue;
+      }
+      const startOffset = toSource(range.startOffset, false);
+      const endOffset = toSource(range.endOffset, true);
+      if (startOffset < 0 || endOffset <= startOffset) continue;
+      if (k === 0) ownRangeMapped = true;
+      ArrayPrototypePush(ranges, {
+        __proto__: null,
+        startOffset,
+        endOffset,
+        count: range.count,
+      });
+    }
+    // A function whose own range does not map is left out.
+    if (!ownRangeMapped) continue;
+    ArrayPrototypePush(functions, {
+      __proto__: null,
+      functionName: fn.functionName,
+      isBlockCoverage: fn.isBlockCoverage,
+      ranges,
+    });
+  }
+  return {
+    __proto__: null,
+    scriptId: script.scriptId,
+    url: script.url,
+    functions,
+  };
+}
+
 function readCoverage(directory, options) {
   const fs = builtin("node:fs");
   const path = builtin("node:path");
   const merged = new SafeMap();
   const lengths = new SafeMap();
   const mergedScripts = [];
+  const sourceMaps = readSourceMaps(directory);
   for (const name of new SafeArrayIterator(fs.readdirSync(directory))) {
+    if (RegExpPrototypeTest(kSourceMapFileRegex, name)) continue;
     let parsed;
     try {
       const file = path.resolve(directory, name);
@@ -279,10 +419,14 @@ function readCoverage(directory, options) {
     }
     const scripts = parsed.result ?? [parsed];
     for (let i = 0; i < scripts.length; i++) {
-      const script = scripts[i];
+      let script = scripts[i];
       if (typeof script?.url !== "string") continue;
       if (shouldSkip(script.url, options)) continue;
       if (!isFilesOwnScript(script, lengths)) continue;
+      const sourceMap = sourceMaps.get(script.url);
+      if (sourceMap !== undefined) {
+        script = mapScriptWithSourceMap(script, sourceMap);
+      }
       const old = merged.get(script.url);
       if (old === undefined) {
         merged.set(script.url, script);
@@ -661,6 +805,7 @@ function writeMerged(directory, file) {
   const path = builtin("node:path");
   const result = [];
   for (const name of new SafeArrayIterator(fs.readdirSync(directory))) {
+    if (RegExpPrototypeTest(kSourceMapFileRegex, name)) continue;
     try {
       const parsed = JSONParse(
         fs.readFileSync(path.resolve(directory, name), "utf8"),
@@ -671,7 +816,27 @@ function writeMerged(directory, file) {
       }
     } catch { /* partial file */ }
   }
-  fs.writeFileSync(file, JSONStringify({ result }));
+  // Node's `source-map-cache`: a transpiled script's map, by its URL.
+  const sourceMapCache = { __proto__: null };
+  let hasSourceMaps = false;
+  for (
+    const { 0: url, 1: entry } of new SafeMapIterator(readSourceMaps(directory))
+  ) {
+    hasSourceMaps = true;
+    sourceMapCache[url] = {
+      __proto__: null,
+      lineLengths: entry.lineLengths,
+      data: entry.data,
+    };
+  }
+  fs.writeFileSync(
+    file,
+    JSONStringify(
+      hasSourceMaps
+        ? { result, "source-map-cache": sourceMapCache }
+        : { result },
+    ),
+  );
 }
 
 // The thresholds' failures, as Node's root test reports them.

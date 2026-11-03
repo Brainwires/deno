@@ -1,0 +1,8 @@
+(no --test) "{not json" 1 true true true
+(no --test) "{}" 1 true true true
+(no --test) "5" 1 true true true
+(no --test) "[1]" 1 true true true
+--test "{not json" 1 true true true
+--test "{}" 1 true true true
+--test "5" 1 true true true
+--test "[1]" 1 true true true

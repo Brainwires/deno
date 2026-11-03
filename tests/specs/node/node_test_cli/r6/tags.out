@@ -1,0 +1,9 @@
+db only ["db"] 5
+db plus integration ["db","integration"] 5
+db suite ["db"] 5
+flaky ["flaky"] 5
+inherits ["flaky"] 5
+tagged.js [] 3
+untagged [] 5
+[WILDCARD]ExperimentalWarning: Test tags is an experimental feature and might change at any time
+[WILDCARD]filtered: [ "db only", "db plus integration", "db suite" ]

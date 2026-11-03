@@ -1,0 +1,2 @@
+spec { userFrameIsAPath: true, internalFrames: true, extFrames: false }
+tap { userFrameIsAPath: true, internalFrames: true, extFrames: false }

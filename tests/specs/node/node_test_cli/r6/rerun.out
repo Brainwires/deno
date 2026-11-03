@@ -1,0 +1,42 @@
+(no --test) 0 1 [ "ℹ pass 3", "ℹ fail 1" ] []
+(no --test) 1 1 [ "ℹ pass 3", "ℹ fail 1" ] [
+  "✔ passes (passed on attempt 0)",
+  "✔ child (passed on attempt 0)",
+  "✔ parent (passed on attempt 0)"
+]
+(no --test) 2 0 [ "ℹ pass 4", "ℹ fail 0" ] [
+  "✔ passes (passed on attempt 0)",
+  "✔ child (passed on attempt 0)",
+  "✔ parent (passed on attempt 0)"
+]
+[
+  [ "rerun.test.js:2:1", "rerun.test.js:8:1", "rerun.test.js:9:11" ],
+  [ "rerun.test.js:2:1", "rerun.test.js:8:1", "rerun.test.js:9:11" ],
+  [
+    "rerun.test.js:2:1",
+    "rerun.test.js:5:1",
+    "rerun.test.js:8:1",
+    "rerun.test.js:9:11"
+  ]
+]
+--test 0 1 [ "ℹ pass 3", "ℹ fail 1" ] []
+--test 1 1 [ "ℹ pass 3", "ℹ fail 1" ] [
+  "✔ passes (passed on attempt 0)",
+  "✔ child (passed on attempt 0)",
+  "✔ parent (passed on attempt 0)"
+]
+--test 2 0 [ "ℹ pass 4", "ℹ fail 0" ] [
+  "✔ passes (passed on attempt 0)",
+  "✔ child (passed on attempt 0)",
+  "✔ parent (passed on attempt 0)"
+]
+[
+  [ "rerun.test.js:2:1", "rerun.test.js:8:1", "rerun.test.js:9:11" ],
+  [ "rerun.test.js:2:1", "rerun.test.js:8:1", "rerun.test.js:9:11" ],
+  [
+    "rerun.test.js:2:1",
+    "rerun.test.js:5:1",
+    "rerun.test.js:8:1",
+    "rerun.test.js:9:11"
+  ]
+]

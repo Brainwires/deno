@@ -15,6 +15,7 @@ const {
   DataViewPrototypeGetByteLength,
   DataViewPrototypeGetByteOffset,
   Error,
+  JSONStringify,
   ObjectEntries,
   ObjectKeys,
   ObjectPrototype,
@@ -1813,6 +1814,33 @@ function shellRunsNodeShimOnNpmScript(command, isCmdExe) {
  * This function is based on https://github.com/nodejs/node/blob/fc6426ccc4b4cb73076356fb6dbf46a28953af01/lib/child_process.js#L504-L528.
  * Copyright Joyent, Inc. and other Node contributors. All rights reserved. MIT license.
  */
+const kNodeCliParseErrorRegExp = new SafeRegExp(
+  "^Failed to parse Node\\.js CLI arguments: ([\\s\\S]*?)\\. If you believe",
+);
+
+// The node shim's message for arguments it can't parse, as Node words it
+// (`--flag requires an argument`), or null for any other error.
+function nodeCliParseErrorMessage(err) {
+  const match = RegExpPrototypeExec(
+    kNodeCliParseErrorRegExp,
+    typeof err?.message === "string" ? err.message : "",
+  );
+  return match === null ? null : match[1];
+}
+
+// The arguments of a child that does what Node does with arguments it can't
+// parse: prints `node: <message>` and exits with 9 (Node's
+// `kInvalidCommandLineArgument`).
+function invalidNodeArgsChild(message) {
+  return [
+    "eval",
+    "--no-config",
+    `Deno.stderr.writeSync(new TextEncoder().encode(${
+      JSONStringify(`node: ${message}\n`)
+    }));Deno.exit(9);`,
+  ];
+}
+
 function buildCommand(
   file,
   args,
@@ -1836,7 +1864,16 @@ function buildCommand(
     } else if (ArrayPrototypeIncludes(args, "--no-use-env-proxy")) {
       env.NODE_USE_ENV_PROXY = "0";
     }
-    const result = op_node_translate_cli_args(args, scriptInNpmPackage, true);
+    let result;
+    try {
+      result = op_node_translate_cli_args(args, scriptInNpmPackage, true);
+    } catch (err) {
+      // Node's child exits with 9 on arguments it can't parse; so does this
+      // one, rather than the spawn throwing.
+      const message = nodeCliParseErrorMessage(err);
+      if (message === null) throw err;
+      return [file, invalidNodeArgsChild(message), false];
+    }
     args = result.denoArgs;
     includeNpmProcessState = result.needsNpmProcessState;
     if (result.caStores?.length) {

@@ -1962,3 +1962,21 @@ Deno.test({
     assert(err.errno < 0);
   }
 });
+
+Deno.test({
+  name:
+    "[child_process] a node invocation with arguments it can't parse exits with 9",
+}, async () => {
+  // Node's child exits with 9 (`node: <message>` on stderr) on a command line
+  // it can't parse; spawnSync() threw the node shim's parse error instead.
+  const args = ["--experimental-test-tag-filter=", "main.js"];
+  const sync = CP.spawnSync(Deno.execPath(), args);
+  assertEquals(sync.status, 9);
+  assertEquals(
+    sync.stderr.toString(),
+    "node: --experimental-test-tag-filter= requires an argument\n",
+  );
+  const { promise, resolve } = Promise.withResolvers<number | null>();
+  CP.spawn(Deno.execPath(), args).on("exit", resolve);
+  assertEquals(await promise, 9);
+});

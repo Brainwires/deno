@@ -65,6 +65,14 @@
       "args": "run -A ../node.mjs --experimental-test-coverage --test-reporter=tap math.test.js",
       "output": "cov_table.out"
     },
+    // A `.ts` file's coverage, mapped from the emitted code back to the
+    // file's lines through the map its process writes beside it: what Node
+    // reports for the same files (which strips types in place).
+    "coverage_ts_source_map": {
+      "cwd": "cov_ts",
+      "args": "run -A ../node.mjs --test --experimental-test-coverage --test-reporter=lcov",
+      "output": "cov_ts.out"
+    },
     // A file of `Deno.test()` tests fails under `node --test` (its tests
     // would not run), as it does in Node (`Deno` is not defined there);
     // outside the runner `Deno.test()` still registers nothing, and
@@ -84,6 +92,47 @@
       "cwd": "deno_test",
       "args": "test -A math.test.js",
       "output": "deno_test_deno.out"
+    },
+    // A reporter that fails ends the run with exit code 7, as in Node (the
+    // runner's uncaught exception handler rethrows a reporter's error).
+    "reporter_error_exit_code": {
+      "cwd": "r6",
+      "args": "run -A ../node.mjs --test --test-reporter=./throwing_reporter.mjs test/pass.js",
+      "output": "r6/reporter_error.out",
+      "exitCode": 7
+    },
+    "reporter_setup_error_exit_code": {
+      "cwd": "r6",
+      "args": "run -A ../node.mjs --test --test-reporter=./no_reporter.mjs test/pass.js",
+      "output": "r6/reporter_setup_error.out",
+      "exitCode": 7
+    },
+    // Test tags on the events of each test (its parents' then its own), and
+    // `testTagFilters` keeping the tests that have every tag given.
+    "tags_in_events": {
+      "cwd": "r6",
+      "args": "run -A tags_events.mjs",
+      "output": "r6/tags.out"
+    },
+    // `--test-rerun-failures`: what passed in an earlier attempt is replayed,
+    // and each attempt's passes are added to the file.
+    "rerun_failures": {
+      "cwd": "r6",
+      "args": "run -A rerun_driver.mjs",
+      "output": "r6/rerun.out"
+    },
+    // A rerun file that isn't JSON or isn't an array of attempts: the
+    // "not a valid rerun file" warning, and the run goes on.
+    "rerun_failures_invalid_file": {
+      "cwd": "r6",
+      "args": "run -A rerun_invalid_driver.mjs",
+      "output": "r6/rerun_invalid.out"
+    },
+    // A failure's stack: `node:internal/` frames and a CommonJS file's path.
+    "failure_stack_frames": {
+      "cwd": "r6",
+      "args": "run -A stack_driver.mjs",
+      "output": "r6/stack.out"
     },
     // Quotes and spaces in a pattern stay in its NODE_OPTIONS token.
     "pattern_cannot_add_flags": {
