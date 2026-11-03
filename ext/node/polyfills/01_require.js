@@ -13,6 +13,8 @@ import {
   op_module_hooks_register,
   op_module_hooks_respond_load,
   op_napi_open,
+  op_node_compile_cjs_function,
+  op_node_create_function_code_cache,
   op_node_has_child_ipc_pipe,
   op_node_strip_typescript_types,
   op_require_as_file_path,
@@ -37,6 +39,8 @@ import {
   op_require_resolve_lookup_paths,
   op_require_stat,
   op_require_try_self,
+  op_v8_cached_data_version_tag,
+  op_zlib_crc32,
 } from "ext:core/ops";
 const {
   ArrayIsArray,
@@ -50,9 +54,13 @@ const {
   ArrayPrototypeSplice,
   Error,
   JSONParse,
+  MathFloor,
+  MathRandom,
+  NumberPrototypeToString,
   ObjectCreate,
   ObjectDefineProperty,
   ObjectEntries,
+  ObjectFreeze,
   ObjectGetOwnPropertyDescriptor,
   ObjectGetPrototypeOf,
   ObjectHasOwn,
@@ -77,12 +85,16 @@ const {
   StringPrototypeIndexOf,
   StringPrototypeLastIndexOf,
   StringPrototypeMatch,
+  StringPrototypePadStart,
   StringPrototypeReplace,
   StringPrototypeSlice,
   StringPrototypeSplit,
   StringPrototypeStartsWith,
+  StringPrototypeToLowerCase,
   SyntaxError,
   TypeError,
+  Uint32Array,
+  Uint8Array,
 } = primordials;
 
 const _httpAgent = core.createLazyLoader("node:_http_agent");
@@ -2299,6 +2311,508 @@ function enrichCJSError(error) {
   }
 }
 
+// denext: Node's on-disk compile cache (`module.enableCompileCache()`,
+// `NODE_COMPILE_CACHE`), as Node 26.5.1's `src/compile_cache.cc`, `src/env.cc`
+// and `lib/internal/modules/helpers.js`, for the CommonJS loader. Same cache
+// layout (`<dir>/<version>-<arch>-<V8 tag>-<uid>/<crc32 of type + file>`),
+// file format (five uint32 headers, then V8's code cache) and
+// `NODE_DEBUG_NATIVE=COMPILE_CACHE` messages as Node. ES modules are compiled
+// by the runtime's module loader with its own code cache and are not stored
+// here.
+const kCompileCacheStatus = [
+  "FAILED",
+  "ENABLED",
+  "ALREADY_ENABLED",
+  "DISABLED",
+];
+const kCompileCacheFailed = 0;
+const kCompileCacheEnabled = 1;
+const kCompileCacheAlreadyEnabled = 2;
+const kCompileCacheDisabled = 3;
+const kCachedCodeCommonJS = 0;
+const kCacheMagicNumber = 0x8adfdbb2;
+const kCacheHeaderCount = 5;
+const kCacheHeaderBytes = kCacheHeaderCount * 4;
+
+const compileCache = {
+  initialized: false,
+  debug: undefined,
+  // The directory with the version tag; "" while the cache is off.
+  dir: "",
+  portable: false,
+  normalizedDir: "",
+  entries: new SafeMap(),
+  exitHookInstalled: false,
+};
+
+function compileCacheGetenv(name) {
+  return op_get_env_no_permission_check(name) ?? undefined;
+}
+
+function compileCacheIsDebug() {
+  if (compileCache.debug === undefined) {
+    // Node's `EnabledDebugList::Parse`: comma-separated, case-insensitive,
+    // and a part of a category's name enables it.
+    const list = compileCacheGetenv("NODE_DEBUG_NATIVE");
+    let enabled = false;
+    if (list) {
+      const parts = StringPrototypeSplit(list, ",");
+      for (let i = 0; i < parts.length; i++) {
+        const wanted = StringPrototypeToLowerCase(parts[i]);
+        if (wanted !== "" && StringPrototypeIncludes("compile_cache", wanted)) {
+          enabled = true;
+        }
+      }
+    }
+    compileCache.debug = enabled;
+  }
+  return compileCache.debug;
+}
+
+function compileCacheDebug(message) {
+  if (compileCacheIsDebug()) {
+    core.print(message, true);
+  }
+}
+
+function compileCacheFs() {
+  return nativeModuleExports["fs"];
+}
+
+function uint32ToHex(value) {
+  return StringPrototypePadStart(
+    NumberPrototypeToString(value >>> 0, 16),
+    8,
+    "0",
+  );
+}
+
+function compileCacheHash(bytes) {
+  return op_zlib_crc32(bytes, 0) >>> 0;
+}
+
+function compileCacheKey(filename, type) {
+  const typeByte = new Uint8Array(1);
+  typeByte[0] = type;
+  const crc = op_zlib_crc32(typeByte, 0);
+  return op_zlib_crc32(core.encode(filename), crc) >>> 0;
+}
+
+function compileCacheTypeName(type) {
+  return type === kCachedCodeCommonJS ? "CommonJS" : "ESM";
+}
+
+// libuv's message for a failed fs call, as `uv_strerror()` prints it.
+function compileCacheStrerror(err) {
+  const match = typeof err?.message === "string"
+    ? RegExpPrototypeExec(/^[A-Z0-9_]+: ([^,]+)/, err.message)
+    : null;
+  return match ? match[1] : String(err?.message ?? err);
+}
+
+function compileCacheVersionTag() {
+  let tag = `${process.version}-${process.arch}-${
+    uint32ToHex(op_v8_cached_data_version_tag())
+  }`;
+  const uid = process.getuid?.();
+  if (uid !== undefined) {
+    tag += `-${uid}`;
+  }
+  return tag;
+}
+
+function compileCacheHandlerEnable(dir, portable) {
+  const tag = compileCacheVersionTag();
+  const base = path.resolve(dir);
+  const dirWithTag = base + path.sep + tag;
+  compileCacheDebug(
+    `[compile cache] resolved path ${dir} + ${tag} -> ${dirWithTag}\n`,
+  );
+  let error;
+  try {
+    compileCacheFs().mkdirSync(dirWithTag, { recursive: true });
+  } catch (err) {
+    error = err;
+  }
+  compileCacheDebug(
+    `[compile cache] creating cache directory ${dirWithTag}...${
+      error === undefined ? "success" : compileCacheStrerror(error)
+    }\n`,
+  );
+  if (error !== undefined) {
+    return {
+      status: kCompileCacheFailed,
+      message: `Cannot create cache directory: ${compileCacheStrerror(error)}`,
+      directory: "",
+    };
+  }
+  compileCache.dir = dirWithTag;
+  compileCache.portable = portable;
+  if (portable) {
+    compileCache.normalizedDir = path.normalize(dirWithTag);
+  }
+  return { status: kCompileCacheEnabled, message: "", directory: base };
+}
+
+// `Environment::EnableCompileCache`.
+function compileCacheEnable(dir, portable) {
+  if (compileCacheGetenv("NODE_DISABLE_COMPILE_CACHE") !== undefined) {
+    const message = "Disabled by NODE_DISABLE_COMPILE_CACHE";
+    compileCacheDebug(`[compile cache] ${message}.\n`);
+    return { status: kCompileCacheDisabled, message, directory: "" };
+  }
+  if (compileCache.dir !== "") {
+    return {
+      status: kCompileCacheAlreadyEnabled,
+      message: "",
+      directory: compileCache.dir,
+    };
+  }
+  const result = compileCacheHandlerEnable(dir, portable);
+  if (
+    result.status === kCompileCacheEnabled && !compileCache.exitHookInstalled
+  ) {
+    compileCache.exitHookInstalled = true;
+    // Node persists the cache in an `AtExit` callback; `unload` is
+    // dispatched on a normal exit and by `process.exit()`.
+    globalThis.addEventListener("unload", compileCacheFlush);
+  }
+  if (result.message !== "") {
+    compileCacheDebug(`[compile cache] ${result.message}\n`);
+  }
+  return result;
+}
+
+// `Environment::InitializeCompileCache`: `NODE_COMPILE_CACHE` turns the cache
+// on before any user module is compiled.
+function compileCacheInitialize() {
+  if (compileCache.initialized) return;
+  compileCache.initialized = true;
+  const dir = compileCacheGetenv("NODE_COMPILE_CACHE");
+  if (!dir) return;
+  const portable = compileCacheGetenv("NODE_COMPILE_CACHE_PORTABLE") === "1";
+  if (portable) {
+    compileCacheDebug("[compile cache] using relative path\n");
+  }
+  compileCacheEnable(dir, portable);
+}
+
+function useCompileCache() {
+  compileCacheInitialize();
+  return compileCache.dir !== "";
+}
+
+function compileCacheReadFile(entry) {
+  compileCacheDebug(
+    `[compile cache] reading cache from ${entry.cacheFilename} for ${
+      compileCacheTypeName(entry.type)
+    } ${entry.sourceFilename}...`,
+  );
+  let data;
+  try {
+    data = compileCacheFs().readFileSync(entry.cacheFilename);
+  } catch (err) {
+    compileCacheDebug(` ${compileCacheStrerror(err)}\n`);
+    return;
+  }
+  if (data.length < kCacheHeaderBytes) {
+    compileCacheDebug(`reading header failed, bytes read ${data.length}\n`);
+    return;
+  }
+  const headerBytes = new Uint8Array(kCacheHeaderBytes);
+  for (let i = 0; i < kCacheHeaderBytes; i++) headerBytes[i] = data[i];
+  const headers = new Uint32Array(headerBytes.buffer);
+  compileCacheDebug(
+    `[${headers[0]} ${headers[1]} ${headers[2]} ${headers[3]} ${
+      headers[4]
+    }]...`,
+  );
+  if (headers[0] !== kCacheMagicNumber) {
+    compileCacheDebug(
+      `magic number mismatch: expected ${kCacheMagicNumber}, actual ${
+        headers[0]
+      }\n`,
+    );
+    return;
+  }
+  if (headers[1] !== entry.codeSize) {
+    compileCacheDebug(
+      `code size mismatch: expected ${entry.codeSize}, actual ${headers[1]}\n`,
+    );
+    return;
+  }
+  if (headers[3] !== entry.codeHash) {
+    compileCacheDebug(
+      `code hash mismatch: expected ${entry.codeHash}, actual ${headers[3]}\n`,
+    );
+    return;
+  }
+  const cache = new Uint8Array(
+    data.buffer,
+    data.byteOffset + kCacheHeaderBytes,
+    data.length - kCacheHeaderBytes,
+  );
+  if (headers[2] !== cache.length) {
+    compileCacheDebug(
+      `cache size mismatch: expected ${headers[2]}, actual ${cache.length}\n`,
+    );
+    return;
+  }
+  const cacheHash = compileCacheHash(cache);
+  if (headers[4] !== cacheHash) {
+    compileCacheDebug(
+      `cache hash mismatch: expected ${headers[4]}, actual ${cacheHash}\n`,
+    );
+    return;
+  }
+  entry.cache = cache;
+  compileCacheDebug(` success, size=${cache.length}\n`);
+}
+
+// `CompileCacheHandler::GetOrInsert`.
+function compileCacheGetOrInsert(code, filename, type) {
+  let filePath = filename;
+  if (compileCache.portable && path.isAbsolute(filePath)) {
+    const relative = path.relative(
+      compileCache.normalizedDir,
+      path.normalize(filePath),
+    );
+    if (relative !== "") {
+      filePath = relative;
+      compileCacheDebug(
+        `[compile cache] using relative path ${filePath} from ${compileCache.dir}\n`,
+      );
+    }
+  }
+  const key = compileCacheKey(filePath, type);
+  const codeBytes = core.encode(code);
+  const codeHash = compileCacheHash(codeBytes);
+  const loaded = compileCache.entries.get(key);
+  if (loaded !== undefined && loaded.codeHash === codeHash) {
+    return loaded;
+  }
+  const entry = {
+    codeHash,
+    codeSize: codeBytes.length,
+    cacheKey: key,
+    cacheFilename: compileCache.dir + path.sep + uint32ToHex(key),
+    sourceFilename: filename,
+    cache: null,
+    type,
+    refreshed: false,
+    persisted: false,
+  };
+  compileCache.entries.set(key, entry);
+  compileCacheReadFile(entry);
+  return entry;
+}
+
+// `CompileCacheHandler::MaybeSave` for a compiled function.
+function compileCacheMaybeSave(entry, fn, rejected) {
+  compileCacheDebug(
+    `[compile cache] V8 code cache for ${
+      compileCacheTypeName(entry.type)
+    } ${entry.sourceFilename} was ${
+      rejected
+        ? "rejected"
+        : entry.cache === null
+        ? "not initialized"
+        : "accepted"
+    }, `,
+  );
+  if (entry.cache !== null && !rejected) {
+    compileCacheDebug("keeping the in-memory entry\n");
+    return;
+  }
+  compileCacheDebug(
+    `${
+      entry.cache === null ? "initializing" : "refreshing"
+    } the in-memory entry\n`,
+  );
+  const cache = op_node_create_function_code_cache(fn);
+  if (cache === undefined) return;
+  entry.refreshed = true;
+  entry.cache = cache;
+}
+
+function compileCacheTempName(filename) {
+  const chars =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+  let suffix = "";
+  for (let i = 0; i < 6; i++) {
+    suffix += chars[MathFloor(MathRandom() * chars.length)];
+  }
+  return `${filename}.${suffix}`;
+}
+
+// `CompileCacheHandler::Persist`: each new or refreshed entry goes to a
+// temporary file that is renamed over the cache file.
+function compileCachePersistEntry(entry) {
+  const fs = compileCacheFs();
+  const typeName = compileCacheTypeName(entry.type);
+  if (entry.cache === null) {
+    compileCacheDebug(
+      `[compile cache] skip persisting ${typeName} ${entry.sourceFilename} because the cache was not initialized\n`,
+    );
+    return;
+  }
+  if (!entry.refreshed) {
+    compileCacheDebug(
+      `[compile cache] skip persisting ${typeName} ${entry.sourceFilename} because cache was the same\n`,
+    );
+    return;
+  }
+  if (entry.persisted) {
+    compileCacheDebug(
+      `[compile cache] skip persisting ${typeName} ${entry.sourceFilename} because cache was already persisted\n`,
+    );
+    return;
+  }
+  const headers = new Uint32Array(kCacheHeaderCount);
+  headers[0] = kCacheMagicNumber;
+  headers[1] = entry.codeSize;
+  headers[2] = entry.cache.length;
+  headers[3] = entry.codeHash;
+  headers[4] = compileCacheHash(entry.cache);
+  compileCacheDebug(
+    `[compile cache] Creating temporary file for cache of ${entry.sourceFilename} (${typeName})...`,
+  );
+  const tmp = compileCacheTempName(entry.cacheFilename);
+  let fd;
+  try {
+    fd = fs.openSync(tmp, "wx", 0o600);
+  } catch (err) {
+    compileCacheDebug(`failed. ${compileCacheStrerror(err)}\n`);
+    return;
+  }
+  compileCacheDebug(` -> ${tmp}\n`);
+  compileCacheDebug(
+    `[compile cache] writing cache for ${typeName} ${entry.sourceFilename} to temporary file ${tmp} [${
+      headers[0]
+    } ${headers[1]} ${headers[2]} ${headers[3]} ${headers[4]}]...`,
+  );
+  try {
+    fs.writeSync(fd, new Uint8Array(headers.buffer));
+    fs.writeSync(fd, entry.cache);
+  } catch (err) {
+    compileCacheDebug(`failed: ${compileCacheStrerror(err)}\n`);
+    try {
+      fs.closeSync(fd);
+    } catch {
+      // Already reported the write failure.
+    }
+    return;
+  }
+  try {
+    fs.closeSync(fd);
+  } catch (err) {
+    compileCacheDebug(`failed: ${compileCacheStrerror(err)}\n`);
+    return;
+  }
+  compileCacheDebug("success\n");
+  compileCacheDebug(
+    `[compile cache] Renaming ${tmp} to ${entry.cacheFilename}...`,
+  );
+  try {
+    fs.renameSync(tmp, entry.cacheFilename);
+  } catch (err) {
+    compileCacheDebug(`failed: ${compileCacheStrerror(err)}\n`);
+    return;
+  }
+  compileCacheDebug("success\n");
+  entry.persisted = true;
+}
+
+function compileCachePersist() {
+  compileCache.entries.forEach(compileCachePersistEntry);
+  compileCacheDebug("[compile cache] Clear deserialized cache.\n");
+  compileCache.entries.clear();
+}
+
+function compileCacheFlush() {
+  if (compileCache.dir === "") return;
+  compileCachePersist();
+}
+
+/**
+ * `module.enableCompileCache([options])`.
+ * @param {string | { directory?: string, portable?: boolean } | undefined} options
+ * @returns {{ status: number, message?: string, directory?: string }}
+ */
+export function enableCompileCache(options) {
+  let portable;
+  let directory;
+  if (typeof options === "object" && options !== null) {
+    ({ directory, portable } = options);
+  } else {
+    directory = options;
+  }
+  if (directory === undefined) {
+    directory = compileCacheGetenv("NODE_COMPILE_CACHE") ||
+      path.join(nativeModuleExports["os"].tmpdir(), "node-compile-cache");
+  }
+  if (portable === undefined) {
+    portable = compileCacheGetenv("NODE_COMPILE_CACHE_PORTABLE") === "1";
+  }
+  if (typeof directory !== "string") {
+    throw new internalErrors.ERR_INVALID_ARG_TYPE(
+      "cacheDir",
+      "string",
+      directory,
+    );
+  }
+  compileCacheInitialize();
+  const native = compileCacheEnable(directory, portable === true);
+  const result = { status: native.status };
+  if (native.message) result.message = native.message;
+  if (native.directory) result.directory = native.directory;
+  return result;
+}
+
+/**
+ * `module.getCompileCacheDir()`.
+ * @returns {string | undefined}
+ */
+export function getCompileCacheDir() {
+  return useCompileCache() ? compileCache.dir : undefined;
+}
+
+/**
+ * `module.flushCompileCache()`.
+ * @param {boolean} [keepDeserializedCache]
+ */
+export function flushCompileCache(keepDeserializedCache) {
+  if (
+    typeof keepDeserializedCache !== "boolean" &&
+    keepDeserializedCache !== undefined
+  ) {
+    throw new internalErrors.ERR_INVALID_ARG_TYPE(
+      "keepDeserializedCache",
+      "boolean",
+      keepDeserializedCache,
+    );
+  }
+  compileCacheInitialize();
+  compileCacheDebug("[compile cache] module.flushCompileCache() requested.\n");
+  compileCacheFlush();
+  compileCacheDebug("[compile cache] module.flushCompileCache() finished.\n");
+}
+
+const compileCacheStatus = ObjectCreate(null);
+for (let i = 0; i < kCompileCacheStatus.length; ++i) {
+  compileCacheStatus[kCompileCacheStatus[i]] = i;
+}
+ObjectFreeze(compileCacheStatus);
+export const constants = ObjectFreeze({
+  __proto__: null,
+  compileCacheStatus,
+});
+
+Module.enableCompileCache = enableCompileCache;
+Module.getCompileCacheDir = getCompileCacheDir;
+Module.flushCompileCache = flushCompileCache;
+Module.constants = constants;
+
 function wrapSafe(
   filename,
   content,
@@ -2314,6 +2828,31 @@ function wrapSafe(
       url.pathToFileURL(filename).toString(),
       [format !== "module"],
     );
+  } else if (useCompileCache()) {
+    const entry = compileCacheGetOrInsert(
+      content,
+      filename,
+      kCachedCodeCommonJS,
+    );
+    try {
+      const { 0: fn, 1: rejected } = op_node_compile_cjs_function(
+        content,
+        url.pathToFileURL(filename).toString(),
+        format !== "module",
+        [
+          "exports",
+          "require",
+          "module",
+          "__filename",
+          "__dirname",
+        ],
+        entry.cache ?? undefined,
+      );
+      f = fn;
+      compileCacheMaybeSave(entry, fn, rejected);
+    } catch (thrown) {
+      err = { thrown };
+    }
   } else {
     [f, err] = core.compileFunction(
       content,

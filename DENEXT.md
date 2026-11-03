@@ -9613,12 +9613,73 @@ where the changes are discussed.
      window-drain and commit-gate tests against fake clocks, the localStorage
      relaunch stress, native_e2e's print checks on WebKitGTK and WebView2).
 
+235. **`feat(ext/node)`: Node's compile cache for CommonJS modules**
+     (`feat/node-compat-round7`, runtime; placeholder number, renumbered when
+     the branch is merged; `ext/node/polyfills/01_require.js`,
+     `ext/node/ops/vm.rs`, `ext/node/lib.rs`). `node:module` had no
+     `enableCompileCache()`, `getCompileCacheDir()`, `flushCompileCache()` or
+     `constants.compileCacheStatus`, so a tool that calls
+     `module.enableCompileCache()` without checking for it first threw
+     `TypeError: enableCompileCache is not a function`, and `NODE_COMPILE_CACHE`
+     did nothing. They now follow Node 26.5.1 (`src/compile_cache.cc`,
+     `src/env.cc`, `src/node_modules.cc`, `lib/internal/modules/helpers.js`):
+     - `enableCompileCache(directory | { directory, portable })` returns
+       `{ status, message?, directory? }` with Node's statuses (`FAILED`,
+       `ENABLED`, `ALREADY_ENABLED`, `DISABLED`); the directory defaults to
+       `NODE_COMPILE_CACHE`, then `<os.tmpdir()>/node-compile-cache`, and
+       `portable` to `NODE_COMPILE_CACHE_PORTABLE=1`. Anything but a string
+       directory is `ERR_INVALID_ARG_TYPE`. `NODE_COMPILE_CACHE` turns the cache
+       on before the first CommonJS module is compiled, and
+       `NODE_DISABLE_COMPILE_CACHE` keeps it off ("Disabled by
+       NODE_DISABLE_COMPILE_CACHE").
+     - The cache lives in `<directory>/<version>-<arch>-<V8 cache tag>-<uid>/`,
+       one file per module named by the CRC-32 of the module type and its path
+       (relative to the cache directory in portable mode), with Node's header
+       (magic number, code size and CRC-32, cache size and CRC-32) before V8's
+       code cache. A module whose source changed, or whose cache V8 rejects, is
+       compiled again and its entry refreshed.
+     - The CommonJS loader compiles each module with its cached code when the
+       cache is on (new op `op_node_compile_cjs_function`, the same origin and
+       host-defined options `Deno.core.compileFunction` gives it) and keeps V8's
+       code cache for a module compiled without one
+       (`op_node_create_function_code_cache`). New and refreshed entries are
+       written at exit (the `unload` event, which `process.exit()` dispatches
+       too) or by `flushCompileCache()`, through a temporary file renamed over
+       the entry.
+     - `NODE_DEBUG_NATIVE=COMPILE_CACHE` prints Node's `[compile cache] ...`
+       lines on stderr.
+
+     With the cache off, the loader compiles through `Deno.core.compileFunction`
+     and the runtime's own code cache as before. Left open: ES modules are
+     compiled by the module loader, which uses the runtime's code cache and does
+     not read or write Node's (`test-compile-cache-esm.js`, `-portable-esm.js`,
+     `-dynamic-import.js`), and nothing is written when the process ends on an
+     uncaught error (`test-compile-cache-bad-syntax.js` expects the "cache was
+     not initialized" line then); the permission model's refusals
+     (`test-compile-cache-api-permission.js`, `-permission-disallowed.js`) are
+     not implemented. Tests: unit `tests/unit_node/module_test.ts` ("the compile
+     cache API is exposed with Node's constants", "stores CommonJS code caches
+     and reuses them", "NODE_DISABLE_COMPILE_CACHE turns it off").
+
+236. **`test(node_compat)`: 13 tests the compile cache passes**
+     (`feat/node-compat-round7`, test config only; placeholder number;
+     `tests/node_compat/config.jsonc`). Each passed three isolated runs (runner
+     parallelism 1, report mode, the CI 10 s timeout) on a Linux x86_64 debug
+     build without skipping, and is on for Linux only, with that reason, until
+     checked on macOS and Windows: `parallel/test-compile-cache-api-env.js`,
+     `-api-error.js`, `-api-flush.js`, `-api-options-portable-env.js`,
+     `-api-portable.js`, `-api-success.js`, `-api-tmpdir.js`, `-disable.js`,
+     `-existing-directory.js`, `-permission-allowed.js` (the node shim parses
+     `--permission` and its grants but does not apply them, so the cache
+     directory is writable, which is what the test expects), `-portable.js`,
+     `-success.js`, `-updated-file.js`.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
 169-174, 176, 178, 180, 182-184, 186, 187, 189-191, 193-196, 198-203, 206, 207,
-209-215, 217, 218, 221, 222, 224, 225, 227, 228, 231, 232) are what the prebuilt
-`libdenort` carries. The CLI-side parts (for example writing
+209-215, 217, 218, 221, 222, 224, 225, 227, 228, 231, 232, 235) are what the
+prebuilt `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
 in the branch too, but a stock CLI does not run them; denext's own launcher
 provides that environment.

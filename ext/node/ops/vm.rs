@@ -1637,6 +1637,111 @@ pub fn op_vm_script_create_cached_data<'s>(
     .into()
 }
 
+/// denext: the CommonJS loader's compile while Node's on-disk compile cache
+/// (`module.enableCompileCache()`, `NODE_COMPILE_CACHE`) is on, as Node's
+/// `CompileFunctionForCJSLoader` (`src/node_contextify.cc`): the wrapper
+/// function is compiled with the cached code when the cache has an entry
+/// (`ConsumeCodeCache`). The origin and host-defined options are the ones
+/// `Deno.core.compileFunction` gives the loader's modules, so `import()` from
+/// the module resolves the same way. Returns `[function, rejected]`; a compile
+/// error is rethrown.
+#[op2]
+pub fn op_node_compile_cjs_function<'s>(
+  scope: &mut v8::PinScope<'s, '_>,
+  source: v8::Local<'s, v8::String>,
+  specifier: v8::Local<'s, v8::String>,
+  is_cjs: bool,
+  params: v8::Local<'s, v8::Array>,
+  #[buffer] cached_data: Option<JsBuffer>,
+) -> Option<v8::Local<'s, v8::Array>> {
+  let host_defined_options = v8::PrimitiveArray::new(scope, 1);
+  let is_cjs_value = v8::Boolean::new(scope, is_cjs);
+  host_defined_options.set(scope, 0, is_cjs_value.into());
+  let origin = v8::ScriptOrigin::new(
+    scope,
+    specifier.into(),
+    0,
+    0,
+    false,
+    0,
+    None,
+    false,
+    false,
+    false,
+    Some(host_defined_options.into()),
+  );
+
+  let mut parameters = Vec::with_capacity(params.length() as _);
+  for i in 0..params.length() {
+    let param = params.get_index(scope, i)?.try_into().ok()?;
+    parameters.push(param);
+  }
+
+  let consume = cached_data.is_some();
+  let mut source = if let Some(cached_data) = &cached_data {
+    v8::script_compiler::Source::new_with_cached_data(
+      source,
+      Some(&origin),
+      v8::script_compiler::CachedData::new(cached_data),
+    )
+  } else {
+    v8::script_compiler::Source::new(source, Some(&origin))
+  };
+  let options = if consume {
+    v8::script_compiler::CompileOptions::ConsumeCodeCache
+  } else {
+    v8::script_compiler::CompileOptions::NoCompileOptions
+  };
+
+  v8::tc_scope!(scope, scope);
+  let Some(function) = v8::script_compiler::compile_function(
+    scope,
+    &mut source,
+    &parameters,
+    &[],
+    options,
+    v8::script_compiler::NoCacheReason::NoReason,
+  ) else {
+    if scope.has_caught() && !scope.has_terminated() {
+      scope.rethrow();
+    }
+    return None;
+  };
+  let rejected = consume
+    && source
+      .get_cached_data()
+      .map(|cached_data| cached_data.rejected())
+      .unwrap_or(true);
+
+  let out = v8::Array::new(scope, 2);
+  out.set_index(scope, 0, function.into());
+  let rejected = v8::Boolean::new(scope, rejected);
+  out.set_index(scope, 1, rejected.into());
+  Some(out)
+}
+
+/// denext: V8's code cache for a function the CommonJS loader compiled
+/// (`ScriptCompiler::CreateCodeCacheForFunction`), for Node's compile cache.
+/// `undefined` when V8 gives none.
+#[op2]
+pub fn op_node_create_function_code_cache<'s>(
+  scope: &mut v8::PinScope<'s, '_>,
+  function: v8::Local<'s, v8::Function>,
+) -> v8::Local<'s, v8::Value> {
+  let Some(code_cache) = function.create_code_cache() else {
+    return v8::undefined(scope).into();
+  };
+  let data = code_cache.to_vec();
+  let len = data.len();
+  let backing_store =
+    v8::ArrayBuffer::new_backing_store_from_vec(data).make_shared();
+  let buffer = v8::ArrayBuffer::with_backing_store(scope, &backing_store);
+  match v8::Uint8Array::new(scope, buffer, 0, len) {
+    Some(array) => array.into(),
+    None => v8::undefined(scope).into(),
+  }
+}
+
 /// Wraps a v8::Module compiled in a contextified context.
 pub struct ContextifyModule {
   module: v8::TracedReference<v8::Module>,
