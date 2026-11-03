@@ -3848,6 +3848,24 @@ pub fn translate_to_deno_args(
   result
 }
 
+/// One `NODE_OPTIONS` token, quoted as Node's parser reads it: in `"…"`, with
+/// a `\` before each `"` and `\`. A value with spaces or quotes then stays one
+/// token instead of adding flags (`--import`, `--require`) to the child's
+/// `NODE_OPTIONS`. The node:test polyfill's `quoteNodeOptionsToken` does the
+/// same.
+fn node_options_token(token: &str) -> String {
+  let mut out = String::with_capacity(token.len() + 2);
+  out.push('"');
+  for c in token.chars() {
+    if c == '"' || c == '\\' {
+      out.push('\\');
+    }
+    out.push(c);
+  }
+  out.push('"');
+  out
+}
+
 /// The flags of Node's test runner that ride along in `NODE_OPTIONS`.
 fn add_test_node_options(
   node_options: &mut Vec<String>,
@@ -3857,14 +3875,21 @@ fn add_test_node_options(
   // detect it and emit the corresponding output format. Deno's own CLI does
   // not consume the flag (its TAP/spec output differs from Node's), so the
   // value rides along through NODE_OPTIONS for the polyfill to pick up.
+  // denext: values are quoted (`node_options_token`), so a pattern or a path
+  // with spaces or quotes stays one token and can't add flags.
   for reporter in &env_opts.test_reporter {
-    node_options.push(format!("--test-reporter={}", reporter));
+    node_options
+      .push(node_options_token(&format!("--test-reporter={reporter}")));
   }
   for pattern in &env_opts.test_name_pattern {
-    node_options.push(format!("--test-name-pattern={}", pattern));
+    node_options.push(node_options_token(&format!(
+      "--test-name-pattern={pattern}"
+    )));
   }
   for pattern in &env_opts.test_skip_pattern {
-    node_options.push(format!("--test-skip-pattern={}", pattern));
+    node_options.push(node_options_token(&format!(
+      "--test-skip-pattern={pattern}"
+    )));
   }
   // denext: `--test-only` and `--test-force-exit` ride along the same way.
   if env_opts.test_only {
@@ -5900,7 +5925,39 @@ mod tests {
     let result = translate_to_deno_args(parsed_args, &options);
     assert_eq!(
       result.node_options,
-      svec!["--test-reporter=spec", "--test-only", "--test-force-exit"]
+      svec![
+        "\"--test-reporter=spec\"",
+        "--test-only",
+        "--test-force-exit"
+      ]
+    );
+  }
+
+  #[test]
+  fn test_runner_values_stay_one_node_options_token() {
+    // A quote, a backslash or a space in a value must not add flags (here
+    // `--import`) to the child's NODE_OPTIONS.
+    let name = r#"x" --import=./evil.mjs ""#;
+    let skip = r"a\ --require=./z.cjs";
+    let reporter = "./my reporter.mjs";
+    let parsed_args = parse_args(svec![
+      format!("--test-name-pattern={name}"),
+      format!("--test-skip-pattern={skip}"),
+      format!("--test-reporter={reporter}"),
+      "main.js"
+    ])
+    .unwrap();
+    let options = TranslateOptions::for_child_process();
+    let result = translate_to_deno_args(parsed_args, &options);
+    let joined = result.node_options.join(" ");
+    let parsed = parse_node_options_env_var(&joined).unwrap();
+    assert_eq!(
+      parsed,
+      vec![
+        format!("--test-reporter={reporter}"),
+        format!("--test-name-pattern={name}"),
+        format!("--test-skip-pattern={skip}"),
+      ]
     );
   }
 

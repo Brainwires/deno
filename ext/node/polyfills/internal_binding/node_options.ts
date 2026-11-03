@@ -19,6 +19,9 @@ const {
 // Quote-aware tokenizer for NODE_OPTIONS. Node.js uses a shell-like parser
 // that respects single and double quotes, so `--title="hello world"` is a
 // single token whose value is `hello world`, not two tokens.
+// denext: inside double quotes a backslash escapes the next character, as in
+// Node's `ParseNodeOptionsEnvVar` (and the CLI's parser), so a quoted value
+// holding `"` can't end the quote early and add tokens.
 function splitNodeOptions(input: string): string[] {
   const args: string[] = [];
   let current = "";
@@ -27,7 +30,10 @@ function splitNodeOptions(input: string): string[] {
 
   for (let i = 0; i < input.length; i++) {
     const ch = input[i];
-    if (ch === '"' && !inSingle) {
+    if (ch === "\\" && inDouble && i + 1 < input.length) {
+      i++;
+      current += input[i];
+    } else if (ch === '"' && !inSingle) {
       inDouble = !inDouble;
     } else if (ch === "'" && !inDouble) {
       inSingle = !inSingle;
@@ -162,6 +168,19 @@ function getExecArgv() {
   }
 }
 
+// denext: one NODE_OPTIONS token, quoted as Node's parser reads it (`"…"`, with
+// `\` before `"` and `\`), so a value with spaces or quotes stays one token.
+// The node shim's `node_options_token` does the same.
+function quoteNodeOptionsToken(token: string): string {
+  let out = '"';
+  for (let i = 0; i < token.length; i++) {
+    const ch = token[i];
+    if (ch === '"' || ch === "\\") out += "\\";
+    out += ch;
+  }
+  return out + '"';
+}
+
 function getOptions() {
   if (optionsMap) {
     return { options: optionsMap };
@@ -190,6 +209,8 @@ function getExecArgvOptions() {
 return {
   getExecArgvOptions,
   getOptions,
+  quoteNodeOptionsToken,
   setOptionSourceExecArgv,
+  splitNodeOptions,
 };
 })();

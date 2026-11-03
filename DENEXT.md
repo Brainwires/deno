@@ -8637,6 +8637,14 @@ free numbers when the branch is merged.
          the CPU count less one at a time.
        - `node --test --watch` is still `deno test --watch`: Deno's patterns,
          `Deno.test` and a type check.
+       - The values the shim and `run()` forward in `NODE_OPTIONS`
+         (`--test-reporter`, `--test-name-pattern`, `--test-skip-pattern`) are
+         quoted as Node's parser reads them (`"…"`, `\"` and `\\` escaped), and
+         node:test splits `NODE_OPTIONS` the same way, so a pattern with quotes
+         or spaces stays one token instead of adding flags such as `--import` to
+         the child's. Tests: shim unit test
+         `test_runner_values_stay_one_node_options_token`; spec
+         `node/node_test_cli` (`pattern_cannot_add_flags`).
 
 902. **`fix(cli)`: `--experimental-loader` and `--import` in `NODE_OPTIONS`**
      (`feat/node-compat-round5`, CLI; `libs/cli_parser/src/convert.rs`,
