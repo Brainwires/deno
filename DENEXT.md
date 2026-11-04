@@ -9963,12 +9963,94 @@ where the changes are discussed.
      derivations took over the runner's 10 s timeout unoptimized, and 1.5 s with
      it.
 
+301. **`perf(cli)`: an idle program under resource limits stays asleep; the idle
+     wake-up audit** (`feat/node-crypto-argon2-idle`; CLI and runtime (`denort`
+     applies the limits too); `cli/lib/resource_limits.rs`). Bun 1.4.3 found an
+     idle server woken every second by a GC timer, so this measured what wakes
+     the fork's own idle server.
+
+     **Method.** biscuits (8 vCPU EPYC-Milan KVM, 15 GB), this branch's debug
+     `deno` (wake-ups do not depend on the optimization level; CPU time does,
+     and was 0-10 ms per window either way), a hello-world `Deno.serve`
+     (`deno run`) and the same as `deno serve` (`export default { fetch }`). Per
+     run: 5 s after `Listening`, a 60 s window with no request; one request, 5
+     s, a 60 s window; 1,000 requests, 5 s, a 60 s window. Wake-ups are the
+     process's context switches (voluntary + involuntary, per thread, from
+     `/proc/<pid>/task/*/status`), CPU from `/proc/<pid>/stat`. A second script
+     sampled the switches every 10 s for 120 s right after 1,000 requests, to
+     see the tail of the load.
+
+     **Before** (base `93a7f77c2e` plus item 300, which touches no timer):
+
+     | program                 | no request                       | after 1 request | after 1,000 requests |
+     | ----------------------- | -------------------------------- | --------------- | -------------------- |
+     | `deno run` `Deno.serve` | 3 / 60 s (0.05/s), 0 ms          | 0               | 0                    |
+     | `deno serve`            | 3 / 60 s, 0 ms                   | 0               | settles (below)      |
+     | `--unstable-idle-trim`  | 9 / 60 s, 0 ms                   | 0               | 0                    |
+     | `--max-memory=384m`     | **2,977 / 60 s (49.6/s), 90 ms** | 49.5/s, 100 ms  | 49.8/s, 120 ms       |
+     | `--max-cpu-time=3600`   | **49.5/s, 120 ms**               | 49.7/s, 140 ms  | 49.7/s, 150 ms       |
+
+     Stock Deno 2.9.6 on the same machine: 3 / 60 s, then 0 and 0.
+
+     **What wakes, and how often:**
+     - **The resource-limit watchdog** (`deno-resource-limits` thread, item for
+       `--max-memory` / `--max-cpu-time` / `--max-time`): a
+       `thread::sleep(20 ms)` loop, 50 wake-ups a second for the life of any
+       program given any of the three limits, idle or not, including
+       `--max-memory` alone, which it never needs to poll. denext's
+       `start: { limits }` sets these on every production server. **Fixed**
+       (below).
+     - **V8 platform delayed tasks** (the memory reducer, GC finalization; the
+       fork's `DenoPlatformImpl` turns each into a one-shot tokio sleep): the 3
+       switches in the first minute after start-up and the tail after load,
+       which is over within 10 s (per 10 s after 1,000 requests: 6, then 0 for
+       the next 110 s). One-shot, not periodic: nothing to fix.
+     - **The idle trim** (item 104, `--unstable-idle-trim`): one-shot per idle
+       period, armed only by activity (per 10 s after 1,000 requests: 48 (the
+       trim's GC on the V8 worker threads), then 0). Nothing to fix.
+     - **The HTTP server**: no date-header timer (hyper's date cache is
+       refreshed when a response is written, not on a timer), no keep-alive
+       sweeper while no connection is open: 0 wake-ups.
+     - **Inspector, telemetry, the module / code cache**: the inspector runs
+       only under `--inspect*`; the OpenTelemetry periodic reader
+       (`ext/telemetry`, `tokio::time::interval`) only with OTEL enabled; the
+       caches write when a module loads, with no flush timer. None ran in these
+       programs.
+
+     **The fix.** The watchdog sleeps until it has something to check: with
+     `--max-memory` alone, until the near-heap-limit callback (which records the
+     limit) or a disarm wakes it (a `parking_lot` condvar; a wake before the
+     sleep is kept); with `--max-time`, until the deadline; with
+     `--max-cpu-time`, for half of what the budget left lasts at full use of
+     every CPU the process may use (`available_parallelism`), at least 20 ms and
+     at most 10 s, so the budget is still sampled at least once a tick before it
+     can run out (the documented overshoot of up to a tick holds); after a limit
+     is reached, every 20 ms through the grace period, as before. The limits'
+     behaviour, exit codes and messages are unchanged.
+
+     **After:**
+
+     | program                 | no request                                       | after 1 request | after 1,000 requests |
+     | ----------------------- | ------------------------------------------------ | --------------- | -------------------- |
+     | `--max-memory=384m`     | 3 / 60 s (0.05/s), 10 ms                         | 3 / 60 s, 0 ms  | 2 / 60 s, 0 ms       |
+     | `--max-cpu-time=3600`   | 9 / 60 s (6 from the watchdog, every 10 s), 0 ms | 6 / 60 s        | 6 / 60 s             |
+     | `--max-time=86400`      | 3 / 60 s, 10 ms                                  | 0               | 4 / 60 s             |
+     | `deno run` `Deno.serve` | 3 / 60 s                                         | 0               | 4 / 60 s             |
+
+     Tests: unit tests in `resource_limits.rs`
+     (`the_watchdog_sleeps_until_it_has_something_to_check`: `--max-memory`
+     alone has no poll interval, `--max-time` sleeps to the deadline;
+     `a_cpu_budget_is_sampled_before_it_can_run_out`; `a_wake_is_not_lost`); the
+     `run/resource_limits` specs pass unchanged (the limits still end busy and
+     idle programs; `compile/resource_limits`, which covers the disarm, was not
+     run locally).
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
 169-174, 176, 178, 180, 182-184, 186, 187, 189-191, 193-196, 198-203, 206, 207,
-209-215, 217, 218, 221, 222, 224, 225, 227, 228, 231, 232, 235, 237, 240, 300)
-are what the prebuilt `libdenort` carries. The CLI-side parts (for example
+209-215, 217, 218, 221, 222, 224, 225, 227, 228, 231, 232, 235, 237, 240, 300,
+301) are what the prebuilt `libdenort` carries. The CLI-side parts (for example
 writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's
 launchers) are in the branch too, but a stock CLI does not run them; denext's
 own launcher provides that environment.
