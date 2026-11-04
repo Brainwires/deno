@@ -4,6 +4,7 @@ import { assert, assertEquals, assertRejects, assertThrows } from "@std/assert";
 import { Readable } from "node:stream";
 import {
   bytes,
+  bytesSync,
   from,
   fromSync,
   pull,
@@ -79,4 +80,69 @@ Deno.test("[node/stream/iter] Brotli and Zstd dictionaries are refused", async (
     ) as NodeJS.ErrnoException;
     assertEquals(err.code, "ERR_FEATURE_UNAVAILABLE_ON_PLATFORM");
   }
+});
+
+// A small compressed chunk can stand for a huge output (a decompression
+// bomb). The decompressors hand each full batch to the consumer before the
+// engine produces more, so one that stops after the first batch never holds
+// the rest in memory. Node 26.5.1 inflated a whole input chunk first.
+Deno.test("[node/stream/iter] decompression yields before inflating a whole chunk", async () => {
+  const size = 64 * 1024 * 1024;
+  const original = new Uint8Array(size);
+  const limit = 16 * 1024 * 1024;
+  const pairs = [
+    [compressGzip, decompressGzip],
+    [compressBrotli, decompressBrotli],
+    [compressZstd, decompressZstd],
+  ] as const;
+  for (const [compress, decompress] of pairs) {
+    const compressed = await bytes(pull(from(original), compress()));
+    assert(compressed.byteLength < 1024 * 1024);
+    const before = Deno.memoryUsage().external;
+    let grew = -1;
+    for await (const batch of pull(from(compressed), decompress())) {
+      assert(batch.length > 0);
+      grew = Deno.memoryUsage().external - before;
+      break;
+    }
+    assert(grew >= 0 && grew < limit, `${decompress.name} grew ${grew}`);
+  }
+
+  const compressed = bytesSync(
+    pullSync(fromSync(original), compressDeflateSync()),
+  );
+  const before = Deno.memoryUsage().external;
+  let grew = -1;
+  for (const batch of pullSync(fromSync(compressed), decompressDeflateSync())) {
+    assert(batch.length > 0);
+    grew = Deno.memoryUsage().external - before;
+    break;
+  }
+  assert(grew >= 0 && grew < limit, `decompressDeflateSync grew ${grew}`);
+  // Keep the original alive until here, so its release can't hide growth.
+  assertEquals(original.byteLength, size);
+});
+
+Deno.test("[node/stream/iter] large outputs still round-trip in batches", async () => {
+  const original = new Uint8Array(4 * 1024 * 1024);
+  for (let i = 0; i < original.length; i++) original[i] = i % 251;
+  for (
+    const [compress, decompress] of [
+      [compressGzip, decompressGzip],
+      [compressBrotli, decompressBrotli],
+      [compressZstd, decompressZstd],
+    ] as const
+  ) {
+    const out = await bytes(pull(from(original), compress(), decompress()));
+    assertEquals(out.byteLength, original.byteLength);
+    assertEquals(out, original);
+  }
+  const out = bytesSync(
+    pullSync(
+      fromSync(original),
+      compressDeflateSync(),
+      decompressDeflateSync(),
+    ),
+  );
+  assertEquals(out, original);
 });
