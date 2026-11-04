@@ -173,3 +173,54 @@ Deno.test("[node/vfs] RealFSProvider doesn't write through a symlink out of its 
   }
   assertEquals([...Deno.readDirSync(outside)], []);
 });
+
+// rmdir, unlink, rename and symlink act on a symlink itself, as the system
+// calls do. Node 26.5.1's RealFSProvider followed it, so removing or renaming
+// a link (or `rm -r` of a directory holding one) removed or moved its target,
+// and a dangling link could not be removed.
+Deno.test("[node/vfs] RealFSProvider removes and renames a symlink, not its target", async () => {
+  const root = Deno.realPathSync(Deno.makeTempDirSync());
+  Deno.writeTextFileSync(path.join(root, "keep.txt"), "keep");
+  Deno.mkdirSync(path.join(root, "dir"));
+  Deno.symlinkSync("../keep.txt", path.join(root, "dir", "link"));
+  Deno.symlinkSync("keep.txt", path.join(root, "link"));
+  Deno.symlinkSync("keep.txt", path.join(root, "link2"));
+  Deno.symlinkSync("missing.txt", path.join(root, "dangling"));
+  const vfs = create(new RealFSProvider(root));
+  vfs.renameSync("/link", "/renamed");
+  assertEquals(Deno.readLinkSync(path.join(root, "renamed")), "keep.txt");
+  vfs.unlinkSync("/renamed");
+  vfs.unlinkSync("/dangling");
+  vfs.rmSync("/dir", { recursive: true });
+
+  const mountPoint = path.join(Deno.makeTempDirSync(), "mnt");
+  vfs.mount(mountPoint);
+  try {
+    await fsPromises.unlink(path.join(mountPoint, "link2"));
+  } finally {
+    vfs.unmount();
+  }
+  assertEquals(Deno.readTextFileSync(path.join(root, "keep.txt")), "keep");
+  assertEquals([...Deno.readDirSync(root)].map((e) => e.name), ["keep.txt"]);
+});
+
+// The containment check compares fs.realpath results with the root's own
+// real path: Node 26.5.1 compared them with the root as given, so a root
+// reached through a symlink (macOS's temporary directories) refused every
+// path under it.
+Deno.test("[node/vfs] RealFSProvider takes a root reached through a symlink", () => {
+  const base = Deno.realPathSync(Deno.makeTempDirSync());
+  Deno.mkdirSync(path.join(base, "root"));
+  Deno.writeTextFileSync(path.join(base, "root", "a.txt"), "a");
+  Deno.writeTextFileSync(path.join(base, "secret.txt"), "secret");
+  Deno.symlinkSync(path.join(base, "root"), path.join(base, "alias"));
+  const vfs = create(new RealFSProvider(path.join(base, "alias")));
+  assertEquals(vfs.readFileSync("/a.txt", "utf8"), "a");
+  vfs.writeFileSync("/b.txt", "b");
+  assertEquals(Deno.readTextFileSync(path.join(base, "root", "b.txt")), "b");
+  assertEquals(vfs.realpathSync("/b.txt"), "/b.txt");
+  const err = assertThrows(() =>
+    vfs.readFileSync("/../secret.txt")
+  ) as NodeJS.ErrnoException;
+  assertEquals(err.code, "ENOENT");
+});

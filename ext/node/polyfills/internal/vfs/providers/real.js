@@ -267,6 +267,11 @@ class RealFileHandle extends VirtualFileHandle {
  */
 class RealFSProvider extends VirtualProvider {
   #rootPath;
+  // The root with its own symlinks resolved (`/tmp` is `/private/tmp` on
+  // macOS), which is what fs.realpath returns for the paths under it. Set
+  // once the root exists, and kept: a root replaced by a symlink afterwards
+  // does not move the containment check.
+  #realRootPath;
 
   /**
    * @param {string} rootPath The real filesystem path to use as root
@@ -275,6 +280,7 @@ class RealFSProvider extends VirtualProvider {
     super();
     // Resolve to absolute path and normalize
     this.#rootPath = path.resolve(getValidatedPath(rootPath, "rootPath"));
+    this.#realRootPath = undefined;
     setOwnProperty(this, "readonly", false);
     setOwnProperty(this, "supportsSymlinks", true);
   }
@@ -285,6 +291,29 @@ class RealFSProvider extends VirtualProvider {
    */
   get rootPath() {
     return this.#rootPath;
+  }
+
+  // Resolved on first use, not in the constructor, so creating a provider
+  // touches no file. Unlike Node 26.5.1, which compared fs.realpath results
+  // with the root as given, so a root reached through a symlink (macOS's `/tmp` or the
+  // `/var/folders` temporary directories) refused every path under it.
+  #getRealRoot() {
+    if (this.#realRootPath === undefined) {
+      try {
+        this.#realRootPath = fs.realpathSync(this.#rootPath);
+      } catch {
+        return this.#rootPath;
+      }
+    }
+    return this.#realRootPath;
+  }
+
+  // Whether `resolved`, an fs.realpath result, is the root or under it.
+  #isInRealRoot(resolved) {
+    const realRoot = this.#getRealRoot();
+    if (resolved === realRoot) return true;
+    const prefix = realRoot.endsWith(path.sep) ? realRoot : realRoot + path.sep;
+    return StringPrototypeStartsWith(resolved, prefix);
   }
 
   /**
@@ -336,10 +365,7 @@ class RealFSProvider extends VirtualProvider {
       // Unlike Node 26.5.1, outside the try: there the ENOENT thrown for a
       // symlink that leaves the root was caught as "doesn't exist yet", and
       // the link itself was returned and followed.
-      if (
-        resolved !== this.#rootPath &&
-        !StringPrototypeStartsWith(resolved, rootWithSep)
-      ) {
+      if (!this.#isInRealRoot(resolved)) {
         throw createENOENT("open", vfsPath);
       }
       return resolved;
@@ -373,10 +399,7 @@ class RealFSProvider extends VirtualProvider {
       }
       // Unlike Node 26.5.1, outside the try, which caught this ENOENT and
       // went on to the next ancestor up, inside the root.
-      if (
-        resolved !== this.#rootPath &&
-        !StringPrototypeStartsWith(resolved, rootWithSep)
-      ) {
+      if (!this.#isInRealRoot(resolved)) {
         throw createENOENT("open", vfsPath);
       }
       return;
@@ -441,35 +464,40 @@ class RealFSProvider extends VirtualProvider {
     return fs.promises.mkdir(realPath, options);
   }
 
+  // rmdir, unlink, rename and symlink act on the last component itself, as
+  // the system calls do: unlike Node 26.5.1, which followed a symlink there,
+  // so removing or renaming a link (`fs.rmSync` of a directory that holds
+  // one, too) removed or moved its target, and a dangling link could not be
+  // removed at all. The directories above it are still resolved and checked.
   rmdirSync(vfsPath) {
-    const realPath = this.#resolvePath(vfsPath);
+    const realPath = this.#resolvePath(vfsPath, false);
     fs.rmdirSync(realPath);
   }
 
   async rmdir(vfsPath) {
-    const realPath = this.#resolvePath(vfsPath);
+    const realPath = this.#resolvePath(vfsPath, false);
     return fs.promises.rmdir(realPath);
   }
 
   unlinkSync(vfsPath) {
-    const realPath = this.#resolvePath(vfsPath);
+    const realPath = this.#resolvePath(vfsPath, false);
     fs.unlinkSync(realPath);
   }
 
   async unlink(vfsPath) {
-    const realPath = this.#resolvePath(vfsPath);
+    const realPath = this.#resolvePath(vfsPath, false);
     return fs.promises.unlink(realPath);
   }
 
   renameSync(oldVfsPath, newVfsPath) {
-    const oldRealPath = this.#resolvePath(oldVfsPath);
-    const newRealPath = this.#resolvePath(newVfsPath);
+    const oldRealPath = this.#resolvePath(oldVfsPath, false);
+    const newRealPath = this.#resolvePath(newVfsPath, false);
     fs.renameSync(oldRealPath, newRealPath);
   }
 
   async rename(oldVfsPath, newVfsPath) {
-    const oldRealPath = this.#resolvePath(oldVfsPath);
-    const newRealPath = this.#resolvePath(newVfsPath);
+    const oldRealPath = this.#resolvePath(oldVfsPath, false);
+    const newRealPath = this.#resolvePath(newVfsPath, false);
     return fs.promises.rename(oldRealPath, newRealPath);
   }
 
@@ -510,7 +538,7 @@ class RealFSProvider extends VirtualProvider {
     if (path.isAbsolute(target)) {
       throw createEACCES("symlink", vfsPath);
     }
-    const realPath = this.#resolvePath(vfsPath);
+    const realPath = this.#resolvePath(vfsPath, false);
     const resolvedTarget = path.resolve(path.dirname(realPath), target);
     const rootWithSep = this.#rootPath.endsWith(path.sep)
       ? this.#rootPath
@@ -529,7 +557,7 @@ class RealFSProvider extends VirtualProvider {
     if (path.isAbsolute(target)) {
       throw createEACCES("symlink", vfsPath);
     }
-    const realPath = this.#resolvePath(vfsPath);
+    const realPath = this.#resolvePath(vfsPath, false);
     const resolvedTarget = path.resolve(path.dirname(realPath), target);
     const rootWithSep = this.#rootPath.endsWith(path.sep)
       ? this.#rootPath
@@ -547,7 +575,7 @@ class RealFSProvider extends VirtualProvider {
   // because fs.realpathSync (a JS impl) preserves case but fs.promises.realpath
   // (native) canonicalizes the drive letter and other components.
   #resolvedToVfsPath(resolved, vfsPath, syscall) {
-    const rel = path.relative(this.#rootPath, resolved);
+    const rel = path.relative(this.#getRealRoot(), resolved);
     if (rel === "") return "/";
     if (
       rel === ".." ||
