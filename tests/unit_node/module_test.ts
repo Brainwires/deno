@@ -713,3 +713,135 @@ console.log(JSON.stringify({ result, dir: getCompileCacheDir() ?? null }));
     await Deno.remove(tempDir, { recursive: true });
   }
 });
+
+// denext: V8 runs whatever code cache it is given once the source length and
+// flags match, so the compile cache refuses a directory other users can write
+// to and a cache entry that isn't a regular file the current user owns.
+async function runCompileCacheEntry(
+  entry: string,
+  env: Record<string, string> = {},
+) {
+  const { code, stdout, stderr } = await new Deno.Command(Deno.execPath(), {
+    args: ["run", "-A", entry],
+    env: { NODE_DEBUG_NATIVE: "COMPILE_CACHE", ...env },
+    stdout: "piped",
+    stderr: "piped",
+  }).output();
+  const err = new TextDecoder().decode(stderr);
+  assertEquals(code, 0, err);
+  return { out: JSON.parse(new TextDecoder().decode(stdout)), err };
+}
+
+async function writeCompileCacheEntry(tempDir: string, cacheDir: string) {
+  const entry = path.join(tempDir, "entry.cjs");
+  await Deno.writeTextFile(
+    path.join(tempDir, "dep.cjs"),
+    "module.exports = function add(a, b) { return a + b; };\n",
+  );
+  await Deno.writeTextFile(
+    entry,
+    `const { enableCompileCache, getCompileCacheDir } = require("node:module");
+const result = enableCompileCache(${JSON.stringify(cacheDir)});
+const add = require("./dep.cjs");
+console.log(JSON.stringify({
+  status: result.status,
+  message: result.message ?? null,
+  dir: getCompileCacheDir() ?? null,
+  sum: add(2, 3),
+}));
+`,
+  );
+  return entry;
+}
+
+Deno.test({
+  name:
+    "[node/module enableCompileCache] refuses a cache directory others can write to",
+  ignore: Deno.build.os === "windows",
+}, async () => {
+  const tempDir = await Deno.makeTempDir();
+  try {
+    const cacheDir = path.join(tempDir, "cache");
+    const entry = await writeCompileCacheEntry(tempDir, cacheDir);
+
+    // A world-writable parent without the sticky bit: another user could
+    // swap the version-tagged directory for their own.
+    await Deno.mkdir(cacheDir);
+    await Deno.chmod(cacheDir, 0o777);
+    const open = await runCompileCacheEntry(entry);
+    assertEquals(open.out.status, 0, open.err);
+    assert(/writable by other users/.test(open.out.message), open.out.message);
+    assertEquals(open.out.dir, null);
+    assertEquals(open.out.sum, 5);
+    assertEquals([...Deno.readDirSync(cacheDir)].length, 1);
+    const tagged = path.join(cacheDir, [...Deno.readDirSync(cacheDir)][0].name);
+    assertEquals([...Deno.readDirSync(tagged)].length, 0);
+
+    // With the sticky bit (as /tmp has) it is used.
+    await Deno.chmod(cacheDir, 0o1777);
+    const sticky = await runCompileCacheEntry(entry);
+    assertEquals(sticky.out.status, 1, sticky.err);
+    assertEquals([...Deno.readDirSync(tagged)].length, 1);
+
+    // A version-tagged directory that its group can write to is refused.
+    await Deno.chmod(tagged, 0o770);
+    const groupWritable = await runCompileCacheEntry(entry);
+    assertEquals(groupWritable.out.status, 0, groupWritable.err);
+    assert(
+      /writable by other users/.test(groupWritable.out.message),
+      groupWritable.out.message,
+    );
+    assert(!/reading cache from/.test(groupWritable.err), groupWritable.err);
+  } finally {
+    await Deno.remove(tempDir, { recursive: true });
+  }
+});
+
+Deno.test({
+  name:
+    "[node/module enableCompileCache] doesn't load a cache entry that is a symlink",
+  ignore: Deno.build.os === "windows",
+}, async () => {
+  const tempDir = await Deno.makeTempDir();
+  try {
+    const cacheDir = path.join(tempDir, "cache");
+    const entry = await writeCompileCacheEntry(tempDir, cacheDir);
+    const first = await runCompileCacheEntry(entry);
+    assertEquals(first.out.status, 1, first.err);
+    const tagged = first.out.dir as string;
+    const [file] = [...Deno.readDirSync(tagged)];
+    const cacheFile = path.join(tagged, file.name);
+    const elsewhere = path.join(tempDir, "planted");
+    await Deno.rename(cacheFile, elsewhere);
+    await Deno.symlink(elsewhere, cacheFile);
+
+    const second = await runCompileCacheEntry(entry);
+    assertEquals(second.out.sum, 5);
+    assert(
+      /not a regular file owned by the current user/.test(second.err),
+      second.err,
+    );
+    assert(!/was accepted/.test(second.err), second.err);
+  } finally {
+    await Deno.remove(tempDir, { recursive: true });
+  }
+});
+
+Deno.test(
+  "[node/module enableCompileCache] the cache directory is created for the current user only",
+  {
+    ignore: Deno.build.os === "windows",
+  },
+  async () => {
+    const tempDir = await Deno.makeTempDir();
+    try {
+      const cacheDir = path.join(tempDir, "cache");
+      const entry = await writeCompileCacheEntry(tempDir, cacheDir);
+      const { out, err } = await runCompileCacheEntry(entry);
+      assertEquals(out.status, 1, err);
+      assertEquals(Deno.statSync(out.dir).mode! & 0o077, 0);
+    } finally {
+      await Deno.remove(tempDir, { recursive: true });
+    }
+  },
+);

@@ -13,6 +13,7 @@ import {
   op_module_hooks_register,
   op_module_hooks_respond_load,
   op_napi_open,
+  op_node_compile_cache_untrusted_dir,
   op_node_compile_cjs_function,
   op_node_create_function_code_cache,
   op_node_has_child_ipc_pipe,
@@ -2349,6 +2350,16 @@ function compileCacheGetenv(name) {
   return op_get_env_no_permission_check(name) ?? undefined;
 }
 
+// denext: a compiled program (`deno compile`, a Deno Desktop app) doesn't take
+// its cache directory from the environment: whoever sets NODE_COMPILE_CACHE
+// for it would choose where its code comes from, around the program's code
+// signature. The program turns the cache on itself with
+// `module.enableCompileCache()`.
+function compileCacheEnvConfig(name) {
+  if (Deno.build.standalone) return undefined;
+  return compileCacheGetenv(name);
+}
+
 function compileCacheIsDebug() {
   if (compileCache.debug === undefined) {
     // Node's `EnabledDebugList::Parse`: comma-separated, case-insensitive,
@@ -2430,7 +2441,7 @@ function compileCacheHandlerEnable(dir, portable) {
   );
   let error;
   try {
-    compileCacheFs().mkdirSync(dirWithTag, { recursive: true });
+    compileCacheFs().mkdirSync(dirWithTag, { recursive: true, mode: 0o700 });
   } catch (err) {
     error = err;
   }
@@ -2443,6 +2454,25 @@ function compileCacheHandlerEnable(dir, portable) {
     return {
       status: kCompileCacheFailed,
       message: `Cannot create cache directory: ${compileCacheStrerror(error)}`,
+      directory: "",
+    };
+  }
+  // denext: V8 runs whatever code cache it is given once the source length
+  // and flags match, so only a directory nobody but the current user (or
+  // root) can write to may hold one.
+  let untrusted;
+  try {
+    untrusted = op_node_compile_cache_untrusted_dir(dirWithTag);
+  } catch (err) {
+    untrusted = compileCacheStrerror(err);
+  }
+  if (untrusted) {
+    compileCacheDebug(
+      `[compile cache] refusing cache directory ${dirWithTag}: ${untrusted}\n`,
+    );
+    return {
+      status: kCompileCacheFailed,
+      message: `Cache directory is not safe to use: ${untrusted}`,
       directory: "",
     };
   }
@@ -2488,9 +2518,16 @@ function compileCacheEnable(dir, portable) {
 function compileCacheInitialize() {
   if (compileCache.initialized) return;
   compileCache.initialized = true;
-  const dir = compileCacheGetenv("NODE_COMPILE_CACHE");
-  if (!dir) return;
-  const portable = compileCacheGetenv("NODE_COMPILE_CACHE_PORTABLE") === "1";
+  const dir = compileCacheEnvConfig("NODE_COMPILE_CACHE");
+  if (!dir) {
+    if (Deno.build.standalone && compileCacheGetenv("NODE_COMPILE_CACHE")) {
+      compileCacheDebug(
+        "[compile cache] NODE_COMPILE_CACHE is ignored in a compiled program\n",
+      );
+    }
+    return;
+  }
+  const portable = compileCacheEnvConfig("NODE_COMPILE_CACHE_PORTABLE") === "1";
   if (portable) {
     compileCacheDebug("[compile cache] using relative path\n");
   }
@@ -2510,6 +2547,14 @@ function compileCacheReadFile(entry) {
   );
   let data;
   try {
+    // denext: only a regular file the current user owns (no symlink, FIFO
+    // or device), on top of the directory check.
+    const stat = compileCacheFs().lstatSync(entry.cacheFilename);
+    const uid = process.getuid?.();
+    if (!stat.isFile() || (uid !== undefined && stat.uid !== uid)) {
+      compileCacheDebug(" not a regular file owned by the current user\n");
+      return;
+    }
     data = compileCacheFs().readFileSync(entry.cacheFilename);
   } catch (err) {
     compileCacheDebug(` ${compileCacheStrerror(err)}\n`);
@@ -2645,6 +2690,16 @@ function compileCacheTempName(filename) {
   return `${filename}.${suffix}`;
 }
 
+// denext: a temporary file that wasn't renamed over its entry isn't left in
+// the cache directory.
+function compileCacheUnlinkTemp(tmp) {
+  try {
+    compileCacheFs().unlinkSync(tmp);
+  } catch {
+    // Nothing more to do.
+  }
+}
+
 // `CompileCacheHandler::Persist`: each new or refreshed entry goes to a
 // temporary file that is renamed over the cache file.
 function compileCachePersistEntry(entry) {
@@ -2701,12 +2756,14 @@ function compileCachePersistEntry(entry) {
     } catch {
       // Already reported the write failure.
     }
+    compileCacheUnlinkTemp(tmp);
     return;
   }
   try {
     fs.closeSync(fd);
   } catch (err) {
     compileCacheDebug(`failed: ${compileCacheStrerror(err)}\n`);
+    compileCacheUnlinkTemp(tmp);
     return;
   }
   compileCacheDebug("success\n");
@@ -2717,6 +2774,7 @@ function compileCachePersistEntry(entry) {
     fs.renameSync(tmp, entry.cacheFilename);
   } catch (err) {
     compileCacheDebug(`failed: ${compileCacheStrerror(err)}\n`);
+    compileCacheUnlinkTemp(tmp);
     return;
   }
   compileCacheDebug("success\n");
@@ -2748,11 +2806,11 @@ export function enableCompileCache(options) {
     directory = options;
   }
   if (directory === undefined) {
-    directory = compileCacheGetenv("NODE_COMPILE_CACHE") ||
+    directory = compileCacheEnvConfig("NODE_COMPILE_CACHE") ||
       path.join(nativeModuleExports["os"].tmpdir(), "node-compile-cache");
   }
   if (portable === undefined) {
-    portable = compileCacheGetenv("NODE_COMPILE_CACHE_PORTABLE") === "1";
+    portable = compileCacheEnvConfig("NODE_COMPILE_CACHE_PORTABLE") === "1";
   }
   if (typeof directory !== "string") {
     throw new internalErrors.ERR_INVALID_ARG_TYPE(

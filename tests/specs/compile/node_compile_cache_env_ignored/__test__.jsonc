@@ -1,0 +1,32 @@
+{
+  // A compiled program (`deno compile`, a Deno Desktop app) doesn't take
+  // Node's compile cache directory from NODE_COMPILE_CACHE: whoever sets it
+  // would choose where the program's code comes from. The program can still
+  // turn the cache on itself with `module.enableCompileCache()`.
+  "tempDir": true,
+  "steps": [{
+    "args": "run -A main.js",
+    "envs": { "NODE_COMPILE_CACHE": "env-cache" },
+    "output": "run.out"
+  }, {
+    "if": "unix",
+    "args": "compile -A --output bin main.js",
+    "output": "[WILDCARD]"
+  }, {
+    "if": "unix",
+    "commandName": "./bin",
+    "args": [],
+    "envs": { "NODE_COMPILE_CACHE": "env-cache-compiled" },
+    "output": "main.out"
+  }, {
+    "if": "windows",
+    "args": "compile -A --output bin.exe main.js",
+    "output": "[WILDCARD]"
+  }, {
+    "if": "windows",
+    "commandName": "./bin.exe",
+    "args": [],
+    "envs": { "NODE_COMPILE_CACHE": "env-cache-compiled" },
+    "output": "main.out"
+  }]
+}

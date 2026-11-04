@@ -3747,3 +3747,119 @@ mod tests {
     assert!(!is_src_subdir(&child, &src));
   }
 }
+
+/// denext: whether Node's compile cache may load code from `dir`, the
+/// version-tagged cache directory `module.enableCompileCache()` just created.
+/// V8's code cache check (magic number, version and flag hashes, source
+/// length) is not a MAC, and its deserializer trusts the bytes it is given,
+/// so the cache must only ever hold files the current user wrote. On Unix
+/// `dir` must be a real directory owned by the current user that nobody
+/// else can write to, and every directory above it, along the path as given
+/// and along its canonical path, must be owned by the current user or root
+/// and not writable by others unless it has the sticky bit (`/tmp`); a
+/// symlink on the way must be owned by the current user or root. Returns
+/// the reason the directory is refused, or `None`. Elsewhere the per-user
+/// temporary directory and ACLs apply, and this returns `None`.
+#[op2(stack_trace)]
+#[string]
+pub fn op_node_compile_cache_untrusted_dir(
+  state: &mut OpState,
+  #[string] dir: String,
+) -> Result<Option<String>, deno_permissions::PermissionCheckError> {
+  let checked = state.borrow_mut::<PermissionsContainer>().check_open(
+    Cow::Borrowed(Path::new(&dir)),
+    OpenAccessKind::Read,
+    Some("node:module.enableCompileCache()"),
+  )?;
+  Ok(compile_cache_untrusted_dir(&checked))
+}
+
+#[cfg(unix)]
+#[allow(
+  clippy::disallowed_methods,
+  reason = "requires real fs: ownership and modes of the on-disk cache \
+   directory and its ancestors, which the FileSystem trait doesn't expose"
+)]
+fn compile_cache_untrusted_dir(dir: &Path) -> Option<String> {
+  use std::os::unix::fs::MetadataExt;
+  use std::os::unix::fs::OpenOptionsExt;
+
+  // SAFETY: geteuid has no preconditions and cannot fail.
+  let uid = unsafe { libc::geteuid() };
+  let trusted_owner = |owner: u32| owner == uid || owner == 0;
+  let open_writable = |mode: u32| mode & 0o022 != 0 && mode & 0o1000 == 0;
+
+  if !dir.is_absolute() {
+    return Some(format!("'{}' is not an absolute path", dir.display()));
+  }
+  // The path as given: the cache's reads and writes go through it.
+  for ancestor in dir.ancestors() {
+    let metadata = match std::fs::symlink_metadata(ancestor) {
+      Ok(metadata) => metadata,
+      Err(err) => return Some(format!("'{}': {err}", ancestor.display())),
+    };
+    if !trusted_owner(metadata.uid()) {
+      return Some(format!(
+        "'{}' is not owned by the current user or root",
+        ancestor.display()
+      ));
+    }
+    if metadata.is_dir() && open_writable(metadata.mode()) {
+      return Some(format!(
+        "'{}' is writable by other users",
+        ancestor.display()
+      ));
+    }
+  }
+  // The canonical path: where a symlink on the way leads.
+  let canonical = match std::fs::canonicalize(dir) {
+    Ok(canonical) => canonical,
+    Err(err) => return Some(format!("'{}': {err}", dir.display())),
+  };
+  for ancestor in canonical.ancestors() {
+    let metadata = match std::fs::OpenOptions::new()
+      .read(true)
+      .custom_flags(libc::O_NOFOLLOW | libc::O_DIRECTORY)
+      .open(ancestor)
+      .and_then(|file| file.metadata())
+    {
+      Ok(metadata) => metadata,
+      Err(err) => return Some(format!("'{}': {err}", ancestor.display())),
+    };
+    if !trusted_owner(metadata.uid()) {
+      return Some(format!(
+        "'{}' is not owned by the current user or root",
+        ancestor.display()
+      ));
+    }
+    if open_writable(metadata.mode()) {
+      return Some(format!(
+        "'{}' is writable by other users",
+        ancestor.display()
+      ));
+    }
+  }
+  // The cache directory itself: the current user's, and only theirs to write.
+  let metadata = match std::fs::symlink_metadata(dir) {
+    Ok(metadata) => metadata,
+    Err(err) => return Some(format!("'{}': {err}", dir.display())),
+  };
+  if !metadata.is_dir() {
+    return Some(format!("'{}' is not a directory", dir.display()));
+  }
+  if metadata.uid() != uid {
+    return Some(format!(
+      "'{}' is not owned by the current user",
+      dir.display()
+    ));
+  }
+  if metadata.mode() & 0o022 != 0 {
+    return Some(format!("'{}' is writable by other users", dir.display()));
+  }
+  None
+}
+
+#[cfg(not(unix))]
+fn compile_cache_untrusted_dir(_dir: &Path) -> Option<String> {
+  None
+}
