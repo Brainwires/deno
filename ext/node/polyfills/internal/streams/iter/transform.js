@@ -559,6 +559,19 @@ function makeZlibTransform(createHandleFn, processFlag, finishFlag) {
           const consumed = writeAvailIn - availInAfter;
           writeInOff += consumed;
           writeAvailIn = availInAfter;
+
+          // Unlike Node 26.5.1, a full batch goes to the consumer before the
+          // engine produces more (continueInputAsync() resumes it). Node
+          // collected all of one input chunk's output first, so a small
+          // compressed chunk (a decompression bomb) was inflated into memory
+          // in full before the consumer saw any of it or could stop.
+          if (pendingBytes >= BATCH_HWM) {
+            const resolve = resolveWrite;
+            resolveWrite = undefined;
+            rejectWrite = undefined;
+            resolve(true);
+            return;
+          }
           writeAvailOutBefore = chunkSize - outOffset;
 
           handle.write(
@@ -578,7 +591,7 @@ function makeZlibTransform(createHandleFn, processFlag, finishFlag) {
         const resolve = resolveWrite;
         resolveWrite = undefined;
         rejectWrite = undefined;
-        if (resolve) resolve();
+        if (resolve) resolve(false);
       }
 
       // onError: called by C++ when the engine encounters an error.
@@ -648,6 +661,37 @@ function makeZlibTransform(createHandleFn, processFlag, finishFlag) {
         return promise;
       }
 
+      // Resumes the write that onWriteComplete paused with a full batch.
+      function continueInputAsync() {
+        const { promise, resolve, reject } = PromiseWithResolvers();
+        resolveWrite = resolve;
+        rejectWrite = reject;
+        writeAvailOutBefore = chunkSize - outOffset;
+        handle.write(
+          writeFlush,
+          writeInput,
+          writeInOff,
+          writeAvailIn,
+          outBuf,
+          outOffset,
+          writeAvailOutBefore,
+        );
+        return promise;
+      }
+
+      // Feeds one input chunk to the engine, yielding full batches while it
+      // produces output (see onWriteComplete).
+      async function* processInput(input, flushFlag) {
+        let more = await processInputAsync(input, flushFlag);
+        while (more) {
+          while (pending.length > 0 && pendingBytes >= BATCH_HWM) {
+            yield drainBatch();
+          }
+          signal.throwIfAborted();
+          more = await continueInputAsync();
+        }
+      }
+
       function drainBatch() {
         if (pendingBytes <= BATCH_HWM) {
           // Swap instead of splice - avoids copying the array.
@@ -687,7 +731,7 @@ function makeZlibTransform(createHandleFn, processFlag, finishFlag) {
             // Flush signal - finalize the engine.
             if (!finalized) {
               finalized = true;
-              await processInputAsync(kEmpty, finishFlag);
+              yield* processInput(kEmpty, finishFlag);
               while (pending.length > 0) {
                 yield drainBatch();
               }
@@ -701,7 +745,7 @@ function makeZlibTransform(createHandleFn, processFlag, finishFlag) {
           nextResult = iter.next();
 
           for (let i = 0; i < chunks.length; i++) {
-            await processInputAsync(chunks[i], processFlag);
+            yield* processInput(chunks[i], processFlag);
           }
 
           if (pendingBytes >= BATCH_HWM) {
@@ -717,7 +761,7 @@ function makeZlibTransform(createHandleFn, processFlag, finishFlag) {
         // Source ended - finalize if not already done by a null signal.
         if (!finalized && !signal.aborted) {
           finalized = true;
-          await processInputAsync(kEmpty, finishFlag);
+          yield* processInput(kEmpty, finishFlag);
           while (pending.length > 0) {
             yield drainBatch();
           }
@@ -768,7 +812,10 @@ function makeZlibTransformSync(createHandleFn, processFlag, finishFlag) {
       let pending = [];
       let pendingBytes = 0;
 
-      function processSyncInput(input, flushFlag) {
+      // A generator: as in the async transform, a full batch is yielded
+      // before the engine produces more, unlike Node 26.5.1, which inflated
+      // all of one input chunk's output into memory first.
+      function* processSyncInput(input, flushFlag) {
         let inOff = 0;
         let availIn = TypedArrayPrototypeGetByteLength(input);
         let availOutBefore = chunkSize - outOffset;
@@ -819,6 +866,9 @@ function makeZlibTransformSync(createHandleFn, processFlag, finishFlag) {
 
           if (availOut === 0) {
             // Engine has more output - loop.
+            while (pending.length > 0 && pendingBytes >= BATCH_HWM) {
+              yield drainBatch();
+            }
             const consumed = availIn - availInAfter;
             inOff += consumed;
             availIn = availInAfter;
@@ -865,7 +915,7 @@ function makeZlibTransformSync(createHandleFn, processFlag, finishFlag) {
         for (const batch of source) {
           if (batch === null) {
             // Flush signal - finalize the engine.
-            processSyncInput(Buffer.alloc(0), finishFlag);
+            yield* processSyncInput(Buffer.alloc(0), finishFlag);
             while (pending.length > 0) {
               yield drainBatch();
             }
@@ -873,7 +923,7 @@ function makeZlibTransformSync(createHandleFn, processFlag, finishFlag) {
           }
 
           for (let i = 0; i < batch.length; i++) {
-            processSyncInput(batch[i], processFlag);
+            yield* processSyncInput(batch[i], processFlag);
           }
 
           if (pendingBytes >= BATCH_HWM) {
