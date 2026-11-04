@@ -259,3 +259,57 @@ Deno.test({
     await Deno.remove(tempFile);
   },
 });
+
+Deno.test({
+  name: "writeSync: a string's position is the third argument",
+  fn() {
+    const tempFile: string = Deno.makeTempFileSync();
+    const fd = openSync(tempFile, "w+");
+    try {
+      assertEquals(writeSync(fd, "hello world"), 11);
+      // `fs.writeSync(fd, string[, position[, encoding]])`: overwrite at 6.
+      assertEquals(writeSync(fd, "WORLD", 6), 5);
+      assertEquals(decoder.decode(Deno.readFileSync(tempFile)), "hello WORLD");
+      // With an encoding, and a null position writing at the current one
+      // (the end, after the first write).
+      assertEquals(writeSync(fd, "6869", 0, "hex"), 2);
+      assertEquals(writeSync(fd, "!", null), 1);
+      assertEquals(decoder.decode(Deno.readFileSync(tempFile)), "hillo WORLD!");
+    } finally {
+      closeSync(fd);
+      Deno.removeSync(tempFile);
+    }
+  },
+});
+
+Deno.test({
+  name: "write: a string's position is the third argument",
+  async fn() {
+    const tempFile: string = await Deno.makeTempFile();
+    const fd = openSync(tempFile, "w+");
+    const writeString = (
+      str: string,
+      position: number | null,
+      encoding: BufferEncoding,
+    ) =>
+      new Promise<[number, unknown]>((resolve, reject) => {
+        write(fd, str, position, encoding, (err, written, buffer) => {
+          if (err) return reject(err);
+          resolve([written, buffer]);
+        });
+      });
+    try {
+      writeSync(fd, "hello world");
+      // Node's callback gets the string that was written, not its bytes.
+      assertEquals(await writeString("WORLD", 6, "utf8"), [5, "WORLD"]);
+      assertEquals(await writeString("6869", 0, "hex"), [2, "6869"]);
+      assertEquals(
+        decoder.decode(await Deno.readFile(tempFile)),
+        "hillo WORLD",
+      );
+    } finally {
+      closeSync(fd);
+      await Deno.remove(tempFile);
+    }
+  },
+});

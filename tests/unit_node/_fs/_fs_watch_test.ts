@@ -175,3 +175,106 @@ Deno.test({
     );
   },
 });
+
+// Runs `code` (an ES module, with the watched path in `FILE`) in a child and
+// returns its exit code and stdout. A watcher that keeps the event loop alive
+// makes the child run until the 30 s timeout kills it.
+async function runWatchChild(code: string, file: string) {
+  const { code: exitCode, stdout } = await new Deno.Command(Deno.execPath(), {
+    args: [
+      "eval",
+      "--ext=mjs",
+      `const FILE = ${JSON.stringify(file)};\n${code}`,
+    ],
+    stdout: "piped",
+    stderr: "inherit",
+    signal: AbortSignal.timeout(30_000),
+  }).output();
+  return { exitCode, stdout: new TextDecoder().decode(stdout) };
+}
+
+Deno.test({
+  name:
+    "[node/fs promises.watch] persistent: false does not keep the process alive",
+  async fn() {
+    const file = Deno.makeTempFileSync();
+    try {
+      const { exitCode, stdout } = await runWatchChild(
+        `import { watch } from "node:fs/promises";
+const iter = watch(FILE, { persistent: false });
+iter.next().then(() => console.log("settled"), () => console.log("rejected"));
+console.log("started");`,
+        file,
+      );
+      // As in Node, the pending next() never settles: the process exits.
+      assertEquals(exitCode, 0);
+      assertEquals(stdout, "started\n");
+    } finally {
+      Deno.removeSync(file);
+    }
+  },
+});
+
+Deno.test({
+  name: "[node/fs watch] persistent: false does not keep the process alive",
+  async fn() {
+    const file = Deno.makeTempFileSync();
+    try {
+      const { exitCode, stdout } = await runWatchChild(
+        `import { watch } from "node:fs";
+watch(FILE, { persistent: false }, () => {});
+console.log("started");`,
+        file,
+      );
+      assertEquals(exitCode, 0);
+      assertEquals(stdout, "started\n");
+    } finally {
+      Deno.removeSync(file);
+    }
+  },
+});
+
+Deno.test({
+  name: "[node/fs watch] an unref'd watcher stays unref'd after an event",
+  async fn() {
+    const file = Deno.makeTempFileSync();
+    try {
+      const { exitCode, stdout } = await runWatchChild(
+        `import { watch, writeFileSync } from "node:fs";
+let seen = false;
+const watcher = watch(FILE, () => {
+  if (!seen) console.log("event");
+  seen = true;
+});
+watcher.unref();
+setTimeout(() => writeFileSync(FILE, "x"), 200);
+setTimeout(() => {}, 1000);`,
+        file,
+      );
+      // The poll started after the event must be unref'd too.
+      assertEquals(exitCode, 0);
+      assertEquals(stdout, "event\n");
+    } finally {
+      Deno.removeSync(file);
+    }
+  },
+});
+
+Deno.test({
+  name: "[node/fs watchFile] persistent: false does not keep the process alive",
+  async fn() {
+    const file = Deno.makeTempFileSync();
+    try {
+      const { exitCode, stdout } = await runWatchChild(
+        `import { watchFile } from "node:fs";
+watchFile(FILE, { persistent: false, interval: 50 }, () => {});
+console.log("started");`,
+        file,
+      );
+      assertEquals(exitCode, 0);
+      assertEquals(stdout, "started\n");
+    } finally {
+      Deno.removeSync(file);
+    }
+  },
+});
