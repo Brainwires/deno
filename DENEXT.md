@@ -9668,9 +9668,10 @@ where the changes are discussed.
        runs keep their caches. A tag's build is slower (cold).
      - **Pinned runners.** `ubuntu-latest` (setup, e2e harness, publish) is
        `ubuntu-24.04`, and the x86_64 Windows target's `windows-latest` is
-       `windows-2022`, the image `denext tests` runs and the tag gate counts.
-       Every third-party action was already pinned by commit SHA; each SHA was
-       checked against its version tag.
+       `windows-2025`, the image it resolved to for every release so far
+       (`windows-2022`'s older MSVC misreads a raw string inside a macro in a
+       laufey test and stops the build). Every third-party action was already
+       pinned by commit SHA; each SHA was checked against its version tag.
      - **CEF enforced at a tag.** `ENGINE_STALENESS_ENFORCE_CEF` is `tag`:
        laufey is on CEF 156 (Chrome Extended Stable 156), so a release no longer
        waives CEF. A branch run still only warns.
