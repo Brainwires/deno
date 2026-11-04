@@ -3246,12 +3246,13 @@ declare namespace Deno {
      * The OS's own quits run this too: on macOS Cmd+Q, the `quit` role, the
      * Dock's Quit and a logout, on Windows the session ending
      * (WM_QUERYENDSESSION), so listeners can refuse them, though a session end
-     * may go on anyway ({@linkcode cancelQuit}). The OS isn't held for long: an app that doesn't answer quits anyway after 5 s. A session
-     * end (`reason: "session-end"`) stays held after a listener's
-     * `preventDefault()`, so a page across a bridge can still decide: call
-     * {@linkcode quit} again to let it go or {@linkcode cancelQuit} to ask the OS
-     * to stop it, within 10 s on macOS and 4 s on Windows, when the session goes on
-     * ending and the app quits. A Windows tray menu's `quit` role quits at
+     * may go on anyway ({@linkcode cancelQuit}). The OS isn't held for long: a
+     * plain quit is answered at once, and one nobody answers goes ahead after
+     * 5 s. A session end (`reason: "session-end"`) stays held after a
+     * listener's `preventDefault()`, so a page across a bridge can still
+     * decide: call {@linkcode quit} again to let it go or
+     * {@linkcode cancelQuit} to ask the OS to stop it, within 10 s on macOS and
+     * 4 s on Windows, when the session goes on ending and the app quits. A Windows tray menu's `quit` role quits at
      * once and asks nobody. */
     export function quit(): boolean;
 

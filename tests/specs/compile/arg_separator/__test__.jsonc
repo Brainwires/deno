@@ -1,5 +1,5 @@
 {
-  // DENEXT.md item 236: `deno compile` and arguments after the script that
+  // DENEXT.md item 238: `deno compile` and arguments after the script that
   // no `--` separates from it (upstream #30334).
   "tempDir": true,
   "tests": {

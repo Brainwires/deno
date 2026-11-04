@@ -9616,15 +9616,13 @@ where the changes are discussed.
 235. **`chore(deps)`: V8 15.6.75.38 from Brainwires/rusty_v8
      `v156.0.0-denext.4`** (`v8` crate `156.0.0+denext.4`;
      `chore/v8-15.6-latest`; runtime and CI; `Cargo.toml`, `Cargo.lock`,
-     `.github/denext-runtime/rusty_v8.sha256`; runtime 3.0.0-denext.9). The
-     number is a placeholder: renumber it when the branch merges, since
-     `integrate/denext-9-pre` already uses 227-234 and `ci/release-hardening`
-     also takes 227. V8 moves from 15.6.75.33 to 15.6.75.38, the head of
-     `branch-heads/15.6` (Chrome Extended Stable 156) on 2026-11-03. This keeps
-     the pin within the engine staleness gate's 14-day patch-lag rule
-     (`ci/release-hardening`) for this runtime: 15.6.75.34, the first patch
-     `.33` lacks, came out on 2026-11-02, so `.33` would have failed the gate
-     from about 2026-11-16. Five security merges come in:
+     `.github/denext-runtime/rusty_v8.sha256`; runtime 3.0.0-denext.9). V8 moves
+     from 15.6.75.33 to 15.6.75.38, the head of `branch-heads/15.6` (Chrome
+     Extended Stable 156) on 2026-11-03. This keeps the pin within the engine
+     staleness gate's 14-day patch-lag rule (`ci/release-hardening`) for this
+     runtime: 15.6.75.34, the first patch `.33` lacks, came out on 2026-11-02,
+     so `.33` would have failed the gate from about 2026-11-16. Five security
+     merges come in:
      - `32bb3bf0bb` [modules] star exports are no longer cached into a linked
        module's export table (crbug 574038247, CVE-2026-121057, High, type
        confusion in V8);
@@ -9706,7 +9704,7 @@ where the changes are discussed.
 
 237. **`feat(node/crypto)`: `--seed` reaches `node:crypto`'s random paths**
      (`feat/seed-node-crypto`; runtime; `ext/node_crypto/lib.rs`; upstream
-     #35718 phase 1; the number is a placeholder, renumbered at integration).
+     #35718 phase 1).
      Under `--seed`, `deno_crypto` puts a seeded `StdRng` in the `OpState`, and
      `Math.random`, `crypto.getRandomValues` and `crypto.randomUUID` (and
      `node:crypto`'s `randomBytes`, which fills through `getRandomValues`)
@@ -9732,7 +9730,7 @@ where the changes are discussed.
      `cli/tools/compile.rs`, `libs/cli_parser/src/convert.rs`,
      `libs/config/deno_json/mod.rs`, `libs/config/workspace/mod.rs`,
      `cli/schemas/config-file.v1.json`, `libs/cli_parser/src/env_vars.rs`;
-     upstream #30334; the number is a placeholder, renumbered at integration).
+     upstream #30334).
      Everything after `deno compile`'s script is embedded in the executable as
      its arguments, so `deno compile main.ts --output app
      --allow-net`
@@ -9767,12 +9765,45 @@ where the changes are discussed.
      deno.json, the env var over the config, an invalid value). The spec fails
      on the base: no warning, and strict mode does not exist.
 
+239. **laufey at `6d88bf8`** (`development-denext`; laufey API 53; runtime
+     3.0.0-denext.9; `cli/rt_desktop/Cargo.toml`, `cli/rt_desktop/lib.rs`,
+     `Cargo.lock`, `.github/workflows/denext_runtime.yml`, `cli/tools/desktop.rs`,
+     `libs/config/deno_json/mod.rs`, `libs/cli_parser/src/flags.rs`,
+     `cli/schemas/config-file.v1.json`). laufey development-denext
+     `99a1c2e..6d88bf8` adds microphone and camera requests (laufey's
+     `docs/media-capture.md`): every `getUserMedia` request goes to the
+     backend, which decides it once and refuses it by default. A request from a
+     sub-frame of another origin than the top-level document's, from an opaque
+     origin, or for anything but the microphone and camera (`getDisplayMedia`)
+     is refused; one the launch file's new `mediaCapture` key grants for every
+     kind it asks (exact origins) is allowed; the rest go to the runtime's
+     handler (the new `set_media_capture_handler` / `answer_media_capture`
+     vtable slots), and are refused when there is none. An allowed request still
+     meets the OS's consent (macOS TCC, Windows' privacy switch). The runtime
+     registers no handler, so a packaged app reaches the devices only through
+     the launch file. denext's packaging writes `mediaCapture` itself (the app
+     origin alone, from `FIRST_MEDIA_CAPTURE_RUNTIME`, 3.0.0-denext.9);
+     `deno desktop`'s own launch file now carries it too, from deno.json's new
+     `desktop.app.mediaCapture` (`{ "microphone": [origins], "camera":
+     [origins] }`): an entry that is not an exact `scheme://host[:port]` origin
+     (`*`, `<scheme>://*`, a path, a query, userinfo, `file:` / `data:`) is
+     reported and skipped, as laufey skips it, and the key is left out when
+     nothing is granted. The compile-time API assert moves to 53. From the same
+     range: laufey's CI lints its tests too (clippy `--all-targets`), and a
+     dispatch picks the macOS runner. Still CEF 156.0.15. Tests:
+     `laufey_launch_config_content` (the key written and left out),
+     `media_capture_origins_are_exact`,
+     `desktop_config_media_capture_reaches_the_flags`,
+     `test_parse_desktop_app_config_media_capture` (an unknown kind is an
+     error); laufey's `media_capture_test.cc` and its native_e2e
+     `--media-capture` checks on its CI.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
 169-174, 176, 178, 180, 182-184, 186, 187, 189-191, 193-196, 198-203, 206, 207,
-209-215, 217, 218, 221, 222, 224, 225, 227, 228, 231, 232, 235) are what the
-prebuilt `libdenort` carries. The CLI-side parts (for example writing
+209-215, 217, 218, 221, 222, 224, 225, 227, 228, 231, 232, 235, 237) are what
+the prebuilt `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
 in the branch too, but a stock CLI does not run them; denext's own launcher
 provides that environment.
@@ -9807,10 +9838,11 @@ activation policy and speech, item 183; and, for runtime 3.0.0-denext.7, CEF
 `backgroundThrottling`, item 198; and the Windows focus, tray role and window
 icon fixes, item 207; and API 52, the OS's quits and layer-surface edge
 anchoring, items 221 and 222; and, for runtime 3.0.0-denext.9, a Linux window
-first shown at its size and the CEF shutdown, storage and print fixes, item
-234), at the commit pinned by `LAUFEY_SHA` in the workflow (or the `laufey_ref`
-input). The same commit is the `laufey` git dependency of
-`cli/rt_desktop/Cargo.toml` (crate 0.8.0, API 52, CEF 156.0.15).
+first shown at its size and the CEF shutdown, storage and print fixes, item 234,
+and API 53, microphone and camera requests and the `mediaCapture` launch key,
+item 239), at the commit pinned by `LAUFEY_SHA` in the workflow (or the
+`laufey_ref` input). The same commit is the `laufey` git dependency of
+`cli/rt_desktop/Cargo.toml` (crate 0.8.0, API 53, CEF 156.0.15).
 
 laufey's `init_api` rejects any C ABI version mismatch between the runtime and
 the host, so the `laufey` crate libdenort links and the hosts are built from the
@@ -10189,7 +10221,7 @@ the equivalent of laufey's `native_e2e`: `.github/denext-runtime/e2e/`. The
 runtime workflow runs it after the launch smoke on every target with both
 backends (Linux under Xvfb with the xfwm4 window manager, a private D-Bus
 session and a stand-in notification server, `linux/`), and on x86_64 Linux again
-on a headless sway with no X server (`E2E_DISPLAY=wayland`, item 215).
+on a headless sway with no X server (`E2E_DISPLAY=wayland`, item 220).
 
 Layout:
 

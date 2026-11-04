@@ -4589,8 +4589,9 @@ fn op_desktop_quit(state: &mut OpState) {
   }
 }
 
-/// The answer to the OS's quit request in progress, `Deno.desktop.quit()`
-/// refused it.
+/// Answers the OS's quit request in progress: `false` when
+/// `Deno.desktop.quit()` refused a plain quit, or from `cancelQuit()` for a
+/// held session end (a request the OS may not honour).
 #[op2(fast)]
 fn op_desktop_answer_quit_request(state: &mut OpState, allow: bool) {
   if let Some(api) = state.try_borrow::<Arc<dyn DesktopApi>>() {
