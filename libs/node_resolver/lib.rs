@@ -15,6 +15,8 @@ mod resolution;
 pub use builtin_modules::DENO_SUPPORTED_BUILTIN_NODE_MODULES;
 pub use builtin_modules::DenoIsBuiltInNodeModuleChecker;
 pub use builtin_modules::IsBuiltInNodeModuleChecker;
+pub use builtin_modules::NODE_SCHEME_ONLY_BUILTIN_NODE_MODULES;
+pub use builtin_modules::is_node_scheme_only_builtin;
 pub use cache::NodeResolutionCache;
 pub use cache::NodeResolutionCacheRc;
 pub use deno_package_json::PackageJson;

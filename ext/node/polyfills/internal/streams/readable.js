@@ -98,6 +98,7 @@ const {
   Symbol,
   SymbolAsyncDispose,
   SymbolAsyncIterator,
+  SymbolFor,
   SymbolSpecies,
   TypedArrayPrototypeSet,
 } = primordials;
@@ -1897,6 +1898,37 @@ Readable.wrap = function (src, options) {
     },
   }).wrap(src);
 };
+
+// Interop with node:stream/iter through its toAsyncStreamable protocol, as
+// Node's lib/internal/streams/readable.js does. The batched iterator lives in
+// internal/streams/iter/classic.js, loaded on the first call. Unlike Node, no
+// --experimental-stream-iter flag is needed: node:stream/iter is always
+// available here.
+{
+  const toAsyncStreamable = SymbolFor("Stream.toAsyncStreamable");
+  let createBatchedAsyncIterator;
+  let normalizeBatch;
+  let kValidatedSource;
+
+  Readable.prototype[toAsyncStreamable] = function () {
+    if (createBatchedAsyncIterator === undefined) {
+      ({ createBatchedAsyncIterator, normalizeBatch } = core.loadExtScript(
+        "ext:deno_node/internal/streams/iter/classic.js",
+      ));
+      ({ kValidatedSource } = core.loadExtScript(
+        "ext:deno_node/internal/streams/iter/types.js",
+      ));
+    }
+    const state = this._readableState;
+    const normalize = (state.objectMode || state.encoding)
+      ? normalizeBatch
+      : null;
+    const iter = createBatchedAsyncIterator(this, normalize);
+    iter[kValidatedSource] = true;
+    iter.stream = this;
+    return iter;
+  };
+}
 
 return { default: Readable, Readable };
 })();

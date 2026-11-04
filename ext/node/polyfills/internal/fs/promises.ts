@@ -17,6 +17,7 @@ import { globPromise } from "ext:deno_node/_fs/_fs_glob.ts";
 import {
   getValidatedPathToString,
   validateStringAfterArrayBufferView,
+  vfsState,
 } from "ext:deno_node/internal/fs/utils.mjs";
 const { isIterable } = core.loadExtScript(
   "ext:deno_node/internal/streams/utils.js",
@@ -41,10 +42,13 @@ const {
   ErrorCaptureStackTrace,
   ErrorPrototype,
   ObjectDefineProperty,
+  ObjectFreeze,
   ObjectPrototypeIsPrototypeOf,
   Promise,
   PromisePrototypeThen,
   PromiseReject,
+  PromiseResolve,
+  ReflectApply,
   SafeArrayIterator,
   SymbolAsyncDispose,
 } = primordials;
@@ -482,42 +486,292 @@ const readlinkPromise = lazyPromisifyFs("readlink", 2) as (
 
 // -- promises object --
 
+// node:vfs: as in Node's lib/internal/fs/promises.js, each of these asks the
+// mounted virtual file systems (`vfsState.handlers`, internal/vfs/setup.js)
+// first. A handler returns `undefined` for a path or descriptor that is not
+// virtual, and the call then goes to the real file system as before.
+type VfsHandlers = Record<string, (...args: any[]) => any>;
+
+// A handler call that throws rejects the returned promise, as Node's async
+// functions do. The real file system's path calls the implementation
+// directly, so its promise (and when it settles) is unchanged.
+function vfsCall(call: () => unknown): unknown {
+  try {
+    return call();
+  } catch (err) {
+    return PromiseReject(err);
+  }
+}
+
+const kDefaultStatOptions = ObjectFreeze({ __proto__: null, bigint: false });
+const kDefaultStatThrowOptions = ObjectFreeze({
+  __proto__: null,
+  bigint: false,
+  throwIfNoEntry: true,
+});
+
+// A handler that resolves with nothing (or nothing the caller sees). `call`
+// gets the handlers and the call's arguments.
+function vfsVoidFirst<R>(
+  impl: (...args: any[]) => Promise<R>,
+  call: (h: VfsHandlers, a: any[]) => Promise<unknown> | undefined,
+): (...args: any[]) => Promise<R | void> {
+  return function (this: unknown, ...args: any[]) {
+    const h = vfsState.handlers;
+    if (h !== null) {
+      const promise = vfsCall(() => call(h, args));
+      if (promise !== undefined) {
+        return PromisePrototypeThen(PromiseResolve(promise), () => {});
+      }
+    }
+    // The receiver is kept, so an error's async stack still names the
+    // method (`at async Object.access`), as Node's does.
+    return ReflectApply(impl, this, args);
+  };
+}
+
+// A handler whose result (or its promise's) is the call's result.
+function vfsResultFirst<R>(
+  impl: (...args: any[]) => Promise<R>,
+  call: (h: VfsHandlers, a: any[]) => unknown,
+): (...args: any[]) => Promise<R> {
+  return function (this: unknown, ...args: any[]) {
+    const h = vfsState.handlers;
+    if (h !== null) {
+      const result = vfsCall(() => call(h, args));
+      if (result !== undefined) return PromiseResolve(result) as Promise<R>;
+    }
+    // The receiver is kept, so an error's async stack still names the
+    // method (`at async Object.access`), as Node's does.
+    return ReflectApply(impl, this, args);
+  };
+}
+
+function named<T extends (...args: any[]) => any>(name: string, fn: T): T {
+  ObjectDefineProperty(fn, "name", {
+    __proto__: null,
+    value: name,
+    configurable: true,
+  });
+  return fn;
+}
+
+const vfsAccess = named(
+  "access",
+  vfsVoidFirst(accessPromise, (h, a) => h.access(a[0], a[1])),
+);
+const vfsCopyFile = named(
+  "copyFile",
+  vfsVoidFirst(
+    copyFilePromise,
+    (h, a) => h.copyFile(a[0], a[1], a[2]),
+  ),
+);
+const vfsOpen = named(
+  "open",
+  vfsResultFirst(
+    openPromise,
+    (h, a) => h.promisesOpen(a[0], a[1], a[2]),
+  ),
+);
+const vfsRename = named(
+  "rename",
+  vfsVoidFirst(
+    renamePromise,
+    (h, a) => h.rename(a[0], a[1]),
+  ),
+);
+const vfsTruncate = named(
+  "truncate",
+  vfsVoidFirst(truncatePromise, (h, a) => h.truncate(a[0], a[1] ?? 0)),
+);
+const vfsRm = named(
+  "rm",
+  vfsVoidFirst(rmPromise, (h, a) => h.rm(a[0], a[1])),
+);
+const vfsRmdir = named(
+  "rmdir",
+  vfsVoidFirst(rmdirPromise, (h, a) => h.rmdir(a[0])),
+);
+const vfsMkdir = named(
+  "mkdir",
+  function (this: unknown, path: string | Buffer | URL, options?: unknown) {
+    const h = vfsState.handlers;
+    if (h !== null) {
+      const promise = vfsCall(() => h.mkdir(path, options));
+      if (promise !== undefined) {
+        return PromisePrototypeThen(
+          PromiseResolve(promise),
+          (r: { result: unknown }) => r.result,
+        );
+      }
+    }
+    return ReflectApply(mkdirPromise, this, [path, options]);
+  },
+);
+const vfsReaddir = named(
+  "readdir",
+  vfsResultFirst(
+    readdirPromise,
+    (h, a) => h.readdir(a[0], a[1]),
+  ),
+);
+const vfsReadlink = named(
+  "readlink",
+  vfsResultFirst(
+    readlinkPromise,
+    (h, a) => h.readlink(a[0], a[1]),
+  ),
+);
+const vfsSymlink = named(
+  "symlink",
+  vfsVoidFirst(
+    symlinkPromise,
+    (h, a) => h.symlink(a[0], a[1], a[2]),
+  ),
+);
+const vfsLstat = named(
+  "lstat",
+  vfsResultFirst(
+    lstatPromise,
+    (h, a) => h.lstat(a[0], a[1] ?? kDefaultStatOptions),
+  ),
+);
+const vfsStat = named(
+  "stat",
+  vfsResultFirst(
+    statPromise,
+    (h, a) => h.stat(a[0], a[1] ?? kDefaultStatThrowOptions),
+  ),
+);
+const vfsStatfs = named(
+  "statfs",
+  vfsResultFirst(
+    statfsPromise,
+    (h, a) => h.statfs(a[0], a[1] ?? kDefaultStatOptions),
+  ),
+);
+const vfsLink = named(
+  "link",
+  vfsVoidFirst(
+    linkPromise,
+    (h, a) => h.link(a[0], a[1]),
+  ),
+);
+const vfsUnlink = named(
+  "unlink",
+  vfsVoidFirst(unlinkPromise, (h, a) => h.unlink(a[0])),
+);
+const vfsChmod = named(
+  "chmod",
+  vfsVoidFirst(chmodPromise, (h, a) => h.chmod(a[0], a[1])),
+);
+const vfsLchmod = lchmodPromise === undefined ? undefined : named(
+  "lchmod",
+  vfsVoidFirst(lchmodPromise, (h, a) => h.lchmod(a[0], a[1])),
+);
+const vfsLchown = named(
+  "lchown",
+  vfsVoidFirst(
+    lchownPromise,
+    (h, a) => h.lchown(a[0], a[1], a[2]),
+  ),
+);
+const vfsChown = named(
+  "chown",
+  vfsVoidFirst(chownPromise, (h, a) => h.chown(a[0], a[1], a[2])),
+);
+const vfsUtimes = named(
+  "utimes",
+  vfsVoidFirst(
+    utimesPromise,
+    (h, a) => h.utimes(a[0], a[1], a[2]),
+  ),
+);
+const vfsLutimes = named(
+  "lutimes",
+  vfsVoidFirst(
+    lutimesPromise,
+    (h, a) => h.lutimes(a[0], a[1], a[2]),
+  ),
+);
+const vfsRealpath = named(
+  "realpath",
+  vfsResultFirst(
+    realpathPromise,
+    (h, a) => h.realpath(a[0], a[1]),
+  ),
+);
+const vfsMkdtemp = named(
+  "mkdtemp",
+  vfsResultFirst(
+    mkdtempPromise,
+    (h, a) => h.mkdtemp(a[0], a[1]),
+  ),
+);
+const vfsWriteFile = named(
+  "writeFile",
+  vfsVoidFirst(
+    writeFilePromise,
+    (h, a) => h.writeFile(a[0], a[1], a[2]),
+  ),
+);
+const vfsAppendFile = named(
+  "appendFile",
+  vfsVoidFirst(
+    appendFilePromise,
+    (h, a) => h.appendFile(a[0], a[1], a[2]),
+  ),
+);
+const vfsReadFile = named(
+  "readFile",
+  vfsResultFirst(
+    readFilePromise,
+    (h, a) => h.readFile(a[0], a[1]),
+  ),
+);
+
 const promises = {
-  access: accessPromise,
+  access: vfsAccess,
   constants,
-  copyFile: copyFilePromise,
+  copyFile: vfsCopyFile,
   cp: cpPromise,
   glob: globPromise,
-  open: openPromise,
+  open: vfsOpen,
   opendir: opendirPromise,
-  rename: renamePromise,
-  truncate: truncatePromise,
-  rm: rmPromise,
-  rmdir: rmdirPromise,
-  mkdir: mkdirPromise,
-  readdir: readdirPromise,
-  readlink: readlinkPromise,
-  symlink: symlinkPromise,
-  lstat: lstatPromise,
-  stat: statPromise,
-  statfs: statfsPromise,
-  link: linkPromise,
-  unlink: unlinkPromise,
-  chmod: chmodPromise,
-  lchmod: lchmodPromise,
-  lchown: lchownPromise,
-  chown: chownPromise,
-  utimes: utimesPromise,
-  lutimes: lutimesPromise,
-  realpath: realpathPromise,
-  mkdtemp: mkdtempPromise,
+  rename: vfsRename,
+  truncate: vfsTruncate,
+  rm: vfsRm,
+  rmdir: vfsRmdir,
+  mkdir: vfsMkdir,
+  readdir: vfsReaddir,
+  readlink: vfsReadlink,
+  symlink: vfsSymlink,
+  lstat: vfsLstat,
+  stat: vfsStat,
+  statfs: vfsStatfs,
+  link: vfsLink,
+  unlink: vfsUnlink,
+  chmod: vfsChmod,
+  lchmod: vfsLchmod,
+  lchown: vfsLchown,
+  chown: vfsChown,
+  utimes: vfsUtimes,
+  lutimes: vfsLutimes,
+  realpath: vfsRealpath,
+  mkdtemp: vfsMkdtemp,
   mkdtempDisposable: mkdtempDisposablePromise,
-  writeFile: writeFilePromise,
-  appendFile: appendFilePromise,
-  readFile: readFilePromise,
-  watch:
-    ((...args: any[]) =>
-      (lazyFs() as any).watchPromise(...new SafeArrayIterator(args))) as any,
+  writeFile: vfsWriteFile,
+  appendFile: vfsAppendFile,
+  readFile: vfsReadFile,
+  watch: ((...args: any[]) => {
+    const h = vfsState.handlers;
+    if (h !== null) {
+      const result = h.promisesWatch?.(args[0], args[1] ?? {});
+      if (result !== undefined) return result;
+    }
+    return (lazyFs() as any).watchPromise(...new SafeArrayIterator(args));
+  }) as any,
 };
 
 export default promises;

@@ -9984,13 +9984,153 @@ where the changes are discussed.
      and returns false with nothing sent for a plain quit, one already
      answered, or one past laufey's deadline.
 
+242. **`feat(ext/node)`: `node:stream/iter` and `node:zlib/iter`**
+     (`feat/node-compat-round8`, runtime; `ext/node/polyfills/stream/iter.js`,
+     `ext/node/polyfills/zlib/iter.js`,
+     `ext/node/polyfills/internal/streams/iter/`, `ext/node/lib.rs`,
+     `ext/node/polyfills/01_require.js`,
+     `ext/node/polyfills/internal/streams/readable.js`,
+     `ext/node/polyfills/internal/errors.ts`,
+     `ext/node/polyfills/internal/util.mjs`,
+     `libs/node_resolver/builtin_modules.rs`). Node 26's experimental
+     iterable-streams API was missing: `require('node:stream/iter')` threw
+     "Cannot find module", failing 43 suite tests (cluster 10 of
+     `plans/node-compat-gaps.md`). The modules are Node 26.5.1's
+     `lib/internal/streams/iter/*.js`, `lib/stream/iter.js` and
+     `lib/zlib/iter.js`, each wrapped as an ext script with its logic unchanged
+     (upstream's closed denoland/deno#36287 ported Node 26.3's; this takes
+     26.5.1's, which adds abort handling to the consumers). They load with
+     `require` and `import` (`node:stream/iter`, `node:zlib/iter`, also without
+     the scheme) and need no `--experimental-stream-iter` flag. Around them:
+     - Node's `SafePromiseAllReturnVoid` and `markPromiseAsHandled` are not Deno
+       primordials / bindings; `consumers.js` and `utils.js` define them locally
+       (the closed PR left `merge()`'s clean-up calling `undefined`).
+     - `internal/streams/iter/transform.js` (the `zlib/iter` compressors) drives
+       the native handles directly, and Deno's (`ext/node/ops/zlib`) differ from
+       Node's binding: `init()` takes no writeState (`write()` takes it as an
+       eighth argument), Zlib's `write()` finishes before returning and leaves
+       the completion callback to its caller (Brotli's and Zstd's call it
+       themselves), errors arrive as `(message, errno)` without Node's code, and
+       Brotli / Zstd take no dictionary. A `NodeHandle` adapter gives the
+       transforms Node's handle API: completion is reported on a later tick for
+       every engine, the zlib code comes from errno (as `zlib.js` does), a
+       Brotli decoder error becomes Node's `ERR_<decoder error>` code with
+       "Decompression failed", and a Brotli or Zstd `dictionary` is
+       `ERR_FEATURE_UNAVAILABLE_ON_PLATFORM` instead of being ignored.
+     - `Readable.prototype[Symbol.for('Stream.toAsyncStreamable')]`, as Node's
+       `readable.js` installs it, so `from(readable)` takes the batched path.
+     - `ERR_OPERATION_FAILED` (with its `TypeError` variant) and
+       `ERR_INVALID_STATE.TypeError` / `.RangeError` in `internal/errors.ts`,
+       `lazyDOMException` and `setOwnProperty` in `internal/util.mjs`. Not done:
+       `FileHandle.prototype.pull()` / `pullSync()` / `writer()`. Tests: unit
+       `tests/unit_node/stream_iter_test.ts` (zlib, Brotli, Zstd round trips
+       through `pull()`, gzip output read back by `node:zlib`, the sync
+       transforms, `Z_DATA_ERROR` from a corrupt stream, `Readable` interop, a
+       refused dictionary).
+
+243. **`feat(ext/node)`: `node:vfs`, and node:fs consults a mounted one**
+     (`feat/node-compat-round8`, runtime; `ext/node/polyfills/vfs.js`,
+     `ext/node/polyfills/internal/vfs/`, `ext/node/polyfills/fs.ts`,
+     `ext/node/polyfills/internal/fs/promises.ts`,
+     `ext/node/polyfills/_fs/_fs_read.ts`,
+     `ext/node/polyfills/internal/fs/utils.mjs`, `ext/node/lib.rs`,
+     `ext/node/polyfills/01_require.js`). Node 26's experimental virtual file
+     system (`vfs.create()`, `VirtualFileSystem`, `MemoryProvider`,
+     `RealFSProvider`, `mount()` / `unmount()`) did not exist: 93 suite tests
+     failed on "No such built-in module: node:vfs" (cluster 14). The modules are
+     Node 26.5.1's `lib/vfs.js` and `lib/internal/vfs/**`, ported the same way
+     as item 244, and, as in Node's `lib/fs.js`, `lib/internal/fs/dir.js` and
+     `lib/internal/fs/promises.js`, every node:fs call Node routes to a mounted
+     VFS first asks `vfsState.handlers` (`internal/vfs/setup.js`): the sync,
+     callback and promise forms of access, exists, readFile, writeFile,
+     appendFile, open, close, read(v), write(v), stat / lstat / fstat / statfs,
+     readdir, opendir, mkdir, mkdtemp, rm / rmdir / unlink, rename, copyFile,
+     link / symlink / readlink, realpath, truncate, ftruncate, chmod / chown /
+     utimes and their `f` / `l` forms, fsync / fdatasync, watch / watchFile /
+     unwatchFile, `openAsBlob` and the read / write streams. A handler answers
+     only for paths under a mount point and the VFS's own descriptors (from
+     `0x40000000`); anything else returns `undefined` and goes to the real file
+     system and Deno's permission checks as before, and with nothing mounted the
+     cost is one null check. Node's `setup.js` has no `readv`, `writev`,
+     `watchFile`, `unwatchFile` or `promisesWatch` handler, which Node's fs
+     calls anyway (a TypeError with a VFS mounted); here those are called only
+     when present. The `fs.promises` wrappers return the implementation's own
+     promise on the real-file path, so its settle timing (which
+     `test-fs-promises-file-handle-readFile` observes) is unchanged. Security:
+     - `RealFSProvider` reaches the disk only through node:fs, so Deno's
+       `--allow-read` / `--allow-write` apply to every file under its root, and
+       Node's permission-model gate (`--allow-fs-vfs`) is moot here (the node
+       shim parses `--permission` but does not apply it).
+     - Node 26.5.1's `RealFSProvider` let a path leave its root: the ENOENT it
+       threw for a symlink resolving outside the root was caught by its own
+       "doesn't exist yet" handler, which returned the link path to be followed,
+       so reading `/link` returned the outside file; the same in the ancestor
+       check let a write go through a symlinked directory; and a dangling
+       symlink (realpath ENOENT) was returned and followed by a write, creating
+       its target anywhere. The escape checks now run outside those `try` blocks
+       and a dangling symlink is refused (ENOENT).
+     - A virtual stat without an explicit owner defaults to the process's uid /
+       gid as in Node; reading those needs `sys` permission in Deno, so they are
+       used only when it is already granted (`op_query_permission`, never a
+       prompt) and are 0 otherwise. Also: `getStatsFromBinding` accepts Node's
+       `BigInt64Array` (the VFS's bigint stats) as well as Deno's
+       `BigUint64Array`, and the `internal/vfs/*` modules are requirable as
+       Node's `--expose-internals` tests expect. Not done: loading modules from
+       a mounted VFS (`require` / `import` of a virtual path, `test-vfs.js`),
+       and `RealFSProvider.promises.watch` with `persistent: false` does not
+       settle (`test-vfs-real-provider-watch.js`, an fs.promises.watch
+       limitation). Tests: unit `tests/unit_node/vfs_test.ts` (node:fs, fs
+       callbacks and fs.promises on a mounted VFS and ENOENT once unmounted, a
+       virtual stat under `--no-prompt` with and without `--allow-sys`,
+       `RealFSProvider` under denied and granted `--allow-read`, `..` and a
+       symlink out of the root, a write through a symlinked directory and a
+       dangling symlink).
+
+244. **`fix(ext/node, resolver)`: `vfs`, `test`, `test/reporters` and `sqlite`
+     are built-ins only with the `node:` scheme** (`feat/node-compat-round8`,
+     runtime and CLI; `ext/node/polyfills/01_require.js`,
+     `libs/node_resolver/builtin_modules.rs`,
+     `libs/node_resolver/resolution.rs`, `libs/resolver/lib.rs`). Node's
+     `schemelessBlockList` makes these resolvable only as `node:<name>`; a bare
+     `vfs` names a package. Deno listed them as `node:<name>` in
+     `builtinModules` but still resolved the bare name to the built-in, so with
+     `node:vfs` added, a package named `vfs` (or `test`, or `sqlite`) could not
+     be loaded: `require('test')` returned `node:test`, and an ES module's
+     `import 'vfs'` would have resolved to the built-in. A bare name in that
+     list (`NODE_SCHEME_ONLY_BUILTIN_NODE_MODULES`, shared with
+     `schemelessBlockList`) now goes through package resolution in `require()`,
+     `require.resolve()`, `Module._load`'s built-in fallback, the module hooks'
+     default resolve, the npm resolver and byonm, and `isBuiltin()` is false for
+     it. Tests: spec `node/scheme_only_builtins_bare` (bare `vfs` and `test`
+     from `require` and `import`, in a package and the main module, with
+     `node:vfs` alongside); Rust unit `scheme_only_builtins_are_builtins`.
+
+245. **`test(node_compat)`: 132 tests `node:stream/iter` and `node:vfs` pass**
+     (`feat/node-compat-round8`, test config only;
+     `tests/node_compat/config.jsonc`). 38 `test-stream-iter-*` and 94
+     `test-vfs-*` tests from items 244-246. Each passed three isolated runs
+     (runner parallelism 1, report mode, the CI 10 s timeout) on a Linux x86_64
+     debug build without skipping, and is on for Linux only, with that reason,
+     until checked on macOS and Windows. Left off:
+     `test-stream-iter-broadcast-from.js` (passes, but takes about 10 s on a
+     debug build), the `-disabled` tests (`test-stream-iter-disabled.js`,
+     `-readable-interop-disabled.js`, `test-vfs-flag.js`: they expect the module
+     to be unavailable without `--experimental-*`, and here it always is),
+     `test-vfs.js` (module loading from a VFS) and
+     `test-vfs-real-provider-watch.js` (item 245). Whole suite (re-measured on
+     biscuits with `plans/node-compat-gaps.md`'s method, on
+     `integrate/denext-9-pre` at cee90fe620): 3979 of 5563 passing (71.5%)
+     before, 4115 (74.0%) after; the one enabled test that run failed,
+     `test-fs-access.js` (the `fs.promises` wrappers dropped the receiver, so
+     the async stack lost `Object.access`), is fixed in item 245.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
 169-174, 176, 178, 180, 182-184, 186, 187, 189-191, 193-196, 198-203, 206, 207,
 209-215, 217, 218, 221, 222, 224, 225, 227, 228, 231, 232, 235, 237, 240,
-260) are what the prebuilt `libdenort` carries. The CLI-side parts (for example
-writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's
+244-246) are what the prebuilt `libdenort` carries. The CLI-side parts (for
+example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's
 launchers) are in the branch too, but a stock CLI does not run them; denext's
 own launcher provides that environment.
 

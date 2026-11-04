@@ -52,6 +52,7 @@ const {
 
 const {
   isArrayBufferView,
+  isBigInt64Array,
   isBigUint64Array,
   isDate,
   isUint8Array,
@@ -717,12 +718,14 @@ Stats.prototype._checkModeProperty = function (property) {
 };
 
 /**
- * @param {Float64Array | BigUint64Array} stats
+ * @param {Float64Array | BigUint64Array | BigInt64Array} stats
  * @param {number} offset
  * @returns
  */
 export function getStatsFromBinding(stats, offset = 0) {
-  if (isBigUint64Array(stats)) {
+  // Node's binding fills a BigInt64Array (node:vfs builds one too); Deno's
+  // own callers pass a BigUint64Array.
+  if (isBigUint64Array(stats) || isBigInt64Array(stats)) {
     return new BigIntStats(
       stats[0 + offset],
       stats[1 + offset],
@@ -1203,6 +1206,14 @@ export const arrayBufferViewToUint8Array = hideStackFrames(
 );
 
 export const realpathCacheKey = Symbol("realpathCacheKey");
+// The handlers of the mounted node:vfs instances (internal/vfs/setup.js), which
+// the fs functions consult before touching the real file system, as in Node's
+// lib/internal/fs/utils.js. `null` while nothing is mounted.
+export const vfsState = { __proto__: null, handlers: null };
+export function setVfsHandlers(handlers) {
+  vfsState.handlers = handlers;
+}
+
 export const constants = {
   kIoMaxLength,
   kMaxUserId,
@@ -1214,6 +1225,8 @@ export const constants = {
 export default {
   constants,
   assertEncoding,
+  setVfsHandlers,
+  vfsState,
   BigIntStats, // for testing
   copyObject,
   Dirent,

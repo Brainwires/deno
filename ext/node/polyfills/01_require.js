@@ -333,6 +333,32 @@ const lazyNodeModules = {
   "internal/timers": () =>
     core.loadExtScript("ext:deno_node/internal/timers.mjs"),
   "internal/url": () => core.loadExtScript("ext:deno_node/internal/url.ts"),
+  "internal/vfs/dir": () =>
+    core.loadExtScript("ext:deno_node/internal/vfs/dir.js"),
+  "internal/vfs/errors": () =>
+    core.loadExtScript("ext:deno_node/internal/vfs/errors.js"),
+  "internal/vfs/fd": () =>
+    core.loadExtScript("ext:deno_node/internal/vfs/fd.js"),
+  "internal/vfs/file_handle": () =>
+    core.loadExtScript("ext:deno_node/internal/vfs/file_handle.js"),
+  "internal/vfs/file_system": () =>
+    core.loadExtScript("ext:deno_node/internal/vfs/file_system.js"),
+  "internal/vfs/provider": () =>
+    core.loadExtScript("ext:deno_node/internal/vfs/provider.js"),
+  "internal/vfs/providers/memory": () =>
+    core.loadExtScript("ext:deno_node/internal/vfs/providers/memory.js"),
+  "internal/vfs/providers/real": () =>
+    core.loadExtScript("ext:deno_node/internal/vfs/providers/real.js"),
+  "internal/vfs/router": () =>
+    core.loadExtScript("ext:deno_node/internal/vfs/router.js"),
+  "internal/vfs/setup": () =>
+    core.loadExtScript("ext:deno_node/internal/vfs/setup.js"),
+  "internal/vfs/stats": () =>
+    core.loadExtScript("ext:deno_node/internal/vfs/stats.js"),
+  "internal/vfs/streams": () =>
+    core.loadExtScript("ext:deno_node/internal/vfs/streams.js"),
+  "internal/vfs/watcher": () =>
+    core.loadExtScript("ext:deno_node/internal/vfs/watcher.js"),
   // Lazy so the WHATWG-streams adapter graph (stream/web -> deno_web
   // 06_streams, ~1.8MB of snapshot heap) is only loaded when something
   // actually requires these internals, not eagerly at node:module init.
@@ -400,6 +426,7 @@ const lazyNodeModules = {
   "stream": () => core.createLazyLoader("node:stream")().default,
   "stream/consumers": () =>
     core.loadExtScript("ext:deno_node/stream/consumers.js"),
+  "stream/iter": () => core.loadExtScript("ext:deno_node/stream/iter.js"),
   "stream/promises": () =>
     core.createLazyLoader("node:stream/promises")().default,
   "tty": () => core.createLazyLoader("node:tty")().default,
@@ -418,7 +445,9 @@ const lazyNodeModules = {
   "trace_events": () =>
     core.loadExtScript("ext:deno_node/trace_events.ts").default,
   "v8": () => core.loadExtScript("ext:deno_node/v8.ts"),
+  "vfs": () => core.loadExtScript("ext:deno_node/vfs.js"),
   "wasi": () => core.loadExtScript("ext:deno_node/wasi.ts").default,
+  "zlib/iter": () => core.loadExtScript("ext:deno_node/zlib/iter.js"),
   "_stream_duplex": () =>
     core.loadExtScript("ext:deno_node/internal/streams/duplex.js").default,
   "_stream_passthrough": () =>
@@ -450,6 +479,18 @@ function defineLazyNativeModule(name, loader) {
   });
 }
 
+// Match Node's schemelessBlockList (lib/internal/bootstrap/realm.js): these
+// modules can only be loaded with the `node:` scheme, so they appear in
+// `builtinModules` as `node:<name>`, and a bare `require("<name>")` looks for a
+// package of that name instead. Keep in sync with
+// `NODE_SCHEME_ONLY_BUILTIN_NODE_MODULES` in libs/node_resolver.
+const schemelessBlockList = new SafeSet([
+  "sqlite",
+  "test",
+  "test/reporters",
+  "vfs",
+]);
+
 // NOTE(bartlomieju): keep this list in sync with `ext/node/lib.rs`
 function setupBuiltinModules() {
   const nodeModules = {
@@ -479,14 +520,6 @@ function setupBuiltinModules() {
     util,
     worker_threads: workerThreads,
   };
-  // Match Node's schemelessBlockList: these modules can only be imported
-  // via the `node:` scheme (see lib/internal/bootstrap/realm.js), so they
-  // appear in `builtinModules` as `node:<name>` rather than `<name>`.
-  const schemelessBlockList = new SafeSet([
-    "sqlite",
-    "test",
-    "test/reporters",
-  ]);
   function registerName(name) {
     // `internal/*` modules are only exposed under --expose-internals, so
     // they aren't part of the public builtinModules list.
@@ -1530,12 +1563,10 @@ Module._resolveLookupPaths = function (request, parent) {
 
   // Return null for built-in modules, matching Node.js behavior.
   // Libraries like requizzle rely on this to detect native modules.
-  const normalizedRequest = StringPrototypeStartsWith(request, "node:")
-    ? StringPrototypeSlice(request, 5)
-    : request;
   if (
-    isBuiltin(request) ||
-    normalizedRequest in nativeModuleExports
+    StringPrototypeStartsWith(request, "node:")
+      ? StringPrototypeSlice(request, 5) in nativeModuleExports
+      : nativeModuleCanBeRequiredByUsers(request)
   ) {
     return null;
   }
@@ -1732,8 +1763,13 @@ Module._load = function (request, parent, isMain) {
   }
 
   // A resolve hook that redirected `require('zlib')` to a file path must
-  // not silently fall back to the native module via the original request.
-  if (!SetPrototypeHas(cjsHookResolvedFilenames, filename)) {
+  // not silently fall back to the native module via the original request,
+  // and neither must a bare scheme-only name (`require('test')`) that
+  // resolved to a package.
+  if (
+    !SetPrototypeHas(cjsHookResolvedFilenames, filename) &&
+    !SetPrototypeHas(schemelessBlockList, request)
+  ) {
     maybeEmitNativeModuleDeprecation(filename);
     const mod = loadNativeModule(filename, request);
     if (mod) {
@@ -3409,8 +3445,8 @@ function isBuiltin(moduleName) {
 
   if (StringPrototypeStartsWith(moduleName, "node:")) {
     moduleName = StringPrototypeSlice(moduleName, 5);
-  } else if (moduleName === "test" || moduleName === "test/reporters") {
-    // test is only a builtin if it has the "node:" scheme
+  } else if (SetPrototypeHas(schemelessBlockList, moduleName)) {
+    // These are only builtins with the "node:" scheme
     // see https://github.com/nodejs/node/blob/73025c4dec042e344eeea7912ed39f7b7c4a3991/test/parallel/test-module-isBuiltin.js#L14
     return false;
   }
@@ -3668,10 +3704,12 @@ function loadNativeModule(_id, request) {
   return undefined;
 }
 
+// Whether `request`, a specifier without the `node:` scheme, names a builtin.
 function nativeModuleCanBeRequiredByUsers(request) {
   // `in` rather than bracket access avoids triggering the lazy getters
   // installed by `defineLazyNativeModule`.
-  return request in nativeModuleExports;
+  return request in nativeModuleExports &&
+    !SetPrototypeHas(schemelessBlockList, request);
 }
 
 /** @param specifier {string} */
