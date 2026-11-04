@@ -9616,13 +9616,13 @@ where the changes are discussed.
 235. **`chore(deps)`: V8 15.6.75.38 from Brainwires/rusty_v8
      `v156.0.0-denext.4`** (`v8` crate `156.0.0+denext.4`;
      `chore/v8-15.6-latest`; runtime and CI; `Cargo.toml`, `Cargo.lock`,
-     `.github/denext-runtime/rusty_v8.sha256`; runtime 3.0.0-denext.10). V8 moves
-     from 15.6.75.33 to 15.6.75.38, the head of `branch-heads/15.6` (Chrome
-     Extended Stable 156) on 2026-11-03. This keeps the pin within the engine
-     staleness gate's 14-day patch-lag rule (`ci/release-hardening`) for this
-     runtime: 15.6.75.34, the first patch `.33` lacks, came out on 2026-11-02,
-     so `.33` would have failed the gate from about 2026-11-16. Five security
-     merges come in:
+     `.github/denext-runtime/rusty_v8.sha256`; runtime 3.0.0-denext.10). V8
+     moves from 15.6.75.33 to 15.6.75.38, the head of `branch-heads/15.6`
+     (Chrome Extended Stable 156) on 2026-11-03. This keeps the pin within the
+     engine staleness gate's 14-day patch-lag rule (`ci/release-hardening`) for
+     this runtime: 15.6.75.34, the first patch `.33` lacks, came out on
+     2026-11-02, so `.33` would have failed the gate from about 2026-11-16. Five
+     security merges come in:
      - `32bb3bf0bb` [modules] star exports are no longer cached into a linked
        module's export table (crbug 574038247, CVE-2026-121057, High, type
        confusion in V8);
@@ -9783,8 +9783,9 @@ where the changes are discussed.
      privacy switch). The runtime registers no handler, so a packaged app
      reaches the devices only through the launch file. denext's packaging writes
      `mediaCapture` itself (the app origin alone, from
-     `FIRST_MEDIA_CAPTURE_RUNTIME`, 3.0.0-denext.10); `deno desktop`'s own launch
-     file now carries it too, from deno.json's new `desktop.app.mediaCapture`
+     `FIRST_MEDIA_CAPTURE_RUNTIME`, 3.0.0-denext.10); `deno desktop`'s own
+     launch file now carries it too, from deno.json's new
+     `desktop.app.mediaCapture`
      (`{ "microphone": [origins], "camera":
      [origins] }`): an entry that is
      not an exact `scheme://host[:port]` origin (`*`, `<scheme>://*`, a path, a
@@ -10328,10 +10329,10 @@ The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
 169-174, 176, 178, 180, 182-184, 186, 187, 189-191, 193-196, 198-203, 206, 207,
 209-215, 217, 218, 221, 222, 224, 225, 227, 228, 231, 232, 235, 237, 240,
-243-245, 247-249, 253, 254, 256-258) are what the prebuilt `libdenort` carries. The
-CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID`
-into a packaged app's launchers) are in the branch too, but a stock CLI does not
-run them; denext's own launcher provides that environment.
+243-245, 247-249, 253, 254, 256-258) are what the prebuilt `libdenort` carries.
+The CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` /
+`LAUFEY_APP_ID` into a packaged app's launchers) are in the branch too, but a
+stock CLI does not run them; denext's own launcher provides that environment.
 
 The laufey backend hosts are built from
 [Brainwires/laufey](https://github.com/Brainwires/laufey) branch
