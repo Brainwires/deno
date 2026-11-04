@@ -10115,6 +10115,7 @@ fn lsp_completions_node_specifier() {
       "node:sqlite",
       "node:stream",
       "node:stream/consumers",
+      "node:stream/iter",
       "node:stream/promises",
       "node:stream/web",
       "node:string_decoder",
@@ -10130,10 +10131,12 @@ fn lsp_completions_node_specifier() {
       "node:util",
       "node:util/types",
       "node:v8",
+      "node:vfs",
       "node:vm",
       "node:wasi",
       "node:worker_threads",
       "node:zlib",
+      "node:zlib/iter",
     ],
   );
   for item in &list.items {
@@ -13599,7 +13602,7 @@ fn lsp_jupyter_completions() {
       },
       "documentation": {
         "kind": "markdown",
-        "value": "Asynchronously reads and returns the entire contents of a file as an UTF-8\ndecoded string.\n\n```ts\nconst data = await Deno.readTextFile(\"hello.txt\");\nconsole.log(data);\n```\n\nThe returned promise rejects if the operation fails, for example with\n[`Deno.errors.NotFound`](deno:/asset/lib.deno.ns.d.ts#177,5-177,43) if the file does not exist,\n[`Deno.errors.IsADirectory`](deno:/asset/lib.deno.ns.d.ts#310,5-310,47) if `path` refers to a directory, or\n[`Deno.errors.PermissionDenied`](deno:/asset/lib.deno.ns.d.ts#188,5-188,51) if the required permission has not\nbeen granted.\n\nRequires `allow-read` permission.\n\n*@tags* — allow-read\n\n\n*@category* — File System\n",
+        "value": "Asynchronously reads and returns the entire contents of a file as an UTF-8\ndecoded string.\n\n```ts\nconst data = await Deno.readTextFile(\"hello.txt\");\nconsole.log(data);\n```\n\nThe returned promise rejects if the operation fails, for example with\n[`Deno.errors.NotFound`](deno:/asset/lib.deno.ns.d.ts#178,5-178,43) if the file does not exist,\n[`Deno.errors.IsADirectory`](deno:/asset/lib.deno.ns.d.ts#311,5-311,47) if `path` refers to a directory, or\n[`Deno.errors.PermissionDenied`](deno:/asset/lib.deno.ns.d.ts#189,5-189,51) if the required permission has not\nbeen granted.\n\nRequires `allow-read` permission.\n\n*@tags* — allow-read\n\n\n*@category* — File System\n",
       },
       "sortText": "11",
     }),

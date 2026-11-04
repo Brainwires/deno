@@ -49,6 +49,14 @@ async function readUntil(
   return text;
 }
 
+// The environment of a child spawned under a scoped `--allow-run`: only
+// PATH, so the host's own `LD_*` / `DYLD_*` variables (which need full run
+// permission) do not decide the outcome.
+const scopedEnv = {
+  clearEnv: true,
+  env: { PATH: Deno.env.get("PATH") ?? "/usr/bin:/bin" },
+};
+
 async function write(pty: Deno.Pty, text: string) {
   const writer = pty.writable.getWriter();
   await writer.write(new TextEncoder().encode(text));
@@ -342,24 +350,34 @@ Deno.test(
 Deno.test(
   { permissions: { run: ["sh"], read: true }, ignore: isWindows },
   async function ptyScopedRunPermissionAllowsOnlyTheListedProgram() {
-    // `--allow-run=sh`: sh may run, anything else may not
+    // `--allow-run=sh`: sh may run, anything else may not. The child gets
+    // only PATH: an `LD_*` variable inherited from the host (CI sets
+    // LD_LIBRARY_PATH) needs full run permission, which is not what this
+    // checks.
     const pty = Deno.openPty({
       cmd: "sh",
       args: ["-c", "echo allowed"],
+      ...scopedEnv,
       cols: 80,
       rows: 24,
     });
     assertStringIncludes(await readAll(pty.readable), "allowed");
     await pty.status;
     assertThrows(
-      () => Deno.openPty({ cmd: "cat", cols: 80, rows: 24 }),
+      () => Deno.openPty({ cmd: "cat", ...scopedEnv, cols: 80, rows: 24 }),
       Deno.errors.NotCapable,
-      "run",
+      'Requires run access to "cat"',
     );
     assertThrows(
-      () => Deno.openPty({ cmd: Deno.execPath(), cols: 80, rows: 24 }),
+      () =>
+        Deno.openPty({
+          cmd: Deno.execPath(),
+          ...scopedEnv,
+          cols: 80,
+          rows: 24,
+        }),
       Deno.errors.NotCapable,
-      "run",
+      "Requires run access to",
     );
   },
 );
@@ -374,6 +392,7 @@ Deno.test(
         Deno.openPty({
           cmd: "sh",
           args: ["-c", "true"],
+          clearEnv: true,
           env: { LD_PRELOAD: "/nope.so", DYLD_INSERT_LIBRARIES: "/nope" },
           cols: 80,
           rows: 24,
