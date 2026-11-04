@@ -10103,15 +10103,76 @@ where the changes are discussed.
      `test-vfs-real-provider-watch.js` (item 264) and
      `sequential/test-fs-watch.js`.
 
+249. **`fix(ext/node)`: Brotli and zstd errors carry Node's code, errno and
+     message** (`fix/node-compat-near-misses`, runtime;
+     `ext/node/ops/zlib/mod.rs`, `ext/node/polyfills/zlib.js`,
+     `ext/node/polyfills/internal/streams/iter/transform.js`,
+     `ext/node/polyfills/internal_binding/constants.ts`). Node's binding reports
+     a Brotli decoder error as `Decompression failed` with the code `ERR_` + the
+     C decoder's `BrotliDecoderErrorString()`, whose names keep their group's
+     prefix (`ERR__ERROR_FORMAT_PADDING_2`). Deno sent
+     `ERR_ERROR_FORMAT_PADDING_2` (the Rust decoder drops the leading
+     underscore) as the message and no code, so every node:zlib Brotli error
+     (`brotliDecompressSync`, `brotliDecompress`, `createBrotliDecompress`) had
+     `code: undefined`; `node:zlib/iter` recovered a code from the message, in
+     the Rust spelling. The op now passes Node's (message, errno, code), mapping
+     the Rust names back to the C ones (including `CL_SPACE`, which the Rust
+     decoder spells `FL_SPACE`). zstd had the same gap: Node reports
+     `ZSTD_getErrorString()` as the message, the `ZSTD_ErrorCode` as `errno` and
+     its name as `code` (`ZSTD_error_prefix_unknown`); Deno threw
+     `Zstd decompress error: Unknown frame descriptor` with no code or errno
+     (node:zlib guessed one code, `ZSTD_error_srcSize_wrong`, from the message).
+     The zstd ops now drive `zstd_safe::DCtx` directly, which keeps the
+     library's error code, and throw an error carrying Node's three fields;
+     `zlib.constants` gains Node's `ZSTD_error_*` values. Tests: unit
+     `zlib_test.ts` (Brotli and zstd, sync, callback and stream; before: `code`
+     undefined), a Rust unit test of the Brotli mapping, and node_compat
+     `test-stream-iter-transform-errors.js` enabled.
+
+250. **`fix(ext/node)`: `RealFSProvider` realpath of a link out of its root is
+     EACCES** (`fix/node-compat-near-misses`, runtime;
+     `ext/node/polyfills/internal/vfs/providers/real.js`). Node answers EACCES
+     for `realpath` of a symlink whose target leaves the provider's root. Its
+     path resolver returned such a link as "doesn't exist yet" (an escape the
+     fork closed when it added `node:vfs`), and `realpath` then refused the
+     resolved target; Deno's resolver refuses the link itself with ENOENT, so
+     `realpath` never got that far. `realpath` and `promises.realpath` now
+     resolve without following the last component (lexical containment and every
+     directory above it checked against the root, as `lstat` and `readlink` do),
+     resolve that one path, and answer EACCES when the result is outside the
+     root. Nothing is opened or read through the link, and every other operation
+     still refuses it. Tests: unit `vfs_test.ts` (a file link and a directory
+     link out of the root are EACCES sync and async, a link inside resolves,
+     reading through the link and a path below the directory link still fail;
+     before: ENOENT), node_compat `test-vfs-real-provider-symlinks.js` enabled.
+
+251. **`fix(ext/node)`: `fs.promises.watch()` validates on the first `next()`,
+     like Node's async generator** (`fix/node-compat-near-misses`, runtime;
+     `ext/node/polyfills/fs.ts`). Node's `fs.promises.watch` is an async
+     generator (`lib/internal/fs/watchers.js`): the path and options are
+     validated, and the watcher started, by the first `next()`. Deno's validated
+     and opened a `Deno.FsWatcher` when `watch()` was called, so an iterator
+     that was never consumed held a watcher, a missing path threw synchronously,
+     and `persistent`, `encoding`, `maxQueue` and `overflow` were not validated
+     at all (`{ encoding: 1 }` or `{ overflow: "barf" }` watched anyway);
+     `encoding` was ignored. It is now an async generator validating as Node
+     does (`ERR_INVALID_ARG_TYPE` / `ERR_INVALID_ARG_VALUE`; `"buffer"` is
+     refused there as in Node) and encoding each file name. `maxQueue` and
+     `overflow` are validated but not applied: Deno's watcher queues its own
+     events. Tests: unit `_fs/_fs_watch_test.ts` (each invalid argument rejects
+     the first `next()`; an unconsumed iterator leaks no resource; a `hex` file
+     name; before: the leak and unvalidated options), node_compat
+     `test-fs-promises-watch.js` enabled.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
 169-174, 176, 178, 180, 182-184, 186, 187, 189-191, 193-196, 198-203, 206, 207,
 209-215, 217, 218, 221, 222, 224, 225, 227, 228, 231, 232, 235, 237, 240,
-244-246, 263, 264) are what the prebuilt `libdenort` carries. The CLI-side parts
-(for example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged
-app's launchers) are in the branch too, but a stock CLI does not run them;
-denext's own launcher provides that environment.
+244-246, 263, 264, 280-282) are what the prebuilt `libdenort` carries. The
+CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID`
+into a packaged app's launchers) are in the branch too, but a stock CLI does not
+run them; denext's own launcher provides that environment.
 
 The laufey backend hosts are built from
 [Brainwires/laufey](https://github.com/Brainwires/laufey) branch

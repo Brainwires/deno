@@ -4331,104 +4331,90 @@ function watch(
   return fsWatcher;
 }
 
-function watchPromise(
+// Node's `fs.promises.watch` is an async generator
+// (lib/internal/fs/watchers.js): the path and options are validated, and the
+// watcher started, by the first `next()`, so a bad argument rejects that call
+// instead of throwing from `watch()`, and an iterator never consumed watches
+// nothing.
+async function* watchPromise(
   filename: string | Buffer | URL,
-  options?: {
+  options: {
     persistent?: boolean;
     recursive?: boolean;
     encoding?: string;
+    maxQueue?: number;
+    overflow?: "ignore" | "error";
     signal?: AbortSignal;
     ignore?: IgnoreOption;
-  },
-): AsyncIterable<{ eventType: string; filename: string | Buffer | null }> {
+  } = kEmptyObject,
+): AsyncGenerator<{ eventType: string; filename: string | Buffer | null }> {
   // deno-lint-ignore deno-internal/prefer-primordials
   const watchPath = getValidatedPath(filename).toString();
-
-  const recursive = options?.recursive ?? false;
-  const signal = options?.signal;
+  validateObject(options, "options");
+  const {
+    persistent = true,
+    recursive = false,
+    encoding = "utf8",
+    maxQueue = 2048,
+    overflow = "ignore",
+    signal,
+    ignore,
+  } = options;
+  validateBoolean(persistent, "options.persistent");
+  validateBoolean(recursive, "options.recursive");
+  // Validated as Node does. Deno's watcher buffers its own events, so the
+  // queue bound is not applied.
+  validateInteger(maxQueue, "options.maxQueue");
+  validateOneOf(overflow, "options.overflow", ["ignore", "error"]);
   validateAbortSignal(signal, "options.signal");
-  validateIgnoreOption(options?.ignore, "options.ignore");
-  const ignoreMatcher = createIgnoreMatcher(options?.ignore);
-  const watcher = Deno.watchFs(watchPath, {
-    recursive,
-  });
-  // Node's `persistent: false`: a pending `next()` does not keep the process
-  // alive (lib/internal/fs/watchers.js starts the handle unref'd).
-  if (options?.persistent === false) {
-    watcher.unref();
+  validateIgnoreOption(ignore, "options.ignore");
+  if (encoding && !Buffer.isEncoding(encoding)) {
+    throw new ERR_INVALID_ARG_VALUE(
+      "encoding",
+      encoding,
+      "is invalid encoding",
+    );
   }
-  const resolvedWatchPath = realpathSync(watchPath) as string;
-
-  let onAbort: (() => void) | null = null;
-  function cleanupAbort() {
-    if (signal && onAbort) {
-      signal.removeEventListener("abort", onAbort);
-      onAbort = null;
-    }
-  }
-
-  if (signal) {
-    if (signal.aborted) {
-      watcher.close();
-    } else {
-      onAbort = () => watcher.close();
-      signal.addEventListener("abort", onAbort, { once: true });
-    }
-  }
-
   // Match Node: surface signal abort as a thrown AbortError carrying
   // `signal.reason` as `cause`.
-  // https://github.com/nodejs/node/blob/main/lib/internal/fs/watchers.js
-  function abortError(): AbortError {
-    return new AbortError(undefined, { cause: signal?.reason });
+  if (signal?.aborted) {
+    throw new AbortError(undefined, { cause: signal.reason });
   }
 
-  const fsIterable = watcher[SymbolAsyncIterator]();
-  const result = {
-    async next(): Promise<
-      IteratorResult<{ eventType: string; filename: string | Buffer | null }>
-    > {
-      if (signal?.aborted) {
-        cleanupAbort();
-        throw abortError();
+  const ignoreMatcher = createIgnoreMatcher(ignore);
+  const watcher = Deno.watchFs(watchPath, { recursive });
+  const onAbort = () => watcher.close();
+  try {
+    // Node's `persistent: false`: a pending `next()` does not keep the process
+    // alive (lib/internal/fs/watchers.js starts the handle unref'd).
+    if (!persistent) {
+      watcher.unref();
+    }
+    signal?.addEventListener("abort", onAbort, { once: true });
+    const resolvedWatchPath = realpathSync(watchPath) as string;
+    const events = watcher[SymbolAsyncIterator]();
+    while (true) {
+      // deno-lint-ignore deno-internal/prefer-primordials
+      const { value: event, done } = await events.next();
+      if (done) break;
+      const fname = recursive
+        ? relative(resolvedWatchPath, event.paths[0])
+        : basename(event.paths[0]);
+      if (ignoreMatcher !== null && ignoreMatcher(fname)) {
+        continue;
       }
-      while (true) {
-        // deno-lint-ignore deno-internal/prefer-primordials
-        const iterResult = await fsIterable.next();
-        if (iterResult.done) {
-          cleanupAbort();
-          if (signal?.aborted) {
-            throw abortError();
-          }
-          return iterResult;
-        }
-
-        const eventType = convertDenoFsEventToNodeFsEvent(
-          iterResult.value.kind,
-        );
-        const fname = recursive
-          ? relative(resolvedWatchPath, iterResult.value.paths[0])
-          : basename(iterResult.value.paths[0]);
-        if (ignoreMatcher !== null && ignoreMatcher(fname)) {
-          continue;
-        }
-        return {
-          value: { eventType, filename: fname },
-          done: false,
-        };
-      }
-    },
-    return(value?: any): Promise<IteratorResult<any>> {
-      cleanupAbort();
-      watcher.close();
-      return PromiseResolve({ value, done: true });
-    },
-    [SymbolAsyncIterator]() {
-      return this;
-    },
-  };
-
-  return result;
+      yield {
+        eventType: convertDenoFsEventToNodeFsEvent(event.kind),
+        filename: encodeWatchFilename(fname, encoding),
+      };
+    }
+    if (signal?.aborted) {
+      throw new AbortError(undefined, { cause: signal.reason });
+    }
+  } finally {
+    signal?.removeEventListener("abort", onAbort);
+    watcher.close();
+  }
 }
 
 type WatchFileListener = (curr: Stats, prev: Stats) => void;

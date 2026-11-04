@@ -176,6 +176,51 @@ Deno.test({
   },
 });
 
+// Node's `fs.promises.watch` is an async generator: arguments are validated
+// and the watcher started by the first `next()`, and an iterator that is never
+// consumed holds no watcher (the resource sanitizer checks that here).
+Deno.test("[node/fs promises.watch] validates on the first next()", async () => {
+  const file = Deno.makeTempFileSync();
+  try {
+    watchPromise(file);
+    const cases: [unknown, unknown, string][] = [
+      [1, undefined, "ERR_INVALID_ARG_TYPE"],
+      [file, 1, "ERR_INVALID_ARG_TYPE"],
+      ["", { persistent: 1 }, "ERR_INVALID_ARG_TYPE"],
+      ["", { recursive: 1 }, "ERR_INVALID_ARG_TYPE"],
+      ["", { encoding: 1 }, "ERR_INVALID_ARG_VALUE"],
+      ["", { encoding: "buffer" }, "ERR_INVALID_ARG_VALUE"],
+      ["", { signal: 1 }, "ERR_INVALID_ARG_TYPE"],
+      ["", { maxQueue: "silly" }, "ERR_INVALID_ARG_TYPE"],
+      ["", { overflow: 1 }, "ERR_INVALID_ARG_VALUE"],
+      ["", { overflow: "barf" }, "ERR_INVALID_ARG_VALUE"],
+    ];
+    for (const [path, options, code] of cases) {
+      // deno-lint-ignore no-explicit-any
+      const iter = (watchPromise as any)(path, options);
+      const err = await assertRejects(() => iter.next());
+      assertEquals((err as { code?: string }).code, code);
+    }
+  } finally {
+    Deno.removeSync(file);
+  }
+});
+
+Deno.test("[node/fs promises.watch] encodes the file name", async () => {
+  const dir = Deno.makeTempDirSync();
+  try {
+    const iter = watchPromise(dir, { encoding: "hex" })[Symbol.asyncIterator]();
+    const first = iter.next();
+    await wait(100);
+    Deno.writeTextFileSync(`${dir}/a`, "x");
+    const { value } = await first;
+    assertEquals(value?.filename, "61");
+    await iter.return?.(undefined);
+  } finally {
+    Deno.removeSync(dir, { recursive: true });
+  }
+});
+
 // Runs `code` (an ES module, with the watched path in `FILE`) in a child and
 // returns its exit code and stdout. A watcher that keeps the event loop alive
 // makes the child run until the 30 s timeout kills it.

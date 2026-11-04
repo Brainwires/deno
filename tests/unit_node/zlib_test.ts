@@ -31,6 +31,7 @@ import {
   unzipSync,
   zstdCompress,
   zstdCompressSync,
+  zstdDecompress,
   zstdDecompressSync,
 } from "node:zlib";
 import { Buffer } from "node:buffer";
@@ -68,6 +69,47 @@ Deno.test("brotli decompress rejects invalid block switch", async () => {
   }
   brotli.end();
   await promise;
+});
+
+Deno.test("brotli decoder errors carry Node's code and message", async () => {
+  // Node's code is `ERR_` + the C decoder's error name, which keeps its
+  // group's `_ERROR_FORMAT_` prefix.
+  const invalid = Buffer.from("not brotli at all, really");
+  const check = (err: unknown) => {
+    const e = err as { code?: string; message: string; errno?: number };
+    assertEquals(e.code, "ERR__ERROR_FORMAT_PADDING_2");
+    assertEquals(e.message, "Decompression failed");
+    assertEquals(e.errno, constants.BROTLI_DECODER_ERROR_FORMAT_PADDING_2);
+  };
+  check(assertThrows(() => brotliDecompressSync(invalid)));
+  const { promise, resolve } = Promise.withResolvers<unknown>();
+  brotliDecompress(invalid, (err) => resolve(err));
+  check(await promise);
+  const stream = createBrotliDecompress();
+  const streamError = new Promise((resolve) => stream.on("error", resolve));
+  stream.end(invalid);
+  check(await streamError);
+});
+
+Deno.test("zstd errors carry Node's code, errno and message", async () => {
+  // Node reports ZSTD_getErrorString() as the message, the ZSTD_ErrorCode as
+  // errno, and its name as the code.
+  const invalid = Buffer.from("not zstd data at all");
+  const check = (err: unknown) => {
+    const e = err as { code?: string; message: string; errno?: number };
+    assertEquals(e.code, "ZSTD_error_prefix_unknown");
+    assertEquals(e.message, "Unknown frame descriptor");
+    assertEquals(e.errno, constants.ZSTD_error_prefix_unknown);
+  };
+  assertEquals(constants.ZSTD_error_prefix_unknown, 10);
+  check(assertThrows(() => zstdDecompressSync(invalid)));
+  const { promise, resolve } = Promise.withResolvers<unknown>();
+  zstdDecompress(invalid, (err) => resolve(err));
+  check(await promise);
+  const stream = createZstdDecompress();
+  const streamError = new Promise((resolve) => stream.on("error", resolve));
+  stream.end(invalid);
+  check(await streamError);
 });
 
 Deno.test("brotli compression async", async () => {
