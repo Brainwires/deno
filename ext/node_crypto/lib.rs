@@ -44,6 +44,7 @@ use rsa::pkcs8::DecodePrivateKey;
 use rsa::pkcs8::DecodePublicKey;
 use rsa::traits::PublicKeyParts;
 
+pub mod argon2_kdf;
 pub mod cipher;
 pub(crate) mod dh;
 pub mod digest;
@@ -60,6 +61,8 @@ use self::digest::match_fixed_digest_with_eager_block_buffer;
 deno_core::extension!(
   deno_node_crypto,
   ops = [
+    argon2_kdf::op_node_argon2_async,
+    argon2_kdf::op_node_argon2_sync,
     op_node_check_prime_async,
     op_node_check_prime_bytes_async,
     op_node_check_prime_bytes,

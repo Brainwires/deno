@@ -42,6 +42,9 @@ const { pbkdf2, pbkdf2Sync } = core.loadExtScript(
 const { scrypt, scryptSync } = core.loadExtScript(
   "ext:deno_node/internal/crypto/scrypt.ts",
 );
+const { argon2, argon2Sync } = core.loadExtScript(
+  "ext:deno_node/internal/crypto/argon2.ts",
+);
 const { hkdf, hkdfSync } = core.loadExtScript(
   "ext:deno_node/internal/crypto/hkdf.ts",
 );
@@ -386,6 +389,8 @@ const verify = verifyOneShot;
 const pseudoRandomBytes = randomBytes;
 
 const defaultExport = {
+  argon2,
+  argon2Sync,
   Certificate,
   checkPrime,
   checkPrimeSync,
@@ -494,6 +499,8 @@ for (
 
 return {
   default: defaultExport,
+  argon2,
+  argon2Sync,
   Certificate,
   checkPrime,
   checkPrimeSync,

@@ -2157,6 +2157,66 @@ declare module "crypto" {
      * @since v10.5.0
      */
     function scryptSync(password: BinaryLike, salt: BinaryLike, keylen: number, options?: ScryptOptions): Buffer;
+    type Argon2Algorithm = "argon2d" | "argon2i" | "argon2id";
+    interface Argon2Parameters {
+        /**
+         * REQUIRED, the password for password hashing applications of Argon2.
+         */
+        message: string | ArrayBuffer | NodeJS.ArrayBufferView;
+        /**
+         * REQUIRED, must be at least 8 bytes long. The salt for password hashing applications of Argon2.
+         */
+        nonce: string | ArrayBuffer | NodeJS.ArrayBufferView;
+        /**
+         * REQUIRED, the degree of parallelism: how many computational chains (lanes) can run. Must be greater than 1 and less than `2**24-1`.
+         */
+        parallelism: number;
+        /**
+         * REQUIRED, the length of the key to generate. Must be greater than 4 and less than `2**32-1`.
+         */
+        tagLength: number;
+        /**
+         * REQUIRED, the memory cost in 1KiB blocks. Must be greater than `8 * parallelism` and less than `2**32-1`.
+         */
+        memory: number;
+        /**
+         * REQUIRED, the number of passes (iterations). Must be greater than 1 and less than `2**32-1`.
+         */
+        passes: number;
+        /**
+         * OPTIONAL, random additional input, similar to the salt, that should NOT be stored with the derived key.
+         */
+        secret?: string | ArrayBuffer | NodeJS.ArrayBufferView | undefined;
+        /**
+         * OPTIONAL, additional data to be added to the hash, functionally equivalent to salt or secret, but meant for non-random data.
+         */
+        associatedData?: string | ArrayBuffer | NodeJS.ArrayBufferView | undefined;
+    }
+    /**
+     * Provides an asynchronous [Argon2](https://www.rfc-editor.org/rfc/rfc9106.html) implementation. Argon2 is a password-based
+     * key derivation function that is designed to be expensive computationally and
+     * memory-wise in order to make brute-force attacks unrewarding.
+     *
+     * The `callback` function is called with two arguments: `err` and `derivedKey`.
+     * `err` is an exception object when key derivation fails, otherwise `err` is
+     * `null`. `derivedKey` is passed to the callback as a `Buffer`.
+     * @since v24.7.0
+     * @param algorithm Variant of Argon2, one of `"argon2d"`, `"argon2i"` or `"argon2id"`.
+     */
+    function argon2(
+        algorithm: Argon2Algorithm,
+        parameters: Argon2Parameters,
+        callback: (err: Error | null, derivedKey: Buffer) => void,
+    ): void;
+    /**
+     * Provides a synchronous [Argon2](https://www.rfc-editor.org/rfc/rfc9106.html) implementation.
+     *
+     * An exception is thrown when key derivation fails, otherwise the derived key is
+     * returned as a `Buffer`.
+     * @since v24.7.0
+     * @param algorithm Variant of Argon2, one of `"argon2d"`, `"argon2i"` or `"argon2id"`.
+     */
+    function argon2Sync(algorithm: Argon2Algorithm, parameters: Argon2Parameters): Buffer;
     interface RsaPublicKey {
         key: KeyLike;
         padding?: number | undefined;

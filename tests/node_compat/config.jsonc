@@ -876,7 +876,18 @@
       "reason": "BoringSSL reports an oversized RSA signing digest as ERR_OSSL_RSA_DIGEST_TOO_BIG_FOR_RSA_KEY, where OpenSSL/Node expects ERR_OSSL_EVP_DECODE_ERROR"
     },
     "parallel/test-crypto-aes-wrap.js": {},
-    "parallel/test-crypto-argon2.js": {},
+    "parallel/test-crypto-argon2.js": {
+      // Node's test skips below OpenSSL 3.2; the preload reports 3.2 for
+      // this test only, so it runs against Deno's Argon2.
+      "extraDenoArgs": ["--preload", "../../argon2_openssl_preload.mjs"]
+    },
+    "parallel/test-crypto-argon2-job.js": {
+      "extraDenoArgs": ["--preload", "../../argon2_openssl_preload.mjs"]
+    },
+    "parallel/test-crypto-argon2-unsupported.js": {
+      "ignore": true,
+      "reason": "Asserts ERR_CRYPTO_ARGON2_NOT_SUPPORTED, Node's error when built against an OpenSSL older than 3.2; Deno's node:crypto always has Argon2"
+    },
     "parallel/test-crypto-async-sign-verify.js": {
       "ignore": true,
       "reason": "Expects the BoringSSL-specific ERR_OSSL_EVP_OPERATION_NOT_SUPPORTED_FOR_THIS_KEYTYPE error; Deno does not surface this error for the unsupported keytype/digest combination"
@@ -4675,6 +4686,9 @@
     "pseudo-tty/test-tty-isatty.js": {},
     "pummel/test-buffer-large-size-buffer-alloc-unsafe-slow.js": {},
     "pummel/test-buffer-large-size-buffer-alloc-unsafe.js": {},
+    "pummel/test-crypto-argon2-nonblocking-constructor.js": {
+      "extraDenoArgs": ["--preload", "../../argon2_openssl_preload.mjs"]
+    },
     "pummel/test-crypto-dh-hash.js": {},
     "pummel/test-crypto-dh-keys.js": {},
     "pummel/test-dh-regr.js": {},

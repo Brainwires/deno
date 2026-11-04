@@ -9905,15 +9905,73 @@ where the changes are discussed.
      `-success.js`, `-updated-file.js`. `-api-tmpdir.js` is ignored: the default
      cache directory is under `DENO_DIR`, not `os.tmpdir()` (item 240).
 
+<!-- Items 242-299 are left to branches in flight; this branch is 300-301. -->
+
+300. **`feat(ext/node)`: `crypto.argon2()` and `crypto.argon2Sync()`**
+     (`feat/node-crypto-argon2-idle`; runtime; `ext/node_crypto/argon2_kdf.rs`,
+     `ext/node/polyfills/internal/crypto/argon2.ts`,
+     `ext/node/polyfills/internal_binding/crypto.ts`,
+     `cli/tsc/dts/node/crypto.d.cts`). Node 24.7 added Argon2 (RFC 9106) to
+     `node:crypto`: `argon2(algorithm, parameters, callback)` and
+     `argon2Sync(algorithm, parameters)`, `algorithm` one of `argon2d`,
+     `argon2i`, `argon2id`, `parameters` `message`, `nonce`, `parallelism`,
+     `tagLength`, `memory`, `passes` and optionally `secret` and
+     `associatedData`. The fork had neither. `internal/crypto/argon2.ts` is Node
+     26's `lib/internal/crypto/argon2.js` (the same validators, error codes and
+     messages, the same defaults: an omitted `secret` / `associatedData` is
+     empty) over the same binding shape: `internalBinding('crypto')` now has
+     `Argon2Job`, `kCryptoJobAsync` / `kCryptoJobSync` and `kTypeArgon2d` / `-i`
+     / `-id`, and the job refuses an input over 2^31 - 1 bytes
+     (`ERR_OUT_OF_RANGE`, "pass is too large", as Node's binding does) and
+     reports whatever the KDF rejects as `Argon2 derivation failed`. The KDF is
+     the RustCrypto `argon2` crate the workspace already had (0.6.0-rc.8, used
+     by WebCrypto's Argon2); the async form copies its inputs and runs on the
+     blocking pool.
+     - **Memory bound:** the same as Node's: `memory` (KiB) at most 2^32 - 1 and
+       at least 8 x `parallelism`, `parallelism` at most 2^24 - 1, `tagLength`
+       at most 2^32 - 1. The working memory (`alloc_zeroed`) and the output
+       buffer (`try_reserve_exact`) are allocated fallibly, so a request the
+       machine cannot satisfy is an `Argon2 derivation failed` error, as
+       OpenSSL's failed allocation is in Node, not an abort of the process. Like
+       Node, a value within the bound but above the free memory is honoured
+       where the OS lets the allocation through (overcommit), and `passes` is
+       not capped.
+     - **Known difference:** the crate keeps associated data inline, at most 32
+       bytes; Node takes up to 2^32 - 1. A longer `associatedData` is an error
+       (`Argon2 derivation failed: associatedData longer than 32 bytes is
+       not supported`)
+       rather than a different key. WebCrypto's Argon2
+       (`ext/crypto/subtle_derive_bits.rs`) has the same limit.
+
+     Tests: unit_node `crypto/crypto_argon2_test.ts` (Node's known-answer
+     vectors, RFC 9106's and OpenSSL 3.2's, sync and async; every view type;
+     Node's range and type errors; the 32-byte `associatedData` limit); Rust
+     unit tests in `argon2_kdf.rs` (RFC 9106 vectors, the KDF's refusals, the
+     empty key); node_compat `parallel/test-crypto-argon2.js`, `-argon2-job.js`
+     and `pummel/test-crypto-argon2-nonblocking-constructor.js` now run instead
+     of skipping (three runs each through the runner, Linux x86_64 debug): they
+     skip below OpenSSL 3.2, and `process.versions.openssl` stays `3.0.7+quic`
+     (see `ext/node/polyfills/_process/process.ts`), so their config entries
+     preload `tests/node_compat/argon2_openssl_preload.mjs`, which reports 3.2
+     to those tests only. The first two fail on the base
+     (`crypto.argon2Sync is not
+     a function`,
+     `Argon2Job is not a constructor`). `-argon2-unsupported.js` is ignored (it
+     asserts `ERR_CRYPTO_ARGON2_NOT_SUPPORTED`, Node's error without Argon2).
+     `argon2` and `blake2` build at `opt-level = 3` in the `dev` profile
+     (`Cargo.toml`, as `sha2` does): the pummel test's 64 MiB x 20-pass
+     derivations took over the runner's 10 s timeout unoptimized, and 1.5 s with
+     it.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
 169-174, 176, 178, 180, 182-184, 186, 187, 189-191, 193-196, 198-203, 206, 207,
-209-215, 217, 218, 221, 222, 224, 225, 227, 228, 231, 232, 235, 237, 240) are
-what the prebuilt `libdenort` carries. The CLI-side parts (for example writing
-`LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
-in the branch too, but a stock CLI does not run them; denext's own launcher
-provides that environment.
+209-215, 217, 218, 221, 222, 224, 225, 227, 228, 231, 232, 235, 237, 240, 300)
+are what the prebuilt `libdenort` carries. The CLI-side parts (for example
+writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's
+launchers) are in the branch too, but a stock CLI does not run them; denext's
+own launcher provides that environment.
 
 The laufey backend hosts are built from
 [Brainwires/laufey](https://github.com/Brainwires/laufey) branch

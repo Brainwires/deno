@@ -607,6 +607,7 @@
     "ext:deno_node/internal/crypto/keys.ts": "../ext/node/polyfills/internal/crypto/keys.ts",
     "ext:deno_node/internal/crypto/pbkdf2.ts": "../ext/node/polyfills/internal/crypto/pbkdf2.ts",
     "ext:deno_node/internal/crypto/random.ts": "../ext/node/polyfills/internal/crypto/random.ts",
+    "ext:deno_node/internal/crypto/argon2.ts": "../ext/node/polyfills/internal/crypto/argon2.ts",
     "ext:deno_node/internal/crypto/scrypt.ts": "../ext/node/polyfills/internal/crypto/scrypt.ts",
     "ext:deno_node/internal/crypto/sig.ts": "../ext/node/polyfills/internal/crypto/sig.ts",
     "ext:deno_node/internal/crypto/types.ts": "../ext/node/polyfills/internal/crypto/types.ts",

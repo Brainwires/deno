@@ -3,6 +3,8 @@ import { core } from "ext:core/mod.js";
 const mod = core.loadExtScript("ext:deno_node/crypto.ts");
 
 export const {
+  argon2,
+  argon2Sync,
   Certificate,
   checkPrime,
   checkPrimeSync,
