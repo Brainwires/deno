@@ -9168,7 +9168,7 @@ where the changes are discussed.
 
 227. **`fix(node)`: `dns.lookup()` passes its `hints` to `getaddrinfo()`**
      (`ext/node/ops/dns.rs`, `internal_binding/cares_wrap.ts`,
-     `internal_binding/ares.ts`; for runtime 3.0.0-denext.9):
+     `internal_binding/ares.ts`; for runtime 3.0.0-denext.10):
      - `cares_wrap.getaddrinfo` dropped `hints` and `op_node_getaddrinfo` always
        set `ai_flags: 0`, so `net.connect()`'s default `dns.ADDRCONFIG` did
        nothing. On a machine with no IPv6, AAAA records came back and took a
@@ -9564,7 +9564,7 @@ where the changes are discussed.
        day ago, so `DENEXT_PACKAGING_VERSION` moves only to an older one.
 
 234. **laufey at `99a1c2e`** (`development-denext`; laufey API 52, no ABI
-     change; runtime 3.0.0-denext.9). On Linux a window is created hidden,
+     change; runtime 3.0.0-denext.10). On Linux a window is created hidden,
      sized, then shown, so a Wayland compositor maps it at the size it was asked
      for. Before, it was created visible at 800x600 and the size set right after
      raced the compositor's first configure: under one loaded CPU some windows
@@ -9616,7 +9616,7 @@ where the changes are discussed.
 235. **`chore(deps)`: V8 15.6.75.38 from Brainwires/rusty_v8
      `v156.0.0-denext.4`** (`v8` crate `156.0.0+denext.4`;
      `chore/v8-15.6-latest`; runtime and CI; `Cargo.toml`, `Cargo.lock`,
-     `.github/denext-runtime/rusty_v8.sha256`; runtime 3.0.0-denext.9). V8 moves
+     `.github/denext-runtime/rusty_v8.sha256`; runtime 3.0.0-denext.10). V8 moves
      from 15.6.75.33 to 15.6.75.38, the head of `branch-heads/15.6` (Chrome
      Extended Stable 156) on 2026-11-03. This keeps the pin within the engine
      staleness gate's 14-day patch-lag rule (`ci/release-hardening`) for this
@@ -9766,7 +9766,7 @@ where the changes are discussed.
      on the base: no warning, and strict mode does not exist.
 
 239. **laufey at `6d88bf8`** (`development-denext`; laufey API 53; runtime
-     3.0.0-denext.9; `cli/rt_desktop/Cargo.toml`, `cli/rt_desktop/lib.rs`,
+     3.0.0-denext.10; `cli/rt_desktop/Cargo.toml`, `cli/rt_desktop/lib.rs`,
      `Cargo.lock`, `.github/workflows/denext_runtime.yml`,
      `cli/tools/desktop.rs`, `libs/config/deno_json/mod.rs`,
      `libs/cli_parser/src/flags.rs`, `cli/schemas/config-file.v1.json`). laufey
@@ -9783,7 +9783,7 @@ where the changes are discussed.
      privacy switch). The runtime registers no handler, so a packaged app
      reaches the devices only through the launch file. denext's packaging writes
      `mediaCapture` itself (the app origin alone, from
-     `FIRST_MEDIA_CAPTURE_RUNTIME`, 3.0.0-denext.9); `deno desktop`'s own launch
+     `FIRST_MEDIA_CAPTURE_RUNTIME`, 3.0.0-denext.10); `deno desktop`'s own launch
      file now carries it too, from deno.json's new `desktop.app.mediaCapture`
      (`{ "microphone": [origins], "camera":
      [origins] }`): an entry that is
@@ -10301,7 +10301,7 @@ activation policy and speech, item 183; and, for runtime 3.0.0-denext.7, CEF
 3.0.0-denext.8, API 51, hidden pages throttled instead of frozen on macOS and
 `backgroundThrottling`, item 198; and the Windows focus, tray role and window
 icon fixes, item 207; and API 52, the OS's quits and layer-surface edge
-anchoring, items 221 and 222; and, for runtime 3.0.0-denext.9, a Linux window
+anchoring, items 221 and 222; and, for runtime 3.0.0-denext.10, a Linux window
 first shown at its size and the CEF shutdown, storage and print fixes, item 234,
 and API 53, microphone and camera requests and the `mediaCapture` launch key,
 item 239; and, for runtime 3.0.0-denext.11, screen capture refused on WebView2
