@@ -9933,58 +9933,7 @@ where the changes are discussed.
      Linux; the signing itself needs a Mac), and
      `media_capture_entitlements_are_a_valid_plist` (`plutil -lint`, macOS).
 
-260. **`feat(cli)`: `--seed` pins the time zone to UTC and the locale to en-US**
-     (`feat/denext10-hygiene`; runtime; `cli/lib/util/v8.rs`, `cli/lib.rs`,
-     `cli/rt/run.rs`; upstream #35718 phase 2). `--seed` is the fork's
-     deterministic mode (item 237 seeds the RNGs under it); phase 2 adds no
-     second flag. Under `--seed`, once the V8 platform (and ICU's data) is up
-     and before the main isolate exists, `TZ` is set to `UTC` in the process
-     environment (through `ProcessEnvGuard`, which re-reads libc's zone), ICU's
-     default zone to `UTC` directly (`v8::icu::set_default_time_zone`, since
-     ICU on Windows reads the OS's zone and ignores `TZ`) and ICU's default
-     locale to `en-US`. Whatever the host's `TZ`, `LC_ALL` or
-     `LANG` say, `Intl`'s resolved time zone and locale, `navigator.language`,
-     `Date.prototype.toString` (offset and zone name), `toLocaleString` and
-     number formatting come out the same; workers share the process-wide
-     settings, `Deno.env.get("TZ")` reads `UTC` and child processes inherit it.
-     A binary compiled with `--seed` does the same at startup. An explicit
-     `Intl` locale or `timeZone` argument still applies, and so does a later
-     `Deno.env.set("TZ", …)`. Without `--seed` nothing changes. Upstream's
-     sketch calls the mode `--deterministic`; here it is `--seed`.
-
-     Tests: spec `run/seed_tz_locale` (`TZ=Asia/Tokyo`, `LC_ALL`/`LANG`
-     `de_DE.UTF-8`: without `--seed` the host's zone and German formatting
-     (unix only, where ICU reads those variables); with `--seed=1` UTC and
-     en-US, in the main thread and in a worker; the `--seed` cases fail on the
-     base, which reports Tokyo and German).
-
-261. **`feat(desktop)`: a build-time warning for a `mediaCapture` origin that is
-     not the app's** (`feat/denext10-hygiene`; CLI; `cli/tools/desktop.rs`).
-     `desktop.app.mediaCapture` grants the microphone or camera without asking
-     (item 239, laufey API 53). `deno desktop` now warns, once per entry,
-     when a listed origin is not the app's own origin (`desktop.app.origin`,
-     else the project's `.deno-desktop/app.json` origin, else
-     `app://localhost`, as `desktop_bridge_origin` resolves it), e.g. a dev
-     server or a third-party page. It only warns: listing another origin is an
-     explicit opt-in, and the grant is still written to the launch file.
-
-     Tests: unit `media_capture_origins_other_than_the_app_origin_are_flagged`
-     (foreign origins of both kinds in config order, none for the app's own,
-     every entry against the default origin).
-
-262. **`docs(cli)`: two stale comments** (`feat/denext10-hygiene`; comments
-     only; `cli/tsc/tsconfig_gen.rs`, `cli/rt/desktop.rs`).
-     `BUILT_IN_TYPES_NODE_MARKER` now names where the built-in `@types/node`
-     goes (`<DENO_DIR>/npm_compat/<name>-<hash>/@types/node`), when (`deno
-     sync-types`, also run by the native check, finds no `@types/node` in
-     `node_modules`) and what reads the marker (`is_built_in_types_node`, for
-     the generated `@types/deno` and for keeping a complete copy), in place of
-     "the native type check reads". `Deno.desktop.cancelQuit`'s comment says
-     what it does: it answers the held session end with false and returns true,
-     and returns false with nothing sent for a plain quit, one already
-     answered, or one past laufey's deadline.
-
-242. **`feat(ext/node)`: `node:stream/iter` and `node:zlib/iter`**
+243. **`feat(ext/node)`: `node:stream/iter` and `node:zlib/iter`**
      (`feat/node-compat-round8`, runtime; `ext/node/polyfills/stream/iter.js`,
      `ext/node/polyfills/zlib/iter.js`,
      `ext/node/polyfills/internal/streams/iter/`, `ext/node/lib.rs`,
@@ -10028,7 +9977,7 @@ where the changes are discussed.
        transforms, `Z_DATA_ERROR` from a corrupt stream, `Readable` interop, a
        refused dictionary).
 
-243. **`feat(ext/node)`: `node:vfs`, and node:fs consults a mounted one**
+244. **`feat(ext/node)`: `node:vfs`, and node:fs consults a mounted one**
      (`feat/node-compat-round8`, runtime; `ext/node/polyfills/vfs.js`,
      `ext/node/polyfills/internal/vfs/`, `ext/node/polyfills/fs.ts`,
      `ext/node/polyfills/internal/fs/promises.ts`,
@@ -10039,7 +9988,7 @@ where the changes are discussed.
      `RealFSProvider`, `mount()` / `unmount()`) did not exist: 93 suite tests
      failed on "No such built-in module: node:vfs" (cluster 14). The modules are
      Node 26.5.1's `lib/vfs.js` and `lib/internal/vfs/**`, ported the same way
-     as item 244, and, as in Node's `lib/fs.js`, `lib/internal/fs/dir.js` and
+     as item 243, and, as in Node's `lib/fs.js`, `lib/internal/fs/dir.js` and
      `lib/internal/fs/promises.js`, every node:fs call Node routes to a mounted
      VFS first asks `vfsState.handlers` (`internal/vfs/setup.js`): the sync,
      callback and promise forms of access, exists, readFile, writeFile,
@@ -10069,6 +10018,19 @@ where the changes are discussed.
        symlink (realpath ENOENT) was returned and followed by a write, creating
        its target anywhere. The escape checks now run outside those `try` blocks
        and a dangling symlink is refused (ENOENT).
+     - Between `RealFSProvider`'s containment check and the node:fs call that
+       uses the path, another process can swap a directory under the root for a
+       symlink (a check-then-use race), as in Node: the provider confines the
+       paths a program names, not a root that something else writes to at the
+       same time.
+     - A mount is global within its isolate: every node:fs call there, from the
+       program or any dependency, sees it, as in Node. That gives a dependency
+       nothing new, since it already runs with the process's permissions and can
+       read and write those files directly. The runtime's own reads (module
+       sources, the lockfile, `deno.json`, `package.json` resolution) do not go
+       through node:fs, so a mount cannot redirect them, and the CommonJS
+       compile cache (item 240) checks each entry's HMAC, so a mount over its
+       directory cannot hand the loader code.
      - A virtual stat without an explicit owner defaults to the process's uid /
        gid as in Node; reading those needs `sys` permission in Deno, so they are
        used only when it is already granted (`op_query_permission`, never a
@@ -10086,7 +10048,7 @@ where the changes are discussed.
        symlink out of the root, a write through a symlinked directory and a
        dangling symlink).
 
-244. **`fix(ext/node, resolver)`: `vfs`, `test`, `test/reporters` and `sqlite`
+245. **`fix(ext/node, resolver)`: `vfs`, `test`, `test/reporters` and `sqlite`
      are built-ins only with the `node:` scheme** (`feat/node-compat-round8`,
      runtime and CLI; `ext/node/polyfills/01_require.js`,
      `libs/node_resolver/builtin_modules.rs`,
@@ -10105,10 +10067,10 @@ where the changes are discussed.
      from `require` and `import`, in a package and the main module, with
      `node:vfs` alongside); Rust unit `scheme_only_builtins_are_builtins`.
 
-245. **`test(node_compat)`: 132 tests `node:stream/iter` and `node:vfs` pass**
+246. **`test(node_compat)`: 132 tests `node:stream/iter` and `node:vfs` pass**
      (`feat/node-compat-round8`, test config only;
      `tests/node_compat/config.jsonc`). 38 `test-stream-iter-*` and 94
-     `test-vfs-*` tests from items 244-246. Each passed three isolated runs
+     `test-vfs-*` tests from items 243-245. Each passed three isolated runs
      (runner parallelism 1, report mode, the CI 10 s timeout) on a Linux x86_64
      debug build without skipping, and is on for Linux only, with that reason,
      until checked on macOS and Windows. Left off:
@@ -10117,17 +10079,17 @@ where the changes are discussed.
      `-readable-interop-disabled.js`, `test-vfs-flag.js`: they expect the module
      to be unavailable without `--experimental-*`, and here it always is),
      `test-vfs.js` (module loading from a VFS) and
-     `test-vfs-real-provider-watch.js` (item 245). Whole suite (re-measured on
+     `test-vfs-real-provider-watch.js` (item 244). Whole suite (re-measured on
      biscuits with `plans/node-compat-gaps.md`'s method, on
      `integrate/denext-9-pre` at cee90fe620): 3979 of 5563 passing (71.5%)
      before, 4115 (74.0%) after; the one enabled test that run failed,
      `test-fs-access.js` (the `fs.promises` wrappers dropped the receiver, so
-     the async stack lost `Object.access`), is fixed in item 245.
+     the async stack lost `Object.access`), is fixed in item 244.
 
-246. **`fix(ext/node)`: `RealFSProvider` acts on a symlink itself, and takes a
+247. **`fix(ext/node)`: `RealFSProvider` acts on a symlink itself, and takes a
      root reached through one** (`fix/node-compat-r8-audit`, runtime;
      `ext/node/polyfills/internal/vfs/providers/real.js`). From the audit of
-     item 245. Node 26.5.1's `RealFSProvider` resolved the last component of
+     item 244. Node 26.5.1's `RealFSProvider` resolved the last component of
      every path, so `unlink`, `rmdir`, `rename` and `symlink` followed a symlink
      there: removing or renaming a link removed or moved its target
      (`fs.rmSync(dir, { recursive: true })` too, which unlinks the links it
@@ -10145,10 +10107,10 @@ where the changes are discussed.
      target alone; a root through a symlink reads, writes, `realpath`s and still
      refuses `..`).
 
-247. **`fix(ext/node)`: `node:zlib/iter` decompressors yield before inflating a
+248. **`fix(ext/node)`: `node:zlib/iter` decompressors yield before inflating a
      whole input chunk** (`fix/node-compat-r8-audit`, runtime;
      `ext/node/polyfills/internal/streams/iter/transform.js`). From the audit of
-     item 244. Node 26.5.1's transforms looped the engine until one input chunk
+     item 243. Node 26.5.1's transforms looped the engine until one input chunk
      was consumed, collecting every output buffer before the first yield, so a
      small compressed chunk (a decompression bomb) was inflated in full into
      memory before the consumer saw any of it or could stop, and the transforms
@@ -10160,12 +10122,96 @@ where the changes are discussed.
      Zstd and sync deflate grows memory by under 16 MiB at the first batch; 4
      MiB round-trips through the batched path).
 
+249. **`feat(cli)`: `--seed` pins the time zone to UTC and the locale to en-US**
+     (`feat/denext10-hygiene`; runtime; `cli/lib/util/v8.rs`, `cli/lib.rs`,
+     `cli/rt/run.rs`; upstream #35718 phase 2). `--seed` is the fork's
+     deterministic mode (item 237 seeds the RNGs under it); phase 2 adds no
+     second flag. Under `--seed`, once the V8 platform (and ICU's data) is up
+     and before the main isolate exists, `TZ` is set to `UTC` in the process
+     environment (through `ProcessEnvGuard`, which re-reads libc's zone), ICU's
+     default zone to `UTC` directly (`v8::icu::set_default_time_zone`, since ICU
+     on Windows reads the OS's zone and ignores `TZ`) and ICU's default locale
+     to `en-US`. Whatever the host's `TZ`, `LC_ALL` or `LANG` say, `Intl`'s
+     resolved time zone and locale, `navigator.language`,
+     `Date.prototype.toString` (offset and zone name), `toLocaleString` and
+     number formatting come out the same; workers share the process-wide
+     settings, `Deno.env.get("TZ")` reads `UTC` and child processes inherit it.
+     A binary compiled with `--seed` does the same at startup. An explicit
+     `Intl` locale or `timeZone` argument still applies, and so does a later
+     `Deno.env.set("TZ", …)`. Without `--seed` nothing changes. Upstream's
+     sketch calls the mode `--deterministic`; here it is `--seed`.
+
+     Tests: spec `run/seed_tz_locale` (`TZ=Asia/Tokyo`, `LC_ALL`/`LANG`
+     `de_DE.UTF-8`: without `--seed` the host's zone and German formatting (unix
+     only, where ICU reads those variables); with `--seed=1` UTC and en-US, in
+     the main thread and in a worker; the `--seed` cases fail on the base, which
+     reports Tokyo and German).
+
+250. **`feat(desktop)`: a build-time warning for a `mediaCapture` origin that is
+     not the app's** (`feat/denext10-hygiene`; CLI; `cli/tools/desktop.rs`).
+     `desktop.app.mediaCapture` grants the microphone or camera without asking
+     (item 239, laufey API 53). `deno desktop` now warns, once per entry, when a
+     listed origin is not the app's own origin (`desktop.app.origin`, else the
+     project's `.deno-desktop/app.json` origin, else `app://localhost`, as
+     `desktop_bridge_origin` resolves it), e.g. a dev server or a third-party
+     page. It only warns: listing another origin is an explicit opt-in, and the
+     grant is still written to the launch file.
+
+     Tests: unit `media_capture_origins_other_than_the_app_origin_are_flagged`
+     (foreign origins of both kinds in config order, none for the app's own,
+     every entry against the default origin).
+
+251. **`docs(cli)`: two stale comments** (`feat/denext10-hygiene`; comments
+     only; `cli/tsc/tsconfig_gen.rs`, `cli/rt/desktop.rs`).
+     `BUILT_IN_TYPES_NODE_MARKER` now names where the built-in `@types/node`
+     goes (`<DENO_DIR>/npm_compat/<name>-<hash>/@types/node`), when
+     (`deno sync-types`, also run by the native check, finds no `@types/node` in
+     `node_modules`) and what reads the marker (`is_built_in_types_node`, for
+     the generated `@types/deno` and for keeping a complete copy), in place of
+     "the native type check reads". `Deno.desktop.cancelQuit`'s comment says
+     what it does: it answers the held session end with false and returns true,
+     and returns false with nothing sent for a plain quit, one already answered,
+     or one past laufey's deadline.
+
+252. **laufey at `ff50802`** (`development-denext`; laufey API 53, no ABI
+     change; runtime 3.0.0-denext.11; `cli/rt_desktop/Cargo.toml`, `Cargo.lock`,
+     `.github/workflows/denext_runtime.yml`). laufey development-denext
+     `6d88bf8..ff50802` closes the media-capture audit's M1: WebView2 raises no
+     permission request for `getDisplayMedia` and showed its own source picker,
+     so any document in a window (another origin's top-level page, or a
+     sub-frame the page delegated display capture to) could capture the screen
+     once the user picked a source, whatever the launch file said. It now
+     cancels `ScreenCaptureStarting` (`ICoreWebView2_27`, for the main frame and
+     every sub-frame), so the page gets `NotAllowedError` and no picker shows;
+     screen capture is refused on every backend, as item 239 says. From the same
+     range:
+
+     - WebKitGTK turns on WebRTC (`enable-webrtc`, looked up so an older
+       WebKitGTK keeps working) only in a process whose launch file has the
+       `mediaCapture` key (item 239; `{}` opts in an app whose handler decides
+       every request); other apps keep it off, since it is a network path a
+       page's CSP does not govern. It grants no device, and it takes effect only
+       in a WebKitGTK built with WebRTC, which the distribution builds checked
+       are not.
+     - The backend-common GTK tests share one Xvfb start-up that waits until the
+       display takes a connection (the aarch64 Linux webview job's occasional
+       refused display).
+     - CEF quick quits with the window open are timed in laufey's e2e, and the
+       macOS CEF host prints one line naming the steps of a shutdown that took 2
+       s or more.
+
+     Still CEF 156.0.15. Tests: laufey's native_e2e media-capture battery asks
+     for screen capture from the granted origin and requires a refusal on every
+     backend, and its WebRTC checks (a loopback `RTCPeerConnection` with and
+     without the granted microphone), N/A on a WebKitGTK built without WebRTC;
+     laufey's CI on `ff50802`.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
 169-174, 176, 178, 180, 182-184, 186, 187, 189-191, 193-196, 198-203, 206, 207,
 209-215, 217, 218, 221, 222, 224, 225, 227, 228, 231, 232, 235, 237, 240,
-244-246, 248, 249) are what the prebuilt `libdenort` carries. The CLI-side parts
+243-245, 247-249) are what the prebuilt `libdenort` carries. The CLI-side parts
 (for example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged
 app's launchers) are in the branch too, but a stock CLI does not run them;
 denext's own launcher provides that environment.
@@ -10202,9 +10248,11 @@ icon fixes, item 207; and API 52, the OS's quits and layer-surface edge
 anchoring, items 221 and 222; and, for runtime 3.0.0-denext.9, a Linux window
 first shown at its size and the CEF shutdown, storage and print fixes, item 234,
 and API 53, microphone and camera requests and the `mediaCapture` launch key,
-item 239), at the commit pinned by `LAUFEY_SHA` in the workflow (or the
-`laufey_ref` input). The same commit is the `laufey` git dependency of
-`cli/rt_desktop/Cargo.toml` (crate 0.8.0, API 53, CEF 156.0.15).
+item 239; and, for runtime 3.0.0-denext.11, screen capture refused on WebView2
+and WebRTC on WebKitGTK for media-capture apps, item 252), at the commit pinned
+by `LAUFEY_SHA` in the workflow (or the `laufey_ref` input). The same commit is
+the `laufey` git dependency of `cli/rt_desktop/Cargo.toml` (crate 0.8.0, API 53,
+CEF 156.0.15).
 
 laufey's `init_api` rejects any C ABI version mismatch between the runtime and
 the host, so the `laufey` crate libdenort links and the hosts are built from the
