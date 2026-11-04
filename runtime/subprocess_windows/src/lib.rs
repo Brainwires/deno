@@ -62,6 +62,7 @@ use std::task::Poll;
 
 use anon_pipe::read2;
 use env::CommandEnv;
+pub use process::batch_file_command_line;
 pub use process::process_kill;
 pub use process::with_exclusive_inheritance;
 pub use process_stdio::disable_stdio_inheritance;

@@ -422,6 +422,48 @@ Deno.test(
   },
 );
 
+Deno.test(
+  { permissions: { run: true, read: true } },
+  function ptyRefusesNulInArguments() {
+    // a NUL would end a Windows command line there, dropping what follows
+    assertThrows(
+      () =>
+        Deno.openPty({
+          cmd: shell,
+          args: [...shellArgs("echo a"), "b\0c"],
+          cols: 80,
+          rows: 24,
+        }),
+      Error,
+      "nul byte",
+    );
+  },
+);
+
+Deno.test(
+  { permissions: { run: true, read: true, write: true }, ignore: !isWindows },
+  async function ptyBatchFileArgumentsCannotRunCommands() {
+    // A `.bat` runs through cmd.exe: its arguments are escaped against cmd's
+    // own parsing, as Deno.Command does it (BatBadBut), so a quote in one
+    // cannot end the quoting and start a second command.
+    const dir = Deno.makeTempDirSync();
+    const script = `${dir}\\args.bat`;
+    Deno.writeTextFileSync(script, "@echo off\r\necho arg=%1\r\n");
+    const marker = `${dir}\\pwned.txt`;
+    const pty = Deno.openPty({
+      cmd: script,
+      args: [`"&echo pwned>${marker}&rem `],
+      cols: 80,
+      rows: 24,
+    });
+    const output = await readAll(pty.readable);
+    await pty.status;
+    assertStringIncludes(output, "arg=");
+    assertThrows(() => Deno.statSync(marker), Deno.errors.NotFound);
+    Deno.removeSync(dir, { recursive: true });
+  },
+);
+
 // `Deno.Command` with `pty` (item 291): thin sugar over the same spawn.
 
 Deno.test(

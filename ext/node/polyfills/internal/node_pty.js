@@ -296,6 +296,9 @@ class Terminal extends EventEmitter {
   destroy() {
     this.#closed = true;
     this.kill("SIGHUP");
+    // the master closes now, as node-pty's socket does, not once the child
+    // has exited: one that ignores SIGHUP does not keep the terminal open
+    core.tryClose(this.#spawn.masterRid);
     this.#spawn.handle[Symbol.asyncDispose]().catch(() => {});
   }
 

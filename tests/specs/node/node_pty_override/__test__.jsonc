@@ -22,6 +22,11 @@
       "args": "run -A signal.cjs",
       "output": "signal.out"
     },
+    "destroy_closes_the_terminal": {
+      "if": "unix",
+      "args": "run -A destroy.cjs",
+      "output": "destroy.out"
+    },
     "needs_run_permission": {
       "if": "unix",
       "args": "run --allow-read --allow-env esm.mjs",

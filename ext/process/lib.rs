@@ -59,6 +59,10 @@ use deno_subprocess_windows::Child as AsyncChild;
 use deno_subprocess_windows::Command;
 #[cfg(windows)]
 use deno_subprocess_windows::Stdio as StdStdio;
+/// How a batch file (`.bat` / `.cmd`) is started, its arguments escaped
+/// against cmd.exe's parsing, for `ext/pty`'s own `CreateProcessW`.
+#[cfg(windows)]
+pub use deno_subprocess_windows::batch_file_command_line;
 /// Runs a spawn that inherits every inheritable handle (Rust's or tokio's
 /// `Command::spawn`) while no Deno spawn holds handles meant for its own
 /// child. See `deno_subprocess_windows`.
