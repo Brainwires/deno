@@ -1,0 +1,9 @@
+{
+  // This process's stdout is a pipe here (the spec runner reads it): a child
+  // on a pseudo-terminal still writes to the terminal, never to that pipe.
+  // Windows: a ConPTY child given no standard handles can pick up the
+  // parent's redirected ones instead.
+  "if": "windows",
+  "args": "run --allow-run main.ts",
+  "output": "main.out"
+}

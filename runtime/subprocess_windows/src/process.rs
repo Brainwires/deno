@@ -741,17 +741,6 @@ pub fn spawn(options: &SpawnOptions) -> Result<ChildProcess, std::io::Error> {
   let verbatim_arguments =
     (options.flags & uv_process_flags::WindowsVerbatimArguments) != 0;
 
-  let has_bat_extension = |program: &[u16]| {
-    // lifted from https://github.com/rust-lang/rust/blob/bc1d7273dfbc6f8a11c0086fa35f6748a13e8d3c/library/std/src/sys/process/windows.rs#L284
-    // Copyright The Rust Project Contributors - MIT
-    matches!(
-      // Case insensitive "ends_with" of UTF-16 encoded ".bat" or ".cmd"
-      program.len().checked_sub(4).and_then(|i| program.get(i..)),
-      Some(
-        [46, 98 | 66, 97 | 65, 116 | 84] | [46, 99 | 67, 109 | 77, 100 | 68]
-      )
-    )
-  };
   let is_batch_file = has_bat_extension(application_path.as_slice_no_nul());
   let (application_path, arguments) = if is_batch_file {
     (
@@ -1655,6 +1644,43 @@ pub fn process_kill(pid: i32, signum: i32) -> Result<(), ProcessKillError> {
   }
 }
 
+// lifted from https://github.com/rust-lang/rust/blob/bc1d7273dfbc6f8a11c0086fa35f6748a13e8d3c/library/std/src/sys/process/windows.rs#L284
+// Copyright The Rust Project Contributors - MIT
+fn has_bat_extension(program: &[u16]) -> bool {
+  matches!(
+    // Case insensitive "ends_with" of UTF-16 encoded ".bat" or ".cmd"
+    program.len().checked_sub(4).and_then(|i| program.get(i..)),
+    Some([46, 98 | 66, 97 | 65, 116 | 84] | [46, 99 | 67, 109 | 77, 100 | 68])
+  )
+}
+
+/// denext: what [`spawn`] hands `CreateProcessW` for a batch file, for a
+/// spawner of its own (`ext/pty`, which starts the child on a
+/// pseudoconsole). A `program` ending in `.bat` or `.cmd` runs as `cmd.exe`
+/// with a command line whose arguments are escaped against cmd's own parsing
+/// (BatBadBut, CVE-2024-24576): `Some((application, command_line))`, both
+/// NUL-terminated. Anything else is `None`, for the caller's own quoting.
+/// `args` starts with argv[0], as [`spawn`]'s do.
+pub fn batch_file_command_line(
+  program: &OsStr,
+  args: &[&OsStr],
+) -> io::Result<Option<(Vec<u16>, Vec<u16>)>> {
+  let program: Vec<u16> = program.encode_wide().collect();
+  if !has_bat_extension(&program) {
+    return Ok(None);
+  }
+  let application = command_prompt()?;
+  let line = WCString::from_vec(make_bat_command_line(&program, args, true)?);
+  let with_nul = |s: &WCString| {
+    s.as_slice_no_nul()
+      .iter()
+      .copied()
+      .chain(Some(0))
+      .collect::<Vec<u16>>()
+  };
+  Ok(Some((with_nul(&application), with_nul(&line))))
+}
+
 // lifted from https://github.com/rust-lang/rust/blob/bc1d7273dfbc6f8a11c0086fa35f6748a13e8d3c/library/std/src/sys/args/windows.rs#L293
 // Copyright The Rust Project Contributors - MIT
 fn make_bat_command_line(
@@ -1815,6 +1841,36 @@ mod tests {
   use pretty_assertions::assert_eq;
 
   use super::*;
+  #[test]
+  fn test_batch_file_command_line() {
+    let args = [OsStr::new(r"C:\x\t.bat"), OsStr::new("a&echo pwned")];
+    let (application, line) =
+      batch_file_command_line(OsStr::new(r"C:\x\t.BAT"), &args)
+        .unwrap()
+        .unwrap();
+    let application = String::from_utf16_lossy(&application);
+    assert!(application.to_ascii_lowercase().ends_with("\\cmd.exe\0"));
+    let line = String::from_utf16_lossy(&line);
+    // the metacharacter stays inside quotes, where cmd does not act on it
+    assert_eq!(
+      line,
+      "/e:ON /v:OFF /d /c \"\"C:\\x\\t.BAT\" \"a&echo pwned\"\"\0"
+    );
+    assert!(
+      batch_file_command_line(OsStr::new(r"C:\x\t.exe"), &args)
+        .unwrap()
+        .is_none()
+    );
+    // a line break would end cmd's command early
+    assert!(
+      batch_file_command_line(
+        OsStr::new(r"C:\x\t.cmd"),
+        &[OsStr::new("t.cmd"), OsStr::new("a\r\nb")]
+      )
+      .is_err()
+    );
+  }
+
   #[test]
   fn test_quote_cmd_arg() {
     let cases = [

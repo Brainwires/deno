@@ -70,6 +70,12 @@ pub fn spawn(
   rows: u16,
 ) -> Result<Spawned, PtyError> {
   let (master, slave) = open_pty(cols, rows)?;
+  // Registered before the spawn: once the child runs, nothing may fail
+  // before it is handed to the resource that kills and reaps it.
+  // SAFETY: the descriptor is owned by the `AsyncFd` for its whole life and
+  // closed by nothing else.
+  let master =
+    unsafe { AsyncFd::register(master) }.map_err(|err| err.into_parts().1)?;
 
   let mut command = std::process::Command::new(&run.program);
   command.arg0(&run.argv0);
@@ -107,10 +113,6 @@ pub fn spawn(
     let _ = child.start_kill();
   })?;
 
-  // SAFETY: the descriptor is owned by the `AsyncFd` for its whole life and
-  // closed by nothing else.
-  let master =
-    unsafe { AsyncFd::register(master) }.map_err(|err| err.into_parts().1)?;
   let master = Rc::new(master);
   Ok(Spawned {
     pid,

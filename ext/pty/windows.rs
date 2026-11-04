@@ -12,6 +12,8 @@
 use std::ffi::OsStr;
 use std::ffi::OsString;
 use std::ffi::c_void;
+use std::hash::BuildHasher;
+use std::hash::RandomState;
 use std::io;
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::io::AsRawHandle;
@@ -35,6 +37,11 @@ use windows_sys::Win32::Foundation::GENERIC_WRITE;
 use windows_sys::Win32::Foundation::GetLastError;
 use windows_sys::Win32::Foundation::HANDLE;
 use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+use windows_sys::Win32::Foundation::LocalFree;
+use windows_sys::Win32::Security::Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW;
+use windows_sys::Win32::Security::Authorization::SDDL_REVISION_1;
+use windows_sys::Win32::Security::PSECURITY_DESCRIPTOR;
+use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
 use windows_sys::Win32::Storage::FileSystem::CreateFileW;
 use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_FIRST_PIPE_INSTANCE;
 use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OVERLAPPED;
@@ -60,6 +67,7 @@ use windows_sys::Win32::System::Threading::InitializeProcThreadAttributeList;
 use windows_sys::Win32::System::Threading::LPPROC_THREAD_ATTRIBUTE_LIST;
 use windows_sys::Win32::System::Threading::PROCESS_INFORMATION;
 use windows_sys::Win32::System::Threading::RegisterWaitForSingleObject;
+use windows_sys::Win32::System::Threading::STARTF_USESTDHANDLES;
 use windows_sys::Win32::System::Threading::STARTUPINFOEXW;
 use windows_sys::Win32::System::Threading::TerminateProcess;
 use windows_sys::Win32::System::Threading::UnregisterWaitEx;
@@ -75,17 +83,17 @@ const PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE: usize = 0x0002_0016;
 /// `GetExitCodeProcess` for a process that is still running.
 const STILL_ACTIVE: u32 = 259;
 
-type HPCON = *mut c_void;
+type Hpcon = *mut c_void;
 type CreatePseudoConsoleFn = unsafe extern "system" fn(
   size: COORD,
   input: HANDLE,
   output: HANDLE,
   flags: u32,
-  pseudoconsole: *mut HPCON,
+  pseudoconsole: *mut Hpcon,
 ) -> i32;
 type ResizePseudoConsoleFn =
-  unsafe extern "system" fn(pseudoconsole: HPCON, size: COORD) -> i32;
-type ClosePseudoConsoleFn = unsafe extern "system" fn(pseudoconsole: HPCON);
+  unsafe extern "system" fn(pseudoconsole: Hpcon, size: COORD) -> i32;
+type ClosePseudoConsoleFn = unsafe extern "system" fn(pseudoconsole: Hpcon);
 
 /// The ConPTY entry points of this machine's kernel32, or none.
 #[derive(Clone, Copy)]
@@ -161,10 +169,10 @@ fn hresult(rc: i32) -> io::Result<()> {
 /// output to the pipe this thread reads.
 struct PseudoConsole {
   api: ConPtyApi,
-  hpc: std::cell::Cell<HPCON>,
+  hpc: std::cell::Cell<Hpcon>,
 }
 
-struct SendHpcon(HPCON);
+struct SendHpcon(Hpcon);
 // SAFETY: a ConPTY handle may be closed from any thread.
 unsafe impl Send for SendHpcon {}
 
@@ -219,6 +227,58 @@ pub struct Spawned {
 
 static PIPE_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
+/// A pipe name no other process can predict: this process's id, a counter
+/// and 64 random bits. (`RandomState` is seeded from the OS's random source
+/// and keyed differently each call.)
+fn pipe_name() -> String {
+  let n = PIPE_COUNTER.fetch_add(1, Ordering::Relaxed);
+  let random = RandomState::new().hash_one(n);
+  format!(
+    r"\\.\pipe\__deno_pty_{}_{}_{:016x}",
+    // SAFETY: no preconditions.
+    unsafe { GetCurrentProcessId() },
+    n,
+    random
+  )
+}
+
+/// Full access for the pipe's owner (this process's user) and no one else:
+/// a protected DACL, so the default one's read access for Everyone and
+/// Anonymous is not there to let another process open the pipe.
+const PIPE_SDDL: &str = "D:P(A;;GA;;;OW)";
+
+/// A security descriptor, freed with `LocalFree`.
+struct SecurityDescriptor(PSECURITY_DESCRIPTOR);
+
+impl SecurityDescriptor {
+  fn owner_only() -> io::Result<Self> {
+    let sddl: Vec<u16> =
+      OsStr::new(PIPE_SDDL).encode_wide().chain(Some(0)).collect();
+    let mut sd: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+    // SAFETY: a NUL-terminated SDDL string; the descriptor it allocates is
+    // freed on drop.
+    if unsafe {
+      ConvertStringSecurityDescriptorToSecurityDescriptorW(
+        sddl.as_ptr(),
+        SDDL_REVISION_1,
+        &mut sd,
+        std::ptr::null_mut(),
+      )
+    } == FALSE
+    {
+      return Err(io::Error::last_os_error());
+    }
+    Ok(Self(sd))
+  }
+}
+
+impl Drop for SecurityDescriptor {
+  fn drop(&mut self) {
+    // SAFETY: allocated by ConvertStringSecurityDescriptorToSecurityDescriptorW.
+    unsafe { LocalFree(self.0 as _) };
+  }
+}
+
 /// A pipe whose end for this process is opened overlapped (for tokio); the
 /// other end, synchronous, goes to the pseudoconsole. `ours_readable` picks
 /// which direction the data flows.
@@ -226,15 +286,17 @@ fn overlapped_pipe(
   ours_readable: bool,
 ) -> io::Result<(OwnedHandle, OwnedHandle)> {
   const PIPE_BUFFER_CAPACITY: u32 = 64 * 1024;
+  let descriptor = SecurityDescriptor::owner_only()?;
+  let security = SECURITY_ATTRIBUTES {
+    nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+    lpSecurityDescriptor: descriptor.0,
+    // neither end is inherited by any child
+    bInheritHandle: FALSE,
+  };
   let mut tries = 0;
   loop {
     tries += 1;
-    let name = format!(
-      r"\\.\pipe\__deno_pty_{}_{}",
-      // SAFETY: no preconditions.
-      unsafe { GetCurrentProcessId() },
-      PIPE_COUNTER.fetch_add(1, Ordering::Relaxed)
-    );
+    let name = pipe_name();
     let wide_name: Vec<u16> =
       OsStr::new(&name).encode_wide().chain(Some(0)).collect();
     let mut flags = FILE_FLAG_FIRST_PIPE_INSTANCE | FILE_FLAG_OVERLAPPED;
@@ -256,7 +318,7 @@ fn overlapped_pipe(
         PIPE_BUFFER_CAPACITY,
         PIPE_BUFFER_CAPACITY,
         0,
-        std::ptr::null(),
+        &security,
       )
     };
     if ours == INVALID_HANDLE_VALUE {
@@ -297,8 +359,19 @@ fn overlapped_pipe(
 
 /// `std`'s quoting of one argument for `CreateProcessW` (what the C runtime's
 /// and `CommandLineToArgvW`'s parsing undo).
-fn append_arg(line: &mut Vec<u16>, arg: &OsStr, force_quotes: bool) {
+fn append_arg(
+  line: &mut Vec<u16>,
+  arg: &OsStr,
+  force_quotes: bool,
+) -> io::Result<()> {
   let wide: Vec<u16> = arg.encode_wide().collect();
+  // a NUL would end the command line there, dropping what follows
+  if wide.contains(&0) {
+    return Err(io::Error::new(
+      io::ErrorKind::InvalidInput,
+      "nul byte found in provided data",
+    ));
+  }
   let quote = force_quotes
     || wide.is_empty()
     || wide.iter().any(|&c| c == b' ' as u16 || c == b'\t' as u16);
@@ -321,17 +394,34 @@ fn append_arg(line: &mut Vec<u16>, arg: &OsStr, force_quotes: bool) {
     line.extend(std::iter::repeat_n(b'\\' as u16, backslashes));
     line.push(b'"' as u16);
   }
+  Ok(())
 }
 
-fn command_line(argv0: &OsStr, args: &[String]) -> Vec<u16> {
+/// The program `CreateProcessW` starts and its command line, both
+/// NUL-terminated. A batch file runs through `cmd.exe`, its arguments
+/// escaped against cmd's parsing exactly as `Deno.Command` does it
+/// (BatBadBut, CVE-2024-24576); the C runtime's quoting alone would let an
+/// argument such as `a&calc` run a second command.
+fn program_and_command_line(
+  program: &OsStr,
+  argv0: &OsStr,
+  args: &[String],
+) -> io::Result<(Vec<u16>, Vec<u16>)> {
+  let mut argv: Vec<&OsStr> = Vec::with_capacity(args.len() + 1);
+  argv.push(argv0);
+  argv.extend(args.iter().map(OsStr::new));
+  if let Some(batch) = deno_process::batch_file_command_line(program, &argv)? {
+    return Ok(batch);
+  }
+  let program: Vec<u16> = program.encode_wide().chain(Some(0)).collect();
   let mut line = Vec::new();
-  append_arg(&mut line, argv0, true);
+  append_arg(&mut line, argv0, true)?;
   for arg in args {
     line.push(b' ' as u16);
-    append_arg(&mut line, OsStr::new(arg), false);
+    append_arg(&mut line, OsStr::new(arg), false)?;
   }
   line.push(0);
-  line
+  Ok((program, line))
 }
 
 /// The environment block: `k=v\0`... `\0`, sorted as Windows keeps it.
@@ -363,7 +453,7 @@ struct AttributeList {
 }
 
 impl AttributeList {
-  fn new(hpc: HPCON) -> io::Result<Self> {
+  fn new(hpc: Hpcon) -> io::Result<Self> {
     let mut size = 0usize;
     // SAFETY: the sizing call, which fails by design.
     unsafe {
@@ -385,8 +475,8 @@ impl AttributeList {
         list,
         0,
         PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE,
-        &mut hpc as *mut HPCON as *mut c_void,
-        std::mem::size_of::<HPCON>(),
+        &mut hpc as *mut Hpcon as *mut c_void,
+        std::mem::size_of::<Hpcon>(),
         std::ptr::null_mut(),
         std::ptr::null_mut(),
       )
@@ -424,7 +514,7 @@ pub fn spawn(
   let (output_ours, output_theirs) = overlapped_pipe(true)?;
   let (input_ours, input_theirs) = overlapped_pipe(false)?;
   let size = coord(cols, rows);
-  let mut hpc: HPCON = std::ptr::null_mut();
+  let mut hpc: Hpcon = std::ptr::null_mut();
   // SAFETY: the pipe ends are open handles.
   hresult(unsafe {
     (api.create)(
@@ -444,19 +534,23 @@ pub fn spawn(
   drop(output_theirs);
 
   let mut attributes = AttributeList::new(hpc)?;
-  let program: Vec<u16> = run
-    .program
-    .as_os_str()
-    .encode_wide()
-    .chain(Some(0))
-    .collect();
-  let mut line = command_line(run.argv0.as_os_str(), args);
+  let (program, mut line) = program_and_command_line(
+    run.program.as_os_str(),
+    run.argv0.as_os_str(),
+    args,
+  )?;
   let mut environment = environment_block(&run.envs)?;
   let cwd: Vec<u16> =
     run.cwd.as_os_str().encode_wide().chain(Some(0)).collect();
   // SAFETY: a plain C struct, the fields it needs set below.
   let mut startup: STARTUPINFOEXW = unsafe { std::mem::zeroed() };
   startup.StartupInfo.cb = std::mem::size_of::<STARTUPINFOEXW>() as u32;
+  // No standard handles of this process's: left unset, a child whose
+  // parent's stdio is redirected (a pipe, a file) can end up with those
+  // instead of the pseudoconsole's, its output going past the terminal.
+  // Null handles under STARTF_USESTDHANDLES make it take the console's (as
+  // Windows Terminal starts its ConPTY clients).
+  startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
   startup.lpAttributeList = attributes.as_ptr();
   // SAFETY: a plain C struct that CreateProcessW fills.
   let mut info: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
@@ -472,7 +566,7 @@ pub fn spawn(
       EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT,
       environment.as_mut_ptr() as *mut c_void,
       cwd.as_ptr(),
-      &mut startup.StartupInfo,
+      &startup.StartupInfo,
       &mut info,
     )
   };
@@ -698,5 +792,53 @@ impl Killer {
     unsafe {
       TerminateProcess(self.process.as_raw_handle() as HANDLE, 1);
     }
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn pipe_names_are_not_predictable() {
+    let a = pipe_name();
+    let b = pipe_name();
+    assert_ne!(a, b);
+    // the part after the counter is random, not a function of it
+    let random = |name: &str| name.rsplit('_').next().unwrap().to_string();
+    assert_eq!(random(&a).len(), 16);
+    assert_ne!(random(&a), random(&b));
+  }
+
+  #[test]
+  fn pipes_admit_their_owner_only() {
+    SecurityDescriptor::owner_only().unwrap();
+    let (ours, theirs) = overlapped_pipe(true).unwrap();
+    drop((ours, theirs));
+  }
+
+  #[test]
+  fn command_line_refuses_nul() {
+    let err = program_and_command_line(
+      OsStr::new(r"C:\x\a.exe"),
+      OsStr::new(r"C:\x\a.exe"),
+      &["a\0b".to_string()],
+    )
+    .unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+  }
+
+  #[test]
+  fn batch_file_arguments_are_escaped_for_cmd() {
+    let (program, line) = program_and_command_line(
+      OsStr::new(r"C:\x\t.cmd"),
+      OsStr::new(r"C:\x\t.cmd"),
+      &["a&echo pwned".to_string()],
+    )
+    .unwrap();
+    let program = String::from_utf16_lossy(&program).to_ascii_lowercase();
+    assert!(program.ends_with("\\cmd.exe\0"), "{program}");
+    let line = String::from_utf16_lossy(&line);
+    assert!(line.contains("\"a&echo pwned\""), "{line}");
   }
 }
