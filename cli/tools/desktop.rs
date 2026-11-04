@@ -1118,7 +1118,7 @@ fn make_self_extracting_macos(
     },
   );
   if let Some(identity) = codesign_identity {
-    codesign_macos_bundle(bundle_path, identity)?;
+    codesign_macos_bundle(bundle_path, identity, &desktop_flags.media_capture)?;
   }
 
   log::info!(
@@ -3030,6 +3030,7 @@ fn rewrite_helper_plist_identifier(
 fn codesign_macos_bundle(
   app_bundle: &Path,
   identity: &str,
+  media_capture: &crate::args::DesktopMediaCapture,
 ) -> Result<(), AnyError> {
   if !cfg!(target_os = "macos") {
     bail!(
@@ -3112,19 +3113,90 @@ fn codesign_macos_bundle(
   // they get the helper entitlements above), but with the webview backend
   // CFBundleExecutable *is* laufey_webview, which loads the runtime dylib and
   // runs V8 in-process.
+  //
+  // denext (DENEXT.md item 242): the devices `desktop.app.mediaCapture` asks
+  // for are added to the main bundle's entitlements, never the helpers'.
   let browser_entitlements = locate_browser_entitlements(app_bundle);
-  // Bound to a local so the temp file outlives the codesign call below.
-  let webview_entitlements =
-    if browser_entitlements.is_none() && identity != "-" {
-      Some(write_webview_entitlements()?)
-    } else {
-      None
-    };
-  let entitlements = browser_entitlements
+  let shipped = browser_entitlements
     .as_deref()
-    .or_else(|| webview_entitlements.as_ref().map(|f| f.path()));
+    .map(|path| {
+      std::fs::read(path)
+        .with_context(|| format!("failed to read {}", path.display()))
+    })
+    .transpose()?;
+  let generated = main_bundle_entitlements_xml(
+    shipped.as_deref(),
+    identity == "-",
+    &media_capture_device_entitlements(media_capture),
+  )?;
+  // Bound to a local so the temp file outlives the codesign call below.
+  let generated_file = generated
+    .as_deref()
+    .map(write_entitlements_file)
+    .transpose()?;
+  let entitlements = generated_file
+    .as_ref()
+    .map(|f| f.path())
+    .or(browser_entitlements.as_deref());
   codesign_one(app_bundle, identity, entitlements, None)?;
   Ok(())
+}
+
+/// denext (DENEXT.md item 242): the Hardened Runtime device entitlement for
+/// each kind `desktop.app.mediaCapture` grants to at least one origin:
+/// `com.apple.security.device.audio-input` for the microphone,
+/// `com.apple.security.device.camera` for the camera. Under the Hardened
+/// Runtime macOS refuses the device to a process without it (no TCC prompt at
+/// all), so a signed app whose launch file allows `getUserMedia` would still
+/// get no audio or video.
+fn media_capture_device_entitlements(
+  media_capture: &crate::args::DesktopMediaCapture,
+) -> Vec<&'static str> {
+  let mut keys = Vec::new();
+  if !media_capture.microphone.is_empty() {
+    keys.push("com.apple.security.device.audio-input");
+  }
+  if !media_capture.camera.is_empty() {
+    keys.push("com.apple.security.device.camera");
+  }
+  keys
+}
+
+/// The entitlements plist to sign the main bundle with, or `None` to sign it
+/// with the plist laufey ships as it is (`shipped`), or with none when there
+/// is no such plist.
+///
+/// - laufey's plist (CEF) with `devices` to add: that plist with each device
+///   key set to `true`.
+/// - No shipped plist and a real identity (webview): [`WEBVIEW_ENTITLEMENTS`]
+///   plus the device keys.
+/// - No shipped plist, ad-hoc: none, as before. The Hardened Runtime is off
+///   for an ad-hoc signature (see [`codesign_one`]), and only under it does
+///   macOS ask for the device entitlements.
+fn main_bundle_entitlements_xml(
+  shipped: Option<&[u8]>,
+  adhoc: bool,
+  devices: &[&str],
+) -> Result<Option<Vec<u8>>, AnyError> {
+  let base = match shipped {
+    Some(_) if devices.is_empty() => return Ok(None),
+    Some(bytes) => bytes,
+    None if adhoc => return Ok(None),
+    None if devices.is_empty() => {
+      return Ok(Some(WEBVIEW_ENTITLEMENTS.as_bytes().to_vec()));
+    }
+    None => WEBVIEW_ENTITLEMENTS.as_bytes(),
+  };
+  let mut dict: plist::Dictionary =
+    plist::from_reader(std::io::Cursor::new(base))
+      .context("failed to parse the main bundle's entitlements plist")?;
+  for key in devices {
+    dict.insert((*key).to_string(), plist::Value::Boolean(true));
+  }
+  let mut xml = Vec::new();
+  plist::to_writer_xml(&mut xml, &dict)
+    .context("failed to write the main bundle's entitlements plist")?;
+  Ok(Some(xml))
 }
 
 /// Entitlements the webview backend needs under the Hardened Runtime.
@@ -3154,18 +3226,21 @@ const WEBVIEW_ENTITLEMENTS: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 </plist>
 "#;
 
-/// Write [`WEBVIEW_ENTITLEMENTS`] somewhere `codesign --entitlements` can read.
+/// Write an entitlements plist (`contents`) somewhere
+/// `codesign --entitlements` can read.
 ///
 /// A temp file rather than `Contents/Resources/entitlements.plist`: the
 /// entitlements are baked into the signature itself, so a copy inside the
 /// bundle would ship in every app without ever being read again.
-fn write_webview_entitlements() -> Result<tempfile::NamedTempFile, AnyError> {
+fn write_entitlements_file(
+  contents: &[u8],
+) -> Result<tempfile::NamedTempFile, AnyError> {
   let mut file = tempfile::Builder::new()
     .prefix("deno-desktop-entitlements-")
     .suffix(".plist")
     .tempfile()
     .context("failed to create the entitlements plist")?;
-  std::io::Write::write_all(&mut file, WEBVIEW_ENTITLEMENTS.as_bytes())
+  std::io::Write::write_all(&mut file, contents)
     .context("failed to write the entitlements plist")?;
   Ok(file)
 }
@@ -4154,7 +4229,7 @@ async fn package_macos_app_bundle(
     },
   );
   if let Some(identity) = codesign_identity {
-    codesign_macos_bundle(&app_bundle, identity)?;
+    codesign_macos_bundle(&app_bundle, identity, &desktop_flags.media_capture)?;
   }
 
   // Remove the standalone dylib (it's now inside the .app).
@@ -7829,7 +7904,8 @@ mod tests {
   fn webview_entitlements_are_a_valid_plist() {
     // Hand-written XML that `codesign --entitlements` rejects would break
     // every signed build, so lint it with the same parser the OS uses.
-    let file = write_webview_entitlements().unwrap();
+    let file =
+      write_entitlements_file(WEBVIEW_ENTITLEMENTS.as_bytes()).unwrap();
     let output = std::process::Command::new("plutil")
       .arg("-lint")
       .arg(file.path())
@@ -7840,6 +7916,137 @@ mod tests {
       "plutil rejected the entitlements plist: {}",
       String::from_utf8_lossy(&output.stdout)
     );
+  }
+
+  // --- media capture entitlements (DENEXT.md item 242) ---
+
+  const AUDIO_INPUT: &str = "com.apple.security.device.audio-input";
+  const CAMERA: &str = "com.apple.security.device.camera";
+
+  fn media(mic: &[&str], cam: &[&str]) -> crate::args::DesktopMediaCapture {
+    crate::args::DesktopMediaCapture {
+      microphone: mic.iter().map(|s| s.to_string()).collect(),
+      camera: cam.iter().map(|s| s.to_string()).collect(),
+    }
+  }
+
+  fn entitlements_dict(xml: &[u8]) -> plist::Dictionary {
+    plist::from_reader(std::io::Cursor::new(xml)).unwrap()
+  }
+
+  #[test]
+  fn media_capture_device_entitlements_match_the_kinds_granted() {
+    assert!(media_capture_device_entitlements(&media(&[], &[])).is_empty());
+    assert_eq!(
+      media_capture_device_entitlements(&media(&["app://a"], &[])),
+      vec![AUDIO_INPUT]
+    );
+    assert_eq!(
+      media_capture_device_entitlements(&media(&[], &["app://a"])),
+      vec![CAMERA]
+    );
+    assert_eq!(
+      media_capture_device_entitlements(&media(&["app://a"], &["app://a"])),
+      vec![AUDIO_INPUT, CAMERA]
+    );
+  }
+
+  #[test]
+  fn webview_entitlements_carry_the_requested_devices() {
+    // No mediaCapture: the webview plist exactly as before.
+    let plain = main_bundle_entitlements_xml(None, false, &[])
+      .unwrap()
+      .unwrap();
+    assert_eq!(plain, WEBVIEW_ENTITLEMENTS.as_bytes());
+
+    let mic = main_bundle_entitlements_xml(None, false, &[AUDIO_INPUT])
+      .unwrap()
+      .unwrap();
+    let dict = entitlements_dict(&mic);
+    assert_eq!(
+      dict.get("com.apple.security.cs.allow-jit"),
+      Some(&plist::Value::Boolean(true)),
+      "the JIT entitlement stays"
+    );
+    assert_eq!(dict.get(AUDIO_INPUT), Some(&plist::Value::Boolean(true)));
+    assert_eq!(dict.get(CAMERA), None, "only the kinds asked for");
+
+    let both =
+      main_bundle_entitlements_xml(None, false, &[AUDIO_INPUT, CAMERA])
+        .unwrap()
+        .unwrap();
+    let dict = entitlements_dict(&both);
+    assert_eq!(dict.get(AUDIO_INPUT), Some(&plist::Value::Boolean(true)));
+    assert_eq!(dict.get(CAMERA), Some(&plist::Value::Boolean(true)));
+  }
+
+  #[test]
+  fn adhoc_webview_signature_has_no_entitlements() {
+    // No Hardened Runtime for an ad-hoc signature, so nothing to add.
+    assert_eq!(main_bundle_entitlements_xml(None, true, &[]).unwrap(), None);
+    assert_eq!(
+      main_bundle_entitlements_xml(None, true, &[AUDIO_INPUT, CAMERA]).unwrap(),
+      None
+    );
+  }
+
+  #[test]
+  fn shipped_browser_entitlements_gain_the_devices() {
+    let shipped = br#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>com.apple.security.cs.allow-jit</key>
+	<true/>
+	<key>com.apple.security.device.camera</key>
+	<false/>
+</dict>
+</plist>
+"#;
+    // No devices: the shipped file is used as it is.
+    assert_eq!(
+      main_bundle_entitlements_xml(Some(shipped), false, &[]).unwrap(),
+      None
+    );
+    let merged =
+      main_bundle_entitlements_xml(Some(shipped), true, &[AUDIO_INPUT, CAMERA])
+        .unwrap()
+        .unwrap();
+    let dict = entitlements_dict(&merged);
+    assert_eq!(
+      dict.get("com.apple.security.cs.allow-jit"),
+      Some(&plist::Value::Boolean(true)),
+      "laufey's own keys stay"
+    );
+    assert_eq!(dict.get(AUDIO_INPUT), Some(&plist::Value::Boolean(true)));
+    assert_eq!(
+      dict.get(CAMERA),
+      Some(&plist::Value::Boolean(true)),
+      "a shipped `false` is overridden by what mediaCapture asks for"
+    );
+  }
+
+  #[test]
+  fn a_shipped_entitlements_plist_that_does_not_parse_is_an_error() {
+    assert!(
+      main_bundle_entitlements_xml(Some(b"not a plist"), false, &[AUDIO_INPUT])
+        .is_err()
+    );
+  }
+
+  #[test]
+  #[cfg(target_os = "macos")]
+  fn media_capture_entitlements_are_a_valid_plist() {
+    let xml = main_bundle_entitlements_xml(None, false, &[AUDIO_INPUT, CAMERA])
+      .unwrap()
+      .unwrap();
+    let file = write_entitlements_file(&xml).unwrap();
+    let output = std::process::Command::new("plutil")
+      .arg("-lint")
+      .arg(file.path())
+      .output()
+      .unwrap();
+    assert!(output.status.success());
   }
 
   // --- macOS Info.plist ---
