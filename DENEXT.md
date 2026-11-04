@@ -9613,12 +9613,51 @@ where the changes are discussed.
      window-drain and commit-gate tests against fake clocks, the localStorage
      relaunch stress, native_e2e's print checks on WebKitGTK and WebView2).
 
+235. **`chore(deps)`: V8 15.6.75.38 from Brainwires/rusty_v8
+     `v156.0.0-denext.4`** (`v8` crate `156.0.0+denext.4`;
+     `chore/v8-15.6-latest`; runtime and CI; `Cargo.toml`, `Cargo.lock`,
+     `.github/denext-runtime/rusty_v8.sha256`; runtime 3.0.0-denext.9). The
+     number is a placeholder: renumber it when the branch merges, since
+     `integrate/denext-9-pre` already uses 227-234 and `ci/release-hardening`
+     also takes 227. V8 moves from 15.6.75.33 to 15.6.75.38, the head of
+     `branch-heads/15.6` (Chrome Extended Stable 156) on 2026-11-03. This keeps
+     the pin within the engine staleness gate's 14-day patch-lag rule
+     (`ci/release-hardening`) for this runtime: 15.6.75.34, the first patch
+     `.33` lacks, came out on 2026-11-02, so `.33` would have failed the gate
+     from about 2026-11-16. Five security merges come in:
+     - `32bb3bf0bb` [modules] star exports are no longer cached into a linked
+       module's export table (crbug 574038247, CVE-2026-121057, High, type
+       confusion in V8);
+     - `0ae4806f48` [fastapi] an uncatchable termination exception thrown in a
+       fast API call that lazily deoptimizes its caller is no longer caught by
+       the caller's `try` (crbug 577627207);
+     - `0113334b37` [debug][wasm] a debugger break inside an optimized Wasm
+       frame is deferred to the next JS or Liftoff function (crbug 577352626,
+       CVE-2026-121137, High, type confusion in DevTools; reachable only with an
+       inspector session);
+     - `a78a00bf57` and `0ac55dd376` [scopes] private names in a class's
+       heritage eval and in catch scopes resolve past the inner class, also
+       after GC (crbug 576947634, 572988453, 573962535).
+
+     CVE-2026-121057 and CVE-2026-121137 are listed in Chrome 157.0.8103.38's
+     release notes. The other three bugs have no CVE yet. Chrome Extended Stable
+     156.0.8078.88 (2026-11-03) ships V8 15.6.75.36, so this pin is two merges
+     ahead of it. V8's `DEPS` and public headers did not change (only
+     `v8-version.h`). rusty_v8's embedder patches and the read-only heap guard
+     of `v156.0.0-denext.3` (item 218) are kept. The release's bindings differ
+     from `denext.3`'s only in V8's patch level and version string.
+     `Cargo.toml`'s rev is `3c8a725f`, the `crate` commit the release names, and
+     its `v8/include/v8-version.h` reads 15.6.75.38. `rusty_v8.sha256` holds the
+     release's `SHA256SUMS`. All 12 files were checked against it and against
+     their build-provenance attestations. rusty_v8's own suite passed on all six
+     targets in the release run (Brainwires/rusty_v8 run 41726295453).
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
 169-174, 176, 178, 180, 182-184, 186, 187, 189-191, 193-196, 198-203, 206, 207,
-209-215, 217, 218, 221, 222, 224, 225, 227, 228, 231, 232) are what the prebuilt
-`libdenort` carries. The CLI-side parts (for example writing
+209-215, 217, 218, 221, 222, 224, 225, 227, 228, 231, 232, 235) are what the
+prebuilt `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
 in the branch too, but a stock CLI does not run them; denext's own launcher
 provides that environment.
