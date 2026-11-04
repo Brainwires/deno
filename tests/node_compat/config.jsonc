@@ -4993,6 +4993,11 @@
     "sequential/test-fs-readdir-recursive.js": {},
     "sequential/test-fs-stat-sync-overflow.js": {},
     "sequential/test-fs-opendir-recursive.js": {},
+    "sequential/test-fs-watch.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, whose file watchers report events differently"
+    },
     "sequential/test-get-heapsnapshot-options.js": {
       "ignore": true,
       "reason": "Node.js snapshot/heap profiling features (--build-snapshot, --heap-prof, --heapsnapshot-near-heap-limit) are not implemented in Deno"
@@ -6151,6 +6156,11 @@
       "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
     },
     "parallel/test-vfs-real-provider-handle.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-vfs-real-provider-watch.js": {
       "darwin": false,
       "windows": false,
       "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"

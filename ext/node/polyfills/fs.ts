@@ -3033,8 +3033,14 @@ function writeSync(
     }
     return innerWriteSync(fd, buffer, offset, length, position);
   }
+  // Here the call signature is
+  // `fs.writeSync(fd, string[, position[, encoding]])`: as in Node's
+  // lib/fs.js, the third argument is the position and the fourth the encoding.
   validateStringAfterArrayBufferView(buffer, "buffer");
   validateEncoding(buffer, length);
+  if (offset === undefined) {
+    offset = null;
+  }
   {
     const h = vfsState.handlers;
     if (h !== null) {
@@ -3044,13 +3050,19 @@ function writeSync(
         bufAsBuffer,
         0,
         bufAsBuffer.length,
-        offset === undefined ? null : offset,
+        offset,
       );
       if (result !== undefined) return result;
     }
   }
   buffer = Buffer.from(buffer, length);
-  return innerWriteSync(fd, buffer, 0, buffer.length, position);
+  return innerWriteSync(
+    fd,
+    buffer,
+    0,
+    buffer.length,
+    offset as number | null,
+  );
 }
 
 /** Writes the buffer to the file of the given descriptor.
@@ -3168,7 +3180,8 @@ function write(
   // deno-lint-ignore deno-internal/prefer-primordials
   innerWrite(fd, buffer, 0, buffer.length, offset).then(
     (nwritten) => {
-      callback(null, nwritten, buffer);
+      // Node's callback gets the string that was passed, not its bytes.
+      callback(null, nwritten, str);
     },
     (err) => callback(fsCallError(err, "write")),
   );
@@ -4247,6 +4260,10 @@ function watch(
   }
 
   if (iterator) {
+    // Node's `persistent: false`: the watcher does not keep the process alive.
+    if (options?.persistent === false) {
+      iterator.unref();
+    }
     asyncIterableToCallback<Deno.FsEvent>(iterator, (val, done) => {
       if (done) return;
       // Node.js returns the relative path from the watched directory for
@@ -4335,6 +4352,11 @@ function watchPromise(
   const watcher = Deno.watchFs(watchPath, {
     recursive,
   });
+  // Node's `persistent: false`: a pending `next()` does not keep the process
+  // alive (lib/internal/fs/watchers.js starts the handle unref'd).
+  if (options?.persistent === false) {
+    watcher.unref();
+  }
   const resolvedWatchPath = realpathSync(watchPath) as string;
 
   let onAbort: (() => void) | null = null;
@@ -4532,6 +4554,10 @@ class StatWatcher extends EventEmitter {
   ) {
     if (persistent) {
       this.#refCount++;
+    } else {
+      // Node's StatWatcher start: `if (!persistent) this.unref()`, so the
+      // polling timer does not keep the process alive.
+      this.unref();
     }
 
     const bigint = this.#bigint;

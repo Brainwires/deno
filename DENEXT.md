@@ -10206,12 +10206,68 @@ where the changes are discussed.
      without the granted microphone), N/A on a WebKitGTK built without WebRTC;
      laufey's CI on `ff50802`.
 
+253. **`fix(ext/node)`: `fs.writeSync(fd, string, position)` writes at
+     `position`** (`fix/node-fs-papercuts`, runtime;
+     `ext/node/polyfills/fs.ts`). For a string, Node's
+     `fs.writeSync(fd, string[, position[, encoding]])` takes the position from
+     the third argument (`lib/fs.js` passes `offset` to `writeString`); Deno
+     took it from the fifth, which the string form never has, so every string
+     write went to the current file position (a VFS handler was already given
+     the third). `fs.write(fd, string, position, encoding, callback)` read the
+     position correctly but called back with the string's bytes instead of the
+     string, as Node's `wrapper` passes it; `filehandle.write(string)` now
+     resolves to `{ bytesWritten, buffer: string }` as in Node too. Tests: unit
+     `_fs/_fs_write_test.ts` (positioned, hex-encoded and `null`-position string
+     writes, sync and callback).
+
+254. **`fix(ext/node, runtime)`: a non-persistent watcher does not keep the
+     process alive** (`fix/node-fs-papercuts`, runtime;
+     `ext/node/polyfills/fs.ts`, `runtime/js/40_fs_events.js`).
+     `test-vfs-real-provider-watch.js` hung (item 244): its
+     `watchFile(path, { persistent: false })` went through `RealFSProvider`,
+     which (as Node's does) registers its own listener, so `unwatchFile` with
+     the caller's leaves the watcher running, and Deno's `StatWatcher` ignored
+     `persistent: false`, so its poll timer kept the loop alive; Node unrefs it
+     (`if (!persistent) this.unref()`). The same option was ignored by
+     `fs.watch()` and `fs.promises.watch()`: a pending poll held the process
+     open where Node's unref'd `FSEvent` handle does not, and the iterator's
+     pending `next()` now leaves the process free to exit, as in Node. And
+     `Deno.FsWatcher.unref()` only unref'd the poll in flight: the next poll,
+     started after the first event, was ref'd again; the watcher now remembers
+     it. Abort was already Node's (a pending `next()` rejects with
+     `AbortError`). Not done: `fs.promises.watch()` still validates its options
+     when called rather than on the first `next()` (Node's is an async
+     generator), which `test-fs-promises-watch.js` checks. Tests: unit
+     `_fs/_fs_watch_test.ts` (a child exits with a non-persistent
+     `promises.watch` pending, `fs.watch`, `watchFile`, and an unref'd
+     `fs.watch` after an event).
+
+255. **`test(node)`: the `node:fs` unit tests type-check together; two Node
+     tests on** (`fix/node-fs-papercuts`, tests only;
+     `tests/unit_node/_fs/_fs_read_test.ts`, `tests/node_compat/config.jsonc`).
+     `_fs_read_test.ts` still carried
+     `/// <reference types="npm:@types/node" />` from before Deno bundled
+     `@types/node`. Checked in one program with its neighbours
+     (`deno check --config tests/config/deno.json tests/unit_node/_fs/*_test.ts`),
+     that pulled DefinitelyTyped's latest `@types/node` over the bundled one,
+     whose `FileHandle` is not an `EventEmitter` ("TODO: Add `EventEmitter`
+     close"), so `_fs_handle_test.ts`'s `fileHandle.once("close")` failed with
+     TS2339, with a dozen other errors (`assert.CallTracker`,
+     `Http2Stream.respond`) in other files. Node's `FileHandle` is an
+     `EventEmitter`, as Deno's runtime class and bundled types have it, so the
+     reference goes and the test stays; every `tests/unit_node/*_test.ts` and
+     `_fs/*_test.ts` now checks together with no errors (before: TS2339 on
+     `once`). The per-file test harness was not affected. Node tests enabled
+     (three isolated runs each, Linux only until checked on macOS and Windows):
+     `test-vfs-real-provider-watch.js` (item 254) and
+     `sequential/test-fs-watch.js`.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
 169-174, 176, 178, 180, 182-184, 186, 187, 189-191, 193-196, 198-203, 206, 207,
 209-215, 217, 218, 221, 222, 224, 225, 227, 228, 231, 232, 235, 237, 240,
-243-245, 247-249) are what the prebuilt `libdenort` carries. The CLI-side parts
+243-245, 247-249, 253, 254) are what the prebuilt `libdenort` carries. The CLI-side parts
 (for example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged
 app's launchers) are in the branch too, but a stock CLI does not run them;
 denext's own launcher provides that environment.

@@ -25,6 +25,10 @@ class FsWatcher {
   #rid = 0;
   #promise;
   #closed = false;
+  // Whether a pending poll keeps the event loop alive. Kept across polls, so
+  // an unref'd watcher stays unref'd after its first event (node:fs's
+  // `persistent: false` and `watcher.unref()`).
+  #refed = true;
 
   constructor(paths, options) {
     // `recursive` defaults to true even when other options are provided, so
@@ -37,11 +41,17 @@ class FsWatcher {
   }
 
   unref() {
-    core.unrefOpPromise(this.#promise);
+    this.#refed = false;
+    if (this.#promise !== undefined) {
+      core.unrefOpPromise(this.#promise);
+    }
   }
 
   ref() {
-    core.refOpPromise(this.#promise);
+    this.#refed = true;
+    if (this.#promise !== undefined) {
+      core.refOpPromise(this.#promise);
+    }
   }
 
   async next() {
@@ -50,6 +60,9 @@ class FsWatcher {
     }
     try {
       this.#promise = op_fs_events_poll(this.#rid);
+      if (!this.#refed) {
+        core.unrefOpPromise(this.#promise);
+      }
       const value = await this.#promise;
       return value ? { value, done: false } : { value: undefined, done: true };
     } catch (error) {
