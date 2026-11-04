@@ -3740,6 +3740,196 @@
     "parallel/test-stream-inheritance.js": {},
     "parallel/test-stream-ispaused.js": {},
     "parallel/test-stream-iterator-helpers-test262-tests.mjs": {},
+    "parallel/test-stream-iter-share-from.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-stream-iter-share-sync.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-stream-iter-share-async.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-stream-iter-share-coverage.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-stream-iter-sharedarraybuffer.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-stream-iter-from-sync.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-stream-iter-from-writable-cache-options.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-stream-iter-from-async.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-stream-iter-from-coverage.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-stream-iter-broadcast-backpressure.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-stream-iter-broadcast-basic.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-stream-iter-broadcast-coverage.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-stream-iter-transform-compat.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-stream-iter-transform-coverage.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-stream-iter-transform-sync.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-stream-iter-transform-output.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-stream-iter-transform-roundtrip.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-stream-iter-to-readable.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-stream-iter-pipeto-writev.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-stream-iter-pipeto-edge.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-stream-iter-pipeto-signal.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-stream-iter-pipeto.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-stream-iter-pull-sync.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-stream-iter-pull-async.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-stream-iter-push-writer.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-stream-iter-push-basic.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-stream-iter-push-backpressure.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-stream-iter-validation.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-stream-iter-consumers-text.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-stream-iter-consumers-tap.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-stream-iter-consumers-merge.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-stream-iter-consumers-bytes.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-stream-iter-cross-realm.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-stream-iter-readable-interop.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-stream-iter-writable-interop.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-stream-iter-writable-from.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-stream-iter-duplex.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-stream-iter-namespace.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
     "parallel/test-stream-map.js": {},
     "parallel/test-stream-objectmode-undefined.js": {},
     "parallel/test-stream-once-readable-pipe.js": {},
@@ -5749,6 +5939,476 @@
       "linux": false,
       "darwin": false,
       "reason": "times out"
+    },
+    "parallel/test-vfs-link.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-vfs-fd.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-vfs-fs-accessSync.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-vfs-fs-mkdirSync.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-vfs-fs-mkdir-callback.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-vfs-fs-mkdtempSync.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-vfs-fs-chmodSync.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-vfs-fs-chmod-callback.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-vfs-fs-callback-error-paths.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-vfs-fs-createWriteStream.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-vfs-fs-createReadStream.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-vfs-fs-copyFileSync.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-vfs-fs-linkSync.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-vfs-fs-promises-stat-no-throw.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-vfs-fs-promises-buffer-encoding.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-vfs-fs-promises.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-vfs-fs-writeFile-callback.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-vfs-fs-writeFileSync.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-vfs-fs-watch-dispatch.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-vfs-fs-stat-callback.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-vfs-fs-statSync.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-vfs-fs-symlink-callback.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-vfs-fs-symlinkSync.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-vfs-fs-truncate-callback.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-vfs-fs-truncateSync.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-vfs-fs-readFileSync.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-vfs-fs-readFile-callback.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-vfs-fs-readdirSync.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-vfs-fs-realpathSync.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-vfs-fs-rename-callback.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-vfs-fs-renameSync.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-vfs-fs-rmSync.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-vfs-fs-opendir-callback.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-vfs-fs-opendirSync.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-vfs-fs-openSync.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-vfs-fs-openAsBlob.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-vfs-fs-open-callback.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-vfs-fs-fchmod-callback.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-vfs-fs-existsSync.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-vfs-file-handle.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-vfs-real-provider.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-vfs-real-provider-promises.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-vfs-real-provider-handle.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-vfs-readdir-symlink-recursive.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-vfs-readfile-flag.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-vfs-readfile-async.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-vfs-readfile-encoding.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-vfs-rename.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-vfs-rm-edge-cases.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-vfs-rmdir-symlink.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-vfs-router.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-vfs-access-modes.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-vfs-append-write.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-vfs-streams.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-vfs-stream-explicit-fd.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-vfs-stream-errors.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-vfs-stream-validation.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-vfs-stream-properties.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-vfs-stats-bigint.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-vfs-stats-helpers.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-vfs-stats-ino-dev.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-vfs-symlinks.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-vfs-callback-api.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-vfs-create.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-vfs-copyfile-mode.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-vfs-ctime-update.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-vfs-mkdtemp.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-vfs-mkdir.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-vfs-multi-mount.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-vfs-memory-provider-dynamic.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-vfs-memory-provider-flags.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-vfs-memory-provider.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-vfs-memory-file-handle.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-vfs-mount.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-vfs-mount-errors.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-vfs-write-options.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-vfs-watch-recursive.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-vfs-watch-abort-signal.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-vfs-watch-promises.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-vfs-watch-encoding.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-vfs-watch-directory.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-vfs-watchfile.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-vfs-watch.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-vfs-promises.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-vfs-promises-open.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-vfs-parent-timestamps.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-vfs-truncate-negative.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-vfs-hardlink-nlink.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-vfs-destructuring.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-vfs-dir-handle.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-vfs-utimes.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-vfs-bigint-position.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-vfs-virtual-provider.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-vfs-virtual-file-handle.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
     },
     "parallel/test-warn-sigprof.js": {
       "linux": false,
