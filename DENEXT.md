@@ -9704,6 +9704,29 @@ where the changes are discussed.
      `tag` and `warn` mode, on a branch, unknown, and with Chrome stable
      offline, all against canned file:// answers and a closed port.
 
+237. **`feat(node/crypto)`: `--seed` reaches `node:crypto`'s random paths**
+     (`feat/seed-node-crypto`; runtime; `ext/node_crypto/lib.rs`; upstream
+     #35718 phase 1; the number is a placeholder, renumbered at integration).
+     Under `--seed`, `deno_crypto` puts a seeded `StdRng` in the `OpState`, and
+     `Math.random`, `crypto.getRandomValues` and `crypto.randomUUID` (and
+     `node:crypto`'s `randomBytes`, which fills through `getRandomValues`)
+     repeat run to run. `node:crypto`'s own ops did not use it:
+     `op_node_fill_random` (`randomFillSync`), `op_node_fill_random_async`
+     (`randomFill`) and `op_node_random_int` (`randomInt`, sync and callback)
+     drew from `thread_rng()`, so a seeded program still varied there. They now
+     draw from the seeded `StdRng` when there is one, and from `thread_rng()`
+     otherwise, as before. The async fill takes its seeded bytes when it is
+     called, not when its blocking task runs, so fills started together get them
+     in call order. Key generation, signing, RSA padding and prime generation
+     keep the OS / thread RNG under `--seed` (a seeded key is a weak key), and
+     phase 2 (`--deterministic`: a default seed, `TZ=UTC`, a fixed default
+     locale) is not part of this item.
+
+     Tests: spec `run/seed_node_crypto` (`--seed=100`: `randomInt` with and
+     without `min` and a callback, `randomFillSync`, `randomFill`, two
+     concurrent `randomFill`s, then `getRandomValues` to show the shared
+     sequence; fails on the base, whose values change every run).
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
