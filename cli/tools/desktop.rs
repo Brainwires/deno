@@ -238,8 +238,10 @@ fn exact_media_capture_origin(entry: &str) -> Option<String> {
     return None;
   }
   let host = url.host_str().filter(|host| !host.is_empty())?;
-  if matches!(url.scheme(), "file" | "data" | "blob" | "about" | "javascript")
-  {
+  if matches!(
+    url.scheme(),
+    "file" | "data" | "blob" | "about" | "javascript"
+  ) {
     return None;
   }
   Some(match url.port() {
@@ -4220,7 +4222,8 @@ fn laufey_launch_config_json(
       ("camera", &media_capture.camera),
     ] {
       if !origins.is_empty() {
-        grant.insert(kind.to_string(), serde_json::Value::from(origins.clone()));
+        grant
+          .insert(kind.to_string(), serde_json::Value::from(origins.clone()));
       }
     }
     config.insert("mediaCapture".to_string(), serde_json::Value::Object(grant));
@@ -11184,17 +11187,16 @@ def456  other.zip
     );
     // Absent values are omitted; singleInstance and the bridge's origins
     // (DENEXT.md item 129) are always recorded.
-    let value: serde_json::Value = serde_json::from_str(
-      &laufey_launch_config_json(
+    let value: serde_json::Value =
+      serde_json::from_str(&laufey_launch_config_json(
         None,
         &[],
         &["app://localhost"],
         false,
         None,
         &Default::default(),
-      ),
-    )
-    .unwrap();
+      ))
+      .unwrap();
     assert_eq!(
       value,
       serde_json::json!({
@@ -11293,16 +11295,21 @@ def456  other.zip
     };
     let config = DesktopConfig {
       app: Some(deno_config::deno_json::DesktopAppConfig {
-        media_capture: Some(deno_config::deno_json::DesktopMediaCaptureConfig {
-          microphone: vec!["acme://app".to_string(), "*".to_string()],
-          camera: vec![],
-        }),
+        media_capture: Some(
+          deno_config::deno_json::DesktopMediaCaptureConfig {
+            microphone: vec!["acme://app".to_string(), "*".to_string()],
+            camera: vec![],
+          },
+        ),
         ..Default::default()
       }),
       ..Default::default()
     };
     apply_desktop_config_to_flags(&mut flags, config);
-    assert_eq!(flags.media_capture.microphone, vec!["acme://app".to_string()]);
+    assert_eq!(
+      flags.media_capture.microphone,
+      vec!["acme://app".to_string()]
+    );
     assert!(flags.media_capture.camera.is_empty());
   }
 
