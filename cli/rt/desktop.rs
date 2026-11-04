@@ -2190,9 +2190,10 @@ pub const DESKTOP_JS: &str = r#"
       configurable: true,
       enumerable: true,
     },
-    // Asks the OS to stop a session end it is waiting on, which it may not
-    // honour (laufey API 52). False when none is held, which includes one past
-    // laufey's deadline.
+    // Refuses the session end a listener held (laufey API 52): answers the
+    // OS's pending request with false, a request the OS may not honour, and
+    // returns true. False, with nothing sent, when none is held: a plain quit
+    // (never held), one already answered, or one past laufey's deadline.
     cancelQuit: {
       value: function cancelQuit() {
         if (!isSessionEndHeld()) return false;

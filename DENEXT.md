@@ -9933,15 +9933,66 @@ where the changes are discussed.
      Linux; the signing itself needs a Mac), and
      `media_capture_entitlements_are_a_valid_plist` (`plutil -lint`, macOS).
 
+260. **`feat(cli)`: `--seed` pins the time zone to UTC and the locale to en-US**
+     (`feat/denext10-hygiene`; runtime; `cli/lib/util/v8.rs`, `cli/lib.rs`,
+     `cli/rt/run.rs`; upstream #35718 phase 2). `--seed` is the fork's
+     deterministic mode (item 237 seeds the RNGs under it); phase 2 adds no
+     second flag. Under `--seed`, once the V8 platform (and ICU's data) is up
+     and before the main isolate exists, `TZ` is set to `UTC` in the process
+     environment (through `ProcessEnvGuard`, which re-reads libc's zone), ICU's
+     default zone to `UTC` directly (`v8::icu::set_default_time_zone`, since
+     ICU on Windows reads the OS's zone and ignores `TZ`) and ICU's default
+     locale to `en-US`. Whatever the host's `TZ`, `LC_ALL` or
+     `LANG` say, `Intl`'s resolved time zone and locale, `navigator.language`,
+     `Date.prototype.toString` (offset and zone name), `toLocaleString` and
+     number formatting come out the same; workers share the process-wide
+     settings, `Deno.env.get("TZ")` reads `UTC` and child processes inherit it.
+     A binary compiled with `--seed` does the same at startup. An explicit
+     `Intl` locale or `timeZone` argument still applies, and so does a later
+     `Deno.env.set("TZ", …)`. Without `--seed` nothing changes. Upstream's
+     sketch calls the mode `--deterministic`; here it is `--seed`.
+
+     Tests: spec `run/seed_tz_locale` (`TZ=Asia/Tokyo`, `LC_ALL`/`LANG`
+     `de_DE.UTF-8`: without `--seed` the host's zone and German formatting
+     (unix only, where ICU reads those variables); with `--seed=1` UTC and
+     en-US, in the main thread and in a worker; the `--seed` cases fail on the
+     base, which reports Tokyo and German).
+
+261. **`feat(desktop)`: a build-time warning for a `mediaCapture` origin that is
+     not the app's** (`feat/denext10-hygiene`; CLI; `cli/tools/desktop.rs`).
+     `desktop.app.mediaCapture` grants the microphone or camera without asking
+     (item 239, laufey API 53). `deno desktop` now warns, once per entry,
+     when a listed origin is not the app's own origin (`desktop.app.origin`,
+     else the project's `.deno-desktop/app.json` origin, else
+     `app://localhost`, as `desktop_bridge_origin` resolves it), e.g. a dev
+     server or a third-party page. It only warns: listing another origin is an
+     explicit opt-in, and the grant is still written to the launch file.
+
+     Tests: unit `media_capture_origins_other_than_the_app_origin_are_flagged`
+     (foreign origins of both kinds in config order, none for the app's own,
+     every entry against the default origin).
+
+262. **`docs(cli)`: two stale comments** (`feat/denext10-hygiene`; comments
+     only; `cli/tsc/tsconfig_gen.rs`, `cli/rt/desktop.rs`).
+     `BUILT_IN_TYPES_NODE_MARKER` now names where the built-in `@types/node`
+     goes (`<DENO_DIR>/npm_compat/<name>-<hash>/@types/node`), when (`deno
+     sync-types`, also run by the native check, finds no `@types/node` in
+     `node_modules`) and what reads the marker (`is_built_in_types_node`, for
+     the generated `@types/deno` and for keeping a complete copy), in place of
+     "the native type check reads". `Deno.desktop.cancelQuit`'s comment says
+     what it does: it answers the held session end with false and returns true,
+     and returns false with nothing sent for a plain quit, one already
+     answered, or one past laufey's deadline.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
 169-174, 176, 178, 180, 182-184, 186, 187, 189-191, 193-196, 198-203, 206, 207,
-209-215, 217, 218, 221, 222, 224, 225, 227, 228, 231, 232, 235, 237, 240) are
-what the prebuilt `libdenort` carries. The CLI-side parts (for example writing
-`LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
-in the branch too, but a stock CLI does not run them; denext's own launcher
-provides that environment.
+209-215, 217, 218, 221, 222, 224, 225, 227, 228, 231, 232, 235, 237, 240,
+260) are what the prebuilt `libdenort` carries. The CLI-side parts (for example
+writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's
+launchers) are in the branch too, but a stock CLI does not run them; denext's
+own launcher provides that environment.
 
 The laufey backend hosts are built from
 [Brainwires/laufey](https://github.com/Brainwires/laufey) branch

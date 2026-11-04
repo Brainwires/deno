@@ -966,6 +966,8 @@ pub fn main() {
     if waited_unconfigured_runtime.is_none() {
       init_v8(&flags);
     }
+    // After the platform (and ICU's data) is up, before the main isolate.
+    deno_lib::util::v8::apply_deterministic_environment(flags.seed);
     boot_phase("after init_v8");
 
     (

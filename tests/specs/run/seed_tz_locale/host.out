@@ -1,0 +1,7 @@
+timeZone: Asia/Tokyo
+locale: de-DE
+navigator.language: de-DE
+TZ: Asia/Tokyo
+toString: Thu Jan 01 1970 09:00:00 GMT+0900 (Japanische Normalzeit)
+toLocaleString: 1.1.1970, 09:00:00
+number: 1.234.567,891

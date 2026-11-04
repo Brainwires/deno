@@ -69,6 +69,10 @@ pub async fn desktop(
   let deno_dir_root = factory.deno_dir()?.root.clone();
 
   apply_desktop_config_to_flags(&mut desktop_flags, desktop_config);
+  warn_foreign_media_capture_origins(
+    &desktop_flags.media_capture,
+    &desktop_bridge_origin(cli_options)?,
+  );
 
   if all_targets {
     let targets = [
@@ -221,6 +225,44 @@ fn media_capture_origins(kind: &str, entries: Vec<String>) -> Vec<String> {
       origin
     })
     .collect()
+}
+
+/// The `desktop.app.mediaCapture` grants (kind, origin) whose origin is not
+/// the app's own `app_origin` (normalized, as [`desktop_bridge_origin`]
+/// returns it), in config order.
+fn foreign_media_capture_origins<'a>(
+  media_capture: &'a crate::args::DesktopMediaCapture,
+  app_origin: &str,
+) -> Vec<(&'static str, &'a str)> {
+  [
+    ("microphone", &media_capture.microphone),
+    ("camera", &media_capture.camera),
+  ]
+  .into_iter()
+  .flat_map(|(kind, origins)| {
+    origins
+      .iter()
+      .filter(|origin| origin.as_str() != app_origin)
+      .map(move |origin| (kind, origin.as_str()))
+  })
+  .collect()
+}
+
+/// Warns, at build time, for each `desktop.app.mediaCapture` origin that is
+/// not the app's own: such a page gets the microphone or camera without the
+/// user being asked. It stays granted (listing it is an explicit opt-in).
+fn warn_foreign_media_capture_origins(
+  media_capture: &crate::args::DesktopMediaCapture,
+  app_origin: &str,
+) {
+  for (kind, origin) in foreign_media_capture_origins(media_capture, app_origin)
+  {
+    log::warn!(
+      "desktop.app.mediaCapture.{kind} grants {origin}, which is not the \
+       app's own origin ({app_origin}): pages from it get the {kind} without \
+       asking"
+    );
+  }
 }
 
 /// `entry` as `scheme://host[:port]`, or `None` when it is anything else.
@@ -11491,6 +11533,41 @@ def456  other.zip
         "http://127.0.0.1:5173".to_string(),
         "https://example.com".to_string(),
       ]
+    );
+  }
+
+  #[test]
+  fn media_capture_origins_other_than_the_app_origin_are_flagged() {
+    let media_capture = crate::args::DesktopMediaCapture {
+      microphone: vec![
+        "acme://app".to_string(),
+        "https://meet.example.com".to_string(),
+      ],
+      camera: vec![
+        "http://127.0.0.1:5173".to_string(),
+        "acme://app".to_string(),
+      ],
+    };
+    assert_eq!(
+      foreign_media_capture_origins(&media_capture, "acme://app"),
+      vec![
+        ("microphone", "https://meet.example.com"),
+        ("camera", "http://127.0.0.1:5173"),
+      ]
+    );
+    // Only the app's own origin: nothing to warn about.
+    let own = crate::args::DesktopMediaCapture {
+      microphone: vec!["acme://app".to_string()],
+      camera: vec!["acme://app".to_string()],
+    };
+    assert!(foreign_media_capture_origins(&own, "acme://app").is_empty());
+    // With no `desktop.app.origin`, the app's origin is the runtime default.
+    assert_eq!(
+      foreign_media_capture_origins(
+        &own,
+        deno_lib::standalone::app_origin::DEFAULT_APP_ORIGIN
+      ),
+      vec![("microphone", "acme://app"), ("camera", "acme://app")]
     );
   }
 
