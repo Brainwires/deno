@@ -10045,15 +10045,51 @@ where the changes are discussed.
      `test-fs-access.js` (the `fs.promises` wrappers dropped the receiver, so
      the async stack lost `Object.access`), is fixed in item 245.
 
+246. **`fix(ext/node)`: `RealFSProvider` acts on a symlink itself, and takes a
+     root reached through one** (`fix/node-compat-r8-audit`, runtime;
+     `ext/node/polyfills/internal/vfs/providers/real.js`). From the audit of
+     item 245. Node 26.5.1's `RealFSProvider` resolved the last component of
+     every path, so `unlink`, `rmdir`, `rename` and `symlink` followed a symlink
+     there: removing or renaming a link removed or moved its target
+     (`fs.rmSync(dir, { recursive: true })` too, which unlinks the links it
+     finds, so it deleted the files they point at elsewhere under the root), and
+     a dangling link could not be removed (ENOENT). Those four now resolve only
+     the directories above the last component, which are still checked against
+     the root, as `lstat` and `readlink` did. And the containment check compared
+     `fs.realpath` results with the root as given, so a root reached through a
+     symlink (macOS's `/tmp` and `/var/folders` temporary directories) refused
+     every path under it: the root's own real path is now resolved on first use
+     (creating a provider touches no file) and kept, so a root replaced by a
+     symlink later does not move the check. Tests: unit
+     `tests/unit_node/vfs_test.ts` (rename, unlink, a dangling link, `rmSync` of
+     a directory holding a link and `fs.promises.unlink` on a mount leave the
+     target alone; a root through a symlink reads, writes, `realpath`s and still
+     refuses `..`).
+
+247. **`fix(ext/node)`: `node:zlib/iter` decompressors yield before inflating a
+     whole input chunk** (`fix/node-compat-r8-audit`, runtime;
+     `ext/node/polyfills/internal/streams/iter/transform.js`). From the audit of
+     item 244. Node 26.5.1's transforms looped the engine until one input chunk
+     was consumed, collecting every output buffer before the first yield, so a
+     small compressed chunk (a decompression bomb) was inflated in full into
+     memory before the consumer saw any of it or could stop, and the transforms
+     take no `maxOutputLength`. The async and sync transforms now hand each full
+     batch (64 KiB) to the consumer before the engine produces more, so memory
+     stays at about one batch and a consumer that counts bytes can stop early;
+     batch sizes are unchanged. Tests: unit
+     `tests/unit_node/stream_iter_test.ts` (64 MiB of output from gzip, Brotli,
+     Zstd and sync deflate grows memory by under 16 MiB at the first batch; 4
+     MiB round-trips through the batched path).
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
 169-174, 176, 178, 180, 182-184, 186, 187, 189-191, 193-196, 198-203, 206, 207,
 209-215, 217, 218, 221, 222, 224, 225, 227, 228, 231, 232, 235, 237, 240,
-244-246) are what the prebuilt `libdenort` carries. The CLI-side parts (for
-example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's
-launchers) are in the branch too, but a stock CLI does not run them; denext's
-own launcher provides that environment.
+244-246, 248, 249) are what the prebuilt `libdenort` carries. The CLI-side parts
+(for example writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged
+app's launchers) are in the branch too, but a stock CLI does not run them;
+denext's own launcher provides that environment.
 
 The laufey backend hosts are built from
 [Brainwires/laufey](https://github.com/Brainwires/laufey) branch
