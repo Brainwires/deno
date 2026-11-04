@@ -555,6 +555,13 @@ opt-level = 3
 [profile.dev.package.sha2]
 opt-level = 3
 
+# Argon2 (node:crypto, WebCrypto) at Node's test sizes is too slow on `debug`
+[profile.dev.package.argon2]
+opt-level = 3
+
+[profile.dev.package.blake2]
+opt-level = 3
+
 [profile.release.package.async-compression]
 opt-level = 3
 [profile.release.package.base64-simd]

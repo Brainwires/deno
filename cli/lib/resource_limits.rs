@@ -30,9 +30,17 @@
 //! - `--max-cpu-time` is a budget of process CPU time (user + system, every
 //!   thread: `getrusage(RUSAGE_SELF)` on Unix, `GetProcessTimes` on Windows),
 //!   counted from when the main worker is created; a watchdog thread samples
-//!   it every [`WATCHDOG_TICK`] and terminates execution when it is used up.
+//!   it and terminates execution when it is used up. It samples no more often
+//!   than it has to: the budget left can't run out sooner than that budget
+//!   spread over every CPU the process may use, so it sleeps for half of that
+//!   (at least [`WATCHDOG_TICK`], at most [`CPU_POLL_MAX`]).
 //! - `--max-time` is a wall-clock deadline from the same moment, idle time
-//!   included, enforced by the same watchdog.
+//!   included, enforced by the same watchdog, which sleeps until it.
+//!
+//! The watchdog has nothing to poll for `--max-memory` (the near-heap-limit
+//! callback wakes it), so an idle program limited by memory alone, or by a
+//! deadline, never wakes it before something happens: an idle server with
+//! limits stays asleep (it woke every [`WATCHDOG_TICK`] before).
 //!
 //! Termination unwinds a running program, and the CLI's (or `denort`'s) exit
 //! path then reports the limit ([`exit_if_exceeded`]). A program that isn't
@@ -65,6 +73,8 @@ use std::time::Instant;
 use deno_runtime::colors;
 use deno_runtime::deno_core::JsRuntime;
 use deno_runtime::deno_core::v8;
+use parking_lot::Condvar;
+use parking_lot::Mutex;
 
 /// Exit code of a program that reached `--max-memory`.
 pub const MEMORY_LIMIT_EXIT_CODE: i32 = 137;
@@ -73,8 +83,13 @@ pub const CPU_TIME_LIMIT_EXIT_CODE: i32 = 152;
 /// Exit code of a program that reached `--max-time`.
 pub const TIME_LIMIT_EXIT_CODE: i32 = 124;
 
-/// How often the watchdog samples the CPU time and the clock.
+/// The watchdog's shortest sleep: how often it samples a CPU budget that is
+/// nearly used up, and how often it looks during [`WATCHDOG_GRACE`].
 const WATCHDOG_TICK: Duration = Duration::from_millis(20);
+
+/// The watchdog's longest sleep while a CPU budget is set, however much of it
+/// is left.
+const CPU_POLL_MAX: Duration = Duration::from_secs(10);
 
 /// How long the watchdog lets a terminated program unwind and report the
 /// limit itself before ending the process.
@@ -172,6 +187,63 @@ static ACTIVE_ISOLATE: parking_lot::Mutex<Option<v8::IsolateHandle>> =
 /// The limits the watchdog was started with (it starts once per process).
 static WATCHDOG_LIMITS: OnceLock<ResourceLimits> = OnceLock::new();
 
+/// Whether the watchdog should look now rather than at the end of its sleep
+/// (a limit recorded outside it, or a disarm); cleared when it wakes.
+static WATCHDOG_WAKE: Mutex<bool> = Mutex::new(false);
+static WATCHDOG_WAKE_SIGNAL: Condvar = Condvar::new();
+
+/// Wakes the watchdog. Safe from V8's near-heap-limit callback: the lock is
+/// only ever held for a flag update.
+fn wake_watchdog() {
+  *WATCHDOG_WAKE.lock() = true;
+  WATCHDOG_WAKE_SIGNAL.notify_all();
+}
+
+/// Sleeps for `timeout` (`None`: until woken) or until [`wake_watchdog`],
+/// whichever comes first. A wake that came before the sleep is not lost.
+fn wait_for_watchdog(timeout: Option<Duration>) {
+  let mut woken = WATCHDOG_WAKE.lock();
+  if !*woken {
+    match timeout {
+      Some(timeout) => {
+        WATCHDOG_WAKE_SIGNAL.wait_for(&mut woken, timeout);
+      }
+      None => WATCHDOG_WAKE_SIGNAL.wait(&mut woken),
+    }
+  }
+  *woken = false;
+}
+
+/// How long the watchdog may sleep before it must look again; `None` when
+/// nothing but a wake can need it (`--max-memory` alone).
+///
+/// - after a limit is reached, [`WATCHDOG_TICK`] (the grace period);
+/// - with `--max-time`, until the deadline;
+/// - with `--max-cpu-time`, half of what the `cpu_remaining` budget lasts at
+///   full use of `parallelism` CPUs, within [`WATCHDOG_TICK`] and
+///   [`CPU_POLL_MAX`].
+fn next_wait(
+  now: Instant,
+  deadline: Option<Instant>,
+  cpu_remaining: Option<Duration>,
+  parallelism: u32,
+  reached: bool,
+) -> Option<Duration> {
+  if reached {
+    return Some(WATCHDOG_TICK);
+  }
+  let until_deadline =
+    deadline.map(|deadline| deadline.saturating_duration_since(now));
+  let cpu_wait = cpu_remaining.map(|remaining| {
+    (remaining / parallelism.max(1).saturating_mul(2))
+      .clamp(WATCHDOG_TICK, CPU_POLL_MAX)
+  });
+  match (until_deadline, cpu_wait) {
+    (Some(a), Some(b)) => Some(a.min(b)),
+    (a, b) => a.or(b),
+  }
+}
+
 /// The limit the program reached, if any.
 pub fn exceeded() -> Option<LimitKind> {
   LimitKind::from_u8(EXCEEDED.load(Ordering::SeqCst))
@@ -203,8 +275,13 @@ fn disarmed() -> bool {
 /// recorded it.
 fn trip(kind: LimitKind) -> bool {
   let recorded = record(&EXCEEDED, kind);
-  if recorded && let Some(handle) = ACTIVE_ISOLATE.lock().as_ref() {
-    handle.terminate_execution();
+  if recorded {
+    if let Some(handle) = ACTIVE_ISOLATE.lock().as_ref() {
+      handle.terminate_execution();
+    }
+    // The watchdog sleeps until woken when only `--max-memory` is set; it
+    // ends the process if the program doesn't unwind.
+    wake_watchdog();
   }
   recorded
 }
@@ -248,7 +325,12 @@ pub fn exit_if_exceeded() {
 /// `deno_runtime::ops::runtime` has checked that the caller is the main
 /// module of a compiled program, evaluating; nothing else calls it.
 pub fn disarm() -> bool {
-  record_disarm(&EXCEEDED)
+  let disarmed = record_disarm(&EXCEEDED);
+  if disarmed {
+    // Let the watchdog thread see it and end.
+    wake_watchdog();
+  }
+  disarmed
 }
 
 /// The near-heap-limit callback's new limit. Armed, reaching the limit
@@ -343,9 +425,23 @@ fn watchdog(
   deadline: Option<Instant>,
   cpu_budget: Option<(Duration, Duration)>,
 ) {
+  // CPU time grows at most this fast: one second a second per CPU the
+  // process may run on.
+  let parallelism = std::thread::available_parallelism()
+    .map(|n| u32::try_from(n.get()).unwrap_or(u32::MAX))
+    .unwrap_or(1);
   let mut reached_at: Option<Instant> = None;
   loop {
-    std::thread::sleep(WATCHDOG_TICK);
+    let cpu_remaining = cpu_budget.map(|(baseline, budget)| {
+      budget.saturating_sub(cpu_time_now().saturating_sub(baseline))
+    });
+    wait_for_watchdog(next_wait(
+      Instant::now(),
+      deadline,
+      cpu_remaining,
+      parallelism,
+      reached_at.is_some(),
+    ));
     if disarmed() {
       // `Deno.disarmResourceLimits()`: nothing is ended from here on.
       return;
@@ -431,6 +527,83 @@ mod tests {
     // any program out of heap.
     assert_eq!(next_heap_limit(4096 * MB, Some(4096 * MB), true), 4096 * MB);
     assert_eq!(next_heap_limit(64 * MB, None, true), 64 * MB);
+  }
+
+  #[test]
+  fn the_watchdog_sleeps_until_it_has_something_to_check() {
+    let now = Instant::now();
+    // `--max-memory` alone: nothing to poll, the callback wakes it.
+    assert_eq!(next_wait(now, None, None, 8, false), None);
+    // A limit reached: the grace period's ticks.
+    assert_eq!(next_wait(now, None, None, 8, true), Some(WATCHDOG_TICK));
+    // `--max-time`: until the deadline, and not past it.
+    let deadline = now + Duration::from_secs(3600);
+    assert_eq!(
+      next_wait(now, Some(deadline), None, 8, false),
+      Some(Duration::from_secs(3600))
+    );
+    assert_eq!(
+      next_wait(
+        deadline + Duration::from_secs(1),
+        Some(deadline),
+        None,
+        8,
+        false
+      ),
+      Some(Duration::ZERO)
+    );
+  }
+
+  #[test]
+  fn a_cpu_budget_is_sampled_before_it_can_run_out() {
+    let now = Instant::now();
+    // 8 CPUs can use 8 s of budget in 1 s: half of that.
+    assert_eq!(
+      next_wait(now, None, Some(Duration::from_secs(8)), 8, false),
+      Some(Duration::from_millis(500))
+    );
+    // A large budget: at most `CPU_POLL_MAX` between samples.
+    assert_eq!(
+      next_wait(now, None, Some(Duration::from_secs(3600)), 8, false),
+      Some(CPU_POLL_MAX)
+    );
+    // Nearly used up (or used up): every tick, as before.
+    assert_eq!(
+      next_wait(now, None, Some(Duration::from_millis(10)), 8, false),
+      Some(WATCHDOG_TICK)
+    );
+    assert_eq!(
+      next_wait(now, None, Some(Duration::ZERO), 0, false),
+      Some(WATCHDOG_TICK)
+    );
+    // With a deadline too, whichever comes first.
+    assert_eq!(
+      next_wait(
+        now,
+        Some(now + Duration::from_millis(200)),
+        Some(Duration::from_secs(8)),
+        8,
+        false
+      ),
+      Some(Duration::from_millis(200))
+    );
+  }
+
+  #[test]
+  fn a_wake_is_not_lost() {
+    // A wake before the sleep: the sleep returns at once (an hour would
+    // time the test out).
+    wake_watchdog();
+    let started = Instant::now();
+    wait_for_watchdog(Some(Duration::from_secs(3600)));
+    assert!(started.elapsed() < Duration::from_secs(60));
+    // A wake during an unbounded sleep ends it.
+    let waiter = std::thread::spawn(|| wait_for_watchdog(None));
+    while !waiter.is_finished() {
+      wake_watchdog();
+      std::thread::sleep(Duration::from_millis(5));
+    }
+    waiter.join().unwrap();
   }
 
   #[test]

@@ -10535,12 +10535,151 @@ where the changes are discussed.
      false"), Rust tests in `ext/pty/windows.rs` and
      `test_batch_file_command_line` in `subprocess_windows`.
 
+263. **`feat(ext/node)`: `crypto.argon2()` and `crypto.argon2Sync()`**
+     (`feat/node-crypto-argon2-idle`; runtime; `ext/node_crypto/argon2_kdf.rs`,
+     `ext/node/polyfills/internal/crypto/argon2.ts`,
+     `ext/node/polyfills/internal_binding/crypto.ts`,
+     `cli/tsc/dts/node/crypto.d.cts`). Node 24.7 added Argon2 (RFC 9106) to
+     `node:crypto`: `argon2(algorithm, parameters, callback)` and
+     `argon2Sync(algorithm, parameters)`, `algorithm` one of `argon2d`,
+     `argon2i`, `argon2id`, `parameters` `message`, `nonce`, `parallelism`,
+     `tagLength`, `memory`, `passes` and optionally `secret` and
+     `associatedData`. The fork had neither. `internal/crypto/argon2.ts` is Node
+     26's `lib/internal/crypto/argon2.js` (the same validators, error codes and
+     messages, the same defaults: an omitted `secret` / `associatedData` is
+     empty) over the same binding shape: `internalBinding('crypto')` now has
+     `Argon2Job`, `kCryptoJobAsync` / `kCryptoJobSync` and `kTypeArgon2d` / `-i`
+     / `-id`, and the job refuses an input over 2^31 - 1 bytes
+     (`ERR_OUT_OF_RANGE`, "pass is too large", as Node's binding does) and
+     reports whatever the KDF rejects as `Argon2 derivation failed`. The KDF is
+     the RustCrypto `argon2` crate the workspace already had (0.6.0-rc.8, used
+     by WebCrypto's Argon2); the async form copies its inputs and runs on the
+     blocking pool.
+     - **Memory bound:** the same as Node's: `memory` (KiB) at most 2^32 - 1 and
+       at least 8 x `parallelism`, `parallelism` at most 2^24 - 1, `tagLength`
+       at most 2^32 - 1. The working memory (`alloc_zeroed`) and the output
+       buffer (`try_reserve_exact`) are allocated fallibly, so a request the
+       machine cannot satisfy is an `Argon2 derivation failed` error, as
+       OpenSSL's failed allocation is in Node, not an abort of the process. Like
+       Node, a value within the bound but above the free memory is honoured
+       where the OS lets the allocation through (overcommit), and `passes` is
+       not capped.
+     - **Known difference:** the crate keeps associated data inline, at most 32
+       bytes; Node takes up to 2^32 - 1. A longer `associatedData` is an error
+       (`Argon2 derivation failed: associatedData longer than 32 bytes is
+       not supported`)
+       rather than a different key. WebCrypto's Argon2
+       (`ext/crypto/subtle_derive_bits.rs`) has the same limit.
+
+     Tests: unit_node `crypto/crypto_argon2_test.ts` (Node's known-answer
+     vectors, RFC 9106's and OpenSSL 3.2's, sync and async; every view type;
+     Node's range and type errors; the 32-byte `associatedData` limit); Rust
+     unit tests in `argon2_kdf.rs` (RFC 9106 vectors, the KDF's refusals, the
+     empty key); node_compat `parallel/test-crypto-argon2.js`, `-argon2-job.js`
+     and `pummel/test-crypto-argon2-nonblocking-constructor.js` now run instead
+     of skipping (three runs each through the runner, Linux x86_64 debug): they
+     skip below OpenSSL 3.2, and `process.versions.openssl` stays `3.0.7+quic`
+     (see `ext/node/polyfills/_process/process.ts`), so their config entries
+     preload `tests/node_compat/argon2_openssl_preload.mjs`, which reports 3.2
+     to those tests only. The first two fail on the base
+     (`crypto.argon2Sync is not
+     a function`,
+     `Argon2Job is not a constructor`). `-argon2-unsupported.js` is ignored (it
+     asserts `ERR_CRYPTO_ARGON2_NOT_SUPPORTED`, Node's error without Argon2).
+     `argon2` and `blake2` build at `opt-level = 3` in the `dev` profile
+     (`Cargo.toml`, as `sha2` does): the pummel test's 64 MiB x 20-pass
+     derivations took over the runner's 10 s timeout unoptimized, and 1.5 s with
+     it.
+
+264. **`perf(cli)`: an idle program under resource limits stays asleep; the idle
+     wake-up audit** (`feat/node-crypto-argon2-idle`; CLI and runtime (`denort`
+     applies the limits too); `cli/lib/resource_limits.rs`). Bun 1.4.3 found an
+     idle server woken every second by a GC timer, so this measured what wakes
+     the fork's own idle server.
+
+     **Method.** biscuits (8 vCPU EPYC-Milan KVM, 15 GB), this branch's debug
+     `deno` (wake-ups do not depend on the optimization level; CPU time does,
+     and was 0-10 ms per window either way), a hello-world `Deno.serve`
+     (`deno run`) and the same as `deno serve` (`export default { fetch }`). Per
+     run: 5 s after `Listening`, a 60 s window with no request; one request, 5
+     s, a 60 s window; 1,000 requests, 5 s, a 60 s window. Wake-ups are the
+     process's context switches (voluntary + involuntary, per thread, from
+     `/proc/<pid>/task/*/status`), CPU from `/proc/<pid>/stat`. A second script
+     sampled the switches every 10 s for 120 s right after 1,000 requests, to
+     see the tail of the load.
+
+     **Before** (base `93a7f77c2e` plus item 263, which touches no timer):
+
+     | program                 | no request                       | after 1 request | after 1,000 requests |
+     | ----------------------- | -------------------------------- | --------------- | -------------------- |
+     | `deno run` `Deno.serve` | 3 / 60 s (0.05/s), 0 ms          | 0               | 0                    |
+     | `deno serve`            | 3 / 60 s, 0 ms                   | 0               | settles (below)      |
+     | `--unstable-idle-trim`  | 9 / 60 s, 0 ms                   | 0               | 0                    |
+     | `--max-memory=384m`     | **2,977 / 60 s (49.6/s), 90 ms** | 49.5/s, 100 ms  | 49.8/s, 120 ms       |
+     | `--max-cpu-time=3600`   | **49.5/s, 120 ms**               | 49.7/s, 140 ms  | 49.7/s, 150 ms       |
+
+     Stock Deno 2.9.6 on the same machine: 3 / 60 s, then 0 and 0.
+
+     **What wakes, and how often:**
+     - **The resource-limit watchdog** (`deno-resource-limits` thread, item for
+       `--max-memory` / `--max-cpu-time` / `--max-time`): a
+       `thread::sleep(20 ms)` loop, 50 wake-ups a second for the life of any
+       program given any of the three limits, idle or not, including
+       `--max-memory` alone, which it never needs to poll. denext's
+       `start: { limits }` sets these on every production server. **Fixed**
+       (below).
+     - **V8 platform delayed tasks** (the memory reducer, GC finalization; the
+       fork's `DenoPlatformImpl` turns each into a one-shot tokio sleep): the 3
+       switches in the first minute after start-up and the tail after load,
+       which is over within 10 s (per 10 s after 1,000 requests: 6, then 0 for
+       the next 110 s). One-shot, not periodic: nothing to fix.
+     - **The idle trim** (item 104, `--unstable-idle-trim`): one-shot per idle
+       period, armed only by activity (per 10 s after 1,000 requests: 48 (the
+       trim's GC on the V8 worker threads), then 0). Nothing to fix.
+     - **The HTTP server**: no date-header timer (hyper's date cache is
+       refreshed when a response is written, not on a timer), no keep-alive
+       sweeper while no connection is open: 0 wake-ups.
+     - **Inspector, telemetry, the module / code cache**: the inspector runs
+       only under `--inspect*`; the OpenTelemetry periodic reader
+       (`ext/telemetry`, `tokio::time::interval`) only with OTEL enabled; the
+       caches write when a module loads, with no flush timer. None ran in these
+       programs.
+
+     **The fix.** The watchdog sleeps until it has something to check: with
+     `--max-memory` alone, until the near-heap-limit callback (which records the
+     limit) or a disarm wakes it (a `parking_lot` condvar; a wake before the
+     sleep is kept); with `--max-time`, until the deadline; with
+     `--max-cpu-time`, for half of what the budget left lasts at full use of
+     every CPU the process may use (`available_parallelism`), at least 20 ms and
+     at most 10 s, so the budget is still sampled at least once a tick before it
+     can run out (the documented overshoot of up to a tick holds); after a limit
+     is reached, every 20 ms through the grace period, as before. The limits'
+     behaviour, exit codes and messages are unchanged.
+
+     **After:**
+
+     | program                 | no request                                       | after 1 request | after 1,000 requests |
+     | ----------------------- | ------------------------------------------------ | --------------- | -------------------- |
+     | `--max-memory=384m`     | 3 / 60 s (0.05/s), 10 ms                         | 3 / 60 s, 0 ms  | 2 / 60 s, 0 ms       |
+     | `--max-cpu-time=3600`   | 9 / 60 s (6 from the watchdog, every 10 s), 0 ms | 6 / 60 s        | 6 / 60 s             |
+     | `--max-time=86400`      | 3 / 60 s, 10 ms                                  | 0               | 4 / 60 s             |
+     | `deno run` `Deno.serve` | 3 / 60 s                                         | 0               | 4 / 60 s             |
+
+     Tests: unit tests in `resource_limits.rs`
+     (`the_watchdog_sleeps_until_it_has_something_to_check`: `--max-memory`
+     alone has no poll interval, `--max-time` sleeps to the deadline;
+     `a_cpu_budget_is_sampled_before_it_can_run_out`; `a_wake_is_not_lost`); the
+     `run/resource_limits` specs pass unchanged (the limits still end busy and
+     idle programs; `compile/resource_limits`, which covers the disarm, was not
+     run locally).
+
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
 169-174, 176, 178, 180, 182-184, 186, 187, 189-191, 193-196, 198-203, 206, 207,
 209-215, 217, 218, 221, 222, 224, 225, 227, 228, 231, 232, 235, 237, 240,
-243-245, 247-249, 253, 254, 256-260, 262) are what the prebuilt `libdenort` carries.
+243-245, 247-249, 253, 254, 256-260, 262-264) are what the prebuilt `libdenort` carries.
 The CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` /
 `LAUFEY_APP_ID` into a packaged app's launchers) are in the branch too, but a
 stock CLI does not run them; denext's own launcher provides that environment.

@@ -286,6 +286,8 @@ const lazyNodeModules = {
   "vm": () => core.loadExtScript("ext:deno_node/vm.js").default,
   "internal/assert/myers_diff": () =>
     core.loadExtScript("ext:deno_node/internal/assert/myers_diff.js").default,
+  "internal/crypto/argon2": () =>
+    core.loadExtScript("ext:deno_node/internal/crypto/argon2.ts").default,
   "internal/crypto/certificate": () =>
     core.loadExtScript("ext:deno_node/internal/crypto/certificate.ts").default,
   "internal/crypto/diffiehellman": () =>
