@@ -6,9 +6,10 @@
 //! `Deno.Command` does it (`deno_process::prepare_run`: `--allow-run` and
 //! its allow-list, the `LD_*` / `DYLD_*` rule, an embedded program's hash).
 //! Unix opens a pty pair and gives the child the slave as its controlling
-//! terminal (`unix.rs`); Windows a ConPTY (`windows.rs`). The master is one
-//! resource, read by `readable` and written by `writable`; the child is
-//! another, waited on by `status` and the only thing `kill` can reach. The
+//! terminal (`unix.rs`); Windows a ConPTY (`windows.rs`), not reachable yet
+//! (`WINDOWS_CONPTY_ENABLED`: a Windows spawn is `NotSupported`). The master
+//! is one resource, read by `readable` and written by `writable`; the child
+//! is another, waited on by `status` and the only thing `kill` can reach. The
 //! JavaScript side is `01_pty.js`.
 
 use std::borrow::Cow;
@@ -40,6 +41,19 @@ use unix as platform;
 mod windows;
 #[cfg(windows)]
 use windows as platform;
+
+/// Whether `Deno.openPty` reaches the ConPTY in `windows.rs`. Off in
+/// 3.0.0-denext.11: on CI the child's output never arrived and the dispose
+/// test hung (DENEXT.md item 259, "Windows"), so every Windows spawn is a
+/// `NotSupported` error until that work is finished. The ConPTY code stays
+/// compiled (and its Rust tests run) so finishing it is flipping this.
+#[cfg(windows)]
+const WINDOWS_CONPTY_ENABLED: bool = false;
+
+/// The error every Windows spawn gets while `WINDOWS_CONPTY_ENABLED` is off.
+#[cfg(windows)]
+const WINDOWS_NOT_SUPPORTED: &str =
+  "PTY support on Windows is not available yet";
 
 deno_core::extension!(
   deno_pty,
@@ -242,6 +256,10 @@ fn op_pty_spawn(
   #[serde] args: SpawnArgs,
   #[string] api_name: String,
 ) -> Result<Spawned, PtyError> {
+  #[cfg(windows)]
+  if !WINDOWS_CONPTY_ENABLED {
+    return Err(PtyError::NotSupported(WINDOWS_NOT_SUPPORTED.to_string()));
+  }
   // The child is handed fds 0-2 (the slave), nothing above: an embedded
   // program's verified handle is numbered from 3 (DENEXT.md item 232).
   let run = deno_process::prepare_run(

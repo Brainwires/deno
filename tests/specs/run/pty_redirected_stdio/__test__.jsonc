@@ -3,7 +3,11 @@
   // on a pseudo-terminal still writes to the terminal, never to that pipe.
   // Windows: a ConPTY child given no standard handles can pick up the
   // parent's redirected ones instead.
+  // TODO(denext): ignored while the runtime's pty is not available on Windows
+  // (3.0.0-denext.11: `Deno.openPty` throws NotSupported there); turn it back
+  // on with the ConPTY work (DENEXT.md item 259).
   "if": "windows",
+  "ignore": true,
   "args": "run --allow-run main.ts",
   "output": "main.out"
 }

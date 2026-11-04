@@ -4268,7 +4268,8 @@ declare namespace Deno {
      * {@linkcode Deno.ChildProcess.pty} (see {@linkcode Deno.openPty}, the
      * underlying API). Only `spawn()` takes it; setting `stdin`, `stdout`,
      * `stderr`, `uid`, `gid`, `detached` or `windowsRawArguments` with it
-     * throws. Requires `--allow-run` for the command, as without it. */
+     * throws. Requires `--allow-run` for the command, as without it. Not
+     * supported on Windows yet ({@linkcode Deno.errors.NotSupported}). */
     pty?: { cols: number; rows: number };
   }
 

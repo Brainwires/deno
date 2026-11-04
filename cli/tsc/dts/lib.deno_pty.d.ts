@@ -106,8 +106,8 @@ declare namespace Deno {
    * {@linkcode Deno.ChildProcess.pty} is its `readable`, `writable` and
    * `resize`.
    *
-   * On Windows the terminal is a ConPTY (Windows 10 version 1809 or later;
-   * an older Windows gets a `NotSupported` error).
+   * Windows is not supported yet: there, `Deno.openPty` and `Deno.Command`
+   * with `pty` throw {@linkcode Deno.errors.NotSupported}.
    *
    * @tags allow-run
    * @category Subprocess */

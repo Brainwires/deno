@@ -2,7 +2,11 @@
 
 // `Deno.openPty` and `Deno.Command` with `pty` (DENEXT.md items 259 and
 // 260). Every test here fails on a build without the API (`Deno.openPty is
-// not a function`); the Windows cases run only where ConPTY is.
+// not a function`). On Windows the pty is not available yet (3.0.0-denext.11):
+// every spawn there throws `NotSupported` (`ptyIsNotSupportedOnWindows`), and
+// the tests that spawn are ignored.
+// TODO(denext): run the Windows cases again (the `isWindows` branches below
+// are kept for that) once the ConPTY work is finished (DENEXT.md item 259).
 
 import {
   assert,
@@ -64,7 +68,7 @@ async function write(pty: Deno.Pty, text: string) {
 }
 
 Deno.test(
-  { permissions: { run: true, read: true } },
+  { permissions: { run: true, read: true }, ignore: isWindows },
   async function ptyEchoRoundTrip() {
     const pty = Deno.openPty({
       cmd: shell,
@@ -140,7 +144,7 @@ Deno.test(
 );
 
 Deno.test(
-  { permissions: { run: true, read: true } },
+  { permissions: { run: true, read: true }, ignore: isWindows },
   function ptyResizeRejectsBadSizes() {
     const pty = Deno.openPty({
       cmd: shell,
@@ -156,7 +160,7 @@ Deno.test(
 );
 
 Deno.test(
-  { permissions: { run: true, read: true } },
+  { permissions: { run: true, read: true }, ignore: isWindows },
   async function ptyExitCode() {
     const pty = Deno.openPty({
       cmd: shell,
@@ -289,7 +293,7 @@ Deno.test(
 );
 
 Deno.test(
-  { permissions: { run: true, read: true } },
+  { permissions: { run: true, read: true }, ignore: isWindows },
   async function ptyAsyncDispose() {
     let status: Deno.CommandStatus | undefined;
     {
@@ -314,7 +318,7 @@ Deno.test(
 );
 
 Deno.test(
-  { permissions: { run: true, read: true } },
+  { permissions: { run: true, read: true }, ignore: isWindows },
   async function ptyReadableEndsWhenTheChildExits() {
     const pty = Deno.openPty({
       cmd: shell,
@@ -331,7 +335,7 @@ Deno.test(
 );
 
 Deno.test(
-  { permissions: { run: false, read: true } },
+  { permissions: { run: false, read: true }, ignore: isWindows },
   function ptyRequiresRunPermission() {
     assertThrows(
       () =>
@@ -404,7 +408,7 @@ Deno.test(
 );
 
 Deno.test(
-  { permissions: { run: true, read: true } },
+  { permissions: { run: true, read: true }, ignore: isWindows },
   function ptyMissingProgram() {
     assertThrows(
       () =>
@@ -442,7 +446,7 @@ Deno.test(
 );
 
 Deno.test(
-  { permissions: { run: true, read: true } },
+  { permissions: { run: true, read: true }, ignore: isWindows },
   function ptyRefusesNulInArguments() {
     // a NUL would end a Windows command line there, dropping what follows
     assertThrows(
@@ -459,8 +463,11 @@ Deno.test(
   },
 );
 
+// TODO(denext): Windows-only, ignored while the pty is not available there;
+// turn it back on (`ignore: !isWindows`) with the ConPTY work (DENEXT.md item
+// 259).
 Deno.test(
-  { permissions: { run: true, read: true, write: true }, ignore: !isWindows },
+  { permissions: { run: true, read: true, write: true }, ignore: true },
   async function ptyBatchFileArgumentsCannotRunCommands() {
     // A `.bat` runs through cmd.exe: its arguments are escaped against cmd's
     // own parsing, as Deno.Command does it (BatBadBut), so a quote in one
@@ -483,10 +490,39 @@ Deno.test(
   },
 );
 
+Deno.test(
+  { permissions: { run: true, read: true }, ignore: !isWindows },
+  function ptyIsNotSupportedOnWindows() {
+    // the ConPTY child's output never arrived and a dispose hung on CI, so
+    // Windows has no pty in 3.0.0-denext.11 (DENEXT.md item 259)
+    const message = "PTY support on Windows is not available yet";
+    assertThrows(
+      () =>
+        Deno.openPty({
+          cmd: shell,
+          args: shellArgs("echo no"),
+          cols: 80,
+          rows: 24,
+        }),
+      Deno.errors.NotSupported,
+      message,
+    );
+    assertThrows(
+      () =>
+        new Deno.Command(shell, {
+          args: shellArgs("echo no"),
+          pty: { cols: 80, rows: 24 },
+        }).spawn(),
+      Deno.errors.NotSupported,
+      message,
+    );
+  },
+);
+
 // `Deno.Command` with `pty` (item 260): thin sugar over the same spawn.
 
 Deno.test(
-  { permissions: { run: true, read: true } },
+  { permissions: { run: true, read: true }, ignore: isWindows },
   async function commandPtySpawnsOnATerminal() {
     const child = new Deno.Command(shell, {
       args: shellArgs(
@@ -577,7 +613,7 @@ Deno.test(
 );
 
 Deno.test(
-  { permissions: { run: false, read: true } },
+  { permissions: { run: false, read: true }, ignore: isWindows },
   function commandPtyRequiresRunPermission() {
     assertThrows(
       () =>

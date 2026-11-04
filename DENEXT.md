@@ -10370,21 +10370,73 @@ where the changes are discussed.
        end-of-file. `resize` is `TIOCSWINSZ` on the master (the foreground
        process gets `SIGWINCH`). The slave is closed in the parent right after
        the spawn.
-     - **Windows** (`windows.rs`): ConPTY. `CreatePseudoConsole` /
-       `ResizePseudoConsole` / `ClosePseudoConsole` are looked up in kernel32 at
-       run time, so a Windows without them (before 10 1809) gets a
-       `NotSupported` error, not a binary that fails to load. Two named pipes
-       opened overlapped on this side (tokio's `NamedPipeServer`), the
-       synchronous ends to the console, which keeps its own references; the
-       child by `CreateProcessW` with `PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE`
-       (`bInheritHandles = FALSE`: nothing else of this process reaches it),
-       `std`'s argument quoting, the environment block sorted; waited on with
-       `RegisterWaitForSingleObject` (the thread pool, no thread of ours);
-       `kill` is `TerminateProcess` for any signal but `0`. The console is
-       closed once the child has exited, on a thread of its own because
-       `ClosePseudoConsole` waits for conhost to drain the output this thread
-       reads; the output pipe's end-of-file follows. `.bat` / `.cmd` files are
-       not wrapped in `cmd.exe` (run `cmd /c` yourself).
+     - **Windows: not supported in 3.0.0-denext.11.** `Deno.openPty`,
+       `Deno.Command` with `pty` and the `node-pty` shim's `spawn` throw
+       `Deno.errors.NotSupported` ("PTY support on Windows is not available
+       yet") on Windows, before the permission check, from `op_pty_spawn`
+       (`WINDOWS_CONPTY_ENABLED = false` in `ext/pty/lib.rs`). The ConPTY work
+       below is unfinished: on the release's full test round (Brainwires/deno
+       run 41850247185) the echo round trip read nothing on windows-2022 x64 and
+       windows-11-arm, `ptyAsyncDispose` hung until the run timed out on x64,
+       the children on arm exited with `0xC0000142` (`STATUS_DLL_INIT_FAILED`)
+       instead of their own code, and the spec `run/pty_redirected_stdio` saw no
+       output. `windows.rs` stays compiled (and its Rust tests run) but
+       unreachable; finishing it is fixing the causes under "ConPTY diagnosis"
+       and flipping that constant. The Windows unit tests are one test,
+       `ptyIsNotSupportedOnWindows`; the Windows-only
+       `ptyBatchFileArgumentsCannotRunCommands` and `run/pty_redirected_stdio`
+       are ignored with a `TODO(denext)`.
+     - **ConPTY diagnosis** (from the CI logs; not yet confirmed on a Windows
+       machine, and not fixed):
+       1. Most likely, the cause of all of it: `AttributeList::new` hands
+          `UpdateProcThreadAttribute` a pointer to its local copy of the `HPCON`
+          (`&mut hpc`) as the value of `PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE`.
+          That attribute's value is the `HPCON` itself (Microsoft's sample
+          passes `hpc`, as portable-pty does): the attribute list stores the
+          pointer, not what it points to, so `CreateProcessW` later reads a
+          stack slot that `new` has returned from. The child is then attached to
+          whatever that garbage names instead of the pseudoconsole: on x64 it
+          ran (the exit code `42` test passed) but its output never reached the
+          pipe; on arm the console attach failed during process start, the
+          `0xC0000142` exit (`-1073741502` in the log) of `ptyExitCode`. Fix:
+          pass `hpc as *mut c_void`, and keep the `HPCON` alive (it is, in the
+          `PseudoConsole`) until `CreateProcessW` returns.
+       2. The dispose hang follows from 1 plus the design: the output pipe
+          reaches end-of-file only when conhost closes it, which is
+          `ClosePseudoConsole`, which runs only once the child has exited. The
+          test's child is `cmd /c pause`, which never saw a key or wrote
+          "Press"; `readUntil(pty.readable, "Press")` inside the `await using`
+          block waited forever, before dispose was reached. Even with 1 fixed,
+          any read of a child that neither writes nor exits waits until
+          something kills it; that is the terminal's meaning, but the test
+          should not depend on output to reach dispose.
+       3. To check once 1 is fixed: `STARTF_USESTDHANDLES` with null standard
+          handles (item 262's M2) may leave the child with null `GetStdHandle`
+          values rather than the console's, which would also produce empty
+          output; Windows Terminal's ConPTY launch is the reference. And the
+          order of the close: `ClosePseudoConsole` before Windows 11 24H2 blocks
+          until its output is read, so the reader must keep draining (or be
+          closed) while the close thread waits.
+       4. Unlikely: the overlapped server ends under tokio's `NamedPipeServer`
+          (the client end connected by `CreateFileW` before any
+          `ConnectNamedPipe`, which is legal) and the thread-pool wait
+          (`ptyExitCode`'s status did arrive, so the wait works).
+     - **Windows (unfinished, not reachable in 3.0.0-denext.11)**
+       (`windows.rs`): ConPTY. `CreatePseudoConsole` / `ResizePseudoConsole` /
+       `ClosePseudoConsole` are looked up in kernel32 at run time, so a Windows
+       without them (before 10 1809) gets a `NotSupported` error, not a binary
+       that fails to load. Two named pipes opened overlapped on this side
+       (tokio's `NamedPipeServer`), the synchronous ends to the console, which
+       keeps its own references; the child by `CreateProcessW` with
+       `PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE` (`bInheritHandles = FALSE`: nothing
+       else of this process reaches it), `std`'s argument quoting, the
+       environment block sorted; waited on with `RegisterWaitForSingleObject`
+       (the thread pool, no thread of ours); `kill` is `TerminateProcess` for
+       any signal but `0`. The console is closed once the child has exited, on a
+       thread of its own because `ClosePseudoConsole` waits for conhost to drain
+       the output this thread reads; the output pipe's end-of-file follows.
+       `.bat` / `.cmd` files are not wrapped in `cmd.exe` (run `cmd /c`
+       yourself).
      - **Resources.** The master is one resource (`pty`) serving `readable` and
        `writable`; the child another (`ptyChild`) that `status`' wait removes
        once it is reaped. `readable` closes the master when it ends or is
@@ -10415,9 +10467,9 @@ where the changes are discussed.
        survives), env / cwd / `clearEnv`, dispose, `readable` ending with the
        child, `--allow-run` denied, `--allow-run=sh` allowing only `sh`,
        `LD_PRELOAD` refused under an allow-list, a missing program, option
-       validation); the Windows cases (echo, exit code, dispose, permissions,
-       `Deno.Command`) run where ConPTY is, the Unix-only ones are `ignore`d
-       there. Every test fails on a build without the API
+       validation); on Windows only `ptyIsNotSupportedOnWindows` (and the
+       option-validation tests, which never reach a spawn) run, every test that
+       spawns is `ignore`d there. Every test fails on a build without the API
        (`Deno.openPty is not a function`).
 
 260. **`feat(process)`: `Deno.Command` with `pty: { cols, rows }`**
@@ -10434,7 +10486,8 @@ where the changes are discussed.
      `stderr`, `uid`, `gid`, `detached`, `windowsRawArguments` or the internal
      `input` with `pty` is a `TypeError`; `output()` / `outputSync()` refuse it
      (use `spawn()`); `child.pty` on a child spawned without it throws. The same
-     `check_run`. Tests in `tests/unit/pty_test.ts` (`commandPty*`).
+     `check_run`. Windows: `NotSupported` in 3.0.0-denext.11, as item 259. Tests
+     in `tests/unit/pty_test.ts` (`commandPty*`).
 
 261. **`feat(ext/node)`: `node-pty` over `Deno.openPty`** (behavior change for
      projects that depend on node-pty; `feat/deno-pty`,
@@ -10489,7 +10542,9 @@ where the changes are discussed.
        `tests/registry/npm/node-pty/`, a 1 KB stand-in tarball with the real
        package's entry and install scripts and its `registry.json`, the real
        tarball being 15 MB; through a node_modules install and the global
-       cache). Unix only: they drive `sh`.
+       cache). Unix only: they drive `sh`. Windows: `spawn` throws item 259's
+       `NotSupported` in 3.0.0-denext.11 (spec `node/node_pty_override`'s
+       `windows_not_supported`).
 
 262. **`fix(pty)`: audit fixes for `Deno.openPty`, `Deno.Command { pty }` and
      the `node-pty` shim** (`fix/deno-pty-audit`, runtime; `ext/pty/windows.rs`,
@@ -10520,20 +10575,23 @@ where the changes are discussed.
        instead of once the child has exited (a child ignoring SIGHUP kept it
        open).
 
-     Known limits, left open: `ClosePseudoConsole` runs on a detached thread
-     that blocks until conhost's output is drained, so a pty handle neither read
-     nor closed parks one thread until exit (Windows); `[Symbol.asyncDispose]`
-     of `Deno.openPty` and `Deno.Command { pty }` signals once and awaits
-     `status`, so a child that ignores the signal hangs the `await using`, as
-     with `Deno.Command`; and `cols` / `rows` take up to 65535 (ConPTY clamps to
-     32767), so an app passing a remote client's size lets that client make
-     conhost or the child allocate a 32767x32767 screen, as with node-pty.
-     Tests: unit `ptyRefusesNulInArguments`,
-     `ptyBatchFileArgumentsCannotRunCommands` (Windows), spec
-     `run/pty_redirected_stdio` (Windows), spec `node/node_pty_override`'s
-     `destroy_closes_the_terminal` (before: "closed before the child exited:
-     false"), Rust tests in `ext/pty/windows.rs` and
-     `test_batch_file_command_line` in `subprocess_windows`.
+     The Windows fixes (H1, M1, M2) are in `windows.rs`, which is not reachable
+     in 3.0.0-denext.11 (item 259: Windows is `NotSupported`); they stay for the
+     finished ConPTY. Known limits, left open: `ClosePseudoConsole` runs on a
+     detached thread that blocks until conhost's output is drained, so a pty
+     handle neither read nor closed parks one thread until exit (Windows);
+     `[Symbol.asyncDispose]` of `Deno.openPty` and `Deno.Command { pty }`
+     signals once and awaits `status`, so a child that ignores the signal hangs
+     the `await using`, as with `Deno.Command`; and `cols` / `rows` take up to
+     65535 (ConPTY clamps to 32767), so an app passing a remote client's size
+     lets that client make conhost or the child allocate a 32767x32767 screen,
+     as with node-pty. Tests: unit `ptyRefusesNulInArguments`,
+     `ptyBatchFileArgumentsCannotRunCommands` (Windows; ignored while Windows is
+     `NotSupported`), spec `run/pty_redirected_stdio` (Windows; ignored
+     likewise), spec `node/node_pty_override`'s `destroy_closes_the_terminal`
+     (before: "closed before the child exited: false"), Rust tests in
+     `ext/pty/windows.rs` and `test_batch_file_command_line` in
+     `subprocess_windows`.
 
 263. **`feat(ext/node)`: `crypto.argon2()` and `crypto.argon2Sync()`**
      (`feat/node-crypto-argon2-idle`; runtime; `ext/node_crypto/argon2_kdf.rs`,
