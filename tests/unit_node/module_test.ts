@@ -783,15 +783,16 @@ Deno.test({
     assertEquals(sticky.out.status, 1, sticky.err);
     assertEquals([...Deno.readDirSync(tagged)].length, 1);
 
-    // A version-tagged directory that its group can write to is refused.
-    await Deno.chmod(tagged, 0o770);
-    const groupWritable = await runCompileCacheEntry(entry);
-    assertEquals(groupWritable.out.status, 0, groupWritable.err);
+    // A version-tagged directory that other users can write to is refused,
+    // even with the sticky bit.
+    await Deno.chmod(tagged, 0o1777);
+    const taggedOpen = await runCompileCacheEntry(entry);
+    assertEquals(taggedOpen.out.status, 0, taggedOpen.err);
     assert(
-      /writable by other users/.test(groupWritable.out.message),
-      groupWritable.out.message,
+      /writable by other users/.test(taggedOpen.out.message),
+      taggedOpen.out.message,
     );
-    assert(!/reading cache from/.test(groupWritable.err), groupWritable.err);
+    assert(!/reading cache from/.test(taggedOpen.err), taggedOpen.err);
   } finally {
     await Deno.remove(tempDir, { recursive: true });
   }

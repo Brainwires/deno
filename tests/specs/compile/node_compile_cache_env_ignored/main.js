@@ -1,3 +1,4 @@
+import "./private_cwd.js";
 import { enableCompileCache, getCompileCacheDir } from "node:module";
 import { existsSync } from "node:fs";
 import process from "node:process";

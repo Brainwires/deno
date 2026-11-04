@@ -3757,7 +3757,9 @@ mod tests {
 /// else can write to, and every directory above it, along the path as given
 /// and along its canonical path, must be owned by the current user or root
 /// and not writable by others unless it has the sticky bit (`/tmp`); a
-/// symlink on the way must be owned by the current user or root. Returns
+/// symlink on the way must be owned by the current user or root. Group write
+/// on the current user's directory is allowed when the group is the user's
+/// private group. Returns
 /// the reason the directory is refused, or `None`. Elsewhere the per-user
 /// temporary directory and ACLs apply, and this returns `None`.
 #[op2(stack_trace)]
@@ -3787,7 +3789,21 @@ fn compile_cache_untrusted_dir(dir: &Path) -> Option<String> {
   // SAFETY: geteuid has no preconditions and cannot fail.
   let uid = unsafe { libc::geteuid() };
   let trusted_owner = |owner: u32| owner == uid || owner == 0;
-  let open_writable = |mode: u32| mode & 0o022 != 0 && mode & 0o1000 == 0;
+  // Writable by someone other than its owner. Group write counts unless the
+  // directory is the current user's and its group is the user's private
+  // group (umask 002 with user private groups), as OpenSSH's
+  // `secure_permissions()` allows.
+  let writable_by_others = |metadata: &std::fs::Metadata| {
+    let mode = metadata.mode();
+    if mode & 0o002 != 0 {
+      return true;
+    }
+    mode & 0o020 != 0
+      && !(metadata.uid() == uid && is_private_group(metadata.gid(), uid))
+  };
+  let open_writable = |metadata: &std::fs::Metadata| {
+    writable_by_others(metadata) && metadata.mode() & 0o1000 == 0
+  };
 
   if !dir.is_absolute() {
     return Some(format!("'{}' is not an absolute path", dir.display()));
@@ -3804,7 +3820,7 @@ fn compile_cache_untrusted_dir(dir: &Path) -> Option<String> {
         ancestor.display()
       ));
     }
-    if metadata.is_dir() && open_writable(metadata.mode()) {
+    if metadata.is_dir() && open_writable(&metadata) {
       return Some(format!(
         "'{}' is writable by other users",
         ancestor.display()
@@ -3832,7 +3848,7 @@ fn compile_cache_untrusted_dir(dir: &Path) -> Option<String> {
         ancestor.display()
       ));
     }
-    if open_writable(metadata.mode()) {
+    if open_writable(&metadata) {
       return Some(format!(
         "'{}' is writable by other users",
         ancestor.display()
@@ -3853,10 +3869,75 @@ fn compile_cache_untrusted_dir(dir: &Path) -> Option<String> {
       dir.display()
     ));
   }
-  if metadata.mode() & 0o022 != 0 {
+  if writable_by_others(&metadata) {
     return Some(format!("'{}' is writable by other users", dir.display()));
   }
   None
+}
+
+/// Whether `gid` is the private group of the user `uid`: the user's primary
+/// group, named after the user, with no member but the user. A lookup that
+/// fails is not a private group.
+#[cfg(unix)]
+fn is_private_group(gid: u32, uid: u32) -> bool {
+  use std::ffi::CStr;
+
+  let mut buf = vec![0 as libc::c_char; 16 * 1024];
+  // SAFETY: an all-zero `passwd` is a valid value for getpwuid_r to fill.
+  let mut pwd: libc::passwd = unsafe { std::mem::zeroed() };
+  let mut found: *mut libc::passwd = std::ptr::null_mut();
+  // SAFETY: the pointers are valid for the call and `buf.len()` is the
+  // buffer's size; getpwuid_r writes only within them.
+  let rc = unsafe {
+    libc::getpwuid_r(uid, &mut pwd, buf.as_mut_ptr(), buf.len(), &mut found)
+  };
+  if rc != 0 || found.is_null() || pwd.pw_name.is_null() || pwd.pw_gid != gid {
+    return false;
+  }
+  // SAFETY: getpwuid_r succeeded, so pw_name is a NUL-terminated string in
+  // `buf`, which is still alive.
+  let user = unsafe { CStr::from_ptr(pwd.pw_name) }.to_bytes().to_vec();
+
+  let mut group_buf = vec![0 as libc::c_char; 64 * 1024];
+  // SAFETY: an all-zero `group` is a valid value for getgrgid_r to fill.
+  let mut grp: libc::group = unsafe { std::mem::zeroed() };
+  let mut found: *mut libc::group = std::ptr::null_mut();
+  // SAFETY: as for getpwuid_r above.
+  let rc = unsafe {
+    libc::getgrgid_r(
+      gid,
+      &mut grp,
+      group_buf.as_mut_ptr(),
+      group_buf.len(),
+      &mut found,
+    )
+  };
+  if rc != 0 || found.is_null() || grp.gr_name.is_null() {
+    return false;
+  }
+  // SAFETY: getgrgid_r succeeded, so gr_name is a NUL-terminated string in
+  // `group_buf`, which is still alive.
+  if unsafe { CStr::from_ptr(grp.gr_name) }.to_bytes() != user.as_slice() {
+    return false;
+  }
+  let mut member = grp.gr_mem;
+  if member.is_null() {
+    return true;
+  }
+  loop {
+    // SAFETY: gr_mem is a NULL-terminated array of NUL-terminated strings
+    // in `group_buf`; `member` stays within it until the NULL entry.
+    let name = unsafe { *member };
+    if name.is_null() {
+      return true;
+    }
+    // SAFETY: see above.
+    if unsafe { CStr::from_ptr(name) }.to_bytes() != user.as_slice() {
+      return false;
+    }
+    // SAFETY: the entry wasn't the terminating NULL, so the next one exists.
+    member = unsafe { member.add(1) };
+  }
 }
 
 #[cfg(not(unix))]

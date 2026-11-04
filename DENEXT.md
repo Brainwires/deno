@@ -9648,24 +9648,26 @@ where the changes are discussed.
        the entry.
      - `NODE_DEBUG_NATIVE=COMPILE_CACHE` prints Node's `[compile cache] ...`
        lines on stderr.
-     - Unlike Node, the cache only loads code another user can't have
-       written: V8 accepts a code cache whose source length, version and flag
-       hashes match, so a planted file would run in place of the module. On
-       Unix the version-tagged directory is created `0700` and must be a real
-       directory owned by the current user that nobody else can write to;
-       every directory above it, along the path as given and its canonical
-       path, must belong to the current user or root and not be writable by
-       others without the sticky bit (`/tmp` passes), and a symlink on the way
-       must belong to the current user or root (new op
-       `op_node_compile_cache_untrusted_dir`, behind the read permission
-       check). Otherwise `enableCompileCache()` returns `FAILED` with "Cache
-       directory is not safe to use: ...". An entry is read only when it is a
-       regular file the current user owns, and a temporary file that was not
-       renamed over its entry is removed.
+     - Unlike Node, the cache only loads code another user can't have written:
+       V8 accepts a code cache whose source length, version and flag hashes
+       match, so a planted file would run in place of the module. On Unix the
+       version-tagged directory is created `0700` and must be a real directory
+       owned by the current user that nobody else can write to; every directory
+       above it, along the path as given and its canonical path, must belong to
+       the current user or root and not be writable by others without the sticky
+       bit (`/tmp` passes), and a symlink on the way must belong to the current
+       user or root. Group write on the current user's own directory is allowed
+       when the group is the user's private group (umask 002 with user private
+       groups), as OpenSSH's `secure_permissions()` allows (new op
+       `op_node_compile_cache_untrusted_dir`, behind the read permission check).
+       Otherwise `enableCompileCache()` returns `FAILED` with "Cache directory
+       is not safe to use: ...". An entry is read only when it is a regular file
+       the current user owns, and a temporary file that was not renamed over its
+       entry is removed.
      - A compiled program (`deno compile`, so a Deno Desktop app too) ignores
        `NODE_COMPILE_CACHE` and `NODE_COMPILE_CACHE_PORTABLE`, so the launch
-       environment can't choose where its code comes from; the program can
-       still call `module.enableCompileCache()` itself.
+       environment can't choose where its code comes from; the program can still
+       call `module.enableCompileCache()` itself.
 
      With the cache off, the loader compiles through `Deno.core.compileFunction`
      and the runtime's own code cache as before. Left open: ES modules are
@@ -9678,9 +9680,9 @@ where the changes are discussed.
      not implemented. Tests: unit `tests/unit_node/module_test.ts` ("the compile
      cache API is exposed with Node's constants", "stores CommonJS code caches
      and reuses them", "NODE_DISABLE_COMPILE_CACHE turns it off", "refuses a
-     cache directory others can write to", "doesn't load a cache entry that is
-     a symlink", "the cache directory is created for the current user only");
-     spec `compile/node_compile_cache_env_ignored`.
+     cache directory others can write to", "doesn't load a cache entry that is a
+     symlink", "the cache directory is created for the current user only"); spec
+     `compile/node_compile_cache_env_ignored`.
 
 236. **`test(node_compat)`: 13 tests the compile cache passes**
      (`feat/node-compat-round7`, test config only; placeholder number;
