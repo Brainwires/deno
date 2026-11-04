@@ -10492,12 +10492,55 @@ where the changes are discussed.
        cache). Unix only: they drive `sh`.
 
 
+262. **`fix(pty)`: audit fixes for `Deno.openPty`, `Deno.Command { pty }` and
+     the `node-pty` shim** (`fix/deno-pty-audit`, runtime;
+     `ext/pty/windows.rs`, `ext/pty/unix.rs`, `ext/process/lib.rs`,
+     `runtime/subprocess_windows/src/process.rs`,
+     `ext/node/polyfills/internal/node_pty.js`). From the audit of items
+     259-261:
+
+     - H1 (Windows): a `.bat` / `.cmd` program ran with the C runtime's quoting
+       alone, so an argument such as `"&calc&rem ` ran a second command through
+       cmd.exe (BatBadBut, the CVE-2024-24576 class). The command line now comes
+       from `batch_file_command_line` in `deno_subprocess_windows` (re-exported
+       by `deno_process`), the escaping `Deno.Command`'s spawn uses.
+     - M1 (Windows): the ConPTY pipes were named `<pid>_<counter>` with the
+       default DACL (read for Everyone and Anonymous), so another local process
+       could open one before the runtime and fail every spawn. They now take 64
+       random bits in the name and a protected owner-only DACL.
+     - M2 (Windows): the child starts with `STARTF_USESTDHANDLES` and null
+       standard handles, as Windows Terminal starts ConPTY clients, so a child
+       of a parent whose stdio is redirected cannot pick up the parent's handles
+       instead of the pseudoconsole's.
+     - Lows: on Unix the master is registered with the reactor before the
+       spawn, so a registration error cannot leave a running child that nothing
+       kills or reaps; a NUL in an argument is refused on Windows instead of
+       truncating the command line, as `Deno.Command` and Unix do; and the
+       shim's `destroy()` closes the master at once, as node-pty's socket does,
+       instead of once the child has exited (a child ignoring SIGHUP kept it
+       open).
+
+     Known limits, left open: `ClosePseudoConsole` runs on a detached thread
+     that blocks until conhost's output is drained, so a pty handle neither read
+     nor closed parks one thread until exit (Windows); `[Symbol.asyncDispose]`
+     of `Deno.openPty` and `Deno.Command { pty }` signals once and awaits
+     `status`, so a child that ignores the signal hangs the `await using`, as
+     with `Deno.Command`; and `cols` / `rows` take up to 65535 (ConPTY clamps to
+     32767), so an app passing a remote client's size lets that client make
+     conhost or the child allocate a 32767x32767 screen, as with node-pty.
+     Tests: unit `ptyRefusesNulInArguments`,
+     `ptyBatchFileArgumentsCannotRunCommands` (Windows), spec
+     `run/pty_redirected_stdio` (Windows), spec `node/node_pty_override`'s
+     `destroy_closes_the_terminal` (before: "closed before the child exited:
+     false"), Rust tests in `ext/pty/windows.rs` and
+     `test_batch_file_command_line` in `subprocess_windows`.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
 169-174, 176, 178, 180, 182-184, 186, 187, 189-191, 193-196, 198-203, 206, 207,
 209-215, 217, 218, 221, 222, 224, 225, 227, 228, 231, 232, 235, 237, 240,
-243-245, 247-249, 253, 254, 256-260) are what the prebuilt `libdenort` carries.
+243-245, 247-249, 253, 254, 256-260, 262) are what the prebuilt `libdenort` carries.
 The CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` /
 `LAUFEY_APP_ID` into a packaged app's launchers) are in the branch too, but a
 stock CLI does not run them; denext's own launcher provides that environment.
