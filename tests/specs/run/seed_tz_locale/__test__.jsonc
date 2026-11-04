@@ -1,0 +1,36 @@
+{
+  // `--seed` is the deterministic mode (upstream #35718): besides seeding the
+  // RNGs it pins the time zone to UTC and the default locale to en-US, whatever
+  // the host's `TZ` and locale variables say. Without it the host's values
+  // apply. ICU reads the locale from `LC_ALL` / `LANG` on unix only.
+  "tests": {
+    "host_values_without_seed": {
+      "if": "unix",
+      "envs": {
+        "TZ": "Asia/Tokyo",
+        "LC_ALL": "de_DE.UTF-8",
+        "LANG": "de_DE.UTF-8"
+      },
+      "args": "run --allow-env=TZ main.js",
+      "output": "host.out"
+    },
+    "pinned_under_seed": {
+      "envs": {
+        "TZ": "Asia/Tokyo",
+        "LC_ALL": "de_DE.UTF-8",
+        "LANG": "de_DE.UTF-8"
+      },
+      "args": "run --seed=1 --allow-env=TZ main.js",
+      "output": "seed.out"
+    },
+    "worker_pinned_under_seed": {
+      "envs": {
+        "TZ": "Asia/Tokyo",
+        "LC_ALL": "de_DE.UTF-8",
+        "LANG": "de_DE.UTF-8"
+      },
+      "args": "run --seed=1 --allow-env=TZ --allow-read worker_main.js",
+      "output": "seed.out"
+    }
+  }
+}

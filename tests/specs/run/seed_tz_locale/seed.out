@@ -1,0 +1,7 @@
+timeZone: UTC
+locale: en-US
+navigator.language: en-US
+TZ: UTC
+toString: Thu Jan 01 1970 00:00:00 GMT+0000 (Coordinated Universal Time)
+toLocaleString: 1/1/1970, 12:00:00 AM
+number: 1,234,567.891

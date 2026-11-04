@@ -1937,6 +1937,8 @@ pub async fn run_with_options(
     None
   };
   deno_core::JsRuntime::init_platform(v8_platform);
+  // A binary compiled with `--seed` keeps its time zone and locale pinned.
+  deno_lib::util::v8::apply_deterministic_environment(metadata.seed);
 
   let main_module = match NpmPackageReqReference::from_specifier(&main_module) {
     Ok(package_ref) => {
