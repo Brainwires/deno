@@ -7,4 +7,11 @@ import add from "./add.cjs";
 console.log("sum", add(2, 3));
 console.log("env cache dir", getCompileCacheDir() ?? "none");
 console.log("env cache created", existsSync(process.env.NODE_COMPILE_CACHE));
-console.log("explicit status", enableCompileCache("explicit-cache").status);
+const explicit = enableCompileCache("explicit-cache");
+console.log(
+  `explicit status ${explicit.status}${
+    explicit.message ? ` ${explicit.message}` : ""
+  }`,
+);
+console.log("explicit cache created", existsSync("explicit-cache"));
+console.log("default status", enableCompileCache().status);

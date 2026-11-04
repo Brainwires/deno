@@ -846,3 +846,72 @@ Deno.test(
     }
   },
 );
+
+Deno.test("[node/module enableCompileCache] defaults to the Deno cache directory, not the temporary directory", async () => {
+  const tempDir = await Deno.makeTempDir();
+  try {
+    const denoDir = path.join(tempDir, "deno_dir");
+    const tmp = path.join(tempDir, "tmp");
+    await Deno.mkdir(tmp);
+    const entry = path.join(tempDir, "entry.cjs");
+    await Deno.writeTextFile(
+      entry,
+      `const { enableCompileCache, getCompileCacheDir } = require("node:module");
+const result = enableCompileCache();
+console.log(JSON.stringify({ result, dir: getCompileCacheDir() ?? null }));
+`,
+    );
+    const { out, err } = await runCompileCacheEntry(entry, {
+      DENO_DIR: denoDir,
+      TMPDIR: tmp,
+      TEMP: tmp,
+      TMP: tmp,
+    });
+    assertEquals(out.result.status, 1, err);
+    assertEquals(
+      out.result.directory,
+      path.join(denoDir, "node_compile_cache"),
+    );
+    assert(out.dir.startsWith(path.join(denoDir, "node_compile_cache")));
+    assertEquals([...Deno.readDirSync(tmp)], []);
+  } finally {
+    await Deno.remove(tempDir, { recursive: true });
+  }
+});
+
+Deno.test("[node/module enableCompileCache] refuses an entry another key wrote", async () => {
+  const tempDir = await Deno.makeTempDir();
+  try {
+    const cacheDir = path.join(tempDir, "cache");
+    const entry = await writeCompileCacheEntry(tempDir, cacheDir);
+    // Another principal's runtime (another key) writes the entry...
+    const planted = await runCompileCacheEntry(entry, {
+      DENO_DIR: path.join(tempDir, "other_deno_dir"),
+    });
+    assertEquals(planted.out.status, 1, planted.err);
+    assert(/writing cache for CommonJS .*dep\.cjs.*success/.test(planted.err));
+
+    // ...and this user's runtime doesn't load it, but replaces it.
+    const ownDenoDir = path.join(tempDir, "own_deno_dir");
+    const first = await runCompileCacheEntry(entry, { DENO_DIR: ownDenoDir });
+    assertEquals(first.out.sum, 5);
+    assert(/dep\.cjs.*authentication failed/.test(first.err), first.err);
+    assert(!/was accepted/.test(first.err), first.err);
+    assert(/writing cache for CommonJS .*dep\.cjs.*success/.test(first.err));
+
+    const second = await runCompileCacheEntry(entry, { DENO_DIR: ownDenoDir });
+    assert(
+      /cache for CommonJS .*dep\.cjs was accepted/.test(second.err),
+      second.err,
+    );
+    if (Deno.build.os !== "windows") {
+      const key = Deno.statSync(
+        path.join(ownDenoDir, "node_compile_cache.key"),
+      );
+      assertEquals(key.size, 32);
+      assertEquals(key.mode! & 0o077, 0);
+    }
+  } finally {
+    await Deno.remove(tempDir, { recursive: true });
+  }
+});

@@ -13,7 +13,11 @@ import {
   op_module_hooks_register,
   op_module_hooks_respond_load,
   op_napi_open,
+  op_node_compile_cache_default_dir,
+  op_node_compile_cache_key_available,
+  op_node_compile_cache_mac,
   op_node_compile_cache_untrusted_dir,
+  op_node_compile_cache_verify,
   op_node_compile_cjs_function,
   op_node_create_function_code_cache,
   op_node_has_child_ipc_pipe,
@@ -2334,6 +2338,9 @@ const kCachedCodeCommonJS = 0;
 const kCacheMagicNumber = 0x8adfdbb2;
 const kCacheHeaderCount = 5;
 const kCacheHeaderBytes = kCacheHeaderCount * 4;
+// denext: each entry ends with an HMAC-SHA256 under the per-user key (see
+// `ext/node/ops/compile_cache.rs`).
+const kCacheMacBytes = 32;
 
 const compileCache = {
   initialized: false,
@@ -2348,16 +2355,6 @@ const compileCache = {
 
 function compileCacheGetenv(name) {
   return op_get_env_no_permission_check(name) ?? undefined;
-}
-
-// denext: a compiled program (`deno compile`, a Deno Desktop app) doesn't take
-// its cache directory from the environment: whoever sets NODE_COMPILE_CACHE
-// for it would choose where its code comes from, around the program's code
-// signature. The program turns the cache on itself with
-// `module.enableCompileCache()`.
-function compileCacheEnvConfig(name) {
-  if (Deno.build.standalone) return undefined;
-  return compileCacheGetenv(name);
 }
 
 function compileCacheIsDebug() {
@@ -2476,6 +2473,13 @@ function compileCacheHandlerEnable(dir, portable) {
       directory: "",
     };
   }
+  // denext: entries are authenticated with the per-user key; without it
+  // nothing is read or written.
+  if (!op_node_compile_cache_key_available()) {
+    const message = "Cannot read or create the compile cache key";
+    compileCacheDebug(`[compile cache] ${message}\n`);
+    return { status: kCompileCacheFailed, message, directory: "" };
+  }
   compileCache.dir = dirWithTag;
   compileCache.portable = portable;
   if (portable) {
@@ -2486,6 +2490,15 @@ function compileCacheHandlerEnable(dir, portable) {
 
 // `Environment::EnableCompileCache`.
 function compileCacheEnable(dir, portable) {
+  // denext: a compiled program (`deno compile`, a Deno Desktop app) never
+  // loads or writes the cache, whoever asks: its code must be the code it
+  // was built and signed with, not bytecode from a directory its user (or
+  // anyone setting NODE_COMPILE_CACHE) can write.
+  if (Deno.build.standalone) {
+    const message = "Disabled in a compiled program";
+    compileCacheDebug(`[compile cache] ${message}.\n`);
+    return { status: kCompileCacheDisabled, message, directory: "" };
+  }
   if (compileCacheGetenv("NODE_DISABLE_COMPILE_CACHE") !== undefined) {
     const message = "Disabled by NODE_DISABLE_COMPILE_CACHE";
     compileCacheDebug(`[compile cache] ${message}.\n`);
@@ -2518,16 +2531,9 @@ function compileCacheEnable(dir, portable) {
 function compileCacheInitialize() {
   if (compileCache.initialized) return;
   compileCache.initialized = true;
-  const dir = compileCacheEnvConfig("NODE_COMPILE_CACHE");
-  if (!dir) {
-    if (Deno.build.standalone && compileCacheGetenv("NODE_COMPILE_CACHE")) {
-      compileCacheDebug(
-        "[compile cache] NODE_COMPILE_CACHE is ignored in a compiled program\n",
-      );
-    }
-    return;
-  }
-  const portable = compileCacheEnvConfig("NODE_COMPILE_CACHE_PORTABLE") === "1";
+  const dir = compileCacheGetenv("NODE_COMPILE_CACHE");
+  if (!dir) return;
+  const portable = compileCacheGetenv("NODE_COMPILE_CACHE_PORTABLE") === "1";
   if (portable) {
     compileCacheDebug("[compile cache] using relative path\n");
   }
@@ -2560,7 +2566,7 @@ function compileCacheReadFile(entry) {
     compileCacheDebug(` ${compileCacheStrerror(err)}\n`);
     return;
   }
-  if (data.length < kCacheHeaderBytes) {
+  if (data.length < kCacheHeaderBytes + kCacheMacBytes) {
     compileCacheDebug(`reading header failed, bytes read ${data.length}\n`);
     return;
   }
@@ -2595,7 +2601,12 @@ function compileCacheReadFile(entry) {
   const cache = new Uint8Array(
     data.buffer,
     data.byteOffset + kCacheHeaderBytes,
-    data.length - kCacheHeaderBytes,
+    data.length - kCacheHeaderBytes - kCacheMacBytes,
+  );
+  const mac = new Uint8Array(
+    data.buffer,
+    data.byteOffset + data.length - kCacheMacBytes,
+    kCacheMacBytes,
   );
   if (headers[2] !== cache.length) {
     compileCacheDebug(
@@ -2608,6 +2619,13 @@ function compileCacheReadFile(entry) {
     compileCacheDebug(
       `cache hash mismatch: expected ${headers[4]}, actual ${cacheHash}\n`,
     );
+    return;
+  }
+  // denext: only an entry this user's runtime wrote for this very source.
+  if (
+    !op_node_compile_cache_verify(entry.macName, entry.codeBytes, cache, mac)
+  ) {
+    compileCacheDebug("authentication failed\n");
     return;
   }
   entry.cache = cache;
@@ -2639,6 +2657,9 @@ function compileCacheGetOrInsert(code, filename, type) {
   const entry = {
     codeHash,
     codeSize: codeBytes.length,
+    // denext: what the entry's MAC covers besides V8's code cache.
+    codeBytes,
+    macName: `${type}:${filePath}`,
     cacheKey: key,
     cacheFilename: compileCache.dir + path.sep + uint32ToHex(key),
     sourceFilename: filename,
@@ -2729,6 +2750,17 @@ function compileCachePersistEntry(entry) {
   headers[2] = entry.cache.length;
   headers[3] = entry.codeHash;
   headers[4] = compileCacheHash(entry.cache);
+  const mac = op_node_compile_cache_mac(
+    entry.macName,
+    entry.codeBytes,
+    entry.cache,
+  );
+  if (mac.length !== kCacheMacBytes) {
+    compileCacheDebug(
+      `[compile cache] skip persisting ${typeName} ${entry.sourceFilename} because the compile cache key is unavailable\n`,
+    );
+    return;
+  }
   compileCacheDebug(
     `[compile cache] Creating temporary file for cache of ${entry.sourceFilename} (${typeName})...`,
   );
@@ -2749,6 +2781,7 @@ function compileCachePersistEntry(entry) {
   try {
     fs.writeSync(fd, new Uint8Array(headers.buffer));
     fs.writeSync(fd, entry.cache);
+    fs.writeSync(fd, mac);
   } catch (err) {
     compileCacheDebug(`failed: ${compileCacheStrerror(err)}\n`);
     try {
@@ -2806,11 +2839,23 @@ export function enableCompileCache(options) {
     directory = options;
   }
   if (directory === undefined) {
-    directory = compileCacheEnvConfig("NODE_COMPILE_CACHE") ||
-      path.join(nativeModuleExports["os"].tmpdir(), "node-compile-cache");
+    // denext: the default is a per-user directory under the Deno cache, not
+    // Node's `<os.tmpdir()>/node-compile-cache`, so a program that may write
+    // the temporary directory can't plant entries for another one.
+    directory = compileCacheGetenv("NODE_COMPILE_CACHE") ||
+      op_node_compile_cache_default_dir();
+    if (directory == null) {
+      if (!Deno.build.standalone) {
+        return {
+          status: kCompileCacheFailed,
+          message: "Cannot resolve the Deno cache directory",
+        };
+      }
+      directory = "";
+    }
   }
   if (portable === undefined) {
-    portable = compileCacheEnvConfig("NODE_COMPILE_CACHE_PORTABLE") === "1";
+    portable = compileCacheGetenv("NODE_COMPILE_CACHE_PORTABLE") === "1";
   }
   if (typeof directory !== "string") {
     throw new internalErrors.ERR_INVALID_ARG_TYPE(

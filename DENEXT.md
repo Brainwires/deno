@@ -9626,18 +9626,36 @@ where the changes are discussed.
      - `enableCompileCache(directory | { directory, portable })` returns
        `{ status, message?, directory? }` with Node's statuses (`FAILED`,
        `ENABLED`, `ALREADY_ENABLED`, `DISABLED`); the directory defaults to
-       `NODE_COMPILE_CACHE`, then `<os.tmpdir()>/node-compile-cache`, and
-       `portable` to `NODE_COMPILE_CACHE_PORTABLE=1`. Anything but a string
-       directory is `ERR_INVALID_ARG_TYPE`. `NODE_COMPILE_CACHE` turns the cache
-       on before the first CommonJS module is compiled, and
+       `NODE_COMPILE_CACHE`, then `<DENO_DIR>/node_compile_cache` (unlike Node's
+       `<os.tmpdir()>/node-compile-cache`: a program that may write the
+       temporary directory, say with only `--allow-write=/tmp`, can't write
+       there), and `portable` to `NODE_COMPILE_CACHE_PORTABLE=1`. Anything but a
+       string directory is `ERR_INVALID_ARG_TYPE`. `NODE_COMPILE_CACHE` turns
+       the cache on before the first CommonJS module is compiled, and
        `NODE_DISABLE_COMPILE_CACHE` keeps it off ("Disabled by
        NODE_DISABLE_COMPILE_CACHE").
      - The cache lives in `<directory>/<version>-<arch>-<V8 cache tag>-<uid>/`,
        one file per module named by the CRC-32 of the module type and its path
        (relative to the cache directory in portable mode), with Node's header
        (magic number, code size and CRC-32, cache size and CRC-32) before V8's
-       code cache. A module whose source changed, or whose cache V8 rejects, is
+       code cache, and then (unlike Node) a 32-byte HMAC-SHA256 under a per-user
+       key. A module whose source changed, or whose cache V8 rejects, is
        compiled again and its entry refreshed.
+     - The MAC covers the module's type and cache path, the SHA-256 of its
+       source and V8's code cache, under a key kept in
+       `<DENO_DIR>/node_compile_cache.key` (32 random bytes, created `0600` by a
+       private temporary file linked into place, read only when it is a regular
+       file of that size the current user owns that no one else can read or
+       write, in a `DENO_DIR` that passes the directory check below). The key
+       never reaches JavaScript (new module `ext/node/ops/compile_cache.rs`:
+       `op_node_compile_cache_default_dir`, `op_node_compile_cache_mac`,
+       `op_node_compile_cache_verify`, `op_node_compile_cache_key_available`).
+       An entry whose MAC doesn't verify ("authentication failed") is not loaded
+       and is rewritten, so a program that can write a cache directory but not
+       read the key can't plant one, and an entry made for one source isn't
+       accepted for another with the same length and CRC-32. Without a key
+       `enableCompileCache()` returns `FAILED` ("Cannot read or create the
+       compile cache key").
      - The CommonJS loader compiles each module with its cached code when the
        cache is on (new op `op_node_compile_cjs_function`, the same origin and
        host-defined options `Deno.core.compileFunction` gives it) and keeps V8's
@@ -9664,10 +9682,11 @@ where the changes are discussed.
        is not safe to use: ...". An entry is read only when it is a regular file
        the current user owns, and a temporary file that was not renamed over its
        entry is removed.
-     - A compiled program (`deno compile`, so a Deno Desktop app too) ignores
-       `NODE_COMPILE_CACHE` and `NODE_COMPILE_CACHE_PORTABLE`, so the launch
-       environment can't choose where its code comes from; the program can still
-       call `module.enableCompileCache()` itself.
+     - A compiled program (`deno compile`, so a Deno Desktop app too) never
+       loads or writes the cache: `enableCompileCache()` returns `DISABLED`
+       ("Disabled in a compiled program") whatever its argument, and
+       `NODE_COMPILE_CACHE` is ignored, so a signed program only runs the code
+       it was built with, never bytecode from a directory its user can write.
 
      With the cache off, the loader compiles through `Deno.core.compileFunction`
      and the runtime's own code cache as before. Left open: ES modules are
@@ -9681,21 +9700,25 @@ where the changes are discussed.
      cache API is exposed with Node's constants", "stores CommonJS code caches
      and reuses them", "NODE_DISABLE_COMPILE_CACHE turns it off", "refuses a
      cache directory others can write to", "doesn't load a cache entry that is a
-     symlink", "the cache directory is created for the current user only"); spec
-     `compile/node_compile_cache_env_ignored`.
+     symlink", "the cache directory is created for the current user only",
+     "defaults to the Deno cache directory, not the temporary directory",
+     "refuses an entry another key wrote"); Rust unit
+     `mac_binds_name_source_and_payload`; spec
+     `compile/node_compile_cache_disabled_in_compiled`.
 
-236. **`test(node_compat)`: 13 tests the compile cache passes**
+236. **`test(node_compat)`: 12 tests the compile cache passes**
      (`feat/node-compat-round7`, test config only; placeholder number;
      `tests/node_compat/config.jsonc`). Each passed three isolated runs (runner
      parallelism 1, report mode, the CI 10 s timeout) on a Linux x86_64 debug
      build without skipping, and is on for Linux only, with that reason, until
      checked on macOS and Windows: `parallel/test-compile-cache-api-env.js`,
      `-api-error.js`, `-api-flush.js`, `-api-options-portable-env.js`,
-     `-api-portable.js`, `-api-success.js`, `-api-tmpdir.js`, `-disable.js`,
+     `-api-portable.js`, `-api-success.js`, `-disable.js`,
      `-existing-directory.js`, `-permission-allowed.js` (the node shim parses
      `--permission` and its grants but does not apply them, so the cache
      directory is writable, which is what the test expects), `-portable.js`,
-     `-success.js`, `-updated-file.js`.
+     `-success.js`, `-updated-file.js`. `-api-tmpdir.js` is ignored: the default
+     cache directory is under `DENO_DIR`, not `os.tmpdir()` (item 235).
 
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,

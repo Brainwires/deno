@@ -1,8 +1,8 @@
 {
-  // A compiled program (`deno compile`, a Deno Desktop app) doesn't take
-  // Node's compile cache directory from NODE_COMPILE_CACHE: whoever sets it
-  // would choose where the program's code comes from. The program can still
-  // turn the cache on itself with `module.enableCompileCache()`.
+  // A compiled program (`deno compile`, a Deno Desktop app) never uses Node's
+  // compile cache: NODE_COMPILE_CACHE is ignored and enableCompileCache()
+  // returns DISABLED whatever its argument, so the program only runs the code
+  // it was built (and signed) with.
   "tempDir": true,
   "steps": [{
     "args": "run -A main.js",

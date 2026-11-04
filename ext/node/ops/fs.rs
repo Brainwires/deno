@@ -3782,7 +3782,7 @@ pub fn op_node_compile_cache_untrusted_dir(
   reason = "requires real fs: ownership and modes of the on-disk cache \
    directory and its ancestors, which the FileSystem trait doesn't expose"
 )]
-fn compile_cache_untrusted_dir(dir: &Path) -> Option<String> {
+pub(crate) fn compile_cache_untrusted_dir(dir: &Path) -> Option<String> {
   use std::os::unix::fs::MetadataExt;
   use std::os::unix::fs::OpenOptionsExt;
 
@@ -3941,6 +3941,6 @@ fn is_private_group(gid: u32, uid: u32) -> bool {
 }
 
 #[cfg(not(unix))]
-fn compile_cache_untrusted_dir(_dir: &Path) -> Option<String> {
+pub(crate) fn compile_cache_untrusted_dir(_dir: &Path) -> Option<String> {
   None
 }
