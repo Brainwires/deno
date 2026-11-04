@@ -1,0 +1,19 @@
+{
+  // The registry's node-pty (a stand-in with the real package's entry and
+  // install script) through a node_modules install: the install script is
+  // not run (it is a dependency's, so it needs --allow-scripts, and is not
+  // needed), and the entry resolves to the runtime's implementation.
+  "tempDir": true,
+  "tests": {
+    "node_modules_dir": {
+      "if": "unix",
+      "args": "run -A --node-modules-dir=auto main.ts",
+      "output": "main.out"
+    },
+    "global_cache": {
+      "if": "unix",
+      "args": "run -A main.ts",
+      "output": "global.out"
+    }
+  }
+}

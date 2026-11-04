@@ -27,6 +27,7 @@ members = [
   "ext/node",
   "ext/node_crypto",
   "ext/node_sqlite",
+  "ext/pty",
   "ext/rt_helper",
   "ext/signals",
   "ext/sql",
@@ -141,6 +142,7 @@ deno_node_crypto = { version = "0.30.0", path = "./ext/node_crypto" }
 deno_node_sqlite = { version = "0.30.0", path = "./ext/node_sqlite" }
 deno_os = { version = "0.77.0", path = "./ext/os" }
 deno_process = { version = "0.75.0", path = "./ext/process" }
+deno_pty = { version = "0.1.0", path = "./ext/pty" }
 deno_signals = { version = "0.51.0", path = "./ext/signals" }
 deno_sql = { version = "0.1.0", path = "./ext/sql" }
 deno_telemetry = { version = "0.82.0", path = "./ext/telemetry" }

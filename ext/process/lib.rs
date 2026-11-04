@@ -767,6 +767,91 @@ type CreateCommand = (
   Option<embedded_program::VerifiedProgram>,
 );
 
+/// denext (DENEXT.md item 290): what `Deno.Command` resolves and checks
+/// before it spawns, for another extension that starts a program the same
+/// way (`ext/pty`, `Deno.openPty`). The program is resolved as
+/// `Deno.Command` resolves it (a path, or a name on the environment's
+/// `PATH`), the environment and working directory are computed once and
+/// used for both the check and the spawn, and the run permission is checked
+/// on the resolved path (`--allow-run` and its allow-list, the `LD_*` /
+/// `DYLD_*` rule, an embedded program's hash, item 232). Nothing here spawns:
+/// the caller does, from these fields, then calls
+/// [`PreparedRun::verify_after_spawn`].
+pub struct PreparedRun {
+  /// The program to exec: the resolved path or, on Linux, the handle an
+  /// embedded program was verified through (`/proc/self/fd/N`).
+  pub program: PathBuf,
+  /// What the child's `argv[0]` names: the resolved path.
+  pub argv0: PathBuf,
+  /// The child's working directory.
+  pub cwd: PathBuf,
+  /// The child's whole environment (the caller clears the inherited one).
+  pub envs: Vec<(OsString, OsString)>,
+  verified: Option<embedded_program::VerifiedProgram>,
+}
+
+impl PreparedRun {
+  /// Right after the spawn: refuses (and ends, through `kill`) a child whose
+  /// program changed between the check and the exec (DENEXT.md item 232).
+  pub fn verify_after_spawn(
+    self,
+    kill: impl FnOnce(),
+  ) -> Result<(), ProcessError> {
+    let Some(verified) = self.verified else {
+      return Ok(());
+    };
+    if verified.unchanged() {
+      return Ok(());
+    }
+    kill();
+    Err(changed_since_check_error())
+  }
+}
+
+/// Resolves `cmd` and checks the run permission exactly as
+/// `Deno.Command` does (see [`PreparedRun`]). `min_fd` is one above the
+/// highest file descriptor the child is handed (its stdio), so on Linux the
+/// handle an embedded program execs from is numbered past them.
+pub fn prepare_run(
+  state: &mut OpState,
+  cmd: &str,
+  cwd: Option<&str>,
+  envs: &[(String, String)],
+  clear_env: bool,
+  api_name: &str,
+  min_fd: i32,
+) -> Result<PreparedRun, ProcessError> {
+  #[cfg_attr(
+    not(target_os = "linux"),
+    allow(unused_mut, reason = "only Linux execs the verified handle")
+  )]
+  let (cmd, run_env, mut verified) = compute_run_cmd_and_check_permissions(
+    cmd, cwd, envs, clear_env, state, api_name,
+    /* allow_cwd_inherit */ false, /* ipc */ false,
+  )?;
+  #[cfg(target_os = "linux")]
+  let program = verified
+    .as_mut()
+    .and_then(|v| v.exec_path(min_fd))
+    .unwrap_or_else(|| cmd.clone());
+  #[cfg(not(target_os = "linux"))]
+  let program = {
+    let _ = min_fd;
+    cmd.clone()
+  };
+  Ok(PreparedRun {
+    program,
+    argv0: cmd,
+    cwd: run_env.cwd,
+    envs: run_env
+      .envs
+      .into_iter()
+      .map(|(k, v)| (k.into_inner(), v))
+      .collect(),
+    verified,
+  })
+}
+
 pub fn npm_process_state_tempfile(
   contents: &[u8],
 ) -> Result<deno_io::RawIoHandle, std::io::Error> {

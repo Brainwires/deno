@@ -66,6 +66,7 @@ deno_panic = { version = "0.2.1", optional = true }
 deno_path_util.workspace = true
 deno_permissions.workspace = true
 deno_process.workspace = true
+deno_pty.workspace = true
 deno_resolver = { workspace = true, features = ["sync"] }
 deno_semver.workspace = true
 deno_signals.workspace = true

@@ -55,6 +55,12 @@ const {
   writableStreamForRid,
 } = core.loadExtScript("ext:deno_web/06_streams.js");
 
+// `Deno.Command` with `pty` (DENEXT.md item 290): the child runs on a
+// pseudo-terminal from ext/pty, loaded on first use.
+let _pty;
+const lazyPty = () =>
+  _pty ?? (_pty = core.loadExtScript("ext:deno_pty/01_pty.js"));
+
 // The key for private `input` option for `Deno.Command`
 const kInputOption = Symbol("kInputOption");
 // The key for private `timeout` option for `Deno.Command`
@@ -236,6 +242,54 @@ function spawnChild(command, options = EMPTY_OPTIONS) {
     "Deno.Command().spawn()",
     options,
   );
+}
+
+// The options a pseudo-terminal replaces (its stdio is the terminal) or
+// does not take: setting one of them together with `pty` is an error.
+const PTY_CONFLICTS = [
+  "stdin",
+  "stdout",
+  "stderr",
+  "uid",
+  "gid",
+  "detached",
+  "windowsRawArguments",
+];
+
+function spawnPtyChild(command, apiName, options) {
+  for (let i = 0; i < PTY_CONFLICTS.length; i++) {
+    const name = PTY_CONFLICTS[i];
+    if (options[name] !== undefined) {
+      throw new TypeError(
+        `Failed to execute '${apiName}': '${name}' cannot be set together with 'pty'`,
+      );
+    }
+  }
+  if (options[kInputOption] !== undefined) {
+    throw new TypeError(
+      `Failed to execute '${apiName}': 'input' cannot be set together with 'pty'`,
+    );
+  }
+  const { pty } = options;
+  if (pty === null || typeof pty !== "object") {
+    throw new TypeError(
+      `Failed to execute '${apiName}': 'pty' must be an object with 'cols' and 'rows'`,
+    );
+  }
+  const spawned = lazyPty().spawnPty({
+    cmd: command,
+    args: options.args,
+    cwd: options.cwd,
+    clearEnv: options.clearEnv,
+    env: options.env,
+    cols: pty.cols,
+    rows: pty.rows,
+  }, apiName);
+  return new ChildProcess(illegalConstructorKey, {
+    pid: spawned.handle.pid,
+    signal: options.signal,
+    pty: spawned,
+  });
 }
 
 function collectOutput(readableStream) {
@@ -436,6 +490,17 @@ class ChildProcess {
   #rid;
   #waitPromise;
   #waitComplete = false;
+  // the pseudo-terminal the child was spawned on (`pty` option), else null
+  #ptySpawn = null;
+  #pty = null;
+  get pty() {
+    if (this.#pty == null) {
+      throw new TypeError(
+        "Cannot get 'pty': the child was not spawned on a pseudo-terminal",
+      );
+    }
+    return this.#pty;
+  }
 
   [_ipcPipeRid];
   [_extraPipeRids];
@@ -481,9 +546,36 @@ class ChildProcess {
     stderrRid,
     ipcPipeRid, // internal
     extraPipeRids,
+    pty = undefined, // internal: the spawn from ext/pty
   } = null) {
     if (key !== illegalConstructorKey) {
       throw new TypeError("Illegal constructor");
+    }
+
+    if (pty !== undefined) {
+      this.#pid = pid;
+      this.#ptySpawn = pty;
+      this.#pty = {
+        __proto__: null,
+        readable: pty.handle.readable,
+        writable: pty.handle.writable,
+        resize: pty.handle.resize,
+      };
+      const onAbort = () => {
+        try {
+          this.kill("SIGTERM");
+        } catch {
+          // the child is gone already
+        }
+      };
+      signal?.[abortSignal.add](onAbort);
+      this.#waitPromise = pty.waitPromise;
+      this.#status = PromisePrototypeThen(pty.handle.status, (res) => {
+        signal?.[abortSignal.remove](onAbort);
+        this.#waitComplete = true;
+        return res;
+      });
+      return;
     }
 
     this.#rid = rid;
@@ -535,6 +627,11 @@ class ChildProcess {
   }
 
   async output() {
+    if (this.#ptySpawn !== null) {
+      throw new TypeError(
+        "Cannot collect output: the child runs on a pseudo-terminal; read 'pty.readable'",
+      );
+    }
     if (this.#stdout?.locked) {
       throw new TypeError(
         "Cannot collect output: 'stdout' is locked",
@@ -575,10 +672,24 @@ class ChildProcess {
     if (this.#waitComplete) {
       throw new TypeError("Child process has already terminated");
     }
+    if (this.#ptySpawn !== null) {
+      this.#ptySpawn.handle.kill(signo);
+      return;
+    }
     op_spawn_kill(this.#rid, signo);
   }
 
   async [SymbolAsyncDispose]() {
+    if (this.#ptySpawn !== null) {
+      try {
+        this.#ptySpawn.handle.kill("SIGTERM");
+      } catch {
+        // the child is gone already
+      }
+      await this.#status;
+      core.tryClose(this.#ptySpawn.masterRid);
+      return;
+    }
     try {
       op_spawn_kill(this.#rid, "SIGTERM");
     } catch {
@@ -589,6 +700,7 @@ class ChildProcess {
 
   ref() {
     core.refOpPromise(this.#waitPromise);
+    if (this.#ptySpawn !== null) return;
     if (this.#stdout) readableStreamForRidUnrefableRef(this.#stdout);
     if (this.#stderr) readableStreamForRidUnrefableRef(this.#stderr);
     if (!this.#waitComplete) {
@@ -598,6 +710,7 @@ class ChildProcess {
 
   unref() {
     core.unrefOpPromise(this.#waitPromise);
+    if (this.#ptySpawn !== null) return;
     if (this.#stdout) readableStreamForRidUnrefableUnref(this.#stdout);
     if (this.#stderr) readableStreamForRidUnrefableUnref(this.#stderr);
     if (!this.#waitComplete) {
@@ -807,6 +920,11 @@ class Command {
         "Piped stdin is not supported for this function, use 'Deno.Command.spawn()' instead",
       );
     }
+    if (this.#options?.pty !== undefined) {
+      throw new TypeError(
+        "'pty' is not supported for this function, use 'Deno.Command.spawn()' instead",
+      );
+    }
     return spawnInner(this.#command, this.#options);
   }
 
@@ -816,10 +934,22 @@ class Command {
         "Piped stdin is not supported for this function, use 'Deno.Command.spawn()' instead",
       );
     }
+    if (this.#options?.pty !== undefined) {
+      throw new TypeError(
+        "'pty' is not supported for this function, use 'Deno.Command.spawn()' instead",
+      );
+    }
     return spawnSyncInner(this.#command, this.#options);
   }
 
   spawn() {
+    if (this.#options?.pty !== undefined) {
+      return spawnPtyChild(
+        this.#command,
+        "Deno.Command().spawn()",
+        this.#options,
+      );
+    }
     const options = {
       __proto__: null,
       ...(this.#options ?? {}),
