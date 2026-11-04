@@ -9704,12 +9704,11 @@ where the changes are discussed.
 
 237. **`feat(node/crypto)`: `--seed` reaches `node:crypto`'s random paths**
      (`feat/seed-node-crypto`; runtime; `ext/node_crypto/lib.rs`; upstream
-     #35718 phase 1).
-     Under `--seed`, `deno_crypto` puts a seeded `StdRng` in the `OpState`, and
-     `Math.random`, `crypto.getRandomValues` and `crypto.randomUUID` (and
-     `node:crypto`'s `randomBytes`, which fills through `getRandomValues`)
-     repeat run to run. `node:crypto`'s own ops did not use it:
-     `op_node_fill_random` (`randomFillSync`), `op_node_fill_random_async`
+     #35718 phase 1). Under `--seed`, `deno_crypto` puts a seeded `StdRng` in
+     the `OpState`, and `Math.random`, `crypto.getRandomValues` and
+     `crypto.randomUUID` (and `node:crypto`'s `randomBytes`, which fills through
+     `getRandomValues`) repeat run to run. `node:crypto`'s own ops did not use
+     it: `op_node_fill_random` (`randomFillSync`), `op_node_fill_random_async`
      (`randomFill`) and `op_node_random_int` (`randomInt`, sync and callback)
      drew from `thread_rng()`, so a seeded program still varied there. They now
      draw from the seeded `StdRng` when there is one, and from `thread_rng()`
@@ -9730,13 +9729,13 @@ where the changes are discussed.
      `cli/tools/compile.rs`, `libs/cli_parser/src/convert.rs`,
      `libs/config/deno_json/mod.rs`, `libs/config/workspace/mod.rs`,
      `cli/schemas/config-file.v1.json`, `libs/cli_parser/src/env_vars.rs`;
-     upstream #30334).
-     Everything after `deno compile`'s script is embedded in the executable as
-     its arguments, so `deno compile main.ts --output app
-     --allow-net`
-     builds a binary named after the script, with no permissions, that always
-     receives `--output app --allow-net`. Upstream once made `--` mandatory and
-     reverted it as too breaking. Here:
+     upstream #30334). Everything after `deno compile`'s script is embedded in
+     the executable as its arguments, so
+     `deno compile main.ts --output app
+     --allow-net` builds a binary named
+     after the script, with no permissions, that always receives
+     `--output app --allow-net`. Upstream once made `--` mandatory and reverted
+     it as too breaking. Here:
 
      - **Default (`warn`).** When the embedded arguments have no leading `--`
        and some of them are `deno compile` flags (its own, its argument groups'
@@ -9767,32 +9766,33 @@ where the changes are discussed.
 
 239. **laufey at `6d88bf8`** (`development-denext`; laufey API 53; runtime
      3.0.0-denext.9; `cli/rt_desktop/Cargo.toml`, `cli/rt_desktop/lib.rs`,
-     `Cargo.lock`, `.github/workflows/denext_runtime.yml`, `cli/tools/desktop.rs`,
-     `libs/config/deno_json/mod.rs`, `libs/cli_parser/src/flags.rs`,
-     `cli/schemas/config-file.v1.json`). laufey development-denext
-     `99a1c2e..6d88bf8` adds microphone and camera requests (laufey's
-     `docs/media-capture.md`): every `getUserMedia` request goes to the
-     backend, which decides it once and refuses it by default. A request from a
-     sub-frame of another origin than the top-level document's, from an opaque
-     origin, or for anything but the microphone and camera (`getDisplayMedia`)
-     is refused; one the launch file's new `mediaCapture` key grants for every
-     kind it asks (exact origins) is allowed; the rest go to the runtime's
-     handler (the new `set_media_capture_handler` / `answer_media_capture`
-     vtable slots), and are refused when there is none. An allowed request still
-     meets the OS's consent (macOS TCC, Windows' privacy switch). The runtime
-     registers no handler, so a packaged app reaches the devices only through
-     the launch file. denext's packaging writes `mediaCapture` itself (the app
-     origin alone, from `FIRST_MEDIA_CAPTURE_RUNTIME`, 3.0.0-denext.9);
-     `deno desktop`'s own launch file now carries it too, from deno.json's new
-     `desktop.app.mediaCapture` (`{ "microphone": [origins], "camera":
-     [origins] }`): an entry that is not an exact `scheme://host[:port]` origin
-     (`*`, `<scheme>://*`, a path, a query, userinfo, `file:` / `data:`) is
-     reported and skipped, as laufey skips it, and the key is left out when
-     nothing is granted. The compile-time API assert moves to 53. From the same
-     range: laufey's CI lints its tests too (clippy `--all-targets`), and a
-     dispatch picks the macOS runner. Still CEF 156.0.15. Tests:
-     `laufey_launch_config_content` (the key written and left out),
-     `media_capture_origins_are_exact`,
+     `Cargo.lock`, `.github/workflows/denext_runtime.yml`,
+     `cli/tools/desktop.rs`, `libs/config/deno_json/mod.rs`,
+     `libs/cli_parser/src/flags.rs`, `cli/schemas/config-file.v1.json`). laufey
+     development-denext `99a1c2e..6d88bf8` adds microphone and camera requests
+     (laufey's `docs/media-capture.md`): every `getUserMedia` request goes to
+     the backend, which decides it once and refuses it by default. A request
+     from a sub-frame of another origin than the top-level document's, from an
+     opaque origin, or for anything but the microphone and camera
+     (`getDisplayMedia`) is refused; one the launch file's new `mediaCapture`
+     key grants for every kind it asks (exact origins) is allowed; the rest go
+     to the runtime's handler (the new `set_media_capture_handler` /
+     `answer_media_capture` vtable slots), and are refused when there is none.
+     An allowed request still meets the OS's consent (macOS TCC, Windows'
+     privacy switch). The runtime registers no handler, so a packaged app
+     reaches the devices only through the launch file. denext's packaging writes
+     `mediaCapture` itself (the app origin alone, from
+     `FIRST_MEDIA_CAPTURE_RUNTIME`, 3.0.0-denext.9); `deno desktop`'s own launch
+     file now carries it too, from deno.json's new `desktop.app.mediaCapture`
+     (`{ "microphone": [origins], "camera":
+     [origins] }`): an entry that is
+     not an exact `scheme://host[:port]` origin (`*`, `<scheme>://*`, a path, a
+     query, userinfo, `file:` / `data:`) is reported and skipped, as laufey
+     skips it, and the key is left out when nothing is granted. The compile-time
+     API assert moves to 53. From the same range: laufey's CI lints its tests
+     too (clippy `--all-targets`), and a dispatch picks the macOS runner. Still
+     CEF 156.0.15. Tests: `laufey_launch_config_content` (the key written and
+     left out), `media_capture_origins_are_exact`,
      `desktop_config_media_capture_reaches_the_flags`,
      `test_parse_desktop_app_config_media_capture` (an unknown kind is an
      error); laufey's `media_capture_test.cc` and its native_e2e
