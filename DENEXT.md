@@ -9944,6 +9944,17 @@ where the changes are discussed.
      (foreign origins of both kinds in config order, none for the app's own,
      every entry against the default origin).
 
+262. **`docs(cli)`: two stale comments** (`feat/denext10-hygiene`; comments
+     only; `cli/tsc/tsconfig_gen.rs`, `cli/rt/desktop.rs`).
+     `BUILT_IN_TYPES_NODE_MARKER` now names where the built-in `@types/node`
+     goes (`<DENO_DIR>/npm_compat/<name>-<hash>/@types/node`), when (`deno
+     sync-types`, also run by the native check, finds no `@types/node` in
+     `node_modules`) and what reads the marker (`is_built_in_types_node`, for
+     the generated `@types/deno` and for keeping a complete copy), in place of
+     "the native type check reads". `Deno.desktop.cancelQuit`'s comment says
+     what it does: it answers the held session end with false and returns true,
+     and returns false with nothing sent for a plain quit, one already
+     answered, or one past laufey's deadline.
 
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
