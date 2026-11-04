@@ -238,6 +238,21 @@ pub enum IconConfig {
   Set(Vec<IconSetEntry>),
 }
 
+/// The origins a packaged desktop app grants the microphone and the camera
+/// without asking (`desktop.app.mediaCapture` in `deno.json`, written to the
+/// launch file's `mediaCapture` key; laufey API 53). Exact origins.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct DesktopMediaCapture {
+  pub microphone: Vec<String>,
+  pub camera: Vec<String>,
+}
+
+impl DesktopMediaCapture {
+  pub fn is_empty(&self) -> bool {
+    self.microphone.is_empty() && self.camera.is_empty()
+  }
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct DesktopFlags {
   pub source_file: String,
@@ -271,6 +286,10 @@ pub struct DesktopFlags {
   /// `desktop.app.activationPolicy` in `deno.json`; the launch configuration
   /// carries it to the backend (laufey API 50).
   pub activation_policy: Option<String>,
+  /// The origins granted the microphone and the camera without asking.
+  /// Sourced from `desktop.app.mediaCapture` in `deno.json`; the launch
+  /// configuration carries it to the backend (laufey API 53).
+  pub media_capture: DesktopMediaCapture,
   /// macOS codesigning identity (e.g. `Developer ID Application: Acme,
   /// Inc. (TEAMID)`, or `-` for ad-hoc). When unset the bundle is left
   /// unsigned; the system will quarantine it on download.

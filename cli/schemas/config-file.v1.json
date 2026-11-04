@@ -327,6 +327,21 @@
               "description": "The macOS activation policy the app starts in: \"regular\" (a Dock icon and a menu bar, the default) or \"accessory\" (neither, from the first frame: a tray / menu-bar app). Written to the packaged app's laufey-launch.json; Deno.dock.setActivationPolicy() switches it at runtime. Ignored on Windows and Linux.",
               "enum": ["regular", "accessory"]
             },
+            "mediaCapture": {
+              "type": "object",
+              "description": "The origins the packaged app grants the microphone and / or the camera (getUserMedia) without asking, as exact origins (\"scheme://host[:port]\", e.g. \"acme://app\"). Written to the packaged app's laufey-launch.json; an origin it doesn't list is refused. Screen capture is never granted.",
+              "additionalProperties": false,
+              "properties": {
+                "microphone": {
+                  "type": "array",
+                  "items": { "type": "string" }
+                },
+                "camera": {
+                  "type": "array",
+                  "items": { "type": "string" }
+                }
+              }
+            },
             "singleInstance": {
               "type": "boolean",
               "description": "Run at most one instance of the app per user. A second launch hands its arguments (a deep link or a file on Windows and Linux) and working directory to the running instance, which receives them as a Deno.desktop \"secondinstance\" event, and exits. The lock is keyed on the app identifier (desktop.app.identifier, or the one the CLI synthesizes). Defaults to false.",

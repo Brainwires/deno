@@ -181,6 +181,12 @@ fn apply_desktop_config_to_flags(
         );
       }
     }
+    if let Some(media) = app_config.media_capture {
+      desktop_flags.media_capture = crate::args::DesktopMediaCapture {
+        microphone: media_capture_origins("microphone", media.microphone),
+        camera: media_capture_origins("camera", media.camera),
+      };
+    }
   }
 
   if let Some(backend) = desktop_config.backend
@@ -195,6 +201,51 @@ fn apply_desktop_config_to_flags(
   {
     desktop_flags.codesign_identity = Some(identity);
   }
+}
+
+/// The exact origins of one `desktop.app.mediaCapture` kind, as laufey's
+/// launch file takes them (`scheme://host[:port]`; laufey API 53). An entry
+/// that is not one (`*`, `<scheme>://*`, a path, an opaque origin) is
+/// reported and skipped, as laufey itself would skip it.
+fn media_capture_origins(kind: &str, entries: Vec<String>) -> Vec<String> {
+  entries
+    .into_iter()
+    .filter_map(|entry| {
+      let origin = exact_media_capture_origin(&entry);
+      if origin.is_none() {
+        log::warn!(
+          "ignoring desktop.app.mediaCapture.{kind} entry {entry:?}: it is an \
+           exact origin, scheme://host[:port]"
+        );
+      }
+      origin
+    })
+    .collect()
+}
+
+/// `entry` as `scheme://host[:port]`, or `None` when it is anything else.
+fn exact_media_capture_origin(entry: &str) -> Option<String> {
+  if entry.contains('*') {
+    return None;
+  }
+  let url = Url::parse(entry).ok()?;
+  if !url.username().is_empty()
+    || url.password().is_some()
+    || url.query().is_some()
+    || url.fragment().is_some()
+    || !matches!(url.path(), "" | "/")
+  {
+    return None;
+  }
+  let host = url.host_str().filter(|host| !host.is_empty())?;
+  if matches!(url.scheme(), "file" | "data" | "blob" | "about" | "javascript")
+  {
+    return None;
+  }
+  Some(match url.port() {
+    Some(port) => format!("{}://{host}:{port}", url.scheme()),
+    None => format!("{}://{host}", url.scheme()),
+  })
 }
 
 async fn compile_desktop(
@@ -1903,6 +1954,7 @@ async fn package_windows_app_dir(
     &desktop_bridge_origin(cli_options)?,
     desktop_flags.single_instance,
     desktop_flags.activation_policy.as_deref(),
+    &desktop_flags.media_capture,
   )?;
 
   // Validate the deep-link schemes. Windows has nothing to write into the
@@ -2102,6 +2154,7 @@ async fn package_linux_app_dir(
     &desktop_bridge_origin(cli_options)?,
     desktop_flags.single_instance,
     desktop_flags.activation_policy.as_deref(),
+    &desktop_flags.media_capture,
   )?;
 
   // Merge any deep-link schemes into the `.desktop` entry written above.
@@ -4024,6 +4077,7 @@ async fn package_macos_app_bundle(
     &desktop_bridge_origin(cli_options)?,
     desktop_flags.single_instance,
     desktop_flags.activation_policy.as_deref(),
+    &desktop_flags.media_capture,
   )?;
 
   // Rewrite each CEF helper's CFBundleIdentifier to be a strict suffix
@@ -4153,8 +4207,24 @@ fn laufey_launch_config_json(
   bridge_origins: &[&str],
   single_instance: bool,
   activation_policy: Option<&str>,
+  media_capture: &crate::args::DesktopMediaCapture,
 ) -> String {
   let mut config = serde_json::Map::new();
+  // laufey API 53: the origins granted the microphone / camera without
+  // asking. Omitted when none is: laufey then refuses every request the
+  // runtime is not asked about.
+  if !media_capture.is_empty() {
+    let mut grant = serde_json::Map::new();
+    for (kind, origins) in [
+      ("microphone", &media_capture.microphone),
+      ("camera", &media_capture.camera),
+    ] {
+      if !origins.is_empty() {
+        grant.insert(kind.to_string(), serde_json::Value::from(origins.clone()));
+      }
+    }
+    config.insert("mediaCapture".to_string(), serde_json::Value::Object(grant));
+  }
   // laufey API 50: the macOS host starts in this policy (no Dock icon from
   // the first frame for "accessory").
   if let Some(policy) = activation_policy {
@@ -4200,6 +4270,7 @@ fn write_laufey_launch_config(
   bridge_origin: &str,
   single_instance: bool,
   activation_policy: Option<&str>,
+  media_capture: &crate::args::DesktopMediaCapture,
 ) -> Result<(), AnyError> {
   if let Some(id) = app_id {
     ensure_laufey_app_id(id)?;
@@ -4220,6 +4291,7 @@ fn write_laufey_launch_config(
       &[bridge_origin],
       single_instance,
       activation_policy,
+      media_capture,
     ),
   )
   .with_context(|| {
@@ -9893,6 +9965,7 @@ def456  other.zip
       deep_links: Vec::new(),
       single_instance: false,
       activation_policy: None,
+      media_capture: Default::default(),
       codesign_identity: None,
       inspect_renderer: None,
       compress: None,
@@ -11091,6 +11164,10 @@ def456  other.zip
       &["acme://app"],
       true,
       Some("accessory"),
+      &crate::args::DesktopMediaCapture {
+        microphone: vec!["acme://app".to_string()],
+        camera: vec![],
+      },
     );
     assert!(json.ends_with('\n'));
     let value: serde_json::Value = serde_json::from_str(&json).unwrap();
@@ -11102,12 +11179,20 @@ def456  other.zip
         "bridgeOrigins": ["acme://app"],
         "singleInstance": true,
         "activationPolicy": "accessory",
+        "mediaCapture": { "microphone": ["acme://app"] },
       })
     );
     // Absent values are omitted; singleInstance and the bridge's origins
     // (DENEXT.md item 129) are always recorded.
     let value: serde_json::Value = serde_json::from_str(
-      &laufey_launch_config_json(None, &[], &["app://localhost"], false, None),
+      &laufey_launch_config_json(
+        None,
+        &[],
+        &["app://localhost"],
+        false,
+        None,
+        &Default::default(),
+      ),
     )
     .unwrap();
     assert_eq!(
@@ -11126,6 +11211,10 @@ def456  other.zip
       "acme://app",
       true,
       Some("accessory"),
+      &crate::args::DesktopMediaCapture {
+        microphone: vec![],
+        camera: vec!["acme://app".to_string()],
+      },
     )
     .unwrap();
     let written: serde_json::Value = serde_json::from_str(
@@ -11138,6 +11227,10 @@ def456  other.zip
     assert_eq!(written["bridgeOrigins"], serde_json::json!(["acme://app"]));
     assert_eq!(written["singleInstance"], true);
     assert_eq!(written["activationPolicy"], "accessory");
+    assert_eq!(
+      written["mediaCapture"],
+      serde_json::json!({ "camera": ["acme://app"] })
+    );
     // An id laufey would ignore fails packaging instead.
     assert!(
       write_laufey_launch_config(
@@ -11146,7 +11239,8 @@ def456  other.zip
         None,
         "app://localhost",
         false,
-        None
+        None,
+        &Default::default(),
       )
       .is_err()
     );
@@ -11159,8 +11253,57 @@ def456  other.zip
       "app://localhost",
       true,
       None,
+      &Default::default(),
     )
     .unwrap();
+  }
+
+  #[test]
+  fn media_capture_origins_are_exact() {
+    assert_eq!(
+      media_capture_origins(
+        "microphone",
+        vec![
+          "acme://app".to_string(),
+          "http://127.0.0.1:5173".to_string(),
+          "https://example.com/".to_string(),
+          "*".to_string(),
+          "acme://*".to_string(),
+          "https://example.com/path".to_string(),
+          "https://example.com/?q".to_string(),
+          "https://user@example.com".to_string(),
+          "file:///tmp".to_string(),
+          "data:text/plain,x".to_string(),
+          "not an origin".to_string(),
+        ],
+      ),
+      vec![
+        "acme://app".to_string(),
+        "http://127.0.0.1:5173".to_string(),
+        "https://example.com".to_string(),
+      ]
+    );
+  }
+
+  #[test]
+  fn desktop_config_media_capture_reaches_the_flags() {
+    let mut flags = DesktopFlags {
+      source_file: "main.ts".to_string(),
+      ..Default::default()
+    };
+    let config = DesktopConfig {
+      app: Some(deno_config::deno_json::DesktopAppConfig {
+        media_capture: Some(deno_config::deno_json::DesktopMediaCaptureConfig {
+          microphone: vec!["acme://app".to_string(), "*".to_string()],
+          camera: vec![],
+        }),
+        ..Default::default()
+      }),
+      ..Default::default()
+    };
+    apply_desktop_config_to_flags(&mut flags, config);
+    assert_eq!(flags.media_capture.microphone, vec!["acme://app".to_string()]);
+    assert!(flags.media_capture.camera.is_empty());
   }
 
   #[test]

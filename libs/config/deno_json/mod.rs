@@ -1124,6 +1124,19 @@ struct SerializedDesktopAppConfig {
   /// first frame: a tray / menu-bar app).
   #[serde(rename = "activationPolicy")]
   pub activation_policy: Option<String>,
+  /// The origins the packaged app grants the microphone and / or the camera
+  /// without asking (`getUserMedia`), as exact origins:
+  /// `{ "microphone": ["acme://app"], "camera": ["acme://app"] }`. Written to
+  /// the launch file's `mediaCapture` (laufey API 53).
+  #[serde(rename = "mediaCapture")]
+  pub media_capture: Option<SerializedDesktopMediaCaptureConfig>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+struct SerializedDesktopMediaCaptureConfig {
+  pub microphone: Option<Vec<String>>,
+  pub camera: Option<Vec<String>>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
@@ -1204,6 +1217,10 @@ impl SerializedDesktopConfig {
         origin: a.origin,
         single_instance: a.single_instance,
         activation_policy: a.activation_policy,
+        media_capture: a.media_capture.map(|m| DesktopMediaCaptureConfig {
+          microphone: m.microphone.unwrap_or_default(),
+          camera: m.camera.unwrap_or_default(),
+        }),
         icons: a.icons.map(|i| {
           fn resolve_icon_value(
             v: SerializedDesktopIconValue,
@@ -1299,6 +1316,15 @@ pub struct DesktopAppConfig {
   pub single_instance: Option<bool>,
   /// `desktop.app.activationPolicy` as written; validated by the CLI.
   pub activation_policy: Option<String>,
+  /// `desktop.app.mediaCapture` as written; validated by the CLI.
+  pub media_capture: Option<DesktopMediaCaptureConfig>,
+}
+
+/// `desktop.app.mediaCapture`: the origins granted each device.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct DesktopMediaCaptureConfig {
+  pub microphone: Vec<String>,
+  pub camera: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -3910,6 +3936,27 @@ mod tests {
     let desktop = unpack_object(config_file.to_desktop_config(), "desktop");
     let app = desktop.app.expect("desktop.app must be parsed");
     assert_eq!(app.activation_policy.as_deref(), Some("accessory"));
+  }
+
+  #[test]
+  fn test_parse_desktop_app_config_media_capture() {
+    let config_text = r#"{ "desktop": { "app": { "mediaCapture": { "microphone": ["acme://app"] } } } }"#;
+    let config_specifier = Url::parse("file:///deno/deno.json").unwrap();
+    let config_file = ConfigFile::new(config_text, config_specifier).unwrap();
+    let desktop = unpack_object(config_file.to_desktop_config(), "desktop");
+    let app = desktop.app.expect("desktop.app must be parsed");
+    assert_eq!(
+      app.media_capture,
+      Some(DesktopMediaCaptureConfig {
+        microphone: vec!["acme://app".to_string()],
+        camera: vec![],
+      })
+    );
+    // A kind other than the microphone and the camera is an error.
+    let config_text = r#"{ "desktop": { "app": { "mediaCapture": { "screen": ["acme://app"] } } } }"#;
+    let config_specifier = Url::parse("file:///deno/deno.json").unwrap();
+    let config_file = ConfigFile::new(config_text, config_specifier).unwrap();
+    assert!(config_file.to_desktop_config().is_err());
   }
 
   #[test]

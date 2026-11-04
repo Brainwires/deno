@@ -2966,6 +2966,7 @@ fn desktop_parse(
     deep_links: Vec::new(),
     single_instance: false,
     activation_policy: None,
+    media_capture: Default::default(),
     codesign_identity: None,
     inspect_renderer,
     compress,

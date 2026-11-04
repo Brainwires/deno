@@ -66,11 +66,12 @@ denort = { path = "../rt", default-features = false }
 # the per-window background policy, branch
 # `fix/macos-hidden-page-and-hit-region`, and the Windows focus, tray role and
 # window icon fixes, branch `fix/windows-focus-tray-roles`; API 52: quit
-# requests and layer-surface edge anchoring, all on `development-denext`),
-# pinned to a commit of the Brainwires/laufey fork.
+# requests and layer-surface edge anchoring; runtime 3.0.0-denext.9, API 53:
+# microphone and camera requests and the `mediaCapture` launch key, all on
+# `development-denext`), pinned to a commit of the Brainwires/laufey fork.
 # The host built from the same commit must be used with it (the API version
 # check is exact).
-laufey = { git = "https://github.com/Brainwires/laufey", rev = "99a1c2e3d2588a4f30fc373fbf17392a487dfdff" }
+laufey = { git = "https://github.com/Brainwires/laufey", rev = "6d88bf8d1c1ca2cefd0b71f87dc18026d5ee037d" }
 libsui.workspace = true
 
 bytes.workspace = true
