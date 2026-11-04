@@ -9930,6 +9930,20 @@ where the changes are discussed.
      en-US, in the main thread and in a worker; the `--seed` cases fail on the
      base, which reports Tokyo and German).
 
+261. **`feat(desktop)`: a build-time warning for a `mediaCapture` origin that is
+     not the app's** (`feat/denext10-hygiene`; CLI; `cli/tools/desktop.rs`).
+     `desktop.app.mediaCapture` grants the microphone or camera without asking
+     (item 239, laufey API 53). `deno desktop` now warns, once per entry,
+     when a listed origin is not the app's own origin (`desktop.app.origin`,
+     else the project's `.deno-desktop/app.json` origin, else
+     `app://localhost`, as `desktop_bridge_origin` resolves it), e.g. a dev
+     server or a third-party page. It only warns: listing another origin is an
+     explicit opt-in, and the grant is still written to the launch file.
+
+     Tests: unit `media_capture_origins_other_than_the_app_origin_are_flagged`
+     (foreign origins of both kinds in config order, none for the app's own,
+     every entry against the default origin).
+
 
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
