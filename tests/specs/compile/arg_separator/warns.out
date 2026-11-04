@@ -1,0 +1,4 @@
+Warning --allow-read -o after the script are embedded in the executable as its arguments, not read by `deno compile`.
+  Put `deno compile`'s flags before the script, or put `--` before the arguments to embed (set DENO_COMPILE_ARG_SEPARATOR=strict to require it).
+Check [WILDCARD]main.ts
+Compile [WILDCARD]

@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 use deno_ast::MediaType;
 use deno_ast::ModuleSpecifier;
+use deno_config::deno_json::CompileArgSeparator;
 use deno_config::deno_json::NodeModulesDirMode;
 use deno_core::anyhow::Context;
 use deno_core::anyhow::anyhow;
@@ -635,7 +636,7 @@ function __internalResolveBundlePath(rel) {
 
 pub async fn compile_binary(
   flags: Arc<Flags>,
-  compile_flags: CompileFlags,
+  mut compile_flags: CompileFlags,
   is_desktop: bool,
   watcher_communicator: Option<Arc<WatcherCommunicator>>,
 ) -> Result<PathBuf, AnyError> {
@@ -658,6 +659,12 @@ pub async fn compile_binary(
   )
   .await?;
   let compile_config = cli_options.start_dir.to_compile_config()?;
+  if !is_desktop {
+    apply_compile_arg_separator(
+      &mut compile_flags.args,
+      resolve_compile_arg_separator(compile_config.arg_separator)?,
+    )?;
+  }
   let mut effective_include = compile_config.include.clone();
   for inc in &compile_flags.include {
     if !effective_include.contains(inc) {
@@ -902,7 +909,7 @@ pub fn copy_dir_all(src: &Path, dst: &Path) -> Result<(), AnyError> {
 
 async fn compile_eszip(
   flags: Arc<Flags>,
-  compile_flags: CompileFlags,
+  mut compile_flags: CompileFlags,
   watcher_communicator: Option<Arc<WatcherCommunicator>>,
 ) -> Result<(), AnyError> {
   let factory = if let Some(watcher_communicator) = watcher_communicator.clone()
@@ -929,6 +936,10 @@ async fn compile_eszip(
   let maybe_import_map_specifier =
     cli_options.resolve_specified_import_map_specifier()?;
   let compile_config = cli_options.start_dir.to_compile_config()?;
+  apply_compile_arg_separator(
+    &mut compile_flags.args,
+    resolve_compile_arg_separator(compile_config.arg_separator)?,
+  )?;
   let mut effective_include = compile_config.include.clone();
   for inc in &compile_flags.include {
     if !effective_include.contains(inc) {
@@ -1028,6 +1039,68 @@ async fn compile_eszip(
 
 /// This function writes out a final binary to specified path. If output path
 /// is not already standalone binary it will return error instead.
+const COMPILE_ARG_SEPARATOR_ENV: &str = "DENO_COMPILE_ARG_SEPARATOR";
+
+/// `DENO_COMPILE_ARG_SEPARATOR` when set, else deno.json's
+/// `compile.argSeparator`, else `warn`.
+fn resolve_compile_arg_separator(
+  config: Option<CompileArgSeparator>,
+) -> Result<CompileArgSeparator, AnyError> {
+  match std::env::var(COMPILE_ARG_SEPARATOR_ENV) {
+    Ok(value) => parse_compile_arg_separator(&value),
+    Err(_) => Ok(config.unwrap_or_default()),
+  }
+}
+
+fn parse_compile_arg_separator(
+  value: &str,
+) -> Result<CompileArgSeparator, AnyError> {
+  match value {
+    "warn" => Ok(CompileArgSeparator::Warn),
+    "strict" => Ok(CompileArgSeparator::Strict),
+    other => bail!(
+      "Invalid {COMPILE_ARG_SEPARATOR_ENV} value '{other}': expected \"warn\" or \"strict\""
+    ),
+  }
+}
+
+/// The arguments after the script are embedded in the executable. Without a
+/// `--` before them, ones that look like `deno compile` flags were most
+/// likely meant for `deno compile` (upstream #30334): `warn` names them;
+/// `strict` requires the `--`, and does not embed it.
+fn apply_compile_arg_separator(
+  args: &mut Vec<String>,
+  mode: CompileArgSeparator,
+) -> Result<(), AnyError> {
+  let has_separator = args.first().is_some_and(|arg| arg == "--");
+  match mode {
+    CompileArgSeparator::Strict => {
+      if has_separator {
+        args.remove(0);
+      } else if !args.is_empty() {
+        bail!(
+          "`deno compile` requires `--` before the arguments to embed in the executable ({COMPILE_ARG_SEPARATOR_ENV} or compile.argSeparator is \"strict\").\n  Got: {}\n  Put `deno compile`'s flags before the script: deno compile [OPTIONS] <SCRIPT> -- [ARGS]...",
+          args.join(" ")
+        );
+      }
+    }
+    CompileArgSeparator::Warn => {
+      if !has_separator {
+        let flag_like = deno_cli_parser::convert::compile_flag_like_args(args);
+        if !flag_like.is_empty() {
+          log::warn!(
+            "{} {} after the script {} embedded in the executable as its arguments, not read by `deno compile`.\n  Put `deno compile`'s flags before the script, or put `--` before the arguments to embed (set {COMPILE_ARG_SEPARATOR_ENV}=strict to require it).",
+            colors::yellow("Warning"),
+            flag_like.join(" "),
+            if flag_like.len() == 1 { "is" } else { "are" },
+          );
+        }
+      }
+    }
+  }
+  Ok(())
+}
+
 fn validate_output_path(output_path: &Path) -> Result<(), AnyError> {
   if output_path.exists() {
     // If the output is a directory, throw error
@@ -1386,6 +1459,58 @@ mod test {
   pub use super::*;
   use crate::http_util::HttpClientProvider;
   use crate::util::env::resolve_cwd;
+
+  fn strings(args: &[&str]) -> Vec<String> {
+    args.iter().map(|s| s.to_string()).collect()
+  }
+
+  #[test]
+  fn compile_arg_separator_strict_requires_and_strips_separator() {
+    let mut args = strings(&["--", "--port", "8080"]);
+    apply_compile_arg_separator(&mut args, CompileArgSeparator::Strict)
+      .unwrap();
+    assert_eq!(args, strings(&["--port", "8080"]));
+
+    let mut args = strings(&["--port", "8080"]);
+    let err =
+      apply_compile_arg_separator(&mut args, CompileArgSeparator::Strict)
+        .unwrap_err();
+    assert!(err.to_string().contains("requires `--`"), "{err}");
+
+    // No embedded arguments needs no separator.
+    let mut args = Vec::new();
+    apply_compile_arg_separator(&mut args, CompileArgSeparator::Strict)
+      .unwrap();
+    assert!(args.is_empty());
+  }
+
+  #[test]
+  fn compile_arg_separator_warn_keeps_args() {
+    // `warn` only warns: the embedded argv is unchanged, a leading `--`
+    // included, as before.
+    for input in [
+      strings(&["--output", "out"]),
+      strings(&["--", "--output", "out"]),
+    ] {
+      let mut args = input.clone();
+      apply_compile_arg_separator(&mut args, CompileArgSeparator::Warn)
+        .unwrap();
+      assert_eq!(args, input);
+    }
+  }
+
+  #[test]
+  fn compile_arg_separator_env_values() {
+    assert_eq!(
+      parse_compile_arg_separator("strict").unwrap(),
+      CompileArgSeparator::Strict
+    );
+    assert_eq!(
+      parse_compile_arg_separator("warn").unwrap(),
+      CompileArgSeparator::Warn
+    );
+    assert!(parse_compile_arg_separator("on").is_err());
+  }
 
   #[test]
   fn compile_watch_paths_include_includes_and_icon() {

@@ -1000,6 +1000,21 @@ struct SerializedCompileConfig {
   pub include: Vec<String>,
   pub exclude: Vec<String>,
   pub permissions: Option<PermissionNameOrObject>,
+  #[serde(rename = "argSeparator")]
+  pub arg_separator: Option<CompileArgSeparator>,
+}
+
+/// `compile.argSeparator`: how `deno compile` treats the arguments after the
+/// script when no `--` separates them from it (upstream #30334).
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum CompileArgSeparator {
+  /// Embed them, and warn about any that name a `deno compile` flag.
+  #[default]
+  Warn,
+  /// Refuse them: the embedded arguments must follow a `--`, which is not
+  /// itself embedded.
+  Strict,
 }
 
 impl SerializedCompileConfig {
@@ -1033,6 +1048,7 @@ impl SerializedCompileConfig {
         }
         None => None,
       },
+      arg_separator: self.arg_separator,
     })
   }
 }
@@ -1042,6 +1058,8 @@ pub struct CompileConfig {
   pub include: Vec<String>,
   pub exclude: Vec<String>,
   pub permissions: Option<Box<PermissionsObjectWithBase>>,
+  /// `compile.argSeparator`; `None` when not set.
+  pub arg_separator: Option<CompileArgSeparator>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
@@ -3763,6 +3781,33 @@ mod tests {
       std::error::Error::source(&err).unwrap().to_string(),
       r#"Invalid exclude: The negation of '!dist/data' is never reached due to the higher priority 'dist/' exclude. Move '!dist/data' after 'dist/'."#
     );
+  }
+
+  #[test]
+  fn compile_arg_separator() {
+    let config_specifier = Url::parse("file:///deno/deno.json").unwrap();
+    let parse = |text: &str| {
+      ConfigFile::new(text, config_specifier.clone())
+        .unwrap()
+        .to_compile_config(&Default::default())
+    };
+    assert_eq!(parse(r#"{ "compile": {} }"#).unwrap().arg_separator, None);
+    assert_eq!(
+      parse(r#"{ "compile": { "argSeparator": "strict" } }"#)
+        .unwrap()
+        .arg_separator,
+      Some(CompileArgSeparator::Strict)
+    );
+    assert_eq!(
+      parse(r#"{ "compile": { "argSeparator": "warn" } }"#)
+        .unwrap()
+        .arg_separator,
+      Some(CompileArgSeparator::Warn)
+    );
+    let err = parse(r#"{ "compile": { "argSeparator": "always" } }"#)
+      .err()
+      .unwrap();
+    assert_eq!(err.to_string(), "Failed to parse \"compile\" configuration");
   }
 
   #[test]

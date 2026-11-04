@@ -35,6 +35,11 @@ pub static ENV_VARS: &[EnvVar] = &[
     example: None,
   },
   EnvVar {
+    name: "DENO_COMPILE_ARG_SEPARATOR",
+    description: "\"strict\" makes `deno compile` require `--` before the arguments\nembedded in the executable; \"warn\" (the default) warns about ones that\nlook like a `deno compile` flag. Overrides deno.json's compile.argSeparator.",
+    example: None,
+  },
+  EnvVar {
     name: "DENO_CONDITIONS",
     description: "Comma-separated list of custom conditions to resolve npm package\nexports and imports with. Equivalent to using the --conditions flag.",
     example: None,
