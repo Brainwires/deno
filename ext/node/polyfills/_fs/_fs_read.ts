@@ -10,6 +10,7 @@ import {
   getValidatedFd,
   validateOffsetLengthRead,
   validatePosition,
+  vfsState,
 } from "ext:deno_node/internal/fs/utils.mjs";
 import { core, primordials } from "ext:core/mod.js";
 const {
@@ -160,6 +161,20 @@ export function read(
     getByteLength(buffer as ArrayBufferView),
   );
 
+  // node:vfs: a mounted virtual file system answers its own descriptors.
+  const h = vfsState.handlers;
+  if (h !== null) {
+    const promise = h.read(fd, buffer, offset, length, position);
+    if (promise !== undefined) {
+      PromisePrototypeThen(
+        promise,
+        (bytesRead: number) => callback!(null, bytesRead, buffer),
+        callback!,
+      );
+      return;
+    }
+  }
+
   // BigInt avoids precision loss for positions > 2^53. -1n means current pos.
   const readPos = position != null && position >= 0
     ? BigInt(position as number | bigint)
@@ -251,6 +266,13 @@ export function readSync(
   }
 
   validateOffsetLengthRead(offset, length, getByteLength(buffer));
+
+  // node:vfs: a mounted virtual file system answers its own descriptors.
+  const h = vfsState.handlers;
+  if (h !== null) {
+    const result = h.readSync(fd, buffer, offset, length, position);
+    if (result !== undefined) return result;
+  }
 
   // BigInt avoids precision loss for positions > 2^53. -1n means current pos.
   const pos = position != null && position >= 0

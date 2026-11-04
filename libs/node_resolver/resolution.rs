@@ -71,6 +71,7 @@ use crate::errors::TypesNotFoundErrorData;
 use crate::errors::UnknownBuiltInNodeModuleError;
 use crate::errors::UnsupportedDirImportError;
 use crate::errors::UnsupportedEsmUrlSchemeError;
+use crate::is_node_scheme_only_builtin;
 use crate::path::UrlOrPath;
 use crate::path::UrlOrPathRef;
 
@@ -519,7 +520,9 @@ impl<
       );
     }
 
-    if self.is_builtin_node_module(specifier) {
+    if self.is_builtin_node_module(specifier)
+      && !is_node_scheme_only_builtin(specifier)
+    {
       return Ok(NodeResolution::BuiltIn(specifier.to_string()));
     }
 
@@ -1533,6 +1536,7 @@ impl<
                 if self
                   .is_built_in_node_module_checker
                   .is_builtin_node_module(target)
+                  && !is_node_scheme_only_builtin(target)
                 {
                   Ok(MaybeTypesResolvedUrl(LocalUrlOrPath::Url(
                     Url::parse(&format!("node:{}", target)).unwrap(),

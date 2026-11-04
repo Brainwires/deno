@@ -1,0 +1,6 @@
+{
+  // `vfs`, `test`, `test/reporters` and `sqlite` are built-ins only with the
+  // `node:` scheme, as in Node: a bare specifier of that name is a package.
+  "args": "run -A main.mjs",
+  "output": "main.out"
+}

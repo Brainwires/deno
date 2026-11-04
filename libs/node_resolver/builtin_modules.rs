@@ -20,6 +20,19 @@ impl IsBuiltInNodeModuleChecker for DenoIsBuiltInNodeModuleChecker {
   }
 }
 
+/// The built-in modules of `DENO_SUPPORTED_BUILTIN_NODE_MODULES` that, as in
+/// Node (`schemelessBlockList` in `lib/internal/bootstrap/realm.js`), are only
+/// built-ins with the `node:` scheme: a bare `vfs` names a package. Keep in sync
+/// with `schemelessBlockList` in `ext/node/polyfills/01_require.js`.
+pub static NODE_SCHEME_ONLY_BUILTIN_NODE_MODULES: &[&str] =
+  &["sqlite", "test", "test/reporters", "vfs"];
+
+/// Whether `module_name` is a built-in only with the `node:` scheme, so a bare
+/// specifier of that name is not resolved to it.
+pub fn is_node_scheme_only_builtin(module_name: &str) -> bool {
+  NODE_SCHEME_ONLY_BUILTIN_NODE_MODULES.contains(&module_name)
+}
+
 /// Collection of built-in node_modules supported by Deno.
 pub static DENO_SUPPORTED_BUILTIN_NODE_MODULES: &[&str] = &[
   // NOTE(bartlomieju): keep this list in sync with `ext/node/polyfills/01_require.js`
@@ -72,6 +85,7 @@ pub static DENO_SUPPORTED_BUILTIN_NODE_MODULES: &[&str] = &[
   "sqlite",
   "stream",
   "stream/consumers",
+  "stream/iter",
   "stream/promises",
   "stream/web",
   "string_decoder",
@@ -87,10 +101,12 @@ pub static DENO_SUPPORTED_BUILTIN_NODE_MODULES: &[&str] = &[
   "util",
   "util/types",
   "v8",
+  "vfs",
   "vm",
   "wasi",
   "worker_threads",
   "zlib",
+  "zlib/iter",
 ];
 
 #[cfg(test)]
@@ -102,5 +118,15 @@ mod test {
     let mut builtins_list = DENO_SUPPORTED_BUILTIN_NODE_MODULES.to_vec();
     builtins_list.sort();
     assert_eq!(DENO_SUPPORTED_BUILTIN_NODE_MODULES, builtins_list);
+  }
+
+  #[test]
+  fn scheme_only_builtins_are_builtins() {
+    for name in NODE_SCHEME_ONLY_BUILTIN_NODE_MODULES {
+      assert!(DenoIsBuiltInNodeModuleChecker.is_builtin_node_module(name));
+      assert!(is_node_scheme_only_builtin(name));
+    }
+    assert!(!is_node_scheme_only_builtin("fs"));
+    assert!(!is_node_scheme_only_builtin("stream/iter"));
   }
 }

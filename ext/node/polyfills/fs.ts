@@ -39,32 +39,36 @@ const {
 type statCallback = any;
 type statCallbackBigInt = any;
 type statOptions = any;
-const { copyFile, copyFileSync } = core.createLazyLoader(
-  "ext:deno_node/_fs/_fs_copy.ts",
-)();
+const { copyFile: copyFileImpl, copyFileSync: copyFileSyncImpl } = core
+  .createLazyLoader(
+    "ext:deno_node/_fs/_fs_copy.ts",
+  )();
 const { cp, cpSync } = core.loadExtScript("ext:deno_node/_fs/_fs_cp.ts");
 const { default: Dir, openDirHandle, openDirHandleSync } = core
   .createLazyLoader(
     "ext:deno_node/_fs/_fs_dir.ts",
   )();
-const { exists, existsSync } = core.createLazyLoader(
-  "ext:deno_node/_fs/_fs_exists.ts",
-)();
-const { fstat, fstatSync } = core.loadExtScript(
+const { exists: existsImpl, existsSync: existsSyncImpl } = core
+  .createLazyLoader(
+    "ext:deno_node/_fs/_fs_exists.ts",
+  )();
+const { fstat: fstatImpl, fstatSync: fstatSyncImpl } = core.loadExtScript(
   "ext:deno_node/_fs/_fs_fstat.ts",
 );
-const { lstat, lstatSync } = core.loadExtScript(
+const { lstat: lstatImpl, lstatSync: lstatSyncImpl } = core.loadExtScript(
   "ext:deno_node/_fs/_fs_lstat.ts",
 );
-const { lutimes, lutimesSync } = core.createLazyLoader(
-  "ext:deno_node/_fs/_fs_lutimes.ts",
-)();
+const { lutimes: lutimesImpl, lutimesSync: lutimesSyncImpl } = core
+  .createLazyLoader(
+    "ext:deno_node/_fs/_fs_lutimes.ts",
+  )();
 const { read, readSync } = core.createLazyLoader(
   "ext:deno_node/_fs/_fs_read.ts",
 )();
-const { readdir, readdirSync } = core.createLazyLoader(
-  "ext:deno_node/_fs/_fs_readdir.ts",
-)();
+const { readdir: readdirImpl, readdirSync: readdirSyncImpl } = core
+  .createLazyLoader(
+    "ext:deno_node/_fs/_fs_readdir.ts",
+  )();
 const { EventEmitter } = core.loadExtScript("ext:deno_node/_events.mjs");
 const lazyTimers = core.createLazyLoader("node:timers");
 const { clearTimeout, setTimeout } = lazyTimers();
@@ -122,6 +126,150 @@ const {
   validateStringAfterArrayBufferView,
   warnOnNonPortableTemplate,
 } = core.createLazyLoader("ext:deno_node/internal/fs/utils.mjs")();
+const { vfsState } = core.createLazyLoader(
+  "ext:deno_node/internal/fs/utils.mjs",
+)();
+
+// node:vfs: while a virtual file system is mounted, `vfsState.handlers`
+// (internal/vfs/setup.js) answers the calls on its paths and virtual file
+// descriptors, as in Node's lib/fs.js; a handler returns `undefined` for
+// anything else, which then reaches the real file system (and Deno's
+// permission checks) as before. These route a handler's promise to an
+// error-first callback. Node's own setup.js has no `readv`, `writev`,
+// `watchFile`, `unwatchFile` or `promisesWatch` handler, which its fs calls
+// unconditionally; those are called only when present here.
+function vfsResult(promise, callback) {
+  if (promise === undefined) return false;
+  PromisePrototypeThen(promise, (result) => callback(null, result), callback);
+  return true;
+}
+
+function vfsVoid(promise, callback) {
+  if (promise === undefined) return false;
+  PromisePrototypeThen(promise, () => callback(null), callback);
+  return true;
+}
+
+function vfsCheckAborted(signal, callback) {
+  if (signal?.aborted) {
+    callback(new AbortError(undefined, { cause: signal.reason }));
+    return true;
+  }
+  return false;
+}
+
+function exists(path, callback) {
+  const h = vfsState.handlers;
+  if (h !== null) {
+    const result = h.existsSync(path);
+    if (result !== undefined) {
+      lazyProcess().default.nextTick(makeCallback(callback), result);
+      return;
+    }
+  }
+  return existsImpl(path, callback);
+}
+function existsSync(path) {
+  const h = vfsState.handlers;
+  if (h !== null) {
+    const result = h.existsSync(path);
+    if (result !== undefined) return result;
+  }
+  return existsSyncImpl(path);
+}
+
+function fstat(fd, options, callback) {
+  const h = vfsState.handlers;
+  if (h !== null) {
+    const cb = typeof options === "function" ? options : callback;
+    const opts = typeof options === "function" ? undefined : options;
+    if (
+      vfsResult(h.fstat(fd, opts ?? { __proto__: null, bigint: false }), cb)
+    ) {
+      return;
+    }
+  }
+  return fstatImpl(fd, options, callback);
+}
+
+function fstatSync(fd, options) {
+  const h = vfsState.handlers;
+  if (h !== null) {
+    const result = h.fstatSync(fd);
+    if (result !== undefined) return result;
+  }
+  return fstatSyncImpl(fd, options);
+}
+
+function lstat(path, options, callback) {
+  const h = vfsState.handlers;
+  if (h !== null) {
+    const cb = typeof options === "function" ? options : callback;
+    const opts = typeof options === "function" ? undefined : options;
+    if (
+      vfsResult(h.lstat(path, opts ?? { __proto__: null, bigint: false }), cb)
+    ) {
+      return;
+    }
+  }
+  return lstatImpl(path, options, callback);
+}
+
+function lstatSync(path, options) {
+  const h = vfsState.handlers;
+  if (h !== null) {
+    const result = h.lstatSync(path, options);
+    if (result !== undefined) return result;
+  }
+  return lstatSyncImpl(path, options);
+}
+
+function lutimes(path, atime, mtime, callback) {
+  const h = vfsState.handlers;
+  if (h !== null && vfsVoid(h.lutimes(path, atime, mtime), callback)) return;
+  return lutimesImpl(path, atime, mtime, callback);
+}
+
+function lutimesSync(path, atime, mtime) {
+  const h = vfsState.handlers;
+  if (h !== null && h.lutimesSync(path, atime, mtime) !== undefined) return;
+  return lutimesSyncImpl(path, atime, mtime);
+}
+
+function readdir(path, options, callback) {
+  const h = vfsState.handlers;
+  if (h !== null) {
+    const cb = typeof options === "function" ? options : callback;
+    const opts = typeof options === "function" ? undefined : options;
+    if (vfsResult(h.readdir(path, getOptions(opts)), cb)) return;
+  }
+  return readdirImpl(path, options, callback);
+}
+
+function readdirSync(path, options) {
+  const h = vfsState.handlers;
+  if (h !== null) {
+    const result = h.readdirSync(path, options);
+    if (result !== undefined) return result;
+  }
+  return readdirSyncImpl(path, options);
+}
+
+function copyFile(src, dest, mode, callback) {
+  const h = vfsState.handlers;
+  if (h !== null) {
+    const cb = typeof mode === "function" ? mode : callback;
+    const m = typeof mode === "function" ? 0 : mode;
+    if (vfsVoid(h.copyFile(src, dest, m), cb)) return;
+  }
+  return copyFileImpl(src, dest, mode, callback);
+}
+
+function copyFileSync(src, dest, mode) {
+  const h = vfsState.handlers;
+  if (h !== null && h.copyFileSync(src, dest, mode) !== undefined) return;
+  return copyFileSyncImpl(src, dest, mode);
+}
 const { glob, globSync } = core.createLazyLoader(
   "ext:deno_node/_fs/_fs_glob.ts",
 )();
@@ -248,6 +396,26 @@ const {
   queueMicrotask,
 } = primordials;
 
+const { kCustomPromisifiedSymbol } = core.loadExtScript(
+  "ext:deno_node/internal/util.mjs",
+);
+// As _fs_exists.ts does for its own: `promisify(fs.exists)` resolves with the
+// boolean, and through this wrapper.
+const existsPromisified = (path) =>
+  new Promise((resolve) => exists(path, resolve));
+ObjectDefineProperty(existsPromisified, "name", {
+  __proto__: null,
+  value: "exists",
+  configurable: true,
+});
+ObjectDefineProperty(exists, kCustomPromisifiedSymbol, {
+  __proto__: null,
+  value: existsPromisified,
+  enumerable: false,
+  writable: false,
+  configurable: true,
+});
+
 const abortSignal = core.loadExtScript("ext:deno_web/03_abort_signal.js");
 const { pathFromURL } = core.loadExtScript("ext:deno_web/00_infra.js");
 const { URLPrototype } = core.loadExtScript("ext:deno_web/00_url.js");
@@ -291,6 +459,9 @@ function stat(
   }
   callback = makeCallback(callback);
   path = getValidatedPathToString(path);
+
+  const h = vfsState.handlers;
+  if (h !== null && vfsResult(h.stat(path, options), callback)) return;
 
   // Node's lib/fs.js stat(): an already aborted `options.signal` fails the
   // call with an `AbortError` instead of starting it.
@@ -343,6 +514,12 @@ function statSync(
   options: statOptions = defaultStatSyncOptions,
 ): Stats | BigIntStats | undefined {
   path = getValidatedPathToString(path);
+
+  const h = vfsState.handlers;
+  if (h !== null) {
+    const result = h.statSync(path, options);
+    if (result !== undefined) return result;
+  }
 
   try {
     const origin = Deno.statSync(path);
@@ -408,6 +585,11 @@ function realpathImpl(
   options = getOptions(options) as RealpathEncodingObj;
   const validatedPath = getValidatedPathToString(path);
 
+  const h = vfsState.handlers;
+  if (h !== null && vfsResult(h.realpath(validatedPath, options), callback)) {
+    return;
+  }
+
   PromisePrototypeThen(
     Deno.realPath(validatedPath),
     (resolved) =>
@@ -448,6 +630,11 @@ function realpathSyncImpl(
 ): string | Buffer {
   options = getOptions(options) as RealpathEncodingObj;
   const validatedPath = getValidatedPathToString(path);
+  const h = vfsState.handlers;
+  if (h !== null) {
+    const result = h.realpathSync(validatedPath, options);
+    if (result !== undefined) return result;
+  }
   try {
     const result = Deno.realPathSync(validatedPath);
     return encodeRealpathResult(result, options);
@@ -556,6 +743,18 @@ function readv(
     validateInteger(position, "position", 0);
     pos = position;
   }
+  const h = vfsState.handlers;
+  if (h !== null) {
+    const promise = h.readv?.(fd, buffers, pos);
+    if (promise !== undefined) {
+      PromisePrototypeThen(
+        promise,
+        (read) => cb(null, read, buffers),
+        cb,
+      );
+      return;
+    }
+  }
 
   if (buffers.length === 0) {
     lazyProcess().default.nextTick(cb, null, 0, buffers);
@@ -596,6 +795,12 @@ function readvSync(
   }
   fd = getValidatedFd(fd);
   validateBufferArray(buffers);
+
+  const h = vfsState.handlers;
+  if (h !== null) {
+    const result = h.readvSync(fd, buffers, position);
+    if (result !== undefined) return result;
+  }
   if (buffers.length === 0) {
     return 0;
   }
@@ -900,6 +1105,15 @@ function readFile(
     cb = callback;
   }
 
+  const h = vfsState.handlers;
+  if (h !== null && cb) {
+    const opts = typeof optOrCallback === "function"
+      ? undefined
+      : optOrCallback;
+    if (vfsCheckAborted(opts?.signal, cb)) return;
+    if (vfsResult(h.readFile(pathOrRid, opts), cb)) return;
+  }
+
   const options = getOptions<FileOptions>(
     optOrCallback,
     readFileDefaultOptions,
@@ -962,6 +1176,11 @@ function readFileSync(
   path: string | URL | number,
   opt?: FileOptionsArgument,
 ): string | Buffer {
+  const h = vfsState.handlers;
+  if (h !== null) {
+    const result = h.readFileSync(path, opt);
+    if (result !== undefined) return result;
+  }
   const options = getOptions<FileOptions>(opt, readFileDefaultOptions);
   validateReadFileBufferOption(options);
 
@@ -1035,6 +1254,18 @@ function readlink(
   }
   cb = makeCallback(cb);
 
+  const h = vfsState.handlers;
+  if (
+    h !== null &&
+    vfsResult(
+      h.readlink(
+        path,
+        typeof optOrCallback === "function" ? undefined : optOrCallback,
+      ),
+      cb,
+    )
+  ) return;
+
   const encoding = readlinkGetEncoding(optOrCallback);
 
   PromisePrototypeThen(
@@ -1064,6 +1295,12 @@ function readlinkSync(
   opt?: ReadlinkOptions,
 ): string | Uint8Array {
   path = getValidatedPathToString(path);
+
+  const h = vfsState.handlers;
+  if (h !== null) {
+    const result = h.readlinkSync(path, opt);
+    if (result !== undefined) return result;
+  }
   const encoding = readlinkGetEncoding(opt);
 
   try {
@@ -1189,6 +1426,14 @@ function statfs(
   callback = makeCallback(callback);
   path = getValidatedPathToString(path);
   const bigint = typeof options?.bigint === "boolean" ? options.bigint : false;
+  const h = vfsState.handlers;
+  if (h !== null) {
+    const result = h.statfsSync(path, options);
+    if (result !== undefined) {
+      lazyProcess().default.nextTick(callback, null, result);
+      return;
+    }
+  }
 
   PromisePrototypeThen(
     op_node_statfs(path, bigint),
@@ -1219,6 +1464,12 @@ function statfsSync(
   options?: StatFsOptions,
 ): StatFs<number> | StatFs<bigint> {
   path = getValidatedPathToString(path);
+
+  const h = vfsState.handlers;
+  if (h !== null) {
+    const result = h.statfsSync(path, options);
+    if (result !== undefined) return result;
+  }
   const bigint = typeof options?.bigint === "boolean" ? options.bigint : false;
 
   try {
@@ -1244,6 +1495,9 @@ function access(
     callback = mode;
     mode = fsConstants.F_OK;
   }
+
+  const h = vfsState.handlers;
+  if (h !== null && vfsVoid(h.access(path, mode), callback)) return;
 
   // deno-lint-ignore deno-internal/prefer-primordials
   path = getValidatedPath(path).toString();
@@ -1298,6 +1552,8 @@ function access(
 }
 
 function accessSync(path: string | Buffer | URL, mode?: number) {
+  const h = vfsState.handlers;
+  if (h !== null && h.accessSync(path, mode) !== undefined) return;
   // deno-lint-ignore deno-internal/prefer-primordials
   path = getValidatedPath(path).toString();
   mode = getValidMode(mode, "access");
@@ -1362,6 +1618,12 @@ function appendFile(
     options.flag = "a";
   }
 
+  const h = vfsState.handlers;
+  if (h !== null) {
+    if (vfsCheckAborted(options.signal, callback)) return;
+    if (vfsVoid(h.appendFile(path, data, options), callback)) return;
+  }
+
   writeFile(path, data, options, callback);
 }
 
@@ -1384,6 +1646,11 @@ function appendFileSync(
     options.flag = "a";
   }
 
+  const h = vfsState.handlers;
+  if (h !== null && h.appendFileSync(path, data, options) !== undefined) {
+    return;
+  }
+
   writeFileSync(path, data, options);
 }
 
@@ -1394,6 +1661,9 @@ function chmod(
 ) {
   path = getValidatedPathToString(path);
   mode = parseFileMode(mode, "mode");
+
+  const h = vfsState.handlers;
+  if (h !== null && vfsVoid(h.chmod(path, mode), callback)) return;
 
   PromisePrototypeThen(
     Deno.chmod(path, mode),
@@ -1406,6 +1676,9 @@ function chmod(
 function chmodSync(path: string | Buffer | URL, mode: string | number) {
   path = getValidatedPathToString(path);
   mode = parseFileMode(mode, "mode");
+
+  const h = vfsState.handlers;
+  if (h !== null && h.chmodSync(path, mode) !== undefined) return;
 
   try {
     Deno.chmodSync(path, mode);
@@ -1446,6 +1719,8 @@ function chown(
   path = getValidatedPath(path).toString();
   validateInteger(uid, "uid", -1, kMaxUserId);
   validateInteger(gid, "gid", -1, kMaxUserId);
+  const h = vfsState.handlers;
+  if (h !== null && vfsVoid(h.chown(path, uid, gid), callback)) return;
 
   // deno-lint-ignore deno-internal/prefer-primordials
   Deno.chown(path, uid, gid).then(
@@ -1463,6 +1738,8 @@ function chownSync(
   path = getValidatedPath(path).toString();
   validateInteger(uid, "uid", -1, kMaxUserId);
   validateInteger(gid, "gid", -1, kMaxUserId);
+  const h = vfsState.handlers;
+  if (h !== null && h.chownSync(path, uid, gid) !== undefined) return;
 
   try {
     Deno.chownSync(path, uid, gid);
@@ -1484,6 +1761,9 @@ function close(
     callback = makeCallback(callback);
   }
 
+  const h = vfsState.handlers;
+  if (h !== null && vfsVoid(h.close(fd), callback)) return;
+
   // Defer to a microtask rather than a JS `setTimeout(0)`. Both make the
   // callback asynchronous, but a real timer trips Deno's test sanitizer as a
   // leaked timeout when a test ends before the timer fires. Node.js' libuv
@@ -1504,6 +1784,9 @@ function close(
 
 function closeSync(fd: number) {
   fd = getValidatedFd(fd);
+
+  const h = vfsState.handlers;
+  if (h !== null && h.closeSync(fd) !== undefined) return;
   try {
     op_node_fs_close(fd);
   } catch (err) {
@@ -1527,6 +1810,9 @@ function fchown(
   validateInteger(gid, "gid", -1, kMaxUserId);
   callback = makeCallback(callback);
 
+  const h = vfsState.handlers;
+  if (h !== null && vfsVoid(h.fchown(fd), callback)) return;
+
   PromisePrototypeThen(
     op_node_fs_fchown(fd, uid, gid),
     () => callback(null),
@@ -1543,6 +1829,9 @@ function fchmod(
   mode = parseFileMode(mode, "mode");
   callback = makeCallback(callback);
 
+  const h = vfsState.handlers;
+  if (h !== null && vfsVoid(h.fchmod(fd), callback)) return;
+
   PromisePrototypeThen(
     op_node_fs_fchmod(fd, mode),
     () => callback(null),
@@ -1558,6 +1847,8 @@ function fchownSync(
   validateInteger(fd, "fd", 0, 2147483647);
   validateInteger(uid, "uid", -1, kMaxUserId);
   validateInteger(gid, "gid", -1, kMaxUserId);
+  const h = vfsState.handlers;
+  if (h !== null && h.fchownSync(fd) !== undefined) return;
 
   try {
     op_node_fs_fchown_sync(fd, uid, gid);
@@ -1589,6 +1880,9 @@ function ftruncate(
 
   if (!callback) throw new Error("No callback function supplied");
 
+  const h = vfsState.handlers;
+  if (h !== null && vfsVoid(h.ftruncate(fd, len), callback)) return;
+
   PromisePrototypeThen(
     op_node_fs_ftruncate(fd, len),
     () => callback(null),
@@ -1601,6 +1895,11 @@ function ftruncateSync(fd: number, len: number = 0) {
     throw new ERR_INVALID_ARG_TYPE("fd", "number", fd);
   }
   validateInteger(len, "len");
+
+  const h = vfsState.handlers;
+  if (h !== null && h.ftruncateSync(fd, len < 0 ? 0 : len) !== undefined) {
+    return;
+  }
   try {
     op_node_fs_ftruncate_sync(fd, MathMax(0, len));
   } catch (err) {
@@ -1646,6 +1945,9 @@ function futimes(
   atime = _getValidTime(atime, "atime");
   mtime = _getValidTime(mtime, "mtime");
 
+  const h = vfsState.handlers;
+  if (h !== null && vfsVoid(h.futimes(fd), callback)) return;
+
   const atimeSecs = MathTrunc(atime as number);
   const atimeNanos = MathTrunc(
     ((atime as number) - atimeSecs) * 1e9,
@@ -1664,6 +1966,9 @@ function futimes(
 function fchmodSync(fd: number, mode: string | number) {
   validateInteger(fd, "fd", 0, 2147483647);
 
+  const h = vfsState.handlers;
+  if (h !== null && h.fchmodSync(fd) !== undefined) return;
+
   try {
     op_node_fs_fchmod_sync(fd, parseFileMode(mode, "mode"));
   } catch (err) {
@@ -1676,6 +1981,10 @@ function fdatasync(
   callback: CallbackWithError,
 ) {
   validateInt32(fd, "fd", 0);
+  {
+    const h = vfsState.handlers;
+    if (h !== null && vfsVoid(h.fdatasync(fd), callback)) return;
+  }
   PromisePrototypeThen(
     op_node_fs_fdatasync(fd),
     () => callback(null),
@@ -1696,6 +2005,9 @@ function futimesSync(
 
   atime = _getValidTime(atime, "atime");
   mtime = _getValidTime(mtime, "mtime");
+
+  const h = vfsState.handlers;
+  if (h !== null && h.futimesSync(fd) !== undefined) return;
 
   const atimeSecs = MathTrunc(atime as number);
   const atimeNanos = MathTrunc(
@@ -1726,6 +2038,9 @@ const lchmod:
     path = getValidatedPathToString(path);
     mode = parseFileMode(mode, "mode");
     callback = makeCallback(callback);
+
+    const h = vfsState.handlers;
+    if (h !== null && vfsVoid(h.lchmod(path, mode), callback)) return;
 
     PromisePrototypeThen(
       op_node_lchmod(path, mode),
@@ -1758,6 +2073,9 @@ function lchown(
   validateInteger(uid, "uid", -1, kMaxUserId);
   validateInteger(gid, "gid", -1, kMaxUserId);
 
+  const h = vfsState.handlers;
+  if (h !== null && vfsVoid(h.lchown(path, uid, gid), callback)) return;
+
   PromisePrototypeThen(
     op_node_lchown(path, uid, gid),
     () => callback(null),
@@ -1767,6 +2085,9 @@ function lchown(
 
 function fdatasyncSync(fd: number) {
   validateInt32(fd, "fd", 0);
+
+  const h = vfsState.handlers;
+  if (h !== null && h.fdatasyncSync(fd) !== undefined) return;
   try {
     op_node_fs_fdatasync_sync(fd);
   } catch (err) {
@@ -1779,6 +2100,10 @@ function fsync(
   callback: CallbackWithError,
 ) {
   validateInt32(fd, "fd", 0);
+  {
+    const h = vfsState.handlers;
+    if (h !== null && vfsVoid(h.fsync(fd), callback)) return;
+  }
   PromisePrototypeThen(
     op_node_fs_fsync(fd),
     () => callback(null),
@@ -1794,12 +2119,17 @@ function lchownSync(
   path = getValidatedPathToString(path);
   validateInteger(uid, "uid", -1, kMaxUserId);
   validateInteger(gid, "gid", -1, kMaxUserId);
+  const h = vfsState.handlers;
+  if (h !== null && h.lchownSync(path, uid, gid) !== undefined) return;
 
   op_node_lchown_sync(path, uid, gid);
 }
 
 function fsyncSync(fd: number) {
   validateInt32(fd, "fd", 0);
+
+  const h = vfsState.handlers;
+  if (h !== null && h.fsyncSync(fd) !== undefined) return;
   try {
     op_node_fs_fsync_sync(fd);
   } catch (err) {
@@ -1814,6 +2144,9 @@ function link(
 ) {
   existingPath = getValidatedPathToString(existingPath);
   newPath = getValidatedPathToString(newPath);
+
+  const h = vfsState.handlers;
+  if (h !== null && vfsVoid(h.link(existingPath, newPath), callback)) return;
 
   // Match Node: errors carry both `path` and `dest` (see lib/fs.js link).
   PromisePrototypeThen(
@@ -1837,6 +2170,9 @@ function linkSync(
   existingPath = getValidatedPathToString(existingPath);
   newPath = getValidatedPathToString(newPath);
 
+  const h = vfsState.handlers;
+  if (h !== null && h.linkSync(existingPath, newPath) !== undefined) return;
+
   try {
     Deno.linkSync(existingPath, newPath);
   } catch (err) {
@@ -1855,6 +2191,9 @@ function unlink(
   path = getValidatedPathToString(path);
   validateFunction(callback, "callback");
 
+  const h = vfsState.handlers;
+  if (h !== null && vfsVoid(h.unlink(path), callback)) return;
+
   PromisePrototypeThen(
     Deno.remove(path),
     () => callback(),
@@ -1865,6 +2204,9 @@ function unlink(
 
 function unlinkSync(path: string | Buffer | URL): void {
   path = getValidatedPathToString(path);
+
+  const h = vfsState.handlers;
+  if (h !== null && h.unlinkSync(path) !== undefined) return;
   try {
     Deno.removeSync(path);
   } catch (err) {
@@ -1880,6 +2222,9 @@ function rename(
   oldPath = getValidatedPathToString(oldPath, "oldPath");
   newPath = getValidatedPathToString(newPath, "newPath");
   validateFunction(callback, "callback");
+
+  const h = vfsState.handlers;
+  if (h !== null && vfsVoid(h.rename(oldPath, newPath), callback)) return;
 
   PromisePrototypeThen(
     Deno.rename(oldPath, newPath),
@@ -1899,6 +2244,9 @@ function renameSync(
 ) {
   oldPath = getValidatedPathToString(oldPath, "oldPath");
   newPath = getValidatedPathToString(newPath, "newPath");
+
+  const h = vfsState.handlers;
+  if (h !== null && h.renameSync(oldPath, newPath) !== undefined) return;
 
   try {
     Deno.renameSync(oldPath, newPath);
@@ -1940,6 +2288,9 @@ function rm(
 
   if (!callback) throw new Error("No callback function supplied");
 
+  const h = vfsState.handlers;
+  if (h !== null && vfsVoid(h.rm(path, options), callback)) return;
+
   validateRmOptions(
     path,
     options,
@@ -1968,6 +2319,8 @@ function rm(
 }
 
 function rmSync(path: string | URL, options?: rmOptions) {
+  const h = vfsState.handlers;
+  if (h !== null && h.rmSync(path, options) !== undefined) return;
   options = validateRmOptionsSync(path, options, false);
   try {
     Deno.removeSync(path, { recursive: options?.recursive });
@@ -2022,6 +2375,9 @@ function rmdir(
   validateFunction(callback, "cb");
   path = getValidatedPathToString(path);
 
+  const h = vfsState.handlers;
+  if (h !== null && vfsVoid(h.rmdir(path), callback)) return;
+
   validateRmdirOptions(options);
   PromisePrototypeThen(
     op_node_rmdir(path),
@@ -2035,6 +2391,9 @@ function rmdir(
 
 function rmdirSync(path: string | Buffer | URL, options?: rmdirOptions) {
   path = getValidatedPathToString(path);
+
+  const h = vfsState.handlers;
+  if (h !== null && h.rmdirSync(path) !== undefined) return;
 
   if (options?.recursive !== undefined) {
     throw new ERR_INVALID_ARG_VALUE(
@@ -2143,6 +2502,19 @@ function mkdir(
   }
   validateBoolean(recursive, "options.recursive");
 
+  const h = vfsState.handlers;
+  if (h !== null) {
+    const promise = h.mkdir(
+      path,
+      typeof options === "function" ? undefined : options,
+    );
+    if (promise !== undefined) {
+      const cb = makeCallback(callback);
+      PromisePrototypeThen(promise, (r) => cb(null, r.result), cb);
+      return;
+    }
+  }
+
   let firstNonExistent: string | undefined;
   try {
     firstNonExistent = recursive ? findFirstNonExistent(path) : undefined;
@@ -2197,6 +2569,12 @@ function mkdirSync(
   }
   validateBoolean(recursive, "options.recursive");
 
+  const h = vfsState.handlers;
+  if (h !== null) {
+    const result = h.mkdirSync(path, options);
+    if (result !== undefined) return result.result;
+  }
+
   let firstNonExistent: string | undefined;
   try {
     firstNonExistent = recursive ? findFirstNonExistent(path) : undefined;
@@ -2248,6 +2626,9 @@ function mkdtemp(
   const encoding = parseMkdtempEncoding(options);
   prefix = getValidatedPathToString(prefix, "prefix");
 
+  const h = vfsState.handlers;
+  if (h !== null && vfsResult(h.mkdtemp(prefix, options), callback)) return;
+
   warnOnNonPortableTemplate(prefix);
 
   PromisePrototypeThen(
@@ -2275,6 +2656,12 @@ function mkdtempSync(
 ): string | Buffer<ArrayBufferLike> {
   const encoding = parseMkdtempEncoding(options);
   prefix = getValidatedPathToString(prefix, "prefix");
+
+  const h = vfsState.handlers;
+  if (h !== null) {
+    const result = h.mkdtempSync(prefix, options);
+    if (result !== undefined) return result;
+  }
 
   warnOnNonPortableTemplate(prefix);
 
@@ -2417,6 +2804,9 @@ function open(
   flags = stringToFlags(flags);
   callback = makeCallback(callback);
 
+  const h = vfsState.handlers;
+  if (h !== null && vfsResult(h.open(path, flags, mode), callback)) return;
+
   const request = createFSReqCallback();
   let openPromise: Promise<number>;
   try {
@@ -2454,6 +2844,11 @@ function openSync(
   flags: OpenFlags = "r",
   maybeMode?: number,
 ) {
+  const h = vfsState.handlers;
+  if (h !== null) {
+    const result = h.openSync(path, flags, maybeMode);
+    if (result !== undefined) return result;
+  }
   path = getValidatedPathToString(path);
   flags = stringToFlags(flags);
   const mode = parseFileMode(maybeMode, "mode", 0o666);
@@ -2495,6 +2890,20 @@ function opendir(
   callback = typeof options === "function" ? options : callback;
   validateFunction(callback, "callback");
 
+  const h = vfsState.handlers;
+  if (h !== null) {
+    try {
+      const result = h.opendirSync(path, options);
+      if (result !== undefined) {
+        lazyProcess().default.nextTick(callback, null, result);
+        return;
+      }
+    } catch (err) {
+      lazyProcess().default.nextTick(callback, err);
+      return;
+    }
+  }
+
   path = _opendirGetPathString(getValidatedPath(path));
   options = getOptions(options, { encoding: "utf8" });
 
@@ -2517,6 +2926,11 @@ function opendirSync(
   path: string | Buffer | URL,
   options?: OpendirOptions,
 ): Dir {
+  const h = vfsState.handlers;
+  if (h !== null) {
+    const result = h.opendirSync(path, options);
+    if (result !== undefined) return result;
+  }
   path = _opendirGetPathString(getValidatedPath(path));
   options = getOptions(options, { encoding: "utf8" });
   const handle = openDirHandleSync(path);
@@ -2530,6 +2944,11 @@ function openAsBlob(
   path: string | Buffer | URL,
   options: { type?: string } = kEmptyObject,
 ): Promise<Blob> {
+  const h = vfsState.handlers;
+  if (h !== null) {
+    const result = h.openAsBlob(path, options);
+    if (result !== undefined) return PromiseResolve(result);
+  }
   validateObject(options, "options");
   const type = options.type || "";
   validateString(type, "options.type");
@@ -2607,10 +3026,29 @@ function writeSync(
     }
     // deno-lint-ignore deno-internal/prefer-primordials
     validateOffsetLengthWrite(offset, length, buffer.byteLength);
+    const h = vfsState.handlers;
+    if (h !== null) {
+      const result = h.writeSync(fd, buffer, offset, length, position);
+      if (result !== undefined) return result;
+    }
     return innerWriteSync(fd, buffer, offset, length, position);
   }
   validateStringAfterArrayBufferView(buffer, "buffer");
   validateEncoding(buffer, length);
+  {
+    const h = vfsState.handlers;
+    if (h !== null) {
+      const bufAsBuffer = Buffer.from(buffer, length);
+      const result = h.writeSync(
+        fd,
+        bufAsBuffer,
+        0,
+        bufAsBuffer.length,
+        offset === undefined ? null : offset,
+      );
+      if (result !== undefined) return result;
+    }
+  }
   buffer = Buffer.from(buffer, length);
   return innerWriteSync(fd, buffer, 0, buffer.length, position);
 }
@@ -2671,6 +3109,18 @@ function write(
     }
     // deno-lint-ignore deno-internal/prefer-primordials
     validateOffsetLengthWrite(offset, length, buffer.byteLength);
+    const h = vfsState.handlers;
+    if (h !== null) {
+      const promise = h.write(fd, buffer, offset, length, position);
+      if (promise !== undefined) {
+        PromisePrototypeThen(
+          promise,
+          (bytesWritten) => callback!(null, bytesWritten, buffer),
+          callback!,
+        );
+        return;
+      }
+    }
     // deno-lint-ignore deno-internal/prefer-primordials
     innerWrite(fd, buffer, offset, length, position).then(
       (nwritten) => {
@@ -2699,6 +3149,20 @@ function write(
   const str = buffer;
   validateEncoding(str, length);
   callback = maybeCallback(position);
+
+  const h = vfsState.handlers;
+  if (h !== null) {
+    const bufAsBuffer = Buffer.from(str, length);
+    const promise = h.write(fd, bufAsBuffer, 0, bufAsBuffer.length, offset);
+    if (promise !== undefined) {
+      PromisePrototypeThen(
+        promise,
+        (bytesWritten) => callback(null, bytesWritten, str),
+        callback,
+      );
+      return;
+    }
+  }
   buffer = Buffer.from(str, length);
 
   // deno-lint-ignore deno-internal/prefer-primordials
@@ -2775,6 +3239,23 @@ function writev(
   validateBufferArray(buffers);
   callback = maybeCallback(callback || position);
 
+  const h = vfsState.handlers;
+  if (h !== null) {
+    const promise = h.writev?.(
+      fd,
+      buffers,
+      typeof position === "number" ? position : null,
+    );
+    if (promise !== undefined) {
+      PromisePrototypeThen(
+        promise,
+        (written) => callback(null, written, buffers),
+        callback,
+      );
+      return;
+    }
+  }
+
   if (buffers.length === 0) {
     lazyProcess().default.nextTick(callback, null, 0, buffers);
     return;
@@ -2819,6 +3300,12 @@ function writevSync(
 
   fd = getValidatedFd(fd);
   validateBufferArray(buffers);
+
+  const h = vfsState.handlers;
+  if (h !== null) {
+    const result = h.writevSync(fd, buffers, position);
+    if (result !== undefined) return result;
+  }
 
   if (buffers.length === 0) {
     return 0;
@@ -2902,6 +3389,19 @@ function writeFile(
   }
 
   validateFunction(callback, "callback");
+
+  {
+    const h = vfsState.handlers;
+    if (h !== null) {
+      const opts = getOptions(options, {
+        encoding: "utf8",
+        mode: 0o666,
+        flag: "w",
+      });
+      if (vfsCheckAborted(opts.signal, callback)) return;
+      if (vfsVoid(h.writeFile(pathOrRid, data, opts), callback)) return;
+    }
+  }
 
   if (ObjectPrototypeIsPrototypeOf(URLPrototype, pathOrRid)) {
     pathOrRid = pathFromURL(pathOrRid as URL);
@@ -2999,6 +3499,11 @@ function writeFileSync(
 ) {
   let flag: string | undefined;
   let mode: number | undefined;
+
+  const h = vfsState.handlers;
+  if (h !== null && h.writeFileSync(pathOrRid, data, options) !== undefined) {
+    return;
+  }
 
   pathOrRid = ObjectPrototypeIsPrototypeOf(URLPrototype, pathOrRid)
     ? pathFromURL(pathOrRid as URL)
@@ -3203,6 +3708,9 @@ function truncate(
 
   if (!callback) throw new Error("No callback function supplied");
 
+  const h = vfsState.handlers;
+  if (h !== null && vfsVoid(h.truncate(path, len), callback)) return;
+
   // Match Node: open with 'r+', ftruncate, close so ENOENT and other
   // errors surface with a path/syscall='open' rather than the raw
   // truncate error.
@@ -3222,6 +3730,9 @@ function truncate(
 function truncateSync(path: string | URL, len: number = 0) {
   validateInteger(len, "len");
   len = MathMax(0, len);
+
+  const h = vfsState.handlers;
+  if (h !== null && h.truncateSync(path, len) !== undefined) return;
   // Match Node: open with 'r+', ftruncate, close.
   const fd = openSync(path, "r+");
   try {
@@ -3269,6 +3780,9 @@ function utimes(
   atime = getValidTime(atime, "atime");
   mtime = getValidTime(mtime, "mtime");
 
+  const h = vfsState.handlers;
+  if (h !== null && vfsVoid(h.utimes(path, atime, mtime), callback)) return;
+
   PromisePrototypeThen(
     Deno.utime(path, atime, mtime),
     () => callback(null),
@@ -3285,6 +3799,9 @@ function utimesSync(
   path = getValidatedPath(path).toString();
   atime = getValidTime(atime, "atime");
   mtime = getValidTime(mtime, "mtime");
+
+  const h = vfsState.handlers;
+  if (h !== null && h.utimesSync(path, atime, mtime) !== undefined) return;
 
   try {
     Deno.utimeSync(path, atime, mtime);
@@ -3319,6 +3836,11 @@ function symlink(
   callback = makeCallback(callback);
   target = getValidatedPathToString(target, "target");
   path = getValidatedPathToString(path);
+
+  const h = vfsState.handlers;
+  if (h !== null && vfsVoid(h.symlink(target, path, linkType), callback)) {
+    return;
+  }
 
   if (isWindows && !linkType) {
     let absoluteTarget;
@@ -3377,6 +3899,9 @@ function symlinkSync(
   validateOneOf(type, "type", ["dir", "file", "junction", null, undefined]);
   target = getValidatedPathToString(target, "target");
   path = getValidatedPathToString(path);
+
+  const h = vfsState.handlers;
+  if (h !== null && h.symlinkSync(target, path, type) !== undefined) return;
 
   if (isWindows && !type) {
     const absoluteTarget = pathModule.resolve(path, "..", target);
@@ -3643,6 +4168,14 @@ function watch(
 
   validateIgnoreOption(options?.ignore, "options.ignore");
 
+  {
+    const h = vfsState.handlers;
+    if (h !== null) {
+      const result = h.watch(filename, options, listener);
+      if (result !== undefined) return result;
+    }
+  }
+
   // deno-lint-ignore deno-internal/prefer-primordials
   const watchPath = getValidatedPath(filename).toString();
 
@@ -3897,6 +4430,11 @@ function watchFile(
   listenerOrOptions: WatchFileListener | WatchFileOptions,
   listener?: WatchFileListener,
 ): StatWatcher {
+  const h = vfsState.handlers;
+  if (h !== null) {
+    const result = h.watchFile?.(filename, listenerOrOptions, listener);
+    if (result !== undefined) return result;
+  }
   // deno-lint-ignore deno-internal/prefer-primordials
   const watchPath = getValidatedPath(filename).toString();
   const handler = typeof listenerOrOptions === "function"
@@ -3920,10 +4458,30 @@ function watchFile(
   return watcher;
 }
 
+function createReadStream(path, options) {
+  const h = vfsState.handlers;
+  if (h !== null) {
+    const result = h.createReadStream(path, options);
+    if (result !== undefined) return result;
+  }
+  return lazyInternalStreams().createReadStream(path, options);
+}
+
+function createWriteStream(path, options) {
+  const h = vfsState.handlers;
+  if (h !== null) {
+    const result = h.createWriteStream(path, options);
+    if (result !== undefined) return result;
+  }
+  return lazyInternalStreams().createWriteStream(path, options);
+}
+
 function unwatchFile(
   filename: string | Buffer | URL,
   listener?: WatchFileListener,
 ) {
+  const h = vfsState.handlers;
+  if (h !== null && h.unwatchFile?.(filename, listener)) return;
   // deno-lint-ignore deno-internal/prefer-primordials
   const watchPath = getValidatedPath(filename).toString();
   const watcher = MapPrototypeGet(statWatchers, watchPath);
@@ -4140,15 +4698,13 @@ const fsExports = {
   cp,
   cpSync,
   get createReadStream() {
-    return _createReadStream ??
-      (_createReadStream = lazyInternalStreams().createReadStream);
+    return _createReadStream ?? (_createReadStream = createReadStream);
   },
   set createReadStream(v) {
     _createReadStream = v;
   },
   get createWriteStream() {
-    return _createWriteStream ??
-      (_createWriteStream = lazyInternalStreams().createWriteStream);
+    return _createWriteStream ?? (_createWriteStream = createWriteStream);
   },
   set createWriteStream(v) {
     _createWriteStream = v;

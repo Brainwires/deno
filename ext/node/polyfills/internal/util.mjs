@@ -286,6 +286,25 @@ function sleep(msec) {
   AtomicsWait(_sleepView, 0, 0, msec);
 }
 
+// Node lazily loads the DOMException constructor; in Deno it is a global.
+function lazyDOMException(message, name) {
+  return new DOMException(message, name);
+}
+
+// Defines an own, writable, enumerable, configurable data property, as
+// Node's internal `setOwnProperty` does (a setter on the prototype chain is
+// not called).
+function setOwnProperty(obj, key, value) {
+  ObjectDefineProperty(obj, key, {
+    __proto__: null,
+    configurable: true,
+    enumerable: true,
+    value,
+    writable: true,
+  });
+  return value;
+}
+
 return {
   convertToValidSignal,
   customInspectSymbol,
@@ -296,11 +315,13 @@ return {
   kEmptyObject,
   kEnumerableProperty,
   kCustomPromisifiedSymbol,
+  lazyDOMException,
   normalizeEncoding,
   once,
   pendingDeprecate,
   promisify,
   removeColors,
+  setOwnProperty,
   shouldColorize,
   sleep,
   WeakReference,
@@ -313,11 +334,13 @@ return {
     isError,
     kEmptyObject,
     kEnumerableProperty,
+    lazyDOMException,
     normalizeEncoding,
     once,
     pendingDeprecate,
     promisify,
     removeColors,
+    setOwnProperty,
     shouldColorize,
     sleep,
   },
