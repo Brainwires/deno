@@ -9905,6 +9905,34 @@ where the changes are discussed.
      `-success.js`, `-updated-file.js`. `-api-tmpdir.js` is ignored: the default
      cache directory is under `DENO_DIR`, not `os.tmpdir()` (item 240).
 
+242. **`feat(desktop)`: a signed macOS app gets the device entitlements its
+     `mediaCapture` asks for** (`feat/desktop-run-paths-av-entitlements`,
+     `cli/tools/desktop.rs`; for runtime 3.0.0-denext.10). Under the Hardened
+     Runtime (every real `macos.codesignIdentity`) macOS gives the microphone or
+     camera only to a process signed with
+     `com.apple.security.device.audio-input` or
+     `com.apple.security.device.camera`; without it there is no TCC prompt and
+     no device, so an app whose launch file allows `getUserMedia` (item 239)
+     still got nothing once signed. When deno.json's `desktop.app.mediaCapture`
+     grants the microphone to at least one origin the main bundle is signed with
+     `audio-input`, the camera with `camera`, each only for the kind asked for:
+     added to laufey's own browser entitlements plist (CEF; a `false` there is
+     set to `true`) or to the webview backend's JIT plist, in a temp file, so
+     the bundle carries no copy. The CEF helpers keep laufey's per-helper plist
+     untouched: no device entitlement reaches a renderer, GPU or utility helper.
+     An ad-hoc signature gets none, as before (no Hardened Runtime, so macOS
+     does not ask for them). A shipped plist that does not parse fails the
+     signing instead of being replaced. Info.plist needed nothing:
+     `NSMicrophoneUsageDescription` and `NSCameraUsageDescription` were already
+     written for every bundle. Tests:
+     `media_capture_device_entitlements_match_the_kinds_granted`,
+     `webview_entitlements_carry_the_requested_devices`,
+     `adhoc_webview_signature_has_no_entitlements`,
+     `shipped_browser_entitlements_gain_the_devices`,
+     `a_shipped_entitlements_plist_that_does_not_parse_is_an_error` (all on
+     Linux; the signing itself needs a Mac), and
+     `media_capture_entitlements_are_a_valid_plist` (`plutil -lint`, macOS).
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
