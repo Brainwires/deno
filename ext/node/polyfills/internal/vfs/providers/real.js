@@ -587,14 +587,18 @@ class RealFSProvider extends VirtualProvider {
     return "/" + rel.replace(/\\/g, "/");
   }
 
+  // The last component is not followed by #resolvePath, which refuses a link
+  // that leaves the root with ENOENT: realpath only names the target, and
+  // #resolvedToVfsPath answers EACCES for one outside the root, as Node does.
+  // Every directory above it is still checked against the root.
   realpathSync(vfsPath, options) {
-    const realPath = this.#resolvePath(vfsPath);
+    const realPath = this.#resolvePath(vfsPath, false);
     const resolved = fs.realpathSync(realPath, options);
     return this.#resolvedToVfsPath(resolved, vfsPath, "realpath");
   }
 
   async realpath(vfsPath, options) {
-    const realPath = this.#resolvePath(vfsPath);
+    const realPath = this.#resolvePath(vfsPath, false);
     const resolved = await fs.promises.realpath(realPath, options);
     return this.#resolvedToVfsPath(resolved, vfsPath, "realpath");
   }

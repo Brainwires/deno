@@ -224,3 +224,34 @@ Deno.test("[node/vfs] RealFSProvider takes a root reached through a symlink", ()
   ) as NodeJS.ErrnoException;
   assertEquals(err.code, "ENOENT");
 });
+
+// realpath of a link that leaves the root answers EACCES as Node's does, and
+// still reads nothing through it.
+Deno.test("[node/vfs] RealFSProvider realpath of a link out of its root is EACCES", async () => {
+  const outside = Deno.realPathSync(Deno.makeTempDirSync());
+  const root = Deno.realPathSync(Deno.makeTempDirSync());
+  Deno.writeTextFileSync(path.join(outside, "secret.txt"), "forbidden");
+  Deno.symlinkSync(
+    path.join(outside, "secret.txt"),
+    path.join(root, "esc-link"),
+  );
+  Deno.symlinkSync(outside, path.join(root, "dirlink"));
+  Deno.mkdirSync(path.join(root, "sub"));
+  Deno.symlinkSync("sub", path.join(root, "in-link"));
+  const vfs = create(new RealFSProvider(root));
+  for (const target of ["/esc-link", "/dirlink"]) {
+    const err = assertThrows(() =>
+      vfs.realpathSync(target)
+    ) as NodeJS.ErrnoException;
+    assertEquals(err.code, "EACCES");
+    await assertRejects(
+      () => vfs.promises.realpath(target),
+      Error,
+      "EACCES",
+    );
+  }
+  assertEquals(vfs.realpathSync("/in-link"), "/sub");
+  assertEquals(await vfs.promises.realpath("/in-link"), "/sub");
+  assertThrows(() => vfs.readFileSync("/esc-link"));
+  assertThrows(() => vfs.realpathSync("/dirlink/secret.txt"));
+});

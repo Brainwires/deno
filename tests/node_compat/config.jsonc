@@ -1708,6 +1708,11 @@
       "reason": "Passes on Linux (3 isolated runs, debug build) with the fork's node_compat round 4 changes; not verified on macOS or Windows"
     },
     "parallel/test-fs-promises-statfs-validate-path.js": {},
+    "parallel/test-fs-promises-watch.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows"
+    },
     "parallel/test-fs-promises-watch-ignore-function.mjs": {},
     "parallel/test-fs-promises-watch-ignore-glob.mjs": {},
     "parallel/test-fs-promises-watch-ignore-invalid.mjs": {},
@@ -3796,6 +3801,11 @@
       "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
     },
     "parallel/test-stream-iter-broadcast-coverage.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-stream-iter-transform-errors.js": {
       "darwin": false,
       "windows": false,
       "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
@@ -6151,6 +6161,11 @@
       "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
     },
     "parallel/test-vfs-real-provider-promises.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"
+    },
+    "parallel/test-vfs-real-provider-symlinks.js": {
       "darwin": false,
       "windows": false,
       "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno has no node:stream/iter or node:vfs"

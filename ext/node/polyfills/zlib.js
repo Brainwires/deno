@@ -647,10 +647,7 @@ function processChunk(self, chunk, flushFlag, cb) {
       self._writeState,
     );
   } catch (err) {
-    // Set appropriate error code for zstd errors
-    if (err.message && err.message.includes("Src size is incorrect")) {
-      err.code = "ZSTD_error_srcSize_wrong";
-    }
+    // A zstd engine throws its error with Node's message, errno and code.
     self.destroy(err);
     return;
   }

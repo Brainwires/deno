@@ -96,20 +96,12 @@ class NodeHandle {
 
   constructor(native) {
     this.#native = native;
-    // Deno's engines report (message, errno). Node's binding adds a code: the
-    // zlib error's name (which zlib.js derives from errno the same way), or
-    // for Brotli `ERR_<decoder error>`, which Deno's decoder reports as the
-    // message, with Node's "Decompression failed" message.
+    // Deno's zlib engine reports (message, errno); Node's binding adds a
+    // code, the zlib error's name, which zlib.js derives from errno the same
+    // way. The Brotli decoder reports Node's code itself.
     native.onerror = (message, errno, code) => {
       this.#failed = true;
-      if (code === undefined) {
-        if (StringPrototypeStartsWith(message, "ERR_")) {
-          code = message;
-          message = "Decompression failed";
-        } else {
-          code = kZlibErrorCodes[errno];
-        }
-      }
+      code ??= kZlibErrorCodes[errno];
       this.#onError?.(message, errno, code);
     };
   }
