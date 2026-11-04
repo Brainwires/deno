@@ -9798,12 +9798,118 @@ where the changes are discussed.
      error); laufey's `media_capture_test.cc` and its native_e2e
      `--media-capture` checks on its CI.
 
+240. **`feat(ext/node)`: Node's compile cache for CommonJS modules**
+     (`feat/node-compat-round7`, runtime; `ext/node/polyfills/01_require.js`,
+     `ext/node/ops/vm.rs`, `ext/node/lib.rs`). `node:module` had no
+     `enableCompileCache()`, `getCompileCacheDir()`, `flushCompileCache()` or
+     `constants.compileCacheStatus`, so a tool that calls
+     `module.enableCompileCache()` without checking for it first threw
+     `TypeError: enableCompileCache is not a function`, and `NODE_COMPILE_CACHE`
+     did nothing. They now follow Node 26.5.1 (`src/compile_cache.cc`,
+     `src/env.cc`, `src/node_modules.cc`, `lib/internal/modules/helpers.js`):
+     - `enableCompileCache(directory | { directory, portable })` returns
+       `{ status, message?, directory? }` with Node's statuses (`FAILED`,
+       `ENABLED`, `ALREADY_ENABLED`, `DISABLED`); the directory defaults to
+       `NODE_COMPILE_CACHE`, then `<DENO_DIR>/node_compile_cache` (unlike Node's
+       `<os.tmpdir()>/node-compile-cache`: a program that may write the
+       temporary directory, say with only `--allow-write=/tmp`, can't write
+       there), and `portable` to `NODE_COMPILE_CACHE_PORTABLE=1`. Anything but a
+       string directory is `ERR_INVALID_ARG_TYPE`. `NODE_COMPILE_CACHE` turns
+       the cache on before the first CommonJS module is compiled, and
+       `NODE_DISABLE_COMPILE_CACHE` keeps it off ("Disabled by
+       NODE_DISABLE_COMPILE_CACHE").
+     - The cache lives in `<directory>/<version>-<arch>-<V8 cache tag>-<uid>/`,
+       one file per module named by the CRC-32 of the module type and its path
+       (relative to the cache directory in portable mode), with Node's header
+       (magic number, code size and CRC-32, cache size and CRC-32) before V8's
+       code cache, and then (unlike Node) a 32-byte HMAC-SHA256 under a per-user
+       key. A module whose source changed, or whose cache V8 rejects, is
+       compiled again and its entry refreshed.
+     - The MAC covers the module's type and cache path, the SHA-256 of its
+       source and V8's code cache, under a key kept in
+       `<DENO_DIR>/node_compile_cache.key` (32 random bytes, created `0600` by a
+       private temporary file linked into place, read only when it is a regular
+       file of that size the current user owns that no one else can read or
+       write, in a `DENO_DIR` that passes the directory check below). The key
+       never reaches JavaScript (new module `ext/node/ops/compile_cache.rs`:
+       `op_node_compile_cache_default_dir`, `op_node_compile_cache_mac`,
+       `op_node_compile_cache_verify`, `op_node_compile_cache_key_available`).
+       An entry whose MAC doesn't verify ("authentication failed") is not loaded
+       and is rewritten, so a program that can write a cache directory but not
+       read the key can't plant one, and an entry made for one source isn't
+       accepted for another with the same length and CRC-32. Without a key
+       `enableCompileCache()` returns `FAILED` ("Cannot read or create the
+       compile cache key").
+     - The CommonJS loader compiles each module with its cached code when the
+       cache is on (new op `op_node_compile_cjs_function`, the same origin and
+       host-defined options `Deno.core.compileFunction` gives it) and keeps V8's
+       code cache for a module compiled without one
+       (`op_node_create_function_code_cache`). New and refreshed entries are
+       written at exit (the `unload` event, which `process.exit()` dispatches
+       too) or by `flushCompileCache()`, through a temporary file renamed over
+       the entry.
+     - `NODE_DEBUG_NATIVE=COMPILE_CACHE` prints Node's `[compile cache] ...`
+       lines on stderr.
+     - Unlike Node, the cache only loads code another user can't have written:
+       V8 accepts a code cache whose source length, version and flag hashes
+       match, so a planted file would run in place of the module. On Unix the
+       version-tagged directory is created `0700` and must be a real directory
+       owned by the current user that nobody else can write to; every directory
+       above it, along the path as given and its canonical path, must belong to
+       the current user or root and not be writable by others without the sticky
+       bit (`/tmp` passes), and a symlink on the way must belong to the current
+       user or root. Group write on the current user's own directory is allowed
+       when the group is the user's private group (umask 002 with user private
+       groups), as OpenSSH's `secure_permissions()` allows (new op
+       `op_node_compile_cache_untrusted_dir`, behind the read permission check).
+       Otherwise `enableCompileCache()` returns `FAILED` with "Cache directory
+       is not safe to use: ...". An entry is read only when it is a regular file
+       the current user owns, and a temporary file that was not renamed over its
+       entry is removed.
+     - A compiled program (`deno compile`, so a Deno Desktop app too) never
+       loads or writes the cache: `enableCompileCache()` returns `DISABLED`
+       ("Disabled in a compiled program") whatever its argument, and
+       `NODE_COMPILE_CACHE` is ignored, so a signed program only runs the code
+       it was built with, never bytecode from a directory its user can write.
+
+     With the cache off, the loader compiles through `Deno.core.compileFunction`
+     and the runtime's own code cache as before. Left open: ES modules are
+     compiled by the module loader, which uses the runtime's code cache and does
+     not read or write Node's (`test-compile-cache-esm.js`, `-portable-esm.js`,
+     `-dynamic-import.js`), and nothing is written when the process ends on an
+     uncaught error (`test-compile-cache-bad-syntax.js` expects the "cache was
+     not initialized" line then); the permission model's refusals
+     (`test-compile-cache-api-permission.js`, `-permission-disallowed.js`) are
+     not implemented. Tests: unit `tests/unit_node/module_test.ts` ("the compile
+     cache API is exposed with Node's constants", "stores CommonJS code caches
+     and reuses them", "NODE_DISABLE_COMPILE_CACHE turns it off", "refuses a
+     cache directory others can write to", "doesn't load a cache entry that is a
+     symlink", "the cache directory is created for the current user only",
+     "defaults to the Deno cache directory, not the temporary directory",
+     "refuses an entry another key wrote"); Rust unit
+     `mac_binds_name_source_and_payload`; spec
+     `compile/node_compile_cache_disabled_in_compiled`.
+
+241. **`test(node_compat)`: 12 tests the compile cache passes**
+     (`feat/node-compat-round7`, test config only;
+     `tests/node_compat/config.jsonc`). Each passed three isolated runs (runner
+     parallelism 1, report mode, the CI 10 s timeout) on a Linux x86_64 debug
+     build without skipping, and is on for Linux only, with that reason, until
+     checked on macOS and Windows: `parallel/test-compile-cache-api-env.js`,
+     `-api-error.js`, `-api-flush.js`, `-api-options-portable-env.js`,
+     `-api-portable.js`, `-api-success.js`, `-disable.js`,
+     `-existing-directory.js`, `-permission-allowed.js` (the node shim parses
+     `--permission` and its grants but does not apply them, so the cache
+     directory is writable, which is what the test expects), `-portable.js`,
+     `-success.js`, `-updated-file.js`. `-api-tmpdir.js` is ignored: the default
+     cache directory is under `DENO_DIR`, not `os.tmpdir()` (item 240).
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
 169-174, 176, 178, 180, 182-184, 186, 187, 189-191, 193-196, 198-203, 206, 207,
-209-215, 217, 218, 221, 222, 224, 225, 227, 228, 231, 232, 235, 237) are what
-the prebuilt `libdenort` carries. The CLI-side parts (for example writing
+209-215, 217, 218, 221, 222, 224, 225, 227, 228, 231, 232, 235, 237, 240) are
+what the prebuilt `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
 in the branch too, but a stock CLI does not run them; denext's own launcher
 provides that environment.

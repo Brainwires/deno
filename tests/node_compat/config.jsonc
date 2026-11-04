@@ -778,21 +778,81 @@
     "parallel/test-common-expect-warning.js": {},
     "parallel/test-common-must-not-call.js": {},
     "parallel/test-common-must-not-mutate-object-deep.mjs": {},
+    "parallel/test-compile-cache-api-env.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno's report still fails it"
+    },
+    "parallel/test-compile-cache-api-error.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno's report still fails it"
+    },
+    "parallel/test-compile-cache-api-flush.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno's report still fails it"
+    },
+    "parallel/test-compile-cache-api-options-portable-env.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno's report still fails it"
+    },
     "parallel/test-compile-cache-api-permission.js": {
       "ignore": true,
       "reason": "Node.js permission model (--experimental-permission) is not implemented in Deno"
     },
-    "parallel/test-compile-cache-permission-allowed.js": {
+    "parallel/test-compile-cache-api-portable.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno's report still fails it"
+    },
+    "parallel/test-compile-cache-api-success.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno's report still fails it"
+    },
+    "parallel/test-compile-cache-api-tmpdir.js": {
       "ignore": true,
-      "reason": "Node.js permission model (--experimental-permission) is not implemented in Deno"
+      "reason": "The default compile cache directory is <DENO_DIR>/node_compile_cache, not <os.tmpdir()>/node-compile-cache, so a program that may write the temporary directory can't plant cache entries for another (DENEXT.md item 240)"
+    },
+    "parallel/test-compile-cache-disable.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno's report still fails it"
+    },
+    "parallel/test-compile-cache-existing-directory.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno's report still fails it"
+    },
+    "parallel/test-compile-cache-permission-allowed.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno's report still fails it"
     },
     "parallel/test-compile-cache-permission-disallowed.js": {
       "ignore": true,
       "reason": "Node.js permission model (--experimental-permission) is not implemented in Deno"
     },
+    "parallel/test-compile-cache-portable.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno's report still fails it"
+    },
+    "parallel/test-compile-cache-success.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno's report still fails it"
+    },
     "parallel/test-compile-cache-typescript-commonjs.js": {},
     "parallel/test-compile-cache-typescript-esm.js": {},
     "parallel/test-compile-cache-typescript-strip-sourcemaps.js": {},
+    "parallel/test-compile-cache-updated-file.js": {
+      "darwin": false,
+      "windows": false,
+      "reason": "Passes on Linux (3 isolated runs, debug build); not verified on macOS or Windows, where upstream Deno's report still fails it"
+    },
     "parallel/test-console-assign-undefined.js": {},
     "parallel/test-console-async-write-error.js": {},
     "parallel/test-console-formatTime.js": {},

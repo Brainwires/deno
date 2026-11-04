@@ -1,0 +1,6 @@
+sum 5
+env cache dir [WILDCARD]env-cache[WILDCARD]
+env cache created true
+explicit status 2
+explicit cache created false
+default status 2

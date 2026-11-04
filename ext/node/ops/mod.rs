@@ -3,6 +3,7 @@
 pub mod assert;
 pub mod blocklist;
 pub mod buffer;
+pub mod compile_cache;
 pub mod constant;
 pub mod dns;
 pub mod fs;

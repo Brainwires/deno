@@ -42,6 +42,7 @@ deno_tls.workspace = true
 deno_whoami.workspace = true
 filetime.workspace = true
 hdrhistogram.workspace = true
+hmac.workspace = true
 idna.workspace = true
 ipnet.workspace = true
 libc.workspace = true
@@ -54,6 +55,7 @@ rand.workspace = true
 rustls-tokio-stream.workspace = true
 rustls-webpki.workspace = true
 serde.workspace = true
+sha2.workspace = true
 smallvec.workspace = true
 socket2.workspace = true
 sys_traits = { workspace = true, features = ["real", "winapi", "libc"] }

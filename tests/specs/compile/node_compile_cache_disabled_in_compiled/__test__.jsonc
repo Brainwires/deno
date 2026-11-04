@@ -1,0 +1,32 @@
+{
+  // A compiled program (`deno compile`, a Deno Desktop app) never uses Node's
+  // compile cache: NODE_COMPILE_CACHE is ignored and enableCompileCache()
+  // returns DISABLED whatever its argument, so the program only runs the code
+  // it was built (and signed) with.
+  "tempDir": true,
+  "steps": [{
+    "args": "run -A main.js",
+    "envs": { "NODE_COMPILE_CACHE": "env-cache" },
+    "output": "run.out"
+  }, {
+    "if": "unix",
+    "args": "compile -A --output bin main.js",
+    "output": "[WILDCARD]"
+  }, {
+    "if": "unix",
+    "commandName": "./bin",
+    "args": [],
+    "envs": { "NODE_COMPILE_CACHE": "env-cache-compiled" },
+    "output": "main.out"
+  }, {
+    "if": "windows",
+    "args": "compile -A --output bin.exe main.js",
+    "output": "[WILDCARD]"
+  }, {
+    "if": "windows",
+    "commandName": "./bin.exe",
+    "args": [],
+    "envs": { "NODE_COMPILE_CACHE": "env-cache-compiled" },
+    "output": "main.out"
+  }]
+}
