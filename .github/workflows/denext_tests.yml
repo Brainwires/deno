@@ -15,7 +15,7 @@
 #          (.github/denext-runtime/manifest_test.py, tag_gate_test.py,
 #          engine_staleness_test.py, audit_ignores_test.py,
 #          glibc_ceiling_test.py, self_binding_test.py, denort_pins_test.py,
-#          linux_needed_test.py)
+#          linux_needed_test.py, toolchain_info_test.py)
 #          and the bare-assertion guard over the release scripts
 #          (assert_guard.py and its test).
 # - cargo-audit: RustSec advisories against Cargo.lock; .cargo/audit.toml
@@ -193,6 +193,11 @@ jobs:
       - name: denort_pins_test.py
         if: runner.os == 'Linux'
         run: python3 -I .github/denext-runtime/denort_pins_test.py
+      # The toolchain record in BUILD_INFO.json (denext_runtime.yml's build
+      # jobs).
+      - name: toolchain_info_test.py
+        if: runner.os == 'Linux'
+        run: python3 -I .github/denext-runtime/toolchain_info_test.py
       - name: lint.js
         env:
           GITHUB_TOKEN: ${{ github.token }}

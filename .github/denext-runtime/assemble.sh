@@ -16,7 +16,11 @@
 #     {webview/build,cef/build/Release}/liblaufey_webauthn.so
 #                                               (Linux: passkeys with
 #                                                security keys, libwebauthn)
-#   BUILD_INFO.json      what was built from where
+#   BUILD_INFO.json      what was built from where, and with what
+#                        (toolchain.denort / toolchain.laufey: the runner
+#                        image, compilers and packages of each build,
+#                        toolchain_info.py's TOOLCHAIN.json in the denort
+#                        artifact and the laufey stage)
 #   licenses/            deno, laufey and CEF licenses (and, on Linux,
 #                        libwebauthn's and the Hunspell dictionaries')
 #
@@ -120,6 +124,7 @@ for backend in webview cef; do
   "laufey": { "repository": "https://github.com/Brainwires/laufey", "sha": "$LAUFEY_SHA", "apiVersion": ${LAUFEY_API_VERSION:-null} },
   "cef": { "version": "$CEF_VERSION" },
   "env": { "DENORT_DESKTOP_BIN": "$lib", "LAUFEY_DEV_DIR": "laufey" },
+  "toolchain": { "denort": $(json_or_null "$denort_dir/TOOLCHAIN.json"), "laufey": $(json_or_null "$work/laufey/TOOLCHAIN.json") },
   "build": { "run": "${RUN_URL:-}" }
 }
 EOF

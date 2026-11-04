@@ -106,20 +106,23 @@ env:
   # The engine staleness gate (.github/denext-runtime/engine_staleness.py):
   # a V8 (Cargo.lock's v8 crate) or CEF (laufey's CEF_FULL_VERSION) pin more
   # than one Chrome stable major behind, and not on Chrome's Extended Stable
-  # milestone, warns on every run and, with `tag`, fails a release tag;
-  # `warn` keeps a tag at a warning. A pin on the Extended Stable milestone
-  # only warns, and says it is still patched (DENEXT.md item 179). A failed
-  # Chrome stable lookup only warns. V8 is `tag` again since the fork builds
-  # its own V8 line on Chrome's Extended Stable branch (V8 15.6, DENEXT.md
-  # item 218). CEF stays `warn` until laufey's CEF tracks Chrome's release
-  # cadence the same way (items 150, 162).
+  # milestone, or more than 14 days behind its own branch's patches (V8's
+  # `Version` commits on its branch-heads, CEF's builds on its milestone;
+  # plans/fork-own-v8.md), warns on every run and, with `tag`, fails a
+  # release tag; `warn` keeps a tag at a warning. A branch run only ever
+  # warns. A pin on the Extended Stable milestone only warns, and says it is
+  # still patched (DENEXT.md item 179). A failed lookup (Chrome stable, a
+  # patch level) only warns. V8 is `tag` since the fork builds its own V8
+  # line on Chrome's Extended Stable branch (V8 15.6, DENEXT.md item 218);
+  # CEF is `tag` too since laufey moved to CEF 156 (Chrome Extended Stable
+  # 156): a release no longer ships a browser engine that misses fixes.
   ENGINE_STALENESS_ENFORCE: tag
-  ENGINE_STALENESS_ENFORCE_CEF: warn
+  ENGINE_STALENESS_ENFORCE_CEF: tag
 
 jobs:
   setup:
     name: setup
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       matrix: ${{ steps.plan.outputs.matrix }}
       linux_matrix: ${{ steps.plan.outputs.linux_matrix }}
@@ -187,9 +190,10 @@ jobs:
             { echo "::error::no LAUFEY_API_VERSION in $LAUFEY_REPOSITORY's capi/include/laufey.h at $laufey_sha"; exit 1; }
 
           # Engine staleness: V8 and CEF more than one Chrome stable major
-          # behind get no upstream security fixes. Warns on branches, fails a
-          # tag (ENGINE_STALENESS_ENFORCE[_V8|_CEF]); offline it warns and
-          # passes.
+          # behind get no upstream security fixes, and a pin more than 14 days
+          # behind its branch's patches misses the fixes merged there. Warns
+          # on branches, fails a tag (ENGINE_STALENESS_ENFORCE[_V8|_CEF]);
+          # offline it warns and passes.
           tag_flag=()
           if [ "$REF_TYPE" = tag ]; then tag_flag=(--tag); fi
           python3 -I .github/denext-runtime/engine_staleness.py "${tag_flag[@]}" --cef "$cef_version" ||
@@ -250,7 +254,7 @@ jobs:
               {"target": "x86_64-apple-darwin", "os": "macos-15-intel"},
               {"target": "x86_64-unknown-linux-gnu", "os": "ubuntu-22.04"},
               {"target": "aarch64-unknown-linux-gnu", "os": "ubuntu-22.04-arm"},
-              {"target": "x86_64-pc-windows-msvc", "os": "windows-latest"},
+              {"target": "x86_64-pc-windows-msvc", "os": "windows-2022"},
               {"target": "aarch64-pc-windows-msvc", "os": "windows-11-arm"},
           ]
           want = [t.strip() for t in os.environ["TARGETS"].split(",") if t.strip()]
@@ -281,7 +285,7 @@ jobs:
   # no runtime, display or build: which result belongs to which launch.
   e2e-harness:
     name: e2e harness
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -294,7 +298,10 @@ jobs:
       # `deno run` and the harness tests below skip type checking, so a type
       # error would otherwise land unseen.
       - name: Type-check the e2e TypeScript
-        run: deno check --no-config --no-lock $(find .github/denext-runtime/e2e -name '*.ts')
+        run: |
+          set -euo pipefail
+          mapfile -t modules < <(find .github/denext-runtime/e2e -name '*.ts' | sort)
+          deno check --no-config --no-lock "${modules[@]}"
       - run: deno test -A --no-check --no-config --no-lock .github/denext-runtime/e2e/lib/
 
   # laufey's webview + CEF backend hosts, built the way laufey's own CI does.
@@ -317,6 +324,28 @@ jobs:
           repository: ${{ env.LAUFEY_REPOSITORY }}
           ref: ${{ needs.setup.outputs.laufey_sha }}
           path: laufey
+
+      # This repository's release scripts (toolchain_info.py) and its Rust
+      # pin, beside the laufey checkout.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: denext-ci
+          sparse-checkout: |
+            .github/denext-runtime
+            rust-toolchain.toml
+          sparse-checkout-cone-mode: false
+
+      # laufey's Makefile builds liblaufey_webauthn.so with cargo on Linux:
+      # the same exact Rust release as libdenort, not the runner image's.
+      - name: Rust toolchain (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          tc=$(sed -n 's/^channel = "\(.*\)"$/\1/p' denext-ci/rust-toolchain.toml)
+          [[ "$tc" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] ||
+            { echo "::error::rust-toolchain.toml's channel '$tc' is not an exact Rust release (x.y.z)"; exit 1; }
+          rustup toolchain install "$tc" --profile minimal --no-self-update
+          echo "RUSTUP_TOOLCHAIN=$tc" >>"$GITHUB_ENV"
 
       - name: Install dependencies (Linux)
         if: runner.os == 'Linux'
@@ -359,7 +388,11 @@ jobs:
           powershell -NoProfile -Command "Expand-Archive -Path wv2.zip -DestinationPath packages/Microsoft.Web.WebView2.$WV2_VERSION"
           rm wv2.zip
 
+      # Never on a tag: a cache any branch or pull request run could have
+      # written must not reach a signed release (the production audit's P9).
+      # A tag's build downloads CEF afresh and writes no cache.
       - name: Cache CEF
+        if: github.ref_type != 'tag'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: laufey/vendor/cef
@@ -381,7 +414,8 @@ jobs:
           if [ "${{ runner.os }}" = Windows ]; then
             # laufey's Makefile reads the architecture from `uname -m`, which
             # an emulated x64 shell reports as x86_64 on Windows on Arm.
-            WEBVIEW2_ROOT="$(pwd)/$(ls -d packages/Microsoft.Web.WebView2.* | head -1)" make webview UNAME_M=${{ runner.arch == 'ARM64' && 'aarch64' || 'x86_64' }}
+            wv2=(packages/Microsoft.Web.WebView2.*)
+            WEBVIEW2_ROOT="$(pwd)/${wv2[0]}" make webview UNAME_M=${{ runner.arch == 'ARM64' && 'aarch64' || 'x86_64' }}
           else
             make webview
           fi
@@ -401,6 +435,24 @@ jobs:
         # UNAME_M: the windowsarm64 CEF dist on windows-11-arm (see the
         # webview step).
         run: make cef UNAME_M=${{ runner.arch == 'ARM64' && 'aarch64' || 'x86_64' }}
+
+      # What the hosts were built with (BUILD_INFO.json's toolchain.laufey):
+      # the runner image, the compilers, and the apt / Homebrew packages,
+      # whose versions those package managers can't pin (the production
+      # audit's P9).
+      - name: Toolchain
+        run: |
+          set -euo pipefail
+          py=python3; command -v python3 >/dev/null 2>&1 || py=python
+          case "${{ runner.os }}" in
+            Linux) pkgs=(--apt cmake --apt ninja-build --apt pkg-config --apt libwebkit2gtk-4.1-dev
+                         --apt libgtk-3-dev --apt libnss3-dev --apt libudev-dev --apt libdbus-1-dev
+                         --require rustc --require cargo) ;;
+            macOS) pkgs=(--brew llvm --brew ninja) ;;
+            *) pkgs=(--require msvc) ;;
+          esac
+          "$py" -I denext-ci/.github/denext-runtime/toolchain_info.py --out "$RUNNER_TEMP/laufey-toolchain.json" \
+            --tool cmake --tool ninja --tool make "${pkgs[@]}"
 
       # Only the backends' runtime files: `deno desktop` copies the whole
       # directory holding a Linux/Windows backend binary into the app.
@@ -472,6 +524,7 @@ jobs:
           esac
           cp laufey/LICENSE laufey/LICENSE.cef "$st/licenses/"
           echo "$LAUFEY_SHA" >"$st/licenses/LAUFEY_SHA"
+          cp "$tmp/laufey-toolchain.json" "$st/TOOLCHAIN.json"
           # The C ABI version the hosts were built with (checked against the
           # one libdenort was compiled with in the package job).
           sed -n 's/^#define LAUFEY_API_VERSION \([0-9]*\).*/\1/p' laufey/capi/include/laufey.h >"$st/LAUFEY_API_VERSION"
@@ -573,6 +626,11 @@ jobs:
       - name: Rust toolchain
         run: |
           tc=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)
+          # An exact release (1.99.1), never a moving channel (stable,
+          # nightly) or a bare minor: the build's toolchain is reproducible
+          # (the production audit's P9).
+          [[ "$tc" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] ||
+            { echo "::error::rust-toolchain.toml's channel '$tc' is not an exact Rust release (x.y.z)"; exit 1; }
           # Name the host on Windows on Arm: an emulated x64 rustup would
           # otherwise install (and build with) an x86_64 toolchain.
           if [ "${{ matrix.target }}" = aarch64-pc-windows-msvc ]; then tc="$tc-${{ matrix.target }}"; fi
@@ -588,7 +646,11 @@ jobs:
         # not target/release/gn_out, where the script puts the library.
         run: python3 -I .github/denext-runtime/fetch_rusty_v8.py --target "${{ matrix.target }}" --dest "$RUNNER_TEMP/rusty_v8" --seed-dir target/release --github-env
 
+      # Never on a tag: a cache any branch or pull request run could have
+      # written must not reach a signed release (the production audit's P9).
+      # A tag builds from a clean target/ and saves no cache.
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        if: github.ref_type != 'tag'
         with:
           prefix-key: denext-denort-v1
           key: ${{ matrix.target }}-${{ matrix.os }}
@@ -653,6 +715,18 @@ jobs:
           echo "$api" >out/LAUFEY_API_VERSION
           git -C "$LAUFEY_SRC" rev-parse HEAD >out/LAUFEY_SHA
           echo "laufey API $api at $(cat out/LAUFEY_SHA)"
+
+      # What libdenort was built with (BUILD_INFO.json's toolchain.denort):
+      # the runner image, rustc, cargo, the C compiler and the apt packages
+      # (the production audit's P9).
+      - name: Toolchain
+        run: |
+          set -euo pipefail
+          py=python3; command -v python3 >/dev/null 2>&1 || py=python
+          pkgs=()
+          if [ "${{ runner.os }}" = Linux ]; then pkgs=(--apt libclang-dev --apt cmake); fi
+          "$py" -I .github/denext-runtime/toolchain_info.py --out out/TOOLCHAIN.json \
+            --require rustc --require cargo ${pkgs[@]+"${pkgs[@]}"}
 
       - name: Collect
         run: |
@@ -847,6 +921,11 @@ jobs:
       - name: Rust toolchain
         run: |
           tc=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)
+          # An exact release (1.99.1), never a moving channel (stable,
+          # nightly) or a bare minor: the build's toolchain is reproducible
+          # (the production audit's P9).
+          [[ "$tc" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] ||
+            { echo "::error::rust-toolchain.toml's channel '$tc' is not an exact Rust release (x.y.z)"; exit 1; }
           # Name the host on Windows on Arm: an emulated x64 rustup would
           # otherwise install (and build with) an x86_64 toolchain.
           if [ "${{ matrix.target }}" = aarch64-pc-windows-msvc ]; then tc="$tc-${{ matrix.target }}"; fi
@@ -862,7 +941,11 @@ jobs:
         # not target/release/gn_out, where the script puts the library.
         run: python3 -I .github/denext-runtime/fetch_rusty_v8.py --target "${{ matrix.target }}" --dest "$RUNNER_TEMP/rusty_v8" --seed-dir target/release --github-env
 
+      # Never on a tag: a cache any branch or pull request run could have
+      # written must not reach a signed release (the production audit's P9).
+      # A tag builds from a clean target/ and saves no cache.
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        if: github.ref_type != 'tag'
         with:
           prefix-key: denext-denort-bin-v1
           key: ${{ matrix.target }}-${{ matrix.os }}
@@ -975,6 +1058,18 @@ jobs:
           OUT_DIR: dist
         run: bash .github/denext-runtime/assemble_denort.sh
 
+      # What denort was built with. Not in the archive (it holds just the
+      # binary, as Deno's own denort zips do): the cli job records it in its
+      # BUILD_INFO.json as denort.toolchain (the production audit's P9).
+      - name: Toolchain
+        run: |
+          set -euo pipefail
+          py=python3; command -v python3 >/dev/null 2>&1 || py=python
+          pkgs=()
+          if [ "${{ runner.os }}" = Linux ]; then pkgs=(--apt libclang-dev --apt cmake); fi
+          "$py" -I .github/denext-runtime/toolchain_info.py --out "dist/deno-denort-$VERSION-$TARGET.toolchain.json" \
+            --require rustc --require cargo ${pkgs[@]+"${pkgs[@]}"}
+
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: dist/*.zip
@@ -1084,6 +1179,11 @@ jobs:
       - name: Rust toolchain
         run: |
           tc=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)
+          # An exact release (1.99.1), never a moving channel (stable,
+          # nightly) or a bare minor: the build's toolchain is reproducible
+          # (the production audit's P9).
+          [[ "$tc" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] ||
+            { echo "::error::rust-toolchain.toml's channel '$tc' is not an exact Rust release (x.y.z)"; exit 1; }
           # Name the host on Windows on Arm: an emulated x64 rustup would
           # otherwise install (and build with) an x86_64 toolchain.
           if [ "${{ matrix.target }}" = aarch64-pc-windows-msvc ]; then tc="$tc-${{ matrix.target }}"; fi
@@ -1099,7 +1199,11 @@ jobs:
         # not target/release/gn_out, where the script puts the library.
         run: python3 -I .github/denext-runtime/fetch_rusty_v8.py --target "${{ matrix.target }}" --dest "$RUNNER_TEMP/rusty_v8" --seed-dir target/release --github-env
 
+      # Never on a tag: a cache any branch or pull request run could have
+      # written must not reach a signed release (the production audit's P9).
+      # A tag builds from a clean target/ and saves no cache.
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        if: github.ref_type != 'tag'
         with:
           prefix-key: denext-cli-v2
           key: ${{ matrix.target }}-${{ matrix.os }}
@@ -1175,6 +1279,18 @@ jobs:
           # EMBEDDED_DENORT_SHA256S).
           grep -aqF "$DENEXT_DENORT_SHA256S" target/release/deno${{ runner.os == 'Windows' && '.exe' || '' }} ||
             { echo "::error::target/release/deno does not carry DENEXT_DENORT_SHA256S"; exit 1; }
+
+      # What deno was built with (BUILD_INFO.json's toolchain): the runner
+      # image, rustc, cargo, the C compiler (the sysroot's clang on Linux)
+      # and the apt packages (the production audit's P9).
+      - name: Toolchain
+        run: |
+          set -euo pipefail
+          py=python3; command -v python3 >/dev/null 2>&1 || py=python
+          pkgs=()
+          if [ "${{ runner.os }}" = Linux ]; then pkgs=(--apt libclang-dev --apt cmake); fi
+          "$py" -I .github/denext-runtime/toolchain_info.py --out "$RUNNER_TEMP/toolchain.json" \
+            --require rustc --require cargo ${pkgs[@]+"${pkgs[@]}"}
 
       - name: Check binary
         run: |
@@ -1309,6 +1425,8 @@ jobs:
           TYPESCRIPT_LSP_DIR: ${{ runner.temp }}/typescript-lsp
           TYPESCRIPT_CHECK_DIR: ${{ runner.temp }}/typescript-check
           TSGOLINT_DIR: ${{ runner.temp }}/tsgolint
+          TOOLCHAIN_JSON: ${{ runner.temp }}/toolchain.json
+          DENORT_TOOLCHAIN_JSON: denort-dist/deno-denort-${{ needs.setup.outputs.version }}-${{ matrix.target }}.toolchain.json
           OUT_DIR: dist
           # The upstream Deno release the fork is built from (BUILD_INFO.json's
           # and manifest.json's deno.version; denext's pins read it as `deno`).
@@ -1856,7 +1974,7 @@ jobs:
     # A `cli_only` dry run has no package or e2e_fork job: it still writes
     # (and uploads) the manifest, from the CLI archives alone.
     if: ${{ always() && needs.cli.result == 'success' && ((needs.package.result == 'success' && needs.e2e_fork.result == 'success') || (inputs.cli_only && needs.package.result == 'skipped' && needs.e2e_fork.result == 'skipped')) && (needs.rpm-smoke.result == 'success' || needs.rpm-smoke.result == 'skipped') }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
@@ -1930,7 +2048,7 @@ jobs:
         env:
           VERSION: ${{ needs.setup.outputs.version }}
           RELEASE: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/denext-runtime-v') && '--release' || '' }}
-        run: python3 -I .github/denext-runtime/denort_pins.py check-cli "$VERSION" dist $RELEASE
+        run: python3 -I .github/denext-runtime/denort_pins.py check-cli "$VERSION" dist ${RELEASE:+"$RELEASE"}
 
       - name: GitHub Release
         if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/denext-runtime-v')
@@ -2015,5 +2133,5 @@ jobs:
           # (tag_gate.py is_prerelease).
           prerelease=$(python3 -I .github/denext-runtime/tag_gate.py --prerelease-flag "${TAG#denext-runtime-v}")
           gh release create "$TAG" --repo "$REPO" --title "$TAG" \
-            --notes-file notes.md --verify-tag --latest="$latest" $prerelease \
+            --notes-file notes.md --verify-tag --latest="$latest" ${prerelease:+"$prerelease"} \
             dist/*.tar.gz dist/*.zip dist/SHA256SUMS dist/manifest.json "${symbols[@]}"
