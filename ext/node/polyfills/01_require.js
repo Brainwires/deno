@@ -3158,7 +3158,7 @@ function maybeBetterSqlite3Addon(filename) {
 // node-pty is a native addon (`pty.node`, `conpty.node`, a `spawn-helper`),
 // built at install and, once loaded, a terminal outside the runtime's
 // permissions. The package's entry module resolves to an implementation of
-// its API over `Deno.openPty` instead (DENEXT.md item 292), unless
+// its API over `Deno.openPty` instead (DENEXT.md item 261), unless
 // DENO_NO_NODE_PTY_COMPAT is set.
 const NODE_PTY_ENTRY =
   /^(.*[\\/]node-pty(?:[\\/][^\\/]+)?)[\\/]lib[\\/]index\.js$/;

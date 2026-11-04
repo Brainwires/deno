@@ -1,6 +1,6 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 
-//! `Deno.openPty`: a child process on a pseudo-terminal (DENEXT.md item 290).
+//! `Deno.openPty`: a child process on a pseudo-terminal (DENEXT.md item 259).
 //!
 //! The program is resolved and its run permission checked exactly as
 //! `Deno.Command` does it (`deno_process::prepare_run`: `--allow-run` and

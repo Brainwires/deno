@@ -1,6 +1,6 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 
-// `Deno.openPty`: a child process on a pseudo-terminal (DENEXT.md item 290).
+// `Deno.openPty`: a child process on a pseudo-terminal (DENEXT.md item 259).
 // The ops are in `lib.rs`; this module validates the options, wires the
 // master into a `ReadableStream` / `WritableStream` pair and builds the
 // handle. `Deno.Command` with `pty` (40_process.js) and the `node-pty` shim

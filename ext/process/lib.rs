@@ -771,7 +771,7 @@ type CreateCommand = (
   Option<embedded_program::VerifiedProgram>,
 );
 
-/// denext (DENEXT.md item 290): what `Deno.Command` resolves and checks
+/// denext (DENEXT.md item 259): what `Deno.Command` resolves and checks
 /// before it spawns, for another extension that starts a program the same
 /// way (`ext/pty`, `Deno.openPty`). The program is resolved as
 /// `Deno.Command` resolves it (a path, or a name on the environment's

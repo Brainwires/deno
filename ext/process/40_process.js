@@ -55,7 +55,7 @@ const {
   writableStreamForRid,
 } = core.loadExtScript("ext:deno_web/06_streams.js");
 
-// `Deno.Command` with `pty` (DENEXT.md item 290): the child runs on a
+// `Deno.Command` with `pty` (DENEXT.md item 259): the child runs on a
 // pseudo-terminal from ext/pty, loaded on first use.
 let _pty;
 const lazyPty = () =>

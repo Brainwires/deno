@@ -1,7 +1,7 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 
-// `Deno.openPty` and `Deno.Command` with `pty` (DENEXT.md items 290 and
-// 291). Every test here fails on a build without the API (`Deno.openPty is
+// `Deno.openPty` and `Deno.Command` with `pty` (DENEXT.md items 259 and
+// 260). Every test here fails on a build without the API (`Deno.openPty is
 // not a function`); the Windows cases run only where ConPTY is.
 
 import {
@@ -464,7 +464,7 @@ Deno.test(
   },
 );
 
-// `Deno.Command` with `pty` (item 291): thin sugar over the same spawn.
+// `Deno.Command` with `pty` (item 260): thin sugar over the same spawn.
 
 Deno.test(
   { permissions: { run: true, read: true } },

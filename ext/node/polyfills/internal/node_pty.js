@@ -4,7 +4,7 @@
 
 // deno-lint-ignore-file deno-internal/prefer-primordials
 
-// `node-pty` over `Deno.openPty` (DENEXT.md item 292). node-pty is a native
+// `node-pty` over `Deno.openPty` (DENEXT.md item 261). node-pty is a native
 // addon (`pty.node` / `conpty.node` plus a `spawn-helper`) that needs a build
 // at install and, loaded, would reach the terminal outside the runtime's
 // permissions, so the package's entry module resolves to this one instead
