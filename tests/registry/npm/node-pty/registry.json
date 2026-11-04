@@ -1,0 +1,28 @@
+{
+  "name": "node-pty",
+  "description": "A stand-in for node-pty 1.1.0: the same entry and install script, no addon",
+  "dist-tags": {
+    "latest": "1.1.0"
+  },
+  "versions": {
+    "1.1.0": {
+      "name": "node-pty",
+      "version": "1.1.0",
+      "description": "A stand-in for node-pty 1.1.0: the same entry and install script, no addon",
+      "main": "./lib/index.js",
+      "scripts": {
+        "install": "node scripts/prebuild.js || node-gyp rebuild",
+        "postinstall": "node scripts/post-install.js"
+      },
+      "license": "MIT",
+      "_id": "node-pty@1.1.0",
+      "dist": {
+        "shasum": "80ceb837090c19ef8f5651d17d454b6690e9900e",
+        "tarball": "http://localhost:4260/node-pty/node-pty-1.1.0.tgz",
+        "integrity": "sha512-V/wYO0MEiesvFLRrrHqnElT8kkX2JX5iJZ13vZRt45o+/3qWiZY7c9CKohcVamERcEaV94CKVtyJi4ZLdRbK9Q==",
+        "unpackedSize": 904
+      }
+    }
+  },
+  "license": "MIT"
+}

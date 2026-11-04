@@ -73,6 +73,7 @@ pub fn get_types_declaration_file_text() -> String {
     "deno.broadcast_channel",
     "deno.net",
     "deno.sql",
+    "deno.pty",
     "deno.shared_globals",
     "deno.cache",
     "esnext.temporal",
@@ -87,7 +88,7 @@ pub fn get_types_declaration_file_text() -> String {
 /// collides. Mirrors the userland `"lib": ["deno.ns", "dom"]` pattern.
 pub fn get_deno_ns_declaration_file_text() -> String {
   // denext: `Deno.SQL` / `Deno.sql` are part of the `Deno` namespace.
-  concat_lib_texts(&["deno.ns", "deno.net", "deno.sql"])
+  concat_lib_texts(&["deno.ns", "deno.net", "deno.sql", "deno.pty"])
 }
 
 /// Deno's desktop lib (`deno desktop` apps: the window's events, notifications,
@@ -232,6 +233,7 @@ pub static LAZILY_LOADED_STATIC_ASSETS: Lazy<
     ),
     maybe_compressed_lib!("lib.deno.net.d.ts", "lib.deno_net.d.ts"),
     maybe_compressed_lib!("lib.deno.sql.d.ts", "lib.deno_sql.d.ts"),
+    maybe_compressed_lib!("lib.deno.pty.d.ts", "lib.deno_pty.d.ts"),
     maybe_compressed_lib!("lib.deno.cache.d.ts", "lib.deno_cache.d.ts"),
     maybe_compressed_lib!("lib.deno.webgpu.d.ts", "lib.deno_webgpu.d.ts"),
     maybe_compressed_lib!("lib.deno.window.d.ts"),

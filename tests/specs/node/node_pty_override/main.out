@@ -1,0 +1,6 @@
+function function function null
+pid true size 100 30 process sh
+"30 100\r\nhello\r\ngot:hello\r\nTERM=xterm-color\r\n"
+legacy emitter saw the same true
+exit 7 undefined size 120 40
+handleFlowControl false

@@ -10324,12 +10324,180 @@ where the changes are discussed.
      name; before: the leak and unvalidated options), node_compat
      `test-fs-promises-watch.js` enabled.
 
+259. **`feat(pty)`: `Deno.openPty`, a child process on a pseudo-terminal**
+     (`feat/deno-pty`, `ext/pty`, `cli/tsc/dts/lib.deno_pty.d.ts`; wired as
+     `Deno.SQL` is, item 24: the workspace, `runtime/snapshot.rs`,
+     `snapshot_info.rs`, `worker.rs`, `web_worker.rs`, a lazy getter in
+     `runtime/js/90_deno_ns.js`, the lib in `cli/tsc/mod.rs` and
+     `cli/build.rs`). What a terminal emulator does:
+     `Deno.openPty({ cmd,
+     args?, cwd?, env?, clearEnv?, cols, rows })`
+     starts `cmd` with a new pseudo-terminal as its stdin, stdout and stderr and
+     returns
+     `{ pid,
+     readable, writable, resize(cols, rows), kill(signal = "SIGHUP"), status,
+     [Symbol.asyncDispose] }`:
+     the child's output (with the terminal's processing: echo, `\r\n`) on a
+     `ReadableStream<Uint8Array>`, its keyboard input on a
+     `WritableStream<Uint8Array>`, `status` the `Deno.ChildProcess` shape
+     (`{ success, code, signal }`, `128 + n` on a signal), and `cmd` / `args` /
+     `cwd` / `env` / `clearEnv` with `Deno.Command`'s exact meaning. Stable
+     under `Deno`, as `Deno.SQL` is and every API the fork adds: there is no
+     `--unstable-pty`. The fork has no unstable flag of its own (every
+     `--unstable-*` is upstream's), denext pins the runtime it runs on exactly,
+     and a gate would only make the `node-pty` shim (item 261) need a flag for a
+     package that works without one on Node.
+     - **Permissions: exactly `Deno.Command`'s.** `ext/process` now exports
+       `prepare_run` (`PreparedRun`): the program resolved as `Deno.Command`
+       resolves it (a path, or a name on the environment's `PATH`), the
+       environment and working directory computed once and used for both the
+       check and the spawn, `check_run` on the resolved path (`--allow-run` and
+       its allow-list, `LD_*` / `DYLD_*` set only with full run permission, an
+       embedded program's hash and post-spawn check, item 232). A pty is never
+       reachable without `--allow-run`; `--allow-run=sh` allows `sh` on a pty
+       and nothing else. No `uid` / `gid`: the child is the current user.
+     - **Unix** (`unix.rs`): `/dev/ptmx` opened `O_CLOEXEC`, `grantpt` /
+       `unlockpt`, the slave (`ptsname_r`; `TIOCPTYGNAME` on macOS) opened
+       `O_CLOEXEC` too, so neither end exists un-inheritable for even a moment
+       (another thread's fork cannot take them); the slave gets the attributes
+       node-pty gives a terminal (canonical mode, echo, `IUTF8`, 38400 baud) and
+       the window size; the child is a `std::process::Command` with the slave as
+       its three stdio (dup2'd before `pre_exec`) and a `pre_exec` of
+       `setsid()` + `TIOCSCTTY` (only async-signal-safe calls), converted to
+       tokio's `Command` so the child is reaped by tokio's SIGCHLD-driven reaper
+       (no thread). The master is `O_NONBLOCK` in a tokio `AsyncFd`; a read's
+       `EIO` (Linux, once every slave descriptor is closed) is the terminal's
+       end-of-file. `resize` is `TIOCSWINSZ` on the master (the foreground
+       process gets `SIGWINCH`). The slave is closed in the parent right after
+       the spawn.
+     - **Windows** (`windows.rs`): ConPTY. `CreatePseudoConsole` /
+       `ResizePseudoConsole` / `ClosePseudoConsole` are looked up in kernel32 at
+       run time, so a Windows without them (before 10 1809) gets a
+       `NotSupported` error, not a binary that fails to load. Two named pipes
+       opened overlapped on this side (tokio's `NamedPipeServer`), the
+       synchronous ends to the console, which keeps its own references; the
+       child by `CreateProcessW` with `PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE`
+       (`bInheritHandles = FALSE`: nothing else of this process reaches it),
+       `std`'s argument quoting, the environment block sorted; waited on with
+       `RegisterWaitForSingleObject` (the thread pool, no thread of ours);
+       `kill` is `TerminateProcess` for any signal but `0`. The console is
+       closed once the child has exited, on a thread of its own because
+       `ClosePseudoConsole` waits for conhost to drain the output this thread
+       reads; the output pipe's end-of-file follows. `.bat` / `.cmd` files are
+       not wrapped in `cmd.exe` (run `cmd /c` yourself).
+     - **Resources.** The master is one resource (`pty`) serving `readable` and
+       `writable`; the child another (`ptyChild`) that `status`' wait removes
+       once it is reaped. `readable` closes the master when it ends or is
+       cancelled; `writable` shares it and does not close it (a terminal has no
+       half-close: an end-of-file for the child is a `"\x04"` written to it);
+       `[Symbol.asyncDispose]` sends `SIGHUP`, awaits `status` and closes the
+       master. A test that reads `readable` to its end (or disposes) and awaits
+       `status` leaves nothing for `deno test`'s sanitizers. A child resource
+       dropped unreaped (the runtime ends with the child running) is killed, as
+       `Deno.Command`'s is.
+     - **`kill` reaches the handle's own child only**: the pid `openPty`
+       returned, never the process group it leads (a shell's background jobs
+       outlive a `kill()` of the shell; `SIGHUP` is what a closing terminal
+       sends, and a shell forwards it as it does), and only while the child has
+       not been reaped (after that a pid may name another process:
+       `TypeError: Child process has already terminated`).
+     - **Why in the runtime, not FFI** (the scout's findings on denext.8,
+       `plans/pty-fork-2026-11-04.md` in denext): node-pty's addon loaded
+       through `ext/napi` but writes to its master failed (`EBADF`: the fd is
+       not in Deno's table), `tty.ReadStream` on it needed full permission,
+       macOS never delivered reads, the install failed in the lifecycle jail (no
+       Linux prebuild, node-gyp), and `--allow-ffi` plus `forkpty` ran any
+       program past `--allow-run`. Here the spawn is `Deno.Command`'s, the fds
+       are the runtime's, and no FFI is involved.
+     - Tests: `tests/unit/pty_test.ts` (echo round trip, `stty size` for the
+       size and a resize, `isatty`, exit code, `SIGTERM` reported as the signal,
+       `SIGHUP` by default scoped to the child (a background job of the shell
+       survives), env / cwd / `clearEnv`, dispose, `readable` ending with the
+       child, `--allow-run` denied, `--allow-run=sh` allowing only `sh`,
+       `LD_PRELOAD` refused under an allow-list, a missing program, option
+       validation); the Windows cases (echo, exit code, dispose, permissions,
+       `Deno.Command`) run where ConPTY is, the Unix-only ones are `ignore`d
+       there. Every test fails on a build without the API
+       (`Deno.openPty is not a function`).
+
+260. **`feat(process)`: `Deno.Command` with `pty: { cols, rows }`**
+     (`feat/deno-pty`, `ext/process/40_process.js`,
+     `cli/tsc/dts/lib.deno.ns.d.ts`).
+     `new Deno.Command(cmd, { pty: { cols,
+     rows } }).spawn()` (Bun 1.4's
+     `Bun.spawn(cmd, { terminal })`) runs the child on a pseudo-terminal: thin
+     sugar over item 259's spawn. The child's stdin, stdout and stderr are the
+     terminal (`stdin` / `stdout` / `stderr` throw "not piped"), `child.pty` is
+     `{ readable, writable, resize }`, `status`, `kill(signal = "SIGTERM")`,
+     `ref` / `unref`, the abort `signal` and `[Symbol.asyncDispose]` (which also
+     closes the master) are the `ChildProcess`'s own. Setting `stdin`, `stdout`,
+     `stderr`, `uid`, `gid`, `detached`, `windowsRawArguments` or the internal
+     `input` with `pty` is a `TypeError`; `output()` / `outputSync()` refuse it
+     (use `spawn()`); `child.pty` on a child spawned without it throws. The same
+     `check_run`. Tests in `tests/unit/pty_test.ts` (`commandPty*`).
+
+261. **`feat(ext/node)`: `node-pty` over `Deno.openPty`** (behavior change for
+     projects that depend on node-pty; `feat/deno-pty`,
+     `ext/node/polyfills/internal/node_pty.js`, `01_require.js`). node-pty is a
+     native addon (`pty.node` / `conpty.node` and a `spawn-helper`) built at
+     install; loaded, it reaches a terminal outside the runtime's permissions
+     (item 259). As `better-sqlite3` over `node:sqlite` (item 61), the entry
+     module (`lib/index.js` of a package whose package.json is named `node-pty`,
+     installed or in the global cache) now resolves to a built-in implementation
+     of node-pty 1.x's public API on item 259: `spawn(file,
+     args, options)`
+     (`fork` / `createTerminal`, the deprecated aliases) and the `IPty`: `pid`,
+     `cols`, `rows`, `process` (the terminal's foreground process by name:
+     `tcgetpgrp` then `/proc/<pid>/comm` on Linux, `proc_name` on macOS; the
+     file otherwise), `onData` / `onExit` (node-pty's disposable events:
+     `onExit` gets `{ exitCode, signal }` with the signal's number and
+     `exitCode` 0 on a signal, as node-pty reports it), the legacy emitter
+     (`on('data' | 'exit' | 'close' | 'error')`, `close` before `exit`),
+     `write(string | Buffer)` (in order; after the child is gone, dropped),
+     `resize` (node-pty's validation), `kill(signal =
+     "SIGHUP")` (errors
+     swallowed, as node-pty's), `pause` / `resume` (data held back), `clear` (a
+     no-op on Unix, as node-pty's), `handleFlowControl` with `flowControlPause`
+     / `flowControlResume` (XOFF / XON not forwarded), `destroy` / `end`. The
+     options keep node-pty's defaults: `encoding` `utf8` (`null` for `Buffer`
+     chunks), `name` → `TERM` (`xterm`), `cols` / `rows` 80 × 24, `cwd` the
+     process's, `env` the process's with node-pty's sanitizing (`TMUX`, `STY`,
+     `WINDOWID`, `TERMCAP`, `COLUMNS`, `LINES`, ... dropped) and `PWD` set; the
+     whole environment is handed to `openPty` with `clearEnv`, so nothing else
+     leaks. `uid` / `gid` throw (the child is the current user; node-pty would
+     `setuid`), `args` as a string throws (node-pty takes a raw command line on
+     Windows only), `open()` (a terminal with no child) throws, `native` is
+     `null` (node-pty documents it as not public), `master` / `slave` are
+     `undefined`. Opt out with `DENO_NO_NODE_PTY_COMPAT=1`, which loads the
+     package's own code (and fails on the addon).
+     - **`deno install`.** node-pty's `install` script
+       (`node
+       scripts/prebuild.js || node-gyp rebuild`) is a
+       dependency's, so without `--allow-scripts` Deno lists it under "Ignored
+       build scripts" and does not run it, which is right: nothing of the
+       package's `build/` or `prebuilds/` is loaded. With `--allow-scripts` it
+       runs as any other (`node-gyp` in the lifecycle jail, item 54), builds an
+       addon that is never loaded, and may fail where it would on Node (no
+       prebuild for the platform, no C++ toolchain); the package works either
+       way. There is no placeholder as better-sqlite3's (item 61): node-pty does
+       not go through `bindings`.
+     - Specs: `node/node_pty_override` (CommonJS: spawn, `stty size` through the
+       terminal, a resize, `write` / `read`, `process`, the exit code; ESM named
+       and default imports; a `SIGTERM` reported as `(0, 15)` with `pause` /
+       `resume`; `--allow-run` missing; the opt-out), `npm/node_pty_shim`
+       (`npm:node-pty@1.1.0` from the test registry:
+       `tests/registry/npm/node-pty/`, a 1 KB stand-in tarball with the real
+       package's entry and install scripts and its `registry.json`, the real
+       tarball being 15 MB; through a node_modules install and the global
+       cache). Unix only: they drive `sh`.
+
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
 169-174, 176, 178, 180, 182-184, 186, 187, 189-191, 193-196, 198-203, 206, 207,
 209-215, 217, 218, 221, 222, 224, 225, 227, 228, 231, 232, 235, 237, 240,
-243-245, 247-249, 253, 254, 256-258) are what the prebuilt `libdenort` carries.
+243-245, 247-249, 253, 254, 256-260) are what the prebuilt `libdenort` carries.
 The CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` /
 `LAUFEY_APP_ID` into a packaged app's launchers) are in the branch too, but a
 stock CLI does not run them; denext's own launcher provides that environment.

@@ -3153,8 +3153,39 @@ function maybeBetterSqlite3Addon(filename) {
   return undefined;
 }
 
+// node-pty is a native addon (`pty.node`, `conpty.node`, a `spawn-helper`),
+// built at install and, once loaded, a terminal outside the runtime's
+// permissions. The package's entry module resolves to an implementation of
+// its API over `Deno.openPty` instead (DENEXT.md item 292), unless
+// DENO_NO_NODE_PTY_COMPAT is set.
+const NODE_PTY_ENTRY =
+  /^(.*[\\/]node-pty(?:[\\/][^\\/]+)?)[\\/]lib[\\/]index\.js$/;
+let nodePtyOptedOut;
+
+function isNodePtyOptedOut() {
+  if (nodePtyOptedOut === undefined) {
+    const value = op_get_env_no_permission_check("DENO_NO_NODE_PTY_COMPAT");
+    nodePtyOptedOut = value != null && value !== "" && value !== "0";
+  }
+  return nodePtyOptedOut;
+}
+
+function maybeNodePtyOverride(filename) {
+  const match = RegExpPrototypeExec(NODE_PTY_ENTRY, filename);
+  if (match === null) return undefined;
+  if (isNodePtyOptedOut()) return undefined;
+  const sep = StringPrototypeIncludes(match[1], "/") ? "/" : "\\";
+  const pkg = op_require_read_package_scope(match[1] + sep + "package.json");
+  if (pkg?.name !== "node-pty") return undefined;
+  const { spawn, fork, createTerminal, open, native } = core.loadExtScript(
+    "ext:deno_node/internal/node_pty.js",
+  );
+  return { spawn, fork, createTerminal, open, native };
+}
+
 function loadMaybeCjs(module, filename) {
-  const override = maybeBetterSqlite3Override(filename);
+  const override = maybeBetterSqlite3Override(filename) ??
+    maybeNodePtyOverride(filename);
   if (override !== undefined) {
     module.exports = override;
     return;

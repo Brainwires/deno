@@ -1307,6 +1307,7 @@ fn common_extensions<
     deno_node_crypto::deno_node_crypto::init(),
     deno_node_sqlite::deno_node_sqlite::init(),
     deno_sql::deno_sql::init(),
+    deno_pty::deno_pty::init(),
     deno_node::deno_node::lazy_init::<
       TInNpmPackageChecker,
       TNpmPackageFolderResolver,

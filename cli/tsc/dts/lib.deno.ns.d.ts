@@ -4,6 +4,7 @@
 /// <reference lib="esnext" />
 /// <reference lib="deno.net" />
 /// <reference lib="deno.sql" />
+/// <reference lib="deno.pty" />
 
 /** Deno provides extra properties on `import.meta`. These are included here
  * to ensure that these are still available when using the Deno namespace in
@@ -4143,6 +4144,15 @@ declare namespace Deno {
      * process from exiting. */
     unref(): void;
 
+    /** The pseudo-terminal a child spawned with `pty` runs on: its output,
+     * its input and its size (see {@linkcode Deno.Pty}). Throws for a child
+     * spawned without `pty`. */
+    get pty(): {
+      readonly readable: ReadableStream<Uint8Array<ArrayBuffer>>;
+      readonly writable: WritableStream<Uint8Array<ArrayBufferLike>>;
+      resize(cols: number, rows: number): void;
+    };
+
     [Symbol.asyncDispose](): Promise<void>;
   }
 
@@ -4252,6 +4262,14 @@ declare namespace Deno {
      * @default {false}
      */
     detached?: boolean;
+
+    /** Spawns the child on a new pseudo-terminal of this size instead of
+     * pipes: its stdin, stdout and stderr are the terminal, reachable as
+     * {@linkcode Deno.ChildProcess.pty} (see {@linkcode Deno.openPty}, the
+     * underlying API). Only `spawn()` takes it; setting `stdin`, `stdout`,
+     * `stderr`, `uid`, `gid`, `detached` or `windowsRawArguments` with it
+     * throws. Requires `--allow-run` for the command, as without it. */
+    pty?: { cols: number; rows: number };
   }
 
   /**

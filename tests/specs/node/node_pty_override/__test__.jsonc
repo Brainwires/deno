@@ -1,0 +1,42 @@
+{
+  // node-pty is a native addon Deno neither builds nor loads: the package's
+  // entry module resolves to an implementation of its API over
+  // Deno.openPty. The package here is a stand-in whose own code would throw,
+  // as the real one's addon load does. Unix only: the shell these drive is
+  // `sh` (the Windows side of the runtime's pty is covered by the unit
+  // tests).
+  "tempDir": true,
+  "tests": {
+    "require": {
+      "if": "unix",
+      "args": "run -A main.cjs",
+      "output": "main.out"
+    },
+    "import": {
+      "if": "unix",
+      "args": "run -A esm.mjs",
+      "output": "esm.out"
+    },
+    "signal_and_pause": {
+      "if": "unix",
+      "args": "run -A signal.cjs",
+      "output": "signal.out"
+    },
+    "needs_run_permission": {
+      "if": "unix",
+      "args": "run --allow-read --allow-env esm.mjs",
+      // a dynamic-loader variable in the environment needs full run
+      // permission first (the `LD_*` rule), which is not what this checks
+      "envs": { "LD_LIBRARY_PATH": "", "DYLD_FALLBACK_LIBRARY_PATH": "" },
+      "output": "no_run.out",
+      "exitCode": 1
+    },
+    "opt_out": {
+      "if": "unix",
+      "args": "run -A esm.mjs",
+      "envs": { "DENO_NO_NODE_PTY_COMPAT": "1" },
+      "output": "opt_out.out",
+      "exitCode": 1
+    }
+  }
+}

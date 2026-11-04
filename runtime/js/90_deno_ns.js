@@ -72,6 +72,10 @@ const lazySurface = () =>
 let _sql;
 const lazySql = () =>
   _sql ?? (_sql = core.loadExtScript("ext:deno_sql/01_sql.js"));
+// `Deno.openPty` (ext/pty): loaded on first access.
+let _pty;
+const lazyPty = () =>
+  _pty ?? (_pty = core.loadExtScript("ext:deno_pty/01_pty.js"));
 let _telemetry;
 const lazyTelemetry = () =>
   _telemetry ??
@@ -292,6 +296,9 @@ const denoNs = {
   },
   get sql() {
     return lazySql().getDefaultSql();
+  },
+  get openPty() {
+    return lazyPty().openPty;
   },
 };
 
