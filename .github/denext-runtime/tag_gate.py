@@ -10,7 +10,10 @@ A `denext-runtime-v*` tag publishes only when, for the tagged commit:
   in any attempt, and none is still running. A crash that fails one run in
   three is a bug: re-running until one passes would ship it (the arm64 and
   macOS SIGABRTs of rc.3 and rc.6 did). A cancelled run (superseded by a
-  newer push) is not a failure. The way past a red run is a new commit;
+  newer push) is not a failure. The way past a red run is a new commit.
+  A run GitHub left queued with no jobs for over STUCK_AFTER seconds never
+  started (one sat queued for days, and neither cancel nor delete removed
+  it): it doesn't hold the release, and it vouches for nothing;
 - the commit is on development-denext or on the release branch
   rel/<version>: a fix/* commit that was dispatched but never merged is not
   a release.
@@ -36,6 +39,7 @@ import os
 import re
 import subprocess
 import sys
+from datetime import datetime, timezone
 
 WORKFLOW = "denext_tests.yml"
 REQUIRED_LEGS = (
@@ -62,6 +66,22 @@ def classify(conclusion, job_conclusions):
     if any(c in ("failure", "timed_out") for c in job_conclusions):
         return conclusion
     return NO_RUNNER
+# A run still `queued` with no jobs this long after it was created never
+# started: GitHub can leave one so for days, beyond cancel and delete.
+STUCK_AFTER = 3600
+
+
+def is_stuck(status, job_count, created_at, now):
+    """Whether a run never started: queued, no jobs, older than STUCK_AFTER.
+
+    created_at: the API's ISO time (`2026-11-04T17:02:01Z`); now: a
+    timezone-aware datetime."""
+    if status != "queued" or job_count != 0 or not created_at:
+        return False
+    created = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+    return (now - created).total_seconds() > STUCK_AFTER
+
+
 # `compare/<sha>...<branch>`: the branch contains the commit.
 CONTAINED = ("ahead", "identical")
 
@@ -129,12 +149,20 @@ def evaluate(runs, legs_of, contained_in):
 
     runs: every `denext tests` run of the commit, each a dict with `id`,
       `status`, `conclusion` and `attempts` (the conclusions of its earlier
-      attempts, oldest first; empty for a run never re-run).
+      attempts, oldest first; empty for a run never re-run), and `stuck`
+      when it never started (`is_stuck`): such a run is left out.
     legs_of: run id -> the OS legs that have a passed job in that run.
     contained_in: branch name -> whether it contains the commit.
     Returns (full_run_id or None, [errors]).
     """
     errors = []
+    for r in runs:
+        if r.get("stuck"):
+            print(
+                f"denext tests run {r['id']} is stuck in the queue with no"
+                " jobs: not counted"
+            )
+    runs = [r for r in runs if not r.get("stuck")]
     pending = [r["id"] for r in runs if r["status"] != "completed"]
     if pending:
         errors.append(
@@ -191,6 +219,7 @@ def gh_lines(args):
 
 
 def gh_runs(repo, sha):
+    now = datetime.now(timezone.utc)
     runs = []
     for line in gh_lines(
         [
@@ -198,10 +227,23 @@ def gh_runs(repo, sha):
             f"repos/{repo}/actions/workflows/{WORKFLOW}/runs"
             f"?head_sha={sha}&per_page=100",
             "--jq",
-            ".workflow_runs[] | {id, status, conclusion, run_attempt}",
+            ".workflow_runs[] | {id, status, conclusion, run_attempt, created_at}",
         ]
     ):
         run = json.loads(line)
+        if run["status"] == "queued":
+            count = int(
+                gh_lines(
+                    [
+                        f"repos/{repo}/actions/runs/{run['id']}/jobs?per_page=1",
+                        "--jq",
+                        ".total_count",
+                    ]
+                )[0]
+            )
+            run["stuck"] = is_stuck(
+                run["status"], count, run.get("created_at"), now
+            )
         # A re-run replaces the run's conclusion: read each earlier attempt
         # (`--jq` prints a string unquoted; a null conclusion prints "null").
         last = int(run.get("run_attempt") or 1)

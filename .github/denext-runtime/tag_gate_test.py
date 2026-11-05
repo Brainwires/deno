@@ -15,6 +15,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from datetime import datetime, timezone
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 GATE = os.path.join(HERE, "tag_gate.py")
@@ -117,6 +118,32 @@ class Evaluate(unittest.TestCase):
         self.assertEqual(len(errors), 1)
         self.assertIn("in progress", errors[0])
         self.assertIn("2", errors[0])
+
+    def test_a_run_stuck_in_the_queue_does_not_hold_the_release(self):
+        # 41873491464: queued with no jobs for over a day; cancel and delete
+        # both failed, and it held 3.0.0-denext.11.
+        stuck = dict(run(41873491464, None, "queued"), stuck=True)
+        full, errors = gate.evaluate(
+            [run(1), stuck], legs({1: ALL_LEGS}), ON_DEV
+        )
+        self.assertEqual(errors, [])
+        self.assertEqual(full, 1)
+
+    def test_a_stuck_run_vouches_for_nothing(self):
+        stuck = dict(run(5, None, "queued"), stuck=True)
+        full, errors = gate.evaluate([stuck], legs({5: ALL_LEGS}), ON_DEV)
+        self.assertIsNone(full)
+        self.assertEqual(len(errors), 1)
+        self.assertIn("no successful full", errors[0])
+
+    def test_is_stuck(self):
+        now = datetime(2026, 11, 5, 18, 0, tzinfo=timezone.utc)
+        old, fresh = "2026-11-04T17:02:01Z", "2026-11-05T17:30:00Z"
+        self.assertTrue(gate.is_stuck("queued", 0, old, now))
+        self.assertFalse(gate.is_stuck("queued", 0, fresh, now))
+        self.assertFalse(gate.is_stuck("queued", 3, old, now))
+        self.assertFalse(gate.is_stuck("in_progress", 0, old, now))
+        self.assertFalse(gate.is_stuck("queued", 0, None, now))
 
     def test_windows_arm64_is_a_required_leg(self):
         self.assertIn("windows-11-arm", gate.REQUIRED_LEGS)
@@ -318,6 +345,30 @@ class Script(unittest.TestCase):
         result = self.gate(answers)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("full_run=11", result.stdout)
+
+    def test_a_run_stuck_in_the_queue_does_not_block(self):
+        answers = self.base()
+        answers[RUNS] = (
+            '{"id":10,"status":"queued","conclusion":null,"run_attempt":1,'
+            '"created_at":"2020-01-01T00:00:00Z"}\n'
+            '{"id":11,"status":"completed","conclusion":"success","run_attempt":1}\n'
+        )
+        answers[f"repos/{REPO}/actions/runs/10/jobs?per_page=1"] = "0\n"
+        result = self.gate(answers)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("run 10 is stuck in the queue", result.stdout)
+
+    def test_a_queued_run_with_jobs_still_blocks(self):
+        answers = self.base()
+        answers[RUNS] = (
+            '{"id":10,"status":"queued","conclusion":null,"run_attempt":1,'
+            '"created_at":"2020-01-01T00:00:00Z"}\n'
+            '{"id":11,"status":"completed","conclusion":"success","run_attempt":1}\n'
+        )
+        answers[f"repos/{REPO}/actions/runs/10/jobs?per_page=1"] = "6\n"
+        result = self.gate(answers)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("still in progress for this commit: 10", result.stdout)
 
     def test_refuses_an_unmerged_commit(self):
         answers = self.base()
