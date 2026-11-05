@@ -10758,6 +10758,20 @@ where the changes are discussed.
      load-dependent: as plain `#[test]`s they abort every run (fail-before), and
      they pass now. No product code changes.
 
+266. **`ci`: a run stuck in the queue with no jobs doesn't hold the tag**
+     (`.github/denext-runtime/tag_gate.py`). A dispatched "denext tests" run
+     (41873491464) stayed `queued` with no jobs for over a day: cancel answered
+     as if it had finished, force-cancel answered 409 and delete 403, so the
+     gate's "still in progress" rule refused every tag of `195a392250`
+     (3.0.0-denext.11). A run still `queued` with no jobs an hour after it was
+     created never started: the gate now reports it and leaves it out. It holds
+     nothing and vouches for nothing; a queued run that has jobs still holds
+     the release. Unchanged: a failed attempt is never cleared, even one the
+     runner caused. "denext tests" run 42112912711 (`09efe6141b`) lost
+     `windows-2022 / test libs` to a runner whose `D:` drive disappeared during
+     the build ("A device which does not exist was specified", os error 433)
+     with no test run, so 3.0.0-denext.12 is tagged on the next commit.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
