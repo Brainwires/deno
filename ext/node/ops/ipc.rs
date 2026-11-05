@@ -963,6 +963,18 @@ mod impl_ {
       ops = [super::op_node_ipc_ref, super::op_node_ipc_unref],
     );
 
+    /// Makes V8 post a delayed foreground task now. V8 posts them on its own
+    /// (the memory reducer, GC finalization) at times that depend on the GC,
+    /// and deno_core aborts the process when the isolate was created outside
+    /// a tokio runtime: the libtest output capture swallows its message, so a
+    /// test that does that dies now and then with a bare SIGABRT. The tests
+    /// here run in a tokio runtime and post one, so that cannot come back.
+    fn post_a_delayed_v8_task(runtime: &mut JsRuntime) {
+      runtime
+        .v8_isolate()
+        .memory_pressure_notification(v8::MemoryPressureLevel::Critical);
+    }
+
     fn wrap_expr(s: &str) -> String {
       format!("(function () {{ return {s}; }})()")
     }
@@ -977,9 +989,10 @@ mod impl_ {
       String::from_utf8(buf).unwrap()
     }
 
-    #[test]
-    fn ipc_serialization() {
+    #[tokio::test]
+    async fn ipc_serialization() {
       let mut runtime = JsRuntime::new(RuntimeOptions::default());
+      post_a_delayed_v8_task(&mut runtime);
 
       let cases = [
         ("'hello'", "\"hello\""),
@@ -1017,12 +1030,13 @@ mod impl_ {
       }
     }
 
-    #[test]
-    fn ipc_ref_unref_invalid_resource() {
+    #[tokio::test]
+    async fn ipc_ref_unref_invalid_resource() {
       let mut runtime = JsRuntime::new(RuntimeOptions {
         extensions: vec![test_ipc_ops::init()],
         ..Default::default()
       });
+      post_a_delayed_v8_task(&mut runtime);
 
       runtime
         .execute_script(

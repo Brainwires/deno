@@ -10731,6 +10731,33 @@ where the changes are discussed.
      idle programs; `compile/resource_limits`, which covers the disarm, was not
      run locally).
 
+<!-- New items below; the comment keeps the formatter from renumbering them. -->
+
+265. **`test(ext/node)`: the IPC serialization tests run in a tokio runtime**
+     (`fix/deno-node-test-abort`; tests only; `ext/node/ops/ipc.rs`). The
+     `ubuntu-22.04-arm / test libs` job of "denext tests" run 42026904939
+     (`cf710bc530`, content identical to `195a392250`, which passed) died in
+     `cargo test -p deno_node --lib` with a bare SIGABRT and no panic message,
+     27 of 140 tests reported. The two tests in `ops::ipc::impl_::tests`
+     (`ipc_serialization`, `ipc_ref_unref_invalid_resource`) were plain
+     `#[test]`s, so their `JsRuntime` was created outside a tokio runtime and
+     registered with no tokio handle. When V8 posts a delayed foreground task
+     for such an isolate (the memory reducer, GC finalization: when depends on
+     the GC, so on load), deno_core's `spawn_delayed_task`
+     (`libs/core/runtime/setup.rs`, upstream #35595) prints a message and calls
+     `std::process::abort()`. On a libtest thread that `eprintln!` goes to the
+     test's output capture, which an abort never prints, hence the silent
+     SIGABRT. Reproduced on biscuits (x86_64, the suite's binary looped with
+     `--test-threads=64`): 13 bare SIGABRTs in 1,000 runs before, 0 in 1,000
+     with the two IPC tests skipped, 0 in 1,000 after. A plain `#[test]`
+     `JsRuntime` that allocates enough to start the GC, or receives a critical
+     memory-pressure notification, aborts every time (exit 134, the message
+     shown only with `--nocapture`); in a tokio runtime it passes. Both tests
+     are now `#[tokio::test]`, and each posts a delayed task through a critical
+     memory-pressure notification, so the hazard is deterministic instead of
+     load-dependent: as plain `#[test]`s they abort every run (fail-before), and
+     they pass now. No product code changes.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
