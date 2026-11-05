@@ -1,6 +1,7 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 
 import { BigIntStats, Stats } from "node:fs";
+import process from "node:process";
 import {
   assert,
   assertEquals,
@@ -8,6 +9,33 @@ import {
   assertStrictEquals,
   assertStringIncludes,
 } from "@std/assert";
+
+/**
+ * Asserts that a callback-style API calls its callback once when the callback
+ * throws, and that the throw surfaces as an uncaught exception (Node's
+ * behaviour) instead of reaching the callback a second time as an error.
+ */
+export async function assertCallbackThrowUncaughtOnce(
+  invoke: (callback: (...args: unknown[]) => void) => void,
+) {
+  const thrown = new Error("thrown by the callback");
+  let calls = 0;
+  const { promise, resolve } = Promise.withResolvers<unknown>();
+  const onUncaught = (err: unknown) => resolve(err);
+  process.on("uncaughtException", onUncaught);
+  try {
+    invoke(() => {
+      calls++;
+      throw thrown;
+    });
+    assertStrictEquals(await promise, thrown);
+    // A second call would come from the same promise chain: give it a turn.
+    await new Promise((r) => setTimeout(r, 10));
+    assertEquals(calls, 1);
+  } finally {
+    process.off("uncaughtException", onUncaught);
+  }
+}
 
 /** Asserts that an error thrown in a callback will not be wrongly caught. */
 export async function assertCallbackErrorUncaught(

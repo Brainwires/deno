@@ -1,5 +1,10 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
-import { randomFillSync, randomUUID, timingSafeEqual } from "node:crypto";
+import {
+  checkPrime,
+  randomFillSync,
+  randomUUID,
+  timingSafeEqual,
+} from "node:crypto";
 import { Buffer } from "node:buffer";
 import {
   assert,
@@ -8,6 +13,7 @@ import {
   assertThrows,
 } from "../../unit/test_util.ts";
 import { assertNotEquals } from "@std/assert";
+import { assertCallbackThrowUncaughtOnce } from "../_test_utils.ts";
 
 const UUID_REGEX =
   /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -73,4 +79,8 @@ Deno.test("[node/crypto.timingSafeEqual] RangeError on Buffer with different byt
   const b = Buffer.from([0, 0, 0, 0, 0, 0, 0, 0, 212, 213, 0]);
 
   assertThrows(() => timingSafeEqual(a, b), RangeError);
+});
+
+Deno.test("checkPrime calls a throwing callback once; the throw is uncaught", async () => {
+  await assertCallbackThrowUncaughtOnce((cb) => checkPrime(7n, cb));
 });

@@ -6,7 +6,6 @@
 (function () {
 const { core, primordials } = __bootstrap;
 const {
-  PromisePrototypeCatch,
   PromisePrototypeThen,
   SafeSet,
   SetPrototypeHas,
@@ -156,11 +155,11 @@ function hkdf(
 
   hash = StringPrototypeToLowerCase(hash);
 
-  PromisePrototypeCatch(
-    PromisePrototypeThen(
-      op_node_hkdf_async(hash, key[kHandle], salt, info, length),
-      (okm) => callback(null, TypedArrayPrototypeGetBuffer(okm)),
-    ),
+  // Two-argument `then`: a throw from `callback` surfaces as uncaught (as in
+  // Node) instead of calling it a second time with that error.
+  PromisePrototypeThen(
+    op_node_hkdf_async(hash, key[kHandle], salt, info, length),
+    (okm) => callback(null, TypedArrayPrototypeGetBuffer(okm)),
     (err) => callback(new ERR_CRYPTO_INVALID_DIGEST(err), undefined),
   );
 }

@@ -9905,15 +9905,34 @@ where the changes are discussed.
      `-success.js`, `-updated-file.js`. `-api-tmpdir.js` is ignored: the default
      cache directory is under `DENO_DIR`, not `os.tmpdir()` (item 240).
 
+<!-- Items 242-304 are left to branches in flight; this branch is 305. -->
+
+305. **`fix(ext/node)`: a throwing callback runs once and is uncaught**
+     (`fix/scrypt-callback-twice`, runtime;
+     `ext/node/polyfills/internal/crypto/{scrypt,hkdf,random}.ts`).
+     `crypto.scrypt()`, `crypto.hkdf()` and `crypto.checkPrime()` adapted their
+     async op as `PromisePrototypeCatch(PromisePrototypeThen(op, ok), fail)`, so
+     a callback that threw was called a second time with its own error, and the
+     throw never surfaced. Node calls the callback once and the throw is an
+     uncaught exception. Each now uses the two-argument `then` (as the argon2
+     port does), so a throw from the callback is an unhandled rejection that
+     reaches `process.on("uncaughtException")`. `pbkdf2` already guarded against
+     it; `generateKeyPair`, `generatePrime` and `randomFill` already use the
+     two-argument form. Tests: one per API in `tests/unit_node/crypto`
+     (`crypto_scrypt_test.ts`, `crypto_hkdf_test.ts`, `crypto_misc_test.ts`)
+     through the new `assertCallbackThrowUncaughtOnce` helper in
+     `tests/unit_node/_test_utils.ts`; each fails on the base (the callback runs
+     twice).
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
 169-174, 176, 178, 180, 182-184, 186, 187, 189-191, 193-196, 198-203, 206, 207,
-209-215, 217, 218, 221, 222, 224, 225, 227, 228, 231, 232, 235, 237, 240) are
-what the prebuilt `libdenort` carries. The CLI-side parts (for example writing
-`LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
-in the branch too, but a stock CLI does not run them; denext's own launcher
-provides that environment.
+209-215, 217, 218, 221, 222, 224, 225, 227, 228, 231, 232, 235, 237, 240, 305)
+are what the prebuilt `libdenort` carries. The CLI-side parts (for example
+writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's
+launchers) are in the branch too, but a stock CLI does not run them; denext's
+own launcher provides that environment.
 
 The laufey backend hosts are built from
 [Brainwires/laufey](https://github.com/Brainwires/laufey) branch
