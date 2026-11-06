@@ -234,6 +234,137 @@ pub unsafe fn uv_stream_set_blocking(
   0
 }
 
+/// Mirrors Node's `LibuvStreamWrap::HasPendingRead` (nodejs/node
+/// `0683ee5f7d`, CVE-2026-105481): true when a read on the stream's socket
+/// would complete right now — the kernel holds data, an EOF or an error that
+/// the loop has not delivered because it has not polled since it arrived.
+/// Nothing is consumed. False when nothing is pending, when the handle has no
+/// connected socket yet (a connect in flight) or is closing, and for a handle
+/// type the probe can't answer for (a TTY; on Windows a pipe, whose reads go
+/// through a thread of their own).
+///
+/// The probe is a one-byte `recv(MSG_PEEK)` on the non-blocking socket, as
+/// Node's: it reports queued data (`1`), a FIN (`0`) and a queued error
+/// (`ECONNRESET`, ...) alike, and `EAGAIN` means nothing is pending. On
+/// Windows `ioctlsocket(FIONREAD)` answers the data case first; the peek
+/// then covers a FIN or an error queued with no bytes.
+///
+/// ### Safety
+/// `stream` must be a valid pointer to an initialized stream handle.
+pub unsafe fn uv_stream_has_pending_read(stream: *mut uv_stream_t) -> bool {
+  if stream.is_null() {
+    return false;
+  }
+  // SAFETY: `stream` is non-null (checked above) and points at an initialized
+  // handle per the caller contract; the handle's own fields are read only.
+  unsafe {
+    if (*stream).flags & UV_HANDLE_CLOSING != 0 {
+      return false;
+    }
+    match (*stream).r#type {
+      uv_handle_type::UV_TCP => {
+        // The socket exists once the handle is connected or accepted; a
+        // connect still in flight has nothing to read, and its error belongs
+        // to the connect callback.
+        let Some(tcp_stream) =
+          (*(stream as *mut uv_tcp_t)).internal_stream.as_ref()
+        else {
+          return false;
+        };
+        #[cfg(unix)]
+        {
+          use std::os::unix::io::AsRawFd;
+          socket_has_pending_read(tcp_stream.as_raw_fd())
+        }
+        #[cfg(windows)]
+        {
+          use std::os::windows::io::AsRawSocket;
+          socket_has_pending_read(tcp_stream.as_raw_socket())
+        }
+      }
+      #[cfg(unix)]
+      uv_handle_type::UV_NAMED_PIPE => {
+        match (*(stream as *mut super::pipe::uv_pipe_t)).fd() {
+          Some(fd) => socket_has_pending_read(fd),
+          None => false,
+        }
+      }
+      _ => false,
+    }
+  }
+}
+
+#[cfg(unix)]
+fn socket_has_pending_read(fd: std::os::unix::io::RawFd) -> bool {
+  let mut byte = 0u8;
+  loop {
+    // SAFETY: `fd` is a descriptor the stream handle owns, and `byte` is a
+    // one-byte buffer that lives for the call.
+    let r = unsafe {
+      libc::recv(
+        fd,
+        &mut byte as *mut u8 as *mut c_void,
+        1,
+        libc::MSG_PEEK | libc::MSG_DONTWAIT,
+      )
+    };
+    if r >= 0 {
+      // Data (1) or a FIN (0): a read completes right now.
+      return true;
+    }
+    let Some(err) = std::io::Error::last_os_error().raw_os_error() else {
+      return false;
+    };
+    if err == libc::EINTR {
+      continue;
+    }
+    // Nothing queued (EAGAIN), no connection to read from, or not a socket
+    // (a pipe that is a FIFO): nothing is pending. Any other error is queued
+    // on the socket and a read would fail with it now.
+    return err != libc::EAGAIN
+      && err != libc::EWOULDBLOCK
+      && err != libc::ENOTCONN
+      && err != libc::ENOTSOCK;
+  }
+}
+
+#[cfg(windows)]
+fn socket_has_pending_read(sock: std::os::windows::io::RawSocket) -> bool {
+  unsafe extern "system" {
+    fn ioctlsocket(s: usize, cmd: i32, argp: *mut u32) -> c_int;
+    fn recv(s: usize, buf: *mut c_char, len: c_int, flags: c_int) -> c_int;
+    fn WSAGetLastError() -> c_int;
+  }
+  // `_IOR('f', 127, u_long)`: the bytes readable without blocking.
+  const FIONREAD: i32 = 0x4004_667F;
+  const MSG_PEEK: c_int = 0x2;
+  const SOCKET_ERROR: c_int = -1;
+  const WSAEWOULDBLOCK: c_int = 10035;
+  const WSAENOTSOCK: c_int = 10038;
+  const WSAENOTCONN: c_int = 10057;
+
+  let sock = sock as usize;
+  let mut pending: u32 = 0;
+  // SAFETY: `sock` is a socket the stream handle owns; `pending` is a valid
+  // out-parameter for FIONREAD.
+  if unsafe { ioctlsocket(sock, FIONREAD, &mut pending) } == 0 && pending > 0 {
+    return true;
+  }
+  // FIONREAD counts bytes only. A FIN or an error queued with no data is
+  // found by a peek, which the non-blocking socket (every tokio/mio socket)
+  // answers at once with WSAEWOULDBLOCK when nothing is queued.
+  let mut byte: c_char = 0;
+  // SAFETY: `sock` is a socket the stream handle owns, and `byte` is a
+  // one-byte buffer that lives for the call.
+  let r = unsafe { recv(sock, &mut byte, 1, MSG_PEEK) };
+  if r != SOCKET_ERROR {
+    return true;
+  }
+  // SAFETY: reads the calling thread's last Winsock error; no arguments.
+  let err = unsafe { WSAGetLastError() };
+  err != WSAEWOULDBLOCK && err != WSAENOTCONN && err != WSAENOTSOCK
+}
+
 /// ### Safety
 /// `handle` must be a valid pointer to an initialized stream handle
 /// (`uv_tcp_t`, `uv_tty_t`, or `uv_pipe_t`, cast as `uv_stream_t`).

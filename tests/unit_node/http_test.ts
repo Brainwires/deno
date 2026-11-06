@@ -4585,3 +4585,327 @@ Deno.test("[node/http] RST right after a complete response is not an error", asy
   server.close();
   await new Promise((resolve) => server.on("close", resolve));
 });
+
+// --- Response-queue poisoning on a kept-alive socket ------------------------
+//
+// CVE-2026-48931 (nodejs/node bc0b53813e): a kept-alive socket idle in the
+// agent's pool has no parser, so a response the server sends unasked sits in
+// the socket and is parsed as the answer to the next request that reuses it.
+// The agent arms a read guard on a pooled socket and destroys it on any read.
+// CVE-2026-105481 (nodejs/node 0683ee5f7d): the guard runs only when the event
+// loop polls; bytes that reached the kernel while the thread was busy are
+// still there when the next request takes the socket in the same tick, so the
+// agent asks the handle (`hasPendingRead()`) first and opens a new connection.
+
+const poisonTlsKey = Deno.readTextFileSync(
+  new URL("../testdata/tls/localhost.key", import.meta.url),
+);
+const poisonTlsCert = Deno.readTextFileSync(
+  new URL("../testdata/tls/localhost.crt", import.meta.url),
+);
+const poisonTlsRootCa = Deno.readTextFileSync(
+  new URL("../testdata/tls/RootCA.pem", import.meta.url),
+);
+
+/** A raw HTTP/1.1 server on its own thread (a Worker has its own event loop),
+ * so it keeps writing while this thread blocks. It answers every request with
+ * its path as the body and, 50 ms after the first request on a connection and
+ * unasked, writes a second response "POISON" (`X-Poisoned: true`). */
+async function startPoisoningServer(
+  tlsOptions?: { cert: string; key: string },
+) {
+  const listen = tlsOptions
+    ? `Deno.listenTls({ hostname: "127.0.0.1", port: 0, cert: ${
+      JSON.stringify(tlsOptions.cert)
+    }, key: ${JSON.stringify(tlsOptions.key)} })`
+    : `Deno.listen({ hostname: "127.0.0.1", port: 0 })`;
+  const code = `
+const listener = ${listen};
+self.postMessage(listener.addr.port);
+const encoder = new TextEncoder();
+const decoder = new TextDecoder();
+const response = (body, poisoned = false) =>
+  encoder.encode(
+    "HTTP/1.1 200 OK\\r\\nConnection: keep-alive\\r\\n" +
+      (poisoned ? "X-Poisoned: true\\r\\n" : "") +
+      "Content-Length: " + body.length + "\\r\\n\\r\\n" + body,
+  );
+async function serve(conn) {
+  let requests = 0;
+  let buffered = "";
+  const chunk = new Uint8Array(4096);
+  try {
+    while (true) {
+      const n = await conn.read(chunk);
+      if (n === null) break;
+      buffered += decoder.decode(chunk.subarray(0, n));
+      let end;
+      while ((end = buffered.indexOf("\\r\\n\\r\\n")) !== -1) {
+        const path = buffered.split(" ", 2)[1];
+        buffered = buffered.slice(end + 4);
+        await conn.write(response(path));
+        if (++requests === 1) {
+          setTimeout(
+            () => conn.write(response("POISON", true)).catch(() => {}),
+            50,
+          );
+        }
+      }
+    }
+  } catch {
+    // The client closed the connection.
+  }
+}
+for await (const conn of listener) serve(conn);
+`;
+  const url = URL.createObjectURL(
+    new Blob([code], { type: "application/javascript" }),
+  );
+  const worker = new Worker(url, { type: "module" });
+  const port = await new Promise<number>((resolve, reject) => {
+    worker.onmessage = (event) => resolve(event.data as number);
+    worker.onerror = (event) => reject(new Error(event.message));
+  });
+  URL.revokeObjectURL(url);
+  return { port, close: () => worker.terminate() };
+}
+
+async function waitFor(check: () => boolean, what: string) {
+  const deadline = Date.now() + 5_000;
+  while (!check()) {
+    if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
+    await new Promise((resolve) => setTimeout(resolve, 1));
+  }
+}
+
+/** Keeps the event loop from polling until the bytes are in the socket's
+ * kernel buffer, so the read guard cannot see them first (Node's own test). */
+function spinUntilPendingRead(socket: Socket) {
+  const handle =
+    (socket as unknown as { _handle: { hasPendingRead(): boolean } })._handle;
+  const deadline = Date.now() + 5_000;
+  while (!handle.hasPendingRead()) {
+    if (Date.now() > deadline) {
+      throw new Error("timed out waiting for pending data");
+    }
+  }
+}
+
+type PoisonResult = {
+  body: string;
+  reused: boolean;
+  socket: Socket;
+  headers: http.IncomingHttpHeaders;
+};
+
+function poisonGet(
+  client: typeof http | typeof https,
+  options: http.RequestOptions,
+): Promise<PoisonResult> {
+  return new Promise((resolve, reject) => {
+    let socket: Socket;
+    const req = client.get(options, (res) => {
+      let body = "";
+      res.setEncoding("utf8");
+      res.on("data", (chunk) => body += chunk);
+      res.on(
+        "end",
+        () =>
+          resolve({
+            body,
+            reused: req.reusedSocket,
+            socket,
+            headers: res.headers,
+          }),
+      );
+    });
+    req.on("socket", (s) => socket = s);
+    req.on("error", reject);
+  });
+}
+
+// Node's test-http-agent-free-socket-data-guard.js, the idle case: the server
+// writes while the socket sits in the pool and the loop is free to poll.
+// Before: the socket stayed in the pool, with no listener on it at all.
+Deno.test("[node/http] agent destroys a free socket that receives unsolicited data (CVE-2026-48931)", async () => {
+  let serverSocket: Socket | undefined;
+  const server = http.createServer((req, res) => {
+    serverSocket ??= req.socket;
+    res.end(req.url);
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const agent = new http.Agent({ keepAlive: true });
+  const options = {
+    host: "127.0.0.1",
+    port: (server.address() as AddressInfo).port,
+    agent,
+  };
+  const name = agent.getName(options);
+  try {
+    const first = await poisonGet(http, { ...options, path: "/request1" });
+    assertEquals(first.body, "/request1");
+    await waitFor(
+      () => agent.freeSockets[name]?.length === 1,
+      "the socket to be pooled",
+    );
+    const freeSocket = agent.freeSockets[name]![0];
+    // The guard is on the handle, not a public stream listener.
+    assertEquals(freeSocket.listenerCount("data"), 0);
+    assertEquals(freeSocket.listenerCount("readable"), 0);
+
+    serverSocket!.write(
+      "HTTP/1.1 200 OK\r\nX-Poisoned: true\r\nConnection: keep-alive\r\n" +
+        "Content-Length: 0\r\n\r\n",
+    );
+    await waitFor(() => freeSocket.destroyed, "the poisoned socket to close");
+    assertEquals(agent.freeSockets[name], undefined);
+
+    const second = await poisonGet(http, { ...options, path: "/request2" });
+    assertEquals(second.body, "/request2");
+    assertEquals(second.headers["x-poisoned"], undefined);
+    assertEquals(second.reused, false);
+  } finally {
+    agent.destroy();
+    server.close();
+    await new Promise((resolve) => server.on("close", resolve));
+  }
+});
+
+// Node's test-http-agent-free-socket-pending-read.js, first case: the bytes
+// arrive while the thread is busy, and the next request takes the socket in
+// the same tick, before the loop polls. Before: the second request read the
+// poisoned response ("POISON", reusedSocket true) — the repro's "busy" mode.
+Deno.test({
+  name:
+    "[node/http] agent checks a free socket for pending data before reusing it (CVE-2026-105481)",
+  sanitizeOps: false,
+  sanitizeResources: false,
+  async fn() {
+    const server = await startPoisoningServer();
+    const agent = new http.Agent({ keepAlive: true, maxSockets: 1 });
+    const options = { host: "127.0.0.1", port: server.port, agent };
+    const name = agent.getName(options);
+    try {
+      const first = await poisonGet(http, { ...options, path: "/request1" });
+      assertEquals(first.body, "/request1");
+      await waitFor(
+        () => agent.freeSockets[name]?.length === 1,
+        "the socket to be pooled",
+      );
+      const freeSocket = agent.freeSockets[name]![0];
+      assertEquals(freeSocket, first.socket);
+
+      spinUntilPendingRead(freeSocket);
+      // Same tick: the loop has not polled since the data arrived.
+      const second = poisonGet(http, { ...options, path: "/request2" });
+      assertEquals(freeSocket.destroyed, true);
+      assertEquals(agent.freeSockets[name], undefined);
+
+      const result = await second;
+      assertEquals(result.body, "/request2");
+      assertEquals(result.headers["x-poisoned"], undefined);
+      assertEquals(result.reused, false);
+      assert(result.socket !== freeSocket);
+    } finally {
+      agent.destroy();
+      server.close();
+    }
+  },
+});
+
+// Node's second case: a released socket handed straight to a queued request
+// (maxSockets reached), on the tick after the response ended, without a poll
+// in between. Before: the queued request read "POISON" on the first socket.
+Deno.test({
+  name:
+    "[node/http] agent checks a released socket for pending data before handing it to a queued request",
+  sanitizeOps: false,
+  sanitizeResources: false,
+  async fn() {
+    const server = await startPoisoningServer();
+    const agent = new http.Agent({ keepAlive: true, maxSockets: 1 });
+    const options = { host: "127.0.0.1", port: server.port, agent };
+    const name = agent.getName(options);
+    try {
+      const first = new Promise<PoisonResult>((resolve, reject) => {
+        let socket: Socket;
+        const req = http.get({ ...options, path: "/request1" }, (res) => {
+          let body = "";
+          res.setEncoding("utf8");
+          res.on("data", (chunk) => body += chunk);
+          res.on("end", () => {
+            // The socket is released to the queued request on the next tick.
+            spinUntilPendingRead(socket);
+            resolve({
+              body,
+              reused: req.reusedSocket,
+              socket,
+              headers: res.headers,
+            });
+          });
+        });
+        req.on("socket", (s) => socket = s);
+        req.on("error", reject);
+      });
+      const second = poisonGet(http, { ...options, path: "/request2" });
+      assertEquals(agent.requests[name]?.length, 1);
+
+      const firstResult = await first;
+      assertEquals(firstResult.body, "/request1");
+      const secondResult = await second;
+      assertEquals(secondResult.body, "/request2");
+      assertEquals(secondResult.headers["x-poisoned"], undefined);
+      assertEquals(secondResult.reused, false);
+      assertEquals(firstResult.socket.destroyed, true);
+      assert(secondResult.socket !== firstResult.socket);
+    } finally {
+      agent.destroy();
+      server.close();
+    }
+  },
+});
+
+// The same over TLS: the TLS handle answers `hasPendingRead()` for the
+// cleartext its wrap holds and for the transport's kernel buffer.
+Deno.test({
+  name:
+    "[node/https] agent checks a free TLS socket for pending data before reusing it (CVE-2026-105481)",
+  sanitizeOps: false,
+  sanitizeResources: false,
+  async fn() {
+    const server = await startPoisoningServer({
+      cert: poisonTlsCert,
+      key: poisonTlsKey,
+    });
+    const agent = new https.Agent({ keepAlive: true, maxSockets: 1 });
+    const options = {
+      host: "127.0.0.1",
+      port: server.port,
+      agent,
+      ca: poisonTlsRootCa,
+      servername: "localhost",
+    };
+    const name = agent.getName(options);
+    try {
+      const first = await poisonGet(https, { ...options, path: "/request1" });
+      assertEquals(first.body, "/request1");
+      await waitFor(
+        () => agent.freeSockets[name]?.length === 1,
+        "the socket to be pooled",
+      );
+      const freeSocket = agent.freeSockets[name]![0];
+
+      spinUntilPendingRead(freeSocket);
+      const second = poisonGet(https, { ...options, path: "/request2" });
+      assertEquals(freeSocket.destroyed, true);
+
+      const result = await second;
+      assertEquals(result.body, "/request2");
+      assertEquals(result.headers["x-poisoned"], undefined);
+      assertEquals(result.reused, false);
+    } finally {
+      agent.destroy();
+      server.close();
+    }
+  },
+});

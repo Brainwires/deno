@@ -10846,12 +10846,102 @@ where the changes are discussed.
      Before the change the converted tests aborted only when the GC posted a
      task; with the check and no fix, every one of them fails, every run.
 
+268. **`fix(ext/node)`: `tls.checkServerIdentity` refuses a non-canonical IP
+     host (CVE-2026-105483, CVE-2026-106069, CVE-2026-106072)**
+     (`fix/node-oct26-tls-agent`, runtime; `ext/node/polyfills/_tls_wrap.js`).
+     Node's October 21 2026 security release (26.12.1, 24.x, 22.x) fixed its
+     identity check in two steps, nodejs/node `9731991b3c` then `9ccbc81ece`;
+     the fork's `checkServerIdentity` was a port of the regressed version. A
+     host `net.isIP()` rejects but that `domainToASCII()` — the WHATWG host
+     parser: IDNA mapping plus IPv4 canonicalization — turns into an address
+     fell through to the DNS-name path as that address: `１２７.0.0.1`
+     (fullwidth digits) and `127。0.0.1` (an ideographic full stop) matched a
+     certificate naming `DNS:127.0.0.1`, `DNS:*.0.0.1` or `CN=127.0.0.1`, and
+     `０１２７.0.0.1` matched `DNS:87.0.0.1`. An ASCII spelling (`0127.0.0.1`,
+     `0177.0.0.1`, `0x7f.0.0.1`, `2130706433`, `127.1`) skipped the
+     normalization and was refused only because it matched no DNS name. The
+     resolver may read such a spelling as another address than the URL parser
+     does (`0127.0.0.1` is 87.0.0.1 to the parser and 127.0.0.1 to a resolver
+     that takes octal), so Node now refuses it outright, and so does the fork:
+     `hostnameASCII` is computed for a non-ASCII host and for an ASCII host that
+     could be a numeric spelling (`/^[0-9a-fx.]+$/i`; every other ASCII host
+     keeps the op off the handshake path, as before), and a host that is not an
+     IP while its normalized form is answers `ERR_TLS_CERT_ALTNAME_INVALID` with
+     the reason `Host is a non-canonical IP address` before any name is matched.
+     A canonical IP host still matches `IP Address:` SANs only, and a DNS host
+     is matched on its normalized form, as before. Tests: unit `tls_test.ts`
+     (Node 26.12.1's `test-tls-check-server-identity.js` cases that the vendored
+     suite, Node 26.5.1, predates — the vendored file is pinned by the
+     `node_test` submodule, so the cases are carried here — and an end-to-end
+     connect against a server whose certificate names 127.0.0.1 as a DNS SAN
+     only, `tests/testdata/tls/ip_as_dns.*`: the four spellings are refused and
+     `127.0.0.1` keeps its IP-SAN answer; before: `１２７.0.0.1` and
+     `127。0.0.1` were authorized), node_compat
+     `test-tls-check-server-identity.js` still enabled.
+
+269. **`fix(ext/node)`: `http.Agent` never reuses a kept-alive socket with a
+     response already on it (CVE-2026-48931, CVE-2026-105481)**
+     (`fix/node-oct26-tls-agent`, runtime; `ext/node/polyfills/_http_agent.js`,
+     `ext/node/ops/stream_wrap.rs`, `ext/node/ops/tls_wrap.rs`,
+     `libs/core/uv_compat/stream.rs`). A kept-alive socket idle in the agent's
+     pool has no parser, so a response the server sends unasked sat in the
+     socket and was parsed as the answer to the next request that reused it
+     (response-queue poisoning). Node fixed it twice: nodejs/node `bc0b53813e`
+     (CVE-2026-48931, March 2026) arms a guard on a pooled socket that destroys
+     it on any read, which the fork had never ported; and `0683ee5f7d`
+     (CVE-2026-105481, the October 21 2026 release) adds `hasPendingRead()` to
+     the stream handle, because the guard runs only when the event loop polls:
+     bytes that reached the kernel while the thread was busy are still there
+     when the next request takes the socket in the same tick. Both are in now.
+
+     The guard is Node 26.12.1's: a socket entering the pool with bytes already
+     buffered is destroyed; otherwise its handle's `onread` becomes the guard
+     and reading is (re)started — Deno's native handle captures `onread` when a
+     read starts, where Node's looks it up on every read, so the read is
+     restarted around the swap, there and again when the socket is reused — and
+     `reuseSocket` restores `onStreamRead`. No public listener is added, as
+     Node's `test-http-agent-keepalive.js` asserts.
+
+     `hasPendingRead()` is a method of every stream handle (`LibUvStreamWrap`,
+     so `TCP` and `Pipe`): `uv_stream_has_pending_read` in uv_compat probes the
+     socket without consuming anything — a one-byte
+     `recv(MSG_PEEK | MSG_DONTWAIT)` on macOS and Linux, so queued data (1), a
+     FIN (0) and a queued error (`ECONNRESET`, …) all count and `EAGAIN` means
+     nothing is pending; on Windows `ioctlsocket(FIONREAD)` first, then the same
+     peek for a FIN or an error queued with no bytes (every socket is
+     non-blocking, mio's). It answers false for a closing handle, a connect
+     still in flight (its error belongs to the connect callback), a TTY and, on
+     Windows, a pipe. `TLSWrap` overrides it: true for cleartext decrypted while
+     `readStop` was active or still in rustls, encrypted records read and not
+     yet fed to rustls, an undelivered peer close, and then the transport's own
+     answer. The agent asks before handing a pooled socket to a request
+     (`addRequest`, walking the pool until a clean socket or none is left) and
+     before handing a released socket to a queued request (`free`); a socket
+     with bytes pending is destroyed and the request gets the next pooled socket
+     or a new connection. Bytes the stream itself already buffered
+     (`readableLength`) count too: in Deno I/O can run between a read and the
+     `free` tick.
+
+     Tests: unit `http_test.ts` (Node's
+     `test-http-agent-free-socket-data-guard.js` idle case against an in-process
+     server; Node's two `test-http-agent-free-socket-pending-read.js` cases — a
+     pooled socket, and a socket released to a queued request — and the pooled
+     case over TLS, against a server on a Worker that writes a second response
+     50 ms after its first while the test thread spins on `hasPendingRead()`;
+     before: the second request read `POISON` on the reused socket), uv_compat
+     `tcp_has_pending_read_reports_kernel_bytes_and_eof` (nothing queued, a
+     byte, the byte read, a FIN, a closing handle, a connect in flight),
+     node_compat `test-http-agent-free-socket-data-guard.js` enabled
+     (`test-http-agent-keepalive.js` still passes). The `node_test` submodule is
+     at Node 26.5.1, which predates `0683ee5f7d`; its test is carried in
+     `http_test.ts`.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
 169-174, 176, 178, 180, 182-184, 186, 187, 189-191, 193-196, 198-203, 206, 207,
 209-215, 217, 218, 221, 222, 224, 225, 227, 228, 231, 232, 235, 237, 240,
-243-245, 247-249, 253, 254, 256-260, 262-264, 267) are what the prebuilt
+243-245, 247-249, 253, 254, 256-260, 262-264, 267-269) are what the prebuilt
 `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
 in the branch too, but a stock CLI does not run them; denext's own launcher
