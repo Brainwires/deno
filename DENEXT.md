@@ -10770,7 +10770,7 @@ where the changes are discussed.
      caused. "denext tests" run 42112912711 (`09efe6141b`) lost
      `windows-2022 / test libs` to a runner whose `D:` drive disappeared during
      the build ("A device which does not exist was specified", os error 433)
-     with no test run, so 3.0.0-denext.12 is tagged on the next commit.
+     with no test run, so 3.0.0-denext.12 is tagged on a later commit.
 
 267. **`deno_core`: a `JsRuntime` created outside tokio fails at creation, and
      the late abort says why** (`fix/jsruntime-tokio-guard`;
