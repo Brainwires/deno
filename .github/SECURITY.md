@@ -1,24 +1,27 @@
 # Security Policy
 
-Thank you for taking the time to investigate the security of Deno. The security
-of Deno is our topmost priority. We appreciate investigative work into system
-security by well-intentioned, ethical security researchers. If you discover a
-vulnerability, however small, we would like to know about it to address it with
-appropriate measures as quickly as possible. This document outlines the method
-we use to work with the security research community to address runtime security.
+This repository is Brainwires' fork of Deno: the runtime behind denext's Deno
+toolchain and its Deno Desktop runtime (`3.0.0-denext.N` releases). Thank you
+for taking the time to investigate its security.
 
 ## Reporting a vulnerability
 
 Please open a new
-[Security advisory](https://github.com/denoland/deno/security/advisories/new)
-with your findings. We strive to resolve all problems as quickly as possible,
-and are more than happy to play an active role in publication of writeups after
-the problem is resolved.
-
-Try to include as much information as possible in the initial report, so we can
-quickly address the issue.
+[Security advisory](https://github.com/Brainwires/deno/security/advisories/new)
+on this repository with your findings (**Security → Report a vulnerability**).
+This covers anything in the fork's releases, including code it shares with
+upstream Deno.
 
 **Please do not open security issues in the public issue tracker.**
+
+When a report also affects upstream Deno, we report it privately to the Deno
+team through
+[their process](https://github.com/denoland/deno/security/advisories/new) and
+coordinate the fix and disclosure with them. If you found an issue in stock Deno
+only, report it to Deno directly.
+
+Try to include as much information as possible: the release (`deno --version`),
+the platform, and the steps to reproduce.
 
 ### Please do the following
 
@@ -27,11 +30,14 @@ quickly address the issue.
 - Do not use attacks on physical security or applications of third parties.
 - Do provide sufficient information to reproduce the problem, so we will be able
   to resolve it as quickly as possible. Usually, a list of steps to follow, and
-  the vulnerable Deno version is enough. More complex vulnerabilities may
-  require further explanation.
+  the vulnerable version is enough. More complex vulnerabilities may require
+  further explanation.
 
 ### Our commitment to you
 
+- We acknowledge a report within 3 business days and triage it within 7.
+- We publish a fix and a GitHub security advisory for every confirmed issue in a
+  released version.
 - If you act in accordance with this policy, we will not take legal action
   against you in regard to your report.
 - We will handle your report with strict confidentiality, and not pass on your
