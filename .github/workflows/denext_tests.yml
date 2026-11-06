@@ -225,12 +225,20 @@ jobs:
       - name: cargo audit
         run: cargo audit --file Cargo.lock
 
+  # The two macOS legs run on the runner the repository variables
+  # RUNNER_MACOS_ARM / RUNNER_MACOS_X64 name — a bare label
+  # (denext-macos-arm64) or a JSON array (["self-hosted","denext-macos-arm64"])
+  # — and on GitHub's macos-15 / macos-15-intel while a variable is unset.
+  # The leg names (the `name:` below) are what tag_gate.py's REQUIRED_LEGS
+  # match, so they stay the GitHub image names whatever runs them.
+  # denext_tests_os.yml also refuses a self-hosted label on a pull_request.
   macos:
     name: macos-15
     if: ${{ github.ref == 'refs/heads/development-denext' || startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.full) || (github.event_name == 'workflow_dispatch' && inputs.macos) }}
     uses: ./.github/workflows/denext_tests_os.yml
     with:
       os: macos-15
+      runs_on: ${{ startsWith(vars.RUNNER_MACOS_ARM, '[') && vars.RUNNER_MACOS_ARM || format('"{0}"', vars.RUNNER_MACOS_ARM || 'macos-15') }}
 
   windows:
     name: windows-2022
@@ -253,6 +261,7 @@ jobs:
     uses: ./.github/workflows/denext_tests_os.yml
     with:
       os: macos-15-intel
+      runs_on: ${{ startsWith(vars.RUNNER_MACOS_X64, '[') && vars.RUNNER_MACOS_X64 || format('"{0}"', vars.RUNNER_MACOS_X64 || 'macos-15-intel') }}
       libs_only: true
 
   linux-arm64:
