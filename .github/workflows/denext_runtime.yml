@@ -156,6 +156,10 @@ jobs:
           SHA: ${{ github.sha }}
           REPO: ${{ github.repository }}
           RUN_NUMBER: ${{ github.run_number }}
+          # The self-hosted macOS runners (a bare label, or a JSON array);
+          # unset: GitHub's images. The matrix carries them as `runner`.
+          RUNNER_MACOS_ARM: ${{ vars.RUNNER_MACOS_ARM }}
+          RUNNER_MACOS_X64: ${{ vars.RUNNER_MACOS_X64 }}
         run: |
           set -euo pipefail
           # The fork's own version (DENEXT.md "Versioning": 3.0.0-denext.N, ...),
@@ -257,6 +261,14 @@ jobs:
               {"target": "x86_64-pc-windows-msvc", "os": "windows-2025"},
               {"target": "aarch64-pc-windows-msvc", "os": "windows-11-arm"},
           ]
+          # Each macOS target's runner: the repository variable (a label, or a
+          # JSON array), else the image. `os` stays the image name: it names
+          # the caches and the artifacts whatever runs the job.
+          mac_runner = {"macos-15": os.environ.get("RUNNER_MACOS_ARM", ""),
+                        "macos-15-intel": os.environ.get("RUNNER_MACOS_X64", "")}
+          for t in all_targets:
+              r = mac_runner.get(t["os"], "").strip()
+              t["runner"] = json.loads(r) if r.startswith("[") else (r or t["os"])
           want = [t.strip() for t in os.environ["TARGETS"].split(",") if t.strip()]
           if want != ["all"]:
               known = {t["target"] for t in all_targets}
@@ -309,6 +321,8 @@ jobs:
     name: laufey / ${{ matrix.target }}
     needs: setup
     if: ${{ !inputs.reuse_laufey_run_id && !inputs.cli_only }}
+    # Stays on GitHub's image: its macOS leg `brew install`s llvm and ninja,
+    # which the self-hosted images do not have.
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     strategy:
@@ -548,7 +562,10 @@ jobs:
     name: denort / ${{ matrix.target }}
     needs: setup
     if: ${{ !inputs.reuse_denort_run_id && !inputs.cli_only }}
-    runs-on: ${{ matrix.os }}
+    # matrix.runner: the self-hosted runner the repository variables name,
+    # else the image; the image on any pull_request (self-hosted never
+    # takes a pull request's code).
+    runs-on: ${{ (startsWith(github.event_name, 'pull_request') && matrix.os) || matrix.runner || matrix.os }}
     timeout-minutes: 355
     # Attests its debug symbol archive (DENEXT.md item 181).
     permissions:
@@ -830,7 +847,10 @@ jobs:
   denort_bin:
     name: denort bin / ${{ matrix.target }}
     needs: setup
-    runs-on: ${{ matrix.os }}
+    # matrix.runner: the self-hosted runner the repository variables name,
+    # else the image; the image on any pull_request (self-hosted never
+    # takes a pull request's code).
+    runs-on: ${{ (startsWith(github.event_name, 'pull_request') && matrix.os) || matrix.runner || matrix.os }}
     timeout-minutes: 355
     permissions:
       contents: read
@@ -1083,7 +1103,10 @@ jobs:
   cli:
     name: cli / ${{ matrix.target }}
     needs: [setup, denort_bin]
-    runs-on: ${{ matrix.os }}
+    # matrix.runner: the self-hosted runner the repository variables name,
+    # else the image; the image on any pull_request (self-hosted never
+    # takes a pull request's code).
+    runs-on: ${{ (startsWith(github.event_name, 'pull_request') && matrix.os) || matrix.runner || matrix.os }}
     timeout-minutes: 355
     permissions:
       contents: read
@@ -1496,7 +1519,10 @@ jobs:
     name: package / ${{ matrix.target }}
     needs: [setup, laufey, denort]
     if: ${{ always() && !inputs.cli_only && needs.setup.result == 'success' && (needs.laufey.result == 'success' || (needs.laufey.result == 'skipped' && inputs.reuse_laufey_run_id != '')) && (needs.denort.result == 'success' || (needs.denort.result == 'skipped' && inputs.reuse_denort_run_id != '')) }}
-    runs-on: ${{ matrix.os }}
+    # matrix.runner: the self-hosted runner the repository variables name,
+    # else the image; the image on any pull_request (self-hosted never
+    # takes a pull request's code).
+    runs-on: ${{ (startsWith(github.event_name, 'pull_request') && matrix.os) || matrix.runner || matrix.os }}
     timeout-minutes: 180
     permissions:
       contents: read
@@ -1833,7 +1859,10 @@ jobs:
     name: e2e (fork CLI) / ${{ matrix.target }}
     needs: [setup, package, cli]
     if: ${{ always() && !inputs.cli_only && needs.cli.result == 'success' && (needs.package.result == 'success' || needs.package.result == 'failure') }}
-    runs-on: ${{ matrix.os }}
+    # matrix.runner: the self-hosted runner the repository variables name,
+    # else the image; the image on any pull_request (self-hosted never
+    # takes a pull request's code).
+    runs-on: ${{ (startsWith(github.event_name, 'pull_request') && matrix.os) || matrix.runner || matrix.os }}
     timeout-minutes: 60
     permissions:
       contents: read
@@ -1929,7 +1958,10 @@ jobs:
     # package's own needs, so a dispatch that reuses the denort or laufey
     # artifacts (both jobs skipped) would skip this job too.
     if: ${{ !cancelled() && needs.package.result == 'success' && needs.setup.outputs.linux_matrix != '[]' }}
-    runs-on: ${{ matrix.os }}
+    # matrix.runner: the self-hosted runner the repository variables name,
+    # else the image; the image on any pull_request (self-hosted never
+    # takes a pull request's code).
+    runs-on: ${{ (startsWith(github.event_name, 'pull_request') && matrix.os) || matrix.runner || matrix.os }}
     timeout-minutes: 30
     permissions:
       contents: read
