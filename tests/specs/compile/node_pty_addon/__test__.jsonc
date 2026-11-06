@@ -1,0 +1,23 @@
+{
+  // node-pty whose package carries its addon (built at install here with
+  // node-gyp, as `@denotest/node-addon`; the real package ships prebuilds):
+  // the package's own code loads it, as on Node, under --allow-ffi alone, in
+  // a compiled program too (DENEXT.md item 268). On 3.0.0-denext.11 and .12
+  // the entry resolved to the runtime's implementation whatever the package
+  // carried, and `native` was null.
+  "tempDir": true,
+  "steps": [{
+    "args": "install --allow-scripts --no-jail-scripts",
+    "output": "[WILDCARD]"
+  }, {
+    "args": "run --allow-read --allow-ffi main.ts",
+    "output": "main.out"
+  }, {
+    "args": "compile --no-check --allow-ffi --output out main.ts",
+    "output": "[WILDCARD]"
+  }, {
+    "commandName": "./out",
+    "args": [],
+    "output": "main.out"
+  }]
+}

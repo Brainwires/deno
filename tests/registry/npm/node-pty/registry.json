@@ -22,6 +22,26 @@
         "integrity": "sha512-V/wYO0MEiesvFLRrrHqnElT8kkX2JX5iJZ13vZRt45o+/3qWiZY7c9CKohcVamERcEaV94CKVtyJi4ZLdRbK9Q==",
         "unpackedSize": 904
       }
+    },
+    "1.1.0-denotest": {
+      "name": "node-pty",
+      "version": "1.1.0-denotest",
+      "description": "A stand-in for node-pty 1.1.0 whose install builds its addon (pty.node) from source, as the real package does where it has no prebuild",
+      "main": "./lib/index.js",
+      "scripts": {
+        "install": "node-gyp configure --verbose build"
+      },
+      "dependencies": {
+        "node-gyp": "12.1.0"
+      },
+      "license": "MIT",
+      "_id": "node-pty@1.1.0-denotest",
+      "dist": {
+        "shasum": "b4454b2b9710953979d1bbb49177afcf390eec08",
+        "tarball": "http://localhost:4260/node-pty/node-pty-1.1.0-denotest.tgz",
+        "integrity": "sha512-62j4gvewsA3Ih26EutHs/tfFuzGk12c58UphNi7pEuXgOCApoPpG6cQOXH2lW21jngU+W5ahudOkjMvvUqdbzA==",
+        "unpackedSize": 2258
+      }
     }
   },
   "license": "MIT"

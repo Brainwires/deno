@@ -10522,18 +10522,20 @@ where the changes are discussed.
      Windows only), `open()` (a terminal with no child) throws, `native` is
      `null` (node-pty documents it as not public), `master` / `slave` are
      `undefined`. Opt out with `DENO_NO_NODE_PTY_COMPAT=1`, which loads the
-     package's own code (and fails on the addon).
+     package's own code (and fails on the addon). Item 268 narrows this to a
+     package that has no addon for the platform; one that carries it loads it,
+     as on Node.
      - **`deno install`.** node-pty's `install` script
        (`node
        scripts/prebuild.js || node-gyp rebuild`) is a
        dependency's, so without `--allow-scripts` Deno lists it under "Ignored
        build scripts" and does not run it, which is right: nothing of the
        package's `build/` or `prebuilds/` is loaded. With `--allow-scripts` it
-       runs as any other (`node-gyp` in the lifecycle jail, item 54), builds an
-       addon that is never loaded, and may fail where it would on Node (no
-       prebuild for the platform, no C++ toolchain); the package works either
-       way. There is no placeholder as better-sqlite3's (item 61): node-pty does
-       not go through `bindings`.
+       runs as any other (`node-gyp` in the lifecycle jail, item 54), builds the
+       addon (which the package then loads itself, item 268), and may fail where
+       it would on Node (no prebuild for the platform, no C++ toolchain); the
+       package works either way. There is no placeholder as better-sqlite3's
+       (item 61): node-pty does not go through `bindings`.
      - Specs: `node/node_pty_override` (CommonJS: spawn, `stty size` through the
        terminal, a resize, `write` / `read`, `process`, the exit code; ESM named
        and default imports; a `SIGTERM` reported as `(0, 15)` with `pause` /
@@ -10846,12 +10848,46 @@ where the changes are discussed.
      Before the change the converted tests aborted only when the GC posted a
      task; with the check and no fix, every one of them fails, every run.
 
+268. **`fix(ext/node)`: node-pty's own addon loads when the package carries it**
+     (`fix/napi-addon-compiled-app`; `ext/node/polyfills/01_require.js`,
+     `internal/node_pty.js`). Item 261 resolved node-pty's entry module to the
+     runtime's implementation whatever the package carried, so from
+     3.0.0-denext.11 a program that brought the addon (node-pty 1.1.0 ships
+     prebuilds for macOS and Windows; an install with `--allow-scripts` builds
+     one) lost it: the package's `native` export, the addon itself on Unix,
+     became `null`, and `spawn` wanted `--allow-run` where the addon wants
+     `--allow-ffi`. A terminal app that calls the addon directly
+     (`native.fork`), as a desktop app packaged with `deno compile` under
+     `--allow-read --allow-env --allow-ffi` does with the addon in its embedded
+     file system, could not start a shell on 3.0.0-denext.12 and could on
+     denext.8 (Brainwires/denext#134; the embedded addon loads fine on denext.12
+     with `DENO_NO_NODE_PTY_COMPAT=1`, so nothing else changed). The entry now
+     resolves to the runtime's implementation only when the package has no addon
+     for this platform: `maybeNodePtyOverride` looks where node-pty's own
+     `loadNativeModule` does (`build/Release`, `build/Debug`, then
+     `prebuilds/<platform>-<arch>`, each below the package root and below
+     `lib/`; `pty.node`, and `conpty.node` on Windows) and, finding one, lets
+     the package's code load it, as Node does, under `--allow-ffi` like any
+     addon. An install that ran no scripts and has no prebuild for the platform
+     (Linux: node-pty publishes none) still gets item 261's implementation, and
+     `DENO_NO_NODE_PTY_COMPAT=1` still opts out of it entirely. The check is on
+     the package's files, not on permissions: a module resolves the same
+     whatever the program may do.
+     - Specs: `compile/node_pty_addon` (the registry's
+       `node-pty@1.1.0-denotest`, a stand-in whose install builds a Node-API
+       `pty.node` with node-gyp, as `@denotest/node-addon`'s does; `deno run`
+       and a compiled program under `--allow-ffi` alone print the addon's
+       `fork`; on 3.0.0-denext.12 `native` is `null`),
+       `node/node_pty_override`'s `addon_present_loads_the_package` (an empty
+       `prebuilds/<platform>-<arch>/pty.node` in the stand-in makes the
+       package's own entry run).
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
 169-174, 176, 178, 180, 182-184, 186, 187, 189-191, 193-196, 198-203, 206, 207,
 209-215, 217, 218, 221, 222, 224, 225, 227, 228, 231, 232, 235, 237, 240,
-243-245, 247-249, 253, 254, 256-260, 262-264, 267) are what the prebuilt
+243-245, 247-249, 253, 254, 256-260, 262-264, 267, 268) are what the prebuilt
 `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
 in the branch too, but a stock CLI does not run them; denext's own launcher

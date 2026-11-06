@@ -3156,12 +3156,23 @@ function maybeBetterSqlite3Addon(filename) {
 }
 
 // node-pty is a native addon (`pty.node`, `conpty.node`, a `spawn-helper`),
-// built at install and, once loaded, a terminal outside the runtime's
-// permissions. The package's entry module resolves to an implementation of
-// its API over `Deno.openPty` instead (DENEXT.md item 261), unless
-// DENO_NO_NODE_PTY_COMPAT is set.
+// built at install or shipped prebuilt. A package that carries the addon for
+// this platform loads it through its own code, as Node does (under
+// `--allow-ffi`, like any addon; DENEXT.md item 268): an app that calls the
+// addon directly (its `native` export) depends on that. Without the addon
+// (an install that ran no scripts and has no prebuild for the platform) the
+// entry module resolves to an implementation of its API over `Deno.openPty`
+// instead (DENEXT.md item 261), unless DENO_NO_NODE_PTY_COMPAT is set.
 const NODE_PTY_ENTRY =
   /^(.*[\\/]node-pty(?:[\\/][^\\/]+)?)[\\/]lib[\\/]index\.js$/;
+// where node-pty's `loadNativeModule` (lib/utils.js) looks for its addon,
+// in its order: each below the package root, then below `lib/` (a bundled
+// copy); the addon is `pty` (Unix, winpty) or `conpty` (ConPTY on Windows).
+const NODE_PTY_ADDON_DIRS = [
+  ["build", "Release"],
+  ["build", "Debug"],
+  ["prebuilds"], // + `<platform>-<arch>`
+];
 let nodePtyOptedOut;
 
 function isNodePtyOptedOut() {
@@ -3172,6 +3183,30 @@ function isNodePtyOptedOut() {
   return nodePtyOptedOut;
 }
 
+/** Whether the node-pty package at `root` carries its addon for this platform. */
+function nodePtyHasAddon(root, sep) {
+  const platform = process.platform;
+  const names = platform === "win32" ? ["conpty", "pty"] : ["pty"];
+  const prebuildDir = `${platform}-${process.arch}`;
+  const bases = [root, root + sep + "lib"];
+  for (let i = 0; i < NODE_PTY_ADDON_DIRS.length; i++) {
+    let dir = ArrayPrototypeJoin(NODE_PTY_ADDON_DIRS[i], sep);
+    if (NODE_PTY_ADDON_DIRS[i].length === 1) dir += sep + prebuildDir;
+    for (let j = 0; j < bases.length; j++) {
+      for (let k = 0; k < names.length; k++) {
+        const addon = bases[j] + sep + dir + sep + names[k] + ".node";
+        try {
+          if (op_require_stat(addon) === 0) return true;
+        } catch {
+          // unreadable (a read permission the package's own code would also
+          // lack): not an addon the package can load
+        }
+      }
+    }
+  }
+  return false;
+}
+
 function maybeNodePtyOverride(filename) {
   const match = RegExpPrototypeExec(NODE_PTY_ENTRY, filename);
   if (match === null) return undefined;
@@ -3179,6 +3214,7 @@ function maybeNodePtyOverride(filename) {
   const sep = StringPrototypeIncludes(match[1], "/") ? "/" : "\\";
   const pkg = op_require_read_package_scope(match[1] + sep + "package.json");
   if (pkg?.name !== "node-pty") return undefined;
+  if (nodePtyHasAddon(match[1], sep)) return undefined;
   const { spawn, fork, createTerminal, open, native } = core.loadExtScript(
     "ext:deno_node/internal/node_pty.js",
   );

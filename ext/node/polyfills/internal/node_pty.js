@@ -5,10 +5,11 @@
 // deno-lint-ignore-file deno-internal/prefer-primordials
 
 // `node-pty` over `Deno.openPty` (DENEXT.md item 261). node-pty is a native
-// addon (`pty.node` / `conpty.node` plus a `spawn-helper`) that needs a build
-// at install and, loaded, would reach the terminal outside the runtime's
-// permissions, so the package's entry module resolves to this one instead
-// (`maybeNodePtyOverride` in 01_require.js). It implements node-pty 1.x's
+// addon (`pty.node` / `conpty.node` plus a `spawn-helper`) built at install or
+// shipped prebuilt. A package without the addon for this platform has its
+// entry module resolve to this one instead (`maybeNodePtyOverride` in
+// 01_require.js); one that carries the addon loads it through its own code,
+// as on Node (DENEXT.md item 268). This implements node-pty 1.x's
 // public API - `spawn(file, args, options)` and the `IPty` it returns: `pid`,
 // `cols`, `rows`, `process`, `onData` / `onExit` (disposable events), the
 // `on('data' | 'exit' | 'close')` emitter, `write`, `resize`, `kill`,
