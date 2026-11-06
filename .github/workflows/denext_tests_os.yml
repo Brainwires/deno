@@ -6,9 +6,13 @@ on:
   workflow_call:
     inputs:
       os:
-        description: The runner image (macos-15, macos-15-intel, windows-2022, windows-11-arm, ubuntu-22.04, ubuntu-22.04-arm)
+        description: The runner image (macos-15, macos-15-intel, windows-2022, windows-11-arm, ubuntu-22.04, ubuntu-22.04-arm); names the leg, its artifacts and its matrix whatever runs it
         type: string
         required: true
+      runs_on:
+        description: 'What to run on, as JSON: a label ("denext-macos-arm64") or an array (["self-hosted","denext-macos-arm64"]); empty means the os image. Ignored on a pull_request: a self-hosted runner never takes untrusted code'
+        type: string
+        default: ''
       libs_only:
         description: Build and run the lib tests only (the extra architecture legs)
         type: boolean
@@ -29,10 +33,14 @@ env:
   RUST_LIB_BACKTRACE: '0'
   TOOLS_DENO_VERSION: 2.9.7
 
+# runs-on on every job: inputs.runs_on (the caller's repository variable), or
+# the os image when it is empty — and ALWAYS the os image on a pull_request /
+# pull_request_target event (github.event_name is the caller's), so a
+# self-hosted runner never takes a pull request's code.
 jobs:
   build:
     name: build debug
-    runs-on: ${{ inputs.os }}
+    runs-on: ${{ fromJSON(startsWith(github.event_name, 'pull_request') && format('"{0}"', inputs.os) || inputs.runs_on || format('"{0}"', inputs.os)) }}
     timeout-minutes: 240
     defaults:
       run:
@@ -74,7 +82,7 @@ jobs:
   libs:
     name: test libs
     needs: build
-    runs-on: ${{ inputs.os }}
+    runs-on: ${{ fromJSON(startsWith(github.event_name, 'pull_request') && format('"{0}"', inputs.os) || inputs.runs_on || format('"{0}"', inputs.os)) }}
     timeout-minutes: 240
     defaults:
       run:
@@ -162,7 +170,7 @@ jobs:
     name: test ${{ matrix.suite }}${{ matrix.shard_label }}
     needs: build
     if: ${{ !inputs.libs_only }}
-    runs-on: ${{ inputs.os }}
+    runs-on: ${{ fromJSON(startsWith(github.event_name, 'pull_request') && format('"{0}"', inputs.os) || inputs.runs_on || format('"{0}"', inputs.os)) }}
     timeout-minutes: 120
     strategy:
       fail-fast: false

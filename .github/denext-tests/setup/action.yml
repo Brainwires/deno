@@ -17,9 +17,11 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
+        # A self-hosted runner's image carries the entry already (its runner
+        # user has no sudo): only add what is missing.
         case "$RUNNER_OS" in
-          Windows) hosts=/c/Windows/System32/drivers/etc/hosts; echo "127.0.0.1 hashy.deno.deno.net" >>"$hosts" ;;
-          *) echo "127.0.0.1 hashy.deno.deno.net" | sudo tee -a /etc/hosts >/dev/null ;;
+          Windows) hosts=/c/Windows/System32/drivers/etc/hosts; grep -q hashy.deno.deno.net "$hosts" || echo "127.0.0.1 hashy.deno.deno.net" >>"$hosts" ;;
+          *) grep -q hashy.deno.deno.net /etc/hosts || echo "127.0.0.1 hashy.deno.deno.net" | sudo tee -a /etc/hosts >/dev/null ;;
         esac
         if curl -sf --max-time 5 https://hashy.deno.deno.net/ >/dev/null 2>&1; then
           echo "::error::hashy.deno.deno.net is still reachable"; exit 1
