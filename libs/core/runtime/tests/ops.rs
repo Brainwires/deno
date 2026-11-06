@@ -146,8 +146,8 @@ async fn test_async_op_serialize_object_with_numbers_as_keys() {
   runtime.run_event_loop(Default::default()).await.unwrap();
 }
 
-#[test]
-fn test_op_return_serde_v8_error() {
+#[tokio::test]
+async fn test_op_return_serde_v8_error() {
   #[allow(clippy::unnecessary_wraps, reason = "test code")]
   #[op2]
   #[serde]
@@ -170,8 +170,8 @@ fn test_op_return_serde_v8_error() {
   );
 }
 
-#[test]
-fn test_op_high_arity() {
+#[tokio::test]
+async fn test_op_high_arity() {
   #[allow(clippy::unnecessary_wraps, reason = "test code")]
   #[op2(fast)]
   #[number]
@@ -196,8 +196,8 @@ fn test_op_high_arity() {
   assert_eq!(v8::Local::new(scope, &r).integer_value(scope), Some(10));
 }
 
-#[test]
-fn test_op_disabled() {
+#[tokio::test]
+async fn test_op_disabled() {
   #[allow(clippy::unnecessary_wraps, reason = "test code")]
   #[op2(fast)]
   #[number]
@@ -221,8 +221,8 @@ fn test_op_disabled() {
   assert!(err.to_string().contains("op is disabled"));
 }
 
-#[test]
-fn test_op_detached_buffer() {
+#[tokio::test]
+async fn test_op_detached_buffer() {
   #[allow(clippy::unnecessary_wraps, reason = "test code")]
   #[op2]
   fn op_sum_take(#[buffer(detach)] b: JsBuffer) -> Result<u32, JsErrorBox> {
@@ -300,9 +300,9 @@ fn test_op_detached_buffer() {
 }
 
 #[cfg(debug_assertions)]
-#[test]
+#[tokio::test]
 #[should_panic(expected = "Found ops with duplicate names:")]
-fn duplicate_op_names() {
+async fn duplicate_op_names() {
   mod a {
     use super::*;
 
@@ -328,8 +328,8 @@ fn duplicate_op_names() {
   });
 }
 
-#[test]
-fn ops_in_js_have_proper_names() {
+#[tokio::test]
+async fn ops_in_js_have_proper_names() {
   #[allow(clippy::unnecessary_wraps, reason = "test code")]
   #[op2]
   #[string]
@@ -414,8 +414,8 @@ async fn test_ref_unref_ops() {
   }
 }
 
-#[test]
-fn test_dispatch() {
+#[tokio::test]
+async fn test_dispatch() {
   let (mut runtime, dispatch_count) = setup(Mode::Async);
   runtime
     .execute_script(
@@ -434,8 +434,8 @@ fn test_dispatch() {
   assert_eq!(dispatch_count.load(Ordering::Relaxed), 2);
 }
 
-#[test]
-fn test_dispatch_no_zero_copy_buf() {
+#[tokio::test]
+async fn test_dispatch_no_zero_copy_buf() {
   let (mut runtime, dispatch_count) = setup(Mode::AsyncZeroCopy(false));
   runtime
     .execute_script(
@@ -449,8 +449,8 @@ fn test_dispatch_no_zero_copy_buf() {
   assert_eq!(dispatch_count.load(Ordering::Relaxed), 1);
 }
 
-#[test]
-fn test_dispatch_stack_zero_copy_bufs() {
+#[tokio::test]
+async fn test_dispatch_stack_zero_copy_bufs() {
   let (mut runtime, dispatch_count) = setup(Mode::AsyncZeroCopy(true));
   runtime
     .execute_script(
@@ -465,8 +465,8 @@ fn test_dispatch_stack_zero_copy_bufs() {
   assert_eq!(dispatch_count.load(Ordering::Relaxed), 1);
 }
 
-#[test]
-fn test_call_site() {
+#[tokio::test]
+async fn test_call_site() {
   let (mut runtime, _) = setup(Mode::Async);
   runtime
     .execute_script(

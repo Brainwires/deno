@@ -2744,8 +2744,8 @@ mod tests {
   use super::*;
 
   #[cfg(not(miri))]
-  #[test]
-  fn test_js_error_from_v8_exception_handles_cyclic_aggregate_error() {
+  #[tokio::test]
+  async fn test_js_error_from_v8_exception_handles_cyclic_aggregate_error() {
     let mut runtime = JsRuntime::new(Default::default());
     deno_core::scope!(scope, runtime);
 
@@ -2769,8 +2769,8 @@ mod tests {
   }
 
   #[cfg(not(miri))]
-  #[test]
-  fn test_js_error_from_v8_exception_handles_crossed_aggregate_cycle() {
+  #[tokio::test]
+  async fn test_js_error_from_v8_exception_handles_crossed_aggregate_cycle() {
     let mut runtime = JsRuntime::new(Default::default());
     deno_core::scope!(scope, runtime);
 
@@ -2793,8 +2793,8 @@ mod tests {
   }
 
   #[cfg(not(miri))]
-  #[test]
-  fn test_js_error_from_v8_exception_truncates_deep_cause_chain() {
+  #[tokio::test]
+  async fn test_js_error_from_v8_exception_truncates_deep_cause_chain() {
     let mut runtime = JsRuntime::new(Default::default());
     deno_core::scope!(scope, runtime);
 
@@ -2824,8 +2824,8 @@ mod tests {
   }
 
   #[cfg(not(miri))]
-  #[test]
-  fn test_js_error_from_v8_exception_bounds_shared_aggregate_graph() {
+  #[tokio::test]
+  async fn test_js_error_from_v8_exception_bounds_shared_aggregate_graph() {
     let mut runtime = JsRuntime::new(Default::default());
     deno_core::scope!(scope, runtime);
 
@@ -2882,8 +2882,9 @@ mod tests {
   }
 
   #[cfg(not(miri))]
-  #[test]
-  fn test_js_error_from_v8_exception_handles_throwing_aggregate_element() {
+  #[tokio::test]
+  async fn test_js_error_from_v8_exception_handles_throwing_aggregate_element()
+  {
     let mut runtime = JsRuntime::new(Default::default());
     deno_core::scope!(scope, runtime);
 
@@ -2915,9 +2916,9 @@ mod tests {
   }
 
   #[cfg(not(miri))]
-  #[test]
-  fn test_js_error_from_v8_exception_handles_throwing_aggregate_errors_getter()
-  {
+  #[tokio::test]
+  async fn test_js_error_from_v8_exception_handles_throwing_aggregate_errors_getter()
+   {
     let mut runtime = JsRuntime::new(Default::default());
     deno_core::scope!(scope, runtime);
 
@@ -2949,8 +2950,8 @@ mod tests {
   }
 
   #[cfg(not(miri))]
-  #[test]
-  fn test_is_aggregate_error_recognizes_builtin() {
+  #[tokio::test]
+  async fn test_is_aggregate_error_recognizes_builtin() {
     let mut runtime = JsRuntime::new(Default::default());
     deno_core::scope!(scope, runtime);
 
@@ -2969,8 +2970,8 @@ mod tests {
   }
 
   #[cfg(not(miri))]
-  #[test]
-  fn test_is_aggregate_error_handles_malformed_constructors() {
+  #[tokio::test]
+  async fn test_is_aggregate_error_handles_malformed_constructors() {
     let mut runtime = JsRuntime::new(Default::default());
     deno_core::scope!(scope, runtime);
 
@@ -2996,8 +2997,8 @@ mod tests {
   }
 
   #[cfg(not(miri))]
-  #[test]
-  fn test_is_aggregate_error_handles_throwing_accessors() {
+  #[tokio::test]
+  async fn test_is_aggregate_error_handles_throwing_accessors() {
     let mut runtime = JsRuntime::new(Default::default());
     deno_core::scope!(scope, runtime);
 
@@ -3179,8 +3180,8 @@ mod tests {
   }
 
   #[cfg(not(miri))]
-  #[test]
-  fn test_to_v8_error_handles_null_builder_exception() {
+  #[tokio::test]
+  async fn test_to_v8_error_handles_null_builder_exception() {
     let mut runtime = JsRuntime::new(Default::default());
 
     deno_core::scope!(scope, runtime);
@@ -3207,8 +3208,8 @@ mod tests {
   }
 
   #[cfg(not(miri))]
-  #[test]
-  fn test_to_v8_error_handles_stack_overflow_in_builder() {
+  #[tokio::test]
+  async fn test_to_v8_error_handles_stack_overflow_in_builder() {
     let mut runtime = JsRuntime::new(Default::default());
 
     deno_core::scope!(scope, runtime);
@@ -3241,8 +3242,8 @@ mod tests {
   }
 
   #[cfg(not(miri))]
-  #[test]
-  fn test_js_error_v8_roundtrip_preserves_shape() {
+  #[tokio::test]
+  async fn test_js_error_v8_roundtrip_preserves_shape() {
     use crate::convert::FromV8;
     use crate::convert::ToV8;
 

@@ -31,8 +31,8 @@ use crate::runtime::tests::Mode;
 use crate::runtime::tests::setup;
 use crate::*;
 
-#[test]
-fn icu() {
+#[tokio::test]
+async fn icu() {
   // If this test fails, update core/runtime/icudtl.dat from
   // rusty_v8/third_party/icu/common/icudtl.dat
   let mut runtime = JsRuntime::new(Default::default());
@@ -41,8 +41,8 @@ fn icu() {
     .unwrap();
 }
 
-#[test]
-fn test_execute_script_return_value() {
+#[tokio::test]
+async fn test_execute_script_return_value() {
   let mut runtime = JsRuntime::new(Default::default());
   let value_global = runtime.execute_script("a.js", "a = 1 + 2").unwrap();
   {
@@ -354,8 +354,8 @@ async fn terminate_execution_webassembly() {
   terminator_thread.join().unwrap();
 }
 
-#[test]
-fn terminate_execution() {
+#[tokio::test]
+async fn terminate_execution() {
   let (mut isolate, _dispatch_count) = setup(Mode::Async);
   let v8_isolate_handle = isolate.v8_isolate().thread_safe_handle();
 
@@ -422,8 +422,8 @@ async fn wasm_streaming_op_invocation_in_import() {
   assert!(val.is_object());
 }
 
-#[test]
-fn dangling_shared_isolate() {
+#[tokio::test]
+async fn dangling_shared_isolate() {
   let v8_isolate_handle = {
     // isolate is dropped at the end of this block
     let (mut runtime, _dispatch_count) = setup(Mode::Async);
@@ -436,8 +436,8 @@ fn dangling_shared_isolate() {
 
 /// Ensure that putting the inspector into OpState doesn't cause crashes. The only valid place we currently allow
 /// the inspector to be stashed without cleanup is the OpState, and this should not actually cause crashes.
-#[test]
-fn inspector() {
+#[tokio::test]
+async fn inspector() {
   let mut runtime = JsRuntime::new(RuntimeOptions {
     inspector: true,
     ..Default::default()
@@ -453,8 +453,8 @@ fn inspector() {
 /// `NodeRuntime.enable` in that window got no `NodeRuntime.waitingForDebugger`
 /// and a frontend waiting for it hung (node_compat's
 /// parallel/test-esm-loader-hooks-inspect-brk.js timed out).
-#[test]
-fn inspect_brk_frontend_attached_while_the_module_loads() {
+#[tokio::test]
+async fn inspect_brk_frontend_attached_while_the_module_loads() {
   let runtime = JsRuntime::new(RuntimeOptions {
     inspector: true,
     ..Default::default()
@@ -565,8 +565,8 @@ fn local_inspector_evaluate(
   rx.try_recv().unwrap()
 }
 
-#[test]
-fn test_get_module_namespace() {
+#[tokio::test]
+async fn test_get_module_namespace() {
   let mut runtime = JsRuntime::new(RuntimeOptions {
     module_loader: Some(Rc::new(NoopModuleLoader)),
     ..Default::default()
@@ -657,8 +657,8 @@ fn test_heap_limits() {
   assert!(callback_invoke_count.load(Ordering::SeqCst) > 0)
 }
 
-#[test]
-fn test_heap_limit_cb_remove() {
+#[tokio::test]
+async fn test_heap_limit_cb_remove() {
   let mut runtime = JsRuntime::new(Default::default());
 
   runtime.add_near_heap_limit_callback(|current_limit, _initial_limit| {
@@ -764,8 +764,8 @@ assertEquals(1, notify_return_value);
   .await;
 }
 
-#[test]
-fn test_v8_platform() {
+#[tokio::test]
+async fn test_v8_platform() {
   let options = RuntimeOptions {
     v8_platform: Some(v8::new_default_platform(0, false).make_shared()),
     ..Default::default()
@@ -775,8 +775,8 @@ fn test_v8_platform() {
 }
 
 #[ignore] // TODO(@littledivy): Fast API ops when snapshot is not loaded.
-#[test]
-fn test_is_proxy() {
+#[tokio::test]
+async fn test_is_proxy() {
   let mut runtime = JsRuntime::new(RuntimeOptions::default());
   let all_true: v8::Global<v8::Value> = runtime
     .execute_script(
@@ -1032,8 +1032,8 @@ async fn test_next_tick_error_continues_drain() {
   assert_eq!(2, TICKS_RUN.load(Ordering::Relaxed));
 }
 
-#[test]
-fn terminate_during_module_eval() {
+#[tokio::test]
+async fn terminate_during_module_eval() {
   let mut runtime = JsRuntime::new(RuntimeOptions {
     module_loader: Some(Rc::new(NoopModuleLoader)),
     ..Default::default()
@@ -1683,8 +1683,8 @@ async fn global_template_middleware() {
   assert!(calls_set.contains("descriptor"));
 }
 
-#[test]
-fn eval_context_with_code_cache() {
+#[tokio::test]
+async fn eval_context_with_code_cache() {
   let code_cache = {
     let updated_code_cache = Arc::new(Mutex::new(HashMap::new()));
 
@@ -1758,8 +1758,8 @@ fn eval_context_with_code_cache() {
   }
 }
 
-#[test]
-fn eval_context_code_cache_error_is_cache_miss() {
+#[tokio::test]
+async fn eval_context_code_cache_error_is_cache_miss() {
   let get_code_cache_cb = Box::new(|_: &Url, _: &[u16]| {
     Err(JsErrorBox::generic("cache unavailable"))
   });
@@ -1789,8 +1789,8 @@ fn eval_context_code_cache_error_is_cache_miss() {
   assert!(!set_called.load(Ordering::SeqCst));
 }
 
-#[test]
-fn eval_context_code_cache_key_sees_full_source() {
+#[tokio::test]
+async fn eval_context_code_cache_key_sees_full_source() {
   // V8's identity hash for a string longer than 16,383 chars is derived from
   // the length alone, so keying the cache on it handed stale bytecode to
   // equal-length rewrites. The callback must observe the actual code units.
@@ -2223,7 +2223,9 @@ async fn test_nexttick_before_queue_microtask() {
 }
 
 // Test that foreground tasks are delivered even when the isolate is
-// registered without a tokio handle.
+// registered without a tokio handle (what a release build does with a
+// `JsRuntime` created outside tokio; a debug build refuses to create one, so
+// the handle is dropped from the registry after creation instead).
 #[test]
 fn foreground_tasks_delivered_without_tokio_handle() {
   let tokio_runtime = tokio::runtime::Builder::new_current_thread()
@@ -2231,9 +2233,15 @@ fn foreground_tasks_delivered_without_tokio_handle() {
     .build()
     .unwrap();
 
-  // Created outside `block_on` so there is no tokio runtime context and
-  // the isolate is registered with `handle: None`.
-  let mut runtime = JsRuntime::new(Default::default());
+  let mut runtime = {
+    let _guard = tokio_runtime.enter();
+    JsRuntime::new(Default::default())
+  };
+  // SAFETY: the pointer only identifies the isolate's registry entry.
+  let isolate_ptr = unsafe { runtime.v8_isolate().as_raw_isolate_ptr() };
+  crate::runtime::setup::forget_tokio_handle_for_test(
+    crate::runtime::setup::isolate_ptr_to_key(isolate_ptr),
+  );
 
   tokio_runtime.block_on(async {
     let promise = runtime
@@ -2263,8 +2271,8 @@ fn foreground_tasks_delivered_without_tokio_handle() {
 /// inlines a fast call reads them until the isolate is disposed. The op
 /// contexts must therefore still be alive while the isolate is being dropped,
 /// and be released afterwards.
-#[test]
-fn op_ctxs_outlive_isolate() {
+#[tokio::test]
+async fn op_ctxs_outlive_isolate() {
   struct OpCtxsProbe {
     op_ctxs: std::rc::Weak<crate::ops::OpCtxs>,
     alive_at_isolate_drop: Rc<std::cell::Cell<Option<bool>>>,
@@ -2321,8 +2329,8 @@ fn op_ctxs_outlive_isolate() {
 /// serializer read the freed bytes (DENEXT.md item 182; under Guard Malloc,
 /// `DYLD_INSERT_LIBRARIES=/usr/lib/libgmalloc.dylib`, every snapshot test
 /// crashed in `SerializeBackingStore`).
-#[test]
-fn shared_info_memory_belongs_to_the_backing_store() {
+#[tokio::test]
+async fn shared_info_memory_belongs_to_the_backing_store() {
   use crate::runtime::jsrealm::IMM_IDX_REF_COUNT;
 
   let mut runtime = JsRuntime::new(Default::default());

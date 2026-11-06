@@ -13,8 +13,21 @@ use crate::modules::RequestedModuleType;
 use crate::runtime::NO_OF_BUILTIN_MODULES;
 use crate::*;
 
+/// The snapshotting runtime is held to the same rule as `JsRuntime`
+/// (`runtime::tests::tokio_context`); it is here because a snapshotting
+/// runtime initializes V8 in snapshotting mode, so it runs with these.
+#[cfg(debug_assertions)]
 #[test]
-fn will_snapshot() {
+#[should_panic(
+  expected = "A `JsRuntime` was created outside of a tokio runtime context"
+)]
+fn a_snapshotting_runtime_outside_tokio_fails_at_creation() {
+  let _snapshot_lock = super::snapshot_test_lock();
+  JsRuntimeForSnapshot::new(RuntimeOptions::default());
+}
+
+#[tokio::test]
+async fn will_snapshot() {
   let _snapshot_lock = super::snapshot_test_lock();
   let snapshot = {
     let mut runtime = JsRuntimeForSnapshot::new(Default::default());
@@ -32,8 +45,8 @@ fn will_snapshot() {
     .unwrap();
 }
 
-#[test]
-fn will_snapshot2() {
+#[tokio::test]
+async fn will_snapshot2() {
   let _snapshot_lock = super::snapshot_test_lock();
   let startup_data = {
     let mut runtime = JsRuntimeForSnapshot::new(Default::default());
@@ -70,8 +83,8 @@ fn will_snapshot2() {
   }
 }
 
-#[test]
-fn test_snapshot_callbacks() {
+#[tokio::test]
+async fn test_snapshot_callbacks() {
   let _snapshot_lock = super::snapshot_test_lock();
   let snapshot = {
     let mut runtime = JsRuntimeForSnapshot::new(Default::default());
@@ -107,8 +120,8 @@ fn test_snapshot_callbacks() {
     .unwrap();
 }
 
-#[test]
-fn shared_array_buffer_primordial_fresh_runtime() {
+#[tokio::test]
+async fn shared_array_buffer_primordial_fresh_runtime() {
   let mut runtime = JsRuntime::new(Default::default());
   runtime
     .execute_script(
@@ -131,8 +144,8 @@ if (SharedArrayBufferPrototypeGetByteLength(sab) !== 4) {
 /// 01_core.js installs SharedArrayBuffer onto primordials during snapshot
 /// setup (via op_get_shared_array_buffer_constructor), so eager ext scripts
 /// that destructure it at IIFE evaluation time get the real constructor.
-#[test]
-fn shared_array_buffer_available_during_snapshot() {
+#[tokio::test]
+async fn shared_array_buffer_available_during_snapshot() {
   let _snapshot_lock = super::snapshot_test_lock();
   let snapshot = {
     let mut runtime = JsRuntimeForSnapshot::new(Default::default());
@@ -181,8 +194,8 @@ if (!Deno.core.isSharedArrayBuffer(sab)) {
     .unwrap();
 }
 
-#[test]
-fn shared_array_buffer_primordial_from_snapshot() {
+#[tokio::test]
+async fn shared_array_buffer_primordial_from_snapshot() {
   let _snapshot_lock = super::snapshot_test_lock();
   let snapshot = {
     let runtime = JsRuntimeForSnapshot::new(Default::default());
@@ -222,8 +235,8 @@ if (SharedArrayBufferPrototypeGetByteLength(sliced) !== 4) {
     .unwrap();
 }
 
-#[test]
-fn test_from_snapshot() {
+#[tokio::test]
+async fn test_from_snapshot() {
   let _snapshot_lock = super::snapshot_test_lock();
   let snapshot = {
     let mut runtime = JsRuntimeForSnapshot::new(Default::default());
@@ -262,6 +275,13 @@ fn test_snapshot_creator() {
 
   let snapshot = Box::leak(output.output);
 
+  // Not a `#[tokio::test]`: `create_snapshot` builds and drops its own
+  // tokio runtime, which tokio refuses inside an async context.
+  let tokio = tokio::runtime::Builder::new_current_thread()
+    .enable_all()
+    .build()
+    .unwrap();
+  let _guard = tokio.enter();
   let mut runtime2 = JsRuntime::new(RuntimeOptions {
     startup_snapshot: Some(snapshot),
     ..Default::default()
@@ -300,6 +320,13 @@ fn test_snapshot_creator_warmup() {
 
   let snapshot = Box::leak(output.output);
 
+  // Not a `#[tokio::test]`: `create_snapshot` builds and drops its own
+  // tokio runtime, which tokio refuses inside an async context.
+  let tokio = tokio::runtime::Builder::new_current_thread()
+    .enable_all()
+    .build()
+    .unwrap();
+  let _guard = tokio.enter();
   let mut runtime2 = JsRuntime::new(RuntimeOptions {
     startup_snapshot: Some(snapshot),
     ..Default::default()
@@ -309,8 +336,8 @@ fn test_snapshot_creator_warmup() {
     .unwrap();
 }
 
-#[test]
-fn es_snapshot() {
+#[tokio::test]
+async fn es_snapshot() {
   let _snapshot_lock = super::snapshot_test_lock();
   fn create_module(
     runtime: &mut JsRuntime,
@@ -466,8 +493,8 @@ fn es_snapshot() {
   }
 }
 
-#[test]
-pub(crate) fn es_snapshot_without_runtime_module_loader() {
+#[tokio::test]
+pub(crate) async fn es_snapshot_without_runtime_module_loader() {
   let _snapshot_lock = super::snapshot_test_lock();
   let startup_data = {
     deno_core::extension!(
@@ -539,8 +566,8 @@ pub(crate) fn es_snapshot_without_runtime_module_loader() {
   );
 }
 
-#[test]
-pub fn snapshot_with_additional_extensions() {
+#[tokio::test]
+pub async fn snapshot_with_additional_extensions() {
   let _snapshot_lock = super::snapshot_test_lock();
   #[op2]
   #[string]
@@ -600,8 +627,8 @@ pub fn snapshot_with_additional_extensions() {
   }
 }
 
-#[test]
-fn lazy_loaded_esm_not_snapshotted_but_metadata_survives() {
+#[tokio::test]
+async fn lazy_loaded_esm_not_snapshotted_but_metadata_survives() {
   let _snapshot_lock = super::snapshot_test_lock();
   let snapshot = {
     deno_core::extension!(
@@ -694,8 +721,8 @@ fn lazy_loaded_esm_not_snapshotted_but_metadata_survives() {
 /// with an extension that ships JavaScript. The second snapshot must keep the
 /// externalized sources inherited from the first, since the heap references
 /// them by external-reference index.
-#[test]
-fn will_snapshot_chained_with_extension_sources() {
+#[tokio::test]
+async fn will_snapshot_chained_with_extension_sources() {
   let _snapshot_lock = super::snapshot_test_lock();
   deno_core::extension!(
     chained_ext,

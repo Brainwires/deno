@@ -15,6 +15,14 @@ fn op_sum(#[serde] nums: Vec<f64>) -> Result<f64, deno_error::JsErrorBox> {
 }
 
 fn main() {
+  // A `JsRuntime` must be created inside a tokio runtime context: V8's
+  // delayed tasks are scheduled on it.
+  let tokio_runtime = tokio::runtime::Builder::new_current_thread()
+    .enable_all()
+    .build()
+    .unwrap();
+  let _tokio_guard = tokio_runtime.enter();
+
   // Build a deno_core::Extension providing custom ops
   const DECL: OpDecl = op_sum();
   let ext = Extension {

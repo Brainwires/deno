@@ -11,7 +11,8 @@ use crate::RuntimeOptions;
 use crate::op2;
 
 #[rstest]
-fn callsite_cache_ignores_array_prototype(
+#[tokio::test]
+async fn callsite_cache_ignores_array_prototype(
   #[values(0, 1, 2)] index: u32,
   #[values(false, true)] eval: bool,
 ) {
@@ -105,8 +106,8 @@ async fn test_error_builder() {
   .await;
 }
 
-#[test]
-fn syntax_error() {
+#[tokio::test]
+async fn syntax_error() {
   let mut runtime = JsRuntime::new(Default::default());
   let src = "hocuspocus(";
   let js_error = runtime.execute_script("i.js", src).unwrap_err();
@@ -117,8 +118,8 @@ fn syntax_error() {
 // Native construction is shared by op dispatch paths for registered classes.
 // Verify that it restores the class and defines the expected own properties
 // without consulting inherited accessors.
-#[test]
-fn native_registered_error_preserves_class() {
+#[tokio::test]
+async fn native_registered_error_preserves_class() {
   use std::borrow::Cow;
 
   use deno_error::JsErrorClass;

@@ -1490,8 +1490,8 @@ function equal(a, b) {
     }};
   }
 
-  #[test]
-  fn test_option_undefined() {
+  #[tokio::test]
+  async fn test_option_undefined() {
     let mut runtime = JsRuntime::new(Default::default());
 
     to_v8_test!(
@@ -1521,8 +1521,8 @@ function equal(a, b) {
     });
   }
 
-  #[test]
-  fn test_option_null() {
+  #[tokio::test]
+  async fn test_option_null() {
     let mut runtime = JsRuntime::new(Default::default());
 
     to_v8_test!(
@@ -1552,8 +1552,8 @@ function equal(a, b) {
     ));
   }
 
-  #[test]
-  fn test_tuple() {
+  #[tokio::test]
+  async fn test_tuple() {
     let mut runtime = JsRuntime::new(Default::default());
 
     to_v8_test!(
@@ -1616,8 +1616,8 @@ function equal(a, b) {
     });
   }
 
-  #[test]
-  fn test_vec() {
+  #[tokio::test]
+  async fn test_vec() {
     let mut runtime = JsRuntime::new(Default::default());
 
     to_v8_test!(
@@ -1684,8 +1684,8 @@ function equal(a, b) {
     });
   }
 
-  #[test]
-  fn test_uint8array() {
+  #[tokio::test]
+  async fn test_uint8array() {
     let mut runtime = JsRuntime::new(Default::default());
 
     to_v8_test!(
@@ -1748,8 +1748,8 @@ function equal(a, b) {
     );
   }
 
-  #[test]
-  fn test_uint16array() {
+  #[tokio::test]
+  async fn test_uint16array() {
     let mut runtime = JsRuntime::new(Default::default());
 
     to_v8_test!(
@@ -1795,8 +1795,8 @@ function equal(a, b) {
     );
   }
 
-  #[test]
-  fn test_uint32array() {
+  #[tokio::test]
+  async fn test_uint32array() {
     let mut runtime = JsRuntime::new(Default::default());
 
     to_v8_test!(
@@ -1842,8 +1842,8 @@ function equal(a, b) {
     );
   }
 
-  #[test]
-  fn test_int32array() {
+  #[tokio::test]
+  async fn test_int32array() {
     let mut runtime = JsRuntime::new(Default::default());
 
     to_v8_test!(
@@ -1889,8 +1889,8 @@ function equal(a, b) {
     );
   }
 
-  #[test]
-  fn test_biguint64array() {
+  #[tokio::test]
+  async fn test_biguint64array() {
     let mut runtime = JsRuntime::new(Default::default());
 
     to_v8_test!(
@@ -1933,8 +1933,8 @@ function equal(a, b) {
     );
   }
 
-  #[test]
-  fn test_bigint64array() {
+  #[tokio::test]
+  async fn test_bigint64array() {
     let mut runtime = JsRuntime::new(Default::default());
 
     to_v8_test!(
@@ -1984,8 +1984,8 @@ function equal(a, b) {
     );
   }
 
-  #[test]
-  fn derive_struct() {
+  #[tokio::test]
+  async fn derive_struct() {
     #[derive(deno_ops::FromV8, deno_ops::ToV8, Eq, PartialEq, Clone, Debug)]
     pub struct Struct {
       a: u8,
@@ -2011,8 +2011,8 @@ function equal(a, b) {
     assert_eq!(value, from);
   }
 
-  #[test]
-  fn derive_from_struct() {
+  #[tokio::test]
+  async fn derive_from_struct() {
     #[derive(deno_ops::FromV8, Eq, PartialEq, Clone, Debug)]
     pub struct Struct {
       a: u8,
@@ -2060,8 +2060,8 @@ function equal(a, b) {
     );
   }
 
-  #[test]
-  fn derive_from_tuple_struct() {
+  #[tokio::test]
+  async fn derive_from_tuple_struct() {
     #[derive(deno_ops::FromV8, Eq, PartialEq, Clone, Debug)]
     pub struct Tuple(u8, String);
     #[derive(deno_ops::FromV8, Eq, PartialEq, Clone, Debug)]
@@ -2083,8 +2083,8 @@ function equal(a, b) {
     assert_eq!(from, TupleSingle(1));
   }
 
-  #[test]
-  fn derive_to_struct() {
+  #[tokio::test]
+  async fn derive_to_struct() {
     #[derive(deno_ops::ToV8, Eq, PartialEq, Clone, Debug)]
     pub struct Struct {
       a: u8,
@@ -2196,8 +2196,8 @@ function equal(a, b) {
     );
   }
 
-  #[test]
-  fn derive_to_tuple_struct() {
+  #[tokio::test]
+  async fn derive_to_tuple_struct() {
     #[derive(deno_ops::ToV8, Eq, PartialEq, Clone, Debug)]
     pub struct Tuple(u8, String);
     #[derive(deno_ops::ToV8, Eq, PartialEq, Clone, Debug)]
@@ -2225,8 +2225,8 @@ function equal(a, b) {
     assert_eq!(from.number_value(scope).unwrap(), 1.0);
   }
 
-  #[test]
-  fn test_box_roundtrip() {
+  #[tokio::test]
+  async fn test_box_roundtrip() {
     let mut runtime = JsRuntime::new(Default::default());
     deno_core::scope!(scope, runtime);
 
@@ -2248,8 +2248,8 @@ function equal(a, b) {
     assert_eq!(back, nested);
   }
 
-  #[test]
-  fn test_bigint() {
+  #[tokio::test]
+  async fn test_bigint() {
     let mut runtime = JsRuntime::new(Default::default());
 
     to_v8_test!(

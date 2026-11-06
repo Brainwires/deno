@@ -7942,8 +7942,8 @@ mod tests {
     assert!(BindOrigins::from_spec(&too_many).is_err());
   }
 
-  #[test]
-  fn desktop_values_become_own_data_properties() {
+  #[tokio::test]
+  async fn desktop_values_become_own_data_properties() {
     use deno_core::ToV8;
     use deno_core::v8;
     let mut runtime = deno_core::JsRuntime::new(Default::default());

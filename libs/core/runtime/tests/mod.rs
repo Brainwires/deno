@@ -20,6 +20,7 @@ mod jsrealm;
 mod misc;
 mod ops;
 mod snapshot;
+mod tokio_context;
 
 #[derive(Copy, Clone)]
 pub enum Mode {

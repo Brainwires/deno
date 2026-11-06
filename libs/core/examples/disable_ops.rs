@@ -7,6 +7,14 @@ use deno_core::JsRuntime;
 use deno_core::RuntimeOptions;
 
 fn main() {
+  // A `JsRuntime` must be created inside a tokio runtime context: V8's
+  // delayed tasks are scheduled on it.
+  let tokio_runtime = tokio::runtime::Builder::new_current_thread()
+    .enable_all()
+    .build()
+    .unwrap();
+  let _tokio_guard = tokio_runtime.enter();
+
   let my_ext = Extension {
     name: "my_ext",
     middleware_fn: Some(Box::new(|op| match op.name {

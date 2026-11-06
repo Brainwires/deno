@@ -334,8 +334,8 @@ impl ModuleLoader for MockLoader {
   }
 }
 
-#[test]
-fn test_recursive_load() {
+#[tokio::test]
+async fn test_recursive_load() {
   let loader = MockLoader::new();
   let loads = loader.loads.clone();
   let mut runtime = JsRuntime::new(RuntimeOptions {
@@ -433,8 +433,8 @@ fn test_recursive_load() {
   assert_eq!(modules.get_requested_modules_cloned(d_id), Some(vec![]));
 }
 
-#[test]
-fn test_mods() {
+#[tokio::test]
+async fn test_mods() {
   let loader = Rc::new(TestingModuleLoader::new(NoopModuleLoader));
   static DISPATCH_COUNT: AtomicUsize = AtomicUsize::new(0);
 
@@ -545,8 +545,8 @@ fn test_mods() {
   assert_eq!(DISPATCH_COUNT.load(Ordering::Relaxed), 1);
 }
 
-#[test]
-fn test_lazy_loaded_esm() {
+#[tokio::test]
+async fn test_lazy_loaded_esm() {
   deno_core::extension!(test_ext, lazy_loaded_esm = [dir "modules/testdata", "lazy_loaded.js"]);
 
   let mut runtime = JsRuntime::new(RuntimeOptions {
@@ -576,8 +576,8 @@ fn test_lazy_loaded_esm() {
     .unwrap();
 }
 
-#[test]
-fn test_lazy_loaded_esm_rejects_non_lazy_cached_module() {
+#[tokio::test]
+async fn test_lazy_loaded_esm_rejects_non_lazy_cached_module() {
   let mut runtime = JsRuntime::new(Default::default());
 
   runtime
@@ -602,8 +602,8 @@ fn test_lazy_loaded_esm_rejects_non_lazy_cached_module() {
     .unwrap();
 }
 
-#[test]
-fn test_lazy_loaded_esm_aliased_specifier() {
+#[tokio::test]
+async fn test_lazy_loaded_esm_aliased_specifier() {
   deno_core::extension!(
     test_ext,
     lazy_loaded_esm = [
@@ -712,8 +712,8 @@ async fn test_lazy_load_esm_evaluates_pre_instantiated_sibling() {
 /// can synchronously start a dynamic import. The cache-hit path must not keep
 /// `ModuleMapData` borrowed while V8 runs the module body, because starting
 /// the import allocates a new module load ID from the same map.
-#[test]
-fn test_cached_synthetic_esm_evaluation_allows_dynamic_import() {
+#[tokio::test]
+async fn test_cached_synthetic_esm_evaluation_allows_dynamic_import() {
   let mut runtime = JsRuntime::new(Default::default());
   let module_map = runtime.module_map().clone();
 
@@ -792,8 +792,8 @@ async fn test_lazy_loaded_esm_concurrent_loads() {
   result.await.unwrap();
 }
 
-#[test]
-fn test_lazy_loaded_script() {
+#[tokio::test]
+async fn test_lazy_loaded_script() {
   deno_core::extension!(
     test_ext,
     lazy_loaded_js = [dir "modules/testdata", "lazy_script.js", "lazy_script_dep.js"]
@@ -828,8 +828,8 @@ fn test_lazy_loaded_script() {
     .unwrap();
 }
 
-#[test]
-fn test_lazy_loaded_script_not_found() {
+#[tokio::test]
+async fn test_lazy_loaded_script_not_found() {
   deno_core::extension!(test_ext);
 
   let mut runtime = JsRuntime::new(RuntimeOptions {
@@ -850,8 +850,8 @@ fn test_lazy_loaded_script_not_found() {
   );
 }
 
-#[test]
-fn test_json_text_bytes_modules() {
+#[tokio::test]
+async fn test_json_text_bytes_modules() {
   let loader = Rc::new(TestingModuleLoader::new(StaticModuleLoader::default()));
   let mut runtime = JsRuntime::new(RuntimeOptions {
     module_loader: Some(loader.clone()),
@@ -998,8 +998,8 @@ fn test_json_text_bytes_modules() {
   futures::executor::block_on(receiver).unwrap();
 }
 
-#[test]
-fn test_validate_import_attributes_default() {
+#[tokio::test]
+async fn test_validate_import_attributes_default() {
   // Verify that unless `validate_import_attributes_cb` is passed all import
   // are allowed and don't have any problem executing "invalid" code.
 
@@ -1088,8 +1088,8 @@ async fn test_fs_module_loader_rejects_non_json_for_json_request() {
   assert_eq!(module.module_type, ModuleType::Json);
 }
 
-#[test]
-fn test_validate_import_attributes_callback() {
+#[tokio::test]
+async fn test_validate_import_attributes_callback() {
   // Verify that `validate_import_attributes_cb` is called and can deny
   // attributes.
 
@@ -1180,8 +1180,8 @@ fn test_validate_import_attributes_callback() {
   }
 }
 
-#[test]
-fn test_validate_import_attributes_callback2() {
+#[tokio::test]
+async fn test_validate_import_attributes_callback2() {
   fn validate_import_attrs(
     scope: &mut v8::PinScope,
     _attrs: &HashMap<String, String>,
@@ -1279,8 +1279,8 @@ async fn test_validate_import_attributes_callback_dynamic_import() {
     .unwrap();
 }
 
-#[test]
-fn test_custom_module_type_default() {
+#[tokio::test]
+async fn test_custom_module_type_default() {
   let loader = Rc::new(TestingModuleLoader::new(StaticModuleLoader::default()));
   let mut runtime = JsRuntime::new(RuntimeOptions {
     module_loader: Some(loader.clone()),
@@ -1316,8 +1316,8 @@ fn test_custom_module_type_default() {
   };
 }
 
-#[test]
-fn test_custom_module_type_callback_synthetic() {
+#[tokio::test]
+async fn test_custom_module_type_callback_synthetic() {
   fn custom_eval_cb(
     scope: &mut v8::PinScope,
     module_type: Cow<'_, str>,
@@ -1400,8 +1400,8 @@ fn test_custom_module_type_callback_synthetic() {
   };
 }
 
-#[test]
-fn test_custom_module_type_callback_computed() {
+#[tokio::test]
+async fn test_custom_module_type_callback_computed() {
   fn custom_eval_cb(
     scope: &mut v8::PinScope,
     module_type: Cow<'_, str>,
@@ -1719,8 +1719,8 @@ async fn dyn_import_borrow_mut_error() {
   .await;
 }
 
-#[test]
-fn test_circular_load() {
+#[tokio::test]
+async fn test_circular_load() {
   let loader = MockLoader::new();
   let loads = loader.loads.clone();
   let mut runtime = JsRuntime::new(RuntimeOptions {
@@ -1821,8 +1821,8 @@ fn test_circular_load() {
   futures::executor::block_on(fut);
 }
 
-#[test]
-fn test_redirect_load() {
+#[tokio::test]
+async fn test_redirect_load() {
   let loader = MockLoader::new();
   let loads = loader.loads.clone();
   let mut runtime = JsRuntime::new(RuntimeOptions {
@@ -1889,8 +1889,8 @@ fn test_redirect_load() {
   futures::executor::block_on(fut);
 }
 
-#[test]
-fn test_concurrent_redirect_load() {
+#[tokio::test]
+async fn test_concurrent_redirect_load() {
   let loader = MockLoader::new();
   let loads = loader.loads.clone();
   let mut runtime = JsRuntime::new(RuntimeOptions {
@@ -2001,8 +2001,8 @@ async fn loader_disappears_after_error() {
   );
 }
 
-#[test]
-fn recursive_load_main_with_code() {
+#[tokio::test]
+async fn recursive_load_main_with_code() {
   const MAIN_WITH_CODE_SRC: &str = r#"
     import { b } from "/b.js";
     import { c } from "/c.js";
@@ -2105,8 +2105,8 @@ fn recursive_load_main_with_code() {
   assert_eq!(modules.get_requested_modules_cloned(d_id), Some(vec![]));
 }
 
-#[test]
-fn main_and_side_module() {
+#[tokio::test]
+async fn main_and_side_module() {
   let main_specifier = resolve_url("file:///main_module.js").unwrap();
   let side_specifier = resolve_url("file:///side_module.js").unwrap();
 
@@ -2148,8 +2148,8 @@ fn main_and_side_module() {
     .unwrap();
 }
 
-#[test]
-fn dynamic_imports_snapshot() {
+#[tokio::test]
+async fn dynamic_imports_snapshot() {
   let _snapshot_lock = crate::runtime::tests::snapshot_test_lock();
   //TODO: Once the issue with the ModuleNamespaceEntryGetter is fixed, we can maintain a reference to the module
   // and use it when loading the snapshot
@@ -2189,8 +2189,8 @@ fn dynamic_imports_snapshot() {
   runtime2.execute_script("check.js", "true").unwrap();
 }
 
-#[test]
-fn import_meta_snapshot() {
+#[tokio::test]
+async fn import_meta_snapshot() {
   let _snapshot_lock = crate::runtime::tests::snapshot_test_lock();
   let snapshot = {
     const MAIN_WITH_CODE_SRC: &str = r#"
@@ -2422,8 +2422,8 @@ async fn import_meta_resolve() {
   b.await.unwrap().unwrap();
 }
 
-#[test]
-fn builtin_core_module() {
+#[tokio::test]
+async fn builtin_core_module() {
   let main_specifier = resolve_url("ext:///main_module.js").unwrap();
 
   let source_code = r#"
@@ -2450,8 +2450,8 @@ fn builtin_core_module() {
   runtime.module_map().set_loading_internal_modules(false);
 }
 
-#[test]
-fn safe_array_iterator_remains_done_after_array_grows() {
+#[tokio::test]
+async fn safe_array_iterator_remains_done_after_array_grows() {
   let main_specifier =
     resolve_url("ext:///safe_array_iterator_test.js").unwrap();
 
@@ -2500,8 +2500,8 @@ fn safe_array_iterator_remains_done_after_array_grows() {
 // map. Mapping `ext:core/mod.js` used to rewrite internal imports too and
 // break instantiation. Regression test for
 // https://github.com/denoland/deno/issues/36302.
-#[test]
-fn lazy_loaded_internal_module_ignores_loader_remapping() {
+#[tokio::test]
+async fn lazy_loaded_internal_module_ignores_loader_remapping() {
   /// Stands in for an import map that maps every specifier.
   struct RemappingLoader;
 
@@ -2541,8 +2541,8 @@ fn lazy_loaded_internal_module_ignores_loader_remapping() {
     .unwrap();
 }
 
-#[test]
-fn import_meta_filename_dirname() {
+#[tokio::test]
+async fn import_meta_filename_dirname() {
   #[cfg(not(target_os = "windows"))]
   let main_specifier = resolve_url("file:///main_module.js").unwrap();
   #[cfg(not(target_os = "windows"))]
@@ -2573,8 +2573,8 @@ fn import_meta_filename_dirname() {
     .unwrap();
 }
 
-#[test]
-fn test_load_with_code_cache() {
+#[tokio::test]
+async fn test_load_with_code_cache() {
   let mut code_cache = {
     let loader = MockLoader::new();
     let loads = loader.loads.clone();
@@ -2697,8 +2697,8 @@ fn test_load_with_code_cache() {
 // code cache request and only serializes its cache once a matching number of
 // `code_cache_ready` callbacks fire, so a JSON (or Wasm) module that requested
 // a cache but never produced one would otherwise stall serialization forever.
-#[test]
-fn test_code_cache_not_created_for_json_module() {
+#[tokio::test]
+async fn test_code_cache_not_created_for_json_module() {
   struct JsonCodeCacheLoader {
     code_cache_ready_calls: Arc<Mutex<Vec<String>>>,
   }
@@ -2799,8 +2799,8 @@ fn ext_module_loader_relative() {
   }
 }
 
-#[test]
-fn module_map_rejects_user_ext_imports_after_resolution() {
+#[tokio::test]
+async fn module_map_rejects_user_ext_imports_after_resolution() {
   struct ExtResolvingLoader;
 
   impl ModuleLoader for ExtResolvingLoader {

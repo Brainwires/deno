@@ -51,6 +51,28 @@ static ISOLATE_ENTRIES: std::sync::LazyLock<
   Mutex<HashMap<usize, IsolateEntry>>,
 > = std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
 
+/// Why a `JsRuntime` needs a tokio runtime context, and what to do about it.
+/// Shared by the creation-time check and the abort in `spawn_delayed_task`.
+pub(crate) const NO_TOKIO_RUNTIME_HINT: &str = "V8 posts delayed foreground tasks (the memory reducer, GC finalization, at times that depend on the GC) and deno_core schedules them on the tokio runtime the `JsRuntime` was created in; without one the process aborts when the first one is posted. Enter a tokio runtime (e.g. via `tokio::runtime::Runtime::enter()`, or use `#[tokio::test]` in a test) before creating the `JsRuntime`.";
+
+/// Debug builds (and so every `cargo test`) refuse to create a `JsRuntime`
+/// outside a tokio runtime context: `spawn_delayed_task` would abort the
+/// process later, at a time that depends on the GC, so a test that does it
+/// passes or dies at random. Failing at creation makes it fail every time,
+/// with the reason. Release builds keep the late abort (with its message).
+/// The check holds whatever V8 platform the process installed: which one
+/// that is depends on which `JsRuntime` came first, so a test could not
+/// rely on it.
+pub(crate) fn check_tokio_runtime_for_new_isolate(
+  handle: Option<&tokio::runtime::Handle>,
+) {
+  if cfg!(debug_assertions) && handle.is_none() {
+    panic!(
+      "A `JsRuntime` was created outside of a tokio runtime context. {NO_TOKIO_RUNTIME_HINT}"
+    );
+  }
+}
+
 /// Register an isolate in the global platform registry. The `tasks`
 /// queue is shared with `JsRuntimeState` so the event loop drains it
 /// directly without touching the global map.
@@ -69,6 +91,16 @@ pub fn register_isolate(
       tasks,
     },
   );
+}
+
+/// Drops the tokio handle an isolate was registered with, so the next
+/// delayed task V8 posts for it takes the abort path in `spawn_delayed_task`
+/// (the path an isolate created outside tokio takes in a release build,
+/// which a debug build can't reach any more).
+#[cfg(test)]
+pub(crate) fn forget_tokio_handle_for_test(isolate_ptr: usize) {
+  let mut map = ISOLATE_ENTRIES.lock().unwrap();
+  map.get_mut(&isolate_ptr).unwrap().handle = None;
 }
 
 pub fn unregister_isolate(isolate_ptr: usize) {
@@ -100,12 +132,16 @@ fn spawn_delayed_task(key: usize, task: v8::Task, delay_in_seconds: f64) {
   let map = ISOLATE_ENTRIES.lock().unwrap();
   let Some(entry) = map.get(&key) else { return };
   let Some(handle) = entry.handle.as_ref() else {
-    #[allow(clippy::print_stderr, reason = "printed before aborting")]
-    {
-      eprintln!(
-        "V8 posted a delayed task, but this isolate was created outside of a tokio runtime context and the delay cannot be honored. Enter a tokio runtime (e.g. via `tokio::runtime::Runtime::enter()`) before creating the `JsRuntime`."
-      );
-    }
+    // Written straight to the stderr handle, not with `eprintln!`: libtest's
+    // output capture intercepts the print macros, and an abort never prints
+    // what it captured, so a test that got here died with a bare SIGABRT.
+    use std::io::Write;
+    let message = format!(
+      "V8 posted a delayed task, but this isolate was created outside of a tokio runtime context and the delay cannot be honored. {NO_TOKIO_RUNTIME_HINT}\n"
+    );
+    let mut stderr = std::io::stderr().lock();
+    let _ = stderr.write_all(message.as_bytes());
+    let _ = stderr.flush();
     std::process::abort();
   };
   let tasks = entry.tasks.clone();

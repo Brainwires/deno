@@ -512,8 +512,8 @@ mod tests {
     }
   }
 
-  #[test]
-  fn sync_struct_return_views() {
+  #[tokio::test]
+  async fn sync_struct_return_views() {
     MAKE_RECT_CALL_COUNT.store(0, Ordering::Relaxed);
 
     let parameter_types = vec![NativeType::F64; 4];

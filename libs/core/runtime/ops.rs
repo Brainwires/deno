@@ -3570,8 +3570,8 @@ mod tests {
   op_create_buf!(f32);
   op_create_buf!(f64);
 
-  #[test]
-  fn return_buffers() -> Result<(), Box<dyn std::error::Error>> {
+  #[tokio::test(flavor = "current_thread")]
+  async fn return_buffers() -> Result<(), Box<dyn std::error::Error>> {
     fn test(size: &str) -> Result<(), Box<dyn std::error::Error>> {
       run_test2(
         1,

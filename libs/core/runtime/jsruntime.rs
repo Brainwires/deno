@@ -821,6 +821,11 @@ impl JsRuntime {
     mut options: RuntimeOptions,
     will_snapshot: bool,
   ) -> Result<JsRuntime, CoreError> {
+    // V8's delayed foreground tasks for this isolate are scheduled on the
+    // tokio runtime it is created in; a debug build refuses to go on without
+    // one, before anything is allocated (see `setup::spawn_delayed_task`).
+    let tokio_handle = tokio::runtime::Handle::try_current().ok();
+    setup::check_tokio_runtime_for_new_isolate(tokio_handle.as_ref());
     let _phase_total = startup_phase_begin();
     let init_mode = InitMode::from_options(&options);
     let mut extensions = std::mem::take(&mut options.extensions);
@@ -1018,7 +1023,7 @@ impl JsRuntime {
     setup::register_isolate(
       setup::isolate_ptr_to_key(isolate_ptr),
       waker.clone(),
-      tokio::runtime::Handle::try_current().ok(),
+      tokio_handle,
       state_rc.foreground_tasks.clone(),
     );
 

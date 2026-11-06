@@ -8,6 +8,9 @@ use deno_core::v8;
 
 use crate::profiling::is_profiling;
 
+/// Must be called inside a tokio runtime context: V8's delayed foreground
+/// tasks are scheduled on it, and without one the process aborts when V8
+/// posts the first (debug builds refuse at creation).
 pub fn create_js_runtime(setup: impl FnOnce() -> Vec<Extension>) -> JsRuntime {
   JsRuntime::new(RuntimeOptions {
     extensions: setup(),
@@ -51,6 +54,11 @@ pub fn bench_js_sync_with(
   setup: impl FnOnce() -> Vec<Extension>,
   opts: BenchOptions,
 ) {
+  let tokio_runtime = tokio::runtime::Builder::new_current_thread()
+    .enable_all()
+    .build()
+    .unwrap();
+  let _tokio_guard = tokio_runtime.enter();
   let mut runtime = create_js_runtime(setup);
   deno_core::scope!(scope, runtime);
 
@@ -89,11 +97,13 @@ pub fn bench_js_async_with(
   setup: impl FnOnce() -> Vec<Extension>,
   opts: BenchOptions,
 ) {
-  let mut runtime = create_js_runtime(setup);
   let tokio_runtime = tokio::runtime::Builder::new_current_thread()
     .enable_all()
     .build()
     .unwrap();
+  let tokio_guard = tokio_runtime.enter();
+  let mut runtime = create_js_runtime(setup);
+  drop(tokio_guard);
 
   // Looped code
   let inner_iters = if is_profiling() {

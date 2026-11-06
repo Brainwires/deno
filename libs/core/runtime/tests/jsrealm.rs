@@ -15,8 +15,8 @@ use crate::error::ExtensionLazyInitOrderMismatchError;
 use crate::modules::StaticModuleLoader;
 use crate::op2;
 
-#[test]
-fn test_set_format_exception_callback_realms() {
+#[tokio::test]
+async fn test_set_format_exception_callback_realms() {
   let mut runtime = JsRuntime::new(RuntimeOptions::default());
   let main_realm = runtime.main_realm();
 
@@ -131,8 +131,8 @@ async fn js_realm_ref_unref_ops() {
   .await;
 }
 
-#[test]
-fn es_snapshot() {
+#[tokio::test]
+async fn es_snapshot() {
   let _snapshot_lock = super::snapshot_test_lock();
   let startup_data = {
     deno_core::extension!(
@@ -182,8 +182,8 @@ fn es_snapshot() {
   }
 }
 
-#[test]
-fn lazy() {
+#[tokio::test]
+async fn lazy() {
   static CALLED: AtomicBool = AtomicBool::new(false);
 
   deno_core::extension!(

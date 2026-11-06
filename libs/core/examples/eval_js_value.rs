@@ -13,6 +13,14 @@ use deno_core::RuntimeOptions;
 use deno_core::v8;
 
 fn main() {
+  // A `JsRuntime` must be created inside a tokio runtime context: V8's
+  // delayed tasks are scheduled on it.
+  let tokio_runtime = tokio::runtime::Builder::new_current_thread()
+    .enable_all()
+    .build()
+    .unwrap();
+  let _tokio_guard = tokio_runtime.enter();
+
   let mut runtime = JsRuntime::new(RuntimeOptions::default());
 
   // Evaluate some code

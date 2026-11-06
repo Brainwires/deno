@@ -10765,22 +10765,97 @@ where the changes are discussed.
      gate's "still in progress" rule refused every tag of `195a392250`
      (3.0.0-denext.11). A run still `queued` with no jobs an hour after it was
      created never started: the gate now reports it and leaves it out. It holds
-     nothing and vouches for nothing; a queued run that has jobs still holds
-     the release. Unchanged: a failed attempt is never cleared, even one the
-     runner caused. "denext tests" run 42112912711 (`09efe6141b`) lost
+     nothing and vouches for nothing; a queued run that has jobs still holds the
+     release. Unchanged: a failed attempt is never cleared, even one the runner
+     caused. "denext tests" run 42112912711 (`09efe6141b`) lost
      `windows-2022 / test libs` to a runner whose `D:` drive disappeared during
      the build ("A device which does not exist was specified", os error 433)
      with no test run, so 3.0.0-denext.12 is tagged on the next commit.
+
+267. **`deno_core`: a `JsRuntime` created outside tokio fails at creation, and
+     the late abort says why** (`fix/jsruntime-tokio-guard`;
+     `libs/core/runtime/setup.rs`, `libs/core/runtime/jsruntime.rs`; tests
+     across `deno_core`, `ext/ffi`, `runtime`). Item 265 fixed two instances of
+     a whole class: a `JsRuntime` (or `JsRuntimeForSnapshot`) created outside a
+     tokio runtime context is registered with no tokio handle, and when V8 later
+     posts a delayed foreground task for it (the memory reducer, GC
+     finalization: when depends on the GC, so on load), `spawn_delayed_task`
+     aborts the process, with its message written by `eprintln!` into libtest's
+     output capture, which an abort never prints. Such a test passed or died
+     with a bare SIGABRT at random.
+
+     **Fail at creation.** `JsRuntime::new_inner` now reads the tokio handle
+     first and, in a build with `debug_assertions` (every `cargo test`, the
+     debug `deno` the spec tests run), panics before anything is allocated when
+     there is none: "A `JsRuntime` was created outside of a tokio runtime
+     context", with why and what to do (enter a runtime, or `#[tokio::test]`). A
+     rule that held only sometimes now holds every time. Release builds keep
+     today's behaviour (the late abort). The check holds whatever V8 platform is
+     installed: which one a process gets depends on which `JsRuntime` came
+     first, so no opt-out was added, and no product path needs one (below).
+
+     **The abort is never silent.** `spawn_delayed_task` writes its message with
+     `std::io::stderr().write_all` (libtest's capture only intercepts the print
+     macros) and flushes before `abort()`.
+
+     **Offenders found.** With the check, `cargo test --lib` over the "test
+     libs" crate list failed exactly the two known tests (`ext/ffi/dlfcn.rs`
+     `sync_struct_return_views`, `runtime/ops/desktop.rs`
+     `desktop_values_become_own_data_properties`); the other failures in that
+     run were the container's (no `test_server` / testdata), and none panicked
+     at creation. The "test core libs" steps (`deno_core`, `serde_v8`,
+     `deno_ops`) failed 127 tests, all in `deno_core`: `convert.rs` (17),
+     `webidl.rs` (17), `error.rs` (12), `runtime/ops.rs` (`return_buffers`),
+     `modules/tests.rs` (29),
+     `runtime/tests/{misc,ops,error,jsrealm,snapshot}.rs` (16, 10, 2 + the six
+     `callsite_cache_ignores_array_prototype` cases, 3, 14). Each is now a
+     `#[tokio::test]` (the two that call `create_snapshot`, which builds and
+     drops its own runtime, enter one instead);
+     `foreground_tasks_delivered_without_tokio_handle`, which tests the
+     no-handle path on purpose, creates its runtime inside tokio and then drops
+     the handle from the registry (a test-only hook), the state a release build
+     reaches. Outside the tests, three `deno_core` examples (`hello_world`,
+     `eval_js_value`, `disable_ops`) and `deno_bench_util`'s `bench_js_sync` /
+     `bench_js_async` created their runtime outside tokio: they enter one now.
+
+     **Product paths: all inside tokio.** The CLI's main worker and every
+     subcommand that makes one (`run`, `serve` incl. `--parallel` threads,
+     `test`, `bench`, `repl`, `jupyter`, `deploy`, `lint` plugins, `bundle`, the
+     control-socket `UnconfiguredRuntime`): `create_and_run_current_thread` or
+     an async fn on it; web / `worker_threads` workers: their thread runs
+     `create_and_run_current_thread`; `deno check` / `tsc::exec`: called from
+     async fns on the main runtime; the LSP's tsc thread: enters
+     `create_basic_runtime()` first; the LSP test runner: `spawn_blocking` +
+     `create_and_run_current_thread`; denort:
+     `create_and_run_current_thread_with_maybe_metrics`; Deno Desktop
+     (`run_desktop`, the headless worker): `create_basic_runtime().block_on`;
+     snapshots at build time (`create_snapshot`,
+     `deno_core_testing::create_snapshot`): enter a private current-thread
+     runtime. No product path creates a `JsRuntime` outside tokio, so there is
+     no product crash to fix.
+
+     Tests: `runtime::tests::tokio_context`
+     (`a_js_runtime_outside_tokio_fails_at_creation`, debug only;
+     `a_js_runtime_in_a_tokio_context_survives_a_delayed_task`;
+     `the_delayed_task_abort_is_never_silent`, which runs an ignored child test
+     that drops its handle and posts a delayed task, and checks the child
+     aborted with the message on its captured stderr: run against the
+     `eprintln!` version it fails, exit 134 and an empty stderr) and
+     `a_snapshotting_runtime_outside_tokio_fails_at_creation` (in
+     `runtime::tests::snapshot`, as it initializes V8 in snapshotting mode).
+     Before the change the converted tests aborted only when the GC posted a
+     task; with the check and no fix, every one of them fails, every run.
 
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
 169-174, 176, 178, 180, 182-184, 186, 187, 189-191, 193-196, 198-203, 206, 207,
 209-215, 217, 218, 221, 222, 224, 225, 227, 228, 231, 232, 235, 237, 240,
-243-245, 247-249, 253, 254, 256-260, 262-264) are what the prebuilt `libdenort`
-carries. The CLI-side parts (for example writing `LAUFEY_CUSTOM_SCHEMES` /
-`LAUFEY_APP_ID` into a packaged app's launchers) are in the branch too, but a
-stock CLI does not run them; denext's own launcher provides that environment.
+243-245, 247-249, 253, 254, 256-260, 262-264, 267) are what the prebuilt
+`libdenort` carries. The CLI-side parts (for example writing
+`LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
+in the branch too, but a stock CLI does not run them; denext's own launcher
+provides that environment.
 
 The laufey backend hosts are built from
 [Brainwires/laufey](https://github.com/Brainwires/laufey) branch

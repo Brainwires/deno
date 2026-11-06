@@ -1176,8 +1176,8 @@ mod tests {
   use super::*;
   use crate::JsRuntime;
 
-  #[test]
-  fn integers() {
+  #[tokio::test]
+  async fn integers() {
     let mut runtime = JsRuntime::new(Default::default());
     deno_core::scope!(scope, runtime);
 
@@ -1295,8 +1295,8 @@ mod tests {
     assert_eq!(converted.unwrap(), 0);
   }
 
-  #[test]
-  fn float() {
+  #[tokio::test]
+  async fn float() {
     let mut runtime = JsRuntime::new(Default::default());
     deno_core::scope!(scope, runtime);
 
@@ -1331,8 +1331,8 @@ mod tests {
     assert!(converted.is_err());
   }
 
-  #[test]
-  fn unrestricted_float() {
+  #[tokio::test]
+  async fn unrestricted_float() {
     let mut runtime = JsRuntime::new(Default::default());
     deno_core::scope!(scope, runtime);
 
@@ -1378,8 +1378,8 @@ mod tests {
     assert!(converted.unwrap().is_infinite());
   }
 
-  #[test]
-  fn double() {
+  #[tokio::test]
+  async fn double() {
     let mut runtime = JsRuntime::new(Default::default());
     deno_core::scope!(scope, runtime);
 
@@ -1414,8 +1414,8 @@ mod tests {
     assert_eq!(converted.unwrap(), f64::MAX);
   }
 
-  #[test]
-  fn unrestricted_double() {
+  #[tokio::test]
+  async fn unrestricted_double() {
     let mut runtime = JsRuntime::new(Default::default());
     deno_core::scope!(scope, runtime);
 
@@ -1461,8 +1461,8 @@ mod tests {
     assert_eq!(*converted.unwrap(), f64::MAX);
   }
 
-  #[test]
-  fn string() {
+  #[tokio::test]
+  async fn string() {
     let mut runtime = JsRuntime::new(Default::default());
     deno_core::scope!(scope, runtime);
 
@@ -1541,8 +1541,8 @@ mod tests {
     assert_eq!(converted.unwrap(), "生");
   }
 
-  #[test]
-  fn byte_string() {
+  #[tokio::test]
+  async fn byte_string() {
     let mut runtime = JsRuntime::new(Default::default());
     deno_core::scope!(scope, runtime);
 
@@ -1621,8 +1621,8 @@ mod tests {
     assert!(converted.is_err());
   }
 
-  #[test]
-  fn any() {
+  #[tokio::test]
+  async fn any() {
     let mut runtime = JsRuntime::new(Default::default());
     deno_core::scope!(scope, runtime);
 
@@ -1637,8 +1637,8 @@ mod tests {
     assert!(converted.unwrap().is_object());
   }
 
-  #[test]
-  fn sequence() {
+  #[tokio::test]
+  async fn sequence() {
     let mut runtime = JsRuntime::new(Default::default());
     deno_core::scope!(scope, runtime);
 
@@ -1655,8 +1655,8 @@ mod tests {
     assert_eq!(converted.unwrap(), vec![1, 2]);
   }
 
-  #[test]
-  fn sequence_next_method_must_be_callable() {
+  #[tokio::test]
+  async fn sequence_next_method_must_be_callable() {
     let mut runtime = JsRuntime::new(Default::default());
     let val = runtime
       .execute_script(
@@ -1688,8 +1688,8 @@ mod tests {
     );
   }
 
-  #[test]
-  fn sequence_propagates_next_getter_exception() {
+  #[tokio::test]
+  async fn sequence_propagates_next_getter_exception() {
     let mut runtime = JsRuntime::new(Default::default());
     let val = runtime
       .execute_script(
@@ -1723,8 +1723,8 @@ mod tests {
     assert!(err.to_string().contains("boom"));
   }
 
-  #[test]
-  fn sequence_check_next_method_once() {
+  #[tokio::test]
+  async fn sequence_check_next_method_once() {
     let mut runtime = JsRuntime::new(Default::default());
     let val = runtime
       .execute_script(
@@ -1779,8 +1779,8 @@ mod tests {
     assert_eq!(next_reads.uint32_value(scope).unwrap(), 1);
   }
 
-  #[test]
-  fn constrained_sequence_one_of() {
+  #[tokio::test]
+  async fn constrained_sequence_one_of() {
     let mut runtime = JsRuntime::new(Default::default());
     deno_core::scope!(scope, runtime);
 
@@ -1802,8 +1802,8 @@ mod tests {
     assert_eq!(&*converted.unwrap(), &[1, 2, 3, 4]);
   }
 
-  #[test]
-  fn nullable() {
+  #[tokio::test]
+  async fn nullable() {
     let mut runtime = JsRuntime::new(Default::default());
     deno_core::scope!(scope, runtime);
 
@@ -1828,8 +1828,8 @@ mod tests {
     assert_eq!(converted.unwrap(), Nullable::Value(1));
   }
 
-  #[test]
-  fn record() {
+  #[tokio::test]
+  async fn record() {
     let mut runtime = JsRuntime::new(Default::default());
     deno_core::scope!(scope, runtime);
 
@@ -1853,8 +1853,8 @@ mod tests {
     assert_eq!(converted.get_index(1).unwrap(), (&String::from("bar"), &2));
   }
 
-  #[test]
-  fn dictionary() {
+  #[tokio::test]
+  async fn dictionary() {
     #[derive(deno_ops::WebIDL, Debug, Eq, PartialEq)]
     #[webidl(dictionary)]
     pub struct Dict {
@@ -1901,8 +1901,8 @@ mod tests {
     );
   }
 
-  #[test]
-  fn r#enum() {
+  #[tokio::test]
+  async fn r#enum() {
     #[derive(deno_ops::WebIDL, Debug, Eq, PartialEq)]
     #[webidl(enum)]
     pub enum Enumeration {
