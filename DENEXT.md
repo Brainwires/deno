@@ -10882,18 +10882,26 @@ where the changes are discussed.
        `prebuilds/<platform>-<arch>/pty.node` in the stand-in makes the
        package's own entry run).
 
-269. **`fix(cli/rt)`: `DENO_UNSTABLE_IDLE_TRIM=0` turns a compiled program's
-     baked idle trim off** (`fix/idle-trim-env-override`; `cli/rt/run.rs`). A
-     program compiled with `--unstable-idle-trim` (item 104) always ran the
-     trim: the environment could only turn it on (`=1`), so a deployment that
-     wanted it off had to recompile, and denext's compiled server, which bakes
-     the flag, could only hold the trim off with a timer of its own. At start
-     the binary now reads `DENO_UNSTABLE_IDLE_TRIM`: `1` turns the trim on and
-     `0` turns it off, whatever was baked; any other value, or none, leaves the
-     baked choice (`idle_trim_enabled`). `deno run` / `deno serve` are
-     unchanged: there the flag and the variable are both opt-ins.
+269. **`fix(runtime)`: `DENO_UNSTABLE_IDLE_TRIM=0` turns a baked idle trim off,
+     at start or later** (`fix/idle-trim-env-override`; `cli/rt/run.rs`,
+     `runtime/idle_trim.rs`). A program compiled with `--unstable-idle-trim`
+     (item 104) always ran the trim: the environment could only turn it on
+     (`=1`), so a deployment that wanted it off had to recompile, and denext's
+     compiled server, which bakes the flag, could only hold the trim off with a
+     timer of its own. Now `DENO_UNSTABLE_IDLE_TRIM=0` turns it off:
+     - **At start** (a compiled program): `1` turns the trim on and `0` off,
+       whatever was baked; any other value, or none, leaves the baked choice
+       (`idle_trim_enabled`). With `0` the event loop is not wrapped at all.
+     - **Later** (any program running the trim, `deno run --unstable-idle-trim`
+       included): the variable is read again each time a trim is due (at most
+       once per idle period), and a `0` skips it, so a program turns a baked
+       trim off from its own code with
+       `Deno.env.set("DENO_UNSTABLE_IDLE_TRIM", "0")` (an env override, not a
+       new `Deno.*` API). Setting it back to anything else lets the next idle
+       period trim again.
      - Tests: `cli/rt/run.rs`'s `idle_trim_env_zero_turns_a_baked_flag_off`
-       (fails on the previous `baked || DENO_UNSTABLE_IDLE_TRIM == "1"`).
+       (fails on the previous `baked || DENO_UNSTABLE_IDLE_TRIM == "1"`),
+       `runtime/idle_trim.rs`'s `a_trim_turned_off_after_start_does_not_run`.
 
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,

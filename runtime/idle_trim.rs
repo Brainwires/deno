@@ -266,16 +266,37 @@ pub(crate) struct IdleTrim {
   /// The RSS the last trim left.
   rss_after_trim: Option<u64>,
   gc_gate: GcGate,
+  /// Whether the program has turned the trim off since it started
+  /// (`DENO_UNSTABLE_IDLE_TRIM=0`, read when a trim is due).
+  turned_off: fn() -> bool,
+}
+
+/// Whether `DENO_UNSTABLE_IDLE_TRIM` is `0` now. Read when a trim is due (at
+/// most once per idle period), not only at start, so a program can turn a
+/// trim that was baked in, or turned on at start, off from its own code
+/// (`Deno.env.set("DENO_UNSTABLE_IDLE_TRIM", "0")`; DENEXT.md item 269).
+fn turned_off_by_env() -> bool {
+  std::env::var_os(crate::UNSTABLE_ENV_VAR_NAMES.idle_trim)
+    .is_some_and(|value| value == "0")
 }
 
 impl IdleTrim {
   pub(crate) fn new(config: IdleTrimConfig) -> Self {
-    Self::with_rss_reader(config, rss_bytes)
+    Self::with_readers(config, rss_bytes, turned_off_by_env)
   }
 
+  #[cfg(test)]
   fn with_rss_reader(
     config: IdleTrimConfig,
     read_rss: fn() -> Option<u64>,
+  ) -> Self {
+    Self::with_readers(config, read_rss, || false)
+  }
+
+  fn with_readers(
+    config: IdleTrimConfig,
+    read_rss: fn() -> Option<u64>,
+    turned_off: fn() -> bool,
   ) -> Self {
     let now = Instant::now();
     Self {
@@ -291,6 +312,7 @@ impl IdleTrim {
       read_rss,
       rss_after_trim: None,
       gc_gate: GcGate::new(&config),
+      turned_off,
     }
   }
 
@@ -372,7 +394,7 @@ impl IdleTrim {
       // millisecond rounding never lets this spin).
       let now = Instant::now().max(deadline);
       if self.scheduler.take_due(now) {
-        if self.grown_since_last_trim() {
+        if !(self.turned_off)() && self.grown_since_last_trim() {
           self.scheduler.record_trim(now);
           // The GC's own follow-up wake-ups (V8's posted tasks, finalizers)
           // come on this thread and are not new activity (`ActivityWake`);
@@ -736,6 +758,24 @@ mod tests {
     assert_eq!(one_idle_period(&mut idle).await, 0);
     // Grown by the threshold (16 MB): trims again.
     FAKE_RSS.store(516 * MB, Ordering::SeqCst);
+    assert_eq!(one_idle_period(&mut idle).await, 1);
+  }
+
+  #[tokio::test]
+  async fn a_trim_turned_off_after_start_does_not_run() {
+    // `DENO_UNSTABLE_IDLE_TRIM=0` set by the program after start (DENEXT.md
+    // item 269), seen through the seam so no test touches the environment.
+    static OFF: AtomicBool = AtomicBool::new(false);
+    fn off() -> bool {
+      OFF.load(Ordering::SeqCst)
+    }
+    let mut idle = IdleTrim::with_readers(config(50, 0), no_rss, off);
+    assert_eq!(one_idle_period(&mut idle).await, 1);
+    OFF.store(true, Ordering::SeqCst);
+    assert_eq!(one_idle_period(&mut idle).await, 0);
+    assert_eq!(one_idle_period(&mut idle).await, 0);
+    // Back on: the next idle period trims again.
+    OFF.store(false, Ordering::SeqCst);
     assert_eq!(one_idle_period(&mut idle).await, 1);
   }
 
