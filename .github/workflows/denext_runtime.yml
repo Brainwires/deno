@@ -301,7 +301,10 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          sparse-checkout: .github/denext-runtime
+          # updater.js: lib/updater_test.ts evaluates it against fake ops
+          sparse-checkout: |
+            .github/denext-runtime
+            runtime/ops/desktop_update/updater.js
           sparse-checkout-cone-mode: false
       - uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
         with:

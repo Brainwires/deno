@@ -3188,6 +3188,10 @@ declare namespace Deno {
         options?: AppUpdateFetchOptions & {
           onProgress?: (p: { transferred: number; total: number }) => void;
           signal?: AbortSignal;
+          /** How long the download may go without receiving data (the
+           * response, then each chunk) before it fails with `io`.
+           * Default 60 000 ms. */
+          stallTimeoutMs?: number;
         },
       ): Promise<{ version: string; size: number }>;
       /** Extract safely and check the staged app's OS code signature.
