@@ -47,6 +47,9 @@ env:
 jobs:
   matrix:
     name: npm matrix
+    # Stays on GitHub's image: services.sh starts its registries with Docker (no Docker
+    # socket in the self-hosted Linux containers), and it pushes on denext/** branches
+    # the pools' vetting does not serve.
     runs-on: ubuntu-22.04
     timeout-minutes: 300
     defaults:

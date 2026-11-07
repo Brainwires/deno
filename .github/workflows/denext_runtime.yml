@@ -122,7 +122,8 @@ env:
 jobs:
   setup:
     name: setup
-    runs-on: ubuntu-24.04
+    # The self-hosted Linux runner RUNNER_LINUX_X64 names, else ubuntu-24.04 (always the image on a pull_request).
+    runs-on: ${{ fromJSON(startsWith(github.event_name, 'pull_request') && '"ubuntu-24.04"' || (startsWith(vars.RUNNER_LINUX_X64, '[') && vars.RUNNER_LINUX_X64 || format('"{0}"', vars.RUNNER_LINUX_X64 || 'ubuntu-24.04'))) }}
     outputs:
       matrix: ${{ steps.plan.outputs.matrix }}
       linux_matrix: ${{ steps.plan.outputs.linux_matrix }}
@@ -264,6 +265,10 @@ jobs:
           # Each macOS target's runner: the repository variable (a label, or a
           # JSON array), else the image. `os` stays the image name: it names
           # the caches and the artifacts whatever runs the job.
+          # The other legs stay on GitHub's images (pool gaps): Linux x64 sudo
+          # apt-get / fallocate + swapon and the ubuntu-22.04 glibc floor; Windows
+          # x64 a release build on the 1-slot 4 vCPU / 8 GB VM; the arm64 Linux
+          # and Windows legs have no pool.
           mac_runner = {"macos-15": os.environ.get("RUNNER_MACOS_ARM", ""),
                         "macos-15-intel": os.environ.get("RUNNER_MACOS_X64", "")}
           for t in all_targets:
@@ -297,7 +302,8 @@ jobs:
   # no runtime, display or build: which result belongs to which launch.
   e2e-harness:
     name: e2e harness
-    runs-on: ubuntu-24.04
+    # The self-hosted Linux runner RUNNER_LINUX_X64 names, else ubuntu-24.04 (always the image on a pull_request).
+    runs-on: ${{ fromJSON(startsWith(github.event_name, 'pull_request') && '"ubuntu-24.04"' || (startsWith(vars.RUNNER_LINUX_X64, '[') && vars.RUNNER_LINUX_X64 || format('"{0}"', vars.RUNNER_LINUX_X64 || 'ubuntu-24.04'))) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -2006,7 +2012,8 @@ jobs:
     # A `cli_only` dry run has no package or e2e_fork job: it still writes
     # (and uploads) the manifest, from the CLI archives alone.
     if: ${{ always() && needs.cli.result == 'success' && ((needs.package.result == 'success' && needs.e2e_fork.result == 'success') || (inputs.cli_only && needs.package.result == 'skipped' && needs.e2e_fork.result == 'skipped')) && (needs.rpm-smoke.result == 'success' || needs.rpm-smoke.result == 'skipped') }}
-    runs-on: ubuntu-24.04
+    # The self-hosted Linux runner RUNNER_LINUX_X64 names, else ubuntu-24.04 (always the image on a pull_request).
+    runs-on: ${{ fromJSON(startsWith(github.event_name, 'pull_request') && '"ubuntu-24.04"' || (startsWith(vars.RUNNER_LINUX_X64, '[') && vars.RUNNER_LINUX_X64 || format('"{0}"', vars.RUNNER_LINUX_X64 || 'ubuntu-24.04'))) }}
     permissions:
       contents: write
     steps:
