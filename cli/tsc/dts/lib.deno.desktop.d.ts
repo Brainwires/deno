@@ -1932,6 +1932,9 @@ declare namespace Deno {
       /** A dialog given a window is modal to it (a sheet on macOS); not on
        * CEF for Linux. */
       fileDialogModal: boolean;
+      /** {@linkcode Deno.desktop.dialog.showMessageBox} works, with no
+       * window open too (not on Winit). */
+      messageDialogs: boolean;
       /** `setBackgroundMaterial("blur")` works: the compositor blurs behind
        * the window (KWin's blur on KDE Plasma, Wayland and X11; the WebView
        * backend only). */
@@ -2048,6 +2051,43 @@ declare namespace Deno {
       properties?: Array<"showHiddenFiles">;
     }
 
+    /** Options of {@linkcode Deno.desktop.dialog.showMessageBox}
+     * (Electron's names). */
+    export interface MessageBoxOptions {
+      /** The main line (required). */
+      message: string;
+      /** Smaller text under it. */
+      detail?: string;
+      /** The window title where the OS shows one (not on macOS, whose alerts
+       * have no title bar). */
+      title?: string;
+      /** The icon: `"warning"`, `"error"`, or the information icon
+       * (`"info"`, also for `"none"` and `"question"`). */
+      type?: "none" | "info" | "question" | "warning" | "error";
+      /** The labels, at most 16; none is one "OK". Each OS places them its
+       * own way (macOS stacks the first rightmost). */
+      buttons?: string[];
+      /** The button Return presses (default: the first). */
+      defaultId?: number;
+      /** The button Escape presses, and the close button on Windows and
+       * Linux. Without one, Escape dismisses the box on Windows and Linux
+       * (`cancelled: true`) and does nothing on macOS. */
+      cancelId?: number;
+      /** The window to be modal to (or pass it first). */
+      // deno-lint-ignore no-explicit-any
+      window?: BrowserWindow<any> | number;
+    }
+
+    /** What {@linkcode Deno.desktop.dialog.showMessageBox} resolves with. */
+    export interface MessageBoxReturnValue {
+      /** The pressed button's index; for a box dismissed without a button,
+       * `cancelId` (or `-1` without one). */
+      response: number;
+      /** Dismissed without pressing a button: Escape or the close button
+       * with no `cancelId`, or the app quitting. */
+      cancelled: boolean;
+    }
+
     /**
      * The OS's own file dialogs: `NSOpenPanel` / `NSSavePanel` on macOS,
      * `IFileOpenDialog` / `IFileSaveDialog` on Windows,
@@ -2086,6 +2126,23 @@ declare namespace Deno {
         window: BrowserWindow<any>,
         options?: SaveDialogOptions,
       ): Promise<string | null>;
+      /** The OS's own message box with your button labels (laufey API 54):
+       * `NSAlert` on macOS, `TaskDialogIndirect` on Windows,
+       * `GtkMessageDialog` on Linux. Given a window it is modal to it (a
+       * sheet on macOS; app-modal on CEF for Linux); without one it is
+       * app-modal and works with no window open (a tray app, a quit guard),
+       * bringing the app to the front. Several may be open at once; the
+       * runtime never blocks on them. Rejects with a `TypeError` /
+       * `RangeError` for wrong options and with an `Error` when it can't be
+       * shown ({@linkcode windowCapabilities}`().messageDialogs`). */
+      showMessageBox(
+        options: MessageBoxOptions,
+      ): Promise<MessageBoxReturnValue>;
+      showMessageBox(
+        // deno-lint-ignore no-explicit-any
+        window: BrowserWindow<any>,
+        options: MessageBoxOptions,
+      ): Promise<MessageBoxReturnValue>;
     };
 
     /** What {@linkcode Deno.desktop.clipboard} supports on this backend /

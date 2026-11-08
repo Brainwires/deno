@@ -32,6 +32,7 @@ op_desktop_start_drag -> "failed"
 op_desktop_file_dialog_open -> "rid 1, cancel false, wait {\"status\":\"failed\",\"paths\":[]}"
 op_desktop_file_dialog_wait -> {"status":"failed","paths":[]}
 op_desktop_file_dialog_cancel -> false
+op_desktop_message_box -> {"status":"failed","response":-1}
 op_desktop_system_capabilities -> {"globalShortcuts":false,"shortcutsUserBinds":false,"launchAtLogin":false,"devtools":false}
 op_desktop_platform_features -> null
 op_desktop_title_bar_preferences -> null
@@ -64,7 +65,7 @@ op_desktop_send_error_report -> null
 op_desktop_request_notification_permission -> "unsupported"
 op_desktop_query_notification_permission -> "unsupported"
 op_desktop_screens -> []
-op_desktop_window_capabilities -> {"state":false,"stateEvents":false,"sizeConstraints":false,"screens":false,"displayEvents":false,"titleBarHidden":false,"titleBarHiddenInset":false,"windowButtonPosition":false,"mica":false,"acrylic":false,"tabbed":false,"vibrancy":false,"normalBounds":false,"keepAlive":false,"setPosition":false,"fileDrop":false,"fileDropEnterPaths":false,"fileDragOut":false,"fileDialogs":false,"fileDialogFilesAndDirectories":false,"fileDialogModal":false,"blur":false,"clickThrough":false,"clickThroughForward":false,"hitRegion":false,"visibleOnAllWorkspaces":false,"visibleOnFullScreen":false,"skipTaskbar":false,"alwaysOnTopLevels":false,"transparent":false,"layerShell":false,"layerShellEdgeAnchor":false,"activationPolicy":false,"nonActivating":false,"textToSpeech":false}
+op_desktop_window_capabilities -> {"state":false,"stateEvents":false,"sizeConstraints":false,"screens":false,"displayEvents":false,"titleBarHidden":false,"titleBarHiddenInset":false,"windowButtonPosition":false,"mica":false,"acrylic":false,"tabbed":false,"vibrancy":false,"normalBounds":false,"keepAlive":false,"setPosition":false,"fileDrop":false,"fileDropEnterPaths":false,"fileDragOut":false,"fileDialogs":false,"fileDialogFilesAndDirectories":false,"fileDialogModal":false,"messageDialogs":false,"blur":false,"clickThrough":false,"clickThroughForward":false,"hitRegion":false,"visibleOnAllWorkspaces":false,"visibleOnFullScreen":false,"skipTaskbar":false,"alwaysOnTopLevels":false,"transparent":false,"layerShell":false,"layerShellEdgeAnchor":false,"activationPolicy":false,"nonActivating":false,"textToSpeech":false}
 op_desktop_tray_capabilities -> {"click":false,"doubleClick":false,"rightClick":false,"middleClick":false,"hover":false,"modifiers":false,"position":false,"popUpMenu":false}
 op_desktop_window_level_code -> 2
 op_desktop_speak -> {"outcome":"unsupported","message":null}
@@ -88,4 +89,4 @@ BrowserWindow throws NotSupported: BrowserWindow is only available in the main s
 Dock throws NotSupported: Dock is only available in the main scope of a desktop app
 Tray throws NotSupported: Tray is only available in the main scope of a desktop app
 Notification throws NotSupported: Notification is only available in the main scope of a desktop app
-90 exposed, 0 uncovered
+91 exposed, 0 uncovered

@@ -251,6 +251,7 @@ await r.step("window API", async () => {
     "fileDialogs",
     "fileDialogFilesAndDirectories",
     "fileDialogModal",
+    "messageDialogs",
   ];
   r.check(
     "windowCapabilities() reports every key as a boolean",
