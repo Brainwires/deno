@@ -69,11 +69,13 @@ denort = { path = "../rt", default-features = false }
 # requests and layer-surface edge anchoring; runtime 3.0.0-denext.9, API 53:
 # microphone and camera requests and the `mediaCapture` launch key; runtime
 # 3.0.0-denext.11: screen capture refused on WebView2 and WebRTC on WebKitGTK
-# for media-capture apps, all on `development-denext`), pinned to a commit of
-# the Brainwires/laufey fork.
+# for media-capture apps, all on `development-denext`; runtime
+# 3.0.0-denext.14, API 54: native message dialogs, branch
+# `feat/message-dialog` until it lands), pinned to a commit of the
+# Brainwires/laufey fork.
 # The host built from the same commit must be used with it (the API version
 # check is exact).
-laufey = { git = "https://github.com/Brainwires/laufey", rev = "ff5080225268e446b7ce75631a13d76568c1f8f5" }
+laufey = { git = "https://github.com/Brainwires/laufey", rev = "d018a93be2487977c599986f6b82b2fb377dc402" }
 libsui.workspace = true
 
 bytes.workspace = true

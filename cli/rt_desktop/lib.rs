@@ -57,7 +57,7 @@ use denort::run::RunOptions;
 /// makes the failure mode obvious instead of "the desktop app silently won't
 /// launch".
 const _: () = assert!(
-  laufey::LAUFEY_API_VERSION == 53,
+  laufey::LAUFEY_API_VERSION == 54,
   "LAUFEY_API_VERSION mismatch: update this assert and the prebuilt backend release pin in cli/tools/desktop.rs when laufey bumps its API version",
 );
 
@@ -1198,6 +1198,7 @@ impl denort::desktop::DesktopApi for WefDesktopApi {
       file_dialogs: c.file_dialogs(),
       file_dialog_files_and_directories: c.file_dialog_files_and_directories(),
       file_dialog_modal: c.file_dialog_modal(),
+      message_dialogs: c.message_dialogs(),
       blur: c.blur(),
       // Overlay windows (laufey API 50).
       click_through: o.click_passthrough(),
@@ -1473,6 +1474,41 @@ impl denort::desktop::DesktopApi for WefDesktopApi {
 
   fn cancel_file_dialog(&self, dialog_id: u32) -> bool {
     laufey::cancel_file_dialog(dialog_id)
+  }
+
+  fn show_message_box(
+    &self,
+    request: deno_runtime::ops::desktop::MessageBoxRequest,
+  ) -> deno_runtime::ops::desktop::DesktopFuture<
+    deno_runtime::ops::desktop::MessageBoxOutcome,
+  > {
+    use deno_runtime::ops::desktop::MessageBoxOutcome;
+    let options = laufey::MessageDialogOptions {
+      kind: match request.kind.as_str() {
+        "warning" => laufey::MessageDialogKind::Warning,
+        "error" => laufey::MessageDialogKind::Error,
+        _ => laufey::MessageDialogKind::Info,
+      },
+      title: request.title,
+      message: request.message,
+      detail: request.detail,
+      buttons: request.buttons,
+      default_index: request.default_id,
+      cancel_index: request.cancel_id,
+    };
+    // Requested now (laufey hops to the UI thread); resolved when the user
+    // answers.
+    let outcome =
+      laufey::show_message_dialog(request.window_id, &options).outcome;
+    Box::pin(async move {
+      match outcome.await {
+        laufey::MessageDialogOutcome::Answered(i) => {
+          MessageBoxOutcome::Answered(i)
+        }
+        laufey::MessageDialogOutcome::Cancelled => MessageBoxOutcome::Cancelled,
+        laufey::MessageDialogOutcome::Failed => MessageBoxOutcome::Failed,
+      }
+    })
   }
 
   fn clipboard_capabilities(

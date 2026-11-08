@@ -53,6 +53,7 @@ pub const DESKTOP_JS: &str = r#"
     op_desktop_file_dialog_open,
     op_desktop_file_dialog_wait,
     op_desktop_file_dialog_cancel,
+    op_desktop_message_box,
     op_desktop_system_capabilities,
     op_desktop_platform_features,
     op_desktop_title_bar_preferences,
@@ -1621,6 +1622,91 @@ pub const DESKTOP_JS: &str = r#"
     "showHiddenFiles",
   ];
   const SAVE_DIALOG_PROPERTIES = ["showHiddenFiles"];
+  // Native message boxes (laufey API 54): Electron's showMessageBox options
+  // and its `type` names ("none" and "question" show the info icon). Escape
+  // presses the `cancelId` button; a box dismissed without one resolves
+  // { response: cancelId ?? -1, cancelled: true }. With no window it is
+  // app-modal, which works with no window open.
+  const MESSAGE_BOX_TYPES = {
+    none: "info",
+    info: "info",
+    question: "info",
+    warning: "warning",
+    error: "error",
+  };
+  function messageBoxRequest(windowOrOptions, maybeOptions) {
+    let target = undefined;
+    let options = windowOrOptions;
+    if (
+      windowOrOptions != null &&
+      Object.prototype.isPrototypeOf.call(BrowserWindowPrototype, windowOrOptions)
+    ) {
+      target = windowOrOptions;
+      options = maybeOptions;
+    }
+    if (options === null || typeof options !== "object") {
+      throw new TypeError("showMessageBox options must be an object");
+    }
+    // The window (argument or options.window) and title, checked as the file
+    // dialogs check them.
+    const common = { window: options.window, title: options.title };
+    const a = target !== undefined
+      ? dialogArgs(target, common)
+      : dialogArgs(common);
+    if (typeof options.message !== "string" || options.message === "") {
+      throw new TypeError("options.message must be a non-empty string");
+    }
+    let detail = null;
+    if (options.detail !== undefined && options.detail !== null) {
+      if (typeof options.detail !== "string") {
+        throw new TypeError("options.detail must be a string");
+      }
+      detail = options.detail;
+    }
+    let kind = "info";
+    if (options.type !== undefined && options.type !== null) {
+      kind = MESSAGE_BOX_TYPES[options.type];
+      if (typeof options.type !== "string" || kind === undefined) {
+        throw new TypeError(
+          `options.type must be one of ${Object.keys(MESSAGE_BOX_TYPES).join(", ")}`,
+        );
+      }
+    }
+    let buttons = [];
+    if (options.buttons !== undefined && options.buttons !== null) {
+      if (
+        !Array.isArray(options.buttons) ||
+        !options.buttons.every((b) => typeof b === "string")
+      ) {
+        throw new TypeError("options.buttons must be an array of strings");
+      }
+      if (options.buttons.length > 16) {
+        throw new TypeError("options.buttons holds at most 16 labels");
+      }
+      buttons = [...options.buttons];
+    }
+    const count = Math.max(buttons.length, 1);
+    const index = (key) => {
+      const v = options[key];
+      if (v === undefined || v === null) return null;
+      if (!Number.isInteger(v) || v < 0 || v >= count) {
+        throw new RangeError(
+          `options.${key} must be the index of a button (0 to ${count - 1})`,
+        );
+      }
+      return v;
+    };
+    return {
+      windowId: a.windowId,
+      kind,
+      title: a.title,
+      message: options.message,
+      detail,
+      buttons,
+      defaultId: index("defaultId"),
+      cancelId: index("cancelId"),
+    };
+  }
   const dialog = Object.freeze({
     showOpenDialog: async function showOpenDialog(
       windowOrOptions = undefined,
@@ -1660,6 +1746,21 @@ pub const DESKTOP_JS: &str = r#"
         showHidden: props.has("showHiddenFiles"),
       }, a.signal);
       return paths === null ? null : paths[0];
+    },
+    showMessageBox: async function showMessageBox(
+      windowOrOptions = undefined,
+      maybeOptions = undefined,
+    ) {
+      const request = messageBoxRequest(windowOrOptions, maybeOptions);
+      const result = await op_desktop_message_box(request);
+      switch (result.status) {
+        case "answered":
+          return { response: result.response, cancelled: false };
+        case "cancelled":
+          return { response: request.cancelId ?? -1, cancelled: true };
+        default:
+          throw new Error("The message box could not be shown");
+      }
     },
   });
   Object.defineProperty(desktop, "dialog", {
@@ -4092,6 +4193,17 @@ mod tests {
     assert!(DESKTOP_JS.contains("return paths === null ? null : paths[0];"));
     // Electron's properties, nothing else.
     assert!(DESKTOP_JS.contains("Unknown dialog property"));
+    // The message box (laufey API 54): Electron's options in, one op, and a
+    // dismissal answers the cancel button's index (or -1).
+    assert!(
+      DESKTOP_JS.contains("showMessageBox: async function showMessageBox(")
+    );
+    assert!(DESKTOP_JS.contains("await op_desktop_message_box(request)"));
+    assert!(DESKTOP_JS.contains(
+      "return { response: request.cancelId ?? -1, cancelled: true };"
+    ));
+    assert!(DESKTOP_JS.contains("options.message must be a non-empty string"));
+    assert!(DESKTOP_JS.contains("question: \"info\","));
   }
 
   #[test]

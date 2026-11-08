@@ -131,6 +131,9 @@ const cases = {
   },
   op_desktop_file_dialog_wait: () => ops.op_desktop_file_dialog_wait(999),
   op_desktop_file_dialog_cancel: () => ops.op_desktop_file_dialog_cancel(999),
+  // Outside a desktop app: answered "failed" at once, no dialog.
+  op_desktop_message_box: () =>
+    ops.op_desktop_message_box({ message: "m", buttons: ["OK"] }),
   op_desktop_system_capabilities: () => ops.op_desktop_system_capabilities(),
   op_desktop_platform_features: () => ops.op_desktop_platform_features(),
   op_desktop_title_bar_preferences: () =>

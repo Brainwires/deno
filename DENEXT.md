@@ -10882,12 +10882,34 @@ where the changes are discussed.
        `prebuilds/<platform>-<arch>/pty.node` in the stand-in makes the
        package's own entry run).
 
+269. **`feat(desktop)`: native message boxes** (`feat/desktop-message-dialog`,
+     laufey API 54 from `feat/message-dialog` `d018a93`; runtime
+     3.0.0-denext.14; `runtime/ops/desktop.rs`, `cli/rt_desktop/lib.rs`,
+     `cli/rt/desktop.rs`, `runtime/js/99_main.js`,
+     `cli/tsc/dts/lib.deno.desktop.d.ts`, `cli/rt_desktop/Cargo.toml`,
+     `Cargo.lock`, `.github/workflows/denext_runtime.yml`).
+     `Deno.desktop.dialog.showMessageBox([window,] options)` shows the OS's own
+     message box with the app's button labels (NSAlert, TaskDialogIndirect,
+     GtkMessageDialog), Electron's options (`message`, `detail`, `title`,
+     `type`, `buttons`, `defaultId`, `cancelId`, `window`) and resolves
+     `{ response, cancelled }`: the pressed button's index, or for a box
+     dismissed without a button `cancelId` (else -1) with `cancelled: true`.
+     Without a window it is app-modal and needs no window open, so a quit guard
+     or a tray app can ask with every window closed. It never blocks the runtime
+     (one async op, `op_desktop_message_box`, main scope only, inert outside a
+     desktop app), and several may be open at once. `windowCapabilities()` gains
+     `messageDialogs`. Wrong options are a `TypeError` / `RangeError`; a backend
+     without message boxes (Winit) or no display rejects with an `Error`. Tests:
+     the request's wire format and checks and the result's
+     (`runtime/ops/desktop.rs`), the installed JS (`cli/rt/desktop.rs`), the
+     inert-ops spec and the window e2e app's capability keys.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
 169-174, 176, 178, 180, 182-184, 186, 187, 189-191, 193-196, 198-203, 206, 207,
 209-215, 217, 218, 221, 222, 224, 225, 227, 228, 231, 232, 235, 237, 240,
-243-245, 247-249, 253, 254, 256-260, 262-264, 267, 268) are what the prebuilt
+243-245, 247-249, 253, 254, 256-260, 262-264, 267-269) are what the prebuilt
 `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
 in the branch too, but a stock CLI does not run them; denext's own launcher
@@ -10926,9 +10948,10 @@ anchoring, items 221 and 222; and, for runtime 3.0.0-denext.10, a Linux window
 first shown at its size and the CEF shutdown, storage and print fixes, item 234,
 and API 53, microphone and camera requests and the `mediaCapture` launch key,
 item 239; and, for runtime 3.0.0-denext.11, screen capture refused on WebView2
-and WebRTC on WebKitGTK for media-capture apps, item 252), at the commit pinned
+and WebRTC on WebKitGTK for media-capture apps, item 252; and, for runtime
+3.0.0-denext.14, API 54, native message dialogs, item 269), at the commit pinned
 by `LAUFEY_SHA` in the workflow (or the `laufey_ref` input). The same commit is
-the `laufey` git dependency of `cli/rt_desktop/Cargo.toml` (crate 0.8.0, API 53,
+the `laufey` git dependency of `cli/rt_desktop/Cargo.toml` (crate 0.8.0, API 54,
 CEF 156.0.15).
 
 laufey's `init_api` rejects any C ABI version mismatch between the runtime and

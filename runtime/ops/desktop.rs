@@ -1614,6 +1614,9 @@ pub struct WindowCapabilitiesInfo {
   pub file_dialog_files_and_directories: bool,
   /// A dialog given a window is modal to it.
   pub file_dialog_modal: bool,
+  /// `Deno.desktop.dialog.showMessageBox` works, with no window open too
+  /// (laufey API 54).
+  pub message_dialogs: bool,
   /// `setBackgroundMaterial("blur")` works: the compositor blurs behind the
   /// window (KWin's blur on KDE Plasma; laufey `BACKDROP_BLUR`).
   pub blur: bool,
@@ -1961,6 +1964,70 @@ impl From<FileDialogOutcome> for FileDialogResultInfo {
     }
   }
 }
+
+/// A message box request from `Deno.desktop.dialog.showMessageBox`
+/// (validated by the JS side; the backend checks it again).
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct MessageBoxRequest {
+  /// The window the dialog is modal to; 0 for an app-modal dialog.
+  pub window_id: u32,
+  /// `"info"`, `"warning"` or `"error"`: the icon.
+  pub kind: String,
+  pub title: Option<String>,
+  pub message: String,
+  pub detail: Option<String>,
+  /// The labels; none is one "OK".
+  pub buttons: Vec<String>,
+  /// The button Return presses (`None`: the first).
+  pub default_id: Option<u32>,
+  /// The button Escape presses (`None`: none).
+  pub cancel_id: Option<u32>,
+}
+
+/// How a message box ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MessageBoxOutcome {
+  /// The button at this index was pressed (Escape pressing the cancel
+  /// button included).
+  Answered(u32),
+  /// Dismissed without a button.
+  Cancelled,
+  /// It could not be shown (no message boxes on this backend, no display).
+  Failed,
+}
+
+/// What `op_desktop_message_box` resolves with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct MessageBoxResultInfo {
+  /// `"answered"`, `"cancelled"` or `"failed"`.
+  pub status: &'static str,
+  /// The pressed button's index; -1 unless answered.
+  pub response: i64,
+}
+
+impl From<MessageBoxOutcome> for MessageBoxResultInfo {
+  fn from(o: MessageBoxOutcome) -> Self {
+    match o {
+      MessageBoxOutcome::Answered(i) => MessageBoxResultInfo {
+        status: "answered",
+        response: i as i64,
+      },
+      MessageBoxOutcome::Cancelled => MessageBoxResultInfo {
+        status: "cancelled",
+        response: -1,
+      },
+      MessageBoxOutcome::Failed => MessageBoxResultInfo {
+        status: "failed",
+        response: -1,
+      },
+    }
+  }
+}
+
+/// The most buttons one message box has (laufey's
+/// `LAUFEY_MESSAGE_DIALOG_MAX_BUTTONS`).
+pub const MAX_MESSAGE_BOX_BUTTONS: usize = 16;
 
 /// The open file dialogs of this runtime, by the id the JS side holds: the
 /// backend's dialog id (for cancel) and the outcome, until awaited.
@@ -2676,6 +2743,14 @@ pub trait DesktopApi: Send + Sync + 'static {
   /// Close an open dialog as cancelled. False when it isn't open.
   fn cancel_file_dialog(&self, _dialog_id: u32) -> bool {
     false
+  }
+  /// Show a message box (laufey API 54); the runtime thread never blocks on
+  /// it. The default is a runtime without them.
+  fn show_message_box(
+    &self,
+    _request: MessageBoxRequest,
+  ) -> DesktopFuture<MessageBoxOutcome> {
+    Box::pin(async { MessageBoxOutcome::Failed })
   }
   fn clipboard_capabilities(&self) -> ClipboardCapabilitiesInfo {
     ClipboardCapabilitiesInfo {
@@ -5355,6 +5430,53 @@ fn op_desktop_file_dialog_open(
   )
 }
 
+fn check_message_box_request(
+  request: &MessageBoxRequest,
+) -> Result<(), deno_error::JsErrorBox> {
+  if request.message.is_empty() {
+    return Err(deno_error::JsErrorBox::type_error(
+      "the message box needs a message",
+    ));
+  }
+  if !matches!(request.kind.as_str(), "" | "info" | "warning" | "error") {
+    return Err(deno_error::JsErrorBox::type_error(format!(
+      "unknown message box kind: {}",
+      request.kind
+    )));
+  }
+  if request.buttons.len() > MAX_MESSAGE_BOX_BUTTONS {
+    return Err(deno_error::JsErrorBox::type_error(format!(
+      "a message box has at most {MAX_MESSAGE_BOX_BUTTONS} buttons"
+    )));
+  }
+  reject_nul("the message box message", &request.message)?;
+  reject_nul_opt("the message box title", request.title.as_deref())?;
+  reject_nul_opt("the message box detail", request.detail.as_deref())?;
+  for label in &request.buttons {
+    reject_nul("a message box button", label)?;
+  }
+  Ok(())
+}
+
+/// `Deno.desktop.dialog.showMessageBox`: shows the OS's message box (laufey
+/// API 54) and resolves with the pressed button. Never blocks the runtime.
+#[op2]
+#[serde]
+async fn op_desktop_message_box(
+  state: std::rc::Rc<std::cell::RefCell<OpState>>,
+  #[serde] request: MessageBoxRequest,
+) -> Result<MessageBoxResultInfo, deno_error::JsErrorBox> {
+  check_message_box_request(&request)?;
+  let outcome = state
+    .borrow()
+    .try_borrow::<Arc<dyn DesktopApi>>()
+    .map(|api| api.show_message_box(request));
+  Ok(match outcome {
+    Some(f) => f.await.into(),
+    None => MessageBoxOutcome::Failed.into(),
+  })
+}
+
 /// The outcome of a dialog `op_desktop_file_dialog_open` showed.
 #[op2]
 #[serde]
@@ -6480,6 +6602,7 @@ deno_core::extension!(
     op_desktop_file_dialog_open,
     op_desktop_file_dialog_wait,
     op_desktop_file_dialog_cancel,
+    op_desktop_message_box,
     op_desktop_system_capabilities,
     op_desktop_platform_features,
     op_desktop_title_bar_preferences,
@@ -8646,6 +8769,7 @@ mod tests {
     assert_eq!(caps["fileDialogs"], json!(false));
     assert_eq!(caps["fileDialogFilesAndDirectories"], json!(true));
     assert_eq!(caps["fileDialogModal"], json!(false));
+    assert_eq!(caps["messageDialogs"], json!(false));
     assert_eq!(caps["blur"], json!(false));
     let clip = serde_json::to_value(super::ClipboardCapabilitiesInfo {
       text: true,
@@ -8712,6 +8836,74 @@ mod tests {
     assert_eq!(super::DragOutcome::Dropped.as_str(), "dropped");
     assert_eq!(super::DragOutcome::Cancelled.as_str(), "cancelled");
     assert_eq!(super::DragOutcome::Failed.as_str(), "failed");
+  }
+
+  #[test]
+  fn message_box_request_from_js() {
+    let r: super::MessageBoxRequest = serde_json::from_value(json!({
+      "windowId": 3,
+      "kind": "warning",
+      "title": null,
+      "message": "Quit?",
+      "detail": "Unsaved changes",
+      "buttons": ["Quit", "Cancel"],
+      "defaultId": 0,
+      "cancelId": 1,
+    }))
+    .unwrap();
+    assert_eq!(r.window_id, 3);
+    assert_eq!(r.kind, "warning");
+    assert_eq!(r.buttons, vec!["Quit", "Cancel"]);
+    assert_eq!((r.default_id, r.cancel_id), (Some(0), Some(1)));
+    assert!(super::check_message_box_request(&r).is_ok());
+    // Missing members default: an app-modal box with no buttons.
+    let d: super::MessageBoxRequest =
+      serde_json::from_value(json!({ "message": "Done" })).unwrap();
+    assert_eq!(d.window_id, 0);
+    assert!(d.buttons.is_empty() && d.cancel_id.is_none());
+    assert!(super::check_message_box_request(&d).is_ok());
+  }
+
+  #[test]
+  fn message_box_requests_are_checked() {
+    let ok = super::MessageBoxRequest {
+      message: "m".into(),
+      ..Default::default()
+    };
+    let bad = |f: &dyn Fn(&mut super::MessageBoxRequest)| {
+      let mut r = ok.clone();
+      f(&mut r);
+      super::check_message_box_request(&r).is_err()
+    };
+    assert!(bad(&|r| r.message.clear()));
+    assert!(bad(&|r| r.kind = "question".into()));
+    assert!(bad(&|r| r.message = "a\0b".into()));
+    assert!(bad(&|r| r.detail = Some("a\0b".into())));
+    assert!(bad(&|r| r.buttons = vec!["a\0".into()]));
+    assert!(bad(&|r| {
+      r.buttons = vec!["b".into(); super::MAX_MESSAGE_BOX_BUTTONS + 1]
+    }));
+    assert!(!bad(&|r| {
+      r.buttons = vec!["b".into(); super::MAX_MESSAGE_BOX_BUTTONS]
+    }));
+  }
+
+  #[test]
+  fn message_box_results() {
+    use super::MessageBoxOutcome;
+    use super::MessageBoxResultInfo;
+    let answered: MessageBoxResultInfo = MessageBoxOutcome::Answered(2).into();
+    assert_eq!(
+      serde_json::to_value(answered).unwrap(),
+      json!({ "status": "answered", "response": 2 })
+    );
+    let cancelled: MessageBoxResultInfo = MessageBoxOutcome::Cancelled.into();
+    assert_eq!(
+      serde_json::to_value(cancelled).unwrap(),
+      json!({ "status": "cancelled", "response": -1 })
+    );
+    let failed: MessageBoxResultInfo = MessageBoxOutcome::Failed.into();
+    assert_eq!((failed.status, failed.response), ("failed", -1));
   }
 
   #[test]

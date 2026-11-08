@@ -32,6 +32,7 @@ op_desktop_start_drag -> "failed"
 op_desktop_file_dialog_open -> "rid 1, cancel false, wait {\"status\":\"failed\",\"paths\":[]}"
 op_desktop_file_dialog_wait -> {"status":"failed","paths":[]}
 op_desktop_file_dialog_cancel -> false
+op_desktop_message_box -> {"status":"failed","response":-1}
 op_desktop_system_capabilities -> {"globalShortcuts":false,"shortcutsUserBinds":false,"launchAtLogin":false,"devtools":false}
 op_desktop_platform_features -> null
 op_desktop_title_bar_preferences -> null
@@ -83,4 +84,4 @@ BrowserWindow throws NotSupported: BrowserWindow is only available in the main s
 Dock throws NotSupported: Dock is only available in the main scope of a desktop app
 Tray throws NotSupported: Tray is only available in the main scope of a desktop app
 Notification throws NotSupported: Notification is only available in the main scope of a desktop app
-85 exposed, 0 uncovered
+86 exposed, 0 uncovered
