@@ -10980,8 +10980,11 @@ where the changes are discussed.
        devices, PDH engine sums, clamping and rounding, the serialized shape,
        and a smoke test of the OS calls on the host that tolerates a `null`
        GPU), `secure_store_gate_takes_the_baked_capability_or_allow_sys`'s
-       sibling `system_stats_gate_takes_the_baked_capability_or_allow_sys`, and
-       `denort` `desktop_js_installs_system_stats`.
+       sibling `system_stats_gate_takes_the_baked_capability_or_allow_sys`,
+       `denort` `desktop_js_installs_system_stats`, and the
+       `run/desktop_ops_inert` spec (the five ops inert and refused without
+       `--allow-sys`; with `--allow-sys` alone, no `--allow-read`, a sample has
+       its CPU and memory figures).
 
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
