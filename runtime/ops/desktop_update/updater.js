@@ -30,6 +30,9 @@
   const MAX_MANIFEST_BYTES = 1024 * 1024;
   const MAX_REDIRECTS = 5;
   const DEFAULT_CHECK_TIMEOUT_MS = 30_000;
+  // How long the archive download may go without a byte (waiting for the
+  // response, then between chunks) before it is abandoned.
+  const DEFAULT_DOWNLOAD_STALL_TIMEOUT_MS = 60_000;
 
   class AppUpdateError extends Error {
     constructor(code, message) {
@@ -204,10 +207,22 @@
     const signal = options.signal;
     const onAbort = () => controller.abort();
     signal?.addEventListener("abort", onAbort);
+    const stallMs = options.stallTimeoutMs ?? DEFAULT_DOWNLOAD_STALL_TIMEOUT_MS;
+    let stalled = false;
+    let stallTimer;
+    const armStallTimer = () => {
+      clearTimeout(stallTimer);
+      stallTimer = setTimeout(() => {
+        stalled = true;
+        controller.abort();
+      }, stallMs);
+    };
     const client = clientFor(options);
     let reader;
     try {
+      armStallTimer();
       const resp = await get(begin.url, options, controller.signal, client);
+      armStallTimer();
       const length = Number(resp.headers.get("content-length"));
       if (Number.isFinite(length) && length > begin.size) {
         await resp.body?.cancel();
@@ -222,11 +237,13 @@
       for (;;) {
         const { done, value } = await reader.read();
         if (done) break;
+        armStallTimer();
         // Throws size_exceeded (and drops the download) past the declared
         // size: the stream is cancelled below, nothing more is read.
         transferred = call(op_desktop_app_update_write, value);
         emitProgress(transferred, begin.size, options.onProgress);
       }
+      clearTimeout(stallTimer);
       try {
         await op_desktop_app_update_finish();
       } catch (e) {
@@ -234,18 +251,26 @@
       }
       return { version: begin.version, size: begin.size };
     } catch (e) {
+      clearTimeout(stallTimer);
       try {
         await reader?.cancel();
       } catch {
         // already closed
       }
       op_desktop_app_update_abort();
+      if (stalled) {
+        throw new AppUpdateError(
+          "io",
+          `the download stalled: no data for ${stallMs} ms`,
+        );
+      }
       if (e instanceof AppUpdateError) throw e;
       throw new AppUpdateError(
         "io",
         `the download failed: ${e?.message ?? e}`,
       );
     } finally {
+      clearTimeout(stallTimer);
       signal?.removeEventListener("abort", onAbort);
       client?.close();
     }

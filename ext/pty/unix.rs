@@ -108,7 +108,11 @@ pub fn spawn(
     Err(err) => return Err(spawn_error(&run, err).into()),
   };
   drop(slave);
-  let pid = child.id().expect("a freshly spawned child has a pid");
+  // `None` only once the child has been reaped, which nothing has done yet;
+  // an error rather than a panic all the same
+  let pid = child
+    .id()
+    .ok_or_else(|| io::Error::other("the spawned child has no process id"))?;
   run.verify_after_spawn(|| {
     let _ = child.start_kill();
   })?;

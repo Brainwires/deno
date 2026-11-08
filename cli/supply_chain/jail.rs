@@ -1707,14 +1707,10 @@ async fn run_in_dirs(
   let mut stdout = child.stdout.take().unwrap();
   let mut stderr = child.stderr.take().unwrap();
   let read_out = tokio::spawn(async move {
-    let mut buf = Vec::new();
-    let _ = stdout.read_to_end(&mut buf).await;
-    buf
+    read_capped(&mut stdout, MAX_SCRIPT_OUTPUT_BYTES).await
   });
   let read_err = tokio::spawn(async move {
-    let mut buf = Vec::new();
-    let _ = stderr.read_to_end(&mut buf).await;
-    buf
+    read_capped(&mut stderr, MAX_SCRIPT_OUTPUT_BYTES).await
   });
   let status = tokio::select! {
     status = child.wait() => status?,
@@ -1749,6 +1745,43 @@ async fn run_in_dirs(
     stdout: Some(stdout),
     stderr: Some(stderr),
   })
+}
+
+/// The most of a jailed script's stdout, and of its stderr, kept for the
+/// installer's report: a script that writes without end can't grow the
+/// installer's memory with it.
+const MAX_SCRIPT_OUTPUT_BYTES: usize = 16 * 1024 * 1024;
+
+/// Reads `reader` to EOF, keeping its first `limit` bytes. The rest is
+/// read and dropped, so the writer never blocks on a full pipe, and a
+/// line saying how much was kept ends the output when some was dropped.
+async fn read_capped<R: tokio::io::AsyncRead + Unpin>(
+  reader: &mut R,
+  limit: usize,
+) -> Vec<u8> {
+  let mut kept = Vec::new();
+  let mut chunk = vec![0u8; 64 * 1024];
+  let mut truncated = false;
+  loop {
+    let n = match reader.read(&mut chunk).await {
+      Ok(0) | Err(_) => break,
+      Ok(n) => n,
+    };
+    let room = limit.saturating_sub(kept.len());
+    if n > room {
+      truncated = true;
+    }
+    kept.extend_from_slice(&chunk[..n.min(room)]);
+  }
+  if truncated {
+    if kept.last().is_some_and(|b| *b != b'\n') {
+      kept.push(b'\n');
+    }
+    kept.extend_from_slice(
+      format!("[output truncated after {limit} bytes]\n").as_bytes(),
+    );
+  }
+  kept
 }
 
 /// Puts the command's process in a session and process group of its own
@@ -2354,6 +2387,35 @@ mod tests {
   // DENEXT.md item 124 (H2, M6): the script's process is a session leader
   // and its whole group is ended, a detached grandchild included
   #[cfg(unix)]
+  #[tokio::test]
+  async fn read_capped_keeps_the_head_and_drains_the_rest() {
+    // under the cap: everything, no marker
+    let mut small: &[u8] = b"hello\n";
+    assert_eq!(read_capped(&mut small, 16).await, b"hello\n");
+    // exactly the cap: nothing dropped, no marker
+    let mut exact: &[u8] = b"0123456789";
+    assert_eq!(read_capped(&mut exact, 10).await, b"0123456789");
+    // over the cap, across many reads: the head, then the marker, and the
+    // reader is drained to EOF
+    let data = vec![b'x'; 300 * 1024];
+    let mut big: &[u8] = &data;
+    let out = read_capped(&mut big, 100 * 1024).await;
+    let mut expected = vec![b'x'; 100 * 1024];
+    expected.extend_from_slice(b"\n[output truncated after 102400 bytes]\n");
+    assert_eq!(out, expected);
+    assert!(big.is_empty());
+    // a writer blocked on a full pipe is unblocked by the drain
+    let (mut writer, mut reader) = tokio::io::duplex(1024);
+    let write = tokio::spawn(async move {
+      for _ in 0..64 {
+        writer.write_all(&[b'y'; 1024]).await.unwrap();
+      }
+    });
+    let out = read_capped(&mut reader, 10).await;
+    write.await.unwrap();
+    assert!(out.starts_with(b"yyyyyyyyyy\n[output truncated after 10 bytes]"));
+  }
+
   #[tokio::test]
   async fn detached_session_and_group_ended() {
     let dir = tempfile::tempdir().unwrap();
