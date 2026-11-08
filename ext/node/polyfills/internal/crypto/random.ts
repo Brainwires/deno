@@ -19,7 +19,6 @@ const {
   MathClz32,
   NumberParseInt,
   ObjectPrototypeIsPrototypeOf,
-  PromisePrototypeCatch,
   PromisePrototypeThen,
   SafeArrayIterator,
   StringFromCharCode,
@@ -123,13 +122,13 @@ function checkPrime(
     );
   }
 
-  PromisePrototypeCatch(
-    PromisePrototypeThen(
-      op_node_check_prime_bytes_async(candidateBytes, checks),
-      (result) => {
-        callback?.(null, result);
-      },
-    ),
+  // Two-argument `then`: a throw from `callback` surfaces as uncaught (as in
+  // Node) instead of calling it a second time with that error.
+  PromisePrototypeThen(
+    op_node_check_prime_bytes_async(candidateBytes, checks),
+    (result) => {
+      callback?.(null, result);
+    },
     (err) => {
       callback?.(err, false);
     },

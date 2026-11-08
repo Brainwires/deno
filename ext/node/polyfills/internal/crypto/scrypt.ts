@@ -29,7 +29,6 @@ const { core, primordials } = __bootstrap;
 const {
   BigInt,
   MathLog2,
-  PromisePrototypeCatch,
   PromisePrototypeThen,
   TypedArrayPrototypeGetBuffer,
 } = primordials;
@@ -100,21 +99,22 @@ function scrypt(
     return;
   }
 
-  PromisePrototypeCatch(
-    PromisePrototypeThen(
-      op_node_scrypt_async(
-        password,
-        salt,
-        keylen,
-        MathLog2(N),
-        r,
-        p,
-        maxmem,
-      ),
-      (buf: Uint8Array) => {
-        cb(null, Buffer.from(TypedArrayPrototypeGetBuffer(buf)));
-      },
+  // Two-argument `then`: a throw from `cb` must not reach the rejection
+  // handler (which would call `cb` again); it is left to surface as uncaught,
+  // as in Node.
+  PromisePrototypeThen(
+    op_node_scrypt_async(
+      password,
+      salt,
+      keylen,
+      MathLog2(N),
+      r,
+      p,
+      maxmem,
     ),
+    (buf: Uint8Array) => {
+      cb(null, Buffer.from(TypedArrayPrototypeGetBuffer(buf)));
+    },
     (err: unknown) => cb(err),
   );
 }

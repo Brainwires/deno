@@ -2,6 +2,7 @@
 import { hkdf, hkdfSync } from "node:crypto";
 import { assert, assertEquals } from "@std/assert";
 import { Buffer } from "node:buffer";
+import { assertCallbackThrowUncaughtOnce } from "../_test_utils.ts";
 import nodeFixtures from "../testdata/crypto_digest_fixtures.json" with {
   type: "json",
 };
@@ -490,4 +491,10 @@ Deno.test("crypto.hkdf (async) - error cases (invalid digest, oversized info)", 
       "async hkdf should reject when info > 1024 bytes",
     );
   })();
+});
+
+Deno.test("hkdf calls a throwing callback once; the throw is uncaught", async () => {
+  await assertCallbackThrowUncaughtOnce((cb) =>
+    hkdf("sha256", "key", "salt", "info", 32, cb)
+  );
 });

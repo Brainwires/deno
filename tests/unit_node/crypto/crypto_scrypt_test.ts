@@ -2,6 +2,7 @@
 import { scrypt, scryptSync } from "node:crypto";
 import { Buffer } from "node:buffer";
 import { assertEquals, assertThrows } from "@std/assert";
+import { assertCallbackThrowUncaughtOnce } from "../_test_utils.ts";
 
 Deno.test("scrypt works correctly", async () => {
   const { promise, resolve } = Promise.withResolvers<boolean>();
@@ -245,4 +246,10 @@ Deno.test("scrypt accepts large safe maxmem values", async () => {
   });
 
   await promise;
+});
+
+Deno.test("scrypt calls a throwing callback once; the throw is uncaught", async () => {
+  await assertCallbackThrowUncaughtOnce((cb) =>
+    scrypt("password", "salt", 32, cb)
+  );
 });
