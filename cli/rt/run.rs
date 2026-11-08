@@ -97,6 +97,7 @@ use node_resolver::analyze::NodeCodeTranslator;
 use node_resolver::cache::NodeResolutionSys;
 use node_resolver::errors::PackageJsonLoadError;
 use sys_traits::EnvCurrentDir;
+use sys_traits::EnvVar;
 
 use crate::binary::DenoCompileModuleSource;
 use crate::binary::StandaloneData;
@@ -1791,17 +1792,19 @@ pub async fn run_with_options(
     .iter()
     .any(|f| f == "legacy-abort")
     || deno_lib::args::legacy_abort_from_env(&sys));
-  // denext (DENEXT.md item 104): `--unstable-idle-trim` at compile time, or
-  // `DENO_UNSTABLE_IDLE_TRIM=1` when the binary runs.
-  let idle_trim = metadata
-    .unstable_config
-    .features
-    .iter()
-    .any(|f| f == "idle-trim")
-    || deno_lib::args::has_flag_env_var(
-      &sys,
-      deno_runtime::UNSTABLE_ENV_VAR_NAMES.idle_trim,
-    );
+  // denext (DENEXT.md items 104, 269): `--unstable-idle-trim` at compile
+  // time, or `DENO_UNSTABLE_IDLE_TRIM=1` when the binary runs;
+  // `DENO_UNSTABLE_IDLE_TRIM=0` turns a baked one off.
+  let idle_trim = idle_trim_enabled(
+    metadata
+      .unstable_config
+      .features
+      .iter()
+      .any(|f| f == "idle-trim"),
+    sys
+      .env_var_os(deno_runtime::UNSTABLE_ENV_VAR_NAMES.idle_trim)
+      .as_deref(),
+  );
   let feature_checker = Arc::new({
     let mut checker = FeatureChecker::default();
     checker.set_exit_cb(Box::new(crate::unstable_exit_cb));
@@ -2741,6 +2744,19 @@ pub(crate) fn expand_desktop_path_tokens(
   }
 }
 
+/// denext (DENEXT.md item 269): whether a compiled program runs the idle trim
+/// (item 104). `baked`: compiled with `--unstable-idle-trim` (or
+/// `"unstable": ["idle-trim"]`); `env`: `DENO_UNSTABLE_IDLE_TRIM` at start.
+/// `1` turns it on and `0` off, whatever was baked; any other value (or none)
+/// leaves the baked choice.
+fn idle_trim_enabled(baked: bool, env: Option<&std::ffi::OsStr>) -> bool {
+  match env {
+    Some(value) if value == "0" => false,
+    Some(value) if value == "1" => true,
+    _ => baked,
+  }
+}
+
 #[cfg(test)]
 mod tests {
   use deno_runtime::deno_permissions::PermissionsOptions;
@@ -2755,9 +2771,36 @@ mod tests {
   use super::desktop_startup_error;
   use super::expand_desktop_path_tokens;
   use super::grant_vfs_read_access;
+  use super::idle_trim_enabled;
 
   fn strs(v: &[&str]) -> Vec<String> {
     v.iter().map(|s| (*s).to_string()).collect()
+  }
+
+  // --- the idle trim switch (DENEXT.md item 269) ---
+
+  #[test]
+  fn idle_trim_env_zero_turns_a_baked_flag_off() {
+    use std::ffi::OsStr;
+    // baked in: on, unless the environment says `0`
+    assert!(idle_trim_enabled(true, None));
+    assert!(!idle_trim_enabled(true, Some(OsStr::new("0"))));
+    assert!(idle_trim_enabled(true, Some(OsStr::new("1"))));
+    // not baked in: only `1` turns it on
+    assert!(!idle_trim_enabled(false, None));
+    assert!(idle_trim_enabled(false, Some(OsStr::new("1"))));
+    assert!(!idle_trim_enabled(false, Some(OsStr::new("0"))));
+    // anything else leaves the baked choice
+    for other in ["", "true", "false", "yes", " 0", "00"] {
+      assert!(
+        idle_trim_enabled(true, Some(OsStr::new(other))),
+        "{other:?}"
+      );
+      assert!(
+        !idle_trim_enabled(false, Some(OsStr::new(other))),
+        "{other:?}"
+      );
+    }
   }
 
   /// Item 190's expansion: the cache folder only.
