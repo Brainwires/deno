@@ -755,7 +755,10 @@ mod os {
     }
   }
 
-  pub fn cpu_between(prev: &Cpu, next: &Cpu) -> (Option<f64>, Vec<f64>) {
+  pub fn cpu_between(
+    prev: &[[u32; 4]],
+    next: &[[u32; 4]],
+  ) -> (Option<f64>, Vec<f64>) {
     super::mach_cpu_between(prev, next)
   }
 
@@ -1128,48 +1131,52 @@ mod os {
       if unsafe { PdhCollectQueryData(self.query) } != 0 {
         return GpuStats::default();
       }
-      let mut items: Vec<PDH_FMT_COUNTERVALUE_ITEM_W> = Vec::new();
-      for _ in 0..4 {
-        let mut bytes = 0u32;
-        let mut count = 0u32;
-        // SAFETY: a size query (null buffer of zero bytes).
-        let status = unsafe {
-          PdhGetFormattedCounterArrayW(
-            counter,
-            PDH_FMT_DOUBLE,
-            &mut bytes,
-            &mut count,
-            std::ptr::null_mut(),
-          )
-        };
-        if status != PDH_MORE_DATA || bytes == 0 {
-          return GpuStats::default();
+      // The instances can change between the size query and the read: try
+      // a few times.
+      let items: Vec<PDH_FMT_COUNTERVALUE_ITEM_W> = 'read: {
+        for _ in 0..4 {
+          let mut bytes = 0u32;
+          let mut count = 0u32;
+          // SAFETY: a size query (null buffer of zero bytes).
+          let status = unsafe {
+            PdhGetFormattedCounterArrayW(
+              counter,
+              PDH_FMT_DOUBLE,
+              &mut bytes,
+              &mut count,
+              std::ptr::null_mut(),
+            )
+          };
+          if status != PDH_MORE_DATA || bytes == 0 {
+            return GpuStats::default();
+          }
+          let item = std::mem::size_of::<PDH_FMT_COUNTERVALUE_ITEM_W>();
+          let cap = (bytes as usize).div_ceil(item);
+          let mut items = Vec::with_capacity(cap);
+          let mut bytes = (cap * item) as u32;
+          // SAFETY: a buffer of `bytes` bytes, aligned for the items; PDH
+          // writes `count` items followed by the strings they point to.
+          let status = unsafe {
+            PdhGetFormattedCounterArrayW(
+              counter,
+              PDH_FMT_DOUBLE,
+              &mut bytes,
+              &mut count,
+              items.as_mut_ptr(),
+            )
+          };
+          if status == PDH_MORE_DATA {
+            continue;
+          }
+          if status != 0 {
+            return GpuStats::default();
+          }
+          // SAFETY: PDH wrote `count` items.
+          unsafe { items.set_len((count as usize).min(cap)) };
+          break 'read items;
         }
-        let item = std::mem::size_of::<PDH_FMT_COUNTERVALUE_ITEM_W>();
-        let cap = (bytes as usize).div_ceil(item);
-        items = Vec::with_capacity(cap);
-        let mut bytes = (cap * item) as u32;
-        // SAFETY: a buffer of `bytes` bytes, aligned for the items; PDH
-        // writes `count` items followed by the strings they point to.
-        let status = unsafe {
-          PdhGetFormattedCounterArrayW(
-            counter,
-            PDH_FMT_DOUBLE,
-            &mut bytes,
-            &mut count,
-            items.as_mut_ptr(),
-          )
-        };
-        if status == PDH_MORE_DATA {
-          continue;
-        }
-        if status != 0 {
-          return GpuStats::default();
-        }
-        // SAFETY: PDH wrote `count` items.
-        unsafe { items.set_len((count as usize).min(cap)) };
-        break;
-      }
+        Vec::new()
+      };
       let named: Vec<(String, f64)> = items
         .iter()
         .filter(|i| i.FmtValue.CStatus == 0 && !i.szName.is_null())
