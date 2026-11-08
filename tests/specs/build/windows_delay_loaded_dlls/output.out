@@ -12,6 +12,7 @@ kernel32.dll: eager
 ntdll.dll: eager
 oleaut32.dll: delay
 opengl32.dll: delay
+pdh.dll: delay
 psapi.dll: delay
 rstrtmgr.dll: delay
 setupapi.dll: delay

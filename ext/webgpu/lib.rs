@@ -70,6 +70,9 @@ pub fn print_linker_flags(name: &str) {
       // Authenticode verification (only needed when a desktop app stages a
       // full-app update; runtime/ops/desktop_update/oscheck.rs)
       "wintrust",
+      // performance counters (only needed by Deno.desktop.systemStats's GPU
+      // figures; runtime/ops/system_stats.rs)
+      "pdh",
     ];
     for dll in dlls {
       println!("cargo:rustc-link-arg-bin={name}=/delayload:{dll}.dll");
