@@ -233,6 +233,28 @@ fn _090_run_permissions_request_sync() {
 }
 
 #[test(flaky)]
+fn permission_prompt_resets_terminal_state() {
+  TestContext::default()
+    .new_command()
+    .args_vec(["run", "--quiet", "run/permission_prompt_terminal_reset.ts"])
+    .with_pty(|mut console| {
+      console.expect("Allow? [y/n/A]");
+      if !cfg!(windows) {
+        // ConPTY re-encodes the output on Windows, so the raw bytes are
+        // only checked on Unix: the reset goes out right before the prompt.
+        console.expect_raw_in_current_output(concat!(
+          "\x18\x1b\\\x1b7\x1b[?1049l\x0f\x1b(B\x1b[0m\x1b[?25h",
+          "\u{250f} \u{26a0}\u{fe0f}  ",
+        ));
+      }
+      console.human_delay();
+      console.write_line_raw("y");
+      console.expect("Granted env access to \"FOO\".");
+      console.expect("granted");
+    });
+}
+
+#[test(flaky)]
 fn permissions_prompt_allow_all() {
   TestContext::default()
     .new_command()

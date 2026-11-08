@@ -11377,12 +11377,36 @@ where the changes are discussed.
        doesn't look the window up and follows the window's case); laufey's
        wrapper and fake-backend tests.
 
+283. **`fix(permissions)`: a permission prompt resets the terminal before it is
+     drawn** (`fix/prompt-terminal-reset`; `runtime/permissions/prompter.rs`).
+     The prompt already flushed pending input and escaped control characters in
+     the names it shows, but the program asking could still hide it by leaving
+     the terminal in a state the prompt is drawn into: foreground equal to
+     background or concealed text (SGR), a hidden cursor, the alternate screen,
+     a half-written escape sequence or an OSC / DCS string never terminated (cf.
+     denoland/deno#9666). The prompt now starts with a reset written in the same
+     write as its text: CAN (aborts a sequence in progress), ST (ends an open
+     string), DECSC then leave the alternate screen (`ESC[?1049l`; the save
+     makes the cursor restore that comes with leaving a no-op when the main
+     screen already shows), SI and `ESC(B` (ASCII glyphs), SGR reset (`ESC[0m`)
+     and show the cursor (`ESC[?25h`). Nothing is restored afterwards. On
+     Windows the reset is written only when the console has virtual terminal
+     processing on (Deno turns it on at startup); without it escape sequences
+     print as text, and could not have hidden anything either.
+     - Tests: `prompt_terminal_reset_clears_hiding_state`
+       (`runtime/permissions/prompter.rs`: the bytes and their order),
+       `permission_prompt_resets_terminal_state`
+       (`tests/integration/run_tests.rs`: a program that leaves black on black,
+       concealed text, a hidden cursor, the alternate screen and an open OSC
+       string, then asks; on Unix the raw PTY output carries the reset right
+       before the prompt's first line).
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
 169-174, 176, 178, 180, 182-184, 186, 187, 189-191, 193-196, 198-203, 206, 207,
 209-215, 217, 218, 221, 222, 224, 225, 227, 228, 231, 232, 235, 237, 240,
-243-245, 247-249, 253, 254, 256-260, 262-264, 267-281) are what the prebuilt
+243-245, 247-249, 253, 254, 256-260, 262-264, 267-283) are what the prebuilt
 `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
 in the branch too, but a stock CLI does not run them; denext's own launcher
