@@ -11213,11 +11213,12 @@ where the changes are discussed.
        released: the macOS GPU walk wrapped a missing (null) `model` or
        `PerformanceStatistics` property before checking it, and dropping that
        wrapper called `CFRelease(NULL)`, which CoreFoundation answers with a
-       trap. A paravirtual GPU in a macOS VM and the Radeon of an Intel Mac lack
-       `model`, so `Deno.desktop.systemStats` aborted the process there (SIGTRAP
-       on Apple silicon, SIGILL on Intel). Test:
-       `a_missing_registry_property_is_none_not_a_trap` (the registry root has
-       no such property; before: the test process died with SIGTRAP).
+       trap. So `Deno.desktop.systemStats` aborted any app on a Mac whose GPU
+       has no IORegistry `model` property (macOS VMs' paravirtual GPU, some
+       discrete GPUs, such as an Intel Mac's Radeon): SIGTRAP on Apple silicon,
+       SIGILL on Intel. Test: `a_missing_registry_property_is_none_not_a_trap`
+       (the registry root has no such property; before: the test process died
+       with SIGTRAP).
 
 277. **`feat(desktop)`: native message boxes** (`feat/desktop-message-dialog`,
      laufey API 54 from `feat/message-dialog` `63056a4`; runtime
