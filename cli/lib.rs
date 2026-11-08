@@ -763,6 +763,11 @@ fn exit_for_error(error: AnyError, initial_cwd: Option<&std::path::Path>) -> ! {
   // A resource limit that terminated the program surfaces as "execution
   // terminated"; report the limit instead.
   deno_lib::resource_limits::exit_if_exceeded();
+  if deno_runtime::fmt_errors::node_error_format()
+    && let Some(e) = js_error_downcast_ref(&error)
+  {
+    exit_for_node_error(e);
+  }
   let mut error_string = match js_error_downcast_ref(&error) {
     Some(e) => {
       let initial_cwd = initial_cwd
@@ -791,6 +796,28 @@ fn exit_for_error(error: AnyError, initial_cwd: Option<&std::path::Path>) -> ! {
   }
 
   exit_with_message(&error_string, 1);
+}
+
+/// denext: an uncaught error in Node mode, printed as Node prints it, and
+/// Node's exit code for it.
+fn exit_for_node_error(error: &deno_core::error::JsError) -> ! {
+  #[allow(
+    clippy::disallowed_methods,
+    reason = "reads the source line and package.json of the failing module"
+  )]
+  fn read_file(path: &std::path::Path) -> Option<String> {
+    std::fs::read_to_string(path).ok()
+  }
+  let text = deno_runtime::fmt_errors::format_js_error_node(
+    error,
+    deno_runtime::deno_node::NODE_VERSION,
+    &read_file,
+  );
+  #[allow(clippy::print_stderr, reason = "Node's uncaught error report")]
+  {
+    eprint!("{text}");
+  }
+  deno_runtime::exit(1);
 }
 
 /// Substring present in every "package rejected because it is newer than the
@@ -1097,6 +1124,16 @@ async fn resolve_flags_and_init(
   flags.unstable_config.fill_with_env(&sys);
   if std::env::var("DENO_COMPAT").is_ok() {
     flags.unstable_config.enable_node_compat();
+  }
+  // denext: Node mode reports an uncaught error as Node does.
+  if flags
+    .unstable_config
+    .features
+    .iter()
+    .any(|f| f == "node-errors")
+  {
+    deno_runtime::fmt_errors::NODE_ERROR_FORMAT
+      .store(true, std::sync::atomic::Ordering::Relaxed);
   }
   if flags.node_conditions.is_empty()
     && let Ok(conditions) = std::env::var("DENO_CONDITIONS")

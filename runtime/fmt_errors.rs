@@ -736,6 +736,208 @@ pub fn format_js_error(
   )
 }
 
+/// denext: set when the program runs in Node mode (`--unstable-node-errors`,
+/// which the `node` shim and the node-args translation pass), so the CLI
+/// reports an uncaught error with [`format_js_error_node`] instead of
+/// [`format_js_error`].
+pub static NODE_ERROR_FORMAT: AtomicBool = AtomicBool::new(false);
+
+/// Whether uncaught errors are reported in Node's format (see
+/// [`NODE_ERROR_FORMAT`]).
+pub fn node_error_format() -> bool {
+  NODE_ERROR_FORMAT.load(Ordering::Relaxed)
+}
+
+const NODE_UNHANDLED_REJECTION_MESSAGE: &str = "This error originated either by throwing inside of an async function without a catch block, or by rejecting a promise which was not handled with .catch(). The promise rejected with the reason";
+
+/// denext: a [`JsError`] that ended the program, in the text Node.js prints to
+/// stderr for an uncaught exception or an unhandled rejection: the location,
+/// the source line and a caret, the error's `stack`, and the `Node.js v<ver>`
+/// footer; a rejection with a value that is not an `Error` is Node's
+/// `UnhandledPromiseRejection` report. No colour, as Node's when stderr is not
+/// a terminal.
+///
+/// `read_file` reads a source file when the error carries no source line (a
+/// syntax error from `vm`, a CommonJS module): the caller does the file system
+/// access.
+pub fn format_js_error_node(
+  js_error: &JsError,
+  node_version: &str,
+  read_file: &dyn Fn(&std::path::Path) -> Option<String>,
+) -> String {
+  let footer = format!("\n\nNode.js v{node_version}\n");
+  let in_promise = js_error
+    .exception_message
+    .starts_with("Uncaught (in promise) ");
+  let is_error = js_error.name.is_some() || js_error.stack.is_some();
+  if !is_error {
+    // A thrown or rejected value that is not an `Error`.
+    let value = js_error
+      .exception_message
+      .trim_start_matches("Uncaught (in promise) ")
+      .trim_start_matches("Uncaught ");
+    if in_promise {
+      return format!(
+        "UnhandledPromiseRejection: {NODE_UNHANDLED_REJECTION_MESSAGE} \"{value}\". {{\n  code: 'ERR_UNHANDLED_REJECTION'\n}}{footer}"
+      );
+    }
+    return format!(
+      "\n{value}\n(Use `node --trace-uncaught ...` to show where the exception was thrown){footer}"
+    );
+  }
+
+  let body = match &js_error.stack {
+    Some(stack) => stack.clone(),
+    None => match (&js_error.name, &js_error.message) {
+      (Some(name), Some(message)) if !message.is_empty() => {
+        format!("{name}: {message}")
+      }
+      (Some(name), _) => name.clone(),
+      (None, _) => js_error.exception_message.clone(),
+    },
+  };
+  let body = node_stack_paths(&body, read_file);
+
+  let header = node_error_source(js_error, in_promise, read_file)
+    .map(|header| format!("{header}\n\n"))
+    .unwrap_or_default();
+  format!("{header}{body}{footer}")
+}
+
+/// `<location>:<line>\n<source line>\n<caret>` for the frame the error points
+/// at, as Node prints it above the stack.
+fn node_error_source(
+  js_error: &JsError,
+  in_promise: bool,
+  read_file: &dyn Fn(&std::path::Path) -> Option<String>,
+) -> Option<String> {
+  let index = js_error.source_line_frame_index.unwrap_or(0);
+  let frame = js_error.frames.get(index)?;
+  let file_name = frame.file_name.as_deref()?;
+  let line_number = frame.line_number?;
+  let column = usize::try_from(frame.column_number.unwrap_or(1) - 1).ok()?;
+  let file_path = node_file_path(file_name);
+  let source_line = match &js_error.source_line {
+    Some(line) => line.clone(),
+    None => {
+      let path = file_path.as_ref()?;
+      let text = read_file(path)?;
+      let line_index = usize::try_from(line_number - 1).ok()?;
+      text.lines().nth(line_index)?.to_string()
+    }
+  };
+  let location = match &file_path {
+    Some(path) if !is_esm_path(path, read_file) => path.display().to_string(),
+    _ => file_name.to_string(),
+  };
+
+  // The column is in UTF-16 code units.
+  let mut units = 0;
+  let mut prefix_end = source_line.len();
+  for (byte_index, ch) in source_line.char_indices() {
+    if units >= column {
+      prefix_end = byte_index;
+      break;
+    }
+    units += ch.len_utf16();
+  }
+  let mut prefix = &source_line[..prefix_end];
+  // A synchronous throw: Node points at the `throw` statement, while the
+  // error's own position is where it was constructed (`throw new Error()`).
+  // A rejection points at the construction, as here.
+  if !in_promise && js_error.name.as_deref() != Some("SyntaxError") {
+    let trimmed = prefix.trim_end();
+    if let Some(before) = trimmed.strip_suffix("throw")
+      && !before
+        .chars()
+        .next_back()
+        .is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '$')
+    {
+      prefix = before;
+    }
+  }
+  let caret: String = prefix
+    .chars()
+    .map(|c| if c == '\t' { '\t' } else { ' ' })
+    .collect();
+  Some(format!("{location}:{line_number}\n{source_line}\n{caret}^"))
+}
+
+/// The path of a `file:` URL or an absolute path, which Node names a
+/// CommonJS module by.
+fn node_file_path(file_name: &str) -> Option<std::path::PathBuf> {
+  if file_name.starts_with("file:") {
+    Url::parse(file_name).ok()?.to_file_path().ok()
+  } else {
+    let path = std::path::Path::new(file_name);
+    path.is_absolute().then(|| path.to_path_buf())
+  }
+}
+
+/// Whether Node loads the file as an ES module (and so names it by its
+/// `file:` URL): `.mjs` / `.mts`, or a `.js` / `.ts` file whose nearest
+/// `package.json` has `"type": "module"`.
+fn is_esm_path(
+  path: &std::path::Path,
+  read_file: &dyn Fn(&std::path::Path) -> Option<String>,
+) -> bool {
+  match path.extension().and_then(|e| e.to_str()) {
+    Some("mjs" | "mts") => return true,
+    Some("cjs" | "cts") => return false,
+    _ => {}
+  }
+  let mut dir = path.parent();
+  while let Some(current) = dir {
+    if let Some(text) = read_file(&current.join("package.json")) {
+      return serde_json::from_str::<serde_json::Value>(&text)
+        .ok()
+        .and_then(|pkg| pkg.get("type")?.as_str().map(|t| t == "module"))
+        .unwrap_or(false);
+    }
+    dir = current.parent();
+  }
+  false
+}
+
+/// The stack with each CommonJS module's `file:` URL as its path, as in a
+/// Node stack trace.
+fn node_stack_paths(
+  stack: &str,
+  read_file: &dyn Fn(&std::path::Path) -> Option<String>,
+) -> String {
+  let mut out = String::with_capacity(stack.len());
+  for (i, line) in stack.split('\n').enumerate() {
+    if i > 0 {
+      out.push('\n');
+    }
+    let Some(start) = line
+      .find("file://")
+      .filter(|_| line.trim_start().starts_with("at "))
+    else {
+      out.push_str(line);
+      continue;
+    };
+    // `file:///a/b.js:1:2` up to `)` or the end of the line
+    let rest = &line[start..];
+    let end = rest.find(')').unwrap_or(rest.len());
+    let location = &rest[..end];
+    let url = location
+      .rsplitn(3, ':')
+      .nth(2)
+      .filter(|url| url.len() > "file://".len())
+      .unwrap_or(location);
+    match node_file_path(url) {
+      Some(path) if !is_esm_path(&path, read_file) => {
+        out.push_str(&line[..start]);
+        out.push_str(&path.display().to_string());
+        out.push_str(&rest[url.len()..]);
+      }
+      _ => out.push_str(line),
+    }
+  }
+  out
+}
+
 #[cfg(test)]
 mod tests {
   use test_util::strip_ansi_codes;
@@ -786,6 +988,117 @@ mod tests {
     assert_eq!(
       strip_ansi_codes(&actual),
       "\nWarning Couldn't format source line: Column 2 is out of bounds (source may have changed at runtime)"
+    );
+  }
+
+  fn node_error(
+    exception_message: &str,
+    stack: Option<&str>,
+    file: &str,
+    line: i64,
+    column: i64,
+    source_line: Option<&str>,
+  ) -> JsError {
+    JsError {
+      name: stack.map(|_| "TypeError".to_string()),
+      message: stack.map(|_| "boom".to_string()),
+      stack: stack.map(str::to_string),
+      cause: None,
+      exception_message: exception_message.to_string(),
+      frames: vec![deno_core::error::JsStackFrame::from_location(
+        Some(file.to_string()),
+        Some(line),
+        Some(column),
+      )],
+      source_line: source_line.map(str::to_string),
+      source_line_frame_index: Some(0),
+      aggregated: None,
+      additional_properties: vec![],
+      stack_is_custom: false,
+    }
+  }
+
+  fn no_files(_: &std::path::Path) -> Option<String> {
+    None
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn node_format_sync_throw_points_at_the_throw() {
+    let error = node_error(
+      "Uncaught TypeError: boom",
+      Some(
+        "TypeError: boom\n    at Object.<anonymous> (file:///app/main.js:2:9)",
+      ),
+      "file:///app/main.js",
+      2,
+      9,
+      Some("  throw new TypeError(\"boom\");"),
+    );
+    assert_eq!(
+      format_js_error_node(&error, "26.5.1", &no_files),
+      "/app/main.js:2\n  throw new TypeError(\"boom\");\n  ^\n\nTypeError: boom\n    at Object.<anonymous> (/app/main.js:2:9)\n\nNode.js v26.5.1\n"
+    );
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn node_format_rejection_points_at_the_construction() {
+    let error = node_error(
+      "Uncaught (in promise) TypeError: boom",
+      Some("TypeError: boom\n    at file:///app/main.mjs:1:16"),
+      "file:///app/main.mjs",
+      1,
+      16,
+      Some("Promise.reject(new TypeError(\"boom\"));"),
+    );
+    assert_eq!(
+      format_js_error_node(&error, "26.5.1", &no_files),
+      "file:///app/main.mjs:1\nPromise.reject(new TypeError(\"boom\"));\n               ^\n\nTypeError: boom\n    at file:///app/main.mjs:1:16\n\nNode.js v26.5.1\n"
+    );
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn node_format_type_module_package_keeps_urls() {
+    let error = node_error(
+      "Uncaught TypeError: boom",
+      Some("TypeError: boom\n    at file:///app/main.js:1:7"),
+      "file:///app/main.js",
+      1,
+      7,
+      None,
+    );
+    let files = |path: &std::path::Path| match path.to_str()? {
+      "/app/package.json" => Some(r#"{ "type": "module" }"#.to_string()),
+      "/app/main.js" => Some("throw new TypeError(\"boom\");\n".to_string()),
+      _ => None,
+    };
+    assert_eq!(
+      format_js_error_node(&error, "26.5.1", &files),
+      "file:///app/main.js:1\nthrow new TypeError(\"boom\");\n^\n\nTypeError: boom\n    at file:///app/main.js:1:7\n\nNode.js v26.5.1\n"
+    );
+  }
+
+  #[test]
+  fn node_format_values_that_are_not_errors() {
+    let rejected = JsError {
+      exception_message: "Uncaught (in promise) 42".to_string(),
+      frames: vec![],
+      source_line_frame_index: None,
+      ..node_error("", None, "", 1, 1, None)
+    };
+    assert_eq!(
+      format_js_error_node(&rejected, "26.5.1", &no_files),
+      "UnhandledPromiseRejection: This error originated either by throwing inside of an async function without a catch block, or by rejecting a promise which was not handled with .catch(). The promise rejected with the reason \"42\". {\n  code: 'ERR_UNHANDLED_REJECTION'\n}\n\nNode.js v26.5.1\n"
+    );
+    let thrown = JsError {
+      exception_message: "Uncaught str".to_string(),
+      ..rejected
+    };
+    assert_eq!(
+      format_js_error_node(&thrown, "26.5.1", &no_files),
+      "\nstr\n(Use `node --trace-uncaught ...` to show where the exception was thrown)\n\nNode.js v26.5.1\n"
     );
   }
 

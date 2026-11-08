@@ -418,6 +418,7 @@ impl ShellCommand for NodeCommand {
     args.extend([
       "run".into(),
       "-A".into(),
+      "--unstable-node-errors".into(),
       "--unstable-bare-node-builtins".into(),
       "--unstable-detect-cjs".into(),
       "--unstable-sloppy-imports".into(),

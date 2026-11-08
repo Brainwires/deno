@@ -576,6 +576,9 @@ impl EnvironmentOptions {
   }
 }
 
+/// V8's (and Node's) default `Error.stackTraceLimit`.
+const DEFAULT_STACK_TRACE_LIMIT: i64 = 10;
+
 #[derive(Debug, Clone)]
 pub struct PerIsolateOptions {
   pub per_env: EnvironmentOptions,
@@ -597,7 +600,7 @@ impl Default for PerIsolateOptions {
       report_uncaught_exception: false,
       report_on_signal: false,
       experimental_shadow_realm: false,
-      stack_trace_limit: 10,
+      stack_trace_limit: DEFAULT_STACK_TRACE_LIMIT,
       report_signal: "SIGUSR2".to_string(),
       build_snapshot: false,
       build_snapshot_config: String::new(),
@@ -3534,9 +3537,18 @@ fn append_remaining_args(
 
 /// Translate parsed Node.js CLI arguments to Deno CLI arguments.
 pub fn translate_to_deno_args(
-  parsed_args: ParseResult,
+  mut parsed_args: ParseResult,
   options: &TranslateOptions,
 ) -> TranslatedArgs {
+  // denext: `--stack-trace-limit` is a V8 option to Node; V8 sets
+  // `Error.stackTraceLimit` from it.
+  let stack_trace_limit = parsed_args.options.per_isolate.stack_trace_limit;
+  if stack_trace_limit != DEFAULT_STACK_TRACE_LIMIT {
+    parsed_args
+      .v8_args
+      .push(format!("--stack-trace-limit={stack_trace_limit}"));
+  }
+
   let mut result = TranslatedArgs::default();
   let deno_args = &mut result.deno_args;
   let node_options = &mut result.node_options;
@@ -3654,6 +3666,7 @@ pub fn translate_to_deno_args(
     // Note: deno eval has implicit permissions, so we don't add -A
 
     if options.add_unstable_flags {
+      deno_args.push("--unstable-node-errors".to_string());
       deno_args.push("--unstable-bare-node-builtins".to_string());
       deno_args.push("--unstable-detect-cjs".to_string());
     }
@@ -3738,6 +3751,28 @@ pub fn translate_to_deno_args(
     return result;
   }
 
+  // denext: `--check`: compile the script without running it, as Node's
+  // `checkSyntax` does; a syntax error is reported as Node reports it.
+  if env_opts.syntax_check_only && !parsed_args.remaining_args.is_empty() {
+    if options.use_node_subcommand {
+      deno_args.push("node".to_string());
+    }
+    deno_args.push("run".to_string());
+    deno_args.push("-A".to_string());
+    if options.add_unstable_flags {
+      deno_args.push("--unstable-node-errors".to_string());
+      deno_args.push("--unstable-bare-node-builtins".to_string());
+      deno_args.push("--unstable-detect-cjs".to_string());
+    }
+    if options.add_standalone_config {
+      deno_args.push("--node-modules-dir=manual".to_string());
+      deno_args.push("--no-config".to_string());
+    }
+    deno_args.push(data_url(include_str!("./check_syntax.js")));
+    deno_args.push(parsed_args.remaining_args[0].clone());
+    return result;
+  }
+
   // `--test`: Node's runner, each test file in its own process (denext); with
   // `--watch`, `deno test --watch` as before. A script started with
   // `--experimental-test-coverage` takes the same route: a process's V8
@@ -3760,6 +3795,7 @@ pub fn translate_to_deno_args(
     deno_args.push("run".to_string());
     deno_args.push("-A".to_string());
     if options.add_unstable_flags {
+      deno_args.push("--unstable-node-errors".to_string());
       deno_args.push("--unstable-bare-node-builtins".to_string());
       deno_args.push("--unstable-detect-cjs".to_string());
     }
@@ -3791,6 +3827,7 @@ pub fn translate_to_deno_args(
     deno_args.push("-A".to_string());
 
     if options.add_unstable_flags {
+      deno_args.push("--unstable-node-errors".to_string());
       deno_args.push("--unstable-bare-node-builtins".to_string());
       deno_args.push("--unstable-detect-cjs".to_string());
     }
@@ -3841,6 +3878,7 @@ pub fn translate_to_deno_args(
   deno_args.push("-A".to_string());
 
   if options.add_unstable_flags {
+    deno_args.push("--unstable-node-errors".to_string());
     deno_args.push("--unstable-bare-node-builtins".to_string());
     deno_args.push("--unstable-detect-cjs".to_string());
   }
@@ -5681,6 +5719,7 @@ mod tests {
       "node",
       "run",
       "-A",
+      "--unstable-node-errors",
       "--unstable-bare-node-builtins",
       "--unstable-detect-cjs",
       "--node-modules-dir=manual",
@@ -6154,6 +6193,7 @@ mod tests {
       svec![
         "run",
         "-A",
+        "--unstable-node-errors",
         "--unstable-bare-node-builtins",
         "--unstable-detect-cjs",
         "--",
@@ -6174,6 +6214,7 @@ mod tests {
       svec![
         "run",
         "-A",
+        "--unstable-node-errors",
         "--unstable-bare-node-builtins",
         "--unstable-detect-cjs",
         "--",

@@ -4,6 +4,7 @@
 
 import { core, internals, primordials } from "ext:core/mod.js";
 import {
+  op_bootstrap_unstable_args,
   op_fs_cwd,
   op_get_env_no_permission_check,
   op_import_sync,
@@ -1843,6 +1844,17 @@ Module._load = function (request, parent, isMain) {
       if (err !== null && typeof err === "object") {
         const set = internals._dispatchedFatalErrors;
         if (set !== undefined) set.add(err);
+      }
+      // denext: in Node mode (`--unstable-node-errors`) the throw ends the
+      // program as an uncaught exception, not as the ESM wrapper's rejection,
+      // so it is reported as Node reports a synchronous throw.
+      if (
+        ArrayPrototypeIncludes(
+          op_bootstrap_unstable_args(),
+          "--unstable-node-errors",
+        )
+      ) {
+        core.reportUnhandledException(err);
       }
     }
     throw err;
