@@ -11133,8 +11133,6 @@ where the changes are discussed.
        (`op_desktop_secret_request` refused with both fixes named without
        `--allow-sys` and with `--allow-sys=hostname`, inert with `--allow-sys`).
 
-
-
 276. **`feat(desktop)`: `Deno.desktop.systemStats`** (`feat/system-stats`;
      `runtime/ops/system_stats.rs`, `runtime/ops/desktop.rs`,
      `cli/rt/desktop.rs`, `cli/rt_desktop/lib.rs`). A desktop app that shows the
@@ -11153,14 +11151,16 @@ where the changes are discussed.
      previous sample; its first sample takes two snapshots 100 ms apart.
      Sampling happens only on a `stats()` call or a live tick, on the blocking
      pool: no background thread. A tick is skipped while the previous one is
-     pending (callbacks never overlap) and, without sampling, while every open
-     app window is hidden (`DesktopApi::any_window_visible`, laufey's
-     `get_visible` over the open windows; a backend that can't say counts as
-     visible). Sampling needs the baked `systemStats` capability (item 275) or
-     unscoped `--allow-sys`, else `NotCapable` (`stats()` rejects, `onStats`
-     throws when subscribing), and no other permission. `systemStats.supported`
-     is true on macOS, Linux and Windows. Aggregate figures only: no per-process
-     data, no host names, no device serials.
+     pending (callbacks never overlap) and, without sampling, while the app has
+     at least one window and every one is hidden
+     (`DesktopApi::any_window_visible`, laufey's `get_visible` over the open
+     windows through `windows_visibility`; an app with no window, a tray-only
+     one, keeps sampling, and a backend that can't say counts as visible).
+     Sampling needs the baked `systemStats` capability (item 275) or unscoped
+     `--allow-sys`, else `NotCapable` (`stats()` rejects, `onStats` throws when
+     subscribing), and no other permission. `systemStats.supported` is true on
+     macOS, Linux and Windows. Aggregate figures only: no per-process data, no
+     host names, no device serials.
      - macOS: CPU from `host_processor_info(PROCESSOR_CPU_LOAD_INFO)` (each
        32-bit tick counter's forward distance, so a wrap is not negative; the
        array is `vm_deallocate`d), memory pressure 100 −

@@ -954,11 +954,11 @@ impl denort::desktop::DesktopApi for WefDesktopApi {
   fn any_window_visible(&self) -> Option<bool> {
     let ids: Vec<u32> =
       self.open_windows.lock().unwrap().iter().copied().collect();
-    Some(
+    Some(deno_runtime::ops::desktop::windows_visibility(
       ids
         .into_iter()
-        .any(|id| laufey::Window::from_id(id).get_visible()),
-    )
+        .map(|id| laufey::Window::from_id(id).get_visible()),
+    ))
   }
 
   fn show(&self, window_id: u32) {

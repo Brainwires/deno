@@ -2559,8 +2559,11 @@ pub trait DesktopApi: Send + Sync + 'static {
 
   fn is_visible(&self, window_id: u32) -> bool;
   /// Whether any of the app's open windows is visible, for work that only
-  /// matters while one is (`Deno.desktop.systemStats` subscriptions). `None`
-  /// when the backend can't say, which callers treat as visible.
+  /// matters while one is (`Deno.desktop.systemStats` subscriptions):
+  /// `Some(false)` only when at least one window is open and every one is
+  /// hidden ([`windows_visibility`]); an app with no window (a tray-only app)
+  /// is `Some(true)`. `None` when the backend can't say, which callers treat
+  /// as visible.
   fn any_window_visible(&self) -> Option<bool> {
     None
   }
@@ -5790,6 +5793,22 @@ fn op_desktop_system_stats_close(
     .map_err(JsErrorBox::from_err)
 }
 
+/// What [`DesktopApi::any_window_visible`] answers for the app's open windows'
+/// visibilities: `false` only when there is at least one window and every one
+/// is hidden. An app with no window at all (a tray-only app, or one between
+/// closing its last window and opening the next) counts as visible, so its
+/// `systemStats` subscriptions keep sampling.
+pub fn windows_visibility(visible: impl IntoIterator<Item = bool>) -> bool {
+  let mut any_window = false;
+  for v in visible {
+    if v {
+      return true;
+    }
+    any_window = true;
+  }
+  !any_window
+}
+
 /// The sampling gate on its own, so `onStats` refuses when subscribing
 /// rather than on every tick.
 #[op2(fast)]
@@ -7052,6 +7071,17 @@ mod tests {
       );
       assert!(message.contains("--allow-sys"), "{message}");
     }
+  }
+
+  #[test]
+  fn windows_visibility_pauses_only_when_every_open_window_is_hidden() {
+    use super::windows_visibility;
+    // A tray-only app (no window) keeps sampling.
+    assert!(windows_visibility([]));
+    assert!(windows_visibility([true]));
+    assert!(windows_visibility([false, true]));
+    assert!(!windows_visibility([false]));
+    assert!(!windows_visibility([false, false]));
   }
 
   #[test]

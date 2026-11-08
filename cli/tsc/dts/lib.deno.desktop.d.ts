@@ -2495,8 +2495,9 @@ declare namespace Deno {
        * ~100 ms apart) so it returns a CPU figure. */
       stats(options?: { perCore?: boolean }): Promise<SystemStats>;
       /** Calls cb every intervalMs (>= 1000, else RangeError) with a sample;
-       * skips ticks while every app window is hidden (resumes when one is
-       * shown). Returns the unsubscribe. */
+       * skips ticks while the app has windows and every one is hidden
+       * (resumes when one is shown; an app with no window, such as a
+       * tray-only app, keeps sampling). Returns the unsubscribe. */
       onStats(
         cb: (stats: SystemStats) => void,
         options: { intervalMs: number; perCore?: boolean },
