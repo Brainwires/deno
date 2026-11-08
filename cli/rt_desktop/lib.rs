@@ -57,7 +57,7 @@ use denort::run::RunOptions;
 /// makes the failure mode obvious instead of "the desktop app silently won't
 /// launch".
 const _: () = assert!(
-  laufey::LAUFEY_API_VERSION == 54,
+  laufey::LAUFEY_API_VERSION == 55,
   "LAUFEY_API_VERSION mismatch: update this assert and the prebuilt backend release pin in cli/tools/desktop.rs when laufey bumps its API version",
 );
 
@@ -4034,6 +4034,22 @@ async fn run_desktop(
               y: e.y,
               paths: e.paths,
               count: e.count,
+            },
+          );
+        });
+      }
+
+      // Every application-menu click, for the app (laufey API 55): after
+      // the window's own `AppMenuClick`, and still once the window that set
+      // the menu has closed (the macOS menu bar keeps its menu), so a
+      // keepAlive or tray app hears its menu as `Deno.desktop` "menuclick".
+      {
+        let menu_tx = event_tx.0.clone();
+        laufey::set_app_menu_click_handler(move |window_id, id: &str| {
+          let _ = menu_tx.try_send(
+            deno_runtime::ops::desktop::DesktopEvent::ApplicationMenuClick {
+              window_id,
+              id: id.to_string(),
             },
           );
         });

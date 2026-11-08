@@ -327,6 +327,11 @@ pub struct OpenDevtoolsOptions {
 pub enum DesktopEvent {
   #[serde(rename_all = "camelCase")]
   AppMenuClick { window_id: u32, id: String },
+  /// An application-menu click for the app (laufey API 55): every one,
+  /// after the window's own `AppMenuClick`, whether or not the window that
+  /// set the menu (`window_id`) is still open. `Deno.desktop` "menuclick".
+  #[serde(rename_all = "camelCase")]
+  ApplicationMenuClick { window_id: u32, id: String },
   #[serde(rename_all = "camelCase")]
   ContextMenuClick { window_id: u32, id: String },
   /// The context menu `showContextMenu` opened closed, after its click if
@@ -6939,6 +6944,23 @@ mod tests {
   }
 
   #[test]
+  fn application_menu_click_wire_shape() {
+    let v = serde_json::to_value(DesktopEvent::ApplicationMenuClick {
+      window_id: 3,
+      id: "file.open-recent".to_string(),
+    })
+    .unwrap();
+    assert_eq!(
+      v,
+      json!({
+        "kind": "applicationMenuClick",
+        "windowId": 3,
+        "id": "file.open-recent",
+      })
+    );
+  }
+
+  #[test]
   fn keyboard_event_camelcases_and_keeps_type() {
     let v = serde_json::to_value(DesktopEvent::KeyboardEvent {
       window_id: 1,
@@ -7462,6 +7484,13 @@ mod tests {
         id: "".into()
       }),
       "appMenuClick"
+    );
+    assert_eq!(
+      kind_of(DesktopEvent::ApplicationMenuClick {
+        window_id: 0,
+        id: "".into()
+      }),
+      "applicationMenuClick"
     );
     assert_eq!(
       kind_of(DesktopEvent::ContextMenuClick {

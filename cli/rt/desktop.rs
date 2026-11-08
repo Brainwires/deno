@@ -2181,6 +2181,8 @@ pub const DESKTOP_JS: &str = r#"
   internals.defineEventHandler(desktop, "platformfeatureschanged");
   internals.defineEventHandler(desktop, "titlebarpreferenceschanged");
   internals.defineEventHandler(desktop, "beforequit");
+  // Application-menu clicks for the app (laufey API 55).
+  internals.defineEventHandler(desktop, "menuclick");
   let quitOnLastWindowClosed = true;
   let quitOnLastWindowClosedSet = false;
   // The OS is waiting on a session end that a listener held: its quit() can
@@ -3129,6 +3131,15 @@ pub const DESKTOP_JS: &str = r#"
             const target = windows.get(ev.windowId);
             if (!target) break;
             target.dispatchEvent(new CustomEvent("menuclick", { detail: { id: ev.id } }));
+            break;
+          }
+          case "applicationMenuClick": {
+            // laufey API 55: every application-menu click, for the app,
+            // after the window's own "menuclick", whether or not the window
+            // that set the menu is still open.
+            desktop.dispatchEvent(new CustomEvent("menuclick", {
+              detail: { id: ev.id, windowId: ev.windowId },
+            }));
             break;
           }
           case "contextMenuClick": {
@@ -4216,6 +4227,28 @@ mod tests {
     ] {
       assert!(DESKTOP_JS.contains(needle), "missing: {needle}");
     }
+  }
+
+  #[test]
+  fn desktop_js_delivers_app_menu_clicks_to_the_app() {
+    // laufey API 55: Deno.desktop "menuclick", independent of windows, and
+    // the window's own "menuclick" still dispatched first.
+    for needle in [
+      "internals.defineEventHandler(desktop, \"menuclick\");",
+      "case \"applicationMenuClick\": {",
+      "desktop.dispatchEvent(new CustomEvent(\"menuclick\", {\n              detail: { id: ev.id, windowId: ev.windowId },",
+      "case \"appMenuClick\": {\n            const target = windows.get(ev.windowId);",
+    ] {
+      assert!(DESKTOP_JS.contains(needle), "missing: {needle}");
+    }
+    let window_case = DESKTOP_JS.find("case \"appMenuClick\": {").unwrap();
+    let app_case = DESKTOP_JS.find("case \"applicationMenuClick\": {").unwrap();
+    // The app-level case doesn't look the window up: it is delivered with
+    // every window closed.
+    let app_body = &DESKTOP_JS[app_case..];
+    let app_body = &app_body[..app_body.find("break;").unwrap()];
+    assert!(!app_body.contains("windows.get("), "{app_body}");
+    assert!(window_case < app_case);
   }
 
   #[test]
