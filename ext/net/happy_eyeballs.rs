@@ -434,7 +434,19 @@ mod tests {
     // Both addresses should be in attempted list (parallel attempts)
     assert_eq!(result.attempted_addresses.len(), 2);
     // Should complete in roughly delay + connection time, not full timeout
-    assert!(attempt_delay < elapsed && elapsed < Duration::from_millis(500));
+    assert!(elapsed < Duration::from_millis(500));
+    // denext: the second attempt waits out the delay only while the first is
+    // still pending. A host with no route to 10.0.0.0/8 (a CI VM) refuses the
+    // first at once, and the second then starts without waiting.
+    let first_hangs = tokio::time::timeout(
+      attempt_delay * 2,
+      tokio::net::TcpStream::connect(hanging_addr),
+    )
+    .await
+    .is_err();
+    if first_hangs {
+      assert!(attempt_delay < elapsed);
+    }
   }
 
   #[tokio::test]
