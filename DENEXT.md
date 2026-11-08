@@ -10882,12 +10882,49 @@ where the changes are discussed.
        `prebuilds/<platform>-<arch>/pty.node` in the stand-in makes the
        package's own entry run).
 
+269. **`feat(desktop)`: baked desktop capabilities, and `secureStore` without
+     `--allow-sys`** (`feat/secure-store-capability`;
+     `cli/lib/standalone/app_origin.rs`, `cli/rt_desktop/app_origin.rs`,
+     `runtime/ops/desktop.rs`). The embedded `.deno-desktop/app.json` takes an
+     optional `"capabilities": string[]`: the desktop capabilities the app's
+     packaging baked in. This runtime knows `"secureStore"` and `"systemStats"`
+     (item 270); a name it doesn't know is accepted and ignored (logged at debug
+     level), so a newer packager can bake one an older runtime has no API for,
+     while a non-array value or a non-string entry is a parse error like the
+     file's other malformed values. Only the file carries the list (deno.json
+     has no such key; a packager writes it only for runtimes that know it, since
+     older ones reject unknown keys). `resolve_baked_capabilities` reads it from
+     the nearest app.json, like `allowedNavigationOrigins`, and the main
+     worker's op state gets a
+     `DesktopBakedCapabilities { secure_store, system_stats }`. Workers don't:
+     they have no `Deno.desktop`, and the ops the capabilities gate are kept out
+     of worker scope. `Deno.desktop.secureStore.get` / `set` / `delete` needed
+     unscoped `--allow-sys`, the whole `sys` grant, only because the store is
+     shared by every app of the user; an app that wanted a keychain had to grant
+     every other `sys` read too. They now pass when the `secureStore` capability
+     is baked **or** `--allow-sys` is granted (packaging that bakes no
+     capabilities keeps working); with neither they reject with the same
+     `NotCapable` class as before, the message naming both fixes (enable
+     `desktop.capabilities.secureStore` so the packaging bakes it, or grant
+     `--allow-sys`). `secureStore.supported` is unchanged. The runtime adds no
+     per-caller namespacing: every caller is the app's own JavaScript in its
+     Deno process (pages reach the store only through whatever bridge the app
+     exposes), so scoping items per caller is the app's job; the runtime cannot
+     tell callers apart. laufey is untouched.
+     - Tests: `deno_lib` `app_config_file_capabilities` (present, absent, empty,
+       an unknown name kept, wrong types refused), `denort_desktop`
+       `baked_capabilities_from_app_json`, `deno_runtime`
+       `baked_capability_names_map_to_flags` and
+       `secure_store_gate_takes_the_baked_capability_or_allow_sys` (baked
+       without `--allow-sys` passes, `--allow-sys` alone passes, neither is
+       `NotCapable` naming both fixes).
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
 169-174, 176, 178, 180, 182-184, 186, 187, 189-191, 193-196, 198-203, 206, 207,
 209-215, 217, 218, 221, 222, 224, 225, 227, 228, 231, 232, 235, 237, 240,
-243-245, 247-249, 253, 254, 256-260, 262-264, 267, 268) are what the prebuilt
+243-245, 247-249, 253, 254, 256-260, 262-264, 267-269) are what the prebuilt
 `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
 in the branch too, but a stock CLI does not run them; denext's own launcher

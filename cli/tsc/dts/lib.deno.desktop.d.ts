@@ -2361,8 +2361,14 @@ declare namespace Deno {
      * rejects); `get` may (a locked keychain to unlock, an ad-hoc build
      * rebuilt since it stored the item) and rejects after `timeout`.
      *
-     * Needs `--allow-sys` (unscoped): the store is shared by every app of the
-     * user. Each call runs off the JavaScript thread.
+     * Needs the `secureStore` desktop capability baked in by the app's
+     * packaging (`"capabilities": ["secureStore"]` in the embedded
+     * `.deno-desktop/app.json`), or `--allow-sys` (unscoped): the store is
+     * shared by every app of the user. Without either, `get` / `set` /
+     * `delete` reject with `Deno.errors.NotCapable`. `supported` needs
+     * neither. The runtime does not tell callers apart: every caller in the
+     * app's process reaches the same items. Each call runs off the
+     * JavaScript thread.
      *
      * Not available in workers.
      *

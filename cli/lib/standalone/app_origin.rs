@@ -142,6 +142,13 @@ pub enum AppOriginError {
 /// `update.publicKey` mirrors `desktop.update.publicKey`: the public half of
 /// the full-app update signing key (`Deno.desktop.updater`). The metadata's
 /// value, written by a CLI that knows the key, takes precedence.
+///
+/// `capabilities` lists the desktop capabilities the app's packaging baked
+/// in (`desktop.capabilities`): names such as `"secureStore"` or
+/// `"systemStats"` that let the app use those APIs without the broad
+/// permission they otherwise need. A name this runtime does not know is
+/// kept here and ignored where the list is resolved (a newer packager may
+/// bake one an older runtime has no API for).
 pub const APP_CONFIG_FILE: &str = ".deno-desktop/app.json";
 
 #[derive(serde::Deserialize)]
@@ -155,6 +162,7 @@ struct SerializedAppConfigFile {
   initial_window: Option<SerializedInitialWindow>,
   update: Option<SerializedUpdate>,
   allowed_navigation_origins: Option<Vec<String>>,
+  capabilities: Option<Vec<String>>,
 }
 
 /// `update` in the file.
@@ -198,6 +206,9 @@ pub struct AppConfigFile {
   /// window's top-level frame may load (the navigation guard), normalized
   /// with [`normalize_navigation_origin`].
   pub allowed_navigation_origins: Option<Vec<String>>,
+  /// `capabilities`: the baked desktop capability names, deduplicated, in
+  /// file order (unknown names included; see [`APP_CONFIG_FILE`]).
+  pub capabilities: Option<Vec<String>>,
 }
 
 /// Normalize one `allowedNavigationOrigins` entry: an exact origin
@@ -283,6 +294,15 @@ pub fn parse_app_config_file(bytes: &[u8]) -> Result<AppConfigFile, String> {
       Ok::<_, String>(out)
     })
     .transpose()?;
+  let capabilities = config.capabilities.map(|names| {
+    let mut out: Vec<String> = Vec::with_capacity(names.len());
+    for name in names {
+      if !out.contains(&name) {
+        out.push(name);
+      }
+    }
+    out
+  });
   let name = config
     .name
     .map(|n| n.trim().to_string())
@@ -298,6 +318,7 @@ pub fn parse_app_config_file(bytes: &[u8]) -> Result<AppConfigFile, String> {
     name,
     update_public_key,
     allowed_navigation_origins,
+    capabilities,
     origin,
     identifier: config.identifier,
     deep_links,
@@ -869,6 +890,38 @@ mod tests {
       r#"{ "allowedNavigationOrigins": ["file:///etc"] }"#,
       r#"{ "allowedNavigationOrigins": [""] }"#,
       r#"{ "allowednavigationorigins": [] }"#,
+    ] {
+      assert!(parse_app_config_file(bad.as_bytes()).is_err(), "{bad}");
+    }
+  }
+
+  #[test]
+  fn app_config_file_capabilities() {
+    let config = parse_app_config_file(
+      br#"{ "capabilities": ["secureStore", "systemStats", "secureStore", "notYetKnown"] }"#,
+    )
+    .unwrap();
+    assert_eq!(
+      config.capabilities,
+      Some(vec![
+        "secureStore".to_string(),
+        "systemStats".to_string(),
+        "notYetKnown".to_string(),
+      ])
+    );
+    assert_eq!(parse_app_config_file(b"{}").unwrap().capabilities, None);
+    assert_eq!(
+      parse_app_config_file(br#"{ "capabilities": [] }"#)
+        .unwrap()
+        .capabilities,
+      Some(vec![])
+    );
+    for bad in [
+      r#"{ "capabilities": "secureStore" }"#,
+      r#"{ "capabilities": [1] }"#,
+      r#"{ "capabilities": [null] }"#,
+      r#"{ "capabilities": ["secureStore", true] }"#,
+      r#"{ "capabilities": { "secureStore": true } }"#,
     ] {
       assert!(parse_app_config_file(bad.as_bytes()).is_err(), "{bad}");
     }

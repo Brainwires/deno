@@ -214,6 +214,35 @@ pub fn resolve_allowed_navigation_origins(
     .unwrap_or_default()
 }
 
+/// The desktop capabilities the app's packaging baked in: the nearest
+/// [`APP_CONFIG_FILE`]'s `capabilities`, mapped to the ones this runtime
+/// knows (unknown names are logged and ignored: a newer packager may bake
+/// one this runtime has no API for), else none. Only the file carries them
+/// (denext writes it; deno.json has no such key). An app.json that does not
+/// parse was already refused by [`resolve_app_config`].
+pub fn resolve_baked_capabilities(
+  root: &Path,
+  entrypoint_key: &str,
+  read_file: impl Fn(&Path) -> Option<Vec<u8>>,
+) -> deno_runtime::ops::desktop::DesktopBakedCapabilities {
+  let names = find_app_config_file(root, entrypoint_key, read_file)
+    .ok()
+    .flatten()
+    .and_then(|(_, config)| config.capabilities)
+    .unwrap_or_default();
+  let (caps, unknown) =
+    deno_runtime::ops::desktop::DesktopBakedCapabilities::from_names(
+      names.iter().map(String::as_str),
+    );
+  if !unknown.is_empty() {
+    log::debug!(
+      "[desktop] ignoring baked capabilities this runtime doesn't know: \
+       {unknown:?}"
+    );
+  }
+  caps
+}
+
 /// The nearest [`APP_CONFIG_FILE`] and its parsed contents, if any.
 fn find_app_config_file(
   root: &Path,
@@ -334,6 +363,60 @@ mod tests {
     )]);
     assert!(
       resolve_allowed_navigation_origins(root, "main.ts", bad).is_empty()
+    );
+  }
+
+  #[test]
+  fn baked_capabilities_from_app_json() {
+    use deno_runtime::ops::desktop::DesktopBakedCapabilities;
+    let root = Path::new("/vfs");
+    let read = reader(&[(
+      ".deno-desktop/app.json",
+      r#"{ "capabilities": ["systemStats", "fromTheFuture", "secureStore"] }"#,
+    )]);
+    assert_eq!(
+      resolve_baked_capabilities(root, "main.ts", &read),
+      DesktopBakedCapabilities {
+        secure_store: true,
+        system_stats: true,
+      }
+    );
+    let read = reader(&[(
+      ".deno-desktop/app.json",
+      r#"{ "capabilities": ["secureStore"] }"#,
+    )]);
+    assert_eq!(
+      resolve_baked_capabilities(root, "src/main.ts", &read),
+      DesktopBakedCapabilities {
+        secure_store: true,
+        system_stats: false,
+      }
+    );
+    // No file, no key, an empty list: nothing baked.
+    assert_eq!(
+      resolve_baked_capabilities(root, "main.ts", reader(&[])),
+      DesktopBakedCapabilities::default()
+    );
+    for file in [
+      r#"{ "identifier": "com.a.b" }"#,
+      r#"{ "capabilities": [] }"#,
+    ] {
+      assert_eq!(
+        resolve_baked_capabilities(
+          root,
+          "main.ts",
+          reader(&[(".deno-desktop/app.json", file)])
+        ),
+        DesktopBakedCapabilities::default(),
+        "{file}"
+      );
+    }
+    // A malformed list bakes nothing (the file is refused at launch).
+    let bad =
+      reader(&[(".deno-desktop/app.json", r#"{ "capabilities": [true] }"#)]);
+    assert_eq!(
+      resolve_baked_capabilities(root, "main.ts", bad),
+      DesktopBakedCapabilities::default()
     );
   }
 

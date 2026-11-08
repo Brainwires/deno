@@ -3060,6 +3060,40 @@ fn constructor_api(
 /// internal default (`laufey_webview`).
 pub struct DesktopAppName(pub String);
 
+/// The desktop capabilities the app's packaging baked into the compiled
+/// binary (`"capabilities"` in the embedded `.deno-desktop/app.json`). Each
+/// one lets the app use that API without the broad permission it otherwise
+/// needs; see [`check_baked_or_sys`]. Put into the main worker's op state
+/// only (the APIs it gates are kept out of workers); absent means nothing
+/// was baked.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DesktopBakedCapabilities {
+  /// `"secureStore"`: `Deno.desktop.secureStore` without `--allow-sys`.
+  pub secure_store: bool,
+  /// `"systemStats"`: `Deno.desktop.systemStats` sampling without
+  /// `--allow-sys`.
+  pub system_stats: bool,
+}
+
+impl DesktopBakedCapabilities {
+  /// Map the baked names to the capabilities this runtime knows; the names
+  /// it doesn't know are returned so the caller can log them.
+  pub fn from_names<'a>(
+    names: impl IntoIterator<Item = &'a str>,
+  ) -> (Self, Vec<&'a str>) {
+    let mut caps = Self::default();
+    let mut unknown = Vec::new();
+    for name in names {
+      match name {
+        "secureStore" => caps.secure_store = true,
+        "systemStats" => caps.system_stats = true,
+        other => unknown.push(other),
+      }
+    }
+    (caps, unknown)
+  }
+}
+
 struct BrowserWindow {
   api: Arc<dyn DesktopApi>,
   window_id: u32,
@@ -5032,6 +5066,37 @@ fn desktop_api(
 /// know, so they share the whole `sys` grant; a partial
 /// `--allow-sys=<names>` is not enough. Checked before anything else, so
 /// the refusal (`NotCapable`) is the same in and outside a desktop app.
+/// The gate of an API a baked desktop capability unlocks: allowed when the
+/// app's packaging baked `capability` (see [`DesktopBakedCapabilities`]),
+/// else when unscoped `--allow-sys` is granted (what packaging that bakes no
+/// capabilities grants instead). Neither is a `NotCapable` error, the class
+/// [`check_desktop_integration`] refuses with, naming both fixes.
+fn check_baked_or_sys(
+  state: &OpState,
+  capability: &str,
+  baked: fn(&DesktopBakedCapabilities) -> bool,
+  api: &str,
+) -> Result<(), deno_error::JsErrorBox> {
+  if state
+    .try_borrow::<DesktopBakedCapabilities>()
+    .is_some_and(baked)
+  {
+    return Ok(());
+  }
+  check_desktop_integration(state).map_err(|err| {
+    use deno_error::JsErrorClass;
+    deno_error::JsErrorBox::new(
+      err.get_class(),
+      format!(
+        "{api} needs the \"{capability}\" desktop capability or --allow-sys: \
+         enable desktop.capabilities.{capability} so the app's packaging \
+         bakes it, or grant --allow-sys ({})",
+        err.get_message()
+      ),
+    )
+  })
+}
+
 fn check_desktop_integration(
   state: &OpState,
 ) -> Result<(), deno_error::JsErrorBox> {
@@ -5481,6 +5546,17 @@ impl From<SecretOutcome> for SecretResultInfo {
   }
 }
 
+/// The `Deno.desktop.secureStore` gate: the baked `secureStore` capability,
+/// else unscoped `--allow-sys`.
+fn check_secure_store(state: &OpState) -> Result<(), deno_error::JsErrorBox> {
+  check_baked_or_sys(
+    state,
+    "secureStore",
+    |c| c.secure_store,
+    "Deno.desktop.secureStore",
+  )
+}
+
 /// `Deno.desktop.secureStore.supported` (laufey API 47).
 #[op2(fast)]
 fn op_desktop_secret_supported(state: &OpState) -> bool {
@@ -5490,9 +5566,10 @@ fn op_desktop_secret_supported(state: &OpState) -> bool {
 }
 
 /// `Deno.desktop.secureStore.get / set / delete` (laufey API 47): the OS's
-/// secret store, which every app of the user shares, so it needs unscoped
-/// `--allow-sys` like the other integrations that reach past the app's own
-/// windows ([`check_desktop_integration`]). The call blocks for as long as
+/// secret store, which every app of the user shares, so it needs the baked
+/// `secureStore` capability or unscoped `--allow-sys` like the other
+/// integrations that reach past the app's own windows
+/// ([`check_baked_or_sys`]). The call blocks for as long as
 /// an unlock prompt may stay up (bounded by `timeoutMs`), so it runs on the
 /// blocking pool.
 #[op2]
@@ -5503,7 +5580,7 @@ async fn op_desktop_secret_request(
 ) -> Result<SecretResultInfo, deno_error::JsErrorBox> {
   let api = {
     let s = state.borrow();
-    check_desktop_integration(&s)?;
+    check_secure_store(&s)?;
     s.try_borrow::<Arc<dyn DesktopApi>>().cloned()
   };
   if !matches!(request.op.as_str(), "get" | "set" | "delete") {
@@ -6636,6 +6713,102 @@ mod tests {
     redact_desktop_hint(&mut features);
     assert_eq!(features["cookieEncryptionWait"], serde_json::Value::Null);
     assert!(features.get("kwallet").is_none());
+  }
+
+  /// An op state with `--allow-sys` (unscoped) or no permission at all,
+  /// and the given baked capabilities (none when `None`).
+  fn baked_capability_state(
+    allow_sys: bool,
+    baked: Option<super::DesktopBakedCapabilities>,
+  ) -> deno_core::OpState {
+    use std::sync::Arc;
+
+    use deno_permissions::Permissions;
+    use deno_permissions::PermissionsContainer;
+    use deno_permissions::PermissionsOptions;
+    use deno_permissions::RuntimePermissionDescriptorParser;
+
+    let parser =
+      RuntimePermissionDescriptorParser::new(sys_traits::impls::RealSys);
+    let perms = Permissions::from_options(
+      &parser,
+      &PermissionsOptions {
+        allow_sys: allow_sys.then(Vec::new),
+        ..Default::default()
+      },
+    )
+    .unwrap();
+    let mut state = deno_core::OpState::new(None);
+    state.put(PermissionsContainer::new(Arc::new(parser), perms));
+    if let Some(baked) = baked {
+      state.put(baked);
+    }
+    state
+  }
+
+  #[test]
+  fn baked_capability_names_map_to_flags() {
+    use super::DesktopBakedCapabilities;
+    let (caps, unknown) = DesktopBakedCapabilities::from_names([
+      "secureStore",
+      "later",
+      "systemStats",
+    ]);
+    assert_eq!(
+      caps,
+      DesktopBakedCapabilities {
+        secure_store: true,
+        system_stats: true,
+      }
+    );
+    assert_eq!(unknown, vec!["later"]);
+    let (caps, unknown) = DesktopBakedCapabilities::from_names(["secureStore"]);
+    assert!(caps.secure_store && !caps.system_stats);
+    assert!(unknown.is_empty());
+    // Names are exact: no case folding.
+    let (caps, unknown) = DesktopBakedCapabilities::from_names(["securestore"]);
+    assert_eq!(caps, DesktopBakedCapabilities::default());
+    assert_eq!(unknown, vec!["securestore"]);
+  }
+
+  #[test]
+  fn secure_store_gate_takes_the_baked_capability_or_allow_sys() {
+    use deno_error::JsErrorClass;
+
+    use super::DesktopBakedCapabilities;
+    use super::check_secure_store;
+    let secure_store = DesktopBakedCapabilities {
+      secure_store: true,
+      ..Default::default()
+    };
+    let other = DesktopBakedCapabilities {
+      system_stats: true,
+      ..Default::default()
+    };
+    // Baked, without --allow-sys.
+    assert!(
+      check_secure_store(&baked_capability_state(false, Some(secure_store)))
+        .is_ok()
+    );
+    // --allow-sys alone (packaging that bakes nothing).
+    assert!(check_secure_store(&baked_capability_state(true, None)).is_ok());
+    assert!(
+      check_secure_store(&baked_capability_state(true, Some(other))).is_ok()
+    );
+    // Neither: the permission error class, naming both fixes.
+    for state in [
+      baked_capability_state(false, None),
+      baked_capability_state(false, Some(other)),
+    ] {
+      let err = check_secure_store(&state).unwrap_err();
+      assert_eq!(err.get_class(), "NotCapable");
+      let message = err.get_message();
+      assert!(
+        message.contains("desktop.capabilities.secureStore"),
+        "{message}"
+      );
+      assert!(message.contains("--allow-sys"), "{message}");
+    }
   }
 
   #[test]
