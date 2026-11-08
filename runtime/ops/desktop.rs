@@ -5091,13 +5091,20 @@ fn check_baked_or_sys(
   }
   check_desktop_integration(state).map_err(|err| {
     use deno_error::JsErrorClass;
+    // The permission's own message names --allow-sys; the other fix goes
+    // on its first line, which is what a caller usually shows.
+    let message = err.get_message();
+    let (first, rest) = message.split_once('\n').unwrap_or((&*message, ""));
+    let rest = if rest.is_empty() {
+      String::new()
+    } else {
+      format!("\n{rest}")
+    };
     deno_error::JsErrorBox::new(
       err.get_class(),
       format!(
-        "{api} needs the \"{capability}\" desktop capability or --allow-sys: \
-         enable desktop.capabilities.{capability} so the app's packaging \
-         bakes it, or grant --allow-sys ({})",
-        err.get_message()
+        "{api}: {first}, or enable desktop.capabilities.{capability} so the \
+         app's packaging bakes the \"{capability}\" capability{rest}"
       ),
     )
   })

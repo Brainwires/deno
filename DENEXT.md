@@ -10917,7 +10917,9 @@ where the changes are discussed.
        `baked_capability_names_map_to_flags` and
        `secure_store_gate_takes_the_baked_capability_or_allow_sys` (baked
        without `--allow-sys` passes, `--allow-sys` alone passes, neither is
-       `NotCapable` naming both fixes).
+       `NotCapable` naming both fixes), and the `run/desktop_ops_inert` spec
+       (`op_desktop_secret_request` refused with both fixes named without
+       `--allow-sys` and with `--allow-sys=hostname`, inert with `--allow-sys`).
 
 270. **`feat(desktop)`: `Deno.desktop.systemStats`** (`feat/system-stats`;
      `runtime/ops/system_stats.rs`, `runtime/ops/desktop.rs`,
