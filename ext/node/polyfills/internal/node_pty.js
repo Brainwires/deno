@@ -10,11 +10,11 @@
 // instead (`maybeNodePtyOverride` in 01_require.js), a package that carries
 // the addon too (its `native` export is then the addon, DENEXT.md items 268
 // and 269); on Windows only a package without the addon does. This implements
-// node-pty 1.x's public API - `spawn(file, args, options)` and the `IPty` it returns: `pid`,
-// `cols`, `rows`, `process`, `onData` / `onExit` (disposable events), the
-// `on('data' | 'exit' | 'close')` emitter, `write`, `resize`, `kill`,
-// `pause` / `resume`, `clear`, `handleFlowControl` - on the runtime's own
-// pseudo-terminal, under `--allow-run` like `Deno.Command`.
+// node-pty 1.x's public API - `spawn(file, args, options)` and the `IPty` it
+// returns: `pid`, `cols`, `rows`, `process`, `onData` / `onExit` (disposable
+// events), the `on('data' | 'exit' | 'close')` emitter, `write`, `resize`,
+// `kill`, `pause` / `resume`, `clear`, `handleFlowControl` - on the runtime's
+// own pseudo-terminal, under `--allow-run` like `Deno.Command`.
 
 (function () {
 const { core } = __bootstrap;
