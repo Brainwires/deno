@@ -4,7 +4,7 @@ readFile {"code":"ERR_ACCESS_DENIED","permission":"FileSystemRead","resource":"d
 promises.readFile {"code":"ERR_ACCESS_DENIED","permission":"FileSystemRead","resource":"denied_dir/secret.txt","syscall":"open","path":"denied_dir/secret.txt","notCapable":true}
 writeFileSync {"code":"ERR_ACCESS_DENIED","permission":"FileSystemWrite","resource":"allowed/new.txt","syscall":"write","path":"allowed/new.txt","notCapable":true}
 writeFile {"code":"ERR_ACCESS_DENIED","permission":"FileSystemWrite","resource":"allowed/new.txt","syscall":"write","path":"allowed/new.txt","notCapable":true}
-promises.writeFile {"code":"ERR_ACCESS_DENIED","permission":"FileSystemWrite","resource":"allowed/new.txt","syscall":"write","path":"allowed/new.txt","notCapable":true}
+promises.writeFile {"code":"ERR_ACCESS_DENIED","permission":"FileSystemWrite","resource":"allowed/new.txt","syscall":"open","path":"allowed/new.txt","notCapable":true}
 statSync {"code":"ERR_ACCESS_DENIED","permission":"FileSystemRead","resource":"denied_dir/secret.txt","syscall":"stat","path":"denied_dir/secret.txt","notCapable":true}
 stat {"code":"ERR_ACCESS_DENIED","permission":"FileSystemRead","resource":"denied_dir/secret.txt","syscall":"stat","path":"denied_dir/secret.txt","notCapable":true}
 promises.stat {"code":"ERR_ACCESS_DENIED","permission":"FileSystemRead","resource":"denied_dir/secret.txt","syscall":"stat","path":"denied_dir/secret.txt","notCapable":true}
