@@ -64,6 +64,57 @@ fn is_prompt_control_character(c: char) -> bool {
 
 pub const PERMISSION_EMOJI: &str = "⚠️";
 
+/// Written to the terminal right before a permission prompt is drawn, so
+/// state left behind by untrusted code cannot hide or disguise the prompt
+/// (foreground colour equal to background, concealed text, a hidden cursor,
+/// the alternate screen, a half-written escape or an open OSC/DCS string).
+/// Nothing is restored afterwards: the state it clears belongs to the code
+/// that asked for the permission, and is not worth keeping.
+///
+/// The order matters. The alternate screen is left before the attributes
+/// are reset, because leaving it restores the cursor (and its attributes)
+/// saved when it was entered. The DECSC right before it makes that restore
+/// a no-op when the main screen is already showing: terminals keep a saved
+/// cursor per screen, and leaving a screen that is not active still
+/// restores the cursor in xterm and VTE.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) const PROMPT_TERMINAL_RESET: &str = concat!(
+  "\x18",        // CAN: abort an escape or control sequence in progress
+  "\x1b\\",      // ST: end an OSC / DCS / APC / PM / SOS string left open
+  "\x1b7",       // DECSC: save the cursor where the prompt will be drawn
+  "\x1b[?1049l", // leave the alternate screen
+  "\x0f",        // SI: select the G0 character set
+  "\x1b(B",      // designate US-ASCII as G0 (no line-drawing glyphs)
+  "\x1b[0m",     // SGR reset: default colours, nothing concealed
+  "\x1b[?25h",   // show the cursor
+);
+
+/// Whether [`PROMPT_TERMINAL_RESET`] can be written to stderr. On Windows
+/// the console interprets escape sequences only with virtual terminal
+/// processing on; without it the bytes would print as text, and untrusted
+/// code could not have used escape sequences to hide anything either.
+#[cfg(unix)]
+fn terminal_reset_supported() -> bool {
+  true
+}
+
+#[cfg(all(not(unix), not(target_arch = "wasm32")))]
+fn terminal_reset_supported() -> bool {
+  use windows_sys::Win32::System::Console::ENABLE_VIRTUAL_TERMINAL_PROCESSING;
+  use windows_sys::Win32::System::Console::GetConsoleMode;
+  use windows_sys::Win32::System::Console::GetStdHandle;
+  use windows_sys::Win32::System::Console::STD_ERROR_HANDLE;
+
+  let mut mode = 0;
+  // SAFETY: winapi calls with a handle owned by the process and a valid out
+  // pointer.
+  unsafe {
+    let handle = GetStdHandle(STD_ERROR_HANDLE);
+    GetConsoleMode(handle, &mut mode) != 0
+      && mode & ENABLE_VIRTUAL_TERMINAL_PROCESSING != 0
+  }
+}
+
 #[derive(Debug, Eq, PartialEq)]
 pub enum PromptResponse {
   Allow,
@@ -506,6 +557,9 @@ impl PermissionPrompter for TtyPrompter {
     // output everything in one shot to make the tests more reliable
     let stack_lines_count = {
       let mut output = String::new();
+      if terminal_reset_supported() {
+        output.push_str(PROMPT_TERMINAL_RESET);
+      }
       write!(&mut output, "┏ {PERMISSION_EMOJI}  ").unwrap();
       write!(&mut output, "{}", colors::bold("Deno requests ")).unwrap();
       write!(&mut output, "{}", colors::bold(message.clone())).unwrap();
@@ -684,6 +738,28 @@ pub mod tests {
     pub fn set(&self, value: bool) {
       STUB_PROMPT_VALUE.store(value, Ordering::SeqCst);
     }
+  }
+
+  #[cfg(not(target_arch = "wasm32"))]
+  #[test]
+  fn prompt_terminal_reset_clears_hiding_state() {
+    let reset = PROMPT_TERMINAL_RESET;
+    // aborts a pending sequence and closes an open string first
+    assert!(reset.starts_with("\x18\x1b\\"));
+    let pos = |needle: &str| {
+      reset
+        .find(needle)
+        .unwrap_or_else(|| panic!("{needle:?} missing from {reset:?}"))
+    };
+    let leave_alt = pos("\x1b[?1049l");
+    // the cursor is saved right before leaving the alternate screen
+    assert_eq!(pos("\x1b7") + 2, leave_alt);
+    // attributes are reset after leaving it, since leaving restores the
+    // attributes saved on entry
+    assert!(pos("\x1b[0m") > leave_alt);
+    assert!(pos("\x1b[?25h") > leave_alt);
+    assert!(pos("\x0f") > leave_alt);
+    assert!(pos("\x1b(B") > leave_alt);
   }
 
   #[cfg(not(target_arch = "wasm32"))]
