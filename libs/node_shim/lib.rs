@@ -3198,7 +3198,10 @@ pub struct TranslateOptions {
   /// When false, uses "deno run" (for child_process spawning)
   pub use_node_subcommand: bool,
   /// Add unstable Node.js compat flags (--unstable-bare-node-builtins,
-  /// --unstable-detect-cjs)
+  /// --unstable-detect-cjs, --unstable-unsafe-proto). denext: Node mode keeps
+  /// `Object.prototype.__proto__`, as Node does (old CommonJS libraries and
+  /// pm2's dependencies assign it), and a child it forks or spawns as `node`
+  /// gets the same translation, so it keeps it too.
   pub add_unstable_flags: bool,
   /// Add standalone config overrides (--node-modules-dir=manual, --no-config)
   /// Only appropriate for the standalone node shim CLI, not for child processes
@@ -3656,6 +3659,7 @@ pub fn translate_to_deno_args(
     if options.add_unstable_flags {
       deno_args.push("--unstable-bare-node-builtins".to_string());
       deno_args.push("--unstable-detect-cjs".to_string());
+      deno_args.push("--unstable-unsafe-proto".to_string());
     }
     if options.add_standalone_config {
       deno_args.push("--node-modules-dir=manual".to_string());
@@ -3762,6 +3766,7 @@ pub fn translate_to_deno_args(
     if options.add_unstable_flags {
       deno_args.push("--unstable-bare-node-builtins".to_string());
       deno_args.push("--unstable-detect-cjs".to_string());
+      deno_args.push("--unstable-unsafe-proto".to_string());
     }
     if options.add_standalone_config {
       deno_args.push("--node-modules-dir=manual".to_string());
@@ -3793,6 +3798,7 @@ pub fn translate_to_deno_args(
     if options.add_unstable_flags {
       deno_args.push("--unstable-bare-node-builtins".to_string());
       deno_args.push("--unstable-detect-cjs".to_string());
+      deno_args.push("--unstable-unsafe-proto".to_string());
     }
     if options.add_standalone_config {
       deno_args.push("--node-modules-dir=manual".to_string());
@@ -3843,6 +3849,7 @@ pub fn translate_to_deno_args(
   if options.add_unstable_flags {
     deno_args.push("--unstable-bare-node-builtins".to_string());
     deno_args.push("--unstable-detect-cjs".to_string());
+    deno_args.push("--unstable-unsafe-proto".to_string());
   }
   if options.add_standalone_config {
     deno_args.push("--node-modules-dir=manual".to_string());
@@ -5683,6 +5690,7 @@ mod tests {
       "-A",
       "--unstable-bare-node-builtins",
       "--unstable-detect-cjs",
+      "--unstable-unsafe-proto",
       "--node-modules-dir=manual",
       "--no-config",
       "foo.js"
@@ -6156,6 +6164,7 @@ mod tests {
         "-A",
         "--unstable-bare-node-builtins",
         "--unstable-detect-cjs",
+        "--unstable-unsafe-proto",
         "--",
         "eval",
         "console.log('not a subcommand')"
@@ -6176,6 +6185,7 @@ mod tests {
         "-A",
         "--unstable-bare-node-builtins",
         "--unstable-detect-cjs",
+        "--unstable-unsafe-proto",
         "--",
         "--import-map=config.json",
         "script.js"

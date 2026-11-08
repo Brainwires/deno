@@ -1,0 +1,7 @@
+deno run: read=false set=false
+node: read=true set=true
+node spawn: read=true set=true
+node fork: read=true set=true
+node fork, empty execArgv: read=true set=true
+node -e: read=true set=true
+deno run spawning node: read=true set=true

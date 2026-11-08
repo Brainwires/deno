@@ -309,6 +309,9 @@ pub(crate) fn get_npm_process_state(
   }
 }
 
+/// The flag that keeps `Object.prototype.__proto__`, which Node mode turns on.
+const UNSAFE_PROTO_FLAG: &str = "--unstable-unsafe-proto";
+
 pub(crate) fn run_bin_value(
   factory: &CliFactory,
   flags: &Flags,
@@ -327,6 +330,11 @@ pub(crate) fn run_bin_value(
       let path = deno_path_util::url_from_file_path(path_buf.as_ref())?;
       let mut deno_args = flags.to_permission_args();
       deno_args.extend(unstable_args.iter().cloned());
+      // denext: an npm package's bin is Node code, run as `node` runs it:
+      // with `Object.prototype.__proto__` (pm2's dependencies assign it).
+      if !deno_args.iter().any(|a| a == UNSAFE_PROTO_FLAG) {
+        deno_args.push(UNSAFE_PROTO_FLAG.to_string());
+      }
       deno_args.extend(forwarded_args.iter().cloned());
 
       run_js_file(&path, &deno_args, &flags.argv, npm_process_state, true)
