@@ -794,7 +794,9 @@ mod os {
       let len = (count as usize * CPU_STATE_MAX).min(info_count as usize);
       let ticks = std::slice::from_raw_parts(info, len);
       let cpus = ticks
-        .chunks_exact(CPU_STATE_MAX)
+        .as_chunks::<CPU_STATE_MAX>()
+        .0
+        .iter()
         .map(|c| [c[0] as u32, c[1] as u32, c[2] as u32, c[3] as u32])
         .collect();
       vm_deallocate(

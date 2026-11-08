@@ -70,7 +70,15 @@ fn test_userspace_resolver() {
     // use `localhost` to ensure dns step happens.
     let addr = format!("localhost:{}", src_addr.port());
 
-    let hickory = hickory_resolver::Resolver::builder_tokio().unwrap().build().unwrap();
+    // denext: a fixed configuration, not the host's: `localhost` never
+    // reaches a name server, and a host resolv.conf hickory can't parse (a
+    // CI VM's scoped IPv6 name server) would fail the test before the lookup.
+    let hickory = hickory_resolver::Resolver::builder_with_config(
+      hickory_resolver::config::ResolverConfig::default(),
+      hickory_resolver::net::runtime::TokioRuntimeProvider::default(),
+    )
+    .build()
+    .unwrap();
 
     assert_eq!(thread_counter.load(SeqCst), 0);
     run_test_client_with_resolver(
