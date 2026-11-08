@@ -11209,6 +11209,15 @@ where the changes are discussed.
        `run/desktop_ops_inert` spec (the five ops inert and refused without
        `--allow-sys`; with `--allow-sys` alone, no `--allow-read`, a sample has
        its CPU and memory figures).
+     - A registry property an accelerator doesn't have is skipped, never
+       released: the macOS GPU walk wrapped a missing (null) `model` or
+       `PerformanceStatistics` property before checking it, and dropping that
+       wrapper called `CFRelease(NULL)`, which CoreFoundation answers with a
+       trap. A paravirtual GPU in a macOS VM and the Radeon of an Intel Mac lack
+       `model`, so `Deno.desktop.systemStats` aborted the process there (SIGTRAP
+       on Apple silicon, SIGILL on Intel). Test:
+       `a_missing_registry_property_is_none_not_a_trap` (the registry root has
+       no such property; before: the test process died with SIGTRAP).
 
 277. **`feat(desktop)`: native message boxes** (`feat/desktop-message-dialog`,
      laufey API 54 from `feat/message-dialog` `63056a4`; runtime

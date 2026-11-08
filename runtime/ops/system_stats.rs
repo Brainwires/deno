@@ -738,6 +738,25 @@ mod os {
     ) -> CFTypeRef;
     fn IORegistryEntryGetName(entry: MachPort, name: *mut c_char)
     -> KernReturn;
+    #[cfg(test)]
+    fn IORegistryGetRootEntry(main_port: MachPort) -> MachPort;
+  }
+
+  /// The registry's root entry, for tests (release it with
+  /// [`release_entry`]).
+  #[cfg(test)]
+  pub(super) fn root_entry() -> MachPort {
+    // SAFETY: the default main port; returns a +1 entry or 0.
+    unsafe { IORegistryGetRootEntry(0) }
+  }
+
+  /// Release an entry from [`root_entry`].
+  #[cfg(test)]
+  pub(super) fn release_entry(entry: MachPort) {
+    // SAFETY: an entry we own.
+    unsafe {
+      IOObjectRelease(entry);
+    }
   }
 
   #[link(name = "CoreFoundation", kind = "framework")]
@@ -878,34 +897,48 @@ mod os {
           K_CF_STRING_ENCODING_UTF8,
         )
       };
-      (!r.is_null()).then_some(Self(r))
+      // Not `then_some`: it would build (and drop, so release) a null
+      // wrapper too.
+      (!r.is_null()).then(|| Self(r))
     }
   }
 
   impl Drop for CfString {
     fn drop(&mut self) {
-      // SAFETY: we own this reference.
-      unsafe { CFRelease(self.0) }
+      if !self.0.is_null() {
+        // SAFETY: we own this non-null reference.
+        unsafe { CFRelease(self.0) }
+      }
     }
   }
 
   /// A CF property copied from the registry (released on drop).
-  struct CfOwned(CFTypeRef);
+  pub(super) struct CfOwned(CFTypeRef);
 
   impl Drop for CfOwned {
     fn drop(&mut self) {
-      // SAFETY: a +1 reference from IORegistryEntryCreateCFProperty.
-      unsafe { CFRelease(self.0) }
+      if !self.0.is_null() {
+        // SAFETY: a non-null +1 reference from
+        // IORegistryEntryCreateCFProperty.
+        unsafe { CFRelease(self.0) }
+      }
     }
   }
 
-  fn property(entry: MachPort, key: &std::ffi::CStr) -> Option<CfOwned> {
+  pub(super) fn property(
+    entry: MachPort,
+    key: &std::ffi::CStr,
+  ) -> Option<CfOwned> {
     let key = CfString::new(key)?;
     // SAFETY: a live registry entry and a CFString key.
     let value = unsafe {
       IORegistryEntryCreateCFProperty(entry, key.0, std::ptr::null(), 0)
     };
-    (!value.is_null()).then_some(CfOwned(value))
+    // Not `then_some`: its argument is built either way, and dropping a
+    // null `CfOwned` would `CFRelease(NULL)`, which CoreFoundation answers
+    // with a trap (a host whose accelerator has no `model`, or no
+    // `PerformanceStatistics`, aborted the process).
+    (!value.is_null()).then(|| CfOwned(value))
   }
 
   /// The `PerformanceStatistics` figure of one accelerator.
@@ -1517,6 +1550,19 @@ mod tests {
         "memory": { "pressure": null, "totalBytes": 8.0 },
       })
     );
+  }
+
+  /// A registry property the entry doesn't have is `None`, and nothing is
+  /// released for it: a null wrapper released with `CFRelease(NULL)`
+  /// trapped on hosts whose accelerator lacks a `model` property (a macOS
+  /// VM's paravirtual GPU, an Intel Mac's Radeon).
+  #[cfg(target_os = "macos")]
+  #[test]
+  fn a_missing_registry_property_is_none_not_a_trap() {
+    let root = os::root_entry();
+    assert_ne!(root, 0);
+    assert!(os::property(root, c"denext-no-such-property").is_none());
+    os::release_entry(root);
   }
 
   /// The OS calls on this host: the shape and the ranges (a machine may
