@@ -97,6 +97,7 @@ const {
   StringPrototypeSplit,
   StringPrototypeStartsWith,
   StringPrototypeToLowerCase,
+  SymbolFor,
   SyntaxError,
   TypeError,
   Uint32Array,
@@ -4744,13 +4745,32 @@ export function register(specifier, parentURL = undefined, options) {
     startAsyncHooksWorker();
   }
   const transferList = options?.transferList ?? [];
-  const reply = asyncHooksRequest(
-    { type: "register", url: resolvedUrl, data: options?.data },
-    transferList,
-    () => {
-      throw new Error("module.register(): unexpected next hook call");
-    },
-  );
+  let reply;
+  try {
+    reply = asyncHooksRequest(
+      { type: "register", url: resolvedUrl, data: options?.data },
+      transferList,
+      () => {
+        throw new Error("module.register(): unexpected next hook call");
+      },
+    );
+  } catch (err) {
+    // denext: a hooks module named by `--experimental-loader` (the node
+    // shim registers it from a preload, marked with this option) that fails
+    // to load or initialize ends the program as an uncaught exception, as
+    // Node's loader bootstrap does, not as the preload's rejection — in Node
+    // mode (`--unstable-node-errors`), where that is reported as Node does.
+    if (
+      options?.[SymbolFor("denext.experimentalLoader")] === true &&
+      ArrayPrototypeIncludes(
+        op_bootstrap_unstable_args(),
+        "--unstable-node-errors",
+      )
+    ) {
+      core.reportUnhandledException(err);
+    }
+    throw err;
+  }
   asyncHooksEntry.resolve = reply.hasResolve ? asyncResolveHook : null;
   asyncHooksEntry.load = reply.hasLoad ? asyncLoadHook : null;
   _activateEsmHooks();

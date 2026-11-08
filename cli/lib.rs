@@ -798,8 +798,14 @@ fn exit_for_error(error: AnyError, initial_cwd: Option<&std::path::Path>) -> ! {
   exit_with_message(&error_string, 1);
 }
 
+/// denext: V8's `--abort-on-uncaught-exception` was given. Node mode reports
+/// an uncaught exception itself, so V8 never sees it as uncaught; the report
+/// then aborts, as Node does with the flag.
+static ABORT_ON_UNCAUGHT_EXCEPTION: std::sync::atomic::AtomicBool =
+  std::sync::atomic::AtomicBool::new(false);
+
 /// denext: an uncaught error in Node mode, printed as Node prints it, and
-/// Node's exit code for it.
+/// Node's exit code for it (an abort under `--abort-on-uncaught-exception`).
 fn exit_for_node_error(error: &deno_core::error::JsError) -> ! {
   #[allow(
     clippy::disallowed_methods,
@@ -816,6 +822,9 @@ fn exit_for_node_error(error: &deno_core::error::JsError) -> ! {
   #[allow(clippy::print_stderr, reason = "Node's uncaught error report")]
   {
     eprint!("{text}");
+  }
+  if ABORT_ON_UNCAUGHT_EXCEPTION.load(std::sync::atomic::Ordering::Relaxed) {
+    std::process::abort();
   }
   deno_runtime::exit(1);
 }
@@ -1218,6 +1227,13 @@ fn init_v8(flags: &Flags) {
     .iter()
     .chain(&flags.v8_flags)
     .any(|flag| flag == "--single-threaded");
+  if env_v8_flags.iter().chain(&flags.v8_flags).any(|flag| {
+    flag == "--abort-on-uncaught-exception"
+      || flag == "--abort_on_uncaught_exception"
+  }) {
+    ABORT_ON_UNCAUGHT_EXCEPTION
+      .store(true, std::sync::atomic::Ordering::Relaxed);
+  }
   init_v8_flags(&default_v8_flags, &flags.v8_flags, env_v8_flags);
   let v8_platform = if is_single_threaded {
     Some(::deno_core::v8::Platform::new_single_threaded(true).make_shared())

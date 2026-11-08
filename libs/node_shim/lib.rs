@@ -4168,13 +4168,14 @@ fn add_preload_flags(
         "import{{register}}from\"node:module\";\
          import{{pathToFileURL}}from\"node:url\";\
          const url=pathToFileURL({specifier});\
-         register(url,url);"
+         register(url,url,{{[Symbol.for(\"denext.experimentalLoader\")]:true}});"
       )
     } else {
       format!(
         "import{{register}}from\"node:module\";\
          import{{pathToFileURL}}from\"node:url\";\
-         register({specifier},pathToFileURL(\"./\"));"
+         register({specifier},pathToFileURL(\"./\"),\
+         {{[Symbol.for(\"denext.experimentalLoader\")]:true}});"
       )
     };
     deno_args.push(format!("--preload={}", data_url(&source)));
@@ -5809,7 +5810,8 @@ mod tests {
         svec![
           "import{register}from\"node:module\";\
            import{pathToFileURL}from\"node:url\";\
-           register(\"./my loader.mjs\",pathToFileURL(\"./\"));"
+           register(\"./my loader.mjs\",pathToFileURL(\"./\"),\
+           {[Symbol.for(\"denext.experimentalLoader\")]:true});"
         ]
       );
       assert_eq!(result.deno_args.last().unwrap(), "script.mjs");
@@ -5926,7 +5928,7 @@ mod tests {
           "import{{register}}from\"node:module\";\
            import{{pathToFileURL}}from\"node:url\";\
            const url=pathToFileURL({loader_json});\
-           register(url,url);"
+           register(url,url,{{[Symbol.for(\"denext.experimentalLoader\")]:true}});"
         ),
       ]
     );

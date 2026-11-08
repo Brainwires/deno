@@ -3295,7 +3295,8 @@ fn node_loader_preload(loader: &str) -> String {
   let source = format!(
     "import{{register}}from\"node:module\";\
      import{{pathToFileURL}}from\"node:url\";\
-     register({specifier},pathToFileURL(\"./\"));"
+     register({specifier},pathToFileURL(\"./\"),\
+     {{[Symbol.for(\"denext.experimentalLoader\")]:true}});"
   );
   let mut url = String::from("data:text/javascript,");
   for byte in source.bytes() {

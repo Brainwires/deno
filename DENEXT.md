@@ -10981,7 +10981,13 @@ where the changes are discussed.
      V8's `--stack-trace-limit`, and `--check` compiles the file as Node loads
      it (`vm.compileFunction` for CommonJS, `vm.SourceTextModule` for an ES
      module or module syntax) without running it, so a syntax error prints
-     Node's block and a valid file exits 0 silently. `deno run` keeps Deno's
+     Node's block and a valid file exits 0 silently. A hooks module named by
+     `--experimental-loader` that throws while loading or in `initialize`
+     ends the program as an uncaught exception too (the shim's preload marks
+     its `module.register()` call), so a thrown `null` prints `null` as in
+     Node. Under V8's `--abort-on-uncaught-exception` the report is followed
+     by an abort, as Node's is (V8 no longer sees the exception as uncaught
+     once the runtime reports it). `deno run` keeps Deno's
      report byte for byte, and `deno run --unstable-node-errors` opts in. Not
      reproduced: the frames in the stack (this runtime's, not Node's internals),
      the own properties `util.inspect` appends to an error (`code`, `errno`,
@@ -10992,7 +10998,10 @@ where the changes are discussed.
        executable: a CommonJS throw at top level and in a function, an `Error`
        and a number rejected, an ES module throw, `--check` of a bad and a good
        file, `--stack-trace-limit=3`; `deno run` of the same throw is unchanged,
-       and with `--unstable-node-errors` is Node's). Tests: `node_format_*`
+       and with `--unstable-node-errors` is Node's); node_compat
+       `module-hooks/test-async-loader-hooks-initialize-{throw-null,rejecting}`
+       and `abort/test-abort-uncaught-exception` (they failed on the train
+       before the loader and abort follow-ups). Tests: `node_format_*`
        (`runtime/fmt_errors.rs`), the translation tests in `libs/node_shim` and
        `node_cli_parser.rs` list the flag.
 
