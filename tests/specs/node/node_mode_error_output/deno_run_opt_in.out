@@ -1,0 +1,8 @@
+file:///[WILDCARD]throw.mjs:2
+throw new TypeError("boom");
+      ^
+
+TypeError: boom
+    at file:///[WILDCARD]throw.mjs:2:7
+
+Node.js v[WILDCARD]

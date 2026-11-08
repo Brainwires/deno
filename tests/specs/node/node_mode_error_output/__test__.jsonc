@@ -1,0 +1,24 @@
+// denext: in Node mode (the `node` shim, which passes
+// `--unstable-node-errors`) an uncaught error, an unhandled rejection and a
+// `--check` syntax error print Node's text, without colour on a pipe, and
+// `--stack-trace-limit` reaches `Error.stackTraceLimit`; `deno run` keeps
+// Deno's report.
+{
+  "tempDir": true,
+  "tests": {
+    "node_mode": {
+      "args": "run -A main.mjs",
+      "output": "main.out"
+    },
+    "deno_run_unchanged": {
+      "args": "run throw.mjs",
+      "exitCode": 1,
+      "output": "deno_run.out"
+    },
+    "deno_run_opt_in": {
+      "args": "run --unstable-node-errors throw.mjs",
+      "exitCode": 1,
+      "output": "deno_run_opt_in.out"
+    }
+  }
+}
