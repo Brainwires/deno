@@ -383,6 +383,7 @@ class ChildProcess extends EventEmitter {
       windowsHide = true,
       detached,
       envPairs,
+      envDefaulted,
       uid,
       gid,
     } = options;
@@ -470,6 +471,7 @@ class ChildProcess extends EventEmitter {
       this.#process = nodeSpawnChild(cmd, {
         args: cmdArgs,
         clearEnv: true,
+        defaultEnv: envDefaulted === true,
         cwd,
         env,
         stdin: toDenoStdio(stdin),
@@ -1491,6 +1493,9 @@ function normalizeSpawnArguments(
     // deno-lint-ignore deno-internal/prefer-primordials
     detached: !!options.detached,
     env,
+    // denext: `env` is the parent's own environment, not one the caller
+    // chose; `--clean-run-env` cuts it down as it does an inherited one.
+    envDefaulted: !options.env,
     envPairs,
     file,
     windowsHide: options.windowsHide !== false,
@@ -2062,6 +2067,7 @@ function spawnSync(
     killSignal,
     windowsVerbatimArguments = false,
     windowsHide = true,
+    envDefaulted,
   } = options;
   let command = options.file || "";
   let args = options.args || [];
@@ -2130,6 +2136,7 @@ function spawnSync(
       uid,
       gid,
       clearEnv: true,
+      defaultEnv: envDefaulted === true,
       extraStdio: extraStdioNormalized,
       windowsRawArguments: windowsVerbatimArguments,
       windowsHide,

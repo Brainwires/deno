@@ -148,6 +148,14 @@ pub static PERMISSION_ARGS: &[ArgDef] = &[
     .require_equals()
     .value_delimiter(',')
 .hidden(),
+  // denext: spawn programs with a minimal environment.
+  ArgDef::new("clean-run-env")
+    .long("clean-run-env")
+    .action(ArgAction::Append)
+    .num_args(NumArgs::ZeroOrMore)
+    .require_equals()
+    .value_delimiter(',')
+.hidden(),
   ArgDef::new("allow-sys")
     .short('S')
     .long("allow-sys")

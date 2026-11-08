@@ -1621,9 +1621,11 @@ fn permission_help_section_is_rendered() {
     "--allow-net-listen[=<IP_OR_HOSTNAME>...]",
     "--deny-net-connect[=<IP_OR_HOSTNAME>...]",
     "--deny-net-listen[=<IP_OR_HOSTNAME>...]",
+    "--clean-run-env[=<VARIABLE_NAME>...]",
   ] {
     assert!(run.contains(flag), "{flag}");
   }
+  assert!(run.contains("effectively full trust unless an OS sandbox"));
   // Hidden from the table above, documented in the section below.
   assert!(!run.contains("  -R, --allow-read[=VALUE...]  \n"));
 

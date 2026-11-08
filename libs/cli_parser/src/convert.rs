@@ -597,6 +597,7 @@ fn permission_args_parse(result: &ParseResult, flags: &mut Flags) {
   perm_flag!("ignore-env", flags.permissions.ignore_env);
   perm_flag!("allow-run", flags.permissions.allow_run);
   perm_flag!("deny-run", flags.permissions.deny_run);
+  perm_flag!("clean-run-env", flags.permissions.clean_run_env);
   perm_flag!("allow-sys", flags.permissions.allow_sys);
   perm_flag!("deny-sys", flags.permissions.deny_sys);
   perm_flag!("allow-ffi", flags.permissions.allow_ffi);
@@ -2533,6 +2534,7 @@ fn install_parse(
       "deny-env",
       "allow-run",
       "deny-run",
+      "clean-run-env",
       "allow-sys",
       "deny-sys",
       "allow-ffi",

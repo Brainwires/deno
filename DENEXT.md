@@ -11401,12 +11401,53 @@ where the changes are discussed.
        string, then asks; on Unix the raw PTY output carries the reset right
        before the prompt's first line).
 
+284. **`feat(permissions)`: `--clean-run-env` spawns programs with a minimal
+     environment, and the run prompt says run access is full trust**
+     (`feat/run-clean-env`; `runtime/permissions/lib.rs`,
+     `runtime/permissions/prompter.rs`, `ext/process/lib.rs`,
+     `ext/process/40_process.js`,
+     `ext/node/polyfills/internal/child_process.ts`,
+     `libs/cli_parser/src/{defs,convert,flags,permission_help}.rs`,
+     `cli/args/{flags,mod}.rs`). Only `LD_*` / `DYLD_*` were kept from a spawned
+     program without `--allow-run` for everything, but many programs run code
+     named by other variables (`BASH_ENV`, `NODE_OPTIONS`, `PYTHONSTARTUP`,
+     `PERL5OPT`, `VIMINIT`, `GIT_*`, ...), and a program allowed to run inherits
+     them all. `--clean-run-env[=<VARIABLE_NAME>...]` (opt-in; without it
+     nothing changes) makes a spawned program inherit only `PATH`, `HOME`,
+     `LANG`, `LC_*`, `TERM`, `TMPDIR` / `TEMP` / `TMP`, `USER` / `USERNAME` and,
+     on Windows, `SystemRoot`, `SystemDrive`, `windir`, `ComSpec`, `PATHEXT`,
+     `USERPROFILE`, `APPDATA` and `LOCALAPPDATA`, plus the names listed (`NAME`,
+     or `PREFIX*`; compared ignoring case on Windows). The variables a caller
+     passes in `env` are still set, and `clearEnv: true` still means exactly the
+     caller's environment. `node:child_process` without `options.env` fills in
+     the whole environment itself; such a spawn is marked (`defaultEnv`) and cut
+     down the same way, keeping what the polyfill added or changed (a Deno
+     child's translated flags). It covers `Deno.Command`, `Deno.run`,
+     `Deno.openPty` and `node:child_process`, and a worker spawns under its
+     parent's rule. A flag, not a `deno.json` key: it lives in
+     `PermissionsOptions`, so `deno compile` (and a desktop app) carries it in
+     the program's metadata; options written before it read as off. The `run`
+     prompt gains a line, and the `--allow-run` help a sentence: a program Deno
+     runs is not bound by Deno's permissions, so run access is effectively full
+     trust unless an OS sandbox confines it.
+     - Tests: `ext/process/lib.rs` `clean_run_env_tests` (the kept names, the
+       variables that run code, pass-through names and prefixes, OS name
+       comparison, the inherited environment cut only when on, `clearEnv`
+       untouched, a defaulted `node:child_process` environment cut but for what
+       the caller set); `runtime/permissions/lib.rs`
+       `test_clean_run_env_from_options_and_inherited_by_workers`,
+       `test_clean_run_env_options_deserialize_without_the_field`; `prompter.rs`
+       `run_prompt_says_it_grants_full_trust`; `libs/cli_parser`
+       `clean_run_env_flag` and the permission help section; `cli/args/mod.rs`
+       `test_flags_to_permission_options_clean_run_env`; the run prompts in
+       `tests/integration/run_tests.rs` carry the new line.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
 169-174, 176, 178, 180, 182-184, 186, 187, 189-191, 193-196, 198-203, 206, 207,
 209-215, 217, 218, 221, 222, 224, 225, 227, 228, 231, 232, 235, 237, 240,
-243-245, 247-249, 253, 254, 256-260, 262-264, 267-283) are what the prebuilt
+243-245, 247-249, 253, 254, 256-260, 262-264, 267-284) are what the prebuilt
 `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
 in the branch too, but a stock CLI does not run them; denext's own launcher

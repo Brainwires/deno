@@ -265,6 +265,7 @@ impl FlagsExt for Flags {
       ("--deny-net-connect", &self.permissions.deny_net_connect),
       ("--allow-net-listen", &self.permissions.allow_net_listen),
       ("--deny-net-listen", &self.permissions.deny_net_listen),
+      ("--clean-run-env", &self.permissions.clean_run_env),
     ] {
       match list {
         Some(list) if list.is_empty() => args.push(flag.to_string()),

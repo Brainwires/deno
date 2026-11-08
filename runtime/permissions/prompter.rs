@@ -115,6 +115,23 @@ fn terminal_reset_supported() -> bool {
   }
 }
 
+/// denext: the extra prompt line for `run`. A program Deno starts is not
+/// bound by Deno's permissions, so allowing one is as good as allowing
+/// everything, unless the OS confines it.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) const RUN_TRUST_NOTE: &str = "Run access is full trust: the program is not bound by Deno's permissions unless an OS sandbox confines it.";
+
+/// The lines a prompt adds for permission `name` between its header and
+/// the stack trace.
+#[cfg(not(target_arch = "wasm32"))]
+fn prompt_note_lines(name: &str) -> &'static [&'static str] {
+  if name == "run" {
+    &[RUN_TRUST_NOTE]
+  } else {
+    &[]
+  }
+}
+
 #[derive(Debug, Eq, PartialEq)]
 pub enum PromptResponse {
   Allow,
@@ -564,6 +581,9 @@ impl PermissionPrompter for TtyPrompter {
       write!(&mut output, "{}", colors::bold("Deno requests ")).unwrap();
       write!(&mut output, "{}", colors::bold(message.clone())).unwrap();
       writeln!(&mut output, "{}", colors::bold(".")).unwrap();
+      for note in prompt_note_lines(&name) {
+        writeln!(&mut output, "┠─ {}", colors::bold(note)).unwrap();
+      }
       if let Some(api_name) = api_name.clone() {
         writeln!(
           &mut output,
@@ -637,7 +657,9 @@ impl PermissionPrompter for TtyPrompter {
         break PromptResponse::Deny;
       };
 
-      let clear_n = if api_name.is_some() { 5 } else { 4 } + stack_lines_count;
+      let clear_n = if api_name.is_some() { 5 } else { 4 }
+        + stack_lines_count
+        + prompt_note_lines(&name).len();
 
       match input.as_bytes()[0] as char {
         'y' | 'Y' => {
@@ -760,6 +782,17 @@ pub mod tests {
     assert!(pos("\x1b[?25h") > leave_alt);
     assert!(pos("\x0f") > leave_alt);
     assert!(pos("\x1b(B") > leave_alt);
+  }
+
+  #[cfg(not(target_arch = "wasm32"))]
+  #[test]
+  fn run_prompt_says_it_grants_full_trust() {
+    assert_eq!(prompt_note_lines("run"), &[RUN_TRUST_NOTE]);
+    assert!(RUN_TRUST_NOTE.contains("full trust"));
+    assert!(RUN_TRUST_NOTE.contains("OS sandbox"));
+    for name in ["read", "write", "net", "env", "sys", "ffi", "import"] {
+      assert!(prompt_note_lines(name).is_empty(), "{name}");
+    }
   }
 
   #[cfg(not(target_arch = "wasm32"))]

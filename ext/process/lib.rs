@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::ffi::CStr;
 #[cfg(unix)]
 use std::ffi::CString;
+use std::ffi::OsStr;
 use std::ffi::OsString;
 use std::io::Write;
 #[cfg(unix)]
@@ -581,6 +582,11 @@ pub struct SpawnArgs {
   /// `None` means unlimited.
   #[serde(default)]
   max_buffer: Option<u64>,
+  /// denext: `env` is the parent's whole environment, filled in by the caller
+  /// rather than chosen (`node:child_process` without `options.env`). Under
+  /// `--clean-run-env` it is then cut down as an inherited one would be.
+  #[serde(default)]
+  default_env: bool,
 }
 
 #[derive(Clone, Deserialize)]
@@ -907,6 +913,27 @@ fn create_command(
   // match the POSIX `execvp` / Node.js behavior. Always `false` on Windows.
   wrap_in_shell: bool,
 ) -> Result<CreateCommand, ProcessError> {
+  // denext: an environment the caller filled in from the parent's own (not
+  // one it chose) gets the `--clean-run-env` cut an inherited one gets. What
+  // the caller added or changed on the way (`node:child_process` translating
+  // flags for a Deno child, say) differs from the parent's value and stays.
+  if args.default_env
+    && args.clear_env
+    && let Some(pass_through) =
+      state.borrow::<PermissionsContainer>().clean_run_env()
+  {
+    let parent = deno_os::env_vars_os_for_child_process()
+      .into_iter()
+      .map(|(k, v)| (EnvVarKey::new(k), v))
+      .collect::<HashMap<_, _>>();
+    args.env.retain(|(key, value)| {
+      clean_run_env_keeps(OsStr::new(key), &pass_through)
+        || parent
+          .get(&EnvVarKey::from_str(key))
+          .is_none_or(|parent_value| parent_value != OsStr::new(value))
+    });
+  }
+
   let maybe_npm_process_state = if args.needs_npm_process_state {
     let provider = state.borrow::<NpmProcessStateProviderRc>();
     let process_state = provider.get_npm_process_state();
@@ -1649,12 +1676,18 @@ fn compute_run_cmd_and_check_permissions(
   (PathBuf, RunEnv, Option<embedded_program::VerifiedProgram>),
   ProcessError,
 > {
-  let run_env =
-    compute_run_env(arg_cwd, arg_envs, arg_clear_env, allow_cwd_inherit)
-      .map_err(|e| ProcessError::SpawnFailed {
-        command: arg_cmd.to_string(),
-        error: Box::new(e),
-      })?;
+  let clean_run_env = state.borrow::<PermissionsContainer>().clean_run_env();
+  let run_env = compute_run_env(
+    arg_cwd,
+    arg_envs,
+    arg_clear_env,
+    allow_cwd_inherit,
+    clean_run_env.as_deref(),
+  )
+  .map_err(|e| ProcessError::SpawnFailed {
+    command: arg_cmd.to_string(),
+    error: Box::new(e),
+  })?;
   let cmd =
     resolve_cmd(arg_cmd, &run_env).map_err(|e| ProcessError::SpawnFailed {
       command: arg_cmd.to_string(),
@@ -1684,6 +1717,71 @@ fn compute_run_cmd_and_check_permissions(
         .into(),
     ),
   }
+}
+
+/// denext (`--clean-run-env`): what a spawned program still inherits. None
+/// of these makes a program run code it was not asked to; the variables that
+/// do (`BASH_ENV`, `NODE_OPTIONS`, `PYTHONSTARTUP`, `VIMINIT`, `GIT_*`,
+/// `LD_*` / `DYLD_*`, …) are exactly what the option keeps out.
+const CLEAN_RUN_ENV_NAMES: &[&str] = &[
+  "PATH", "HOME", "LANG", "TERM", "TMPDIR", "TEMP", "TMP", "USER", "USERNAME",
+];
+
+/// Prefixes of [`CLEAN_RUN_ENV_NAMES`] (the locale categories).
+const CLEAN_RUN_ENV_PREFIXES: &[&str] = &["LC_"];
+
+/// On Windows, what programs need to start and find the system and the user's
+/// folders.
+#[cfg(windows)]
+const CLEAN_RUN_ENV_WINDOWS_NAMES: &[&str] = &[
+  "SystemRoot",
+  "SystemDrive",
+  "windir",
+  "ComSpec",
+  "PATHEXT",
+  "USERPROFILE",
+  "APPDATA",
+  "LOCALAPPDATA",
+];
+
+/// denext: whether `--clean-run-env` lets a spawned program inherit the
+/// variable `key`: a name of the minimal set, or one `pass_through` names
+/// (`NAME`, or `PREFIX*` for every name that starts with `PREFIX`). Names
+/// compare as the OS does: ignoring case on Windows, exactly elsewhere. A
+/// name that isn't Unicode is never kept.
+fn clean_run_env_keeps(key: &OsStr, pass_through: &[String]) -> bool {
+  let Some(key) = key.to_str() else {
+    return false;
+  };
+  fn same(a: &str, b: &str) -> bool {
+    if cfg!(windows) {
+      a.eq_ignore_ascii_case(b)
+    } else {
+      a == b
+    }
+  }
+  fn starts_with(key: &str, prefix: &str) -> bool {
+    key
+      .get(..prefix.len())
+      .is_some_and(|start| same(start, prefix))
+  }
+  #[cfg(windows)]
+  let windows_names = CLEAN_RUN_ENV_WINDOWS_NAMES;
+  #[cfg(not(windows))]
+  let windows_names: &[&str] = &[];
+  CLEAN_RUN_ENV_NAMES
+    .iter()
+    .chain(windows_names)
+    .any(|name| same(key, name))
+    || CLEAN_RUN_ENV_PREFIXES
+      .iter()
+      .any(|prefix| starts_with(key, prefix))
+    || pass_through
+      .iter()
+      .any(|entry| match entry.strip_suffix('*') {
+        Some(prefix) => starts_with(key, prefix),
+        None => same(key, entry),
+      })
 }
 
 #[derive(Debug)]
@@ -1761,11 +1859,16 @@ struct RunEnv {
 /// no explicit cwd was passed and `current_dir()` fails (e.g. the parent's
 /// cwd has been unlinked). Only Node-compat ops opt into this; Deno's own
 /// `Deno.run` / `Deno.Command` keep the existing strict behavior.
+///
+/// `clean_run_env` (denext, `--clean-run-env`): when `Some`, only the
+/// variables [`clean_run_env_keeps`] keeps are inherited; `arg_envs` are
+/// still set on top, and with `arg_clear_env` nothing is inherited anyway.
 fn compute_run_env(
   arg_cwd: Option<&str>,
   arg_envs: &[(String, String)],
   arg_clear_env: bool,
   allow_cwd_inherit: bool,
+  clean_run_env: Option<&[String]>,
 ) -> Result<RunEnv, ProcessError> {
   #[allow(
     clippy::disallowed_methods,
@@ -1802,6 +1905,10 @@ fn compute_run_env(
     // keeps to this process (`set_env_overlay_var_not_inherited`).
     let mut envs = deno_os::env_vars_os_for_child_process()
       .into_iter()
+      .filter(|(k, _)| {
+        clean_run_env
+          .is_none_or(|pass_through| clean_run_env_keeps(k, pass_through))
+      })
       .map(|(k, v)| (EnvVarKey::new(k), v))
       .collect::<HashMap<_, _>>();
     for (key, value) in arg_envs {
@@ -3170,5 +3277,238 @@ mod self_fork_tests {
       true,
       &[("DYLD_INSERT_LIBRARIES", "/tmp/x")]
     ));
+  }
+}
+
+// denext: `--clean-run-env`.
+#[cfg(test)]
+mod clean_run_env_tests {
+  use std::ffi::OsStr;
+  use std::ffi::OsString;
+
+  use super::EnvVarKey;
+  use super::clean_run_env_keeps;
+  use super::compute_run_env;
+
+  fn keeps(key: &str, pass_through: &[&str]) -> bool {
+    let pass_through: Vec<String> =
+      pass_through.iter().map(|s| s.to_string()).collect();
+    clean_run_env_keeps(OsStr::new(key), &pass_through)
+  }
+
+  #[test]
+  fn keeps_the_minimal_set() {
+    for key in [
+      "PATH", "HOME", "LANG", "LC_ALL", "LC_CTYPE", "TERM", "TMPDIR", "TEMP",
+      "TMP", "USER", "USERNAME",
+    ] {
+      assert!(keeps(key, &[]), "{key}");
+    }
+  }
+
+  #[test]
+  fn drops_variables_that_run_code() {
+    for key in [
+      "BASH_ENV",
+      "ENV",
+      "NODE_OPTIONS",
+      "PYTHONSTARTUP",
+      "PYTHONPATH",
+      "PERL5OPT",
+      "RUBYOPT",
+      "VIMINIT",
+      "GIT_DIR",
+      "GIT_SSH_COMMAND",
+      "GIT_CONFIG_GLOBAL",
+      "LD_PRELOAD",
+      "DYLD_INSERT_LIBRARIES",
+      "PROMPT_COMMAND",
+      "EDITOR",
+      "PAGER",
+      // a prefix of a kept name is not the name
+      "PATHS",
+      "LC",
+    ] {
+      assert!(!keeps(key, &[]), "{key}");
+    }
+  }
+
+  #[test]
+  fn passes_through_listed_names_and_prefixes() {
+    assert!(keeps("GIT_DIR", &["GIT_DIR"]));
+    assert!(!keeps("GIT_DIR_X", &["GIT_DIR"]));
+    assert!(keeps("MY_APP_TOKEN", &["MY_APP_*"]));
+    assert!(keeps("MY_APP_", &["MY_APP_*"]));
+    assert!(!keeps("MY_AP", &["MY_APP_*"]));
+    assert!(!keeps("OTHER", &["GIT_DIR", "MY_APP_*"]));
+  }
+
+  #[test]
+  fn compares_names_as_the_os_does() {
+    assert_eq!(keeps("Path", &[]), cfg!(windows));
+    assert_eq!(keeps("git_dir", &["GIT_DIR"]), cfg!(windows));
+    assert_eq!(keeps("lc_all", &[]), cfg!(windows));
+    assert_eq!(keeps("SystemRoot", &[]), cfg!(windows));
+    assert_eq!(keeps("COMSPEC", &[]), cfg!(windows));
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn drops_a_name_that_is_not_unicode() {
+    use std::os::unix::ffi::OsStrExt;
+    assert!(!clean_run_env_keeps(
+      OsStr::from_bytes(b"PATH\xff"),
+      &["*".to_string()]
+    ));
+  }
+
+  fn env_of(
+    envs: &[(String, String)],
+    clear_env: bool,
+    clean: Option<&[String]>,
+  ) -> std::collections::HashMap<EnvVarKey, OsString> {
+    compute_run_env(None, envs, clear_env, false, clean)
+      .unwrap()
+      .envs
+  }
+
+  fn has(
+    envs: &std::collections::HashMap<EnvVarKey, OsString>,
+    key: &str,
+  ) -> bool {
+    envs.contains_key(&EnvVarKey::from_str(key))
+  }
+
+  // `cargo test` runs the test with `CARGO_MANIFEST_DIR` set, a variable
+  // the minimal set does not keep.
+  #[test]
+  fn cuts_the_inherited_environment_only_when_on() {
+    let inherited = "CARGO_MANIFEST_DIR";
+    if std::env::var_os(inherited).is_none() {
+      return;
+    }
+    let explicit = vec![("DENO_TEST_EXPLICIT".to_string(), "1".to_string())];
+
+    // Off: everything is inherited (stock behaviour).
+    let envs = env_of(&explicit, false, None);
+    assert!(has(&envs, inherited));
+    assert!(has(&envs, "DENO_TEST_EXPLICIT"));
+
+    // On: the inherited variable is gone, the explicit one stays, and so
+    // does the minimal set.
+    let envs = env_of(&explicit, false, Some(&[]));
+    assert!(!has(&envs, inherited));
+    assert!(has(&envs, "DENO_TEST_EXPLICIT"));
+    if std::env::var_os("PATH").is_some() {
+      assert!(has(&envs, "PATH"));
+    }
+
+    // Passed through by name or prefix.
+    let envs = env_of(&explicit, false, Some(&["CARGO_*".to_string()]));
+    assert!(has(&envs, inherited));
+
+    // `clearEnv`: the caller's environment, exactly, whether on or off.
+    let chosen = vec![
+      (inherited.to_string(), "chosen".to_string()),
+      ("NODE_OPTIONS".to_string(), "--require x".to_string()),
+    ];
+    for clean in [None, Some(&[] as &[String])] {
+      let envs = env_of(&chosen, true, clean);
+      assert_eq!(envs.len(), 2);
+      assert!(has(&envs, inherited));
+      assert!(has(&envs, "NODE_OPTIONS"));
+    }
+  }
+
+  // A spawn whose `env` is the parent's own, filled in by the caller
+  // (`node:child_process` without `options.env`): cut down like an
+  // inherited one under the option, except what the caller added or changed.
+  #[cfg(unix)]
+  #[test]
+  fn cuts_a_defaulted_environment_but_keeps_what_the_caller_set() {
+    use std::sync::Arc;
+
+    use deno_core::OpState;
+    use deno_permissions::Permissions;
+    use deno_permissions::PermissionsContainer;
+    use deno_permissions::PermissionsOptions;
+    use deno_permissions::RuntimePermissionDescriptorParser;
+
+    let inherited = "CARGO_MANIFEST_DIR";
+    let Some(inherited_value) = std::env::var_os(inherited) else {
+      return;
+    };
+    let inherited_value = inherited_value.into_string().unwrap();
+
+    let spawn_envs = |clean: Option<Vec<String>>, default_env: bool| {
+      let mut state = OpState::new(None);
+      let parser =
+        RuntimePermissionDescriptorParser::new(sys_traits::impls::RealSys);
+      let permissions = Permissions::from_options(
+        &parser,
+        &PermissionsOptions {
+          allow_run: Some(vec![]),
+          clean_run_env: clean,
+          ..Default::default()
+        },
+      )
+      .unwrap();
+      state.put(PermissionsContainer::new(Arc::new(parser), permissions));
+      let args: super::SpawnArgs =
+        deno_core::serde_json::from_value(deno_core::serde_json::json!({
+          "cmd": "/bin/sh",
+          "args": [],
+          "cwd": null,
+          "clearEnv": true,
+          "defaultEnv": default_env,
+          "env": [
+            [inherited, inherited_value],
+            ["DENO_TEST_ADDED", "1"],
+            ["LANG", "C"],
+          ],
+          "gid": null,
+          "uid": null,
+          "windowsRawArguments": false,
+          "ipc": null,
+          "serialization": null,
+          "stdin": "null",
+          "stdout": "null",
+          "stderr": "null",
+          "input": null,
+          "extraStdio": [],
+          "detached": false,
+          "needsNpmProcessState": false,
+          "argv0": null,
+        }))
+        .unwrap();
+      let (command, ..) = super::create_command(
+        &mut state,
+        args,
+        "node:child_process",
+        false,
+        false,
+      )
+      .unwrap();
+      command
+        .get_envs()
+        .filter_map(|(k, v)| v.map(|_| k.to_str().unwrap().to_string()))
+        .collect::<Vec<_>>()
+    };
+
+    let all = |envs: &[String]| {
+      [inherited, "DENO_TEST_ADDED", "LANG"]
+        .iter()
+        .all(|k| envs.iter().any(|e| e == k))
+    };
+    // Off, or an environment the caller chose: as passed.
+    assert!(all(&spawn_envs(None, true)));
+    assert!(all(&spawn_envs(Some(vec![]), false)));
+    // On, defaulted: the parent's unchanged variable is cut.
+    let envs = spawn_envs(Some(vec![]), true);
+    assert!(!envs.iter().any(|e| e == inherited), "{envs:?}");
+    assert!(envs.iter().any(|e| e == "DENO_TEST_ADDED"), "{envs:?}");
+    assert!(envs.iter().any(|e| e == "LANG"), "{envs:?}");
+    // ... unless passed through.
+    assert!(all(&spawn_envs(Some(vec![inherited.to_string()]), true)));
   }
 }

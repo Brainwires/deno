@@ -30,8 +30,10 @@ Docs: https://docs.deno.com/go/permissions
                                             --allow-env  |  --allow-env=\"PORT,HOME,PATH\"
   -S, --allow-sys[=<API_NAME>...]           Allow access to OS information. Optionally allow specific APIs by function name.
                                             --allow-sys  |  --allow-sys=\"systemMemoryInfo,osRelease\"
-  --allow-run[=<PROGRAM_NAME>...]           Allow running subprocesses. Optionally specify allowed runnable program names.
+  --allow-run[=<PROGRAM_NAME>...]           Allow running subprocesses. Optionally specify allowed runnable program names. A program Deno runs is not bound by Deno's permissions, so this is effectively full trust unless an OS sandbox confines it.
                                             --allow-run  |  --allow-run=\"whoami,ps\"
+  --clean-run-env[=<VARIABLE_NAME>...]      Spawn programs with a minimal environment (PATH, HOME, LANG, LC_*, TERM, TMPDIR/TEMP/TMP, USER/USERNAME, and on Windows the system variables) plus the listed names (NAME or PREFIX*), not the whole environment. Variables passed in `env` are still set.
+                                            --clean-run-env  |  --clean-run-env=\"GIT_DIR,MY_APP_*\"
   --allow-ffi[=<PATH>...]                   (Unstable) Allow loading dynamic libraries. Optionally specify allowed directories or files.
                                             --allow-ffi  |  --allow-ffi=\"./libfoo.so\"
   --deny-read[=<PATH>...]                   Deny file system read access. Optionally specify denied paths.
