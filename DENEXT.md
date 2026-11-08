@@ -10883,7 +10883,7 @@ where the changes are discussed.
        package's own entry run).
 
 269. **`feat(desktop)`: native message boxes** (`feat/desktop-message-dialog`,
-     laufey API 54 from `feat/message-dialog` `d018a93`; runtime
+     laufey API 54 from `feat/message-dialog` `63056a4`; runtime
      3.0.0-denext.14; `runtime/ops/desktop.rs`, `cli/rt_desktop/lib.rs`,
      `cli/rt/desktop.rs`, `runtime/js/99_main.js`,
      `cli/tsc/dts/lib.deno.desktop.d.ts`, `cli/rt_desktop/Cargo.toml`,
