@@ -3092,6 +3092,17 @@ laufey::main!(|| {
         data.vfs.read_file_all(file).ok().map(|b| b.into_owned())
       },
     );
+  // The desktop capabilities the app's packaging baked in (`capabilities`
+  // in the embedded app.json): each lets the app use that API without the
+  // broad permission it otherwise needs.
+  let baked_capabilities = app_origin::resolve_baked_capabilities(
+    &data.root_path,
+    &data.metadata.entrypoint_key,
+    |path| {
+      let file = data.vfs.file_entry(path).ok()?;
+      data.vfs.read_file_all(file).ok().map(|b| b.into_owned())
+    },
+  );
   let app_origin = app_config.origin;
   let deep_links = app_config.deep_links;
   // `LAUFEY_APP_ID` (the per-app web data directory, and the key of the
@@ -3191,6 +3202,7 @@ laufey::main!(|| {
           display_name: app_config.name,
           app_update,
           allowed_navigation_origins,
+          baked_capabilities,
         },
         data,
       )
@@ -3292,6 +3304,9 @@ struct LaunchConfig {
   app_update: deno_runtime::ops::desktop_update::AppUpdateConfig,
   /// `allowedNavigationOrigins` from the embedded app.json (normalized).
   allowed_navigation_origins: Vec<String>,
+  /// `capabilities` from the embedded app.json: the baked desktop
+  /// capabilities this runtime knows.
+  baked_capabilities: deno_runtime::ops::desktop::DesktopBakedCapabilities,
 }
 
 /// Register the backend's open-URL and second-instance handlers, feeding
@@ -3893,6 +3908,7 @@ async fn run_desktop(
   ));
   let launch_deep_links = Arc::new(launch.deep_links);
   let app_update = launch.app_update;
+  let baked_capabilities = launch.baked_capabilities;
   let launch_urls = launch.targets.urls;
   let launch_files: Vec<String> = launch
     .targets
@@ -4083,6 +4099,9 @@ async fn run_desktop(
       // Deno.desktop.updater (main scope only; the ops are kept out of
       // workers).
       state.put(app_update);
+      // The baked desktop capabilities (main scope only, like the APIs they
+      // gate; a worker has no `Deno.desktop`).
+      state.put(baked_capabilities);
       state.put(event_rx);
       state.put(event_tx);
       state.put(pending_responses);

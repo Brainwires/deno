@@ -1,8 +1,10 @@
 // The desktop integrations that reach past the app's own windows (reading
 // and watching the clipboard, global shortcuts, launch at login, taking a
-// URL scheme from its owner, notifications) check unscoped --allow-sys
-// first: NotCapable without it, also with only some sys names; with it they
-// are as inert as every other op outside a desktop app.
+// URL scheme from its owner, notifications, the secure store) check unscoped
+// --allow-sys first: NotCapable without it, also with only some sys names;
+// with it they are as inert as every other op outside a desktop app. (The
+// secure store also passes with the baked "secureStore" capability, which
+// only a packaged desktop app has.)
 const ops = Deno[Deno.internal].core.ops;
 const granted = Deno.permissions.querySync({ name: "sys" }).state ===
   "granted";
@@ -28,6 +30,12 @@ const cases = {
     ops.op_desktop_register_scheme("myapp", true),
   "op_desktop_register_scheme(no force)": () =>
     ops.op_desktop_register_scheme("myapp", false),
+  op_desktop_secret_request: () =>
+    ops.op_desktop_secret_request({
+      op: "get",
+      service: "dev.deno.inert",
+      account: "a",
+    }),
   op_desktop_schedule_notification: () =>
     ops.op_desktop_schedule_notification({
       tag: "t",

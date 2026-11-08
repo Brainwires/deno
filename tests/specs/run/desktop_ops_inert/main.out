@@ -36,7 +36,7 @@ op_desktop_system_capabilities -> {"globalShortcuts":false,"shortcutsUserBinds":
 op_desktop_platform_features -> null
 op_desktop_title_bar_preferences -> null
 op_desktop_secret_supported -> false
-op_desktop_secret_request throws NotCapable: Requires sys access, run again with the --allow-sys flag
+op_desktop_secret_request throws NotCapable: Deno.desktop.secureStore: Requires sys access, run again with the --allow-sys flag, or enable desktop.capabilities.secureStore so the app's packaging bakes the "secureStore" capability
 op_desktop_register_shortcut throws NotCapable: Requires sys access, run again with the --allow-sys flag
 op_desktop_unregister_shortcut -> false
 op_desktop_unregister_all_shortcuts -> null
