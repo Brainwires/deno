@@ -366,6 +366,11 @@ const exceptionWithHostPort = hideStackFrames(
   },
 );
 
+// A permission refusal (`--allow-*` not granted).
+function isNotCapableError(e: unknown): boolean {
+  return ObjectPrototypeIsPrototypeOf(Deno.errors.NotCapable.prototype, e);
+}
+
 const handleDnsError = hideStackFrames(
   (err: Error, syscall: string, address: string) => {
     //@ts-expect-error code is safe to access with optional chaining
@@ -374,7 +379,7 @@ const handleDnsError = hideStackFrames(
       return dnsException(err?.uv_errcode, syscall, address);
     }
 
-    if (ObjectPrototypeIsPrototypeOf(Deno.errors.NotCapable.prototype, err)) {
+    if (isNotCapableError(err)) {
       return dnsException(codeMap.get("EPERM")!, syscall, address);
     }
 
@@ -3134,7 +3139,53 @@ interface UvExceptionContext {
   path?: string;
   dest?: string;
 }
+
+const kNotCapableMessage = new SafeRegExp(/^Requires (\w+) access to "(.*)"/);
+const kNodePermissionScopes = {
+  __proto__: null,
+  read: "FileSystemRead",
+  write: "FileSystemWrite",
+};
+
+/**
+ * A permission refusal (`Deno.errors.NotCapable`) met by a node: API gets the
+ * fields Node's permission model puts on its refusals (`code:
+ * "ERR_ACCESS_DENIED"`, `permission`, `resource`) plus the `syscall` and
+ * `path` every fs error carries. The error is decorated in place, so it stays
+ * a `Deno.errors.NotCapable` with Deno's message, and Deno's own APIs, which
+ * never come through here, keep throwing it unchanged.
+ */
+function decorateNotCapableError(e: Error, ctx: UvExceptionContext) {
+  const match = StringPrototypeMatch(e.message, kNotCapableMessage);
+  const path = typeof ctx.path === "string"
+    ? ctx.path
+    : (match ? match[2] : undefined);
+  // deno-lint-ignore no-explicit-any
+  const ex: any = e;
+  ex.code = "ERR_ACCESS_DENIED";
+  const permission = match ? kNodePermissionScopes[match[1]] : undefined;
+  if (permission !== undefined) {
+    ex.permission = permission;
+  }
+  if (path !== undefined) {
+    ex.resource = path;
+  }
+  if (ctx.syscall !== undefined) {
+    ex.syscall = ctx.syscall;
+  }
+  if (path !== undefined) {
+    ex.path = path;
+  }
+  if (typeof ctx.dest === "string") {
+    ex.dest = ctx.dest;
+  }
+  return ex;
+}
+
 function denoErrorToNodeError(e: Error, ctx: UvExceptionContext) {
+  if (isNotCapableError(e)) {
+    return decorateNotCapableError(e, ctx);
+  }
   if (ObjectPrototypeIsPrototypeOf(Deno.errors.BadResource.prototype, e)) {
     return uvException({
       errno: UV_EBADF,
@@ -3158,6 +3209,9 @@ function denoWriteFileErrorToNodeError(
   e: Error,
   ctx: UvExceptionContext,
 ) {
+  if (isNotCapableError(e)) {
+    return decorateNotCapableError(e, ctx);
+  }
   if (ObjectPrototypeIsPrototypeOf(Deno.errors.BadResource.prototype, e)) {
     return uvException({
       errno: UV_EBADF,

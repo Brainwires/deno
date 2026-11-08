@@ -1,0 +1,9 @@
+// denext (DENEXT.md item 269): a permission refusal from `node:fs` carries
+// Node's permission-model fields (`code: "ERR_ACCESS_DENIED"`, `permission`,
+// `resource`) plus `syscall` / `path` on the sync, callback and promise
+// forms, and stays a `Deno.errors.NotCapable`; Deno's own APIs keep their
+// error unchanged.
+{
+  "args": "run --allow-read=allowed main.mjs",
+  "output": "main.out"
+}
