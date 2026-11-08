@@ -867,7 +867,7 @@ fn node_error_source(
 /// CommonJS module by.
 fn node_file_path(file_name: &str) -> Option<std::path::PathBuf> {
   if file_name.starts_with("file:") {
-    Url::parse(file_name).ok()?.to_file_path().ok()
+    deno_path_util::url_to_file_path(&Url::parse(file_name).ok()?).ok()
   } else {
     let path = std::path::Path::new(file_name);
     path.is_absolute().then(|| path.to_path_buf())

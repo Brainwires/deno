@@ -332,7 +332,8 @@ fn socket_has_pending_read(fd: std::os::unix::io::RawFd) -> bool {
 fn socket_has_pending_read(sock: std::os::windows::io::RawSocket) -> bool {
   unsafe extern "system" {
     fn ioctlsocket(s: usize, cmd: i32, argp: *mut u32) -> c_int;
-    fn recv(s: usize, buf: *mut c_char, len: c_int, flags: c_int) -> c_int;
+    // The same signature as tcp.rs's declaration (clashing-extern-declarations).
+    fn recv(s: usize, buf: *mut c_void, len: c_int, flags: c_int) -> c_int;
     fn WSAGetLastError() -> c_int;
   }
   // `_IOR('f', 127, u_long)`: the bytes readable without blocking.
@@ -356,7 +357,8 @@ fn socket_has_pending_read(sock: std::os::windows::io::RawSocket) -> bool {
   let mut byte: c_char = 0;
   // SAFETY: `sock` is a socket the stream handle owns, and `byte` is a
   // one-byte buffer that lives for the call.
-  let r = unsafe { recv(sock, &mut byte, 1, MSG_PEEK) };
+  let r =
+    unsafe { recv(sock, &mut byte as *mut c_char as *mut c_void, 1, MSG_PEEK) };
   if r != SOCKET_ERROR {
     return true;
   }
