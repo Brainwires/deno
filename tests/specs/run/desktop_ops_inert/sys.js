@@ -1,10 +1,11 @@
 // The desktop integrations that reach past the app's own windows (reading
 // and watching the clipboard, global shortcuts, launch at login, taking a
-// URL scheme from its owner, notifications, the secure store) check unscoped
-// --allow-sys first: NotCapable without it, also with only some sys names;
-// with it they are as inert as every other op outside a desktop app. (The
-// secure store also passes with the baked "secureStore" capability, which
-// only a packaged desktop app has.)
+// URL scheme from its owner, notifications, the secure store, sampling the
+// system stats) check unscoped --allow-sys first: NotCapable without it,
+// also with only some sys names; with it they are as inert as every other op
+// outside a desktop app (sampling only reads the machine's figures). (The
+// secure store and the system stats also pass with their baked capability,
+// which only a packaged desktop app has.)
 const ops = Deno[Deno.internal].core.ops;
 const granted = Deno.permissions.querySync({ name: "sys" }).state ===
   "granted";
@@ -36,6 +37,23 @@ const cases = {
       service: "dev.deno.inert",
       account: "a",
     }),
+  op_desktop_system_stats_check: () => ops.op_desktop_system_stats_check(),
+  // Sampling needs nothing besides sys (no --allow-read for /proc).
+  op_desktop_system_stats: async () => {
+    const rid = ops.op_desktop_system_stats_open();
+    try {
+      const s = await ops.op_desktop_system_stats(rid, true, false);
+      return [
+        Object.keys(s),
+        Object.keys(s.cpu),
+        typeof s.at,
+        typeof s.cpu.total,
+        typeof s.memory.pressure,
+      ];
+    } finally {
+      ops.op_desktop_system_stats_close(rid);
+    }
+  },
   op_desktop_schedule_notification: () =>
     ops.op_desktop_schedule_notification({
       tag: "t",

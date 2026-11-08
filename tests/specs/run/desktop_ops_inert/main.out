@@ -37,6 +37,11 @@ op_desktop_platform_features -> null
 op_desktop_title_bar_preferences -> null
 op_desktop_secret_supported -> false
 op_desktop_secret_request throws NotCapable: Deno.desktop.secureStore: Requires sys access, run again with the --allow-sys flag, or enable desktop.capabilities.secureStore so the app's packaging bakes the "secureStore" capability
+op_desktop_system_stats_supported -> true
+op_desktop_system_stats_open -> "number"
+op_desktop_system_stats_close throws BadResource: Bad resource ID
+op_desktop_system_stats_check throws NotCapable: Deno.desktop.systemStats: Requires sys access, run again with the --allow-sys flag, or enable desktop.capabilities.systemStats so the app's packaging bakes the "systemStats" capability
+op_desktop_system_stats throws NotCapable: Deno.desktop.systemStats: Requires sys access, run again with the --allow-sys flag, or enable desktop.capabilities.systemStats so the app's packaging bakes the "systemStats" capability
 op_desktop_register_shortcut throws NotCapable: Requires sys access, run again with the --allow-sys flag
 op_desktop_unregister_shortcut -> false
 op_desktop_unregister_all_shortcuts -> null
@@ -83,4 +88,4 @@ BrowserWindow throws NotSupported: BrowserWindow is only available in the main s
 Dock throws NotSupported: Dock is only available in the main scope of a desktop app
 Tray throws NotSupported: Tray is only available in the main scope of a desktop app
 Notification throws NotSupported: Notification is only available in the main scope of a desktop app
-85 exposed, 0 uncovered
+90 exposed, 0 uncovered

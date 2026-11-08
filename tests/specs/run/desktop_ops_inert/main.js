@@ -143,6 +143,25 @@ const cases = {
       account: "a",
       value: "v",
     }),
+  op_desktop_system_stats_supported: () =>
+    ops.op_desktop_system_stats_supported(),
+  // A sampler opens nothing of the OS's; sampling is refused without sys.
+  op_desktop_system_stats_open: () => {
+    const rid = ops.op_desktop_system_stats_open();
+    ops.op_desktop_system_stats_close(rid);
+    return typeof rid;
+  },
+  op_desktop_system_stats_close: () =>
+    ops.op_desktop_system_stats_close(0x7fffffff),
+  op_desktop_system_stats_check: () => ops.op_desktop_system_stats_check(),
+  op_desktop_system_stats: async () => {
+    const rid = ops.op_desktop_system_stats_open();
+    try {
+      return await ops.op_desktop_system_stats(rid, true, false);
+    } finally {
+      ops.op_desktop_system_stats_close(rid);
+    }
+  },
   op_desktop_register_shortcut: () =>
     ops.op_desktop_register_shortcut("CmdOrCtrl+Shift+K"),
   op_desktop_unregister_shortcut: () =>

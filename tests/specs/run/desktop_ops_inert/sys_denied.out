@@ -10,4 +10,6 @@ op_desktop_set_launch_at_login throws NotCapable: Requires sys access, run again
 op_desktop_register_scheme throws NotCapable: Requires sys access, run again with the --allow-sys flag
 op_desktop_register_scheme(no force) throws Error: deep-link scheme registration is not available in this runtime
 op_desktop_secret_request throws NotCapable: Deno.desktop.secureStore: Requires sys access, run again with the --allow-sys flag, or enable desktop.capabilities.secureStore so the app's packaging bakes the "secureStore" capability
+op_desktop_system_stats_check throws NotCapable: Deno.desktop.systemStats: Requires sys access, run again with the --allow-sys flag, or enable desktop.capabilities.systemStats so the app's packaging bakes the "systemStats" capability
+op_desktop_system_stats throws NotCapable: Deno.desktop.systemStats: Requires sys access, run again with the --allow-sys flag, or enable desktop.capabilities.systemStats so the app's packaging bakes the "systemStats" capability
 op_desktop_schedule_notification throws NotCapable: Requires sys access, run again with the --allow-sys flag

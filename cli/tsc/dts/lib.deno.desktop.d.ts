@@ -2400,6 +2400,87 @@ declare namespace Deno {
     };
 
     /**
+     * One sample of the machine from {@linkcode systemStats}: aggregate
+     * figures only (no per-process data, no host names, no device serials).
+     *
+     * @category Desktop
+     * @experimental
+     */
+    export interface SystemStats {
+      /** Date.now() when sampled. */
+      at: number;
+      /** Percent busy (0-100, one decimal) across all cores since this
+       * sampler's previous stats(); null when unknown. `cores` only with
+       * perCore. */
+      cpu: { total: number | null; cores?: number[] };
+      /** Percent utilization (0-100) of the busiest / aggregate GPU; null
+       * when unknown. `devices` when the OS names them. */
+      gpu: {
+        utilization: number | null;
+        devices?: { name: string; utilization: number | null }[];
+      };
+      /** Memory pressure in percent (0-100); null when unknown. */
+      memory: {
+        pressure: number | null;
+        usedBytes?: number;
+        totalBytes?: number;
+      };
+    }
+
+    /**
+     * A sampler from {@linkcode systemStats.createSampler}.
+     *
+     * @category Desktop
+     * @experimental
+     */
+    export interface SystemStatsSampler {
+      /** One sample. The first call on a sampler primes it (two snapshots
+       * ~100 ms apart) so it returns a CPU figure. */
+      stats(options?: { perCore?: boolean }): Promise<SystemStats>;
+      /** Calls cb every intervalMs (>= 1000, else RangeError) with a sample;
+       * skips ticks while every app window is hidden (resumes when one is
+       * shown). Returns the unsubscribe. */
+      onStats(
+        cb: (stats: SystemStats) => void,
+        options: { intervalMs: number; perCore?: boolean },
+      ): () => void;
+      /** Stops every subscription and frees the sampler. */
+      close(): void;
+    }
+
+    /**
+     * The machine's CPU, GPU and memory figures, sampled natively inside the
+     * runtime: macOS `host_processor_info`, IOKit's `PerformanceStatistics`
+     * and `kern.memorystatus_level`; Linux `/proc/stat`, `/proc/meminfo`,
+     * amdgpu's `gpu_busy_percent` and NVIDIA's NVML when the driver
+     * installed it; Windows `GetSystemTimes`, PDH's GPU engine counters and
+     * `GlobalMemoryStatusEx`. A GPU the OS gives no figure for (Intel on
+     * Linux, for one) is `null`.
+     *
+     * Sampling (`stats()`, `onStats` ticks) needs the `systemStats` desktop
+     * capability baked in by the app's packaging (`"capabilities":
+     * ["systemStats"]` in the embedded `.deno-desktop/app.json`), or
+     * `--allow-sys` (unscoped); without either `stats()` rejects and
+     * `onStats` throws `Deno.errors.NotCapable`. No other permission: no
+     * `--allow-read`, `--allow-run` or `--allow-ffi`. Nothing is sampled
+     * unless a `stats()` call or a live `onStats` subscription asks, and
+     * each sample runs off the JavaScript thread.
+     *
+     * Not available in workers.
+     *
+     * @category Desktop
+     * @experimental
+     */
+    export const systemStats: {
+      /** Whether this runtime can sample on this OS (true on macOS, Linux,
+       * Windows). */
+      readonly supported: boolean;
+      /** A sampler: each one keeps its own previous CPU snapshot, so its
+       * figure is "since this caller's previous call". */
+      createSampler(): SystemStatsSampler;
+    };
+
+    /**
      * DevTools control. `enabled` is false when the app was launched with
      * DevTools turned off (`LAUFEY_INSPECTABLE=0`, or `"inspectable": false`
      * in the packaged app's `laufey-launch.json`): then neither these calls

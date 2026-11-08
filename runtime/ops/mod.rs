@@ -7,6 +7,7 @@ pub mod fs_events;
 pub mod http;
 pub mod permissions;
 pub mod runtime;
+pub mod system_stats;
 pub mod tty;
 pub mod web_worker;
 pub mod worker_host;

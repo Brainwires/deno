@@ -116,7 +116,7 @@ uuid.workspace = true
 unicode-normalization.workspace = true
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { workspace = true, features = ["Win32_System_Console", "Win32_System_Diagnostics_ToolHelp", "Win32_UI_Input_KeyboardAndMouse", "Win32_Security_WinTrust", "Win32_Security_Cryptography", "Win32_Security_Cryptography_Catalog", "Win32_Security_Cryptography_Sip"] }
+windows-sys = { workspace = true, features = ["Win32_System_Console", "Win32_System_Diagnostics_ToolHelp", "Win32_UI_Input_KeyboardAndMouse", "Win32_Security_WinTrust", "Win32_Security_Cryptography", "Win32_Security_Cryptography_Catalog", "Win32_Security_Cryptography_Sip", "Win32_System_Performance", "Win32_System_SystemInformation", "Win32_System_Threading", "Win32_System_WindowsProgramming", "Wdk_System_SystemInformation"] }
 
 [target.'cfg(unix)'.dependencies]
 nix.workspace = true
