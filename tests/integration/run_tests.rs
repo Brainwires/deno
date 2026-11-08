@@ -174,6 +174,7 @@ fn _090_run_permissions_request() {
     .with_pty(|mut console| {
       console.expect(concat!(
         "┏ ⚠️  Deno requests run access to \"ls\".\r\n",
+        "┠─ Run access is full trust: the program is not bound by Deno's permissions unless an OS sandbox confines it.\r\n",
         "┠─ Requested by `Deno.permissions.request()` API.\r\n",
         "┠─ To see a stack trace for this prompt, set the DENO_TRACE_PERMISSIONS environmental variable.\r\n",
         "┠─ Learn more at: https://docs.deno.com/go/--allow-run\r\n",
@@ -185,6 +186,7 @@ fn _090_run_permissions_request() {
       console.expect("Granted run access to \"ls\".");
       console.expect(concat!(
         "┏ ⚠️  Deno requests run access to \"cat\".\r\n",
+        "┠─ Run access is full trust: the program is not bound by Deno's permissions unless an OS sandbox confines it.\r\n",
         "┠─ Requested by `Deno.permissions.request()` API.\r\n",
         "┠─ To see a stack trace for this prompt, set the DENO_TRACE_PERMISSIONS environmental variable.\r\n",
         "┠─ Learn more at: https://docs.deno.com/go/--allow-run\r\n",
@@ -207,6 +209,7 @@ fn _090_run_permissions_request_sync() {
     .with_pty(|mut console| {
       console.expect(concat!(
         "┏ ⚠️  Deno requests run access to \"ls\".\r\n",
+        "┠─ Run access is full trust: the program is not bound by Deno's permissions unless an OS sandbox confines it.\r\n",
         "┠─ Requested by `Deno.permissions.request()` API.\r\n",
         "┠─ To see a stack trace for this prompt, set the DENO_TRACE_PERMISSIONS environmental variable.\r\n",
         "┠─ Learn more at: https://docs.deno.com/go/--allow-run\r\n",
@@ -218,6 +221,7 @@ fn _090_run_permissions_request_sync() {
       console.expect("Granted run access to \"ls\".");
       console.expect(concat!(
         "┏ ⚠️  Deno requests run access to \"cat\".\r\n",
+        "┠─ Run access is full trust: the program is not bound by Deno's permissions unless an OS sandbox confines it.\r\n",
         "┠─ Requested by `Deno.permissions.request()` API.\r\n",
         "┠─ To see a stack trace for this prompt, set the DENO_TRACE_PERMISSIONS environmental variable.\r\n",
         "┠─ Learn more at: https://docs.deno.com/go/--allow-run\r\n",
@@ -241,6 +245,7 @@ fn permissions_prompt_allow_all() {
       // "run" permissions
       console.expect(concat!(
         "┏ ⚠️  Deno requests run access to \"FOO\".\r\n",
+        "┠─ Run access is full trust: the program is not bound by Deno's permissions unless an OS sandbox confines it.\r\n",
         "┠─ Requested by `Deno.permissions.request()` API.\r\n",
         "┠─ To see a stack trace for this prompt, set the DENO_TRACE_PERMISSIONS environmental variable.\r\n",
         "┠─ Learn more at: https://docs.deno.com/go/--allow-run\r\n",
@@ -383,6 +388,7 @@ fn permissions_prompt_allow_all_lowercase_a() {
       // "run" permissions
       console.expect(concat!(
         "┏ ⚠️  Deno requests run access to \"FOO\".\r\n",
+        "┠─ Run access is full trust: the program is not bound by Deno's permissions unless an OS sandbox confines it.\r\n",
         "┠─ Requested by `Deno.permissions.request()` API.\r\n",
         "┠─ To see a stack trace for this prompt, set the DENO_TRACE_PERMISSIONS environmental variable.\r\n",
         "┠─ Learn more at: https://docs.deno.com/go/--allow-run\r\n",

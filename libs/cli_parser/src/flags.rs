@@ -1133,6 +1133,11 @@ pub struct PermissionFlags {
   pub ignore_read: Option<Vec<String>>,
   pub allow_run: Option<Vec<String>>,
   pub deny_run: Option<Vec<String>>,
+  /// denext: `--clean-run-env[=<VARIABLE_NAME>...]`. Spawned programs get a
+  /// minimal environment plus these names. Not a grant, so it is not counted
+  /// by `has_permission`.
+  #[serde(default)]
+  pub clean_run_env: Option<Vec<String>>,
   pub allow_sys: Option<Vec<String>>,
   pub deny_sys: Option<Vec<String>>,
   pub allow_write: Option<Vec<String>>,

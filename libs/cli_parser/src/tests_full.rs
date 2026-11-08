@@ -3036,6 +3036,34 @@ fn cache_multiple() {
   );
 }
 
+// denext: `--clean-run-env`.
+#[test]
+fn clean_run_env_flag() {
+  let r = flags_from_vec(svec!["deno", "run", "script.ts"]);
+  assert_eq!(r.unwrap().permissions.clean_run_env, None);
+  let r = flags_from_vec(svec!["deno", "run", "--clean-run-env", "script.ts"]);
+  let flags = r.unwrap();
+  assert_eq!(flags.permissions.clean_run_env, Some(svec![]));
+  // Not a grant.
+  assert!(!flags.permissions.has_permission());
+  let r = flags_from_vec(svec![
+    "deno",
+    "run",
+    "-A",
+    "--clean-run-env=GIT_DIR,MY_APP_*",
+    "script.ts"
+  ]);
+  let flags = r.unwrap();
+  assert_eq!(
+    flags.permissions.clean_run_env,
+    Some(svec!["GIT_DIR", "MY_APP_*"])
+  );
+  assert!(flags.permissions.allow_all);
+  // Like the permission flags, only for a global install.
+  let r = flags_from_vec(svec!["deno", "install", "--clean-run-env"]);
+  assert!(r.is_err());
+}
+
 #[test]
 fn allow_net_connect_allowlist() {
   let r = flags_from_vec(svec![

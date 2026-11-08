@@ -4586,6 +4586,10 @@ pub struct Permissions {
   /// (a prompt answered for the legacy `name: "net"`) can switch models and
   /// drop the directional deny rules.
   net_directional: bool,
+  /// denext: `--clean-run-env[=<VARS>]`. `Some` spawns programs with a
+  /// minimal inherited environment (plus these names); see
+  /// [`PermissionsOptions::clean_run_env`]. A worker takes its parent's.
+  clean_run_env: Option<Vec<String>>,
 }
 
 impl Permissions {
@@ -4662,6 +4666,16 @@ pub struct PermissionsOptions {
   pub allow_import: Option<Vec<String>>,
   pub deny_import: Option<Vec<String>>,
   pub prompt: bool,
+  /// denext: `--clean-run-env[=<VARS>]`. When `Some`, a spawned program
+  /// inherits only a minimal environment (`PATH`, `HOME`, the locale, the
+  /// terminal type, the temp directory, the user name and, on Windows, the
+  /// system variables programs need to start) plus the names listed here
+  /// (`NAME`, or `PREFIX*`), instead of the whole environment. Variables the
+  /// caller passes in `env` are still set, and a caller that passes
+  /// `clearEnv: true` chooses the whole environment itself. `None` (the
+  /// default) keeps the inherited environment.
+  #[serde(default)]
+  pub clean_run_env: Option<Vec<String>>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -4822,6 +4836,7 @@ impl Permissions {
 
     Ok(Self {
       net_directional,
+      clean_run_env: opts.clean_run_env.clone(),
       read: Permissions::new_unary_with_ignore(
         parse_maybe_vec(opts.allow_read.as_deref(), |item| {
           parser.parse_read_descriptor(item)
@@ -4931,6 +4946,7 @@ impl Permissions {
       ffi: UnaryPermission::allow_all(),
       import: UnaryPermission::allow_all(),
       net_directional: false,
+      clean_run_env: None,
     }
   }
 
@@ -4957,6 +4973,7 @@ impl Permissions {
       ffi: Permissions::new_unary(None, None, prompt),
       import: Permissions::new_unary(None, None, prompt),
       net_directional: false,
+      clean_run_env: None,
     }
   }
 }
@@ -5199,6 +5216,13 @@ impl PermissionsContainer {
     Self::new(descriptor_parser, Permissions::allow_all())
   }
 
+  /// denext: the `--clean-run-env` pass-through list when a spawned program
+  /// gets a minimal environment, `None` when it inherits the whole one. See
+  /// [`PermissionsOptions::clean_run_env`].
+  pub fn clean_run_env(&self) -> Option<Vec<String>> {
+    self.inner.lock().clean_run_env.clone()
+  }
+
   pub fn create_child_permissions(
     &self,
     child_permissions_arg: ChildPermissionsArg,
@@ -5249,6 +5273,8 @@ impl PermissionsContainer {
     // legacy model but never an escalation.
     let parent_directional = inner.net_directional_active();
     worker_perms.net_directional = parent_directional;
+    // A worker spawns with the same environment rule as its parent.
+    worker_perms.clean_run_env = inner.clean_run_env.clone();
     let (legacy_arg, directional_arg) = if parent_directional {
       (
         ChildUnaryPermissionArg::NotGranted,
@@ -14675,6 +14701,77 @@ mod tests {
         })
         .is_err()
     );
+  }
+
+  #[test]
+  fn test_clean_run_env_from_options_and_inherited_by_workers() {
+    let parser = TestPermissionDescriptorParser;
+    // Off by default, including for `allow_all` and `none`.
+    let perms =
+      Permissions::from_options(&parser, &Default::default()).unwrap();
+    let perms = PermissionsContainer::new(
+      Arc::new(TestPermissionDescriptorParser),
+      perms,
+    );
+    assert_eq!(perms.clean_run_env(), None);
+    assert_eq!(
+      PermissionsContainer::allow_all(Arc::new(TestPermissionDescriptorParser))
+        .clean_run_env(),
+      None
+    );
+
+    let perms = Permissions::from_options(
+      &parser,
+      &PermissionsOptions {
+        allow_run: Some(svec![]),
+        clean_run_env: Some(svec!["GIT_DIR", "MY_APP_*"]),
+        ..Default::default()
+      },
+    )
+    .unwrap();
+    let perms = PermissionsContainer::new(
+      Arc::new(TestPermissionDescriptorParser),
+      perms,
+    );
+    assert_eq!(perms.clean_run_env(), Some(svec!["GIT_DIR", "MY_APP_*"]));
+    // A worker spawns under its parent's rule, whatever it is granted.
+    let worker = perms
+      .create_child_permissions(ChildPermissionsArg::none())
+      .unwrap();
+    assert_eq!(worker.clean_run_env(), Some(svec!["GIT_DIR", "MY_APP_*"]));
+    assert_eq!(
+      perms.deep_clone_without_prompt().clean_run_env(),
+      Some(svec!["GIT_DIR", "MY_APP_*"])
+    );
+
+    // An empty list is on, with nothing passed through.
+    let perms = Permissions::from_options(
+      &parser,
+      &PermissionsOptions {
+        clean_run_env: Some(vec![]),
+        ..Default::default()
+      },
+    )
+    .unwrap();
+    assert_eq!(
+      PermissionsContainer::new(
+        Arc::new(TestPermissionDescriptorParser),
+        perms
+      )
+      .clean_run_env(),
+      Some(vec![])
+    );
+  }
+
+  #[test]
+  fn test_clean_run_env_options_deserialize_without_the_field() {
+    // Options serialized before the field existed (a compiled program's
+    // metadata) read as off.
+    let mut value =
+      serde_json::to_value(PermissionsOptions::default()).unwrap();
+    value.as_object_mut().unwrap().remove("clean_run_env");
+    let options: PermissionsOptions = serde_json::from_value(value).unwrap();
+    assert_eq!(options.clean_run_env, None);
   }
 
   #[test]

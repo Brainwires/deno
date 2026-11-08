@@ -2295,6 +2295,7 @@ fn flags_to_permissions_options(
       &identity,
     ),
     prompt: !resolve_no_prompt(flags),
+    clean_run_env: flags.clean_run_env.clone(),
   };
 
   // Enforce mutual exclusion between the legacy `net` model and the directional
@@ -2526,6 +2527,22 @@ mod test {
     assert_eq!(parse("file:///example.com"), None);
   }
 
+  // denext: `--clean-run-env` reaches the options (and with them a compiled
+  // program's metadata) as given, off unless set.
+  #[test]
+  fn test_flags_to_permission_options_clean_run_env() {
+    let options =
+      flags_to_permissions_options(&PermissionFlags::default(), None).unwrap();
+    assert_eq!(options.clean_run_env, None);
+    let flags = PermissionFlags {
+      allow_run: Some(vec![]),
+      clean_run_env: Some(vec!["GIT_DIR".to_string()]),
+      ..Default::default()
+    };
+    let options = flags_to_permissions_options(&flags, None).unwrap();
+    assert_eq!(options.clean_run_env, Some(vec!["GIT_DIR".to_string()]));
+  }
+
   #[test]
   fn test_flags_to_permission_options() {
     let base_dir = resolve_cwd(None).unwrap().join("sub");
@@ -2695,7 +2712,8 @@ mod test {
           ]),
           allow_import: Some(vec!["jsr.io".to_string()]),
           deny_import: Some(vec!["example.com".to_string()]),
-          prompt: true
+          prompt: true,
+          clean_run_env: None,
         }
       );
     }
@@ -2761,7 +2779,8 @@ mod test {
           ]),
           allow_import: Some(vec![]),
           deny_import: None,
-          prompt: true
+          prompt: true,
+          clean_run_env: None,
         }
       );
     }
