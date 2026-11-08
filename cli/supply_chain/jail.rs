@@ -2384,9 +2384,6 @@ mod tests {
     assert_eq!(options.allow_write, Some(vec!["out/../build".to_string()]));
   }
 
-  // DENEXT.md item 124 (H2, M6): the script's process is a session leader
-  // and its whole group is ended, a detached grandchild included
-  #[cfg(unix)]
   #[tokio::test]
   async fn read_capped_keeps_the_head_and_drains_the_rest() {
     // under the cap: everything, no marker
@@ -2416,6 +2413,9 @@ mod tests {
     assert!(out.starts_with(b"yyyyyyyyyy\n[output truncated after 10 bytes]"));
   }
 
+  // DENEXT.md item 124 (H2, M6): the script's process is a session leader
+  // and its whole group is ended, a detached grandchild included
+  #[cfg(unix)]
   #[tokio::test]
   async fn detached_session_and_group_ended() {
     let dir = tempfile::tempdir().unwrap();
