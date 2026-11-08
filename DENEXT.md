@@ -10954,6 +10954,32 @@ where the changes are discussed.
        (`runtime/fmt_errors.rs`), the translation tests in `libs/node_shim` and
        `node_cli_parser.rs` list the flag.
 
+269. **`fix(ext/node)`: `console` in a worker with `stdout: true` writes to
+     `worker.stdout`** (`fix/worker-stdout-console`;
+     `ext/node/polyfills/worker_threads.ts`). A `node:worker_threads` worker
+     created with `stdout: true` captured `process.stdout.write` into
+     `worker.stdout`, but `console.log` in it went straight to the process's
+     stdout, and the captured writes reached the process's stdout as well. In
+     Node, `console` in a worker writes to the worker's `process.stdout` /
+     `process.stderr`, and with `stdout: true` / `stderr: true` that output
+     reaches the parent only through `worker.stdout` / `worker.stderr`, which
+     pino transports and test runners that collect worker output rely on. The
+     worker metadata now carries the two options; with `stdout: true` the
+     worker's `process.stdout.write` posts the chunk to the parent without also
+     printing it, and the global console's methods are replaced (the console
+     object itself kept, so references taken earlier stay the same) with ones
+     whose stdout-level output (`log`, `info`, `debug`, `dir`, `table`, ...)
+     goes through that `process.stdout.write`; `stderr: true` does the same for
+     the stderr level (`error`, `warn`, `trace`, a failed `assert`). Without the
+     options nothing changes: console and `process.stdout.write` print to the
+     process's stdio as before. Inside such a worker the console's methods are
+     no longer forwarded to an attached inspector.
+     - Specs: `node/worker_stdout_console` (`piped`: `console.log` / `info` /
+       `error` / `warn` and `process.stdout.write` from a worker with both
+       options arrive on `worker.stdout` / `worker.stderr` and nowhere else,
+       Node's output; `not_piped`: without them the worker's `console.log` still
+       prints to the process's stdout).
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,

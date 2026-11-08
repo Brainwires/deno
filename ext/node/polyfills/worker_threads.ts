@@ -798,6 +798,8 @@ class NodeWorker extends EventEmitter {
       isEval: !!options?.eval,
       isWorkerThread: true,
       hasStdin: !!options?.stdin,
+      pipeStdout: !!options?.stdout,
+      pipeStderr: !!options?.stderr,
       resourceLimits: resourceLimits_,
     }, options?.transferList ?? []);
 
@@ -1535,6 +1537,12 @@ internals.__initWorkerThreads = (
             type: "WORKER_STDOUT",
             data: chunk,
           });
+          // With `stdout: true` the parent reads the output from
+          // `worker.stdout` only, as in Node; it must not also reach the
+          // process's own stdout.
+          if (metadata.pipeStdout) {
+            return pipedWriteDone(encoding, callback);
+          }
           return FunctionPrototypeCall(
             origStdoutWrite,
             lazyProcess().default.stdout,
@@ -1559,6 +1567,9 @@ internals.__initWorkerThreads = (
             type: "WORKER_STDERR",
             data: chunk,
           });
+          if (metadata.pipeStderr) {
+            return pipedWriteDone(encoding, callback);
+          }
           return FunctionPrototypeCall(
             origStderrWrite,
             lazyProcess().default.stderr,
@@ -1567,6 +1578,18 @@ internals.__initWorkerThreads = (
             callback,
           );
         };
+
+        // In Node, `console` in a worker writes to the worker's
+        // `process.stdout` / `process.stderr`, so with `stdout: true` /
+        // `stderr: true` its output arrives on `worker.stdout` /
+        // `worker.stderr`. Deno's console prints straight to the isolate's
+        // stdio, so route it through the piped streams instead.
+        if (metadata.pipeStdout || metadata.pipeStderr) {
+          routeConsoleToPipedStdio(
+            !!metadata.pipeStdout,
+            !!metadata.pipeStderr,
+          );
+        }
       }
     }
     patchMessagePortIfFound(workerData);
@@ -2524,6 +2547,45 @@ function webMessagePortToNodeMessagePort(port: MessagePort) {
     port.on(name, fn);
   };
   return port;
+}
+
+// Completes a `process.stdout.write` / `process.stderr.write` whose chunk
+// went to the parent only (`stdout: true` / `stderr: true`).
+function pipedWriteDone(encoding, callback) {
+  const cb = typeof encoding === "function" ? encoding : callback;
+  if (typeof cb === "function") {
+    lazyProcess().default.nextTick(cb);
+  }
+  return true;
+}
+
+// Replaces the global console's methods with ones whose output goes through
+// the worker's (patched) `process.stdout.write` / `process.stderr.write`.
+// The console object itself is kept, so `require("console")` and references
+// taken earlier stay the same object.
+function routeConsoleToPipedStdio(pipeStdout, pipeStderr) {
+  const { Console: WebConsole } = core.loadExtScript(
+    "ext:deno_web/01_console.js",
+  );
+  const routed = new WebConsole((msg, level) => {
+    const isErr = level > 1;
+    if (isErr ? pipeStderr : pipeStdout) {
+      const stream = isErr
+        ? lazyProcess().default.stderr
+        : lazyProcess().default.stdout;
+      stream.write(msg);
+    } else {
+      core.print(msg, isErr);
+    }
+  });
+  const target = globalThis.console;
+  const keys = ObjectKeys(routed);
+  for (let i = 0; i < keys.length; i++) {
+    const key = keys[i];
+    if (typeof routed[key] === "function") {
+      target[key] = routed[key];
+    }
+  }
 }
 
 // TODO(@marvinhagemeister): Recursively iterating over all message

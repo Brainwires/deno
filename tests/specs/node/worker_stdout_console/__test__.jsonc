@@ -1,0 +1,15 @@
+// denext (DENEXT.md item 269): `console.*` in a `node:worker_threads` worker
+// created with `stdout: true` / `stderr: true` writes to the worker's piped
+// `worker.stdout` / `worker.stderr` (as in Node), not to the process's stdio.
+{
+  "tests": {
+    "piped": {
+      "args": "run main.cjs",
+      "output": "main.out"
+    },
+    "not_piped": {
+      "args": "run not_piped.cjs",
+      "output": "not_piped.out"
+    }
+  }
+}
