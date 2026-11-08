@@ -513,6 +513,7 @@ mod tests {
         "-A",
         "--unstable-bare-node-builtins",
         "--unstable-detect-cjs",
+        "--unstable-unsafe-proto",
         "script.js"
       ]
     );

@@ -1,0 +1,12 @@
+// denext: Node mode keeps `Object.prototype.__proto__` (pm2's dependencies
+// assign it), and so does a child it forks or spawns; `deno run` of Deno code
+// keeps it off.
+{
+  "tempDir": true,
+  "tests": {
+    "node_mode_keeps_proto": {
+      "args": "run -A main.mjs",
+      "output": "main.out"
+    }
+  }
+}

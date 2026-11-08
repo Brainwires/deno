@@ -10882,12 +10882,40 @@ where the changes are discussed.
        `prebuilds/<platform>-<arch>/pty.node` in the stand-in makes the
        package's own entry run).
 
+269. **`fix(node)`: Node mode keeps `Object.prototype.__proto__`, and so do its
+     children** (`fix/node-mode-unsafe-proto`; `libs/node_shim/lib.rs`,
+     `cli/tools/x.rs`, `cli/task_runner.rs`). Deno turns the `__proto__`
+     accessor off unless `--unstable-unsafe-proto` is given, and only the task
+     shell's `node <script>` command gave it, so under the `node` shim
+     `({}).__proto__` was `undefined` and an `obj.__proto__ = proto` assignment
+     made an own property instead of a prototype: pm2 died at start
+     (`this.set is not a function` in a dependency), and with the flag passed by
+     hand its daemon, which pm2 spawns as `process.execPath`, still ran without
+     it. The node-args translation (`translate_to_deno_args`, used by the `node`
+     arg0 shim, `child_process`'s `node` / `process.execPath` / `fork()`
+     children and the task shell's `node <flags>` command) now adds
+     `--unstable-unsafe-proto` beside `--unstable-bare-node-builtins` and
+     `--unstable-detect-cjs`, so a Node-mode program and every Node child of it,
+     `fork()` with an explicit `execArgv: []` included, have the accessor, as
+     under Node. An npm package's JS bin run by `deno x` (and so `npx`) or as a
+     command in a task or lifecycle script gets it too. A program run with
+     `deno run` or `deno serve` keeps it off unless asked for (an npm package's
+     `deno run npm:` specifier included), and a `child_process` spawn with Deno
+     arguments (`run ...`) is passed through unchanged.
+     - Specs: `node/node_mode_unsafe_proto` (a `node` symlink of the executable
+       runs a script that reads `({}).__proto__` and assigns `obj.__proto__`,
+       spawns `process.execPath` and `fork()`s children that do the same, with
+       and without `execArgv: []`; `node -e`; Deno code spawning
+       `node child.cjs`; the `deno run` parent itself still has it off). Tests:
+       `libs/node_shim`'s and `node_cli_parser.rs`'s translation tests list the
+       flag.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
 169-174, 176, 178, 180, 182-184, 186, 187, 189-191, 193-196, 198-203, 206, 207,
 209-215, 217, 218, 221, 222, 224, 225, 227, 228, 231, 232, 235, 237, 240,
-243-245, 247-249, 253, 254, 256-260, 262-264, 267, 268) are what the prebuilt
+243-245, 247-249, 253, 254, 256-260, 262-264, 267-269) are what the prebuilt
 `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
 in the branch too, but a stock CLI does not run them; denext's own launcher

@@ -607,10 +607,13 @@ impl ShellCommand for NodeModulesFileRunCommand {
     &self,
     mut context: ShellCommandContext,
   ) -> LocalBoxFuture<'static, ExecuteResult> {
+    // denext: an npm bin is Node code; it keeps `Object.prototype.__proto__`
+    // as the task shell's `node` command does
     let mut args: Vec<OsString> = vec![
       "run".into(),
       "--ext=js".into(),
       "-A".into(),
+      "--unstable-unsafe-proto".into(),
       self.path.clone().into_os_string(),
     ];
     args.extend(context.args);
