@@ -1,0 +1,13 @@
+// denext (DENEXT.md item 269): an addon built on Node's V8 C++ ABI (NAN's
+// `NODE_MODULE` -> `node_module_register`, `NODE_MODULE_INIT` ->
+// `node_register_module_v<N>`, or raw `v8::` symbols bound at load time) fails
+// `require()` / `process.dlopen()` with a catchable Error, code
+// `ERR_DLOPEN_FAILED`, naming the file, the npm package and why. Before, the
+// three cases gave a TypeError without a code, "Unable to find register
+// Node-API module" and the loader's own undefined-symbol message.
+{
+  "tempDir": true,
+  "if": "unix",
+  "args": "run --allow-read --allow-write --allow-run --allow-env --allow-ffi main.mjs",
+  "output": "main.out"
+}

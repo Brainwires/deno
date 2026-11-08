@@ -1,0 +1,33 @@
+register: {
+  plainError: true,
+  code: "ERR_DLOPEN_FAILED",
+  namesFile: true,
+  namesPackage: true,
+  saysV8Abi: true,
+  reason: "node_module_register"
+}
+init: {
+  plainError: true,
+  code: "ERR_DLOPEN_FAILED",
+  namesFile: true,
+  namesPackage: true,
+  saysV8Abi: true,
+  reason: "node_register_module_v147"
+}
+symbol: {
+  plainError: true,
+  code: "ERR_DLOPEN_FAILED",
+  namesFile: true,
+  namesPackage: true,
+  saysV8Abi: true,
+  reason: "v8 symbol"
+}
+register: {
+  plainError: true,
+  code: "ERR_DLOPEN_FAILED",
+  namesFile: true,
+  namesPackage: true,
+  saysV8Abi: true,
+  reason: "node_module_register"
+}
+still running
