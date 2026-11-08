@@ -10982,18 +10982,18 @@ where the changes are discussed.
      it (`vm.compileFunction` for CommonJS, `vm.SourceTextModule` for an ES
      module or module syntax) without running it, so a syntax error prints
      Node's block and a valid file exits 0 silently. A hooks module named by
-     `--experimental-loader` that throws while loading or in `initialize`
-     ends the program as an uncaught exception too (the shim's preload marks
-     its `module.register()` call), so a thrown `null` prints `null` as in
-     Node. Under V8's `--abort-on-uncaught-exception` the report is followed
-     by an abort, as Node's is (V8 no longer sees the exception as uncaught
-     once the runtime reports it). `deno run` keeps Deno's
-     report byte for byte, and `deno run --unstable-node-errors` opts in. Not
-     reproduced: the frames in the stack (this runtime's, not Node's internals),
-     the own properties `util.inspect` appends to an error (`code`, `errno`,
-     ...), the line of an error constructed on one line and thrown on another
-     (the header names the construction), and the header Node prints for a value
-     that is not an `Error`.
+     `--experimental-loader` that throws while loading or in `initialize` ends
+     the program as an uncaught exception too (the shim's preload marks its
+     `module.register()` call), so a thrown `null` prints `null` as in Node.
+     Under V8's `--abort-on-uncaught-exception` the report is followed by an
+     abort, as Node's is (V8 no longer sees the exception as uncaught once the
+     runtime reports it). `deno run` keeps Deno's report byte for byte, and
+     `deno run --unstable-node-errors` opts in. Not reproduced: the frames in
+     the stack (this runtime's, not Node's internals), the own properties
+     `util.inspect` appends to an error (`code`, `errno`, ...), the line of an
+     error constructed on one line and thrown on another (the header names the
+     construction), and the header Node prints for a value that is not an
+     `Error`.
      - Specs: `node/node_mode_error_output` (through a `node` symlink of the
        executable: a CommonJS throw at top level and in a function, an `Error`
        and a number rejected, an ES module throw, `--check` of a bad and a good
@@ -11452,16 +11452,17 @@ where the changes are discussed.
        `test_flags_to_permission_options_clean_run_env`; the run prompts in
        `tests/integration/run_tests.rs` carry the new line.
 
-285. **`fix(cli)`: a doubled comma escapes a comma in a path permission
-     again** (port of denoland/deno#37115 for denoland/deno#37114, by Behnam;
-     CLI only; `libs/cli_parser/src/defs.rs`, `libs/cli_parser/src/convert.rs`).
-     Since Deno 2.9.8 the parser split `--allow-read`, `--deny-read`,
-     `--ignore-read`, `--allow-write`, `--deny-write`, `--allow-ffi` and
-     `--deny-ffi` values at every comma before the comma escaping saw them, so
-     `--allow-read=a,,b` (the single path `a,b`) failed with `Empty path is
-     not allowed`. Those flags no longer take the generic comma delimiter; each
-     raw value goes through `escape_and_split_commas`, as before 2.9.8, and an
-     empty entry is still refused. The other permission flags are unchanged.
+285. **`fix(cli)`: a doubled comma escapes a comma in a path permission again**
+     (port of denoland/deno#37115 for denoland/deno#37114, by Behnam; CLI only;
+     `libs/cli_parser/src/defs.rs`, `libs/cli_parser/src/convert.rs`). Since
+     Deno 2.9.8 the parser split `--allow-read`, `--deny-read`, `--ignore-read`,
+     `--allow-write`, `--deny-write`, `--allow-ffi` and `--deny-ffi` values at
+     every comma before the comma escaping saw them, so `--allow-read=a,,b` (the
+     single path `a,b`) failed with `Empty path is
+     not allowed`. Those
+     flags no longer take the generic comma delimiter; each raw value goes
+     through `escape_and_split_commas`, as before 2.9.8, and an empty entry is
+     still refused. The other permission flags are unchanged.
      - Tests: `libs/cli_parser` `path_permission_flags_escape_commas` (repeated
        flags, short aliases, comma runs, Unicode) and
        `path_permission_flags_reject_empty_values`; spec

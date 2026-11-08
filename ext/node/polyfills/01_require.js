@@ -4758,7 +4758,7 @@ export function register(specifier, parentURL = undefined, options) {
     // denext: a hooks module named by `--experimental-loader` (the node
     // shim registers it from a preload, marked with this option) that fails
     // to load or initialize ends the program as an uncaught exception, as
-    // Node's loader bootstrap does, not as the preload's rejection — in Node
+    // Node's loader bootstrap does, not as the preload's rejection, in Node
     // mode (`--unstable-node-errors`), where that is reported as Node does.
     if (
       options?.[SymbolFor("denext.experimentalLoader")] === true &&
