@@ -34,13 +34,14 @@ env:
   TOOLS_DENO_VERSION: 2.9.7
 
 # runs-on on every job: inputs.runs_on (the caller's repository variable), or
-# the os image when it is empty — and ALWAYS the os image on a pull_request /
-# pull_request_target event (github.event_name is the caller's), so a
-# self-hosted runner never takes a pull request's code.
+# the os image when it is empty — and ALWAYS the os image on a fork's
+# pull_request and on every other pull_request* event (pull_request_target, …;
+# github.event_name / github.event are the caller's), so a self-hosted runner
+# never takes a fork's code; a same-repo pull_request runs on it.
 jobs:
   build:
     name: build debug
-    runs-on: ${{ fromJSON(startsWith(github.event_name, 'pull_request') && format('"{0}"', inputs.os) || inputs.runs_on || format('"{0}"', inputs.os)) }}
+    runs-on: ${{ fromJSON((startsWith(github.event_name, 'pull_request') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository)) && format('"{0}"', inputs.os) || inputs.runs_on || format('"{0}"', inputs.os)) }}
     timeout-minutes: 240
     defaults:
       run:
@@ -82,7 +83,7 @@ jobs:
   libs:
     name: test libs
     needs: build
-    runs-on: ${{ fromJSON(startsWith(github.event_name, 'pull_request') && format('"{0}"', inputs.os) || inputs.runs_on || format('"{0}"', inputs.os)) }}
+    runs-on: ${{ fromJSON((startsWith(github.event_name, 'pull_request') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository)) && format('"{0}"', inputs.os) || inputs.runs_on || format('"{0}"', inputs.os)) }}
     timeout-minutes: 240
     defaults:
       run:
@@ -170,7 +171,7 @@ jobs:
     name: test ${{ matrix.suite }}${{ matrix.shard_label }}
     needs: build
     if: ${{ !inputs.libs_only }}
-    runs-on: ${{ fromJSON(startsWith(github.event_name, 'pull_request') && format('"{0}"', inputs.os) || inputs.runs_on || format('"{0}"', inputs.os)) }}
+    runs-on: ${{ fromJSON((startsWith(github.event_name, 'pull_request') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository)) && format('"{0}"', inputs.os) || inputs.runs_on || format('"{0}"', inputs.os)) }}
     timeout-minutes: 120
     strategy:
       fail-fast: false
