@@ -4,7 +4,7 @@
   // The package's `native` export is the addon under --allow-ffi alone, in a
   // compiled program too (DENEXT.md item 268; on 3.0.0-denext.11 and .12 it
   // was null). On Unix `spawn` is the runtime's all the same, so a child's
-  // output and exit arrive (item 269; from 3.0.0-denext.13 the package's own
+  // output and exit arrive (item 274; from 3.0.0-denext.13 the package's own
   // `spawn` never delivered them), and `native` is null without --allow-ffi.
   // On Windows the package's own code loads (item 268).
   "tempDir": true,

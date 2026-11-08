@@ -1,5 +1,5 @@
 // On Unix node-pty's `spawn` is the runtime's even when the package carries
-// its addon, so the child's output and exit arrive (DENEXT.md item 269), and
+// its addon, so the child's output and exit arrive (DENEXT.md item 274), and
 // `native` is the package's addon under --allow-ffi, `null` without it.
 import process from "node:process";
 import pty from "node-pty";

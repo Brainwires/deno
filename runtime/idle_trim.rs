@@ -274,7 +274,7 @@ pub(crate) struct IdleTrim {
 /// Whether `DENO_UNSTABLE_IDLE_TRIM` is `0` now. Read when a trim is due (at
 /// most once per idle period), not only at start, so a program can turn a
 /// trim that was baked in, or turned on at start, off from its own code
-/// (`Deno.env.set("DENO_UNSTABLE_IDLE_TRIM", "0")`; DENEXT.md item 269).
+/// (`Deno.env.set("DENO_UNSTABLE_IDLE_TRIM", "0")`; DENEXT.md item 278).
 fn turned_off_by_env() -> bool {
   std::env::var_os(crate::UNSTABLE_ENV_VAR_NAMES.idle_trim)
     .is_some_and(|value| value == "0")
@@ -764,7 +764,7 @@ mod tests {
   #[tokio::test]
   async fn a_trim_turned_off_after_start_does_not_run() {
     // `DENO_UNSTABLE_IDLE_TRIM=0` set by the program after start (DENEXT.md
-    // item 269), seen through the seam so no test touches the environment.
+    // item 278), seen through the seam so no test touches the environment.
     static OFF: AtomicBool = AtomicBool::new(false);
     fn off() -> bool {
       OFF.load(Ordering::SeqCst)

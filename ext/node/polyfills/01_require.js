@@ -3173,7 +3173,7 @@ function maybeBetterSqlite3Addon(filename) {
 // item 261) whatever the package carries: the package's own JavaScript reads
 // the terminal through `tty.ReadStream(fd)`, which the runtime cannot do for
 // an arbitrary fd, so with its addon loaded `spawn` started the child and
-// never delivered its output or exit (DENEXT.md item 269). When the package
+// never delivered its output or exit (DENEXT.md item 274). When the package
 // carries the addon, the entry's `native` export is that addon, loaded on
 // first access through the package's own path (`--allow-ffi`, like any addon;
 // `null` without it): an app that calls the addon directly depends on that

@@ -10872,7 +10872,7 @@ where the changes are discussed.
      (Linux: node-pty publishes none) still gets item 261's implementation, and
      `DENO_NO_NODE_PTY_COMPAT=1` still opts out of it entirely. The check is on
      the package's files, not on permissions: a module resolves the same
-     whatever the program may do. Item 269 keeps this for Windows only: on Unix
+     whatever the program may do. Item 274 keeps this for Windows only: on Unix
      the runtime's implementation answers and `native` is the package's addon.
      - Specs: `compile/node_pty_addon` (the registry's
        `node-pty@1.1.0-denotest`, a stand-in whose install builds a Node-API
@@ -10923,7 +10923,7 @@ where the changes are discussed.
        `legacy_abi.rs` unit tests (package names from both `node_modules`
        layouts and the npm cache, symbols from Linux and macOS loader messages).
 
-269. **`fix(node)`: Node mode keeps `Object.prototype.__proto__`, and so do its
+270. **`fix(node)`: Node mode keeps `Object.prototype.__proto__`, and so do its
      children** (`fix/node-mode-unsafe-proto`; `libs/node_shim/lib.rs`,
      `cli/tools/x.rs`, `cli/task_runner.rs`). Deno turns the `__proto__`
      accessor off unless `--unstable-unsafe-proto` is given, and only the task
@@ -10951,7 +10951,7 @@ where the changes are discussed.
        `libs/node_shim`'s and `node_cli_parser.rs`'s translation tests list the
        flag.
 
-269. **`fix(node)`: Node mode reports uncaught errors as Node does**
+271. **`fix(node)`: Node mode reports uncaught errors as Node does**
      (`fix/node-mode-error-output`; `runtime/fmt_errors.rs`, `cli/lib.rs`,
      `runtime/features/data.rs`, `libs/node_shim/lib.rs`,
      `libs/node_shim/check_syntax.js`, `ext/node/polyfills/01_require.js`,
@@ -10995,7 +10995,7 @@ where the changes are discussed.
        (`runtime/fmt_errors.rs`), the translation tests in `libs/node_shim` and
        `node_cli_parser.rs` list the flag.
 
-269. **`fix(ext/node)`: `console` in a worker with `stdout: true` writes to
+272. **`fix(ext/node)`: `console` in a worker with `stdout: true` writes to
      `worker.stdout`** (`fix/worker-stdout-console`;
      `ext/node/polyfills/worker_threads.ts`). A `node:worker_threads` worker
      created with `stdout: true` captured `process.stdout.write` into
@@ -11021,7 +11021,7 @@ where the changes are discussed.
        Node's output; `not_piped`: without them the worker's `console.log` still
        prints to the process's stdout).
 
-269. **`fix(ext/node)`: `node:fs` permission refusals carry Node's fields**
+273. **`fix(ext/node)`: `node:fs` permission refusals carry Node's fields**
      (`fix/node-fs-notcapable-code`; `ext/node/polyfills/internal/errors.ts`). A
      path the program may not read or write made `node:fs` throw Deno's
      `NotCapable` with no `code`, `syscall` or `path` (denoland/deno#32583), so
@@ -11048,7 +11048,7 @@ where the changes are discussed.
        `resource`, `syscall` and `path` and stay `NotCapable`;
        `Deno.readTextFileSync`'s refusal keeps its class, message and own keys).
 
-269. **`fix(ext/node)`: on Unix node-pty's `spawn` is the runtime's even when
+274. **`fix(ext/node)`: on Unix node-pty's `spawn` is the runtime's even when
      the package carries its addon** (`fix/node-pty-prefer-runtime-unix`;
      `ext/node/polyfills/01_require.js`, `internal/node_pty.js`). Item 268 let a
      package that carries its addon load its own code, and node-pty 1.1.0 ships
@@ -11094,13 +11094,13 @@ where the changes are discussed.
        run` and the compiled program under `--allow-ffi` alone
        still print the addon's `fork`.
 
-269. **`feat(desktop)`: baked desktop capabilities, and `secureStore` without
+275. **`feat(desktop)`: baked desktop capabilities, and `secureStore` without
      `--allow-sys`** (`feat/secure-store-capability`;
      `cli/lib/standalone/app_origin.rs`, `cli/rt_desktop/app_origin.rs`,
      `runtime/ops/desktop.rs`). The embedded `.deno-desktop/app.json` takes an
      optional `"capabilities": string[]`: the desktop capabilities the app's
      packaging baked in. This runtime knows `"secureStore"` and `"systemStats"`
-     (item 270); a name it doesn't know is accepted and ignored (logged at debug
+     (item 276); a name it doesn't know is accepted and ignored (logged at debug
      level), so a newer packager can bake one an older runtime has no API for,
      while a non-array value or a non-string entry is a parse error like the
      file's other malformed values. Only the file carries the list (deno.json
@@ -11135,7 +11135,7 @@ where the changes are discussed.
 
 
 
-270. **`feat(desktop)`: `Deno.desktop.systemStats`** (`feat/system-stats`;
+276. **`feat(desktop)`: `Deno.desktop.systemStats`** (`feat/system-stats`;
      `runtime/ops/system_stats.rs`, `runtime/ops/desktop.rs`,
      `cli/rt/desktop.rs`, `cli/rt_desktop/lib.rs`). A desktop app that shows the
      machine's load (a meter, a status line) had to read `/proc` under
@@ -11156,7 +11156,7 @@ where the changes are discussed.
      pending (callbacks never overlap) and, without sampling, while every open
      app window is hidden (`DesktopApi::any_window_visible`, laufey's
      `get_visible` over the open windows; a backend that can't say counts as
-     visible). Sampling needs the baked `systemStats` capability (item 269) or
+     visible). Sampling needs the baked `systemStats` capability (item 275) or
      unscoped `--allow-sys`, else `NotCapable` (`stats()` rejects, `onStats`
      throws when subscribing), and no other permission. `systemStats.supported`
      is true on macOS, Linux and Windows. Aggregate figures only: no per-process
@@ -11200,7 +11200,7 @@ where the changes are discussed.
        `--allow-sys`; with `--allow-sys` alone, no `--allow-read`, a sample has
        its CPU and memory figures).
 
-269. **`feat(desktop)`: native message boxes** (`feat/desktop-message-dialog`,
+277. **`feat(desktop)`: native message boxes** (`feat/desktop-message-dialog`,
      laufey API 54 from `feat/message-dialog` `63056a4`; runtime
      3.0.0-denext.14; `runtime/ops/desktop.rs`, `cli/rt_desktop/lib.rs`,
      `cli/rt/desktop.rs`, `runtime/js/99_main.js`,
@@ -11222,7 +11222,7 @@ where the changes are discussed.
      (`runtime/ops/desktop.rs`), the installed JS (`cli/rt/desktop.rs`), the
      inert-ops spec and the window e2e app's capability keys.
 
-269. **`fix(runtime)`: `DENO_UNSTABLE_IDLE_TRIM=0` turns a baked idle trim off,
+278. **`fix(runtime)`: `DENO_UNSTABLE_IDLE_TRIM=0` turns a baked idle trim off,
      at start or later** (`fix/idle-trim-env-override`; `cli/rt/run.rs`,
      `runtime/idle_trim.rs`). A program compiled with `--unstable-idle-trim`
      (item 104) always ran the trim: the environment could only turn it on
@@ -11243,7 +11243,7 @@ where the changes are discussed.
        (fails on the previous `baked || DENO_UNSTABLE_IDLE_TRIM == "1"`),
        `runtime/idle_trim.rs`'s `a_trim_turned_off_after_start_does_not_run`.
 
-268. **`fix(ext/node)`: `tls.checkServerIdentity` refuses a non-canonical IP
+279. **`fix(ext/node)`: `tls.checkServerIdentity` refuses a non-canonical IP
      host (CVE-2026-105483, CVE-2026-106069, CVE-2026-106072)**
      (`fix/node-oct26-tls-agent`, runtime; `ext/node/polyfills/_tls_wrap.js`).
      Node's October 21 2026 security release (26.12.1, 24.x, 22.x) fixed its
@@ -11276,7 +11276,7 @@ where the changes are discussed.
      `127。0.0.1` were authorized), node_compat
      `test-tls-check-server-identity.js` still enabled.
 
-269. **`fix(ext/node)`: `http.Agent` never reuses a kept-alive socket with a
+280. **`fix(ext/node)`: `http.Agent` never reuses a kept-alive socket with a
      response already on it (CVE-2026-48931, CVE-2026-105481)**
      (`fix/node-oct26-tls-agent`, runtime; `ext/node/polyfills/_http_agent.js`,
      `ext/node/ops/stream_wrap.rs`, `ext/node/ops/tls_wrap.rs`,
@@ -11333,9 +11333,7 @@ where the changes are discussed.
      at Node 26.5.1, which predates `0683ee5f7d`; its test is carried in
      `http_test.ts`.
 
-<!-- Items 242-304 are left to branches in flight; this branch is 305. -->
-
-305. **`fix(ext/node)`: a throwing callback runs once and is uncaught**
+281. **`fix(ext/node)`: a throwing callback runs once and is uncaught**
      (`fix/scrypt-callback-twice`, runtime;
      `ext/node/polyfills/internal/crypto/{scrypt,hkdf,random}.ts`).
      `crypto.scrypt()`, `crypto.hkdf()` and `crypto.checkPrime()` adapted their
@@ -11357,23 +11355,11 @@ The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
 169-174, 176, 178, 180, 182-184, 186, 187, 189-191, 193-196, 198-203, 206, 207,
 209-215, 217, 218, 221, 222, 224, 225, 227, 228, 231, 232, 235, 237, 240,
-243-245, 247-249, 253, 254, 256-260, 262-264, 267-270) are what the prebuilt
-
-
-243-245, 247-249, 253, 254, 256-260, 262-264, 267-269) are what the prebuilt
+243-245, 247-249, 253, 254, 256-260, 262-264, 267-281) are what the prebuilt
 `libdenort` carries. The CLI-side parts (for example writing
-
-243-245, 247-249, 253, 254, 256-260, 262-264, 267, 268, 269) are what the
-prebuilt `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
 in the branch too, but a stock CLI does not run them; denext's own launcher
 provides that environment.
-
-209-215, 217, 218, 221, 222, 224, 225, 227, 228, 231, 232, 235, 237, 240, 305)
-are what the prebuilt `libdenort` carries. The CLI-side parts (for example
-writing `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's
-launchers) are in the branch too, but a stock CLI does not run them; denext's
-own launcher provides that environment.
 
 The laufey backend hosts are built from
 [Brainwires/laufey](https://github.com/Brainwires/laufey) branch
@@ -11409,7 +11395,7 @@ first shown at its size and the CEF shutdown, storage and print fixes, item 234,
 and API 53, microphone and camera requests and the `mediaCapture` launch key,
 item 239; and, for runtime 3.0.0-denext.11, screen capture refused on WebView2
 and WebRTC on WebKitGTK for media-capture apps, item 252; and, for runtime
-3.0.0-denext.14, API 54, native message dialogs, item 269), at the commit pinned
+3.0.0-denext.14, API 54, native message dialogs, item 277), at the commit pinned
 by `LAUFEY_SHA` in the workflow (or the `laufey_ref` input). The same commit is
 the `laufey` git dependency of `cli/rt_desktop/Cargo.toml` (crate 0.8.0, API 54,
 CEF 156.0.15).

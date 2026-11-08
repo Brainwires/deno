@@ -1792,7 +1792,7 @@ pub async fn run_with_options(
     .iter()
     .any(|f| f == "legacy-abort")
     || deno_lib::args::legacy_abort_from_env(&sys));
-  // denext (DENEXT.md items 104, 269): `--unstable-idle-trim` at compile
+  // denext (DENEXT.md items 104, 278): `--unstable-idle-trim` at compile
   // time, or `DENO_UNSTABLE_IDLE_TRIM=1` when the binary runs;
   // `DENO_UNSTABLE_IDLE_TRIM=0` turns a baked one off.
   let idle_trim = idle_trim_enabled(
@@ -2744,7 +2744,7 @@ pub(crate) fn expand_desktop_path_tokens(
   }
 }
 
-/// denext (DENEXT.md item 269): whether a compiled program runs the idle trim
+/// denext (DENEXT.md item 278): whether a compiled program runs the idle trim
 /// (item 104). `baked`: compiled with `--unstable-idle-trim` (or
 /// `"unstable": ["idle-trim"]`); `env`: `DENO_UNSTABLE_IDLE_TRIM` at start.
 /// `1` turns it on and `0` off, whatever was baked; any other value (or none)
@@ -2777,7 +2777,7 @@ mod tests {
     v.iter().map(|s| (*s).to_string()).collect()
   }
 
-  // --- the idle trim switch (DENEXT.md item 269) ---
+  // --- the idle trim switch (DENEXT.md item 278) ---
 
   #[test]
   fn idle_trim_env_zero_turns_a_baked_flag_off() {
