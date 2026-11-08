@@ -5663,7 +5663,8 @@ fn op_desktop_system_stats_close(
 ) -> Result<(), JsErrorBox> {
   state
     .resource_table
-    .close(rid)
+    .take::<SystemStatsSamplerResource>(rid)
+    .map(drop)
     .map_err(JsErrorBox::from_err)
 }
 

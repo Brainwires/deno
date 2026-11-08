@@ -34,7 +34,10 @@ pub struct CpuTicks {
   pub idle: u64,
 }
 
-#[cfg_attr(not(any(test, target_os = "linux", windows)), allow(dead_code))]
+#[cfg_attr(
+  not(any(test, target_os = "linux", windows)),
+  allow(dead_code, reason = "used on another OS; tested on every OS")
+)]
 impl CpuTicks {
   /// The ticks from `prev` to `self`; `None` when a counter went backwards
   /// (a CPU taken offline and back, a counter reset).
@@ -47,7 +50,10 @@ impl CpuTicks {
 }
 
 /// A CPU snapshot: the aggregate ticks and each core's.
-#[cfg_attr(not(any(test, target_os = "linux", windows)), allow(dead_code))]
+#[cfg_attr(
+  not(any(test, target_os = "linux", windows)),
+  allow(dead_code, reason = "used on another OS; tested on every OS")
+)]
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CpuSnapshot {
   pub total: Option<CpuTicks>,
@@ -74,7 +80,10 @@ pub fn busy_percent(delta: CpuTicks) -> Option<f64> {
 /// The CPU figures between two snapshots: the aggregate (from `total`, else
 /// the sum of the cores) and each core's (0 for a core with no ticks between
 /// them; cores beyond the shorter snapshot are left out).
-#[cfg_attr(not(any(test, target_os = "linux", windows)), allow(dead_code))]
+#[cfg_attr(
+  not(any(test, target_os = "linux", windows)),
+  allow(dead_code, reason = "used on another OS; tested on every OS")
+)]
 pub fn cpu_between(
   prev: &CpuSnapshot,
   next: &CpuSnapshot,
@@ -109,7 +118,10 @@ pub fn cpu_between(
 /// Mach's per-CPU `[user, system, idle, nice]` tick counters
 /// (`natural_t`, which wrap at 2^32), as a delta: each counter's forward
 /// distance, so a wrap between two snapshots is not a negative figure.
-#[cfg_attr(not(any(test, target_os = "macos")), allow(dead_code))]
+#[cfg_attr(
+  not(any(test, target_os = "macos")),
+  allow(dead_code, reason = "used on another OS; tested on every OS")
+)]
 pub fn mach_ticks_between(prev: [u32; 4], next: [u32; 4]) -> CpuTicks {
   let d = |i: usize| u64::from(next[i].wrapping_sub(prev[i]));
   CpuTicks {
@@ -120,7 +132,10 @@ pub fn mach_ticks_between(prev: [u32; 4], next: [u32; 4]) -> CpuTicks {
 
 /// The CPU figures between two Mach snapshots (one `[user, system, idle,
 /// nice]` per CPU): the aggregate is the sum of the cores' deltas.
-#[cfg_attr(not(any(test, target_os = "macos")), allow(dead_code))]
+#[cfg_attr(
+  not(any(test, target_os = "macos")),
+  allow(dead_code, reason = "used on another OS; tested on every OS")
+)]
 pub fn mach_cpu_between(
   prev: &[[u32; 4]],
   next: &[[u32; 4]],
@@ -149,7 +164,10 @@ pub fn mach_cpu_between(
 /// One `cpu` / `cpuN` line of Linux's `/proc/stat` (user nice system idle
 /// iowait irq softirq steal; guest time is already in user and nice): idle
 /// and iowait are the idle ticks.
-#[cfg_attr(not(any(test, target_os = "linux")), allow(dead_code))]
+#[cfg_attr(
+  not(any(test, target_os = "linux")),
+  allow(dead_code, reason = "used on another OS; tested on every OS")
+)]
 fn parse_proc_stat_line(fields: &str) -> Option<CpuTicks> {
   let mut n = [0u64; 8];
   let mut count = 0;
@@ -168,7 +186,10 @@ fn parse_proc_stat_line(fields: &str) -> Option<CpuTicks> {
 }
 
 /// Linux's `/proc/stat`: the aggregate `cpu` line and each `cpuN` line.
-#[cfg_attr(not(any(test, target_os = "linux")), allow(dead_code))]
+#[cfg_attr(
+  not(any(test, target_os = "linux")),
+  allow(dead_code, reason = "used on another OS; tested on every OS")
+)]
 pub fn parse_proc_stat(text: &str) -> CpuSnapshot {
   let mut snapshot = CpuSnapshot::default();
   for line in text.lines() {
@@ -203,7 +224,10 @@ pub struct MemoryStats {
 
 /// Memory from Linux's `/proc/meminfo`: pressure = 100 × (1 − MemAvailable
 /// / MemTotal), used = total − available.
-#[cfg_attr(not(any(test, target_os = "linux")), allow(dead_code))]
+#[cfg_attr(
+  not(any(test, target_os = "linux")),
+  allow(dead_code, reason = "used on another OS; tested on every OS")
+)]
 pub fn parse_meminfo(text: &str) -> MemoryStats {
   let kib = |key: &str| -> Option<u64> {
     text.lines().find_map(|line| {
@@ -228,19 +252,28 @@ pub fn parse_meminfo(text: &str) -> MemoryStats {
 
 /// Memory pressure from macOS's `kern.memorystatus_level` (the share of
 /// memory still available, 0-100).
-#[cfg_attr(not(any(test, target_os = "macos")), allow(dead_code))]
+#[cfg_attr(
+  not(any(test, target_os = "macos")),
+  allow(dead_code, reason = "used on another OS; tested on every OS")
+)]
 pub fn mac_memory_pressure(level: i32) -> Option<f64> {
   (0..=100).contains(&level).then(|| f64::from(100 - level))
 }
 
 /// The keys IOKit's `PerformanceStatistics` names a GPU's busy share by,
 /// best first: Apple silicon and Intel graphics, then AMD on macOS.
-#[cfg_attr(not(any(test, target_os = "macos")), allow(dead_code))]
+#[cfg_attr(
+  not(any(test, target_os = "macos")),
+  allow(dead_code, reason = "used on another OS; tested on every OS")
+)]
 pub const GPU_UTILIZATION_KEYS: &[&str] =
   &["Device Utilization %", "GPU Activity(%)"];
 
 /// The first of [`GPU_UTILIZATION_KEYS`] `lookup` answers, as a percent.
-#[cfg_attr(not(any(test, target_os = "macos")), allow(dead_code))]
+#[cfg_attr(
+  not(any(test, target_os = "macos")),
+  allow(dead_code, reason = "used on another OS; tested on every OS")
+)]
 pub fn performance_statistics_utilization(
   lookup: impl Fn(&str) -> Option<i64>,
 ) -> Option<f64> {
@@ -286,7 +319,10 @@ pub fn gpu_from_devices(devices: Vec<GpuDevice>) -> GpuStats {
 }
 
 /// amdgpu's sysfs `gpu_busy_percent` (a bare number).
-#[cfg_attr(not(any(test, target_os = "linux")), allow(dead_code))]
+#[cfg_attr(
+  not(any(test, target_os = "linux")),
+  allow(dead_code, reason = "used on another OS; tested on every OS")
+)]
 pub fn parse_busy_percent(text: &str) -> Option<f64> {
   let n: f64 = text.trim().parse().ok()?;
   n.is_finite().then(|| percent(n)).flatten()
@@ -296,7 +332,10 @@ pub fn parse_busy_percent(text: &str) -> Option<f64> {
 /// (`pid_<pid>_luid_<hi>_<lo>_phys_<n>_eng_<n>_engtype_<type>`): the
 /// adapter (`luid_…_phys_<n>`) and the engine type. The process id is
 /// dropped: the figures are summed over every process.
-#[cfg_attr(not(any(test, windows)), allow(dead_code))]
+#[cfg_attr(
+  not(any(test, windows)),
+  allow(dead_code, reason = "used on another OS; tested on every OS")
+)]
 pub fn gpu_engine_key(instance: &str) -> Option<(&str, &str)> {
   let adapter_start = instance.find("luid_")?;
   let eng = instance[adapter_start..].find("_eng_")? + adapter_start;
@@ -313,7 +352,10 @@ pub fn gpu_engine_key(instance: &str) -> Option<(&str, &str)> {
 /// The GPU utilization from PDH's `\GPU Engine(*)\Utilization Percentage`
 /// items: summed per adapter and engine type (every process's share of the
 /// 3D engine, …), the busiest of those; `None` when there are none.
-#[cfg_attr(not(any(test, windows)), allow(dead_code))]
+#[cfg_attr(
+  not(any(test, windows)),
+  allow(dead_code, reason = "used on another OS; tested on every OS")
+)]
 pub fn gpu_from_engines<'a>(
   items: impl IntoIterator<Item = (&'a str, f64)>,
 ) -> Option<f64> {
@@ -419,7 +461,13 @@ impl Sampler {
   }
 }
 
+// The runtime reads the kernel's own figures here, not the app's files:
+// std::fs, not the permission-checked file system.
 #[cfg(target_os = "linux")]
+#[allow(
+  clippy::disallowed_methods,
+  reason = "reads /proc and /sys for the runtime itself, not for the app"
+)]
 mod os {
   use std::sync::OnceLock;
 
@@ -483,7 +531,7 @@ mod os {
   type NvmlDevice = *mut std::ffi::c_void;
 
   /// `nvmlUtilization_t`; only `gpu` is read.
-  #[allow(dead_code)]
+  #[allow(dead_code, reason = "mirrors the C layout")]
   #[repr(C)]
   struct NvmlUtilization {
     gpu: u32,
@@ -619,7 +667,7 @@ mod os {
 
   /// `vm_statistics64` (mach/vm_statistics.h); most fields mirror the C
   /// layout and are never read.
-  #[allow(dead_code)]
+  #[allow(dead_code, reason = "mirrors the C layout")]
   #[repr(C, align(8))]
   #[derive(Default)]
   struct VmStatistics64 {

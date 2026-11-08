@@ -10,6 +10,6 @@ op_desktop_set_launch_at_login -> "not-supported"
 op_desktop_register_scheme throws Error: deep-link scheme registration is not available in this runtime
 op_desktop_register_scheme(no force) throws Error: deep-link scheme registration is not available in this runtime
 op_desktop_secret_request -> {"status":"unsupported","value":null,"reason":null}
-op_desktop_system_stats_check -> undefined
+op_desktop_system_stats_check -> null
 op_desktop_system_stats -> [["at","cpu","gpu","memory"],["total","cores"],"number","number","number"]
 op_desktop_schedule_notification -> false
