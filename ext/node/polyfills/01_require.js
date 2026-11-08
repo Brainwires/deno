@@ -3168,13 +3168,18 @@ function maybeBetterSqlite3Addon(filename) {
 }
 
 // node-pty is a native addon (`pty.node`, `conpty.node`, a `spawn-helper`),
-// built at install or shipped prebuilt. A package that carries the addon for
-// this platform loads it through its own code, as Node does (under
-// `--allow-ffi`, like any addon; DENEXT.md item 268): an app that calls the
-// addon directly (its `native` export) depends on that. Without the addon
-// (an install that ran no scripts and has no prebuild for the platform) the
-// entry module resolves to an implementation of its API over `Deno.openPty`
-// instead (DENEXT.md item 261), unless DENO_NO_NODE_PTY_COMPAT is set.
+// built at install or shipped prebuilt. On Unix the package's entry module
+// resolves to an implementation of its API over `Deno.openPty` (DENEXT.md
+// item 261) whatever the package carries: the package's own JavaScript reads
+// the terminal through `tty.ReadStream(fd)`, which the runtime cannot do for
+// an arbitrary fd, so with its addon loaded `spawn` started the child and
+// never delivered its output or exit (DENEXT.md item 269). When the package
+// carries the addon, the entry's `native` export is that addon, loaded on
+// first access through the package's own path (`--allow-ffi`, like any addon;
+// `null` without it): an app that calls the addon directly depends on that
+// (DENEXT.md item 268). On Windows a package that carries the addon loads it
+// through its own code, as Node does (item 268); without one the runtime's
+// implementation answers. DENO_NO_NODE_PTY_COMPAT=1 opts out of all of it.
 const NODE_PTY_ENTRY =
   /^(.*[\\/]node-pty(?:[\\/][^\\/]+)?)[\\/]lib[\\/]index\.js$/;
 // where node-pty's `loadNativeModule` (lib/utils.js) looks for its addon,
@@ -3195,8 +3200,11 @@ function isNodePtyOptedOut() {
   return nodePtyOptedOut;
 }
 
-/** Whether the node-pty package at `root` carries its addon for this platform. */
-function nodePtyHasAddon(root, sep) {
+/**
+ * The addon the node-pty package at `root` carries for this platform, the
+ * first where its loader looks, or `undefined` without one.
+ */
+function nodePtyAddon(root, sep) {
   const platform = process.platform;
   const names = platform === "win32" ? ["conpty", "pty"] : ["pty"];
   const prebuildDir = `${platform}-${process.arch}`;
@@ -3208,7 +3216,7 @@ function nodePtyHasAddon(root, sep) {
       for (let k = 0; k < names.length; k++) {
         const addon = bases[j] + sep + dir + sep + names[k] + ".node";
         try {
-          if (op_require_stat(addon) === 0) return true;
+          if (op_require_stat(addon) === 0) return addon;
         } catch {
           // unreadable (a read permission the package's own code would also
           // lack): not an addon the package can load
@@ -3216,26 +3224,65 @@ function nodePtyHasAddon(root, sep) {
       }
     }
   }
-  return false;
+  return undefined;
 }
 
-function maybeNodePtyOverride(filename) {
+/**
+ * node-pty's `native` export on Unix: the package's addon at `addon`, loaded
+ * on first access as the package would (`module.require`, so it is the same
+ * module the package's own files get). Without `--allow-ffi` for it, or when
+ * it does not load, `null`, as without an addon: an ES module import reads
+ * every named export, and a program that only spawns must neither need
+ * `--allow-ffi` nor be prompted for it.
+ */
+function defineNodePtyNative(exports, module, addon) {
+  let native;
+  ObjectDefineProperty(exports, "native", {
+    __proto__: null,
+    configurable: true,
+    enumerable: true,
+    get() {
+      if (native !== undefined) return native;
+      native = null;
+      try {
+        const query = core.ops.op_query_permission;
+        if (
+          query === undefined ||
+          query({ name: "ffi", path: addon })?.state === "granted"
+        ) {
+          native = module.require(addon);
+        }
+      } catch {
+        // not a loadable addon: as without one
+      }
+      return native;
+    },
+    set(value) {
+      native = value;
+    },
+  });
+}
+
+function maybeNodePtyOverride(filename, module) {
   const match = RegExpPrototypeExec(NODE_PTY_ENTRY, filename);
   if (match === null) return undefined;
   if (isNodePtyOptedOut()) return undefined;
   const sep = StringPrototypeIncludes(match[1], "/") ? "/" : "\\";
   const pkg = op_require_read_package_scope(match[1] + sep + "package.json");
   if (pkg?.name !== "node-pty") return undefined;
-  if (nodePtyHasAddon(match[1], sep)) return undefined;
+  const addon = nodePtyAddon(match[1], sep);
+  if (addon !== undefined && process.platform === "win32") return undefined;
   const { spawn, fork, createTerminal, open, native } = core.loadExtScript(
     "ext:deno_node/internal/node_pty.js",
   );
-  return { spawn, fork, createTerminal, open, native };
+  const exports = { spawn, fork, createTerminal, open, native };
+  if (addon !== undefined) defineNodePtyNative(exports, module, addon);
+  return exports;
 }
 
 function loadMaybeCjs(module, filename) {
   const override = maybeBetterSqlite3Override(filename) ??
-    maybeNodePtyOverride(filename);
+    maybeNodePtyOverride(filename, module);
   if (override !== undefined) {
     module.exports = override;
     return;

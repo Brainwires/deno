@@ -1,10 +1,12 @@
 {
   // node-pty whose package carries its addon (built at install here with
-  // node-gyp, as `@denotest/node-addon`; the real package ships prebuilds):
-  // the package's own code loads it, as on Node, under --allow-ffi alone, in
-  // a compiled program too (DENEXT.md item 268). On 3.0.0-denext.11 and .12
-  // the entry resolved to the runtime's implementation whatever the package
-  // carried, and `native` was null.
+  // node-gyp, as `@denotest/node-addon`; the real package ships prebuilds).
+  // The package's `native` export is the addon under --allow-ffi alone, in a
+  // compiled program too (DENEXT.md item 268; on 3.0.0-denext.11 and .12 it
+  // was null). On Unix `spawn` is the runtime's all the same, so a child's
+  // output and exit arrive (item 269; from 3.0.0-denext.13 the package's own
+  // `spawn` never delivered them), and `native` is null without --allow-ffi.
+  // On Windows the package's own code loads (item 268).
   "tempDir": true,
   "steps": [{
     "args": "install --allow-scripts --no-jail-scripts",
@@ -12,6 +14,14 @@
   }, {
     "args": "run --allow-read --allow-ffi main.ts",
     "output": "main.out"
+  }, {
+    "if": "unix",
+    "args": "run --allow-read --allow-env --allow-run --allow-ffi spawn.ts",
+    "output": "spawn.out"
+  }, {
+    "if": "unix",
+    "args": "run --allow-read --allow-env --allow-run spawn.ts",
+    "output": "spawn_no_ffi.out"
   }, {
     "args": "compile --no-check --allow-ffi --output out main.ts",
     "output": "[WILDCARD]"

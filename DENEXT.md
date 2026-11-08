@@ -10872,7 +10872,8 @@ where the changes are discussed.
      (Linux: node-pty publishes none) still gets item 261's implementation, and
      `DENO_NO_NODE_PTY_COMPAT=1` still opts out of it entirely. The check is on
      the package's files, not on permissions: a module resolves the same
-     whatever the program may do.
+     whatever the program may do. Item 269 keeps this for Windows only: on Unix
+     the runtime's implementation answers and `native` is the package's addon.
      - Specs: `compile/node_pty_addon` (the registry's
        `node-pty@1.1.0-denotest`, a stand-in whose install builds a Node-API
        `pty.node` with node-gyp, as `@denotest/node-addon`'s does; `deno run`
@@ -11007,6 +11008,52 @@ where the changes are discussed.
        `resource`, `syscall` and `path` and stay `NotCapable`;
        `Deno.readTextFileSync`'s refusal keeps its class, message and own keys).
 
+269. **`fix(ext/node)`: on Unix node-pty's `spawn` is the runtime's even when
+     the package carries its addon** (`fix/node-pty-prefer-runtime-unix`;
+     `ext/node/polyfills/01_require.js`, `internal/node_pty.js`). Item 268 let a
+     package that carries its addon load its own code, and node-pty 1.1.0 ships
+     prebuilds for macOS: from 3.0.0-denext.13 `spawn()` there returned a pid
+     but never delivered `onData` or `onExit` under `deno run`, because the
+     package's JavaScript reads the master through `tty.ReadStream(fd)` /
+     `net.Socket({ fd })`, which the runtime cannot do for an arbitrary fd (the
+     Node-gap plan's gap 3, the real fix, not in this item). On Unix the entry
+     module now resolves to item 261's implementation whatever the package
+     carries, and when the package carries the addon (found where node-pty's
+     `loadNativeModule` looks, as in item 268) the entry's `native` export is
+     that addon: a getter that loads it on first access through the package's
+     own path with `module.require`, so it is the module the package's files
+     would get, under `--allow-ffi` like any addon. That keeps the case item 268
+     fixed: a compiled desktop app under
+     `--allow-read
+     --allow-env --allow-ffi` that calls `native.fork` and
+     does the master's I/O itself (Brainwires/denext#134, Qutty) gets the addon
+     from its embedded file system. Without `--allow-ffi` for the addon (asked
+     with a query, never a prompt), or when it does not load, `native` is
+     `null`, as without an addon: an ES module import reads every named export,
+     and a program that only spawns must neither need `--allow-ffi` nor be
+     prompted for it. The choice is on the package's files and the platform, not
+     on the program's permissions, as item 268's: a permission-based rule ("the
+     package's code when only `--allow-ffi` is granted") would still hand such a
+     program a `spawn` that never reports, and would resolve a module
+     differently by flags; with `native` lazy, a program that calls the addon
+     directly and one that spawns both work under the same resolution. Windows
+     is unchanged (item 268: a package with `conpty.node` / `pty.node` loads its
+     own code, since the runtime's pty is not available there yet, item 259),
+     and `DENO_NO_NODE_PTY_COMPAT=1` still loads the package's own code
+     everywhere.
+     - Specs: `node/node_pty_override`'s `addon_present_uses_the_runtime` (Unix:
+       an empty `prebuilds/<platform>-<arch>/pty.node` in the stand-in, then
+       `sh -c 'echo hi; exit 3'` through `spawn` delivers `hi` and exit 3, with
+       a 10 s timeout; `native` is `null`, the file not loading; on
+       3.0.0-denext.13 the stand-in's own entry ran and threw);
+       `addon_present_loads_the_package` is now Windows only;
+       `compile/node_pty_addon` adds two Unix steps with the stand-in's real
+       Node-API addon: `spawn` delivers the output and exit with `native` the
+       addon under `--allow-ffi`, and with `native` `null` without it;
+       `deno
+       run` and the compiled program under `--allow-ffi` alone
+       still print the addon's `fork`.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
@@ -11014,6 +11061,9 @@ The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 209-215, 217, 218, 221, 222, 224, 225, 227, 228, 231, 232, 235, 237, 240,
 243-245, 247-249, 253, 254, 256-260, 262-264, 267-269) are what the prebuilt
 `libdenort` carries. The CLI-side parts (for example writing
+
+243-245, 247-249, 253, 254, 256-260, 262-264, 267, 268, 269) are what the
+prebuilt `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
 in the branch too, but a stock CLI does not run them; denext's own launcher
 provides that environment.

@@ -6,15 +6,15 @@
 
 // `node-pty` over `Deno.openPty` (DENEXT.md item 261). node-pty is a native
 // addon (`pty.node` / `conpty.node` plus a `spawn-helper`) built at install or
-// shipped prebuilt. A package without the addon for this platform has its
-// entry module resolve to this one instead (`maybeNodePtyOverride` in
-// 01_require.js); one that carries the addon loads it through its own code,
-// as on Node (DENEXT.md item 268). This implements node-pty 1.x's
-// public API - `spawn(file, args, options)` and the `IPty` it returns: `pid`,
-// `cols`, `rows`, `process`, `onData` / `onExit` (disposable events), the
-// `on('data' | 'exit' | 'close')` emitter, `write`, `resize`, `kill`,
-// `pause` / `resume`, `clear`, `handleFlowControl` - on the runtime's own
-// pseudo-terminal, under `--allow-run` like `Deno.Command`.
+// shipped prebuilt. On Unix the package's entry module resolves to this one
+// instead (`maybeNodePtyOverride` in 01_require.js), a package that carries
+// the addon too (its `native` export is then the addon, DENEXT.md items 268
+// and 269); on Windows only a package without the addon does. This implements
+// node-pty 1.x's public API - `spawn(file, args, options)` and the `IPty` it
+// returns: `pid`, `cols`, `rows`, `process`, `onData` / `onExit` (disposable
+// events), the `on('data' | 'exit' | 'close')` emitter, `write`, `resize`,
+// `kill`, `pause` / `resume`, `clear`, `handleFlowControl` - on the runtime's
+// own pseudo-terminal, under `--allow-run` like `Deno.Command`.
 
 (function () {
 const { core } = __bootstrap;
@@ -338,7 +338,8 @@ function open() {
 }
 
 // `native` is node-pty's addon, "not public API and could be removed at any
-// time": nothing here.
+// time": nothing here (01_require.js puts the package's addon there when the
+// package carries one).
 const native = null;
 
 return { spawn, fork, createTerminal, open, native, Terminal };
