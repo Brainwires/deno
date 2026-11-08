@@ -11452,6 +11452,23 @@ where the changes are discussed.
        `test_flags_to_permission_options_clean_run_env`; the run prompts in
        `tests/integration/run_tests.rs` carry the new line.
 
+285. **`fix(cli)`: a doubled comma escapes a comma in a path permission
+     again** (port of denoland/deno#37115 for denoland/deno#37114, by Behnam;
+     CLI only; `libs/cli_parser/src/defs.rs`, `libs/cli_parser/src/convert.rs`).
+     Since Deno 2.9.8 the parser split `--allow-read`, `--deny-read`,
+     `--ignore-read`, `--allow-write`, `--deny-write`, `--allow-ffi` and
+     `--deny-ffi` values at every comma before the comma escaping saw them, so
+     `--allow-read=a,,b` (the single path `a,b`) failed with `Empty path is
+     not allowed`. Those flags no longer take the generic comma delimiter; each
+     raw value goes through `escape_and_split_commas`, as before 2.9.8, and an
+     empty entry is still refused. The other permission flags are unchanged.
+     - Tests: `libs/cli_parser` `path_permission_flags_escape_commas` (repeated
+       flags, short aliases, comma runs, Unicode) and
+       `path_permission_flags_reject_empty_values`; spec
+       `permission/comma_paths` (an escaped path is granted for read and write,
+       short flags repeated, an explicit deny still wins, and the fragments
+       between the commas stay inaccessible).
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
