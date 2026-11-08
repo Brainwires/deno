@@ -303,7 +303,10 @@ pub struct GpuStats {
 /// only when there are any.
 #[cfg_attr(
   not(any(test, target_os = "macos", target_os = "linux")),
-  allow(dead_code)
+  allow(
+    dead_code,
+    reason = "only the macOS and Linux GPU probes name devices"
+  )
 )]
 pub fn gpu_from_devices(devices: Vec<GpuDevice>) -> GpuStats {
   let utilization = devices
