@@ -1,6 +1,8 @@
 {
   "tempDir": true,
   "tests": {
+    // denext (DENEXT.md item 270): an npm package's JS bin run by `deno x`
+    // runs in Node mode, which has `__proto__` with or without the flag
     "without_flag": {
       "if": "notSlowCiShard",
       "args": "x -y npm:@denotest/unsafe-proto-bin",

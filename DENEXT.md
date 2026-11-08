@@ -10949,7 +10949,8 @@ where the changes are discussed.
        and without `execArgv: []`; `node -e`; Deno code spawning
        `node child.cjs`; the `deno run` parent itself still has it off). Tests:
        `libs/node_shim`'s and `node_cli_parser.rs`'s translation tests list the
-       flag.
+       flag. Upstream's `x/unstable_flags` `without_flag` spec now expects the
+       accessor on (a `deno x` bin runs in Node mode).
 
 271. **`fix(node)`: Node mode reports uncaught errors as Node does**
      (`fix/node-mode-error-output`; `runtime/fmt_errors.rs`, `cli/lib.rs`,
