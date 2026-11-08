@@ -10882,12 +10882,39 @@ where the changes are discussed.
        `prebuilds/<platform>-<arch>/pty.node` in the stand-in makes the
        package's own entry run).
 
+269. **`fix(ext/node)`: `node:fs` permission refusals carry Node's fields**
+     (`fix/node-fs-notcapable-code`; `ext/node/polyfills/internal/errors.ts`). A
+     path the program may not read or write made `node:fs` throw Deno's
+     `NotCapable` with no `code`, `syscall` or `path` (denoland/deno#32583), so
+     code that branches on `err.code`, as fs-walking libraries and loggers do,
+     saw `undefined`. Node's own permission model
+     (`node --permission
+     --allow-fs-read=...`) refuses with
+     `code: "ERR_ACCESS_DENIED"`, `permission: "FileSystemRead"`
+     (`"FileSystemWrite"` for a write) and `resource: <the path as given>`. The
+     two mappers every `node:fs` path runs its errors through
+     (`denoErrorToNodeError`, `denoWriteFileErrorToNodeError`) now give a
+     `NotCapable` those three fields plus the `syscall` and `path` that all fs
+     errors carry (the path from the call, else from Deno's message), and
+     nothing else: Node's refusals have no `errno`, so none is invented. The
+     error is decorated in place rather than replaced, so it stays a
+     `Deno.errors.NotCapable` with Deno's message (which names the `--allow-*`
+     flag to grant), and code written against Deno's class keeps working. Deno's
+     own APIs (`Deno.readTextFile` and the rest) never pass through these
+     mappers and throw exactly what they did. `permission` is set for read and
+     write refusals only, the two Node names an fs call can meet.
+     - Specs: `node/fs_not_capable_fields` (under `--allow-read=allowed`:
+       `readFile`, `writeFile`, `stat`, `open` and `readdir` in their sync,
+       callback and promise forms, and `lstatSync`, carry `code`, `permission`,
+       `resource`, `syscall` and `path` and stay `NotCapable`;
+       `Deno.readTextFileSync`'s refusal keeps its class, message and own keys).
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
 169-174, 176, 178, 180, 182-184, 186, 187, 189-191, 193-196, 198-203, 206, 207,
 209-215, 217, 218, 221, 222, 224, 225, 227, 228, 231, 232, 235, 237, 240,
-243-245, 247-249, 253, 254, 256-260, 262-264, 267, 268) are what the prebuilt
+243-245, 247-249, 253, 254, 256-260, 262-264, 267-269) are what the prebuilt
 `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
 in the branch too, but a stock CLI does not run them; denext's own launcher
