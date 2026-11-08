@@ -366,6 +366,11 @@ const exceptionWithHostPort = hideStackFrames(
   },
 );
 
+// A permission refusal (`--allow-*` not granted).
+function isNotCapableError(e: unknown): boolean {
+  return ObjectPrototypeIsPrototypeOf(Deno.errors.NotCapable.prototype, e);
+}
+
 const handleDnsError = hideStackFrames(
   (err: Error, syscall: string, address: string) => {
     //@ts-expect-error code is safe to access with optional chaining
@@ -374,7 +379,7 @@ const handleDnsError = hideStackFrames(
       return dnsException(err?.uv_errcode, syscall, address);
     }
 
-    if (ObjectPrototypeIsPrototypeOf(Deno.errors.NotCapable.prototype, err)) {
+    if (isNotCapableError(err)) {
       return dnsException(codeMap.get("EPERM")!, syscall, address);
     }
 
@@ -3178,7 +3183,7 @@ function decorateNotCapableError(e: Error, ctx: UvExceptionContext) {
 }
 
 function denoErrorToNodeError(e: Error, ctx: UvExceptionContext) {
-  if (ObjectPrototypeIsPrototypeOf(Deno.errors.NotCapable.prototype, e)) {
+  if (isNotCapableError(e)) {
     return decorateNotCapableError(e, ctx);
   }
   if (ObjectPrototypeIsPrototypeOf(Deno.errors.BadResource.prototype, e)) {
@@ -3204,7 +3209,7 @@ function denoWriteFileErrorToNodeError(
   e: Error,
   ctx: UvExceptionContext,
 ) {
-  if (ObjectPrototypeIsPrototypeOf(Deno.errors.NotCapable.prototype, e)) {
+  if (isNotCapableError(e)) {
     return decorateNotCapableError(e, ctx);
   }
   if (ObjectPrototypeIsPrototypeOf(Deno.errors.BadResource.prototype, e)) {
