@@ -11350,6 +11350,33 @@ where the changes are discussed.
      `tests/unit_node/_test_utils.ts`; each fails on the base (the callback runs
      twice).
 
+282. **`feat(desktop)`: application-menu clicks reach the app with every window
+     closed** (`feat/app-menu-event`, laufey API 55 from `feat/app-menu-event`
+     `f665989`, stacked on item 277; `cli/rt_desktop/lib.rs`,
+     `runtime/ops/desktop.rs`, `cli/rt/desktop.rs`,
+     `cli/tsc/dts/lib.deno.desktop.d.ts`, `cli/rt_desktop/Cargo.toml`,
+     `Cargo.lock`, `.github/workflows/denext_runtime.yml`). The application menu
+     is set through a window (`setApplicationMenu`), and its clicks were only
+     delivered as that window's `"menuclick"`: the runtime looked the window up
+     and dropped the click when it was gone. On macOS the menu bar keeps showing
+     the menu of the last window that set one, so an app kept running with its
+     windows closed (`quitOnLastWindowClosed = false`, a tray app) had a menu
+     bar whose items did nothing. laufey API 55 adds one app-level handler that
+     hears every application-menu click, after the window's own callback, with
+     the id of the window that set the menu, open or not
+     (`set_app_menu_click_handler`; every CEF and WebView backend, and the
+     `laufey` crate reports them from the window menus' callback on Winit). The
+     runtime turns each into an `applicationMenuClick` event and `Deno.desktop`
+     dispatches `"menuclick"` with `{ id, windowId }`, without looking the
+     window up; the window's own `"menuclick"` is unchanged and still comes
+     first. Typed as `Deno.desktop.AppMenuClickDetail` and `onmenuclick`. The
+     compile-time API assert moves to 55.
+     - Tests: the event's wire shape and kind (`runtime/ops/desktop.rs`), the
+       installed JS (`cli/rt/desktop.rs`
+       `desktop_js_delivers_app_menu_clicks_to_the_app`: the app-level case
+       doesn't look the window up and follows the window's case); laufey's
+       wrapper and fake-backend tests.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,

@@ -1658,6 +1658,16 @@ declare namespace Deno {
       name: string;
     }
 
+    /** Detail of a `Deno.desktop` `"menuclick"` event: a click on an
+     * application-menu item. */
+    export interface AppMenuClickDetail {
+      /** The clicked item's `id`. */
+      id: string;
+      /** The id of the window whose `setApplicationMenu` installed the menu.
+       * That window may have closed: on macOS the menu bar keeps its menu. */
+      windowId: number;
+    }
+
     /** Detail of an `"openurl"` event. */
     export interface OpenUrlDetail {
       /** The URL as the OS delivered it (not validated). */
@@ -2582,6 +2592,12 @@ declare namespace Deno {
        * quit. Its `reason` is `"session-end"` when the user's session is
        * ending (see {@linkcode quit}), else `"quit"`. */
       beforequit: Event & { readonly reason: "quit" | "session-end" };
+      /** An application-menu item was clicked. Fires for every click, after
+       * the window's own `"menuclick"`, whether or not the window that set
+       * the menu is still open: on macOS the menu bar keeps showing the
+       * menu of a window that closed, so an app with no window left (one
+       * that keeps running, a tray app) hears its menu here. */
+      menuclick: CustomEvent<AppMenuClickDetail>;
       /** A URL routed to the running app (macOS). */
       openurl: CustomEvent<OpenUrlDetail>;
       /** A file opened with the running app (macOS). */
@@ -3431,6 +3447,9 @@ declare namespace Deno {
     export let ondisplaychanged: ((ev: Event) => any) | null;
     export let onplatformfeatureschanged: ((ev: Event) => any) | null;
     export let onbeforequit: ((ev: Event) => any) | null;
+    export let onmenuclick:
+      | ((ev: CustomEvent<AppMenuClickDetail>) => any)
+      | null;
     export let onopenurl:
       | ((ev: CustomEvent<OpenUrlDetail>) => any)
       | null;
