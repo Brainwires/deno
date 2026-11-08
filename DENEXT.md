@@ -10898,11 +10898,9 @@ where the changes are discussed.
      `--unstable-detect-cjs`, so a Node-mode program and every Node child of it,
      `fork()` with an explicit `execArgv: []` included, have the accessor, as
      under Node. An npm package's JS bin run by `deno x` (and so `npx`) or as a
-     command in a task or lifecycle script gets it too. `deno
-     run` /
-     `deno serve` of a program keep it off unless asked for (a
-     `deno
-     run npm:pkg` included), and a `child_process` spawn with Deno
+     command in a task or lifecycle script gets it too. A program run with
+     `deno run` or `deno serve` keeps it off unless asked for (an npm package's
+     `deno run npm:` specifier included), and a `child_process` spawn with Deno
      arguments (`run ...`) is passed through unchanged.
      - Specs: `node/node_mode_unsafe_proto` (a `node` symlink of the executable
        runs a script that reads `({}).__proto__` and assigns `obj.__proto__`,
