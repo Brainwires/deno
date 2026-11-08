@@ -6223,4 +6223,52 @@ mod tests {
       ]
     );
   }
+
+  #[test]
+  fn check_compiles_the_script_without_running_it() {
+    let parsed = parse_args(svec!["--check", "app.js"]).unwrap();
+    let result =
+      translate_to_deno_args(parsed, &TranslateOptions::for_child_process());
+    let args = result.deno_args;
+    assert_eq!(
+      &args[..5],
+      &svec![
+        "run",
+        "-A",
+        "--unstable-node-errors",
+        "--unstable-bare-node-builtins",
+        "--unstable-detect-cjs"
+      ],
+      "{args:?}"
+    );
+    assert!(args[5].starts_with("data:text/javascript,"), "{args:?}");
+    assert_eq!(&args[6..], &svec!["app.js"], "{args:?}");
+  }
+
+  #[test]
+  fn stack_trace_limit_reaches_v8() {
+    let parsed = parse_args(svec!["--stack-trace-limit=3", "app.js"]).unwrap();
+    let result =
+      translate_to_deno_args(parsed, &TranslateOptions::for_child_process());
+    assert!(
+      result
+        .deno_args
+        .iter()
+        .any(|a| a == "--v8-flags=--stack-trace-limit=3"),
+      "{:?}",
+      result.deno_args
+    );
+    // The default is V8's own, so it is not passed.
+    let parsed = parse_args(svec!["app.js"]).unwrap();
+    let result =
+      translate_to_deno_args(parsed, &TranslateOptions::for_child_process());
+    assert!(
+      !result
+        .deno_args
+        .iter()
+        .any(|a| a.contains("stack-trace-limit")),
+      "{:?}",
+      result.deno_args
+    );
+  }
 }
