@@ -10919,12 +10919,74 @@ where the changes are discussed.
        without `--allow-sys` passes, `--allow-sys` alone passes, neither is
        `NotCapable` naming both fixes).
 
+270. **`feat(desktop)`: `Deno.desktop.systemStats`** (`feat/system-stats`;
+     `runtime/ops/system_stats.rs`, `runtime/ops/desktop.rs`,
+     `cli/rt/desktop.rs`, `cli/rt_desktop/lib.rs`). A desktop app that shows the
+     machine's load (a meter, a status line) had to read `/proc` under
+     `--allow-read`, run `ioreg` / `nvidia-smi` under `--allow-run`, or reach
+     Mach and IOKit through `--allow-ffi`. The runtime now samples natively:
+     `Deno.desktop.systemStats.createSampler()` returns a sampler whose
+     `stats({ perCore? })` resolves to
+     `{ at, cpu: { total, cores? }, gpu: {
+     utilization, devices? }, memory: { pressure, usedBytes?, totalBytes? } }`
+     (percent figures 0-100, one decimal, `null` when unknown), and whose
+     `onStats(cb, { intervalMs, perCore? })` calls back every `intervalMs` (at
+     least 1000, else `RangeError`) and returns the unsubscribe; `close()` stops
+     every subscription and frees it (idempotent). Each sampler keeps its own
+     previous CPU snapshot, so its CPU figure is the share since that sampler's
+     previous sample; its first sample takes two snapshots 100 ms apart.
+     Sampling happens only on a `stats()` call or a live tick, on the blocking
+     pool: no background thread. A tick is skipped while the previous one is
+     pending (callbacks never overlap) and, without sampling, while every open
+     app window is hidden (`DesktopApi::any_window_visible`, laufey's
+     `get_visible` over the open windows; a backend that can't say counts as
+     visible). Sampling needs the baked `systemStats` capability (item 269) or
+     unscoped `--allow-sys`, else `NotCapable` (`stats()` rejects, `onStats`
+     throws when subscribing), and no other permission. `systemStats.supported`
+     is true on macOS, Linux and Windows. Aggregate figures only: no per-process
+     data, no host names, no device serials.
+     - macOS: CPU from `host_processor_info(PROCESSOR_CPU_LOAD_INFO)` (each
+       32-bit tick counter's forward distance, so a wrap is not negative; the
+       array is `vm_deallocate`d), memory pressure 100 −
+       `kern.memorystatus_level`, used = app memory + wired + compressed
+       (`host_statistics64(HOST_VM_INFO64)`), total `hw.memsize`; GPU from each
+       `IOAccelerator`'s `PerformanceStatistics`
+       (`"Device Utilization
+       %"`, else AMD's `"GPU Activity(%)"`), named
+       by its `model`, else its registry name.
+     - Linux: `/proc/stat` (aggregate and per core; idle + iowait are idle),
+       `/proc/meminfo` (pressure 100 × (1 − MemAvailable / MemTotal)), amdgpu's
+       `/sys/class/drm/card*/device/gpu_busy_percent` (named by `product_name`,
+       else the card), NVIDIA's NVML (`libnvidia-ml.so.1` through `dlopen`,
+       loaded and initialized once, a failure cached). Other GPUs (Intel) are
+       `null`. The files are read by the runtime itself, not under the app's
+       `--allow-read`.
+     - Windows: `GetSystemTimes` (aggregate),
+       `NtQuerySystemInformation(SystemProcessorPerformanceInformation)` (per
+       core), `GlobalMemoryStatusEx` (`dwMemoryLoad`), and a PDH query per
+       sampler over `\GPU Engine(*)\Utilization Percentage`, summed per adapter
+       and engine type over every process, the busiest taken (the query's first
+       collection primes it). PDH names adapters only by LUID, so Windows
+       reports no `devices`. `runtime/Cargo.toml` adds the `windows-sys`
+       features these need (no new crate).
+     - No new dependencies: raw `extern "C"` declarations for Mach, IOKit and
+       CoreFoundation, `libc` for `sysctlbyname` / `dlopen`. laufey is untouched
+       (the visibility check uses the window API it has).
+     - Tests: `deno_runtime` `ops::system_stats` (tick deltas to percent, 32-bit
+       Mach wraps, `/proc/stat` and `/proc/meminfo` parsing, the
+       `PerformanceStatistics` key choice, the busiest of the amdgpu / NVML
+       devices, PDH engine sums, clamping and rounding, the serialized shape,
+       and a smoke test of the OS calls on the host that tolerates a `null`
+       GPU), `secure_store_gate_takes_the_baked_capability_or_allow_sys`'s
+       sibling `system_stats_gate_takes_the_baked_capability_or_allow_sys`, and
+       `denort` `desktop_js_installs_system_stats`.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
 169-174, 176, 178, 180, 182-184, 186, 187, 189-191, 193-196, 198-203, 206, 207,
 209-215, 217, 218, 221, 222, 224, 225, 227, 228, 231, 232, 235, 237, 240,
-243-245, 247-249, 253, 254, 256-260, 262-264, 267-269) are what the prebuilt
+243-245, 247-249, 253, 254, 256-260, 262-264, 267-270) are what the prebuilt
 `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
 in the branch too, but a stock CLI does not run them; denext's own launcher

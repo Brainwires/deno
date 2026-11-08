@@ -58,6 +58,11 @@ pub const DESKTOP_JS: &str = r#"
     op_desktop_title_bar_preferences,
     op_desktop_secret_supported,
     op_desktop_secret_request,
+    op_desktop_system_stats_supported,
+    op_desktop_system_stats_open,
+    op_desktop_system_stats_close,
+    op_desktop_system_stats_check,
+    op_desktop_system_stats,
     op_desktop_register_shortcut,
     op_desktop_unregister_shortcut,
     op_desktop_unregister_all_shortcuts,
@@ -2048,7 +2053,104 @@ pub const DESKTOP_JS: &str = r#"
       });
     },
   });
+  // Aggregate CPU, GPU and memory figures, sampled natively by the runtime.
+  // Each sampler keeps its own previous CPU snapshot; sampling needs the
+  // baked "systemStats" capability or --allow-sys.
+  function systemStatsPerCore(options, name) {
+    if (options === undefined) return false;
+    if (options === null || typeof options !== "object") {
+      throw new TypeError(`${name} must be an object`);
+    }
+    const perCore = options.perCore;
+    if (perCore !== undefined && typeof perCore !== "boolean") {
+      throw new TypeError(`${name}.perCore must be a boolean`);
+    }
+    return perCore === true;
+  }
+  function createSystemStatsSampler() {
+    let rid = op_desktop_system_stats_open();
+    const subscriptions = new Set();
+    function liveRid() {
+      if (rid === null) {
+        throw new Deno.errors.BadResource("the sampler is closed");
+      }
+      return rid;
+    }
+    return Object.freeze({
+      async stats(options = undefined) {
+        const perCore = systemStatsPerCore(options, "options");
+        return await op_desktop_system_stats(liveRid(), perCore, false);
+      },
+      onStats(cb, options) {
+        if (typeof cb !== "function") {
+          throw new TypeError("cb must be a function");
+        }
+        if (options === null || typeof options !== "object") {
+          throw new TypeError("options must be an object");
+        }
+        const intervalMs = options.intervalMs;
+        if (
+          typeof intervalMs !== "number" || !Number.isFinite(intervalMs) ||
+          intervalMs < 1000
+        ) {
+          throw new RangeError(
+            "intervalMs must be a finite number of milliseconds, at least 1000",
+          );
+        }
+        const perCore = systemStatsPerCore(options, "options");
+        const id = liveRid();
+        op_desktop_system_stats_check();
+        let active = true;
+        let pending = false;
+        // A tick while the previous sample is still pending is skipped, so
+        // callbacks never overlap; while every app window is hidden the op
+        // answers null without sampling.
+        const tick = async () => {
+          if (!active || pending) return;
+          pending = true;
+          try {
+            const stats = await op_desktop_system_stats(id, perCore, true);
+            if (active && stats !== null) cb(stats);
+          } catch (error) {
+            if (active) reportError(error);
+          } finally {
+            pending = false;
+          }
+        };
+        const timer = setInterval(tick, intervalMs);
+        const unsubscribe = () => {
+          if (!active) return;
+          active = false;
+          clearInterval(timer);
+          subscriptions.delete(unsubscribe);
+        };
+        subscriptions.add(unsubscribe);
+        return unsubscribe;
+      },
+      close() {
+        if (rid === null) return;
+        for (const unsubscribe of [...subscriptions]) unsubscribe();
+        const closing = rid;
+        rid = null;
+        op_desktop_system_stats_close(closing);
+      },
+    });
+  }
+  const systemStats = Object.freeze({
+    get supported() {
+      return op_desktop_system_stats_supported();
+    },
+    createSampler() {
+      return createSystemStatsSampler();
+    },
+  });
   Object.defineProperties(desktop, {
+    systemStats: {
+      value: systemStats,
+      writable: false,
+      configurable: true,
+      enumerable: true,
+    },
     secureStore: {
       value: secureStore,
       writable: false,
@@ -4130,6 +4232,30 @@ mod tests {
       "op: \"get\",",
       "op: \"set\",",
       "op: \"delete\",",
+    ] {
+      assert!(DESKTOP_JS.contains(needle), "missing: {needle}");
+    }
+  }
+
+  #[test]
+  fn desktop_js_installs_system_stats() {
+    // Deno.desktop.systemStats: samplers over the native ops, a validated
+    // interval, ticks that never overlap and skip hidden windows.
+    for needle in [
+      "systemStats: {",
+      "return op_desktop_system_stats_supported();",
+      "let rid = op_desktop_system_stats_open();",
+      "return await op_desktop_system_stats(liveRid(), perCore, false);",
+      "op_desktop_system_stats_check();",
+      "const stats = await op_desktop_system_stats(id, perCore, true);",
+      "if (active && stats !== null) cb(stats);",
+      "if (!active || pending) return;",
+      "intervalMs < 1000",
+      "throw new RangeError(",
+      "const timer = setInterval(tick, intervalMs);",
+      "for (const unsubscribe of [...subscriptions]) unsubscribe();",
+      "op_desktop_system_stats_close(closing);",
+      "if (rid === null) return;",
     ] {
       assert!(DESKTOP_JS.contains(needle), "missing: {needle}");
     }

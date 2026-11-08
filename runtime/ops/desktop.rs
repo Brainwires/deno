@@ -2491,6 +2491,12 @@ pub trait DesktopApi: Send + Sync + 'static {
   fn set_window_opacity(&self, window_id: u32, opacity: f64);
 
   fn is_visible(&self, window_id: u32) -> bool;
+  /// Whether any of the app's open windows is visible, for work that only
+  /// matters while one is (`Deno.desktop.systemStats` subscriptions). `None`
+  /// when the backend can't say, which callers treat as visible.
+  fn any_window_visible(&self) -> Option<bool> {
+    None
+  }
   fn show(&self, window_id: u32);
   fn hide(&self, window_id: u32);
   fn focus(&self, window_id: u32);
@@ -5600,6 +5606,107 @@ async fn op_desktop_secret_request(
   Ok(outcome.into())
 }
 
+/// The `Deno.desktop.systemStats` sampling gate: the baked `systemStats`
+/// capability, else unscoped `--allow-sys`. No other permission: the
+/// sampling is native code inside the runtime (no file reads under
+/// `--allow-read`, no subprocess, no FFI).
+fn check_system_stats(state: &OpState) -> Result<(), deno_error::JsErrorBox> {
+  check_baked_or_sys(
+    state,
+    "systemStats",
+    |c| c.system_stats,
+    "Deno.desktop.systemStats",
+  )
+}
+
+/// A `Deno.desktop.systemStats` sampler: its previous CPU snapshot (and, on
+/// Windows, its PDH query). Shared with the blocking task that samples.
+struct SystemStatsSamplerResource(
+  Arc<std::sync::Mutex<super::system_stats::Sampler>>,
+);
+
+impl deno_core::Resource for SystemStatsSamplerResource {
+  fn name(&self) -> Cow<'_, str> {
+    "desktopSystemStatsSampler".into()
+  }
+}
+
+/// `Deno.desktop.systemStats.supported`: whether this runtime samples on
+/// this OS.
+#[op2(fast)]
+fn op_desktop_system_stats_supported() -> bool {
+  super::system_stats::SUPPORTED
+}
+
+/// `Deno.desktop.systemStats.createSampler()`. Opens nothing of the OS's
+/// (the first sample does); needs no permission.
+#[op2(fast)]
+#[smi]
+fn op_desktop_system_stats_open(state: &mut OpState) -> deno_core::ResourceId {
+  state
+    .resource_table
+    .add(SystemStatsSamplerResource(Default::default()))
+}
+
+/// `SystemStatsSampler.close()`.
+#[op2(fast)]
+fn op_desktop_system_stats_close(
+  state: &mut OpState,
+  #[smi] rid: deno_core::ResourceId,
+) -> Result<(), JsErrorBox> {
+  state
+    .resource_table
+    .close(rid)
+    .map_err(JsErrorBox::from_err)
+}
+
+/// The sampling gate on its own, so `onStats` refuses when subscribing
+/// rather than on every tick.
+#[op2(fast)]
+fn op_desktop_system_stats_check(state: &OpState) -> Result<(), JsErrorBox> {
+  check_system_stats(state)
+}
+
+/// `SystemStatsSampler.stats()` and each `onStats` tick: one sample, on the
+/// blocking pool (the first sample of a sampler sleeps between its two
+/// snapshots). With `only_if_visible` (a tick), `null` without sampling
+/// while every app window is hidden.
+#[op2]
+#[serde]
+async fn op_desktop_system_stats(
+  state: std::rc::Rc<std::cell::RefCell<OpState>>,
+  #[smi] rid: deno_core::ResourceId,
+  per_core: bool,
+  only_if_visible: bool,
+) -> Result<Option<super::system_stats::SystemStats>, JsErrorBox> {
+  let (sampler, api) = {
+    let s = state.borrow();
+    check_system_stats(&s)?;
+    let sampler = s
+      .resource_table
+      .get::<SystemStatsSamplerResource>(rid)
+      .map_err(JsErrorBox::from_err)?;
+    (
+      sampler.0.clone(),
+      s.try_borrow::<Arc<dyn DesktopApi>>().cloned(),
+    )
+  };
+  if only_if_visible
+    && api.is_some_and(|api| api.any_window_visible() == Some(false))
+  {
+    return Ok(None);
+  }
+  let stats = deno_core::unsync::spawn_blocking(move || {
+    sampler
+      .lock()
+      .unwrap_or_else(|e| e.into_inner())
+      .sample(per_core)
+  })
+  .await
+  .map_err(|_| JsErrorBox::generic("sampling the system stats failed"))?;
+  Ok(Some(stats))
+}
+
 /// `Deno.desktop.titleBarPreferences()` (laufey API 47): how the user set
 /// up title bars, for an app that draws its own; `null` outside a desktop app
 /// (or from a backend that can't say). Async: on Linux the first call may
@@ -6562,6 +6669,11 @@ deno_core::extension!(
     op_desktop_title_bar_preferences,
     op_desktop_secret_supported,
     op_desktop_secret_request,
+    op_desktop_system_stats_supported,
+    op_desktop_system_stats_open,
+    op_desktop_system_stats_close,
+    op_desktop_system_stats_check,
+    op_desktop_system_stats,
     op_desktop_register_shortcut,
     op_desktop_unregister_shortcut,
     op_desktop_unregister_all_shortcuts,
@@ -6805,6 +6917,40 @@ mod tests {
       let message = err.get_message();
       assert!(
         message.contains("desktop.capabilities.secureStore"),
+        "{message}"
+      );
+      assert!(message.contains("--allow-sys"), "{message}");
+    }
+  }
+
+  #[test]
+  fn system_stats_gate_takes_the_baked_capability_or_allow_sys() {
+    use deno_error::JsErrorClass;
+
+    use super::DesktopBakedCapabilities;
+    use super::check_system_stats;
+    let system_stats = DesktopBakedCapabilities {
+      system_stats: true,
+      ..Default::default()
+    };
+    let other = DesktopBakedCapabilities {
+      secure_store: true,
+      ..Default::default()
+    };
+    assert!(
+      check_system_stats(&baked_capability_state(false, Some(system_stats)))
+        .is_ok()
+    );
+    assert!(check_system_stats(&baked_capability_state(true, None)).is_ok());
+    for state in [
+      baked_capability_state(false, None),
+      baked_capability_state(false, Some(other)),
+    ] {
+      let err = check_system_stats(&state).unwrap_err();
+      assert_eq!(err.get_class(), "NotCapable");
+      let message = err.get_message();
+      assert!(
+        message.contains("desktop.capabilities.systemStats"),
         "{message}"
       );
       assert!(message.contains("--allow-sys"), "{message}");

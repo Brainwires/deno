@@ -951,6 +951,16 @@ impl denort::desktop::DesktopApi for WefDesktopApi {
     laufey::Window::from_id(window_id).get_visible()
   }
 
+  fn any_window_visible(&self) -> Option<bool> {
+    let ids: Vec<u32> =
+      self.open_windows.lock().unwrap().iter().copied().collect();
+    Some(
+      ids
+        .into_iter()
+        .any(|id| laufey::Window::from_id(id).get_visible()),
+    )
+  }
+
   fn show(&self, window_id: u32) {
     self.initial_reveal.note_app_control(window_id);
     laufey::Window::from_id(window_id).show();
