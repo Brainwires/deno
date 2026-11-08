@@ -1,15 +1,27 @@
 {
-  // node-pty is a native addon Deno does not build: a package without the
-  // addon for the platform has its entry module resolve to an implementation
-  // of its API over Deno.openPty (one that carries the addon loads it, as on
-  // Node: `addon_present_loads_the_package`, and spec compile/node_pty_addon
-  // with a real addon). The package here is a stand-in whose own code would
-  // throw, as the real one's addon load does. Unix only: the shell these
-  // drive is `sh`. On Windows the runtime's pty is not available yet
+  // node-pty is a native addon Deno does not build: on Unix its entry module
+  // resolves to an implementation of its API over Deno.openPty, a package
+  // that carries the addon too (`addon_present_uses_the_runtime`; its
+  // `native` export is then the addon: spec compile/node_pty_addon). On
+  // Windows one that carries the addon loads it, as on Node
+  // (`addon_present_loads_the_package`). The package here is a stand-in whose
+  // own code would throw, as the real one's addon load does. Unix only: the
+  // shell these drive is `sh`. On Windows the runtime's pty is not available yet
   // (DENEXT.md item 259): `windows_not_supported` checks that spawn says so.
   "tempDir": true,
   "tests": {
+    "addon_present_uses_the_runtime": {
+      "if": "unix",
+      "steps": [{
+        "args": "run -A addon_present_setup.mjs",
+        "output": "[WILDCARD]"
+      }, {
+        "args": "run -A addon_present.mjs",
+        "output": "addon_present.out"
+      }]
+    },
     "addon_present_loads_the_package": {
+      "if": "windows",
       "steps": [{
         "args": "run -A addon_present_setup.mjs",
         "output": "[WILDCARD]"
