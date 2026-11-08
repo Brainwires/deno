@@ -648,6 +648,124 @@ async fn tcp_connect_and_echo() {
   .await;
 }
 
+// ========== TCP has_pending_read ==========
+
+/// `uv_stream_has_pending_read` answers for the kernel's receive queue
+/// without consuming it: false on a connected socket with nothing queued,
+/// true once the peer wrote (and still true afterwards, nothing was read),
+/// and true for a FIN with no data. A handle whose connect is still in
+/// flight has no socket and answers false.
+#[tokio::test]
+async fn tcp_has_pending_read_reports_kernel_bytes_and_eof() {
+  run_test(async |runtime, uv_loop| {
+    // A std listener plays the peer: its accept and write are blocking calls
+    // outside the uv loop, so nothing here depends on the loop polling.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let server_port = listener.local_addr().unwrap().port();
+
+    let connected = Rc::new(Cell::new(false));
+    let connected_ptr = Rc::into_raw(connected.clone());
+
+    unsafe extern "C" fn on_connect(req: *mut uv_connect_t, status: i32) {
+      assert_eq!(status, 0);
+      let connected = unsafe { Rc::from_raw((*req).data as *const Cell<bool>) };
+      connected.set(true);
+      let _ = Rc::into_raw(connected);
+    }
+
+    let mut client = std::mem::MaybeUninit::<uv_tcp_t>::uninit();
+    let client_ptr = client.as_mut_ptr();
+    let mut connect_req = std::mem::MaybeUninit::<uv_connect_t>::uninit();
+    let connect_req_ptr = connect_req.as_mut_ptr();
+
+    unsafe {
+      uv_tcp_init(uv_loop, client_ptr);
+      // Not connected yet: no socket to probe.
+      assert!(!uv_stream_has_pending_read(client_ptr as *mut uv_stream_t));
+
+      (*connect_req_ptr).data = connected_ptr as *mut c_void;
+      let mut addr = std::mem::MaybeUninit::<sockaddr_in>::uninit();
+      let ip = std::ffi::CString::new("127.0.0.1").unwrap();
+      uv_ip4_addr(ip.as_ptr(), server_port as i32, addr.as_mut_ptr());
+      assert_ok(uv_tcp_connect(
+        connect_req_ptr,
+        client_ptr,
+        addr.as_ptr() as *const c_void,
+        Some(on_connect),
+      ));
+      // The connect is in flight: still nothing to read.
+      assert!(!uv_stream_has_pending_read(client_ptr as *mut uv_stream_t));
+    }
+
+    for _ in 0..100 {
+      tick(runtime).await;
+      if connected.get() {
+        break;
+      }
+      tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+    }
+    assert!(connected.get(), "Client should have connected");
+
+    let (mut peer, _) = listener.accept().unwrap();
+    let stream = client_ptr as *mut uv_stream_t;
+
+    // Connected, nothing queued.
+    assert!(!unsafe { uv_stream_has_pending_read(stream) });
+
+    // The peer wrote: pending, and a probe consumes nothing, so it stays so.
+    std::io::Write::write_all(&mut peer, b"x").unwrap();
+    let mut saw_pending = false;
+    for _ in 0..200 {
+      if unsafe { uv_stream_has_pending_read(stream) } {
+        saw_pending = true;
+        break;
+      }
+      std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    assert!(saw_pending, "a byte in the kernel's queue is pending");
+    assert!(unsafe { uv_stream_has_pending_read(stream) });
+
+    // The byte never left the socket: a read gets it. (A raw read: tokio's
+    // `try_read` answers WouldBlock until the reactor has seen the readiness,
+    // which is exactly the gap the probe exists for.)
+    #[cfg(unix)]
+    unsafe {
+      use std::os::unix::io::AsRawFd;
+      let fd = (*client_ptr).internal_stream.as_ref().unwrap().as_raw_fd();
+      let mut byte = 0u8;
+      let n = libc::recv(
+        fd,
+        &mut byte as *mut u8 as *mut c_void,
+        1,
+        libc::MSG_DONTWAIT,
+      );
+      assert_eq!((n, byte), (1, b'x'));
+      assert!(!uv_stream_has_pending_read(stream));
+    }
+
+    // A FIN with no data is pending too (a read completes with EOF now).
+    peer.shutdown(std::net::Shutdown::Write).unwrap();
+    let mut saw_eof = false;
+    for _ in 0..200 {
+      if unsafe { uv_stream_has_pending_read(stream) } {
+        saw_eof = true;
+        break;
+      }
+      std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    assert!(saw_eof, "a FIN in the kernel's queue is pending");
+
+    unsafe {
+      uv_close(client_ptr as *mut uv_handle_t, None);
+      // A closing handle answers false whatever the queue holds.
+      assert!(!uv_stream_has_pending_read(stream));
+      Rc::from_raw(connected_ptr);
+    }
+    tick(runtime).await;
+  })
+  .await;
+}
+
 // ========== TCP nodelay ==========
 
 #[tokio::test(flavor = "current_thread")]

@@ -1772,6 +1772,9 @@ const jsonStringPattern = new SafeRegExp(
 const fqdnDotPattern = new SafeRegExp("[.]$");
 const upperCasePattern = new SafeRegExp("[A-Z]", "g");
 const nonAsciiPattern = new SafeRegExp("[^\\u0021-\\u007F]", "u");
+// An ASCII host that may be a non-canonical IPv4 spelling: octal / hex /
+// short / decimal forms ("0177.0.0.1", "0x7f.0.0.1", "127.1", "2130706433").
+const numericHostPattern = new SafeRegExp("^[0-9a-fx.]+$", "i");
 
 function splitEscapedAltNames(altNames) {
   const result = [];
@@ -1873,6 +1876,22 @@ function checkServerIdentity(hostname, cert) {
 
   hostname = "" + hostname;
 
+  // Node normalizes every host with domainToASCII() (the WHATWG host parser:
+  // IDNA mapping plus IPv4 canonicalization). Keep the op off the common
+  // all-ASCII handshake path: an ASCII host needs it only when it could be a
+  // non-canonical IPv4 spelling (numericHostPattern), since check()
+  // lowercases on its own and rejects non-ASCII patterns.
+  const hostnameASCII = RegExpPrototypeTest(nonAsciiPattern, hostname) ||
+      RegExpPrototypeTest(numericHostPattern, hostname)
+    ? domainToASCII(hostname)
+    : hostname;
+
+  // Remove trailing dots for error messages and matching.
+  hostname = unfqdn(hostname);
+  const hostnameASCIIWithoutFQDN = unfqdn(hostnameASCII);
+  const hostnameIsIP = net.isIP(hostname);
+  const hostnameASCIIIsIP = net.isIP(hostnameASCIIWithoutFQDN);
+
   if (altNames) {
     const splitAltNames = StringPrototypeIncludes(altNames, '"')
       ? splitEscapedAltNames(altNames)
@@ -1889,18 +1908,31 @@ function checkServerIdentity(hostname, cert) {
     });
   }
 
+  // Non-canonical IP address spellings can be interpreted differently by
+  // domainToASCII() and the operating system resolver. Reject them instead of
+  // validating a certificate against an address that may not be the peer
+  // (CVE-2026-105483: "127.0.0.1" in fullwidth digits, U+FF11 U+FF12 U+FF17,
+  // or with an ideographic full stop, U+3002, fell through to the DNS-name
+  // path as "127.0.0.1" and matched a DNS SAN or CN;
+  // CVE-2026-106069 / -106072: "0127.0.0.1" is 87.0.0.1 to the URL parser
+  // and 127.0.0.1 to some resolvers).
+  if (!hostnameIsIP && hostnameASCIIIsIP) {
+    return new ERR_TLS_CERT_ALTNAME_INVALID(
+      "Host is a non-canonical IP address",
+      hostname,
+      cert,
+    );
+  }
+
   let valid = false;
   let reason = "Unknown reason";
-
-  // Remove trailing dots for error messages and matching.
-  hostname = unfqdn(hostname);
 
   // An IP literal must not be IDNA-normalized: domainToASCII() returns '' for
   // an IPv6 literal (it is not a domain), so matching against the normalized
   // host would skip IP-SAN matching for IPv6 entirely. Match IP hosts against
   // the hostname as given; net.isIP() rejects non-ASCII, so there is no IDNA
   // confusion to guard against here.
-  if (net.isIP(hostname)) {
+  if (hostnameIsIP) {
     valid = ArrayPrototypeIncludes(ips, canonicalizeIP(hostname));
     if (!valid) {
       reason = `IP: ${hostname} is not in the cert's list: ` +
@@ -1910,17 +1942,10 @@ function checkServerIdentity(hostname, cert) {
     // Match on the IDNA-normalized host: splitHost() only splits on U+002E,
     // but IDNA also maps U+3002, U+FF0E and U+FF61 to a label separator, so
     // "foo<U+3002>bar.example.com" must be seen as the four-label
-    // "foo.bar.example.com" rather than a single label matching "*". An
-    // all-ASCII host has no such mapping to apply (check() lowercases and
-    // rejects non-ASCII patterns), so it is matched as given and the
-    // normalization is skipped, keeping the op off the common handshake path.
+    // "foo.bar.example.com" rather than a single label matching "*".
     // domainToASCII() returns '' for a host IDNA rejects; that empty host is
     // then matched by no pattern, which is the intended fail-closed outcome.
-    const hostParts = splitHost(
-      RegExpPrototypeTest(nonAsciiPattern, hostname)
-        ? domainToASCII(hostname)
-        : hostname,
-    );
+    const hostParts = splitHost(hostnameASCIIWithoutFQDN);
     const wildcard = (pattern) => check(hostParts, pattern, true);
 
     if (dnsNames.length > 0) {

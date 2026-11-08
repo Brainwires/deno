@@ -38,6 +38,19 @@ openssl x509 -req -sha256 -days 36135 -in localhost.csr -CA RootCA.pem -CAkey Ro
 Note that the country / state / city / name in the first command can be
 customized.
 
+## An IP address as a DNS name
+
+`ip_as_dns.key` / `ip_as_dns.crt` name `127.0.0.1` as a **DNS** SAN only (no
+`IP Address:` SAN), signed by `RootCA`. A TLS client that spells the address
+non-canonically (`１２７.0.0.1`, `127。0.0.1`, `0127.0.0.1`, `127.1`) must
+refuse it rather than match the DNS name (CVE-2026-105483).
+
+```shell
+printf 'authorityKeyIdentifier=keyid,issuer\nbasicConstraints=CA:FALSE\nkeyUsage = digitalSignature, keyEncipherment\nextendedKeyUsage = serverAuth\nsubjectAltName = DNS:127.0.0.1\n' > ip_as_dns.cnf
+openssl req -new -nodes -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -keyout ip_as_dns.key -out ip_as_dns.csr -subj "/C=US/O=Example-Certificates/CN=ip-as-dns"
+openssl x509 -req -sha256 -days 36135 -in ip_as_dns.csr -CA RootCA.pem -CAkey RootCA.key -CAcreateserial -extfile ip_as_dns.cnf -out ip_as_dns.crt
+```
+
 Generate localhost_ecc.key, localhost_ecc.csr, and localhost_ecc.crt:
 
 ```shell

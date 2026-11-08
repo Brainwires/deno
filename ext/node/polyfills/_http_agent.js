@@ -18,9 +18,16 @@ const {
   emitDestroy,
   emitInit,
   executionAsyncId,
+  ownerSymbol,
   symbols,
 } = core.loadExtScript("ext:deno_node/internal/async_hooks.ts");
 const { async_id_symbol } = symbols;
+const { kReadBytesOrError, streamBaseState } = core.loadExtScript(
+  "ext:deno_node/internal_binding/stream_wrap.ts",
+);
+const { onStreamRead } = core.loadExtScript(
+  "ext:deno_node/internal/stream_base_commons.ts",
+);
 const { kEmptyObject, once } = core.loadExtScript(
   "ext:deno_node/internal/util.mjs",
 );
@@ -60,6 +67,7 @@ const KEEP_ALIVE_TIMEOUT_RE = new SafeRegExp("^timeout=(\\d+)");
 const kOnKeylog = Symbol("onkeylog");
 const kRequestOptions = Symbol("requestOptions");
 const kRequestAsyncResource = Symbol("requestAsyncResource");
+const kFreeSocketDataGuard = Symbol("kFreeSocketDataGuard");
 // New Agent code.
 
 // The largest departure from the previous implementation is that
@@ -132,6 +140,86 @@ function freeSocketErrorListener(err) {
   debug("SOCKET ERROR on FREE socket:", err.message, err.stack);
   socket.destroy();
   socket.emit("agentRemove");
+}
+
+// Guard against unsolicited data arriving while a socket is idle in the
+// freeSockets pool.  When the HTTPParser is detached the data would sit
+// in the TCP buffer and be silently consumed as the response for the
+// *next* request that reuses the socket (response-queue poisoning,
+// CVE-2026-48931). See: https://hackerone.com/reports/3582376
+function freeSocketOnReadGuard() {
+  const nread = streamBaseState[kReadBytesOrError];
+  if (nread === 0) return;
+
+  debug("READ on FREE socket - destroying poisoned socket");
+  this[ownerSymbol].destroy();
+}
+
+// Node's stream handle looks `onread` up on every read. Deno's native handle
+// captures it when a read starts, so a swap on a handle that is already
+// reading takes effect only once the read is restarted. Nothing is lost
+// across the restart: bytes not yet read stay in the kernel (TCP) or in the
+// TLS wrap's own buffers until the next read delivers them.
+function restartRead(handle) {
+  if (handle.reading) {
+    const err = handle.readStop();
+    if (err) return err;
+  }
+  handle.reading = true;
+  return handle.readStart();
+}
+
+function installFreeSocketDataGuard(socket) {
+  if (socket.readableLength > 0) {
+    debug("BUFFERED DATA on FREE socket - destroying poisoned socket");
+    socket.destroy();
+    return;
+  }
+
+  if (socket.connecting) {
+    socket[kFreeSocketDataGuard] = function onConnect() {
+      socket[kFreeSocketDataGuard] = null;
+      installFreeSocketDataGuard(socket);
+    };
+    socket.once("connect", socket[kFreeSocketDataGuard]);
+    return;
+  }
+
+  const handle = socket._handle;
+  if (handle) {
+    handle.onread = freeSocketOnReadGuard;
+    const err = restartRead(handle);
+    if (err) socket.destroy();
+  }
+}
+
+// The data guard only runs when the event loop polls for I/O. Data that
+// reached the OS socket buffer after the last poll has not been seen by it
+// yet, so check for it directly before handing an idle socket to a request
+// (CVE-2026-105481). In Deno I/O can also run between a read and the
+// 'free' tick, so bytes the stream already buffered count as pending too.
+function hasPendingRead(socket) {
+  // A socket that is still connecting has nothing to read yet, and a pending
+  // connect error must be reported to the request rather than swallowed here.
+  if (socket.connecting) return false;
+  if (socket.readableLength > 0) return true;
+  const handle = socket._handle;
+  return typeof handle?.hasPendingRead === "function" &&
+    handle.hasPendingRead() === true;
+}
+
+function removeFreeSocketDataGuard(socket) {
+  if (socket[kFreeSocketDataGuard]) {
+    socket.removeListener("connect", socket[kFreeSocketDataGuard]);
+    socket[kFreeSocketDataGuard] = null;
+  }
+
+  const handle = socket._handle;
+  if (handle?.onread === freeSocketOnReadGuard) {
+    handle.onread = onStreamRead;
+    const err = restartRead(handle);
+    if (err) socket.destroy();
+  }
 }
 
 export function Agent(options) {
@@ -207,6 +295,12 @@ export function Agent(options) {
       return;
     }
     if (requests && requests.length) {
+      if (hasPendingRead(socket)) {
+        // onClose() will create a new socket for the pending request.
+        debug("PENDING DATA on released socket - destroying");
+        socket.destroy();
+        return;
+      }
       const req = ArrayPrototypeShift(requests);
       const reqAsyncRes = req[kRequestAsyncResource];
       if (reqAsyncRes) {
@@ -256,6 +350,7 @@ export function Agent(options) {
     this.removeSocket(socket, options);
 
     socket.once("error", freeSocketErrorListener);
+    installFreeSocketDataGuard(socket);
     ArrayPrototypePush(freeSockets, socket);
   });
 
@@ -386,16 +481,23 @@ Agent.prototype.addRequest = function addRequest(
     socket = this.scheduling === "fifo"
       ? ArrayPrototypeShift(freeSockets)
       : ArrayPrototypePop(freeSockets);
+    // Reject sockets that are no longer writable (remote end already closed
+    // the connection while the socket was idle in the pool), and sockets
+    // with bytes waiting that the data guard has not seen yet: a response
+    // the server sent unasked would be parsed as the answer to this request.
+    while (
+      socket &&
+      (socket.destroyed || !socket.writable || hasPendingRead(socket))
+    ) {
+      debug("PENDING DATA on FREE socket - destroying poisoned socket");
+      socket.destroy();
+      socket = this.scheduling === "fifo"
+        ? ArrayPrototypeShift(freeSockets)
+        : ArrayPrototypePop(freeSockets);
+    }
     if (!freeSockets.length) {
       delete this.freeSockets[name];
     }
-  }
-
-  // Reject sockets that are no longer writable (remote end already closed
-  // the connection while the socket was idle in the pool).
-  if (socket && (socket.destroyed || !socket.writable)) {
-    socket.destroy();
-    socket = null;
   }
 
   const freeLen = freeSockets ? freeSockets.length : 0;
@@ -668,6 +770,7 @@ Agent.prototype.keepSocketAlive = function keepSocketAlive(socket) {
 Agent.prototype.reuseSocket = function reuseSocket(socket, req) {
   debug("have free socket");
   socket.removeListener("error", freeSocketErrorListener);
+  removeFreeSocketDataGuard(socket);
   req.reusedSocket = true;
   socket.ref();
 };

@@ -1330,6 +1330,27 @@ impl LibUvStreamWrap {
     unsafe { uv_compat::uv_stream_set_blocking(stream, enable as i32) }
   }
 
+  /// Mirrors Node's `LibuvStreamWrap::HasPendingRead` (nodejs/node
+  /// `0683ee5f7d`, CVE-2026-105481): true when a read on the socket would
+  /// complete right now — data, a FIN or an error the loop has not delivered
+  /// because it has not polled since it arrived — without consuming
+  /// anything. `http.Agent` asks before handing a kept-alive socket to a
+  /// request, so a response the server sent unasked is never parsed as the
+  /// answer to that request. False for a closed handle, a handle with no
+  /// connected socket, and a type the probe can't answer for (a TTY; on
+  /// Windows a pipe).
+  #[fast]
+  #[rename("hasPendingRead")]
+  pub fn has_pending_read(&self) -> bool {
+    let stream = self.stream_ptr();
+    if stream.is_null() || !self.base.is_alive() {
+      return false;
+    }
+    // SAFETY: stream is a valid non-null uv_stream_t owned by this wrapper
+    // (checked above); the probe reads the handle and peeks the socket only.
+    unsafe { uv_compat::uv_stream_has_pending_read(stream) }
+  }
+
   #[fast]
   pub fn shutdown(
     &self,

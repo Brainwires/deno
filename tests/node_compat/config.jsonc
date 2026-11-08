@@ -1955,6 +1955,7 @@
     "parallel/test-http-agent-destroyed-socket.js": {},
     "parallel/test-http-agent-error-on-idle.js": {},
     "parallel/test-http-agent-false.js": {},
+    "parallel/test-http-agent-free-socket-data-guard.js": {},
     "parallel/test-http-agent-getname.js": {},
     "parallel/test-http-agent-keep-alive-timeout-buffer.js": {},
     "parallel/test-http-agent-keepalive-delay.js": {},

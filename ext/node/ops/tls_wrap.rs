@@ -916,10 +916,6 @@ impl UnderlyingStream {
     !matches!(self, UnderlyingStream::None)
   }
 
-  #[allow(
-    dead_code,
-    reason = "Useful when debugging TLS/native stream attachment."
-  )]
   fn uv_stream_ptr(&self) -> *mut uv_stream_t {
     match self {
       UnderlyingStream::Uv { stream } => *stream,
@@ -2615,6 +2611,36 @@ impl TLSWrap {
     let inner = unsafe { &mut *self.inner.as_mut_ptr() };
     inner.onread = None;
     0
+  }
+
+  /// `hasPendingRead` for a TLS socket (see `LibUvStreamWrap`'s): true when
+  /// cleartext is waiting that no read has delivered — decrypted while
+  /// `readStop` was active (`pending_clear_out`), or still in rustls
+  /// (`has_buffered_cleartext`) — when encrypted records were read from the
+  /// transport and not yet fed to rustls (`enc_in`), when the peer's close
+  /// is undelivered (`pending_eof`), or when the underlying socket's kernel
+  /// buffer holds anything. Without this override the base method would
+  /// probe the TLSWrap's own (null) stream and always answer false.
+  #[fast]
+  fn has_pending_read(&self) -> bool {
+    let inner = unsafe { &*self.inner.as_mut_ptr() };
+    if !inner.alive.get() || inner.closing {
+      return false;
+    }
+    if !inner.enc_in.is_empty()
+      || inner.has_buffered_cleartext
+      || !inner.pending_clear_out.is_empty()
+      || inner.pending_eof
+    {
+      return true;
+    }
+    let stream = inner.underlying.uv_stream_ptr();
+    if stream.is_null() {
+      return false;
+    }
+    // SAFETY: the underlying stream is attached (non-null) and outlives this
+    // wrap until `close` runs, which sets `closing` (checked above).
+    unsafe { uv_compat::uv_stream_has_pending_read(stream) }
   }
 
   /// Writev — collect multiple buffers into one and write through TLS.

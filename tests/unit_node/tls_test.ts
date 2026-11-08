@@ -2090,3 +2090,194 @@ Deno.test("tls setMaxSendFragment validates its argument like Node", async () =>
     server.close();
   }
 });
+
+// Node 26.12.1's test-tls-check-server-identity.js cases that the vendored
+// suite (Node 26.5.1) predates: CVE-2026-105483 (nodejs/node 9731991b3c) and
+// CVE-2026-106069 / -106072 (9ccbc81ece), with the IPv6 "IP Address:" cases
+// added alongside them. A host that net.isIP() rejects but that domainToASCII()
+// turns into an IP address (fullwidth digits, an ideographic full stop, octal,
+// hex, short and decimal IPv4 spellings) is refused outright: the resolver may
+// read it as another address than the URL parser does. Before: the fullwidth
+// and ideographic-dot spellings normalized to "127.0.0.1" and matched a DNS
+// SAN, a wildcard SAN and the CN; the ASCII spellings were refused only
+// because they matched no DNS name.
+Deno.test("tls.checkServerIdentity refuses a non-canonical IP host (Node 26.12.1 cases)", () => {
+  type Case = {
+    host: string;
+    cert: { subject: Record<string, string>; subjectaltname?: string };
+    error?: string;
+  };
+  const nonCanonical = "Host is a non-canonical IP address";
+  const cases: Case[] = [
+    // An "IP Address:" SAN also matches an IPv6 host: domainToASCII("::1") is
+    // "" (an IPv6 literal is not a domain), which must not skip IP-SAN
+    // matching.
+    { host: "::1", cert: { subject: {}, subjectaltname: "IP Address:::1" } },
+    {
+      host: "2001:db8::1",
+      cert: { subject: {}, subjectaltname: "IP Address:2001:DB8:0:0:0:0:0:1" },
+    },
+    {
+      host: "::1",
+      cert: { subject: {}, subjectaltname: "IP Address:::2" },
+      error: "IP: ::1 is not in the cert's list: ::2",
+    },
+    // Non-canonical IP addresses are rejected instead of being matched against
+    // the address domainToASCII() produces.
+    ...[
+      ["0127.0.0.1", "87.0.0.1"],
+      ["0177.0.0.1", "127.0.0.1"],
+      ["0x7f.0.0.1", "127.0.0.1"],
+      ["2130706433", "127.0.0.1"],
+      ["127.1", "127.0.0.1"],
+      ["１２７.0.0.1", "127.0.0.1"], // Fullwidth digits.
+      ["127。0.0.1", "127.0.0.1"], // Ideographic full stop.
+    ].map(([host, normalized]) => ({
+      host,
+      cert: { subjectaltname: `DNS:${normalized}`, subject: {} },
+      error: nonCanonical,
+    })),
+    {
+      host: "0127.0.0.1",
+      cert: {
+        subjectaltname: "IP Address:87.0.0.1",
+        subject: { CN: "87.0.0.1" },
+      },
+      error: nonCanonical,
+    },
+    {
+      host: "0127.0.0.1",
+      cert: {
+        subjectaltname: "IP Address:87.0.0.1",
+        subject: { CN: "Example Operator" },
+      },
+      error: nonCanonical,
+    },
+    {
+      host: "1.2.3.example",
+      cert: { subjectaltname: "DNS:1.2.3.example", subject: {} },
+    },
+    // The shapes CVE-2026-105483 was reported with: a wildcard SAN, the CN and
+    // an IP SAN matching the normalized address; and fullwidth octal digits.
+    {
+      host: "１２７.0.0.1",
+      cert: { subjectaltname: "DNS:*.0.0.1", subject: {} },
+      error: nonCanonical,
+    },
+    {
+      host: "１２７.0.0.1",
+      cert: { subject: { CN: "127.0.0.1" } },
+      error: nonCanonical,
+    },
+    {
+      host: "１２７.0.0.1",
+      cert: { subjectaltname: "IP Address:127.0.0.1", subject: {} },
+      error: nonCanonical,
+    },
+    {
+      host: "０１２７.0.0.1",
+      cert: { subjectaltname: "DNS:87.0.0.1", subject: {} },
+      error: nonCanonical,
+    },
+    // A canonical IP host stays on the IP-SAN path, and a trailing dot is
+    // still removed before matching.
+    {
+      host: "127.0.0.1",
+      cert: { subjectaltname: "DNS:127.0.0.1", subject: {} },
+      error: "IP: 127.0.0.1 is not in the cert's list: ",
+    },
+    {
+      host: "127.0.0.1",
+      cert: { subjectaltname: "IP Address:127.0.0.1", subject: {} },
+    },
+    {
+      host: "example.com.",
+      cert: { subjectaltname: "DNS:example.com", subject: {} },
+    },
+  ];
+  for (const { host, cert, error } of cases) {
+    const err = tls.checkServerIdentity(
+      host,
+      cert as unknown as tls.PeerCertificate,
+    ) as (Error & { code?: string }) | undefined;
+    const label = `${JSON.stringify(host)} against ${JSON.stringify(cert)}`;
+    if (error === undefined) {
+      assertEquals(err, undefined, `${label} must be accepted`);
+    } else {
+      assert(err instanceof Error, `${label} must be rejected`);
+      assertEquals(err.code, "ERR_TLS_CERT_ALTNAME_INVALID", label);
+      assertEquals(
+        err.message,
+        `Hostname/IP does not match certificate's altnames: ${error}`,
+        label,
+      );
+    }
+  }
+});
+
+// End to end (CVE-2026-105483): the server's certificate names 127.0.0.1 as a
+// DNS SAN only. Before: "１２７.0.0.1" and "127。0.0.1" were authorized — they
+// normalized to "127.0.0.1" and matched the DNS SAN — while "127.0.0.1" itself
+// was refused, an IP host matching IP SANs only. Every spelling is resolved to
+// the server's address here, as Node's own test does, so the outcome is the
+// identity check's alone.
+Deno.test("tls.connect refuses a non-canonical IP host against a DNS SAN", async () => {
+  const ipAsDnsKey = Deno.readTextFileSync(
+    join(tlsTestdataDir, "ip_as_dns.key"),
+  );
+  const ipAsDnsCert = Deno.readTextFileSync(
+    join(tlsTestdataDir, "ip_as_dns.crt"),
+  );
+  const server = tls.createServer(
+    { key: ipAsDnsKey, cert: ipAsDnsCert },
+    (socket) => socket.end(),
+  );
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = (server.address() as net.AddressInfo).port;
+  const lookup = ((
+    _host: string,
+    options: { all?: boolean },
+    cb: (...args: unknown[]) => void,
+  ) =>
+    options.all
+      ? cb(null, [{ address: "127.0.0.1", family: 4 }])
+      : cb(null, "127.0.0.1", 4)) as unknown as net.LookupFunction;
+  const connect = (host: string) =>
+    new Promise<string>((resolve) => {
+      const socket = tls.connect({ host, port, ca: rootCaCert, lookup }, () => {
+        resolve(`authorized=${socket.authorized}`);
+        socket.destroy();
+      });
+      socket.on("error", (err: Error & { code?: string }) => {
+        resolve(`error ${err.code}: ${err.message}`);
+      });
+    });
+  try {
+    for (
+      const host of [
+        "１２７.0.0.1",
+        "127。0.0.1",
+        "0127.0.0.1",
+        "127.1",
+      ]
+    ) {
+      const outcome = await deadline(connect(host), 10_000);
+      assertStringIncludes(
+        outcome,
+        "error ERR_TLS_CERT_ALTNAME_INVALID",
+        JSON.stringify(host),
+      );
+      assertStringIncludes(
+        outcome,
+        "Host is a non-canonical IP address",
+        JSON.stringify(host),
+      );
+    }
+    // The canonical spelling is an IP host: matched against IP SANs only.
+    const outcome = await deadline(connect("127.0.0.1"), 10_000);
+    assertStringIncludes(outcome, "error ERR_TLS_CERT_ALTNAME_INVALID");
+    assertStringIncludes(outcome, "IP: 127.0.0.1 is not in the cert's list");
+  } finally {
+    server.close();
+  }
+});
