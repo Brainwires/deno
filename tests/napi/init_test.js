@@ -86,7 +86,7 @@ Deno.test("legacy V8 addon is rejected with a clear error", {
 }, function () {
   const path =
     new URL(`./module_legacy.${libSuffix}`, import.meta.url).pathname;
-  assertThrows(
+  const err = assertThrows(
     () => {
       ops.op_napi_open(
         path,
@@ -99,8 +99,15 @@ Deno.test("legacy V8 addon is rejected with a clear error", {
         emitDestroy,
       );
     },
-    TypeError,
+    Error,
     "legacy Node.js native addon API",
+  );
+  // A plain Error with Node's dlopen code, so require() fallbacks can catch it.
+  assert(!(err instanceof TypeError), `expected a plain Error, got ${err}`);
+  assert(err.code === "ERR_DLOPEN_FAILED", `unexpected code ${err.code}`);
+  assert(
+    err.message.includes("node_module_register"),
+    `expected the registration path in the error, got: ${err.message}`,
   );
 });
 

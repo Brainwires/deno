@@ -62,6 +62,7 @@ use libloading::os::windows::*;
 pub use value::napi_value;
 
 pub mod function;
+mod legacy_abi;
 // Only used to diagnose Windows addons that link against `node.exe`; on unix the
 // helpers are exercised solely by their unit tests.
 #[cfg_attr(
@@ -82,6 +83,23 @@ fn fmt_lib_load_source(err: &libloading::Error) -> String {
   }
 }
 
+fn fmt_package(package: &Option<String>) -> String {
+  match package {
+    Some(name) => format!(" (npm package \"{name}\")"),
+    None => String::new(),
+  }
+}
+
+impl NApiError {
+  fn legacy_addon(path: &Path, reason: String) -> Self {
+    NApiError::UnsupportedLegacyAddon {
+      path: path.to_path_buf(),
+      package: legacy_abi::npm_package_name(path),
+      reason,
+    }
+  }
+}
+
 #[derive(Debug, thiserror::Error, deno_error::JsError)]
 pub enum NApiError {
   #[class(type)]
@@ -95,23 +113,39 @@ pub enum NApiError {
   // `LoadLibraryExW failed` on Windows). Surface the underlying OS error via
   // `source` and the resolved path so the failure is actionable. See
   // denoland/deno#36622.
+  #[property("code" = "ERR_DLOPEN_FAILED")]
   #[error("{source}{}\n  path: {}", fmt_lib_load_source(source), path.display())]
   LibraryLoad {
     source: libloading::Error,
     path: PathBuf,
   },
   #[class(type)]
+  #[property("code" = "ERR_DLOPEN_FAILED")]
   #[error("Unable to find register Node-API module at {}", .0.display())]
   ModuleNotFound(PathBuf),
-  #[class(type)]
+  // Node throws `ERR_DLOPEN_FAILED` for every addon its `process.dlopen`
+  // cannot load, so a `require()` fallback chain (re2, optional native
+  // accelerators) that checks the code keeps working. A plain `Error`, as
+  // Node's.
+  #[class(generic)]
+  #[property("code" = "ERR_DLOPEN_FAILED")]
   #[error(
-    "Cannot load native addon at {}: it was built against the legacy Node.js \
-     native addon API (NODE_MODULE / nan), which Deno does not support. Only \
-     Node-API (N-API) addons are supported.",
-    .0.display()
+    "Cannot load native addon at {}{}: it was built against the legacy \
+     Node.js native addon API (NODE_MODULE / nan) and uses Node's V8 C++ ABI \
+     ({}), which this runtime does not provide. Only Node-API (N-API) addons \
+     can load in this runtime: use a Node-API build of the package or a \
+     Node-API alternative (addons built with node-addon-api or napi-rs).",
+    .path.display(),
+    fmt_package(.package),
+    .reason
   )]
-  UnsupportedLegacyAddon(PathBuf),
+  UnsupportedLegacyAddon {
+    path: PathBuf,
+    package: Option<String>,
+    reason: String,
+  },
   #[class(type)]
+  #[property("code" = "ERR_DLOPEN_FAILED")]
   #[error(
     "Cannot load native addon at {}: it links directly against the Node.js \
      binary (node.exe) and relies on the V8 C++ ABI, Node.js internals and/or \
@@ -908,6 +942,14 @@ unsafe impl Send for NapiModuleHandle {}
 #[derive(Clone, Copy)]
 struct NapiModuleHandle(*const NapiModule);
 
+/// Legacy (`node_module_register`) addons already refused, by path, with the
+/// `nm_version` they registered: when the library stays mapped after the
+/// failed load, a second `dlopen` runs no constructor, so the refusal must
+/// not depend on the registration happening again.
+static LEGACY_ADDON_VERSIONS: std::sync::LazyLock<
+  RwLock<HashMap<PathBuf, i32>>,
+> = std::sync::LazyLock::new(|| RwLock::new(HashMap::new()));
+
 static NAPI_LOADED_MODULES: std::sync::LazyLock<
   RwLock<HashMap<PathBuf, NapiModuleHandle>>,
 > = std::sync::LazyLock::new(|| RwLock::new(HashMap::new()));
@@ -1054,10 +1096,10 @@ fn op_napi_open<'scope>(
   {
     Ok(library) => library,
     Err(err) => {
-      return Err(NApiError::LibraryLoad {
-        source: err,
-        path: real_path.to_path_buf(),
-      });
+      // A V8-ABI addon whose `v8::` / `node::` symbols are bound at load time
+      // (macOS chained fixups, `-z now` / BIND_NOW on Linux) fails right here
+      // with the mangled name in the loader message.
+      return Err(classify_library_load_error(err, &path, &real_path));
     }
   };
 
@@ -1082,10 +1124,7 @@ fn op_napi_open<'scope>(
         {
           return Err(NApiError::UnsupportedNodeBinaryAddon(path.into_owned()));
         }
-        return Err(NApiError::LibraryLoad {
-          source: err,
-          path: real_path.to_path_buf(),
-        });
+        return Err(classify_library_load_error(err, &path, &real_path));
       }
     };
 
@@ -1105,7 +1144,13 @@ fn op_napi_open<'scope>(
     // register function (it uses the unsupported legacy ABI), so bail out with
     // a clear error instead of crashing later. See denoland/deno#26656.
     if nm.nm_version != NAPI_MODULE_VERSION {
-      return Err(NApiError::UnsupportedLegacyAddon(path.into_owned()));
+      LEGACY_ADDON_VERSIONS
+        .write()
+        .insert(real_path.to_path_buf(), nm.nm_version);
+      return Err(NApiError::legacy_addon(
+        &path,
+        legacy_register_reason(nm.nm_version),
+      ));
     }
     NAPI_LOADED_MODULES.write().insert(
       real_path.to_path_buf(),
@@ -1120,10 +1165,23 @@ fn op_napi_open<'scope>(
     // pointer should still be valid.
     let nm = unsafe { &*module_to_register.0 };
     if nm.nm_version != NAPI_MODULE_VERSION {
-      return Err(NApiError::UnsupportedLegacyAddon(path.into_owned()));
+      return Err(NApiError::legacy_addon(
+        &path,
+        legacy_register_reason(nm.nm_version),
+      ));
     }
     // SAFETY: we are going blind, calling the register function on the other side.
     unsafe { (nm.nm_register_func)(env_ptr, exports.into()) }
+  } else if let Some(nm_version) = {
+    LEGACY_ADDON_VERSIONS
+      .read()
+      .get(real_path.as_ref())
+      .copied()
+  } {
+    return Err(NApiError::legacy_addon(
+      &path,
+      legacy_register_reason(nm_version),
+    ));
   } else {
     match unsafe {
       library.get::<napi_register_module_v1>(b"napi_register_module_v1")
@@ -1134,6 +1192,24 @@ fn op_napi_open<'scope>(
         unsafe { init(env_ptr, exports.into()) }
       }
       _ => {
+        // A context-aware legacy addon (`NODE_MODULE_INIT`, or
+        // `NODE_MODULE_INITIALIZER` by hand) does not call
+        // `node_module_register`; it exports `node_register_module_v<N>`,
+        // which Node looks up after `dlopen`. Never call it: it expects V8
+        // handles, not a Node-API env.
+        if let Some(version) = legacy_abi::node_module_versions().find(|v| {
+          let name = format!("node_register_module_v{v}\0");
+          // SAFETY: only looks the symbol up; it is never called.
+          unsafe { library.get::<*const c_void>(name.as_bytes()) }.is_ok()
+        }) {
+          return Err(NApiError::legacy_addon(
+            &path,
+            format!(
+              "it exports `node_register_module_v{version}` \
+               (NODE_MODULE_INIT) instead of `napi_register_module_v1`"
+            ),
+          ));
+        }
         return Err(NApiError::ModuleNotFound(path.into_owned()));
       }
     }
@@ -1146,6 +1222,36 @@ fn op_napi_open<'scope>(
   std::mem::forget(library);
 
   Ok(exports)
+}
+
+fn legacy_register_reason(nm_version: i32) -> String {
+  format!(
+    "it registers through `node_module_register` with NODE_MODULE_VERSION \
+     {nm_version}, not Node-API's module version {NAPI_MODULE_VERSION}"
+  )
+}
+
+/// A loader failure naming a `v8::` / `node::` C++ symbol (or another legacy
+/// entry point) is a V8-ABI addon; anything else stays the loader's error.
+fn classify_library_load_error(
+  err: libloading::Error,
+  path: &Path,
+  real_path: &Path,
+) -> NApiError {
+  let message = format!("{err}{}", fmt_lib_load_source(&err));
+  match legacy_abi::v8_abi_symbol_in_error(&message) {
+    Some(symbol) => NApiError::legacy_addon(
+      path,
+      format!(
+        "it needs the C++ symbol `{symbol}`, which only the Node.js binary \
+         exports"
+      ),
+    ),
+    None => NApiError::LibraryLoad {
+      source: err,
+      path: real_path.to_path_buf(),
+    },
+  }
 }
 
 #[allow(clippy::print_stdout, reason = "cargo build script output")]

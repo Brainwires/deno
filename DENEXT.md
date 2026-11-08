@@ -10881,13 +10881,53 @@ where the changes are discussed.
        `node/node_pty_override`'s `addon_present_loads_the_package` (an empty
        `prebuilds/<platform>-<arch>/pty.node` in the stand-in makes the
        package's own entry run).
+269. **`fix(ext/napi)`: a V8-C++-ABI (NAN) addon fails with a clear, catchable
+     error** (`fix/napi-nan-addon-error`; `ext/napi/lib.rs`,
+     `ext/napi/legacy_abi.rs`). Only Node-API addons can load here; one built on
+     Node's V8 C++ ABI (NAN's `NODE_MODULE`, `NODE_MODULE_INIT`, raw `v8::` /
+     `node::` calls: `re2`, `@datadog/pprof`, older `@sentry/profiling-node`)
+     failed three different ways: a `node_module_register` addon got a
+     `TypeError` with no code and no package; a `NODE_MODULE_INIT` addon (it
+     exports `node_register_module_v<N>` and registers nothing) got "Unable to
+     find register Node-API module"; and one whose `v8::` symbols the loader
+     binds at load time (macOS chained fixups, `-z now` on Linux) got the
+     loader's own `undefined symbol: _ZN2v8...` /
+     `symbol not found in flat
+     namespace '__ZN2v8...'`. All three are now
+     one `Error` with code `ERR_DLOPEN_FAILED` (what Node's `process.dlopen`
+     throws for any addon it cannot load, so a `try { require() } catch`
+     fallback chain keeps working) whose message names the file, the npm package
+     (read from the `node_modules` / npm cache path), the reason (the
+     registration and its NODE_MODULE_VERSION, the `node_register_module_v<N>`
+     export, or the missing C++ symbol) and the remedy: a Node-API build of the
+     package or a Node-API alternative. It keeps the phrase "legacy Node.js
+     native addon API", so the uncaught-error hints in `runtime/fmt_errors.rs`
+     still fire. The loader's other failures (`LibraryLoad`), a missing
+     registration and a Windows addon importing `node.exe` keep their messages
+     and classes and gain the same code. A `node_module_register` addon is
+     remembered by path, so loading it a second time (no constructor runs while
+     the library stays mapped) is refused the same way. The legacy register
+     function is never called. Still a crash: an addon that calls a `v8::`
+     function from a static constructor with lazy binding on Linux
+     (`symbol lookup error` during `dlopen`); NAN addons do not, they only call
+     `node_module_register` there.
+     - Specs: `node/napi_v8_abi_addon_error` (compiles a `node_module_register`
+       addon, a `node_register_module_v147` one and one bound at load time with
+       `cc`, then `require()`s each and `process.dlopen()`s the first, printing
+       the code, class and message parts; on the base the first has no code, the
+       second says "Unable to find register Node-API module" and the third
+       prints the loader's undefined-symbol message). Tests:
+       `tests/napi/init_test.js` "legacy V8 addon is rejected with a clear
+       error" now wants a plain `Error` with `ERR_DLOPEN_FAILED`;
+       `legacy_abi.rs` unit tests (package names from both `node_modules`
+       layouts and the npm cache, symbols from Linux and macOS loader messages).
 
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
 169-174, 176, 178, 180, 182-184, 186, 187, 189-191, 193-196, 198-203, 206, 207,
 209-215, 217, 218, 221, 222, 224, 225, 227, 228, 231, 232, 235, 237, 240,
-243-245, 247-249, 253, 254, 256-260, 262-264, 267, 268) are what the prebuilt
+243-245, 247-249, 253, 254, 256-260, 262-264, 267-269) are what the prebuilt
 `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
 in the branch too, but a stock CLI does not run them; denext's own launcher
