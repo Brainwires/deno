@@ -511,6 +511,7 @@ mod tests {
       svec![
         "run",
         "-A",
+        "--unstable-node-errors",
         "--unstable-bare-node-builtins",
         "--unstable-detect-cjs",
         "--unstable-unsafe-proto",

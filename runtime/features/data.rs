@@ -147,6 +147,15 @@ pub static FEATURE_DESCRIPTIONS: &[UnstableFeatureDescription] = &[
     env_var: None,
   },
   UnstableFeatureDescription {
+    // denext: the `node` shim and the node-args translation turn this on, so a
+    // Node-mode program reports an uncaught error as Node does (DENEXT.md).
+    name: "node-errors",
+    help_text: "Report uncaught errors in the format Node.js uses",
+    show_in_help: false,
+    kind: UnstableFeatureKind::Runtime,
+    env_var: None,
+  },
+  UnstableFeatureDescription {
     // Deprecated: Node.js `setTimeout`/`setInterval` globals are now the
     // default, so this flag is a no-op kept only for backwards compatibility.
     name: "node-globals",

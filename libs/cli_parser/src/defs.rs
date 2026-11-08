@@ -561,6 +561,11 @@ ArgDef::new("unstable-bare-node-builtins")
     .set_true()
     .hidden()
 .help("Deprecated. `request.signal` in Deno.serve no longer aborts on successfully completed requests, so this flag has no effect."),
+  ArgDef::new("unstable-node-errors")
+    .long("unstable-node-errors")
+    .set_true()
+    .hidden()
+.help("Report uncaught errors in the format Node.js uses"),
   ArgDef::new("unstable-node-globals")
     .long("unstable-node-globals")
     .set_true()

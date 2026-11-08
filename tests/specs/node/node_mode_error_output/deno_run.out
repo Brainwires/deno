@@ -1,0 +1,4 @@
+error: Uncaught (in promise) TypeError: boom
+throw new TypeError("boom");
+      ^
+    at [WILDCARD]throw.mjs:2:7

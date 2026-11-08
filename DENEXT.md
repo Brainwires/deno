@@ -10910,6 +10910,50 @@ where the changes are discussed.
        `libs/node_shim`'s and `node_cli_parser.rs`'s translation tests list the
        flag.
 
+269. **`fix(node)`: Node mode reports uncaught errors as Node does**
+     (`fix/node-mode-error-output`; `runtime/fmt_errors.rs`, `cli/lib.rs`,
+     `runtime/features/data.rs`, `libs/node_shim/lib.rs`,
+     `libs/node_shim/check_syntax.js`, `ext/node/polyfills/01_require.js`,
+     `cli/task_runner.rs`). Under the `node` shim an uncaught error printed
+     Deno's report (`error: Uncaught (in promise) TypeError: ...`, even for a
+     synchronous throw, in colour on a pipe, with no Node.js version footer),
+     which tools that parse a Node program's stderr and snapshot tests of CLI
+     output do not recognise; `--stack-trace-limit=N` was parsed and dropped
+     (`Error.stackTraceLimit` stayed 10); and `node --check file.js` ran the
+     file instead of checking it. The node-args translation (the shim,
+     `child_process`'s `node` children, the task shell's `node`) now passes a
+     new hidden unstable feature, `--unstable-node-errors`, which a Node child
+     keeps through the translation and `process.execArgv`. With it the CLI
+     prints an uncaught error as Node 26 does (`format_js_error_node`): the file
+     and line, the source line and a caret, a blank line, the error's `stack`, a
+     blank line and `Node.js v26.5.1`, without colour, exit code 1. A CommonJS
+     module is named by its path (in that header and in the stack's frames) and
+     an ES module by its `file:` URL, as Node names them. The caret points at
+     the `throw` of a synchronous `throw new Error()` and at the construction
+     for a rejection, as Node's does, and a CommonJS entry module's top-level
+     throw now ends the program as an uncaught exception, not as its ESM
+     wrapper's rejection. A rejection with a value that is not an `Error` prints
+     Node's `UnhandledPromiseRejection` message with the value and its
+     `ERR_UNHANDLED_REJECTION` code, and a thrown one prints the value and
+     Node's line suggesting `--trace-uncaught`. `--stack-trace-limit=N` becomes
+     V8's `--stack-trace-limit`, and `--check` compiles the file as Node loads
+     it (`vm.compileFunction` for CommonJS, `vm.SourceTextModule` for an ES
+     module or module syntax) without running it, so a syntax error prints
+     Node's block and a valid file exits 0 silently. `deno run` keeps Deno's
+     report byte for byte, and `deno run --unstable-node-errors` opts in. Not
+     reproduced: the frames in the stack (this runtime's, not Node's internals),
+     the own properties `util.inspect` appends to an error (`code`, `errno`,
+     ...), the line of an error constructed on one line and thrown on another
+     (the header names the construction), and the header Node prints for a value
+     that is not an `Error`.
+     - Specs: `node/node_mode_error_output` (through a `node` symlink of the
+       executable: a CommonJS throw at top level and in a function, an `Error`
+       and a number rejected, an ES module throw, `--check` of a bad and a good
+       file, `--stack-trace-limit=3`; `deno run` of the same throw is unchanged,
+       and with `--unstable-node-errors` is Node's). Tests: `node_format_*`
+       (`runtime/fmt_errors.rs`), the translation tests in `libs/node_shim` and
+       `node_cli_parser.rs` list the flag.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
