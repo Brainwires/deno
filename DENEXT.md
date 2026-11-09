@@ -11649,66 +11649,75 @@ where the changes are discussed.
        `sqlite3@5.1.7` install failed before (`getaddrinfo EPERM github.com`)
        and now installs and loads.
 
-289. **`feat(ext/node)`: fetch takes Node's global proxy, and node:http's
-proxy, keep-alive, pipelining and header-limit gaps** (runtime;
-`ext/fetch/26_fetch.js`, `ext/fetch/lib.rs`, `ext/node/polyfills/_http_proxy.js`,
-`_http_client.js`, `_http_outgoing.ts`, `_http_server.js`, `_http_common.js`,
-`http.ts`, `https.ts`, `internal_binding/http_parser.ts`, `node_options.ts`,
-`ext/node/ops/llhttp/binding.rs`, `libs/node_shim/lib.rs`).
+289. **`feat(ext/node)`: fetch takes Node's global proxy, and node:http's proxy,
+     keep-alive, pipelining and header-limit gaps** (runtime;
+     `ext/fetch/26_fetch.js`, `ext/fetch/lib.rs`,
+     `ext/node/polyfills/_http_proxy.js`, `_http_client.js`,
+     `_http_outgoing.ts`, `_http_server.js`, `_http_common.js`, `http.ts`,
+     `https.ts`, `internal_binding/http_parser.ts`, `node_options.ts`,
+     `ext/node/ops/llhttp/binding.rs`, `libs/node_shim/lib.rs`).
 
-Proxy for fetch: `fetch()` follows Node's global proxy configuration
-(`NODE_USE_ENV_PROXY=1`, `--use-env-proxy`, `http.setGlobalProxyFromEnv()`,
-`NO_PROXY`) once node:http has loaded. This picks the client only: when the
-default client's environment proxy is already the one Node chose it is kept as
-is, and otherwise the request goes through a `Deno.createHttpClient` proxy
-client, whose own permission checks apply. A request routed this way carries
-Node's fetch defaults where the caller set none (`connection: keep-alive`,
-`sec-fetch-mode: cors`, `user-agent: node`, `accept-encoding: gzip, deflate`),
-and fetch now decodes a `deflate` (zlib) response body.
+     Proxy for fetch: `fetch()` follows Node's global proxy configuration
+     (`NODE_USE_ENV_PROXY=1`, `--use-env-proxy`, `http.setGlobalProxyFromEnv()`,
+     `NO_PROXY`) once node:http has loaded. This picks the client only: when the
+     default client's environment proxy is already the one Node chose it is kept
+     as is, and otherwise the request goes through a `Deno.createHttpClient`
+     proxy client, whose own permission checks apply. A request routed this way
+     carries Node's fetch defaults where the caller set none
+     (`connection: keep-alive`, `sec-fetch-mode: cors`, `user-agent: node`,
+     `accept-encoding: gzip, deflate`), and fetch now decodes a `deflate` (zlib)
+     response body.
 
-Proxied `http.request()`: the request authority is checked as in Node 26. A
-caller's Host header (object, flat array or array of pairs) and an absolute-form
-path must name the request's `host:port`, an absolute path must use `http:`
-without userinfo, an origin-form path must start with `/`, and a duplicate Host
-is refused (`ERR_INVALID_ARG_VALUE`); the sent Host is canonicalized, and
-`CONNECT` / `OPTIONS *` keep their target. Behind a per-agent `proxyEnv` with a
-finite `maxSockets` the CONNECT asks the proxy to keep the connection alive, and
-a refused tunnel reports `Failed to establish tunnel to <target> via <proxy URL,
-credentials redacted>`.
+     Proxied `http.request()`: the request authority is checked as in Node 26. A
+     caller's Host header (object, flat array or array of pairs) and an
+     absolute-form path must name the request's `host:port`, an absolute path
+     must use `http:` without userinfo, an origin-form path must start with `/`,
+     and a duplicate Host is refused (`ERR_INVALID_ARG_VALUE`); the sent Host is
+     canonicalized, and `CONNECT` / `OPTIONS *` keep their target. Behind a
+     per-agent `proxyEnv` with a finite `maxSockets` the CONNECT asks the proxy
+     to keep the connection alive, and a refused tunnel reports
+     `Failed to establish tunnel to <target> via <proxy URL,
+     credentials redacted>`.
 
-Keep-alive hang: `OutgoingMessage` counted corks only while it had no socket,
-but `end()` follows Node 26's always-counting cork, so a request ended before
-its socket connected left that socket corked for good and the next request on it
-never left (a "socket hang up" once the server's keep-alive timeout closed the
-idle connection). `cork()` / `uncork()` count every cork now, as in Node 26.
+     Keep-alive hang: `OutgoingMessage` counted corks only while it had no
+     socket, but `end()` follows Node 26's always-counting cork, so a request
+     ended before its socket connected left that socket corked for good and the
+     next request on it never left (a "socket hang up" once the server's
+     keep-alive timeout closed the idle connection). `cork()` / `uncork()` count
+     every cork now, as in Node 26.
 
-Pipelining: the server skipped resuming a socket it had paused for a flood of
-pipelined requests whenever the queued output fell below the high-water mark, so
-the connection stalled until the keep-alive timeout dropped it (10,000
-pipelined requests reset after about 1,800). It now checks every change, and
-emits a response's `drain` only once nothing is pending, as Node 26 does. A
-response still queued for a pipelined request when the connection closes is
-destroyed and emits `close` (`OutgoingMessage#destroy()` without a socket closes
-on the next tick, and `closed` is there) instead of waiting for a socket.
+     Pipelining: the server skipped resuming a socket it had paused for a flood
+     of pipelined requests whenever the queued output fell below the high-water
+     mark, so the connection stalled until the keep-alive timeout dropped it
+     (10,000 pipelined requests reset after about 1,800). It now checks every
+     change, and emits a response's `drain` only once nothing is pending, as
+     Node 26 does. A response still queued for a pipelined request when the
+     connection closes is destroyed and emits `close`
+     (`OutgoingMessage#destroy()` without a socket closes on the next tick, and
+     `closed` is there) instead of waiting for a socket.
 
-Header limits: a 400/408/413/431 written for a client error now reaches the
-client before the socket is destroyed; `server.maxHeadersCount` (the parser's
-`maxHeaderPairs`) fails a request with too many headers with
-`HPE_HEADER_OVERFLOW`; `--insecure-http-parser` and `--max-http-header-size`
-reach node:http through NODE_OPTIONS (also from a spawned `process.execPath`),
-and `http.maxHeaderSize` and the parser's default limit follow the latter.
+     Header limits: a 400/408/413/431 written for a client error now reaches the
+     client before the socket is destroyed; `server.maxHeadersCount` (the
+     parser's `maxHeaderPairs`) fails a request with too many headers with
+     `HPE_HEADER_OVERFLOW`; `--insecure-http-parser` and
+     `--max-http-header-size` reach node:http through NODE_OPTIONS (also from a
+     spawned `process.execPath`), and `http.maxHeaderSize` and the parser's
+     default limit follow the latter.
 
-Not covered: fetch through a proxy to an `https:` fixture with an X.509 v1
-certificate (rustls refuses it) and the fetch client's CONNECT headers
-(`ext/fetch/proxy.rs`); a program that never loads node:http keeps the default
-client's environment proxy for fetch; `parallel/test-http-keep-alive-empty-line`.
+     Not covered: fetch through a proxy to an `https:` fixture with an X.509 v1
+     certificate (rustls refuses it) and the fetch client's CONNECT headers
+     (`ext/fetch/proxy.rs`); a program that never loads node:http keeps the
+     default client's environment proxy for fetch;
+     `parallel/test-http-keep-alive-empty-line`.
 
-Tests: node_compat client-proxy (13 more), `parallel/test-http-header-overflow`,
-`-insecure-parser`, `-max-header-size`, `-max-headers-count-overflow`,
-`-outgoing-drain-writable-length`, `-pipeline-outgoing-destroy`,
-`-pipeline-requests-connection-leak`; unit_node `http_test.ts` (a request queued
-behind one ended while connecting, the proxied authority checks, the 431 via
-`socket.push()`); `libs/node_shim` `http_parser_flags_ride_along_in_node_options`.
+     Tests: node_compat client-proxy (13 more),
+     `parallel/test-http-header-overflow`, `-insecure-parser`,
+     `-max-header-size`, `-max-headers-count-overflow`,
+     `-outgoing-drain-writable-length`, `-pipeline-outgoing-destroy`,
+     `-pipeline-requests-connection-leak`; unit_node `http_test.ts` (a request
+     queued behind one ended while connecting, the proxied authority checks, the
+     431 via `socket.push()`); `libs/node_shim`
+     `http_parser_flags_ride_along_in_node_options`.
 
 290. **`feat(node)`: `net.Socket({ fd })`, `server.listen({ fd })` and
      `tty.ReadStream(fd)` on descriptors the process owns; long unix socket
@@ -11750,50 +11759,52 @@ behind one ended while connecting, the proxied authority checks, the 431 via
        are unchanged.
 
 291. **`feat(node:tls)`: real TLS session resumption, session tickets and
-`ciphers` over rustls** (`ext/node/ops/tls_session.rs`,
-`ext/node/ops/tls_wrap.rs`, `ext/node/polyfills/_tls_wrap.js`,
-`ext/node/polyfills/_tls_common.ts`). `node:tls` sessions were synthetic: the
-client emitted made-up `'session'` buffers naming `host:port`, every buffer for
-a server was the same, a resumed TLS 1.3 connection emitted none,
-`getTLSTicket()` did not exist and `ticketKeys` / `setTicketKeys()` were stored
-but never used. rustls has no public session serialization (and its session
-values are bound to the verifier that accepted them), so each session rustls
-stores now goes into a per-isolate registry under a random 128-bit id, and the
-buffer handed to JS (`deno-tls-session:<hex>`) names it. `'session'` fires for
-every session rustls stores (each TLS 1.3 NewSessionTicket, including on a
-resumed connection as BoringSSL does; a full TLS 1.2 handshake), `getSession()`
-returns the newest, `setSession()` / `options.session` offer exactly that
-session and only to a connection with the server name it was issued for, and
-`getTLSTicket()` reports the ticket (the offered one on a resumed TLS 1.2
-connection, as OpenSSL does). TLS 1.3 tickets are single-use in rustls, so the
-tickets of one lineage share a pool and every resumed connection refills it; a
-buffer resumes only in the process that received it. Contexts with an explicit
-`ca` (and no client cert) now cache their verifier by the CA set, so they resume
-too. Servers issue tickets under their 48-byte `ticketKeys` (random per server
-when not given, as in Node; `getTicketKeys()` used to return zeros): servers
-sharing keys accept each other's tickets and `setTicketKeys()` rotates them;
-`sessionTimeout` is the ticket lifetime. The `ciphers` option is now applied:
-`TLS_*` names pick the TLS 1.3 suites and the rest is evaluated as an OpenSSL
-cipher string (names, `ALL`/`DEFAULT`/`HIGH`, `ECDHE`, `aRSA`/`ECDSA`,
-`AES`/`AES128`/`AES256`/`AESGCM`/`CHACHA20`, `SHA256`/ `SHA384`, `!`/`-`/`+`,
-`A+B`) over the suites rustls offers; a list naming only TLS 1.3 suites makes
-the context TLS 1.3 only. A TLS 1.2 list that selects nothing rustls implements
-(CBC, RSA key exchange, DHE, CCM) keeps the TLS 1.2 defaults rather than failing
-every handshake, and unknown names still raise `ERR_SSL_NO_CIPHER_MATCH` as
-before. Not supported: TLS 1.3 external PSK (`pskCallback`; rustls has none),
-the server `newSession` / `resumeSession` session-id cache events, and the
-private `enableTicketKeyCallback()` hook. - Tests: `ext/node` unit tests
-`tls_session::tests` (buffer encoding, ticket extraction, ticketer key
-separation and tamper checks, the server-name gate); unit_node
-`tls 1.3 sessions are real, unique and
+     `ciphers` over rustls** (`ext/node/ops/tls_session.rs`,
+     `ext/node/ops/tls_wrap.rs`, `ext/node/polyfills/_tls_wrap.js`,
+     `ext/node/polyfills/_tls_common.ts`). `node:tls` sessions were synthetic:
+     the client emitted made-up `'session'` buffers naming `host:port`, every
+     buffer for a server was the same, a resumed TLS 1.3 connection emitted
+     none, `getTLSTicket()` did not exist and `ticketKeys` / `setTicketKeys()`
+     were stored but never used. rustls has no public session serialization (and
+     its session values are bound to the verifier that accepted them), so each
+     session rustls stores now goes into a per-isolate registry under a random
+     128-bit id, and the buffer handed to JS (`deno-tls-session:<hex>`) names
+     it. `'session'` fires for every session rustls stores (each TLS 1.3
+     NewSessionTicket, including on a resumed connection as BoringSSL does; a
+     full TLS 1.2 handshake), `getSession()` returns the newest, `setSession()`
+     / `options.session` offer exactly that session and only to a connection
+     with the server name it was issued for, and `getTLSTicket()` reports the
+     ticket (the offered one on a resumed TLS 1.2 connection, as OpenSSL does).
+     TLS 1.3 tickets are single-use in rustls, so the tickets of one lineage
+     share a pool and every resumed connection refills it; a buffer resumes only
+     in the process that received it. Contexts with an explicit `ca` (and no
+     client cert) now cache their verifier by the CA set, so they resume too.
+     Servers issue tickets under their 48-byte `ticketKeys` (random per server
+     when not given, as in Node; `getTicketKeys()` used to return zeros):
+     servers sharing keys accept each other's tickets and `setTicketKeys()`
+     rotates them; `sessionTimeout` is the ticket lifetime. The `ciphers` option
+     is now applied: `TLS_*` names pick the TLS 1.3 suites and the rest is
+     evaluated as an OpenSSL cipher string (names, `ALL`/`DEFAULT`/`HIGH`,
+     `ECDHE`, `aRSA`/`ECDSA`, `AES`/`AES128`/`AES256`/`AESGCM`/`CHACHA20`,
+     `SHA256`/ `SHA384`, `!`/`-`/`+`, `A+B`) over the suites rustls offers; a
+     list naming only TLS 1.3 suites makes the context TLS 1.3 only. A TLS 1.2
+     list that selects nothing rustls implements (CBC, RSA key exchange, DHE,
+     CCM) keeps the TLS 1.2 defaults rather than failing every handshake, and
+     unknown names still raise `ERR_SSL_NO_CIPHER_MATCH` as before. Not
+     supported: TLS 1.3 external PSK (`pskCallback`; rustls has none), the
+     server `newSession` / `resumeSession` session-id cache events, and the
+     private `enableTicketKeyCallback()` hook. - Tests: `ext/node` unit tests
+     `tls_session::tests` (buffer encoding, ticket extraction, ticketer key
+     separation and tamper checks, the server-name gate); unit_node
+     `tls 1.3 sessions are real, unique and
        resumable`,
-`tls 1.2 session resumes and reports the offered ticket`,
-`tls server ticketKeys are shared and rotated`,
-`tls session resumes
+     `tls 1.2 session resumes and reports the offered ticket`,
+     `tls server ticketKeys are shared and rotated`,
+     `tls session resumes
        with an explicit ca`,
-`tls ciphers option selects rustls suites`; node_compat `test-tls-ticket`,
-`test-tls-ticket-12`, `test-tls-ticket-cluster`,
-`test-https-agent-session-reuse`, `test-https-agent-disable-session-reuse`.
+     `tls ciphers option selects rustls suites`; node_compat `test-tls-ticket`,
+     `test-tls-ticket-12`, `test-tls-ticket-cluster`,
+     `test-https-agent-session-reuse`, `test-https-agent-disable-session-reuse`.
 
 292. **`feat(ext/node)`: the legacy `node:crypto` ciphers, modes and brainpool
      curves** (`feat/node-crypto-legacy`, runtime;
@@ -11848,100 +11859,107 @@ separation and tamper checks, the server-name gate); unit_node
        compressed points, `convertKey` and secrets equal Node's).
 
 293. **`feat(node)`: Node's `--cpu-prof`, `--heap-prof`, `--heapsnapshot-signal`
-and `--heapsnapshot-near-heap-limit` write their files; `v8` and `Worker`
-profiling APIs** (runtime and CLI; `runtime/cpu_profiler/{mod,heapprof}.rs`,
-`runtime/web_worker.rs`, `runtime/ops/worker_host.rs`, `runtime/js/99_main.js`,
-`cli/worker.rs`, `cli/lib/worker.rs`, `cli/factory.rs`, `cli/args/mod.rs`,
-`cli/rt/run.rs`, `libs/cli_parser`, `libs/node_shim`,
-`ext/node/polyfills/
+     and `--heapsnapshot-near-heap-limit` write their files; `v8` and `Worker`
+     profiling APIs** (runtime and CLI;
+     `runtime/cpu_profiler/{mod,heapprof}.rs`, `runtime/web_worker.rs`,
+     `runtime/ops/worker_host.rs`, `runtime/js/99_main.js`, `cli/worker.rs`,
+     `cli/lib/worker.rs`, `cli/factory.rs`, `cli/args/mod.rs`, `cli/rt/run.rs`,
+     `libs/cli_parser`, `libs/node_shim`,
+     `ext/node/polyfills/
      {v8,v8_esm,worker_threads,process}.ts`,
-`internal_binding/node_options.ts`, `internal/errors.ts`). `node --cpu-prof` and
-`--heap-prof` were parsed and dropped, so no profile was written. - The node
-shim passes `--cpu-prof` / `--heap-prof` and their `-dir`, `-name` and
-`-interval` options on as Deno flags of the same names. Deno's new hidden
-`--heap-prof*` flags (on `run`, `eval`, `serve` and `desktop`, like
-`--cpu-prof*`) start V8's sampling heap profiler before the main module and
-write a `.heapprofile` (the `HeapProfiler.stopSampling` profile) when the
-program ends: normally, through `process.exit()` / `Deno.exit()`, or on SIGINT /
-SIGTERM (the `signal_flush` path the CPU profile and coverage use). Every worker
-writes its own profile, as in Node. - Profile files take Node's names,
-`CPU.<YYYYMMDD>.<HHMMSS>.<pid>.<tid>.<seq>
+     `internal_binding/node_options.ts`, `internal/errors.ts`).
+     `node --cpu-prof` and `--heap-prof` were parsed and dropped, so no profile
+     was written. - The node shim passes `--cpu-prof` / `--heap-prof` and their
+     `-dir`, `-name` and `-interval` options on as Deno flags of the same names.
+     Deno's new hidden `--heap-prof*` flags (on `run`, `eval`, `serve` and
+     `desktop`, like `--cpu-prof*`) start V8's sampling heap profiler before the
+     main module and write a `.heapprofile` (the `HeapProfiler.stopSampling`
+     profile) when the program ends: normally, through `process.exit()` /
+     `Deno.exit()`, or on SIGINT / SIGTERM (the `signal_flush` path the CPU
+     profile and coverage use). Every worker writes its own profile, as in
+     Node. - Profile files take Node's names,
+     `CPU.<YYYYMMDD>.<HHMMSS>.<pid>.<tid>.<seq>
        .cpuprofile` and
-`Heap.<...>.heapprofile` (local time; the thread id is 0 on the main thread and
-the worker's `threadId` in a worker; one sequence counter for the process, from
-001). This replaces Deno's `CPU.<ms>.<pid>.cpuprofile` default for
-`deno run --cpu-prof` too. A `-name` may hold `${pid}`. A custom name in a
-worker still gets `.worker-<id>` appended, as before. - A `worker_threads`
-Worker whose `execArgv` holds `--cpu-prof` / `--heap-prof` (and their options)
-profiles that worker alone (`op_create_worker`'s new `profile` argument). -
-`--heapsnapshot-signal=<sig>` and `--heapsnapshot-near-heap-limit=<n>` ride in
-`NODE_OPTIONS`, like `--trace-sigint`: the process bootstrap installs a listener
-on the signal that writes a `Heap.<...>.heapsnapshot` to the `--diagnostic-dir`
-(else the working directory), and hands the limit to
-`v8.setHeapSnapshotNearHeapLimit()`; a worker takes its own
-`--heapsnapshot-near-heap-limit` from its `execArgv`. - `v8.startCpuProfile()` /
-`v8.startHeapProfile()` (Node 25+) return handles whose `stop()` returns the
-profile's JSON synchronously, on an in-process inspector session (several CPU
-profiles at once; one heap profile per thread, else
-`ERR_HEAP_PROFILE_HAVE_BEEN_STARTED`), with Node's option validation. -
-`worker.startCpuProfile()`, `worker.startHeapProfile()` and
-`worker.getHeapSnapshot()` send a request over the worker's message channel,
-which the worker's thread takes before any listener sees it
-(`internals.setWorkerControlHook` in `99_main.js`) and answers with the same
-functions; after the worker ends they reject with `ERR_WORKER_NOT_RUNNING`. They
-need the worker's event loop to be running (a worker blocked in synchronous code
-answers when it yields), where Node interrupts the isolate. - Not done:
-`maxBufferSize` is validated but V8's sample cap is not applied (the inspector
-protocol has no such parameter); `v8.setHeapProfileNearHeapLimit()`;
-`worker.getHeapSnapshot()` options; Node's embedder graph in heap snapshots
-(`pummel/test-heapdump-*`). - Tests: `libs/node_shim`
-`test_cpu_and_heap_prof_flags_are_translated` and
-`test_heapsnapshot_signal_rides_in_node_options`; specs `heap_prof` (default
-name, `Deno.exit()`, `-dir` + `-name`, a worker's own profile) and
-`cpu_prof/node_name` (Node's default name, `${pid}` in a name). The node suite's
-`sequential/test-cpu-prof-*`, `parallel/test-heap-prof-*`,
-`sequential/test-diagnostic-dir-*-prof`, `sequential/test-heapdump-flag*`,
-`parallel/test-v8-{cpu,heap}-profile`,
-`parallel/test-worker-{cpu,heap}-profile`, `parallel/test-worker-heap-snapshot`
-and `parallel/test-heapsnapshot-near-heap-limit-worker` are the targets.
+     `Heap.<...>.heapprofile` (local time; the thread id is 0 on the main thread
+     and the worker's `threadId` in a worker; one sequence counter for the
+     process, from 001). This replaces Deno's `CPU.<ms>.<pid>.cpuprofile`
+     default for `deno run --cpu-prof` too. A `-name` may hold `${pid}`. A
+     custom name in a worker still gets `.worker-<id>` appended, as before. - A
+     `worker_threads` Worker whose `execArgv` holds `--cpu-prof` / `--heap-prof`
+     (and their options) profiles that worker alone (`op_create_worker`'s new
+     `profile` argument). - `--heapsnapshot-signal=<sig>` and
+     `--heapsnapshot-near-heap-limit=<n>` ride in `NODE_OPTIONS`, like
+     `--trace-sigint`: the process bootstrap installs a listener on the signal
+     that writes a `Heap.<...>.heapsnapshot` to the `--diagnostic-dir` (else the
+     working directory), and hands the limit to
+     `v8.setHeapSnapshotNearHeapLimit()`; a worker takes its own
+     `--heapsnapshot-near-heap-limit` from its `execArgv`. -
+     `v8.startCpuProfile()` / `v8.startHeapProfile()` (Node 25+) return handles
+     whose `stop()` returns the profile's JSON synchronously, on an in-process
+     inspector session (several CPU profiles at once; one heap profile per
+     thread, else `ERR_HEAP_PROFILE_HAVE_BEEN_STARTED`), with Node's option
+     validation. - `worker.startCpuProfile()`, `worker.startHeapProfile()` and
+     `worker.getHeapSnapshot()` send a request over the worker's message
+     channel, which the worker's thread takes before any listener sees it
+     (`internals.setWorkerControlHook` in `99_main.js`) and answers with the
+     same functions; after the worker ends they reject with
+     `ERR_WORKER_NOT_RUNNING`. They need the worker's event loop to be running
+     (a worker blocked in synchronous code answers when it yields), where Node
+     interrupts the isolate. - Not done: `maxBufferSize` is validated but V8's
+     sample cap is not applied (the inspector protocol has no such parameter);
+     `v8.setHeapProfileNearHeapLimit()`; `worker.getHeapSnapshot()` options;
+     Node's embedder graph in heap snapshots (`pummel/test-heapdump-*`). -
+     Tests: `libs/node_shim` `test_cpu_and_heap_prof_flags_are_translated` and
+     `test_heapsnapshot_signal_rides_in_node_options`; specs `heap_prof`
+     (default name, `Deno.exit()`, `-dir` + `-name`, a worker's own profile) and
+     `cpu_prof/node_name` (Node's default name, `${pid}` in a name). The node
+     suite's `sequential/test-cpu-prof-*`, `parallel/test-heap-prof-*`,
+     `sequential/test-diagnostic-dir-*-prof`, `sequential/test-heapdump-flag*`,
+     `parallel/test-v8-{cpu,heap}-profile`,
+     `parallel/test-worker-{cpu,heap}-profile`,
+     `parallel/test-worker-heap-snapshot` and
+     `parallel/test-heapsnapshot-near-heap-limit-worker` are the targets.
 
 294. **`fix(ext/node)`: small Node API holes: `http2.constants`' status codes,
      `DatabaseSync#enableLoadExtension`, `v8.isStringOneByteRepresentation`,
      `_http_client` / `_http_incoming`, `dns.resolve("")`**
      (`ext/node/polyfills/internal/http2/constants.ts`, `ext/node_sqlite`,
      `ext/node/ops/v8.rs`, `ext/node/polyfills/v8.ts`,
-     `ext/node/polyfills/01_require.js`, `libs/node_resolver/builtin_modules.rs`,
+     `ext/node/polyfills/01_require.js`,
+     `libs/node_resolver/builtin_modules.rs`,
      `ext/node/polyfills/internal_binding/cares_wrap.ts`).
      - `http2.constants` has all 63 `HTTP_STATUS_*` names (upstream
        denoland/deno#36960); it had 10.
      - `DatabaseSync#enableLoadExtension(allow)` turns `loadExtension()` and the
-       `load_extension()` SQL function on and off (upstream denoland/deno#30218).
-       Turning it on needs a database opened with `allowExtension: true`
-       (`ERR_INVALID_STATE`, "Cannot enable extension loading because it was
-       disabled at database creation.") and `--allow-ffi`, as opening with
-       `allowExtension` does; a non-boolean is `ERR_INVALID_ARG_TYPE`. While it
-       is off, `loadExtension()` fails with Node's `ERR_INVALID_STATE`
-       "extension loading is not allowed" (it was `ERR_LOAD_SQLITE_EXTENSION`
-       with another message).
+       `load_extension()` SQL function on and off (upstream
+       denoland/deno#30218). Turning it on needs a database opened with
+       `allowExtension: true` (`ERR_INVALID_STATE`, "Cannot enable extension
+       loading because it was disabled at database creation.") and
+       `--allow-ffi`, as opening with `allowExtension` does; a non-boolean is
+       `ERR_INVALID_ARG_TYPE`. While it is off, `loadExtension()` fails with
+       Node's `ERR_INVALID_STATE` "extension loading is not allowed" (it was
+       `ERR_LOAD_SQLITE_EXTENSION` with another message).
      - `v8.isStringOneByteRepresentation(content)`: V8's `String::IsOneByte`.
      - `require("_http_client")` and `require("_http_incoming")` are built-ins
-       (both polyfills existed but weren't registered), the same
-       `ClientRequest` / `IncomingMessage` as `node:http`.
-     - `dns.resolve("")` and every `resolve*("")` fail with `ENODATA`, as
-       c-ares answers an empty name (upstream denoland/deno#36535); the system
-       resolver expanded "" with the search domains and returned an address.
+       (both polyfills existed but weren't registered), the same `ClientRequest`
+       / `IncomingMessage` as `node:http`.
+     - `dns.resolve("")` and every `resolve*("")` fail with `ENODATA`, as c-ares
+       answers an empty name (upstream denoland/deno#36535); the system resolver
+       expanded "" with the search domains and returned an address.
      - Tests: unit `http2_test.ts` (the 63 names and values), `sqlite_test.ts`
        (`enableLoadExtension` validation, the creation rule, off and back on),
        `v8_test.ts`, `module_test.ts` (`builtinModules`, `isBuiltin`, same
-       classes as `node:http`), `dns_test.ts` (A, AAAA, MX, TXT and the
-       promise API, no lookup made).
+       classes as `node:http`), `dns_test.ts` (A, AAAA, MX, TXT and the promise
+       API, no lookup made).
 
 295. **`feat(ext/node)`: the `process` long tail: `execve`, `setgroups` /
      `initgroups`, `finalization`, `performance.nodeTiming`, `process.versions`
      and an inspectable `process.env`** (`ext/node/ops/process.rs`,
      `ext/node/ops/perf_hooks.rs`, `ext/node/polyfills/process.ts`,
-     `ext/node/polyfills/_process/process.ts`, `ext/node/polyfills/perf_hooks.js`,
-     `ext/node/polyfills/internal/child_process.ts`, `libs/core/runtime/setup.rs`).
+     `ext/node/polyfills/_process/process.ts`,
+     `ext/node/polyfills/perf_hooks.js`,
+     `ext/node/polyfills/internal/child_process.ts`,
+     `libs/core/runtime/setup.rs`).
      - `process.execve(file[, args[, env]])` replaces the process with execve(2)
        on Unix. The program is resolved and checked exactly as `Deno.Command`
        checks it (`deno_process::prepare_run`: `--allow-run` and its allow-list,
@@ -11956,8 +11974,8 @@ and `parallel/test-heapsnapshot-near-heap-limit-worker` are the targets.
        `ERR_WORKER_UNSUPPORTED_OPERATION`. `exit` listeners don't run.
      - `process.setgroups(groups)` / `process.initgroups(user, extraGroup)`
        (Unix but Android): ids or names, names resolved first
-       (`ERR_UNKNOWN_CREDENTIAL`), behind the whole `--allow-sys` (no scoped
-       sys kind names these calls).
+       (`ERR_UNKNOWN_CREDENTIAL`), behind the whole `--allow-sys` (no scoped sys
+       kind names these calls).
      - `process.finalization.register` / `registerBeforeExit` / `unregister`, as
        Node's `lib/internal/process/finalization.js`: the callback gets
        `(obj, event)` on `exit` / `beforeExit` for objects still alive, without
@@ -11973,10 +11991,10 @@ and `parallel/test-heapsnapshot-near-heap-limit-worker` are the targets.
        process, `nodeStart` and `v8Start` are negative. `idleTime` is 0 (not
        measured) and there is no `uvMetricsInfo`.
      - `process.versions` gains Node's keys `acorn`, `ada`, `amaro`, `merve`,
-       `nbytes`, `ncrypto`, `simdjson`, `simdutf`, `undici`, `uvwasi` and `zstd`.
-       What Deno bundles reports its real version (`sqlite` 3.53.2, the bundled
-       libsqlite3-sys build, was 3.53.1; `zstd` 1.5.7; `simdutf` 7.7.0, V8's);
-       the rest carry Node 26.5.1's, as `uv` and `ares` already did.
+       `nbytes`, `ncrypto`, `simdjson`, `simdutf`, `undici`, `uvwasi` and
+       `zstd`. What Deno bundles reports its real version (`sqlite` 3.53.2, the
+       bundled libsqlite3-sys build, was 3.53.1; `zstd` 1.5.7; `simdutf` 7.7.0,
+       V8's); the rest carry Node 26.5.1's, as `uv` and `ares` already did.
      - `util.inspect(process.env)` and `console.log(process.env)` show the
        variables (upstream denoland/deno#35449): inspecting a Proxy formats its
        target, so they printed `{}`. A private inspect hook on the target prints
@@ -11995,20 +12013,22 @@ and `parallel/test-heapsnapshot-near-heap-limit-worker` are the targets.
      `libs/node_shim/main.rs`, `cli/node_compat_shim.rs`,
      `ext/node/polyfills/sea.js`, `ext/node/ops/sea.rs`, `ext/fs/interface.rs`,
      `cli/rt/file_system.rs`, `ext/node/lib.rs`,
-     `ext/node/polyfills/01_require.js`, `libs/node_resolver/builtin_modules.rs`).
+     `ext/node/polyfills/01_require.js`,
+     `libs/node_resolver/builtin_modules.rs`).
      - `node --experimental-sea-config`, `--build-sea`, `--build-snapshot`,
        `--build-snapshot-config` and `--snapshot-blob` are refused: the message
-       names the flag and points at `deno compile` (or `denext build
-       --compile`), and the `node` shim and a `child_process` spawn of Deno exit
-       9, Node's status for refused arguments. Before, the SEA config flag
-       started the REPL, `--build-sea` was handed to V8, and the snapshot flags
-       ran the script. A `deno task` falls back to a real `node`, as for any
-       flag the shim can't parse.
+       names the flag and points at `deno compile` (or
+       `denext build
+       --compile`), and the `node` shim and a
+       `child_process` spawn of Deno exit 9, Node's status for refused
+       arguments. Before, the SEA config flag started the REPL, `--build-sea`
+       was handed to V8, and the snapshot flags ran the script. A `deno task`
+       falls back to a real `node`, as for any flag the shim can't parse.
      - `node:sea` (only with the `node:` scheme, as in Node): `isSea()` is true
        in a `deno compile` program; `getAsset(key[, encoding])`,
        `getRawAsset(key)` and `getAssetAsBlob(key[, options])` read the files it
-       carries, a key being a path relative to the main module's directory or
-       an absolute path in the program. They are read through the new
+       carries, a key being a path relative to the main module's directory or an
+       absolute path in the program. They are read through the new
        `FileSystem::read_embedded_file` (`None` outside the embedded files, so
        nothing on disk is ever read, and no permission applies: they are the
        program's own); a missing asset is
@@ -12028,8 +12048,8 @@ The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
 169-174, 176, 178, 180, 182-184, 186, 187, 189-191, 193-196, 198-203, 206, 207,
 209-215, 217, 218, 221, 222, 224, 225, 227, 228, 231, 232, 235, 237, 240,
-243-245, 247-249, 253, 254, 256-260, 262-264, 267-284, 286, 287, 289-296) are what the
-prebuilt `libdenort` carries. The CLI-side parts (for example writing
+243-245, 247-249, 253, 254, 256-260, 262-264, 267-284, 286, 287, 289-296) are
+what the prebuilt `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
 in the branch too, but a stock CLI does not run them; denext's own launcher
 provides that environment.

@@ -4,11 +4,6 @@ mod cpuprof;
 mod flamegraph;
 mod heapprof;
 
-pub use heapprof::DEFAULT_HEAP_PROF_INTERVAL;
-pub use heapprof::HeapProfiler;
-pub use heapprof::HeapProfilerConfig;
-pub use heapprof::heap_prof_filename;
-
 use std::cell::RefCell;
 use std::fs;
 use std::path::PathBuf;
@@ -16,6 +11,11 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::AtomicI32;
 use std::time::SystemTime;
+
+pub use heapprof::DEFAULT_HEAP_PROF_INTERVAL;
+pub use heapprof::HeapProfiler;
+pub use heapprof::HeapProfilerConfig;
+pub use heapprof::heap_prof_filename;
 
 /// Configuration for CPU profiling that can be passed to workers.
 #[derive(Clone, Debug)]
