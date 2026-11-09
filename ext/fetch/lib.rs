@@ -29,6 +29,7 @@ use std::task::Poll;
 
 use async_compression::tokio::bufread::BrotliDecoder;
 use async_compression::tokio::bufread::GzipDecoder;
+use async_compression::tokio::bufread::ZlibDecoder;
 use bytes::Bytes;
 use cookies::CookieError;
 // Re-export data_url
@@ -1656,6 +1657,7 @@ fn decompress_response(
   {
     Some(DecodeKind::Gzip) => decode_response(resp, DecodeKind::Gzip),
     Some(DecodeKind::Brotli) => decode_response(resp, DecodeKind::Brotli),
+    Some(DecodeKind::Deflate) => decode_response(resp, DecodeKind::Deflate),
     _ => resp.map(box_raw_body),
   }
 }
@@ -1669,6 +1671,10 @@ fn content_encoding_decode_kind(encoding: &HeaderValue) -> Option<DecodeKind> {
     Some(DecodeKind::Gzip)
   } else if encoding.eq_ignore_ascii_case("br") {
     Some(DecodeKind::Brotli)
+  } else if encoding.eq_ignore_ascii_case("deflate") {
+    // HTTP's "deflate" is the zlib format (RFC 9110 section 8.4.1.2). A fetch
+    // routed by Node's proxy configuration asks for it, as Node's does.
+    Some(DecodeKind::Deflate)
   } else {
     None
   }
@@ -1677,6 +1683,7 @@ fn content_encoding_decode_kind(encoding: &HeaderValue) -> Option<DecodeKind> {
 enum DecodeKind {
   Gzip,
   Brotli,
+  Deflate,
 }
 
 /// Marker inserted into the response extensions when the body was
@@ -1704,6 +1711,7 @@ fn decode_response(
   let body = match kind {
     DecodeKind::Gzip => box_reader_body(GzipDecoder::new(reader)),
     DecodeKind::Brotli => box_reader_body(BrotliDecoder::new(reader)),
+    DecodeKind::Deflate => box_reader_body(ZlibDecoder::new(reader)),
   };
 
   http::Response::from_parts(parts, body)

@@ -3582,6 +3582,7 @@ pub fn translate_to_deno_args(
   let env_opts = &opts.per_isolate.per_env;
 
   add_tls_node_options(node_options, env_opts);
+  add_http_node_options(node_options, env_opts);
 
   // Forward --trace-event-categories regardless of subcommand path. Set here
   // so it survives early-returning translations (`-e`, `--test`, REPL, etc.).
@@ -4050,6 +4051,23 @@ fn test_cli_source(
   format!(
     "import t from\"node:test\";await t[Symbol.for(\"denext.nodeTestCli\")]({config});"
   )
+}
+
+/// `--insecure-http-parser` and `--max-http-header-size` ride along in
+/// NODE_OPTIONS, where node:http reads them.
+fn add_http_node_options(
+  node_options: &mut Vec<String>,
+  env_opts: &EnvironmentOptions,
+) {
+  if env_opts.insecure_http_parser {
+    node_options.push("--insecure-http-parser".to_string());
+  }
+  if env_opts.max_http_header_size != 16 * 1024 {
+    node_options.push(format!(
+      "--max-http-header-size={}",
+      env_opts.max_http_header_size
+    ));
+  }
 }
 
 fn add_tls_node_options(
@@ -5996,6 +6014,37 @@ mod tests {
       assert_eq!(result.node_options, svec!["--trace-sigint"]);
     }
     let parsed_args = parse_args(svec!["main.js"]).unwrap();
+    let options = TranslateOptions::for_child_process();
+    let result = translate_to_deno_args(parsed_args, &options);
+    assert!(result.node_options.is_empty());
+  }
+
+  #[test]
+  fn http_parser_flags_ride_along_in_node_options() {
+    for args in [
+      svec![
+        "--insecure-http-parser",
+        "--max-http-header-size=10",
+        "main.js"
+      ],
+      svec![
+        "--insecure-http-parser",
+        "--max-http-header-size=10",
+        "-p",
+        "1"
+      ],
+    ] {
+      let parsed_args = parse_args(args).unwrap();
+      let options = TranslateOptions::for_child_process();
+      let result = translate_to_deno_args(parsed_args, &options);
+      assert_eq!(
+        result.node_options,
+        svec!["--insecure-http-parser", "--max-http-header-size=10"]
+      );
+    }
+    // The default header size is left out.
+    let parsed_args =
+      parse_args(svec!["--max-http-header-size=16384", "main.js"]).unwrap();
     let options = TranslateOptions::for_child_process();
     let result = translate_to_deno_args(parsed_args, &options);
     assert!(result.node_options.is_empty());

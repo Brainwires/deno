@@ -2717,6 +2717,35 @@ Deno.test(
   },
 );
 
+// HTTP's `deflate` coding is the zlib format (RFC 9110 section 8.4.1.2);
+// fetch decodes it like gzip and br.
+Deno.test(
+  { permissions: { net: true } },
+  async function fetchDecodesDeflateResponse() {
+    const compressed = await new Response(
+      new Blob(["hello deflate"]).stream().pipeThrough(
+        new CompressionStream("deflate"),
+      ),
+    ).bytes();
+    const ac = new AbortController();
+    const server = Deno.serve(
+      { port: listenPort, signal: ac.signal, onListen() {} },
+      () =>
+        new Response(compressed, {
+          headers: { "content-encoding": "deflate" },
+        }),
+    );
+    try {
+      const resp = await fetch(`http://localhost:${listenPort}/`);
+      assertEquals(resp.headers.get("content-encoding"), "deflate");
+      assertEquals(await resp.text(), "hello deflate");
+    } finally {
+      ac.abort();
+      await server.finished;
+    }
+  },
+);
+
 // The flip side of the regression test above: when a fetch response with a
 // transparently decompressed body is re-serialized by an HTTP server
 // (`return fetch(...)` proxying), the retained `content-encoding` and

@@ -79,6 +79,10 @@ struct Inner {
   max_header_size: u32,
   header_nread: u32,
   header_overflow: bool,
+  /// Header fields plus values seen in the current header block of a
+  /// request, checked against the JS parser's `maxHeaderPairs` (Node's
+  /// TrackHeaderPair()).
+  header_pairs: u32,
   initialized: bool,
 
   /// Bytes consumed up to (but not including) the parse error position
@@ -147,6 +151,7 @@ impl HTTPParser {
         max_header_size: 0,
         header_nread: 0,
         header_overflow: false,
+        header_pairs: 0,
         initialized: false,
         last_bytes_parsed: 0,
         last_errno: 0,
@@ -237,6 +242,7 @@ impl Inner {
     self.last_bytes_parsed = 0;
     self.last_errno = sys::HPE_OK;
     self.header_overflow = false;
+    self.header_pairs = 0;
     self.initialized = true;
   }
 
@@ -294,6 +300,31 @@ unsafe fn get_ctx<'a>(parser: *mut sys::llhttp_t) -> &'a mut ExecuteContext {
   unsafe { &mut *((*parser).data as *mut ExecuteContext) }
 }
 
+/// Count a new header pair of a request and check it against the JS
+/// parser's `maxHeaderPairs` (`server.maxHeadersCount * 2`), as Node's
+/// TrackHeaderPair() does: past it the request fails with
+/// HPE_HEADER_OVERFLOW. A missing or non-positive limit means none.
+fn check_header_pairs(ctx: &mut ExecuteContext, inner: &mut Inner) -> c_int {
+  if inner.parser.type_ as sys::llhttp_type_t != sys::HTTP_REQUEST {
+    return 0;
+  }
+  inner.header_pairs += 2;
+  let (scope, cb_obj) = unsafe { ctx.scope_and_callbacks() };
+  let key = v8::String::new(scope, "maxHeaderPairs").unwrap();
+  let Some(limit) = cb_obj.get(scope, key.into()) else {
+    return 0;
+  };
+  let Some(limit) = limit.number_value(scope).filter(|_| limit.is_number())
+  else {
+    return 0;
+  };
+  if limit > 0.0 && f64::from(inner.header_pairs) > limit {
+    inner.header_overflow = true;
+    return -1;
+  }
+  0
+}
+
 /// Check if header size exceeds the configured maximum.
 /// Returns -1 (HPE_USER) if overflow, 0 if ok.
 /// Matches Node.js's TrackHeader() behavior in node_http_parser.cc.
@@ -320,6 +351,7 @@ unsafe extern "C" fn on_message_begin(parser: *mut sys::llhttp_t) -> c_int {
   inner.headers_flushed = false;
   inner.header_nread = 0;
   inner.header_overflow = false;
+  inner.header_pairs = 0;
 
   let (scope, cb_obj) = unsafe { ctx.scope_and_callbacks() };
   let cb = cb_obj.get_index(scope, K_ON_MESSAGE_BEGIN);
@@ -379,9 +411,21 @@ unsafe extern "C" fn on_header_field(
   if inner.in_header_value {
     inner.in_header_value = false;
   }
-  inner.current_header_field.extend_from_slice(data);
   inner.header_nread += length as u32;
-  check_header_overflow(inner)
+  let rv = check_header_overflow(inner);
+  if rv != 0 {
+    return rv;
+  }
+  // llhttp may hand a field name over in pieces; only its first piece
+  // starts a new pair.
+  if inner.current_header_field.is_empty() {
+    let rv = check_header_pairs(ctx, inner);
+    if rv != 0 {
+      return rv;
+    }
+  }
+  inner.current_header_field.extend_from_slice(data);
+  0
 }
 
 unsafe extern "C" fn on_header_value(
@@ -447,6 +491,8 @@ unsafe extern "C" fn on_headers_complete(parser: *mut sys::llhttp_t) -> c_int {
   let ctx = unsafe { get_ctx(parser) };
   let inner_ptr = ctx.inner;
   let inner = unsafe { &mut *inner_ptr };
+  // Trailers are a new header block, counted afresh as in Node.
+  inner.header_pairs = 0;
   let (scope, cb_obj) = unsafe { ctx.scope_and_callbacks() };
 
   let Some(cb) = cb_obj.get_index(scope, K_ON_HEADERS_COMPLETE) else {
