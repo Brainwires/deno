@@ -9,6 +9,7 @@ const {
   ArrayBufferPrototype,
   ArrayIsArray,
   ArrayPrototypeFilter,
+  ArrayPrototypeIncludes,
   ArrayPrototypeJoin,
   ArrayPrototypeMap,
   ArrayPrototypePush,
@@ -29,11 +30,13 @@ const {
   SafeRegExp,
   SafeSet,
   SafeWeakSet,
+  SetPrototypeAdd,
   SetPrototypeHas,
   String,
   StringPrototypeCharCodeAt,
   StringPrototypeIncludes,
   StringPrototypeReplace,
+  StringPrototypeSlice,
   StringPrototypeSplit,
   StringPrototypeStartsWith,
   TypedArrayPrototypeGetBuffer,
@@ -118,6 +121,186 @@ function validateCipherList(ciphers: string): void {
     err.code = "ERR_SSL_NO_CIPHER_MATCH";
     throw err;
   }
+}
+
+// The suites rustls offers, in its preference order, with the OpenSSL
+// names Node uses and the cipher-string keywords that select each one.
+// TLS 1.3 suites are configured by name only (Node routes `TLS_*` entries
+// to SSL_CTX_set_ciphersuites); TLS 1.2 suites follow OpenSSL's cipher
+// string rules over these keywords.
+const TLS13_SUITES: [string, string][] = [
+  ["TLS_AES_256_GCM_SHA384", "TLS13_AES_256_GCM_SHA384"],
+  ["TLS_AES_128_GCM_SHA256", "TLS13_AES_128_GCM_SHA256"],
+  ["TLS_CHACHA20_POLY1305_SHA256", "TLS13_CHACHA20_POLY1305_SHA256"],
+];
+const TLS12_COMMON = ["ALL", "DEFAULT", "HIGH", "TLSv1.2", "ECDHE", "EECDH"];
+const TLS12_SUITES: [string, string, string[]][] = [
+  [
+    "ECDHE-ECDSA-AES256-GCM-SHA384",
+    "TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384",
+    [
+      "kECDHE",
+      "kEECDH",
+      "aECDSA",
+      "ECDSA",
+      "AES",
+      "AES256",
+      "AESGCM",
+      "SHA384",
+    ],
+  ],
+  [
+    "ECDHE-ECDSA-AES128-GCM-SHA256",
+    "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256",
+    [
+      "kECDHE",
+      "kEECDH",
+      "aECDSA",
+      "ECDSA",
+      "AES",
+      "AES128",
+      "AESGCM",
+      "SHA256",
+    ],
+  ],
+  [
+    "ECDHE-ECDSA-CHACHA20-POLY1305",
+    "TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256",
+    ["kECDHE", "kEECDH", "aECDSA", "ECDSA", "CHACHA20"],
+  ],
+  [
+    "ECDHE-RSA-AES256-GCM-SHA384",
+    "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384",
+    ["kECDHE", "kEECDH", "aRSA", "AES", "AES256", "AESGCM", "SHA384"],
+  ],
+  [
+    "ECDHE-RSA-AES128-GCM-SHA256",
+    "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256",
+    ["kECDHE", "kEECDH", "aRSA", "AES", "AES128", "AESGCM", "SHA256"],
+  ],
+  [
+    "ECDHE-RSA-CHACHA20-POLY1305",
+    "TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256",
+    ["kECDHE", "kEECDH", "aRSA", "CHACHA20"],
+  ],
+];
+
+function tls12SuiteMatches(index: number, term: string): boolean {
+  const { 0: name, 2: tags } = TLS12_SUITES[index];
+  if (term === name) return true;
+  for (const tag of new SafeArrayIterator(TLS12_COMMON)) {
+    if (term === tag) return true;
+  }
+  for (const tag of new SafeArrayIterator(tags)) {
+    if (term === tag) return true;
+  }
+  return false;
+}
+
+// Evaluate an OpenSSL cipher string (`A:B+C:!D:-E:+F:@STRENGTH`) against
+// the TLS 1.2 suites rustls offers. Returns indices into TLS12_SUITES.
+function selectTls12Suites(cipherList: string[]): number[] {
+  let selected: number[] = [];
+  const banned = new SafeSet<number>();
+  for (const entry of new SafeArrayIterator(cipherList)) {
+    if (entry === "" || StringPrototypeStartsWith(entry, "@")) continue;
+    const op = entry[0] === "!" || entry[0] === "-" || entry[0] === "+"
+      ? entry[0]
+      : "";
+    const terms = StringPrototypeSplit(
+      op === "" ? entry : StringPrototypeSlice(entry, 1),
+      "+",
+    );
+    const matching: number[] = [];
+    for (let i = 0; i < TLS12_SUITES.length; i++) {
+      let all = true;
+      for (const term of new SafeArrayIterator(terms)) {
+        if (!tls12SuiteMatches(i, term)) {
+          all = false;
+          break;
+        }
+      }
+      if (all) ArrayPrototypePush(matching, i);
+    }
+    if (op === "") {
+      for (const i of new SafeArrayIterator(matching)) {
+        if (
+          !SetPrototypeHas(banned, i) && !ArrayPrototypeIncludes(selected, i)
+        ) {
+          ArrayPrototypePush(selected, i);
+        }
+      }
+    } else if (op === "+") {
+      const moved = ArrayPrototypeFilter(
+        selected,
+        (i: number) => ArrayPrototypeIncludes(matching, i),
+      );
+      selected = ArrayPrototypeFilter(
+        selected,
+        (i: number) => !ArrayPrototypeIncludes(matching, i),
+      );
+      ArrayPrototypePush(selected, ...new SafeArrayIterator(moved));
+    } else {
+      selected = ArrayPrototypeFilter(
+        selected,
+        (i: number) => !ArrayPrototypeIncludes(matching, i),
+      );
+      if (op === "!") {
+        for (const i of new SafeArrayIterator(matching)) {
+          SetPrototypeAdd(banned, i);
+        }
+      }
+    }
+  }
+  return selected;
+}
+
+// Map a `ciphers` option onto the rustls suites to enable, as rustls suite
+// names, or `undefined` for rustls's defaults. Like Node, `TLS_*` entries
+// pick the TLS 1.3 suites (the defaults stay when none is given) and the
+// rest is an OpenSSL cipher string for TLS 1.2. Names rustls does not
+// implement (CBC, RSA key exchange, DHE, CCM, ...) select nothing; when the
+// TLS 1.2 part selects nothing rustls offers, the TLS 1.2 defaults stay
+// enabled, so a legacy cipher string keeps connecting instead of failing
+// every handshake.
+function resolveCipherSuites(
+  ciphers: string | undefined | null,
+): string[] | undefined {
+  if (ciphers == null || ciphers === "") return undefined;
+  const entries = ArrayPrototypeFilter(
+    StringPrototypeSplit(ciphers, new SafeRegExp("[:, ]")),
+    (e: string) => e !== "",
+  );
+  const tls13: string[] = [];
+  const cipherList: string[] = [];
+  for (const entry of new SafeArrayIterator(entries)) {
+    if (StringPrototypeStartsWith(entry, "TLS_")) {
+      for (
+        const { 0: name, 1: rustlsName } of new SafeArrayIterator(TLS13_SUITES)
+      ) {
+        if (entry === name && !ArrayPrototypeIncludes(tls13, rustlsName)) {
+          ArrayPrototypePush(tls13, rustlsName);
+        }
+      }
+    } else {
+      ArrayPrototypePush(cipherList, entry);
+    }
+  }
+  const out: string[] = tls13.length > 0
+    ? tls13
+    : ArrayPrototypeMap(TLS13_SUITES, (s: [string, string]) => s[1]);
+  if (cipherList.length > 0) {
+    let selected = selectTls12Suites(cipherList);
+    if (selected.length === 0) {
+      selected = ArrayPrototypeMap(TLS12_SUITES, (_s: unknown, i: number) => i);
+    }
+    for (const i of new SafeArrayIterator(selected)) {
+      ArrayPrototypePush(out, TLS12_SUITES[i][1]);
+    }
+  } else if (tls13.length === 0) {
+    return undefined;
+  }
+  return out;
 }
 
 // Mirrors OpenSSL's SECLEVEL bit-strength requirements (see
@@ -499,6 +682,7 @@ class SecureContext {
     minVersion: string;
     maxVersion: string;
     ciphers?: string;
+    cipherSuites?: string[];
     passphrase?: string;
     sigalgs?: string;
     ecdhCurve?: string;
@@ -625,6 +809,7 @@ class SecureContext {
       minVersion,
       maxVersion,
       ciphers: options.ciphers,
+      cipherSuites: resolveCipherSuites(options.ciphers),
       passphrase: options.passphrase,
       sigalgs: options.sigalgs,
       ecdhCurve: options.ecdhCurve,

@@ -28,6 +28,7 @@ pub mod stream_wrap;
 pub(crate) mod stream_wrap_state;
 pub mod tcp_wrap;
 pub mod tls;
+pub mod tls_session;
 pub mod tls_wrap;
 pub mod tty_wrap;
 pub mod udp;

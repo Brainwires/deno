@@ -11727,6 +11727,52 @@ NNN. **`feat(node)`: `net.Socket({ fd })`, `server.listen({ fd })` and
        `node/pipe_open_fd` specs (isolate ownership, duplicate regular-file fd)
        are unchanged.
 
+NNN. **`feat(node:tls)`: real TLS session resumption, session tickets and
+`ciphers` over rustls** (`ext/node/ops/tls_session.rs`,
+`ext/node/ops/tls_wrap.rs`, `ext/node/polyfills/_tls_wrap.js`,
+`ext/node/polyfills/_tls_common.ts`). `node:tls` sessions were synthetic: the
+client emitted made-up `'session'` buffers naming `host:port`, every buffer for
+a server was the same, a resumed TLS 1.3 connection emitted none,
+`getTLSTicket()` did not exist and `ticketKeys` / `setTicketKeys()` were stored
+but never used. rustls has no public session serialization (and its session
+values are bound to the verifier that accepted them), so each session rustls
+stores now goes into a per-isolate registry under a random 128-bit id, and the
+buffer handed to JS (`deno-tls-session:<hex>`) names it. `'session'` fires for
+every session rustls stores (each TLS 1.3 NewSessionTicket, including on a
+resumed connection as BoringSSL does; a full TLS 1.2 handshake), `getSession()`
+returns the newest, `setSession()` / `options.session` offer exactly that
+session and only to a connection with the server name it was issued for, and
+`getTLSTicket()` reports the ticket (the offered one on a resumed TLS 1.2
+connection, as OpenSSL does). TLS 1.3 tickets are single-use in rustls, so the
+tickets of one lineage share a pool and every resumed connection refills it; a
+buffer resumes only in the process that received it. Contexts with an explicit
+`ca` (and no client cert) now cache their verifier by the CA set, so they resume
+too. Servers issue tickets under their 48-byte `ticketKeys` (random per server
+when not given, as in Node; `getTicketKeys()` used to return zeros): servers
+sharing keys accept each other's tickets and `setTicketKeys()` rotates them;
+`sessionTimeout` is the ticket lifetime. The `ciphers` option is now applied:
+`TLS_*` names pick the TLS 1.3 suites and the rest is evaluated as an OpenSSL
+cipher string (names, `ALL`/`DEFAULT`/`HIGH`, `ECDHE`, `aRSA`/`ECDSA`,
+`AES`/`AES128`/`AES256`/`AESGCM`/`CHACHA20`, `SHA256`/ `SHA384`, `!`/`-`/`+`,
+`A+B`) over the suites rustls offers; a list naming only TLS 1.3 suites makes
+the context TLS 1.3 only. A TLS 1.2 list that selects nothing rustls implements
+(CBC, RSA key exchange, DHE, CCM) keeps the TLS 1.2 defaults rather than failing
+every handshake, and unknown names still raise `ERR_SSL_NO_CIPHER_MATCH` as
+before. Not supported: TLS 1.3 external PSK (`pskCallback`; rustls has none),
+the server `newSession` / `resumeSession` session-id cache events, and the
+private `enableTicketKeyCallback()` hook. - Tests: `ext/node` unit tests
+`tls_session::tests` (buffer encoding, ticket extraction, ticketer key
+separation and tamper checks, the server-name gate); unit_node
+`tls 1.3 sessions are real, unique and
+       resumable`,
+`tls 1.2 session resumes and reports the offered ticket`,
+`tls server ticketKeys are shared and rotated`,
+`tls session resumes
+       with an explicit ca`,
+`tls ciphers option selects rustls suites`; node_compat `test-tls-ticket`,
+`test-tls-ticket-12`, `test-tls-ticket-cluster`,
+`test-https-agent-session-reuse`, `test-https-agent-disable-session-reuse`.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,

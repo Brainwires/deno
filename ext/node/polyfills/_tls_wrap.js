@@ -111,7 +111,7 @@ const {
 const { isArrayBufferView, isTypedArray } = core.loadExtScript(
   "ext:deno_node/internal/util/types.ts",
 );
-const { op_tls_canonicalize_ipv4_address } = core.ops;
+const { op_node_fill_random, op_tls_canonicalize_ipv4_address } = core.ops;
 const { default: tlsWrap } = core.loadExtScript(
   "ext:deno_node/internal_binding/tls_wrap.ts",
 );
@@ -167,14 +167,32 @@ function getDefaultProtocolVersions() {
 }
 
 function emitPendingSession(socket) {
-  const session = socket[kPendingSession];
+  const sessions = socket[kPendingSession];
   socket[kPendingSession] = null;
-  if (ArrayIsArray(session)) {
-    for (let i = 0; i < session.length; i++) {
-      socket.emit("session", session[i]);
+  if (sessions) {
+    for (let i = 0; i < sessions.length; i++) {
+      socket.emit("session", sessions[i]);
     }
-  } else if (session) {
-    socket.emit("session", session);
+  }
+}
+
+// A new client session arrived (a TLS 1.2 handshake, or a TLS 1.3
+// NewSessionTicket). Like Node, hold it until the server's identity was
+// checked in onConnectSecure.
+function onnewsessionclient(session) {
+  const owner = this._owner;
+  if (!owner) return;
+  const buf = Buffer.from(
+    getViewBuffer(session),
+    getViewByteOffset(session),
+    getViewByteLength(session),
+  );
+  owner._session = buf;
+  if (owner[kIsVerified]) {
+    owner.emit("session", buf);
+  } else {
+    if (!owner[kPendingSession]) owner[kPendingSession] = [];
+    ArrayPrototypePush(owner[kPendingSession], buf);
   }
 }
 
@@ -393,7 +411,6 @@ function TLSSocket(socket, opts) {
   this[kIsVerified] = false;
   this[kPendingSession] = null;
   this._session = null;
-  this._sessionReused = false;
 
   let wrap;
   let handle;
@@ -482,6 +499,7 @@ TLSSocket.prototype[kReinitializeHandle] = function (handle) {
   const savedOnhandshakedone = oldHandle?.onhandshakedone;
   const savedOnhandshakestart = oldHandle?.onhandshakestart;
   const savedOnerror = oldHandle?.onerror;
+  const savedOnnewsession = oldHandle?.onnewsession;
 
   if (oldHandle) {
     oldHandle.close();
@@ -506,6 +524,7 @@ TLSSocket.prototype[kReinitializeHandle] = function (handle) {
     this._handle.onhandshakestart = savedOnhandshakestart;
   }
   if (savedOnerror) this._handle.onerror = savedOnerror;
+  if (savedOnnewsession) this._handle.onnewsession = savedOnnewsession;
 
   // Re-apply verify mode and ALPN from TLS options.
   const options = this._tlsOptions;
@@ -517,11 +536,9 @@ TLSSocket.prototype[kReinitializeHandle] = function (handle) {
   if (options.ALPNProtocols) {
     this._handle.setAlpnProtocols(options.ALPNProtocols);
   }
-  // Only re-enable resumption when the session already passed
-  // setSession()'s host:port validation; an invalid buffer must not
-  // enable resumption on the new handle.
-  if (this._session && this._sessionReused) {
-    this._handle.setSessionAllowed(true);
+  // Offer the session given to setSession() on the new handle too.
+  if (this._session) {
+    this._handle.setSession(this._session);
   }
   if (this._maxSendFragment !== undefined) {
     this._handle.setMaxSendFragment(this._maxSendFragment);
@@ -859,16 +876,15 @@ TLSSocket.prototype._init = function (socket, wrap) {
   } else {
     ssl.onhandshakestart = noop;
     ssl.onhandshakedone = onhandshakedone;
+    ssl.onnewsession = onnewsessionclient;
 
-    // Unlike Node, options.session is not applied here: it can't be
-    // validated against the destination yet, because kConnectOptions
-    // isn't set until after construction. tls.connect() applies it via
-    // setSession(), which validates against the connect options.
-    // Consequence: a directly constructed
-    // `new TLSSocket(socket, { session })` never resumes -- with no
-    // kConnectOptions, syntheticSessionMatches() can't validate the
-    // buffer. Acceptable under the synthetic-session design, since such
-    // a buffer can't be matched to a destination in the shared cache.
+    if (options.session) {
+      const session = typeof options.session === "string"
+        ? Buffer.from(options.session, "latin1")
+        : Buffer.from(options.session);
+      this._session = session;
+      ssl.setSession(session);
+    }
   }
 
   if (options.ALPNProtocols) {
@@ -1084,49 +1100,29 @@ TLSSocket.prototype.setServername = function (name) {
   this._handle?.setServername(name);
 };
 
-// Format prefixes for the synthetic session buffers we emit from
-// onConnectSecure when rustls handles resumption internally. The encoded
-// payload is `${servername ?? host ?? ""}:${port ?? ""}` -- see the
-// matching emit sites in onConnectSecure.
-const SYNTHETIC_SESSION_PREFIXES = [
-  "deno-tls12-session:",
-  "deno-tls13-session-ticket-1:",
-  "deno-tls13-session-ticket-2:",
-  "deno-tls13-dummy-session:",
-];
+TLSSocket.prototype.setSession = function (session) {
+  if (typeof session === "string") {
+    session = Buffer.from(session, "latin1");
+  }
+  this._session = session ? Buffer.from(session) : null;
+  // The buffer names a session the native layer keeps (see
+  // ext/node/ops/tls_session.rs). The native layer offers it only to a
+  // connection whose server name matches the one it was issued for, and
+  // onConnectSecure still runs checkServerIdentity() on a resumed session.
+  if (this._handle?.setSession) {
+    this._handle.setSession(this._session ?? Buffer.alloc(0));
+  }
+};
 
-function syntheticSessionMatches(buf, options) {
-  if (!buf || !options) return false;
-  const sessionKey = `${options.servername ?? options.host ?? ""}:${
-    options.port ?? ""
-  }`;
-  // deno-lint-ignore deno-internal/prefer-primordials -- Buffer.prototype.toString(encoding)
-  const text = buf.toString("latin1");
-  for (const prefix of new SafeArrayIterator(SYNTHETIC_SESSION_PREFIXES)) {
-    if (text === prefix + sessionKey) return true;
-  }
-  return false;
-}
-
-TLSSocket.prototype.setSession = function (_session) {
-  if (typeof _session === "string") {
-    _session = Buffer.from(_session, "latin1");
-  }
-  this._session = _session ? Buffer.from(_session) : null;
-  // rustls drives session resumption itself; the buffer we hand back from
-  // getSession() is synthetic and encodes the host:port it was issued for.
-  // Only treat the next handshake as a resume when the caller is replaying
-  // a buffer that matches *this* connection's host:port -- otherwise
-  // accepting any deno-tls*-session prefix would let an attacker skip
-  // checkServerIdentity() in onConnectSecure by forging a session for a
-  // different name.
-  this._sessionReused = syntheticSessionMatches(
-    this._session,
-    this[kConnectOptions],
-  );
-  if (this._handle) {
-    this._handle.setSessionAllowed(this._sessionReused);
-  }
+TLSSocket.prototype.getTLSTicket = function getTLSTicket() {
+  const ticket = this._handle?.getTLSTicket?.();
+  return ticket
+    ? Buffer.from(
+      getViewBuffer(ticket),
+      getViewByteOffset(ticket),
+      getViewByteLength(ticket),
+    )
+    : undefined;
 };
 
 TLSSocket.prototype.getPeerCertificate = function (detailed) {
@@ -1159,7 +1155,7 @@ TLSSocket.prototype.isSessionReused = function () {
   if (this._handle?.isSessionReused) {
     return this._handle.isSessionReused();
   }
-  return this._sessionReused;
+  return false;
 };
 
 // Proxy TLSSocket handle methods
@@ -1435,8 +1431,9 @@ function Server(options, listener) {
       );
     }
   }
+  // Like Node, a server without ticketKeys gets random per-server keys.
   this._ticketKeys = options.ticketKeys == null
-    ? Buffer.alloc(48)
+    ? randomTicketKeys()
     : Buffer.from(
       getViewBuffer(options.ticketKeys),
       getViewByteOffset(options.ticketKeys),
@@ -1518,7 +1515,34 @@ Server.prototype.setSecureContext = function (options) {
     sigalgs: options.sigalgs,
     ticketKeys: options.ticketKeys,
   });
+  applyServerSessionOptions(this, options);
 };
+
+function randomTicketKeys() {
+  const keys = Buffer.alloc(48);
+  op_node_fill_random(keys);
+  return keys;
+}
+
+// The native server config reads the ticket keys and session lifetime from
+// the context it is built from (ext/node/ops/tls_session.rs).
+function applyServerSessionOptions(server, options) {
+  const context = server._sharedCreds?.context;
+  if (!context) return;
+  if (options.ticketKeys != null || server._ticketKeys === undefined) {
+    server._ticketKeys = options.ticketKeys == null
+      ? randomTicketKeys()
+      : Buffer.from(
+        getViewBuffer(options.ticketKeys),
+        getViewByteOffset(options.ticketKeys),
+        getViewByteLength(options.ticketKeys),
+      );
+  }
+  context.ticketKeys = server._ticketKeys;
+  if (options.sessionTimeout != null) {
+    context.sessionTimeout = options.sessionTimeout;
+  }
+}
 
 Server.prototype.addContext = function (servername, context) {
   if (!servername) {
@@ -1547,6 +1571,9 @@ Server.prototype.setTicketKeys = function setTicketKeys(keys) {
     getViewByteOffset(keys),
     getViewByteLength(keys),
   );
+  if (this._sharedCreds?.context) {
+    this._sharedCreds.context.ticketKeys = this._ticketKeys;
+  }
 };
 
 // ---------------------------------------------------------------------------
@@ -1609,31 +1636,11 @@ function onConnectSecure() {
     debug("client emit secureConnect. authorized:", this.authorized);
   }
 
-  if (!this._session && this.getProtocol() === "TLSv1.2") {
-    const sessionKey = `${options.servername ?? options.host ?? ""}:${
-      options.port ?? ""
-    }`;
-    this._session = Buffer.from(`deno-tls12-session:${sessionKey}`);
-    this[kPendingSession] = this._session;
-  } else if (!this._session && this.getProtocol() === "TLSv1.3") {
-    const sessionKey = `${options.servername ?? options.host ?? ""}:${
-      options.port ?? ""
-    }`;
-    this._session = Buffer.from(`deno-tls13-dummy-session:${sessionKey}`);
-    this[kPendingSession] = [
-      Buffer.from(`deno-tls13-session-ticket-1:${sessionKey}`),
-      Buffer.from(`deno-tls13-session-ticket-2:${sessionKey}`),
-    ];
-    this.prependOnceListener("close", () => emitPendingSession(this));
-  }
-
   this.secureConnecting = false;
   this.emit("secureConnect");
 
   this[kIsVerified] = true;
-  if (!ArrayIsArray(this[kPendingSession])) {
-    emitPendingSession(this);
-  }
+  emitPendingSession(this);
 
   this.removeListener("end", onConnectEnd);
 }
@@ -1719,8 +1726,8 @@ function connect(...args) {
 
   tlssock[kConnectOptions] = options;
 
-  // Apply the session before the connection can start so the resumption
-  // gate is set before rustls creates the ClientConnection in start().
+  // Apply the session before the connection can start so it is offered
+  // when rustls creates the ClientConnection in start().
   if (options.session) {
     tlssock.setSession(options.session);
   }

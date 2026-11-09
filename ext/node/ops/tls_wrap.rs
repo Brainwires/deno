@@ -31,7 +31,6 @@ use std::io::Write;
 use std::ptr::NonNull;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 
 use deno_core::CppgcInherits;
@@ -64,6 +63,8 @@ use crate::ops::stream_wrap::call_fatal_exception;
 use crate::ops::stream_wrap::free_uv_buf;
 use crate::ops::stream_wrap_state::ReadInterceptor;
 use crate::ops::tls::NodeTlsState;
+use crate::ops::tls_session::ClientSessionLink;
+use crate::ops::tls_session::NodeClientSessionStore;
 
 // ---------------------------------------------------------------------------
 // TLS connection wrapper — abstracts over client vs server
@@ -634,6 +635,44 @@ unsafe fn do_emit_client_hello(ctx: &EmitCtx) {
   }
 }
 
+/// Emit a new client session (onnewsession) to JS.
+///
+/// # Safety
+/// EmitCtx must contain valid pointers. No TLSWrapInner reference may be held by the caller.
+unsafe fn do_emit_new_session(ctx: &EmitCtx, session: &[u8]) {
+  unsafe {
+    let mut isolate = v8::Isolate::from_raw_isolate_ptr(ctx.isolate_ptr);
+
+    if ctx.loop_ptr.is_null() {
+      return;
+    }
+    let ctx_ptr = (*ctx.loop_ptr).data;
+    if ctx_ptr.is_null() {
+      return;
+    }
+    let context_global = clone_context_global(&mut isolate, ctx_ptr);
+
+    v8::scope!(let handle_scope, &mut isolate);
+    let context = v8::Local::new(handle_scope, context_global);
+    let scope = &mut v8::ContextScope::new(handle_scope, context);
+
+    let this = v8::Local::new(scope, &ctx.js_handle);
+    let key =
+      v8::String::new_external_onebyte_static(scope, b"onnewsession").unwrap();
+    if let Some(val) = this.get(scope, key.into())
+      && let Ok(func) = v8::Local::<v8::Function>::try_from(val)
+    {
+      let store = v8::ArrayBuffer::new_backing_store_from_vec(session.to_vec())
+        .make_shared();
+      let ab = v8::ArrayBuffer::with_backing_store(scope, &store);
+      let Some(view) = v8::Uint8Array::new(scope, ab, 0, session.len()) else {
+        return;
+      };
+      func.call(scope, this.into(), &[view.into()]);
+    }
+  }
+}
+
 /// Look up `req.oncomplete` and invoke it with `(status, handle, undefined)`,
 /// reporting any exception the callback throws as uncaught (matching Node's
 /// MakeCallback). Shared by the synchronous (`do_invoke_queued`) and deferred
@@ -1157,10 +1196,10 @@ struct TLSWrapInner {
   client_hello_servername: Option<String>,
   client_hello_alpn: Vec<Vec<u8>>,
 
-  /// Whether this connection was configured with an explicit session to resume.
-  /// Node.js client connections only attempt session resumption when
+  /// Client connections: which session to offer and which new sessions
+  /// arrived (see `tls_session`). Node.js clients only resume when
   /// `options.session` is passed (or `setSession()` is called).
-  allow_resumption: Arc<AtomicBool>,
+  session_link: Option<Arc<ClientSessionLink>>,
 
   /// User-supplied static read buffer (Node's `onread.buffer`).
   /// When set, decrypted data is copied into this buffer rather than
@@ -1317,7 +1356,7 @@ impl TLSWrapInner {
       accepted: None,
       client_hello_servername: None,
       client_hello_alpn: Vec::new(),
-      allow_resumption: Arc::new(AtomicBool::new(false)),
+      session_link: None,
       user_buffer: None,
       task_spawner,
     }
@@ -1757,6 +1796,27 @@ impl TLSWrapInner {
             WriteCompletion::Sync,
           );
           (*ptr).underlying.shutdown();
+        }
+      }
+
+      // Sessions rustls stored while processing this input become 'session'
+      // events. A resumed TLS 1.2 handshake keeps the offered session (as
+      // OpenSSL's client does), so the re-issued ticket is not reported.
+      if let Some(link) = (*ptr).session_link.clone() {
+        let resumed_tls12 = (*ptr).tls_conn.as_ref().is_some_and(|conn| {
+          matches!(conn.handshake_kind(), Some(rustls::HandshakeKind::Resumed))
+            && conn.protocol_version() == Some(rustls::ProtocolVersion::TLSv1_2)
+        });
+        for issued in link.take_issued() {
+          if issued.tls12 && resumed_tls12 {
+            continue;
+          }
+          if let Some(ctx) = extract_emit_ctx(ptr) {
+            do_emit_new_session(&ctx, &issued.buffer);
+          }
+          if !(*ptr).alive.get() {
+            return;
+          }
         }
       }
 
@@ -2297,12 +2357,19 @@ impl TLSWrap {
     };
 
     let inner = unsafe { &mut *self.inner.as_mut_ptr() };
-    let allow_resumption = inner.allow_resumption.clone();
+    let session_link = Arc::new(ClientSessionLink::new(
+      op_state
+        .try_borrow::<NodeTlsState>()
+        .map(|s| s.session_registry.clone())
+        .unwrap_or_default(),
+    ));
     let client_config =
-      match build_client_config(scope, context, op_state, allow_resumption) {
+      match build_client_config(scope, context, op_state, session_link.clone())
+      {
         Some((c, _)) => c,
         None => return -1,
       };
+    inner.session_link = Some(session_link);
     // The verifier in `client_config` writes errors via the per-connection
     // `CURRENT_VERIFY_ERROR` thread-local set by `cycle`, so `inner`'s own
     // pre-allocated `verify_error` slot stays correctly scoped per
@@ -3353,16 +3420,34 @@ impl TLSWrap {
     // No-op for rustls
   }
 
-  /// Allow or disallow offering cached sessions for resumption on this
-  /// connection. In Node.js, client connections only attempt session
-  /// resumption when `options.session` is provided (or `setSession()` is
-  /// called); the JS layer validates the session buffer against the
-  /// destination and toggles this flag on the underlying
-  /// `NodeClientSessionStoreWrapper`.
+  /// Node's `TLSWrap::SetSession`: offer the session named by `session` (a
+  /// buffer from a `'session'` event or `getSession()`) on the next client
+  /// handshake. Returns whether this isolate still holds that session; an
+  /// unknown buffer is accepted and simply does not resume, like an expired
+  /// OpenSSL session.
   #[fast]
-  fn set_session_allowed(&self, allowed: bool) {
+  fn set_session(&self, #[buffer] session: &[u8]) -> bool {
     let inner = unsafe { &*self.inner.as_ptr() };
-    inner.allow_resumption.store(allowed, Ordering::Relaxed);
+    match &inner.session_link {
+      Some(link) => link.set_offered((!session.is_empty()).then_some(session)),
+      None => false,
+    }
+  }
+
+  /// Node's `TLSWrap::GetTLSTicket`: the session ticket of the current
+  /// client session, if the server issued one.
+  #[buffer]
+  fn get_tls_ticket(&self) -> Option<Box<[u8]>> {
+    let inner = unsafe { &*self.inner.as_ptr() };
+    let link = inner.session_link.as_ref()?;
+    let resumed_tls12 = inner.tls_conn.as_ref().is_some_and(|conn| {
+      matches!(conn.handshake_kind(), Some(rustls::HandshakeKind::Resumed))
+        && conn.protocol_version() == Some(rustls::ProtocolVersion::TLSv1_2)
+    });
+    link
+      .ticket(resumed_tls12)
+      .filter(|t| !t.is_empty())
+      .map(Vec::into_boxed_slice)
   }
 
   /// Node's `TLSWrap::SetMaxSendFragment`: cap the plaintext carried by one
@@ -3509,6 +3594,94 @@ fn get_js_string(
       v.to_string(scope).map(|s| s.to_rust_string_lossy(scope))
     }
   })
+}
+
+/// The crypto provider and protocol versions for a `node:tls` context.
+///
+/// The context's `cipherSuites` (rustls suite names, resolved from the
+/// `ciphers` option in `_tls_common.ts`) restrict and order the provider's
+/// suites. A protocol version left without suites is dropped, which is how
+/// Node treats a cipher list naming only TLS 1.3 suites (TLS 1.3 only).
+fn node_provider_and_versions(
+  scope: &mut v8::PinScope,
+  context: v8::Local<v8::Object>,
+  versions: &[&'static rustls::SupportedProtocolVersion],
+) -> Option<(
+  Arc<rustls::crypto::CryptoProvider>,
+  Vec<&'static rustls::SupportedProtocolVersion>,
+)> {
+  let mut provider = rustls::crypto::CryptoProvider::get_default()
+    .map(|p| (**p).clone())
+    .unwrap_or_else(rustls::crypto::aws_lc_rs::default_provider);
+  if let Some(names) = get_js_string_array(scope, context, "cipherSuites") {
+    let available = std::mem::take(&mut provider.cipher_suites);
+    provider.cipher_suites = names
+      .iter()
+      .filter_map(|name| {
+        available
+          .iter()
+          .find(|s| s.suite().as_str() == Some(name.as_str()))
+          .copied()
+      })
+      .collect();
+  }
+  let versions: Vec<_> = versions
+    .iter()
+    .copied()
+    .filter(|v| provider.cipher_suites.iter().any(|s| s.version() == *v))
+    .collect();
+  if versions.is_empty() {
+    return None;
+  }
+  Some((Arc::new(provider), versions))
+}
+
+/// Read an array-of-strings property, if present.
+fn get_js_string_array(
+  scope: &mut v8::PinScope,
+  obj: v8::Local<v8::Object>,
+  key: &str,
+) -> Option<Vec<String>> {
+  let key = v8::String::new(scope, key)?;
+  let val = obj.get(scope, key.into())?;
+  let arr = v8::Local::<v8::Array>::try_from(val).ok()?;
+  let mut out = Vec::with_capacity(arr.length() as usize);
+  for i in 0..arr.length() {
+    let v = arr.get_index(scope, i)?;
+    out.push(v.to_string(scope)?.to_rust_string_lossy(scope));
+  }
+  Some(out)
+}
+
+/// Node's default `sessionTimeout`, in seconds.
+const DEFAULT_SESSION_TIMEOUT_SECS: u32 = 300;
+
+/// Read a non-negative integer property, if present.
+fn get_js_u32(
+  scope: &mut v8::PinScope,
+  obj: v8::Local<v8::Object>,
+  key: &str,
+) -> Option<u32> {
+  let key = v8::String::new(scope, key)?;
+  let val = obj.get(scope, key.into())?;
+  if !val.is_number() {
+    return None;
+  }
+  let n = val.number_value(scope)?;
+  (n.is_finite() && n >= 0.0).then(|| n.min(u32::MAX as f64) as u32)
+}
+
+/// Read the context's 48-byte `ticketKeys`, if a server set them.
+fn get_js_ticket_keys(
+  scope: &mut v8::PinScope,
+  obj: v8::Local<v8::Object>,
+) -> Option<[u8; 48]> {
+  let key = v8::String::new(scope, "ticketKeys")?;
+  let val = obj.get(scope, key.into())?;
+  let view = v8::Local::<v8::ArrayBufferView>::try_from(val).ok()?;
+  let mut keys = [0u8; 48];
+  (view.byte_length() == 48 && view.copy_contents(&mut keys) == 48)
+    .then_some(keys)
 }
 
 fn get_js_bool(
@@ -4898,80 +5071,12 @@ fn normalize_pem_headers(pem: &[u8]) -> std::borrow::Cow<'_, [u8]> {
   std::borrow::Cow::Owned(s.into_bytes())
 }
 
-#[derive(Debug)]
-struct NodeClientSessionStoreWrapper {
-  inner: Arc<dyn rustls::client::ClientSessionStore>,
-  allow_resumption: Arc<AtomicBool>,
-}
-
-impl rustls::client::ClientSessionStore for NodeClientSessionStoreWrapper {
-  fn set_kx_hint(
-    &self,
-    server_name: rustls::pki_types::ServerName<'static>,
-    group: rustls::NamedGroup,
-  ) {
-    self.inner.set_kx_hint(server_name, group);
-  }
-
-  fn kx_hint(
-    &self,
-    server_name: &rustls::pki_types::ServerName<'_>,
-  ) -> Option<rustls::NamedGroup> {
-    self.inner.kx_hint(server_name)
-  }
-
-  fn set_tls12_session(
-    &self,
-    server_name: rustls::pki_types::ServerName<'static>,
-    value: rustls::client::Tls12ClientSessionValue,
-  ) {
-    self.inner.set_tls12_session(server_name, value);
-  }
-
-  fn tls12_session(
-    &self,
-    server_name: &rustls::pki_types::ServerName<'_>,
-  ) -> Option<rustls::client::Tls12ClientSessionValue> {
-    if self.allow_resumption.load(Ordering::Relaxed) {
-      self.inner.tls12_session(server_name)
-    } else {
-      None
-    }
-  }
-
-  fn remove_tls12_session(
-    &self,
-    server_name: &rustls::pki_types::ServerName<'static>,
-  ) {
-    self.inner.remove_tls12_session(server_name);
-  }
-
-  fn insert_tls13_ticket(
-    &self,
-    server_name: rustls::pki_types::ServerName<'static>,
-    value: rustls::client::Tls13ClientSessionValue,
-  ) {
-    self.inner.insert_tls13_ticket(server_name, value);
-  }
-
-  fn take_tls13_ticket(
-    &self,
-    server_name: &rustls::pki_types::ServerName<'static>,
-  ) -> Option<rustls::client::Tls13ClientSessionValue> {
-    if self.allow_resumption.load(Ordering::Relaxed) {
-      self.inner.take_tls13_ticket(server_name)
-    } else {
-      None
-    }
-  }
-}
-
 /// Build a rustls ClientConfig from a SecureContext JS object.
 fn build_client_config(
   scope: &mut v8::PinScope,
   context: v8::Local<v8::Object>,
   op_state: &mut OpState,
-  allow_resumption: Arc<AtomicBool>,
+  session_link: Arc<ClientSessionLink>,
 ) -> Option<(rustls::ClientConfig, VerifyErrorStore)> {
   use deno_net::DefaultTlsOptions;
   use deno_tls::TlsKeys;
@@ -5106,14 +5211,32 @@ fn build_client_config(
   let is_default_path = !has_explicit_ca
     && use_default_ca
     && matches!(maybe_cert_chain_and_key, TlsKeys::Null);
+  // A context whose trust store is exactly its explicit `ca` list (and that
+  // presents no client cert) caches its verifier by that list, for the same
+  // reason: connections that share a `ca` can resume each other's sessions.
+  let explicit_ca_key = (!use_default_ca
+    && !empty_explicit_ca
+    && matches!(maybe_cert_chain_and_key, TlsKeys::Null))
+  .then(|| {
+    use sha2::Digest;
+    let mut hasher = sha2::Sha256::new();
+    for der in &root_cert_ders {
+      hasher.update((der.len() as u64).to_be_bytes());
+      hasher.update(der);
+    }
+    (<[u8; 32]>::from(hasher.finalize()), reject_unauthorized)
+  });
 
   // Always build with root certs so NodeServerCertVerifier can check them.
   // NodeServerCertVerifier never aborts the handshake — it stores errors
   // for verifyError().  The JS layer decides whether to destroy the
   // connection based on rejectUnauthorized.
-  let config_builder =
-    rustls::ClientConfig::builder_with_protocol_versions(protocol_versions)
-      .with_root_certificates(root_cert_store.clone());
+  let (provider, protocol_versions) =
+    node_provider_and_versions(scope, context, protocol_versions)?;
+  let config_builder = rustls::ClientConfig::builder_with_provider(provider)
+    .with_protocol_versions(&protocol_versions)
+    .ok()?
+    .with_root_certificates(root_cert_store.clone());
 
   let mut config = match maybe_cert_chain_and_key {
     TlsKeys::Static(deno_tls::TlsKey(cert_chain, private_key)) => {
@@ -5155,23 +5278,21 @@ fn build_client_config(
   // checkServerIdentity in JS).
   //
   // In Node.js, client session resumption is opt-in per connection:
-  // connections only offer cached sessions when `options.session` was
-  // explicitly provided (or `setSession()` was called). `NodeClientSessionStoreWrapper`
-  // saves newly issued sessions unconditionally (so getSession / 'session'
-  // events work), but only offers them for resumption when `allow_resumption`
-  // is true.
+  // connections only offer a session when `options.session` was explicitly
+  // provided (or `setSession()` was called). `NodeClientSessionStore`
+  // saves every newly issued session to the registry (delivered to JS as a
+  // 'session' event) and offers only the one `setSession()` selected.
   if let Some(node_tls_state) = op_state.try_borrow::<NodeTlsState>() {
-    let store = if reject_unauthorized {
+    let kx_hints = if reject_unauthorized {
       node_tls_state.client_session_store.clone()
     } else {
       node_tls_state.client_session_store_insecure.clone()
     };
-    config.resumption = rustls::client::Resumption::store(Arc::new(
-      NodeClientSessionStoreWrapper {
-        inner: store,
-        allow_resumption,
-      },
-    ));
+    config.resumption =
+      rustls::client::Resumption::store(Arc::new(NodeClientSessionStore {
+        kx_hints,
+        link: session_link,
+      }));
   }
 
   // Install NodeServerCertVerifier to store verification errors for
@@ -5217,6 +5338,14 @@ fn build_client_config(
         Err(_) => (Default::default(), None),
       }
     }
+  } else if let Some(cached) = explicit_ca_key.and_then(|key| {
+    op_state
+      .borrow::<NodeTlsState>()
+      .cached_ca_verifiers
+      .get(&key)
+      .cloned()
+  }) {
+    (cached.1, Some(cached.0))
   } else {
     let store: VerifyErrorStore = Default::default();
     let verifier_root_store = if empty_explicit_ca {
@@ -5238,6 +5367,16 @@ fn build_client_config(
           strict_verify: reject_unauthorized,
         }) as Arc<dyn rustls::client::danger::ServerCertVerifier>
       });
+    if let (Some(key), Some(v)) = (explicit_ca_key, &v)
+      && let Some(state) = op_state.try_borrow_mut::<NodeTlsState>()
+    {
+      if state.cached_ca_verifiers.len() >= 64 {
+        state.cached_ca_verifiers.clear();
+      }
+      state
+        .cached_ca_verifiers
+        .insert(key, (v.clone(), store.clone()));
+    }
     (store, v)
   };
   if let Some(v) = verifier_arc {
@@ -5248,7 +5387,7 @@ fn build_client_config(
   // rustls's `Arc::downgrade(&client_creds)` identity check keeps the
   // resumed session compatible across `tls.connect()` calls. Keep this
   // split by verification policy for the same reason as the verifier Arc.
-  if is_default_path {
+  if is_default_path || explicit_ca_key.is_some() {
     let state = op_state.borrow_mut::<NodeTlsState>();
     let cached_no_client_auth = if reject_unauthorized {
       &mut state.cached_no_client_auth
@@ -5546,8 +5685,11 @@ fn build_server_config(
   let reject_unauthorized =
     get_js_bool(scope, context, "rejectUnauthorized", true);
 
-  let builder =
-    rustls::ServerConfig::builder_with_protocol_versions(protocol_versions);
+  let (provider, protocol_versions) =
+    node_provider_and_versions(scope, context, protocol_versions)?;
+  let builder = rustls::ServerConfig::builder_with_provider(provider)
+    .with_protocol_versions(&protocol_versions)
+    .ok()?;
 
   // When `requestCert` is true, the server sends a CertificateRequest during
   // the TLS handshake so the client presents its certificate. Without this
@@ -5676,14 +5818,23 @@ fn build_server_config(
   // and Node's `tls.TLSSocket#isSessionReused()` always returns false even
   // when the client has a session cache configured.
   //
-  // The ticketer is shared at the process level via `NodeTlsState` so that
-  // every TLS connection accepted by the same `tls.createServer()` (which
-  // builds a fresh ServerConfig per accepted socket) decrypts tickets with
-  // the same keys.  Without this sharing each connection rotates keys and
-  // resumption never succeeds.
-  let ticketer = {
+  // A `tls.Server` puts its 48-byte `ticketKeys` (given, or random per
+  // server, and replaced by `setTicketKeys()`) on its context, so every
+  // connection it accepts (a fresh ServerConfig each) and every server that
+  // shares the keys issues and accepts the same tickets.  A context without
+  // keys (one an SNICallback returned, say) falls back to a process-shared
+  // rustls ticketer.
+  let ticket_keys = get_js_ticket_keys(scope, context);
+  let session_timeout = get_js_u32(scope, context, "sessionTimeout")
+    .unwrap_or(DEFAULT_SESSION_TIMEOUT_SECS);
+  let ticketer: Option<Arc<dyn rustls::server::ProducesTickets>> = {
     let state = op_state.borrow_mut::<NodeTlsState>();
-    if let Some(t) = &state.server_ticketer {
+    if let Some(keys) = ticket_keys {
+      state
+        .ticketers
+        .get(&keys, session_timeout)
+        .map(|t| t as Arc<dyn rustls::server::ProducesTickets>)
+    } else if let Some(t) = &state.server_ticketer {
       Some(t.clone())
     } else {
       match rustls::crypto::aws_lc_rs::Ticketer::new() {
