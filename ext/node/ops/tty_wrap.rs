@@ -45,6 +45,7 @@ fn uv_error_info(err: i32) -> (&'static str, &'static str) {
 
 use deno_permissions::PermissionsContainer;
 
+use crate::ops::fd_adopt;
 use crate::ops::handle_wrap::AsyncWrap;
 use crate::ops::handle_wrap::Handle;
 use crate::ops::handle_wrap::HandleWrap;
@@ -52,13 +53,15 @@ use crate::ops::handle_wrap::OwnedPtr;
 use crate::ops::handle_wrap::ProviderType;
 use crate::ops::stream_wrap::LibUvStreamWrap;
 
-/// Check that non-stdio file descriptors (fd > 2) have --allow-all permission.
-/// Stdio fds 0, 1, 2 are always allowed.
+/// Check whether `TTY(fd)` may wrap `fd`. Stdio, fds this isolate opened or
+/// the runtime registered, and fds the process inherited at startup are
+/// allowed like stdio (see `fd_adopt`); any other descriptor needs read and
+/// write access to everything.
 fn check_tty_fd_permission(
   state: &mut OpState,
   fd: i32,
 ) -> Result<(), deno_permissions::PermissionCheckError> {
-  if fd > 2 {
+  if !fd_adopt::tty_fd_needs_no_permission(state, fd) {
     state
       .borrow_mut::<PermissionsContainer>()
       .check_read_all("node:tty TTY()")?;

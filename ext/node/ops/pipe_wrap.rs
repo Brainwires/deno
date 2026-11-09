@@ -9,7 +9,6 @@
 
 use std::cell::Cell;
 use std::cell::RefCell;
-use std::path::Path;
 use std::rc::Rc;
 
 use deno_core::CppgcInherits;
@@ -25,6 +24,7 @@ use deno_core::v8;
 use deno_net::check_unix_socket_path;
 use deno_permissions::PermissionsContainer;
 
+use crate::ops::fd_adopt;
 use crate::ops::handle_wrap::AsyncWrap;
 use crate::ops::handle_wrap::Handle;
 use crate::ops::handle_wrap::HandleWrap;
@@ -314,31 +314,16 @@ impl PipeWrap {
 
   #[fast]
   fn open(&self, state: &mut OpState, #[smi] fd: i32) -> i32 {
-    if fd < 0 {
-      return uv_compat::UV_EBADF;
-    }
-    // Descriptors explicitly associated with this isolate may be adopted
-    // directly. Preserve Node compatibility for an untracked raw descriptor
-    // only when the isolate has all permissions.
-    let untracked = fd > 2 && !state.borrow::<deno_io::FdTable>().contains(fd);
-    let allow_untracked = untracked
-      && state
-        .borrow::<PermissionsContainer>()
-        .check_has_all_permissions(Path::new("node:net.Socket({ fd })"))
-        .is_ok();
-    if untracked && !allow_untracked {
-      return uv_compat::UV_EPERM;
-    }
-    let Some(replace_registration) = state
-      .borrow::<deno_io::FdTable>()
-      .begin_uv_adopt(fd, allow_untracked)
-    else {
-      return uv_compat::UV_EEXIST;
-    };
     let pipe = self.pipe_ptr();
     if pipe.is_null() {
       return uv_compat::UV_EBADF;
     }
+    // Which descriptors may be adopted, and how: see `fd_adopt`.
+    let adoption = match fd_adopt::begin(state, fd, "node:net.Socket({ fd })") {
+      Ok(adoption) => adoption,
+      Err(err) => return err,
+    };
+    let fd = adoption.fd;
     // A wrap constructed with `new Pipe(SERVER)` opens the fd as a listening
     // socket. Like the TCP split (see TCPWrap::open), the listener path must
     // not pre-register an AsyncFd, or uv_pipe_listen's reactor registration
@@ -351,10 +336,8 @@ impl PipeWrap {
       // SAFETY: pipe is valid (null-checked above).
       unsafe { uv_compat::uv_pipe_open(pipe, fd) }
     };
+    fd_adopt::finish(state, adoption, ret);
     if ret == 0 {
-      state
-        .borrow_mut::<deno_io::FdTable>()
-        .finish_uv_adopt(fd, replace_registration);
       self.base.set_fd(fd);
     }
     ret

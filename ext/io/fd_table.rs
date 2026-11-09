@@ -143,6 +143,12 @@ impl FdTable {
     )
   }
 
+  /// Check if an fd is a TableOwned entry: a descriptor this isolate opened
+  /// itself (e.g. `fs.openSync` on a FIFO, a socket or a terminal).
+  pub fn is_table_owned(&self, fd: i32) -> bool {
+    matches!(self.entries.get(&fd), Some(FdOwnership::TableOwned(_)))
+  }
+
   /// Check if an fd was explicitly registered as adoptable by a uv wrapper.
   pub fn is_uv_adoptable(&self, fd: i32) -> bool {
     matches!(self.entries.get(&fd), Some(FdOwnership::Adoptable))

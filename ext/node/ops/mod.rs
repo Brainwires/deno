@@ -6,6 +6,7 @@ pub mod buffer;
 pub mod compile_cache;
 pub mod constant;
 pub mod dns;
+pub(crate) mod fd_adopt;
 pub mod fs;
 pub mod handle_wrap;
 pub mod http;

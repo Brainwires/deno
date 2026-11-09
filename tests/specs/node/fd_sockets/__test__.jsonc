@@ -1,0 +1,30 @@
+{
+  "tempDir": true,
+  "tests": {
+    "socket_activation": {
+      "if": "unix",
+      "args": "run --allow-net --allow-run --allow-env --allow-read socket_activation.mjs",
+      "output": "socket_activation.out"
+    },
+    "pipe_fd": {
+      "if": "unix",
+      "args": "run --allow-read=. --allow-write=. --allow-env --allow-run=mkfifo pipe_fd.mjs",
+      "output": "pipe_fd.out"
+    },
+    "pty_fd": {
+      "if": "unix",
+      "args": "run --allow-run --allow-read pty_fd.ts",
+      "output": "pty_fd.out"
+    },
+    "long_unix_path": {
+      "if": "mac",
+      "args": "run -A long_unix_path.mjs",
+      "output": "long_unix_path.out"
+    },
+    "windows_refuse": {
+      "if": "windows",
+      "args": "run -A windows_refuse.mjs",
+      "output": "windows_refuse.out"
+    }
+  }
+}

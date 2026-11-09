@@ -8,7 +8,6 @@
 use std::cell::Cell;
 use std::cell::RefCell;
 use std::net::ToSocketAddrs;
-use std::path::Path;
 use std::rc::Rc;
 
 use deno_core::CppgcInherits;
@@ -27,6 +26,7 @@ use deno_net::io::TcpStreamResource;
 use deno_permissions::PermissionsContainer;
 use socket2::SockAddr as Socket2SockAddr;
 
+use crate::ops::fd_adopt;
 use crate::ops::handle_wrap::AsyncWrap;
 use crate::ops::handle_wrap::Handle;
 use crate::ops::handle_wrap::HandleWrap;
@@ -393,31 +393,16 @@ impl TCPWrap {
 
   #[fast]
   fn open(&self, state: &mut OpState, #[smi] fd: i32) -> i32 {
-    if fd < 0 {
-      return uv_compat::UV_EBADF;
-    }
-    // Descriptors explicitly associated with this isolate may be adopted
-    // directly. Preserve Node compatibility for an untracked raw descriptor
-    // only when the isolate has all permissions.
-    let untracked = fd > 2 && !state.borrow::<deno_io::FdTable>().contains(fd);
-    let allow_untracked = untracked
-      && state
-        .borrow::<PermissionsContainer>()
-        .check_has_all_permissions(Path::new("node:net.Socket({ fd })"))
-        .is_ok();
-    if untracked && !allow_untracked {
-      return uv_compat::UV_EPERM;
-    }
-    let Some(replace_registration) = state
-      .borrow::<deno_io::FdTable>()
-      .begin_uv_adopt(fd, allow_untracked)
-    else {
-      return uv_compat::UV_EEXIST;
-    };
     let tcp = self.tcp_ptr();
     if tcp.is_null() {
       return uv_compat::UV_EBADF;
     }
+    // Which descriptors may be adopted, and how: see `fd_adopt`.
+    let adoption = match fd_adopt::begin(state, fd, "node:net.Socket({ fd })") {
+      Ok(adoption) => adoption,
+      Err(err) => return err,
+    };
+    let fd = adoption.fd;
     // SAFETY: tcp handle is valid (null-checked above); fd is validated above.
     // Platform-specific non-blocking setup and uv_tcp_open are safe with valid args.
     let ret = unsafe {
@@ -449,10 +434,8 @@ impl TCPWrap {
     };
     // Track the adopted fd so it can't be re-adopted by another wrap and is
     // dropped from the FdTable on close.
+    fd_adopt::finish(state, adoption, ret);
     if ret == 0 {
-      state
-        .borrow_mut::<deno_io::FdTable>()
-        .finish_uv_adopt(fd, replace_registration);
       self.base.set_fd(fd);
     }
     ret

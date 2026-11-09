@@ -11480,6 +11480,45 @@ where the changes are discussed.
        short flags repeated, an explicit deny still wins, and the fragments
        between the commas stay inaccessible).
 
+NNN. **`feat(node)`: `net.Socket({ fd })`, `server.listen({ fd })` and
+     `tty.ReadStream(fd)` on descriptors the process owns; long unix socket
+     paths on macOS** (runtime; `ext/node/ops/fd_adopt.rs`,
+     `ext/node/ops/pipe_wrap.rs`, `ext/node/ops/tcp_wrap.rs`,
+     `ext/node/ops/tty_wrap.rs`, `ext/io/inherited_fds.rs`,
+     `ext/io/fd_table.rs`, `libs/core/uv_compat/pipe.rs`, `cli/lib.rs`,
+     `cli/rt/lib.rs`). A raw fd now opens as a pipe, TCP or TTY handle when it
+     already belongs to the process or to the isolate, gated like stdio with no
+     permission check: stdio, fds the runtime registered (inherited extra stdio,
+     `createPipe()` ends, the IPC channel), a FIFO / socket / terminal this
+     isolate opened through node:fs (`fs.openSync` on a FIFO used to fail with
+     `EEXIST` even under `-A`; the wrap gets a dup and the node:fs entry is
+     released), and a descriptor inherited at process start. `main` records the
+     fds open at startup (with their device and inode, so a number the runtime
+     later reuses never counts, and without `NODE_CHANNEL_FD` and the npm state
+     fd); each is claimed once process-wide. Socket activation
+     (`listen({ fd: 3 })` from a service manager) now works with only
+     `--allow-net`, and an inherited pty works through `tty.ReadStream(fd)`
+     without `--allow-read` / `--allow-write`. Any other descriptor (one a
+     native addon or another isolate created) still needs every permission, or
+     an unscoped `--allow-ffi` (which already reaches the whole process);
+     `TTY(fd)` keeps its read-all + write-all alternative. A worker still cannot
+     adopt another isolate's descriptors, and a regular file stays with node:fs.
+     On Windows a node:fs descriptor is refused with `open ENOTSUP` instead of
+     `EEXIST`. Separately, on macOS a unix socket path past `sun_path`'s 104
+     bytes binds and connects, as in libuv: the address is built with `sun_len`
+     covering the path (up to 255 bytes), and a connect on a long path dials a
+     fresh socket by hand instead of through Tokio, which refuses it. Linux caps
+     the address at `sizeof(sockaddr_un)`, as Node does there.
+     - Tests: spec `node/fd_sockets` (`socket_activation`: a non-Deno parent
+       passes a listening socket as fd 3 to a child with only `--allow-net`;
+       `pipe_fd`: a node:fs FIFO read through `net.Socket({ fd })` with scoped
+       permissions; `pty_fd`: an inherited pty read through `tty.ReadStream(3)`
+       with no permissions; `long_unix_path` (macOS): a 150+ byte path under
+       `$TMPDIR` listens and connects; `windows_refuse`); `deno_io` unit tests
+       for the inherited-fd identity check and fd listing. The
+       `node/pipe_open_fd` specs (isolate ownership, duplicate regular-file fd)
+       are unchanged.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
