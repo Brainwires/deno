@@ -3046,6 +3046,7 @@ dependencies = [
 name = "deno_node"
 version = "0.198.0"
 dependencies = [
+ "aws-lc-rs",
  "base64 0.22.1",
  "boxed_error",
  "brotli",
