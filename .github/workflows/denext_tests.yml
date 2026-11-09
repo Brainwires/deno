@@ -87,6 +87,13 @@ on:
         description: With full=false, also run the windows-2022 leg
         type: boolean
         default: false
+      macos_runner:
+        description: Where the macos-15 leg runs, pool (RUNNER_MACOS_ARM) or github (GitHub's macos-15 image)
+        type: choice
+        options:
+          - pool
+          - github
+        default: pool
 
 permissions:
   contents: read
@@ -242,7 +249,8 @@ jobs:
     uses: ./.github/workflows/denext_tests_os.yml
     with:
       os: macos-15
-      runs_on: ${{ startsWith(vars.RUNNER_MACOS_ARM, '[') && vars.RUNNER_MACOS_ARM || format('"{0}"', vars.RUNNER_MACOS_ARM || 'macos-15') }}
+      # A dispatch with macos_runner=github runs the leg on GitHub's image instead of the pool.
+      runs_on: ${{ (github.event_name == 'workflow_dispatch' && inputs.macos_runner == 'github') && '"macos-15"' || (startsWith(vars.RUNNER_MACOS_ARM, '[') && vars.RUNNER_MACOS_ARM || format('"{0}"', vars.RUNNER_MACOS_ARM || 'macos-15')) }}
 
   windows:
     name: windows-2022
