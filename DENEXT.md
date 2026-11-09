@@ -11511,6 +11511,60 @@ NNN. **`fix(ext/node)`: small Node API holes: `http2.constants`' status codes,
        classes as `node:http`), `dns_test.ts` (A, AAAA, MX, TXT and the
        promise API, no lookup made).
 
+NNN. **`feat(ext/node)`: the `process` long tail: `execve`, `setgroups` /
+     `initgroups`, `finalization`, `performance.nodeTiming`, `process.versions`
+     and an inspectable `process.env`** (`ext/node/ops/process.rs`,
+     `ext/node/ops/perf_hooks.rs`, `ext/node/polyfills/process.ts`,
+     `ext/node/polyfills/_process/process.ts`, `ext/node/polyfills/perf_hooks.js`,
+     `ext/node/polyfills/internal/child_process.ts`, `libs/core/runtime/setup.rs`).
+     - `process.execve(file[, args[, env]])` replaces the process with execve(2)
+       on Unix. The program is resolved and checked exactly as `Deno.Command`
+       checks it (`deno_process::prepare_run`: `--allow-run` and its allow-list,
+       the `LD_*` / `DYLD_*` rule, an embedded program's hash from item 232, run
+       on Linux from the handle it was hashed through); when `file` is Deno
+       itself, the Node arguments are translated as `child_process.spawn`
+       translates them. Rust's stdout / stderr are flushed, fds 0-2 go back to
+       blocking mode and `SIGPIPE` to its default action first; a failed exec
+       puts them back and throws Node's error (`code`, `syscall: "execve"`,
+       positive `errno`, `path`). Validation matches Node's messages; Windows
+       throws `ERR_FEATURE_UNAVAILABLE_ON_PLATFORM` and a worker
+       `ERR_WORKER_UNSUPPORTED_OPERATION`. `exit` listeners don't run.
+     - `process.setgroups(groups)` / `process.initgroups(user, extraGroup)`
+       (Unix but Android): ids or names, names resolved first
+       (`ERR_UNKNOWN_CREDENTIAL`), behind the whole `--allow-sys` (no scoped
+       sys kind names these calls).
+     - `process.finalization.register` / `registerBeforeExit` / `unregister`, as
+       Node's `lib/internal/process/finalization.js`: the callback gets
+       `(obj, event)` on `exit` / `beforeExit` for objects still alive, without
+       keeping them alive.
+     - `performance.nodeTiming` has Node's fields from the runtime's own
+       timestamps, on `performance.now()`'s clock: `nodeStart` (the process
+       start, recorded by a loader constructor), `v8Start` (when this process
+       finished initializing V8, `deno_core::v8_initialized_at`), `environment`
+       (this runtime's `node` extension state), `bootstrapComplete` (the Node
+       bootstrap), `loopStart` (the first timer turn after it) and `loopExit`
+       (the loop running out of work), -1 until they happen. Because
+       `performance.timeOrigin` is when this runtime instance started, not the
+       process, `nodeStart` and `v8Start` are negative. `idleTime` is 0 (not
+       measured) and there is no `uvMetricsInfo`.
+     - `process.versions` gains Node's keys `acorn`, `ada`, `amaro`, `merve`,
+       `nbytes`, `ncrypto`, `simdjson`, `simdutf`, `undici`, `uvwasi` and `zstd`.
+       What Deno bundles reports its real version (`sqlite` 3.53.2, the bundled
+       libsqlite3-sys build, was 3.53.1; `zstd` 1.5.7; `simdutf` 7.7.0, V8's);
+       the rest carry Node 26.5.1's, as `uv` and `ares` already did.
+     - `util.inspect(process.env)` and `console.log(process.env)` show the
+       variables (upstream denoland/deno#35449): inspecting a Proxy formats its
+       target, so they printed `{}`. A private inspect hook on the target prints
+       them; without the whole env permission it stays `{}` (no throw, no
+       prompt). The traps hide the hook.
+     - Tests: unit `process_test.ts` (`execve` re-running the script with
+       translated arguments and env, replacing with `/bin/sh`, the ENOENT error,
+       validation, refusal without `--allow-run`; `setgroups` / `initgroups`
+       validation and unknown names, refusal without `--allow-sys`;
+       `finalization` order and `unregister`; the versions and `sqlite` matching
+       `sqlite_version()`; `inspect(process.env)` with and without permission),
+       `perf_hooks_test.ts` (`nodeTiming` order, loop milestones, `toJSON`).
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,

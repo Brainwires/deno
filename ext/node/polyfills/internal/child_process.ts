@@ -3149,6 +3149,7 @@ function setupChannel(
 }
 
 return {
+  buildCommand,
   ChildProcess,
   mapValues,
   stdioStringToArray,

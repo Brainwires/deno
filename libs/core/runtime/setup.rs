@@ -254,6 +254,16 @@ fn v8_init(
   });
   v8::V8::initialize_platform(v8_platform.clone());
   v8::V8::initialize();
+  let _ = V8_INITIALIZED_AT.set(std::time::Instant::now());
+}
+
+static V8_INITIALIZED_AT: std::sync::OnceLock<std::time::Instant> =
+  std::sync::OnceLock::new();
+
+/// When this process finished initializing V8 (its platform and the engine),
+/// or `None` before it has. Node reports it as `performance.nodeTiming.v8Start`.
+pub fn v8_initialized_at() -> Option<std::time::Instant> {
+  V8_INITIALIZED_AT.get().copied()
 }
 
 pub fn init_v8(

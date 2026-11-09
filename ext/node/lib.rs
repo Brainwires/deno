@@ -424,6 +424,10 @@ deno_core::extension!(deno_node,
     ops::process::op_node_process_setgid,
     ops::process::op_node_process_setuid,
     ops::process::op_process_abort,
+    ops::process::op_node_process_execve,
+    ops::process::op_node_process_initgroups,
+    ops::process::op_node_process_setgroups,
+    ops::perf_hooks::op_node_perf_milestones_ago,
     ops::process::op_node_process_constrained_memory<TSys>,
     ops::process::op_node_process_resource_usage,
     ops::node_cli_parser::op_node_translate_cli_args,
@@ -865,6 +869,7 @@ deno_core::extension!(deno_node,
     fs: deno_fs::FileSystemRc,
   },
   state = |state, options| {
+    state.put(ops::perf_hooks::NodeEnvironmentStart(std::time::Instant::now()));
     state.put(options.fs.clone());
     state.put(ops::module_hooks::LoaderHookRegistry::default());
 

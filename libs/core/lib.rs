@@ -204,6 +204,7 @@ pub use crate::runtime::host_defined_options::register_external_module_import_me
 pub use crate::runtime::host_defined_options::register_vm_dynamic_import_callback;
 pub use crate::runtime::set_user_import_meta_proto;
 pub use crate::runtime::stats;
+pub use crate::runtime::v8_initialized_at;
 pub use crate::source_map::SourceMapApplication;
 pub use crate::source_map::SourceMapData;
 pub use crate::source_map::SourceMapper;
