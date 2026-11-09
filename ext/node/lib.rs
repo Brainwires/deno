@@ -891,6 +891,9 @@ deno_core::extension!(deno_node,
       cached_insecure_verifier: None,
       cached_no_client_auth: None,
       cached_insecure_no_client_auth: None,
+      session_registry: Default::default(),
+      ticketers: Default::default(),
+      cached_ca_verifiers: Default::default(),
     });
   },
   customizer = |ext: &mut deno_core::Extension| {

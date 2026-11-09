@@ -89,6 +89,17 @@ pub(crate) struct NodeTlsState {
     Option<Arc<dyn deno_tls::rustls::client::ResolvesClientCert>>,
   pub(crate) cached_insecure_no_client_auth:
     Option<Arc<dyn deno_tls::rustls::client::ResolvesClientCert>>,
+  /// Every client session rustls produced in this isolate, by the id the
+  /// JS session buffer names (see `tls_session`).
+  pub(crate) session_registry:
+    Arc<crate::ops::tls_session::ClientSessionRegistry>,
+  /// Server session ticketers by `ticketKeys`.
+  pub(crate) ticketers: crate::ops::tls_session::TicketerCache,
+  /// Cached verifiers for client contexts with an explicit `ca` list, keyed
+  /// by (SHA-256 of the CA DERs, rejectUnauthorized), so that resumption's
+  /// verifier identity check holds across connections with the same `ca`.
+  pub(crate) cached_ca_verifiers:
+    std::collections::HashMap<([u8; 32], bool), CachedClientVerifier>,
 }
 
 fn cert_der_to_pem(cert: &[u8]) -> String {
@@ -236,6 +247,7 @@ pub fn op_set_default_ca_certificates(
     // Custom CA list changed; previously cached verifier no longer matches.
     tls_state.cached_default_verifier = None;
     tls_state.cached_insecure_verifier = None;
+    tls_state.cached_ca_verifiers.clear();
   } else {
     state.put(NodeTlsState {
       custom_ca_certs: Some(certs),
@@ -250,6 +262,9 @@ pub fn op_set_default_ca_certificates(
       cached_insecure_verifier: None,
       cached_no_client_auth: None,
       cached_insecure_no_client_auth: None,
+      session_registry: Default::default(),
+      ticketers: Default::default(),
+      cached_ca_verifiers: Default::default(),
     });
   }
 }

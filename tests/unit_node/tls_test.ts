@@ -1834,9 +1834,9 @@ Deno.test("tls client session resumption is opt-in per connection", async (t) =>
   await t.step(
     "session for a different host:port does not resume",
     async () => {
-      // A well-formed synthetic session issued for another server must fail
-      // syntheticSessionMatches() and keep resumption disabled, even though
-      // the shared cache holds tickets for this host.
+      // Another server has its own ticket keys, so a session issued by the
+      // first server is offered but cannot be decrypted, and the handshake
+      // is a full one.
       const serverB = await startTlsEchoServer();
       try {
         const { port: portB } = serverB.address() as net.AddressInfo;
@@ -2279,5 +2279,233 @@ Deno.test("tls.connect refuses a non-canonical IP host against a DNS SAN", async
     assertStringIncludes(outcome, "IP: 127.0.0.1 is not in the cert's list");
   } finally {
     server.close();
+  }
+});
+
+// deno-lint-ignore no-explicit-any
+type AnyOptions = any;
+
+interface SessionRun {
+  reused: boolean;
+  sessions: Buffer[];
+  latest: Buffer | null;
+  ticketAtSession: Buffer | undefined;
+  ticketAtConnect: Buffer | undefined;
+  cipher: string | undefined;
+  version: string | null;
+}
+
+function runSessionClient(options: AnyOptions): Promise<SessionRun> {
+  const { promise, resolve, reject } = Promise.withResolvers<SessionRun>();
+  const run: SessionRun = {
+    reused: false,
+    sessions: [],
+    latest: null,
+    ticketAtSession: undefined,
+    ticketAtConnect: undefined,
+    cipher: undefined,
+    version: null,
+  };
+  const client = tls.connect({ rejectUnauthorized: false, ...options });
+  client.on("session", (s: Buffer) => {
+    if (run.sessions.length === 0) {
+      // deno-lint-ignore no-explicit-any
+      run.ticketAtSession = (client as any).getTLSTicket();
+      assertEquals(s.compare(client.getSession()!), 0);
+    }
+    run.sessions.push(s);
+  });
+  client.on("secureConnect", () => {
+    run.reused = client.isSessionReused();
+    // deno-lint-ignore no-explicit-any
+    run.ticketAtConnect = (client as any).getTLSTicket();
+    run.cipher = client.getCipher()?.name;
+    run.version = client.getProtocol();
+  });
+  client.on("data", () => client.end());
+  client.on("close", () => {
+    run.latest = client.getSession() ?? null;
+    resolve(run);
+  });
+  client.on("error", reject);
+  return deadline(promise, 5000);
+}
+
+function startSessionServer(options: AnyOptions = {}): Promise<tls.Server> {
+  const { promise, resolve } = Promise.withResolvers<tls.Server>();
+  const server = tls.createServer(
+    { cert, key, ...options },
+    (socket: net.Socket) => socket.end("x"),
+  );
+  server.listen(0, "127.0.0.1", () => resolve(server));
+  return promise;
+}
+
+Deno.test("tls 1.3 sessions are real, unique and resumable", async () => {
+  const server = await startSessionServer();
+  try {
+    const { port } = server.address() as net.AddressInfo;
+    const opts = { port, host: "127.0.0.1" };
+    const first = await runSessionClient(opts);
+    assertEquals(first.reused, false);
+    assertEquals(first.version, "TLSv1.3");
+    assert(first.sessions.length >= 1, "expected a 'session' event");
+    assertEquals(
+      new Set(first.sessions.map((s) => s.toString("hex"))).size,
+      first.sessions.length,
+      "each ticket must be its own session",
+    );
+    assert(first.ticketAtSession, "getTLSTicket() after a ticket arrived");
+
+    // A resumed TLS 1.3 connection gets fresh tickets ('session' events),
+    // like BoringSSL.
+    const second = await runSessionClient({ ...opts, session: first.latest });
+    assertEquals(second.reused, true);
+    assert(second.sessions.length >= 1, "resumed connection got no tickets");
+    assert(!second.sessions[0].equals(first.latest!));
+
+    // The same buffer resumes again (its lineage was refilled).
+    const third = await runSessionClient({ ...opts, session: first.latest });
+    assertEquals(third.reused, true);
+  } finally {
+    await closeServer(server);
+  }
+});
+
+Deno.test("tls 1.2 session resumes and reports the offered ticket", async () => {
+  const server = await startSessionServer({ maxVersion: "TLSv1.2" });
+  try {
+    const { port } = server.address() as net.AddressInfo;
+    const opts = { port, host: "127.0.0.1" };
+    const first = await runSessionClient(opts);
+    assertEquals(first.reused, false);
+    assertEquals(first.sessions.length, 1);
+    const ticket = first.ticketAtSession;
+    assert(ticket && ticket.length > 0, "server issued no ticket");
+    for (let i = 0; i < 2; i++) {
+      const again = await runSessionClient({ ...opts, session: first.latest });
+      assertEquals(again.reused, true);
+      // OpenSSL keeps the offered TLS 1.2 session: no new 'session' event,
+      // and getTLSTicket() is the ticket that was offered.
+      assertEquals(again.sessions.length, 0);
+      assertEquals(
+        again.ticketAtConnect?.toString("hex"),
+        ticket.toString("hex"),
+      );
+    }
+  } finally {
+    await closeServer(server);
+  }
+});
+
+Deno.test("tls server ticketKeys are shared and rotated", async () => {
+  const keys = Buffer.alloc(48, 7);
+  const a = await startSessionServer({ ticketKeys: keys });
+  const b = await startSessionServer({ ticketKeys: keys });
+  const c = await startSessionServer();
+  try {
+    assertEquals(a.getTicketKeys().compare(keys), 0);
+    // Without ticketKeys a server gets random keys, as in Node.
+    assert(!c.getTicketKeys().equals(Buffer.alloc(48)));
+    const portOf = (s: tls.Server) => (s.address() as net.AddressInfo).port;
+    const opts = { host: "127.0.0.1", maxVersion: "TLSv1.2" };
+    const first = await runSessionClient({ ...opts, port: portOf(a) });
+    // Same keys on another server: resumes.
+    const onB = await runSessionClient({
+      ...opts,
+      port: portOf(b),
+      session: first.latest,
+    });
+    assertEquals(onB.reused, true);
+    // Other keys: full handshake.
+    const onC = await runSessionClient({
+      ...opts,
+      port: portOf(c),
+      session: first.latest,
+    });
+    assertEquals(onC.reused, false);
+    // Rotated keys: full handshake; restored keys: resumes again.
+    b.setTicketKeys(Buffer.alloc(48, 9));
+    const rotated = await runSessionClient({
+      ...opts,
+      port: portOf(b),
+      session: first.latest,
+    });
+    assertEquals(rotated.reused, false);
+    b.setTicketKeys(keys);
+    const restored = await runSessionClient({
+      ...opts,
+      port: portOf(b),
+      session: first.latest,
+    });
+    assertEquals(restored.reused, true);
+  } finally {
+    await closeServer(a);
+    await closeServer(b);
+    await closeServer(c);
+  }
+});
+
+Deno.test("tls session resumes with an explicit ca", async () => {
+  const server = await startSessionServer();
+  try {
+    const { port } = server.address() as net.AddressInfo;
+    const opts = { port, host: "localhost", ca: [rootCaCert] };
+    const first = await runSessionClient({ ...opts, rejectUnauthorized: true });
+    assertEquals(first.reused, false);
+    const second = await runSessionClient({
+      ...opts,
+      rejectUnauthorized: true,
+      session: first.latest,
+    });
+    assertEquals(second.reused, true);
+    // A session is offered only to the server name it was issued for.
+    const insecure = await runSessionClient({
+      ...opts,
+      servername: "localhost",
+    });
+    const sameName = await runSessionClient({
+      ...opts,
+      servername: "localhost",
+      session: insecure.latest,
+    });
+    assertEquals(sameName.reused, true);
+    const otherName = await runSessionClient({
+      ...opts,
+      servername: "example.com",
+      session: sameName.latest,
+    });
+    assertEquals(otherName.reused, false);
+  } finally {
+    await closeServer(server);
+  }
+});
+
+Deno.test("tls ciphers option selects rustls suites", async () => {
+  const server = await startSessionServer();
+  try {
+    const { port } = server.address() as net.AddressInfo;
+    const opts = { port, host: "127.0.0.1" };
+    const tls12 = await runSessionClient({
+      ...opts,
+      maxVersion: "TLSv1.2",
+      ciphers: "ECDHE-RSA-CHACHA20-POLY1305",
+    });
+    assertEquals(tls12.cipher, "ECDHE-RSA-CHACHA20-POLY1305");
+    const keyword = await runSessionClient({
+      ...opts,
+      maxVersion: "TLSv1.2",
+      ciphers: "HIGH:!CHACHA20:!AES256",
+    });
+    assertEquals(keyword.cipher, "ECDHE-RSA-AES128-GCM-SHA256");
+    const tls13 = await runSessionClient({
+      ...opts,
+      ciphers: "TLS_CHACHA20_POLY1305_SHA256",
+    });
+    assertEquals(tls13.cipher, "TLS_CHACHA20_POLY1305_SHA256");
+    // Only TLS 1.3 suites named: TLS 1.3 only, as in Node.
+    assertEquals(tls13.version, "TLSv1.3");
+  } finally {
+    await closeServer(server);
   }
 });
