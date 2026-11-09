@@ -11480,6 +11480,67 @@ where the changes are discussed.
        short flags repeated, an explicit deny still wins, and the fragments
        between the commas stay inaccessible).
 
+NNN. **`feat(ext/node)`: fetch takes Node's global proxy, and node:http's
+proxy, keep-alive, pipelining and header-limit gaps** (runtime;
+`ext/fetch/26_fetch.js`, `ext/fetch/lib.rs`, `ext/node/polyfills/_http_proxy.js`,
+`_http_client.js`, `_http_outgoing.ts`, `_http_server.js`, `_http_common.js`,
+`http.ts`, `https.ts`, `internal_binding/http_parser.ts`, `node_options.ts`,
+`ext/node/ops/llhttp/binding.rs`, `libs/node_shim/lib.rs`).
+
+Proxy for fetch: `fetch()` follows Node's global proxy configuration
+(`NODE_USE_ENV_PROXY=1`, `--use-env-proxy`, `http.setGlobalProxyFromEnv()`,
+`NO_PROXY`) once node:http has loaded. This picks the client only: when the
+default client's environment proxy is already the one Node chose it is kept as
+is, and otherwise the request goes through a `Deno.createHttpClient` proxy
+client, whose own permission checks apply. A request routed this way carries
+Node's fetch defaults where the caller set none (`connection: keep-alive`,
+`sec-fetch-mode: cors`, `user-agent: node`, `accept-encoding: gzip, deflate`),
+and fetch now decodes a `deflate` (zlib) response body.
+
+Proxied `http.request()`: the request authority is checked as in Node 26. A
+caller's Host header (object, flat array or array of pairs) and an absolute-form
+path must name the request's `host:port`, an absolute path must use `http:`
+without userinfo, an origin-form path must start with `/`, and a duplicate Host
+is refused (`ERR_INVALID_ARG_VALUE`); the sent Host is canonicalized, and
+`CONNECT` / `OPTIONS *` keep their target. Behind a per-agent `proxyEnv` with a
+finite `maxSockets` the CONNECT asks the proxy to keep the connection alive, and
+a refused tunnel reports `Failed to establish tunnel to <target> via <proxy URL,
+credentials redacted>`.
+
+Keep-alive hang: `OutgoingMessage` counted corks only while it had no socket,
+but `end()` follows Node 26's always-counting cork, so a request ended before
+its socket connected left that socket corked for good and the next request on it
+never left (a "socket hang up" once the server's keep-alive timeout closed the
+idle connection). `cork()` / `uncork()` count every cork now, as in Node 26.
+
+Pipelining: the server skipped resuming a socket it had paused for a flood of
+pipelined requests whenever the queued output fell below the high-water mark, so
+the connection stalled until the keep-alive timeout dropped it (10,000
+pipelined requests reset after about 1,800). It now checks every change, and
+emits a response's `drain` only once nothing is pending, as Node 26 does. A
+response still queued for a pipelined request when the connection closes is
+destroyed and emits `close` (`OutgoingMessage#destroy()` without a socket closes
+on the next tick, and `closed` is there) instead of waiting for a socket.
+
+Header limits: a 400/408/413/431 written for a client error now reaches the
+client before the socket is destroyed; `server.maxHeadersCount` (the parser's
+`maxHeaderPairs`) fails a request with too many headers with
+`HPE_HEADER_OVERFLOW`; `--insecure-http-parser` and `--max-http-header-size`
+reach node:http through NODE_OPTIONS (also from a spawned `process.execPath`),
+and `http.maxHeaderSize` and the parser's default limit follow the latter.
+
+Not covered: fetch through a proxy to an `https:` fixture with an X.509 v1
+certificate (rustls refuses it) and the fetch client's CONNECT headers
+(`ext/fetch/proxy.rs`); a program that never loads node:http keeps the default
+client's environment proxy for fetch; `parallel/test-http-keep-alive-empty-line`.
+
+Tests: node_compat client-proxy (13 more), `parallel/test-http-header-overflow`,
+`-insecure-parser`, `-max-header-size`, `-max-headers-count-overflow`,
+`-outgoing-drain-writable-length`, `-pipeline-outgoing-destroy`,
+`-pipeline-requests-connection-leak`; unit_node `http_test.ts` (a request queued
+behind one ended while connecting, the proxied authority checks, the 431 via
+`socket.push()`); `libs/node_shim` `http_parser_flags_ride_along_in_node_options`.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,

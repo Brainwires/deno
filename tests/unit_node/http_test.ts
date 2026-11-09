@@ -4909,3 +4909,131 @@ Deno.test({
     }
   },
 });
+
+// A request ended before its socket connected left the socket corked for good
+// (OutgoingMessage counted corks only while it had no socket, but end()
+// assumes Node 26's always-counting cork), so a request queued behind it on a
+// keep-alive agent never wrote its bytes and failed with "socket hang up"
+// once the server's keep-alive timeout closed the idle connection.
+Deno.test("[node/http] a request queued behind one ended while connecting is sent on the reused socket", async () => {
+  const server = http.createServer((req, res) => res.end(req.url));
+  server.keepAliveTimeout = 60_000;
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const agent = new http.Agent({ maxSockets: 1 });
+  const port = (server.address() as AddressInfo).port;
+  const get = (path: string) => {
+    const { promise, resolve, reject } = Promise.withResolvers<string>();
+    const req = http.request(
+      { host: "127.0.0.1", port, path, agent },
+      (res) => {
+        let body = "";
+        res.setEncoding("utf8");
+        res.on("data", (chunk) => body += chunk);
+        res.on("end", () => resolve(body));
+      },
+    );
+    req.on("error", reject);
+    return { req, promise };
+  };
+  try {
+    const first = get("/first");
+    const { promise: secondDone, resolve: setSecond } = Promise.withResolvers<
+      Promise<string>
+    >();
+    first.req.on("socket", () => {
+      const second = get("/second");
+      first.req.end();
+      second.req.end();
+      setSecond(second.promise);
+    });
+    assertEquals(await first.promise, "/first");
+    const timeout = setTimeout(() => agent.destroy(), 5_000);
+    try {
+      assertEquals(await (await secondDone), "/second");
+    } finally {
+      clearTimeout(timeout);
+    }
+  } finally {
+    agent.destroy();
+    server.close();
+    await new Promise((resolve) => server.on("close", resolve));
+  }
+});
+
+// Node checks a proxied request's Host header and absolute-form path against
+// the authority it was built for, and canonicalizes the Host it sends.
+Deno.test("[node/http] proxied request authority is validated and canonicalized", () => {
+  const agent = new http.Agent({
+    proxyEnv: { HTTP_PROXY: "http://localhost:1" },
+  });
+  try {
+    const req = http.request({
+      agent,
+      host: "localhost",
+      port: 80,
+      defaultPort: 8080,
+      path: "/g",
+      headers: { Host: "localhost:80" },
+    });
+    req.on("error", () => {});
+    assertEquals(req.path, "http://localhost/g");
+    assertEquals(req.getHeader("host"), "localhost");
+    req.destroy();
+
+    const options = { agent, host: "localhost", port: 3000, path: "/x" };
+    for (
+      const [extra, message] of [
+        [{ path: "http://example.test/x" }, /must match the request authority/],
+        [
+          { headers: { Host: "bad.example" } },
+          /must match the request authority/,
+        ],
+        [{ path: "https://localhost:3000/x" }, /must use http: scheme/],
+        [{ path: "http://u:p@localhost:3000/x" }, /must not contain userinfo/],
+        [{ path: "@other.example/x" }, /absolute-form or start with \//],
+        [
+          { headers: ["Host", "localhost:3000", "host", "bad.example"] },
+          /must not contain duplicate Host headers/,
+        ],
+      ] as const
+    ) {
+      const err = assertThrows(() => http.request({ ...options, ...extra })) as
+        & Error
+        & { code?: string };
+      assertEquals(err.code, "ERR_INVALID_ARG_VALUE");
+      assertEquals(message.test(err.message), true, err.message);
+    }
+  } finally {
+    agent.destroy();
+  }
+});
+
+// The 431 written for a header overflow was still queued when the socket was
+// destroyed, so the client got nothing (Node's test-http-header-overflow).
+Deno.test("[node/http] header overflow answers 431 before the socket closes", async () => {
+  const payload = "GET /blah HTTP/1.1\r\nCookie: " +
+    "a".repeat(http.maxHeaderSize - "Cookie: ".length + 1);
+  const server = http.createServer();
+  server.on("connection", (socket) => {
+    socket.on("error", () => {});
+    socket.push(payload);
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const client = net.createConnection(
+      (server.address() as AddressInfo).port,
+      "127.0.0.1",
+    );
+    let received = "";
+    client.on("data", (chunk) => received += chunk);
+    await once(client, "end");
+    client.end();
+    assertEquals(
+      received,
+      "HTTP/1.1 431 Request Header Fields Too Large\r\nConnection: close\r\n\r\n",
+    );
+  } finally {
+    server.close();
+    await new Promise((resolve) => server.on("close", resolve));
+  }
+});

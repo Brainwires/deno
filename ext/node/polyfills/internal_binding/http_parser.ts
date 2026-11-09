@@ -27,6 +27,18 @@ const { core } = __bootstrap;
 const { HTTPParser: NativeHTTPParser } = core.ops;
 const { Buffer } = core.loadExtScript("ext:deno_node/internal/buffer.mjs");
 const { AsyncResource } = core.loadExtScript("ext:deno_node/async_hooks.ts");
+const { getOptionValue } = core.loadExtScript(
+  "ext:deno_node/internal/options.ts",
+);
+
+// `--max-http-header-size` (node CLI flag or NODE_OPTIONS), 16 KiB by
+// default: `http.maxHeaderSize`, and a parser's limit when it is given none
+// (Node's parser falls back to the same option). Read on use rather than at
+// module evaluation, which can run before the options exist.
+function getMaxHTTPHeaderSize(): number {
+  const value = Number(getOptionValue("--max-http-header-size") ?? "");
+  return Number.isSafeInteger(value) && value > 0 ? value : 16384;
+}
 
 // Method names indexed by llhttp method enum values.
 // Order must match llhttp_method_t in llhttp.h.
@@ -154,9 +166,9 @@ HTTPParser.prototype.initialize = function (
   maxHeaderSize?: number,
   lenientFlags?: number,
 ) {
-  // Default to the global maxHeaderSize (16384) when not specified,
-  // matching Node.js behavior where 0 means "use the default".
-  const effectiveMaxHeaderSize = maxHeaderSize || 16384;
+  // 0 or unset means "use the default", `--max-http-header-size`, as in
+  // Node.
+  const effectiveMaxHeaderSize = maxHeaderSize || getMaxHTTPHeaderSize();
   // Store the async resource so execute() can run callbacks in the
   // correct async context (preserves AsyncLocalStorage through the
   // native parser, emulating Node's MakeCallback behavior).
@@ -315,5 +327,5 @@ HTTPParser.kLenientOptionalCRBeforeLF = 256;
 HTTPParser.kLenientSpacesAfterChunkSize = 512;
 HTTPParser.kLenientAll = 1023;
 
-return { methods, allMethods, HTTPParser };
+return { methods, allMethods, getMaxHTTPHeaderSize, HTTPParser };
 })();

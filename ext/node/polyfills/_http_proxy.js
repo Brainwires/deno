@@ -24,9 +24,12 @@ import { op_get_env_no_permission_check } from "ext:core/ops";
 const {
   ArrayIsArray,
   ArrayPrototypePush,
+  MapPrototypeGet,
+  MapPrototypeSet,
   Number,
   NumberIsInteger,
   RegExpPrototypeExec,
+  SafeMap,
   SafeRegExp,
   String,
   StringPrototypeEndsWith,
@@ -144,8 +147,18 @@ function parseProxyUrl(raw, kind, mode) {
   ) {
     hostname = StringPrototypeSlice(hostname, 1, -1);
   }
+  // The proxy URL as error messages show it: Node keeps the caller's string
+  // unless it carries credentials, which are cleared.
+  let href = raw;
+  if (url.username || url.password) {
+    const redacted = new URL(raw);
+    redacted.username = "";
+    redacted.password = "";
+    href = redacted.href;
+  }
   return {
     raw,
+    href,
     protocol: url.protocol,
     hostname,
     port: url.port ? Number(url.port) : (url.protocol === "https:" ? 443 : 80),
@@ -448,6 +461,93 @@ function hasGlobalProxy() {
   maybeInitFromEnv();
   return globalProxyConfig !== null;
 }
+
+// === fetch() routing ===
+//
+// Node's fetch takes the same global proxy configuration as node:http. fetch()
+// asks `routeFetch` for each request (see `setNodeProxyRouter` in
+// ext:deno_fetch/26_fetch.js). This only picks the client a request is sent
+// through; that client's own permission checks apply as they always do.
+
+// The proxy URL Deno's default fetch client takes from the environment for a
+// scheme, in the order ext/fetch's `proxy::from_env()` reads it.
+function defaultClientProxyFor(protocol) {
+  const read = (key) => {
+    const value = op_get_env_no_permission_check(key);
+    return value === undefined || value === null || value === ""
+      ? undefined
+      : value;
+  };
+  const all = read("ALL_PROXY") ?? read("all_proxy");
+  if (all !== undefined) return all;
+  if (protocol === "https:") {
+    return read("HTTPS_PROXY") ?? read("https_proxy");
+  }
+  // In a CGI context `Proxy:` request headers arrive as HTTP_PROXY, so the
+  // default client ignores it there.
+  if (read("REQUEST_METHOD") !== undefined) return undefined;
+  return read("HTTP_PROXY") ?? read("http_proxy");
+}
+
+let fetchClients = null;
+
+function fetchClientRidFor(entry) {
+  fetchClients ??= new SafeMap();
+  let client = MapPrototypeGet(fetchClients, entry.raw);
+  if (client === undefined) {
+    const { createHttpClient } = core.loadExtScript(
+      "ext:deno_fetch/22_http_client.js",
+    );
+    const host = StringPrototypeIndexOf(entry.hostname, ":") !== -1
+      ? `[${entry.hostname}]`
+      : entry.hostname;
+    const proxy = { url: `${entry.protocol}//${host}:${entry.port}` };
+    if (entry.username || entry.password) {
+      proxy.basicAuth = {
+        username: entry.username,
+        password: entry.password,
+      };
+    }
+    client = createHttpClient({ proxy });
+    MapPrototypeSet(fetchClients, entry.raw, client);
+  }
+  return client[core.internalRidSymbol];
+}
+
+function routeFetch(href) {
+  let config;
+  try {
+    config = getGlobalProxyConfig();
+  } catch {
+    // A malformed proxy variable fails node:http requests; fetch keeps the
+    // default client, as before.
+    return null;
+  }
+  if (config === null) return null;
+  let url;
+  try {
+    url = new URL(href);
+  } catch {
+    return null;
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") return null;
+  const port = url.port
+    ? Number(url.port)
+    : (url.protocol === "https:" ? 443 : 80);
+  const entry = selectProxy(config, url.protocol, url.hostname, port);
+  if (entry === null) return null;
+  // When the default client already goes through this proxy (the usual
+  // NODE_USE_ENV_PROXY case), keep it, so nothing about how that request is
+  // sent changes but its headers.
+  const rid = defaultClientProxyFor(url.protocol) === entry.raw
+    ? null
+    : fetchClientRidFor(entry);
+  return { rid, nodeDefaults: true };
+}
+
+core.loadExtScript("ext:deno_fetch/26_fetch.js").setNodeProxyRouter(
+  routeFetch,
+);
 
 // Called by the runtime bootstrap if NODE_USE_ENV_PROXY=1 (or
 // --use-env-proxy) is set. Reads the process.env at that time.

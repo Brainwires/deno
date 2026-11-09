@@ -89,6 +89,7 @@ const {
   connResetException,
   ERR_HTTP_HEADERS_SENT,
   ERR_INVALID_ARG_TYPE,
+  ERR_INVALID_ARG_VALUE,
   ERR_INVALID_CHAR,
   ERR_INVALID_HTTP_TOKEN,
   ERR_INVALID_PROTOCOL,
@@ -98,6 +99,7 @@ const {
 const {
   validateBoolean,
   validateInteger,
+  validatePort,
 } = core.loadExtScript("ext:deno_node/internal/validators.mjs");
 const { getTimerDuration } = core.loadExtScript(
   "ext:deno_node/internal/timers.mjs",
@@ -447,59 +449,223 @@ function isURL(input) {
   return ObjectPrototypeIsPrototypeOf(URL.prototype, input);
 }
 
-// Builds the absolute-form request target (RFC 9112 section 3.2.2) that an
-// HTTP proxy is given in place of the origin-form path.
-//
-// Node builds it with `new URL()`, so go through the URL parser here too:
-// `href` omits the port when it is the scheme default and normalizes the
-// authority (lowercasing, IDNA), neither of which string concatenation does.
-// `authorityHost` must not carry the port - it is applied separately so the
-// parser can drop it when it is the default.
-//
-// The path is resolved against the origin rather than the full base URL: a
-// path of `//host/x` is protocol-relative to the URL parser and would
-// otherwise silently retarget the request at another authority.
-function buildProxyRequestTarget(authorityHost, port, path) {
-  let base;
-  try {
-    base = new URL(`http://${authorityHost}`);
-    base.port = port;
-  } catch {
-    // A host the URL parser rejects is not a reachable target; node:http
-    // reports that while building the request. Fall back to concatenation so
-    // this helper is not what fails first.
-    const portSuffix = +port === 80 ? "" : `:${port}`;
-    return `http://${authorityHost}${portSuffix}${path}`;
-  }
-
-  // An absolute-form path is already a complete target. It is only honored
-  // when its authority matches the one that `--allow-net` validated and it
-  // carries no userinfo: the permission check upstream sees only `host` and
-  // `port`, so an absolute `path` aimed at another authority (or embedding
-  // credentials for one) would otherwise retarget the proxied request past
-  // that check. Fail closed instead - like a denied direct connection.
-  let absolute = null;
-  try {
-    absolute = new URL(path);
-  } catch {
-    // Not absolute-form; resolved as an origin-form path below.
-  }
-  if (absolute !== null) {
-    if (
-      absolute.host !== base.host ||
-      absolute.username !== "" ||
-      absolute.password !== ""
-    ) {
-      throw new ERR_INVALID_URL(path);
+// Returns the Host value of an array-form `headers` option, or undefined if
+// it has none. The documented shape is [k, v, k, v, ...]; [[k, v], ...] is
+// accepted too, as Node does. Anything else in a pairs array, and a second
+// Host entry in either shape, is refused: the proxied request's authority is
+// checked against the one Host value, so a smuggled second one must not reach
+// the wire.
+function getHostFromHeaderArray(headers) {
+  let host;
+  const isPairs = headers.length > 0 && ArrayIsArray(headers[0]);
+  if (isPairs) {
+    for (let i = 0; i < headers.length; i++) {
+      const entry = headers[i];
+      if (!ArrayIsArray(entry)) {
+        throw new ERR_INVALID_ARG_VALUE(
+          `options.headers[${i}]`,
+          typeof entry,
+          "must be an array when headers is passed as an array of pairs",
+        );
+      }
+      if (StringPrototypeToLowerCase(`${entry[0]}`) === "host") {
+        if (host !== undefined) {
+          throw new ERR_INVALID_ARG_VALUE(
+            "options.headers",
+            "(redacted)",
+            "must not contain duplicate Host headers",
+          );
+        }
+        host = `${entry[1]}`;
+      }
     }
-    return absolute.href;
+  } else {
+    for (let i = 0; i + 1 < headers.length; i += 2) {
+      if (StringPrototypeToLowerCase(`${headers[i]}`) === "host") {
+        if (host !== undefined) {
+          throw new ERR_INVALID_ARG_VALUE(
+            "options.headers",
+            "(redacted)",
+            "must not contain duplicate Host headers",
+          );
+        }
+        host = `${headers[i + 1]}`;
+      }
+    }
+  }
+  return host;
+}
+
+function authoritiesMatch(canonicalHost, hostFromHeader) {
+  let parsed;
+  try {
+    parsed = new URL(`http://${hostFromHeader}`);
+  } catch {
+    return false;
+  }
+  if (
+    parsed.username || parsed.password ||
+    parsed.pathname !== "/" || parsed.search || parsed.hash
+  ) {
+    return false;
+  }
+  return parsed.host === canonicalHost;
+}
+
+// Checks a proxied http request against its request authority (RFC 9112
+// section 3.2), the way Node does: a caller-supplied Host header and an
+// absolute-form path must name the `host`/`port` the request was built for,
+// an absolute-form path must use http: and carry no userinfo, and an
+// origin-form path must start with "/". Returns the request URL whose `href`
+// becomes the absolute-form target.
+//
+// This is also what keeps `--allow-net` honest for proxied requests: the
+// permission check sees only `host` and `port`, so a path or Host header aimed
+// at another authority would otherwise retarget the request past it.
+//
+// The authority is built with `new URL()`, so the port is dropped when it is
+// the scheme default and the host is normalized (lowercased, IDNA), neither of
+// which string concatenation does.
+function validateRequestAuthority(
+  pathOption,
+  proxyAuthority,
+  userHostHeader,
+  headerArray,
+) {
+  validatePort(proxyAuthority.port, "options.port", true);
+  pathOption = `${pathOption}`;
+  let requestBase;
+  try {
+    requestBase = new URL(`http://${proxyAuthority.host}`);
+  } catch {
+    throw new ERR_INVALID_URL(`http://${proxyAuthority.host}`);
+  }
+  requestBase.port = proxyAuthority.port;
+
+  const result = { requestBase, requestURL: undefined };
+  if (headerArray !== undefined) {
+    const host = getHostFromHeaderArray(headerArray);
+    // The array is not rewritten to a canonical Host, so its value has to be
+    // the canonical authority already.
+    if (host !== undefined && host !== requestBase.host) {
+      throw new ERR_INVALID_ARG_VALUE(
+        "Host in options.headers",
+        host,
+        `must match the request authority (${requestBase.host})`,
+      );
+    }
+  } else if (userHostHeader !== undefined) {
+    if (!authoritiesMatch(requestBase.host, userHostHeader)) {
+      throw new ERR_INVALID_ARG_VALUE(
+        "Host in options.headers",
+        userHostHeader,
+        `must match the request authority (${requestBase.host})`,
+      );
+    }
   }
 
+  let requestURL;
+  let isAbsoluteForm = false;
   try {
-    return new URL(base.origin + path).href;
+    requestURL = new URL(pathOption);
+    isAbsoluteForm = true;
   } catch {
-    const portSuffix = +port === 80 ? "" : `:${port}`;
-    return `http://${authorityHost}${portSuffix}${path}`;
+    if (StringPrototypeCharCodeAt(pathOption, 0) !== 0x2F) {
+      throw new ERR_INVALID_ARG_VALUE(
+        "options.path",
+        pathOption,
+        "must be in absolute-form or start with /",
+      );
+    }
+    // Resolved against the origin, not used as a base: a path of `//host/x`
+    // is protocol-relative to the URL parser and would otherwise retarget
+    // the request at another authority.
+    requestURL = new URL(requestBase.origin + pathOption);
+  }
+  result.requestURL = requestURL;
+  if (!isAbsoluteForm) {
+    return result;
+  }
+
+  if (requestURL.username || requestURL.password) {
+    requestURL.username = "";
+    requestURL.password = "";
+    throw new ERR_INVALID_ARG_VALUE(
+      "options.path",
+      requestURL.href,
+      "must not contain userinfo, use options.auth instead",
+    );
+  }
+
+  if (requestURL.protocol !== "http:") {
+    throw new ERR_INVALID_ARG_VALUE(
+      "options.path",
+      requestURL.protocol,
+      "must use http: scheme when specified as an absolute URL",
+    );
+  }
+
+  if (requestBase.host !== requestURL.host) {
+    throw new ERR_INVALID_ARG_VALUE(
+      "options.path",
+      requestURL,
+      `must match the request authority (${requestBase.host})`,
+    );
+  }
+
+  return result;
+}
+
+// For an http request through an http proxy (RFC 9112 section 3.2.2): check
+// the request authority, rewrite the path to absolute-form and add the
+// Proxy-Connection / Proxy-Authorization headers. CONNECT and `OPTIONS *`
+// keep their request target. Mirrors Node's `rewriteForProxiedHttp`.
+function rewriteForProxiedHttp(
+  req,
+  proxyAuthority,
+  userHostHeader,
+  headerArray,
+) {
+  if (req._header) return;
+  if (!req[kProxy] || req.protocol !== "http:") return;
+
+  let requestURL;
+  if (
+    req.method !== "CONNECT" && !(req.method === "OPTIONS" && req.path === "*")
+  ) {
+    // Validate before touching the headers, so a refused request does not
+    // leave proxy headers behind on the outgoing header store.
+    const result = validateRequestAuthority(
+      req.path,
+      proxyAuthority,
+      userHostHeader,
+      headerArray,
+    );
+    if (headerArray === undefined) {
+      const currentHost = req.getHeader("host");
+      if (
+        currentHost !== undefined && currentHost !== result.requestBase.host
+      ) {
+        req.setHeader("Host", result.requestBase.host);
+      }
+    }
+    requestURL = result.requestURL;
+  }
+
+  if (req[kProxy].auth && !req.getHeader("proxy-authorization")) {
+    req.setHeader("Proxy-Authorization", req[kProxy].auth);
+  }
+  if (!req.getHeader("proxy-connection")) {
+    // Mirrors what _storeHeader picks for Connection on the proxy hop.
+    req.setHeader(
+      "Proxy-Connection",
+      req.shouldKeepAlive ? "keep-alive" : "close",
+    );
+  }
+
+  if (requestURL !== undefined) {
+    req[kPath] = requestURL.href;
+    req[kProxyRewrittenToAbsolute] = true;
   }
 }
 
@@ -641,9 +807,13 @@ function ClientRequest(input, options, cb) {
     optsWithoutSignal._proxyTargetHost = host;
     optsWithoutSignal._proxyTargetPort = port;
     optsWithoutSignal._proxyProtocol = protocol;
+    // Node asks the proxy to keep the CONNECT tunnel's connection alive when
+    // the agent may reuse sockets: keepAlive, or a finite maxSockets.
     optsWithoutSignal._proxyUseProxyConnection =
       !(this.agent && this.agent.__proxyConfig !== undefined) ||
-      this.agent?.keepAlive === true;
+      this.agent?.keepAlive === true ||
+      (this.agent?.maxSockets !== undefined &&
+        this.agent.maxSockets !== Infinity);
   }
 
   const setHost = options.setHost !== undefined
@@ -755,9 +925,9 @@ function ClientRequest(input, options, cb) {
   ) {
     hostHeaderFromOptions = `[${hostHeaderFromOptions}]`;
   }
-  // Captured before the port is appended: building the proxy request target
-  // takes the host and the port separately, the way Node's does.
-  const proxyAuthorityHost = hostHeaderFromOptions;
+  // Captured before the port is appended: the proxied request's authority is
+  // built from the host and the port separately, the way Node's is.
+  const proxyAuthority = { host: hostHeaderFromOptions, port };
 
   if (port && +port !== defaultPort) {
     hostHeaderFromOptions += ":" + port;
@@ -765,18 +935,6 @@ function ClientRequest(input, options, cb) {
   // Preserve the request authority (with the port when non-default) so that
   // the perf_hooks entry can report a faithful URL.
   this[kAuthority] = hostHeaderFromOptions;
-
-  // For HTTP via HTTP proxy, rewrite path to an absolute URL so the proxy
-  // knows where to forward the request. This has to come after the authority
-  // above so both derive from the same bracketed host.
-  if (this[kProxy] && protocol === "http:") {
-    this[kPath] = buildProxyRequestTarget(
-      proxyAuthorityHost,
-      port,
-      this[kPath],
-    );
-    this[kProxyRewrittenToAbsolute] = true;
-  }
 
   const headersArray = ArrayIsArray(options.headers);
   if (!headersArray) {
@@ -787,6 +945,10 @@ function ClientRequest(input, options, cb) {
         this.setHeader(key, options.headers[key]);
       }
     }
+
+    // Read before the implicit Host below, so the proxied-request check can
+    // tell a caller's Host from the one derived here.
+    const userHostHeader = this.getHeader("host");
 
     if (host && !this.getHeader("host") && setHost) {
       let hostHeader = hostHeaderFromOptions;
@@ -808,32 +970,21 @@ function ClientRequest(input, options, cb) {
       );
     }
 
-    if (this[kProxy] && protocol === "http:") {
-      // Mirror what _storeHeader will pick for Connection: when shouldKeepAlive
-      // is true, both Connection and Proxy-Connection are "keep-alive"; when
-      // false, both are "close". Matches Node's wire format on the proxy hop.
-      if (!this.getHeader("proxy-connection")) {
-        this.setHeader(
-          "Proxy-Connection",
-          this.shouldKeepAlive ? "keep-alive" : "close",
-        );
-      }
-      if (this[kProxy].auth && !this.getHeader("proxy-authorization")) {
-        this.setHeader("Proxy-Authorization", this[kProxy].auth);
-      }
-    }
-
     if (this.getHeader("expect")) {
       if (this._header) {
         throw new ERR_HTTP_HEADERS_SENT("render");
       }
 
+      rewriteForProxiedHttp(this, proxyAuthority, userHostHeader);
       this._storeHeader(
         this.method + " " + this.path + " HTTP/1.1\r\n",
         this[kOutHeaders],
       );
+    } else {
+      rewriteForProxiedHttp(this, proxyAuthority, userHostHeader);
     }
   } else {
+    rewriteForProxiedHttp(this, proxyAuthority, undefined, options.headers);
     this._storeHeader(
       this.method + " " + this.path + " HTTP/1.1\r\n",
       options.headers,
