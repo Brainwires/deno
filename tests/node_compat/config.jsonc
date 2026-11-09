@@ -67,13 +67,10 @@
     "async-hooks/test-async-local-storage-async-await.js": {},
     "async-hooks/test-async-local-storage-args.js": {},
     "async-hooks/test-async-await.js": {},
-    "client-proxy/test-use-env-proxy-cli-http.mjs": {
-      "ignore": true,
-      "reason": "Tests Node.js-specific CLI flags/options that are not supported in Deno"
-    },
+    "client-proxy/test-use-env-proxy-cli-http.mjs": {},
     "client-proxy/test-use-env-proxy-cli-https.mjs": {
       "ignore": true,
-      "reason": "Tests Node.js-specific CLI flags/options that are not supported in Deno"
+      "reason": "fetch() cannot reach the fixture through the proxy: rustls refuses the fixture's X.509 v1 certificate (UnsupportedCertVersion), and the fetch client's CONNECT request carries User-Agent where the test expects Node's exact header set"
     },
     "client-proxy/test-use-env-proxy-precedence.mjs": {},
     "es-module/test-cjs-legacyMainResolve.js": {
@@ -2082,6 +2079,7 @@
     "parallel/test-http-head-throw-on-response-body-write.js": {},
     "parallel/test-http-header-badrequest.js": {},
     "parallel/test-http-header-obstext.js": {},
+    "parallel/test-http-header-overflow.js": {},
     "parallel/test-http-header-owstext.js": {},
     "parallel/test-http-header-read.js": {},
     "parallel/test-http-header-validators.js": {},
@@ -2098,6 +2096,7 @@
     "parallel/test-http-incoming-pipelined-socket-destroy.js": {},
     "parallel/test-http-information-headers.js": {},
     "parallel/test-http-information-processing.js": {},
+    "parallel/test-http-insecure-parser.js": {},
     "parallel/test-http-insecure-parser-per-stream.js": {},
     "parallel/test-http-invalid-path-chars.js": {},
     "parallel/test-http-invalid-te.js": {},
@@ -2122,7 +2121,9 @@
     "parallel/test-http-malformed-request.js": {},
     "parallel/test-http-many-ended-pipelines.js": {},
     "parallel/test-http-max-header-size-per-stream.js": {},
+    "parallel/test-http-max-header-size.js": {},
     "parallel/test-http-max-headers-count.js": {},
+    "parallel/test-http-max-headers-count-overflow.js": {},
     "parallel/test-http-max-http-headers.js": {},
     "parallel/test-http-max-sockets.js": {},
     "parallel/test-http-methods.js": {},
@@ -2139,6 +2140,7 @@
     },
     "parallel/test-http-outgoing-buffer.js": {},
     "parallel/test-http-outgoing-destroy.js": {},
+    "parallel/test-http-outgoing-drain-writable-length.js": {},
     "parallel/test-http-outgoing-end-cork.js": {},
     "parallel/test-http-outgoing-end-types.js": {},
     "parallel/test-http-outgoing-finish-writable.js": {},
@@ -2168,6 +2170,7 @@
     "parallel/test-http-pipe-fs.js": {},
     "parallel/test-http-pipeline-assertionerror-finish.js": {},
     "parallel/test-http-pipeline-flood.js": {},
+    "parallel/test-http-pipeline-outgoing-destroy.js": {},
     "parallel/test-http-pipeline-socket-parser-typeerror.js": {},
     "parallel/test-http-proxy.js": {},
     "parallel/test-http-raw-headers.js": {},
@@ -5226,6 +5229,25 @@
     "client-proxy/test-https-proxy-request-connection-refused.mjs": {},
     "client-proxy/test-https-proxy-request-invalid-credentials.mjs": {},
     "client-proxy/test-https-proxy-request-invalid-url.mjs": {},
+    "client-proxy/test-http-proxy-fetch.mjs": {},
+    "client-proxy/test-http-proxy-request-absolute-path-authority-match.mjs": {},
+    "client-proxy/test-http-proxy-request-authority-construction.mjs": {},
+    "client-proxy/test-http-proxy-request-max-sockets.mjs": {},
+    "client-proxy/test-http-proxy-request-validation-errors.mjs": {},
+    "client-proxy/test-http-set-global-proxy-from-env-fetch.mjs": {},
+    "client-proxy/test-http-set-global-proxy-from-env-fetch-default.mjs": {},
+    "client-proxy/test-http-set-global-proxy-from-env-fetch-https.mjs": {
+      "ignore": true,
+      "reason": "fetch() cannot reach the fixture through the proxy: rustls refuses the fixture's X.509 v1 certificate (UnsupportedCertVersion), and the fetch client's CONNECT request carries User-Agent where the test expects Node's exact header set"
+    },
+    "client-proxy/test-http-set-global-proxy-from-env-fetch-restore.mjs": {},
+    "client-proxy/test-http-set-global-proxy-from-env-override-fetch.mjs": {},
+    "client-proxy/test-https-proxy-fetch.mjs": {
+      "ignore": true,
+      "reason": "fetch() cannot reach the fixture through the proxy: rustls refuses the fixture's X.509 v1 certificate (UnsupportedCertVersion), and the fetch client's CONNECT request carries User-Agent where the test expects Node's exact header set"
+    },
+    "client-proxy/test-https-proxy-request-auth-failure.mjs": {},
+    "client-proxy/test-https-proxy-request-max-sockets.mjs": {},
     "es-module/test-esm-dns-promises.mjs": {},
     "es-module/test-esm-json.mjs": {},
     "es-module/test-esm-loader-custom-condition.mjs": {},
@@ -5648,11 +5670,7 @@
     },
     "parallel/test-http-localaddress.js": {},
     "parallel/test-http-parser-timeout-reset.js": {},
-    "parallel/test-http-pipeline-requests-connection-leak.js": {
-      "linux": false,
-      "darwin": false,
-      "reason": "error: Uncaught Error: read ECONNRESET"
-    },
+    "parallel/test-http-pipeline-requests-connection-leak.js": {},
     "parallel/test-http-request-lookup-error-catchable.js": {},
     "parallel/test-http-response-multi-content-length.js": {},
     "parallel/test-http-server-async-dispose.js": {},

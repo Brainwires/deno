@@ -588,6 +588,13 @@ fn parse_flags(source: &str) -> (Vec<String>, Vec<String>, Vec<String>) {
           n if n.starts_with("--dns-result-order=") => {
             node_options.push(flag.to_string());
           }
+          // node:http reads these from NODE_OPTIONS.
+          "--insecure-http-parser" | "--no-insecure-http-parser" => {
+            node_options.push(flag.to_string());
+          }
+          n if n.starts_with("--max-http-header-size=") => {
+            node_options.push(flag.to_string());
+          }
           "--allow-natives-syntax" => {
             v8_flags.push("--allow-natives-syntax".to_string());
           }

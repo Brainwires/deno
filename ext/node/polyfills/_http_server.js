@@ -762,6 +762,16 @@ function socketOnClose(socket, state) {
   destroySuspendedKeepAliveTimeout(state);
   freeParser(socket.parser, undefined, socket);
   abortIncoming(state.incoming);
+  abortOutgoing(state.outgoing);
+}
+
+// Responses still queued for a pipelined request when the connection closes
+// will never get the socket; destroy them so they emit 'close', as Node does.
+function abortOutgoing(outgoing) {
+  while (outgoing.length) {
+    const res = ArrayPrototypeShift(outgoing);
+    res.destroy(connResetException("aborted"));
+  }
 }
 
 function abortIncoming(incoming) {
@@ -885,7 +895,11 @@ function socketOnDrain(socket, state) {
   }
 
   const msg = socket._httpMessage;
-  if (msg && !msg.finished && msg[kNeedDrain]) {
+  // Only once the message has nothing pending anywhere (Node 26): this also
+  // runs synchronously from updateOutgoingData while output is being flushed.
+  if (
+    msg && !msg.finished && msg[kNeedDrain] && msg.writableLength === 0
+  ) {
     msg[kNeedDrain] = false;
     msg.emit("drain");
   }
@@ -942,7 +956,12 @@ function socketOnError(e) {
           response = badRequestResponse;
           break;
       }
-      this.write(response);
+      // Node's write reaches the wire before its destroy() does. Here the
+      // write is still queued when destroy() would discard it, so the client
+      // got no 4xx at all (seen with a request fed through socket.push()).
+      // Destroy once the response has been handed off, or has failed.
+      this.write(response, () => this.destroy(e));
+      return;
     }
     this.destroy(e);
   }
@@ -952,12 +971,10 @@ function noop() {}
 
 function updateOutgoingData(socket, state, delta) {
   state.outgoingData += delta;
-  if (
-    socket._paused &&
-    state.outgoingData < socket.writableHighWaterMark
-  ) {
-    return;
-  }
+  // As in Node: check every change. Returning early while the socket was
+  // paused and the queued output had fallen below the high-water mark skipped
+  // exactly the resume, so a flood of pipelined requests stalled once reading
+  // paused, until the keep-alive timeout dropped the connection.
   socketOnDrain(socket, state);
 }
 

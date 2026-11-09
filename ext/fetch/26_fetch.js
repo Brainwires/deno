@@ -383,6 +383,47 @@ function createResponseBodyStream(responseBodyRid, terminator) {
  * @param {AbortSignal} terminator
  * @returns {Promise<InnerResponse>}
  */
+// Set by node:http (`ext:deno_node/_http_proxy.js`) once it loads. It routes a
+// fetch the way Node's global proxy configuration does (NODE_USE_ENV_PROXY,
+// `--use-env-proxy`, `http.setGlobalProxyFromEnv()`): given the request URL it
+// returns null to leave the request to the default client, or
+// `{ rid, nodeDefaults: true }` where `rid` is the `Deno.HttpClient` resource
+// to send through (null keeps the default client, whose environment proxy is
+// already the one Node picked). Choosing the client is all it does: the
+// client's own permission checks apply unchanged.
+let nodeProxyRouter = null;
+
+function setNodeProxyRouter(router) {
+  nodeProxyRouter = router;
+}
+
+// The default headers Node's fetch (undici) sends, added to a request that
+// Node's proxy configuration routed, where a caller did not set them. Such a
+// request leaves as Node's would, so a proxy sees the same request either
+// way.
+const NODE_FETCH_DEFAULT_HEADERS = [
+  ["connection", "keep-alive"],
+  ["sec-fetch-mode", "cors"],
+  ["user-agent", "node"],
+  ["accept-encoding", "gzip, deflate"],
+];
+
+function addNodeFetchDefaultHeaders(headerList) {
+  for (let i = 0; i < NODE_FETCH_DEFAULT_HEADERS.length; i++) {
+    const { 0: name, 1: value } = NODE_FETCH_DEFAULT_HEADERS[i];
+    let present = false;
+    for (let j = 0; j < headerList.length; j++) {
+      if (byteLowerCase(headerList[j][0]) === name) {
+        present = true;
+        break;
+      }
+    }
+    if (!present) {
+      ArrayPrototypePush(headerList, [name, value]);
+    }
+  }
+}
+
 async function mainFetch(req, recursive, terminator, inspectorCtx = null) {
   // https://fetch.spec.whatwg.org/#main-fetch step 5: if the request should be
   // blocked due to a bad port, return a network error before any network I/O
@@ -454,11 +495,22 @@ async function mainFetch(req, recursive, terminator, inspectorCtx = null) {
     }
   }
 
+  let clientRid = req.clientRid;
+  if (clientRid === null && nodeProxyRouter !== null) {
+    // Asked on every hop, so a redirect to another origin is routed (or
+    // bypassed through NO_PROXY) for its own URL.
+    const route = nodeProxyRouter(url.href);
+    if (route !== null) {
+      if (route.rid !== null) clientRid = route.rid;
+      if (route.nodeDefaults) addNodeFetchDefaultHeaders(req.headerList);
+    }
+  }
+
   const { requestRid, cancelHandleRid } = op_fetch(
     req.method,
     req.currentUrl(),
     req.headerList,
-    req.clientRid,
+    clientRid,
     reqBody !== null || reqRid !== null,
     reqBody,
     reqRid,
@@ -1113,5 +1165,5 @@ function handleWasmStreaming(source, rid) {
   }
 }
 
-return { fetch, handleWasmStreaming, mainFetch };
+return { fetch, handleWasmStreaming, mainFetch, setNodeProxyRouter };
 })();

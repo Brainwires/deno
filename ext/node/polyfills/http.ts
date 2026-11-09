@@ -22,7 +22,9 @@ const {
   ServerResponse,
   STATUS_CODES,
 } = core.createLazyLoader("node:_http_server")();
-const { methods, parsers } = core.createLazyLoader("node:_http_common")();
+const { getMaxHTTPHeaderSize, methods, parsers } = core.createLazyLoader(
+  "node:_http_common",
+)();
 const { validateInteger } = core.loadExtScript(
   "ext:deno_node/internal/validators.mjs",
 );
@@ -69,10 +71,6 @@ function get(...args: any[]) {
   return req;
 }
 
-// Default max header size matches Node.js default (16 KiB).
-// Node reads this from --max-http-header-size; we hardcode it.
-const maxHeaderSize = 16_384;
-
 function setMaxIdleHTTPParsers(max: number) {
   validateInteger(max, "max", 1);
   parsers.max = max;
@@ -91,7 +89,10 @@ return {
     httpAgent.setGlobalAgent(value);
   },
   IncomingMessage,
-  maxHeaderSize,
+  // `--max-http-header-size`, 16 KiB by default, as in Node.
+  get maxHeaderSize() {
+    return getMaxHTTPHeaderSize();
+  },
   METHODS,
   OutgoingMessage,
   request,

@@ -90,7 +90,19 @@ function parseOption(options: Map<string, OptionValue>, arg: string) {
     });
     return;
   }
+  if (StringPrototypeStartsWith(arg, "--max-http-header-size=")) {
+    options.set("--max-http-header-size", {
+      value: StringPrototypeSlice(arg, "--max-http-header-size=".length),
+    });
+    return;
+  }
   switch (arg) {
+    case "--insecure-http-parser":
+      options.set("--insecure-http-parser", { value: true });
+      break;
+    case "--no-insecure-http-parser":
+      options.set("--insecure-http-parser", { value: false });
+      break;
     case "--no-warnings":
       options.set("--warnings", { value: false });
       break;

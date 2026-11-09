@@ -574,18 +574,18 @@ function openCONNECTTunnel(agent: any, options: any, cb: any) {
       if (!m) {
         fail(
           new ERR_PROXY_TUNNEL(
-            `Failed to establish tunnel to ${hostHeader} over ${proxy.protocol}//${proxy.hostname}:${proxy.port}: ${statusLine}`,
+            `Failed to establish tunnel to ${hostHeader} via ${proxy.href}: ${statusLine}`,
           ),
         );
         return;
       }
       const statusCode = Number(m[1]);
       if (statusCode < 200 || statusCode >= 300) {
-        // Format matches Node's wire: "Failed to establish tunnel to
-        // <host:port> over <proxy origin>: <status line>". Tests grep for
+        // Format matches Node's: "Failed to establish tunnel to
+        // <host:port> via <proxy URL, credentials redacted>: <status line>". Tests grep for
         // ERR_PROXY_TUNNEL + this prefix + the verbatim status line.
         const err: any = new ERR_PROXY_TUNNEL(
-          `Failed to establish tunnel to ${hostHeader} over ${proxy.protocol}//${proxy.hostname}:${proxy.port}: ${statusLine}`,
+          `Failed to establish tunnel to ${hostHeader} via ${proxy.href}: ${statusLine}`,
         );
         err.statusCode = statusCode;
         if (settled) return;

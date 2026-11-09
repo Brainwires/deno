@@ -38,8 +38,13 @@ const {
   Uint8Array,
 } = primordials;
 import { setImmediate } from "node:timers";
+const { getOptionValue } = core.loadExtScript(
+  "ext:deno_node/internal/options.ts",
+);
+const lazyProcess = core.createLazyLoader("node:process");
 const {
   allMethods,
+  getMaxHTTPHeaderSize,
   HTTPParser,
   methods,
 } = core.loadExtScript("ext:deno_node/internal_binding/http_parser.ts");
@@ -379,9 +384,17 @@ function headerSegmentLatin1(rawPacket) {
   return out;
 }
 
+let warnedLenient = false;
+
+// `--insecure-http-parser` (node CLI flag or NODE_OPTIONS). Read on use
+// rather than at module evaluation, which can run before the options exist.
 function isLenient() {
-  // Deno doesn't have --insecure-http-parser flag (yet)
-  return false;
+  const insecureHTTPParser = getOptionValue("--insecure-http-parser") === true;
+  if (insecureHTTPParser && !warnedLenient) {
+    warnedLenient = true;
+    lazyProcess().default.emitWarning("Using insecure HTTP parsing");
+  }
+  return insecureHTTPParser;
 }
 
 export const CRLF = "\r\n";
@@ -395,6 +408,7 @@ export {
   checkInvalidHeaderChar as _checkInvalidHeaderChar,
   checkIsHttpToken as _checkIsHttpToken,
   freeParser,
+  getMaxHTTPHeaderSize,
   HTTPParser,
   IncomingMessage,
   isLenient,
@@ -415,6 +429,7 @@ export default {
   CRLF,
   continueExpression,
   freeParser,
+  getMaxHTTPHeaderSize,
   HTTPParser,
   IncomingMessage,
   isLenient,

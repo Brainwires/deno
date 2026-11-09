@@ -218,8 +218,7 @@ ObjectDefineProperties(OutgoingMessage.prototype, {
   writableCorked: {
     __proto__: null,
     get: function writableCorked() {
-      const corked = this[kSocket] ? this[kSocket].writableCorked : 0;
-      return corked + this[kCorked];
+      return this[kCorked];
     },
     enumerable: true,
     configurable: true,
@@ -231,6 +230,14 @@ ObjectDefineProperties(OutgoingMessage.prototype, {
     },
     set: function connection(val) {
       this.socket = val;
+    },
+    enumerable: true,
+    configurable: true,
+  },
+  closed: {
+    __proto__: null,
+    get: function closed() {
+      return this._closed;
     },
     enumerable: true,
     configurable: true,
@@ -254,10 +261,15 @@ ObjectDefineProperties(OutgoingMessage.prototype, {
   cork: {
     __proto__: null,
     value: function cork() {
+      // kCorked counts every cork, with or without a socket, as Node 26 does:
+      // end() sets it to 1 and calls uncork() to drop it to 0, so an uncork
+      // that skipped the count while a socket was attached left it at 1, and
+      // the socket setter then re-corked the next socket for good (a request
+      // ended before its socket connected never let its successor's bytes out
+      // on a reused keep-alive socket).
+      this[kCorked]++;
       if (this.socket) {
         this.socket.cork();
-      } else {
-        this[kCorked]++;
       }
     },
     writable: true,
@@ -267,10 +279,9 @@ ObjectDefineProperties(OutgoingMessage.prototype, {
   uncork: {
     __proto__: null,
     value: function uncork() {
+      this[kCorked]--;
       if (this.socket) {
         this.socket.uncork();
-      } else if (this[kCorked]) {
-        this[kCorked]--;
       }
     },
     writable: true,
@@ -314,9 +325,10 @@ ObjectDefineProperties(OutgoingMessage.prototype, {
       if (this.socket) {
         this.socket.destroy(error);
       } else {
-        this.once("socket", function socketDestroyOnConnect(socket: any) {
-          socket.destroy(error);
-        });
+        // Node 26: a message that never got a socket (a pipelined response
+        // still queued behind another) closes now rather than waiting for a
+        // socket that, once its connection is gone, never comes.
+        (globalThis as any).process.nextTick(emitDestroyNT, this);
       }
 
       return this;
@@ -741,11 +753,8 @@ ObjectDefineProperties(OutgoingMessage.prototype, {
   _flushOutput: {
     __proto__: null,
     value: function _flushOutput(socket: Socket) {
-      while (this[kCorked]) {
-        this[kCorked]--;
-        socket.cork();
-      }
-
+      // The corks taken before the socket was attached were already moved
+      // onto it by the `socket` setter.
       const outputLength = this.outputData.length;
       if (outputLength <= 0) {
         return undefined;
@@ -1471,6 +1480,13 @@ function write_(
   }
 
   return ret;
+}
+
+function emitDestroyNT(self: any) {
+  if (!self._closed) {
+    self._closed = true;
+    self.emit("close");
+  }
 }
 
 function connectionCorkNT(conn: any) {
