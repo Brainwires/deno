@@ -902,6 +902,12 @@ pub(crate) fn boot_phase(label: &str) {
 }
 
 pub fn main() {
+  // Before anything opens a descriptor: fds 3+ open now were inherited and
+  // belong to the process like stdio (socket activation, a parent's pipe).
+  deno_runtime::deno_io::capture_inherited_fds(&[
+    "NODE_CHANNEL_FD",
+    deno_runtime::deno_process::NPM_RESOLUTION_STATE_FD_ENV_VAR_NAME,
+  ]);
   boot_phase("main start");
   #[cfg(feature = "dhat-heap")]
   let profiler = dhat::Profiler::new_heap();

@@ -65,6 +65,7 @@ use windows_sys::Win32::System::Console::STD_OUTPUT_HANDLE;
 
 mod fd_table;
 pub mod fs;
+mod inherited_fds;
 mod pipe;
 #[cfg(windows)]
 mod winpipe;
@@ -79,6 +80,10 @@ pub use bi_pipe::RawBiPipeHandle;
 pub use bi_pipe::bi_pipe_pair_raw;
 pub use fd_table::FdTable;
 pub use fd_table::register_internal_fd;
+pub use inherited_fds::capture_inherited_fds;
+pub use inherited_fds::claim_inherited_fd;
+pub use inherited_fds::is_inherited_fd;
+pub use inherited_fds::unclaim_inherited_fd;
 pub use pipe::AsyncPipeRead;
 pub use pipe::AsyncPipeWrite;
 pub use pipe::PipeRead;

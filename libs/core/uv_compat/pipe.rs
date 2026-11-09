@@ -552,6 +552,34 @@ pub unsafe fn uv_pipe_open_listener(pipe: *mut uv_pipe_t, fd: c_int) -> c_int {
   unsafe { uv_pipe_open(pipe, fd) }
 }
 
+/// A `sockaddr_un` with room for a longer `sun_path` where the kernel takes
+/// one. macOS (like the other BSDs) reads `sun_len` bytes of address, up to
+/// 255, instead of stopping at `sizeof(struct sockaddr_un)` (104 bytes of
+/// path), so libuv's long socket paths work there; Linux caps the address
+/// at `sizeof(struct sockaddr_un)`, so its buffer is exactly that.
+#[cfg(unix)]
+#[repr(C)]
+struct UnixSockAddr {
+  addr: libc::sockaddr_un,
+  #[cfg(target_vendor = "apple")]
+  _long_path:
+    [u8; UNIX_SOCKADDR_MAX - std::mem::size_of::<libc::sockaddr_un>()],
+}
+
+/// The largest address macOS accepts (`SOCK_MAXADDRLEN`); `sun_len` is a
+/// `u8`, so 255 is also the most it can describe.
+#[cfg(target_vendor = "apple")]
+const UNIX_SOCKADDR_MAX: usize = 255;
+
+/// Whether `path` is too long for a plain `sockaddr_un` (so std / Tokio
+/// refuse it) but fits [`UnixSockAddr`].
+#[cfg(unix)]
+fn is_long_unix_path(path: &str) -> bool {
+  // SAFETY: zeroing a sockaddr_un is safe; only its field size is read.
+  let plain: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+  !path.as_bytes().starts_with(&[0]) && path.len() >= plain.sun_path.len()
+}
+
 /// Build a `sockaddr_un` from a path, handling both abstract sockets
 /// (path starts with `\0`, Linux-only) and filesystem sockets.
 ///
@@ -559,55 +587,54 @@ pub unsafe fn uv_pipe_open_listener(pipe: *mut uv_pipe_t, fd: c_int) -> c_int {
 #[cfg(unix)]
 fn make_sockaddr_un(
   path: &str,
-) -> Result<(libc::sockaddr_un, libc::socklen_t), c_int> {
+) -> Result<(UnixSockAddr, libc::socklen_t), c_int> {
   let path_bytes = path.as_bytes();
   if path_bytes.is_empty() {
     return Err(super::UV_EINVAL);
   }
 
-  // SAFETY: zeroing a sockaddr_un is safe — it's a plain C struct.
-  let mut addr: libc::sockaddr_un = unsafe { std::mem::zeroed() };
-  addr.sun_family = libc::AF_UNIX as libc::sa_family_t;
+  // SAFETY: zeroing is safe -- UnixSockAddr is plain C bytes.
+  let mut buf: UnixSockAddr = unsafe { std::mem::zeroed() };
+  buf.addr.sun_family = libc::AF_UNIX as libc::sa_family_t;
+  let path_offset = std::mem::offset_of!(libc::sockaddr_un, sun_path);
+  // Room for the path: sun_path plus, on macOS, the tail of the buffer.
+  let capacity = std::mem::size_of::<UnixSockAddr>() - path_offset;
 
   let is_abstract = path_bytes[0] == 0;
-  if is_abstract {
+  let addr_len = if is_abstract {
     // Abstract socket (Linux): sun_path starts with \0 followed by the
-    // name bytes. No NUL terminator needed — the name length is
+    // name bytes. No NUL terminator needed -- the name length is
     // determined by addr_len.
-    if path_bytes.len() > addr.sun_path.len() {
+    if path_bytes.len() > buf.addr.sun_path.len() {
       return Err(super::UV_EINVAL);
     }
-    unsafe {
-      std::ptr::copy_nonoverlapping(
-        path_bytes.as_ptr(),
-        addr.sun_path.as_mut_ptr() as *mut u8,
-        path_bytes.len(),
-      );
-    }
-    let addr_len = std::mem::size_of::<libc::sa_family_t>() + path_bytes.len();
-    Ok((addr, addr_len as libc::socklen_t))
+    path_offset + path_bytes.len()
   } else {
     // Filesystem socket: must be NUL-terminated, reject interior NULs.
     if path_bytes.contains(&0) {
       return Err(super::UV_EINVAL);
     }
-    // +1 for the NUL terminator
-    let total_len = path_bytes.len() + 1;
-    if total_len > addr.sun_path.len() {
+    // +1 for the NUL terminator (the buffer is zeroed).
+    if path_bytes.len() + 1 > capacity {
       return Err(super::UV_EINVAL);
     }
-    unsafe {
-      std::ptr::copy_nonoverlapping(
-        path_bytes.as_ptr(),
-        addr.sun_path.as_mut_ptr() as *mut u8,
-        path_bytes.len(),
-      );
-      // NUL terminator (sun_path was zeroed, but be explicit)
-      *(addr.sun_path.as_mut_ptr().add(path_bytes.len()) as *mut u8) = 0;
-    }
-    let addr_len = std::mem::size_of::<libc::sa_family_t>() + total_len;
-    Ok((addr, addr_len as libc::socklen_t))
+    path_offset + path_bytes.len() + 1
+  };
+  // SAFETY: the bounds checks above keep the copy inside `buf` (the
+  // pointer is derived from the whole struct, so it may run past
+  // `sun_path` into the macOS tail), and the regions do not overlap.
+  unsafe {
+    std::ptr::copy_nonoverlapping(
+      path_bytes.as_ptr(),
+      (&mut buf as *mut UnixSockAddr as *mut u8).add(path_offset),
+      path_bytes.len(),
+    );
   }
+  #[cfg(target_vendor = "apple")]
+  {
+    buf.addr.sun_len = addr_len as u8;
+  }
+  Ok((buf, addr_len as libc::socklen_t))
 }
 
 /// Bind to a Unix domain socket path.
@@ -772,6 +799,24 @@ pub unsafe fn uv_pipe_connect(
       .internal_fd
       .take()
       .map(|fd| std::os::unix::net::UnixStream::from_raw_fd(fd))
+  };
+  // std / Tokio refuse a path longer than `sun_path`; the kernel may still
+  // take it (see `UnixSockAddr`), so connect a fresh socket by hand.
+  let bound_stream = match bound_stream {
+    None if cfg!(target_vendor = "apple") && is_long_unix_path(&path) => {
+      // SAFETY: plain socket(2) call; the fd is owned by the stream below.
+      let fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };
+      if fd < 0 {
+        return io_error_to_uv(&std::io::Error::last_os_error());
+      }
+      // SAFETY: fd is a fresh socket owned by nothing else.
+      unsafe {
+        use std::os::unix::io::FromRawFd;
+        libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
+        Some(std::os::unix::net::UnixStream::from_raw_fd(fd))
+      }
+    }
+    other => other,
   };
   let raw_fd = bound_stream.as_ref().map(|stream| {
     use std::os::unix::io::AsRawFd;
