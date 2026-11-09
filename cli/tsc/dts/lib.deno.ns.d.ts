@@ -590,6 +590,12 @@ declare namespace Deno {
    * A set of options which can define the permissions within a test or worker
    * context at a highly specific level.
    *
+   * Permissions are denied by default: a name the object leaves out is not
+   * granted, exactly as if it were set to `false`, and is never inherited from
+   * the parent. Set a name to `"inherit"` to pass the parent's permission on.
+   * {@linkcode Deno.Permissions.names} lists every name, for building a
+   * complete set.
+   *
    * @category Permissions */
   export interface PermissionOptionsObject {
     /** Specifies if the `env` permission should be requested or revoked.
@@ -4567,7 +4573,8 @@ declare namespace Deno {
     | "net-listen"
     | "env"
     | "sys"
-    | "ffi";
+    | "ffi"
+    | "import";
 
   /** The current status of the permission:
    *
@@ -4851,6 +4858,26 @@ declare namespace Deno {
    *
    * @category Permissions */
   export class Permissions {
+    /** Every permission name this runtime knows, as a frozen array.
+     *
+     * Use it to build a permission set that stays complete when a new name
+     * is added, for example a worker that is granted nothing:
+     *
+     * ```ts
+     * const none = Object.fromEntries(
+     *   Deno.permissions.names.map((name) => [name, false]),
+     * );
+     * new Worker(new URL("./worker.ts", import.meta.url), {
+     *   type: "module",
+     *   deno: { permissions: none },
+     * });
+     * ```
+     *
+     * A name a worker's `permissions` object leaves out is not granted
+     * either; it is never inherited.
+     */
+    readonly names: readonly PermissionName[];
+
     /** Resolves to the current status of a permission.
      *
      * Note, if the permission is already granted, `request()` will not prompt

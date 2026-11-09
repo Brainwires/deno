@@ -16,6 +16,7 @@ const {
   MapPrototypeHas,
   MapPrototypeSet,
   FunctionPrototypeCall,
+  ObjectFreeze,
   PromiseResolve,
   PromiseReject,
   ReflectHas,
@@ -38,8 +39,11 @@ const illegalConstructorKey = Symbol("illegalConstructorKey");
  * @property {boolean} partial
  */
 
-/** @type {ReadonlyArray<"read" | "write" | "net" | "net-connect" | "net-listen" | "env" | "sys" | "run" | "ffi" | "import">} */
-const permissionNames = [
+/**
+ * Every permission name the runtime knows, frozen: `Deno.permissions.names`.
+ * @type {ReadonlyArray<"read" | "write" | "net" | "net-connect" | "net-listen" | "env" | "sys" | "run" | "ffi" | "import">}
+ */
+const permissionNames = ObjectFreeze([
   "read",
   "write",
   "net",
@@ -50,7 +54,7 @@ const permissionNames = [
   "run",
   "ffi",
   "import",
-];
+]);
 
 /**
  * @param {Deno.PermissionDescriptor} desc
@@ -204,6 +208,11 @@ class Permissions {
     if (key != illegalConstructorKey) {
       throw new TypeError("Illegal constructor");
     }
+  }
+
+  /** @returns {ReadonlyArray<Deno.PermissionName>} */
+  get names() {
+    return permissionNames;
   }
 
   query(desc) {

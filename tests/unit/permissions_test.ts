@@ -20,6 +20,31 @@ Deno.test(function permissionInvalidNameSync() {
   }, TypeError);
 });
 
+Deno.test(function permissionNames() {
+  const names = Deno.permissions.names;
+  assertEquals(names, [
+    "read",
+    "write",
+    "net",
+    "net-connect",
+    "net-listen",
+    "env",
+    "sys",
+    "run",
+    "ffi",
+    "import",
+  ]);
+  assert(Object.isFrozen(names));
+  assertThrows(() => {
+    (names as Deno.PermissionName[]).push("read");
+  }, TypeError);
+  assert(Deno.permissions.names === names);
+  // every listed name is one the runtime accepts
+  for (const name of names) {
+    Deno.permissions.querySync({ name } as Deno.PermissionDescriptor);
+  }
+});
+
 Deno.test(
   { permissions: { net: [] } },
   async function permissionNetInvalidHost() {
