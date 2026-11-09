@@ -2,6 +2,12 @@
 
 mod cpuprof;
 mod flamegraph;
+mod heapprof;
+
+pub use heapprof::DEFAULT_HEAP_PROF_INTERVAL;
+pub use heapprof::HeapProfiler;
+pub use heapprof::HeapProfilerConfig;
+pub use heapprof::heap_prof_filename;
 
 use std::cell::RefCell;
 use std::fs;
@@ -21,34 +27,103 @@ pub struct CpuProfilerConfig {
   pub flamegraph: bool,
 }
 
-/// Generate a default CPU profile filename using timestamp and PID.
-/// Optionally includes a suffix (e.g. worker ID) for uniqueness.
-pub fn cpu_prof_default_filename(suffix: Option<&str>) -> String {
-  let timestamp = SystemTime::now()
-    .duration_since(SystemTime::UNIX_EPOCH)
-    .unwrap_or_default()
-    .as_millis();
+/// denext: Node's diagnostic file name,
+/// `<prefix>.<YYYYMMDD>.<HHMMSS>.<pid>.<threadId>.<seq>.<ext>` (Node's
+/// `DiagnosticFilename`): local time, the thread id is 0 on the main thread
+/// and the worker's `threadId` in a worker, and the sequence number counts
+/// every such file the process writes, from 001.
+pub fn diagnostic_filename(prefix: &str, ext: &str, thread_id: u32) -> String {
+  static SEQ: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(0);
+  let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+  let (year, month, day, hours, minutes, seconds) = local_time_now();
   let pid = std::process::id();
-  match suffix {
-    Some(s) => format!("CPU.{}.{}.{}.cpuprofile", timestamp, pid, s),
-    None => format!("CPU.{}.{}.cpuprofile", timestamp, pid),
-  }
+  format!(
+    "{prefix}.{year:04}{month:02}{day:02}.{hours:02}{minutes:02}{seconds:02}.{pid}.{thread_id}.{seq:03}.{ext}"
+  )
 }
 
-/// Generate a CPU profile filename from config, appending a suffix for workers
-/// when a custom name is provided.
-pub fn cpu_prof_filename(
-  config: &CpuProfilerConfig,
-  suffix: Option<&str>,
-) -> String {
-  match (&config.name, suffix) {
-    (Some(name), Some(s)) => {
-      // Always make worker filenames unique even with custom names
-      let stem = name.strip_suffix(".cpuprofile").unwrap_or(name);
-      format!("{}.{}.cpuprofile", stem, s)
+/// The current local date and time as `(year, month, day, hours, minutes,
+/// seconds)`.
+#[cfg(unix)]
+fn local_time_now() -> (i64, u32, u32, u32, u32, u32) {
+  let now = SystemTime::now()
+    .duration_since(SystemTime::UNIX_EPOCH)
+    .map(|d| d.as_secs())
+    .unwrap_or_default() as libc::time_t;
+  // SAFETY: `tm` is plain old data; zeroed is a valid value for it.
+  let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+  // SAFETY: both pointers are valid for the duration of the call, and
+  // `localtime_r` is the reentrant variant.
+  let ok = unsafe { !libc::localtime_r(&now, &mut tm).is_null() };
+  if !ok {
+    return utc_time_now();
+  }
+  (
+    tm.tm_year as i64 + 1900,
+    (tm.tm_mon + 1) as u32,
+    tm.tm_mday as u32,
+    tm.tm_hour as u32,
+    tm.tm_min as u32,
+    tm.tm_sec as u32,
+  )
+}
+
+#[cfg(not(unix))]
+fn local_time_now() -> (i64, u32, u32, u32, u32, u32) {
+  utc_time_now()
+}
+
+fn utc_time_now() -> (i64, u32, u32, u32, u32, u32) {
+  let secs = SystemTime::now()
+    .duration_since(SystemTime::UNIX_EPOCH)
+    .map(|d| d.as_secs())
+    .unwrap_or_default();
+  // Howard Hinnant's civil-from-days.
+  let z = (secs / 86400) as i64 + 719468;
+  let era = if z >= 0 { z } else { z - 146096 } / 146097;
+  let doe = (z - era * 146097) as u64;
+  let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+  let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+  let mp = (5 * doy + 2) / 153;
+  let day = (doy - (153 * mp + 2) / 5 + 1) as u32;
+  let month = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+  let year = yoe as i64 + era * 400 + if month <= 2 { 1 } else { 0 };
+  let sod = secs % 86400;
+  (
+    year,
+    month,
+    day,
+    (sod / 3600) as u32,
+    ((sod % 3600) / 60) as u32,
+    (sod % 60) as u32,
+  )
+}
+
+/// denext: a `--cpu-prof-name` / `--heap-prof-name` may hold `${pid}`, which
+/// is replaced with the process id, as Node does.
+pub fn expand_profile_name(name: &str) -> String {
+  name.replace("${pid}", &std::process::id().to_string())
+}
+
+/// Generate a default CPU profile filename, Node's
+/// `CPU.<date>.<time>.<pid>.<threadId>.<seq>.cpuprofile`.
+pub fn cpu_prof_default_filename(thread_id: u32) -> String {
+  diagnostic_filename("CPU", "cpuprofile", thread_id)
+}
+
+/// Generate a CPU profile filename from config. `thread_id` is 0 on the main
+/// thread and the worker's id in a worker, where a custom name gets the
+/// worker's id appended so that every thread writes its own file.
+pub fn cpu_prof_filename(config: &CpuProfilerConfig, thread_id: u32) -> String {
+  match &config.name {
+    Some(name) if thread_id != 0 => {
+      let name = expand_profile_name(name);
+      let stem = name.strip_suffix(".cpuprofile").unwrap_or(&name);
+      format!("{}.worker-{}.cpuprofile", stem, thread_id)
     }
-    (Some(name), None) => name.clone(),
-    (None, _) => cpu_prof_default_filename(suffix),
+    Some(name) => expand_profile_name(name),
+    None => cpu_prof_default_filename(thread_id),
   }
 }
 

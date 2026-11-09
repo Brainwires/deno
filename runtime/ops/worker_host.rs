@@ -128,6 +128,11 @@ pub struct CreateWebWorkerArgs {
   pub resource_limits: Option<ResourceLimits>,
   pub wait_for_debugger_on_start: bool,
   pub wait_for_page_wait_for_debugger: bool,
+  /// denext: a `worker_threads` Worker's own `--cpu-prof` (from its
+  /// `execArgv`), which takes the place of the one every worker inherits.
+  pub maybe_cpu_prof_config: Option<crate::cpu_profiler::CpuProfilerConfig>,
+  /// denext: a `worker_threads` Worker's own `--heap-prof`.
+  pub maybe_heap_prof_config: Option<crate::cpu_profiler::HeapProfilerConfig>,
 }
 
 pub type CreateWebWorkerCb = dyn Fn(CreateWebWorkerArgs) -> (WebWorker, SendableWebWorkerHandle)
@@ -311,6 +316,54 @@ pub struct CreateWorkerArgs {
   worker_type: WorkerThreadType,
   close_on_idle: bool,
   resource_limits: Option<ResourceLimits>,
+  /// denext: the profilers a `worker_threads` Worker's `execArgv` asks for.
+  #[from_v8(serde)]
+  profile: Option<WorkerProfileArgs>,
+}
+
+/// denext: `--cpu-prof` / `--heap-prof` in a `worker_threads` Worker's
+/// `execArgv`, the directory already resolved against the working directory.
+#[derive(serde::Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct WorkerProfileArgs {
+  cpu: Option<WorkerProfilerArgs>,
+  heap: Option<WorkerProfilerArgs>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkerProfilerArgs {
+  dir: String,
+  name: Option<String>,
+  interval: Option<f64>,
+}
+
+impl WorkerProfileArgs {
+  fn into_configs(
+    self,
+  ) -> (
+    Option<crate::cpu_profiler::CpuProfilerConfig>,
+    Option<crate::cpu_profiler::HeapProfilerConfig>,
+  ) {
+    let cpu = self.cpu.map(|cpu| crate::cpu_profiler::CpuProfilerConfig {
+      dir: std::path::PathBuf::from(cpu.dir),
+      name: cpu.name,
+      interval: cpu.interval.map(|i| i as u32).unwrap_or(1000),
+      md: false,
+      flamegraph: false,
+    });
+    let heap = self
+      .heap
+      .map(|heap| crate::cpu_profiler::HeapProfilerConfig {
+        dir: std::path::PathBuf::from(heap.dir),
+        name: heap.name,
+        interval: heap
+          .interval
+          .map(|i| i as u64)
+          .unwrap_or(crate::cpu_profiler::DEFAULT_HEAP_PROF_INTERVAL),
+      });
+    (cpu, heap)
+  }
 }
 
 #[derive(Debug, thiserror::Error, deno_error::JsError)]
@@ -343,6 +396,10 @@ fn op_create_worker(
   #[serde] maybe_worker_metadata: Option<JsMessageData>,
 ) -> Result<WorkerId, CreateWorkerError> {
   let specifier = args.specifier.clone();
+  let (maybe_cpu_prof_config, maybe_heap_prof_config) = args
+    .profile
+    .map(WorkerProfileArgs::into_configs)
+    .unwrap_or_default();
   let maybe_source_code = if args.has_source_code {
     Some(args.source_code.clone())
   } else {
@@ -470,6 +527,8 @@ fn op_create_worker(
           resource_limits: args.resource_limits,
           wait_for_debugger_on_start,
           wait_for_page_wait_for_debugger,
+          maybe_cpu_prof_config,
+          maybe_heap_prof_config,
         });
 
       // Send thread safe handle from newly created worker to host thread

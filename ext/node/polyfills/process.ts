@@ -165,6 +165,7 @@ const {
   NumberIsFinite,
   NumberIsInteger,
   NumberMAX_SAFE_INTEGER,
+  NumberParseInt,
   NumberPrototypeToFixed,
   ObjectCreate,
   ObjectDefineProperty,
@@ -1982,6 +1983,29 @@ internals.__bootstrapNodeProcess = function (
 
     if (getOptionValue("--warnings")) {
       process.on("warning", onWarning);
+    }
+
+    // denext: `--heapsnapshot-signal`: the signal writes a heap snapshot to
+    // the `--diagnostic-dir` (else the working directory), as Node's
+    // pre_execution.js `initializeHeapSnapshotSignalHandlers` does.
+    // denext: `--heapsnapshot-near-heap-limit` (a worker takes its own from
+    // its `execArgv`, see worker_threads.ts).
+    const nearHeapLimit = getOptionValue("--heapsnapshot-near-heap-limit");
+    if (runningOnMainThread && nearHeapLimit) {
+      const limit = NumberParseInt(nearHeapLimit, 10);
+      if (limit > 0) {
+        core.loadExtScript("ext:deno_node/v8.ts")
+          .setHeapSnapshotNearHeapLimit(limit);
+      }
+    }
+    const heapSnapshotSignal = getOptionValue("--heapsnapshot-signal");
+    if (runningOnMainThread && heapSnapshotSignal) {
+      process.on(heapSnapshotSignal, () => {
+        const v8 = core.loadExtScript("ext:deno_node/v8.ts");
+        const dir = getOptionValue("--diagnostic-dir");
+        const name = v8.defaultHeapSnapshotFilename();
+        v8.writeHeapSnapshot(dir ? `${dir}/${name}` : name);
+      });
     }
 
     // Match Node's pre_execution.js: when --pending-deprecation is set, wrap

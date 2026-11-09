@@ -31,7 +31,11 @@ const {
   Int16Array,
   Int32Array,
   Int8Array,
+  JSONParse,
+  JSONStringify,
+  MathFloor,
   ObjectFreeze,
+  ObjectSetPrototypeOf,
   ObjectPrototypeToString,
   String,
   StringPrototypePadStart,
@@ -79,6 +83,9 @@ const {
   op_v8_gc_profiler_new,
   op_v8_gc_profiler_start,
   op_v8_gc_profiler_stop,
+  op_inspector_connect,
+  op_inspector_disconnect,
+  op_inspector_dispatch,
 } = core.ops;
 
 const { Buffer } = core.loadExtScript("ext:deno_node/internal/buffer.mjs");
@@ -109,7 +116,11 @@ const lazyFsUtils = core.createLazyLoader(
   "ext:deno_node/internal/fs/utils.mjs",
 );
 const {
+  validateBoolean,
   validateFunction,
+  validateInt32,
+  validateInteger,
+  validateNumber,
   validateObject,
   validateOneOf,
   validateString,
@@ -203,6 +214,44 @@ function takeCoverage() {
 
 let heapSnapshotCounter = 0;
 
+// The default `writeHeapSnapshot()` file name, Node's
+// `Heap.<date>.<time>.<pid>.<threadId>.<seq>.heapsnapshot`.
+function defaultHeapSnapshotFilename() {
+  const now = new Date();
+  const year = DatePrototypeGetFullYear(now);
+  const month = StringPrototypePadStart(
+    String(DatePrototypeGetMonth(now) + 1),
+    2,
+    "0",
+  );
+  const day = StringPrototypePadStart(
+    String(DatePrototypeGetDate(now)),
+    2,
+    "0",
+  );
+  const hours = StringPrototypePadStart(
+    String(DatePrototypeGetHours(now)),
+    2,
+    "0",
+  );
+  const minutes = StringPrototypePadStart(
+    String(DatePrototypeGetMinutes(now)),
+    2,
+    "0",
+  );
+  const seconds = StringPrototypePadStart(
+    String(DatePrototypeGetSeconds(now)),
+    2,
+    "0",
+  );
+  const pid = globalThis.process?.pid ?? 0;
+  const thread = 0;
+  const seq = ++heapSnapshotCounter;
+  return `Heap.${year}${month}${day}.${hours}${minutes}${seconds}.${pid}.${thread}.${
+    StringPrototypePadStart(String(seq), 3, "0")
+  }.heapsnapshot`;
+}
+
 function writeHeapSnapshot(
   filename?: string,
   options?: Record<string, unknown>,
@@ -210,40 +259,7 @@ function writeHeapSnapshot(
   if (filename !== undefined) {
     filename = lazyFsUtils().getValidatedPath(filename) as string;
   } else {
-    const now = new Date();
-    const year = DatePrototypeGetFullYear(now);
-    const month = StringPrototypePadStart(
-      String(DatePrototypeGetMonth(now) + 1),
-      2,
-      "0",
-    );
-    const day = StringPrototypePadStart(
-      String(DatePrototypeGetDate(now)),
-      2,
-      "0",
-    );
-    const hours = StringPrototypePadStart(
-      String(DatePrototypeGetHours(now)),
-      2,
-      "0",
-    );
-    const minutes = StringPrototypePadStart(
-      String(DatePrototypeGetMinutes(now)),
-      2,
-      "0",
-    );
-    const seconds = StringPrototypePadStart(
-      String(DatePrototypeGetSeconds(now)),
-      2,
-      "0",
-    );
-    const pid = globalThis.process?.pid ?? 0;
-    const thread = 0;
-    const seq = ++heapSnapshotCounter;
-    filename =
-      `Heap.${year}${month}${day}.${hours}${minutes}${seconds}.${pid}.${thread}.${
-        StringPrototypePadStart(String(seq), 3, "0")
-      }.heapsnapshot`;
+    filename = defaultHeapSnapshotFilename();
   }
   if (options !== undefined) {
     validateObject(options, "options");
@@ -817,6 +833,191 @@ const promiseHooks = {
   },
 };
 
+// denext: `v8.startCpuProfile()` / `v8.startHeapProfile()` (Node 25+), on
+// the isolate's own inspector: a local session answers each request before
+// `op_inspector_dispatch` returns, so the profile can be handed back
+// synchronously, as Node does.
+function createSyncInspectorSession() {
+  let responses = [];
+  const connection = op_inspector_connect(
+    false,
+    (message) => ArrayPrototypePush(responses, message),
+  );
+  let nextId = 1;
+  return {
+    post(method, params) {
+      const id = nextId++;
+      responses = [];
+      op_inspector_dispatch(
+        connection,
+        JSONStringify(params ? { id, method, params } : { id, method }),
+      );
+      for (let i = 0; i < responses.length; i++) {
+        const message = JSONParse(responses[i]);
+        if (message.id !== id) continue;
+        if (message.error) {
+          throw new Error(message.error.message);
+        }
+        return message.result;
+      }
+      throw new Error(`No inspector response to ${method}`);
+    },
+    disconnect() {
+      op_inspector_disconnect(connection);
+    },
+  };
+}
+
+const kMaxSamplingIntervalMs = 0x7FFFFFFF / 1000;
+const kNoProfileOptions = ObjectFreeze(ObjectSetPrototypeOf({}, null));
+
+function normalizeCpuProfileOptions(options = kNoProfileOptions) {
+  validateObject(options, "options");
+  const { sampleInterval, maxBufferSize } = options;
+  let samplingIntervalMicros = 0;
+  if (sampleInterval !== undefined) {
+    validateNumber(
+      sampleInterval,
+      "options.sampleInterval",
+      0,
+      kMaxSamplingIntervalMs,
+    );
+    samplingIntervalMicros = MathFloor(sampleInterval * 1000);
+    if (sampleInterval > 0 && samplingIntervalMicros === 0) {
+      samplingIntervalMicros = 1;
+    }
+  }
+  if (maxBufferSize !== undefined) {
+    validateNumber(maxBufferSize, "options.maxBufferSize", 1, 0xFFFF_FFFF);
+  }
+  return { samplingIntervalMicros };
+}
+
+function normalizeHeapProfileOptions(options = kNoProfileOptions) {
+  validateObject(options, "options");
+  const {
+    sampleInterval = 512 * 1024,
+    stackDepth = 16,
+    forceGC = false,
+    includeObjectsCollectedByMajorGC = false,
+    includeObjectsCollectedByMinorGC = false,
+  } = options;
+  validateInteger(sampleInterval, "options.sampleInterval", 1);
+  validateInt32(stackDepth, "options.stackDepth", 0);
+  validateBoolean(forceGC, "options.forceGC");
+  validateBoolean(
+    includeObjectsCollectedByMajorGC,
+    "options.includeObjectsCollectedByMajorGC",
+  );
+  validateBoolean(
+    includeObjectsCollectedByMinorGC,
+    "options.includeObjectsCollectedByMinorGC",
+  );
+  return {
+    sampleInterval,
+    stackDepth,
+    forceGC,
+    includeObjectsCollectedByMajorGC,
+    includeObjectsCollectedByMinorGC,
+  };
+}
+
+// Starts a CPU profile on a session of its own, so that several can run at
+// once. Returns a function that stops it and returns the profile's JSON.
+function startCpuProfileRaw({ samplingIntervalMicros }) {
+  const session = createSyncInspectorSession();
+  try {
+    session.post("Profiler.enable");
+    if (samplingIntervalMicros > 0) {
+      session.post("Profiler.setSamplingInterval", {
+        interval: samplingIntervalMicros,
+      });
+    }
+    session.post("Profiler.start");
+  } catch (err) {
+    session.disconnect();
+    throw err;
+  }
+  return () => {
+    try {
+      return JSONStringify(session.post("Profiler.stop").profile);
+    } finally {
+      session.disconnect();
+    }
+  };
+}
+
+let heapProfileSession = null;
+
+const { ERR_HEAP_PROFILE_HAVE_BEEN_STARTED } = core.loadExtScript(
+  "ext:deno_node/internal/errors.ts",
+);
+
+// One sampling heap profile per thread, as in Node.
+function startHeapProfileRaw(options) {
+  if (heapProfileSession !== null) {
+    throw new ERR_HEAP_PROFILE_HAVE_BEEN_STARTED();
+  }
+  const session = createSyncInspectorSession();
+  try {
+    if (options.forceGC) {
+      session.post("HeapProfiler.collectGarbage");
+    }
+    session.post("HeapProfiler.startSampling", {
+      samplingInterval: options.sampleInterval,
+      stackDepth: options.stackDepth,
+      includeObjectsCollectedByMajorGC:
+        options.includeObjectsCollectedByMajorGC,
+      includeObjectsCollectedByMinorGC:
+        options.includeObjectsCollectedByMinorGC,
+    });
+  } catch (err) {
+    session.disconnect();
+    throw err;
+  }
+  heapProfileSession = session;
+  return () => {
+    try {
+      return JSONStringify(session.post("HeapProfiler.stopSampling").profile);
+    } finally {
+      session.disconnect();
+      heapProfileSession = null;
+    }
+  };
+}
+
+class SyncCPUProfileHandle {
+  #stop;
+  constructor(stop) {
+    this.#stop = stop;
+  }
+  stop() {
+    if (this.#stop === null) return undefined;
+    const stop = this.#stop;
+    this.#stop = null;
+    return stop();
+  }
+  [SymbolDispose]() {
+    this.stop();
+  }
+}
+
+class SyncHeapProfileHandle extends SyncCPUProfileHandle {}
+
+// https://nodejs.org/api/v8.html#v8startcpuprofileoptions
+function startCpuProfile(options) {
+  return new SyncCPUProfileHandle(
+    startCpuProfileRaw(normalizeCpuProfileOptions(options)),
+  );
+}
+
+// https://nodejs.org/api/v8.html#v8startheapprofileoptions
+function startHeapProfile(options) {
+  return new SyncHeapProfileHandle(
+    startHeapProfileRaw(normalizeHeapProfileOptions(options)),
+  );
+}
+
 return {
   cachedDataVersionTag,
   getHeapCodeStatistics,
@@ -826,6 +1027,8 @@ return {
   queryObjects,
   setFlagsFromString,
   setHeapSnapshotNearHeapLimit,
+  startCpuProfile,
+  startHeapProfile,
   startupSnapshot,
   stopCoverage,
   takeCoverage,
@@ -838,5 +1041,13 @@ return {
   DefaultSerializer,
   DefaultDeserializer,
   promiseHooks,
+  // denext: for worker_threads' `worker.startCpuProfile()` /
+  // `startHeapProfile()`, which run these on the worker's thread.
+  normalizeCpuProfileOptions,
+  normalizeHeapProfileOptions,
+  startCpuProfileRaw,
+  startHeapProfileRaw,
+  getHeapSnapshotBytes: () => op_v8_take_heap_snapshot(),
+  defaultHeapSnapshotFilename,
 };
 })();

@@ -326,6 +326,9 @@ pub struct LibMainWorkerOptions {
   /// `--max-memory`, `--max-cpu-time` and `--max-time` (`deno run`, and a
   /// program compiled with them). See [`crate::resource_limits`].
   pub resource_limits: crate::resource_limits::ResourceLimits,
+  /// denext: Node's `--heap-prof`; the main worker starts it in
+  /// `cli/worker.rs`, and every worker takes its own, as in Node.
+  pub maybe_heap_prof_config: Option<deno_runtime::HeapProfilerConfig>,
 }
 
 #[derive(Default, Clone)]
@@ -563,7 +566,12 @@ impl<TSys: DenoLibSys> LibWorkerFactorySharedState<TSys> {
         maybe_worker_metadata: args.maybe_worker_metadata,
         maybe_main_module_blob: args.maybe_main_module_blob,
         maybe_coverage_dir: shared.maybe_coverage_dir.clone(),
-        maybe_cpu_prof_config: shared.maybe_cpu_prof_config.clone(),
+        maybe_cpu_prof_config: args
+          .maybe_cpu_prof_config
+          .or_else(|| shared.maybe_cpu_prof_config.clone()),
+        maybe_heap_prof_config: args
+          .maybe_heap_prof_config
+          .or_else(|| shared.options.maybe_heap_prof_config.clone()),
         enable_raw_imports: shared.options.enable_raw_imports,
         enable_stack_trace_arg_in_ops: has_trace_permissions_enabled(
           &shared.sys,

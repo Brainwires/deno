@@ -97,6 +97,8 @@ const {
   FunctionPrototypeCall,
   NumberIsFinite,
   NumberIsNaN,
+  NumberParseFloat,
+  NumberParseInt,
   ObjectAssign,
   ObjectCreate,
   ObjectDefineProperty,
@@ -110,7 +112,9 @@ const {
   queueMicrotask,
   RangeError,
   ReferenceError,
+  RegExpPrototypeTest,
   SafeMap,
+  SafeMapIterator,
   SafeRegExp,
   SafeSet,
   String,
@@ -203,6 +207,57 @@ function isWorkerStdoutMsg(data: unknown): data is WorkerStdioMsg {
     (data as { "type": unknown })["type"] === "WORKER_STDOUT";
 }
 
+// denext: requests a Worker object makes of its thread
+// (`worker.startCpuProfile()`, `startHeapProfile()`, `getHeapSnapshot()`)
+// and the thread's replies. They ride the worker's message channel, and the
+// thread takes them before any user listener sees them (see
+// `internals.setWorkerControlHook` in runtime/js/99_main.js), so they work
+// whether or not the thread listens for messages, as long as its event loop
+// runs.
+const kWorkerControl = "__denextWorkerControl";
+const kWorkerControlReply = "__denextWorkerControlReply";
+
+function isWorkerControlMsg(data: unknown, kind: string): boolean {
+  return typeof data === "object" && data !== null &&
+    ObjectHasOwn(data, "type") &&
+    (data as { "type": unknown })["type"] === kind;
+}
+
+const lazyV8 = core.createLazyLoader("ext:deno_node/v8.ts");
+
+// The thread's side: runs one request and returns its result.
+const workerCpuProfiles = new SafeMap();
+let nextWorkerCpuProfileId = 1;
+let workerHeapProfileStop = null;
+function runWorkerControl(op, args) {
+  const v8 = lazyV8();
+  switch (op) {
+    case "startCpuProfile": {
+      const id = nextWorkerCpuProfileId++;
+      workerCpuProfiles.set(id, v8.startCpuProfileRaw(args));
+      return id;
+    }
+    case "stopCpuProfile": {
+      const stop = workerCpuProfiles.get(args);
+      if (stop === undefined) return undefined;
+      workerCpuProfiles.delete(args);
+      return stop();
+    }
+    case "startHeapProfile":
+      workerHeapProfileStop = v8.startHeapProfileRaw(args);
+      return undefined;
+    case "stopHeapProfile": {
+      const stop = workerHeapProfileStop;
+      workerHeapProfileStop = null;
+      return stop === null ? undefined : stop();
+    }
+    case "takeHeapSnapshot":
+      return v8.getHeapSnapshotBytes();
+    default:
+      throw new Error(`Unknown worker request ${op}`);
+  }
+}
+
 // Flags that are valid Node.js environment flags but not allowed in workers
 // because they affect per-process state.
 const workerDisallowedFlags = new SafeSet([
@@ -222,10 +277,9 @@ const workerDisallowedFlags = new SafeSet([
   "--report-uncaught-exception",
 ]);
 
-// V8 profiling flags Node accepts in worker execArgv. Deno doesn't wire up
-// the underlying profiling integration, but rejecting them with
-// ERR_WORKER_INVALID_EXEC_ARGV breaks scripts that pass them unconditionally,
-// so accept and ignore.
+// The profiling flags Node accepts in a worker's execArgv. denext: they start
+// the worker's own profile (see `workerProfileFromExecArgv`); they need no
+// further validation.
 const workerSilentlyIgnoredFlags = new SafeSet([
   "--heap-prof",
   "--heap-prof-interval",
@@ -236,6 +290,57 @@ const workerSilentlyIgnoredFlags = new SafeSet([
   "--cpu-prof-name",
   "--cpu-prof-dir",
 ]);
+
+// denext: `--cpu-prof` / `--heap-prof` (and their `-dir`, `-name` and
+// `-interval` options) in a Worker's `execArgv` give that worker its own
+// profile, written to the working directory (or the `-dir`) as it ends, as in
+// Node. Returns `undefined` when neither profiler is asked for.
+const kWindowsAbsolutePath = new SafeRegExp("^[A-Za-z]:[\\\\/]");
+function workerProfileFromExecArgv(execArgv) {
+  const values = new SafeMap();
+  const enabled = new SafeSet();
+  for (let i = 0; i < execArgv.length; i++) {
+    const arg = String(execArgv[i]);
+    if (!StringPrototypeStartsWith(arg, "--")) continue;
+    const eqIdx = StringPrototypeIndexOf(arg, "=");
+    const name = eqIdx === -1 ? arg : StringPrototypeSlice(arg, 0, eqIdx);
+    if (name === "--cpu-prof" || name === "--heap-prof") {
+      enabled.add(name);
+    } else if (workerSilentlyIgnoredFlags.has(name)) {
+      if (eqIdx !== -1) {
+        values.set(name, StringPrototypeSlice(arg, eqIdx + 1));
+      } else if (i + 1 < execArgv.length) {
+        values.set(name, String(execArgv[++i]));
+      }
+    } else if (name === "--no-cpu-prof") {
+      enabled.delete("--cpu-prof");
+    } else if (name === "--no-heap-prof") {
+      enabled.delete("--heap-prof");
+    }
+  }
+  if (enabled.size === 0) return undefined;
+  const process = lazyProcess().default;
+  const resolveDir = (dir) => {
+    if (dir === undefined || dir === "") return process.cwd();
+    if (
+      StringPrototypeStartsWith(dir, "/") ||
+      RegExpPrototypeTest(kWindowsAbsolutePath, dir)
+    ) {
+      return dir;
+    }
+    return process.cwd() + "/" + dir;
+  };
+  const one = (kind) => {
+    if (!enabled.has(`--${kind}-prof`)) return undefined;
+    const interval = values.get(`--${kind}-prof-interval`);
+    return {
+      dir: resolveDir(values.get(`--${kind}-prof-dir`)),
+      name: values.get(`--${kind}-prof-name`) ?? null,
+      interval: interval === undefined ? null : NumberParseFloat(interval),
+    };
+  };
+  return { cpu: one("cpu") ?? null, heap: one("heap") ?? null };
+}
 
 // The options Node 26.5.1 accepts in a Worker's `execArgv`: node_worker.cc
 // parses them with the per-isolate options parser, so every option of the
@@ -855,6 +960,9 @@ class NodeWorker extends EventEmitter {
         workerType: "node",
         closeOnIdle: true,
         resourceLimits: resourceLimits_,
+        profile: options?.execArgv
+          ? workerProfileFromExecArgv(options.execArgv)
+          : undefined,
       },
       serializedWorkerMetadata,
     );
@@ -931,6 +1039,104 @@ class NodeWorker extends EventEmitter {
     this.emit("error", err);
   }
 
+  // denext: a request to the worker's thread (see `kWorkerControl`).
+  #nextControlId = 1;
+  #pendingControls = new SafeMap();
+  #requestThread(op, args = undefined) {
+    if (this.#status !== "RUNNING" || this.#exited) {
+      return PromiseReject(new ERR_WORKER_NOT_RUNNING());
+    }
+    const id = this.#nextControlId++;
+    let resolve, reject;
+    const promise = new Promise((res, rej) => {
+      resolve = res;
+      reject = rej;
+    });
+    this.#pendingControls.set(id, { resolve, reject });
+    try {
+      op_host_post_message_raw(
+        this.#id,
+        serializeMessageData({ type: kWorkerControl, id, op, args }),
+      );
+    } catch (err) {
+      this.#pendingControls.delete(id);
+      reject(err);
+    }
+    return promise;
+  }
+
+  #onControlReply(message) {
+    const pending = this.#pendingControls.get(message.id);
+    if (pending === undefined) return;
+    this.#pendingControls.delete(message.id);
+    if (message.error) {
+      const err = new Error(message.error.message);
+      if (message.error.code !== undefined) err.code = message.error.code;
+      pending.reject(err);
+    } else {
+      pending.resolve(message.result);
+    }
+  }
+
+  #failPendingControls() {
+    const pendings = this.#pendingControls;
+    this.#pendingControls = new SafeMap();
+    for (const { 1: pending } of new SafeMapIterator(pendings)) {
+      pending.reject(new ERR_WORKER_NOT_RUNNING());
+    }
+  }
+
+  // https://nodejs.org/api/worker_threads.html#workerstartcpuprofile
+  startCpuProfile(options) {
+    const normalized = lazyV8().normalizeCpuProfileOptions(options);
+    return PromisePrototypeThen(
+      this.#requestThread("startCpuProfile", normalized),
+      (id) => {
+        let stopped = null;
+        return {
+          stop: () => stopped ??= this.#requestThread("stopCpuProfile", id),
+          async [SymbolAsyncDispose]() {
+            await this.stop();
+          },
+        };
+      },
+    );
+  }
+
+  // https://nodejs.org/api/worker_threads.html#workerstartheapprofile
+  startHeapProfile(options) {
+    const normalized = lazyV8().normalizeHeapProfileOptions(options);
+    return PromisePrototypeThen(
+      this.#requestThread("startHeapProfile", normalized),
+      () => {
+        let stopped = null;
+        return {
+          stop: () => stopped ??= this.#requestThread("stopHeapProfile"),
+          async [SymbolAsyncDispose]() {
+            await this.stop();
+          },
+        };
+      },
+    );
+  }
+
+  // https://nodejs.org/api/worker_threads.html#workergetheapsnapshotoptions
+  getHeapSnapshot(options) {
+    if (options !== undefined) {
+      validateObject(options, "options");
+    }
+    return PromisePrototypeThen(
+      this.#requestThread("takeHeapSnapshot"),
+      (data) => {
+        const { Readable } = lazyStream();
+        const stream = new Readable({ read() {} });
+        FunctionPrototypeCall(Readable.prototype.push, stream, data);
+        FunctionPrototypeCall(Readable.prototype.push, stream, null);
+        return stream;
+      },
+    );
+  }
+
   #closeStdio() {
     if (!this.stdout.readableEnded) {
       FunctionPrototypeCall(
@@ -990,6 +1196,7 @@ class NodeWorker extends EventEmitter {
           // before the last stdout/stderr message (Node.js behavior).
           await this.#messageLoopPromise;
           this.#closeStdio();
+          this.#failPendingControls();
           this.resourceLimits = {};
           if (!this.#exited) {
             this.#exited = true;
@@ -1011,6 +1218,7 @@ class NodeWorker extends EventEmitter {
           // before the last stdout/stderr message (Node.js behavior).
           await this.#messageLoopPromise;
           this.#closeStdio();
+          this.#failPendingControls();
           this.resourceLimits = {};
           if (!this.#exited) {
             this.#exited = true;
@@ -1043,6 +1251,8 @@ class NodeWorker extends EventEmitter {
     ) {
       this.#workerOnline = true;
       this.emit("online");
+    } else if (isWorkerControlMsg(message, kWorkerControlReply)) {
+      this.#onControlReply(message);
     } else if (isWorkerStdoutMsg(message)) {
       FunctionPrototypeCall(
         lazyStream().Readable.prototype.push,
@@ -1152,6 +1362,7 @@ class NodeWorker extends EventEmitter {
     this.#status = "TERMINATED";
     op_host_terminate_worker(this.#id);
     this.#closeStdio();
+    this.#failPendingControls();
 
     if (!this.#exited) {
       this.#exited = true;
@@ -1233,8 +1444,6 @@ class NodeWorker extends EventEmitter {
     return this.#name;
   }
 
-  readonly getHeapSnapshot = () =>
-    notImplemented("Worker.prototype.getHeapSnapshot");
   // fake performance
   readonly performance = globalThis.performance;
 }
@@ -1494,6 +1703,22 @@ internals.__initWorkerThreads = (
             if (metadata.execArgv[i] === "--trace-warnings") {
               lazyProcess().default.traceProcessWarnings = true;
             }
+            // denext: the worker's own `--heapsnapshot-near-heap-limit`.
+            const arg = String(metadata.execArgv[i]);
+            if (
+              StringPrototypeStartsWith(arg, "--heapsnapshot-near-heap-limit=")
+            ) {
+              const limit = NumberParseInt(
+                StringPrototypeSlice(
+                  arg,
+                  "--heapsnapshot-near-heap-limit=".length,
+                ),
+                10,
+              );
+              if (limit > 0) {
+                lazyV8().setHeapSnapshotNearHeapLimit(limit);
+              }
+            }
           }
         }
 
@@ -1675,6 +1900,26 @@ internals.__initWorkerThreads = (
     };
 
     if (isWorkerThread) {
+      // denext: answer the Worker object's requests (see `kWorkerControl`).
+      internals.setWorkerControlHook?.((message) => {
+        if (!isWorkerControlMsg(message, kWorkerControl)) return false;
+        let reply;
+        try {
+          reply = {
+            type: kWorkerControlReply,
+            id: message.id,
+            result: runWorkerControl(message.op, message.args),
+          };
+        } catch (err) {
+          reply = {
+            type: kWorkerControlReply,
+            id: message.id,
+            error: { message: err?.message ?? String(err), code: err?.code },
+          };
+        }
+        parentPort.postMessage(reply);
+        return true;
+      });
       // Notify the host that the worker is online
       parentPort.postMessage(
         {

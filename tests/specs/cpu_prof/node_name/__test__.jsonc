@@ -1,0 +1,35 @@
+{
+  "tests": {
+    "default_name": {
+      "tempDir": true,
+      "steps": [
+        {
+          "args": "run --cpu-prof main.js",
+          "output": "done\n"
+        },
+        {
+          "args": "run --allow-read verify.js",
+          "output": "CPU.<date>.<time>.<pid>.0.001.cpuprofile\n"
+        }
+      ]
+    },
+    "pid_in_name": {
+      "tempDir": true,
+      "steps": [
+        {
+          "args": [
+            "run",
+            "--cpu-prof",
+            "--cpu-prof-name=CPU.${pid}.cpuprofile",
+            "main.js"
+          ],
+          "output": "done\n"
+        },
+        {
+          "args": "run --allow-read verify_pid.js",
+          "output": "CPU.<pid>.cpuprofile\n"
+        }
+      ]
+    }
+  }
+}

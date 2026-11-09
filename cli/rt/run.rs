@@ -1908,6 +1908,7 @@ pub async fn run_with_options(
       max_cpu_time_secs: metadata.max_cpu_time,
       max_time_secs: metadata.max_time,
     },
+    maybe_heap_prof_config: None,
   };
   let worker_factory = LibMainWorkerFactory::new(
     blob_store,

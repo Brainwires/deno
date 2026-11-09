@@ -374,6 +374,13 @@ pub struct DocFlags {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Default)]
+pub struct HeapProfFlags {
+  pub dir: Option<String>,
+  pub name: Option<String>,
+  pub interval: Option<u64>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Default)]
 pub struct CpuProfFlags {
   pub dir: Option<String>,
   pub name: Option<String>,
@@ -1104,6 +1111,8 @@ pub struct Flags {
   pub require: Vec<String>,
   pub tunnel: bool,
   pub cpu_prof: Option<CpuProfFlags>,
+  /// denext: `--heap-prof` (Node's sampling heap profile at exit).
+  pub heap_prof: Option<HeapProfFlags>,
   /// Watch configuration for subcommands that support `--watch`. `paths` is
   /// only populated for subcommands whose `--watch` accepts values.
   pub watch: Option<WatchFlagsWithPaths>,

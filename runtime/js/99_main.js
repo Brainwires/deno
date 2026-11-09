@@ -284,6 +284,13 @@ function postMessage(message, transferOrOptions = undefined) {
 
 let isClosing = false;
 let globalDispatchEvent;
+// denext: node:worker_threads takes its own requests from the host (a
+// Worker's `startCpuProfile()`, `getHeapSnapshot()`, ...) before any
+// listener sees them; returns true for a message it handled.
+let workerControlHook = null;
+internals.setWorkerControlHook = (hook) => {
+  workerControlHook = hook;
+};
 let closeOnIdle;
 
 function hasMessageEventListener() {
@@ -308,6 +315,10 @@ function dispatchWorkerMessage(data) {
     });
     event.setIsTrusted(errorEvent, true);
     globalDispatchEvent(errorEvent);
+    return;
+  }
+
+  if (workerControlHook !== null && workerControlHook(message)) {
     return;
   }
 

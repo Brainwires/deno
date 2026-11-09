@@ -1307,6 +1307,26 @@ impl CliOptions {
     self.flags.cpu_prof.as_ref().is_some_and(|f| f.flamegraph)
   }
 
+  /// denext: `--heap-prof` (Node's sampling heap profile), resolved against
+  /// the initial working directory.
+  pub fn heap_prof_config(&self) -> Option<deno_runtime::HeapProfilerConfig> {
+    self
+      .flags
+      .heap_prof
+      .as_ref()
+      .map(|f| deno_runtime::HeapProfilerConfig {
+        dir: f
+          .dir
+          .as_ref()
+          .map(|d| self.initial_cwd.join(d))
+          .unwrap_or_else(|| self.initial_cwd.clone()),
+        name: f.name.clone(),
+        interval: f
+          .interval
+          .unwrap_or(deno_runtime::cpu_profiler::DEFAULT_HEAP_PROF_INTERVAL),
+      })
+  }
+
   pub fn enable_testing_features(&self) -> bool {
     self.flags.enable_testing_features
   }
