@@ -1,0 +1,9 @@
+run() delegates to enterWith(): true
+inner store: inner
+outer store: outer
+after run: undefined
+enterWith calls: outer,inner,outer,undefined
+in scope: scoped
+after scope: initial
+after dispose(): initial
+timer from scope: scoped

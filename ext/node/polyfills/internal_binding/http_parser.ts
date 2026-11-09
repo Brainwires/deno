@@ -26,7 +26,18 @@
 const { core } = __bootstrap;
 const { HTTPParser: NativeHTTPParser } = core.ops;
 const { Buffer } = core.loadExtScript("ext:deno_node/internal/buffer.mjs");
-const { AsyncResource } = core.loadExtScript("ext:deno_node/async_hooks.ts");
+const {
+  captureAsyncContextFrame,
+  constants: { kInit, kDestroy },
+  emitDestroy,
+  emitInit,
+  enterNativeCallback,
+  exitNativeCallback,
+  getDefaultTriggerAsyncId,
+  hasHooks,
+  kAsyncContextFrame,
+  newAsyncId,
+} = core.loadExtScript("ext:deno_node/internal/async_hooks.ts");
 const { getOptionValue } = core.loadExtScript(
   "ext:deno_node/internal/options.ts",
 );
@@ -139,6 +150,86 @@ const kOnMessageComplete = 4;
 const kOnExecute = 5;
 const kOnTimeout = 6;
 
+// The parser is an async resource, as Node's (an AsyncWrap of type
+// HTTPINCOMINGMESSAGE for a request parser, HTTPCLIENTREQUEST for a response
+// parser): `initialize()` gives it a new async id (destroying the previous
+// one when the parser is reused) and captures the async context, and every
+// callback the native parser makes runs in that context between `before` and
+// `after`, as node_http_parser.cc calls each one through MakeCallback. That
+// is what keeps AsyncLocalStorage (APM agents' context) in a request handler
+// whose connection was accepted by a server listening in another context.
+const kAsyncId = Symbol("kAsyncId");
+const kTriggerAsyncId = Symbol("kTriggerAsyncId");
+const kResource = Symbol("kResource");
+const kScopedCallbacks = Symbol("kScopedCallbacks");
+const kCallbackCache = Symbol("kCallbackCache");
+const kLastCallbackIndex = 6; // kOnTimeout
+
+function scopedCallback(parser: any, fn: any) {
+  return function (...args: unknown[]) {
+    const asyncId = parser[kAsyncId];
+    const prior = enterNativeCallback(
+      parser[kAsyncContextFrame],
+      asyncId,
+      parser[kTriggerAsyncId],
+      parser[kResource],
+    );
+    try {
+      return Reflect.apply(fn, parser, args);
+    } finally {
+      exitNativeCallback(prior, asyncId);
+    }
+  };
+}
+
+// The object handed to the native parser as its callbacks: index `i` reads
+// the parser's current `parser[i]` (callbacks may change during parsing)
+// wrapped in the parser's async scope, and the exception slot the native
+// side writes is the parser's own.
+function scopedCallbacks(parser: any) {
+  let callbacks = parser[kScopedCallbacks];
+  if (callbacks !== undefined) return callbacks;
+  const cache: any[] = [];
+  parser[kCallbackCache] = cache;
+  callbacks = { __proto__: null };
+  for (let i = 0; i <= kLastCallbackIndex; i++) {
+    Object.defineProperty(callbacks, i, {
+      __proto__: null,
+      get() {
+        const fn = parser[i];
+        if (typeof fn !== "function") return fn;
+        const entry = cache[i];
+        if (entry !== undefined && entry[0] === fn) return entry[1];
+        const wrapped = scopedCallback(parser, fn);
+        cache[i] = [fn, wrapped];
+        return wrapped;
+      },
+    } as PropertyDescriptor);
+  }
+  Object.defineProperty(callbacks, "__lastException", {
+    __proto__: null,
+    get() {
+      return parser.__lastException;
+    },
+    set(value) {
+      parser.__lastException = value;
+    },
+  } as PropertyDescriptor);
+  parser[kScopedCallbacks] = callbacks;
+  return callbacks;
+}
+
+function callbacksFor(parser: any) {
+  return parser[kAsyncId] === undefined ? parser : scopedCallbacks(parser);
+}
+
+function destroyAsyncId(parser: any) {
+  const asyncId = parser[kAsyncId];
+  if (asyncId === undefined) return;
+  parser[kAsyncId] = undefined;
+  if (hasHooks(kDestroy)) emitDestroy(asyncId);
+}
+
 /**
  * JS wrapper around the native llhttp-based HTTPParser cppgc object.
  *
@@ -169,13 +260,25 @@ HTTPParser.prototype.initialize = function (
   // 0 or unset means "use the default", `--max-http-header-size`, as in
   // Node.
   const effectiveMaxHeaderSize = maxHeaderSize || getMaxHTTPHeaderSize();
-  // Store the async resource so execute() can run callbacks in the
-  // correct async context (preserves AsyncLocalStorage through the
-  // native parser, emulating Node's MakeCallback behavior).
   if (asyncResource) {
-    this._asyncResource = new AsyncResource(
-      asyncResource.type || "HTTPPARSER",
-    );
+    // AsyncWrap::AsyncReset: a reused parser's previous id is destroyed.
+    destroyAsyncId(this);
+    const asyncId = newAsyncId();
+    const triggerAsyncId = getDefaultTriggerAsyncId();
+    this[kAsyncId] = asyncId;
+    this[kTriggerAsyncId] = triggerAsyncId;
+    this[kResource] = asyncResource;
+    this[kAsyncContextFrame] = captureAsyncContextFrame();
+    if (hasHooks(kInit)) {
+      emitInit(
+        asyncId,
+        type === HTTPParser.REQUEST
+          ? "HTTPINCOMINGMESSAGE"
+          : "HTTPCLIENTREQUEST",
+        triggerAsyncId,
+        asyncResource,
+      );
+    }
   }
   this._native.initialize(
     type,
@@ -215,19 +318,13 @@ HTTPParser.prototype.execute = function (
     };
   }
 
-  // Pass `this` (the JS wrapper) directly so callbacks set during
-  // parsing (e.g. trailer headers set in kOnHeadersComplete) are
-  // visible to subsequent callbacks.
-  // Run within the async resource scope to preserve AsyncLocalStorage
-  // context through native parser callbacks (emulates Node's MakeCallback).
-  const doExecute = () =>
-    this._native.execute(
-      this,
-      new Uint8Array(data.buffer, data.byteOffset, data.byteLength),
-    );
-  const result = this._asyncResource
-    ? this._asyncResource.runInAsyncScope(doExecute)
-    : doExecute();
+  // Pass the JS wrapper (or its scoped view, which reads it live) so
+  // callbacks set during parsing (e.g. trailer headers set in
+  // kOnHeadersComplete) are visible to subsequent callbacks.
+  const result = this._native.execute(
+    callbacksFor(this),
+    new Uint8Array(data.buffer, data.byteOffset, data.byteLength),
+  );
 
   // Restore original callback
   this[kOnBody] = origOnBody;
@@ -267,7 +364,7 @@ HTTPParser.prototype.execute = function (
 };
 
 HTTPParser.prototype.finish = function (this: any) {
-  return this._native.finish(this);
+  return this._native.finish(callbacksFor(this));
 };
 
 HTTPParser.prototype.pause = function (this: any) {
@@ -279,10 +376,13 @@ HTTPParser.prototype.resume = function (this: any) {
 };
 
 HTTPParser.prototype.close = function (this: any) {
+  destroyAsyncId(this);
   this._native.close();
 };
 
 HTTPParser.prototype.free = function (this: any) {
+  // Parser::Free emits the destroy hook (the parser goes back to the pool).
+  destroyAsyncId(this);
   this._native.free();
 };
 
@@ -297,7 +397,7 @@ HTTPParser.prototype.getCurrentBuffer = function (this: any) {
 // consume/unconsume - server optimization: data flows directly from the
 // TCP handle to the parser, bypassing the JS readable stream layer.
 HTTPParser.prototype.consume = function (this: any, handle: any) {
-  this._native.consume(this, handle);
+  this._native.consume(callbacksFor(this), handle);
 };
 
 HTTPParser.prototype.unconsume = function (this: any) {

@@ -39,6 +39,7 @@ const {
   SafeFinalizationRegistry,
   SafeArrayIterator,
   Symbol,
+  SymbolDispose,
 } = primordials;
 
 const {
@@ -205,15 +206,39 @@ class AsyncLocalStorage {
 
   // deno-lint-ignore no-explicit-any
   run(store: any, callback: any, ...args: any[]): any {
-    this.enabled = true;
-    const previous = this.#variable.enter(
-      store === undefined ? kUndefinedStore : store,
-    );
+    // Node's AsyncContextFrame backend (its default since Node 24) runs
+    // `run()` through `enterWith()`, and APM agents rely on it: they detect
+    // that backend by overriding `enterWith` on a probe instance, and they
+    // wrap `enterWith` alone to observe every store change. The exit restores
+    // the whole snapshot, as before; an overridden `enterWith` also sees the
+    // prior store on the way out, as in Node.
+    const previous = getAsyncContext();
+    const enterWith = this.enterWith;
+    if (enterWith === kEnterWith) {
+      this.enabled = true;
+      this.#variable.enter(store === undefined ? kUndefinedStore : store);
+      try {
+        return ReflectApply(callback, null, args);
+      } finally {
+        setAsyncContext(previous);
+      }
+    }
+    const prior = this.getStore();
+    ReflectApply(enterWith, this, [store]);
     try {
       return ReflectApply(callback, null, args);
     } finally {
-      setAsyncContext(previous);
+      try {
+        ReflectApply(this.enterWith, this, [prior]);
+      } finally {
+        setAsyncContext(previous);
+      }
     }
+  }
+
+  // Node 25.9: enters `store` until the returned scope is disposed (`using`).
+  withScope(store: unknown): RunScope {
+    return new RunScope(this, store);
   }
 
   // deno-lint-ignore no-explicit-any
@@ -270,6 +295,34 @@ class AsyncLocalStorage {
         ...new SafeArrayIterator(args),
       );
     };
+  }
+}
+
+const kEnterWith = AsyncLocalStorage.prototype.enterWith;
+
+// The scope `AsyncLocalStorage.prototype.withScope()` returns: Node's
+// lib/internal/async_local_storage/run_scope.js.
+class RunScope {
+  #storage: AsyncLocalStorage;
+  #previousStore: unknown;
+  #disposed = false;
+
+  constructor(storage: AsyncLocalStorage, store: unknown) {
+    this.#storage = storage;
+    this.#previousStore = storage.getStore();
+    storage.enterWith(store);
+  }
+
+  dispose() {
+    if (this.#disposed) {
+      return;
+    }
+    this.#disposed = true;
+    this.#storage.enterWith(this.#previousStore);
+  }
+
+  [SymbolDispose]() {
+    this.dispose();
   }
 }
 

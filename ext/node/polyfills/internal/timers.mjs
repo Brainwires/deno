@@ -38,6 +38,7 @@ const {
   emitDestroy,
   emitInit,
   enabledHooksExist,
+  enterAsyncResource,
   executionAsyncId,
   newAsyncId: nextAsyncId,
 } = core.loadExtScript("ext:deno_node/internal/async_hooks.ts");
@@ -224,6 +225,8 @@ Timeout.prototype[createTimer] = function () {
       const oldContext = getAsyncContext();
       try {
         setAsyncContext(asyncContext);
+        // The Timeout is the callback's executionAsyncResource(), as in Node.
+        enterAsyncResource(self);
         emitBefore(asyncId, triggerAsyncId, self);
         const ret = invokeCallback();
         // Only emit after/destroy on success. On error, the domain's

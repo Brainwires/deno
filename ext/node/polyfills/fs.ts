@@ -19,6 +19,7 @@ type WriteFileOptions = any;
 const {
   getValidatedEncoding,
   isFd,
+  fsReqCallback,
   isFileOptions,
   makeCallback,
   maybeCallback,
@@ -1104,6 +1105,7 @@ function readFile(
   } else {
     cb = callback;
   }
+  if (typeof cb === "function") cb = fsReqCallback(cb);
 
   const h = vfsState.handlers;
   if (h !== null && cb) {
@@ -2190,6 +2192,7 @@ function unlink(
 ): void {
   path = getValidatedPathToString(path);
   validateFunction(callback, "callback");
+  callback = fsReqCallback(callback);
 
   const h = vfsState.handlers;
   if (h !== null && vfsVoid(h.unlink(path), callback)) return;
@@ -2222,6 +2225,7 @@ function rename(
   oldPath = getValidatedPathToString(oldPath, "oldPath");
   newPath = getValidatedPathToString(newPath, "newPath");
   validateFunction(callback, "callback");
+  callback = fsReqCallback(callback);
 
   const h = vfsState.handlers;
   if (h !== null && vfsVoid(h.rename(oldPath, newPath), callback)) return;
@@ -3402,6 +3406,7 @@ function writeFile(
   }
 
   validateFunction(callback, "callback");
+  callback = fsReqCallback(callback);
 
   {
     const h = vfsState.handlers;
