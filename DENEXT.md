@@ -6008,9 +6008,9 @@ where the changes are discussed.
      `.github/denext-runtime/engine_staleness.py`). The runtime was on `v8`
      150.4.0 (V8 15.0.245.2, 2026-07-24), which gets no upstream V8 fixes any
      more, so a public JIT or type-confusion bug reachable from untrusted
-     JavaScript could escape the permission sandbox. It now takes `v8` 152.2.0,
-     V8 15.2.124.1: the newest rusty_v8 release (2026-08-20; its `main` still
-     carries 15.2), and the one upstream's open
+     JavaScript could get around the permission checks. It now takes `v8`
+     152.2.0, V8 15.2.124.1: the newest rusty_v8 release (2026-08-20; its `main`
+     still carries 15.2), and the one upstream's open
      [denoland/deno#36665](https://github.com/denoland/deno/pull/36665) adopts.
      Upstream's five commits and this fork's `dynamic.rs` adaptation land as one
      squashed commit (author kept, the upstream SHAs listed in its trailer), so
@@ -11617,6 +11617,78 @@ the host, so the `laufey` crate libdenort links and the hosts are built from the
 names for `laufey` (crates.io, or a git rev of Brainwires/laufey) with a path to
 that revision's `capi/`, records the `LAUFEY_API_VERSION` it compiled, and the
 package job fails if it differs from the hosts' `capi/include/laufey.h`.
+
+## Permissions: least-privilege guardrails
+
+The `--allow-*` / `--deny-*` permissions are **least-privilege guardrails**, not
+a sandbox. They are checks inside Deno's own APIs (`runtime/permissions/`, asked
+by each op before it acts); the operating system knows nothing about them. Code
+that leaves those APIs leaves the checks behind: a subprocess (`--allow-run`)
+runs with the user's full rights, and FFI (`--allow-ffi`) and Node-API addons
+are native code in the process that never asks. Kernel enforcement of the same
+grants (Landlock on Linux, Seatbelt on macOS) is planned; until it ships, every
+description of a permission in this fork means "least-privilege guardrail". The
+lifecycle-script jail ([npm supply-chain settings](#npm-supply-chain-settings))
+is the one place the OS already confines code, and it covers install scripts
+only.
+
+### Permission footguns
+
+- **`--allow-run` and `--allow-ffi` mean full trust.** A program started with
+  `--allow-run` is not bound by the parent's flags; a shell, an interpreter or
+  another `deno` can do anything. A scoped `--allow-run=<prog>` narrows which
+  programs start, not what they do. FFI and Node-API addons are not checked at
+  all once loaded.
+- **Write access to config files is code execution.** `deno.json` (tasks, import
+  maps, permission sets), `package.json` scripts, `.npmrc`, lockfiles, shell
+  startup files, git hooks and git config, and any module the next run imports.
+- **`--allow-net` to localhost reaches local services and cloud metadata.** A
+  loopback or unscoped grant reaches every service listening on the machine; an
+  unscoped one also reaches the instance metadata endpoint. An allowed host name
+  connects to whatever address DNS returns for it. `Deno.resolveDns()` checks
+  the name servers, not the names looked up. Block metadata and internal ranges
+  at the network layer too, not only with `--deny-net`.
+- **`--allow-env` exposes secrets.** Unscoped, every module reads every
+  variable; a subprocess inherits the environment unless it is cleared.
+- **`--allow-read` of the home directory exposes credentials** (`~/.ssh`,
+  `~/.aws`, `~/.config/gcloud`, `~/.kube`, `~/.docker/config.json`, `~/.npmrc`,
+  `~/.netrc`, shell history).
+- **Symlinks and allow scopes**, as of `3.0.0-denext.13`: allow scopes are
+  matched against the path as written, so a symlink inside an allowed folder
+  that points outside it is followed (reads, writes, directory links). Deny
+  rules are checked against the resolved path, including dangling links and
+  linked parent directories. `Deno.symlink()` / `node:fs` `symlink` need
+  unscoped read and write, so scoped code can't create a link, but an existing
+  one (or one a subprocess, an archive or a checkout creates) is followed. Allow
+  scopes that resolve links are in progress on a separate branch.
+
+### Network permissions and proxies
+
+Checked against `3.0.0-denext.13` with an environment HTTP proxy:
+
+- **`fetch()` / `WebSocket`** (`ext/fetch/proxy.rs`, `ext/fetch/dns.rs`,
+  `ext/websocket/lib.rs`): `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY` and
+  `NO_PROXY` (either case) are snapshotted before user code runs
+  (`snapshot_proxy_env`), so `Deno.env.set()` later changes nothing. The
+  destination URL is checked (allow and deny) before any I/O, proxied or not,
+  and every redirect hop is checked again. The hop to an environment HTTP/HTTPS
+  proxy needs no `--allow-net` grant (operator configuration); a SOCKS proxy
+  host and an explicit `Deno.createHttpClient({ proxy })` do. `NO_PROXY` hosts
+  connect directly with the usual checks. A refusal inside the connector
+  surfaces as `TypeError: fetch failed` with the permission error as `cause`. A
+  proxied request may still look the destination name up through the local
+  resolver.
+- **`node:http` / `node:https`** (`ext/node/polyfills/_http_proxy.js`,
+  `_http_client.js`): Node 24 rules, a proxy only with `NODE_USE_ENV_PROXY=1` /
+  `--use-env-proxy`, `http.setGlobalProxyFromEnv()` or an agent's `proxyEnv`;
+  the variables are read on first use without `--allow-env` (not snapshotted).
+  The target is checked (`op_node_http_check_proxy_net`) and the proxy hop is a
+  normal `node:net` / `node:tls` connection, so both need `--allow-net`.
+- **`Deno.connect` / `connectTls` / `node:net` / `node:tls`**: no proxy support;
+  direct connections with the usual checks.
+- **npm clients with their own proxy agent** open a socket only to the proxy, so
+  only the proxy is checked. A grant to a proxy host is a grant to everything
+  that proxy can reach.
 
 ## npm supply-chain settings
 
