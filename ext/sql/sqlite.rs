@@ -291,8 +291,7 @@ pub fn op_sql_sqlite_query<'a>(
   for (i, p) in params.0.iter().enumerate() {
     stmt.raw_bind_parameter(i + 1, Bind(p))?;
   }
-  let names: Vec<String> =
-    stmt.column_names().iter().map(|s| s.to_string()).collect();
+  let names: Vec<String> = stmt.column_names().map(|s| s.to_string()).collect();
   let shape = RowShape::new(scope, &names, flags).map_err(SqlError::Type)?;
   let readonly = stmt.readonly();
   let ncols = names.len();

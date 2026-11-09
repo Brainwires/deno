@@ -3,7 +3,6 @@
 """Tests of denort_pins.py. Run: python3 -I .github/denext-runtime/denort_pins_test.py"""
 import hashlib
 import os
-import re
 import sys
 import tempfile
 import unittest
@@ -12,6 +11,7 @@ import zipfile
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import denort_pins as pins  # noqa: E402
+import plan_matrix  # noqa: E402
 
 V = "3.0.0-denext.8"
 TARGETS = sorted(pins.RELEASE_TARGETS)
@@ -135,10 +135,19 @@ class CheckManifest(unittest.TestCase):
 
 class Workflow(unittest.TestCase):
     def test_the_workflow_builds_the_release_targets(self):
+        # The matrix is defined in plan_matrix.py; the workflow's plan step
+        # runs it. Both halves must hold for the release targets to be built.
         path = os.path.join(HERE, "..", "workflows", "denext_runtime.yml")
         with open(path) as f:
-            built = re.findall(r'\{"target": "([^"]+)", "os":', f.read())
+            workflow = f.read()
+        self.assertRegex(
+            workflow,
+            r"matrix=\$\(TARGETS=\"\$TARGETS\" python3 -I "
+            r"\.github/denext-runtime/plan_matrix\.py\)",
+        )
+        built = [t["target"] for t in plan_matrix.plan({"TARGETS": "all"})]
         self.assertEqual(sorted(built), TARGETS)
+        self.assertEqual(len(built), len(set(built)))
 
 
 if __name__ == "__main__":
