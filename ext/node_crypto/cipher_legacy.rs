@@ -23,6 +23,10 @@ use aes::cipher::KeyInit;
 use aes::cipher::StreamCipher;
 use aes::cipher::block_padding::Pkcs7;
 use aes::cipher::consts::U16;
+use aes::cipher::consts::U256;
+use aes::cipher::typenum::IsLess;
+use aes::cipher::typenum::Le;
+use aes::cipher::typenum::NonZero;
 use ccm::aead;
 use ccm::aead::generic_array::ArrayLength;
 use ccm::aead::generic_array::typenum::Unsigned;
@@ -622,15 +626,27 @@ where
   Some(Box::new(AeadImpl(cipher)))
 }
 
+// A macro rather than a generic function: `Ocb3`'s nonce and tag sizes are
+// bounded by `ocb3`'s sealed traits, which a where clause cannot name, so each
+// size pair is instantiated with concrete types.
+macro_rules! ocb_new {
+  ($c:ty, $n:ty, $m:ty, $key:expr) => {
+    match ocb3::Ocb3::<$c, $n, $m>::new_from_slice($key) {
+      Ok(cipher) => Some(Box::new(AeadImpl(cipher)) as Box<dyn OneShot>),
+      Err(_) => None,
+    }
+  };
+}
+
 macro_rules! ocb_dispatch {
   ($c:ty, $key:expr, $n:expr, $m:expr) => {{
     use aes::cipher::consts::*;
     macro_rules! with_m {
       ($nn:ty) => {
         match $m {
-          8 => ocb_new::<$c, $nn, U8>($key),
-          12 => ocb_new::<$c, $nn, U12>($key),
-          16 => ocb_new::<$c, $nn, U16>($key),
+          8 => ocb_new!($c, $nn, U8, $key),
+          12 => ocb_new!($c, $nn, U12, $key),
+          16 => ocb_new!($c, $nn, U16, $key),
           _ => None,
         }
       };
@@ -649,20 +665,6 @@ macro_rules! ocb_dispatch {
       _ => None,
     }
   }};
-}
-
-fn ocb_new<C, N, M>(key: &[u8]) -> Option<Box<dyn OneShot>>
-where
-  C: BlockCipher
-    + BlockSizeUser<BlockSize = U16>
-    + BlockEncrypt
-    + BlockDecrypt
-    + KeyInit
-    + 'static,
-  ocb3::Ocb3<C, N, M>: aead::AeadInPlace + KeyInit + 'static,
-{
-  let cipher = ocb3::Ocb3::<C, N, M>::new_from_slice(key).ok()?;
-  Some(Box::new(AeadImpl(cipher)))
 }
 
 struct OneShotMode {
@@ -923,15 +925,23 @@ where
     + KeyInit
     + Clone
     + 'static,
+  // OFB's keystream wrapper (`StreamCipherCoreWrapper`) holds a block-sized
+  // buffer and needs the block size below 256.
+  C::BlockSize: IsLess<U256>,
+  Le<C::BlockSize, U256>: NonZero,
 {
   let cipher = C::new_from_slice(key).ok()?;
   let iv_block = || GenericArray::from_slice(iv);
   Some(match (mode, encrypt) {
     (Mode::Ecb, true) => Both::Enc(Box::new(BlockEnc(
-      <ecb::Encryptor<C> as aes::cipher::InnerInit>::inner_init(cipher),
+      <ecb::Encryptor<C> as aes::cipher::crypto_common::InnerInit>::inner_init(
+        cipher,
+      ),
     ))),
     (Mode::Ecb, false) => Both::Dec(Box::new(BlockDec(
-      <ecb::Decryptor<C> as aes::cipher::InnerInit>::inner_init(cipher),
+      <ecb::Decryptor<C> as aes::cipher::crypto_common::InnerInit>::inner_init(
+        cipher,
+      ),
     ))),
     (Mode::Cbc, true) => Both::Enc(Box::new(BlockEnc(
       cbc::Encryptor::<C>::inner_iv_init(cipher, iv_block()),
@@ -969,7 +979,10 @@ where
       encrypt,
     ),
     (Mode::Ofb, encrypt) => Both::boxed(
-      Keystream(ofb::Ofb::<C>::inner_iv_init(cipher, iv_block())),
+      Keystream(ofb::Ofb::<C>::from_core(ofb::OfbCore::<C>::inner_iv_init(
+        cipher,
+        iv_block(),
+      ))),
       encrypt,
     ),
     _ => return None,
@@ -993,10 +1006,13 @@ where
     Mode::Ctr => {
       let cipher = C::new_from_slice(key).ok()?;
       Some(Both::boxed(
-        Keystream(ctr::Ctr128BE::<C>::inner_iv_init(
+        Keystream(ctr::Ctr128BE::<C>::from_core(ctr::CtrCore::<
+          C,
+          ctr::flavors::Ctr128BE,
+        >::inner_iv_init(
           cipher,
           GenericArray::from_slice(iv),
-        )),
+        ))),
         encrypt,
       ))
     }
