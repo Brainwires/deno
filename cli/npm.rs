@@ -795,8 +795,9 @@ impl DenoTaskLifeCycleScriptsExecutor {
             stderr,
             stdout,
           } = if let Some(jail) = jail {
-            // an approved dependency's script, confined (`jail-scripts`)
-            crate::supply_chain::jail::run_jailed_script(
+            // an approved dependency's script, confined (`jail-scripts`); boxed,
+            // as the future is large (clippy::large_futures on Windows)
+            Box::pin(crate::supply_chain::jail::run_jailed_script(
               jail,
               crate::supply_chain::jail::JailedScript {
                 package_name: package.id.nv.name.as_str(),
@@ -816,7 +817,7 @@ impl DenoTaskLifeCycleScriptsExecutor {
                 ],
                 kill_signal: kill_signal.clone(),
               },
-            )
+            ))
             .await
             .map_err(DenoTaskLifecycleScriptsError::Task)?
           } else {

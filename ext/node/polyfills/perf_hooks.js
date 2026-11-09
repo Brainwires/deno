@@ -308,6 +308,8 @@ class PerformanceNodeTiming {
       ...options,
       depth: options.depth == null ? null : options.depth - 1,
     };
+    // This class's own toJSON below, not an intrinsic's.
+    // deno-lint-ignore deno-internal/prefer-primordials
     return `PerformanceNodeTiming ${inspect(this.toJSON(), opts)}`;
   }
 
