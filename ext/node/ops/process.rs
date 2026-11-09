@@ -497,7 +497,7 @@ pub fn op_node_process_setuid(
 /// has checked the types). Behind `--allow-sys` (all of it: a scoped grant
 /// names no kind for this call).
 #[cfg(not(any(target_os = "android", target_os = "windows")))]
-#[op2(stack_trace)]
+#[op2(fast, stack_trace)]
 pub fn op_node_process_setgroups<'a>(
   scope: &mut v8::PinScope<'a, '_>,
   state: &mut OpState,
@@ -527,7 +527,7 @@ pub fn op_node_process_setgroups<'a>(
 }
 
 #[cfg(any(target_os = "android", target_os = "windows"))]
-#[op2(stack_trace)]
+#[op2(fast, stack_trace)]
 pub fn op_node_process_setgroups(
   _scope: &mut v8::PinScope<'_, '_>,
   _state: &mut OpState,
@@ -540,7 +540,7 @@ pub fn op_node_process_setgroups(
 /// `extraGroup` a gid or a group name. Behind `--allow-sys`, as
 /// [`op_node_process_setgroups`].
 #[cfg(not(any(target_os = "android", target_os = "windows")))]
-#[op2(stack_trace)]
+#[op2(fast, stack_trace)]
 pub fn op_node_process_initgroups<'a>(
   scope: &mut v8::PinScope<'a, '_>,
   state: &mut OpState,
@@ -578,7 +578,7 @@ pub fn op_node_process_initgroups<'a>(
 }
 
 #[cfg(any(target_os = "android", target_os = "windows"))]
-#[op2(stack_trace)]
+#[op2(fast, stack_trace)]
 pub fn op_node_process_initgroups(
   _scope: &mut v8::PinScope<'_, '_>,
   _state: &mut OpState,

@@ -31,7 +31,6 @@ use std::io::Write;
 use std::ptr::NonNull;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 
 use deno_core::CppgcInherits;
 use deno_core::GarbageCollected;

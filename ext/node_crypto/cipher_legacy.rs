@@ -851,6 +851,7 @@ fn parse(name: &str) -> Option<(Algo, Mode)> {
 }
 
 /// Whether the name is one this module serves.
+#[cfg(test)]
 pub(crate) fn is_legacy(name: &str) -> bool {
   parse(name).is_some()
 }

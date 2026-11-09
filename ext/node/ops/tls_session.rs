@@ -481,7 +481,7 @@ impl rustls::server::ProducesTickets for NodeTicketer {
 /// `NodeTicketer`s by (keys, lifetime), so every connection of a server (a
 /// fresh `ServerConfig` each) and every server sharing `ticketKeys` uses one
 /// ticketer.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub(crate) struct TicketerCache {
   ticketers: HashMap<([u8; 48], u32), Arc<NodeTicketer>>,
 }

@@ -4,6 +4,7 @@ use std::cell::Cell;
 use std::cell::RefCell;
 
 use deno_core::GarbageCollected;
+use deno_core::OpState;
 use deno_core::op2;
 use hdrhistogram::Histogram;
 
@@ -470,7 +471,7 @@ pub struct NodeEnvironmentStart(pub std::time::Instant);
 /// milestone this process never recorded is `NaN`.
 #[op2(fast)]
 pub fn op_node_perf_milestones_ago(
-  state: &mut deno_core::OpState,
+  state: &mut OpState,
   #[buffer] out: &mut [f64],
 ) {
   if out.len() < 3 {
