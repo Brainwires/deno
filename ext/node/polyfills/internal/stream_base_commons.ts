@@ -23,7 +23,15 @@
 (function () {
 const { core, primordials } = __bootstrap;
 
-const { ownerSymbol } = core.loadExtScript(
+const {
+  asyncIdSymbol,
+  captureAsyncContextFrame,
+  enterNativeCallback,
+  exitNativeCallback,
+  kAsyncContextFrame,
+  ownerSymbol,
+  trigger_async_id_symbol: kTriggerAsyncId,
+} = core.loadExtScript(
   "ext:deno_node/internal/async_hooks.ts",
 );
 // deno-lint-ignore no-unused-vars
@@ -57,6 +65,7 @@ const {
   Array,
   ArrayBufferPrototype,
   FunctionPrototypeBind,
+  FunctionPrototypeCall,
   MapPrototypeGet,
   ObjectPrototypeIsPrototypeOf,
   Symbol,
@@ -113,8 +122,24 @@ function handleWriteReq(req: any, data: any, encoding: string) {
   }
 }
 
+// A write completes in the context the write was made in (Node's WriteWrap
+// is an AsyncWrap made by the write).
 // deno-lint-ignore no-explicit-any
 function onWriteComplete(this: any, status: number) {
+  const frame = this[kAsyncContextFrame];
+  if (frame === undefined) {
+    return FunctionPrototypeCall(onWriteCompleteImpl, this, status);
+  }
+  const prior = enterNativeCallback(frame, undefined, undefined);
+  try {
+    return FunctionPrototypeCall(onWriteCompleteImpl, this, status);
+  } finally {
+    exitNativeCallback(prior, undefined);
+  }
+}
+
+// deno-lint-ignore no-explicit-any
+function onWriteCompleteImpl(this: any, status: number) {
   let stream = this.handle[ownerSymbol];
 
   if (stream.constructor.name === "ReusedHandle") {
@@ -157,6 +182,7 @@ function createWriteWrap(
 
   req.handle = handle;
   req.oncomplete = onWriteComplete;
+  req[kAsyncContextFrame] = captureAsyncContextFrame();
   req.async = false;
   req.bytes = 0;
   req.buffer = null;
@@ -256,7 +282,34 @@ function afterWriteDispatched(
 // entry of the `streamBaseState` array from the `stream_wrap` internal binding.
 // Here we pass the `nread` value directly to this method as async Deno APIs
 // don't grant us the ability to rely on some mutable array entry setting.
+//
+// Runs as Node's LibuvStreamWrap::OnUvRead does, through MakeCallback: in the
+// context the handle was made in, as the socket's async resource when it was
+// reported to async_hooks.
 function onStreamRead(
+  // deno-lint-ignore no-explicit-any
+  this: any,
+  arrayBuffer: Uint8Array,
+  nread?: number,
+) {
+  const frame = this[kAsyncContextFrame];
+  const triggerAsyncId = this[kTriggerAsyncId];
+  if (frame === undefined && triggerAsyncId === undefined) {
+    return FunctionPrototypeCall(onStreamReadImpl, this, arrayBuffer, nread);
+  }
+  const owner = this[ownerSymbol];
+  const asyncId = triggerAsyncId === undefined
+    ? undefined
+    : owner?.[asyncIdSymbol];
+  const prior = enterNativeCallback(frame, asyncId, triggerAsyncId, this);
+  try {
+    return FunctionPrototypeCall(onStreamReadImpl, this, arrayBuffer, nread);
+  } finally {
+    exitNativeCallback(prior, asyncId);
+  }
+}
+
+function onStreamReadImpl(
   // deno-lint-ignore no-explicit-any
   this: any,
   arrayBuffer: Uint8Array,

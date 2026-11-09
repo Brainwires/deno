@@ -174,6 +174,72 @@ function exitAsyncResourceIfActive(previousContext: any): void {
   }
 }
 
+// Node's AsyncWrap keeps the async context frame that was current when the
+// wrap was created, and MakeCallback runs every native callback of the wrap
+// (a socket read, a write or connect completion, an accepted connection, an
+// HTTP parser event) in that frame, between the wrap's `before` and `after`
+// hooks, restoring the caller's frame afterwards. The runtime's native
+// handles call JS directly, so the polyfills capture the frame on the JS
+// object (`obj[kAsyncContextFrame]`) and enter it with
+// `enterNativeCallback()` / `exitNativeCallback()`.
+//
+// An empty frame is stored as `null`: `getAsyncContext()` reports an empty
+// context as `undefined`, and a missing capture must stay distinguishable
+// (it leaves the current context alone).
+const kAsyncContextFrame = Symbol("kAsyncContextFrame");
+
+// deno-lint-ignore no-explicit-any
+function captureAsyncContextFrame(): any {
+  const frame = getAsyncContext();
+  return frame === undefined ? null : frame;
+}
+
+// Enters a native callback run in `frame` (from `captureAsyncContextFrame()`)
+// as async resource `asyncId` / `resource`. Returns the caller's context, to
+// hand to `exitNativeCallback()`. A non-number `asyncId` enters only the
+// frame.
+function enterNativeCallback(
+  // deno-lint-ignore no-explicit-any
+  frame: any,
+  asyncId: number | undefined,
+  triggerAsyncId: number | undefined,
+  resource?: unknown,
+  // deno-lint-ignore no-explicit-any
+): any {
+  const prior = getAsyncContext();
+  if (frame !== undefined) setAsyncContext(frame);
+  if (typeof asyncId === "number") {
+    if (resource !== undefined) {
+      // As enterAsyncResourceIfActive(): only worth an allocation while a
+      // hook or an async context mapping can observe it.
+      if (active_hooks.array.length > 0) {
+        executionResourceVariable.enter(resource);
+      } else {
+        executionResourceVariable.enterIfActive(resource);
+      }
+    }
+    try {
+      emitBefore(asyncId, triggerAsyncId ?? 0, resource);
+    } catch (e) {
+      setAsyncContext(prior);
+      throw e;
+    }
+  }
+  return prior;
+}
+
+function exitNativeCallback(
+  // deno-lint-ignore no-explicit-any
+  prior: any,
+  asyncId: number | undefined,
+): void {
+  try {
+    if (typeof asyncId === "number") emitAfter(asyncId);
+  } finally {
+    setAsyncContext(prior);
+  }
+}
+
 // Calls `symbol`'s callback of every active hook (a hook created with
 // `trackPromises: false` sits out promise events), keeping the set of hooks
 // fixed while they run.
@@ -728,6 +794,10 @@ return {
   exitAsyncResource,
   enterAsyncResourceIfActive,
   exitAsyncResourceIfActive,
+  kAsyncContextFrame,
+  captureAsyncContextFrame,
+  enterNativeCallback,
+  exitNativeCallback,
   emitBefore,
   emitAfter,
   emitDestroy,

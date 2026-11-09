@@ -1,0 +1,65 @@
+ok /a after await
+ok /a after fs.promises
+ok /a after setTimeout promise
+ok /a fs.readFile cb
+ok /a fs.stat cb
+ok /a handler
+ok /a nextTick cb
+ok /a outgoing finish event
+ok /a outgoing response cb
+ok /a outgoing response end
+ok /a outgoing socket event
+ok /a queueMicrotask cb
+ok /a req end
+ok /a res close
+ok /a res finish
+ok /a setImmediate cb
+ok /a setTimeout cb
+ok /b after await
+ok /b after fs.promises
+ok /b after setTimeout promise
+ok /b fs.readFile cb
+ok /b fs.stat cb
+ok /b handler
+ok /b nextTick cb
+ok /b outgoing finish event
+ok /b outgoing response cb
+ok /b outgoing response end
+ok /b outgoing socket event
+ok /b queueMicrotask cb
+ok /b req end
+ok /b res close
+ok /b res finish
+ok /b setImmediate cb
+ok /b setTimeout cb
+ok /inner after await
+ok /inner after await
+ok /inner after fs.promises
+ok /inner after fs.promises
+ok /inner after setTimeout promise
+ok /inner after setTimeout promise
+ok /inner fs.readFile cb
+ok /inner fs.readFile cb
+ok /inner fs.stat cb
+ok /inner fs.stat cb
+ok /inner handler
+ok /inner handler
+ok /inner nextTick cb
+ok /inner nextTick cb
+ok /inner queueMicrotask cb
+ok /inner queueMicrotask cb
+ok /inner req end
+ok /inner req end
+ok /inner res close
+ok /inner res close
+ok /inner res finish
+ok /inner res finish
+ok /inner setImmediate cb
+ok /inner setImmediate cb
+ok /inner setTimeout cb
+ok /inner setTimeout cb
+ok bare handler
+ok net client close
+ok net client data
+ok net client end
+ALL OK

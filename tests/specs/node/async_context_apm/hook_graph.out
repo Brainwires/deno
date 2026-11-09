@@ -1,0 +1,6 @@
+connection event: runs as TCPSERVERWRAP, between before/after: true, executionAsyncResource matches: true, chain: TCPSERVERWRAP
+request handler: runs as HTTPINCOMINGMESSAGE, between before/after: true, executionAsyncResource matches: true, chain: HTTPINCOMINGMESSAGE < TCPWRAP < TCPSERVERWRAP
+fs.stat callback: runs as FSREQCALLBACK, between before/after: true, executionAsyncResource matches: true, chain: FSREQCALLBACK < HTTPINCOMINGMESSAGE < TCPWRAP < TCPSERVERWRAP
+fs.readFile callback: runs as FSREQCALLBACK, between before/after: true, executionAsyncResource matches: true, chain: FSREQCALLBACK < HTTPINCOMINGMESSAGE < TCPWRAP < TCPSERVERWRAP
+setTimeout callback: runs as Timeout, between before/after: true, executionAsyncResource matches: true, chain: Timeout < FSREQCALLBACK < HTTPINCOMINGMESSAGE < TCPWRAP < TCPSERVERWRAP
+client response callback: runs as HTTPCLIENTREQUEST, between before/after: true, executionAsyncResource matches: true, chain: HTTPCLIENTREQUEST < TCPSERVERWRAP

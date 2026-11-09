@@ -105,8 +105,8 @@ const {
 } = core.loadExtScript("ext:deno_node/internal/validators.mjs");
 const { nextTick } = core.loadExtScript("ext:deno_node/_next_tick.ts");
 const {
-  enterAsyncResourceIfActive,
-  exitAsyncResourceIfActive,
+  asyncIdSymbol,
+  defaultTriggerAsyncIdScope,
 } = core.loadExtScript("ext:deno_node/internal/async_hooks.ts");
 const { enqueueNodePerformanceEntry, hasNodeObserverForType } = core
   .loadExtScript(
@@ -584,8 +584,26 @@ function emitCloseNT(self) {
 
 // ---- Server ----
 
+// The resource async_hooks reports for a request parser (Node's).
+class HTTPServerAsyncResource {
+  constructor(type, socket) {
+    this.type = type;
+    this.socket = socket;
+  }
+}
+
 function connectionListener(socket) {
-  connectionListenerInternal(this, socket);
+  // As Node: what the connection sets up (its parser) is triggered by the
+  // socket.
+  const socketAsyncId = socket[asyncIdSymbol];
+  defaultTriggerAsyncIdScope(
+    typeof socketAsyncId === "number" && socketAsyncId > 0
+      ? socketAsyncId
+      : undefined,
+    connectionListenerInternal,
+    this,
+    socket,
+  );
 }
 
 function connectionListenerInternal(server, socket) {
@@ -611,7 +629,7 @@ function connectionListenerInternal(server, socket) {
 
   parser.initialize(
     HTTPParser.REQUEST,
-    {},
+    new HTTPServerAsyncResource("HTTPINCOMINGMESSAGE", socket),
     server.maxHeaderSize || 0,
     lenient ? kLenientAll : kLenientNone,
   );
@@ -1125,14 +1143,10 @@ function parserOnIncoming(server, socket, state, req, keepAlive) {
     });
   }
 
-  // Enter a new async-hooks resource scope for the duration of the request
-  // emission. Each request gets its own resource (the IncomingMessage), so
-  // executionAsyncResource() returns a per-request object that is preserved
-  // across timers, await transitions, etc. Without this, every request would
-  // share the top-level resource and concurrent requests would race on any
-  // state stashed there.
-  const prevAsyncResource = enterAsyncResourceIfActive(req);
-  try {
+  // The request is emitted from a parser callback, which runs as the
+  // parser's async resource (HTTPINCOMINGMESSAGE, one per connection), so
+  // executionAsyncResource() is that resource here, as in Node.
+  {
     let handled = false;
 
     if (req.httpVersionMajor === 1 && req.httpVersionMinor === 1) {
@@ -1186,8 +1200,6 @@ function parserOnIncoming(server, socket, state, req, keepAlive) {
     if (!handled) {
       server.emit("request", req, res);
     }
-  } finally {
-    exitAsyncResourceIfActive(prevAsyncResource);
   }
 
   return 0;

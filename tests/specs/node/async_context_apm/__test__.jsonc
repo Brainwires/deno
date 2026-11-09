@@ -1,0 +1,21 @@
+{
+  // What APM agents' context propagation and async_hooks consumers rely on:
+  // AsyncLocalStorage through an instrumented HTTP server, fs, timers and
+  // sockets (including a server that listens in another context), the
+  // AsyncContextFrame-style AsyncLocalStorage API (run() through enterWith(),
+  // withScope()), and the resource graph of an HTTP request.
+  "tests": {
+    "otel_pattern": {
+      "args": "run -A otel_pattern.cjs",
+      "output": "otel_pattern.out"
+    },
+    "als_frame_api": {
+      "args": "run als_frame_api.cjs",
+      "output": "als_frame_api.out"
+    },
+    "hook_graph": {
+      "args": "run -A hook_graph.cjs",
+      "output": "hook_graph.out"
+    }
+  }
+}

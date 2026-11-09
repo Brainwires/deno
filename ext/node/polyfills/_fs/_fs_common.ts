@@ -7,6 +7,16 @@ const { validateFunction } = core.loadExtScript(
   "ext:deno_node/internal/validators.mjs",
 );
 
+const {
+  emitDestroy,
+  emitInit,
+  enabledHooksExist,
+  enterNativeCallback,
+  exitNativeCallback,
+  getDefaultTriggerAsyncId,
+  newAsyncId,
+} = core.loadExtScript("ext:deno_node/internal/async_hooks.ts");
+
 const lazyFsUtils = core.createLazyLoader(
   "ext:deno_node/internal/fs/utils.mjs",
 );
@@ -79,7 +89,40 @@ function makeCallback(cb) {
   // Callbacks run with `this` = undefined, matching Node.js ESM strict-mode
   // behavior (the original code was an ESM arrow function capturing `this`
   // from makeCallback's call site, which is undefined in strict mode).
-  return (...args) => ReflectApply(cb, undefined, args);
+  return fsReqCallback(cb);
+}
+
+// The resource async_hooks reports for a callback-style fs call (Node's
+// FSReqCallback).
+class FSReqCallback {}
+
+// Node makes an FSReqCallback for each callback-style fs request, and its
+// callback runs as that resource (`init` FSREQCALLBACK, triggered by the
+// caller, then `before` / `after` / `destroy` around the callback). While
+// any hook is enabled, `cb` becomes such a request; otherwise it is only
+// called with `this` = undefined.
+function fsReqCallback(cb) {
+  if (!enabledHooksExist()) {
+    return (...args) => ReflectApply(cb, undefined, args);
+  }
+  const asyncId = newAsyncId();
+  const triggerAsyncId = getDefaultTriggerAsyncId();
+  const resource = new FSReqCallback();
+  emitInit(asyncId, "FSREQCALLBACK", triggerAsyncId, resource);
+  return (...args) => {
+    const prior = enterNativeCallback(
+      undefined,
+      asyncId,
+      triggerAsyncId,
+      resource,
+    );
+    try {
+      return ReflectApply(cb, undefined, args);
+    } finally {
+      exitNativeCallback(prior, asyncId);
+      emitDestroy(asyncId);
+    }
+  };
 }
 
 return {
@@ -90,5 +133,6 @@ return {
   isFd,
   maybeCallback,
   makeCallback,
+  fsReqCallback,
 };
 })();

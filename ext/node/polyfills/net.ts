@@ -43,12 +43,17 @@ const {
 const { Duplex } = core.createLazyLoader("node:stream")();
 const {
   asyncIdSymbol,
+  captureAsyncContextFrame,
   defaultTriggerAsyncIdScope,
   emitDestroy,
   emitInit,
+  enterNativeCallback,
   executionAsyncId,
+  exitNativeCallback,
+  kAsyncContextFrame: kAsyncContext,
   newAsyncId,
   ownerSymbol,
+  trigger_async_id_symbol: kTriggerAsyncId,
 } = core.loadExtScript("ext:deno_node/internal/async_hooks.ts");
 const {
   AbortError,
@@ -193,7 +198,6 @@ const kBytesWritten = Symbol("kBytesWritten");
 // registration time and restored before dispatching. Otherwise
 // `AsyncLocalStorage.getStore()` returns `undefined` inside `connect` and
 // `connection` handlers. See https://github.com/denoland/deno/issues/35154.
-const kAsyncContext = Symbol("kAsyncContext");
 
 // Runs `run` with the async context snapshot that was active when the
 // operation was initiated, restoring the previous context afterwards.
@@ -202,12 +206,11 @@ function _runInAsyncContext(snapshot: any, run: () => void) {
     run();
     return;
   }
-  const prior = core.getAsyncContext();
-  core.setAsyncContext(snapshot);
+  const prior = enterNativeCallback(snapshot, undefined, undefined);
   try {
     run();
   } finally {
-    core.setAsyncContext(prior);
+    exitNativeCallback(prior, undefined);
   }
 }
 
@@ -385,15 +388,25 @@ const providerTypeNames = [
   "ZLIB",
 ];
 
+const kInitEmitted = Symbol("kInitEmitted");
+
 function _emitHandleInit(handle: Handle, asyncId: number) {
   if (typeof (handle as any).getProviderType !== "function") {
     return;
   }
+  // A socket made from an accepted handle reaches this from its constructor
+  // and from _initSocketHandle(): report the resource once.
+  if ((handle as any)[kInitEmitted] === asyncId) {
+    return;
+  }
+  (handle as any)[kInitEmitted] = asyncId;
   const providerType = (handle as any).getProviderType();
+  const triggerAsyncId = executionAsyncId();
+  (handle as any)[kTriggerAsyncId] = triggerAsyncId;
   emitInit(
     asyncId,
     providerTypeNames[providerType] || "UNKNOWN",
-    executionAsyncId(),
+    triggerAsyncId,
     handle,
   );
 }
@@ -1026,6 +1039,11 @@ function _initSocketHandle(socket: Socket) {
   if (socket._handle) {
     (socket._handle as any)[ownerSymbol] = socket;
     socket._handle.onread = onStreamRead;
+    // The context the socket's native callbacks (reads, writes) run in, as
+    // Node's AsyncWrap captures it when the handle is made.
+    if ((socket._handle as any)[kAsyncContext] === undefined) {
+      (socket._handle as any)[kAsyncContext] = captureAsyncContextFrame();
+    }
     socket[asyncIdSymbol] = _getNewAsyncId(socket._handle);
     _emitHandleInit(socket._handle, socket[asyncIdSymbol]);
 
@@ -1660,7 +1678,7 @@ Socket.prototype.connect = function (...args) {
   // Capture the async context now, while we are still running synchronously
   // inside the caller's context. The DNS lookup that precedes the actual
   // connect is async and would otherwise drop it before `_afterConnect` runs.
-  this._handle[kAsyncContext] = core.getAsyncContext();
+  this._handle[kAsyncContext] = captureAsyncContextFrame();
 
   if (cb !== null) {
     this.once("connect", cb);
@@ -2093,7 +2111,11 @@ Socket.prototype._destroy = function (exception, cb) {
       }
 
       debug("emit close");
-      this.emit("close", isException);
+      // Node's HandleWrap::OnClose runs in the handle's context.
+      _runInAsyncContext(
+        (handle as any)[kAsyncContext],
+        () => this.emit("close", isException),
+      );
     });
   } else {
     cb(exception);
@@ -2618,10 +2640,25 @@ function _emitListeningNT(server: Server) {
 function _onconnection(this: any, err: number, clientHandle?: Handle) {
   // deno-lint-ignore no-this-alias
   const handle = this;
-  _runInAsyncContext(
+  // Node creates an accepted handle before it enters the server's callback
+  // scope, so the connection's own callbacks don't inherit the context that
+  // was active at listen() (only callbacks of the server handle do).
+  if (clientHandle && (clientHandle as any)[kAsyncContext] === undefined) {
+    (clientHandle as any)[kAsyncContext] = null;
+  }
+  const self = handle[ownerSymbol];
+  const asyncId = self?.[asyncIdSymbol];
+  const prior = enterNativeCallback(
     handle[kAsyncContext],
-    () => FunctionPrototypeCall(_onconnectionImpl, handle, err, clientHandle),
+    asyncId,
+    handle[kTriggerAsyncId],
+    handle,
   );
+  try {
+    FunctionPrototypeCall(_onconnectionImpl, handle, err, clientHandle);
+  } finally {
+    exitNativeCallback(prior, asyncId);
+  }
 }
 
 function _onconnectionImpl(this: any, err: number, clientHandle?: Handle) {
@@ -2749,7 +2786,10 @@ function _setupListenHandle(
 
   this[asyncIdSymbol] = _getNewAsyncId(this._handle);
   this._handle.onconnection = _onconnection;
-  this._handle[kAsyncContext] = core.getAsyncContext();
+  this._handle[kAsyncContext] = captureAsyncContextFrame();
+  // Node reports the listening handle (TCPSERVERWRAP / PIPESERVERWRAP) when
+  // it is created; its connections are triggered by it.
+  _emitHandleInit(this._handle, this[asyncIdSymbol]);
   this._handle[ownerSymbol] = this;
 
   // For TCP and Pipe handles, wrap the onconnection callback to create
