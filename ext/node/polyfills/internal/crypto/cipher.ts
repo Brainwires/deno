@@ -10,6 +10,7 @@ const {
 } = core;
 const {
   ArrayBufferIsView,
+  ArrayPrototypePush,
   Boolean,
   DataViewPrototypeGetBuffer,
   DataViewPrototypeGetByteLength,
@@ -22,6 +23,7 @@ const {
   SafeRegExp,
   SafeSet,
   SetPrototypeHas,
+  StringPrototypeEndsWith,
   StringPrototypeReplace,
   StringPrototypeStartsWith,
   StringPrototypeToLowerCase,
@@ -32,6 +34,7 @@ const {
   TypedArrayPrototypeGetBuffer,
   TypedArrayPrototypeGetByteLength,
   TypedArrayPrototypeGetByteOffset,
+  TypedArrayPrototypeSet,
   Uint8Array,
 } = primordials;
 const {
@@ -80,6 +83,7 @@ const {
   ERR_INVALID_ARG_VALUE,
   ERR_UNKNOWN_ENCODING,
   NodeError,
+  NodeTypeError,
 } = core.loadExtScript("ext:deno_node/internal/errors.ts");
 
 const {
@@ -144,6 +148,70 @@ function isAesWrap(cipher: string): boolean {
   return cipher === "aes128-wrap" || cipher === "aes192-wrap" ||
     cipher === "aes256-wrap" || cipher === "id-aes128-wrap-pad" ||
     cipher === "id-aes192-wrap-pad" || cipher === "id-aes256-wrap-pad";
+}
+
+// Modes that turn any length of input into the same length of output, so
+// update() passes data straight through (no whole-block cache): the stream
+// modes, GCM, XTS (each update is one data unit), and CCM / OCB (one-shot
+// AEADs, see below). DENEXT.md item NNN.
+const kPassThroughSuffixes = [
+  "-ctr",
+  "-cfb",
+  "-cfb1",
+  "-cfb8",
+  "-cfb128",
+  "-ofb",
+  "-ofb128",
+  "-gcm",
+  "-xts",
+  "-ccm",
+  "-ocb",
+];
+
+function needsBlockCache(cipher: string): boolean {
+  if (cipher === "chacha20" || cipher === "chacha20-poly1305") {
+    return false;
+  }
+  for (let i = 0; i < kPassThroughSuffixes.length; i++) {
+    if (StringPrototypeEndsWith(cipher, kPassThroughSuffixes[i])) {
+      return false;
+    }
+  }
+  return true;
+}
+
+// CCM takes its whole message in one update() (as in Node). OCB is sealed
+// over the whole message too: its updates are collected and the output
+// comes from final().
+function isCcm(cipher: string): boolean {
+  return StringPrototypeEndsWith(cipher, "-ccm");
+}
+
+function isOcb(cipher: string): boolean {
+  return StringPrototypeEndsWith(cipher, "-ocb");
+}
+
+function concatChunks(chunks: Uint8Array[]): Uint8Array {
+  let length = 0;
+  for (let i = 0; i < chunks.length; i++) {
+    length += TypedArrayPrototypeGetByteLength(chunks[i]);
+  }
+  const out = new FastBuffer(length);
+  let offset = 0;
+  for (let i = 0; i < chunks.length; i++) {
+    TypedArrayPrototypeSet(out, chunks[i], offset);
+    offset += TypedArrayPrototypeGetByteLength(chunks[i]);
+  }
+  return out;
+}
+
+function checkAeadOptions(cipher: string, authTagLength: number) {
+  if ((isCcm(cipher) || isOcb(cipher)) && authTagLength === -1) {
+    throw new NodeTypeError(
+      "ERR_CRYPTO_INVALID_AUTH_TAG",
+      `authTagLength required for ${cipher}`,
+    );
+  }
 }
 
 function isStringOrBuffer(
@@ -211,6 +279,17 @@ function Cipheriv(
   this._blockSize = getBlockSize(cipher);
   this._cache = new BlockModeCache(false, this._blockSize);
   this._isAesWrap = isAesWrap(cipher);
+  checkAeadOptions(cipher, authTagLength);
+  if (StringPrototypeEndsWith(cipher, "-xts")) {
+    // OpenSSL refuses an XTS key whose halves are equal, when encrypting
+    const k = toU8(key);
+    const half = TypedArrayPrototypeGetByteLength(k) / 2;
+    let same = half > 0;
+    for (let i = 0; same && i < half; i++) same = k[i] === k[half + i];
+    if (same) {
+      throw opensslError("ERR_OSSL_XTS_DUPLICATED_KEYS", "xts duplicated keys");
+    }
+  }
 
   if (this._isAesWrap) {
     this._aesWrapAlgorithm = cipher;
@@ -241,11 +320,9 @@ function Cipheriv(
     }
   }
 
-  this._needsBlockCache = !this._isAesWrap &&
-    !(cipher == "aes-128-gcm" || cipher == "aes-256-gcm" ||
-      cipher == "aes-128-ctr" || cipher == "aes-192-ctr" ||
-      cipher == "aes-256-ctr" || cipher == "chacha20" ||
-      cipher == "chacha20-poly1305");
+  this._needsBlockCache = !this._isAesWrap && needsBlockCache(cipher);
+  this._isCcm = isCcm(cipher);
+  this._ocbChunks = isOcb(cipher) ? [] : undefined;
   this._authTag = undefined;
   this._autoPadding = true;
   this._finalized = false;
@@ -267,6 +344,22 @@ Cipheriv.prototype.final = function (
   if (this._isAesWrap) {
     this._finalized = true;
     return encoding === "buffer" ? Buffer.from([]) : this._decoder!.end();
+  }
+
+  if (this._ocbChunks !== undefined) {
+    // OCB: the whole message, sealed at once
+    const data = concatChunks(this._ocbChunks);
+    const output = new FastBuffer(TypedArrayPrototypeGetByteLength(data));
+    if (
+      TypedArrayPrototypeGetByteLength(data) > 0 &&
+      !op_node_cipheriv_encrypt(this._context, data, output)
+    ) {
+      throw new Error("Trying to add data in unsupported state");
+    }
+    const maybeTag = op_node_cipheriv_take(this._context);
+    if (maybeTag) this._authTag = Buffer.from(maybeTag);
+    this._finalized = true;
+    return encoding === "buffer" ? output : this._decoder!.end(output);
   }
 
   const bs = this._blockSize;
@@ -320,13 +413,14 @@ Cipheriv.prototype.getAuthTag = function (): Buffer {
 
 Cipheriv.prototype.setAAD = function (
   buffer: ArrayBufferView,
-  _options?: {
+  options?: {
     plaintextLength: number;
   },
 ) {
   if (this._finalized) {
     throw new ERR_CRYPTO_INVALID_STATE("setAAD");
   }
+  checkCcmAad(this, options);
   op_node_cipheriv_set_aad(this._context, buffer);
   return this;
 };
@@ -378,6 +472,14 @@ Cipheriv.prototype.update = function (
   }
 
   let output: Buffer;
+  if (this._ocbChunks !== undefined) {
+    ArrayPrototypePush(this._ocbChunks, Buffer.from(buf));
+    output = Buffer.alloc(0);
+    if (outputEncoding !== "buffer") {
+      return this._decoder!.write(output);
+    }
+    return output;
+  }
   if (!this._needsBlockCache) {
     output = new FastBuffer(inputByteLength);
     if (!op_node_cipheriv_encrypt(this._context, buf, output)) {
@@ -409,6 +511,16 @@ Cipheriv.prototype.update = function (
 
   return output;
 };
+
+// CCM authenticates the message length first: Node wants it with the AAD
+function checkCcmAad(self: any, options?: { plaintextLength: number }) {
+  if (self._isCcm && options?.plaintextLength === undefined) {
+    throw new NodeTypeError(
+      "ERR_MISSING_ARGS",
+      "options.plaintextLength required for CCM mode with AAD",
+    );
+  }
+}
 
 function _lazyInitCipherDecoder(self: any, encoding: string) {
   if (encoding === "buffer") {
@@ -523,6 +635,7 @@ function Decipheriv(
   this._blockSize = getBlockSize(cipher);
   this._cache = new BlockModeCache(this._autoPadding, this._blockSize);
   this._isAesWrap = isAesWrap(cipher);
+  checkAeadOptions(cipher, authTagLength);
 
   if (this._isAesWrap) {
     this._aesWrapAlgorithm = cipher;
@@ -553,13 +666,10 @@ function Decipheriv(
     }
   }
 
-  this._needsBlockCache = !this._isAesWrap &&
-    !(cipher == "aes-128-gcm" || cipher == "aes-256-gcm" ||
-      cipher == "aes-128-ctr" || cipher == "aes-192-ctr" ||
-      cipher == "aes-256-ctr" || cipher == "chacha20" ||
-      cipher == "chacha20-poly1305");
-  this._isGcmMode = cipher == "aes-128-gcm" || cipher == "aes-192-gcm" ||
-    cipher == "aes-256-gcm";
+  this._needsBlockCache = !this._isAesWrap && needsBlockCache(cipher);
+  this._isGcmMode = StringPrototypeEndsWith(cipher, "-gcm");
+  this._isCcm = isCcm(cipher);
+  this._ocbChunks = isOcb(cipher) ? [] : undefined;
   this._authTagLength = authTagLength;
   this._authTag = undefined;
   this._finalized = false;
@@ -581,6 +691,34 @@ Decipheriv.prototype.final = function (
   if (this._isAesWrap) {
     this._finalized = true;
     return encoding === "buffer" ? Buffer.from([]) : this._decoder!.end();
+  }
+
+  if (this._ocbChunks !== undefined) {
+    // OCB: the whole message, opened at once
+    const data = concatChunks(this._ocbChunks);
+    const output = new FastBuffer(TypedArrayPrototypeGetByteLength(data));
+    const ok = TypedArrayPrototypeGetByteLength(data) === 0 ||
+      op_node_decipheriv_decrypt(this._context, data, output);
+    this._finalized = true;
+    let error;
+    try {
+      op_node_decipheriv_final(
+        this._context,
+        this._autoPadding,
+        new Uint8Array(0),
+        new FastBuffer(0),
+        this._authTag || NO_TAG,
+      );
+    } catch (e) {
+      error = e;
+    }
+    if (!ok || error) {
+      throw opensslError(
+        "ERR_OSSL_BAD_DECRYPT",
+        "error:1C800064:Provider routines::bad decrypt",
+      );
+    }
+    return encoding === "buffer" ? output : this._decoder!.end(output);
   }
 
   const bs = this._blockSize;
@@ -627,13 +765,14 @@ Decipheriv.prototype.final = function (
 
 Decipheriv.prototype.setAAD = function (
   buffer: ArrayBufferView,
-  _options?: {
+  options?: {
     plaintextLength: number;
   },
 ) {
   if (this._finalized) {
     throw new ERR_CRYPTO_INVALID_STATE("setAAD");
   }
+  checkCcmAad(this, options);
   op_node_decipheriv_set_aad(this._context, buffer);
   return this;
 };
@@ -659,8 +798,13 @@ Decipheriv.prototype.setAuthTag = function (
       `Invalid authentication tag length: ${tagByteLength}`,
     );
   }
-  // deno-lint-ignore deno-internal/prefer-primordials -- `buffer` may be Buffer/TypedArray/DataView
-  op_node_decipheriv_auth_tag(this._context, buffer.byteLength);
+  // the tag itself: CCM and OCB need it before the data (DENEXT.md item NNN)
+  op_node_decipheriv_auth_tag(
+    this._context,
+    isArrayBufferView(buffer) && !isTypedArray(buffer)
+      ? toFastBufferView(buffer)
+      : buffer,
+  );
   this._authTag = buffer;
   return this;
 };
@@ -713,6 +857,26 @@ Decipheriv.prototype.update = function (
   }
 
   let output;
+  if (this._ocbChunks !== undefined) {
+    ArrayPrototypePush(this._ocbChunks, Buffer.from(buf));
+    output = Buffer.alloc(0);
+    if (outputEncoding !== "buffer") {
+      return this._decoder!.write(output);
+    }
+    return output;
+  }
+  if (this._isCcm) {
+    // one update: the plaintext, or nothing when it doesn't authenticate
+    // (final() then throws, as in Node)
+    output = new FastBuffer(inputByteLength);
+    if (!op_node_decipheriv_decrypt(this._context, buf, output)) {
+      output = Buffer.alloc(0);
+    }
+    if (outputEncoding !== "buffer") {
+      return this._decoder!.write(output);
+    }
+    return output;
+  }
   if (!this._needsBlockCache) {
     output = new FastBuffer(inputByteLength);
     if (!op_node_decipheriv_decrypt(this._context, buf, output)) {
