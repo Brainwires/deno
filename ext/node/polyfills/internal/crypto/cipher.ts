@@ -153,7 +153,7 @@ function isAesWrap(cipher: string): boolean {
 // Modes that turn any length of input into the same length of output, so
 // update() passes data straight through (no whole-block cache): the stream
 // modes, GCM, XTS (each update is one data unit), and CCM / OCB (one-shot
-// AEADs, see below). DENEXT.md item NNN.
+// AEADs, see below). DENEXT.md item 292.
 const kPassThroughSuffixes = [
   "-ctr",
   "-cfb",
@@ -798,7 +798,7 @@ Decipheriv.prototype.setAuthTag = function (
       `Invalid authentication tag length: ${tagByteLength}`,
     );
   }
-  // the tag itself: CCM and OCB need it before the data (DENEXT.md item NNN)
+  // the tag itself: CCM and OCB need it before the data (DENEXT.md item 292)
   op_node_decipheriv_auth_tag(
     this._context,
     isArrayBufferView(buffer) && !isTypedArray(buffer)

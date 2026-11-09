@@ -84,14 +84,14 @@ const ellipticCurves: Array<EllipticCurve> = [
     publicKeySize: 65,
     publicKeySizeCompressed: 33,
     sharedSecretSize: 32,
-  }, // RFC 5639 (DENEXT.md item NNN)
+  }, // RFC 5639 (DENEXT.md item 292)
   {
     name: "brainpoolP384r1",
     privateKeySize: 48,
     publicKeySize: 97,
     publicKeySizeCompressed: 49,
     sharedSecretSize: 48,
-  }, // RFC 5639 (DENEXT.md item NNN)
+  }, // RFC 5639 (DENEXT.md item 292)
 ];
 
 // OpenSSL NID values and cipher metadata.
@@ -276,7 +276,7 @@ const cipherInfoTable: CipherInfoResult[] = [
     keyLength: 32,
     mode: "wrap",
   },
-  // DENEXT.md item NNN: the ciphers of `cipher_legacy.rs`, as Node 26 reports them
+  // DENEXT.md item 292: the ciphers of `cipher_legacy.rs`, as Node 26 reports them
   {
     name: "aes-128-cfb",
     nid: 421,
@@ -787,7 +787,7 @@ for (
 
 // Ciphers actually supported by the runtime (subset of cipherInfoTable);
 // the legacy ones come from ext/node_crypto/cipher_legacy.rs (DENEXT.md item
-// NNN).
+// 292).
 // Must be kept in sorted (lexicographic) order - Node.js validates this.
 const supportedCiphers = [
   "aes-128-cbc",

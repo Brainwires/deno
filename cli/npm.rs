@@ -848,7 +848,7 @@ impl DenoTaskLifeCycleScriptsExecutor {
           let stdout = stdout.unwrap_or_default();
           let stderr = stderr.unwrap_or_default();
           if exit_code != 0 {
-            // a native package's own fix (DENEXT.md item NNN)
+            // a native package's own fix (DENEXT.md item 288)
             let hint = jail
               .and_then(|jail| {
                 jail.native_failure_hint(

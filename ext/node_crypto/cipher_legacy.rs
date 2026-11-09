@@ -1,7 +1,7 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 
 //! The `node:crypto` ciphers beyond the ones `cipher.rs` spells out
-//! (DENEXT.md item NNN): AES-192 CBC and GCM; the CFB (128, 8 and 1 bit), OFB,
+//! (DENEXT.md item 292): AES-192 CBC and GCM; the CFB (128, 8 and 1 bit), OFB,
 //! CCM, OCB and XTS modes of AES; camellia and sm4; two- and three-key DES in
 //! ECB, CBC, CFB and OFB. Each is built from RustCrypto block ciphers and
 //! mode crates behind one encryptor and one decryptor interface, so

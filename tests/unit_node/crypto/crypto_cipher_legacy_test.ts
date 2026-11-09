@@ -1,6 +1,6 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 // The legacy node:crypto ciphers and the brainpool ECDH curves (DENEXT.md
-// item NNN), against vectors Node.js produced (legacy_cipher_vectors.json,
+// item 292), against vectors Node.js produced (legacy_cipher_vectors.json,
 // written by generate_legacy_vectors.cjs).
 import crypto from "node:crypto";
 import { Buffer } from "node:buffer";

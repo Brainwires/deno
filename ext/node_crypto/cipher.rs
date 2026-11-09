@@ -638,7 +638,7 @@ enum Cipher {
   DesEde3Cbc(Box<cbc::Encryptor<des::TdesEde3>>),
   ChaCha20(Box<ChaCha20Cipher>),
   ChaCha20Poly1305(Box<ChaCha20Poly1305Cipher>),
-  /// The rest (DENEXT.md item NNN): `cipher_legacy.rs`.
+  /// The rest (DENEXT.md item 292): `cipher_legacy.rs`.
   Legacy(Box<dyn crate::cipher_legacy::EncMode>),
 }
 
@@ -656,7 +656,7 @@ enum Decipher {
   DesEde3Cbc(Box<cbc::Decryptor<des::TdesEde3>>),
   ChaCha20(Box<ChaCha20Cipher>),
   ChaCha20Poly1305(Box<ChaCha20Poly1305Cipher>, Option<usize>),
-  /// The rest (DENEXT.md item NNN): `cipher_legacy.rs`.
+  /// The rest (DENEXT.md item 292): `cipher_legacy.rs`.
   Legacy(Box<dyn crate::cipher_legacy::DecMode>),
 }
 

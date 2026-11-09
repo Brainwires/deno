@@ -350,7 +350,7 @@ pub struct JailConfig {
   /// The packages whose refused declared hosts were reported.
   warned_declared: std::sync::Mutex<std::collections::BTreeSet<String>>,
   /// Node's headers for a native build from source, handed to the script
-  /// as `npm_config_nodedir` (DENEXT.md item NNN).
+  /// as `npm_config_nodedir` (DENEXT.md item 288).
   node_headers: Option<Arc<super::node_headers::NodeHeaders>>,
 }
 
@@ -537,7 +537,7 @@ impl JailConfig {
   }
 
   /// What to do about a jailed script of a native package that failed
-  /// (DENEXT.md item NNN): the package's own fix, or `None` for a package
+  /// (DENEXT.md item 288): the package's own fix, or `None` for a package
   /// that builds and downloads nothing native.
   pub fn native_failure_hint(
     &self,
@@ -908,7 +908,7 @@ fn declared_host_known(declared: &str, known: &[String]) -> bool {
 /// Network access of a package's scripts: the package's own `net` (a host
 /// list is the narrower grant and wins over `jailScripts.net`; `false` wins
 /// over both `jailScripts.net` and the declared hosts, DENEXT.md item 111),
-/// the config's, the built-in exception's hosts (DENEXT.md item NNN), or the
+/// the config's, the built-in exception's hosts (DENEXT.md item 288), or the
 /// hosts the package declares for itself, each only when
 /// `jailScripts.knownPackages` (or the built-in list of reviewed ones) lists
 /// it for the package (DENEXT.md item 124: a declaration is a request, not a
@@ -1672,7 +1672,7 @@ async fn run_in_dirs(
     set_proxy_env(&mut env, &format!("http://{address}"));
   }
   // a native build from source gets Node's headers offline, unless the
-  // project names its own (DENEXT.md item NNN)
+  // project names its own (DENEXT.md item 288)
   if let Some(headers) = &config.node_headers
     && super::node_headers::needs_node_gyp(s.package_folder, s.script)
     && !env.keys().any(|k| {
@@ -2355,7 +2355,7 @@ mod tests {
     );
   }
 
-  // DENEXT.md item NNN: a package known to download at install gets its
+  // DENEXT.md item 288: a package known to download at install gets its
   // reviewed hosts by default; the project's own entry, `net: true` and
   // paranoid still decide first
   #[test]
@@ -2440,7 +2440,7 @@ mod tests {
     );
   }
 
-  // DENEXT.md item NNN: a reviewed declared host is honoured without a
+  // DENEXT.md item 288: a reviewed declared host is honoured without a
   // `knownPackages` entry
   #[test]
   fn builtin_known_declared_hosts() {

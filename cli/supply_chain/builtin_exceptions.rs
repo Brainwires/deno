@@ -37,7 +37,7 @@ pub struct BuiltinException {
   /// Environment variables passed through to its scripts.
   pub env: &'static [&'static str],
   /// Builds from source with node-gyp when no prebuilt binary fits, which
-  /// needs Node's headers (DENEXT.md item NNN: provided offline).
+  /// needs Node's headers (DENEXT.md item 288: provided offline).
   pub node_gyp: bool,
 }
 

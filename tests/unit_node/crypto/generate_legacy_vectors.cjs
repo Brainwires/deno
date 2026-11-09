@@ -1,7 +1,7 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 // Writes legacy_cipher_vectors.json with Node.js (run it with `node`, not
 // Deno): one encryption per cipher of ext/node_crypto/cipher_legacy.rs, and
-// ECDH key pairs and secrets on the brainpool curves (DENEXT.md item NNN).
+// ECDH key pairs and secrets on the brainpool curves (DENEXT.md item 292).
 const c = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");

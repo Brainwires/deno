@@ -515,7 +515,7 @@
     },
     // where nothing can confine the script's other programs, paranoid
     // refuses to run it
-    // DENEXT.md item NNN: in a plain package.json project (no supplyChain
+    // DENEXT.md item 288: in a plain package.json project (no supplyChain
     // entries), a package known to download a prebuilt binary at install
     // (here a fixture named keytar) reaches GitHub's release hosts by
     // default and nothing else; when its script fails, the installer says

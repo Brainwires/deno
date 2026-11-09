@@ -1,6 +1,6 @@
 // Copyright 2018-2026 the Deno authors. MIT license.
 
-//! Node's C/C++ headers for node-gyp, offline (DENEXT.md item NNN).
+//! Node's C/C++ headers for node-gyp, offline (DENEXT.md item 288).
 //!
 //! A native addon built from source (`node-gyp rebuild`, also prebuild-install's
 //! and node-pre-gyp's fallback) needs the headers of the Node version the
