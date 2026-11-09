@@ -6561,8 +6561,10 @@ mod tests {
     // After the script they are the script's own arguments.
     let parsed = parse_args(svec!["app.js", "--build-snapshot"]).unwrap();
     assert_eq!(parsed.remaining_args, svec!["app.js", "--build-snapshot"]);
-    // Other parse errors are not this refusal.
-    let errors = parse_args(svec!["--no-such-node-flag"]).unwrap_err();
+    // Other parse errors are not this refusal (an unknown flag is not an
+    // error: it is passed on).
+    let errors =
+      parse_args(svec!["--check", "--eval", "console.log(42)"]).unwrap_err();
     assert!(!is_unsupported_build_flag_error(&errors), "{errors:?}");
   }
 }
