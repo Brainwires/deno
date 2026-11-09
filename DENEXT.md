@@ -11480,13 +11480,35 @@ where the changes are discussed.
        short flags repeated, an explicit deny still wins, and the fragments
        between the commas stay inaccessible).
 
+286. **`fix(deps)`: RUSTSEC-2026-0459 — SQLite 3.54.1 (libsqlite3-sys 0.39.1,
+     rusqlite 0.41.1)** (`Cargo.toml`, `Cargo.lock`,
+     `libs/vendor/denokv_sqlite`, `ext/sql/sqlite.rs`). SQLite before 3.54.0
+     could return uninitialized page-cache memory when a database was opened
+     beside a `-wal` file of another page size, so a crafted database / WAL pair
+     could expose stale process memory through ordinary queries
+     (CVE-2026-119375). The bundled SQLite behind `node:sqlite`, `Deno.openKv`,
+     the Cache API, `localStorage` and `Deno.SQL`'s SQLite driver moves from
+     3.53.2 (libsqlite3-sys 0.38.1 under rusqlite 0.40.1) to 3.54.1
+     (libsqlite3-sys 0.39.1 under rusqlite 0.41.1). denokv_sqlite 0.14.0, the
+     latest release, requires rusqlite 0.40, and two rusqlite lines cannot link
+     two `sqlite3`s, so it is vendored in `libs/vendor/denokv_sqlite` (patched
+     through `[patch.crates-io]`) with only that requirement raised to 0.41;
+     remove it when a denokv_sqlite release takes rusqlite 0.41. rusqlite 0.41's
+     `Statement::column_names` returns an iterator, which `Deno.SQL`'s SQLite
+     driver now collects directly. `cargo audit` reports no RUSTSEC-2026-0459
+     and nothing ignores it. The `bundled-sqlcipher` feature, which this tree
+     does not enable, is still affected in 0.39.1. `tests/sqlite_extension`
+     (outside the workspace, its own lock) is unchanged.
+     - Tests: the existing `node:sqlite`, KV, Cache API and `localStorage`
+       suites, which exercise the SQLite this item replaces.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
 169-174, 176, 178, 180, 182-184, 186, 187, 189-191, 193-196, 198-203, 206, 207,
 209-215, 217, 218, 221, 222, 224, 225, 227, 228, 231, 232, 235, 237, 240,
-243-245, 247-249, 253, 254, 256-260, 262-264, 267-284) are what the prebuilt
-`libdenort` carries. The CLI-side parts (for example writing
+243-245, 247-249, 253, 254, 256-260, 262-264, 267-284, 286) are what the
+prebuilt `libdenort` carries. The CLI-side parts (for example writing
 `LAUFEY_CUSTOM_SCHEMES` / `LAUFEY_APP_ID` into a packaged app's launchers) are
 in the branch too, but a stock CLI does not run them; denext's own launcher
 provides that environment.
