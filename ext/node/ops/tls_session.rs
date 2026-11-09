@@ -163,10 +163,12 @@ fn ticket_from_debug(debug: &str) -> Vec<u8> {
     .take_while(|b| b.is_ascii_hexdigit())
     .collect();
   hex
-    .chunks_exact(2)
-    .filter_map(|pair| {
-      let hi = (pair[0] as char).to_digit(16)?;
-      let lo = (pair[1] as char).to_digit(16)?;
+    .as_chunks::<2>()
+    .0
+    .iter()
+    .filter_map(|&[hi, lo]| {
+      let hi = (hi as char).to_digit(16)?;
+      let lo = (lo as char).to_digit(16)?;
       Some((hi * 16 + lo) as u8)
     })
     .collect()

@@ -612,8 +612,10 @@ pub fn op_node_process_execve(
 
   let invalid = |what: &str| ProcessError::InvalidParam(what.to_string());
   let envs: Vec<(String, String)> = env
-    .chunks_exact(2)
-    .map(|kv| (kv[0].clone(), kv[1].clone()))
+    .as_chunks::<2>()
+    .0
+    .iter()
+    .map(|[key, value]| (key.clone(), value.clone()))
     .collect();
   // No fd is handed over: an embedded program's handle may take fd 3 up.
   let run = deno_process::prepare_run(

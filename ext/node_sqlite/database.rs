@@ -1601,6 +1601,7 @@ impl DatabaseSync {
   // function. Loading can only be turned on when the database was opened with
   // `allowExtension: true`, and turning it on needs the FFI permission, as
   // opening with `allowExtension` does.
+  #[fast]
   #[undefined]
   fn enable_load_extension(
     &self,
