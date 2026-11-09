@@ -16,7 +16,8 @@ const {
   TypedArrayPrototypeGetByteLength,
   TypedArrayPrototypeGetByteOffset,
 } = primordials;
-const { op_node_sea_get_asset } = core.ops;
+const { op_main_module, op_node_sea_get_asset } = core.ops;
+const { isWindows } = core.loadExtScript("ext:deno_node/_util/os.ts");
 const { NodeError } = core.loadExtScript("ext:deno_node/internal/errors.ts");
 const { validateString } = core.loadExtScript(
   "ext:deno_node/internal/validators.mjs",
@@ -44,6 +45,8 @@ class ERR_SINGLE_EXECUTABLE_APPLICATION_ASSET_NOT_FOUND extends NodeError {
 }
 
 function isSea() {
+  // No internal flag carries this: the runtime sets it on `Deno.build` only
+  // (child_process.ts and process.ts read it there too).
   return Deno.build.standalone === true;
 }
 
@@ -54,11 +57,8 @@ function isAbsolutePath(path) {
 }
 
 function mainModuleDir() {
-  const main = pathFromURL(Deno.mainModule);
-  const cut = StringPrototypeLastIndexOf(
-    main,
-    Deno.build.os === "windows" ? "\\" : "/",
-  );
+  const main = pathFromURL(op_main_module());
+  const cut = StringPrototypeLastIndexOf(main, isWindows ? "\\" : "/");
   return cut === -1 ? main : StringPrototypeSlice(main, 0, cut);
 }
 

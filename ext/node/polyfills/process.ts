@@ -15,6 +15,7 @@ const { format } = core.loadExtScript(
 import {
   op_bootstrap_exec_argv,
   op_current_thread_cpu_usage,
+  op_env,
   op_fs_umask,
   op_getegid,
   op_geteuid,
@@ -801,7 +802,8 @@ function execve(
       envObject[key] = value;
     }
   } else {
-    envObject = Deno.env.toObject();
+    // `Deno.env.toObject()`'s op (the same env permission check).
+    envObject = op_env();
   }
 
   let argv = args;

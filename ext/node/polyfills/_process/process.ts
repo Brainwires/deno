@@ -143,14 +143,15 @@ const OBJECT_PROTO_PROP_NAMES = ObjectGetOwnPropertyNames(ObjectPrototype);
 // `console.log(process.env)` printed `{}` (upstream denoland/deno#35449).
 // The formatter's private hook on the target prints the variables instead, as
 // Node does; the traps keep the hook out of sight.
+const { op_env, op_query_permission } = core.ops;
 const kPrivateCustomInspect = SymbolFor("Deno.privateCustomInspect");
 const envTarget = Object();
 envTarget[kPrivateCustomInspect] = function (inspect, inspectOptions) {
   // Without the whole env permission it stays `{}`: inspecting an object that
   // holds `process` must neither throw nor prompt.
-  const granted =
-    Deno.permissions.querySync({ name: "env" }).state === "granted";
-  return inspect(granted ? { ...Deno.env.toObject() } : {}, inspectOptions);
+  // The ops behind `Deno.permissions.querySync` and `Deno.env.toObject()`.
+  const granted = op_query_permission({ name: "env" })?.state === "granted";
+  return inspect(granted ? { ...op_env() } : {}, inspectOptions);
 };
 /**
  * https://nodejs.org/api/process.html#process_process_env

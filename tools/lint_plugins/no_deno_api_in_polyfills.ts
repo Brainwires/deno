@@ -14,13 +14,13 @@
 // Paths are relative to the repo root.
 export const EXPECTED_VIOLATIONS: Record<string, number> = {
   "ext/node/polyfills/fs.ts": 51,
-  "ext/node/polyfills/process.ts": 32,
+  "ext/node/polyfills/process.ts": 31,
   "ext/node/polyfills/os.ts": 22,
   "ext/node/polyfills/internal/child_process.ts": 23,
   "ext/node/polyfills/_fs/_fs_copy.ts": 7,
   "ext/node/polyfills/internal/process/report.ts": 6,
   "ext/node/polyfills/path/_win32.ts": 5,
-  "ext/node/polyfills/_process/process.ts": 7,
+  "ext/node/polyfills/_process/process.ts": 5,
   "ext/node/polyfills/internal_binding/udp_wrap.ts": 4,
   "ext/node/polyfills/_process/streams.mjs": 4,
   "ext/node/polyfills/internal/errors.ts": 3,
@@ -39,8 +39,9 @@ export const EXPECTED_VIOLATIONS: Record<string, number> = {
   "ext/node/polyfills/internal_binding/node_options.ts": 1,
   "ext/node/polyfills/_fs/cp/cp.ts": 1,
   "ext/node/polyfills/_fs/_fs_lutimes.ts": 1,
-  // node:sea (DENEXT.md item 296): Deno.build / Deno.mainModule.
-  "ext/node/polyfills/sea.js": 3,
+  // node:sea's isSea(): `Deno.build.standalone` has no internal equivalent
+  // (child_process.ts and process.ts read it there as well).
+  "ext/node/polyfills/sea.js": 1,
 };
 
 const plugin: Deno.lint.Plugin = {
