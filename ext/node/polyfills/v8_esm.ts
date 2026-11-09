@@ -11,6 +11,8 @@ export const {
   queryObjects,
   setFlagsFromString,
   setHeapSnapshotNearHeapLimit,
+  startCpuProfile,
+  startHeapProfile,
   startupSnapshot,
   stopCoverage,
   takeCoverage,

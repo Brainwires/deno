@@ -19,6 +19,8 @@ use deno_lib::worker::ResolveNpmBinaryEntrypointError;
 use deno_npm_installer::PackageCaching;
 use deno_npm_installer::graph::NpmCachingStrategy;
 use deno_runtime::CpuProfilerConfig;
+use deno_runtime::HeapProfiler;
+use deno_runtime::HeapProfilerConfig;
 use deno_runtime::WorkerExecutionMode;
 use deno_runtime::coverage::CoverageCollector;
 use deno_runtime::cpu_prof_filename;
@@ -48,6 +50,7 @@ pub struct CliMainWorkerOptions {
   pub create_hmr_runner: Option<CreateHmrRunnerCb>,
   pub maybe_coverage_dir: Option<PathBuf>,
   pub maybe_cpu_prof_config: Option<CpuProfilerConfig>,
+  pub maybe_heap_prof_config: Option<HeapProfilerConfig>,
   pub default_npm_caching_strategy: NpmCachingStrategy,
   pub needs_test_modules: bool,
   pub initial_cwd: Arc<ModuleSpecifier>,
@@ -58,6 +61,7 @@ struct SharedState {
   pub create_hmr_runner: Option<CreateHmrRunnerCb>,
   pub maybe_coverage_dir: Option<PathBuf>,
   pub maybe_cpu_prof_config: Option<CpuProfilerConfig>,
+  pub maybe_heap_prof_config: Option<HeapProfilerConfig>,
   pub maybe_file_watcher_communicator: Option<Arc<WatcherCommunicator>>,
   pub initial_cwd: Arc<ModuleSpecifier>,
 }
@@ -81,6 +85,7 @@ impl CliMainWorker {
   pub async fn run(&mut self) -> Result<i32, CoreError> {
     let maybe_coverage_collector = self.maybe_setup_coverage_collector();
     let maybe_cpu_profiler = self.maybe_setup_cpu_profiler();
+    let maybe_heap_profiler = self.maybe_setup_heap_profiler();
     let mut maybe_hmr_runner = self.maybe_setup_hmr_runner();
 
     // Wrap profiler and coverage in Rc<RefCell<Option<...>>> so that
@@ -91,12 +96,15 @@ impl CliMainWorker {
       Rc::new(RefCell::new(maybe_coverage_collector));
     let profiler_cell: Rc<RefCell<Option<CpuProfiler>>> =
       Rc::new(RefCell::new(maybe_cpu_profiler));
+    let heap_profiler_cell: Rc<RefCell<Option<HeapProfiler>>> =
+      Rc::new(RefCell::new(maybe_heap_profiler));
 
     // Register exit callbacks so Deno.exit() flushes profiling/coverage
     // data before calling std::process::exit().
     {
       let coverage_for_exit = coverage_cell.clone();
       let profiler_for_exit = profiler_cell.clone();
+      let heap_profiler_for_exit = heap_profiler_cell.clone();
       let inspector = self.worker.js_runtime().inspector();
       let mut cbs = OpExitCallbacks::default();
       cbs.push(Box::new(move || {
@@ -107,6 +115,11 @@ impl CliMainWorker {
       cbs.push(Box::new(move || {
         if let Some(mut cp) = profiler_for_exit.borrow_mut().take() {
           let _ = cp.stop_profiling();
+        }
+      }));
+      cbs.push(Box::new(move || {
+        if let Some(mut hp) = heap_profiler_for_exit.borrow_mut().take() {
+          let _ = hp.stop_profiling();
         }
       }));
       // When an inspector session is connected, notify it that the
@@ -169,7 +182,8 @@ impl CliMainWorker {
     // supervisor's teardown, Ctrl+C) still writes its coverage and CPU
     // profile, unless the program handles the signal itself
     // (denoland/deno#32362). Not under a watcher, which restarts on signals.
-    let has_profiler = profiler_cell.borrow().is_some();
+    let has_profiler =
+      profiler_cell.borrow().is_some() || heap_profiler_cell.borrow().is_some();
     let mut flush_on_signal =
       ((has_coverage || has_profiler) && !under_watcher).then(|| {
         crate::util::signal_flush::install();
@@ -209,6 +223,9 @@ impl CliMainWorker {
     }
     if let Some(mut cpu_profiler) = profiler_cell.borrow_mut().take() {
       cpu_profiler.stop_profiling()?;
+    }
+    if let Some(mut heap_profiler) = heap_profiler_cell.borrow_mut().take() {
+      heap_profiler.stop_profiling()?;
     }
     if let Some(hmr_runner) = maybe_hmr_runner.as_mut() {
       hmr_runner.stop();
@@ -515,9 +532,18 @@ impl CliMainWorker {
     Some(coverage_collector)
   }
 
+  /// denext: Node's `--heap-prof`, started before the main module.
+  pub fn maybe_setup_heap_profiler(&mut self) -> Option<HeapProfiler> {
+    let config = self.shared.maybe_heap_prof_config.as_ref()?;
+    let mut heap_profiler =
+      HeapProfiler::new(self.worker.js_runtime(), config, 0);
+    heap_profiler.start_profiling();
+    Some(heap_profiler)
+  }
+
   pub fn maybe_setup_cpu_profiler(&mut self) -> Option<CpuProfiler> {
     let config = self.shared.maybe_cpu_prof_config.as_ref()?;
-    let filename = cpu_prof_filename(config, None);
+    let filename = cpu_prof_filename(config, 0);
 
     let mut cpu_profiler = CpuProfiler::new(
       self.worker.js_runtime(),
@@ -603,6 +629,7 @@ impl CliMainWorkerFactory {
         create_hmr_runner: options.create_hmr_runner,
         maybe_coverage_dir: options.maybe_coverage_dir,
         maybe_cpu_prof_config: options.maybe_cpu_prof_config,
+        maybe_heap_prof_config: options.maybe_heap_prof_config,
         maybe_file_watcher_communicator,
         initial_cwd: options.initial_cwd,
       }),

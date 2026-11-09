@@ -1,0 +1,57 @@
+{
+  "tests": {
+    "basic": {
+      "tempDir": true,
+      "steps": [
+        {
+          "args": "run --heap-prof main.js",
+          "output": "done\n"
+        },
+        {
+          "args": "run --allow-read verify.js 1",
+          "output": "1 heap profile(s) Heap.<date>.<time>.<pid>.0.001.heapprofile\n"
+        }
+      ]
+    },
+    "process_exit": {
+      "tempDir": true,
+      "steps": [
+        {
+          "args": "run --heap-prof --heap-prof-interval=128 exit.js",
+          "output": "",
+          "exitCode": 55
+        },
+        {
+          "args": "run --allow-read verify.js 1",
+          "output": "1 heap profile(s) Heap.<date>.<time>.<pid>.0.001.heapprofile\n"
+        }
+      ]
+    },
+    "dir_and_name": {
+      "tempDir": true,
+      "steps": [
+        {
+          "args": "run --heap-prof-dir=prof --heap-prof-name=test.heapprofile main.js",
+          "output": "done\n"
+        },
+        {
+          "args": "run --allow-read verify_named.js",
+          "output": "prof/test.heapprofile has a head\n"
+        }
+      ]
+    },
+    "worker": {
+      "tempDir": true,
+      "steps": [
+        {
+          "args": "run --allow-read --heap-prof worker_main.js",
+          "output": "worker done\n"
+        },
+        {
+          "args": "run --allow-read verify.js 2",
+          "output": "2 heap profile(s) Heap.<date>.<time>.<pid>.0.001.heapprofile\n"
+        }
+      ]
+    }
+  }
+}

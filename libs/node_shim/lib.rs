@@ -3594,6 +3594,29 @@ pub fn translate_to_deno_args(
   if opts.trace_sigint {
     node_options.push("--trace-sigint".to_string());
   }
+  // denext: so does `--heapsnapshot-near-heap-limit`, which the bootstrap
+  // hands to `v8.setHeapSnapshotNearHeapLimit()`.
+  if env_opts.heap_snapshot_near_heap_limit > 0 {
+    node_options.push(format!(
+      "--heapsnapshot-near-heap-limit={}",
+      env_opts.heap_snapshot_near_heap_limit
+    ));
+  }
+  // denext: `--heapsnapshot-signal` rides along in NODE_OPTIONS too: the
+  // process's bootstrap installs the signal's listener, which writes a heap
+  // snapshot to the `--diagnostic-dir` (or the working directory).
+  if !env_opts.heapsnapshot_signal.is_empty() {
+    node_options.push(node_options_token(&format!(
+      "--heapsnapshot-signal={}",
+      env_opts.heapsnapshot_signal
+    )));
+    if !env_opts.diagnostic_dir.is_empty() {
+      node_options.push(node_options_token(&format!(
+        "--diagnostic-dir={}",
+        env_opts.diagnostic_dir
+      )));
+    }
+  }
 
   // Check for system CA usage
   if opts.use_system_ca || opts.use_openssl_ca {
@@ -3699,6 +3722,7 @@ pub fn translate_to_deno_args(
     // Add conditions and inspector flags for eval
     add_conditions(deno_args, env_opts);
     add_inspector_flags(deno_args, env_opts);
+    add_profiler_flags(deno_args, env_opts);
     add_preload_flags(deno_args, env_opts, options);
 
     // Get the eval code from either the explicit eval_string or the first remaining arg (for -p)
@@ -4137,7 +4161,48 @@ fn add_common_flags(
   // Add inspector flags
   add_inspector_flags(deno_args, env_opts);
 
+  add_profiler_flags(deno_args, env_opts);
+
   add_preload_flags(deno_args, env_opts, options);
+}
+
+/// denext: Node's `--cpu-prof` / `--heap-prof` and their `-dir`, `-name` and
+/// `-interval` options, as Deno's own flags of the same names (the profile is
+/// started before the main module and written at exit, by every thread).
+fn add_profiler_flags(
+  deno_args: &mut Vec<String>,
+  env_opts: &EnvironmentOptions,
+) {
+  if env_opts.cpu_prof {
+    deno_args.push("--cpu-prof".to_string());
+    if !env_opts.cpu_prof_dir.is_empty() {
+      deno_args.push(format!("--cpu-prof-dir={}", env_opts.cpu_prof_dir));
+    }
+    if !env_opts.cpu_prof_name.is_empty() {
+      deno_args.push(format!("--cpu-prof-name={}", env_opts.cpu_prof_name));
+    }
+    if env_opts.cpu_prof_interval != 1000 {
+      deno_args.push(format!(
+        "--cpu-prof-interval={}",
+        env_opts.cpu_prof_interval
+      ));
+    }
+  }
+  if env_opts.heap_prof {
+    deno_args.push("--heap-prof".to_string());
+    if !env_opts.heap_prof_dir.is_empty() {
+      deno_args.push(format!("--heap-prof-dir={}", env_opts.heap_prof_dir));
+    }
+    if !env_opts.heap_prof_name.is_empty() {
+      deno_args.push(format!("--heap-prof-name={}", env_opts.heap_prof_name));
+    }
+    if env_opts.heap_prof_interval != 512 * 1024 {
+      deno_args.push(format!(
+        "--heap-prof-interval={}",
+        env_opts.heap_prof_interval
+      ));
+    }
+  }
 }
 
 /// Node's preload flags, as `--preload` modules in Node's order: the
@@ -5834,6 +5899,82 @@ mod tests {
       );
       assert_eq!(result.deno_args.last().unwrap(), "script.mjs");
     }
+  }
+
+  #[test]
+  fn test_cpu_and_heap_prof_flags_are_translated() {
+    let parsed = parse_args(svec![
+      "--cpu-prof",
+      "--cpu-prof-dir",
+      "prof",
+      "--cpu-prof-name",
+      "CPU.${pid}.cpuprofile",
+      "--cpu-prof-interval",
+      "50",
+      "--heap-prof",
+      "--heap-prof-interval",
+      "128",
+      "script.js"
+    ])
+    .unwrap();
+    let result =
+      translate_to_deno_args(parsed, &TranslateOptions::for_child_process());
+    for expected in [
+      "--cpu-prof",
+      "--cpu-prof-dir=prof",
+      "--cpu-prof-name=CPU.${pid}.cpuprofile",
+      "--cpu-prof-interval=50",
+      "--heap-prof",
+      "--heap-prof-interval=128",
+    ] {
+      assert!(
+        result.deno_args.iter().any(|arg| arg == expected),
+        "{expected} missing from {:?}",
+        result.deno_args
+      );
+    }
+    assert!(
+      !result
+        .deno_args
+        .iter()
+        .any(|arg| arg.starts_with("--heap-prof-dir")),
+      "{:?}",
+      result.deno_args
+    );
+    assert_eq!(result.deno_args.last().unwrap(), "script.js");
+
+    let parsed = parse_args(svec!["--heap-prof", "--eval", "1"]).unwrap();
+    let result =
+      translate_to_deno_args(parsed, &TranslateOptions::for_child_process());
+    assert_eq!(result.deno_args[0], "eval");
+    assert!(
+      result.deno_args.iter().any(|arg| arg == "--heap-prof"),
+      "{:?}",
+      result.deno_args
+    );
+  }
+
+  #[test]
+  fn test_heapsnapshot_signal_rides_in_node_options() {
+    let parsed = parse_args(svec![
+      "--heapsnapshot-signal",
+      "SIGUSR2",
+      "--diagnostic-dir",
+      "/tmp/diag",
+      "script.js"
+    ])
+    .unwrap();
+    let result =
+      translate_to_deno_args(parsed, &TranslateOptions::for_child_process());
+    assert_eq!(
+      result.node_options,
+      svec![
+        "\"--heapsnapshot-signal=SIGUSR2\"",
+        "\"--diagnostic-dir=/tmp/diag\""
+      ],
+      "{:?}",
+      result.node_options
+    );
   }
 
   #[test]

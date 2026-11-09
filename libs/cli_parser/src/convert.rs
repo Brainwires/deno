@@ -1269,6 +1269,20 @@ fn cpu_prof_parse(result: &ParseResult, flags: &mut Flags) {
       flamegraph,
     });
   }
+
+  let heap_enabled = result.get_bool("heap-prof");
+  let dir = result.get_one("heap-prof-dir").map(|s| s.to_string());
+  let name = result.get_one("heap-prof-name").map(|s| s.to_string());
+  let interval = result
+    .get_one("heap-prof-interval")
+    .and_then(|s| s.parse::<u64>().ok());
+  if heap_enabled || dir.is_some() || name.is_some() || interval.is_some() {
+    flags.heap_prof = Some(HeapProfFlags {
+      dir,
+      name,
+      interval,
+    });
+  }
 }
 
 fn allow_and_deny_import_parse(result: &ParseResult, flags: &mut Flags) {

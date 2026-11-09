@@ -1476,6 +1476,7 @@ impl CliFactory {
         max_cpu_time_secs: cli_options.max_cpu_time(),
         max_time_secs: cli_options.max_time(),
       },
+      maybe_heap_prof_config: cli_options.heap_prof_config(),
     })
   }
 
@@ -1511,6 +1512,7 @@ impl CliFactory {
       create_hmr_runner,
       maybe_coverage_dir,
       maybe_cpu_prof_config,
+      maybe_heap_prof_config: cli_options.heap_prof_config(),
       default_npm_caching_strategy: cli_options.default_npm_caching_strategy(),
       initial_cwd: Arc::new(initial_cwd),
     })

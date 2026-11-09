@@ -452,6 +452,27 @@ pub static CPU_PROF_ARGS: &[ArgDef] = &[
     .set_true()
     .hidden()
 .help("Generate an SVG flamegraph alongside the CPU profile"),
+  ArgDef::new("heap-prof").long("heap-prof").set_true().hidden()
+.help("Start the V8 sampling heap profiler on startup and write the profile to disk on exit (Node's --heap-prof)"),
+  ArgDef::new("heap-prof-dir")
+    .long("heap-prof-dir")
+    .action(ArgAction::Set)
+    .num_args(NumArgs::Exact(1))
+    .hidden()
+.help("Directory where the heap profiles will be written. Implicitly enables --heap-prof"),
+  ArgDef::new("heap-prof-name")
+    .long("heap-prof-name")
+    .action(ArgAction::Set)
+    .num_args(NumArgs::Exact(1))
+    .hidden()
+.help("Filename for the heap profile (defaults to Heap.<date>.<time>.<pid>.<tid>.<seq>.heapprofile)"),
+  ArgDef::new("heap-prof-interval")
+    .long("heap-prof-interval")
+    .action(ArgAction::Set)
+    .num_args(NumArgs::Exact(1))
+    .value_parser(ValueParser::U64)
+    .hidden()
+.help("Average sampling interval in bytes for heap profiling (default: 524288)"),
 ];
 
 // All unstable feature flags from runtime/features/gen.rs.

@@ -152,6 +152,29 @@ function parseOption(options: Map<string, OptionValue>, arg: string) {
       options.set("--use-system-ca", { value: false });
       break;
     default:
+      // denext: `--heapsnapshot-signal` and `--diagnostic-dir`, which the
+      // node shim passes in NODE_OPTIONS (see process.ts).
+      if (StringPrototypeStartsWith(arg, "--heapsnapshot-signal=")) {
+        options.set("--heapsnapshot-signal", {
+          value: StringPrototypeSlice(arg, "--heapsnapshot-signal=".length),
+        });
+        break;
+      }
+      if (StringPrototypeStartsWith(arg, "--heapsnapshot-near-heap-limit=")) {
+        options.set("--heapsnapshot-near-heap-limit", {
+          value: StringPrototypeSlice(
+            arg,
+            "--heapsnapshot-near-heap-limit=".length,
+          ),
+        });
+        break;
+      }
+      if (StringPrototypeStartsWith(arg, "--diagnostic-dir=")) {
+        options.set("--diagnostic-dir", {
+          value: StringPrototypeSlice(arg, "--diagnostic-dir=".length),
+        });
+        break;
+      }
       if (StringPrototypeStartsWith(arg, "--dns-result-order=")) {
         const value = StringPrototypeSlice(
           arg,

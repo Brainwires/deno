@@ -36,6 +36,8 @@ pub mod cpu_profiler;
 pub mod crash_report;
 pub use cpu_profiler::CpuProfiler;
 pub use cpu_profiler::CpuProfilerConfig;
+pub use cpu_profiler::HeapProfiler;
+pub use cpu_profiler::HeapProfilerConfig;
 pub use cpu_profiler::cpu_prof_filename;
 pub mod fmt_errors;
 pub mod idle_trim;

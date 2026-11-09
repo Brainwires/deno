@@ -11847,6 +11847,64 @@ NNN. **`feat(ext/node)`: the legacy `node:crypto` ciphers, modes and brainpool
        as Node; the ciphers Node refuses stay unknown; brainpool ECDH keys,
        compressed points, `convertKey` and secrets equal Node's).
 
+NNN. **`feat(node)`: Node's `--cpu-prof`, `--heap-prof`, `--heapsnapshot-signal`
+and `--heapsnapshot-near-heap-limit` write their files; `v8` and `Worker`
+profiling APIs** (runtime and CLI; `runtime/cpu_profiler/{mod,heapprof}.rs`,
+`runtime/web_worker.rs`, `runtime/ops/worker_host.rs`, `runtime/js/99_main.js`,
+`cli/worker.rs`, `cli/lib/worker.rs`, `cli/factory.rs`, `cli/args/mod.rs`,
+`cli/rt/run.rs`, `libs/cli_parser`, `libs/node_shim`,
+`ext/node/polyfills/
+     {v8,v8_esm,worker_threads,process}.ts`,
+`internal_binding/node_options.ts`, `internal/errors.ts`). `node --cpu-prof` and
+`--heap-prof` were parsed and dropped, so no profile was written. - The node
+shim passes `--cpu-prof` / `--heap-prof` and their `-dir`, `-name` and
+`-interval` options on as Deno flags of the same names. Deno's new hidden
+`--heap-prof*` flags (on `run`, `eval`, `serve` and `desktop`, like
+`--cpu-prof*`) start V8's sampling heap profiler before the main module and
+write a `.heapprofile` (the `HeapProfiler.stopSampling` profile) when the
+program ends: normally, through `process.exit()` / `Deno.exit()`, or on SIGINT /
+SIGTERM (the `signal_flush` path the CPU profile and coverage use). Every worker
+writes its own profile, as in Node. - Profile files take Node's names,
+`CPU.<YYYYMMDD>.<HHMMSS>.<pid>.<tid>.<seq>
+       .cpuprofile` and
+`Heap.<...>.heapprofile` (local time; the thread id is 0 on the main thread and
+the worker's `threadId` in a worker; one sequence counter for the process, from
+001). This replaces Deno's `CPU.<ms>.<pid>.cpuprofile` default for
+`deno run --cpu-prof` too. A `-name` may hold `${pid}`. A custom name in a
+worker still gets `.worker-<id>` appended, as before. - A `worker_threads`
+Worker whose `execArgv` holds `--cpu-prof` / `--heap-prof` (and their options)
+profiles that worker alone (`op_create_worker`'s new `profile` argument). -
+`--heapsnapshot-signal=<sig>` and `--heapsnapshot-near-heap-limit=<n>` ride in
+`NODE_OPTIONS`, like `--trace-sigint`: the process bootstrap installs a listener
+on the signal that writes a `Heap.<...>.heapsnapshot` to the `--diagnostic-dir`
+(else the working directory), and hands the limit to
+`v8.setHeapSnapshotNearHeapLimit()`; a worker takes its own
+`--heapsnapshot-near-heap-limit` from its `execArgv`. - `v8.startCpuProfile()` /
+`v8.startHeapProfile()` (Node 25+) return handles whose `stop()` returns the
+profile's JSON synchronously, on an in-process inspector session (several CPU
+profiles at once; one heap profile per thread, else
+`ERR_HEAP_PROFILE_HAVE_BEEN_STARTED`), with Node's option validation. -
+`worker.startCpuProfile()`, `worker.startHeapProfile()` and
+`worker.getHeapSnapshot()` send a request over the worker's message channel,
+which the worker's thread takes before any listener sees it
+(`internals.setWorkerControlHook` in `99_main.js`) and answers with the same
+functions; after the worker ends they reject with `ERR_WORKER_NOT_RUNNING`. They
+need the worker's event loop to be running (a worker blocked in synchronous code
+answers when it yields), where Node interrupts the isolate. - Not done:
+`maxBufferSize` is validated but V8's sample cap is not applied (the inspector
+protocol has no such parameter); `v8.setHeapProfileNearHeapLimit()`;
+`worker.getHeapSnapshot()` options; Node's embedder graph in heap snapshots
+(`pummel/test-heapdump-*`). - Tests: `libs/node_shim`
+`test_cpu_and_heap_prof_flags_are_translated` and
+`test_heapsnapshot_signal_rides_in_node_options`; specs `heap_prof` (default
+name, `Deno.exit()`, `-dir` + `-name`, a worker's own profile) and
+`cpu_prof/node_name` (Node's default name, `${pid}` in a name). The node suite's
+`sequential/test-cpu-prof-*`, `parallel/test-heap-prof-*`,
+`sequential/test-diagnostic-dir-*-prof`, `sequential/test-heapdump-flag*`,
+`parallel/test-v8-{cpu,heap}-profile`,
+`parallel/test-worker-{cpu,heap}-profile`, `parallel/test-worker-heap-snapshot`
+and `parallel/test-heapsnapshot-near-heap-limit-worker` are the targets.
+
 The runtime-side parts (1-3, 5-22, 24, 25, 27, 32-37, 41-45, 50, 52, 60-62,
 64-73, 75-77, 80, 82, 87-89, 91, 93, 95, 97, 99-102, 104, 105, 109, 110, 113,
 118, 119, 126, 127, 129, 136, 137, 144-148, 150, 153, 158-160, 162, 164-167,
